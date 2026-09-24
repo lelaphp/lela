@@ -107,14 +107,31 @@ fn base64_encode(req: &mut Request) -> Result<Value, Thrown> {
     let string = string_argument(req, 1)?;
     let input = string.as_bytes();
     let encoded = PhpString::product(req, input.len().div_ceil(3), 4, 0, |out| {
-        encode(input, out);
+        encode_into(input, out);
     })?;
     Ok(Value::string(encoded))
 }
 
+/// `php_base64_encode`, for the extensions that include `base64.h`: the
+/// padded encoding.
+///
+/// ```php
+/// var_dump(iconv_mime_encode('S', 'é', ['scheme' => 'B', 'input-charset' => 'UTF-8', 'output-charset' => 'UTF-8']));
+/// ```
+/// ```expect
+/// string(19) "S: =?UTF-8?B?w6k=?="
+/// ```
+#[must_use]
+pub fn encode(input: &[u8]) -> Vec<u8> {
+    let mut out = vec![0; input.len().div_ceil(3) * 4];
+    encode_into(input, &mut out);
+    out
+}
+
 /// `php_base64_encode_impl(in, inl, out, flags)` with padding on: the
-/// groups of three, then the tail.
-fn encode(input: &[u8], out: &mut [u8]) {
+/// groups of three, then the tail, into `out` of four bytes for each
+/// three begun.
+fn encode_into(input: &[u8], out: &mut [u8]) {
     let mut chunks = input.chunks_exact(3);
     let mut at = 0;
     for group in &mut chunks {
@@ -241,12 +258,22 @@ fn base64_decode(req: &mut Request) -> Result<Value, Thrown> {
     }
 }
 
-/// `php_base64_decode_impl(in, inl, out, outl, strict)`: the bytes, or
-/// none where `strict` refuses the input. php lays the bytes into a
-/// string of the input's length and shortens it afterwards; here they
-/// are gathered first and the string made at its length, so
-/// `memory_get_usage()` after a decode reads the shorter allocation.
-fn decode(input: &[u8], strict: bool) -> Option<Vec<u8>> {
+/// `php_base64_decode_ex`, `php_base64_decode_impl(in, inl, out, outl,
+/// strict)`: the bytes, or none where `strict` refuses the input, which
+/// is also what the extensions that include `base64.h` call. php lays
+/// the bytes into a string of the input's length and shortens it
+/// afterwards; here they are gathered first and the string made at its
+/// length, so `memory_get_usage()` after a decode reads the shorter
+/// allocation.
+///
+/// ```php
+/// var_dump(iconv_mime_decode('=?UTF-8?B?w6k=?= =?UTF-8?B?w6k?= =?UTF-8?B?w6k*?='));
+/// ```
+/// ```expect
+/// string(6) "ééé"
+/// ```
+#[must_use]
+pub fn decode(input: &[u8], strict: bool) -> Option<Vec<u8>> {
     let mut out: Vec<u8> = Vec::with_capacity(input.len());
     let mut i = 0usize;
     let mut padding = 0usize;

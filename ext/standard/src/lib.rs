@@ -46,7 +46,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 mod array;
-mod base64;
+pub mod base64;
 mod basic_functions;
 pub mod crc32;
 mod csv;
@@ -68,7 +68,7 @@ mod metaphone;
 mod microtime;
 mod output;
 mod pack;
-mod quot_print;
+pub mod quot_print;
 mod scanf;
 pub mod sha1;
 mod soundex;

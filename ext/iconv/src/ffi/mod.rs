@@ -29,6 +29,18 @@ pub(super) enum Errno {
     Other(i32),
 }
 
+impl Errno {
+    /// The number, as php's `Unknown error (%d)` prints `errno`.
+    pub(super) fn code(self) -> i32 {
+        match self {
+            Errno::Inval => libc::EINVAL,
+            Errno::Ilseq => libc::EILSEQ,
+            Errno::TooBig => libc::E2BIG,
+            Errno::Other(n) => n,
+        }
+    }
+}
+
 /// One `iconv_t` converter, closed when dropped.
 pub(super) struct Cd(libc::iconv_t);
 
@@ -135,19 +147,20 @@ impl Cd {
 
     /// `_php_iconv_appendl`: `input` onto `out` in room of 128 bytes and
     /// doubling, `None` flushing the shift state; the `errno` of a call
-    /// that failed other than for room.
+    /// that failed other than for room, whose bytes php never counts
+    /// into the string and which are dropped here.
     pub(super) fn append(&mut self, input: Option<&[u8]>, out: &mut Vec<u8>) -> Result<(), Errno> {
         let mut room = 128;
         let mut rest = input.unwrap_or_default();
         loop {
             let mut chunk = vec![0u8; room];
             let (written, result) = self.step(input.map(|_| &mut rest), &mut chunk);
-            out.extend_from_slice(&chunk[..written]);
             match result {
-                Err(Errno::TooBig) => {}
+                Err(Errno::TooBig) | Ok(_) => out.extend_from_slice(&chunk[..written]),
                 Err(errno) => return Err(errno),
-                Ok(_) if input.is_none() => return Ok(()),
-                Ok(_) => {}
+            }
+            if result.is_ok() && input.is_none() {
+                return Ok(());
             }
             if input.is_some() && rest.is_empty() {
                 return Ok(());
@@ -192,6 +205,29 @@ impl Cd {
     }
 }
 
+impl Cd {
+    /// `iconv(cd, NULL, NULL, NULL, NULL)`: the shift state set back to
+    /// its initial one, nothing written.
+    pub(super) fn reset(&mut self) -> Result<(), Errno> {
+        // SAFETY: with every pointer null `iconv` resets the converter's
+        // state and reads or writes no buffer.
+        let result = unsafe {
+            libc::iconv(
+                self.0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        if result == usize::MAX {
+            Err(errno())
+        } else {
+            Ok(())
+        }
+    }
+}
+
 impl Drop for Cd {
     /// `iconv_close`.
     fn drop(&mut self) {
@@ -231,8 +267,10 @@ fn prime() {
     std::hint::black_box(&room);
 }
 
-/// The calling thread's `errno`, read right after the call that set it.
-fn errno() -> Errno {
+/// The calling thread's `errno`: read right after the call that set it,
+/// or, where php prints `errno` without having just called anything, as
+/// it stands.
+pub(super) fn errno() -> Errno {
     match std::io::Error::last_os_error().raw_os_error().unwrap_or(0) {
         libc::EINVAL => Errno::Inval,
         libc::EILSEQ => Errno::Ilseq,

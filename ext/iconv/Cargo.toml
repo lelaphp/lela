@@ -11,9 +11,12 @@ description = "The iconv extension, php-src/ext/iconv"
 [lints]
 workspace = true
 
-# The facade; the engine is out of reach (`[[edge]]` ext/*).
+# The facade, and ext/standard, whose `base64.h` and `quot_print.h`
+# `iconv.c` includes (ADR-0004's dependency rule); the engine is out of
+# reach (`[[edge]]` ext/*).
 [dependencies]
 php_ext = { path = "../../crates/php_ext" }
+php_ext_standard = { path = "../standard" }
 # The host's `iconv(3)`, in `src/ffi/` alone (`unsafe.homes`).
 libc = { workspace = true }
 

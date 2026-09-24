@@ -1,0 +1,840 @@
+//! `iconv.c`'s MIME header codecs, `_php_iconv_mime_encode` and
+//! `_php_iconv_mime_decode` (`Z/ext/iconv/iconv.c:917-1776`), and the
+//! three natives over them. An encoded word's text is ext/standard's
+//! `php_base64_encode`, `php_base64_decode` and `php_quot_print_decode`,
+//! which `iconv.c` includes; every conversion is a converter of the
+//! call's own.
+//
+// The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
+#![allow(rustdoc::invalid_codeblock_attributes)]
+
+use php_ext::coerce::{to_long, to_string};
+use php_ext::decl::Type;
+use php_ext::raising::Thrown;
+use php_ext::request::Request;
+use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext_standard::{base64, quot_print};
+
+use super::ffi::{self, Cd, Errno};
+use super::{
+    Error, Kind, MAX_NAME, argument, charset, count, encoding, failed, long, opened, string,
+    too_long,
+};
+
+/// `ICONV_ASCII_ENCODING`.
+const ASCII: &[u8] = b"ASCII";
+
+/// `php_iconv_enc_scheme_t`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Scheme {
+    Base64,
+    Qprint,
+}
+
+/// `$mode`'s two bits, `ICONV_MIME_DECODE_STRICT` and
+/// `ICONV_MIME_DECODE_CONTINUE_ON_ERROR`, read once.
+#[derive(Clone, Copy)]
+struct Mode {
+    strict: bool,
+    go_on: bool,
+}
+
+impl Mode {
+    fn of(mode: i64) -> Mode {
+        Mode {
+            strict: mode & 1 != 0,
+            go_on: mode & 2 != 0,
+        }
+    }
+
+    /// Where a word that is passed through leaves the scan.
+    fn after_word(self) -> Scan {
+        if self.strict { Scan::Word } else { Scan::Any }
+    }
+}
+
+/// A C string's bytes: up to the first NUL, as `strlen` reads them.
+fn c_str(bytes: &[u8]) -> &[u8] {
+    bytes.split(|&b| b == 0).next().unwrap_or_default()
+}
+
+/// `qp_table`: what one byte costs as quoted-printable, itself or `=XX`.
+fn qp_cost(byte: u8) -> usize {
+    match byte {
+        b'!'..=b'<' | b'>' | b'@'..=b'^' | b'`'..=b'~' => 1,
+        _ => 3,
+    }
+}
+
+/// An error a converter's `iconv` left, as the encoder's switch reads it.
+fn by_errno(errno: Errno) -> Error {
+    match errno {
+        Errno::Inval => Error::IllegalChar,
+        Errno::Ilseq => Error::IllegalSeq,
+        other => Error::Unknown(other),
+    }
+}
+
+/// `_php_iconv_mime_encode`: `name: ` and `value` as encoded words of
+/// `out_charset` in `scheme`, each line at most `max` bytes, folded with
+/// `lf` and a space.
+#[allow(clippy::too_many_arguments)]
+fn encode(
+    name: &[u8],
+    value: &[u8],
+    max: usize,
+    lf: &[u8],
+    scheme: Scheme,
+    out_charset: &[u8],
+    enc: &[u8],
+) -> Result<Vec<u8>, Error> {
+    if name.len().wrapping_add(2) >= max || out_charset.len().wrapping_add(12) >= max {
+        return Err(Error::TooBig);
+    }
+    let mut cd_pl = opened(ASCII, enc)?;
+    let mut cd = opened(out_charset, enc)?;
+    let mut buf = vec![0u8; max.saturating_add(5)];
+    let mut out = Vec::new();
+    let mut chars = max;
+    let _ = cd_pl.append((!name.is_empty()).then_some(name), &mut out);
+    chars = chars.wrapping_sub(name.len());
+    out.extend_from_slice(b": ");
+    chars = chars.wrapping_sub(2);
+    let mut rest = value;
+    loop {
+        let letter = if scheme == Scheme::Base64 { 4 } else { 3 };
+        let min = b"=??X??=".len() + out_charset.len() + letter;
+        if chars < min + lf.len() + 1 {
+            out.extend_from_slice(lf);
+            out.push(b' ');
+            chars = max.wrapping_sub(1);
+        }
+        out.extend_from_slice(b"=?");
+        out.extend_from_slice(out_charset);
+        out.push(b'?');
+        chars = chars.wrapping_sub(3 + out_charset.len());
+        match scheme {
+            Scheme::Base64 => {
+                out.extend_from_slice(b"B?");
+                chars = chars.wrapping_sub(2);
+                let (used, left) =
+                    base64_word(&mut cd, rest, &mut buf, chars.wrapping_sub(2) / 4 * 3)?;
+                rest = left;
+                let encoded = base64::encode(&buf[..used]);
+                if chars < encoded.len() {
+                    return Err(Error::Unknown(ffi::errno()));
+                }
+                out.extend_from_slice(&encoded);
+                out.extend_from_slice(b"?=");
+                chars = chars.wrapping_sub(encoded.len() + 2);
+            }
+            Scheme::Qprint => {
+                out.extend_from_slice(b"Q?");
+                chars = chars.wrapping_sub(2);
+                let (used, left) = qprint_word(&mut cd, rest, &mut buf, chars.wrapping_sub(2))?;
+                rest = left;
+                for &byte in &buf[..used] {
+                    if qp_cost(byte) == 1 {
+                        out.push(byte);
+                        chars = chars.wrapping_sub(1);
+                    } else {
+                        const HEX: &[u8; 16] = b"0123456789ABCDEF";
+                        out.extend_from_slice(&[
+                            b'=',
+                            HEX[usize::from(byte >> 4)],
+                            HEX[usize::from(byte & 15)],
+                        ]);
+                        chars = chars.wrapping_sub(3);
+                    }
+                }
+                out.extend_from_slice(b"?=");
+                chars = chars.wrapping_sub(2);
+                cd.reset().map_err(Error::Unknown)?;
+            }
+        }
+        if rest.is_empty() {
+            return Ok(out);
+        }
+    }
+}
+
+/// One base64 word's bytes: as much of `input` as fits `size` bytes of
+/// `buf` with room kept for the shift state's reset, four bytes more
+/// each time it did not fit. The bytes written and the input left.
+fn base64_word<'a>(
+    cd: &mut Cd,
+    input: &'a [u8],
+    buf: &mut [u8],
+    size: usize,
+) -> Result<(usize, &'a [u8]), Error> {
+    let size = size.min(buf.len());
+    let mut reserved = 4;
+    loop {
+        if size <= reserved {
+            return Err(Error::TooBig);
+        }
+        let mut rest = input;
+        let (written, result) = cd.step(Some(&mut rest), &mut buf[..size - reserved]);
+        match result {
+            Err(Errno::TooBig) if rest.len() == input.len() => return Err(Error::TooBig),
+            Ok(_) | Err(Errno::TooBig) => {}
+            Err(errno) => return Err(by_errno(errno)),
+        }
+        let (flushed, result) = cd.step(None, &mut buf[written..size]);
+        match result {
+            Ok(_) => return Ok((written + flushed, rest)),
+            Err(Errno::TooBig) => {}
+            Err(errno) => return Err(Error::Unknown(errno)),
+        }
+        cd.reset().map_err(Error::Unknown)?;
+        reserved += 4;
+    }
+}
+
+/// One quoted-printable word's bytes: as much of `input` as converts
+/// into bytes whose `=XX` form fits `room`, the converter's room shrunk
+/// by a third of the overshoot each time it did not. The bytes written
+/// and the input left.
+fn qprint_word<'a>(
+    cd: &mut Cd,
+    input: &'a [u8],
+    buf: &mut [u8],
+    room: usize,
+) -> Result<(usize, &'a [u8]), Error> {
+    let mut size = room;
+    loop {
+        // php's loop stops at a size of zero with the input rewound and
+        // its `do while` round the words never ends; here that is the
+        // line too short for any word.
+        if size == 0 || size > buf.len() {
+            return Err(Error::TooBig);
+        }
+        let mut rest = input;
+        let (written, result) = cd.step(Some(&mut rest), &mut buf[..size]);
+        match result {
+            Err(Errno::TooBig) if rest.len() == input.len() => {
+                return Err(Error::Unknown(Errno::TooBig));
+            }
+            Ok(_) | Err(Errno::TooBig) => {}
+            Err(errno) => return Err(by_errno(errno)),
+        }
+        let (flushed, result) = cd.step(None, &mut buf[written..size]);
+        if let Err(errno) = result
+            && errno != Errno::TooBig
+        {
+            return Err(Error::Unknown(errno));
+        }
+        let used = written + flushed;
+        let needed: usize = buf[..used].iter().map(|&b| qp_cost(b)).sum();
+        if needed <= room {
+            return Ok((used, rest));
+        }
+        size = size.wrapping_sub((needed - room).div_ceil(3));
+    }
+}
+
+/// php's `smart_str` for the decoded header: `None` until an append
+/// allocates it, which `iconv_mime_decode_headers` reads as nothing left.
+type Header = Option<Vec<u8>>;
+
+/// `_php_iconv_appendl` onto the header: `None` flushes the converter's
+/// shift state, and an empty span appends nothing and allocates nothing.
+fn append(header: &mut Header, bytes: Option<&[u8]>, cd: &mut Cd) -> Result<(), Error> {
+    if bytes.is_some_and(<[u8]>::is_empty) {
+        return Ok(());
+    }
+    cd.append(bytes, header.get_or_insert_with(Vec::new))
+        .map_err(Error::from)
+}
+
+/// `_php_iconv_mime_decode`'s `scan_stat`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Scan {
+    /// 0: any character.
+    Any,
+    /// 1: after `=`, the `?` that opens a word.
+    Open,
+    /// 2: the charset's name.
+    Charset,
+    /// 3: the scheme's letter.
+    Scheme,
+    /// 4: the `?` after it.
+    TextOpen,
+    /// 5: the encoded text.
+    Text,
+    /// 6: the `=` after its closing `?`.
+    Close,
+    /// 7: after `\r`, a `\n`.
+    Cr,
+    /// 8: after a line end, whether the next line folds into this one.
+    Fold,
+    /// 9: after a word, what comes next.
+    After,
+    /// 10: the language after `*`, dismissed.
+    Language,
+    /// 11: blanks.
+    Blanks,
+    /// 12: a word that is not encoded.
+    Word,
+}
+
+/// The bytes of `input` from `start` to `end`, php's `(p1 + 1) -
+/// encoded_word`; `None` where the start is `NULL`, which
+/// `_php_iconv_appendl` reads as a flush.
+fn span(input: &[u8], start: Option<usize>, end: usize) -> Option<&[u8]> {
+    start.map(|start| input.get(start..end.min(input.len())).unwrap_or_default())
+}
+
+/// `_php_iconv_mime_decode`: one header decoded into `enc`, and where it
+/// ended, `*next_pos`.
+#[allow(clippy::too_many_lines)]
+fn decode(input: &[u8], enc: &[u8], mode: Mode) -> Result<(Header, usize), Error> {
+    let at = |k: usize| input.get(k).copied().unwrap_or(0);
+    let mut cd_pl = opened(enc, ASCII)?;
+    let mut cd: Option<Cd> = None;
+    let mut out: Header = None;
+    let mut err: Result<(), Error> = Ok(());
+    let (mut scan, mut scheme) = (Scan::Any, Scheme::Base64);
+    let (mut word, mut charset, mut text, mut blanks) =
+        (None::<usize>, None::<usize>, 0, None::<usize>);
+    let mut text_len = 0;
+    let (mut p, mut left) = (0usize, input.len());
+    while left > 0 {
+        let c = at(p);
+        let mut eos = false;
+        let mut after = scan == Scan::After;
+        'step: {
+            match scan {
+                Scan::Any => match c {
+                    b'\r' => scan = Scan::Cr,
+                    b'\n' => scan = Scan::Fold,
+                    b'=' => {
+                        word = Some(p);
+                        scan = Scan::Open;
+                    }
+                    b' ' | b'\t' => {
+                        blanks = Some(p);
+                        scan = Scan::Blanks;
+                    }
+                    _ => {
+                        err = append(&mut out, Some(&[c]), &mut cd_pl);
+                        if err.is_err() {
+                            if mode.go_on {
+                                err = Ok(());
+                            } else {
+                                err?;
+                            }
+                        }
+                        word = None;
+                        if mode.strict {
+                            scan = Scan::Word;
+                        }
+                    }
+                },
+                Scan::Open => {
+                    if c != b'?' {
+                        if c == b'\r' || c == b'\n' {
+                            p -= 1;
+                        }
+                        err = append(&mut out, span(input, word, p + 1), &mut cd_pl);
+                        err?;
+                        word = None;
+                        scan = mode.after_word();
+                        break 'step;
+                    }
+                    charset = Some(p + 1);
+                    scan = Scan::Charset;
+                }
+                Scan::Charset => {
+                    match c {
+                        b'?' => scan = Scan::Scheme,
+                        b'*' => scan = Scan::Language,
+                        b'\r' | b'\n' => {
+                            p -= 1;
+                            let _ = append(&mut out, Some(b"="), &mut cd_pl);
+                            let _ = append(&mut out, Some(b"?"), &mut cd_pl);
+                            err = append(&mut out, span(input, charset, p + 1), &mut cd_pl);
+                            err?;
+                            charset = None;
+                            scan = mode.after_word();
+                            break 'step;
+                        }
+                        _ => {}
+                    }
+                    if scan == Scan::Charset {
+                        break 'step;
+                    }
+                    let Some(from) = charset else {
+                        return Err(Error::Malformed);
+                    };
+                    let name = input.get(from..p).unwrap_or_default();
+                    if name.len() > 79 {
+                        if !mode.go_on {
+                            return Err(Error::Malformed);
+                        }
+                        err = append(&mut out, span(input, word, p + 1), &mut cd_pl);
+                        err?;
+                        word = None;
+                        scan = mode.after_word();
+                        break 'step;
+                    }
+                    cd = None;
+                    match Cd::open(enc, c_str(name)) {
+                        Ok(opened) => cd = Some(opened),
+                        Err(errno) if !mode.go_on => {
+                            return Err(if errno == Errno::Inval {
+                                Error::WrongCharset
+                            } else {
+                                Error::Converter
+                            });
+                        }
+                        Err(_) => {
+                            // The word is kept undecoded, its two `?` and
+                            // the `=` after them skipped over.
+                            let mut marks = 2;
+                            while marks > 0 && left > 1 {
+                                p += 1;
+                                if at(p) == b'?' {
+                                    marks -= 1;
+                                }
+                                left -= 1;
+                            }
+                            if at(p + 1) == b'=' {
+                                p += 1;
+                                if left > 1 {
+                                    left -= 1;
+                                }
+                            }
+                            err = append(&mut out, span(input, word, p + 1), &mut cd_pl);
+                            err?;
+                            scan = Scan::Word;
+                        }
+                    }
+                }
+                Scan::Scheme => match c {
+                    b'b' | b'B' => {
+                        scheme = Scheme::Base64;
+                        scan = Scan::TextOpen;
+                    }
+                    b'q' | b'Q' => {
+                        scheme = Scheme::Qprint;
+                        scan = Scan::TextOpen;
+                    }
+                    _ => {
+                        if !mode.go_on {
+                            return Err(Error::Malformed);
+                        }
+                        err = append(&mut out, span(input, word, p + 1), &mut cd_pl);
+                        err?;
+                        word = None;
+                        scan = mode.after_word();
+                    }
+                },
+                Scan::TextOpen => {
+                    if c != b'?' {
+                        if !mode.go_on {
+                            return Err(Error::Malformed);
+                        }
+                        err = append(&mut out, span(input, word, p + 1), &mut cd_pl);
+                        err?;
+                        word = None;
+                        scan = mode.after_word();
+                        break 'step;
+                    }
+                    text = p + 1;
+                    scan = Scan::Text;
+                }
+                Scan::Text => {
+                    if c == b'?' {
+                        text_len = p - text;
+                        scan = Scan::Close;
+                    }
+                }
+                Scan::Cr => {
+                    if c == b'\n' {
+                        scan = Scan::Fold;
+                    } else {
+                        let _ = append(&mut out, Some(b"\r"), &mut cd_pl);
+                        let _ = append(&mut out, Some(&[c]), &mut cd_pl);
+                        scan = Scan::Any;
+                    }
+                }
+                Scan::Fold => {
+                    if c != b' ' && c != b'\t' {
+                        p -= 1;
+                        left = 1;
+                        break 'step;
+                    }
+                    if word.is_none() {
+                        let _ = append(&mut out, Some(b" "), &mut cd_pl);
+                    }
+                    blanks = None;
+                    scan = Scan::Blanks;
+                }
+                Scan::Close => {
+                    if c != b'=' {
+                        if !mode.go_on {
+                            return Err(Error::Malformed);
+                        }
+                        err = append(&mut out, span(input, word, p + 1), &mut cd_pl);
+                        err?;
+                        word = None;
+                        scan = mode.after_word();
+                        break 'step;
+                    }
+                    scan = Scan::After;
+                    if left == 1 {
+                        eos = true;
+                        after = true;
+                    }
+                }
+                Scan::After => {}
+                Scan::Language => {
+                    if c == b'?' {
+                        scan = Scan::Scheme;
+                    }
+                }
+                Scan::Blanks => match c {
+                    b'\r' => scan = Scan::Cr,
+                    b'\n' => scan = Scan::Fold,
+                    b'=' => {
+                        if word.is_none()
+                            && let Some(from) = blanks.take()
+                        {
+                            let _ = append(&mut out, input.get(from..p), &mut cd_pl);
+                        }
+                        word = Some(p);
+                        scan = Scan::Open;
+                    }
+                    b' ' | b'\t' => {}
+                    _ => {
+                        if let Some(from) = blanks.take() {
+                            let _ = append(&mut out, input.get(from..p), &mut cd_pl);
+                        }
+                        let _ = append(&mut out, Some(&[c]), &mut cd_pl);
+                        word = None;
+                        scan = mode.after_word();
+                    }
+                },
+                Scan::Word => match c {
+                    b'\r' => scan = Scan::Cr,
+                    b'\n' => scan = Scan::Fold,
+                    b' ' | b'\t' => {
+                        blanks = Some(p);
+                        scan = Scan::Blanks;
+                    }
+                    b'=' if !mode.strict => {
+                        word = Some(p);
+                        scan = Scan::Open;
+                    }
+                    _ => {
+                        let _ = append(&mut out, Some(&[c]), &mut cd_pl);
+                    }
+                },
+            }
+            if !after {
+                break 'step;
+            }
+            // 9: the word's text decoded, then what follows it.
+            if !eos && !matches!(c, b'\r' | b'\n' | b' ' | b'\t') && mode.strict {
+                err = append(&mut out, span(input, word, p + 1), &mut cd_pl);
+                err?;
+                scan = Scan::Word;
+                break 'step;
+            }
+            let encoded = input.get(text..text + text_len).unwrap_or_default();
+            let decoded = match scheme {
+                Scheme::Base64 => base64::decode(encoded, false),
+                Scheme::Qprint => quot_print::decode(encoded, true),
+            };
+            let Some(decoded) = decoded else {
+                if !mode.go_on {
+                    return Err(Error::Unknown(ffi::errno()));
+                }
+                err = append(&mut out, span(input, word, p + 1), &mut cd_pl);
+                err?;
+                word = None;
+                scan = mode.after_word();
+                break 'step;
+            };
+            let Some(cd) = cd.as_mut() else {
+                return Err(Error::Converter);
+            };
+            err = append(&mut out, Some(&decoded), cd);
+            if err.is_ok() {
+                err = append(&mut out, None, cd);
+            }
+            if err.is_err() {
+                if !mode.go_on {
+                    err?;
+                }
+                err = append(&mut out, span(input, word, p), &mut cd_pl);
+                word = None;
+                if err.is_err() {
+                    break 'step;
+                }
+            }
+            if eos {
+                scan = Scan::Any;
+                break 'step;
+            }
+            match c {
+                b'\r' => scan = Scan::Cr,
+                b'\n' => scan = Scan::Fold,
+                b'=' => scan = Scan::Open,
+                b' ' | b'\t' => {
+                    blanks = Some(p);
+                    scan = Scan::Blanks;
+                }
+                _ => {
+                    let _ = append(&mut out, Some(&[c]), &mut cd_pl);
+                    scan = Scan::Word;
+                }
+            }
+        }
+        left -= 1;
+        p += 1;
+    }
+    match scan {
+        Scan::Any | Scan::Fold | Scan::Blanks | Scan::Word => {}
+        _ if mode.go_on => {
+            if scan == Scan::Open {
+                let _ = append(&mut out, Some(b"="), &mut cd_pl);
+            }
+            err = Ok(());
+        }
+        _ => return Err(Error::Malformed),
+    }
+    err.map(|()| (out, p))
+}
+
+/// One of the encoder's preferences, `zend_hash_str_find_deref`.
+fn preference(req: &mut Request, prefs: PhpArray, name: &[u8]) -> Result<Option<Value>, Thrown> {
+    let key = Key::Str(PhpString::new(req, name)?);
+    Ok(prefs.get(&key).map(|value| value.deref()))
+}
+
+/// `iconv_mime_encode(string $field_name, string $field_value, array $options = []): string|false`,
+/// the `scheme`, `input-charset`, `output-charset`, `line-length` and
+/// `line-break-chars` preferences as php reads them.
+///
+/// ```php
+/// $p = ['input-charset' => 'UTF-8', 'output-charset' => 'UTF-8', 'line-length' => 30, 'line-break-chars' => "\n"];
+/// echo iconv_mime_encode('Subject', 'Prüfung Prüfung Prüfung', $p), "\n";
+/// echo iconv_mime_encode('Subject', 'Prüfung Prüfung', ['scheme' => 'q'] + $p), "\n";
+/// var_dump(iconv_mime_encode('Subject', "\xff", $p), iconv_mime_encode(str_repeat('x', 40), 'a', $p), iconv_mime_encode('S', 'a', ['output-charset' => 'nope']));
+/// var_dump(iconv_mime_encode('S', 'a', ['input-charset' => str_repeat('a', 64)]));
+/// ```
+/// ```expect
+/// Subject: =?UTF-8?B?UHI=?=
+///  =?UTF-8?B?w7xmdW5nIFA=?=
+///  =?UTF-8?B?csO8ZnVuZyA=?=
+///  =?UTF-8?B?UHLDvGZ1bmc=?=
+/// Subject: =?UTF-8?Q?Pr=C3=BCf?=
+///  =?UTF-8?Q?ung=20Pr=C3=BCfun?=
+///  =?UTF-8?Q?g?=
+///
+/// Notice: iconv_mime_encode(): Detected an illegal character in input string in %s on line 5
+///
+/// Warning: iconv_mime_encode(): Buffer length exceeded in %s on line 5
+///
+/// Warning: iconv_mime_encode(): Wrong encoding, conversion from "UTF-8" to "nope" is not allowed in %s on line 5
+/// bool(false)
+/// bool(false)
+/// bool(false)
+///
+/// Warning: iconv_mime_encode(): Encoding parameter exceeds the maximum allowed length of 64 characters in %s on line 6
+/// bool(false)
+/// ```
+pub(super) fn iconv_mime_encode(req: &mut Request) -> Result<Value, Thrown> {
+    count(req, 2, 3)?;
+    let name = string(req, 1, false)?.unwrap_or_default();
+    let value = string(req, 2, false)?.unwrap_or_default();
+    let prefs = argument(req, 3, &Type::Array)?.and_then(|v| v.as_array().copied());
+    let mut in_charset = encoding(req, Kind::Internal);
+    let mut out_charset = in_charset.clone();
+    let (mut max, mut lf, mut scheme) = (76i64, b"\r\n".to_vec(), Scheme::Base64);
+    if let Some(prefs) = prefs {
+        if let Some(given) = preference(req, prefs, b"scheme")?
+            && let Some(&letter) = given.as_str_bytes().and_then(<[u8]>::first)
+        {
+            match letter {
+                b'B' | b'b' => scheme = Scheme::Base64,
+                b'Q' | b'q' => scheme = Scheme::Qprint,
+                _ => {}
+            }
+        }
+        for (key, slot) in [
+            (&b"input-charset"[..], &mut in_charset),
+            (b"output-charset", &mut out_charset),
+        ] {
+            let given = preference(req, prefs, key)?;
+            if let Some(bytes) = given.as_ref().and_then(Value::as_str_bytes) {
+                if bytes.len() >= MAX_NAME {
+                    too_long(req);
+                    return Ok(Value::bool(false));
+                }
+                if !bytes.is_empty() {
+                    *slot = bytes.to_vec();
+                }
+            }
+        }
+        if let Some(given) = preference(req, prefs, b"line-length")? {
+            max = to_long(req, &given)?;
+        }
+        if let Some(given) = preference(req, prefs, b"line-break-chars")? {
+            lf = to_string(req, &given)?.as_bytes().to_vec();
+        }
+    }
+    // `(size_t) line_len`.
+    let max = usize::try_from(max.cast_unsigned()).unwrap_or(usize::MAX);
+    // `safe_emalloc(1, max_line_len, 5)`: the line's buffer meets the
+    // memory limit as php's does, before a byte is encoded.
+    let charge = PhpString::product(req, 1, max, 5, |_| {})?;
+    req.release(Value::string(charge));
+    let (out_charset, in_charset) = (c_str(&out_charset).to_vec(), c_str(&in_charset).to_vec());
+    match encode(
+        &name,
+        &value,
+        max,
+        c_str(&lf),
+        scheme,
+        &out_charset,
+        &in_charset,
+    ) {
+        Ok(out) => Ok(Value::string(PhpString::new(req, &out)?)),
+        Err(error) => failed(req, error, &out_charset, &in_charset),
+    }
+}
+
+/// `iconv_mime_decode(string $string, int $mode = 0, ?string $encoding = null): string|false`.
+///
+/// ```php
+/// $h = "Subject: =?UTF-8?B?UHLDvGZ1bmc=?=\r\n =?UTF-8?Q?_Pr=C3=BCfung?= x";
+/// var_dump(iconv_mime_decode($h), iconv_mime_decode('=?UTF-8?B?w6k=?=abc'), iconv_mime_decode('=?UTF-8?B?w6k=?=abc', ICONV_MIME_DECODE_STRICT));
+/// var_dump(iconv_mime_decode('a =?nope?B?w6k=?= b', ICONV_MIME_DECODE_CONTINUE_ON_ERROR), iconv_mime_decode('a =?nope?B?w6k=?= b'), iconv_mime_decode('=?UTF-8?X?a?='), iconv_mime_decode('=?UTF-8?X?a?=', 2));
+/// var_dump(iconv_mime_decode('=?UTF-8?B?w6k=?=', 0, 'ISO-8859-1') === "\xe9", iconv_mime_decode('x', 0, str_repeat('a', 64)));
+/// ```
+/// ```expect
+/// string(28) "Subject: Prüfung Prüfung x"
+/// string(5) "éabc"
+/// string(19) "=?UTF-8?B?w6k=?=abc"
+///
+/// Warning: iconv_mime_decode(): Wrong encoding, conversion from "???" to "UTF-8" is not allowed in %s on line 4
+///
+/// Warning: iconv_mime_decode(): Malformed string in %s on line 4
+/// string(19) "a =?nope?B?w6k=?= b"
+/// bool(false)
+/// bool(false)
+/// string(13) "=?UTF-8?X?a?="
+///
+/// Warning: iconv_mime_decode(): Encoding parameter exceeds the maximum allowed length of 64 characters in %s on line 5
+/// bool(true)
+/// bool(false)
+/// ```
+pub(super) fn iconv_mime_decode(req: &mut Request) -> Result<Value, Thrown> {
+    count(req, 1, 3)?;
+    let input = string(req, 1, false)?.unwrap_or_default();
+    let mode = Mode::of(long(req, 2, false)?.unwrap_or(0));
+    let Some(charset) = charset(req, 3)? else {
+        return Ok(Value::bool(false));
+    };
+    match decode(&input, c_str(&charset), mode) {
+        Ok((header, _)) => Ok(Value::string(PhpString::new(
+            req,
+            &header.unwrap_or_default(),
+        )?)),
+        Err(error) => failed(req, error, &charset, b"???"),
+    }
+}
+
+/// `iconv_mime_decode_headers(string $headers, int $mode = 0, ?string $encoding = null): array|false`:
+/// header after header, each split at its first `:`, a name seen again
+/// gathering its values into an array.
+///
+/// ```php
+/// $h = "Subject: =?UTF-8?B?UHLDvGZ1bmc=?=\r\nTo: a@b\r\nTo: =?UTF-8?Q?c=40d?=\r\n  e\r\nX-Nothing\r\nX:\t y";
+/// var_dump(iconv_mime_decode_headers($h), iconv_mime_decode_headers("A: =?UTF-8?X?a?=\r\nB: b"), iconv_mime_decode_headers(''));
+/// ```
+/// ```expect
+/// Warning: iconv_mime_decode_headers(): Malformed string in %s on line 3
+/// array(3) {
+///   ["Subject"]=>
+///   string(8) "Prüfung"
+///   ["To"]=>
+///   array(2) {
+///     [0]=>
+///     string(3) "a@b"
+///     [1]=>
+///     string(4) "c@de"
+///   }
+///   ["X"]=>
+///   string(1) "y"
+/// }
+/// bool(false)
+/// array(0) {
+/// }
+/// ```
+pub(super) fn iconv_mime_decode_headers(req: &mut Request) -> Result<Value, Thrown> {
+    count(req, 1, 3)?;
+    let input = string(req, 1, false)?.unwrap_or_default();
+    let mode = Mode::of(long(req, 2, false)?.unwrap_or(0));
+    let Some(charset) = charset(req, 3)? else {
+        return Ok(Value::bool(false));
+    };
+    let mut fields: Vec<(Vec<u8>, Field)> = Vec::new();
+    let mut rest = &input[..];
+    while !rest.is_empty() {
+        let (header, next) = match decode(rest, c_str(&charset), mode) {
+            Ok((Some(header), next)) => (header, next),
+            Ok((None, _)) => break,
+            Err(error) => return failed(req, error, &charset, b"???"),
+        };
+        if let Some(colon) = header.iter().position(|&b| b == b':') {
+            let at = header[colon + 1..]
+                .iter()
+                .position(|&b| b != b' ' && b != b'\t')
+                .map_or(header.len(), |n| colon + 1 + n);
+            let (name, value) = (&header[..colon], header[at..].to_vec());
+            match fields.iter_mut().find(|(seen, _)| seen == name) {
+                Some((_, field)) => field.add(value),
+                None => fields.push((name.to_vec(), Field::One(value))),
+            }
+        }
+        rest = rest.get(next..).unwrap_or_default();
+    }
+    let mut out = PhpArray::new(req)?;
+    for (name, field) in fields {
+        let key = Key::Str(PhpString::new(req, &name)?);
+        let value = match field {
+            Field::One(value) => Value::string(PhpString::new(req, &value)?),
+            Field::Many(values) => {
+                let mut list = PhpArray::new(req)?;
+                for value in values {
+                    let value = Value::string(PhpString::new(req, &value)?);
+                    list.append(req, value)?;
+                }
+                Value::array(list)
+            }
+        };
+        out.set(req, key, value)?;
+    }
+    Ok(Value::array(out))
+}
+
+/// One name's values in `iconv_mime_decode_headers`' answer: a string,
+/// until the name is seen again and they become an array.
+enum Field {
+    One(Vec<u8>),
+    Many(Vec<Vec<u8>>),
+}
+
+impl Field {
+    /// The name seen again.
+    fn add(&mut self, value: Vec<u8>) {
+        match self {
+            Field::One(first) => *self = Field::Many(vec![std::mem::take(first), value]),
+            Field::Many(values) => values.push(value),
+        }
+    }
+}

@@ -6,7 +6,7 @@
 //!
 //! `iconv.c`'s conversions, character counts, substrings and searches
 //! over `UCS-4LE`, php's `GENERIC_SUPERSET_NAME`, one converter per
-//! call; the three `iconv.*` ini entries, which fall back on php's own
+//! call; the MIME header codecs in `mime`; the three `iconv.*` ini entries, which fall back on php's own
 //! `input_encoding`, `internal_encoding` and `output_encoding` and then on
 //! `default_charset`; and the four constants.
 #![deny(unsafe_code)]
@@ -23,6 +23,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 mod ffi;
+mod mime;
 
 use ffi::{Cd, Errno};
 use php_ext::abi::{Extension, ExtensionBuilder};
@@ -237,6 +238,9 @@ fn natives() -> Vec<(FunctionDecl, Entry)> {
         (declared("iconv_substr", &[("string", "string", None), ("offset", "int", None), ("length", "?int", null()), enc()], "string|false"), iconv_substr),
         (declared("iconv_strpos", &[("haystack", "string", None), ("needle", "string", None), ("offset", "int", Some(ConstExpr::Long(0))), enc()], "int|false"), iconv_strpos),
         (declared("iconv_strrpos", &[("haystack", "string", None), ("needle", "string", None), enc()], "int|false"), iconv_strrpos),
+        (declared("iconv_mime_encode", &[("field_name", "string", None), ("field_value", "string", None), ("options", "array", Some(ConstExpr::Array(Vec::new())))], "string|false"), mime::iconv_mime_encode),
+        (declared("iconv_mime_decode", &[("string", "string", None), ("mode", "int", Some(ConstExpr::Long(0))), enc()], "string|false"), mime::iconv_mime_decode),
+        (declared("iconv_mime_decode_headers", &[("headers", "string", None), ("mode", "int", Some(ConstExpr::Long(0))), enc()], "array|false"), mime::iconv_mime_decode_headers),
         (declared("iconv", &[("from_encoding", "string", None), ("to_encoding", "string", None), ("string", "string", None)], "string|false"), iconv),
         (declared("iconv_set_encoding", &[("type", "string", None), ("encoding", "string", None)], "bool"), iconv_set_encoding),
         (declared("iconv_get_encoding", &[("type", "string", Some(ConstExpr::Str(b"all".as_slice().into())))], "array|string|false"), iconv_get_encoding),
@@ -332,8 +336,9 @@ enum Error {
     IllegalChar,
     IllegalSeq,
     TooBig,
+    Malformed,
     OutOfBounds,
-    Unknown(i32),
+    Unknown(Errno),
 }
 
 impl From<Errno> for Error {
@@ -343,7 +348,7 @@ impl From<Errno> for Error {
             Errno::Inval => Error::IllegalChar,
             Errno::Ilseq => Error::IllegalSeq,
             Errno::TooBig => Error::TooBig,
-            Errno::Other(n) => Error::Unknown(n),
+            Errno::Other(_) => Error::Unknown(errno),
         }
     }
 }
@@ -378,7 +383,8 @@ fn failed(req: &mut Request, error: Error, to: &[u8], from: &[u8]) -> Result<Val
         Error::IllegalChar => (true, "Detected an incomplete multibyte character in input string".to_owned()),
         Error::IllegalSeq => (true, "Detected an illegal character in input string".to_owned()),
         Error::TooBig => (false, "Buffer length exceeded".to_owned()),
-        Error::Unknown(errno) => (true, format!("Unknown error ({errno})")),
+        Error::Malformed => (false, "Malformed string".to_owned()),
+        Error::Unknown(errno) => (true, format!("Unknown error ({})", errno.code())),
     };
     docref(req, if notice { Level::Notice } else { Level::Warning }, &text);
     Ok(Value::bool(false))

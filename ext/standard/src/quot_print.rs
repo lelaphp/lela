@@ -1,5 +1,6 @@
 //! `Z/ext/standard/quot_print.c`: `quoted_printable_decode`'s own loop
-//! over the C string, and `quoted_printable_encode` over
+//! over the C string, `php_quot_print_decode` for the extensions that
+//! include `quot_print.h`, and `quoted_printable_encode` over
 //! `php_quot_print_encode`, RFC 2045's encoding with php's 75-byte soft
 //! line limit and its lookahead for a multi-byte UTF-8 lead.
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
@@ -114,6 +115,88 @@ fn quoted_printable_decode(req: &mut Request) -> Result<Value, Thrown> {
         }
     }
     string_value(req, &out)
+}
+
+/// `hexval_tbl` of `php_quot_print_decode`: a hex digit's value, 16 for
+/// a line end, 32 for a blank, 64 for any other byte.
+fn hexval(byte: u8) -> u8 {
+    match byte {
+        b'0'..=b'9' => byte - b'0',
+        b'A'..=b'F' => byte - b'A' + 10,
+        b'a'..=b'f' => byte - b'a' + 10,
+        b'\n' | b'\r' => 16,
+        b'\t' | b' ' => 32,
+        _ => 64,
+    }
+}
+
+/// `php_quot_print_decode(str, length, replace_us_by_ws)`
+/// (`Z/ext/standard/quot_print.c:46`), the decoder `iconv.c`'s encoded
+/// words and php's `convert.quoted-printable-decode` share: `=XX` as its
+/// byte, a soft line break (`=`, blanks, a line end) dropped, and with
+/// `underscores` an `_` read as a space. `None` is php's `NULL` for an
+/// escape that is neither; the input ends at its first NUL.
+///
+/// ```php
+/// var_dump(iconv_mime_decode('=?UTF-8?Q?a_b=3Dc=C3=A9?='), iconv_mime_decode("=?UTF-8?Q?soft=\r\n?="), @iconv_mime_decode('=?UTF-8?Q?bad=4?='));
+/// ```
+/// ```expect
+/// string(7) "a b=cé"
+/// string(4) "soft"
+/// bool(false)
+/// ```
+#[must_use]
+pub fn decode(input: &[u8], underscores: bool) -> Option<Vec<u8>> {
+    let at = |k: usize| input.get(k).copied().unwrap_or(0);
+    let mut out = Vec::with_capacity(input.len());
+    let (mut left, mut p) = (input.len(), 0);
+    while left > 0 && at(p) != 0 {
+        if at(p) != b'=' {
+            out.push(if underscores && at(p) == b'_' {
+                b' '
+            } else {
+                at(p)
+            });
+            left -= 1;
+            p += 1;
+            continue;
+        }
+        left -= 1;
+        p += 1;
+        if left == 0 || at(p) == 0 {
+            break;
+        }
+        let mut high = hexval(at(p));
+        if high < 16 {
+            left -= 1;
+            p += 1;
+            let low = hexval(at(p));
+            if left == 0 || low >= 16 {
+                return None;
+            }
+            out.push((high << 4) | low);
+            left -= 1;
+            p += 1;
+        } else if high < 64 {
+            while high == 32 {
+                left -= 1;
+                p += 1;
+                high = hexval(at(p));
+                if left == 0 || high == 64 {
+                    return None;
+                }
+            }
+            if at(p) == b'\r' && left >= 2 && at(p + 1) == b'\n' {
+                left -= 1;
+                p += 1;
+            }
+            left -= 1;
+            p += 1;
+        } else {
+            return None;
+        }
+    }
+    Some(out)
 }
 
 /// `quoted_printable_encode(string $string): string`: control bytes,
