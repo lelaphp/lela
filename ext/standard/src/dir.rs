@@ -1,7 +1,8 @@
 //! `Z/ext/standard/dir.c` past the four natives `file` declares over a
 //! directory stream (`opendir`, `closedir`, `rewinddir`, `readdir`):
 //! `dir` and the `Directory` class it hands back, `chdir`, `getcwd` and
-//! `scandir`, with the constants `dir.stub.php` declares. The working
+//! `scandir` and `glob`, the last over php's bundled `php_glob.c`
+//! (`glob`), with the constants `dir.stub.php` declares. The working
 //! directory is the request's, as php's ZTS build keeps it per thread,
 //! and `chdir` answers as the host's `chdir(2)` would, which is what the
 //! CLI's `VCWD_CHDIR` is. `chroot` is not declared: the oracle's CLI is
@@ -31,20 +32,29 @@ use crate::virtual_cwd::{Resolve, virtual_file_ex};
 use crate::zpp::optional_long;
 use crate::{State, argument_count_between, constant, ffi};
 
+mod glob;
+
 /// `PHP_SCANDIR_SORT_*`, `scandir`'s `$sorting_order`.
 const SCANDIR_SORT_ASCENDING: i64 = 0;
 const SCANDIR_SORT_DESCENDING: i64 = 1;
 const SCANDIR_SORT_NONE: i64 = 2;
 
-/// The constants of `dir.stub.php` declared here, in its order, less
-/// the `GLOB_*` ones `glob` brings.
+/// The constants of `dir.stub.php`, in its order.
 ///
 /// ```php
-/// var_dump(DIRECTORY_SEPARATOR, PATH_SEPARATOR, SCANDIR_SORT_ASCENDING, SCANDIR_SORT_DESCENDING, SCANDIR_SORT_NONE);
+/// var_dump(DIRECTORY_SEPARATOR, PATH_SEPARATOR, GLOB_BRACE, GLOB_ERR, GLOB_MARK, GLOB_NOCHECK, GLOB_NOESCAPE, GLOB_NOSORT, GLOB_ONLYDIR, GLOB_AVAILABLE_FLAGS, SCANDIR_SORT_ASCENDING, SCANDIR_SORT_DESCENDING, SCANDIR_SORT_NONE);
 /// ```
 /// ```expect
 /// string(1) "/"
 /// string(1) ":"
+/// int(128)
+/// int(4)
+/// int(8)
+/// int(16)
+/// int(4096)
+/// int(32)
+/// int(1073741824)
+/// int(1073746108)
 /// int(0)
 /// int(1)
 /// int(2)
@@ -58,6 +68,17 @@ pub(crate) fn constants() -> Vec<ConstDecl> {
     vec![
         string(b"DIRECTORY_SEPARATOR", b"/"),
         string(b"PATH_SEPARATOR", b":"),
+        constant(b"GLOB_BRACE", i64::from(glob::PHP_GLOB_BRACE)),
+        constant(b"GLOB_ERR", i64::from(glob::PHP_GLOB_ERR)),
+        constant(b"GLOB_MARK", i64::from(glob::PHP_GLOB_MARK)),
+        constant(b"GLOB_NOCHECK", i64::from(glob::PHP_GLOB_NOCHECK)),
+        constant(b"GLOB_NOESCAPE", i64::from(glob::PHP_GLOB_NOESCAPE)),
+        constant(b"GLOB_NOSORT", i64::from(glob::PHP_GLOB_NOSORT)),
+        constant(b"GLOB_ONLYDIR", i64::from(glob::PHP_GLOB_ONLYDIR)),
+        constant(
+            b"GLOB_AVAILABLE_FLAGS",
+            i64::from(glob::PHP_GLOB_AVAILABLE_FLAGS),
+        ),
         constant(b"SCANDIR_SORT_ASCENDING", SCANDIR_SORT_ASCENDING),
         constant(b"SCANDIR_SORT_DESCENDING", SCANDIR_SORT_DESCENDING),
         constant(b"SCANDIR_SORT_NONE", SCANDIR_SORT_NONE),
@@ -67,7 +88,7 @@ pub(crate) fn constants() -> Vec<ConstDecl> {
 /// The natives, as the stub declares them.
 ///
 /// ```php
-/// echo new ReflectionFunction('dir'), new ReflectionFunction('chdir'), new ReflectionFunction('getcwd'), new ReflectionFunction('scandir');
+/// echo new ReflectionFunction('dir'), new ReflectionFunction('chdir'), new ReflectionFunction('getcwd'), new ReflectionFunction('scandir'), new ReflectionFunction('glob');
 /// ```
 /// ```expect
 /// Function [ <internal:standard> function dir ] {
@@ -100,6 +121,14 @@ pub(crate) fn constants() -> Vec<ConstDecl> {
 ///   }
 ///   - Return [ array|false ]
 /// }
+/// Function [ <internal:standard> function glob ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> string $pattern ]
+///     Parameter #1 [ <optional> int $flags = 0 ]
+///   }
+///   - Return [ array|false ]
+/// }
 /// ```
 pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
     vec![
@@ -114,6 +143,10 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
                 "scandir(string $directory, int $sorting_order = SCANDIR_SORT_ASCENDING, $context = null): array|false",
             ),
             scandir,
+        ),
+        (
+            stub("glob(string $pattern, int $flags = 0): array|false"),
+            glob,
         ),
     ]
 }
@@ -548,6 +581,104 @@ fn scandir(req: &mut Request) -> Result<Value, Thrown> {
     let mut array = PhpArray::new(req)?;
     for name in names {
         array.append(req, Value::string(name))?;
+    }
+    Ok(Value::array(array))
+}
+
+/// `glob(string $pattern, int $flags = 0): array|false`,
+/// `PHP_FUNCTION(glob)` (`Z/ext/standard/dir.c:403`): php's warnings for
+/// a pattern of `MAXPATHLEN` bytes or more and for a bit outside
+/// `GLOB_AVAILABLE_FLAGS`; a relative pattern prefixed with the working
+/// directory and the prefix taken off each path again, as php's ZTS
+/// build does; then `php_glob` with `GLOB_ONLYDIR` masked off, no match
+/// the empty array and any other failure `false`, and under
+/// `GLOB_ONLYDIR` each path that `stat(2)` does not call a directory
+/// dropped.
+///
+/// ```php
+/// $d = __DIR__ . '/glob-d'; @mkdir($d); @mkdir("$d/sub"); foreach (['b.txt', 'a.txt', '.h', 'c.php'] as $f) touch("$d/$f");
+/// chdir($d);
+/// var_dump(glob('*.txt'), glob("$d/*.php") === ["$d/c.php"], glob('{a,c}*', GLOB_BRACE), glob('*', GLOB_ONLYDIR | GLOB_MARK), glob('nope*'), glob('nope*', GLOB_NOCHECK), glob('*', 1 << 20), glob(str_repeat('x', 1024)));
+/// ```
+/// ```expect
+/// Warning: glob(): At least one of the passed flags is invalid or not supported on this platform in %s on line 4
+///
+/// Warning: glob(): Pattern exceeds the maximum allowed length of 1024 characters in %s on line 4
+/// array(2) {
+///   [0]=>
+///   string(5) "a.txt"
+///   [1]=>
+///   string(5) "b.txt"
+/// }
+/// bool(true)
+/// array(2) {
+///   [0]=>
+///   string(5) "a.txt"
+///   [1]=>
+///   string(5) "c.php"
+/// }
+/// array(1) {
+///   [0]=>
+///   string(4) "sub/"
+/// }
+/// array(0) {
+/// }
+/// array(1) {
+///   [0]=>
+///   string(5) "nope*"
+/// }
+/// bool(false)
+/// bool(false)
+/// ```
+fn glob(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 1, 2)?;
+    let pattern = path_argument(req, 1)?;
+    let flags = optional_long(req, 2, 0)?;
+    if pattern.len() >= crate::virtual_cwd::MAXPATHLEN {
+        let text = format!(
+            "Pattern exceeds the maximum allowed length of {} characters",
+            crate::virtual_cwd::MAXPATHLEN
+        );
+        docref(req, Level::Warning, &text);
+        return Ok(Value::bool(false));
+    }
+    let available = i64::from(glob::PHP_GLOB_AVAILABLE_FLAGS);
+    if available & flags != flags {
+        docref(
+            req,
+            Level::Warning,
+            "At least one of the passed flags is invalid or not supported on this platform",
+        );
+        return Ok(Value::bool(false));
+    }
+    let mut work = pattern.as_bytes().to_vec();
+    let mut cwd_skip = 0;
+    if work.first() != Some(&b'/') {
+        let cwd = req.cwd().0.as_os_str().as_bytes().to_vec();
+        cwd_skip = cwd.len() + 1;
+        let mut prefixed = cwd;
+        prefixed.push(b'/');
+        prefixed.extend_from_slice(&work);
+        // `snprintf(work_pattern, MAXPATHLEN, ...)`.
+        prefixed.truncate(crate::virtual_cwd::MAXPATHLEN - 1);
+        work = prefixed;
+    }
+    // Every available bit fits an `int`.
+    let bits = i32::try_from(flags & i64::from(glob::PHP_GLOB_FLAGMASK)).unwrap_or(0);
+    let paths = match glob::php_glob(&work, bits) {
+        Ok(paths) => paths,
+        Err(glob::PHP_GLOB_NOMATCH) => Vec::new(),
+        Err(_) => return Ok(Value::bool(false)),
+    };
+    let only_dirs = flags & i64::from(glob::PHP_GLOB_ONLYDIR) != 0;
+    let mut array = PhpArray::new(req)?;
+    for path in paths {
+        if only_dirs && !std::fs::metadata(host(&path)).is_ok_and(|m| m.is_dir()) {
+            continue;
+        }
+        let shown = path.get(cwd_skip..).unwrap_or_default();
+        let shown = Value::string(PhpString::new(req, shown)?);
+        array.append(req, shown)?;
     }
     Ok(Value::array(array))
 }
