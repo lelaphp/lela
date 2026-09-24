@@ -10968,8 +10968,20 @@ impl Emit<'_> {
     /// Fatal error: Cannot use "static" when no class scope is active in %s on line 2
     /// ```
     ///
+    /// A number written where the class goes is no name at all,
+    /// `zend_try_compile_const_expr_resolve_class_name`'s refusal of a
+    /// `ZEND_AST_ZVAL` that is no string, while an expression that
+    /// folds to one is the refusal after it compiled:
+    ///
     /// ```php
     /// echo (1)::class;
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Illegal class name in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// echo (1 + 1)::class;
     /// ```
     /// ```expect exit=255
     /// Fatal error: Cannot use "::class" on int in %s on line 2
@@ -10977,6 +10989,16 @@ impl Emit<'_> {
     fn class_name_of(&mut self, class: ClassSpec) -> Result<Where, CompileError> {
         if let Some(value) = self.resolved_class_name(class)? {
             return Ok(Where::Constant(value));
+        }
+        if let ClassSpec::Expr(expr) = class
+            && let tree::Expr::LiteralExpr(id) = self.peel(expr)
+            && let Some(value) = self.parsed.tree[id].value
+            && matches!(
+                TokenValue::of(self.parsed, Holder::Scalar(&self.parsed.tree[id]), value),
+                Some(TokenValue::Int(_) | TokenValue::Float(_))
+            )
+        {
+            return Err(self.compile_error("Illegal class name"));
         }
         let (op1_type, op1) = match class {
             ClassSpec::Name(token) => (OperandKind::Unused, class_fetch_type(self.text(token))),
