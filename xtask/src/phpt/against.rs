@@ -1,0 +1,352 @@
+//! `xtask phpt --against <commit>`: a subset's run held test by test to
+//! the stored run at a commit, the merge base as a rule (#663, #664). A
+//! test that met its expectation there and fails here is a regression,
+//! and the comparison's reading fails while any is, naming them.
+//!
+//! **What a run is, and what keys it.** Every run in which the engine
+//! judged every test a subset holds is kept as its verdicts, one per
+//! test, at `target/phpt-runs/<tree>/<scope>.json`, beside the reading
+//! store and not in it. The key is the tree the engine's binary is built
+//! from, [`BUILT_FROM`], and not the tree the subset's reading is stamped
+//! with: that one is the crate's own, which does not move when
+//! `php_engine` does, while the verdicts do. The same key is taken from a
+//! commit's objects, so the run a checkout of the merge base took is found
+//! from any worktree by the commit alone, and a run over sources that are
+//! no commit's is found by none.
+//!
+//! **What gives no verdict.** A comparison is made or it is a skip that
+//! says why, and never a pass: no run stored at the commit, a run at the
+//! head that measured no engine (no binary, one the tree has moved past,
+//! the oracle standing in for it, a pinned php not on this machine), the
+//! engine's sources written during the run, the two runs over other
+//! corpora or other tests, or no test met at the commit, which leaves
+//! nothing to hold. A test past the recipe's limit is its own fail where
+//! the adapter judges it so (#691), and a regression like any other.
+//!
+//! **What the exit answers.** With `--against` the exit is the
+//! comparisons', 1 while any is not a pass, so a caller that merges on the
+//! exit merges on a pass alone; the subset's own reading is written
+//! beside it as before and holds what it always held.
+
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
+
+use super::{CORPUS, INSTRUMENT, Judgement, Tally};
+use crate::git;
+use crate::manifest::Manifest;
+use crate::oracle::Runner;
+use crate::reading::{Reading, Status, listed};
+use crate::tally::Judgement as _;
+
+/// What the engine's binary is built from: the crates and extensions it
+/// links, the workspace's lock, and `ops.toml`, which two `build.rs` read.
+const BUILT_FROM: [&str; 5] = ["Cargo.toml", "Cargo.lock", "ops.toml", "crates", "ext"];
+/// Where a workspace keeps its runs, relative to its root.
+const RUNS: &str = "target/phpt-runs";
+/// What a comparison's scope adds to its subset's.
+pub(crate) const SCOPE: &str = "@against";
+
+/// One subset's run as it is kept: every test's verdict by its divergence
+/// key, and what names the run without keying it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct Run {
+    /// The commit `HEAD` was at when the run was taken.
+    pub commit: String,
+    /// The pinned corpus, its tag and commit.
+    pub corpus: String,
+    /// The engine that ran: the binary's path and md5, or the linked one.
+    pub engine: String,
+    pub verdicts: BTreeMap<String, Judgement>,
+}
+
+/// What a head's run comes to against the stored one.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct Diff {
+    /// The tests met at the commit that are not met here, with their
+    /// verdict here.
+    pub regressed: Vec<(String, Judgement)>,
+    /// The tests met at the commit.
+    pub held: u64,
+    /// The tests that counted against the reading at the commit and are
+    /// met here.
+    pub fixed: u64,
+}
+
+/// The runs one `phpt` invocation keeps and is held against: the tree it
+/// keys its own by, what names them, and the commit asked for.
+pub(crate) struct Runs {
+    root: PathBuf,
+    tree: String,
+    commit: String,
+    corpus: String,
+    base: Option<Base>,
+}
+
+/// The commit a run is held against: its short id, the key its runs
+/// stand under, and the workspaces whose runs are looked in.
+struct Base {
+    commit: String,
+    tree: String,
+    roots: Vec<PathBuf>,
+}
+
+impl Runs {
+    /// The runs of the workspace at `root`, held against `against` when
+    /// one is named; a commit the repository does not have is refused.
+    pub(crate) fn new(root: &Path, manifest: &Manifest, against: Option<&str>) -> Result<Runs> {
+        let base = match against {
+            None => None,
+            Some(named) => {
+                let spec = format!("{named}^{{commit}}");
+                let full = git::git(root, &["rev-parse", "--verify", "--quiet", &spec], None)
+                    .with_context(|| format!("--against {named}: no such commit"))?;
+                let full = full.trim();
+                // The run is looked for here, and in the main worktree,
+                // whose store is the track's (harness-design.md §4.2).
+                let mut roots = vec![root.to_path_buf()];
+                roots.extend(crate::track::main_worktree(root).ok());
+                Some(Base {
+                    commit: full.chars().take(7).collect(),
+                    tree: git::tracked_hash(root, &BUILT_FROM, Some(full))?,
+                    roots,
+                })
+            }
+        };
+        let source = &manifest.pin.source;
+        Ok(Runs {
+            root: root.to_path_buf(),
+            tree: git::tracked_hash(root, &BUILT_FROM, None)?,
+            commit: git::head_commit(root)?,
+            corpus: format!("{} {}", source.tag, source.commit),
+            base,
+        })
+    }
+
+    /// Before a subset runs: with `--against`, the reading that gives no
+    /// verdict when the commit has no run of it, and then the subset is
+    /// not run, there being nothing to hold it to.
+    pub(crate) fn unheld(&self, manifest: &Manifest, scope: &str) -> Result<Option<Reading>> {
+        let Some(base) = &self.base else {
+            return Ok(None);
+        };
+        match base.run(scope)? {
+            Ok(_) => Ok(None),
+            Err(why) => Ok(Some(held(
+                manifest,
+                &self.root,
+                scope,
+                &base.commit,
+                Err(why),
+            )?)),
+        }
+    }
+
+    /// After a subset ran: its run kept, where the engine judged every
+    /// test and the sources stood still, and with `--against` the
+    /// comparison's reading.
+    pub(crate) fn after(
+        &self,
+        manifest: &Manifest,
+        scope: &str,
+        tally: &Tally,
+        runner: &Runner,
+        subset: &Reading,
+    ) -> Result<Option<Reading>> {
+        let run = self.run_of(tally, runner);
+        let moved = git::tracked_hash(&self.root, &BUILT_FROM, None)? != self.tree;
+        if let (Some(run), false) = (&run, moved) {
+            let file = path(&self.root, &self.tree, scope);
+            if let Some(dir) = file.parent() {
+                fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+            }
+            let text = serde_json::to_string_pretty(run).context("rendering the run")?;
+            fs::write(&file, text).with_context(|| format!("writing {}", file.display()))?;
+        }
+        let Some(base) = &self.base else {
+            return Ok(None);
+        };
+        let diff = match (base.run(scope)?, run) {
+            (Err(why), _) => Err(why),
+            (Ok(_), _) if moved => {
+                Err("the engine's sources were written while the subset ran".to_owned())
+            }
+            (Ok(_), None) => Err(format!("this run measured no engine: {}", subset.message)),
+            (Ok(was), Some(run)) => diff(&was, &run),
+        };
+        held(manifest, &self.root, scope, &base.commit, diff).map(Some)
+    }
+
+    /// The run a tally is where the engine judged every test the subset
+    /// holds, and none where anything else ran or anything was left.
+    fn run_of(&self, tally: &Tally, runner: &Runner) -> Option<Run> {
+        let engine = match runner {
+            Runner::Engine(_) => runner.stamp()?,
+            Runner::Linked => "the linked engine".to_owned(),
+            _ => return None,
+        };
+        (tally.found > 0 && tally.judged.len() == tally.found).then(|| Run {
+            commit: self.commit.clone(),
+            corpus: self.corpus.clone(),
+            engine,
+            verdicts: tally
+                .judged
+                .iter()
+                .map(|j| (j.id.clone(), j.judgement))
+                .collect(),
+        })
+    }
+}
+
+impl Base {
+    /// The run of `scope` stored at the commit, from the first workspace
+    /// that keeps one, or why there is none.
+    fn run(&self, scope: &str) -> Result<Result<Run, String>> {
+        for root in &self.roots {
+            let file = path(root, &self.tree, scope);
+            if file.is_file() {
+                let text = fs::read_to_string(&file)
+                    .with_context(|| format!("reading {}", file.display()))?;
+                let run = serde_json::from_str(&text)
+                    .with_context(|| format!("{} is not a run", file.display()))?;
+                return Ok(Ok(run));
+            }
+        }
+        let looked: Vec<String> = self.roots.iter().map(|r| r.display().to_string()).collect();
+        Ok(Err(format!(
+            "no run of {scope} is kept at {} (the engine's tree {}) in {}; take one with `xtask phpt` in a checkout of {} with its engine built",
+            self.commit,
+            self.tree,
+            looked.join(" or "),
+            self.commit
+        )))
+    }
+}
+
+fn path(root: &Path, tree: &str, scope: &str) -> PathBuf {
+    root.join(RUNS).join(tree).join(format!("{scope}.json"))
+}
+
+/// The head's run against the stored one, or why the two do not compare.
+pub(crate) fn diff(was: &Run, run: &Run) -> Result<Diff, String> {
+    if was.corpus != run.corpus {
+        return Err(format!(
+            "the stored run is over the corpus {} and this one over {}",
+            was.corpus, run.corpus
+        ));
+    }
+    if !was.verdicts.keys().eq(run.verdicts.keys()) {
+        return Err(format!(
+            "the stored run holds {} tests and this one {}, and they are not the same tests",
+            was.verdicts.len(),
+            run.verdicts.len()
+        ));
+    }
+    let mut diff = Diff::default();
+    for ((id, then), now) in was.verdicts.iter().zip(run.verdicts.values()) {
+        if then.met() {
+            diff.held += 1;
+            // The compiler refusing a test it read there is a loss as a
+            // failure is: its skip excuses only what it never read.
+            if now.counts_against() || *now == Judgement::Unread {
+                diff.regressed.push((id.clone(), *now));
+            }
+        } else if then.counts_against() && now.met() {
+            diff.fixed += 1;
+        }
+    }
+    Ok(diff)
+}
+
+/// The comparison's reading over `scope`, at the scope the subset's
+/// reading has with [`SCOPE`] after it.
+fn held(
+    manifest: &Manifest,
+    root: &Path,
+    scope: &str,
+    commit: &str,
+    diff: Result<Diff, String>,
+) -> Result<Reading> {
+    let reading = Reading::for_scope(INSTRUMENT, &format!("{scope}{SCOPE}"), manifest, root)?;
+    compared(reading, commit, diff)
+}
+
+/// The words, the counts and the status of one comparison: fail while a
+/// test met at `commit` is not met here, a skip that says why where no
+/// verdict is given, and a pass otherwise.
+pub(crate) fn compared(
+    mut reading: Reading,
+    commit: &str,
+    diff: Result<Diff, String>,
+) -> Result<Reading> {
+    let scope = reading.scope.clone();
+    let diff = match diff {
+        Ok(diff) if diff.held == 0 => Err(format!(
+            "no test met its expectation at {commit}, so nothing is held"
+        )),
+        diff => diff,
+    };
+    let diff = match diff {
+        Ok(diff) => diff,
+        Err(why) => {
+            reading.status = Status::Skip;
+            reading.message = format!("{scope}: no verdict against {commit}; {why}");
+            return Ok(reading);
+        }
+    };
+    let prefix = format!("phpt:{CORPUS}/");
+    let names: Vec<&str> = diff
+        .regressed
+        .iter()
+        .map(|(id, now)| {
+            println!("regressed {id}: met at {commit}, {} here", now.as_str());
+            id.strip_prefix(&prefix).unwrap_or(id)
+        })
+        .collect();
+    reading.count("held", diff.held)?;
+    reading.count("regressed", names.len() as u64)?;
+    reading.count("fixed", diff.fixed)?;
+    let (status, lost) = if names.is_empty() {
+        (Status::Pass, "none fails here".to_owned())
+    } else {
+        (
+            Status::Fail,
+            format!("{} fail here: {}", names.len(), listed(&names)),
+        )
+    };
+    reading.status = status;
+    reading.message = format!(
+        "{scope}: of {} tests met at {commit}, {lost}; {} newly met",
+        diff.held, diff.fixed
+    );
+    Ok(reading)
+}
+
+/// The exit `--against` owes: 1 while any comparison is not a pass,
+/// whatever the subsets' own readings say.
+pub(crate) fn answer(readings: &[Reading]) -> Result<()> {
+    let asked: Vec<&Reading> = readings
+        .iter()
+        .filter(|r| r.scope.ends_with(SCOPE))
+        .collect();
+    let short: Vec<&str> = asked
+        .iter()
+        .filter(|r| r.status != Status::Pass)
+        .map(|r| r.scope.as_str())
+        .collect();
+    if short.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "{} of {} comparisons are no pass: {}",
+        short.len(),
+        asked.len(),
+        listed(&short)
+    )
+}
+
+#[cfg(test)]
+mod tests;

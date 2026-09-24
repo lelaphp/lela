@@ -217,6 +217,12 @@ fn steer(root: &Path, store: &Store, file: &str, from: &Path, dry: bool) -> Resu
 /// What every instrument ends with: each reading printed as one line and
 /// the set recorded, whose outcome is the exit.
 pub(crate) fn record(store: &Store, readings: &[Reading]) -> Result<()> {
+    recorded(store, readings)?.exit()
+}
+
+/// [`record`] without the exit: every reading printed and written, and
+/// what they owe, for an instrument whose exit answers something else.
+fn recorded(store: &Store, readings: &[Reading]) -> Result<Outcome> {
     for reading in readings {
         println!(
             "{} {} {}: {}",
@@ -226,7 +232,7 @@ pub(crate) fn record(store: &Store, readings: &[Reading]) -> Result<()> {
             reading.message
         );
     }
-    store.record(readings)?.exit()
+    store.record(readings)
 }
 
 /// `xtask ticket read`, `close` and `parent`: the ticket named or the
@@ -287,8 +293,17 @@ fn phpt_command(root: &Path, manifest: &Manifest, store: &Store, ask: cli::Phpt)
         lane: ask.jit,
         engine: ask.engine,
         census: ask.census,
+        against: ask.against,
     };
-    record(store, &phpt::run(root, manifest, &registry, &ask)?)
+    let readings = phpt::run(root, manifest, &registry, &ask)?;
+    let outcome = recorded(store, &readings)?;
+    // `--against` asks whether a test met at the commit fails here, and
+    // the exit is that answer; the subsets' own readings are written as
+    // ever and hold what they always held (#664).
+    if ask.against.is_some() {
+        return phpt::against::answer(&readings);
+    }
+    outcome.exit()
 }
 
 /// `xtask generate`: the files the manifest's `generated` rules render,

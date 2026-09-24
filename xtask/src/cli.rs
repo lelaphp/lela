@@ -380,6 +380,11 @@ pub(crate) struct Phpt {
     /// nothing runs twice and no count changes.
     #[arg(long)]
     pub census: bool,
+    /// Hold each subset, test by test, to the run kept at this commit, the
+    /// merge base as a rule: one more reading per subset, failing while a
+    /// test met there is not met here, and the exit is those readings'.
+    #[arg(long, value_name = "COMMIT")]
+    pub against: Option<String>,
 }
 
 /// What one `compile-identity` run is asked for, flattened onto the
