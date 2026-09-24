@@ -140,6 +140,26 @@ impl PhpString {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    /// `ZSTR_IS_VALID_UTF8`: whether a check already found the bytes to
+    /// be valid UTF-8, which a string forgets when it is written into.
+    /// `false` says only that no check was recorded.
+    #[must_use]
+    pub fn is_valid_utf8(&self) -> bool {
+        self.0.is_valid_utf8()
+    }
+
+    /// `GC_ADD_FLAGS(s, IS_STR_VALID_UTF8)`: record that a check found
+    /// the bytes to be valid UTF-8, so the next reader need not check
+    /// them again, as `pcre` records it after a `/u` match over the whole
+    /// subject. A caller that has not checked every byte must not call
+    /// this. An interned or persistent string is shared beyond the
+    /// request and is left as it is, as php leaves an interned one.
+    pub fn mark_valid_utf8(&self) {
+        if !self.0.is_interned() && !self.0.is_persistent() {
+            self.0.mark_valid_utf8();
+        }
+    }
 }
 
 /// Two strings are equal when their bytes are, `zend_string_equals`.

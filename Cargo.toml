@@ -32,3 +32,4 @@ md5 = "0.8"
 libc = "0.2"                        # the platform's headers, for `php_heap`'s probe of the thread's bounds (design §4.1)
 corosensei = "0.3"                  # a fiber's machine stack and the switch onto it, in `php_heap` (design §4.1, §5.11)
 expect-test = "1.5"                 # the parser's snapshot fixtures, regenerated once per file (record §4.9)
+pcre2-sys = "0.2.10"                # libpcre2-8 with its JIT, built from the crate's bundled source (design §7.2, `.cargo/config.toml`'s PCRE2_SYS_STATIC)
