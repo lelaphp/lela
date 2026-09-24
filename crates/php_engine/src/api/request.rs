@@ -8260,10 +8260,11 @@ impl Request {
     /// `PHP_INI_SYSTEM` or `PHP_INI_SYSTEM|PHP_INI_PERDIR`, which
     /// `zend_alter_ini_entry_ex` refuses at `PHP_INI_STAGE_RUNTIME` as it
     /// refuses every entry whose `modifiable` lacks the stage; the rest of
-    /// the table is `PHP_INI_ALL`.
+    /// the table is `PHP_INI_ALL`. An extension's entry is refused where
+    /// its declaration lacks `PHP_INI_USER`, as `browscap` does.
     ///
     /// ```php
-    /// var_dump(ini_set('xmlrpc_errors', '1'), ini_set('short_open_tag', '1'), ini_set('sendmail_path', 'x'), ini_set('mail.log', 'x'), ini_set('SMTP', 'mx'), ini_get('sendmail_path'), ini_get('mail.cr_lf_mode'));
+    /// var_dump(ini_set('xmlrpc_errors', '1'), ini_set('short_open_tag', '1'), ini_set('sendmail_path', 'x'), ini_set('mail.log', 'x'), ini_set('SMTP', 'mx'), ini_get('sendmail_path'), ini_get('mail.cr_lf_mode'), ini_set('browscap', 'x'), ini_set('assert.warning', '1'));
     /// echo NAN;
     /// ```
     /// ```expect
@@ -8274,13 +8275,15 @@ impl Request {
     /// string(9) "localhost"
     /// string(24) "/usr/sbin/sendmail -t -i"
     /// string(4) "crlf"
+    /// bool(false)
+    /// string(1) "1"
     ///
     /// Warning: unexpected NAN value was coerced to string in %s on line 3
     /// NAN
     /// ```
     pub fn ini_set(&mut self, name: &[u8], value: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
         let previous = self.ini_get(name).map(<[u8]>::to_vec);
-        if previous.is_none() || !Request::ini_modifiable(name) {
+        if previous.is_none() || !Request::ini_modifiable(name) || !self.ini_user(name) {
             return Ok(None);
         }
         if Request::ini_verdict(name, value) == IniVerdict::Rejected {
@@ -8295,6 +8298,18 @@ impl Request {
             _ => {}
         }
         Ok(previous)
+    }
+
+    /// Whether an extension's entry is `PHP_INI_USER`, its declaration's
+    /// `user`; an entry no extension declared is the core table's, which
+    /// [`Request::ini_modifiable`] answers for.
+    fn ini_user(&self, name: &[u8]) -> bool {
+        self.shared
+            .extensions
+            .iter()
+            .flat_map(|extension| extension.ini.iter())
+            .find(|decl| decl.name.0.as_ref() == name)
+            .is_none_or(|decl| decl.user)
     }
 
     /// Whether an entry's `modifiable` carries `PHP_INI_USER`, what
