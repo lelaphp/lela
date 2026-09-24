@@ -80,6 +80,7 @@ mod streamsfuncs;
 mod string;
 mod strnatcmp;
 mod stub;
+mod syslog;
 mod uniqid;
 mod url;
 mod uuencode;
@@ -113,6 +114,7 @@ struct State {
     hrtime: hrtime::State,
     contexts: streamsfuncs::Contexts,
     page: Option<pageinfo::Page>,
+    syslog: syslog::Log,
 }
 
 /// The extension value (design §7.1): declarations paired with entries,
@@ -220,6 +222,7 @@ pub fn extension() -> Extension {
         .classes(vec![assert::assertion_error_class()])
         .ini(assert::ini())
         .request_state::<State>()
+        .rshutdown(syslog::close)
         .build("standard")
 }
 
@@ -254,6 +257,7 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
         password::natives(),
         assert::natives(),
         pageinfo::natives(),
+        syslog::natives(),
     ]
     .into_iter()
     .flatten()
@@ -272,6 +276,7 @@ fn file_constants() -> Vec<ConstDecl> {
         crypt::constants(),
         password::constants(),
         assert::constants(),
+        syslog::constants(),
     ]
     .into_iter()
     .flatten()

@@ -200,3 +200,27 @@ pub(super) fn nice(increment: i32) -> bool {
     unsafe { libc::nice(increment) };
     std::io::Error::last_os_error().raw_os_error() == Some(0)
 }
+
+/// `openlog(3)` with `ident`, which the caller keeps alive until the
+/// matching [`closelog`], since the C library keeps the pointer.
+pub(super) fn openlog(ident: &CString, option: i32, facility: i32) {
+    // SAFETY: `ident` is NUL-terminated and outlives the log it names,
+    // which is closed before the caller lets it go.
+    unsafe { libc::openlog(ident.as_ptr(), option, facility) };
+}
+
+/// `closelog(3)`.
+pub(super) fn closelog() {
+    // SAFETY: `closelog` takes nothing and closes the log if one is open.
+    unsafe { libc::closelog() };
+}
+
+/// `syslog(priority, "%.*s", len, message)`: one message, its bytes as
+/// they are, NUL ones included in the length.
+pub(super) fn syslog(priority: i32, message: &[u8]) {
+    let len = libc::c_int::try_from(message.len()).unwrap_or(libc::c_int::MAX);
+    // SAFETY: the format is NUL-terminated and asks for one `int` and one
+    // pointer to at most `len` bytes, which `message` holds and outlives
+    // the call.
+    unsafe { libc::syslog(priority, c"%.*s".as_ptr(), len, message.as_ptr()) };
+}
