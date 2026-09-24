@@ -2129,7 +2129,7 @@ fn return_type_error(
 ) -> Thrown {
     let function = req.vm().at(frame).and_then(|state| state.function);
     let name = function.map_or_else(String::new, |function| req.qualified_name_of(function));
-    let declared = crate::api::coerce::type_name(ty);
+    let declared = crate::api::coerce::declared_type_name(ty);
     let given = match returned {
         Some(returned) => crate::ops::value_name(req, &returned.undef_as_null()),
         None => String::from("none"),
@@ -2236,7 +2236,7 @@ fn arg_type_error(
         .and_then(|decl| decl.parameters.get(at).cloned())
         .map(|parameter| format!(" (${})", String::from_utf8_lossy(&parameter.name.0)))
         .unwrap_or_default();
-    let declared = crate::api::coerce::type_name(ty);
+    let declared = crate::api::coerce::declared_type_name(ty);
     let given = crate::ops::value_name(req, &argument.undef_as_null());
     let caller = call_site(req, frame);
     let message = match caller {
