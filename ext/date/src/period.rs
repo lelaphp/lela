@@ -210,6 +210,7 @@ fn is_long(value: &Value) -> bool {
 /// $r = new DatePeriod('R2/2012-07-01T00:00:00Z/P1D');
 /// var_dump(get_class($r->getStartDate()));
 /// try { new DatePeriod([], 2); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// echo (new ReflectionMethod('DatePeriod', '__construct'))->getNumberOfRequiredParameters(), "\n";
 /// try { new DatePeriod($s, $i, 0); } catch (Exception $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
 /// ```
 /// ```expect
@@ -224,6 +225,7 @@ fn is_long(value: &Value) -> bool {
 /// Deprecated: Calling DatePeriod::__construct(string $isostr, int $options = 0) is deprecated, use DatePeriod::createFromISO8601String() instead in %s on line 7
 /// string(8) "DateTime"
 /// DatePeriod::__construct() accepts (DateTimeInterface, DateInterval, int [, int]), or (DateTimeInterface, DateInterval, DateTime [, int]), or (string [, int]) as arguments
+/// 1
 /// DateMalformedPeriodStringException: DatePeriod::__construct(): Recurrence count must be greater or equal to 1 and lower than 2147483640
 /// ```
 pub(crate) fn construct(req: &mut Request) -> Result<Value, Thrown> {

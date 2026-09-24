@@ -558,6 +558,15 @@ fn date_interval() -> (ClassDecl, Vec<(MethodDecl, Entry)>) {
     )
 }
 
+/// An untyped parameter whose stub default is `UNKNOWN`: optional, with
+/// no value Reflection can show.
+fn unknown(name: &str) -> Parameter {
+    Parameter {
+        default: Some(ConstExpr::Constant(Name(b"UNKNOWN".as_slice().into()))),
+        ..untyped(name)
+    }
+}
+
 /// One of `DatePeriod`'s seven properties, typed and without a default,
 /// which its handlers answer in place of a slot (php's `ZEND_ACC_VIRTUAL`).
 fn period_property(name: &str, ty: Type) -> PropertyDecl {
@@ -617,9 +626,9 @@ fn date_period() -> (ClassDecl, Vec<(MethodDecl, Entry)>) {
         (
             ctor(vec![
                 untyped("start"),
-                untyped("interval"),
-                untyped("end"),
-                untyped("options"),
+                unknown("interval"),
+                unknown("end"),
+                unknown("options"),
             ]),
             period::construct,
         ),
