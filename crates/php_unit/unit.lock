@@ -48,3 +48,13 @@ decl::Type::mask
 decl::Visibility
 enum_methods
 frameless_table
+link::Linked
+link::Linking
+link::Refusal
+link::Refusal::level
+link::Refused
+link::Site
+link::TentativeReturn
+link::link
+link::object_type
+type_to_string

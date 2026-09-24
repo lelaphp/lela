@@ -8588,7 +8588,7 @@ impl Request {
                 continue;
             }
             if let Some(existing) = self.class_named(&decl.name.0) {
-                let message = self.redeclaration(existing, &decl.name.0);
+                let message = self.redeclaration(existing);
                 let file = decl.file.0.to_vec();
                 self.end_in_compile_time(Level::CompileError, &message, &file, decl.line);
                 return false;
@@ -8601,18 +8601,30 @@ impl Request {
         true
     }
 
-    /// `zend_class_redeclaration_error`'s two wordings: the site of the
-    /// earlier declaration named when it was a user class.
-    fn redeclaration(&self, existing: ClassId, name: &[u8]) -> String {
-        match self.class_decl(existing) {
-            Some(earlier) if !earlier.file.0.is_empty() => format!(
-                "Cannot redeclare class {} (previously declared in {}:{})",
-                String::from_utf8_lossy(name),
-                String::from_utf8_lossy(&earlier.file.0),
-                earlier.line
-            ),
-            _ => format!("Cannot redeclare class {}", String::from_utf8_lossy(name)),
+    /// `zend_class_redeclaration_error`'s two wordings, which name the
+    /// earlier declaration as it was declared, what it is and its own
+    /// name, and its site when it was a user class.
+    ///
+    /// ```php
+    /// class stdclass {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot redeclare class stdClass in %s on line 2
+    /// ```
+    fn redeclaration(&self, existing: ClassId) -> String {
+        let Some(earlier) = self.class_decl(existing) else {
+            return String::from("InternalError: a class redeclared over none");
+        };
+        let what = php_unit::link::object_type(earlier.kind);
+        let name = String::from_utf8_lossy(&earlier.name.0);
+        if earlier.file.0.is_empty() {
+            return format!("Cannot redeclare {what} {name}");
         }
+        format!(
+            "Cannot redeclare {what} {name} (previously declared in {}:{})",
+            String::from_utf8_lossy(&earlier.file.0),
+            earlier.line
+        )
     }
 
     /// The class at `at` of `unit` into the request's table, with its
@@ -8653,14 +8665,11 @@ impl Request {
 
     /// `zend_bind_class` at a `ZEND_DECLARE_CLASS`, `zend_do_link_class`
     /// over the declaration the opline's lowered name finds in the unit:
-    /// the parent resolved first and then each interface, which is the
-    /// order php's messages come in. A name nothing declares is php's
-    /// `Error`, `Class "P" not found` for a parent and `Interface "I"
-    /// not found` for an interface; a parent that is an interface, an
-    /// interface list naming something that is not one, and the same
-    /// interface twice are `zend_do_inheritance`'s and
-    /// `zend_do_implement_interface`'s `E_ERROR`, which ends the request
-    /// where it stands.
+    /// the parent fetched first and then each interface, all of them
+    /// before any is checked, which is the order php's messages come in.
+    /// A name nothing declares, once autoloading has been asked, is
+    /// php's `Error`, `Class "P" not found` for a parent and `Interface
+    /// "I" not found` for an interface.
     ///
     /// Linking copies nothing: an inherited constant, property or
     /// method is found by walking `parent` from the declaration, so what
@@ -8683,12 +8692,170 @@ impl Request {
     ///   thrown in %s on line 3
     /// ```
     ///
+    /// Then the class is linked (`zend_do_link_class`) by the checks
+    /// `zend_inheritance.c` makes, [`php_unit::link`], which the early
+    /// bind runs too: a class implementing an interface is never early
+    /// bound, so what linking refuses about one is refused here, after
+    /// what the file printed, at the site php names, and a deprecation
+    /// a tentative return raises is raised here before the class runs.
+    ///
+    /// ```php
+    /// interface I { const X = 1; }
+    /// interface J { const X = 2; }
+    /// class C implements I, J {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Class C inherits both I::X and J::X, which is ambiguous in %s on line 4
+    /// ```
+    ///
+    /// ```php
+    /// interface I { const X = 1; }
+    /// class C implements I { protected const X = 2; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Access level to C::X must be public (as in interface I) in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class C implements Throwable {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Class C cannot implement interface Throwable, extend Exception or Error instead in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// class C implements UnitEnum {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Non-enum class C cannot implement interface UnitEnum in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// class Foo implements UnitEnum { public static function cases(): array { return []; } }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Non-enum class Foo cannot implement interface UnitEnum in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// enum Foo implements Throwable {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Enum Foo cannot implement interface Throwable in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// enum E implements BackedEnum {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Non-backed enum E cannot implement interface BackedEnum in %s on line 2
+    /// ```
+    ///
+    /// An interface's methods are held before what the interface itself
+    /// guards (`do_interface_implementation`), and the parent before the
+    /// interface list, of which a class is refused before a repeat:
+    ///
+    /// ```php
+    /// class C implements Throwable { function getMessage(): int {} }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Declaration of C::getMessage(): int must be compatible with Throwable::getMessage(): string in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// class P {}
+    /// class C extends Closure implements P {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Class C cannot extend final class Closure in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class P {}
+    /// interface I {}
+    /// class C implements I, P, I {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: C cannot implement P - it is not an interface in %s on line 4
+    /// ```
+    ///
     /// ```php
     /// class P {}
     /// class C implements P {}
     /// ```
     /// ```expect exit=255
     /// Fatal error: C cannot implement P - it is not an interface in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class C implements ArrayAccess {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Class C contains 4 abstract methods and must therefore be declared abstract or implement the remaining methods (ArrayAccess::offsetExists, ArrayAccess::offsetGet, ArrayAccess::offsetSet, ...) in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// echo "before\n";
+    /// class C implements ArrayAccess {
+    ///     function offsetExists($o): bool { return true; }
+    ///     function offsetGet($o): mixed { return 1; }
+    ///     function offsetSet(): void {}
+    ///     function offsetUnset($o): void {}
+    /// }
+    /// ```
+    /// ```expect exit=255
+    /// before
+    ///
+    /// Fatal error: Declaration of C::offsetSet(): void must be compatible with ArrayAccess::offsetSet(mixed $offset, mixed $value): void in %s on line 6
+    /// ```
+    ///
+    /// ```php
+    /// class A { function f(): X {} }
+    /// class B extends A implements Stringable {
+    ///     function __toString(): string { return ""; }
+    ///     function f(): Y {}
+    /// }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Could not check compatibility between B::f(): Y and A::f(): X, because class Y is not available in %s on line 5
+    /// ```
+    ///
+    /// What php takes, it takes: an override whose parameter is wider
+    /// and whose return is narrower, and one of a tentative return that
+    /// declares none, which is php's deprecation and links:
+    ///
+    /// ```php
+    /// class C implements ArrayAccess {
+    ///     function offsetExists(mixed $o): bool { return true; }
+    ///     function offsetGet($o) { return "got $o"; }
+    ///     function offsetSet($o, $v): void {}
+    ///     function offsetUnset($o): void {}
+    /// }
+    /// echo (new C)["k"], "\n";
+    /// ```
+    /// ```expect exit=0
+    /// Deprecated: Return type of C::offsetGet($o) should either be compatible with ArrayAccess::offsetGet(mixed $offset): mixed, or the #[\ReturnTypeWillChange] attribute should be used to temporarily suppress the notice in %s on line 4
+    /// got k
+    /// ```
+    ///
+    /// `Traversable` itself is php's `E_CORE_ERROR`, which names no site:
+    ///
+    /// ```php
+    /// class C implements Traversable {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Class C must implement interface Traversable as part of either Iterator or IteratorAggregate in Unknown on line 0
+    /// ```
+    ///
+    /// An interface list naming one interface twice is refused in the
+    /// words for what the declaration is:
+    ///
+    /// ```php
+    /// interface I {}
+    /// interface J extends I, I {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Interface J cannot implement previously implemented interface I in %s on line 3
     /// ```
     pub(crate) fn bind_class(&mut self, unit: &Arc<Unit>, lowered: &[u8]) -> Result<(), Thrown> {
         let Some(at) = unit
@@ -8707,54 +8874,43 @@ impl Request {
                 "InternalError: a DECLARE_CLASS names a class the unit does not declare",
             ));
         };
-        let name = String::from_utf8_lossy(&decl.name.0).into_owned();
         if let Some(existing) = self.class_named(&decl.name.0) {
-            let message = self.redeclaration(existing, &decl.name.0);
+            let message = self.redeclaration(existing);
             return Err(crate::api::raising::fatal(self, &message));
         }
         if let Some(parent) = &decl.parent {
-            self.bind_parent(&name, parent)?;
+            self.fetch_to_link(parent, "Class")?;
         }
-        let object_type = match decl.kind {
-            ClassKind::Class => "Class",
-            ClassKind::Interface => "Interface",
-            ClassKind::Trait => "Trait",
-            ClassKind::Enum => "Enum",
-        };
-        let mut implemented: Vec<ClassId> = Vec::new();
         for interface in &decl.interfaces {
-            let found = match self.class_named(&interface.0) {
-                Some(found) => Some(found),
-                None => crate::api::call::autoload(self, &interface.0)?,
-            };
-            let Some(found) = found else {
-                return Err(crate::api::raising::throw(
-                    self,
-                    "Error",
-                    &format!(
-                        "Interface \"{}\" not found",
-                        String::from_utf8_lossy(&interface.0)
-                    ),
-                ));
-            };
-            if self.class_decl(found).map(|i| i.kind) != Some(ClassKind::Interface) {
-                let message = format!(
-                    "{name} cannot implement {} - it is not an interface",
-                    self.class_name(found)
-                );
-                return Err(crate::api::raising::fatal(self, &message));
+            self.fetch_to_link(interface, "Interface")?;
+        }
+        let lookup = |name: &[u8]| self.class_named(name).and_then(|id| self.class_decl(id));
+        let linking = php_unit::link::link(&decl, &lookup);
+        for deprecation in &linking.deprecations {
+            crate::api::raising::raise_at(
+                self,
+                Level::Deprecated,
+                &deprecation.to_string(),
+                &deprecation.site.file.0,
+                deprecation.site.line,
+            );
+        }
+        if let php_unit::link::Linked::Refused(refused)
+        | php_unit::link::Linked::Unresolved(refused) = linking.outcome
+        {
+            let message = refused.refusal.to_string();
+            match refused.refusal.level() {
+                Level::CoreError => self.end_in_core_error(&message),
+                level => {
+                    self.end_in_compile_time(
+                        level,
+                        &message,
+                        &refused.site.file.0,
+                        refused.site.line,
+                    );
+                }
             }
-            if implemented.contains(&found) {
-                let message = format!(
-                    "{object_type} {name} cannot implement previously implemented interface {}",
-                    self.class_name(found)
-                );
-                return Err(crate::api::raising::fatal(self, &message));
-            }
-            if let Some(message) = self.interface_gets_implemented(&decl, &name, found) {
-                return Err(crate::api::raising::fatal(self, &message));
-            }
-            implemented.push(found);
+            return Err(Thrown::of(None));
         }
         let Ok(at) = u32::try_from(at) else {
             return Err(crate::api::raising::fatal(
@@ -8766,107 +8922,27 @@ impl Request {
         Ok(())
     }
 
-    /// The parent [`Request::bind_class`] names, found or autoloaded,
-    /// and `zend_do_inheritance`'s refusals of it: an interface, an enum
-    /// and a final class cannot be extended.
-    fn bind_parent(&mut self, name: &str, parent: &php_unit::decl::Name) -> Result<(), Thrown> {
-        let found = match self.class_named(&parent.0) {
+    /// `zend_fetch_class_by_name` under `ZEND_FETCH_CLASS_EXCEPTION`, as
+    /// `zend_do_link_class` fetches the parent and each interface before
+    /// any check is made of them: the class of that name, or the one
+    /// autoloading it declared, and php's `Error` where neither is,
+    /// `what` naming the class a parent and the interface an interface.
+    fn fetch_to_link(
+        &mut self,
+        name: &php_unit::decl::Name,
+        what: &str,
+    ) -> Result<ClassId, Thrown> {
+        let found = match self.class_named(&name.0) {
             Some(found) => Some(found),
-            None => crate::api::call::autoload(self, &parent.0)?,
+            None => crate::api::call::autoload(self, &name.0)?,
         };
-        let Some(found) = found else {
-            return Err(crate::api::raising::throw(
+        found.ok_or_else(|| {
+            crate::api::raising::throw(
                 self,
                 "Error",
-                &format!("Class \"{}\" not found", String::from_utf8_lossy(&parent.0)),
-            ));
-        };
-        if self.class_decl(found).map(|p| p.kind) == Some(ClassKind::Interface) {
-            let message = format!(
-                "Class {name} cannot extend interface {}",
-                self.class_name(found)
-            );
-            return Err(crate::api::raising::fatal(self, &message));
-        }
-        // `zend_do_inheritance`'s refusals of an enum, checked before
-        // a final class since every enum is final (GH-16315).
-        let refused = match self.class_decl(found) {
-            Some(p) if p.kind == ClassKind::Enum => Some("enum"),
-            Some(p) if p.flags.is_final => Some("final class"),
-            _ => None,
-        };
-        if let Some(what) = refused {
-            let message = format!(
-                "Class {name} cannot extend {what} {}",
-                self.class_name(found)
-            );
-            return Err(crate::api::raising::fatal(self, &message));
-        }
-        Ok(())
-    }
-
-    /// `interface_gets_implemented` of the three Zend interfaces that
-    /// hold a class to what it is: `UnitEnum` and `BackedEnum` take an
-    /// enum alone and `BackedEnum` a backed one
-    /// (`zend_implement_unit_enum`, `zend_implement_backed_enum`), and
-    /// `Throwable` takes nothing that is not under `Exception` or `Error`
-    /// (`zend_implement_throwable`); the refusal is php's `E_ERROR`.
-    ///
-    /// ```php
-    /// class Foo implements UnitEnum { public static function cases(): array { return []; } }
-    /// ```
-    /// ```expect exit=255
-    /// Fatal error: Non-enum class Foo cannot implement interface UnitEnum in %s on line 2
-    /// ```
-    ///
-    /// ```php
-    /// enum Foo implements Throwable {}
-    /// ```
-    /// ```expect exit=255
-    /// Fatal error: Enum Foo cannot implement interface Throwable in %s on line 2
-    /// ```
-    fn interface_gets_implemented(
-        &self,
-        decl: &ClassDecl,
-        name: &str,
-        interface: ClassId,
-    ) -> Option<String> {
-        let lowered = self.class_name(interface).to_ascii_lowercase();
-        let shown = self.class_name(interface);
-        let is_enum = decl.kind == ClassKind::Enum;
-        match lowered.as_str() {
-            "unitenum" | "backedenum" if !is_enum => Some(format!(
-                "Non-enum class {name} cannot implement interface {shown}"
-            )),
-            "backedenum" if decl.backing == php_unit::decl::EnumBacking::Pure => Some(format!(
-                "Non-backed enum {name} cannot implement interface {shown}"
-            )),
-            "throwable" => {
-                let mut root = decl.parent.clone();
-                let mut last = None;
-                for _ in 0..64 {
-                    let Some(parent) = root else {
-                        break;
-                    };
-                    last = Some(parent.0.to_ascii_lowercase());
-                    root = self
-                        .class_named(&parent.0)
-                        .and_then(|found| self.class_decl(found))
-                        .and_then(|found| found.parent.clone());
-                }
-                if matches!(last.as_deref(), Some(b"exception" | b"error")) {
-                    return None;
-                }
-                Some(if is_enum {
-                    format!("Enum {name} cannot implement interface {shown}")
-                } else {
-                    format!(
-                        "Class {name} cannot implement interface {shown}, extend Exception or Error instead"
-                    )
-                })
-            }
-            _ => None,
-        }
+                &format!("{what} \"{}\" not found", String::from_utf8_lossy(&name.0)),
+            )
+        })
     }
 
     /// `zend_hash_find(EG(function_table), lcname)`: the native of that

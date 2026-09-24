@@ -112,8 +112,12 @@ use php_unit::{
 use php_syntax::magic_const_name;
 
 use crate::{CompileError, Options, StackLimit};
+use attributes::InternalAttribute;
 use walk::{Class, Closure, Function, Method, Property};
 
+mod attributes;
+mod magic;
+mod types;
 mod walk;
 
 /// One arm of an `if` as the tree holds it, php's `ZEND_AST_IF_ELEM`:
@@ -373,6 +377,9 @@ pub(crate) struct Emit<'a> {
     /// `zend_compile_class_decl` bound them; the last is the one whose
     /// body is being compiled while `active_class` names it.
     classes: Vec<ClassDecl>,
+    /// Which of [`Emit::classes`] were bound early, in the order bound:
+    /// the file's classes `CG(class_table)` holds while it compiles.
+    bound: Vec<usize>,
     /// The functions the file declares with their bodies,
     /// [`Unit::functions`]: `CG(function_table)` past the natives, each
     /// entry landing once its body has compiled, which is when php's
@@ -800,6 +807,23 @@ fn folded_const_expr(folded: Zval) -> Option<ConstExpr> {
     })
 }
 
+/// Whether a constant expression is a value `zend_const_expr_to_zval`
+/// folded, which a typed default is checked against where it is
+/// written, and not a name still to evaluate (`Z_CONSTANT`).
+fn is_literal(expr: &ConstExpr) -> bool {
+    match expr {
+        ConstExpr::Null
+        | ConstExpr::Bool(_)
+        | ConstExpr::Long(_)
+        | ConstExpr::Double(_)
+        | ConstExpr::Str(_) => true,
+        ConstExpr::Array(elements) => elements
+            .iter()
+            .all(|(key, value)| key.as_ref().is_none_or(is_literal) && is_literal(value)),
+        _ => false,
+    }
+}
+
 /// `zend_dirname` (`Z/Zend/zend_compile.c:2176`) on a path that is no
 /// Windows one: trailing slashes stripped, then the last component,
 /// then the slashes before it; `/` for a path of slashes alone, `.` for
@@ -872,6 +896,7 @@ pub(crate) fn unit(
         line: 1,
         diagnostics: Vec::new(),
         classes: Vec::new(),
+        bound: Vec::new(),
         functions_declared: Vec::new(),
         dynamic: Vec::new(),
         dynamic_func_defs: Vec::new(),
@@ -2292,6 +2317,16 @@ impl Emit<'_> {
     /// class of its clause jumps over the rest to the clause's body.
     /// Returns the clause's last `CATCH`, whose `op2` is the next
     /// clause's first and is left unset on the last clause of the `try`.
+    ///
+    /// `self`, `parent` and `static` name no class a `catch` can hold to
+    /// (`zend_is_const_default_class_ref`):
+    ///
+    /// ```php
+    /// class T { function m() { try { f(); } catch (static $e) {} } }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Bad class name in the catch statement in %s on line 2
+    /// ```
     fn catch_clause(
         &mut self,
         clause: &tree::CatchClause,
@@ -2310,6 +2345,13 @@ impl Emit<'_> {
             return Err(walk::unread(line, "a `catch` naming no class"));
         }
         let var = clause.var.map(|id| self.variable_name(id));
+        self.line = line;
+        if types
+            .iter()
+            .any(|class| class_fetch_type(class) != FETCH_CLASS_DEFAULT)
+        {
+            return Err(self.compile_error("Bad class name in the catch statement"));
+        }
         if var.as_deref() == Some(b"this".as_slice()) {
             return Err(self.compile_error("Cannot re-assign $this"));
         }
@@ -2688,60 +2730,67 @@ impl Emit<'_> {
         Ok(())
     }
 
-    /// `zend_declare_typed_property` for each promoted parameter of a
-    /// constructor (`zend_compile_params`): the property carries the
-    /// parameter's visibility, its `readonly` bit and its declared type,
-    /// and no explicit default, which for a typed one is uninitialized
-    /// and for an untyped one the implicit `null`. A name the class
-    /// already declares is php's `Cannot redeclare C::$p`, and a
-    /// `readonly` promotion with no type is php's own refusal.
-    fn promoted_properties(
+    /// The property a constructor's promoted parameter declares, where
+    /// `zend_compile_params` declares it, after the parameter's type:
+    /// a name the class already has, a callable type, and an untyped
+    /// `readonly` are php's fatals in php's words, and the property has
+    /// no default of its own, uninitialized where it is typed and
+    /// `null` where it is not.
+    ///
+    /// ```php
+    /// class C { function __construct(public callable $f) {} }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Property C::$f cannot have type callable in %s on line 2
+    /// ```
+    fn promoted_property(
         &mut self,
-        class: usize,
-        class_name: &[u8],
-        function: &Function,
+        parameter: &walk::Parameter,
+        promoted: walk::Promoted,
+        ty: Option<&Type>,
     ) -> Result<(), CompileError> {
-        for parameter in &function.parameters {
-            let Some(promoted) = parameter.promote else {
-                continue;
-            };
-            if self
-                .classes
-                .get(class)
-                .is_some_and(|decl| decl.properties.iter().any(|p| *p.name.0 == *parameter.name))
-            {
-                return Err(self.compile_error(format!(
-                    "Cannot redeclare {}::${}",
-                    String::from_utf8_lossy(class_name),
-                    String::from_utf8_lossy(&parameter.name)
-                )));
-            }
-            if promoted.is_readonly && parameter.ty.is_none() {
-                return Err(self.compile_error(format!(
-                    "Readonly property {}::${} must have type",
-                    String::from_utf8_lossy(class_name),
-                    String::from_utf8_lossy(&parameter.name)
-                )));
-            }
-            let default = parameter.ty.is_none().then_some(ConstExpr::Null);
-            let Some(decl) = self.classes.get_mut(class) else {
-                return Err(
-                    self.fatal("InternalError: a promoted property of a class the unit has not")
-                );
-            };
-            decl.properties.push(PropertyDecl {
-                name: Name(parameter.name.clone().into_boxed_slice()),
-                visibility: promoted.visibility,
-                set_visibility: None,
-                is_instance: true,
-                is_readonly: promoted.is_readonly,
-                is_final: false,
-                ty: parameter.ty.clone(),
-                default,
-                attributes: Vec::new(),
-                doc_comment: None,
-            });
+        let class_name = self.active_class.clone().unwrap_or_default();
+        let member = format!(
+            "{}::${}",
+            String::from_utf8_lossy(&class_name),
+            String::from_utf8_lossy(&parameter.name)
+        );
+        if self
+            .classes
+            .last()
+            .is_some_and(|decl| decl.properties.iter().any(|p| *p.name.0 == *parameter.name))
+        {
+            return Err(self.compile_error(format!("Cannot redeclare {member}")));
         }
+        if let Some(ty) = ty
+            && ty.mask() & types::MAY_BE_CALLABLE != 0
+        {
+            return Err(self.compile_error(format!(
+                "Property {member} cannot have type {}",
+                php_unit::type_to_string(ty)
+            )));
+        }
+        if promoted.is_readonly && ty.is_none() {
+            return Err(self.compile_error(format!("Readonly property {member} must have type")));
+        }
+        let default = ty.is_none().then_some(ConstExpr::Null);
+        let Some(decl) = self.classes.last_mut() else {
+            return Err(
+                self.fatal("InternalError: a promoted property of a class the unit has not")
+            );
+        };
+        decl.properties.push(PropertyDecl {
+            name: Name(parameter.name.clone().into_boxed_slice()),
+            visibility: promoted.visibility,
+            set_visibility: None,
+            is_instance: true,
+            is_readonly: promoted.is_readonly,
+            is_final: false,
+            ty: ty.cloned(),
+            default,
+            attributes: Vec::new(),
+            doc_comment: None,
+        });
         Ok(())
     }
 
@@ -2753,6 +2802,20 @@ impl Emit<'_> {
     /// `Cannot redeclare C::m()`, `E_COMPILE_ERROR`, spelled as the
     /// second declaration spells it. An instance method's body has
     /// `$this` as its frame's own (`this_guaranteed_exists`).
+    ///
+    /// A class that declares `__toString` implements `Stringable`
+    /// (`add_stringable_interface`), which keeps it from the early bind,
+    /// and the method returns `string` where it declares nothing:
+    ///
+    /// ```php
+    /// class A { function __toString() { return 1; } }
+    /// var_dump(new A instanceof Stringable);
+    /// echo new A, "\n";
+    /// ```
+    /// ```expect exit=0
+    /// bool(true)
+    /// 1
+    /// ```
     fn method_decl(&mut self, class: usize, method: &Method) -> Result<(), CompileError> {
         let class_name = self
             .classes
@@ -2773,19 +2836,32 @@ impl Emit<'_> {
         }
         let (function, body) =
             self.body(&method.function, &name, Some(&class_name), method.is_static)?;
-        self.promoted_properties(class, &class_name, &method.function)?;
-        let Some(decl) = self.classes.get_mut(class) else {
-            return Err(self.fatal("InternalError: a method of a class the unit has not"));
-        };
-        let at = u32::try_from(decl.methods.len()).unwrap_or(u32::MAX);
-        decl.methods.push(MethodDecl {
+        let declared = MethodDecl {
             function,
             visibility: method.visibility,
             is_instance: !method.is_static,
             is_abstract: false,
             is_final: method.is_final,
             tentative_return: false,
-        });
+        };
+        self.line = method.function.line;
+        self.magic_method(&class_name, &declared)?;
+        let Some(decl) = self.classes.get_mut(class) else {
+            return Err(self.fatal("InternalError: a method of a class the unit has not"));
+        };
+        // `add_stringable_interface`: a class that declares
+        // `__toString` implements `Stringable`, written or not.
+        if name.eq_ignore_ascii_case(b"__tostring")
+            && decl.kind != ClassKind::Trait
+            && !decl
+                .interfaces
+                .iter()
+                .any(|interface| interface.0.eq_ignore_ascii_case(b"Stringable"))
+        {
+            decl.interfaces.push(Name(b"Stringable".as_slice().into()));
+        }
+        let at = u32::try_from(decl.methods.len()).unwrap_or(u32::MAX);
+        decl.methods.push(declared);
         self.methods.push(MethodBody {
             class: u32::try_from(class).unwrap_or(u32::MAX),
             method: at,
@@ -2839,9 +2915,34 @@ impl Emit<'_> {
         let line = function.line;
         self.line = line;
         self.returns_by_ref = function.by_ref;
-        self.return_type.clone_from(&function.return_type);
+        // `zend_compile_params`' `fallback_return_type`: a method named
+        // `__toString` with no return type written returns `string` all
+        // the same, which is what `Stringable::__toString` holds it to.
+        self.return_type = match function.return_type {
+            Some(written) => Some(self.typename(written, false)?.0),
+            None if scope.is_some() && name.eq_ignore_ascii_case(b"__tostring") => {
+                Some(Type::String)
+            }
+            None => None,
+        };
         let is_ctor = scope.is_some() && name.eq_ignore_ascii_case(b"__construct");
-        let parameters = self.recv_prologue(function, is_ctor)?;
+        // `get_function_or_method_name`, what a deprecation of the
+        // prologue names the function by.
+        let owner = scope.map(<[u8]>::to_vec).or_else(|| {
+            self.fn_flags
+                .closure
+                .then(|| self.active_class.clone())
+                .flatten()
+        });
+        let shown = match owner {
+            Some(owner) => format!(
+                "{}::{}",
+                String::from_utf8_lossy(&owner),
+                String::from_utf8_lossy(name)
+            ),
+            None => String::from_utf8_lossy(name).into_owned(),
+        };
+        let parameters = self.recv_prologue(function, is_ctor, &shown)?;
         // The entry safepoint is the opline after the prologue (design
         // §5.7), which `begin_body` numbered zero at opline zero; the
         // assignments a promoted parameter makes stand after it, as
@@ -2878,7 +2979,7 @@ impl Emit<'_> {
             FunctionDecl {
                 name: Name(name.into()),
                 parameters,
-                return_type: function.return_type.clone(),
+                return_type: self.return_type.clone(),
                 returns_by_ref: function.by_ref,
                 is_generator: function.generator,
                 attributes: Vec::new(),
@@ -2908,10 +3009,45 @@ impl Emit<'_> {
     /// parameter written before a required one becomes a required one
     /// with no default whatever it was written as, which is why the last
     /// required parameter is found before any opline is emitted.
+    ///
+    /// What the prologue refuses, and the two deprecations it raises and
+    /// compiles past, each at the parameter's line and naming the function
+    /// as `get_function_or_method_name` does:
+    ///
+    /// ```php
+    /// function f($_GET) {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot re-assign auto-global variable _GET in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// function f($this) {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use $this as parameter in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// function f($a = 1, $b) {}
+    /// ```
+    /// ```expect exit=0
+    /// Deprecated: f(): Optional parameter $a declared before required parameter $b is implicitly treated as a required parameter in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// class C { function m(int $x = null) { var_dump($x); } }
+    /// (new C)->m();
+    /// ```
+    /// ```expect exit=0
+    /// Deprecated: C::m(): Implicitly marking parameter $x as nullable is deprecated, the explicit nullable type must be used instead in %s on line 2
+    /// NULL
+    /// ```
     fn recv_prologue(
         &mut self,
         function: &Function,
         is_ctor: bool,
+        shown: &str,
     ) -> Result<Vec<Parameter>, CompileError> {
         let last_required = function
             .parameters
@@ -2921,49 +3057,27 @@ impl Emit<'_> {
         let mut variadic_seen = false;
         for (at, parameter) in function.parameters.iter().enumerate() {
             let number = u32::try_from(at).unwrap_or(u32::MAX);
-            let cv = self.lookup_cv(&parameter.name);
-            if cv != number {
-                return Err(self.compile_error(format!(
-                    "Redefinition of parameter ${}",
-                    String::from_utf8_lossy(&parameter.name)
-                )));
-            }
+            self.line = parameter.line;
+            let named = String::from_utf8_lossy(&parameter.name).into_owned();
+            let cv = self.parameter_cv(parameter, number)?;
             self.parameter_refused(parameter, variadic_seen, is_ctor)?;
             variadic_seen = parameter.variadic;
-            // `zend_compile_params` folds a default under
-            // `ZEND_COMPILE_NO_PERSISTENT_CONSTANT_SUBSTITUTION`, so one
-            // naming a constant is not folded: the name stays as
-            // written, and what stands in the constant table is the
-            // `IS_CONSTANT_AST` zval over the expression, which the
-            // engine evaluates on the pass that copies it and
-            // Reflection reads back as the name.
-            let folded = match parameter.default {
-                Some(expr) if self.names_a_constant(expr) => {
-                    let unevaluated = self.const_expr(expr)?;
-                    Some(self.unevaluated(unevaluated))
-                }
-                Some(expr) => {
-                    let Some(folded) = self.constant_of(expr)? else {
-                        return Err(self.fatal("a parameter default this compiler cannot read yet"));
-                    };
-                    Some(folded)
-                }
-                None => None,
-            };
-            let implicitly_nullable = parameter.promote.is_none()
-                && folded
-                    .as_ref()
-                    .is_some_and(|zval| zval.kind() == ZvalType::Null)
-                && parameter
-                    .ty
-                    .as_ref()
-                    .is_some_and(|ty| !ty.contains_code(ZvalType::Null as u8));
-            let ty = match (&parameter.ty, implicitly_nullable) {
-                (Some(ty), true) => Some(Type::Nullable(Box::new(ty.clone()))),
-                (ty, _) => ty.clone(),
-            };
+            let mut folded = self.parameter_default(parameter)?;
+            let (ty, implicitly_nullable) = self.parameter_type(parameter, &mut folded, shown)?;
             let keeps_default = !parameter.variadic
                 && (implicitly_nullable || last_required.is_none_or(|last| at > last));
+            if let (Some(last), Some(_), false) = (last_required, &folded, implicitly_nullable)
+                && at < last
+                && let Some(required) = function.parameters.get(last)
+            {
+                self.raise(
+                    Level::Deprecated,
+                    &format!(
+                        "{shown}(): Optional parameter ${named} declared before required parameter ${} is implicitly treated as a required parameter",
+                        String::from_utf8_lossy(&required.name)
+                    ),
+                );
+            }
             let default = if let (Some(folded), true) = (folded, keeps_default) {
                 let slot = self.constant(folded);
                 self.push(Opline {
@@ -2975,10 +3089,18 @@ impl Emit<'_> {
                     out: cv,
                     ..Opline::default()
                 });
-                parameter
+                let written = parameter
                     .default
                     .map(|expr| self.const_expr(expr))
-                    .transpose()?
+                    .transpose()?;
+                // `zend_is_valid_default_value` converted an int under
+                // a type with `float` and no `int` where it stood.
+                match (written, folded.kind()) {
+                    (Some(ConstExpr::Long(n)), ZvalType::Double) => {
+                        Some(ConstExpr::Double(double_of(Zval::long(n))))
+                    }
+                    (written, _) => written,
+                }
             } else {
                 self.push(Opline {
                     opcode: if parameter.variadic {
@@ -2998,6 +3120,9 @@ impl Emit<'_> {
                 });
                 None
             };
+            if let Some(promoted) = parameter.promote {
+                self.promoted_property(parameter, promoted, ty.as_ref())?;
+            }
             parameters.push(Parameter {
                 name: Name(parameter.name.clone().into_boxed_slice()),
                 ty,
@@ -3009,6 +3134,184 @@ impl Emit<'_> {
             });
         }
         Ok(parameters)
+    }
+
+    /// The CV a parameter takes, `lookup_cv` over its name, which must
+    /// be the next one, after the names php refuses a parameter.
+    fn parameter_cv(
+        &mut self,
+        parameter: &walk::Parameter,
+        number: u32,
+    ) -> Result<u32, CompileError> {
+        let named = String::from_utf8_lossy(&parameter.name).into_owned();
+        if is_auto_global(&parameter.name) {
+            return Err(
+                self.compile_error(format!("Cannot re-assign auto-global variable {named}"))
+            );
+        }
+        let cv = self.lookup_cv(&parameter.name);
+        if cv != number {
+            return Err(self.compile_error(format!("Redefinition of parameter ${named}")));
+        }
+        if parameter.name == b"this" {
+            return Err(self.compile_error("Cannot use $this as parameter"));
+        }
+        Ok(cv)
+    }
+
+    /// A parameter's compiled type, `zend_compile_typename_ex` with a
+    /// `null` default under a written type as its PHP 5 spelling of
+    /// `?T`, which is php's deprecation, and whether that made it
+    /// nullable.
+    fn parameter_type(
+        &mut self,
+        parameter: &walk::Parameter,
+        folded: &mut Option<Zval>,
+        shown: &str,
+    ) -> Result<(Option<Type>, bool), CompileError> {
+        let Some(written) = parameter.ty else {
+            return Ok((None, false));
+        };
+        let force_nullable = parameter.promote.is_none()
+            && folded
+                .as_ref()
+                .is_some_and(|zval| zval.kind() == ZvalType::Null);
+        let (ty, forced) = self.typename(written, force_nullable)?;
+        self.parameter_type_refused(&ty, parameter, folded.as_mut(), force_nullable)?;
+        if !forced {
+            return Ok((Some(ty), false));
+        }
+        self.raise(
+            Level::Deprecated,
+            &format!(
+                "{shown}(): Implicitly marking parameter ${} as nullable is deprecated, the explicit nullable type must be used instead",
+                String::from_utf8_lossy(&parameter.name)
+            ),
+        );
+        Ok((Some(Type::Nullable(Box::new(ty))), true))
+    }
+
+    /// A parameter's default as `zend_compile_params` folds it, under
+    /// `ZEND_COMPILE_NO_PERSISTENT_CONSTANT_SUBSTITUTION`, so one naming
+    /// a constant is not folded: the name stays as written, and what
+    /// stands in the constant table is the `IS_CONSTANT_AST` zval over
+    /// the expression, which the engine evaluates on the pass that
+    /// copies it and Reflection reads back as the name.
+    fn parameter_default(
+        &mut self,
+        parameter: &walk::Parameter,
+    ) -> Result<Option<Zval>, CompileError> {
+        Ok(match parameter.default {
+            Some(expr) if self.names_a_constant(expr) => {
+                let unevaluated = self.const_expr(expr)?;
+                Some(self.unevaluated(unevaluated))
+            }
+            Some(expr) => {
+                let Some(folded) = self.constant_of(expr)? else {
+                    return Err(self.fatal("a parameter default this compiler cannot read yet"));
+                };
+                Some(folded)
+            }
+            None => None,
+        })
+    }
+
+    /// What `zend_compile_params` refuses about a parameter's compiled
+    /// type: `void` and `never`, which no argument can be, and a
+    /// default the type does not take, named by
+    /// `zend_get_type_by_const`. A default that names a constant is
+    /// checked when it is evaluated, and `null` under a written type is
+    /// the nullable spelling. An int default under a type that takes
+    /// `float` and not `int` is converted where it stands, as
+    /// `zend_is_valid_default_value` converts it.
+    ///
+    /// ```php
+    /// function f(void $x) {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: void cannot be used as a parameter type in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// function f(never $x) {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: never cannot be used as a parameter type in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// function f(
+    ///     int $a,
+    ///     float $arg = false
+    /// ) {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use bool as default value for parameter $arg of type float in %s on line 4
+    /// ```
+    ///
+    /// ```php
+    /// function f(iterable $x = 1) {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use int as default value for parameter $x of type Traversable|array in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// function f(float $a = 1, int|float $b = 2, ?array $c = [], int $d = PHP_INT_MAX, ?int $e = null) {
+    ///     var_dump($a, $b, $c, $d, $e);
+    /// }
+    /// f();
+    /// ```
+    /// ```expect exit=0
+    /// float(1)
+    /// int(2)
+    /// array(0) {
+    /// }
+    /// int(9223372036854775807)
+    /// NULL
+    /// ```
+    fn parameter_type_refused(
+        &self,
+        ty: &Type,
+        parameter: &walk::Parameter,
+        folded: Option<&mut Zval>,
+        force_nullable: bool,
+    ) -> Result<(), CompileError> {
+        let mask = ty.mask();
+        if mask & types::MAY_BE_VOID != 0 {
+            return Err(self.compile_error("void cannot be used as a parameter type"));
+        }
+        if mask & types::MAY_BE_NEVER != 0 {
+            return Err(self.compile_error("never cannot be used as a parameter type"));
+        }
+        let Some(value) = folded else {
+            return Ok(());
+        };
+        let kind = value.kind();
+        if force_nullable || kind == ZvalType::ConstExpr {
+            return Ok(());
+        }
+        if ty.contains_code(kind as u8) {
+            return Ok(());
+        }
+        if ty.contains_code(ZvalType::Double as u8) && kind == ZvalType::Long {
+            *value = Zval::double(double_of(*value));
+            return Ok(());
+        }
+        let given = match kind {
+            ZvalType::False | ZvalType::True => "bool",
+            ZvalType::Long => "int",
+            ZvalType::Double => "float",
+            ZvalType::String => "string",
+            ZvalType::Array => "array",
+            ZvalType::Object => "object",
+            _ => "null",
+        };
+        Err(self.compile_error(format!(
+            "Cannot use {given} as default value for parameter ${} of type {}",
+            String::from_utf8_lossy(&parameter.name),
+            php_unit::type_to_string(ty)
+        )))
     }
 
     /// What `zend_compile_params` refuses about one parameter, in php's
@@ -3048,6 +3351,7 @@ impl Emit<'_> {
             if parameter.promote.is_none() {
                 continue;
             }
+            self.line = parameter.line;
             let name = self.string(&parameter.name)?;
             let slot = self.literal(name);
             let slots = self.cache_slots(3);
@@ -3279,16 +3583,6 @@ impl Emit<'_> {
         // ZEND_FETCH_CLASS_NO_AUTOLOAD)` stands before the class itself
         // goes into the table, so a class naming itself as its parent
         // finds nothing and binds as the program serves.
-        // An enum is never bound early, so a class naming one as its
-        // parent finds none in the table and binds as the program serves,
-        // where the link refuses it.
-        let early = interfaces.is_empty()
-            && match &parent {
-                None => true,
-                Some(parent) => self
-                    .known_class(parent)
-                    .is_some_and(|found| found.kind != ClassKind::Enum),
-            };
         let (attributes, dynamic_properties) = self.class_attributes(class, &name, class.line)?;
         let is_enum = class.kind == ClassKind::Enum;
         let mut decl = ClassDecl {
@@ -3344,13 +3638,20 @@ impl Emit<'_> {
         if is_enum {
             self.verify_enum(at, &name)?;
         }
-        if early {
-            // `zend_try_early_bind`, which links the class here: what
-            // `zend_do_inheritance` refuses is php's `E_ERROR` while the
-            // file compiles, so nothing of the file runs.
-            if let Some(parent) = &parent {
-                self.inherit_at_compile_time(&name, parent)?;
-            }
+        // `zend_compile_class_decl` decides once the body has compiled,
+        // so an interface `add_stringable_interface` gave the class
+        // counts, and an enum, which `zend_enum_add_interfaces` gave
+        // `UnitEnum`, is never bound early.
+        let early = self
+            .classes
+            .get(at)
+            .is_some_and(|decl| decl.interfaces.is_empty())
+            && match &parent {
+                None => true,
+                Some(parent) => self.bound_class(parent).is_some(),
+            };
+        if early && (parent.is_none() || self.try_early_bind(at)?) {
+            self.bound.push(at);
             return Ok(());
         }
         self.declare_class(&name, parent.as_deref())
@@ -3368,13 +3669,15 @@ impl Emit<'_> {
     /// ```
     fn enum_backing(&mut self, class: &Class, name: &[u8]) -> Result<EnumBacking, CompileError> {
         let _ = name;
-        match &class.backing {
-            None => Ok(EnumBacking::Pure),
-            Some(Type::Int) => Ok(EnumBacking::Int),
-            Some(Type::String) => Ok(EnumBacking::String),
-            Some(other) => Err(self.compile_error(format!(
+        let Some(written) = class.backing else {
+            return Ok(EnumBacking::Pure);
+        };
+        match self.typename(written, false)?.0 {
+            Type::Int => Ok(EnumBacking::Int),
+            Type::String => Ok(EnumBacking::String),
+            other => Err(self.compile_error(format!(
                 "Enum backing type must be int or string, {} given",
-                type_to_string(other)
+                type_to_string(&other)
             ))),
         }
     }
@@ -3494,6 +3797,20 @@ impl Emit<'_> {
     /// own line, its value kept as the constant expression it was
     /// written as (design §4.7), and a name the group declares twice
     /// php's fatal in php's words.
+    ///
+    /// ```php
+    /// class A { final private const X = 1; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Private constant A::X cannot be final as it is not visible to other classes in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// class A { const CLASS = 1; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: A class constant must not be called 'class'; it is reserved for class name fetching in %s on line 2
+    /// ```
     fn class_constants(
         &mut self,
         decl: &mut ClassDecl,
@@ -3502,6 +3819,18 @@ impl Emit<'_> {
     ) -> Result<(), CompileError> {
         for constant in &class.constants {
             self.line = constant.line;
+            if constant.visibility == Visibility::Private && constant.is_final {
+                return Err(self.compile_error(format!(
+                    "Private constant {}::{} cannot be final as it is not visible to other classes",
+                    String::from_utf8_lossy(name),
+                    String::from_utf8_lossy(&constant.name)
+                )));
+            }
+            if constant.name.eq_ignore_ascii_case(b"class") {
+                return Err(self.compile_error(
+                    "A class constant must not be called 'class'; it is reserved for class name fetching",
+                ));
+            }
             if decl.constants.iter().any(|c| *c.name.0 == *constant.name) {
                 return Err(self.compile_error(format!(
                     "Cannot redefine class constant {}::{}",
@@ -3532,18 +3861,76 @@ impl Emit<'_> {
     /// ([`Self::class_name`]), and each argument evaluated no further
     /// than `zend_const_expr_to_zval` leaves it, the constant
     /// expression the declaration keeps for `ReflectionAttribute` to
-    /// read (design §4.7). The attribute is a marker php never
+    /// read (design §4.7). An attribute is a marker php never
     /// instantiates on its own, so a name no class answers is no error
     /// here, as it is none in php.
     ///
-    /// `#[\AllowDynamicProperties]` is the one attribute the compiler
-    /// itself reads: `validate_allow_dynamic_properties`
-    /// (`Z/Zend/zend_attributes.c:73`) sets
-    /// `ZEND_ACC_ALLOW_DYNAMIC_PROPERTIES` on the class it is written
-    /// on and is php's compile error on a trait, an interface or an
-    /// enum. php's fourth refusal, the readonly class, waits on a
-    /// compiler that reads one. The attribute is kept in the list
-    /// beside the bit, as php keeps it for `ReflectionClass`.
+    /// Then php's second loop over the ones the engine declares
+    /// ([`attributes::InternalAttribute`]), at the class's own line: a
+    /// target its `#[Attribute]` does not allow and one written twice
+    /// are php's `E_ERROR`, unless `#[\DelayedTargetValidation]`
+    /// defers the target, and its validator's refusal is
+    /// `E_COMPILE_ERROR`. `#[\AllowDynamicProperties]` sets
+    /// `ZEND_ACC_ALLOW_DYNAMIC_PROPERTIES`, kept beside the attribute
+    /// as php keeps it for `ReflectionClass`.
+    ///
+    /// ```php
+    /// #[ReturnTypeWillChange]
+    /// class C {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Attribute "ReturnTypeWillChange" cannot target class (allowed targets: method) in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// #[Attribute]
+    /// #[Attribute]
+    /// class A {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Attribute "Attribute" must not be repeated in %s on line 4
+    /// ```
+    ///
+    /// ```php
+    /// #[Attribute]
+    /// interface Demo {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot apply #[\Attribute] to interface Demo in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// #[Deprecated]
+    /// class Demo {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot apply #[\Deprecated] to class Demo in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// #[AllowDynamicProperties]
+    /// interface Demo {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot apply #[\AllowDynamicProperties] to interface Demo in %s on line 3
+    /// ```
+    ///
+    /// What php takes, it takes: an internal attribute on a target it
+    /// allows, one deferred, and a user's attribute of any name:
+    ///
+    /// ```php
+    /// #[Attribute(Attribute::TARGET_CLASS)]
+    /// #[AllowDynamicProperties]
+    /// #[DelayedTargetValidation, ReturnTypeWillChange]
+    /// #[Mine, Mine]
+    /// class C {}
+    /// $c = new C;
+    /// $c->p = 1;
+    /// echo $c->p, "\n";
+    /// ```
+    /// ```expect exit=0
+    /// 1
+    /// ```
     fn class_attributes(
         &mut self,
         class: &Class,
@@ -3551,31 +3938,58 @@ impl Emit<'_> {
         declared_at: u32,
     ) -> Result<(Vec<Attribute>, DynamicProperties), CompileError> {
         let mut out = Vec::new();
-        let mut dynamic_properties = DynamicProperties::default();
         for attribute in &class.attributes {
             self.line = attribute.line;
             let name = self.class_name(&attribute.name);
-            if name.eq_ignore_ascii_case(b"AllowDynamicProperties") {
-                let refused = match class.kind {
-                    ClassKind::Trait => Some("trait"),
-                    ClassKind::Interface => Some("interface"),
-                    ClassKind::Enum => Some("enum"),
-                    ClassKind::Class => None,
-                };
-                if let Some(word) = refused {
-                    // php raises the validator's message where the
-                    // class was written and not where the attribute was
-                    // (`zend_compile_attributes` runs at the class's
-                    // own line).
-                    self.line = declared_at;
-                    return Err(self.compile_error(format!(
-                        "Cannot apply #[\\AllowDynamicProperties] to {word} {}",
-                        String::from_utf8_lossy(class_name)
-                    )));
-                }
+            out.push(self.attribute(attribute, name)?);
+        }
+        self.line = declared_at;
+        let internal = |attribute: &Attribute| InternalAttribute::named(&attribute.name.0);
+        let delayed = out.iter().any(|attribute| {
+            internal(attribute) == Some(InternalAttribute::DelayedTargetValidation)
+        });
+        let mut dynamic_properties = DynamicProperties::default();
+        for (at, attribute) in out.iter().enumerate() {
+            let Some(known) = internal(attribute) else {
+                continue;
+            };
+            let shown = String::from_utf8_lossy(&attribute.name.0).into_owned();
+            let targets = known.targets();
+            let on_target = targets & attributes::TARGET_CLASS != 0;
+            if !on_target && !delayed {
+                return Err(CompileError {
+                    level: Level::Error,
+                    message: format!(
+                        "Attribute \"{shown}\" cannot target class (allowed targets: {})",
+                        attributes::target_names(targets)
+                    ),
+                    line: self.line,
+                    raised: Vec::new(),
+                });
+            }
+            if out
+                .iter()
+                .enumerate()
+                .any(|(other, o)| other != at && o.name.0.eq_ignore_ascii_case(&attribute.name.0))
+            {
+                return Err(CompileError {
+                    level: Level::Error,
+                    message: format!("Attribute \"{shown}\" must not be repeated"),
+                    line: self.line,
+                    raised: Vec::new(),
+                });
+            }
+            if !on_target {
+                continue;
+            }
+            if let Some(refused) =
+                known.refused_on_class(class.kind, false, &String::from_utf8_lossy(class_name))
+            {
+                return Err(self.compile_error(refused));
+            }
+            if known == InternalAttribute::AllowDynamicProperties {
                 dynamic_properties = DynamicProperties::Allowed;
             }
-            out.push(self.attribute(attribute, name)?);
         }
         Ok((out, dynamic_properties))
     }
@@ -3651,20 +4065,40 @@ impl Emit<'_> {
                     String::from_utf8_lossy(name)
                 )));
             }
-            if decl.properties.iter().any(|p| *p.name.0 == *property.name) {
-                return Err(self.compile_error(format!(
-                    "Cannot redeclare {}::${}",
-                    String::from_utf8_lossy(name),
-                    String::from_utf8_lossy(&property.name)
-                )));
-            }
-            let set_visibility = self.set_visibility_of(property, name)?;
+            let member = format!(
+                "{}::${}",
+                String::from_utf8_lossy(name),
+                String::from_utf8_lossy(&property.name)
+            );
             self.active_property = Some(property.name.clone());
-            let default = match property.default {
+            let ty = match property.ty {
+                Some(written) => {
+                    let ty = self.typename(written, false)?.0;
+                    let mask = ty.mask();
+                    if mask & (types::MAY_BE_VOID | types::MAY_BE_NEVER | types::MAY_BE_CALLABLE)
+                        != 0
+                    {
+                        return Err(self.compile_error(format!(
+                            "Property {member} cannot have type {}",
+                            php_unit::type_to_string(&ty)
+                        )));
+                    }
+                    Some(ty)
+                }
+                None => None,
+            };
+            if decl.properties.iter().any(|p| *p.name.0 == *property.name) {
+                return Err(self.compile_error(format!("Cannot redeclare {member}")));
+            }
+            let mut default = match property.default {
                 Some(expr) => Some(self.const_expr(expr)?),
                 None => None,
             };
+            if let (Some(ty), Some(default)) = (&ty, default.as_mut()) {
+                self.property_default_refused(ty, default, &member)?;
+            }
             self.active_property = None;
+            let set_visibility = self.set_visibility_of(property, name)?;
             decl.properties.push(PropertyDecl {
                 name: Name(property.name.clone().into_boxed_slice()),
                 visibility: property.visibility,
@@ -3674,13 +4108,108 @@ impl Emit<'_> {
                 // `zend_declare_typed_property`: a `private(set)`
                 // property is implicitly final.
                 is_final: set_visibility == Some(Visibility::Private),
-                ty: property.ty.clone(),
+                ty,
                 default,
                 attributes: Vec::new(),
                 doc_comment: property.doc_comment.clone().map(Vec::into_boxed_slice),
             });
         }
         Ok(())
+    }
+
+    /// What `zend_compile_prop_decl` refuses about a typed property's
+    /// default, `zend_is_valid_default_value` over the value it folded
+    /// to: `null` under a type without it names the nullable type that
+    /// would take it, and any other value php's
+    /// `zend_zval_value_name`. A default still naming a constant is
+    /// checked when it is evaluated, and an int under a type that takes
+    /// `float` and not `int` becomes the float.
+    ///
+    /// ```php
+    /// class C {
+    ///     public int $a = 1;
+    ///     public string|int $b = null;
+    /// }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Default value for property of type string|int may not be null. Use the nullable type string|int|null to allow null default value in %s on line 4
+    /// ```
+    ///
+    /// ```php
+    /// class C { public array $bar = 1; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use int as default value for property C::$bar of type array in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// class C { public float $f = 1; public ?int $n = null; public iterable $i = []; public int $k = PHP_INT_SIZE; }
+    /// var_dump(new C);
+    /// ```
+    /// ```expect exit=0
+    /// object(C)#1 (4) {
+    ///   ["f"]=>
+    ///   float(1)
+    ///   ["n"]=>
+    ///   NULL
+    ///   ["i"]=>
+    ///   array(0) {
+    ///   }
+    ///   ["k"]=>
+    ///   int(8)
+    /// }
+    /// ```
+    fn property_default_refused(
+        &self,
+        ty: &Type,
+        default: &mut ConstExpr,
+        member: &str,
+    ) -> Result<(), CompileError> {
+        let kind = match default {
+            ConstExpr::Null => ZvalType::Null,
+            ConstExpr::Bool(false) => ZvalType::False,
+            ConstExpr::Bool(true) => ZvalType::True,
+            ConstExpr::Long(_) => ZvalType::Long,
+            ConstExpr::Double(_) => ZvalType::Double,
+            ConstExpr::Str(_) => ZvalType::String,
+            ConstExpr::Array(elements)
+                if elements.iter().all(|(key, value)| {
+                    key.as_ref().is_none_or(is_literal) && is_literal(value)
+                }) =>
+            {
+                ZvalType::Array
+            }
+            _ => return Ok(()),
+        };
+        if ty.contains_code(kind as u8) {
+            return Ok(());
+        }
+        if let ConstExpr::Long(n) = default
+            && ty.contains_code(ZvalType::Double as u8)
+        {
+            *default = ConstExpr::Double(double_of(Zval::long(*n)));
+            return Ok(());
+        }
+        let text = php_unit::type_to_string(ty);
+        if kind == ZvalType::Null && !matches!(ty, Type::Intersection(_)) {
+            let nullable = Type::Union(vec![ty.clone(), Type::Null]);
+            return Err(self.compile_error(format!(
+                "Default value for property of type {text} may not be null. Use the nullable type {} to allow null default value",
+                php_unit::type_to_string(&nullable)
+            )));
+        }
+        let given = match kind {
+            ZvalType::Null => "null",
+            ZvalType::False => "false",
+            ZvalType::True => "true",
+            ZvalType::Long => "int",
+            ZvalType::Double => "float",
+            ZvalType::String => "string",
+            _ => "array",
+        };
+        Err(self.compile_error(format!(
+            "Cannot use {given} as default value for property {member} of type {text}"
+        )))
     }
 
     /// `zend_declare_typed_property`'s arm over `ZEND_ACC_PPP_SET_MASK`
@@ -3788,31 +4317,14 @@ impl Emit<'_> {
         Ok(self.class_name(written))
     }
 
-    /// `zend_lookup_class_ex` over `CG(class_table)`: the declaration of
-    /// the class of that name, one the engine declared
-    /// ([`Options::classes`]) or one this file has bound before this
-    /// point.
-    fn known_class(&self, name: &[u8]) -> Option<&ClassDecl> {
-        let wanted = name.to_ascii_lowercase();
-        self.known_classes
-            .iter()
-            .chain(self.classes.iter())
-            .find(|decl| decl.name.0.to_ascii_lowercase() == wanted)
-    }
-
-    /// What `zend_do_inheritance` refuses at the early bind, which is
-    /// `E_ERROR` while the file compiles and so runs nothing of it: a
-    /// parent that is an interface or a final class.
-    ///
-    /// ```php
-    /// class G extends Generator {}
-    /// ```
-    /// ```expect exit=255
-    /// Fatal error: Class G cannot extend final class Generator in %s on line 2
-    /// ``` The rest of inheritance is the
-    /// engine's, since a class this cannot link here it declares with a
-    /// `DECLARE_CLASS` instead. The refusal stands while the file
-    /// compiles, so nothing of it runs:
+    /// `zend_try_early_bind`: the class at `at` linked against what
+    /// `CG(class_table)` holds while the file compiles, the engine's
+    /// classes and the file's own bound so far, by the checks
+    /// `zend_inheritance.c` makes ([`php_unit::link`]). A refusal is
+    /// php's `E_COMPILE_ERROR` while the file compiles, so nothing of it
+    /// runs; a check that needs a class not bound yet leaves the class to
+    /// its `DECLARE_CLASS` (false), linked where it was written; and the
+    /// deprecations a tentative return raises are the unit's.
     ///
     /// ```php
     /// echo "before\n";
@@ -3822,27 +4334,206 @@ impl Emit<'_> {
     /// ```expect exit=255
     /// Fatal error: Class C cannot extend interface I in %s on line 4
     /// ```
-    fn inherit_at_compile_time(&mut self, name: &[u8], parent: &[u8]) -> Result<(), CompileError> {
-        let Some(found) = self.known_class(parent) else {
-            return Ok(());
+    ///
+    /// ```php
+    /// class C extends Closure {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Class C cannot extend final class Closure in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// class G extends Generator {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Class G cannot extend final class Generator in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// class A { final function f() {} }
+    /// class B extends A { function f() {} }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot override final method A::f() in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class A { function f() {} }
+    /// class B extends A { static function f() {} }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot make non static method A::f() static in class B in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class A { static function f() {} }
+    /// class B extends A { function f() {} }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot make static method A::f() non static in class B in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class A { function f() {} }
+    /// class B extends A { protected function f() {} }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Access level to B::f() must be public (as in class A) in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class A { protected function f() {} }
+    /// class B extends A { private function f() {} }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Access level to B::f() must be protected (as in class A) or weaker in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class A { function f($a) {} }
+    /// class B extends A { function f(int $a) {} }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Declaration of B::f(int $a) must be compatible with A::f($a) in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class A { public private(set) int $p; }
+    /// class B extends A { public private(set) int $p; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot override final property A::$p in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class A { public static $p; }
+    /// class B extends A { public $p; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot redeclare static A::$p as non static B::$p in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class A { function __construct(public readonly int $p) {} }
+    /// class B extends A { public int $p; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot redeclare readonly property A::$p as non-readonly B::$p in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class A { public int $p; }
+    /// class B extends A { public private(set) int $p; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Set access level of B::$p must be omitted (as in class A) in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class A { public protected(set) int $p; }
+    /// class B extends A { public private(set) int $p; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Set access level of B::$p must be protected(set) (as in class A) or weaker in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class A { public int $p; }
+    /// class B extends A { protected int $p; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Access level to B::$p must be public (as in class A) in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class A { public int $p; }
+    /// class B extends A { public string $p; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Type of B::$p must be int (as in class A) in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class A { public $p; }
+    /// class B extends A { public int $p; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Type of B::$p must be omitted to match the parent definition in class A in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class A { final const X = 1; }
+    /// class B extends A { const X = 2; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: B::X cannot override final constant A::X in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class A { const X = 1; }
+    /// class B extends A { protected const X = 2; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Access level to B::X must be public (as in class A) in %s on line 3
+    /// ```
+    ///
+    /// What php takes, it takes: a wider parameter, an added optional
+    /// one, a narrower return, a wider visibility, a property of the
+    /// same type written its own way, and a parent's private method
+    /// taken over on any terms, each bound early:
+    ///
+    /// ```php
+    /// class A {
+    ///     public int|string $p = 1;
+    ///     protected function f(int $a): object { return $this; }
+    ///     private function g(int $a) {}
+    /// }
+    /// class B extends A {
+    ///     public string|int $p = 2;
+    ///     public function f(int|string $a, $b = 0): B { return $this; }
+    ///     public static function g() {}
+    /// }
+    /// $b = new B;
+    /// var_dump($b->f(1) === $b, $b->p);
+    /// ```
+    /// ```expect exit=0
+    /// bool(true)
+    /// int(2)
+    /// ```
+    fn try_early_bind(&mut self, at: usize) -> Result<bool, CompileError> {
+        let Some(child) = self.classes.get(at) else {
+            return Ok(false);
         };
-        // `zend_do_inheritance`'s refusal of a final parent, which
-        // `Generator`, `Closure` and every enum are.
-        let what = match found.kind {
-            ClassKind::Interface => "interface",
-            _ if found.flags.is_final => "final class",
-            _ => return Ok(()),
-        };
-        let parent = String::from_utf8_lossy(&found.name.0).into_owned();
-        Err(CompileError {
-            level: Level::Error,
-            message: format!(
-                "Class {} cannot extend {what} {parent}",
-                String::from_utf8_lossy(name)
-            ),
-            line: self.line,
-            raised: Vec::new(),
-        })
+        let lookup = |name: &[u8]| self.bound_class(name);
+        let linking = php_unit::link::link(child, &lookup);
+        for deprecation in linking.deprecations {
+            self.diagnostics.push(Diagnostic {
+                level: Level::Deprecated,
+                line: deprecation.site.line,
+                message: deprecation.to_string().as_str().into(),
+            });
+        }
+        match linking.outcome {
+            php_unit::link::Linked::Linked => Ok(true),
+            php_unit::link::Linked::Unresolved(_) => Ok(false),
+            php_unit::link::Linked::Refused(refused) => Err(CompileError {
+                level: refused.refusal.level(),
+                message: refused.refusal.to_string(),
+                line: refused.site.line,
+                raised: Vec::new(),
+            }),
+        }
+    }
+
+    /// A class `CG(class_table)` holds while the file compiles: one the
+    /// engine declared, or one of the file's own that was bound early,
+    /// which a class declared by a `DECLARE_CLASS` is not yet.
+    fn bound_class(&self, name: &[u8]) -> Option<&ClassDecl> {
+        let wanted = name.to_ascii_lowercase();
+        self.known_classes
+            .iter()
+            .chain(self.bound.iter().filter_map(|at| self.classes.get(*at)))
+            .find(|decl| decl.name.0.to_ascii_lowercase() == wanted)
     }
 
     /// `ZEND_DECLARE_CLASS`, what php emits for a class it did not early
@@ -4105,6 +4796,16 @@ impl Emit<'_> {
     /// namespace of what follows, and a first one after any statement
     /// but an empty one is php's compile error (`zend_is_first_statement`);
     /// a later one moves the namespace, as php's does. No opline.
+    ///
+    /// `namespace` is no namespace's name, whatever its case, since
+    /// `namespace\X` is the relative name:
+    ///
+    /// ```php
+    /// namespace NAMEspace;
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use 'NAMEspace' as namespace name in %s on line 2
+    /// ```
     fn namespace(&mut self, id: NodeId<tree::NamespaceDef>) -> Result<(), CompileError> {
         let node = &self.parsed.tree[id];
         let Some(name) = node.name else {
@@ -4121,6 +4822,12 @@ impl Emit<'_> {
             return Err(self.compile_error(
                 "Namespace declaration statement has to be the very first statement or after any declare call in the script",
             ));
+        }
+        if name.eq_ignore_ascii_case(b"namespace") {
+            return Err(self.compile_error(format!(
+                "Cannot use '{}' as namespace name",
+                String::from_utf8_lossy(name)
+            )));
         }
         self.namespace = Some(name.to_vec());
         // php's `zend_is_first_statement` steps over a `ZEND_AST_DECLARE`
@@ -10730,8 +11437,20 @@ impl Emit<'_> {
     /// Fatal error: Cannot use "static" when no class scope is active in %s on line 2
     /// ```
     ///
+    /// A number written where the class goes is no name at all,
+    /// `zend_try_compile_const_expr_resolve_class_name`'s refusal of a
+    /// `ZEND_AST_ZVAL` that is no string, while an expression that
+    /// folds to one is the refusal after it compiled:
+    ///
     /// ```php
     /// echo (1)::class;
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Illegal class name in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// echo (1 + 1)::class;
     /// ```
     /// ```expect exit=255
     /// Fatal error: Cannot use "::class" on int in %s on line 2
@@ -10739,6 +11458,16 @@ impl Emit<'_> {
     fn class_name_of(&mut self, class: ClassSpec) -> Result<Where, CompileError> {
         if let Some(value) = self.resolved_class_name(class)? {
             return Ok(Where::Constant(value));
+        }
+        if let ClassSpec::Expr(expr) = class
+            && let tree::Expr::LiteralExpr(id) = self.peel(expr)
+            && let Some(value) = self.parsed.tree[id].value
+            && matches!(
+                TokenValue::of(self.parsed, Holder::Scalar(&self.parsed.tree[id]), value),
+                Some(TokenValue::Int(_) | TokenValue::Float(_))
+            )
+        {
+            return Err(self.compile_error("Illegal class name"));
         }
         let (op1_type, op1) = match class {
             ClassSpec::Name(token) => (OperandKind::Unused, class_fetch_type(self.text(token))),
@@ -13006,6 +13735,7 @@ mod tests {
             line: 1,
             diagnostics: Vec::new(),
             classes: Vec::new(),
+            bound: Vec::new(),
             functions_declared: Vec::new(),
             dynamic: Vec::new(),
             dynamic_func_defs: Vec::new(),

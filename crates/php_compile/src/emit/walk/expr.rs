@@ -86,7 +86,7 @@ impl Emit<'_> {
         let parameters = self.walk_parameters(node.params)?;
         let return_type = match node.ret {
             Some(ret) => match self.parsed.tree[ret].ty {
-                Some(ty) => Some(self.walk_type(ty, line)?),
+                Some(ty) => Some(ty),
                 None => return Err(unread(line, "a return type")),
             },
             None => None,
