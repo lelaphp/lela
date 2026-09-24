@@ -222,6 +222,66 @@ fn a_missed_expectation_fails_with_the_difference() {
 }
 
 #[test]
+fn a_program_past_the_recipes_limit_fails_its_test_and_the_lane_goes_on() {
+    if oracle().is_none() {
+        return;
+    }
+    // Three tests in order, the middle one a program that never ends and
+    // says first which process it is. Under a limit of one second it is
+    // that test's fail, naming the limit; the process is killed and
+    // reaped, not left running; and the test after it is still judged
+    // (#691). Before, the limit ended the whole run and took every
+    // verdict with it.
+    let (tree, subset) = subset("past-limit", &[]);
+    let pid = tree.path().join("pid");
+    let hangs = format!(
+        "--TEST--\nNever ends\n--FILE--\n<?php file_put_contents({:?}, getmypid()); while (true) {{}}\n--EXPECT--\nnothing\n",
+        pid.display().to_string()
+    );
+    let echo = |n: u8| format!("--TEST--\nn{n}\n--FILE--\n<?php echo {n};\n--EXPECT--\n{n}\n");
+    fs::write(tree.join("a.phpt"), echo(1)).unwrap();
+    fs::write(tree.join("b.phpt"), hangs).unwrap();
+    fs::write(tree.join("c.phpt"), echo(3)).unwrap();
+    let binary = oracle().unwrap();
+    let mut manifest = manifest();
+    manifest.pin.recipe.limits.timeout_s = 1;
+    let oracle = manifest.pin.oracle();
+    let under = Under {
+        runner: &Runner::Engine(binary),
+        lane: None,
+        oracle_absent: None,
+    };
+    let tally = run_subset(&oracle, &registry(""), &subset, under).unwrap();
+    let went: Vec<(&str, Judgement)> = tally
+        .judged
+        .iter()
+        .map(|j| (j.name.as_str(), j.judgement))
+        .collect();
+    assert_eq!(
+        went,
+        [
+            ("a.phpt", Judgement::Pass),
+            ("b.phpt", Judgement::Fail),
+            ("c.phpt", Judgement::Pass),
+        ],
+        "{tally:#?}"
+    );
+    let note = &tally.judged[1].note;
+    assert!(note.contains("the recipe's limit of 1 s"), "{note}");
+    assert_eq!(tally.against(), ["b.phpt"]);
+    // The process the test ran is gone: `kill -0` finds no process by
+    // that number, which it would for one still running or one killed and
+    // never reaped.
+    let pid = fs::read_to_string(&pid).unwrap();
+    let alive = std::process::Command::new("kill")
+        .args(["-0", pid.trim()])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(!alive.success(), "process {pid} is still there");
+}
+
+#[test]
 fn the_same_missed_expectation_is_diverged_under_an_accepted_row() {
     if oracle().is_none() {
         return;

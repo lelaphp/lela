@@ -20,7 +20,9 @@ use super::file::Phpt;
 use super::{Judged, Judgement, Lane, Subset};
 use crate::divergence::Registry;
 use crate::oracle::expect::Expectation;
-use crate::oracle::{self, Invocation, Observation, Oracle, Pin, Program, Verdict as Compared};
+use crate::oracle::{
+    self, Invocation, Observation, Oracle, PastLimit, Pin, Program, Verdict as Compared,
+};
 
 /// The fresh-process adapter of design §8's `ScriptExec` seam, bound to
 /// one run: the oracle and the registry, the binary it runs, the tier lane
@@ -87,7 +89,7 @@ impl<'a> Adapter<'a> {
 
         let actual = match self.run_program(&phpt, test, &ini)? {
             Ok(actual) => actual,
-            Err(borked) => return Ok(Judged::new(&id, &name, Judgement::Bork, borked)),
+            Err((judgement, why)) => return Ok(Judged::new(&id, &name, judgement, why)),
         };
         if let Some(construct) = unread(&actual) {
             return Ok(Judged::new(&id, &name, Judgement::Unread, construct));
@@ -134,19 +136,29 @@ impl<'a> Adapter<'a> {
     /// The test's program, written where upstream writes it, run through
     /// the binary under test with the sections that shape one run, and
     /// taken away after; then `CLEAN`, which takes away what the test
-    /// left. A file already standing where the program goes borks the
-    /// test rather than being overwritten.
+    /// left. What it wrote, or the verdict it came to without an
+    /// expectation to hold it to: a file already standing where the
+    /// program goes borks the test rather than being overwritten, and a
+    /// program still running at the recipe's limit fails it, since a hang
+    /// is the engine's failure on this test as a wrong answer is and not
+    /// the end of the lane (#691). Upstream's limit is the same 60 s
+    /// (run-tests.php:1187), and past it upstream kills the process and
+    /// holds what it wrote, with its `** ERROR: process timed out **`
+    /// line, to the expectation, which fails (run-tests.php:1205-1209).
     fn run_program(
         &self,
         phpt: &Phpt,
         test: &Path,
         ini: &[String],
-    ) -> Result<Result<Vec<u8>, String>> {
+    ) -> Result<Result<Vec<u8>, (Judgement, String)>> {
         let program = test.with_extension("php");
         if program.exists() {
-            return Ok(Err(format!(
-                "a file already stands where the test's program goes, {}",
-                program.display()
+            return Ok(Err((
+                Judgement::Bork,
+                format!(
+                    "a file already stands where the test's program goes, {}",
+                    program.display()
+                ),
             )));
         }
         let body = phpt.section("FILE").unwrap_or_default().to_vec();
@@ -154,22 +166,26 @@ impl<'a> Adapter<'a> {
         let args = words(&phpt.text("ARGS").unwrap_or_default());
         let mut env = executable(self.binary);
         env.extend(env_of(phpt, test));
-        let output = self
-            .oracle
-            .run_under(&Invocation {
-                ini,
-                args: &args,
-                env: &env,
-                stdin: phpt.section("STDIN"),
-                merge_streams: merges_streams(phpt),
-                ..Invocation::new(self.binary, Program::File(&program))
-            })
-            .with_context(|| format!("running {}", test.display()))?;
+        let ran = self.oracle.run_under(&Invocation {
+            ini,
+            args: &args,
+            env: &env,
+            stdin: phpt.section("STDIN"),
+            merge_streams: merges_streams(phpt),
+            ..Invocation::new(self.binary, Program::File(&program))
+        });
         drop(written);
+        let output = match ran {
+            Ok(output) => Ok(output.stdout),
+            Err(e) => match e.downcast_ref::<PastLimit>() {
+                Some(past) => Err((Judgement::Fail, past.to_string())),
+                None => return Err(e.context(format!("running {}", test.display()))),
+            },
+        };
         if let Some(body) = phpt.filled("CLEAN") {
             self.run_section(test, "clean", body)?;
         }
-        Ok(Ok(output.stdout))
+        Ok(output)
     }
 
     /// A section that runs beside the test rather than as it: `SKIPIF`,
