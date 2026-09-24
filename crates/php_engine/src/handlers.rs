@@ -5329,6 +5329,14 @@ fn class_operand(
         return Ok(class);
     }
     let written = exec::constant(code, ConstIdx(at));
+    if let Some(class) =
+        crate::api::call::autoload(req, written.as_str_bytes().unwrap_or_default())?
+    {
+        if let Some(slot) = slot {
+            req.prime(frame, slot, Cached::Class(class));
+        }
+        return Ok(class);
+    }
     Err(crate::api::raising::throw(
         req,
         "Error",

@@ -55,6 +55,29 @@ pub(crate) fn classes(text: &str, entries: &[(&str, Entry)]) -> Vec<Declared> {
     out
 }
 
+/// A function's declaration read off one stub line, for the natives of
+/// `php_spl.stub.php`.
+///
+/// ```php
+/// $f = new ReflectionFunction("spl_autoload_register");
+/// foreach ($f->getParameters() as $p) echo $p, "\n";
+/// echo $f->getReturnType(), " ", (new ReflectionFunction("iterator_to_array"))->getNumberOfRequiredParameters(), "\n";
+/// ```
+/// ```expect
+/// Parameter #0 [ <optional> ?callable $callback = null ]
+/// Parameter #1 [ <optional> bool $throw = true ]
+/// Parameter #2 [ <optional> bool $prepend = false ]
+/// bool 1
+/// ```
+pub(crate) fn function(line: &str) -> FunctionDecl {
+    let mut reader = Reader {
+        bytes: line.as_bytes(),
+        at: 0,
+    };
+    let name = reader.word();
+    reader.signature(name)
+}
+
 /// The cursor over a stub's text.
 struct Reader<'a> {
     bytes: &'a [u8],

@@ -517,11 +517,76 @@ pub fn lookup_function(req: &Request, name: &[u8]) -> Option<Function> {
     req.function_named(name)
 }
 
-/// Serve the autoloaders for `name`, `zend_lookup_class` after the table miss.
+/// Serve the autoloaders for `name`, `zend_lookup_class_ex` after the
+/// table miss (`Z/Zend/zend_execute_API.c:1228`) over
+/// `spl_perform_autoload` (`Z/ext/spl/php_spl.c:414`): a name that is
+/// no valid class name, or one an autoloader is already loading
+/// (`EG(in_autoload)`), loads nothing; otherwise each callable of the
+/// stack `spl_autoload_register` built is served with the name as it
+/// was written, a leading `\` dropped, until the table has the class,
+/// one throws, or none is left. The stack is read afresh at each
+/// step, so a loader registered or removed by a loader counts as php's
+/// walk of the live table counts it.
+///
+/// ```php
+/// class Real { const LOADED = 'yes'; }
+/// spl_autoload_register(function ($class) {
+///     echo "first: $class\n";
+/// });
+/// spl_autoload_register(function ($class) {
+///     echo "second: $class\n";
+///     if ($class === 'Late') { class_alias('Real', $class); }
+/// });
+/// echo \Late::LOADED, "\n";
+/// var_dump(class_exists('late'), class_exists('Never', false));
+/// new Missing;
+/// ```
+/// ```expect exit=255
+/// first: Late
+/// second: Late
+/// yes
+/// bool(true)
+/// bool(false)
+/// first: Missing
+/// second: Missing
+///
+/// Fatal error: Uncaught Error: Class "Missing" not found in %s:12
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 12
+/// ```
 pub fn autoload(req: &mut Request, name: &[u8]) -> Result<Option<ClassId>, Thrown> {
-    let _ = name;
-    let _ = req;
-    Ok(None)
+    let bare = name.strip_prefix(b"\\").unwrap_or(name);
+    let valid = !bare.is_empty()
+        && bare
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'\\' || *b >= 0x80);
+    if !valid {
+        return Ok(None);
+    }
+    if let Some(class) = req.class_named(bare) {
+        return Ok(Some(class));
+    }
+    let lowered = bare.to_ascii_lowercase();
+    if !req.autoload_enter(&lowered) {
+        return Ok(None);
+    }
+    let served = (|| {
+        let mut at = 0;
+        while let Some(loader) = req.autoloader(at) {
+            let class = crate::api::values::PhpString::new(req, bare)?;
+            let returned = call(req, &loader, &[Value::string(class)]);
+            req.release(Value::string(class));
+            req.release(returned?);
+            if let Some(class) = req.class_named(bare) {
+                return Ok(Some(class));
+            }
+            at += 1;
+        }
+        Ok(None)
+    })();
+    req.autoload_leave(&lowered);
+    served
 }
 
 /// A constant by the key the table holds it under, `zend_get_constant`:
