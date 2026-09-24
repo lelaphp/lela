@@ -379,8 +379,10 @@ fn object(req: &mut Request, position: u32, class: Option<&str>) -> Result<PhpOb
     let v = value(req, position);
     let ty = class.map_or(Type::Object, |c| Type::Named(Name(c.as_bytes().into())));
     let coerced = coerce_param(req, &v, &ty, position)?;
-    if let Some(o) = coerced.as_object() {
-        return Ok(*o);
+    if let Some(o) = coerced.as_object().copied()
+        && class.is_none_or(|c| is_a(req, o.class(), c.as_bytes()))
+    {
+        return Ok(o);
     }
     let name = value_name(req, &v);
     let wanted = class.unwrap_or("object");

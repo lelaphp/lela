@@ -1139,6 +1139,7 @@ const CIT_FLAGS_MESSAGE: &str = "contain only one of CachingIterator::CALL_TOSTR
 /// foreach ($full as $v) {}
 /// var_dump($full->getCache(), count($full), $full['x'], isset($full['z']));
 /// try { $it['a']; } catch (BadMethodCallException $e) { echo $e->getMessage(), "\n"; }
+/// try { new CachingIterator(new ArrayObject([])); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
 /// ```
 /// ```expect
 /// a,b,c
@@ -1153,6 +1154,7 @@ const CIT_FLAGS_MESSAGE: &str = "contain only one of CachingIterator::CALL_TOSTR
 /// int(1)
 /// bool(false)
 /// CachingIterator does not use a full cache (see CachingIterator::__construct)
+/// CachingIterator::__construct(): Argument #1 ($iterator) must be of type Iterator, ArrayObject given
 /// ```
 fn caching_construct(req: &mut Request) -> Result<Value, Thrown> {
     caching_construct_as(req, Kind::Caching, "CachingIterator", "Iterator")
