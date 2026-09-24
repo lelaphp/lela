@@ -70,6 +70,7 @@ mod metaphone;
 mod microtime;
 mod output;
 mod pack;
+mod pageinfo;
 mod password;
 mod quot_print;
 mod scanf;
@@ -111,6 +112,7 @@ struct State {
     uniqid: uniqid::State,
     hrtime: hrtime::State,
     contexts: streamsfuncs::Contexts,
+    page: Option<pageinfo::Page>,
 }
 
 /// The extension value (design §7.1): declarations paired with entries,
@@ -251,6 +253,7 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
         crypt::natives(),
         password::natives(),
         assert::natives(),
+        pageinfo::natives(),
     ]
     .into_iter()
     .flatten()
