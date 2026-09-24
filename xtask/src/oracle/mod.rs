@@ -923,7 +923,8 @@ fn renumber(haystack: &[u8], token: &[u8]) -> Vec<u8> {
 }
 
 /// Where a program runs: its directory and the path it is run by, and a
-/// directory of this run's own for the streams, removed on drop. The
+/// directory of this run's own for the streams, removed on drop, which a
+/// snippet's directory stands inside and never is. The
 /// linked adapter holds one too, so a snippet stands as a file under
 /// both adapters.
 pub(crate) struct Scratch {
@@ -936,11 +937,16 @@ impl Scratch {
     pub(crate) fn for_program(recipe: &Recipe, program: Program<'_>) -> Result<Scratch> {
         let own = Tree::new("oracle")?;
         let (dir, script) = match program {
+            // The snippet stands alone in a directory under the run's, so
+            // a program that lists or reads its own directory finds its
+            // own file there and never the streams captured beside it.
             Program::Snippet(code) => {
+                let dir = own.join("program");
+                fs::create_dir(&dir).context("making the snippet's directory")?;
                 let script = PathBuf::from(&recipe.script_name);
-                fs::write(own.join(&script), format!("{}{code}", recipe.preamble))
+                fs::write(dir.join(&script), format!("{}{code}", recipe.preamble))
                     .with_context(|| format!("writing {}", recipe.script_name))?;
-                (own.path().to_path_buf(), script)
+                (dir, script)
             }
             Program::File(path) => (dir_of(path), run_by(path)?),
         };
