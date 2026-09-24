@@ -516,6 +516,17 @@ pub(crate) enum Aside {
     Stderr(Vec<u8>),
 }
 
+/// A write a debug build stopped: the opline whose `TMP` it was, the
+/// opcode serving it, the temporary's number and what the slot held.
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone, Copy)]
+struct DirtyTemporary {
+    opline: u32,
+    opcode: Opcode,
+    number: u32,
+    held: php_heap::ZvalType,
+}
+
 /// One request (design §5.14): `Send`, single-threaded, dropped at the
 /// end of `serve`. Everything a native may touch is a method here or on
 /// a value it hands out.
@@ -700,6 +711,11 @@ pub struct Request {
     /// (`zend_call_stack_init`) from the two `zend.*_stack_size`
     /// entries; what the compiler is held to (design §5.6).
     stack_limit: StackLimit,
+    /// A debug build's record of the first write of a `TMP` it found
+    /// over a slot that still held an owner, until the loop takes it
+    /// ([`Request::take_sensed`]).
+    #[cfg(debug_assertions)]
+    dirty: Option<DirtyTemporary>,
     /// The classes the units this request served declared, each the
     /// unit that holds it and the index of its declaration, in the
     /// order declared: php's `EG(class_table)` past what the engine
@@ -959,6 +975,8 @@ impl Request {
             aliases: Vec::new(),
             sapi_constant: Value::null(),
             user_functions: Vec::new(),
+            #[cfg(debug_assertions)]
+            dirty: None,
         };
         if let Some(name) = req
             .shared
@@ -1303,6 +1321,18 @@ impl Request {
     /// `value` into a slot, the slot owning it from here, and what the
     /// slot held handed back for the caller to release; a slot past the
     /// end takes nothing and hands `value` back.
+    ///
+    /// php writes an opline's `TMP` with `ZVAL_COPY_VALUE` and never
+    /// releases what stood there, because a live temporary is never
+    /// written over: the handler that reads one frees it or moves it out.
+    /// Here the write hands the old value back to be released, so a `TMP`
+    /// whose owner a handler moved without emptying the slot is released
+    /// a second time by the next write (#723). A debug build stops that
+    /// write: the `TMP` the opline the frame stands at writes, found
+    /// holding an owner, is recorded for [`Request::take_sensed`]. A
+    /// scalar left there is no owner and no second release, and php
+    /// writes over one itself: `JMPZ_EX` and `JMPNZ_EX` write the `TMP`
+    /// the `BOOL` after them writes again.
     pub(crate) fn set_slot(&mut self, frame: FrameRef, at: u32, value: Value) -> Value {
         let Some(f) = self
             .stack
@@ -1313,7 +1343,67 @@ impl Request {
         };
         let old = f.slot(Slot(at));
         f.set(Slot(at), value.to_zval());
+        #[cfg(debug_assertions)]
+        if old.is_refcounted() {
+            self.sense_dirty_temporary(frame, at, old.kind());
+        }
         Value::of_zval(old)
+    }
+
+    /// A debug build's question at a write over a slot that held an
+    /// owner of a `held`: whether the slot is the `TMP` of the opline
+    /// `frame` stands at, which the handler that read it last should
+    /// have left empty. The first such write is recorded.
+    #[cfg(debug_assertions)]
+    fn sense_dirty_temporary(&mut self, frame: FrameRef, at: u32, held: php_heap::ZvalType) {
+        if self.dirty.is_some() {
+            return;
+        }
+        let opline = self.vm.opline(frame);
+        let Some(serving) = self.vm.serving(frame) else {
+            return;
+        };
+        let Some(op) = serving
+            .code()
+            .and_then(|code| exec::opline_at(code, opline).map(|op| (code, *op)))
+        else {
+            return;
+        };
+        let (code, op) = op;
+        let its_own = match op.out_type {
+            php_unit::OperandKind::Tmp => exec::temporary_slot(code, op.out) == at,
+            php_unit::OperandKind::Var
+            | php_unit::OperandKind::Cv
+            | php_unit::OperandKind::Const
+            | php_unit::OperandKind::Unused => false,
+        };
+        if its_own {
+            self.dirty = Some(DirtyTemporary {
+                opline,
+                opcode: op.opcode,
+                number: op.out,
+                held,
+            });
+        }
+    }
+
+    /// What a debug build's two sensors found since the loop last asked
+    /// (design §10, #761): a `TMP` written over an owner it still held,
+    /// or a refcount operation on a block the heap had freed, as the
+    /// `InternalError` fatal that ends the request; the first of them,
+    /// and taken. The loop asks after every handler.
+    #[cfg(debug_assertions)]
+    pub(crate) fn take_sensed(&mut self) -> Option<Fatal> {
+        let dirty = self.dirty.take().map(|dirty| {
+            Fatal::Error(format!(
+                "InternalError: {} at opline {} writes its TMP #{} over an owner it still holds ({:?}): the handler that last read the slot moved it out and did not empty it",
+                dirty.opcode.name(),
+                dirty.opline,
+                dirty.number,
+                dirty.held,
+            ))
+        });
+        dirty.or_else(|| self.heap.take_freed_use())
     }
 
     /// The zval in a slot of `frame` in place, php's `EX_VAR(var)`
@@ -10150,6 +10240,7 @@ impl Request {
     /// as its value, `RETURN_COPY` and `RETURN_STR_COPY`: the frame gives
     /// its owner up with the call, and the caller's temporary holds the
     /// one taken here.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn addref(&self, value: &Value) {
         self.heap.addref(value.to_zval());
     }
@@ -10166,6 +10257,7 @@ impl Request {
     // `Value` that is still in hand after this call names what may be
     // freed.
     #[allow(clippy::needless_pass_by_value)]
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn release(&mut self, value: Value) {
         Heap::release(&mut Hooks(self), value.to_zval());
     }

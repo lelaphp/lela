@@ -13799,4 +13799,56 @@ mod tests {
             req.release(object.as_value());
         }
     }
+
+    /// A debug build stops at a write of a `TMP` over an owner the slot
+    /// still holds, #723's shape planted: a string left in the `TMP` a
+    /// `QM_ASSIGN` writes, as `FE_RESET_R` left its subject before #723,
+    /// is the `InternalError` naming the opcode, the opline and the
+    /// temporary, raised by the loop after the handler and before the
+    /// next one, and not a second release several allocations later.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn a_write_over_a_temporary_that_still_holds_a_value_is_an_internal_error() {
+        let engine = Engine::builder().build();
+        let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+        let unit = Arc::new(Unit {
+            main: OpArray {
+                oplines: vec![Opline {
+                    opcode: Opcode::QmAssign,
+                    op1_type: OperandKind::Const,
+                    op1: 0,
+                    out_type: OperandKind::Tmp,
+                    out: 0,
+                    ..Opline::default()
+                }]
+                .into_boxed_slice(),
+                literals: vec![php_heap::Zval::long(7)].into_boxed_slice(),
+                num_tmps: 1,
+                ..OpArray::default()
+            },
+            ..Unit::default()
+        });
+        let frame = req.pushed(Arc::clone(&unit));
+        let Ok(left) = crate::api::values::PhpString::new(&mut req, b"an owner left behind") else {
+            return;
+        };
+        let planted = req.set_slot(frame, 0, Value::string(left));
+        assert!(
+            planted.to_zval().is_undef(),
+            "the slot was empty before the plant"
+        );
+
+        assert_eq!(
+            crate::tier::step(&mut req, frame),
+            Err(Fatal::Error(String::from(
+                "InternalError: ZEND_QM_ASSIGN at opline 0 writes its TMP #0 over an owner it still holds (String): the handler that last read the slot moved it out and did not empty it"
+            )))
+        );
+        assert_eq!(
+            req.slot(frame, 0).as_int(),
+            Some(7),
+            "the write itself stood"
+        );
+        req.pop_frame();
+    }
 }

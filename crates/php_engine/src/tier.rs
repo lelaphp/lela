@@ -252,6 +252,10 @@ fn serve<T: Tier>(req: &mut Request, entry: FrameRef, unhandled: Unhandled) -> R
         let code = code_of(&serving, frame)?;
         let op = *at_opline(req, frame, code)?;
         stepped = dispatch::dispatch::<T>(req, frame, code, &op)?;
+        #[cfg(debug_assertions)]
+        if let Some(sensed) = req.take_sensed() {
+            return Err(sensed);
+        }
     }
 }
 
@@ -278,7 +282,12 @@ pub fn step(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
     let serving = standing(req, frame)?;
     let code = code_of(&serving, frame)?;
     let op = *at_opline(req, frame, code)?;
-    dispatch::dispatch::<Nop>(req, frame, code, &op)
+    let stepped = dispatch::dispatch::<Nop>(req, frame, code, &op)?;
+    #[cfg(debug_assertions)]
+    if let Some(sensed) = req.take_sensed() {
+        return Err(sensed);
+    }
+    Ok(stepped)
 }
 
 /// What `frame` is serving, held by its own share of the unit so the
