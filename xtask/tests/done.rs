@@ -1103,25 +1103,25 @@ fn the_stop_hook_runs_done_with_hook() {
     );
 }
 
-/// CI's test job holds the function-hook module to the committed
-/// declarations (harness-design.md §1 revision 8, §6; #62): `tsc -p
-/// harness-plugins` reads `harness-plugins/types`, the tracked file the
-/// committer's Claude Code rewrites at pre-commit, before the crate's
-/// tests; no Claude Code is installed on the runner and nothing writes
+/// CI's per-commit job, where the harness's own tests run, holds the
+/// function-hook module to the committed declarations (harness-design.md
+/// §1 revision 8, §6; #62): `tsc -p harness-plugins` reads
+/// `harness-plugins/types`, the tracked file the committer's Claude Code
+/// rewrites at pre-commit, before the crates' tests; no Claude Code is installed on the runner and nothing writes
 /// the declarations there. The comments are stripped first, so a step
 /// named in prose does not stand in for the step, and a step that left
 /// is not found in prose either.
 #[test]
-fn ci_test_job_typechecks_the_module_against_the_committed_declarations() {
+fn ci_typechecks_the_module_against_the_committed_declarations_before_the_tests() {
     let text = read(".github/workflows/harness.yml");
-    let job = &text[text.find("\n  xtask:").unwrap()..text.find("\n  per-commit:").unwrap()];
+    let job = &text[text.find("\n  per-commit:").unwrap()..];
     let steps = job
         .lines()
         .filter(|l| !l.trim_start().starts_with('#'))
         .collect::<Vec<_>>()
         .join("\n");
     let mut last = 0;
-    for step in ["tsc -p harness-plugins", "run: cargo test -p xtask"] {
+    for step in ["tsc -p harness-plugins", "run: cargo xtask test"] {
         let at = steps
             .find(step)
             .unwrap_or_else(|| panic!("the test job lacks {step}: {steps}"));
