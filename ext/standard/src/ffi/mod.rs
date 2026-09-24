@@ -155,3 +155,15 @@ pub(super) fn utime(path: &Path, times: Option<(i64, i64)>) -> std::io::Result<(
         Err(std::io::Error::last_os_error())
     }
 }
+
+/// `fnmatch(pattern, string, flags) == 0`, the host's `fnmatch(3)`,
+/// which `fnmatch()` calls as it is; a NUL inside either is refused by
+/// `Z_PARAM_PATH` before it gets here.
+pub(super) fn fnmatch(pattern: &[u8], string: &[u8], flags: i32) -> bool {
+    let (Ok(pattern), Ok(string)) = (CString::new(pattern), CString::new(string)) else {
+        return false;
+    };
+    // SAFETY: both are NUL-terminated strings that outlive the call,
+    // which reads them and nothing else.
+    unsafe { libc::fnmatch(pattern.as_ptr(), string.as_ptr(), flags) == 0 }
+}
