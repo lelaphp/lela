@@ -424,7 +424,7 @@ impl Shared {
 /// table and empty here, since an entry with no value at all is one
 /// `ini_set()` refuses to set. `short_open_tag` is the one entry the
 /// scanner reads, `CG(short_tags)`, and `token_get_all` with it.
-const CORE_INI: [(&str, &str); 23] = [
+const CORE_INI: [(&str, &str); 35] = [
     ("short_open_tag", "1"),
     ("fatal_error_backtraces", "1"),
     ("precision", "14"),
@@ -452,6 +452,22 @@ const CORE_INI: [(&str, &str); 23] = [
     // `fiber.stack_size`, `NULL` in php's table, which `ini_get` reads
     // as the empty string and `OnUpdateFiberStackSize` as php's default.
     ("fiber.stack_size", ""),
+    // `main.c`'s entries for `mail()` and `php_syslog`, and
+    // `sys_temp_dir`, `PHP_INI_SYSTEM` or `PHP_INI_SYSTEM|PHP_INI_PERDIR`
+    // but `SMTP`, `smtp_port` and `syslog.filter`; a `NULL` default is
+    // empty here, as the two error strings above are.
+    ("sys_temp_dir", ""),
+    ("SMTP", "localhost"),
+    ("smtp_port", "25"),
+    ("mail.add_x_header", "0"),
+    ("mail.mixed_lf_and_crlf", "0"),
+    ("mail.cr_lf_mode", "crlf"),
+    ("mail.log", ""),
+    ("sendmail_path", "/usr/sbin/sendmail -t -i"),
+    ("mail.force_extra_parameters", ""),
+    ("syslog.facility", "LOG_USER"),
+    ("syslog.ident", "php"),
+    ("syslog.filter", "no-ctrl"),
 ];
 
 /// A host's ini value as the ini scanner hands it to the table

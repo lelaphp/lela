@@ -213,7 +213,7 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
 
 /// `strerror(errno)`: the text Rust's error carries before its own
 /// ` (os error N)`.
-fn strerror(error: &std::io::Error) -> String {
+pub(super) fn strerror(error: &std::io::Error) -> String {
     let text = error.to_string();
     text.split_once(" (os error")
         .map_or(text.clone(), |(text, _)| text.to_owned())

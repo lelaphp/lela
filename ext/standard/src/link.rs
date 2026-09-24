@@ -1,0 +1,279 @@
+//! `Z/ext/standard/link.c`: `readlink`, `linkinfo`, `symlink` and
+//! `link`, each a system call over a path the program wrote, with
+//! `strerror(errno)` as the warning where it failed. The two that make
+//! a link expand their paths first with `expand_filepath`
+//! (`crate::virtual_cwd`), which resolves a link that is already there,
+//! so `symlink` onto an existing link makes the link at what it points
+//! to, as php's does. php's `Unable to symlink to a URL` refusal reads the
+//! expanded path, which on this host always begins with `/` and so never
+//! names a wrapper; it is left out.
+// The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
+#![allow(rustdoc::invalid_codeblock_attributes)]
+
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
+use std::path::Path;
+
+use php_ext::decl::FunctionDecl;
+use php_ext::raising::{Level, Thrown, docref};
+use php_ext::request::Request;
+use php_ext::values::{PhpString, Value};
+
+use crate::argument_count_between;
+use crate::filestat::strerror;
+use crate::md5::path_argument;
+use crate::output::Entry;
+use crate::string::path::zend_dirname;
+use crate::stub::stub;
+use crate::virtual_cwd::{MAXPATHLEN, expand_filepath};
+
+/// The four, as the stub declares them.
+///
+/// ```php
+/// echo new ReflectionFunction('readlink'), new ReflectionFunction('linkinfo'), new ReflectionFunction('symlink'), new ReflectionFunction('link');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function readlink ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <required> string $path ]
+///   }
+///   - Return [ string|false ]
+/// }
+/// Function [ <internal:standard> function linkinfo ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <required> string $path ]
+///   }
+///   - Return [ int|false ]
+/// }
+/// Function [ <internal:standard> function symlink ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> string $target ]
+///     Parameter #1 [ <required> string $link ]
+///   }
+///   - Return [ bool ]
+/// }
+/// Function [ <internal:standard> function link ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> string $target ]
+///     Parameter #1 [ <required> string $link ]
+///   }
+///   - Return [ bool ]
+/// }
+/// ```
+pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
+    vec![
+        (
+            stub("readlink(string $path): string|false"),
+            readlink as Entry,
+        ),
+        (stub("linkinfo(string $path): int|false"), linkinfo),
+        (stub("symlink(string $target, string $link): bool"), symlink),
+        (stub("link(string $target, string $link): bool"), link),
+    ]
+}
+
+fn host(bytes: &[u8]) -> &Path {
+    Path::new(OsStr::from_bytes(bytes))
+}
+
+/// The path a system call is handed for what the program wrote: against
+/// the request's working directory, the empty path left empty so the
+/// call answers `ENOENT`.
+fn plain(req: &Request, path: &[u8]) -> Vec<u8> {
+    if path.is_empty() {
+        return Vec::new();
+    }
+    req.absolutize(path).0.as_os_str().as_bytes().to_vec()
+}
+
+/// The request's working directory as bytes, what `VCWD_GETCWD` gives
+/// `expand_filepath`.
+fn cwd(req: &Request) -> Vec<u8> {
+    req.cwd().0.as_os_str().as_bytes().to_vec()
+}
+
+/// `php_error_docref(NULL, E_WARNING, "%s", strerror(errno))`.
+fn failed(req: &mut Request, error: &std::io::Error) -> Value {
+    docref(req, Level::Warning, &strerror(error));
+    Value::bool(false)
+}
+
+/// `readlink(string $path): string|false`, `PHP_FUNCTION(readlink)`
+/// (`Z/ext/standard/link.c:45`): `readlink(2)` of the path, at most
+/// `MAXPATHLEN - 1` bytes of what the link holds, and `strerror(errno)`
+/// where it failed, which for a file that is no link is `EINVAL`'s.
+///
+/// ```php
+/// $d = __DIR__ . '/readlink-d'; @mkdir($d); chdir($d);
+/// symlink('there', 'l'); file_put_contents('f', 'x');
+/// var_dump(readlink('l'), readlink("$d/l"), readlink('f'), readlink('nope'), readlink(''));
+/// unlink('l'); unlink('f'); chdir('/'); rmdir($d);
+/// try { readlink("a\0b"); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Warning: readlink(): Invalid argument in %s on line 4
+///
+/// Warning: readlink(): No such file or directory in %s on line 4
+///
+/// Warning: readlink(): No such file or directory in %s on line 4
+/// string(5) "there"
+/// string(5) "there"
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// readlink(): Argument #1 ($path) must not contain any null bytes
+/// ```
+fn readlink(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 1, 1)?;
+    let link = path_argument(req, 1)?;
+    let path = plain(req, link.as_bytes());
+    match std::fs::read_link(host(&path)) {
+        Ok(target) => {
+            let target = target.as_os_str().as_bytes();
+            let target = target.get(..MAXPATHLEN - 1).unwrap_or(target);
+            Ok(Value::string(PhpString::new(req, target)?))
+        }
+        Err(error) => Ok(failed(req, &error)),
+    }
+}
+
+/// `linkinfo(string $path): int|false`, `PHP_FUNCTION(linkinfo)`
+/// (`Z/ext/standard/link.c:80`): `lstat(2)`'s `st_dev` for the path,
+/// and `-1` after `strerror(errno)` where it failed; php answers `-1`
+/// and never `false`.
+///
+/// ```php
+/// $d = __DIR__ . '/linkinfo-d'; @mkdir($d); chdir($d);
+/// symlink('nowhere', 'l');
+/// var_dump(linkinfo('l') === lstat('l')['dev'], linkinfo('l') > 0, linkinfo('nope'), linkinfo(''));
+/// unlink('l'); chdir('/'); rmdir($d);
+/// ```
+/// ```expect
+/// Warning: linkinfo(): No such file or directory in %s on line 4
+///
+/// Warning: linkinfo(): No such file or directory in %s on line 4
+/// bool(true)
+/// bool(true)
+/// int(-1)
+/// int(-1)
+/// ```
+fn linkinfo(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 1, 1)?;
+    let link = path_argument(req, 1)?;
+    let path = plain(req, link.as_bytes());
+    match std::fs::symlink_metadata(host(&path)) {
+        Ok(meta) => Ok(Value::int(i64::try_from(meta.dev()).unwrap_or(i64::MAX))),
+        Err(error) => {
+            docref(req, Level::Warning, &strerror(&error));
+            Ok(Value::int(-1))
+        }
+    }
+}
+
+/// `symlink(string $target, string $link): bool`,
+/// `PHP_FUNCTION(symlink)` (`Z/ext/standard/link.c:111`): the link's
+/// path expanded against the working directory and the target's against
+/// the link's directory, either failing as `No such file or directory`,
+/// then `symlink(2)` with the target exactly as written, since a
+/// relative target is relative to the link and not to the working
+/// directory, and `strerror(errno)` where it failed. The link's path is
+/// expanded with its links resolved, so a second `symlink` onto the same
+/// name makes the link the first one points at.
+///
+/// ```php
+/// $d = __DIR__ . '/symlink-d'; @mkdir($d); chdir($d);
+/// var_dump(symlink('t.txt', 'l'), readlink('l'), is_link('l'), symlink('t.txt', 'sub/../m'), readlink('m'));
+/// var_dump(symlink('x', 'nodir/l'), symlink('', 'l2'), symlink('x', ''), symlink('t.txt', 'l'), is_link('t.txt'), readlink('t.txt'));
+/// foreach (['l', 'm', 't.txt'] as $f) unlink($f); chdir('/'); rmdir($d);
+/// ```
+/// ```expect
+/// bool(true)
+/// string(5) "t.txt"
+/// bool(true)
+/// bool(true)
+/// string(5) "t.txt"
+///
+/// Warning: symlink(): No such file or directory in %s on line 4
+///
+/// Warning: symlink(): No such file or directory in %s on line 4
+///
+/// Warning: symlink(): No such file or directory in %s on line 4
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// string(5) "t.txt"
+/// ```
+fn symlink(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 2, 2)?;
+    let target = path_argument(req, 1)?;
+    let link = path_argument(req, 2)?;
+    let Some(source) = expand_filepath(link.as_bytes(), &cwd(req)) else {
+        return Ok(no_such_file(req));
+    };
+    let dirname = zend_dirname(&source);
+    if expand_filepath(target.as_bytes(), &dirname).is_none() {
+        return Ok(no_such_file(req));
+    }
+    match std::os::unix::fs::symlink(host(target.as_bytes()), host(&source)) {
+        Ok(()) => Ok(Value::bool(true)),
+        Err(error) => Ok(failed(req, &error)),
+    }
+}
+
+/// `link(string $target, string $link): bool`, `PHP_FUNCTION(link)`
+/// (`Z/ext/standard/link.c:171`): both paths expanded against the
+/// working directory, either failing as `No such file or directory`,
+/// then `link(2)` over the two expanded paths, as php's ZTS build calls
+/// it, and `strerror(errno)` where it failed.
+///
+/// ```php
+/// $d = __DIR__ . '/link-d'; @mkdir($d); chdir($d);
+/// file_put_contents('t', 'x');
+/// var_dump(link('t', 'h'), file_get_contents('h'), stat('t')['nlink'], link('t', 'h'), link('nope', 'h2'), link('', 'h3'), link('t', ''));
+/// foreach (['t', 'h'] as $f) unlink($f); chdir('/'); rmdir($d);
+/// ```
+/// ```expect
+/// Warning: link(): File exists in %s on line 4
+///
+/// Warning: link(): No such file or directory in %s on line 4
+///
+/// Warning: link(): No such file or directory in %s on line 4
+///
+/// Warning: link(): No such file or directory in %s on line 4
+/// bool(true)
+/// string(1) "x"
+/// int(2)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// ```
+fn link(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 2, 2)?;
+    let target = path_argument(req, 1)?;
+    let link = path_argument(req, 2)?;
+    let cwd = cwd(req);
+    let (Some(source), Some(dest)) = (
+        expand_filepath(link.as_bytes(), &cwd),
+        expand_filepath(target.as_bytes(), &cwd),
+    ) else {
+        return Ok(no_such_file(req));
+    };
+    match std::fs::hard_link(host(&dest), host(&source)) {
+        Ok(()) => Ok(Value::bool(true)),
+        Err(error) => Ok(failed(req, &error)),
+    }
+}
+
+/// The warning php writes itself where a path does not expand.
+fn no_such_file(req: &mut Request) -> Value {
+    docref(req, Level::Warning, "No such file or directory");
+    Value::bool(false)
+}

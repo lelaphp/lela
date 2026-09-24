@@ -440,7 +440,7 @@ fn print_r(req: &mut Request) -> Result<Value, Thrown> {
 /// which is why the marker lands on the next line with one space before
 /// it. Without the guard a value that holds itself is unbounded
 /// recursion, which is a panic reaching a request (design §10).
-fn render(
+pub(super) fn render(
     req: &mut Request,
     out: &mut Vec<u8>,
     value: &Value,

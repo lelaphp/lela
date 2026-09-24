@@ -22,7 +22,15 @@ use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, t
 use php_ext::request::{Request, Stream, Whence, WrapperOp};
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
+use std::os::unix::ffi::OsStrExt;
+
 use crate::output::Entry;
+use crate::stub::stub;
+use crate::virtual_cwd::{MAXPATHLEN, Resolve, virtual_file_ex};
+use crate::zpp::{
+    array_argument, assign_ref, nullable_long, nullable_string, optional_bool, optional_long,
+    optional_string,
+};
 use crate::{
     State, argument_count_between, bool_argument, constant, declared, long_argument, parameter,
     string_argument,
@@ -55,7 +63,7 @@ const PHP_FILE_NO_DEFAULT_CONTEXT: i64 = 16;
 /// in its order, less the two 8.1 deprecated.
 ///
 /// ```php
-/// var_dump(SEEK_SET, SEEK_CUR, SEEK_END, LOCK_SH, LOCK_EX, LOCK_UN, LOCK_NB, FILE_USE_INCLUDE_PATH, FILE_IGNORE_NEW_LINES, FILE_SKIP_EMPTY_LINES, FILE_APPEND, FILE_NO_DEFAULT_CONTEXT);
+/// var_dump(SEEK_SET, SEEK_CUR, SEEK_END, LOCK_SH, LOCK_EX, LOCK_UN, LOCK_NB, FILE_USE_INCLUDE_PATH, FILE_IGNORE_NEW_LINES, FILE_SKIP_EMPTY_LINES, FILE_APPEND, FILE_NO_DEFAULT_CONTEXT, FNM_NOESCAPE, FNM_PATHNAME, FNM_PERIOD, FNM_CASEFOLD);
 /// ```
 /// ```expect
 /// int(0)
@@ -69,6 +77,10 @@ const PHP_FILE_NO_DEFAULT_CONTEXT: i64 = 16;
 /// int(2)
 /// int(4)
 /// int(8)
+/// int(16)
+/// int(1)
+/// int(2)
+/// int(4)
 /// int(16)
 /// ```
 pub(crate) fn constants() -> Vec<ConstDecl> {
@@ -85,6 +97,10 @@ pub(crate) fn constants() -> Vec<ConstDecl> {
         constant(b"FILE_SKIP_EMPTY_LINES", PHP_FILE_SKIP_EMPTY_LINES),
         constant(b"FILE_APPEND", PHP_FILE_APPEND),
         constant(b"FILE_NO_DEFAULT_CONTEXT", PHP_FILE_NO_DEFAULT_CONTEXT),
+        constant(b"FNM_NOESCAPE", FNM_NOESCAPE),
+        constant(b"FNM_PATHNAME", FNM_PATHNAME),
+        constant(b"FNM_PERIOD", FNM_PERIOD),
+        constant(b"FNM_CASEFOLD", FNM_CASEFOLD),
     ]
 }
 
@@ -191,6 +207,7 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
     ]);
     natives.extend(contents_natives());
     natives.extend(path_natives());
+    natives.extend(rest_natives());
     natives
 }
 
@@ -204,7 +221,7 @@ fn stream_parameter() -> Parameter {
 
 /// An untyped parameter defaulting to `null`, the stub's `$context` and
 /// `$dir_handle`.
-fn untyped_null(name: &[u8]) -> Parameter {
+pub(super) fn untyped_null(name: &[u8]) -> Parameter {
     Parameter {
         ty: None,
         default: Some(ConstExpr::Null),
@@ -431,7 +448,7 @@ fn dir_argument(req: &mut Request) -> Result<Stream, Thrown> {
 
 /// `php_set_default_dir` (`Z/ext/standard/dir.c:62`): the owner the last
 /// directory held given up, and one taken on the new one, or none.
-fn set_default_dir(req: &mut Request, stream: Option<Stream>) {
+pub(super) fn set_default_dir(req: &mut Request, stream: Option<Stream>) {
     let res = stream.map(Stream::resource);
     if let Some(res) = res {
         req.addref(&res.as_value());
@@ -1376,7 +1393,7 @@ fn fwrite(req: &mut Request) -> Result<Value, Thrown> {
 /// `Z_PARAM_RESOURCE_OR_NULL` for a `$context`: a resource or `null`,
 /// taken and not read, since no wrapper here reads a `$context`; anything
 /// else is the parser's `TypeError`.
-fn context_argument(req: &mut Request, position: u32) -> Result<(), Thrown> {
+pub(super) fn context_argument(req: &mut Request, position: u32) -> Result<(), Thrown> {
     let given = req.argument(position).unwrap_or_default().deref();
     match given.as_ref() {
         ValueRef::Null | ValueRef::Undef | ValueRef::Resource(_) => Ok(()),
@@ -1863,7 +1880,7 @@ fn has_to_string(req: &mut Request, object: PhpObject) -> Result<bool, Thrown> {
 ///   string(12) "php://output"
 /// }
 /// ```
-fn stream_get_meta_data(req: &mut Request) -> Result<Value, Thrown> {
+pub(super) fn stream_get_meta_data(req: &mut Request) -> Result<Value, Thrown> {
     argument_count_between(req, 1, 1)?;
     let stream = stream_argument(req, 1)?;
     Ok(Value::array(stream.meta_data(req)?))
@@ -2324,4 +2341,1021 @@ fn unlink(req: &mut Request) -> Result<Value, Thrown> {
     Ok(Value::bool(
         req.wrapper_op(filename.as_bytes(), WrapperOp::Unlink)?,
     ))
+}
+
+/// `FNM_NOESCAPE`, `FNM_PATHNAME`, `FNM_PERIOD` and `FNM_CASEFOLD` as
+/// this host's `<fnmatch.h>` has them, what `fnmatch`'s `$flags` hands
+/// `fnmatch(3)` unchanged.
+const FNM_NOESCAPE: i64 = 1;
+const FNM_PATHNAME: i64 = 2;
+const FNM_PERIOD: i64 = 4;
+const FNM_CASEFOLD: i64 = 16;
+
+/// `file(string $filename, int $flags = 0, $context = null): array|false`,
+/// `PHP_FUNCTION(file)` (`Z/ext/standard/file.c:581`): the file read
+/// whole and cut after each `\n`; under `FILE_IGNORE_NEW_LINES` the
+/// `\n` (and a `\r` before it) is dropped, and under
+/// `FILE_SKIP_EMPTY_LINES` as well a line that is then empty is too. A
+/// last line with no `\n` is kept as it is.
+///
+/// ```php
+/// $f = sys_get_temp_dir() . '/php-file-witness.txt';
+/// file_put_contents($f, "a\r\n\nb\nc");
+/// echo json_encode(file($f)), "\n", json_encode(file($f, FILE_IGNORE_NEW_LINES)), "\n", json_encode(file($f, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES)), "\n";
+/// file_put_contents($f, ""); var_dump(file($f));
+/// unlink($f);
+/// try { file($f, 64); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(@file($f));
+/// ```
+/// ```expect
+/// ["a\r\n","\n","b\n","c"]
+/// ["a","","b","c"]
+/// ["a","b","c"]
+/// array(0) {
+/// }
+/// file(): Argument #2 ($flags) must be a valid flag value
+/// bool(false)
+/// ```
+fn file(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 1, 3)?;
+    let filename = path_argument(req, 1)?;
+    let flags = if req.argument_count() >= 2 {
+        long_argument(req, 2)?
+    } else {
+        0
+    };
+    context_argument(req, 3)?;
+    let known = PHP_FILE_USE_INCLUDE_PATH
+        | PHP_FILE_IGNORE_NEW_LINES
+        | PHP_FILE_SKIP_EMPTY_LINES
+        | PHP_FILE_NO_DEFAULT_CONTEXT;
+    if flags & !known != 0 {
+        return Err(arg_value_error(req, 2, "be a valid flag value"));
+    }
+    let include_new_line = flags & PHP_FILE_IGNORE_NEW_LINES == 0;
+    let skip_blank_lines = flags & PHP_FILE_SKIP_EMPTY_LINES != 0;
+    let use_include_path = flags & PHP_FILE_USE_INCLUDE_PATH != 0;
+    let Some(stream) = req.open_stream(filename.as_bytes(), b"rb", use_include_path)? else {
+        return Ok(Value::bool(false));
+    };
+    let contents = stream.copy_to_mem(req, None)?;
+    stream.close(req);
+    let buf = contents.as_bytes().to_vec();
+    let mut lines: Vec<&[u8]> = Vec::new();
+    let mut s = 0;
+    for (p, _) in buf.iter().enumerate().filter(|(_, c)| **c == b'\n') {
+        if include_new_line {
+            lines.push(&buf[s..=p]);
+        } else {
+            let windows_eol = usize::from(p > 0 && buf[p - 1] == b'\r');
+            if skip_blank_lines && p - s == windows_eol {
+                s = p + 1;
+                continue;
+            }
+            lines.push(&buf[s..p - windows_eol]);
+        }
+        s = p + 1;
+    }
+    if s != buf.len() {
+        lines.push(&buf[s..]);
+    }
+    let mut array = PhpArray::new(req)?;
+    for line in lines {
+        let v = Value::string(PhpString::new(req, line)?);
+        array.append(req, v)?;
+    }
+    Ok(Value::array(array))
+}
+
+/// The rest of `file.c`'s natives, as the stub declares them. `popen`
+/// and `pclose` are not among them: a stream over a pipe to a process is
+/// a kind the streams facet does not hand an extension. The witness
+/// leaves out `fputcsv` and `fgetcsv`, whose defaults `"\""` and `"\\"`
+/// the engine's Reflection prints with their escapes undone.
+///
+/// ```php
+/// foreach (['flock', 'get_meta_tags', 'readfile', 'fscanf', 'fpassthru', 'fsync', 'fdatasync', 'realpath', 'fnmatch', 'sys_get_temp_dir'] as $f) echo new ReflectionFunction($f);
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function flock ] {
+///
+///   - Parameters [3] {
+///     Parameter #0 [ <required> $stream ]
+///     Parameter #1 [ <required> int $operation ]
+///     Parameter #2 [ <optional> &$would_block = null ]
+///   }
+///   - Return [ bool ]
+/// }
+/// Function [ <internal:standard> function get_meta_tags ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> string $filename ]
+///     Parameter #1 [ <optional> bool $use_include_path = false ]
+///   }
+///   - Return [ array|false ]
+/// }
+/// Function [ <internal:standard> function readfile ] {
+///
+///   - Parameters [3] {
+///     Parameter #0 [ <required> string $filename ]
+///     Parameter #1 [ <optional> bool $use_include_path = false ]
+///     Parameter #2 [ <optional> $context = null ]
+///   }
+///   - Return [ int|false ]
+/// }
+/// Function [ <internal:standard> function fscanf ] {
+///
+///   - Parameters [3] {
+///     Parameter #0 [ <required> $stream ]
+///     Parameter #1 [ <required> string $format ]
+///     Parameter #2 [ <optional> mixed &...$vars ]
+///   }
+///   - Return [ array|int|false|null ]
+/// }
+/// Function [ <internal:standard> function fpassthru ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <required> $stream ]
+///   }
+///   - Return [ int ]
+/// }
+/// Function [ <internal:standard> function fsync ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <required> $stream ]
+///   }
+///   - Return [ bool ]
+/// }
+/// Function [ <internal:standard> function fdatasync ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <required> $stream ]
+///   }
+///   - Return [ bool ]
+/// }
+/// Function [ <internal:standard> function realpath ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <required> string $path ]
+///   }
+///   - Return [ string|false ]
+/// }
+/// Function [ <internal:standard> function fnmatch ] {
+///
+///   - Parameters [3] {
+///     Parameter #0 [ <required> string $pattern ]
+///     Parameter #1 [ <required> string $filename ]
+///     Parameter #2 [ <optional> int $flags = 0 ]
+///   }
+///   - Return [ bool ]
+/// }
+/// Function [ <internal:standard> function sys_get_temp_dir ] {
+///
+///   - Parameters [0] {
+///   }
+///   - Return [ string ]
+/// }
+/// ```
+fn rest_natives() -> Vec<(FunctionDecl, Entry)> {
+    vec![
+        (
+            stub("flock($stream, int $operation, &$would_block = null): bool"),
+            flock as Entry,
+        ),
+        (
+            stub("get_meta_tags(string $filename, bool $use_include_path = false): array|false"),
+            get_meta_tags,
+        ),
+        (
+            stub(
+                "readfile(string $filename, bool $use_include_path = false, $context = null): int|false",
+            ),
+            readfile,
+        ),
+        (
+            stub("fscanf($stream, string $format, mixed &...$vars): array|int|false|null"),
+            fscanf,
+        ),
+        (stub("fpassthru($stream): int"), fpassthru),
+        (
+            stub("file(string $filename, int $flags = 0, $context = null): array|false"),
+            file,
+        ),
+        (stub("fsync($stream): bool"), fsync),
+        (stub("fdatasync($stream): bool"), fdatasync),
+        (
+            stub(
+                "fputcsv($stream, array $fields, string $separator = \",\", string $enclosure = \"\\\"\", string $escape = \"\\\\\", string $eol = \"\\n\"): int|false",
+            ),
+            fputcsv,
+        ),
+        (
+            stub(
+                "fgetcsv($stream, ?int $length = null, string $separator = \",\", string $enclosure = \"\\\"\", string $escape = \"\\\\\"): array|false",
+            ),
+            fgetcsv,
+        ),
+        (stub("realpath(string $path): string|false"), realpath),
+        (
+            stub("fnmatch(string $pattern, string $filename, int $flags = 0): bool"),
+            fnmatch,
+        ),
+        (stub("sys_get_temp_dir(): string"), sys_get_temp_dir),
+    ]
+}
+
+/// `flock($stream, int $operation, &$would_block = null): bool`,
+/// `PHP_FUNCTION(flock)` over `php_flock_common`
+/// (`Z/ext/standard/file.c:185`): the operation's low two bits are one
+/// of `LOCK_SH`, `LOCK_EX` or `LOCK_UN`, else php's `ValueError`;
+/// `$would_block` is zeroed, then `flock(2)` with `LOCK_NB` where the
+/// operation asks for it, and a refused `LOCK_NB` request sets it
+/// to one, which is `EWOULDBLOCK`'s answer. A stream with no `flock(2)`,
+/// `php://memory` among them, answers `false`.
+///
+/// ```php
+/// $p = __DIR__ . '/flock.txt'; touch($p);
+/// $a = fopen($p, 'r'); $b = fopen($p, 'r');
+/// var_dump(flock($a, LOCK_EX), flock($b, LOCK_EX | LOCK_NB, $wb), $wb, flock($a, LOCK_UN), flock($b, LOCK_SH | LOCK_NB, $wb), $wb, flock(fopen('php://memory', 'r'), LOCK_SH));
+/// try { flock($a, 0); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(false)
+/// int(1)
+/// bool(true)
+/// bool(true)
+/// int(0)
+/// bool(false)
+/// flock(): Argument #2 ($operation) must be one of LOCK_SH, LOCK_EX, or LOCK_UN
+/// ```
+fn flock(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 2, 3)?;
+    let stream = stream_argument(req, 1)?;
+    let operation = long_argument(req, 2)?;
+    let act = operation & PHP_LOCK_UN;
+    if !(1..=3).contains(&act) {
+        return Err(arg_value_error(
+            req,
+            2,
+            "be one of LOCK_SH, LOCK_EX, or LOCK_UN",
+        ));
+    }
+    let would_block = req.argument_count() >= 3;
+    if would_block {
+        assign_ref(req, 3, Value::int(0));
+    }
+    // `flock_values[act - 1]`: `LOCK_SH`, `LOCK_EX` and `LOCK_UN` are
+    // `flock(2)`'s 1, 2 and 8, and `LOCK_NB` its 4.
+    let lock = [1, 2, 8][usize::try_from(act - 1).unwrap_or(0)];
+    let non_blocking = operation & PHP_LOCK_NB != 0;
+    let lock = lock | if non_blocking { 4 } else { 0 };
+    if stream.flock(req, lock) {
+        return Ok(Value::bool(true));
+    }
+    if would_block && non_blocking && stream.is_stdio(req) {
+        assign_ref(req, 3, Value::int(1));
+    }
+    Ok(Value::bool(false))
+}
+
+/// `PHP_META_UNSAFE`: the bytes a meta tag's name has replaced by `_`.
+const META_UNSAFE: &[u8] = b".\\+*?[^]$() ";
+
+/// `META_DEF_BUFSIZE`: the longest token `php_next_meta_token` gathers.
+const META_DEF_BUFSIZE: usize = 8192;
+
+/// `php_meta_tags_token`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MetaToken {
+    Eof,
+    OpenTag,
+    CloseTag,
+    Slash,
+    Equal,
+    Space,
+    Id,
+    String,
+    Other,
+}
+
+/// `php_meta_tags_data`: the stream, the byte put back in place of
+/// `ungetc`, whether the tag is a `meta`, and the token's bytes.
+struct MetaData {
+    stream: Stream,
+    lc: Option<i32>,
+    in_meta: bool,
+    token: Option<Vec<u8>>,
+}
+
+impl MetaData {
+    /// `php_stream_getc`: the next byte, or `EOF`'s `-1`.
+    fn getc(&self, req: &mut Request) -> Result<i32, Thrown> {
+        Ok(match self.stream.read(req, 1)? {
+            Some(byte) if !byte.is_empty() => i32::from(byte.as_bytes()[0]),
+            _ => -1,
+        })
+    }
+
+    /// `php_next_meta_token` (`Z/ext/standard/file.c:2140`), a byte at
+    /// a time as php reads it, `eof` read after each byte, so the byte
+    /// that brings the stream to its end is dropped as php's loop drops
+    /// it.
+    fn next(&mut self, req: &mut Request) -> Result<MetaToken, Thrown> {
+        let alnum = |ch: i32| u8::try_from(ch).is_ok_and(|c| c.is_ascii_alphanumeric());
+        loop {
+            let mut ch = if self.lc.is_some() {
+                0
+            } else {
+                if self.stream.eof(req) {
+                    return Ok(MetaToken::Eof);
+                }
+                let ch = self.getc(req)?;
+                if ch == 0 {
+                    return Ok(MetaToken::Eof);
+                }
+                ch
+            };
+            if self.stream.eof(req) {
+                return Ok(MetaToken::Eof);
+            }
+            if let Some(put_back) = self.lc.take() {
+                ch = put_back;
+            }
+            match u8::try_from(ch).unwrap_or(0) {
+                b'<' => return Ok(MetaToken::OpenTag),
+                b'>' => return Ok(MetaToken::CloseTag),
+                b'=' => return Ok(MetaToken::Equal),
+                b'/' => return Ok(MetaToken::Slash),
+                b'\'' | b'"' => {
+                    let compliment = ch;
+                    let mut buff = Vec::new();
+                    loop {
+                        if self.stream.eof(req) {
+                            break;
+                        }
+                        ch = self.getc(req)?;
+                        if ch == 0
+                            || ch == compliment
+                            || ch == i32::from(b'<')
+                            || ch == i32::from(b'>')
+                        {
+                            break;
+                        }
+                        // `buff[len++] = ch`: `EOF` is the byte `0xff`.
+                        buff.push(ch.to_le_bytes()[0]);
+                        if buff.len() == META_DEF_BUFSIZE {
+                            break;
+                        }
+                    }
+                    if ch == i32::from(b'<') || ch == i32::from(b'>') {
+                        // Was just an apostrophe.
+                        self.lc = Some(ch);
+                    }
+                    if self.in_meta {
+                        self.token = Some(buff);
+                    }
+                    return Ok(MetaToken::String);
+                }
+                b'\n' | b'\r' | b'\t' => {}
+                b' ' => return Ok(MetaToken::Space),
+                _ if alnum(ch) => {
+                    let mut buff = vec![ch.to_le_bytes()[0]];
+                    loop {
+                        if self.stream.eof(req) {
+                            break;
+                        }
+                        ch = self.getc(req)?;
+                        let html401 = u8::try_from(ch).is_ok_and(|c| b"-_.:".contains(&c));
+                        if ch == 0 || !(alnum(ch) || html401) {
+                            break;
+                        }
+                        buff.push(ch.to_le_bytes()[0]);
+                        if buff.len() == META_DEF_BUFSIZE {
+                            break;
+                        }
+                    }
+                    let alpha = u8::try_from(ch).is_ok_and(|c| c.is_ascii_alphabetic());
+                    if !alpha && ch != i32::from(b'-') {
+                        self.lc = Some(ch);
+                    }
+                    self.token = Some(buff);
+                    return Ok(MetaToken::Id);
+                }
+                _ => return Ok(MetaToken::Other),
+            }
+        }
+    }
+}
+
+/// `get_meta_tags(string $filename, bool $use_include_path = false): array|false`,
+/// `PHP_FUNCTION(get_meta_tags)` (`Z/ext/standard/file.c:233`): the
+/// file read through `php_next_meta_token` up to its `</head>`, and each
+/// `<meta name=... content=...>` a pair, the name lowercased with
+/// `PHP_META_UNSAFE`'s bytes as `_`, a tag with a name and no content an
+/// empty string; `false` after the open's warning.
+///
+/// ```php
+/// $p = __DIR__ . '/meta.html';
+/// file_put_contents($p, "<html><head>\n<meta name=\"Author\" content=\"Jo Q\">\n<META NAME='key words' CONTENT='a, b'>\n<meta name=robots content=noindex>\n<meta name=\"empty\">\n<meta content=\"x\">\n</head><meta name=\"after\" content=\"no\"></html>");
+/// var_dump(get_meta_tags($p), get_meta_tags(__DIR__ . '/nope.html'));
+/// ```
+/// ```expect
+/// Warning: get_meta_tags(%s/nope.html): Failed to open stream: No such file or directory in %s on line 4
+/// array(4) {
+///   ["author"]=>
+///   string(4) "Jo Q"
+///   ["key_words"]=>
+///   string(4) "a, b"
+///   ["robots"]=>
+///   string(7) "noindex"
+///   ["empty"]=>
+///   string(0) ""
+/// }
+/// bool(false)
+/// ```
+#[allow(clippy::too_many_lines)] // one C function, kept whole
+fn get_meta_tags(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 1, 2)?;
+    let filename = path_argument(req, 1)?;
+    let use_include_path = optional_bool(req, 2, false)?;
+    let Some(stream) = req.open_stream(filename.as_bytes(), b"rb", use_include_path)? else {
+        return Ok(Value::bool(false));
+    };
+    let mut array = PhpArray::new(req)?;
+    let mut md = MetaData {
+        stream,
+        lc: None,
+        in_meta: false,
+        token: None,
+    };
+    let (mut in_tag, mut looking_for_val) = (false, false);
+    let (mut have_name, mut have_content) = (false, false);
+    let (mut saw_name, mut saw_content) = (false, false);
+    let mut name: Option<Vec<u8>> = None;
+    let mut value: Option<Vec<u8>> = None;
+    let mut tok_last = MetaToken::Eof;
+    let unsafe_to_underscore = |bytes: &[u8]| -> Vec<u8> {
+        bytes
+            .iter()
+            .map(|c| if META_UNSAFE.contains(c) { b'_' } else { *c })
+            .collect()
+    };
+    loop {
+        let tok = md.next(req)?;
+        if tok == MetaToken::Eof {
+            break;
+        }
+        let token = md.token.take();
+        let is = |word: &[u8]| {
+            token
+                .as_deref()
+                .is_some_and(|t| t.eq_ignore_ascii_case(word))
+        };
+        let mut done = false;
+        match tok {
+            MetaToken::Id => {
+                if tok_last == MetaToken::OpenTag {
+                    md.in_meta = is(b"meta");
+                } else if tok_last == MetaToken::Slash && in_tag {
+                    done = is(b"head");
+                } else if tok_last == MetaToken::Equal && looking_for_val {
+                    if saw_name {
+                        name = Some(unsafe_to_underscore(token.as_deref().unwrap_or_default()));
+                        have_name = true;
+                    } else if saw_content {
+                        value.clone_from(&token);
+                        have_content = true;
+                    }
+                    looking_for_val = false;
+                } else if md.in_meta {
+                    if is(b"name") {
+                        (saw_name, saw_content, looking_for_val) = (true, false, true);
+                    } else if is(b"content") {
+                        (saw_name, saw_content, looking_for_val) = (false, true, true);
+                    }
+                }
+            }
+            MetaToken::String if tok_last == MetaToken::Equal && looking_for_val => {
+                if saw_name {
+                    name = Some(unsafe_to_underscore(token.as_deref().unwrap_or_default()));
+                    have_name = true;
+                } else if saw_content {
+                    value.clone_from(&token);
+                    have_content = true;
+                }
+                looking_for_val = false;
+            }
+            MetaToken::OpenTag => {
+                if looking_for_val {
+                    looking_for_val = false;
+                    (have_name, saw_name, have_content, saw_content) = (false, false, false, false);
+                }
+                in_tag = true;
+            }
+            MetaToken::CloseTag => {
+                if have_name {
+                    let key = name.take().unwrap_or_default().to_ascii_lowercase();
+                    let content = if have_content {
+                        value.take().unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
+                    let key = Key::from_string(PhpString::new(req, &key)?);
+                    let content = Value::string(PhpString::new(req, &content)?);
+                    array.set(req, key, content)?;
+                }
+                name = None;
+                value = None;
+                (in_tag, looking_for_val) = (false, false);
+                (have_name, saw_name, have_content, saw_content) = (false, false, false, false);
+                md.in_meta = false;
+            }
+            _ => {}
+        }
+        tok_last = tok;
+        if done {
+            break;
+        }
+    }
+    md.stream.close(req);
+    Ok(Value::array(array))
+}
+
+/// `php_stream_passthru`: what is left of the stream written to the
+/// request's body a chunk at a time, and how many bytes that was.
+fn passthru(req: &mut Request, stream: Stream) -> Result<i64, Thrown> {
+    let mut size: i64 = 0;
+    loop {
+        match stream.read(req, 8192)? {
+            Some(chunk) if !chunk.is_empty() => {
+                req.write(chunk.as_bytes());
+                size = size.saturating_add(i64::try_from(chunk.len()).unwrap_or(i64::MAX));
+            }
+            _ => break,
+        }
+    }
+    Ok(size)
+}
+
+/// `readfile(string $filename, bool $use_include_path = false, $context = null): int|false`,
+/// `PHP_FUNCTION(readfile)` (`Z/ext/standard/file.c:1122`): the file
+/// opened `rb` and written through to the page whole, and how many
+/// bytes it held; `false` after the open's warning.
+///
+/// ```php
+/// $p = __DIR__ . '/readfile.txt'; file_put_contents($p, "one\ntwo\n");
+/// var_dump(readfile($p), readfile(__DIR__ . '/nope.txt'));
+/// ```
+/// ```expect
+/// one
+/// two
+///
+/// Warning: readfile(%s/nope.txt): Failed to open stream: No such file or directory in %s on line 3
+/// int(8)
+/// bool(false)
+/// ```
+fn readfile(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 1, 3)?;
+    let filename = path_argument(req, 1)?;
+    let use_include_path = optional_bool(req, 2, false)?;
+    context_argument(req, 3)?;
+    let Some(stream) = req.open_stream(filename.as_bytes(), b"rb", use_include_path)? else {
+        return Ok(Value::bool(false));
+    };
+    let size = passthru(req, stream)?;
+    stream.close(req);
+    Ok(Value::int(size))
+}
+
+/// `fpassthru($stream): int`, `PHP_FUNCTION(fpassthru)`
+/// (`Z/ext/standard/file.c:1181`): the rest of the stream from where it
+/// stands written through to the page, and how many bytes.
+///
+/// ```php
+/// $m = fopen('php://memory', 'r+'); fwrite($m, "abcdef"); fseek($m, 2);
+/// var_dump(fpassthru($m), fpassthru($m));
+/// ```
+/// ```expect
+/// cdefint(4)
+/// int(0)
+/// ```
+fn fpassthru(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 1, 1)?;
+    let stream = stream_argument(req, 1)?;
+    Ok(Value::int(passthru(req, stream)?))
+}
+
+/// `fscanf($stream, string $format, mixed &...$vars): array|int|false|null`,
+/// `PHP_FUNCTION(fscanf)` (`Z/ext/standard/file.c:929`): the next line
+/// of the stream, `php_stream_get_line` with no limit, scanned as
+/// `sscanf` scans a string, into the variables where they are given;
+/// `false` at the end of the stream. The stream is `Z_PARAM_RESOURCE`
+/// then `zend_fetch_resource2` for a `File-Handle`, so a closed one is
+/// php's `supplied resource` `TypeError`.
+///
+/// ```php
+/// $m = fopen('php://memory', 'r+'); fwrite($m, "12 apples\nbob 7\n"); rewind($m);
+/// var_dump(fscanf($m, "%d %s"), fscanf($m, "%s %d", $who, $n), $who, $n, fscanf($m, "%d"));
+/// fclose($m);
+/// try { fscanf($m, "%d"); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { fscanf("x", "%d"); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// array(2) {
+///   [0]=>
+///   int(12)
+///   [1]=>
+///   string(6) "apples"
+/// }
+/// int(2)
+/// string(3) "bob"
+/// int(7)
+/// bool(false)
+/// fscanf(): supplied resource is not a valid File-Handle resource
+/// fscanf(): Argument #1 ($stream) must be of type resource, string given
+/// ```
+fn fscanf(req: &mut Request) -> Result<Value, Thrown> {
+    let given = req.argument_count();
+    if given < 2 {
+        return Err(php_ext::raising::too_few_arguments(
+            req,
+            2,
+            u32::try_from(given).unwrap_or(0),
+        ));
+    }
+    let handle = req.argument(1).unwrap_or_default().deref();
+    if !matches!(handle.as_ref(), ValueRef::Resource(_)) {
+        let name = value_name(req, &handle);
+        return Err(arg_type_error(
+            req,
+            1,
+            &format!("be of type resource, {name} given"),
+        ));
+    }
+    let Some(stream) = Stream::from_value(req, &handle) else {
+        return Err(throw(
+            req,
+            "TypeError",
+            "fscanf(): supplied resource is not a valid File-Handle resource",
+        ));
+    };
+    let format = string_argument(req, 2)?;
+    let Some(line) = stream.get_line(req, None)? else {
+        return Ok(Value::bool(false));
+    };
+    let c_string = |bytes: &[u8]| bytes.split(|c| *c == 0).next().unwrap_or(&[]).to_vec();
+    let input = c_string(line.as_bytes());
+    let format = c_string(format.as_bytes());
+    crate::scanf::scan(req, &input, &format, 3, given - 2)
+}
+
+/// `php_stream_sync_supported`: the plain files kind, and the host's
+/// standard streams, are the ones with an `fsync(2)`.
+fn sync(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 1, 1)?;
+    let stream = stream_argument(req, 1)?;
+    if !stream.is_stdio(req) {
+        docref(req, Level::Warning, "Can't fsync this stream!");
+        return Ok(Value::bool(false));
+    }
+    Ok(Value::bool(stream.flush(req)))
+}
+
+/// `fsync($stream): bool`, `PHP_FUNCTION(fsync)`
+/// (`Z/ext/standard/file.c:1266`): php's warning for a stream with no
+/// `fsync(2)`, else what was written handed to the file. The flush is
+/// what a program sees of it: durability is not observable here.
+///
+/// ```php
+/// $f = fopen(__DIR__ . '/fsync.txt', 'w'); fwrite($f, 'x');
+/// var_dump(fsync($f), file_get_contents(__DIR__ . '/fsync.txt'), fsync(fopen('php://memory', 'r')));
+/// ```
+/// ```expect
+/// Warning: fsync(): Can't fsync this stream! in %s on line 3
+/// bool(true)
+/// string(1) "x"
+/// bool(false)
+/// ```
+fn fsync(req: &mut Request) -> Result<Value, Thrown> {
+    sync(req)
+}
+
+/// `fdatasync($stream): bool`, `PHP_FUNCTION(fdatasync)`
+/// (`Z/ext/standard/file.c:1282`): `fsync`'s answer with `data_only`.
+///
+/// ```php
+/// $f = fopen(__DIR__ . '/fdatasync.txt', 'w'); fwrite($f, 'y');
+/// var_dump(fdatasync($f), fdatasync(fopen('php://temp', 'r')));
+/// ```
+/// ```expect
+/// Warning: fdatasync(): Can't fsync this stream! in %s on line 3
+/// bool(true)
+/// bool(false)
+/// ```
+fn fdatasync(req: &mut Request) -> Result<Value, Thrown> {
+    sync(req)
+}
+
+/// The one-byte `$separator` or `$enclosure` at `position`, or the
+/// default where the call gave none, and php's `ValueError` for any
+/// other length.
+fn one_byte(req: &mut Request, position: u32, default: u8) -> Result<u8, Thrown> {
+    match optional_string(req, position)? {
+        None => Ok(default),
+        Some(s) => match s.as_bytes() {
+            [c] => Ok(*c),
+            _ => Err(arg_value_error(req, position, "be a single character")),
+        },
+    }
+}
+
+/// `fputcsv($stream, array $fields, ...): int|false`,
+/// `PHP_FUNCTION(fputcsv)` over `php_fputcsv`
+/// (`Z/ext/standard/file.c:1683`): each field as a string, enclosed
+/// where it holds the separator, the enclosure, the escape, a line
+/// break, a tab or a space, an enclosure inside doubled unless the
+/// escape precedes it; the fields joined by the separator, `$eol` or
+/// `\n` after, written at once; the bytes written, or `false`.
+///
+/// ```php
+/// $m = fopen('php://memory', 'r+');
+/// var_dump(fputcsv($m, ['a', 'b c', 'd"e', 7, 1.5, null, "x\ny", 'p\\"q'], ',', '"', '\\'), fputcsv($m, ['one', 'two'], ';', "'", '', "!\n"));
+/// rewind($m); while (!feof($m)) { echo fread($m, 100); }
+/// fputcsv($m, ['z']);
+/// try { fputcsv($m, [], 'ab'); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// int(35)
+/// int(9)
+/// a,"b c","d""e",7,1.5,,"x
+/// y","p\"q"
+/// one;two!
+///
+/// Deprecated: fputcsv(): the $escape parameter must be provided as its default value will change in %s on line 5
+/// fputcsv(): Argument #3 ($separator) must be a single character
+/// ```
+fn fputcsv(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 2, 6)?;
+    let stream = stream_argument(req, 1)?;
+    let fields = array_argument(req, 2)?;
+    let delimiter = one_byte(req, 3, b',')?;
+    let enclosure = one_byte(req, 4, b'"')?;
+    let escape = crate::csv::escape_argument(req, 5)?;
+    let eol = nullable_string(req, 6)?;
+    let count = fields.len();
+    let mut line = Vec::new();
+    for (i, (_, field)) in fields.iter().enumerate() {
+        let field = to_string(req, &field)?;
+        let bytes = field.as_bytes();
+        let special = [delimiter, enclosure, b'\n', b'\r', b'\t', b' ']
+            .iter()
+            .chain(escape.iter())
+            .any(|c| bytes.contains(c));
+        if special {
+            line.push(enclosure);
+            let mut escaped = false;
+            for &ch in bytes {
+                if escape == Some(ch) {
+                    escaped = true;
+                } else if !escaped && ch == enclosure {
+                    line.push(enclosure);
+                } else {
+                    escaped = false;
+                }
+                line.push(ch);
+            }
+            line.push(enclosure);
+        } else {
+            line.extend_from_slice(bytes);
+        }
+        if i + 1 != count {
+            line.push(delimiter);
+        }
+    }
+    match eol {
+        Some(eol) => line.extend_from_slice(eol.as_bytes()),
+        None => line.push(b'\n'),
+    }
+    Ok(stream.write(req, &line).map_or_else(
+        || Value::bool(false),
+        |n| Value::int(i64::try_from(n).unwrap_or(i64::MAX)),
+    ))
+}
+
+/// `fgetcsv($stream, ?int $length = null, ...): array|false`,
+/// `PHP_FUNCTION(fgetcsv)` (`Z/ext/standard/file.c:1749`): the next
+/// line, at most `$length` bytes of it where one is given and not zero,
+/// parsed by `php_fgetcsv` with the stream beside it, so an enclosed
+/// field that runs past the line's end reads the lines after it; `false`
+/// at the end of the stream, and php's one `null` for an empty line.
+///
+/// ```php
+/// $m = fopen('php://memory', 'r+'); fwrite($m, "a,\"b\nc\",d\n\nx;y\n\"open"); rewind($m);
+/// var_dump(fgetcsv($m, null, ',', '"', '\\'), fgetcsv($m, 0, ',', '"', ''), fgetcsv($m, 2, ';', '"', ''), fgetcsv($m, null, ';', '"', ''), fgetcsv($m, null, ',', '"', ''), fgetcsv($m, null, ',', '"', ''));
+/// try { fgetcsv($m, -1); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// array(3) {
+///   [0]=>
+///   string(1) "a"
+///   [1]=>
+///   string(3) "b
+/// c"
+///   [2]=>
+///   string(1) "d"
+/// }
+/// array(1) {
+///   [0]=>
+///   NULL
+/// }
+/// array(2) {
+///   [0]=>
+///   string(1) "x"
+///   [1]=>
+///   string(0) ""
+/// }
+/// array(1) {
+///   [0]=>
+///   string(1) "y"
+/// }
+/// array(1) {
+///   [0]=>
+///   string(4) "open"
+/// }
+/// bool(false)
+///
+/// Deprecated: fgetcsv(): the $escape parameter must be provided as its default value will change in %s on line 4
+/// fgetcsv(): Argument #2 ($length) must be between 0 and 9223372036854775806
+/// ```
+fn fgetcsv(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 1, 5)?;
+    let stream = stream_argument(req, 1)?;
+    let len = nullable_long(req, 2)?;
+    let delimiter = one_byte(req, 3, b',')?;
+    let enclosure = one_byte(req, 4, b'"')?;
+    let escape = crate::csv::escape_argument(req, 5)?;
+    let len = match len {
+        None | Some(0) => None,
+        Some(n) if !(0..=i64::MAX - 1).contains(&n) => {
+            return Err(arg_value_error(
+                req,
+                2,
+                &format!("be between 0 and {}", i64::MAX - 1),
+            ));
+        }
+        Some(n) => Some(usize::try_from(n).unwrap_or(usize::MAX).saturating_add(1)),
+    };
+    let Some(line) = stream.get_line(req, len)? else {
+        return Ok(Value::bool(false));
+    };
+    let line = line.as_bytes().to_vec();
+    let mut failed = None;
+    let mut more = || match stream.get_line(req, None) {
+        Ok(next) => next.map(|s| s.as_bytes().to_vec()),
+        Err(thrown) => {
+            failed = Some(thrown);
+            None
+        }
+    };
+    let fields = crate::csv::fgetcsv(&line, delimiter, enclosure, escape, &mut more);
+    if let Some(thrown) = failed {
+        return Err(thrown);
+    }
+    let mut array = PhpArray::new(req)?;
+    match fields {
+        None => array.append(req, Value::null())?,
+        Some(fields) => {
+            for field in fields {
+                let value = Value::string(PhpString::new(req, &field)?);
+                array.append(req, value)?;
+            }
+        }
+    }
+    Ok(Value::array(array))
+}
+
+/// `realpath(string $path): string|false`, `PHP_FUNCTION(realpath)`
+/// (`Z/ext/standard/file.c:2105`) over `tsrm_realpath`
+/// (`Z/Zend/zend_virtual_cwd.c:1717`): the path against the working
+/// directory with every link resolved, `false` where any part of it is
+/// not there, and the working directory itself for the empty path.
+///
+/// ```php
+/// $d = __DIR__ . '/realpath-d'; @mkdir($d); touch("$d/f"); @symlink("$d/f", "$d/l");
+/// chdir($d);
+/// var_dump(realpath('f') === realpath("$d/f"), realpath('l') === realpath('f'), realpath('./../realpath-d/f') === realpath('f'), realpath('') === getcwd(), realpath('.') === getcwd(), realpath('nope'), realpath('f/x'), basename(realpath('/')));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// string(0) ""
+/// ```
+fn realpath(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 1, 1)?;
+    let path = path_argument(req, 1)?;
+    let cwd = req.cwd().0.as_os_str().as_bytes().to_vec();
+    let written = if path.as_bytes().is_empty() {
+        cwd.clone()
+    } else {
+        path.as_bytes().to_vec()
+    };
+    let cwd: &[u8] = if written.first() == Some(&b'/') {
+        b""
+    } else {
+        &cwd
+    };
+    match virtual_file_ex(cwd, &written, Resolve::RealPath) {
+        Some(resolved) => Ok(Value::string(PhpString::new(req, &resolved)?)),
+        None => Ok(Value::bool(false)),
+    }
+}
+
+/// `fnmatch(string $pattern, string $filename, int $flags = 0): bool`,
+/// `PHP_FUNCTION(fnmatch)` (`Z/ext/standard/file.c:2241`): the host's
+/// `fnmatch(3)` with the flags as given, after php's warnings for a
+/// name or a pattern of `MAXPATHLEN` bytes or more.
+///
+/// ```php
+/// var_dump(fnmatch('*.txt', 'a.txt'), fnmatch('*.txt', 'a.TXT'), fnmatch('*.txt', 'a.TXT', FNM_CASEFOLD), fnmatch('a/*', 'a/b/c'), fnmatch('a/*', 'a/b/c', FNM_PATHNAME), fnmatch('*', '.hidden', FNM_PERIOD), fnmatch('\*', '*'), fnmatch('\*', '\*', FNM_NOESCAPE), fnmatch('[a-c]?', 'bz'));
+/// var_dump(fnmatch(str_repeat('x', 1024), 'x'), fnmatch('x', str_repeat('x', 1024)));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+///
+/// Warning: fnmatch(): Pattern exceeds the maximum allowed length of 1024 characters in %s on line 3
+///
+/// Warning: fnmatch(): Filename exceeds the maximum allowed length of 1024 characters in %s on line 3
+/// bool(false)
+/// bool(false)
+/// ```
+fn fnmatch(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 2, 3)?;
+    let pattern = path_argument(req, 1)?;
+    let filename = path_argument(req, 2)?;
+    let flags = optional_long(req, 3, 0)?;
+    if filename.len() >= MAXPATHLEN {
+        let text =
+            format!("Filename exceeds the maximum allowed length of {MAXPATHLEN} characters");
+        docref(req, Level::Warning, &text);
+        return Ok(Value::bool(false));
+    }
+    if pattern.len() >= MAXPATHLEN {
+        let text = format!("Pattern exceeds the maximum allowed length of {MAXPATHLEN} characters");
+        docref(req, Level::Warning, &text);
+        return Ok(Value::bool(false));
+    }
+    // `(int)flags`: the low 32 bits, as C's conversion keeps them.
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = flags as i32;
+    Ok(Value::bool(crate::ffi::fnmatch(
+        pattern.as_bytes(),
+        filename.as_bytes(),
+        flags,
+    )))
+}
+
+/// `sys_get_temp_dir(): string`, `PHP_FUNCTION(sys_get_temp_dir)`
+/// (`Z/ext/standard/file.c:2269`) over `php_get_temporary_directory`
+/// (`Z/main/php_open_temporary_file.c:236`): `sys_temp_dir` where it is
+/// set, else `TMPDIR` from the environment, else `P_tmpdir`, `/tmp`;
+/// one trailing slash taken off the first two.
+///
+/// ```php
+/// $t = sys_get_temp_dir(); var_dump($t[0], substr($t, -1) !== '/' || $t === '/', is_dir($t));
+/// ```
+/// ```expect
+/// string(1) "/"
+/// bool(true)
+/// bool(true)
+/// ```
+fn sys_get_temp_dir(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 0, 0)?;
+    // A `sys_temp_dir` of `/` alone is passed over, as php's two tests
+    // pass it over.
+    let from_ini = req
+        .ini_get(b"sys_temp_dir")
+        .filter(|dir| !dir.is_empty() && *dir != b"/")
+        .map(|dir| dir.strip_suffix(b"/").unwrap_or(dir).to_vec());
+    let dir = if let Some(dir) = from_ini {
+        dir
+    } else if let Some(dir) = req.env(b"TMPDIR").filter(|dir| !dir.is_empty()) {
+        dir.strip_suffix(b"/").unwrap_or(dir).to_vec()
+    } else {
+        b"/tmp".to_vec()
+    };
+    Ok(Value::string(PhpString::new(req, &dir)?))
 }

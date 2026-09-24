@@ -17,6 +17,9 @@ php_ext = { path = "../../crates/php_ext" }
 # `access(2)`, `utime(2)` and the user and group lookups `filestat.c`
 # makes, in `src/ffi/` alone (`unsafe.homes`).
 libc = { workspace = true }
+# zlib's `uncompress`, which `php_handle_swc` inflates a compressed SWF
+# with: an inflate's bytes are the stream's whatever implements it.
+miniz_oxide = "0.8.9"
 
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
 [dev-dependencies]

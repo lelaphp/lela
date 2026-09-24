@@ -46,11 +46,16 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 mod array;
+mod assert;
 mod base64;
 mod basic_functions;
+mod browscap;
 mod crc32;
+mod crypt;
 mod csv;
+mod datetime;
 mod dir;
+mod dns;
 mod exec;
 mod ffi;
 mod file;
@@ -60,27 +65,38 @@ mod head;
 mod hrtime;
 mod html;
 mod http;
+mod image;
+mod info;
 mod ini;
+mod iptc;
 mod levenshtein;
+mod link;
+mod mail;
 mod math;
 mod md5;
 mod metaphone;
 mod microtime;
+mod net;
 mod output;
 mod pack;
+mod pageinfo;
+mod password;
 mod quot_print;
 mod scanf;
 mod sha1;
 mod soundex;
+mod streamsfuncs;
 mod string;
 mod strnatcmp;
 mod stub;
+mod syslog;
 mod r#type;
 mod uniqid;
 mod url;
 mod uuencode;
 mod var;
 mod versioning;
+mod virtual_cwd;
 mod zpp;
 
 use php_ext::abi::{Callable, Dependency, DependencyKind, Extension, ExtensionBuilder};
@@ -106,6 +122,10 @@ struct State {
     string: string::State,
     uniqid: uniqid::State,
     hrtime: hrtime::State,
+    contexts: streamsfuncs::Contexts,
+    page: Option<pageinfo::Page>,
+    syslog: syslog::Log,
+    browscap: browscap::Browscap,
 }
 
 /// The extension value (design §7.1): declarations paired with entries,
@@ -135,6 +155,7 @@ pub fn extension() -> Extension {
         default: Some(ConstExpr::Constant(Name(b"COUNT_NORMAL".as_slice().into()))),
         ..parameter(b"mode", Type::Int)
     };
+    let directory = dir::directory_class();
     ExtensionBuilder::default()
         .functions(vec![
             (
@@ -214,7 +235,12 @@ pub fn extension() -> Extension {
         .classes(var::classes())
         .ini(var::ini())
         .dependencies(dependencies())
+        .class_with(directory.0, directory.1, directory.2)
+        .classes(vec![assert::assertion_error_class()])
+        .ini(assert::ini())
+        .ini(browscap::ini())
         .request_state::<State>()
+        .rshutdown(syslog::close)
         .build("standard")
 }
 
@@ -242,6 +268,22 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
         hrtime::natives(),
         versioning::natives(),
         basic_functions::natives(),
+        dir::natives(),
+        link::natives(),
+        streamsfuncs::natives(),
+        crypt::natives(),
+        password::natives(),
+        assert::natives(),
+        pageinfo::natives(),
+        syslog::natives(),
+        mail::natives(),
+        image::natives(),
+        browscap::natives(),
+        datetime::natives(),
+        net::natives(),
+        iptc::natives(),
+        dns::natives(),
+        info::natives(),
     ]
     .into_iter()
     .flatten()
@@ -256,6 +298,14 @@ fn file_constants() -> Vec<ConstDecl> {
         html::constants(),
         basic_functions::constants(),
         dir::constants(),
+        streamsfuncs::constants(),
+        crypt::constants(),
+        password::constants(),
+        assert::constants(),
+        syslog::constants(),
+        image::constants(),
+        dns::constants(),
+        info::constants(),
     ]
     .into_iter()
     .flatten()

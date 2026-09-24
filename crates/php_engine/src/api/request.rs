@@ -9681,6 +9681,52 @@ impl Request {
         self.info_table(&table);
     }
 
+    /// `display_ini_entries(NULL)` (`Z/main/php_ini.c:131`) as the CLI
+    /// prints it after `zend_ini_sort_entries`: the entries no extension
+    /// declared, the engine's own, sorted by name, under `Directive =>
+    /// Local Value => Master Value`, an empty value `no value`. What
+    /// `PHP_MINFO_FUNCTION(core)` and `phpinfo()`'s `PHP Core` print.
+    pub fn core_ini_info(&mut self) {
+        let shared = Arc::clone(&self.shared);
+        let owned = |name: &[u8]| {
+            shared
+                .extensions
+                .iter()
+                .any(|e| e.ini.iter().any(|entry| entry.name.0.as_ref() == name))
+        };
+        let mut names: Vec<&[u8]> = shared
+            .ini_defaults()
+            .iter()
+            .map(|(name, _)| name.as_slice())
+            .filter(|name| !owned(name))
+            .collect();
+        // `ini_key_compare`: `zend_binary_strcasecmp` of the names.
+        names.sort_unstable_by_key(|name| name.to_ascii_lowercase());
+        let shown = |value: Option<&[u8]>| {
+            value.filter(|v| !v.is_empty()).map_or_else(
+                || String::from("no value"),
+                |v| String::from_utf8_lossy(v).into_owned(),
+            )
+        };
+        let rows: Vec<[String; 3]> = names
+            .iter()
+            .map(|name| {
+                [
+                    String::from_utf8_lossy(name).into_owned(),
+                    shown(self.ini_get(name)),
+                    shown(shared.ini_default(name)),
+                ]
+            })
+            .collect();
+        let mut table: Vec<&[&str]> = vec![&["Directive", "Local Value", "Master Value"]];
+        let cells: Vec<[&str; 3]> = rows
+            .iter()
+            .map(|[name, local, master]| [name.as_str(), local.as_str(), master.as_str()])
+            .collect();
+        table.extend(cells.iter().map(<[&str; 3]>::as_slice));
+        self.info_table(&table);
+    }
+
     /// `php_info_print_table_start` and one `php_info_print_table_row`
     /// per row as the CLI prints them, `phpinfo_as_text`
     /// (`Z/ext/standard/info.c:1062-1220`): a blank line, then each
@@ -9832,26 +9878,36 @@ impl Request {
     /// handler runs it here: `max_execution_time` re-arms the execution
     /// timer (`OnUpdateTimeout`, `Z/main/main.c:467`).
     ///
-    /// The two entries of the table without `PHP_INI_USER` are
-    /// `xmlrpc_errors`, `PHP_INI_SYSTEM`, and `short_open_tag`,
-    /// `PHP_INI_SYSTEM|PHP_INI_PERDIR`, which `zend_alter_ini_entry_ex`
-    /// refuses at `PHP_INI_STAGE_RUNTIME` as it refuses every entry whose
-    /// `modifiable` lacks the stage; the rest of the table is `PHP_INI_ALL`.
+    /// The entries of the table without `PHP_INI_USER`, `xmlrpc_errors`,
+    /// `short_open_tag`, `sys_temp_dir`, the `mail.*` ones but `SMTP` and
+    /// `smtp_port`, `sendmail_path` and two of the three `syslog.*`, are
+    /// `PHP_INI_SYSTEM` or `PHP_INI_SYSTEM|PHP_INI_PERDIR`, which
+    /// `zend_alter_ini_entry_ex` refuses at `PHP_INI_STAGE_RUNTIME` as it
+    /// refuses every entry whose `modifiable` lacks the stage; the rest of
+    /// the table is `PHP_INI_ALL`. An extension's entry is refused where
+    /// its declaration lacks `PHP_INI_USER`, as `browscap` does.
     ///
     /// ```php
-    /// var_dump(ini_set('xmlrpc_errors', '1'), ini_set('short_open_tag', '1'));
+    /// var_dump(ini_set('xmlrpc_errors', '1'), ini_set('short_open_tag', '1'), ini_set('sendmail_path', 'x'), ini_set('mail.log', 'x'), ini_set('SMTP', 'mx'), ini_get('sendmail_path'), ini_get('mail.cr_lf_mode'), ini_set('browscap', 'x'), ini_set('assert.warning', '1'));
     /// echo NAN;
     /// ```
     /// ```expect
     /// bool(false)
     /// bool(false)
+    /// bool(false)
+    /// bool(false)
+    /// string(9) "localhost"
+    /// string(24) "/usr/sbin/sendmail -t -i"
+    /// string(4) "crlf"
+    /// bool(false)
+    /// string(1) "1"
     ///
     /// Warning: unexpected NAN value was coerced to string in %s on line 3
     /// NAN
     /// ```
     pub fn ini_set(&mut self, name: &[u8], value: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
         let previous = self.ini_get(name).map(<[u8]>::to_vec);
-        if previous.is_none() || !Request::ini_modifiable(name) {
+        if previous.is_none() || !Request::ini_modifiable(name) || !self.ini_user(name) {
             return Ok(None);
         }
         if Request::ini_verdict(name, value) == IniVerdict::Rejected {
@@ -9871,12 +9927,39 @@ impl Request {
         Ok(previous)
     }
 
+    /// Whether an extension's entry is `PHP_INI_USER`, its declaration's
+    /// `user`; an entry no extension declared is the core table's, which
+    /// [`Request::ini_modifiable`] answers for.
+    fn ini_user(&self, name: &[u8]) -> bool {
+        self.shared
+            .extensions
+            .iter()
+            .flat_map(|extension| extension.ini.iter())
+            .find(|decl| decl.name.0.as_ref() == name)
+            .is_none_or(|decl| decl.user)
+    }
+
     /// Whether an entry's `modifiable` carries `PHP_INI_USER`, what
     /// `ini_set()` asks: every entry of the table is `PHP_INI_ALL` but
-    /// `xmlrpc_errors`, `PHP_INI_SYSTEM` (`Z/main/main.c:806`), and
-    /// `short_open_tag`, `PHP_INI_SYSTEM|PHP_INI_PERDIR` (`Z/main/main.c:820`).
+    /// `xmlrpc_errors`, `sys_temp_dir`, `sendmail_path`, `syslog.facility`
+    /// and `syslog.ident`, `PHP_INI_SYSTEM` (`Z/main/main.c:806-890`), and
+    /// `short_open_tag` and the four `mail.*` beside `sendmail_path`,
+    /// `PHP_INI_SYSTEM|PHP_INI_PERDIR` (`Z/main/main.c:820-871`).
     fn ini_modifiable(name: &[u8]) -> bool {
-        !matches!(name, b"xmlrpc_errors" | b"short_open_tag")
+        !matches!(
+            name,
+            b"xmlrpc_errors"
+                | b"short_open_tag"
+                | b"sys_temp_dir"
+                | b"mail.add_x_header"
+                | b"mail.mixed_lf_and_crlf"
+                | b"mail.cr_lf_mode"
+                | b"mail.log"
+                | b"sendmail_path"
+                | b"mail.force_extra_parameters"
+                | b"syslog.facility"
+                | b"syslog.ident"
+        )
     }
 
     /// What a core entry's `on_modify` says of a new value before

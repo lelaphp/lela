@@ -39,8 +39,20 @@ fn php_basename<'a>(s: &'a [u8], suffix: &[u8]) -> &'a [u8] {
 
 /// `zend_dirname(path, len)`: the length the path is cut to, and
 /// whether the cut path is the one byte php writes over it, `/` or
-/// `.`.
-fn zend_dirname(path: &[u8]) -> Vec<u8> {
+/// `.`. `dirname` is one reader and `symlink` another, which cuts the
+/// expanded link path to its directory.
+///
+/// ```php
+/// var_dump(dirname('/a/b/'), dirname('a'), dirname('/'), dirname(''), dirname('//x//y//'));
+/// ```
+/// ```expect
+/// string(2) "/a"
+/// string(1) "."
+/// string(1) "/"
+/// string(0) ""
+/// string(3) "//x"
+/// ```
+pub(crate) fn zend_dirname(path: &[u8]) -> Vec<u8> {
     if path.is_empty() {
         return Vec::new();
     }

@@ -1,4 +1,4 @@
-//! The header natives of `Z/ext/standard/head.c`,
+//! The header and cookie natives of `Z/ext/standard/head.c`,
 //! `basic_functions.stub.php:2222-2242`, each over the request's
 //! `SG(sapi_headers)`: the list, the response code and the status line
 //! are the engine's, and `sapi_header_op`'s warnings are raised there,
@@ -10,16 +10,18 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_ext::coerce::coerce_param;
+use php_ext::coerce::{coerce_param, to_long, to_string, truthy};
 use php_ext::decl::{ConstExpr, FunctionDecl, Parameter, Type};
-use php_ext::raising::{Level, Thrown, docref};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
 use crate::output::Entry;
+use crate::stub::stub;
+use crate::zpp::{ArrayOr, array_or_long, given, optional_string};
 use crate::{argument_count_between, declared, long_argument, parameter, string_argument};
 
-/// The five, in the stub's order less the two cookie natives.
+/// The seven, in the stub's order but the two cookie natives last.
 ///
 /// ```php
 /// header("X-A: 1"); var_dump(headers_list(), headers_sent(), http_response_code());
@@ -89,6 +91,18 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
         (
             declared(b"headers_list", &[], Type::Array),
             headers_list as Entry,
+        ),
+        (
+            stub(
+                "setcookie(string $name, string $value = \"\", array|int $expires_or_options = 0, string $path = \"\", string $domain = \"\", bool $secure = false, bool $httponly = false): bool",
+            ),
+            setcookie as Entry,
+        ),
+        (
+            stub(
+                "setrawcookie(string $name, string $value = \"\", array|int $expires_or_options = 0, string $path = \"\", string $domain = \"\", bool $secure = false, bool $httponly = false): bool",
+            ),
+            setrawcookie as Entry,
         ),
     ]
 }
@@ -355,4 +369,285 @@ fn headers_list(req: &mut Request) -> Result<Value, Thrown> {
         array.append(req, value)?;
     }
     Ok(Value::array(array))
+}
+
+/// `ILLEGAL_COOKIE_CHARACTER` (`Z/ext/standard/head.c:81`), the list the
+/// refusals name.
+const ILLEGAL_COOKIE_CHARACTER: &str =
+    "\",\", \";\", \" \", \"\\t\", \"\\r\", \"\\n\", \"\\013\", or \"\\014\"";
+
+/// Whether the C string `s` holds a byte of `set`, `strpbrk`'s answer.
+fn strpbrk(s: &[u8], set: &[u8]) -> bool {
+    s.iter().take_while(|c| **c != 0).any(|c| set.contains(c))
+}
+
+/// `php_format_date("D, d M Y H:i:s \G\M\T", t, 0)`: the time in UTC as
+/// a cookie's `expires` writes it.
+fn cookie_date(t: i64) -> String {
+    const DAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let (days, rem) = (t.div_euclid(86_400), t.rem_euclid(86_400));
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    let weekday = DAYS
+        .get(usize::try_from(days.rem_euclid(7)).unwrap_or(0))
+        .copied()
+        .unwrap_or("Thu");
+    let month = MONTHS
+        .get(usize::try_from(month - 1).unwrap_or(0))
+        .copied()
+        .unwrap_or("Jan");
+    format!(
+        "{weekday}, {day:02} {month} {year:04} {:02}:{:02}:{:02} GMT",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
+}
+
+/// What `php_setcookie` is given past the name and value.
+#[derive(Default)]
+struct Cookie {
+    expires: i64,
+    path: Option<Vec<u8>>,
+    domain: Option<Vec<u8>>,
+    secure: bool,
+    httponly: bool,
+    samesite: Option<Vec<u8>>,
+    partitioned: bool,
+}
+
+/// `php_setcookie` (`Z/ext/standard/head.c:83`): php's refusals, then the
+/// `Set-Cookie` line, a deleted cookie for an empty value, the value
+/// `rawurlencode`d unless raw, the expiry and `Max-Age`, and the
+/// attributes, added to the headers as `sapi_header_op` adds one.
+fn php_setcookie(
+    req: &mut Request,
+    name: &[u8],
+    value: Option<&[u8]>,
+    cookie: &Cookie,
+    url_encode: bool,
+) -> Result<bool, Thrown> {
+    let refuse = |req: &mut Request, text: String| Err(throw(req, "ValueError", &text));
+    let function = if url_encode {
+        "setcookie"
+    } else {
+        "setrawcookie"
+    };
+    if name.is_empty() {
+        return Err(arg_value_error(req, 1, "not be empty"));
+    }
+    if strpbrk(name, b"=,; \t\r\n\x0b\x0c") {
+        let text = format!(
+            "{function}(): Argument #1 ($name) cannot contain \"=\", {ILLEGAL_COOKIE_CHARACTER}"
+        );
+        return refuse(req, text);
+    }
+    if !url_encode && value.is_some_and(|v| strpbrk(v, b",; \t\r\n\x0b\x0c")) {
+        let text =
+            format!("{function}(): Argument #2 ($value) cannot contain {ILLEGAL_COOKIE_CHARACTER}");
+        return refuse(req, text);
+    }
+    for (what, field) in [("path", &cookie.path), ("domain", &cookie.domain)] {
+        if field
+            .as_deref()
+            .is_some_and(|f| strpbrk(f, b",; \t\r\n\x0b\x0c"))
+        {
+            let text = format!(
+                "{function}(): \"{what}\" option cannot contain {ILLEGAL_COOKIE_CHARACTER}"
+            );
+            return refuse(req, text);
+        }
+    }
+    if cookie.expires >= 253_402_300_800 {
+        let text = format!("{function}(): \"expires\" option cannot have a year greater than 9999");
+        return refuse(req, text);
+    }
+    if cookie.partitioned && !cookie.secure {
+        let text = format!(
+            "{function}(): \"partitioned\" option cannot be used without \"secure\" option"
+        );
+        return refuse(req, text);
+    }
+    let mut line = b"Set-Cookie: ".to_vec();
+    line.extend_from_slice(name);
+    match value.filter(|v| !v.is_empty()) {
+        None => {
+            line.extend_from_slice(b"=deleted; expires=Thu, 01 Jan 1970 00:00:01 GMT; Max-Age=0");
+        }
+        Some(value) => {
+            line.push(b'=');
+            if url_encode {
+                crate::url::url_encode(value, true, &mut line);
+            } else {
+                line.extend_from_slice(value);
+            }
+            if cookie.expires > 0 {
+                line.extend_from_slice(b"; expires=");
+                line.extend_from_slice(cookie_date(cookie.expires).as_bytes());
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
+                let diff = cookie.expires.saturating_sub(now).max(0);
+                line.extend_from_slice(format!("; Max-Age={diff}").as_bytes());
+            }
+        }
+    }
+    let attributes: [(&[u8], Option<&[u8]>); 2] = [
+        (b"; path=", cookie.path.as_deref()),
+        (b"; domain=", cookie.domain.as_deref()),
+    ];
+    for (label, field) in attributes {
+        if let Some(field) = field.filter(|f| !f.is_empty()) {
+            line.extend_from_slice(label);
+            line.extend_from_slice(field);
+        }
+    }
+    if cookie.secure {
+        line.extend_from_slice(b"; secure");
+    }
+    if cookie.httponly {
+        line.extend_from_slice(b"; HttpOnly");
+    }
+    if let Some(samesite) = cookie.samesite.as_deref().filter(|s| !s.is_empty()) {
+        line.extend_from_slice(b"; SameSite=");
+        line.extend_from_slice(samesite);
+    }
+    if cookie.partitioned {
+        line.extend_from_slice(b"; Partitioned");
+    }
+    Ok(req.header_add(&line, false, 0))
+}
+
+/// `php_head_parse_cookie_options_array` (`Z/ext/standard/head.c:205`).
+fn cookie_options(
+    req: &mut Request,
+    options: PhpArray,
+    cookie: &mut Cookie,
+    function: &str,
+) -> Result<(), Thrown> {
+    for (key, value) in options.snapshot() {
+        let Key::Str(key) = key else {
+            let text = format!("{function}(): option array cannot have numeric keys");
+            return Err(throw(req, "ValueError", &text));
+        };
+        let lower = key.as_bytes().to_ascii_lowercase();
+        let string = |req: &mut Request| -> Result<Vec<u8>, Thrown> {
+            let text = to_string(req, &value)?;
+            let bytes = text.as_bytes().to_vec();
+            req.release(Value::string(text));
+            Ok(bytes)
+        };
+        match lower.as_slice() {
+            b"expires" => cookie.expires = to_long(req, &value)?,
+            b"path" => cookie.path = Some(string(req)?),
+            b"domain" => cookie.domain = Some(string(req)?),
+            b"secure" => cookie.secure = truthy(req, &value.deref()),
+            b"httponly" => cookie.httponly = truthy(req, &value.deref()),
+            b"samesite" => cookie.samesite = Some(string(req)?),
+            b"partitioned" => cookie.partitioned = truthy(req, &value.deref()),
+            _ => {
+                let text = format!(
+                    "{function}(): option \"{}\" is invalid",
+                    String::from_utf8_lossy(key.as_bytes())
+                );
+                return Err(throw(req, "ValueError", &text));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `php_setcookie_common` (`Z/ext/standard/head.c:246`): the name, the
+/// value, then either the expiry and the four after it or, alone, an
+/// array of options.
+fn setcookie_common(req: &mut Request, raw: bool) -> Result<Value, Thrown> {
+    argument_count_between(req, 1, 7)?;
+    let function = if raw { "setrawcookie" } else { "setcookie" };
+    let name = string_argument(req, 1)?.as_bytes().to_vec();
+    let value = optional_string(req, 2)?.map(|v| v.as_bytes().to_vec());
+    let mut cookie = Cookie::default();
+    let options = match given(req, 3) {
+        Some(_) => array_or_long(req, 3, false)?,
+        None => None,
+    };
+    let path = optional_string(req, 4)?.map(|v| v.as_bytes().to_vec());
+    let domain = optional_string(req, 5)?.map(|v| v.as_bytes().to_vec());
+    cookie.path = path;
+    cookie.domain = domain;
+    if given(req, 6).is_some() {
+        cookie.secure = bool_argument(req, 6)?;
+    }
+    if given(req, 7).is_some() {
+        cookie.httponly = bool_argument(req, 7)?;
+    }
+    match options {
+        Some(ArrayOr::Array(options)) => {
+            if req.argument_count() > 3 {
+                let text = format!(
+                    "{function}(): Expects exactly 3 arguments when argument #3 ($expires_or_options) is an array"
+                );
+                return Err(throw(req, "ArgumentCountError", &text));
+            }
+            cookie_options(req, options, &mut cookie, function)?;
+        }
+        Some(ArrayOr::Other(expires)) => cookie.expires = expires,
+        None => {}
+    }
+    let sent = php_setcookie(req, &name, value.as_deref(), &cookie, !raw)?;
+    Ok(Value::bool(sent))
+}
+
+/// `setcookie(string $name, string $value = "", array|int $expires_or_options = 0, string $path = "", string $domain = "", bool $secure = false, bool $httponly = false): bool`,
+/// `PHP_FUNCTION(setcookie)` (`Z/ext/standard/head.c:294`): the value
+/// `rawurlencode`d. Under the CLI the line goes nowhere and the answer
+/// is `true`; each refusal is php's.
+///
+/// ```php
+/// var_dump(setcookie('a', 'b c'), setcookie('a', '', ['expires' => 5, 'path' => '/', 'SameSite' => 'Lax', 'secure' => true, 'partitioned' => true]));
+/// foreach ([[''], ['a=b'], ['a', 'b', ['path' => 'x;y']], ['a', 'b', ['domain' => "x\n"]], ['a', 'b', ['expires' => 253402300800]], ['a', 'b', ['partitioned' => true]], ['a', 'b', ['nope' => 1]], ['a', 'b', [1]]] as $args) {
+///     try { call_user_func_array('setcookie', $args); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// try { setcookie('a', 'b', [], '/'); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// setcookie(): Argument #1 ($name) must not be empty
+/// setcookie(): Argument #1 ($name) cannot contain "=", ",", ";", " ", "\t", "\r", "\n", "\013", or "\014"
+/// setcookie(): "path" option cannot contain ",", ";", " ", "\t", "\r", "\n", "\013", or "\014"
+/// setcookie(): "domain" option cannot contain ",", ";", " ", "\t", "\r", "\n", "\013", or "\014"
+/// setcookie(): "expires" option cannot have a year greater than 9999
+/// setcookie(): "partitioned" option cannot be used without "secure" option
+/// setcookie(): option "nope" is invalid
+/// setcookie(): option array cannot have numeric keys
+/// setcookie(): Expects exactly 3 arguments when argument #3 ($expires_or_options) is an array
+/// ```
+fn setcookie(req: &mut Request) -> Result<Value, Thrown> {
+    setcookie_common(req, false)
+}
+
+/// `setrawcookie(...)`, `PHP_FUNCTION(setrawcookie)`
+/// (`Z/ext/standard/head.c:302`): the value as it is, and refused where
+/// it holds a byte a cookie may not.
+///
+/// ```php
+/// var_dump(setrawcookie('a', 'b%20c'));
+/// try { setrawcookie('a', 'b c'); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// bool(true)
+/// setrawcookie(): Argument #2 ($value) cannot contain ",", ";", " ", "\t", "\r", "\n", "\013", or "\014"
+/// ```
+fn setrawcookie(req: &mut Request) -> Result<Value, Thrown> {
+    setcookie_common(req, true)
 }
