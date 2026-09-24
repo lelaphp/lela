@@ -69,8 +69,18 @@ struct State {
 pub fn extension() -> Extension {
     let mut builder = ExtensionBuilder::default()
         .functions(functions::natives())
-        .classes(exceptions::classes())
-        .classes(iterators::classes());
+        .classes(exceptions::classes());
+    for ((decl, methods), payload) in iterators::classes() {
+        builder = match payload {
+            iterators::Payload::Dual => {
+                builder.class_payload::<iterators::DualIt>(decl, methods, &iterators::DUAL)
+            }
+            iterators::Payload::Rec => {
+                builder.class_payload::<iterators::RecIt>(decl, methods, &iterators::REC)
+            }
+            iterators::Payload::None => builder.classes(vec![(decl, methods)]),
+        };
+    }
     for (decl, methods) in array::classes() {
         builder = builder.class_payload::<array::SplArray>(decl, methods, &array::HANDLERS);
     }
@@ -298,6 +308,14 @@ fn long_or(req: &mut Request, position: u32, default: i64) -> Result<i64, Thrown
     long(req, position)
 }
 
+/// `Z_PARAM_LONG_OR_NULL`.
+fn nullable_long(req: &mut Request, position: u32) -> Result<Option<i64>, Thrown> {
+    match given(req, position) {
+        Some(v) if !matches!(v.deref().as_ref(), ValueRef::Null) => long(req, position).map(Some),
+        _ => Ok(None),
+    }
+}
+
 /// `$this` of the method being served.
 fn this(req: &mut Request) -> Result<PhpObject, Thrown> {
     match req.this() {
@@ -306,14 +324,6 @@ fn this(req: &mut Request) -> Result<PhpObject, Thrown> {
             req,
             "InternalError: an SPL method served without its receiver",
         )),
-    }
-}
-
-/// `Z_PARAM_LONG_OR_NULL`.
-fn nullable_long(req: &mut Request, position: u32) -> Result<Option<i64>, Thrown> {
-    match given(req, position) {
-        Some(v) if !matches!(v.deref().as_ref(), ValueRef::Null) => long(req, position).map(Some),
-        _ => Ok(None),
     }
 }
 

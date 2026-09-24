@@ -349,6 +349,32 @@ pub fn exit(req: &mut Request, status: &Value) -> Thrown {
     Thrown::of(None)
 }
 
+/// `zend_clear_exception`: the throwable a call left pending taken off
+/// the request and given up, as SPL's `CATCH_GET_CHILD` swallows what a
+/// child's `getChildren()` threw. A fatal or an `exit` is not a throwable
+/// and cannot be cleared; it comes back as the `Err` to hand on.
+///
+/// ```php
+/// class Bad extends RecursiveArrayIterator {
+///     function getChildren(): ?RecursiveArrayIterator { throw new Exception("no children"); }
+/// }
+/// $it = new RecursiveIteratorIterator(new Bad([1, [2], 3]), RecursiveIteratorIterator::LEAVES_ONLY, RecursiveIteratorIterator::CATCH_GET_CHILD);
+/// foreach ($it as $v) echo $v, ";";
+/// ```
+/// ```expect
+/// 1;3;
+/// ```
+pub fn clear(req: &mut Request, thrown: Thrown) -> Result<(), Thrown> {
+    let Some(exception) = thrown.exception().copied() else {
+        return Err(thrown);
+    };
+    if req.pending() == Some(exception) {
+        req.take_pending();
+    }
+    req.release(exception.as_value());
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use php_unit::decl::{FunctionDecl, Name, Parameter, Type};

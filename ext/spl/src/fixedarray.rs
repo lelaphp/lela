@@ -370,6 +370,24 @@ impl ObjectHandlers for Handlers {
     }
 }
 
+/// `safe_emalloc(size, sizeof(zval), 0)`'s checks before a row of
+/// `size` elements is laid down: php's `Possible integer overflow in
+/// memory allocation` fatal where the bytes overflow, and the memory
+/// limit's where they do not fit, both before anything is built.
+fn reserve(req: &mut Request, size: usize) -> Result<(), Thrown> {
+    let Some(bytes) = size.checked_mul(16) else {
+        return Err(php_ext::raising::fatal(
+            req,
+            &format!("Possible integer overflow in memory allocation ({size} * 16 + 0)"),
+        ));
+    };
+    if bytes > 65536 {
+        let probe = PhpString::filled(req, bytes, |_| {})?;
+        req.release(Value::string(probe));
+    }
+    Ok(())
+}
+
 /// `spl_fixedarray_object_clone`: the elements with one more owner each.
 fn clone_array(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
     let elements = with(req, object, |a| a.elements.clone())?;
@@ -396,11 +414,12 @@ fn construct(req: &mut Request) -> Result<Value, Thrown> {
     if size < 0 {
         return Err(arg_value_error(req, 1, "be greater than or equal to 0"));
     }
-    with(req, this, |a| {
-        if a.elements.is_empty() {
-            a.elements = vec![Value::null(); usize::try_from(size).unwrap_or(0)];
-        }
-    })?;
+    if !with(req, this, |a| a.elements.is_empty())? {
+        return Ok(Value::null());
+    }
+    let size = usize::try_from(size).unwrap_or(0);
+    reserve(req, size)?;
+    with(req, this, |a| a.elements = vec![Value::null(); size])?;
     Ok(Value::null())
 }
 
@@ -555,7 +574,7 @@ fn from_array(req: &mut Request) -> Result<Value, Thrown> {
         let mut max = 0usize;
         for (key, _) in &rows {
             match key {
-                Key::Int(n) if *n >= 0 => max = max.max(usize::try_from(*n).unwrap_or(0)),
+                Key::Int(n) if *n >= 0 => max = max.max(usize::try_from(*n).unwrap_or(usize::MAX)),
                 _ => {
                     return Err(throw(
                         req,
@@ -565,7 +584,15 @@ fn from_array(req: &mut Request) -> Result<Value, Thrown> {
                 }
             }
         }
-        elements = vec![Value::null(); max + 1];
+        let Some(size) = max.checked_add(1).filter(|s| i64::try_from(*s).is_ok()) else {
+            return Err(throw(
+                req,
+                "InvalidArgumentException",
+                "integer overflow detected",
+            ));
+        };
+        reserve(req, size)?;
+        elements = vec![Value::null(); size];
         for (key, value) in rows {
             if let Key::Int(n) = key
                 && let Some(slot) = usize::try_from(n).ok().and_then(|n| elements.get_mut(n))
@@ -614,7 +641,8 @@ fn set_size(req: &mut Request) -> Result<Value, Thrown> {
     if size < 0 {
         return Err(arg_value_error(req, 1, "be greater than or equal to 0"));
     }
-    let size = usize::try_from(size).unwrap_or(0);
+    let size = usize::try_from(size).unwrap_or(usize::MAX);
+    reserve(req, size)?;
     let cut = with(req, this, |a| {
         if size < a.elements.len() {
             a.elements.split_off(size)
