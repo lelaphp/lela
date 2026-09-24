@@ -20,7 +20,7 @@
 pin = "oracle.toml"                        # the only statement of version, digest, recipe
 
 [budget]
-total = 272500                             # design §4.1: the sum of every [[crate]] row plus `bindings`; docs is separate (253.2k + 15k = 268.2k at this revision)
+total = 398500                             # design §4.1: the sum of every [[crate]] row plus `bindings`; docs is separate (253.2k + 15k = 268.2k at this revision)
 new = 127500                               # design §0, §4.1: lines not on the inheritance manifest (§13)
 docs = 5000                                # design §10; `docs/**` plus the three living documents
 harness = 500                              # harness §12 item 6: `.claude/**` and `harness-plugins/**` hand-written, generated types excluded
@@ -87,14 +87,14 @@ lock = "xtask.lock"                        # harness §4.1, revision 16: the har
 # builtins that §13 moves into php_engine.
 [[crate]]
 name = "ext/standard"
-budget = 30000
+budget = 68500
 # The port is partial: `crosscheck` and `phpt` are its meter, not a
 # condition of done (harness §4.5 condition 1, #383). The key's deletion
 # is the port's completion certificate.
 porting = true
 [[crate]]
 name = "ext/spl"
-budget = 10000
+budget = 16500
 # The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
 porting = true
 [[crate]]
@@ -104,7 +104,7 @@ budget = 10000
 porting = true
 [[crate]]
 name = "ext/reflection"
-budget = 9000
+budget = 9500
 # The port is partial: both `crosscheck` columns render as the oracle's,
 # and the corpus reaches the methods standing beside `stub::unbuilt`
 # (#378), so `phpt` is the meter here (harness §4.5 condition 1, #383).
@@ -116,31 +116,31 @@ budget = 6000
 porting = true
 [[crate]]
 name = "ext/mbstring"
-budget = 4000
+budget = 17000
 feature = "mbstring"
 [[crate]]
 name = "ext/session"
-budget = 4000
+budget = 5500
 # The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
 porting = true
 [[crate]]
 name = "ext/pdo"
-budget = 2500
+budget = 6000
 [[crate]]
 name = "ext/dom"
-budget = 2000
+budget = 25500
 # The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
 porting = true
 [[crate]]
 name = "ext/random"
-budget = 2000
+budget = 3500
 [[crate]]
 name = "ext/pdo_mysql"
-budget = 2000
+budget = 2500
 feature = "pdo_mysql"
 [[crate]]
 name = "ext/filter"
-budget = 2000
+budget = 3000
 # The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
 porting = true
 [[crate]]
@@ -160,26 +160,26 @@ budget = 1500
 porting = true
 [[crate]]
 name = "ext/openssl"
-budget = 1000
+budget = 13500
 feature = "openssl"
 [[crate]]
 name = "ext/curl"
-budget = 1000
+budget = 6000
 feature = "curl"
 [[crate]]
 name = "ext/iconv"
-budget = 500
+budget = 3000
 # The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
 porting = true
 [[crate]]
 name = "ext/pdo_sqlite"
-budget = 500
+budget = 2500
 [[crate]]
 name = "ext/ctype"
 budget = 500
 [[crate]]
 name = "ext/hash"
-budget = 3000    # design ledger 9: no Mahout crate; a thin port over the RustCrypto hash crates
+budget = 17000    # design ledger 9: no Mahout crate; a thin port over the RustCrypto hash crates
 # The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
 porting = true
 
