@@ -1043,7 +1043,7 @@ mod tests {
         let engine = Engine::builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let unit = with_cache(24);
-        let frame = req.push_frame(Arc::clone(&unit));
+        let frame = req.pushed(Arc::clone(&unit));
         for at in [0, 8, 16, 24] {
             assert_eq!(req.cached(frame, CacheSlot(at)), Cached::Unprimed);
         }
@@ -1061,7 +1061,7 @@ mod tests {
         );
         req.pop_frame();
 
-        let frame = req.push_frame(unit);
+        let frame = req.pushed(unit);
         assert_eq!(
             req.cached(frame, CacheSlot(16)),
             Cached::Unprimed,

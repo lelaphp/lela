@@ -12,10 +12,10 @@
 //! nowhere else, an array is `zend_hash` to the byte and an object is
 //! `zend_object` in its store, `zend_objects_store`, the destructor
 //! served through the seam with the heap handed back for it. The VM
-//! stack is still a safe stand-in whose public shape is `heap.lock`,
-//! and the copy of `zend_vm_stack` lands behind it (design §11, days
-//! 3–7). Nothing here panics: a slot that is not there reads as `UNDEF`,
-//! as php's uninitialised zval does.
+//! stack is `zend_vm_stack`'s pages, taken from the same heap, so a
+//! frame is memory the limit bounds as any value is. Nothing here
+//! panics: a slot that is not there reads as `UNDEF`, as php's
+//! uninitialised zval does.
 #![deny(
     clippy::undocumented_unsafe_blocks,
     clippy::multiple_unsafe_ops_per_block

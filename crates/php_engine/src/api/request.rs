@@ -895,11 +895,18 @@ impl Request {
         let web = description.is_web;
         let mut resources = Resources::default();
         let stream_type = crate::streams::register(&mut resources);
+        // `init_executor`'s `zend_vm_stack_init`: the first page of the
+        // VM stack, out of the heap the object store's table stands in.
+        // The main chunk holds it, so nothing refuses it; a heap that
+        // did would refuse the first push again, with php's fatal.
+        let mut heap = Heap::new();
+        let mut stack = VmStack::new();
+        let _laid = stack.open(&mut heap);
         let mut req = Request {
             shared,
             description,
-            heap: Heap::new(),
-            stack: VmStack::new(),
+            heap,
+            stack,
             vm: Vm::default(),
             map: MapTable::new(),
             states: Vec::new(),
@@ -997,6 +1004,13 @@ impl Request {
         &mut self.stack
     }
 
+    /// The first page of the VM stack the request runs on, out of its
+    /// heap, where none stands: what `zend_fiber_execute` takes for a
+    /// fiber's stack before the fiber's function is called.
+    pub(crate) fn open_stack(&mut self) -> Result<(), Fatal> {
+        self.stack.open(&mut self.heap)
+    }
+
     /// The engine's half of the frames: what the loop and the handlers
     /// read (design §5.6).
     pub(crate) fn vm(&self) -> &Vm {
@@ -1055,12 +1069,13 @@ impl Request {
 
     /// Push a frame for `unit`'s op array: its shape on the VM stack and
     /// its engine state, which are pushed and popped together and share a
-    /// `FrameRef`.
-    pub(crate) fn push_frame(&mut self, unit: Arc<Unit>) -> FrameRef {
+    /// `FrameRef`. A VM stack whose page the memory limit refuses is
+    /// the fatal php raises there, and nothing is pushed.
+    pub(crate) fn push_frame(&mut self, unit: Arc<Unit>) -> Result<FrameRef, Fatal> {
         let code = exec::code_of(&unit);
         let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
+        let frame = self.stack.push_frame(&mut self.heap, slots, 0)?;
         exec::init_runtime_cache(&mut self.map, code, exec::Body::Main);
-        let frame = self.stack.push_frame(slots);
         self.vm.push(unit);
         // `zend_execute` gives the main op array's frame `EG(symbol_table)`
         // and `i_init_code_execute_data` attaches it, so every CV name
@@ -1069,7 +1084,7 @@ impl Request {
             state.symbol_table = Some(TableId::GLOBAL);
         }
         self.attach_symbol_table(frame);
-        frame
+        Ok(frame)
     }
 
     /// The frame for the main op array of a file an `INCLUDE_OR_EVAL`
@@ -1085,15 +1100,17 @@ impl Request {
     /// to it, so the included code reads the includer's variables.
     /// `caller` is `prev_execute_data`, the frame whose opline is the
     /// `INCLUDE_OR_EVAL`, and `returns_to` its `VAR` where the value is
-    /// read.
+    /// read. The push comes first, as php's does, so a VM stack page the
+    /// memory limit refuses is the fatal and nothing else is touched.
     pub(crate) fn push_code_frame(
         &mut self,
         unit: Arc<Unit>,
         caller: FrameRef,
         returns_to: Option<(FrameRef, u32)>,
-    ) -> FrameRef {
+    ) -> Result<FrameRef, Fatal> {
         let code = exec::code_of(&unit);
         let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
+        let frame = self.stack.push_frame(&mut self.heap, slots, 0)?;
         let (this, called_scope, scope) = self.vm.at(caller).map_or((None, None, None), |state| {
             (state.this, state.called_scope, self.frame_scope(caller))
         });
@@ -1102,7 +1119,6 @@ impl Request {
         }
         let table = self.rebuild_symbol_table(caller);
         exec::init_runtime_cache(&mut self.map, code, exec::Body::Main);
-        let frame = self.stack.push_frame(slots);
         self.vm.push_body(
             unit,
             exec::Body::Main,
@@ -1118,7 +1134,7 @@ impl Request {
             state.symbol_table = Some(table);
         }
         self.attach_symbol_table(frame);
-        frame
+        Ok(frame)
     }
 
     /// `zend_leave_helper`'s arm for a nested code frame
@@ -1165,21 +1181,28 @@ impl Request {
     /// declared parameters kept beside the frame, and the receiver and
     /// the called scope carried over; `returns_to` is the caller's slot
     /// for what the frame returns and `caller` the frame whose opline
-    /// pushed the call, `None` where a native did. None for a function
-    /// that is no user function, which is the caller's internal error
-    /// to name.
+    /// pushed the call, `None` where a native did. The frame's room on
+    /// the VM stack is php's `zend_vm_calc_used_stack`, the extra
+    /// arguments' slots with it, and a page the memory limit refuses is
+    /// the fatal php raises at the push; a function that is no user
+    /// function is an internal error.
     pub(crate) fn push_user_frame(
         &mut self,
         function: Function,
         call: exec::CallState,
         returns_to: Option<(FrameRef, u32)>,
         caller: Option<FrameRef>,
-    ) -> Option<FrameRef> {
+    ) -> Result<FrameRef, Fatal> {
+        let no_body = || {
+            Fatal::Error(String::from(
+                "InternalError: a user function whose body the unit has not",
+            ))
+        };
         let (unit, body) = {
-            let user = self.user_function(function)?;
+            let user = self.user_function(function).ok_or_else(no_body)?;
             (Arc::clone(&user.unit), user.body)
         };
-        let code = exec::body_of(&unit, body)?;
+        let code = exec::body_of(&unit, body).ok_or_else(no_body)?;
         let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
         // The declared parameters, which is php's `common.num_args` and
         // excludes a variadic: an argument from the variadic's position
@@ -1189,9 +1212,10 @@ impl Request {
             decl.parameters.iter().filter(|p| !p.variadic).count()
         });
         let num_args = u32::try_from(call.arguments.len()).unwrap_or(u32::MAX);
+        let extra_args = call.arguments.len().saturating_sub(parameters);
+        let frame = self.stack.push_frame(&mut self.heap, slots, extra_args)?;
         let closure = call.closure;
         exec::init_runtime_cache(&mut self.map, code, body);
-        let frame = self.stack.push_frame(slots);
         self.vm.push_body(
             unit,
             body,
@@ -1223,7 +1247,7 @@ impl Request {
         for coerced in call.coerced {
             self.release(coerced);
         }
-        Some(frame)
+        Ok(frame)
     }
 
     /// The frame off both stacks, every owner its slots held given up
@@ -1253,7 +1277,7 @@ impl Request {
             }
             self.release_named(state.extra_named);
         }
-        self.stack.pop_frame();
+        self.stack.pop_frame(&mut self.heap);
     }
 
     /// The value in a slot of `frame`, a view of it: `ZVAL_COPY_VALUE`,
@@ -1626,13 +1650,8 @@ impl Request {
     fn serve_user(&mut self, function: Function, call: CallState) -> Result<Value, Thrown> {
         let standing = self.vm.frames().len();
         let passed = call.arguments.len();
-        let Some(frame) = self.push_user_frame(function, call, None, None) else {
-            return self
-                .fatal_of::<()>(Err(Fatal::Error(String::from(
-                    "InternalError: a user function whose body the unit has not",
-                ))))
-                .map(|()| Value::null());
-        };
+        let pushed = self.push_user_frame(function, call, None, None);
+        let frame = self.fatal_of(pushed)?;
         // `enter`'s own prologue, so a body reached from here stands
         // where a body reached from `DO_UCALL` stands: every `RECV*`
         // php runs is run, which is where a declared parameter type is
@@ -10891,6 +10910,17 @@ pub(crate) fn append_escaped(out: &mut String, bytes: &[u8]) {
             }
             byte => out.push(char::from(byte)),
         }
+    }
+}
+
+#[cfg(test)]
+impl Request {
+    /// [`Request::push_frame`] in a test, whose request no memory limit
+    /// holds, so the push is never refused.
+    pub(crate) fn pushed(&mut self, unit: Arc<Unit>) -> FrameRef {
+        let pushed = self.push_frame(unit);
+        assert_eq!(pushed.as_ref().err(), None, "a test's frame is pushed");
+        pushed.unwrap_or(FrameRef(0))
     }
 }
 

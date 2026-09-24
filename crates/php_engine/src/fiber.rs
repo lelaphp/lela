@@ -53,10 +53,6 @@ use crate::api::request::Request;
 use crate::api::values::{PhpObject, PhpString, Value};
 use crate::exec::Vm;
 
-/// `ZEND_FIBER_VM_STACK_SIZE`: the page a fiber's VM stack starts with,
-/// 1,024 zvals, where the request's own grows in 256 KiB pages.
-const VM_PAGE: usize = 1024 * 16;
-
 /// `sizeof(zend_fiber_stack)` on a 64-bit build without Valgrind or
 /// sanitizers: the pointer and the size `zend_fiber_stack_allocate`
 /// `emalloc`s beside the mapping.
@@ -167,8 +163,8 @@ struct Fiber {
     execution: Option<Execution>,
     /// `fiber->result`, one owner, `null` until the callable returns.
     result: Value,
-    /// The `emalloc`s php makes for a started fiber, the stack record
-    /// and the first VM page, counted by the heap as php's are.
+    /// The `emalloc` php makes for a started fiber beside its VM stack's
+    /// pages, the stack record, counted by the heap as php's is.
     blocks: Vec<Block>,
 }
 
@@ -714,7 +710,7 @@ fn start(req: &mut Request) -> Result<Value, Thrown> {
         }
     };
     let execution = Execution {
-        stack: php_heap::VmStack::new(),
+        stack: php_heap::VmStack::fiber(),
         vm: Vm::default(),
         error_reporting: req.ini_error_reporting(),
         stack_limit: StackLimit::fiber(stack.base(), stack.end(), reserved),
@@ -826,15 +822,12 @@ fn run(
     arguments: &[Value],
     named: &[(PhpString, Value)],
 ) -> Transfer {
-    let page = req.heap_mut().block(VM_PAGE);
-    let Ok(page) = req.fatal_of(page) else {
+    let opened = req.open_stack();
+    if req.fatal_of(opened).is_err() {
         if let Some(fiber) = object.native_mut::<Fiber>(req) {
             fiber.bailout = true;
         }
         return Transfer::Fatal;
-    };
-    if let Some(fiber) = object.native_mut::<Fiber>(req) {
-        fiber.blocks.push(page);
     }
     let outcome = call_named(req, callable, arguments, named);
     let held = object
@@ -940,10 +933,12 @@ fn switch_into(
             for block in blocks {
                 req.heap_mut().free_block(block);
             }
+            execution.stack.close(req.heap_mut());
             Ok(back)
         }
         Err(fatal) => {
             fiber.status = Status::Dead;
+            execution.stack.close(req.heap_mut());
             req.fatal_of::<()>(Err(fatal))?;
             Ok(Transfer::Fatal)
         }
@@ -1355,6 +1350,7 @@ fn destroy(req: &mut Request, object: PhpObject) {
         None => Execution::default(),
     };
     req.switch_execution(&mut execution);
+    execution.stack.close(req.heap_mut());
     let Some(fiber) = object.native_mut::<Fiber>(req) else {
         return;
     };

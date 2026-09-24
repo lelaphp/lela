@@ -43,7 +43,6 @@ FiberStack::resume
 Frame
 Frame::is_empty
 Frame::len
-Frame::new
 Frame::set
 Frame::slot
 Frame::slot_ptr
@@ -193,11 +192,14 @@ Strings::new
 Suspensions
 Switched
 VmStack
+VmStack::close
 VmStack::current
 VmStack::entry
+VmStack::fiber
 VmStack::frame
 VmStack::frame_mut
 VmStack::new
+VmStack::open
 VmStack::pop_entry
 VmStack::pop_frame
 VmStack::push_entry
