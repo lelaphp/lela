@@ -980,6 +980,55 @@ impl Ops for Memory {
     }
 }
 
+/// A kind an extension implements, [`crate::api::request::StreamOps`],
+/// served as every kind here is.
+struct OfExtension(Box<dyn crate::api::request::StreamOps>);
+
+impl Ops for OfExtension {
+    fn label(&self) -> &'static str {
+        self.0.label()
+    }
+
+    fn write(&mut self, req: &mut Request, buf: &[u8]) -> Option<usize> {
+        self.0.write(req, buf)
+    }
+
+    fn read(&mut self, req: &mut Request, buf: &mut [u8], eof: &mut bool) -> Option<usize> {
+        self.0.read(req, buf, eof)
+    }
+
+    fn close(&mut self, req: &mut Request) -> i32 {
+        self.0.close(req);
+        0
+    }
+
+    fn seek(
+        &mut self,
+        req: &mut Request,
+        offset: i64,
+        whence: Option<Whence>,
+        position: &mut i64,
+    ) -> Option<bool> {
+        self.0.seek(req, offset, whence, position)
+    }
+
+    fn seekable(&self) -> bool {
+        self.0.seekable()
+    }
+
+    fn stat(&mut self, _req: &mut Request) -> Option<StatBuf> {
+        let size = self.0.size()?;
+        let mut buf = [0; 13];
+        buf[7] = size;
+        Some(buf)
+    }
+}
+
+/// `_php_stream_alloc` over a kind an extension implements.
+pub(crate) fn of_extension(ops: Box<dyn crate::api::request::StreamOps>, mode: &[u8]) -> PhpStream {
+    PhpStream::new(Box::new(OfExtension(ops)), mode)
+}
+
 /// `_php_stream_memory_create` (`Z/main/streams/memory.c:271`): empty,
 /// at zero, unbuffered.
 fn memory(mode: TempMode) -> PhpStream {

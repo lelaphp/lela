@@ -12,6 +12,7 @@ abi::DependencyKind
 abi::Extension
 abi::ExtensionBuilder
 abi::ExtensionBuilder::build
+abi::ExtensionBuilder::class_constants
 abi::ExtensionBuilder::class_payload
 abi::ExtensionBuilder::class_with
 abi::ExtensionBuilder::classes
@@ -22,9 +23,11 @@ abi::ExtensionBuilder::functions
 abi::ExtensionBuilder::info
 abi::ExtensionBuilder::ini
 abi::ExtensionBuilder::on_modify
+abi::ExtensionBuilder::register
 abi::ExtensionBuilder::request_state
 abi::ExtensionBuilder::rinit
 abi::ExtensionBuilder::rshutdown
+abi::ExtensionBuilder::trampolines
 abi::FromArgument
 abi::InOut
 abi::IniVerdict
@@ -199,6 +202,7 @@ request::PHP_VERSION
 request::PathIntent
 request::Request
 request::Request::absolutize
+request::Request::active_function_name
 request::Request::addref
 request::Request::argument
 request::Request::argument_count
@@ -265,6 +269,7 @@ request::Request::loaded_extensions
 request::Request::memory_peak
 request::Request::memory_usage
 request::Request::named_arguments
+request::Request::new_stream
 request::Request::open_dir
 request::Request::open_stream
 request::Request::os_error_text
@@ -277,6 +282,7 @@ request::Request::register_filter
 request::Request::register_shutdown_function
 request::Request::register_tick_function
 request::Request::register_wrapper
+request::Request::registered
 request::Request::release
 request::Request::remove_filter
 request::Request::request_headers
@@ -313,6 +319,7 @@ request::Request::temp_dir
 request::Request::temporary_name
 request::Request::this
 request::Request::tmpfile
+request::Request::trampoline
 request::Request::transports
 request::Request::umask
 request::Request::unregister_tick_function
@@ -364,6 +371,14 @@ request::Stream::write
 request::StreamFilter
 request::StreamFilter::close
 request::StreamFilter::filter
+request::StreamOps
+request::StreamOps::close
+request::StreamOps::label
+request::StreamOps::read
+request::StreamOps::seek
+request::StreamOps::seekable
+request::StreamOps::size
+request::StreamOps::write
 request::StreamWrapper
 request::Whence
 request::Whence::from_int

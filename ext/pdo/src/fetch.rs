@@ -1,0 +1,1541 @@
+//! `pdo_stmt.c`'s fetch half: the fetch style as a type ([`Mode`], `enum
+//! pdo_fetch_type` with its flags as a [`Flags`] set), decoded where php
+//! verifies it (`pdo_verify_fetch_mode`); what the default style fetches
+//! with ([`Target`], php's `stmt->fetch` union); a column's value as
+//! `fetch_value` converts it; and a row as `do_fetch` shapes it, with
+//! `fetch()`, `fetchAll()`, `fetchColumn()`, `fetchObject()` and
+//! `setFetchMode()` over it.
+
+use php_ext::abi::Callable;
+use php_ext::call::{call, call_array, known_method, lookup_class, new_object};
+use php_ext::coerce::{callable_checked, to_long, to_string, truthy, value_name};
+use php_ext::decl::Name;
+use php_ext::raising::{Level, Thrown, arg_count_error, argument_error, docref, throw};
+use php_ext::request::Request;
+use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+
+use crate::connector::{BindEvent, BindKind, Orientation, SqlState};
+use crate::dbh::{Dbh, Nulls};
+use crate::error::{self, On};
+use crate::stmt;
+use crate::{arity, long_arg};
+
+/// `enum pdo_fetch_type`, the style without its bits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Kind {
+    Default,
+    Lazy,
+    Assoc,
+    Num,
+    Both,
+    Obj,
+    Bound,
+    Column,
+    Class,
+    Into,
+    Func,
+    Named,
+    KeyPair,
+}
+
+impl Kind {
+    /// The low four bits, `how & ~PDO_FETCH_FLAGS`; `None` for the three
+    /// numbers php names no style.
+    fn of(bits: i64) -> Option<Kind> {
+        Some(match bits & 0xF {
+            0 => Kind::Default,
+            1 => Kind::Lazy,
+            2 => Kind::Assoc,
+            3 => Kind::Num,
+            4 => Kind::Both,
+            5 => Kind::Obj,
+            6 => Kind::Bound,
+            7 => Kind::Column,
+            8 => Kind::Class,
+            9 => Kind::Into,
+            10 => Kind::Func,
+            11 => Kind::Named,
+            12 => Kind::KeyPair,
+            _ => return None,
+        })
+    }
+}
+
+/// One fetch bit, the bits above the style.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Flag {
+    Group = 32,
+    Unique = 64,
+    ClassType = 128,
+    PropsLate = 256,
+    Serialize = 512,
+}
+
+/// `how & PDO_FETCH_FLAGS`, as a set.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Flags(i64);
+
+impl Flags {
+    fn of(bits: i64) -> Flags {
+        Flags(bits & !0xF)
+    }
+
+    pub(crate) fn has(self, flag: Flag) -> bool {
+        self.0 & flag as i64 != 0
+    }
+
+    fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Whether the set is `flag` and nothing else, php's `bits ==
+    /// PDO_FETCH_GROUP`.
+    fn is(self, flag: Flag) -> bool {
+        self.0 == flag as i64
+    }
+}
+
+/// A fetch style as a fetch reads it: the style, `None` for a number php
+/// names none, and its bits.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Mode {
+    pub(crate) kind: Option<Kind>,
+    pub(crate) flags: Flags,
+}
+
+impl Mode {
+    /// `how` split, the stored default standing in for
+    /// `PDO_FETCH_USE_DEFAULT`, as `do_fetch` resolves it.
+    fn resolve(how: i64, default: i64) -> Mode {
+        let how = if Kind::of(how) == Some(Kind::Default) && Flags::of(how).is_empty() {
+            default
+        } else {
+            how
+        };
+        Mode {
+            kind: Kind::of(how),
+            flags: Flags::of(how),
+        }
+    }
+}
+
+/// `pdo_verify_fetch_mode`: `how` held to php's refusals, the argument
+/// `arg` named, as `fetch()` (`fetch_all` false) or `fetchAll()` asks.
+fn verify(
+    req: &mut Request,
+    default: i64,
+    how: i64,
+    arg: u32,
+    fetch_all: bool,
+) -> Result<(), Thrown> {
+    let bitmask = |req: &mut Request| {
+        argument_error(
+            req,
+            "ValueError",
+            arg,
+            "must be a bitmask of PDO::FETCH_* constants",
+        )
+    };
+    if !(0..1024).contains(&how) {
+        return Err(bitmask(req));
+    }
+    let (mut kind, mut flags) = (Kind::of(how), Flags::of(how));
+    if kind == Some(Kind::Default) {
+        kind = Kind::of(default);
+        flags = Flags::of(default);
+    }
+    if !flags.is_empty() {
+        let class_flags =
+            flags.has(Flag::ClassType) || flags.has(Flag::PropsLate) || flags.has(Flag::Serialize);
+        if class_flags && kind != Some(Kind::Class) {
+            return Err(argument_error(
+                req,
+                "ValueError",
+                arg,
+                "cannot use PDO::FETCH_CLASSTYPE, PDO::FETCH_PROPS_LATE, or PDO::FETCH_SERIALIZE fetch flags with a fetch mode other than PDO::FETCH_CLASS",
+            ));
+        }
+        if flags.has(Flag::Serialize) {
+            docref(
+                req,
+                Level::Deprecated,
+                "The PDO::FETCH_SERIALIZE mode is deprecated",
+            );
+        }
+    }
+    match kind {
+        Some(Kind::Func) if !fetch_all => Err(argument_error(
+            req,
+            "ValueError",
+            arg,
+            "PDO::FETCH_FUNC can only be used with PDOStatement::fetchAll()",
+        )),
+        Some(Kind::Lazy) if fetch_all => Err(argument_error(
+            req,
+            "ValueError",
+            arg,
+            "PDO::FETCH_LAZY cannot be used with PDOStatement::fetchAll()",
+        )),
+        Some(Kind::Into) if fetch_all => Err(argument_error(
+            req,
+            "ValueError",
+            arg,
+            "PDO::FETCH_INTO cannot be used with PDOStatement::fetchAll()",
+        )),
+        Some(Kind::Default) | None => Err(bitmask(req)),
+        Some(_) => Ok(()),
+    }
+}
+
+/// `stmt->fetch`: what the default style fetches with, the column of
+/// `FETCH_COLUMN`, the class and constructor arguments of `FETCH_CLASS`
+/// (one owner of the array), or the object of `FETCH_INTO` (one owner).
+#[derive(Clone, Copy, Default)]
+pub(crate) enum Target {
+    #[default]
+    None,
+    Column(i64),
+    Class {
+        class: ClassId,
+        args: Option<PhpArray>,
+    },
+    Into(PhpObject),
+}
+
+impl Target {
+    /// `pdo_stmt_free_default_fetch_mode`.
+    pub(crate) fn release(self, req: &mut Request) {
+        match self {
+            Target::Class {
+                args: Some(args), ..
+            } => req.release(Value::array(args)),
+            Target::Into(object) => req.release(object.as_value()),
+            _ => {}
+        }
+    }
+
+    /// What the target owns, for the cycle collector.
+    pub(crate) fn visit(&self, visit: &mut dyn FnMut(Value)) {
+        match self {
+            Target::Class {
+                args: Some(args), ..
+            } => visit(Value::array(*args)),
+            Target::Into(object) => visit(object.as_value()),
+            _ => {}
+        }
+    }
+
+    fn column(self) -> i64 {
+        match self {
+            Target::Column(n) => n,
+            _ => 0,
+        }
+    }
+}
+
+/// What one fetch reads beside the statement's own target: the class
+/// `fetchObject()` and `fetchAll()` name for this call, and the
+/// function `fetchAll(PDO::FETCH_FUNC)` is given.
+#[derive(Default)]
+struct With {
+    class: Option<(ClassId, Option<PhpArray>)>,
+    func: Option<Callable>,
+}
+
+// ---- one value
+
+/// `fetch_value`: column `column` of the current row, one owner the
+/// caller's, the connection's null handling and stringification and the
+/// bound type `ty` applied as php applies them.
+pub(super) fn value(
+    req: &mut Request,
+    object: PhpObject,
+    column: i64,
+    ty: Option<BindKind>,
+) -> Result<Value, Thrown> {
+    let count = stmt::read(req, object, |s| s.column_count).unwrap_or(0);
+    let Ok(at) = usize::try_from(column) else {
+        return Err(throw(
+            req,
+            "ValueError",
+            "Column index must be greater than or equal to 0",
+        ));
+    };
+    if at >= count {
+        return Err(throw(req, "ValueError", "Invalid column index"));
+    }
+    let got = stmt::with_driver(req, object, |req, driver| driver.value(req, at, ty))?;
+    let mut value = match got {
+        Ok(value) => value,
+        Err(failure) => {
+            stmt::record(req, object, failure)?;
+            Value::null()
+        }
+    };
+    let (nulls, stringify) = stmt::dbh_of(req, object)
+        .and_then(|dbh| dbh.native::<Dbh>(req).map(|d| (d.nulls, d.stringify)))
+        .unwrap_or((Nulls::Natural, false));
+    if nulls == Nulls::EmptyString && value.as_str_bytes().is_some_and(<[u8]>::is_empty) {
+        req.release(value);
+        value = Value::null();
+    }
+    let ty = if stringify { Some(BindKind::Str) } else { ty };
+    if let Some(ty) = ty
+        && !crate::is_null(&value)
+    {
+        value = convert(req, value, ty)?;
+    }
+    if nulls == Nulls::ToString && crate::is_null(&value) {
+        value = crate::string(req, b"")?;
+    }
+    Ok(value)
+}
+
+/// The conversions `fetch_value` makes for a bound type.
+fn convert(req: &mut Request, value: Value, ty: BindKind) -> Result<Value, Thrown> {
+    let converted = match ty {
+        BindKind::Int => Value::int(to_long(req, &value)?),
+        BindKind::Bool => Value::bool(truthy(req, &value)),
+        BindKind::Str => match value.as_ref() {
+            ValueRef::Bool(false) => crate::string(req, b"0")?,
+            ValueRef::Str(_) => return Ok(value),
+            ValueRef::Resource(_) => match php_ext::request::Stream::from_value(req, &value) {
+                Some(stream) => Value::string(stream.copy_to_mem(req, None)?),
+                None => crate::string(req, b"")?,
+            },
+            _ => Value::string(to_string(req, &value)?),
+        },
+        BindKind::Null => Value::null(),
+        BindKind::Lob => match value.as_str_bytes().map(<[u8]>::to_vec) {
+            Some(bytes) => memory_stream(req, &bytes)?,
+            None => return Ok(value),
+        },
+        BindKind::Stmt | BindKind::Other(_) => return Ok(value),
+    };
+    req.release(value);
+    Ok(converted)
+}
+
+/// `php_stream_memory_open(TEMP_STREAM_READONLY, str)`: a stream over
+/// the bytes, at its start.
+fn memory_stream(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
+    let Some(stream) = req.open_stream(b"php://memory", b"w+b", false)? else {
+        return Ok(Value::null());
+    };
+    stream.write(req, bytes);
+    stream.seek(req, 0, php_ext::request::Whence::Set);
+    Ok(stream.as_value())
+}
+
+// ---- one row
+
+/// `do_fetch_common`: the connector moved to the next row, the columns
+/// described where they were not, and each bound column written;
+/// `false` where no row came or a step failed, its error recorded.
+fn common(
+    req: &mut Request,
+    object: PhpObject,
+    orientation: Orientation,
+    offset: i64,
+) -> Result<bool, Thrown> {
+    if !stmt::read(req, object, |s| s.executed).unwrap_or(false) {
+        return Ok(false);
+    }
+    if !stmt::dispatch(req, object, BindEvent::FetchPre)? {
+        return Ok(false);
+    }
+    let moved = stmt::with_driver(req, object, |req, driver| {
+        driver.fetch(req, orientation, offset)
+    })?;
+    match moved {
+        Ok(true) => {}
+        Ok(false) => return Ok(false),
+        Err(failure) => {
+            stmt::record(req, object, failure)?;
+            return Ok(false);
+        }
+    }
+    if !stmt::read(req, object, |s| s.columns.is_some()).unwrap_or(false)
+        && !stmt::describe_columns(req, object)?
+    {
+        return Ok(false);
+    }
+    if !stmt::dispatch(req, object, BindEvent::FetchPost)? {
+        return Ok(false);
+    }
+    let bound: Vec<(i64, Value, BindKind)> = stmt::read(req, object, |s| {
+        s.columns_bound
+            .iter()
+            .filter(|b| b.position >= 0)
+            .map(|b| (b.position, b.value, b.ty.kind()))
+            .collect()
+    })
+    .unwrap_or_default();
+    for (position, cell, ty) in bound {
+        let Some(cell) = cell.as_php_ref().copied() else {
+            continue;
+        };
+        let fetched = value(req, object, position, Some(ty))?;
+        cell.set(req, fetched);
+    }
+    Ok(true)
+}
+
+/// A symbol-table key for a column's name, `zend_symtable_update`'s: a
+/// canonical decimal is the integer.
+fn symtable_key(req: &mut Request, name: &[u8]) -> Result<Key, Thrown> {
+    Ok(Key::from_string(PhpString::new(req, name)?))
+}
+
+/// `do_fetch`: the next row shaped as `how` asks, with the group key
+/// where `grouped`; `None` where no row came or the fetch failed, its
+/// error recorded on the statement and not yet handled.
+fn shaped(
+    req: &mut Request,
+    object: PhpObject,
+    how: i64,
+    orientation: Orientation,
+    offset: i64,
+    grouped: bool,
+    with: &With,
+) -> Result<Option<(Value, Option<Value>)>, Thrown> {
+    let (default, target) =
+        stmt::read(req, object, |s| (s.default_fetch, s.target)).unwrap_or((4, Target::None));
+    let mode = Mode::resolve(how, default);
+    let flags = mode.flags;
+    if !common(req, object, orientation, offset)? {
+        return Ok(None);
+    }
+    let Some(kind) = mode.kind else {
+        return Ok(Some((Value::null(), None)));
+    };
+    match kind {
+        Kind::Bound => return Ok(Some((Value::bool(true), None))),
+        Kind::Lazy => return crate::row::lazy(req, object).map(|v| Some((v, None))),
+        Kind::Column => return column_row(req, object, flags, target.column(), grouped),
+        _ => {}
+    }
+    let Some(dbh) = stmt::dbh_of(req, object) else {
+        return Ok(None);
+    };
+    let failed =
+        |req: &mut Request, supp: &str| -> Result<Option<(Value, Option<Value>)>, Thrown> {
+            error::raise_impl(req, dbh, On::Stmt(object), SqlState::GENERAL, Some(supp))?;
+            Ok(None)
+        };
+    let count = stmt::read(req, object, |s| s.column_count).unwrap_or(0);
+    let mut next = 0i64;
+    let mut class_args = None;
+    let mut class = None;
+    let out = match kind {
+        Kind::Default | Kind::Assoc | Kind::Both | Kind::Num | Kind::Named => {
+            Value::array(PhpArray::new(req)?)
+        }
+        Kind::Obj => {
+            let Some(std) = lookup_class(req, b"stdClass")? else {
+                return Ok(None);
+            };
+            new_object(req, std)?.as_value()
+        }
+        Kind::Class => {
+            let named = with.class.or(match target {
+                Target::Class { class, args } => Some((class, args)),
+                _ => None,
+            });
+            let Some((instance, ce, args)) =
+                class_object(req, object, dbh, flags, named, &mut next)?
+            else {
+                return Ok(None);
+            };
+            class = Some(ce);
+            class_args = args;
+            instance
+        }
+        Kind::Into => {
+            let Target::Into(into) = target else {
+                return failed(req, "No fetch-into object specified.");
+            };
+            req.addref(&into.as_value());
+            into.as_value()
+        }
+        Kind::Func => {
+            if with.func.is_none() {
+                return failed(req, "No fetch function specified");
+            }
+            Value::null()
+        }
+        Kind::Lazy | Kind::Bound | Kind::Column | Kind::KeyPair => Value::null(),
+    };
+    stmt::write(req, object, |s| s.in_fetch = true);
+    let filled = fill(
+        req, object, kind, flags, out, next, count, grouped, with, class, class_args,
+    );
+    stmt::write(req, object, |s| s.in_fetch = false);
+    filled
+}
+
+/// `FETCH_CLASS`'s object: of the class the first column names under
+/// `FETCH_CLASSTYPE` or of the one the call or the default names, made
+/// without its constructor, which `FETCH_PROPS_LATE` serves now; with
+/// the class and its constructor arguments. `None` where php refuses
+/// the fetch, its error raised on the statement.
+fn class_object(
+    req: &mut Request,
+    object: PhpObject,
+    dbh: PhpObject,
+    flags: Flags,
+    named: Option<(ClassId, Option<PhpArray>)>,
+    next: &mut i64,
+) -> Result<Option<(Value, ClassId, Option<PhpArray>)>, Thrown> {
+    let refuse = |req: &mut Request, supp: &str| {
+        error::raise_impl(req, dbh, On::Stmt(object), SqlState::GENERAL, Some(supp))
+    };
+    let ce = if flags.has(Flag::ClassType) {
+        let name = value(req, object, *next, None)?;
+        *next += 1;
+        // A column that is no string leaves the class the call or the
+        // default named, as `do_fetch` only looks up a string.
+        let found = match name.as_str_bytes().map(<[u8]>::to_vec) {
+            Some(name) => lookup_class(req, &name)?,
+            None => named.map(|(class, _)| class),
+        };
+        req.release(name);
+        match found {
+            Some(found) => found,
+            None => match lookup_class(req, b"stdClass")? {
+                Some(std) => std,
+                None => return Ok(None),
+            },
+        }
+    } else if let Some((class, _)) = named {
+        class
+    } else {
+        refuse(req, "No fetch class specified")?;
+        return Ok(None);
+    };
+    let args = named.and_then(|(_, args)| args);
+    if flags.has(Flag::Serialize) {
+        if !implements_serializable(req, ce) {
+            refuse(req, "cannot unserialize class")?;
+            return Ok(None);
+        }
+        return Ok(Some((new_object(req, ce)?.as_value(), ce, args)));
+    }
+    let instance = new_object(req, ce)?;
+    if flags.has(Flag::PropsLate)
+        && let Err(thrown) = construct(req, instance, args)
+    {
+        req.release(instance.as_value());
+        return Err(thrown);
+    }
+    Ok(Some((instance.as_value(), ce, args)))
+}
+
+/// The body of `do_fetch` past the container's making: the group key,
+/// a serialized object's payload, each column written as the style
+/// writes it, and the constructor or the function served after.
+#[allow(clippy::too_many_arguments)]
+fn fill(
+    req: &mut Request,
+    object: PhpObject,
+    kind: Kind,
+    flags: Flags,
+    mut out: Value,
+    mut next: i64,
+    count: usize,
+    grouped: bool,
+    with: &With,
+    class: Option<ClassId>,
+    class_args: Option<PhpArray>,
+) -> Result<Option<(Value, Option<Value>)>, Thrown> {
+    let mut key = None;
+    if grouped {
+        let fetched = value(req, object, next, None)?;
+        key = Some(Value::string(to_string(req, &fetched)?));
+        req.release(fetched);
+        next += 1;
+    }
+    if kind == Kind::Class && flags.has(Flag::Serialize) {
+        let payload = value(req, object, next, None)?;
+        let bytes = payload
+            .as_str_bytes()
+            .map(<[u8]>::to_vec)
+            .unwrap_or_default();
+        req.release(payload);
+        let text = crate::string(req, &bytes)?;
+        if let Some(made) = out.as_object().copied() {
+            let answered = php_ext::call::call_method(req, &made, b"unserialize", &[text]);
+            req.release(text);
+            match answered {
+                Ok(answered) => req.release(answered),
+                Err(thrown) => {
+                    req.release(out);
+                    return Err(thrown);
+                }
+            }
+        }
+        next += 1;
+    }
+    let names: Vec<Vec<u8>> = stmt::read(req, object, |s| {
+        s.columns
+            .as_ref()
+            .map(|c| c.iter().map(|c| c.name.clone()).collect())
+            .unwrap_or_default()
+    })
+    .unwrap_or_default();
+    let mut arguments = Vec::new();
+    let mut at = next;
+    while usize::try_from(at).is_ok_and(|a| a < count) {
+        let fetched = value(req, object, at, None)?;
+        let name = names
+            .get(usize::try_from(at).unwrap_or(0))
+            .cloned()
+            .unwrap_or_default();
+        match kind {
+            Kind::Assoc => {
+                let key = symtable_key(req, &name)?;
+                set(req, &mut out, key, fetched)?;
+            }
+            Kind::Default | Kind::Both => {
+                let key = symtable_key(req, &name)?;
+                req.addref(&fetched);
+                set(req, &mut out, key, fetched)?;
+                if let Some(mut array) = out.as_array().copied() {
+                    if array.contains(&Key::Int(at)) {
+                        req.release(fetched);
+                    } else {
+                        array.set(req, Key::Int(at), fetched)?;
+                        out = Value::array(array);
+                    }
+                }
+            }
+            Kind::Named => named(req, &mut out, &name, fetched)?,
+            Kind::Num => {
+                if let Some(mut array) = out.as_array().copied() {
+                    array.append(req, fetched)?;
+                    out = Value::array(array);
+                }
+            }
+            Kind::Class | Kind::Obj | Kind::Into => {
+                if let Some(made) = out.as_object().copied() {
+                    let name = PhpString::new(req, &name)?;
+                    made.set_prop(req, name, fetched)?;
+                }
+            }
+            Kind::Func => arguments.push(fetched),
+            Kind::Lazy | Kind::Bound | Kind::Column | Kind::KeyPair => req.release(fetched),
+        }
+        at += 1;
+    }
+    if kind == Kind::Class
+        && !flags.has(Flag::PropsLate)
+        && !flags.has(Flag::Serialize)
+        && let (Some(made), Some(_)) = (out.as_object().copied(), class)
+        && let Err(thrown) = construct(req, made, class_args)
+    {
+        req.release(out);
+        return Err(thrown);
+    }
+    if kind == Kind::Func
+        && let Some(func) = &with.func
+    {
+        let answered = call(req, func, &arguments);
+        for argument in arguments {
+            req.release(argument);
+        }
+        out = answered?;
+    }
+    Ok(Some((out, key)))
+}
+
+/// `zend_symtable_update` on the row's array.
+fn set(req: &mut Request, out: &mut Value, key: Key, value: Value) -> Result<(), Thrown> {
+    if let Some(mut array) = out.as_array().copied() {
+        array.set(req, key, value)?;
+        *out = Value::array(array);
+    }
+    Ok(())
+}
+
+/// `FETCH_NAMED`'s column: a name seen before becomes a list of every
+/// value it had.
+fn named(req: &mut Request, out: &mut Value, name: &[u8], fetched: Value) -> Result<(), Thrown> {
+    let Some(mut array) = out.as_array().copied() else {
+        return Ok(());
+    };
+    let key = Key::Str(PhpString::new(req, name)?);
+    match array.get(&key) {
+        Some(current) => {
+            let mut list = if let Some(list) = current.as_array().copied() {
+                list
+            } else {
+                let mut list = PhpArray::new(req)?;
+                req.addref(&current);
+                list.append(req, current)?;
+                list
+            };
+            list.append(req, fetched)?;
+            array.set(req, key, Value::array(list))?;
+        }
+        None => array.set(req, key, fetched)?,
+    }
+    *out = Value::array(array);
+    Ok(())
+}
+
+/// Whether `class` implements `Serializable`, php's `ce->unserialize`
+/// being set.
+fn implements_serializable(req: &mut Request, class: ClassId) -> bool {
+    let Ok(Some(serializable)) = lookup_class(req, b"Serializable") else {
+        return false;
+    };
+    match new_object(req, class) {
+        Ok(probe) => {
+            let is = probe.instance_of(req, serializable);
+            req.release(probe.as_value());
+            is
+        }
+        Err(_) => false,
+    }
+}
+
+/// `pdo_call_fetch_object_constructor`: the class's constructor served
+/// on `made` with `args` as its named parameters.
+fn construct(req: &mut Request, made: PhpObject, args: Option<PhpArray>) -> Result<(), Thrown> {
+    let constructor = Name(b"__construct".as_slice().into());
+    let Some(callable) = known_method(req, made.class(), &constructor, Some(made)) else {
+        return Ok(());
+    };
+    let args = match args {
+        Some(args) => args,
+        None => PhpArray::new(req)?,
+    };
+    let answered = call_array(req, &callable, args)?;
+    req.release(answered);
+    Ok(())
+}
+
+/// `FETCH_COLUMN`'s one value, and its group key, as `do_fetch` reads
+/// the column the style and its bits name.
+fn column_row(
+    req: &mut Request,
+    object: PhpObject,
+    flags: Flags,
+    column: i64,
+    grouped: bool,
+) -> Result<Option<(Value, Option<Value>)>, Thrown> {
+    let count = stmt::read(req, object, |s| s.column_count).unwrap_or(0);
+    let colno = if (flags.has(Flag::Group) || flags.has(Flag::Unique)) && column == -1 {
+        1
+    } else {
+        column
+    };
+    if colno < 0 {
+        return Err(throw(
+            req,
+            "ValueError",
+            "Column index must be greater than or equal to 0",
+        ));
+    }
+    if usize::try_from(colno).is_ok_and(|c| c >= count) {
+        return Err(throw(req, "ValueError", "Invalid column index"));
+    }
+    let read_at = if flags.is(Flag::Group) && column == -1 {
+        1
+    } else if flags.is(Flag::Group) && colno != 0 {
+        0
+    } else {
+        colno
+    };
+    let fetched = value(req, object, read_at, None)?;
+    let key = if grouped {
+        let key_at = if flags.is(Flag::Group) && column > 0 {
+            colno
+        } else {
+            0
+        };
+        let raw = value(req, object, key_at, None)?;
+        let key = Value::string(to_string(req, &raw)?);
+        req.release(raw);
+        Some(key)
+    } else {
+        None
+    };
+    Ok(Some((fetched, key)))
+}
+
+/// One row as the default style shapes it, for the statement's iterator.
+pub(super) fn row(req: &mut Request, object: PhpObject, how: i64) -> Result<Option<Value>, Thrown> {
+    Ok(shaped(
+        req,
+        object,
+        how,
+        Orientation::Forward,
+        0,
+        false,
+        &With::default(),
+    )?
+    .map(|(value, _)| value))
+}
+
+/// `pdo_do_key_pair_fetch`: the next row's two columns into `container`
+/// as key and value; `false` where no row came or it had other than two
+/// columns.
+fn key_pair(
+    req: &mut Request,
+    object: PhpObject,
+    orientation: Orientation,
+    offset: i64,
+    container: &mut PhpArray,
+) -> Result<bool, Thrown> {
+    if !common(req, object, orientation, offset)? {
+        return Ok(false);
+    }
+    if stmt::read(req, object, |s| s.column_count).unwrap_or(0) != 2 {
+        if let Some(dbh) = stmt::dbh_of(req, object) {
+            error::raise_impl(
+                req,
+                dbh,
+                On::Stmt(object),
+                SqlState::GENERAL,
+                Some(
+                    "PDO::FETCH_KEY_PAIR fetch mode requires the result set to contain exactly 2 columns.",
+                ),
+            )?;
+        }
+        return Ok(false);
+    }
+    let key = value(req, object, 0, None)?;
+    let fetched = value(req, object, 1, None)?;
+    let key = if let Some(n) = key.as_int() {
+        Key::Int(n)
+    } else {
+        let text = to_string(req, &key)?;
+        req.release(key);
+        Key::from_string(text)
+    };
+    container.set(req, key, fetched)?;
+    Ok(true)
+}
+
+// ---- setting the default
+
+/// `pdo_stmt_setup_fetch_mode`: the default style and its target set from
+/// `mode` and the arguments after it, held to php's counts and types;
+/// `mode_arg` is the argument `mode` was, `1` for `setFetchMode()` and
+/// `2` for `PDO::query()`.
+pub(super) fn setup_mode(
+    req: &mut Request,
+    object: PhpObject,
+    mode: i64,
+    mode_arg: u32,
+    args: &[Value],
+) -> Result<(), Thrown> {
+    let old = stmt::write(req, object, |s| {
+        s.default_fetch = 4;
+        std::mem::take(&mut s.target)
+    })
+    .unwrap_or_default();
+    old.release(req);
+    verify(req, 4, mode, mode_arg, false)?;
+    let flags = Flags::of(mode);
+    let given = u32::try_from(args.len()).unwrap_or(u32::MAX);
+    let total = mode_arg + given;
+    let first = mode_arg + 1;
+    let count_error = |req: &mut Request, how: &str, n: u32| {
+        arg_count_error(
+            req,
+            &format!("{how} {n} arguments for the fetch mode provided, {total} given"),
+        )
+    };
+    let target = match Kind::of(mode) {
+        Some(
+            Kind::Default
+            | Kind::Lazy
+            | Kind::Assoc
+            | Kind::Num
+            | Kind::Both
+            | Kind::Obj
+            | Kind::Bound
+            | Kind::Named
+            | Kind::KeyPair,
+        ) => {
+            if given != 0 {
+                return Err(count_error(req, "exactly", mode_arg));
+            }
+            Target::None
+        }
+        Some(Kind::Column) => {
+            if given != 1 {
+                return Err(count_error(req, "exactly", first));
+            }
+            let Some(n) = args[0].as_int() else {
+                let name = value_name(req, &args[0]);
+                return Err(argument_error(
+                    req,
+                    "TypeError",
+                    first,
+                    &format!("must be of type int, {name} given"),
+                ));
+            };
+            if n < 0 {
+                return Err(argument_error(
+                    req,
+                    "ValueError",
+                    first,
+                    "must be greater than or equal to 0",
+                ));
+            }
+            Target::Column(n)
+        }
+        Some(Kind::Class) if flags.has(Flag::ClassType) => {
+            if given != 0 {
+                return Err(count_error(req, "exactly", mode_arg));
+            }
+            Target::None
+        }
+        Some(Kind::Class) => class_target(req, args, mode_arg, total)?,
+        Some(Kind::Into) => {
+            if total != first {
+                return Err(count_error(req, "exactly", first));
+            }
+            let Some(into) = args[0].as_object().copied() else {
+                let shown = value_name(req, &args[0]);
+                return Err(argument_error(
+                    req,
+                    "TypeError",
+                    first,
+                    &format!("must be of type object, {shown} given"),
+                ));
+            };
+            req.addref(&into.as_value());
+            Target::Into(into)
+        }
+        Some(Kind::Func) | None => {
+            return Err(argument_error(
+                req,
+                "ValueError",
+                mode_arg,
+                "must be one of the PDO::FETCH_* constants",
+            ));
+        }
+    };
+    stmt::write(req, object, |s| {
+        s.target = target;
+        s.default_fetch = mode;
+    });
+    Ok(())
+}
+
+/// `setup_fetch_mode`'s `FETCH_CLASS` arm: the class the first argument
+/// names and the constructor arguments the second may give, held to
+/// php's counts and types.
+fn class_target(
+    req: &mut Request,
+    args: &[Value],
+    mode_arg: u32,
+    total: u32,
+) -> Result<Target, Thrown> {
+    let given = u32::try_from(args.len()).unwrap_or(u32::MAX);
+    let first = mode_arg + 1;
+    let count_error = |req: &mut Request, how: &str, n: u32| {
+        arg_count_error(
+            req,
+            &format!("{how} {n} arguments for the fetch mode provided, {total} given"),
+        )
+    };
+    if given == 0 {
+        return Err(count_error(req, "at least", first));
+    }
+    if given > 2 {
+        return Err(count_error(req, "at most", mode_arg + 2));
+    }
+    let Some(name) = args[0].as_str_bytes().map(<[u8]>::to_vec) else {
+        let shown = value_name(req, &args[0]);
+        return Err(argument_error(
+            req,
+            "TypeError",
+            first,
+            &format!("must be of type string, {shown} given"),
+        ));
+    };
+    let Some(class) = lookup_class(req, &name)? else {
+        return Err(argument_error(
+            req,
+            "TypeError",
+            first,
+            "must be a valid class",
+        ));
+    };
+    let mut ctor_args = None;
+    if let Some(extra) = args.get(1) {
+        match extra.as_ref() {
+            ValueRef::Null => {}
+            ValueRef::Array(array) => {
+                if !array.is_empty() {
+                    if !has_constructor(req, class) {
+                        return Err(argument_error(
+                            req,
+                            "ValueError",
+                            3,
+                            "must be empty when class provided in argument #2 ($class) does not have a constructor",
+                        ));
+                    }
+                    req.addref(extra);
+                    ctor_args = Some(*array);
+                }
+            }
+            _ => {
+                let shown = value_name(req, extra);
+                return Err(argument_error(
+                    req,
+                    "TypeError",
+                    mode_arg + 2,
+                    &format!("must be of type ?array, {shown} given"),
+                ));
+            }
+        }
+    }
+    Ok(Target::Class {
+        class,
+        args: ctor_args,
+    })
+}
+
+/// Whether `class` declares or inherits a constructor.
+fn has_constructor(req: &mut Request, class: ClassId) -> bool {
+    let mut at = Some(class);
+    while let Some(class) = at {
+        let Some(decl) = req.class_decl(class) else {
+            return false;
+        };
+        if decl
+            .methods
+            .iter()
+            .any(|m| m.function.name.0.eq_ignore_ascii_case(b"__construct"))
+        {
+            return true;
+        }
+        let parent = decl.parent.clone();
+        at = parent.and_then(|p| lookup_class(req, &p.0).ok().flatten());
+    }
+    false
+}
+
+// ---- the methods
+
+/// `PDOStatement::fetch(int $mode = PDO::FETCH_DEFAULT, int $cursorOrientation = PDO::FETCH_ORI_NEXT, int $cursorOffset = 0): mixed`.
+///
+/// ```php
+/// $db = new PDO('sqlite::memory:');
+/// $s = $db->query("SELECT 1 AS a, 'x' AS b, NULL AS c");
+/// var_dump($s->fetch());
+/// $s = $db->query("SELECT 1 AS a, 2 AS a");
+/// var_dump($s->fetch(PDO::FETCH_NAMED), $s->fetch());
+/// $s = $db->query("SELECT 1 AS a");
+/// var_dump($s->fetch(PDO::FETCH_OBJ));
+/// try { $s->fetch(13); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// array(6) {
+///   ["a"]=>
+///   int(1)
+///   [0]=>
+///   int(1)
+///   ["b"]=>
+///   string(1) "x"
+///   [1]=>
+///   string(1) "x"
+///   ["c"]=>
+///   NULL
+///   [2]=>
+///   NULL
+/// }
+/// array(1) {
+///   ["a"]=>
+///   array(2) {
+///     [0]=>
+///     int(1)
+///     [1]=>
+///     int(2)
+///   }
+/// }
+/// bool(false)
+/// object(stdClass)#3 (1) {
+///   ["a"]=>
+///   int(1)
+/// }
+/// PDOStatement::fetch(): Argument #1 ($mode) must be a bitmask of PDO::FETCH_* constants
+/// ```
+pub(super) fn fetch(req: &mut Request) -> Result<Value, Thrown> {
+    arity(req, 0, 3)?;
+    let how = long_arg(req, 1, 0)?;
+    let orientation = Orientation::of(long_arg(req, 2, 0)?);
+    let offset = long_arg(req, 3, 0)?;
+    let (object, _) = stmt::this_stmt(req)?;
+    stmt::clear_error(req, object);
+    let default = stmt::read(req, object, |s| s.default_fetch).unwrap_or(4);
+    verify(req, default, how, 1, false)?;
+    if Kind::of(how) == Some(Kind::KeyPair) {
+        let mut out = PhpArray::new(req)?;
+        if key_pair(req, object, orientation, offset, &mut out)? {
+            return Ok(Value::array(out));
+        }
+        req.release(Value::array(out));
+        stmt::handle_error(req, object, false)?;
+        return Ok(Value::bool(false));
+    }
+    if let Some((value, _)) = shaped(
+        req,
+        object,
+        how,
+        orientation,
+        offset,
+        false,
+        &With::default(),
+    )? {
+        Ok(value)
+    } else {
+        stmt::handle_error(req, object, false)?;
+        Ok(Value::bool(false))
+    }
+}
+
+/// `PDOStatement::fetchObject(?string $class = "stdClass", array $constructorArgs = []): object|false`.
+///
+/// ```php
+/// class P { public $a; function __construct(public $tag = 'none') {} }
+/// $db = new PDO('sqlite::memory:');
+/// $s = $db->query('SELECT 1 AS a UNION SELECT 2');
+/// var_dump($s->fetchObject('P', ['t']), $s->fetchObject(), $s->fetchObject());
+/// try { $s->fetchObject('Nope'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// object(P)#3 (2) {
+///   ["a"]=>
+///   int(1)
+///   ["tag"]=>
+///   string(1) "t"
+/// }
+/// object(stdClass)#4 (1) {
+///   ["a"]=>
+///   int(2)
+/// }
+/// bool(false)
+/// PDOStatement::fetchObject(): Argument #1 ($class) must be a valid class name, Nope given
+/// ```
+pub(super) fn fetch_object(req: &mut Request) -> Result<Value, Thrown> {
+    arity(req, 0, 2)?;
+    let named = crate::nullable_bytes_arg(req, 1)?;
+    let args = crate::array_arg(req, 2)?;
+    let class = match named {
+        Some(name) => {
+            if let Some(class) = lookup_class(req, &name)? {
+                class
+            } else {
+                let shown = String::from_utf8_lossy(&name).into_owned();
+                return Err(argument_error(
+                    req,
+                    "TypeError",
+                    1,
+                    &format!("must be a valid class name, {shown} given"),
+                ));
+            }
+        }
+        None => match lookup_class(req, b"stdClass")? {
+            Some(class) => class,
+            None => return Ok(Value::bool(false)),
+        },
+    };
+    let (object, _) = stmt::this_stmt(req)?;
+    stmt::clear_error(req, object);
+    if args.is_some_and(|a| !a.is_empty()) && !has_constructor(req, class) {
+        return Err(argument_error(
+            req,
+            "ValueError",
+            2,
+            "must be empty when class provided in argument #1 ($class) does not have a constructor",
+        ));
+    }
+    let with = With {
+        class: Some((class, args)),
+        func: None,
+    };
+    if let Some((value, _)) = shaped(req, object, 8, Orientation::Forward, 0, false, &with)? {
+        Ok(value)
+    } else {
+        stmt::handle_error(req, object, false)?;
+        Ok(Value::bool(false))
+    }
+}
+
+/// `PDOStatement::fetchColumn(int $column = 0): mixed`.
+///
+/// ```php
+/// $db = new PDO('sqlite::memory:');
+/// $s = $db->query("SELECT 'a', 'b' UNION SELECT 'c', 'd'");
+/// var_dump($s->fetchColumn(1), $s->fetchColumn(), $s->fetchColumn());
+/// $s = $db->query('SELECT 1');
+/// try { $s->fetchColumn(3); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// string(1) "b"
+/// string(1) "c"
+/// bool(false)
+/// Invalid column index
+/// ```
+pub(super) fn fetch_column(req: &mut Request) -> Result<Value, Thrown> {
+    arity(req, 0, 1)?;
+    let column = long_arg(req, 1, 0)?;
+    let (object, _) = stmt::this_stmt(req)?;
+    stmt::clear_error(req, object);
+    if !common(req, object, Orientation::Forward, 0)? {
+        stmt::handle_error(req, object, false)?;
+        return Ok(Value::bool(false));
+    }
+    value(req, object, column, None)
+}
+
+/// `fetchAll(PDO::FETCH_CLASS, ...)`'s class, `stdClass` where none is
+/// named, and its constructor arguments.
+fn all_class(
+    req: &mut Request,
+    second: Option<Value>,
+    third: Option<Value>,
+) -> Result<Option<(ClassId, Option<PhpArray>)>, Thrown> {
+    let class = match second.filter(|v| !crate::is_null(v)) {
+        Some(named) => {
+            let Some(bytes) = named.as_str_bytes().map(<[u8]>::to_vec) else {
+                let shown = value_name(req, &named);
+                return Err(argument_error(
+                    req,
+                    "TypeError",
+                    2,
+                    &format!("must be of type string, {shown} given"),
+                ));
+            };
+            match lookup_class(req, &bytes)? {
+                Some(class) => class,
+                None => {
+                    return Err(argument_error(req, "TypeError", 2, "must be a valid class"));
+                }
+            }
+        }
+        None => match lookup_class(req, b"stdClass")? {
+            Some(class) => class,
+            None => return Ok(None),
+        },
+    };
+    let args = match third {
+        Some(args) => match args.as_array().copied() {
+            Some(args) if !args.is_empty() => {
+                if !has_constructor(req, class) {
+                    return Err(argument_error(
+                        req,
+                        "ValueError",
+                        3,
+                        "must be empty when class provided in argument #2 ($class) does not have a constructor",
+                    ));
+                }
+                Some(args)
+            }
+            _ => None,
+        },
+        None => None,
+    };
+    Ok(Some((class, args)))
+}
+
+/// `fetchAll()`'s arguments after the style, as the style reads them: the
+/// class and constructor arguments of `FETCH_CLASS`, the function of
+/// `FETCH_FUNC` and the column of `FETCH_COLUMN`, which stays the
+/// statement's; php's counts and types held.
+fn all_arguments(
+    req: &mut Request,
+    object: PhpObject,
+    kind: Option<Kind>,
+    flags: Flags,
+    given: usize,
+    second: Option<Value>,
+    third: Option<Value>,
+) -> Result<With, Thrown> {
+    let mut with = With::default();
+    match kind {
+        Some(Kind::Class) => match all_class(req, second, third)? {
+            Some(class) => with.class = Some(class),
+            None => return Ok(with),
+        },
+        Some(Kind::Func) => {
+            if given != 2 {
+                return Err(arg_count_error(
+                    req,
+                    &format!("exactly 2 argument for PDO::FETCH_FUNC, {given} given"),
+                ));
+            }
+            let Some(callback) = second.filter(|v| !crate::is_null(v)) else {
+                return Err(argument_error(
+                    req,
+                    "TypeError",
+                    2,
+                    "must be a callable, null given",
+                ));
+            };
+            with.func = match callable_checked(req, &callback) {
+                Ok(callable) => Some(callable),
+                Err(error) => return Err(throw(req, "TypeError", &error)),
+            };
+        }
+        Some(Kind::Column) => {
+            if given > 2 {
+                return Err(arg_count_error(
+                    req,
+                    &format!("at most 2 argument for the fetch mode provided, {given} given"),
+                ));
+            }
+            let column = match second {
+                Some(column) => {
+                    let Some(n) = column.as_int() else {
+                        let shown = value_name(req, &column);
+                        return Err(argument_error(
+                            req,
+                            "TypeError",
+                            2,
+                            &format!("must be of type int, {shown} given"),
+                        ));
+                    };
+                    if n < 0 {
+                        return Err(argument_error(
+                            req,
+                            "ValueError",
+                            2,
+                            "must be greater than or equal to 0",
+                        ));
+                    }
+                    n
+                }
+                None if flags.has(Flag::Group) || flags.has(Flag::Unique) => -1,
+                None => 0,
+            };
+            let old = stmt::write(req, object, |s| {
+                std::mem::replace(&mut s.target, Target::Column(column))
+            })
+            .unwrap_or_default();
+            old.release(req);
+        }
+        _ => {
+            if given > 1 {
+                return Err(arg_count_error(
+                    req,
+                    &format!("exactly 1 argument for the fetch mode provided, {given} given"),
+                ));
+            }
+        }
+    }
+    Ok(with)
+}
+
+/// `PDOStatement::fetchAll(int $mode = PDO::FETCH_DEFAULT, mixed ...$args): array`:
+/// every row, grouped or keyed where the bits ask.
+///
+/// ```php
+/// $db = new PDO('sqlite::memory:');
+/// $db->exec("CREATE TABLE t (k, v)");
+/// $db->exec("INSERT INTO t VALUES ('a', 1), ('a', 2), ('b', 3)");
+/// var_dump($db->query('SELECT v FROM t')->fetchAll(PDO::FETCH_COLUMN));
+/// var_dump($db->query('SELECT k, v FROM t')->fetchAll(PDO::FETCH_KEY_PAIR));
+/// var_dump($db->query('SELECT k, v FROM t')->fetchAll(PDO::FETCH_COLUMN | PDO::FETCH_GROUP));
+/// var_dump($db->query('SELECT k, v FROM t')->fetchAll(PDO::FETCH_FUNC, fn ($k, $v) => "$k$v"));
+/// ```
+/// ```expect
+/// array(3) {
+///   [0]=>
+///   int(1)
+///   [1]=>
+///   int(2)
+///   [2]=>
+///   int(3)
+/// }
+/// array(2) {
+///   ["a"]=>
+///   int(2)
+///   ["b"]=>
+///   int(3)
+/// }
+/// array(2) {
+///   ["a"]=>
+///   array(2) {
+///     [0]=>
+///     int(1)
+///     [1]=>
+///     int(2)
+///   }
+///   ["b"]=>
+///   array(1) {
+///     [0]=>
+///     int(3)
+///   }
+/// }
+/// array(3) {
+///   [0]=>
+///   string(2) "a1"
+///   [1]=>
+///   string(2) "a2"
+///   [2]=>
+///   string(2) "b3"
+/// }
+/// ```
+pub(super) fn fetch_all(req: &mut Request) -> Result<Value, Thrown> {
+    let given = req.argument_count();
+    if given > 3 {
+        return Err(arg_count_error(
+            req,
+            &format!("at most 3 arguments, {given} given"),
+        ));
+    }
+    let how = long_arg(req, 1, 0)?;
+    let second = req
+        .argument(2)
+        .map(|v| v.deref())
+        .filter(|v| !matches!(v.as_ref(), ValueRef::Undef));
+    let third = req
+        .argument(3)
+        .map(|v| v.deref())
+        .filter(|v| !matches!(v.as_ref(), ValueRef::Undef | ValueRef::Null));
+    let (object, _) = stmt::this_stmt(req)?;
+    let default = stmt::read(req, object, |s| s.default_fetch).unwrap_or(4);
+    verify(req, default, how, 1, true)?;
+    let kind = Kind::of(how);
+    let mut flags = Flags::of(how);
+    let with = all_arguments(req, object, kind, flags, given, second, third)?;
+    let mut how = how;
+    let mut kind = kind;
+    if kind == Some(Kind::Default) {
+        flags = Flags(flags.0 | Flags::of(default).0);
+        kind = Kind::of(default);
+        how = (default & 0xF) | flags.0;
+    }
+    stmt::clear_error(req, object);
+    let mut out = PhpArray::new(req)?;
+    if kind == Some(Kind::KeyPair) {
+        while key_pair(req, object, Orientation::Forward, 0, &mut out)? {}
+        stmt::handle_error(req, object, false)?;
+        return Ok(Value::array(out));
+    }
+    if flags.has(Flag::Group) || flags.has(Flag::Unique) {
+        grouped_rows(req, object, how | flags.0, flags, &with, &mut out)?;
+    } else {
+        while let Some((row, _)) = shaped(req, object, how, Orientation::Forward, 0, false, &with)?
+        {
+            out.append(req, row)?;
+        }
+    }
+    let state = stmt::read(req, object, |s| s.error_code).flatten();
+    if state != Some(SqlState::NONE) {
+        req.release(Value::array(out));
+        stmt::handle_error(req, object, false)?;
+        return Ok(Value::array(PhpArray::new(req)?));
+    }
+    Ok(Value::array(out))
+}
+
+/// `fetchAll()` under `FETCH_GROUP` or `FETCH_UNIQUE`: each row under
+/// the key its first column gives, in the order the keys are first
+/// seen, a list of them per key or the last one.
+fn grouped_rows(
+    req: &mut Request,
+    object: PhpObject,
+    how: i64,
+    flags: Flags,
+    with: &With,
+    out: &mut PhpArray,
+) -> Result<(), Thrown> {
+    // Each group key as it was first seen, what the table keeps under
+    // it: the last row for `FETCH_UNIQUE`, every row for `FETCH_GROUP`.
+    let mut groups: Vec<(Vec<u8>, Vec<Value>)> = Vec::new();
+    while let Some((row, key)) = shaped(
+        req,
+        object,
+        how | flags.0,
+        Orientation::Forward,
+        0,
+        true,
+        with,
+    )? {
+        let key = key
+            .and_then(|k| k.as_str_bytes().map(<[u8]>::to_vec))
+            .unwrap_or_default();
+        match groups.iter_mut().find(|(seen, _)| *seen == key) {
+            Some((_, rows)) if flags.has(Flag::Unique) => {
+                for old in std::mem::replace(rows, vec![row]) {
+                    req.release(old);
+                }
+            }
+            Some((_, rows)) => rows.push(row),
+            None => groups.push((key, vec![row])),
+        }
+    }
+    for (key, rows) in groups {
+        let key = Key::from_string(PhpString::new(req, &key)?);
+        if flags.has(Flag::Unique) {
+            for row in rows {
+                out.set(req, key.clone(), row)?;
+            }
+        } else {
+            let mut group = PhpArray::new(req)?;
+            for row in rows {
+                group.append(req, row)?;
+            }
+            out.set(req, key, Value::array(group))?;
+        }
+    }
+    Ok(())
+}
+
+/// `PDOStatement::setFetchMode(int $mode, mixed ...$args): true`.
+///
+/// ```php
+/// class Row { public $a; }
+/// $db = new PDO('sqlite::memory:');
+/// $s = $db->query('SELECT 1 AS a');
+/// var_dump($s->setFetchMode(PDO::FETCH_CLASS, 'Row'));
+/// var_dump($s->fetch());
+/// try { $s->setFetchMode(PDO::FETCH_COLUMN); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
+/// $o = new stdClass;
+/// $s = $db->query('SELECT 2 AS b');
+/// $s->setFetchMode(PDO::FETCH_INTO, $o); $s->fetch(); var_dump($o);
+/// ```
+/// ```expect
+/// bool(true)
+/// object(Row)#3 (1) {
+///   ["a"]=>
+///   int(1)
+/// }
+/// PDOStatement::setFetchMode() expects exactly 2 arguments for the fetch mode provided, 1 given
+/// object(stdClass)#4 (1) {
+///   ["b"]=>
+///   int(2)
+/// }
+/// ```
+pub(super) fn set_fetch_mode(req: &mut Request) -> Result<Value, Thrown> {
+    let given = req.argument_count();
+    if given < 1 {
+        return Err(arg_count_error(
+            req,
+            &format!("at least 1 argument, {given} given"),
+        ));
+    }
+    let mode = long_arg(req, 1, 0)?;
+    let args: Vec<Value> = (2..=u32::try_from(given).unwrap_or(u32::MAX))
+        .map(|at| req.argument(at).unwrap_or_default().deref())
+        .collect();
+    let (object, _) = stmt::this_stmt(req)?;
+    if stmt::read(req, object, |s| s.in_fetch).unwrap_or(false) {
+        return Err(throw(
+            req,
+            "Error",
+            "Cannot change default fetch mode while fetching",
+        ));
+    }
+    setup_mode(req, object, mode, 1, &args)?;
+    Ok(Value::bool(true))
+}

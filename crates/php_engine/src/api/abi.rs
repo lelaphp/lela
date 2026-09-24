@@ -12,7 +12,9 @@ use std::hash::Hash;
 use std::sync::{Arc, Mutex};
 
 use php_heap::{Fatal, Heap, Obj};
-use php_unit::decl::{ClassDecl, ConstDecl, FunctionDecl, IniDecl, MethodDecl};
+use php_unit::decl::{
+    ClassConstDecl, ClassDecl, ConstDecl, FunctionDecl, IniDecl, MethodDecl, Name,
+};
 
 use crate::api::call::{Function, Target};
 use crate::api::coerce::BinaryOp;
@@ -186,6 +188,15 @@ pub struct Extension {
     pub(crate) rinit: Option<Rinit>,
     pub(crate) rshutdown: Option<fn(&mut Request)>,
     pub(crate) info: Option<Info>,
+    /// What [`ExtensionBuilder::register`] was handed, in its order.
+    pub(crate) registered: Vec<Arc<dyn Any + Send + Sync>>,
+    /// What [`ExtensionBuilder::class_constants`] was handed: each
+    /// class another extension declares, with the constants this one
+    /// adds to it.
+    pub(crate) class_constants: Vec<(Name, Vec<ClassConstDecl>)>,
+    /// What [`ExtensionBuilder::trampolines`] was handed: each class,
+    /// with the methods its `get_method` answers off its table.
+    pub(crate) trampolines: Vec<(Name, MethodDecl, Entry)>,
 }
 
 impl std::fmt::Debug for Extension {
@@ -212,6 +223,9 @@ pub struct ExtensionBuilder {
     rinit: Option<Rinit>,
     rshutdown: Option<fn(&mut Request)>,
     info: Option<Info>,
+    registered: Vec<Arc<dyn Any + Send + Sync>>,
+    class_constants: Vec<(Name, Vec<ClassConstDecl>)>,
+    trampolines: Vec<(Name, MethodDecl, Entry)>,
 }
 
 impl ExtensionBuilder {
@@ -361,6 +375,55 @@ impl ExtensionBuilder {
         self
     }
 
+    /// A value this extension hands at startup to the extension
+    /// that reads every value of its type, php's `php_pdo_register_driver`
+    /// into `pdo_driver_hash` from `pdo_sqlite`'s `MINIT`: immutable once the
+    /// engine is built, and answered by [`Request::registered`] in bundle
+    /// order, which is `MINIT` order (ADR-0005).
+    #[must_use]
+    pub fn register<T: Send + Sync + 'static>(mut self, value: T) -> ExtensionBuilder {
+        self.registered.push(Arc::new(value));
+        self
+    }
+
+    /// Constants this extension declares on a class another extension
+    /// declares, php's `zend_declare_class_constant_ex` over a foreign
+    /// `zend_class_entry` at `MINIT`, which is how `pdo_sqlite` puts its
+    /// deprecated `PDO::SQLITE_*` aliases on `PDO`: appended to that
+    /// class's own as the engine links it, after every constant the class
+    /// declares, in bundle order. A class the bundle does not declare
+    /// takes none.
+    #[must_use]
+    pub fn class_constants(
+        mut self,
+        class: &[u8],
+        constants: Vec<ClassConstDecl>,
+    ) -> ExtensionBuilder {
+        self.class_constants.push((Name(class.into()), constants));
+        self
+    }
+
+    /// Methods of a class another extension declares that the class's
+    /// `get_method` answers and its table carries none of, `pdo`'s
+    /// methods (`pdo_dbh_methods.get_driver_methods`, which
+    /// `pdo_hash_methods` lays down with `func.scope = pdo_dbh_ce`): each
+    /// is a trampoline of `class` ([`Request::trampoline`]), so no lookup
+    /// by name and no rendering finds it, and its diagnostics name the
+    /// class it is laid down on.
+    #[must_use]
+    pub fn trampolines(
+        mut self,
+        class: &[u8],
+        methods: Vec<(MethodDecl, Entry)>,
+    ) -> ExtensionBuilder {
+        self.trampolines.extend(
+            methods
+                .into_iter()
+                .map(|(method, entry)| (Name(class.into()), method, entry)),
+        );
+        self
+    }
+
     /// The extension, named as php names it (`ctype`, `pcre`).
     #[must_use]
     pub fn build(self, name: &str) -> Extension {
@@ -377,6 +440,9 @@ impl ExtensionBuilder {
             rinit: self.rinit,
             rshutdown: self.rshutdown,
             info: self.info,
+            registered: self.registered,
+            class_constants: self.class_constants,
+            trampolines: self.trampolines,
         }
     }
 }

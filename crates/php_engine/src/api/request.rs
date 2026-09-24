@@ -369,6 +369,53 @@ impl Stream {
     }
 }
 
+/// `php_stream_ops` for a kind of stream an extension implements, which
+/// the engine's generic half of every stream runs over as it runs its
+/// own kinds: the label `stream_get_meta_data` prints as `stream_type`,
+/// the operations each answering as php's does, `None` for the `-1` an
+/// operation fails with, and a kind holding its own `abstract` as its
+/// fields. What `pdo_sqlite`'s blob streams and their kin are made of,
+/// through [`Request::new_stream`].
+pub trait StreamOps: Send {
+    /// `ops->label`.
+    fn label(&self) -> &'static str;
+
+    /// `ops->write`: how many bytes were taken.
+    fn write(&mut self, req: &mut Request, buf: &[u8]) -> Option<usize>;
+
+    /// `ops->read`: how many bytes were given, `eof` set where the kind
+    /// sets `stream->eof`.
+    fn read(&mut self, req: &mut Request, buf: &mut [u8], eof: &mut bool) -> Option<usize>;
+
+    /// `ops->close`, with what the kind holds.
+    fn close(&mut self, req: &mut Request);
+
+    /// `ops->seek`, `None` where the kind has none: `position` is php's
+    /// `*newoffs`, written as the kind writes it; `Some(true)` for
+    /// php's `0`.
+    fn seek(
+        &mut self,
+        req: &mut Request,
+        offset: i64,
+        whence: Option<Whence>,
+        position: &mut i64,
+    ) -> Option<bool> {
+        let _ = (req, offset, whence, position);
+        None
+    }
+
+    /// Whether the kind has an `ops->seek`.
+    fn seekable(&self) -> bool {
+        false
+    }
+
+    /// `ops->stat` for a kind that fills `st_size` alone, `None` where it
+    /// has none.
+    fn size(&self) -> Option<i64> {
+        None
+    }
+}
+
 /// A stream wrapper's operations, Zend's `php_stream_wrapper_ops` as a
 /// value: the scheme it serves and one function per operation, `None`
 /// where the wrapper does not support it.
@@ -7707,6 +7754,15 @@ impl Request {
         )
     }
 
+    /// `get_active_function_or_method_name`: the native being served as
+    /// a message names it, `Class::method` for a method, which is what
+    /// a native writes before `(): ` in a sentence of its own that no
+    /// raiser here words, as `pdo_sqlite`'s callback refusals do.
+    #[must_use]
+    pub fn active_function_name(&self) -> String {
+        self.active_native()
+    }
+
     /// `func->common.function_name`: the name a function was declared
     /// under, and `native` for one the table has no declaration for. A
     /// method's is its own name alone, what `get_active_function_name`
@@ -10634,6 +10690,32 @@ impl Request {
             .find_map(|state| state.downcast_ref::<E>())
     }
 
+    /// Every value of type `T` an extension of the bundle handed over
+    /// with [`ExtensionBuilder::register`], in bundle order: what
+    /// `pdo_driver_hash` holds after every `MINIT` of the bundle has
+    /// registered into it, immutable for the engine's life
+    /// (ADR-0005).
+    ///
+    /// [`ExtensionBuilder::register`]: crate::api::abi::ExtensionBuilder::register
+    pub fn registered<T: Send + Sync + 'static>(&self) -> impl Iterator<Item = &T> {
+        self.shared
+            .extensions
+            .iter()
+            .flat_map(|e| e.registered.iter())
+            .filter_map(|value| value.downcast_ref::<T>())
+    }
+
+    /// The trampoline `class` answers under the lowered name, a method
+    /// its `get_method` synthesises and its table has no row for: one
+    /// an extension laid down with [`ExtensionBuilder::trampolines`],
+    /// which is what a class's own `get_method` hands back for it.
+    ///
+    /// [`ExtensionBuilder::trampolines`]: crate::api::abi::ExtensionBuilder::trampolines
+    #[must_use]
+    pub fn trampoline(&self, class: ClassId, lowered: &[u8]) -> Option<Function> {
+        self.trampoline_named(class, lowered)
+    }
+
     /// The request's resource types, for an extension registering one.
     pub fn resources(&mut self) -> &mut Resources {
         &mut self.resources
@@ -11598,6 +11680,14 @@ impl Request {
         use_include_path: bool,
     ) -> Result<Option<Stream>, Thrown> {
         self.open_stream_wrapper(path, mode, use_include_path)
+    }
+
+    /// `php_stream_alloc(ops, abstract, 0, mode)`: a stream of a kind the
+    /// extension implements, as a resource of the `stream` type with one
+    /// owner, the caller's, at position zero with nothing read.
+    pub fn new_stream(&mut self, ops: Box<dyn StreamOps>, mode: &[u8]) -> Result<Stream, Thrown> {
+        let stream = crate::streams::of_extension(ops, mode);
+        self.stream_alloc(stream)
     }
 
     /// `opendir()`, `php_stream_opendir` under `REPORT_ERRORS`: the

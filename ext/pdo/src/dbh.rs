@@ -1,0 +1,1568 @@
+//! `pdo_dbh.c`: the `PDO` class, its connection `pdo_dbh_t` as the object's
+//! native payload ([`Dbh`]), the handlers `pdo_dbh_init` installs, and
+//! the methods, each checking the connection was constructed and clearing
+//! the error state where php does, in php's order.
+
+use php_ext::abi::{CloneObj, CloneObjWith, ObjectHandlers, Std};
+use php_ext::call::{Function, call_array, known_method, lookup_class, new_object};
+use php_ext::coerce::value_name;
+use php_ext::decl::Name;
+use php_ext::raising::{Thrown, argument_error, deprecated, throw, throwing_warnings};
+use php_ext::request::Request;
+use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+
+use crate::connector::{
+    BindType, Cause, Connection, Connector, Failure, OnError, Source, SqlState,
+};
+use crate::error::{self, On};
+use crate::stmt::{DbLink, Stmt};
+use crate::{Entry, arity, bytes_arg, long_arg, this};
+
+/// The attribute numbers PDO reads itself, `enum pdo_attribute_type`.
+pub(crate) const ATTR_AUTOCOMMIT: i64 = 0;
+pub(crate) const ATTR_ERRMODE: i64 = 3;
+pub(crate) const ATTR_CASE: i64 = 8;
+pub(crate) const ATTR_ORACLE_NULLS: i64 = 11;
+pub(crate) const ATTR_PERSISTENT: i64 = 12;
+pub(crate) const ATTR_STATEMENT_CLASS: i64 = 13;
+pub(crate) const ATTR_DRIVER_NAME: i64 = 16;
+pub(crate) const ATTR_STRINGIFY_FETCHES: i64 = 17;
+pub(crate) const ATTR_DEFAULT_FETCH_MODE: i64 = 19;
+pub(crate) const ATTR_EMULATE_PREPARES: i64 = 20;
+
+/// `enum pdo_case_conversion`: what the column names are folded to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum Case {
+    #[default]
+    Natural,
+    Upper,
+    Lower,
+}
+
+impl Case {
+    fn code(self) -> i64 {
+        match self {
+            Case::Natural => 0,
+            Case::Upper => 1,
+            Case::Lower => 2,
+        }
+    }
+}
+
+/// `enum pdo_null_handling`, as `ATTR_ORACLE_NULLS` sets it: php stores
+/// any number it is given and acts on two of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum Nulls {
+    #[default]
+    Natural,
+    EmptyString,
+    ToString,
+    Other(u8),
+}
+
+impl Nulls {
+    fn of(n: i64) -> Nulls {
+        // php stores the attribute in a `uint8_t`.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        match n as u8 {
+            0 => Nulls::Natural,
+            1 => Nulls::EmptyString,
+            2 => Nulls::ToString,
+            other => Nulls::Other(other),
+        }
+    }
+
+    fn code(self) -> i64 {
+        match self {
+            Nulls::Natural => 0,
+            Nulls::EmptyString => 1,
+            Nulls::ToString => 2,
+            Nulls::Other(n) => i64::from(n),
+        }
+    }
+}
+
+/// Where the connection's connection is: none before the factory ran, the
+/// connector's while no call holds it, and lent while one does.
+#[derive(Default)]
+enum Conn {
+    #[default]
+    Closed,
+    Open(Box<dyn Connection>),
+    Lent,
+}
+
+/// `pdo_dbh_t`, the payload of a `PDO` and of every subclass.
+// php's bit fields `stringify`, `in_txn`, `is_persistent` and
+// `alloc_own_columns`, one each.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Default)]
+pub(crate) struct Dbh {
+    /// `dbh->driver`: set once the factory succeeded, which is what
+    /// `PDO_CONSTRUCT_CHECK` asks.
+    pub(crate) driver: Option<&'static dyn Connector>,
+    conn: Conn,
+    pub(crate) error_mode: OnError,
+    /// `dbh->error_code`: `None` before anything cleared it, php's
+    /// zeroed array, which `errorCode()` answers `null` for.
+    pub(crate) error_code: Option<SqlState>,
+    /// The connection's `einfo`, what `fetch_err` appends: the native
+    /// code and text of its last error, `None` for none.
+    pub(crate) native_error: Option<(i64, Vec<u8>)>,
+    /// `dbh->desired_case`.
+    pub(crate) case: Case,
+    /// `dbh->oracle_nulls`.
+    pub(crate) nulls: Nulls,
+    /// `dbh->stringify`.
+    pub(crate) stringify: bool,
+    /// `dbh->default_fetch_type`, php's `uint16_t` as set, read as a
+    /// fetch style where a fetch uses it.
+    pub(crate) default_fetch: u16,
+    /// `dbh->def_stmt_ce`, `None` for `PDOStatement`.
+    stmt_class: Option<ClassId>,
+    /// `dbh->def_stmt_ctor_args`, one owner.
+    stmt_args: Option<PhpArray>,
+    /// `dbh->in_txn`.
+    in_txn: bool,
+    /// `dbh->is_persistent`: the option was given; the connection is not
+    /// pooled.
+    persistent: bool,
+    /// `dbh->query_stmt`: the statement a failed `query()` left, one
+    /// owner, whose error state `errorCode()` and `errorInfo()` read.
+    query_stmt: Option<PhpObject>,
+    /// `dbh->alloc_own_columns`.
+    pub(crate) describes_at_execute: bool,
+}
+
+impl Dbh {
+    /// `PDO_FETCH_BOTH`, the connection's default before the constructor
+    /// sets it.
+    fn fresh() -> Dbh {
+        Dbh {
+            default_fetch: 4,
+            ..Dbh::default()
+        }
+    }
+}
+
+/// `pdo_dbh_object_handlers`.
+pub(crate) struct Handlers;
+
+pub(crate) static HANDLERS: Handlers = Handlers;
+
+impl ObjectHandlers for Handlers {
+    /// `pdo_dbh_free_storage`: a transaction still open rolled back, and
+    /// then `dbh_free`: the failed statement given up, the connection
+    /// closed and the constructor arguments released.
+    fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        let Some(dbh) = object.native_mut::<Dbh>(req) else {
+            return;
+        };
+        let conn = std::mem::take(&mut dbh.conn);
+        let held = (dbh.query_stmt.take(), dbh.stmt_args.take());
+        let tracked = dbh.in_txn;
+        if let Conn::Open(mut conn) = conn {
+            if conn.in_transaction().unwrap_or(tracked) {
+                let _ = conn.rollback(req);
+            }
+            if let Some(stmt) = held.0 {
+                req.release(stmt.as_value());
+            }
+            conn.close(req);
+        } else if let Some(stmt) = held.0 {
+            req.release(stmt.as_value());
+        }
+        if let Some(args) = held.1 {
+            req.release(Value::array(args));
+        }
+    }
+
+    /// `dbh_get_gc`: the constructor arguments and what the connector
+    /// holds.
+    fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
+        if let Some(dbh) = object.native::<Dbh>(req) {
+            if let Some(args) = dbh.stmt_args {
+                visit(Value::array(args));
+            }
+            if let Conn::Open(conn) = &dbh.conn {
+                conn.gc(visit);
+            }
+        }
+    }
+
+    fn clone_obj(&self) -> Option<CloneObj> {
+        None
+    }
+
+    fn clone_obj_with(&self) -> Option<CloneObjWith> {
+        None
+    }
+
+    /// `zend_objects_not_comparable`.
+    fn compare(
+        &self,
+        req: &mut Request,
+        left: &Value,
+        right: &Value,
+    ) -> Result<Option<std::cmp::Ordering>, Thrown> {
+        let _ = (req, left, right);
+        Ok(None)
+    }
+
+    /// `dbh_method_get`: the class's own method, else one the connection's
+    /// connector lays on `PDO`, `pdo_hash_methods` over
+    /// `get_driver_methods`.
+    fn get_method(&self, req: &mut Request, object: PhpObject, lowered: &[u8]) -> Option<Function> {
+        if let Some(found) = Std.get_method(req, object, lowered) {
+            return Some(found);
+        }
+        let driver = object.native::<Dbh>(req)?.driver?;
+        if !driver.methods().contains(&lowered) {
+            return None;
+        }
+        let pdo = lookup_class(req, b"PDO").ok().flatten()?;
+        req.trampoline(pdo, lowered)
+    }
+}
+
+/// The methods, `Class::method` to entry, for the stub reader.
+pub(crate) const METHODS: [(&str, Entry); 16] = [
+    ("PDO::__construct", construct),
+    ("PDO::connect", connect),
+    ("PDO::beginTransaction", begin_transaction),
+    ("PDO::commit", commit),
+    ("PDO::errorCode", error_code),
+    ("PDO::errorInfo", error_info),
+    ("PDO::exec", exec),
+    ("PDO::getAttribute", get_attribute),
+    ("PDO::getAvailableDrivers", get_available_drivers),
+    ("PDO::inTransaction", in_transaction),
+    ("PDO::lastInsertId", last_insert_id),
+    ("PDO::prepare", prepare),
+    ("PDO::query", query),
+    ("PDO::quote", quote),
+    ("PDO::rollBack", roll_back),
+    ("PDO::setAttribute", set_attribute),
+];
+
+// ---- the handle's state, lent and read
+
+fn dbh_ref<R>(req: &Request, object: PhpObject, read: impl FnOnce(&Dbh) -> R) -> Option<R> {
+    object.native::<Dbh>(req).map(read)
+}
+
+fn dbh_mut<R>(
+    req: &mut Request,
+    object: PhpObject,
+    change: impl FnOnce(&mut Dbh) -> R,
+) -> Option<R> {
+    object.native_mut::<Dbh>(req).map(change)
+}
+
+/// `PDO_CONSTRUCT_CHECK`: php's `Error` naming the object's class where
+/// the connection's factory never succeeded.
+pub(super) fn constructed(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
+    if dbh_ref(req, object, |d| d.driver.is_some()).unwrap_or(false) {
+        return Ok(());
+    }
+    let class = crate::class_name(req, object.class());
+    Err(throw(
+        req,
+        "Error",
+        &format!("{class} object is uninitialized"),
+    ))
+}
+
+/// `PDO_DBH_CLEAR_ERR`: the state `00000`, and the statement a failed
+/// `query()` left given up.
+pub(super) fn clear_error(req: &mut Request, object: PhpObject) {
+    let held = dbh_mut(req, object, |d| {
+        d.error_code = Some(SqlState::NONE);
+        d.query_stmt.take()
+    })
+    .flatten();
+    if let Some(stmt) = held {
+        req.release(stmt.as_value());
+    }
+}
+
+/// The connection's connection lent to `f` for one call and put back.
+pub(super) fn with_connection<R>(
+    req: &mut Request,
+    object: PhpObject,
+    f: impl FnOnce(&mut Request, &mut dyn Connection) -> Result<R, Thrown>,
+) -> Result<R, Thrown> {
+    constructed(req, object)?;
+    let conn = dbh_mut(req, object, |d| std::mem::replace(&mut d.conn, Conn::Lent));
+    let Some(Conn::Open(mut conn)) = conn else {
+        if let Some(taken) = conn {
+            dbh_mut(req, object, |d| d.conn = taken);
+        }
+        return Err(php_ext::raising::fatal(
+            req,
+            "InternalError: a PDO handle's connection was asked for while a callback held it",
+        ));
+    };
+    let answered = f(req, &mut *conn);
+    dbh_mut(req, object, |d| d.conn = Conn::Open(conn));
+    answered
+}
+
+/// A connector call on the connection's connection whose failure PDO connections on
+/// the connection, `PDO_HANDLE_DBH_ERR`: `Ok(None)` for a failure handled,
+/// the connector's `Unsupported` handed back as `Err(None)` for the caller
+/// to word.
+fn on_connection<T>(
+    req: &mut Request,
+    object: PhpObject,
+    call: impl FnOnce(&mut Request, &mut dyn Connection) -> Result<T, Failure>,
+) -> Result<Result<Option<T>, ()>, Thrown> {
+    let answered = with_connection(req, object, |req, conn| Ok(call(req, conn)))?;
+    match answered {
+        Ok(value) => Ok(Ok(Some(value))),
+        Err(Failure {
+            cause: Cause::Unsupported,
+            thrown: None,
+        }) => Ok(Err(())),
+        Err(failure) => {
+            error::settle(req, object, On::Dbh, failure)?;
+            Ok(Ok(None))
+        }
+    }
+}
+
+/// `pdo_raise_impl_error(dbh, NULL, "IM001", supp)` and `false`.
+fn unsupported(req: &mut Request, object: PhpObject, supp: &str) -> Result<Value, Thrown> {
+    error::raise_impl(req, object, On::Dbh, SqlState(*b"IM001"), Some(supp))?;
+    Ok(Value::bool(false))
+}
+
+// ---- construction
+
+/// `PDO::__construct(string $dsn, ?string $username = null, ?string
+/// $password = null, ?array $options = null)`: the connector the DSN names,
+/// its factory served the rest of the DSN, and each option set as
+/// `setAttribute()` would, a warning meanwhile thrown as a
+/// `PDOException`.
+///
+/// ```php
+/// $db = new PDO('sqlite::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_WARNING, PDO::ATTR_CASE => PDO::CASE_UPPER]);
+/// var_dump($db->getAttribute(PDO::ATTR_ERRMODE), $db->getAttribute(PDO::ATTR_CASE), $db->getAttribute(PDO::ATTR_DRIVER_NAME));
+/// foreach (['nope', 'nosuch:x', 'sqlite:/no/such/dir/x.db'] as $dsn) {
+///     try { new PDO($dsn); } catch (PDOException $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// }
+/// class MyPDO extends PDO { function __construct() {} }
+/// try { (new MyPDO)->exec('x'); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// int(1)
+/// int(1)
+/// string(6) "sqlite"
+/// PDOException: PDO::__construct(): Argument #1 ($dsn) must be a valid data source name
+/// PDOException: could not find driver
+/// PDOException: SQLSTATE[HY000] [14] unable to open database file
+/// MyPDO object is uninitialized
+/// ```
+fn construct(req: &mut Request) -> Result<Value, Thrown> {
+    let this = this(req)?;
+    construct_driver(req, Some(this), this.class())?;
+    Ok(Value::null())
+}
+
+/// `PDO::connect(...): static`: the connection made as the connector's own
+/// class where it registered one, `Pdo\Sqlite` for `sqlite:`, and the
+/// class it was called on otherwise.
+///
+/// ```php
+/// $db = PDO::connect('sqlite::memory:');
+/// var_dump(get_class($db), $db->query('SELECT 1')->fetchColumn());
+/// class Mine extends PDO {}
+/// try { Mine::connect('sqlite::memory:'); } catch (PDOException $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// string(10) "Pdo\Sqlite"
+/// int(1)
+/// Mine::connect() cannot be used for connecting to the "sqlite" driver, either call Pdo\Sqlite::connect() or PDO::connect() instead
+/// ```
+fn connect(req: &mut Request) -> Result<Value, Thrown> {
+    let Some(called) = req.called_scope() else {
+        return Err(php_ext::raising::fatal(
+            req,
+            "InternalError: PDO::connect() served without a called scope",
+        ));
+    };
+    match construct_driver(req, None, called)? {
+        Some(object) => Ok(object.as_value()),
+        None => Ok(Value::null()),
+    }
+}
+
+/// `php_pdo_internal_construct_driver`: the constructor's body for
+/// `current`, or `connect()`'s for a new object of the class it makes,
+/// which comes back.
+fn construct_driver(
+    req: &mut Request,
+    current: Option<PhpObject>,
+    called: ClassId,
+) -> Result<Option<PhpObject>, Thrown> {
+    arity(req, 1, 4)?;
+    let source = bytes_arg(req, 1)?;
+    let username = crate::nullable_bytes_arg(req, 2)?;
+    let password = crate::nullable_bytes_arg(req, 3)?;
+    let options = crate::array_arg(req, 4)?;
+    let source = resolve_dsn(req, source)?;
+    let colon = source.iter().position(|b| *b == b':').unwrap_or(0);
+    let scheme = &source[..colon];
+    let Some(driver) = crate::drivers(req).find(|d| d.name().as_bytes() == scheme) else {
+        return Err(throw(req, "PDOException", "could not find driver"));
+    };
+    let object = match specific_object(req, driver, called, current.is_none())? {
+        Some(made) => made,
+        None => match current {
+            Some(current) => current,
+            None => {
+                return Err(php_ext::raising::fatal(
+                    req,
+                    "InternalError: PDO::connect() made no object",
+                ));
+            }
+        },
+    };
+    let made = current.is_none();
+    let opened = open(
+        req,
+        object,
+        driver,
+        &source[colon + 1..],
+        username.as_deref(),
+        password.as_deref(),
+        options,
+    );
+    match opened {
+        Ok(()) => Ok(made.then_some(object)),
+        Err(thrown) => {
+            if made {
+                req.release(object.as_value());
+            }
+            Err(thrown)
+        }
+    }
+}
+
+/// The DSN as the constructor reads it: a name without a colon looked
+/// up as `pdo.dsn.<name>`, and a `uri:` one read from the first line of
+/// what the URI opens, each refused as php refuses it.
+fn resolve_dsn(req: &mut Request, mut source: Vec<u8>) -> Result<Vec<u8>, Thrown> {
+    if !source.contains(&b':') {
+        let alias = [b"pdo.dsn.".as_slice(), &source].concat();
+        let Some(found) = req.ini_get(&alias).map(<[u8]>::to_vec) else {
+            return Err(argument_error(
+                req,
+                "PDOException",
+                1,
+                "must be a valid data source name",
+            ));
+        };
+        if !found.contains(&b':') {
+            let alias = String::from_utf8_lossy(&alias).into_owned();
+            return Err(throw(
+                req,
+                "PDOException",
+                &format!("invalid data source name (via INI: {alias})"),
+            ));
+        }
+        source = found;
+    }
+    if let Some(uri) = source.strip_prefix(b"uri:").map(<[u8]>::to_vec) {
+        deprecated(
+            req,
+            "Looking up the DSN from a URI is deprecated due to possible security concerns with DSNs coming from remote URIs",
+        );
+        let Some(line) = dsn_from_uri(req, &uri)? else {
+            return Err(argument_error(
+                req,
+                "PDOException",
+                1,
+                "must be a valid data source URI",
+            ));
+        };
+        if !line.contains(&b':') {
+            return Err(argument_error(
+                req,
+                "PDOException",
+                1,
+                "must be a valid data source name (via URI)",
+            ));
+        }
+        source = line;
+    }
+    Ok(source)
+}
+
+/// The payload laid down and the factory served, under
+/// `zend_replace_error_handling(EH_THROW, pdo_exception_ce)`.
+fn open(
+    req: &mut Request,
+    object: PhpObject,
+    driver: &'static dyn Connector,
+    dsn: &[u8],
+    username: Option<&[u8]>,
+    password: Option<&[u8]>,
+    options: Option<PhpArray>,
+) -> Result<(), Thrown> {
+    let persistent = match options.and_then(|o| o.get(&Key::Int(ATTR_PERSISTENT))) {
+        Some(v) => persistent_asked(req, &v.deref())?,
+        None => false,
+    };
+    let auto_commit = crate::connector::option_long(req, options, ATTR_AUTOCOMMIT, 1)?;
+    let mode = crate::connector::option_long(req, options, ATTR_ERRMODE, 2)?;
+    let _ = auto_commit;
+    dbh_mut(req, object, |d| {
+        *d = Dbh {
+            persistent,
+            error_mode: match mode {
+                0 => OnError::Silent,
+                1 => OnError::Warn,
+                _ => OnError::Throw,
+            },
+            ..Dbh::fresh()
+        };
+    });
+    throwing_warnings(req, "PDOException", |req| {
+        let source = Source {
+            dsn,
+            username,
+            password,
+            options,
+        };
+        let conn = match driver.open(req, &source) {
+            Ok(conn) => conn,
+            Err(failure) => return Err(error::throw_connect(req, failure)),
+        };
+        let describes = conn.describes_at_execute();
+        dbh_mut(req, object, |d| {
+            d.conn = Conn::Open(conn);
+            d.driver = Some(driver);
+            d.describes_at_execute = describes;
+        });
+        if let Some(options) = options {
+            for (key, value) in options.snapshot() {
+                if let Key::Int(attr) = key {
+                    attribute_set(req, object, attr, &value.deref(), 3)?;
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Whether `ATTR_PERSISTENT` asks for a persistent connection: a
+/// non-numeric string is a key and asks, anything else by its truth as
+/// `zval_get_long` reads it.
+fn persistent_asked(req: &mut Request, value: &Value) -> Result<bool, Thrown> {
+    if let Some(bytes) = value.as_str_bytes()
+        && !bytes.is_empty()
+        && php_ext::coerce::numeric_string(bytes).is_none()
+    {
+        return Ok(true);
+    }
+    Ok(php_ext::coerce::to_long(req, value)? != 0)
+}
+
+/// `dsn_from_uri`: the first line of what the URI opens, at most 511
+/// bytes, as `php_stream_get_line` reads it into `alt_dsn`.
+fn dsn_from_uri(req: &mut Request, uri: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
+    let Some(stream) = req.open_stream(uri, b"rb", false)? else {
+        return Ok(None);
+    };
+    let line = stream.get_line(req, Some(512))?;
+    stream.close(req);
+    Ok(line.map(|line| line.as_bytes().to_vec()))
+}
+
+/// `create_driver_specific_pdo_object`: `None` where the current object
+/// is the one to open, a new object of the class `connect()` makes
+/// otherwise, and php's `PDOException` where the class called on cannot
+/// open a connection of this connector.
+fn specific_object(
+    req: &mut Request,
+    driver: &'static dyn Connector,
+    called: ClassId,
+    connecting: bool,
+) -> Result<Option<PhpObject>, Thrown> {
+    let pdo = lookup_class(req, b"PDO")?;
+    let is_pdo = Some(called) == pdo;
+    let own = match driver.class() {
+        Some(name) => lookup_class(req, name)?,
+        None => None,
+    };
+    let classes: Vec<&'static [u8]> = crate::drivers(req)
+        .filter_map(super::connector::Connector::class)
+        .collect();
+    let mut based_on_called = false;
+    if !is_pdo {
+        for name in classes {
+            if crate::extends(req, called, name) {
+                based_on_called = true;
+                break;
+            }
+        }
+    }
+    let verb = if connecting { "connect" } else { "__construct" };
+    let called_name = crate::class_name(req, called);
+    let wrong = |req: &mut Request, own: ClassId| {
+        let own = crate::class_name(req, own);
+        let name = driver.name();
+        throw(
+            req,
+            "PDOException",
+            &format!(
+                "{called_name}::{verb}() cannot be used for connecting to the \"{name}\" driver, either call {own}::{verb}() or PDO::{verb}() instead"
+            ),
+        )
+    };
+    if based_on_called {
+        let Some(own) = own else {
+            return Err(throw(
+                req,
+                "PDOException",
+                &format!(
+                    "{called_name}::{verb}() cannot be used for connecting to an unknown driver, call PDO::{verb}() instead"
+                ),
+            ));
+        };
+        let own_name = req
+            .class_decl(own)
+            .map(|d| d.name.0.to_vec())
+            .unwrap_or_default();
+        if !crate::extends(req, called, &own_name) {
+            return Err(wrong(req, own));
+        }
+        return if connecting {
+            new_object(req, called).map(Some)
+        } else {
+            Ok(None)
+        };
+    }
+    if !is_pdo && !connecting {
+        return Ok(None);
+    }
+    match own {
+        Some(own) if !is_pdo => Err(wrong(req, own)),
+        Some(own) if connecting => new_object(req, own).map(Some),
+        _ if connecting => new_object(req, called).map(Some),
+        _ => Ok(None),
+    }
+}
+
+// ---- attributes
+
+/// `pdo_dbh_attribute_set`: an attribute PDO connections itself, or the
+/// connector's; `value_arg` is the argument a refusal names, `3` from the
+/// constructor's options and `2` from `setAttribute()`.
+fn attribute_set(
+    req: &mut Request,
+    object: PhpObject,
+    attr: i64,
+    value: &Value,
+    value_arg: u32,
+) -> Result<bool, Thrown> {
+    let long = |req: &mut Request| crate::connector::long_attribute(req, value);
+    match attr {
+        ATTR_ERRMODE => {
+            let mode = match long(req)? {
+                0 => OnError::Silent,
+                1 => OnError::Warn,
+                2 => OnError::Throw,
+                _ => {
+                    return Err(argument_error(
+                        req,
+                        "ValueError",
+                        value_arg,
+                        "Error mode must be one of the PDO::ERRMODE_* constants",
+                    ));
+                }
+            };
+            dbh_mut(req, object, |d| d.error_mode = mode);
+            return Ok(true);
+        }
+        ATTR_CASE => {
+            let case = match long(req)? {
+                0 => Case::Natural,
+                1 => Case::Upper,
+                2 => Case::Lower,
+                _ => {
+                    return Err(argument_error(
+                        req,
+                        "ValueError",
+                        value_arg,
+                        "Case folding mode must be one of the PDO::CASE_* constants",
+                    ));
+                }
+            };
+            dbh_mut(req, object, |d| d.case = case);
+            return Ok(true);
+        }
+        ATTR_ORACLE_NULLS => {
+            let nulls = Nulls::of(long(req)?);
+            dbh_mut(req, object, |d| d.nulls = nulls);
+            return Ok(true);
+        }
+        ATTR_DEFAULT_FETCH_MODE => {
+            let mode = default_fetch_mode(req, value, value_arg)?;
+            dbh_mut(req, object, |d| d.default_fetch = mode);
+            return Ok(true);
+        }
+        ATTR_STRINGIFY_FETCHES => {
+            let stringify = match value.as_ref() {
+                ValueRef::Bool(b) => b,
+                ValueRef::Int(n) => n != 0,
+                _ => {
+                    let given = value_name(req, value);
+                    return Err(throw(
+                        req,
+                        "TypeError",
+                        &format!(
+                            "Attribute value must be of type bool for selected attribute, {given} given"
+                        ),
+                    ));
+                }
+            };
+            dbh_mut(req, object, |d| d.stringify = stringify);
+            let _ = with_connection(req, object, |req, conn| {
+                let _ = conn.set_attribute(req, attr, value);
+                Ok(())
+            });
+            return Ok(true);
+        }
+        ATTR_STATEMENT_CLASS => return set_statement_class(req, object, value, value_arg),
+        _ => {}
+    }
+    clear_error(req, object);
+    match on_connection(req, object, |req, conn| {
+        conn.set_attribute(req, attr, value)
+    })? {
+        Ok(Some(())) => Ok(true),
+        Ok(None) => Ok(false),
+        Err(()) => {
+            error::raise_impl(
+                req,
+                object,
+                On::Dbh,
+                SqlState(*b"IM001"),
+                Some("driver does not support setting attributes"),
+            )?;
+            Ok(false)
+        }
+    }
+}
+
+/// `ATTR_DEFAULT_FETCH_MODE`'s value: an integer, or an array whose
+/// first element is not `FETCH_INTO` or `FETCH_CLASS`, read as a
+/// number, never `FETCH_DEFAULT`, and stored as php's `uint16_t`.
+fn default_fetch_mode(req: &mut Request, value: &Value, value_arg: u32) -> Result<u16, Thrown> {
+    let mode = if let Some(array) = value.as_array() {
+        if let Some(first) = array.get(&Key::Int(0))
+            && let Some(kind) = first.as_int()
+            && (kind == 9 || kind == 8)
+        {
+            return Err(argument_error(
+                req,
+                "ValueError",
+                value_arg,
+                "PDO::FETCH_INTO and PDO::FETCH_CLASS cannot be set as the default fetch mode",
+            ));
+        }
+        php_ext::coerce::to_long(req, value)?
+    } else {
+        crate::connector::long_attribute(req, value)?
+    };
+    if mode == 0 {
+        return Err(argument_error(
+            req,
+            "ValueError",
+            value_arg,
+            "Fetch mode must be a bitmask of PDO::FETCH_* constants",
+        ));
+    }
+    // php stores the default in a `uint16_t`.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Ok(mode as u16)
+}
+
+/// `ATTR_STATEMENT_CLASS`: `[class, constructor_args]`, the class a
+/// statement is made as, which must extend `PDOStatement` and keep its
+/// constructor from the public.
+fn set_statement_class(
+    req: &mut Request,
+    object: PhpObject,
+    value: &Value,
+    value_arg: u32,
+) -> Result<bool, Thrown> {
+    if dbh_ref(req, object, |d| d.persistent).unwrap_or(false) {
+        error::raise_impl(
+            req,
+            object,
+            On::Dbh,
+            SqlState::GENERAL,
+            Some("PDO::ATTR_STATEMENT_CLASS cannot be used with persistent PDO instances"),
+        )?;
+        error::handle(req, object, On::Dbh, false)?;
+        return Ok(false);
+    }
+    let (class, args) = statement_class(req, value, Some(value_arg))?;
+    let old = dbh_mut(req, object, |d| {
+        d.stmt_class = Some(class);
+        std::mem::replace(&mut d.stmt_args, args)
+    })
+    .flatten();
+    if let Some(args) = args {
+        req.addref(&Value::array(args));
+    }
+    if let Some(old) = old {
+        req.release(Value::array(old));
+    }
+    Ok(true)
+}
+
+/// The class and the constructor arguments an `ATTR_STATEMENT_CLASS`
+/// value names, held to php's refusals; `arg` is the argument
+/// `setAttribute()` names, `None` for `prepare()`'s options, whose
+/// refusals name none.
+pub(super) fn statement_class(
+    req: &mut Request,
+    value: &Value,
+    arg: Option<u32>,
+) -> Result<(ClassId, Option<PhpArray>), Thrown> {
+    let type_error = |req: &mut Request, tail: &str| match arg {
+        Some(at) => argument_error(req, "TypeError", at, tail),
+        None => throw(req, "TypeError", tail),
+    };
+    let Some(array) = value.as_array().copied() else {
+        let given = value_name(req, value);
+        return Err(type_error(
+            req,
+            &format!("PDO::ATTR_STATEMENT_CLASS value must be of type array, {given} given"),
+        ));
+    };
+    let Some(first) = array.get(&Key::Int(0)) else {
+        let tail = "PDO::ATTR_STATEMENT_CLASS value must be an array with the format array(classname, constructor_args)";
+        return Err(match arg {
+            Some(at) => argument_error(req, "ValueError", at, tail),
+            None => throw(req, "ValueError", tail),
+        });
+    };
+    let class = match first.deref().as_str_bytes().map(<[u8]>::to_vec) {
+        Some(name) => lookup_class(req, &name)?,
+        None => None,
+    };
+    let Some(class) = class else {
+        return Err(type_error(
+            req,
+            "PDO::ATTR_STATEMENT_CLASS class must be a valid class",
+        ));
+    };
+    if !crate::extends(req, class, b"PDOStatement") {
+        return Err(type_error(
+            req,
+            "PDO::ATTR_STATEMENT_CLASS class must be derived from PDOStatement",
+        ));
+    }
+    if public_constructor(req, class) {
+        return Err(type_error(
+            req,
+            "User-supplied statement class cannot have a public constructor",
+        ));
+    }
+    let args = match array.get(&Key::Int(1)) {
+        Some(args) => {
+            if let Some(args) = args.deref().as_array().copied() {
+                Some(args)
+            } else {
+                let given = value_name(req, value);
+                return Err(type_error(
+                    req,
+                    &format!(
+                        "PDO::ATTR_STATEMENT_CLASS constructor_args must be of type ?array, {given} given"
+                    ),
+                ));
+            }
+        }
+        None => None,
+    };
+    Ok((class, args))
+}
+
+/// Whether `class` has a constructor that is public.
+fn public_constructor(req: &mut Request, class: ClassId) -> bool {
+    constructor_visibility(req, class).is_some_and(|v| v == php_ext::decl::Visibility::Public)
+}
+
+/// The visibility of the constructor `class` declares or inherits.
+fn constructor_visibility(req: &mut Request, class: ClassId) -> Option<php_ext::decl::Visibility> {
+    let mut at = Some(class);
+    while let Some(class) = at {
+        let decl = req.class_decl(class)?;
+        if let Some(method) = decl
+            .methods
+            .iter()
+            .find(|m| m.function.name.0.eq_ignore_ascii_case(b"__construct"))
+        {
+            return Some(method.visibility);
+        }
+        let parent = decl.parent.clone();
+        at = parent.and_then(|p| lookup_class(req, &p.0).ok().flatten());
+    }
+    None
+}
+
+/// `PDO::setAttribute(int $attribute, mixed $value): bool`.
+///
+/// ```php
+/// $db = new PDO('sqlite::memory:');
+/// var_dump($db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_SILENT), $db->setAttribute(PDO::ATTR_ORACLE_NULLS, 7), $db->getAttribute(PDO::ATTR_ORACLE_NULLS));
+/// try { $db->setAttribute(PDO::ATTR_ERRMODE, 9); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// try { $db->setAttribute(PDO::ATTR_CASE, 'x'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { $db->setAttribute(PDO::ATTR_STATEMENT_CLASS, ['stdClass']); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($db->setAttribute(12345, 1));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// int(7)
+/// PDO::setAttribute(): Argument #2 ($value) Error mode must be one of the PDO::ERRMODE_* constants
+/// Attribute value must be of type int for selected attribute, string given
+/// PDO::setAttribute(): Argument #2 ($value) PDO::ATTR_STATEMENT_CLASS class must be derived from PDOStatement
+/// bool(false)
+/// ```
+fn set_attribute(req: &mut Request) -> Result<Value, Thrown> {
+    arity(req, 2, 2)?;
+    let this = this(req)?;
+    let attr = long_arg(req, 1, 0)?;
+    let value = crate::arg(req, 2)?.unwrap_or_default();
+    clear_error(req, this);
+    constructed(req, this)?;
+    attribute_set(req, this, attr, &value, 2).map(Value::bool)
+}
+
+/// `PDO::getAttribute(int $attribute): mixed`: PDO's own attributes, then
+/// the connector's.
+///
+/// ```php
+/// $db = new PDO('sqlite::memory:');
+/// var_dump($db->getAttribute(PDO::ATTR_PERSISTENT), $db->getAttribute(PDO::ATTR_DEFAULT_FETCH_MODE), $db->getAttribute(PDO::ATTR_STRINGIFY_FETCHES), $db->getAttribute(PDO::ATTR_STATEMENT_CLASS));
+/// var_dump(is_string($db->getAttribute(PDO::ATTR_SERVER_VERSION)));
+/// try { $db->getAttribute(PDO::ATTR_PREFETCH); } catch (PDOException $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// bool(false)
+/// int(4)
+/// bool(false)
+/// array(1) {
+///   [0]=>
+///   string(12) "PDOStatement"
+/// }
+/// bool(true)
+/// SQLSTATE[IM001]: Driver does not support this function: driver does not support that attribute
+/// ```
+fn get_attribute(req: &mut Request) -> Result<Value, Thrown> {
+    arity(req, 1, 1)?;
+    let this = this(req)?;
+    let attr = long_arg(req, 1, 0)?;
+    clear_error(req, this);
+    constructed(req, this)?;
+    let Some(state) = dbh_ref(req, this, |d| {
+        (
+            d.persistent,
+            d.case,
+            d.nulls,
+            d.error_mode,
+            d.driver.map(Connector::name),
+            d.stmt_class,
+            d.stmt_args,
+            d.default_fetch,
+            d.stringify,
+        )
+    }) else {
+        return Ok(Value::bool(false));
+    };
+    let (persistent, case, nulls, mode, name, class, args, fetch, stringify) = state;
+    match attr {
+        ATTR_PERSISTENT => return Ok(Value::bool(persistent)),
+        ATTR_CASE => return Ok(Value::int(case.code())),
+        ATTR_ORACLE_NULLS => return Ok(Value::int(nulls.code())),
+        ATTR_ERRMODE => {
+            return Ok(Value::int(match mode {
+                OnError::Silent => 0,
+                OnError::Warn => 1,
+                OnError::Throw => 2,
+            }));
+        }
+        ATTR_DRIVER_NAME => return crate::string(req, name.unwrap_or("").as_bytes()),
+        ATTR_STATEMENT_CLASS => {
+            let mut out = PhpArray::new(req)?;
+            let class = class.map_or_else(
+                || String::from("PDOStatement"),
+                |c| crate::class_name(req, c),
+            );
+            let text = crate::string(req, class.as_bytes())?;
+            out.append(req, text)?;
+            if let Some(args) = args {
+                req.addref(&Value::array(args));
+                out.append(req, Value::array(args))?;
+            }
+            return Ok(Value::array(out));
+        }
+        ATTR_DEFAULT_FETCH_MODE => return Ok(Value::int(i64::from(fetch))),
+        ATTR_STRINGIFY_FETCHES => return Ok(Value::bool(stringify)),
+        _ => {}
+    }
+    match on_connection(req, this, |req, conn| conn.attribute(req, attr))? {
+        Ok(Some(Some(value))) => Ok(value),
+        Ok(Some(None)) => unsupported(req, this, "driver does not support that attribute"),
+        Ok(None) => Ok(Value::bool(false)),
+        Err(()) => unsupported(req, this, "driver does not support getting attributes"),
+    }
+}
+
+// ---- statements
+
+/// `PDO::exec(string $statement): int|false`: the rows it changed.
+///
+/// ```php
+/// $db = new PDO('sqlite::memory:');
+/// var_dump($db->exec('CREATE TABLE t (a)'), $db->exec('INSERT INTO t VALUES (1), (2)'), $db->exec('UPDATE t SET a = 3'));
+/// try { $db->exec(''); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// try { $db->exec('NOPE'); } catch (PDOException $e) { echo $e->getMessage(), "\n"; }
+/// $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_WARNING);
+/// var_dump($db->exec('NOPE'));
+/// ```
+/// ```expect
+/// int(0)
+/// int(2)
+/// int(2)
+/// PDO::exec(): Argument #1 ($statement) must not be empty
+/// SQLSTATE[HY000]: General error: 1 near "NOPE": syntax error
+///
+/// Warning: PDO::exec(): SQLSTATE[HY000]: General error: 1 near "NOPE": syntax error in %s on line 7
+/// bool(false)
+/// ```
+fn exec(req: &mut Request) -> Result<Value, Thrown> {
+    arity(req, 1, 1)?;
+    let this = this(req)?;
+    let sql = bytes_arg(req, 1)?;
+    if sql.is_empty() {
+        return Err(argument_error(req, "ValueError", 1, "must not be empty"));
+    }
+    clear_error(req, this);
+    constructed(req, this)?;
+    match on_connection(req, this, |req, conn| conn.exec(req, &sql))? {
+        Ok(Some(rows)) => Ok(Value::int(rows)),
+        Ok(None) | Err(()) => Ok(Value::bool(false)),
+    }
+}
+
+/// `PDO::prepare(string $query, array $options = []): PDOStatement|false`.
+///
+/// ```php
+/// $db = new PDO('sqlite::memory:');
+/// $s = $db->prepare('SELECT ? + ?');
+/// $s->execute([1, 2]);
+/// var_dump($s->queryString, $s->fetchColumn());
+/// class St extends PDOStatement { protected function __construct(public $tag) {} }
+/// $s = $db->prepare('SELECT 1', [PDO::ATTR_STATEMENT_CLASS => ['St', ['x']]]);
+/// var_dump(get_class($s), $s->tag);
+/// try { $db->prepare('SELEKT'); } catch (PDOException $e) { echo $e->getMessage(), "\n"; }
+/// try { $db->prepare('SELECT 1', [PDO::ATTR_STATEMENT_CLASS => 'St']); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// string(12) "SELECT ? + ?"
+/// int(3)
+/// string(2) "St"
+/// string(1) "x"
+/// SQLSTATE[HY000]: General error: 1 near "SELEKT": syntax error
+/// PDO::ATTR_STATEMENT_CLASS value must be of type array, string given
+/// ```
+fn prepare(req: &mut Request) -> Result<Value, Thrown> {
+    arity(req, 1, 2)?;
+    let this = this(req)?;
+    let sql = bytes_arg(req, 1)?;
+    let options = crate::array_arg(req, 2)?;
+    constructed(req, this)?;
+    if sql.is_empty() {
+        return Err(argument_error(req, "ValueError", 1, "must not be empty"));
+    }
+    clear_error(req, this);
+    let (class, args) = match options.and_then(|o| o.get(&Key::Int(ATTR_STATEMENT_CLASS))) {
+        Some(value) => {
+            let (class, args) = statement_class(req, &value, None)?;
+            (Some(class), args)
+        }
+        None => dbh_ref(req, this, |d| (d.stmt_class, d.stmt_args)).unwrap_or((None, None)),
+    };
+    let stmt = instantiate(req, this, class, args.is_some(), &sql)?;
+    let prepared = with_connection(req, this, |req, conn| Ok(conn.prepare(req, &sql, options)))?;
+    match prepared {
+        Ok(prepared) => {
+            crate::stmt::attach(req, stmt, prepared);
+            construct_statement(req, stmt, &sql, args)?;
+            Ok(stmt.as_value())
+        }
+        Err(failure) => {
+            req.release(stmt.as_value());
+            error::settle(req, this, On::Dbh, failure)?;
+            Ok(Value::bool(false))
+        }
+    }
+}
+
+/// `pdo_stmt_instantiate` and the fields `prepare()` and `query()` lay
+/// down on the new statement: its query, the connection's default fetch
+/// style and the connection itself, one owner.
+fn instantiate(
+    req: &mut Request,
+    dbh: PhpObject,
+    class: Option<ClassId>,
+    with_args: bool,
+    sql: &[u8],
+) -> Result<PhpObject, Thrown> {
+    let class = match class {
+        Some(class) => class,
+        None => match lookup_class(req, b"PDOStatement")? {
+            Some(class) => class,
+            None => {
+                return Err(php_ext::raising::fatal(
+                    req,
+                    "InternalError: PDOStatement is not declared",
+                ));
+            }
+        },
+    };
+    if with_args && constructor_visibility(req, class).is_none() {
+        return Err(throw(
+            req,
+            "Error",
+            "User-supplied statement does not accept constructor arguments",
+        ));
+    }
+    let stmt = new_object(req, class)?;
+    let fetch = dbh_ref(req, dbh, |d| d.default_fetch).unwrap_or(4);
+    req.addref(&dbh.as_value());
+    if let Some(s) = stmt.native_mut::<Stmt>(req) {
+        s.query = sql.to_vec();
+        s.default_fetch = i64::from(fetch);
+        s.dbh = DbLink::Owned(dbh);
+    } else {
+        req.release(dbh.as_value());
+    }
+    Ok(stmt)
+}
+
+/// `pdo_stmt_construct`: `queryString` written past the class's own
+/// write handler, and the class's constructor served with the arguments
+/// as `zend_call_known_function` serves them.
+fn construct_statement(
+    req: &mut Request,
+    stmt: PhpObject,
+    sql: &[u8],
+    args: Option<PhpArray>,
+) -> Result<(), Thrown> {
+    let name = PhpString::new(req, b"queryString")?;
+    let query = PhpString::new(req, sql)?;
+    Std.write_property(req, stmt, name, Value::string(query))?;
+    if constructor_visibility(req, stmt.class()).is_none() {
+        return Ok(());
+    }
+    let constructor = Name(b"__construct".as_slice().into());
+    let Some(callable) = known_method(req, stmt.class(), &constructor, Some(stmt)) else {
+        return Ok(());
+    };
+    let args = match args {
+        Some(args) => args,
+        None => PhpArray::new(req)?,
+    };
+    let returned = call_array(req, &callable, args);
+    let returned = match returned {
+        Ok(value) => value,
+        Err(thrown) => {
+            req.release(stmt.as_value());
+            return Err(thrown);
+        }
+    };
+    req.release(returned);
+    Ok(())
+}
+
+/// `PDO::query(string $query, ?int $fetchMode = null, mixed ...$fetchModeArgs): PDOStatement|false`:
+/// prepared and executed at once, the fetch style set where one is given.
+///
+/// ```php
+/// $db = new PDO('sqlite::memory:');
+/// foreach ($db->query('SELECT 1 AS a UNION SELECT 2', PDO::FETCH_ASSOC) as $row) var_dump($row);
+/// var_dump($db->query('SELECT 5', PDO::FETCH_COLUMN, 0)->fetch());
+/// $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_SILENT);
+/// var_dump($db->query('SELECT * FROM nope'), $db->errorCode(), $db->errorInfo()[2]);
+/// ```
+/// ```expect
+/// array(1) {
+///   ["a"]=>
+///   int(1)
+/// }
+/// array(1) {
+///   ["a"]=>
+///   int(2)
+/// }
+/// int(5)
+/// bool(false)
+/// string(5) "HY000"
+/// string(19) "no such table: nope"
+/// ```
+fn query(req: &mut Request) -> Result<Value, Thrown> {
+    let given = req.argument_count();
+    if given < 1 {
+        return Err(php_ext::raising::arg_count_error(
+            req,
+            &format!("at least 1 argument, {given} given"),
+        ));
+    }
+    let this = this(req)?;
+    let sql = bytes_arg(req, 1)?;
+    let mode = crate::arg(req, 2)?.and_then(|v| v.as_int());
+    let extra: Vec<Value> = (3..=u32::try_from(given).unwrap_or(u32::MAX))
+        .map(|at| req.argument(at).unwrap_or_default().deref())
+        .collect();
+    constructed(req, this)?;
+    if sql.is_empty() {
+        return Err(argument_error(req, "ValueError", 1, "must not be empty"));
+    }
+    clear_error(req, this);
+    let (class, args) = dbh_ref(req, this, |d| (d.stmt_class, d.stmt_args)).unwrap_or((None, None));
+    let stmt = instantiate(req, this, class, args.is_some(), &sql)?;
+    if let Some(s) = stmt.native_mut::<Stmt>(req) {
+        s.active = crate::stmt::Active::Same;
+    }
+    let prepared = with_connection(req, this, |req, conn| Ok(conn.prepare(req, &sql, None)))?;
+    let prepared = match prepared {
+        Ok(prepared) => prepared,
+        Err(failure) => {
+            req.release(stmt.as_value());
+            error::settle(req, this, On::Dbh, failure)?;
+            return Ok(Value::bool(false));
+        }
+    };
+    crate::stmt::attach(req, stmt, prepared);
+    crate::stmt::clear_error(req, stmt);
+    let set = match mode {
+        Some(mode) => crate::fetch::setup_mode(req, stmt, mode, 2, &extra),
+        None => Ok(()),
+    };
+    let ran = match set {
+        Ok(()) => {
+            crate::stmt::clear_error(req, stmt);
+            crate::stmt::run(req, stmt)
+        }
+        Err(thrown) => Err(Some(thrown)),
+    };
+    match ran {
+        Ok(()) => {
+            construct_statement(req, stmt, &sql, args)?;
+            Ok(stmt.as_value())
+        }
+        Err(thrown) => {
+            if let Some(s) = stmt.native_mut::<Stmt>(req) {
+                s.dbh = DbLink::Held(this);
+            }
+            req.release(this.as_value());
+            let old = dbh_mut(req, this, |d| d.query_stmt.replace(stmt)).flatten();
+            if let Some(old) = old {
+                req.release(old.as_value());
+            }
+            if let Some(thrown) = thrown {
+                return Err(thrown);
+            }
+            crate::stmt::handle_error(req, stmt, false)?;
+            Ok(Value::bool(false))
+        }
+    }
+}
+
+/// `PDO::quote(string $string, int $type = PDO::PARAM_STR): string|false`.
+///
+/// ```php
+/// $db = new PDO('sqlite::memory:');
+/// var_dump($db->quote("it's"), $db->quote('1', PDO::PARAM_INT));
+/// try { $db->quote("a\0b"); } catch (PDOException $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// string(7) "'it''s'"
+/// string(3) "'1'"
+/// SQLite PDO::quote does not support null bytes
+/// ```
+fn quote(req: &mut Request) -> Result<Value, Thrown> {
+    arity(req, 1, 2)?;
+    let this = this(req)?;
+    let text = bytes_arg(req, 1)?;
+    let ty = BindType::of(long_arg(req, 2, 2)?);
+    constructed(req, this)?;
+    clear_error(req, this);
+    let mode = dbh_ref(req, this, |d| d.error_mode).unwrap_or_default();
+    match on_connection(req, this, |req, conn| conn.quote(req, &text, ty, mode))? {
+        Ok(Some(quoted)) => crate::string(req, &quoted),
+        Ok(None) => Ok(Value::bool(false)),
+        Err(()) => unsupported(req, this, "driver does not support quoting"),
+    }
+}
+
+/// `PDO::lastInsertId(?string $name = null): string|false`.
+///
+/// ```php
+/// $db = new PDO('sqlite::memory:');
+/// $db->exec('CREATE TABLE t (id INTEGER PRIMARY KEY, a)');
+/// $db->exec("INSERT INTO t (a) VALUES ('x'), ('y')");
+/// var_dump($db->lastInsertId(), $db->lastInsertId('t'));
+/// ```
+/// ```expect
+/// string(1) "2"
+/// string(1) "2"
+/// ```
+fn last_insert_id(req: &mut Request) -> Result<Value, Thrown> {
+    arity(req, 0, 1)?;
+    let this = this(req)?;
+    let name = crate::nullable_bytes_arg(req, 1)?;
+    constructed(req, this)?;
+    clear_error(req, this);
+    match on_connection(req, this, |req, conn| {
+        conn.last_insert_id(req, name.as_deref())
+    })? {
+        Ok(Some(id)) => crate::string(req, &id),
+        Ok(None) => Ok(Value::bool(false)),
+        Err(()) => unsupported(req, this, "driver does not support lastInsertId()"),
+    }
+}
+
+// ---- transactions
+
+/// `pdo_is_in_transaction`: the connector's answer, or PDO's own tracking.
+fn in_txn(req: &mut Request, object: PhpObject) -> Result<bool, Thrown> {
+    let tracked = dbh_ref(req, object, |d| d.in_txn).unwrap_or(false);
+    with_connection(req, object, |_, conn| {
+        Ok(conn.in_transaction().unwrap_or(tracked))
+    })
+}
+
+/// One of `begin`, `commit` and `rollback`: `true` with the tracking
+/// set to `after`, `false` with the error handled.
+fn transaction(
+    req: &mut Request,
+    object: PhpObject,
+    after: bool,
+    call: fn(&mut dyn Connection, &mut Request) -> Result<(), Failure>,
+) -> Result<Result<bool, ()>, Thrown> {
+    match on_connection(req, object, |req, conn| call(conn, req))? {
+        Ok(Some(())) => {
+            dbh_mut(req, object, |d| d.in_txn = after);
+            Ok(Ok(true))
+        }
+        Ok(None) => Ok(Ok(false)),
+        Err(()) => Ok(Err(())),
+    }
+}
+
+/// `PDO::beginTransaction(): bool`.
+///
+/// ```php
+/// $db = new PDO('sqlite::memory:');
+/// var_dump($db->beginTransaction(), $db->inTransaction());
+/// try { $db->beginTransaction(); } catch (PDOException $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// There is already an active transaction
+/// ```
+fn begin_transaction(req: &mut Request) -> Result<Value, Thrown> {
+    arity(req, 0, 0)?;
+    let this = this(req)?;
+    constructed(req, this)?;
+    if in_txn(req, this)? {
+        return Err(throw(
+            req,
+            "PDOException",
+            "There is already an active transaction",
+        ));
+    }
+    match transaction(req, this, true, super::connector::Connection::begin)? {
+        Ok(done) => Ok(Value::bool(done)),
+        Err(()) => Err(throw(
+            req,
+            "PDOException",
+            "This driver doesn't support transactions",
+        )),
+    }
+}
+
+/// `PDO::commit(): bool`.
+///
+/// ```php
+/// $db = new PDO('sqlite::memory:');
+/// $db->exec('CREATE TABLE t (a)');
+/// $db->beginTransaction(); $db->exec('INSERT INTO t VALUES (1)');
+/// var_dump($db->commit(), $db->query('SELECT COUNT(*) FROM t')->fetchColumn());
+/// try { $db->commit(); } catch (PDOException $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// bool(true)
+/// int(1)
+/// There is no active transaction
+/// ```
+fn commit(req: &mut Request) -> Result<Value, Thrown> {
+    end_transaction(req, super::connector::Connection::commit)
+}
+
+/// `PDO::rollBack(): bool`.
+///
+/// ```php
+/// $db = new PDO('sqlite::memory:');
+/// $db->exec('CREATE TABLE t (a)');
+/// $db->beginTransaction(); $db->exec('INSERT INTO t VALUES (1)');
+/// var_dump($db->rollBack(), $db->inTransaction(), $db->query('SELECT COUNT(*) FROM t')->fetchColumn());
+/// try { $db->rollBack(); } catch (PDOException $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(false)
+/// int(0)
+/// There is no active transaction
+/// ```
+fn roll_back(req: &mut Request) -> Result<Value, Thrown> {
+    end_transaction(req, super::connector::Connection::rollback)
+}
+
+fn end_transaction(
+    req: &mut Request,
+    call: fn(&mut dyn Connection, &mut Request) -> Result<(), Failure>,
+) -> Result<Value, Thrown> {
+    arity(req, 0, 0)?;
+    let this = this(req)?;
+    constructed(req, this)?;
+    if !in_txn(req, this)? {
+        return Err(throw(req, "PDOException", "There is no active transaction"));
+    }
+    match transaction(req, this, false, call)? {
+        Ok(done) => Ok(Value::bool(done)),
+        Err(()) => Ok(Value::bool(false)),
+    }
+}
+
+/// `PDO::inTransaction(): bool`.
+///
+/// ```php
+/// $db = new PDO('sqlite::memory:');
+/// var_dump($db->inTransaction());
+/// $db->exec('BEGIN');
+/// var_dump($db->inTransaction());
+/// ```
+/// ```expect
+/// bool(false)
+/// bool(true)
+/// ```
+fn in_transaction(req: &mut Request) -> Result<Value, Thrown> {
+    arity(req, 0, 0)?;
+    let this = this(req)?;
+    constructed(req, this)?;
+    in_txn(req, this).map(Value::bool)
+}
+
+// ---- the error state
+
+/// `PDO::errorCode(): ?string`: the failed `query()`'s state, else the
+/// connection's, `null` before anything set one.
+///
+/// ```php
+/// $db = new PDO('sqlite::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_SILENT]);
+/// var_dump($db->errorCode());
+/// $db->exec('SELECT 1');
+/// var_dump($db->errorCode());
+/// $db->exec('NOPE');
+/// var_dump($db->errorCode());
+/// ```
+/// ```expect
+/// NULL
+/// string(5) "00000"
+/// string(5) "HY000"
+/// ```
+fn error_code(req: &mut Request) -> Result<Value, Thrown> {
+    arity(req, 0, 0)?;
+    let this = this(req)?;
+    constructed(req, this)?;
+    let (held, code) = dbh_ref(req, this, |d| (d.query_stmt, d.error_code)).unwrap_or((None, None));
+    if let Some(stmt) = held {
+        let state = stmt.native::<Stmt>(req).and_then(|s| s.error_code);
+        return crate::string(req, state.as_ref().map_or("", SqlState::as_str).as_bytes());
+    }
+    match code {
+        Some(state) => crate::string(req, state.as_str().as_bytes()),
+        None => Ok(Value::null()),
+    }
+}
+
+/// `PDO::errorInfo(): array`: the state, and where it is an error what
+/// the connector recorded, filled to three with `null`.
+///
+/// ```php
+/// $db = new PDO('sqlite::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_SILENT]);
+/// var_dump($db->errorInfo());
+/// $db->exec('NOPE');
+/// var_dump($db->errorInfo());
+/// ```
+/// ```expect
+/// array(3) {
+///   [0]=>
+///   string(0) ""
+///   [1]=>
+///   NULL
+///   [2]=>
+///   NULL
+/// }
+/// array(3) {
+///   [0]=>
+///   string(5) "HY000"
+///   [1]=>
+///   int(1)
+///   [2]=>
+///   string(25) "near "NOPE": syntax error"
+/// }
+/// ```
+fn error_info(req: &mut Request) -> Result<Value, Thrown> {
+    arity(req, 0, 0)?;
+    let this = this(req)?;
+    constructed(req, this)?;
+    let (held, code) = dbh_ref(req, this, |d| (d.query_stmt, d.error_code)).unwrap_or((None, None));
+    let state = match held {
+        Some(stmt) => stmt.native::<Stmt>(req).and_then(|s| s.error_code),
+        None => code,
+    };
+    let mut out = PhpArray::new(req)?;
+    let made = crate::string(req, state.as_ref().map_or("", SqlState::as_str).as_bytes())?;
+    out.append(req, made)?;
+    if state != Some(SqlState::NONE) {
+        error::fetch_error(req, this, &mut out)?;
+    }
+    while out.len() < 3 {
+        out.append(req, Value::null())?;
+    }
+    Ok(Value::array(out))
+}
+
+/// `PDO::getAvailableDrivers(): array`.
+///
+/// ```php
+/// var_dump(in_array('sqlite', PDO::getAvailableDrivers(), true));
+/// ```
+/// ```expect
+/// bool(true)
+/// ```
+fn get_available_drivers(req: &mut Request) -> Result<Value, Thrown> {
+    arity(req, 0, 0)?;
+    crate::driver_names(req)
+}
