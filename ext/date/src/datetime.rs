@@ -500,6 +500,32 @@ pub(crate) fn immutable_create_from_format(req: &mut Request) -> Result<Value, T
 /// DateMalformedStringException: Failed to parse time string (not a date) at position 0 (n): The timezone could not be found in the database
 /// DateObjectError: Object of type A (inheriting DateTime) has not been correctly initialized by calling parent::__construct() in its constructor
 /// ```
+///
+/// Its declaration, as `ReflectionMethod` renders it.
+///
+/// ```php
+/// echo new ReflectionMethod('DateTime', '__construct');
+/// echo new ReflectionMethod('DateTime', 'setTime');
+/// ```
+/// ```expect
+/// Method [ <internal:date, ctor> public method __construct ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <optional> string $datetime = "now" ]
+///     Parameter #1 [ <optional> ?DateTimeZone $timezone = null ]
+///   }
+/// }
+/// Method [ <internal:date> public method setTime ] {
+///
+///   - Parameters [4] {
+///     Parameter #0 [ <required> int $hour ]
+///     Parameter #1 [ <required> int $minute ]
+///     Parameter #2 [ <optional> int $second = 0 ]
+///     Parameter #3 [ <optional> int $microsecond = 0 ]
+///   }
+///   - Tentative return [ DateTime ]
+/// }
+/// ```
 pub(crate) fn construct(req: &mut Request) -> Result<Value, Thrown> {
     count_between(req, 0, 2)?;
     let text = optional_string(req, 1)?
