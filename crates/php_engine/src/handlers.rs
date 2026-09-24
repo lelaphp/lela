@@ -4339,7 +4339,10 @@ fn read_dimension(
     if let Some(object) = container.as_object().copied() {
         let dim = object_dim(req, frame, code, op);
         return Ok(match mode {
-            DimRead::Warning => req.read_dimension(object, dim.as_ref()),
+            DimRead::Warning => {
+                let table = req.object_handlers(object.heap());
+                table.read_dimension(req, object, dim.as_ref())
+            }
             DimRead::Silent => req.read_dimension_is(object, dim.as_ref()),
         });
     }
@@ -5075,7 +5078,8 @@ fn fetch_dim_place(
         }
         Ok(Container::Object(object)) => {
             let dim = object_dim(req, frame, code, op);
-            match req.read_dimension(object, dim.as_ref()) {
+            let table = req.object_handlers(object.heap());
+            match table.read_dimension(req, object, dim.as_ref()) {
                 Ok(value) => {
                     if value.as_object().is_none() {
                         let class = req.class_name(object.class());
@@ -7437,12 +7441,28 @@ fn assign_to_place(
 }
 
 /// `zend_assign_to_object_dim` (`Z/Zend/zend_execute.c:1558`), the arm
-/// `ZEND_ASSIGN_DIM` takes over an object: `offsetSet` with the dimension
-/// and the value ([`Request::write_dimension`]), `null` as the dimension
-/// for `$o[] = v`, and php's `Error` `Cannot use object of type C as
-/// array` for a class that is no `ArrayAccess`. The temporary `out` names
-/// one more owner of the value under `RETURN_VALUE_USED`, which is the
-/// value written and never what `offsetSet` returned.
+/// `ZEND_ASSIGN_DIM` takes over an object: the class's `write_dimension`,
+/// at `Std` `offsetSet` with the dimension and the value
+/// ([`Request::write_dimension`]), `null` as the dimension for
+/// `$o[] = v`, and php's `Error` `Cannot use object of type C as array`
+/// for a class that is no `ArrayAccess`. The temporary `out` names one
+/// more owner of the value under `RETURN_VALUE_USED`, which is the value
+/// written and never what `offsetSet` returned. A class of an extension
+/// is written through its own slot, as `MultipleIterator`'s
+/// `spl_multiple_iterator_write_dimension` attaches an iterator though
+/// the class is no `ArrayAccess`; its reads go through `read_dimension`
+/// the same way.
+///
+/// ```php
+/// $m = new MultipleIterator();
+/// $m[new ArrayIterator([1, 2])] = 'a';
+/// try { $m[new stdClass] = 'b'; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($m->countIterators());
+/// ```
+/// ```expect
+/// Can only attach objects that implement the Iterator interface
+/// int(1)
+/// ```
 fn assign_object_dim(
     req: &mut Request,
     frame: FrameRef,
@@ -7454,7 +7474,8 @@ fn assign_object_dim(
     let dim = object_dim(req, frame, code, op);
     let value = exec::take_operand(req, frame, code, data.op1_type, data.op1);
     req.addref(&value);
-    let served = req.write_dimension(object, dim.as_ref(), value);
+    let table = req.object_handlers(object.heap());
+    let served = table.write_dimension(req, object, dim.as_ref(), value);
     let answer = match served {
         Ok(()) => {
             write_out(req, frame, code, op, &value);
@@ -8068,7 +8089,8 @@ fn binary_assign_op_obj_dim(
     let Compound { op, data, kernel } = step;
     let dim = object_dim(req, frame, code, op);
     let value = exec::operand(req, frame, code, data.op1_type, data.op1);
-    let read = req.read_dimension(object, dim.as_ref());
+    let table = req.object_handlers(object.heap());
+    let read = table.read_dimension(req, object, dim.as_ref());
     let held = match read {
         Ok(held) => held,
         Err(thrown) => {
@@ -8080,7 +8102,7 @@ fn binary_assign_op_obj_dim(
     req.release(held);
     exec::free_operand(req, frame, code, data.op1_type, data.op1);
     let stepped = computed?;
-    let written = req.write_dimension(object, dim.as_ref(), stepped);
+    let written = table.write_dimension(req, object, dim.as_ref(), stepped);
     if let Err(thrown) = written {
         req.release(stepped);
         return Err(thrown);
