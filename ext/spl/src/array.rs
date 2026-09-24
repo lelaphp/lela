@@ -406,7 +406,7 @@ fn hash_key(req: &mut Request, offset: &Value) -> Result<Option<Key>, Thrown> {
 
 /// `zend_illegal_container_offset` for the class of `object`.
 fn illegal(req: &mut Request, object: PhpObject, offset: &Value, how: &str) -> Thrown {
-    let ty = offset.deref().type_name().to_owned();
+    let ty = crate::zval_type_name(req, offset);
     let class = String::from_utf8_lossy(&crate::class_name(req, object.class())).into_owned();
     let message = match how {
         "isset" => format!("Cannot access offset of type {ty} in isset or empty"),
@@ -1063,6 +1063,7 @@ fn offset_get(req: &mut Request) -> Result<Value, Thrown> {
 /// $o->offsetSet('k', 'v'); $o->offsetSet(null, 'next');
 /// var_dump($o->getArrayCopy());
 /// try { $o[[]] = 1; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { $o[new stdClass] = 1; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
 /// ```
 /// ```expect
 /// array(2) {
@@ -1072,6 +1073,7 @@ fn offset_get(req: &mut Request) -> Result<Value, Thrown> {
 ///   string(4) "next"
 /// }
 /// Cannot access offset of type array on ArrayObject
+/// Cannot access offset of type stdClass on ArrayObject
 /// ```
 fn offset_set(req: &mut Request) -> Result<Value, Thrown> {
     crate::arity(req, 2, 2)?;

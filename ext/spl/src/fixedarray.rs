@@ -137,7 +137,7 @@ fn index(req: &mut Request, offset: &Value) -> Result<Option<usize>, Thrown> {
 }
 
 fn illegal(req: &mut Request, offset: &Value) -> Thrown {
-    let ty = offset.deref().type_name().to_owned();
+    let ty = crate::zval_type_name(req, offset);
     throw(
         req,
         "TypeError",
@@ -664,6 +664,7 @@ fn set_size(req: &mut Request) -> Result<Value, Thrown> {
 /// var_dump(isset($a[0]), empty($a[0]), isset($a[1]), $a->offsetExists(5), $a->offsetGet(0));
 /// unset($a[0]); var_dump($a[0]);
 /// try { $a['x']; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { $a[new stdClass] = 1; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
 /// ```
 /// ```expect
 /// bool(true)
@@ -673,6 +674,7 @@ fn set_size(req: &mut Request) -> Result<Value, Thrown> {
 /// int(0)
 /// NULL
 /// Cannot access offset of type string on SplFixedArray
+/// Cannot access offset of type stdClass on SplFixedArray
 /// ```
 fn offset_exists(req: &mut Request) -> Result<Value, Thrown> {
     crate::arity(req, 1, 1)?;

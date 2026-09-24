@@ -393,6 +393,16 @@ fn object(req: &mut Request, position: u32, class: Option<&str>) -> Result<PhpOb
     ))
 }
 
+/// `zend_zval_type_name`: an object's class name, any other value's
+/// type.
+fn zval_type_name(req: &Request, value: &Value) -> String {
+    let value = value.deref();
+    match value.as_object() {
+        Some(object) => String::from_utf8_lossy(&class_name(req, object.class())).into_owned(),
+        None => value.type_name().to_owned(),
+    }
+}
+
 /// A string value made of `bytes`, one owner, the caller's.
 fn string_value(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
     Ok(Value::string(PhpString::new(req, bytes)?))
