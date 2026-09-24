@@ -582,13 +582,6 @@ impl Vm {
         self.at(frame).map_or(0, |state| state.opline)
     }
 
-    /// `zend_get_executed_lineno`: the line of the opline the innermost
-    /// frame stands at, which is the line a diagnostic names, and zero
-    /// while no frame is being served.
-    pub(crate) fn executing_line(&self) -> u32 {
-        self.frames.last().map_or(0, line_of)
-    }
-
     /// `CACHED_PTR(num)`: what the runtime cache of the op array `frame`
     /// serves holds at `slot`, read off the request's map table
     /// (`EX(run_time_cache)`, [`RuntimeCache::get`]).

@@ -23,6 +23,7 @@ pub mod api;
 mod classes;
 mod engine;
 mod exec;
+mod fiber;
 mod handlers;
 mod interrupt;
 mod natives;

@@ -34,6 +34,7 @@ mod array;
 mod block;
 mod call_stack;
 mod compare;
+mod fiber;
 mod gc;
 mod hooks;
 mod map;
@@ -52,6 +53,7 @@ pub use array::{Arr, ArrIter, Key, SortEntry, canonical_int};
 pub use block::Block;
 pub use call_stack::{CallStack, call_stack_bounds, call_stack_default_size};
 pub use compare::{Scalar, compare, identical};
+pub use fiber::{FiberStack, Host, StackRefused, Suspensions, Switched, suspend};
 pub use hooks::{Fatal, HeapHooks};
 pub use map::{MapPtr, MapTable};
 pub use numeric::{

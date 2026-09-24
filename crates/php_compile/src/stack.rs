@@ -110,6 +110,33 @@ impl StackLimit {
         }
     }
 
+    /// The limit inside a fiber, which `zend_fiber_execute` writes over
+    /// the thread's before the fiber's body runs
+    /// (`Z/Zend/zend_fibers.c:590-593`): the base is the high address
+    /// of the stack the engine laid down for the fiber,
+    /// `zend_fiber_stack_base`, and the limit its lowest usable address
+    /// plus `zend.reserved_stack_size`, `zend_fiber_stack_limit`
+    /// (`:337-359`), the reserve doubled on Apple for
+    /// `___chkstk_darwin`, which reads twice as far below an alternative
+    /// stack. Neither is read off the thread, and
+    /// `zend.max_allowed_stack_size` is not
+    /// asked: php says in as many words that the maximum for a fiber is
+    /// `fiber.stack_size` (`Z/Zend/zend.c:276`), so a recursion inside
+    /// one is refused at the fiber's depth (design §5.11).
+    #[must_use]
+    pub fn fiber(base: usize, end: usize, reserved: u64) -> StackLimit {
+        let reserved = usize::try_from(reserved.max(RESERVED_MIN)).unwrap_or(usize::MAX);
+        let reserved = if cfg!(target_vendor = "apple") {
+            reserved.saturating_mul(2)
+        } else {
+            reserved
+        };
+        StackLimit {
+            base,
+            limit: end.saturating_add(reserved),
+        }
+    }
+
     /// `zend_check_stack_limit`: nothing while the calling frame stands
     /// above the limit, and past it php's `E_COMPILE_ERROR`
     /// (`zend_stack_limit_error`), whose number is the distance from the
@@ -272,6 +299,20 @@ mod tests {
             "a {size}-byte thread reads as {read}"
         );
         assert!(local < stack.base && local > stack.limit);
+    }
+
+    /// A fiber's limit is its own stack's: the reservation above the
+    /// lowest address, doubled on Apple, and php's least where the entry
+    /// asks for less.
+    #[test]
+    fn a_fibers_limit_is_its_stacks_end_and_the_reserve() {
+        let doubled = if cfg!(target_vendor = "apple") { 2 } else { 1 };
+        let reserved = usize::try_from(RESERVED_MIN).unwrap_or(0) * doubled;
+        let stack = StackLimit::fiber(0x20_0000, 0x10_0000, 0);
+        assert_eq!(stack.base, 0x20_0000);
+        assert_eq!(stack.limit, 0x10_0000 + reserved);
+        let wider = StackLimit::fiber(0x20_0000, 0x10_0000, 64 * 1024);
+        assert_eq!(wider.limit, 0x10_0000 + 64 * 1024 * doubled);
     }
 
     /// `limit`'s two clamps.

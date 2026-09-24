@@ -642,6 +642,10 @@ pub struct Request {
     gc_enabled: bool,
     /// `le_stream`, the resource type every stream is registered under.
     stream_type: ResourceType,
+    /// The fibers running on this request, innermost last, each with the
+    /// execution state of the stack that resumed it, and where each
+    /// suspends to (design §5.11, `crate::fiber`).
+    fibers: crate::fiber::Fibers,
     /// php's `EG(exception)`: the throwable a handler left pending, which
     /// the loop reads at the `Threw` edge.
     pending: Option<PhpObject>,
@@ -752,7 +756,7 @@ enum Traced {
 /// a user frame, with its place among the frames, or a call a native
 /// is serving.
 enum Link<'a> {
-    Frame(usize, &'a exec::FrameState),
+    Frame(&'a VmStack, usize, &'a exec::FrameState),
     Call(&'a exec::CallState),
 }
 
@@ -856,6 +860,7 @@ impl Request {
             cwd,
             gc_enabled: true,
             stream_type,
+            fibers: crate::fiber::Fibers::default(),
             pending: None,
             unwind_exit: false,
             marked_destructed: false,
@@ -912,6 +917,52 @@ impl Request {
 
     pub(crate) fn vm_mut(&mut self) -> &mut Vm {
         &mut self.vm
+    }
+
+    /// The fibers running on this request (design §5.11).
+    pub(crate) fn fibers(&self) -> &crate::fiber::Fibers {
+        &self.fibers
+    }
+
+    pub(crate) fn fibers_mut(&mut self) -> &mut crate::fiber::Fibers {
+        &mut self.fibers
+    }
+
+    /// The half of `zend_fiber_switch_context` that is the engine's:
+    /// the execution state the request runs on and `other` change
+    /// places, `zend_fiber_capture_vm_state` and
+    /// `zend_fiber_restore_vm_state` as one swap. The VM stack carries
+    /// the current frame and the entry slot with it, so neither is
+    /// saved on its own.
+    pub(crate) fn switch_execution(&mut self, other: &mut crate::fiber::Execution) {
+        std::mem::swap(&mut self.stack, &mut other.stack);
+        std::mem::swap(&mut self.vm, &mut other.vm);
+        std::mem::swap(&mut self.error_reporting, &mut other.error_reporting);
+        std::mem::swap(&mut self.stack_limit, &mut other.stack_limit);
+    }
+
+    /// The stacks php's one `prev_execute_data` chain runs through: the
+    /// one the request is running on, then each resumer's below it, the
+    /// request's own last.
+    fn executions(&self) -> impl Iterator<Item = (&VmStack, &Vm)> {
+        std::iter::once((&self.stack, &self.vm)).chain(
+            self.fibers
+                .below()
+                .map(|execution| (&execution.stack, &execution.vm)),
+        )
+    }
+
+    /// The innermost user frame on the chain, which is where
+    /// `zend_get_executed_filename` and `zend_get_executed_lineno` stop:
+    /// on a fiber whose callable is a native, the resumer's.
+    fn innermost_frame(&self) -> Option<&exec::FrameState> {
+        self.executions().find_map(|(_, vm)| vm.innermost())
+    }
+
+    /// `zend_objects_store_mark_destructed` has marked the store: no
+    /// destructor is served from here, a fiber's teardown among them.
+    pub(crate) fn destructors_marked(&self) -> bool {
+        self.marked_destructed
     }
 
     /// Push a frame for `unit`'s op array: its shape on the VM stack and
@@ -1348,6 +1399,21 @@ impl Request {
     /// #1 {main}
     ///   thrown in %s on line 2
     /// ```
+    ///
+    /// A fatal the body raises is rendered while the body's frames still
+    /// stand, as `php_error_cb` renders it under `zend_error` before
+    /// anything unwinds, so the site it names is the body's own line and
+    /// not the caller's.
+    ///
+    /// ```php
+    /// set_time_limit(1);
+    /// register_shutdown_function(function () {
+    ///     for (;;) {}
+    /// });
+    /// ```
+    /// ```expect exit=255 wall=1s
+    /// Fatal error: Maximum execution time of 1 second exceeded in %s on line 4
+    /// ```
     fn serve_user(&mut self, function: Function, call: CallState) -> Result<Value, Thrown> {
         let standing = self.vm.frames().len();
         let passed = call.arguments.len();
@@ -1390,10 +1456,15 @@ impl Request {
         }
         let reenter = self.shared.reenter;
         let served = reenter(self, frame);
+        // A fatal is rendered where it was raised, `php_error_cb` under
+        // `zend_error`, so the frames that raised it still stand while
+        // it is: the site a timeout names inside a callback, or inside a
+        // fiber's body, is the callback's and not its caller's.
+        let served = self.fatal_of(served);
         while self.vm.frames().len() > standing {
             self.pop_frame();
         }
-        self.fatal_of(served)?;
+        served?;
         match self.pending.take() {
             Some(pending) => Err(Thrown::of(Some(pending))),
             // The callback exited: what the native reads is php's
@@ -1635,7 +1706,7 @@ impl Request {
     pub(crate) fn executed_scope(&self) -> Option<ClassId> {
         for link in self.chain() {
             let (function, closure, carried) = match link {
-                Link::Frame(_, state) => (state.function, state.closure, state.scope),
+                Link::Frame(_, _, state) => (state.function, state.closure, state.scope),
                 Link::Call(call) => (Some(call.function), call.closure, None),
             };
             let scope = self
@@ -2134,30 +2205,39 @@ impl Request {
     /// being served, each frame's `calls_below` saying where among the
     /// calls it was pushed. A call still being built is not on the
     /// chain, as php's is a chain of activations.
+    ///
+    /// A fiber's chain goes on into its resumer's, as php's
+    /// `stack_bottom->prev_execute_data` names the frame that resumed
+    /// it: each stack's links innermost first, the running stack's
+    /// before the stacks below it (design §5.11).
     fn chain(&self) -> impl Iterator<Item = Link<'_>> {
-        let frames = self.vm.frames();
-        let calls = self.vm.calls();
         let mut chain: Vec<Link> = Vec::new();
-        let mut taken = 0usize;
-        for (at, state) in frames.iter().enumerate() {
-            let below = usize::try_from(state.calls_below)
-                .unwrap_or(usize::MAX)
-                .min(calls.len());
-            while taken < below {
+        for (stack, vm) in self.executions() {
+            let frames = vm.frames();
+            let calls = vm.calls();
+            let mut links: Vec<Link> = Vec::new();
+            let mut taken = 0usize;
+            for (at, state) in frames.iter().enumerate() {
+                let below = usize::try_from(state.calls_below)
+                    .unwrap_or(usize::MAX)
+                    .min(calls.len());
+                while taken < below {
+                    if calls[taken].stage == exec::CallStage::Serving {
+                        links.push(Link::Call(&calls[taken]));
+                    }
+                    taken += 1;
+                }
+                links.push(Link::Frame(stack, at, state));
+            }
+            while taken < calls.len() {
                 if calls[taken].stage == exec::CallStage::Serving {
-                    chain.push(Link::Call(&calls[taken]));
+                    links.push(Link::Call(&calls[taken]));
                 }
                 taken += 1;
             }
-            chain.push(Link::Frame(at, state));
+            chain.extend(links.into_iter().rev());
         }
-        while taken < calls.len() {
-            if calls[taken].stage == exec::CallStage::Serving {
-                chain.push(Link::Call(&calls[taken]));
-            }
-            taken += 1;
-        }
-        chain.into_iter().rev()
+        chain.into_iter()
     }
 
     /// `EG(current_execute_data)` and its `prev_execute_data` chain,
@@ -2189,12 +2269,12 @@ impl Request {
         let mut rows = Vec::new();
         for at in 0..chain.len() {
             let site = match chain.get(at.saturating_add(1)) {
-                Some(Link::Frame(_, below)) => exec::body_of(&below.unit, below.body)
+                Some(Link::Frame(_, _, below)) => exec::body_of(&below.unit, below.body)
                     .map(|code| (code.filename.0.to_vec(), i64::from(exec::line_of(below)))),
                 Some(Link::Call(_)) | None => None,
             };
             match &chain[at] {
-                Link::Frame(place, state) => {
+                Link::Frame(stack, place, state) => {
                     let Some(function) = state.function else {
                         // A code frame: named by the includer's opline
                         // where that is an `INCLUDE_OR_EVAL`, and the
@@ -2204,7 +2284,7 @@ impl Request {
                         let Some(kind) = chain
                             .get(at.saturating_add(1))
                             .and_then(|below| match below {
-                                Link::Frame(_, below) => Some(below),
+                                Link::Frame(_, _, below) => Some(below),
                                 Link::Call(_) => None,
                             })
                             .and_then(|below| {
@@ -2234,7 +2314,12 @@ impl Request {
                     let passed = usize::try_from(state.num_args).unwrap_or(0);
                     let mut arguments: Vec<Value> = (0..passed
                         .saturating_sub(state.extra_args.len()))
-                        .map(|slot| self.slot(frame, u32::try_from(slot).unwrap_or(u32::MAX)))
+                        .map(|slot| {
+                            let slot = Slot(u32::try_from(slot).unwrap_or(u32::MAX));
+                            stack
+                                .frame(frame)
+                                .map_or(Value::undef(), |f| Value::of_zval(f.slot(slot)))
+                        })
                         .collect();
                     arguments.extend(state.extra_args.iter().copied());
                     rows.push((
@@ -5335,7 +5420,9 @@ impl Request {
     /// stands, which is every release inside a serving and none of the
     /// releases `php_request_shutdown` makes after the main frame popped.
     fn executing(&self) -> bool {
-        self.vm.innermost().is_some() || self.vm.serving_call().is_some()
+        self.fibers.active().is_some()
+            || self.vm.innermost().is_some()
+            || self.vm.serving_call().is_some()
     }
 
     /// `zend_attach_symbol_table` (`Z/Zend/zend_execute_API.c:1857`) on
@@ -7533,7 +7620,15 @@ impl Request {
     /// where the entry has no value. Made at request start and by
     /// `ini_set('error_reporting', ...)`.
     fn update_error_reporting(&mut self) {
-        self.error_reporting = self.ini_get(b"error_reporting").map_or(E_ALL, ini_atol);
+        self.error_reporting = self.ini_error_reporting();
+    }
+
+    /// `INI_INT("error_reporting")`, `E_ALL` where the entry is unset:
+    /// the level the entry says, which is what a fiber starts its body
+    /// at (`zend_fiber_execute`), whatever an `@` around the `start`
+    /// masked.
+    pub(crate) fn ini_error_reporting(&self) -> i64 {
+        self.ini_get(b"error_reporting").map_or(E_ALL, ini_atol)
     }
 
     /// `set_error_handler()`: the previous handler.
@@ -7583,8 +7678,7 @@ impl Request {
     /// `zend_get_executed_filename`.
     #[must_use]
     pub fn current_file(&self) -> Option<&[u8]> {
-        self.vm
-            .innermost()
+        self.innermost_frame()
             .and_then(|state| exec::body_of(&state.unit, state.body))
             .map(|code| code.filename.0.as_ref())
             .or(self.description.script_name.as_deref())
@@ -7593,8 +7687,12 @@ impl Request {
     /// `zend_get_executed_lineno`: the line the innermost frame stands
     /// on, which is the line a diagnostic and a backtrace name.
     #[must_use]
+    ///
+    /// The line of the opline the innermost frame stands at, zero while
+    /// no frame is being served; inside a fiber whose callable is a
+    /// native, the resumer's frame's.
     pub fn current_line(&self) -> u32 {
-        self.vm.executing_line()
+        self.innermost_frame().map_or(0, exec::line_of)
     }
 
     /// `ZEND_NUM_ARGS()`: how many arguments the call being served was
@@ -7732,7 +7830,7 @@ impl Request {
     pub fn called_scope(&self) -> Option<ClassId> {
         for link in self.chain() {
             let (function, this, called) = match link {
-                Link::Frame(_, state) => (state.function, state.this, state.called_scope),
+                Link::Frame(_, _, state) => (state.function, state.this, state.called_scope),
                 Link::Call(call) => (Some(call.function), call.this, call.called_scope),
             };
             if let Some(this) = this {
@@ -8277,6 +8375,9 @@ impl Request {
             return Ok(None);
         }
         if Request::ini_verdict(name, value) == IniVerdict::Rejected {
+            return Ok(None);
+        }
+        if name == b"fiber.stack_size" && !crate::fiber::stack_size_updated(self, value) {
             return Ok(None);
         }
         self.ini.retain(|(n, _)| n.as_slice() != name);
@@ -8886,7 +8987,7 @@ impl Request {
     /// fatal the allocator raised, recorded here where `zend_mm` leaves
     /// the request, as the `Thrown` carrying no throwable that ends the
     /// native.
-    fn fatal_of<T>(&mut self, answered: Result<T, Fatal>) -> Result<T, Thrown> {
+    pub(crate) fn fatal_of<T>(&mut self, answered: Result<T, Fatal>) -> Result<T, Thrown> {
         match answered {
             Ok(value) => Ok(value),
             Err(fatal) => {
