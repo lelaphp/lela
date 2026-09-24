@@ -655,6 +655,9 @@ impl ObjectHandlers for TzHandlers {
         req: &mut Request,
         object: PhpObject,
     ) -> Result<Option<PhpArray>, Thrown> {
+        if has_debug_info(req, object) {
+            return Std.get_debug_info(req, object);
+        }
         let own = std_rows(req, object)?;
         let kind = object.native::<TzObj>(req).and_then(|t| t.tz.clone());
         let fields = match &kind {

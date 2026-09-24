@@ -133,6 +133,19 @@ pub(crate) fn timezone_open(req: &mut Request) -> Result<Value, Thrown> {
 /// DateTimeZone::__construct(): Unknown or bad timezone (Nowhere/Special)
 /// DateTimeZone::__construct(): Argument #1 ($timezone) must not contain any null bytes
 /// ```
+///
+/// A subclass's `__debugInfo` is what `var_dump` shows.
+///
+/// ```php
+/// class U extends DateTimeZone { public function __debugInfo(): array { return ['value' => 'zzz']; } }
+/// var_dump(new U('Europe/Kyiv'));
+/// ```
+/// ```expect
+/// object(U)#1 (1) {
+///   ["value"]=>
+///   string(3) "zzz"
+/// }
+/// ```
 pub(crate) fn construct(req: &mut Request) -> Result<Value, Thrown> {
     count_between(req, 1, 1)?;
     let text = path_string(req, 1)?.as_bytes().to_vec();
@@ -185,11 +198,15 @@ pub(crate) fn timezone_name_get(req: &mut Request) -> Result<Value, Thrown> {
 /// ```php
 /// $d = new DateTime('2020-07-01 UTC');
 /// var_dump(timezone_offset_get(new DateTimeZone('America/Los_Angeles'), $d), (new DateTimeZone('+0430'))->getOffset($d), (new DateTimeZone('CEST'))->getOffset($d));
+/// try { timezone_offset_get(new stdClass, $d); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { timezone_offset_get(new DateTimeZone('UTC'), new DateTimeZone('UTC')); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
 /// ```
 /// ```expect
 /// int(-25200)
 /// int(16200)
 /// int(7200)
+/// timezone_offset_get(): Argument #1 ($object) must be of type DateTimeZone, stdClass given
+/// timezone_offset_get(): Argument #2 ($datetime) must be of type DateTimeInterface, DateTimeZone given
 /// ```
 pub(crate) fn timezone_offset_get(req: &mut Request) -> Result<Value, Thrown> {
     let (object, at, shift) = receiver(req)?;

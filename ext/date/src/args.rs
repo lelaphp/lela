@@ -161,8 +161,11 @@ pub(super) fn object_of(
     let value = req.argument(position).unwrap_or_default();
     let ty = Type::Named(Name(class.as_bytes().into()));
     let coerced = coerce_param(req, &value, &ty, position)?;
-    if let Some(object) = coerced.deref().as_object() {
-        return Ok(*object);
+    if let Some(object) = coerced.deref().as_object().copied() {
+        let wanted = php_ext::call::lookup_class(req, class.as_bytes())?;
+        if wanted.is_some_and(|c| object.instance_of(req, c)) {
+            return Ok(object);
+        }
     }
     let name = value_name(req, &value.deref());
     Err(arg_type_error(
