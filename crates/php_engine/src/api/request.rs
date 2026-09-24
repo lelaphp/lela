@@ -5443,6 +5443,24 @@ impl Request {
         Ok(new)
     }
 
+    /// [`PhpObject::clone_with`]: the members copied beside `payload`,
+    /// and `__clone` served on the copy.
+    pub(crate) fn clone_members_payload<T: Any + Send>(
+        &mut self,
+        object: PhpObject,
+        payload: T,
+    ) -> Result<PhpObject, Thrown> {
+        let cloned = self.heap.object_clone_with(object.heap(), payload);
+        let new = PhpObject::of(self.fatal_of(cloned)?);
+        if self.method_named(object.class(), b"__clone").is_some()
+            && let Err(thrown) = crate::api::call::call_method(self, &new, b"__clone", &[])
+        {
+            self.release(new.as_value());
+            return Err(thrown);
+        }
+        Ok(new)
+    }
+
     /// `zend_objects_clone_obj_with`, the `Std` `clone_obj_with` slot:
     /// the class's `clone_obj`, then each of `properties` written on the
     /// copy through the class's `write_property`, a reference with one

@@ -688,6 +688,37 @@ impl PhpObject {
         req.instance_of(self.class(), class)
     }
 
+    /// `zend_objects_clone_obj` for a class whose objects carry a
+    /// native payload (design §5.4), what that class's own `clone_obj`
+    /// answers: a fresh entry of the same class holding what this one
+    /// holds, one more owner each, as `zend_objects_clone_members`
+    /// copies them, with `payload`, the class's copy of this object's
+    /// own, in the new entry's slot, and the class's `__clone` served
+    /// on it. The copy is the caller's, one owner, and is given up with
+    /// what `__clone` threw. [`Std`](crate::api::abi::Std)'s slot
+    /// refuses such an object, since the heap cannot copy a payload it
+    /// only knows how to drop; this is the door the class copies it
+    /// through.
+    ///
+    /// ```php
+    /// class D extends DateTime { public $n = 1; function __clone() { $this->n = $this->n + 1; } }
+    /// $a = new D('2000-01-01 UTC');
+    /// $b = clone $a;
+    /// var_dump($b->n, $b->format('Y'), $a->n);
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// string(4) "2000"
+    /// int(1)
+    /// ```
+    pub fn clone_with<T: Any + Send>(
+        &self,
+        req: &mut Request,
+        payload: T,
+    ) -> Result<PhpObject, Thrown> {
+        req.clone_members_payload(*self, payload)
+    }
+
     /// What a `Closure` carries, for a closure object: its native
     /// payload, as php's `zend_closure` is the object's own struct.
     #[must_use]

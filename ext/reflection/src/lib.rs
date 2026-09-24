@@ -4253,7 +4253,8 @@ fn function_parameter_string(
 /// `zend_internal_arg_info.default_value`: the expression's source
 /// text, which for a scalar is the scalar as written, and for a string
 /// the stub's spelling, double-quoted as `zend_exceptions.stub.php` and
-/// the rest of php-src write theirs, constants joined by `|` as the
+/// the rest of php-src write theirs, a class constant as `Class::NAME`,
+/// constants joined by `|` as the
 /// stub joins them, and `<default>` for the stub's
 /// `UNKNOWN`, an optional parameter with nothing to show; a string the
 /// stub spells with an escape needs the written text on the
@@ -4268,6 +4269,12 @@ fn const_expr_string(expr: &php_ext::decl::ConstExpr) -> String {
         ConstExpr::Str(s) => format!("\"{}\"", String::from_utf8_lossy(s)),
         expr if stub::is_unknown_default(expr) => String::from("<default>"),
         ConstExpr::Constant(name) => String::from_utf8_lossy(&name.0).into_owned(),
+        // `DateTimeZone::ALL`, as `timezone_identifiers_list`'s stub writes it.
+        ConstExpr::ClassConstant { class, name } => format!(
+            "{}::{}",
+            String::from_utf8_lossy(&class.0),
+            String::from_utf8_lossy(&name.0)
+        ),
         ConstExpr::Array(elements) if elements.is_empty() => String::from("[]"),
         // `ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401`: the stub's
         // operands with the operator between, as it wrote them.

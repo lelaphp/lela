@@ -410,6 +410,7 @@ values::PhpArray::unset
 values::PhpObject
 values::PhpObject::as_value
 values::PhpObject::class
+values::PhpObject::clone_with
 values::PhpObject::closure
 values::PhpObject::closure_bound
 values::PhpObject::debug_info
