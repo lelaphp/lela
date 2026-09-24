@@ -1715,7 +1715,6 @@ pub(crate) fn do_fcall<T: Tier>(
 /// where the file itself threw.
 ///
 /// ```php
-/// ini_set('zend.exception_ignore_args', '1');
 /// if (!isset($go)) { function boom() { throw new Exception('boom'); } }
 /// if ($go ?? false) { boom(); }
 /// $go = 1;
@@ -1724,11 +1723,11 @@ pub(crate) fn do_fcall<T: Tier>(
 /// try { include __FILE__; } catch (Exception $e) { echo $e->getTraceAsString(), "\n"; }
 /// ```
 /// ```expect
-/// #0 %s(4): boom()
-/// #1 %s(6): include()
+/// #0 %s(3): boom()
+/// #1 %s(5): include('%s')
 /// #2 {main}
-/// #0 %s(4): boom()
-/// #1 %s(8): include()
+/// #0 %s(3): boom()
+/// #1 %s(7): include('%s')
 /// #2 {main}
 /// ```
 pub(crate) fn include_or_eval<T: Tier>(
