@@ -70,6 +70,7 @@ mod output;
 mod pack;
 mod quot_print;
 mod scanf;
+mod select;
 mod sha1;
 mod soundex;
 mod string;
@@ -242,6 +243,7 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
         hrtime::natives(),
         versioning::natives(),
         basic_functions::natives(),
+        select::natives(),
     ]
     .into_iter()
     .flatten()

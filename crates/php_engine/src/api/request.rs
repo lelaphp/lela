@@ -119,6 +119,20 @@ pub enum Whence {
     End,
 }
 
+/// What `php_stream_cast` is asked to make of a stream, of the casts
+/// that give a fd: `PHP_STREAM_AS_FD_FOR_SELECT` with
+/// `PHP_STREAM_CAST_INTERNAL`, which `stream_select` and `stream_isatty`
+/// ask and which neither flushes nor seeks; `PHP_STREAM_AS_FD` with it;
+/// and `PHP_STREAM_AS_FD` alone, which `proc_open` asks of a stream it
+/// hands a child and which warns of buffered bytes the child will not
+/// see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cast {
+    Select,
+    Internal,
+    Fd,
+}
+
 impl Stream {
     pub(crate) const fn of(r: Resource) -> Stream {
         Stream(r)

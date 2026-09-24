@@ -31,11 +31,12 @@
 //! read buffer's `DETECT_EOL` arm.
 
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 
 use php_heap::ResourceType;
 
 use crate::api::raising::{Level, Thrown, raise, throw, warning};
-use crate::api::request::{Request, Stream, Whence};
+use crate::api::request::{Cast, Request, Stream, Whence};
 use crate::api::values::{Key, PhpArray, PhpString, Resource, Value};
 
 /// `FG(def_chunk_size)`, which `PHP_SOCK_CHUNK_SIZE` sets at 8192
@@ -133,6 +134,14 @@ pub(crate) trait Ops: Send {
     /// `php_stream_stdio_ops`.
     fn is_stdio(&self) -> bool {
         false
+    }
+
+    /// `ops->cast` to `PHP_STREAM_AS_FD` or `PHP_STREAM_AS_FD_FOR_SELECT`,
+    /// which every kind here answers alike: the host fd the kind
+    /// reads and writes, `None` for php's `FAILURE`, a kind with no
+    /// fd.
+    fn fd(&self) -> Option<BorrowedFd<'_>> {
+        None
     }
 }
 
@@ -602,6 +611,51 @@ impl PhpStream {
         self.flags.was_written = false;
         let Self { ops, .. } = self;
         ops.flush(req)
+    }
+
+    /// `_php_stream_cast` (`Z/main/streams/cast.c:194`) to a fd:
+    /// short of `PHP_STREAM_AS_FD_FOR_SELECT` the stream is flushed and a
+    /// kind that seeks is sought to the position, the read buffer
+    /// dropped; the kind is asked for its fd, and one with none
+    /// is php's `Cannot represent a stream of type %s as a %s` under
+    /// `report`; a cast without `PHP_STREAM_CAST_INTERNAL` that leaves
+    /// bytes in the read buffer is php's warning that they are lost.
+    pub(crate) fn cast(&mut self, req: &mut Request, cast: Cast, warn: bool) -> Option<RawFd> {
+        if cast != Cast::Select {
+            self.flush(req);
+            if self.ops.seekable() && !self.flags.no_seek {
+                let Self { ops, position, .. } = self;
+                let mut dummy = 0;
+                let _ = ops.seek(req, *position, Some(Whence::Set), &mut dummy);
+                self.readpos = 0;
+                self.writepos = 0;
+            }
+        }
+        let Some(fd) = self.ops.fd().map(|fd| fd.as_raw_fd()) else {
+            if warn {
+                let target = if cast == Cast::Select {
+                    "select()able descriptor"
+                } else {
+                    "File Descriptor"
+                };
+                let text = format!(
+                    "{}(): Cannot represent a stream of type {} as a {target}",
+                    req.active_native(),
+                    self.ops.label()
+                );
+                warning(req, &text);
+            }
+            return None;
+        };
+        let held = self.writepos - self.readpos;
+        if held > 0 && cast == Cast::Fd {
+            let text = format!(
+                "{}(): {held} bytes of buffered data lost during stream conversion!",
+                req.active_native()
+            );
+            warning(req, &text);
+        }
+        Some(fd)
     }
 
     /// `_php_stream_free` under `PHP_STREAM_FREE_CLOSE`
@@ -1212,6 +1266,12 @@ impl Ops for Stdio {
 
     fn is_stdio(&self) -> bool {
         true
+    }
+
+    /// `php_stdiop_cast` (`Z/main/streams/plain_wrapper.c:645`): the
+    /// file's fd, for either cast.
+    fn fd(&self) -> Option<BorrowedFd<'_>> {
+        Some(self.file.as_fd())
     }
 }
 
@@ -1828,6 +1888,29 @@ impl Request {
             Some(n) => Ok(Some(PhpString::new(self, &buf[..n])?)),
             None => Ok(None),
         }
+    }
+}
+
+impl Stream {
+    /// `php_stream_cast` to a fd, `PHP_STREAM_AS_FD_FOR_SELECT`
+    /// for [`Cast::Select`] and `PHP_STREAM_AS_FD` otherwise: the host
+    /// fd the stream's kind reads and writes, or `None` for a
+    /// kind with none, php's `Cannot represent a stream of type %s as a
+    /// %s` warning under `warn`. Short of [`Cast::Select`] the stream
+    /// is flushed and sought to its position first, and a [`Cast::Fd`]
+    /// that leaves bytes in the read buffer warns that they are lost.
+    /// The fd is the stream's, open while the stream is.
+    pub fn cast(self, req: &mut Request, cast: Cast, warn: bool) -> Option<RawFd> {
+        req.stream_op(self, |req, stream| stream.cast(req, cast, warn))
+            .flatten()
+    }
+
+    /// `stream->writepos - stream->readpos`: the bytes read from the
+    /// kind and not yet handed on, which `stream_select` counts as
+    /// readable without asking the host.
+    #[must_use]
+    pub fn unread(self, req: &Request) -> usize {
+        req.stream_ref(self).map_or(0, |s| s.writepos - s.readpos)
     }
 }
 

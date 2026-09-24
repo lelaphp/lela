@@ -6,7 +6,10 @@
 //! read of any other wrapper's file; `getpwnam_r(3)` and `getgrnam_r(3)`
 //! for `chown` and `chgrp` by name; and `utime(2)`, which `touch` sets
 //! the times with. Each is one call, and a path reaches it as the bytes
-//! the host has.
+//! the host has. Beside them are the two `streamsfuncs.c` makes of a
+//! stream's host fd: `select(2)`, which `php_select` is on every
+//! platform php builds for here, over `fd_set`s built with `FD_SET`, and
+//! `isatty(3)`.
 #![allow(unsafe_code)]
 #![deny(
     clippy::undocumented_unsafe_blocks,
@@ -14,6 +17,7 @@
 )]
 
 use std::ffi::CString;
+use std::os::fd::RawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
@@ -154,4 +158,93 @@ pub(super) fn utime(path: &Path, times: Option<(i64, i64)>) -> std::io::Result<(
     } else {
         Err(std::io::Error::last_os_error())
     }
+}
+
+// ----------------------------------------------------- streamsfuncs.c
+
+/// `FD_SETSIZE`: the first fd an `fd_set` has no bit for, which
+/// `PHP_SAFE_MAX_FD` refuses before `select(2)` is asked.
+pub(super) const FD_SETSIZE: RawFd = 1024;
+
+/// An empty `fd_set` with the bit of each fd of `fds` set; each
+/// is below [`FD_SETSIZE`], which the caller has checked.
+fn fd_set(fds: &[RawFd]) -> libc::fd_set {
+    let mut set = std::mem::MaybeUninit::<libc::fd_set>::uninit();
+    // SAFETY: `FD_ZERO` writes every byte of the set it is handed, which
+    // is live storage of an `fd_set`'s size.
+    unsafe { libc::FD_ZERO(set.as_mut_ptr()) };
+    // SAFETY: `FD_ZERO` initialised every byte of the set.
+    let mut set = unsafe { set.assume_init() };
+    for &fd in fds {
+        if (0..FD_SETSIZE).contains(&fd) {
+            // SAFETY: `fd` is in `0..FD_SETSIZE`, a bit the set has.
+            unsafe { libc::FD_SET(fd, &raw mut set) };
+        }
+    }
+    set
+}
+
+/// The fds of `fds` whose bit `set` holds.
+fn set_in(set: &libc::fd_set, fds: &[RawFd]) -> Vec<RawFd> {
+    fds.iter()
+        .copied()
+        .filter(|&fd| {
+            // SAFETY: `fd` is in `0..FD_SETSIZE`, a bit the set has, and
+            // `FD_ISSET` only reads it.
+            (0..FD_SETSIZE).contains(&fd) && unsafe { libc::FD_ISSET(fd, set) }
+        })
+        .collect()
+}
+
+/// `php_select(max_fd + 1, &rfds, &wfds, &efds, tv_p)`: the three sets
+/// of fds, `timeout` as seconds and microseconds or `None` to
+/// wait for ever; the count `select(2)` answered, one per bit, and the
+/// fds of each set it left set, or the `errno` of its `-1`.
+pub(super) fn select(
+    sets: [&[RawFd]; 3],
+    timeout: Option<(i64, i64)>,
+) -> std::io::Result<(i32, [Vec<RawFd>; 3])> {
+    let [read, write, except] = sets;
+    let max_fd = read
+        .iter()
+        .chain(write)
+        .chain(except)
+        .copied()
+        .max()
+        .unwrap_or(0);
+    let (mut rfds, mut wfds, mut efds) = (fd_set(read), fd_set(write), fd_set(except));
+    let mut tv = timeout.map(|(sec, usec)| libc::timeval {
+        tv_sec: libc::time_t::try_from(sec).unwrap_or(libc::time_t::MAX),
+        tv_usec: libc::suseconds_t::try_from(usec).unwrap_or(0),
+    });
+    let tv_p = tv.as_mut().map_or(std::ptr::null_mut(), std::ptr::from_mut);
+    // SAFETY: the three sets and the `timeval`, where there is one, are
+    // live storage the call reads and writes and nothing else holds.
+    let ret = unsafe {
+        libc::select(
+            max_fd + 1,
+            &raw mut rfds,
+            &raw mut wfds,
+            &raw mut efds,
+            tv_p,
+        )
+    };
+    if ret == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok((
+        ret,
+        [
+            set_in(&rfds, read),
+            set_in(&wfds, write),
+            set_in(&efds, except),
+        ],
+    ))
+}
+
+/// `isatty(fileno)`: whether the fd is a terminal; any number is
+/// a fd the call may be asked about.
+pub(super) fn isatty(fd: RawFd) -> bool {
+    // SAFETY: `isatty` reads nothing through its argument, a number.
+    unsafe { libc::isatty(fd) == 1 }
 }

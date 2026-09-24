@@ -171,6 +171,7 @@ raising::throw_at
 raising::throw_value
 raising::too_few_arguments
 raising::warning
+request::Cast
 request::ExtensionId
 request::HostPath
 request::Interrupt
@@ -303,6 +304,7 @@ request::Resources
 request::Resources::register_type
 request::Stream
 request::Stream::as_value
+request::Stream::cast
 request::Stream::close
 request::Stream::copy_to_mem
 request::Stream::eof
@@ -321,6 +323,7 @@ request::Stream::set_read_buffer
 request::Stream::stat
 request::Stream::tell
 request::Stream::truncate
+request::Stream::unread
 request::Stream::write
 request::StreamFilter
 request::StreamWrapper
