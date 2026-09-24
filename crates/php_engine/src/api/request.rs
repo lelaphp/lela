@@ -7331,14 +7331,64 @@ impl Request {
             .unwrap_or(default)
     }
 
-    /// `EX_USES_STRICT_TYPES()` (`Z/Zend/zend_compile.h:719`): whether
-    /// the op array the innermost frame serves was compiled under
-    /// `declare(strict_types=1)`. What a return's type check and a write
-    /// to a typed property read, and what a native's own argument
-    /// parsing reads too: a native holds no frame of this engine's, so
-    /// the frame standing while one runs is the caller php reaches
-    /// through the native's `prev_execute_data`.
+    /// `ZEND_ARG_USES_STRICT_TYPES()` (`Z/Zend/zend_compile.h:723`) for
+    /// the native being served, and `EX_USES_STRICT_TYPES()` of the
+    /// innermost frame where none is: whether its caller was compiled
+    /// under `declare(strict_types=1)`, which is what a native's own
+    /// argument parsing reads. A native holds no frame of this engine's,
+    /// so its `prev_execute_data` is the innermost frame, unless another
+    /// native is being served above that frame, which is a call
+    /// `zend_call_function` made: php's caller there is that native's
+    /// frame, which carries no `ZEND_ACC_STRICT_TYPES`, so a native a
+    /// callback names coerces its arguments though the file that named
+    /// it is strict.
+    ///
+    /// ```php
+    /// declare(strict_types=1);
+    /// var_dump(array_map('strlen', [12]), array_map('str_repeat', ['a'], ['2']));
+    /// try { str_repeat(12, 2); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// array(1) {
+    ///   [0]=>
+    ///   int(2)
+    /// }
+    /// array(1) {
+    ///   [0]=>
+    ///   string(2) "aa"
+    /// }
+    /// str_repeat(): Argument #1 ($string) must be of type string, int given
+    /// ```
+    ///
+    /// `call_user_func` in a namespace is such a native too, since php
+    /// compiles it to `INIT_USER_CALL` only where it resolves the name at
+    /// compile time (`zend_compile_func_cuf`), so its callee coerces.
+    ///
+    /// ```php
+    /// declare(strict_types=1);
+    /// namespace Foo;
+    /// var_dump(call_user_func('strlen', false));
+    /// ```
+    /// ```expect
+    /// int(0)
+    /// ```
     pub(crate) fn strict_types(&self) -> bool {
+        let floor = self.vm.innermost().map_or(0, |state| {
+            usize::try_from(state.calls_below).unwrap_or(usize::MAX)
+        });
+        let calls = self.vm.calls();
+        let serving = calls
+            .iter()
+            .rposition(|call| call.stage == exec::CallStage::Serving);
+        if let Some(at) = serving
+            && calls.get(floor..at).is_some_and(|below| {
+                below
+                    .iter()
+                    .any(|call| call.stage == exec::CallStage::Serving)
+            })
+        {
+            return false;
+        }
         self.vm
             .innermost()
             .is_some_and(crate::exec::strict_types_of)
