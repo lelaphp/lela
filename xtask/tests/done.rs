@@ -115,6 +115,7 @@ fn repository(name: &str, registry: &Path) -> Tree {
         std::fs::copy(workspace().join(file), root.join(file)).unwrap();
     }
     std::fs::copy(registry, root.join("docs/divergence.toml")).unwrap();
+    unmark_porting(&root, "ext/pcre");
     let fixture = fixtures().join("done");
     for file in ["Cargo.toml", "src/lib.rs"] {
         let text = std::fs::read_to_string(fixture.join("ext/pcre").join(file)).unwrap();
@@ -130,6 +131,34 @@ fn repository(name: &str, registry: &Path) -> Tree {
     sh(&root, &["git", "init", "-q", "-b", "main"]);
     commit(&root, "scratch");
     root
+}
+
+/// Drop `porting = true` from one crate's `[[crate]]` row in the scratch
+/// repository's manifest, the other half of [`mark_porting`]. These tests
+/// hold `ext/pcre` to condition 1 as a crate whose port is whole, and the
+/// tracked manifest marks it partial since #652, so the scratch copy says
+/// what the tests need rather than what the tracked file carries.
+fn unmark_porting(root: &Path, name: &str) {
+    let text = std::fs::read_to_string(root.join("seams.toml")).unwrap();
+    let head = format!("name = \"{name}\"");
+    let mut in_row = false;
+    let kept: Vec<&str> = text
+        .lines()
+        .filter(|line| {
+            if line.starts_with("[[") {
+                in_row = false;
+            } else if *line == head {
+                in_row = true;
+            }
+            !(in_row && line.trim() == "porting = true")
+        })
+        .collect();
+    std::fs::write(root.join("seams.toml"), kept.join("\n") + "\n").unwrap();
+    let manifest = Manifest::load(root).unwrap();
+    assert!(
+        manifest.crate_named(name).is_some_and(|row| !row.porting),
+        "{name} is unmarked"
+    );
 }
 
 /// Mark one crate's `[[crate]]` row `porting = true` in the scratch
