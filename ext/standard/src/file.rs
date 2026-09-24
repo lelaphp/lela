@@ -2361,44 +2361,16 @@ const FNM_CASEFOLD: i64 = 16;
 /// ```php
 /// $f = sys_get_temp_dir() . '/php-file-witness.txt';
 /// file_put_contents($f, "a\r\n\nb\nc");
-/// var_dump(file($f), file($f, FILE_IGNORE_NEW_LINES), file($f, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES));
+/// echo json_encode(file($f)), "\n", json_encode(file($f, FILE_IGNORE_NEW_LINES)), "\n", json_encode(file($f, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES)), "\n";
 /// file_put_contents($f, ""); var_dump(file($f));
 /// unlink($f);
 /// try { file($f, 64); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
 /// var_dump(@file($f));
 /// ```
 /// ```expect
-/// array(4) {
-///   [0]=>
-///   string(3) "a
-/// "
-///   [1]=>
-///   string(1) "
-/// "
-///   [2]=>
-///   string(2) "b
-/// "
-///   [3]=>
-///   string(1) "c"
-/// }
-/// array(4) {
-///   [0]=>
-///   string(1) "a"
-///   [1]=>
-///   string(0) ""
-///   [2]=>
-///   string(1) "b"
-///   [3]=>
-///   string(1) "c"
-/// }
-/// array(3) {
-///   [0]=>
-///   string(1) "a"
-///   [1]=>
-///   string(1) "b"
-///   [2]=>
-///   string(1) "c"
-/// }
+/// ["a\r\n","\n","b\n","c"]
+/// ["a","","b","c"]
+/// ["a","b","c"]
 /// array(0) {
 /// }
 /// file(): Argument #2 ($flags) must be a valid flag value
