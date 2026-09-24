@@ -587,15 +587,22 @@ impl<'a> Oracle<'a> {
         }
         cmd.envs(&recipe.env);
         cmd.envs(call.env.iter().map(|(name, value)| (name, value)));
-        let out_path = scratch.own.join("stdout");
-        let err_path = scratch.own.join("stderr");
+        // The streams, and the program's stdin, stand in a tree apart from
+        // the program's directory, so a snippet that lists or reads its
+        // own directory finds its own file there and never these; a tree
+        // and not a directory under the snippet's, since php's
+        // `memory_get_usage()` counts the path in `$_SERVER` and a witness
+        // pins that number.
+        let streams = Tree::new("streams")?;
+        let out_path = streams.join("stdout");
+        let err_path = streams.join("stderr");
         let out_file = File::create(&out_path).context("creating the stdout file")?;
         let err_file = if call.merge_streams {
             out_file.try_clone().context("sharing the stdout file")?
         } else {
             File::create(&err_path).context("creating the stderr file")?
         };
-        cmd.stdin(stdin_of(&scratch, call.stdin)?)
+        cmd.stdin(stdin_of(&streams, call.stdin)?)
             .stdout(out_file)
             .stderr(err_file);
 
@@ -851,11 +858,11 @@ fn against_the_tree(root: &Path, path: PathBuf) -> Runner {
 
 /// The program's stdin: a file holding what a test's `--STDIN--` gives,
 /// and nothing at all otherwise.
-fn stdin_of(scratch: &Scratch, bytes: Option<&[u8]>) -> Result<Stdio> {
+fn stdin_of(streams: &Tree, bytes: Option<&[u8]>) -> Result<Stdio> {
     let Some(bytes) = bytes else {
         return Ok(Stdio::null());
     };
-    let path = scratch.own.join("stdin");
+    let path = streams.join("stdin");
     fs::write(&path, bytes).context("writing the program's stdin")?;
     Ok(Stdio::from(
         File::open(&path).context("opening the program's stdin")?,
@@ -922,35 +929,37 @@ fn renumber(haystack: &[u8], token: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Where a program runs: its directory and the path it is run by, and a
-/// directory of this run's own for the streams, removed on drop, which a
-/// snippet's directory stands inside and never is. The
-/// linked adapter holds one too, so a snippet stands as a file under
-/// both adapters.
+/// Where a program runs: its directory and the path it is run by, and for
+/// a snippet the directory of its own it is written into, removed on
+/// drop. The linked adapter holds one too, so a snippet stands as a file
+/// under both adapters. What the fresh-process adapter captures stands
+/// apart, in a tree [`Oracle::run_under`] holds.
 pub(crate) struct Scratch {
     pub(crate) dir: PathBuf,
     script: PathBuf,
-    own: Tree,
+    _snippet: Option<Tree>,
 }
 
 impl Scratch {
     pub(crate) fn for_program(recipe: &Recipe, program: Program<'_>) -> Result<Scratch> {
-        let own = Tree::new("oracle")?;
-        let (dir, script) = match program {
-            // The snippet stands alone in a directory under the run's, so
-            // a program that lists or reads its own directory finds its
-            // own file there and never the streams captured beside it.
+        Ok(match program {
             Program::Snippet(code) => {
-                let dir = own.join("program");
-                fs::create_dir(&dir).context("making the snippet's directory")?;
+                let own = Tree::new("oracle")?;
                 let script = PathBuf::from(&recipe.script_name);
-                fs::write(dir.join(&script), format!("{}{code}", recipe.preamble))
+                fs::write(own.join(&script), format!("{}{code}", recipe.preamble))
                     .with_context(|| format!("writing {}", recipe.script_name))?;
-                (dir, script)
+                Scratch {
+                    dir: own.path().to_path_buf(),
+                    script,
+                    _snippet: Some(own),
+                }
             }
-            Program::File(path) => (dir_of(path), run_by(path)?),
-        };
-        Ok(Scratch { dir, script, own })
+            Program::File(path) => Scratch {
+                dir: dir_of(path),
+                script: run_by(path)?,
+                _snippet: None,
+            },
+        })
     }
 
     /// The recipe's normalisation of a stream: [`normalise_in`] over the
