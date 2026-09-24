@@ -68,6 +68,7 @@ mod metaphone;
 mod microtime;
 mod output;
 mod pack;
+mod proc_open;
 mod quot_print;
 mod scanf;
 mod select;
@@ -107,6 +108,7 @@ struct State {
     string: string::State,
     uniqid: uniqid::State,
     hrtime: hrtime::State,
+    proc_open: proc_open::ProcState,
 }
 
 /// The extension value (design §7.1): declarations paired with entries,
@@ -244,6 +246,7 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
         versioning::natives(),
         basic_functions::natives(),
         select::natives(),
+        proc_open::natives(),
     ]
     .into_iter()
     .flatten()

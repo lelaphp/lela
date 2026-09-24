@@ -31,12 +31,12 @@
 //! read buffer's `DETECT_EOL` arm.
 
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 
 use php_heap::ResourceType;
 
 use crate::api::raising::{Level, Thrown, raise, throw, warning};
-use crate::api::request::{Cast, Request, Stream, Whence};
+use crate::api::request::{Cast, FdStream, Request, Stream, Whence};
 use crate::api::values::{Key, PhpArray, PhpString, Resource, Value};
 
 /// `FG(def_chunk_size)`, which `PHP_SOCK_CHUNK_SIZE` sets at 8192
@@ -59,8 +59,10 @@ pub(crate) trait Ops: Send {
     /// sets `stream->eof`, `None` for `-1`.
     fn read(&mut self, req: &mut Request, buf: &mut [u8], eof: &mut bool) -> Option<usize>;
 
-    /// `ops->close`, with what the kind holds.
-    fn close(&mut self, req: &mut Request);
+    /// `ops->close`, with what the kind holds: php's answer, `0` but for
+    /// a process pipe, whose close is `pclose(3)`'s exit status, which
+    /// `pclose()` hands back.
+    fn close(&mut self, req: &mut Request) -> i32;
 
     /// `ops->flush`: `true` for php's `0`.
     fn flush(&mut self, _req: &mut Request) -> bool {
@@ -663,12 +665,12 @@ impl PhpStream {
     /// runs, so `fclose`, the last owner's release and the shutdown walk
     /// are one path: the owed flush, then the kind closed, then the
     /// stream dropped.
-    fn free(mut self, req: &mut Request) {
+    fn free(mut self, req: &mut Request) -> i32 {
         if self.flags.was_written {
             self.flush(req);
         }
         let Self { ops, .. } = &mut self;
-        ops.close(req);
+        ops.close(req)
     }
 }
 
@@ -778,8 +780,9 @@ impl Ops for Memory {
 
     /// `php_stream_memory_close` (`Z/main/streams/memory.c:97`): the
     /// bytes released.
-    fn close(&mut self, _req: &mut Request) {
+    fn close(&mut self, _req: &mut Request) -> i32 {
         self.data = Vec::new();
+        0
     }
 
     /// `php_stream_memory_seek` (`Z/main/streams/memory.c:120`): a
@@ -969,11 +972,12 @@ impl Ops for Temp {
     /// `php_stream_free_enclosed(innerstream, PHP_STREAM_FREE_CLOSE)`:
     /// the inner resource closed and its one owner given up, which
     /// unlinks a spilled file.
-    fn close(&mut self, req: &mut Request) {
+    fn close(&mut self, req: &mut Request) -> i32 {
         if let Some(inner) = self.inner.take() {
             inner.resource().close(req);
             req.release(inner.resource().as_value());
         }
+        0
     }
 
     /// `php_stream_temp_flush` (`Z/main/streams/memory.c:418`).
@@ -1047,9 +1051,10 @@ pub(crate) fn temporary_file(
     let orig_path = path.as_os_str().as_encoded_bytes().to_vec();
     let mut stream = PhpStream::new(
         Box::new(Stdio {
-            file,
+            file: Some(file),
             is_seekable: true,
             temp_name: Some(path),
+            process: None,
         }),
         b"r+b",
     );
@@ -1067,12 +1072,15 @@ const PLAIN_FILES: &str = "plainfile";
 const PHP_WRAPPER: &str = "PHP";
 
 /// `php_stdio_stream_data` under `php_stream_stdio_ops`
-/// (`Z/main/streams/plain_wrapper.c:135`): the file, whether it seeks,
-/// and `temp_name`, the path of a temporary file to unlink at close.
+/// (`Z/main/streams/plain_wrapper.c:135`): the file, `None` once closed;
+/// whether it seeks; `temp_name`, the path of a temporary file to unlink
+/// at close; and for a pipe `popen` opened, `is_process_pipe`, the child
+/// at its other end, whom the close waits for as `pclose(3)` does.
 struct Stdio {
-    file: std::fs::File,
+    file: Option<std::fs::File>,
     is_seekable: bool,
     temp_name: Option<std::path::PathBuf>,
+    process: Option<std::process::Child>,
 }
 
 /// `php_socket_strerror_s` over `errno`, as the plain files kind's two
@@ -1128,10 +1136,11 @@ impl Ops for Stdio {
     /// `write(2)`, and php's notice with `errno` where it failed; the
     /// stat cache cleared after it, since the file's times moved.
     fn write(&mut self, req: &mut Request, buf: &[u8]) -> Option<usize> {
-        let written = self.file.write(buf);
+        let written = self.file.as_mut()?.write(buf);
         req.forget_stats();
         match written {
             Ok(n) => Some(n),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Some(0),
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => None,
             Err(error) => {
                 let text = format!(
@@ -1151,7 +1160,7 @@ impl Ops for Stdio {
     /// it failed, eof set then too unless the fd was bad, `EBADF`; the
     /// stat cache cleared after it, since the file's atime moved.
     fn read(&mut self, req: &mut Request, buf: &mut [u8], eof: &mut bool) -> Option<usize> {
-        let read = self.file.read(buf);
+        let read = self.file.as_mut()?.read(buf);
         req.forget_stats();
         match read {
             Ok(0) => {
@@ -1159,6 +1168,7 @@ impl Ops for Stdio {
                 Some(0)
             }
             Ok(n) => Some(n),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Some(0),
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => None,
             Err(error) => {
                 let text = format!(
@@ -1184,12 +1194,24 @@ impl Ops for Stdio {
         true
     }
 
-    /// `php_stdiop_close` (`Z/main/streams/plain_wrapper.c:508`): a
-    /// temporary file unlinked, and the file closed, which its drop does.
-    fn close(&mut self, _req: &mut Request) {
+    /// `php_stdiop_close` (`Z/main/streams/plain_wrapper.c:508`): the
+    /// file closed, which its drop does, and a temporary file unlinked;
+    /// a process pipe is `pclose(3)`, the pipe closed and the child
+    /// waited for, and its answer `WEXITSTATUS` where the child exited
+    /// and the wait status as it is where a signal ended it.
+    fn close(&mut self, _req: &mut Request) -> i32 {
+        drop(self.file.take());
+        if let Some(mut child) = self.process.take() {
+            use std::os::unix::process::ExitStatusExt;
+            return match child.wait() {
+                Ok(status) => status.code().unwrap_or_else(|| status.into_raw()),
+                Err(_) => -1,
+            };
+        }
         if let Some(path) = self.temp_name.take() {
             let _ = std::fs::remove_file(path);
         }
+        0
     }
 
     /// `php_stdiop_seek` (`Z/main/streams/plain_wrapper.c:616`): php's
@@ -1214,7 +1236,10 @@ impl Ops for Stdio {
             Some(Whence::End) => SeekFrom::End(offset),
             None => return Some(false),
         };
-        match self.file.seek(from) {
+        let Some(file) = self.file.as_mut() else {
+            return Some(false);
+        };
+        match file.seek(from) {
             Ok(at) => {
                 *position = i64::try_from(at).unwrap_or(i64::MAX);
                 Some(true)
@@ -1230,7 +1255,7 @@ impl Ops for Stdio {
     /// `php_stdiop_stat` (`Z/main/streams/plain_wrapper.c:703`):
     /// `fstat(2)`.
     fn stat(&mut self, _req: &mut Request) -> Option<StatBuf> {
-        Some(stat_buf(&self.file.metadata().ok()?))
+        Some(stat_buf(&self.file.as_ref()?.metadata().ok()?))
     }
 
     /// `php_stdiop_set_option`'s `PHP_STREAM_OPTION_TRUNCATE_API`
@@ -1239,6 +1264,7 @@ impl Ops for Stdio {
     fn truncate(&mut self, _req: &mut Request, size: usize) -> Option<bool> {
         Some(
             self.file
+                .as_ref()?
                 .set_len(u64::try_from(size).unwrap_or(u64::MAX))
                 .is_ok(),
         )
@@ -1249,12 +1275,13 @@ impl Ops for Stdio {
     /// `LOCK_EX` or `LOCK_UN`, without blocking under `LOCK_NB`.
     fn flock(&mut self, _req: &mut Request, operation: i64) -> Option<bool> {
         let nonblocking = operation & LOCK_NB != 0;
+        let file = self.file.as_ref()?;
         let taken = match operation & !LOCK_NB {
-            LOCK_SH if nonblocking => self.file.try_lock_shared().is_ok(),
-            LOCK_SH => self.file.lock_shared().is_ok(),
-            LOCK_EX if nonblocking => self.file.try_lock().is_ok(),
-            LOCK_EX => self.file.lock().is_ok(),
-            LOCK_UN => self.file.unlock().is_ok(),
+            LOCK_SH if nonblocking => file.try_lock_shared().is_ok(),
+            LOCK_SH => file.lock_shared().is_ok(),
+            LOCK_EX if nonblocking => file.try_lock().is_ok(),
+            LOCK_EX => file.lock().is_ok(),
+            LOCK_UN => file.unlock().is_ok(),
             _ => false,
         };
         Some(taken)
@@ -1271,7 +1298,7 @@ impl Ops for Stdio {
     /// `php_stdiop_cast` (`Z/main/streams/plain_wrapper.c:645`): the
     /// file's fd, for either cast.
     fn fd(&self) -> Option<BorrowedFd<'_>> {
-        Some(self.file.as_fd())
+        self.file.as_ref().map(AsFd::as_fd)
     }
 }
 
@@ -1347,9 +1374,10 @@ fn plain_open(req: &Request, path: &[u8], mode: &[u8]) -> Result<PhpStream, Stri
     };
     let mut stream = PhpStream::new(
         Box::new(Stdio {
-            file,
+            file: Some(file),
             is_seekable,
             temp_name: None,
+            process: None,
         }),
         mode,
     );
@@ -1394,7 +1422,9 @@ impl Ops for HostFd {
         None
     }
 
-    fn close(&mut self, _req: &mut Request) {}
+    fn close(&mut self, _req: &mut Request) -> i32 {
+        0
+    }
 
     fn seekable(&self) -> bool {
         true
@@ -1435,7 +1465,9 @@ impl Ops for Output {
         None
     }
 
-    fn close(&mut self, _req: &mut Request) {}
+    fn close(&mut self, _req: &mut Request) -> i32 {
+        0
+    }
 }
 
 /// What one wrapper's opener answered: the stream, or the message
@@ -1847,7 +1879,9 @@ impl Request {
         let out = f(self, &mut taken);
         match self.resource_native_mut::<Option<PhpStream>>(res) {
             Some(slot) => *slot = Some(taken),
-            None => taken.free(self),
+            None => {
+                self.pclose_ret = taken.free(self);
+            }
         }
         Some(out)
     }
@@ -1891,7 +1925,61 @@ impl Request {
     }
 }
 
+impl Request {
+    /// `_php_stream_fopen_from_fd` (`Z/main/streams/plain_wrapper.c:303`)
+    /// and `_php_stream_fopen_from_pipe` (`:350`): an open host fd as a
+    /// stream of the plain files kind, `STDIO`, with no wrapper and no
+    /// path, `mode` as `stream->mode`. A fd of a pipe, a fifo or a
+    /// character device cannot seek (`detect_is_seekable`) and has no
+    /// position; any other has the one `lseek(SEEK_CUR)` answers. A
+    /// process pipe never seeks, and its close waits for the child.
+    ///
+    /// The `Err` is the memory limit, met registering the resource.
+    pub fn stream_from_fd(&mut self, fd: OwnedFd, kind: FdStream<'_>) -> Result<Stream, Thrown> {
+        let mut file = std::fs::File::from(fd);
+        let (mode, process) = match kind {
+            FdStream::File { mode } => (mode, None),
+            FdStream::Process { mode, child } => (mode, Some(child)),
+        };
+        let is_seekable = process.is_none()
+            && file.metadata().is_ok_and(|meta| {
+                use std::os::unix::fs::FileTypeExt;
+                let kind = meta.file_type();
+                !(kind.is_fifo() || kind.is_char_device() || kind.is_socket())
+            });
+        let position = if is_seekable {
+            file.stream_position()
+                .map_or(-1, |at| i64::try_from(at).unwrap_or(i64::MAX))
+        } else {
+            -1
+        };
+        let mut stream = PhpStream::new(
+            Box::new(Stdio {
+                file: Some(file),
+                is_seekable,
+                temp_name: None,
+                process,
+            }),
+            mode,
+        );
+        stream.flags.no_seek = !is_seekable;
+        stream.position = position;
+        self.stream_alloc(stream)
+    }
+}
+
 impl Stream {
+    /// `pclose()`'s `zend_list_close(stream->res)`
+    /// (`Z/ext/standard/file.c:829`): the resource closed, its
+    /// destructor served, and `FG(pclose_ret)`, what the kind's close
+    /// answered: a process pipe's exit status, `0` for any other kind,
+    /// and `-1` where the child could not be waited for.
+    pub fn pclose(self, req: &mut Request) -> i64 {
+        req.pclose_ret = 0;
+        self.resource().close(req);
+        i64::from(req.pclose_ret)
+    }
+
     /// `php_stream_cast` to a fd, `PHP_STREAM_AS_FD_FOR_SELECT`
     /// for [`Cast::Select`] and `PHP_STREAM_AS_FD` otherwise: the host
     /// fd the stream's kind reads and writes, or `None` for a
@@ -1952,8 +2040,9 @@ impl Ops for Dir {
 
     /// `php_plain_files_dirstream_close`: `closedir(3)`, which dropping
     /// the iterator is.
-    fn close(&mut self, _req: &mut Request) {
+    fn close(&mut self, _req: &mut Request) -> i32 {
         self.entries = None;
+        0
     }
 
     /// `php_plain_files_dirstream_rewind`: `rewinddir(3)` whatever it is
@@ -1993,7 +2082,8 @@ impl Ops for Dir {
 
 /// `stream_resource_regular_dtor` (`Z/main/streams/streams.c:1873`):
 /// the stream freed under `PHP_STREAM_FREE_CLOSE |
-/// PHP_STREAM_FREE_RSRC_DTOR`, with the resource already closed.
+/// PHP_STREAM_FREE_RSRC_DTOR`, with the resource already closed, and
+/// what the kind's close answered kept as `FG(pclose_ret)`.
 pub(crate) fn dtor(req: &mut Request, r: Resource) {
     let Some(stream) = req
         .resource_native_mut::<Option<PhpStream>>(r.heap())
@@ -2001,7 +2091,7 @@ pub(crate) fn dtor(req: &mut Request, r: Resource) {
     else {
         return;
     };
-    stream.free(req);
+    req.pclose_ret = stream.free(req);
 }
 
 /// The `stream` resource type, `le_stream`, as `PHP_MINIT(streams)`

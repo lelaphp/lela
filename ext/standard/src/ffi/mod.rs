@@ -248,3 +248,104 @@ pub(super) fn isatty(fd: RawFd) -> bool {
     // SAFETY: `isatty` reads nothing through its argument, a number.
     unsafe { libc::isatty(fd) == 1 }
 }
+
+// ------------------------------------------------------------ proc_open.c
+
+/// `WNOHANG` and `WUNTRACED`, what `waitpid(2)` is given.
+pub(super) const WNOHANG: i32 = libc::WNOHANG;
+pub(super) const WUNTRACED: i32 = libc::WUNTRACED;
+
+/// `waitpid(pid, &status, options)`: the pid it answered, `0` for a
+/// child still running under `WNOHANG`, and the wait status, or the
+/// `errno` of its `-1`.
+pub(super) fn waitpid(pid: i32, options: i32) -> std::io::Result<(i32, i32)> {
+    let mut status = 0;
+    // SAFETY: `status` is live storage of an `int`, the one thing the
+    // call writes.
+    let ret = unsafe { libc::waitpid(pid, &raw mut status, options) };
+    if ret == -1 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok((ret, status))
+    }
+}
+
+/// `kill(pid, sig) == 0`.
+pub(super) fn kill(pid: i32, sig: i32) -> bool {
+    // SAFETY: `kill` reads nothing through its arguments, two numbers.
+    unsafe { libc::kill(pid, sig) == 0 }
+}
+
+/// `dup(fd)`: a new fd of the same open file, close-on-exec as every fd
+/// this process makes, or the `errno` of its `-1`.
+pub(super) fn dup(fd: RawFd) -> std::io::Result<std::os::fd::OwnedFd> {
+    use std::os::fd::FromRawFd;
+    // SAFETY: `fcntl` with `F_DUPFD_CLOEXEC` reads nothing through its
+    // arguments and makes a new fd or fails.
+    let new = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+    if new == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `new` is the fd `fcntl` just made, open and owned by nothing
+    // else.
+    Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(new) })
+}
+
+/// `openpty(&master, &slave, NULL, NULL, NULL)`: the two ends of a new
+/// pseudoterminal, or the `errno` of its `-1`.
+pub(super) fn openpty() -> std::io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
+    use std::os::fd::FromRawFd;
+    let (mut master, mut slave) = (-1, -1);
+    // SAFETY: `master` and `slave` are live `int`s the call writes; the
+    // three null pointers are the name, the termios and the window size
+    // the call is allowed not to be given.
+    let ret = unsafe {
+        libc::openpty(
+            &raw mut master,
+            &raw mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if ret == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `openpty` answered 0, so `master` is an open fd it made and
+    // nothing else owns.
+    let master = unsafe { std::os::fd::OwnedFd::from_raw_fd(master) };
+    // SAFETY: as `master`.
+    let slave = unsafe { std::os::fd::OwnedFd::from_raw_fd(slave) };
+    Ok((master, slave))
+}
+
+/// `close_parentends_of_pipes` (`Z/ext/standard/proc_open.c:1144`) in the
+/// child, between `fork(2)` and `exec(2)`: each `(from, to)` pair is
+/// `dup2(from, to)`, and a pair already in place has its close-on-exec
+/// bit cleared, since every fd this process makes carries one. The fds
+/// named must stay open until the command is spawned.
+pub(super) fn place_fds(command: &mut std::process::Command, moves: Vec<(RawFd, RawFd)>) {
+    use std::os::unix::process::CommandExt;
+    let placed = move || {
+        for &(from, to) in &moves {
+            let ret = if from == to {
+                // SAFETY: `fcntl` with `F_SETFD` reads nothing through
+                // its arguments; it is async-signal-safe, as the child
+                // between `fork` and `exec` needs.
+                unsafe { libc::fcntl(from, libc::F_SETFD, 0) }
+            } else {
+                // SAFETY: `dup2` reads nothing through its arguments and
+                // is async-signal-safe.
+                unsafe { libc::dup2(from, to) }
+            };
+            if ret == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    };
+    // SAFETY: the closure calls `dup2` and `fcntl` alone, both
+    // async-signal-safe, touches no lock and allocates nothing, which is
+    // what a closure run between `fork` and `exec` may do.
+    unsafe { command.pre_exec(placed) };
+}

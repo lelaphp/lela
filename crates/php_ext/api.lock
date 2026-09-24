@@ -173,6 +173,7 @@ raising::too_few_arguments
 raising::warning
 request::Cast
 request::ExtensionId
+request::FdStream
 request::HostPath
 request::Interrupt
 request::Interrupt::raise
@@ -285,6 +286,7 @@ request::Request::set_umask
 request::Request::state
 request::Request::status_line
 request::Request::stdin
+request::Request::stream_from_fd
 request::Request::stream_wrappers
 request::Request::superglobal
 request::Request::take_uploaded_file
@@ -315,6 +317,7 @@ request::Stream::get_line
 request::Stream::is_dir
 request::Stream::is_stdio
 request::Stream::meta_data
+request::Stream::pclose
 request::Stream::read
 request::Stream::read_dir
 request::Stream::resource

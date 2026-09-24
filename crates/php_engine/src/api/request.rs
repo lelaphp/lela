@@ -133,6 +133,24 @@ pub enum Cast {
     Fd,
 }
 
+/// What a host fd becomes as a stream, [`Request::stream_from_fd`]:
+/// the three openers php has over one that is already open.
+#[derive(Debug)]
+pub enum FdStream<'a> {
+    /// `php_stream_fopen_from_fd(fd, mode, NULL)`: a plain file's kind,
+    /// `STDIO`, which seeks where the fd does and has no position where
+    /// it is a pipe or a character device; what `proc_open` hands back
+    /// for a `pipe`.
+    File { mode: &'a [u8] },
+    /// `php_stream_fopen_from_pipe` over what `popen(3)` opened: the
+    /// same kind, never seeking, whose close waits for `child`, the
+    /// process at the pipe's other end, and answers its exit status.
+    Process {
+        mode: &'a [u8],
+        child: std::process::Child,
+    },
+}
+
 impl Stream {
     pub(crate) const fn of(r: Resource) -> Stream {
         Stream(r)
@@ -650,6 +668,9 @@ pub struct Request {
     /// never one row.
     next_ref_source: usize,
     pub(crate) wrappers: Vec<StreamWrapper>,
+    /// `FG(pclose_ret)`: what the last stream freed by its resource's
+    /// destructor answered from its kind's close, which `pclose()` reads.
+    pub(crate) pclose_ret: i32,
     filters: Vec<StreamFilter>,
     /// php's `EG(user_error_handler)`, the handler `set_error_handler`
     /// installed, `IS_UNDEF` as none; the stack under it is
@@ -914,6 +935,7 @@ impl Request {
             ref_sources: Vec::new(),
             next_ref_source: 1,
             wrappers: Vec::new(),
+            pclose_ret: 0,
             filters: Vec::new(),
             error_handler: None,
             error_handler_levels: 0,
