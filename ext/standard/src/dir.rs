@@ -27,6 +27,7 @@ use php_ext::values::{PhpArray, PhpObject, PhpString, Value, ValueRef};
 use crate::file::{context_argument, set_default_dir};
 use crate::md5::path_argument;
 use crate::output::Entry;
+use crate::streamsfuncs::{NullContext, stream_context};
 use crate::stub::stub;
 use crate::virtual_cwd::{Resolve, virtual_file_ex};
 use crate::zpp::optional_long;
@@ -323,6 +324,7 @@ fn dir(req: &mut Request) -> Result<Value, Thrown> {
     argument_count_between(req, 1, 2)?;
     let directory = path_argument(req, 1)?;
     context_argument(req, 2)?;
+    stream_context(req, 2, NullContext::Default)?;
     let Some(stream) = req.open_dir(directory.as_bytes())? else {
         return Ok(Value::bool(false));
     };

@@ -399,6 +399,47 @@ fn default_context(req: &mut Request) -> Result<Resource, Thrown> {
     Ok(res)
 }
 
+/// What `php_stream_context_from_zval`'s `nocontext` says a `null`
+/// `$context` is: `FG(default_context)`, or, under
+/// `FILE_NO_DEFAULT_CONTEXT` and where php asks only for one given,
+/// nothing at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NullContext {
+    Default,
+    None,
+}
+
+/// `php_stream_context_from_zval(zcontext, nocontext)`
+/// (`Z/main/streams/php_stream_context.h:36`) over the `$context` at
+/// `position`, which `Z_PARAM_RESOURCE_OR_NULL` has taken: the one given, or
+/// for `null` `FG(default_context)`, made on the first use and a
+/// resource of the request's from then, unless `nocontext` says none.
+/// The first open of a request that is handed no `$context` makes it,
+/// so under the CLI it is resource 4, after the three standard streams,
+/// and the stream is 5.
+///
+/// ```php
+/// var_dump(fopen('php://memory', 'r'), stream_context_get_default(), fopen('php://memory', 'r'));
+/// ```
+/// ```expect
+/// resource(5) of type (stream)
+/// resource(4) of type (stream-context)
+/// resource(6) of type (stream)
+/// ```
+pub(crate) fn stream_context(
+    req: &mut Request,
+    position: u32,
+    nocontext: NullContext,
+) -> Result<(), Thrown> {
+    let given = req.argument(position).unwrap_or_default().deref();
+    if nocontext == NullContext::Default
+        && matches!(given.as_ref(), ValueRef::Null | ValueRef::Undef)
+    {
+        default_context(req)?;
+    }
+    Ok(())
+}
+
 /// `Z_PARAM_RESOURCE` then `decode_context_param`
 /// (`Z/ext/standard/streamsfuncs.c:937`): a `context`, or a stream's,
 /// which here is the default one; anything else is php's

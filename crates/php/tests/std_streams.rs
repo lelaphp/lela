@@ -1,6 +1,7 @@
 //! The binary's standard handles, held to what the oracle at 8.5.9 prints
 //! under `php -n`: `do_cli` registers `STDIN`, `STDOUT` and `STDERR` as
-//! resources 1 to 3 for a file and for `-r`'s code.
+//! resources 1 to 3 for a file and for `-r`'s code, so a request's first
+//! open is resource 5 after `FG(default_context)`.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -30,9 +31,9 @@ fn php(words: &[&str]) -> (String, String, i32) {
 }
 
 #[test]
-fn a_file_and_direct_code_see_the_three_constants() {
-    let expected = "resource(1) of type (stream)\nresource(2) of type (stream)\nresource(3) of type (stream)\n";
-    let code = "var_dump(STDIN, STDOUT, STDERR);";
+fn a_file_and_direct_code_see_the_three_constants_and_the_first_open_is_resource_5() {
+    let expected = "resource(1) of type (stream)\nresource(2) of type (stream)\nresource(3) of type (stream)\nresource(5) of type (stream)\n";
+    let code = "var_dump(STDIN, STDOUT, STDERR, fopen('php://memory', 'r'));";
     let file = scratch("ids.php", &format!("<?php\n{code}\n"));
     let file = file.to_string_lossy().into_owned();
     assert_eq!(php(&[&file]), (expected.to_owned(), String::new(), 0));

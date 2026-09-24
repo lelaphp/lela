@@ -25,6 +25,7 @@ use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use std::os::unix::ffi::OsStrExt;
 
 use crate::output::Entry;
+use crate::streamsfuncs::{NullContext, stream_context};
 use crate::stub::stub;
 use crate::virtual_cwd::{MAXPATHLEN, Resolve, virtual_file_ex};
 use crate::zpp::{
@@ -502,6 +503,7 @@ fn opendir(req: &mut Request) -> Result<Value, Thrown> {
     argument_count_between(req, 1, 2)?;
     let directory = path_argument(req, 1)?;
     context_argument(req, 2)?;
+    stream_context(req, 2, NullContext::Default)?;
     let Some(dir) = req.open_dir(directory.as_bytes())? else {
         return Ok(Value::bool(false));
     };
@@ -1005,6 +1007,8 @@ fn fopen(req: &mut Request) -> Result<Value, Thrown> {
     } else {
         false
     };
+    context_argument(req, 4)?;
+    stream_context(req, 4, NullContext::Default)?;
     let opened = req.open_stream(filename.as_bytes(), mode.as_bytes(), use_include_path)?;
     Ok(opened.map_or_else(|| Value::bool(false), Stream::as_value))
 }
@@ -1390,6 +1394,16 @@ fn fwrite(req: &mut Request) -> Result<Value, Thrown> {
     ))
 }
 
+/// `flags & PHP_FILE_NO_DEFAULT_CONTEXT`, as `file()` and
+/// `file_put_contents()` hand it to `php_stream_context_from_zval`.
+fn no_default_context(flags: i64) -> NullContext {
+    if flags & PHP_FILE_NO_DEFAULT_CONTEXT == 0 {
+        NullContext::Default
+    } else {
+        NullContext::None
+    }
+}
+
 /// `Z_PARAM_RESOURCE_OR_NULL` for a `$context`: a resource or `null`,
 /// taken and not read, since no wrapper here reads a `$context`; anything
 /// else is the parser's `TypeError`.
@@ -1496,6 +1510,7 @@ fn file_get_contents(req: &mut Request) -> Result<Value, Thrown> {
         Some(len) => Some(usize::try_from(len).unwrap_or(usize::MAX)),
         None => None,
     };
+    stream_context(req, 3, NullContext::Default)?;
     let Some(stream) = req.open_stream(filename.as_bytes(), b"rb", use_include_path)? else {
         return Ok(Value::bool(false));
     };
@@ -1589,6 +1604,7 @@ fn file_put_contents(req: &mut Request) -> Result<Value, Thrown> {
         0
     };
     context_argument(req, 4)?;
+    stream_context(req, 4, no_default_context(flags))?;
     let source = match data.as_ref() {
         ValueRef::Resource(_) => match Stream::from_value(req, &data) {
             Some(stream) => Some(stream),
@@ -2001,6 +2017,7 @@ fn rmdir(req: &mut Request) -> Result<Value, Thrown> {
     argument_count_between(req, 1, 2)?;
     let dir = path_argument(req, 1)?;
     context_argument(req, 2)?;
+    stream_context(req, 2, NullContext::Default)?;
     Ok(Value::bool(
         req.wrapper_op(dir.as_bytes(), WrapperOp::Rmdir)?,
     ))
@@ -2086,6 +2103,7 @@ fn mkdir(req: &mut Request) -> Result<Value, Thrown> {
     };
     let recursive = given >= 3 && bool_argument(req, 3)?;
     context_argument(req, 4)?;
+    stream_context(req, 4, NullContext::Default)?;
     let op = WrapperOp::Mkdir { mode, recursive };
     Ok(Value::bool(req.wrapper_op(dir.as_bytes(), op)?))
 }
@@ -2122,6 +2140,7 @@ fn rename(req: &mut Request) -> Result<Value, Thrown> {
     let from = path_argument(req, 1)?;
     let to = path_argument(req, 2)?;
     context_argument(req, 3)?;
+    stream_context(req, 3, NullContext::Default)?;
     let op = WrapperOp::Rename { to: to.as_bytes() };
     Ok(Value::bool(req.wrapper_op(from.as_bytes(), op)?))
 }
@@ -2235,6 +2254,7 @@ fn copy(req: &mut Request) -> Result<Value, Thrown> {
     let source = path_argument(req, 1)?;
     let target = path_argument(req, 2)?;
     context_argument(req, 3)?;
+    stream_context(req, 3, NullContext::Default)?;
     let _ = req.plain_path(source.as_bytes());
     Ok(Value::bool(copy_file(
         req,
@@ -2338,6 +2358,7 @@ fn unlink(req: &mut Request) -> Result<Value, Thrown> {
     argument_count_between(req, 1, 2)?;
     let filename = path_argument(req, 1)?;
     context_argument(req, 2)?;
+    stream_context(req, 2, NullContext::Default)?;
     Ok(Value::bool(
         req.wrapper_op(filename.as_bytes(), WrapperOp::Unlink)?,
     ))
@@ -2392,6 +2413,7 @@ fn file(req: &mut Request) -> Result<Value, Thrown> {
     if flags & !known != 0 {
         return Err(arg_value_error(req, 2, "be a valid flag value"));
     }
+    stream_context(req, 3, no_default_context(flags))?;
     let include_new_line = flags & PHP_FILE_IGNORE_NEW_LINES == 0;
     let skip_blank_lines = flags & PHP_FILE_SKIP_EMPTY_LINES != 0;
     let use_include_path = flags & PHP_FILE_USE_INCLUDE_PATH != 0;
@@ -2920,6 +2942,7 @@ fn readfile(req: &mut Request) -> Result<Value, Thrown> {
     let filename = path_argument(req, 1)?;
     let use_include_path = optional_bool(req, 2, false)?;
     context_argument(req, 3)?;
+    stream_context(req, 3, NullContext::Default)?;
     let Some(stream) = req.open_stream(filename.as_bytes(), b"rb", use_include_path)? else {
         return Ok(Value::bool(false));
     };
