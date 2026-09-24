@@ -66,6 +66,7 @@ mod hrtime;
 mod html;
 mod http;
 mod image;
+mod info;
 mod ini;
 mod iptc;
 mod levenshtein;
@@ -274,6 +275,7 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
         net::natives(),
         iptc::natives(),
         dns::natives(),
+        info::natives(),
     ]
     .into_iter()
     .flatten()
@@ -295,6 +297,7 @@ fn file_constants() -> Vec<ConstDecl> {
         syslog::constants(),
         image::constants(),
         dns::constants(),
+        info::constants(),
     ]
     .into_iter()
     .flatten()

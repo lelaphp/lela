@@ -1317,7 +1317,7 @@ fn stream_resolve_include_path(req: &mut Request) -> Result<Value, Thrown> {
 
 /// The engine's own wrappers, `php` and then `file`, in the order php
 /// registers them, and then those the program registered.
-fn builtin_and_registered(req: &Request) -> Vec<String> {
+pub(super) fn builtin_and_registered(req: &Request) -> Vec<String> {
     let mut schemes = vec![String::from("php"), String::from("file")];
     schemes.extend(req.stream_wrappers());
     schemes

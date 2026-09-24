@@ -788,3 +788,29 @@ pub(super) fn ipv4_addresses(name: &CStr) -> Option<Vec<[u8; 4]>> {
     }
     Some(out)
 }
+
+/// `uname(2)`, what `php_get_uname` reads (`Z/ext/standard/info.c:655`):
+/// the system's name, node name, release, version and machine, in that
+/// order; `None` where the call fails.
+pub(super) fn uname() -> Option<[Vec<u8>; 5]> {
+    // SAFETY: `utsname` is plain C data, for which all zeroes is a value.
+    let mut buf: libc::utsname = unsafe { std::mem::zeroed() };
+    // SAFETY: `buf` is a live `utsname` the call writes into.
+    if unsafe { libc::uname(&raw mut buf) } != 0 {
+        return None;
+    }
+    let field = |chars: &[c_char]| -> Vec<u8> {
+        chars
+            .iter()
+            .take_while(|c| **c != 0)
+            .map(|c| c.to_ne_bytes()[0])
+            .collect()
+    };
+    Some([
+        field(&buf.sysname),
+        field(&buf.nodename),
+        field(&buf.release),
+        field(&buf.version),
+        field(&buf.machine),
+    ])
+}
