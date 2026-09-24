@@ -380,7 +380,7 @@ impl Emit<'_> {
                 Some(rest) => rest.to_vec(),
                 None => resolved,
             };
-            let unqualified = resolved.rsplit(|b| *b == b'\\').next().unwrap_or_default();
+            let unqualified = resolved.rsplit(|b| *b == b'\\').next().unwrap_or(&resolved);
             if is_reserved_class_name(unqualified) {
                 return Err(self.compile_error(format!(
                     "Cannot use \"{}\" as a type name as it is reserved",
@@ -422,7 +422,7 @@ impl Emit<'_> {
                 self.intersection_redundant_by_single(earlier, single)?;
                 continue;
             }
-            if class_name_of(earlier).eq_ignore_ascii_case(&class_name_of(single)) {
+            if same_class(earlier, single) {
                 return Err(self.compile_error(format!(
                     "Duplicate type {} is redundant",
                     type_to_string(single)
@@ -443,11 +443,7 @@ impl Emit<'_> {
         let Type::Intersection(members) = intersection else {
             return Ok(());
         };
-        let name = class_name_of(single);
-        if members
-            .iter()
-            .any(|member| class_name_of(member).eq_ignore_ascii_case(&name))
-        {
+        if members.iter().any(|member| same_class(member, single)) {
             return Err(self.compile_error(format!(
                 "Type {} is redundant as it is more restrictive than type {}",
                 type_to_string(intersection),
@@ -470,11 +466,7 @@ impl Emit<'_> {
         };
         let found = smaller
             .iter()
-            .filter(|outer| {
-                larger
-                    .iter()
-                    .any(|inner| class_name_of(inner).eq_ignore_ascii_case(&class_name_of(outer)))
-            })
+            .filter(|outer| larger.iter().any(|inner| same_class(inner, outer)))
             .count();
         if found != smaller.len() {
             return Ok(());
@@ -507,14 +499,20 @@ pub(super) fn is_complex(ty: &Type) -> bool {
 }
 
 /// `ZEND_TYPE_NAME` of a type with one name.
-fn class_name_of(ty: &Type) -> Vec<u8> {
+fn class_name_of(ty: &Type) -> Option<&[u8]> {
     match ty {
-        Type::Named(name) => name.0.to_vec(),
-        Type::SelfClass => b"self".to_vec(),
-        Type::ParentClass => b"parent".to_vec(),
-        Type::Iterable => b"Traversable".to_vec(),
-        _ => Vec::new(),
+        Type::Named(name) => Some(&name.0),
+        Type::SelfClass => Some(b"self"),
+        Type::ParentClass => Some(b"parent"),
+        Type::Iterable => Some(b"Traversable"),
+        _ => None,
     }
+}
+
+/// Whether two types name the same class, whatever the case
+/// (`zend_string_equals_ci` over `ZEND_TYPE_NAME`).
+fn same_class(a: &Type, b: &Type) -> bool {
+    matches!((class_name_of(a), class_name_of(b)), (Some(a), Some(b)) if a.eq_ignore_ascii_case(b))
 }
 
 /// `ZEND_TYPE_INIT_MASK`: the builtins of a pure mask as a type, which
@@ -543,9 +541,9 @@ pub(super) fn of_mask(mask: u32) -> Type {
             members.push(ty);
         }
     }
-    match members.len() {
-        1 => members.pop().unwrap_or(Type::Null),
-        _ => Type::Union(members),
+    match <[Type; 1]>::try_from(members) {
+        Ok([single]) => single,
+        Err(members) => Type::Union(members),
     }
 }
 

@@ -21,55 +21,173 @@ const MAY_BE_STRING: u32 = 1 << 6;
 const MAY_BE_ARRAY: u32 = 1 << 7;
 const MAY_BE_STATIC: u32 = 1 << 15;
 
-/// What one magic method is held to, a row of php's `if` chain: the
-/// count of parameters where it has one, whether it must be a class's
-/// method or an instance's, whether it must be public, the type each parameter
-/// must accept, and the type its return must be within.
-struct Rule {
-    arguments: Option<usize>,
-    is_static: Option<bool>,
-    public: bool,
-    parameter_types: &'static [u32],
-    return_type: Option<u32>,
-    no_return_type: bool,
+/// The magic methods `zend_check_magic_method_implementation` knows,
+/// one variant per branch of its `if` chain.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MagicMethod {
+    Construct,
+    Destruct,
+    Clone,
+    Get,
+    Set,
+    Unset,
+    Isset,
+    Call,
+    CallStatic,
+    ToString,
+    DebugInfo,
+    Serialize,
+    Unserialize,
+    SetState,
+    Invoke,
+    Sleep,
+    Wakeup,
 }
 
-/// The row for a lowered method name, none for a name that is not
-/// magic.
-fn rule(lowered: &[u8]) -> Option<Rule> {
-    let row = |arguments, is_static, public, parameter_types, return_type| Rule {
-        arguments,
-        is_static: Some(is_static),
-        public,
-        parameter_types,
-        return_type,
-        no_return_type: false,
-    };
-    Some(match lowered {
-        b"__construct" => Rule {
-            no_return_type: true,
-            ..row(None, false, false, &[], None)
-        },
-        b"__destruct" => Rule {
-            no_return_type: true,
-            ..row(Some(0), false, false, &[], None)
-        },
-        b"__clone" => row(Some(0), false, false, &[], Some(MAY_BE_VOID)),
-        b"__get" => row(Some(1), false, true, &[MAY_BE_STRING], None),
-        b"__set" => row(Some(2), false, true, &[MAY_BE_STRING], Some(MAY_BE_VOID)),
-        b"__unset" => row(Some(1), false, true, &[MAY_BE_STRING], Some(MAY_BE_VOID)),
-        b"__isset" => row(Some(1), false, true, &[MAY_BE_STRING], Some(MAY_BE_BOOL)),
-        b"__call" => row(Some(2), false, true, &[MAY_BE_STRING, MAY_BE_ARRAY], None),
-        b"__callstatic" => row(Some(2), true, true, &[MAY_BE_STRING, MAY_BE_ARRAY], None),
-        b"__tostring" => row(Some(0), false, true, &[], Some(MAY_BE_STRING)),
-        b"__debuginfo" => row(Some(0), false, true, &[], Some(MAY_BE_ARRAY | MAY_BE_NULL)),
-        b"__serialize" | b"__sleep" => row(Some(0), false, true, &[], Some(MAY_BE_ARRAY)),
-        b"__unserialize" => row(Some(1), false, true, &[MAY_BE_ARRAY], Some(MAY_BE_VOID)),
-        b"__set_state" => row(Some(1), true, true, &[MAY_BE_ARRAY], Some(MAY_BE_OBJECT)),
-        b"__invoke" => row(None, false, true, &[], None),
-        b"__wakeup" => row(Some(0), false, true, &[], Some(MAY_BE_VOID)),
-        _ => return None,
-    })
+/// Whose method a magic method must be.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Receiver {
+    /// `zend_check_magic_method_non_static`.
+    Instance,
+    /// `zend_check_magic_method_static`.
+    Class,
+}
+
+/// What a magic method's declared return is held to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Returns {
+    /// Nothing: any return type, or none.
+    Any,
+    /// `zend_check_magic_method_no_return_type`: none may be declared.
+    Undeclared,
+    /// `zend_check_magic_method_return_type`: one declared must be
+    /// within this mask.
+    Within(u32),
+}
+
+/// The signature one magic method is held to: the count of parameters
+/// where php fixes one, whose method it is, whether it must be public,
+/// the mask each parameter declared with a type must accept, and its
+/// return.
+struct Signature {
+    arity: Option<usize>,
+    receiver: Receiver,
+    public: bool,
+    parameters: &'static [u32],
+    returns: Returns,
+}
+
+impl MagicMethod {
+    /// Each variant by its lowered name, as `ZEND_*_FUNC_NAME` spells it.
+    const NAMES: [(&'static [u8], MagicMethod); 17] = [
+        (b"__construct", MagicMethod::Construct),
+        (b"__destruct", MagicMethod::Destruct),
+        (b"__clone", MagicMethod::Clone),
+        (b"__get", MagicMethod::Get),
+        (b"__set", MagicMethod::Set),
+        (b"__unset", MagicMethod::Unset),
+        (b"__isset", MagicMethod::Isset),
+        (b"__call", MagicMethod::Call),
+        (b"__callstatic", MagicMethod::CallStatic),
+        (b"__tostring", MagicMethod::ToString),
+        (b"__debuginfo", MagicMethod::DebugInfo),
+        (b"__serialize", MagicMethod::Serialize),
+        (b"__unserialize", MagicMethod::Unserialize),
+        (b"__set_state", MagicMethod::SetState),
+        (b"__invoke", MagicMethod::Invoke),
+        (b"__sleep", MagicMethod::Sleep),
+        (b"__wakeup", MagicMethod::Wakeup),
+    ];
+
+    /// The magic method a lowered method name is, none for any other.
+    fn named(lowered: &[u8]) -> Option<MagicMethod> {
+        MagicMethod::NAMES
+            .iter()
+            .find(|(name, _)| *name == lowered)
+            .map(|(_, magic)| *magic)
+    }
+
+    /// The branch of php's chain for this method.
+    fn signature(self) -> Signature {
+        use MagicMethod as M;
+        use Receiver::{Class, Instance};
+        let (arity, receiver, public, parameters, returns): (_, _, _, &'static [u32], _) =
+            match self {
+                M::Construct => (None, Instance, false, &[], Returns::Undeclared),
+                M::Destruct => (Some(0), Instance, false, &[], Returns::Undeclared),
+                M::Clone => (Some(0), Instance, false, &[], Returns::Within(MAY_BE_VOID)),
+                M::Get => (Some(1), Instance, true, &[MAY_BE_STRING], Returns::Any),
+                M::Set => (
+                    Some(2),
+                    Instance,
+                    true,
+                    &[MAY_BE_STRING],
+                    Returns::Within(MAY_BE_VOID),
+                ),
+                M::Unset => (
+                    Some(1),
+                    Instance,
+                    true,
+                    &[MAY_BE_STRING],
+                    Returns::Within(MAY_BE_VOID),
+                ),
+                M::Isset => (
+                    Some(1),
+                    Instance,
+                    true,
+                    &[MAY_BE_STRING],
+                    Returns::Within(MAY_BE_BOOL),
+                ),
+                M::Call => (
+                    Some(2),
+                    Instance,
+                    true,
+                    &[MAY_BE_STRING, MAY_BE_ARRAY],
+                    Returns::Any,
+                ),
+                M::CallStatic => (
+                    Some(2),
+                    Class,
+                    true,
+                    &[MAY_BE_STRING, MAY_BE_ARRAY],
+                    Returns::Any,
+                ),
+                M::ToString => (Some(0), Instance, true, &[], Returns::Within(MAY_BE_STRING)),
+                M::DebugInfo => (
+                    Some(0),
+                    Instance,
+                    true,
+                    &[],
+                    Returns::Within(MAY_BE_ARRAY | MAY_BE_NULL),
+                ),
+                M::Serialize | M::Sleep => {
+                    (Some(0), Instance, true, &[], Returns::Within(MAY_BE_ARRAY))
+                }
+                M::Unserialize => (
+                    Some(1),
+                    Instance,
+                    true,
+                    &[MAY_BE_ARRAY],
+                    Returns::Within(MAY_BE_VOID),
+                ),
+                M::SetState => (
+                    Some(1),
+                    Class,
+                    true,
+                    &[MAY_BE_ARRAY],
+                    Returns::Within(MAY_BE_OBJECT),
+                ),
+                M::Invoke => (None, Instance, true, &[], Returns::Any),
+                M::Wakeup => (Some(0), Instance, true, &[], Returns::Within(MAY_BE_VOID)),
+            };
+        Signature {
+            arity,
+            receiver,
+            public,
+            parameters,
+            returns,
+        }
+    }
 }
 
 impl Emit<'_> {
@@ -169,16 +287,14 @@ impl Emit<'_> {
         method: &MethodDecl,
     ) -> Result<(), CompileError> {
         let lowered = method.function.name.0.to_ascii_lowercase();
-        if !lowered.starts_with(b"__") {
-            return Ok(());
-        }
-        let Some(rule) = rule(&lowered) else {
+        let Some(magic) = MagicMethod::named(&lowered) else {
             return Ok(());
         };
+        let signature = magic.signature();
         let class = String::from_utf8_lossy(class).into_owned();
         let name = String::from_utf8_lossy(&method.function.name.0).into_owned();
         let parameters = &method.function.parameters;
-        if let Some(count) = rule.arguments {
+        if let Some(count) = signature.arity {
             if parameters.len() != count {
                 return Err(self.compile_error(match count {
                     0 => format!("Method {class}::{name}() cannot take arguments"),
@@ -192,32 +308,29 @@ impl Emit<'_> {
                 )));
             }
         }
-        match rule.is_static {
-            Some(false) if !method.is_instance => {
+        match (signature.receiver, method.is_instance) {
+            (Receiver::Instance, false) => {
                 return Err(
                     self.compile_error(format!("Method {class}::{name}() cannot be static"))
                 );
             }
-            Some(true) if method.is_instance => {
+            (Receiver::Class, true) => {
                 return Err(self.compile_error(format!("Method {class}::{name}() must be static")));
             }
             _ => {}
         }
-        if rule.no_return_type && method.function.return_type.is_some() {
+        if signature.returns == Returns::Undeclared && method.function.return_type.is_some() {
             return Err(self.compile_error(format!(
                 "Method {class}::{name}() cannot declare a return type"
             )));
         }
-        if rule.public && method.visibility != Visibility::Public {
+        if signature.public && method.visibility != Visibility::Public {
             self.raise(
                 Level::Warning,
                 &format!("The magic method {class}::{name}() must have public visibility"),
             );
         }
-        for (at, required) in rule.parameter_types.iter().enumerate() {
-            let Some(parameter) = parameters.get(at) else {
-                continue;
-            };
+        for (at, (required, parameter)) in signature.parameters.iter().zip(parameters).enumerate() {
             if let Some(ty) = &parameter.ty
                 && ty.mask() & required == 0
             {
@@ -229,7 +342,9 @@ impl Emit<'_> {
                 )));
             }
         }
-        if let (Some(required), Some(declared)) = (rule.return_type, &method.function.return_type) {
+        if let (Returns::Within(required), Some(declared)) =
+            (signature.returns, &method.function.return_type)
+        {
             self.magic_return(&class, &name, required, declared)?;
         }
         Ok(())
