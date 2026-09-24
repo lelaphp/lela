@@ -49,6 +49,7 @@ mod array;
 mod assert;
 mod base64;
 mod basic_functions;
+mod browscap;
 mod crc32;
 mod crypt;
 mod csv;
@@ -117,6 +118,7 @@ struct State {
     contexts: streamsfuncs::Contexts,
     page: Option<pageinfo::Page>,
     syslog: syslog::Log,
+    browscap: browscap::Browscap,
 }
 
 /// The extension value (design §7.1): declarations paired with entries,
@@ -223,6 +225,7 @@ pub fn extension() -> Extension {
         .class_with(directory.0, directory.1, directory.2)
         .classes(vec![assert::assertion_error_class()])
         .ini(assert::ini())
+        .ini(browscap::ini())
         .request_state::<State>()
         .rshutdown(syslog::close)
         .build("standard")
@@ -262,6 +265,7 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
         syslog::natives(),
         mail::natives(),
         image::natives(),
+        browscap::natives(),
     ]
     .into_iter()
     .flatten()
