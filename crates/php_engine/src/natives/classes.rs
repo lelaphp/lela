@@ -125,13 +125,9 @@ fn object_argument(req: &mut Request, position: u32) -> Result<PhpObject, Thrown
     let object = coerce_param(req, &given, &Type::Object, position)?;
     match object.as_object() {
         Some(object) => Ok(*object),
-        None => Err(arg_type_error(
+        None => Err(crate::api::raising::fatal(
             req,
-            position,
-            &format!(
-                "be of type object, {} given",
-                crate::ops::value_name(req, &given.deref())
-            ),
+            "InternalError: coerce_param held a value that is no object to `object`",
         )),
     }
 }

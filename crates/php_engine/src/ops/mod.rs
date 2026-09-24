@@ -727,38 +727,6 @@ fn mangled_prefix(mangled: &[MangledName], at: &mut usize, name: PhpString) -> O
     mangled.get(found).and_then(|slot| slot.prefix.clone())
 }
 
-/// Every class name a declared type holds, in the order it was written:
-/// the one name of a class type, and each member of a union or an
-/// intersection that is one, which `zend_check_type_slow` walks with
-/// `ZEND_TYPE_LIST_FOREACH`. What reads it is every check of a value
-/// against a declared type that a class name can stand in: a return, a
-/// parameter and a property.
-///
-/// ```php
-/// class A {} class B extends A {}
-/// function f(): A { return new B; }
-/// class C { public A $a; }
-/// $c = new C; $c->a = new B;
-/// var_dump(f() instanceof B, $c->a instanceof B);
-/// ```
-/// ```expect
-/// bool(true)
-/// bool(true)
-/// ```
-pub(crate) fn named_types(
-    ty: &php_unit::decl::Type,
-) -> Box<dyn Iterator<Item = &php_unit::decl::Name> + '_> {
-    use php_unit::decl::Type;
-    match ty {
-        Type::Named(name) => Box::new(std::iter::once(name)),
-        Type::Nullable(inner) => named_types(inner),
-        Type::Union(members) | Type::Intersection(members) => {
-            Box::new(members.iter().flat_map(named_types))
-        }
-        _ => Box::new(std::iter::empty()),
-    }
-}
-
 /// `zend_verify_property_type` (`Z/Zend/zend_object_handlers.c:1065`)
 /// under `zend_assign_to_typed_prop` (`Z/Zend/zend_execute.c:3583`):
 /// what a write to a property with a declared type is held to. Nothing
@@ -823,7 +791,7 @@ pub(crate) fn verify_property_type(
     strict: bool,
 ) -> Result<Option<Value>, Thrown> {
     let held = value.deref();
-    match type_assignable(req, &held, ty, strict) {
+    match type_assignable(req, &held, ty, declaring, strict) {
         Assignable::Yes => Ok(None),
         Assignable::Coerce => {
             match crate::api::coerce::scalar_type_hint(req, &held, ty.mask(), strict)? {
@@ -860,17 +828,18 @@ fn type_assignable(
     req: &mut Request,
     held: &Value,
     ty: &php_unit::decl::Type,
+    declaring: crate::api::values::ClassId,
     strict: bool,
 ) -> Assignable {
-    if ty.contains_code(held.type_code()) {
-        return Assignable::Yes;
-    }
-    if let Some(object) = held.as_object()
-        && named_types(ty).any(|named| {
-            req.class_named(&named.0)
-                .is_some_and(|of| req.instance_of(object.class(), of))
-        })
-    {
+    if crate::api::coerce::holds(
+        req,
+        held,
+        ty,
+        crate::api::coerce::Scopes {
+            own: Some(declaring),
+            called: Some(declaring),
+        },
+    ) {
         return Assignable::Yes;
     }
     let mask = ty.mask();
@@ -937,7 +906,7 @@ pub(crate) fn verify_ref_assignable(
     let mut first: Option<usize> = None;
     let mut coerced: Option<Value> = None;
     for (i, (declaring, name, ty)) in listed.iter().enumerate() {
-        let verdict = type_assignable(req, &held, ty, strict);
+        let verdict = type_assignable(req, &held, ty, *declaring, strict);
         if verdict == Assignable::Coerce {
             let made = crate::api::coerce::scalar_type_hint(req, &held, ty.mask(), strict)?;
             let Some(made) = made else {
@@ -1025,7 +994,7 @@ pub(crate) fn verify_prop_assignable_by_ref(
     let Some((first_at, first_name, first_ty)) = first else {
         return verify_property_type(req, &held, ty, declaring, name, strict);
     };
-    match type_assignable(req, &held, ty, strict) {
+    match type_assignable(req, &held, ty, declaring, strict) {
         Assignable::Yes => return Ok(None),
         Assignable::Coerce => {
             // The value would convert, so what refuses the bind is the

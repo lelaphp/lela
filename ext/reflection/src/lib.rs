@@ -72,7 +72,6 @@ use php_ext::call::{
     Function, constant, eval_const_expr, lookup_class, lookup_function, new_object,
     read_static_prop, write_static_prop,
 };
-use php_ext::coerce::value_name;
 use php_ext::decl::{
     ClassConstDecl, ClassDecl, ClassKind, ConstExpr, EnumBacking, FunctionDecl, MethodDecl, Name,
     Parameter, PropertyDecl, Type, Visibility,
@@ -331,28 +330,20 @@ fn string_argument(req: &mut Request, position: u32) -> Result<Vec<u8>, Thrown> 
 /// constructors do with it: an object is its class, kept beside it; a
 /// string is `zend_lookup_class`, a leading `\` dropped, or php's
 /// `ReflectionException` `Class "X" does not exist` with the name as
-/// given; anything else is the `TypeError` naming `object|string`.
+/// given; the refusal is `coerce_param`'s over `object|string`.
 fn class_argument(
     req: &mut Request,
     position: u32,
 ) -> Result<(ClassId, Option<PhpObject>), Thrown> {
-    if let Some(given) = req.argument(position) {
-        match given.deref().as_ref() {
-            ValueRef::Object(object) => return Ok((object.class(), Some(*object))),
-            ValueRef::Array(_) | ValueRef::Resource(_) => {
-                return Err(arg_type_error(
-                    req,
-                    position,
-                    &format!(
-                        "be of type object|string, {} given",
-                        value_name(req, &given.deref())
-                    ),
-                ));
-            }
-            _ => {}
-        }
+    let Some(given) = req.argument(position) else {
+        return Ok((class_named(req, b"")?, None));
+    };
+    let ty = Type::Union(vec![Type::Object, Type::String]);
+    let held = php_ext::coerce::coerce_param(req, &given, &ty, position)?;
+    if let Some(object) = held.as_object() {
+        return Ok((object.class(), Some(*object)));
     }
-    let name = string_argument(req, position)?;
+    let name = held.as_str_bytes().unwrap_or_default().to_vec();
     Ok((class_named(req, &name)?, None))
 }
 
@@ -1198,31 +1189,30 @@ fn reflection_function_is_deprecated(req: &mut Request) -> Result<Value, Thrown>
 ///   thrown in %s on line 2
 /// ```
 fn reflection_function_construct(req: &mut Request) -> Result<Value, Thrown> {
-    if let Some(given) = req.argument(1)
-        && let ValueRef::Object(object) = given.deref().as_ref()
-    {
-        let object = *object;
+    exactly_arguments(req, 1)?;
+    let given = req.argument(1).unwrap_or_default();
+    let ty = Type::Union(vec![
+        Type::Named(Name(b"Closure".as_slice().into())),
+        Type::String,
+    ]);
+    let held = php_ext::coerce::coerce_param(req, &given, &ty, 1)?;
+    if let Some(object) = held.as_object().copied() {
         // php's `IS_OBJECT` arm: `zend_get_closure_method_def` and
         // `intern->obj` holding the closure, `$name` the declaration's
         // own, which is the `{closure:…}` the compiler built.
-        if let Some(decl) = signature::closure_decl(req, object) {
-            if let Some(this) = req.this() {
-                set_name(req, this, &decl.name.0)?;
-                keep_closure(req, this, object);
-            }
-            return Ok(Value::null());
+        let Some(decl) = signature::closure_decl(req, object) else {
+            return Err(php_ext::raising::fatal(
+                req,
+                "InternalError: a Closure with no declaration behind it",
+            ));
+        };
+        if let Some(this) = req.this() {
+            set_name(req, this, &decl.name.0)?;
+            keep_closure(req, this, object);
         }
-        let class = req.class_decl(object.class()).map_or_else(
-            || String::from("object"),
-            |decl| String::from_utf8_lossy(&decl.name.0).into_owned(),
-        );
-        return Err(arg_type_error(
-            req,
-            1,
-            &format!("be of type Closure|string, {class} given"),
-        ));
+        return Ok(Value::null());
     }
-    let name = one_string_argument(req)?;
+    let name = held.as_str_bytes().unwrap_or_default().to_vec();
     let bare = name.strip_prefix(b"\\").unwrap_or(&name);
     let Some(function) = lookup_function(req, bare) else {
         return Err(throw(
@@ -1484,15 +1474,11 @@ fn reflection_class_construct(req: &mut Request) -> Result<Value, Thrown> {
 /// ```
 fn reflection_object_construct(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 1)?;
-    let given = req.argument(1).unwrap_or_default().deref();
-    let ValueRef::Object(object) = given.as_ref() else {
-        return Err(arg_type_error(
-            req,
-            1,
-            &format!("be of type object, {} given", value_name(req, &given)),
-        ));
+    let given = req.argument(1).unwrap_or_default();
+    let given = php_ext::coerce::coerce_param(req, &given, &Type::Object, 1)?;
+    let Some(object) = given.as_object().copied() else {
+        return Ok(Value::null());
     };
-    let object = *object;
     let name = class_name_of(req, object.class());
     if let Some(this) = req.this() {
         set_name(req, this, &name)?;
@@ -1885,47 +1871,27 @@ fn reflection_class_get_default_properties(req: &mut Request) -> Result<Value, T
 fn reflection_class_is_subclass_of(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 1)?;
     let class = this_class(req)?;
-    let given = req.argument(1).unwrap_or_default().deref();
-    let of = match given.as_ref() {
-        ValueRef::Object(object) => {
-            let reflector = lookup_class(req, b"ReflectionClass")?;
-            if !reflector.is_some_and(|reflector| object.instance_of(req, reflector)) {
-                let name = class_name_of(req, object.class());
-                return Err(arg_type_error(
-                    req,
-                    1,
-                    &format!(
-                        "be of type ReflectionClass|string, {} given",
-                        String::from_utf8_lossy(&name)
-                    ),
-                ));
-            }
-            let Some(name) = object
-                .prop(req, b"name")
-                .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
-            else {
-                return Err(throw(
-                    req,
-                    "Error",
-                    "Internal error: Failed to retrieve the argument's reflection object",
-                ));
-            };
-            class_named(req, &name)?
-        }
-        ValueRef::Array(_) | ValueRef::Resource(_) => {
-            return Err(arg_type_error(
+    let given = req.argument(1).unwrap_or_default();
+    let ty = Type::Union(vec![
+        Type::Named(Name(b"ReflectionClass".as_slice().into())),
+        Type::String,
+    ]);
+    let given = php_ext::coerce::coerce_param(req, &given, &ty, 1)?;
+    let of = if let ValueRef::Object(object) = given.as_ref() {
+        let Some(name) = object
+            .prop(req, b"name")
+            .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
+        else {
+            return Err(throw(
                 req,
-                1,
-                &format!(
-                    "be of type ReflectionClass|string, {} given",
-                    value_name(req, &given)
-                ),
+                "Error",
+                "Internal error: Failed to retrieve the argument's reflection object",
             ));
-        }
-        _ => {
-            let name = string_argument(req, 1)?;
-            class_named(req, &name)?
-        }
+        };
+        class_named(req, &name)?
+    } else {
+        let name = given.as_str_bytes().unwrap_or_default().to_vec();
+        class_named(req, &name)?
     };
     Ok(Value::bool(class != of && class_is(req, class, of, 0)))
 }
@@ -2328,7 +2294,9 @@ fn reflection_method_construct(req: &mut Request) -> Result<Value, Thrown> {
         .argument(2)
         .map(|v| v.deref())
         .filter(|v| !matches!(v.as_ref(), ValueRef::Null | ValueRef::Undef));
-    let first = req.argument(1).unwrap_or_default().deref();
+    let first = req.argument(1).unwrap_or_default();
+    let ty = Type::Union(vec![Type::Object, Type::String]);
+    let first = php_ext::coerce::coerce_param(req, &first, &ty, 1)?;
     let (class, method_name) = match (first.as_ref(), second) {
         (ValueRef::Object(object), Some(_)) => (object.class(), string_argument(req, 2)?),
         (ValueRef::Object(_), None) => {
@@ -2339,22 +2307,12 @@ fn reflection_method_construct(req: &mut Request) -> Result<Value, Thrown> {
                 "ReflectionMethod::__construct(): Argument #2 ($method) cannot be null when argument #1 ($objectOrMethod) is an object",
             ));
         }
-        (ValueRef::Array(_) | ValueRef::Resource(_), _) => {
-            return Err(arg_type_error(
-                req,
-                1,
-                &format!(
-                    "be of type object|string, {} given",
-                    value_name(req, &first)
-                ),
-            ));
-        }
         (_, Some(_)) => {
-            let class = string_argument(req, 1)?;
+            let class = first.as_str_bytes().unwrap_or_default().to_vec();
             (class_named(req, &class)?, string_argument(req, 2)?)
         }
         (_, None) => {
-            let given = string_argument(req, 1)?;
+            let given = first.as_str_bytes().unwrap_or_default().to_vec();
             let Some(at) = given.windows(2).position(|pair| pair == b"::") else {
                 return Err(throw(
                     req,
@@ -2658,17 +2616,9 @@ fn this_property(req: &mut Request) -> Result<(ClassId, Vec<u8>, Option<Property
 /// ```
 fn reflection_property_get_value(req: &mut Request) -> Result<Value, Thrown> {
     at_most_arguments(req, 1)?;
-    let given = req.argument(1).unwrap_or_default().deref();
-    if !matches!(
-        given.as_ref(),
-        ValueRef::Object(_) | ValueRef::Null | ValueRef::Undef
-    ) {
-        return Err(arg_type_error(
-            req,
-            1,
-            &format!("be of type ?object, {} given", value_name(req, &given)),
-        ));
-    }
+    let given = req.argument(1).unwrap_or_default();
+    let given =
+        php_ext::coerce::coerce_param(req, &given, &Type::Nullable(Box::new(Type::Object)), 1)?;
     let (class, name, declared) = this_property(req)?;
     // `instanceof_function(Z_OBJCE_P(object), intern->ce)`: the object
     // is held to the class the reflector was asked about, which is the
@@ -2830,13 +2780,10 @@ fn reflection_property_set_value(req: &mut Request) -> Result<Value, Thrown> {
         return Ok(Value::null());
     }
     exactly_arguments(req, 2)?;
-    let given = req.argument(1).unwrap_or_default().deref();
-    let ValueRef::Object(object) = given.as_ref() else {
-        return Err(arg_type_error(
-            req,
-            1,
-            &format!("be of type object, {} given", value_name(req, &given)),
-        ));
+    let given = req.argument(1).unwrap_or_default();
+    let given = php_ext::coerce::coerce_param(req, &given, &Type::Object, 1)?;
+    let Some(object) = given.as_object() else {
+        return Ok(Value::null());
     };
     let value = req.argument(2).unwrap_or_default().deref();
     req.addref(&value);

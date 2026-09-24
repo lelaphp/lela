@@ -1313,33 +1313,18 @@ fn array_column(req: &mut Request) -> Result<Value, Thrown> {
 
 /// `Z_PARAM_STR_OR_LONG_OR_NULL` at `position`, as the key it names.
 fn column_key(req: &mut Request, position: u32) -> Result<Option<Key>, Thrown> {
-    let given = req.argument(position).unwrap_or_default().deref();
-    match given.as_ref() {
-        ValueRef::Null => Ok(None),
-        ValueRef::Int(n) => Ok(Some(Key::Int(n))),
-        ValueRef::Str(s) => Ok(Some(Key::Str(*s))),
-        ValueRef::Float(_) | ValueRef::Bool(_) => {
-            let coerced = php_ext::coerce::coerce_param(
-                req,
-                &given,
-                &Type::Union(vec![Type::String, Type::Int, Type::Null]),
-                position,
-            )?;
-            match coerced.as_ref() {
-                ValueRef::Int(n) => Ok(Some(Key::Int(n))),
-                ValueRef::Str(s) => Ok(Some(Key::Str(*s))),
-                _ => Ok(None),
-            }
-        }
-        _ => {
-            let name = value_name(req, &given);
-            Err(arg_type_error(
-                req,
-                position,
-                &format!("be of type string|int|null, {name} given"),
-            ))
-        }
-    }
+    let given = req.argument(position).unwrap_or_default();
+    let coerced = php_ext::coerce::coerce_param(
+        req,
+        &given,
+        &Type::Union(vec![Type::String, Type::Int, Type::Null]),
+        position,
+    )?;
+    Ok(match coerced.as_ref() {
+        ValueRef::Int(n) => Some(Key::Int(n)),
+        ValueRef::Str(s) => Some(Key::Str(*s)),
+        _ => None,
+    })
 }
 
 /// `array_column_fetch_prop`: the value `name` names in a row, one more

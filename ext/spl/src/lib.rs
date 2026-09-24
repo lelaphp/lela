@@ -38,9 +38,9 @@ mod stub;
 
 use php_ext::abi::{Extension, ExtensionBuilder, ObjectHandlers, Std};
 use php_ext::call::{call_method, lookup_class};
-use php_ext::coerce::{coerce_param, key_of, truthy, value_name};
+use php_ext::coerce::{coerce_param, key_of, truthy};
 use php_ext::decl::{ClassKind, Name, Type};
-use php_ext::raising::{Thrown, arg_count_error, arg_null_deprecated, arg_type_error, throw};
+use php_ext::raising::{Thrown, arg_count_error, arg_null_deprecated, throw};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -361,36 +361,27 @@ fn nullable_string(req: &mut Request, position: u32) -> Result<Option<PhpString>
 
 /// `Z_PARAM_ARRAY_HT`.
 fn array(req: &mut Request, position: u32) -> Result<PhpArray, Thrown> {
-    let v = value(req, position);
-    if let Some(a) = v.as_array() {
-        return Ok(*a);
+    let v = given(req, position).unwrap_or_default();
+    let held = coerce_param(req, &v, &Type::Array, position)?;
+    match held.as_array() {
+        Some(a) => Ok(*a),
+        None => PhpArray::new(req),
     }
-    let name = value_name(req, &v);
-    Err(arg_type_error(
-        req,
-        position,
-        &format!("be of type array, {name} given"),
-    ))
 }
 
 /// `Z_PARAM_OBJECT_OF_CLASS` and `Z_PARAM_OBJ`: an object, of `class`
-/// where one is named, the `TypeError` naming the type otherwise.
+/// where one is named, both `coerce_param`'s.
 fn object(req: &mut Request, position: u32, class: Option<&str>) -> Result<PhpObject, Thrown> {
     let v = value(req, position);
     let ty = class.map_or(Type::Object, |c| Type::Named(Name(c.as_bytes().into())));
     let coerced = coerce_param(req, &v, &ty, position)?;
-    if let Some(o) = coerced.as_object().copied()
-        && class.is_none_or(|c| is_a(req, o.class(), c.as_bytes()))
-    {
-        return Ok(o);
+    match coerced.as_object() {
+        Some(o) => Ok(*o),
+        None => Err(php_ext::raising::fatal(
+            req,
+            "InternalError: coerce_param held a value that is no object to an object type",
+        )),
     }
-    let name = value_name(req, &v);
-    let wanted = class.unwrap_or("object");
-    Err(arg_type_error(
-        req,
-        position,
-        &format!("be of type {wanted}, {name} given"),
-    ))
 }
 
 /// `zend_zval_type_name`: an object's class name, any other value's

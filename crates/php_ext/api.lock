@@ -110,6 +110,7 @@ call::write_static_prop
 coerce::BinaryOp
 coerce::Exponent
 coerce::Exponent::as_char
+coerce::argument
 coerce::binary_op
 coerce::callable_checked
 coerce::coerce_param

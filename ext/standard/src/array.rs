@@ -12,7 +12,7 @@ use php_ext::abi::Callable;
 use php_ext::call::call;
 use php_ext::coerce::{coerce_param, compare, to_double, to_long, to_string};
 use php_ext::decl::{ConstDecl, ConstExpr, FunctionDecl, Parameter, Type};
-use php_ext::raising::{Level, Thrown, arg_type_error, docref};
+use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, Value, ValueRef, zend_sort};
 
@@ -269,16 +269,11 @@ fn array_merge(req: &mut Request) -> Result<Value, Thrown> {
     let arguments = req.variadic_arguments(1)?;
     let mut arrays = Vec::with_capacity(arguments.len());
     for (at, argument) in arguments.iter().enumerate() {
-        let Some(array) = argument.deref().as_array().copied() else {
-            let position = u32::try_from(at.saturating_add(1)).unwrap_or(u32::MAX);
-            let given = php_ext::coerce::value_name(req, argument);
-            return Err(arg_type_error(
-                req,
-                position,
-                &format!("be of type array, {given} given"),
-            ));
-        };
-        arrays.push(array);
+        let position = u32::try_from(at.saturating_add(1)).unwrap_or(u32::MAX);
+        let held = coerce_param(req, argument, &Type::Array, position)?;
+        if let Some(array) = held.as_array().copied() {
+            arrays.push(array);
+        }
     }
     if arrays.is_empty() {
         return Ok(Value::array(PhpArray::new(req)?));

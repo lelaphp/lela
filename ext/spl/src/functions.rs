@@ -693,21 +693,10 @@ fn spl_object_id(req: &mut Request) -> Result<Value, Thrown> {
     Ok(Value::int(i64::from(object.index())))
 }
 
-/// `Z_PARAM_ITERABLE`: an array or a `Traversable`.
+/// `Z_PARAM_ITERABLE`: an array or a `Traversable`, `coerce_param`'s.
 fn iterable(req: &mut Request, position: u32) -> Result<Value, Thrown> {
     let given = crate::value(req, position);
-    let traversable = given
-        .as_object()
-        .is_some_and(|object| crate::is_a(req, object.class(), b"Traversable"));
-    if given.as_array().is_some() || traversable {
-        return Ok(given);
-    }
-    let name = value_name(req, &given);
-    Err(arg_type_error(
-        req,
-        position,
-        &format!("be of type Traversable|array, {name} given"),
-    ))
+    php_ext::coerce::coerce_param(req, &given, &php_ext::decl::Type::Iterable, position)
 }
 
 /// `iterator_apply(Traversable $iterator, callable $callback, ?array

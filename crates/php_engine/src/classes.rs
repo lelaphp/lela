@@ -26,11 +26,9 @@ use php_unit::decl::{
 use crate::api::abi::{CloneObj, Entry, NativeClassDecl, ObjectHandlers};
 use crate::api::call::{Function, Target};
 use crate::api::coerce::coerce_param;
-use crate::api::raising::{Thrown, arg_count_error, arg_type_error, throw, warning};
+use crate::api::raising::{Thrown, arg_count_error, throw, warning};
 use crate::api::request::Request;
-use crate::api::values::{
-    ClassId, ClosureInfo, Key, PhpArray, PhpObject, PhpString, Value, ValueRef,
-};
+use crate::api::values::{ClassId, ClosureInfo, Key, PhpArray, PhpObject, PhpString, Value};
 
 /// `default_exception_handlers`: `clone_obj` null, so every throwable
 /// is uncloneable (`zend_register_default_exception`), and the rest
@@ -1239,25 +1237,8 @@ fn throwable_construct(req: &mut Request) -> Result<Value, Thrown> {
         write_throwable_property(req, this, b"code", code)?;
     }
     if let Some(previous) = req.argument(3) {
-        let previous = previous.deref();
-        let is_throwable = match previous.as_object() {
-            Some(object) => req
-                .class_named(b"Throwable")
-                .is_some_and(|throwable| req.instance_of(object.class(), throwable)),
-            None => matches!(previous.as_ref(), ValueRef::Null | ValueRef::Undef),
-        };
-        if !is_throwable {
-            // `zend_zval_value_name`: an object is named by its class.
-            let given = previous.as_object().map_or_else(
-                || String::from(previous.type_name()),
-                |object| req.class_name(object.class()),
-            );
-            return Err(arg_type_error(
-                req,
-                3,
-                &format!("be of type ?Throwable, {given} given"),
-            ));
-        }
+        let ty = Type::Nullable(Box::new(Type::Named(Name::from("Throwable"))));
+        let previous = coerce_param(req, &previous, &ty, 3)?;
         req.addref(&previous);
         write_throwable_property(req, this, b"previous", previous)?;
     }

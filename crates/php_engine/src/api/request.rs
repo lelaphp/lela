@@ -7116,14 +7116,34 @@ impl Request {
     }
 
     /// `arg_info->type` of the active native's parameter at `position`,
-    /// what `zend_null_arg_deprecated` names the type by; none where the
-    /// native declares no type there.
+    /// what `zend_null_arg_deprecated` names the type by and what
+    /// [`crate::api::coerce::argument`] holds the argument to: the
+    /// variadic's own past the declared count, as php's `arg_offset`
+    /// stops at `num_args` there; none where the native declares no
+    /// type there.
     pub(crate) fn active_parameter_type(&self, position: u32) -> Option<php_unit::decl::Type> {
         let decl = self.function_decl(self.active_native_function()?)?;
-        decl.parameters
-            .get(usize::try_from(position.checked_sub(1)?).ok()?)?
-            .ty
-            .clone()
+        let at = usize::try_from(position.checked_sub(1)?).ok()?;
+        let parameter = match decl.parameters.get(at) {
+            Some(parameter) => parameter,
+            None => decl.parameters.last().filter(|last| last.variadic)?,
+        };
+        parameter.ty.clone()
+    }
+
+    /// `func->common.scope` and `Z_CE(EX(This))` of the native being
+    /// served: the class its method is declared on and the class it was
+    /// called on, what a parameter typed `self`, `parent` or `static`
+    /// resolves against; none for a function.
+    pub(crate) fn active_native_scopes(&self) -> crate::api::coerce::Scopes {
+        let own = self
+            .active_native_function()
+            .and_then(|function| self.method_class(function));
+        let called = self.vm.serving_call().and_then(|call| call.called_scope);
+        crate::api::coerce::Scopes {
+            own,
+            called: called.or(own),
+        }
     }
 
     /// The `($name)` `zend_argument_error_variadic` and
@@ -8166,6 +8186,19 @@ impl Request {
         match state.function {
             Some(function) => self.method_class(function),
             None => state.scope,
+        }
+    }
+
+    /// The classes a `self`, a `parent` and a `static` in a type checked
+    /// in `frame` name: the frame's scope and its called scope, which
+    /// is what `zend_check_type_slow` resolves them against for an
+    /// argument's `RECV` and for a return.
+    pub(crate) fn frame_scopes(&self, frame: FrameRef) -> crate::api::coerce::Scopes {
+        let own = self.frame_scope(frame);
+        let called = self.vm.at(frame).and_then(|state| state.called_scope);
+        crate::api::coerce::Scopes {
+            own,
+            called: called.or(own),
         }
     }
 

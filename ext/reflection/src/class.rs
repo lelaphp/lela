@@ -12,9 +12,8 @@
 //! a `Closure` (#415).
 
 use php_ext::call::{eval_const_expr, instantiate, read_class_prop_silent, write_static_prop};
-use php_ext::coerce::value_name;
 use php_ext::decl::{ClassKind, MethodDecl, Visibility};
-use php_ext::raising::{Thrown, arg_count_error, arg_type_error, throw};
+use php_ext::raising::{Thrown, arg_count_error, throw};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -351,13 +350,10 @@ pub(super) fn reflection_class_get_parent_class(req: &mut Request) -> Result<Val
 /// ```
 pub(super) fn reflection_class_is_instance(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 1)?;
-    let given = req.argument(1).unwrap_or_default().deref();
-    let ValueRef::Object(object) = given.as_ref() else {
-        return Err(arg_type_error(
-            req,
-            1,
-            &format!("be of type object, {} given", value_name(req, &given)),
-        ));
+    let given = req.argument(1).unwrap_or_default();
+    let given = php_ext::coerce::coerce_param(req, &given, &php_ext::decl::Type::Object, 1)?;
+    let Some(object) = given.as_object() else {
+        return Ok(Value::bool(false));
     };
     let of = object.class();
     let class = this_class(req)?;
@@ -926,21 +922,17 @@ pub(super) fn reflection_class_new_instance(req: &mut Request) -> Result<Value, 
 pub(super) fn reflection_class_new_instance_args(req: &mut Request) -> Result<Value, Thrown> {
     at_most_arguments(req, 1)?;
     let class = this_class(req)?;
-    let given = req.argument(1).unwrap_or_default().deref();
     let mut arguments = Vec::new();
-    if let ValueRef::Array(array) = given.as_ref() {
-        let mut cursor = array.iter();
-        while cursor.advance() {
-            if let Some(value) = cursor.value() {
-                arguments.push(*value);
+    if let Some(given) = req.argument(1) {
+        let given = php_ext::coerce::coerce_param(req, &given, &php_ext::decl::Type::Array, 1)?;
+        if let ValueRef::Array(array) = given.as_ref() {
+            let mut cursor = array.iter();
+            while cursor.advance() {
+                if let Some(value) = cursor.value() {
+                    arguments.push(*value);
+                }
             }
         }
-    } else if !matches!(given.as_ref(), ValueRef::Null | ValueRef::Undef) {
-        return Err(arg_type_error(
-            req,
-            1,
-            &format!("be of type array, {} given", value_name(req, &given)),
-        ));
     }
     instantiable(req, class)?;
     let object = instantiate(req, class, &arguments)?;

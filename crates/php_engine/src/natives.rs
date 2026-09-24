@@ -367,13 +367,13 @@ fn clone(req: &mut Request) -> Result<Value, Thrown> {
     if !(1..=2).contains(&count) {
         return Err(wrong_argument_count(req, 1, 2, count));
     }
-    let given = req.argument(1).unwrap_or_default().deref();
+    let given = req.argument(1).unwrap_or_default();
+    let given = coerce_param(req, &given, &Type::Object, 1)?;
     let Some(object) = given.as_object().copied() else {
-        let tail = format!(
-            "must be of type object, {} given",
-            crate::ops::value_name(req, &given)
-        );
-        return Err(arg_type_error(req, 1, &tail));
+        return Err(crate::api::raising::fatal(
+            req,
+            "InternalError: coerce_param held a value that is no object to `object`",
+        ));
     };
     let with = if count == 2 {
         let with = req.argument(2).unwrap_or_default();

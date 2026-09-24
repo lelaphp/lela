@@ -729,17 +729,11 @@ fn array_map(req: &mut Request) -> Result<Value, Thrown> {
     let values = req.variadic_arguments(2)?;
     let mut arrays = Vec::with_capacity(values.len());
     for (at, value) in values.iter().enumerate() {
-        let value = value.deref();
-        let Some(array) = value.as_array().copied() else {
-            let position = u32::try_from(at + 2).unwrap_or(u32::MAX);
-            let name = value_name(req, &value);
-            return Err(arg_type_error(
-                req,
-                position,
-                &format!("be of type array, {name} given"),
-            ));
-        };
-        arrays.push(array);
+        let position = u32::try_from(at + 2).unwrap_or(u32::MAX);
+        let held = coerce_param(req, value, &Type::Array, position)?;
+        if let Some(array) = held.as_array().copied() {
+            arrays.push(array);
+        }
     }
     if let [input] = arrays[..] {
         let Some(callback) = callback else {

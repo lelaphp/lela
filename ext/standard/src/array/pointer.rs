@@ -538,13 +538,9 @@ fn extreme(req: &mut Request, wanted: Ordering) -> Result<Value, Thrown> {
     }
     let arguments = req.variadic_arguments(1)?;
     if let [only] = arguments[..] {
-        let only = only.deref();
+        let only = php_ext::coerce::coerce_param(req, &only, &Type::Array, 1)?;
         let Some(array) = only.as_array() else {
-            return Err(arg_type_error(
-                req,
-                1,
-                &format!("be of type array, {} given", value_name(req, &only)),
-            ));
+            return Ok(Value::null());
         };
         // `zend_hash_minmax`: the first element, replaced by a later one
         // only where it is strictly beyond.

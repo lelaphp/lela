@@ -16,7 +16,7 @@ use std::collections::HashSet;
 
 use php_ext::abi::Callable;
 use php_ext::call::call;
-use php_ext::coerce::{callable_checked, to_long, to_string, value_name};
+use php_ext::coerce::{callable_checked, to_long, to_string};
 use php_ext::decl::{FunctionDecl, Parameter, Type};
 use php_ext::raising::{Thrown, arg_count_error, arg_type_error};
 use php_ext::request::Request;
@@ -191,18 +191,19 @@ fn parse(req: &mut Request, callbacks: usize) -> Result<Parsed, Thrown> {
 fn arrays_of(req: &mut Request, values: &[Value]) -> Result<Vec<PhpArray>, Thrown> {
     let mut arrays = Vec::with_capacity(values.len());
     for (at, value) in values.iter().enumerate() {
-        let Some(array) = value.as_array() else {
-            let position = u32::try_from(at + 1).unwrap_or(u32::MAX);
-            return Err(not_an_array(req, position, value));
-        };
-        arrays.push(*array);
+        let position = u32::try_from(at + 1).unwrap_or(u32::MAX);
+        arrays.push(array_at(req, position, value)?);
     }
     Ok(arrays)
 }
 
-fn not_an_array(req: &mut Request, position: u32, value: &Value) -> Thrown {
-    let name = value_name(req, value);
-    arg_type_error(req, position, &format!("be of type array, {name} given"))
+/// `Z_PARAM_ARRAY` over one value of the variadic, `coerce_param`'s.
+fn array_at(req: &mut Request, position: u32, value: &Value) -> Result<PhpArray, Thrown> {
+    let held = php_ext::coerce::coerce_param(req, value, &Type::Array, position)?;
+    match held.as_array() {
+        Some(array) => Ok(*array),
+        None => PhpArray::new(req),
+    }
 }
 
 /// The comparisons one call carries, as php carries them: whether values
@@ -698,17 +699,12 @@ fn diff_walk(
 fn array_diff(req: &mut Request) -> Result<Value, Thrown> {
     let parsed = parse(req, 0)?;
     let values = parsed.arrays;
-    let Some(first) = values[0].as_array().copied() else {
-        return Err(not_an_array(req, 1, &values[0]));
-    };
+    let first = array_at(req, 1, &values[0])?;
     let check_rest = |req: &mut Request| -> Result<Vec<PhpArray>, Thrown> {
         let mut rest = Vec::new();
         for (at, value) in values.iter().enumerate().skip(1) {
-            let Some(array) = value.as_array() else {
-                let position = u32::try_from(at + 1).unwrap_or(u32::MAX);
-                return Err(not_an_array(req, position, value));
-            };
-            rest.push(*array);
+            let position = u32::try_from(at + 1).unwrap_or(u32::MAX);
+            rest.push(array_at(req, position, value)?);
         }
         Ok(rest)
     };
@@ -721,10 +717,8 @@ fn array_diff(req: &mut Request) -> Result<Value, Thrown> {
         let search = to_string(req, &value.deref())?.as_bytes().to_vec();
         let mut found = false;
         for (at, other) in values.iter().enumerate().skip(1) {
-            let Some(other) = other.as_array().copied() else {
-                let position = u32::try_from(at + 1).unwrap_or(u32::MAX);
-                return Err(not_an_array(req, position, other));
-            };
+            let position = u32::try_from(at + 1).unwrap_or(u32::MAX);
+            let other = array_at(req, position, other)?;
             if found {
                 continue;
             }
