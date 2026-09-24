@@ -49,7 +49,7 @@ use php_ext::decl::{
     Attribute, AttributeArgument, ConstDecl, ConstExpr, FunctionDecl, IniDecl, Name, Parameter,
     Type,
 };
-use php_ext::raising::Thrown;
+use php_ext::raising::{Level, Thrown, raise_at};
 use php_ext::request::Request;
 use php_ext::values::Value;
 
@@ -88,6 +88,7 @@ pub fn extension() -> Extension {
         .constants(constants())
         .functions(functions())
         .request_state::<State>()
+        .rinit(startup_timezone)
         .info(date_info)
         .build("date")
 }
@@ -110,6 +111,29 @@ fn ini() -> Vec<IniDecl> {
         system: true,
     })
     .collect()
+}
+
+/// `OnUpdate_date_timezone` over the startup value: php checks
+/// `date.timezone` as its ini entries are registered and prints its
+/// startup warning for a zone the database has not, the empty one
+/// included, then keeps `UTC`. The request's first moment is where this
+/// engine has a request to raise it on. A value `ini_set` gives later is
+/// checked where it is read (`zone::guess_timezone`); refusing it as php
+/// does needs an on-modify handler for an extension's entry, which the
+/// face has not (#721).
+#[allow(clippy::unnecessary_wraps)] // `rinit`'s signature, which may throw
+fn startup_timezone(req: &mut Request) -> Result<(), Thrown> {
+    let Some(value) = req.ini_get(b"date.timezone").map(<[u8]>::to_vec) else {
+        return Ok(());
+    };
+    if !Tzdb::builtin().is_valid(&value) {
+        let message = format!(
+            "PHP Startup: Invalid date.timezone value '{}', using 'UTC' instead",
+            String::from_utf8_lossy(&value)
+        );
+        raise_at(req, Level::Warning, &message, b"Unknown", 0);
+    }
+    Ok(())
 }
 
 /// `PHP_MINFO_FUNCTION(date)`.
