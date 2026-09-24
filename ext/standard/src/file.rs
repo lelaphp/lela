@@ -204,7 +204,7 @@ fn stream_parameter() -> Parameter {
 
 /// An untyped parameter defaulting to `null`, the stub's `$context` and
 /// `$dir_handle`.
-fn untyped_null(name: &[u8]) -> Parameter {
+pub(super) fn untyped_null(name: &[u8]) -> Parameter {
     Parameter {
         ty: None,
         default: Some(ConstExpr::Null),
@@ -431,7 +431,7 @@ fn dir_argument(req: &mut Request) -> Result<Stream, Thrown> {
 
 /// `php_set_default_dir` (`Z/ext/standard/dir.c:62`): the owner the last
 /// directory held given up, and one taken on the new one, or none.
-fn set_default_dir(req: &mut Request, stream: Option<Stream>) {
+pub(super) fn set_default_dir(req: &mut Request, stream: Option<Stream>) {
     let res = stream.map(Stream::resource);
     if let Some(res) = res {
         req.addref(&res.as_value());
@@ -1376,7 +1376,7 @@ fn fwrite(req: &mut Request) -> Result<Value, Thrown> {
 /// `Z_PARAM_RESOURCE_OR_NULL` for a `$context`: a resource or `null`,
 /// taken and not read, since no wrapper here reads a `$context`; anything
 /// else is the parser's `TypeError`.
-fn context_argument(req: &mut Request, position: u32) -> Result<(), Thrown> {
+pub(super) fn context_argument(req: &mut Request, position: u32) -> Result<(), Thrown> {
     let given = req.argument(position).unwrap_or_default().deref();
     match given.as_ref() {
         ValueRef::Null | ValueRef::Undef | ValueRef::Resource(_) => Ok(()),

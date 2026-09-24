@@ -50,6 +50,7 @@ mod base64;
 mod basic_functions;
 mod crc32;
 mod csv;
+mod dir;
 mod exec;
 mod ffi;
 mod file;
@@ -78,6 +79,7 @@ mod url;
 mod uuencode;
 mod var;
 mod versioning;
+mod virtual_cwd;
 mod zpp;
 
 use php_ext::abi::{Callable, Dependency, DependencyKind, Extension, ExtensionBuilder};
@@ -132,6 +134,7 @@ pub fn extension() -> Extension {
         default: Some(ConstExpr::Constant(Name(b"COUNT_NORMAL".as_slice().into()))),
         ..parameter(b"mode", Type::Int)
     };
+    let directory = dir::directory_class();
     ExtensionBuilder::default()
         .functions(vec![
             (
@@ -205,6 +208,7 @@ pub fn extension() -> Extension {
         .constants(file::constants())
         .constants(file_constants())
         .dependencies(dependencies())
+        .class_with(directory.0, directory.1, directory.2)
         .request_state::<State>()
         .build("standard")
 }
@@ -233,6 +237,7 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
         hrtime::natives(),
         versioning::natives(),
         basic_functions::natives(),
+        dir::natives(),
     ]
     .into_iter()
     .flatten()
@@ -246,6 +251,7 @@ fn file_constants() -> Vec<ConstDecl> {
         url::constants(),
         html::constants(),
         basic_functions::constants(),
+        dir::constants(),
     ]
     .into_iter()
     .flatten()
