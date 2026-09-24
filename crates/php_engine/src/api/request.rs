@@ -4686,24 +4686,49 @@ impl Request {
         Ok(())
     }
 
-    /// `zend_fe_fetch_object_helper` (`Z/Zend/zend_vm_def.h:7315`) over
-    /// an object whose class has no `get_iterator`: the first property
-    /// at or past `from` the executing scope may see, with the position
-    /// it sits at, its key and a view of its value. The order is
-    /// `Z_OBJPROP`'s, which is [`Request::object_entries`]' order: the
-    /// class's declared instance properties in declaration order, then
-    /// the dynamic table. A slot nothing has written is stepped over as
-    /// php steps over an `IS_UNDEF` bucket, and one the executing scope
-    /// may not reach is stepped over as php steps over a mangled key
+    /// The start of a `foreach` over an object whose class has no
+    /// `get_iterator`, the object arm `FE_RESET_R` and `FE_RESET_RW`
+    /// share (`Z/Zend/zend_vm_def.h:6903-6934`): the property table the
+    /// walk goes over made the object's own, separated where a cast
+    /// shares it and laid down where the object has none, which is php's
+    /// `get_properties` materialising it; then, where the object has a
+    /// property at all, declared or dynamic, the hash iterator the walk
+    /// is registered at (`zend_hash_iterator_add(properties, 0)`), whose
+    /// index is the loop variable's `Z_FE_ITER`. `None` is the empty
+    /// table php jumps past the loop over with `Z_FE_ITER` at `-1`.
+    pub(crate) fn object_walk_start(&mut self, object: PhpObject) -> Result<Option<u32>, Thrown> {
+        self.separate_object_properties(object)?;
+        let o = object.heap();
+        let table = self.heap.object_properties(o);
+        let table = self.fatal_of(table)?;
+        if self.class_slots(object.class()) == 0 && table.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(self.heap.iterator_add(table, 0)))
+    }
+
+    /// `zend_fe_fetch_object_helper` (`Z/Zend/zend_vm_def.h:7058`) over
+    /// an object whose class has no `get_iterator`, and the object arm
+    /// of `FE_FETCH_RW`: the next property the executing scope may see
+    /// from where iterator `idx` stands, with its key and where it sits,
+    /// the iterator left one past it. The order is `Z_OBJPROP`'s: the
+    /// class's declared instance properties in declaration order, which
+    /// php's table carries as its first buckets and this heap walks by
+    /// the iterator's lead ([`php_heap::Heap::iterator_lead`]), then the
+    /// dynamic table from the iterator's own position, which every write
+    /// to the table moves as php's writes move it. A slot nothing has
+    /// written is stepped over as php steps over an `IS_UNDEF`
+    /// behind an `IS_INDIRECT`, and one the executing scope may not
+    /// reach is stepped over as php steps over a mangled key
     /// `zend_check_property_access` refuses. `None` is nothing left,
     /// which is the fetch's jump past the loop. The `Err` is the memory
     /// limit refusing the intern of a declared name; php's key is
     /// interned already and takes no allocation.
-    pub(crate) fn object_property_from(
+    pub(crate) fn object_walk(
         &mut self,
         object: PhpObject,
-        from: u32,
-    ) -> Result<Option<(u32, php_heap::Key, Value)>, Thrown> {
+        idx: u32,
+    ) -> Result<Option<(php_heap::Key, Walked)>, Thrown> {
         let o = object.heap();
         let class = object.class();
         let declared: Vec<(Box<[u8]>, ClassId, Visibility)> = self
@@ -4711,26 +4736,103 @@ impl Request {
             .into_iter()
             .map(|(declaring, p)| (p.name.0, declaring, p.visibility))
             .collect();
-        let mut at = from as usize;
+        let mut at = self.heap.iterator_lead(idx) as usize;
         while let Some((name, declaring, visibility)) = declared.get(at) {
-            let z = o.slot(u32::try_from(at).unwrap_or(u32::MAX));
-            if !z.is_undef() && self.may_access(*declaring, *visibility) {
+            let slot = u32::try_from(at).unwrap_or(u32::MAX);
+            if !o.slot(slot).is_undef() && self.may_access(*declaring, *visibility) {
                 let interned = self.heap.intern(name);
                 let key = self.fatal_of(interned).map(php_heap::Key::Str)?;
-                let at = u32::try_from(at).unwrap_or(u32::MAX);
-                return Ok(Some((at, key, Value::of_zval(z))));
+                self.heap.iterator_set_lead(idx, slot.saturating_add(1));
+                return Ok(Some((key, Walked::Slot(slot))));
             }
             at = at.saturating_add(1);
         }
+        self.heap
+            .iterator_set_lead(idx, u32::try_from(declared.len()).unwrap_or(u32::MAX));
         let Some(table) = o.properties() else {
             return Ok(None);
         };
-        let skipped = at.saturating_sub(declared.len());
-        let Some((key, z)) = (&table).into_iter().nth(skipped) else {
+        let pos = self.heap.iterator_pos(idx, table);
+        let Some((found, key, _)) = table.live_from(pos) else {
             return Ok(None);
         };
-        let at = u32::try_from(declared.len().saturating_add(skipped)).unwrap_or(u32::MAX);
-        Ok(Some((at, key, Value::of_zval(z))))
+        self.heap.iterator_set_pos(idx, found.saturating_add(1));
+        Ok(Some((key, Walked::Dynamic(key))))
+    }
+
+    /// What [`Request::object_walk`] found at a place: the value, a view
+    /// with no owner taken and a reference followed where `deref`.
+    pub(crate) fn walked_value(object: PhpObject, walked: Walked) -> Value {
+        let o = object.heap();
+        let z = match walked {
+            Walked::Slot(slot) => o.slot(slot),
+            Walked::Dynamic(key) => o
+                .properties()
+                .and_then(|table| table.get(key))
+                .unwrap_or(php_heap::Zval::UNDEF),
+        };
+        Value::of_zval(z)
+    }
+
+    /// `FE_FETCH_RW`'s bind over an object's property
+    /// (`Z/Zend/zend_vm_def.h:7331-7357`, `:7434-7439`): the cell the
+    /// place holds, or one made there over the value it held
+    /// (`ZVAL_NEW_EMPTY_REF`), the place keeping the owner it had. A
+    /// declared `readonly` slot is php's `Error` and no cell; a typed
+    /// one puts its type on the cell it makes (`ZEND_REF_ADD_TYPE_SOURCE`),
+    /// so a write through the loop's variable is held to it.
+    pub(crate) fn walked_reference(
+        &mut self,
+        object: PhpObject,
+        walked: Walked,
+    ) -> Result<PhpRef, Thrown> {
+        let o = object.heap();
+        let held = Request::walked_value(object, walked);
+        if let Some(cell) = held.as_php_ref() {
+            return Ok(*cell);
+        }
+        match walked {
+            Walked::Slot(slot) => {
+                let placed = self.placed_properties(object.class());
+                let Some((declaring, decl)) = placed.get(slot as usize).cloned() else {
+                    return self.fatal_of(Err(Fatal::Error(format!(
+                        "InternalError: a walk over slot {slot}, which the class does not declare"
+                    ))));
+                };
+                if decl.is_readonly {
+                    let class = self.class_name(declaring);
+                    let shown = String::from_utf8_lossy(&decl.name.0).into_owned();
+                    return Err(crate::api::raising::throw(
+                        self,
+                        "Error",
+                        &format!("Cannot acquire reference to readonly property {class}::${shown}"),
+                    ));
+                }
+                let cell = self.reference(held)?;
+                if let Some(place) = o.slot_ref(slot) {
+                    place.write(cell.as_value().to_zval());
+                }
+                if let Some(ty) = decl.ty.clone() {
+                    self.ref_add_type_source(
+                        cell.heap(),
+                        RefSource {
+                            declaring,
+                            name: decl.name.0.to_vec(),
+                            ty,
+                        },
+                    );
+                }
+                Ok(cell)
+            }
+            Walked::Dynamic(key) => {
+                let place = o.properties().and_then(|table| table.value_ref(key));
+                let cell = self.reference(held)?;
+                if let Some(place) = place {
+                    place.write(cell.as_value().to_zval());
+                }
+                Ok(cell)
+            }
+        }
     }
 
     /// `zend_std_get_property_ptr_ptr`'s dynamic arm under `BP_VAR_W`
@@ -9168,6 +9270,14 @@ impl Request {
 /// borrow of itself across a call up, which is the discipline php keeps
 /// by re-reading `EG(objects_store)` after `dtor_obj`.
 struct Hooks<'a>(&'a mut Request);
+
+/// Where a walk over an object stands at a property: a declared slot,
+/// or the key of a bucket of the dynamic table.
+#[derive(Clone, Copy)]
+pub(crate) enum Walked {
+    Slot(u32),
+    Dynamic(php_heap::Key),
+}
 
 /// One `zend_property_info *` of a reference's source list
 /// (`Z/Zend/zend_types.h:626`): a typed property whose slot holds the

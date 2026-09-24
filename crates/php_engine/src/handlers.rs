@@ -8922,14 +8922,33 @@ fn add_element(
 ///
 /// An object whose class has no `get_iterator` is copied the same way
 /// and walks its property table: the table separated where a cast
-/// shares it ([`Request::separate_object_properties`]), and the
-/// position of the walk, php's `Z_FE_ITER` off `zend_hash_iterator_add`
-/// and this engine's `Z_FE_POS`, at the first property. php's iterator
-/// list (`EG(ht_iterators)`), which follows a table its loop rehashes,
-/// is not in the heap yet (#434); the position is the array loop's and
-/// the `FE_FREE` has no iterator to delete. No class declares a
+/// shares it and registered with a hash iterator at its first property
+/// ([`Request::object_walk_start`]), whose index is the `VAR`'s
+/// `Z_FE_ITER`, so a body that deletes or adds a property leaves the
+/// walk where php's leaves it; an object of no property at all jumps
+/// past the loop with `Z_FE_ITER` at `-1`. No class declares a
 /// `get_iterator`, `Traversable` not being declared yet, so the other
 /// arm, `zend_fe_reset_iterator`, is unreachable (#367).
+///
+/// The walk follows the table its body changes: a dynamic property
+/// deleted ahead of it is not reached and one added is, in either kind
+/// of loop, the declared slots walked first as php's table holds them.
+///
+/// ```php
+/// #[AllowDynamicProperties]
+/// class Q { public $a = 1; public $b = 2; }
+/// $o = new Q; $o->x = 1; $o->y = 2; $o->z = 3;
+/// foreach ($o as $k => &$v) {
+///     echo $k;
+///     if ($k === 'x') { unset($o->y); $o->w = 4; }
+/// }
+/// echo "\n";
+/// foreach ($o as $k => $v) { echo $k; if ($k === 'a') { $o->n = 5; } }
+/// ```
+/// ```expect
+/// abxzw
+/// abxzwn
+/// ```
 ///
 /// The properties an object walks are the ones the executing scope may
 /// see: a private or a protected one read from outside the class is
@@ -9025,38 +9044,65 @@ pub(crate) fn fe_reset_r<T: Tier>(
         }
         return Ok(advance(req, frame));
     }
-    if let Some(object) = subject.as_object() {
-        if let Err(thrown) = req.separate_object_properties(*object) {
-            return threw(req, frame, &thrown);
-        }
+    if let Some(object) = subject.as_object().copied() {
+        let started = match req.object_walk_start(object) {
+            Ok(started) => started,
+            Err(thrown) => return threw(req, frame, &thrown),
+        };
         if op.op1_type != OperandKind::Tmp {
             req.addref(&subject);
         }
         let previous = req.set_slot(frame, slot, subject);
         req.release(previous);
-        if let Some(cell) = req.slot_ptr(frame, slot) {
-            // `Z_FE_POS_P(EX_VAR(opline->result.var)) = 0`, the word php
-            // writes on its own after the copy: a value write leaves `u2`
-            // where it stands (`ZvalRef::write`, #491).
-            cell.set_fe_pos(0);
-        }
+        set_fe_iter(req, frame, slot, started);
         if op.op1_type == OperandKind::Var {
             exec::free_operand(req, frame, code, op.op1_type, op.op1);
         }
+        if started.is_none() {
+            req.vm_mut().jump(frame, op.op2);
+            return Ok(Stepped::Same(frame));
+        }
         return Ok(advance(req, frame));
     }
+    fe_reset_refused(req, frame, code, op, &subject)
+}
+
+/// The arm both resets share for what is neither array nor object
+/// (`Z/Zend/zend_vm_def.h:6950`): php's warning naming the value as
+/// `zend_zval_value_name` names it, the `VAR` left `UNDEF` with
+/// `Z_FE_ITER` at `-1` so the `FE_FREE` deletes nothing, the operand
+/// freed and the jump `op2` names.
+fn fe_reset_refused(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    subject: &Value,
+) -> Edge {
     crate::api::raising::warning(
         req,
         &format!(
             "foreach() argument must be of type array|object, {} given",
-            crate::ops::value_name(req, &subject)
+            crate::ops::value_name(req, subject)
         ),
     );
+    let slot = exec::temporary_slot(code, op.out);
     let previous = req.set_slot(frame, slot, Value::undef());
     req.release(previous);
+    set_fe_iter(req, frame, slot, None);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
     req.vm_mut().jump(frame, op.op2);
     Ok(Stepped::Same(frame))
+}
+
+/// `Z_FE_ITER_P(EX_VAR(opline->result.var)) = idx`, `(uint32_t)-1`
+/// for none: the loop variable's `u2` word, written after the value as
+/// php writes it, since a value write leaves `u2` where it stands
+/// (`ZvalRef::write`, #491).
+fn set_fe_iter(req: &mut Request, frame: FrameRef, slot: u32, idx: Option<u32>) {
+    if let Some(cell) = req.slot_ptr(frame, slot) {
+        cell.set_fe_pos(idx.unwrap_or(u32::MAX));
+    }
 }
 
 /// `ZEND_FE_FETCH_R` (`Z/Zend/zend_vm_def.h:7176`): the array in the
@@ -9086,11 +9132,11 @@ pub(crate) fn fe_reset_r<T: Tier>(
 /// ```
 ///
 /// A `VAR` holding an object is `zend_fe_fetch_object_helper`
-/// (`Z/Zend/zend_vm_def.h:7315`) instead: the property at the position
-/// or the first one past it the executing scope may see
-/// ([`Request::object_property_from`]), its unmangled name as the key,
-/// and the same jump where nothing is left. The value is the property's
-/// with a reference followed, one more owner, as an array element's is.
+/// (`Z/Zend/zend_vm_def.h:7058`) instead: the next property the
+/// executing scope may see from where the loop's hash iterator stands
+/// ([`Request::object_walk`]), its unmangled name as the key, and the
+/// same jump where nothing is left. The value is the property's with a
+/// reference followed, one more owner, as an array element's is.
 ///
 /// ```php
 /// class C { public $n = 1; protected $p = 2; public $s = 'x'; private $q = 3; public function all() { foreach ($this as $k => $v) echo "$k=$v "; } }
@@ -9113,9 +9159,24 @@ pub(crate) fn fe_fetch_r<T: Tier>(
         )));
     };
     let held = at.read();
-    let found = if let Some(object) = Value::of_zval(held).as_object() {
-        match req.object_property_from(*object, held.fe_pos()) {
-            Ok(found) => found,
+    let found = if let Some(object) = Value::of_zval(held).as_object().copied() {
+        match req.object_walk(object, held.fe_pos()) {
+            Ok(Some((key, walked))) => {
+                let value = Request::walked_value(object, walked);
+                let key = match fe_key(req, key) {
+                    Ok(key) => key,
+                    Err(thrown) => return threw(req, frame, &thrown),
+                };
+                if op.out_type == OperandKind::Unused {
+                    req.release(key);
+                } else {
+                    let out = exec::temporary_slot(code, op.out);
+                    let previous = req.set_slot(frame, out, key);
+                    req.release(previous);
+                }
+                return fe_assign(req, frame, code, op, value);
+            }
+            Ok(None) => None,
             Err(thrown) => return threw(req, frame, &thrown),
         }
     } else if let Some(array) = held.as_arr() {
@@ -9135,18 +9196,43 @@ pub(crate) fn fe_fetch_r<T: Tier>(
     // is `ZVAL_COPY_VALUE` and leaves `u2` standing (#491).
     at.set_fe_pos(pos.saturating_add(1));
     if op.out_type != OperandKind::Unused {
-        let key = match key {
-            php_heap::Key::Long(n) => Value::int(n),
-            php_heap::Key::Str(s) => {
-                let s = Value::string(crate::api::values::PhpString::of(s));
-                req.addref(&s);
-                s
-            }
+        let key = match fe_key(req, key) {
+            Ok(key) => key,
+            Err(thrown) => return threw(req, frame, &thrown),
         };
         let out = exec::temporary_slot(code, op.out);
         let previous = req.set_slot(frame, out, key);
         req.release(previous);
     }
+    fe_assign(req, frame, code, op, value)
+}
+
+/// The key a fetch writes to its `result` (`RETURN_VALUE_USED`): an
+/// integer as it stands, and a string with one more owner
+/// (`ZVAL_STR_COPY`).
+fn fe_key(req: &mut Request, key: php_heap::Key) -> Result<Value, Thrown> {
+    Ok(match key {
+        php_heap::Key::Long(n) => Value::int(n),
+        php_heap::Key::Str(s) => {
+            let s = Value::string(PhpString::of(s));
+            req.addref(&s);
+            s
+        }
+    })
+}
+
+/// The value a by-value fetch hands its CV, `zend_assign_to_variable`
+/// (`Z/Zend/zend_execute.c`): one more owner with a reference followed,
+/// written through the cell the CV holds or over what it held, which is
+/// released after the write.
+fn fe_assign(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    value: Value,
+) -> Edge {
+    let _ = code;
     let value = value.deref();
     req.addref(&value);
     if let Some(r) = req.slot(frame, op.op2).as_php_ref() {
@@ -9158,15 +9244,453 @@ pub(crate) fn fe_fetch_r<T: Tier>(
     Ok(advance(req, frame))
 }
 
-/// `ZEND_FE_FREE` (`Z/Zend/zend_vm_def.h:3260`): the `VAR` the
-/// `FE_RESET_R` filled given up where the loop ends, the array's or the
-/// object's owner released (`zval_ptr_dtor_nogc`), and nothing over the
-/// `UNDEF` a warned-on reset left. The `FE_FETCH_R` before it jumps
-/// here, and a `break` out of the loop lands here too. php deletes the
-/// hash iterator its object loop took as well
-/// (`zend_hash_iterator_del`); this engine's object loop keeps the
-/// position in the `VAR` and takes no iterator, so there is none to
-/// delete (#434).
+/// `ZEND_FE_RESET_RW` (`Z/Zend/zend_vm_def.h:6958`), the first opline
+/// of a `foreach` by reference: the subject read in place
+/// (`GET_OP1_ZVAL_PTR_PTR`), a CV or the place a `_W` fetch's `VAR`
+/// names. An array there is made a reference where it is not one
+/// (`ZVAL_NEW_REF(array_ref, array_ref)`), the `VAR` the opline's
+/// `result` names holds one more owner of that cell, the array inside
+/// it is separated (`SEPARATE_ARRAY`) so the loop writes the variable's
+/// own copy, and a hash iterator is registered at its first position
+/// (`zend_hash_iterator_add`), its index the `VAR`'s `Z_FE_ITER`. A
+/// temporary is wrapped in a cell of its own and a constant array is
+/// copied first. An object is the same cell, or the object itself from
+/// a temporary, over the walk [`Request::object_walk_start`] registers.
+/// What is neither is php's warning and the jump past the loop, as for
+/// the by-value reset.
+///
+/// The loop writes through the variable, and an element the body
+/// appends is walked, because the iterator's position is the table's
+/// and not a count.
+///
+/// ```php
+/// $a = [1, 2, 3];
+/// foreach ($a as &$v) { $v *= 2; if ($v == 2) { $a[] = 4; } }
+/// var_dump($a);
+/// ```
+/// ```expect
+/// array(4) {
+///   [0]=>
+///   int(2)
+///   [1]=>
+///   int(4)
+///   [2]=>
+///   int(6)
+///   [3]=>
+///   &int(8)
+/// }
+/// ```
+///
+/// A copy the loop shares its array with keeps its own values: the
+/// separation is the variable's, before the first write.
+///
+/// ```php
+/// $a = ['x' => 1, 'y' => 2]; $b = $a;
+/// foreach ($a as $k => &$v) { $v = "$k$v"; }
+/// unset($v);
+/// var_dump($a, $b);
+/// ```
+/// ```expect
+/// array(2) {
+///   ["x"]=>
+///   string(2) "x1"
+///   ["y"]=>
+///   string(2) "y2"
+/// }
+/// array(2) {
+///   ["x"]=>
+///   int(1)
+///   ["y"]=>
+///   int(2)
+/// }
+/// ```
+///
+/// An element the body deletes ahead of the walk is not reached, and a
+/// rehash the body's appends cause moves the walk with the element it
+/// stood at.
+///
+/// ```php
+/// $a = ['a' => 1, 'b' => 2, 'c' => 3, 'd' => 4, 'e' => 5, 'f' => 6, 'g' => 7, 'h' => 8];
+/// foreach ($a as $k => &$v) {
+///     echo $k;
+///     if ($k === 'b') { unset($a['a'], $a['c']); $a['i'] = 9; }
+/// }
+/// unset($v);
+/// echo "\n";
+/// foreach ($a as $k => $v) echo $k;
+/// ```
+/// ```expect
+/// abdefghi
+/// bdefghi
+/// ```
+///
+/// A dimension is fetched for writing, so the loop binds the elements
+/// of the nested array in place, and a constant array is walked through
+/// a copy of its own.
+///
+/// ```php
+/// $m = ['r' => [1, 2]];
+/// foreach ($m['r'] as &$v) { $v += 10; }
+/// unset($v);
+/// foreach ([7, 8] as $k => &$w) { $w = $k; }
+/// var_dump($m, $w);
+/// ```
+/// ```expect
+/// array(1) {
+///   ["r"]=>
+///   array(2) {
+///     [0]=>
+///     int(11)
+///     [1]=>
+///     int(12)
+///   }
+/// }
+/// int(1)
+/// ```
+///
+/// ```php
+/// $n = 5;
+/// foreach ($n as &$v) {}
+/// echo "on\n";
+/// ```
+/// ```expect
+/// Warning: foreach() argument must be of type array|object, int given in %s on line 3
+/// on
+/// ```
+pub(crate) fn fe_reset_rw<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let slot = exec::temporary_slot(code, op.out);
+    // `GET_OP1_ZVAL_PTR_PTR(BP_VAR_R)`: the place a CV or a `VAR` names,
+    // a `VAR`'s `IS_INDIRECT` followed; a temporary or a constant is a
+    // value and names no place.
+    let place = match op.op1_type {
+        OperandKind::Cv => {
+            if req.slot(frame, op.op1).tag() == TypeTag::Undef {
+                // `_get_zval_ptr_cv_BP_VAR_R`: the undefined-variable
+                // warning, and `null`, which is the refusal below.
+                let _ = exec::operand(req, frame, code, op.op1_type, op.op1);
+            }
+            req.slot_ptr(frame, op.op1)
+        }
+        OperandKind::Var => {
+            let at = exec::temporary_slot(code, op.op1);
+            req.slot_ptr(frame, at)
+                .map(|cell| cell.read().as_indirect().unwrap_or(cell))
+        }
+        _ => None,
+    };
+    let Some(place) = place else {
+        return fe_reset_rw_value(req, frame, code, op, slot);
+    };
+    let subject = exec::value_of(place.read()).deref();
+    let is_array = subject.as_array().is_some();
+    if !is_array && subject.as_object().is_none() {
+        return fe_reset_refused(req, frame, code, op, &subject.undef_as_null());
+    }
+    // `if (array_ptr == array_ref) ZVAL_NEW_REF(array_ref, array_ref)`:
+    // the place's owner is the cell's from here.
+    let held = exec::value_of(place.read());
+    let cell = if let Some(cell) = held.as_php_ref() {
+        *cell
+    } else {
+        let cell = match req.reference(held) {
+            Ok(cell) => cell,
+            Err(thrown) => return threw(req, frame, &thrown),
+        };
+        place.write(cell.as_value().to_zval());
+        cell
+    };
+    req.addref(&cell.as_value());
+    let previous = req.set_slot(frame, slot, cell.as_value());
+    req.release(previous);
+    let started = if is_array {
+        match req.reference_separate(cell.heap()) {
+            Ok(Some(array)) => Some(req.heap_mut().iterator_add(array, 0)),
+            Ok(None) => None,
+            Err(thrown) => return threw(req, frame, &thrown),
+        }
+    } else {
+        let Some(object) = subject.as_object().copied() else {
+            return Ok(advance(req, frame));
+        };
+        match req.object_walk_start(object) {
+            Ok(started) => started,
+            Err(thrown) => return threw(req, frame, &thrown),
+        }
+    };
+    set_fe_iter(req, frame, slot, started);
+    if op.op1_type == OperandKind::Var {
+        exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    }
+    if started.is_none() {
+        req.vm_mut().jump(frame, op.op2);
+        return Ok(Stepped::Same(frame));
+    }
+    Ok(advance(req, frame))
+}
+
+/// `FE_RESET_RW` over a temporary or a constant: an array is wrapped in
+/// a cell of its own (`ZVAL_NEW_REF(array_ref, array_ptr)`), a constant
+/// one copied into it first (`zend_array_dup`), and separated; an
+/// object is the `VAR`'s as it stands, over its walk.
+fn fe_reset_rw_value(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    slot: u32,
+) -> Edge {
+    let subject = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
+    if let Some(array) = subject.as_array().copied() {
+        let owned = if op.op1_type == OperandKind::Const {
+            match req.array_dup(array.heap()) {
+                Ok(copy) => Value::array(PhpArray::of(copy)),
+                Err(thrown) => return threw(req, frame, &thrown),
+            }
+        } else {
+            // The temporary's owner is the cell's, and the slot is
+            // emptied so nothing gives it up twice.
+            let _ = req.take_slot(frame, exec::temporary_slot(code, op.op1));
+            subject
+        };
+        let cell = match req.reference(owned) {
+            Ok(cell) => cell,
+            Err(thrown) => return threw(req, frame, &thrown),
+        };
+        let previous = req.set_slot(frame, slot, cell.as_value());
+        req.release(previous);
+        let started = match req.reference_separate(cell.heap()) {
+            Ok(Some(array)) => Some(req.heap_mut().iterator_add(array, 0)),
+            Ok(None) => None,
+            Err(thrown) => return threw(req, frame, &thrown),
+        };
+        set_fe_iter(req, frame, slot, started);
+        return Ok(advance(req, frame));
+    }
+    if let Some(object) = subject.as_object().copied()
+        && op.op1_type != OperandKind::Const
+    {
+        let _ = req.take_slot(frame, exec::temporary_slot(code, op.op1));
+        let previous = req.set_slot(frame, slot, subject);
+        req.release(previous);
+        let started = match req.object_walk_start(object) {
+            Ok(started) => started,
+            Err(thrown) => return threw(req, frame, &thrown),
+        };
+        set_fe_iter(req, frame, slot, started);
+        if started.is_none() {
+            req.vm_mut().jump(frame, op.op2);
+            return Ok(Stepped::Same(frame));
+        }
+        return Ok(advance(req, frame));
+    }
+    fe_reset_refused(req, frame, code, op, &subject)
+}
+
+/// `ZEND_FE_FETCH_RW` (`Z/Zend/zend_vm_def.h:7256`): the subject the
+/// reset's `VAR` holds, a reference followed. Over an array the
+/// iterator's position (`zend_hash_iterator_pos_ex`), which separates
+/// an array the body shared and moves the walk onto a table the body
+/// replaced; the first live element from there, or the jump to the
+/// opline `extended_value` names; the iterator one past it; the key to
+/// `result`. Over an object the next property the scope may see
+/// ([`Request::object_walk`]). The element is made a reference in place
+/// where it is not one (`ZVAL_NEW_EMPTY_REF`), a declared property's
+/// with its type or php's `readonly` refusal
+/// ([`Request::walked_reference`]), and the CV `op2` names is bound to
+/// that cell (`ZVAL_REF`), what it held given up. A subject the body
+/// made neither array nor object is php's warning and the jump.
+///
+/// ```php
+/// #[AllowDynamicProperties]
+/// class P { public $a = 1; protected $b = 2; public int $c = 3; }
+/// $o = new P; $o->d = 4;
+/// foreach ($o as $k => &$v) { $v = $v * 10; }
+/// unset($v);
+/// var_dump($o);
+/// ```
+/// ```expect
+/// object(P)#1 (4) {
+///   ["a"]=>
+///   int(10)
+///   ["b":protected]=>
+///   int(2)
+///   ["c"]=>
+///   int(30)
+///   ["d"]=>
+///   int(40)
+/// }
+/// ```
+///
+/// A typed property the loop binds keeps its type through the cell, so
+/// a write through the loop's variable is held to it; a `readonly` one
+/// cannot be bound at all.
+///
+/// ```php
+/// class T { public int $n = 1; public function __construct(public readonly int $r = 2) {} }
+/// $o = new T;
+/// try { foreach ($o as &$v) { $v = "x"; } } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// unset($v);
+/// $o = new T;
+/// try { foreach ($o as $k => &$v) { echo "$k\n"; } } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Cannot assign string to reference held by property T::$n of type int
+/// n
+/// Cannot acquire reference to readonly property T::$r
+/// ```
+///
+/// ```php
+/// $a = [1, 2];
+/// foreach ($a as &$v) { $a = 5; }
+/// echo "on\n";
+/// ```
+/// ```expect
+/// Warning: foreach() argument must be of type array|object, int given in %s on line 3
+/// on
+/// ```
+pub(crate) fn fe_fetch_rw<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let slot = exec::temporary_slot(code, op.op1);
+    let Some(at) = req.slot_ptr(frame, slot) else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: FE_FETCH_RW over a VAR the frame does not have",
+        )));
+    };
+    let held = at.read();
+    let idx = held.fe_pos();
+    let holder = Value::of_zval(held);
+    let subject = holder.deref();
+    let (key, cell) = if let Some(array) = subject.as_array().copied() {
+        let placed = req.heap_mut().iterator_pos_ex(idx, array.heap());
+        let (pos, walked) = placed?;
+        if !walked.is_same(array.heap())
+            && let Some(r) = holder.as_php_ref()
+        {
+            // `ZVAL_ARR(array, zend_array_dup(ht))`: the reference holds
+            // the copy from here, the shared original one owner fewer.
+            r.heap().val_ref().write(php_heap::Zval::array(walked));
+        }
+        let Some((found, key, value)) = walked.live_from(pos) else {
+            req.vm_mut().jump(frame, op.extended_value);
+            return Ok(Stepped::Same(frame));
+        };
+        req.heap_mut()
+            .iterator_set_pos(idx, found.saturating_add(1));
+        let value = exec::value_of(value);
+        let cell = if let Some(cell) = value.as_php_ref() {
+            *cell
+        } else {
+            let cell = match req.reference(value) {
+                Ok(cell) => cell,
+                Err(thrown) => return threw(req, frame, &thrown),
+            };
+            if let Some(place) = walked.value_ref(key) {
+                place.write(cell.as_value().to_zval());
+            }
+            cell
+        };
+        (key, cell)
+    } else if let Some(object) = subject.as_object().copied() {
+        let walked = match req.object_walk(object, idx) {
+            Ok(Some(walked)) => walked,
+            Ok(None) => {
+                req.vm_mut().jump(frame, op.extended_value);
+                return Ok(Stepped::Same(frame));
+            }
+            Err(thrown) => return threw(req, frame, &thrown),
+        };
+        match req.walked_reference(object, walked.1) {
+            Ok(cell) => (walked.0, cell),
+            Err(thrown) => return threw(req, frame, &thrown),
+        }
+    } else {
+        crate::api::raising::warning(
+            req,
+            &format!(
+                "foreach() argument must be of type array|object, {} given",
+                crate::ops::value_name(req, &subject.undef_as_null())
+            ),
+        );
+        if req.is_pending() {
+            return Ok(Stepped::Threw(frame));
+        }
+        req.vm_mut().jump(frame, op.extended_value);
+        return Ok(Stepped::Same(frame));
+    };
+    if op.out_type != OperandKind::Unused {
+        let key = match fe_key(req, key) {
+            Ok(key) => key,
+            Err(thrown) => return threw(req, frame, &thrown),
+        };
+        let out = exec::temporary_slot(code, op.out);
+        let previous = req.set_slot(frame, out, key);
+        req.release(previous);
+    }
+    let bound = cell.as_value();
+    if op.op2_type == OperandKind::Cv {
+        let same = req
+            .slot(frame, op.op2)
+            .as_php_ref()
+            .is_some_and(|held| *held == cell);
+        if !same {
+            req.addref(&bound);
+            let garbage = req.set_slot(frame, op.op2, bound);
+            req.release(garbage);
+        }
+    } else {
+        req.addref(&bound);
+        let out = exec::temporary_slot(code, op.op2);
+        let garbage = req.set_slot(frame, out, bound);
+        req.release(garbage);
+    }
+    Ok(advance(req, frame))
+}
+
+/// `ZEND_FE_FREE` (`Z/Zend/zend_vm_def.h:3260`): the `VAR` the reset
+/// filled given up where the loop ends, the array's, the object's or
+/// the reference's owner released (`zval_ptr_dtor_nogc`), and nothing
+/// over the `UNDEF` a warned-on reset left. The fetch before it jumps
+/// here, and a `break` out of the loop lands here too. A `VAR` that
+/// holds anything but an array is a walk registered with a hash
+/// iterator, an object's or a by-reference one, and the iterator its
+/// `Z_FE_ITER` names is deleted first (`zend_hash_iterator_del`), `-1`
+/// being none.
+///
+/// A `return` inside a by-reference loop runs the `FE_FREE` the compiler
+/// put before it, and a throw out of one frees the variable through the
+/// unwind's `ZEND_LIVE_LOOP` range; either way the iterator goes with
+/// it, so a loop nested in a loop over one array walks it afresh.
+///
+/// ```php
+/// function f() { foreach ([1, 2, 3] as &$v) { if ($v == 2) return $v; } }
+/// var_dump(f());
+/// function g() { $a = [1, 2]; foreach ($a as &$v) { throw new Exception("x"); } }
+/// try { g(); } catch (Exception $e) { echo "caught\n"; }
+/// $a = [1, 2, 3];
+/// foreach ($a as &$v) { foreach ($a as &$w) { $w++; } }
+/// var_dump($a);
+/// ```
+/// ```expect
+/// int(2)
+/// caught
+/// array(3) {
+///   [0]=>
+///   int(4)
+///   [1]=>
+///   int(5)
+///   [2]=>
+///   &int(6)
+/// }
+/// ```
 ///
 /// The array the `INIT_ARRAY` built is given back here and the string
 /// it held stays with `$s` alone, 3072 bytes in the bin php puts it in,
@@ -9189,8 +9713,21 @@ pub(crate) fn fe_free<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    fe_iterator_del(req, frame, exec::temporary_slot(code, op.op1));
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
     Ok(advance(req, frame))
+}
+
+/// `if (Z_TYPE_P(var) != IS_ARRAY && Z_FE_ITER_P(var) != (uint32_t)-1)
+/// zend_hash_iterator_del(Z_FE_ITER_P(var))`: what `FE_FREE` and the
+/// unwind of a `ZEND_LIVE_LOOP` range both do before the release.
+fn fe_iterator_del(req: &mut Request, frame: FrameRef, slot: u32) {
+    let Some(held) = req.slot_ptr(frame, slot).map(php_heap::ZvalRef::read) else {
+        return;
+    };
+    if held.as_arr().is_none() && held.fe_pos() != u32::MAX {
+        req.heap_mut().iterator_del(held.fe_pos());
+    }
 }
 
 /// `ZEND_ADD`: [`crate::ops::add`] over the two operands, into the
@@ -11498,6 +12035,9 @@ fn cleanup_live_vars(
             continue;
         }
         let slot = exec::temporary_slot(code, range.var);
+        if range.kind == php_unit::LiveKind::Loop {
+            fe_iterator_del(req, frame, slot);
+        }
         let garbage = req.take_slot(frame, slot);
         if range.kind == php_unit::LiveKind::Silence {
             restore_silenced(req, &garbage);
@@ -12995,10 +13535,18 @@ mod tests {
         let made = crate::api::call::new_object(&mut req, class);
         assert!(made.is_ok(), "Exception is instantiable");
         if let Ok(object) = made {
+            let started = req.object_walk_start(object);
             assert!(
-                matches!(req.object_property_from(object, 0), Ok(None)),
-                "the global scope sees none of Exception's properties"
+                matches!(started, Ok(Some(_))),
+                "Exception declares properties, so the walk is registered"
             );
+            if let Ok(Some(idx)) = started {
+                assert!(
+                    matches!(req.object_walk(object, idx), Ok(None)),
+                    "the global scope sees none of Exception's properties"
+                );
+                req.heap_mut().iterator_del(idx);
+            }
             req.release(object.as_value());
         }
     }
