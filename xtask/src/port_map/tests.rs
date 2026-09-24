@@ -475,8 +475,8 @@ fn a_tree_without_crates_is_refused_and_nothing_is_joined() {
 /// builder, and a crate `new-ext` laid down, whose `extension()`
 /// declares its state and registers nothing, is not evidence however
 /// many stand beside the ported ones. `ext/standard` is among the ported
-/// since `str_repeat` (#174) and `ext/spl` is not; which others are is
-/// the workspace's to say, not this test's. The committed census names
+/// since `str_repeat` (#174); which others are is the workspace's to
+/// say, not this test's. The committed census names
 /// no extension on any row, so no row is resolved by any of them yet.
 #[test]
 fn ported_names_exactly_the_laid_down_crates_that_register_a_native() {
@@ -496,7 +496,6 @@ fn ported_names_exactly_the_laid_down_crates_that_register_a_native() {
     let here = Ported::read(workspace(), &manifest);
     assert_eq!(here.crates, registering, "{:?}", here.crates);
     assert!(here.carries("standard"), "{:?}", here.crates);
-    assert!(!here.carries("spl"), "{:?}", here.crates);
     assert!(
         registering.len() < laid.len(),
         "some laid-down crate registers nothing yet: {registering:?}"
