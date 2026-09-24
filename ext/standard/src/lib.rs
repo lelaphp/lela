@@ -49,6 +49,7 @@ mod base64;
 mod basic_functions;
 mod crc32;
 mod csv;
+mod dir;
 mod exec;
 mod file;
 mod formatted_print;
@@ -242,6 +243,7 @@ fn file_constants() -> Vec<ConstDecl> {
         url::constants(),
         html::constants(),
         basic_functions::constants(),
+        dir::constants(),
     ]
     .into_iter()
     .flatten()
