@@ -655,9 +655,7 @@ impl Emit<'_> {
         if class.kind != ClassKind::Enum {
             return Err(refused(line, "Case can only be used in enums"));
         }
-        if !node.attrs.is_empty() {
-            return Err(unread(line, "an attribute before an enum case"));
-        }
+        let attributes = self.walk_attributes(&node.attrs)?;
         let Some(name) = node.name.and_then(|name| self.parsed.tree[name].name) else {
             return Err(unread(line, "an enum case whose name is no identifier"));
         };
@@ -667,6 +665,7 @@ impl Emit<'_> {
             is_final: false,
             value: node.value,
             is_case: true,
+            attributes,
             doc_comment: self.doc_comment(node.doc_comment),
             line,
         });
@@ -704,6 +703,7 @@ impl Emit<'_> {
                 is_final: modifiers.has(Flag::Final),
                 value: Some(value),
                 is_case: false,
+                attributes: Vec::new(),
                 doc_comment,
                 line,
             });
@@ -1018,6 +1018,9 @@ pub(super) struct Constant {
     /// `ZEND_AST_ENUM_CASE`, which stands in the constants table beside
     /// the enum's own constants in the order written.
     pub(super) is_case: bool,
+    /// The attributes written before a case, `ast->child[3]` of
+    /// `ZEND_AST_ENUM_CASE`; a constant's are refused before this.
+    pub(super) attributes: Vec<Attr>,
     pub(super) doc_comment: Option<Vec<u8>>,
     pub(super) line: u32,
 }

@@ -3510,6 +3510,7 @@ impl Emit<'_> {
             }
             self.active_constants = foldable_constants(&decl.constants, usize::MAX);
             let value = self.case_or_constant(decl, constant, name)?;
+            let attributes = self.case_attributes(constant)?;
             decl.constants.push(ClassConstDecl {
                 name: Name(constant.name.clone().into_boxed_slice()),
                 visibility: constant.visibility,
@@ -3517,7 +3518,7 @@ impl Emit<'_> {
                 is_case: constant.is_case,
                 ty: None,
                 value,
-                attributes: Vec::new(),
+                attributes,
                 doc_comment: constant.doc_comment.clone().map(Vec::into_boxed_slice),
             });
         }
@@ -3573,19 +3574,61 @@ impl Emit<'_> {
                 }
                 dynamic_properties = DynamicProperties::Allowed;
             }
-            let mut arguments = Vec::new();
-            for argument in &attribute.arguments.clone() {
-                arguments.push(AttributeArgument {
-                    name: None,
-                    value: self.const_expr(*argument)?,
-                });
-            }
-            out.push(Attribute {
-                name: Name(name.into_boxed_slice()),
-                arguments,
-            });
+            out.push(self.attribute(attribute, name)?);
         }
         Ok((out, dynamic_properties))
+    }
+
+    /// One attribute as the declaration keeps it: the name resolved,
+    /// each argument the constant expression `zend_const_expr_to_zval`
+    /// leaves.
+    fn attribute(
+        &mut self,
+        attribute: &walk::Attr,
+        name: Vec<u8>,
+    ) -> Result<Attribute, CompileError> {
+        let mut arguments = Vec::new();
+        for argument in &attribute.arguments {
+            arguments.push(AttributeArgument {
+                name: None,
+                value: self.const_expr(*argument)?,
+            });
+        }
+        Ok(Attribute {
+            name: Name(name.into_boxed_slice()),
+            arguments,
+        })
+    }
+
+    /// `zend_compile_attributes` over an enum case's list, the target
+    /// `ZEND_ATTRIBUTE_TARGET_CLASS_CONST`, which `ReflectionClassConstant::getAttributes`
+    /// reads.
+    ///
+    /// ```php
+    /// #[Attribute] class Tag { function __construct(public string $v) {} }
+    /// enum Suit { #[Tag('red')] case Hearts; }
+    /// $a = (new ReflectionClassConstant(Suit::class, 'Hearts'))->getAttributes()[0];
+    /// var_dump($a->getName(), $a->getArguments());
+    /// ```
+    /// ```expect
+    /// string(3) "Tag"
+    /// array(1) {
+    ///   [0]=>
+    ///   string(3) "red"
+    /// }
+    /// ```
+    fn case_attributes(
+        &mut self,
+        constant: &walk::Constant,
+    ) -> Result<Vec<Attribute>, CompileError> {
+        let mut out = Vec::with_capacity(constant.attributes.len());
+        for attribute in &constant.attributes {
+            self.line = attribute.line;
+            let name = self.class_name(&attribute.name);
+            out.push(self.attribute(attribute, name)?);
+        }
+        self.line = constant.line;
+        Ok(out)
     }
 
     /// `zend_compile_prop_decl`, the same one declarator at a time,
