@@ -98,6 +98,7 @@ Heap::separate
 Heap::set_memory_limit
 Heap::stored
 Heap::string
+Heap::string_append
 Heap::string_safe_alloc
 Heap::string_with
 HeapHooks

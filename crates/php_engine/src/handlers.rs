@@ -5958,7 +5958,14 @@ pub(crate) fn assign_op<T: Tier>(
         let previous = req.set_slot(frame, op.op1, Value::null());
         req.release(previous);
     }
-    let computed = kernel(req, &held, &value);
+    let computed = if grows_in_place(req, op.extended_value, &held) {
+        crate::ops::concat_assign(req, &held, &value, |req| {
+            let at = req.slot_ptr(frame, op.op1);
+            vacate(req, at);
+        })
+    } else {
+        kernel(req, &held, &value)
+    };
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
     let stepped = match computed {
         Ok(stepped) => stepped,
@@ -6754,6 +6761,44 @@ fn binary_op_of(extended_value: u32) -> Option<BinaryKernel> {
         Opcode::BwAnd => crate::ops::bitwise_and,
         _ => return None,
     })
+}
+
+/// Whether a compound assignment over `held` is `concat_function` with
+/// its own left operand as the place written,
+/// [`crate::ops::concat_assign`]: the operator is `.`, and the place is
+/// not a cell carrying types over a value that is no string, which php
+/// hands to `zend_binary_op` and the check of each type instead
+/// (`zend_binary_assign_op_typed_ref`, `Z/Zend/zend_execute.c:1677-1682`).
+fn grows_in_place(req: &Request, extended_value: u32, held: &Value) -> bool {
+    let concat = u8::try_from(extended_value)
+        .ok()
+        .and_then(Opcode::from_u8)
+        .is_some_and(|opcode| opcode == Opcode::Concat);
+    if !concat {
+        return false;
+    }
+    match held.as_php_ref() {
+        Some(cell) => {
+            req.ref_type_sources(cell.heap()).is_empty() || cell.get().as_php_string().is_some()
+        }
+        None => true,
+    }
+}
+
+/// `i_zval_ptr_dtor(result); ZVAL_NULL(result)` of `concat_function`
+/// over a place, read again where it stands now: a reference there is
+/// followed to its cell, `null` is written, and the owner the place held
+/// is given up.
+fn vacate(req: &mut Request, at: Option<php_heap::ZvalRef>) {
+    let Some(mut at) = at else {
+        return;
+    };
+    if let Some(cell) = exec::value_of(at.read()).as_php_ref() {
+        at = cell.heap().val_ref();
+    }
+    let held = exec::value_of(at.read());
+    at.write(Value::null().to_zval());
+    req.release(held);
 }
 
 /// `ZEND_ASSIGN_STATIC_PROP_OP` (`Z/Zend/zend_vm_def.h:2714`),

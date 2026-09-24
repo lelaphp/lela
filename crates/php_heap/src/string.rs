@@ -163,6 +163,101 @@ impl Str {
         Str(header)
     }
 
+    /// `zend_string_extend(s, ZSTR_LEN(s) + ZSTR_LEN(tail), 0)` and the
+    /// `memcpy` of `tail` after the old bytes, the arm of
+    /// `concat_function` (`Z/Zend/zend_operators.c:2125-2155`) that writes
+    /// back into the left operand, and of `ZEND_CONCAT`'s where the left
+    /// is a temporary (`Z/Zend/zend_vm_def.h:407-418`). The caller hands
+    /// one owner of `s` over and is handed one owner of what comes back.
+    ///
+    /// A string of the request's with that one owner and nobody else's
+    /// is `perealloc`ed ([`Mm::realloc`]), which keeps the slot where
+    /// the new size falls in the same bin and the `run` where the pages
+    /// after it are free, so a loop of appends copies what it appends
+    /// and the old bytes only when a block moves. Any other string,
+    /// interned or shared, is `zend_string_alloc` of the new length with
+    /// the old bytes copied in, and the caller's owner of it given up
+    /// (`GC_DELREF`); the other holders see it as it was. The hash is
+    /// forgotten, and the UTF-8 verdict kept where both sides had it
+    /// (`ZSTR_GET_COPYABLE_CONCAT_PROPERTIES_BOTH`). `tail` may be `s`
+    /// itself, `$s .= $s`, whose bytes are then read where the realloc
+    /// left them. The `Err` is the limit or the system refusing the
+    /// size, with `s` standing as it was.
+    pub(crate) fn append(mm: &mut Mm, s: Str, tail: Str) -> Result<Str, Fatal> {
+        let old = s.len();
+        let add = tail.len();
+        // `ZEND_CONCAT`'s own check (`Z/Zend/zend_vm_def.h:410-412`);
+        // `concat_function` throws before it asks.
+        let Some(len) = old.checked_add(add) else {
+            return Err(Fatal::Error(String::from(
+                "Integer overflow in memory allocation",
+            )));
+        };
+        let utf8 = s.is_valid_utf8() && tail.is_valid_utf8();
+        let same = s.is_same(tail);
+        let grown = if !s.is_interned() && !s.is_persistent() && s.refcount() == 1 {
+            // SAFETY: `s` is the request's and its one owner is the
+            // caller's, handed here, so nothing names the allocation but
+            // this; its header, bytes and NUL are initialised.
+            let at =
+                unsafe { mm.realloc(s.address(), HEADER + old + 1, Str::allocation_size(len)) }?;
+            Str(at.cast())
+        } else {
+            let at = mm.alloc(Str::allocation_size(len))?;
+            // SAFETY: a fresh allocation of the size a string of `len`
+            // bytes takes, which the `old` bytes of `s` fit in.
+            let copy = unsafe { Str::init(at, s.bytes(), 0) };
+            if !s.is_interned() && !s.is_persistent() {
+                s.delref();
+            }
+            copy
+        };
+        let from = if same { grown } else { tail };
+        // SAFETY: the bytes of a live string sit right after its header.
+        let src = unsafe { from.0.as_ptr().cast::<u8>().add(HEADER) };
+        // SAFETY: `grown` is an allocation of `len` bytes whose first
+        // `old` are the old string's and whose one owner is ours, and
+        // `src` is readable for `add` bytes: `tail`'s own, or `grown`'s
+        // head, before byte `old`, when the tail was the string that
+        // moved.
+        unsafe { grown.append_at(old, src, add) };
+        if utf8 {
+            grown.mark_valid_utf8();
+        }
+        Ok(grown)
+    }
+
+    /// The `memcpy(ZSTR_VAL(str) + old, src, add)` and the NUL after it
+    /// of an append, and `ZSTR_LEN(str) = old + add`, with the hash and
+    /// the UTF-8 verdict forgotten as `zend_string_forget_hash_val`
+    /// forgets them.
+    ///
+    /// # Safety
+    ///
+    /// `self` is a string of one owner, the caller's, whose allocation
+    /// holds [`Str::allocation_size`] of `old + add` bytes with its first
+    /// `old` bytes initialised; `src` is readable for `add` bytes that
+    /// lie wholly before byte `old` of this string or in another
+    /// allocation.
+    unsafe fn append_at(self, old: usize, src: *const u8, add: usize) {
+        let header = self.0.as_ptr();
+        // SAFETY: the caller's contract: the header is initialised and
+        // no borrow of it or of the bytes is live.
+        unsafe { (*header).len = old + add };
+        self.forget_hash();
+        // SAFETY: the bytes sit right after the header, and the tail and
+        // its NUL end inside the allocation.
+        let val = unsafe { header.cast::<u8>().add(HEADER + old) };
+        // SAFETY: `src` is readable for `add` bytes, `val` writable for
+        // them, and the two do not overlap by the caller's contract.
+        unsafe { val.copy_from_nonoverlapping(src, add) };
+        // SAFETY: the NUL php keeps is the byte after the tail, the
+        // allocation's last.
+        let end = unsafe { val.add(add) };
+        // SAFETY: `end` is inside the allocation, as above.
+        unsafe { end.write(0) };
+    }
+
     /// Where the string sits, for the heap that frees it.
     pub(crate) const fn address(self) -> NonNull<u8> {
         self.0.cast()
