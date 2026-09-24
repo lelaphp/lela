@@ -284,8 +284,8 @@ impl Table {
     fn rows(self, req: &mut Request) -> Result<Vec<(Key, Value)>, Thrown> {
         match self {
             Table::Array(_, array) => Ok(array.snapshot_refs()),
-            Table::Props(object) => Ok(Std
-                .get_properties(req, object)?
+            Table::Props(object) => Ok(object
+                .props_for(req, PropertyPurpose::ArrayCast)?
                 .into_iter()
                 .filter(|(name, _)| !name.as_bytes().starts_with(b"\0"))
                 .map(|(name, value)| (Key::from_string(name), value))
@@ -1156,11 +1156,17 @@ fn get_array_copy(req: &mut Request) -> Result<Value, Thrown> {
 /// class Counted extends ArrayObject { function count(): int { return 42; } }
 /// $c = new Counted([1, 2]);
 /// var_dump($c->count(), count($c), (new ArrayObject([1, 2, 3]))->count());
+/// class Held { public $a = 1; protected $b = 2; private $c = 3; public $d = 4; }
+/// $h = @new ArrayObject(new Held);
+/// var_dump(count($h));
+/// foreach ($h as $k => $v) echo "$k=$v;";
 /// ```
 /// ```expect
 /// int(42)
 /// int(42)
 /// int(3)
+/// int(2)
+/// a=1;d=4;
 /// ```
 fn count(req: &mut Request) -> Result<Value, Thrown> {
     crate::arity(req, 0, 0)?;
