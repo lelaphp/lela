@@ -11,9 +11,14 @@ description = "The spl extension, php-src/ext/spl"
 [lints]
 workspace = true
 
-# The one dependency: the facade. The engine is out of reach (`[[edge]]` ext/*).
+# The facade, and ext/pcre for what `spl_iterators.c` includes of it:
+# `pcre_get_compiled_regex_cache` and the `php_pcre_*_impl` functions
+# (`php_pcre.h`) that `RegexIterator` runs, ADR-0004's edge where php-src
+# includes the other extension's headers and `php_spl.c`'s
+# `ZEND_MOD_REQUIRED("pcre")`. The engine is out of reach (`[[edge]]` ext/*).
 [dependencies]
 php_ext = { path = "../../crates/php_ext" }
+php_ext_pcre = { path = "../pcre" }
 
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
 [dev-dependencies]
