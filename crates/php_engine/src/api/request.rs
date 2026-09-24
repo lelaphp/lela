@@ -642,6 +642,12 @@ pub struct Request {
     /// `EG(user_error_handlers)`, each row the handler it replaced and
     /// that handler's mask, `EG(user_error_handlers_error_reporting)`
     /// kept beside it. Every handler here is one owner of its value.
+    /// `EG(error_handling)` at `EH_THROW` with `EG(exception_class)`: the
+    /// class a warning is thrown as meanwhile, `None` at `EH_NORMAL`.
+    error_handling: Option<String>,
+    /// What a warning was thrown as under `EH_THROW`, held until the
+    /// native that asked for it hands it on.
+    error_handling_thrown: Option<Thrown>,
     error_handler: Option<Callable>,
     /// `EG(user_error_handler_error_reporting)`: the levels the handler
     /// is handed, `set_error_handler`'s `$error_levels`.
@@ -903,6 +909,8 @@ impl Request {
             next_ref_source: 1,
             wrappers: Vec::new(),
             filters: Vec::new(),
+            error_handling: None,
+            error_handling_thrown: None,
             error_handler: None,
             error_handler_levels: 0,
             error_handlers: Vec::new(),
@@ -2988,6 +2996,22 @@ impl Request {
         file: &[u8],
         line: u32,
     ) -> bool {
+        // `php_error_cb` under `EH_THROW` (`Z/main/main.c:1368`), which
+        // `zend_error_impl` reaches past the user handler: a warning is
+        // thrown as the class `zend_replace_error_handling` named, where
+        // nothing is pending, and shown nowhere.
+        if let Some(class) = self.error_handling.clone()
+            && matches!(
+                level,
+                Level::Warning | Level::CoreWarning | Level::CompileWarning | Level::UserWarning
+            )
+        {
+            if self.pending.is_none() && self.error_handling_thrown.is_none() {
+                let thrown = crate::api::raising::throw(self, &class, message);
+                self.error_handling_thrown = Some(thrown);
+            }
+            return false;
+        }
         // "Always clear the last backtrace."
         self.last_fatal_error_backtrace = None;
         if self.pending.is_none() && self.fatal_error_backtraces() && fatal_errors(level) {
@@ -6773,6 +6797,17 @@ impl Request {
     /// `Flow::Resume` (`jit-design.md` §2.2). The unwind exit is one
     /// answer, since it stands in php's slot as any throwable does;
     /// [`Request::pending`] is the object alone.
+    /// `zend_replace_error_handling`: the class a warning is thrown as,
+    /// `None` for `EH_NORMAL`; the one it replaces comes back.
+    pub(crate) fn replace_error_handling(&mut self, class: Option<String>) -> Option<String> {
+        std::mem::replace(&mut self.error_handling, class)
+    }
+
+    /// The throwable a warning became under `EH_THROW`, taken.
+    pub(crate) fn take_error_handling_thrown(&mut self) -> Option<Thrown> {
+        self.error_handling_thrown.take()
+    }
+
     pub(crate) fn is_pending(&self) -> bool {
         self.pending.is_some() || self.unwind_exit
     }

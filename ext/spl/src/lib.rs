@@ -26,6 +26,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 mod array;
+mod directory;
 mod dllist;
 mod exceptions;
 mod fixedarray;
@@ -83,6 +84,9 @@ pub fn extension() -> Extension {
     }
     for (decl, methods) in array::classes() {
         builder = builder.class_payload::<array::SplArray>(decl, methods, &array::HANDLERS);
+    }
+    for (decl, methods) in directory::classes() {
+        builder = builder.class_payload::<directory::Fs>(decl, methods, &directory::HANDLERS);
     }
     for (decl, methods) in dllist::classes() {
         builder = builder.class_payload::<dllist::SplDllist>(decl, methods, &dllist::HANDLERS);

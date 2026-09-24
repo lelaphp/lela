@@ -173,6 +173,7 @@ raising::raise_at
 raising::throw
 raising::throw_at
 raising::throw_value
+raising::throwing_warnings
 raising::too_few_arguments
 raising::warning
 request::ExtensionId

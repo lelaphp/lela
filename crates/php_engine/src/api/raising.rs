@@ -375,6 +375,34 @@ pub fn clear(req: &mut Request, thrown: Thrown) -> Result<(), Thrown> {
     Ok(())
 }
 
+/// `zend_replace_error_handling(EH_THROW, class)` around `f`: a warning
+/// raised meanwhile is thrown as `class` with the warning's message and
+/// shown nowhere, the first one only, and the handling `f` found is
+/// restored after it, which is how SPL's file classes turn a stream's
+/// warning into their `RuntimeException`. A throwable left pending by a
+/// warning is the `Err`, whatever `f` answered.
+///
+/// ```php
+/// try { new SplFileObject(__DIR__ . '/no-such-file'); }
+/// catch (RuntimeException $e) { echo get_class($e), ': ', str_replace(__DIR__, '', $e->getMessage()), "\n"; }
+/// ```
+/// ```expect
+/// RuntimeException: SplFileObject::__construct(/no-such-file): Failed to open stream: No such file or directory
+/// ```
+pub fn throwing_warnings<R>(
+    req: &mut Request,
+    class: &str,
+    f: impl FnOnce(&mut Request) -> Result<R, Thrown>,
+) -> Result<R, Thrown> {
+    let previous = req.replace_error_handling(Some(class.to_owned()));
+    let answered = f(req);
+    req.replace_error_handling(previous);
+    match (answered, req.take_error_handling_thrown()) {
+        (_, Some(thrown)) => Err(thrown),
+        (answered, None) => answered,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use php_unit::decl::{FunctionDecl, Name, Parameter, Type};
