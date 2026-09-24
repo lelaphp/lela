@@ -361,15 +361,28 @@ pub(crate) fn match_unhandled_error(req: &mut Request, subject: &Value) -> Throw
     throw(req, "UnhandledMatchError", &message)
 }
 
-/// `zend_zval_type_name`: a class for an object, `null` for an
-/// undefined value, and php's type name for the rest.
-fn type_name(req: &Request, value: &Value) -> String {
+/// `zend_zval_type_name` (`Z/Zend/zend_API.c:174`): `ZVAL_DEREF`, then
+/// a class for an object, `null` for an undefined value, and
+/// `zend_get_type_by_const`'s word for the rest, which is `resource`
+/// for a closed resource as for an open one. What `UnhandledMatchError`
+/// names a subject that is no scalar as.
+///
+/// ```php
+/// class classA {} try { echo match (new classA) { 1 => 'one' }; } catch (UnhandledMatchError $e) { echo $e->getMessage(), "\n"; } $f = fopen('php://memory', 'r'); fclose($f); try { echo match ($f) { 1 => 'one' }; } catch (UnhandledMatchError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Unhandled match case of type classA
+/// Unhandled match case of type resource
+/// ```
+pub(crate) fn type_name(req: &Request, value: &Value) -> String {
+    let value = value.deref();
     match value.as_ref() {
         ValueRef::Object(o) => req.class_decl(o.class()).map_or_else(
             || String::from("object"),
             |decl| String::from_utf8_lossy(&decl.name.0).into_owned(),
         ),
         ValueRef::Undef => String::from("null"),
+        ValueRef::Resource(_) => String::from("resource"),
         _ => String::from(value.type_name()),
     }
 }
@@ -1023,8 +1036,8 @@ pub(crate) fn verify_prop_assignable_by_ref(
                 req.release(made);
                 let class = req.class_name(first_at);
                 let two = req.class_name(declaring);
-                let one_declared = crate::api::coerce::type_name(&first_ty);
-                let two_declared = crate::api::coerce::type_name(ty);
+                let one_declared = crate::api::coerce::declared_type_name(&first_ty);
+                let two_declared = crate::api::coerce::declared_type_name(ty);
                 let given = type_name(req, &held.undef_as_null());
                 return Err(throw(
                     req,
@@ -1064,7 +1077,7 @@ pub(crate) fn incdec_prop_error(
     increment: bool,
 ) -> (Thrown, Value) {
     let class = req.class_name(declaring);
-    let declared = crate::api::coerce::type_name(ty);
+    let declared = crate::api::coerce::declared_type_name(ty);
     let (word, edge, limit) = if increment {
         ("increment", "maximal", i64::MAX)
     } else {
@@ -1112,7 +1125,7 @@ fn ref_type_error(
     name: &[u8],
 ) -> Thrown {
     let class = req.class_name(declaring);
-    let declared = crate::api::coerce::type_name(ty);
+    let declared = crate::api::coerce::declared_type_name(ty);
     let given = value_name(req, &value.undef_as_null());
     throw(
         req,
@@ -1143,8 +1156,8 @@ fn conflicting_coercion(
     };
     let one_class = req.class_name(*one_at);
     let two_class = req.class_name(*two_at);
-    let one_declared = crate::api::coerce::type_name(one_ty);
-    let two_declared = crate::api::coerce::type_name(two_ty);
+    let one_declared = crate::api::coerce::declared_type_name(one_ty);
+    let two_declared = crate::api::coerce::declared_type_name(two_ty);
     let given = value_name(req, &value.undef_as_null());
     throw(
         req,
@@ -1179,7 +1192,7 @@ fn property_type_error(
     name: &[u8],
 ) -> Thrown {
     let class = req.class_name(declaring);
-    let declared = crate::api::coerce::type_name(ty);
+    let declared = crate::api::coerce::declared_type_name(ty);
     let given = value_name(req, &value.undef_as_null());
     throw(
         req,

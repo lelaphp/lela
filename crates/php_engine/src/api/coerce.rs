@@ -285,11 +285,40 @@ pub fn is_type(value: &Value, tag: TypeTag) -> bool {
 /// argument type error carries, the last `%s` of php's
 /// `zend_argument_type_error(n, "must be of type %s, %s given", ...)`,
 /// so a native that words one by hand words it with this and not with
-/// [`Value::type_name`], which is `zend_zval_type_name` and says `bool`
-/// where php says `true`.
+/// [`type_name`], which says `bool` where php says `true`.
 #[must_use]
 pub fn value_name(req: &Request, value: &Value) -> String {
     crate::ops::value_name(req, value)
+}
+
+/// `zend_zval_type_name` (`Z/Zend/zend_API.c:174`), the kernel
+/// [`crate::ops::type_name`] through the face: the class for an object,
+/// `null` for a slot nothing wrote, and `zend_get_type_by_const`'s word
+/// for the rest, `bool` for either bool and `resource` for a closed
+/// resource too, a reference followed to what it holds. Where
+/// [`value_name`] renders `true`, this renders `bool`; where
+/// [`Value::type_name`] renders `object`, this renders the class. It is
+/// what `ctype_fallback`'s deprecation names its argument as.
+///
+/// ```php
+/// class classA {} $f = fopen('php://memory', 'r'); fclose($f); var_dump(ctype_alpha(new classA), ctype_digit(new stdClass), ctype_alpha(true), ctype_alpha($f));
+/// ```
+/// ```expect
+/// Deprecated: ctype_alpha(): Argument of type classA will be interpreted as string in the future in %s on line 2
+///
+/// Deprecated: ctype_digit(): Argument of type stdClass will be interpreted as string in the future in %s on line 2
+///
+/// Deprecated: ctype_alpha(): Argument of type bool will be interpreted as string in the future in %s on line 2
+///
+/// Deprecated: ctype_alpha(): Argument of type resource will be interpreted as string in the future in %s on line 2
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// ```
+#[must_use]
+pub fn type_name(req: &Request, value: &Value) -> String {
+    crate::ops::type_name(req, value)
 }
 
 /// `===`.
@@ -505,12 +534,6 @@ pub(crate) fn scalar_type_hint(
     Ok(None)
 }
 
-/// The declared type as `zend_type_to_string` writes it, through the
-/// face: what a `TypeError` for a parameter names the type as.
-pub(crate) fn type_name(ty: &Type) -> String {
-    declared_type_name(ty)
-}
-
 /// `zend_parse_arg_*_weak` on `null` for a scalar parameter that is
 /// not nullable: the value `null` coerces to under the 8.1 rule,
 /// `false`, `0`, `0.0` or the empty string, and none for a type php
@@ -540,10 +563,11 @@ fn null_as_scalar(req: &mut Request, ty: &Type) -> Result<Option<Value>, Thrown>
     })
 }
 
-/// The declared type as `zend_type_to_string` writes it into the null
-/// deprecation, for the shapes a native parameter declares: a scalar,
-/// a class, `?T`, and a union in its declared order.
-fn declared_type_name(ty: &Type) -> String {
+/// The declared type as `zend_type_to_string` writes it, for the
+/// shapes a native parameter declares: a scalar, a class, `?T`, and a
+/// union in its declared order. What a `TypeError` for a parameter and
+/// the null deprecation name the type as.
+pub(crate) fn declared_type_name(ty: &Type) -> String {
     match ty {
         Type::Mixed => String::from("mixed"),
         Type::Void => String::from("void"),

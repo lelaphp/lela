@@ -25,6 +25,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 use php_ext::abi::{Extension, ExtensionBuilder};
+use php_ext::coerce::type_name;
 use php_ext::decl::{FunctionDecl, Name, Parameter, Type};
 use php_ext::raising::{Level, Thrown, docref, too_few_arguments};
 use php_ext::request::Request;
@@ -147,7 +148,8 @@ fn class_of(class: Class, byte: u8) -> bool {
 
 /// `ctype_impl(iswhat, allow_digits, allow_minus)`: `Z_PARAM_ZVAL` and
 /// the string walk, then `ctype_fallback` for everything else, which
-/// raises the deprecation naming the argument's type through
+/// raises the deprecation naming the argument's type as
+/// `zend_zval_type_name` does, the class for an object, through
 /// `php_error_docref` before it answers: an `int` from 0 to 255 is the
 /// byte, from -128 to -1 the byte plus 256, above 255 is
 /// `allow_digits`, below -128 is `allow_minus`; any other type is
@@ -172,7 +174,7 @@ fn ctype(
         Level::Deprecated,
         &format!(
             "Argument of type {} will be interpreted as string in the future",
-            given.type_name()
+            type_name(req, &given)
         ),
     );
     Ok(Value::bool(match given.as_ref() {
@@ -214,8 +216,9 @@ fn ctype_alnum(req: &mut Request) -> Result<Value, Thrown> {
 /// as `65` again; past the range neither digits nor a minus are
 /// letters. A float, `null` and a bool are the deprecation and false,
 /// and so is an array, which the compiler cannot write `[]` for
-/// yet. Under `LC_CTYPE=C` nothing above 0x7F is a letter or
-/// printable: `\xE9` and `\xA0` are false.
+/// yet. An object is named by its class, a `__toString` read by
+/// nothing, and is false. Under `LC_CTYPE=C` nothing above 0x7F is a
+/// letter or printable: `\xE9` and `\xA0` are false.
 ///
 /// ```php
 /// var_dump(ctype_alpha('abcXYZ'), ctype_alpha('Hello, World!'), ctype_alpha(''), ctype_alpha(65), ctype_alpha(-191), ctype_alpha(300), ctype_alpha(-300), ctype_alpha(1.5), ctype_alpha(null));
@@ -244,7 +247,7 @@ fn ctype_alnum(req: &mut Request) -> Result<Value, Thrown> {
 /// ```
 ///
 /// ```php
-/// setlocale(LC_CTYPE, "C"); var_dump(ctype_alpha("\xE9"), ctype_print("\xA0"), ctype_alpha(true), ctype_digit(false), ctype_alpha(233));
+/// class classA { public function __toString(): string { return 'abc'; } } setlocale(LC_CTYPE, "C"); var_dump(ctype_alpha("\xE9"), ctype_print("\xA0"), ctype_alpha(true), ctype_digit(false), ctype_alpha(233), ctype_alpha(new classA), ctype_alpha(new stdClass));
 /// ```
 /// ```expect
 /// Deprecated: ctype_alpha(): Argument of type bool will be interpreted as string in the future in %s on line 2
@@ -252,6 +255,12 @@ fn ctype_alnum(req: &mut Request) -> Result<Value, Thrown> {
 /// Deprecated: ctype_digit(): Argument of type bool will be interpreted as string in the future in %s on line 2
 ///
 /// Deprecated: ctype_alpha(): Argument of type int will be interpreted as string in the future in %s on line 2
+///
+/// Deprecated: ctype_alpha(): Argument of type classA will be interpreted as string in the future in %s on line 2
+///
+/// Deprecated: ctype_alpha(): Argument of type stdClass will be interpreted as string in the future in %s on line 2
+/// bool(false)
+/// bool(false)
 /// bool(false)
 /// bool(false)
 /// bool(false)

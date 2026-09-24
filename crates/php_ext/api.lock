@@ -127,6 +127,7 @@ coerce::to_number
 coerce::to_object
 coerce::to_string
 coerce::truthy
+coerce::type_name
 coerce::value_name
 decl::Attribute
 decl::AttributeArgument
