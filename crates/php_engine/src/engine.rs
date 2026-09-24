@@ -420,8 +420,9 @@ impl Shared {
 }
 
 /// The core ini entries and their defaults: php's `main.c` table and
-/// five entries of `Zend/zend.c`'s, the two a throwable's trace reads,
-/// the two the stack limit reads (`Shared::stack_limit`) and
+/// six entries of `Zend/zend.c`'s, the two a throwable's trace reads,
+/// the two the stack limit reads (`Shared::stack_limit`),
+/// `zend.enable_gc`, which turns the cycle collector on, and
 /// `fatal_error_backtraces`, php 8.5's, `On` by default
 /// (`Z/Zend/zend.c:263`), which a fatal's trace reads,
 /// under the CLI's hardcoded overrides (`Z/sapi/cli/php_cli.c:116-121`),
@@ -431,7 +432,7 @@ impl Shared {
 /// table and empty here, since an entry with no value at all is one
 /// `ini_set()` refuses to set. `short_open_tag` is the one entry the
 /// scanner reads, `CG(short_tags)`, and `token_get_all` with it.
-const CORE_INI: [(&str, &str); 36] = [
+const CORE_INI: [(&str, &str); 37] = [
     ("short_open_tag", "1"),
     ("fatal_error_backtraces", "1"),
     ("precision", "14"),
@@ -456,6 +457,9 @@ const CORE_INI: [(&str, &str); 36] = [
     ("zend.exception_string_param_max_len", "15"),
     ("zend.max_allowed_stack_size", "0"),
     ("zend.reserved_stack_size", "0"),
+    // `zend.enable_gc`, `On` (`Z/Zend/zend.c:265`), whose `on_modify` is
+    // the collector's `gc_enable`.
+    ("zend.enable_gc", "1"),
     // `fiber.stack_size`, `NULL` in php's table, which `ini_get` reads
     // as the empty string and `OnUpdateFiberStackSize` as php's default.
     ("fiber.stack_size", ""),

@@ -524,6 +524,25 @@ impl Arr {
         self.header().flags.get() & UNINITIALIZED != 0
     }
 
+    /// `zend_refcounted_h gc`: the header the cycle collector colours.
+    pub(crate) fn gc(&self) -> &Refcounted {
+        &self.header().gc
+    }
+
+    /// What the collector walks of a table (`Z/Zend/zend_gc.c:1161-1199`):
+    /// the value of every position below `nNumUsed`, in order, an
+    /// `IS_INDIRECT` one followed to the zval it names; a tombstone is
+    /// `UNDEF`, which is never collectable.
+    pub(crate) fn gc_values(self, out: &mut Vec<Zval>) {
+        if self.is_uninitialized() {
+            return;
+        }
+        for i in 0..self.num_used() {
+            let z = self.value_at(i);
+            out.push(z.as_indirect().map_or(z, ZvalRef::read));
+        }
+    }
+
     /// `IS_ARRAY_IMMUTABLE`: a compiled program's constant array, never
     /// refcounted, separated before any write.
     #[must_use]
@@ -1798,10 +1817,34 @@ impl crate::Heap {
         Ok(())
     }
 
-    /// `zend_array_destroy`: every element released through `hooks`, in
+    /// `zend_array_destroy` (`Z/Zend/zend_hash.c:1815`): nothing for a
+    /// table the cycle collector is already destroying, whose type it
+    /// turned to `IS_NULL` (`rc_dtor_func`'s `zend_empty_destroy`);
+    /// otherwise the table taken out of the root buffer and turned to
+    /// `IS_NULL` itself, every element released through `hooks`, in
     /// order, with the table standing around each, every string key
     /// given up, then the data and the header back to the heap.
     pub(crate) fn array_destroy(hooks: &mut dyn HeapHooks, a: Arr) {
+        if a.gc().kind() == ZvalType::Null as u32 {
+            return;
+        }
+        hooks
+            .heap()
+            .gc
+            .remove_from_buffer(crate::collector::Node::Arr(a));
+        a.gc().set_kind_null();
+        Heap::array_free_contents(hooks, a);
+        // SAFETY: the header came from `array_sized`, its last owner has
+        // given it up and its contents are freed.
+        unsafe { hooks.heap().mm.free(a.address()) };
+    }
+
+    /// `zend_hash_destroy`: every element released through `hooks`, in
+    /// order, every string key given up, the iterators unregistered and
+    /// the data back to the heap, the header left for the caller, which
+    /// is what the cycle collector's free phase does to a garbage table
+    /// before it frees the headers in a second pass.
+    pub(crate) fn array_free_contents(hooks: &mut dyn HeapHooks, a: Arr) {
         let used = a.num_used();
         if a.is_packed() {
             for i in 0..used {
@@ -1826,9 +1869,6 @@ impl crate::Heap {
             // released.
             unsafe { heap.mm.free(data) };
         }
-        // SAFETY: the header came from `array_sized` and its last owner
-        // has given it up.
-        unsafe { heap.mm.free(a.address()) };
     }
 }
 

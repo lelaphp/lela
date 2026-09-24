@@ -46,9 +46,58 @@ pub(crate) const OBJ_WEAKLY_REFERENCED: u32 = PERSISTENT;
 pub(crate) const OBJ_DESTRUCTOR_CALLED: u32 = 1 << 8;
 /// `IS_OBJ_FREE_CALLED`: `free_obj` ran over the members, once.
 pub(crate) const OBJ_FREE_CALLED: u32 = 1 << 9;
-/// `IS_OBJ_LAZY_UNINITIALIZED`: above the flags, in the collector's
-/// half of the word, where php keeps it (`Z/Zend/zend_types.h:867`).
+/// `IS_OBJ_LAZY_UNINITIALIZED`: a bit of the object's `extra_flags`,
+/// where php keeps it (`Z/Zend/zend_types.h:867-870`), and not of this
+/// word, whose top twenty-two bits are the collector's.
 pub(crate) const OBJ_LAZY_UNINITIALIZED: u32 = 1 << 31;
+
+/// `GC_TYPE_MASK`: the type byte's four bits at the bottom of the word.
+const TYPE_MASK: u32 = 0x0000_000f;
+/// `GC_INFO_SHIFT`: the collector's twenty-two bits start here.
+const INFO_SHIFT: u32 = 10;
+/// `GC_ADDRESS` (`Z/Zend/zend_gc.c:90`): the low twenty bits of the
+/// info, the value's index in the root buffer, compressed past 2^19.
+const GC_ADDRESS: u32 = 0x000f_ffff;
+/// `GC_COLOR`: the two bits above the address.
+const GC_COLOR: u32 = 0x0030_0000;
+
+/// A value's colour to the cycle collector (`Z/Zend/zend_gc.c:24-37`),
+/// php's two `GC_COLOR` bits decoded; the header keeps them where php
+/// keeps them and nothing reads the bits but [`Refcounted::colour`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Colour {
+    /// `GC_BLACK`: in use or free, and zero, so a value the collector
+    /// never touched reads black.
+    Black,
+    /// `GC_WHITE`: a member of a garbage cycle.
+    White,
+    /// `GC_GREY`: a possible member of a cycle.
+    Grey,
+    /// `GC_PURPLE`: a possible root of a cycle.
+    Purple,
+}
+
+impl Colour {
+    /// The colour's bits in the info.
+    const fn bits(self) -> u32 {
+        match self {
+            Colour::Black => 0,
+            Colour::White => 0x0010_0000,
+            Colour::Grey => 0x0020_0000,
+            Colour::Purple => 0x0030_0000,
+        }
+    }
+
+    /// The colour the info's two bits say.
+    const fn of(info: u32) -> Colour {
+        match info & GC_COLOR {
+            0x0010_0000 => Colour::White,
+            0x0020_0000 => Colour::Grey,
+            0x0030_0000 => Colour::Purple,
+            _ => Colour::Black,
+        }
+    }
+}
 
 impl Refcounted {
     /// A header with one owner, of `kind`, with `flags` set.
@@ -90,11 +139,6 @@ impl Refcounted {
         self.type_info.get() & FLAGS_MASK
     }
 
-    /// One bit of the whole word, for the bits php keeps above the flags.
-    pub(crate) fn has_info(&self, bit: u32) -> bool {
-        self.type_info.get() & bit != 0
-    }
-
     /// `GC_ADD_FLAGS`.
     pub(crate) fn add_flags(&self, flags: u32) {
         self.type_info
@@ -105,5 +149,69 @@ impl Refcounted {
     pub(crate) fn del_flags(&self, flags: u32) {
         self.type_info
             .set(self.type_info.get() & !(flags & FLAGS_MASK));
+    }
+
+    /// `GC_TYPE`: the type byte, which the collector's free phase turns
+    /// to `IS_NULL` so that a release reaching zero on a value it is
+    /// already destroying does nothing (`GC_NULL`).
+    pub(crate) fn kind(&self) -> u32 {
+        self.type_info.get() & TYPE_MASK
+    }
+
+    /// `GC_TYPE_INFO(p) = GC_NULL | (GC_TYPE_INFO(p) & ~GC_TYPE_MASK)`:
+    /// the type byte `IS_NULL`, the flags and the info kept.
+    pub(crate) fn set_kind_null(&self) {
+        self.type_info
+            .set((self.type_info.get() & !TYPE_MASK) | ZvalType::Null as u32);
+    }
+
+    /// `GC_INFO`: the collector's twenty-two bits, colour and address.
+    fn info(&self) -> u32 {
+        self.type_info.get() >> INFO_SHIFT
+    }
+
+    /// `GC_REF_SET_INFO(ref, address | colour)`: where the value stands
+    /// in the root buffer, its index compressed as `gc_compress` keeps
+    /// it (none for a value not there), and its colour; the type and the
+    /// flags kept.
+    pub(crate) fn set_place(&self, address: Option<u32>, colour: Colour) {
+        let info = address.map_or(0, |at| at & GC_ADDRESS) | colour.bits();
+        self.type_info
+            .set((self.type_info.get() & (TYPE_MASK | FLAGS_MASK)) | (info << INFO_SHIFT));
+    }
+
+    /// `GC_REF_ADDRESS`: the value's compressed index in the root
+    /// buffer, none for one that is not there.
+    pub(crate) fn address(&self) -> Option<u32> {
+        match self.info() & GC_ADDRESS {
+            0 => None,
+            at => Some(at),
+        }
+    }
+
+    /// `GC_REF_COLOR`.
+    pub(crate) fn colour(&self) -> Colour {
+        Colour::of(self.info())
+    }
+
+    /// `GC_REF_SET_COLOR`, which `GC_REF_SET_BLACK` and
+    /// `GC_REF_SET_PURPLE` are for the two colours at either end.
+    pub(crate) fn set_colour(&self, colour: Colour) {
+        self.type_info.set(
+            (self.type_info.get() & !(GC_COLOR << INFO_SHIFT)) | (colour.bits() << INFO_SHIFT),
+        );
+    }
+
+    /// `GC_INFO(ref) == 0`: black and in no entry of the buffer, which
+    /// is a value the collector holds nothing of.
+    pub(crate) fn is_unplaced(&self) -> bool {
+        self.info() == 0
+    }
+
+    /// `GC_MAY_LEAK` (`Z/Zend/zend_gc.h:110`): not in the root buffer,
+    /// no colour, and collectable, which is what makes a value one
+    /// `gc_possible_root` may take.
+    pub(crate) fn may_leak(&self) -> bool {
+        self.type_info.get() & ((!0 << INFO_SHIFT) | NOT_COLLECTABLE) == 0
     }
 }

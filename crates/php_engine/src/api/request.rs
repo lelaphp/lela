@@ -672,7 +672,6 @@ pub struct Request {
     /// cache, which the plain files kind clears (design §4.3 seam 5).
     pub(crate) stat_cache: crate::wrapper::StatCache,
     cwd: PathBuf,
-    gc_enabled: bool,
     /// `le_stream`, the resource type every stream is registered under.
     stream_type: ResourceType,
     /// The fibers running on this request, innermost last, each with the
@@ -949,7 +948,6 @@ impl Request {
             umask: 0o022,
             stat_cache: crate::wrapper::StatCache::default(),
             cwd,
-            gc_enabled: true,
             stream_type,
             fibers: crate::fiber::Fibers::default(),
             pending: None,
@@ -981,6 +979,10 @@ impl Request {
         // `php_request_startup` sets one from the ini.
         req.arm_timer();
         req.set_memory_limit();
+        // `zend.enable_gc` as the startup ini leaves the collector
+        // (`OnUpdateGCEnabled`), and `gc_reset` from `zend_activate`.
+        let enable_gc = ini_truth(req.ini_get(b"zend.enable_gc"));
+        req.heap.gc_startup(enable_gc);
         req.update_error_reporting();
         req.stack_limit = req.shared.stack_limit();
         req
@@ -1239,31 +1241,55 @@ impl Request {
 
     /// The frame off both stacks, every owner its slots held given up
     /// while the frame still stands, `i_free_compiled_variables` over
-    /// the CVs and the temporaries with them, since a temporary the
-    /// compiler numbered for an opline's value and nothing read is
-    /// still an owner here; the receiver (`ZEND_CALL_RELEASE_THIS`) and
-    /// the extra arguments (`zend_vm_stack_free_extra_args`) with them;
-    /// then `zend_vm_stack_free_call_frame`.
+    /// the CVs, each a possible root of the cycle collector as php's
+    /// `i_zval_ptr_dtor` makes it, and the temporaries after them as
+    /// `FREE_OP` gives one up, since a temporary the compiler numbered
+    /// for an opline's value and nothing read is still an owner here;
+    /// then, in `zend_leave_helper`'s order, the extra named arguments,
+    /// the extra arguments (`zend_vm_stack_free_extra_args`, `nogc`),
+    /// the receiver (`ZEND_CALL_RELEASE_THIS`) and the closure, all of
+    /// them while the frame still stands on both stacks, as php's
+    /// `vm_stack_top` is only put back after them, so a destructor one
+    /// of them serves pushes its frames above it; then
+    /// `zend_vm_stack_free_call_frame`.
     pub(crate) fn pop_frame(&mut self) {
         let frame = self.stack.current();
         let slots = self.stack.frame(frame).map_or(0, php_heap::Frame::len);
+        let cvs = self
+            .vm
+            .serving(frame)
+            .and_then(|serving| serving.code().map(|code| code.num_cvs as usize))
+            .unwrap_or(slots);
         for at in 0..slots {
             let value = self.take_slot(frame, u32::try_from(at).unwrap_or(u32::MAX));
-            self.release(value);
+            if at < cvs {
+                self.release(value);
+            } else {
+                self.release_nogc(value);
+            }
         }
         self.free_rebuilt_table(frame);
-        if let Some(state) = self.vm.pop() {
-            if let Some(this) = state.this {
+        let held = self.vm.at_mut(frame).map(|state| {
+            (
+                std::mem::take(&mut state.extra_named),
+                std::mem::take(&mut state.extra_args),
+                state.this.take(),
+                state.closure.take(),
+            )
+        });
+        if let Some((named, extra_args, this, closure)) = held {
+            self.release_named(named);
+            for extra in extra_args {
+                self.release_nogc(extra);
+            }
+            if let Some(this) = this {
                 self.release(this.as_value());
             }
-            if let Some(closure) = state.closure {
+            if let Some(closure) = closure {
                 self.release(closure.as_value());
             }
-            for extra in state.extra_args {
-                self.release(extra);
-            }
-            self.release_named(state.extra_named);
         }
+        self.vm.pop();
         self.stack.pop_frame();
     }
 
@@ -1314,14 +1340,32 @@ impl Request {
 
     /// The served call off the stack, `zend_vm_stack_free_args` over what
     /// the `SEND_*` oplines placed and `zend_vm_stack_free_call_frame`
-    /// after it.
+    /// after it. A native's argument is given up as php's `nogc` gives it
+    /// up and is no possible root of the cycle collector, where a user
+    /// function's, a CV of its frame, is one when the frame is left.
+    ///
+    /// ```php
+    /// $o = new stdClass;
+    /// var_dump(is_object($o), gc_status()["roots"]);
+    /// function f($x) {}
+    /// f($o);
+    /// var_dump(gc_status()["roots"]);
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// int(0)
+    /// int(1)
+    /// ```
     pub(crate) fn pop_call(&mut self) {
         if let Some(call) = self.vm.pop_call() {
+            // `zend_vm_stack_free_args`, whose `zval_ptr_dtor_nogc` makes
+            // no argument a possible root; the receiver and the closure
+            // after them are `OBJ_RELEASE`, which does.
             for value in call.coerced {
-                self.release(value);
+                self.release_nogc(value);
             }
             for value in call.arguments {
-                self.release(value);
+                self.release_nogc(value);
             }
             if let Some(name) = call.name {
                 self.release(Value::string(name));
@@ -3432,11 +3476,15 @@ impl Request {
     /// The ending alone, the diagnostic already rendered at its own
     /// level: php's status alone for `E_PARSE`, and for every other
     /// fatal level the log form the host is handed, the trace under
-    /// `Stack trace:` where `php_error_cb` gave `php_log_err` one.
+    /// `Stack trace:` where `php_error_cb` gave `php_log_err` one. The
+    /// cycle collector takes no root from here on, as `_zend_bailout`
+    /// protects it (`Z/Zend/zend.c:1263`), and a collection serving
+    /// destructors when the fatal came returns without freeing.
     fn end_at_level(&mut self, level: Level, message: &str, file: &[u8], line: u32) {
         if self.ending.is_some() {
             return;
         }
+        self.heap.gc_protect(true);
         self.exit_status = 255;
         self.ending = Some(match level {
             Level::Parse => Ending::Parse,
@@ -9893,6 +9941,9 @@ impl Request {
             b"max_execution_time" => self.arm_timer(),
             b"memory_limit" => self.set_memory_limit(),
             b"error_reporting" => self.update_error_reporting(),
+            b"zend.enable_gc" => {
+                self.heap.gc_enable(ini_truth(Some(value)));
+            }
             _ => {}
         }
         Ok(previous)
@@ -10356,6 +10407,16 @@ impl Request {
         Heap::release(&mut Hooks(self), value.to_zval());
     }
 
+    /// One owner fewer as `zval_ptr_dtor_nogc` gives it up: what
+    /// [`Request::release`] does, and never a possible root of the cycle
+    /// collector (design §5.12). What `FREE_OP` does to a temporary
+    /// operand and `zend_vm_stack_free_args` to an internal call's
+    /// arguments.
+    #[allow(clippy::needless_pass_by_value)]
+    pub(crate) fn release_nogc(&mut self, value: Value) {
+        Heap::release_nogc(&mut Hooks(self), value.to_zval());
+    }
+
     // ------------------------------------------ references, resources
 
     /// `ZVAL_NEW_REF`, what [`PhpRef::new`] is: a cell of the request's
@@ -10578,39 +10639,57 @@ impl Request {
         self.heap.reset_peak();
     }
 
-    /// `gc_collect_cycles()`: the number of collected cycles.
+    /// `gc_collect_cycles()`, `zend_gc_collect_cycles` over the
+    /// request's heap (design §5.12): the values the collection freed, as php
+    /// 8.5 counts them.
     pub fn gc_collect(&mut self) -> i64 {
-        0
+        Heap::gc_collect_cycles(&mut Hooks(self))
     }
 
-    /// `gc_enable()` and `gc_disable()`.
+    /// `gc_enable()` and `gc_disable()`: `zend.enable_gc` altered, whose
+    /// `OnUpdateGCEnabled` is `gc_enable`, so `ini_get` reads what the
+    /// call left.
     pub fn gc_enable(&mut self, enabled: bool) {
-        self.gc_enabled = enabled;
+        let value: &[u8] = if enabled { b"1" } else { b"0" };
+        self.ini.retain(|(n, _)| n.as_slice() != b"zend.enable_gc");
+        self.ini.push((b"zend.enable_gc".to_vec(), value.to_vec()));
+        self.heap.gc_enable(enabled);
     }
 
     /// `gc_enabled()`.
     #[must_use]
     pub fn gc_enabled(&self) -> bool {
-        self.gc_enabled
+        self.heap.gc_enabled()
     }
 
-    /// `gc_status()` with php 8.5's fields, the keys strings of the
-    /// request's.
+    /// `gc_status()`, `zend_gc_get_status` in php 8.5's twelve fields, the
+    /// times in seconds as php divides its nanoseconds, the keys strings
+    /// of the request's.
     pub fn gc_status(&mut self) -> Result<PhpArray, Thrown> {
+        let status = self.heap.gc_status();
         let mut array = PhpArray::new(self)?;
         for (name, value) in [
-            ("running", Value::bool(false)),
-            ("protected", Value::bool(false)),
-            ("full", Value::bool(false)),
-            ("runs", Value::int(0)),
-            ("collected", Value::int(0)),
-            ("threshold", Value::int(10_001)),
-            ("buffer_size", Value::int(16_384)),
-            ("roots", Value::int(0)),
-            ("application_time", Value::float(0.0)),
-            ("collector_time", Value::float(0.0)),
-            ("destructor_time", Value::float(0.0)),
-            ("free_time", Value::float(0.0)),
+            ("running", Value::bool(status.running)),
+            ("protected", Value::bool(status.protected)),
+            ("full", Value::bool(status.full)),
+            ("runs", Value::int(i64::from(status.runs))),
+            ("collected", Value::int(i64::from(status.collected))),
+            ("threshold", Value::int(i64::from(status.threshold))),
+            ("buffer_size", Value::int(i64::from(status.buffer_size))),
+            ("roots", Value::int(i64::from(status.roots))),
+            (
+                "application_time",
+                Value::float(seconds(status.application_time)),
+            ),
+            (
+                "collector_time",
+                Value::float(seconds(status.collector_time)),
+            ),
+            (
+                "destructor_time",
+                Value::float(seconds(status.destructor_time)),
+            ),
+            ("free_time", Value::float(seconds(status.free_time))),
         ] {
             let key = Key::Str(PhpString::new(self, name.as_bytes())?);
             array.set(self, key, value)?;
@@ -10862,6 +10941,80 @@ impl HeapHooks for Hooks<'_> {
         table.free_obj(self.0, PhpObject::of(obj));
     }
 
+    /// php's `dtor_obj != zend_objects_destroy_object || ce->destructor`:
+    /// the class declares or inherits `__destruct`, or its handler
+    /// table serves a destructor of its own, which `Fiber`'s does.
+    fn has_destructor(&mut self, obj: Obj) -> bool {
+        let class = ClassId(obj.class());
+        self.0.method_named(class, b"__destruct").is_some()
+            || crate::fiber::serves_destructor(self.0.object_handlers(obj))
+    }
+
+    /// The live temporaries of every frame of the running execution,
+    /// innermost first (`zend_gc_check_root_tmpvars`): each frame's
+    /// `ZEND_LIVE_TMPVAR` and `ZEND_LIVE_LOOP` ranges open at the opline
+    /// it stands at, a range that starts past it ending the walk of that
+    /// frame's table, as php's sorted table does. A `foreach` by
+    /// reference that a collection ran inside holds its array in a live
+    /// `LOOP` temporary, which the collection roots again after it, and
+    /// the array's cycles are found by the next one.
+    ///
+    /// ```php
+    /// $a = [0, 1];
+    /// foreach ($a as &$v) {
+    ///     $a[0] =& $a;
+    ///     $a[1] = array();
+    ///     $a[1][0] =& $a[1];
+    ///     $b = 1;
+    ///     $a =& $b;
+    ///     var_dump(gc_collect_cycles());
+    ///     break;
+    /// }
+    /// var_dump(gc_status()['roots']);
+    /// unset($v);
+    /// var_dump(gc_collect_cycles());
+    /// ```
+    /// ```expect
+    /// int(0)
+    /// int(1)
+    /// int(2)
+    /// ```
+    fn gc_live_temporaries(&mut self, visit: &mut dyn FnMut(Zval)) {
+        let req = &*self.0;
+        for (at, state) in req.vm.frames().iter().enumerate().rev() {
+            let Some(code) = crate::exec::body_of(&state.unit, state.body) else {
+                continue;
+            };
+            let frame = FrameRef(u32::try_from(at).unwrap_or(u32::MAX));
+            for range in &code.live_ranges {
+                if range.start.0 > state.opline {
+                    break;
+                }
+                if range.end.0 <= state.opline {
+                    continue;
+                }
+                if matches!(
+                    range.kind,
+                    php_unit::LiveKind::TmpVar | php_unit::LiveKind::Loop
+                ) {
+                    let slot = crate::exec::temporary_slot(code, range.var);
+                    visit(req.slot(frame, slot).to_zval());
+                }
+            }
+        }
+    }
+
+    /// A `WeakMap`'s keys beside its entries (`crate::weakrefs::gc_entries`).
+    fn gc_weakmap_entries(&mut self, map: Obj, visit: &mut dyn FnMut(Obj, ZvalRef)) -> bool {
+        crate::weakrefs::gc_entries(self.0, map, visit)
+    }
+
+    /// The `WeakMap` entries keyed by an object
+    /// (`crate::weakrefs::gc_keyed`).
+    fn gc_weakly_keyed(&mut self, key: Obj, visit: &mut dyn FnMut(ZvalRef, Obj)) {
+        crate::weakrefs::gc_keyed(self.0, key, visit);
+    }
+
     /// `get_gc`, through the table: what the payload owns, handed to the
     /// collector's walk as zvals.
     fn gc_children(&mut self, obj: Obj, visit: &mut dyn FnMut(Zval)) {
@@ -10935,6 +11088,11 @@ const DISPLAY_ERRORS_STDERR: u8 = 2;
 )]
 fn display_errors_mode(number: i64) -> u8 {
     number as u8
+}
+
+/// `(double) hrtime / ZEND_NANO_IN_SEC`, a collector time in seconds.
+fn seconds(d: std::time::Duration) -> f64 {
+    d.as_secs_f64()
 }
 
 /// `zend_ini_parse_bool`: an ini entry read as on or off, where "off",
