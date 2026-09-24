@@ -113,6 +113,14 @@ pub(crate) type EngineStateBuilder =
     Arc<dyn Fn(&StartupIni) -> Box<dyn Any + Send + Sync> + Send + Sync>;
 /// The `RINIT` function.
 pub(crate) type Rinit = fn(&mut Request) -> Result<(), Thrown>;
+
+/// An ini entry's `on_modify`, php's `PHP_INI_MH` at
+/// `ZEND_INI_STAGE_RUNTIME`: served by `ini_set()` with the new value
+/// before the entry takes it, raising what the entry's handler raises,
+/// and answering whether the value is taken, `false` being php's
+/// `FAILURE`, which leaves the entry as it was and makes `ini_set()`
+/// answer `false`.
+pub type OnModify = fn(&mut Request, &[u8]) -> Result<bool, Thrown>;
 /// The `MINFO` function: writes the extension's `phpinfo()` table
 /// through [`Request::info_table`].
 pub(crate) type Info = fn(&mut Request);
@@ -164,6 +172,7 @@ pub struct Extension {
     pub(crate) classes: Vec<NativeClassDecl>,
     pub(crate) constants: Vec<ConstDecl>,
     pub(crate) ini: Vec<IniDecl>,
+    pub(crate) on_modify: Vec<(Vec<u8>, OnModify)>,
     pub(crate) dependencies: Vec<Dependency>,
     pub(crate) request_state: Option<StateBuilder>,
     pub(crate) engine_state: Option<EngineStateBuilder>,
@@ -189,6 +198,7 @@ pub struct ExtensionBuilder {
     classes: Vec<NativeClassDecl>,
     constants: Vec<ConstDecl>,
     ini: Vec<IniDecl>,
+    on_modify: Vec<(Vec<u8>, OnModify)>,
     dependencies: Vec<Dependency>,
     request_state: Option<StateBuilder>,
     engine_state: Option<EngineStateBuilder>,
@@ -281,6 +291,14 @@ impl ExtensionBuilder {
         self
     }
 
+    /// The `on_modify` of the ini entry `name`, one of the extension's
+    /// own, served whenever a program changes it with `ini_set()`.
+    #[must_use]
+    pub fn on_modify(mut self, name: &[u8], handler: OnModify) -> ExtensionBuilder {
+        self.on_modify.push((name.to_vec(), handler));
+        self
+    }
+
     /// The `deps` table, `ZEND_MOD_REQUIRED("libxml")` and its kin, in
     /// the order the extension lists them; an extension that declares
     /// none has php's null pointer, the empty table.
@@ -345,6 +363,7 @@ impl ExtensionBuilder {
             classes: self.classes,
             constants: self.constants,
             ini: self.ini,
+            on_modify: self.on_modify,
             dependencies: self.dependencies,
             request_state: self.request_state,
             engine_state: self.engine_state,

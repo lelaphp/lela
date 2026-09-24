@@ -9213,6 +9213,17 @@ impl Request {
         if name == b"fiber.stack_size" && !crate::fiber::stack_size_updated(self, value) {
             return Ok(None);
         }
+        let handler = self.shared.extensions.iter().find_map(|e| {
+            e.on_modify
+                .iter()
+                .find(|(n, _)| n.as_slice() == name)
+                .map(|(_, h)| *h)
+        });
+        if let Some(handler) = handler
+            && !handler(self, value)?
+        {
+            return Ok(None);
+        }
         self.ini.retain(|(n, _)| n.as_slice() != name);
         self.ini.push((name.to_vec(), value.to_vec()));
         match name {
@@ -10484,6 +10495,51 @@ mod tests {
 
         assert_eq!(String::from_utf8_lossy(&served.stdout), "d\nafter\n");
         assert_eq!(served.fatal, None);
+    }
+
+    /// An extension entry's `on_modify` (`PHP_INI_MH` at
+    /// `ZEND_INI_STAGE_RUNTIME`) as `ini_set()` serves it: before the
+    /// value is taken, what it raises raised, and its refusal leaving the
+    /// entry as it was. No witness holds it, because the entry is no
+    /// entry of the oracle's; `assert.c`'s `OnUpdateAssert` family is
+    /// the one php-src has, which reaches it with #753.
+    #[test]
+    fn an_extension_entrys_on_modify_is_served_by_ini_set() {
+        #[allow(clippy::unnecessary_wraps)] // `OnModify`'s signature
+        fn guarded(req: &mut Request, value: &[u8]) -> Result<bool, crate::api::raising::Thrown> {
+            if value == b"0" {
+                crate::api::raising::docref(
+                    req,
+                    Level::Deprecated,
+                    "t.flag INI setting is deprecated",
+                );
+            }
+            Ok(value != b"bad")
+        }
+        let extension = crate::api::abi::ExtensionBuilder::default()
+            .ini(vec![php_unit::decl::IniDecl {
+                name: php_unit::decl::Name(b"t.flag".as_slice().into()),
+                default: b"1".as_slice().into(),
+                user: true,
+                per_dir: true,
+                system: true,
+            }])
+            .on_modify(b"t.flag", guarded)
+            .build("modified");
+        let engine = Engine::builder().extensions(&[extension]).build();
+        let served = engine.serve_capture(
+            "<?php var_dump(ini_set('t.flag', '0'), ini_set('t.flag', 'bad'), ini_get('t.flag'));",
+            crate::test::Capture::default(),
+        );
+        let out = String::from_utf8_lossy(&served.stdout);
+        assert!(
+            out.contains("Deprecated: ini_set(): t.flag INI setting is deprecated"),
+            "{out}"
+        );
+        assert!(
+            out.ends_with("string(1) \"1\"\nbool(false)\nstring(1) \"0\"\n"),
+            "{out}"
+        );
     }
 
     /// `zend_objects_destroy_object`'s `E_CORE_ERROR`

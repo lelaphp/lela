@@ -21,6 +21,7 @@ abi::ExtensionBuilder::engine_state
 abi::ExtensionBuilder::functions
 abi::ExtensionBuilder::info
 abi::ExtensionBuilder::ini
+abi::ExtensionBuilder::on_modify
 abi::ExtensionBuilder::request_state
 abi::ExtensionBuilder::rinit
 abi::ExtensionBuilder::rshutdown
@@ -55,6 +56,7 @@ abi::ObjectHandlers::unset_dimension
 abi::ObjectHandlers::unset_property
 abi::ObjectHandlers::write_dimension
 abi::ObjectHandlers::write_property
+abi::OnModify
 abi::OrFalse
 abi::Out
 abi::Out::set
