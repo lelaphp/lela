@@ -410,6 +410,74 @@ impl ObjectHandlers for WeakMapHandlers {
 
 static WEAK_MAP: WeakMapHandlers = WeakMapHandlers;
 
+/// `zend_weakmap_read_dimension` under `BP_VAR_W` and `BP_VAR_RW`
+/// (`Z/Zend/zend_weakrefs.c:370`), which the dimension fetch for a write
+/// asks of a `WeakMap` where it asks `read_dimension` of any other
+/// class: the entry's own slot, so `$map[$k][] = 1` writes into the
+/// entry and `$map[$k] =& $v` binds it; php's refusals as the read
+/// raises them. php makes the slot a reference (`ZVAL_MAKE_REF`) and the
+/// fetch unwraps it again where the map is its one owner
+/// (`ZVAL_UNREF`), which leaves the slot as it was. `None` for an object
+/// of any other class.
+///
+/// ```php
+/// $obj = new stdClass;
+/// $map = new WeakMap;
+/// $integer = 1;
+/// $map[$obj] = [];
+/// $map[$obj][] = 42;
+/// var_dump($map[$obj]);
+/// $map[$obj] =& $integer;
+/// $integer++;
+/// var_dump($map[$obj], $map->offsetGet($obj));
+/// ```
+/// ```expect
+/// array(1) {
+///   [0]=>
+///   int(42)
+/// }
+/// int(2)
+/// int(2)
+/// ```
+pub(crate) fn dimension_place(
+    req: &mut Request,
+    table: &'static dyn ObjectHandlers,
+    object: PhpObject,
+    offset: Option<&Value>,
+) -> Option<Result<php_heap::ZvalRef, Thrown>> {
+    if !std::ptr::addr_eq(table, &raw const WEAK_MAP) {
+        return None;
+    }
+    Some(weakmap_place(req, object, offset))
+}
+
+fn weakmap_place(
+    req: &mut Request,
+    object: PhpObject,
+    offset: Option<&Value>,
+) -> Result<php_heap::ZvalRef, Thrown> {
+    let Some(offset) = offset else {
+        return Err(throw(req, "Error", "Cannot append to WeakMap"));
+    };
+    let key = map_key(req, offset)?;
+    let at = Key::Int(i64::from(key.index()));
+    let entries = entries_of(req, object);
+    let held = entries.and_then(|entries| entries.get(&at).map(|value| (entries, value)));
+    let Some((entries, value)) = held else {
+        let class = req.class_name(key.class());
+        return Err(throw(
+            req,
+            "Error",
+            &format!("Object {class}#{} not contained in WeakMap", key.index()),
+        ));
+    };
+    let _ = value;
+    match entries.heap().value_ref(at.heap()) {
+        Some(place) => Ok(place),
+        None => Err(throw(req, "Error", "Cannot append to WeakMap")),
+    }
+}
+
 /// `zend_weakmap_clone_obj`: the new map's entries a copy, every value
 /// one more owner, and the copy registered against every key.
 fn weakmap_clone(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {

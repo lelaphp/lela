@@ -5285,20 +5285,25 @@ fn fetch_dim_place(
         Ok(Container::Object(object)) => {
             let dim = object_dim(req, frame, code, op);
             let table = req.object_handlers(object.heap());
-            match table.read_dimension(req, object, dim.as_ref()) {
-                Ok(value) => {
-                    if value.as_object().is_none() {
-                        let class = req.class_name(object.class());
-                        crate::api::raising::notice(
-                            req,
-                            &format!(
-                                "Indirect modification of overloaded element of {class} has no effect"
-                            ),
-                        );
+            if let Some(placed) = crate::weakrefs::dimension_place(req, table, object, dim.as_ref())
+            {
+                placed.map(php_heap::Zval::indirect)
+            } else {
+                match table.read_dimension(req, object, dim.as_ref()) {
+                    Ok(value) => {
+                        if value.as_object().is_none() {
+                            let class = req.class_name(object.class());
+                            crate::api::raising::notice(
+                                req,
+                                &format!(
+                                    "Indirect modification of overloaded element of {class} has no effect"
+                                ),
+                            );
+                        }
+                        Ok(value.to_zval())
                     }
-                    Ok(value.to_zval())
+                    Err(thrown) => Err(thrown),
                 }
-                Err(thrown) => Err(thrown),
             }
         }
         Ok(Container::Text(_)) if op.op2_type == OperandKind::Unused => {
