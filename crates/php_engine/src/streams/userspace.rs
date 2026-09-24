@@ -839,6 +839,14 @@ pub(crate) fn path_op(
             b"stream_metadata",
             vec![url_arg, Value::int(5), Value::int(gid)],
         ),
+        WrapperOp::OwnerName(name) => (
+            b"stream_metadata",
+            vec![url_arg, Value::int(2), string_arg(req, name)?],
+        ),
+        WrapperOp::GroupName(name) => (
+            b"stream_metadata",
+            vec![url_arg, Value::int(4), string_arg(req, name)?],
+        ),
         WrapperOp::Chmod(mode) => (
             b"stream_metadata",
             vec![url_arg, Value::int(6), Value::int(mode)],

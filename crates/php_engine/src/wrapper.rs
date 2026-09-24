@@ -348,7 +348,9 @@ impl Request {
             WrapperOp::Touch(_)
             | WrapperOp::Chmod(_)
             | WrapperOp::Owner(_)
-            | WrapperOp::Group(_) => self.metadata_url(path, op),
+            | WrapperOp::Group(_)
+            | WrapperOp::OwnerName(_)
+            | WrapperOp::GroupName(_) => self.metadata_url(path, op),
         }
     }
 
@@ -680,7 +682,7 @@ impl Request {
             }
             WrapperOp::Touch(Some(_)) => "touch",
             WrapperOp::Chmod(_) => "chmod",
-            WrapperOp::Owner(_) => "chown",
+            WrapperOp::Owner(_) | WrapperOp::OwnerName(_) => "chown",
             _ => "chgrp",
         };
         let text = format!("Cannot call {name}() for a non-standard stream");
@@ -734,7 +736,9 @@ impl Request {
             WrapperOp::Unlink
             | WrapperOp::Rename { .. }
             | WrapperOp::Mkdir { .. }
-            | WrapperOp::Rmdir => return false,
+            | WrapperOp::Rmdir
+            | WrapperOp::OwnerName(_)
+            | WrapperOp::GroupName(_) => return false,
         };
         match done {
             Ok(()) => {

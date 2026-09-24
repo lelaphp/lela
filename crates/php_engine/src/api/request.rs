@@ -416,6 +416,11 @@ pub enum WrapperOp<'a> {
     Owner(i64),
     /// `PHP_STREAM_META_GROUP`, a group id.
     Group(i64),
+    /// `PHP_STREAM_META_OWNER_NAME`, a user's name, which `chown` hands a
+    /// wrapper that is not the plain files one as it was given.
+    OwnerName(&'a [u8]),
+    /// `PHP_STREAM_META_GROUP_NAME`, a group's name, as `chgrp` hands it.
+    GroupName(&'a [u8]),
 }
 
 /// `php_stream_bucket_brigade`: the buckets a filter is handed and the
