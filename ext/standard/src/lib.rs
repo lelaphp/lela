@@ -66,6 +66,7 @@ mod html;
 mod http;
 mod image;
 mod ini;
+mod iptc;
 mod levenshtein;
 mod link;
 mod mail;
@@ -270,6 +271,7 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
         browscap::natives(),
         datetime::natives(),
         net::natives(),
+        iptc::natives(),
     ]
     .into_iter()
     .flatten()
