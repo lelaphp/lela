@@ -639,7 +639,7 @@ fn special_constant(name: &[u8]) -> Option<Value> {
 /// php's `Error` where there is no such scope, and any other name is
 /// `zend_lookup_class_ex`, the table and then the autoloaders, with
 /// `Class "X" not found` where neither has it.
-fn fetch_class(req: &mut Request, name: &[u8]) -> Result<ClassId, Thrown> {
+pub(crate) fn fetch_class(req: &mut Request, name: &[u8]) -> Result<ClassId, Thrown> {
     if name.eq_ignore_ascii_case(b"self") {
         return req.scope().ok_or_else(|| {
             throw(
@@ -703,7 +703,6 @@ pub fn eval_const_expr(
     expr: &ConstExpr,
     scope: Option<ClassId>,
 ) -> Result<Value, Thrown> {
-    let _ = scope;
     match expr {
         ConstExpr::Null => Ok(Value::null()),
         ConstExpr::Bool(b) => Ok(Value::bool(*b)),
@@ -723,9 +722,34 @@ pub fn eval_const_expr(
         },
         // `zend_ast_evaluate`'s `ZEND_AST_CLASS_CONST` arm: the class
         // fetched by the name as written and its constant read through
-        // `zend_fetch_class_constant`. `self`, `parent` and `static` are
-        // refused while the file compiles, so the name here is a class's.
+        // `zend_get_class_constant_ex`, whose `self` and `parent` are the
+        // scope the expression is evaluated in and its parent; `static`
+        // is refused while the file compiles.
         ConstExpr::ClassConstant { class, name } => {
+            if class.0.eq_ignore_ascii_case(b"self") || class.0.eq_ignore_ascii_case(b"parent") {
+                let parent = class.0.eq_ignore_ascii_case(b"parent");
+                let word = if parent { "parent" } else { "self" };
+                let Some(scope) = scope else {
+                    return Err(throw(
+                        req,
+                        "Error",
+                        &format!("Cannot access \"{word}\" when no class scope is active"),
+                    ));
+                };
+                let id = if parent {
+                    let Some(up) = req.class_parent(scope) else {
+                        return Err(throw(
+                            req,
+                            "Error",
+                            "Cannot access \"parent\" when current class scope has no parent",
+                        ));
+                    };
+                    up
+                } else {
+                    scope
+                };
+                return req.class_constant(id, &name.0);
+            }
             let Some(id) = req.class_named(&class.0) else {
                 return Err(throw(
                     req,

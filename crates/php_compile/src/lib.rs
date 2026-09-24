@@ -3288,12 +3288,98 @@ mod tests {
             line: 0,
             raised: Vec::new(),
         };
-        let error = refused(b"<?php\n$a = (print 1);\n").unwrap_or_else(compiled);
+        let error = refused(b"<?php\n$a = (eval('1;'));\n").unwrap_or_else(compiled);
         assert_eq!(error.level, Level::Parse);
-        assert_eq!(error.message, "a `print` this compiler cannot read yet");
+        assert_eq!(error.message, "an `eval` this compiler cannot read yet");
         assert_eq!(error.line, 2);
         let unclosed = refused(b"<?php\n$a = (1 + 2;\n").unwrap_or_else(compiled);
         assert_eq!(unclosed.message, "syntax error, unexpected token \";\"");
+    }
+
+    /// `global $a, $b;` is `zend_compile_global_var`'s `BIND_GLOBAL` per
+    /// variable, the CV in `op1` and its name in `op2`, where the
+    /// statement was refused as not read before; a name the program
+    /// computes still is.
+    #[test]
+    fn a_global_statement_binds_each_cv_by_name() {
+        assert_eq!(
+            oplines_of(b"<?php global $a, $b; echo $a;"),
+            "0000 BIND_GLOBAL CV0($a) string(\"a\")\n\
+             0001 BIND_GLOBAL CV1($b) string(\"b\")\n\
+             0002 ECHO CV0($a)\n\
+             0003 RETURN int(1)\n"
+        );
+        assert_eq!(
+            refused_message(b"<?php global $$x;").as_deref(),
+            Some("a `global` of a variable named at run time this compiler cannot read yet")
+        );
+    }
+
+    /// `++` and `--` over an element and over a property, which were
+    /// refused as over what is no variable, as the oracle's
+    /// `[regime.dump]` has them: an element is `FETCH_DIM_RW` per link
+    /// and the step over the last `VAR`, a property is the last fetch
+    /// turned into `PRE_INC_OBJ` and its kin, and a `POST_*` nothing
+    /// reads is the `PRE_*` `zend_do_free` makes of it.
+    #[test]
+    fn a_step_over_an_element_or_a_property_is_the_fetch_under_rw() {
+        assert_eq!(
+            oplines_of(
+                b"<?php $a[0]++; $x = $a[0][1]--; $o->p++; $y = --$o->q->r; ++$a[0]->p; $b[]++;"
+            ),
+            "0000 V5 = FETCH_DIM_RW CV0($a) int(0)\n\
+             0001 PRE_INC V5\n\
+             0002 V7 = FETCH_DIM_RW CV0($a) int(0)\n\
+             0003 V8 = FETCH_DIM_RW V7 int(1)\n\
+             0004 T9 = POST_DEC V8\n\
+             0005 ASSIGN CV1($x) T9\n\
+             0006 PRE_INC_OBJ CV2($o) string(\"p\")\n\
+             0007 V12 = FETCH_OBJ_RW CV2($o) string(\"q\")\n\
+             0008 T13 = PRE_DEC_OBJ V12 string(\"r\")\n\
+             0009 ASSIGN CV3($y) T13\n\
+             0010 V15 = FETCH_DIM_RW CV0($a) int(0)\n\
+             0011 PRE_INC_OBJ V15 string(\"p\")\n\
+             0012 V17 = FETCH_DIM_RW CV4($b) NEXT\n\
+             0013 PRE_INC V17\n\
+             0014 RETURN int(1)\n"
+        );
+    }
+
+    /// `C::class`, which was refused as not read, as the oracle's
+    /// `[regime.dump]` has it: a name written out folds to its resolved
+    /// spelling, `self` in a known scope to the class being compiled,
+    /// and `static`, `self` where the scope is the includer's and a
+    /// value are `FETCH_CLASS_NAME`.
+    #[test]
+    fn a_class_name_folds_where_php_resolves_it_and_is_fetched_where_not() {
+        assert_eq!(
+            oplines_of(b"<?php namespace N; echo Foo::class, \\Foo::class, self::class, static::class, $o::class;"),
+            "0000 ECHO string(\"N\\\\Foo\")\n\
+             0001 ECHO string(\"Foo\")\n\
+             0002 T1 = FETCH_CLASS_NAME (self)\n\
+             0003 ECHO T1\n\
+             0004 T2 = FETCH_CLASS_NAME (static)\n\
+             0005 ECHO T2\n\
+             0006 T3 = FETCH_CLASS_NAME CV0($o)\n\
+             0007 ECHO T3\n\
+             0008 RETURN int(1)\n"
+        );
+    }
+
+    /// `print` is `zend_compile_print`'s `ECHO` and the constant `1` as
+    /// the expression's value, which a condition over it reads as it
+    /// stands, the oracle's `[regime.dump]` of the same source.
+    #[test]
+    fn print_is_an_echo_whose_value_is_the_constant_one() {
+        assert_eq!(
+            oplines_of(b"<?php $r = print \"a\"; if (print $r) echo \"y\";"),
+            "0000 ECHO string(\"a\")\n\
+             0001 ASSIGN CV0($r) int(1)\n\
+             0002 ECHO CV0($r)\n\
+             0003 JMPZ int(1) 0005\n\
+             0004 ECHO string(\"y\")\n\
+             0005 RETURN int(1)\n"
+        );
     }
 
     /// Five `long` cases, the default among them, are what
@@ -4266,10 +4352,14 @@ mod tests {
             Some("Cannot use result of built-in function in write context")
         );
         assert_eq!(
-            refused(b"<?php C::$s[0] += 1;").as_deref(),
-            Some(
-                "a compound assignment to a dimension over a `static` property, whose fetch is `FETCH_STATIC_PROP_RW`, this compiler cannot read yet"
-            )
+            oplines_of(b"<?php C::$s[0] += 1; C::$s[1]++;"),
+            "0000 V0 = FETCH_STATIC_PROP_RW string(\"s\") string(\"C\")\n\
+             0001 ASSIGN_DIM_OP (ADD) V0 int(0)\n\
+             0002 OP_DATA int(1)\n\
+             0003 V2 = FETCH_STATIC_PROP_RW string(\"s\") string(\"C\")\n\
+             0004 V3 = FETCH_DIM_RW V2 int(1)\n\
+             0005 PRE_INC V3\n\
+             0006 RETURN int(1)\n"
         );
     }
 
@@ -4440,10 +4530,7 @@ mod tests {
             refused(b"<?php C::$p();").as_deref(),
             Some("a static call whose method is named at run time this compiler cannot read yet")
         );
-        assert_eq!(
-            refused(b"<?php echo self::$p;").as_deref(),
-            Some("a class reference of the scope this compiler cannot read yet")
-        );
+        assert_eq!(refused(b"<?php echo self::$p;").as_deref(), None);
         assert_eq!(
             refused(b"<?php class D { const X = C::$p; }").as_deref(),
             Some("Constant expression contains invalid operations")
@@ -4675,10 +4762,7 @@ mod tests {
         );
         assert_eq!(
             refused(b"<?php\nclass M extends self {}"),
-            not_yet(
-                "a class reference of the scope this compiler cannot read yet",
-                2
-            )
+            compile_error("Cannot use \"self\" as class name, as it is reserved", 2)
         );
         assert_eq!(
             refused(b"<?php\ninterface I {}\nclass M extends I {}"),
@@ -5912,12 +5996,10 @@ class C {
     /// What a dimension refuses: `[]` where a value is wanted, php's
     /// `Cannot use [] for reading`; under a write the bases php
     /// refuses outright, a temporary expression and a call answered in
-    /// one; and the two bases this compiler has not under a write,
-    /// A `static` property under a compound assignment, whose fetch is
-    /// `FETCH_STATIC_PROP_RW` and which no handler serves. `$this` and
-    /// a `static` property under a plain write, a property and a call
-    /// under a write, and every base php compiles where it stands under
-    /// a read, compile since #451 and #507.
+    /// one. `$this` and a `static` property under a write, a compound
+    /// assignment and a `++` (`FETCH_STATIC_PROP_RW`), a property and a
+    /// call under a write, and every base php compiles where it stands
+    /// under a read, compile since #451, #507 and #667.
     #[test]
     fn a_dimension_this_compiler_cannot_read_yet_is_refused() {
         for source in [
@@ -5925,7 +6007,6 @@ class C {
             b"<?php echo $a[];".as_slice(),
             b"<?php \"ab\"[0] = 1;".as_slice(),
             b"<?php [1, 2][0] = 1;".as_slice(),
-            b"<?php C::$p[0] += 1;".as_slice(),
         ] {
             assert!(
                 refused(source).is_some(),
@@ -6248,14 +6329,7 @@ class C {
             .err()
             .map(|e| e.message)
         };
-        assert_eq!(
-            refused(b"<?php new $c;").as_deref(),
-            Some("a `new` of what is no class name this compiler cannot read yet")
-        );
-        assert_eq!(
-            refused(b"<?php echo E::class;").as_deref(),
-            Some("a `::class` this compiler cannot read yet")
-        );
+        assert_eq!(refused(b"<?php echo E::class;").as_deref(), None);
         assert_eq!(
             refused(b"<?php echo $o->$p;").as_deref(),
             Some("a property named at run time this compiler cannot read yet")
@@ -6266,13 +6340,63 @@ class C {
                 "a property fetch sent to a callee the table has not this compiler cannot read yet"
             )
         );
+    }
+
+    /// A class reference of the scope and a class the program computes,
+    /// which were refused as not read, as the oracle's `[regime.dump]`
+    /// has them in the main op array: `self`, `parent` and `static` are
+    /// their fetch type in an unused operand, the scope being the
+    /// includer's and so no compile-time error, and an expression is
+    /// `FETCH_CLASS` into a `VAR`, `instanceof`'s under
+    /// `ZEND_FETCH_CLASS_NO_AUTOLOAD` and `_SILENT` beside
+    /// `_EXCEPTION`.
+    #[test]
+    fn a_class_reference_of_the_scope_or_an_expression_compiles_as_php_emits_it() {
         assert_eq!(
-            refused(b"<?php echo $o instanceof $c;").as_deref(),
-            Some("an `instanceof` of what is no class name this compiler cannot read yet")
+            oplines_of(
+                b"<?php echo self::$p; new $c; var_dump($o instanceof $c); echo $o::X, static::Y; $o::m(); parent::$q = 1; new static;"
+            ),
+            "0000 T2 = FETCH_STATIC_PROP_R string(\"p\") (self) (exception)\n\
+             0001 ECHO T2\n\
+             0002 V3 = FETCH_CLASS (exception) CV0($c)\n\
+             0003 V4 = NEW 0 V3\n\
+             0004 DO_FCALL\n\
+             0005 FREE V4\n\
+             0006 INIT_FCALL 1 96 string(\"var_dump\")\n\
+             0007 V6 = FETCH_CLASS (no-autoload) (silent) (exception) CV0($c)\n\
+             0008 T7 = INSTANCEOF CV1($o) V6\n\
+             0009 SEND_VAL T7 1\n\
+             0010 DO_ICALL\n\
+             0011 V9 = FETCH_CLASS (exception) CV1($o)\n\
+             0012 T10 = FETCH_CLASS_CONSTANT V9 string(\"X\")\n\
+             0013 ECHO T10\n\
+             0014 T11 = FETCH_CLASS_CONSTANT (static) (exception) string(\"Y\")\n\
+             0015 ECHO T11\n\
+             0016 V12 = FETCH_CLASS (exception) CV1($o)\n\
+             0017 INIT_STATIC_METHOD_CALL 0 V12 string(\"m\")\n\
+             0018 DO_FCALL\n\
+             0019 ASSIGN_STATIC_PROP string(\"q\")\n\
+             0020 OP_DATA int(1)\n\
+             0021 V15 = NEW 0 (static) (exception)\n\
+             0022 DO_FCALL\n\
+             0023 FREE V15\n\
+             0024 RETURN int(1)\n\
+             LIVE RANGES:\n\
+             \x20    4: 0004 - 0005 (new)\n\
+             \x20    15: 0022 - 0023 (new)\n"
+        );
+        let refused_message = |source: &[u8]| refused(source).map(|e| e.message);
+        assert_eq!(
+            refused_message(b"<?php function f() { return self::X; }").as_deref(),
+            Some("Cannot use \"self\" when no class scope is active")
         );
         assert_eq!(
-            refused(b"<?php new self;").as_deref(),
-            Some("a class reference of the scope this compiler cannot read yet")
+            refused_message(b"<?php class A { function f() { new parent; } }").as_deref(),
+            Some("Cannot use \"parent\" when current class scope has no parent")
+        );
+        assert_eq!(
+            refused_message(b"<?php class A { const X = static::Y; }").as_deref(),
+            Some("\"static::\" is not allowed in compile-time constants")
         );
     }
 
