@@ -257,8 +257,9 @@ const LIST_SIZE: u32 = 8;
 /// Read off the oracle at php's own resource ids, `php -n` at 8.5.9 over
 /// nine `fopen('php://memory', 'r')` into `$a[]`, printing
 /// `get_resource_id` and the step `memory_get_usage()` took: the CLI's
-/// `STDIN`, `STDOUT` and `STDERR` and its source file stand in the list
-/// before the first line, so the first open is id 5, and id 8, the
+/// `STDIN`, `STDOUT` and `STDERR` stand in the list before the first
+/// line and the first open makes `FG(default_context)` before its
+/// stream, so the first open is id 5, and id 8, the
 /// fourth open, costs 456 where its neighbours cost 296, which is the
 /// packed table's data going from the 160-byte bin to the 320-byte one;
 /// the ninth open, id 13, costs the same 160 more again, that time for
