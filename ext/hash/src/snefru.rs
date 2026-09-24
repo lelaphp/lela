@@ -6,6 +6,8 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use std::slice;
+
 use crate::algos::{Slot, State};
 
 /// `PHP_SNEFRU_CTX`: `state`, the bit count, `length` and `buffer`.
@@ -23,7 +25,7 @@ use crate::algos::{Slot, State};
 pub(crate) struct Snefru {
     state: [u32; 16],
     count: [u32; 2],
-    length: [u8; 1],
+    length: u8,
     buffer: [u8; 32],
 }
 
@@ -117,17 +119,17 @@ impl State for Snefru {
             self.count[1] = self.count[1].wrapping_add((input.len() as u32).wrapping_mul(8));
         }
         let mut buffer = self.buffer;
-        let mut length = self.length[0];
+        let mut length = self.length;
         feed32(&mut buffer, &mut length, input, |block| {
             self.transform(block);
         });
         self.buffer = buffer;
-        self.length[0] = length;
+        self.length = length;
     }
 
     /// `PHP_SNEFRUFinal`.
     fn finish(&mut self) -> Vec<u8> {
-        if self.length[0] != 0 {
+        if self.length != 0 {
             let buffer = self.buffer;
             self.transform(&buffer);
         }
@@ -144,14 +146,14 @@ impl State for Snefru {
         vec![
             Slot::L(&mut self.state),
             Slot::L(&mut self.count),
-            Slot::B(&mut self.length),
+            Slot::B(slice::from_mut(&mut self.length)),
             Slot::B(&mut self.buffer),
         ]
     }
 
     /// `php_snefru_unserialize`: `length < sizeof(buffer)`.
     fn valid(&self) -> bool {
-        self.length[0] < 32
+        self.length < 32
     }
 }
 

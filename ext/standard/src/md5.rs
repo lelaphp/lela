@@ -59,8 +59,12 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
 /// among them.
 #[derive(Clone)]
 pub struct Md5 {
-    /// `lo`, `hi`, `a`, `b`, `c` and `d`.
-    pub words: [u32; 6],
+    /// `lo`: the bytes counted, in 29 bits.
+    pub lo: u32,
+    /// `hi`: what `lo` carried.
+    pub hi: u32,
+    /// `a`, `b`, `c` and `d`.
+    pub state: [u32; 4],
     /// `buffer`.
     pub buffer: [u8; 64],
     /// `block`.
@@ -151,7 +155,9 @@ impl Md5 {
     #[must_use]
     pub fn new() -> Md5 {
         Md5 {
-            words: [0, 0, 0x6745_2301, 0xefcd_ab89, 0x98ba_dcfe, 0x1032_5476],
+            lo: 0,
+            hi: 0,
+            state: [0x6745_2301, 0xefcd_ab89, 0x98ba_dcfe, 0x1032_5476],
             buffer: [0; 64],
             block: [0; 16],
         }
@@ -162,7 +168,7 @@ impl Md5 {
     /// RFC's.
     #[allow(clippy::many_single_char_names)]
     fn body(&mut self, data: &[u8]) {
-        let [_, _, mut a, mut b, mut c, mut d] = self.words;
+        let [mut a, mut b, mut c, mut d] = self.state;
         for chunk in data.chunks_exact(64) {
             for (i, word) in self.block.iter_mut().enumerate() {
                 *word = u32::from_le_bytes([
@@ -195,21 +201,21 @@ impl Md5 {
             c = c.wrapping_add(saved[2]);
             d = d.wrapping_add(saved[3]);
         }
-        self.words[2..].copy_from_slice(&[a, b, c, d]);
+        self.state = [a, b, c, d];
     }
 
     /// `PHP_MD5Update`: `lo` counts bytes in 29 bits and carries into
     /// `hi`, which takes `size >> 29` truncated as C's `uint32_t` does.
     #[allow(clippy::cast_possible_truncation)]
     pub fn update(&mut self, mut data: &[u8]) {
-        let saved = self.words[0];
+        let saved = self.lo;
         let size = data.len() as u64;
         let lo = u32::try_from((u64::from(saved) + size) & 0x1fff_ffff).unwrap_or(0);
-        self.words[0] = lo;
+        self.lo = lo;
         if lo < saved {
-            self.words[1] = self.words[1].wrapping_add(1);
+            self.hi = self.hi.wrapping_add(1);
         }
-        self.words[1] = self.words[1].wrapping_add((size >> 29) as u32);
+        self.hi = self.hi.wrapping_add((size >> 29) as u32);
         let used = (saved & 0x3f) as usize;
         if used != 0 {
             let free = 64 - used;
@@ -229,7 +235,7 @@ impl Md5 {
 
     /// `PHP_MD5Final`: the sixteen bytes.
     pub fn finish(&mut self) -> [u8; 16] {
-        let mut used = (self.words[0] & 0x3f) as usize;
+        let mut used = (self.lo & 0x3f) as usize;
         self.buffer[used] = 0x80;
         used += 1;
         if 64 - used < 8 {
@@ -239,13 +245,13 @@ impl Md5 {
             used = 0;
         }
         self.buffer[used..56].fill(0);
-        self.words[0] <<= 3;
-        self.buffer[56..60].copy_from_slice(&self.words[0].to_le_bytes());
-        self.buffer[60..].copy_from_slice(&self.words[1].to_le_bytes());
+        self.lo <<= 3;
+        self.buffer[56..60].copy_from_slice(&self.lo.to_le_bytes());
+        self.buffer[60..].copy_from_slice(&self.hi.to_le_bytes());
         let buffer = self.buffer;
         self.body(&buffer);
         let mut out = [0u8; 16];
-        for (i, word) in self.words[2..].iter().enumerate() {
+        for (i, word) in self.state.iter().enumerate() {
             out[4 * i..4 * i + 4].copy_from_slice(&word.to_le_bytes());
         }
         out

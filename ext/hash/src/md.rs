@@ -12,6 +12,8 @@
 
 use php_ext_standard::{md5, sha1};
 
+use std::slice;
+
 use crate::algos::{Slot, State, le_words};
 
 /// `PADDING`: the one bit and the zeros after it.
@@ -385,7 +387,9 @@ impl State for Md5 {
 
     fn slots(&mut self) -> Vec<Slot<'_>> {
         vec![
-            Slot::L(&mut self.0.words),
+            Slot::L(slice::from_mut(&mut self.0.lo)),
+            Slot::L(slice::from_mut(&mut self.0.hi)),
+            Slot::L(&mut self.0.state),
             Slot::B(&mut self.0.buffer),
             Slot::L(&mut self.0.block),
         ]
@@ -403,16 +407,19 @@ impl State for Md5 {
 /// ```
 #[derive(Clone)]
 pub(crate) struct Md2 {
-    /// `state`, `checksum` and `buffer`, 48, 16 and 16 bytes.
-    bytes: [u8; 80],
-    in_buffer: [u8; 1],
+    state: [u8; 48],
+    checksum: [u8; 16],
+    buffer: [u8; 16],
+    in_buffer: u8,
 }
 
 impl Default for Md2 {
     fn default() -> Md2 {
         Md2 {
-            bytes: [0; 80],
-            in_buffer: [0],
+            state: [0; 48],
+            checksum: [0; 16],
+            buffer: [0; 16],
+            in_buffer: 0,
         }
     }
 }
@@ -438,23 +445,23 @@ const MD2_S: [u8; 256] = [
 impl Md2 {
     /// `MD2_Transform`.
     fn transform(&mut self, block: &[u8]) {
-        let state = &mut self.bytes;
+        let state = &mut self.state;
         for i in 0..16 {
             state[16 + i] = block[i];
             state[32 + i] = block[i] ^ state[i];
         }
         let mut t = 0u8;
         for i in 0..18u8 {
-            for byte in state.iter_mut().take(48) {
+            for byte in state.iter_mut() {
                 *byte ^= MD2_S[usize::from(t)];
                 t = *byte;
             }
             t = t.wrapping_add(i);
         }
-        let mut t = state[48 + 15];
-        for i in 0..16 {
-            state[48 + i] ^= MD2_S[usize::from(block[i] ^ t)];
-            t = state[48 + i];
+        let mut t = self.checksum[15];
+        for (sum, byte) in self.checksum.iter_mut().zip(block) {
+            *sum ^= MD2_S[usize::from(byte ^ t)];
+            t = *sum;
         }
     }
 }
@@ -463,18 +470,18 @@ impl State for Md2 {
     /// `PHP_MD2Update`.
     fn update(&mut self, input: &[u8]) {
         let mut p = 0;
-        let held = usize::from(self.in_buffer[0]);
+        let held = usize::from(self.in_buffer);
         if held != 0 {
             if held + input.len() < 16 {
-                self.bytes[64 + held..64 + held + input.len()].copy_from_slice(input);
-                self.in_buffer[0] = (held + input.len()) as u8;
+                self.buffer[held..held + input.len()].copy_from_slice(input);
+                self.in_buffer = (held + input.len()) as u8;
                 return;
             }
-            self.bytes[64 + held..].copy_from_slice(&input[..16 - held]);
-            let buffer: [u8; 16] = self.buffer();
+            self.buffer[held..].copy_from_slice(&input[..16 - held]);
+            let buffer = self.buffer;
             self.transform(&buffer);
             p = 16 - held;
-            self.in_buffer[0] = 0;
+            self.in_buffer = 0;
         }
         while p + 16 <= input.len() {
             self.transform(&input[p..p + 16]);
@@ -482,43 +489,33 @@ impl State for Md2 {
         }
         if p < input.len() {
             let rest = input.len() - p;
-            self.bytes[64..64 + rest].copy_from_slice(&input[p..]);
-            self.in_buffer[0] = rest as u8;
+            self.buffer[..rest].copy_from_slice(&input[p..]);
+            self.in_buffer = rest as u8;
         }
     }
 
     /// `PHP_MD2Final`.
     fn finish(&mut self) -> Vec<u8> {
-        let held = usize::from(self.in_buffer[0]);
-        self.bytes[64 + held..].fill((16 - held) as u8);
-        let buffer = self.buffer();
+        let held = usize::from(self.in_buffer);
+        self.buffer[held..].fill((16 - held) as u8);
+        let buffer = self.buffer;
         self.transform(&buffer);
-        let checksum: [u8; 16] = self.bytes[48..64].try_into().unwrap_or([0; 16]);
+        let checksum = self.checksum;
         self.transform(&checksum);
-        self.bytes[..16].to_vec()
+        self.state[..16].to_vec()
     }
 
     fn slots(&mut self) -> Vec<Slot<'_>> {
-        let (state, rest) = self.bytes.split_at_mut(48);
-        let (checksum, buffer) = rest.split_at_mut(16);
         vec![
-            Slot::B(state),
-            Slot::B(checksum),
-            Slot::B(buffer),
-            Slot::B(&mut self.in_buffer),
+            Slot::B(&mut self.state),
+            Slot::B(&mut self.checksum),
+            Slot::B(&mut self.buffer),
+            Slot::B(slice::from_mut(&mut self.in_buffer)),
         ]
     }
 
     /// `php_md2_unserialize`: `in_buffer < sizeof(buffer)`.
     fn valid(&self) -> bool {
-        self.in_buffer[0] < 16
-    }
-}
-
-impl Md2 {
-    fn buffer(&self) -> [u8; 16] {
-        let mut out = [0u8; 16];
-        out.copy_from_slice(&self.bytes[64..]);
-        out
+        self.in_buffer < 16
     }
 }

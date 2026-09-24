@@ -6,6 +6,8 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use std::slice;
+
 use crate::algos::{Slot, State};
 
 /// The S-box, the first byte of each row of `C0`.
@@ -90,8 +92,10 @@ fn round(words: &[u64; 8], key: &[u64; 8]) -> [u64; 8] {
 pub(crate) struct Whirlpool {
     state: [u64; 8],
     bitlength: [u8; 32],
-    /// `buffer.pos` and `buffer.bits`.
-    at: [u32; 2],
+    /// `buffer.pos`, `buffer.bits` and `buffer.data`; the two are php's
+    /// `int`s, read as such where it compares them.
+    pos: u32,
+    bits: u32,
     data: [u8; 64],
 }
 
@@ -100,7 +104,8 @@ impl Default for Whirlpool {
         Whirlpool {
             state: [0; 8],
             bitlength: [0; 32],
-            at: [0; 2],
+            pos: 0,
+            bits: 0,
             data: [0; 64],
         }
     }
@@ -147,9 +152,9 @@ impl State for Whirlpool {
             carry >>= 8;
             value >>= 8;
         }
-        let rem = self.at[1] as i32 & 7;
-        let mut bits = self.at[1] as i32;
-        let mut pos = self.at[0] as usize;
+        let rem = self.bits as i32 & 7;
+        let mut bits = self.bits as i32;
+        let mut pos = self.pos as usize;
         let mut source_pos = 0;
         while source_bits > 8 {
             let b = u32::from(source[source_pos]);
@@ -187,13 +192,13 @@ impl State for Whirlpool {
             self.data[pos] = (b << (8 - rem)) as u8;
             bits += source_bits as i32;
         }
-        self.at = [pos as u32, bits as u32];
+        (self.pos, self.bits) = (pos as u32, bits as u32);
     }
 
     /// `PHP_WHIRLPOOLFinal`.
     fn finish(&mut self) -> Vec<u8> {
-        let mut pos = self.at[0] as usize;
-        self.data[pos] |= 0x80 >> (self.at[1] & 7);
+        let mut pos = self.pos as usize;
+        self.data[pos] |= 0x80 >> (self.bits & 7);
         pos += 1;
         if pos > 32 {
             self.data[pos..].fill(0);
@@ -210,7 +215,8 @@ impl State for Whirlpool {
         vec![
             Slot::Q(&mut self.state),
             Slot::B(&mut self.bitlength),
-            Slot::L(&mut self.at),
+            Slot::L(slice::from_mut(&mut self.pos)),
+            Slot::L(slice::from_mut(&mut self.bits)),
             Slot::B(&mut self.data),
         ]
     }
@@ -218,7 +224,7 @@ impl State for Whirlpool {
     /// `php_whirlpool_unserialize`: `0 <= pos < 64` and `bits` within
     /// the byte `pos` names.
     fn valid(&self) -> bool {
-        let (pos, bits) = (i64::from(self.at[0] as i32), i64::from(self.at[1] as i32));
+        let (pos, bits) = (i64::from(self.pos as i32), i64::from(self.bits as i32));
         (0..64).contains(&pos) && bits >= pos * 8 && bits < pos * 8 + 8
     }
 }

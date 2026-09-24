@@ -6,6 +6,8 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use std::slice;
+
 use crate::algos::{Slot, State};
 use crate::md::{PADDING, feed};
 
@@ -151,7 +153,7 @@ impl<const V: u8> State for Sha512<V> {
 #[derive(Clone)]
 pub(crate) struct Sha3<const D: usize> {
     lanes: [u8; 200],
-    index: [u32; 1],
+    index: u32,
 }
 
 /// The lanes `generic64lc` keeps complemented.
@@ -162,7 +164,7 @@ impl<const D: usize> Default for Sha3<D> {
     fn default() -> Sha3<D> {
         let mut sponge = Sha3 {
             lanes: [0; 200],
-            index: [0],
+            index: 0,
         };
         sponge.complement();
         sponge
@@ -202,16 +204,16 @@ impl<const D: usize> State for Sha3<D> {
     /// `byteIOIndex`, a permutation each time the rate fills.
     fn update(&mut self, mut input: &[u8]) {
         while !input.is_empty() {
-            let at = self.index[0] as usize;
+            let at = self.index as usize;
             let take = (Self::RATE - at).min(input.len());
             for (lane, byte) in self.lanes[at..at + take].iter_mut().zip(input) {
                 *lane ^= byte;
             }
             input = &input[take..];
-            self.index[0] += take as u32;
-            if self.index[0] as usize == Self::RATE {
+            self.index += take as u32;
+            if self.index as usize == Self::RATE {
                 self.permute();
-                self.index[0] = 0;
+                self.index = 0;
             }
         }
     }
@@ -219,7 +221,7 @@ impl<const D: usize> State for Sha3<D> {
     /// `Keccak_HashFinal`: the suffix `0x06`, the final bit, one
     /// permutation, and the digest out of the rate.
     fn finish(&mut self) -> Vec<u8> {
-        let at = self.index[0] as usize;
+        let at = self.index as usize;
         self.lanes[at] ^= 0x06;
         self.lanes[Self::RATE - 1] ^= 0x80;
         self.permute();
@@ -228,11 +230,15 @@ impl<const D: usize> State for Sha3<D> {
     }
 
     fn slots(&mut self) -> Vec<Slot<'_>> {
-        vec![Slot::B(&mut self.lanes), Slot::L(&mut self.index)]
+        vec![
+            Slot::B(&mut self.lanes),
+            Slot::Over(1),
+            Slot::L(slice::from_mut(&mut self.index)),
+        ]
     }
 
     /// `php_keccak_unserialize`: `byteIOIndex < rate / 8`.
     fn valid(&self) -> bool {
-        (self.index[0] as usize) < Self::RATE
+        (self.index as usize) < Self::RATE
     }
 }

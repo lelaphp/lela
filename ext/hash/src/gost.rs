@@ -8,6 +8,8 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use std::slice;
+
 use crate::algos::{Slot, State, le_words};
 use crate::snefru::feed32;
 
@@ -154,7 +156,7 @@ fn gost(t: &[[u32; 256]; 4], h: &mut [u32], m: &[u32; 8]) {
 pub(crate) struct Gost<const C: bool> {
     state: [u32; 16],
     count: [u32; 2],
-    length: [u8; 1],
+    length: u8,
     buffer: [u8; 32],
 }
 
@@ -163,7 +165,7 @@ impl<const C: bool> Default for Gost<C> {
         Gost {
             state: [0; 16],
             count: [0; 2],
-            length: [0],
+            length: 0,
             buffer: [0; 32],
         }
     }
@@ -199,18 +201,18 @@ impl<const C: bool> State for Gost<C> {
             self.count[0] = self.count[0].wrapping_add(bits as u32);
         }
         let mut buffer = self.buffer;
-        let mut length = self.length[0];
+        let mut length = self.length;
         feed32(&mut buffer, &mut length, input, |block| {
             self.transform(block);
         });
         self.buffer = buffer;
-        self.length[0] = length;
+        self.length = length;
     }
 
     /// `PHP_GOSTFinal`: the bit count and then the checksum through the
     /// compression.
     fn finish(&mut self) -> Vec<u8> {
-        if self.length[0] != 0 {
+        if self.length != 0 {
             let buffer = self.buffer;
             self.transform(&buffer);
         }
@@ -230,13 +232,13 @@ impl<const C: bool> State for Gost<C> {
         vec![
             Slot::L(&mut self.state),
             Slot::L(&mut self.count),
-            Slot::B(&mut self.length),
+            Slot::B(slice::from_mut(&mut self.length)),
             Slot::B(&mut self.buffer),
         ]
     }
 
     /// `php_gost_unserialize`: `length < sizeof(buffer)`.
     fn valid(&self) -> bool {
-        self.length[0] < 32
+        self.length < 32
     }
 }

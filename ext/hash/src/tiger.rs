@@ -7,6 +7,8 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use std::slice;
+
 use crate::algos::{Slot, State};
 
 type Tables = [[u64; 256]; 4];
@@ -154,17 +156,20 @@ const TABLES: Tables = {
 /// ```
 #[derive(Clone)]
 pub(crate) struct Tiger<const P: u32, const D: usize> {
-    state: [u64; 4],
+    state: [u64; 3],
+    /// The bits of every block compressed.
+    passed: u64,
     buffer: [u8; 64],
-    length: [u32; 1],
+    length: u32,
 }
 
 impl<const P: u32, const D: usize> Default for Tiger<P, D> {
     fn default() -> Tiger<P, D> {
         Tiger {
-            state: [IV[0], IV[1], IV[2], 0],
+            state: IV,
+            passed: 0,
             buffer: [0; 64],
-            length: [0],
+            length: 0,
         }
     }
 }
@@ -177,9 +182,7 @@ impl<const P: u32, const D: usize> Tiger<P, D> {
             b.copy_from_slice(bytes);
             *word = u64::from_le_bytes(b);
         }
-        let mut state = [self.state[0], self.state[1], self.state[2]];
-        compress(&TABLES, P, &words, &mut state);
-        self.state[..3].copy_from_slice(&state);
+        compress(&TABLES, P, &words, &mut self.state);
     }
 }
 
@@ -187,10 +190,10 @@ impl<const P: u32, const D: usize> State for Tiger<P, D> {
     /// `PHP_TIGERUpdate`: `passed` counts the bits of every block
     /// compressed.
     fn update(&mut self, input: &[u8]) {
-        let length = self.length[0] as usize;
+        let length = self.length as usize;
         if length + input.len() < 64 {
             self.buffer[length..length + input.len()].copy_from_slice(input);
-            self.length[0] += input.len() as u32;
+            self.length += input.len() as u32;
             return;
         }
         let rest = (length + input.len()) % 64;
@@ -201,25 +204,25 @@ impl<const P: u32, const D: usize> State for Tiger<P, D> {
             let block = self.buffer;
             self.compress(&block);
             self.buffer = [0; 64];
-            self.state[3] = self.state[3].wrapping_add(512);
+            self.passed = self.passed.wrapping_add(512);
         }
         while i + 64 <= input.len() {
             self.buffer.copy_from_slice(&input[i..i + 64]);
             let block = self.buffer;
             self.compress(&block);
-            self.state[3] = self.state[3].wrapping_add(512);
+            self.passed = self.passed.wrapping_add(512);
             i += 64;
         }
         self.buffer[rest..].fill(0);
         self.buffer[..rest].copy_from_slice(&input[i..]);
-        self.length[0] = rest as u32;
+        self.length = rest as u32;
     }
 
     /// `TigerFinalize` and `TigerDigest`: the state's words
     /// little-endian, cut to the digest.
     fn finish(&mut self) -> Vec<u8> {
-        let mut length = self.length[0] as usize;
-        self.state[3] = self.state[3].wrapping_add((length as u64) << 3);
+        let mut length = self.length as usize;
+        self.passed = self.passed.wrapping_add((length as u64) << 3);
         self.buffer[length] = 1;
         length += 1;
         if !length.is_multiple_of(8) {
@@ -235,28 +238,26 @@ impl<const P: u32, const D: usize> State for Tiger<P, D> {
         } else {
             self.buffer[length..56].fill(0);
         }
-        self.buffer[56..].copy_from_slice(&self.state[3].to_le_bytes());
+        self.buffer[56..].copy_from_slice(&self.passed.to_le_bytes());
         let block = self.buffer;
         self.compress(&block);
-        let mut out: Vec<u8> = self.state[..3]
-            .iter()
-            .flat_map(|w| w.to_le_bytes())
-            .collect();
+        let mut out: Vec<u8> = self.state.iter().flat_map(|w| w.to_le_bytes()).collect();
         out.truncate(D);
         out
     }
 
-    /// `q3qb64l`: `state` and `passed` as four words.
+    /// `q3qb64l`.
     fn slots(&mut self) -> Vec<Slot<'_>> {
         vec![
             Slot::Q(&mut self.state),
+            Slot::Q(slice::from_mut(&mut self.passed)),
             Slot::B(&mut self.buffer),
-            Slot::L(&mut self.length),
+            Slot::L(slice::from_mut(&mut self.length)),
         ]
     }
 
     /// `php_tiger_unserialize`: `length < sizeof(buffer)`.
     fn valid(&self) -> bool {
-        self.length[0] < 64
+        self.length < 64
     }
 }

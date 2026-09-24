@@ -15,14 +15,26 @@ use php_ext::raising::{self, Thrown, arg_count_error, arg_type_error, arg_value_
 use php_ext::request::{Request, Stream};
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
-use crate::algos::{self, ALGOS, Algo, State};
+use crate::algos::{self, ALGOS, Algo, Refusal, State};
 use crate::stub::stub;
 
 /// A native's entry.
 type Entry = fn(&mut Request) -> Result<Value, Thrown>;
 
-/// `PHP_HASH_HMAC`.
-const HMAC: i64 = 1;
+/// `hash_init`'s `$flags`, php's `context->options`: kept whole, as
+/// `__serialize` writes it back as given, and read through [`Flags::hmac`].
+#[derive(Debug, Default, Clone, Copy)]
+struct Flags(i64);
+
+impl Flags {
+    /// `PHP_HASH_HMAC`.
+    const HMAC: i64 = 1;
+
+    /// `options & PHP_HASH_HMAC`.
+    fn hmac(self) -> bool {
+        self.0 & Flags::HMAC != 0
+    }
+}
 
 /// The natives in `hash.stub.php`'s order.
 ///
@@ -129,7 +141,7 @@ const MHASH: [Option<(&str, &str)>; 42] = [
 pub(crate) fn constants() -> Vec<ConstDecl> {
     let mut out = vec![ConstDecl {
         name: Name(b"HASH_HMAC".as_slice().into()),
-        value: ConstExpr::Long(HMAC),
+        value: ConstExpr::Long(Flags::HMAC),
         attributes: Vec::new(),
     }];
     for (number, entry) in (0i64..).zip(MHASH) {
@@ -482,7 +494,7 @@ fn hash_hmac_file(req: &mut Request) -> Result<Value, Thrown> {
 pub(crate) struct Context {
     algo: Option<&'static Algo>,
     state: Option<Box<dyn State>>,
-    options: i64,
+    flags: Flags,
     key: Option<Vec<u8>>,
 }
 
@@ -504,11 +516,11 @@ pub(crate) struct Context {
 fn hash_init(req: &mut Request) -> Result<Value, Thrown> {
     count(req, 1, 4)?;
     let name = string(req, 1)?;
-    let flags = long(req, 2, 0)?;
+    let flags = Flags(long(req, 2, 0)?);
     let key = string(req, 3)?;
     let options = options(req, 4)?;
     let algo = algo(req, &name, false)?;
-    if flags & HMAC != 0 {
+    if flags.hmac() {
         if !algo.crypto {
             return Err(arg_value_error(
                 req,
@@ -526,7 +538,7 @@ fn hash_init(req: &mut Request) -> Result<Value, Thrown> {
     }
     let mut state = (algo.init)(req, options)?;
     let mut kept = None;
-    if flags & HMAC != 0 {
+    if flags.hmac() {
         let mut k = if key.len() > algo.block {
             state.update(&key);
             let reduced = state.finish();
@@ -548,7 +560,7 @@ fn hash_init(req: &mut Request) -> Result<Value, Thrown> {
         *context = Context {
             algo: Some(algo),
             state: Some(state),
-            options: flags,
+            flags,
             key: kept,
         };
     }
@@ -620,15 +632,16 @@ fn hash_update_stream(req: &mut Request) -> Result<Value, Thrown> {
             arg_type_error(req, 2, &format!("be of type resource, {name} given"))
         });
     };
-    let mut length = long(req, 3, -1)?;
+    // `$length`: a negative one reads to the end, as php's loop does.
+    let mut left = usize::try_from(long(req, 3, -1)?).ok();
     verify(req, object, 1)?;
     let Some(mut state) = take(req, object) else {
         return Err(finalized(req, 1));
     };
-    let mut read = 0i64;
-    while length != 0 {
-        let want = if length > 0 { length.min(1024) } else { 1024 };
-        let chunk = match stream.read(req, usize::try_from(want).unwrap_or(1024)) {
+    let mut read = 0usize;
+    while left != Some(0) {
+        let want = left.map_or(1024, |left| left.min(1024));
+        let chunk = match stream.read(req, want) {
             Ok(Some(chunk)) if !chunk.is_empty() => chunk,
             Ok(_) => break,
             Err(thrown) => {
@@ -637,12 +650,11 @@ fn hash_update_stream(req: &mut Request) -> Result<Value, Thrown> {
             }
         };
         state.update(chunk.as_bytes());
-        let n = i64::try_from(chunk.len()).unwrap_or(0);
-        length -= n;
-        read += n;
+        left = left.map(|left| left.saturating_sub(chunk.len()));
+        read += chunk.len();
     }
     put(req, object, state);
-    Ok(Value::int(read))
+    Ok(Value::int(i64::try_from(read).unwrap_or(i64::MAX)))
 }
 
 /// `hash_update_file(HashContext $context, string $filename, $stream_context = null): bool`.
@@ -730,11 +742,11 @@ fn clone_context(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thro
         (
             c.algo,
             c.state.as_ref().map(|s| s.fork()),
-            c.options,
+            c.flags,
             c.key.clone(),
         )
     });
-    let Some((algo, Some(state), options, key)) = forked else {
+    let Some((algo, Some(state), flags, key)) = forked else {
         return Err(throw(
             req,
             "ValueError",
@@ -751,7 +763,7 @@ fn clone_context(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thro
         *context = Context {
             algo,
             state: Some(state),
-            options,
+            flags,
             key,
         };
     }
@@ -1302,9 +1314,9 @@ fn serialize(req: &mut Request) -> Result<Value, Thrown> {
     let Some(this) = req.this() else {
         return Ok(Value::null());
     };
-    let (algo, options) = this
+    let (algo, flags) = this
         .native::<Context>(req)
-        .map_or((None, 0), |c| (c.algo, c.options));
+        .map_or((None, Flags::default()), |c| (c.algo, c.flags));
     let name = algo.map_or("", |a| a.label);
     let cannot = |req: &mut Request| {
         throw(
@@ -1313,10 +1325,10 @@ fn serialize(req: &mut Request) -> Result<Value, Thrown> {
             &format!("HashContext for algorithm \"{name}\" cannot be serialized"),
         )
     };
-    let Some((spec, magic)) = algo.and_then(|a| a.spec) else {
+    let Some(magic) = algo.and_then(|a| a.magic) else {
         return Err(cannot(req));
     };
-    if options & HMAC != 0 {
+    if flags.hmac() {
         return Err(throw(
             req,
             "Exception",
@@ -1326,15 +1338,13 @@ fn serialize(req: &mut Request) -> Result<Value, Thrown> {
     let Some(mut state) = take(req, this) else {
         return Err(cannot(req));
     };
-    let fields = algos::serialize(req, state.as_mut(), spec);
+    let fields = algos::serialize(req, state.as_mut());
     put(req, this, state);
-    let Some(fields) = fields? else {
-        return Err(cannot(req));
-    };
+    let fields = fields?;
     let mut out = PhpArray::new(req)?;
     let algo_name = PhpString::new(req, name.as_bytes())?;
     out.append(req, Value::string(algo_name))?;
-    out.append(req, Value::int(options))?;
+    out.append(req, Value::int(flags.0))?;
     out.append(req, Value::array(fields))?;
     out.append(req, Value::int(magic))?;
     let mut members = PhpArray::new(req)?;
@@ -1396,10 +1406,10 @@ fn unserialize(req: &mut Request) -> Result<Value, Thrown> {
     }
     let at = |n: i64| data.get(&Key::Int(n)).map(|v| v.deref());
     let name = at(0).and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec));
-    let (options, fields, magic) = (int_of(at(1)), at(2), int_of(at(3)));
+    let (flags, fields, magic) = (int_of(at(1)).map(Flags), at(2), int_of(at(3)));
     let members = at(4).and_then(|v| v.as_array().copied());
-    let (Some(name), Some(options), Some(fields), Some(magic), Some(members)) =
-        (name, options, fields, magic, members)
+    let (Some(name), Some(flags), Some(fields), Some(magic), Some(members)) =
+        (name, flags, fields, magic, members)
     else {
         return Err(throw(
             req,
@@ -1407,7 +1417,7 @@ fn unserialize(req: &mut Request) -> Result<Value, Thrown> {
             "Incomplete or ill-formed serialization data",
         ));
     };
-    if options & HMAC != 0 {
+    if flags.hmac() {
         return Err(throw(
             req,
             "Exception",
@@ -1417,7 +1427,7 @@ fn unserialize(req: &mut Request) -> Result<Value, Thrown> {
     let Some(algo) = algos::fetch(&name) else {
         return Err(throw(req, "Exception", "Unknown hash algorithm"));
     };
-    let Some((spec, want)) = algo.spec else {
+    let Some(want) = algo.magic else {
         return Err(throw(
             req,
             "Exception",
@@ -1425,15 +1435,16 @@ fn unserialize(req: &mut Request) -> Result<Value, Thrown> {
         ));
     };
     let mut state = (algo.init)(req, None)?;
-    let code = if magic == want {
-        algos::unserialize(state.as_mut(), spec, &fields)
+    let written = if magic == want {
+        algos::unserialize(state.as_mut(), &fields)
     } else {
-        -1
+        Err(Refusal::Malformed)
     };
     if let Some(context) = this.native_mut::<Context>(req) {
         context.algo = Some(algo);
     }
-    if code != 0 {
+    if let Err(refusal) = written {
+        let code = refusal.code();
         return Err(throw(
             req,
             "Exception",
@@ -1445,7 +1456,7 @@ fn unserialize(req: &mut Request) -> Result<Value, Thrown> {
     }
     if let Some(context) = this.native_mut::<Context>(req) {
         context.state = Some(state);
-        context.options = options;
+        context.flags = flags;
     }
     for (key, value) in members.snapshot() {
         let name = key.to_prop_name(req)?;
