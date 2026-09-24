@@ -349,3 +349,31 @@ pub(super) fn place_fds(command: &mut std::process::Command, moves: Vec<(RawFd, 
     // what a closure run between `fork` and `exec` may do.
     unsafe { command.pre_exec(placed) };
 }
+
+/// `socketpair(domain, type, protocol, pair)`: the two ends of a new pair
+/// of connected sockets, close-on-exec, or the `errno` of its `-1`.
+pub(super) fn socketpair(
+    domain: i32,
+    kind: i32,
+    protocol: i32,
+) -> std::io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
+    use std::os::fd::FromRawFd;
+    let mut pair = [-1; 2];
+    // SAFETY: `pair` is room for the two `int`s the call writes.
+    let ret = unsafe { libc::socketpair(domain, kind, protocol, pair.as_mut_ptr()) };
+    if ret == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `socketpair` answered 0, so `pair[0]` is an open socket it
+    // made and nothing else owns.
+    let first = unsafe { std::os::fd::OwnedFd::from_raw_fd(pair[0]) };
+    // SAFETY: as `first`, for `pair[1]`.
+    let second = unsafe { std::os::fd::OwnedFd::from_raw_fd(pair[1]) };
+    for fd in [&first, &second] {
+        use std::os::fd::AsRawFd;
+        // SAFETY: `fcntl` with `F_SETFD` reads nothing through its
+        // arguments but a number.
+        unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
+    }
+    Ok((first, second))
+}

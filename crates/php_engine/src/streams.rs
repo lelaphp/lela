@@ -39,6 +39,8 @@ use crate::api::raising::{Level, Thrown, raise, throw, warning};
 use crate::api::request::{Cast, FdStream, Request, Stream, Whence};
 use crate::api::values::{Key, PhpArray, PhpString, Resource, Value};
 
+mod sockets;
+
 /// `FG(def_chunk_size)`, which `PHP_SOCK_CHUNK_SIZE` sets at 8192
 /// (`Z/ext/standard/file.c:131`): what one fill of the read buffer asks
 /// the kind for.
@@ -145,6 +147,26 @@ pub(crate) trait Ops: Send {
     fn fd(&self) -> Option<BorrowedFd<'_>> {
         None
     }
+
+    /// `PHP_STREAM_OPTION_BLOCKING`: whether the kind blocked before, or
+    /// `None` for php's `-1`, a kind with no such option or an fd that
+    /// refused it.
+    fn set_blocking(&mut self, _blocking: bool) -> Option<bool> {
+        None
+    }
+
+    /// `PHP_STREAM_OPTION_READ_TIMEOUT`: `false` for a kind with no such
+    /// option.
+    fn set_timeout(&mut self, _timeout: std::time::Duration) -> bool {
+        false
+    }
+
+    /// `PHP_STREAM_OPTION_XPORT_API`: one operation of a `transport`,
+    /// `None` for php's `PHP_STREAM_OPTION_RETURN_NOTIMPL`, a kind that
+    /// is no socket.
+    fn xport(&mut self, _req: &mut Request, _op: sockets::XportOp<'_>) -> Option<sockets::Xported> {
+        None
+    }
 }
 
 /// `php_stream_statbuf`'s thirteen fields in the order `php_fstat` puts
@@ -160,9 +182,11 @@ pub(crate) enum MetaData {
     /// `timed_out`, `blocked` and `eof` as `php_stream_eof` answers it.
     Generic,
     /// `php_stdiop_set_option`'s three, with `eof` as the kind's last
-    /// read left `stream->eof` and `blocked` from `O_NONBLOCK`, which no
-    /// stream here sets.
-    Stdio,
+    /// read left `stream->eof` and `blocked` from `O_NONBLOCK`.
+    Stdio { blocked: bool },
+    /// `php_sockop_set_option`'s three: whether the last read timed out,
+    /// whether the socket blocks, and `stream->eof`.
+    Socket { timed_out: bool, blocked: bool },
     /// `php_stream_temp_set_option`'s copy of `ts->meta`, which only
     /// `data:` fills: nothing at all for `php://temp`.
     Own,
@@ -852,7 +876,7 @@ impl Ops for Memory {
 
     fn meta_data(&self) -> MetaData {
         if self.label == "STDIO" {
-            MetaData::Stdio
+            MetaData::Stdio { blocked: true }
         } else {
             MetaData::Generic
         }
@@ -1055,6 +1079,7 @@ pub(crate) fn temporary_file(
             is_seekable: true,
             temp_name: Some(path),
             process: None,
+            blocking: true,
         }),
         b"r+b",
     );
@@ -1081,6 +1106,8 @@ struct Stdio {
     is_seekable: bool,
     temp_name: Option<std::path::PathBuf>,
     process: Option<std::process::Child>,
+    /// Whether the fd blocks, what `stream_set_blocking` last set.
+    blocking: bool,
 }
 
 /// `php_socket_strerror_s` over `errno`, as the plain files kind's two
@@ -1288,11 +1315,23 @@ impl Ops for Stdio {
     }
 
     fn meta_data(&self) -> MetaData {
-        MetaData::Stdio
+        MetaData::Stdio {
+            blocked: self.blocking,
+        }
     }
 
     fn is_stdio(&self) -> bool {
         true
+    }
+
+    /// `php_stdiop_set_option`'s `PHP_STREAM_OPTION_BLOCKING`
+    /// (`Z/main/streams/plain_wrapper.c:803`): `O_NONBLOCK` set or
+    /// cleared on the fd, and whether it blocked before.
+    fn set_blocking(&mut self, blocking: bool) -> Option<bool> {
+        let file = self.file.as_ref()?;
+        let was = php_heap::set_fd_blocking(file.as_fd(), blocking).ok()?;
+        self.blocking = blocking;
+        Some(was)
     }
 
     /// `php_stdiop_cast` (`Z/main/streams/plain_wrapper.c:645`): the
@@ -1378,6 +1417,7 @@ fn plain_open(req: &Request, path: &[u8], mode: &[u8]) -> Result<PhpStream, Stri
             is_seekable,
             temp_name: None,
             process: None,
+            blocking: true,
         }),
         mode,
     );
@@ -1437,7 +1477,7 @@ impl Ops for HostFd {
     }
 
     fn meta_data(&self) -> MetaData {
-        MetaData::Stdio
+        MetaData::Stdio { blocked: true }
     }
 
     fn is_stdio(&self) -> bool {
@@ -1800,9 +1840,10 @@ impl Request {
         let Some(s) = self.stream_ref(stream) else {
             return Ok(out);
         };
-        let eof = match s.ops.meta_data() {
-            MetaData::Generic => Some(s.eof()),
-            MetaData::Stdio => Some(s.eof),
+        let head = match s.ops.meta_data() {
+            MetaData::Generic => Some((false, true, s.eof())),
+            MetaData::Stdio { blocked } => Some((false, blocked, s.eof)),
+            MetaData::Socket { timed_out, blocked } => Some((timed_out, blocked, s.eof)),
             MetaData::Own => None,
         };
         let wrapper = s.wrapper;
@@ -1812,9 +1853,9 @@ impl Request {
         let seekable = s.ops.seekable() && !s.flags.no_seek;
         let uri = s.orig_path.clone();
         let mut entries = Vec::new();
-        if let Some(eof) = eof {
-            entries.push(("timed_out", MetaValue::Bool(false)));
-            entries.push(("blocked", MetaValue::Bool(true)));
+        if let Some((timed_out, blocked, eof)) = head {
+            entries.push(("timed_out", MetaValue::Bool(timed_out)));
+            entries.push(("blocked", MetaValue::Bool(blocked)));
             entries.push(("eof", MetaValue::Bool(eof)));
         }
         if !wrapper.is_empty() {
@@ -1936,11 +1977,12 @@ impl Request {
     ///
     /// The `Err` is the memory limit, met registering the resource.
     pub fn stream_from_fd(&mut self, fd: OwnedFd, kind: FdStream<'_>) -> Result<Stream, Thrown> {
-        let mut file = std::fs::File::from(fd);
         let (mode, process) = match kind {
             FdStream::File { mode } => (mode, None),
             FdStream::Process { mode, child } => (mode, Some(child)),
+            FdStream::Socket => return self.socket_stream(fd),
         };
+        let mut file = std::fs::File::from(fd);
         let is_seekable = process.is_none()
             && file.metadata().is_ok_and(|meta| {
                 use std::os::unix::fs::FileTypeExt;
@@ -1959,6 +2001,7 @@ impl Request {
                 is_seekable,
                 temp_name: None,
                 process,
+                blocking: true,
             }),
             mode,
         );

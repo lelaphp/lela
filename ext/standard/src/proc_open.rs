@@ -306,6 +306,7 @@ fn pclose(req: &mut Request) -> Result<Value, Thrown> {
 enum Parent {
     None,
     Pipe { fd: OwnedFd, mode: &'static [u8] },
+    Socket { fd: OwnedFd },
 }
 
 /// `descriptorspec_item`: the fd number the child sees, the fd the
@@ -567,6 +568,7 @@ fn array_descriptor(
             }
         },
         b"pty" => Ok(pty_descriptor(req, index, done.len(), pty)),
+        b"socket" => Ok(socket_descriptor(req, index)),
         _ => {
             let text = format!(
                 "{} is not a valid descriptor spec/mode",
@@ -574,6 +576,29 @@ fn array_descriptor(
             );
             docref(req, Level::Warning, &text);
             Ok(None)
+        }
+    }
+}
+
+/// `set_proc_descriptor_to_socket` (`Z/ext/standard/proc_open.c:920`): a
+/// pair of connected unix sockets, the first the parent's, a
+/// `generic_socket` stream, and the second the child's.
+fn socket_descriptor(req: &mut Request, index: i64) -> Option<Descriptor> {
+    const AF_UNIX: i32 = 1;
+    const SOCK_STREAM: i32 = 1;
+    match crate::ffi::socketpair(AF_UNIX, SOCK_STREAM, 0) {
+        Ok((parentend, childend)) => Some(Descriptor {
+            index,
+            childend,
+            parent: Parent::Socket { fd: parentend },
+        }),
+        Err(error) => {
+            let text = format!(
+                "Unable to create socket pair: {}",
+                strerror(req, error.raw_os_error().unwrap_or(0))
+            );
+            docref(req, Level::Warning, &text);
+            None
         }
     }
 }
@@ -724,8 +749,8 @@ fn environment(req: &mut Request, env: PhpArray) -> Result<Env, Thrown> {
 /// `PHP_FUNCTION(proc_open)` (`Z/ext/standard/proc_open.c:1193`): a command
 /// array's elements as the child's `argv`, searched for on the path, and
 /// a string handed to `/bin/sh -c`; each entry of the spec by its
-/// integer key, a stream or an array naming a `pipe`, a `file`, a
-/// `redirect` to another, `null` or a `pty`; the child spawned with each
+/// integer key, a stream or an array naming a `pipe`, a `socket`, a
+/// `file`, a `redirect` to another, `null` or a `pty`; the child spawned with each
 /// fd placed where its key says, in `$cwd` and with `$env_vars` where
 /// they are given; then `$pipes` written with a stream for each pipe's
 /// parent end, under its key, and the `process` resource. A spawn that
@@ -742,6 +767,9 @@ fn environment(req: &mut Request, env: PhpArray) -> Result<Env, Thrown> {
 /// var_dump(proc_open(['nonexistent_command_of_this_witness'], [], $pipes));
 /// $p = proc_open('true', [0 => ['null'], 1 => ['pty']], $pipes);
 /// var_dump(stream_get_meta_data($pipes[1])['mode'], proc_close($p));
+/// $p = proc_open('cat', [0 => ['socket'], 1 => ['socket']], $pipes);
+/// fwrite($pipes[0], "sock\n"); stream_socket_shutdown($pipes[0], STREAM_SHUT_WR);
+/// var_dump(stream_get_meta_data($pipes[0])['stream_type'], fgets($pipes[1]), proc_close($p));
 /// ```
 /// ```expect
 /// resource(%d) of type (process)
@@ -784,6 +812,10 @@ fn environment(req: &mut Request, env: PhpArray) -> Result<Env, Thrown> {
 /// Warning: proc_open(): posix_spawn() failed: No such file or directory in %s on line 9
 /// bool(false)
 /// string(2) "r+"
+/// int(0)
+/// string(14) "generic_socket"
+/// string(5) "sock
+/// "
 /// int(0)
 /// ```
 ///
@@ -887,8 +919,12 @@ fn proc_open(req: &mut Request) -> Result<Value, Thrown> {
             parent,
         } = descriptor;
         drop(childend);
-        if let Parent::Pipe { fd, mode } = parent {
-            let stream = req.stream_from_fd(fd, FdStream::File { mode })?;
+        let stream = match parent {
+            Parent::Pipe { fd, mode } => Some(req.stream_from_fd(fd, FdStream::File { mode })?),
+            Parent::Socket { fd } => Some(req.stream_from_fd(fd, FdStream::Socket)?),
+            Parent::None => None,
+        };
+        if let Some(stream) = stream {
             let value = stream.as_value();
             req.addref(&value);
             pipes.set(req, Key::Int(index), value)?;

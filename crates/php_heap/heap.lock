@@ -142,6 +142,7 @@ Obj::slot_ref
 Obj::slots
 Obj::unprotect
 ObjectId
+Readiness
 Ref
 Ref::addref
 Ref::is_same
@@ -232,7 +233,10 @@ compare
 double_to_string
 identical
 numeric_prefix
+peek_fd
+poll_fd
 power
+set_fd_blocking
 shift_left
 shift_right
 suspend

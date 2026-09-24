@@ -149,6 +149,33 @@ pub enum FdStream<'a> {
         mode: &'a [u8],
         child: std::process::Child,
     },
+    /// `php_stream_sock_open_from_socket`: a socket, of the
+    /// `generic_socket` kind, `r+`, blocking, with
+    /// `default_socket_timeout` as its read timeout; what
+    /// `stream_socket_pair` and `proc_open`'s `socket` hand back.
+    Socket,
+}
+
+/// What `php_stream_xport_create` is asked to make of a `transport`'s
+/// name: a client connected within `timeout`, `None` to wait for ever,
+/// or a server bound to the name, listening where `listen` says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Xport {
+    Client {
+        timeout: Option<std::time::Duration>,
+    },
+    Server {
+        listen: bool,
+    },
+}
+
+/// Why `php_stream_xport_create` made no stream: the `errno` the natives
+/// hand back as `$error_code`, `0` where there was none, and the text
+/// they hand back as `$error_message` and print.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct XportFailure {
+    pub code: i32,
+    pub text: String,
 }
 
 impl Stream {

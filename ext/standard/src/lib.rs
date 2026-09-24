@@ -73,6 +73,7 @@ mod quot_print;
 mod scanf;
 mod select;
 mod sha1;
+mod sockets;
 mod soundex;
 mod string;
 mod strnatcmp;
@@ -216,6 +217,7 @@ pub fn extension() -> Extension {
         .classes(math::classes())
         .classes(var::classes())
         .ini(var::ini())
+        .ini(sockets::ini())
         .dependencies(dependencies())
         .request_state::<State>()
         .build("standard")
@@ -247,6 +249,7 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
         basic_functions::natives(),
         select::natives(),
         proc_open::natives(),
+        sockets::natives(),
     ]
     .into_iter()
     .flatten()
@@ -261,6 +264,7 @@ fn file_constants() -> Vec<ConstDecl> {
         html::constants(),
         basic_functions::constants(),
         dir::constants(),
+        sockets::constants(),
     ]
     .into_iter()
     .flatten()

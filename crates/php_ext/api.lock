@@ -294,6 +294,7 @@ request::Request::temp_dir
 request::Request::temporary_name
 request::Request::this
 request::Request::tmpfile
+request::Request::transports
 request::Request::umask
 request::Request::unregister_tick_function
 request::Request::url_stat
@@ -301,10 +302,12 @@ request::Request::variadic_arguments
 request::Request::wrapper_op
 request::Request::write
 request::Request::write_stderr
+request::Request::xport_create
 request::ResourceDtor
 request::Resources
 request::Resources::register_type
 request::Stream
+request::Stream::accept
 request::Stream::as_value
 request::Stream::cast
 request::Stream::close
@@ -320,9 +323,15 @@ request::Stream::meta_data
 request::Stream::pclose
 request::Stream::read
 request::Stream::read_dir
+request::Stream::recvfrom
 request::Stream::resource
 request::Stream::seek
+request::Stream::sendto
+request::Stream::set_blocking
 request::Stream::set_read_buffer
+request::Stream::set_timeout
+request::Stream::shutdown
+request::Stream::socket_name
 request::Stream::stat
 request::Stream::tell
 request::Stream::truncate
@@ -333,6 +342,8 @@ request::StreamWrapper
 request::Whence
 request::Whence::from_int
 request::WrapperOp
+request::Xport
+request::XportFailure
 syntax::Diagnostic
 syntax::Diagnostic::new
 syntax::Diagnostic::of
