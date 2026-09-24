@@ -528,6 +528,15 @@ pub fn clone_with<T: std::any::Any + Send>(
     Ok(copy)
 }
 
+/// `zend_create_internal_iterator_zval`: an `InternalIterator` over
+/// `object`, walking the elements its class's
+/// [`crate::api::abi::ObjectHandlers::iterator_element`] answers, which
+/// is what `getIterator()` hands back for a class php iterates in C.
+/// The iterator is the caller's, one owner, and holds one of `object`.
+pub fn internal_iterator(req: &mut Request, object: &PhpObject) -> Result<PhpObject, Thrown> {
+    crate::interfaces::internal_iterator(req, *object)
+}
+
 /// `zend_lookup_class`: the linked class named, autoloading if needed.
 pub fn lookup_class(req: &mut Request, name: &[u8]) -> Result<Option<ClassId>, Thrown> {
     Ok(req.class_named(name))

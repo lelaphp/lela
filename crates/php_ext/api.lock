@@ -49,6 +49,7 @@ abi::ObjectHandlers::get_properties_for
 abi::ObjectHandlers::get_property_ptr_ptr
 abi::ObjectHandlers::has_dimension
 abi::ObjectHandlers::has_property
+abi::ObjectHandlers::iterator_element
 abi::ObjectHandlers::read_dimension
 abi::ObjectHandlers::read_property
 abi::ObjectHandlers::unset_dimension
@@ -89,6 +90,7 @@ call::eval_const_expr
 call::fetch_constant
 call::initialize_lazy
 call::instantiate
+call::internal_iterator
 call::iterate
 call::lookup_class
 call::lookup_function

@@ -21,7 +21,7 @@ use php_unit::decl::{
     Visibility,
 };
 
-use crate::api::abi::NativeClassDecl;
+use crate::api::abi::{Entry, NativeClassDecl, ObjectHandlers};
 use crate::api::raising::{Thrown, throw};
 use crate::api::request::Request;
 use crate::api::values::{ClassId, PhpObject, Value};
@@ -122,6 +122,7 @@ pub(crate) fn classes() -> Vec<NativeClassDecl> {
     ]
     .into_iter()
     .map(|decl| (decl, Vec::new(), None, None))
+    .chain(std::iter::once(internal_iterator_class()))
     .collect()
 }
 
@@ -224,4 +225,194 @@ pub(crate) fn valid(req: &mut Request, iterator: PhpObject) -> Result<bool, Thro
 /// one method served, its return the caller's, one owner.
 pub(crate) fn step(req: &mut Request, iterator: PhpObject, method: &[u8]) -> Result<Value, Thrown> {
     crate::api::call::call_method(req, &iterator, method, &[])
+}
+
+/// `zend_internal_iterator`: the object walked, how many steps past its
+/// rewind the walk stands, and whether it was rewound, php's
+/// `rewind_called`.
+#[derive(Default)]
+struct Internal {
+    object: Option<PhpObject>,
+    index: usize,
+}
+
+/// `zend_internal_iterator_handlers`: `free_obj` gives back the object
+/// walked, `get_gc` names it, and the class is uncloneable.
+struct InternalHandlers;
+
+static INTERNAL: InternalHandlers = InternalHandlers;
+
+impl ObjectHandlers for InternalHandlers {
+    fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        if let Some(held) = object
+            .native_mut::<Internal>(req)
+            .and_then(|it| it.object.take())
+        {
+            req.release(held.as_value());
+        }
+    }
+
+    fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
+        if let Some(held) = object.native::<Internal>(req).and_then(|it| it.object) {
+            visit(held.as_value());
+        }
+    }
+
+    fn clone_obj(&self) -> Option<crate::api::abi::CloneObj> {
+        None
+    }
+}
+
+/// `final class InternalIterator implements Iterator` as
+/// `zend_interfaces.stub.php` declares it, its constructor private.
+///
+/// ```php
+/// $f = SplFixedArray::fromArray(['a', 'b']);
+/// $it = $f->getIterator();
+/// var_dump(get_class($it), $it instanceof Iterator);
+/// foreach ($it as $k => $v) echo "$k=$v ";
+/// $it->rewind(); $it->next(); var_dump($it->key(), $it->current(), $it->valid());
+/// $it->next(); var_dump($it->valid(), $it->current());
+/// ```
+/// ```expect
+/// string(16) "InternalIterator"
+/// bool(true)
+/// 0=a 1=b int(1)
+/// string(1) "b"
+/// bool(true)
+/// bool(false)
+/// NULL
+/// ```
+fn internal_iterator_class() -> NativeClassDecl {
+    let method = |name: &[u8], returns: Option<Type>| MethodDecl {
+        is_abstract: false,
+        ..abstract_method(name, Vec::new(), returns)
+    };
+    let mut decl = interface(b"InternalIterator", &[], Vec::new());
+    decl.kind = ClassKind::Class;
+    decl.flags.is_final = true;
+    decl.interfaces = vec![Name(b"Iterator".as_slice().into())];
+    let methods: Vec<(MethodDecl, Entry)> = vec![
+        (
+            MethodDecl {
+                visibility: Visibility::Private,
+                ..method(b"__construct", None)
+            },
+            internal_construct as Entry,
+        ),
+        (method(b"current", Some(Type::Mixed)), internal_current),
+        (method(b"key", Some(Type::Mixed)), internal_key),
+        (method(b"next", Some(Type::Void)), internal_next),
+        (method(b"valid", Some(Type::Bool)), internal_valid),
+        (method(b"rewind", Some(Type::Void)), internal_rewind),
+    ];
+    (
+        decl,
+        methods,
+        Some(&INTERNAL),
+        Some(crate::api::abi::new_payload::<Internal>()),
+    )
+}
+
+/// `zend_create_internal_iterator_zval`.
+pub(crate) fn internal_iterator(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
+    let Some(class) = req.class_named(b"internaliterator") else {
+        return Err(crate::api::raising::fatal(
+            req,
+            "InternalError: InternalIterator is not declared",
+        ));
+    };
+    let iterator = req.new_object(class)?;
+    req.addref(&object.as_value());
+    if let Some(it) = iterator.native_mut::<Internal>(req) {
+        it.object = Some(object);
+    }
+    Ok(iterator)
+}
+
+/// `InternalIterator::__construct`: php's `Error`.
+fn internal_construct(req: &mut Request) -> Result<Value, Thrown> {
+    Err(throw(
+        req,
+        "Error",
+        "Cannot manually construct InternalIterator",
+    ))
+}
+
+/// The element the iterator stands at, through the walked object's
+/// class's `iterator_element`.
+fn internal_element(req: &mut Request) -> Result<Option<(Value, Value)>, Thrown> {
+    let Some(this) = req.this() else {
+        return Ok(None);
+    };
+    let Some((object, index)) = this
+        .native::<Internal>(req)
+        .and_then(|it| it.object.map(|o| (o, it.index)))
+    else {
+        return Err(throw(
+            req,
+            "Error",
+            "The InternalIterator object has not been properly initialized",
+        ));
+    };
+    let table = req.object_handlers(object.heap());
+    table.iterator_element(req, object, index)
+}
+
+/// `InternalIterator::current(): mixed`.
+fn internal_current(req: &mut Request) -> Result<Value, Thrown> {
+    Ok(match internal_element(req)? {
+        Some((key, value)) => {
+            req.release(key);
+            value
+        }
+        None => Value::null(),
+    })
+}
+
+/// `InternalIterator::key(): mixed`.
+fn internal_key(req: &mut Request) -> Result<Value, Thrown> {
+    Ok(match internal_element(req)? {
+        Some((key, value)) => {
+            req.release(value);
+            key
+        }
+        None => Value::null(),
+    })
+}
+
+/// `InternalIterator::next(): void`.
+// An entry's shape, which cannot fail here.
+#[allow(clippy::unnecessary_wraps)]
+fn internal_next(req: &mut Request) -> Result<Value, Thrown> {
+    if let Some(this) = req.this()
+        && let Some(it) = this.native_mut::<Internal>(req)
+    {
+        it.index += 1;
+    }
+    Ok(Value::null())
+}
+
+/// `InternalIterator::valid(): bool`.
+fn internal_valid(req: &mut Request) -> Result<Value, Thrown> {
+    Ok(Value::bool(match internal_element(req)? {
+        Some((key, value)) => {
+            req.release(key);
+            req.release(value);
+            true
+        }
+        None => false,
+    }))
+}
+
+/// `InternalIterator::rewind(): void`.
+// An entry's shape, which cannot fail here.
+#[allow(clippy::unnecessary_wraps)]
+fn internal_rewind(req: &mut Request) -> Result<Value, Thrown> {
+    if let Some(this) = req.this()
+        && let Some(it) = this.native_mut::<Internal>(req)
+    {
+        it.index = 0;
+    }
+    Ok(Value::null())
 }

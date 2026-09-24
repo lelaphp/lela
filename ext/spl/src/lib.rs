@@ -27,6 +27,7 @@
 
 mod array;
 mod exceptions;
+mod fixedarray;
 mod functions;
 mod iterators;
 mod observer;
@@ -70,6 +71,13 @@ pub fn extension() -> Extension {
         .classes(iterators::classes());
     for (decl, methods) in array::classes() {
         builder = builder.class_payload::<array::SplArray>(decl, methods, &array::HANDLERS);
+    }
+    for (decl, methods) in fixedarray::classes() {
+        builder = builder.class_payload::<fixedarray::SplFixedArray>(
+            decl,
+            methods,
+            &fixedarray::HANDLERS,
+        );
     }
     builder
         .classes(observer::classes())

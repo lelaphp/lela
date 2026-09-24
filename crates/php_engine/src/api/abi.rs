@@ -146,6 +146,13 @@ pub(crate) type NativeNew = fn(&mut Heap, u32, u32) -> Result<Obj, Fatal>;
 
 /// One [`NativeNew`], the payload's `Default` into a fresh object of
 /// `class` with `slots` declared property slots.
+/// The `create_object` of a native class of the engine's own whose
+/// objects carry a `T`, as [`ExtensionBuilder::class_payload`] gives an
+/// extension's.
+pub(crate) fn new_payload<T: Any + Send + Default>() -> NativeNew {
+    new_with_payload::<T> as NativeNew
+}
+
 fn new_with_payload<T: Any + Send + Default>(
     heap: &mut Heap,
     class: u32,
@@ -787,6 +794,22 @@ pub trait ObjectHandlers: Send + Sync {
         right: &Value,
     ) -> Result<Option<Ordering>, Thrown> {
         req.compare_objects(left, right)
+    }
+
+    /// The element a `zend_object_iterator` of the class stands at
+    /// `index` steps past its rewind, its key and its value, one more
+    /// owner each: what an `InternalIterator` over the object answers
+    /// ([`crate::api::call::internal_iterator`]), for a class php walks
+    /// with an iterator of its own in C rather than with methods.
+    /// `None` at `Std` and past the last element.
+    fn iterator_element(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        index: usize,
+    ) -> Result<Option<(Value, Value)>, Thrown> {
+        let _ = (req, object, index);
+        Ok(None)
     }
 
     /// `get_properties_for`: the rows one purpose reads; `None` at
