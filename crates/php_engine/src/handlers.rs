@@ -9166,8 +9166,9 @@ fn add_element(
 /// is the undefined-variable warning and `null`. An array is copied
 /// into the `VAR` the opline's `result` names (`ZVAL_COPY_VALUE`) with
 /// one more owner taken unless the operand is a `TMP`, whose owner
-/// moves; the position `Z_FE_POS` starts at zero; a `VAR` operand is
-/// freed (`FREE_OP1_IF_VAR`) and the next opline is the `FE_FETCH_R`.
+/// moves and whose slot is left `UNDEF` ([`take_temporary`]); the
+/// position `Z_FE_POS` starts at zero; a `VAR` operand is freed
+/// (`FREE_OP1_IF_VAR`) and the next opline is the `FE_FETCH_R`.
 /// An operand that is neither array nor object is php's warning, the
 /// `VAR` left `UNDEF`, the operand freed (`FREE_OP1`) and the jump
 /// `op2` names, to the `FE_FREE` past the loop.
@@ -9271,6 +9272,41 @@ fn add_element(
 /// }
 /// int(0)
 /// ```
+///
+/// The `TMP` a dimension read leaves is the loop's from the reset, so
+/// the `FETCH_DIM_R` of the next pass writes its slot over nothing: an
+/// array a native built, whose second element is the subject, is read
+/// thirty times over with its previous copy gone each time (#723).
+///
+/// ```php
+/// for ($i = 0; $i < 30; $i++) {
+///     $r = json_decode('{"w":[],"errors":[]}', true);
+///     foreach ($r["errors"] as $e) {}
+/// }
+/// echo "ok\n";
+/// ```
+/// ```expect
+/// ok
+/// ```
+///
+/// The same holds of every `TMP` subject: an array an `INIT_ARRAY`
+/// builds and an object a cast makes are each given up once, by the
+/// `FE_FREE`, so the loop over them costs nothing when it is done, and
+/// each pass walks its own object.
+///
+/// ```php
+/// $b = memory_get_usage();
+/// for ($i = 0; $i < 30; $i++) { foreach ([$i] as $e) {} }
+/// var_dump(memory_get_usage() - $b);
+/// for ($i = 0; $i < 30; $i++) {
+///     foreach ([[$i]] as $e) {}
+///     foreach ((object)['a' => $i] as $k => $v) echo $i < 3 ? "$k=$v " : '';
+/// }
+/// ```
+/// ```expect
+/// int(0)
+/// a=0 a=1 a=2
+/// ```
 pub(crate) fn fe_reset_r<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -9280,7 +9316,9 @@ pub(crate) fn fe_reset_r<T: Tier>(
     let subject = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
     let slot = exec::temporary_slot(code, op.out);
     if subject.as_array().is_some() {
-        if op.op1_type != OperandKind::Tmp {
+        if op.op1_type == OperandKind::Tmp {
+            take_temporary(req, frame, code, op.op1);
+        } else {
             req.addref(&subject);
         }
         let previous = req.set_slot(frame, slot, subject);
@@ -9301,7 +9339,9 @@ pub(crate) fn fe_reset_r<T: Tier>(
             Ok(started) => started,
             Err(thrown) => return threw(req, frame, &thrown),
         };
-        if op.op1_type != OperandKind::Tmp {
+        if op.op1_type == OperandKind::Tmp {
+            take_temporary(req, frame, code, op.op1);
+        } else {
             req.addref(&subject);
         }
         let previous = req.set_slot(frame, slot, subject);
@@ -9317,6 +9357,18 @@ pub(crate) fn fe_reset_r<T: Tier>(
         return Ok(advance(req, frame));
     }
     fe_reset_refused(req, frame, code, op, &subject)
+}
+
+/// php's `ZVAL_COPY_VALUE` out of a `TMP` whose owner the reset's
+/// `VAR` takes: php leaves the dead temporary's bits standing, since
+/// nothing reads them again, but every write of a slot here gives up
+/// what the slot held, so the next opline to write this one would give
+/// the subject up a second time after the `FE_FREE` did. The slot is
+/// emptied instead, as [`exec::take_operand`] empties a `TMP` it moves.
+fn take_temporary(req: &mut Request, frame: FrameRef, code: &OpArray, field: u32) {
+    // The value is the `VAR`'s now, so what the take hands back is not
+    // released here.
+    let _ = req.take_slot(frame, exec::temporary_slot(code, field));
 }
 
 /// The arm both resets share for what is neither array nor object
