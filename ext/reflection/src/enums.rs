@@ -381,7 +381,7 @@ fn this_case(req: &mut Request) -> Result<(ClassId, Vec<u8>), Thrown> {
 ///
 /// ```php
 /// var_dump(new ReflectionEnumUnitCase('PropertyHookType', 'Set'));
-/// try { new ReflectionEnumUnitCase('Exception', 'Set'); } catch (Throwable $t) { echo get_class($t), ': ', $t->getMessage(), "\n"; }
+/// try { new ReflectionEnumUnitCase('Nope', 'Set'); } catch (Throwable $t) { echo get_class($t), ': ', $t->getMessage(), "\n"; }
 /// ```
 /// ```expect
 /// object(ReflectionEnumUnitCase)#1 (2) {
@@ -390,7 +390,7 @@ fn this_case(req: &mut Request) -> Result<(ClassId, Vec<u8>), Thrown> {
 ///   ["class"]=>
 ///   string(16) "PropertyHookType"
 /// }
-/// ReflectionException: Class "Exception" is not an enum
+/// ReflectionException: Class "Nope" does not exist
 /// ```
 pub(super) fn reflection_enum_case_construct(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 2)?;
