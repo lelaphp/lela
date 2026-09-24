@@ -1,0 +1,858 @@
+//! `php_pcre_match_impl` (`Z/ext/pcre/php_pcre.c:1150`) and what it
+//! shares with the rest of the family: the scratch a call borrows from
+//! the request, the loop's empty-match step, and `populate_subpat_array`,
+//! the shape of one match's array, which `preg_replace_callback` hands
+//! its callback too.
+
+use php_ext::raising::{Level, Thrown, arg_value_error, docref};
+use php_ext::request::Request;
+use php_ext::values::{Key, PhpArray, PhpString, Value};
+
+use crate::ffi::{self, Context, MatchData, Subject};
+use crate::pattern::{Pattern, compiled};
+use crate::{
+    INTERNAL_ERROR, NO_ERROR, OFFSET_CAPTURE, PATTERN_ORDER, SET_ORDER, State, UNMATCHED_AS_NULL,
+    arguments_between, error_code, exec_error, ini_bool, ini_long, long_argument, set_error,
+    string_argument,
+};
+
+/// `PHP_PCRE_PREALLOC_MDATA_SIZE`.
+const PREALLOC_PAIRS: u32 = 32;
+
+/// What one call matches with: the match data, the request's own while
+/// no other call holds it and the pattern fits it, and `mctx`
+/// with the limits the ini entries hold now.
+pub(crate) struct Scratch {
+    pub(crate) data: MatchData,
+    pub(crate) context: Context,
+    pooled: bool,
+}
+
+impl Scratch {
+    /// php's `mdata_used` test and `pcre2_match_data_create_from_pattern`;
+    /// `None`, with `PREG_INTERNAL_ERROR`, where the library had no memory.
+    pub(crate) fn take(req: &mut Request, pattern: &Pattern) -> Option<Scratch> {
+        let backtrack = limit(ini_long(req, "pcre.backtrack_limit"));
+        let recursion = limit(ini_long(req, "pcre.recursion_limit"));
+        let jit = ini_bool(req, "pcre.jit");
+        let state = req.state::<State>();
+        let context = state.context.take().or_else(Context::new);
+        let fits = pattern.groups <= PREALLOC_PAIRS as usize;
+        let (data, pooled) = if fits {
+            (
+                state
+                    .data
+                    .take()
+                    .or_else(|| MatchData::with_pairs(PREALLOC_PAIRS)),
+                true,
+            )
+        } else {
+            (MatchData::for_code(&pattern.code), false)
+        };
+        let (Some(mut context), Some(data)) = (context, data) else {
+            set_error(req, INTERNAL_ERROR);
+            return None;
+        };
+        context.configure(backtrack, recursion, jit);
+        Some(Scratch {
+            data,
+            context,
+            pooled,
+        })
+    }
+
+    /// The scratch handed back for the next call.
+    pub(crate) fn give_back(self, req: &mut Request) {
+        let state = req.state::<State>();
+        if state.context.is_none() {
+            state.context = Some(self.context);
+        }
+        if self.pooled && state.data.is_none() {
+            state.data = Some(self.data);
+        }
+    }
+
+    /// One match of `pattern` over `subject` from `start`.
+    pub(crate) fn run(
+        &mut self,
+        pattern: &Pattern,
+        subject: &mut Subject<'_>,
+        start: usize,
+        options: u32,
+        jit: bool,
+    ) -> i32 {
+        ffi::run(
+            &pattern.code,
+            subject,
+            start,
+            options,
+            &mut self.data,
+            &self.context,
+            jit,
+        )
+    }
+
+    /// `pcre2_match` again at the end of an empty match, anchored and
+    /// not empty, which is how php steps past one, never `pcre2_jit_match`.
+    pub(crate) fn retry(&mut self, pattern: &Pattern, subject: &mut Subject<'_>, at: usize) -> i32 {
+        self.run(
+            pattern,
+            subject,
+            at,
+            ffi::PCRE2_NOTEMPTY_ATSTART | ffi::PCRE2_ANCHORED,
+            false,
+        )
+    }
+
+    /// The offsets of group `group`, `PCRE2_UNSET` twice for one that did
+    /// not take part.
+    pub(crate) fn group(&self, group: usize) -> (usize, usize) {
+        let ovector = self.data.ovector();
+        (
+            ovector.get(2 * group).copied().unwrap_or(ffi::PCRE2_UNSET),
+            ovector
+                .get(2 * group + 1)
+                .copied()
+                .unwrap_or(ffi::PCRE2_UNSET),
+        )
+    }
+}
+
+/// `(uint32_t)PCRE_G(backtrack_limit)`: the low 32 bits, as C's cast.
+fn limit(value: i64) -> u32 {
+    u32::try_from(value.rem_euclid(1 << 32)).unwrap_or(u32::MAX)
+}
+
+/// `calculate_unit_length`: one byte, or under `/u` the character that
+/// starts at `at`.
+pub(super) fn unit_length(pattern: &Pattern, subject: &[u8], at: usize) -> usize {
+    if !pattern.utf {
+        return 1;
+    }
+    1 + subject
+        .get(at + 1..)
+        .unwrap_or_default()
+        .iter()
+        .take_while(|b| *b & 0xc0 == 0x80)
+        .count()
+}
+
+/// The bytes of `subject` between two offsets as a new string,
+/// `ZVAL_STRINGL_FAST`.
+pub(super) fn piece(
+    req: &mut Request,
+    subject: &[u8],
+    start: usize,
+    end: usize,
+) -> Result<Value, Thrown> {
+    let bytes = subject.get(start..end).unwrap_or_default();
+    Ok(Value::string(PhpString::new(req, bytes)?))
+}
+
+/// `populate_match_value`: the group's text, or for one that did not
+/// take part `null` or the empty string.
+fn match_value(
+    req: &mut Request,
+    subject: &[u8],
+    (start, end): (usize, usize),
+    unmatched_as_null: bool,
+) -> Result<Value, Thrown> {
+    if start == ffi::PCRE2_UNSET {
+        return if unmatched_as_null {
+            Ok(Value::null())
+        } else {
+            Ok(Value::string(PhpString::new(req, b"")?))
+        };
+    }
+    piece(req, subject, start, end)
+}
+
+/// `add_offset_pair`'s pair: `[text, offset]`, or for a group that did
+/// not take part `[null or "", -1]`.
+pub(super) fn offset_pair(
+    req: &mut Request,
+    subject: &[u8],
+    (start, end): (usize, usize),
+    unmatched_as_null: bool,
+) -> Result<Value, Thrown> {
+    let mut pair = PhpArray::new(req)?;
+    if start == ffi::PCRE2_UNSET {
+        let text = if unmatched_as_null {
+            Value::null()
+        } else {
+            Value::string(PhpString::new(req, b"")?)
+        };
+        pair.append(req, text)?;
+        pair.append(req, Value::int(-1))?;
+    } else {
+        let text = piece(req, subject, start, end)?;
+        pair.append(req, text)?;
+        pair.append(req, Value::int(i64::try_from(start).unwrap_or(i64::MAX)))?;
+    }
+    Ok(pair.to_value())
+}
+
+/// `add_named` and the numbered insert after it: the value under the
+/// group's name, where it has one and, for a group that did not take
+/// part, where no group of the name was written first (`J`), then
+/// under the next number.
+fn insert(
+    req: &mut Request,
+    into: &mut PhpArray,
+    name: Option<&[u8]>,
+    value: Value,
+    unmatched: bool,
+) -> Result<(), Thrown> {
+    if let Some(name) = name {
+        let key = Key::Str(PhpString::new(req, name)?);
+        if !unmatched || !into.contains(&key) {
+            req.addref(&value);
+            into.set(req, key, value)?;
+        }
+    }
+    into.append(req, value)
+}
+
+/// `populate_subpat_array`: one match's groups, each under its number
+/// and its name, as text or as `[text, offset]` pairs, the groups past
+/// the last that took part only under `PREG_UNMATCHED_AS_NULL`, and
+/// `MARK` last where the match passed one.
+pub(super) fn populate(
+    req: &mut Request,
+    into: &mut PhpArray,
+    pattern: &Pattern,
+    scratch: &Scratch,
+    subject: &[u8],
+    count: usize,
+    flags: i64,
+) -> Result<(), Thrown> {
+    let offsets = flags & OFFSET_CAPTURE != 0;
+    let as_null = flags & UNMATCHED_AS_NULL != 0;
+    let name = |group: usize| pattern.names.get(group).and_then(|n| n.as_deref());
+    for group in 0..count {
+        let at = scratch.group(group);
+        let value = if offsets {
+            offset_pair(req, subject, at, as_null)?
+        } else {
+            match_value(req, subject, at, as_null)?
+        };
+        insert(req, into, name(group), value, at.0 == ffi::PCRE2_UNSET)?;
+    }
+    if as_null {
+        for group in count..pattern.groups {
+            let unset = (ffi::PCRE2_UNSET, ffi::PCRE2_UNSET);
+            let value = if offsets {
+                offset_pair(req, subject, unset, true)?
+            } else {
+                Value::null()
+            };
+            insert(req, into, name(group), value, true)?;
+        }
+    }
+    if let Some(mark) = scratch.data.mark() {
+        let key = Key::Str(PhpString::new(req, b"MARK")?);
+        let mark = Value::string(PhpString::new(req, &mark)?);
+        into.set(req, key, mark)?;
+    }
+    Ok(())
+}
+
+/// `preg_match(string $pattern, string $subject, &$matches = null, int
+/// $flags = 0, int $offset = 0): int|false`: one match, its groups in
+/// `$matches` under their numbers and names.
+///
+/// ```php
+/// var_dump(preg_match('/(\d+)-(?<word>\w+)/', 'ab 12-cd', $m), $m, preg_match('/x/', 'abc', $m), $m);
+/// ```
+/// ```expect
+/// int(1)
+/// array(4) {
+///   [0]=>
+///   string(5) "12-cd"
+///   [1]=>
+///   string(2) "12"
+///   ["word"]=>
+///   string(2) "cd"
+///   [2]=>
+///   string(2) "cd"
+/// }
+/// int(0)
+/// array(0) {
+/// }
+/// ```
+///
+/// `PREG_OFFSET_CAPTURE` pairs each group with its byte offset, and
+/// `PREG_UNMATCHED_AS_NULL` reports a group that did not take part, the
+/// trailing ones included, as `null`.
+///
+/// ```php
+/// preg_match('/(a)(b)?(c)?/', 'xa', $m, PREG_OFFSET_CAPTURE); var_dump($m);
+/// preg_match('/(a)(b)?(c)?/', 'xa', $m, PREG_UNMATCHED_AS_NULL); var_dump($m);
+/// preg_match('/(a)(?<n>b)?(c)?/', 'xa', $m, PREG_UNMATCHED_AS_NULL | PREG_OFFSET_CAPTURE); var_dump($m);
+/// ```
+/// ```expect
+/// array(2) {
+///   [0]=>
+///   array(2) {
+///     [0]=>
+///     string(1) "a"
+///     [1]=>
+///     int(1)
+///   }
+///   [1]=>
+///   array(2) {
+///     [0]=>
+///     string(1) "a"
+///     [1]=>
+///     int(1)
+///   }
+/// }
+/// array(4) {
+///   [0]=>
+///   string(1) "a"
+///   [1]=>
+///   string(1) "a"
+///   [2]=>
+///   NULL
+///   [3]=>
+///   NULL
+/// }
+/// array(5) {
+///   [0]=>
+///   array(2) {
+///     [0]=>
+///     string(1) "a"
+///     [1]=>
+///     int(1)
+///   }
+///   [1]=>
+///   array(2) {
+///     [0]=>
+///     string(1) "a"
+///     [1]=>
+///     int(1)
+///   }
+///   ["n"]=>
+///   array(2) {
+///     [0]=>
+///     NULL
+///     [1]=>
+///     int(-1)
+///   }
+///   [2]=>
+///   array(2) {
+///     [0]=>
+///     NULL
+///     [1]=>
+///     int(-1)
+///   }
+///   [3]=>
+///   array(2) {
+///     [0]=>
+///     NULL
+///     [1]=>
+///     int(-1)
+///   }
+/// }
+/// ```
+///
+/// The offset, negative from the end, and past the end an internal
+/// error; an order `preg_match` has none of is the `ValueError`.
+///
+/// ```php
+/// var_dump(preg_match('/\w/', 'abc', $m, 0, 1), $m, preg_match('/\w/', 'abc', $m, 0, -1), $m, preg_match('/\w/', 'abc', $m, 0, 4), preg_last_error(), $m);
+/// try { preg_match('/a/', 'a', $m, PREG_SET_ORDER); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// int(1)
+/// array(1) {
+///   [0]=>
+///   string(1) "b"
+/// }
+/// int(1)
+/// array(1) {
+///   [0]=>
+///   string(1) "c"
+/// }
+/// bool(false)
+/// int(1)
+/// array(0) {
+/// }
+/// preg_match(): Argument #4 ($flags) must be a PREG_* constant
+/// ```
+///
+/// `(*MARK)` names, and a duplicate name under `J`, where the group that
+/// took part wins.
+///
+/// ```php
+/// preg_match('/(*MARK:A)x|(*MARK:B)y/', 'y', $m); var_dump($m);
+/// preg_match('/(?<n>a)|(?<n>b)/J', 'b', $m); var_dump($m);
+/// ```
+/// ```expect
+/// array(2) {
+///   [0]=>
+///   string(1) "y"
+///   ["MARK"]=>
+///   string(1) "B"
+/// }
+/// array(4) {
+///   [0]=>
+///   string(1) "b"
+///   ["n"]=>
+///   string(1) "b"
+///   [1]=>
+///   string(0) ""
+///   [2]=>
+///   string(1) "b"
+/// }
+/// ```
+///
+/// php's pattern syntax: bracket delimiters that nest, the modifiers,
+/// and the warnings for what it refuses.
+///
+/// ```php
+/// var_dump(preg_match('{a{2}}', 'aa'), preg_match('(a(b))', 'ab'), preg_match('[a]i', 'A'), preg_match('<a>', 'a'), preg_match('#^b$#m', "a\nb"), preg_match('/a.b/s', "a\nb"), preg_match('/a b/x', 'ab'), preg_match('/a+?/U', 'aa', $m), $m, preg_match('/b/A', 'ab'), preg_match('/a$/D', "a\n"), preg_match('/(a)(?:b)(c)/n', 'abc', $m), $m, preg_match('/\w/u', "\xc3\xa9"), preg_match("/a/\n", 'a'));
+/// var_dump(preg_match('', 'a'), preg_match('abc', 'a'), preg_match('/abc', 'a'), preg_match('(abc', 'a'), preg_match('/a/Z', 'a'), preg_match("/a/\0", 'a'), preg_match('/a/e', 'a'), preg_match('/(/', 'a'), preg_last_error(), preg_last_error_msg());
+/// ```
+/// ```expect
+/// int(1)
+/// int(1)
+/// int(1)
+/// int(1)
+/// int(1)
+/// int(1)
+/// int(1)
+/// int(1)
+/// array(1) {
+///   [0]=>
+///   string(2) "aa"
+/// }
+/// int(0)
+/// int(0)
+/// int(1)
+/// array(1) {
+///   [0]=>
+///   string(3) "abc"
+/// }
+/// int(1)
+/// int(1)
+///
+/// Warning: preg_match(): Empty regular expression in %s on line 3
+///
+/// Warning: preg_match(): Delimiter must not be alphanumeric, backslash, or NUL byte in %s on line 3
+///
+/// Warning: preg_match(): No ending delimiter '/' found in %s on line 3
+///
+/// Warning: preg_match(): No ending matching delimiter ')' found in %s on line 3
+///
+/// Warning: preg_match(): Unknown modifier 'Z' in %s on line 3
+///
+/// Warning: preg_match(): NUL byte is not a valid modifier in %s on line 3
+///
+/// Warning: preg_match(): Unknown modifier 'e' in %s on line 3
+///
+/// Warning: preg_match(): Compilation failed: missing closing parenthesis at offset 1 in %s on line 3
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// int(1)
+/// string(14) "Internal error"
+/// ```
+pub(crate) fn preg_match(req: &mut Request) -> Result<Value, Thrown> {
+    do_match(req, false)
+}
+
+/// `preg_match_all(string $pattern, string $subject, &$matches = null,
+/// int $flags = 0, int $offset = 0): int|false`: every match, grouped by
+/// group under `PREG_PATTERN_ORDER` and by match under `PREG_SET_ORDER`,
+/// an empty match stepped past as Perl's `/g` does.
+///
+/// ```php
+/// var_dump(preg_match_all('/(\d)(?<l>[a-z])?/', '1a2 3c', $m), $m);
+/// var_dump(preg_match_all('/(\d)(?<l>[a-z])?/', '1a2', $m, PREG_SET_ORDER), $m);
+/// ```
+/// ```expect
+/// int(3)
+/// array(4) {
+///   [0]=>
+///   array(3) {
+///     [0]=>
+///     string(2) "1a"
+///     [1]=>
+///     string(1) "2"
+///     [2]=>
+///     string(2) "3c"
+///   }
+///   [1]=>
+///   array(3) {
+///     [0]=>
+///     string(1) "1"
+///     [1]=>
+///     string(1) "2"
+///     [2]=>
+///     string(1) "3"
+///   }
+///   ["l"]=>
+///   array(3) {
+///     [0]=>
+///     string(1) "a"
+///     [1]=>
+///     string(0) ""
+///     [2]=>
+///     string(1) "c"
+///   }
+///   [2]=>
+///   array(3) {
+///     [0]=>
+///     string(1) "a"
+///     [1]=>
+///     string(0) ""
+///     [2]=>
+///     string(1) "c"
+///   }
+/// }
+/// int(2)
+/// array(2) {
+///   [0]=>
+///   array(4) {
+///     [0]=>
+///     string(2) "1a"
+///     [1]=>
+///     string(1) "1"
+///     ["l"]=>
+///     string(1) "a"
+///     [2]=>
+///     string(1) "a"
+///   }
+///   [1]=>
+///   array(2) {
+///     [0]=>
+///     string(1) "2"
+///     [1]=>
+///     string(1) "2"
+///   }
+/// }
+/// ```
+///
+/// ```php
+/// var_dump(preg_match_all('/a*/', 'baac', $m), $m, preg_match_all('//u', "\xc3\xa9x", $m, PREG_OFFSET_CAPTURE), $m, preg_match_all('/x/', 'abc'));
+/// preg_match_all('/(*MARK:A)a|(*MARK:B)b/', 'ab', $m); var_dump($m);
+/// preg_match_all('/(a)|(b)/', 'ab', $m, PREG_SET_ORDER | PREG_UNMATCHED_AS_NULL); var_dump($m);
+/// try { preg_match_all('/a/', 'a', $m, 3); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// int(4)
+/// array(1) {
+///   [0]=>
+///   array(4) {
+///     [0]=>
+///     string(0) ""
+///     [1]=>
+///     string(2) "aa"
+///     [2]=>
+///     string(0) ""
+///     [3]=>
+///     string(0) ""
+///   }
+/// }
+/// int(3)
+/// array(1) {
+///   [0]=>
+///   array(3) {
+///     [0]=>
+///     array(2) {
+///       [0]=>
+///       string(0) ""
+///       [1]=>
+///       int(0)
+///     }
+///     [1]=>
+///     array(2) {
+///       [0]=>
+///       string(0) ""
+///       [1]=>
+///       int(2)
+///     }
+///     [2]=>
+///     array(2) {
+///       [0]=>
+///       string(0) ""
+///       [1]=>
+///       int(3)
+///     }
+///   }
+/// }
+/// int(0)
+/// array(2) {
+///   [0]=>
+///   array(2) {
+///     [0]=>
+///     string(1) "a"
+///     [1]=>
+///     string(1) "b"
+///   }
+///   ["MARK"]=>
+///   array(2) {
+///     [0]=>
+///     string(1) "A"
+///     [1]=>
+///     string(1) "B"
+///   }
+/// }
+/// array(2) {
+///   [0]=>
+///   array(3) {
+///     [0]=>
+///     string(1) "a"
+///     [1]=>
+///     string(1) "a"
+///     [2]=>
+///     NULL
+///   }
+///   [1]=>
+///   array(3) {
+///     [0]=>
+///     string(1) "b"
+///     [1]=>
+///     NULL
+///     [2]=>
+///     string(1) "b"
+///   }
+/// }
+/// preg_match_all(): Argument #4 ($flags) must be a PREG_* constant
+/// ```
+pub(crate) fn preg_match_all(req: &mut Request) -> Result<Value, Thrown> {
+    do_match(req, true)
+}
+
+/// `php_do_pcre_match`.
+fn do_match(req: &mut Request, global: bool) -> Result<Value, Thrown> {
+    arguments_between(req, 2, 5)?;
+    let regex = string_argument(req, 1)?;
+    let subject = string_argument(req, 2)?;
+    let wants = req.argument_count() >= 3;
+    let flags = long_argument(req, 4, 0)?;
+    let offset = long_argument(req, 5, 0)?;
+    let Some(pattern) = compiled(req, regex.as_bytes()) else {
+        return Ok(Value::bool(false));
+    };
+    if offset == i64::MIN {
+        return Err(arg_value_error(
+            req,
+            5,
+            &format!("be greater than {}", i64::MIN),
+        ));
+    }
+    let matches = if wants { Some(3) } else { None };
+    match_impl(req, &pattern, subject, matches, global, flags, offset)
+}
+
+/// Where the match's array goes: the argument that is `$matches`.
+fn assign_matches(req: &mut Request, position: Option<u32>, array: PhpArray) {
+    match position {
+        Some(position) => crate::assign_ref(req, position, array.to_value()),
+        None => req.release(array.to_value()),
+    }
+}
+
+/// `php_pcre_match_impl`: the count of matches, or `false` with the
+/// error code set; `$matches` written at `matches` where the call gave one.
+pub(super) fn match_impl(
+    req: &mut Request,
+    pattern: &Pattern,
+    subject_string: PhpString,
+    matches: Option<u32>,
+    global: bool,
+    flags: i64,
+    offset: i64,
+) -> Result<Value, Thrown> {
+    // `zend_try_array_init`: `$matches` is `[]` before anything else.
+    if let Some(position) = matches {
+        let empty = PhpArray::new(req)?;
+        assign_matches(req, Some(position), empty);
+    }
+    let mut order = if global { PATTERN_ORDER } else { 0 };
+    if flags & 0xff != 0 {
+        order = flags & 0xff;
+        if (global && !(PATTERN_ORDER..=SET_ORDER).contains(&order)) || (!global && order != 0) {
+            return Err(arg_value_error(req, 4, "be a PREG_* constant"));
+        }
+    }
+    let bytes = subject_string.as_bytes();
+    let len = bytes.len();
+    let magnitude = usize::try_from(offset.unsigned_abs()).unwrap_or(usize::MAX);
+    let mut start = if offset < 0 {
+        len.saturating_sub(magnitude)
+    } else {
+        magnitude
+    };
+    if start > len {
+        exec_error(req, ffi::PCRE2_ERROR_BADOFFSET);
+        return Ok(Value::bool(false));
+    }
+    set_error(req, NO_ERROR);
+    let Some(mut scratch) = Scratch::take(req, pattern) else {
+        return Ok(Value::bool(false));
+    };
+    let outcome = matches_loop(
+        req,
+        pattern,
+        &mut scratch,
+        bytes,
+        &mut start,
+        matches.is_some(),
+        global,
+        order,
+        flags,
+    );
+    scratch.give_back(req);
+    let (count, out) = outcome?;
+    if let Some(out) = out {
+        assign_matches(req, matches, out);
+    }
+    match count {
+        Some(count) if error_code(req) == NO_ERROR => Ok(Value::int(count)),
+        _ => Ok(Value::bool(false)),
+    }
+}
+
+/// The loop of `php_pcre_match_impl`: how many matched, `None` for the
+/// "Get subpatterns list failed" return, and the array for `$matches`.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn matches_loop(
+    req: &mut Request,
+    pattern: &Pattern,
+    scratch: &mut Scratch,
+    bytes: &[u8],
+    start: &mut usize,
+    wants: bool,
+    global: bool,
+    order: i64,
+    flags: i64,
+) -> Result<(Option<i64>, Option<PhpArray>), Thrown> {
+    let offsets = flags & OFFSET_CAPTURE != 0;
+    let as_null = flags & UNMATCHED_AS_NULL != 0;
+    let mut out = if wants {
+        Some(PhpArray::new(req)?)
+    } else {
+        None
+    };
+    let mut sets = Vec::new();
+    if global && wants && order == PATTERN_ORDER {
+        for _ in 0..pattern.groups {
+            sets.push(PhpArray::new(req)?);
+        }
+    }
+    let mut marks: Option<PhpArray> = None;
+    let mut subject = Subject::new(bytes);
+    let mut matched: i64 = 0;
+    let mut count = scratch.run(pattern, &mut subject, *start, 0, true);
+    'search: loop {
+        if count >= 0 {
+            if count == 0 {
+                docref(req, Level::Notice, "Matched, but too many substrings");
+                count = i32::try_from(pattern.groups).unwrap_or(i32::MAX);
+            }
+            loop {
+                matched += 1;
+                let n = usize::try_from(count).unwrap_or(0);
+                if let Some(out) = out.as_mut() {
+                    let (whole_start, whole_end) = scratch.group(0);
+                    if whole_end < whole_start {
+                        docref(req, Level::Warning, "Get subpatterns list failed");
+                        return Ok((None, Some(*out)));
+                    }
+                    if !global {
+                        populate(req, out, pattern, scratch, bytes, n, flags)?;
+                        break 'search;
+                    }
+                    if order == PATTERN_ORDER {
+                        for (group, set) in sets.iter_mut().enumerate().take(n) {
+                            let at = scratch.group(group);
+                            let value = if offsets {
+                                offset_pair(req, bytes, at, as_null)?
+                            } else {
+                                match_value(req, bytes, at, as_null)?
+                            };
+                            set.append(req, value)?;
+                        }
+                        if let Some(mark) = scratch.data.mark() {
+                            let marks = match marks.as_mut() {
+                                Some(marks) => marks,
+                                None => marks.insert(PhpArray::new(req)?),
+                            };
+                            let mark = Value::string(PhpString::new(req, &mark)?);
+                            marks.set(req, Key::Int(matched - 1), mark)?;
+                        }
+                        let unset = (ffi::PCRE2_UNSET, ffi::PCRE2_UNSET);
+                        for set in sets.iter_mut().skip(n) {
+                            let value = if offsets {
+                                offset_pair(req, bytes, unset, as_null)?
+                            } else {
+                                match_value(req, bytes, unset, as_null)?
+                            };
+                            set.append(req, value)?;
+                        }
+                    } else {
+                        let mut set = PhpArray::new(req)?;
+                        populate(req, &mut set, pattern, scratch, bytes, n, flags)?;
+                        out.append(req, set.to_value())?;
+                    }
+                }
+                let (whole_start, whole_end) = scratch.group(0);
+                *start = whole_end;
+                if *start == whole_start {
+                    count = scratch.retry(pattern, &mut subject, *start);
+                    if count >= 0 {
+                        if global {
+                            continue;
+                        }
+                        break 'search;
+                    } else if count == ffi::PCRE2_ERROR_NOMATCH {
+                        if *start < bytes.len() {
+                            *start += unit_length(pattern, bytes, *start);
+                        } else {
+                            break 'search;
+                        }
+                    } else {
+                        exec_error(req, count);
+                        break 'search;
+                    }
+                }
+                break;
+            }
+        } else if count == ffi::PCRE2_ERROR_NOMATCH {
+            break;
+        } else {
+            exec_error(req, count);
+            break;
+        }
+        if !global {
+            break;
+        }
+        count = scratch.run(pattern, &mut subject, *start, 0, true);
+    }
+    if let Some(out) = out.as_mut()
+        && !sets.is_empty()
+    {
+        for (group, set) in sets.into_iter().enumerate() {
+            let value = set.to_value();
+            if let Some(name) = pattern.names.get(group).and_then(|n| n.as_deref()) {
+                let key = Key::Str(PhpString::new(req, name)?);
+                req.addref(&value);
+                out.set(req, key, value)?;
+            }
+            out.append(req, value)?;
+        }
+        if let Some(marks) = marks {
+            let key = Key::Str(PhpString::new(req, b"MARK")?);
+            out.set(req, key, marks.to_value())?;
+        }
+    }
+    Ok((Some(matched), out))
+}

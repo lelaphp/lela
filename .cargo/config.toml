@@ -12,3 +12,8 @@ xtask = "run --quiet --package xtask --"
 # harness, so the config's wins (`force = true`).
 [env]
 CARGO_WORKSPACE_DIR = { value = "", relative = true, force = true }
+
+# pcre2-sys links a system libpcre2-8 when pkg-config finds one, which
+# makes the pattern library whatever the machine has; set, it builds the
+# source the crate bundles, one version on every machine (design §7.2).
+PCRE2_SYS_STATIC = { value = "1", force = true }
