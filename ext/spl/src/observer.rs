@@ -1178,12 +1178,14 @@ fn multiple_set_flags(req: &mut Request) -> Result<Value, Thrown> {
 /// $m->attachIterator(new ArrayIterator([3]));
 /// try { $m->current(); } catch (InvalidArgumentException $e) { echo $e->getMessage(), "\n"; }
 /// var_dump($m->containsIterator($a)); $m->detachIterator($a); var_dump($m->containsIterator($a));
+/// try { $m->attachIterator($a, new stdClass); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
 /// ```
 /// ```expect
 /// Key duplication error
 /// Sub-Iterator is associated with NULL
 /// bool(true)
 /// bool(false)
+/// MultipleIterator::attachIterator(): Argument #2 ($info) must be of type string|int|null, stdClass given
 /// ```
 fn attach_iterator(req: &mut Request) -> Result<Value, Thrown> {
     crate::arity(req, 1, 2)?;
@@ -1193,6 +1195,19 @@ fn attach_iterator(req: &mut Request) -> Result<Value, Thrown> {
     let info = match info {
         Some(v) if matches!(v.as_ref(), ValueRef::Null) => None,
         Some(v) if matches!(v.as_ref(), ValueRef::Int(_) | ValueRef::Str(_)) => Some(v),
+        Some(v)
+            if matches!(
+                v.as_ref(),
+                ValueRef::Array(_) | ValueRef::Object(_) | ValueRef::Resource(_)
+            ) =>
+        {
+            let name = php_ext::coerce::value_name(req, &v);
+            return Err(php_ext::raising::arg_type_error(
+                req,
+                2,
+                &format!("be of type string|int|null, {name} given"),
+            ));
+        }
         Some(v) => {
             let coerced = php_ext::coerce::coerce_param(
                 req,
