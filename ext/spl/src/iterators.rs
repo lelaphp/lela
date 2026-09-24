@@ -1817,6 +1817,18 @@ fn hook(req: &mut Request, this: PhpObject, lowered: &[u8], name: &[u8]) -> Resu
 
 /// An error a step raises, cleared under `CATCH_GET_CHILD` and handed
 /// on otherwise.
+///
+/// ```php
+/// class Loud extends RecursiveIteratorIterator { function nextElement(): void { throw new Exception("next"); } }
+/// $quiet = new Loud(new RecursiveArrayIterator([[1, 2]]), RecursiveIteratorIterator::LEAVES_ONLY, RecursiveIteratorIterator::CATCH_GET_CHILD);
+/// $quiet->next(); echo $quiet->current(), "\n";
+/// $loud = new Loud(new RecursiveArrayIterator([[1, 2]]));
+/// try { $loud->next(); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// 1
+/// next
+/// ```
 fn caught(req: &mut Request, this: PhpObject, thrown: Thrown) -> Result<(), Thrown> {
     if rec(req, this, |it| it.flags & CIT_CATCH_GET_CHILD != 0)? {
         php_ext::raising::clear(req, thrown)
@@ -1896,8 +1908,11 @@ fn rec_forward(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
                             continue;
                         }
                     }
-                    hook(req, this, b"nextelement", b"nextElement")?;
+                    let hooked = hook(req, this, b"nextelement", b"nextElement");
                     set_state(req, this, State::Next)?;
+                    if let Err(thrown) = hooked {
+                        caught(req, this, thrown)?;
+                    }
                     return Ok(());
                 }
                 State::SelfFirst => {
