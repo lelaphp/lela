@@ -2315,6 +2315,29 @@ fn error_reporting(req: &mut Request) -> Result<Value, Thrown> {
 /// d
 /// ```
 ///
+/// The entry owns what its callable resolved to, `zend_fcc_addref`: a
+/// `Class::method` string registered with `$this` in scope names the
+/// object the call is bound to, which the entry keeps past the
+/// expression that made it, so the walk serves the method on it and its
+/// destructor comes after:
+///
+/// ```php
+/// class Test {
+///     function register() { register_shutdown_function('Test::method'); }
+///     function method() { var_dump($this); }
+///     function __destruct() { echo "destructed\n"; }
+/// }
+/// (new Test)->register();
+/// $a = [1, 2, 3];
+/// echo "end\n";
+/// ```
+/// ```expect
+/// end
+/// object(Test)#1 (0) {
+/// }
+/// destructed
+/// ```
+///
 /// A callback that names nothing is php's `TypeError` at the
 /// registration, worded as `zend_parse_arg_func` words the two misses,
 /// and no argument at all is php's `ArgumentCountError`:
@@ -2346,7 +2369,7 @@ fn register_shutdown_function(req: &mut Request) -> Result<Value, Thrown> {
         return Err(too_few_arguments(req, 1, 0));
     }
     let callback = callable_argument(req, 1)?;
-    req.addref(&callback.value());
+    callback.addref(req);
     let mut arguments = Vec::new();
     for position in 2..=u32::try_from(count).unwrap_or(u32::MAX) {
         let value = req.argument(position).unwrap_or_default();
@@ -2555,12 +2578,13 @@ mod tests {
     /// `zend_mm_init` maps into `real_size` before a request runs a line
     /// (`Z/Zend/zend_alloc.c:2047-2081`), and the oracle answers it too.
     ///
-    /// 49240 is the object store's table and what this source's
-    /// interning costs, and every byte of it is php's own arithmetic.
-    /// `init_executor` lays `EG(objects_store)` down before the request
-    /// serves a line, 1024 buckets of a pointer each, 8192 bytes of the
-    /// request heap (`Z/Zend/zend_execute_API.c:171`, design §5.4), and
-    /// so does this engine's request. php interns a request's constant operands
+    /// 311384 is the object store's table, the VM stack's first page and
+    /// what this source's interning costs, and every byte of it is php's
+    /// own arithmetic. `init_executor` lays `EG(objects_store)` down
+    /// before the request serves a line, 1024 buckets of a pointer each,
+    /// 8192 bytes of the request heap (`Z/Zend/zend_execute_API.c:171`,
+    /// design §5.4), and `zend_vm_stack_init` the stack's first 262144
+    /// (design §5.6), and so does this engine's request. php interns a request's constant operands
     /// into `CG(interned_strings)` out of the request heap
     /// (`zend_insert_literal` through `zend_new_interned_string_request`,
     /// `Z/Zend/zend_compile.c:563-582`, `Z/Zend/zend_string.c:227-265`),
@@ -2593,8 +2617,8 @@ mod tests {
         let (flagged, _) = served("<?php var_dump(memory_get_usage(true));");
         let (coerced, _) = served("<?php var_dump(memory_get_usage(1));");
         assert_eq!(
-            unflagged, "int(49240)\n",
-            "the object store's 8192, the interned table's 40960 and the two strings in it, 40 and 48"
+            unflagged, "int(311384)\n",
+            "the object store's 8192, the VM stack's first page of 262144, the interned table's 40960 and the two strings in it, 40 and 48"
         );
         assert_eq!(flagged, "int(2097152)\n");
         assert_eq!(coerced, flagged, "php's Z_PARAM_BOOL coerces 1 to true");
@@ -2657,8 +2681,9 @@ mod tests {
     ///
     /// **The second number is the oracle's; the first is this engine's
     /// own accounting**, for the reason the pin above states at length.
-    /// 2097152 is php's one 2 MiB chunk. 49288 is the object store's
-    /// 8192 and what this source's interning costs the request: the
+    /// 2097152 is php's one 2 MiB chunk. 311432 is the object store's
+    /// 8192, the VM stack's first page of 262144 and what this source's
+    /// interning costs the request: the
     /// table's own 40960 bucket array on the first string it interns,
     /// and then
     /// `memory_reset_peak_usage` 48 bytes, `var_dump` 40 and
@@ -2674,8 +2699,8 @@ mod tests {
         );
         assert_eq!(fatal, None);
         assert_eq!(
-            body, "int(49288)\nint(2097152)\n",
-            "the object store's 8192, the interned table's 40960 and the three strings in it, 48, 40 and 48"
+            body, "int(311432)\nint(2097152)\n",
+            "the object store's 8192, the VM stack's first page of 262144, the interned table's 40960 and the three strings in it, 48, 40 and 48"
         );
     }
 }

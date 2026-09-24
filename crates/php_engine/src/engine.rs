@@ -1252,7 +1252,13 @@ fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) {
     if !req.declare_classes(unit) || !req.declare_functions(unit) {
         return;
     }
-    let frame = req.push_frame(Arc::clone(unit));
+    let frame = match req.push_frame(Arc::clone(unit)) {
+        Ok(frame) => frame,
+        Err(fatal) => {
+            req.end_in(&fatal);
+            return;
+        }
+    };
     if req.seed_argv(frame, unit).is_err() {
         req.detach_symbol_table(frame);
         req.pop_frame();
@@ -2367,11 +2373,12 @@ mod tests {
                 "what the request interned is the request's own memory"
             );
         }
-        // The object store's table, and nothing else, before a line runs
-        // (design §5.4): 1024 buckets of a pointer each.
+        // The object store's table and the VM stack's first page, and
+        // nothing else, before a line runs (design §5.4, §5.6): 1024
+        // buckets of a pointer each, and `ZEND_VM_STACK_PAGE_SIZE`.
         assert_eq!(
             started_at,
-            vec![8192, 8192],
+            vec![8192 + 262_144, 8192 + 262_144],
             "every request starts where the one before it did"
         );
         assert_eq!(
@@ -2621,7 +2628,7 @@ mod tests {
             },
             ..Unit::default()
         };
-        let frame = req.push_frame(Arc::new(unit));
+        let frame = req.pushed(Arc::new(unit));
         assert_eq!(
             crate::tier::execute::<Nop>(&mut req, frame),
             Err(Fatal::Error(String::from(
@@ -2641,7 +2648,7 @@ mod tests {
             .unit(b"<?php echo 1;", b"witness.php")
             .unwrap_or_default();
         let unit = Unit::clone(&unit);
-        let frame = req.push_frame(Arc::new(unit));
+        let frame = req.pushed(Arc::new(unit));
         assert_eq!(crate::tier::execute::<Probe>(&mut req, frame), Ok(()));
         assert_eq!(
             req.state::<Asked>().sites,
@@ -2666,7 +2673,7 @@ mod tests {
             )
             .unwrap_or_default();
         req.declare_functions(&unit);
-        let frame = req.push_frame(unit);
+        let frame = req.pushed(unit);
         let outcome = crate::tier::execute::<Probe>(&mut req, frame);
         assert!(
             outcome.is_err(),

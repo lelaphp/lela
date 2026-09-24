@@ -202,7 +202,7 @@ mod tests {
     fn the_interrupt_is_tested_at_an_activation() {
         let engine = Engine::builder().tier::<Probe>().build();
         let mut req = Request::new(Arc::clone(&engine.shared), description());
-        let frame = req.push_frame(looping());
+        let frame = req.pushed(looping());
         req.interrupt().elapsed(1);
 
         assert_eq!(
@@ -223,7 +223,7 @@ mod tests {
     fn the_interrupt_is_tested_after_a_resume() {
         let engine = Engine::builder().tier::<Probe>().build();
         let mut req = Request::new(Arc::clone(&engine.shared), description());
-        let frame = req.push_frame(looping());
+        let frame = req.pushed(looping());
         let asked = req.state::<Asked>();
         asked.resume = Some(frame);
         asked.elapsed = Some(1);
@@ -246,7 +246,7 @@ mod tests {
             .tier::<Nop>()
             .build();
         let mut req = Request::new(Arc::clone(&engine.shared), description());
-        let frame = req.push_frame(looping());
+        let frame = req.pushed(looping());
         let armed = Instant::now();
 
         assert_eq!(

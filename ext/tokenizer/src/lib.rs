@@ -509,6 +509,9 @@ fn token_construct(req: &mut Request) -> Result<Value, Thrown> {
     } else {
         -1
     };
+    // `ZVAL_STR_COPY`: the argument keeps its owner and the property
+    // takes one of its own, once every argument has been read.
+    req.addref(&text);
     fill_token(req, this, id, text, line, pos)?;
     Ok(Value::null())
 }
@@ -691,7 +694,8 @@ fn token_get_token_name(req: &mut Request) -> Result<Value, Thrown> {
 }
 
 /// `PhpToken::__toString(): string`, php's `PHP_METHOD(PhpToken, __toString)`
-/// (`Z/ext/tokenizer/tokenizer.c:234`): `text`.
+/// (`Z/ext/tokenizer/tokenizer.c:234`): `text`, with an owner of its own,
+/// `RETURN_STR_COPY`, since the property keeps the one it has.
 ///
 /// ```php
 /// var_dump((new PhpToken(T_ECHO, "echo"))->__toString());
@@ -699,13 +703,30 @@ fn token_get_token_name(req: &mut Request) -> Result<Value, Thrown> {
 /// ```expect
 /// string(4) "echo"
 /// ```
+///
+/// So the text outlives every call that returned it: two calls give
+/// two owners up, and the property's string is still the token's.
+///
+/// ```php
+/// $t = new PhpToken(T_ECHO, str_repeat("echo", 8));
+/// var_dump($t->__toString(), $t->__toString());
+/// $pad = str_repeat("-", 32);
+/// var_dump($t->text);
+/// ```
+/// ```expect
+/// string(32) "echoechoechoechoechoechoechoecho"
+/// string(32) "echoechoechoechoechoechoechoecho"
+/// string(32) "echoechoechoechoechoechoechoecho"
+/// ```
 fn token_to_string(req: &mut Request) -> Result<Value, Thrown> {
     let count = req.argument_count();
     if count != 0 {
         return Err(wrong_argument_count(req, 0, 0, count));
     }
     let this = receiver(req)?;
-    Ok(Value::string(token_text(req, this)?))
+    let text = Value::string(token_text(req, this)?);
+    req.addref(&text);
+    Ok(text)
 }
 
 /// `ZEND_THIS` of a method being served.
