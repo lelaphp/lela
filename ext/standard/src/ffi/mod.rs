@@ -176,3 +176,27 @@ pub(super) fn random_bytes(buf: &mut [u8]) {
     // given, which is all the call writes.
     unsafe { libc::arc4random_buf(buf.as_mut_ptr().cast(), buf.len()) }
 }
+
+/// `sysconf(_SC_ARG_MAX)`, what `PHP_MINIT_FUNCTION(exec)` sets
+/// `cmd_max_len` to, and `_POSIX_ARG_MAX`'s 4096 where it answers `-1`.
+pub(super) fn arg_max() -> usize {
+    // SAFETY: `sysconf` reads a name and writes nothing.
+    let max = unsafe { libc::sysconf(libc::_SC_ARG_MAX) };
+    usize::try_from(max).unwrap_or(4096)
+}
+
+/// `errno = 0; nice(increment); errno == 0`: whether `nice(2)` took the
+/// increment, which is how `proc_nice` tells, since `-1` is also a
+/// niceness.
+pub(super) fn nice(increment: i32) -> bool {
+    // SAFETY: `__error` answers the calling thread's `errno` location
+    // and nothing else.
+    let errno = unsafe { libc::__error() };
+    // SAFETY: that location is live and the thread's own for its life;
+    // writing zero to it is what C's `errno = 0` does.
+    unsafe { *errno = 0 };
+    // SAFETY: `nice` takes a number and changes the process's priority,
+    // nothing in this program's memory.
+    unsafe { libc::nice(increment) };
+    std::io::Error::last_os_error().raw_os_error() == Some(0)
+}
