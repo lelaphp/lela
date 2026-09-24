@@ -1477,22 +1477,72 @@ impl Emit<'_> {
 
     /// `++$a`, `$a--` and their kin over a variable, an element, a
     /// property or a class's property (`ZEND_AST_STATIC_PROP`), php's
-    /// four step nodes; anything else is not read yet.
+    /// four step nodes; anything else is not read yet. What a call
+    /// returned is php's compile-time fatal
+    /// (`zend_ensure_writable_variable`), and `$this` is `FETCH_THIS`
+    /// and the step over it, the `TypeError` for an object:
+    ///
+    /// ```php
+    /// class Foo {
+    ///     function f() {
+    ///         try { ++$this; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    ///         try { $this--; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    ///     }
+    /// }
+    /// (new Foo)->f();
+    /// ```
+    /// ```expect
+    /// Cannot increment Foo
+    /// Cannot decrement Foo
+    /// ```
+    ///
+    /// ```php
+    /// function test() { return 42; }
+    /// ++test();
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Can't use function return value in write context in %s on line 3
+    /// ```
     fn step(&mut self, target: tree::Expr, up: bool, pre: bool) -> Result<Where, CompileError> {
         let line = self.line_of(target);
+        let opcode = match (pre, up) {
+            (true, true) => Opcode::PreInc,
+            (true, false) => Opcode::PreDec,
+            (false, true) => Opcode::PostInc,
+            (false, false) => Opcode::PostDec,
+        };
         match self.peel(target) {
-            tree::Expr::SimpleVarExpr(var) => {
-                let SimpleVar::Cv(name) = self.simple_var_of(var, line)? else {
-                    return Err(self.stepless(up));
-                };
-                let opcode = match (pre, up) {
-                    (true, true) => Opcode::PreInc,
-                    (true, false) => Opcode::PreDec,
-                    (false, true) => Opcode::PostInc,
-                    (false, false) => Opcode::PostDec,
-                };
-                Ok(self.incdec(&name, opcode))
+            // `zend_ensure_writable_variable` (`Z/Zend/zend_compile.c:3388`):
+            // what a call returned is no place to step.
+            tree::Expr::CallExpr(id) => {
+                let callee = self.peel(self.parsed.tree[id].callee);
+                Err(self.compile_error(match callee {
+                    tree::Expr::MemberAccessExpr(_) | tree::Expr::ScopedAccessExpr(_) => {
+                        "Can't use method return value in write context"
+                    }
+                    _ => "Can't use function return value in write context",
+                }))
             }
+            tree::Expr::SimpleVarExpr(var) => match self.simple_var_of(var, line)? {
+                SimpleVar::Cv(name) => Ok(self.incdec(&name, opcode)),
+                // `zend_compile_var` over `$this` under `BP_VAR_RW`:
+                // `FETCH_THIS` into a `VAR` and the step over it, which
+                // is the `TypeError` for an object as the program serves.
+                SimpleVar::This => {
+                    let this = self.fetch_this(OperandKind::Var);
+                    let (op1_type, op1) = self.operand(this);
+                    let out = self.temporary();
+                    self.push(Opline {
+                        opcode,
+                        op1_type,
+                        op1,
+                        out_type: OperandKind::Tmp,
+                        out,
+                        ..Opline::default()
+                    });
+                    Ok(Where::Temporary(out))
+                }
+            },
             tree::Expr::ScopedAccessExpr(scoped) => match self.scoped_of(scoped, line)? {
                 Scoped::Property { class, name } => {
                     let step = match (pre, up) {
@@ -1505,6 +1555,13 @@ impl Emit<'_> {
                 }
                 Scoped::Constant { .. } | Scoped::ClassName { .. } => Err(self.stepless(up)),
             },
+            // `$$x++` is `FETCH_RW` by name and the step over it, and no
+            // handler here serves a fetch by name under a write.
+            tree::Expr::VarVarExpr(_) | tree::Expr::DynamicVarExpr(_) => Err(self.unread(if up {
+                "a `++` over a variable named at run time"
+            } else {
+                "a `--` over a variable named at run time"
+            })),
             tree::Expr::SubscriptExpr(_) => self.dim_step(target, up, pre),
             tree::Expr::MemberAccessExpr(access) => {
                 let name = self.member_name_of(access, line)?;
