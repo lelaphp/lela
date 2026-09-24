@@ -10219,6 +10219,15 @@ impl Request {
         self.constants.push((Some("Core"), name.to_vec(), value));
     }
 
+    /// The fd the host handed under one of its standard streams
+    /// ([`crate::engine::FileHandles`]), `None` where it handed none.
+    pub(crate) fn host_fd(
+        &self,
+        standard: crate::streams::Standard,
+    ) -> Option<std::os::fd::BorrowedFd<'_>> {
+        self.description.file_handles.as_ref()?.fd(standard)
+    }
+
     /// Whether the host asked for the CLI's standard handles.
     pub(crate) fn registers_file_handles(&self) -> bool {
         self.description.file_handles.is_some()

@@ -99,7 +99,7 @@ impl Engine {
             script_name: Some(name.to_vec()),
             source: Some(source.as_bytes().to_vec()),
             cwd: dir.to_path_buf(),
-            file_handles: Some(FileHandles),
+            file_handles: Some(piped()),
             ..RequestDescription::default()
         };
         let observables = self.serve(description, &mut sink);
@@ -112,6 +112,20 @@ impl Engine {
             fatal: observables.fatal,
         }
     }
+}
+
+/// The CLI's standard handles as a test runner hands php its fds, one
+/// pipe's end under each, so `fstat` and `ftruncate` on `STDIN`, `STDOUT`
+/// and `STDERR` answer what php answers under `run-tests.php` and the
+/// witness lane's oracle, a pipe's `fstat(2)` and the `EINVAL` its
+/// `ftruncate(2)` is. What the request writes is the sink's all the same;
+/// the pipes carry nothing. A pipe the system refuses is no fd, which
+/// answers as a closed one does.
+fn piped() -> FileHandles {
+    let stdin = std::io::pipe().ok().map(|(reader, _)| reader.into());
+    let stdout = std::io::pipe().ok().map(|(_, writer)| writer.into());
+    let stderr = std::io::pipe().ok().map(|(_, writer)| writer.into());
+    FileHandles::new(stdin, stdout, stderr)
 }
 
 /// A request on a fresh engine, for a unit test of the face that needs

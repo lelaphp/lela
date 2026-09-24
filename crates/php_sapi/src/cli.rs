@@ -697,10 +697,10 @@ impl OutputSink for Process {
 /// as `zend_eval_string` scans it in `ST_IN_SCRIPTING`; stdin is read
 /// whole and served as `Standard input code`. A file that cannot be
 /// opened is `cli_seek_file_begin`'s line on stderr and exit 1, before a
-/// request begins. The request is handed the CLI's standard handles
+/// request begins. The request is handed the process's standard handles
 /// ([`FileHandles`]), which the engine registers as `STDIN`, `STDOUT`
-/// and `STDERR`, as `do_cli` registers them for a file, `-r`'s code and
-/// stdin alike.
+/// and `STDERR` over copies of fds 0, 1 and 2, as `do_cli` registers
+/// them for a file, `-r`'s code and stdin alike.
 ///
 /// What php's `-R`-family reads stdin lazily for is not here: nothing in
 /// the engine reads the request's body yet (design §4.3 seam 4, the
@@ -745,9 +745,22 @@ pub fn describe(program: &Program, arguments: &[OsString]) -> Result<RequestDesc
         sapi_name: String::from(NAME),
         script_name: Some(script),
         source,
-        file_handles: Some(FileHandles),
+        file_handles: Some(process_handles()),
         ..RequestDescription::default()
     })
+}
+
+/// The process's fds 0, 1 and 2 as the engine is handed them, each a
+/// `dup(2)` of the host's, so the request's `fstat` and `ftruncate` ask
+/// of the fds php's `STDIO` kind asks of; a closed one is `None`, which
+/// both answer as `fstat(2)` answers `EBADF`.
+fn process_handles() -> FileHandles {
+    use std::os::fd::AsFd;
+    FileHandles::new(
+        std::io::stdin().as_fd().try_clone_to_owned().ok(),
+        std::io::stdout().as_fd().try_clone_to_owned().ok(),
+        std::io::stderr().as_fd().try_clone_to_owned().ok(),
+    )
 }
 
 /// Serve `program` on `engine` as `do_cli` serves it and hand back the

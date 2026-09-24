@@ -27,6 +27,7 @@ use crate::api::abi::{Cache, Entry, Extension, NativeNew, ObjectHandlers, Startu
 use crate::api::request::{Aside, Ending, ExtensionId, Request};
 use crate::api::values::{ClassId, Value};
 use crate::exec;
+use crate::streams::Standard;
 use crate::tier::{Nop, Tier, execute, reenter, resume};
 
 /// Everything a host knows about one request before it starts (design
@@ -63,9 +64,43 @@ pub struct RequestDescription {
 ///
 /// What is written to the streams goes to the sink, `STDOUT` past the
 /// `php_output` layer and `STDERR` onto its error stream (design
-/// revision 16), and `STDIN` reads the request's body.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct FileHandles;
+/// revision 16), and `STDIN` reads the request's body. The fds are what
+/// `fstat` and `ftruncate` on the three ask, as php's `STDIO` kind asks
+/// `fstat(2)` and `ftruncate(2)` of fds 0, 1 and 2; a host with no fd for
+/// one of them hands `None`, which `fstat(2)` and `ftruncate(2)` answer
+/// as they answer a closed fd, so both answer `false`.
+#[derive(Debug, Clone)]
+pub struct FileHandles {
+    fds: Arc<[Option<std::os::fd::OwnedFd>; 3]>,
+}
+
+impl FileHandles {
+    /// The three over the fds the host hands, closed when the last
+    /// description holding them is dropped; a host hands copies of its
+    /// own, as `dup(2)` makes them.
+    #[must_use]
+    pub fn new(
+        stdin: Option<std::os::fd::OwnedFd>,
+        stdout: Option<std::os::fd::OwnedFd>,
+        stderr: Option<std::os::fd::OwnedFd>,
+    ) -> FileHandles {
+        FileHandles {
+            fds: Arc::new([stdin, stdout, stderr]),
+        }
+    }
+
+    /// The fd under one of the three, `None` where the host handed none.
+    pub(crate) fn fd(&self, standard: Standard) -> Option<std::os::fd::BorrowedFd<'_>> {
+        use std::os::fd::AsFd;
+        let [stdin, stdout, stderr] = &*self.fds;
+        let fd = match standard {
+            Standard::Stdin => stdin,
+            Standard::Stdout => stdout,
+            Standard::Stderr => stderr,
+        };
+        fd.as_ref().map(AsFd::as_fd)
+    }
+}
 
 /// Where a request's bytes go (design §4.3 seam 4): the engine owns the
 /// header list, the status and the commit moment; a sink only writes.
