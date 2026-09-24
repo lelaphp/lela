@@ -1782,7 +1782,7 @@ pub(crate) fn include_or_eval<T: Tier>(
         req.addref(&value);
         return answered(req, frame, returns_to, value);
     }
-    let callee = req.push_code_frame(unit, frame, returns_to);
+    let callee = req.push_code_frame(unit, frame, returns_to)?;
     Ok(Stepped::Pushed(callee))
 }
 
@@ -1876,11 +1876,7 @@ fn enter(
     let returns_to =
         (op.out_type != OperandKind::Unused).then(|| (frame, exec::temporary_slot(code, op.out)));
     let passed = call.arguments.len();
-    let Some(callee) = req.push_user_frame(function, call, returns_to, Some(frame)) else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: a user function whose body the unit has not",
-        )));
-    };
+    let callee = req.push_user_frame(function, call, returns_to, Some(frame))?;
     let Some(serving) = req.vm().serving(callee) else {
         return Err(Fatal::Error(String::from(
             "InternalError: the frame just pushed is serving no op array",
@@ -13883,7 +13879,7 @@ mod tests {
         let engine = Engine::builder().tier::<Probe>().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let unit = jumping(0, 1);
-        let frame = req.push_frame(Arc::clone(&unit));
+        let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let back = code.oplines.get(1).copied().unwrap_or_default();
         req.vm_mut().jump(frame, 1);
@@ -13919,7 +13915,7 @@ mod tests {
         let engine = Engine::builder().tier::<Probe>().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let unit = jumping(0, 1);
-        let frame = req.push_frame(Arc::clone(&unit));
+        let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let back = code.oplines.get(1).copied().unwrap_or_default();
         req.vm_mut().jump(frame, 1);
@@ -13967,7 +13963,7 @@ mod tests {
         let engine = Engine::builder().tier::<Probe>().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let taken = conditional(php_heap::Zval::bool(true));
-        let frame = req.push_frame(Arc::clone(&taken));
+        let frame = req.pushed(Arc::clone(&taken));
         let code = crate::exec::code_of(&taken);
         let op = code.oplines.get(1).copied().unwrap_or_default();
         req.vm_mut().jump(frame, 1);
@@ -13983,7 +13979,7 @@ mod tests {
         );
 
         let not_taken = conditional(php_heap::Zval::long(0));
-        let frame = req.push_frame(Arc::clone(&not_taken));
+        let frame = req.pushed(Arc::clone(&not_taken));
         let code = crate::exec::code_of(&not_taken);
         req.vm_mut().jump(frame, 1);
         assert_eq!(
@@ -14026,9 +14022,9 @@ mod tests {
         let engine = Engine::builder().tier::<Probe>().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let unit = returning(1);
-        let outer = req.push_frame(Arc::clone(&unit));
+        let outer = req.pushed(Arc::clone(&unit));
         let guard = req.stack_mut().push_entry(outer);
-        let inner = req.push_frame(Arc::clone(&unit));
+        let inner = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let op = code.oplines.first().copied().unwrap_or_default();
 
@@ -14120,7 +14116,7 @@ mod tests {
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
         let unit = by_name(&mut strings);
-        let frame = req.push_frame(Arc::clone(&unit));
+        let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let init = code.oplines.first().copied().unwrap_or_default();
         let send = code.oplines.get(1).copied().unwrap_or_default();
@@ -14154,7 +14150,7 @@ mod tests {
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
         let unit = by_name(&mut strings);
-        let frame = req.push_frame(Arc::clone(&unit));
+        let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let init = code.oplines.first().copied().unwrap_or_default();
         assert_eq!(req.cached(frame, CacheSlot(init.out)), Cached::Unprimed);
@@ -14230,7 +14226,7 @@ mod tests {
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
         let unit = declaring_f(&engine, &mut strings);
-        let main = req.push_frame(Arc::clone(&unit));
+        let main = req.pushed(Arc::clone(&unit));
         req.declare_functions(&unit);
         let f = req.function_named(b"f").unwrap_or(Function::PASS);
         let code = crate::exec::body_of(&unit, exec::Body::Function(0))
@@ -14322,7 +14318,7 @@ mod tests {
             },
             ..Unit::default()
         });
-        let frame = req.push_frame(Arc::clone(&unit));
+        let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let init = code.oplines.first().copied().unwrap_or_default();
         let strlen = req.function_named(b"strlen");
@@ -14375,7 +14371,7 @@ mod tests {
             },
             ..Unit::default()
         });
-        let frame = req.push_frame(Arc::clone(&unit));
+        let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let init = code.oplines.first().copied().unwrap_or_default();
         for pass in 1..=2 {
@@ -14431,7 +14427,7 @@ mod tests {
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
         let unit = catching(&mut strings, b"Error", b"error");
-        let frame = req.push_frame(Arc::clone(&unit));
+        let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let clause = code.oplines.first().copied().unwrap_or_default();
         let error = req.class_named(b"error");
@@ -14514,7 +14510,7 @@ mod tests {
             (b"Closure", b"closure"),
             Some((b"fromCallable", b"fromcallable")),
         );
-        let frame = req.push_frame(Arc::clone(&unit));
+        let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let op = code.oplines.first().copied().unwrap_or_default();
         let closure = req.class_named(b"closure");
@@ -14554,7 +14550,7 @@ mod tests {
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
         let unit = static_method_call(&mut strings, (b"Exception", b"exception"), None);
-        let frame = req.push_frame(Arc::clone(&unit));
+        let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let op = code.oplines.first().copied().unwrap_or_default();
         let exception = req.class_named(b"exception");
@@ -14588,7 +14584,7 @@ mod tests {
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
         let unit = catching(&mut strings, b"NoPe", b"nope");
-        let frame = req.push_frame(Arc::clone(&unit));
+        let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let clause = code.oplines.first().copied().unwrap_or_default();
         let thrown = crate::api::raising::throw(&mut req, "Error", "e");
@@ -14671,7 +14667,7 @@ mod tests {
             },
             ..Unit::default()
         });
-        let frame = req.push_frame(Arc::clone(&unit));
+        let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let named = req.class_named(b"stdclass");
         assert!(named.is_some(), "the engine declares stdClass");
@@ -14751,7 +14747,7 @@ mod tests {
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
         let unit = jmp_frameless_over(&mut strings, b"foo\\substr");
-        let frame = req.push_frame(Arc::clone(&unit));
+        let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let jmp = code.oplines.first().copied().unwrap_or_default();
         assert_eq!(req.cached(frame, CacheSlot(0)), Cached::Unprimed);
@@ -14780,7 +14776,7 @@ mod tests {
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
         let unit = jmp_frameless_over(&mut strings, b"strlen");
-        let frame = req.push_frame(Arc::clone(&unit));
+        let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let jmp = code.oplines.first().copied().unwrap_or_default();
 
@@ -14863,7 +14859,7 @@ mod tests {
             },
             ..Unit::default()
         });
-        let frame = req.push_frame(Arc::clone(&unit));
+        let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let call = code.oplines.first().copied().unwrap_or_default();
         assert_eq!(
@@ -14899,7 +14895,7 @@ mod tests {
             },
             ..Unit::default()
         });
-        let frame = req.push_frame(Arc::clone(&unit));
+        let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let call = code.oplines.first().copied().unwrap_or_default();
         assert!(matches!(
@@ -14943,7 +14939,7 @@ mod tests {
             },
             ..Unit::default()
         });
-        let frame = req.push_frame(Arc::clone(&unit));
+        let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let init = code.oplines.first().copied().unwrap_or_default();
 
@@ -14999,7 +14995,7 @@ mod tests {
         let engine = Engine::builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let unit = assigning();
-        let frame = req.push_frame(Arc::clone(&unit));
+        let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let mut op = code.oplines.first().copied().unwrap_or_default();
         op.out_type = OperandKind::Tmp;
@@ -15116,5 +15112,57 @@ mod tests {
             }
             req.release(object.as_value());
         }
+    }
+
+    /// A debug build stops at a write of a `TMP` over an owner the slot
+    /// still holds, #723's shape planted: a string left in the `TMP` a
+    /// `QM_ASSIGN` writes, as `FE_RESET_R` left its subject before #723,
+    /// is the `InternalError` naming the opcode, the opline and the
+    /// temporary, raised by the loop after the handler and before the
+    /// next one, and not a second release several allocations later.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn a_write_over_a_temporary_that_still_holds_a_value_is_an_internal_error() {
+        let engine = Engine::builder().build();
+        let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+        let unit = Arc::new(Unit {
+            main: OpArray {
+                oplines: vec![Opline {
+                    opcode: Opcode::QmAssign,
+                    op1_type: OperandKind::Const,
+                    op1: 0,
+                    out_type: OperandKind::Tmp,
+                    out: 0,
+                    ..Opline::default()
+                }]
+                .into_boxed_slice(),
+                literals: vec![php_heap::Zval::long(7)].into_boxed_slice(),
+                num_tmps: 1,
+                ..OpArray::default()
+            },
+            ..Unit::default()
+        });
+        let frame = req.pushed(Arc::clone(&unit));
+        let Ok(left) = crate::api::values::PhpString::new(&mut req, b"an owner left behind") else {
+            return;
+        };
+        let planted = req.set_slot(frame, 0, Value::string(left));
+        assert!(
+            planted.to_zval().is_undef(),
+            "the slot was empty before the plant"
+        );
+
+        assert_eq!(
+            crate::tier::step(&mut req, frame),
+            Err(Fatal::Error(String::from(
+                "InternalError: ZEND_QM_ASSIGN at opline 0 writes its TMP #0 over an owner it still holds (String): the handler that last read the slot moved it out and did not empty it"
+            )))
+        );
+        assert_eq!(
+            req.slot(frame, 0).as_int(),
+            Some(7),
+            "the write itself stood"
+        );
+        req.pop_frame();
     }
 }

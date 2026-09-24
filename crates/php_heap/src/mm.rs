@@ -209,6 +209,12 @@ pub(crate) struct Mm {
     real_size: usize,
     real_peak: usize,
     limit: usize,
+    /// `overflow`: set where the heap refuses an allocation with its
+    /// fatal, `zend_mm_safe_error`, and cleared once the fatal is
+    /// rendered ([`Mm::overflow_rendered`]). While it is set the limit
+    /// refuses nothing, so rendering the fatal, its backtrace among it,
+    /// is not refused by the limit it reports.
+    overflow: bool,
 }
 
 impl Mm {
@@ -232,6 +238,7 @@ impl Mm {
             real_size: 0,
             real_peak: 0,
             limit: NO_LIMIT,
+            overflow: false,
         };
         if let Some(chunk) = chunk_alloc(CHUNK_SIZE) {
             chunk_init(chunk, 0);
@@ -278,6 +285,21 @@ impl Mm {
     /// Set the `memory_limit`.
     pub(crate) fn set_limit(&mut self, limit: usize) {
         self.limit = limit;
+    }
+
+    /// `heap->overflow = 0` after `zend_error` returns in
+    /// `zend_mm_safe_error` (`Z/Zend/zend_alloc.c:417`): the fatal the
+    /// heap raised is rendered, and the limit holds again.
+    pub(crate) fn overflow_rendered(&mut self) {
+        self.overflow = false;
+    }
+
+    /// `zend_mm_safe_error`'s `heap->overflow = 1`
+    /// (`Z/Zend/zend_alloc.c:405`): the fatal, with the limit lifted
+    /// until it is rendered.
+    fn refuse(&mut self, fatal: Fatal) -> Fatal {
+        self.overflow = true;
+        fatal
     }
 
     /// `_emalloc`: `size` usable bytes, from the bin its size falls in,
@@ -512,6 +534,8 @@ impl Mm {
         } else {
             let pages_count = info & LRUN_PAGES_MASK;
             self.size = self.size.saturating_sub(pages_count as usize * PAGE_SIZE);
+            #[cfg(debug_assertions)]
+            freed::given_back(at, pages_count as usize * PAGE_SIZE);
             self.free_pages(chunk, page_num as u32, pages_count, true);
         }
     }
@@ -521,13 +545,18 @@ impl Mm {
     fn alloc_small(&mut self, bin_num: usize) -> Result<NonNull<u8>, Fatal> {
         self.size += BIN_DATA_SIZE[bin_num];
         self.peak = self.peak.max(self.size);
-        if let Some(slot) = NonNull::new(self.free_slot[bin_num]) {
-            // SAFETY: a slot on the free list is free memory of this
-            // heap, whose first word is the next free slot.
-            self.free_slot[bin_num] = unsafe { slot.as_ref() }.next;
-            return Ok(slot.cast());
-        }
-        self.alloc_small_slow(bin_num)
+        let slot = match NonNull::new(self.free_slot[bin_num]) {
+            Some(slot) => {
+                // SAFETY: a slot on the free list is free memory of this
+                // heap, whose first word is the next free slot.
+                self.free_slot[bin_num] = unsafe { slot.as_ref() }.next;
+                slot.cast()
+            }
+            None => self.alloc_small_slow(bin_num)?,
+        };
+        #[cfg(debug_assertions)]
+        freed::handed_out(slot, BIN_DATA_SIZE[bin_num]);
+        Ok(slot)
     }
 
     /// `zend_mm_alloc_small_slow` (`Z/Zend/zend_alloc.c:1338`): a `run` of
@@ -576,6 +605,8 @@ impl Mm {
     /// `at` is a live slot of bin `bin_num` in this heap.
     unsafe fn free_small(&mut self, at: NonNull<u8>, bin_num: usize) {
         self.size = self.size.saturating_sub(BIN_DATA_SIZE[bin_num]);
+        #[cfg(debug_assertions)]
+        freed::given_back(at, BIN_DATA_SIZE[bin_num]);
         let slot: *mut FreeSlot = at.as_ptr().cast();
         // SAFETY: the caller has given the slot up, so its bytes are the
         // heap's again and the link word may be written over them.
@@ -597,6 +628,8 @@ impl Mm {
         let at = self.alloc_pages(pages_count, PAGE_SIZE * pages_count as usize)?;
         self.size += pages_count as usize * PAGE_SIZE;
         self.peak = self.peak.max(self.size);
+        #[cfg(debug_assertions)]
+        freed::handed_out(at, pages_count as usize * PAGE_SIZE);
         Ok(at)
     }
 
@@ -660,7 +693,9 @@ impl Mm {
                 if self.gc() != 0 {
                     continue;
                 }
-                return Err(limit_exhausted(self.limit, asked));
+                if !self.overflow {
+                    return Err(self.refuse(limit_exhausted(self.limit, asked)));
+                }
             }
             let mapped = match chunk_alloc(CHUNK_SIZE) {
                 Some(chunk) => Some(chunk),
@@ -668,7 +703,7 @@ impl Mm {
                 None => None,
             };
             let Some(chunk) = mapped else {
-                return Err(out_of_memory(self.real_size, asked));
+                return Err(self.refuse(out_of_memory(self.real_size, asked)));
             };
             self.real_size += CHUNK_SIZE;
             self.real_peak = self.real_peak.max(self.real_size);
@@ -881,8 +916,9 @@ impl Mm {
         let new_size = size.next_multiple_of(real_page_size());
         if new_size > self.limit - self.real_size.min(self.limit)
             && (self.gc() == 0 || new_size > self.limit - self.real_size.min(self.limit))
+            && !self.overflow
         {
-            return Err(limit_exhausted(self.limit, size));
+            return Err(self.refuse(limit_exhausted(self.limit, size)));
         }
         let mapped = match chunk_alloc(new_size) {
             Some(at) => Some(at),
@@ -890,7 +926,7 @@ impl Mm {
             None => None,
         };
         let Some(at) = mapped else {
-            return Err(out_of_memory(self.real_size, size));
+            return Err(self.refuse(out_of_memory(self.real_size, size)));
         };
         let at = at.cast::<u8>();
         let node = match self.alloc_small(size_to_bin(HUGE_LIST_SIZE)) {
@@ -1157,4 +1193,70 @@ fn bitset_is_free_range(map: &[u64; PAGE_MAP_LEN], start: u32, len: u32) -> bool
 unsafe fn copy_into(from: NonNull<u8>, to: NonNull<u8>, len: usize) {
     // SAFETY: the caller's contract, handed on.
     unsafe { std::ptr::copy_nonoverlapping(from.as_ptr(), to.as_ptr(), len) };
+}
+
+/// A debug build's mark on a block the heap has freed (design §10), so
+/// that a refcount operation on one is found where it is made and not
+/// several allocations later, where a write into a freed bin slot's link
+/// word surfaces (#723, #750). A release build compiles none of it.
+///
+/// The mark is two words, the second and third of the block, laid when a
+/// bin slot or a `run` is given back and cleared when one is handed out,
+/// so a block the heap has out never carries it. The first word is left
+/// alone, being the free list's link. The pattern is no live value's:
+/// where every refcounted value keeps a hash and a length, a flags word
+/// and a pointer, a store index and a class number, a zval's payload and
+/// its type byte, or a list index and a type number, the pair of odd
+/// words below is none of them. A huge block goes back to the system and carries no
+/// mark; nor does a slot of the 8- and 16-byte bins, which no refcounted
+/// value is small enough for.
+#[cfg(debug_assertions)]
+pub(crate) mod freed {
+    use std::ptr::NonNull;
+
+    /// The two words a freed block carries.
+    const MARK: [u64; 2] = [0xA5A5_A5A5_A5A5_A5A5; 2];
+
+    /// Where the mark stands in a block: its second word, which every
+    /// block of this heap is aligned for, being at least eight-aligned.
+    fn mark_at(at: NonNull<u8>) -> *mut [u64; 2] {
+        let mark: *mut [u64; 2] = at.as_ptr().wrapping_add(8).cast();
+        mark
+    }
+
+    /// Where the mark stands in a block, when the block has room for it.
+    fn mark_of(at: NonNull<u8>, size: usize) -> Option<*mut [u64; 2]> {
+        (size >= 8 + size_of::<[u64; 2]>()).then(|| mark_at(at))
+    }
+
+    /// The block of `size` bytes at `at` is the heap's again.
+    pub(crate) fn given_back(at: NonNull<u8>, size: usize) {
+        if let Some(mark) = mark_of(at, size) {
+            // SAFETY: the block is `size` bytes of this heap its owner has
+            // given up, and the mark is inside it past the link word.
+            unsafe { mark.write(MARK) };
+        }
+    }
+
+    /// The block of `size` bytes at `at` is its caller's from here.
+    pub(crate) fn handed_out(at: NonNull<u8>, size: usize) {
+        if let Some(mark) = mark_of(at, size) {
+            // SAFETY: the block is `size` bytes of this heap nothing else
+            // holds yet, and the mark is inside it.
+            unsafe { mark.write([0; 2]) };
+        }
+    }
+
+    /// Whether the refcounted block at `at` is one the heap has freed and
+    /// not handed out since. Every refcounted value is at least 24 bytes,
+    /// so the two words are inside it.
+    pub(crate) fn is_freed(at: NonNull<u8>) -> bool {
+        let mark = mark_at(at);
+        // SAFETY: `at` names a refcounted block of this heap, live or
+        // freed into a bin or a `run` of a chunk still mapped, so its
+        // second and third words are readable; a block freed back to the
+        // system is the defect this read exists to name, and reading it
+        // is the refcount operation's own read, made one step earlier.
+        unsafe { mark.read() == MARK }
+    }
 }

@@ -447,6 +447,18 @@ impl Zval {
         }
     }
 
+    /// The block a refcounted value's header stands at, `Z_COUNTED`; none
+    /// for a value that carries no header.
+    #[cfg(debug_assertions)]
+    pub(crate) fn counted(self) -> Option<NonNull<u8>> {
+        if !self.is_refcounted() {
+            return None;
+        }
+        NonNull::new(std::ptr::with_exposed_provenance_mut(
+            usize::try_from(self.value).unwrap_or(0),
+        ))
+    }
+
     /// Whether the value carries a refcounted header (`Z_REFCOUNTED`): a
     /// bit test, never a type-range test.
     #[must_use]
@@ -525,7 +537,14 @@ mod tests {
 
     #[test]
     fn an_indirect_zval_names_a_slot_in_place() {
-        let mut frame = crate::Frame::new(2);
+        let _alone = crate::serial::alone();
+        let mut heap = crate::Heap::new();
+        let mut stack = crate::VmStack::new();
+        let pushed = stack.push_frame(&mut heap, 2, 0);
+        assert!(pushed.is_ok(), "a frame of two slots fits the first page");
+        let Some(frame) = pushed.ok().and_then(|f| stack.frame_mut(f)) else {
+            return;
+        };
         let at = frame.slot_ptr(crate::Slot(1));
         assert!(at.is_some(), "a frame of two slots has a second");
         let Some(at) = at else {
@@ -540,5 +559,6 @@ mod tests {
         assert_eq!(frame.slot(crate::Slot(1)), Zval::long(4));
         assert_eq!(at.read(), Zval::long(4));
         assert_eq!(frame.slot_ptr(crate::Slot(2)), None);
+        stack.close(&mut heap);
     }
 }

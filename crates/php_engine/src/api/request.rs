@@ -628,6 +628,17 @@ pub(crate) enum Aside {
     Stderr(Vec<u8>),
 }
 
+/// A write a debug build stopped: the opline whose `TMP` it was, the
+/// opcode serving it, the temporary's number and what the slot held.
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone, Copy)]
+struct DirtyTemporary {
+    opline: u32,
+    opcode: Opcode,
+    number: u32,
+    held: php_heap::ZvalType,
+}
+
 /// One request (design §5.14): `Send`, single-threaded, dropped at the
 /// end of `serve`. Everything a native may touch is a method here or on
 /// a value it hands out.
@@ -840,6 +851,11 @@ pub struct Request {
     /// (`zend_call_stack_init`) from the two `zend.*_stack_size`
     /// entries; what the compiler is held to (design §5.6).
     stack_limit: StackLimit,
+    /// A debug build's record of the first write of a `TMP` it found
+    /// over a slot that still held an owner, until the loop takes it
+    /// ([`Request::take_sensed`]).
+    #[cfg(debug_assertions)]
+    dirty: Option<DirtyTemporary>,
     /// The classes the units this request served declared, each the
     /// unit that holds it and the index of its declaration, in the
     /// order declared: php's `EG(class_table)` past what the engine
@@ -1036,11 +1052,18 @@ impl Request {
         let mut resources = Resources::default();
         let stream_type = crate::streams::register(&mut resources);
         let filter_type = resources.register_type(b"stream filter", None);
+        // `init_executor`'s `zend_vm_stack_init`: the first page of the
+        // VM stack, out of the heap the object store's table stands in.
+        // The main chunk holds it, so nothing refuses it; a heap that
+        // did would refuse the first push again, with php's fatal.
+        let mut heap = Heap::new();
+        let mut stack = VmStack::new();
+        let _laid = stack.open(&mut heap);
         let mut req = Request {
             shared,
             description,
-            heap: Heap::new(),
-            stack: VmStack::new(),
+            heap,
+            stack,
             vm: Vm::default(),
             map: MapTable::new(),
             states: Vec::new(),
@@ -1100,6 +1123,8 @@ impl Request {
             aliases: Vec::new(),
             sapi_constant: Value::null(),
             user_functions: Vec::new(),
+            #[cfg(debug_assertions)]
+            dirty: None,
         };
         if let Some(name) = req
             .shared
@@ -1147,6 +1172,13 @@ impl Request {
 
     pub(crate) fn stack_mut(&mut self) -> &mut VmStack {
         &mut self.stack
+    }
+
+    /// The first page of the VM stack the request runs on, out of its
+    /// heap, where none stands: what `zend_fiber_execute` takes for a
+    /// fiber's stack before the fiber's function is called.
+    pub(crate) fn open_stack(&mut self) -> Result<(), Fatal> {
+        self.stack.open(&mut self.heap)
     }
 
     /// The engine's half of the frames: what the loop and the handlers
@@ -1207,12 +1239,13 @@ impl Request {
 
     /// Push a frame for `unit`'s op array: its shape on the VM stack and
     /// its engine state, which are pushed and popped together and share a
-    /// `FrameRef`.
-    pub(crate) fn push_frame(&mut self, unit: Arc<Unit>) -> FrameRef {
+    /// `FrameRef`. A VM stack whose page the memory limit refuses is
+    /// the fatal php raises there, and nothing is pushed.
+    pub(crate) fn push_frame(&mut self, unit: Arc<Unit>) -> Result<FrameRef, Fatal> {
         let code = exec::code_of(&unit);
         let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
+        let frame = self.stack.push_frame(&mut self.heap, slots, 0)?;
         exec::init_runtime_cache(&mut self.map, code, exec::Body::Main);
-        let frame = self.stack.push_frame(slots);
         self.vm.push(unit);
         // `zend_execute` gives the main op array's frame `EG(symbol_table)`
         // and `i_init_code_execute_data` attaches it, so every CV name
@@ -1221,7 +1254,7 @@ impl Request {
             state.symbol_table = Some(TableId::GLOBAL);
         }
         self.attach_symbol_table(frame);
-        frame
+        Ok(frame)
     }
 
     /// The frame for the main op array of a file an `INCLUDE_OR_EVAL`
@@ -1237,15 +1270,17 @@ impl Request {
     /// to it, so the included code reads the includer's variables.
     /// `caller` is `prev_execute_data`, the frame whose opline is the
     /// `INCLUDE_OR_EVAL`, and `returns_to` its `VAR` where the value is
-    /// read.
+    /// read. The push comes first, as php's does, so a VM stack page the
+    /// memory limit refuses is the fatal and nothing else is touched.
     pub(crate) fn push_code_frame(
         &mut self,
         unit: Arc<Unit>,
         caller: FrameRef,
         returns_to: Option<(FrameRef, u32)>,
-    ) -> FrameRef {
+    ) -> Result<FrameRef, Fatal> {
         let code = exec::code_of(&unit);
         let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
+        let frame = self.stack.push_frame(&mut self.heap, slots, 0)?;
         let (this, called_scope, scope) = self.vm.at(caller).map_or((None, None, None), |state| {
             (state.this, state.called_scope, self.frame_scope(caller))
         });
@@ -1254,7 +1289,6 @@ impl Request {
         }
         let table = self.rebuild_symbol_table(caller);
         exec::init_runtime_cache(&mut self.map, code, exec::Body::Main);
-        let frame = self.stack.push_frame(slots);
         self.vm.push_body(
             unit,
             exec::Body::Main,
@@ -1270,7 +1304,7 @@ impl Request {
             state.symbol_table = Some(table);
         }
         self.attach_symbol_table(frame);
-        frame
+        Ok(frame)
     }
 
     /// `zend_leave_helper`'s arm for a nested code frame
@@ -1317,21 +1351,28 @@ impl Request {
     /// declared parameters kept beside the frame, and the receiver and
     /// the called scope carried over; `returns_to` is the caller's slot
     /// for what the frame returns and `caller` the frame whose opline
-    /// pushed the call, `None` where a native did. None for a function
-    /// that is no user function, which is the caller's internal error
-    /// to name.
+    /// pushed the call, `None` where a native did. The frame's room on
+    /// the VM stack is php's `zend_vm_calc_used_stack`, the extra
+    /// arguments' slots with it, and a page the memory limit refuses is
+    /// the fatal php raises at the push; a function that is no user
+    /// function is an internal error.
     pub(crate) fn push_user_frame(
         &mut self,
         function: Function,
         call: exec::CallState,
         returns_to: Option<(FrameRef, u32)>,
         caller: Option<FrameRef>,
-    ) -> Option<FrameRef> {
+    ) -> Result<FrameRef, Fatal> {
+        let no_body = || {
+            Fatal::Error(String::from(
+                "InternalError: a user function whose body the unit has not",
+            ))
+        };
         let (unit, body) = {
-            let user = self.user_function(function)?;
+            let user = self.user_function(function).ok_or_else(no_body)?;
             (Arc::clone(&user.unit), user.body)
         };
-        let code = exec::body_of(&unit, body)?;
+        let code = exec::body_of(&unit, body).ok_or_else(no_body)?;
         let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
         // The declared parameters, which is php's `common.num_args` and
         // excludes a variadic: an argument from the variadic's position
@@ -1341,9 +1382,10 @@ impl Request {
             decl.parameters.iter().filter(|p| !p.variadic).count()
         });
         let num_args = u32::try_from(call.arguments.len()).unwrap_or(u32::MAX);
+        let extra_args = call.arguments.len().saturating_sub(parameters);
+        let frame = self.stack.push_frame(&mut self.heap, slots, extra_args)?;
         let closure = call.closure;
         exec::init_runtime_cache(&mut self.map, code, body);
-        let frame = self.stack.push_frame(slots);
         self.vm.push_body(
             unit,
             body,
@@ -1375,7 +1417,7 @@ impl Request {
         for coerced in call.coerced {
             self.release(coerced);
         }
-        Some(frame)
+        Ok(frame)
     }
 
     /// The frame off both stacks, every owner its slots held given up
@@ -1429,7 +1471,7 @@ impl Request {
             }
         }
         self.vm.pop();
-        self.stack.pop_frame();
+        self.stack.pop_frame(&mut self.heap);
     }
 
     /// The value in a slot of `frame`, a view of it: `ZVAL_COPY_VALUE`,
@@ -1455,6 +1497,18 @@ impl Request {
     /// `value` into a slot, the slot owning it from here, and what the
     /// slot held handed back for the caller to release; a slot past the
     /// end takes nothing and hands `value` back.
+    ///
+    /// php writes an opline's `TMP` with `ZVAL_COPY_VALUE` and never
+    /// releases what stood there, because a live temporary is never
+    /// written over: the handler that reads one frees it or moves it out.
+    /// Here the write hands the old value back to be released, so a `TMP`
+    /// whose owner a handler moved without emptying the slot is released
+    /// a second time by the next write (#723). A debug build stops that
+    /// write: the `TMP` the opline the frame stands at writes, found
+    /// holding an owner, is recorded for [`Request::take_sensed`]. A
+    /// scalar left there is no owner and no second release, and php
+    /// writes over one itself: `JMPZ_EX` and `JMPNZ_EX` write the `TMP`
+    /// the `BOOL` after them writes again.
     pub(crate) fn set_slot(&mut self, frame: FrameRef, at: u32, value: Value) -> Value {
         let Some(f) = self
             .stack
@@ -1465,7 +1519,67 @@ impl Request {
         };
         let old = f.slot(Slot(at));
         f.set(Slot(at), value.to_zval());
+        #[cfg(debug_assertions)]
+        if old.is_refcounted() {
+            self.sense_dirty_temporary(frame, at, old.kind());
+        }
         Value::of_zval(old)
+    }
+
+    /// A debug build's question at a write over a slot that held an
+    /// owner of a `held`: whether the slot is the `TMP` of the opline
+    /// `frame` stands at, which the handler that read it last should
+    /// have left empty. The first such write is recorded.
+    #[cfg(debug_assertions)]
+    fn sense_dirty_temporary(&mut self, frame: FrameRef, at: u32, held: php_heap::ZvalType) {
+        if self.dirty.is_some() {
+            return;
+        }
+        let opline = self.vm.opline(frame);
+        let Some(serving) = self.vm.serving(frame) else {
+            return;
+        };
+        let Some(op) = serving
+            .code()
+            .and_then(|code| exec::opline_at(code, opline).map(|op| (code, *op)))
+        else {
+            return;
+        };
+        let (code, op) = op;
+        let its_own = match op.out_type {
+            php_unit::OperandKind::Tmp => exec::temporary_slot(code, op.out) == at,
+            php_unit::OperandKind::Var
+            | php_unit::OperandKind::Cv
+            | php_unit::OperandKind::Const
+            | php_unit::OperandKind::Unused => false,
+        };
+        if its_own {
+            self.dirty = Some(DirtyTemporary {
+                opline,
+                opcode: op.opcode,
+                number: op.out,
+                held,
+            });
+        }
+    }
+
+    /// What a debug build's two sensors found since the loop last asked
+    /// (design §10, #761): a `TMP` written over an owner it still held,
+    /// or a refcount operation on a block the heap had freed, as the
+    /// `InternalError` fatal that ends the request; the first of them,
+    /// and taken. The loop asks after every handler.
+    #[cfg(debug_assertions)]
+    pub(crate) fn take_sensed(&mut self) -> Option<Fatal> {
+        let dirty = self.dirty.take().map(|dirty| {
+            Fatal::Error(format!(
+                "InternalError: {} at opline {} writes its TMP #{} over an owner it still holds ({:?}): the handler that last read the slot moved it out and did not empty it",
+                dirty.opcode.name(),
+                dirty.opline,
+                dirty.number,
+                dirty.held,
+            ))
+        });
+        dirty.or_else(|| self.heap.take_freed_use())
     }
 
     /// The zval in a slot of `frame` in place, php's `EX_VAR(var)`
@@ -1820,13 +1934,8 @@ impl Request {
     fn serve_user(&mut self, function: Function, call: CallState) -> Result<Value, Thrown> {
         let standing = self.vm.frames().len();
         let passed = call.arguments.len();
-        let Some(frame) = self.push_user_frame(function, call, None, None) else {
-            return self
-                .fatal_of::<()>(Err(Fatal::Error(String::from(
-                    "InternalError: a user function whose body the unit has not",
-                ))))
-                .map(|()| Value::null());
-        };
+        let pushed = self.push_user_frame(function, call, None, None);
+        let frame = self.fatal_of(pushed)?;
         // `enter`'s own prologue, so a body reached from here stands
         // where a body reached from `DO_UCALL` stands: every `RECV*`
         // php runs is run, which is where a declared parameter type is
@@ -3714,6 +3823,9 @@ impl Request {
                 self.ini_parse_bytes_of("memory_limit")
             )),
         }
+        // A fatal the heap raised lifted its limit for the rendering, as
+        // `zend_mm_safe_error` does; it holds again from here.
+        self.heap.overflow_rendered();
     }
 
     /// `zend_objects_new` over `class` (`object_init_ex` without the
@@ -4417,6 +4529,23 @@ impl Request {
     /// handler that has already held the value to the declared type
     /// reaches this one, since the verify raises a deprecation of its
     /// own and php runs it once (`zend_binary_assign_op_typed_prop`).
+    ///
+    /// The write through a reference gives what the cell held up once,
+    /// the cell's own release after the write, so each value written
+    /// over is freed and nothing is freed twice:
+    ///
+    /// ```php
+    /// class C { public static $p; }
+    /// $v = str_repeat("x", 32);
+    /// C::$p = &$v;
+    /// C::$p = str_repeat("y", 32);
+    /// C::$p = str_repeat("z", 32);
+    /// var_dump($v, C::$p);
+    /// ```
+    /// ```expect
+    /// string(32) "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+    /// string(32) "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+    /// ```
     pub(crate) fn store_static_property(&mut self, declaring: ClassId, name: &[u8], value: Value) {
         let held = self
             .statics
@@ -4427,10 +4556,9 @@ impl Request {
             return;
         };
         if let Some(ValueRef::Reference(cell)) = self.statics.get(at).map(|(_, v)| v.as_ref()) {
+            // `PhpRef::set` gives up what the cell held, after the write.
             let cell = *cell;
-            let previous = cell.get();
             cell.set(self, value);
-            self.release(previous);
             return;
         }
         let previous = self
@@ -10550,6 +10678,7 @@ impl Request {
     /// as its value, `RETURN_COPY` and `RETURN_STR_COPY`: the frame gives
     /// its owner up with the call, and the caller's temporary holds the
     /// one taken here.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn addref(&self, value: &Value) {
         self.heap.addref(value.to_zval());
     }
@@ -10566,6 +10695,7 @@ impl Request {
     // `Value` that is still in hand after this call names what may be
     // freed.
     #[allow(clippy::needless_pass_by_value)]
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn release(&mut self, value: Value) {
         Heap::release(&mut Hooks(self), value.to_zval());
     }
@@ -10576,6 +10706,7 @@ impl Request {
     /// operand and `zend_vm_stack_free_args` to an internal call's
     /// arguments.
     #[allow(clippy::needless_pass_by_value)]
+    #[cfg_attr(debug_assertions, track_caller)]
     pub(crate) fn release_nogc(&mut self, value: Value) {
         Heap::release_nogc(&mut Hooks(self), value.to_zval());
     }
@@ -11435,6 +11566,17 @@ pub(crate) fn append_escaped(out: &mut String, bytes: &[u8]) {
             }
             byte => out.push(char::from(byte)),
         }
+    }
+}
+
+#[cfg(test)]
+impl Request {
+    /// [`Request::push_frame`] in a test, whose request no memory limit
+    /// holds, so the push is never refused.
+    pub(crate) fn pushed(&mut self, unit: Arc<Unit>) -> FrameRef {
+        let pushed = self.push_frame(unit);
+        assert_eq!(pushed.as_ref().err(), None, "a test's frame is pushed");
+        pushed.unwrap_or(FrameRef(0))
     }
 }
 
