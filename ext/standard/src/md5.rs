@@ -51,12 +51,20 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
     ]
 }
 
-/// `PHP_MD5_CTX`: the four words, the bytes seen and the block not yet
-/// full.
-pub(super) struct Md5 {
-    state: [u32; 4],
-    length: u64,
-    buffer: Vec<u8>,
+/// `PHP_MD5_CTX` in php's own layout, `lo, hi, a, b, c, d`, the block
+/// not yet full and the last block's words, which ext/hash's
+/// `HashContext` serialises field by field as `llllllb64l16.`
+/// (`Z/ext/standard/md5.h:35-41`). `block` is what `SET` leaves on an
+/// architecture outside php's unaligned-read list, the oracle's arm64
+/// among them.
+#[derive(Clone)]
+pub struct Md5 {
+    /// `lo`, `hi`, `a`, `b`, `c` and `d`.
+    pub words: [u32; 6],
+    /// `buffer`.
+    pub buffer: [u8; 64],
+    /// `block`.
+    pub block: [u32; 16],
 }
 
 /// The per-round shifts and `floor(abs(sin(i + 1)) * 2^32)`.
@@ -132,84 +140,112 @@ const K: [u32; 64] = [
     0xeb86_d391,
 ];
 
+impl Default for Md5 {
+    fn default() -> Md5 {
+        Md5::new()
+    }
+}
+
 impl Md5 {
     /// `PHP_MD5Init`.
-    pub(super) fn new() -> Md5 {
+    #[must_use]
+    pub fn new() -> Md5 {
         Md5 {
-            state: [0x6745_2301, 0xefcd_ab89, 0x98ba_dcfe, 0x1032_5476],
-            length: 0,
-            buffer: Vec::with_capacity(64),
+            words: [0, 0, 0x6745_2301, 0xefcd_ab89, 0x98ba_dcfe, 0x1032_5476],
+            buffer: [0; 64],
+            block: [0; 16],
         }
     }
 
-    /// One 64-byte block through the four rounds; the names are the
+    /// `body`: 64-byte blocks through the four rounds, each block's
+    /// words left in `block` as `SET` leaves them; the names are the
     /// RFC's.
     #[allow(clippy::many_single_char_names)]
-    fn block(&mut self, block: &[u8]) {
-        let mut m = [0u32; 16];
-        for (i, word) in m.iter_mut().enumerate() {
-            *word = u32::from_le_bytes([
-                block[4 * i],
-                block[4 * i + 1],
-                block[4 * i + 2],
-                block[4 * i + 3],
-            ]);
+    fn body(&mut self, data: &[u8]) {
+        let [_, _, mut a, mut b, mut c, mut d] = self.words;
+        for chunk in data.chunks_exact(64) {
+            for (i, word) in self.block.iter_mut().enumerate() {
+                *word = u32::from_le_bytes([
+                    chunk[4 * i],
+                    chunk[4 * i + 1],
+                    chunk[4 * i + 2],
+                    chunk[4 * i + 3],
+                ]);
+            }
+            let saved = [a, b, c, d];
+            for i in 0..64 {
+                let (f, g) = match i / 16 {
+                    0 => ((b & c) | (!b & d), i),
+                    1 => ((d & b) | (!d & c), (5 * i + 1) % 16),
+                    2 => (b ^ c ^ d, (3 * i + 5) % 16),
+                    _ => (c ^ (b | !d), (7 * i) % 16),
+                };
+                let rotated = a
+                    .wrapping_add(f)
+                    .wrapping_add(K[i])
+                    .wrapping_add(self.block[g])
+                    .rotate_left(S[i]);
+                a = d;
+                d = c;
+                c = b;
+                b = b.wrapping_add(rotated);
+            }
+            a = a.wrapping_add(saved[0]);
+            b = b.wrapping_add(saved[1]);
+            c = c.wrapping_add(saved[2]);
+            d = d.wrapping_add(saved[3]);
         }
-        let [mut a, mut b, mut c, mut d] = self.state;
-        for i in 0..64 {
-            let (f, g) = match i / 16 {
-                0 => ((b & c) | (!b & d), i),
-                1 => ((d & b) | (!d & c), (5 * i + 1) % 16),
-                2 => (b ^ c ^ d, (3 * i + 5) % 16),
-                _ => (c ^ (b | !d), (7 * i) % 16),
-            };
-            let rotated = a
-                .wrapping_add(f)
-                .wrapping_add(K[i])
-                .wrapping_add(m[g])
-                .rotate_left(S[i]);
-            a = d;
-            d = c;
-            c = b;
-            b = b.wrapping_add(rotated);
-        }
-        for (word, add) in self.state.iter_mut().zip([a, b, c, d]) {
-            *word = word.wrapping_add(add);
-        }
+        self.words[2..].copy_from_slice(&[a, b, c, d]);
     }
 
-    /// `PHP_MD5Update`.
-    pub(super) fn update(&mut self, mut data: &[u8]) {
-        self.length = self.length.wrapping_add(data.len() as u64);
-        if !self.buffer.is_empty() {
-            let take = (64 - self.buffer.len()).min(data.len());
-            self.buffer.extend_from_slice(&data[..take]);
-            data = &data[take..];
-            if self.buffer.len() == 64 {
-                let block = std::mem::take(&mut self.buffer);
-                self.block(&block);
+    /// `PHP_MD5Update`: `lo` counts bytes in 29 bits and carries into
+    /// `hi`, which takes `size >> 29` truncated as C's `uint32_t` does.
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn update(&mut self, mut data: &[u8]) {
+        let saved = self.words[0];
+        let size = data.len() as u64;
+        let lo = u32::try_from((u64::from(saved) + size) & 0x1fff_ffff).unwrap_or(0);
+        self.words[0] = lo;
+        if lo < saved {
+            self.words[1] = self.words[1].wrapping_add(1);
+        }
+        self.words[1] = self.words[1].wrapping_add((size >> 29) as u32);
+        let used = (saved & 0x3f) as usize;
+        if used != 0 {
+            let free = 64 - used;
+            if data.len() < free {
+                self.buffer[used..used + data.len()].copy_from_slice(data);
+                return;
             }
+            self.buffer[used..].copy_from_slice(&data[..free]);
+            data = &data[free..];
+            let buffer = self.buffer;
+            self.body(&buffer);
         }
-        let mut chunks = data.chunks_exact(64);
-        for block in &mut chunks {
-            self.block(block);
-        }
-        self.buffer.extend_from_slice(chunks.remainder());
+        let whole = data.len() & !0x3f;
+        self.body(&data[..whole]);
+        self.buffer[..data.len() - whole].copy_from_slice(&data[whole..]);
     }
 
     /// `PHP_MD5Final`: the sixteen bytes.
-    pub(super) fn finish(mut self) -> [u8; 16] {
-        let bits = self.length.wrapping_mul(8);
-        let mut pad = vec![0x80u8];
-        let used = usize::try_from(self.length % 64).unwrap_or(0);
-        let zeros = if used < 56 { 55 - used } else { 119 - used };
-        pad.resize(1 + zeros, 0);
-        pad.extend_from_slice(&bits.to_le_bytes());
-        let length = self.length;
-        self.update(&pad);
-        self.length = length;
+    pub fn finish(&mut self) -> [u8; 16] {
+        let mut used = (self.words[0] & 0x3f) as usize;
+        self.buffer[used] = 0x80;
+        used += 1;
+        if 64 - used < 8 {
+            self.buffer[used..].fill(0);
+            let buffer = self.buffer;
+            self.body(&buffer);
+            used = 0;
+        }
+        self.buffer[used..56].fill(0);
+        self.words[0] <<= 3;
+        self.buffer[56..60].copy_from_slice(&self.words[0].to_le_bytes());
+        self.buffer[60..].copy_from_slice(&self.words[1].to_le_bytes());
+        let buffer = self.buffer;
+        self.body(&buffer);
         let mut out = [0u8; 16];
-        for (i, word) in self.state.iter().enumerate() {
+        for (i, word) in self.words[2..].iter().enumerate() {
             out[4 * i..4 * i + 4].copy_from_slice(&word.to_le_bytes());
         }
         out
