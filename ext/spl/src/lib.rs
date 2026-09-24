@@ -79,11 +79,14 @@ pub fn extension() -> Extension {
             &fixedarray::HANDLERS,
         );
     }
-    builder
-        .classes(observer::classes())
-        .request_state::<State>()
-        .info(spl_info)
-        .build("SPL")
+    for (decl, methods) in observer::classes() {
+        builder = if decl.kind == ClassKind::Interface {
+            builder.classes(vec![(decl, methods)])
+        } else {
+            builder.class_payload::<observer::Storage>(decl, methods, &observer::HANDLERS)
+        };
+    }
+    builder.request_state::<State>().info(spl_info).build("SPL")
 }
 
 /// `PHP_MINFO_FUNCTION(spl)`: `SPL support => enabled`.
