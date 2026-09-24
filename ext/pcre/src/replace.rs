@@ -434,6 +434,8 @@ fn over_array(
 /// ```php
 /// var_dump(preg_replace(['/a/', '/b/', '/c/'], ['b', 'c'], 'abc'), preg_replace(['/a/', '/b/'], 'x', 'ab'), preg_replace('/\d/', '#', ['k' => 'a1', 5 => 'b22', 7]));
 /// try { preg_replace('/a/', ['x'], 'a'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { preg_replace('/a/', new stdClass, 'a'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(preg_replace('/1/', 'x', 21), preg_replace('/1/', 'x', 1.5), preg_replace('/1/', 'x', true));
 /// var_dump(preg_replace('/(/', 'x', 'a'), preg_replace(['/a/', '/(/'], 'x', 'a'), preg_last_error_msg());
 /// ```
 /// ```expect
@@ -448,10 +450,14 @@ fn over_array(
 ///   string(1) "#"
 /// }
 /// preg_replace(): Argument #1 ($pattern) must be of type array when argument #2 ($replacement) is an array, string given
+/// preg_replace(): Argument #2 ($replacement) must be of type array|string, stdClass given
+/// string(2) "2x"
+/// string(3) "x.5"
+/// string(1) "x"
 ///
-/// Warning: preg_replace(): Compilation failed: missing closing parenthesis at offset 1 in %s on line 4
+/// Warning: preg_replace(): Compilation failed: missing closing parenthesis at offset 1 in %s on line 6
 ///
-/// Warning: preg_replace(): Compilation failed: missing closing parenthesis at offset 1 in %s on line 4
+/// Warning: preg_replace(): Compilation failed: missing closing parenthesis at offset 1 in %s on line 6
 /// NULL
 /// NULL
 /// string(14) "Internal error"

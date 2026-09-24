@@ -32,7 +32,7 @@ mod replace;
 mod split;
 
 use php_ext::abi::{Callable, Extension, ExtensionBuilder};
-use php_ext::coerce::{callable_checked, coerce_param};
+use php_ext::coerce::{callable_checked, coerce_param, value_name};
 use php_ext::decl::{ConstDecl, ConstExpr, FunctionDecl, IniDecl, Name, Parameter, Type};
 use php_ext::raising::{Thrown, arg_count_error, arg_type_error};
 use php_ext::request::Request;
@@ -433,17 +433,33 @@ enum Either {
     Str(PhpString),
 }
 
-/// One `Z_PARAM_ARRAY_HT_OR_STR`.
+/// One `Z_PARAM_ARRAY_HT_OR_STR`: the array, or the argument read as
+/// `Z_PARAM_STR` reads it, and for anything else the `TypeError` naming
+/// `array|string`.
 fn either_argument(req: &mut Request, position: u32) -> Result<Either, Thrown> {
-    let given = req.argument(position).unwrap_or_default();
-    let ty = Type::Union(vec![Type::Array, Type::String]);
-    let coerced = coerce_param(req, &given, &ty, position)?.deref();
-    if let Some(array) = coerced.as_array() {
-        return Ok(Either::Array(*array));
-    }
-    match coerced.as_php_string() {
-        Some(s) => Ok(Either::Str(*s)),
-        None => Ok(Either::Str(PhpString::new(req, b"")?)),
+    let given = req.argument(position).unwrap_or_default().deref();
+    match given.as_ref() {
+        ValueRef::Array(array) => Ok(Either::Array(*array)),
+        ValueRef::Str(s) => Ok(Either::Str(*s)),
+        ValueRef::Null
+        | ValueRef::Undef
+        | ValueRef::Int(_)
+        | ValueRef::Float(_)
+        | ValueRef::Bool(_) => {
+            let coerced = coerce_param(req, &given, &Type::String, position)?;
+            match coerced.as_php_string() {
+                Some(s) => Ok(Either::Str(*s)),
+                None => Ok(Either::Str(PhpString::new(req, b"")?)),
+            }
+        }
+        _ => {
+            let name = value_name(req, &given);
+            Err(arg_type_error(
+                req,
+                position,
+                &format!("be of type array|string, {name} given"),
+            ))
+        }
     }
 }
 
