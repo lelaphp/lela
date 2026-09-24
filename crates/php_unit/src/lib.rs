@@ -19,6 +19,7 @@ pub mod decl;
 mod dump;
 mod frameless;
 mod op;
+mod types;
 mod unit;
 
 mod opcode {
@@ -33,4 +34,5 @@ pub use op::{
     TryCatch,
 };
 pub use opcode::Opcode;
+pub use types::type_to_string;
 pub use unit::{Diagnostic, Level, MethodBody, Unit};

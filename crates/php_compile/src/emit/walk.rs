@@ -25,7 +25,7 @@ use php_syntax::tree::{
 };
 use php_syntax::{SyntaxKind, TextRange, tree};
 use php_unit::Level;
-use php_unit::decl::{ClassKind, Name, Type, Visibility};
+use php_unit::decl::{ClassKind, Visibility};
 
 mod expr;
 
@@ -269,40 +269,6 @@ impl Emit<'_> {
         Ok(out)
     }
 
-    /// A declared type from the tree, in the shape the unit holds: the
-    /// scalar and special names by their keyword, any other name as
-    /// written without a leading `\`, and `?T`, `A|B` and `A&B` over
-    /// those; a DNF type is refused.
-    fn walk_type(&self, ty: TypeExpr, line: u32) -> Result<Type, CompileError> {
-        let tree = &self.parsed.tree;
-        match ty {
-            TypeExpr::NamedType(id) => Ok(type_name(self.text(tree[id].name))),
-            TypeExpr::NullableType(id) => match tree[id].ty {
-                Some(TypeExpr::NamedType(inner)) => Ok(Type::Nullable(Box::new(type_name(
-                    self.text(tree[inner].name),
-                )))),
-                _ => Err(unread(line, "a type")),
-            },
-            TypeExpr::UnionType(id) => Ok(Type::Union(self.type_members(&tree[id].types, line)?)),
-            TypeExpr::IntersectionType(id) => Ok(Type::Intersection(
-                self.type_members(&tree[id].types, line)?,
-            )),
-            TypeExpr::ParenType(_) => Err(unread(line, "a DNF type")),
-        }
-    }
-
-    /// The members of a union or an intersection, each a name.
-    fn type_members(&self, members: &[TypeExpr], line: u32) -> Result<Vec<Type>, CompileError> {
-        members
-            .iter()
-            .map(|member| match member {
-                TypeExpr::NamedType(id) => Ok(type_name(self.text(self.parsed.tree[*id].name))),
-                TypeExpr::ParenType(_) => Err(unread(line, "a DNF type")),
-                _ => Err(unread(line, "a type")),
-            })
-            .collect()
-    }
-
     /// A function's or a method's signature and body from the tree:
     /// the parameters, the return type, the block, and the lines of
     /// the keyword and the closing brace.
@@ -321,7 +287,7 @@ impl Emit<'_> {
         let parameters = self.walk_parameters(params)?;
         let return_type = match ret {
             Some(ret) => match self.parsed.tree[ret].ty {
-                Some(ty) => Some(self.walk_type(ty, line)?),
+                Some(ty) => Some(ty),
                 None => return Err(unread(line, "a return type")),
             },
             None => None,
@@ -369,13 +335,10 @@ impl Emit<'_> {
                 visibility: modifiers.visibility.unwrap_or_default(),
                 is_readonly,
             });
-            let ty = match param.ty {
-                Some(ty) => Some(self.walk_type(ty, line)?),
-                None => None,
-            };
             out.push(Parameter {
                 name: self.variable_name(param.var),
-                ty,
+                ty: param.ty,
+                line,
                 by_ref: param.byref.is_some(),
                 variadic: param.variadic.is_some(),
                 default: param.default,
@@ -483,7 +446,7 @@ impl Emit<'_> {
         range: TextRange,
     ) -> Result<Class, CompileError> {
         let name = self.text(name).to_vec();
-        if is_reserved_class_name(&name) {
+        if super::types::is_reserved_class_name(&name) {
             return Err(refused(
                 line,
                 format!(
@@ -588,17 +551,13 @@ impl Emit<'_> {
         if modifiers.any(&[Flag::Final, Flag::Abstract, Flag::Readonly]) {
             return Err(unread(line, "a property"));
         }
-        let ty = match node.ty {
-            Some(ty) => Some(self.walk_type(ty, line)?),
-            None => None,
-        };
         for declarator in &node.property_declarators {
             let declarator = self.parsed.tree[*declarator].clone();
             class.properties.push(Property {
                 name: self.variable_name(declarator.var),
                 visibility: modifiers.visibility.unwrap_or_default(),
                 set_visibility: modifiers.set_visibility,
-                ty: ty.clone(),
+                ty: node.ty,
                 is_static: modifiers.has(Flag::Static),
                 default: declarator.init,
                 doc_comment: self.doc_comment(declarator.doc_comment),
@@ -673,32 +632,6 @@ pub(super) fn refused(line: u32, message: impl Into<String>) -> CompileError {
     }
 }
 
-/// One type name as php's `zend_compile_single_typename` sorts it: a
-/// scalar or special type by its keyword whatever the case, `static`, `self` and
-/// `parent`, and any other name as a class name without its leading `\`.
-fn type_name(name: &[u8]) -> Type {
-    match name.to_ascii_lowercase().as_slice() {
-        b"mixed" => Type::Mixed,
-        b"void" => Type::Void,
-        b"never" => Type::Never,
-        b"null" => Type::Null,
-        b"bool" => Type::Bool,
-        b"false" => Type::False,
-        b"true" => Type::True,
-        b"int" => Type::Int,
-        b"float" => Type::Float,
-        b"string" => Type::String,
-        b"array" => Type::Array,
-        b"object" => Type::Object,
-        b"iterable" => Type::Iterable,
-        b"callable" => Type::Callable,
-        b"static" => Type::CalledClass,
-        b"self" => Type::SelfClass,
-        b"parent" => Type::ParentClass,
-        _ => Type::Named(Name(name.strip_prefix(b"\\").unwrap_or(name).into())),
-    }
-}
-
 // ----- the shapes a declaration reaches the emitter in -----
 //
 // What the walk above reads a class, a function, a closure and the
@@ -759,7 +692,9 @@ pub(super) struct Attr {
 pub(super) struct Function {
     pub(super) name: Vec<u8>,
     pub(super) parameters: Vec<Parameter>,
-    pub(super) return_type: Option<Type>,
+    /// The return type as written, which the emitter compiles where
+    /// `zend_compile_params` does, before the first parameter.
+    pub(super) return_type: Option<TypeExpr>,
     pub(super) by_ref: bool,
     pub(super) body: Vec<php_syntax::tree::Stmt>,
     pub(super) doc_comment: Option<Vec<u8>>,
@@ -774,7 +709,11 @@ pub(super) struct Function {
 #[derive(Debug, PartialEq)]
 pub(super) struct Parameter {
     pub(super) name: Vec<u8>,
-    pub(super) ty: Option<Type>,
+    /// The type as written, compiled by the emitter.
+    pub(super) ty: Option<TypeExpr>,
+    /// The parameter's own line, `param_ast->lineno`, which
+    /// `zend_compile_params` sets `CG(zend_lineno)` to before it.
+    pub(super) line: u32,
     pub(super) by_ref: bool,
     pub(super) variadic: bool,
     pub(super) default: Option<php_syntax::tree::Expr>,
@@ -847,7 +786,9 @@ pub(super) struct Property {
     pub(super) name: Vec<u8>,
     pub(super) visibility: Visibility,
     pub(super) set_visibility: Option<Visibility>,
-    pub(super) ty: Option<Type>,
+    /// The group's type as written, compiled by the emitter once per
+    /// declarator, as `zend_compile_prop_decl` compiles it.
+    pub(super) ty: Option<TypeExpr>,
     pub(super) is_static: bool,
     pub(super) default: Option<php_syntax::tree::Expr>,
     pub(super) doc_comment: Option<Vec<u8>>,
@@ -866,27 +807,4 @@ pub(super) struct Constant {
     pub(super) value: php_syntax::tree::Expr,
     pub(super) doc_comment: Option<Vec<u8>>,
     pub(super) line: u32,
-}
-
-/// `zend_is_reserved_class_name`: the names `reserved_class_names` lists
-/// in `zend_compile.c`, which no class may take, whatever the case.
-fn is_reserved_class_name(name: &[u8]) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_slice(),
-        b"bool"
-            | b"false"
-            | b"float"
-            | b"int"
-            | b"null"
-            | b"parent"
-            | b"self"
-            | b"static"
-            | b"string"
-            | b"true"
-            | b"void"
-            | b"never"
-            | b"iterable"
-            | b"object"
-            | b"mixed"
-    )
 }

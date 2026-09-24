@@ -47,3 +47,4 @@ decl::Type::contains_code
 decl::Type::mask
 decl::Visibility
 frameless_table
+type_to_string

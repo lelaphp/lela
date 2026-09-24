@@ -114,6 +114,7 @@ use php_syntax::magic_const_name;
 use crate::{CompileError, Options, StackLimit};
 use walk::{Class, Closure, Function, Method, Property};
 
+mod types;
 mod walk;
 
 /// One arm of an `if` as the tree holds it, php's `ZEND_AST_IF_ELEM`:
@@ -791,6 +792,23 @@ fn folded_const_expr(folded: Zval) -> Option<ConstExpr> {
         ZvalType::String => ConstExpr::Str(folded.as_str()?.bytes().into()),
         _ => return None,
     })
+}
+
+/// Whether a constant expression is a value `zend_const_expr_to_zval`
+/// folded, which a typed default is checked against where it is
+/// written, and not a name still to evaluate (`Z_CONSTANT`).
+fn is_literal(expr: &ConstExpr) -> bool {
+    match expr {
+        ConstExpr::Null
+        | ConstExpr::Bool(_)
+        | ConstExpr::Long(_)
+        | ConstExpr::Double(_)
+        | ConstExpr::Str(_) => true,
+        ConstExpr::Array(elements) => elements
+            .iter()
+            .all(|(key, value)| key.as_ref().is_none_or(is_literal) && is_literal(value)),
+        _ => false,
+    }
 }
 
 /// `zend_dirname` (`Z/Zend/zend_compile.c:2176`) on a path that is no
@@ -2680,60 +2698,67 @@ impl Emit<'_> {
         Ok(())
     }
 
-    /// `zend_declare_typed_property` for each promoted parameter of a
-    /// constructor (`zend_compile_params`): the property carries the
-    /// parameter's visibility, its `readonly` bit and its declared type,
-    /// and no explicit default, which for a typed one is uninitialized
-    /// and for an untyped one the implicit `null`. A name the class
-    /// already declares is php's `Cannot redeclare C::$p`, and a
-    /// `readonly` promotion with no type is php's own refusal.
-    fn promoted_properties(
+    /// The property a constructor's promoted parameter declares, where
+    /// `zend_compile_params` declares it, after the parameter's type:
+    /// a name the class already has, a callable type, and an untyped
+    /// `readonly` are php's fatals in php's words, and the property has
+    /// no default of its own, uninitialized where it is typed and
+    /// `null` where it is not.
+    ///
+    /// ```php
+    /// class C { function __construct(public callable $f) {} }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Property C::$f cannot have type callable in %s on line 2
+    /// ```
+    fn promoted_property(
         &mut self,
-        class: usize,
-        class_name: &[u8],
-        function: &Function,
+        parameter: &walk::Parameter,
+        promoted: walk::Promoted,
+        ty: Option<&Type>,
     ) -> Result<(), CompileError> {
-        for parameter in &function.parameters {
-            let Some(promoted) = parameter.promote else {
-                continue;
-            };
-            if self
-                .classes
-                .get(class)
-                .is_some_and(|decl| decl.properties.iter().any(|p| *p.name.0 == *parameter.name))
-            {
-                return Err(self.compile_error(format!(
-                    "Cannot redeclare {}::${}",
-                    String::from_utf8_lossy(class_name),
-                    String::from_utf8_lossy(&parameter.name)
-                )));
-            }
-            if promoted.is_readonly && parameter.ty.is_none() {
-                return Err(self.compile_error(format!(
-                    "Readonly property {}::${} must have type",
-                    String::from_utf8_lossy(class_name),
-                    String::from_utf8_lossy(&parameter.name)
-                )));
-            }
-            let default = parameter.ty.is_none().then_some(ConstExpr::Null);
-            let Some(decl) = self.classes.get_mut(class) else {
-                return Err(
-                    self.fatal("InternalError: a promoted property of a class the unit has not")
-                );
-            };
-            decl.properties.push(PropertyDecl {
-                name: Name(parameter.name.clone().into_boxed_slice()),
-                visibility: promoted.visibility,
-                set_visibility: None,
-                is_instance: true,
-                is_readonly: promoted.is_readonly,
-                is_final: false,
-                ty: parameter.ty.clone(),
-                default,
-                attributes: Vec::new(),
-                doc_comment: None,
-            });
+        let class_name = self.active_class.clone().unwrap_or_default();
+        let member = format!(
+            "{}::${}",
+            String::from_utf8_lossy(&class_name),
+            String::from_utf8_lossy(&parameter.name)
+        );
+        if self
+            .classes
+            .last()
+            .is_some_and(|decl| decl.properties.iter().any(|p| *p.name.0 == *parameter.name))
+        {
+            return Err(self.compile_error(format!("Cannot redeclare {member}")));
         }
+        if let Some(ty) = ty
+            && ty.mask() & types::MAY_BE_CALLABLE != 0
+        {
+            return Err(self.compile_error(format!(
+                "Property {member} cannot have type {}",
+                php_unit::type_to_string(ty)
+            )));
+        }
+        if promoted.is_readonly && ty.is_none() {
+            return Err(self.compile_error(format!("Readonly property {member} must have type")));
+        }
+        let default = ty.is_none().then_some(ConstExpr::Null);
+        let Some(decl) = self.classes.last_mut() else {
+            return Err(
+                self.fatal("InternalError: a promoted property of a class the unit has not")
+            );
+        };
+        decl.properties.push(PropertyDecl {
+            name: Name(parameter.name.clone().into_boxed_slice()),
+            visibility: promoted.visibility,
+            set_visibility: None,
+            is_instance: true,
+            is_readonly: promoted.is_readonly,
+            is_final: false,
+            ty: ty.cloned(),
+            default,
+            attributes: Vec::new(),
+            doc_comment: None,
+        });
         Ok(())
     }
 
@@ -2765,19 +2790,19 @@ impl Emit<'_> {
         }
         let (function, body) =
             self.body(&method.function, &name, Some(&class_name), method.is_static)?;
-        self.promoted_properties(class, &class_name, &method.function)?;
-        let Some(decl) = self.classes.get_mut(class) else {
-            return Err(self.fatal("InternalError: a method of a class the unit has not"));
-        };
-        let at = u32::try_from(decl.methods.len()).unwrap_or(u32::MAX);
-        decl.methods.push(MethodDecl {
+        let declared = MethodDecl {
             function,
             visibility: method.visibility,
             is_instance: !method.is_static,
             is_abstract: false,
             is_final: method.is_final,
             tentative_return: false,
-        });
+        };
+        let Some(decl) = self.classes.get_mut(class) else {
+            return Err(self.fatal("InternalError: a method of a class the unit has not"));
+        };
+        let at = u32::try_from(decl.methods.len()).unwrap_or(u32::MAX);
+        decl.methods.push(declared);
         self.methods.push(MethodBody {
             class: u32::try_from(class).unwrap_or(u32::MAX),
             method: at,
@@ -2831,7 +2856,10 @@ impl Emit<'_> {
         let line = function.line;
         self.line = line;
         self.returns_by_ref = function.by_ref;
-        self.return_type.clone_from(&function.return_type);
+        self.return_type = match function.return_type {
+            Some(written) => Some(self.typename(written, false)?.0),
+            None => None,
+        };
         let is_ctor = scope.is_some() && name.eq_ignore_ascii_case(b"__construct");
         let parameters = self.recv_prologue(function, is_ctor)?;
         // The entry safepoint is the opline after the prologue (design
@@ -2858,7 +2886,7 @@ impl Emit<'_> {
             FunctionDecl {
                 name: Name(name.into()),
                 parameters,
-                return_type: function.return_type.clone(),
+                return_type: self.return_type.clone(),
                 returns_by_ref: function.by_ref,
                 attributes: Vec::new(),
                 doc_comment: function.doc_comment.clone().map(Vec::into_boxed_slice),
@@ -2900,6 +2928,7 @@ impl Emit<'_> {
         let mut variadic_seen = false;
         for (at, parameter) in function.parameters.iter().enumerate() {
             let number = u32::try_from(at).unwrap_or(u32::MAX);
+            self.line = parameter.line;
             let cv = self.lookup_cv(&parameter.name);
             if cv != number {
                 return Err(self.compile_error(format!(
@@ -2909,37 +2938,22 @@ impl Emit<'_> {
             }
             self.parameter_refused(parameter, variadic_seen, is_ctor)?;
             variadic_seen = parameter.variadic;
-            // `zend_compile_params` folds a default under
-            // `ZEND_COMPILE_NO_PERSISTENT_CONSTANT_SUBSTITUTION`, so one
-            // naming a constant is not folded: the name stays as
-            // written, and what stands in the constant table is the
-            // `IS_CONSTANT_AST` zval over the expression, which the
-            // engine evaluates on the pass that copies it and
-            // Reflection reads back as the name.
-            let folded = match parameter.default {
-                Some(expr) if self.names_a_constant(expr) => {
-                    let unevaluated = self.const_expr(expr)?;
-                    Some(self.unevaluated(unevaluated))
+            let mut folded = self.parameter_default(parameter)?;
+            let (ty, implicitly_nullable) = match parameter.ty {
+                Some(written) => {
+                    let force_nullable = parameter.promote.is_none()
+                        && folded
+                            .as_ref()
+                            .is_some_and(|zval| zval.kind() == ZvalType::Null);
+                    let (ty, forced) = self.typename(written, force_nullable)?;
+                    self.parameter_type_refused(&ty, parameter, folded.as_mut(), force_nullable)?;
+                    if forced {
+                        (Some(Type::Nullable(Box::new(ty))), true)
+                    } else {
+                        (Some(ty), false)
+                    }
                 }
-                Some(expr) => {
-                    let Some(folded) = self.constant_of(expr)? else {
-                        return Err(self.fatal("a parameter default this compiler cannot read yet"));
-                    };
-                    Some(folded)
-                }
-                None => None,
-            };
-            let implicitly_nullable = parameter.promote.is_none()
-                && folded
-                    .as_ref()
-                    .is_some_and(|zval| zval.kind() == ZvalType::Null)
-                && parameter
-                    .ty
-                    .as_ref()
-                    .is_some_and(|ty| !ty.contains_code(ZvalType::Null as u8));
-            let ty = match (&parameter.ty, implicitly_nullable) {
-                (Some(ty), true) => Some(Type::Nullable(Box::new(ty.clone()))),
-                (ty, _) => ty.clone(),
+                None => (None, false),
             };
             let keeps_default = !parameter.variadic
                 && (implicitly_nullable || last_required.is_none_or(|last| at > last));
@@ -2954,10 +2968,18 @@ impl Emit<'_> {
                     out: cv,
                     ..Opline::default()
                 });
-                parameter
+                let written = parameter
                     .default
                     .map(|expr| self.const_expr(expr))
-                    .transpose()?
+                    .transpose()?;
+                // `zend_is_valid_default_value` converted an int under
+                // a type with `float` and no `int` where it stood.
+                match (written, folded.kind()) {
+                    (Some(ConstExpr::Long(n)), ZvalType::Double) => {
+                        Some(ConstExpr::Double(double_of(Zval::long(n))))
+                    }
+                    (written, _) => written,
+                }
             } else {
                 self.push(Opline {
                     opcode: if parameter.variadic {
@@ -2977,6 +2999,9 @@ impl Emit<'_> {
                 });
                 None
             };
+            if let Some(promoted) = parameter.promote {
+                self.promoted_property(parameter, promoted, ty.as_ref())?;
+            }
             parameters.push(Parameter {
                 name: Name(parameter.name.clone().into_boxed_slice()),
                 ty,
@@ -2987,6 +3012,129 @@ impl Emit<'_> {
             });
         }
         Ok(parameters)
+    }
+
+    /// A parameter's default as `zend_compile_params` folds it, under
+    /// `ZEND_COMPILE_NO_PERSISTENT_CONSTANT_SUBSTITUTION`, so one naming
+    /// a constant is not folded: the name stays as written, and what
+    /// stands in the constant table is the `IS_CONSTANT_AST` zval over
+    /// the expression, which the engine evaluates on the pass that
+    /// copies it and Reflection reads back as the name.
+    fn parameter_default(
+        &mut self,
+        parameter: &walk::Parameter,
+    ) -> Result<Option<Zval>, CompileError> {
+        Ok(match parameter.default {
+            Some(expr) if self.names_a_constant(expr) => {
+                let unevaluated = self.const_expr(expr)?;
+                Some(self.unevaluated(unevaluated))
+            }
+            Some(expr) => {
+                let Some(folded) = self.constant_of(expr)? else {
+                    return Err(self.fatal("a parameter default this compiler cannot read yet"));
+                };
+                Some(folded)
+            }
+            None => None,
+        })
+    }
+
+    /// What `zend_compile_params` refuses about a parameter's compiled
+    /// type: `void` and `never`, which no argument can be, and a
+    /// default the type does not take, named by
+    /// `zend_get_type_by_const`. A default that names a constant is
+    /// checked when it is evaluated, and `null` under a written type is
+    /// the nullable spelling. An int default under a type that takes
+    /// `float` and not `int` is converted where it stands, as
+    /// `zend_is_valid_default_value` converts it.
+    ///
+    /// ```php
+    /// function f(void $x) {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: void cannot be used as a parameter type in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// function f(never $x) {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: never cannot be used as a parameter type in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// function f(
+    ///     int $a,
+    ///     float $arg = false
+    /// ) {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use bool as default value for parameter $arg of type float in %s on line 4
+    /// ```
+    ///
+    /// ```php
+    /// function f(iterable $x = 1) {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use int as default value for parameter $x of type Traversable|array in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// function f(float $a = 1, int|float $b = 2, ?array $c = [], int $d = PHP_INT_MAX, ?int $e = null) {
+    ///     var_dump($a, $b, $c, $d, $e);
+    /// }
+    /// f();
+    /// ```
+    /// ```expect exit=0
+    /// float(1)
+    /// int(2)
+    /// array(0) {
+    /// }
+    /// int(9223372036854775807)
+    /// NULL
+    /// ```
+    fn parameter_type_refused(
+        &self,
+        ty: &Type,
+        parameter: &walk::Parameter,
+        folded: Option<&mut Zval>,
+        force_nullable: bool,
+    ) -> Result<(), CompileError> {
+        let mask = ty.mask();
+        if mask & types::MAY_BE_VOID != 0 {
+            return Err(self.compile_error("void cannot be used as a parameter type"));
+        }
+        if mask & types::MAY_BE_NEVER != 0 {
+            return Err(self.compile_error("never cannot be used as a parameter type"));
+        }
+        let Some(value) = folded else {
+            return Ok(());
+        };
+        let kind = value.kind();
+        if force_nullable || kind == ZvalType::ConstExpr {
+            return Ok(());
+        }
+        if ty.contains_code(kind as u8) {
+            return Ok(());
+        }
+        if ty.contains_code(ZvalType::Double as u8) && kind == ZvalType::Long {
+            *value = Zval::double(double_of(*value));
+            return Ok(());
+        }
+        let given = match kind {
+            ZvalType::False | ZvalType::True => "bool",
+            ZvalType::Long => "int",
+            ZvalType::Double => "float",
+            ZvalType::String => "string",
+            ZvalType::Array => "array",
+            ZvalType::Object => "object",
+            _ => "null",
+        };
+        Err(self.compile_error(format!(
+            "Cannot use {given} as default value for parameter ${} of type {}",
+            String::from_utf8_lossy(&parameter.name),
+            php_unit::type_to_string(ty)
+        )))
     }
 
     /// What `zend_compile_params` refuses about one parameter, in php's
@@ -3026,6 +3174,7 @@ impl Emit<'_> {
             if parameter.promote.is_none() {
                 continue;
             }
+            self.line = parameter.line;
             let name = self.string(&parameter.name)?;
             let slot = self.literal(name);
             let slots = self.cache_slots(3);
@@ -3422,20 +3571,40 @@ impl Emit<'_> {
     ) -> Result<(), CompileError> {
         for property in &class.properties {
             self.line = property.line;
-            if decl.properties.iter().any(|p| *p.name.0 == *property.name) {
-                return Err(self.compile_error(format!(
-                    "Cannot redeclare {}::${}",
-                    String::from_utf8_lossy(name),
-                    String::from_utf8_lossy(&property.name)
-                )));
-            }
-            let set_visibility = self.set_visibility_of(property, name)?;
+            let member = format!(
+                "{}::${}",
+                String::from_utf8_lossy(name),
+                String::from_utf8_lossy(&property.name)
+            );
             self.active_property = Some(property.name.clone());
-            let default = match property.default {
+            let ty = match property.ty {
+                Some(written) => {
+                    let ty = self.typename(written, false)?.0;
+                    let mask = ty.mask();
+                    if mask & (types::MAY_BE_VOID | types::MAY_BE_NEVER | types::MAY_BE_CALLABLE)
+                        != 0
+                    {
+                        return Err(self.compile_error(format!(
+                            "Property {member} cannot have type {}",
+                            php_unit::type_to_string(&ty)
+                        )));
+                    }
+                    Some(ty)
+                }
+                None => None,
+            };
+            if decl.properties.iter().any(|p| *p.name.0 == *property.name) {
+                return Err(self.compile_error(format!("Cannot redeclare {member}")));
+            }
+            let mut default = match property.default {
                 Some(expr) => Some(self.const_expr(expr)?),
                 None => None,
             };
+            if let (Some(ty), Some(default)) = (&ty, default.as_mut()) {
+                self.property_default_refused(ty, default, &member)?;
+            }
             self.active_property = None;
+            let set_visibility = self.set_visibility_of(property, name)?;
             decl.properties.push(PropertyDecl {
                 name: Name(property.name.clone().into_boxed_slice()),
                 visibility: property.visibility,
@@ -3445,13 +3614,108 @@ impl Emit<'_> {
                 // `zend_declare_typed_property`: a `private(set)`
                 // property is implicitly final.
                 is_final: set_visibility == Some(Visibility::Private),
-                ty: property.ty.clone(),
+                ty,
                 default,
                 attributes: Vec::new(),
                 doc_comment: property.doc_comment.clone().map(Vec::into_boxed_slice),
             });
         }
         Ok(())
+    }
+
+    /// What `zend_compile_prop_decl` refuses about a typed property's
+    /// default, `zend_is_valid_default_value` over the value it folded
+    /// to: `null` under a type without it names the nullable type that
+    /// would take it, and any other value php's
+    /// `zend_zval_value_name`. A default still naming a constant is
+    /// checked when it is evaluated, and an int under a type that takes
+    /// `float` and not `int` becomes the float.
+    ///
+    /// ```php
+    /// class C {
+    ///     public int $a = 1;
+    ///     public string|int $b = null;
+    /// }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Default value for property of type string|int may not be null. Use the nullable type string|int|null to allow null default value in %s on line 4
+    /// ```
+    ///
+    /// ```php
+    /// class C { public array $bar = 1; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use int as default value for property C::$bar of type array in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// class C { public float $f = 1; public ?int $n = null; public iterable $i = []; public int $k = PHP_INT_SIZE; }
+    /// var_dump(new C);
+    /// ```
+    /// ```expect exit=0
+    /// object(C)#1 (4) {
+    ///   ["f"]=>
+    ///   float(1)
+    ///   ["n"]=>
+    ///   NULL
+    ///   ["i"]=>
+    ///   array(0) {
+    ///   }
+    ///   ["k"]=>
+    ///   int(8)
+    /// }
+    /// ```
+    fn property_default_refused(
+        &self,
+        ty: &Type,
+        default: &mut ConstExpr,
+        member: &str,
+    ) -> Result<(), CompileError> {
+        let kind = match default {
+            ConstExpr::Null => ZvalType::Null,
+            ConstExpr::Bool(false) => ZvalType::False,
+            ConstExpr::Bool(true) => ZvalType::True,
+            ConstExpr::Long(_) => ZvalType::Long,
+            ConstExpr::Double(_) => ZvalType::Double,
+            ConstExpr::Str(_) => ZvalType::String,
+            ConstExpr::Array(elements)
+                if elements.iter().all(|(key, value)| {
+                    key.as_ref().is_none_or(is_literal) && is_literal(value)
+                }) =>
+            {
+                ZvalType::Array
+            }
+            _ => return Ok(()),
+        };
+        if ty.contains_code(kind as u8) {
+            return Ok(());
+        }
+        if let ConstExpr::Long(n) = default
+            && ty.contains_code(ZvalType::Double as u8)
+        {
+            *default = ConstExpr::Double(double_of(Zval::long(*n)));
+            return Ok(());
+        }
+        let text = php_unit::type_to_string(ty);
+        if kind == ZvalType::Null && !matches!(ty, Type::Intersection(_)) {
+            let nullable = Type::Union(vec![ty.clone(), Type::Null]);
+            return Err(self.compile_error(format!(
+                "Default value for property of type {text} may not be null. Use the nullable type {} to allow null default value",
+                php_unit::type_to_string(&nullable)
+            )));
+        }
+        let given = match kind {
+            ZvalType::Null => "null",
+            ZvalType::False => "false",
+            ZvalType::True => "true",
+            ZvalType::Long => "int",
+            ZvalType::Double => "float",
+            ZvalType::String => "string",
+            _ => "array",
+        };
+        Err(self.compile_error(format!(
+            "Cannot use {given} as default value for property {member} of type {text}"
+        )))
     }
 
     /// `zend_declare_typed_property`'s arm over `ZEND_ACC_PPP_SET_MASK`
