@@ -4,11 +4,12 @@
 //! beside it whose `main` a test moves from a branch of the clone, as a
 //! commit landing on main does.
 
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use xtask::scratch::Tree;
+use xtask::scratch::{self, Tree};
 
 fn workspace() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
@@ -36,7 +37,9 @@ fn rev(root: &Path, name: &str) -> String {
     sh(root, &["git", "rev-parse", name]).trim().to_owned()
 }
 
-/// The scratch: the track's clone at `root` and its bare `origin.git`.
+/// The scratch: the track's clone at `root`, its bare `origin.git`, and
+/// the `PATH` the sync runs under, with the build stood in by
+/// [`scratch::cargo`].
 struct Scratch {
     /// The tree both of them are under, held for as long as the test
     /// reads them and dropped with it, which is what takes them away.
@@ -44,6 +47,7 @@ struct Scratch {
     dir: Tree,
     root: PathBuf,
     origin: PathBuf,
+    path: OsString,
 }
 
 impl Scratch {
@@ -96,7 +100,14 @@ impl Scratch {
         );
         sh(&root, &["git", "checkout", "-q", "--detach", "origin/t-x"]);
         sh(&root, &["git", "config", "track.name", "t-x"]);
-        Scratch { dir, root, origin }
+        let path =
+            scratch::cargo(&dir.join("bin"), Path::new(env!("CARGO_BIN_EXE_xtask"))).unwrap();
+        Scratch {
+            dir,
+            root,
+            origin,
+            path,
+        }
     }
 
     /// One commit on origin's `branch` writing `content` to `file`, made
@@ -145,6 +156,7 @@ impl Scratch {
             .arg(&self.root)
             .args(["track", "sync"])
             .current_dir(&self.root)
+            .env("PATH", &self.path)
             .env_remove("CARGO")
             .env_remove("CARGO_MANIFEST_DIR")
             .env("GIT_AUTHOR_NAME", "x")

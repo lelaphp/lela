@@ -5,6 +5,7 @@
 //! in the worktree and asks for the local file is this one, and the store
 //! the retire appends to is the real store.
 
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -14,7 +15,7 @@ use xtask::divergence::Registry;
 use xtask::manifest::Manifest;
 use xtask::permit::{Call, judge};
 use xtask::reading::{Reading, Status, Store};
-use xtask::scratch::Tree;
+use xtask::scratch::{self, Tree};
 use xtask::status;
 
 fn workspace() -> &'static Path {
@@ -61,20 +62,48 @@ fn add(root: &Path, args: &[&str]) -> (i32, String) {
     worktree(root, "add", args)
 }
 
+/// The add with `cargo` itself on `PATH` rather than the stand-in, for
+/// the one test that holds what the build compiles.
+fn add_building(root: &Path, args: &[&str]) -> (i32, String) {
+    run(
+        root,
+        "add",
+        args,
+        &std::env::var_os("PATH").unwrap_or_default(),
+    )
+}
+
+/// A `PATH` whose `cargo` is [`scratch::cargo`], from a tree of its own
+/// beside the repository, so nothing of it is among the repository's
+/// files; the tree goes with the value, once the call it served is over.
+fn stand_in() -> (Tree, OsString) {
+    let bin = Tree::new("worktree-cargo").unwrap();
+    let path = scratch::cargo(&bin, Path::new(env!("CARGO_BIN_EXE_xtask"))).unwrap();
+    (bin, path)
+}
+
 /// The retire half, run against `root`, which is the checkout the
 /// instrument is asked from: the track's own or a worktree of it.
 fn retire(root: &Path, args: &[&str]) -> (i32, String) {
     worktree(root, "retire", args)
 }
 
-/// One half of `xtask worktree`, run from and against `root`.
+/// One half of `xtask worktree`, run from and against `root`, with the
+/// build stood in.
 fn worktree(root: &Path, half: &str, args: &[&str]) -> (i32, String) {
+    let (_bin, path) = stand_in();
+    run(root, half, args, &path)
+}
+
+/// One half of `xtask worktree` under `path`.
+fn run(root: &Path, half: &str, args: &[&str], path: &OsString) -> (i32, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
         .arg("--root")
         .arg(root)
         .args(["worktree", half])
         .args(args)
         .current_dir(root)
+        .env("PATH", path)
         .env_remove("CARGO")
         .env_remove("CARGO_MANIFEST_DIR")
         .env("GIT_AUTHOR_NAME", "x")
@@ -86,12 +115,15 @@ fn worktree(root: &Path, half: &str, args: &[&str]) -> (i32, String) {
     joined(&out)
 }
 
-/// One of the two commands under `scripts/`, run from the scratch repository.
+/// One of the two commands under `scripts/`, run from the scratch
+/// repository with the build stood in.
 fn command(root: &Path, name: &str, args: &[&str]) -> (i32, String) {
+    let (_bin, path) = stand_in();
     let out = Command::new("bash")
         .arg(workspace().join("scripts").join(name))
         .args(args)
         .current_dir(root)
+        .env("PATH", &path)
         .env_remove("CARGO")
         .env_remove("CARGO_MANIFEST_DIR")
         .env("GIT_AUTHOR_NAME", "x")
@@ -367,7 +399,7 @@ fn an_add_seeds_the_worktrees_target_from_the_clones_and_builds_the_workspace_al
         "{\"instrument\":\"the-clones-own\"}\n",
     );
 
-    let (code, out) = add(&root, &["t-x/warm"]);
+    let (code, out) = add_building(&root, &["t-x/warm"]);
     assert_eq!(code, 0, "{out}");
     let dir = worktree_of(&root, "t-x/warm");
     let built = dir.join("target/debug/xtask");

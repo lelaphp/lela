@@ -13,6 +13,12 @@ on:
   push:
     branches: [main, "t-*"] # main and the track branches, whose base is main
   pull_request:
+# A push to a track branch supersedes the run of the push before it, which
+# is cancelled: `track work` pushes on every ticket it closes, and a run
+# nobody reads is minutes billed. `main`'s runs queue and finish.
+concurrency:
+  group: harness-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 jobs:
   regions:
     name: computed check
@@ -23,15 +29,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo install computed --locked
       - run: computed check AGENTS.md ext/AGENTS.md data/INDEX.md docs/divergence.md
-  xtask:
-    name: cargo test -p xtask
+  per-commit:
+    name: the instruments, then done
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable # reads rust-toolchain.toml; the number is stated there
+        with:
+          fetch-depth: 0 # done measures since the merge base with the track
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # Each instrument exits 1 on a failing reading, which fails the job;
+      # the readings it wrote are uploaded either way.
       - run: cargo fmt --check
-      - run: cargo clippy -p xtask --all-targets -- -D warnings
+      - run: cargo xtask clippy
       # `new-ext` renders ext/AGENTS.md's extensions region with `computed
       # run`, and the test that holds the template topology reads the row
       # it wrote, so the binary is the test's dependency and not only the
@@ -123,30 +133,13 @@ jobs:
           echo "$promise=tree" >> "$GITHUB_ENV"
       - name: the tree is at the pin's commit
         run: cargo test -p xtask --test oracle a_tree_the_variable_names_is_at_the_pin
-      - run: cargo test -p xtask
-  per-commit:
-    name: the instruments, then done
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0 # done measures since the merge base with the track
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      # Each instrument exits 1 on a failing reading, which fails the job;
-      # the readings it wrote are uploaded either way.
-      - run: cargo fmt --check
-      - run: cargo xtask clippy
       # The crate's own tests as the reading `done`'s condition 1 asks
       # every touched crate for (#191): the workspace here, the touched
-      # crates at pre-commit. The harness's own run a second time, after
-      # the test job's, since that job promises the corpus and this one
-      # writes the reading. The harness's tests need `computed` as the
-      # test job's do: `new-ext` renders ext/AGENTS.md's extensions region
-      # with `computed run`, and the test that holds the template topology
-      # reads the row it wrote; without the binary the crate is laid down
-      # with a note and no row, and the reading fails.
-      - run: cargo install computed --locked
+      # crates at pre-commit. The harness's own tests run here once, under
+      # the corpus promised above, and are the reading; they ran a second
+      # time in a job of their own before, which cost a runner the whole
+      # suite per push for nothing `done` reads, and `cargo xtask clippy`
+      # above already holds xtask to every warning.
       - run: cargo xtask test
       - run: cargo xtask api-check
       - run: cargo xtask budget

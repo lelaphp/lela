@@ -25,11 +25,11 @@
 pub(crate) mod expect;
 pub(crate) mod linked;
 
-use std::cell::OnceCell;
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -397,7 +397,7 @@ impl Pin {
     pub fn oracle(&self) -> Oracle<'_> {
         Oracle {
             pin: self,
-            digest: OnceCell::new(),
+            digest: OnceLock::new(),
         }
     }
 
@@ -505,7 +505,7 @@ pub struct Oracle<'a> {
     pin: &'a Pin,
     /// What the one assertion found, kept so a mismatch refuses every
     /// later run the same way rather than hashing again.
-    digest: OnceCell<Result<(), String>>,
+    digest: OnceLock<Result<(), String>>,
 }
 
 impl<'a> Oracle<'a> {

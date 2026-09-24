@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use xtask::scratch::Tree;
+use xtask::scratch::{self, Tree};
 
 fn workspace() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
@@ -54,14 +54,19 @@ fn has_ref(root: &Path, name: &str) -> bool {
         .success()
 }
 
-/// The command, this crate's own binary, run against the scratch root.
+/// The command, this crate's own binary, run against the scratch root,
+/// with the clone's build stood in by [`scratch::cargo`] from the scratch
+/// tree's `bin`.
 fn track_new(root: &Path, args: &[&str]) -> (i32, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+    let xtask = Path::new(env!("CARGO_BIN_EXE_xtask"));
+    let path = scratch::cargo(&root.parent().unwrap().join("bin"), xtask).unwrap();
+    let out = Command::new(xtask)
         .arg("--root")
         .arg(root)
         .args(["track", "new"])
         .args(args)
         .current_dir(root)
+        .env("PATH", path)
         .env_remove("CARGO")
         .env_remove("CARGO_MANIFEST_DIR")
         .env("GIT_AUTHOR_NAME", "x")
@@ -128,7 +133,18 @@ fn repository(name: &str) -> (Tree, PathBuf, PathBuf) {
         &root,
         &["git", "remote", "add", "origin", origin.to_str().unwrap()],
     );
-    sh(&root, &["git", "push", "-q", "origin", "main"]);
+    sh(
+        &root,
+        &[
+            "git",
+            "-c",
+            "core.hooksPath=/var/empty",
+            "push",
+            "-q",
+            "origin",
+            "main",
+        ],
+    );
     (base, root, origin)
 }
 
@@ -275,7 +291,15 @@ fn an_existing_branch_or_directory_refuses_and_changes_nothing() {
     // asked, not the remote-tracking refs.
     sh(
         &root,
-        &["git", "push", "-q", "origin", "main:refs/heads/t-remote"],
+        &[
+            "git",
+            "-c",
+            "core.hooksPath=/var/empty",
+            "push",
+            "-q",
+            "origin",
+            "main:refs/heads/t-remote",
+        ],
     );
     sh(
         &root,
