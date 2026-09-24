@@ -622,6 +622,10 @@ pub struct Request {
     /// A row is dropped by `zend_reference_destroy`, which reaches
     /// [`HeapHooks::free_reference`].
     ref_sources: Vec<(usize, Vec<RefSource>)>,
+    /// php's `EG(weakrefs)`: every weakly referenced object's id against
+    /// the `WeakReference` and `WeakMap` objects that name it
+    /// (`crate::weakrefs`).
+    pub(crate) weakrefs: crate::weakrefs::Table,
     /// The next word [`Request::ref_add_type_source`] hands out, never
     /// reused, so a cell freed and a cell laid down at its address are
     /// never one row.
@@ -862,6 +866,7 @@ impl Request {
             statics: Vec::new(),
             guards: Vec::new(),
             ref_sources: Vec::new(),
+            weakrefs: crate::weakrefs::Table::default(),
             next_ref_source: 1,
             wrappers: Vec::new(),
             filters: Vec::new(),
@@ -1356,6 +1361,12 @@ impl Request {
     fn closure_code(&self, function: Function) -> Option<&php_unit::OpArray> {
         let user = self.user_function(function)?;
         exec::body_of(&user.unit, user.body)
+    }
+
+    /// The live object the store holds under the id `spl_object_id`
+    /// reports, none for an id no live object has.
+    pub(crate) fn stored_object(&self, id: u32) -> Option<PhpObject> {
+        self.heap.stored(php_heap::ObjectId(id)).map(PhpObject::of)
     }
 
     /// `ce->type == ZEND_INTERNAL_CLASS`: a class the engine or an
@@ -9869,6 +9880,12 @@ impl HeapHooks for Hooks<'_> {
     fn free_reference(&mut self, r: Ref) {
         let word = r.sources();
         self.0.ref_sources.retain(|(at, _)| *at != word);
+    }
+
+    /// `zend_weakrefs_notify`: every weak holder of the object cleared
+    /// before its members go (`crate::weakrefs::notify`).
+    fn weakrefs_notify(&mut self, obj: Obj) {
+        crate::weakrefs::notify(self.0, obj);
     }
 }
 

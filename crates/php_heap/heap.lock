@@ -110,6 +110,7 @@ HeapHooks::free_resource
 HeapHooks::gc_children
 HeapHooks::heap
 HeapHooks::out_of_memory
+HeapHooks::weakrefs_notify
 Intern
 Intern::constant_array
 Intern::intern
@@ -132,9 +133,11 @@ Obj::id
 Obj::is_lazy
 Obj::is_recursive
 Obj::is_same
+Obj::is_weakly_referenced
 Obj::properties
 Obj::protect
 Obj::refcount
+Obj::set_weakly_referenced
 Obj::slot
 Obj::slot_ref
 Obj::slots

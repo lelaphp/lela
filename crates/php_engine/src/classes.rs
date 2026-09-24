@@ -375,7 +375,7 @@ fn closure_clone(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thro
 /// both. `__clone` is private, the one method the visibility rule of
 /// `zend_std_get_method` has to be held to.
 pub(crate) fn zend_classes() -> Vec<NativeClassDecl> {
-    vec![
+    let mut classes: Vec<NativeClassDecl> = vec![
         (
             ClassDecl {
                 methods: vec![abstract_method(b"__toString", Some(Type::String))],
@@ -471,7 +471,33 @@ pub(crate) fn zend_classes() -> Vec<NativeClassDecl> {
         (std_class(), Vec::new(), None, None),
         (unit_enum(), Vec::new(), None, None),
         (backed_enum(), Vec::new(), None, None),
-    ]
+    ];
+    classes.push((countable(), Vec::new(), None, None));
+    classes.extend(crate::weakrefs::weakref_classes());
+    classes
+}
+
+/// `interface Countable` as `zend_interfaces.stub.php` declares it:
+/// `count(): int`, abstract, its return type tentative. What `count()`
+/// asks of an object whose class has no `count_elements`, and what
+/// `WeakMap` implements.
+///
+/// ```php
+/// class N implements Countable { function count(): int { return 3; } }
+/// var_dump(count(new N), new N instanceof Countable);
+/// ```
+/// ```expect
+/// int(3)
+/// bool(true)
+/// ```
+fn countable() -> ClassDecl {
+    ClassDecl {
+        methods: vec![MethodDecl {
+            tentative_return: true,
+            ..abstract_method(b"count", Some(Type::Int))
+        }],
+        ..declared(b"Countable", ClassKind::Interface, None)
+    }
 }
 
 /// `interface UnitEnum` as `zend_enum.stub.php` declares it and

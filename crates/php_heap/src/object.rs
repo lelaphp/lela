@@ -246,6 +246,25 @@ impl Obj {
         self.has_flag(gc::PROTECTED)
     }
 
+    /// `IS_OBJ_WEAKLY_REFERENCED`: whether a weak reference or a weak
+    /// map's key names the object, so that its free is told to the
+    /// engine through [`HeapHooks::weakrefs_notify`].
+    #[must_use]
+    pub fn is_weakly_referenced(&self) -> bool {
+        self.has_flag(gc::OBJ_WEAKLY_REFERENCED)
+    }
+
+    /// `GC_ADD_FLAGS(object, IS_OBJ_WEAKLY_REFERENCED)`, or
+    /// `GC_DEL_FLAGS` where `weak` is false: what `zend_weakref_register`
+    /// and `zend_weakref_unregister` write.
+    pub fn set_weakly_referenced(&self, weak: bool) {
+        if weak {
+            self.add_flag(gc::OBJ_WEAKLY_REFERENCED);
+        } else {
+            self.header().gc.del_flags(gc::OBJ_WEAKLY_REFERENCED);
+        }
+    }
+
     /// `Z_PROTECT_RECURSION_P`: the walk is inside.
     pub fn protect(&self) {
         self.add_flag(gc::PROTECTED);
@@ -718,10 +737,15 @@ impl Heap {
     }
 
     /// `free_obj`: `zend_object_std_dtor` (`Z/Zend/zend_objects.c:77`),
-    /// the dynamic table then the slots, and for an internal class the
+    /// the weak references to the object told first
+    /// (`zend_weakrefs_notify`, [`HeapHooks::weakrefs_notify`]), then
+    /// the dynamic table and the slots, and for an internal class the
     /// payload, what it names of the heap given back by the engine
     /// through [`HeapHooks::free_native`] and the rest by its drop.
     fn object_free(hooks: &mut dyn HeapHooks, o: Obj) {
+        if o.is_weakly_referenced() {
+            hooks.weakrefs_notify(o);
+        }
         if let Some(table) = o.header().properties.take() {
             Heap::release(hooks, Zval::array(table));
         }
