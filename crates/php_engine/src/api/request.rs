@@ -8254,19 +8254,26 @@ impl Request {
     /// handler runs it here: `max_execution_time` re-arms the execution
     /// timer (`OnUpdateTimeout`, `Z/main/main.c:467`).
     ///
-    /// The two entries of the table without `PHP_INI_USER` are
-    /// `xmlrpc_errors`, `PHP_INI_SYSTEM`, and `short_open_tag`,
-    /// `PHP_INI_SYSTEM|PHP_INI_PERDIR`, which `zend_alter_ini_entry_ex`
-    /// refuses at `PHP_INI_STAGE_RUNTIME` as it refuses every entry whose
-    /// `modifiable` lacks the stage; the rest of the table is `PHP_INI_ALL`.
+    /// The entries of the table without `PHP_INI_USER`, `xmlrpc_errors`,
+    /// `short_open_tag`, `sys_temp_dir`, the `mail.*` ones but `SMTP` and
+    /// `smtp_port`, `sendmail_path` and two of the three `syslog.*`, are
+    /// `PHP_INI_SYSTEM` or `PHP_INI_SYSTEM|PHP_INI_PERDIR`, which
+    /// `zend_alter_ini_entry_ex` refuses at `PHP_INI_STAGE_RUNTIME` as it
+    /// refuses every entry whose `modifiable` lacks the stage; the rest of
+    /// the table is `PHP_INI_ALL`.
     ///
     /// ```php
-    /// var_dump(ini_set('xmlrpc_errors', '1'), ini_set('short_open_tag', '1'));
+    /// var_dump(ini_set('xmlrpc_errors', '1'), ini_set('short_open_tag', '1'), ini_set('sendmail_path', 'x'), ini_set('mail.log', 'x'), ini_set('SMTP', 'mx'), ini_get('sendmail_path'), ini_get('mail.cr_lf_mode'));
     /// echo NAN;
     /// ```
     /// ```expect
     /// bool(false)
     /// bool(false)
+    /// bool(false)
+    /// bool(false)
+    /// string(9) "localhost"
+    /// string(24) "/usr/sbin/sendmail -t -i"
+    /// string(4) "crlf"
     ///
     /// Warning: unexpected NAN value was coerced to string in %s on line 3
     /// NAN
@@ -8292,10 +8299,25 @@ impl Request {
 
     /// Whether an entry's `modifiable` carries `PHP_INI_USER`, what
     /// `ini_set()` asks: every entry of the table is `PHP_INI_ALL` but
-    /// `xmlrpc_errors`, `PHP_INI_SYSTEM` (`Z/main/main.c:806`), and
-    /// `short_open_tag`, `PHP_INI_SYSTEM|PHP_INI_PERDIR` (`Z/main/main.c:820`).
+    /// `xmlrpc_errors`, `sys_temp_dir`, `sendmail_path`, `syslog.facility`
+    /// and `syslog.ident`, `PHP_INI_SYSTEM` (`Z/main/main.c:806-890`), and
+    /// `short_open_tag` and the four `mail.*` beside `sendmail_path`,
+    /// `PHP_INI_SYSTEM|PHP_INI_PERDIR` (`Z/main/main.c:820-871`).
     fn ini_modifiable(name: &[u8]) -> bool {
-        !matches!(name, b"xmlrpc_errors" | b"short_open_tag")
+        !matches!(
+            name,
+            b"xmlrpc_errors"
+                | b"short_open_tag"
+                | b"sys_temp_dir"
+                | b"mail.add_x_header"
+                | b"mail.mixed_lf_and_crlf"
+                | b"mail.cr_lf_mode"
+                | b"mail.log"
+                | b"sendmail_path"
+                | b"mail.force_extra_parameters"
+                | b"syslog.facility"
+                | b"syslog.ident"
+        )
     }
 
     /// What a core entry's `on_modify` says of a new value before
