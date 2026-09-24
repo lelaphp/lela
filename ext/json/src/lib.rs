@@ -309,6 +309,7 @@ fn declared(name: &[u8], parameters: &[Parameter], returns: Type) -> FunctionDec
         parameters: parameters.to_vec(),
         return_type: Some(returns),
         returns_by_ref: false,
+        is_generator: false,
         attributes: Vec::new(),
         doc_comment: None,
         file: Name(Box::new([])),

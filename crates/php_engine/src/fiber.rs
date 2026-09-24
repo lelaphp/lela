@@ -559,6 +559,7 @@ fn method(
             parameters,
             return_type: returns,
             returns_by_ref: false,
+            is_generator: false,
             attributes: Vec::new(),
             doc_comment: None,
             file: Name(Box::new([])),
@@ -1420,10 +1421,16 @@ fn destroy(req: &mut Request, object: PhpObject) {
             .map_or(0, |frame| usize::try_from(frame.calls_below).unwrap_or(0));
         if calls > above {
             req.pop_call();
-        } else if req.vm().frames().is_empty() {
-            break;
+        } else if let Some(frame) = req.vm().frames().last() {
+            // A generator resumed inside the fiber has its frame here,
+            // and is closed with it rather than left pointing at a frame
+            // no stack holds.
+            match frame.generator {
+                Some(generator) => crate::generator::close_unwound(req, generator),
+                None => req.pop_frame(),
+            }
         } else {
-            req.pop_frame();
+            break;
         }
     }
     let mut execution = match req.fibers_mut().running.pop() {

@@ -185,6 +185,20 @@ fn class_natives() -> Vec<(FunctionDecl, Entry)> {
         ),
         (
             declared(
+                b"enum_exists",
+                &[
+                    parameter(b"enum", Some(Type::String), false),
+                    Parameter {
+                        default: Some(ConstExpr::Bool(true)),
+                        ..parameter(b"autoload", Some(Type::Bool), false)
+                    },
+                ],
+                Some(Type::Bool),
+            ),
+            enum_exists as Entry,
+        ),
+        (
+            declared(
                 b"get_class",
                 &[parameter(b"object", Some(Type::Object), false)],
                 Some(Type::String),
@@ -894,6 +908,48 @@ fn exit(req: &mut Request) -> Result<Value, Thrown> {
 /// ```
 fn class_exists(req: &mut Request) -> Result<Value, Thrown> {
     classes::exists(req, &[ClassKind::Class, ClassKind::Enum])
+}
+
+/// `enum_exists(string $enum, bool $autoload = true): bool`, php's
+/// `class_exists_impl` with `ZEND_ACC_ENUM` to have: [`class_exists`]'s
+/// lookup, true for an enum alone.
+///
+/// ```php
+/// enum Suit { case Hearts; }
+/// var_dump(enum_exists('Suit'), enum_exists('\suit'), enum_exists('stdClass'), enum_exists('PropertyHookType'), enum_exists('Nope', false));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// ```
+fn enum_exists(req: &mut Request) -> Result<Value, Thrown> {
+    let count = req.argument_count();
+    if !(1..=2).contains(&count) {
+        return Err(wrong_argument_count(req, 1, 2, count));
+    }
+    let name = string_argument(req, 1)?;
+    let autoload = if count == 2 {
+        let given = req.argument(2).unwrap_or_default();
+        coerce_param(req, &given, &Type::Bool, 2)?
+            .as_bool()
+            .unwrap_or(true)
+    } else {
+        true
+    };
+    let bytes = name.as_bytes();
+    let bytes = bytes.strip_prefix(b"\\").unwrap_or(bytes);
+    let found = match req.class_named(bytes) {
+        Some(class) => Some(class),
+        None if autoload => crate::api::call::autoload(req, bytes)?,
+        None => None,
+    };
+    let exists = found
+        .and_then(|class| req.class_decl(class))
+        .is_some_and(|decl| decl.kind == ClassKind::Enum);
+    Ok(Value::bool(exists))
 }
 
 /// `get_class(object $object = UNKNOWN): string`, php's
@@ -2497,6 +2553,7 @@ fn declared(name: &[u8], parameters: &[Parameter], returns: Option<Type>) -> Fun
         parameters: parameters.to_vec(),
         return_type: returns,
         returns_by_ref: false,
+        is_generator: false,
         attributes: Vec::new(),
         doc_comment: None,
         file: Name(Box::new([])),

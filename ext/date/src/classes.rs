@@ -56,6 +56,7 @@ fn constant(name: &str, ty: Type, value: ConstExpr) -> ClassConstDecl {
         name: Name(name.as_bytes().into()),
         visibility: Visibility::Public,
         is_final: false,
+        is_case: false,
         ty: Some(ty),
         value,
         attributes: Vec::new(),

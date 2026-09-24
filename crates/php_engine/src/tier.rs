@@ -207,6 +207,27 @@ pub(crate) fn reenter<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<(),
     serving::<T>(req, frame, Unhandled::Pending)
 }
 
+/// `zend_generator_resume`'s `zend_execute_ex(generator->execute_data)`
+/// (design §5.11): the same loop once more on a generator's frame, which
+/// the resumption has put back on the stack where the resumer stands.
+/// The frame was activated before `GENERATOR_CREATE` moved it and is not
+/// activated again, so no `Site::Entry` is raised; the loop dispatches
+/// the opline the frame stands at, or unwinds from it where a throwable
+/// is pending, which is how `Generator::throw` raises at the `yield`.
+/// The serving is over when the frame yields, returns, or leaves a
+/// throwable it did not catch pending for the resumer to read.
+pub(crate) fn resume<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<(), Fatal> {
+    let guard = req.stack_mut().push_entry(frame);
+    let first = if req.is_pending() {
+        Stepped::Threw(frame)
+    } else {
+        Stepped::Same(frame)
+    };
+    let outcome = serve_from::<T>(req, Unhandled::Pending, first);
+    req.stack_mut().pop_entry(guard);
+    outcome
+}
+
 /// One serving: the entry slot pushed, the loop, the entry slot popped
 /// on the fatal path as on the normal one.
 fn serving<T: Tier>(req: &mut Request, frame: FrameRef, unhandled: Unhandled) -> Result<(), Fatal> {
@@ -220,8 +241,18 @@ fn serving<T: Tier>(req: &mut Request, frame: FrameRef, unhandled: Unhandled) ->
 /// its own entry frame whatever the caller is, where php installs its
 /// own site (design §4.3 seam 8).
 fn serve<T: Tier>(req: &mut Request, entry: FrameRef, unhandled: Unhandled) -> Result<(), Fatal> {
-    let mut frame = entry;
-    let mut stepped = activated::<T>(req, frame)?;
+    let first = activated::<T>(req, entry)?;
+    serve_from::<T>(req, unhandled, first)
+}
+
+/// The loop from the edge its first step took.
+fn serve_from<T: Tier>(
+    req: &mut Request,
+    unhandled: Unhandled,
+    first: Stepped,
+) -> Result<(), Fatal> {
+    let mut frame;
+    let mut stepped = first;
     loop {
         match stepped {
             Stepped::Same(at) | Stepped::Moved(at) | Stepped::Popped(at) => frame = at,

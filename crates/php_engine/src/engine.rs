@@ -27,7 +27,7 @@ use crate::api::abi::{Cache, Entry, Extension, NativeNew, ObjectHandlers, Startu
 use crate::api::request::{Aside, Ending, ExtensionId, Request};
 use crate::api::values::{ClassId, Value};
 use crate::exec;
-use crate::tier::{Nop, Tier, execute, reenter};
+use crate::tier::{Nop, Tier, execute, reenter, resume};
 
 /// Everything a host knows about one request before it starts (design
 /// §4.3 seam 4): one plain `Send` value, handed over once.
@@ -165,6 +165,10 @@ pub(crate) struct Shared {
     /// destructor's or a callback's frame through, bound to the same
     /// tier as `entry`.
     pub(crate) reenter: Loop,
+    /// The same loop over a generator's frame the resumption put back on
+    /// the stack, `zend_generator_resume`'s `zend_execute_ex`, bound to
+    /// the same tier (design §5.11, [`crate::tier::resume`]).
+    pub(crate) resume: Loop,
     /// The unit cache (design §6.3): what a file compiled to, held for
     /// every request that asks for the same file unchanged. A source the
     /// host handed over is not in it, because php caches neither `-r`
@@ -224,6 +228,29 @@ pub(crate) enum MethodAt {
     Declared(u32),
     /// The index among [`Shared::trampolines`].
     Trampoline(u32),
+}
+
+/// `zend_register_internal_enum`'s `zend_register_functions` over the
+/// enum methods: a native enum takes `cases`, and `from` and `tryFrom`
+/// for a backed one, after the methods its stub declares, served by the
+/// entries every enum's are ([`crate::enums::EnumMethod`]).
+fn link_enum_methods(decl: &mut ClassDecl, class: ClassId, methods: &mut Vec<NativeMethod>) {
+    if decl.kind != php_unit::decl::ClassKind::Enum {
+        return;
+    }
+    for method in php_unit::enum_methods(decl.backing) {
+        let lowered = method.function.name.0.to_ascii_lowercase();
+        let Some(served) = crate::enums::EnumMethod::of(&lowered, decl.backing) else {
+            continue;
+        };
+        let index = u32::try_from(decl.methods.len()).unwrap_or(u32::MAX);
+        decl.methods.push(method);
+        methods.push(NativeMethod {
+            class,
+            at: MethodAt::Declared(index),
+            entry: served.entry(),
+        });
+    }
 }
 
 /// `zend_register_closure_ce` leaves `__invoke` off `Closure`'s table
@@ -626,6 +653,7 @@ pub struct EngineBuilder {
     ini: Vec<(Vec<u8>, Vec<u8>)>,
     entry: Loop,
     reenter: Loop,
+    resume: Loop,
     tier_extension: Option<Extension>,
 }
 
@@ -652,6 +680,7 @@ impl EngineBuilder {
     pub fn tier<T: Tier>(mut self) -> EngineBuilder {
         self.entry = execute::<T>;
         self.reenter = reenter::<T>;
+        self.resume = resume::<T>;
         self.tier_extension = T::extension();
         self
     }
@@ -714,6 +743,7 @@ impl EngineBuilder {
                     entry: *entry,
                 });
             }
+            link_enum_methods(&mut decl, class, &mut methods);
             classes.push(decl);
         }
         let trampolines = link_trampolines(&classes, &mut methods);
@@ -761,6 +791,7 @@ impl EngineBuilder {
                 sapi_names,
                 entry: self.entry,
                 reenter: self.reenter,
+                resume: self.resume,
                 units: Cache::new(MAX_ACCELERATED_FILES),
                 strings: Mutex::new(strings),
                 map_ptr_last: AtomicU32::new(0),
@@ -785,6 +816,7 @@ impl Engine {
             ini: Vec::new(),
             entry: execute::<Nop>,
             reenter: reenter::<Nop>,
+            resume: resume::<Nop>,
             tier_extension: Nop::extension(),
         }
     }
@@ -2581,7 +2613,7 @@ mod tests {
         let unit = Unit {
             main: php_unit::OpArray {
                 oplines: vec![php_unit::Opline {
-                    opcode: php_unit::Opcode::Yield,
+                    opcode: php_unit::Opcode::DeclareAnonClass,
                     ..php_unit::Opline::default()
                 }]
                 .into_boxed_slice(),
@@ -2593,7 +2625,7 @@ mod tests {
         assert_eq!(
             crate::tier::execute::<Nop>(&mut req, frame),
             Err(Fatal::Error(String::from(
-                "InternalError: ZEND_YIELD has no handler in this engine yet"
+                "InternalError: ZEND_DECLARE_ANON_CLASS has no handler in this engine yet"
             )))
         );
     }

@@ -17,7 +17,7 @@
 use std::sync::Arc;
 
 use php_heap::{FrameRef, MapPtr, MapTable, Zval};
-use php_unit::{CacheSlot, ConstIdx, OpArray, OperandKind, Opline, Unit};
+use php_unit::{CacheSlot, ConstIdx, Level, OpArray, OperandKind, Opline, Unit};
 
 use crate::api::call::Function;
 use crate::api::raising::warning;
@@ -196,6 +196,13 @@ pub(crate) struct FrameState {
     /// a frame a native re-entered the loop on counts the native that
     /// entered it too, and so stands above it.
     pub(crate) calls_below: u32,
+    /// The `Generator` whose frame this is, php's `EX(return_value)`
+    /// under `ZEND_CALL_GENERATOR` (`zend_get_running_generator`): set
+    /// by `GENERATOR_CREATE` when it moves the frame into the object,
+    /// read by `YIELD`, `YIELD_FROM` and `GENERATOR_RETURN`. A view with
+    /// no owner, since the object owns the frame and not the other way
+    /// round; none for every other frame.
+    pub(crate) generator: Option<PhpObject>,
     /// php's fast-call temporaries, one per `finally` block of the op
     /// array a `FAST_CALL` or an unwind has entered. php keeps two
     /// fields in the one zval at `EX_VAR(opline->result.var)`,
@@ -525,9 +532,34 @@ impl Vm {
             extra_args: Vec::new(),
             extra_named: Vec::new(),
             calls_below,
+            generator: None,
             fast_calls: Vec::new(),
             runtime_cache,
         });
+    }
+
+    /// A frame's state that was off the stack back on top of it, the
+    /// half of a generator's resumption that is the engine's: the calls
+    /// its body was building when it yielded go back on the call stack
+    /// above the ones standing, and the frame counts those as below it
+    /// (`zend_generator_restore_call_stack`).
+    pub(crate) fn resume(&mut self, mut state: FrameState, calls: Vec<CallState>) {
+        state.calls_below = u32::try_from(self.calls.len()).unwrap_or(u32::MAX);
+        self.calls.extend(calls);
+        self.frames.push(state);
+    }
+
+    /// The innermost frame's state off the stack with the calls it was
+    /// building, which stand above its `calls_below`: what
+    /// `zend_generator_freeze_call_stack` takes with a generator that
+    /// yields in the middle of a call's arguments.
+    pub(crate) fn suspend(&mut self) -> Option<(FrameState, Vec<CallState>)> {
+        let state = self.frames.pop()?;
+        let below = usize::try_from(state.calls_below)
+            .unwrap_or(usize::MAX)
+            .min(self.calls.len());
+        let calls = self.calls.split_off(below);
+        Some((state, calls))
     }
 
     /// The frame's state off the stack; its slots are the heap frame's,
@@ -1005,6 +1037,99 @@ pub(crate) fn parameter_prologue(
         }
     }
     Ok(None)
+}
+
+/// `E_FATAL_ERRORS` (`Z/Zend/zend_errors.h:47`): the six levels a `@`
+/// does not silence, and what `E_HAS_ONLY_FATAL_ERRORS` tests a mask
+/// against.
+pub(crate) const E_FATAL_ERRORS: i64 = Level::Error.bit()
+    | Level::CoreError.bit()
+    | Level::CompileError.bit()
+    | Level::UserError.bit()
+    | Level::RecoverableError.bit()
+    | Level::Parse.bit();
+
+/// `E_HAS_ONLY_FATAL_ERRORS(mask)` (`Z/Zend/zend_errors.h:49`).
+pub(crate) fn has_only_fatal_errors(mask: i64) -> bool {
+    mask & !E_FATAL_ERRORS == 0
+}
+
+/// The restore `END_SILENCE` and the unwinder share: the word put back
+/// to what a `BEGIN_SILENCE` saved, where the word still holds only
+/// fatal levels and the saved one held more.
+pub(crate) fn restore_silenced(req: &mut Request, saved: &Value) {
+    let saved = saved.as_int().unwrap_or(0);
+    if has_only_fatal_errors(req.error_reporting()) && !has_only_fatal_errors(saved) {
+        req.set_error_reporting(saved);
+    }
+}
+
+/// The value a `FAST_CALL` emitted by a `return` was carrying past the
+/// `finally` block in its `op2`, given up where the return never
+/// happened.
+pub(crate) fn free_carried_value(req: &mut Request, frame: FrameRef, code: &OpArray, from: u32) {
+    let Some(op) = opline_at(code, from) else {
+        return;
+    };
+    if !matches!(op.op2_type, OperandKind::Tmp | OperandKind::Var) {
+        return;
+    }
+    let slot = temporary_slot(code, op.op2);
+    let garbage = req.take_slot(frame, slot);
+    req.release(garbage);
+}
+
+/// `cleanup_live_vars` (`Z/Zend/zend_execute.c`): every live range the
+/// unwind leaves, given up. A range is left when it is open at `op_num`
+/// and the opline being landed on is outside it; `catch_op` of zero is
+/// php's "landing nowhere", the walk out of the frame, where every open
+/// range is left.
+///
+/// php frees each kind by what it holds; every kind here is one value in
+/// one temporary, freed the same way, but `ZEND_LIVE_SILENCE`, which
+/// holds the `error_reporting` a `BEGIN_SILENCE` saved: the word is put
+/// back as `END_SILENCE` would have put it ([`restore_silenced`]), so a
+/// throw under a `@` does not leave the request silenced.
+pub(crate) fn cleanup_live_vars(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op_num: u32,
+    catch_op: u32,
+) {
+    for range in &code.live_ranges {
+        if range.start.0 > op_num {
+            break;
+        }
+        if op_num >= range.end.0 {
+            continue;
+        }
+        if catch_op != 0 && catch_op >= range.start.0 && catch_op < range.end.0 {
+            continue;
+        }
+        let slot = temporary_slot(code, range.var);
+        if range.kind == php_unit::LiveKind::Loop
+            && let Some(held) = req.slot_ptr(frame, slot).map(php_heap::ZvalRef::read)
+        {
+            crate::handlers::ForeachVar::iterator_del(req, held);
+        }
+        let garbage = req.take_slot(frame, slot);
+        if range.kind == php_unit::LiveKind::Silence {
+            restore_silenced(req, &garbage);
+        }
+        req.release(garbage);
+    }
+}
+
+/// `cleanup_unfinished_calls` (`Z/Zend/zend_execute.c`): the calls the
+/// frame was still building or serving when the throwable was raised,
+/// given up innermost first. A frame records how many calls stood below
+/// it, which is where its own begin.
+pub(crate) fn cleanup_unfinished_calls(req: &mut Request, frame: FrameRef) {
+    let below = req.vm().at(frame).map_or(0, |state| state.calls_below);
+    while u32::try_from(req.vm().calls().len()).unwrap_or(0) > below {
+        req.pop_call();
+    }
 }
 
 #[cfg(test)]

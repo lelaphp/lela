@@ -2,12 +2,16 @@
 //! `Iterator`, `Serializable` and `Countable` as
 //! `zend_interfaces.stub.php` declares them, registered by
 //! `zend_register_interfaces` before any other class, and the
-//! `zend_user_iterator` a `foreach` over a `Traversable` object walks:
-//! `getIterator()` asked until it answers an `Iterator`
-//! (`zend_user_it_get_new_iterator`), then `rewind()` and `valid()` at
-//! the reset and `next()`, `valid()`, `current()` and `key()` at each
-//! fetch, in the order `zend_fe_fetch_object_helper` calls the iterator
-//! functions. `ArrayAccess` and `Stringable` are `classes`'s.
+//! `zend_object_iterator` a `foreach` or a `yield from` over a
+//! `Traversable` object walks ([`ObjectIterator`]): `getIterator()` asked
+//! until it answers an `Iterator` or a `Generator`
+//! (`zend_user_it_get_new_iterator`), then the iterator functions of
+//! what it answered, `zend_user_iterator`'s over an `Iterator`'s methods
+//! or `zend_generator_iterator_functions` over a generator, `rewind` and
+//! `valid` at the reset and `move_forward`, `valid`, `get_current_data`
+//! and `get_current_key` at each fetch, in the order
+//! `zend_fe_fetch_object_helper` calls them. `ArrayAccess` and
+//! `Stringable` are `classes`'s.
 //!
 //! A class of the engine's or an extension's whose `get_iterator` php
 //! writes in C (`ArrayIterator`, `SplFixedArray`) is walked the same way
@@ -70,6 +74,18 @@ use crate::api::values::{ClassId, PhpObject, Value};
 /// ```
 /// ```expect
 /// get get 0:0;1:1;
+/// ```
+///
+/// `Countable` is what `count()` asks of an object whose class has no
+/// `count_elements`, and what `WeakMap` implements.
+///
+/// ```php
+/// class N implements Countable { function count(): int { return 3; } }
+/// var_dump(count(new N), new N instanceof Countable);
+/// ```
+/// ```expect
+/// int(3)
+/// bool(true)
 /// ```
 pub(crate) fn classes() -> Vec<NativeClassDecl> {
     let tentative = |name: &[u8], parameters: Vec<Parameter>, returns: Option<Type>| MethodDecl {
@@ -155,6 +171,7 @@ fn abstract_method(name: &[u8], parameters: Vec<Parameter>, returns: Option<Type
             parameters,
             return_type: returns,
             returns_by_ref: false,
+            is_generator: false,
             attributes: Vec::new(),
             doc_comment: None,
             file: Name(Box::new([])),
@@ -178,57 +195,6 @@ pub(crate) fn is_traversable(req: &Request, class: ClassId) -> bool {
         .is_some_and(|traversable| req.instance_of(class, traversable))
 }
 
-/// `zend_user_it_get_new_iterator`
-/// (`Z/Zend/zend_interfaces.c:179`): an `Iterator` is its own iterator
-/// and an `IteratorAggregate` is asked with `getIterator()` until what
-/// it answers is one, php's `Exception` naming the class that answered
-/// something else. The iterator comes back with one owner, the
-/// caller's.
-pub(crate) fn iterator_of(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
-    let iterator = req.class_named(b"iterator");
-    let mut current = object;
-    req.addref(&current.as_value());
-    loop {
-        if iterator.is_some_and(|i| req.instance_of(current.class(), i)) {
-            return Ok(current);
-        }
-        let answered = crate::api::call::call_method(req, &current, b"getIterator", &[]);
-        let class = current.class();
-        req.release(current.as_value());
-        let answered = answered?;
-        match answered.as_object().copied() {
-            Some(next) if is_traversable(req, next.class()) => current = next,
-            _ => {
-                req.release(answered);
-                let name = req.class_name(class);
-                return Err(throw(
-                    req,
-                    "Exception",
-                    &format!(
-                        "Objects returned by {name}::getIterator() must be traversable or implement interface Iterator"
-                    ),
-                ));
-            }
-        }
-    }
-}
-
-/// `zend_user_it_valid`: `valid()` served and its return read as
-/// `i_zend_is_true` reads it.
-pub(crate) fn valid(req: &mut Request, iterator: PhpObject) -> Result<bool, Thrown> {
-    let answered = crate::api::call::call_method(req, &iterator, b"valid", &[])?;
-    let valid = crate::api::coerce::truthy(req, &answered);
-    req.release(answered);
-    Ok(valid)
-}
-
-/// `zend_user_it_rewind`, `zend_user_it_move_forward`,
-/// `zend_user_it_get_current_data` and `zend_user_it_get_current_key`:
-/// one method served, its return the caller's, one owner.
-pub(crate) fn step(req: &mut Request, iterator: PhpObject, method: &[u8]) -> Result<Value, Thrown> {
-    crate::api::call::call_method(req, &iterator, method, &[])
-}
-
 /// The name of php's `zend_iterator_class_entry`, `__iterator_wrapper`
 /// (`Z/Zend/zend_iterators.c:59`), keyed with a leading `\0`: php never
 /// adds the class to `EG(class_table)`, and the byte is the mark
@@ -236,35 +202,140 @@ pub(crate) fn step(req: &mut Request, iterator: PhpObject, method: &[u8]) -> Res
 /// name or sees it in a listing.
 pub(crate) const ITERATOR_WRAPPER: &[u8] = b"\0__iterator_wrapper";
 
-/// `zend_user_iterator` (`Z/Zend/zend_interfaces.h:30`), php's
-/// `zend_object_iterator` for a class walked by its methods: what a
-/// `foreach` over a `Traversable` object holds in its loop variable from
-/// the reset to `FE_FREE`, as `zend_fe_reset_iterator` puts `&iter->std`
-/// there. It is the payload of an object of the `__iterator_wrapper`
-/// class ([`ITERATOR_WRAPPER`]), so the loop owns it as it owns any
-/// value: the release at `FE_FREE`, or at the unwind of the loop's live
-/// range, gives back the `Iterator` it walks, and it takes the number
-/// in the object store `zend_iterator_init` takes, which a `var_dump`
-/// inside the body shows. The progress is `index`, never the loop variable's `u2` word.
+/// Which `zend_object_iterator_funcs` serve an [`ObjectIterator`], php's
+/// `iter->funcs`: the table the class's `get_iterator` chose, read at
+/// every step and never again chosen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Funcs {
+    /// `zend_interface_iterator_funcs_iterator`, the `zend_user_it_*`
+    /// functions: each step one method of the `Iterator` served.
+    #[default]
+    User,
+    /// `zend_generator_iterator_functions`: each step the generator
+    /// resumed or read as `Generator`'s own methods do it, its delegation
+    /// tree followed to the generator whose body runs
+    /// ([`crate::generator`]).
+    Generator,
+}
+
+impl Funcs {
+    /// `funcs->rewind`: `zend_user_it_rewind`, or
+    /// `zend_generator_iterator_rewind`, which runs the generator to its
+    /// first `yield` and refuses a generator already past it.
+    fn rewind(self, req: &mut Request, data: PhpObject) -> Result<(), Thrown> {
+        match self {
+            Funcs::User => {
+                let answered = crate::api::call::call_method(req, &data, b"rewind", &[])?;
+                req.release(answered);
+                Ok(())
+            }
+            Funcs::Generator => crate::generator::iterator_rewind(req, data),
+        }
+    }
+
+    /// `funcs->valid`, `SUCCESS` as `true`: `zend_user_it_valid`'s
+    /// `valid()` read as `i_zend_is_true` reads it, or whether the
+    /// generator still has its frame.
+    fn valid(self, req: &mut Request, data: PhpObject) -> Result<bool, Thrown> {
+        match self {
+            Funcs::User => {
+                let answered = crate::api::call::call_method(req, &data, b"valid", &[])?;
+                let valid = crate::api::coerce::truthy(req, &answered);
+                req.release(answered);
+                Ok(valid)
+            }
+            Funcs::Generator => crate::generator::iterator_valid(req, data),
+        }
+    }
+
+    /// `funcs->move_forward`: `next()` served, or the generator resumed.
+    fn move_forward(self, req: &mut Request, data: PhpObject) -> Result<(), Thrown> {
+        match self {
+            Funcs::User => {
+                let answered = crate::api::call::call_method(req, &data, b"next", &[])?;
+                req.release(answered);
+                Ok(())
+            }
+            Funcs::Generator => crate::generator::iterator_move_forward(req, data),
+        }
+    }
+
+    /// `funcs->get_current_data`, one owner the caller's: what
+    /// `current()` answered, or the value the generator yielded with a
+    /// reference followed. `by_ref` is `FE_FETCH_RW`'s
+    /// `ZVAL_MAKE_REF` over the zval php's function points at: the
+    /// generator's own value made a reference in place, the cell handed
+    /// out; `current()`'s answer is no zval anyone else holds, and is
+    /// handed out as it is for the fetch to wrap.
+    fn current(self, req: &mut Request, data: PhpObject, by_ref: bool) -> Result<Value, Thrown> {
+        match self {
+            Funcs::User => crate::api::call::call_method(req, &data, b"current", &[]),
+            Funcs::Generator if by_ref => {
+                crate::generator::iterator_current_ref(req, data).map(|cell| cell.as_value())
+            }
+            Funcs::Generator => {
+                let value = crate::generator::iterator_current(req, data)?
+                    .deref()
+                    .undef_as_null();
+                req.addref(&value);
+                Ok(value)
+            }
+        }
+    }
+
+    /// `funcs->get_current_key`, one owner the caller's:
+    /// `zend_user_it_get_current_key`'s `key()` with a reference
+    /// unwrapped, or the generator's key, `null` where it has none.
+    fn key(self, req: &mut Request, data: PhpObject) -> Result<Value, Thrown> {
+        match self {
+            Funcs::User => {
+                let answered = crate::api::call::call_method(req, &data, b"key", &[])?;
+                let bare = answered.deref();
+                req.addref(&bare);
+                req.release(answered);
+                Ok(bare)
+            }
+            Funcs::Generator => crate::generator::iterator_key(req, data),
+        }
+    }
+}
+
+/// `zend_object_iterator` (`Z/Zend/zend_iterators.h`), the iterator a
+/// `Traversable` object's `get_iterator` hands out: what a `foreach`
+/// over the object holds in its loop variable from the reset to
+/// `FE_FREE`, as `zend_fe_reset_iterator` puts `&iter->std` there, and
+/// what a `yield from` over it holds in the generator's delegated values.
+/// It is the payload of an object of the `__iterator_wrapper` class
+/// ([`ITERATOR_WRAPPER`]), so its holder owns it as it owns any value:
+/// the release at `FE_FREE`, at the unwind of the loop's live range or
+/// when the generator gives its values up, gives back the object it
+/// walks, and it takes the number in the object store
+/// `zend_iterator_init` takes, which a `var_dump` inside the body shows.
+/// The progress is `index`, never the loop variable's `u2` word.
 ///
-/// A class php walks with an iterator of its own in C
+/// Two tables serve it ([`Funcs`]): `zend_user_iterator`'s over an
+/// `Iterator`'s methods, and `zend_generator_iterator_functions` over a
+/// `Generator`. A class php walks with an iterator of its own in C
 /// (`zend_class_entry.get_iterator`, #735) is walked through its methods
-/// here, so the functions are `zend_user_it_*`'s alone.
+/// here, so it is the first table's.
 #[derive(Default)]
 pub(crate) struct ObjectIterator {
-    /// `it.data`: the `Iterator` whose methods are served, one owner;
-    /// `None` only in an object nothing reset.
+    /// `iter->funcs`.
+    funcs: Funcs,
+    /// `it.data`: the `Iterator` or the `Generator` walked, one owner;
+    /// `None` only in an object nothing made an iterator of.
     data: Option<PhpObject>,
-    /// `iter->index`: the fetches made since the reset, the first
-    /// counting none; `None` from the reset to the first fetch, php's
-    /// `-1`, which serves no `next()`.
+    /// `iter->index`: the fetches made, the first counting none; `None`
+    /// before the first fetch, php's `-1` after the reset and `0` after a
+    /// `yield from`, which moves nothing forward.
     index: Option<u64>,
 }
 
 /// `iterator_object_handlers` (`Z/Zend/zend_iterators.c:28`):
-/// `iter_wrapper_free` gives back the `Iterator` walked,
-/// `iter_wrapper_dtor` serves nothing, `iter_wrapper_get_gc` names what
-/// the iterator holds, and the object is uncloneable.
+/// `iter_wrapper_free` is `funcs->dtor`, which for both tables gives back
+/// the object walked, `iter_wrapper_dtor` serves nothing,
+/// `iter_wrapper_get_gc` names what the iterator holds, and the object is
+/// uncloneable.
 struct WrapperHandlers;
 
 static WRAPPER: WrapperHandlers = WrapperHandlers;
@@ -319,32 +390,49 @@ pub(crate) fn is_iterator_wrapper(req: &Request, object: PhpObject) -> bool {
     object.native::<ObjectIterator>(req).is_some()
 }
 
-/// `zend_fe_reset_iterator` (`Z/Zend/zend_execute.c:5368`) over a
-/// `Traversable` object, whose `get_iterator` is
-/// `zend_user_it_get_new_iterator`: the `Iterator` found
-/// ([`iterator_of`]), refused under `by_ref` as `zend_user_it_get_iterator`
-/// refuses it, wrapped in a fresh [`ObjectIterator`], then `rewind()` and
-/// `valid()`. The wrapper comes back with one owner, the loop's, and
-/// whether `valid()` answered `false`, php's `is_empty`, which jumps
-/// past the loop; on a throw nothing is held.
-pub(crate) fn reset(
+/// `ce->get_iterator(ce, object, by_ref)` over a `Traversable` object
+/// ([`is_traversable`]): the wrapper of a fresh [`ObjectIterator`], one
+/// owner the caller's. A `Generator`'s is `zend_generator_get_iterator`,
+/// which refuses a closed generator and one walked by reference that
+/// does not yield by reference ([`crate::generator::get_iterator`]); an
+/// `Iterator`'s is `zend_user_it_get_iterator`, which refuses any walk by
+/// reference; an `IteratorAggregate`'s is `zend_user_it_get_new_iterator`
+/// (`Z/Zend/zend_interfaces.c:179`), `getIterator()` asked and what it
+/// answered asked in turn with the same `by_ref`, php's `Exception`
+/// naming the class where the answer is not `Traversable` or is the
+/// object itself. On a throw nothing is held.
+///
+/// ```php
+/// class Gen implements IteratorAggregate {
+///     function getIterator(): Generator { yield 'a' => 1; yield 'b' => 2; }
+/// }
+/// foreach (new Gen as $k => $v) echo "$k=$v ";
+/// class ByRef implements IteratorAggregate {
+///     public $a = [1, 2];
+///     function &getIterator(): Generator { foreach ($this->a as &$v) yield $v; }
+/// }
+/// $o = new ByRef;
+/// foreach ($o as &$v) $v *= 10;
+/// unset($v);
+/// echo implode(',', $o->a), "\n";
+/// class Me implements IteratorAggregate { function getIterator(): Traversable { return $this; } }
+/// try { foreach (new Me as $v) {} } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// a=1 b=2 10,20
+/// Objects returned by Me::getIterator() must be traversable or implement interface Iterator
+/// ```
+pub(crate) fn get_iterator(
     req: &mut Request,
     object: PhpObject,
     by_ref: bool,
-) -> Result<(PhpObject, bool), Thrown> {
-    let data = iterator_of(req, object)?;
-    if by_ref {
-        req.release(data.as_value());
-        return Err(throw(
-            req,
-            "Error",
-            "An iterator cannot be used with foreach by reference",
-        ));
-    }
+) -> Result<PhpObject, Thrown> {
+    let (funcs, data) = iterated(req, object, by_ref)?;
     let wrapper = match req.class_named(ITERATOR_WRAPPER) {
         Some(class) => req.new_object_with(
             class,
             ObjectIterator {
+                funcs,
                 data: Some(data),
                 index: None,
             },
@@ -354,16 +442,73 @@ pub(crate) fn reset(
             "InternalError: the iterator wrapper class is not declared",
         )),
     };
-    let wrapper = match wrapper {
-        Ok(wrapper) => wrapper,
-        Err(thrown) => {
-            req.release(data.as_value());
-            return Err(thrown);
+    wrapper.inspect_err(|_| req.release(data.as_value()))
+}
+
+/// The table [`get_iterator`] chooses for `object` and the object it
+/// walks, one owner the caller's.
+fn iterated(
+    req: &mut Request,
+    object: PhpObject,
+    by_ref: bool,
+) -> Result<(Funcs, PhpObject), Thrown> {
+    if crate::generator::is_generator(req, object) {
+        crate::generator::get_iterator(req, object, by_ref)?;
+        req.addref(&object.as_value());
+        return Ok((Funcs::Generator, object));
+    }
+    if req
+        .class_named(b"iterator")
+        .is_some_and(|iterator| req.instance_of(object.class(), iterator))
+    {
+        if by_ref {
+            return Err(throw(
+                req,
+                "Error",
+                "An iterator cannot be used with foreach by reference",
+            ));
         }
+        req.addref(&object.as_value());
+        return Ok((Funcs::User, object));
+    }
+    let answered = crate::api::call::call_method(req, &object, b"getIterator", &[])?;
+    match answered.deref().as_object().copied() {
+        Some(inner) if inner != object && is_traversable(req, inner.class()) => {
+            let walked = iterated(req, inner, by_ref);
+            req.release(answered);
+            walked
+        }
+        _ => {
+            req.release(answered);
+            let name = req.class_name(object.class());
+            Err(throw(
+                req,
+                "Exception",
+                &format!(
+                    "Objects returned by {name}::getIterator() must be traversable or implement interface Iterator"
+                ),
+            ))
+        }
+    }
+}
+
+/// `zend_fe_reset_iterator` (`Z/Zend/zend_execute.c:5368`) over a
+/// `Traversable` object: the iterator [`get_iterator`] makes, then
+/// `funcs->rewind` and `funcs->valid`. The wrapper comes back with one
+/// owner, the loop's, and whether `valid` answered `false`, php's
+/// `is_empty`, which jumps past the loop; on a throw nothing is held.
+pub(crate) fn reset(
+    req: &mut Request,
+    object: PhpObject,
+    by_ref: bool,
+) -> Result<(PhpObject, bool), Thrown> {
+    let wrapper = get_iterator(req, object, by_ref)?;
+    let Some((funcs, data)) = walked(req, wrapper) else {
+        return Ok((wrapper, true));
     };
-    let valid = step(req, data, b"rewind")
-        .map(|rewound| req.release(rewound))
-        .and_then(|()| valid(req, data));
+    let valid = funcs
+        .rewind(req, data)
+        .and_then(|()| funcs.valid(req, data));
     match valid {
         Ok(valid) => Ok((wrapper, !valid)),
         Err(thrown) => {
@@ -373,48 +518,93 @@ pub(crate) fn reset(
     }
 }
 
+/// The table and the object walked of the iterator `wrapper` holds, the
+/// index moved on as `++iter->index` moves it, and whether this is a
+/// fetch past the first, which moves the walk forward first.
+fn step(req: &mut Request, wrapper: PhpObject) -> Option<(Funcs, PhpObject, bool)> {
+    let it = wrapper.native_mut::<ObjectIterator>(req)?;
+    let data = it.data?;
+    let fetched = it.index;
+    it.index = Some(fetched.map_or(0, |index| index.saturating_add(1)));
+    Some((it.funcs, data, fetched.is_some()))
+}
+
+/// The table and the object walked of the iterator `wrapper` holds.
+fn walked(req: &Request, wrapper: PhpObject) -> Option<(Funcs, PhpObject)> {
+    let it = wrapper.native::<ObjectIterator>(req)?;
+    it.data.map(|data| (it.funcs, data))
+}
+
 /// The iterator arm of `zend_fe_fetch_object_helper`
-/// (`Z/Zend/zend_vm_def.h:7117`) and of `ZEND_FE_FETCH_RW`: the index
-/// moved on, and past the first fetch `next()` and `valid()`; then
-/// `current()`, and `key()` where the opline keeps it, its reference
-/// followed as `zend_user_it_get_current_key` unwraps one. `None` is the
-/// end, the fetch's jump past the loop. The values are the caller's,
-/// one owner each.
+/// (`Z/Zend/zend_vm_def.h:7117`) and of `ZEND_FE_FETCH_RW`: past the
+/// first fetch `funcs->move_forward` and `funcs->valid`; then
+/// `funcs->get_current_data`, by reference under `by_ref`
+/// ([`Funcs::current`]), and `funcs->get_current_key` where the opline
+/// keeps the key. `None` is the end, the fetch's jump past the loop. The
+/// values are the caller's, one owner each.
 pub(crate) fn fetch(
     req: &mut Request,
     wrapper: PhpObject,
     keyed: bool,
+    by_ref: bool,
 ) -> Result<Option<(Value, Option<Value>)>, Thrown> {
-    let Some(it) = wrapper.native_mut::<ObjectIterator>(req) else {
+    let Some((funcs, data, moves)) = step(req, wrapper) else {
         return Ok(None);
     };
-    let Some(data) = it.data else {
-        return Ok(None);
-    };
-    let fetched = it.index;
-    it.index = Some(fetched.map_or(0, |index| index.saturating_add(1)));
-    if fetched.is_some() {
-        let moved = step(req, data, b"next")?;
-        req.release(moved);
-        if !valid(req, data)? {
+    if moves {
+        funcs.move_forward(req, data)?;
+        if !funcs.valid(req, data)? {
             return Ok(None);
         }
     }
-    let current = step(req, data, b"current")?;
+    let current = funcs.current(req, data, by_ref)?;
     if !keyed {
         return Ok(Some((current, None)));
     }
-    match step(req, data, b"key") {
-        Ok(key) => {
-            let bare = key.deref();
-            req.addref(&bare);
-            req.release(key);
-            Ok(Some((current, Some(bare))))
-        }
+    match funcs.key(req, data) {
+        Ok(key) => Ok(Some((current, Some(key)))),
         Err(thrown) => {
             req.release(current);
             Err(thrown)
         }
+    }
+}
+
+/// `zend_generator_get_next_delegated_value`'s iterator arm
+/// (`Z/Zend/zend_generators.c:669`), the walk a `yield from` over a
+/// `Traversable` makes of the iterator [`get_iterator`] handed it: past
+/// the first element `funcs->move_forward`, then `funcs->valid` every
+/// time, since `YIELD_FROM` rewound without asking; the value and the
+/// key, one owner each, or `None` where the walk is spent.
+pub(crate) fn delegated(
+    req: &mut Request,
+    wrapper: PhpObject,
+) -> Result<Option<(Value, Value)>, Thrown> {
+    let Some((funcs, data, moves)) = step(req, wrapper) else {
+        return Ok(None);
+    };
+    if moves {
+        funcs.move_forward(req, data)?;
+    }
+    if !funcs.valid(req, data)? {
+        return Ok(None);
+    }
+    let current = funcs.current(req, data, false)?;
+    match funcs.key(req, data) {
+        Ok(key) => Ok(Some((current, key))),
+        Err(thrown) => {
+            req.release(current);
+            Err(thrown)
+        }
+    }
+}
+
+/// `iter->funcs->rewind` over the iterator `wrapper` holds, what
+/// `YIELD_FROM` does to the iterator it takes before it stores it.
+pub(crate) fn rewind(req: &mut Request, wrapper: PhpObject) -> Result<(), Thrown> {
+    match walked(req, wrapper) {
+        Some((funcs, data)) => funcs.rewind(req, data),
+        None => Ok(()),
     }
 }
 

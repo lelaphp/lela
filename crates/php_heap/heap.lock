@@ -212,11 +212,13 @@ VmStack::current
 VmStack::entry
 VmStack::frame
 VmStack::frame_mut
+VmStack::move_to_heap
 VmStack::new
 VmStack::pop_entry
 VmStack::pop_frame
 VmStack::push_entry
 VmStack::push_frame
+VmStack::resume_frame
 Zval
 Zval::UNDEF
 Zval::array

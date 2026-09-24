@@ -566,7 +566,7 @@ pub(super) fn reflection_class_constant_get_name(req: &mut Request) -> Result<Va
 pub(super) fn reflection_class_constant_get_value(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 0)?;
     let (_, scope, decl) = this_constant(req)?;
-    eval_const_expr(req, &decl.value, Some(scope))
+    super::constant_value(req, &decl, scope)
 }
 
 /// `ReflectionClassConstant::__toString()`: `_class_const_string`, the
@@ -684,11 +684,8 @@ pub(super) fn reflection_class_constant_is_final(req: &mut Request) -> Result<Va
 /// ```
 pub(super) fn reflection_class_constant_is_enum_case(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 0)?;
-    let (_, scope, _) = this_constant(req)?;
-    let is_enum = req
-        .class_decl(scope)
-        .is_some_and(|decl| decl.kind == php_ext::decl::ClassKind::Enum);
-    Ok(Value::bool(is_enum))
+    let (_, _, decl) = this_constant(req)?;
+    Ok(Value::bool(decl.is_case))
 }
 
 /// `ReflectionClassConstant::isDeprecated()`:

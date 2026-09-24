@@ -102,6 +102,28 @@ impl VmStack {
         self.frames.pop();
     }
 
+    /// The frame the loop is executing, off the stack and handed over
+    /// whole with every slot it holds (design §5.6, §5.11): what
+    /// `GENERATOR_CREATE` and `YIELD` do to a generator's frame, which
+    /// lives on the heap between its runs as php's `zend_generator`
+    /// keeps its own `execute_data`. The slots are one allocation that
+    /// moves with the frame and not through it, so a `ZvalRef` into one
+    /// names the same zval while the frame is off the stack. None on an
+    /// empty stack.
+    pub fn move_to_heap(&mut self) -> Option<Frame> {
+        self.frames.pop()
+    }
+
+    /// A frame [`VmStack::move_to_heap`] took, back on top of this
+    /// stack, whichever stack that is: the generator's resumption,
+    /// which pushes the frame where the resumer stands, on a fiber's
+    /// stack when a fiber resumes it (design §5.11).
+    pub fn resume_frame(&mut self, frame: Frame) -> FrameRef {
+        let at = u32::try_from(self.frames.len()).unwrap_or(u32::MAX);
+        self.frames.push(frame);
+        FrameRef(at)
+    }
+
     /// The frame at `f`, if it is live.
     #[must_use]
     pub fn frame(&self, f: FrameRef) -> Option<&Frame> {

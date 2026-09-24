@@ -276,6 +276,7 @@ pub(super) fn function(
         parameters,
         return_type: returns,
         returns_by_ref: false,
+        is_generator: false,
         attributes: Vec::new(),
         doc_comment: None,
         file: Name(Box::new([])),

@@ -64,7 +64,65 @@ impl Modifiers {
     }
 }
 
+/// Where every generator the file declares starts: the offset of each
+/// function, method, closure and arrow function whose own body holds a
+/// `yield` or a `yield from`, ascending. php's parser marks the
+/// declaration as it reduces the `yield` (`CG(extra_fn_flags) |=
+/// ZEND_ACC_GENERATOR`, `Z/Zend/zend_language_parser.y:1378-1381`),
+/// the flags saved and restored around every nested declaration, so a
+/// `yield` belongs to the innermost function-like around it and to no
+/// class body: one walk of the tree's shape with a stack of the
+/// declarations open, which is what `zend_compile_func_decl` reads
+/// before it compiles the body and emits `GENERATOR_CREATE` after the
+/// parameters.
+pub(super) fn generators(tree: &tree::Tree) -> Vec<u32> {
+    let mut open: Vec<(usize, Option<u32>)> = Vec::new();
+    let mut found = Vec::new();
+    for (at, element) in tree.elements().iter().enumerate() {
+        let tree::Element::Node {
+            kind,
+            range,
+            descendants,
+            ..
+        } = *element
+        else {
+            continue;
+        };
+        while open.last().is_some_and(|(end, _)| *end < at) {
+            open.pop();
+        }
+        let end = at.saturating_add(descendants as usize);
+        match kind {
+            SyntaxKind::FUNCTION_DECL
+            | SyntaxKind::METHOD_DECL
+            | SyntaxKind::CLOSURE_EXPR
+            | SyntaxKind::ARROW_FN_EXPR
+            | SyntaxKind::PROPERTY_HOOK => open.push((end, Some(range.start))),
+            SyntaxKind::CLASS_DECL
+            | SyntaxKind::INTERFACE_DECL
+            | SyntaxKind::TRAIT_DECL
+            | SyntaxKind::ENUM_DECL
+            | SyntaxKind::ANON_CLASS_DECL => open.push((end, None)),
+            SyntaxKind::YIELD_EXPR | SyntaxKind::YIELD_FROM_EXPR => {
+                if let Some((_, Some(start))) = open.last() {
+                    found.push(*start);
+                }
+            }
+            _ => {}
+        }
+    }
+    found.sort_unstable();
+    found.dedup();
+    found
+}
+
 impl Emit<'_> {
+    /// Whether the function-like node starting at `start` is a
+    /// generator ([`generators`]).
+    pub(super) fn is_generator_at(&self, start: u32) -> bool {
+        self.generators.binary_search(&start).is_ok()
+    }
+
     /// The file's statements in order, `zend_compile_top_stmt` over
     /// the `SourceFile`'s list: each one read from the tree and emitted
     /// before the next is read, so a refusal stands where php's
@@ -182,8 +240,54 @@ impl Emit<'_> {
                     node.range(),
                 )
             }
+            Stmt::EnumDecl(id) => self.walk_enum_decl(id, line),
             _ => Err(self.internal("a statement that is no class declaration")),
         }
+    }
+
+    /// An `enum` declaration read from the tree, php's `zend_ast_decl`
+    /// under `ZEND_ACC_ENUM`: the name, the backing type after the `:`,
+    /// the interfaces, the attributes and the members, cases among them.
+    fn walk_enum_decl(
+        &mut self,
+        id: NodeId<tree::EnumDecl>,
+        line: u32,
+    ) -> Result<Class, CompileError> {
+        let tree = &self.parsed.tree;
+        let node = &tree[id];
+        let Some(name) = node.name else {
+            return Err(unread(line, "an enum"));
+        };
+        let interfaces = match node.implements {
+            Some(implements) => tree[implements]
+                .types
+                .iter()
+                .map(|id| self.text(*id).to_vec())
+                .collect(),
+            None => Vec::new(),
+        };
+        let backing = match node.backing.and_then(|backing| tree[backing].ty) {
+            Some(ty) => Some(self.walk_type(ty, line)?),
+            None if node.backing.is_some() => {
+                return Err(unread(line, "an enum's backing type"));
+            }
+            None => None,
+        };
+        let attributes = self.walk_attributes(&node.attrs)?;
+        let (doc_comment, body, range) = (node.doc_comment, node.body, node.range());
+        let mut class = self.walk_class(
+            ClassKind::Enum,
+            name,
+            None,
+            interfaces,
+            attributes,
+            doc_comment,
+            body,
+            line,
+            range,
+        )?;
+        class.backing = backing;
+        Ok(class)
     }
 
     /// A `function` declaration read from the tree, in the shape the
@@ -340,6 +444,7 @@ impl Emit<'_> {
             doc_comment,
             line,
             end_line: self.end_line(range),
+            generator: self.is_generator_at(range.start),
         })
     }
 
@@ -491,6 +596,7 @@ impl Emit<'_> {
                     String::from_utf8_lossy(&name),
                     match kind {
                         ClassKind::Interface => "an interface name",
+                        ClassKind::Enum => "an enum name",
                         _ => "a class name",
                     }
                 ),
@@ -499,6 +605,7 @@ impl Emit<'_> {
         let mut class = Class {
             name,
             kind,
+            backing: None,
             parent,
             interfaces,
             attributes,
@@ -525,10 +632,44 @@ impl Emit<'_> {
             ClassMember::TraitUseDecl(id) => {
                 Err(unread(self.parsed.tree[id].line(), "a `use` of a trait"))
             }
-            ClassMember::EnumCaseDecl(id) => {
-                Err(unread(self.parsed.tree[id].line(), "an enum case"))
-            }
+            ClassMember::EnumCaseDecl(id) => self.walk_case(class, id),
         }
+    }
+
+    /// One `case A;` or `case A = expr;`, php's `ZEND_AST_ENUM_CASE`,
+    /// which `zend_compile_enum_case` refuses outside an enum.
+    ///
+    /// ```php
+    /// class C { case A; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Case can only be used in enums in %s on line 2
+    /// ```
+    fn walk_case(
+        &mut self,
+        class: &mut Class,
+        id: NodeId<tree::EnumCaseDecl>,
+    ) -> Result<(), CompileError> {
+        let node = self.parsed.tree[id].clone();
+        let line = node.line();
+        if class.kind != ClassKind::Enum {
+            return Err(refused(line, "Case can only be used in enums"));
+        }
+        let attributes = self.walk_attributes(&node.attrs)?;
+        let Some(name) = node.name.and_then(|name| self.parsed.tree[name].name) else {
+            return Err(unread(line, "an enum case whose name is no identifier"));
+        };
+        class.constants.push(Constant {
+            name: self.text(name).to_vec(),
+            visibility: Visibility::Public,
+            is_final: false,
+            value: node.value,
+            is_case: true,
+            attributes,
+            doc_comment: self.doc_comment(node.doc_comment),
+            line,
+        });
+        Ok(())
     }
 
     /// One `const A = 1, B = 2;` of a class body, php's
@@ -560,7 +701,9 @@ impl Emit<'_> {
                 name,
                 visibility: modifiers.visibility.unwrap_or_default(),
                 is_final: modifiers.has(Flag::Final),
-                value,
+                value: Some(value),
+                is_case: false,
+                attributes: Vec::new(),
                 doc_comment,
                 line,
             });
@@ -721,6 +864,9 @@ fn type_name(name: &[u8]) -> Type {
 pub(super) struct Class {
     pub(super) name: Vec<u8>,
     pub(super) kind: ClassKind,
+    /// An enum's backing type as written after the `:`, php's
+    /// `decl->child[4]`; none for a pure enum and for every other kind.
+    pub(super) backing: Option<Type>,
     pub(super) parent: Option<Vec<u8>>,
     pub(super) interfaces: Vec<Vec<u8>>,
     pub(super) attributes: Vec<Attr>,
@@ -765,6 +911,9 @@ pub(super) struct Function {
     pub(super) doc_comment: Option<Vec<u8>>,
     pub(super) line: u32,
     pub(super) end_line: u32,
+    /// `ZEND_ACC_GENERATOR`: a `yield` stands in the body itself
+    /// ([`generators`]).
+    pub(super) generator: bool,
 }
 
 /// One parameter, php's `ZEND_AST_PARAM`: the declared type where one is
@@ -863,7 +1012,15 @@ pub(super) struct Constant {
     pub(super) name: Vec<u8>,
     pub(super) visibility: Visibility,
     pub(super) is_final: bool,
-    pub(super) value: php_syntax::tree::Expr,
+    /// The value as written; a `case` of a pure enum has none.
+    pub(super) value: Option<php_syntax::tree::Expr>,
+    /// `case A;` or `case A = 1;` in an enum's body, php's
+    /// `ZEND_AST_ENUM_CASE`, which stands in the constants table beside
+    /// the enum's own constants in the order written.
+    pub(super) is_case: bool,
+    /// The attributes written before a case, `ast->child[3]` of
+    /// `ZEND_AST_ENUM_CASE`; a constant's are refused before this.
+    pub(super) attributes: Vec<Attr>,
     pub(super) doc_comment: Option<Vec<u8>>,
     pub(super) line: u32,
 }

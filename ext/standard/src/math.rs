@@ -4,7 +4,7 @@
 //! (`Z/ext/standard/math.c:62-252`), which `round`, `number_format` and
 //! `range` round with.
 
-use php_ext::call::{class_constant, lookup_class};
+use php_ext::call::lookup_class;
 use php_ext::coerce::{coerce_param, numeric_string, value_name};
 use php_ext::decl::{
     ClassConstDecl, ClassDecl, ClassFlags, ClassKind, ConstDecl, ConstExpr, EnumBacking,
@@ -12,7 +12,7 @@ use php_ext::decl::{
 };
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, deprecated, docref, throw};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{PhpString, Value, ValueRef};
 
 use crate::output::Entry;
 use crate::{argument_count_between, constant, declared, frameless, long_argument, parameter};
@@ -104,7 +104,8 @@ pub(crate) fn constants() -> Vec<ConstDecl> {
 }
 
 /// `enum RoundingMode` as `basic_functions.stub.php` declares it, its
-/// eight cases in order and the `cases()` every enum has.
+/// eight cases in order; `cases()` is the engine's, which gives it to
+/// every enum it links as `zend_enum_register_funcs` does.
 ///
 /// ```php
 /// var_dump(RoundingMode::HalfEven, RoundingMode::cases()[7], count(RoundingMode::cases()), RoundingMode::TowardsZero->name, RoundingMode::HalfOdd instanceof UnitEnum);
@@ -135,6 +136,7 @@ pub(crate) fn classes() -> Vec<(ClassDecl, Vec<(MethodDecl, Entry)>)> {
                 name: Name((*case).into()),
                 visibility: Visibility::Public,
                 is_final: false,
+                is_case: true,
                 ty: None,
                 value: ConstExpr::EnumCase {
                     class: name(),
@@ -163,29 +165,7 @@ pub(crate) fn classes() -> Vec<(ClassDecl, Vec<(MethodDecl, Entry)>)> {
         line: 0,
         end_line: 0,
     };
-    let cases = MethodDecl {
-        function: declared(b"cases", &[], Type::Array),
-        visibility: Visibility::Public,
-        is_instance: false,
-        is_abstract: false,
-        is_final: false,
-        tentative_return: false,
-    };
-    vec![(decl, vec![(cases, rounding_mode_cases as Entry)])]
-}
-
-/// `RoundingMode::cases(): array`, what `zend_enum_cases_func` answers:
-/// every case in declaration order.
-fn rounding_mode_cases(req: &mut Request) -> Result<Value, Thrown> {
-    let mut out = PhpArray::new(req)?;
-    let Some(class) = lookup_class(req, b"RoundingMode")? else {
-        return Ok(Value::array(out));
-    };
-    for (case, _) in ROUNDING_MODES {
-        let value = class_constant(req, class, case)?;
-        out.append(req, value)?;
-    }
-    Ok(Value::array(out))
+    vec![(decl, Vec::new())]
 }
 
 /// The declarations, as `basic_functions.stub.php` has them. `round`'s

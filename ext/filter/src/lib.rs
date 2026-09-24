@@ -510,6 +510,7 @@ fn declared(name: &[u8], parameters: Vec<Parameter>, returns: Type) -> FunctionD
         parameters,
         return_type: Some(returns),
         returns_by_ref: false,
+        is_generator: false,
         attributes: Vec::new(),
         doc_comment: None,
         file: Name(Box::new([])),

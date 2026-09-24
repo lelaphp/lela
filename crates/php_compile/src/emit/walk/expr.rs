@@ -104,6 +104,7 @@ impl Emit<'_> {
                 doc_comment: self.doc_comment(node.doc_comment),
                 line,
                 end_line: self.line_after(node.range),
+                generator: self.is_generator_at(node.range.start),
             },
             uses: Vec::new(),
             is_static,
