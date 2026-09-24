@@ -2626,10 +2626,12 @@ pub(crate) fn new<T: Tier>(
 /// method X::m()` where the class has none, the class's declared name
 /// and the method as written; `op2` unused is the constructor, `Cannot
 /// call constructor` where the class has none. An instance method
-/// needs a `$this` of the class in the calling frame, which no frame
-/// here has, so it is `Non-static method X::m() cannot be called
-/// statically`. The call frame carries the class as its called scope
-/// and no receiver.
+/// takes the calling frame's `$this` where it is an instance of the
+/// class and is `Non-static method X::m() cannot be called statically`
+/// where there is none; one declared `static` called through `self` or `parent`
+/// forwards the calling frame's called scope, which is what `static`
+/// reads in it. `op1` unused is `self`, `parent` or `static`, and a
+/// `VAR` the class a `FETCH_CLASS` left.
 ///
 /// ```php
 /// Nope::m();
@@ -2711,7 +2713,14 @@ pub(crate) fn init_static_method_call<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let slot = CacheSlot(op.out);
-    let primed = req.cached(frame, slot);
+    // The slot holds the class php resolved off a constant pair; a class
+    // reference of the scope, or one a `FETCH_CLASS` left, is resolved on
+    // every pass, since `static` and a computed name differ between them.
+    let primed = if op.op1_type == OperandKind::Const {
+        req.cached(frame, slot)
+    } else {
+        Cached::Unprimed
+    };
     let class = match primed {
         Cached::Class(class) | Cached::ClassAndCallee { class, .. } => class,
         _ => {
@@ -2723,7 +2732,7 @@ pub(crate) fn init_static_method_call<T: Tier>(
             // where the callee is named as the program serves, or not
             // named at all, the class alone is what the slot holds, and
             // where it is a constant the pair below writes both.
-            if op.op2_type != OperandKind::Const {
+            if op.op1_type == OperandKind::Const && op.op2_type != OperandKind::Const {
                 req.prime(frame, slot, Cached::Class(class));
             }
             class
@@ -2749,6 +2758,24 @@ pub(crate) fn init_static_method_call<T: Tier>(
                 let thrown = crate::api::raising::throw(req, "Error", "Cannot call constructor");
                 return threw(req, frame, &thrown);
             };
+            // `Z_OBJ(EX(This))->ce != ce->constructor->common.scope` over a
+            // private constructor.
+            let private = req
+                .method_decl(constructor)
+                .is_some_and(|decl| decl.visibility == php_unit::decl::Visibility::Private);
+            let foreign = req
+                .vm()
+                .this(frame)
+                .is_some_and(|this| Some(this.class()) != req.method_class(constructor));
+            if private && foreign {
+                let name = req.class_name(class);
+                let thrown = crate::api::raising::throw(
+                    req,
+                    "Error",
+                    &format!("Cannot call private {name}::__construct()"),
+                );
+                return threw(req, frame, &thrown);
+            }
             (constructor, None)
         }
         OperandKind::Const => {
@@ -2782,7 +2809,7 @@ pub(crate) fn init_static_method_call<T: Tier>(
     // `ZEND_ACC_NEVER_CACHE` and one a trait declared; this engine has
     // none of the three, so the write stands whenever the name was a
     // constant.
-    if op.op2_type == OperandKind::Const {
+    if op.op1_type == OperandKind::Const && op.op2_type == OperandKind::Const {
         req.prime(frame, slot, Cached::ClassAndCallee { class, function });
     }
     static_call_frame(req, frame, op, class, function, name)
@@ -2801,13 +2828,35 @@ fn static_call_frame(
     function: Function,
     written: Option<Value>,
 ) -> Edge {
-    if req
+    // `if (!(fbc->common.fn_flags & ZEND_ACC_STATIC))`: an instance
+    // method takes the calling frame's `$this` where it is an instance
+    // of the class, and is php's `Error` otherwise; a static one called
+    // through `self` or `parent` forwards the calling frame's called
+    // scope, `Z_OBJCE(EX(This))` or `Z_CE(EX(This))`.
+    let receiver = req.vm().this(frame);
+    let (this, called) = if req
         .method_decl(function)
         .is_some_and(|decl| decl.is_instance)
     {
-        let thrown = non_static_method_call(req, function);
-        return threw(req, frame, &thrown);
-    }
+        let Some(this) = receiver.filter(|this| req.instance_of(this.class(), class)) else {
+            let thrown = non_static_method_call(req, function);
+            return threw(req, frame, &thrown);
+        };
+        req.addref(&this.as_value());
+        (Some(this), this.class())
+    } else if op.op1_type == OperandKind::Unused
+        && matches!(
+            op.op1 & FETCH_CLASS_MASK,
+            FETCH_CLASS_SELF | FETCH_CLASS_PARENT
+        )
+    {
+        let forwarded = receiver
+            .map(|this| this.class())
+            .or_else(|| req.vm().at(frame).and_then(|state| state.called_scope));
+        (None, forwarded.unwrap_or(class))
+    } else {
+        (None, class)
+    };
     let name = match written {
         Some(written) => match crate::ops::to_string(req, &written) {
             Ok(name) => name,
@@ -2823,8 +2872,8 @@ fn static_call_frame(
         name: Some(name),
         arguments: Vec::new(),
         count: usize::try_from(op.extended_value).unwrap_or(0),
-        this: None,
-        called_scope: Some(class),
+        this,
+        called_scope: Some(called),
         closure: None,
         extra_named: Vec::new(),
         stage: CallStage::Building,
@@ -5380,11 +5429,13 @@ pub(crate) fn instanceof<T: Tier>(
             cached_class(req, frame, code, op.op2, slot)
                 .is_some_and(|class| req.instance_of(object.class(), class))
         }
-        (Some(_), _) => {
-            return Err(Fatal::Error(String::from(
-                "InternalError: ZEND_INSTANCEOF over a class named at run time",
-            )));
-        }
+        (Some(object), _) => match class_operand(req, frame, code, op.op2_type, op.op2, None) {
+            Ok(class) => req.instance_of(object.class(), class),
+            Err(thrown) => {
+                exec::free_operand(req, frame, code, op.op1_type, op.op1);
+                return threw(req, frame, &thrown);
+            }
+        },
         (None, _) => false,
     };
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
@@ -5440,11 +5491,19 @@ fn class_operand(
     at: u32,
     slot: Option<CacheSlot>,
 ) -> Result<crate::api::values::ClassId, Thrown> {
-    if kind != OperandKind::Const {
-        return Err(crate::api::raising::fatal(
-            req,
-            "InternalError: a class named at run time is not served",
-        ));
+    match kind {
+        OperandKind::Const => {}
+        // `zend_fetch_class(NULL, opline->opN.num)`: `self`, `parent` or
+        // `static`, the fetch type in the operand's number.
+        OperandKind::Unused => return scope_class(req, at),
+        // `Z_CE_P(EX_VAR(opline->opN.var))`, what a `FETCH_CLASS` left.
+        OperandKind::Var => return fetched_class(req, frame, code, at),
+        OperandKind::Tmp | OperandKind::Cv => {
+            return Err(crate::api::raising::fatal(
+                req,
+                "InternalError: a class operand that is neither a constant, a fetch type nor a FETCH_CLASS",
+            ));
+        }
     }
     if let Some(class) = cached_class(req, frame, code, at, slot) {
         return Ok(class);
@@ -5458,6 +5517,122 @@ fn class_operand(
             String::from_utf8_lossy(written.as_str_bytes().unwrap_or_default())
         ),
     ))
+}
+
+/// `ZEND_FETCH_CLASS_MASK` (`Z/Zend/zend_compile.h:1034`): the bits of a
+/// class operand's number that are its fetch type, the flags above them.
+const FETCH_CLASS_MASK: u32 = 0x0f;
+
+/// `ZEND_FETCH_CLASS_SELF` and `ZEND_FETCH_CLASS_PARENT`
+/// (`Z/Zend/zend_compile.h:1028`), the two fetch types a call on the class
+/// forwards the called scope through.
+const FETCH_CLASS_SELF: u32 = 1;
+const FETCH_CLASS_PARENT: u32 = 2;
+
+/// `zend_fetch_class(NULL, fetch_type)` (`Z/Zend/zend_execute_API.c:1712`)
+/// under `ZEND_FETCH_CLASS_EXCEPTION`, which every compiled reference
+/// carries: `self` the executed scope, `parent` its parent and `static`
+/// the called scope, each php's `Error` where there is none
+/// ([`crate::api::call::fetch_class`]).
+fn scope_class(req: &mut Request, fetch: u32) -> Result<crate::api::values::ClassId, Thrown> {
+    let name: &[u8] = match fetch & FETCH_CLASS_MASK {
+        FETCH_CLASS_SELF => b"self",
+        FETCH_CLASS_PARENT => b"parent",
+        _ => b"static",
+    };
+    crate::api::call::fetch_class(req, name)
+}
+
+/// `Z_CE_P(EX_VAR(var))`: the class a `FETCH_CLASS` left in its `VAR`.
+/// php keeps the class entry's pointer in the slot, which is no value a
+/// program can read; the slot holds the class's identity as a long
+/// here ([`hold_class`]), and nothing but the opline after the fetch
+/// reads it.
+fn fetched_class(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    at: u32,
+) -> Result<crate::api::values::ClassId, Thrown> {
+    let held = req.slot(frame, exec::temporary_slot(code, at));
+    match held.as_int().and_then(|id| u32::try_from(id).ok()) {
+        Some(id) => Ok(crate::api::values::ClassId(id)),
+        None => Err(crate::api::raising::fatal(
+            req,
+            "InternalError: a class operand whose VAR no FETCH_CLASS wrote",
+        )),
+    }
+}
+
+/// `Z_CE_P(EX_VAR(opline->result.var)) = ce`: the class written into the
+/// `VAR` [`fetched_class`] reads.
+fn hold_class(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    out: u32,
+    class: crate::api::values::ClassId,
+) {
+    let slot = exec::temporary_slot(code, out);
+    let previous = req.set_slot(frame, slot, Value::int(i64::from(class.0)));
+    req.release(previous);
+}
+
+/// `ZEND_FETCH_CLASS` (`Z/Zend/zend_vm_def.h:3540`), what
+/// `zend_compile_class_ref` emits for a class the program computes,
+/// `$o::X`, `new $name`, `$cls::m()`: an object's class, a string's
+/// class by name through `zend_fetch_class` (the autoloaders asked,
+/// `self`, `parent` and `static` read as their fetch type), and php's
+/// `Error` for any other value, an undefined variable having warned.
+/// The class is written into the `VAR` for the opline after it.
+///
+/// ```php
+/// class A { const X = 'x'; public static $p = 'p'; static function m() { return 'm'; } }
+/// $o = new A; $n = 'A'; $l = 'a';
+/// var_dump($o::X, $n::$p, $l::m(), get_class(new $n));
+/// try { $i = 1; $i::X; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { $u = 'Nope'; $u::m(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// string(1) "x"
+/// string(1) "p"
+/// string(1) "m"
+/// string(1) "A"
+/// Class name must be a valid object or a string
+/// Class "Nope" not found
+/// ```
+pub(crate) fn fetch_class<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let class = if op.op2_type == OperandKind::Unused {
+        scope_class(req, op.op1)
+    } else {
+        let value = exec::operand(req, frame, code, op.op2_type, op.op2).deref();
+        let class = if let Some(object) = value.as_object() {
+            Ok(object.class())
+        } else if let Some(name) = value.as_str_bytes() {
+            let name = name.to_vec();
+            crate::api::call::fetch_class(req, &name)
+        } else {
+            Err(crate::api::raising::throw(
+                req,
+                "Error",
+                "Class name must be a valid object or a string",
+            ))
+        };
+        exec::free_operand(req, frame, code, op.op2_type, op.op2);
+        class
+    };
+    match class {
+        Ok(class) => {
+            hold_class(req, frame, code, op.out, class);
+            Ok(advance(req, frame))
+        }
+        Err(thrown) => threw(req, frame, &thrown),
+    }
 }
 
 /// `zend_undefined_method`: php's `Error` naming the class as declared

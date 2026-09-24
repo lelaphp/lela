@@ -170,8 +170,58 @@ enum Offset {
 /// property, php's `ZEND_AST_CLASS_CONST` and `ZEND_AST_STATIC_PROP`,
 /// which the grammar tells apart by the `$`.
 enum Scoped {
-    Constant { class: Vec<u8>, name: Vec<u8> },
-    Property { class: Vec<u8>, name: Vec<u8> },
+    Constant { class: ClassSpec, name: Vec<u8> },
+    Property { class: ClassSpec, name: Vec<u8> },
+}
+
+/// The class a `::`, a `new` or an `instanceof` stands on, as the tree
+/// holds it: a name written out, php's `ZEND_AST_ZVAL`, or any other
+/// expression, whose value names the class as the program serves.
+#[derive(Clone, Copy)]
+enum ClassSpec {
+    Name(TokenId),
+    Expr(tree::Expr),
+}
+
+/// What `zend_compile_class_ref` (`Z/Zend/zend_compile.c:2819`) leaves
+/// in its `znode`: a class named at compile time, its name resolved
+/// (`IS_CONST`); `self`, `parent` or `static`, the fetch type and its
+/// flags in the operand's number (`IS_UNUSED`); or the `VAR` a
+/// `FETCH_CLASS` wrote the class into.
+enum ClassRef {
+    Named(Vec<u8>),
+    Scope(u32),
+    Fetched(u32),
+}
+
+/// `ZEND_FETCH_CLASS_SELF`, `_PARENT` and `_STATIC`
+/// (`Z/Zend/zend_compile.h:1028`), the fetch types of a class reference
+/// of the scope, and `ZEND_FETCH_CLASS_DEFAULT`, a class by name.
+const FETCH_CLASS_DEFAULT: u32 = 0;
+const FETCH_CLASS_SELF: u32 = 1;
+const FETCH_CLASS_PARENT: u32 = 2;
+const FETCH_CLASS_STATIC: u32 = 3;
+
+/// `ZEND_FETCH_CLASS_NO_AUTOLOAD`, `ZEND_FETCH_CLASS_SILENT` and
+/// `ZEND_FETCH_CLASS_EXCEPTION` (`Z/Zend/zend_compile.h:1035`), the flags
+/// a class reference's fetch carries beside its type.
+const FETCH_CLASS_NO_AUTOLOAD: u32 = 0x80;
+const FETCH_CLASS_SILENT: u32 = 0x0100;
+const FETCH_CLASS_EXCEPTION: u32 = 0x0200;
+
+/// `zend_get_class_fetch_type` (`Z/Zend/zend_compile.c:1732`): which of
+/// the three a name written out is, whatever its case, and
+/// `ZEND_FETCH_CLASS_DEFAULT` for every other name.
+fn class_fetch_type(name: &[u8]) -> u32 {
+    if name.eq_ignore_ascii_case(b"self") {
+        FETCH_CLASS_SELF
+    } else if name.eq_ignore_ascii_case(b"parent") {
+        FETCH_CLASS_PARENT
+    } else if name.eq_ignore_ascii_case(b"static") {
+        FETCH_CLASS_STATIC
+    } else {
+        FETCH_CLASS_DEFAULT
+    }
 }
 
 /// What `zend_compile_simple_var` makes of a `$name`: the CV
@@ -241,6 +291,15 @@ pub(crate) struct Emit<'a> {
     /// `CG(active_class_entry)`: the class whose members are being
     /// compiled, by name, and none outside a class body.
     active_class: Option<Vec<u8>>,
+    /// `CG(active_class_entry)->parent_name`: the name the class being
+    /// compiled extends, which `parent` needs one of.
+    active_parent: Option<Vec<u8>>,
+    /// The constants of `CG(active_class_entry)->constants_table` while a
+    /// method of it compiles: the ones the class declared before the
+    /// method, by name, with the value each was written as, which is
+    /// what `zend_try_ct_eval_class_const` substitutes where it folded
+    /// to a scalar.
+    active_constants: Vec<(Vec<u8>, ConstExpr)>,
     /// `CG(active_op_array)->function_name`: the function or method whose
     /// body is being compiled, by name, and none in the main op array,
     /// which `__FUNCTION__` and `__METHOD__` fold to.
@@ -639,7 +698,7 @@ enum Base {
     },
     StaticProp {
         name_at: u32,
-        class_at: u32,
+        class: (OperandKind, u32),
         out: u32,
         slots: u32,
     },
@@ -773,6 +832,8 @@ pub(crate) fn unit(
         frameless: frameless_table(&options.functions),
         namespace: None,
         active_class: None,
+        active_parent: None,
+        active_constants: Vec::new(),
         active_function: None,
         this_in_scope: false,
         return_type: None,
@@ -1368,7 +1429,7 @@ impl Emit<'_> {
                 }
                 tree::Expr::ScopedAccessExpr(scoped) => match self.scoped_of(scoped, line)? {
                     Scoped::Property { class, name } => {
-                        self.assign_static_prop(&class, &name, value)
+                        self.assign_static_prop(class, &name, value)
                     }
                     Scoped::Constant { .. } => {
                         Err(self.unread("an assignment to what is no variable"))
@@ -1393,7 +1454,7 @@ impl Emit<'_> {
             }
             tree::Expr::ScopedAccessExpr(scoped) => match self.scoped_of(scoped, line)? {
                 Scoped::Property { class, name } => {
-                    self.assign_static_prop_op(&class, &name, op, value)
+                    self.assign_static_prop_op(class, &name, op, value)
                 }
                 Scoped::Constant { .. } => {
                     Err(self.unread("a compound assignment to what is no variable"))
@@ -1429,7 +1490,7 @@ impl Emit<'_> {
                         (false, true) => Step::PostInc,
                         (false, false) => Step::PostDec,
                     };
-                    self.static_prop_step(&class, &name, step)
+                    self.static_prop_step(class, &name, step)
                 }
                 Scoped::Constant { .. } => Err(self.stepless(up)),
             },
@@ -1586,19 +1647,16 @@ impl Emit<'_> {
             }
             tree::Expr::ScopedAccessExpr(scoped) => {
                 let node = &self.parsed.tree[scoped];
-                let tree::Expr::NameRef(class) = self.peel(node.scope) else {
-                    return Err(self.unread("a static call on what is no class name"));
-                };
+                let class = self.class_spec(node.scope);
                 let Some(tree::ScopedSelector::MemberName(method)) = node.member else {
                     return Err(self.unread("a static call whose method is named at run time"));
                 };
                 let Some(method) = self.parsed.tree[method].name else {
                     return Err(self.unread("a static call"));
                 };
-                let class = self.text(class).to_vec();
                 let method = self.text(method).to_vec();
                 let arguments = self.arguments(args, line)?;
-                self.static_call(&class, &method, &arguments)
+                self.static_call(class, &method, &arguments)
             }
             tree::Expr::MemberAccessExpr(access) => {
                 let method = self.member_name_of(access, line)?;
@@ -1658,13 +1716,13 @@ impl Emit<'_> {
         }
     }
 
-    /// A class named as written where php's grammar has a
-    /// `class_name_reference`: `new C` and `$o instanceof C`. A class
-    /// held in a variable is not read yet.
-    fn class_reference(&self, expr: Option<tree::Expr>) -> Option<Vec<u8>> {
-        match expr.map(|expr| self.peel(expr)) {
-            Some(tree::Expr::NameRef(name)) => Some(self.text(name).to_vec()),
-            _ => None,
+    /// The class a `::`, a `new` or an `instanceof` stands on: a name
+    /// written out, php's `ZEND_AST_ZVAL` that `zend_compile_class_ref`
+    /// reads without compiling, or an expression it compiles.
+    fn class_spec(&self, expr: tree::Expr) -> ClassSpec {
+        match self.peel(expr) {
+            tree::Expr::NameRef(name) => ClassSpec::Name(name),
+            other => ClassSpec::Expr(other),
         }
     }
 
@@ -1732,19 +1790,16 @@ impl Emit<'_> {
     }
 
     /// `C::NAME` and `C::$name`: a class constant or a class's
-    /// property (`ZEND_AST_STATIC_PROP`), the class named as written;
-    /// `::class`, a scope that is no name and a member the program
-    /// names are refused as not read yet.
+    /// property (`ZEND_AST_STATIC_PROP`), over the class a name written
+    /// out or an expression names ([`Self::class_spec`]); `::class` and
+    /// a member the program names are refused as not read yet.
     fn scoped_of(
         &self,
         id: NodeId<tree::ScopedAccessExpr>,
         line: u32,
     ) -> Result<Scoped, CompileError> {
         let node = &self.parsed.tree[id];
-        let tree::Expr::NameRef(class) = self.peel(node.scope) else {
-            return Err(walk::unread(line, "a class reference of the scope"));
-        };
-        let class = self.text(class).to_vec();
+        let class = self.class_spec(node.scope);
         match node.member {
             Some(tree::ScopedSelector::MemberName(member)) => {
                 let Some(name) = self.parsed.tree[member].name else {
@@ -3074,12 +3129,12 @@ impl Emit<'_> {
         }
         let line = self.line;
         let parent = match &class.parent {
-            Some(written) => Some(self.inherited_name(written)?),
+            Some(written) => Some(self.inherited_name(written, "class name")?),
             None => None,
         };
         let mut interfaces = Vec::with_capacity(class.interfaces.len());
         for written in &class.interfaces {
-            interfaces.push(self.inherited_name(written)?);
+            interfaces.push(self.inherited_name(written, "interface name")?);
         }
         // `zend_lookup_class_ex(ce->parent_name, NULL,
         // ZEND_FETCH_CLASS_NO_AUTOLOAD)` stands before the class itself
@@ -3117,15 +3172,29 @@ impl Emit<'_> {
             end_line: class.end_line,
         };
         self.active_class = Some(name.clone());
+        self.active_parent.clone_from(&parent);
         self.class_constants(&mut decl, class, &name)?;
+        self.active_constants = decl
+            .constants
+            .iter()
+            .map(|c| (c.name.0.to_vec(), c.value.clone()))
+            .collect();
         self.class_properties(&mut decl, class, &name)?;
         let at = self.classes.len();
         self.classes.push(decl);
         for method in &class.methods {
             self.line = method.function.line;
+            self.active_constants = self.classes[at]
+                .constants
+                .iter()
+                .take(method.constants_before)
+                .map(|decl| (decl.name.0.to_vec(), decl.value.clone()))
+                .collect();
             self.method_decl(at, method)?;
         }
+        self.active_constants.clear();
         self.active_class = None;
+        self.active_parent = None;
         self.line = line;
         if early {
             // `zend_try_early_bind`, which links the class here: what
@@ -3158,6 +3227,11 @@ impl Emit<'_> {
                     String::from_utf8_lossy(&constant.name)
                 )));
             }
+            self.active_constants = decl
+                .constants
+                .iter()
+                .map(|c| (c.name.0.to_vec(), c.value.clone()))
+                .collect();
             let value = self.const_expr(constant.value)?;
             decl.constants.push(ClassConstDecl {
                 name: Name(constant.name.clone().into_boxed_slice()),
@@ -3364,19 +3438,26 @@ impl Emit<'_> {
         Ok((property.visibility != set).then_some(set))
     }
 
-    /// `zend_resolve_class_name` over a name written after `extends` or
-    /// `implements`: the name a `FETCH_CLASS` of the same file resolves
-    /// to ([`Self::class_name`]). `self`, `parent` and `static` are what
-    /// php's parser refuses there, and are refused here as not yet read.
-    fn inherited_name(&mut self, written: &[u8]) -> Result<Vec<u8>, CompileError> {
-        let name = self.class_name(written);
-        if name.eq_ignore_ascii_case(b"self")
-            || name.eq_ignore_ascii_case(b"parent")
-            || name.eq_ignore_ascii_case(b"static")
-        {
-            return Err(self.fatal("a class reference of the scope this compiler cannot read yet"));
+    /// `zend_resolve_const_class_name_reference` over a name written
+    /// after `extends` (`what` is `class name`) or `implements`
+    /// (`interface name`): the name a `FETCH_CLASS` of the same file
+    /// resolves to ([`Self::class_name`]), and `self`, `parent` and
+    /// `static` php's compile-time fatal, the name as written.
+    ///
+    /// ```php
+    /// class A extends parent {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use "parent" as class name, as it is reserved in %s on line 2
+    /// ```
+    fn inherited_name(&mut self, written: &[u8], what: &str) -> Result<Vec<u8>, CompileError> {
+        if class_fetch_type(written) != FETCH_CLASS_DEFAULT {
+            return Err(self.compile_error(format!(
+                "Cannot use \"{}\" as {what}, as it is reserved",
+                String::from_utf8_lossy(written)
+            )));
         }
-        Ok(name)
+        Ok(self.class_name(written))
     }
 
     /// `zend_lookup_class_ex` over `CG(class_table)`: the declaration of
@@ -3475,6 +3556,27 @@ impl Emit<'_> {
     /// ```expect exit=0
     /// ab1
     /// ```
+    ///
+    /// A constant of the class being compiled folds where it stands
+    /// (`zend_try_ct_eval_class_const`), so `self::A + 1` is `2` in the
+    /// declaration; `parent::` stays the tree, resolved in the declaring
+    /// scope when the engine evaluates it:
+    ///
+    /// ```php
+    /// class P { const A = 1; const B = self::A + 1; public $d = self::B; }
+    /// class C extends P { const D = parent::B; const E = [self::D, P::A]; }
+    /// var_dump(C::D, (new C)->d, C::E);
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// int(2)
+    /// array(2) {
+    ///   [0]=>
+    ///   int(2)
+    ///   [1]=>
+    ///   int(1)
+    /// }
+    /// ```
     #[allow(clippy::too_many_lines)]
     fn const_expr(&mut self, expr: tree::Expr) -> Result<ConstExpr, CompileError> {
         let line = expr.line(self.parsed);
@@ -3494,19 +3596,24 @@ impl Emit<'_> {
             // `zend_compile_const_expr_class_const`: the class named as
             // written, resolved in the namespace, and the constant's
             // name, kept as the tree for the engine to fetch on first
-            // use; `self`, `parent` and `static` are refused as
-            // `class_name_literal` refuses them.
+            // use; `self` and `parent` stay as written, for the engine
+            // to resolve in the scope that evaluates the expression;
+            // `static` and a class the program computes are php's
+            // compile-time fatals.
             tree::Expr::ScopedAccessExpr(id) => match self.scoped_of(id, line)? {
                 Scoped::Constant { class, name } => {
-                    let class = self.class_name(&class);
-                    if class.eq_ignore_ascii_case(b"self")
-                        || class.eq_ignore_ascii_case(b"parent")
-                        || class.eq_ignore_ascii_case(b"static")
-                    {
-                        return Err(self.fatal(
-                            "a class reference of the scope this compiler cannot read yet",
+                    let ClassSpec::Name(token) = class else {
+                        return Err(self.compile_error(
+                            "Dynamic class names are not allowed in compile-time class constant references",
+                        ));
+                    };
+                    let written = self.text(token).to_vec();
+                    if class_fetch_type(&written) == FETCH_CLASS_STATIC {
+                        return Err(self.compile_error(
+                            "\"static::\" is not allowed in compile-time constants",
                         ));
                     }
+                    let class = self.class_name(&written);
                     Ok(ConstExpr::ClassConstant {
                         class: Name(class.into_boxed_slice()),
                         name: Name(name.into_boxed_slice()),
@@ -5944,10 +6051,10 @@ impl Emit<'_> {
             }
             tree::Expr::InstanceofExpr(id) => {
                 let node = &tree[id];
-                let Some(class) = self.class_reference(node.rhs) else {
-                    return Err(self.unread("an `instanceof` of what is no class name"));
+                let Some(class) = node.rhs.map(|rhs| self.class_spec(rhs)) else {
+                    return Err(self.unread("an `instanceof`"));
                 };
-                self.instance_of(node.lhs, &class)
+                self.instance_of(node.lhs, class)
             }
             tree::Expr::AssignExpr(id) => self.assignment(id, line),
             tree::Expr::TernaryExpr(id) => {
@@ -5966,14 +6073,14 @@ impl Emit<'_> {
                 if node.anon.is_some() {
                     return Err(self.unread("an anonymous class"));
                 }
-                let Some(class) = self.class_reference(node.ctor) else {
-                    return Err(self.unread("a `new` of what is no class name"));
+                let Some(class) = node.ctor.map(|ctor| self.class_spec(ctor)) else {
+                    return Err(self.unread("a `new`"));
                 };
                 let arguments = match node.args {
                     Some(args) => self.arguments(args, line)?,
                     None => Vec::new(),
                 };
-                self.new_expression(&class, &arguments)
+                self.new_expression(class, &arguments)
             }
             tree::Expr::YieldExpr(_) | tree::Expr::YieldFromExpr(_) => {
                 Err(self.unread("a `yield`"))
@@ -6008,8 +6115,8 @@ impl Emit<'_> {
                 self.prop(tree[id].obj, &name)
             }
             tree::Expr::ScopedAccessExpr(id) => match self.scoped_of(id, line)? {
-                Scoped::Constant { class, name } => self.class_const(&class, &name),
-                Scoped::Property { class, name } => self.static_prop(&class, &name),
+                Scoped::Constant { class, name } => self.class_const(class, &name),
+                Scoped::Property { class, name } => self.static_prop(class, &name),
             },
             tree::Expr::SubscriptExpr(_) => self.dim_read(expr),
             tree::Expr::ClosureExpr(_) | tree::Expr::ArrowFnExpr(_) => {
@@ -6654,15 +6761,16 @@ impl Emit<'_> {
                 let Scoped::Property { class, name } = self.scoped_of(id, line)? else {
                     return Err(self.fatal("a `??` over a class constant, which is no variable"));
                 };
+                let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
                 let name = self.string(&name)?;
                 let name_at = self.literal(name);
                 let out = self.temporary();
                 let extended_value = self.cache_slots(3);
-                let op2 = self.class_name_literal(&class)?;
+                let (op2_type, op2) = self.class_operand(&class)?;
                 delayed.push(IsLink {
                     opcode: Opcode::FetchStaticPropIs,
                     op1: Some((OperandKind::Const, name_at)),
-                    op2_type: OperandKind::Const,
+                    op2_type,
                     op2,
                     out,
                     extended_value,
@@ -7023,7 +7131,7 @@ impl Emit<'_> {
         if let tree::Expr::ScopedAccessExpr(id) = target
             && let Scoped::Property { class, name } = self.scoped_of(id, line)?
         {
-            return self.assign_static_prop_ref(&class, &name, source);
+            return self.assign_static_prop_ref(class, &name, source);
         }
         // `zend_delayed_compile_var(&target_node, target_ast, BP_VAR_W, 1)`:
         // a plain CV settles where it stands and a dimension's fetches
@@ -7240,14 +7348,15 @@ impl Emit<'_> {
                 let Scoped::Property { class, name } = self.scoped_of(id, line)? else {
                     return Err(self.fatal("a class constant that is no property"));
                 };
+                let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
                 let name = self.string(&name)?;
                 let name_at = self.literal(name);
                 let out = self.temporary();
                 let slots = self.cache_slots(3);
-                let class_at = self.class_name_literal(&class)?;
+                let class = self.class_operand(&class)?;
                 Base::StaticProp {
                     name_at,
-                    class_at,
+                    class,
                     out,
                     slots,
                 }
@@ -7419,7 +7528,7 @@ impl Emit<'_> {
             }
             Base::StaticProp {
                 name_at,
-                class_at,
+                class: (class_type, class_at),
                 out,
                 slots,
             } => {
@@ -7432,7 +7541,7 @@ impl Emit<'_> {
                     },
                     op1_type: OperandKind::Const,
                     op1: name_at,
-                    op2_type: OperandKind::Const,
+                    op2_type: class_type,
                     op2: class_at,
                     out_type,
                     out,
@@ -7649,15 +7758,16 @@ impl Emit<'_> {
     /// `T::$a = 5; var_dump(T::$a);` numbers the read's temporary `T1`.
     fn assign_static_prop(
         &mut self,
-        class: &[u8],
+        class: ClassSpec,
         name: &[u8],
         value: tree::Expr,
     ) -> Result<Where, CompileError> {
+        let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
         let name = self.string(name)?;
         let name_at = self.literal(name);
         let out = self.temporary();
         let slots = self.cache_slots(3);
-        let class_at = self.class_name_literal(class)?;
+        let (class_type, class_at) = self.class_operand(&class)?;
         // The delayed fetch's line, as [`Self::assign_dim`] keeps it.
         let line = self.line;
         let value = self.expr(value)?;
@@ -7667,7 +7777,7 @@ impl Emit<'_> {
             opcode: Opcode::AssignStaticProp,
             op1_type: OperandKind::Const,
             op1: name_at,
-            op2_type: OperandKind::Const,
+            op2_type: class_type,
             op2: class_at,
             out_type: OperandKind::Tmp,
             out,
@@ -7862,16 +7972,17 @@ impl Emit<'_> {
     /// handler reads it from.
     fn assign_static_prop_op(
         &mut self,
-        class: &[u8],
+        class: ClassSpec,
         name: &[u8],
         op: BinaryOp,
         value: tree::Expr,
     ) -> Result<Where, CompileError> {
+        let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
         let name = self.string(name)?;
         let name_at = self.literal(name);
         let out = self.temporary();
         let slots = self.cache_slots(3);
-        let class_at = self.class_name_literal(class)?;
+        let (class_type, class_at) = self.class_operand(&class)?;
         // The delayed fetch's line, as [`Self::assign_static_prop`]
         // keeps it.
         let line = self.line;
@@ -7882,7 +7993,7 @@ impl Emit<'_> {
             opcode: Opcode::AssignStaticPropOp,
             op1_type: OperandKind::Const,
             op1: name_at,
-            op2_type: OperandKind::Const,
+            op2_type: class_type,
             op2: class_at,
             out_type: OperandKind::Tmp,
             out,
@@ -7910,15 +8021,16 @@ impl Emit<'_> {
     /// is why `C::$p++` as a statement is `PRE_INC_STATIC_PROP`.
     fn static_prop_step(
         &mut self,
-        class: &[u8],
+        class: ClassSpec,
         name: &[u8],
         step: Step,
     ) -> Result<Where, CompileError> {
+        let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
         let name = self.string(name)?;
         let name_at = self.literal(name);
         let out = self.temporary();
         let slots = self.cache_slots(3);
-        let class_at = self.class_name_literal(class)?;
+        let (class_type, class_at) = self.class_operand(&class)?;
         self.push(Opline {
             opcode: match step {
                 Step::PreInc => Opcode::PreIncStaticProp,
@@ -7928,7 +8040,7 @@ impl Emit<'_> {
             },
             op1_type: OperandKind::Const,
             op1: name_at,
-            op2_type: OperandKind::Const,
+            op2_type: class_type,
             op2: class_at,
             out_type: OperandKind::Tmp,
             out,
@@ -7955,21 +8067,22 @@ impl Emit<'_> {
     /// the source leaves but a CV.
     fn assign_static_prop_ref(
         &mut self,
-        class: &[u8],
+        class: ClassSpec,
         name: &[u8],
         source: tree::Expr,
     ) -> Result<Where, CompileError> {
+        let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
         let name = self.string(name)?;
         let name_at = self.literal(name);
         let out = self.temporary();
         let slots = self.cache_slots(3);
-        let class_at = self.class_name_literal(class)?;
+        let (class_type, class_at) = self.class_operand(&class)?;
         let (data_type, data, flags) = self.ref_source(source, false)?;
         self.push(Opline {
             opcode: Opcode::AssignStaticPropRef,
             op1_type: OperandKind::Const,
             op1: name_at,
-            op2_type: OperandKind::Const,
+            op2_type: class_type,
             op2: class_at,
             out_type: OperandKind::Var,
             out,
@@ -9199,7 +9312,16 @@ impl Emit<'_> {
             // `ZEND_COMPILE_NO_CONSTANT_SUBSTITUTION`, which opcache
             // sets, so a class constant is fetched as the program serves,
             // and a class's property is a variable.
+            // `zend_try_ct_eval_class_const`'s one arm opcache leaves
+            // standing, a constant of the class being compiled.
             tree::Expr::ScopedAccessExpr(id) => match self.scoped_of(id, line)? {
+                Scoped::Constant {
+                    class: ClassSpec::Name(token),
+                    name,
+                } => match self.active_class_constant(token, &name)? {
+                    Some(value) => Ok(value),
+                    None => Err(self.fatal("a class constant is fetched at run time")),
+                },
                 Scoped::Constant { .. } => {
                     Err(self.fatal("a class constant is fetched at run time"))
                 }
@@ -9736,30 +9858,56 @@ impl Emit<'_> {
         Ok(self.call_op(Opcode::DoFcall, line))
     }
 
-    /// `zend_compile_new` for a class named as written: `NEW` with the
-    /// class's constant pair in `op1`, a cache slot in `op2` and the
-    /// number of arguments in `extended_value`, written into the `VAR`
-    /// the object lands in; then the arguments sent for a callee
-    /// nothing is known of, since the constructor is looked up as the
-    /// program serves (`zend_compile_call_common` with `fbc` null), and
-    /// the `DO_FCALL` that serves it, whose own `VAR` `zend_do_free`
-    /// marks unused. `self`, `parent` and `static` are class references
-    /// of another kind (`zend_get_class_fetch_type`), not read yet.
+    /// `zend_compile_new` (`Z/Zend/zend_compile.c:5410`): the class
+    /// compiled as `zend_compile_class_ref` compiles it, then `NEW`
+    /// with the class's constant pair in `op1` and a cache slot in
+    /// `op2` for a class named at compile time, the fetch type of
+    /// `self`, `parent` or `static` in an unused `op1`, or the `VAR` a
+    /// `FETCH_CLASS` wrote; the number of arguments in `extended_value`
+    /// and the object written into a `VAR`. Then the arguments sent for
+    /// a callee nothing is known of, since the constructor is looked up
+    /// as the program serves (`zend_compile_call_common` with `fbc`
+    /// null), and the `DO_FCALL` that serves it, whose own `VAR`
+    /// `zend_do_free` marks unused.
+    ///
+    /// ```php
+    /// class A {
+    ///     static function make() { return new static; }
+    ///     static function mine() { return new self; }
+    /// }
+    /// class B extends A {
+    ///     function up() { return new parent; }
+    /// }
+    /// var_dump(get_class(B::make()), get_class(B::mine()), get_class((new B)->up()));
+    /// $name = 'B';
+    /// var_dump(new $name instanceof A);
+    /// ```
+    /// ```expect
+    /// string(1) "B"
+    /// string(1) "A"
+    /// string(1) "A"
+    /// bool(true)
+    /// ```
     fn new_expression(
         &mut self,
-        class: &[u8],
+        class: ClassSpec,
         arguments: &[tree::Expr],
     ) -> Result<Where, CompileError> {
         let line = self.line;
-        let class = self.class_name_literal(class)?;
+        let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
         let out = self.temporary();
-        let slot = self.cache_slot();
+        let (op1_type, op1) = self.class_operand(&class)?;
+        let op2 = if op1_type == OperandKind::Const {
+            self.cache_slot()
+        } else {
+            0
+        };
         let count = u32::try_from(arguments.len()).unwrap_or(0);
         self.push(Opline {
             opcode: Opcode::New,
-            op1_type: OperandKind::Const,
-            op1: class,
-            op2: slot,
+            op1_type,
+            op1,
+            op2,
             out_type: OperandKind::Var,
             out,
             extended_value: count,
@@ -9771,36 +9919,82 @@ impl Emit<'_> {
         Ok(Where::Returned(out))
     }
 
-    /// `zend_compile_static_call` for a class and a method both named as
-    /// written: `INIT_STATIC_METHOD_CALL` with the class's constant pair
-    /// in `op1`, the method's in `op2`, two cache slots in `result` and
-    /// the number of arguments in `extended_value`; `__construct` is
-    /// php's `CONSTRUCTOR`, `op2` unused and one cache slot. The callee
-    /// is known where the linked table holds the class and a public
-    /// method of the name (`zend_get_compatible_func_or_null`), which is
-    /// what decides how the arguments are sent; the call op is
-    /// `DO_FCALL` either way (`zend_get_call_op`).
+    /// `zend_compile_static_call` (`Z/Zend/zend_compile.c:5332`): the
+    /// class compiled as `zend_compile_class_ref` compiles it, then
+    /// `INIT_STATIC_METHOD_CALL` with the class in `op1`
+    /// (`zend_set_class_name_op1`: its constant pair, the fetch type of
+    /// `self`, `parent` or `static` in an unused `op1`, or the `VAR` a
+    /// `FETCH_CLASS` wrote), the method's pair in `op2`, two cache slots
+    /// in `result` and the number of arguments in `extended_value`;
+    /// `__construct` is php's `CONSTRUCTOR`, `op2` unused and one cache
+    /// slot where the class is a constant. The callee is known where the
+    /// class is named at compile time or is `self` in a known scope, and
+    /// the table holds a method of the name the scope may call
+    /// (`zend_get_compatible_func_or_null`), which decides how the
+    /// arguments are sent and whether the call is `DO_UCALL`.
+    ///
+    /// ```php
+    /// class P {
+    ///     public static $tag = "P";
+    ///     function __construct() { echo "P\n"; }
+    ///     static function who() { return static::$tag; }
+    ///     function name() { return "P::name"; }
+    /// }
+    /// class C extends P {
+    ///     public static $tag = "C";
+    ///     function __construct() { parent::__construct(); echo "C\n"; }
+    ///     function name() { return parent::name() . " via " . self::who(); }
+    ///     static function s() { return parent::who(); }
+    /// }
+    /// $c = new C;
+    /// var_dump($c->name(), C::s());
+    /// $k = 'C';
+    /// var_dump($k::who(), $c::who());
+    /// ```
+    /// ```expect
+    /// P
+    /// C
+    /// string(13) "P::name via C"
+    /// string(1) "C"
+    /// string(1) "C"
+    /// string(1) "C"
+    /// ```
     fn static_call(
         &mut self,
-        class: &[u8],
+        class: ClassSpec,
         method: &[u8],
         arguments: &[tree::Expr],
     ) -> Result<Where, CompileError> {
         let line = self.line;
-        let known = self.known_method(class, method);
+        let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
+        let constructor = method.eq_ignore_ascii_case(b"__construct");
+        let known = match &class {
+            _ if constructor => None,
+            ClassRef::Named(name) => self.known_method_of(name, method),
+            ClassRef::Scope(fetch) if fetch & 0x0f == FETCH_CLASS_SELF && self.scope_known() => {
+                let active = self.active_class.clone().unwrap_or_default();
+                self.known_method_of(&active, method)
+            }
+            ClassRef::Scope(_) | ClassRef::Fetched(_) => None,
+        };
         let call_op = match known {
             Some(Known::User) => Opcode::DoUcall,
             Some(Known::Native) | None => Opcode::DoFcall,
         };
         let known = known.is_some();
-        let class_at = self.class_name_literal(class)?;
+        let (op1_type, op1) = self.class_operand(&class)?;
         let count = u32::try_from(arguments.len()).unwrap_or(0);
-        let opline = if method.eq_ignore_ascii_case(b"__construct") {
+        let opline = if constructor {
+            let out = if op1_type == OperandKind::Const {
+                self.cache_slot()
+            } else {
+                0
+            };
             Opline {
                 opcode: Opcode::InitStaticMethodCall,
-                op1_type: OperandKind::Const,
-                op1: class_at,
-                out: self.cache_slot(),
+                op1_type,
+                op1,
+                out,
                 extended_value: count,
                 ..Opline::default()
             }
@@ -9808,8 +10002,8 @@ impl Emit<'_> {
             let method_at = self.func_name_literal(method)?;
             Opline {
                 opcode: Opcode::InitStaticMethodCall,
-                op1_type: OperandKind::Const,
-                op1: class_at,
+                op1_type,
+                op1,
                 op2_type: OperandKind::Const,
                 op2: method_at,
                 out: self.cache_slots(2),
@@ -9861,24 +10055,84 @@ impl Emit<'_> {
         self.receiver_of(object)
     }
 
-    /// `zend_compile_class_const` under `ZEND_COMPILE_NO_CONSTANT_SUBSTITUTION`,
-    /// which opcache sets, so nothing folds: `FETCH_CLASS_CONSTANT` with
-    /// the constant's name in `op2`, into a temporary
-    /// (`zend_emit_op_tmp`), then the class's constant pair in `op1`
+    /// `zend_compile_class_const` (`Z/Zend/zend_compile.c:11064`): a
+    /// constant of the class whose body is being compiled, named `self`
+    /// where the scope is known or by the class's own name, is the value
+    /// `zend_try_ct_eval_class_const` substitutes where the class
+    /// declared it before this point and it folded to a scalar
+    /// ([`Self::active_class_constant`]); every other constant is
+    /// fetched as the program serves, since opcache's
+    /// `ZEND_COMPILE_NO_CONSTANT_SUBSTITUTION` folds no other class's.
+    /// The class is compiled as `zend_compile_class_ref` compiles it,
+    /// then `FETCH_CLASS_CONSTANT` with the constant's name in `op2`, into
+    /// a temporary (`zend_emit_op_tmp`), then the class in `op1`
     /// (`zend_set_class_name_op1`) and two cache slots in
     /// `extended_value`. php reads the constant's name before the
     /// class's, so the constants stand in that order, as they do under
     /// [`Self::static_prop`].
-    fn class_const(&mut self, class: &[u8], name: &[u8]) -> Result<Where, CompileError> {
+    ///
+    /// ```php
+    /// class P { const Y = 'py'; const Z = 'pz'; }
+    /// class A extends P {
+    ///     const X = 'ax';
+    ///     const Z = 'az';
+    ///     function f() { return [self::X, static::Z, parent::Z, A::X]; }
+    /// }
+    /// class B extends A { const Z = 'bz'; }
+    /// $r = (new B)->f();
+    /// echo $r[0], $r[1], $r[2], $r[3], "\n";
+    /// $b = new B;
+    /// var_dump($b::Z, ('A')::X);
+    /// ```
+    /// ```expect
+    /// axbzpzax
+    /// string(2) "bz"
+    /// string(2) "ax"
+    /// ```
+    ///
+    /// Outside a class, where the scope is known, `self` is php's
+    /// compile-time fatal; in the main op array the scope is the
+    /// includer's and the fetch raises the `Error` as the program serves:
+    ///
+    /// ```php
+    /// function f() { return self::X; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use "self" when no class scope is active in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// echo static::X;
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught Error: Cannot access "static" when no class scope is active in %s:2
+    /// Stack trace:
+    /// #0 {main}
+    ///   thrown in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// class A { function f() { return parent::X; } }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use "parent" when current class scope has no parent in %s on line 2
+    /// ```
+    fn class_const(&mut self, class: ClassSpec, name: &[u8]) -> Result<Where, CompileError> {
+        if let ClassSpec::Name(token) = class
+            && let Some(value) = self.active_class_constant(token, name)?
+        {
+            return Ok(Where::Constant(value));
+        }
+        let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
         let name = self.string(name)?;
         let name_at = self.literal(name);
         let out = self.temporary();
-        let class_at = self.class_name_literal(class)?;
+        let (op1_type, op1) = self.class_operand(&class)?;
         let slots = self.cache_slots(2);
         self.push(Opline {
             opcode: Opcode::FetchClassConstant,
-            op1_type: OperandKind::Const,
-            op1: class_at,
+            op1_type,
+            op1,
             op2_type: OperandKind::Const,
             op2: name_at,
             out_type: OperandKind::Tmp,
@@ -9889,28 +10143,98 @@ impl Emit<'_> {
         Ok(Where::Temporary(out))
     }
 
+    /// `zend_try_ct_eval_class_const`'s one arm opcache leaves standing,
+    /// `class_name_refers_to_active_ce` (`Z/Zend/zend_compile.c:1720`):
+    /// `self` where the scope is known, or the name of the class whose
+    /// body is being compiled, over a constant that class declared
+    /// before the member being compiled and that folded to a scalar,
+    /// which is the constant's value; nothing for every other.
+    fn active_class_constant(
+        &mut self,
+        token: TokenId,
+        name: &[u8],
+    ) -> Result<Option<Zval>, CompileError> {
+        let written = self.text(token).to_vec();
+        let Some(active) = self.active_class.clone() else {
+            return Ok(None);
+        };
+        let refers = match class_fetch_type(&written) {
+            FETCH_CLASS_SELF => self.scope_known(),
+            FETCH_CLASS_DEFAULT => self.class_name(&written).eq_ignore_ascii_case(&active),
+            _ => false,
+        };
+        if !refers {
+            return Ok(None);
+        }
+        let Some((_, value)) = self
+            .active_constants
+            .iter()
+            .find(|(held, _)| held.as_slice() == name)
+        else {
+            return Ok(None);
+        };
+        let value = value.clone();
+        Ok(Some(match value {
+            ConstExpr::Null => Zval::null(),
+            ConstExpr::Bool(b) => Zval::bool(b),
+            ConstExpr::Long(n) => Zval::long(n),
+            ConstExpr::Double(d) => Zval::double(d),
+            ConstExpr::Str(bytes) => self.string(&bytes)?,
+            _ => return Ok(None),
+        }))
+    }
+
     /// `zend_compile_static_prop` under `BP_VAR_R`, which delays nothing
-    /// this compiler reads: `FETCH_STATIC_PROP_R` with the property's
-    /// name as one constant in `op1` and three cache slots in
-    /// `extended_value` (`zend_alloc_cache_slots(3)`), then the class's
-    /// constant pair in `op2` (`zend_add_class_name_literal`), which
-    /// reserves no slot of its own where `op1` is a constant. The fetch
-    /// is written into a temporary (`zend_adjust_for_fetch_type`). php
-    /// reads the property's name before the class's, so the literals
-    /// stand in that order; `self`, `parent` and `static` are refused
-    /// as [`Self::class_name_literal`] refuses them.
-    fn static_prop(&mut self, class: &[u8], name: &[u8]) -> Result<Where, CompileError> {
+    /// this compiler reads: the class compiled as `zend_compile_class_ref`
+    /// compiles it, then `FETCH_STATIC_PROP_R` with the property's name
+    /// as one constant in `op1` and three cache slots in
+    /// `extended_value` (`zend_alloc_cache_slots(3)`), then the class in
+    /// `op2`, its constant pair (`zend_add_class_name_literal`), the
+    /// fetch type of `self`, `parent` or `static`, or the `VAR` a
+    /// `FETCH_CLASS` wrote. The fetch is written into a temporary
+    /// (`zend_adjust_for_fetch_type`). php reads the property's name
+    /// before the class's, so the literals stand in that order.
+    ///
+    /// ```php
+    /// class A {
+    ///     public static $n = 0;
+    ///     public static $list = [];
+    ///     static function bump() { self::$n++; static::$list[] = self::$n; return self::$n; }
+    /// }
+    /// class B extends A {
+    ///     static function twice() { parent::bump(); return parent::$n + static::$n; }
+    /// }
+    /// A::bump();
+    /// var_dump(B::twice(), A::$list);
+    /// echo self::$n;
+    /// ```
+    /// ```expect exit=255
+    /// int(4)
+    /// array(2) {
+    ///   [0]=>
+    ///   int(1)
+    ///   [1]=>
+    ///   int(2)
+    /// }
+    ///
+    /// Fatal error: Uncaught Error: Cannot access "self" when no class scope is active in %s:12
+    /// Stack trace:
+    /// #0 {main}
+    ///   thrown in %s on line 12
+    /// ```
+    fn static_prop(&mut self, class: ClassSpec, name: &[u8]) -> Result<Where, CompileError> {
+        let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
         let name = self.string(name)?;
         let name_at = self.literal(name);
         let out = self.temporary();
         let slots = self.cache_slots(3);
-        let class_at = self.class_name_literal(class)?;
+        let (op2_type, op2) = self.class_operand(&class)?;
         self.push(Opline {
             opcode: Opcode::FetchStaticPropR,
             op1_type: OperandKind::Const,
             op1: name_at,
-            op2_type: OperandKind::Const,
-            op2: class_at,
+            op2_type,
+            op2,
             out_type: OperandKind::Tmp,
             out,
             extended_value: slots,
@@ -9963,27 +10287,53 @@ impl Emit<'_> {
 
     /// `zend_compile_instanceof`: a constant on the left is `false`
     /// where it stands, php's compile-time answer for what is no object;
-    /// otherwise `INSTANCEOF` over the operand with the class's constant
-    /// pair in `op2` and a cache slot in `extended_value`, into a
-    /// temporary.
-    fn instance_of(&mut self, expr: tree::Expr, class: &[u8]) -> Result<Where, CompileError> {
+    /// otherwise the class compiled as `zend_compile_class_ref` compiles
+    /// it under `ZEND_FETCH_CLASS_NO_AUTOLOAD`, `_SILENT` and
+    /// `_EXCEPTION`, then `INSTANCEOF` over the operand with the class in
+    /// `op2`, a cache slot in `extended_value` where the class is a
+    /// constant, into a temporary.
+    ///
+    /// ```php
+    /// class A { function is($o) { return [$o instanceof self, $o instanceof static]; } }
+    /// class B extends A {}
+    /// $cls = 'A';
+    /// var_dump((new B)->is(new A), new B instanceof $cls);
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   [0]=>
+    ///   bool(true)
+    ///   [1]=>
+    ///   bool(false)
+    /// }
+    /// bool(true)
+    /// ```
+    fn instance_of(&mut self, expr: tree::Expr, class: ClassSpec) -> Result<Where, CompileError> {
         let value = self.expr(expr)?;
         if let Where::Constant(_) = value {
             return Ok(Where::Constant(Zval::bool(false)));
         }
-        let class_at = self.class_name_literal(class)?;
+        let class = self.class_ref(
+            class,
+            FETCH_CLASS_NO_AUTOLOAD | FETCH_CLASS_EXCEPTION | FETCH_CLASS_SILENT,
+        )?;
         let (op1_type, op1) = self.operand(value);
         let out = self.temporary();
-        let slot = self.cache_slot();
+        let (op2_type, op2) = self.class_operand(&class)?;
+        let extended_value = if op2_type == OperandKind::Const {
+            self.cache_slot()
+        } else {
+            0
+        };
         self.push(Opline {
             opcode: Opcode::Instanceof,
             op1_type,
             op1,
-            op2_type: OperandKind::Const,
-            op2: class_at,
+            op2_type,
+            op2,
             out_type: OperandKind::Tmp,
             out,
-            extended_value: slot,
+            extended_value,
             ..Opline::default()
         });
         Ok(Where::Temporary(out))
@@ -9993,22 +10343,129 @@ impl Emit<'_> {
     /// name as written with its leading separator dropped, and its
     /// lowered form in the slot after it, which the engine looks the
     /// class up by (`Z_STR_P(RT_CONSTANT(opline, opline->op1) + 1)`).
-    /// `self`, `parent` and `static` name no class of the table
-    /// (`zend_get_class_fetch_type`) and are refused as not yet read.
     fn class_name_literal(&mut self, name: &[u8]) -> Result<u32, CompileError> {
-        let written = self.class_name(name);
-        if written.eq_ignore_ascii_case(b"self")
-            || written.eq_ignore_ascii_case(b"parent")
-            || written.eq_ignore_ascii_case(b"static")
-        {
-            return Err(self.fatal("a class reference of the scope this compiler cannot read yet"));
-        }
-        let lowered = written.to_ascii_lowercase();
-        let written = self.string(&written)?;
+        let resolved = self.class_name(name);
+        self.resolved_class_literal(&resolved)
+    }
+
+    /// `zend_add_class_name_literal` over a name already resolved.
+    fn resolved_class_literal(&mut self, resolved: &[u8]) -> Result<u32, CompileError> {
+        let lowered = resolved.to_ascii_lowercase();
+        let written = self.string(resolved)?;
         let lowered = self.string(&lowered)?;
         let at = self.literal(written);
         self.literal(lowered);
         Ok(at)
+    }
+
+    /// `zend_is_scope_known` (`Z/Zend/zend_compile.c:1696`): whether the
+    /// class `self` names is the one being compiled. A closure can be
+    /// rebound to another scope; outside a class a function's scope is
+    /// none, known, and the main op array's is the includer's, not
+    /// known.
+    fn scope_known(&self) -> bool {
+        if self.fn_flags.closure {
+            return false;
+        }
+        match self.active_class {
+            None => self.active_function.is_some(),
+            Some(_) => true,
+        }
+    }
+
+    /// `zend_ensure_valid_class_fetch_type` (`Z/Zend/zend_compile.c:1768`):
+    /// where the scope is known, `self`, `parent` and `static` outside a
+    /// class and `parent` in a class that extends nothing are php's
+    /// compile-time fatals.
+    fn ensure_valid_class_fetch_type(&self, fetch: u32) -> Result<(), CompileError> {
+        if fetch == FETCH_CLASS_DEFAULT || !self.scope_known() {
+            return Ok(());
+        }
+        let word = match fetch {
+            FETCH_CLASS_SELF => "self",
+            FETCH_CLASS_PARENT => "parent",
+            _ => "static",
+        };
+        if self.active_class.is_none() {
+            return Err(self.compile_error(format!(
+                "Cannot use \"{word}\" when no class scope is active"
+            )));
+        }
+        if fetch == FETCH_CLASS_PARENT && self.active_parent.is_none() {
+            return Err(
+                self.compile_error("Cannot use \"parent\" when current class scope has no parent")
+            );
+        }
+        Ok(())
+    }
+
+    /// `zend_compile_class_ref` (`Z/Zend/zend_compile.c:2819`): a name
+    /// written with a leading `\` is the class of that name; `self`,
+    /// `parent` and `static` are their fetch type and `flags` in an
+    /// unused operand, held to [`Self::ensure_valid_class_fetch_type`];
+    /// any other name is the class it resolves to. An expression is
+    /// compiled: a constant string is read as a name written with its
+    /// leading `\`, a constant of another type is php's `Illegal class
+    /// name`, and anything else is `FETCH_CLASS` over the value into a
+    /// `VAR`, `ZEND_FETCH_CLASS_DEFAULT` and `flags` in its `op1`.
+    fn class_ref(&mut self, class: ClassSpec, flags: u32) -> Result<ClassRef, CompileError> {
+        let written = match class {
+            ClassSpec::Name(token) => self.text(token).to_vec(),
+            ClassSpec::Expr(expr) => match self.expr(expr)? {
+                Where::Constant(value) => {
+                    let Some(name) = value.as_str() else {
+                        return Err(self.compile_error("Illegal class name"));
+                    };
+                    let name = name.bytes().to_vec();
+                    match class_fetch_type(&name) {
+                        FETCH_CLASS_DEFAULT => {
+                            let bare = name.strip_prefix(b"\\").unwrap_or(&name).to_vec();
+                            return Ok(ClassRef::Named(bare));
+                        }
+                        fetch => {
+                            self.ensure_valid_class_fetch_type(fetch)?;
+                            return Ok(ClassRef::Scope(fetch | flags));
+                        }
+                    }
+                }
+                value => {
+                    let (op2_type, op2) = self.operand(value);
+                    let out = self.temporary();
+                    self.push(Opline {
+                        opcode: Opcode::FetchClass,
+                        op1: FETCH_CLASS_DEFAULT | flags,
+                        op2_type,
+                        op2,
+                        out_type: OperandKind::Var,
+                        out,
+                        ..Opline::default()
+                    });
+                    return Ok(ClassRef::Fetched(out));
+                }
+            },
+        };
+        if written.starts_with(b"\\") {
+            return Ok(ClassRef::Named(self.class_name(&written)));
+        }
+        match class_fetch_type(&written) {
+            FETCH_CLASS_DEFAULT => Ok(ClassRef::Named(self.class_name(&written))),
+            fetch => {
+                self.ensure_valid_class_fetch_type(fetch)?;
+                Ok(ClassRef::Scope(fetch | flags))
+            }
+        }
+    }
+
+    /// `zend_set_class_name_op1` and its kin: the operand a class
+    /// reference is on the opline that reads it, the constant pair of a
+    /// class named at compile time added here, the fetch type in an
+    /// unused operand, or the `VAR` a `FETCH_CLASS` wrote.
+    fn class_operand(&mut self, class: &ClassRef) -> Result<(OperandKind, u32), CompileError> {
+        Ok(match class {
+            ClassRef::Named(name) => (OperandKind::Const, self.resolved_class_literal(name)?),
+            ClassRef::Scope(fetch) => (OperandKind::Unused, *fetch),
+            ClassRef::Fetched(at) => (OperandKind::Var, *at),
+        })
     }
 
     /// `zend_get_compatible_func_or_null` over `CG(class_table)`: whether
@@ -10018,8 +10475,14 @@ impl Emit<'_> {
     /// inside the class, which nothing here is. The name is resolved as
     /// the fetch resolves it ([`Self::class_name`]), which is the name a
     /// declaration of the file took under the same namespace.
+    #[cfg(test)]
     fn known_method(&self, class: &[u8], method: &[u8]) -> Option<Known> {
-        let class = self.class_name(class).to_ascii_lowercase();
+        self.known_method_of(&self.class_name(class), method)
+    }
+
+    /// [`Self::known_method`] over a name already resolved.
+    fn known_method_of(&self, class: &[u8], method: &[u8]) -> Option<Known> {
+        let class = class.to_ascii_lowercase();
         let method = method.to_ascii_lowercase();
         let own = self
             .active_class
@@ -10099,8 +10562,12 @@ impl Emit<'_> {
     /// `namespace\C` and any other name take the namespace before them,
     /// as [`Self::function_name`] resolves a function's, with nothing
     /// waiting for the program, since a class name resolves at compile
-    /// time.
+    /// time. `self`, `parent` and `static` written without the `\` are
+    /// no class's name and resolve to themselves.
     fn class_name(&self, name: &[u8]) -> Vec<u8> {
+        if class_fetch_type(name) != FETCH_CLASS_DEFAULT {
+            return name.to_vec();
+        }
         self.function_name(name).0
     }
 
@@ -11771,6 +12238,8 @@ mod tests {
             frameless: Vec::new(),
             namespace: Some(b"A".to_vec()),
             active_class: None,
+            active_parent: None,
+            active_constants: Vec::new(),
             active_function: None,
             this_in_scope: false,
             return_type: None,

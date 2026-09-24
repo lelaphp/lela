@@ -4508,10 +4508,7 @@ mod tests {
             refused(b"<?php C::$p();").as_deref(),
             Some("a static call whose method is named at run time this compiler cannot read yet")
         );
-        assert_eq!(
-            refused(b"<?php echo self::$p;").as_deref(),
-            Some("a class reference of the scope this compiler cannot read yet")
-        );
+        assert_eq!(refused(b"<?php echo self::$p;").as_deref(), None);
         assert_eq!(
             refused(b"<?php class D { const X = C::$p; }").as_deref(),
             Some("Constant expression contains invalid operations")
@@ -4743,10 +4740,7 @@ mod tests {
         );
         assert_eq!(
             refused(b"<?php\nclass M extends self {}"),
-            not_yet(
-                "a class reference of the scope this compiler cannot read yet",
-                2
-            )
+            compile_error("Cannot use \"self\" as class name, as it is reserved", 2)
         );
         assert_eq!(
             refused(b"<?php\ninterface I {}\nclass M extends I {}"),
@@ -6314,10 +6308,6 @@ class C {
             .map(|e| e.message)
         };
         assert_eq!(
-            refused(b"<?php new $c;").as_deref(),
-            Some("a `new` of what is no class name this compiler cannot read yet")
-        );
-        assert_eq!(
             refused(b"<?php echo E::class;").as_deref(),
             Some("a `::class` this compiler cannot read yet")
         );
@@ -6331,13 +6321,63 @@ class C {
                 "a property fetch sent to a callee the table has not this compiler cannot read yet"
             )
         );
+    }
+
+    /// A class reference of the scope and a class the program computes,
+    /// which were refused as not read, as the oracle's `[regime.dump]`
+    /// has them in the main op array: `self`, `parent` and `static` are
+    /// their fetch type in an unused operand, the scope being the
+    /// includer's and so no compile-time error, and an expression is
+    /// `FETCH_CLASS` into a `VAR`, `instanceof`'s under
+    /// `ZEND_FETCH_CLASS_NO_AUTOLOAD` and `_SILENT` beside
+    /// `_EXCEPTION`.
+    #[test]
+    fn a_class_reference_of_the_scope_or_an_expression_compiles_as_php_emits_it() {
         assert_eq!(
-            refused(b"<?php echo $o instanceof $c;").as_deref(),
-            Some("an `instanceof` of what is no class name this compiler cannot read yet")
+            oplines_of(
+                b"<?php echo self::$p; new $c; var_dump($o instanceof $c); echo $o::X, static::Y; $o::m(); parent::$q = 1; new static;"
+            ),
+            "0000 T2 = FETCH_STATIC_PROP_R string(\"p\") (self) (exception)\n\
+             0001 ECHO T2\n\
+             0002 V3 = FETCH_CLASS (exception) CV0($c)\n\
+             0003 V4 = NEW 0 V3\n\
+             0004 DO_FCALL\n\
+             0005 FREE V4\n\
+             0006 INIT_FCALL 1 96 string(\"var_dump\")\n\
+             0007 V6 = FETCH_CLASS (no-autoload) (silent) (exception) CV0($c)\n\
+             0008 T7 = INSTANCEOF CV1($o) V6\n\
+             0009 SEND_VAL T7 1\n\
+             0010 DO_ICALL\n\
+             0011 V9 = FETCH_CLASS (exception) CV1($o)\n\
+             0012 T10 = FETCH_CLASS_CONSTANT V9 string(\"X\")\n\
+             0013 ECHO T10\n\
+             0014 T11 = FETCH_CLASS_CONSTANT (static) (exception) string(\"Y\")\n\
+             0015 ECHO T11\n\
+             0016 V12 = FETCH_CLASS (exception) CV1($o)\n\
+             0017 INIT_STATIC_METHOD_CALL 0 V12 string(\"m\")\n\
+             0018 DO_FCALL\n\
+             0019 ASSIGN_STATIC_PROP string(\"q\")\n\
+             0020 OP_DATA int(1)\n\
+             0021 V15 = NEW 0 (static) (exception)\n\
+             0022 DO_FCALL\n\
+             0023 FREE V15\n\
+             0024 RETURN int(1)\n\
+             LIVE RANGES:\n\
+             \x20    4: 0004 - 0005 (new)\n\
+             \x20    15: 0022 - 0023 (new)\n"
+        );
+        let refused_message = |source: &[u8]| refused(source).map(|e| e.message);
+        assert_eq!(
+            refused_message(b"<?php function f() { return self::X; }").as_deref(),
+            Some("Cannot use \"self\" when no class scope is active")
         );
         assert_eq!(
-            refused(b"<?php new self;").as_deref(),
-            Some("a class reference of the scope this compiler cannot read yet")
+            refused_message(b"<?php class A { function f() { new parent; } }").as_deref(),
+            Some("Cannot use \"parent\" when current class scope has no parent")
+        );
+        assert_eq!(
+            refused_message(b"<?php class A { const X = static::Y; }").as_deref(),
+            Some("\"static::\" is not allowed in compile-time constants")
         );
     }
 
