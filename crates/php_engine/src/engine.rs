@@ -27,6 +27,7 @@ use crate::api::abi::{Cache, Entry, Extension, NativeNew, ObjectHandlers, Startu
 use crate::api::request::{Aside, Ending, ExtensionId, Request};
 use crate::api::values::{ClassId, Value};
 use crate::exec;
+use crate::streams::Standard;
 use crate::tier::{Nop, Tier, execute, reenter, resume};
 
 /// Everything a host knows about one request before it starts (design
@@ -46,6 +47,59 @@ pub struct RequestDescription {
     /// The source to serve, when the host has it in hand (`php -r`, the
     /// in-process tests); else the file is read by its name.
     pub source: Option<Vec<u8>>,
+    /// The CLI's standard handles, which `do_cli` registers after
+    /// `php_request_startup` and php's other hosts have none of; `None`
+    /// registers nothing.
+    pub file_handles: Option<FileHandles>,
+}
+
+/// What `do_cli` registers for a request it serves a program in
+/// (`Z/sapi/cli/php_cli.c:926-980` at 8.5.9), and the host's fds under
+/// it. `PHP_CLI_PROCESS_TITLE` first, then `cli_register_file_handles`
+/// (`:519`): `php://stdin`, `php://stdout` and `php://stderr` opened in
+/// that order, which makes them the request's resources 1, 2 and 3, and
+/// the constants `STDIN`, `STDOUT` and `STDERR` on them, each under
+/// `Core`. `do_cli`'s `-l` registers no stream, so a host leaves this
+/// `None` for a lint, and php's CGI and `FastCGI` hosts have none of it.
+///
+/// What is written to the streams goes to the sink, `STDOUT` past the
+/// `php_output` layer and `STDERR` onto its error stream (design
+/// revision 16), and `STDIN` reads the request's body. The fds are what
+/// `fstat` and `ftruncate` on the three ask, as php's `STDIO` kind asks
+/// `fstat(2)` and `ftruncate(2)` of fds 0, 1 and 2; a host with no fd for
+/// one of them hands `None`, which `fstat(2)` and `ftruncate(2)` answer
+/// as they answer a closed fd, so both answer `false`.
+#[derive(Debug, Clone)]
+pub struct FileHandles {
+    fds: Arc<[Option<std::os::fd::OwnedFd>; 3]>,
+}
+
+impl FileHandles {
+    /// The three over the fds the host hands, closed when the last
+    /// description holding them is dropped; a host hands copies of its
+    /// own, as `dup(2)` makes them.
+    #[must_use]
+    pub fn new(
+        stdin: Option<std::os::fd::OwnedFd>,
+        stdout: Option<std::os::fd::OwnedFd>,
+        stderr: Option<std::os::fd::OwnedFd>,
+    ) -> FileHandles {
+        FileHandles {
+            fds: Arc::new([stdin, stdout, stderr]),
+        }
+    }
+
+    /// The fd under one of the three, `None` where the host handed none.
+    pub(crate) fn fd(&self, standard: Standard) -> Option<std::os::fd::BorrowedFd<'_>> {
+        use std::os::fd::AsFd;
+        let [stdin, stdout, stderr] = &*self.fds;
+        let fd = match standard {
+            Standard::Stdin => stdin,
+            Standard::Stdout => stdout,
+            Standard::Stderr => stderr,
+        };
+        fd.as_ref().map(AsFd::as_fd)
+    }
 }
 
 /// Where a request's bytes go (design §4.3 seam 4): the engine owns the
@@ -1013,6 +1067,9 @@ impl Engine {
                 let _ = rinit(&mut req);
             }
         }
+        // What `do_cli` registers once `php_request_startup` has run,
+        // before the program is compiled.
+        let _ = req.register_file_handles();
         // Where the unit's constant strings live is where the unit
         // lives (design §5.2): a file's unit is published into the
         // engine's table and shared by every request that serves it,

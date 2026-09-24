@@ -713,7 +713,12 @@ pub struct Request {
     /// then each an `INCLUDE_OR_EVAL` opened, which the once forms read
     /// before they open one (`zend_include_or_eval`).
     included_files: Vec<Vec<u8>>,
-    constants: Vec<(Vec<u8>, Value)>,
+    /// The rows this request added to `EG(zend_constants)`, in the order
+    /// it added them, each under the extension it is registered by:
+    /// `Core` for what the host registers at request start
+    /// ([`crate::engine::FileHandles`]), `None` for what `define()` and
+    /// `const` wrote, php's `PHP_USER_CONSTANT`.
+    constants: Vec<(Option<&'static str>, Vec<u8>, Value)>,
     /// `zend_enum_get_case`'s slot (`Z/Zend/zend_enum.c:410`): one
     /// instance per case of each enum, made on the first read of the
     /// case and handed back by identity from then on, so that
@@ -9116,8 +9121,8 @@ impl Request {
         }
         self.constants
             .iter()
-            .find(|(n, _)| n.as_slice() == name)
-            .map(|(_, v)| *v)
+            .find(|(_, n, _)| n.as_slice() == name)
+            .map(|(_, _, v)| *v)
             .or_else(|| self.shared.constant(name))
     }
 
@@ -10234,7 +10239,7 @@ impl Request {
         rows.extend(
             self.constants
                 .iter()
-                .map(|(name, value)| (None, name.clone(), *value)),
+                .map(|(module, name, value)| (*module, name.clone(), *value)),
         );
         rows
     }
@@ -10257,7 +10262,12 @@ impl Request {
     /// request, each name a string of the request's.
     pub fn constants(&mut self) -> Result<PhpArray, Thrown> {
         let mut array = PhpArray::new(self)?;
-        let constants = self.constants.clone();
+        let constants: Vec<(Vec<u8>, Value)> = self
+            .constants
+            .iter()
+            .filter(|(module, _, _)| module.is_none())
+            .map(|(_, name, value)| (name.clone(), *value))
+            .collect();
         for (name, value) in constants {
             let key = Key::Str(PhpString::new(self, &name)?);
             self.addref(&value);
@@ -10271,8 +10281,32 @@ impl Request {
         if self.constant_named(name).is_some() {
             return Ok(false);
         }
-        self.constants.push((name.to_vec(), value));
+        self.constants.push((None, name.to_vec(), value));
         Ok(true)
+    }
+
+    /// `zend_register_constant` at request start for a constant the
+    /// host registers under `Core`, as `do_cli` registers
+    /// `PHP_CLI_PROCESS_TITLE` and `cli_register_file_handles` the three
+    /// streams: after every extension's own, so it stands last in
+    /// `Core`'s group and before what the program defines. The value's
+    /// one owner is the table's.
+    pub(crate) fn register_host_constant(&mut self, name: &'static [u8], value: Value) {
+        self.constants.push((Some("Core"), name.to_vec(), value));
+    }
+
+    /// The fd the host handed under one of its standard streams
+    /// ([`crate::engine::FileHandles`]), `None` where it handed none.
+    pub(crate) fn host_fd(
+        &self,
+        standard: crate::streams::Standard,
+    ) -> Option<std::os::fd::BorrowedFd<'_>> {
+        self.description.file_handles.as_ref()?.fd(standard)
+    }
+
+    /// Whether the host asked for the CLI's standard handles.
+    pub(crate) fn registers_file_handles(&self) -> bool {
+        self.description.file_handles.is_some()
     }
 
     /// `zend_constant::attributes`: the attributes the declaration of
@@ -11077,7 +11111,7 @@ impl Request {
     }
 
     /// The request body as a stream, `php://stdin`, which is what the
-    /// CLI's `STDIN` constant will hold: the body as the description
+    /// CLI's `STDIN` constant holds: the body as the description
     /// carries it, read whole until #544 reads it lazily.
     pub fn stdin(&mut self) -> Result<Option<Stream>, Thrown> {
         self.open_stream(b"php://stdin", b"r", false)

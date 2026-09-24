@@ -844,10 +844,11 @@ const S_IFREG: i64 = 0o100_000;
 
 /// `php_stream_memory_data` under `php_stream_memory_ops`
 /// (`Z/main/streams/memory.c:36`): the bytes, the position in them, and
-/// which of the three ways it was opened. The label is `MEMORY` for `php://memory`; the request's
-/// body read through the same bytes carries the label of the kind php
-/// reads it with, since nothing in the engine reads a body lazily yet
-/// (#544).
+/// which of the three ways it was opened. The label is `MEMORY` for
+/// `php://memory`; `php://input` reads the request's body through the
+/// same bytes under the label of the kind php reads it with, and
+/// `php://stdin` through [`HostFd`], since nothing in the engine reads a
+/// body lazily yet (#544).
 struct Memory {
     data: Vec<u8>,
     fpos: usize,
@@ -963,20 +964,8 @@ impl Ops for Memory {
         Some(true)
     }
 
-    fn meta_data(&self) -> MetaData {
-        if self.label == "STDIO" {
-            MetaData::Stdio { blocked: true }
-        } else {
-            MetaData::Generic
-        }
-    }
-
     fn memory_buffer(&self) -> Option<&[u8]> {
         (self.label == "MEMORY").then_some(self.data.as_slice())
-    }
-
-    fn is_stdio(&self) -> bool {
-        self.label == "STDIO"
     }
 }
 
@@ -1517,14 +1506,63 @@ fn plain_open(req: &Request, path: &[u8], mode: &[u8]) -> Result<PhpStream, Stri
 
 // --------------------------------------------------------- php://
 
-/// The host's standard streams as `php://stdout` and `php://stderr`
-/// reach them under the CLI: fd 1 is the body the sink is handed, past
-/// the `php_output` layer (`sapi_cli_ub_write`, since php's CLI writes
-/// both to the one fd), and fd 2 is the sink's error stream (design
-/// revision 16). Reading either is the `EBADF` a write-only fd
-/// answers.
-struct HostFd {
-    stderr: bool,
+/// Which of the host's three standard streams a `php://` path names,
+/// fd 0, 1 or 2 under php's CLI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Standard {
+    Stdin,
+    Stdout,
+    Stderr,
+}
+
+/// The host's standard streams as `php://stdin`, `php://stdout` and
+/// `php://stderr` reach them, php's `STDIO` kind over fds 0, 1 and 2.
+/// What is read and written is the host's sink and body, not the fds:
+/// fd 1 is the body the sink is handed, past the `php_output` layer
+/// (`sapi_cli_ub_write`, since php's CLI writes both to the one fd), fd 2
+/// is the sink's error stream (design revision 16), and fd 0 is the
+/// request's body read whole until #544 reads it lazily. Reading fd 1 or
+/// fd 2 is the `EBADF` a write-only fd answers.
+///
+/// `fstat` and `ftruncate` are `fstat(2)` and `ftruncate(2)` of the fd
+/// the host handed under the stream ([`crate::engine::FileHandles`]):
+/// the process's own under the CLI binary, and a pipe's under the
+/// in-process `Capture` host, since a pipe is what php's CLI has there
+/// under a test runner. A host that handed none, and one that registers
+/// no handles, which is every host but the CLI's, answers as a closed fd
+/// does, `false` to both.
+///
+/// ```php
+/// var_dump(count(fstat(STDOUT)), fstat(STDERR)['size'], ftruncate(fopen('php://stdout', 'w'), 0), ftruncate(STDIN, 0));
+/// ```
+/// ```expect
+/// int(26)
+/// int(0)
+/// bool(false)
+/// bool(false)
+/// ```
+enum HostFd {
+    /// fd 0, over the body it reads.
+    Stdin(Memory),
+    Stdout,
+    Stderr,
+}
+
+impl HostFd {
+    fn standard(&self) -> Standard {
+        match self {
+            HostFd::Stdin(_) => Standard::Stdin,
+            HostFd::Stdout => Standard::Stdout,
+            HostFd::Stderr => Standard::Stderr,
+        }
+    }
+
+    /// The fd under the stream, as a file `fstat(2)` and `ftruncate(2)`
+    /// can be asked through: a copy the call closes behind it.
+    fn file(&self, req: &Request) -> Option<std::fs::File> {
+        let fd = req.host_fd(self.standard())?;
+        fd.try_clone_to_owned().ok().map(std::fs::File::from)
+    }
 }
 
 impl Ops for HostFd {
@@ -1533,15 +1571,23 @@ impl Ops for HostFd {
     }
 
     fn write(&mut self, req: &mut Request, buf: &[u8]) -> Option<usize> {
-        if self.stderr {
-            req.write_stderr(buf);
-        } else {
-            req.ub_write(buf);
+        match self {
+            HostFd::Stdin(body) => body.write(req, buf),
+            HostFd::Stdout => {
+                req.ub_write(buf);
+                Some(buf.len())
+            }
+            HostFd::Stderr => {
+                req.write_stderr(buf);
+                Some(buf.len())
+            }
         }
-        Some(buf.len())
     }
 
-    fn read(&mut self, req: &mut Request, buf: &mut [u8], _eof: &mut bool) -> Option<usize> {
+    fn read(&mut self, req: &mut Request, buf: &mut [u8], eof: &mut bool) -> Option<usize> {
+        if let HostFd::Stdin(body) = self {
+            return body.read(req, buf, eof);
+        }
         let text = format!(
             "{}(): Read of {} bytes failed with errno={EBADF} Bad file descriptor",
             req.active_native(),
@@ -1551,18 +1597,35 @@ impl Ops for HostFd {
         None
     }
 
-    fn close(&mut self, _req: &mut Request) -> i32 {
-        0
+    fn close(&mut self, req: &mut Request) -> i32 {
+        match self {
+            HostFd::Stdin(body) => body.close(req),
+            HostFd::Stdout | HostFd::Stderr => 0,
+        }
     }
 
     fn seekable(&self) -> bool {
         true
     }
 
-    /// `ftruncate(2)` on a pipe or a terminal, which is what the host's
-    /// fds are to this engine: supported, and refused.
-    fn truncate(&mut self, _req: &mut Request, _size: usize) -> Option<bool> {
-        Some(false)
+    /// `php_stdiop_stat` (`Z/main/streams/plain_wrapper.c:703`):
+    /// `fstat(2)` of the host's fd.
+    fn stat(&mut self, req: &mut Request) -> Option<StatBuf> {
+        Some(stat_buf(&self.file(req)?.metadata().ok()?))
+    }
+
+    /// `php_stdiop_set_option`'s `PHP_STREAM_OPTION_TRUNCATE_API`
+    /// (`Z/main/streams/plain_wrapper.c:983`): supported, as an fd is,
+    /// and `ftruncate(2)` of the host's fd, which a pipe and a terminal
+    /// refuse.
+    fn truncate(&mut self, req: &mut Request, size: usize) -> Option<bool> {
+        let Some(file) = self.file(req) else {
+            return Some(false);
+        };
+        Some(
+            file.set_len(u64::try_from(size).unwrap_or(u64::MAX))
+                .is_ok(),
+        )
     }
 
     fn meta_data(&self) -> MetaData {
@@ -1571,6 +1634,72 @@ impl Ops for HostFd {
 
     fn is_stdio(&self) -> bool {
         true
+    }
+}
+
+impl Request {
+    /// `PHP_CLI_PROCESS_TITLE`, which `do_cli` registers after
+    /// `php_request_startup` as whether `cli_set_process_title` can set
+    /// the title, `true` on the systems this engine builds for, then
+    /// `cli_register_file_handles` (`Z/sapi/cli/php_cli.c:519`):
+    /// `php://stdin` opened `rb`, `php://stdout` and `php://stderr` `wb`,
+    /// and the three constants on them, each holding its stream's one
+    /// owner. Where one of the three does not open, php closes the others
+    /// and registers none, which no host here reaches. A no-op for a host
+    /// that asked for no handles ([`crate::engine::FileHandles`]).
+    ///
+    /// ```php
+    /// var_dump(is_resource(STDIN), get_resource_type(STDOUT), PHP_CLI_PROCESS_TITLE);
+    /// var_dump(STDIN, STDOUT, STDERR, fwrite(STDERR, "x"));
+    /// var_dump(array_slice(array_keys(get_defined_constants(true)['Core']), -5));
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// string(6) "stream"
+    /// bool(true)
+    /// resource(1) of type (stream)
+    /// resource(2) of type (stream)
+    /// resource(3) of type (stream)
+    /// int(1)
+    /// array(5) {
+    ///   [0]=>
+    ///   string(10) "PHP_BINARY"
+    ///   [1]=>
+    ///   string(21) "PHP_CLI_PROCESS_TITLE"
+    ///   [2]=>
+    ///   string(5) "STDIN"
+    ///   [3]=>
+    ///   string(6) "STDOUT"
+    ///   [4]=>
+    ///   string(6) "STDERR"
+    /// }
+    /// ```
+    /// ```stderr
+    /// x
+    /// ```
+    pub(crate) fn register_file_handles(&mut self) -> Result<(), Thrown> {
+        if !self.registers_file_handles() {
+            return Ok(());
+        }
+        self.register_host_constant(b"PHP_CLI_PROCESS_TITLE", Value::bool(true));
+        let mut opened = Vec::with_capacity(3);
+        for (path, mode) in [
+            (&b"php://stdin"[..], &b"rb"[..]),
+            (b"php://stdout", b"wb"),
+            (b"php://stderr", b"wb"),
+        ] {
+            opened.push(self.open_stream(path, mode, false)?);
+        }
+        let [Some(stdin), Some(stdout), Some(stderr)] = opened[..] else {
+            for stream in opened.into_iter().flatten() {
+                stream.close(self);
+            }
+            return Ok(());
+        };
+        self.register_host_constant(b"STDIN", stdin.as_value());
+        self.register_host_constant(b"STDOUT", stdout.as_value());
+        self.register_host_constant(b"STDERR", stderr.as_value());
+        Ok(())
     }
 }
 
@@ -1638,37 +1767,31 @@ fn php_open(req: &mut Request, path: &[u8], mode: &[u8]) -> Result<Opened, Throw
     let stream = match lower.as_slice() {
         b"memory" => memory(TempMode::of(mode)),
         b"output" => PhpStream::new(Box::new(Output), b"wb"),
-        b"stdin" | b"input" => {
-            let (label, allocated): (_, &[u8]) = if lower == b"stdin" {
-                ("STDIO", mode)
-            } else {
-                ("Input", b"rb")
-            };
-            let mut stream = PhpStream::new(
-                Box::new(Memory {
+        // `php_stream_input_ops` seeks the body it reads
+        // (`php_stream_input_seek`).
+        b"input" => PhpStream::new(
+            Box::new(Memory {
+                data: req.body_bytes().to_vec(),
+                fpos: 0,
+                mode: TempMode::ReadOnly,
+                label: "Input",
+            }),
+            b"rb",
+        ),
+        // Each a pipe or a terminal under the CLI, which
+        // `detect_is_seekable` says does not seek.
+        b"stdin" | b"stdout" | b"stderr" => {
+            let kind = match lower.as_slice() {
+                b"stdin" => HostFd::Stdin(Memory {
                     data: req.body_bytes().to_vec(),
                     fpos: 0,
                     mode: TempMode::ReadOnly,
-                    label,
+                    label: "STDIO",
                 }),
-                allocated,
-            );
-            // `php_stream_input_ops` seeks the body it reads
-            // (`php_stream_input_seek`); fd 0 under the CLI is a pipe or
-            // a terminal, which `detect_is_seekable` says does not.
-            if label == "STDIO" {
-                stream.flags.no_seek = true;
-                stream.position = -1;
-            }
-            stream
-        }
-        b"stdout" | b"stderr" => {
-            let mut stream = PhpStream::new(
-                Box::new(HostFd {
-                    stderr: lower == b"stderr",
-                }),
-                mode,
-            );
+                b"stdout" => HostFd::Stdout,
+                _ => HostFd::Stderr,
+            };
+            let mut stream = PhpStream::new(Box::new(kind), mode);
             stream.flags.no_seek = true;
             stream.position = -1;
             stream
