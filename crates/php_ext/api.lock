@@ -89,6 +89,7 @@ call::fetch_constant
 call::initialize_lazy
 call::instantiate
 call::iterate
+call::known_method
 call::lookup_class
 call::lookup_function
 call::new_lazy_ghost

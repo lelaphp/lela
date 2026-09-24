@@ -15,7 +15,7 @@
 //! yet (#412).
 
 use php_ext::abi::Callable;
-use php_ext::call::{call_array, call_named};
+use php_ext::call::{call_array, call_named, known_method};
 use php_ext::coerce::{is_callable, to_callable, value_name};
 use php_ext::decl::{FunctionDecl, MethodDecl, Visibility};
 use php_ext::raising::{Thrown, arg_count_error, arg_type_error, throw};
@@ -996,69 +996,70 @@ fn array_argument(req: &mut Request, position: u32) -> Result<PhpArray, Thrown> 
     }
 }
 
-/// The value `zend_is_callable_ex` resolves to the callee a reflector
-/// already looked its declaration up with: the closure itself, the
-/// function's name, or the `[$object, 'method']` pair a method makes
-/// with the receiver the call was given and the `['Class', 'method']`
-/// pair it makes without one. One owner, the caller's, so that what a
-/// pair holds is released with it.
-fn callable_value(
-    req: &mut Request,
-    function: &FunctionRef,
-    this: Option<PhpObject>,
-) -> Result<Value, Thrown> {
-    match function {
-        FunctionRef::Closure(object) => {
-            let value = object.as_value();
-            req.addref(&value);
-            Ok(value)
-        }
-        FunctionRef::Global(name) => string_value(req, name),
-        FunctionRef::Method(scope, name) => {
-            let first = if let Some(object) = this {
-                let value = object.as_value();
-                req.addref(&value);
-                value
-            } else {
-                let class = class_name_of(req, *scope);
-                string_value(req, &class)?
-            };
-            let method = string_value(req, name)?;
-            let mut pair = PhpArray::new(req)?;
-            pair.set(req, Key::Int(0), first)?;
-            pair.set(req, Key::Int(1), method)?;
-            Ok(Value::array(pair))
-        }
-    }
-}
-
-/// `zend_call_known_fcc` over what a reflector holds, which is what
-/// `ReflectionFunction::invoke` and `reflection_method_invoke` end in:
-/// the callable the reference resolves to, served by `serve` with the
-/// arguments the call was given, and php's `ReflectionException` for a
-/// reference that resolves to no callee, the `Invocation of ... failed`
-/// php raises when `zend_call_known_fcc` came back with nothing and
-/// left nothing pending. The value the callable was read off is given
-/// up after the call, as `zend_fcc_dtor` gives its copy up.
+/// `zend_call_known_fcc` over the function a `ReflectionFunction`
+/// holds, which is what `ReflectionFunction::invoke` ends in: the
+/// callable its name or closure resolves to through
+/// `zend_is_callable_ex`, served by `serve` with the arguments the call
+/// was given, and the value it was read off, one owner of the caller's,
+/// given up after the call as `zend_fcc_dtor` gives its copy up. What
+/// names no callee is php's `ReflectionException`, the `Invocation of
+/// ... failed` php raises when the call came back with nothing and left
+/// nothing pending; a method is [`invoke_method`]'s and never reaches
+/// here.
 fn invoke(
     req: &mut Request,
     function: &FunctionRef,
-    this: Option<PhpObject>,
     serve: impl FnOnce(&mut Request, &Callable) -> Result<Value, Thrown>,
 ) -> Result<Value, Thrown> {
-    let value = callable_value(req, function, this)?;
+    let value = match function {
+        FunctionRef::Method(..) => return Err(invocation_failed(req, function)),
+        FunctionRef::Closure(object) => {
+            let value = object.as_value();
+            req.addref(&value);
+            value
+        }
+        FunctionRef::Global(name) => string_value(req, name)?,
+    };
     let served = if is_callable(req, &value) {
         to_callable(req, &value).and_then(|callable| serve(req, &callable))
     } else {
-        let what = invocation_of(req, function);
-        Err(throw(
-            req,
-            "ReflectionException",
-            &format!("Invocation of {what} failed"),
-        ))
+        Err(invocation_failed(req, function))
     };
     req.release(value);
     served
+}
+
+/// `zend_call_known_function` over the method a `ReflectionMethod`
+/// holds, which is what `reflection_method_invoke` ends in: the `fcc`
+/// php fills by hand, the method `decl` names on `class`, the
+/// reflector's class, as the called scope and on the receiver given,
+/// with no visibility held against the caller ([`known_method`]),
+/// served by `serve`. A method the class does not hold is php's
+/// `Invocation of method ... failed`, named on `scope`, the class that
+/// declares it, as php names `mptr->common.scope`.
+fn invoke_method(
+    req: &mut Request,
+    class: ClassId,
+    decl: &MethodDecl,
+    scope: ClassId,
+    this: Option<PhpObject>,
+    serve: impl FnOnce(&mut Request, &Callable) -> Result<Value, Thrown>,
+) -> Result<Value, Thrown> {
+    let Some(callable) = known_method(req, class, &decl.function.name, this) else {
+        let held = FunctionRef::Method(scope, decl.function.name.0.to_vec());
+        return Err(invocation_failed(req, &held));
+    };
+    serve(req, &callable)
+}
+
+/// php's `ReflectionException` for a call that named no callee.
+fn invocation_failed(req: &mut Request, function: &FunctionRef) -> Thrown {
+    let what = invocation_of(req, function);
+    throw(
+        req,
+        "ReflectionException",
+        &format!("Invocation of {what} failed"),
+    )
 }
 
 /// php's two `Invocation of %s failed` subjects: `function name()` and
@@ -1100,7 +1101,7 @@ pub(super) fn reflection_function_invoke(req: &mut Request) -> Result<Value, Thr
     let (function, _) = this_function(req)?;
     let arguments = variadic_arguments(req, 1);
     let named = req.named_arguments();
-    invoke(req, &function, None, |req, callable| {
+    invoke(req, &function, |req, callable| {
         call_named(req, callable, &arguments, &named)
     })
 }
@@ -1123,7 +1124,7 @@ pub(super) fn reflection_function_invoke_args(req: &mut Request) -> Result<Value
     exactly_arguments(req, 1)?;
     let (function, _) = this_function(req)?;
     let array = array_argument(req, 1)?;
-    invoke(req, &function, None, |req, callable| {
+    invoke(req, &function, |req, callable| {
         call_array(req, callable, array)
     })
 }
@@ -1215,8 +1216,7 @@ pub(super) fn reflection_method_invoke(req: &mut Request) -> Result<Value, Throw
     let this = receiver(req, &decl, scope, 1)?;
     let arguments = variadic_arguments(req, 2);
     let named = req.named_arguments();
-    let function = FunctionRef::Method(class, decl.function.name.0.to_vec());
-    invoke(req, &function, this, |req, callable| {
+    invoke_method(req, class, &decl, scope, this, |req, callable| {
         call_named(req, callable, &arguments, &named)
     })
 }
@@ -1233,6 +1233,24 @@ pub(super) fn reflection_method_invoke(req: &mut Request) -> Result<Value, Throw
 /// ```expect
 /// int(5)
 /// int(5)
+/// ```
+///
+/// The method is the one the reflector holds, served as php fills
+/// `fcc` by hand and not resolved through `zend_is_callable_ex`: a
+/// private or protected method is served from outside its class, and
+/// one the class declares on itself with no receiver (#733).
+///
+/// ```php
+/// class Vault {
+///     private function open($a, $b) { return "$a$b"; }
+///     protected static function peek($x) { return "[$x]"; }
+/// }
+/// var_dump((new ReflectionMethod('Vault', 'open'))->invokeArgs(new Vault(), ['b' => 2, 'a' => 1]));
+/// var_dump((new ReflectionMethod('Vault', 'peek'))->invokeArgs(null, [3]));
+/// ```
+/// ```expect
+/// string(2) "12"
+/// string(3) "[3]"
 /// ```
 ///
 /// What is no array is php's `TypeError`, whose tail names the value as
@@ -1255,8 +1273,7 @@ pub(super) fn reflection_method_invoke_args(req: &mut Request) -> Result<Value, 
     exactly_arguments(req, 2)?;
     let this = receiver(req, &decl, scope, 1)?;
     let array = array_argument(req, 2)?;
-    let function = FunctionRef::Method(class, decl.function.name.0.to_vec());
-    invoke(req, &function, this, |req, callable| {
+    invoke_method(req, class, &decl, scope, this, |req, callable| {
         call_array(req, callable, array)
     })
 }
