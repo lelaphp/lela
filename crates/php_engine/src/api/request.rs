@@ -9077,10 +9077,12 @@ impl Request {
                 .into_iter()
                 .flatten(),
         );
-        let loaders = std::mem::take(&mut self.autoloaders);
-        let all: Vec<Callable> = error.chain(exception).chain(loaders).collect();
-        for handler in all {
+        let handlers: Vec<Callable> = error.chain(exception).collect();
+        for handler in handlers {
             self.release(handler.into_value());
+        }
+        for loader in std::mem::take(&mut self.autoloaders) {
+            loader.release(self);
         }
     }
 
@@ -9724,10 +9726,32 @@ impl Request {
     /// `spl_autoload_register()`: the callable onto the stack, at its
     /// head under `prepend`, and nothing where one of the same target
     /// is there already (`spl_find_registered_function`). The stack
-    /// takes an owner of the callable's value, as
+    /// takes the callable's owners, [`Callable::addref`], as
     /// `autoload_func_info_from_fci` takes one of its object and closure,
-    /// and gives it up when the callable leaves the stack or the request
-    /// ends.
+    /// and gives them up when the callable leaves the stack or the
+    /// request ends.
+    /// A `Class::method` string registered with `$this` in scope is
+    /// served on that object after the expression that made it is gone:
+    ///
+    /// ```php
+    /// class Test {
+    ///     function register() { spl_autoload_register('Test::load'); }
+    ///     function load($name) { echo "load $name\n"; var_dump($this); }
+    ///     function __destruct() { echo "destructed\n"; }
+    /// }
+    /// (new Test)->register();
+    /// $a = [1, 2, 3];
+    /// var_dump(class_exists('Missing'));
+    /// echo "end\n";
+    /// ```
+    /// ```expect
+    /// load Missing
+    /// object(Test)#1 (0) {
+    /// }
+    /// bool(false)
+    /// end
+    /// destructed
+    /// ```
     pub fn autoload_register(&mut self, loader: Callable, prepend: bool) -> Result<(), Thrown> {
         if self
             .autoloaders
@@ -9736,7 +9760,7 @@ impl Request {
         {
             return Ok(());
         }
-        self.addref(&loader.value());
+        loader.addref(self);
         if prepend {
             self.autoloaders.insert(0, loader);
         } else {
@@ -9754,8 +9778,7 @@ impl Request {
         else {
             return false;
         };
-        let removed = self.autoloaders.remove(at);
-        self.release(removed.into_value());
+        self.autoloaders.remove(at).release(self);
         true
     }
 
@@ -10589,7 +10612,7 @@ impl Request {
     /// destroyed table.
     pub(crate) fn free_shutdown_functions(&mut self) {
         for (callback, arguments) in std::mem::take(&mut self.shutdown_functions) {
-            self.release(callback.into_value());
+            callback.release(self);
             for value in arguments {
                 self.release(value);
             }

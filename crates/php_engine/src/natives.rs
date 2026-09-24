@@ -2264,6 +2264,29 @@ fn error_reporting(req: &mut Request) -> Result<Value, Thrown> {
 /// d
 /// ```
 ///
+/// The entry owns what its callable resolved to, `zend_fcc_addref`: a
+/// `Class::method` string registered with `$this` in scope names the
+/// object the call is bound to, which the entry keeps past the
+/// expression that made it, so the walk serves the method on it and its
+/// destructor comes after:
+///
+/// ```php
+/// class Test {
+///     function register() { register_shutdown_function('Test::method'); }
+///     function method() { var_dump($this); }
+///     function __destruct() { echo "destructed\n"; }
+/// }
+/// (new Test)->register();
+/// $a = [1, 2, 3];
+/// echo "end\n";
+/// ```
+/// ```expect
+/// end
+/// object(Test)#1 (0) {
+/// }
+/// destructed
+/// ```
+///
 /// A callback that names nothing is php's `TypeError` at the
 /// registration, worded as `zend_parse_arg_func` words the two misses,
 /// and no argument at all is php's `ArgumentCountError`:
@@ -2295,7 +2318,7 @@ fn register_shutdown_function(req: &mut Request) -> Result<Value, Thrown> {
         return Err(too_few_arguments(req, 1, 0));
     }
     let callback = callable_argument(req, 1)?;
-    req.addref(&callback.value());
+    callback.addref(req);
     let mut arguments = Vec::new();
     for position in 2..=u32::try_from(count).unwrap_or(u32::MAX) {
         let value = req.argument(position).unwrap_or_default();

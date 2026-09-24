@@ -412,15 +412,45 @@ impl Callable {
         self.target
     }
 
-    /// The value the callable came from, a view and no owner taken:
-    /// what a native addrefs where php's `zend_fcc_addref` does, to
-    /// hold the callable past the call frame it was read off.
+    /// The value the callable came from, a view and no owner taken. A
+    /// list that holds the callable past the call frame it was read off
+    /// takes its owners with [`Callable::addref`], not of this alone.
     pub(crate) const fn value(&self) -> Value {
         self.value
     }
 
     pub(crate) fn into_value(self) -> Value {
         self.value
+    }
+
+    /// `zend_fcc_addref` (`Z/Zend/zend_API.h:773`): the owners a list
+    /// that keeps the callable past the frame it was read off takes, its
+    /// value's and, `GC_ADDREF(fcc->object)`, the receiver's it resolved
+    /// to. A `Class::method` string taken with `$this` in scope names an
+    /// object the string does not own, so the list owns it itself. A
+    /// closure's owner is its value's, since `fcc->closure` is the value.
+    /// Given up by [`Callable::release`].
+    pub(crate) fn addref(&self, req: &Request) {
+        req.addref(&self.value);
+        if let Target::Method {
+            this: Some(this), ..
+        } = self.target
+        {
+            req.addref(&this.as_value());
+        }
+    }
+
+    /// `zend_fcc_dtor` (`Z/Zend/zend_API.h:798`): the owners
+    /// [`Callable::addref`] took given up, the receiver's first,
+    /// `OBJ_RELEASE(fcc->object)`, and then the value's.
+    pub(crate) fn release(self, req: &mut Request) {
+        if let Target::Method {
+            this: Some(this), ..
+        } = self.target
+        {
+            req.release(this.as_value());
+        }
+        req.release(self.value);
     }
 }
 
