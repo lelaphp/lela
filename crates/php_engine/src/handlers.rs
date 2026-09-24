@@ -9256,6 +9256,29 @@ fn add_element(
 /// on
 /// ```
 ///
+/// A loop over a `TMP` in a function body leaves nothing behind for
+/// the frame's teardown either: [`Request::pop_frame`] gives up every
+/// owner the frame's slots still hold, temporaries with the CVs, so a
+/// subject left standing in its `TMP` after the `FE_FREE` gave it up
+/// was given up again on the return, and the next blocks of its size
+/// were handed out of a broken free list. `Zend/tests/gc_051.phpt`'s
+/// early return out of a loop over a cast is one shape, a loop walked to
+/// its end over an `INIT_ARRAY` the other (#771).
+///
+/// ```php
+/// function f(string $s): object { foreach ((array) $s as $v) { $o = new stdClass; return $o; } }
+/// function g($s) { foreach ([$s] as $v) {} }
+/// for ($i = 0; $i < 3; $i++) {
+///     $a = new stdClass; $b = new stdClass; $a->ref = $b; $b->ref = $a;
+///     $r = f('x'); g('x');
+///     $x = []; $x[] = 1; $y = []; $y[] = 1; $z = []; $z[] = 1;
+/// }
+/// echo "ok\n";
+/// ```
+/// ```expect
+/// ok
+/// ```
+///
 /// The loop reads the array it copied, so an assignment to the subject
 /// inside the body changes nothing the loop sees, and the copy takes no
 /// element of its own: one more owner, released by the `FE_FREE`. The
