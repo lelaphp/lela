@@ -4299,6 +4299,23 @@ impl Request {
     /// handler that has already held the value to the declared type
     /// reaches this one, since the verify raises a deprecation of its
     /// own and php runs it once (`zend_binary_assign_op_typed_prop`).
+    ///
+    /// The write through a reference gives what the cell held up once,
+    /// the cell's own release after the write, so each value written
+    /// over is freed and nothing is freed twice:
+    ///
+    /// ```php
+    /// class C { public static $p; }
+    /// $v = str_repeat("x", 32);
+    /// C::$p = &$v;
+    /// C::$p = str_repeat("y", 32);
+    /// C::$p = str_repeat("z", 32);
+    /// var_dump($v, C::$p);
+    /// ```
+    /// ```expect
+    /// string(32) "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+    /// string(32) "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+    /// ```
     pub(crate) fn store_static_property(&mut self, declaring: ClassId, name: &[u8], value: Value) {
         let held = self
             .statics
@@ -4309,10 +4326,9 @@ impl Request {
             return;
         };
         if let Some(ValueRef::Reference(cell)) = self.statics.get(at).map(|(_, v)| v.as_ref()) {
+            // `PhpRef::set` gives up what the cell held, after the write.
             let cell = *cell;
-            let previous = cell.get();
             cell.set(self, value);
-            self.release(previous);
             return;
         }
         let previous = self
