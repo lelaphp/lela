@@ -350,7 +350,7 @@ impl ObjectHandlers for Handlers {
     ) -> Result<Value, Thrown> {
         let target = offset.and_then(|o| o.deref().as_object().copied());
         match target {
-            Some(target) if !read_overridden(req, object) => {
+            Some(target) if overridden_bits(req, object)? & SOS_OVERRIDDEN_READ == 0 => {
                 let found = with(req, object, |s| {
                     s.places
                         .get(&RowKey::Id(target.index()))
@@ -374,10 +374,7 @@ impl ObjectHandlers for Handlers {
     ) -> Result<(), Thrown> {
         let target = offset.and_then(|o| o.deref().as_object().copied());
         match target {
-            Some(target)
-                if !crate::overridden(req, object, b"offsetset")
-                    && !crate::overridden(req, object, b"gethash") =>
-            {
+            Some(target) if overridden_bits(req, object)? & SOS_OVERRIDDEN_WRITE == 0 => {
                 if crate::is_a(req, object.class(), b"MultipleIterator")
                     && !crate::is_a(req, target.class(), b"Iterator")
                 {
@@ -406,7 +403,7 @@ impl ObjectHandlers for Handlers {
         let Some(target) = offset.deref().as_object().copied() else {
             return Std.has_dimension(req, object, offset, not_empty);
         };
-        if read_overridden(req, object) {
+        if overridden_bits(req, object)? & SOS_OVERRIDDEN_READ != 0 {
             return Std.has_dimension(req, object, offset, not_empty);
         }
         let found = with(req, object, |s| {
@@ -428,10 +425,7 @@ impl ObjectHandlers for Handlers {
         offset: &Value,
     ) -> Result<(), Thrown> {
         match offset.deref().as_object().copied() {
-            Some(target)
-                if !crate::overridden(req, object, b"offsetunset")
-                    && !crate::overridden(req, object, b"gethash") =>
-            {
+            Some(target) if overridden_bits(req, object)? & SOS_OVERRIDDEN_UNSET == 0 => {
                 let key = RowKey::Id(target.index());
                 if let Some((object, inf)) = with(req, object, |s| s.detach(&key))? {
                     req.release(inf);
@@ -489,11 +483,53 @@ impl ObjectHandlers for Handlers {
     }
 }
 
-/// `SOS_OVERRIDDEN_READ_DIMENSION`.
-fn read_overridden(req: &mut Request, object: PhpObject) -> bool {
-    crate::overridden(req, object, b"gethash")
+const SOS_OVERRIDDEN_READ: i64 = 1;
+const SOS_OVERRIDDEN_WRITE: i64 = 2;
+const SOS_OVERRIDDEN_UNSET: i64 = 4;
+
+/// `intern->flags` as the dimension handlers test it: for a subclass of
+/// `SplObjectStorage` the `SOS_OVERRIDDEN_*` bits
+/// `spl_object_storage_new_ex` sets for a `getHash`, `offsetGet`,
+/// `offsetExists`, `offsetSet` or `offsetUnset` of its own; for a
+/// `MultipleIterator`, which shares the field, its `MIT_*` flags, so
+/// `MIT_NEED_ALL` reads as the read bit and `MIT_KEYS_ASSOC` as the
+/// write bit, as they do in php.
+///
+/// ```php
+/// $any = new MultipleIterator(MultipleIterator::MIT_NEED_ANY);
+/// $any[new ArrayIterator([1])] = 'a';
+/// var_dump($any->countIterators());
+/// $assoc = new MultipleIterator(MultipleIterator::MIT_NEED_ANY | MultipleIterator::MIT_KEYS_ASSOC);
+/// try { $assoc[new ArrayIterator([1])] = 'a'; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { $any[new ArrayIterator([1])]; } catch (Exception $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+/// $all = new MultipleIterator();
+/// try { $all[new ArrayIterator([1])]; } catch (Error $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// int(1)
+/// Cannot use object of type MultipleIterator as array
+/// UnexpectedValueException: Object not found
+/// Error: Cannot use object of type MultipleIterator as array
+/// ```
+fn overridden_bits(req: &mut Request, object: PhpObject) -> Result<i64, Thrown> {
+    if crate::is_a(req, object.class(), b"MultipleIterator") {
+        return with(req, object, |s| s.flags);
+    }
+    let hash = crate::overridden(req, object, b"gethash");
+    let mut bits = 0;
+    if hash
         || crate::overridden(req, object, b"offsetget")
         || crate::overridden(req, object, b"offsetexists")
+    {
+        bits |= SOS_OVERRIDDEN_READ;
+    }
+    if hash || crate::overridden(req, object, b"offsetset") {
+        bits |= SOS_OVERRIDDEN_WRITE;
+    }
+    if hash || crate::overridden(req, object, b"offsetunset") {
+        bits |= SOS_OVERRIDDEN_UNSET;
+    }
+    Ok(bits)
 }
 
 /// `spl_object_storage_clone`: every row attached anew to the copy.
