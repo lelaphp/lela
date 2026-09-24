@@ -6,9 +6,9 @@
 //!
 //! `hash.c`'s natives, `HashContext` over a payload of php's
 //! `php_hashcontext_object`, the `mhash*` compatibility natives and the
-//! `MHASH_*` constants. The algorithms are php's table in its order,
-//! the cryptographic families up to GOST so far; each state is php's C
-//! struct as fields, so `__serialize` writes what php writes.
+//! `MHASH_*` constants. The algorithms are php's table in its order;
+//! each state is php's C struct as fields, so `__serialize` writes what
+//! php writes.
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -31,14 +31,18 @@
 )]
 
 mod algos;
+mod checksum;
 mod gost;
+mod haval;
 mod md;
+mod murmur;
 mod natives;
 mod sha;
 mod snefru;
 mod stub;
 mod tiger;
 mod whirlpool;
+mod xxhash;
 
 use php_ext::abi::{Extension, ExtensionBuilder};
 

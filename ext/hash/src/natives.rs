@@ -15,7 +15,7 @@ use php_ext::raising::{self, Thrown, arg_count_error, arg_type_error, arg_value_
 use php_ext::request::{Request, Stream};
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
-use crate::algos::{self, ALGOS, Algo, Refusal, State};
+use crate::algos::{self, ALGOS, Algo, Options, Refusal, State};
 use crate::stub::stub;
 
 /// A native's entry.
@@ -231,9 +231,9 @@ fn long(req: &mut Request, position: u32, default: i64) -> Result<i64, Thrown> {
 
 /// `Z_PARAM_ARRAY_HT`: php's `HashTable *args`, `NULL` where the call
 /// gave none.
-fn options(req: &mut Request, position: u32) -> Result<Option<PhpArray>, Thrown> {
+fn options(req: &mut Request, position: u32) -> Result<Options, Thrown> {
     let value = argument(req, position, &Type::Array)?;
-    Ok(value.and_then(|v| v.as_array().copied()))
+    Ok(Options(value.and_then(|v| v.as_array().copied())))
 }
 
 /// `PHP_HASHCONTEXT_VERIFY`'s `TypeError`.
@@ -300,7 +300,7 @@ fn digest_value(req: &mut Request, digest: &[u8], binary: bool) -> Result<Value,
 
 /// `hash_init(context, NULL)`, the pieces, `hash_final`.
 fn digest_of(req: &mut Request, algo: &Algo, pieces: &[&[u8]]) -> Result<Vec<u8>, Thrown> {
-    let mut state = (algo.init)(req, None)?;
+    let mut state = (algo.init)(req, Options::default())?;
     for piece in pieces {
         state.update(piece);
     }
@@ -438,7 +438,7 @@ fn do_hmac(req: &mut Request, file: bool) -> Result<Value, Thrown> {
             return Ok(Value::bool(false));
         };
         let k = hmac_key(req, algo, &key)?;
-        let mut state = (algo.init)(req, None)?;
+        let mut state = (algo.init)(req, Options::default())?;
         state.update(&k);
         if !pump(req, stream, state.as_mut())? {
             return Ok(Value::bool(false));
@@ -808,10 +808,10 @@ fn names(req: &mut Request, crypto: bool) -> Result<Value, Thrown> {
 /// `hash_algos(): array`, the table's names in its order.
 ///
 /// ```php
-/// echo implode(' ', array_slice(hash_algos(), 0, 29)), "\n";
+/// echo count(hash_algos()), ' ', implode(' ', hash_algos()), "\n";
 /// ```
 /// ```expect
-/// md2 md4 md5 sha1 sha224 sha256 sha384 sha512/224 sha512/256 sha512 sha3-224 sha3-256 sha3-384 sha3-512 ripemd128 ripemd160 ripemd256 ripemd320 whirlpool tiger128,3 tiger160,3 tiger192,3 tiger128,4 tiger160,4 tiger192,4 snefru snefru256 gost gost-crypto
+/// 60 md2 md4 md5 sha1 sha224 sha256 sha384 sha512/224 sha512/256 sha512 sha3-224 sha3-256 sha3-384 sha3-512 ripemd128 ripemd160 ripemd256 ripemd320 whirlpool tiger128,3 tiger160,3 tiger192,3 tiger128,4 tiger160,4 tiger192,4 snefru snefru256 gost gost-crypto adler32 crc32 crc32b crc32c fnv132 fnv1a32 fnv164 fnv1a64 joaat murmur3a murmur3c murmur3f xxh32 xxh64 xxh3 xxh128 haval128,3 haval160,3 haval192,3 haval224,3 haval256,3 haval128,4 haval160,4 haval192,4 haval224,4 haval256,4 haval128,5 haval160,5 haval192,5 haval224,5 haval256,5
 /// ```
 fn hash_algos(req: &mut Request) -> Result<Value, Thrown> {
     count(req, 0, 0)?;
@@ -821,10 +821,10 @@ fn hash_algos(req: &mut Request) -> Result<Value, Thrown> {
 /// `hash_hmac_algos(): array`, the cryptographic ones.
 ///
 /// ```php
-/// $h = hash_hmac_algos(); echo implode(' ', array_slice($h, 20, 9)), ' ', in_array('crc32', $h) ? 'crc32' : '-', "\n";
+/// $h = hash_hmac_algos(); echo count($h), ' ', implode(' ', array_slice($h, 20)), ' ', in_array('crc32', $h) ? 'crc32' : '-', "\n";
 /// ```
 /// ```expect
-/// tiger160,3 tiger192,3 tiger128,4 tiger160,4 tiger192,4 snefru snefru256 gost gost-crypto -
+/// 44 tiger160,3 tiger192,3 tiger128,4 tiger160,4 tiger192,4 snefru snefru256 gost gost-crypto haval128,3 haval160,3 haval192,3 haval224,3 haval256,3 haval128,4 haval160,4 haval192,4 haval224,4 haval256,4 haval128,5 haval160,5 haval192,5 haval224,5 haval256,5 -
 /// ```
 fn hash_hmac_algos(req: &mut Request) -> Result<Value, Thrown> {
     count(req, 0, 0)?;
@@ -1434,7 +1434,7 @@ fn unserialize(req: &mut Request) -> Result<Value, Thrown> {
             &format!("Hash algorithm \"{}\" cannot be unserialized", algo.label),
         ));
     };
-    let mut state = (algo.init)(req, None)?;
+    let mut state = (algo.init)(req, Options::default())?;
     let written = if magic == want {
         algos::unserialize(state.as_mut(), &fields)
     } else {

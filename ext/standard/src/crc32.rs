@@ -58,12 +58,27 @@ const CRC32TAB: [u32; 256] = table();
 /// `php_crc32_bulk_init`, `php_crc32_bulk_update` and
 /// `php_crc32_bulk_end`.
 fn crc(data: &[u8]) -> u32 {
-    let mut crc = u32::MAX;
+    !update(u32::MAX, data)
+}
+
+/// `php_crc32_bulk_update`'s walk of the reflected table, which is
+/// ext/hash's `PHP_CRC32BUpdate` too: the state after `data`, with no
+/// inversion either side.
+///
+/// ```php
+/// var_dump(hash('crc32b', 'The quick brown fox jumped over the lazy dog.'), dechex(crc32('The quick brown fox jumped over the lazy dog.')));
+/// ```
+/// ```expect
+/// string(8) "82a34642"
+/// string(8) "82a34642"
+/// ```
+#[must_use]
+pub fn update(mut crc: u32, data: &[u8]) -> u32 {
     for &byte in data {
         let low = crc.to_le_bytes()[0];
         crc = (crc >> 8) ^ CRC32TAB[usize::from(low ^ byte)];
     }
-    !crc
+    crc
 }
 
 /// `crc32(string $string): int`.

@@ -48,7 +48,7 @@
 mod array;
 mod base64;
 mod basic_functions;
-mod crc32;
+pub mod crc32;
 mod csv;
 mod dir;
 mod exec;

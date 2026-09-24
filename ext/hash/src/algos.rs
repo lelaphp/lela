@@ -7,11 +7,12 @@
 //! the struct's bytes (`hash.c:210-340`); the slots are the spec, and no
 //! spec string is kept beside them.
 
-use php_ext::raising::Thrown;
+use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
-use crate::{gost, md, sha, snefru, tiger, whirlpool};
+use crate::checksum::{Bzip2, Castagnoli, Ieee};
+use crate::{checksum, gost, haval, md, murmur, sha, snefru, tiger, whirlpool, xxhash};
 
 /// A stretch of a state's fields: one letter of its spec and its count.
 pub(crate) enum Slot<'a> {
@@ -93,7 +94,40 @@ impl<T: State + Clone + 'static> Fork for T {
 
 /// `hash_init` with the `options` array, which the seeded algorithms
 /// read and every other ignores.
-pub(crate) type Init = fn(&mut Request, Option<PhpArray>) -> Result<Box<dyn State>, Thrown>;
+pub(crate) type Init = fn(&mut Request, Options) -> Result<Box<dyn State>, Thrown>;
+
+/// The `options` array of `hash()`, `hash_file()` and `hash_init()`,
+/// php's `HashTable *args`, `NULL` where the call gave none.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Options(pub(crate) Option<PhpArray>);
+
+impl Options {
+    /// `zend_hash_str_find_deref(args, name)`.
+    pub(crate) fn get(self, req: &mut Request, name: &[u8]) -> Result<Option<Value>, Thrown> {
+        let Some(options) = self.0 else {
+            return Ok(None);
+        };
+        let key = PhpString::new(req, name)?;
+        Ok(options.get(&Key::Str(key)).map(|value| value.deref()))
+    }
+
+    /// The `seed` option as `PHP_MURMUR3AInit` and `PHP_XXH32Init` read
+    /// it: an int, or the deprecation and zero.
+    pub(crate) fn seed(self, req: &mut Request) -> Result<u64, Thrown> {
+        let Some(value) = self.get(req, b"seed")? else {
+            return Ok(0);
+        };
+        if let ValueRef::Int(n) = value.as_ref() {
+            return Ok(n.cast_unsigned());
+        }
+        docref(
+            req,
+            Level::Deprecated,
+            "Passing a seed of a type other than int is deprecated because it is the same as setting the seed to 0",
+        );
+        Ok(0)
+    }
+}
 
 /// One `php_hash_ops`, under the name it is registered with.
 pub(crate) struct Algo {
@@ -115,7 +149,7 @@ pub(crate) struct Algo {
 #[allow(clippy::unnecessary_wraps)]
 fn plain<T: State + Default + 'static>(
     _: &mut Request,
-    _: Option<PhpArray>,
+    _: Options,
 ) -> Result<Box<dyn State>, Thrown> {
     Ok(Box::new(T::default()))
 }
@@ -137,7 +171,7 @@ const fn algo(name: &'static str, digest: usize, block: usize, crypto: bool, ini
 
 /// The algorithms in php's order, which `hash_algos()` lists.
 #[rustfmt::skip]
-pub(crate) static ALGOS: [Algo; 29] = [
+pub(crate) static ALGOS: [Algo; 60] = [
     algo("md2", 16, 16, true, plain::<md::Md2>),
     algo("md4", 16, 64, true, plain::<md::Md4>),
     algo("md5", 16, 64, true, plain::<md::Md5>),
@@ -167,6 +201,37 @@ pub(crate) static ALGOS: [Algo; 29] = [
     Algo { label: "snefru", ..algo("snefru256", 32, 32, true, plain::<snefru::Snefru>) },
     algo("gost", 32, 32, true, plain::<gost::Gost<false>>),
     algo("gost-crypto", 32, 32, true, plain::<gost::Gost<true>>),
+    algo("adler32", 4, 4, false, plain::<checksum::Adler32>),
+    algo("crc32", 4, 4, false, plain::<checksum::Crc<Bzip2>>),
+    algo("crc32b", 4, 4, false, plain::<checksum::Crc<Ieee>>),
+    algo("crc32c", 4, 4, false, plain::<checksum::Crc<Castagnoli>>),
+    algo("fnv132", 4, 4, false, plain::<checksum::Fnv32<false>>),
+    algo("fnv1a32", 4, 4, false, plain::<checksum::Fnv32<true>>),
+    algo("fnv164", 8, 4, false, plain::<checksum::Fnv64<false>>),
+    algo("fnv1a64", 8, 4, false, plain::<checksum::Fnv64<true>>),
+    algo("joaat", 4, 4, false, plain::<checksum::Joaat>),
+    algo("murmur3a", 4, 4, false, murmur::Murmur3a::init),
+    algo("murmur3c", 16, 4, false, murmur::Murmur3c::init),
+    algo("murmur3f", 16, 8, false, murmur::Murmur3f::init),
+    algo("xxh32", 4, 4, false, xxhash::Xxh32::init),
+    algo("xxh64", 8, 8, false, xxhash::Xxh64::init),
+    Algo { magic: None, ..algo("xxh3", 8, 8, false, xxhash::Xxh3::init_64) },
+    Algo { magic: None, ..algo("xxh128", 16, 8, false, xxhash::Xxh3::init_128) },
+    algo("haval128,3", 16, 128, true, plain::<haval::Haval<3, 128>>),
+    algo("haval160,3", 20, 128, true, plain::<haval::Haval<3, 160>>),
+    algo("haval192,3", 24, 128, true, plain::<haval::Haval<3, 192>>),
+    algo("haval224,3", 28, 128, true, plain::<haval::Haval<3, 224>>),
+    algo("haval256,3", 32, 128, true, plain::<haval::Haval<3, 256>>),
+    algo("haval128,4", 16, 128, true, plain::<haval::Haval<4, 128>>),
+    algo("haval160,4", 20, 128, true, plain::<haval::Haval<4, 160>>),
+    algo("haval192,4", 24, 128, true, plain::<haval::Haval<4, 192>>),
+    algo("haval224,4", 28, 128, true, plain::<haval::Haval<4, 224>>),
+    algo("haval256,4", 32, 128, true, plain::<haval::Haval<4, 256>>),
+    algo("haval128,5", 16, 128, true, plain::<haval::Haval<5, 128>>),
+    algo("haval160,5", 20, 128, true, plain::<haval::Haval<5, 160>>),
+    algo("haval192,5", 24, 128, true, plain::<haval::Haval<5, 192>>),
+    algo("haval224,5", 28, 128, true, plain::<haval::Haval<5, 224>>),
+    algo("haval256,5", 32, 128, true, plain::<haval::Haval<5, 256>>),
 ];
 
 /// `DECLARE_SHA3_OPS`: the block is the sponge's rate, and the state
