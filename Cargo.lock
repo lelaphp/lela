@@ -470,6 +470,7 @@ name = "php_ext_spl"
 version = "0.0.0"
 dependencies = [
  "php_ext",
+ "php_ext_pcre",
 ]
 
 [[package]]

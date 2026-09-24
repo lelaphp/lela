@@ -9,15 +9,18 @@
 //! which is what php's `zend_user_it_*` functions do for a user class
 //! and what a native class's methods do for its own, so the order of
 //! the calls an inner iterator sees is php's. `RegexIterator` and
-//! `RecursiveRegexIterator` wait on ext/pcre's compiled-pattern face
-//! (#713).
+//! `RecursiveRegexIterator` hold ext/pcre's compiled pattern
+//! ([`Regex`]), php's `pcre_cache_entry`, and match with it through
+//! the `php_pcre_*_impl` functions that crate exports, so a pattern is
+//! compiled once, by ext/pcre, whichever extension asked.
 
 use php_ext::abi::{Callable, CloneObj, ObjectHandlers};
-use php_ext::call::{call, call_method, instantiate, lookup_class};
+use php_ext::call::{call, call_method, instantiate, lookup_class, read_prop};
 use php_ext::coerce::{to_string, truthy};
-use php_ext::raising::{Thrown, arg_type_error, arg_value_error, throw};
+use php_ext::raising::{Thrown, arg_type_error, arg_value_error, throw, throwing_warnings};
 use php_ext::request::Request;
-use php_ext::values::{ClassId, Key, PhpArray, PhpObject, Value, ValueRef};
+use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext_pcre::Regex;
 
 use crate::Entry;
 use crate::stub::{self, Declared};
@@ -50,6 +53,8 @@ enum Kind {
     NoRewind,
     Infinite,
     Append,
+    Regex,
+    RecursiveRegex,
     CallbackFilter,
     RecursiveCallbackFilter,
 }
@@ -71,6 +76,69 @@ pub(crate) struct DualIt {
     callback: Option<Callable>,
     callback_value: Option<Value>,
     appended: Option<PhpObject>,
+    regex: Option<RegexIt>,
+}
+
+/// `regex_mode`: what `RegexIterator::accept` makes of its subject,
+/// each the `RegexIterator` constant of its number.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Match = 0,
+    GetMatch = 1,
+    AllMatches = 2,
+    Split = 3,
+    Replace = 4,
+}
+
+impl Mode {
+    /// The `regex_mode` a number names, `None` from `REGIT_MODE_MAX` on and
+    /// below zero, where php raises [`MODE_MESSAGE`].
+    fn named(mode: i64) -> Option<Mode> {
+        [
+            Mode::Match,
+            Mode::GetMatch,
+            Mode::AllMatches,
+            Mode::Split,
+            Mode::Replace,
+        ]
+        .into_iter()
+        .find(|m| m.number() == mode)
+    }
+
+    fn number(self) -> i64 {
+        self as i64
+    }
+}
+
+const MODE_MESSAGE: &str = "be RegexIterator::MATCH, RegexIterator::GET_MATCH, RegexIterator::ALL_MATCHES, RegexIterator::SPLIT, or RegexIterator::REPLACE";
+
+/// `u.regex.flags`: the bits `setFlags` stored, every one kept as php
+/// keeps it, of which `REGIT_USE_KEY` and `REGIT_INVERTED` are read.
+#[derive(Clone, Copy)]
+struct RegexFlags(i64);
+
+impl RegexFlags {
+    /// `REGIT_USE_KEY`: the key is the subject, and what `REPLACE` made
+    /// replaces it.
+    fn use_key(self) -> bool {
+        self.0 & 1 != 0
+    }
+
+    /// `REGIT_INVERTED`: the answer turned over.
+    fn inverted(self) -> bool {
+        self.0 & 2 != 0
+    }
+}
+
+/// `spl_dual_it_object.u.regex`: the pattern out of ext/pcre's cache,
+/// the string it was compiled from, and what `accept` runs it with.
+#[derive(Clone)]
+struct RegexIt {
+    pattern: Regex,
+    source: Box<[u8]>,
+    mode: Mode,
+    flags: RegexFlags,
+    preg_flags: i64,
 }
 
 /// One level of `spl_recursive_it_object`'s stack.
@@ -237,6 +305,31 @@ class AppendIterator extends IteratorIterator {
 class InfiniteIterator extends IteratorIterator {
     public function __construct(Iterator $iterator) {}
     /** @tentative-return-type */ public function next(): void {}
+}
+class RegexIterator extends FilterIterator {
+    public const int USE_KEY = 1;
+    public const int INVERT_MATCH = 2;
+    public const int MATCH = 0;
+    public const int GET_MATCH = 1;
+    public const int ALL_MATCHES = 2;
+    public const int SPLIT = 3;
+    public const int REPLACE = 4;
+    public ?string $replacement = null;
+    public function __construct(Iterator $iterator, string $pattern, int $mode = RegexIterator::MATCH, int $flags = 0, int $pregFlags = 0) {}
+    /** @tentative-return-type */ public function accept(): bool {}
+    /** @tentative-return-type */ public function getMode(): int {}
+    /** @tentative-return-type */ public function setMode(int $mode): void {}
+    /** @tentative-return-type */ public function getFlags(): int {}
+    /** @tentative-return-type */ public function setFlags(int $flags): void {}
+    /** @tentative-return-type */ public function getRegex(): string {}
+    /** @tentative-return-type */ public function getPregFlags(): int {}
+    /** @tentative-return-type */ public function setPregFlags(int $pregFlags): void {}
+}
+class RecursiveRegexIterator extends RegexIterator implements RecursiveIterator {
+    public function __construct(RecursiveIterator $iterator, string $pattern, int $mode = RecursiveRegexIterator::MATCH, int $flags = 0, int $pregFlags = 0) {}
+    /** @tentative-return-type */ public function accept(): bool {}
+    /** @tentative-return-type */ public function hasChildren(): bool {}
+    /** @tentative-return-type */ public function getChildren(): RecursiveRegexIterator {}
 }
 class EmptyIterator implements Iterator {
     /** @tentative-return-type */ public function current(): never {}
@@ -421,6 +514,28 @@ pub(crate) fn classes() -> Vec<(Declared, Payload)> {
         ),
         ("InfiniteIterator::__construct", infinite_construct),
         ("InfiniteIterator::next", infinite_next),
+        ("RegexIterator::__construct", regex_construct),
+        ("RegexIterator::accept", regex_accept),
+        ("RegexIterator::getMode", regex_get_mode),
+        ("RegexIterator::setMode", regex_set_mode),
+        ("RegexIterator::getFlags", regex_get_flags),
+        ("RegexIterator::setFlags", regex_set_flags),
+        ("RegexIterator::getRegex", regex_get_regex),
+        ("RegexIterator::getPregFlags", regex_get_preg_flags),
+        ("RegexIterator::setPregFlags", regex_set_preg_flags),
+        (
+            "RecursiveRegexIterator::__construct",
+            recursive_regex_construct,
+        ),
+        ("RecursiveRegexIterator::accept", recursive_regex_accept),
+        (
+            "RecursiveRegexIterator::hasChildren",
+            recursive_filter_has_children,
+        ),
+        (
+            "RecursiveRegexIterator::getChildren",
+            recursive_regex_get_children,
+        ),
         ("EmptyIterator::current", empty_current),
         ("EmptyIterator::next", nothing),
         ("EmptyIterator::key", empty_key),
@@ -862,7 +977,16 @@ fn recursive_filter_construct(req: &mut Request) -> Result<Value, Thrown> {
 }
 
 /// `hasChildren(): bool`, the inner iterator's; `ParentIterator::accept`
-/// too.
+/// and `RecursiveRegexIterator::hasChildren` too.
+///
+/// ```php
+/// $it = new RecursiveRegexIterator(new RecursiveArrayIterator([['a'], 'a']), '/a/');
+/// foreach ($it as $v) var_dump($it->hasChildren());
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(false)
+/// ```
 fn recursive_filter_has_children(req: &mut Request) -> Result<Value, Thrown> {
     crate::arity(req, 0, 0)?;
     let this = this_dual(req)?;
@@ -1718,6 +1842,448 @@ fn append_get_array_iterator(req: &mut Request) -> Result<Value, Thrown> {
     let this = this_dual(req)?;
     let list = appended(req, this)?;
     Ok(crate::copied(req, list.as_value()))
+}
+
+// ---- `RegexIterator` and `RecursiveRegexIterator`, over ext/pcre's pattern
+
+/// The receiver's `u.regex`, php's `Error` where no `RegexIterator`
+/// constructor was served on it.
+fn this_regex(req: &mut Request) -> Result<(PhpObject, RegexIt), Thrown> {
+    let this = this_dual(req)?;
+    match dual(req, this, |it| it.regex.clone())? {
+        Some(regex) => Ok((this, regex)),
+        None => Err(throw(
+            req,
+            "Error",
+            "The object is in an invalid state as the parent constructor was not called",
+        )),
+    }
+}
+
+/// `RegexIterator::__construct(Iterator $iterator, string $pattern, int $mode = RegexIterator::MATCH, int $flags = 0, int $pregFlags = 0)`:
+/// the pattern out of ext/pcre's cache, its warning thrown as
+/// `InvalidArgumentException`.
+///
+/// ```php
+/// $it = new RegexIterator(new ArrayIterator(['apple', 'bob', 'avocado', 7, 'a' => [1]]), '/^a/');
+/// foreach ($it as $k => $v) echo "$k=$v;";
+/// echo "\n";
+/// try { new RegexIterator(new ArrayIterator([]), '/(/'); } catch (InvalidArgumentException $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// try { new RegexIterator(new ArrayIterator([]), 'abc'); } catch (InvalidArgumentException $e) { echo $e->getMessage(), "\n"; }
+/// try { new RegexIterator(new ArrayIterator([]), '/a/', 5); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// $twice = new RegexIterator(new ArrayIterator([]), '/a/');
+/// try { $twice->__construct(new ArrayIterator([]), '/a/'); } catch (BadMethodCallException $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($twice->replacement);
+/// ```
+/// ```expect
+/// 0=apple;2=avocado;
+/// InvalidArgumentException: RegexIterator::__construct(): Compilation failed: missing closing parenthesis at offset 1
+/// RegexIterator::__construct(): Delimiter must not be alphanumeric, backslash, or NUL byte
+/// RegexIterator::__construct(): Argument #3 ($mode) must be RegexIterator::MATCH, RegexIterator::GET_MATCH, RegexIterator::ALL_MATCHES, RegexIterator::SPLIT, or RegexIterator::REPLACE
+/// RegexIterator::getIterator() must be called exactly once per instance
+/// NULL
+/// ```
+fn regex_construct(req: &mut Request) -> Result<Value, Thrown> {
+    regex_construct_as(req, Kind::Regex, "RegexIterator", "Iterator")
+}
+
+/// `spl_dual_it_construct`'s `DIT_RegexIterator` arm.
+fn regex_construct_as(
+    req: &mut Request,
+    kind: Kind,
+    base: &str,
+    inner_class: &str,
+) -> Result<Value, Thrown> {
+    let (this, inner) = dual_construct(req, base, inner_class, 2, 5)?;
+    let source = crate::string(req, 2)?;
+    let mode = crate::long_or(req, 3, Mode::Match.number())?;
+    let flags = crate::long_or(req, 4, 0)?;
+    let preg_flags = crate::long_or(req, 5, 0)?;
+    let Some(mode) = Mode::named(mode) else {
+        return Err(arg_value_error(req, 3, MODE_MESSAGE));
+    };
+    let compiled = throwing_warnings(req, "InvalidArgumentException", |req| {
+        Ok(Regex::compile(req, source.as_bytes()))
+    })?;
+    let Some(pattern) = compiled else {
+        return Ok(Value::null());
+    };
+    dual_set(req, this, kind, inner)?;
+    dual(req, this, |it| {
+        it.regex = Some(RegexIt {
+            pattern,
+            source: source.as_bytes().into(),
+            mode,
+            flags: RegexFlags(flags),
+            preg_flags,
+        });
+    })?;
+    Ok(Value::null())
+}
+
+/// `RegexIterator::accept(): bool`: `(string)current()`, or the key
+/// under `USE_KEY`, matched against the pattern as `getMode()` says, the
+/// answer turned over under `INVERT_MATCH`; `GET_MATCH`, `ALL_MATCHES`
+/// and `SPLIT` put what they found in place of the element, and
+/// `REPLACE` puts the replaced subject in place of the element or the
+/// key.
+///
+/// ```php
+/// $in = new ArrayIterator(['k1' => 'a-1', 'k' => 'b', 'k3' => 'c-3-4', 'x' => [1]]);
+/// $show = function ($it) { foreach ($it as $k => $v) echo $k, '=', is_array($v) ? str_replace(["\n", ' '], '', print_r($v, true)) : $v, ';'; echo "\n"; };
+/// $show(new RegexIterator($in, '/\d/'));
+/// $show(new RegexIterator($in, '/\d/', RegexIterator::MATCH, RegexIterator::INVERT_MATCH));
+/// $show(new RegexIterator($in, '/\d/', RegexIterator::MATCH, RegexIterator::USE_KEY));
+/// $show(new RegexIterator($in, '/(\w)-(\d)/', RegexIterator::GET_MATCH));
+/// $show(new RegexIterator($in, '/\d/', RegexIterator::ALL_MATCHES));
+/// $show(new RegexIterator($in, '/-/', RegexIterator::SPLIT));
+/// $show(new RegexIterator($in, '/-/', RegexIterator::SPLIT, 0, PREG_SPLIT_OFFSET_CAPTURE));
+/// $r = new RegexIterator($in, '/(\w)-/', RegexIterator::REPLACE);
+/// $show($r);
+/// $r->replacement = '<$1>';
+/// $show($r);
+/// $k = new RegexIterator($in, '/k/', RegexIterator::REPLACE, RegexIterator::USE_KEY);
+/// $k->replacement = 'K';
+/// $show($k);
+/// ```
+/// ```expect
+/// k1=a-1;k3=c-3-4;
+/// k=b;
+/// k1=a-1;k3=c-3-4;
+/// k1=Array([0]=>a-1[1]=>a[2]=>1);k3=Array([0]=>c-3[1]=>c[2]=>3);
+/// k1=Array([0]=>Array([0]=>1));k3=Array([0]=>Array([0]=>3[1]=>4));
+/// k1=Array([0]=>a[1]=>1);k3=Array([0]=>c[1]=>3[2]=>4);
+/// k1=Array([0]=>Array([0]=>a[1]=>0)[1]=>Array([0]=>1[1]=>2));k3=Array([0]=>Array([0]=>c[1]=>0)[1]=>Array([0]=>3[1]=>2)[2]=>Array([0]=>4[1]=>4));
+/// k1=1;k3=4;
+/// k1=<a>1;k3=<c><3>4;
+/// K1=a-1;K=b;K3=c-3-4;
+/// ```
+fn regex_accept(req: &mut Request) -> Result<Value, Thrown> {
+    crate::arity(req, 0, 0)?;
+    let (this, regex) = this_regex(req)?;
+    let (data, key) = dual(req, this, |it| (it.data, it.key))?;
+    let Some(data) = data else {
+        return Ok(Value::bool(false));
+    };
+    let subject = if regex.flags.use_key() {
+        key.unwrap_or_default()
+    } else if data.as_array().is_some() {
+        return Ok(Value::bool(false));
+    } else {
+        data
+    };
+    let subject = to_string(req, &subject)?;
+    let matched = regex_run(req, this, &regex, subject);
+    req.release(Value::string(subject));
+    Ok(Value::bool(match matched? {
+        Some(matched) => matched != regex.flags.inverted(),
+        None => false,
+    }))
+}
+
+/// The `switch` of `RegexIterator::accept`: whether the `regex_mode` found
+/// what it looks for, `None` for php's `RETURN_FALSE` that
+/// `INVERT_MATCH` does not turn over.
+fn regex_run(
+    req: &mut Request,
+    this: PhpObject,
+    regex: &RegexIt,
+    subject: PhpString,
+) -> Result<Option<bool>, Thrown> {
+    let pattern = &regex.pattern;
+    match regex.mode {
+        Mode::Match => Ok(Some(pattern.is_match(req, subject.as_bytes()))),
+        Mode::GetMatch | Mode::AllMatches => {
+            regex_replace_data(req, this, None)?;
+            let global = regex.mode == Mode::AllMatches;
+            let (count, matches) = pattern.match_impl(req, subject, global, regex.preg_flags, 0)?;
+            regex_replace_data(req, this, Some(Value::array(matches)))?;
+            Ok(Some(count.as_int().is_some_and(|n| n > 0)))
+        }
+        Mode::Split => {
+            regex_replace_data(req, this, None)?;
+            let pieces = pattern.split_impl(req, subject.as_bytes(), -1, regex.preg_flags)?;
+            let count = pieces.as_array().map_or(0, PhpArray::len);
+            regex_replace_data(req, this, Some(pieces))?;
+            Ok(Some(count > 1))
+        }
+        Mode::Replace => {
+            let replacement = read_prop(req, &this, b"replacement")?.deref();
+            let replacement = to_string(req, &replacement)?;
+            let mut count = 0;
+            let replaced =
+                pattern.replace_impl(req, subject, replacement.as_bytes(), -1, &mut count);
+            req.release(Value::string(replacement));
+            let Some(replaced) = replaced? else {
+                return Ok(None);
+            };
+            let replaced = Some(Value::string(replaced));
+            let old = dual(req, this, |it| {
+                if regex.flags.use_key() {
+                    std::mem::replace(&mut it.key, replaced)
+                } else {
+                    std::mem::replace(&mut it.data, replaced)
+                }
+            })?;
+            if let Some(old) = old {
+                req.release(old);
+            }
+            Ok(Some(count > 0))
+        }
+    }
+}
+
+/// The fetched element given up for `data`, which is the object's from
+/// here.
+fn regex_replace_data(
+    req: &mut Request,
+    this: PhpObject,
+    data: Option<Value>,
+) -> Result<(), Thrown> {
+    if let Some(old) = dual(req, this, |it| std::mem::replace(&mut it.data, data))? {
+        req.release(old);
+    }
+    Ok(())
+}
+
+/// `RegexIterator::getMode(): int`.
+///
+/// ```php
+/// var_dump((new RegexIterator(new ArrayIterator([]), '/a/'))->getMode());
+/// var_dump((new RegexIterator(new ArrayIterator([]), '/a/', RegexIterator::REPLACE))->getMode());
+/// ```
+/// ```expect
+/// int(0)
+/// int(4)
+/// ```
+fn regex_get_mode(req: &mut Request) -> Result<Value, Thrown> {
+    crate::arity(req, 0, 0)?;
+    let (_, regex) = this_regex(req)?;
+    Ok(Value::int(regex.mode.number()))
+}
+
+/// `RegexIterator::setMode(int $mode): void`, `$mode` checked before
+/// the receiver, as php checks it.
+///
+/// ```php
+/// $it = new RegexIterator(new ArrayIterator(['a-b', 'c']), '/-/');
+/// $it->setMode(RegexIterator::SPLIT);
+/// var_dump($it->getMode(), iterator_to_array($it));
+/// try { $it->setMode(-1); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($it->getMode());
+/// ```
+/// ```expect
+/// int(3)
+/// array(1) {
+///   [0]=>
+///   array(2) {
+///     [0]=>
+///     string(1) "a"
+///     [1]=>
+///     string(1) "b"
+///   }
+/// }
+/// RegexIterator::setMode(): Argument #1 ($mode) must be RegexIterator::MATCH, RegexIterator::GET_MATCH, RegexIterator::ALL_MATCHES, RegexIterator::SPLIT, or RegexIterator::REPLACE
+/// int(3)
+/// ```
+fn regex_set_mode(req: &mut Request) -> Result<Value, Thrown> {
+    crate::arity(req, 1, 1)?;
+    let mode = crate::long(req, 1)?;
+    let Some(mode) = Mode::named(mode) else {
+        return Err(arg_value_error(req, 1, MODE_MESSAGE));
+    };
+    regex_set(req, |regex| regex.mode = mode)
+}
+
+/// The receiver's `u.regex` changed.
+fn regex_set(req: &mut Request, change: impl FnOnce(&mut RegexIt)) -> Result<Value, Thrown> {
+    let (this, _) = this_regex(req)?;
+    dual(req, this, |it| it.regex.as_mut().map(change))?;
+    Ok(Value::null())
+}
+
+/// `RegexIterator::getFlags(): int`.
+///
+/// ```php
+/// var_dump((new RegexIterator(new ArrayIterator([]), '/a/'))->getFlags());
+/// var_dump((new RegexIterator(new ArrayIterator([]), '/a/', RegexIterator::MATCH, RegexIterator::USE_KEY | RegexIterator::INVERT_MATCH))->getFlags());
+/// ```
+/// ```expect
+/// int(0)
+/// int(3)
+/// ```
+fn regex_get_flags(req: &mut Request) -> Result<Value, Thrown> {
+    crate::arity(req, 0, 0)?;
+    let (_, regex) = this_regex(req)?;
+    Ok(Value::int(regex.flags.0))
+}
+
+/// `RegexIterator::setFlags(int $flags): void`, any bits.
+///
+/// ```php
+/// $it = new RegexIterator(new ArrayIterator(['a' => 'x', 'y' => 'a']), '/a/');
+/// echo implode(',', array_keys(iterator_to_array($it))), "\n";
+/// $it->setFlags(RegexIterator::USE_KEY);
+/// echo implode(',', array_keys(iterator_to_array($it))), "\n";
+/// $it->setFlags(RegexIterator::USE_KEY | RegexIterator::INVERT_MATCH | 64);
+/// echo implode(',', array_keys(iterator_to_array($it))), "\n";
+/// var_dump($it->getFlags());
+/// ```
+/// ```expect
+/// y
+/// a
+/// y
+/// int(67)
+/// ```
+fn regex_set_flags(req: &mut Request) -> Result<Value, Thrown> {
+    crate::arity(req, 1, 1)?;
+    let flags = crate::long(req, 1)?;
+    regex_set(req, |regex| regex.flags = RegexFlags(flags))
+}
+
+/// `RegexIterator::getRegex(): string`, the pattern as it was given.
+///
+/// ```php
+/// $it = new RegexIterator(new ArrayIterator([]), '/^x(\d)$/i');
+/// var_dump($it->getRegex());
+/// ```
+/// ```expect
+/// string(10) "/^x(\d)$/i"
+/// ```
+fn regex_get_regex(req: &mut Request) -> Result<Value, Thrown> {
+    crate::arity(req, 0, 0)?;
+    let (_, regex) = this_regex(req)?;
+    crate::string_value(req, &regex.source)
+}
+
+/// `RegexIterator::getPregFlags(): int`.
+///
+/// ```php
+/// var_dump((new RegexIterator(new ArrayIterator([]), '/a/'))->getPregFlags());
+/// var_dump((new RegexIterator(new ArrayIterator([]), '/a/', RegexIterator::SPLIT, 0, PREG_SPLIT_NO_EMPTY))->getPregFlags());
+/// ```
+/// ```expect
+/// int(0)
+/// int(1)
+/// ```
+fn regex_get_preg_flags(req: &mut Request) -> Result<Value, Thrown> {
+    crate::arity(req, 0, 0)?;
+    let (_, regex) = this_regex(req)?;
+    Ok(Value::int(regex.preg_flags))
+}
+
+/// `RegexIterator::setPregFlags(int $pregFlags): void`: the `PREG_*`
+/// flags the `php_pcre_*_impl` that `getMode()` names is served with.
+///
+/// ```php
+/// $it = new RegexIterator(new ArrayIterator(['ab']), '/(b)/', RegexIterator::GET_MATCH);
+/// $it->setPregFlags(PREG_OFFSET_CAPTURE);
+/// var_dump($it->getPregFlags());
+/// foreach ($it as $v) echo json_encode($v), "\n";
+/// ```
+/// ```expect
+/// int(256)
+/// [["b",1],["b",1]]
+/// ```
+fn regex_set_preg_flags(req: &mut Request) -> Result<Value, Thrown> {
+    crate::arity(req, 1, 1)?;
+    let preg_flags = crate::long(req, 1)?;
+    regex_set(req, |regex| regex.preg_flags = preg_flags)
+}
+
+/// `RecursiveRegexIterator::__construct(RecursiveIterator $iterator, string $pattern, int $mode = RecursiveRegexIterator::MATCH, int $flags = 0, int $pregFlags = 0)`.
+///
+/// ```php
+/// $it = new RecursiveIteratorIterator(new RecursiveRegexIterator(new RecursiveArrayIterator(['ax', ['ay', 'b'], 'c']), '/a/'), RecursiveIteratorIterator::SELF_FIRST);
+/// foreach ($it as $k => $v) echo $it->getDepth(), ':', is_array($v) ? 'A' : $v, ';';
+/// echo "\n";
+/// try { new RecursiveRegexIterator(new ArrayIterator([]), '/a/'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// 0:ax;0:A;1:ay;
+/// RecursiveRegexIterator::__construct(): Argument #1 ($iterator) must be of type RecursiveIterator, ArrayIterator given
+/// ```
+fn recursive_regex_construct(req: &mut Request) -> Result<Value, Thrown> {
+    regex_construct_as(
+        req,
+        Kind::RecursiveRegex,
+        "RecursiveRegexIterator",
+        "RecursiveIterator",
+    )
+}
+
+/// `RecursiveRegexIterator::accept(): bool`: an array element is
+/// accepted where it is not empty, and anything else is
+/// `RegexIterator::accept`'s.
+///
+/// ```php
+/// $it = new RecursiveRegexIterator(new RecursiveArrayIterator(['x1', [], ['y'], 'z']), '/\d/');
+/// foreach ($it as $k => $v) echo $k, is_array($v) ? '=A' : "=$v", ';';
+/// echo "\n";
+/// $it = new RecursiveRegexIterator(new RecursiveArrayIterator(['x1', ['y']]), '/\d/', RecursiveRegexIterator::MATCH, RecursiveRegexIterator::INVERT_MATCH);
+/// foreach ($it as $k => $v) echo $k, is_array($v) ? '=A' : "=$v", ';';
+/// echo "\n";
+/// ```
+/// ```expect
+/// 0=x1;2=A;
+/// 1=A;
+/// ```
+fn recursive_regex_accept(req: &mut Request) -> Result<Value, Thrown> {
+    crate::arity(req, 0, 0)?;
+    let this = this_dual(req)?;
+    match dual(req, this, |it| it.data)? {
+        None => Ok(Value::bool(false)),
+        Some(data) => match data.as_array() {
+            Some(array) => Ok(Value::bool(!array.is_empty())),
+            None => regex_accept(req),
+        },
+    }
+}
+
+/// `RecursiveRegexIterator::getChildren(): RecursiveRegexIterator`:
+/// the inner iterator's children in a new object of the receiver's
+/// class, constructed with the receiver's pattern and its three numbers.
+///
+/// ```php
+/// class Tagged extends RecursiveRegexIterator {}
+/// $it = new Tagged(new RecursiveArrayIterator([['a1', 'b2', 'a3']]), '/^a(\d)/', RegexIterator::GET_MATCH, 0, 0);
+/// $it->rewind();
+/// $children = $it->getChildren();
+/// var_dump(get_class($children), $children->getRegex(), $children->getMode());
+/// foreach ($children as $k => $v) echo $k, ':', implode(',', $v), ';';
+/// echo "\n";
+/// ```
+/// ```expect
+/// string(6) "Tagged"
+/// string(8) "/^a(\d)/"
+/// int(1)
+/// 0:a1,1;2:a3,3;
+/// ```
+fn recursive_regex_get_children(req: &mut Request) -> Result<Value, Thrown> {
+    crate::arity(req, 0, 0)?;
+    let (this, regex) = this_regex(req)?;
+    let Some(inner) = inner(req, this)? else {
+        return Ok(Value::null());
+    };
+    let children = crate::method(req, inner, b"getChildren")?;
+    let source = match crate::string_value(req, &regex.source) {
+        Ok(source) => source,
+        Err(thrown) => {
+            req.release(children);
+            return Err(thrown);
+        }
+    };
+    let arguments = [
+        children,
+        source,
+        Value::int(regex.mode.number()),
+        Value::int(regex.flags.0),
+        Value::int(regex.preg_flags),
+    ];
+    let made = instantiate(req, this.class(), &arguments);
+    req.release(children);
+    req.release(source);
+    Ok(made?.as_value())
 }
 
 /// `EmptyIterator::current(): never`.
