@@ -46,7 +46,26 @@ pub struct RequestDescription {
     /// The source to serve, when the host has it in hand (`php -r`, the
     /// in-process tests); else the file is read by its name.
     pub source: Option<Vec<u8>>,
+    /// The CLI's standard handles, which `do_cli` registers after
+    /// `php_request_startup` and php's other hosts have none of; `None`
+    /// registers nothing.
+    pub file_handles: Option<FileHandles>,
 }
+
+/// What `do_cli` registers for a request it serves a program in
+/// (`Z/sapi/cli/php_cli.c:926-980` at 8.5.9), and the host's fds under
+/// it. `PHP_CLI_PROCESS_TITLE` first, then `cli_register_file_handles`
+/// (`:519`): `php://stdin`, `php://stdout` and `php://stderr` opened in
+/// that order, which makes them the request's resources 1, 2 and 3, and
+/// the constants `STDIN`, `STDOUT` and `STDERR` on them, each under
+/// `Core`. `do_cli`'s `-l` registers no stream, so a host leaves this
+/// `None` for a lint, and php's CGI and `FastCGI` hosts have none of it.
+///
+/// What is written to the streams goes to the sink, `STDOUT` past the
+/// `php_output` layer and `STDERR` onto its error stream (design
+/// revision 16), and `STDIN` reads the request's body.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FileHandles;
 
 /// Where a request's bytes go (design §4.3 seam 4): the engine owns the
 /// header list, the status and the commit moment; a sink only writes.
@@ -1013,6 +1032,9 @@ impl Engine {
                 let _ = rinit(&mut req);
             }
         }
+        // What `do_cli` registers once `php_request_startup` has run,
+        // before the program is compiled.
+        let _ = req.register_file_handles();
         // Where the unit's constant strings live is where the unit
         // lives (design §5.2): a file's unit is published into the
         // engine's table and shared by every request that serves it,

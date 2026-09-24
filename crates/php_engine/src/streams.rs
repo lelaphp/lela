@@ -1574,6 +1574,72 @@ impl Ops for HostFd {
     }
 }
 
+impl Request {
+    /// `PHP_CLI_PROCESS_TITLE`, which `do_cli` registers after
+    /// `php_request_startup` as whether `cli_set_process_title` can set
+    /// the title, `true` on the systems this engine builds for, then
+    /// `cli_register_file_handles` (`Z/sapi/cli/php_cli.c:519`):
+    /// `php://stdin` opened `rb`, `php://stdout` and `php://stderr` `wb`,
+    /// and the three constants on them, each holding its stream's one
+    /// owner. Where one of the three does not open, php closes the others
+    /// and registers none, which no host here reaches. A no-op for a host
+    /// that asked for no handles ([`crate::engine::FileHandles`]).
+    ///
+    /// ```php
+    /// var_dump(is_resource(STDIN), get_resource_type(STDOUT), PHP_CLI_PROCESS_TITLE);
+    /// var_dump(STDIN, STDOUT, STDERR, fwrite(STDERR, "x"));
+    /// var_dump(array_slice(array_keys(get_defined_constants(true)['Core']), -5));
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// string(6) "stream"
+    /// bool(true)
+    /// resource(1) of type (stream)
+    /// resource(2) of type (stream)
+    /// resource(3) of type (stream)
+    /// int(1)
+    /// array(5) {
+    ///   [0]=>
+    ///   string(10) "PHP_BINARY"
+    ///   [1]=>
+    ///   string(21) "PHP_CLI_PROCESS_TITLE"
+    ///   [2]=>
+    ///   string(5) "STDIN"
+    ///   [3]=>
+    ///   string(6) "STDOUT"
+    ///   [4]=>
+    ///   string(6) "STDERR"
+    /// }
+    /// ```
+    /// ```stderr
+    /// x
+    /// ```
+    pub(crate) fn register_file_handles(&mut self) -> Result<(), Thrown> {
+        if !self.registers_file_handles() {
+            return Ok(());
+        }
+        self.register_host_constant(b"PHP_CLI_PROCESS_TITLE", Value::bool(true));
+        let mut opened = Vec::with_capacity(3);
+        for (path, mode) in [
+            (&b"php://stdin"[..], &b"rb"[..]),
+            (b"php://stdout", b"wb"),
+            (b"php://stderr", b"wb"),
+        ] {
+            opened.push(self.open_stream(path, mode, false)?);
+        }
+        let [Some(stdin), Some(stdout), Some(stderr)] = opened[..] else {
+            for stream in opened.into_iter().flatten() {
+                stream.close(self);
+            }
+            return Ok(());
+        };
+        self.register_host_constant(b"STDIN", stdin.as_value());
+        self.register_host_constant(b"STDOUT", stdout.as_value());
+        self.register_host_constant(b"STDERR", stderr.as_value());
+        Ok(())
+    }
+}
+
 /// `php_stream_output_ops` (`Z/ext/standard/php_fopen_wrapper.c:52`),
 /// `php://output`: a write is `PHPWRITE`, through the `php_output` layer, a
 /// read is eof and `-1`, and there is no seek.

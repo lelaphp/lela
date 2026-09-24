@@ -18,4 +18,6 @@
 
 pub mod cli;
 
-pub use php_engine::{Engine, EngineBuilder, Observables, OutputSink, RequestDescription};
+pub use php_engine::{
+    Engine, EngineBuilder, FileHandles, Observables, OutputSink, RequestDescription,
+};

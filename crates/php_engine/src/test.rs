@@ -7,7 +7,7 @@
 use std::path::Path;
 
 pub use crate::engine::Engine;
-use crate::engine::{OutputSink, RequestDescription};
+use crate::engine::{FileHandles, OutputSink, RequestDescription};
 
 /// An in-process sink: everything the request wrote, kept, the way
 /// php's CLI has it. `stderr` is the CLI's second stream whole: each
@@ -99,6 +99,7 @@ impl Engine {
             script_name: Some(name.to_vec()),
             source: Some(source.as_bytes().to_vec()),
             cwd: dir.to_path_buf(),
+            file_handles: Some(FileHandles),
             ..RequestDescription::default()
         };
         let observables = self.serve(description, &mut sink);
