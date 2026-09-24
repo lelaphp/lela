@@ -46,42 +46,71 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 mod array;
+mod assert;
 pub mod base64;
 mod basic_functions;
+mod browscap;
 pub mod crc32;
+mod crypt;
 mod csv;
+mod datetime;
 mod dir;
+mod dns;
 mod exec;
 mod ffi;
 mod file;
 mod filestat;
+mod filters;
 mod formatted_print;
 mod head;
 mod hrtime;
 mod html;
 mod http;
+mod image;
+mod info;
 mod ini;
+mod iptc;
 mod levenshtein;
+mod link;
+mod mail;
 mod math;
 pub mod md5;
 mod metaphone;
 mod microtime;
+mod net;
 mod output;
 mod pack;
+mod pageinfo;
+mod password;
+mod proc_open;
 pub mod quot_print;
 mod scanf;
+mod select;
 pub mod sha1;
+mod sockets;
 mod soundex;
+mod streamsfuncs;
 mod string;
 mod strnatcmp;
 mod stub;
+mod syslog;
 mod r#type;
 mod uniqid;
 mod url;
+mod user_filters;
+mod userspace;
 mod uuencode;
 mod var;
 mod versioning;
+mod virtual_cwd;
 mod zpp;
+
+/// What `php_string.h`, `html.h` and `php_var.h` declare `PHPAPI` for the
+/// extensions that include them, ext/filter's sanitizers and ext/session's
+/// serializers (ADR-0004; design §4.10).
+pub use html::escape as escape_html_entities;
+pub use string::strip_tags_ex;
+pub use var::{Serializer, Unserializer};
 
 use php_ext::abi::{Callable, Dependency, DependencyKind, Extension, ExtensionBuilder};
 use php_ext::call::{call_array, call_named, fetch_constant};
@@ -106,6 +135,12 @@ struct State {
     string: string::State,
     uniqid: uniqid::State,
     hrtime: hrtime::State,
+    contexts: streamsfuncs::Contexts,
+    page: Option<pageinfo::Page>,
+    syslog: syslog::Log,
+    browscap: browscap::Browscap,
+    proc_open: proc_open::ProcState,
+    user_filters: user_filters::FilterState,
 }
 
 /// The extension value (design §7.1): declarations paired with entries,
@@ -135,6 +170,7 @@ pub fn extension() -> Extension {
         default: Some(ConstExpr::Constant(Name(b"COUNT_NORMAL".as_slice().into()))),
         ..parameter(b"mode", Type::Int)
     };
+    let directory = dir::directory_class();
     ExtensionBuilder::default()
         .functions(vec![
             (
@@ -212,10 +248,27 @@ pub fn extension() -> Extension {
         .constants(math::constants())
         .classes(math::classes())
         .classes(var::classes())
+        .classes(user_filters::classes())
         .ini(var::ini())
+        .ini(sockets::ini())
         .dependencies(dependencies())
+        .class_with(directory.0, directory.1, directory.2)
+        .classes(vec![assert::assertion_error_class()])
+        .ini(assert::ini())
+        .ini(browscap::ini())
         .request_state::<State>()
+        .rshutdown(syslog::close)
+        .rinit(rinit)
         .build("standard")
+}
+
+/// `PHP_RINIT(basic)`'s share here: the string filters, which php
+/// registers at `module` startup and this engine keeps in the request's
+/// filter table (`filters::register`).
+#[allow(clippy::unnecessary_wraps)] // `ExtensionBuilder::rinit`'s signature
+fn rinit(req: &mut Request) -> Result<(), Thrown> {
+    filters::register(req);
+    Ok(())
 }
 
 /// The natives of the php-src files ported one file each (#655), in
@@ -242,6 +295,27 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
         hrtime::natives(),
         versioning::natives(),
         basic_functions::natives(),
+        dir::natives(),
+        link::natives(),
+        streamsfuncs::natives(),
+        crypt::natives(),
+        password::natives(),
+        assert::natives(),
+        pageinfo::natives(),
+        syslog::natives(),
+        mail::natives(),
+        image::natives(),
+        browscap::natives(),
+        datetime::natives(),
+        net::natives(),
+        iptc::natives(),
+        dns::natives(),
+        info::natives(),
+        select::natives(),
+        proc_open::natives(),
+        sockets::natives(),
+        user_filters::natives(),
+        userspace::natives(),
     ]
     .into_iter()
     .flatten()
@@ -256,6 +330,17 @@ fn file_constants() -> Vec<ConstDecl> {
         html::constants(),
         basic_functions::constants(),
         dir::constants(),
+        streamsfuncs::constants(),
+        crypt::constants(),
+        password::constants(),
+        assert::constants(),
+        syslog::constants(),
+        image::constants(),
+        dns::constants(),
+        info::constants(),
+        sockets::constants(),
+        user_filters::constants(),
+        userspace::constants(),
     ]
     .into_iter()
     .flatten()

@@ -64,9 +64,9 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
     natives
 }
 
-/// `zend_builtin_functions.stub.php`'s functions in its order, the
-/// `gc_*` five and `zend_thread_id`, which a build without `ZEND_DEBUG`
-/// and `ZTS` does not declare, left out.
+/// `zend_builtin_functions.stub.php`'s functions in its order,
+/// `zend_thread_id`, which a build without `ZEND_DEBUG` and `ZTS` does
+/// not declare, left out.
 const CORE: &[&str] = &[
     "clone",
     "exit",
@@ -124,6 +124,12 @@ const CORE: &[&str] = &[
     "debug_print_backtrace",
     "extension_loaded",
     "get_extension_funcs",
+    "gc_mem_caches",
+    "gc_collect_cycles",
+    "gc_enabled",
+    "gc_enable",
+    "gc_disable",
+    "gc_status",
 ];
 
 /// The two that read the linked table (#259), `clone`, which reads an
@@ -259,6 +265,7 @@ fn zend_natives() -> Vec<(FunctionDecl, Entry)> {
             extension_loaded as Entry,
         ),
     ];
+    natives.extend(gc_natives());
     natives.extend(ini_natives());
     natives.extend([
         (
@@ -282,6 +289,280 @@ fn zend_natives() -> Vec<(FunctionDecl, Entry)> {
         ),
     ]);
     natives
+}
+
+/// The six that read and drive the cycle collector (design §5.12),
+/// each `ZEND_PARSE_PARAMETERS_NONE`.
+fn gc_natives() -> Vec<(FunctionDecl, Entry)> {
+    vec![
+        (
+            declared(b"gc_mem_caches", &[], Some(Type::Int)),
+            gc_mem_caches as Entry,
+        ),
+        (
+            declared(b"gc_collect_cycles", &[], Some(Type::Int)),
+            gc_collect_cycles as Entry,
+        ),
+        (
+            declared(b"gc_enabled", &[], Some(Type::Bool)),
+            gc_enabled as Entry,
+        ),
+        (
+            declared(b"gc_enable", &[], Some(Type::Void)),
+            gc_enable as Entry,
+        ),
+        (
+            declared(b"gc_disable", &[], Some(Type::Void)),
+            gc_disable as Entry,
+        ),
+        (
+            declared(b"gc_status", &[], Some(Type::Array)),
+            gc_status as Entry,
+        ),
+    ]
+}
+
+/// `ZEND_PARSE_PARAMETERS_NONE`: an argument is php's
+/// `ArgumentCountError`.
+fn no_arguments(req: &mut Request) -> Result<(), Thrown> {
+    let count = req.argument_count();
+    if count != 0 {
+        return Err(wrong_argument_count(req, 0, 0, count));
+    }
+    Ok(())
+}
+
+/// `gc_mem_caches(): int`, `zend_mm_gc`: the bin `runs` wholly free
+/// given back to their chunks, and the bytes they held. Four hundred
+/// strings of 3000 bytes are a hundred `runs` of three pages of the
+/// 3072-byte bin; given back, their pages are free again, and none of
+/// them is swept twice.
+///
+/// ```php
+/// $s = [];
+/// for ($i = 0; $i < 400; $i++) { $s[] = str_repeat("x", 3000) . $i; }
+/// $s = null;
+/// var_dump(gc_mem_caches() >= 100 * 12288, gc_mem_caches());
+/// ```
+/// ```expect
+/// bool(true)
+/// int(0)
+/// ```
+fn gc_mem_caches(req: &mut Request) -> Result<Value, Thrown> {
+    no_arguments(req)?;
+    let freed = req.heap_mut().gc_mem_caches();
+    Ok(Value::int(as_long(freed)))
+}
+
+/// `gc_collect_cycles(): int`, `zend_gc_collect_cycles`: a collection over the
+/// root buffer, and the values it freed, strings and resources not
+/// among them since php 8.5. Two objects that name each other are
+/// garbage once their variables are gone: their destructors are served
+/// first, in the order the walk found them, the collection is repeated once
+/// after them, and both are freed, so the collection counts two.
+///
+/// ```php
+/// class Node {
+///     public $other;
+///     public function __construct(public $name) {}
+///     public function __destruct() { echo "destruct {$this->name}\n"; }
+/// }
+/// $a = new Node('a');
+/// $b = new Node('b');
+/// $a->other = $b;
+/// $b->other = $a;
+/// unset($a, $b);
+/// echo "before\n";
+/// var_dump(gc_collect_cycles());
+/// echo "after\n";
+/// var_dump(gc_collect_cycles());
+/// ```
+/// ```expect
+/// before
+/// destruct a
+/// destruct b
+/// int(2)
+/// after
+/// int(0)
+/// ```
+///
+/// A destructor that gives its object an owner resurrects it: the collection
+/// after the destructors finds it live and frees nothing, and once that
+/// owner lets go the cycle is garbage again and its destructor, served
+/// once, is not served a second time.
+///
+/// ```php
+/// class Keeper {
+///     public static $kept;
+///     public $self;
+///     public function __destruct() { echo "destruct\n"; Keeper::$kept = $this; }
+/// }
+/// $k = new Keeper;
+/// $k->self = $k;
+/// unset($k);
+/// var_dump(gc_collect_cycles(), Keeper::$kept instanceof Keeper);
+/// Keeper::$kept = null;
+/// var_dump(gc_collect_cycles());
+/// ```
+/// ```expect
+/// destruct
+/// int(0)
+/// bool(true)
+/// int(1)
+/// ```
+fn gc_collect_cycles(req: &mut Request) -> Result<Value, Thrown> {
+    no_arguments(req)?;
+    Ok(Value::int(req.gc_collect()))
+}
+
+/// `gc_enabled(): bool`: whether a full root buffer runs the collector,
+/// which `zend.enable_gc` sets.
+///
+/// ```php
+/// var_dump(gc_enabled(), ini_get('zend.enable_gc'));
+/// gc_disable();
+/// var_dump(gc_enabled(), ini_get('zend.enable_gc'));
+/// gc_enable();
+/// var_dump(gc_enabled(), ini_get('zend.enable_gc'));
+/// ini_set('zend.enable_gc', 'off');
+/// var_dump(gc_enabled());
+/// ```
+/// ```expect
+/// bool(true)
+/// string(1) "1"
+/// bool(false)
+/// string(1) "0"
+/// bool(true)
+/// string(1) "1"
+/// bool(false)
+/// ```
+fn gc_enabled(req: &mut Request) -> Result<Value, Thrown> {
+    no_arguments(req)?;
+    Ok(Value::bool(req.gc_enabled()))
+}
+
+/// `gc_enable(): void`, `zend.enable_gc` altered to `1`. The collector
+/// is only turned off by `gc_disable()`: roots are still added to the
+/// buffer, and `gc_collect_cycles()` still runs, but a full buffer runs
+/// nothing.
+///
+/// ```php
+/// gc_disable();
+/// $a = [];
+/// $a[] =& $a;
+/// unset($a);
+/// var_dump(gc_status()['roots'], gc_collect_cycles());
+/// gc_enable();
+/// var_dump(gc_enabled());
+/// ```
+/// ```expect
+/// int(1)
+/// int(1)
+/// bool(true)
+/// ```
+fn gc_enable(req: &mut Request) -> Result<Value, Thrown> {
+    no_arguments(req)?;
+    req.gc_enable(true);
+    Ok(Value::null())
+}
+
+/// `gc_disable(): void`, `zend.enable_gc` altered to `0`. With the
+/// collector off, ten thousand cycles fill the buffer past its
+/// threshold and no collection is made; `gc_collect_cycles()` frees them all.
+///
+/// ```php
+/// gc_disable();
+/// for ($i = 0; $i < 10001; $i++) { $o = new stdClass; $o->o = $o; }
+/// unset($o);
+/// $s = gc_status();
+/// var_dump($s['runs'], $s['roots'], gc_collect_cycles());
+/// ```
+/// ```expect
+/// int(0)
+/// int(10001)
+/// int(10001)
+/// ```
+fn gc_disable(req: &mut Request) -> Result<Value, Thrown> {
+    no_arguments(req)?;
+    req.gc_enable(false);
+    Ok(Value::null())
+}
+
+/// `gc_status(): array`, `zend_gc_get_status` in php 8.5's twelve
+/// fields. A table that holds itself by reference is one root once its
+/// variable is gone, and one value collected by the collection that finds it.
+///
+/// ```php
+/// $a = [];
+/// $a[] =& $a;
+/// unset($a);
+/// $s = gc_status();
+/// var_dump(array_keys($s), $s['runs'], $s['roots'], $s['threshold'], $s['buffer_size']);
+/// gc_collect_cycles();
+/// $s = gc_status();
+/// var_dump($s['running'], $s['protected'], $s['full'], $s['runs'], $s['collected'], $s['roots']);
+/// var_dump(is_float($s['application_time']), is_float($s['collector_time']));
+/// ```
+/// ```expect
+/// array(12) {
+///   [0]=>
+///   string(7) "running"
+///   [1]=>
+///   string(9) "protected"
+///   [2]=>
+///   string(4) "full"
+///   [3]=>
+///   string(4) "runs"
+///   [4]=>
+///   string(9) "collected"
+///   [5]=>
+///   string(9) "threshold"
+///   [6]=>
+///   string(11) "buffer_size"
+///   [7]=>
+///   string(5) "roots"
+///   [8]=>
+///   string(16) "application_time"
+///   [9]=>
+///   string(14) "collector_time"
+///   [10]=>
+///   string(15) "destructor_time"
+///   [11]=>
+///   string(9) "free_time"
+/// }
+/// int(0)
+/// int(1)
+/// int(10001)
+/// int(16384)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// int(1)
+/// int(1)
+/// int(0)
+/// bool(true)
+/// bool(true)
+/// ```
+///
+/// A full buffer runs the collector on its own: the ten thousand and
+/// first root is one past the threshold, and the collection it starts frees
+/// the ten thousand cycles and leaves the last root in the buffer.
+///
+/// ```php
+/// for ($i = 0; $i < 10001; $i++) { $o = new stdClass; $o->o = $o; }
+/// unset($o);
+/// $s = gc_status();
+/// var_dump($s['runs'], $s['collected'], $s['roots'], $s['threshold']);
+/// ```
+/// ```expect
+/// int(1)
+/// int(10000)
+/// int(1)
+/// int(10001)
+/// ```
+fn gc_status(req: &mut Request) -> Result<Value, Thrown> {
+    no_arguments(req)?;
+    Ok(Value::array(req.gc_status()?))
 }
 
 /// The four that read and move the engine's ini table and the word

@@ -542,6 +542,37 @@ pub fn clone(req: &mut Request, object: &PhpObject) -> Result<PhpObject, Thrown>
     req.clone_object(*object, None)
 }
 
+/// A class's `clone_obj` over an object with a native payload, php's
+/// `spl_array_object_clone` and its kin: a fresh object of the class
+/// with the members copied as `zend_objects_clone_members` copies them,
+/// `payload` (the class's copy of the old one) in its slot, and then
+/// the class's `__clone` served on it, the copy given up with what
+/// `__clone` threw. What the payload names of the heap is the caller's
+/// to have taken an owner of. The copy is the caller's, one owner.
+pub fn clone_with<T: std::any::Any + Send>(
+    req: &mut Request,
+    object: &PhpObject,
+    payload: T,
+) -> Result<PhpObject, Thrown> {
+    let copy = req.clone_with_payload(*object, payload)?;
+    if req.method_named(object.class(), b"__clone").is_some()
+        && let Err(thrown) = call_method(req, &copy, b"__clone", &[])
+    {
+        req.release(copy.as_value());
+        return Err(thrown);
+    }
+    Ok(copy)
+}
+
+/// `zend_create_internal_iterator_zval`: an `InternalIterator` over
+/// `object`, walking the elements its class's
+/// [`crate::api::abi::ObjectHandlers::iterator_element`] answers, which
+/// is what `getIterator()` hands back for a class php iterates in C.
+/// The iterator is the caller's, one owner, and holds one of `object`.
+pub fn internal_iterator(req: &mut Request, object: &PhpObject) -> Result<PhpObject, Thrown> {
+    crate::interfaces::internal_iterator(req, *object)
+}
+
 /// `zend_lookup_class`: the linked class named, autoloading if needed.
 pub fn lookup_class(req: &mut Request, name: &[u8]) -> Result<Option<ClassId>, Thrown> {
     Ok(req.class_named(name))
@@ -553,11 +584,76 @@ pub fn lookup_function(req: &Request, name: &[u8]) -> Option<Function> {
     req.function_named(name)
 }
 
-/// Serve the autoloaders for `name`, `zend_lookup_class` after the table miss.
+/// Serve the autoloaders for `name`, `zend_lookup_class_ex` after the
+/// table miss (`Z/Zend/zend_execute_API.c:1228`) over
+/// `spl_perform_autoload` (`Z/ext/spl/php_spl.c:414`): a name that is
+/// no valid class name, or one an autoloader is already loading
+/// (`EG(in_autoload)`), loads nothing; otherwise each callable of the
+/// stack `spl_autoload_register` built is served with the name as it
+/// was written, a leading `\` dropped, until the table has the class,
+/// one throws, or none is left. The stack is read afresh at each
+/// step, so a loader registered or removed by a loader counts as php's
+/// walk of the live table counts it.
+///
+/// ```php
+/// class Real { const LOADED = 'yes'; }
+/// spl_autoload_register(function ($class) {
+///     echo "first: $class\n";
+/// });
+/// spl_autoload_register(function ($class) {
+///     echo "second: $class\n";
+///     if ($class === 'Late') { class_alias('Real', $class); }
+/// });
+/// echo \Late::LOADED, "\n";
+/// var_dump(class_exists('late'), class_exists('Never', false));
+/// new Missing;
+/// ```
+/// ```expect exit=255
+/// first: Late
+/// second: Late
+/// yes
+/// bool(true)
+/// bool(false)
+/// first: Missing
+/// second: Missing
+///
+/// Fatal error: Uncaught Error: Class "Missing" not found in %s:12
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 12
+/// ```
 pub fn autoload(req: &mut Request, name: &[u8]) -> Result<Option<ClassId>, Thrown> {
-    let _ = name;
-    let _ = req;
-    Ok(None)
+    let bare = name.strip_prefix(b"\\").unwrap_or(name);
+    let valid = !bare.is_empty()
+        && bare
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'\\' || *b >= 0x80);
+    if !valid {
+        return Ok(None);
+    }
+    if let Some(class) = req.class_named(bare) {
+        return Ok(Some(class));
+    }
+    let lowered = bare.to_ascii_lowercase();
+    if !req.autoload_enter(&lowered) {
+        return Ok(None);
+    }
+    let served = (|| {
+        let mut at = 0;
+        while let Some(loader) = req.autoloader(at) {
+            let class = crate::api::values::PhpString::new(req, bare)?;
+            let returned = call(req, &loader, &[Value::string(class)]);
+            req.release(Value::string(class));
+            req.release(returned?);
+            if let Some(class) = req.class_named(bare) {
+                return Ok(Some(class));
+            }
+            at += 1;
+        }
+        Ok(None)
+    })();
+    req.autoload_leave(&lowered);
+    served
 }
 
 /// A constant by the key the table holds it under, `zend_get_constant`:
@@ -639,7 +735,7 @@ fn special_constant(name: &[u8]) -> Option<Value> {
 /// php's `Error` where there is no such scope, and any other name is
 /// `zend_lookup_class_ex`, the table and then the autoloaders, with
 /// `Class "X" not found` where neither has it.
-fn fetch_class(req: &mut Request, name: &[u8]) -> Result<ClassId, Thrown> {
+pub(crate) fn fetch_class(req: &mut Request, name: &[u8]) -> Result<ClassId, Thrown> {
     if name.eq_ignore_ascii_case(b"self") {
         return req.scope().ok_or_else(|| {
             throw(
@@ -703,7 +799,6 @@ pub fn eval_const_expr(
     expr: &ConstExpr,
     scope: Option<ClassId>,
 ) -> Result<Value, Thrown> {
-    let _ = scope;
     match expr {
         ConstExpr::Null => Ok(Value::null()),
         ConstExpr::Bool(b) => Ok(Value::bool(*b)),
@@ -723,9 +818,34 @@ pub fn eval_const_expr(
         },
         // `zend_ast_evaluate`'s `ZEND_AST_CLASS_CONST` arm: the class
         // fetched by the name as written and its constant read through
-        // `zend_fetch_class_constant`. `self`, `parent` and `static` are
-        // refused while the file compiles, so the name here is a class's.
+        // `zend_get_class_constant_ex`, whose `self` and `parent` are the
+        // scope the expression is evaluated in and its parent; `static`
+        // is refused while the file compiles.
         ConstExpr::ClassConstant { class, name } => {
+            if class.0.eq_ignore_ascii_case(b"self") || class.0.eq_ignore_ascii_case(b"parent") {
+                let parent = class.0.eq_ignore_ascii_case(b"parent");
+                let word = if parent { "parent" } else { "self" };
+                let Some(scope) = scope else {
+                    return Err(throw(
+                        req,
+                        "Error",
+                        &format!("Cannot access \"{word}\" when no class scope is active"),
+                    ));
+                };
+                let id = if parent {
+                    let Some(up) = req.class_parent(scope) else {
+                        return Err(throw(
+                            req,
+                            "Error",
+                            "Cannot access \"parent\" when current class scope has no parent",
+                        ));
+                    };
+                    up
+                } else {
+                    scope
+                };
+                return req.class_constant(id, &name.0);
+            }
             let Some(id) = req.class_named(&class.0) else {
                 return Err(throw(
                     req,

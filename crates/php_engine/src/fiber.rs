@@ -204,10 +204,37 @@ impl ObjectHandlers for FiberHandlers {
         None
     }
 
-    /// `zend_fiber_object_gc`: the callable and `fiber->result`. php walks a
-    /// suspended fiber's frames too; this engine's frames of a suspended
-    /// fiber are not named, which keeps what they hold alive through a
-    /// collection and never frees it early.
+    /// `zend_fiber_object_gc` (`Z/Zend/zend_fibers.c:817`): the callable
+    /// and `fiber->result`, and for a suspended fiber every frame it
+    /// holds, innermost first, as `zend_unfinished_execution_gc_ex`
+    /// names each: the receiver and the closure, the slots, the extra
+    /// arguments and the extra named ones; then the calls its frames
+    /// were building, their receivers, closures and arguments
+    /// (`zend_unfinished_calls_gc`). Each is an owner the fiber's frames
+    /// hold, so a cycle through a suspended fiber's variables is found.
+    /// A running fiber's frames are the running execution's, and are
+    /// not named.
+    ///
+    /// ```php
+    /// function park() {
+    ///     $fiber = new Fiber(function () {
+    ///         $held = new stdClass;
+    ///         $held->fiber = Fiber::getCurrent();
+    ///         Fiber::suspend();
+    ///         echo "never\n";
+    ///     });
+    ///     $fiber->start();
+    /// }
+    /// park();
+    /// var_dump(gc_status()['roots']);
+    /// var_dump(gc_collect_cycles());
+    /// echo "done\n";
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// int(1)
+    /// done
+    /// ```
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
         let Some(fiber) = object.native::<Fiber>(req) else {
             return;
@@ -216,10 +243,59 @@ impl ObjectHandlers for FiberHandlers {
             visit(callable.value());
         }
         visit(fiber.result);
+        if fiber.status != Status::Suspended {
+            return;
+        }
+        let Some(execution) = &fiber.execution else {
+            return;
+        };
+        for (at, state) in execution.vm.frames().iter().enumerate().rev() {
+            if let Some(this) = state.this {
+                visit(this.as_value());
+            }
+            if let Some(closure) = state.closure {
+                visit(closure.as_value());
+            }
+            let frame = php_heap::FrameRef(u32::try_from(at).unwrap_or(u32::MAX));
+            if let Some(slots) = execution.stack.frame(frame) {
+                for slot in 0..slots.len() {
+                    let slot = php_heap::Slot(u32::try_from(slot).unwrap_or(u32::MAX));
+                    visit(Value::of_zval(slots.slot(slot)));
+                }
+            }
+            for extra in &state.extra_args {
+                visit(*extra);
+            }
+            for (_, value) in &state.extra_named {
+                visit(*value);
+            }
+        }
+        for call in execution.vm.calls().iter().rev() {
+            if let Some(this) = call.this {
+                visit(this.as_value());
+            }
+            if let Some(closure) = call.closure {
+                visit(closure.as_value());
+            }
+            for argument in &call.arguments {
+                visit(*argument);
+            }
+            for (_, value) in &call.extra_named {
+                visit(*value);
+            }
+        }
     }
 }
 
 static FIBER: FiberHandlers = FiberHandlers;
+
+/// Whether `table` is `Fiber`'s, whose `dtor_obj` is
+/// `zend_fiber_object_destroy` and not `zend_objects_destroy_object`,
+/// so the cycle collector serves it a destructor whatever the class
+/// declares.
+pub(crate) fn serves_destructor(table: &'static dyn ObjectHandlers) -> bool {
+    std::ptr::addr_eq(table, &raw const FIBER)
+}
 
 /// `zend_fiber_object_create`: a fresh payload, `ZEND_FIBER_STATUS_INIT`.
 fn new_fiber(heap: &mut Heap, class: u32, slots: u32) -> Result<Obj, Fatal> {

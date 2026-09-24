@@ -15,10 +15,12 @@
 mod find;
 mod locale;
 mod parse_str;
-mod path;
+pub(super) mod path;
 mod replace;
 mod slashes;
 mod strip_tags;
+
+pub use strip_tags::strip_tags_ex;
 
 use php_ext::coerce::to_string;
 use php_ext::decl::FunctionDecl;

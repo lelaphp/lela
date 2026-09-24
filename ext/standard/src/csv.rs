@@ -1,5 +1,5 @@
-//! `php_fgetcsv` (`Z/ext/standard/file.c:1837`), the one CSV reader
-//! behind `str_getcsv` here and `fgetcsv` once `file.c`'s half lands,
+//! `php_fgetcsv` (`Z/ext/standard/file.c:1865`), the one CSV reader
+//! behind `str_getcsv` here and `fgetcsv` in `file`,
 //! with `php_csv_handle_escape_argument` beside it. The reader walks a
 //! byte at a time: the delimiter, the enclosure and the escape are
 //! single bytes, and under the C locale `php_mblen` never joins one of
@@ -56,37 +56,44 @@ const fn is_space(c: u8) -> bool {
     matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
 }
 
-/// `php_fgetcsv(NULL, delimiter, enclosure, escape, len, buf)` over a
-/// buffer with no stream behind it: the fields, or `None` for a line
-/// with nothing on it.
+/// `php_fgetcsv(stream, delimiter, enclosure, escape, len, buf)`
+/// (`Z/ext/standard/file.c:1865`): the fields of the line in `first`,
+/// or `None` for a line with nothing on it. Where an enclosed field runs
+/// past the line's end, `more` is asked for the next line, php's
+/// `php_stream_get_line(stream, NULL, 0, &new_len)`; `None` from it is
+/// the stream at its end, and for `str_getcsv`, which has no stream,
+/// the answer every time, so the field keeps what the line had.
 #[allow(clippy::too_many_lines)]
 pub(super) fn fgetcsv(
-    buf: &[u8],
+    first: &[u8],
     delimiter: u8,
     enclosure: u8,
     escape: Option<u8>,
+    more: &mut dyn FnMut() -> Option<Vec<u8>>,
 ) -> Option<Vec<Vec<u8>>> {
     // `buf` is read as php reads its NUL-terminated copy.
-    let at = |i: usize| buf.get(i).copied().unwrap_or(0);
-    let limit = trailing(buf, buf.len());
-    let line_end = limit;
-    let line_end_bytes = &buf[limit..];
+    let at = |buf: &[u8], i: usize| buf.get(i).copied().unwrap_or(0);
+    // A copy reads the terminator too, as php's `memcpy` does where an
+    // escape stepped onto it.
+    let span = |buf: &[u8], from: usize, to: usize| -> Vec<u8> {
+        (from..to).map(|i| at(buf, i)).collect()
+    };
+    let mut buf = first.to_vec();
+    let mut limit = trailing(&buf, buf.len());
+    let mut line_end = limit;
     let mut values = Vec::new();
     let mut bptr = 0usize;
     let mut first_field = true;
-    let step = |bptr: usize| usize::from(bptr < limit);
-    // A copy reads the terminator too, as php's `memcpy` does where an
-    // escape stepped onto it.
-    let span = |from: usize, to: usize| -> Vec<u8> { (from..to).map(at).collect() };
     loop {
+        let step = |bptr: usize, limit: usize| usize::from(bptr < limit);
         let mut field: Vec<u8> = Vec::new();
-        let mut inc_len = step(bptr);
+        let mut inc_len = step(bptr, limit);
         if inc_len == 1 {
             let mut tmp = bptr;
-            while at(tmp) != delimiter && is_space(at(tmp)) {
+            while at(&buf, tmp) != delimiter && is_space(at(&buf, tmp)) {
                 tmp += 1;
             }
-            if at(tmp) == enclosure && tmp < limit {
+            if at(&buf, tmp) == enclosure && tmp < limit {
                 bptr = tmp;
             }
         }
@@ -94,7 +101,7 @@ pub(super) fn fgetcsv(
             return None;
         }
         first_field = false;
-        if inc_len != 0 && at(bptr) == enclosure {
+        if inc_len != 0 && at(&buf, bptr) == enclosure {
             let mut state = 0u8;
             bptr += 1;
             let mut hunk = bptr;
@@ -104,24 +111,35 @@ pub(super) fn fgetcsv(
             loop {
                 if inc_len == 0 {
                     if state == 2 {
-                        field.extend_from_slice(&span(hunk, bptr.saturating_sub(1)));
+                        field.extend_from_slice(&span(&buf, hunk, bptr.saturating_sub(1)));
                         hunk = bptr;
-                    } else {
-                        if state == 1 {
-                            field.extend_from_slice(&span(hunk, bptr));
-                            hunk = bptr;
+                        break;
+                    }
+                    if state == 1 {
+                        field.extend_from_slice(&span(&buf, hunk, bptr));
+                        hunk = bptr;
+                    }
+                    if hunk != line_end {
+                        field.extend_from_slice(&span(&buf, hunk, bptr));
+                        hunk = bptr;
+                    }
+                    field.extend_from_slice(buf.get(line_end..).unwrap_or_default());
+                    if let Some(next) = more() {
+                        buf = next;
+                        bptr = 0;
+                        hunk = 0;
+                        limit = trailing(&buf, buf.len());
+                        line_end = limit;
+                        state = 0;
+                        inc_len = step(bptr, limit);
+                        continue;
+                    }
+                    // The enclosure is unterminated.
+                    if bptr > limit {
+                        if hunk == bptr {
+                            hunk -= 1;
                         }
-                        if hunk != line_end {
-                            field.extend_from_slice(&span(hunk, bptr));
-                            hunk = bptr;
-                        }
-                        field.extend_from_slice(line_end_bytes);
-                        if bptr > limit {
-                            if hunk == bptr {
-                                hunk -= 1;
-                            }
-                            bptr -= 1;
-                        }
+                        bptr -= 1;
                     }
                     break;
                 }
@@ -131,48 +149,48 @@ pub(super) fn fgetcsv(
                         state = 0;
                     }
                     2 => {
-                        if at(bptr) != enclosure {
-                            field.extend_from_slice(&span(hunk, bptr.saturating_sub(1)));
+                        if at(&buf, bptr) != enclosure {
+                            field.extend_from_slice(&span(&buf, hunk, bptr.saturating_sub(1)));
                             hunk = bptr;
                             break;
                         }
-                        field.extend_from_slice(&span(hunk, bptr));
+                        field.extend_from_slice(&span(&buf, hunk, bptr));
                         bptr += 1;
                         hunk = bptr;
                         state = 0;
                     }
                     _ => {
-                        if at(bptr) == enclosure {
+                        if at(&buf, bptr) == enclosure {
                             state = 2;
-                        } else if escape.is_some_and(|e| at(bptr) == e) {
+                        } else if escape.is_some_and(|e| at(&buf, bptr) == e) {
                             state = 1;
                         }
                         bptr += 1;
                     }
                 }
-                inc_len = step(bptr);
+                inc_len = step(bptr, limit);
             }
             // Up to the delimiter.
             loop {
-                if inc_len == 0 || at(bptr) == delimiter {
+                if inc_len == 0 || at(&buf, bptr) == delimiter {
                     break;
                 }
                 bptr += 1;
-                inc_len = step(bptr);
+                inc_len = step(bptr, limit);
             }
-            field.extend_from_slice(&span(hunk, bptr));
+            field.extend_from_slice(&span(&buf, hunk, bptr));
             bptr += inc_len;
         } else {
             // 2B: the bare field.
             let hunk = bptr;
-            while inc_len != 0 && at(bptr) != delimiter {
+            while inc_len != 0 && at(&buf, bptr) != delimiter {
                 bptr += 1;
-                inc_len = step(bptr);
+                inc_len = step(bptr, limit);
             }
-            field.extend_from_slice(&span(hunk, bptr));
+            field.extend_from_slice(&span(&buf, hunk, bptr));
             let end = trailing(&field, field.len());
             field.truncate(end);
-            if at(bptr) == delimiter {
+            if at(&buf, bptr) == delimiter {
                 bptr += 1;
             }
         }
@@ -268,7 +286,9 @@ pub(super) fn str_getcsv(req: &mut Request) -> Result<Value, Thrown> {
     };
     let escape = escape_argument(req, 4)?;
     let mut array = PhpArray::new(req)?;
-    match fgetcsv(string.as_bytes(), delimiter, enclosure, escape) {
+    match fgetcsv(string.as_bytes(), delimiter, enclosure, escape, &mut || {
+        None
+    }) {
         None => array.append(req, Value::null())?,
         Some(fields) => {
             for field in fields {

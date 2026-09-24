@@ -135,6 +135,19 @@ impl ZvalRef {
     }
 }
 
+/// Which of the two walks that reach a `WeakMap` entry the cycle
+/// collector's grey walk has already taken its owner off by: from the
+/// key object (`GC_FROM_WEAKMAP_KEY`) and from the map
+/// (`GC_FROM_WEAKMAP`). An entry is owned by the map and kept alive by
+/// the key, so the walk takes one owner off it, whichever of the two it
+/// came by first, and the marks say which. Cleared again before the
+/// collection ends.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct WeakMarks {
+    pub(crate) from_key: bool,
+    pub(crate) from_map: bool,
+}
+
 /// One value slot: a payload word, the type byte, the type flags and the
 /// opline-specific `u2` word. Copying a zval is a bitwise copy and touches
 /// no refcount; [`crate::Heap::addref`] and [`crate::Heap::release`] are
@@ -145,7 +158,10 @@ pub struct Zval {
     value: u64,
     kind: ZvalType,
     type_flags: u8,
-    _pad: u16,
+    /// The extra bits of php's `Z_TYPE_INFO` above the type flags,
+    /// where the cycle collector marks a `WeakMap` entry
+    /// ([`WeakMarks`]) and nothing else writes.
+    extra: u16,
     u2: u32,
 }
 
@@ -155,7 +171,7 @@ impl Zval {
         value: 0,
         kind: ZvalType::Undef,
         type_flags: 0,
-        _pad: 0,
+        extra: 0,
         u2: 0,
     };
 
@@ -164,7 +180,7 @@ impl Zval {
             value,
             kind,
             type_flags: 0,
-            _pad: 0,
+            extra: 0,
             u2: 0,
         }
     }
@@ -206,7 +222,7 @@ impl Zval {
             } else {
                 Zval::TYPE_REFCOUNTED
             },
-            _pad: 0,
+            extra: 0,
             u2: 0,
         }
     }
@@ -223,7 +239,7 @@ impl Zval {
             } else {
                 Zval::TYPE_REFCOUNTED | Zval::TYPE_COLLECTABLE
             },
-            _pad: 0,
+            extra: 0,
             u2: 0,
         }
     }
@@ -236,7 +252,7 @@ impl Zval {
             value: o.payload(),
             kind: ZvalType::Object,
             type_flags: Zval::TYPE_REFCOUNTED | Zval::TYPE_COLLECTABLE,
-            _pad: 0,
+            extra: 0,
             u2: 0,
         }
     }
@@ -249,7 +265,7 @@ impl Zval {
             value: r.payload(),
             kind: ZvalType::Resource,
             type_flags: Zval::TYPE_REFCOUNTED,
-            _pad: 0,
+            extra: 0,
             u2: 0,
         }
     }
@@ -263,7 +279,7 @@ impl Zval {
             value: r.payload(),
             kind: ZvalType::Reference,
             type_flags: Zval::TYPE_REFCOUNTED | Zval::TYPE_COLLECTABLE,
-            _pad: 0,
+            extra: 0,
             u2: 0,
         }
     }
@@ -437,6 +453,39 @@ impl Zval {
     pub const fn is_refcounted(self) -> bool {
         self.type_flags & Zval::TYPE_REFCOUNTED != 0
     }
+
+    /// `Z_COLLECTABLE`: a mutable array, an object or a reference, the
+    /// values a cycle can pass through.
+    #[must_use]
+    pub(crate) const fn is_collectable(self) -> bool {
+        self.type_flags & Zval::TYPE_COLLECTABLE != 0
+    }
+
+    /// The marks the cycle collector left on this zval, a `WeakMap`
+    /// entry's.
+    pub(crate) const fn weak_marks(self) -> WeakMarks {
+        WeakMarks {
+            from_key: self.extra & Zval::FROM_WEAKMAP_KEY != 0,
+            from_map: self.extra & Zval::FROM_WEAKMAP != 0,
+        }
+    }
+
+    /// The zval with `marks` in place of the ones it carried.
+    pub(crate) const fn with_weak_marks(mut self, marks: WeakMarks) -> Zval {
+        self.extra &= !(Zval::FROM_WEAKMAP_KEY | Zval::FROM_WEAKMAP);
+        if marks.from_key {
+            self.extra |= Zval::FROM_WEAKMAP_KEY;
+        }
+        if marks.from_map {
+            self.extra |= Zval::FROM_WEAKMAP;
+        }
+        self
+    }
+
+    /// `Z_FROM_WEAKMAP_KEY` (`Z/Zend/zend_gc.c:200`), in the extra bits.
+    const FROM_WEAKMAP_KEY: u16 = 1 << 0;
+    /// `Z_FROM_WEAKMAP`.
+    const FROM_WEAKMAP: u16 = 1 << 1;
 
     /// `IS_TYPE_REFCOUNTED`.
     const TYPE_REFCOUNTED: u8 = 1;

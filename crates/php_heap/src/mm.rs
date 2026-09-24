@@ -770,7 +770,7 @@ impl Mm {
     /// `run`'s element count; the walk of the chunks gives those `runs`
     /// back and resets the count of every other, so the next sweep
     /// starts from zero.
-    fn gc(&mut self) -> usize {
+    pub(crate) fn gc(&mut self) -> usize {
         for (bin_num, &elements) in BIN_ELEMENTS.iter().enumerate() {
             let elements = elements as u32;
             let mut has_free_pages = false;

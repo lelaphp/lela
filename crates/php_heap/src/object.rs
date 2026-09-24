@@ -79,8 +79,9 @@ pub(crate) struct ObjHeader {
     gc: Refcounted,
     /// php's `handle`: the store's index, `spl_object_id()`.
     handle: Cell<u32>,
-    /// `extra_flags`, `OBJ_EXTRA_FLAGS()`: kept for the size.
-    _extra_flags: u32,
+    /// `extra_flags`, `OBJ_EXTRA_FLAGS()`, where php keeps
+    /// `IS_OBJ_LAZY_UNINITIALIZED` and `IS_OBJ_LAZY_PROXY`.
+    extra_flags: u32,
     /// php's `ce`: the class as the engine numbers it, which the heap
     /// reads nothing of, and the slots the class laid down, which php
     /// reads off `ce->default_properties_count`.
@@ -174,7 +175,7 @@ impl Obj {
             header.as_ptr().write(ObjHeader {
                 gc: Refcounted::new(ZvalType::Object, 0),
                 handle: Cell::new(0),
-                _extra_flags: 0,
+                extra_flags: 0,
                 class,
                 slots,
                 payload: Cell::new(payload),
@@ -230,11 +231,12 @@ impl Obj {
     }
 
     /// `IS_OBJ_LAZY_UNINITIALIZED`: a lazy ghost or proxy nothing has
-    /// initialised (design §5.4). The bit sits above the flags, where
-    /// php keeps it (`Z/Zend/zend_types.h:867`).
+    /// initialised (design §5.4). The bit is `extra_flags`'s, where php
+    /// keeps it (`Z/Zend/zend_types.h:867-870`), since the header word's
+    /// top bits are the collector's colour.
     #[must_use]
     pub fn is_lazy(&self) -> bool {
-        self.header().gc.has_info(gc::OBJ_LAZY_UNINITIALIZED)
+        self.header().extra_flags & gc::OBJ_LAZY_UNINITIALIZED != 0
     }
 
     /// `Z_IS_RECURSIVE_P`: a walk that guards itself with
@@ -287,12 +289,17 @@ impl Obj {
         self.header().payload.get().is_some()
     }
 
-    fn has_flag(self, flag: u32) -> bool {
+    pub(crate) fn has_flag(self, flag: u32) -> bool {
         self.header().gc.flags() & flag != 0
     }
 
-    fn add_flag(self, flag: u32) {
+    pub(crate) fn add_flag(self, flag: u32) {
         self.header().gc.add_flags(flag);
+    }
+
+    /// `zend_refcounted_h gc`: the header the cycle collector colours.
+    pub(crate) fn gc(&self) -> &Refcounted {
+        &self.header().gc
     }
 
     fn slot_ptr(self, i: u32) -> *mut Zval {
@@ -510,14 +517,14 @@ impl Store {
     }
 
     /// `SET_OBJ_INVALID`: the bucket no longer names a live object.
-    fn invalidate(&self, handle: u32) {
+    pub(crate) fn invalidate(&self, handle: u32) {
         if let Some(word) = self.read(handle) {
             self.write(handle, word | BUCKET_INVALID);
         }
     }
 
     /// `ZEND_OBJECTS_STORE_ADD_TO_FREE_LIST`.
-    fn add_to_free_list(&mut self, handle: u32) {
+    pub(crate) fn add_to_free_list(&mut self, handle: u32) {
         let next = self.free_list_head.unwrap_or(u32::MAX) as usize;
         self.write(handle, (next << 1) | BUCKET_INVALID);
         self.free_list_head = Some(handle);
@@ -706,13 +713,19 @@ impl Heap {
         }
     }
 
-    /// `zend_objects_store_del` (`Z/Zend/zend_objects_API.c:162`): the
-    /// destructor served once with the count held at one, and, when
-    /// nothing took an owner meanwhile, the bucket invalidated, the
-    /// members and the payload freed once, the bytes given back and the
-    /// id put on the free list. The heap is reached through `hooks`
-    /// across each call up, since the destructor may grow the store.
+    /// `zend_objects_store_del` (`Z/Zend/zend_objects_API.c:162`):
+    /// nothing for an object the cycle collector is already freeing,
+    /// whose type it turned to `IS_NULL`; otherwise the destructor
+    /// served once with the count held at one, and, when nothing took an
+    /// owner meanwhile, the bucket invalidated, the members and the
+    /// payload freed once, the object taken out of the root buffer, the
+    /// bytes given back and the id put on the free list. The heap is
+    /// reached through `hooks` across each call up, since the destructor
+    /// may grow the store.
     pub(crate) fn store_del(hooks: &mut dyn HeapHooks, o: Obj) {
+        if o.gc().kind() == ZvalType::Null as u32 {
+            return;
+        }
         if !o.has_flag(gc::OBJ_DESTRUCTOR_CALLED) {
             o.add_flag(gc::OBJ_DESTRUCTOR_CALLED);
             o.header().gc.set_refcount(1);
@@ -730,8 +743,10 @@ impl Heap {
             Heap::object_free(hooks, o);
         }
         let heap = hooks.heap();
+        heap.gc.remove_from_buffer(crate::collector::Node::Obj(o));
         // SAFETY: the object came from `object_alloc`, its bucket is
-        // invalid and its members are freed, so nothing names it.
+        // invalid, its members are freed and the root buffer names it no
+        // more, so nothing names it.
         unsafe { heap.mm.free(o.address()) };
         heap.store.add_to_free_list(handle);
     }
@@ -742,12 +757,16 @@ impl Heap {
     /// the dynamic table and the slots, and for an internal class the
     /// payload, what it names of the heap given back by the engine
     /// through [`HeapHooks::free_native`] and the rest by its drop.
-    fn object_free(hooks: &mut dyn HeapHooks, o: Obj) {
+    ///
+    /// The dynamic table is given up as `zend_object_std_dtor` gives it
+    /// up, `GC_DELREF` and `zend_array_destroy` at zero and never
+    /// `gc_possible_root`: a table still shared is not a root.
+    pub(crate) fn object_free(hooks: &mut dyn HeapHooks, o: Obj) {
         if o.is_weakly_referenced() {
             hooks.weakrefs_notify(o);
         }
         if let Some(table) = o.header().properties.take() {
-            Heap::release(hooks, Zval::array(table));
+            Heap::release_nogc(hooks, Zval::array(table));
         }
         for i in 0..o.slots() {
             let z = o.slot(i);

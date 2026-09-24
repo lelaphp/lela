@@ -83,7 +83,7 @@ fn label(wrapper: &Located) -> &'static str {
     match wrapper {
         Located::Plain => "plainfile",
         Located::Php => "PHP",
-        Located::User(_) | Located::Nothing => "user-space",
+        Located::Ext(_) | Located::Space(_) | Located::Nothing => "user-space",
     }
 }
 
@@ -92,7 +92,8 @@ fn label(wrapper: &Located) -> &'static str {
 fn same(a: &Located, b: &Located) -> bool {
     match (a, b) {
         (Located::Plain, Located::Plain) | (Located::Php, Located::Php) => true,
-        (Located::User(x), Located::User(y)) => x == y,
+        (Located::Ext(x), Located::Ext(y)) => x == y,
+        (Located::Space(x), Located::Space(y)) => x.same(y),
         _ => false,
     }
 }
@@ -216,6 +217,7 @@ impl Request {
         path: &[u8],
         link: bool,
         cached: bool,
+        quiet: bool,
     ) -> Result<Option<StatBuf>, Thrown> {
         if cached {
             let entry = if link {
@@ -253,7 +255,13 @@ impl Request {
                     meta.ok().map(|meta| stat_buf(&meta))
                 }
             }
-            Located::User(at) => match self.wrappers[at].stat {
+            Located::Space(user) => {
+                // `php_stat` adds `PHP_STREAM_URL_STAT_IGNORE_OPEN_BASEDIR`,
+                // and `PHP_STREAM_URL_STAT_QUIET` for an existence check.
+                let flags = i64::from(link) | i64::from(quiet) << 1 | i64::from(cached) << 2;
+                crate::streams::userspace::url_stat(self, &user, &local, flags)?
+            }
+            Located::Ext(at) => match self.wrappers[at].stat {
                 Some(stat) => match stat(self, &local)? {
                     Some(array) => {
                         // `statbuf_from_array`
@@ -312,10 +320,13 @@ impl Request {
                 // nothing said.
                 match self.locate_wrapper(path).0 {
                     Located::Plain => Ok(self.plain_mkdir(path, mode, recursive)),
-                    Located::User(at) => match self.wrappers[at].mkdir {
+                    Located::Ext(at) => match self.wrappers[at].mkdir {
                         Some(mkdir) => mkdir(self, path, mode, recursive),
                         None => Ok(false),
                     },
+                    Located::Space(user) => {
+                        crate::streams::userspace::path_op(self, &user, path, op)
+                    }
                     Located::Php | Located::Nothing => Ok(false),
                 }
             }
@@ -324,17 +335,22 @@ impl Request {
                 // as `_php_stream_mkdir`.
                 match self.locate_wrapper(path).0 {
                     Located::Plain => Ok(self.plain_rmdir(path)),
-                    Located::User(at) => match self.wrappers[at].rmdir {
+                    Located::Ext(at) => match self.wrappers[at].rmdir {
                         Some(rmdir) => rmdir(self, path),
                         None => Ok(false),
                     },
+                    Located::Space(user) => {
+                        crate::streams::userspace::path_op(self, &user, path, op)
+                    }
                     Located::Php | Located::Nothing => Ok(false),
                 }
             }
             WrapperOp::Touch(_)
             | WrapperOp::Chmod(_)
             | WrapperOp::Owner(_)
-            | WrapperOp::Group(_) => self.metadata_url(path, op),
+            | WrapperOp::Group(_)
+            | WrapperOp::OwnerName(_)
+            | WrapperOp::GroupName(_) => self.metadata_url(path, op),
         }
     }
 
@@ -344,13 +360,16 @@ impl Request {
     /// wrapper handed the path as written.
     fn unlink_url(&mut self, path: &[u8]) -> Result<bool, Thrown> {
         let wrapper = self.locate_wrapper(path).0;
-        let unlink = match wrapper {
+        let unlink = match &wrapper {
             Located::Nothing => {
                 docref(self, Level::Warning, "Unable to locate stream wrapper");
                 return Ok(false);
             }
             Located::Plain => return Ok(self.plain_unlink(path)),
-            Located::User(at) => self.wrappers[at].unlink,
+            Located::Space(user) => {
+                return crate::streams::userspace::path_op(self, user, path, WrapperOp::Unlink);
+            }
+            Located::Ext(at) => self.wrappers[*at].unlink,
             Located::Php => None,
         };
         if let Some(unlink) = unlink {
@@ -387,13 +406,13 @@ impl Request {
     /// as written.
     fn rename_url(&mut self, from: &[u8], to: &[u8]) -> Result<bool, Thrown> {
         let wrapper = self.locate_wrapper(from).0;
-        let rename = match wrapper {
+        let rename = match &wrapper {
             Located::Nothing => {
                 docref(self, Level::Warning, "Unable to locate stream wrapper");
                 return Ok(false);
             }
-            Located::Plain => None,
-            Located::User(at) => self.wrappers[at].rename,
+            Located::Plain | Located::Space(_) => None,
+            Located::Ext(at) => self.wrappers[*at].rename,
             Located::Php => {
                 docref(
                     self,
@@ -403,7 +422,7 @@ impl Request {
                 return Ok(false);
             }
         };
-        if let Located::User(_) = wrapper
+        if let Located::Ext(_) = wrapper
             && rename.is_none()
         {
             docref(
@@ -420,6 +439,9 @@ impl Request {
                 "Cannot rename a file across wrapper types",
             );
             return Ok(false);
+        }
+        if let Located::Space(user) = &wrapper {
+            return crate::streams::userspace::path_op(self, user, from, WrapperOp::Rename { to });
         }
         match rename {
             Some(rename) => rename(self, from, to),
@@ -638,10 +660,13 @@ impl Request {
         let wrapper = self.locate_wrapper(path).0;
         match wrapper {
             Located::Plain => return Ok(self.plain_metadata(path, op)),
-            Located::User(at) => {
+            Located::Ext(at) => {
                 if let Some(set_stat) = self.wrappers[at].set_stat {
                     return set_stat(self, path, op);
                 }
+            }
+            Located::Space(user) => {
+                return crate::streams::userspace::path_op(self, &user, path, op);
             }
             Located::Php | Located::Nothing => {}
         }
@@ -657,7 +682,7 @@ impl Request {
             }
             WrapperOp::Touch(Some(_)) => "touch",
             WrapperOp::Chmod(_) => "chmod",
-            WrapperOp::Owner(_) => "chown",
+            WrapperOp::Owner(_) | WrapperOp::OwnerName(_) => "chown",
             _ => "chgrp",
         };
         let text = format!("Cannot call {name}() for a non-standard stream");
@@ -711,7 +736,9 @@ impl Request {
             WrapperOp::Unlink
             | WrapperOp::Rename { .. }
             | WrapperOp::Mkdir { .. }
-            | WrapperOp::Rmdir => return false,
+            | WrapperOp::Rmdir
+            | WrapperOp::OwnerName(_)
+            | WrapperOp::GroupName(_) => return false,
         };
         match done {
             Ok(()) => {

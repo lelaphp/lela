@@ -24,7 +24,7 @@ use php_unit::decl::{ClassDecl, ConstDecl, ConstExpr, FunctionDecl, MethodDecl, 
 use php_unit::{FramelessEntry, Unit, frameless_table};
 
 use crate::api::abi::{Cache, Entry, Extension, NativeNew, ObjectHandlers, StartupIni};
-use crate::api::request::{Aside, Ending, Request};
+use crate::api::request::{Aside, Ending, ExtensionId, Request};
 use crate::api::values::{ClassId, Value};
 use crate::exec;
 use crate::tier::{Nop, Tier, execute, reenter};
@@ -113,7 +113,14 @@ const MAX_ACCELERATED_FILES: usize = 10_000;
 /// engine states, the ini defaults and the loop (design §5.14).
 pub(crate) struct Shared {
     pub(crate) extensions: Vec<Extension>,
+    /// `CG(function_table)`'s natives, the engine's own and then each
+    /// extension's in bundle order, less what the startup ini's
+    /// `disable_functions` took out of it ([`function_table`]).
     pub(crate) functions: Vec<(FunctionDecl, Entry)>,
+    /// Each native's `internal_function.module`, one row per row of
+    /// `functions`: the extension that declared it, or none for one the
+    /// engine declares itself.
+    pub(crate) function_modules: Vec<Option<ExtensionId>>,
     /// `zend_flf_functions` (`Z/Zend/zend_API.c:3115-3133`): the natives
     /// with a frameless entry, one row per arity in registration order,
     /// which a `FRAMELESS_ICALL_*`'s `extended_value` indexes. Computed
@@ -413,8 +420,9 @@ impl Shared {
 }
 
 /// The core ini entries and their defaults: php's `main.c` table and
-/// five entries of `Zend/zend.c`'s, the two a throwable's trace reads,
-/// the two the stack limit reads (`Shared::stack_limit`) and
+/// six entries of `Zend/zend.c`'s, the two a throwable's trace reads,
+/// the two the stack limit reads (`Shared::stack_limit`),
+/// `zend.enable_gc`, which turns the cycle collector on, and
 /// `fatal_error_backtraces`, php 8.5's, `On` by default
 /// (`Z/Zend/zend.c:263`), which a fatal's trace reads,
 /// under the CLI's hardcoded overrides (`Z/sapi/cli/php_cli.c:116-121`),
@@ -439,7 +447,7 @@ impl Shared {
 /// string(0) ""
 /// string(10) "ISO-8859-1"
 /// ```
-const CORE_INI: [(&str, &str); 27] = [
+const CORE_INI: [(&str, &str); 41] = [
     ("short_open_tag", "1"),
     ("fatal_error_backtraces", "1"),
     ("precision", "14"),
@@ -468,9 +476,31 @@ const CORE_INI: [(&str, &str); 27] = [
     ("zend.exception_string_param_max_len", "15"),
     ("zend.max_allowed_stack_size", "0"),
     ("zend.reserved_stack_size", "0"),
+    // `zend.enable_gc`, `On` (`Z/Zend/zend.c:265`), whose `on_modify` is
+    // the collector's `gc_enable`.
+    ("zend.enable_gc", "1"),
     // `fiber.stack_size`, `NULL` in php's table, which `ini_get` reads
     // as the empty string and `OnUpdateFiberStackSize` as php's default.
     ("fiber.stack_size", ""),
+    // `disable_functions`, `PHP_INI_SYSTEM` (`Z/main/main.c:872`): read
+    // once, as the function table is built (`function_table`).
+    ("disable_functions", ""),
+    // `main.c`'s entries for `mail()` and `php_syslog`, and
+    // `sys_temp_dir`, `PHP_INI_SYSTEM` or `PHP_INI_SYSTEM|PHP_INI_PERDIR`
+    // but `SMTP`, `smtp_port` and `syslog.filter`; a `NULL` default is
+    // empty here, as the two error strings above are.
+    ("sys_temp_dir", ""),
+    ("SMTP", "localhost"),
+    ("smtp_port", "25"),
+    ("mail.add_x_header", "0"),
+    ("mail.mixed_lf_and_crlf", "0"),
+    ("mail.cr_lf_mode", "crlf"),
+    ("mail.log", ""),
+    ("sendmail_path", "/usr/sbin/sendmail -t -i"),
+    ("mail.force_extra_parameters", ""),
+    ("syslog.facility", "LOG_USER"),
+    ("syslog.ident", "php"),
+    ("syslog.filter", "no-ctrl"),
 ];
 
 /// A host's ini value as the ini scanner hands it to the table
@@ -560,6 +590,55 @@ fn ini_quantity(value: &[u8]) -> i64 {
     if negative { -magnitude } else { magnitude }
 }
 
+/// `zend_disable_functions` (`Z/Zend/zend_API.c:3668-3710`): the names
+/// the startup ini's `disable_functions` takes out of the function table
+/// before any request runs, so a call to one is a call to an undefined
+/// function and no lookup, `function_exists()`, `is_callable()` or
+/// `get_defined_functions()` finds it. The list is split at every space
+/// and every comma and at nothing else, so a tab or a `;` is a byte of a
+/// name. Each name is a key of the table, which holds a native under its
+/// lowered name, matched byte for byte: `STRLEN` takes nothing out, and a
+/// name no native has is passed over. `exit`, `die` and `clone` are the
+/// three `zend_disable_function` keeps in the table; php says so with a
+/// startup `E_WARNING`, `Cannot disable function %s()` in `Unknown` on
+/// line 0, which this engine does not raise, since it has no diagnostic
+/// before a request (#776).
+fn disabled_functions(list: &[u8]) -> Vec<&[u8]> {
+    list.split(|byte| matches!(byte, b' ' | b','))
+        .filter(|name| !name.is_empty())
+        .filter(|name| !matches!(*name, b"exit" | b"die" | b"clone"))
+        .collect()
+}
+
+/// `CG(function_table)`'s natives once every `MINIT` has registered its
+/// own and `php_module_startup` has called `zend_disable_functions` over
+/// the startup ini's `disable_functions` (`Z/main/main.c:2370`): the engine's own
+/// and then each extension's in bundle order, less what the list names
+/// ([`disabled_functions`]), each beside the extension that declared it.
+/// The one place the disabled set is decided: what it takes out is in no
+/// table the compiler or a request reads.
+fn function_table(
+    extensions: &[Extension],
+    ini: &[(Vec<u8>, Vec<u8>)],
+) -> (Vec<Option<ExtensionId>>, Vec<(FunctionDecl, Entry)>) {
+    let list = ini
+        .iter()
+        .find(|(name, _)| name.as_slice() == b"disable_functions")
+        .map_or(&[][..], |(_, list)| list.as_slice());
+    let disabled = disabled_functions(list);
+    crate::natives::natives()
+        .into_iter()
+        .map(|native| (None, native))
+        .chain(extensions.iter().zip(0u32..).flat_map(|(e, at)| {
+            e.functions
+                .iter()
+                .cloned()
+                .map(move |native| (Some(ExtensionId(at)), native))
+        }))
+        .filter(|(_, (decl, _))| !disabled.contains(&decl.name.0.to_ascii_lowercase().as_slice()))
+        .unzip()
+}
+
 /// Builds an [`Engine`]: the bundle, the tier and the startup ini.
 pub struct EngineBuilder {
     extensions: Vec<Extension>,
@@ -625,15 +704,13 @@ impl EngineBuilder {
             .filter_map(|e| e.engine_state.as_ref())
             .map(|build| build(&startup))
             .collect();
-        let functions: Vec<(FunctionDecl, Entry)> = crate::natives::natives()
-            .into_iter()
-            .chain(extensions.iter().flat_map(|e| e.functions.iter().cloned()))
-            .collect();
+        let (function_modules, functions) = function_table(&extensions, &ini);
         let frameless = frameless_table(functions.iter().map(|(decl, _)| decl));
         // `zend_register_internal_class_with_flags` and `zend_register_functions`
         // over the class's methods: each declaration takes its methods,
         // and each method's entry is numbered in the order it is met.
-        let mut zend = crate::classes::zend_classes();
+        let mut zend = crate::interfaces::classes();
+        zend.extend(crate::classes::zend_classes());
         zend.extend(crate::fiber::classes());
         let mut classes: Vec<ClassDecl> = Vec::new();
         let mut handlers = Vec::new();
@@ -689,6 +766,7 @@ impl EngineBuilder {
             shared: Arc::new(Shared {
                 extensions,
                 functions,
+                function_modules,
                 frameless,
                 classes,
                 handlers,
@@ -1342,6 +1420,66 @@ mod tests {
         for written in ["0", "2", "abc", "stderr", "1M", "of", " off", ""] {
             assert_eq!(read(written).as_deref(), Some(written), "{written:?}");
         }
+    }
+
+    /// What the pinned oracle answers under `-n -d disable_functions=<list>`
+    /// for [`disabled_functions`]'s cases: a disabled native is no
+    /// function to a call, a dynamic call, `function_exists()`,
+    /// `get_defined_functions()` or a callback's check; the list splits
+    /// at spaces and commas alone; a name is matched as the table's
+    /// lowered key; an unknown one is passed over; `exit` and `die` stay;
+    /// and a user function may take a disabled native's name (Zend's
+    /// `bug79382.phpt`).
+    #[test]
+    fn disable_functions_takes_its_natives_out_of_the_function_table() {
+        const PROBE: &str = r#"<?php
+            $listed = false;
+            foreach (get_defined_functions()['internal'] as $name) { $listed = $listed || $name === 'strlen'; }
+            var_dump(function_exists('strlen'), function_exists('defined'), function_exists('exit'), $listed);
+            try { strlen('a'); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+            try { $f = 'defined'; $f('A'); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+            try { set_error_handler('strlen'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+        "#;
+        const UNDEFINED_STRLEN: &str = "Call to undefined function strlen()\n";
+        const UNDEFINED_DEFINED: &str = "Call to undefined function defined()\n";
+        const CALLBACK: &str = "set_error_handler(): Argument #1 ($callback) must be a valid callback or null, function \"strlen\" not found or invalid function name\n";
+        let served_under = |list: &str| {
+            let engine = Engine::builder().ini("disable_functions", list).build();
+            served(&engine, PROBE).0
+        };
+        let answers = |strlen: bool, defined: bool| {
+            let mut expected =
+                format!("bool({strlen})\nbool({defined})\nbool(true)\nbool({strlen})\n");
+            if !strlen {
+                expected.push_str(UNDEFINED_STRLEN);
+            }
+            if !defined {
+                expected.push_str(UNDEFINED_DEFINED);
+            }
+            if !strlen {
+                expected.push_str(CALLBACK);
+            }
+            expected
+        };
+        for (list, strlen, defined) in [
+            ("", true, true),
+            ("strlen", false, true),
+            (" strlen , defined", false, false),
+            ("strlen,,defined", false, false),
+            ("STRLEN", true, true),
+            ("nosuchfn,strlen", false, true),
+            ("\tstrlen", true, true),
+            ("die,strlen", false, true),
+            ("exit", true, true),
+        ] {
+            assert_eq!(served_under(list), answers(strlen, defined), "{list:?}");
+        }
+        let engine = Engine::builder().ini("disable_functions", "strlen").build();
+        let (out, _) = served(
+            &engine,
+            "<?php function strlen($x) { return 42; } var_dump(strlen('foobar'));",
+        );
+        assert_eq!(out, "int(42)\n");
     }
 
     /// `fatal_error_backtraces` is `On` in php's table (`Z/Zend/zend.c:263`)

@@ -645,6 +645,7 @@ impl Emit<'_> {
             visibility: modifiers.visibility.unwrap_or_default(),
             is_static: modifiers.has(Flag::Static),
             is_final: modifiers.has(Flag::Final),
+            constants_before: class.constants.len(),
         });
         Ok(())
     }
@@ -797,6 +798,10 @@ pub(super) struct Method {
     pub(super) visibility: Visibility,
     pub(super) is_static: bool,
     pub(super) is_final: bool,
+    /// How many of the class's constants stand before the method in the
+    /// body, which are the ones `CG(active_class_entry)->constants_table`
+    /// holds while it compiles.
+    pub(super) constants_before: usize,
 }
 
 /// One closure as written, php's `ZEND_AST_CLOSURE` and its

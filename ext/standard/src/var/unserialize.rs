@@ -284,6 +284,100 @@ pub(super) fn unserialize(req: &mut Request) -> Result<Value, Thrown> {
     Ok(root)
 }
 
+/// `php_unserialize_data_t` with `php_var_unserialize`, `PHPAPI` in
+/// `php_var.h`: one var hash across the values read out of one string,
+/// each from where the last stopped, so an `R:n;` in a later value is a
+/// reference to a slot an earlier one filled. What ext/session's decoders
+/// read each session variable through into the session's array;
+/// [`Unserializer::finish`] is `PHP_VAR_UNSERIALIZE_DESTROY`, the delayed
+/// `__unserialize()` and `__wakeup()` calls.
+pub struct Unserializer<'a> {
+    state: State<'a>,
+}
+
+impl<'a> Unserializer<'a> {
+    /// `PHP_VAR_UNSERIALIZE_INIT` over `data`, every class allowed and
+    /// the depth `unserialize_max_depth` sets.
+    #[must_use]
+    pub fn new(req: &Request, data: &'a [u8]) -> Unserializer<'a> {
+        let max_depth = req
+            .ini_get(b"unserialize_max_depth")
+            .and_then(|v| std::str::from_utf8(v).ok()?.trim().parse::<i64>().ok())
+            .unwrap_or(4096);
+        Unserializer {
+            state: State {
+                buf: data,
+                p: 0,
+                slots: Vec::new(),
+                root: Value::null(),
+                delayed: Vec::new(),
+                allowed: None,
+                max_depth,
+                depth: 0,
+            },
+        }
+    }
+
+    /// Where the scanner stands, php's `*p` after the last value.
+    #[must_use]
+    pub const fn offset(&self) -> usize {
+        self.state.p
+    }
+
+    /// The scanner moved to `at`, as a decoder steps over the name it
+    /// read itself.
+    pub const fn set_offset(&mut self, at: usize) {
+        self.state.p = at;
+    }
+
+    /// `php_var_unserialize` of one value into `array[key]`, the slot
+    /// the var hash numbers; `false` is the scanner's failure. The key
+    /// is the array's from here, as a `set` takes it.
+    pub fn element(
+        &mut self,
+        req: &mut Request,
+        array: PhpArray,
+        key: Key,
+    ) -> Result<bool, Thrown> {
+        self.state.value(req, Some(Slot::Element(array, key)))
+    }
+
+    /// `php_var_unserialize` of one value as a root, `None` for the
+    /// scanner's failure; the value is the caller's, a reference
+    /// unwrapped.
+    pub fn value(&mut self, req: &mut Request) -> Result<Option<Value>, Thrown> {
+        if !self.state.value(req, Some(Slot::Root))? {
+            return Ok(None);
+        }
+        let root = std::mem::replace(&mut self.state.root, Value::null());
+        if let Some(cell) = root.as_php_ref() {
+            let inner = cell.get();
+            req.addref(&inner);
+            req.release(root);
+            return Ok(Some(inner));
+        }
+        Ok(Some(root))
+    }
+
+    /// `PHP_VAR_UNSERIALIZE_DESTROY`: the delayed calls, in the order
+    /// they were queued, until one of them throws.
+    pub fn finish(mut self, req: &mut Request) -> Result<(), Thrown> {
+        req.release(std::mem::replace(&mut self.state.root, Value::null()));
+        for delayed in std::mem::take(&mut self.state.delayed) {
+            let called = match delayed {
+                Delayed::Wakeup(object) => call_method(req, &object, b"__wakeup", &[]),
+                Delayed::Unserialize(object, array) => {
+                    let answered = call_method(req, &object, b"__unserialize", &[array.to_value()]);
+                    req.release(array.to_value());
+                    answered
+                }
+            };
+            req.release(called?);
+        }
+        Ok(())
+    }
+}
+
 /// The allowed classes, lowered, `None` for all of them, and the depth
 /// limit.
 type Options = (Option<Vec<Vec<u8>>>, i64);

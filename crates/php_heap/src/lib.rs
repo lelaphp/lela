@@ -33,7 +33,9 @@
 mod array;
 mod block;
 mod call_stack;
+mod collector;
 mod compare;
+mod fd;
 mod fiber;
 mod gc;
 mod hooks;
@@ -53,7 +55,9 @@ mod zval;
 pub use array::{Arr, ArrIter, Key, SortEntry, canonical_int};
 pub use block::Block;
 pub use call_stack::{CallStack, call_stack_bounds, call_stack_default_size};
+pub use collector::GcStatus;
 pub use compare::{Scalar, compare, identical};
+pub use fd::{Readiness, peek_fd, poll_fd, set_fd_blocking};
 pub use fiber::{FiberStack, Host, StackRefused, Suspensions, Switched, suspend};
 pub use hooks::{Fatal, HeapHooks};
 pub use map::{MapPtr, MapTable};
@@ -102,6 +106,9 @@ pub struct Heap {
     /// php's `EG(ht_iterators)`: the positions the walks of this
     /// request's tables are registered at.
     iterators: iterators::Iterators,
+    /// php's `zend_gc_globals`, the cycle collector's root buffer and
+    /// numbers, the request's own (design §5.12).
+    gc: collector::Collector,
 }
 
 impl Default for Heap {
@@ -118,12 +125,15 @@ impl Heap {
     pub fn new() -> Heap {
         let mut mm = mm::Mm::new();
         let store = object::Store::new(&mut mm);
+        let mut gc = collector::Collector::new();
+        gc.enable(true);
         Heap {
             store,
             resources: resource::RegularList::new(),
             mm,
             interned: string::Table::new(),
             iterators: iterators::Iterators::default(),
+            gc,
         }
     }
 
@@ -270,32 +280,54 @@ impl Heap {
     /// it reaches zero the value is freed, an array's elements released
     /// with it, an object's destructor served through `hooks` (seam 1),
     /// a resource's per-type destructor the same way and a reference's
-    /// value released before its cell. The hooks are what says this may re-enter, and the heap is
-    /// theirs: it is asked for at each step and again after every call
-    /// up, since the destructor may have grown it.
+    /// value released before its cell. A decrement that leaves owners is
+    /// `gc_check_possible_root` (design §5.12): an array or an object,
+    /// or what a reference holds, may be the last outside owner of a
+    /// cycle, and goes in the root buffer. The hooks are what says this
+    /// may re-enter, and the heap is theirs: it is asked for at each
+    /// step and again after every call up, since the destructor may have
+    /// grown it.
     pub fn release(hooks: &mut dyn HeapHooks, z: Zval) {
+        if Heap::release_nogc(hooks, z) {
+            Heap::gc_check_possible_root(hooks, z);
+        }
+    }
+
+    /// One owner fewer as `zval_ptr_dtor_nogc` gives it up: what
+    /// [`Heap::release`] does, and never a possible root. php frees a
+    /// temporary operand this way (`FREE_OP`), and an internal call's
+    /// arguments, since neither is a place a cycle is left behind in.
+    /// Whether owners are left.
+    pub fn release_nogc(hooks: &mut dyn HeapHooks, z: Zval) -> bool {
         if !z.is_refcounted() {
-            return;
+            return false;
         }
         if let Some(s) = z.as_str() {
             hooks.heap().release_string(s);
-        } else if let Some(a) = z.as_arr() {
+            return false;
+        }
+        if let Some(a) = z.as_arr() {
             if a.delref() == 0 {
                 Heap::array_destroy(hooks, a);
+                return false;
             }
         } else if let Some(o) = z.as_obj() {
             if o.delref() == 0 {
                 Heap::store_del(hooks, o);
+                return false;
             }
         } else if let Some(r) = z.as_resource() {
             if r.delref() == 0 {
                 Heap::resource_free(hooks, r);
             }
+            return false;
         } else if let Some(r) = z.as_reference()
             && r.delref() == 0
         {
             Heap::reference_destroy(hooks, r);
+            return false;
         }
+        true
     }
 }
 

@@ -113,6 +113,14 @@ pub(crate) type EngineStateBuilder =
     Arc<dyn Fn(&StartupIni) -> Box<dyn Any + Send + Sync> + Send + Sync>;
 /// The `RINIT` function.
 pub(crate) type Rinit = fn(&mut Request) -> Result<(), Thrown>;
+
+/// An ini entry's `on_modify`, php's `PHP_INI_MH` at
+/// `ZEND_INI_STAGE_RUNTIME`: served by `ini_set()` with the new value
+/// before the entry takes it, raising what the entry's handler raises,
+/// and answering whether the value is taken, `false` being php's
+/// `FAILURE`, which leaves the entry as it was and makes `ini_set()`
+/// answer `false`.
+pub type OnModify = fn(&mut Request, &[u8]) -> Result<bool, Thrown>;
 /// The `MINFO` function: writes the extension's `phpinfo()` table
 /// through [`Request::info_table`].
 pub(crate) type Info = fn(&mut Request);
@@ -171,6 +179,7 @@ pub struct Extension {
     pub(crate) classes: Vec<NativeClassDecl>,
     pub(crate) constants: Vec<ConstDecl>,
     pub(crate) ini: Vec<IniDecl>,
+    pub(crate) on_modify: Vec<(Vec<u8>, OnModify)>,
     pub(crate) dependencies: Vec<Dependency>,
     pub(crate) request_state: Option<StateBuilder>,
     pub(crate) engine_state: Option<EngineStateBuilder>,
@@ -197,6 +206,7 @@ pub struct ExtensionBuilder {
     classes: Vec<NativeClassDecl>,
     constants: Vec<ConstDecl>,
     ini: Vec<IniDecl>,
+    on_modify: Vec<(Vec<u8>, OnModify)>,
     dependencies: Vec<Dependency>,
     request_state: Option<StateBuilder>,
     engine_state: Option<EngineStateBuilder>,
@@ -290,6 +300,14 @@ impl ExtensionBuilder {
         self
     }
 
+    /// The `on_modify` of the ini entry `name`, one of the extension's
+    /// own, served whenever a program changes it with `ini_set()`.
+    #[must_use]
+    pub fn on_modify(mut self, name: &[u8], handler: OnModify) -> ExtensionBuilder {
+        self.on_modify.push((name.to_vec(), handler));
+        self
+    }
+
     /// The `deps` table, `ZEND_MOD_REQUIRED("libxml")` and its kin, in
     /// the order the extension lists them; an extension that declares
     /// none has php's null pointer, the empty table.
@@ -362,6 +380,7 @@ impl ExtensionBuilder {
             classes: self.classes,
             constants: self.constants,
             ini: self.ini,
+            on_modify: self.on_modify,
             dependencies: self.dependencies,
             request_state: self.request_state,
             engine_state: self.engine_state,
@@ -712,6 +731,28 @@ pub trait ObjectHandlers: Send + Sync {
         req.method_named(object.class(), lowered)
     }
 
+    /// The object a method `get_method` did not find is looked up on
+    /// and called on in its place, the `*object` php's `get_method`
+    /// may replace: `spl_dual_it_get_method` hands an outer iterator's
+    /// unknown method to its inner iterator, `spl_recursive_it_get_method`
+    /// to the iterator of the level it stands on. A view, no owner
+    /// taken; `None` at `Std`.
+    ///
+    /// ```php
+    /// class Inner extends ArrayIterator { function hello() { return get_class($this) . " says hello"; } }
+    /// $outer = new IteratorIterator(new Inner([1]));
+    /// echo $outer->hello(), "\n";
+    /// try { $outer->missing(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Inner says hello
+    /// Call to undefined method IteratorIterator::missing()
+    /// ```
+    fn method_receiver(&self, req: &mut Request, object: PhpObject) -> Option<PhpObject> {
+        let _ = (req, object);
+        None
+    }
+
     /// `get_constructor`, `zend_std_get_constructor` at `Std`: the
     /// class's `__construct` where the calling scope may reach it, php's
     /// `Error` where it may not, and none for a class with no
@@ -805,6 +846,22 @@ pub trait ObjectHandlers: Send + Sync {
         right: &Value,
     ) -> Result<Option<Ordering>, Thrown> {
         req.compare_objects(left, right)
+    }
+
+    /// The element a `zend_object_iterator` of the class stands at
+    /// `index` steps past its rewind, its key and its value, one more
+    /// owner each: what an `InternalIterator` over the object answers
+    /// ([`crate::api::call::internal_iterator`]), for a class php walks
+    /// with an iterator of its own in C rather than with methods.
+    /// `None` at `Std` and past the last element.
+    fn iterator_element(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        index: usize,
+    ) -> Result<Option<(Value, Value)>, Thrown> {
+        let _ = (req, object, index);
+        Ok(None)
     }
 
     /// `get_properties_for`: the rows one purpose reads; `None` at

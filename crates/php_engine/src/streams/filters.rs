@@ -1,0 +1,575 @@
+//! A stream's two filter chains (design §4.3 seam 5): php's
+//! `main/streams/filter.c` and the filtered arms of `streams.c`'s read,
+//! write and flush. A filter is an extension's [`StreamFilter`], made by
+//! the factory registered under its name or a wildcard over it
+//! (`php_stream_filter_create`), attached at the head or the tail of the
+//! read or the write chain, and named by a resource of the `stream
+//! filter` type while it is attached. Every read of the kind passes
+//! through the read chain on its way into the read buffer; every write
+//! passes through the write chain on its way to the kind, and a flush
+//! drains it; the stream's free flushes the write chain with
+//! `PSFS_FLAG_FLUSH_CLOSE`, closes each filter's resource and serves each
+//! filter's `dtor`.
+//!
+//! A filter may serve PHP code. What that code throws is kept as the
+//! request's pending throwable for the native that asked for the
+//! operation, the call answering `PSFS_ERR_FATAL`, as php's
+//! `userfilter_filter` answers with `EG(exception)` set; no filter is
+//! called while one is pending, as `zend_call_function` calls nothing
+//! then.
+
+use std::collections::VecDeque;
+
+use super::PhpStream;
+use crate::api::raising::{Thrown, warning};
+use crate::api::request::{
+    Brigade, FilterFactory, FilterFlags, FilterStatus, Request, Stream, StreamFilter,
+};
+use crate::api::values::{Resource, Value};
+
+/// `PHP_STREAM_FILTER_READ` and `PHP_STREAM_FILTER_WRITE`.
+const FILTER_READ: i64 = 1;
+const FILTER_WRITE: i64 = 2;
+
+/// One filter on a chain: the extension's filter and, once
+/// `stream_filter_append` named it, its resource, of which the chain
+/// holds one owner.
+pub(crate) struct Attached {
+    ops: Box<dyn StreamFilter>,
+    res: Option<Resource>,
+}
+
+/// Which of a stream's two chains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Chain {
+    Read,
+    Write,
+}
+
+/// The payload of a `stream filter` resource: the stream the filter is
+/// attached to and the chain it is on; the resource itself finds the
+/// filter on it.
+struct Named {
+    stream: Stream,
+    chain: Chain,
+}
+
+/// A throwable a filter raised, kept for the native that asked, unless
+/// one is kept already.
+fn defer(req: &mut Request, thrown: Thrown) {
+    if req.stream_thrown.is_none() {
+        req.stream_thrown = Some(thrown);
+    } else if let Some(object) = thrown.exception() {
+        req.release(object.as_value());
+    }
+}
+
+impl PhpStream {
+    fn chain_mut(&mut self, chain: Chain) -> &mut Vec<Attached> {
+        match chain {
+            Chain::Read => &mut self.readfilters,
+            Chain::Write => &mut self.writefilters,
+        }
+    }
+
+    /// One `fops->filter` call of the filter at `at` of `chain`, the
+    /// stream being this one: `PSFS_ERR_FATAL` for a filter that threw,
+    /// or that is not called because a throwable is pending already.
+    fn run_filter(
+        &mut self,
+        req: &mut Request,
+        chain: Chain,
+        at: usize,
+        io: (&mut Brigade, &mut Brigade),
+        consumed: Option<&mut usize>,
+        flags: FilterFlags,
+    ) -> FilterStatus {
+        if req.stream_thrown.is_some() {
+            return FilterStatus::ErrFatal;
+        }
+        let Some(stream) = self.res.map(Stream::of) else {
+            return FilterStatus::ErrFatal;
+        };
+        let Some(filter) = self.chain_mut(chain).get_mut(at) else {
+            return FilterStatus::ErrFatal;
+        };
+        let (input, output) = io;
+        match filter
+            .ops
+            .filter(req, stream, input, output, consumed, flags)
+        {
+            Ok(status) => status,
+            Err(thrown) => {
+                defer(req, thrown);
+                FilterStatus::ErrFatal
+            }
+        }
+    }
+
+    /// `_php_stream_fill_read_buffer`'s filtered arm
+    /// (`Z/main/streams/streams.c:571`): while the stream is not at eof
+    /// and the buffer holds fewer than `size` bytes, at most a chunk, one
+    /// chunk read from the kind and wound through the chain, the last
+    /// read with `PSFS_FLAG_FLUSH_CLOSE` once the kind is at eof and an
+    /// empty one with `PSFS_FLAG_FLUSH_INC`; what the chain passes on
+    /// goes into the buffer, what a filter keeps waits for the next
+    /// round, and `PSFS_ERR_FATAL` breaks the stream. `false` is a read
+    /// that failed before a byte was had, or the break.
+    pub(super) fn fill_filtered(&mut self, req: &mut Request, size: usize) -> bool {
+        let to_read_now = size.min(self.chunk_size);
+        let mut chunk = vec![0u8; self.chunk_size];
+        let mut inp = Brigade::new();
+        let mut outp = Brigade::new();
+        while !self.eof && self.writepos - self.readpos < to_read_now {
+            let Self { ops, eof, .. } = self;
+            let justread = ops.read(req, &mut chunk, eof);
+            if justread.is_none() && self.writepos == self.readpos {
+                return false;
+            }
+            let flags = match justread {
+                Some(n) if n > 0 => {
+                    inp.push_back(chunk[..n].to_vec());
+                    if self.eof {
+                        FilterFlags::FlushClose
+                    } else {
+                        FilterFlags::Normal
+                    }
+                }
+                _ if self.eof => FilterFlags::FlushClose,
+                _ => FilterFlags::FlushInc,
+            };
+            let mut status = FilterStatus::ErrFatal;
+            for at in 0..self.readfilters.len() {
+                status = self.run_filter(req, Chain::Read, at, (&mut inp, &mut outp), None, flags);
+                if status != FilterStatus::PassOn {
+                    break;
+                }
+                std::mem::swap(&mut inp, &mut outp);
+                outp.clear();
+            }
+            match status {
+                FilterStatus::PassOn => {
+                    while let Some(bucket) = inp.pop_front() {
+                        self.buffer_bucket(&bucket);
+                    }
+                }
+                FilterStatus::FeedMe => outp.clear(),
+                FilterStatus::ErrFatal => {
+                    self.eof = true;
+                    self.fatal_error = true;
+                    return false;
+                }
+            }
+            if justread.is_none_or(|n| n == 0) {
+                break;
+            }
+        }
+        true
+    }
+
+    /// One bucket appended to the read buffer, the buffer compacted first
+    /// where it has not the room and grown where compacting was not
+    /// enough.
+    fn buffer_bucket(&mut self, bucket: &[u8]) {
+        if !self.readbuf.is_empty() && self.readbuf.len() - self.writepos < bucket.len() {
+            self.readbuf.copy_within(self.readpos..self.writepos, 0);
+            self.writepos -= self.readpos;
+            self.readpos = 0;
+        }
+        if self.readbuf.len() - self.writepos < bucket.len() {
+            let grown = self.readbuf.len() + bucket.len();
+            self.readbuf.resize(grown, 0);
+        }
+        self.readbuf[self.writepos..self.writepos + bucket.len()].copy_from_slice(bucket);
+        self.writepos += bucket.len();
+    }
+
+    /// `_php_stream_write_filtered` (`Z/main/streams/streams.c:1245`):
+    /// `buf`, where there is one, as one bucket through the write chain,
+    /// what it passes on written to the kind; the bytes the head filter
+    /// says it consumed, `None` for php's `-1` where the chain broke or
+    /// the kind refused a write.
+    pub(super) fn write_filtered(
+        &mut self,
+        req: &mut Request,
+        buf: Option<&[u8]>,
+        flags: FilterFlags,
+    ) -> Option<usize> {
+        let mut inp = Brigade::new();
+        let mut outp = Brigade::new();
+        if let Some(buf) = buf {
+            inp.push_back(buf.to_vec());
+        }
+        let mut consumed = 0usize;
+        let mut status = FilterStatus::ErrFatal;
+        for at in 0..self.writefilters.len() {
+            let counted = (at == 0).then_some(&mut consumed);
+            status = self.run_filter(req, Chain::Write, at, (&mut inp, &mut outp), counted, flags);
+            if status != FilterStatus::PassOn {
+                break;
+            }
+            std::mem::swap(&mut inp, &mut outp);
+            outp.clear();
+        }
+        let mut failed = false;
+        match status {
+            FilterStatus::PassOn => {
+                while let Some(bucket) = inp.pop_front() {
+                    if self.write_buffer(req, &bucket).is_none() {
+                        failed = true;
+                    }
+                }
+            }
+            FilterStatus::ErrFatal => failed = true,
+            FilterStatus::FeedMe => {}
+        }
+        (!failed).then_some(consumed)
+    }
+
+    /// `php_stream_filter_append_ex` and `php_stream_filter_prepend_ex`
+    /// (`Z/main/streams/filter.c:264`): the filter put at the tail or the
+    /// head of the chain; one appended to the read chain while the read
+    /// buffer holds bytes has them wound through it at once, their
+    /// filtered bytes replacing the buffer, the buffer given to a filter
+    /// that asks to be fed, and php's `Filter failed to process
+    /// pre-buffered data` and `false` where it breaks.
+    fn attach(&mut self, req: &mut Request, chain: Chain, filter: Attached, append: bool) -> bool {
+        if !append {
+            self.chain_mut(chain).insert(0, filter);
+            return true;
+        }
+        self.chain_mut(chain).push(filter);
+        let held = self.writepos - self.readpos;
+        if chain != Chain::Read || held == 0 {
+            return true;
+        }
+        let mut inp: Brigade = VecDeque::from([self.readbuf[self.readpos..self.writepos].to_vec()]);
+        let mut outp = Brigade::new();
+        let mut consumed = 0usize;
+        let at = self.readfilters.len() - 1;
+        let mut status = self.run_filter(
+            req,
+            Chain::Read,
+            at,
+            (&mut inp, &mut outp),
+            Some(&mut consumed),
+            FilterFlags::Normal,
+        );
+        if self.readpos + consumed > self.writepos {
+            status = FilterStatus::ErrFatal;
+        }
+        match status {
+            FilterStatus::ErrFatal => {
+                let text = format!(
+                    "{}(): Filter failed to process pre-buffered data",
+                    req.active_native()
+                );
+                warning(req, &text);
+                return false;
+            }
+            FilterStatus::FeedMe => {
+                self.readpos = 0;
+                self.writepos = 0;
+            }
+            FilterStatus::PassOn => {
+                self.readpos = 0;
+                self.writepos = 0;
+                while let Some(bucket) = outp.pop_front() {
+                    if self.readbuf.len() - self.writepos < bucket.len() {
+                        let grown = self.readbuf.len() + bucket.len();
+                        self.readbuf.resize(grown, 0);
+                    }
+                    self.readbuf[self.writepos..self.writepos + bucket.len()]
+                        .copy_from_slice(&bucket);
+                    self.writepos += bucket.len();
+                }
+            }
+        }
+        true
+    }
+
+    /// `_php_stream_filter_flush` (`Z/main/streams/filter.c:360`): from the
+    /// filter at `at` to the chain's tail, each called with nothing new,
+    /// the first with `PSFS_FLAG_FLUSH_CLOSE` under `finish` and
+    /// `PSFS_FLAG_FLUSH_INC` otherwise; a filter asking to be fed ends the
+    /// flush, and one that breaks is `false`. What the last passes on goes
+    /// into the read buffer for the read chain, php's shuffle of the
+    /// buffer with it, and to the kind for the write chain.
+    fn flush_from(&mut self, req: &mut Request, chain: Chain, at: usize, finish: bool) -> bool {
+        let mut inp = Brigade::new();
+        let mut outp = Brigade::new();
+        let mut flags = if finish {
+            FilterFlags::FlushClose
+        } else {
+            FilterFlags::FlushInc
+        };
+        let len = self.chain_mut(chain).len();
+        for current in at..len {
+            match self.run_filter(req, chain, current, (&mut inp, &mut outp), None, flags) {
+                FilterStatus::FeedMe => return true,
+                FilterStatus::ErrFatal => return false,
+                FilterStatus::PassOn => {}
+            }
+            std::mem::swap(&mut inp, &mut outp);
+            outp.clear();
+            flags = FilterFlags::Normal;
+        }
+        let flushed: usize = inp.iter().map(Vec::len).sum();
+        if flushed == 0 {
+            return true;
+        }
+        match chain {
+            Chain::Read => {
+                if self.readpos > 0 {
+                    // php moves the held bytes to the front and sets
+                    // `readpos` to zero before it subtracts it from
+                    // `writepos`, which it therefore leaves where it was.
+                    self.readbuf.copy_within(self.readpos..self.writepos, 0);
+                    self.readpos = 0;
+                }
+                if flushed > self.readbuf.len() - self.writepos {
+                    let grown = self.writepos + flushed + self.chunk_size;
+                    self.readbuf.resize(grown, 0);
+                }
+                while let Some(bucket) = inp.pop_front() {
+                    self.readbuf[self.writepos..self.writepos + bucket.len()]
+                        .copy_from_slice(&bucket);
+                    self.writepos += bucket.len();
+                }
+            }
+            Chain::Write => {
+                while let Some(bucket) = inp.pop_front() {
+                    let Self { ops, position, .. } = self;
+                    if let Some(count) = ops.write(req, &bucket)
+                        && count > 0
+                    {
+                        *position += i64::try_from(count).unwrap_or(i64::MAX);
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// The filters of both chains taken off at the stream's free
+    /// (`Z/main/streams/streams.c:510`): each one's resource closed and
+    /// the chain's owner of it given up, then its `dtor` served.
+    pub(super) fn free_filters(&mut self, req: &mut Request) {
+        let filters: Vec<Attached> = self
+            .readfilters
+            .drain(..)
+            .chain(self.writefilters.drain(..))
+            .collect();
+        for filter in filters {
+            release_filter(req, filter);
+        }
+    }
+}
+
+/// `php_stream_filter_remove(filter, 1)` past the unlinking: the
+/// filter's resource closed, where it has one, and the chain's owner of
+/// it given up, then `php_stream_filter_free`'s `dtor`.
+fn release_filter(req: &mut Request, filter: Attached) {
+    let Attached { mut ops, res } = filter;
+    if let Some(res) = res {
+        res.close(req);
+        req.release(res.as_value());
+    }
+    if req.stream_thrown.is_some() {
+        return;
+    }
+    if let Err(thrown) = ops.close(req) {
+        defer(req, thrown);
+    }
+}
+
+impl Request {
+    /// `php_stream_filter_create` (`Z/main/streams/filter.c:212`): the
+    /// factory registered under `name`, else under the name with its
+    /// last segment and then each shorter one made `*`, asked for a
+    /// filter; php's `Unable to locate filter "%s"` where no factory
+    /// matched and `Unable to create or locate filter "%s"` where the
+    /// last one that did refused.
+    fn filter_create(
+        &mut self,
+        name: &[u8],
+        params: Option<&Value>,
+    ) -> Result<Option<Box<dyn StreamFilter>>, Thrown> {
+        let lookup = |req: &Request, wanted: &[u8]| -> Option<FilterFactory> {
+            req.filters
+                .iter()
+                .find(|(n, _)| n.as_slice() == wanted)
+                .map(|(_, f)| *f)
+        };
+        let mut factory = lookup(self, name);
+        let mut filter = None;
+        if let Some(found) = factory {
+            filter = found(self, name, params)?;
+        } else if name.contains(&b'.') {
+            let mut wild = name.to_vec();
+            while let Some(period) = wild.iter().rposition(|b| *b == b'.') {
+                wild.truncate(period + 1);
+                wild.push(b'*');
+                if let Some(found) = lookup(self, &wild) {
+                    factory = Some(found);
+                    filter = found(self, name, params)?;
+                    if filter.is_some() {
+                        break;
+                    }
+                }
+                wild.truncate(period);
+            }
+        }
+        if filter.is_none() {
+            let what = if factory.is_none() {
+                "Unable to locate filter"
+            } else {
+                "Unable to create or locate filter"
+            };
+            let text = format!(
+                "{}(): {what} \"{}\"",
+                self.active_native(),
+                String::from_utf8_lossy(name)
+            );
+            warning(self, &text);
+        }
+        Ok(filter)
+    }
+
+    /// `stream_filter_remove`'s work (`Z/ext/standard/streamsfuncs.c:1298`)
+    /// past its parameters: the filter a `stream filter` resource names
+    /// flushed to the chain's end as the stream closing would flush it,
+    /// php's `Unable to flush filter, not removing` and `false` where that
+    /// breaks; then the resource closed and the filter taken off its
+    /// chain and freed. `None` is a resource of another type, or closed,
+    /// which is php's `TypeError` for the native to raise.
+    pub fn remove_filter(&mut self, res: Resource) -> Result<Option<bool>, Thrown> {
+        if res.kind() != Some(self.filter_type) {
+            return Ok(None);
+        }
+        let Some((stream, chain)) = res.native::<Named>(self).map(|n| (n.stream, n.chain)) else {
+            return Ok(None);
+        };
+        let flushed = self
+            .stream_op(stream, |req, s| {
+                let at = s.chain_mut(chain).iter().position(|f| f.res == Some(res))?;
+                Some(s.flush_from(req, chain, at, true))
+            })
+            .flatten();
+        if flushed == Some(false) {
+            let text = format!(
+                "{}(): Unable to flush filter, not removing",
+                self.active_native()
+            );
+            warning(self, &text);
+            return Ok(Some(false));
+        }
+        let taken = self
+            .stream_op(stream, |_, s| {
+                let filters = s.chain_mut(chain);
+                let at = filters.iter().position(|f| f.res == Some(res))?;
+                Some(filters.remove(at))
+            })
+            .flatten();
+        if let Some(filter) = taken {
+            release_filter(self, filter);
+        } else {
+            res.close(self);
+        }
+        match self.stream_thrown.take() {
+            Some(thrown) => Err(thrown),
+            None => Ok(Some(true)),
+        }
+    }
+}
+
+impl Stream {
+    /// `apply_filter_to_stream` (`Z/ext/standard/streamsfuncs.c:1208`)
+    /// past its parameters: `read_write`, `STREAM_FILTER_READ`,
+    /// `STREAM_FILTER_WRITE` or both, or neither for the chains the
+    /// stream's `mode` reads and writes; a filter made for each chain by
+    /// the factory `name` finds, each with `params`, and attached at the
+    /// tail, `append`, or the head. The answer is a new `stream filter`
+    /// resource for the last filter attached, one owner the caller's and
+    /// one the chain's, and `None` where a filter could not be made or
+    /// the pre-buffered bytes broke it, after php's warning.
+    pub fn add_filter(
+        self,
+        req: &mut Request,
+        name: &[u8],
+        params: Option<&Value>,
+        read_write: i64,
+        append: bool,
+    ) -> Result<Option<Resource>, Thrown> {
+        let mut read_write = read_write;
+        if read_write & (FILTER_READ | FILTER_WRITE) == 0 {
+            let mode = req
+                .stream_ref(self)
+                .map(|s| s.mode.clone())
+                .unwrap_or_default();
+            if mode.contains(&b'r') || mode.contains(&b'+') {
+                read_write |= FILTER_READ;
+            }
+            if mode.iter().any(|b| matches!(b, b'w' | b'+' | b'a')) {
+                read_write |= FILTER_WRITE;
+            }
+        }
+        let mut last = None;
+        for (bit, chain) in [(FILTER_READ, Chain::Read), (FILTER_WRITE, Chain::Write)] {
+            if read_write & bit == 0 {
+                continue;
+            }
+            let Some(ops) = req.filter_create(name, params)? else {
+                return Ok(None);
+            };
+            let attached = req
+                .stream_op(self, |req, s| {
+                    s.attach(req, chain, Attached { ops, res: None }, append)
+                })
+                .unwrap_or(false);
+            if !attached {
+                // `php_stream_filter_remove(filter, 1)`: the filter that
+                // broke on the buffer taken off its chain and freed.
+                let taken = req
+                    .stream_op(self, |_, s| s.chain_mut(chain).pop())
+                    .flatten();
+                if let Some(filter) = taken {
+                    release_filter(req, filter);
+                }
+                return match req.stream_thrown.take() {
+                    Some(thrown) => Err(thrown),
+                    None => Ok(None),
+                };
+            }
+            last = Some(chain);
+        }
+        let Some(chain) = last else {
+            return Ok(None);
+        };
+        let kind = req.filter_type;
+        let res = Resource::new(
+            req,
+            kind,
+            Named {
+                stream: self,
+                chain,
+            },
+        )?;
+        req.addref(&res.as_value());
+        req.stream_op(self, |_, s| {
+            let filters = s.chain_mut(chain);
+            let at = if append {
+                filters.len().checked_sub(1)
+            } else {
+                Some(0)
+            };
+            if let Some(filter) = at.and_then(|at| filters.get_mut(at)) {
+                filter.res = Some(res);
+            }
+        });
+        match req.stream_thrown.take() {
+            Some(thrown) => Err(thrown),
+            None => Ok(Some(res)),
+        }
+    }
+}

@@ -144,6 +144,56 @@ pub(crate) fn notify(req: &mut Request, object: Obj) {
     }
 }
 
+/// A `WeakMap`'s entries for the cycle collector
+/// (`zend_weakmap_get_key_entry_gc`, `Z/Zend/zend_weakrefs.c:509`):
+/// each key object beside its entry in place, in the entries' order;
+/// `false` for an object whose table is not `WeakMap`'s, which php
+/// tells by `get_gc == zend_weakmap_get_gc`.
+pub(crate) fn gc_entries(
+    req: &Request,
+    map: Obj,
+    visit: &mut dyn FnMut(Obj, php_heap::ZvalRef),
+) -> bool {
+    let table = req.object_handlers(map);
+    if !std::ptr::addr_eq(table, &raw const WEAK_MAP) {
+        return false;
+    }
+    let Some(entries) = entries_of(req, PhpObject::of(map)) else {
+        return true;
+    };
+    let entries = entries.heap();
+    for (key, _) in &entries {
+        if let php_heap::Key::Long(id) = key
+            && let Some(owner) = u32::try_from(id).ok().and_then(|id| stored(req, id))
+            && let Some(entry) = entries.value_ref(key)
+        {
+            visit(owner.heap(), entry);
+        }
+    }
+    true
+}
+
+/// The `WeakMap` entries keyed by `key` for the cycle collector
+/// (`zend_weakmap_get_object_key_entry_gc`, `Z/Zend/zend_weakrefs.c:536`):
+/// every map `EG(weakrefs)` lists against the object, in the order they
+/// were registered, and its entry for the object in place; a
+/// `WeakReference` names none.
+pub(crate) fn gc_keyed(req: &Request, key: Obj, visit: &mut dyn FnMut(php_heap::ZvalRef, Obj)) {
+    let id = key.id().0;
+    let Some((_, holders)) = req.weakrefs.rows.iter().find(|(at, _)| *at == id) else {
+        return;
+    };
+    for holder in holders {
+        if let Holder::Map(at) = *holder
+            && let Some(map) = stored(req, at)
+            && let Some(entries) = entries_of(req, map)
+            && let Some(entry) = entries.heap().value_ref(php_heap::Key::Long(i64::from(id)))
+        {
+            visit(entry, map.heap());
+        }
+    }
+}
+
 /// The `WeakReference` handler table: `free_obj` unregisters, the
 /// debug table is the one row php shows, and the class is uncloneable.
 struct WeakReferenceHandlers;
@@ -397,7 +447,26 @@ impl ObjectHandlers for WeakMapHandlers {
     }
 
     /// `zend_weakmap_get_gc`: the values, which the map owns; the keys it
-    /// does not.
+    /// does not. The cycle collector reads the map through
+    /// [`gc_entries`] as well, since an entry is kept alive by its key:
+    /// an entry whose value holds its key is garbage once nothing else
+    /// holds the key, and the collection frees both.
+    ///
+    /// ```php
+    /// class Value { public function __construct(public string $name) {} }
+    /// $map = new WeakMap();
+    /// $obj = new Value('a');
+    /// $map[$obj] = [$obj];
+    /// var_dump(gc_collect_cycles(), count($map));
+    /// $obj = null;
+    /// var_dump(gc_collect_cycles(), count($map));
+    /// ```
+    /// ```expect
+    /// int(0)
+    /// int(1)
+    /// int(2)
+    /// int(0)
+    /// ```
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
         for (_, value) in entries_of(req, object)
             .map(|e| e.snapshot())

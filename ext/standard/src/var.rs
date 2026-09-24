@@ -23,6 +23,9 @@ mod debug;
 mod serialize;
 mod unserialize;
 
+pub use serialize::Serializer;
+pub use unserialize::Unserializer;
+
 /// `PHP_IC_ENTRY`'s name, the class an object of a class `unserialize()`
 /// could not load becomes.
 pub(crate) const INCOMPLETE_CLASS: &[u8] = b"__PHP_Incomplete_Class";
@@ -440,7 +443,7 @@ fn print_r(req: &mut Request) -> Result<Value, Thrown> {
 /// which is why the marker lands on the next line with one space before
 /// it. Without the guard a value that holds itself is unbounded
 /// recursion, which is a panic reaching a request (design §10).
-fn render(
+pub(super) fn render(
     req: &mut Request,
     out: &mut Vec<u8>,
     value: &Value,
