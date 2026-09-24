@@ -31,18 +31,22 @@
 
 mod args;
 mod ffi;
+mod format;
 mod zone;
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use php_ext::abi::{Extension, ExtensionBuilder};
-use php_ext::decl::{FunctionDecl, IniDecl, Name, Type};
+use php_ext::decl::{
+    Attribute, AttributeArgument, ConstDecl, ConstExpr, FunctionDecl, IniDecl, Name, Parameter,
+    Type,
+};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::Value;
 
-use crate::args::{function, p};
+use crate::args::{d, function, nullable, p, union};
 use crate::ffi::{Errors, Tzdb, Zone};
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
@@ -74,6 +78,7 @@ type Entry = fn(&mut Request) -> Result<Value, Thrown>;
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
         .ini(ini())
+        .constants(constants())
         .functions(functions())
         .request_state::<State>()
         .info(date_info)
@@ -113,16 +118,184 @@ fn date_info(req: &mut Request) {
     ]);
 }
 
+/// `#[\Deprecated(since: ..., message: ...)]`.
+fn deprecated(since: &str, message: &str) -> Vec<Attribute> {
+    vec![Attribute {
+        name: Name(b"Deprecated".as_slice().into()),
+        arguments: vec![
+            AttributeArgument {
+                name: Some(Name(b"since".as_slice().into())),
+                value: ConstExpr::Str(since.as_bytes().into()),
+            },
+            AttributeArgument {
+                name: Some(Name(b"message".as_slice().into())),
+                value: ConstExpr::Str(message.as_bytes().into()),
+            },
+        ],
+    }]
+}
+
+/// The `DATE_*` formats, in `register_php_date_symbols`' order.
+const FORMATS: [(&str, &str); 14] = [
+    ("ATOM", "Y-m-d\\TH:i:sP"),
+    ("COOKIE", "l, d-M-Y H:i:s T"),
+    ("ISO8601", "Y-m-d\\TH:i:sO"),
+    ("ISO8601_EXPANDED", "X-m-d\\TH:i:sP"),
+    ("RFC822", "D, d M y H:i:s O"),
+    ("RFC850", "l, d-M-y H:i:s T"),
+    ("RFC1036", "D, d M y H:i:s O"),
+    ("RFC1123", "D, d M Y H:i:s O"),
+    ("RFC7231", "D, d M Y H:i:s \\G\\M\\T"),
+    ("RFC2822", "D, d M Y H:i:s O"),
+    ("RFC3339", "Y-m-d\\TH:i:sP"),
+    ("RFC3339_EXTENDED", "Y-m-d\\TH:i:s.vP"),
+    ("RSS", "D, d M Y H:i:s O"),
+    ("W3C", "Y-m-d\\TH:i:sP"),
+];
+
+/// `RFC7231`'s `#[\Deprecated]`, on the constant and the class constant.
+fn rfc7231_deprecation() -> Vec<Attribute> {
+    deprecated(
+        "8.5",
+        "as this format ignores the associated timezone and always uses GMT",
+    )
+}
+
+/// `register_php_date_symbols`: the formats, then the three deprecated
+/// `SUNFUNCS_RET_*`.
+///
+/// ```php
+/// var_dump(DATE_ATOM, DATE_COOKIE, DATE_RSS, DATE_W3C, DATE_ISO8601_EXPANDED, DATE_RFC3339_EXTENDED);
+/// var_dump(DATE_RFC7231, SUNFUNCS_RET_DOUBLE);
+/// ```
+/// ```expect
+/// string(13) "Y-m-d\TH:i:sP"
+/// string(16) "l, d-M-Y H:i:s T"
+/// string(16) "D, d M Y H:i:s O"
+/// string(13) "Y-m-d\TH:i:sP"
+/// string(13) "X-m-d\TH:i:sP"
+/// string(15) "Y-m-d\TH:i:s.vP"
+///
+/// Deprecated: Constant DATE_RFC7231 is deprecated since 8.5, as this format ignores the associated timezone and always uses GMT in %s on line 3
+///
+/// Deprecated: Constant SUNFUNCS_RET_DOUBLE is deprecated since 8.4, as date_sunrise() and date_sunset() were deprecated in 8.1 in %s on line 3
+/// string(21) "D, d M Y H:i:s \G\M\T"
+/// int(2)
+/// ```
+fn constants() -> Vec<ConstDecl> {
+    let mut out: Vec<ConstDecl> = FORMATS
+        .iter()
+        .map(|(name, value)| ConstDecl {
+            name: Name(format!("DATE_{name}").into_bytes().into()),
+            value: ConstExpr::Str(value.as_bytes().into()),
+            attributes: if *name == "RFC7231" {
+                rfc7231_deprecation()
+            } else {
+                Vec::new()
+            },
+        })
+        .collect();
+    for (name, value) in [("TIMESTAMP", 0), ("STRING", 1), ("DOUBLE", 2)] {
+        out.push(ConstDecl {
+            name: Name(format!("SUNFUNCS_RET_{name}").into_bytes().into()),
+            value: ConstExpr::Long(value),
+            attributes: deprecated(
+                "8.4",
+                "as date_sunrise() and date_sunset() were deprecated in 8.1",
+            ),
+        });
+    }
+    out
+}
+
+/// `?int $timestamp = null` of the `date`-shaped natives.
+fn null_ts() -> Parameter {
+    null_int("timestamp")
+}
+
+/// `?int $name = null`.
+fn null_int(name: &str) -> Parameter {
+    d(name, nullable(Type::Int), ConstExpr::Null)
+}
+
 /// The functions, in `php_date.stub.php`'s order.
 fn functions() -> Vec<(FunctionDecl, Entry)> {
+    let int_or_false = || union(vec![Type::Int, Type::False]);
+    let string_or_false = || union(vec![Type::String, Type::False]);
+    let mktime_params = || {
+        vec![
+            p("hour", Type::Int),
+            null_int("minute"),
+            null_int("second"),
+            null_int("month"),
+            null_int("day"),
+            null_int("year"),
+        ]
+    };
+    let strftime_decl = |name: &str| FunctionDecl {
+        attributes: deprecated("8.1", "use IntlDateFormatter::format() instead"),
+        ..function(
+            name,
+            vec![p("format", Type::String), null_ts()],
+            Some(string_or_false()),
+        )
+    };
+    let format_ts = |name: &str, returns: Type| {
+        function(
+            name,
+            vec![p("format", Type::String), null_ts()],
+            Some(returns),
+        )
+    };
     vec![
+        (format_ts("date", Type::String), format::date as Entry),
+        (format_ts("idate", int_or_false()), format::idate),
+        (format_ts("gmdate", Type::String), format::gmdate),
+        (
+            function("mktime", mktime_params(), Some(int_or_false())),
+            format::mktime,
+        ),
+        (
+            function("gmmktime", mktime_params(), Some(int_or_false())),
+            format::gmmktime,
+        ),
+        (
+            function(
+                "checkdate",
+                vec![
+                    p("month", Type::Int),
+                    p("day", Type::Int),
+                    p("year", Type::Int),
+                ],
+                Some(Type::Bool),
+            ),
+            format::checkdate,
+        ),
+        (strftime_decl("strftime"), format::strftime),
+        (strftime_decl("gmstrftime"), format::gmstrftime),
+        (function("time", vec![], Some(Type::Int)), format::time),
+        (
+            function(
+                "localtime",
+                vec![
+                    null_ts(),
+                    d("associative", Type::Bool, ConstExpr::Bool(false)),
+                ],
+                Some(Type::Array),
+            ),
+            format::localtime,
+        ),
+        (
+            function("getdate", vec![null_ts()], Some(Type::Array)),
+            format::getdate,
+        ),
         (
             function(
                 "date_default_timezone_set",
                 vec![p("timezoneId", Type::String)],
                 Some(Type::Bool),
             ),
-            zone::date_default_timezone_set as Entry,
+            zone::date_default_timezone_set,
         ),
         (
             function("date_default_timezone_get", vec![], Some(Type::String)),
