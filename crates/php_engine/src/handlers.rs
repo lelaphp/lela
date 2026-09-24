@@ -10207,7 +10207,20 @@ pub(crate) fn isset_isempty_prop_obj<T: Tier>(
 /// the byte at it being `0`, with an offset that is no simple scalar and
 /// no whole numeric string answering as an absent one does; and
 /// everything else `false` under `isset` and `true` under `empty`, with
-/// nothing raised.
+/// nothing raised. An object is asked through its class's
+/// `has_dimension`, so a class of an extension answers as php's own
+/// `has_dimension` does, `ArrayObject` holding a `null` as not set.
+///
+/// ```php
+/// $o = new ArrayObject(['n' => null, 'z' => 0]);
+/// var_dump(isset($o['n']), isset($o['z']), empty($o['z']), isset($o['none']));
+/// ```
+/// ```expect
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// ```
 fn isset_container(
     req: &mut Request,
     container: &Value,
@@ -10216,7 +10229,8 @@ fn isset_container(
 ) -> Result<bool, Thrown> {
     match container.as_ref() {
         ValueRef::Object(object) => {
-            let held = req.has_dimension(*object, offset, empty)?;
+            let table = req.object_handlers(object.heap());
+            let held = table.has_dimension(req, *object, offset, empty)?;
             Ok(held != empty)
         }
         ValueRef::Str(text) => {
