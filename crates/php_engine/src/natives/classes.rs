@@ -1102,6 +1102,9 @@ fn declared(req: &mut Request, kinds: &[ClassKind]) -> Result<Value, Thrown> {
                 .contains(&decl.kind)
                 .then(|| alias.unwrap_or_else(|| decl.name.0.to_vec()))
         })
+        // `ZSTR_VAL(key)[0] != 0`: a key with a leading `\0` is none a
+        // program declared, the iterator wrapper's here.
+        .filter(|name| name.first() != Some(&0))
         .collect();
     let mut array = PhpArray::new(req)?;
     for name in names {

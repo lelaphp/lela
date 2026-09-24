@@ -3090,10 +3090,13 @@ pub(crate) fn defined(req: &Request, name: &[u8]) -> bool {
 /// ```php
 /// class N implements Countable { function count(): int { return 3; } }
 /// $m = new WeakMap; $k = new stdClass; $m[$k] = 1;
-/// var_dump(count(new N), count($m), sizeof($m));
+/// var_dump(count(new N), sizeof(new N), new N instanceof Countable);
+/// var_dump(count($m), sizeof($m));
 /// ```
 /// ```expect
 /// int(3)
+/// int(3)
+/// bool(true)
 /// int(1)
 /// int(1)
 /// ```

@@ -49,6 +49,8 @@ abi::ObjectHandlers::get_properties_for
 abi::ObjectHandlers::get_property_ptr_ptr
 abi::ObjectHandlers::has_dimension
 abi::ObjectHandlers::has_property
+abi::ObjectHandlers::iterator_element
+abi::ObjectHandlers::method_receiver
 abi::ObjectHandlers::read_dimension
 abi::ObjectHandlers::read_property
 abi::ObjectHandlers::unset_dimension
@@ -82,12 +84,14 @@ call::call_method
 call::call_named
 call::class_constant
 call::clone
+call::clone_with
 call::closure_from_callable
 call::constant
 call::eval_const_expr
 call::fetch_constant
 call::initialize_lazy
 call::instantiate
+call::internal_iterator
 call::iterate
 call::known_method
 call::lookup_class
@@ -159,6 +163,8 @@ raising::arg_count_error
 raising::arg_null_deprecated
 raising::arg_type_error
 raising::arg_value_error
+raising::argument_error
+raising::clear
 raising::deprecated
 raising::docref
 raising::exit
@@ -170,6 +176,7 @@ raising::raise_at
 raising::throw
 raising::throw_at
 raising::throw_value
+raising::throwing_warnings
 raising::too_few_arguments
 raising::warning
 request::ExtensionId
@@ -393,6 +400,7 @@ values::PhpArray::is_list
 values::PhpArray::is_recursive
 values::PhpArray::iter
 values::PhpArray::len
+values::PhpArray::live_from
 values::PhpArray::new
 values::PhpArray::next_free
 values::PhpArray::protect

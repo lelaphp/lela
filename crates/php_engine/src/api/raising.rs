@@ -265,6 +265,24 @@ pub fn arg_value_error(req: &mut Request, position: u32, tail: &str) -> Thrown {
     throw(req, "ValueError", &message)
 }
 
+/// `zend_argument_error`: a throwable of `class` for the argument at
+/// `position`, the sentence the two above word, `fn(): Argument #N
+/// ($name) <tail>` with the tail as it stands, which is what SPL throws
+/// its `OutOfRangeException` for an index with.
+///
+/// ```php
+/// $l = new SplDoublyLinkedList;
+/// try { $l->offsetGet(3); } catch (OutOfRangeException $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// SplDoublyLinkedList::offsetGet(): Argument #1 ($index) is out of range
+/// ```
+pub fn argument_error(req: &mut Request, class: &str, position: u32, tail: &str) -> Thrown {
+    let message = req.argument_message(position, "");
+    let message = format!("{}{tail}", message.trim_end_matches("must "));
+    throw(req, class, &message)
+}
+
 /// `ArgumentCountError`: `fn() expects <tail>`.
 pub fn arg_count_error(req: &mut Request, tail: &str) -> Thrown {
     let message = format!("{}() expects {tail}", req.active_native());
@@ -329,6 +347,60 @@ pub fn exit(req: &mut Request, status: &Value) -> Thrown {
     }
     req.throw_unwind_exit();
     Thrown::of(None)
+}
+
+/// `zend_clear_exception`: the throwable a call left pending taken off
+/// the request and given up, as SPL's `CATCH_GET_CHILD` swallows what a
+/// child's `getChildren()` threw. A fatal or an `exit` is not a throwable
+/// and cannot be cleared; it comes back as the `Err` to hand on.
+///
+/// ```php
+/// class Bad extends RecursiveArrayIterator {
+///     function getChildren(): ?RecursiveArrayIterator { throw new Exception("no children"); }
+/// }
+/// $it = new RecursiveIteratorIterator(new Bad([1, [2], 3]), RecursiveIteratorIterator::LEAVES_ONLY, RecursiveIteratorIterator::CATCH_GET_CHILD);
+/// foreach ($it as $v) echo $v, ";";
+/// ```
+/// ```expect
+/// 1;3;
+/// ```
+pub fn clear(req: &mut Request, thrown: Thrown) -> Result<(), Thrown> {
+    let Some(exception) = thrown.exception().copied() else {
+        return Err(thrown);
+    };
+    if req.pending() == Some(exception) {
+        req.take_pending();
+    }
+    req.release(exception.as_value());
+    Ok(())
+}
+
+/// `zend_replace_error_handling(EH_THROW, class)` around `f`: a warning
+/// raised meanwhile is thrown as `class` with the warning's message and
+/// shown nowhere, the first one only, and the handling `f` found is
+/// restored after it, which is how SPL's file classes turn a stream's
+/// warning into their `RuntimeException`. A throwable left pending by a
+/// warning is the `Err`, whatever `f` answered.
+///
+/// ```php
+/// try { new SplFileObject(__DIR__ . '/no-such-file'); }
+/// catch (RuntimeException $e) { echo get_class($e), ': ', str_replace(__DIR__, '', $e->getMessage()), "\n"; }
+/// ```
+/// ```expect
+/// RuntimeException: SplFileObject::__construct(/no-such-file): Failed to open stream: No such file or directory
+/// ```
+pub fn throwing_warnings<R>(
+    req: &mut Request,
+    class: &str,
+    f: impl FnOnce(&mut Request) -> Result<R, Thrown>,
+) -> Result<R, Thrown> {
+    let previous = req.replace_error_handling(Some(class.to_owned()));
+    let answered = f(req);
+    req.replace_error_handling(previous);
+    match (answered, req.take_error_handling_thrown()) {
+        (_, Some(thrown)) => Err(thrown),
+        (answered, None) => answered,
+    }
 }
 
 #[cfg(test)]

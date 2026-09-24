@@ -701,6 +701,28 @@ pub trait ObjectHandlers: Send + Sync {
         req.method_named(object.class(), lowered)
     }
 
+    /// The object a method `get_method` did not find is looked up on
+    /// and called on in its place, the `*object` php's `get_method`
+    /// may replace: `spl_dual_it_get_method` hands an outer iterator's
+    /// unknown method to its inner iterator, `spl_recursive_it_get_method`
+    /// to the iterator of the level it stands on. A view, no owner
+    /// taken; `None` at `Std`.
+    ///
+    /// ```php
+    /// class Inner extends ArrayIterator { function hello() { return get_class($this) . " says hello"; } }
+    /// $outer = new IteratorIterator(new Inner([1]));
+    /// echo $outer->hello(), "\n";
+    /// try { $outer->missing(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Inner says hello
+    /// Call to undefined method IteratorIterator::missing()
+    /// ```
+    fn method_receiver(&self, req: &mut Request, object: PhpObject) -> Option<PhpObject> {
+        let _ = (req, object);
+        None
+    }
+
     /// `get_constructor`, `zend_std_get_constructor` at `Std`: the
     /// class's `__construct` where the calling scope may reach it, php's
     /// `Error` where it may not, and none for a class with no
@@ -794,6 +816,22 @@ pub trait ObjectHandlers: Send + Sync {
         right: &Value,
     ) -> Result<Option<Ordering>, Thrown> {
         req.compare_objects(left, right)
+    }
+
+    /// The element a `zend_object_iterator` of the class stands at
+    /// `index` steps past its rewind, its key and its value, one more
+    /// owner each: what an `InternalIterator` over the object answers
+    /// ([`crate::api::call::internal_iterator`]), for a class php walks
+    /// with an iterator of its own in C rather than with methods.
+    /// `None` at `Std` and past the last element.
+    fn iterator_element(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        index: usize,
+    ) -> Result<Option<(Value, Value)>, Thrown> {
+        let _ = (req, object, index);
+        Ok(None)
     }
 
     /// `get_properties_for`: the rows one purpose reads; `None` at

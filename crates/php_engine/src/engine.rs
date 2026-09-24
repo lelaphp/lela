@@ -614,7 +614,8 @@ impl EngineBuilder {
         // `zend_register_internal_class_with_flags` and `zend_register_functions`
         // over the class's methods: each declaration takes its methods,
         // and each method's entry is numbered in the order it is met.
-        let mut zend = crate::classes::zend_classes();
+        let mut zend = crate::interfaces::classes();
+        zend.extend(crate::classes::zend_classes());
         zend.extend(crate::fiber::classes());
         let mut classes: Vec<ClassDecl> = Vec::new();
         let mut handlers = Vec::new();

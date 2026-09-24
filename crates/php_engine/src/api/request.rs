@@ -646,6 +646,12 @@ pub struct Request {
     /// `EG(user_error_handlers)`, each row the handler it replaced and
     /// that handler's mask, `EG(user_error_handlers_error_reporting)`
     /// kept beside it. Every handler here is one owner of its value.
+    /// `EG(error_handling)` at `EH_THROW` with `EG(exception_class)`: the
+    /// class a warning is thrown as meanwhile, `None` at `EH_NORMAL`.
+    error_handling: Option<String>,
+    /// What a warning was thrown as under `EH_THROW`, held until the
+    /// native that asked for it hands it on.
+    error_handling_thrown: Option<Thrown>,
     error_handler: Option<Callable>,
     /// `EG(user_error_handler_error_reporting)`: the levels the handler
     /// is handed, `set_error_handler`'s `$error_levels`.
@@ -658,6 +664,8 @@ pub struct Request {
     shutdown_functions: Vec<(Callable, Vec<Value>)>,
     tick_functions: Vec<(Callable, Vec<Value>)>,
     autoloaders: Vec<Callable>,
+    /// `EG(in_autoload)`: the lowered names an autoloader is loading.
+    in_autoload: Vec<Vec<u8>>,
     assert_callback: Option<Value>,
     umask: u32,
     /// `BG(CurrentStatFile)` and `BG(CurrentLStatFile)`, `php_stat`'s
@@ -926,6 +934,8 @@ impl Request {
             next_ref_source: 1,
             wrappers: Vec::new(),
             filters: Vec::new(),
+            error_handling: None,
+            error_handling_thrown: None,
             error_handler: None,
             error_handler_levels: 0,
             error_handlers: Vec::new(),
@@ -934,6 +944,7 @@ impl Request {
             shutdown_functions: Vec::new(),
             tick_functions: Vec::new(),
             autoloaders: Vec::new(),
+            in_autoload: Vec::new(),
             assert_callback: None,
             umask: 0o022,
             stat_cache: crate::wrapper::StatCache::default(),
@@ -3131,6 +3142,22 @@ impl Request {
         file: &[u8],
         line: u32,
     ) -> bool {
+        // `php_error_cb` under `EH_THROW` (`Z/main/main.c:1368`), which
+        // `zend_error_impl` reaches past the user handler: a warning is
+        // thrown as the class `zend_replace_error_handling` named, where
+        // nothing is pending, and shown nowhere.
+        if let Some(class) = self.error_handling.clone()
+            && matches!(
+                level,
+                Level::Warning | Level::CoreWarning | Level::CompileWarning | Level::UserWarning
+            )
+        {
+            if self.pending.is_none() && self.error_handling_thrown.is_none() {
+                let thrown = crate::api::raising::throw(self, &class, message);
+                self.error_handling_thrown = Some(thrown);
+            }
+            return false;
+        }
         // "Always clear the last backtrace."
         self.last_fatal_error_backtrace = None;
         if self.pending.is_none() && self.fatal_error_backtraces() && fatal_errors(level) {
@@ -7165,6 +7192,17 @@ impl Request {
     /// `Flow::Resume` (`jit-design.md` §2.2). The unwind exit is one
     /// answer, since it stands in php's slot as any throwable does;
     /// [`Request::pending`] is the object alone.
+    /// `zend_replace_error_handling`: the class a warning is thrown as,
+    /// `None` for `EH_NORMAL`; the one it replaces comes back.
+    pub(crate) fn replace_error_handling(&mut self, class: Option<String>) -> Option<String> {
+        std::mem::replace(&mut self.error_handling, class)
+    }
+
+    /// The throwable a warning became under `EH_THROW`, taken.
+    pub(crate) fn take_error_handling_thrown(&mut self) -> Option<Thrown> {
+        self.error_handling_thrown.take()
+    }
+
     pub(crate) fn is_pending(&self) -> bool {
         self.pending.is_some() || self.unwind_exit
     }
@@ -7958,7 +7996,11 @@ impl Request {
             return Err(crate::api::raising::fatal(self, &message));
         }
         if let Some(parent) = &decl.parent {
-            let Some(found) = self.class_named(&parent.0) else {
+            let found = match self.class_named(&parent.0) {
+                Some(found) => Some(found),
+                None => crate::api::call::autoload(self, &parent.0)?,
+            };
+            let Some(found) = found else {
                 return Err(crate::api::raising::throw(
                     self,
                     "Error",
@@ -7975,7 +8017,11 @@ impl Request {
         }
         let mut implemented: Vec<ClassId> = Vec::new();
         for interface in &decl.interfaces {
-            let Some(found) = self.class_named(&interface.0) else {
+            let found = match self.class_named(&interface.0) {
+                Some(found) => Some(found),
+                None => crate::api::call::autoload(self, &interface.0)?,
+            };
+            let Some(found) = found else {
                 return Err(crate::api::raising::throw(
                     self,
                     "Error",
@@ -8688,7 +8734,8 @@ impl Request {
     }
 
     /// `zend_shutdown_executor_values`' release of both handlers and
-    /// both stacks (`Z/Zend/zend_execute_API.c:410-420`), after the open
+    /// both stacks (`Z/Zend/zend_execute_API.c:410-420`), and SPL's
+    /// `RSHUTDOWN` of the autoload stack beside them, after the open
     /// resources are closed, so a resource's destructor that raises
     /// still reaches the handler that stood.
     pub(crate) fn free_user_handlers(&mut self) {
@@ -8702,7 +8749,8 @@ impl Request {
                 .into_iter()
                 .flatten(),
         );
-        let all: Vec<Callable> = error.chain(exception).collect();
+        let loaders = std::mem::take(&mut self.autoloaders);
+        let all: Vec<Callable> = error.chain(exception).chain(loaders).collect();
         for handler in all {
             self.release(handler.into_value());
         }
@@ -9345,8 +9393,22 @@ impl Request {
             .map_or(&[], |decl| decl.attributes.as_slice())
     }
 
-    /// `spl_autoload_register()`.
+    /// `spl_autoload_register()`: the callable onto the stack, at its
+    /// head under `prepend`, and nothing where one of the same target
+    /// is there already (`spl_find_registered_function`). The stack
+    /// takes an owner of the callable's value, as
+    /// `autoload_func_info_from_fci` takes one of its object and closure,
+    /// and gives it up when the callable leaves the stack or the request
+    /// ends.
     pub fn autoload_register(&mut self, loader: Callable, prepend: bool) -> Result<(), Thrown> {
+        if self
+            .autoloaders
+            .iter()
+            .any(|held| held.target() == loader.target())
+        {
+            return Ok(());
+        }
+        self.addref(&loader.value());
         if prepend {
             self.autoloaders.insert(0, loader);
         } else {
@@ -9357,9 +9419,37 @@ impl Request {
 
     /// `spl_autoload_unregister()`.
     pub fn autoload_unregister(&mut self, loader: &Callable) -> bool {
-        let before = self.autoloaders.len();
-        self.autoloaders.retain(|l| l != loader);
-        self.autoloaders.len() != before
+        let Some(at) = self
+            .autoloaders
+            .iter()
+            .position(|l| l.target() == loader.target())
+        else {
+            return false;
+        };
+        let removed = self.autoloaders.remove(at);
+        self.release(removed.into_value());
+        true
+    }
+
+    /// The autoloader at `at` on the stack, what `spl_perform_autoload`
+    /// serves next.
+    pub(crate) fn autoloader(&self, at: usize) -> Option<Callable> {
+        self.autoloaders.get(at).cloned()
+    }
+
+    /// `zend_hash_add_empty_element(EG(in_autoload), lc_name)`: `false`
+    /// for a name an autoloader is loading already.
+    pub(crate) fn autoload_enter(&mut self, lowered: &[u8]) -> bool {
+        if self.in_autoload.iter().any(|name| name == lowered) {
+            return false;
+        }
+        self.in_autoload.push(lowered.to_vec());
+        true
+    }
+
+    /// `zend_hash_del(EG(in_autoload), lc_name)`.
+    pub(crate) fn autoload_leave(&mut self, lowered: &[u8]) {
+        self.in_autoload.retain(|name| name != lowered);
     }
 
     /// `spl_autoload_functions()`.
