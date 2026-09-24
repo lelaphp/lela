@@ -5263,7 +5263,6 @@ fn write_entry(
     array: PhpArray,
     dim: Option<&Value>,
     constant: bool,
-    read: DimRead,
 ) -> Result<Result<Option<php_heap::ZvalRef>, Thrown>, Fatal> {
     let Some(dim) = dim else {
         return Ok(req.array_next_entry(array.heap()));
@@ -5272,20 +5271,6 @@ fn write_entry(
         Ok(key) => key,
         Err(thrown) => return Ok(Err(thrown)),
     };
-    // `zend_undefined_offset_write` and `zend_undefined_index_write`
-    // (`Z/Zend/zend_execute.c:2765`): under `BP_VAR_RW` the key the
-    // table has not got warns before it is laid down, which is the one
-    // thing `_RW` adds to `_W`.
-    if read == DimRead::Warning && array.heap().get(key).is_none() {
-        let message = match key {
-            php_heap::Key::Long(n) => format!("Undefined array key {n}"),
-            php_heap::Key::Str(s) => format!(
-                "Undefined array key \"{}\"",
-                String::from_utf8_lossy(s.bytes())
-            ),
-        };
-        crate::api::raising::warning(req, &message);
-    }
     Ok(req.array_lookup(array.heap(), key))
 }
 
@@ -5463,16 +5448,19 @@ fn fetch_dim_place(
         Ok(Container::Array(array)) => {
             let dim = (op.op2_type != OperandKind::Unused)
                 .then(|| exec::operand(req, frame, code, op.op2_type, op.op2));
-            let written = write_entry(
-                req,
-                array,
-                dim.as_ref(),
-                op.op2_type == OperandKind::Const,
-                read,
-            )?;
-            match written {
-                Ok(Some(entry)) => Ok(php_heap::Zval::indirect(entry)),
-                Ok(None) => Err(crate::api::raising::throw(
+            let constant = op.op2_type == OperandKind::Const;
+            let landing = match read {
+                DimRead::Warning => rw_entry(req, array, dim.as_ref(), constant)?,
+                DimRead::Silent => {
+                    write_entry(req, array, dim.as_ref(), constant)?.map(Landing::from)
+                }
+            };
+            match landing {
+                Ok(Landing::Entry(entry)) => Ok(php_heap::Zval::indirect(entry)),
+                // `ZVAL_NULL(result)`: the array went while the warning
+                // ran.
+                Ok(Landing::Gone) => Ok(php_heap::Zval::null()),
+                Ok(Landing::Occupied) => Err(crate::api::raising::throw(
                     req,
                     "Error",
                     "Cannot add element to the array as the next element is already occupied",
@@ -8329,13 +8317,7 @@ pub(crate) fn assign_dim<T: Tier>(
         }
         Ok(Container::Array(array)) => {
             let dim = exec::operand(req, frame, code, op.op2_type, op.op2);
-            let entry = write_entry(
-                req,
-                array,
-                Some(&dim),
-                op.op2_type == OperandKind::Const,
-                DimRead::Silent,
-            )?;
+            let entry = write_entry(req, array, Some(&dim), op.op2_type == OperandKind::Const)?;
             match entry {
                 Ok(Some(entry)) => {
                     let value = exec::take_operand(req, frame, code, data.op1_type, data.op1);
@@ -8443,41 +8425,134 @@ struct Compound<'a> {
     kernel: BinaryKernel,
 }
 
+/// Where a dimension write under `BP_VAR_RW` lands, what
+/// `zend_fetch_dimension_address_inner` answers for it.
+enum Landing {
+    /// The entry at the key, in place.
+    Entry(php_heap::ZvalRef),
+    /// `$a[]` with `nNextFreeElement` at `ZEND_LONG_MAX` taken, which
+    /// is `zend_cannot_add_element`'s `Error` at the site.
+    Occupied,
+    /// php's `NULL` with nothing thrown: the handler the `Undefined
+    /// array key` warning reached destroyed the array or took an owner
+    /// of it, so there is no entry to write into and the site's
+    /// temporary takes `null` ([`undefined_key_write`]).
+    Gone,
+}
+
+impl From<Option<php_heap::ZvalRef>> for Landing {
+    fn from(entry: Option<php_heap::ZvalRef>) -> Landing {
+        entry.map_or(Landing::Occupied, Landing::Entry)
+    }
+}
+
 /// The entry a compound assignment to a dimension lands in, php's
 /// `zend_fetch_dimension_address_inner_RW` (`Z/Zend/zend_execute.c`):
 /// the entry at the key, laid down holding `null` where the table has
-/// none, and php's `Undefined array key` warning before it, which is
-/// the one thing the `BP_VAR_W` walk ([`write_entry`]) does not raise.
-/// The `UNUSED` dimension of `$a[] op= v` is an entry appended with
-/// nothing in it (`zend_hash_next_index_insert(ht,
-/// &EG(uninitialized_zval))`), which raises no warning at all.
+/// none after php's `Undefined array key` warning
+/// ([`undefined_key_write`]), which is the one thing the `BP_VAR_W`
+/// walk ([`write_entry`]) does not raise. The `UNUSED` dimension of
+/// `$a[] op= v` is an entry appended with nothing in it
+/// (`zend_hash_next_index_insert(ht, &EG(uninitialized_zval))`), which
+/// raises no warning at all.
 fn rw_entry(
     req: &mut Request,
     array: PhpArray,
     dim: Option<&Value>,
     constant: bool,
-) -> Result<Result<Option<php_heap::ZvalRef>, Thrown>, Fatal> {
+) -> Result<Result<Landing, Thrown>, Fatal> {
     let Some(dim) = dim else {
-        return Ok(req.array_next_entry(array.heap()));
+        return Ok(req.array_next_entry(array.heap()).map(Landing::from));
     };
     let key = match crate::ops::array_offset(req, dim, constant) {
         Ok(key) => key,
         Err(thrown) => return Ok(Err(thrown)),
     };
     if array.heap().get(key).is_none() {
-        let message = match key {
-            php_heap::Key::Long(n) => format!("Undefined array key {n}"),
-            php_heap::Key::Str(s) => format!(
-                "Undefined array key \"{}\"",
-                String::from_utf8_lossy(s.bytes())
-            ),
-        };
-        crate::api::raising::warning(req, &message);
-        if req.is_pending() {
-            return Ok(Err(Thrown::of(None)));
-        }
+        return Ok(undefined_key_write(req, array, key));
     }
-    Ok(req.array_lookup(array.heap(), key))
+    Ok(req.array_lookup(array.heap(), key).map(Landing::from))
+}
+
+/// `zend_undefined_offset_write` and `zend_undefined_index_write`
+/// (`Z/Zend/zend_execute.c:2507-2550`): the `Undefined array key`
+/// warning for a key `array` has not got, and the entry laid down
+/// holding `null` after it. The warning may reach a handler that
+/// overwrites the variable holding the array, so the array is held
+/// across it, `GC_ADDREF(ht)`, and a string key too, which the handler
+/// may free as well. Where the array has any owner but that one and
+/// its own after the warning, it is given up, `zend_array_destroy` at
+/// the last, and nothing is written: [`Landing::Gone`]. An immutable
+/// array is never held, as php's `IS_ARRAY_IMMUTABLE` test says.
+///
+/// ```php
+/// $v = null;
+/// set_error_handler(function () use (&$v) { $v = 0; });
+/// $v[0] .= "xyz";
+/// var_dump($v);
+/// $v = null;
+/// $v["k"]["j"] .= "xyz";
+/// var_dump($v);
+/// set_error_handler(function ($no, $message) use (&$v, &$copy) {
+///     echo $message, "\n";
+///     $copy = $v;
+/// });
+/// $v = [];
+/// $v[5] .= "x";
+/// $v[1][2] .= "y";
+/// var_dump($v, $copy);
+/// ```
+/// ```expect
+/// int(0)
+/// int(0)
+/// Undefined array key 5
+/// Undefined array key 1
+/// Undefined array key 2
+/// array(0) {
+/// }
+/// array(0) {
+/// }
+/// ```
+fn undefined_key_write(
+    req: &mut Request,
+    array: PhpArray,
+    key: php_heap::Key,
+) -> Result<Landing, Thrown> {
+    let held = (!array.heap().is_immutable()).then_some(Value::array(array));
+    if let Some(held) = &held {
+        req.addref(held);
+    }
+    let name = match key {
+        php_heap::Key::Str(s) => Some(exec::value_of(php_heap::Zval::string(s))),
+        php_heap::Key::Long(_) => None,
+    };
+    if let Some(name) = &name {
+        req.addref(name);
+    }
+    let message = match key {
+        php_heap::Key::Long(n) => format!("Undefined array key {n}"),
+        php_heap::Key::Str(s) => format!(
+            "Undefined array key \"{}\"",
+            String::from_utf8_lossy(s.bytes())
+        ),
+    };
+    crate::api::raising::warning(req, &message);
+    let gone = held.is_some_and(|held| {
+        let owners = held.refcount();
+        req.release_nogc(held);
+        owners != 2
+    });
+    let landing = if req.is_pending() {
+        Err(Thrown::of(None))
+    } else if gone {
+        Ok(Landing::Gone)
+    } else {
+        req.array_lookup(array.heap(), key).map(Landing::from)
+    };
+    if let Some(name) = name {
+        req.release(name);
+    }
+    landing
 }
 
 /// `ZEND_ASSIGN_DIM_OP` (`Z/Zend/zend_vm_def.h:1156`), `$a[k] op= v`
@@ -8648,8 +8723,15 @@ pub(crate) fn assign_dim_op<T: Tier>(
             let dim = (op.op2_type != OperandKind::Unused)
                 .then(|| exec::operand(req, frame, code, op.op2_type, op.op2));
             match rw_entry(req, array, dim.as_ref(), op.op2_type == OperandKind::Const)? {
-                Ok(Some(entry)) => stepped_entry(req, frame, code, step, entry),
-                Ok(None) => Err(crate::api::raising::throw(
+                Ok(Landing::Entry(entry)) => stepped_entry(req, frame, code, step, entry),
+                // `assign_dim_op_ret_null`: `FREE_OP_DATA` and a `null`
+                // result.
+                Ok(Landing::Gone) => {
+                    exec::free_operand(req, frame, code, data.op1_type, data.op1);
+                    write_out(req, frame, code, op, &Value::null());
+                    Ok(())
+                }
+                Ok(Landing::Occupied) => Err(crate::api::raising::throw(
                     req,
                     "Error",
                     "Cannot add element to the array as the next element is already occupied",
