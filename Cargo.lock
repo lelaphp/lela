@@ -382,6 +382,7 @@ dependencies = [
 name = "php_ext_iconv"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "php_ext",
 ]
 
