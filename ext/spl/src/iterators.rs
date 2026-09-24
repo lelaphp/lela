@@ -652,6 +652,27 @@ impl ObjectHandlers for DualHandlers {
     fn clone_obj(&self) -> Option<CloneObj> {
         None
     }
+
+    /// `spl_dual_it_get_method`: the inner iterator.
+    ///
+    /// ```php
+    /// $it = new LimitIterator(new ArrayIterator([3, 1, 2]), 0, 2);
+    /// var_dump($it->count(), $it->getArrayCopy());
+    /// ```
+    /// ```expect
+    /// int(3)
+    /// array(3) {
+    ///   [0]=>
+    ///   int(3)
+    ///   [1]=>
+    ///   int(1)
+    ///   [2]=>
+    ///   int(2)
+    /// }
+    /// ```
+    fn method_receiver(&self, req: &mut Request, object: PhpObject) -> Option<PhpObject> {
+        object.native::<DualIt>(req).and_then(|it| it.inner)
+    }
 }
 
 /// `IteratorIterator::__construct(Traversable $iterator, ?string $class = null)`:
@@ -2019,6 +2040,25 @@ impl ObjectHandlers for RecHandlers {
 
     fn clone_obj(&self) -> Option<CloneObj> {
         None
+    }
+
+    /// `spl_recursive_it_get_method`: the iterator of the level the
+    /// walk stands on.
+    ///
+    /// ```php
+    /// class Tree extends RecursiveArrayIterator { function depthNote() { return "at " . json_encode($this->getArrayCopy()); } }
+    /// $it = new RecursiveIteratorIterator(new Tree([1, [2, 3]]));
+    /// foreach ($it as $v) echo $v, " ", $it->depthNote(), "\n";
+    /// ```
+    /// ```expect
+    /// 1 at [1,[2,3]]
+    /// 2 at [2,3]
+    /// 3 at [2,3]
+    /// ```
+    fn method_receiver(&self, req: &mut Request, object: PhpObject) -> Option<PhpObject> {
+        object
+            .native::<RecIt>(req)
+            .and_then(|it| it.levels.last().map(|level| level.iterator))
     }
 }
 

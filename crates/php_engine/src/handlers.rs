@@ -2866,10 +2866,19 @@ pub(crate) fn init_method_call<T: Tier>(
     };
     let class = object.class();
     let table = req.object_handlers(object.heap());
-    let Some(function) = lowered
-        .as_str_bytes()
-        .and_then(|lowered| table.get_method(req, object, lowered))
-    else {
+    let found = lowered.as_str_bytes().and_then(|lowered| {
+        table
+            .get_method(req, object, lowered)
+            .map(|function| (function, None))
+            .or_else(|| {
+                let inner = table.method_receiver(req, object)?;
+                let inner_table = req.object_handlers(inner.heap());
+                inner_table
+                    .get_method(req, inner, lowered)
+                    .map(|function| (function, Some(inner)))
+            })
+    });
+    let Some((function, receiver)) = found else {
         let thrown = undefined_method(req, class, &written);
         exec::free_operand(req, frame, code, op.op1_type, op.op1);
         return threw(req, frame, &thrown);
@@ -2892,6 +2901,16 @@ pub(crate) fn init_method_call<T: Tier>(
         req.addref(&object.as_value());
         req.release(taken);
     }
+    // A receiver `method_receiver` handed over stands in for the
+    // object, one owner moved from the one to the other.
+    let object = match receiver {
+        Some(inner) => {
+            req.addref(&inner.as_value());
+            req.release(object.as_value());
+            inner
+        }
+        None => object,
+    };
     let this = if req
         .method_decl(function)
         .is_some_and(|decl| decl.is_instance)
@@ -2907,7 +2926,7 @@ pub(crate) fn init_method_call<T: Tier>(
         arguments: Vec::new(),
         count: usize::try_from(op.extended_value).unwrap_or(0),
         this,
-        called_scope: Some(class),
+        called_scope: Some(object.class()),
         closure: None,
         extra_named: Vec::new(),
         stage: CallStage::Building,

@@ -50,6 +50,7 @@ abi::ObjectHandlers::get_property_ptr_ptr
 abi::ObjectHandlers::has_dimension
 abi::ObjectHandlers::has_property
 abi::ObjectHandlers::iterator_element
+abi::ObjectHandlers::method_receiver
 abi::ObjectHandlers::read_dimension
 abi::ObjectHandlers::read_property
 abi::ObjectHandlers::unset_dimension
