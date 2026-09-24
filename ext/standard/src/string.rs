@@ -20,6 +20,8 @@ mod replace;
 mod slashes;
 mod strip_tags;
 
+pub use strip_tags::strip_tags_ex;
+
 use php_ext::coerce::to_string;
 use php_ext::decl::FunctionDecl;
 use php_ext::raising::{Level, Thrown, arg_value_error, deprecated, docref, throw};

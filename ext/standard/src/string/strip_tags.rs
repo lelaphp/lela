@@ -66,9 +66,21 @@ const fn is_space(c: u8) -> bool {
     matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
 }
 
-/// `php_strip_tags_ex(rbuf, len, allow, allow_len, allow_tag_spaces)`.
+/// `php_strip_tags_ex(rbuf, len, allow, allow_len, allow_tag_spaces)`,
+/// `PHPAPI` in `php_string.h`: ext/filter's `FILTER_SANITIZE_STRING`
+/// strips with `allow_tag_spaces` set, so `< b>` opens a tag there where
+/// `strip_tags()` keeps it as text.
+///
+/// ```php
+/// var_dump(strip_tags("a< b>c"), filter_var("a< b>c", FILTER_UNSAFE_RAW) === "a< b>c", @filter_var("a< b>c", FILTER_SANITIZE_STRING));
+/// ```
+/// ```expect
+/// string(6) "a< b>c"
+/// bool(true)
+/// string(2) "ac"
+/// ```
 #[allow(clippy::too_many_lines)]
-fn strip_tags_ex(buf: &[u8], allow: Option<&[u8]>, allow_tag_spaces: bool) -> Vec<u8> {
+pub fn strip_tags_ex(buf: &[u8], allow: Option<&[u8]>, allow_tag_spaces: bool) -> Vec<u8> {
     let allow: Option<Vec<u8>> = allow.map(|a| a.iter().map(u8::to_ascii_lowercase).collect());
     let at = |i: usize| buf.get(i).copied().unwrap_or(0);
     let mut out = Vec::with_capacity(buf.len());
