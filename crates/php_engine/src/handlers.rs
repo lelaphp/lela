@@ -4434,7 +4434,6 @@ fn fetch_obj_place(
     // property` notice, is not served yet (#513), so the placement is
     // loud and a property the scope may not reach is the `Error`.
     let placed = req.declared_slot_for_write(object.class(), &name, "indirectly modify", false);
-    exec::free_operand(req, frame, code, op.op1_type, op.op1);
     let at = match placed {
         Ok(Some((slot, typed))) => {
             // `if (UNEXPECTED(Z_TYPE_P(retval) == IS_UNDEF))`: under
@@ -4451,14 +4450,14 @@ fn fetch_obj_place(
                             "Typed property {class}::${shown} must not be accessed before initialization"
                         ),
                     );
-                    return threw(req, frame, &thrown);
+                    return threw_freeing_container(req, frame, code, op, &thrown);
                 }
                 crate::api::raising::warning(
                     req,
                     &format!("Undefined property: {class}::${shown}"),
                 );
                 if let Err(thrown) = req.write_declared_slot(object.heap(), slot, Value::null()) {
-                    return threw(req, frame, &thrown);
+                    return threw_freeing_container(req, frame, code, op, &thrown);
                 }
             }
             let Some(at) = object.heap().slot_ref(slot) else {
@@ -4488,10 +4487,10 @@ fn fetch_obj_place(
                         String::from_utf8_lossy(&name)
                     )));
                 }
-                Err(thrown) => return threw(req, frame, &thrown),
+                Err(thrown) => return threw_freeing_container(req, frame, code, op, &thrown),
             }
         }
-        Err(thrown) => return threw(req, frame, &thrown),
+        Err(thrown) => return threw_freeing_container(req, frame, code, op, &thrown),
     };
     let out = exec::temporary_slot(code, op.out);
     let previous = req.take_slot(frame, out);
@@ -4502,7 +4501,22 @@ fn fetch_obj_place(
         )));
     };
     var.write(php_heap::Zval::indirect(at));
+    exec::free_container_var(req, frame, code, op);
     Ok(advance(req, frame))
+}
+
+/// A throw out of [`fetch_obj_place`] once the object is found: the
+/// container given up as `FREE_OP1_VAR_PTR` gives it up, with no place
+/// written to extract, and then the throw.
+fn threw_freeing_container(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    thrown: &Thrown,
+) -> Edge {
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    threw(req, frame, thrown)
 }
 
 /// `ZEND_FETCH_DIM_R` (`Z/Zend/zend_vm_def.h:1933`), `$a[k]` where a
@@ -5427,6 +5441,38 @@ pub(crate) fn fetch_dim_rw<T: Tier>(
     fetch_dim_place(req, frame, code, op, DimRead::Warning)
 }
 
+/// The array arm of [`fetch_dim_place`], `fetch_from_array`: the entry
+/// the dimension names as the `IS_INDIRECT` the `VAR` takes, laid down
+/// by [`write_entry`] under `BP_VAR_W` and by [`rw_entry`] under
+/// `BP_VAR_RW`, and `null` where the array went while the warning ran,
+/// php's `ZVAL_NULL(result)`.
+fn array_place(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    array: PhpArray,
+    read: DimRead,
+) -> Result<Result<php_heap::Zval, Thrown>, Fatal> {
+    let dim = (op.op2_type != OperandKind::Unused)
+        .then(|| exec::operand(req, frame, code, op.op2_type, op.op2));
+    let constant = op.op2_type == OperandKind::Const;
+    let landing = match read {
+        DimRead::Warning => rw_entry(req, array, dim.as_ref(), constant)?,
+        DimRead::Silent => write_entry(req, array, dim.as_ref(), constant)?.map(Landing::from),
+    };
+    Ok(match landing {
+        Ok(Landing::Entry(entry)) => Ok(php_heap::Zval::indirect(entry)),
+        Ok(Landing::Gone) => Ok(php_heap::Zval::null()),
+        Ok(Landing::Occupied) => Err(crate::api::raising::throw(
+            req,
+            "Error",
+            "Cannot add element to the array as the next element is already occupied",
+        )),
+        Err(thrown) => Err(thrown),
+    })
+}
+
 /// The body `FETCH_DIM_W` and `FETCH_DIM_RW` share, php's one
 /// `zend_fetch_dimension_address` under two `BP_VAR_*`: `read` is
 /// `BP_VAR_RW`'s own diagnostic for a key the table has not got, which
@@ -5445,29 +5491,7 @@ fn fetch_dim_place(
         )));
     };
     let written = match write_container(req, place) {
-        Ok(Container::Array(array)) => {
-            let dim = (op.op2_type != OperandKind::Unused)
-                .then(|| exec::operand(req, frame, code, op.op2_type, op.op2));
-            let constant = op.op2_type == OperandKind::Const;
-            let landing = match read {
-                DimRead::Warning => rw_entry(req, array, dim.as_ref(), constant)?,
-                DimRead::Silent => {
-                    write_entry(req, array, dim.as_ref(), constant)?.map(Landing::from)
-                }
-            };
-            match landing {
-                Ok(Landing::Entry(entry)) => Ok(php_heap::Zval::indirect(entry)),
-                // `ZVAL_NULL(result)`: the array went while the warning
-                // ran.
-                Ok(Landing::Gone) => Ok(php_heap::Zval::null()),
-                Ok(Landing::Occupied) => Err(crate::api::raising::throw(
-                    req,
-                    "Error",
-                    "Cannot add element to the array as the next element is already occupied",
-                )),
-                Err(thrown) => Err(thrown),
-            }
-        }
+        Ok(Container::Array(array)) => array_place(req, frame, code, op, array, read)?,
         Ok(Container::Object(object)) => {
             let dim = object_dim(req, frame, code, op);
             let table = req.object_handlers(object.heap());
@@ -5530,12 +5554,14 @@ fn fetch_dim_place(
         Err(thrown) => Err(thrown),
     };
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
-    exec::free_operand(req, frame, code, op.op1_type, op.op1);
     let previous = req.take_slot(frame, out);
     req.release(previous);
     let written = match written {
         Ok(written) => written,
-        Err(thrown) => return threw(req, frame, &thrown),
+        Err(thrown) => {
+            exec::free_operand(req, frame, code, op.op1_type, op.op1);
+            return threw(req, frame, &thrown);
+        }
     };
     let Some(var) = req.slot_ptr(frame, out) else {
         return Err(Fatal::Error(String::from(
@@ -5543,6 +5569,7 @@ fn fetch_dim_place(
         )));
     };
     var.write(written);
+    exec::free_container_var(req, frame, code, op);
     Ok(advance(req, frame))
 }
 

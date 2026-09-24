@@ -908,6 +908,69 @@ pub(crate) fn free_operand(
     }
 }
 
+/// `FREE_VAR_PTR_AND_EXTRACT_RESULT_IF_NECESSARY`
+/// (`Z/Zend/zend_execute.c:163`): a `FETCH_DIM_W`, `FETCH_DIM_RW`,
+/// `FETCH_OBJ_W` or `FETCH_OBJ_RW` over a `VAR` gives the container up
+/// after it wrote the place it found into its own `VAR`. A container the
+/// `VAR` holds the last owner of, a call's answer, takes the place with
+/// it when it goes, so the `IS_INDIRECT` naming the place is first
+/// replaced by what the place holds, one owner taken (`ZVAL_COPY`), and
+/// the link after it writes into that copy. A `VAR` holding a CV's
+/// `IS_INDIRECT` owns nothing and frees nothing.
+///
+/// So a trace's `args` written through is the copy's, and never the
+/// frame's parameter (bug #79108), and a call's object or array written
+/// through lives until the write is done:
+///
+/// ```php
+/// function test(string $val) {
+///     $a = &$val;
+///     hackingHere();
+///     echo $val, "\n";
+/// }
+/// function hackingHere() {
+///     debug_backtrace()[1]['args'][0] = 'Modified';
+/// }
+/// test('Original');
+/// class C { public $p = [0]; function __destruct() { echo "d\n"; } }
+/// function g() { return new C; }
+/// g()->p[0] = 1;
+/// function f() { return [[1], [2]]; }
+/// f()[1][0] = 5;
+/// $c = new C;
+/// function h($c) { return $c; }
+/// h($c)->p[0] = 7;
+/// var_dump($c->p);
+/// echo "end\n";
+/// ```
+/// ```expect
+/// Original
+/// d
+/// array(1) {
+///   [0]=>
+///   int(7)
+/// }
+/// end
+/// d
+/// ```
+pub(crate) fn free_container_var(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) {
+    if op.op1_type != OperandKind::Var {
+        return;
+    }
+    let container = req.take_slot(frame, temporary_slot(code, op.op1));
+    if container.to_zval().is_refcounted() && container.refcount() == 1 {
+        let out = temporary_slot(code, op.out);
+        if let Some(var) = req.slot_ptr(frame, out)
+            && let Some(place) = var.read().as_indirect()
+        {
+            let held = value_of(place.read());
+            req.addref(&held);
+            var.write(held.to_zval());
+        }
+    }
+    req.release_nogc(container);
+}
+
 /// The op array's constant at `at`, as a value.
 pub(crate) fn constant(code: &OpArray, at: ConstIdx) -> Value {
     code.literals
