@@ -591,7 +591,23 @@ fn preg_last_error(req: &mut Request) -> Result<Value, Thrown> {
 }
 
 /// `preg_last_error_msg(): string`, `php_pcre_get_error_msg` over
-/// `PCRE_G(error_code)`. The witnesses are `preg_last_error`'s.
+/// `PCRE_G(error_code)`, beside `preg_last_error`'s witnesses: a pattern
+/// php refuses is an internal error, and the next call that runs clears it.
+///
+/// ```php
+/// var_dump(@preg_match('/(/', 'a'), preg_last_error_msg(), preg_quote('x'), preg_last_error_msg(), preg_split('/,/', 'a'), preg_last_error_msg());
+/// ```
+/// ```expect
+/// bool(false)
+/// string(14) "Internal error"
+/// string(1) "x"
+/// string(14) "Internal error"
+/// array(1) {
+///   [0]=>
+///   string(1) "a"
+/// }
+/// string(8) "No error"
+/// ```
 fn preg_last_error_msg(req: &mut Request) -> Result<Value, Thrown> {
     arguments_between(req, 0, 0)?;
     let code = error_code(req);
