@@ -11,9 +11,14 @@ description = "The hash extension, php-src/ext/hash"
 [lints]
 workspace = true
 
-# The one dependency: the facade. The engine is out of reach (`[[edge]]` ext/*).
+# The facade, and ext/standard, whose `md5.h` and `sha1.h` `php_hash_md.h`
+# and `php_hash_sha.h` include (ADR-0004's dependency rule). The engine is
+# out of reach (`[[edge]]` ext/*).
 [dependencies]
 php_ext = { path = "../../crates/php_ext" }
+php_ext_standard = { path = "../standard" }
+sha2 = { workspace = true }
+keccak = { workspace = true }
 
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
 [dev-dependencies]
