@@ -55,4 +55,5 @@ link::Refused
 link::Site
 link::TentativeReturn
 link::link
+link::object_type
 type_to_string

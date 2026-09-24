@@ -6801,7 +6801,7 @@ impl Request {
                 continue;
             }
             if let Some(existing) = self.class_named(&decl.name.0) {
-                let message = self.redeclaration(existing, &decl.name.0);
+                let message = self.redeclaration(existing);
                 let file = decl.file.0.to_vec();
                 self.end_in_compile_time(Level::CompileError, &message, &file, decl.line);
                 return false;
@@ -6814,18 +6814,30 @@ impl Request {
         true
     }
 
-    /// `zend_class_redeclaration_error`'s two wordings: the site of the
-    /// earlier declaration named when it was a user class.
-    fn redeclaration(&self, existing: ClassId, name: &[u8]) -> String {
-        match self.class_decl(existing) {
-            Some(earlier) if !earlier.file.0.is_empty() => format!(
-                "Cannot redeclare class {} (previously declared in {}:{})",
-                String::from_utf8_lossy(name),
-                String::from_utf8_lossy(&earlier.file.0),
-                earlier.line
-            ),
-            _ => format!("Cannot redeclare class {}", String::from_utf8_lossy(name)),
+    /// `zend_class_redeclaration_error`'s two wordings, which name the
+    /// earlier declaration as it was declared, what it is and its own
+    /// name, and its site when it was a user class.
+    ///
+    /// ```php
+    /// class stdclass {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot redeclare class stdClass in %s on line 2
+    /// ```
+    fn redeclaration(&self, existing: ClassId) -> String {
+        let Some(earlier) = self.class_decl(existing) else {
+            return String::from("InternalError: a class redeclared over none");
+        };
+        let what = php_unit::link::object_type(earlier.kind);
+        let name = String::from_utf8_lossy(&earlier.name.0);
+        if earlier.file.0.is_empty() {
+            return format!("Cannot redeclare {what} {name}");
         }
+        format!(
+            "Cannot redeclare {what} {name} (previously declared in {}:{})",
+            String::from_utf8_lossy(&earlier.file.0),
+            earlier.line
+        )
     }
 
     /// The class at `at` of `unit` into the request's table, with its
@@ -7014,7 +7026,7 @@ impl Request {
         };
         let name = String::from_utf8_lossy(&decl.name.0).into_owned();
         if let Some(existing) = self.class_named(&decl.name.0) {
-            let message = self.redeclaration(existing, &decl.name.0);
+            let message = self.redeclaration(existing);
             return Err(crate::api::raising::fatal(self, &message));
         }
         if let Some(parent) = &decl.parent

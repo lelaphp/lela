@@ -205,8 +205,10 @@ fn or_weaker(visibility: Visibility) -> &'static str {
     }
 }
 
-/// `zend_get_object_type`, lowercase, and `zend_get_object_type_uc`.
-fn object_type(kind: ClassKind) -> &'static str {
+/// `zend_get_object_type`: what a declaration is, lowercase, as php's
+/// messages name it.
+#[must_use]
+pub fn object_type(kind: ClassKind) -> &'static str {
     match kind {
         ClassKind::Class => "class",
         ClassKind::Interface => "interface",
