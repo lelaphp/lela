@@ -32,6 +32,7 @@
 mod args;
 mod ffi;
 mod format;
+mod parse;
 mod zone;
 
 use std::collections::HashMap;
@@ -219,6 +220,7 @@ fn null_int(name: &str) -> Parameter {
 }
 
 /// The functions, in `php_date.stub.php`'s order.
+#[allow(clippy::too_many_lines)] // the stub's function table, one row per native
 fn functions() -> Vec<(FunctionDecl, Entry)> {
     let int_or_false = || union(vec![Type::Int, Type::False]);
     let string_or_false = || union(vec![Type::String, Type::False]);
@@ -248,7 +250,15 @@ fn functions() -> Vec<(FunctionDecl, Entry)> {
         )
     };
     vec![
-        (format_ts("date", Type::String), format::date as Entry),
+        (
+            function(
+                "strtotime",
+                vec![p("datetime", Type::String), null_int("baseTimestamp")],
+                Some(int_or_false()),
+            ),
+            parse::strtotime as Entry,
+        ),
+        (format_ts("date", Type::String), format::date),
         (format_ts("idate", int_or_false()), format::idate),
         (format_ts("gmdate", Type::String), format::gmdate),
         (
@@ -288,6 +298,22 @@ fn functions() -> Vec<(FunctionDecl, Entry)> {
         (
             function("getdate", vec![null_ts()], Some(Type::Array)),
             format::getdate,
+        ),
+        (
+            function(
+                "date_parse",
+                vec![p("datetime", Type::String)],
+                Some(Type::Array),
+            ),
+            parse::date_parse,
+        ),
+        (
+            function(
+                "date_parse_from_format",
+                vec![p("format", Type::String), p("datetime", Type::String)],
+                Some(Type::Array),
+            ),
+            parse::date_parse_from_format,
         ),
         (
             function(
