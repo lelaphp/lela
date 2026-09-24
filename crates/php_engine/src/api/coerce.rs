@@ -214,8 +214,10 @@ pub fn is_callable(req: &Request, value: &Value) -> bool {
 /// the callable a value names, or the sentence php words the refusal
 /// with, one per shape. What `zend_fcall_info_init` hands its caller to
 /// raise, which is `ob_start`'s warning and every other native that
-/// prints php's own words rather than "must be a valid callback".
-pub fn callable_checked(req: &Request, value: &Value) -> Result<Callable, String> {
+/// prints php's own words rather than "must be a valid callback". The
+/// request is taken mutably because the resolution raises php's
+/// deprecations for `self`, `parent` and `static` as the class half.
+pub fn callable_checked(req: &mut Request, value: &Value) -> Result<Callable, String> {
     req.callable_checked(value)
 }
 

@@ -719,14 +719,52 @@ pub(crate) fn bind_static<T: Tier>(
 }
 
 /// `ZEND_INIT_DYNAMIC_CALL` (`Z/Zend/zend_vm_def.h:3899`): the call
-/// frame for a callee named as the program serves, `$f(…)`. A
-/// `Closure` is `zend_init_closure_call`, the payload's function with
-/// its receiver, its scope and the closure itself on the call, so the
-/// body's `BIND_STATIC` prologue finds what it bound; a string is the
-/// function of that name, `zend_hash_find_ptr(EG(function_table))` over
-/// its lowered form, and a name nothing declares is php's `Error`
-/// naming it as written. What is neither is php's `Error` for a value
+/// frame for a callee named as the program serves, `$f(…)`, each shape
+/// through php's own initialiser. An object is
+/// `zend_init_dynamic_call_object`: a `Closure` its payload's function
+/// with its receiver, its scope and the closure itself on the call, so
+/// the body's `BIND_STATIC` prologue finds what it bound, and any other
+/// object its class's `__invoke`. A string is
+/// `zend_init_dynamic_call_string`: `Class::method` a `static` call, and
+/// otherwise the function of that name, a name nothing declares being
+/// php's `Error` naming it as written. An array is
+/// `zend_init_dynamic_call_array`, `[$object, 'method']` or `['Class',
+/// 'method']`. What is none of the three is php's `Error` for a value
 /// that is not callable.
+///
+/// ```php
+/// class C { public $v = 'v'; function m($x) { return "m$x$this->v "; } static function s($x) { return "s$x "; } function __invoke($x) { return "i$x "; } }
+/// $c = new C;
+/// $a = [$c, 'm']; $b = ['C', 's']; $s = 'C::s'; $t = [$c, 's'];
+/// echo $a(1), $b(2), $s(3), $c(4), $t(5), "\n";
+/// ```
+/// ```expect
+/// m1v s2 s3 i4 s5
+/// ```
+///
+/// Each refusal is php's `Error` in the initialiser's own words, which
+/// are not `zend_is_callable_ex`'s.
+///
+/// ```php
+/// class C { function m() {} private static function p() {} }
+/// foreach ([[1], [1 => 1, 2 => 2], [1, 'm'], ['C', 1], ['Nope', 'm'], ['C', 'nope'], ['C', 'm'], 'C::m', 'C::p', [new C, 'nope'], new stdClass, 'Nope::x'] as $f) {
+///     try { $f(); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// Error: Array callback must have exactly two elements
+/// Error: Array callback has to contain indices 0 and 1
+/// Error: First array member is not a valid class name or object
+/// Error: Second array member is not a valid method
+/// Error: Class "Nope" not found
+/// Error: Call to undefined method C::nope()
+/// Error: Non-static method C::m() cannot be called statically
+/// Error: Non-static method C::m() cannot be called statically
+/// Error: Call to private method C::p() from global scope
+/// Error: Call to undefined method C::nope()
+/// Error: Object of type stdClass is not callable
+/// Error: Class "Nope" not found
+/// ```
 ///
 /// ```php
 /// $f = function () { return 1; };
@@ -782,67 +820,254 @@ pub(crate) fn init_dynamic_call<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let callee = exec::operand(req, frame, code, op.op2_type, op.op2);
+    let callee = exec::operand(req, frame, code, op.op2_type, op.op2).deref();
     let count = usize::try_from(op.extended_value).unwrap_or(0);
-    let call = if let Some(object) = callee.deref().as_object().copied()
-        && let Some(closure) = object.closure(req).cloned()
-    {
+    let resolved = if let Some(object) = callee.as_object().copied() {
+        dynamic_call_object(req, object)
+    } else if let Some(name) = callee.as_str_bytes().map(<[u8]>::to_vec) {
+        dynamic_call_string(req, &name)
+    } else if let Some(array) = callee.as_array().copied() {
+        dynamic_call_array(req, array)
+    } else {
+        Err(crate::api::raising::throw(
+            req,
+            "Error",
+            &format!("Value of type {} is not callable", callee.type_name()),
+        ))
+    };
+    let target = match resolved {
+        Ok(target) => target,
+        Err(thrown) => {
+            exec::free_operand(req, frame, code, op.op2_type, op.op2);
+            return threw(req, frame, &thrown);
+        }
+    };
+    req.vm_mut().push_call(CallState {
+        function: target.function,
+        name: target.name,
+        arguments: Vec::new(),
+        count,
+        this: target.this,
+        called_scope: target.called_scope,
+        closure: target.closure,
+        extra_named: Vec::new(),
+        stage: CallStage::Building,
+        frameless: false,
+        coerced: Vec::new(),
+    });
+    exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    Ok(advance(req, frame))
+}
+
+/// What a dynamic call resolved to: the callee, the name the call frame
+/// carries for a method, the receiver it holds one owner of, the called
+/// scope, and the closure the frame holds one owner of.
+struct DynamicTarget {
+    function: Function,
+    name: Option<PhpString>,
+    this: Option<PhpObject>,
+    called_scope: Option<crate::api::values::ClassId>,
+    closure: Option<PhpObject>,
+}
+
+/// `zend_init_dynamic_call_object` (`Z/Zend/zend_execute.c:5152`): the
+/// object's `get_closure`, a `Closure`'s payload with its receiver, its
+/// scope and the closure itself held by the call, or `__invoke` on the
+/// object where its class declares one, and php's `Error` naming the
+/// class otherwise.
+fn dynamic_call_object(req: &mut Request, object: PhpObject) -> Result<DynamicTarget, Thrown> {
+    if let Some(closure) = object.closure(req).cloned() {
         req.addref(&object.as_value());
         if let Some(this) = closure.this {
             req.addref(&this.as_value());
         }
-        CallState {
+        return Ok(DynamicTarget {
             function: closure.function,
             name: None,
-            arguments: Vec::new(),
-            count,
             this: closure.this,
             called_scope: closure.scope,
             closure: Some(object),
-            extra_named: Vec::new(),
-            stage: CallStage::Building,
-            frameless: false,
-            coerced: Vec::new(),
-        }
-    } else if let Some(name) = callee.deref().as_str_bytes().map(<[u8]>::to_vec) {
-        let Some(function) = exec::find_function(req, &name.to_ascii_lowercase()) else {
-            let thrown = crate::api::raising::throw(
-                req,
-                "Error",
-                &format!(
-                    "Call to undefined function {}()",
-                    String::from_utf8_lossy(&name)
-                ),
-            );
-            return threw(req, frame, &thrown);
-        };
-        CallState {
-            function,
-            name: None,
-            arguments: Vec::new(),
-            count,
-            this: None,
-            called_scope: None,
-            closure: None,
-            extra_named: Vec::new(),
-            stage: CallStage::Building,
-            frameless: false,
-            coerced: Vec::new(),
-        }
+        });
+    }
+    let class = object.class();
+    let Some(function) = req.method_named(class, b"__invoke") else {
+        let shown = req.class_name(class);
+        return Err(crate::api::raising::throw(
+            req,
+            "Error",
+            &format!("Object of type {shown} is not callable"),
+        ));
+    };
+    let name = req.method_name_string(function)?;
+    let this = if req
+        .method_decl(function)
+        .is_some_and(|decl| decl.is_instance)
+    {
+        req.addref(&object.as_value());
+        Some(object)
     } else {
-        let thrown = crate::api::raising::throw(
+        None
+    };
+    Ok(DynamicTarget {
+        function,
+        name: Some(name),
+        this,
+        called_scope: Some(class),
+        closure: None,
+    })
+}
+
+/// `zend_init_dynamic_call_string` (`Z/Zend/zend_execute.c:5072`): a
+/// `Class::method` string is the class by name, `Class "X" not found`
+/// where nothing declares it, and the method as
+/// `zend_std_get_static_method` finds it, with its access rule and
+/// php's refusal of an instance method named on the class; any other
+/// string is the function of that name with a leading `\` skipped, and
+/// the `Error` naming it as written where there is none.
+fn dynamic_call_string(req: &mut Request, name: &[u8]) -> Result<DynamicTarget, Thrown> {
+    let split = name
+        .windows(2)
+        .rposition(|pair| pair == b"::")
+        .filter(|at| *at > 0);
+    if let Some(at) = split {
+        let class = dynamic_call_class(req, &name[..at])?;
+        return dynamic_call_static(req, class, &name[at + 2..]);
+    }
+    let bare = name.strip_prefix(b"\\").unwrap_or(name);
+    let Some(function) = exec::find_function(req, &bare.to_ascii_lowercase()) else {
+        return Err(crate::api::raising::throw(
             req,
             "Error",
             &format!(
-                "Value of type {} is not callable",
-                callee.deref().type_name()
+                "Call to undefined function {}()",
+                String::from_utf8_lossy(name)
             ),
-        );
-        return threw(req, frame, &thrown);
+        ));
     };
-    req.vm_mut().push_call(call);
-    exec::free_operand(req, frame, code, op.op2_type, op.op2);
-    Ok(advance(req, frame))
+    Ok(DynamicTarget {
+        function,
+        name: None,
+        this: None,
+        called_scope: None,
+        closure: None,
+    })
+}
+
+/// `zend_init_dynamic_call_array` (`Z/Zend/zend_execute.c:5196`): a
+/// pair of exactly the members 0 and 1, the first a class name or an
+/// object and the second a method name, each shape php's `Error` in its
+/// words where it is not; a class name's method found as a `static` call
+/// finds it, an object's through its `get_method` with the access rule
+/// `zend_std_get_method` holds it to, a `static` method on an object
+/// called with no receiver.
+fn dynamic_call_array(req: &mut Request, array: PhpArray) -> Result<DynamicTarget, Thrown> {
+    let refuse = |req: &mut Request, text: &str| crate::api::raising::throw(req, "Error", text);
+    if array.len() != 2 {
+        return Err(refuse(req, "Array callback must have exactly two elements"));
+    }
+    let (Some(first), Some(second)) = (
+        array.get(&crate::api::values::Key::Int(0)),
+        array.get(&crate::api::values::Key::Int(1)),
+    ) else {
+        return Err(refuse(req, "Array callback has to contain indices 0 and 1"));
+    };
+    let (first, second) = (first.deref(), second.deref());
+    if first.as_object().is_none() && first.as_str_bytes().is_none() {
+        return Err(refuse(
+            req,
+            "First array member is not a valid class name or object",
+        ));
+    }
+    let Some(method) = second.as_str_bytes().map(<[u8]>::to_vec) else {
+        return Err(refuse(req, "Second array member is not a valid method"));
+    };
+    if let Some(class) = first.as_str_bytes().map(<[u8]>::to_vec) {
+        let class = dynamic_call_class(req, &class)?;
+        return dynamic_call_static(req, class, &method);
+    }
+    let Some(object) = first.as_object().copied() else {
+        return Err(refuse(
+            req,
+            "First array member is not a valid class name or object",
+        ));
+    };
+    let class = object.class();
+    let table = req.object_handlers(object.heap());
+    let Some(function) = table.get_method(req, object, &method.to_ascii_lowercase()) else {
+        let written = Value::string(PhpString::new(req, &method)?);
+        let thrown = undefined_method(req, class, &written);
+        req.release(written);
+        return Err(thrown);
+    };
+    req.check_method_access(function, &method)?;
+    let name = PhpString::new(req, &method)?;
+    let this = if req
+        .method_decl(function)
+        .is_some_and(|decl| decl.is_instance)
+    {
+        req.addref(&object.as_value());
+        Some(object)
+    } else {
+        None
+    };
+    Ok(DynamicTarget {
+        function,
+        name: Some(name),
+        this,
+        called_scope: Some(class),
+        closure: None,
+    })
+}
+
+/// `zend_fetch_class_by_name` under `ZEND_FETCH_CLASS_EXCEPTION`: the
+/// class of that name, a leading `\` skipped, and php's `Error` where
+/// nothing declares it.
+fn dynamic_call_class(
+    req: &mut Request,
+    name: &[u8],
+) -> Result<crate::api::values::ClassId, Thrown> {
+    let bare = name.strip_prefix(b"\\").unwrap_or(name);
+    match req.class_named(bare) {
+        Some(class) => Ok(class),
+        None => Err(crate::api::raising::throw(
+            req,
+            "Error",
+            &format!("Class \"{}\" not found", String::from_utf8_lossy(name)),
+        )),
+    }
+}
+
+/// `zend_std_get_static_method` over `class` and then the dynamic
+/// call's refusal of an instance method: `Call to undefined method` and
+/// `zend_bad_method_call` as `INIT_STATIC_METHOD_CALL` raises them, and
+/// `zend_non_static_method_call`.
+fn dynamic_call_static(
+    req: &mut Request,
+    class: crate::api::values::ClassId,
+    method: &[u8],
+) -> Result<DynamicTarget, Thrown> {
+    let written = Value::string(PhpString::new(req, method)?);
+    let Some(function) = req.method_named(class, &method.to_ascii_lowercase()) else {
+        let thrown = undefined_method(req, class, &written);
+        req.release(written);
+        return Err(thrown);
+    };
+    req.release(written);
+    req.check_method_access(function, method)?;
+    if req
+        .method_decl(function)
+        .is_some_and(|decl| decl.is_instance)
+    {
+        return Err(non_static_method_call(req, function));
+    }
+    let name = PhpString::new(req, method)?;
+    Ok(DynamicTarget {
+        function,
+        name: Some(name),
+        this: None,
+        called_scope: Some(class),
+        closure: None,
+    })
 }
 
 /// `ZEND_ECHO`: the operand as a string (`zval_get_string`), written to
