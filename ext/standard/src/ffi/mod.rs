@@ -224,3 +224,17 @@ pub(super) fn syslog(priority: i32, message: &[u8]) {
     // the call.
     unsafe { libc::syslog(priority, c"%.*s".as_ptr(), len, message.as_ptr()) };
 }
+
+/// `strsignal(3)`: the host's name for a signal.
+pub(super) fn strsignal(signal: i32) -> String {
+    // SAFETY: `strsignal` answers a pointer to a NUL-terminated string
+    // the C library owns, valid until the next call on this thread.
+    let text = unsafe { libc::strsignal(signal) };
+    if text.is_null() {
+        return String::new();
+    }
+    // SAFETY: `text` is the non-null, NUL-terminated string just
+    // answered, read before any other call could replace it.
+    let text = unsafe { std::ffi::CStr::from_ptr(text) };
+    text.to_string_lossy().into_owned()
+}

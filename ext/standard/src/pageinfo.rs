@@ -58,6 +58,11 @@ fn statpage(req: &mut Request) -> Page {
     page
 }
 
+/// `php_getuid`, which `mail`'s `X-PHP-Originating-Script` reads.
+pub(super) fn getuid(req: &mut Request) -> i64 {
+    statpage(req).uid
+}
+
 /// A number, or `false` for one below zero, as each native here answers.
 fn long_or_false(n: i64) -> Value {
     if n < 0 {

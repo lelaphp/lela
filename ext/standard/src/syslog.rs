@@ -189,6 +189,47 @@ fn closelog(req: &mut Request) -> Result<Value, Thrown> {
     Ok(Value::bool(true))
 }
 
+/// `syslog.facility` as `OnSetFacility` (`Z/main/main.c:590`) reads its
+/// name.
+fn facility(req: &Request) -> i32 {
+    let name = req.ini_get(b"syslog.facility").unwrap_or(b"LOG_USER");
+    match name {
+        b"LOG_AUTH" => 32,
+        b"LOG_AUTHPRIV" => 80,
+        b"LOG_CRON" => 72,
+        b"LOG_DAEMON" => 24,
+        b"LOG_FTP" => 88,
+        b"LOG_KERN" => 0,
+        b"LOG_LPR" => 48,
+        b"LOG_MAIL" => 16,
+        b"LOG_NEWS" => 56,
+        b"LOG_SYSLOG" => 40,
+        b"LOG_UUCP" => 64,
+        b"LOG_LOCAL0" => 128,
+        b"LOG_LOCAL1" => 136,
+        b"LOG_LOCAL2" => 144,
+        b"LOG_LOCAL3" => 152,
+        b"LOG_LOCAL4" => 160,
+        b"LOG_LOCAL5" => 168,
+        b"LOG_LOCAL6" => 176,
+        b"LOG_LOCAL7" => 184,
+        _ => 8,
+    }
+}
+
+/// `php_syslog` (`Z/main/php_syslog.c:57`): the log opened with
+/// `syslog.ident` and `syslog.facility` where no `openlog` has been
+/// called, then [`syslog_str`].
+pub(super) fn php_syslog(req: &mut Request, priority: i32, message: &[u8]) {
+    if !req.state::<State>().syslog.opened {
+        let ident = req.ini_get(b"syslog.ident").unwrap_or(b"php").to_vec();
+        let ident = CString::new(ident).unwrap_or_default();
+        let facility = facility(req);
+        php_openlog(req, ident, 0, facility);
+    }
+    syslog_str(req, priority, message);
+}
+
 /// `php_syslog_str` (`Z/main/php_syslog.c:34`) under `syslog.filter`:
 /// `raw` sends the message as it is; otherwise printable ASCII is kept,
 /// bytes from `0x80` up where the filter is not `ascii`, control bytes

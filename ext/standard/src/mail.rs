@@ -1,0 +1,561 @@
+//! `Z/ext/standard/mail.c`: `mail` over `php_mail`, which hands the
+//! message to the `sendmail_path` command as php's `popen(3)` does: the
+//! shell over the command and its extra parameters, in the request's
+//! working directory, the message written to its standard input. The
+//! additional headers are a string or php's array form built by
+//! `php_mail_build_headers`, `mail.log` names a file or `syslog`,
+//! `mail.add_x_header` prepends `X-PHP-Originating-Script`, and
+//! `mail.cr_lf_mode` and `mail.mixed_lf_and_crlf` choose the line
+//! separator, all as main.c declares them.
+// The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
+#![allow(rustdoc::invalid_codeblock_attributes)]
+
+use std::ffi::OsStr;
+use std::io::Write;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::process::ExitStatusExt;
+use std::process::{Command, Stdio};
+
+use php_ext::coerce::value_name;
+use php_ext::decl::FunctionDecl;
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
+use php_ext::request::Request;
+use php_ext::values::{Key, PhpArray, Value, ValueRef};
+
+use crate::argument_count_between;
+use crate::output::Entry;
+use crate::stub::stub;
+use crate::zpp::{ArrayOr, array_or_string, given};
+
+/// `EX_TEMPFAIL`, the one non-zero exit `php_mail` takes as sent.
+const EX_TEMPFAIL: i32 = 75;
+
+/// `LOG_NOTICE`, the priority `php_mail_log_to_syslog` logs at.
+const LOG_NOTICE: i32 = 5;
+
+/// The one native, as the stub declares it.
+///
+/// ```php
+/// echo new ReflectionFunction('mail');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function mail ] {
+///
+///   - Parameters [5] {
+///     Parameter #0 [ <required> string $to ]
+///     Parameter #1 [ <required> string $subject ]
+///     Parameter #2 [ <required> string $message ]
+///     Parameter #3 [ <optional> array|string $additional_headers = [] ]
+///     Parameter #4 [ <optional> string $additional_params = "" ]
+///   }
+///   - Return [ bool ]
+/// }
+/// ```
+pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
+    vec![(
+        stub(
+            "mail(string $to, string $subject, string $message, array|string $additional_headers = [], string $additional_params = \"\"): bool",
+        ),
+        mail as Entry,
+    )]
+}
+
+/// `php_mail_build_headers_check_field_value` (`Z/ext/standard/mail.c:71`):
+/// the error a header's value has, a folded `CRLF` or `LF` followed by a
+/// space or tab being none.
+fn check_field_value(value: &[u8]) -> Option<&'static str> {
+    let at = |i: usize| value.get(i).copied().unwrap_or(0);
+    let mut len = 0;
+    while len < value.len() {
+        match at(len) {
+            b'\r' => {
+                if at(len + 1) != b'\n' {
+                    return Some("contains CR character that is not allowed in the header");
+                }
+                if value.len() - len >= 3 && matches!(at(len + 2), b' ' | b'\t') {
+                    len += 3;
+                    continue;
+                }
+                return Some(
+                    "contains CRLF characters that are used as a line separator and are not allowed in the header",
+                );
+            }
+            b'\n' => {
+                if value.len() - len >= 2 && matches!(at(len + 1), b' ' | b'\t') {
+                    len += 2;
+                    continue;
+                }
+                return Some("contains LF character that is not allowed in the header");
+            }
+            0 => return Some("contains NULL character that is not allowed in the header"),
+            _ => len += 1,
+        }
+    }
+    None
+}
+
+/// `php_mail_build_headers_elem` (`Z/ext/standard/mail.c:133`): one
+/// `Name: value` line, or php's error for the name or the value; an array
+/// value is each of its elements under the name.
+fn build_elem(
+    req: &mut Request,
+    out: &mut Vec<u8>,
+    key: &[u8],
+    value: &Value,
+) -> Result<(), Thrown> {
+    let name = String::from_utf8_lossy(key).into_owned();
+    match value.deref().as_ref() {
+        ValueRef::Str(text) => {
+            if key.iter().any(|&c| !(33..=126).contains(&c) || c == b':') {
+                let message = format!("Header name \"{name}\" contains invalid characters");
+                return Err(throw(req, "ValueError", &message));
+            }
+            if let Some(error) = check_field_value(text.as_bytes()) {
+                let message = format!("Header \"{name}\" {error}");
+                return Err(throw(req, "ValueError", &message));
+            }
+            out.extend_from_slice(key);
+            out.extend_from_slice(b": ");
+            let text = text.as_bytes();
+            out.extend_from_slice(text.split(|c| *c == 0).next().unwrap_or(text));
+            out.extend_from_slice(b"\r\n");
+            Ok(())
+        }
+        ValueRef::Array(array) => build_elems(req, out, key, *array),
+        _ => {
+            let given = value_name(req, &value.deref());
+            let message = format!("Header \"{name}\" must be of type array|string, {given} given");
+            Err(throw(req, "TypeError", &message))
+        }
+    }
+}
+
+/// `php_mail_build_headers_elems` (`Z/ext/standard/mail.c:177`): an
+/// array header's elements, each a string under a numeric key.
+fn build_elems(
+    req: &mut Request,
+    out: &mut Vec<u8>,
+    key: &[u8],
+    array: PhpArray,
+) -> Result<(), Thrown> {
+    let name = String::from_utf8_lossy(key).into_owned();
+    for (element_key, element) in array.snapshot() {
+        if let Key::Str(found) = element_key {
+            let found = String::from_utf8_lossy(found.as_bytes()).into_owned();
+            let message =
+                format!("Header \"{name}\" must only contain numeric keys, \"{found}\" found");
+            return Err(throw(req, "TypeError", &message));
+        }
+        let element = element.deref();
+        if !matches!(element.as_ref(), ValueRef::Str(_)) {
+            let given = value_name(req, &element);
+            let message =
+                format!("Header \"{name}\" must only contain values of type string, {given} found");
+            return Err(throw(req, "TypeError", &message));
+        }
+        build_elem(req, out, key, &element)?;
+    }
+    Ok(())
+}
+
+/// `php_mail_build_headers` (`Z/ext/standard/mail.c:211`): each header
+/// by its name, `To` and `Subject` refused as additional ones, the ones
+/// RFC 2822 allows once refusing an array, and the last `\r\n` taken
+/// off.
+fn build_headers(req: &mut Request, headers: PhpArray) -> Result<Vec<u8>, Thrown> {
+    let mut out = Vec::new();
+    for (key, value) in headers.snapshot() {
+        let key = match key {
+            Key::Str(name) => name.as_bytes().to_vec(),
+            Key::Int(idx) => {
+                let message = format!("Header name cannot be numeric, {idx} given");
+                return Err(throw(req, "TypeError", &message));
+            }
+        };
+        let value = value.deref();
+        let lower = key.to_ascii_lowercase();
+        match lower.as_slice() {
+            b"to" => {
+                return Err(throw(
+                    req,
+                    "ValueError",
+                    "The additional headers cannot contain the \"To\" header",
+                ));
+            }
+            b"subject" => {
+                return Err(throw(
+                    req,
+                    "ValueError",
+                    "The additional headers cannot contain the \"Subject\" header",
+                ));
+            }
+            b"orig-date" | b"from" | b"sender" | b"reply-to" | b"cc" | b"bcc" | b"message-id"
+            | b"references" | b"in-reply-to"
+                if value.as_array().is_some() =>
+            {
+                let target = String::from_utf8_lossy(&lower).into_owned();
+                let message = format!("Header \"{target}\" must be of type string, array given");
+                return Err(throw(req, "TypeError", &message));
+            }
+            _ => build_elem(req, &mut out, &key, &value)?,
+        }
+    }
+    out.truncate(out.len().saturating_sub(2));
+    Ok(out)
+}
+
+/// The `to` and `subject` cleaning of `PHP_FUNCTION(mail)`
+/// (`Z/ext/standard/mail.c:303-334`): trailing whitespace off, then each
+/// control byte a space but a folded `\r\n` and the spaces after it,
+/// read as the C string the value is.
+fn clean(field: &[u8]) -> Vec<u8> {
+    let field = field.split(|c| *c == 0).next().unwrap_or(field);
+    let end = field
+        .iter()
+        .rposition(|c| !matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r'))
+        .map_or(0, |at| at + 1);
+    let mut out = field[..end].to_vec();
+    let at = |out: &[u8], i: usize| out.get(i).copied().unwrap_or(0);
+    let mut i = 0;
+    while i < out.len() {
+        if out[i].is_ascii_control() {
+            if out[i] == b'\r'
+                && at(&out, i + 1) == b'\n'
+                && matches!(at(&out, i + 2), b' ' | b'\t')
+            {
+                i += 2;
+                while matches!(at(&out, i + 1), b' ' | b'\t') {
+                    i += 1;
+                }
+                i += 1;
+                continue;
+            }
+            out[i] = b' ';
+        }
+        i += 1;
+    }
+    out
+}
+
+/// `php_mail_detect_multiple_crlf` (`Z/ext/standard/mail.c:406`).
+fn multiple_crlf(hdr: &[u8]) -> bool {
+    let at = |i: usize| hdr.get(i).copied().unwrap_or(0);
+    let Some(&first) = hdr.first() else {
+        return false;
+    };
+    if !(33..=126).contains(&first) || first == b':' {
+        return true;
+    }
+    let mut i = 0;
+    while at(i) != 0 {
+        match at(i) {
+            b'\r' => {
+                if at(i + 1) == 0
+                    || at(i + 1) == b'\r'
+                    || (at(i + 1) == b'\n' && matches!(at(i + 2), 0 | b'\n' | b'\r'))
+                {
+                    return true;
+                }
+                i += 2;
+            }
+            b'\n' => {
+                if matches!(at(i + 1), 0 | b'\r' | b'\n') {
+                    return true;
+                }
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+    false
+}
+
+/// `php_format_date("d-M-Y H:i:s e", now, 1)` under the default
+/// `date.timezone`, UTC: the stamp `mail.log` lines begin with.
+fn log_date() -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // Howard Hinnant's `civil_from_days`.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    let name = MONTHS
+        .get(usize::try_from(month - 1).unwrap_or(0))
+        .copied()
+        .unwrap_or("Jan");
+    format!(
+        "{day:02}-{name}-{year} {:02}:{:02}:{:02} UTC",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
+}
+
+/// `php_mail` (`Z/ext/standard/mail.c:444`): the log line where
+/// `mail.log` asks for one, the separator, the `X-PHP-Originating-Script`
+/// header, php's refusal of malformed headers, then the command with the
+/// message on its standard input, and its exit status read as php reads
+/// it.
+#[allow(clippy::too_many_lines)] // one C function, kept whole
+fn php_mail(
+    req: &mut Request,
+    to: &[u8],
+    subject: &[u8],
+    message: &[u8],
+    headers: Option<&[u8]>,
+    extra_cmd: Option<&[u8]>,
+) -> Result<bool, Thrown> {
+    let ini = |req: &Request, name: &[u8]| req.ini_get(name).map(<[u8]>::to_vec);
+    let mail_log = ini(req, b"mail.log").filter(|log| !log.is_empty());
+    let file = req.current_file().unwrap_or(b"").to_vec();
+    if let Some(log) = mail_log {
+        let mut line = format!(
+            "mail() on [{}:{}]: To: {} -- Headers: {} -- Subject: {}",
+            String::from_utf8_lossy(&file),
+            req.current_line(),
+            String::from_utf8_lossy(to),
+            String::from_utf8_lossy(headers.unwrap_or_default()),
+            String::from_utf8_lossy(subject)
+        )
+        .into_bytes();
+        if headers.is_some() {
+            for c in &mut line {
+                if matches!(*c, b'\r' | b'\n') {
+                    *c = b' ';
+                }
+            }
+        }
+        if log == b"syslog" {
+            crate::syslog::php_syslog(req, LOG_NOTICE, &line);
+        } else {
+            let mut entry = format!("[{}] ", log_date()).into_bytes();
+            entry.extend_from_slice(&line);
+            entry.push(b'\n');
+            if let Some(stream) = req.open_stream(&log, b"a", false)? {
+                stream.write(req, &entry);
+                stream.close(req);
+            }
+        }
+    }
+    let mode = ini(req, b"mail.cr_lf_mode");
+    let line_sep: &[u8] = match mode.as_deref() {
+        Some(b"lf" | b"mixed" | b"os") => b"\n",
+        _ if req
+            .ini_get(b"mail.mixed_lf_and_crlf")
+            .is_some_and(Request::ini_parse_bool) =>
+        {
+            b"\n"
+        }
+        _ => b"\r\n",
+    };
+    let mut hdr = headers.map(<[u8]>::to_vec);
+    if req
+        .ini_get(b"mail.add_x_header")
+        .is_some_and(Request::ini_parse_bool)
+    {
+        let base = file
+            .rsplit(|c| *c == b'/')
+            .next()
+            .unwrap_or_default()
+            .to_vec();
+        let mut x = format!(
+            "X-PHP-Originating-Script: {}:",
+            crate::pageinfo::getuid(req)
+        )
+        .into_bytes();
+        x.extend_from_slice(&base);
+        if let Some(headers) = hdr.filter(|h| !h.is_empty()) {
+            x.extend_from_slice(line_sep);
+            x.extend_from_slice(&headers);
+        }
+        hdr = Some(x);
+    }
+    if hdr.as_deref().is_some_and(multiple_crlf) {
+        docref(
+            req,
+            Level::Warning,
+            "Multiple or malformed newlines found in additional_header",
+        );
+        return Ok(false);
+    }
+    let sendmail_path = ini(req, b"sendmail_path").unwrap_or_default();
+    let mut command = sendmail_path.clone();
+    if let Some(extra) = extra_cmd {
+        command.push(b' ');
+        command.extend_from_slice(extra);
+    }
+    let child = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(OsStr::from_bytes(&command))
+        .current_dir(req.cwd().0)
+        .env_clear()
+        .envs(
+            req.env_pairs()
+                .iter()
+                .map(|(name, value)| (OsStr::from_bytes(name), OsStr::from_bytes(value))),
+        )
+        .stdin(Stdio::piped())
+        .spawn();
+    let Ok(mut child) = child else {
+        let text = format!(
+            "Could not execute mail delivery program '{}'",
+            String::from_utf8_lossy(&sendmail_path)
+        );
+        docref(req, Level::Warning, &text);
+        return Ok(false);
+    };
+    let mut body = Vec::new();
+    for (field, value) in [(b"To: ".as_slice(), to), (b"Subject: ", subject)] {
+        body.extend_from_slice(field);
+        body.extend_from_slice(value);
+        body.extend_from_slice(line_sep);
+    }
+    if let Some(hdr) = &hdr {
+        body.extend_from_slice(hdr);
+        body.extend_from_slice(line_sep);
+    }
+    body.extend_from_slice(line_sep);
+    let message = message.split(|c| *c == 0).next().unwrap_or(message);
+    if mode.as_deref() == Some(b"lf") {
+        let mut i = 0;
+        while i < message.len() {
+            if message[i] == b'\r' && message.get(i + 1) == Some(&b'\n') {
+                body.push(b'\n');
+                i += 2;
+            } else {
+                body.push(message[i]);
+                i += 1;
+            }
+        }
+    } else {
+        body.extend_from_slice(message);
+    }
+    body.extend_from_slice(line_sep);
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(&body);
+    }
+    let status = match child.wait() {
+        Ok(status) => status,
+        Err(error) => {
+            let code = error.raw_os_error().unwrap_or(0);
+            let text = format!(
+                "Sendmail pclose failed {code} ({})",
+                crate::filestat::strerror(&error)
+            );
+            docref(req, Level::Warning, &text);
+            return Ok(false);
+        }
+    };
+    if let Some(signal) = status.signal() {
+        let text = format!(
+            "Sendmail killed by signal {signal} ({})",
+            crate::ffi::strsignal(signal)
+        );
+        docref(req, Level::Warning, &text);
+        return Ok(false);
+    }
+    let code = status.code().unwrap_or(0);
+    if code != 0 && code != EX_TEMPFAIL {
+        let text = format!("Sendmail exited with non-zero exit code {code}");
+        docref(req, Level::Warning, &text);
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+/// `mail(string $to, string $subject, string $message, array|string $additional_headers = [], string $additional_params = ""): bool`,
+/// `PHP_FUNCTION(mail)` (`Z/ext/standard/mail.c:273`): the three strings
+/// as paths, the headers a string with no NUL, its trailing whitespace
+/// off, or an array built by `php_mail_build_headers`; `to` and `subject`
+/// cleaned of trailing whitespace and control bytes; the extra
+/// parameters, or `mail.force_extra_parameters` over them, through
+/// `escapeshellcmd`'s escape; then `php_mail`.
+///
+/// ```php
+/// var_dump(mail('a@example.com', 's', 'm', "Bad\r\n\r\nX: y"), mail('a@example.com', 's', 'm', " leading"));
+/// foreach ([['To' => 'x'], ['Subject' => 'x'], [1 => 'x'], ['From' => ['a']], ['X' => 1], ['X' => ['k' => 'v']], ['X' => [1]], ['Bad Name' => 'v'], ['X' => "a\rb"], ['X' => "a\nb"], ['X' => "a\r\nb"], ['X' => "a\0b"]] as $headers) {
+///     try { mail('a@example.com', 's', 'm', $headers); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// }
+/// try { mail("a\0b", 's', 'm'); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// try { mail('a', 's', 'm', "x\0y"); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Warning: mail(): Multiple or malformed newlines found in additional_header in %s on line 2
+///
+/// Warning: mail(): Multiple or malformed newlines found in additional_header in %s on line 2
+/// bool(false)
+/// bool(false)
+/// ValueError: The additional headers cannot contain the "To" header
+/// ValueError: The additional headers cannot contain the "Subject" header
+/// TypeError: Header name cannot be numeric, 1 given
+/// TypeError: Header "from" must be of type string, array given
+/// TypeError: Header "X" must be of type array|string, int given
+/// TypeError: Header "X" must only contain numeric keys, "k" found
+/// TypeError: Header "X" must only contain values of type string, int found
+/// ValueError: Header name "Bad Name" contains invalid characters
+/// ValueError: Header "X" contains CR character that is not allowed in the header
+/// ValueError: Header "X" contains LF character that is not allowed in the header
+/// ValueError: Header "X" contains CRLF characters that are used as a line separator and are not allowed in the header
+/// ValueError: Header "X" contains NULL character that is not allowed in the header
+/// mail(): Argument #1 ($to) must not contain any null bytes
+/// mail(): Argument #4 ($additional_headers) must not contain any null bytes
+/// ```
+fn mail(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 3, 5)?;
+    let to = crate::md5::path_argument(req, 1)?;
+    let subject = crate::md5::path_argument(req, 2)?;
+    let message = crate::md5::path_argument(req, 3)?;
+    let headers = match given(req, 4) {
+        Some(_) => match array_or_string(req, 4, false)? {
+            Some(ArrayOr::Other(text)) => {
+                if text.as_bytes().contains(&0) {
+                    return Err(arg_value_error(req, 4, "not contain any null bytes"));
+                }
+                let bytes = text.as_bytes();
+                let end = bytes
+                    .iter()
+                    .rposition(|c| !matches!(c, b' ' | b'\n' | b'\r' | b'\t' | 0x0b | 0))
+                    .map_or(0, |at| at + 1);
+                Some(bytes[..end].to_vec())
+            }
+            Some(ArrayOr::Array(array)) => Some(build_headers(req, array)?),
+            None => None,
+        },
+        None => None,
+    };
+    let extra = match given(req, 5) {
+        Some(_) => Some(crate::md5::path_argument(req, 5)?.as_bytes().to_vec()),
+        None => None,
+    };
+    let forced = req
+        .ini_get(b"mail.force_extra_parameters")
+        .filter(|forced| !forced.is_empty())
+        .map(<[u8]>::to_vec);
+    let extra = match forced.or(extra) {
+        Some(extra) => Some(crate::exec::escape_shell_cmd(req, &extra)?),
+        None => None,
+    };
+    let to = clean(to.as_bytes());
+    let subject = clean(subject.as_bytes());
+    let headers = headers.filter(|h| !h.is_empty());
+    let sent = php_mail(
+        req,
+        &to,
+        &subject,
+        message.as_bytes(),
+        headers.as_deref(),
+        extra.as_deref(),
+    )?;
+    Ok(Value::bool(sent))
+}

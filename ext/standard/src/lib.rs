@@ -65,6 +65,7 @@ mod http;
 mod ini;
 mod levenshtein;
 mod link;
+mod mail;
 mod md5;
 mod metaphone;
 mod microtime;
@@ -258,6 +259,7 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
         assert::natives(),
         pageinfo::natives(),
         syslog::natives(),
+        mail::natives(),
     ]
     .into_iter()
     .flatten()
