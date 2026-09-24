@@ -15,6 +15,11 @@ workspace = true
 [dependencies]
 php_ext = { path = "../../crates/php_ext" }
 
+# timelib, compiled from `lib/`, the sources vendored from php-src's
+# `ext/date/lib` at the pinned tag (design §7.2, §12); no system library.
+[build-dependencies]
+cc = { workspace = true }
+
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
 [dev-dependencies]
 php_ext = { path = "../../crates/php_ext", features = ["test"] }
