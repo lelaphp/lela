@@ -140,6 +140,26 @@ impl PhpString {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    /// `ZSTR_IS_VALID_UTF8`: whether a check already found the bytes to
+    /// be valid UTF-8, which a string forgets when it is written into.
+    /// `false` says only that no check was recorded.
+    #[must_use]
+    pub fn is_valid_utf8(&self) -> bool {
+        self.0.is_valid_utf8()
+    }
+
+    /// `GC_ADD_FLAGS(s, IS_STR_VALID_UTF8)`: record that a check found
+    /// the bytes to be valid UTF-8, so the next reader need not check
+    /// them again, as `pcre` records it after a `/u` match over the whole
+    /// subject. A caller that has not checked every byte must not call
+    /// this. An interned or persistent string is shared beyond the
+    /// request and is left as it is, as php leaves an interned one.
+    pub fn mark_valid_utf8(&self) {
+        if !self.0.is_interned() && !self.0.is_persistent() {
+            self.0.mark_valid_utf8();
+        }
+    }
 }
 
 /// Two strings are equal when their bytes are, `zend_string_equals`.
@@ -666,6 +686,37 @@ impl PhpObject {
     #[must_use]
     pub fn instance_of(&self, req: &Request, class: ClassId) -> bool {
         req.instance_of(self.class(), class)
+    }
+
+    /// `zend_objects_clone_obj` for a class whose objects carry a
+    /// native payload (design §5.4), what that class's own `clone_obj`
+    /// answers: a fresh entry of the same class holding what this one
+    /// holds, one more owner each, as `zend_objects_clone_members`
+    /// copies them, with `payload`, the class's copy of this object's
+    /// own, in the new entry's slot, and the class's `__clone` served
+    /// on it. The copy is the caller's, one owner, and is given up with
+    /// what `__clone` threw. [`Std`](crate::api::abi::Std)'s slot
+    /// refuses such an object, since the heap cannot copy a payload it
+    /// only knows how to drop; this is the door the class copies it
+    /// through.
+    ///
+    /// ```php
+    /// class D extends DateTime { public $n = 1; function __clone() { $this->n = $this->n + 1; } }
+    /// $a = new D('2000-01-01 UTC');
+    /// $b = clone $a;
+    /// var_dump($b->n, $b->format('Y'), $a->n);
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// string(4) "2000"
+    /// int(1)
+    /// ```
+    pub fn clone_with<T: Any + Send>(
+        &self,
+        req: &mut Request,
+        payload: T,
+    ) -> Result<PhpObject, Thrown> {
+        req.clone_members_payload(*self, payload)
     }
 
     /// What a `Closure` carries, for a closure object: its native

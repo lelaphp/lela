@@ -146,6 +146,13 @@ pub(crate) type NativeNew = fn(&mut Heap, u32, u32) -> Result<Obj, Fatal>;
 
 /// One [`NativeNew`], the payload's `Default` into a fresh object of
 /// `class` with `slots` declared property slots.
+/// The `create_object` of a native class of the engine's own whose
+/// objects carry a `T`, as [`ExtensionBuilder::class_payload`] gives an
+/// extension's.
+pub(crate) fn new_payload<T: Any + Send + Default>() -> NativeNew {
+    new_with_payload::<T> as NativeNew
+}
+
 fn new_with_payload<T: Any + Send + Default>(
     heap: &mut Heap,
     class: u32,

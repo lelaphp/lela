@@ -3070,9 +3070,11 @@ pub(crate) fn defined(req: &Request, name: &[u8]) -> bool {
 /// php's compiler emits for `count($a)` and `sizeof($a)` in place of the
 /// call (`zend_compile_func_count`), and the one arm the native of the
 /// same name shares with it: an array is its element count; an object
-/// is served by its `count_elements` handler or its `Countable::count`,
-/// neither of which any class here has yet, so it is the `TypeError`;
-/// and anything else is the `TypeError` too, naming the function as it
+/// is served by its `count_elements` handler, `WeakMap`'s, and
+/// otherwise, where its class implements `Countable`, by its `count()`
+/// method, whose return is read as `zval_get_long` reads it; any other
+/// object is the `TypeError`, and anything else is too, naming the
+/// function as it
 /// was written, `sizeof` where `extended_value` says so, and the value
 /// as `zend_zval_value_name` names it. A variable nothing has written is
 /// the warning and then the error for null.
@@ -3083,6 +3085,17 @@ pub(crate) fn defined(req: &Request, name: &[u8]) -> bool {
 /// ```expect
 /// int(3)
 /// int(3)
+/// ```
+///
+/// ```php
+/// class N implements Countable { function count(): int { return 3; } }
+/// $m = new WeakMap; $k = new stdClass; $m[$k] = 1;
+/// var_dump(count(new N), count($m), sizeof($m));
+/// ```
+/// ```expect
+/// int(3)
+/// int(1)
+/// int(1)
 /// ```
 ///
 /// ```php
@@ -3110,6 +3123,22 @@ pub(crate) fn count(req: &mut Request, value: &Value, sizeof: bool) -> Result<i6
     let value = &value.deref();
     if let Some(array) = value.as_array() {
         return Ok(i64::try_from(array.len()).unwrap_or(i64::MAX));
+    }
+    if let Some(object) = value.as_object().copied() {
+        let table = req.object_handlers(object.heap());
+        if let Some(count) = table.count_elements(req, object)? {
+            return Ok(count);
+        }
+        let class = object.class();
+        if let Some(countable) = req.class_named(b"Countable")
+            && req.instance_of(class, countable)
+            && let Some(method) = req.method_named(class, b"count")
+        {
+            let returned = req.serve_method(method, Some(object), class, &[], &[])?;
+            let count = get_long(req, &returned);
+            req.release(returned);
+            return Ok(count);
+        }
     }
     let function = if sizeof { "sizeof" } else { "count" };
     let name = value_name(req, value);

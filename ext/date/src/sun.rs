@@ -1,0 +1,253 @@
+//! `date_sunrise`, `date_sunset` and `date_sun_info` over timelib's
+//! `astro.c`.
+
+use php_ext::raising::{Thrown, arg_value_error, deprecated};
+use php_ext::request::Request;
+use php_ext::values::{PhpArray, Value};
+
+use crate::args::{
+    count_between, double, long, nullable_double, optional_long, set_str, string_value,
+};
+use crate::ffi::Time;
+use crate::zone::default_zone;
+
+/// `SUNFUNCS_RET_*`.
+const RET_TIMESTAMP: i64 = 0;
+const RET_STRING: i64 = 1;
+const RET_DOUBLE: i64 = 2;
+
+/// `INI_FLT(name)`: `zend_strtod` of the entry, the longest prefix that
+/// reads as a number and zero where none does.
+fn ini_float(req: &Request, name: &[u8]) -> f64 {
+    let text = req.ini_get(name).unwrap_or_default();
+    let text = String::from_utf8_lossy(text);
+    let text = text.trim_start();
+    let mut end = 0;
+    let mut best = 0.0;
+    for (at, _) in text.char_indices().skip(1).chain([(text.len(), ' ')]) {
+        if let Ok(n) = text[..at].parse::<f64>() {
+            best = n;
+            end = at;
+        }
+    }
+    if end == 0 { 0.0 } else { best }
+}
+
+/// `php_do_date_sunrise_sunset(INTERNAL_FUNCTION_PARAM_PASSTHRU, calc_sunset)`.
+fn sunrise_sunset(req: &mut Request, sunset: bool) -> Result<Value, Thrown> {
+    let name = if sunset {
+        "date_sunset"
+    } else {
+        "date_sunrise"
+    };
+    deprecated(
+        req,
+        &format!("Function {name}() is deprecated since 8.1, use date_sun_info() instead"),
+    );
+    count_between(req, 1, 6)?;
+    let time = long(req, 1)?;
+    let format = optional_long(req, 2, RET_STRING)?;
+    let latitude = nullable_double(req, 3)?;
+    let longitude = nullable_double(req, 4)?;
+    let zenith = nullable_double(req, 5)?;
+    let gmt_offset = nullable_double(req, 6)?;
+    let latitude = latitude.unwrap_or_else(|| ini_float(req, b"date.default_latitude"));
+    let longitude = longitude.unwrap_or_else(|| ini_float(req, b"date.default_longitude"));
+    let zenith = zenith.unwrap_or_else(|| {
+        if sunset {
+            ini_float(req, b"date.sunset_zenith")
+        } else {
+            ini_float(req, b"date.sunrise_zenith")
+        }
+    });
+    if ![RET_TIMESTAMP, RET_STRING, RET_DOUBLE].contains(&format) {
+        return Err(arg_value_error(
+            req,
+            2,
+            "be one of SUNFUNCS_RET_TIMESTAMP, SUNFUNCS_RET_STRING, or SUNFUNCS_RET_DOUBLE",
+        ));
+    }
+    let altitude = 90.0 - zenith;
+    if !latitude.is_finite() || !longitude.is_finite() {
+        return Ok(Value::bool(false));
+    }
+    let zone = default_zone(req)?;
+    let mut t = Time::new();
+    t.set_zone_id(zone);
+    // php reads the offset before the time is set, so at the epoch.
+    #[allow(clippy::cast_precision_loss)]
+    let gmt_offset = gmt_offset.unwrap_or_else(|| t.current_offset() as f64 / 3600.0);
+    t.unixtime2local(time);
+    let (rs, h_rise, h_set, rise, set, _) = t.rise_set(longitude, latitude, altitude, true);
+    if rs != 0 {
+        return Ok(Value::bool(false));
+    }
+    if format == RET_TIMESTAMP {
+        return Ok(Value::int(if sunset { set } else { rise }));
+    }
+    let mut n = if sunset { h_set } else { h_rise } + gmt_offset;
+    if !(0.0..=24.0).contains(&n) {
+        n -= (n / 24.0).floor() * 24.0;
+    }
+    if !(0.0..=24.0).contains(&n) {
+        return Ok(Value::bool(false));
+    }
+    if format == RET_STRING {
+        #[allow(clippy::cast_possible_truncation)]
+        let hours = n as i32;
+        #[allow(clippy::cast_possible_truncation)]
+        let minutes = (60.0 * (n - f64::from(hours))) as i32;
+        return string_value(req, format!("{hours:02}:{minutes:02}").as_bytes());
+    }
+    Ok(Value::float(n))
+}
+
+/// `date_sunrise(int $timestamp, int $returnFormat = SUNFUNCS_RET_STRING,
+/// ?float $latitude = null, ?float $longitude = null, ?float $zenith =
+/// null, ?float $utcOffset = null): string|int|float|false`, deprecated
+/// since 8.1.
+///
+/// ```php
+/// date_default_timezone_set('Europe/Amsterdam');
+/// $t = 1700000000;
+/// var_dump(@date_sunrise($t, SUNFUNCS_RET_STRING, 52.37, 4.89), @date_sunrise($t, SUNFUNCS_RET_TIMESTAMP, 52.37, 4.89), @date_sunrise($t, SUNFUNCS_RET_DOUBLE, 52.37, 4.89, 90, 1));
+/// var_dump(date_sunrise($t, SUNFUNCS_RET_STRING, 89.9, 0));
+/// try { @date_sunrise($t, 7); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// string(5) "07:57"
+/// int(1699945056)
+/// float(8.064960453025263)
+///
+/// Deprecated: Constant SUNFUNCS_RET_STRING is deprecated since 8.4, as date_sunrise() and date_sunset() were deprecated in 8.1 in %s on line 5
+///
+/// Deprecated: Function date_sunrise() is deprecated since 8.1, use date_sun_info() instead in %s on line 5
+/// bool(false)
+/// date_sunrise(): Argument #2 ($returnFormat) must be one of SUNFUNCS_RET_TIMESTAMP, SUNFUNCS_RET_STRING, or SUNFUNCS_RET_DOUBLE
+/// ```
+pub(crate) fn date_sunrise(req: &mut Request) -> Result<Value, Thrown> {
+    sunrise_sunset(req, false)
+}
+
+/// `date_sunset(...)`, `date_sunrise`'s twin, deprecated since 8.1.
+///
+/// ```php
+/// date_default_timezone_set('America/New_York');
+/// var_dump(@date_sunset(1700000000, SUNFUNCS_RET_STRING, 40.71, -74.0), @date_sunset(1700000000, SUNFUNCS_RET_TIMESTAMP, 40.71, -74.0), @date_sunset(1700000000));
+/// ```
+/// ```expect
+/// string(5) "16:40"
+/// int(1699998043)
+/// string(5) "09:42"
+/// ```
+pub(crate) fn date_sunset(req: &mut Request) -> Result<Value, Thrown> {
+    sunrise_sunset(req, true)
+}
+
+/// One pair of `date_sun_info`'s rows: `false` for a body always below
+/// the altitude, `true` always above, the two times otherwise.
+fn add_pair(
+    req: &mut Request,
+    array: &mut PhpArray,
+    rs: i32,
+    names: (&[u8], &[u8]),
+    times: (i64, i64),
+) -> Result<(), Thrown> {
+    let (a, b) = match rs {
+        -1 => (Value::bool(false), Value::bool(false)),
+        1 => (Value::bool(true), Value::bool(true)),
+        _ => (Value::int(times.0), Value::int(times.1)),
+    };
+    set_str(req, array, names.0, a)?;
+    set_str(req, array, names.1, b)
+}
+
+/// `date_sun_info(int $timestamp, float $latitude, float $longitude):
+/// array`: sunrise, sunset, transit and the three twilights.
+///
+/// ```php
+/// date_default_timezone_set('UTC');
+/// var_dump(date_sun_info(1700000000, 52.37, 4.89));
+/// var_dump(date_sun_info(1719835200, 78.2, 15.6));
+/// try { date_sun_info(0, INF, 0); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// array(9) {
+///   ["sunrise"]=>
+///   int(1699945169)
+///   ["sunset"]=>
+///   int(1699977009)
+///   ["transit"]=>
+///   int(1699961089)
+///   ["civil_twilight_begin"]=>
+///   int(1699942918)
+///   ["civil_twilight_end"]=>
+///   int(1699979259)
+///   ["nautical_twilight_begin"]=>
+///   int(1699940432)
+///   ["nautical_twilight_end"]=>
+///   int(1699981745)
+///   ["astronomical_twilight_begin"]=>
+///   int(1699938032)
+///   ["astronomical_twilight_end"]=>
+///   int(1699984146)
+/// }
+/// array(9) {
+///   ["sunrise"]=>
+///   bool(true)
+///   ["sunset"]=>
+///   bool(true)
+///   ["transit"]=>
+///   int(1719831695)
+///   ["civil_twilight_begin"]=>
+///   bool(true)
+///   ["civil_twilight_end"]=>
+///   bool(true)
+///   ["nautical_twilight_begin"]=>
+///   bool(true)
+///   ["nautical_twilight_end"]=>
+///   bool(true)
+///   ["astronomical_twilight_begin"]=>
+///   bool(true)
+///   ["astronomical_twilight_end"]=>
+///   bool(true)
+/// }
+/// date_sun_info(): Argument #2 ($latitude) must be finite
+/// ```
+pub(crate) fn date_sun_info(req: &mut Request) -> Result<Value, Thrown> {
+    count_between(req, 3, 3)?;
+    let time = long(req, 1)?;
+    let latitude = double(req, 2)?;
+    let longitude = double(req, 3)?;
+    if !latitude.is_finite() {
+        return Err(arg_value_error(req, 2, "be finite"));
+    }
+    if !longitude.is_finite() {
+        return Err(arg_value_error(req, 3, "be finite"));
+    }
+    let zone = default_zone(req)?;
+    let mut t = Time::new();
+    t.set_zone_id(zone);
+    t.unixtime2local(time);
+    let mut array = PhpArray::new(req)?;
+    let (rs, _, _, rise, set, transit) = t.rise_set(longitude, latitude, -35.0 / 60.0, true);
+    add_pair(req, &mut array, rs, (b"sunrise", b"sunset"), (rise, set))?;
+    set_str(req, &mut array, b"transit", Value::int(transit))?;
+    for (altitude, begin, end) in [
+        (
+            -6.0,
+            &b"civil_twilight_begin"[..],
+            &b"civil_twilight_end"[..],
+        ),
+        (-12.0, b"nautical_twilight_begin", b"nautical_twilight_end"),
+        (
+            -18.0,
+            b"astronomical_twilight_begin",
+            b"astronomical_twilight_end",
+        ),
+    ] {
+        let (rs, _, _, rise, set, _) = t.rise_set(longitude, latitude, altitude, false);
+        add_pair(req, &mut array, rs, (begin, end), (rise, set))?;
+    }
+    Ok(Value::array(array))
+}

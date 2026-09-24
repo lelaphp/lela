@@ -6,7 +6,7 @@
 //! the request holds, and the rest still raise php's `Error` for an
 //! undefined function or class.
 
-use php_unit::decl::ConstExpr;
+use php_unit::decl::{ConstExpr, Name};
 
 use crate::api::abi::{Callable, PropertyRead};
 use crate::api::raising::{Thrown, throw};
@@ -465,6 +465,42 @@ pub fn call_method(
         ));
     };
     req.serve_method(function, Some(*object), class, arguments, &[])
+}
+
+/// A `zend_fcall_info_cache` filled by hand with a method the caller
+/// already holds, which is what `reflection_method_invoke` hands
+/// `zend_call_known_function` (`Z/ext/reflection/php_reflection.c:3543`):
+/// the method `class` declares or inherits under `name`, `class` as
+/// the called scope, and `this` as the receiver. Nothing is resolved
+/// through `zend_is_callable_ex`, so no visibility is held against the
+/// caller's scope and no receiver is asked for; a caller that owes php
+/// those refusals makes them first. A name `class` neither declares
+/// nor inherits is no callee. The callable holds no value of its own
+/// and is served while the caller holds the receiver, through
+/// [`call_named`] or [`call_array`].
+#[must_use]
+pub fn known_method(
+    req: &Request,
+    class: ClassId,
+    name: &Name,
+    this: Option<PhpObject>,
+) -> Option<Callable> {
+    let lowered = name.0.to_ascii_lowercase();
+    let function = req.method_named(class, &lowered)?;
+    let spelled = format!(
+        "{}::{}",
+        req.class_name(class),
+        String::from_utf8_lossy(&name.0)
+    );
+    Some(Callable::of(
+        Value::null(),
+        spelled.as_bytes(),
+        Target::Method {
+            function,
+            scope: class,
+            this,
+        },
+    ))
 }
 
 /// `new $class(...$arguments)`: [`new_object`] and then the class's

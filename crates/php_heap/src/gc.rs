@@ -37,6 +37,10 @@ pub(crate) const PERSISTENT: u32 = 1 << 7;
 pub(crate) const PERMANENT: u32 = 1 << 8;
 /// `IS_STR_VALID_UTF8`: the bytes were checked once and are valid UTF-8.
 pub(crate) const VALID_UTF8: u32 = 1 << 9;
+/// `IS_OBJ_WEAKLY_REFERENCED`, which is `GC_PERSISTENT` on an object
+/// (`Z/Zend/zend_types.h:859`): a `WeakReference` or a `WeakMap` names
+/// the object, so its free tells the engine before the members go.
+pub(crate) const OBJ_WEAKLY_REFERENCED: u32 = PERSISTENT;
 /// `IS_OBJ_DESTRUCTOR_CALLED`: `zend_objects_store_del` served the
 /// destructor, and serves it no second time.
 pub(crate) const OBJ_DESTRUCTOR_CALLED: u32 = 1 << 8;

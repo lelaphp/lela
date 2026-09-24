@@ -67,6 +67,13 @@ Heap::close_resources
 Heap::free_block
 Heap::free_object_storage
 Heap::interned
+Heap::iterator_add
+Heap::iterator_del
+Heap::iterator_lead
+Heap::iterator_pos
+Heap::iterator_pos_ex
+Heap::iterator_set_lead
+Heap::iterator_set_pos
 Heap::memory_limit
 Heap::memory_peak
 Heap::memory_real_peak
@@ -109,6 +116,7 @@ HeapHooks::free_resource
 HeapHooks::gc_children
 HeapHooks::heap
 HeapHooks::out_of_memory
+HeapHooks::weakrefs_notify
 Host
 Host::Transfer
 Host::suspensions
@@ -134,9 +142,11 @@ Obj::id
 Obj::is_lazy
 Obj::is_recursive
 Obj::is_same
+Obj::is_weakly_referenced
 Obj::properties
 Obj::protect
 Obj::refcount
+Obj::set_weakly_referenced
 Obj::slot
 Obj::slot_ref
 Obj::slots

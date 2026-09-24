@@ -1,0 +1,13 @@
+{
+  "commit": "882bbb2",
+  "corpus": "php-8.5.9 dd6e76cc",
+  "engine": "target/release/php md5 0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+  "verdicts": {
+    "phpt:php-src/ext/fixture/tests/diverged.phpt": "diverged",
+    "phpt:php-src/ext/fixture/tests/fixed.phpt": "fail",
+    "phpt:php-src/ext/fixture/tests/kept.phpt": "pass",
+    "phpt:php-src/ext/fixture/tests/planted.phpt": "pass",
+    "phpt:php-src/ext/fixture/tests/skipped.phpt": "skip",
+    "phpt:php-src/ext/fixture/tests/still.phpt": "fail"
+  }
+}

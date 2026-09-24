@@ -20,8 +20,11 @@
 //! growing it is an allocation the request is held to.
 //!
 //! The iterators php keeps beside a table for `foreach` by reference
-//! (`nIteratorsCount`, `EG(ht_iterators)`) are not here yet; the
-//! internal pointer is, and every move of it is php's.
+//! and over an object (`nIteratorsCount`, `EG(ht_iterators)`) are
+//! [`crate::iterators`]'s, and every write here that moves a position,
+//! the rehash that compacts, the delete that trims `nNumUsed`, the copy
+//! and the destroy, moves theirs as php's does; the internal pointer is
+//! here, and every move of it is php's.
 
 // A position, a size and a mask are `uint32_t` in php and here, and a
 // hash slot's index is the low word of the hash; the narrowing casts
@@ -37,6 +40,7 @@ use std::ptr::NonNull;
 
 use crate::gc::{self, Refcounted};
 use crate::hooks::{Fatal, HeapHooks};
+use crate::iterators::Iterators;
 use crate::mm::Mm;
 use crate::sort::zend_sort;
 use crate::string::Str;
@@ -70,6 +74,45 @@ pub(crate) trait Allocate {
         copy: usize,
         size: usize,
     ) -> Result<NonNull<u8>, Fatal>;
+    /// `EG(ht_iterators)`, which a rehash moves: the request's list
+    /// beside its heap, and none for a constant array, which no walk
+    /// registers against.
+    fn iterators(&mut self) -> Option<&mut Iterators> {
+        None
+    }
+}
+
+/// The request's allocator and its iterator list together, which is
+/// what a write to a request's array is handed: the allocation a write
+/// may make and the positions a rehash it causes moves.
+pub(crate) struct Tables<'h> {
+    mm: &'h mut Mm,
+    iterators: &'h mut Iterators,
+}
+
+impl Allocate for Tables<'_> {
+    fn alloc(&mut self, size: usize) -> Result<NonNull<u8>, Fatal> {
+        self.mm.alloc(size)
+    }
+
+    unsafe fn realloc(
+        &mut self,
+        at: NonNull<u8>,
+        copy: usize,
+        size: usize,
+    ) -> Result<NonNull<u8>, Fatal> {
+        // SAFETY: the caller's, handed on to the heap the block is from.
+        unsafe { self.mm.realloc(at, copy, size) }
+    }
+
+    unsafe fn free(&mut self, at: NonNull<u8>) {
+        // SAFETY: the caller's, handed on to the heap the block is from.
+        unsafe { self.mm.free(at) };
+    }
+
+    fn iterators(&mut self) -> Option<&mut Iterators> {
+        Some(self.iterators)
+    }
 }
 
 impl Allocate for Mm {
@@ -233,7 +276,7 @@ pub(crate) fn index_del(a: Arr, index: i64) -> Option<Zval> {
     if !a.is_packed() {
         a.unlink(idx);
     }
-    Some(a.del_at(idx))
+    Some(a.del_at(idx, None))
 }
 
 /// `pefree` over a [`persistent_array`]: the data, then the header.
@@ -452,6 +495,23 @@ impl Arr {
     #[must_use]
     pub fn table_size(&self) -> u32 {
         self.header().table_size.get()
+    }
+
+    /// `HT_FLAGS(ht)`, the whole `u.flags` word: php's `u.v.flags` in
+    /// its low byte, and the iterator count in its third byte.
+    pub(crate) fn flags(self) -> u32 {
+        self.header().flags.get()
+    }
+
+    pub(crate) fn set_flags(self, flags: u32) {
+        self.header().flags.set(flags);
+    }
+
+    /// `ht->u.v.flags = flags`: the low byte written and the iterator
+    /// count beside it left standing ("Don't overwrite iterator count",
+    /// `Z/Zend/zend_hash.c:161`).
+    fn set_flag_byte(self, flags: u32) {
+        self.set_flags((self.flags() & !0xff) | flags);
     }
 
     /// `HT_IS_PACKED`: the slots are the integer keys `0..nNumUsed`.
@@ -901,7 +961,7 @@ impl Arr {
         let at = mm.alloc(Arr::packed_size(self.table_size()))?;
         self.header().table_mask.set(MIN_MASK);
         self.set_data_addr(at);
-        self.header().flags.set(PACKED | STATIC_KEYS);
+        self.set_flag_byte(PACKED | STATIC_KEYS);
         self.hash_reset();
         Ok(())
     }
@@ -912,7 +972,7 @@ impl Arr {
         let at = mm.alloc(Arr::data_size(size))?;
         self.header().table_mask.set(Arr::size_to_mask(size));
         self.set_data_addr(at);
-        self.header().flags.set(STATIC_KEYS);
+        self.set_flag_byte(STATIC_KEYS);
         self.hash_reset();
         Ok(())
     }
@@ -944,7 +1004,7 @@ impl Arr {
             // now that the buckets hold the elements.
             unsafe { mm.free(old) };
         }
-        self.rehash();
+        self.rehash(mm.iterators());
         Ok(())
     }
 
@@ -980,7 +1040,7 @@ impl Arr {
         let elements = self.header().num_elements.get();
         let size = self.table_size();
         if used > elements + (elements >> 5) {
-            self.rehash();
+            self.rehash(mm.iterators());
         } else if size < MAX_SIZE {
             let grown = size + size;
             let old = self.data_addr();
@@ -997,7 +1057,7 @@ impl Arr {
                 // are copied.
                 unsafe { mm.free(old) };
             }
-            self.rehash();
+            self.rehash(mm.iterators());
         } else {
             return Err(overflow(size.wrapping_mul(2), BUCKET + HASH));
         }
@@ -1013,16 +1073,22 @@ impl Arr {
         self.write_hash(n_index, idx);
     }
 
-    /// `zend_hash_rehash`: the chains rebuilt over the buckets, and the
-    /// tombstones compacted out with the internal pointer moved past the
-    /// ones it stood on or after.
-    fn rehash(self) {
+    /// `zend_hash_rehash` (`Z/Zend/zend_hash.c:1334`): the chains rebuilt
+    /// over the buckets, and the tombstones compacted out with the
+    /// internal pointer moved past the ones it stood on or after; every
+    /// iterator on the table moved with the bucket it stood at, and the
+    /// ones past the end moved to the new end, so an append after the
+    /// rehash is walked.
+    fn rehash(self, mut iterators: Option<&mut Iterators>) {
         let header = self.header();
         if header.num_elements.get() == 0 {
             if !self.is_uninitialized() {
                 header.num_used.set(0);
                 self.hash_reset();
                 header.internal_pointer.set(0);
+                if let Some(iterators) = iterators {
+                    iterators.reset(self);
+                }
             }
             return;
         }
@@ -1032,6 +1098,11 @@ impl Arr {
         while i < used {
             if self.read_bucket(i).val.is_undef() {
                 let mut j = i;
+                let walked = self.has_iterators();
+                let mut iter_pos = match iterators.as_deref_mut() {
+                    Some(iterators) if walked => iterators.lower_pos(self, i + 1),
+                    _ => u32::MAX,
+                };
                 i += 1;
                 while i < used {
                     let b = self.read_bucket(i);
@@ -1042,11 +1113,26 @@ impl Arr {
                         if pointer > j && pointer <= i {
                             header.internal_pointer.set(j);
                         }
+                        if walked
+                            && i >= iter_pos
+                            && let Some(iterators) = iterators.as_deref_mut()
+                        {
+                            loop {
+                                iterators.update(self, iter_pos, j);
+                                iter_pos = iterators.lower_pos(self, iter_pos + 1);
+                                if iter_pos >= i {
+                                    break;
+                                }
+                            }
+                        }
                         j += 1;
                     }
                     i += 1;
                 }
                 header.num_used.set(j);
+                if let Some(iterators) = iterators {
+                    iterators.update(self, used, j);
+                }
                 return;
             }
             self.link(i);
@@ -1057,7 +1143,7 @@ impl Arr {
     /// `_zend_hash_del_el_ex` after the unlink: one element fewer, the
     /// trailing tombstones dropped off `nNumUsed`, the internal pointer
     /// clamped, and the value handed back for release.
-    fn del_at(self, idx: u32) -> Zval {
+    fn del_at(self, idx: u32, iterators: Option<&mut Iterators>) -> Zval {
         let header = self.header();
         header.num_elements.set(header.num_elements.get() - 1);
         let z = self.value_at(idx);
@@ -1081,6 +1167,9 @@ impl Arr {
             header
                 .internal_pointer
                 .set(header.internal_pointer.get().min(used));
+            if let Some(iterators) = iterators {
+                iterators.clamp_max(self, used);
+            }
         }
         z
     }
@@ -1226,7 +1315,7 @@ impl crate::Heap {
     /// reads after `[$x, 'k' => 1]` is this table's size, not the packed one's.
     pub fn array_mixed(&mut self, size: u32) -> Result<Arr, Fatal> {
         let a = self.array_sized(size)?;
-        a.real_init_mixed(&mut self.mm)?;
+        a.real_init_mixed(&mut self.tables())?;
         Ok(a)
     }
 
@@ -1236,8 +1325,8 @@ impl crate::Heap {
         let a = self.array_sized(u32::try_from(entries.len()).unwrap_or(u32::MAX))?;
         for (key, z) in entries {
             match *key {
-                Key::Long(n) => write_long(&mut self.mm, a, n, *z, Write::Update)?,
-                Key::Str(s) => write_str(&mut self.mm, a, s, *z)?,
+                Key::Long(n) => write_long(&mut self.tables(), a, n, *z, Write::Update)?,
+                Key::Str(s) => write_str(&mut self.tables(), a, s, *z)?,
             };
         }
         a.header().gc.add_flags(gc::IMMUTABLE);
@@ -1308,14 +1397,23 @@ impl crate::Heap {
         z: Zval,
         write: Write,
     ) -> Result<Written, Fatal> {
-        write_long(&mut self.mm, a, index, z, write)
+        write_long(&mut self.tables(), a, index, z, write)
     }
 
     /// `_zend_hash_add_or_update_i` with `HASH_UPDATE`: the key is the
     /// bucket's own from here, one more owner unless it is interned; the
     /// value replaced, if one was, handed back to release.
     fn array_write_str(&mut self, a: Arr, key: Str, z: Zval) -> Result<Written, Fatal> {
-        write_str(&mut self.mm, a, key, z)
+        write_str(&mut self.tables(), a, key, z)
+    }
+
+    /// The allocator and the iterator list a write to a request's
+    /// array is handed.
+    fn tables(&mut self) -> Tables<'_> {
+        Tables {
+            mm: &mut self.mm,
+            iterators: &mut self.iterators,
+        }
     }
 }
 
@@ -1465,7 +1563,7 @@ impl crate::Heap {
                 hooks.heap().release_string(k);
             }
         }
-        let old = a.del_at(idx);
+        let old = a.del_at(idx, Some(&mut hooks.heap().iterators));
         Heap::release(hooks, old);
         true
     }
@@ -1500,12 +1598,24 @@ impl crate::Heap {
                 self.addref(z);
                 target.write_slot(i, z);
             }
+            self.iterators.dup(a, target);
             return Ok(target);
         }
         target.real_init_mixed(&mut self.mm)?;
-        header
-            .flags
-            .set(source.flags.get() & (PACKED | UNINITIALIZED | STATIC_KEYS));
+        target.set_flag_byte(source.flags.get() & (PACKED | UNINITIALIZED | STATIC_KEYS));
+        self.iterators.dup(a, target);
+        let walked = target.has_iterators();
+        if walked {
+            // `target->nNumUsed = source->nNumUsed`, so the positions the
+            // copies were given read against the source's bounds while
+            // the walk below compacts.
+            header.num_used.set(used);
+        }
+        // `zend_array_dup_elements` past the first hole: `iter_pos` is the
+        // lowest copy at or past the source position being moved, and
+        // `None` until a hole has been met, since nothing before one
+        // moves.
+        let mut iter_pos: Option<u32> = None;
         header
             .internal_pointer
             .set(if pointer < used { pointer } else { 0 });
@@ -1513,6 +1623,9 @@ impl crate::Heap {
         for i in 0..used {
             let b = a.read_bucket(i);
             if b.val.is_undef() {
+                if walked && iter_pos.is_none() {
+                    iter_pos = Some(self.iterators.lower_pos(target, i + 1));
+                }
                 continue;
             }
             self.addref(b.val);
@@ -1523,6 +1636,20 @@ impl crate::Heap {
             target.link(idx);
             if pointer == i {
                 header.internal_pointer.set(idx);
+            }
+            // An iterator copy at a position the compaction moves is
+            // moved with its bucket.
+            if let Some(mut lowest) = iter_pos
+                && i >= lowest
+            {
+                loop {
+                    self.iterators.update(target, lowest, idx);
+                    lowest = self.iterators.lower_pos(target, lowest + 1);
+                    if lowest >= i {
+                        break;
+                    }
+                }
+                iter_pos = Some(lowest);
             }
             idx += 1;
         }
@@ -1608,7 +1735,7 @@ impl crate::Heap {
             return Ok(());
         }
         if a.is_packed() {
-            a.packed_to_hash(&mut hooks.heap().mm)?;
+            a.packed_to_hash(&mut hooks.heap().tables())?;
         }
         let mut entries: Vec<SortEntry> = (0..a.num_used())
             .map(|i| a.read_bucket(i))
@@ -1649,14 +1776,14 @@ impl crate::Heap {
         }
         header.internal_pointer.set(0);
         if !renumber {
-            a.rehash();
+            a.rehash(Some(&mut hooks.heap().iterators));
             return Ok(());
         }
         header.next_free.set(i64::from(used));
         let old = a.data_addr();
         let new = heap.mm.alloc(Arr::packed_size(a.table_size()))?;
         let slots: Vec<Zval> = (0..used).map(|i| a.read_bucket(i).val).collect();
-        header.flags.set(header.flags.get() | PACKED | STATIC_KEYS);
+        a.set_flag_byte((header.flags.get() & 0xff) | PACKED | STATIC_KEYS);
         header.table_mask.set(MIN_MASK);
         a.set_data_addr(new);
         for (i, val) in slots.into_iter().enumerate() {
@@ -1693,6 +1820,7 @@ impl crate::Heap {
             }
         }
         let heap = hooks.heap();
+        heap.iterators.remove(a);
         if let Some(data) = a.data_addr() {
             // SAFETY: the data was this heap's and every element in it is
             // released.
@@ -2244,5 +2372,128 @@ mod tests {
         assert_eq!(a.next_free(), 2);
         assert!(a.is_packed());
         Heap::release(&mut nothing, Zval::array(a));
+    }
+
+    /// A hash of `n` string-keyed elements `k0`, `k1`, … holding their
+    /// index.
+    fn hash_of(nothing: &mut Nothing, n: i64) -> Option<Arr> {
+        let a = nothing.heap.array().ok()?;
+        for i in 0..n {
+            let key = nothing.heap.intern(format!("k{i}").as_bytes()).ok()?;
+            Heap::array_update(nothing, a, Key::Str(key), Zval::long(i)).ok()?;
+        }
+        Some(a)
+    }
+
+    /// `zend_hash_rehash` with iterators (`Z/Zend/zend_hash.c:1395-1434`):
+    /// the compaction a full table makes moves every registered
+    /// position with the bucket it stood at, and one past the end to the
+    /// new end, while the table's count says how many name it.
+    #[test]
+    fn a_rehash_moves_every_iterator_with_its_bucket() {
+        let _alone = alone();
+        let mut nothing = Nothing::new();
+        let Some(a) = hash_of(&mut nothing, 8) else {
+            return;
+        };
+        let at_five = nothing.heap.iterator_add(a, 5);
+        let at_end = nothing.heap.iterator_add(a, 8);
+        assert_eq!(a.iterators_count(), 2);
+        for k in [b"k1", b"k2"] {
+            let Ok(key) = nothing.heap.intern(k) else {
+                return;
+            };
+            assert!(Heap::array_del(&mut nothing, a, Key::Str(key)));
+        }
+        assert_eq!(
+            nothing.heap.iterator_pos(at_five, a),
+            5,
+            "a delete moves no position"
+        );
+        assert!(matches!(
+            nothing.heap.array_append(a, Zval::long(9)),
+            Ok(true)
+        ));
+        assert_eq!(
+            nothing.heap.iterator_pos(at_five, a),
+            3,
+            "k5 now stands at 3"
+        );
+        assert_eq!(
+            a.entry_at(3).and_then(|(_, z)| z.as_long()),
+            Some(5),
+            "the bucket the iterator names is the one it stood at"
+        );
+        assert_eq!(
+            nothing.heap.iterator_pos(at_end, a),
+            6,
+            "the old end is the new end"
+        );
+        nothing.heap.iterator_del(at_five);
+        nothing.heap.iterator_del(at_end);
+        assert_eq!(a.iterators_count(), 0);
+        Heap::release(&mut nothing, Zval::array(a));
+    }
+
+    /// `_zend_hash_del_el_ex`'s trim of `nNumUsed` clamps every iterator
+    /// to the new end (`zend_hash_iterators_clamp_max`), and an emptied
+    /// table's rehash puts them all at zero.
+    #[test]
+    fn a_trimmed_end_clamps_the_iterators_past_it() {
+        let _alone = alone();
+        let mut nothing = Nothing::new();
+        let Some(a) = hash_of(&mut nothing, 3) else {
+            return;
+        };
+        let past = nothing.heap.iterator_add(a, 3);
+        let Ok(key) = nothing.heap.intern(b"k2") else {
+            return;
+        };
+        assert!(Heap::array_del(&mut nothing, a, Key::Str(key)));
+        assert_eq!(nothing.heap.iterator_pos(past, a), 2);
+        nothing.heap.iterator_del(past);
+        Heap::release(&mut nothing, Zval::array(a));
+    }
+
+    /// `zend_array_dup_ht_iterators`: a copy on write carries a copy of
+    /// every iterator on the source, on the iterator's ring, so the walk
+    /// that finds the copy in its variable goes on at the copy's
+    /// position (`zend_hash_iterator_find_copy_pos`), compacted with the
+    /// copy's buckets; and a table destroyed under an iterator poisons
+    /// it rather than leave it naming freed memory.
+    #[test]
+    fn a_copy_carries_the_iterators_and_a_destroy_poisons_them() {
+        let _alone = alone();
+        let mut nothing = Nothing::new();
+        let Some(a) = hash_of(&mut nothing, 4) else {
+            return;
+        };
+        let walk = nothing.heap.iterator_add(a, 3);
+        let Ok(key) = nothing.heap.intern(b"k0") else {
+            return;
+        };
+        assert!(Heap::array_del(&mut nothing, a, Key::Str(key)));
+        a.addref();
+        let Ok(copy) = nothing.heap.separate(a) else {
+            return;
+        };
+        assert!(!copy.is_same(a));
+        assert_eq!(copy.iterators_count(), 1, "the copy is walked too");
+        assert_eq!(nothing.heap.iterator_pos(walk, copy), 2, "k3, compacted");
+        assert_eq!(a.iterators_count(), 0, "and the source no longer");
+        let Ok((pos, held)) = nothing.heap.iterator_pos_ex(walk, copy) else {
+            return;
+        };
+        assert!(held.is_same(copy) && pos == 2);
+        Heap::release(&mut nothing, Zval::array(a));
+        Heap::release(&mut nothing, Zval::array(copy));
+        nothing.heap.iterator_del(walk);
+        let Some(b) = hash_of(&mut nothing, 1) else {
+            return;
+        };
+        let again = nothing.heap.iterator_add(b, 0);
+        assert_eq!(again, walk, "the freed slot is the next one given");
+        nothing.heap.iterator_del(again);
+        Heap::release(&mut nothing, Zval::array(b));
     }
 }

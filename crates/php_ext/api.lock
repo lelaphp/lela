@@ -89,6 +89,7 @@ call::fetch_constant
 call::initialize_lazy
 call::instantiate
 call::iterate
+call::known_method
 call::lookup_class
 call::lookup_function
 call::new_lazy_ghost
@@ -410,6 +411,7 @@ values::PhpArray::unset
 values::PhpObject
 values::PhpObject::as_value
 values::PhpObject::class
+values::PhpObject::clone_with
 values::PhpObject::closure
 values::PhpObject::closure_bound
 values::PhpObject::debug_info
@@ -442,7 +444,9 @@ values::PhpString
 values::PhpString::as_bytes
 values::PhpString::filled
 values::PhpString::is_empty
+values::PhpString::is_valid_utf8
 values::PhpString::len
+values::PhpString::mark_valid_utf8
 values::PhpString::new
 values::PhpString::product
 values::Resource

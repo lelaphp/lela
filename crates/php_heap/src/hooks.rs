@@ -70,4 +70,14 @@ pub trait HeapHooks {
     fn free_reference(&mut self, r: Ref) {
         let _ = r;
     }
+    /// `zend_weakrefs_notify` (`Z/Zend/zend_weakrefs.c:212`): the object
+    /// is being freed, its destructor served and its members not yet
+    /// released, and every `WeakReference` naming it is cleared and
+    /// every `WeakMap` entry keyed by it removed, the entry's value
+    /// released there. Called only for an object carrying
+    /// `IS_OBJ_WEAKLY_REFERENCED`, which a heap that hands out no weak
+    /// reference never sets, so it has a body of its own to do nothing.
+    fn weakrefs_notify(&mut self, obj: Obj) {
+        let _ = obj;
+    }
 }

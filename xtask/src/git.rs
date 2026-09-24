@@ -127,6 +127,53 @@ pub fn tree_hash(root: &Path, scope: &Path) -> Result<String> {
     Ok(blob_id(manifest.as_bytes()))
 }
 
+/// One object id over the tracked files under `paths`, taken as
+/// [`tree_hash`] is, from each file's blob id and path: their contents
+/// on disk when `at` is `None`, and as the commit `at` holds them
+/// otherwise, so a checkout of `at` with nothing under `paths` written
+/// since hashes to the id `at` does. Tracked files alone, since an
+/// untracked one the build reads is reached by an edit to a tracked one,
+/// and an untracked `.DS_Store` would otherwise leave a clean checkout
+/// matching no commit. A tracked file gone from disk is listed as gone.
+pub(crate) fn tracked_hash(root: &Path, paths: &[&str], at: Option<&str>) -> Result<String> {
+    let mut listing = Vec::new();
+    if let Some(commit) = at {
+        let mut args = vec!["ls-tree", "-r", "-z", "--full-tree", commit, "--"];
+        args.extend(paths);
+        for entry in git(root, &args, None)?
+            .split('\0')
+            .filter(|e| !e.is_empty())
+        {
+            let (head, path) = entry
+                .split_once('\t')
+                .with_context(|| format!("git ls-tree wrote {entry:?}"))?;
+            if let [_, "blob", id] = head.split(' ').collect::<Vec<_>>()[..] {
+                listing.push((path.to_owned(), id.to_owned()));
+            }
+        }
+    } else {
+        let mut args = vec!["ls-files", "-z", "--cached", "--"];
+        args.extend(paths);
+        for path in git(root, &args, None)?
+            .split('\0')
+            .filter(|p| !p.is_empty())
+        {
+            let id = fs::read(root.join(path)).map_or_else(|_| "gone".to_owned(), |b| blob_id(&b));
+            listing.push((path.to_owned(), id));
+        }
+    }
+    listing.sort_unstable();
+    listing.dedup();
+    let mut text = String::new();
+    for (path, id) in &listing {
+        text.push_str(id);
+        text.push(' ');
+        text.push_str(path);
+        text.push('\n');
+    }
+    Ok(blob_id(text.as_bytes()))
+}
+
 /// The id git gives a blob: SHA-1 over `blob <len>\0<content>`.
 pub fn blob_id(content: &[u8]) -> String {
     let mut hash = sha1_smol::Sha1::new();

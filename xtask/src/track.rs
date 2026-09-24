@@ -481,7 +481,7 @@ pub(crate) fn short(commit: &str) -> &str {
 
 /// The main worktree of the repository `root` is in: the first entry of
 /// `git worktree list`, the path git prints, which is canonical.
-fn main_worktree(root: &Path) -> Result<PathBuf> {
+pub(crate) fn main_worktree(root: &Path) -> Result<PathBuf> {
     worktrees(root)?
         .into_iter()
         .next()

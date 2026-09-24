@@ -80,15 +80,15 @@ third-engine-design.md
 
 | seam | lock | items | ceiling | reading |
 |---|---|---|---|---|
-| heap | heap.lock | 238 |  | pass |
+| heap | heap.lock | 248 |  | pass |
 | unit | unit.lock | 48 |  | pass |
 | ops | ops.lock | 209 |  | pass |
-| api | api.lock | 483 | 560 | pass |
+| api | api.lock | 487 | 560 | pass |
 | sapi | sapi.lock | 6 |  | pass |
 | tier | tier.lock |  |  | skip |
 | harness | xtask.lock | 329 |  | pass |
 
-<!-- /computed in=a828ef526f3c1412293300e138772111bc23a984f5a35c342ac3fa215d3f503b out=f00345cf665cfd4bfadedcfb73161a27e9b66b45f306ab2ed7b7e5d7fca217b2 -->
+<!-- /computed in=e9bf5aa92be7a37bd736c57600e3251311b8a9829e506d938928ad1a5f1594c3 out=6aa0ce40e0970d05bdac5f0371c0b3ba52dec097e41353146a5afea570a46881 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
@@ -116,7 +116,7 @@ third-engine-design.md
 | harness.self |  | deny | fail | Harness configuration, the oracle pin and the divergence registry are edited by a person. |
 | divergence.reason |  | check | no reading | A divergence row with status accepted has a reason a person wrote; done fails while an open row touches the scope (harness §4.3). |
 
-<!-- /computed in=db6054a82a724d876ca1fff972397600b4e3af007aaa56461f3bf09cd59b0c57 out=d6cfa66b48e0d88b4fae122326e9f4668c3c2476e09c957a868ffd770a7cd767 -->
+<!-- /computed in=09357a5360495a4fef062111f3f4c4dd60d5f2e9958df9d4b4559204b2a4d564 out=d6cfa66b48e0d88b4fae122326e9f4668c3c2476e09c957a868ffd770a7cd767 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -153,7 +153,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=1b63718cdf3e576388b3463c2cf052b36431ba37285a083d3b82107dc8b1fad8 out=61da392a23ffd98faceaf334c37191699fc7318a1a7cc61623e3bc4381b59c40 -->
+<!-- /computed in=388be3eff8d35faa18df68412950c24b8c943d8421feea6984fed5c07a23ffb7 out=61da392a23ffd98faceaf334c37191699fc7318a1a7cc61623e3bc4381b59c40 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .
