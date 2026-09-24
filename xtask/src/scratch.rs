@@ -134,6 +134,63 @@ impl Tree {
     }
 }
 
+/// `cargo` stood in at `dir/cargo`, and the `PATH` that finds it first.
+///
+/// `worktree add`, `track new` and `track sync` each end in `cargo build
+/// -p xtask` in the checkout they lay down or move, and a scratch clone
+/// has no `target/` for that build to start from: every test through one
+/// of them compiled the harness and all its dependencies cold, two
+/// minutes apiece on CI's runner and most of the harness's test time.
+/// What those tests hold is the command around the build, so the
+/// stand-in answers `build -p xtask` by laying down `target/debug/xtask`
+/// in its working directory as a shell file that runs `xtask`, the binary
+/// under test, rooted at that directory: what a real build there would
+/// answer for, in the time a file takes to write. `cargo xtask …`, which
+/// `scripts/worktree-add.sh` and `worktree-retire.sh` fall back to in a
+/// clone with no build and always call from its root, runs that binary
+/// rooted there in the same way. Any other `cargo` call goes to the
+/// `cargo` this process was started by. The one test that holds the
+/// build itself, the seeded worktree's, runs without it.
+pub fn cargo(dir: &Path, xtask: &Path) -> Result<std::ffi::OsString> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let cargo = std::env::var_os("CARGO").context("no CARGO to hand other calls on to")?;
+    let (xtask, cargo) = (
+        xtask.display().to_string(),
+        Path::new(&cargo).display().to_string(),
+    );
+    if xtask.contains('\'') || cargo.contains('\'') {
+        anyhow::bail!("a quote in {xtask} or {cargo}, which the stand-in does not spell");
+    }
+    // A scratch tree's path is canonical, and `pwd -P` is the spelling a
+    // real build's root would have.
+    let body = format!(
+        "#!/bin/sh\n\
+         if [ \"$*\" = 'build -p xtask' ]; then\n\
+         \x20   mkdir -p target/debug || exit 1\n\
+         \x20   printf '#!/bin/sh\\nexec %s --root %s \"$@\"\\n' \"'{xtask}'\" \"'$(pwd -P)'\" > target/debug/xtask || exit 1\n\
+         \x20   exec chmod +x target/debug/xtask\n\
+         fi\n\
+         if [ \"$1\" = xtask ]; then\n\
+         \x20   shift\n\
+         \x20   exec '{xtask}' --root \"$(pwd -P)\" \"$@\"\n\
+         fi\n\
+         exec '{cargo}' \"$@\"\n"
+    );
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("creating the stand-in's directory {}", dir.display()))?;
+    let file = dir.join("cargo");
+    std::fs::write(&file, body)
+        .with_context(|| format!("writing the cargo stand-in {}", file.display()))?;
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755))
+        .with_context(|| format!("marking the cargo stand-in {} executable", file.display()))?;
+    let mut paths = vec![dir.to_path_buf()];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    std::env::join_paths(paths).context("joining the stand-in's directory onto PATH")
+}
+
 /// The lock beside `tree`, opened and taken.
 ///
 /// A lock that will not come says another live process is working at this

@@ -218,6 +218,7 @@ scratch::KEEP
 scratch::Tree
 scratch::Tree::new
 scratch::Tree::path
+scratch::cargo
 status::render
 status::session
 steer::STEERABLE
