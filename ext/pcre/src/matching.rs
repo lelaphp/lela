@@ -668,34 +668,30 @@ fn do_match(req: &mut Request, global: bool) -> Result<Value, Thrown> {
             &format!("be greater than {}", i64::MIN),
         ));
     }
-    let matches = if wants { Some(3) } else { None };
-    match_impl(req, &pattern, subject, matches, global, flags, offset)
-}
-
-/// Where the match's array goes: the argument that is `$matches`.
-fn assign_matches(req: &mut Request, position: Option<u32>, array: PhpArray) {
-    match position {
-        Some(position) => crate::assign_ref(req, position, array.to_value()),
-        None => req.release(array.to_value()),
+    // `zend_try_array_init`: `$matches` is `[]` before anything else.
+    if wants {
+        let empty = PhpArray::new(req)?;
+        crate::assign_ref(req, 3, empty.to_value());
     }
+    let (value, matches) = match_impl(req, &pattern, subject, wants, global, flags, offset)?;
+    if let Some(matches) = matches {
+        crate::assign_ref(req, 3, matches.to_value());
+    }
+    Ok(value)
 }
 
 /// `php_pcre_match_impl`: the count of matches, or `false` with the
-/// error code set; `$matches` written at `matches` where the call gave one.
+/// error code set, and where `wants` asks for them the groups, as
+/// `$matches` holds them.
 pub(super) fn match_impl(
     req: &mut Request,
     pattern: &Pattern,
     subject_string: PhpString,
-    matches: Option<u32>,
+    wants: bool,
     global: bool,
     flags: i64,
     offset: i64,
-) -> Result<Value, Thrown> {
-    // `zend_try_array_init`: `$matches` is `[]` before anything else.
-    if let Some(position) = matches {
-        let empty = PhpArray::new(req)?;
-        assign_matches(req, Some(position), empty);
-    }
+) -> Result<(Value, Option<PhpArray>), Thrown> {
     let mut order = if global { PATTERN_ORDER } else { 0 };
     if flags & 0xff != 0 {
         order = flags & 0xff;
@@ -713,11 +709,11 @@ pub(super) fn match_impl(
     };
     if start > len {
         exec_error(req, ffi::PCRE2_ERROR_BADOFFSET);
-        return Ok(Value::bool(false));
+        return Ok((Value::bool(false), None));
     }
     set_error(req, NO_ERROR);
     let Some(mut scratch) = Scratch::take(req, pattern) else {
-        return Ok(Value::bool(false));
+        return Ok((Value::bool(false), None));
     };
     let from_start = start == 0;
     let outcome = matches_loop(
@@ -726,27 +722,25 @@ pub(super) fn match_impl(
         &mut scratch,
         subject_string,
         &mut start,
-        matches.is_some(),
+        wants,
         global,
         order,
         flags,
     );
     scratch.give_back(req);
     let (count, out) = outcome?;
-    if let Some(out) = out {
-        assign_matches(req, matches, out);
-    }
-    match count {
+    let value = match count {
         Some(count) if error_code(req) == NO_ERROR => {
             // The library checked every byte from offset zero under `/u`,
             // or the string already said they were valid.
             if pattern.utf && from_start {
                 subject_string.mark_valid_utf8();
             }
-            Ok(Value::int(count))
+            Value::int(count)
         }
-        _ => Ok(Value::bool(false)),
-    }
+        _ => Value::bool(false),
+    };
+    Ok((value, out))
 }
 
 /// The loop of `php_pcre_match_impl`: how many matched, `None` for the

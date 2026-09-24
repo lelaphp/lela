@@ -12,6 +12,8 @@
 //! cache of immutable values, [`pattern::Patterns`], and the match data,
 //! `mctx` and `PCRE_G(error_code)` are the request's,
 //! [`State`]. The `unsafe` the library needs is `src/ffi/`'s alone.
+//! Beyond `extension()` the crate exports [`Regex`], the compiled-pattern
+//! face ext/spl and ext/filter read (design §4.10).
 #![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -28,8 +30,11 @@
 mod ffi;
 mod matching;
 mod pattern;
+mod regex;
 mod replace;
 mod split;
+
+pub use regex::Regex;
 
 use php_ext::abi::{Callable, Extension, ExtensionBuilder};
 use php_ext::coerce::{callable_checked, coerce_param, value_name};

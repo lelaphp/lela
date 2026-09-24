@@ -135,7 +135,7 @@ pub(crate) fn preg_split(req: &mut Request) -> Result<Value, Thrown> {
 
 /// `php_pcre_split_impl`.
 #[allow(clippy::too_many_lines)]
-fn split_impl(
+pub(super) fn split_impl(
     req: &mut Request,
     pattern: &Pattern,
     bytes: &[u8],

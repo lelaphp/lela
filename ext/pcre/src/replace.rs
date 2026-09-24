@@ -32,7 +32,7 @@ enum Replaced {
 
 /// `size_t limit` from a `zend_long`: `-1`, and every other negative,
 /// is no limit.
-fn limit_of(limit: i64) -> usize {
+pub(super) fn limit_of(limit: i64) -> usize {
     usize::try_from(limit).unwrap_or(usize::MAX)
 }
 
@@ -212,8 +212,20 @@ fn replace_one(
     let Some(pattern) = compiled(req, regex) else {
         return Ok(None);
     };
+    replace_impl(req, &pattern, subject, replacement, limit, count)
+}
+
+/// `php_pcre_replace_impl`: one compiled pattern over one subject.
+pub(super) fn replace_impl(
+    req: &mut Request,
+    pattern: &Pattern,
+    subject: PhpString,
+    replacement: &[u8],
+    limit: usize,
+    count: &mut usize,
+) -> Result<Option<PhpString>, Thrown> {
     let bytes = subject.as_bytes();
-    let replaced = replace_loop(req, &pattern, bytes, limit, count, |_, scratch, n, out| {
+    let replaced = replace_loop(req, pattern, bytes, limit, count, |_, scratch, n, out| {
         expand(replacement, bytes, scratch, n, out);
         Ok(())
     })?;
