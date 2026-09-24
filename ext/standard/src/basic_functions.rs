@@ -60,6 +60,22 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
         ),
         (stub("get_include_path(): string|false"), get_include_path),
         (
+            stub("getservbyname(string $service, string $protocol): int|false"),
+            getservbyname,
+        ),
+        (
+            stub("getservbyport(int $port, string $protocol): string|false"),
+            getservbyport,
+        ),
+        (
+            stub("getprotobyname(string $protocol): int|false"),
+            getprotobyname,
+        ),
+        (
+            stub("getprotobynumber(int $protocol): string|false"),
+            getprotobynumber,
+        ),
+        (
             stub(
                 "parse_ini_file(string $filename, bool $process_sections = false, int $scanner_mode = INI_SCANNER_NORMAL): array|false",
             ),
@@ -561,4 +577,93 @@ fn parse_ini_file(req: &mut Request) -> Result<Value, Thrown> {
     stream.close(req);
     let name = filename.as_bytes().to_vec();
     parse_ini(req, &bytes, &name, sections, mode)
+}
+
+/// `getservbyname(string $service, string $protocol): int|false`,
+/// `PHP_FUNCTION(getservbyname)` (`Z/ext/standard/basic_functions.c:2030`):
+/// the `port` `/etc/services` gives the `service` under the protocol,
+/// `getservbyname(3)`'s, or `false`.
+///
+/// ```php
+/// var_dump(getservbyname('http', 'tcp'), getservbyname('domain', 'udp'), getservbyname('nope', 'tcp'), getservbyname('http', ''));
+/// ```
+/// ```expect
+/// int(80)
+/// int(53)
+/// bool(false)
+/// bool(false)
+/// ```
+fn getservbyname(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 2, 2)?;
+    let name = path_argument(req, 1)?;
+    let proto = path_argument(req, 2)?;
+    Ok(crate::ffi::service_port(name.as_bytes(), proto.as_bytes())
+        .map_or_else(|| Value::bool(false), |port| Value::int(i64::from(port))))
+}
+
+/// `getservbyport(int $port, string $protocol): string|false`,
+/// `PHP_FUNCTION(getservbyport)` (`Z/ext/standard/basic_functions.c:2069`):
+/// the `service` name `getservbyport(3)` gives the `port`, cut to sixteen
+/// bits as php's `(unsigned short)` cast cuts it, or `false`.
+///
+/// ```php
+/// var_dump(getservbyport(80, 'tcp'), getservbyport(65536 + 22, 'tcp'), getservbyport(80, 'nope'));
+/// ```
+/// ```expect
+/// string(4) "http"
+/// string(3) "ssh"
+/// bool(false)
+/// ```
+fn getservbyport(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 2, 2)?;
+    let port = long_argument(req, 1)?;
+    let proto = path_argument(req, 2)?;
+    let port = u16::from_le_bytes([port.to_le_bytes()[0], port.to_le_bytes()[1]]);
+    match crate::ffi::service_name(port, proto.as_bytes()) {
+        Some(name) => string_value(req, &name),
+        None => Ok(Value::bool(false)),
+    }
+}
+
+/// `getprotobyname(string $protocol): int|false`,
+/// `PHP_FUNCTION(getprotobyname)` (`Z/ext/standard/basic_functions.c:2098`):
+/// `/etc/protocols`' number for the name, or `false`.
+///
+/// ```php
+/// var_dump(getprotobyname('tcp'), getprotobyname('icmp'), getprotobyname('nope'));
+/// ```
+/// ```expect
+/// int(6)
+/// int(1)
+/// bool(false)
+/// ```
+fn getprotobyname(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 1, 1)?;
+    let name = path_argument(req, 1)?;
+    Ok(crate::ffi::protocol_number(name.as_bytes())
+        .map_or_else(|| Value::bool(false), |n| Value::int(i64::from(n))))
+}
+
+/// `getprotobynumber(int $protocol): string|false`,
+/// `PHP_FUNCTION(getprotobynumber)` (`Z/ext/standard/basic_functions.c:2119`):
+/// the name for the number, cut to an `int`, or `false`.
+///
+/// ```php
+/// var_dump(getprotobynumber(17), getprotobynumber(6), getprotobynumber(99999));
+/// ```
+/// ```expect
+/// string(3) "udp"
+/// string(3) "tcp"
+/// bool(false)
+/// ```
+fn getprotobynumber(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 1, 1)?;
+    let number = long_argument(req, 1)?;
+    // `(int)proto`: the low 32 bits.
+    #[allow(clippy::cast_possible_truncation)]
+    let number = number as i32;
+    match crate::ffi::protocol_name(number) {
+        Some(name) => string_value(req, &name),
+        None => Ok(Value::bool(false)),
+    }
 }

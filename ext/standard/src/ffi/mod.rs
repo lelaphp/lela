@@ -238,3 +238,68 @@ pub(super) fn strsignal(signal: i32) -> String {
     let text = unsafe { std::ffi::CStr::from_ptr(text) };
     text.to_string_lossy().into_owned()
 }
+
+/// A C string the C library owns, copied out, or `None` for null.
+fn owned(text: *const libc::c_char) -> Option<Vec<u8>> {
+    if text.is_null() {
+        return None;
+    }
+    // SAFETY: `text` is a non-null, NUL-terminated string the call just
+    // answered, read before any other call could replace it.
+    let text = unsafe { std::ffi::CStr::from_ptr(text) };
+    Some(text.to_bytes().to_vec())
+}
+
+/// `ntohs(getservbyname(name, proto)->s_port)`.
+pub(super) fn service_port(name: &[u8], proto: &[u8]) -> Option<u16> {
+    let (name, proto) = (CString::new(name).ok()?, CString::new(proto).ok()?);
+    // SAFETY: both strings are NUL-terminated and outlive the call, which
+    // answers null or a pointer to the C library's own `servent`.
+    let entry = unsafe { libc::getservbyname(name.as_ptr(), proto.as_ptr()) };
+    if entry.is_null() {
+        return None;
+    }
+    // SAFETY: `entry` is the non-null `servent` just answered.
+    let port = unsafe { (*entry).s_port };
+    let port = u16::from_ne_bytes([port.to_ne_bytes()[0], port.to_ne_bytes()[1]]);
+    Some(u16::from_be(port))
+}
+
+/// `getservbyport(htons(port), proto)->s_name`.
+pub(super) fn service_name(port: u16, proto: &[u8]) -> Option<Vec<u8>> {
+    let proto = CString::new(proto).ok()?;
+    let port = i32::from(port.to_be());
+    // SAFETY: `proto` is NUL-terminated and outlives the call, which
+    // answers null or a pointer to the C library's own `servent`.
+    let entry = unsafe { libc::getservbyport(port, proto.as_ptr()) };
+    if entry.is_null() {
+        return None;
+    }
+    // SAFETY: `entry` is the non-null `servent` just answered.
+    owned(unsafe { (*entry).s_name })
+}
+
+/// `getprotobyname(name)->p_proto`.
+pub(super) fn protocol_number(name: &[u8]) -> Option<i32> {
+    let name = CString::new(name).ok()?;
+    // SAFETY: `name` is NUL-terminated and outlives the call, which
+    // answers null or a pointer to the C library's own `protoent`.
+    let entry = unsafe { libc::getprotobyname(name.as_ptr()) };
+    if entry.is_null() {
+        return None;
+    }
+    // SAFETY: `entry` is the non-null `protoent` just answered.
+    Some(unsafe { (*entry).p_proto })
+}
+
+/// `getprotobynumber(number)->p_name`.
+pub(super) fn protocol_name(number: i32) -> Option<Vec<u8>> {
+    // SAFETY: the call takes a number and answers null or a pointer to
+    // the C library's own `protoent`.
+    let entry = unsafe { libc::getprotobynumber(number) };
+    if entry.is_null() {
+        return None;
+    }
+    // SAFETY: `entry` is the non-null `protoent` just answered.
+    owned(unsafe { (*entry).p_name })
+}
