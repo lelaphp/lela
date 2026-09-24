@@ -112,7 +112,6 @@ fn local_offset(t: &Time) -> Offset {
             offset: t.z + t.dst * 3600,
             is_dst: t.dst != 0,
             abbr: t.tz_abbr().to_vec(),
-            changed_at: 0,
         },
         ZONETYPE_OFFSET => {
             let o = t.z;
@@ -126,7 +125,6 @@ fn local_offset(t: &Time) -> Offset {
                     ((o % 3600) / 60).abs()
                 )
                 .into_bytes(),
-                changed_at: 0,
             }
         }
         ZONETYPE_ID => match t.zone() {
@@ -142,7 +140,6 @@ fn blank_offset() -> Offset {
         offset: 0,
         is_dst: false,
         abbr: Vec::new(),
-        changed_at: 0,
     }
 }
 
@@ -734,7 +731,6 @@ fn php_strftime(req: &mut Request, gmt: bool) -> Result<Value, Thrown> {
             offset: 0,
             is_dst: false,
             abbr: b"GMT".to_vec(),
-            changed_at: 0,
         }
     } else {
         let zone = default_zone(req)?;

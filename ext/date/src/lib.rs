@@ -26,14 +26,19 @@
 )]
 // The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
-// The binding's items the later natives of #656 read, before they land.
-#![allow(dead_code)]
 
 mod args;
+mod classes;
+mod datetime;
 mod ffi;
 mod format;
+mod interval;
+mod obj;
 mod parse;
+mod period;
 mod sun;
+mod timezone;
+mod tzdb;
 mod zone;
 
 use std::collections::HashMap;
@@ -48,7 +53,7 @@ use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::Value;
 
-use crate::args::{d, function, nullable, p, union};
+use crate::args::{class, d, function, nullable, p, str_default, union};
 use crate::ffi::{Errors, Tzdb, Zone};
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
@@ -78,7 +83,7 @@ type Entry = fn(&mut Request) -> Result<Value, Thrown>;
 /// bool(true)
 /// ```
 pub fn extension() -> Extension {
-    ExtensionBuilder::default()
+    classes::register(ExtensionBuilder::default())
         .ini(ini())
         .constants(constants())
         .functions(functions())
@@ -220,6 +225,16 @@ fn null_int(name: &str) -> Parameter {
     d(name, nullable(Type::Int), ConstExpr::Null)
 }
 
+/// `?DateTimeZone $timezone = null`.
+fn null_tz() -> Parameter {
+    d("timezone", nullable(class("DateTimeZone")), ConstExpr::Null)
+}
+
+/// `$object` of a class, the first parameter of the procedural twins.
+fn obj(class_name: &str) -> Parameter {
+    p("object", class(class_name))
+}
+
 /// `date_sunrise` and `date_sunset`, deprecated since 8.1.
 fn sunrise_decl(name: &str) -> FunctionDecl {
     let null_float = |name: &str| d(name, nullable(Type::Float), ConstExpr::Null);
@@ -331,6 +346,46 @@ fn functions() -> Vec<(FunctionDecl, Entry)> {
         ),
         (
             function(
+                "date_create",
+                vec![d("datetime", Type::String, str_default("now")), null_tz()],
+                Some(union(vec![class("DateTime"), Type::False])),
+            ),
+            datetime::date_create,
+        ),
+        (
+            function(
+                "date_create_immutable",
+                vec![d("datetime", Type::String, str_default("now")), null_tz()],
+                Some(union(vec![class("DateTimeImmutable"), Type::False])),
+            ),
+            datetime::date_create_immutable,
+        ),
+        (
+            function(
+                "date_create_from_format",
+                vec![
+                    p("format", Type::String),
+                    p("datetime", Type::String),
+                    null_tz(),
+                ],
+                Some(union(vec![class("DateTime"), Type::False])),
+            ),
+            datetime::date_create_from_format,
+        ),
+        (
+            function(
+                "date_create_immutable_from_format",
+                vec![
+                    p("format", Type::String),
+                    p("datetime", Type::String),
+                    null_tz(),
+                ],
+                Some(union(vec![class("DateTimeImmutable"), Type::False])),
+            ),
+            datetime::date_create_immutable_from_format,
+        ),
+        (
+            function(
                 "date_parse",
                 vec![p("datetime", Type::String)],
                 Some(Type::Array),
@@ -344,6 +399,243 @@ fn functions() -> Vec<(FunctionDecl, Entry)> {
                 Some(Type::Array),
             ),
             parse::date_parse_from_format,
+        ),
+        (
+            function(
+                "date_get_last_errors",
+                vec![],
+                Some(union(vec![Type::Array, Type::False])),
+            ),
+            datetime::date_get_last_errors,
+        ),
+        (
+            function(
+                "date_format",
+                vec![obj("DateTimeInterface"), p("format", Type::String)],
+                Some(Type::String),
+            ),
+            datetime::date_format_fn,
+        ),
+        (
+            function(
+                "date_modify",
+                vec![obj("DateTime"), p("modifier", Type::String)],
+                Some(union(vec![class("DateTime"), Type::False])),
+            ),
+            datetime::date_modify,
+        ),
+        (
+            function(
+                "date_add",
+                vec![obj("DateTime"), p("interval", class("DateInterval"))],
+                Some(class("DateTime")),
+            ),
+            datetime::date_add,
+        ),
+        (
+            function(
+                "date_sub",
+                vec![obj("DateTime"), p("interval", class("DateInterval"))],
+                Some(class("DateTime")),
+            ),
+            datetime::date_sub,
+        ),
+        (
+            function(
+                "date_timezone_get",
+                vec![obj("DateTimeInterface")],
+                Some(union(vec![class("DateTimeZone"), Type::False])),
+            ),
+            datetime::date_timezone_get,
+        ),
+        (
+            function(
+                "date_timezone_set",
+                vec![obj("DateTime"), p("timezone", class("DateTimeZone"))],
+                Some(class("DateTime")),
+            ),
+            datetime::date_timezone_set,
+        ),
+        (
+            function(
+                "date_offset_get",
+                vec![obj("DateTimeInterface")],
+                Some(Type::Int),
+            ),
+            datetime::date_offset_get,
+        ),
+        (
+            function(
+                "date_diff",
+                vec![
+                    p("baseObject", class("DateTimeInterface")),
+                    p("targetObject", class("DateTimeInterface")),
+                    d("absolute", Type::Bool, ConstExpr::Bool(false)),
+                ],
+                Some(class("DateInterval")),
+            ),
+            datetime::date_diff,
+        ),
+        (
+            function(
+                "date_time_set",
+                vec![
+                    obj("DateTime"),
+                    p("hour", Type::Int),
+                    p("minute", Type::Int),
+                    d("second", Type::Int, ConstExpr::Long(0)),
+                    d("microsecond", Type::Int, ConstExpr::Long(0)),
+                ],
+                Some(class("DateTime")),
+            ),
+            datetime::date_time_set,
+        ),
+        (
+            function(
+                "date_date_set",
+                vec![
+                    obj("DateTime"),
+                    p("year", Type::Int),
+                    p("month", Type::Int),
+                    p("day", Type::Int),
+                ],
+                Some(class("DateTime")),
+            ),
+            datetime::date_date_set,
+        ),
+        (
+            function(
+                "date_isodate_set",
+                vec![
+                    obj("DateTime"),
+                    p("year", Type::Int),
+                    p("week", Type::Int),
+                    d("dayOfWeek", Type::Int, ConstExpr::Long(1)),
+                ],
+                Some(class("DateTime")),
+            ),
+            datetime::date_isodate_set,
+        ),
+        (
+            function(
+                "date_timestamp_set",
+                vec![obj("DateTime"), p("timestamp", Type::Int)],
+                Some(class("DateTime")),
+            ),
+            datetime::date_timestamp_set,
+        ),
+        (
+            function(
+                "date_timestamp_get",
+                vec![obj("DateTimeInterface")],
+                Some(Type::Int),
+            ),
+            datetime::date_timestamp_get,
+        ),
+        (
+            function(
+                "timezone_open",
+                vec![p("timezone", Type::String)],
+                Some(union(vec![class("DateTimeZone"), Type::False])),
+            ),
+            timezone::timezone_open,
+        ),
+        (
+            function(
+                "timezone_name_get",
+                vec![obj("DateTimeZone")],
+                Some(Type::String),
+            ),
+            timezone::timezone_name_get,
+        ),
+        (
+            function(
+                "timezone_name_from_abbr",
+                vec![
+                    p("abbr", Type::String),
+                    d("utcOffset", Type::Int, ConstExpr::Long(-1)),
+                    d("isDST", Type::Int, ConstExpr::Long(-1)),
+                ],
+                Some(union(vec![Type::String, Type::False])),
+            ),
+            tzdb::timezone_name_from_abbr,
+        ),
+        (
+            function(
+                "timezone_offset_get",
+                vec![
+                    obj("DateTimeZone"),
+                    p("datetime", class("DateTimeInterface")),
+                ],
+                Some(Type::Int),
+            ),
+            timezone::timezone_offset_get,
+        ),
+        (
+            function(
+                "timezone_transitions_get",
+                vec![
+                    obj("DateTimeZone"),
+                    d(
+                        "timestampBegin",
+                        Type::Int,
+                        ConstExpr::Constant(Name(b"PHP_INT_MIN".as_slice().into())),
+                    ),
+                    d("timestampEnd", Type::Int, ConstExpr::Long(2_147_483_647)),
+                ],
+                Some(union(vec![Type::Array, Type::False])),
+            ),
+            timezone::timezone_transitions_get,
+        ),
+        (
+            function(
+                "timezone_location_get",
+                vec![obj("DateTimeZone")],
+                Some(union(vec![Type::Array, Type::False])),
+            ),
+            timezone::timezone_location_get,
+        ),
+        (
+            function(
+                "timezone_identifiers_list",
+                vec![
+                    d(
+                        "timezoneGroup",
+                        Type::Int,
+                        ConstExpr::ClassConstant {
+                            class: Name(b"DateTimeZone".as_slice().into()),
+                            name: Name(b"ALL".as_slice().into()),
+                        },
+                    ),
+                    d("countryCode", nullable(Type::String), ConstExpr::Null),
+                ],
+                Some(Type::Array),
+            ),
+            tzdb::timezone_identifiers_list,
+        ),
+        (
+            function("timezone_abbreviations_list", vec![], Some(Type::Array)),
+            tzdb::timezone_abbreviations_list,
+        ),
+        (
+            function("timezone_version_get", vec![], Some(Type::String)),
+            tzdb::timezone_version_get,
+        ),
+        (
+            function(
+                "date_interval_create_from_date_string",
+                vec![p("datetime", Type::String)],
+                Some(union(vec![class("DateInterval"), Type::False])),
+            ),
+            interval::date_interval_create_from_date_string,
+        ),
+        (
+            function(
+                "date_interval_format",
+                vec![obj("DateInterval"), p("format", Type::String)],
+                Some(Type::String),
+            ),
+            interval::date_interval_format,
         ),
         (
             function(

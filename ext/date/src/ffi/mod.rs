@@ -58,6 +58,16 @@ fn c_string(bytes: &[u8]) -> CString {
     CString::new(&bytes[..end]).unwrap_or_default()
 }
 
+/// The bytes with the NUL after them that a `zend_string` always has:
+/// timelib is handed a length, but its format parser and its interval
+/// scanner also stop at the terminator.
+fn terminated(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len() + 1);
+    out.extend_from_slice(bytes);
+    out.push(0);
+    out
+}
+
 /// `timelib_day_of_week`.
 pub(super) fn day_of_week(y: i64, m: i64, d: i64) -> i64 {
     sys::timelib_day_of_week(y, m, d)
@@ -88,25 +98,12 @@ pub(super) fn valid_date(y: i64, m: i64, d: i64) -> bool {
     sys::timelib_valid_date(y, m, d) != 0
 }
 
-/// `timelib_valid_time`.
-pub(super) fn valid_time(h: i64, i: i64, s: i64) -> bool {
-    sys::timelib_valid_time(h, i, s) != 0
-}
-
 /// `timelib_isoweek_from_date`: the ISO week and its year.
 pub(super) fn isoweek_from_date(y: i64, m: i64, d: i64) -> (i64, i64) {
     let (mut iw, mut iy) = (0, 0);
     // SAFETY: both out-pointers are locals the call writes and nothing else.
     unsafe { sys::timelib_isoweek_from_date(y, m, d, &raw mut iw, &raw mut iy) };
     (iw, iy)
-}
-
-/// `timelib_date_from_isodate`: the calendar date of an ISO date.
-pub(super) fn date_from_isodate(iy: i64, iw: i64, id: i64) -> (i64, i64, i64) {
-    let (mut y, mut m, mut d) = (0, 0, 0);
-    // SAFETY: the three out-pointers are locals the call writes.
-    unsafe { sys::timelib_date_from_isodate(iy, iw, id, &raw mut y, &raw mut m, &raw mut d) };
-    (y, m, d)
 }
 
 /// The bundled timezone database, `timezonedb_builtin`: data compiled into
@@ -223,7 +220,6 @@ pub(crate) struct Offset {
     pub offset: i32,
     pub is_dst: bool,
     pub abbr: Vec<u8>,
-    pub changed_at: i64,
 }
 
 impl Zone {
@@ -255,11 +251,6 @@ impl Zone {
         bytes_of(self.info().name)
     }
 
-    /// `tz->bc`: whether the zone is a backwards-compatible alias.
-    pub(crate) fn bc(&self) -> bool {
-        self.info().bc != 0
-    }
-
     /// `tz->location`.
     pub(crate) fn location(&self) -> Location {
         let loc = &self.info().location;
@@ -277,10 +268,18 @@ impl Zone {
         }
     }
 
-    /// Whether the zone carries a POSIX string for the years past its
-    /// last change of offset.
+    /// Whether the zone carries a POSIX string with a daylight-saving
+    /// rule for the years past its last change of offset, php's
+    /// `posix_info && posix_info->dst_end`.
     pub(crate) fn has_posix(&self) -> bool {
-        !self.info().posix_info.is_null()
+        let posix = self.info().posix_info;
+        if posix.is_null() {
+            return false;
+        }
+        // SAFETY: a non-null `posix_info` is the string the parse built
+        // for this zone, alive as long as the zone.
+        let posix = unsafe { &*posix };
+        !posix.dst_end.is_null()
     }
 
     /// `tz->bit64.timecnt` transitions: their times and the index of the
@@ -336,7 +335,6 @@ impl Zone {
                 offset: 0,
                 is_dst: false,
                 abbr: Vec::new(),
-                changed_at: 0,
             };
         }
         // SAFETY: timelib answered an initialised offset it allocated.
@@ -345,7 +343,6 @@ impl Zone {
             offset: o.offset,
             is_dst: o.is_dst != 0,
             abbr: bytes_of(o.abbr).to_vec(),
-            changed_at: o.changed_at,
         };
         // SAFETY: the offset is ours and read above; nothing holds it.
         unsafe { sys::timelib_time_offset_dtor(raw) };
@@ -372,7 +369,6 @@ impl Zone {
 /// One message of a `timelib_error_container`, copied out.
 #[derive(Debug, Clone)]
 pub(crate) struct Message {
-    pub code: i32,
     pub position: i32,
     pub character: u8,
     pub text: Vec<u8>,
@@ -403,7 +399,6 @@ impl Errors {
             messages
                 .iter()
                 .map(|m| Message {
-                    code: m.error_code,
                     position: m.position,
                     character: m.character.to_ne_bytes()[0],
                     text: bytes_of(m.message).to_vec(),
@@ -568,13 +563,14 @@ impl Time {
     /// has for it that keeps the zone: set from the abbreviation and the
     /// fields restored.
     pub(crate) fn set_abbr(&mut self, abbr: &[u8]) {
-        let (z, dst, zone_type) = (self.z, self.dst, self.zone_type);
+        let (z, dst, zone_type, have_zone) = (self.z, self.dst, self.zone_type, self.have_zone);
         let zone = self.zone.clone();
         let info = self.tz_info;
         self.set_timezone_from_abbr(i64::from(z), abbr, dst);
         self.z = z;
         self.dst = dst;
         self.zone_type = zone_type;
+        self.have_zone = have_zone;
         self.tz_info = info;
         self.zone = zone;
     }
@@ -633,12 +629,6 @@ impl Time {
         // SAFETY: two live times; the relative time answered is ours.
         let raw = unsafe { sys::timelib_diff(self.ptr(), other.ptr()) };
         take_rel(raw)
-    }
-
-    /// `timelib_diff_days(one, two)`.
-    pub(crate) fn diff_days(&self, other: &Time) -> i64 {
-        // SAFETY: two live times, read only.
-        i64::from(unsafe { sys::timelib_diff_days(self.ptr(), other.ptr()) })
     }
 
     fn arith(
@@ -713,12 +703,14 @@ impl Time {
     /// wrapper is `timelib_parse_tzfile` itself, whose zone the parse
     /// hands back in `tz_info` and [`Time::sync`] adopts.
     pub(crate) fn strtotime(s: &[u8]) -> (Time, Errors) {
+        let text = terminated(s);
         let mut errors: *mut sys::ErrorContainer = ptr::null_mut();
-        // SAFETY: the bytes and their length, a local for the container,
-        // the static database and a wrapper of the signature timelib asks.
+        // SAFETY: the bytes, NUL-terminated, and their length, a local
+        // for the container, the database and a wrapper of the signature
+        // timelib asks.
         let raw = unsafe {
             sys::timelib_strtotime(
-                s.as_ptr().cast(),
+                text.as_ptr().cast(),
                 s.len(),
                 &raw mut errors,
                 Tzdb::builtin().ptr(),
@@ -731,13 +723,15 @@ impl Time {
     /// `timelib_parse_from_format(format, s, len, &errors, ...)`.
     pub(crate) fn parse_from_format(format: &[u8], s: &[u8]) -> (Time, Errors) {
         let format = c_string(format);
+        let text = terminated(s);
         let mut errors: *mut sys::ErrorContainer = ptr::null_mut();
-        // SAFETY: a NUL-terminated format, the bytes and their length, a
-        // local for the container, the static database and the wrapper.
+        // SAFETY: a NUL-terminated format, the bytes, NUL-terminated, and
+        // their length, a local for the container, the database and the
+        // wrapper.
         let raw = unsafe {
             sys::timelib_parse_from_format(
                 format.as_ptr(),
-                s.as_ptr().cast(),
+                text.as_ptr().cast(),
                 s.len(),
                 &raw mut errors,
                 Tzdb::builtin().ptr(),
@@ -797,6 +791,7 @@ pub(crate) struct IsoInterval {
 
 /// `timelib_strtointerval(s, len, &b, &e, &p, &r, &errors)`.
 pub(super) fn strtointerval(s: &[u8]) -> IsoInterval {
+    let text = terminated(s);
     let mut begin: *mut TimeFields = ptr::null_mut();
     let mut end: *mut TimeFields = ptr::null_mut();
     let mut period: *mut RelTime = ptr::null_mut();
@@ -806,7 +801,7 @@ pub(super) fn strtointerval(s: &[u8]) -> IsoInterval {
     // every structure it answers is ours.
     unsafe {
         sys::timelib_strtointerval(
-            s.as_ptr().cast(),
+            text.as_ptr().cast(),
             s.len(),
             &raw mut begin,
             &raw mut end,

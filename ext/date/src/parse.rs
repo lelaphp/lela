@@ -52,6 +52,13 @@ fn add_errors(req: &mut Request, array: &mut PhpArray, errors: &Errors) -> Resul
     Ok(())
 }
 
+/// `date_get_last_errors`' array: `zval_from_error_container` alone.
+pub(super) fn errors_value(req: &mut Request, errors: &Errors) -> Result<Value, Thrown> {
+    let mut array = PhpArray::new(req)?;
+    add_errors(req, &mut array, errors)?;
+    Ok(Value::array(array))
+}
+
 /// `strtotime(string $datetime, ?int $baseTimestamp = null): int|false`:
 /// the parse filled from the base time in the default zone.
 ///

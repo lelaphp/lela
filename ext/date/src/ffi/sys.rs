@@ -111,7 +111,21 @@ pub struct TzInfo {
     pub bc: u8,
     pub location: LocInfo,
     pub posix_string: *mut c_char,
-    pub posix_info: *mut u8,
+    pub posix_info: *mut PosixStr,
+}
+
+/// `timelib_posix_str`, of which the binding reads whether it names a
+/// daylight-saving rule.
+#[repr(C)]
+pub struct PosixStr {
+    pub std: *mut c_char,
+    pub std_offset: i64,
+    pub dst: *mut c_char,
+    pub dst_offset: i64,
+    pub dst_begin: *mut u8,
+    pub dst_end: *mut u8,
+    pub type_index_std_type: c_int,
+    pub type_index_dst_type: c_int,
 }
 
 /// `timelib_time_offset`.
@@ -193,7 +207,6 @@ unsafe extern "C" {
     pub safe fn timelib_daynr_from_weeknr(iy: i64, iw: i64, id: i64) -> i64;
     pub safe fn timelib_days_in_month(y: i64, m: i64) -> i64;
     pub safe fn timelib_valid_date(y: i64, m: i64, d: i64) -> c_int;
-    pub safe fn timelib_valid_time(h: i64, i: i64, s: i64) -> c_int;
     pub fn timelib_isoweek_from_date(y: i64, m: i64, d: i64, iw: *mut i64, iy: *mut i64);
     pub fn timelib_date_from_isodate(
         iy: i64,
