@@ -352,7 +352,7 @@ fn php_date(req: &mut Request, localtime: bool) -> Result<Value, Thrown> {
 /// echo date('c | r | \Y\-\m | x X', $t), "\n";
 /// echo date(DATE_ATOM, 1719835200), " ", date('I T', 1719835200), "\n";
 /// echo date('jS jS jS jS', 86400 * 2), date('jS', 86400 * 11), date('jS', 86400 * 21), "\n";
-/// var_dump(date(''), bin2hex(date('\\')), bin2hex(date('a\\')));
+/// var_dump(date(''), bin2hex(date('\\')), bin2hex(date('a\\', $t)));
 /// ```
 /// ```expect
 /// 14 Tue 14 Tuesday 2 th 2 317 46 November 11 Nov 11 30 0 2023 2023 23 pm PM 967 11 23 11 23 13 20 000000 000 Europe/Amsterdam 0 +0100 +01:00 +01:00 CET 3600 1700000000
