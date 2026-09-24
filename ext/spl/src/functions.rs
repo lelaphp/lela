@@ -473,22 +473,53 @@ fn names_native(req: &Request, given: &Value, name: &[u8]) -> bool {
 }
 
 /// `spl_autoload_unregister(callable $callback): bool`: the callable
-/// off the stack, `false` where it was not on it.
+/// off the stack, `false` where it was not on it; `spl_autoload_call`
+/// itself empties the stack, with php's deprecation.
 ///
 /// ```php
 /// $loader = function ($c) { echo "never\n"; };
 /// spl_autoload_register($loader);
 /// var_dump(spl_autoload_unregister($loader), spl_autoload_unregister($loader), spl_autoload_functions());
+/// spl_autoload_register($loader);
+/// var_dump(spl_autoload_unregister('spl_autoload_call'), spl_autoload_functions());
 /// ```
 /// ```expect
 /// bool(true)
 /// bool(false)
 /// array(0) {
 /// }
+///
+/// Deprecated: spl_autoload_unregister(): Using spl_autoload_call() as a callback for spl_autoload_unregister() is deprecated, to remove all registered autoloaders, call spl_autoload_unregister() for all values returned from spl_autoload_functions() in %s on line 6
+/// bool(true)
+/// array(0) {
+/// }
 /// ```
 fn spl_autoload_unregister(req: &mut Request) -> Result<Value, Thrown> {
     crate::arity(req, 1, 1)?;
     let loader = callable(req, 1, false)?;
+    let given = crate::value(req, 1);
+    let named = match given.deref().as_ref() {
+        ValueRef::Str(s) => {
+            let name = s.as_bytes();
+            name.strip_prefix(b"\\")
+                .unwrap_or(name)
+                .eq_ignore_ascii_case(b"spl_autoload_call")
+        }
+        _ => false,
+    };
+    if named {
+        docref(
+            req,
+            Level::Deprecated,
+            "Using spl_autoload_call() as a callback for spl_autoload_unregister() is deprecated, to remove all registered autoloaders, call spl_autoload_unregister() for all values returned from spl_autoload_functions()",
+        );
+        for held in req.autoload_functions() {
+            if let Ok(held) = callable_checked(req, &held) {
+                req.autoload_unregister(&held);
+            }
+        }
+        return Ok(Value::bool(true));
+    }
     Ok(Value::bool(req.autoload_unregister(&loader)))
 }
 
