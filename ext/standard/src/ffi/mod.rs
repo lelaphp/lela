@@ -167,3 +167,12 @@ pub(super) fn fnmatch(pattern: &[u8], string: &[u8], flags: i32) -> bool {
     // which reads them and nothing else.
     unsafe { libc::fnmatch(pattern.as_ptr(), string.as_ptr(), flags) == 0 }
 }
+
+/// `arc4random_buf(3)`, the host's CSPRNG, which is what
+/// `php_random_bytes` reads on this host: `buf` filled with random
+/// bytes. It cannot fail.
+pub(super) fn random_bytes(buf: &mut [u8]) {
+    // SAFETY: `buf` is live, writable storage of exactly the length
+    // given, which is all the call writes.
+    unsafe { libc::arc4random_buf(buf.as_mut_ptr().cast(), buf.len()) }
+}

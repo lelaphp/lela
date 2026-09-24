@@ -69,6 +69,7 @@ mod metaphone;
 mod microtime;
 mod output;
 mod pack;
+mod password;
 mod quot_print;
 mod scanf;
 mod sha1;
@@ -245,6 +246,7 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
         link::natives(),
         streamsfuncs::natives(),
         crypt::natives(),
+        password::natives(),
     ]
     .into_iter()
     .flatten()
@@ -261,6 +263,7 @@ fn file_constants() -> Vec<ConstDecl> {
         dir::constants(),
         streamsfuncs::constants(),
         crypt::constants(),
+        password::constants(),
     ]
     .into_iter()
     .flatten()

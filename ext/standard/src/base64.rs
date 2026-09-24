@@ -114,7 +114,7 @@ fn base64_encode(req: &mut Request) -> Result<Value, Thrown> {
 
 /// `php_base64_encode_impl(in, inl, out, flags)` with padding on: the
 /// groups of three, then the tail.
-fn encode(input: &[u8], out: &mut [u8]) {
+pub(super) fn encode(input: &[u8], out: &mut [u8]) {
     let mut chunks = input.chunks_exact(3);
     let mut at = 0;
     for group in &mut chunks {
