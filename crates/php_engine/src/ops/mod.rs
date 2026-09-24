@@ -2091,7 +2091,12 @@ pub(crate) fn concat(req: &mut Request, left: &Value, right: &Value) -> Result<V
 /// left string is grown where it stands when the place held its one
 /// owner, and copied only when it is interned or shared
 /// ([`Request::string_append`], `zend_string_extend`). A loop of `.=`
-/// is then linear in what it appends.
+/// is then linear in what it appends. `ASSIGN_OP` over a CV,
+/// `ASSIGN_DIM_OP` over an array's element, `ASSIGN_OBJ_OP` over a
+/// declared property and `ASSIGN_STATIC_PROP_OP` call it where php's
+/// `zend_binary_op(var_ptr, var_ptr, value)` stands; a property served
+/// by `__get` and `__set` or an `ArrayAccess` offset is read and written
+/// back, as php's is, and takes [`concat`].
 ///
 /// php converts both sides first, holding one more owner of the left
 /// string while a `__toString` on the right is served, and only then
@@ -2145,6 +2150,35 @@ pub(crate) fn concat(req: &mut Request, left: &Value, right: &Value) -> Result<V
 /// int(10100)
 /// int(12128)
 /// int(12128)
+/// ```
+///
+/// A declared property, a typed one over a string, a class's property
+/// and an array's element are each such a place, and each grows where it
+/// stands, the peak not moving past what the four already held; the
+/// copy an array's separation made, the string read out of a property
+/// and the class's own string appended to it keep their bytes:
+///
+/// ```php
+/// class C { public $p; public string $q = ''; public static $s; }
+/// $o = new C; $o->p = str_repeat('a', 5000); $o->q = str_repeat('a', 5000); C::$s = str_repeat('a', 5000); $a = ['k' => str_repeat('a', 5000)];
+/// $t = str_repeat('b', 2000); memory_reset_peak_usage(); $m = memory_get_usage();
+/// $o->p .= $t; $o->q .= $t; C::$s .= $t; $a['k'] .= $t;
+/// var_dump(memory_get_peak_usage() - $m, strlen($o->p), strlen($o->q), strlen(C::$s), strlen($a['k']));
+/// $b = $a; $a['k'] .= '!'; $p = $o->p; $o->p .= '?'; $s = C::$s; C::$s .= $s;
+/// var_dump(strlen($b['k']), strlen($a['k']), strlen($p), strlen($o->p), strlen($s), strlen(C::$s));
+/// ```
+/// ```expect
+/// int(0)
+/// int(7000)
+/// int(7000)
+/// int(7000)
+/// int(7000)
+/// int(7000)
+/// int(7001)
+/// int(7000)
+/// int(7001)
+/// int(7000)
+/// int(14000)
 /// ```
 pub(crate) fn concat_assign(
     req: &mut Request,
