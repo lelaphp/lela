@@ -749,15 +749,15 @@ fn chr(req: &mut Request) -> Result<Value, Thrown> {
 /// ```php
 /// $f = 'call_user_func_array';
 /// var_dump($f('call_user_func', ['str_pad', 'abc', 'length' => 6, 'pad_string' => '-']));
-/// $f('call_user_func', ['str_pad', 'abc', 'pad_type' => 0, 'length' => 'x']);
+/// $f('call_user_func', ['str_pad', 'abc', 'pad_type' => 0, 'pad_string' => ' ', 'length' => 'x']);
 /// ```
 /// ```expect exit=255
 /// string(6) "abc---"
 ///
 /// Fatal error: Uncaught TypeError: str_pad(): Argument #2 ($length) must be of type int, string given in %s:4
 /// Stack trace:
-/// #0 [internal function]: str_pad('abc', 'x', NULL, 0)
-/// #1 [internal function]: call_user_func('str_pad', 'abc', pad_type: 0, length: 'x')
+/// #0 [internal function]: str_pad('abc', 'x', ' ', 0)
+/// #1 [internal function]: call_user_func('str_pad', 'abc', pad_type: 0, pad_string: ' ', length: 'x')
 /// #2 %s(4): call_user_func_array('call_user_func', Array)
 /// #3 {main}
 ///   thrown in %s on line 4
