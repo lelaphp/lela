@@ -1862,7 +1862,22 @@ fn read_csv(
             break;
         }
     }
-    let line = fs(req, this, |it| it.line.clone())?.unwrap_or_default();
+    let mut line = fs(req, this, |it| it.line.clone())?.unwrap_or_default();
+    // `php_fgetcsv` reads on from the stream while a field's enclosure
+    // is open at the end of the line, so a quoted field spans lines.
+    while open_enclosure(&line, control) {
+        let Some(stream) = fs(req, this, |it| it.stream)? else {
+            break;
+        };
+        if stream.eof(req) {
+            break;
+        }
+        match stream.get_line(req, None)? {
+            Some(more) if !more.as_bytes().is_empty() => line.extend_from_slice(more.as_bytes()),
+            _ => break,
+        }
+    }
+    fs(req, this, |it| it.line = Some(line.clone()))?;
     let line = if line.ends_with(b"\n") {
         let mut l = line;
         l.pop();
@@ -1888,6 +1903,40 @@ fn read_csv(
         req.release(old);
     }
     Ok(true)
+}
+
+/// Whether `line` ends inside an enclosed field, as `php_fgetcsv`'s
+/// state stands at the end of its buffer: an enclosure that opens a
+/// field opens it, a doubled one inside stands for itself, the escape takes
+/// the byte after it, and a lone one closes it.
+fn open_enclosure(line: &[u8], (delimiter, enclosure, escape): (u8, u8, Option<u8>)) -> bool {
+    let mut at = 0;
+    let mut inside = false;
+    let mut field_start = true;
+    while let Some(&c) = line.get(at) {
+        if inside {
+            if Some(c) == escape && escape != Some(enclosure) {
+                at += 2;
+                continue;
+            }
+            if c == enclosure {
+                if line.get(at + 1) == Some(&enclosure) {
+                    at += 2;
+                    continue;
+                }
+                inside = false;
+            }
+        } else if field_start && c == enclosure {
+            inside = true;
+            field_start = false;
+        } else if c == delimiter {
+            field_start = true;
+        } else if c != b' ' && c != b'\t' {
+            field_start = false;
+        }
+        at += 1;
+    }
+    inside
 }
 
 /// `spl_filesystem_file_read_line_ex`: CSV, a user `getCurrentLine()`,
@@ -2094,7 +2143,20 @@ fn escape_arg(req: &mut Request, position: u32, this: PhpObject) -> Result<Optio
 }
 
 /// `fgetcsv(string $separator = ",", string $enclosure = "\"", string
-/// $escape = "\\"): array|false`, through `ext/standard`'s `str_getcsv`.
+/// $escape = "\\"): array|false`, through `ext/standard`'s `str_getcsv`,
+/// a field whose enclosure is open at the end of the line read on
+/// into the next.
+///
+/// ```php
+/// $t = new SplTempFileObject();
+/// $t->fwrite("a,\"b\nc\",d\ne,f\n");
+/// $t->rewind();
+/// while ($row = $t->fgetcsv(',', '"', '')) echo json_encode($row), ' ', $t->key(), "\n";
+/// ```
+/// ```expect
+/// ["a","b\nc","d"] 0
+/// ["e","f"] 1
+/// ```
 fn file_fgetcsv(req: &mut Request) -> Result<Value, Thrown> {
     crate::arity(req, 0, 3)?;
     let (this, _) = this_file(req)?;
