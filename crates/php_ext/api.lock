@@ -171,9 +171,13 @@ raising::throw_at
 raising::throw_value
 raising::too_few_arguments
 raising::warning
+request::Brigade
 request::Cast
 request::ExtensionId
 request::FdStream
+request::FilterFactory
+request::FilterFlags
+request::FilterStatus
 request::HostPath
 request::Interrupt
 request::Interrupt::raise
@@ -261,6 +265,7 @@ request::Request::register_shutdown_function
 request::Request::register_tick_function
 request::Request::register_wrapper
 request::Request::release
+request::Request::remove_filter
 request::Request::request_headers
 request::Request::reset_memory_peak
 request::Request::resource
@@ -286,6 +291,7 @@ request::Request::set_umask
 request::Request::state
 request::Request::status_line
 request::Request::stdin
+request::Request::stream_filters
 request::Request::stream_from_fd
 request::Request::stream_wrappers
 request::Request::superglobal
@@ -308,6 +314,7 @@ request::Resources
 request::Resources::register_type
 request::Stream
 request::Stream::accept
+request::Stream::add_filter
 request::Stream::as_value
 request::Stream::cast
 request::Stream::close
@@ -338,6 +345,8 @@ request::Stream::truncate
 request::Stream::unread
 request::Stream::write
 request::StreamFilter
+request::StreamFilter::close
+request::StreamFilter::filter
 request::StreamWrapper
 request::Whence
 request::Whence::from_int

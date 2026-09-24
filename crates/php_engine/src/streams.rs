@@ -36,9 +36,10 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use php_heap::ResourceType;
 
 use crate::api::raising::{Level, Thrown, raise, throw, warning};
-use crate::api::request::{Cast, FdStream, Request, Stream, Whence};
+use crate::api::request::{Cast, FdStream, FilterFlags, Request, Stream, Whence};
 use crate::api::values::{Key, PhpArray, PhpString, Resource, Value};
 
+mod filters;
 mod sockets;
 
 /// `FG(def_chunk_size)`, which `PHP_SOCK_CHUNK_SIZE` sets at 8192
@@ -224,6 +225,14 @@ pub(crate) struct PhpStream {
     writepos: usize,
     /// `stream->chunk_size`.
     chunk_size: usize,
+    /// `stream->res`, which a filter is handed as its stream.
+    res: Option<Resource>,
+    /// `stream->readfilters`, the chain every read of the kind passes
+    /// through, head first.
+    readfilters: Vec<filters::Attached>,
+    /// `stream->writefilters`, the chain every write passes through
+    /// before the kind.
+    writefilters: Vec<filters::Attached>,
 }
 
 /// `stream->flags`, the four of `PHP_STREAM_FLAG_*` the generic
@@ -260,6 +269,9 @@ impl PhpStream {
             readpos: 0,
             writepos: 0,
             chunk_size: CHUNK_SIZE,
+            res: None,
+            readfilters: Vec::new(),
+            writefilters: Vec::new(),
         }
     }
 
@@ -284,6 +296,9 @@ impl PhpStream {
     /// chunk where the chunk would not fit, and one read of the kind
     /// into the room after `writepos`. `false` is the read that failed.
     fn fill_read_buffer(&mut self, req: &mut Request, size: usize) -> bool {
+        if !self.readfilters.is_empty() {
+            return self.fill_filtered(req, size);
+        }
         if self.writepos - self.readpos >= size {
             return true;
         }
@@ -333,7 +348,8 @@ impl PhpStream {
             if size == 0 {
                 break;
             }
-            let toread = if self.flags.no_buffer || self.chunk_size == 1 {
+            let direct = self.flags.no_buffer || self.chunk_size == 1;
+            let toread = if self.readfilters.is_empty() && direct {
                 let Self { ops, eof, .. } = self;
                 match ops.read(req, &mut buf[didread..], eof) {
                     Some(n) => n,
@@ -395,6 +411,20 @@ impl PhpStream {
     /// the first took none and php returned its `-1`. A write that
     /// took a byte marks the flush owed at close.
     pub(crate) fn write(&mut self, req: &mut Request, buf: &[u8]) -> Option<usize> {
+        if buf.is_empty() {
+            return Some(0);
+        }
+        if self.writefilters.is_empty() {
+            return self.write_buffer(req, buf);
+        }
+        let bytes = self.write_filtered(req, Some(buf), FilterFlags::Normal);
+        self.flags.was_written = true;
+        bytes
+    }
+
+    /// `_php_stream_write_buffer` (`Z/main/streams/streams.c:1189`): the
+    /// kind written past the filters, as [`PhpStream::write`] describes.
+    fn write_buffer(&mut self, req: &mut Request, buf: &[u8]) -> Option<usize> {
         if buf.is_empty() {
             return Some(0);
         }
@@ -631,12 +661,26 @@ impl PhpStream {
         self.ops.read_dir()
     }
 
-    /// `_php_stream_flush` (`Z/main/streams/streams.c:1316`) without a
-    /// filter chain: the owed flush cleared and the kind flushed.
-    pub(crate) fn flush(&mut self, req: &mut Request) -> bool {
+    /// `_php_stream_flush` (`Z/main/streams/streams.c:1316`): the write
+    /// chain flushed through to the kind first, with `closing` its last
+    /// call; the owed flush cleared and the kind flushed.
+    pub(crate) fn flush_closing(&mut self, req: &mut Request, closing: bool) -> bool {
+        if !self.writefilters.is_empty() {
+            let flags = if closing {
+                FilterFlags::FlushClose
+            } else {
+                FilterFlags::FlushInc
+            };
+            let _ = self.write_filtered(req, None, flags);
+        }
         self.flags.was_written = false;
         let Self { ops, .. } = self;
         ops.flush(req)
+    }
+
+    /// `php_stream_flush`, not closing.
+    pub(crate) fn flush(&mut self, req: &mut Request) -> bool {
+        self.flush_closing(req, false)
     }
 
     /// `_php_stream_cast` (`Z/main/streams/cast.c:194`) to a fd:
@@ -656,6 +700,16 @@ impl PhpStream {
                 self.readpos = 0;
                 self.writepos = 0;
             }
+        }
+        if !self.readfilters.is_empty() || !self.writefilters.is_empty() {
+            if warn {
+                let text = format!(
+                    "{}(): Cannot cast a filtered stream on this system",
+                    req.active_native()
+                );
+                warning(req, &text);
+            }
+            return None;
         }
         let Some(fd) = self.ops.fd().map(|fd| fd.as_raw_fd()) else {
             if warn {
@@ -690,11 +744,13 @@ impl PhpStream {
     /// are one path: the owed flush, then the kind closed, then the
     /// stream dropped.
     fn free(mut self, req: &mut Request) -> i32 {
-        if self.flags.was_written {
-            self.flush(req);
+        if self.flags.was_written || !self.writefilters.is_empty() {
+            self.flush_closing(req, true);
         }
         let Self { ops, .. } = &mut self;
-        ops.close(req)
+        let ret = ops.close(req);
+        self.free_filters(req);
+        ret
     }
 }
 
@@ -1901,6 +1957,9 @@ impl Request {
     pub(crate) fn stream_alloc(&mut self, stream: PhpStream) -> Result<Stream, Thrown> {
         let kind = self.stream_type();
         let res = self.new_resource(kind, Some(stream))?;
+        if let Some(Some(stream)) = self.resource_native_mut::<Option<PhpStream>>(res.heap()) {
+            stream.res = Some(res);
+        }
         Ok(Stream::of(res))
     }
 

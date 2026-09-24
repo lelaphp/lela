@@ -415,16 +415,61 @@ pub enum WrapperOp<'a> {
     Group(i64),
 }
 
-/// A stream filter: its name and the function that filters one bucket,
-/// with `closing` set on the last.
-#[derive(Debug, Clone)]
-#[allow(clippy::type_complexity)] // as StreamWrapper
-pub struct StreamFilter {
-    /// The filter's name, as `php_stream_filter_register_factory` is
-    /// given it.
-    pub name: String,
-    pub filter: fn(&mut Request, &[u8], &mut Vec<u8>, bool) -> Result<(), Thrown>,
+/// `php_stream_bucket_brigade`: the buckets a filter is handed and the
+/// ones it hands on, each bucket its bytes, in order.
+pub type Brigade = std::collections::VecDeque<Vec<u8>>;
+
+/// `php_stream_filter_status_t`, what a filter answers: `PSFS_ERR_FATAL`,
+/// the stream broken; `PSFS_FEED_ME`, nothing to hand on yet;
+/// `PSFS_PASS_ON`, buckets on the `output` brigade.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterStatus {
+    ErrFatal,
+    FeedMe,
+    PassOn,
 }
+
+/// `PSFS_FLAG_NORMAL`, `PSFS_FLAG_FLUSH_INC` and `PSFS_FLAG_FLUSH_CLOSE`:
+/// whether a filter call is one more bucket, a flush, or the last call
+/// before the stream closes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterFlags {
+    Normal,
+    FlushInc,
+    FlushClose,
+}
+
+/// `php_stream_filter_ops` (`Z/main/streams/php_stream_filter_api.h`):
+/// one filter on one of a stream's chains, holding what its factory
+/// made it with. The filter takes the buckets of `input` it consumes,
+/// adds to `consumed` how many bytes they held where it is asked, and
+/// puts what it makes on `output`; a call may serve PHP code, whose
+/// throwable the `Err` is and which the stream treats as
+/// `PSFS_ERR_FATAL`.
+pub trait StreamFilter: Send {
+    /// `fops->filter`, on the stream it is attached to.
+    fn filter(
+        &mut self,
+        req: &mut Request,
+        stream: Stream,
+        input: &mut Brigade,
+        output: &mut Brigade,
+        consumed: Option<&mut usize>,
+        flags: FilterFlags,
+    ) -> Result<FilterStatus, Thrown>;
+
+    /// `fops->dtor`, served once when the filter leaves its chain.
+    fn close(&mut self, _req: &mut Request) -> Result<(), Thrown> {
+        Ok(())
+    }
+}
+
+/// `php_stream_filter_factory`'s `create_filter`: a filter of the name
+/// the program asked for, which may be one a wildcard matched, with the
+/// parameters it was given; `None` is the factory's refusal, after
+/// whatever it said.
+pub type FilterFactory =
+    fn(&mut Request, &[u8], Option<&Value>) -> Result<Option<Box<dyn StreamFilter>>, Thrown>;
 
 /// A resource's per-type destructor, php's `list_dtor_ex`: served once,
 /// by [`Resource::close`] or by the release that reaches zero, with the
@@ -698,7 +743,18 @@ pub struct Request {
     /// `FG(pclose_ret)`: what the last stream freed by its resource's
     /// destructor answered from its kind's close, which `pclose()` reads.
     pub(crate) pclose_ret: i32,
-    filters: Vec<StreamFilter>,
+    /// `FG(stream_filters)`: each filter name and its factory, in the
+    /// order they were registered.
+    pub(crate) filters: Vec<(Vec<u8>, FilterFactory)>,
+    /// A throwable PHP code served by a stream's kind or filter raised
+    /// inside an operation whose answer has no room for it: php's
+    /// `EG(exception)` standing until the native that asked for the
+    /// operation returns, which is when [`Request::serve_native`] raises
+    /// it, and before which no more such code is served.
+    pub(crate) stream_thrown: Option<Thrown>,
+    /// `le_stream_filter`, the type of the resource a filter on a chain
+    /// is named by.
+    pub(crate) filter_type: ResourceType,
     /// php's `EG(user_error_handler)`, the handler `set_error_handler`
     /// installed, `IS_UNDEF` as none; the stack under it is
     /// `EG(user_error_handlers)`, each row the handler it replaced and
@@ -933,6 +989,7 @@ impl Request {
         let web = description.is_web;
         let mut resources = Resources::default();
         let stream_type = crate::streams::register(&mut resources);
+        let filter_type = resources.register_type(b"stream filter", None);
         let mut req = Request {
             shared,
             description,
@@ -964,6 +1021,8 @@ impl Request {
             wrappers: Vec::new(),
             pclose_ret: 0,
             filters: Vec::new(),
+            stream_thrown: None,
+            filter_type,
             error_handler: None,
             error_handler_levels: 0,
             error_handlers: Vec::new(),
@@ -2801,7 +2860,20 @@ impl Request {
                 &format!("Call to undefined function {name}()"),
             ));
         };
-        entry(self)
+        let served = entry(self);
+        match (served, self.stream_thrown.take()) {
+            (Ok(value), Some(thrown)) => {
+                self.release(value);
+                Err(thrown)
+            }
+            (Err(thrown), Some(deferred)) => {
+                if let Some(object) = deferred.exception() {
+                    self.release(object.as_value());
+                }
+                Err(thrown)
+            }
+            (served, None) => served,
+        }
     }
 
     pub(crate) fn take_body(&mut self) -> Vec<u8> {
@@ -10000,13 +10072,23 @@ impl Request {
         self.wrappers.iter().map(|w| w.scheme.clone()).collect()
     }
 
-    /// `stream_filter_register()`: `false` when the name is taken.
-    pub fn register_filter(&mut self, filter: StreamFilter) -> bool {
-        if self.filters.iter().any(|f| f.name == filter.name) {
+    /// `php_stream_filter_register_factory_volatile`
+    /// (`Z/main/streams/filter.c:50`): `factory` for the filter `name`,
+    /// which may end in `.*` to take every name under it, for the rest of
+    /// the request; `false` where the name is taken.
+    pub fn register_filter(&mut self, name: &[u8], factory: FilterFactory) -> bool {
+        if self.filters.iter().any(|(n, _)| n.as_slice() == name) {
             return false;
         }
-        self.filters.push(filter);
+        self.filters.push((name.to_vec(), factory));
         true
+    }
+
+    /// `stream_get_filters()`'s names: every filter registered, in the
+    /// order they were.
+    #[must_use]
+    pub fn stream_filters(&self) -> Vec<Vec<u8>> {
+        self.filters.iter().map(|(name, _)| name.clone()).collect()
     }
 }
 
