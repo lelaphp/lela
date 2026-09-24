@@ -2,7 +2,9 @@
 //! `libc`, thin"; `unsafe.homes`' `ext/*/src/ffi/`): `iconv_open`, one
 //! `iconv` call at a time and `iconv_close`, which `Drop` makes. A
 //! converter is opened for one call of a native and closed before it
-//! returns, never shared, so no request sees another's shift state. The
+//! returns, or held by one stream filter of one request and closed when
+//! the filter leaves its chain; never shared, so no request sees
+//! another's shift state. The
 //! oracle's `--ri iconv` reads libiconv 1.11, the macOS system library,
 //! which is the library linked here.
 #![allow(unsafe_code)]
@@ -43,6 +45,12 @@ impl Errno {
 
 /// One `iconv_t` converter, closed when dropped.
 pub(super) struct Cd(libc::iconv_t);
+
+// SAFETY: a converter is its state alone, which libiconv keeps behind the
+// handle with no tie to the thread that opened it; `Cd` owns the handle
+// and every call takes `&mut self`, so it is moved between threads and
+// never used from two at once.
+unsafe impl Send for Cd {}
 
 impl Cd {
     /// `iconv_open(to, from)`: the converter, or `errno`.

@@ -6,8 +6,10 @@
 //!
 //! `iconv.c`'s conversions, character counts, substrings and searches
 //! over `UCS-4LE`, php's `GENERIC_SUPERSET_NAME`, one converter per
-//! call; the MIME header codecs in `mime`; the three `iconv.*` ini entries, which fall back on php's own
-//! `input_encoding`, `internal_encoding` and `output_encoding` and then on
+//! call; the MIME header codecs in `mime`; the `convert.iconv.*` stream
+//! filter in `filter`; `ob_iconv_handler`; the three `iconv.*` ini
+//! entries, which fall back on php's own `input_encoding`,
+//! `internal_encoding` and `output_encoding` and then on
 //! `default_charset`; and the four constants.
 #![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
@@ -23,6 +25,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 mod ffi;
+mod filter;
 mod mime;
 
 use ffi::{Cd, Errno};
@@ -125,7 +128,18 @@ pub fn extension() -> Extension {
             Startup
         })
         .request_state::<State>()
+        .rinit(rinit)
         .build("iconv")
+}
+
+/// `php_iconv_stream_filter_register_factory`, which php's `MINIT`
+/// runs: the `convert.iconv.*` factory in the request's filter table,
+/// the one `stream_filter_register` adds to, as ext/standard keeps its
+/// string filters there.
+#[allow(clippy::unnecessary_wraps)] // `ExtensionBuilder::rinit`'s signature
+fn rinit(req: &mut Request) -> Result<(), Thrown> {
+    req.register_filter(filter::NAME, filter::factory);
+    Ok(())
 }
 
 /// `PHP_MINFO_FUNCTION(miconv)`: the table, then `DISPLAY_INI_ENTRIES`.
