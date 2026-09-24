@@ -126,6 +126,8 @@ porting = true
 [[crate]]
 name = "ext/pdo"
 budget = 6000
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
 [[crate]]
 name = "ext/dom"
 budget = 25500
@@ -134,6 +136,8 @@ porting = true
 [[crate]]
 name = "ext/random"
 budget = 3500
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
 [[crate]]
 name = "ext/pdo_mysql"
 budget = 2500
@@ -174,6 +178,8 @@ porting = true
 [[crate]]
 name = "ext/pdo_sqlite"
 budget = 2500
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
 [[crate]]
 name = "ext/ctype"
 budget = 500
