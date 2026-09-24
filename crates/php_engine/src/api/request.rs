@@ -675,6 +675,10 @@ pub struct Request {
     /// table has it among them: `ZVAL_ALIAS_PTR` rows, request state as
     /// the classes the request declared are.
     aliases: Vec<(usize, Vec<u8>, ClassId)>,
+    /// `PHP_SAPI`, `sapi_module.name` as `php_module_startup` registers
+    /// it: the host's, so the request's, the engine's interned string
+    /// for the name the description carries.
+    sapi_constant: Value,
     /// The functions and methods the units this request served declared,
     /// each the unit that holds it and which of its op arrays is the
     /// body: php's `EG(function_table)` past the natives and each user
@@ -883,8 +887,15 @@ impl Request {
             stack_limit: StackLimit::UNCHECKED,
             declared: Vec::new(),
             aliases: Vec::new(),
+            sapi_constant: Value::null(),
             user_functions: Vec::new(),
         };
+        if let Some(name) = req
+            .shared
+            .sapi_constant(req.description.sapi_name.as_bytes())
+        {
+            req.sapi_constant = name;
+        }
         // Request state in bundle order (ADR-0005).
         for extension in &req.shared.extensions {
             if let Some((type_id, build)) = &extension.request_state {
@@ -7246,6 +7257,9 @@ impl Request {
     }
 
     pub(crate) fn constant_named(&self, name: &[u8]) -> Option<Value> {
+        if name == b"PHP_SAPI" {
+            return Some(self.sapi_constant);
+        }
         self.constants
             .iter()
             .find(|(n, _)| n.as_slice() == name)
@@ -8257,9 +8271,14 @@ impl Request {
         let mut rows: Vec<(Option<&str>, Vec<u8>, Value)> = decls
             .iter()
             .zip(modules)
-            .filter_map(|(decl, module)| {
-                let value = self.shared.constant(&decl.name.0)?;
-                Some((Some(module), decl.name.0.to_vec(), value))
+            .flat_map(|(decl, module)| {
+                // `PHP_SAPI` stands where php registers it, before
+                // `PHP_BINARY`, and is the request's.
+                let sapi = (decl.name.0.as_ref() == b"PHP_BINARY")
+                    .then(|| (Some("Core"), b"PHP_SAPI".to_vec(), self.sapi_constant));
+                let value = self.shared.constant(&decl.name.0);
+                sapi.into_iter()
+                    .chain(value.map(|value| (Some(module), decl.name.0.to_vec(), value)))
             })
             .collect();
         rows.extend(
