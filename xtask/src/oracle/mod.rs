@@ -27,6 +27,7 @@ pub(crate) mod linked;
 
 use std::cell::OnceCell;
 use std::collections::BTreeMap;
+use std::fmt;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -447,6 +448,34 @@ pub struct Observation {
     pub wall: Duration,
 }
 
+/// How a run ended that the recipe's limit ended: the process ran past
+/// `[recipe.limits] timeout_s` and was killed and reaped. [`Oracle::run_under`]
+/// returns it as its error, so a caller that has a verdict for it reads it
+/// with `downcast_ref` and every other caller's run ends as before: the phpt
+/// lane's is that test's `fail`, since a hang is the engine's failure on the
+/// test as a wrong answer is (#691), and the lane goes on to the next.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PastLimit {
+    pub(crate) binary: PathBuf,
+    pub(crate) script: PathBuf,
+    /// The recipe's limit, in seconds.
+    pub(crate) limit_s: u64,
+}
+
+impl fmt::Display for PastLimit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} ran past the recipe's limit of {} s on {} and was killed",
+            self.binary.display(),
+            self.limit_s,
+            self.script.display()
+        )
+    }
+}
+
+impl std::error::Error for PastLimit {}
+
 /// One invocation under the pin's recipe: which binary runs, which program,
 /// which regime, and the four things a `.phpt` section adds to a run. Every
 /// field past the program is empty for a witness, which is why `run` takes
@@ -580,14 +609,17 @@ impl<'a> Oracle<'a> {
                 break status;
             }
             if started.elapsed() > limit {
+                // Killed and then reaped, so the process is gone and not a
+                // zombie when the caller hears of it. A kill that finds it
+                // already exited is no error: the wait reaps it either way.
                 let _ = child.kill();
-                let _ = child.wait();
-                bail!(
-                    "{} ran past the recipe's limit of {} s on {}",
-                    call.binary.display(),
-                    recipe.limits.timeout_s,
-                    scratch.script.display()
-                );
+                child.wait().context("reaping php past the limit")?;
+                return Err(PastLimit {
+                    binary: call.binary.to_path_buf(),
+                    script: scratch.script.clone(),
+                    limit_s: recipe.limits.timeout_s,
+                }
+                .into());
             }
             thread::sleep(Duration::from_millis(5));
         };
