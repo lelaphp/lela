@@ -2114,6 +2114,23 @@ impl Emit<'_> {
     /// t
     /// f
     /// ```
+    ///
+    /// A label written just before the `try` stands outside it: php
+    /// lays a `NOP` down between them, so a `goto` to it from inside
+    /// leaves the `try` and serves the `finally` on the way
+    /// (`Zend/tests/try/finally_goto_005.phpt`):
+    ///
+    /// ```php
+    /// label: try {
+    ///     goto label;
+    /// } finally {
+    ///     print "success";
+    ///     return;
+    /// }
+    /// ```
+    /// ```expect
+    /// success
+    /// ```
     fn r#try(&mut self, id: NodeId<tree::TryStmt>) -> Result<(), CompileError> {
         let node = &self.parsed.tree[id];
         let catches = &node.catch_clauses;
@@ -2129,6 +2146,20 @@ impl Emit<'_> {
         };
         if catches.is_empty() && finally.is_none() {
             return Err(self.compile_error("Cannot use try without catch or finally"));
+        }
+        // "label: try { } must not be equal to try { label: }": the
+        // label written last standing at the next opline takes a `NOP`
+        // of its own, so a `goto` to it leaves the `try` and runs the
+        // `finally` (`Z/Zend/zend_compile.c`, `zend_compile_try`).
+        if self
+            .labels
+            .last()
+            .is_some_and(|(_, label)| label.opline == self.next())
+        {
+            self.push(Opline {
+                opcode: Opcode::Nop,
+                ..Opline::default()
+            });
         }
         let offset = u32::try_from(self.try_catch.len()).unwrap_or(u32::MAX);
         self.try_catch.push(TryCatch {
