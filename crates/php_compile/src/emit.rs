@@ -114,6 +114,7 @@ use php_syntax::magic_const_name;
 use crate::{CompileError, Options, StackLimit};
 use walk::{Class, Closure, Function, Method, Property};
 
+mod magic;
 mod types;
 mod walk;
 
@@ -2798,6 +2799,8 @@ impl Emit<'_> {
             is_final: method.is_final,
             tentative_return: false,
         };
+        self.line = method.function.line;
+        self.magic_method(&class_name, &declared)?;
         let Some(decl) = self.classes.get_mut(class) else {
             return Err(self.fatal("InternalError: a method of a class the unit has not"));
         };
