@@ -53,6 +53,7 @@ mod browscap;
 mod crc32;
 mod crypt;
 mod csv;
+mod datetime;
 mod dir;
 mod exec;
 mod ffi;
@@ -266,6 +267,7 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
         mail::natives(),
         image::natives(),
         browscap::natives(),
+        datetime::natives(),
     ]
     .into_iter()
     .flatten()

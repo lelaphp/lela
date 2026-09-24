@@ -303,3 +303,28 @@ pub(super) fn protocol_name(number: i32) -> Option<Vec<u8>> {
     // SAFETY: `entry` is the non-null `protoent` just answered.
     owned(unsafe { (*entry).p_name })
 }
+
+/// `strptime(s, format, &tm)` over a zeroed `tm`: the eight fields
+/// `strptime()` answers, `tm_sec` to `tm_yday`, and what was left of the
+/// string, or `None` where the call answered null.
+pub(super) fn strptime(s: &[u8], format: &[u8]) -> Option<([i32; 8], Vec<u8>)> {
+    let (text, format) = (CString::new(s).ok()?, CString::new(format).ok()?);
+    let mut tm = std::mem::MaybeUninit::<libc::tm>::zeroed();
+    // SAFETY: both strings are NUL-terminated and outlive the call, and
+    // `tm` is live, zeroed storage the call writes; it answers null or a
+    // pointer into `text`.
+    let rest = unsafe { libc::strptime(text.as_ptr(), format.as_ptr(), tm.as_mut_ptr()) };
+    if rest.is_null() {
+        return None;
+    }
+    // SAFETY: a zeroed `tm` is a valid one, and the call wrote only fields.
+    let tm = unsafe { tm.assume_init() };
+    let rest = owned(rest)?;
+    Some((
+        [
+            tm.tm_sec, tm.tm_min, tm.tm_hour, tm.tm_mday, tm.tm_mon, tm.tm_year, tm.tm_wday,
+            tm.tm_yday,
+        ],
+        rest,
+    ))
+}
