@@ -80,7 +80,7 @@ pub enum PathIntent {
 #[derive(Debug, Clone, PartialEq)]
 pub enum OutputOp {
     Start {
-        callback: Option<Callable>,
+        handler: StartHandler,
         chunk_size: i64,
         flags: i64,
     },
@@ -98,6 +98,91 @@ pub enum OutputOp {
     },
     ListHandlers,
     ImplicitFlush(bool),
+}
+
+/// What `ob_start()` starts, `php_output_handler_create_user`'s switch
+/// over its `$callback` (`Z/main/output.c:466`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum StartHandler {
+    /// `null`: the default handler, which passes its buffer on.
+    Default,
+    /// A name an extension registered its handler under, found by
+    /// [`Request::buffer_handler`] before the name is read as a callable.
+    Registered(BufferHandler),
+    /// Anything else, as the callable it resolved to.
+    User(Callable),
+}
+
+/// A handler of the buffer stack an extension registers under a name
+/// `ob_start()` takes, `php_output_handler_alias_register`, with the
+/// handlers it cannot stand beside: while the stack is not empty and one
+/// of `conflicts` is on it, starting this one is php's warning and a
+/// refusal, the check every `php_output_handler_conflict_register` in
+/// php-src makes through `php_output_handler_conflict`.
+#[derive(Debug, Clone, Copy)]
+pub struct BufferHandler {
+    pub name: &'static str,
+    pub conflicts: &'static [&'static str],
+    /// `php_output_handler_context_func_t`.
+    pub handler: fn(&mut Request, &mut HandlerCall<'_>) -> Result<HandlerStatus, Thrown>,
+}
+
+impl PartialEq for BufferHandler {
+    /// One registration a name, as php's alias table keys them.
+    fn eq(&self, other: &BufferHandler) -> bool {
+        self.name == other.name
+    }
+}
+
+/// The operation a handler is served for, `php_output_context.op`'s
+/// bits read once; none set is a plain write.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // php's op bits, one field per bit, each read alone
+pub struct HandlerOp {
+    /// `PHP_OUTPUT_HANDLER_START`: the handler's first call.
+    pub start: bool,
+    /// `PHP_OUTPUT_HANDLER_CLEAN`.
+    pub clean: bool,
+    /// `PHP_OUTPUT_HANDLER_FLUSH`.
+    pub flush: bool,
+    /// `PHP_OUTPUT_HANDLER_FINAL`: its last.
+    pub finish: bool,
+}
+
+/// One call of an extension's buffer handler, `php_output_context`, and
+/// the one `php_output_handler_hook` an extension in php-src asks of the
+/// handler being served.
+#[derive(Debug)]
+pub struct HandlerCall<'a> {
+    pub op: HandlerOp,
+    /// `context->in`: the handler's buffered bytes.
+    pub input: &'a [u8],
+    /// `context->out`: what goes on, none being `PHP_OUTPUT_HANDLER_NO_DATA`.
+    pub out: Vec<u8>,
+    /// `php_output_handler_hook(PHP_OUTPUT_HANDLER_HOOK_IMMUTABLE)`: set,
+    /// the handler can no longer be cleaned or removed.
+    pub immutable: bool,
+}
+
+/// What an extension's buffer handler answers, its `zend_result`: on
+/// `Failure` the handler is disabled and its buffer goes on unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandlerStatus {
+    Success,
+    Failure,
+}
+
+/// `SG(sapi_headers)`'s content type, `mimetype` and
+/// `send_default_content_type` read as the one state they are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContentType {
+    /// The mimetype a `Content-Type` header, or the default one sent
+    /// with the block, laid down.
+    Held(Vec<u8>),
+    /// None yet, and the default one still to be sent.
+    Default,
+    /// None, and none to be sent.
+    Unset,
 }
 
 /// An open stream, php's `php_stream` (design §4.3 seam 5), named by its
@@ -8195,6 +8280,25 @@ impl Request {
     #[must_use]
     pub fn output_started_at(&self) -> Option<(Vec<u8>, u32)> {
         self.output.started_at()
+    }
+
+    /// `php_output_handler_alias`: the handler an extension registered
+    /// under `name`, which `ob_start()` takes before it reads the name as
+    /// a callable.
+    #[must_use]
+    pub fn buffer_handler(&self, name: &[u8]) -> Option<BufferHandler> {
+        self.shared
+            .extensions
+            .iter()
+            .flat_map(|extension| &extension.buffer_handlers)
+            .find(|handler| handler.name.as_bytes() == name)
+            .copied()
+    }
+
+    /// `SG(sapi_headers).mimetype` and `send_default_content_type`.
+    #[must_use]
+    pub fn content_type(&self) -> ContentType {
+        self.output.content_type()
     }
 
     /// `header()`, `sapi_header_op` under `SAPI_HEADER_ADD` or

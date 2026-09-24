@@ -32,7 +32,10 @@ use php_heap::{Block, Fatal, Heap, Str};
 use crate::api::abi::Callable;
 use crate::api::call;
 use crate::api::raising::{Level, Thrown, docref};
-use crate::api::request::{OutputOp, Request};
+use crate::api::request::{
+    BufferHandler, ContentType, HandlerCall, HandlerOp, HandlerStatus, OutputOp, Request,
+    StartHandler,
+};
 use crate::api::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
 /// The handler operations, `Z/main/php_output.h:23-29`.
@@ -109,6 +112,9 @@ enum Func {
     /// `php_output_handler_user_func_t`: the callable, its `zoh` copy
     /// held, and the record `ecalloc`'d beside it.
     User { callable: Callable, record: Block },
+    /// `php_output_handler_context_func_t`: an extension's, under the
+    /// name it registered, `php_output_handler_create_internal`.
+    Registered(BufferHandler),
 }
 
 /// One `php_output_handler` (`Z/main/php_output.h:123`): its fields
@@ -267,6 +273,19 @@ impl Output {
         self.started.clone()
     }
 
+    /// `SG(sapi_headers).mimetype`, its NUL off, and
+    /// `send_default_content_type`.
+    pub(crate) fn content_type(&self) -> ContentType {
+        match &self.mimetype {
+            Some(block) => {
+                let bytes = block.bytes();
+                ContentType::Held(bytes[..bytes.len().saturating_sub(1)].to_vec())
+            }
+            None if self.send_default_content_type => ContentType::Default,
+            None => ContentType::Unset,
+        }
+    }
+
     pub(crate) fn headers_sent(&self) -> bool {
         self.headers_sent
     }
@@ -394,7 +413,7 @@ impl Output {
         }
         heap.free_block(handler.record);
         match handler.func {
-            Func::Default => None,
+            Func::Default | Func::Registered(_) => None,
             Func::User { callable, record } => {
                 heap.free_block(record);
                 Some(callable.into_value())
@@ -617,21 +636,22 @@ fn handler_op(req: &mut Request, at: usize, context: &mut Context) -> Status {
     if storable && context.op == HANDLER_WRITE {
         return Status::NoData;
     }
-    let (started, user) = {
+    let (started, serve) = {
         let Some(handler) = req.output().handlers.get(at) else {
             return Status::Failure;
         };
-        let user = match &handler.func {
-            Func::User { callable, .. } => Some(callable.clone()),
-            Func::Default => None,
+        let serve = match &handler.func {
+            Func::User { callable, .. } => Serve::User(callable.clone()),
+            Func::Registered(registered) => Serve::Registered(*registered),
+            Func::Default => Serve::Default,
         };
-        (handler.flags & HANDLER_STARTED != 0, user)
+        (handler.flags & HANDLER_STARTED != 0, serve)
     };
     if !started {
         context.op |= HANDLER_START;
     }
     req.output_mut().running = Some(at);
-    if let Some(callable) = user {
+    if let Serve::User(callable) = serve {
         let buffered = req.output().buffered(at);
         status = match user_handler(req, at, &callable, &buffered, context) {
             Ok(status) => status,
@@ -640,6 +660,9 @@ fn handler_op(req: &mut Request, at: usize, context: &mut Context) -> Status {
                 Status::Failure
             }
         };
+        still_have_handler = req.output().handlers.len() > at;
+    } else if let Serve::Registered(registered) = serve {
+        status = registered_handler(req, at, &registered, context);
         still_have_handler = req.output().handlers.len() > at;
     } else {
         context.input = req.output().buffered(at);
@@ -661,6 +684,56 @@ fn handler_op(req: &mut Request, at: usize, context: &mut Context) -> Status {
     settle(req, at, status, context);
     context.op = original_op;
     status
+}
+
+/// Whom `php_output_handler_op` serves the buffer to.
+enum Serve {
+    Default,
+    Registered(BufferHandler),
+    User(Callable),
+}
+
+/// An extension's handler served (`Z/main/output.c:1038-1050`): the
+/// buffer fed in as `context->in`, what it wrote the operation's, and
+/// `PHP_OUTPUT_HANDLER_NO_DATA` for nothing written; a handler that
+/// asked to be immutable loses `CLEANABLE` and `REMOVABLE`.
+fn registered_handler(
+    req: &mut Request,
+    at: usize,
+    registered: &BufferHandler,
+    context: &mut Context,
+) -> Status {
+    let buffered = req.output().buffered(at);
+    let op = context.op;
+    let mut call = HandlerCall {
+        op: HandlerOp {
+            start: op & HANDLER_START != 0,
+            clean: op & HANDLER_CLEAN != 0,
+            flush: op & HANDLER_FLUSH != 0,
+            finish: op & HANDLER_FINAL != 0,
+        },
+        input: &buffered,
+        out: Vec::new(),
+        immutable: false,
+    };
+    let answer = (registered.handler)(req, &mut call);
+    if call.immutable
+        && let Some(handler) = req.output_mut().handlers.get_mut(at)
+    {
+        handler.flags &= !(HANDLER_REMOVABLE | HANDLER_CLEANABLE);
+    }
+    match answer {
+        Ok(HandlerStatus::Success) if call.out.is_empty() => Status::NoData,
+        Ok(HandlerStatus::Success) => {
+            context.out = call.out;
+            Status::Success
+        }
+        Ok(HandlerStatus::Failure) => Status::Failure,
+        Err(thrown) => {
+            req.leave_pending(&thrown);
+            Status::Failure
+        }
+    }
 }
 
 /// The end of `php_output_handler_op` (`Z/main/output.c:1063-1090`):
@@ -1306,11 +1379,17 @@ pub(crate) fn deactivate(req: &mut Request) {
 }
 
 /// `php_output_handler_start` (`Z/main/output.c:545`): the handler
-/// pushed and made active, or refused while the layer is inactive or a
-/// handler is running. No conflict or alias is registered, since no
-/// extension registers one yet.
+/// pushed and made active, or refused while the layer is inactive, a
+/// handler is running, or a registered handler meets one it conflicts
+/// with.
 fn handler_start(req: &mut Request, handler: Handler) -> bool {
     if req.output().flags & ACTIVATED == 0 || lock_error(req, HANDLER_START) {
+        free_handler(req, handler);
+        return false;
+    }
+    if let Func::Registered(registered) = &handler.func
+        && conflicts(req, registered)
+    {
         free_handler(req, handler);
         return false;
     }
@@ -1327,6 +1406,36 @@ fn handler_start(req: &mut Request, handler: Handler) -> bool {
     }
 }
 
+/// The check a `php_output_handler_conflict_register` function makes,
+/// `php_output_handler_conflict` over each name while the stack is not
+/// empty: a name on the stack is php's warning, and the refusal.
+fn conflicts(req: &mut Request, registered: &BufferHandler) -> bool {
+    if req.output().level() == 0 {
+        return false;
+    }
+    for &set in registered.conflicts {
+        let started = req
+            .output()
+            .handlers
+            .iter()
+            .any(|h| h.name.bytes() == set.as_bytes());
+        if !started {
+            continue;
+        }
+        let text = if set == registered.name {
+            format!("Output handler '{set}' cannot be used twice")
+        } else {
+            format!(
+                "Output handler '{}' conflicts with '{set}'",
+                registered.name
+            )
+        };
+        docref(req, Level::Warning, &text);
+        return true;
+    }
+    false
+}
+
 /// `php_output_start_user` (`Z/main/output.c:430`): the default
 /// handler for no callback, `php_output_handler_create_internal` with
 /// the name a string of the request's; else
@@ -1335,17 +1444,23 @@ fn handler_start(req: &mut Request, handler: Handler) -> bool {
 /// itself for a string, and the callable's value held as `zoh`.
 fn start_user(
     req: &mut Request,
-    callback: Option<&Callable>,
+    start: &StartHandler,
     chunk_size: usize,
     flags: u32,
 ) -> Result<bool, Thrown> {
-    let handler = match callback {
-        None => {
+    let handler = match start {
+        StartHandler::Default => {
             let name = req.string(DEFAULT_NAME)?.heap();
             let (_, heap) = req.output_and_heap();
             Output::handler_init(heap, name, chunk_size, ability_flags(flags), Func::Default)
         }
-        Some(callable) => {
+        StartHandler::Registered(registered) => {
+            let name = req.string(registered.name.as_bytes())?.heap();
+            let (_, heap) = req.output_and_heap();
+            let func = Func::Registered(*registered);
+            Output::handler_init(heap, name, chunk_size, ability_flags(flags), func)
+        }
+        StartHandler::User(callable) => {
             let value = callable.clone().into_value();
             let name = match value.as_php_string() {
                 Some(s) => {
@@ -1423,13 +1538,13 @@ pub(crate) fn buffer_op(req: &mut Request, op: &OutputOp) -> Result<Value, Throw
     let level = req.output().level();
     Ok(match op {
         OutputOp::Start {
-            callback,
+            handler,
             chunk_size,
             flags,
         } => {
             let chunk_size = usize::try_from(*chunk_size).unwrap_or(0);
             let flags = u32::try_from(*flags).unwrap_or(HANDLER_STDFLAGS);
-            if start_user(req, callback.as_ref(), chunk_size, flags)? {
+            if start_user(req, handler, chunk_size, flags)? {
                 Value::bool(true)
             } else {
                 refused(req, "Failed to create buffer")

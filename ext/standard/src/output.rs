@@ -8,7 +8,7 @@
 use php_ext::coerce::{callable_checked, coerce_param};
 use php_ext::decl::{ConstExpr, FunctionDecl, Name, Parameter, Type};
 use php_ext::raising::{Level, Thrown, arg_count_error, docref};
-use php_ext::request::{OutputOp, Request};
+use php_ext::request::{OutputOp, Request, StartHandler};
 use php_ext::values::{Value, ValueRef};
 
 use crate::{declared, parameter};
@@ -266,10 +266,15 @@ fn ob_start(req: &mut Request) -> Result<Value, Thrown> {
     let callback = req.argument(1).unwrap_or_default();
     let chunk_size = if given >= 2 { long_at(req, 2)? } else { 0 };
     let flags = if given >= 3 { long_at(req, 3)? } else { 0x70 };
-    let callback = match callback.deref().as_ref() {
-        ValueRef::Undef | ValueRef::Null => None,
+    let registered = match callback.deref().as_ref() {
+        ValueRef::Str(name) if !name.is_empty() => req.buffer_handler(name.as_bytes()),
+        _ => None,
+    };
+    let handler = match (callback.deref().as_ref(), registered) {
+        (ValueRef::Undef | ValueRef::Null, _) => StartHandler::Default,
+        (_, Some(registered)) => StartHandler::Registered(registered),
         _ => match callable_checked(req, &callback) {
-            Ok(callable) => Some(callable),
+            Ok(callable) => StartHandler::User(callable),
             // `zend_fcall_info_init`'s error, which is the sentence
             // `zend_is_callable_ex` words for the shape it refused.
             Err(error) => {
@@ -280,7 +285,7 @@ fn ob_start(req: &mut Request) -> Result<Value, Thrown> {
         },
     };
     req.output_buffer_op(&OutputOp::Start {
-        callback,
+        handler,
         chunk_size: chunk_size.max(0),
         flags,
     })

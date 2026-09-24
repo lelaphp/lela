@@ -17,7 +17,7 @@ use php_unit::decl::{ClassDecl, ConstDecl, FunctionDecl, IniDecl, MethodDecl};
 use crate::api::call::{Function, Target};
 use crate::api::coerce::BinaryOp;
 use crate::api::raising::Thrown;
-use crate::api::request::Request;
+use crate::api::request::{BufferHandler, Request};
 use crate::api::values::{ClassId, ClosureInfo, PhpArray, PhpObject, PhpString, TypeTag, Value};
 
 /// The startup ini view an extension's engine state is built from: what
@@ -177,6 +177,7 @@ pub struct Extension {
     pub(crate) rinit: Option<Rinit>,
     pub(crate) rshutdown: Option<fn(&mut Request)>,
     pub(crate) info: Option<Info>,
+    pub(crate) buffer_handlers: Vec<BufferHandler>,
 }
 
 impl std::fmt::Debug for Extension {
@@ -202,6 +203,7 @@ pub struct ExtensionBuilder {
     rinit: Option<Rinit>,
     rshutdown: Option<fn(&mut Request)>,
     info: Option<Info>,
+    buffer_handlers: Vec<BufferHandler>,
 }
 
 impl ExtensionBuilder {
@@ -307,6 +309,14 @@ impl ExtensionBuilder {
         self
     }
 
+    /// A handler of the buffer stack under its name,
+    /// `php_output_handler_alias_register` and its conflicts at `MINIT`.
+    #[must_use]
+    pub fn buffer_handler(mut self, handler: BufferHandler) -> ExtensionBuilder {
+        self.buffer_handlers.push(handler);
+        self
+    }
+
     /// Declare request state: built at request start in bundle order,
     /// dropped after the `rshutdown` hooks in reverse (ADR-0005).
     #[must_use]
@@ -358,6 +368,7 @@ impl ExtensionBuilder {
             rinit: self.rinit,
             rshutdown: self.rshutdown,
             info: self.info,
+            buffer_handlers: self.buffer_handlers,
         }
     }
 }

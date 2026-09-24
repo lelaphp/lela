@@ -11,6 +11,7 @@ abi::Dependency
 abi::DependencyKind
 abi::Extension
 abi::ExtensionBuilder
+abi::ExtensionBuilder::buffer_handler
 abi::ExtensionBuilder::build
 abi::ExtensionBuilder::class_payload
 abi::ExtensionBuilder::class_with
@@ -172,7 +173,12 @@ raising::throw_at
 raising::throw_value
 raising::too_few_arguments
 raising::warning
+request::BufferHandler
+request::ContentType
 request::ExtensionId
+request::HandlerCall
+request::HandlerOp
+request::HandlerStatus
 request::HostPath
 request::Interrupt
 request::Interrupt::raise
@@ -190,6 +196,7 @@ request::Request::autoload_functions
 request::Request::autoload_register
 request::Request::autoload_unregister
 request::Request::backtrace
+request::Request::buffer_handler
 request::Request::called_scope
 request::Request::caller_var
 request::Request::class_alias
@@ -200,6 +207,7 @@ request::Request::clear_last_error
 request::Request::clear_stat_cache
 request::Request::constant_attributes
 request::Request::constants
+request::Request::content_type
 request::Request::current_file
 request::Request::current_line
 request::Request::cwd
@@ -303,6 +311,7 @@ request::Request::write_stderr
 request::ResourceDtor
 request::Resources
 request::Resources::register_type
+request::StartHandler
 request::Stream
 request::Stream::as_value
 request::Stream::close

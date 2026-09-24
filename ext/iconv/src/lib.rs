@@ -30,7 +30,7 @@ use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::coerce::coerce_param;
 use php_ext::decl::{ConstDecl, ConstExpr, FunctionDecl, IniDecl, Name, Parameter, Type};
 use php_ext::raising::{Level, Thrown, arg_count_error, arg_value_error, docref};
-use php_ext::request::Request;
+use php_ext::request::{BufferHandler, ContentType, HandlerCall, HandlerStatus, Request};
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
@@ -114,6 +114,11 @@ pub fn extension() -> Extension {
             constant("ICONV_MIME_DECODE_CONTINUE_ON_ERROR", ConstExpr::Long(2)),
         ])
         .ini(Kind::ALL.map(ini).to_vec())
+        .buffer_handler(BufferHandler {
+            name: "ob_iconv_handler",
+            conflicts: &["ob_iconv_handler", "mb_output_handler"],
+            handler: ob_iconv_handler,
+        })
         .info(info)
         .engine_state(|_| {
             ffi::reset_lc_ctype();
@@ -700,6 +705,109 @@ fn iconv(req: &mut Request) -> Result<Value, Thrown> {
         Ok(out) => Ok(Value::string(PhpString::new(req, &out)?)),
         Err(error) => failed(req, error, &to, &from),
     }
+}
+
+/// `php_iconv_output_handler` (`Z/ext/iconv/iconv.c:299`), what
+/// `ob_start('ob_iconv_handler')` starts: at its start, refused once a
+/// byte reached the host, else a `text/` mimetype, or the default one
+/// while it is still to be sent, given `iconv.output_encoding`'s charset
+/// in a `Content-Type` header, which makes the handler immutable; then
+/// the buffer converted from the internal encoding to that one, what
+/// converted going on beside php's notice for what did not.
+///
+/// ```php
+/// ini_set('internal_encoding', 'ISO-8859-1');
+/// ob_start('ob_iconv_handler'); echo "h\xe9llo\n"; ob_flush();
+/// var_dump(ob_start('ob_iconv_handler'), ob_get_status()['flags'], ob_end_clean(), ob_list_handlers(), function_exists('ob_iconv_handler'));
+/// echo "\xff\n";
+/// ```
+/// ```expect
+/// héllo
+///
+/// Warning: ob_start(): Output handler 'ob_iconv_handler' cannot be used twice in %s on line 4
+///
+/// Notice: ob_start(): Failed to create buffer in %s on line 4
+///
+/// Notice: ob_end_clean(): Failed to discard buffer of ob_iconv_handler (0) in %s on line 4
+/// bool(false)
+/// int(20512)
+/// bool(false)
+/// array(1) {
+///   [0]=>
+///   string(16) "ob_iconv_handler"
+/// }
+/// bool(false)
+/// ÿ
+/// ```
+///
+/// Once a byte reached the host the handler refuses at its start, is disabled,
+/// and its buffer goes on as it was.
+///
+/// ```php
+/// ini_set('output_encoding', 'ASCII');
+/// echo "sent\n"; ob_start('ob_iconv_handler'); echo "é\n"; ob_flush(); var_dump(ob_get_status()['flags']);
+/// ```
+/// ```expect
+/// sent
+/// é
+/// int(12400)
+/// ```
+fn ob_iconv_handler(
+    req: &mut Request,
+    call: &mut HandlerCall<'_>,
+) -> Result<HandlerStatus, Thrown> {
+    if call.op.start {
+        if req.output_started_at().is_some() {
+            return Ok(HandlerStatus::Failure);
+        }
+        let mimetype = match req.content_type() {
+            ContentType::Held(held)
+                if held.len() >= 5 && held[..5].eq_ignore_ascii_case(b"text/") =>
+            {
+                Some(
+                    held.split(|&b| b == b';')
+                        .next()
+                        .unwrap_or_default()
+                        .to_vec(),
+                )
+            }
+            ContentType::Held(_) | ContentType::Unset => None,
+            ContentType::Default => Some(
+                req.ini_get(b"default_mimetype")
+                    .map_or_else(|| b"text/html".to_vec(), <[u8]>::to_vec),
+            ),
+        };
+        if let Some(mimetype) = mimetype
+            && (!call.op.clean || !call.op.finish)
+        {
+            let charset = encoding(req, Kind::Output);
+            let cut = charset
+                .windows(2)
+                .position(|w| w == b"//")
+                .unwrap_or(charset.len());
+            let mut line = b"Content-Type:".to_vec();
+            line.extend_from_slice(&mimetype);
+            line.extend_from_slice(b"; charset=");
+            line.extend_from_slice(&charset[..cut]);
+            call.immutable = req.header_add(&line, true, 0);
+        }
+    }
+    if !call.input.is_empty() {
+        let (to, from) = (encoding(req, Kind::Output), encoding(req, Kind::Internal));
+        let (out, error) = match opened(&to, &from) {
+            Ok(mut cd) => match cd.convert(call.input) {
+                (out, Ok(())) => (out, None),
+                (_, Err(errno @ Errno::Other(_))) => (Vec::new(), Some(Error::from(errno))),
+                (out, Err(errno)) => (out, Some(Error::from(errno))),
+            },
+            Err(error) => (Vec::new(), Some(error)),
+        };
+        if let Some(error) = error {
+            let _ = failed(req, error, &to, &from)?;
+        }
+        call.out = out;
+    }
+    Ok(HandlerStatus::Success)
 }
 
 /// `iconv_set_encoding(string $type, string $encoding): bool`, which
