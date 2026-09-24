@@ -26,6 +26,7 @@ mod engine;
 mod exec;
 mod fiber;
 mod handlers;
+mod interfaces;
 mod interrupt;
 mod natives;
 mod ops;

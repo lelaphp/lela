@@ -9025,6 +9025,11 @@ pub(crate) fn fe_reset_r<T: Tier>(
         }
         return Ok(advance(req, frame));
     }
+    if let Some(object) = subject.as_object()
+        && crate::interfaces::is_traversable(req, object.class())
+    {
+        return fe_reset_iterator(req, frame, code, op, *object);
+    }
     if let Some(object) = subject.as_object() {
         if let Err(thrown) = req.separate_object_properties(*object) {
             return threw(req, frame, &thrown);
@@ -9113,6 +9118,9 @@ pub(crate) fn fe_fetch_r<T: Tier>(
         )));
     };
     let held = at.read();
+    if held.fe_pos() >= ITERATOR_FIRST {
+        return fe_fetch_iterator(req, frame, code, op, held);
+    }
     let found = if let Some(object) = Value::of_zval(held).as_object() {
         match req.object_property_from(*object, held.fe_pos()) {
             Ok(found) => found,
@@ -11730,6 +11738,122 @@ pub(crate) fn make_ref<T: Tier>(
     };
     let previous = req.set_slot(frame, out, held);
     req.release(previous);
+    Ok(advance(req, frame))
+}
+
+/// The `Z_FE_POS` of a `VAR` that holds an iterator and not an array or
+/// an object walked by its properties, php's `iter->index` in the three
+/// states `zend_fe_fetch_object_helper` reads it in: the first fetch
+/// still to come, which serves no `next()`; a fetch made; and the end,
+/// which the reset found when `valid()` answered `false` there. A
+/// property walk's position is an index into a property table and never
+/// reaches them.
+const ITERATOR_FIRST: u32 = u32::MAX - 2;
+const ITERATOR_FETCHED: u32 = u32::MAX - 1;
+const ITERATOR_ENDED: u32 = u32::MAX;
+
+/// `zend_fe_reset_iterator` (`Z/Zend/zend_execute.c:5236`) over a
+/// `Traversable` object: its iterator ([`crate::interfaces::iterator_of`])
+/// takes the `VAR`, then `rewind()` and `valid()` are served, and the
+/// operand is given up as `FREE_OP1` gives it up.
+fn fe_reset_iterator(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    object: PhpObject,
+) -> Edge {
+    let iterator = crate::interfaces::iterator_of(req, object);
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    let iterator = match iterator {
+        Ok(iterator) => iterator,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    let slot = exec::temporary_slot(code, op.out);
+    let previous = req.set_slot(frame, slot, iterator.as_value());
+    req.release(previous);
+    let valid = crate::interfaces::step(req, iterator, b"rewind")
+        .map(|rewound| req.release(rewound))
+        .and_then(|()| crate::interfaces::valid(req, iterator));
+    let state = match valid {
+        Ok(true) => ITERATOR_FIRST,
+        Ok(false) => ITERATOR_ENDED,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    if let Some(cell) = req.slot_ptr(frame, slot) {
+        cell.set_fe_pos(state);
+    }
+    Ok(advance(req, frame))
+}
+
+/// The iterator arm of `zend_fe_fetch_object_helper`
+/// (`Z/Zend/zend_vm_def.h:7118`): past the first fetch `next()` and
+/// `valid()`, then `current()` and, where the opline keeps the key,
+/// `key()`; the jump to `extended_value` at the end.
+fn fe_fetch_iterator(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    held: php_heap::Zval,
+) -> Edge {
+    let slot = exec::temporary_slot(code, op.op1);
+    let Some(iterator) = Value::of_zval(held).as_object().copied() else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: FE_FETCH_R over an iterator VAR holding no object",
+        )));
+    };
+    let mut state = held.fe_pos();
+    if state == ITERATOR_FETCHED {
+        let moved = crate::interfaces::step(req, iterator, b"next")
+            .map(|moved| req.release(moved))
+            .and_then(|()| crate::interfaces::valid(req, iterator));
+        match moved {
+            Ok(true) => {}
+            Ok(false) => state = ITERATOR_ENDED,
+            Err(thrown) => return threw(req, frame, &thrown),
+        }
+    }
+    if let Some(cell) = req.slot_ptr(frame, slot) {
+        cell.set_fe_pos(if state == ITERATOR_ENDED {
+            ITERATOR_ENDED
+        } else {
+            ITERATOR_FETCHED
+        });
+    }
+    if state == ITERATOR_ENDED {
+        req.vm_mut().jump(frame, op.extended_value);
+        return Ok(Stepped::Same(frame));
+    }
+    let current = match crate::interfaces::step(req, iterator, b"current") {
+        Ok(current) => current,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    if op.out_type != OperandKind::Unused {
+        let key = match crate::interfaces::step(req, iterator, b"key") {
+            Ok(key) => key,
+            Err(thrown) => {
+                req.release(current);
+                return threw(req, frame, &thrown);
+            }
+        };
+        let bare = key.deref();
+        req.addref(&bare);
+        req.release(key);
+        let key = bare;
+        let out = exec::temporary_slot(code, op.out);
+        let previous = req.set_slot(frame, out, key);
+        req.release(previous);
+    }
+    let value = current.deref();
+    req.addref(&value);
+    req.release(current);
+    if let Some(r) = req.slot(frame, op.op2).as_php_ref() {
+        req.reference_set(r.heap(), value);
+    } else {
+        let garbage = req.set_slot(frame, op.op2, value);
+        req.release(garbage);
+    }
     Ok(advance(req, frame))
 }
 
