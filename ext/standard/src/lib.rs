@@ -83,6 +83,7 @@ mod r#type;
 mod uniqid;
 mod url;
 mod user_filters;
+mod userspace;
 mod uuencode;
 mod var;
 mod versioning;
@@ -265,6 +266,7 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
         proc_open::natives(),
         sockets::natives(),
         user_filters::natives(),
+        userspace::natives(),
     ]
     .into_iter()
     .flatten()
@@ -281,6 +283,7 @@ fn file_constants() -> Vec<ConstDecl> {
         dir::constants(),
         sockets::constants(),
         user_filters::constants(),
+        userspace::constants(),
     ]
     .into_iter()
     .flatten()

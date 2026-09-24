@@ -313,7 +313,12 @@ fn php_stat(req: &mut Request, filename: &[u8], ty: Fs) -> Result<Value, Thrown>
         return Ok(Value::bool(false));
     }
     let link = ty.is_link_operation();
-    let Some(sb) = req.url_stat(filename, link, true)? else {
+    let answered = if ty.is_exists_check() {
+        req.url_stat_quiet(filename, link)?
+    } else {
+        req.url_stat(filename, link, true)?
+    };
+    let Some(sb) = answered else {
         if !ty.is_exists_check() {
             let text = format!(
                 "{}stat failed for {}",

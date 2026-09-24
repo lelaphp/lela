@@ -37,10 +37,11 @@ use php_heap::ResourceType;
 
 use crate::api::raising::{Level, Thrown, raise, throw, warning};
 use crate::api::request::{Cast, FdStream, FilterFlags, Request, Stream, Whence};
-use crate::api::values::{Key, PhpArray, PhpString, Resource, Value};
+use crate::api::values::{ClassId, Key, PhpArray, PhpString, Resource, Value};
 
 mod filters;
 mod sockets;
+pub(crate) mod userspace;
 
 /// `FG(def_chunk_size)`, which `PHP_SOCK_CHUNK_SIZE` sets at 8192
 /// (`Z/ext/standard/file.c:131`): what one fill of the read buffer asks
@@ -124,7 +125,7 @@ pub(crate) trait Ops: Send {
 
     /// `php_plain_files_dirstream_read`: the next entry's name, `None`
     /// past the last and for a kind that is no directory.
-    fn read_dir(&mut self) -> Option<Vec<u8>> {
+    fn read_dir(&mut self, _req: &mut Request) -> Option<Vec<u8>> {
         None
     }
 
@@ -152,7 +153,26 @@ pub(crate) trait Ops: Send {
     /// `PHP_STREAM_OPTION_BLOCKING`: whether the kind blocked before, or
     /// `None` for php's `-1`, a kind with no such option or an fd that
     /// refused it.
-    fn set_blocking(&mut self, _blocking: bool) -> Option<bool> {
+    fn set_blocking(&mut self, _req: &mut Request, _blocking: bool) -> Option<bool> {
+        None
+    }
+
+    /// Whether the last `ops->seek` found the kind cannot seek after all,
+    /// which sets `PHP_STREAM_FLAG_NO_SEEK`, as a user-space stream with
+    /// no `stream_seek` does.
+    fn lost_seek(&self) -> bool {
+        false
+    }
+
+    /// `stream->wrapperdata`, which `stream_get_meta_data` prints as
+    /// `wrapper_data`: a user-space stream's instance.
+    fn wrapper_data(&self) -> Option<Value> {
+        None
+    }
+
+    /// `php_userstreamop_cast`'s `stream_cast`: the stream a user-space
+    /// stream says it is to be cast as, `None` for every other kind.
+    fn user_cast(&mut self, _req: &mut Request, _select: bool) -> Option<Stream> {
         None
     }
 
@@ -490,15 +510,23 @@ impl PhpStream {
                 Some(Whence::Set) if offset < 0 => return false,
                 other => (offset, other),
             };
+            if !self.writefilters.is_empty() {
+                self.flush(req);
+            }
             let Self { ops, position, .. } = self;
             if let Some(sought) = ops.seek(req, offset, whence, position) {
-                if sought {
-                    self.eof = false;
-                    self.fatal_error = false;
+                if self.ops.lost_seek() {
+                    self.flags.no_seek = true;
                 }
-                self.readpos = 0;
-                self.writepos = 0;
-                return sought;
+                if !self.flags.no_seek || sought {
+                    if sought {
+                        self.eof = false;
+                        self.fatal_error = false;
+                    }
+                    self.readpos = 0;
+                    self.writepos = 0;
+                    return sought;
+                }
             }
         }
         if whence == Some(Whence::Cur) && offset >= 0 {
@@ -657,8 +685,8 @@ impl PhpStream {
 
     /// `_php_stream_readdir` (`Z/main/streams/streams.c:2221`): the next
     /// entry, which `php_stream_read` of one `php_stream_dirent` is.
-    pub(crate) fn read_dir(&mut self) -> Option<Vec<u8>> {
-        self.ops.read_dir()
+    pub(crate) fn read_dir(&mut self, req: &mut Request) -> Option<Vec<u8>> {
+        self.ops.read_dir(req)
     }
 
     /// `_php_stream_flush` (`Z/main/streams/streams.c:1316`): the write
@@ -710,6 +738,11 @@ impl PhpStream {
                 warning(req, &text);
             }
             return None;
+        }
+        if let Some(inner) = self.ops.user_cast(req, cast == Cast::Select) {
+            return req
+                .stream_op(inner, |req, s| s.cast(req, cast, true))
+                .flatten();
         }
         let Some(fd) = self.ops.fd().map(|fd| fd.as_raw_fd()) else {
             if warn {
@@ -1383,7 +1416,7 @@ impl Ops for Stdio {
     /// `php_stdiop_set_option`'s `PHP_STREAM_OPTION_BLOCKING`
     /// (`Z/main/streams/plain_wrapper.c:803`): `O_NONBLOCK` set or
     /// cleared on the fd, and whether it blocked before.
-    fn set_blocking(&mut self, blocking: bool) -> Option<bool> {
+    fn set_blocking(&mut self, _req: &mut Request, blocking: bool) -> Option<bool> {
         let file = self.file.as_ref()?;
         let was = php_heap::set_fd_blocking(file.as_fd(), blocking).ok()?;
         self.blocking = blocking;
@@ -1690,40 +1723,99 @@ fn temp(req: &mut Request, mode: TempMode, smax: usize) -> Result<Stream, Thrown
 
 /// Which wrapper `php_stream_locate_url_wrapper`
 /// (`Z/main/streams/streams.c:2010`) found for a path: the plain files
-/// wrapper for no scheme and for `file://`, the `php://` wrapper, one
-/// the program registered, or none.
+/// wrapper, the `php://` wrapper, one an extension registered (its place
+/// in [`Request::wrappers`]), one a program registered with
+/// `stream_wrapper_register`, or none.
+#[derive(Clone)]
 pub(crate) enum Located {
     Plain,
     Php,
-    User(usize),
+    Ext(usize),
+    Space(userspace::UserWrapper),
     Nothing,
 }
 
+/// One row of a request's wrapper table, `url_stream_wrappers_hash` or
+/// `FG(stream_wrappers)`: a wrapper under its scheme.
+#[derive(Clone)]
+pub(crate) struct Registered {
+    pub(crate) scheme: Vec<u8>,
+    pub(crate) wrapper: Located,
+}
+
+/// Whether two rows name the same wrapper, as `zend_hash_find_ptr(...) ==
+/// wrapper` compares them.
+fn same_wrapper(a: &Located, b: &Located) -> bool {
+    match (a, b) {
+        (Located::Plain, Located::Plain) | (Located::Php, Located::Php) => true,
+        (Located::Ext(x), Located::Ext(y)) => x == y,
+        _ => false,
+    }
+}
+
 impl Request {
+    /// `url_stream_wrappers_hash`, the wrappers every request starts
+    /// with: `php`, `file`, then those the extensions registered.
+    pub(crate) fn global_wrappers(&self) -> Vec<Registered> {
+        let mut table = vec![
+            Registered {
+                scheme: b"php".to_vec(),
+                wrapper: Located::Php,
+            },
+            Registered {
+                scheme: b"file".to_vec(),
+                wrapper: Located::Plain,
+            },
+        ];
+        for (at, w) in self.wrappers.iter().enumerate() {
+            table.push(Registered {
+                scheme: w.scheme.as_bytes().to_vec(),
+                wrapper: Located::Ext(at),
+            });
+        }
+        table
+    }
+
+    /// `php_stream_get_url_stream_wrappers_hash`: the request's own table
+    /// once a program changed it, the global one before.
+    pub(crate) fn wrapper_table(&self) -> Vec<Registered> {
+        self.url_wrappers
+            .clone()
+            .unwrap_or_else(|| self.global_wrappers())
+    }
+
+    /// The row a scheme names in a table, `zend_hash_str_find_ptr`.
+    fn wrapper_row(table: &[Registered], scheme: &[u8]) -> Option<Located> {
+        table
+            .iter()
+            .find(|r| r.scheme == scheme)
+            .map(|r| r.wrapper.clone())
+    }
+
     /// `php_stream_locate_url_wrapper` (`Z/main/streams/streams.c:2010`):
     /// a scheme is alphanumerics with `+`, `-` and `.`, two bytes or
-    /// more, followed by `://`; one nobody registered is php's warning
-    /// and then the plain files wrapper over the path as written;
-    /// `file://` with a host that is not `localhost` is php's warning and
-    /// no wrapper, and otherwise the path after the slashes.
+    /// more, followed by `://`, looked up as written and then lowered;
+    /// one nobody registered is php's warning and then the path as
+    /// written for the plain files wrapper. `file://` (or any scheme
+    /// `strncasecmp` takes for it) with a host that is not `localhost`
+    /// is php's warning and no wrapper, and otherwise the path after the
+    /// slashes; once a program changed the table, a plain path goes to
+    /// whatever it registered as `file` and to none where it unregistered
+    /// that, php's `file:// wrapper is disabled`. A wrapper registered
+    /// as a URL wrapper under `allow_url_fopen=0` is refused.
     pub(crate) fn locate_wrapper(&mut self, path: &[u8]) -> (Located, Vec<u8>) {
         let n = path
             .iter()
             .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
             .count();
-        let protocol = (n > 1 && path.get(n) == Some(&b':') && path[n + 1..].starts_with(b"//"))
-            .then(|| path[..n].to_ascii_lowercase());
+        let mut protocol =
+            (n > 1 && path.get(n) == Some(&b':') && path[n + 1..].starts_with(b"//"))
+                .then(|| path[..n].to_vec());
+        let table = self.wrapper_table();
         let mut wrapper = None;
         if let Some(scheme) = &protocol {
-            wrapper = match scheme.as_slice() {
-                b"php" => Some(Located::Php),
-                b"file" => Some(Located::Plain),
-                _ => self
-                    .wrappers
-                    .iter()
-                    .position(|w| w.scheme.as_bytes().eq_ignore_ascii_case(scheme))
-                    .map(Located::User),
-            };
+            wrapper = Request::wrapper_row(&table, scheme)
+                .or_else(|| Request::wrapper_row(&table, &scheme.to_ascii_lowercase()));
             if wrapper.is_none() {
                 let text = format!(
                     "{}(): Unable to find the wrapper \"{}\" - did you forget to enable it when you configured PHP?",
@@ -1731,10 +1823,15 @@ impl Request {
                     String::from_utf8_lossy(&scheme[..scheme.len().min(31)])
                 );
                 warning(self, &text);
+                protocol = None;
             }
         }
-        match wrapper {
-            Some(Located::Plain) => {
+        let is_file = protocol
+            .as_ref()
+            .is_none_or(|p| p.len() <= 4 && p.eq_ignore_ascii_case(&b"file"[..p.len()]));
+        if is_file {
+            let mut local = path.to_vec();
+            if protocol.is_some() {
                 let localhost =
                     path.len() >= 17 && path[..17].eq_ignore_ascii_case(b"file://localhost/");
                 if !localhost && path.get(n + 3).is_some_and(|b| *b != b'/') {
@@ -1753,11 +1850,133 @@ impl Request {
                 while path.get(at + 1) == Some(&b'/') {
                     at += 1;
                 }
-                (Located::Plain, path[at..].to_vec())
+                local = path[at..].to_vec();
             }
-            Some(found) => (found, path.to_vec()),
-            None => (Located::Plain, path.to_vec()),
+            if self.url_wrappers.is_some() {
+                if let Some(found) = wrapper.or_else(|| Request::wrapper_row(&table, b"file")) {
+                    return (found, local);
+                }
+                let text = format!(
+                    "{}(): file:// wrapper is disabled in the server configuration",
+                    self.active_native()
+                );
+                warning(self, &text);
+                return (Located::Nothing, local);
+            }
+            return (Located::Plain, local);
         }
+        let Some(found) = wrapper else {
+            return (Located::Plain, path.to_vec());
+        };
+        if let Located::Space(user) = &found
+            && user.is_url
+            && !self
+                .ini_get(b"allow_url_fopen")
+                .is_none_or(Request::ini_parse_bool)
+        {
+            let text = format!(
+                "{}(): {}:// wrapper is disabled in the server configuration by allow_url_fopen=0",
+                self.active_native(),
+                String::from_utf8_lossy(&path[..n])
+            );
+            warning(self, &text);
+            return (Located::Nothing, path.to_vec());
+        }
+        (found, path.to_vec())
+    }
+
+    /// `php_register_url_stream_wrapper_volatile` and its three callers'
+    /// checks: a scheme of alphanumerics, `+`, `-` and `.`; the table
+    /// the request's own from the first change on.
+    fn own_wrappers(&mut self) -> &mut Vec<Registered> {
+        if self.url_wrappers.is_none() {
+            self.url_wrappers = Some(self.global_wrappers());
+        }
+        self.url_wrappers.get_or_insert_with(Vec::new)
+    }
+
+    /// `stream_wrapper_register()` (`Z/main/streams/userspace.c:437`) past
+    /// its parameters: `class` registered under `protocol` for the rest of
+    /// the request, a URL wrapper where `flags` holds `STREAM_IS_URL`;
+    /// php's `Protocol %s:// is already defined.` where the scheme is
+    /// taken and `Invalid protocol scheme specified` where it is not one.
+    pub fn wrapper_register(&mut self, protocol: &[u8], class: ClassId, flags: i64) -> bool {
+        let valid = protocol
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'));
+        let taken = self.wrapper_table().iter().any(|r| r.scheme == protocol);
+        if valid && !taken {
+            let wrapper = Located::Space(userspace::UserWrapper::new(
+                class,
+                flags & 1 != 0,
+                protocol.to_vec(),
+            ));
+            self.own_wrappers().push(Registered {
+                scheme: protocol.to_vec(),
+                wrapper,
+            });
+            return true;
+        }
+        let shown = String::from_utf8_lossy(protocol);
+        let text = if taken {
+            format!("Protocol {shown}:// is already defined.")
+        } else {
+            let name = self.class_name(class);
+            format!(
+                "Invalid protocol scheme specified. Unable to register wrapper class {name} to {shown}://"
+            )
+        };
+        crate::api::raising::docref(self, Level::Warning, &text);
+        false
+    }
+
+    /// `stream_wrapper_unregister()` (`Z/main/streams/userspace.c:473`):
+    /// the scheme taken out of the request's table, a built-in one
+    /// among them, and php's `Unable to unregister protocol %s://` where
+    /// it is not there.
+    pub fn wrapper_unregister(&mut self, protocol: &[u8]) -> bool {
+        let table = self.own_wrappers();
+        let Some(at) = table.iter().position(|r| r.scheme == protocol) else {
+            let text = format!(
+                "Unable to unregister protocol {}://",
+                String::from_utf8_lossy(protocol)
+            );
+            crate::api::raising::docref(self, Level::Warning, &text);
+            return false;
+        };
+        table.remove(at);
+        true
+    }
+
+    /// `stream_wrapper_restore()` (`Z/main/streams/userspace.c:499`): the
+    /// built-in wrapper put back under its scheme; php's `%s:// never
+    /// existed, nothing to restore` for a scheme no built-in has, and its
+    /// notice `%s:// was never changed, nothing to restore`, `true`, where
+    /// the table has the built-in one already.
+    pub fn wrapper_restore(&mut self, protocol: &[u8]) -> bool {
+        let shown = String::from_utf8_lossy(protocol).into_owned();
+        let Some(original) = Request::wrapper_row(&self.global_wrappers(), protocol) else {
+            let text = format!("{shown}:// never existed, nothing to restore");
+            crate::api::raising::docref(self, Level::Warning, &text);
+            return false;
+        };
+        let unchanged = match &self.url_wrappers {
+            None => true,
+            Some(table) => Request::wrapper_row(table, protocol)
+                .is_some_and(|current| same_wrapper(&current, &original)),
+        };
+        if unchanged {
+            let text = format!("{shown}:// was never changed, nothing to restore");
+            crate::api::raising::docref(self, Level::Notice, &text);
+            return true;
+        }
+        let table = self.own_wrappers();
+        table.retain(|r| r.scheme != protocol);
+        table.push(Registered {
+            scheme: protocol.to_vec(),
+            wrapper: original,
+        });
+        true
     }
 
     /// `_php_stream_open_wrapper_ex` (`Z/main/streams/streams.c:2233`)
@@ -1795,7 +2014,7 @@ impl Request {
                 },
             ),
             Located::Php => (PHP_WRAPPER, php_open(self, &path_to_open, mode)?),
-            Located::User(at) => {
+            Located::Ext(at) => {
                 let open = self.wrappers[at].open;
                 (
                     "user-space",
@@ -1803,6 +2022,16 @@ impl Request {
                         .ok_or_else(|| String::from("operation failed")),
                 )
             }
+            Located::Space(user) => (
+                "user-space",
+                userspace::open(
+                    self,
+                    &user,
+                    &path_to_open,
+                    mode,
+                    i64::from(use_include_path),
+                )?,
+            ),
             Located::Nothing => ("", Err(String::from("no suitable wrapper could be found"))),
         };
         match opened {
@@ -1861,13 +2090,17 @@ impl Request {
                 },
             ),
             Located::Php => (PHP_WRAPPER, Err(String::from("not implemented"))),
-            Located::User(at) => match self.wrappers[at].open_dir {
+            Located::Ext(at) => match self.wrappers[at].open_dir {
                 Some(open_dir) => (
                     "user-space",
                     open_dir(self, &path_to_open)?.ok_or_else(|| String::from("operation failed")),
                 ),
                 None => ("user-space", Err(String::from("not implemented"))),
             },
+            Located::Space(user) => (
+                "user-space",
+                userspace::open_dir(self, &user, &path_to_open)?,
+            ),
             Located::Nothing => ("", Err(String::from("no suitable wrapper could be found"))),
         };
         match opened {
@@ -1903,6 +2136,7 @@ impl Request {
             MetaData::Own => None,
         };
         let wrapper = s.wrapper;
+        let wrapper_data = s.ops.wrapper_data();
         let stream_type = s.ops.label();
         let mode = s.mode.clone();
         let unread = i64::try_from(s.writepos - s.readpos).unwrap_or(i64::MAX);
@@ -1913,6 +2147,9 @@ impl Request {
             entries.push(("timed_out", MetaValue::Bool(timed_out)));
             entries.push(("blocked", MetaValue::Bool(blocked)));
             entries.push(("eof", MetaValue::Bool(eof)));
+        }
+        if let Some(data) = wrapper_data {
+            entries.push(("wrapper_data", MetaValue::Value(data)));
         }
         if !wrapper.is_empty() {
             entries.push(("wrapper_type", MetaValue::Str(wrapper.as_bytes().to_vec())));
@@ -1932,6 +2169,10 @@ impl Request {
                 MetaValue::Bool(b) => Value::bool(b),
                 MetaValue::Int(n) => Value::int(n),
                 MetaValue::Str(bytes) => Value::string(PhpString::new(self, &bytes)?),
+                MetaValue::Value(value) => {
+                    self.addref(&value);
+                    value
+                }
             };
             let key = Key::Str(PhpString::new(self, key.as_bytes())?);
             out.set(self, key, value)?;
@@ -2110,6 +2351,8 @@ enum MetaValue {
     Bool(bool),
     Int(i64),
     Str(Vec<u8>),
+    /// A value of the request's, one more owner taken for the array.
+    Value(Value),
 }
 
 // ---------------------------------------------------------- directories
@@ -2167,7 +2410,7 @@ impl Ops for Dir {
 
     /// `php_plain_files_dirstream_read`: the next name `readdir(3)`
     /// gives, `.` and `..` first, and `None` past the last.
-    fn read_dir(&mut self) -> Option<Vec<u8>> {
+    fn read_dir(&mut self, _req: &mut Request) -> Option<Vec<u8>> {
         use std::os::unix::ffi::OsStrExt;
         if self.dots < 2 {
             self.dots += 1;

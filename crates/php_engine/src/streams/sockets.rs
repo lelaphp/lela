@@ -320,7 +320,7 @@ impl Ops for Socket {
 
     /// `PHP_STREAM_OPTION_BLOCKING`: `php_set_sock_blocking`, and the
     /// old `is_blocked`.
-    fn set_blocking(&mut self, blocking: bool) -> Option<bool> {
+    fn set_blocking(&mut self, _req: &mut Request, blocking: bool) -> Option<bool> {
         let old = self.is_blocked;
         self.sock.as_ref()?.set_blocking(blocking).ok()?;
         self.is_blocked = blocking;
@@ -902,7 +902,7 @@ impl Stream {
     /// `O_NONBLOCK` set or cleared on a socket or a pipe, and `false` for
     /// php's `-1`, a kind with no such option.
     pub fn set_blocking(self, req: &mut Request, blocking: bool) -> bool {
-        req.stream_op(self, |_, stream| stream.ops.set_blocking(blocking))
+        req.stream_op(self, |req, stream| stream.ops.set_blocking(req, blocking))
             .flatten()
             .is_some()
     }

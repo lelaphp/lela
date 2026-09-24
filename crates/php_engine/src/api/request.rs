@@ -331,7 +331,10 @@ impl Stream {
     /// `php_stream_readdir`: the next entry's name, `.` and `..` first,
     /// `None` past the last (`readdir` answers `false`).
     pub fn read_dir(self, req: &mut Request) -> Result<Option<PhpString>, Thrown> {
-        match req.stream_op(self, |_, stream| stream.read_dir()).flatten() {
+        match req
+            .stream_op(self, |req, stream| stream.read_dir(req))
+            .flatten()
+        {
             Some(name) => Ok(Some(PhpString::new(req, &name)?)),
             None => Ok(None),
         }
@@ -740,6 +743,13 @@ pub struct Request {
     /// never one row.
     next_ref_source: usize,
     pub(crate) wrappers: Vec<StreamWrapper>,
+    /// `FG(stream_wrappers)`: the request's own wrapper table once a
+    /// program changed it, `None` while it has the built-in one.
+    pub(crate) url_wrappers: Option<Vec<crate::streams::Registered>>,
+    /// `FG(user_stream_current_filename)`: the path a user-space wrapper's
+    /// opener is opening, which the same path opened from inside it is
+    /// refused as.
+    pub(crate) user_stream_current: Option<Vec<u8>>,
     /// `FG(pclose_ret)`: what the last stream freed by its resource's
     /// destructor answered from its kind's close, which `pclose()` reads.
     pub(crate) pclose_ret: i32,
@@ -1019,6 +1029,8 @@ impl Request {
             ref_sources: Vec::new(),
             next_ref_source: 1,
             wrappers: Vec::new(),
+            url_wrappers: None,
+            user_stream_current: None,
             pclose_ret: 0,
             filters: Vec::new(),
             stream_thrown: None,
@@ -10004,7 +10016,15 @@ impl Request {
         link: bool,
         cached: bool,
     ) -> Result<Option<[i64; 13]>, Thrown> {
-        self.stat_url(path, link, cached)
+        self.stat_url(path, link, cached, false)
+    }
+
+    /// [`Request::url_stat`] with `cached`, as `php_stat` makes it for an
+    /// existence check, `file_exists` and the `is_*` natives: a
+    /// user-space wrapper's `url_stat` is handed
+    /// `STREAM_URL_STAT_QUIET` beside the link bit.
+    pub fn url_stat_quiet(&mut self, path: &[u8], link: bool) -> Result<Option<[i64; 13]>, Thrown> {
+        self.stat_url(path, link, true, true)
     }
 
     /// `php_clear_stat_cache`: the stat cache emptied, both entries.
