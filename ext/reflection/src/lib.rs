@@ -41,8 +41,8 @@
 //! payload [`Reflected`], which its class's `create_object` lays down
 //! (design §5.4), so the class it was asked about and the object it was
 //! made from are what the renderings read. An extension's `INI` block,
-//! `_extension_ini_string`, a closure's `Bound Variables` and
-//! `<iterateable>` are not rendered yet (#375).
+//! `_extension_ini_string` and a closure's `Bound Variables` are not
+//! rendered yet (#375).
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -3282,8 +3282,41 @@ fn value_string(req: &mut Request, value: &Value) -> String {
 /// its `@@ file start-end` line. `object` is php's `obj` argument, the
 /// instance an object reflector kept: it turns the header's word into
 /// `Object of class` and is the only thing that puts a `Dynamic
-/// properties` block there at all. `<iterateable>` is not rendered yet
-/// (#375).
+/// properties` block there at all. A class with `ce->get_iterator`,
+/// one `Traversable` through `Iterator` or `IteratorAggregate`, is
+/// marked `<iterateable>`.
+///
+/// ```php
+/// class A implements IteratorAggregate { function getIterator(): Iterator { yield 1; } }
+/// echo new ReflectionClass("A");
+/// ```
+/// ```expect
+/// Class [ <user> <iterateable> class A implements IteratorAggregate, Traversable ] {
+///   @@ %s 2-2
+///
+///   - Constants [0] {
+///   }
+///
+///   - Static properties [0] {
+///   }
+///
+///   - Static methods [0] {
+///   }
+///
+///   - Properties [0] {
+///   }
+///
+///   - Methods [1] {
+///     Method [ <user, prototype IteratorAggregate> public method getIterator ] {
+///       @@ %s 2 - 2
+///
+///       - Parameters [0] {
+///       }
+///       - Return [ Iterator ]
+///     }
+///   }
+/// }
+/// ```
 fn class_string(
     req: &mut Request,
     class: ClassId,
@@ -3448,6 +3481,17 @@ fn class_header(
         let _ = write!(out, ":{extension}");
     }
     out.push_str("> ");
+    // `ce->get_iterator`, which `zend_implement_iterator` and
+    // `zend_implement_aggregate` give a class that is `Traversable`
+    // through `Iterator` or `IteratorAggregate`, and `Generator` has.
+    let iterable = matches!(decl.kind, ClassKind::Class | ClassKind::Enum)
+        && lookup_class(req, b"Traversable")
+            .ok()
+            .flatten()
+            .is_some_and(|traversable| class_is(req, class, traversable, 0));
+    if iterable {
+        out.push_str("<iterateable> ");
+    }
     match decl.kind {
         ClassKind::Interface => out.push_str("interface "),
         ClassKind::Trait => out.push_str("trait "),
