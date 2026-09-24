@@ -13,9 +13,10 @@
     clippy::multiple_unsafe_ops_per_block
 )]
 
-use std::ffi::CString;
+use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
+use std::ptr::{self, NonNull};
 
 /// `F_OK`, `R_OK`, `W_OK` and `X_OK`: what `access(2)` is asked.
 pub(super) const F_OK: i32 = libc::F_OK;
@@ -427,4 +428,363 @@ pub(super) fn interfaces() -> std::io::Result<Vec<InterfaceAddress>> {
     // nothing read from it is used after.
     unsafe { libc::freeifaddrs(head) };
     Ok(found)
+}
+
+// ---- dns.c: the darwin resolver of `<dns.h>`, `dn_expand` and
+// `dn_skipname` from libresolv, `getaddrinfo`, `getnameinfo`,
+// `inet_pton` and `gethostname`.
+
+/// The opaque `dns_handle_t` of `<dns.h>`, `Z/ext/standard/dns.c:819`.
+type DnsHandleT = *const c_void;
+
+#[link(name = "resolv")]
+unsafe extern "C" {
+    /// `dns_open`, `<dns.h>`, called at `Z/ext/standard/dns.c:416`.
+    fn dns_open(name: *const c_char) -> DnsHandleT;
+    /// `dns_free`, `<dns.h>`, called by `php_dns_free_handle`
+    /// (`Z/ext/standard/php_dns.h:25`).
+    fn dns_free(dns: DnsHandleT);
+    /// `dns_search`, `<dns.h>`, called by `php_dns_search`
+    /// (`Z/ext/standard/php_dns.h:23`).
+    fn dns_search(
+        dns: DnsHandleT,
+        name: *const c_char,
+        dnsclass: u32,
+        dnstype: u32,
+        buf: *mut c_char,
+        len: u32,
+        from: *mut libc::sockaddr,
+        fromlen: *mut u32,
+    ) -> i32;
+    /// `dn_expand`, which `<resolv.h>` renames `res_9_dn_expand` on darwin;
+    /// called at `Z/ext/standard/dns.c:461`.
+    fn res_9_dn_expand(
+        msg: *const u8,
+        eom: *const u8,
+        src: *const u8,
+        dst: *mut c_char,
+        dstsiz: c_int,
+    ) -> c_int;
+    /// `dn_skipname`, which `<resolv.h>` renames `res_9_dn_skipname` on
+    /// darwin; called at `Z/ext/standard/dns.c:996`.
+    fn res_9_dn_skipname(ptr: *const u8, eom: *const u8) -> c_int;
+}
+
+unsafe extern "C" {
+    /// `h_errno`, `<netdb.h>`, read by `php_dns_errno`
+    /// (`Z/ext/standard/php_dns.h:27`): a plain global on darwin, set by
+    /// `dns_search`.
+    static mut h_errno: c_int;
+    /// `inet_pton`, `<arpa/inet.h>`, called at `Z/ext/standard/dns.c:181`.
+    fn inet_pton(af: c_int, src: *const c_char, dst: *mut c_void) -> c_int;
+}
+
+/// The `from`/`fromsize` pair php keeps for `dns_search` across one call of
+/// a native (`Z/ext/standard/dns.c:817`): `fromsize` is set once and
+/// `dns_search` may shrink it.
+pub(super) struct DnsFrom {
+    /// `struct sockaddr_storage from`.
+    storage: libc::sockaddr_storage,
+    /// `uint32_t fromsize = sizeof(from)`.
+    len: u32,
+}
+
+impl DnsFrom {
+    /// A zeroed `sockaddr_storage` and its size, as `Z/ext/standard/dns.c:817`.
+    pub(super) fn new() -> DnsFrom {
+        // SAFETY: `sockaddr_storage` is a C struct of integers and padding
+        // bytes, for which all-zero is a valid value.
+        let storage = unsafe { std::mem::zeroed::<libc::sockaddr_storage>() };
+        let len = u32::try_from(size_of::<libc::sockaddr_storage>()).unwrap_or(0);
+        DnsFrom { storage, len }
+    }
+}
+
+/// An open `dns_handle_t`, freed with `dns_free` when dropped
+/// (`php_dns_free_handle`, `Z/ext/standard/php_dns.h:25`).
+pub(super) struct DnsHandle(NonNull<c_void>);
+
+impl DnsHandle {
+    /// `dns_open(NULL)`, `Z/ext/standard/dns.c:416`; `None` where it gives
+    /// `NULL`.
+    pub(super) fn open() -> Option<DnsHandle> {
+        // SAFETY: `dns_open` takes `NULL` for the default resolver setup and
+        // returns an owned pointer or `NULL`.
+        let h = unsafe { dns_open(ptr::null()) };
+        NonNull::new(h.cast_mut()).map(DnsHandle)
+    }
+
+    /// `php_dns_search`, `Z/ext/standard/php_dns.h:23`: `dns_search` into
+    /// `buf`. `Ok` is the length of the answer; `Err` is `h_errno`, read
+    /// right after the call as `php_dns_errno` does.
+    pub(super) fn search(
+        &self,
+        name: &CStr,
+        class: u32,
+        ty: u32,
+        buf: &mut [u8],
+        from: &mut DnsFrom,
+    ) -> Result<usize, c_int> {
+        let len = u32::try_from(buf.len()).unwrap_or(u32::MAX);
+        let from_ptr = (&raw mut from.storage).cast::<libc::sockaddr>();
+        // SAFETY: the pointer came from `dns_open` and is not yet freed;
+        // `name` is NUL-terminated; `buf` is writable for `len` bytes, which
+        // is at most its length; `from`/`fromlen` point at a live
+        // `sockaddr_storage` and its size.
+        let n = unsafe {
+            dns_search(
+                self.0.as_ptr(),
+                name.as_ptr(),
+                class,
+                ty,
+                buf.as_mut_ptr().cast::<c_char>(),
+                len,
+                from_ptr,
+                &raw mut from.len,
+            )
+        };
+        if n < 0 {
+            return Err(last_h_errno());
+        }
+        Ok(usize::try_from(n).unwrap_or(0).min(buf.len()))
+    }
+}
+
+impl Drop for DnsHandle {
+    /// `dns_free`, `Z/ext/standard/php_dns.h:25`.
+    fn drop(&mut self) {
+        // SAFETY: the pointer came from `dns_open` and is freed once, here.
+        unsafe { dns_free(self.0.as_ptr()) }
+    }
+}
+
+/// The value of `h_errno`, `Z/ext/standard/php_dns.h:27`.
+fn last_h_errno() -> c_int {
+    let p = &raw const h_errno;
+    // SAFETY: `h_errno` is a C `int` that lives for the whole process; it
+    // is read by value, with no reference kept.
+    unsafe { p.read() }
+}
+
+/// `dn_expand(msg, msg + msg.len(), msg + pos, name, cap)`, as
+/// `Z/ext/standard/dns.c:461` calls it: the length of
+/// the compressed name at `pos` and the name, or `None` where libresolv
+/// gives -1. A `pos` at or past the end is -1, as `ns_name_unpack` checks.
+pub(super) fn dn_expand(msg: &[u8], pos: usize, cap: usize) -> Option<(usize, Vec<u8>)> {
+    let tail = msg.get(pos..)?;
+    if tail.is_empty() {
+        return None;
+    }
+    let mut dst = vec![0u8; cap.max(1)];
+    let size = c_int::try_from(cap).unwrap_or(c_int::MAX);
+    let range = msg.as_ptr_range();
+    // SAFETY: `msg..eom` is one live slice and `src` lies inside it;
+    // libresolv reads only inside it and writes at most `size` bytes, no
+    // more than `dst` holds, NUL included.
+    let n = unsafe {
+        res_9_dn_expand(
+            range.start,
+            range.end,
+            tail.as_ptr(),
+            dst.as_mut_ptr().cast::<c_char>(),
+            size,
+        )
+    };
+    let n = usize::try_from(n).ok()?;
+    let len = dst.iter().position(|&b| b == 0).unwrap_or(dst.len());
+    dst.truncate(len);
+    Some((n, dst))
+}
+
+/// `dn_skipname(msg + pos, msg + msg.len())`, as
+/// `Z/ext/standard/dns.c:996` calls it: the length of the compressed
+/// name at `pos`, or -1. A `pos` past the end is -1 and a `pos` at the end
+/// is 0, as `ns_name_skip` gives.
+pub(super) fn dn_skipname(msg: &[u8], pos: usize) -> c_int {
+    let Some(tail) = msg.get(pos..) else {
+        return -1;
+    };
+    let range = tail.as_ptr_range();
+    // SAFETY: `ptr..eom` is one live slice; libresolv reads only below
+    // `eom`.
+    unsafe { res_9_dn_skipname(range.start, range.end) }
+}
+
+/// `gethostname(buf, sizeof(buf))` into a buffer of `size` bytes: the name
+/// up to its NUL, or the `errno` and `strerror(errno)` of a failure
+/// (`Z/ext/standard/dns.c:131`).
+pub(super) fn gethostname(size: usize) -> Result<Vec<u8>, (c_int, Vec<u8>)> {
+    let mut buf = vec![0u8; size];
+    // SAFETY: `buf` is writable for `buf.len()` bytes.
+    let rc = unsafe { libc::gethostname(buf.as_mut_ptr().cast::<c_char>(), buf.len()) };
+    if rc != 0 {
+        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        return Err((errno, strerror(errno)));
+    }
+    let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    buf.truncate(len);
+    Ok(buf)
+}
+
+/// `strerror(errnum)` of `Z/ext/standard/dns.c:132`, through `strerror_r`.
+fn strerror(errnum: c_int) -> Vec<u8> {
+    let mut buf = vec![0u8; 256];
+    // SAFETY: `buf` is writable for `buf.len()` bytes; `strerror_r` writes a
+    // NUL-terminated text no longer than that.
+    let rc = unsafe { libc::strerror_r(errnum, buf.as_mut_ptr().cast::<c_char>(), buf.len()) };
+    if rc != 0 && buf.first() == Some(&0) {
+        return format!("Unknown error: {errnum}").into_bytes();
+    }
+    let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    buf.truncate(len);
+    buf
+}
+
+/// `inet_pton(AF_INET6, ip, &sa6.sin6_addr)` of `Z/ext/standard/dns.c:181`;
+/// `None` where it gives 0.
+pub(super) fn inet_pton6(ip: &CStr) -> Option<[u8; 16]> {
+    let mut addr = libc::in6_addr { s6_addr: [0; 16] };
+    // SAFETY: `ip` is NUL-terminated and `addr` is a live `in6_addr`, the
+    // size `AF_INET6` writes.
+    let rc = unsafe {
+        inet_pton(
+            libc::AF_INET6,
+            ip.as_ptr(),
+            (&raw mut addr).cast::<c_void>(),
+        )
+    };
+    (rc != 0).then_some(addr.s6_addr)
+}
+
+/// `inet_pton(AF_INET, ip, &sa4.sin_addr)` of `Z/ext/standard/dns.c:188`;
+/// `None` where it gives 0. The address is in network order.
+pub(super) fn inet_pton4(ip: &CStr) -> Option<[u8; 4]> {
+    let mut addr = libc::in_addr { s_addr: 0 };
+    // SAFETY: `ip` is NUL-terminated and `addr` is a live `in_addr`, the
+    // size `AF_INET` writes.
+    let rc = unsafe { inet_pton(libc::AF_INET, ip.as_ptr(), (&raw mut addr).cast::<c_void>()) };
+    (rc != 0).then_some(addr.s_addr.to_ne_bytes())
+}
+
+/// `NI_MAXHOST`, `<netdb.h>`: the size of `out`, `Z/ext/standard/dns.c:177`.
+const NI_MAXHOST: usize = 1025;
+
+/// `getnameinfo(sa, len, out, NI_MAXHOST, NULL, 0, NI_NAMEREQD)` of
+/// `Z/ext/standard/dns.c:184`: the name,
+/// or `None` where it does not give 0.
+fn getnameinfo_namereqd(sa: *const libc::sockaddr, len: usize) -> Option<Vec<u8>> {
+    let mut out = vec![0u8; NI_MAXHOST];
+    let salen = libc::socklen_t::try_from(len).ok()?;
+    let hostlen = libc::socklen_t::try_from(out.len()).ok()?;
+    // SAFETY: the callers pass a pointer to a live socket address of `len`
+    // bytes; `out` is writable for `hostlen` bytes; no service is asked for.
+    let rc = unsafe {
+        libc::getnameinfo(
+            sa,
+            salen,
+            out.as_mut_ptr().cast::<c_char>(),
+            hostlen,
+            ptr::null_mut(),
+            0,
+            libc::NI_NAMEREQD,
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+    let n = out.iter().position(|&b| b == 0).unwrap_or(out.len());
+    out.truncate(n);
+    Some(out)
+}
+
+/// The `getnameinfo` of `Z/ext/standard/dns.c:184`: a zeroed
+/// `sockaddr_in6` with only its family and address set, as php leaves it.
+pub(super) fn name_of_v6(addr: [u8; 16]) -> Option<Vec<u8>> {
+    let sa6 = libc::sockaddr_in6 {
+        sin6_len: 0,
+        sin6_family: libc::sa_family_t::try_from(libc::AF_INET6).unwrap_or(0),
+        sin6_port: 0,
+        sin6_flowinfo: 0,
+        sin6_addr: libc::in6_addr { s6_addr: addr },
+        sin6_scope_id: 0,
+    };
+    getnameinfo_namereqd(
+        (&raw const sa6).cast::<libc::sockaddr>(),
+        size_of::<libc::sockaddr_in6>(),
+    )
+}
+
+/// The `getnameinfo` of `Z/ext/standard/dns.c:191`: a zeroed `sockaddr_in`
+/// with only its family and address set, as php leaves it.
+pub(super) fn name_of_v4(addr: [u8; 4]) -> Option<Vec<u8>> {
+    let sa4 = libc::sockaddr_in {
+        sin_len: 0,
+        sin_family: libc::sa_family_t::try_from(libc::AF_INET).unwrap_or(0),
+        sin_port: 0,
+        sin_addr: libc::in_addr {
+            s_addr: u32::from_ne_bytes(addr),
+        },
+        sin_zero: [0; 8],
+    };
+    getnameinfo_namereqd(
+        (&raw const sa4).cast::<libc::sockaddr>(),
+        size_of::<libc::sockaddr_in>(),
+    )
+}
+
+/// The list `getaddrinfo` gives, freed with `freeaddrinfo` when dropped; it
+/// stands in for the `hostent` of `Z/main/network.c:1410`.
+struct AddrList(*mut libc::addrinfo);
+
+impl Drop for AddrList {
+    /// `freeaddrinfo`, for the list of `Z/main/network.c:1410`.
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: the list came from a `getaddrinfo` that gave 0 and is
+            // freed once, here.
+            unsafe { libc::freeaddrinfo(self.0) }
+        }
+    }
+}
+
+/// The IPv4 addresses of `name`, in the order `getaddrinfo` lists them, for
+/// `php_network_gethostbyname` (`Z/main/network.c:1410`), which is
+/// `gethostbyname(3)` on darwin. `None` where the lookup fails. One entry
+/// per address: the hints ask for `SOCK_STREAM` only.
+pub(super) fn ipv4_addresses(name: &CStr) -> Option<Vec<[u8; 4]>> {
+    let hints = libc::addrinfo {
+        ai_flags: 0,
+        ai_family: libc::AF_INET,
+        ai_socktype: libc::SOCK_STREAM,
+        ai_protocol: 0,
+        ai_addrlen: 0,
+        ai_canonname: ptr::null_mut(),
+        ai_addr: ptr::null_mut(),
+        ai_next: ptr::null_mut(),
+    };
+    let mut res: *mut libc::addrinfo = ptr::null_mut();
+    // SAFETY: `name` is NUL-terminated, no service is asked for, `hints` is
+    // a live `addrinfo` with null pointers and `res` is a live out pointer.
+    let rc =
+        unsafe { libc::getaddrinfo(name.as_ptr(), ptr::null(), &raw const hints, &raw mut res) };
+    if rc != 0 {
+        return None;
+    }
+    let list = AddrList(res);
+    let mut out = Vec::new();
+    let mut cur = list.0.cast_const();
+    while !cur.is_null() {
+        // SAFETY: `cur` is a non-null node of the list `getaddrinfo` gave,
+        // alive until `list` drops.
+        let ai = unsafe { &*cur };
+        let wide = usize::try_from(ai.ai_addrlen).unwrap_or(0) >= size_of::<libc::sockaddr_in>();
+        if ai.ai_family == libc::AF_INET && !ai.ai_addr.is_null() && wide {
+            // SAFETY: `ai_addr` is non-null and points at `ai_addrlen`
+            // bytes, at least a `sockaddr_in`, of the same list.
+            let sa = unsafe { ptr::read_unaligned(ai.ai_addr.cast::<libc::sockaddr_in>()) };
+            out.push(sa.sin_addr.s_addr.to_ne_bytes());
+        }
+        cur = ai.ai_next.cast_const();
+    }
+    Some(out)
 }

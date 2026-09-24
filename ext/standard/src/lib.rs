@@ -55,6 +55,7 @@ mod crypt;
 mod csv;
 mod datetime;
 mod dir;
+mod dns;
 mod exec;
 mod ffi;
 mod file;
@@ -272,6 +273,7 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
         datetime::natives(),
         net::natives(),
         iptc::natives(),
+        dns::natives(),
     ]
     .into_iter()
     .flatten()
@@ -292,6 +294,7 @@ fn file_constants() -> Vec<ConstDecl> {
         assert::constants(),
         syslog::constants(),
         image::constants(),
+        dns::constants(),
     ]
     .into_iter()
     .flatten()
