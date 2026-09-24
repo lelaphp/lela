@@ -9312,13 +9312,74 @@ pub(crate) fn sr<T: Tier>(req: &mut Request, frame: FrameRef, code: &OpArray, op
     binary(req, frame, code, op, crate::ops::shift_right)
 }
 
-/// `ZEND_CONCAT`: [`crate::ops::concat`], the same way.
+/// `ZEND_CONCAT` (`Z/Zend/zend_vm_def.h:374`): [`crate::ops::concat`],
+/// the same way, but for php's own arm for a left temporary
+/// ([`concat_into`]), which grows the left string where it stands.
+///
+/// The string `str_repeat` returned is the temporary's alone and grows
+/// into the `run` the joined string needs, the old slot given back as
+/// it moves, so the peak moves by the joined string alone and not by
+/// the two standing together; a string a variable holds is copied into
+/// a new one beside it:
+///
+/// ```php
+/// $a = str_repeat('a', 5000); memory_reset_peak_usage(); $m = memory_get_usage();
+/// $b = str_repeat('b', 3000) . $a; $p = memory_get_peak_usage() - $m;
+/// memory_reset_peak_usage(); $m = memory_get_usage();
+/// $c = $b . '!'; $q = memory_get_peak_usage() - $m;
+/// var_dump(strlen($b), $c === str_repeat('b', 3000) . $a . '!', $p, $q, $b[0], $b[7999]);
+/// ```
+/// ```expect
+/// int(8000)
+/// bool(true)
+/// int(8192)
+/// int(8192)
+/// string(1) "b"
+/// string(1) "a"
+/// ```
 pub(crate) fn concat<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    concat_into(req, frame, code, op)
+}
+
+/// The body `CONCAT` and `FAST_CONCAT` share: php's arm for a left
+/// operand that is a temporary, when both sides are strings and neither
+/// is empty (`Z/Zend/zend_vm_def.h:407-418`, `:3317-3328`), hands the
+/// temporary's owner to [`Request::string_append`], which grows the
+/// string where it stands when that owner is its only one and copies it
+/// otherwise, as `zend_string_extend` and php's alloc arm beside it do;
+/// every other pair is [`binary`] over [`crate::ops::concat`].
+fn concat_into(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
+    if matches!(op.op1_type, OperandKind::Tmp | OperandKind::Var) {
+        let left = exec::operand(req, frame, code, op.op1_type, op.op1);
+        let right = exec::operand(req, frame, code, op.op2_type, op.op2);
+        if let (Some(&a), Some(&b)) = (left.as_php_string(), right.as_php_string())
+            && !a.is_empty()
+            && !b.is_empty()
+        {
+            // The temporary's owner is the append's now, and nothing
+            // releases it again.
+            req.take_slot(frame, exec::temporary_slot(code, op.op1));
+            let joined = req.string_append(a, b);
+            exec::free_operand(req, frame, code, op.op2_type, op.op2);
+            return match joined {
+                Ok(joined) => {
+                    let slot = exec::temporary_slot(code, op.out);
+                    let previous = req.set_slot(frame, slot, Value::string(joined));
+                    req.release(previous);
+                    Ok(advance(req, frame))
+                }
+                Err(thrown) => {
+                    req.leave_pending(&thrown);
+                    Ok(Stepped::Threw(frame))
+                }
+            };
+        }
+    }
     binary(req, frame, code, op, crate::ops::concat)
 }
 
@@ -9330,7 +9391,9 @@ pub(crate) fn concat<T: Tier>(
 /// which is the kernel's first arm and its rest: each non-string piece
 /// converted where php converts it, the `Array to string conversion`
 /// warning and an object's `__toString` raised in operand order, and
-/// the operands freed after the kernel (`FREE_OP1`, `FREE_OP2`).
+/// the operands freed after the kernel (`FREE_OP1`, `FREE_OP2`). A left
+/// piece that is a temporary string grows where it stands, as
+/// [`concat`]'s does ([`concat_into`]).
 ///
 /// ```php
 /// $a = 1; echo "x$a", "$a";
@@ -9360,7 +9423,7 @@ pub(crate) fn fast_concat<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    binary(req, frame, code, op, crate::ops::concat)
+    concat_into(req, frame, code, op)
 }
 
 /// `ZEND_ROPE_INIT` (`Z/Zend/zend_vm_def.h:3410`): the first piece of
