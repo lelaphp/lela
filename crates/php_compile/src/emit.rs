@@ -112,8 +112,10 @@ use php_unit::{
 use php_syntax::magic_const_name;
 
 use crate::{CompileError, Options, StackLimit};
+use attributes::InternalAttribute;
 use walk::{Class, Closure, Function, Method, Property};
 
+mod attributes;
 mod magic;
 mod types;
 mod walk;
@@ -3680,18 +3682,76 @@ impl Emit<'_> {
     /// ([`Self::class_name`]), and each argument evaluated no further
     /// than `zend_const_expr_to_zval` leaves it, the constant
     /// expression the declaration keeps for `ReflectionAttribute` to
-    /// read (design §4.7). The attribute is a marker php never
+    /// read (design §4.7). An attribute is a marker php never
     /// instantiates on its own, so a name no class answers is no error
     /// here, as it is none in php.
     ///
-    /// `#[\AllowDynamicProperties]` is the one attribute the compiler
-    /// itself reads: `validate_allow_dynamic_properties`
-    /// (`Z/Zend/zend_attributes.c:73`) sets
-    /// `ZEND_ACC_ALLOW_DYNAMIC_PROPERTIES` on the class it is written
-    /// on and is php's compile error on a trait, an interface or an
-    /// enum. php's fourth refusal, the readonly class, waits on a
-    /// compiler that reads one. The attribute is kept in the list
-    /// beside the bit, as php keeps it for `ReflectionClass`.
+    /// Then php's second loop over the ones the engine declares
+    /// ([`attributes::InternalAttribute`]), at the class's own line: a
+    /// target its `#[Attribute]` does not allow and one written twice
+    /// are php's `E_ERROR`, unless `#[\DelayedTargetValidation]`
+    /// defers the target, and its validator's refusal is
+    /// `E_COMPILE_ERROR`. `#[\AllowDynamicProperties]` sets
+    /// `ZEND_ACC_ALLOW_DYNAMIC_PROPERTIES`, kept beside the attribute
+    /// as php keeps it for `ReflectionClass`.
+    ///
+    /// ```php
+    /// #[ReturnTypeWillChange]
+    /// class C {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Attribute "ReturnTypeWillChange" cannot target class (allowed targets: method) in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// #[Attribute]
+    /// #[Attribute]
+    /// class A {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Attribute "Attribute" must not be repeated in %s on line 4
+    /// ```
+    ///
+    /// ```php
+    /// #[Attribute]
+    /// interface Demo {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot apply #[\Attribute] to interface Demo in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// #[Deprecated]
+    /// class Demo {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot apply #[\Deprecated] to class Demo in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// #[AllowDynamicProperties]
+    /// interface Demo {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot apply #[\AllowDynamicProperties] to interface Demo in %s on line 3
+    /// ```
+    ///
+    /// What php takes, it takes: an internal attribute on a target it
+    /// allows, one deferred, and a user's attribute of any name:
+    ///
+    /// ```php
+    /// #[Attribute(Attribute::TARGET_CLASS)]
+    /// #[AllowDynamicProperties]
+    /// #[DelayedTargetValidation, ReturnTypeWillChange]
+    /// #[Mine, Mine]
+    /// class C {}
+    /// $c = new C;
+    /// $c->p = 1;
+    /// echo $c->p, "\n";
+    /// ```
+    /// ```expect exit=0
+    /// 1
+    /// ```
     fn class_attributes(
         &mut self,
         class: &Class,
@@ -3699,30 +3759,9 @@ impl Emit<'_> {
         declared_at: u32,
     ) -> Result<(Vec<Attribute>, DynamicProperties), CompileError> {
         let mut out = Vec::new();
-        let mut dynamic_properties = DynamicProperties::default();
         for attribute in &class.attributes {
             self.line = attribute.line;
             let name = self.class_name(&attribute.name);
-            if name.eq_ignore_ascii_case(b"AllowDynamicProperties") {
-                let refused = match class.kind {
-                    ClassKind::Trait => Some("trait"),
-                    ClassKind::Interface => Some("interface"),
-                    ClassKind::Enum => Some("enum"),
-                    ClassKind::Class => None,
-                };
-                if let Some(word) = refused {
-                    // php raises the validator's message where the
-                    // class was written and not where the attribute was
-                    // (`zend_compile_attributes` runs at the class's
-                    // own line).
-                    self.line = declared_at;
-                    return Err(self.compile_error(format!(
-                        "Cannot apply #[\\AllowDynamicProperties] to {word} {}",
-                        String::from_utf8_lossy(class_name)
-                    )));
-                }
-                dynamic_properties = DynamicProperties::Allowed;
-            }
             let mut arguments = Vec::new();
             for argument in &attribute.arguments.clone() {
                 arguments.push(AttributeArgument {
@@ -3734,6 +3773,54 @@ impl Emit<'_> {
                 name: Name(name.into_boxed_slice()),
                 arguments,
             });
+        }
+        self.line = declared_at;
+        let internal = |attribute: &Attribute| InternalAttribute::named(&attribute.name.0);
+        let delayed = out.iter().any(|attribute| {
+            internal(attribute) == Some(InternalAttribute::DelayedTargetValidation)
+        });
+        let mut dynamic_properties = DynamicProperties::default();
+        for (at, attribute) in out.iter().enumerate() {
+            let Some(known) = internal(attribute) else {
+                continue;
+            };
+            let shown = String::from_utf8_lossy(&attribute.name.0).into_owned();
+            let targets = known.targets();
+            let on_target = targets & attributes::TARGET_CLASS != 0;
+            if !on_target && !delayed {
+                return Err(CompileError {
+                    level: Level::Error,
+                    message: format!(
+                        "Attribute \"{shown}\" cannot target class (allowed targets: {})",
+                        attributes::target_names(targets)
+                    ),
+                    line: self.line,
+                    raised: Vec::new(),
+                });
+            }
+            if out
+                .iter()
+                .enumerate()
+                .any(|(other, o)| other != at && o.name.0.eq_ignore_ascii_case(&attribute.name.0))
+            {
+                return Err(CompileError {
+                    level: Level::Error,
+                    message: format!("Attribute \"{shown}\" must not be repeated"),
+                    line: self.line,
+                    raised: Vec::new(),
+                });
+            }
+            if !on_target {
+                continue;
+            }
+            if let Some(refused) =
+                known.refused_on_class(class.kind, false, &String::from_utf8_lossy(class_name))
+            {
+                return Err(self.compile_error(refused));
+            }
+            if known == InternalAttribute::AllowDynamicProperties {
+                dynamic_properties = DynamicProperties::Allowed;
+            }
         }
         Ok((out, dynamic_properties))
     }
