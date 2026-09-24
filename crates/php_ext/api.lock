@@ -233,6 +233,7 @@ request::Request::header_remove
 request::Request::headers_list
 request::Request::headers_sent
 request::Request::included_files
+request::Request::info_ini_entries
 request::Request::info_table
 request::Request::ini_entries
 request::Request::ini_get

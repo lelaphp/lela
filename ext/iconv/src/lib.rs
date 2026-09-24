@@ -95,10 +95,10 @@ pub fn extension() -> Extension {
         .build("iconv")
 }
 
-/// `PHP_MINFO_FUNCTION(miconv)`'s table.
+/// `PHP_MINFO_FUNCTION(miconv)`: the table, then `DISPLAY_INI_ENTRIES`.
 ///
 /// ```php
-/// $e = new ReflectionExtension('iconv'); ob_start(); $e->info(); echo rtrim(explode('Directive', ob_get_clean())[0]), "\n";
+/// $e = new ReflectionExtension('iconv'); ob_start(); $e->info(); echo ob_get_clean();
 /// ```
 /// ```expect
 ///
@@ -107,6 +107,11 @@ pub fn extension() -> Extension {
 /// iconv support => enabled
 /// iconv implementation => libiconv
 /// iconv library version => 1.11
+///
+/// Directive => Local Value => Master Value
+/// iconv.input_encoding => no value => no value
+/// iconv.output_encoding => no value => no value
+/// iconv.internal_encoding => no value => no value
 /// ```
 fn info(req: &mut Request) {
     req.info_table(&[
@@ -114,6 +119,8 @@ fn info(req: &mut Request) {
         &["iconv implementation", "libiconv"],
         &["iconv library version", "1.11"],
     ]);
+    let names = KINDS.map(|kind| format!("iconv.{kind}"));
+    req.info_ini_entries(&names.each_ref().map(String::as_bytes));
 }
 
 /// One declared type: `?T`, or `A|B`.

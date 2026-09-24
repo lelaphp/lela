@@ -8858,7 +8858,28 @@ impl Request {
             return;
         }
         self.info_table(&[&["Version", PHP_VERSION]]);
-        if module.ini.is_empty() {
+        let names: Vec<&[u8]> = module.ini.iter().map(|entry| &*entry.name.0).collect();
+        self.info_ini_entries(&names);
+    }
+
+    /// `DISPLAY_INI_ENTRIES()`, `display_ini_entries`
+    /// (`Z/main/php_ini.c:115`), for the entries named, as an
+    /// extension's `MINFO` ends with it: nothing for none, else a table
+    /// under `Directive => Local Value => Master Value`, the master being
+    /// the engine's default and an empty value `no value`.
+    ///
+    /// ```php
+    /// @ini_set('iconv.output_encoding', 'ISO-8859-1');
+    /// $e = new ReflectionExtension('iconv'); ob_start(); $e->info(); echo strstr(ob_get_clean(), 'Directive');
+    /// ```
+    /// ```expect
+    /// Directive => Local Value => Master Value
+    /// iconv.input_encoding => no value => no value
+    /// iconv.output_encoding => ISO-8859-1 => no value
+    /// iconv.internal_encoding => no value => no value
+    /// ```
+    pub fn info_ini_entries(&mut self, names: &[&[u8]]) {
+        if names.is_empty() {
             return;
         }
         let no_value = || String::from("no value");
@@ -8867,14 +8888,13 @@ impl Request {
                 .filter(|v| !v.is_empty())
                 .map_or_else(no_value, |v| String::from_utf8_lossy(v).into_owned())
         };
-        let rows: Vec<[String; 3]> = module
-            .ini
+        let rows: Vec<[String; 3]> = names
             .iter()
-            .map(|entry| {
+            .map(|name| {
                 [
-                    String::from_utf8_lossy(&entry.name.0).into_owned(),
-                    shown(self.ini_get(&entry.name.0)),
-                    shown(self.shared.ini_default(&entry.name.0)),
+                    String::from_utf8_lossy(name).into_owned(),
+                    shown(self.ini_get(name)),
+                    shown(self.shared.ini_default(name)),
                 ]
             })
             .collect();
