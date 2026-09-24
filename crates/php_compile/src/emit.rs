@@ -3992,15 +3992,48 @@ impl Emit<'_> {
 
     /// The subject of a `foreach`: compiled as an expression, and where
     /// the value is taken by reference, as `zend_compile_var` under
-    /// `BP_VAR_W` compiles a variable, which for a CV is the CV itself;
-    /// a call's `VAR` is separated after it
-    /// (`zend_separate_if_call_and_write`), and a call whose value is a
-    /// temporary, one of the special table's, is php's compile error. A
-    /// property fetched for writing is not read yet.
+    /// `BP_VAR_W` compiles a variable, which for a CV is the CV itself
+    /// and for a dimension, a property or a `static` property the `_W`
+    /// fetch of the whole chain into a `VAR` ([`Self::var_for_reference`]),
+    /// so `FE_RESET_RW` binds the elements where they stand; a call's
+    /// `VAR` is separated after it (`zend_separate_if_call_and_write`),
+    /// and a call whose value is a temporary, one of the special
+    /// table's, is php's compile error.
+    ///
+    /// ```php
+    /// class C { public $p = [1, 2]; public static $s = ['a' => 1]; }
+    /// $o = new C;
+    /// foreach ($o->p as &$v) { $v *= 3; }
+    /// unset($v);
+    /// foreach (C::$s as &$w) { $w = 'b'; }
+    /// unset($w);
+    /// var_dump($o->p, C::$s);
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   [0]=>
+    ///   int(3)
+    ///   [1]=>
+    ///   int(6)
+    /// }
+    /// array(1) {
+    ///   ["a"]=>
+    ///   string(1) "b"
+    /// }
+    /// ```
     fn foreach_subject(&mut self, expr: tree::Expr, by_ref: bool) -> Result<Where, CompileError> {
-        if by_ref && matches!(self.peel(expr), tree::Expr::MemberAccessExpr(_)) {
-            return Err(self
-                .fatal("a `foreach` by reference over a property this compiler cannot read yet"));
+        let node = self.peel(expr);
+        if by_ref
+            && (matches!(
+                node,
+                tree::Expr::SubscriptExpr(_) | tree::Expr::MemberAccessExpr(_)
+            ) || self.is_static_prop(node))
+        {
+            let (kind, at) = self.var_for_reference(node)?;
+            return Ok(match kind {
+                OperandKind::Cv => Where::Cv(at),
+                _ => Where::Returned(at),
+            });
         }
         let subject = self.expr(expr)?;
         if by_ref && self.is_call(expr) {
