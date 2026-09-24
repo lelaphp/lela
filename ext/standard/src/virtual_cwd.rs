@@ -251,3 +251,20 @@ pub(super) fn virtual_file_ex(cwd: &[u8], path: &[u8], how: Resolve) -> Option<V
     }
     Some(buf.head(len))
 }
+
+/// `expand_filepath_ex(path, real, relative_to, len)` under
+/// `CWD_FILEPATH` (`Z/main/fopen_wrappers.c:787`): an absolute path as
+/// it is, a relative one against `relative_to`, the working directory
+/// the caller hands it; `None` for the empty path and wherever
+/// [`virtual_file_ex`] fails.
+pub(super) fn expand_filepath(path: &[u8], relative_to: &[u8]) -> Option<Vec<u8>> {
+    if path.is_empty() {
+        return None;
+    }
+    let cwd: &[u8] = if path.first() == Some(&b'/') {
+        b""
+    } else {
+        relative_to
+    };
+    virtual_file_ex(cwd, path, Resolve::FilePath)
+}

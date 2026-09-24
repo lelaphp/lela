@@ -62,6 +62,7 @@ mod html;
 mod http;
 mod ini;
 mod levenshtein;
+mod link;
 mod md5;
 mod metaphone;
 mod microtime;
@@ -238,6 +239,7 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
         versioning::natives(),
         basic_functions::natives(),
         dir::natives(),
+        link::natives(),
     ]
     .into_iter()
     .flatten()

@@ -15,7 +15,7 @@
 mod find;
 mod locale;
 mod parse_str;
-mod path;
+pub(super) mod path;
 mod replace;
 mod slashes;
 mod strip_tags;
