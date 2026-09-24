@@ -63,6 +63,7 @@ fn allowed(id: &[u8], what: i64) -> bool {
 /// var_dump(count($all), $all[0], $all[count($all) - 1], count(timezone_identifiers_list(DateTimeZone::ALL_WITH_BC)) > count($all));
 /// var_dump(timezone_identifiers_list(DateTimeZone::PER_COUNTRY, 'NL'), timezone_identifiers_list(DateTimeZone::ANTARCTICA | DateTimeZone::UTC));
 /// try { timezone_identifiers_list(DateTimeZone::PER_COUNTRY); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// echo new ReflectionFunction('timezone_identifiers_list');
 /// ```
 /// ```expect
 /// int(419)
@@ -100,6 +101,14 @@ fn allowed(id: &[u8], what: i64) -> bool {
 ///   string(3) "UTC"
 /// }
 /// timezone_identifiers_list(): Argument #2 ($countryCode) must be a two-letter ISO 3166-1 compatible country code when argument #1 ($timezoneGroup) is DateTimeZone::PER_COUNTRY
+/// Function [ <internal:date> function timezone_identifiers_list ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <optional> int $timezoneGroup = DateTimeZone::ALL ]
+///     Parameter #1 [ <optional> ?string $countryCode = null ]
+///   }
+///   - Return [ array ]
+/// }
 /// ```
 pub(crate) fn timezone_identifiers_list(req: &mut Request) -> Result<Value, Thrown> {
     count_between(req, 0, 2)?;
