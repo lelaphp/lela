@@ -357,29 +357,74 @@ fn spl_autoload_extensions(req: &mut Request) -> Result<Value, Thrown> {
 }
 
 /// `spl_autoload_functions(): array`: the stack, in the order it is
-/// served.
+/// served, a method given as `'Class::method'` handed back as the pair
+/// php's `autoload_func_info` keeps, the class named as declared.
 ///
 /// ```php
 /// function first($c) {}
 /// class Loader { static function load($c) {} function __invoke($c) {} }
 /// spl_autoload_register('first');
-/// spl_autoload_register(['Loader', 'load']);
+/// spl_autoload_register('loader::load');
 /// spl_autoload_register($f = fn ($c) => null, true, true);
-/// var_dump(count(spl_autoload_functions()), spl_autoload_functions()[1]);
+/// var_dump(count(spl_autoload_functions()), spl_autoload_functions()[1], spl_autoload_functions()[2]);
 /// ```
 /// ```expect
 /// int(3)
 /// string(5) "first"
+/// array(2) {
+///   [0]=>
+///   string(6) "Loader"
+///   [1]=>
+///   string(4) "load"
+/// }
 /// ```
 fn spl_autoload_functions(req: &mut Request) -> Result<Value, Thrown> {
     crate::arity(req, 0, 0)?;
     let loaders = req.autoload_functions();
     let mut out = PhpArray::new(req)?;
     for loader in loaders {
-        let loader = crate::copied(req, loader);
+        let loader = match static_pair(req, &loader)? {
+            Some(pair) => pair,
+            None => crate::copied(req, loader),
+        };
         out.append(req, loader)?;
     }
     Ok(Value::array(out))
+}
+
+/// A loader written `'Class::method'` as the pair `[Class, method]`,
+/// the class by its declared name and the method by the name its class
+/// declares it with; `None` for any other loader.
+fn static_pair(req: &mut Request, loader: &Value) -> Result<Option<Value>, Thrown> {
+    let held = loader.deref();
+    let ValueRef::Str(text) = held.as_ref() else {
+        return Ok(None);
+    };
+    let text = text.as_bytes().to_vec();
+    let Some(at) = text.windows(2).position(|w| w == b"::") else {
+        return Ok(None);
+    };
+    let (class, method) = (&text[..at], &text[at + 2..]);
+    let class = class.strip_prefix(b"\\").unwrap_or(class);
+    let Some(id) = lookup_class(req, class).ok().flatten() else {
+        return Ok(None);
+    };
+    let declared = crate::class_name(req, id);
+    let method = req
+        .class_decl(id)
+        .and_then(|decl| {
+            decl.methods
+                .iter()
+                .find(|m| m.function.name.0.eq_ignore_ascii_case(method))
+                .map(|m| m.function.name.0.to_vec())
+        })
+        .unwrap_or_else(|| method.to_vec());
+    let mut pair = PhpArray::new(req)?;
+    let class = crate::string_value(req, &declared)?;
+    pair.append(req, class)?;
+    let method = crate::string_value(req, &method)?;
+    pair.append(req, method)?;
+    Ok(Some(Value::array(pair)))
 }
 
 /// The callable at `position`, php's `Z_PARAM_FUNC` and its refusal.
