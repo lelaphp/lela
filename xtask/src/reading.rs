@@ -495,6 +495,61 @@ impl Log {
     }
 }
 
+/// The commits a track stands on: the first-parent chain of `HEAD`, each
+/// with its distance from the tip. A branch merged into the track sits on
+/// a second parent and a branch cut behind the tip is off it past the cut,
+/// so the readings their worktrees took, which `worktree retire` appends
+/// into the track's store, are not taken on it (#787).
+#[derive(Debug, Clone, Default)]
+pub struct Chain {
+    distance: BTreeMap<String, usize>,
+}
+
+impl Chain {
+    /// The chain of `HEAD` at `root`; empty where `root` is no repository,
+    /// so a store beside none stands on its unstamped readings alone.
+    pub fn of_head(root: &Path) -> Result<Chain> {
+        if !root.join(".git").exists() {
+            return Ok(Chain::default());
+        }
+        let ids = crate::git::git(root, &["rev-list", "--first-parent", "HEAD"], None)?;
+        let distance = ids.lines().enumerate().map(|(n, id)| (id.to_owned(), n));
+        Ok(Chain {
+            distance: distance.collect(),
+        })
+    }
+
+    /// How far `commit`, whole or abbreviated as a reading records it, is
+    /// from the tip; none when it is off the chain.
+    fn distance(&self, commit: &str) -> Option<usize> {
+        let (id, n) = self.distance.range(commit.to_owned()..).next()?;
+        (!commit.is_empty() && id.starts_with(commit)).then_some(*n)
+    }
+
+    /// The reading of each scope of `instrument` that stands for the track,
+    /// in scope order: the one taken at the tip or at its nearest ancestor
+    /// on the chain, the last written of those taken at one commit. One
+    /// taken off the chain stands for nothing, and one taken at no commit,
+    /// a scope nothing measured, stands behind every one taken on it.
+    pub fn standing<'a>(&self, log: &'a [Reading], instrument: &str) -> Vec<&'a Reading> {
+        let mut nearest: BTreeMap<&str, (usize, &Reading)> = BTreeMap::new();
+        for reading in log.iter().filter(|r| r.instrument == instrument) {
+            let rank = match self.distance(&reading.commit) {
+                Some(n) => n,
+                None if reading.commit.is_empty() => usize::MAX,
+                None => continue,
+            };
+            if nearest
+                .get(reading.scope.as_str())
+                .is_none_or(|(held, _)| rank <= *held)
+            {
+                nearest.insert(&reading.scope, (rank, reading));
+            }
+        }
+        nearest.into_values().map(|(_, r)| r).collect()
+    }
+}
+
 /// What an instrument's exit says about the readings it wrote: 1 while
 /// any reading fails, 0 when every one passes or is skipped. The rule
 /// harness-design.md §4.5 states for `done` (exit 1 while anything is

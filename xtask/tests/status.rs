@@ -518,6 +518,84 @@ fn git_prints_the_log_and_the_status() {
     assert!(md.contains("?? untracked.txt"), "{md}");
 }
 
+/// #787: a track's reading of a subset is the one at its tip or its
+/// nearest ancestor on the track. A branch cut behind the tip, whose
+/// worktree's log `worktree retire` appends into the track's store after
+/// the track's own readings, stands for nothing, and neither does a
+/// reading of an older commit written last; the JSON the dashboard's data
+/// step reads says the same, with the commit each reading was taken at.
+#[test]
+fn phpt_takes_the_reading_at_the_track_tip_and_never_a_retired_branchs() {
+    let root = scratch("chain");
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    };
+    git(&["init", "-q", "-b", "t-x"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "cut"]);
+    let cut = git(&["rev-parse", "--short", "HEAD"]);
+    git(&["switch", "-q", "-c", "behind"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "the branch"]);
+    let branch = git(&["rev-parse", "--short", "HEAD"]);
+    git(&["switch", "-q", "t-x"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "the tip"]);
+    let tip = git(&["rev-parse", "--short", "HEAD"]);
+
+    let phpt = |scope: &str, commit: &str, at: &str, passed: i64| {
+        let mut r = Reading::new("phpt", scope);
+        r.status = Status::Fail;
+        r.commit = commit.into();
+        r.at = at.parse().unwrap();
+        r.numbers.insert("passed".into(), passed.into());
+        r
+    };
+    let track = Store::of_workspace(&root);
+    let worktree = Store::at(root.join("worktree-store"));
+    track
+        .record(&[phpt("ext/date", &tip, "2026-09-24T16:44:00Z", 613)])
+        .unwrap();
+    track
+        .record(&[phpt("ext/date", &cut, "2026-09-24T16:50:00Z", 400)])
+        .unwrap();
+    worktree
+        .record(&[
+            phpt("ext/date", &branch, "2026-09-24T17:35:00Z", 0),
+            phpt("ext/spl", &branch, "2026-09-24T17:36:00Z", 1),
+        ])
+        .unwrap();
+    let retired = std::fs::read(worktree.root().join("log.jsonl")).unwrap();
+    assert_eq!(track.append(&retired).unwrap(), 2);
+
+    let (ok, json, err) = status(&root, &["--section", "phpt", "--format", "json"]);
+    assert!(ok, "{err}");
+    let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let rows = rows.as_array().unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "the branch's ext/spl stands for nothing: {json}"
+    );
+    assert_eq!(rows[0]["scope"], "ext/date");
+    assert_eq!(rows[0]["reading"]["commit"], tip.as_str(), "{json}");
+    assert_eq!(rows[0]["reading"]["numbers"]["passed"], 613, "{json}");
+    let (ok, md, _) = status(&root, &["--section", "phpt"]);
+    assert!(
+        ok && md.contains("passed=613") && !md.contains("ext/spl"),
+        "{md}"
+    );
+}
+
 /// `--session` is the map plus the local facts in one block, for the
 /// session-start hook; the local file is laid down from its template when
 /// the clone has none, and an unrendered region is said to be one.
