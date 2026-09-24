@@ -1015,6 +1015,23 @@ fn get_path_info(req: &mut Request) -> Result<Value, Thrown> {
     }
 }
 
+/// `Z_PARAM_RESOURCE_OR_NULL` for a stream's options: a resource or
+/// `null`, php's `TypeError` for anything else.
+fn context_argument(req: &mut Request, position: u32) -> Result<(), Thrown> {
+    match crate::given(req, position).map(|v| v.deref()) {
+        None => Ok(()),
+        Some(v) if matches!(v.as_ref(), ValueRef::Null | ValueRef::Resource(_)) => Ok(()),
+        Some(v) => {
+            let name = php_ext::coerce::value_name(req, &v);
+            Err(arg_type_error(
+                req,
+                position,
+                &format!("be of type resource or null, {name} given"),
+            ))
+        }
+    }
+}
+
 /// `openFile(string $mode = "r", bool $useIncludePath = false, $context
 /// = null): SplFileObject`, an object of the file class over the file.
 ///
@@ -1023,12 +1040,14 @@ fn get_path_info(req: &mut Request) -> Result<Value, Thrown> {
 /// $o = (new SplFileInfo($f))->openFile();
 /// var_dump(get_class($o), $o->fgets());
 /// try { (new SplFileInfo(__DIR__))->openFile(); } catch (LogicException $e) { echo $e->getMessage(), "\n"; }
+/// try { (new SplFileInfo($f))->openFile('r', false, []); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
 /// ```
 /// ```expect
 /// string(13) "SplFileObject"
 /// string(2) "x
 /// "
 /// Cannot use SplFileObject with directories
+/// SplFileInfo::openFile(): Argument #3 ($context) must be of type resource or null, array given
 /// ```
 fn open_file(req: &mut Request) -> Result<Value, Thrown> {
     crate::arity(req, 0, 3)?;
@@ -1038,6 +1057,7 @@ fn open_file(req: &mut Request) -> Result<Value, Thrown> {
         None => b"r".to_vec(),
     };
     let include = crate::bool_or(req, 2, false)?;
+    context_argument(req, 3)?;
     let chosen = fs(req, this, |it| it.file_class)?;
     let Some(class) = class_or(req, b"SplFileObject", chosen)? else {
         return Ok(Value::null());
@@ -1705,6 +1725,7 @@ fn file_construct(req: &mut Request) -> Result<Value, Thrown> {
         None => b"r".to_vec(),
     };
     let include = crate::bool_or(req, 3, false)?;
+    context_argument(req, 4)?;
     if fs(req, this, |it| it.stream.is_some())? {
         return Err(throw(req, "Error", "Cannot call constructor twice"));
     }
