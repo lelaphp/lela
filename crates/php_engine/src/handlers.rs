@@ -5578,6 +5578,103 @@ fn hold_class(
     req.release(previous);
 }
 
+/// `ZEND_FETCH_CLASS_NAME` (`Z/Zend/zend_vm_def.h:8895`), `C::class`
+/// where the compiler could not fold it: over a value, the object's
+/// class's name, what is no object php's `TypeError` `Cannot use
+/// "::class" on int`; over a fetch type, the name of
+/// `EX(func)->op_array.scope`, of its parent, or of the called scope
+/// (`Z_OBJCE(EX(This))` or `Z_CE(EX(This))`), php's `Error` where the
+/// op array has no scope or the class no parent.
+///
+/// ```php
+/// class A { static function who() { return static::class; } }
+/// class B extends A {}
+/// $b = new B;
+/// var_dump(B::who(), $b::class);
+/// try { $n = 1; $n::class; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// echo static::class;
+/// ```
+/// ```expect exit=255
+/// string(1) "B"
+/// string(1) "B"
+/// Cannot use "::class" on int
+///
+/// Fatal error: Uncaught Error: Cannot use "static" in the global scope in %s:7
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 7
+/// ```
+pub(crate) fn fetch_class_name<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let class = if op.op1_type == OperandKind::Unused {
+        let fetch = op.op1 & FETCH_CLASS_MASK;
+        let word = match fetch {
+            FETCH_CLASS_SELF => "self",
+            FETCH_CLASS_PARENT => "parent",
+            _ => "static",
+        };
+        let Some(scope) = req.frame_scope(frame) else {
+            let thrown = crate::api::raising::throw(
+                req,
+                "Error",
+                &format!("Cannot use \"{word}\" in the global scope"),
+            );
+            return threw(req, frame, &thrown);
+        };
+        match fetch {
+            FETCH_CLASS_SELF => scope,
+            FETCH_CLASS_PARENT => {
+                let Some(parent) = req.class_parent(scope) else {
+                    let thrown = crate::api::raising::throw(
+                        req,
+                        "Error",
+                        "Cannot use \"parent\" when current class scope has no parent",
+                    );
+                    return threw(req, frame, &thrown);
+                };
+                parent
+            }
+            _ => req
+                .vm()
+                .this(frame)
+                .map(|this| this.class())
+                .or_else(|| req.vm().at(frame).and_then(|state| state.called_scope))
+                .unwrap_or(scope),
+        }
+    } else {
+        let value = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
+        let class = value.as_object().map(PhpObject::class);
+        let Some(class) = class else {
+            let shown = crate::ops::value_name(req, &value);
+            let thrown = crate::api::raising::throw(
+                req,
+                "TypeError",
+                &format!("Cannot use \"::class\" on {shown}"),
+            );
+            exec::free_operand(req, frame, code, op.op1_type, op.op1);
+            return threw(req, frame, &thrown);
+        };
+        exec::free_operand(req, frame, code, op.op1_type, op.op1);
+        class
+    };
+    let name = req
+        .class_decl(class)
+        .map(|decl| decl.name.0.to_vec())
+        .unwrap_or_default();
+    let name = match PhpString::new(req, &name) {
+        Ok(name) => name,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    let slot = exec::temporary_slot(code, op.out);
+    let previous = req.set_slot(frame, slot, Value::string(name));
+    req.release(previous);
+    Ok(advance(req, frame))
+}
+
 /// `ZEND_FETCH_CLASS` (`Z/Zend/zend_vm_def.h:3540`), what
 /// `zend_compile_class_ref` emits for a class the program computes,
 /// `$o::X`, `new $name`, `$cls::m()`: an object's class, a string's

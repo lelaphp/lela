@@ -3344,6 +3344,27 @@ mod tests {
         );
     }
 
+    /// `C::class`, which was refused as not read, as the oracle's
+    /// `[regime.dump]` has it: a name written out folds to its resolved
+    /// spelling, `self` in a known scope to the class being compiled,
+    /// and `static`, `self` where the scope is the includer's and a
+    /// value are `FETCH_CLASS_NAME`.
+    #[test]
+    fn a_class_name_folds_where_php_resolves_it_and_is_fetched_where_not() {
+        assert_eq!(
+            oplines_of(b"<?php namespace N; echo Foo::class, \\Foo::class, self::class, static::class, $o::class;"),
+            "0000 ECHO string(\"N\\\\Foo\")\n\
+             0001 ECHO string(\"Foo\")\n\
+             0002 T1 = FETCH_CLASS_NAME (self)\n\
+             0003 ECHO T1\n\
+             0004 T2 = FETCH_CLASS_NAME (static)\n\
+             0005 ECHO T2\n\
+             0006 T3 = FETCH_CLASS_NAME CV0($o)\n\
+             0007 ECHO T3\n\
+             0008 RETURN int(1)\n"
+        );
+    }
+
     /// `print` is `zend_compile_print`'s `ECHO` and the constant `1` as
     /// the expression's value, which a condition over it reads as it
     /// stands, the oracle's `[regime.dump]` of the same source.
@@ -6307,10 +6328,7 @@ class C {
             .err()
             .map(|e| e.message)
         };
-        assert_eq!(
-            refused(b"<?php echo E::class;").as_deref(),
-            Some("a `::class` this compiler cannot read yet")
-        );
+        assert_eq!(refused(b"<?php echo E::class;").as_deref(), None);
         assert_eq!(
             refused(b"<?php echo $o->$p;").as_deref(),
             Some("a property named at run time this compiler cannot read yet")

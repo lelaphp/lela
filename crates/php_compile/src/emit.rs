@@ -166,12 +166,23 @@ enum Offset {
     Var(Vec<u8>),
 }
 
-/// What stands after a `::`: a class constant, or a class's own
-/// property, php's `ZEND_AST_CLASS_CONST` and `ZEND_AST_STATIC_PROP`,
-/// which the grammar tells apart by the `$`.
+/// What stands after a `::`: a class constant, a class's own property
+/// or the class's name, php's `ZEND_AST_CLASS_CONST`,
+/// `ZEND_AST_STATIC_PROP` and `ZEND_AST_CLASS_NAME`, which the grammar
+/// tells apart by the `$` and the keyword.
 enum Scoped {
-    Constant { class: ClassSpec, name: Vec<u8> },
-    Property { class: ClassSpec, name: Vec<u8> },
+    Constant {
+        class: ClassSpec,
+        name: Vec<u8>,
+    },
+    Property {
+        class: ClassSpec,
+        name: Vec<u8>,
+    },
+    /// `C::class`, php's `ZEND_AST_CLASS_NAME`.
+    ClassName {
+        class: ClassSpec,
+    },
 }
 
 /// The class a `::`, a `new` or an `instanceof` stands on, as the tree
@@ -1431,7 +1442,7 @@ impl Emit<'_> {
                     Scoped::Property { class, name } => {
                         self.assign_static_prop(class, &name, value)
                     }
-                    Scoped::Constant { .. } => {
+                    Scoped::Constant { .. } | Scoped::ClassName { .. } => {
                         Err(self.unread("an assignment to what is no variable"))
                     }
                 },
@@ -1456,7 +1467,7 @@ impl Emit<'_> {
                 Scoped::Property { class, name } => {
                     self.assign_static_prop_op(class, &name, op, value)
                 }
-                Scoped::Constant { .. } => {
+                Scoped::Constant { .. } | Scoped::ClassName { .. } => {
                     Err(self.unread("a compound assignment to what is no variable"))
                 }
             },
@@ -1492,7 +1503,7 @@ impl Emit<'_> {
                     };
                     self.static_prop_step(class, &name, step)
                 }
-                Scoped::Constant { .. } => Err(self.stepless(up)),
+                Scoped::Constant { .. } | Scoped::ClassName { .. } => Err(self.stepless(up)),
             },
             tree::Expr::SubscriptExpr(_) => self.dim_step(target, up, pre),
             tree::Expr::MemberAccessExpr(access) => {
@@ -1791,8 +1802,8 @@ impl Emit<'_> {
 
     /// `C::NAME` and `C::$name`: a class constant or a class's
     /// property (`ZEND_AST_STATIC_PROP`), over the class a name written
-    /// out or an expression names ([`Self::class_spec`]); `::class` and
-    /// a member the program names are refused as not read yet.
+    /// out or an expression names ([`Self::class_spec`]), or its name;
+    /// a member the program names is refused as not read yet.
     fn scoped_of(
         &self,
         id: NodeId<tree::ScopedAccessExpr>,
@@ -1819,7 +1830,7 @@ impl Emit<'_> {
                     name: self.variable_name(var),
                 })
             }
-            Some(tree::ScopedSelector::ClassKw(_)) => Err(walk::unread(line, "a `::class`")),
+            Some(tree::ScopedSelector::ClassKw(_)) => Ok(Scoped::ClassName { class }),
             Some(tree::ScopedSelector::VarVarExpr(_) | tree::ScopedSelector::DynamicVarExpr(_)) => {
                 Err(walk::unread(line, "a static property named at run time"))
             }
@@ -3621,6 +3632,31 @@ impl Emit<'_> {
                 }
                 Scoped::Property { .. } => {
                     Err(self.compile_error("Constant expression contains invalid operations"))
+                }
+                // `zend_compile_const_expr_class_name`, after
+                // `zend_eval_const_expr` folded what
+                // `zend_try_compile_const_expr_resolve_class_name` answers
+                // for: a class the program computes and `static` are
+                // php's compile-time fatals, and `self` or `parent`
+                // outside a class, whose scope is the includer's, waits
+                // on a constant expression that keeps the fetch type.
+                Scoped::ClassName { class } => {
+                    if let Some(folded) = self.resolved_class_name(class)? {
+                        return folded_const_expr(folded).ok_or_else(|| {
+                            self.fatal("a constant expression this compiler cannot read yet")
+                        });
+                    }
+                    let ClassSpec::Name(token) = class else {
+                        return Err(self.compile_error(
+                            "(expression)::class cannot be used in constant expressions",
+                        ));
+                    };
+                    if class_fetch_type(self.text(token)) == FETCH_CLASS_STATIC {
+                        return Err(self.compile_error(
+                            "static::class cannot be used for compile-time class name resolution",
+                        ));
+                    }
+                    Err(self.unread("a `self::class` or `parent::class` outside a class"))
                 }
             },
             // `ZEND_AST_ARRAY` in a constant expression stays the tree
@@ -6117,6 +6153,7 @@ impl Emit<'_> {
             tree::Expr::ScopedAccessExpr(id) => match self.scoped_of(id, line)? {
                 Scoped::Constant { class, name } => self.class_const(class, &name),
                 Scoped::Property { class, name } => self.static_prop(class, &name),
+                Scoped::ClassName { class } => self.class_name_of(class),
             },
             tree::Expr::SubscriptExpr(_) => self.dim_read(expr),
             tree::Expr::ClosureExpr(_) | tree::Expr::ArrowFnExpr(_) => {
@@ -9310,10 +9347,10 @@ impl Emit<'_> {
             }
             // `zend_try_ct_eval_class_const` folds nothing under
             // `ZEND_COMPILE_NO_CONSTANT_SUBSTITUTION`, which opcache
-            // sets, so a class constant is fetched as the program serves,
-            // and a class's property is a variable.
-            // `zend_try_ct_eval_class_const`'s one arm opcache leaves
-            // standing, a constant of the class being compiled.
+            // sets, but a constant of the class being compiled, so any
+            // other is fetched as the program serves; a class's property
+            // is a variable; and a class's name folds where
+            // `zend_try_compile_const_expr_resolve_class_name` answers.
             tree::Expr::ScopedAccessExpr(id) => match self.scoped_of(id, line)? {
                 Scoped::Constant {
                     class: ClassSpec::Name(token),
@@ -9326,6 +9363,10 @@ impl Emit<'_> {
                     Err(self.fatal("a class constant is fetched at run time"))
                 }
                 Scoped::Property { .. } => Err(self.fatal("a variable is no constant expression")),
+                Scoped::ClassName { class } => match self.resolved_class_name(class)? {
+                    Some(value) => Ok(value),
+                    None => Err(self.fatal("a class name is fetched at run time")),
+                },
             },
             tree::Expr::MatchExpr(_) => Err(self.fatal("a match is no constant expression")),
             tree::Expr::ErrorSuppressExpr(_) => {
@@ -10053,6 +10094,118 @@ impl Emit<'_> {
     /// reads); anything else is the expression itself.
     fn receiver(&mut self, object: tree::Expr) -> Result<(OperandKind, u32), CompileError> {
         self.receiver_of(object)
+    }
+
+    /// `zend_try_compile_const_expr_resolve_class_name`
+    /// (`Z/Zend/zend_compile.c:1784`): the name `C::class` folds to
+    /// where it is known while the file compiles, a name written out as
+    /// it resolves, `self` the class being compiled and `parent` the
+    /// name it extends where the scope is known; nothing for `static`,
+    /// for `self` and `parent` where the scope is not known, and for a
+    /// class the program computes. `self`, `parent` and `static` are
+    /// held to [`Self::ensure_valid_class_fetch_type`] first.
+    fn resolved_class_name(&mut self, class: ClassSpec) -> Result<Option<Zval>, CompileError> {
+        let ClassSpec::Name(token) = class else {
+            return Ok(None);
+        };
+        let written = self.text(token).to_vec();
+        let fetch = class_fetch_type(&written);
+        self.ensure_valid_class_fetch_type(fetch)?;
+        let name = match fetch {
+            FETCH_CLASS_DEFAULT => self.class_name(&written),
+            FETCH_CLASS_SELF if self.scope_known() => match self.active_class.clone() {
+                Some(active) => active,
+                None => return Ok(None),
+            },
+            FETCH_CLASS_PARENT if self.scope_known() => match self.active_parent.clone() {
+                Some(parent) => parent,
+                None => return Ok(None),
+            },
+            _ => return Ok(None),
+        };
+        Ok(Some(self.string(&name)?))
+    }
+
+    /// `zend_compile_class_name` (`Z/Zend/zend_compile.c:11105`),
+    /// `C::class`: the string [`Self::resolved_class_name`] folds to
+    /// where it does; `FETCH_CLASS_NAME` with the fetch type in an
+    /// unused `op1` for `static` and for `self` and `parent` where the
+    /// scope is not known; and for an expression, `FETCH_CLASS_NAME` over
+    /// its value, a constant being php's `Cannot use "::class" on`
+    /// compile-time fatal. Each into a temporary.
+    ///
+    /// ```php
+    /// namespace N;
+    /// class Foo {
+    ///     function names() { return [self::class, static::class, Foo::class]; }
+    /// }
+    /// class Bar extends Foo {
+    ///     function up() { return parent::class; }
+    /// }
+    /// $o = new Bar;
+    /// var_dump(Foo::class, \Foo::class, $o->names(), $o->up(), $o::class);
+    /// ```
+    /// ```expect
+    /// string(5) "N\Foo"
+    /// string(3) "Foo"
+    /// array(3) {
+    ///   [0]=>
+    ///   string(5) "N\Foo"
+    ///   [1]=>
+    ///   string(5) "N\Bar"
+    ///   [2]=>
+    ///   string(5) "N\Foo"
+    /// }
+    /// string(5) "N\Foo"
+    /// string(5) "N\Bar"
+    /// ```
+    ///
+    /// ```php
+    /// function f() { return static::class; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use "static" when no class scope is active in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// echo (1)::class;
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use "::class" on int in %s on line 2
+    /// ```
+    fn class_name_of(&mut self, class: ClassSpec) -> Result<Where, CompileError> {
+        if let Some(value) = self.resolved_class_name(class)? {
+            return Ok(Where::Constant(value));
+        }
+        let (op1_type, op1) = match class {
+            ClassSpec::Name(token) => (OperandKind::Unused, class_fetch_type(self.text(token))),
+            ClassSpec::Expr(expr) => match self.expr(expr)? {
+                Where::Constant(value) => {
+                    let shown = match value.kind() {
+                        ZvalType::Null => "null",
+                        ZvalType::False => "false",
+                        ZvalType::True => "true",
+                        ZvalType::Long => "int",
+                        ZvalType::Double => "float",
+                        ZvalType::String => "string",
+                        ZvalType::Array => "array",
+                        _ => "value",
+                    };
+                    return Err(self.compile_error(format!("Cannot use \"::class\" on {shown}")));
+                }
+                value => self.operand(value),
+            },
+        };
+        let out = self.temporary();
+        self.push(Opline {
+            opcode: Opcode::FetchClassName,
+            op1_type,
+            op1,
+            out_type: OperandKind::Tmp,
+            out,
+            ..Opline::default()
+        });
+        Ok(Where::Temporary(out))
     }
 
     /// `zend_compile_class_const` (`Z/Zend/zend_compile.c:11064`): a
