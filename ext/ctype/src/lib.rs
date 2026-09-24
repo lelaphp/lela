@@ -8,10 +8,9 @@
 //! the class and false when it is empty; anything else is the 8.1
 //! deprecation and `ctype_fallback`, which reads an `int` as one byte
 //! where it fits and answers by the class's `allow_digits` and
-//! `allow_minus` otherwise. The classes are the oracle's, php's libc
-//! under the recipe's `LC_ALL=C`, which on the pinned build classes
-//! the bytes above 127 as Latin-1: [`class_of`] pins the table the
-//! oracle answered for every byte, ranges and all.
+//! `allow_minus` otherwise. The classes are the `C` locale's, the only
+//! one the engine sets (#567): ASCII, and no byte above 0x7F in any
+//! class, which is what [`class_of`] reads.
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -108,10 +107,8 @@ fn declared(name: &[u8]) -> FunctionDecl {
     }
 }
 
-/// One of `<ctype.h>`'s classes, as the oracle's libc answers for each
-/// byte under the recipe: the ASCII class, and above 127 the Latin-1
-/// bytes the pinned build's `C` locale puts in it. Each range is
-/// inclusive.
+/// One of `<ctype.h>`'s classes, as libc answers for each byte under
+/// `LC_CTYPE=C`: an ASCII class, which no byte above 0x7F is in.
 #[derive(Clone, Copy)]
 enum Class {
     Alnum,
@@ -127,50 +124,22 @@ enum Class {
     Xdigit,
 }
 
-/// `iswhat(c)` for one byte: the oracle's table, read for every byte
-/// from 0 to 255 under the recipe and pinned as ranges.
+/// `iswhat(c)` for one byte under `LC_CTYPE=C`, the table of C's
+/// `<ctype.h>` as inclusive ranges: ASCII and nothing else, so a byte
+/// above 0x7F is in no class. A locale other than C, once the engine
+/// sets one, is a table of its own beside this one.
 fn class_of(class: Class, byte: u8) -> bool {
     let ranges: &[(u8, u8)] = match class {
-        Class::Alnum => &[
-            (48, 57),
-            (65, 90),
-            (97, 122),
-            (170, 170),
-            (181, 181),
-            (186, 186),
-            (192, 214),
-            (216, 246),
-            (248, 255),
-        ],
-        Class::Alpha => &[
-            (65, 90),
-            (97, 122),
-            (170, 170),
-            (181, 181),
-            (186, 186),
-            (192, 214),
-            (216, 246),
-            (248, 255),
-        ],
-        Class::Cntrl => &[(0, 31), (127, 159), (173, 173)],
+        Class::Alnum => &[(48, 57), (65, 90), (97, 122)],
+        Class::Alpha => &[(65, 90), (97, 122)],
+        Class::Cntrl => &[(0, 31), (127, 127)],
         Class::Digit => &[(48, 57)],
-        Class::Lower => &[(97, 122), (181, 181), (223, 246), (248, 255)],
-        Class::Graph => &[(33, 126), (161, 172), (174, 255)],
-        Class::Print => &[(32, 126), (160, 172), (174, 255)],
-        Class::Punct => &[
-            (33, 47),
-            (58, 64),
-            (91, 96),
-            (123, 126),
-            (161, 161),
-            (167, 167),
-            (171, 171),
-            (182, 183),
-            (187, 187),
-            (191, 191),
-        ],
-        Class::Space => &[(9, 13), (32, 32), (160, 160)],
-        Class::Upper => &[(65, 90), (192, 214), (216, 222)],
+        Class::Lower => &[(97, 122)],
+        Class::Graph => &[(33, 126)],
+        Class::Print => &[(32, 126)],
+        Class::Punct => &[(33, 47), (58, 64), (91, 96), (123, 126)],
+        Class::Space => &[(9, 13), (32, 32)],
+        Class::Upper => &[(65, 90)],
         Class::Xdigit => &[(48, 57), (65, 70), (97, 102)],
     };
     ranges.iter().any(|&(lo, hi)| (lo..=hi).contains(&byte))
@@ -220,7 +189,7 @@ fn ctype(
 /// past the byte range.
 ///
 /// ```php
-/// var_dump(ctype_alnum('abc123'), ctype_alnum('ab-c'), ctype_alnum(''), ctype_alnum(48), ctype_alnum(300), ctype_alnum(-300));
+/// setlocale(LC_CTYPE, "C"); var_dump(ctype_alnum('abc123'), ctype_alnum('ab-c'), ctype_alnum(''), ctype_alnum(48), ctype_alnum(300), ctype_alnum(-300), ctype_alnum("\xE9"));
 /// ```
 /// ```expect
 /// Deprecated: ctype_alnum(): Argument of type int will be interpreted as string in the future in %s on line 2
@@ -234,6 +203,7 @@ fn ctype(
 /// bool(true)
 /// bool(true)
 /// bool(false)
+/// bool(false)
 /// ```
 fn ctype_alnum(req: &mut Request) -> Result<Value, Thrown> {
     ctype(req, Class::Alnum, true, false)
@@ -244,8 +214,8 @@ fn ctype_alnum(req: &mut Request) -> Result<Value, Thrown> {
 /// as `65` again; past the range neither digits nor a minus are
 /// letters. A float, `null` and a bool are the deprecation and false,
 /// and so is an array, which the compiler cannot write `[]` for
-/// yet. Above 127 the class is the oracle's Latin-1: `\xE9` is a
-/// letter.
+/// yet. Under `LC_CTYPE=C` nothing above 0x7F is a letter or
+/// printable: `\xE9` and `\xA0` are false.
 ///
 /// ```php
 /// var_dump(ctype_alpha('abcXYZ'), ctype_alpha('Hello, World!'), ctype_alpha(''), ctype_alpha(65), ctype_alpha(-191), ctype_alpha(300), ctype_alpha(-300), ctype_alpha(1.5), ctype_alpha(null));
@@ -274,14 +244,17 @@ fn ctype_alnum(req: &mut Request) -> Result<Value, Thrown> {
 /// ```
 ///
 /// ```php
-/// var_dump(ctype_alpha("\xE9"), ctype_print("\xA0"), ctype_alpha(true), ctype_digit(false));
+/// setlocale(LC_CTYPE, "C"); var_dump(ctype_alpha("\xE9"), ctype_print("\xA0"), ctype_alpha(true), ctype_digit(false), ctype_alpha(233));
 /// ```
 /// ```expect
 /// Deprecated: ctype_alpha(): Argument of type bool will be interpreted as string in the future in %s on line 2
 ///
 /// Deprecated: ctype_digit(): Argument of type bool will be interpreted as string in the future in %s on line 2
-/// bool(true)
-/// bool(true)
+///
+/// Deprecated: ctype_alpha(): Argument of type int will be interpreted as string in the future in %s on line 2
+/// bool(false)
+/// bool(false)
+/// bool(false)
 /// bool(false)
 /// bool(false)
 /// ```
@@ -292,7 +265,7 @@ fn ctype_alpha(req: &mut Request) -> Result<Value, Thrown> {
 /// `ctype_cntrl(mixed $text): bool`, `iscntrl`.
 ///
 /// ```php
-/// var_dump(ctype_cntrl("\t\n"), ctype_cntrl('a'), ctype_cntrl(9), ctype_cntrl(300));
+/// setlocale(LC_CTYPE, "C"); var_dump(ctype_cntrl("\t\n"), ctype_cntrl('a'), ctype_cntrl(9), ctype_cntrl(300), ctype_cntrl("\x85"));
 /// ```
 /// ```expect
 /// Deprecated: ctype_cntrl(): Argument of type int will be interpreted as string in the future in %s on line 2
@@ -301,6 +274,7 @@ fn ctype_alpha(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(false)
 /// bool(true)
+/// bool(false)
 /// bool(false)
 /// ```
 fn ctype_cntrl(req: &mut Request) -> Result<Value, Thrown> {
@@ -312,7 +286,7 @@ fn ctype_cntrl(req: &mut Request) -> Result<Value, Thrown> {
 /// `251`, which is no digit.
 ///
 /// ```php
-/// var_dump(ctype_digit('0123'), ctype_digit('12a'), ctype_digit(55), ctype_digit(300), ctype_digit(-300), ctype_digit(-5));
+/// setlocale(LC_CTYPE, "C"); var_dump(ctype_digit('0123'), ctype_digit('12a'), ctype_digit(55), ctype_digit(300), ctype_digit(-300), ctype_digit(-5), ctype_digit("\xB2"));
 /// ```
 /// ```expect
 /// Deprecated: ctype_digit(): Argument of type int will be interpreted as string in the future in %s on line 2
@@ -326,6 +300,7 @@ fn ctype_cntrl(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(true)
 /// bool(true)
+/// bool(false)
 /// bool(false)
 /// bool(false)
 /// ```
@@ -336,13 +311,14 @@ fn ctype_digit(req: &mut Request) -> Result<Value, Thrown> {
 /// `ctype_lower(mixed $text): bool`, `islower`.
 ///
 /// ```php
-/// var_dump(ctype_lower('abc'), ctype_lower('aBc'), ctype_lower(97));
+/// setlocale(LC_CTYPE, "C"); var_dump(ctype_lower('abc'), ctype_lower('aBc'), ctype_lower(97), ctype_lower("\xE9"));
 /// ```
 /// ```expect
 /// Deprecated: ctype_lower(): Argument of type int will be interpreted as string in the future in %s on line 2
 /// bool(true)
 /// bool(false)
 /// bool(true)
+/// bool(false)
 /// ```
 fn ctype_lower(req: &mut Request) -> Result<Value, Thrown> {
     ctype(req, Class::Lower, false, false)
@@ -352,7 +328,7 @@ fn ctype_lower(req: &mut Request) -> Result<Value, Thrown> {
 /// minus allowed past the byte range.
 ///
 /// ```php
-/// var_dump(ctype_graph('a!Z'), ctype_graph('a b'), ctype_graph(33), ctype_graph(300), ctype_graph(-300));
+/// setlocale(LC_CTYPE, "C"); var_dump(ctype_graph('a!Z'), ctype_graph('a b'), ctype_graph(33), ctype_graph(300), ctype_graph(-300), ctype_graph("\xE9"));
 /// ```
 /// ```expect
 /// Deprecated: ctype_graph(): Argument of type int will be interpreted as string in the future in %s on line 2
@@ -365,6 +341,7 @@ fn ctype_lower(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(true)
 /// bool(true)
+/// bool(false)
 /// ```
 fn ctype_graph(req: &mut Request) -> Result<Value, Thrown> {
     ctype(req, Class::Graph, true, true)
@@ -374,7 +351,7 @@ fn ctype_graph(req: &mut Request) -> Result<Value, Thrown> {
 /// minus allowed past the byte range.
 ///
 /// ```php
-/// var_dump(ctype_print('a b!'), ctype_print("a\tb"), ctype_print(32), ctype_print(300), ctype_print(-300));
+/// setlocale(LC_CTYPE, "C"); var_dump(ctype_print('a b!'), ctype_print("a\tb"), ctype_print(32), ctype_print(300), ctype_print(-300), ctype_print("\xA0"));
 /// ```
 /// ```expect
 /// Deprecated: ctype_print(): Argument of type int will be interpreted as string in the future in %s on line 2
@@ -387,6 +364,7 @@ fn ctype_graph(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(true)
 /// bool(true)
+/// bool(false)
 /// ```
 fn ctype_print(req: &mut Request) -> Result<Value, Thrown> {
     ctype(req, Class::Print, true, true)
@@ -395,13 +373,14 @@ fn ctype_print(req: &mut Request) -> Result<Value, Thrown> {
 /// `ctype_punct(mixed $text): bool`, `ispunct`.
 ///
 /// ```php
-/// var_dump(ctype_punct('!?.'), ctype_punct('a!'), ctype_punct(33));
+/// setlocale(LC_CTYPE, "C"); var_dump(ctype_punct('!?.'), ctype_punct('a!'), ctype_punct(33), ctype_punct("\xA7"));
 /// ```
 /// ```expect
 /// Deprecated: ctype_punct(): Argument of type int will be interpreted as string in the future in %s on line 2
 /// bool(true)
 /// bool(false)
 /// bool(true)
+/// bool(false)
 /// ```
 fn ctype_punct(req: &mut Request) -> Result<Value, Thrown> {
     ctype(req, Class::Punct, false, false)
@@ -410,13 +389,14 @@ fn ctype_punct(req: &mut Request) -> Result<Value, Thrown> {
 /// `ctype_space(mixed $text): bool`, `isspace`.
 ///
 /// ```php
-/// var_dump(ctype_space(" \t\n"), ctype_space('a b'), ctype_space(32));
+/// setlocale(LC_CTYPE, "C"); var_dump(ctype_space(" \t\n"), ctype_space('a b'), ctype_space(32), ctype_space("\xA0"));
 /// ```
 /// ```expect
 /// Deprecated: ctype_space(): Argument of type int will be interpreted as string in the future in %s on line 2
 /// bool(true)
 /// bool(false)
 /// bool(true)
+/// bool(false)
 /// ```
 fn ctype_space(req: &mut Request) -> Result<Value, Thrown> {
     ctype(req, Class::Space, false, false)
@@ -425,13 +405,14 @@ fn ctype_space(req: &mut Request) -> Result<Value, Thrown> {
 /// `ctype_upper(mixed $text): bool`, `isupper`.
 ///
 /// ```php
-/// var_dump(ctype_upper('ABC'), ctype_upper('AbC'), ctype_upper(65));
+/// setlocale(LC_CTYPE, "C"); var_dump(ctype_upper('ABC'), ctype_upper('AbC'), ctype_upper(65), ctype_upper("\xC9"));
 /// ```
 /// ```expect
 /// Deprecated: ctype_upper(): Argument of type int will be interpreted as string in the future in %s on line 2
 /// bool(true)
 /// bool(false)
 /// bool(true)
+/// bool(false)
 /// ```
 fn ctype_upper(req: &mut Request) -> Result<Value, Thrown> {
     ctype(req, Class::Upper, false, false)
@@ -441,7 +422,7 @@ fn ctype_upper(req: &mut Request) -> Result<Value, Thrown> {
 /// past the byte range.
 ///
 /// ```php
-/// var_dump(ctype_xdigit('0fA9'), ctype_xdigit('g'), ctype_xdigit(70), ctype_xdigit(300), ctype_xdigit(-300));
+/// setlocale(LC_CTYPE, "C"); var_dump(ctype_xdigit('0fA9'), ctype_xdigit('g'), ctype_xdigit(70), ctype_xdigit(300), ctype_xdigit(-300), ctype_xdigit("\xC1"));
 /// ```
 /// ```expect
 /// Deprecated: ctype_xdigit(): Argument of type int will be interpreted as string in the future in %s on line 2
@@ -453,6 +434,7 @@ fn ctype_upper(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(true)
 /// bool(true)
+/// bool(false)
 /// bool(false)
 /// ```
 fn ctype_xdigit(req: &mut Request) -> Result<Value, Thrown> {
