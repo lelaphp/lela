@@ -328,3 +328,103 @@ pub(super) fn strptime(s: &[u8], format: &[u8]) -> Option<([i32; 8], Vec<u8>)> {
         rest,
     ))
 }
+
+/// One `ifaddrs` entry as `net_get_interfaces` reads it: the name, the
+/// flags, the address's family, and the four addresses `php_inet_ntop`
+/// renders, the last two only where `IFF_BROADCAST` or
+/// `IFF_POINTOPOINT` says they are there.
+pub(super) struct InterfaceAddress {
+    pub(super) name: Vec<u8>,
+    pub(super) flags: u32,
+    pub(super) family: Option<i64>,
+    pub(super) address: Option<Vec<u8>>,
+    pub(super) netmask: Option<Vec<u8>>,
+    pub(super) broadcast: Option<Vec<u8>>,
+    pub(super) ptp: Option<Vec<u8>>,
+}
+
+unsafe extern "C" {
+    /// `inet_ntop(3)`, which the `libc` crate does not declare.
+    fn inet_ntop(
+        af: libc::c_int,
+        src: *const libc::c_void,
+        dst: *mut libc::c_char,
+        size: libc::socklen_t,
+    ) -> *const libc::c_char;
+}
+
+/// `php_inet_ntop` (`Z/ext/standard/net.c:44`) over `inet_ntop(3)`: an
+/// IPv4 or IPv6 address as text, `None` for any other family.
+fn address_text(addr: *const libc::sockaddr) -> Option<Vec<u8>> {
+    if addr.is_null() {
+        return None;
+    }
+    // SAFETY: `addr` is a non-null `sockaddr` from `getifaddrs`, whose
+    // family field every family has.
+    let family = i32::from(unsafe { (*addr).sa_family });
+    let mut out = [0 as libc::c_char; 64];
+    let len = libc::socklen_t::try_from(out.len()).unwrap_or(0);
+    // The address field's place inside the family's structure, reached
+    // by offset so no pointer is cast to a stricter alignment.
+    let offset = match family {
+        libc::AF_INET => std::mem::offset_of!(libc::sockaddr_in, sin_addr),
+        libc::AF_INET6 => std::mem::offset_of!(libc::sockaddr_in6, sin6_addr),
+        _ => return None,
+    };
+    let src = addr
+        .cast::<u8>()
+        .wrapping_add(offset)
+        .cast::<libc::c_void>();
+    // SAFETY: `src` points at an address of `family`, and `out` has room
+    // for `len` bytes, the most the call writes.
+    let text = unsafe { inet_ntop(family, src, out.as_mut_ptr(), len) };
+    owned(text)
+}
+
+/// `getifaddrs(3)` walked and freed: each entry, in its order, or the
+/// error the call left.
+pub(super) fn interfaces() -> std::io::Result<Vec<InterfaceAddress>> {
+    let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: `head` is a live pointer the call writes the list to.
+    if unsafe { libc::getifaddrs(&raw mut head) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut found = Vec::new();
+    let mut at = head;
+    while !at.is_null() {
+        // SAFETY: `at` is a non-null entry of the list `getifaddrs` made,
+        // which lives until `freeifaddrs` below.
+        let entry = unsafe { &*at };
+        let flags = entry.ifa_flags;
+        let family = if entry.ifa_addr.is_null() {
+            None
+        } else {
+            // SAFETY: `ifa_addr` is non-null and the list's own.
+            Some(i64::from(unsafe { (*entry.ifa_addr).sa_family }))
+        };
+        let broadcast = flags & u32::try_from(libc::IFF_BROADCAST).unwrap_or(0) != 0;
+        let ptp = flags & u32::try_from(libc::IFF_POINTOPOINT).unwrap_or(0) != 0;
+        found.push(InterfaceAddress {
+            name: owned(entry.ifa_name).unwrap_or_default(),
+            flags,
+            family,
+            address: address_text(entry.ifa_addr),
+            netmask: address_text(entry.ifa_netmask),
+            broadcast: if broadcast {
+                address_text(entry.ifa_dstaddr)
+            } else {
+                None
+            },
+            ptp: if ptp {
+                address_text(entry.ifa_dstaddr)
+            } else {
+                None
+            },
+        });
+        at = entry.ifa_next;
+    }
+    // SAFETY: `head` is the list `getifaddrs` made, freed once, and
+    // nothing read from it is used after.
+    unsafe { libc::freeifaddrs(head) };
+    Ok(found)
+}

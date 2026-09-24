@@ -72,6 +72,7 @@ mod mail;
 mod md5;
 mod metaphone;
 mod microtime;
+mod net;
 mod output;
 mod pack;
 mod pageinfo;
@@ -268,6 +269,7 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
         image::natives(),
         browscap::natives(),
         datetime::natives(),
+        net::natives(),
     ]
     .into_iter()
     .flatten()
