@@ -443,19 +443,42 @@ pub fn binary_op(
 ///   thrown in %s on line 2
 /// ```
 ///
+/// A `string` takes an object through its `__toString` under the weak
+/// rule, `zend_parse_arg_str_weak`'s object arm, and the string it made
+/// replaces the object in the frame; an object with no `__toString` is
+/// the `TypeError` naming its class, and what `__toString` throws is
+/// what the call throws, with no `TypeError` after it.
+///
+/// ```php
+/// class S { function __toString(): string { return "s"; } }
+/// class T { function __toString(): string { throw new Exception("from __toString"); } }
+/// var_dump(strtoupper(new S), str_repeat(new S, 2), strlen(new S));
+/// try { strtoupper(new stdClass); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { strtoupper(new T); } catch (Exception $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// string(1) "S"
+/// string(2) "ss"
+/// int(1)
+/// strtoupper(): Argument #1 ($string) must be of type string, stdClass given
+/// Exception: from __toString
+/// ```
+///
 /// Under `strict_types` the caller's file refuses what the weak rule
-/// converts, the number and the numeric string alike, and
+/// converts, the object, the number and the numeric string alike, and
 /// takes an int where a float is asked for, the one conversion php
 /// makes there.
 ///
 /// ```php
 /// declare(strict_types=1);
-/// foreach ([fn () => str_repeat(12, 1), fn () => str_repeat('x', '2'), fn () => fmod('7', 2), fn () => in_array(1, [], 1)] as $f) {
+/// class S { function __toString(): string { return "s"; } }
+/// foreach ([fn () => strtoupper(new S), fn () => str_repeat(12, 1), fn () => str_repeat('x', '2'), fn () => fmod('7', 2), fn () => in_array(1, [], 1)] as $f) {
 ///     try { $f(); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
 /// }
 /// var_dump(fmod(7, 2));
 /// ```
 /// ```expect
+/// strtoupper(): Argument #1 ($string) must be of type string, S given
 /// str_repeat(): Argument #1 ($string) must be of type string, int given
 /// str_repeat(): Argument #2 ($times) must be of type int, string given
 /// fmod(): Argument #1 ($num1) must be of type float, string given
@@ -730,10 +753,26 @@ fn numeric_whole(bytes: &[u8]) -> Option<php_heap::Number> {
 /// the preference order `zend_verify_weak_scalar_type_hint` walks over
 /// the `zend_parse_arg_*_weak` readers, int then float then string then
 /// bool, with a string read by `is_numeric_str_function` where the type
-/// accepts both int and float. `null` never converts here, since php allows that
-/// for an internal parameter alone ([`null_as_scalar`]); what does not
+/// accepts both int and float, and an object taken as the string its
+/// class's `cast_object` gives, `zend_parse_arg_str_weak`'s object arm,
+/// whose throw is the `Err`. `null` never converts here, since php
+/// allows that for an internal parameter alone ([`null_as_scalar`]); what does not
 /// convert is `None`, and the caller raises the `TypeError`.
 ///
+/// ```php
+/// class S { function __toString(): string { return "s"; } }
+/// function f(string $s) { return $s; }
+/// function g(int|string $v) { return $v; }
+/// class P { public string $p = ''; }
+/// $p = new P; $p->p = new S;
+/// var_dump(f(new S), g(new S), g(1.0), $p->p);
+/// ```
+/// ```expect
+/// string(1) "s"
+/// string(1) "s"
+/// int(1)
+/// string(1) "s"
+/// ```
 pub(crate) fn scalar_type_hint(
     req: &mut Request,
     value: &Value,
@@ -790,6 +829,13 @@ pub(crate) fn scalar_type_hint(
             // precision the caller names (#408).
             ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Bool(_) => {
                 return Ok(Some(Value::string(crate::ops::to_string(req, &value)?)));
+            }
+            // `cast_object(zobj, &obj, IS_STRING)`, which for a class
+            // with no `__toString` fails without a word.
+            ValueRef::Object(object) => {
+                if let Some(text) = req.cast_object(*object, TypeTag::String)? {
+                    return Ok(Some(text));
+                }
             }
             _ => {}
         }

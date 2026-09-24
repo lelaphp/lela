@@ -2870,10 +2870,12 @@ fn increment_string(req: &mut Request, bytes: &[u8]) -> Result<PhpString, Thrown
 /// so the native of the same name serves `strlen` only where the
 /// compiler could not see it. A string is its byte length. Anything else
 /// goes the way `Z_PARAM_STR` would take it: under `strict_types` a
-/// `TypeError`; otherwise `null` is the 8.1 deprecation and zero, a
-/// bool, a long or a double is the length of the string it converts to
-/// (`zend_parse_arg_str_weak`, so a NAN warns as [`to_string`] warns),
-/// and an array, a resource or an object with no `__toString` is
+/// `TypeError`; otherwise `null` is the 8.1 deprecation and zero, and
+/// anything else is the length of the string the weak rule makes of it,
+/// [`crate::api::coerce::scalar_type_hint`] (`zend_parse_arg_str_weak`,
+/// so a NAN warns as [`to_string`] warns and an object goes through its
+/// `__toString`), and an array, a resource or an object with no
+/// `__toString` is
 /// php's `TypeError`, both texts the handler's own literals with
 /// `zend_zval_value_name` in the second. A variable nothing has written
 /// is the undefined-variable warning and then null's deprecation, in
@@ -2928,13 +2930,18 @@ pub(crate) fn strlen(req: &mut Request, value: &Value) -> Result<Value, Thrown> 
                 );
                 return Ok(Value::int(0));
             }
-            ValueRef::Bool(_) | ValueRef::Int(_) | ValueRef::Float(_) => {
-                let text = to_string(req, value)?;
-                let len = i64::try_from(text.len()).unwrap_or(i64::MAX);
-                req.release(Value::string(text));
-                return Ok(Value::int(len));
+            _ => {
+                // `zend_parse_arg_str_weak` over a copy of the operand,
+                // the one weak rule a `string` parameter takes.
+                let mask = php_unit::decl::Type::String.mask();
+                if let Some(text) = crate::api::coerce::scalar_type_hint(req, value, mask, false)? {
+                    let len = text
+                        .as_php_string()
+                        .map_or(0, |text| i64::try_from(text.len()).unwrap_or(i64::MAX));
+                    req.release(text);
+                    return Ok(Value::int(len));
+                }
             }
-            _ => {}
         }
     }
     let name = value_name(req, value);
