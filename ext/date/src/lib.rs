@@ -44,7 +44,7 @@ mod zone;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use php_ext::abi::{Extension, ExtensionBuilder};
+use php_ext::abi::{Extension, ExtensionBuilder, StartupIni};
 use php_ext::decl::{
     Attribute, AttributeArgument, ConstDecl, ConstExpr, FunctionDecl, IniDecl, Name, Parameter,
     Type,
@@ -70,6 +70,29 @@ struct State {
     last_errors: Option<Errors>,
 }
 
+/// Engine-scoped and immutable (ADR-0005): the startup value of each of
+/// the extension's ini entries, php's master value, which
+/// `DISPLAY_INI_ENTRIES` prints beside the request's.
+struct Masters(Vec<(Vec<u8>, Vec<u8>)>);
+
+impl Masters {
+    fn of(ini: &StartupIni) -> Masters {
+        Masters(
+            INI.iter()
+                .map(|(name, default)| {
+                    let value = ini
+                        .entries
+                        .iter()
+                        .rev()
+                        .find(|(n, _)| n.as_slice() == name.as_bytes())
+                        .map_or_else(|| default.as_bytes().to_vec(), |(_, v)| v.clone());
+                    (name.as_bytes().to_vec(), value)
+                })
+                .collect(),
+        )
+    }
+}
+
 /// A native's entry, the shape `ExtensionBuilder::functions` takes.
 type Entry = fn(&mut Request) -> Result<Value, Thrown>;
 
@@ -88,29 +111,32 @@ pub fn extension() -> Extension {
         .constants(constants())
         .functions(functions())
         .request_state::<State>()
+        .engine_state(Masters::of)
         .rinit(startup_timezone)
         .info(date_info)
         .build("date")
 }
 
-/// `PHP_INI_BEGIN()` of `php_date.c`, every entry `PHP_INI_ALL`.
+/// `PHP_INI_BEGIN()` of `php_date.c`: each entry and its default.
+const INI: [(&str, &str); 5] = [
+    ("date.timezone", "UTC"),
+    ("date.default_latitude", "31.7667"),
+    ("date.default_longitude", "35.2333"),
+    ("date.sunset_zenith", "90.833333"),
+    ("date.sunrise_zenith", "90.833333"),
+];
+
+/// The ini entries, every one `PHP_INI_ALL`.
 fn ini() -> Vec<IniDecl> {
-    [
-        ("date.timezone", "UTC"),
-        ("date.default_latitude", "31.7667"),
-        ("date.default_longitude", "35.2333"),
-        ("date.sunset_zenith", "90.833333"),
-        ("date.sunrise_zenith", "90.833333"),
-    ]
-    .into_iter()
-    .map(|(name, default)| IniDecl {
-        name: Name(name.as_bytes().into()),
-        default: default.as_bytes().into(),
-        user: true,
-        per_dir: true,
-        system: true,
-    })
-    .collect()
+    INI.into_iter()
+        .map(|(name, default)| IniDecl {
+            name: Name(name.as_bytes().into()),
+            default: default.as_bytes().into(),
+            user: true,
+            per_dir: true,
+            system: true,
+        })
+        .collect()
 }
 
 /// `OnUpdate_date_timezone` over the startup value: php checks
@@ -136,7 +162,30 @@ fn startup_timezone(req: &mut Request) -> Result<(), Thrown> {
     Ok(())
 }
 
-/// `PHP_MINFO_FUNCTION(date)`.
+/// `PHP_MINFO_FUNCTION(date)`: the extension's table, then its ini
+/// entries as `DISPLAY_INI_ENTRIES` prints them.
+///
+/// ```php
+/// date_default_timezone_set('Europe/Berlin');
+/// ini_set('date.default_latitude', '52.5');
+/// (new ReflectionExtension('date'))->info();
+/// ```
+/// ```expect
+/// date
+///
+/// date/time support => enabled
+/// timelib version => 2022.17
+/// "Olson" Timezone Database Version => 2026.3
+/// Timezone Database => internal
+/// Default timezone => Europe/Berlin
+///
+/// Directive => Local Value => Master Value
+/// date.timezone => UTC => UTC
+/// date.default_latitude => 52.5 => 31.7667
+/// date.default_longitude => 35.2333 => 35.2333
+/// date.sunset_zenith => 90.833333 => 90.833333
+/// date.sunrise_zenith => 90.833333 => 90.833333
+/// ```
 fn date_info(req: &mut Request) {
     let version = String::from_utf8_lossy(Tzdb::builtin().version()).into_owned();
     let default = String::from_utf8_lossy(&zone::guess_timezone(req)).into_owned();
@@ -147,6 +196,37 @@ fn date_info(req: &mut Request) {
         &["Timezone Database", "internal"],
         &["Default timezone", &default],
     ]);
+    // `DISPLAY_INI_ENTRIES()`: each entry's request value beside its
+    // master, `no value` for an empty one.
+    let shown = |value: &[u8]| {
+        if value.is_empty() {
+            "no value".to_owned()
+        } else {
+            String::from_utf8_lossy(value).into_owned()
+        }
+    };
+    let masters = req
+        .engine::<Masters>()
+        .map(|m| m.0.clone())
+        .unwrap_or_default();
+    let rows: Vec<[String; 3]> = masters
+        .iter()
+        .map(|(name, master)| {
+            let local = req.ini_get(name).unwrap_or(master);
+            [
+                String::from_utf8_lossy(name).into_owned(),
+                shown(local),
+                shown(master),
+            ]
+        })
+        .collect();
+    let mut table: Vec<&[&str]> = vec![&["Directive", "Local Value", "Master Value"]];
+    let cells: Vec<[&str; 3]> = rows
+        .iter()
+        .map(|[name, local, master]| [name.as_str(), local.as_str(), master.as_str()])
+        .collect();
+    table.extend(cells.iter().map(<[&str; 3]>::as_slice));
+    req.info_table(&table);
 }
 
 /// `#[\Deprecated(since: ..., message: ...)]`.
