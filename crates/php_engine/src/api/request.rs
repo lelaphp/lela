@@ -9514,16 +9514,12 @@ impl Request {
     /// `internal_function.module` naming it.
     #[must_use]
     pub fn extension_functions(&self, extension: ExtensionId) -> Vec<Function> {
-        let Some(at) = usize::try_from(extension.0).ok() else {
-            return Vec::new();
-        };
-        let start = self.extension_functions_start(at);
-        let count = self
-            .extension_of(extension)
-            .map_or(0, |e| e.functions.len());
-        (start..start.saturating_add(count))
-            .filter_map(|i| u32::try_from(i).ok())
-            .map(Function)
+        self.shared
+            .function_modules
+            .iter()
+            .zip(0u32..)
+            .filter(|(module, _)| **module == Some(extension))
+            .map(|(_, at)| Function(at))
             .collect()
     }
 
@@ -9533,14 +9529,7 @@ impl Request {
     #[must_use]
     pub fn function_extension(&self, function: Function) -> Option<ExtensionId> {
         let at = usize::try_from(function.0).ok()?;
-        (0..self.shared.extensions.len())
-            .find(|&i| {
-                let start = self.extension_functions_start(i);
-                let count = self.shared.extensions[i].functions.len();
-                (start..start.saturating_add(count)).contains(&at)
-            })
-            .and_then(|i| u32::try_from(i).ok())
-            .map(ExtensionId)
+        self.shared.function_modules.get(at).copied().flatten()
     }
 
     /// `ce->info.internal.module`: the extension that declared a native
@@ -9761,25 +9750,6 @@ impl Request {
             .get(usize::try_from(extension.0).ok()?)
     }
 
-    /// Where extension `at`'s functions begin in the linked table: the
-    /// engine's own natives come first, then each extension's in bundle
-    /// order (`Engine::build`).
-    fn extension_functions_start(&self, at: usize) -> usize {
-        let all: usize = self
-            .shared
-            .extensions
-            .iter()
-            .map(|e| e.functions.len())
-            .sum();
-        let own = self.shared.functions.len().saturating_sub(all);
-        self.shared
-            .extensions
-            .iter()
-            .take(at)
-            .map(|e| e.functions.len())
-            .fold(own, usize::saturating_add)
-    }
-
     // -------------------------------------------------- state
 
     /// The request state of the calling extension, `T` being the type it
@@ -9880,7 +9850,8 @@ impl Request {
     ///
     /// The entries of the table without `PHP_INI_USER`, `xmlrpc_errors`,
     /// `short_open_tag`, `sys_temp_dir`, the `mail.*` ones but `SMTP` and
-    /// `smtp_port`, `sendmail_path` and two of the three `syslog.*`, are
+    /// `smtp_port`, `sendmail_path`, two of the three `syslog.*` and
+    /// `disable_functions`, are
     /// `PHP_INI_SYSTEM` or `PHP_INI_SYSTEM|PHP_INI_PERDIR`, which
     /// `zend_alter_ini_entry_ex` refuses at `PHP_INI_STAGE_RUNTIME` as it
     /// refuses every entry whose `modifiable` lacks the stage; the rest of
@@ -9941,10 +9912,24 @@ impl Request {
 
     /// Whether an entry's `modifiable` carries `PHP_INI_USER`, what
     /// `ini_set()` asks: every entry of the table is `PHP_INI_ALL` but
-    /// `xmlrpc_errors`, `sys_temp_dir`, `sendmail_path`, `syslog.facility`
-    /// and `syslog.ident`, `PHP_INI_SYSTEM` (`Z/main/main.c:806-890`), and
+    /// `xmlrpc_errors`, `sys_temp_dir`, `sendmail_path`, `syslog.facility`,
+    /// `syslog.ident` and `disable_functions`, `PHP_INI_SYSTEM`
+    /// (`Z/main/main.c:806-890`), and
     /// `short_open_tag` and the four `mail.*` beside `sendmail_path`,
     /// `PHP_INI_SYSTEM|PHP_INI_PERDIR` (`Z/main/main.c:820-871`).
+    ///
+    /// `disable_functions` is read once, as the engine is built, so
+    /// setting it from inside is refused and takes nothing out.
+    ///
+    /// ```php
+    /// var_dump(ini_get('disable_functions'), ini_set('disable_functions', 'strlen'), function_exists('strlen'), strlen('abc'));
+    /// ```
+    /// ```expect
+    /// string(0) ""
+    /// bool(false)
+    /// bool(true)
+    /// int(3)
+    /// ```
     fn ini_modifiable(name: &[u8]) -> bool {
         !matches!(
             name,
@@ -9959,6 +9944,7 @@ impl Request {
                 | b"mail.force_extra_parameters"
                 | b"syslog.facility"
                 | b"syslog.ident"
+                | b"disable_functions"
         )
     }
 
