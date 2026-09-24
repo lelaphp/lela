@@ -463,6 +463,26 @@ pub(super) fn populate(
 /// int(1)
 /// string(14) "Internal error"
 /// ```
+///
+/// A `/u` match from offset zero that ends without an error records on
+/// the string that its bytes are valid UTF-8, php's `IS_STR_VALID_UTF8`,
+/// so the calls after it skip the library's check, which is what keeps
+/// a `\G` walk through a long subject linear; a string written into
+/// forgets it and is checked again.
+///
+/// ```php
+/// $s = str_repeat("\u{e9}", 3); $n = 0; $pos = 0;
+/// while (preg_match('/\G./u', $s, $m, 0, $pos)) { $pos += strlen($m[0]); $n++; }
+/// $s .= "\xff";
+/// var_dump($n, preg_match('/./u', $s), preg_last_error_msg(), preg_match('/./u', substr($s, 0, 1)), preg_last_error_msg());
+/// ```
+/// ```expect
+/// int(3)
+/// bool(false)
+/// string(56) "Malformed UTF-8 characters, possibly incorrectly encoded"
+/// bool(false)
+/// string(56) "Malformed UTF-8 characters, possibly incorrectly encoded"
+/// ```
 pub(crate) fn preg_match(req: &mut Request) -> Result<Value, Thrown> {
     do_match(req, false)
 }
@@ -699,11 +719,12 @@ pub(super) fn match_impl(
     let Some(mut scratch) = Scratch::take(req, pattern) else {
         return Ok(Value::bool(false));
     };
+    let from_start = start == 0;
     let outcome = matches_loop(
         req,
         pattern,
         &mut scratch,
-        bytes,
+        subject_string,
         &mut start,
         matches.is_some(),
         global,
@@ -716,7 +737,14 @@ pub(super) fn match_impl(
         assign_matches(req, matches, out);
     }
     match count {
-        Some(count) if error_code(req) == NO_ERROR => Ok(Value::int(count)),
+        Some(count) if error_code(req) == NO_ERROR => {
+            // The library checked every byte from offset zero under `/u`,
+            // or the string already said they were valid.
+            if pattern.utf && from_start {
+                subject_string.mark_valid_utf8();
+            }
+            Ok(Value::int(count))
+        }
         _ => Ok(Value::bool(false)),
     }
 }
@@ -728,13 +756,14 @@ fn matches_loop(
     req: &mut Request,
     pattern: &Pattern,
     scratch: &mut Scratch,
-    bytes: &[u8],
+    string: PhpString,
     start: &mut usize,
     wants: bool,
     global: bool,
     order: i64,
     flags: i64,
 ) -> Result<(Option<i64>, Option<PhpArray>), Thrown> {
+    let bytes = string.as_bytes();
     let offsets = flags & OFFSET_CAPTURE != 0;
     let as_null = flags & UNMATCHED_AS_NULL != 0;
     let mut out = if wants {
@@ -749,7 +778,7 @@ fn matches_loop(
         }
     }
     let mut marks: Option<PhpArray> = None;
-    let mut subject = Subject::new(bytes);
+    let mut subject = Subject::of(&string);
     let mut matched: i64 = 0;
     let mut count = scratch.run(pattern, &mut subject, *start, 0, true);
     'search: loop {

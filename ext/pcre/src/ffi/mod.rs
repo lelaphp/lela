@@ -25,6 +25,7 @@ use std::ffi::CStr;
 use std::ptr::{self, NonNull};
 
 use pcre2_sys as sys;
+use php_ext::values::PhpString;
 
 pub(crate) use sys::{
     PCRE2_ANCHORED, PCRE2_CASELESS, PCRE2_DOLLAR_ENDONLY, PCRE2_DOTALL, PCRE2_DUPNAMES,
@@ -317,17 +318,29 @@ impl Context {
     }
 }
 
-/// A subject and whether the library has checked it as UTF-8 already.
+/// A subject and whether it is known to be valid UTF-8: checked by the
+/// library in an earlier call over it, or carrying `IS_STR_VALID_UTF8`,
+/// which the engine sets only on a string whose every byte was checked.
 pub(crate) struct Subject<'s> {
     bytes: &'s [u8],
     checked: bool,
 }
 
 impl<'s> Subject<'s> {
+    /// A subject nothing is known of yet.
     pub(crate) fn new(bytes: &'s [u8]) -> Subject<'s> {
         Subject {
             bytes,
             checked: false,
+        }
+    }
+
+    /// A string's bytes, known valid where the string says it was
+    /// checked, php's `is_known_valid_utf8`.
+    pub(crate) fn of(string: &'s PhpString) -> Subject<'s> {
+        Subject {
+            bytes: string.as_bytes(),
+            checked: string.is_valid_utf8(),
         }
     }
 }
@@ -359,9 +372,10 @@ pub(super) fn run(
         options
     };
     let rc = if jit && code.jitted && trusted {
-        // SAFETY: the pattern has JIT code; the subject is `bytes`, alive
-        // for the call, with `start` within it and, under UTF, checked
-        // before and at a character's start; data and context are live.
+        // SAFETY: the pattern has machine code; the subject is `bytes`,
+        // alive for the call, with `start` within it and, under UTF, known
+        // valid (a check by the library, or the string's own record of
+        // one) with `start` at a character's start; data and `mctx` live.
         unsafe {
             sys::pcre2_jit_match_8(
                 code.raw.as_ptr(),

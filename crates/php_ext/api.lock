@@ -434,7 +434,9 @@ values::PhpString
 values::PhpString::as_bytes
 values::PhpString::filled
 values::PhpString::is_empty
+values::PhpString::is_valid_utf8
 values::PhpString::len
+values::PhpString::mark_valid_utf8
 values::PhpString::new
 values::PhpString::product
 values::Resource
