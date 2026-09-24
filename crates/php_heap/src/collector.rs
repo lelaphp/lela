@@ -38,15 +38,14 @@
 use std::time::{Duration, Instant};
 
 use crate::array::Arr;
-use crate::gc::{self, GC_BLACK, GC_GREY, GC_PURPLE, GC_WHITE, Refcounted};
+use crate::gc::{self, Colour, Refcounted};
 use crate::hooks::HeapHooks;
 use crate::object::Obj;
 use crate::reference::Ref;
 use crate::{Heap, Zval};
 
-/// `GC_INVALID`: index zero is never a root.
-const INVALID: u32 = 0;
-/// `GC_FIRST_ROOT`.
+/// `GC_FIRST_ROOT`: the first index of the root buffer, zero being
+/// the address a value in no entry reads.
 const FIRST_ROOT: u32 = 1;
 /// `GC_DEFAULT_BUF_SIZE`: the entries `gc_enable` lays down.
 const DEFAULT_BUF_SIZE: u32 = 16 * 1024;
@@ -115,16 +114,96 @@ impl Node {
     }
 }
 
-/// One entry of `GC_G(buf)`: php's tagged pointer, its low two bits
-/// the entry's kind (`GC_ROOT`, `GC_UNUSED`, `GC_GARBAGE`,
+/// One entry of `GC_G(buf)`: php's tagged pointer decoded, its low two
+/// bits the entry's kind (`GC_ROOT`, `GC_UNUSED`, `GC_GARBAGE`,
 /// `GC_DTOR_GARBAGE`) and, for an unused one, the next unused index in
-/// the bits above them.
+/// the bits above them, none at the end of the list.
 #[derive(Clone, Copy, Debug)]
 enum Entry {
     Root(Node),
-    Unused(u32),
+    Unused(Option<u32>),
     Garbage(Node),
     DtorGarbage(Obj),
+}
+
+/// The root buffer as `gc_enable` lays it down: php's `buf` with its
+/// `unused` list, `first_unused`, `gc_threshold` and `buf_size`. The
+/// entries below `first_unused` are held from index one on; the ones
+/// above it are php's allocated and unwritten, and are not laid down.
+#[derive(Debug)]
+struct Buffer {
+    /// The entries from `GC_FIRST_ROOT` to `first_unused`, index `i`
+    /// at `entries[i - 1]`.
+    entries: Vec<Entry>,
+    /// The head of the unused list.
+    unused: Option<u32>,
+    threshold: u32,
+    size: u32,
+}
+
+impl Buffer {
+    /// `gc_enable`'s buffer: the default size and threshold, empty.
+    fn new() -> Buffer {
+        Buffer {
+            entries: Vec::new(),
+            unused: None,
+            threshold: THRESHOLD_DEFAULT,
+            size: DEFAULT_BUF_SIZE,
+        }
+    }
+
+    /// `first_unused`: the first index never written.
+    fn first_unused(&self) -> u32 {
+        FIRST_ROOT + u32::try_from(self.entries.len()).unwrap_or(u32::MAX - FIRST_ROOT)
+    }
+
+    fn entry(&self, idx: u32) -> Option<Entry> {
+        let at = idx.checked_sub(FIRST_ROOT)? as usize;
+        self.entries.get(at).copied()
+    }
+
+    fn set(&mut self, idx: u32, entry: Entry) {
+        if let Some(at) = idx
+            .checked_sub(FIRST_ROOT)
+            .and_then(|at| self.entries.get_mut(at as usize))
+        {
+            *at = entry;
+        }
+    }
+
+    /// `gc_fetch_unused`: the head of the unused list, taken off it.
+    fn fetch_unused(&mut self) -> Option<u32> {
+        let idx = self.unused?;
+        self.unused = match self.entry(idx) {
+            Some(Entry::Unused(next)) => next,
+            _ => None,
+        };
+        Some(idx)
+    }
+
+    /// `gc_link_unused`: the entry onto the unused list.
+    fn link_unused(&mut self, idx: u32) {
+        self.set(idx, Entry::Unused(self.unused));
+        self.unused = Some(idx);
+    }
+
+    /// `gc_fetch_next_unused`: the first index never written.
+    fn fetch_next_unused(&mut self) -> u32 {
+        let idx = self.first_unused();
+        self.entries.push(Entry::Unused(None));
+        idx
+    }
+
+    /// `gc_decompress`: the entry holding `node`, whose header keeps
+    /// its index modulo 2^19 past the uncompressed range.
+    fn decompress(&self, node: Node, mut idx: u32) -> Option<u32> {
+        loop {
+            if entry_node(self.entry(idx)?).is_some_and(|n| n.is_same(node)) {
+                return Some(idx);
+            }
+            idx += MAX_UNCOMPRESSED;
+        }
+    }
 }
 
 /// `zend_gc_globals`, request-scoped: the root buffer and the numbers
@@ -135,19 +214,12 @@ enum Entry {
     reason = "php's `zend_gc_globals` keeps these four flags as `bool`s, and `gc_status()` reports three of them"
 )]
 pub(crate) struct Collector {
-    /// `buf`, the entries below `first_unused`; the ones above it are
-    /// php's allocated and unwritten, and are not laid down here.
-    buf: Vec<Entry>,
-    /// Whether `gc_enable` laid the buffer down (php's `buf != NULL`).
-    allocated: bool,
+    /// `buf`, none until the first `gc_enable` lays it down.
+    buf: Option<Buffer>,
     enabled: bool,
     active: bool,
     protected: bool,
     full: bool,
-    unused: u32,
-    first_unused: u32,
-    threshold: u32,
-    buf_size: u32,
     num_roots: u32,
     runs: u32,
     collected: u32,
@@ -172,9 +244,9 @@ pub struct GcStatus {
     /// `collected`: the values freed, strings and resources not among
     /// them (php 8.5).
     pub collected: u32,
-    /// `threshold`.
+    /// `threshold`, zero while there is no buffer.
     pub threshold: u32,
-    /// `buffer_size`.
+    /// `buffer_size`, zero while there is no buffer.
     pub buffer_size: u32,
     /// `roots`.
     pub roots: u32,
@@ -193,16 +265,11 @@ impl Collector {
     /// before the `zend.enable_gc` entry is read.
     pub(crate) fn new() -> Collector {
         Collector {
-            buf: Vec::new(),
-            allocated: false,
+            buf: None,
             enabled: false,
             active: false,
             protected: true,
             full: false,
-            unused: INVALID,
-            first_unused: INVALID,
-            threshold: INVALID,
-            buf_size: INVALID,
             num_roots: 0,
             runs: 0,
             collected: 0,
@@ -216,14 +283,12 @@ impl Collector {
     /// `gc_reset`: the counts back to zero over a buffer that stands,
     /// and the clock restarted whatever there is.
     fn reset(&mut self) {
-        if self.allocated {
+        if let Some(buf) = &mut self.buf {
+            buf.entries.clear();
+            buf.unused = None;
             self.active = false;
             self.protected = false;
             self.full = false;
-            self.unused = INVALID;
-            self.first_unused = FIRST_ROOT;
-            self.buf.clear();
-            self.buf.push(Entry::Unused(INVALID));
             self.num_roots = 0;
             self.runs = 0;
             self.collected = 0;
@@ -239,10 +304,8 @@ impl Collector {
     pub(crate) fn enable(&mut self, enable: bool) -> bool {
         let old = self.enabled;
         self.enabled = enable;
-        if enable && !old && !self.allocated {
-            self.allocated = true;
-            self.buf_size = DEFAULT_BUF_SIZE;
-            self.threshold = THRESHOLD_DEFAULT;
+        if enable && !old && self.buf.is_none() {
+            self.buf = Some(Buffer::new());
             self.reset();
         }
         old
@@ -265,8 +328,8 @@ impl Collector {
             full: self.full,
             runs: self.runs,
             collected: self.collected,
-            threshold: self.threshold,
-            buffer_size: self.buf_size,
+            threshold: self.buf.as_ref().map_or(0, |buf| buf.threshold),
+            buffer_size: self.buf.as_ref().map_or(0, |buf| buf.size),
             roots: self.num_roots,
             application_time: self.activated_at.elapsed(),
             collector_time: self.collecting,
@@ -275,64 +338,55 @@ impl Collector {
         }
     }
 
-    fn entry(&self, idx: u32) -> Entry {
-        self.buf
-            .get(idx as usize)
-            .copied()
-            .unwrap_or(Entry::Unused(INVALID))
+    /// `first_unused`, `GC_FIRST_ROOT` with no buffer.
+    fn first_unused(&self) -> u32 {
+        self.buf.as_ref().map_or(FIRST_ROOT, Buffer::first_unused)
+    }
+
+    fn entry(&self, idx: u32) -> Option<Entry> {
+        self.buf.as_ref()?.entry(idx)
     }
 
     fn set(&mut self, idx: u32, entry: Entry) {
-        if let Some(at) = self.buf.get_mut(idx as usize) {
-            *at = entry;
+        if let Some(buf) = &mut self.buf {
+            buf.set(idx, entry);
         }
-    }
-
-    /// `gc_fetch_unused`: the head of the unused list, taken off it.
-    fn fetch_unused(&mut self) -> u32 {
-        let idx = self.unused;
-        self.unused = match self.entry(idx) {
-            Entry::Unused(next) => next,
-            _ => INVALID,
-        };
-        idx
-    }
-
-    /// `gc_link_unused`: the entry onto the unused list.
-    fn link_unused(&mut self, idx: u32) {
-        self.set(idx, Entry::Unused(self.unused));
-        self.unused = idx;
-    }
-
-    /// `gc_fetch_next_unused`: the first index never written.
-    fn fetch_next_unused(&mut self) -> u32 {
-        let idx = self.first_unused;
-        self.first_unused += 1;
-        self.buf.push(Entry::Unused(INVALID));
-        idx
     }
 
     /// `gc_remove_from_roots`.
     fn remove_from_roots(&mut self, idx: u32) {
-        self.link_unused(idx);
+        if let Some(buf) = &mut self.buf {
+            buf.link_unused(idx);
+        }
         self.num_roots = self.num_roots.saturating_sub(1);
     }
 
-    /// A free index for a root, a garbage entry or an extra root, the
-    /// buffer grown past its size where it must be (`gc_add_garbage`'s
-    /// and `gc_extra_root`'s ladder); none where it cannot grow.
+    /// A free index for a root php adds under its threshold
+    /// (`gc_possible_root`'s ladder): an unused entry, or the next one
+    /// while it is under the threshold; none at the threshold, which is
+    /// `gc_possible_root_when_full`'s.
+    fn fetch_under_threshold(&mut self) -> Option<u32> {
+        let buf = self.buf.as_mut()?;
+        if let Some(idx) = buf.fetch_unused() {
+            return Some(idx);
+        }
+        (buf.first_unused() < buf.threshold).then(|| buf.fetch_next_unused())
+    }
+
+    /// A free index for a root past the threshold, a garbage entry or an
+    /// extra root, the buffer grown past its size where it must be
+    /// (`gc_add_garbage`'s and `gc_extra_root`'s ladder); none where it
+    /// cannot grow.
     fn fetch_any(&mut self) -> Option<u32> {
-        if self.unused != INVALID {
-            return Some(self.fetch_unused());
+        let buf = self.buf.as_mut()?;
+        if let Some(idx) = buf.fetch_unused() {
+            return Some(idx);
         }
-        if self.first_unused != self.buf_size {
-            return Some(self.fetch_next_unused());
+        if buf.first_unused() == buf.size {
+            self.grow_root_buffer();
         }
-        self.grow_root_buffer();
-        if self.first_unused == self.buf_size {
-            return None;
-        }
-        Some(self.fetch_next_unused())
+        let buf = self.buf.as_mut()?;
+        (buf.first_unused() != buf.size).then(|| buf.fetch_next_unused())
     }
 
     /// `gc_grow_root_buffer`. php warns `GC buffer overflow (GC
@@ -340,18 +394,19 @@ impl Collector {
     /// entries is sixteen gigabytes here, so the flags are set and the
     /// warning, which no request reaches, is not raised.
     fn grow_root_buffer(&mut self) {
-        if self.buf_size >= MAX_BUF_SIZE && !self.full {
+        let Some(buf) = &mut self.buf else { return };
+        if buf.size >= MAX_BUF_SIZE && !self.full {
             self.active = true;
             self.protected = true;
             self.full = true;
             return;
         }
-        let new_size = if self.buf_size < BUF_GROW_STEP {
-            self.buf_size.saturating_mul(2)
+        let new_size = if buf.size < BUF_GROW_STEP {
+            buf.size.saturating_mul(2)
         } else {
-            self.buf_size.saturating_add(BUF_GROW_STEP)
+            buf.size.saturating_add(BUF_GROW_STEP)
         };
-        self.buf_size = new_size.min(MAX_BUF_SIZE);
+        buf.size = new_size.min(MAX_BUF_SIZE);
     }
 
     /// `gc_adjust_threshold`: a collection that freed little, or left the
@@ -359,73 +414,59 @@ impl Collector {
     /// buffer to hold it; one that freed enough lowers it a step, never
     /// below the default.
     fn adjust_threshold(&mut self, count: i64) {
-        if count < THRESHOLD_TRIGGER || self.num_roots >= self.threshold {
-            if self.threshold < THRESHOLD_MAX {
-                let new_threshold = (self.threshold + THRESHOLD_STEP).min(THRESHOLD_MAX);
-                if new_threshold > self.buf_size {
+        let num_roots = self.num_roots;
+        let Some(buf) = &self.buf else { return };
+        let threshold = buf.threshold;
+        if count < THRESHOLD_TRIGGER || num_roots >= threshold {
+            if threshold < THRESHOLD_MAX {
+                let new_threshold = (threshold + THRESHOLD_STEP).min(THRESHOLD_MAX);
+                if new_threshold > buf.size {
                     self.grow_root_buffer();
                 }
-                if new_threshold <= self.buf_size {
-                    self.threshold = new_threshold;
+                if let Some(buf) = &mut self.buf
+                    && new_threshold <= buf.size
+                {
+                    buf.threshold = new_threshold;
                 }
             }
-        } else if self.threshold > THRESHOLD_DEFAULT {
-            self.threshold = self
-                .threshold
+        } else if threshold > THRESHOLD_DEFAULT
+            && let Some(buf) = &mut self.buf
+        {
+            buf.threshold = threshold
                 .saturating_sub(THRESHOLD_STEP)
                 .max(THRESHOLD_DEFAULT);
         }
     }
 
     /// Write `node` at `idx` as a root and put its compressed index and
-    /// `color` in its header, counting it.
-    fn place(&mut self, idx: u32, node: Node, color: u32) {
+    /// `colour` in its header, counting it.
+    fn place(&mut self, idx: u32, node: Node, colour: Colour) {
         self.set(idx, Entry::Root(node));
-        node.gc().set_info(compress(idx) | color);
+        node.gc().set_place(Some(compress(idx)), colour);
         self.num_roots += 1;
-    }
-
-    /// `gc_decompress`: the entry holding `node`, whose header keeps
-    /// its index modulo 2^19 past the uncompressed range.
-    fn decompress(&self, node: Node, mut idx: u32) -> Option<u32> {
-        loop {
-            if idx >= self.first_unused {
-                return None;
-            }
-            if let Entry::Root(n) | Entry::Garbage(n) = self.entry(idx)
-                && n.is_same(node)
-            {
-                return Some(idx);
-            }
-            if let Entry::DtorGarbage(o) = self.entry(idx)
-                && Node::Obj(o).is_same(node)
-            {
-                return Some(idx);
-            }
-            idx += MAX_UNCOMPRESSED;
-        }
     }
 
     /// `GC_REMOVE_FROM_BUFFER` and `gc_remove_from_buffer`: a value
     /// that carries the collector's bits has them cleared, and the entry
-    /// its address names is put back on the unused list. What `zend_array_destroy` and
-    /// `zend_objects_store_del` do before the value's memory goes, so the
-    /// buffer never names freed memory.
+    /// its address names is put back on the unused list. What
+    /// `zend_array_destroy` and `zend_objects_store_del` do before the
+    /// value's memory goes, so the buffer never names freed memory.
     pub(crate) fn remove_from_buffer(&mut self, node: Node) {
         let header = node.gc();
-        if header.info() == 0 {
+        if header.is_unplaced() {
             return;
         }
-        let idx = header.address();
-        header.set_info(0);
-        let idx = if self.first_unused >= MAX_UNCOMPRESSED {
-            self.decompress(node, idx)
+        let address = header.address();
+        header.set_place(None, Colour::Black);
+        let Some(address) = address else { return };
+        let idx = if self.first_unused() >= MAX_UNCOMPRESSED {
+            self.buf
+                .as_ref()
+                .and_then(|buf| buf.decompress(node, address))
         } else {
-            Some(idx)
+            Some(address)
         };
-        if let Some(idx) = idx
-            && idx != INVALID
-        {
+        if let Some(idx) = idx {
             self.remove_from_roots(idx);
         }
     }
@@ -434,26 +475,30 @@ impl Collector {
     /// into the unused entries below them, each header's address
     /// rewritten, so the roots are the entries from the first on.
     fn compact(&mut self) {
-        if self.num_roots + FIRST_ROOT == self.first_unused {
+        let num_roots = self.num_roots;
+        let Some(buf) = &mut self.buf else { return };
+        if num_roots + FIRST_ROOT == buf.first_unused() {
             return;
         }
-        if self.num_roots != 0 {
+        if num_roots != 0 {
+            let is_unused = |entry: Option<Entry>| matches!(entry, Some(Entry::Unused(_)));
             let mut free = FIRST_ROOT;
-            let mut scan = self.first_unused - 1;
-            let end = self.num_roots;
+            let mut scan = buf.first_unused() - 1;
+            let end = num_roots;
             while free < scan {
-                while !matches!(self.entry(free), Entry::Unused(_)) {
+                while !is_unused(buf.entry(free)) {
                     free += 1;
                 }
-                while matches!(self.entry(scan), Entry::Unused(_)) {
+                while is_unused(buf.entry(scan)) {
                     scan -= 1;
                 }
                 if scan > free {
-                    let moved = self.entry(scan);
-                    self.set(free, moved);
-                    if let Some(node) = entry_node(moved) {
-                        let color = node.gc().color();
-                        node.gc().set_info(compress(free) | color);
+                    if let Some(moved) = buf.entry(scan) {
+                        buf.set(free, moved);
+                        if let Some(node) = entry_node(moved) {
+                            let colour = node.gc().colour();
+                            node.gc().set_place(Some(compress(free)), colour);
+                        }
                     }
                     free += 1;
                     scan -= 1;
@@ -463,9 +508,8 @@ impl Collector {
                 }
             }
         }
-        self.unused = INVALID;
-        self.first_unused = self.num_roots + FIRST_ROOT;
-        self.buf.truncate(self.first_unused as usize);
+        buf.unused = None;
+        buf.entries.truncate(num_roots as usize);
     }
 
     /// `gc_add_garbage`: a white value that was not a root, added as
@@ -473,13 +517,13 @@ impl Collector {
     fn add_garbage(&mut self, node: Node) {
         if let Some(idx) = self.fetch_any() {
             self.set(idx, Entry::Garbage(node));
-            node.gc().set_info(compress(idx) | GC_BLACK);
+            node.gc().set_place(Some(compress(idx)), Colour::Black);
             self.num_roots += 1;
         }
     }
 }
 
-/// The value an entry names, whatever its kind.
+/// The value an entry names, whatever its kind; none for an unused one.
 fn entry_node(entry: Entry) -> Option<Node> {
     match entry {
         Entry::Root(n) | Entry::Garbage(n) => Some(n),
@@ -507,10 +551,6 @@ fn compress(idx: u32) -> u32 {
 fn as_count(count: i64) -> u32 {
     count as u32
 }
-
-/// `GC_HAS_DESTRUCTORS`: a garbage object whose destructor is still to
-/// be served was found.
-const HAS_DESTRUCTORS: u32 = 1;
 
 /// The children php's walk reads off one value, `get_gc` for an object:
 /// the zvals in `kids`, and the table php's handler hands back beside
@@ -582,10 +622,10 @@ fn push_all(list: &[Zval], stack: &mut Vec<Node>, mut step: impl FnMut(Node) -> 
 fn grey(child: Node) -> bool {
     let g = child.gc();
     g.delref();
-    if g.color() == GC_GREY {
+    if g.colour() == Colour::Grey {
         return false;
     }
-    g.set_color(GC_GREY);
+    g.set_colour(Colour::Grey);
     true
 }
 
@@ -594,20 +634,20 @@ fn grey(child: Node) -> bool {
 fn blacken(child: Node) -> bool {
     let g = child.gc();
     g.addref();
-    if g.color() == GC_BLACK {
+    if g.colour() == Colour::Black {
         return false;
     }
-    g.set_color(GC_BLACK);
+    g.set_colour(Colour::Black);
     true
 }
 
 /// `gc_scan`'s step: a grey child whitened.
 fn whiten(child: Node) -> bool {
     let g = child.gc();
-    if g.color() != GC_GREY {
+    if g.colour() != Colour::Grey {
         return false;
     }
-    g.set_color(GC_WHITE);
+    g.set_colour(Colour::White);
     true
 }
 
@@ -616,10 +656,10 @@ fn whiten(child: Node) -> bool {
 fn collect(child: Node) -> bool {
     let g = child.gc();
     g.addref();
-    if g.color() != GC_WHITE {
+    if g.colour() != Colour::White {
         return false;
     }
-    g.set_color(GC_BLACK);
+    g.set_colour(Colour::Black);
     true
 }
 
@@ -653,17 +693,12 @@ impl Heap {
     /// threshold; at the threshold, `gc_possible_root_when_full`.
     fn gc_possible_root(hooks: &mut dyn HeapHooks, node: Node) {
         let gc = &mut hooks.heap().gc;
-        if gc.protected {
+        if gc.protected || gc.buf.is_none() {
             return;
         }
-        if gc.unused != INVALID {
-            let idx = gc.fetch_unused();
-            gc.place(idx, node, GC_PURPLE);
-        } else if gc.first_unused < gc.threshold {
-            let idx = gc.fetch_next_unused();
-            gc.place(idx, node, GC_PURPLE);
-        } else {
-            Heap::gc_possible_root_when_full(hooks, node);
+        match gc.fetch_under_threshold() {
+            Some(idx) => gc.place(idx, node, Colour::Purple),
+            None => Heap::gc_possible_root_when_full(hooks, node),
         }
     }
 
@@ -686,23 +721,14 @@ impl Heap {
                 }
                 return;
             }
-            if node.gc().info() != 0 {
+            if !node.gc().is_unplaced() {
                 return;
             }
         }
         let gc = &mut hooks.heap().gc;
-        let idx = if gc.unused != INVALID {
-            gc.fetch_unused()
-        } else if gc.first_unused != gc.buf_size {
-            gc.fetch_next_unused()
-        } else {
-            gc.grow_root_buffer();
-            if gc.first_unused == gc.buf_size {
-                return;
-            }
-            gc.fetch_next_unused()
-        };
-        gc.place(idx, node, GC_PURPLE);
+        if let Some(idx) = gc.fetch_any() {
+            gc.place(idx, node, Colour::Purple);
+        }
     }
 
     /// `gc_mark_grey`: every value reachable from `root` one owner fewer
@@ -716,10 +742,10 @@ impl Heap {
                     (Some(table), split) => {
                         let g = table.gc();
                         g.delref();
-                        if g.color() == GC_GREY {
+                        if g.colour() == Colour::Grey {
                             walk(&kids[..split], &mut stack, grey)
                         } else {
-                            g.set_color(GC_GREY);
+                            g.set_colour(Colour::Grey);
                             push_all(&kids[..split], &mut stack, grey);
                             walk(&kids[split..], &mut stack, grey)
                         }
@@ -751,10 +777,10 @@ impl Heap {
                     (Some(table), split) => {
                         let g = table.gc();
                         g.addref();
-                        if g.color() == GC_BLACK {
+                        if g.colour() == Colour::Black {
                             walk(&kids[..split], &mut stack, blacken)
                         } else {
-                            g.set_color(GC_BLACK);
+                            g.set_colour(Colour::Black);
                             push_all(&kids[..split], &mut stack, blacken);
                             walk(&kids[split..], &mut stack, blacken)
                         }
@@ -782,10 +808,10 @@ impl Heap {
         let mut node = root;
         loop {
             let g = node.gc();
-            let next = if g.color() != GC_WHITE {
+            let next = if g.colour() != Colour::White {
                 None
             } else if g.refcount() > 0 {
-                g.set_color(GC_BLACK);
+                g.set_colour(Colour::Black);
                 Heap::gc_scan_black(hooks, node, kids);
                 None
             } else {
@@ -793,8 +819,8 @@ impl Heap {
                     Node::Obj(o) if walkable(o) => match children(hooks, node, kids) {
                         (Some(table), split) => {
                             let g = table.gc();
-                            if g.color() == GC_GREY {
-                                g.set_color(GC_WHITE);
+                            if g.colour() == Colour::Grey {
+                                g.set_colour(Colour::White);
                                 stack.push(Node::Arr(table));
                                 push_all(&kids[..split], &mut stack, whiten);
                                 walk(&kids[split..], &mut stack, whiten)
@@ -826,7 +852,7 @@ impl Heap {
     fn gc_collect_white(
         hooks: &mut dyn HeapHooks,
         root: Node,
-        flags: &mut u32,
+        has_destructors: &mut bool,
         kids: &mut Vec<Zval>,
     ) -> i64 {
         let mut count = 0;
@@ -838,18 +864,18 @@ impl Heap {
             }
             let next = match node {
                 Node::Obj(o) if walkable(o) => {
-                    if o.gc().info() == 0 {
+                    if o.gc().is_unplaced() {
                         hooks.heap().gc.add_garbage(node);
                     }
                     if !o.has_flag(gc::OBJ_DESTRUCTOR_CALLED) && hooks.has_destructor(o) {
-                        *flags |= HAS_DESTRUCTORS;
+                        *has_destructors = true;
                     }
                     match children(hooks, node, kids) {
                         (Some(table), split) => {
                             let g = table.gc();
                             g.addref();
-                            if g.color() == GC_WHITE {
-                                g.set_color(GC_BLACK);
+                            if g.colour() == Colour::White {
+                                g.set_colour(Colour::Black);
                                 push_all(&kids[..split], &mut stack, collect);
                                 walk(&kids[split..], &mut stack, collect)
                             } else {
@@ -861,7 +887,7 @@ impl Heap {
                 }
                 Node::Obj(_) => None,
                 Node::Arr(_) => {
-                    if node.gc().info() == 0 {
+                    if node.gc().is_unplaced() {
                         hooks.heap().gc.add_garbage(node);
                     }
                     children(hooks, node, kids);
@@ -894,7 +920,7 @@ impl Heap {
                 first = false;
                 count += 1;
                 true
-            } else if node.gc().address() != 0 && node.gc().color() == GC_BLACK {
+            } else if node.gc().address().is_some() && node.gc().colour() == Colour::Black {
                 hooks.heap().gc.remove_from_buffer(node);
                 count += 1;
                 true
@@ -913,7 +939,7 @@ impl Heap {
                         (Some(table), split) => {
                             push_all(&kids[..split], &mut stack, |_| true);
                             let g = table.gc();
-                            if g.address() != 0 && g.color() == GC_BLACK {
+                            if g.address().is_some() && g.colour() == Colour::Black {
                                 hooks.heap().gc.remove_from_buffer(Node::Arr(table));
                             }
                             walk(&kids[split..], &mut stack, |_| true)
@@ -942,11 +968,11 @@ impl Heap {
     fn gc_mark_roots(hooks: &mut dyn HeapHooks, kids: &mut Vec<Zval>) {
         hooks.heap().gc.compact();
         let mut idx = FIRST_ROOT;
-        while idx < hooks.heap().gc.first_unused {
-            if let Entry::Root(node) = hooks.heap().gc.entry(idx)
-                && node.gc().color() == GC_PURPLE
+        while idx < hooks.heap().gc.first_unused() {
+            if let Some(Entry::Root(node)) = hooks.heap().gc.entry(idx)
+                && node.gc().colour() == Colour::Purple
             {
-                node.gc().set_color(GC_GREY);
+                node.gc().set_colour(Colour::Grey);
                 Heap::gc_mark_grey(hooks, node, kids);
             }
             idx += 1;
@@ -957,11 +983,11 @@ impl Heap {
     /// the extra roots the scan added.
     fn gc_scan_roots(hooks: &mut dyn HeapHooks, kids: &mut Vec<Zval>) {
         let mut idx = FIRST_ROOT;
-        while idx < hooks.heap().gc.first_unused {
-            if let Entry::Root(node) = hooks.heap().gc.entry(idx)
-                && node.gc().color() == GC_GREY
+        while idx < hooks.heap().gc.first_unused() {
+            if let Some(Entry::Root(node)) = hooks.heap().gc.entry(idx)
+                && node.gc().colour() == Colour::Grey
             {
-                node.gc().set_color(GC_WHITE);
+                node.gc().set_colour(Colour::White);
                 Heap::gc_scan(hooks, node, kids);
             }
             idx += 1;
@@ -971,28 +997,32 @@ impl Heap {
     /// `gc_collect_roots`: the live roots out of the buffer, the rest
     /// compacted to its front and each made garbage, a white one walked
     /// for the garbage it reaches.
-    fn gc_collect_roots(hooks: &mut dyn HeapHooks, flags: &mut u32, kids: &mut Vec<Zval>) -> i64 {
+    fn gc_collect_roots(
+        hooks: &mut dyn HeapHooks,
+        has_destructors: &mut bool,
+        kids: &mut Vec<Zval>,
+    ) -> i64 {
         let gc = &mut hooks.heap().gc;
-        for idx in FIRST_ROOT..gc.first_unused {
-            if let Entry::Root(node) = gc.entry(idx)
-                && node.gc().color() == GC_BLACK
+        for idx in FIRST_ROOT..gc.first_unused() {
+            if let Some(Entry::Root(node)) = gc.entry(idx)
+                && node.gc().colour() == Colour::Black
             {
-                node.gc().set_info(0);
+                node.gc().set_place(None, Colour::Black);
                 gc.remove_from_roots(idx);
             }
         }
         gc.compact();
-        let end = gc.first_unused;
+        let end = gc.first_unused();
         let mut count = 0;
         for idx in FIRST_ROOT..end {
             let gc = &mut hooks.heap().gc;
-            let Entry::Root(node) = gc.entry(idx) else {
+            let Some(Entry::Root(node)) = gc.entry(idx) else {
                 continue;
             };
             gc.set(idx, Entry::Garbage(node));
-            if node.gc().color() == GC_WHITE {
-                node.gc().set_color(GC_BLACK);
-                count += Heap::gc_collect_white(hooks, node, flags, kids);
+            if node.gc().colour() == Colour::White {
+                node.gc().set_colour(Colour::Black);
+                count += Heap::gc_collect_white(hooks, node, has_destructors, kids);
             }
         }
         count
@@ -1006,7 +1036,7 @@ impl Heap {
     fn gc_call_destructors(hooks: &mut dyn HeapHooks, from: u32, end: u32) {
         let mut idx = from;
         while idx != end {
-            if let Entry::DtorGarbage(o) = hooks.heap().gc.entry(idx) {
+            if let Some(Entry::DtorGarbage(o)) = hooks.heap().gc.entry(idx) {
                 hooks.heap().gc.set(idx, Entry::Root(Node::Obj(o)));
                 if !o.has_flag(gc::OBJ_DESTRUCTOR_CALLED) {
                     o.add_flag(gc::OBJ_DESTRUCTOR_CALLED);
@@ -1026,7 +1056,7 @@ impl Heap {
     /// buffer and its bytes back to the heap.
     fn gc_free_garbage(hooks: &mut dyn HeapHooks, end: u32) {
         for idx in FIRST_ROOT..end {
-            let Entry::Garbage(node) = hooks.heap().gc.entry(idx) else {
+            let Some(Entry::Garbage(node)) = hooks.heap().gc.entry(idx) else {
                 continue;
             };
             match node {
@@ -1051,11 +1081,10 @@ impl Heap {
         }
         let heap = hooks.heap();
         for idx in FIRST_ROOT..end {
-            let Entry::Garbage(node) = heap.gc.entry(idx) else {
+            let Some(Entry::Garbage(node)) = heap.gc.entry(idx) else {
                 continue;
             };
-            heap.gc.link_unused(idx);
-            heap.gc.num_roots = heap.gc.num_roots.saturating_sub(1);
+            heap.gc.remove_from_roots(idx);
             let at = match node {
                 Node::Obj(o) => o.address(),
                 Node::Arr(a) => a.address(),
@@ -1103,29 +1132,29 @@ impl Heap {
             }
             Heap::gc_mark_roots(hooks, &mut kids);
             Heap::gc_scan_roots(hooks, &mut kids);
-            let mut flags = 0;
-            let mut count = Heap::gc_collect_roots(hooks, &mut flags, &mut kids);
+            let mut has_destructors = false;
+            let mut count = Heap::gc_collect_roots(hooks, &mut has_destructors, &mut kids);
             if hooks.heap().gc.num_roots == 0 {
                 hooks.heap().gc.active = false;
                 break;
             }
-            let end = hooks.heap().gc.first_unused;
-            if flags & HAS_DESTRUCTORS != 0 {
+            let end = hooks.heap().gc.first_unused();
+            if has_destructors {
                 should_rerun = true;
                 for idx in FIRST_ROOT..end {
-                    if let Entry::Garbage(Node::Obj(o)) = hooks.heap().gc.entry(idx)
+                    if let Some(Entry::Garbage(Node::Obj(o))) = hooks.heap().gc.entry(idx)
                         && !o.has_flag(gc::OBJ_DESTRUCTOR_CALLED)
                     {
                         if hooks.has_destructor(o) {
                             hooks.heap().gc.set(idx, Entry::DtorGarbage(o));
-                            o.gc().set_color(GC_PURPLE);
+                            o.gc().set_colour(Colour::Purple);
                         } else {
                             o.add_flag(gc::OBJ_DESTRUCTOR_CALLED);
                         }
                     }
                 }
                 for idx in FIRST_ROOT..end {
-                    if let Entry::DtorGarbage(o) = hooks.heap().gc.entry(idx) {
+                    if let Some(Entry::DtorGarbage(o)) = hooks.heap().gc.entry(idx) {
                         count -= Heap::gc_remove_nested_data(hooks, Node::Obj(o), &mut kids);
                     }
                 }
