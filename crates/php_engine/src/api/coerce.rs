@@ -871,6 +871,23 @@ pub(crate) fn scalar_type_hint(
 ///   thrown in %s on line 2
 /// ```
 ///
+/// Under `strict_types` the same `null` is the `TypeError`, php's
+/// `zend_parse_arg_*_slow` refusing before the weak reader is reached,
+/// for a string, an int, a union and a bool alike.
+///
+/// ```php
+/// declare(strict_types=1);
+/// foreach ([fn () => define(null, 1), fn () => str_repeat('x', null), fn () => round(null), fn () => in_array(1, [], null), fn () => memory_get_usage(null)] as $f) {
+///     try { $f(); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// define(): Argument #1 ($constant_name) must be of type string, null given
+/// str_repeat(): Argument #2 ($times) must be of type int, null given
+/// round(): Argument #1 ($num) must be of type int|float, null given
+/// in_array(): Argument #3 ($strict) must be of type bool, null given
+/// memory_get_usage(): Argument #1 ($real_usage) must be of type bool, null given
+/// ```
 fn null_as_scalar(req: &mut Request, mask: u32) -> Result<Option<Value>, Thrown> {
     Ok(if mask & MAY_BE_LONG != 0 {
         Some(Value::int(0))

@@ -30,11 +30,10 @@ use php_unit::decl::{ClassKind, ConstExpr, FunctionDecl, Name, Parameter, Type, 
 use crate::api::abi::{Callable, Entry};
 use crate::api::coerce::{coerce_param, to_string};
 use crate::api::raising::{
-    Thrown, arg_count_error, arg_null_deprecated, arg_type_error, deprecated, throw,
-    too_few_arguments, warning,
+    Thrown, arg_count_error, arg_type_error, deprecated, throw, too_few_arguments, warning,
 };
 use crate::api::request::Request;
-use crate::api::values::{ClassId, Key, PhpArray, PhpString, TypeTag, Value, ValueRef};
+use crate::api::values::{ClassId, Key, PhpArray, PhpString, Value, ValueRef};
 
 mod backtrace;
 mod classes;
@@ -1698,10 +1697,6 @@ fn real_usage(req: &mut Request) -> Result<bool, Thrown> {
     let Some(given) = req.argument(1) else {
         return Ok(false);
     };
-    if matches!(given.deref().as_ref(), ValueRef::Null | ValueRef::Undef) {
-        arg_null_deprecated(req, 1, "bool");
-        return Ok(false);
-    }
     let coerced = coerce_param(req, &given, &Type::Bool, 1)?;
     Ok(coerced.as_bool().unwrap_or(false))
 }
@@ -2114,29 +2109,21 @@ fn callable_argument(req: &mut Request, position: u32) -> Result<Callable, Throw
 }
 
 /// One `Z_PARAM_LONG` of a native, the argument at `position` read off
-/// the call frame: `null` is the 8.1 deprecation and then zero, and what
-/// is there is coerced as php coerces an int parameter.
+/// the call frame, `coerce_param` over `int`, whose `null` is the 8.1
+/// deprecation and then zero under the weak rule.
 fn long_argument(req: &mut Request, position: u32) -> Result<i64, Thrown> {
     let given = req.argument(position).unwrap_or_default();
-    if matches!(given.deref().as_ref(), ValueRef::Null | ValueRef::Undef) {
-        arg_null_deprecated(req, position, "int");
-        return Ok(0);
-    }
     let coerced = coerce_param(req, &given, &Type::Int, position)?;
     Ok(coerced.as_int().unwrap_or(0))
 }
 
 /// One `Z_PARAM_STR` of a native, the argument at `position` read off
-/// the call frame: `null` is the 8.1 deprecation and then the empty
-/// string, and what is there is coerced as php coerces a string
-/// parameter. The string is the frame's, a view the native holds while
-/// the call stands.
+/// the call frame, `coerce_param` over `string`: `null` is the 8.1
+/// deprecation and then the empty string under the weak rule and the
+/// `TypeError` under `strict_types`. The string is the frame's, a view
+/// the native holds while the call stands.
 fn string_argument(req: &mut Request, position: u32) -> Result<PhpString, Thrown> {
     let given = req.argument(position).unwrap_or_default();
-    if matches!(given.deref().as_ref(), ValueRef::Null | ValueRef::Undef) {
-        arg_null_deprecated(req, position, "string");
-        return PhpString::new(req, b"");
-    }
     let coerced = coerce_param(req, &given, &Type::String, position)?;
     match coerced.as_php_string() {
         Some(s) => Ok(*s),
@@ -2146,44 +2133,18 @@ fn string_argument(req: &mut Request, position: u32) -> Result<PhpString, Thrown
 
 /// One `Z_PARAM_STR_OR_LONG` of a native, the argument at `position`
 /// read off the call frame (`zend_parse_arg_str_or_long`,
-/// `Z/Zend/zend_API.h`): a string or an int as it is, and under the weak
-/// rule `zend_parse_arg_str_or_long_slow`'s two tries in order, the
-/// int's (`null` the 8.1 deprecation and then `0`, a bool its int, a
-/// float the int it truncates to where it fits) and then the string's
-/// (a float past the long's range as its string, an object through
-/// `__toString`); what neither takes, and everything but a string or
-/// an int under `strict_types`, is php's `TypeError` naming the union.
+/// `Z/Zend/zend_API.h`): `coerce_param` over `string|int`, whose weak
+/// rule is `zend_parse_arg_str_or_long_slow`'s two tries in order, the
+/// int's and then the string's, and whose `null` is the 8.1 deprecation
+/// and `0`.
 fn string_or_long_argument(req: &mut Request, position: u32) -> Result<Value, Thrown> {
-    let given = req.argument(position).unwrap_or_default().deref();
-    if matches!(given.as_ref(), ValueRef::Str(_) | ValueRef::Int(_)) {
-        return Ok(given);
-    }
-    if !req.strict_types() {
-        match given.as_ref() {
-            ValueRef::Null | ValueRef::Undef => {
-                arg_null_deprecated(req, position, "string|int");
-                return Ok(Value::int(0));
-            }
-            ValueRef::Bool(b) => return Ok(Value::int(i64::from(b))),
-            ValueRef::Float(_) => {
-                if let Some(n) = crate::ops::arg_long_weak(req, &given) {
-                    return Ok(Value::int(n));
-                }
-                return Ok(Value::string(to_string(req, &given)?));
-            }
-            ValueRef::Object(object) => {
-                if let Some(text) = req.cast_object(*object, TypeTag::String)? {
-                    return Ok(text);
-                }
-            }
-            _ => {}
-        }
-    }
-    let tail = format!(
-        "be of type string|int, {} given",
-        crate::ops::value_name(req, &given)
-    );
-    Err(arg_type_error(req, position, &tail))
+    let given = req.argument(position).unwrap_or_default();
+    coerce_param(
+        req,
+        &given,
+        &Type::Union(vec![Type::String, Type::Int]),
+        position,
+    )
 }
 
 /// One declared parameter.

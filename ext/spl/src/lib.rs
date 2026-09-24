@@ -40,7 +40,7 @@ use php_ext::abi::{Extension, ExtensionBuilder, ObjectHandlers, Std};
 use php_ext::call::{call_method, lookup_class};
 use php_ext::coerce::{coerce_param, key_of, truthy};
 use php_ext::decl::{ClassKind, Name, Type};
-use php_ext::raising::{Thrown, arg_count_error, arg_null_deprecated, throw};
+use php_ext::raising::{Thrown, arg_count_error, throw};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -285,24 +285,14 @@ fn value(req: &Request, position: u32) -> Value {
     given(req, position).unwrap_or_default().deref()
 }
 
-fn scalar(req: &mut Request, position: u32, ty: &Type, name: &str) -> Result<Value, Thrown> {
+fn scalar(req: &mut Request, position: u32, ty: &Type) -> Result<Value, Thrown> {
     let given = given(req, position).unwrap_or_default();
-    if matches!(given.deref().as_ref(), ValueRef::Null | ValueRef::Undef) {
-        arg_null_deprecated(req, position, name);
-        return match *ty {
-            Type::Int => Ok(Value::int(0)),
-            Type::Bool => Ok(Value::bool(false)),
-            _ => string_value(req, b""),
-        };
-    }
     coerce_param(req, &given, ty, position)
 }
 
 /// `Z_PARAM_LONG`.
 fn long(req: &mut Request, position: u32) -> Result<i64, Thrown> {
-    Ok(scalar(req, position, &Type::Int, "int")?
-        .as_int()
-        .unwrap_or(0))
+    Ok(scalar(req, position, &Type::Int)?.as_int().unwrap_or(0))
 }
 
 /// `Z_PARAM_LONG` after `Z_PARAM_OPTIONAL`.
@@ -337,14 +327,14 @@ fn bool_or(req: &mut Request, position: u32, default: bool) -> Result<bool, Thro
     if given(req, position).is_none() {
         return Ok(default);
     }
-    Ok(scalar(req, position, &Type::Bool, "bool")?
+    Ok(scalar(req, position, &Type::Bool)?
         .as_bool()
         .unwrap_or(false))
 }
 
 /// `Z_PARAM_STR`.
 fn string(req: &mut Request, position: u32) -> Result<PhpString, Thrown> {
-    let coerced = scalar(req, position, &Type::String, "string")?;
+    let coerced = scalar(req, position, &Type::String)?;
     match coerced.as_php_string() {
         Some(s) => Ok(*s),
         None => PhpString::new(req, b""),

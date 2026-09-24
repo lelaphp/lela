@@ -104,11 +104,10 @@ use php_ext::call::{call_array, call_named, fetch_constant};
 use php_ext::coerce::{callable_checked, coerce_param, is_type};
 use php_ext::decl::{ConstDecl, ConstExpr, FunctionDecl, Name, Parameter, Type};
 use php_ext::raising::{
-    Level, Thrown, arg_count_error, arg_null_deprecated, arg_type_error, arg_value_error, docref,
-    too_few_arguments,
+    Level, Thrown, arg_count_error, arg_type_error, arg_value_error, docref, too_few_arguments,
 };
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpString, TypeTag, Value, ValueRef};
+use php_ext::values::{PhpArray, PhpString, TypeTag, Value};
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
 /// private to this crate (ADR-0005); nothing in it is shared or synchronised.
@@ -2085,27 +2084,19 @@ fn string_argument(req: &mut Request, position: u32) -> Result<PhpString, Thrown
 }
 
 /// One `Z_PARAM_LONG` of a native, the argument at `position` read off
-/// the call frame: `null` is the 8.1 deprecation and then zero, and what
-/// is there is coerced as php coerces an int parameter.
+/// the call frame, `coerce_param` over `int`, whose `null` is the 8.1
+/// deprecation and then zero under the weak rule.
 fn long_argument(req: &mut Request, position: u32) -> Result<i64, Thrown> {
     let given = req.argument(position).unwrap_or_default();
-    if matches!(given.deref().as_ref(), ValueRef::Null | ValueRef::Undef) {
-        arg_null_deprecated(req, position, "int");
-        return Ok(0);
-    }
     let coerced = coerce_param(req, &given, &Type::Int, position)?;
     Ok(coerced.as_int().unwrap_or(0))
 }
 
 /// One `Z_PARAM_BOOL` of a native, the argument at `position` read off
-/// the call frame: `null` is the 8.1 deprecation and then `false`, and
-/// what is there is coerced as php coerces a bool parameter.
+/// the call frame, `coerce_param` over `bool`, whose `null` is the 8.1
+/// deprecation and then `false` under the weak rule.
 fn bool_argument(req: &mut Request, position: u32) -> Result<bool, Thrown> {
     let given = req.argument(position).unwrap_or_default();
-    if matches!(given.deref().as_ref(), ValueRef::Null | ValueRef::Undef) {
-        arg_null_deprecated(req, position, "bool");
-        return Ok(false);
-    }
     let coerced = coerce_param(req, &given, &Type::Bool, position)?;
     Ok(coerced.as_bool().unwrap_or(false))
 }

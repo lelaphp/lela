@@ -1188,6 +1188,32 @@ fn reflection_function_is_deprecated(req: &mut Request) -> Result<Value, Thrown>
 /// #1 {main}
 ///   thrown in %s on line 2
 /// ```
+///
+/// `null` is `coerce_param`'s over `Closure|string`: the deprecation
+/// naming the union and the empty string written over the argument,
+/// which is what the trace of the miss prints, and under
+/// `strict_types` the `TypeError`.
+///
+/// ```php
+/// new ReflectionFunction(null);
+/// ```
+/// ```expect exit=255
+/// Deprecated: ReflectionFunction::__construct(): Passing null to parameter #1 ($function) of type Closure|string is deprecated in %s on line 2
+///
+/// Fatal error: Uncaught ReflectionException: Function () does not exist in %s:2
+/// Stack trace:
+/// #0 %s(2): ReflectionFunction->__construct('')
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// ```php
+/// declare(strict_types=1);
+/// try { new ReflectionFunction(null); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// ReflectionFunction::__construct(): Argument #1 ($function) must be of type Closure|string, null given
+/// ```
 fn reflection_function_construct(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 1)?;
     let given = req.argument(1).unwrap_or_default();

@@ -4,7 +4,7 @@
 
 use php_ext::coerce::coerce_param;
 use php_ext::decl::{ConstExpr, FunctionDecl, MethodDecl, Name, Parameter, Type, Visibility};
-use php_ext::raising::{Thrown, arg_count_error, arg_null_deprecated};
+use php_ext::raising::{Thrown, arg_count_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -73,10 +73,6 @@ pub(super) fn nullable_string(
 /// `Z_PARAM_LONG`.
 pub(super) fn long(req: &mut Request, position: u32) -> Result<i64, Thrown> {
     let value = req.argument(position).unwrap_or_default();
-    if matches!(value.deref().as_ref(), ValueRef::Null | ValueRef::Undef) {
-        arg_null_deprecated(req, position, "int");
-        return Ok(0);
-    }
     let coerced = coerce_param(req, &value, &Type::Int, position)?;
     Ok(coerced.as_int().unwrap_or(0))
 }
@@ -104,10 +100,6 @@ pub(super) fn nullable_long(req: &mut Request, position: u32) -> Result<Option<i
 /// `Z_PARAM_DOUBLE`.
 pub(super) fn double(req: &mut Request, position: u32) -> Result<f64, Thrown> {
     let value = req.argument(position).unwrap_or_default();
-    if matches!(value.deref().as_ref(), ValueRef::Null | ValueRef::Undef) {
-        arg_null_deprecated(req, position, "float");
-        return Ok(0.0);
-    }
     let coerced = coerce_param(req, &value, &Type::Float, position)?;
     Ok(coerced.as_float().unwrap_or(0.0))
 }
@@ -133,10 +125,6 @@ pub(super) fn optional_bool(
     let Some(value) = given(req, position) else {
         return Ok(default);
     };
-    if matches!(value.deref().as_ref(), ValueRef::Null) {
-        arg_null_deprecated(req, position, "bool");
-        return Ok(false);
-    }
     let coerced = coerce_param(req, &value, &Type::Bool, position)?;
     Ok(coerced.as_bool().unwrap_or(false))
 }

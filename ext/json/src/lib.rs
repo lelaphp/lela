@@ -352,8 +352,17 @@ fn arguments_between(req: &mut Request, min: usize, max: usize) -> Result<(), Th
     ))
 }
 
-/// One `Z_PARAM_STRING`: the argument coerced as php coerces a string
-/// parameter, the 8.1 deprecation for `null` raised by the coercion.
+/// One `Z_PARAM_STRING`: `coerce_param` over `string`, whose `null` is
+/// the 8.1 deprecation and the empty string under the weak rule and the
+/// `TypeError` under `strict_types`.
+///
+/// ```php
+/// declare(strict_types=1);
+/// try { json_decode(null); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// json_decode(): Argument #1 ($json) must be of type string, null given
+/// ```
 fn string_argument(req: &mut Request, position: u32) -> Result<PhpString, Thrown> {
     let given = req.argument(position).unwrap_or_default();
     let coerced = coerce_param(req, &given, &Type::String, position)?;
