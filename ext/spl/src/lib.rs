@@ -25,13 +25,14 @@
 // The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+mod array;
 mod exceptions;
 mod functions;
 mod iterators;
 mod observer;
 mod stub;
 
-use php_ext::abi::{Extension, ExtensionBuilder};
+use php_ext::abi::{Extension, ExtensionBuilder, ObjectHandlers, Std};
 use php_ext::call::{call_method, lookup_class};
 use php_ext::coerce::{coerce_param, key_of, truthy, value_name};
 use php_ext::decl::{ClassKind, Name, Type};
@@ -63,10 +64,14 @@ struct State {
 /// bool(true)
 /// ```
 pub fn extension() -> Extension {
-    ExtensionBuilder::default()
+    let mut builder = ExtensionBuilder::default()
         .functions(functions::natives())
         .classes(exceptions::classes())
-        .classes(iterators::classes())
+        .classes(iterators::classes());
+    for (decl, methods) in array::classes() {
+        builder = builder.class_payload::<array::SplArray>(decl, methods, &array::HANDLERS);
+    }
+    builder
         .classes(observer::classes())
         .request_state::<State>()
         .info(spl_info)
@@ -259,6 +264,32 @@ fn scalar(req: &mut Request, position: u32, ty: &Type, name: &str) -> Result<Val
     coerce_param(req, &given, ty, position)
 }
 
+/// `Z_PARAM_LONG`.
+fn long(req: &mut Request, position: u32) -> Result<i64, Thrown> {
+    Ok(scalar(req, position, &Type::Int, "int")?
+        .as_int()
+        .unwrap_or(0))
+}
+
+/// `Z_PARAM_LONG` after `Z_PARAM_OPTIONAL`.
+fn long_or(req: &mut Request, position: u32, default: i64) -> Result<i64, Thrown> {
+    if given(req, position).is_none() {
+        return Ok(default);
+    }
+    long(req, position)
+}
+
+/// `$this` of the method being served.
+fn this(req: &mut Request) -> Result<PhpObject, Thrown> {
+    match req.this() {
+        Some(this) => Ok(this),
+        None => Err(php_ext::raising::fatal(
+            req,
+            "InternalError: an SPL method served without its receiver",
+        )),
+    }
+}
+
 /// `Z_PARAM_BOOL` after `Z_PARAM_OPTIONAL`.
 fn bool_or(req: &mut Request, position: u32, default: bool) -> Result<bool, Thrown> {
     if given(req, position).is_none() {
@@ -433,4 +464,143 @@ fn set_key(
         }
     };
     array.set(req, key, value)
+}
+
+// ---- what several classes share
+
+/// `zend_dval_to_lval_safe`: the integer a float offset makes, with
+/// php's deprecation where the float has a fraction the cast drops.
+fn float_key(req: &mut Request, f: f64) -> Result<i64, Thrown> {
+    let n = php_ext::coerce::float_to_long(f);
+    // `zend_is_long_compatible` is `(double)l == d`, an exact test.
+    #[allow(clippy::cast_precision_loss, clippy::float_cmp)]
+    let compatible = (n as f64) == f;
+    if !compatible && f.is_finite() && f.abs() < 9.2e18 {
+        let shown = php_ext::coerce::to_string(req, &Value::float(f))?;
+        let shown = String::from_utf8_lossy(shown.as_bytes()).into_owned();
+        php_ext::raising::deprecated(
+            req,
+            &format!("Implicit conversion from float {shown} to int loses precision"),
+        );
+    }
+    Ok(n)
+}
+
+/// Whether the class of `object` overrides `lowered` with a method of
+/// its own, php's `fptr_*` pointers being set: the method the class
+/// answers is not one this crate serves.
+fn overridden(req: &mut Request, object: PhpObject, lowered: &[u8]) -> bool {
+    Std.get_method(req, object, lowered)
+        .and_then(|method| req.function_decl(method))
+        .is_some_and(|decl| !decl.file.0.is_empty())
+}
+
+/// One value through `ext/standard`'s `serialize`, as
+/// `php_var_serialize` writes it.
+fn serialized(req: &mut Request, value: Value) -> Result<Vec<u8>, Thrown> {
+    let answered = standard(req, b"serialize", &[value])?;
+    let bytes = answered.as_str_bytes().unwrap_or_default().to_vec();
+    req.release(answered);
+    Ok(bytes)
+}
+
+/// One value through `ext/standard`'s `unserialize`, `None` for what it
+/// could not read.
+fn unserialized(req: &mut Request, bytes: &[u8]) -> Result<Option<Value>, Thrown> {
+    let text = string_value(req, bytes)?;
+    let answered = standard(req, b"unserialize", &[text]);
+    req.release(text);
+    let answered = answered?;
+    if answered.as_bool() == Some(false) && bytes != b"b:0;" {
+        return Ok(None);
+    }
+    Ok(Some(answered))
+}
+
+/// A native of another extension served by name, php's `Error` for one
+/// the bundle has not.
+fn standard(req: &mut Request, name: &[u8], arguments: &[Value]) -> Result<Value, Thrown> {
+    let named = string_value(req, name)?;
+    let callable = php_ext::coerce::callable_checked(req, &named);
+    req.release(named);
+    let Ok(callable) = callable else {
+        let shown = String::from_utf8_lossy(name).into_owned();
+        return Err(throw(
+            req,
+            "Error",
+            &format!("Call to undefined function {shown}()"),
+        ));
+    };
+    php_ext::call::call(req, &callable, arguments)
+}
+
+/// Where the serialized value starting at `at` ends, one past its last
+/// byte, as `php_var_unserialize` reads the grammar; `None` for bytes
+/// that are no value.
+fn serialized_end(bytes: &[u8], at: usize) -> Option<usize> {
+    let tag = *bytes.get(at)?;
+    let upto = |from: usize, byte: u8| {
+        bytes
+            .get(from..)?
+            .iter()
+            .position(|b| *b == byte)
+            .map(|p| from + p)
+    };
+    let number = |from: usize, end: usize| -> Option<usize> {
+        std::str::from_utf8(bytes.get(from..end)?)
+            .ok()?
+            .parse()
+            .ok()
+    };
+    match tag {
+        b'N' => (bytes.get(at + 1) == Some(&b';')).then_some(at + 2),
+        b'b' | b'i' | b'd' | b'r' | b'R' => upto(at, b';').map(|p| p + 1),
+        b's' | b'S' | b'E' => {
+            let colon = upto(at + 2, b':')?;
+            let len = number(at + 2, colon)?;
+            let end = colon + 2 + len;
+            (bytes.get(end..end + 2) == Some(b"\";")).then_some(end + 2)
+        }
+        b'a' | b'O' | b'C' => {
+            let mut from = at + 2;
+            if tag != b'a' {
+                let colon = upto(from, b':')?;
+                from = colon + 2 + number(from, colon)? + 2;
+            }
+            let colon = upto(from, b':')?;
+            let count = number(from, colon)?;
+            let mut p = colon + 2;
+            if tag == b'C' {
+                let end = p + count;
+                return (bytes.get(end) == Some(&b'}')).then_some(end + 1);
+            }
+            for _ in 0..count * 2 {
+                p = serialized_end(bytes, p)?;
+            }
+            (bytes.get(p) == Some(&b'}')).then_some(p + 1)
+        }
+        _ => None,
+    }
+}
+
+/// The members, `zend_std_get_properties` as an array of its own.
+fn members(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thrown> {
+    let mut out = PhpArray::new(req)?;
+    for (name, value) in Std.get_properties(req, object)? {
+        req.addref(&value);
+        out.set(req, Key::from_string(name), value)?;
+    }
+    Ok(out)
+}
+
+/// `object_properties_load`: each member written onto the object.
+fn load_members(req: &mut Request, object: PhpObject, members: &Value) -> Result<(), Thrown> {
+    if let Some(members) = members.as_array() {
+        for (key, value) in members.snapshot() {
+            let name = key.to_prop_name(req)?;
+            req.addref(&value);
+            Std.write_property(req, object, name, value)?;
+        }
+    }
+    Ok(())
 }

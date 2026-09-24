@@ -82,6 +82,7 @@ call::call_method
 call::call_named
 call::class_constant
 call::clone
+call::clone_with
 call::closure_from_callable
 call::constant
 call::eval_const_expr
@@ -388,6 +389,7 @@ values::PhpArray::is_list
 values::PhpArray::is_recursive
 values::PhpArray::iter
 values::PhpArray::len
+values::PhpArray::live_from
 values::PhpArray::new
 values::PhpArray::protect
 values::PhpArray::replace

@@ -383,6 +383,19 @@ impl PhpArray {
         }
     }
 
+    /// The first live element at or past the bucket `position`, with
+    /// the bucket it stands at: what a hash iterator's `pos` reads
+    /// (`zend_hash_get_current_data_ex` after
+    /// `_zend_hash_get_valid_pos`), so a walk that keeps the bucket
+    /// resumes where it stood while the elements before it change. A
+    /// view, no owner taken; `None` past the last.
+    #[must_use]
+    pub fn live_from(&self, position: u32) -> Option<(u32, Key, Value)> {
+        self.0
+            .live_from(position)
+            .map(|(at, key, z)| (at, Key::of(key), Value::of_zval(z)))
+    }
+
     /// The elements in order, references followed, views of them.
     #[must_use]
     pub fn snapshot(&self) -> Vec<(Key, Value)> {

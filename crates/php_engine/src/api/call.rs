@@ -506,6 +506,28 @@ pub fn clone(req: &mut Request, object: &PhpObject) -> Result<PhpObject, Thrown>
     req.clone_object(*object, None)
 }
 
+/// A class's `clone_obj` over an object with a native payload, php's
+/// `spl_array_object_clone` and its kin: a fresh object of the class
+/// with the members copied as `zend_objects_clone_members` copies them,
+/// `payload` (the class's copy of the old one) in its slot, and then
+/// the class's `__clone` served on it, the copy given up with what
+/// `__clone` threw. What the payload names of the heap is the caller's
+/// to have taken an owner of. The copy is the caller's, one owner.
+pub fn clone_with<T: std::any::Any + Send>(
+    req: &mut Request,
+    object: &PhpObject,
+    payload: T,
+) -> Result<PhpObject, Thrown> {
+    let copy = req.clone_with_payload(*object, payload)?;
+    if req.method_named(object.class(), b"__clone").is_some()
+        && let Err(thrown) = call_method(req, &copy, b"__clone", &[])
+    {
+        req.release(copy.as_value());
+        return Err(thrown);
+    }
+    Ok(copy)
+}
+
 /// `zend_lookup_class`: the linked class named, autoloading if needed.
 pub fn lookup_class(req: &mut Request, name: &[u8]) -> Result<Option<ClassId>, Thrown> {
     Ok(req.class_named(name))
