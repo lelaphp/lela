@@ -5,9 +5,9 @@
 //! declaration the reflector's `$name`, and a method's `$class`, look
 //! up again, through [`super::signature::this_function`].
 //!
-//! What stands beside `stub::unbuilt` still: `isGenerator` and
-//! `getStaticVariables`, whose facts the declaration model has no field
-//! for (#420); `getEndLine`, which is #376's; `getClosureCalledClass`,
+//! What stands beside `stub::unbuilt` still: `getStaticVariables`,
+//! whose table the declaration model has no field for (#420);
+//! `getEndLine`, which is #376's; `getClosureCalledClass`,
 //! whose `called_scope` the payload does not carry, and `getClosure`,
 //! which waits on `api::call::closure_from_callable`; `setAccessible`
 //! and `ReflectionFunction`'s `isDisabled`, which the stub marks
@@ -268,6 +268,28 @@ pub(super) fn reflection_function_returns_reference(req: &mut Request) -> Result
     exactly_arguments(req, 0)?;
     let (_, decl) = this_function(req)?;
     Ok(Value::bool(decl.returns_by_ref))
+}
+
+/// `ReflectionFunctionAbstract::isGenerator()`: `ZEND_ACC_GENERATOR`,
+/// which a `yield` of the body's own sets, and which no native carries.
+///
+/// ```php
+/// function g() { yield; }
+/// function f() { return function () { yield; }; }
+/// class C { function m() { yield 1; } }
+/// var_dump((new ReflectionFunction('g'))->isGenerator(), (new ReflectionFunction('f'))->isGenerator());
+/// var_dump((new ReflectionMethod('C', 'm'))->isGenerator(), (new ReflectionFunction('strlen'))->isGenerator());
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// ```
+pub(super) fn reflection_function_is_generator(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    let (_, decl) = this_function(req)?;
+    Ok(Value::bool(decl.is_generator))
 }
 
 /// `ReflectionFunctionAbstract::isVariadic()`: `ZEND_ACC_VARIADIC`,

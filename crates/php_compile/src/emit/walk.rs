@@ -64,7 +64,65 @@ impl Modifiers {
     }
 }
 
+/// Where every generator the file declares starts: the offset of each
+/// function, method, closure and arrow function whose own body holds a
+/// `yield` or a `yield from`, ascending. php's parser marks the
+/// declaration as it reduces the `yield` (`CG(extra_fn_flags) |=
+/// ZEND_ACC_GENERATOR`, `Z/Zend/zend_language_parser.y:1378-1381`),
+/// the flags saved and restored around every nested declaration, so a
+/// `yield` belongs to the innermost function-like around it and to no
+/// class body: one walk of the tree's shape with a stack of the
+/// declarations open, which is what `zend_compile_func_decl` reads
+/// before it compiles the body and emits `GENERATOR_CREATE` after the
+/// parameters.
+pub(super) fn generators(tree: &tree::Tree) -> Vec<u32> {
+    let mut open: Vec<(usize, Option<u32>)> = Vec::new();
+    let mut found = Vec::new();
+    for (at, element) in tree.elements().iter().enumerate() {
+        let tree::Element::Node {
+            kind,
+            range,
+            descendants,
+            ..
+        } = *element
+        else {
+            continue;
+        };
+        while open.last().is_some_and(|(end, _)| *end < at) {
+            open.pop();
+        }
+        let end = at.saturating_add(descendants as usize);
+        match kind {
+            SyntaxKind::FUNCTION_DECL
+            | SyntaxKind::METHOD_DECL
+            | SyntaxKind::CLOSURE_EXPR
+            | SyntaxKind::ARROW_FN_EXPR
+            | SyntaxKind::PROPERTY_HOOK => open.push((end, Some(range.start))),
+            SyntaxKind::CLASS_DECL
+            | SyntaxKind::INTERFACE_DECL
+            | SyntaxKind::TRAIT_DECL
+            | SyntaxKind::ENUM_DECL
+            | SyntaxKind::ANON_CLASS_DECL => open.push((end, None)),
+            SyntaxKind::YIELD_EXPR | SyntaxKind::YIELD_FROM_EXPR => {
+                if let Some((_, Some(start))) = open.last() {
+                    found.push(*start);
+                }
+            }
+            _ => {}
+        }
+    }
+    found.sort_unstable();
+    found.dedup();
+    found
+}
+
 impl Emit<'_> {
+    /// Whether the function-like node starting at `start` is a
+    /// generator ([`generators`]).
+    pub(super) fn is_generator_at(&self, start: u32) -> bool {
+        self.generators.binary_search(&start).is_ok()
+    }
+
     /// The file's statements in order, `zend_compile_top_stmt` over
     /// the `SourceFile`'s list: each one read from the tree and emitted
     /// before the next is read, so a refusal stands where php's
@@ -340,6 +398,7 @@ impl Emit<'_> {
             doc_comment,
             line,
             end_line: self.end_line(range),
+            generator: self.is_generator_at(range.start),
         })
     }
 
@@ -765,6 +824,9 @@ pub(super) struct Function {
     pub(super) doc_comment: Option<Vec<u8>>,
     pub(super) line: u32,
     pub(super) end_line: u32,
+    /// `ZEND_ACC_GENERATOR`: a `yield` stands in the body itself
+    /// ([`generators`]).
+    pub(super) generator: bool,
 }
 
 /// One parameter, php's `ZEND_AST_PARAM`: the declared type where one is

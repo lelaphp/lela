@@ -440,6 +440,10 @@ pub(crate) struct Emit<'a> {
     /// `op_array->fn_flags` of the op array being compiled, the bits
     /// this compiler reads back.
     fn_flags: FnFlags,
+    /// Where every generator of the file starts, ascending
+    /// ([`walk::generators`]): php's parser marks `ZEND_ACC_GENERATOR`
+    /// on a declaration before its body compiles.
+    generators: Vec<u32>,
 }
 
 /// `op_array->fn_flags` (`Z/Zend/zend_compile.h:283-296`), the two bits
@@ -453,6 +457,9 @@ pub(crate) struct Emit<'a> {
 struct FnFlags {
     closure: bool,
     is_static: bool,
+    /// `ZEND_ACC_GENERATOR`, which a `yield` in the body sets and every
+    /// `return` reads.
+    generator: bool,
 }
 
 /// One entry of `CG(loop_var_stack)` a `finally` puts there
@@ -882,6 +889,7 @@ pub(crate) fn unit(
         unwind: Vec::new(),
         fast_call_var: None,
         try_catch_offset: None,
+        generators: walk::generators(&parsed.tree),
     };
     // A fatal leaves the file with what `zend_error` had raised before
     // it already rendered, so those travel with it.
@@ -2548,6 +2556,7 @@ impl Emit<'_> {
         let flags = FnFlags {
             closure: true,
             is_static: closure.is_static,
+            generator: false,
         };
         let saved = self.begin_body(&name, this_in_scope, flags);
         let outcome =
@@ -2843,6 +2852,18 @@ impl Emit<'_> {
             *first = OplineIdx(entry);
         }
         self.promotions(function)?;
+        if function.generator {
+            // `zend_compile_func_decl` after `zend_compile_params`
+            // (`Z/Zend/zend_compile.c:8553`): the frame is moved into
+            // the `Generator` the call returns before anything else of
+            // the body runs.
+            self.fn_flags.generator = true;
+            self.mark_function_as_generator()?;
+            self.push(Opline {
+                opcode: Opcode::GeneratorCreate,
+                ..Opline::default()
+            });
+        }
         self.closure_uses(binds)?;
         self.statements(&function.body)?;
         if let Some(value) = arrow {
@@ -2860,6 +2881,7 @@ impl Emit<'_> {
                 parameters,
                 return_type: function.return_type.clone(),
                 returns_by_ref: function.by_ref,
+                is_generator: function.generator,
                 attributes: Vec::new(),
                 doc_comment: function.doc_comment.clone().map(Vec::into_boxed_slice),
                 file: self.filename.clone(),
@@ -3126,6 +3148,14 @@ impl Emit<'_> {
     ) -> Result<OpArray, CompileError> {
         self.final_return(return_one)?;
         self.resolve_jumps()?;
+        if self.fn_flags.generator {
+            // `pass_two`'s `ZEND_RETURN` arm (`Z/Zend/zend_opcode.c:1213`).
+            for op in &mut self.oplines {
+                if matches!(op.opcode, Opcode::Return | Opcode::ReturnByRef) {
+                    op.opcode = Opcode::GeneratorReturn;
+                }
+            }
+        }
         resolve_fast_calls(&mut self.oplines, &self.try_catch);
         headers_numbered(&self.oplines, &self.safepoints)?;
         swap_commutative(&mut self.oplines);
@@ -4516,7 +4546,9 @@ impl Emit<'_> {
     /// string(2) "ok"
     /// ```
     fn r#return(&mut self, value: Option<tree::Expr>) -> Result<(), CompileError> {
-        let by_ref = self.returns_by_ref;
+        // For a generator the `&` is its yields', not its return's.
+        let generator = self.fn_flags.generator;
+        let by_ref = self.returns_by_ref && !generator;
         let written = value.map(|value| self.peel(value));
         if by_ref
             && written.is_some_and(|expr| {
@@ -4547,7 +4579,13 @@ impl Emit<'_> {
             None => Where::Constant(Zval::null()),
         };
         let compiled = self.copied_past_finally(compiled, by_ref);
-        let compiled = self.return_type_check(compiled, value.is_some(), false)?;
+        // A generator's return type is held to `Generator` at compile
+        // time instead ([`Self::mark_function_as_generator`]).
+        let compiled = if generator {
+            compiled
+        } else {
+            self.return_type_check(compiled, value.is_some(), false)?
+        };
         let before_finally = self.next();
         self.handle_loops_and_finally(Some(compiled));
         // The `finally` may have written into the cell a by-reference
@@ -6206,9 +6244,8 @@ impl Emit<'_> {
                 };
                 self.new_expression(class, &arguments)
             }
-            tree::Expr::YieldExpr(_) | tree::Expr::YieldFromExpr(_) => {
-                Err(self.unread("a `yield`"))
-            }
+            tree::Expr::YieldExpr(id) => self.yield_expr(id),
+            tree::Expr::YieldFromExpr(id) => self.yield_from(id),
             tree::Expr::IncludeExpr(id) => {
                 let node = &tree[id];
                 let kind = match node.op.map(|op| self.kind(op)) {
@@ -6457,6 +6494,194 @@ impl Emit<'_> {
             ..Opline::default()
         });
         Ok(Where::Constant(Zval::bool(true)))
+    }
+
+    /// `zend_mark_function_as_generator` (`Z/Zend/zend_compile.c:1530`):
+    /// a `yield` needs a function to be in, and a generator's declared
+    /// return type must admit a `Generator`, which a type does where it
+    /// takes any object or names `Traversable`, `Iterator` or
+    /// `Generator`. Both refusals are `E_COMPILE_ERROR`s at the line the
+    /// compiler stands on, the `yield`'s or, from
+    /// [`Self::parameters_and_body`], the declaration's.
+    ///
+    /// ```php
+    /// function f(): int { yield 1; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Generator return type must be a supertype of Generator, int given in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// function f(): iterable { yield 1; }
+    /// function g(): Traversable|false { yield 2; }
+    /// function h(): ?object { yield 3; }
+    /// foreach ([f(), g(), h()] as $gen) foreach ($gen as $v) echo $v;
+    /// ```
+    /// ```expect
+    /// 123
+    /// ```
+    fn mark_function_as_generator(&mut self) -> Result<(), CompileError> {
+        if self.active_function.is_none() {
+            return Err(
+                self.compile_error("The \"yield\" expression can only be used inside a function")
+            );
+        }
+        let Some(ty) = self.return_type.clone() else {
+            return Ok(());
+        };
+        if generator_compatible(&ty) {
+            return Ok(());
+        }
+        Err(self.compile_error(format!(
+            "Generator return type must be a supertype of Generator, {} given",
+            type_to_string(&ty)
+        )))
+    }
+
+    /// `zend_compile_yield` (`Z/Zend/zend_compile.c:10716`): the key
+    /// where one is written, then the value, then `YIELD` over the two
+    /// into a `VAR`, which is where `send()` puts what it sends. Under a
+    /// generator written `function &gen()` a variable is compiled for
+    /// writing, so what the generator hands out is the variable's own
+    /// cell, and a call carries `ZEND_RETURNS_FUNCTION` for the notice
+    /// over one that returned by value.
+    ///
+    /// ```php
+    /// function g() { $x = yield 1; echo "got $x\n"; yield 'k' => 2; $y = yield; var_dump($y); return 3; }
+    /// $g = g();
+    /// var_dump($g->current());
+    /// var_dump($g->send('a'));
+    /// var_dump($g->key());
+    /// $g->next();
+    /// var_dump($g->key(), $g->current());
+    /// $g->send('b');
+    /// var_dump($g->valid(), $g->getReturn());
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// got a
+    /// int(2)
+    /// string(1) "k"
+    /// int(1)
+    /// NULL
+    /// string(1) "b"
+    /// bool(false)
+    /// int(3)
+    /// ```
+    ///
+    /// `yield` outside a function is php's compile error:
+    ///
+    /// ```php
+    /// yield 1;
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: The "yield" expression can only be used inside a function in %s on line 2
+    /// ```
+    fn yield_expr(&mut self, id: NodeId<tree::YieldExpr>) -> Result<Where, CompileError> {
+        self.mark_function_as_generator()?;
+        if !self.fn_flags.generator {
+            return Err(self.fatal("InternalError: a `yield` in a body the scan found none in"));
+        }
+        let node = self.parsed.tree[id].clone();
+        let key = match node.key {
+            Some(key) => {
+                let key = self.parsed.tree[key].key;
+                let value = self.expr(key)?;
+                Some(self.operand(value))
+            }
+            None => None,
+        };
+        let by_ref = self.returns_by_ref;
+        let extended_value = match node.value {
+            Some(value) if by_ref && self.is_call(value) => RETURNS_FUNCTION,
+            _ => 0,
+        };
+        let value = match node.value {
+            Some(value) if by_ref && self.is_variable(value) => {
+                let (kind, at, _) = self.ref_source(value, true)?;
+                Some((kind, at))
+            }
+            Some(value) => {
+                let value = self.expr(value)?;
+                Some(self.operand(value))
+            }
+            None => None,
+        };
+        let (op1_type, op1) = value.unwrap_or((OperandKind::Unused, 0));
+        let (op2_type, op2) = key.unwrap_or((OperandKind::Unused, 0));
+        let out = self.temporary();
+        self.push(Opline {
+            opcode: Opcode::Yield,
+            op1_type,
+            op1,
+            op2_type,
+            op2,
+            out_type: OperandKind::Var,
+            out,
+            extended_value,
+            ..Opline::default()
+        });
+        Ok(Where::Returned(out))
+    }
+
+    /// `zend_compile_yield_from` (`Z/Zend/zend_compile.c:10751`): the
+    /// operand, then `YIELD_FROM` over it into a temporary, which holds
+    /// what a generator delegated to returned. A generator written
+    /// `function &gen()` may not delegate.
+    ///
+    /// ```php
+    /// function inner() { yield 1; yield 2; return 'r'; }
+    /// function outer() { $r = yield from inner(); yield 3; yield from ['a' => 4, 5]; return $r; }
+    /// $g = outer();
+    /// foreach ($g as $k => $v) echo "$k=$v ";
+    /// echo $g->getReturn(), "\n";
+    /// ```
+    /// ```expect
+    /// 0=1 1=2 0=3 a=4 0=5 r
+    /// ```
+    ///
+    /// ```php
+    /// function &g() { yield from [1]; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use "yield from" inside a by-reference generator in %s on line 2
+    /// ```
+    fn yield_from(&mut self, id: NodeId<tree::YieldFromExpr>) -> Result<Where, CompileError> {
+        self.mark_function_as_generator()?;
+        if !self.fn_flags.generator {
+            return Err(self.fatal("InternalError: a `yield` in a body the scan found none in"));
+        }
+        if self.returns_by_ref {
+            return Err(
+                self.compile_error("Cannot use \"yield from\" inside a by-reference generator")
+            );
+        }
+        let source = self.required(self.parsed.tree[id].source, "a `yield from`")?;
+        let value = self.expr(source)?;
+        let (op1_type, op1) = self.operand(value);
+        let out = self.temporary();
+        self.push(Opline {
+            opcode: Opcode::YieldFrom,
+            op1_type,
+            op1,
+            out_type: OperandKind::Tmp,
+            out,
+            ..Opline::default()
+        });
+        Ok(Where::Temporary(out))
+    }
+
+    /// `zend_is_variable` (`Z/Zend/zend_compile.c:2718`): a variable, a
+    /// dimension, a property or a `static` property, the nodes a
+    /// by-reference `yield` compiles for writing. A variable named by
+    /// an expression is left to `zend_compile_expr` here, which reads it.
+    fn is_variable(&self, expr: tree::Expr) -> bool {
+        match self.peel(expr) {
+            tree::Expr::SimpleVarExpr(_)
+            | tree::Expr::SubscriptExpr(_)
+            | tree::Expr::MemberAccessExpr(_) => true,
+            other => self.is_static_prop(other),
+        }
     }
 
     /// `zend_compile_include_or_eval` (`Z/Zend/zend_compile.c:10800`):
@@ -9486,8 +9711,10 @@ impl Emit<'_> {
             // around it, so a `print` folds to nothing.
             tree::Expr::PrintExpr(_) => Err(self.fatal("a `print` is no constant expression")),
             tree::Expr::EvalExpr(_) => Err(self.unread("an `eval`")),
+            // `zend_compile_yield` emits its opline whatever stands
+            // around it.
             tree::Expr::YieldExpr(_) | tree::Expr::YieldFromExpr(_) => {
-                Err(self.unread("a `yield`"))
+                Err(self.fatal("a `yield` is no constant expression"))
             }
         }
     }
@@ -11423,7 +11650,11 @@ impl Emit<'_> {
     /// was written `function &f`, and the return carries its safepoint
     /// number.
     fn final_return(&mut self, return_one: bool) -> Result<(), CompileError> {
-        if let Some(ty) = self.return_type.clone() {
+        if let Some(ty) = self
+            .return_type
+            .clone()
+            .filter(|_| !self.fn_flags.generator)
+        {
             if ty.contains_code(NEVER_CODE) {
                 self.push(Opline {
                     opcode: Opcode::VerifyNeverType,
@@ -12520,6 +12751,7 @@ mod tests {
             unwind: Vec::new(),
             fast_call_var: None,
             try_catch_offset: None,
+            generators: Vec::new(),
         }
     }
 
@@ -12557,6 +12789,7 @@ mod tests {
                 parameters: Vec::new(),
                 return_type: None,
                 returns_by_ref: false,
+                is_generator: false,
                 attributes: Vec::new(),
                 doc_comment: None,
                 file: Name(Box::new([])),
@@ -12890,4 +13123,107 @@ fn is_auto_global(name: &[u8]) -> bool {
             | b"_REQUEST"
             | b"_FILES"
     )
+}
+
+/// `zend_mark_function_as_generator`'s test of a declared return type
+/// (`Z/Zend/zend_compile.c:1537-1551`): any object admits a
+/// `Generator`, and so does a name `is_generator_compatible_class_type`
+/// answers for, `Traversable`, `Iterator` or `Generator` whatever the
+/// case, alone or in a union or an intersection. `iterable` is
+/// `Traversable|array` once php has compiled it.
+fn generator_compatible(ty: &Type) -> bool {
+    match ty {
+        Type::Mixed | Type::Object | Type::Iterable => true,
+        Type::Named(name) => {
+            let lowered = name.0.to_ascii_lowercase();
+            matches!(
+                lowered.as_slice(),
+                b"traversable" | b"iterator" | b"generator"
+            )
+        }
+        Type::Nullable(inner) => generator_compatible(inner),
+        Type::Union(members) | Type::Intersection(members) => {
+            members.iter().any(generator_compatible)
+        }
+        _ => false,
+    }
+}
+
+/// `zend_type_to_string` (`Z/Zend/zend_compile.c:1429`): the class
+/// names in the order written, then the builtins in php's fixed order,
+/// `mixed` for the whole mask, and `?T` for a single type beside
+/// `null`.
+fn type_to_string(ty: &Type) -> String {
+    fn collect(ty: &Type, names: &mut Vec<String>, mask: &mut Vec<&'static str>) {
+        match ty {
+            Type::Named(name) => names.push(String::from_utf8_lossy(&name.0).into_owned()),
+            Type::SelfClass => names.push(String::from("self")),
+            Type::ParentClass => names.push(String::from("parent")),
+            Type::Iterable => {
+                names.push(String::from("Traversable"));
+                mask.push("array");
+            }
+            Type::Nullable(inner) => {
+                collect(inner, names, mask);
+                mask.push("null");
+            }
+            Type::Union(members) | Type::Intersection(members) => {
+                for member in members {
+                    collect(member, names, mask);
+                }
+            }
+            Type::Mixed => mask.push("mixed"),
+            Type::CalledClass => mask.push("static"),
+            Type::Callable => mask.push("callable"),
+            Type::Object => mask.push("object"),
+            Type::Array => mask.push("array"),
+            Type::String => mask.push("string"),
+            Type::Int => mask.push("int"),
+            Type::Float => mask.push("float"),
+            Type::Bool => mask.push("bool"),
+            Type::False => mask.push("false"),
+            Type::True => mask.push("true"),
+            Type::Void => mask.push("void"),
+            Type::Never => mask.push("never"),
+            Type::Null => mask.push("null"),
+        }
+    }
+    let mut names = Vec::new();
+    let mut mask = Vec::new();
+    collect(ty, &mut names, &mut mask);
+    if mask.contains(&"mixed") {
+        names.push(String::from("mixed"));
+        return names.join("|");
+    }
+    let glue = if matches!(ty, Type::Intersection(_)) {
+        "&"
+    } else {
+        "|"
+    };
+    let mut out = names.join(glue);
+    let order = [
+        "static", "callable", "object", "array", "string", "int", "float", "bool", "false", "true",
+        "void", "never",
+    ];
+    for builtin in order {
+        if !mask.contains(&builtin)
+            || (builtin != "bool" && mask.contains(&"bool") && matches!(builtin, "false" | "true"))
+        {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push('|');
+        }
+        out.push_str(builtin);
+    }
+    if mask.contains(&"null") {
+        if !out.is_empty() && !out.contains('|') && !out.contains('&') {
+            return format!("?{out}");
+        }
+        if !out.is_empty() {
+            out.push('|');
+        }
+        out.push_str("null");
+    }
+    out
 }

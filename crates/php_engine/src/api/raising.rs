@@ -360,6 +360,7 @@ mod tests {
             parameters,
             return_type: None,
             returns_by_ref: false,
+            is_generator: false,
             attributes: Vec::new(),
             doc_comment: None,
             file: Name(Box::new([])),

@@ -193,6 +193,7 @@ fn method(name: &[u8], parameters: &[Parameter], returns: Option<Type>) -> Metho
             parameters: parameters.to_vec(),
             return_type: returns,
             returns_by_ref: false,
+            is_generator: false,
             attributes: Vec::new(),
             doc_comment: None,
             file: Name(Box::new([])),
@@ -4666,7 +4667,7 @@ fn reflection_function_abstract() -> Declared {
             ),
             (
                 tentative(method(b"isGenerator", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::func::reflection_function_is_generator as Entry,
             ),
             (
                 tentative(method(b"isVariadic", &[], Some(Type::Bool))),

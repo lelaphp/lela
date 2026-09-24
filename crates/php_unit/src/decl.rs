@@ -232,12 +232,22 @@ pub struct Parameter {
 /// entry, as php's `frameless_function_infos` is null there. The
 /// compiler emits `FRAMELESS_ICALL_<n>` for a call whose count an
 /// arity here covers, and [`crate::frameless_table`] numbers the rows.
+///
+/// `is_generator` is `ZEND_ACC_GENERATOR` beside `returns_by_ref`'s
+/// `ZEND_ACC_RETURN_REFERENCE`, the two `fn_flags` bits a declaration
+/// carries: the body has a `yield` of its own, so its op array starts
+/// with `GENERATOR_CREATE` after the parameters and every `RETURN*` in
+/// it is `GENERATOR_RETURN` (`zend_mark_function_as_generator`,
+/// `Z/Zend/zend_compile.c:1530`). What
+/// `ReflectionFunctionAbstract::isGenerator` answers; false on every
+/// native, as php has no internal generator function.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionDecl {
     pub name: Name,
     pub parameters: Vec<Parameter>,
     pub return_type: Option<Type>,
     pub returns_by_ref: bool,
+    pub is_generator: bool,
     pub attributes: Vec<Attribute>,
     pub doc_comment: Option<Box<[u8]>>,
     pub file: Name,

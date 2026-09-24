@@ -881,6 +881,12 @@ impl Request {
         &mut self.vm
     }
 
+    /// The loop over a generator's frame, bound to the engine's tier
+    /// ([`crate::tier::resume`]).
+    pub(crate) fn resume_loop(&self) -> fn(&mut Request, FrameRef) -> Result<(), Fatal> {
+        self.shared.resume
+    }
+
     /// Push a frame for `unit`'s op array: its shape on the VM stack and
     /// its engine state, which are pushed and popped together and share a
     /// `FrameRef`.
@@ -1069,7 +1075,14 @@ impl Request {
             self.release(value);
         }
         self.free_rebuilt_table(frame);
-        if let Some(state) = self.vm.pop() {
+        // Both halves of the frame are off their stacks before its
+        // receiver and its extra arguments are given up, as
+        // `zend_leave_helper` moves `EG(current_execute_data)` back to the
+        // caller first: a destructor that runs on the release pushes its
+        // own frame where this one stood, the two stacks level.
+        let state = self.vm.pop();
+        self.stack.pop_frame();
+        if let Some(state) = state {
             if let Some(this) = state.this {
                 self.release(this.as_value());
             }
@@ -1081,7 +1094,6 @@ impl Request {
             }
             self.release_named(state.extra_named);
         }
-        self.stack.pop_frame();
     }
 
     /// The value in a slot of `frame`, a view of it: `ZVAL_COPY_VALUE`,
@@ -6078,8 +6090,20 @@ impl Request {
         let Some(constructor) = self.method_named(object.class(), b"__construct") else {
             return Ok(None);
         };
-        self.check_method_access(constructor, b"__construct")?;
-        Ok(Some(constructor))
+        if self.method_accessible(constructor) {
+            return Ok(Some(constructor));
+        }
+        // `zend_bad_constructor_call`: the sentence names no `method`.
+        let shown = visibility_string(self.method_visibility(constructor));
+        let class = self
+            .method_class(constructor)
+            .map_or_else(|| String::from("object"), |class| self.class_name(class));
+        let from = self.scope_phrase();
+        Err(crate::api::raising::throw(
+            self,
+            "Error",
+            &format!("Call to {shown} {class}::__construct() from {from}"),
+        ))
     }
 
     /// `zend_std_cast_object_tostring`: `__toString` for a string, its
@@ -9408,6 +9432,7 @@ mod tests {
                     parameters: Vec::new(),
                     return_type: None,
                     returns_by_ref: false,
+                    is_generator: false,
                     attributes: Vec::new(),
                     doc_comment: None,
                     file: Name(Box::new([])),

@@ -372,8 +372,10 @@ fn closure_clone(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thro
 /// `@implementation-alias`es of `Exception`'s, so one entry serves
 /// both. `__clone` is private, the one method the visibility rule of
 /// `zend_std_get_method` has to be held to.
+// One row per class Zend declares: the length is the list's.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn zend_classes() -> Vec<NativeClassDecl> {
-    vec![
+    let before: Vec<NativeClassDecl> = vec![
         (
             ClassDecl {
                 methods: vec![abstract_method(b"__toString", Some(Type::String))],
@@ -392,6 +394,9 @@ pub(crate) fn zend_classes() -> Vec<NativeClassDecl> {
             None,
             None,
         ),
+        (traversable(), Vec::new(), None, None),
+        (iterator_aggregate(), Vec::new(), None, None),
+        (iterator(), Vec::new(), None, None),
         (
             ClassDecl {
                 methods: array_access_methods(),
@@ -466,10 +471,151 @@ pub(crate) fn zend_classes() -> Vec<NativeClassDecl> {
             None,
         ),
         (closure_class(), closure_methods(), Some(&CLOSURE), None),
+    ];
+    let after: Vec<NativeClassDecl> = vec![
         (std_class(), Vec::new(), None, None),
         (unit_enum(), Vec::new(), None, None),
         (backed_enum(), Vec::new(), None, None),
-    ]
+    ];
+    before
+        .into_iter()
+        .chain(crate::generator::classes())
+        .chain(after)
+        .collect()
+}
+
+/// `interface Traversable {}` as `zend_interfaces.stub.php` declares
+/// it, what `foreach` and `yield from` walk with `get_iterator`, and
+/// what no class implements but through `Iterator` or
+/// `IteratorAggregate`.
+///
+/// ```php
+/// function g() { yield 1; }
+/// class C {}
+/// var_dump(g() instanceof Traversable, new C instanceof Traversable);
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(false)
+/// ```
+fn traversable() -> ClassDecl {
+    declared(b"Traversable", ClassKind::Interface, None)
+}
+
+/// `interface IteratorAggregate extends Traversable`, its one method's
+/// return type tentative.
+///
+/// ```php
+/// echo new ReflectionClass('IteratorAggregate');
+/// ```
+/// ```expect
+/// Interface [ <internal:Core> interface IteratorAggregate extends Traversable ] {
+///
+///   - Constants [0] {
+///   }
+///
+///   - Static properties [0] {
+///   }
+///
+///   - Static methods [0] {
+///   }
+///
+///   - Properties [0] {
+///   }
+///
+///   - Methods [1] {
+///     Method [ <internal:Core> abstract public method getIterator ] {
+///
+///       - Parameters [0] {
+///       }
+///       - Tentative return [ Traversable ]
+///     }
+///   }
+/// }
+/// ```
+fn iterator_aggregate() -> ClassDecl {
+    ClassDecl {
+        interfaces: vec![Name::from("Traversable")],
+        methods: vec![interface_method(
+            b"getIterator",
+            &[],
+            Some(Type::Named(Name::from("Traversable"))),
+        )],
+        ..declared(b"IteratorAggregate", ClassKind::Interface, None)
+    }
+}
+
+/// `interface Iterator extends Traversable`, its five methods' return
+/// types tentative, in the stub's order.
+///
+/// ```php
+/// echo new ReflectionClass('Iterator');
+/// ```
+/// ```expect
+/// Interface [ <internal:Core> interface Iterator extends Traversable ] {
+///
+///   - Constants [0] {
+///   }
+///
+///   - Static properties [0] {
+///   }
+///
+///   - Static methods [0] {
+///   }
+///
+///   - Properties [0] {
+///   }
+///
+///   - Methods [5] {
+///     Method [ <internal:Core> abstract public method current ] {
+///
+///       - Parameters [0] {
+///       }
+///       - Tentative return [ mixed ]
+///     }
+///
+///     Method [ <internal:Core> abstract public method next ] {
+///
+///       - Parameters [0] {
+///       }
+///       - Tentative return [ void ]
+///     }
+///
+///     Method [ <internal:Core> abstract public method key ] {
+///
+///       - Parameters [0] {
+///       }
+///       - Tentative return [ mixed ]
+///     }
+///
+///     Method [ <internal:Core> abstract public method valid ] {
+///
+///       - Parameters [0] {
+///       }
+///       - Tentative return [ bool ]
+///     }
+///
+///     Method [ <internal:Core> abstract public method rewind ] {
+///
+///       - Parameters [0] {
+///       }
+///       - Tentative return [ void ]
+///     }
+///   }
+/// }
+/// ```
+fn iterator() -> ClassDecl {
+    ClassDecl {
+        interfaces: vec![Name::from("Traversable")],
+        methods: vec![
+            interface_method(b"current", &[], Some(Type::Mixed)),
+            interface_method(b"next", &[], Some(Type::Void)),
+            interface_method(b"key", &[], Some(Type::Mixed)),
+            interface_method(b"valid", &[], Some(Type::Bool)),
+            interface_method(b"rewind", &[], Some(Type::Void)),
+        ],
+        ..declared(b"Iterator", ClassKind::Interface, None)
+    }
 }
 
 /// `interface UnitEnum` as `zend_enum.stub.php` declares it and
@@ -781,6 +927,7 @@ fn closure_method(
             parameters,
             return_type: returns,
             returns_by_ref: false,
+            is_generator: false,
             attributes: Vec::new(),
             doc_comment: None,
             file: Name(Box::new([])),
@@ -948,6 +1095,7 @@ fn throwable_method(name: &[u8], parameters: &[Parameter], returns: Option<Type>
             parameters: parameters.to_vec(),
             return_type: returns,
             returns_by_ref: false,
+            is_generator: false,
             attributes: Vec::new(),
             doc_comment: None,
             file: Name(Box::new([])),

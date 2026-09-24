@@ -2157,6 +2157,7 @@ fn declared(name: &[u8], parameters: &[Parameter], returns: Option<Type>) -> Fun
         parameters: parameters.to_vec(),
         return_type: returns,
         returns_by_ref: false,
+        is_generator: false,
         attributes: Vec::new(),
         doc_comment: None,
         file: Name(Box::new([])),
