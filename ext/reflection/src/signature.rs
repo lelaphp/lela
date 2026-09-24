@@ -794,12 +794,16 @@ pub(super) fn reflection_parameter_is_passed_by_reference(
 }
 
 /// `ReflectionParameter::canBePassedByValue()`: the way the parameter
-/// is sent is not `ZEND_SEND_BY_REF`.
+/// is sent is not `ZEND_SEND_BY_REF`, which `ZEND_SEND_PREFER_REF`
+/// is not either.
 ///
 /// ```php
-/// var_dump((new ReflectionParameter('str_repeat', 0))->canBePassedByValue());
+/// var_dump((new ReflectionParameter('str_repeat', 0))->canBePassedByValue(), (new ReflectionParameter('sort', 0))->canBePassedByValue(), (new ReflectionParameter('array_multisort', 0))->canBePassedByValue(), (new ReflectionParameter('array_multisort', 0))->isPassedByReference());
 /// ```
 /// ```expect
+/// bool(true)
+/// bool(false)
+/// bool(true)
 /// bool(true)
 /// ```
 pub(super) fn reflection_parameter_can_be_passed_by_value(
@@ -807,7 +811,7 @@ pub(super) fn reflection_parameter_can_be_passed_by_value(
 ) -> Result<Value, Thrown> {
     exactly_arguments(req, 0)?;
     let (_, _, parameter) = this_parameter(req)?;
-    Ok(Value::bool(!parameter.by_ref))
+    Ok(Value::bool(!parameter.by_ref || parameter.prefer_ref))
 }
 
 /// `ReflectionParameter::isPromoted()`:

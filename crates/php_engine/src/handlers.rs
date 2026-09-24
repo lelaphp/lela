@@ -1077,16 +1077,17 @@ pub(crate) fn send_ref<T: Tier>(
     place_argument(req, frame, op, bound)
 }
 
-/// `ARG_MUST_BE_SENT_BY_REF` (`Z/Zend/zend_compile.h:1137`) over the
-/// callee the `INIT` resolved: whether the parameter numbered `number`
-/// takes its argument by reference, the variadic's bit for every
-/// argument past the declared ones.
-fn must_be_sent_by_ref(req: &Request, number: u32) -> bool {
+/// `ZEND_ARG_SEND_MODE` (`Z/Zend/zend_compile.h:1141`) over the callee
+/// the `INIT` resolved: whether the parameter numbered `number` takes
+/// its argument by reference, and whether only where it can
+/// (`ZEND_SEND_PREFER_REF`), the variadic's for every argument past the
+/// declared ones.
+fn send_mode(req: &Request, number: u32) -> (bool, bool) {
     let Some(function) = req.vm().building_call_function() else {
-        return false;
+        return (false, false);
     };
     let Some(decl) = req.function_decl(function) else {
-        return false;
+        return (false, false);
     };
     let at = usize::try_from(number.saturating_sub(1)).unwrap_or(usize::MAX);
     let variadic = decl.parameters.last().filter(|last| last.variadic);
@@ -1094,7 +1095,22 @@ fn must_be_sent_by_ref(req: &Request, number: u32) -> bool {
         .get(at)
         .filter(|parameter| !parameter.variadic)
         .or(variadic)
-        .is_some_and(|parameter| parameter.by_ref)
+        .map_or((false, false), |parameter| {
+            (parameter.by_ref, parameter.by_ref && parameter.prefer_ref)
+        })
+}
+
+/// `ARG_SHOULD_BE_SENT_BY_REF`: by reference, or by reference where it
+/// can be.
+fn should_be_sent_by_ref(req: &Request, number: u32) -> bool {
+    send_mode(req, number).0
+}
+
+/// `ARG_MUST_BE_SENT_BY_REF` (`Z/Zend/zend_compile.h:1137`): by
+/// reference and nothing else.
+fn must_be_sent_by_ref(req: &Request, number: u32) -> bool {
+    let (by_ref, prefer) = send_mode(req, number);
+    by_ref && !prefer
 }
 
 /// `zend_cannot_pass_by_reference` (`Z/Zend/zend_execute.c`): the
@@ -1193,7 +1209,7 @@ pub(crate) fn send_var_ex<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    if must_be_sent_by_ref(req, op.op2) {
+    if should_be_sent_by_ref(req, op.op2) {
         return send_ref::<T>(req, frame, code, op);
     }
     send(req, frame, code, op)
@@ -1211,9 +1227,8 @@ pub(crate) fn send_var_ex<T: Tier>(
 /// is wrapped in a cell of its own (`ZVAL_NEW_REF(arg, arg)`) and php's
 /// notice `Only variables should be passed by reference` is raised.
 /// php's third arm, `ARG_MAY_BE_SENT_BY_REF`, is the parameter declared
-/// prefer-by-reference that takes a value without the notice; nothing
-/// in this engine declares one, so it is folded into the arm that
-/// raises.
+/// prefer-by-reference, `extract`'s and `array_multisort`'s, which
+/// takes what the call returned as it stands and without the notice.
 ///
 /// ```php
 /// class C { function m(&$x) { $x = 9; var_dump($x); } }
@@ -1241,13 +1256,14 @@ pub(crate) fn send_var_no_ref_ex<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    if !must_be_sent_by_ref(req, op.op2) {
+    let (by_ref, prefer) = send_mode(req, op.op2);
+    if !by_ref {
         return send(req, frame, code, op);
     }
     // `GET_OP1_ZVAL_PTR(BP_VAR_R)` over a `VAR`, which follows no
     // reference: the operand's owner is the argument's from here.
     let returned = req.take_slot(frame, exec::temporary_slot(code, op.op1));
-    if returned.as_php_ref().is_some() {
+    if returned.as_php_ref().is_some() || prefer {
         return place_argument(req, frame, op, returned);
     }
     let cell = match req.reference(returned) {

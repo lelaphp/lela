@@ -360,6 +360,23 @@ impl PhpArray {
         Ok(req.array_del(self.0, key.heap()))
     }
 
+    /// `nNextFreeElement`: the index `$a[] = ...` writes at, one past the
+    /// greatest integer key the array has held, `ZEND_LONG_MIN` for an
+    /// array that never held one.
+    #[must_use]
+    pub fn next_free(&self) -> i64 {
+        self.0.next_free()
+    }
+
+    /// `nNextFreeElement` written after `SEPARATE_ARRAY`, as
+    /// `array_pop()` moves it back one where the element it took was the
+    /// last one appended.
+    pub fn set_next_free(&mut self, req: &mut Request, next: i64) -> Result<(), Thrown> {
+        self.separate(req)?;
+        self.0.set_next_free(next);
+        Ok(())
+    }
+
     /// `SEPARATE_ARRAY`: an array with one owner is itself, and one with
     /// more is copied once (`zend_array_dup`), the copy having one owner
     /// and this name, the original one owner fewer.
@@ -405,6 +422,10 @@ impl PhpArray {
     /// stable since 8.0 while its algorithm is not; a comparison that is
     /// not transitive leaves what the algorithm leaves, php's order.
     ///
+    /// `compare` is handed each element as its key and its value, the
+    /// `Bucket` php's comparators read, so the key comparators of
+    /// `ksort()` and `uksort()` stand on the same walk as the value ones.
+    ///
     /// `compare` may serve PHP code, a `usort` callback, and so may throw:
     /// the first `Err` is kept and every comparison after it answers
     /// `Equal`, as `zend_call_function` returns without calling while
@@ -415,7 +436,11 @@ impl PhpArray {
         &mut self,
         req: &mut Request,
         renumber: bool,
-        mut compare: impl FnMut(&mut Request, &Value, &Value) -> Result<Ordering, Thrown>,
+        mut compare: impl FnMut(
+            &mut Request,
+            (&Key, &Value),
+            (&Key, &Value),
+        ) -> Result<Ordering, Thrown>,
     ) -> Result<(), Thrown> {
         self.separate(req)?;
         let mut pending: Option<Thrown> = None;
@@ -423,7 +448,9 @@ impl PhpArray {
             let ordering = if pending.is_some() {
                 Ordering::Equal
             } else {
-                match compare(req, &Value::of_zval(x.val), &Value::of_zval(y.val)) {
+                let (xk, xv) = (Key::of(x.key), Value::of_zval(x.val));
+                let (yk, yv) = (Key::of(y.key), Value::of_zval(y.val));
+                match compare(req, (&xk, &xv), (&yk, &yv)) {
                     Ok(ordering) => ordering,
                     Err(thrown) => {
                         pending = Some(thrown);
@@ -745,6 +772,21 @@ impl PhpObject {
     pub fn set_prop(&self, req: &mut Request, name: PhpString, value: Value) -> Result<(), Thrown> {
         let table = req.object_handlers(self.0);
         table.write_property(req, *self, name, value)
+    }
+
+    /// One property written as `unserialize()` writes it,
+    /// [`Request::unserialize_property`]: the key as a serialized object
+    /// carries it, mangled for a protected or a private property, placed
+    /// in the declared slot it names without the class's handlers, or
+    /// written into the dynamic table under the key; the value and the
+    /// key are the object's from here.
+    pub fn unserialize_prop(
+        &self,
+        req: &mut Request,
+        key: PhpString,
+        value: Value,
+    ) -> Result<(), Thrown> {
+        req.unserialize_property(*self, key, value)
     }
 
     /// One declared property by slot, `OBJ_PROP_NUM(obj, index)` by

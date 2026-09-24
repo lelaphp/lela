@@ -20,6 +20,7 @@ Arr::position
 Arr::protect
 Arr::refcount
 Arr::reset
+Arr::set_next_free
 Arr::table_size
 Arr::unprotect
 Arr::value_ref

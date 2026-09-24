@@ -62,6 +62,7 @@ mod html;
 mod http;
 mod ini;
 mod levenshtein;
+mod math;
 mod md5;
 mod metaphone;
 mod microtime;
@@ -74,6 +75,7 @@ mod soundex;
 mod string;
 mod strnatcmp;
 mod stub;
+mod r#type;
 mod uniqid;
 mod url;
 mod uuencode;
@@ -195,6 +197,8 @@ pub fn extension() -> Extension {
         .functions(filestat::natives())
         .functions(basic_natives())
         .functions(file_natives())
+        .functions(math::natives())
+        .functions(r#type::natives())
         .constants(vec![
             constant(b"COUNT_NORMAL", COUNT_NORMAL),
             constant(b"COUNT_RECURSIVE", COUNT_RECURSIVE),
@@ -205,6 +209,10 @@ pub fn extension() -> Extension {
         .constants(array::constants())
         .constants(file::constants())
         .constants(file_constants())
+        .constants(math::constants())
+        .classes(math::classes())
+        .classes(var::classes())
+        .ini(var::ini())
         .dependencies(dependencies())
         .request_state::<State>()
         .build("standard")
@@ -2058,6 +2066,7 @@ fn parameter(name: &[u8], ty: Type) -> Parameter {
         name: Name(name.into()),
         ty: Some(ty),
         by_ref: false,
+        prefer_ref: false,
         variadic: false,
         default: None,
         attributes: Vec::new(),

@@ -189,6 +189,7 @@ request::Request::autoload_register
 request::Request::autoload_unregister
 request::Request::backtrace
 request::Request::called_scope
+request::Request::caller_var
 request::Request::class_alias
 request::Request::class_decl
 request::Request::class_extension
@@ -218,6 +219,7 @@ request::Request::extension_number
 request::Request::flush
 request::Request::frame_args
 request::Request::frame_vars
+request::Request::frameless
 request::Request::fs_guard
 request::Request::function_decl
 request::Request::function_extension
@@ -268,6 +270,7 @@ request::Request::scope
 request::Request::script_name
 request::Request::serialize_precision
 request::Request::set_assert_callback
+request::Request::set_caller_var
 request::Request::set_cwd
 request::Request::set_env
 request::Request::set_error_handler
@@ -389,10 +392,12 @@ values::PhpArray::is_recursive
 values::PhpArray::iter
 values::PhpArray::len
 values::PhpArray::new
+values::PhpArray::next_free
 values::PhpArray::protect
 values::PhpArray::replace
 values::PhpArray::separate
 values::PhpArray::set
+values::PhpArray::set_next_free
 values::PhpArray::snapshot
 values::PhpArray::snapshot_refs
 values::PhpArray::sort_by
@@ -424,6 +429,7 @@ values::PhpObject::set_prop
 values::PhpObject::set_slot
 values::PhpObject::slot
 values::PhpObject::unprotect
+values::PhpObject::unserialize_prop
 values::PhpRef
 values::PhpRef::as_value
 values::PhpRef::get

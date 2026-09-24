@@ -203,11 +203,20 @@ pub struct Attribute {
 }
 
 /// One declared parameter slot.
+///
+/// `prefer_ref` is php's `ZEND_SEND_PREFER_REF` beside `by_ref`'s
+/// `ZEND_SEND_BY_REF` (`Z/Zend/zend_compile.h:1117`): a parameter that
+/// takes a variable by reference and anything else by value, which the
+/// stub marks `@prefer-ref` and only `extract()` and
+/// `array_multisort()` declare. It is set only where `by_ref` is, so
+/// `by_ref` alone is `ARG_SHOULD_BE_SENT_BY_REF` and `by_ref` without
+/// `prefer_ref` is `ARG_MUST_BE_SENT_BY_REF`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Parameter {
     pub name: Name,
     pub ty: Option<Type>,
     pub by_ref: bool,
+    pub prefer_ref: bool,
     pub variadic: bool,
     pub default: Option<ConstExpr>,
     pub attributes: Vec<Attribute>,

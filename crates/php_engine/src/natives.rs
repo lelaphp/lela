@@ -2192,6 +2192,7 @@ fn parameter(name: &[u8], ty: Option<Type>, variadic: bool) -> Parameter {
         name: Name(name.into()),
         ty,
         by_ref: false,
+        prefer_ref: false,
         variadic,
         default: None,
         attributes: Vec::new(),

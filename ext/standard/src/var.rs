@@ -19,6 +19,131 @@ use php_ext::values::{Key, PhpString, Value};
 use crate::output::Entry;
 use crate::{argument_count_between, bool_argument, declared, parameter};
 
+mod debug;
+mod serialize;
+mod unserialize;
+
+/// `PHP_IC_ENTRY`'s name, the class an object of a class `unserialize()`
+/// could not load becomes.
+pub(crate) const INCOMPLETE_CLASS: &[u8] = b"__PHP_Incomplete_Class";
+
+/// `MAGIC_MEMBER`, the property an incomplete object keeps its class's
+/// name in.
+pub(crate) const MAGIC_MEMBER: &[u8] = b"__PHP_Incomplete_Class_Name";
+
+/// The object's class name as the linked table spells it.
+fn class_name(req: &Request, object: php_ext::values::PhpObject) -> Vec<u8> {
+    req.class_decl(object.class())
+        .map(|decl| decl.name.0.to_vec())
+        .unwrap_or_default()
+}
+
+/// Whether the class, or a class it extends, declares `method`, compared
+/// without case as php's function table is keyed.
+fn has_method(req: &mut Request, class: php_ext::values::ClassId, method: &[u8]) -> bool {
+    let mut at = Some(class);
+    for _ in 0..64 {
+        let Some(here) = at else { return false };
+        let Some(decl) = req.class_decl(here) else {
+            return false;
+        };
+        if decl
+            .methods
+            .iter()
+            .any(|m| !m.is_abstract && m.function.name.0.eq_ignore_ascii_case(method))
+        {
+            return true;
+        }
+        let parent = decl.parent.as_ref().map(|p| p.0.to_vec());
+        at = match parent {
+            Some(parent) => php_ext::call::lookup_class(req, &parent).ok().flatten(),
+            None => None,
+        };
+    }
+    false
+}
+
+/// Whether the object is an enum case.
+fn is_enum(req: &Request, object: php_ext::values::PhpObject) -> bool {
+    is_enum_class(req, object.class())
+}
+
+fn is_enum_class(req: &Request, class: php_ext::values::ClassId) -> bool {
+    req.class_decl(class)
+        .is_some_and(|decl| matches!(decl.kind, ClassKind::Enum))
+}
+
+/// `__PHP_Incomplete_Class`, what `unserialize()` makes an object of a
+/// class it cannot load: no member, every property dynamic.
+///
+/// ```php
+/// $o = unserialize('O:3:"Foo":1:{s:1:"a";i:1;}'); var_dump($o, get_class($o), serialize($o));
+/// ```
+/// ```expect
+/// object(__PHP_Incomplete_Class)#1 (2) {
+///   ["__PHP_Incomplete_Class_Name"]=>
+///   string(3) "Foo"
+///   ["a"]=>
+///   int(1)
+/// }
+/// string(22) "__PHP_Incomplete_Class"
+/// string(26) "O:3:"Foo":1:{s:1:"a";i:1;}"
+/// ```
+pub(crate) fn classes() -> Vec<(
+    php_ext::decl::ClassDecl,
+    Vec<(php_ext::decl::MethodDecl, Entry)>,
+)> {
+    use php_ext::decl::{ClassDecl, ClassFlags, DynamicProperties, EnumBacking, Name};
+    vec![(
+        ClassDecl {
+            name: Name(INCOMPLETE_CLASS.into()),
+            kind: ClassKind::Class,
+            flags: ClassFlags {
+                is_final: true,
+                dynamic_properties: DynamicProperties::Allowed,
+                ..ClassFlags::default()
+            },
+            parent: None,
+            interfaces: Vec::new(),
+            traits: Vec::new(),
+            backing: EnumBacking::Pure,
+            constants: Vec::new(),
+            properties: Vec::new(),
+            methods: Vec::new(),
+            attributes: Vec::new(),
+            doc_comment: None,
+            file: Name(Box::new([])),
+            line: 0,
+            end_line: 0,
+        },
+        Vec::new(),
+    )]
+}
+
+/// The ini entries the unserializer reads, `basic_functions.c`'s
+/// `unserialize_callback_func` and `unserialize_max_depth`.
+///
+/// ```php
+/// var_dump(ini_get("unserialize_max_depth"), ini_get("unserialize_callback_func"));
+/// ```
+/// ```expect
+/// string(4) "4096"
+/// string(0) ""
+/// ```
+pub(crate) fn ini() -> Vec<php_ext::decl::IniDecl> {
+    let entry = |name: &[u8], default: &[u8]| php_ext::decl::IniDecl {
+        name: php_ext::decl::Name(name.into()),
+        default: default.into(),
+        user: true,
+        per_dir: true,
+        system: true,
+    };
+    vec![
+        entry(b"unserialize_callback_func", b""),
+        entry(b"unserialize_max_depth", b"4096"),
+    ]
+}
+
 /// `PRINT_ZVAL_INDENT` (`Z/Zend/zend.c:80`): the four spaces a level of
 /// the rendering steps in by, taken twice between a key and the array
 /// its value opens.
@@ -78,6 +203,42 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
                 Type::Nullable(Box::new(Type::String)),
             ),
             var_export,
+        ),
+        (
+            declared(
+                b"debug_zval_dump",
+                &[
+                    parameter(b"value", Type::Mixed),
+                    Parameter {
+                        variadic: true,
+                        ..parameter(b"values", Type::Mixed)
+                    },
+                ],
+                Type::Void,
+            ),
+            debug::debug_zval_dump,
+        ),
+        (
+            declared(
+                b"serialize",
+                &[parameter(b"value", Type::Mixed)],
+                Type::String,
+            ),
+            serialize::serialize,
+        ),
+        (
+            declared(
+                b"unserialize",
+                &[
+                    parameter(b"data", Type::String),
+                    Parameter {
+                        default: Some(ConstExpr::Array(Vec::new())),
+                        ..parameter(b"options", Type::Array)
+                    },
+                ],
+                Type::Mixed,
+            ),
+            unserialize::unserialize,
         ),
     ]
 }

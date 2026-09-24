@@ -134,6 +134,7 @@ impl Reader<'_> {
             name: Name(name.into()),
             ty,
             by_ref,
+            prefer_ref: false,
             variadic,
             default,
             attributes: Vec::new(),

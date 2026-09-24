@@ -1,0 +1,452 @@
+//! `serialize()`, php's `php_var_serialize_intern` (`Z/ext/standard/var.c:1049`):
+//! the byte format php writes, with the var hash that numbers every
+//! value written, so a second sight of an object is `r:n;` and a second
+//! sight of a reference `R:n;`; an object's `__serialize()`, `__sleep()`
+//! and enum cases as php reads them, and a float at
+//! `serialize_precision` through `zend_gcvt`.
+
+use php_ext::abi::PropertyPurpose;
+use php_ext::call::call_method;
+use php_ext::coerce::{Exponent, float_format, to_string};
+use php_ext::raising::{Level, Thrown, docref, throw};
+use php_ext::request::Request;
+use php_ext::values::{Key, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
+
+use super::{INCOMPLETE_CLASS, MAGIC_MEMBER, class_name, has_method, is_enum};
+use crate::argument_count_between;
+
+/// What the var hash keys an entry by: the object's identity, or the
+/// reference's.
+#[derive(Clone, Copy, PartialEq)]
+enum Held {
+    Object(u32),
+    Reference(PhpRef),
+}
+
+/// `php_serialize_data`: `n`, the count of values written, and the
+/// number each object and reference was first written at, `-1` for an
+/// object whose serialization failed.
+struct VarHash {
+    n: i64,
+    seen: Vec<(Held, i64)>,
+}
+
+impl VarHash {
+    /// `php_add_var_hash`: the number an earlier sight gave `value`, or
+    /// zero after recording this one; a scalar and an array are never
+    /// recorded, and a reference to an object is the object.
+    fn add(&mut self, value: &Value) -> i64 {
+        self.n += 1;
+        let held = match value.as_ref() {
+            ValueRef::Reference(cell) => match cell.get().as_object() {
+                Some(object) => Some((Held::Object(object.index()), true)),
+                None => Some((Held::Reference(*cell), true)),
+            },
+            ValueRef::Object(object) => Some((Held::Object(object.index()), false)),
+            _ => None,
+        };
+        let Some((held, is_ref)) = held else {
+            return 0;
+        };
+        if let Some((_, number)) = self.seen.iter().find(|(h, _)| *h == held) {
+            // References are counted once; undo the increment above.
+            if is_ref && *number != -1 {
+                self.n -= 1;
+            }
+            return *number;
+        }
+        self.seen.push((held, self.n));
+        0
+    }
+
+    fn fail(&mut self, object: PhpObject) {
+        if let Some((_, number)) = self
+            .seen
+            .iter_mut()
+            .find(|(h, _)| *h == Held::Object(object.index()))
+        {
+            *number = -1;
+        }
+    }
+}
+
+/// `serialize(mixed $value): string`, php's `PHP_FUNCTION(serialize)`
+/// (`Z/ext/standard/var.c:1358`).
+///
+/// ```php
+/// var_dump(serialize(null), serialize(true), serialize(-5), serialize(1.5), serialize(0.1 + 0.2), serialize(1e100), serialize(-0.0), serialize(INF), serialize(NAN), serialize("a\"b"), serialize([1, "k" => [2]]));
+/// ```
+/// ```expect
+/// string(2) "N;"
+/// string(4) "b:1;"
+/// string(5) "i:-5;"
+/// string(6) "d:1.5;"
+/// string(22) "d:0.30000000000000004;"
+/// string(11) "d:1.0E+100;"
+/// string(5) "d:-0;"
+/// string(6) "d:INF;"
+/// string(6) "d:NAN;"
+/// string(10) "s:3:"a"b";"
+/// string(36) "a:2:{i:0;i:1;s:1:"k";a:1:{i:0;i:2;}}"
+/// ```
+///
+/// An object is its class and its properties, a protected or private
+/// one under the name php mangles it to; a second sight of the same
+/// object is `r:n;`, and a reference seen twice is `R:n;`, `n` the
+/// number the var hash gave its first sight.
+///
+/// ```php
+/// class P { public $a = 1; protected $b = 2; private $c = 3; public $d; }
+/// $p = new P; $p->d = $p; echo json_encode(serialize([$p, $p])), "\n";
+/// $x = 1; $arr = []; $arr[] = &$x; $arr[] = &$x; $arr[] = 2; echo serialize($arr), "\n";
+/// $o = new stdClass; $o->self = $o; $o->list = [1]; echo serialize($o), "\n";
+/// ```
+/// ```expect
+/// "a:2:{i:0;O:1:\"P\":4:{s:1:\"a\";i:1;s:4:\"\u0000*\u0000b\";i:2;s:4:\"\u0000P\u0000c\";i:3;s:1:\"d\";r:2;}i:1;r:2;}"
+/// a:3:{i:0;i:1;i:1;R:2;i:2;i:2;}
+/// O:8:"stdClass":2:{s:4:"self";r:1;s:4:"list";a:1:{i:0;i:1;}}
+/// ```
+///
+/// `__serialize()` answers the data, which must be an array; `__sleep()`
+/// names the properties, each looked for as written, then as private,
+/// then as protected, with php's warnings for a name that is not there
+/// or twice.
+///
+/// ```php
+/// class S { public $a = 1; function __serialize(): array { return ["x" => $this->a, 5 => "y"]; } }
+/// class L { public $a = 1; protected $b = 2; private $c = 3; public $d = 4; function __sleep() { return ["a", "b", "c", "nope", "a"]; } }
+/// class Bad { function __serialize() { return 1; } }
+/// echo serialize(new S), "\n", json_encode(serialize(new L)), "\n";
+/// try { serialize(new Bad); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// O:1:"S":2:{s:1:"x";i:1;i:5;s:1:"y";}
+///
+/// Warning: serialize(): "nope" returned as member variable from __sleep() but does not exist in %s on line 5
+///
+/// Warning: serialize(): "a" is returned from __sleep() multiple times in %s on line 5
+/// "O:1:\"L\":3:{s:1:\"a\";i:1;s:4:\"\u0000*\u0000b\";i:2;s:4:\"\u0000L\u0000c\";i:3;}"
+/// Bad::__serialize() must return an array
+/// ```
+///
+/// A closure is not serializable; an enum case is `E:` and its name.
+///
+/// ```php
+/// try { serialize(function () {}); } catch (Exception $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+/// echo serialize(RoundingMode::HalfEven), "\n";
+/// ```
+/// ```expect
+/// Exception: Serialization of 'Closure' is not allowed
+/// E:21:"RoundingMode:HalfEven";
+/// ```
+pub(super) fn serialize(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 1, 1)?;
+    let value = req.argument(1).unwrap_or_default();
+    let mut hash = VarHash {
+        n: 0,
+        seen: Vec::new(),
+    };
+    let mut out = Vec::new();
+    write(req, &mut out, &value, &mut hash, false, true)?;
+    Ok(Value::string(PhpString::new(req, &out)?))
+}
+
+fn write_long(out: &mut Vec<u8>, n: i64) {
+    out.extend_from_slice(b"i:");
+    out.extend_from_slice(n.to_string().as_bytes());
+    out.push(b';');
+}
+
+fn write_string(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.extend_from_slice(b"s:");
+    out.extend_from_slice(bytes.len().to_string().as_bytes());
+    out.extend_from_slice(b":\"");
+    out.extend_from_slice(bytes);
+    out.extend_from_slice(b"\";");
+}
+
+/// `php_var_serialize_class_name`: `O:len:"name":`, the name an
+/// incomplete object carries in place of its own; whether it was one.
+fn write_class_name(req: &mut Request, out: &mut Vec<u8>, object: PhpObject) -> bool {
+    let mut name = class_name(req, object);
+    let incomplete = name == INCOMPLETE_CLASS;
+    if incomplete
+        && let Some(stored) = object
+            .prop(req, MAGIC_MEMBER)
+            .and_then(|v| v.deref().as_str_bytes().map(<[u8]>::to_vec))
+    {
+        name = stored;
+    }
+    out.extend_from_slice(b"O:");
+    out.extend_from_slice(name.len().to_string().as_bytes());
+    out.extend_from_slice(b":\"");
+    out.extend_from_slice(&name);
+    out.extend_from_slice(b"\":");
+    incomplete
+}
+
+/// `php_var_serialize_intern`.
+fn write(
+    req: &mut Request,
+    out: &mut Vec<u8>,
+    value: &Value,
+    hash: &mut VarHash,
+    in_rcn_array: bool,
+    is_root: bool,
+) -> Result<(), Thrown> {
+    let already = hash.add(value);
+    if already != 0 {
+        if already == -1 {
+            out.extend_from_slice(b"N;");
+            return Ok(());
+        }
+        if value.as_php_ref().is_some() {
+            out.extend_from_slice(format!("R:{already};").as_bytes());
+            return Ok(());
+        }
+        if value.as_object().is_some() {
+            out.extend_from_slice(format!("r:{already};").as_bytes());
+            return Ok(());
+        }
+    }
+    let value = value.deref();
+    match value.as_ref() {
+        ValueRef::Bool(false) => out.extend_from_slice(b"b:0;"),
+        ValueRef::Bool(true) => out.extend_from_slice(b"b:1;"),
+        ValueRef::Null | ValueRef::Undef => out.extend_from_slice(b"N;"),
+        ValueRef::Int(n) => write_long(out, n),
+        ValueRef::Float(f) => {
+            out.extend_from_slice(b"d:");
+            out.extend_from_slice(
+                float_format(f, req.serialize_precision(), Exponent::Upper).as_bytes(),
+            );
+            out.push(b';');
+        }
+        ValueRef::Str(s) => write_string(out, s.as_bytes()),
+        ValueRef::Array(array) => {
+            out.extend_from_slice(b"a:");
+            let shared = !is_root && (in_rcn_array || array.to_value().refcount() > 1);
+            nested(req, out, &value, *array, hash, shared, false)?;
+        }
+        ValueRef::Object(object) => object_value(req, out, *object, hash)?,
+        _ => out.extend_from_slice(b"i:0;"),
+    }
+    Ok(())
+}
+
+/// `php_var_serialize_nested_data`: `count:{`, each key and value, `}`;
+/// a reference with one owner is written as what it holds.
+fn nested(
+    req: &mut Request,
+    out: &mut Vec<u8>,
+    outer: &Value,
+    table: PhpArray,
+    hash: &mut VarHash,
+    in_rcn_array: bool,
+    incomplete: bool,
+) -> Result<(), Thrown> {
+    let rows = table.snapshot_refs();
+    let mut skip_magic = incomplete;
+    let count = rows.len() - usize::from(incomplete && rows.iter().any(|(k, _)| is_magic(k)));
+    out.extend_from_slice(count.to_string().as_bytes());
+    out.extend_from_slice(b":{");
+    for (key, data) in rows {
+        if skip_magic && is_magic(&key) {
+            skip_magic = false;
+            continue;
+        }
+        match &key {
+            Key::Int(n) => write_long(out, *n),
+            Key::Str(s) => write_string(out, s.as_bytes()),
+        }
+        let data = match data.as_php_ref() {
+            Some(cell) if data.refcount() == 1 => cell.get(),
+            _ => data,
+        };
+        if let (Some(inner), Some(outer_array)) = (data.as_array(), outer.as_array())
+            && inner == outer_array
+        {
+            hash.add(outer);
+            out.extend_from_slice(b"N;");
+            continue;
+        }
+        write(req, out, &data, hash, in_rcn_array, false)?;
+    }
+    out.push(b'}');
+    Ok(())
+}
+
+fn is_magic(key: &Key) -> bool {
+    matches!(key, Key::Str(s) if s.as_bytes() == MAGIC_MEMBER)
+}
+
+/// The `IS_OBJECT` arm.
+fn object_value(
+    req: &mut Request,
+    out: &mut Vec<u8>,
+    object: PhpObject,
+    hash: &mut VarHash,
+) -> Result<(), Thrown> {
+    let name = class_name(req, object);
+    if object.closure(req).is_some() || name.windows(10).any(|w| w == b"@anonymous") {
+        let shown = String::from_utf8_lossy(
+            &name[..name.iter().position(|b| *b == 0).unwrap_or(name.len())],
+        )
+        .into_owned();
+        return Err(throw(
+            req,
+            "Exception",
+            &format!("Serialization of '{shown}' is not allowed"),
+        ));
+    }
+    if is_enum(req, object) {
+        let case = object
+            .prop(req, b"name")
+            .and_then(|v| v.deref().as_str_bytes().map(<[u8]>::to_vec))
+            .unwrap_or_default();
+        out.extend_from_slice(b"E:");
+        out.extend_from_slice((name.len() + 1 + case.len()).to_string().as_bytes());
+        out.extend_from_slice(b":\"");
+        out.extend_from_slice(&name);
+        out.push(b':');
+        out.extend_from_slice(&case);
+        out.extend_from_slice(b"\";");
+        return Ok(());
+    }
+    if has_method(req, object.class(), b"__serialize") {
+        let data = call_method(req, &object, b"__serialize", &[])?;
+        let Some(array) = data.as_array().copied() else {
+            req.release(data);
+            let shown = String::from_utf8_lossy(&name).into_owned();
+            return Err(throw(
+                req,
+                "TypeError",
+                &format!("{shown}::__serialize() must return an array"),
+            ));
+        };
+        write_class_name(req, out, object);
+        let shared = data.refcount() > 1;
+        let rows = array.snapshot_refs();
+        out.extend_from_slice(rows.len().to_string().as_bytes());
+        out.extend_from_slice(b":{");
+        let mut written = Ok(());
+        for (key, value) in rows {
+            match &key {
+                Key::Int(n) => write_long(out, *n),
+                Key::Str(s) => write_string(out, s.as_bytes()),
+            }
+            let value = match value.as_php_ref() {
+                Some(cell) if value.refcount() == 1 => cell.get(),
+                _ => value,
+            };
+            written = write(req, out, &value, hash, shared, false);
+            if written.is_err() {
+                break;
+            }
+        }
+        out.push(b'}');
+        req.release(data);
+        return written;
+    }
+    if name != INCOMPLETE_CLASS && has_method(req, object.class(), b"__sleep") {
+        let names = call_method(req, &object, b"__sleep", &[])?;
+        let Some(list) = names.as_array().copied() else {
+            req.release(names);
+            let shown = String::from_utf8_lossy(&name).into_owned();
+            docref(
+                req,
+                Level::Warning,
+                &format!(
+                    "{shown}::__sleep() should return an array only containing the names of instance-variables to serialize"
+                ),
+            );
+            out.extend_from_slice(b"N;");
+            return Ok(());
+        };
+        let table = sleep_props(req, object, &name, list)?;
+        req.release(names);
+        write_class_name(req, out, object);
+        let written = nested(req, out, &object.as_value(), table, hash, false, false);
+        req.release(table.to_value());
+        return written;
+    }
+    let incomplete = write_class_name(req, out, object);
+    let props = object.props_for(req, PropertyPurpose::Serialize)?;
+    let mut table = PhpArray::new(req)?;
+    for (prop, value) in props {
+        req.addref(&value);
+        req.addref(&Value::string(prop));
+        table.set(req, Key::Str(prop), value)?;
+    }
+    let written = nested(req, out, &object.as_value(), table, hash, false, incomplete);
+    req.release(table.to_value());
+    if written.is_err() {
+        hash.fail(object);
+    }
+    written
+}
+
+/// `php_var_serialize_get_sleep_props`: each name `__sleep()` returned,
+/// looked for as it is, then mangled private, then mangled protected,
+/// among the properties php serializes; php's warnings for a name that
+/// is no string, is not there, or comes twice.
+fn sleep_props(
+    req: &mut Request,
+    object: PhpObject,
+    class: &[u8],
+    list: PhpArray,
+) -> Result<PhpArray, Thrown> {
+    let props = object.props_for(req, PropertyPurpose::Serialize)?;
+    let shown_class = String::from_utf8_lossy(class).into_owned();
+    let mut out = PhpArray::new(req)?;
+    for (_, name) in list.snapshot() {
+        if name.as_php_string().is_none() {
+            docref(
+                req,
+                Level::Warning,
+                &format!(
+                    "{shown_class}::__sleep() should return an array only containing the names of instance-variables to serialize"
+                ),
+            );
+        }
+        let text = to_string(req, &name)?.as_bytes().to_vec();
+        let mut private = vec![0];
+        private.extend_from_slice(class);
+        private.push(0);
+        private.extend_from_slice(&text);
+        let mut protected = b"\0*\0".to_vec();
+        protected.extend_from_slice(&text);
+        let found = [text.clone(), private, protected]
+            .into_iter()
+            .find_map(|candidate| {
+                props
+                    .iter()
+                    .find(|(prop, _)| prop.as_bytes() == candidate.as_slice())
+                    .map(|(prop, value)| (*prop, *value))
+            });
+        let shown = String::from_utf8_lossy(&text).into_owned();
+        let Some((prop, value)) = found else {
+            docref(
+                req,
+                Level::Warning,
+                &format!(
+                    "\"{shown}\" returned as member variable from __sleep() but does not exist"
+                ),
+            );
+            continue;
+        };
+        let key = Key::Str(prop);
+        if out.contains(&key) {
+            docref(
+                req,
+                Level::Warning,
+                &format!("\"{shown}\" is returned from __sleep() multiple times"),
+            );
+            continue;
+        }
+        req.addref(&value);
+        req.addref(&Value::string(prop));
+        out.set(req, key, value)?;
+    }
+    Ok(out)
+}

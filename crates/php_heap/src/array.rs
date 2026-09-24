@@ -531,8 +531,10 @@ impl Arr {
     /// `ht->nNextFreeElement = n`: what `zend_init_rsrc_list`
     /// (`Z/Zend/zend_list.c:204-208`) writes over the `ZEND_LONG_MIN` the
     /// init left, so the first resource's id is one and not the 8.3
-    /// rule's.
-    pub(crate) fn set_next_free(self, n: i64) {
+    /// rule's, and what `array_pop()` writes one back
+    /// (`Z/ext/standard/array.c:3549`) where the element it took was the
+    /// last one appended.
+    pub fn set_next_free(self, n: i64) {
         self.header().next_free.set(n);
     }
 

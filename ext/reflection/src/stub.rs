@@ -152,6 +152,7 @@ fn parameter(name: &[u8], ty: Type) -> Parameter {
         name: Name(name.into()),
         ty: Some(ty),
         by_ref: false,
+        prefer_ref: false,
         variadic: false,
         default: None,
         attributes: Vec::new(),

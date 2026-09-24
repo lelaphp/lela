@@ -2645,6 +2645,7 @@ impl Emit<'_> {
                 name: Name(parameter.name.clone().into_boxed_slice()),
                 ty,
                 by_ref: parameter.by_ref,
+                prefer_ref: false,
                 variadic: parameter.variadic,
                 default,
                 attributes: Vec::new(),
@@ -9416,19 +9417,18 @@ impl Emit<'_> {
             extended_value: count,
             ..Opline::default()
         });
-        let by_ref = self.send_modes(&lowered_name, arguments.len());
-        self.args(arguments, true, &by_ref)?;
+        let modes = self.send_modes(&lowered_name, arguments.len());
+        self.args(arguments, true, &modes)?;
         Ok(self.call_op(call_op, line))
     }
 
-    /// `ARG_SHOULD_BE_SENT_BY_REF` (`Z/Zend/zend_compile.h:1141`) over
-    /// the callee the table has, one answer per argument: the
-    /// parameter's own by-reference bit, and the variadic's for every
-    /// argument past the declared ones, since a variadic collects them
-    /// all. A name the table has not is every argument by value, which
-    /// is what the `_EX` sends read off the callee as the program
-    /// serves.
-    fn send_modes(&self, lowered: &[u8], count: usize) -> Vec<bool> {
+    /// `ZEND_ARG_SEND_MODE` (`Z/Zend/zend_compile.h:1141`) over the
+    /// callee the table has, one answer per argument: the parameter's
+    /// own way of being sent, and the variadic's for every argument past the declared
+    /// ones, since a variadic collects them all. A name the table has
+    /// not is every argument by value, which is what the `_EX` sends
+    /// read off the callee as the program serves.
+    fn send_modes(&self, lowered: &[u8], count: usize) -> Vec<SendMode> {
         let parameters = match self.native_index(lowered) {
             Some(index) => self.functions.get(index).map(|decl| &decl.parameters),
             None => self
@@ -9443,11 +9443,17 @@ impl Emit<'_> {
         let variadic = parameters.last().filter(|last| last.variadic);
         (0..count)
             .map(|at| {
-                parameters
+                match parameters
                     .get(at)
                     .filter(|parameter| !parameter.variadic)
                     .or(variadic)
-                    .is_some_and(|parameter| parameter.by_ref)
+                {
+                    Some(parameter) if parameter.by_ref && parameter.prefer_ref => {
+                        SendMode::PreferRef
+                    }
+                    Some(parameter) if parameter.by_ref => SendMode::Ref,
+                    _ => SendMode::Value,
+                }
             })
             .collect()
     }
@@ -10394,17 +10400,20 @@ impl Emit<'_> {
         &mut self,
         arguments: &[tree::Expr],
         known: bool,
-        by_ref: &[bool],
+        modes: &[SendMode],
     ) -> Result<(), CompileError> {
         for (at, argument) in arguments.iter().enumerate() {
             let number = u32::try_from(at).unwrap_or(0) + 1;
+            let mode = modes.get(at).copied().unwrap_or(SendMode::Value);
             // `ARG_SHOULD_BE_SENT_BY_REF` at a call site whose callee the
             // table has: a variable is compiled under `BP_VAR_W` and sent
             // by `SEND_REF`; anything else is sent by the `_EX` opcode
             // its operand asks for, which php delays the error to, since
             // `Only variables can be passed by reference` is raised where
-            // the argument is placed and not where it is written.
-            if by_ref.get(at).copied().unwrap_or(false) {
+            // the argument is placed and not where it is written. Under
+            // `ARG_MAY_BE_SENT_BY_REF` a value is `SEND_VAL` and no error
+            // at all.
+            if mode != SendMode::Value {
                 let cv = match self.peel(*argument) {
                     tree::Expr::SimpleVarExpr(id) => match self.simple_var_of(id, self.line)? {
                         SimpleVar::Cv(name) => Some(self.lookup_cv(&name)),
@@ -10414,6 +10423,10 @@ impl Emit<'_> {
                 };
                 let (opcode, op1_type, op1) = if let Some(cv) = cv {
                     (Opcode::SendRef, OperandKind::Cv, cv)
+                } else if mode == SendMode::PreferRef {
+                    let value = self.expr(*argument)?;
+                    let (op1_type, op1) = self.operand(value);
+                    (Opcode::SendVal, op1_type, op1)
                 } else {
                     let value = self.expr(*argument)?;
                     let (op1_type, op1) = self.operand(value);
@@ -11534,6 +11547,15 @@ enum Literal {
     /// `T_DNUMBER` and `T_CONSTANT_ENCAPSED_STRING`: one php takes,
     /// whose value no directive this compiler serves reads.
     Other,
+}
+
+/// How a call site whose callee the table has sends one argument, php's
+/// `ZEND_SEND_BY_VAL`, `ZEND_SEND_BY_REF` and `ZEND_SEND_PREFER_REF`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SendMode {
+    Value,
+    Ref,
+    PreferRef,
 }
 
 #[cfg(test)]
