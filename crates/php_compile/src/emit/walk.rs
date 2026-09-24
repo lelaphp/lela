@@ -240,8 +240,54 @@ impl Emit<'_> {
                     node.range(),
                 )
             }
+            Stmt::EnumDecl(id) => self.walk_enum_decl(id, line),
             _ => Err(self.internal("a statement that is no class declaration")),
         }
+    }
+
+    /// An `enum` declaration read from the tree, php's `zend_ast_decl`
+    /// under `ZEND_ACC_ENUM`: the name, the backing type after the `:`,
+    /// the interfaces, the attributes and the members, cases among them.
+    fn walk_enum_decl(
+        &mut self,
+        id: NodeId<tree::EnumDecl>,
+        line: u32,
+    ) -> Result<Class, CompileError> {
+        let tree = &self.parsed.tree;
+        let node = &tree[id];
+        let Some(name) = node.name else {
+            return Err(unread(line, "an enum"));
+        };
+        let interfaces = match node.implements {
+            Some(implements) => tree[implements]
+                .types
+                .iter()
+                .map(|id| self.text(*id).to_vec())
+                .collect(),
+            None => Vec::new(),
+        };
+        let backing = match node.backing.and_then(|backing| tree[backing].ty) {
+            Some(ty) => Some(self.walk_type(ty, line)?),
+            None if node.backing.is_some() => {
+                return Err(unread(line, "an enum's backing type"));
+            }
+            None => None,
+        };
+        let attributes = self.walk_attributes(&node.attrs)?;
+        let (doc_comment, body, range) = (node.doc_comment, node.body, node.range());
+        let mut class = self.walk_class(
+            ClassKind::Enum,
+            name,
+            None,
+            interfaces,
+            attributes,
+            doc_comment,
+            body,
+            line,
+            range,
+        )?;
+        class.backing = backing;
+        Ok(class)
     }
 
     /// A `function` declaration read from the tree, in the shape the
@@ -550,6 +596,7 @@ impl Emit<'_> {
                     String::from_utf8_lossy(&name),
                     match kind {
                         ClassKind::Interface => "an interface name",
+                        ClassKind::Enum => "an enum name",
                         _ => "a class name",
                     }
                 ),
@@ -558,6 +605,7 @@ impl Emit<'_> {
         let mut class = Class {
             name,
             kind,
+            backing: None,
             parent,
             interfaces,
             attributes,
@@ -584,10 +632,45 @@ impl Emit<'_> {
             ClassMember::TraitUseDecl(id) => {
                 Err(unread(self.parsed.tree[id].line(), "a `use` of a trait"))
             }
-            ClassMember::EnumCaseDecl(id) => {
-                Err(unread(self.parsed.tree[id].line(), "an enum case"))
-            }
+            ClassMember::EnumCaseDecl(id) => self.walk_case(class, id),
         }
+    }
+
+    /// One `case A;` or `case A = expr;`, php's `ZEND_AST_ENUM_CASE`,
+    /// which `zend_compile_enum_case` refuses outside an enum.
+    ///
+    /// ```php
+    /// class C { case A; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Case can only be used in enums in %s on line 2
+    /// ```
+    fn walk_case(
+        &mut self,
+        class: &mut Class,
+        id: NodeId<tree::EnumCaseDecl>,
+    ) -> Result<(), CompileError> {
+        let node = self.parsed.tree[id].clone();
+        let line = node.line();
+        if class.kind != ClassKind::Enum {
+            return Err(refused(line, "Case can only be used in enums"));
+        }
+        if !node.attrs.is_empty() {
+            return Err(unread(line, "an attribute before an enum case"));
+        }
+        let Some(name) = node.name.and_then(|name| self.parsed.tree[name].name) else {
+            return Err(unread(line, "an enum case whose name is no identifier"));
+        };
+        class.constants.push(Constant {
+            name: self.text(name).to_vec(),
+            visibility: Visibility::Public,
+            is_final: false,
+            value: node.value,
+            is_case: true,
+            doc_comment: self.doc_comment(node.doc_comment),
+            line,
+        });
+        Ok(())
     }
 
     /// One `const A = 1, B = 2;` of a class body, php's
@@ -619,7 +702,8 @@ impl Emit<'_> {
                 name,
                 visibility: modifiers.visibility.unwrap_or_default(),
                 is_final: modifiers.has(Flag::Final),
-                value,
+                value: Some(value),
+                is_case: false,
                 doc_comment,
                 line,
             });
@@ -780,6 +864,9 @@ fn type_name(name: &[u8]) -> Type {
 pub(super) struct Class {
     pub(super) name: Vec<u8>,
     pub(super) kind: ClassKind,
+    /// An enum's backing type as written after the `:`, php's
+    /// `decl->child[4]`; none for a pure enum and for every other kind.
+    pub(super) backing: Option<Type>,
     pub(super) parent: Option<Vec<u8>>,
     pub(super) interfaces: Vec<Vec<u8>>,
     pub(super) attributes: Vec<Attr>,
@@ -925,7 +1012,12 @@ pub(super) struct Constant {
     pub(super) name: Vec<u8>,
     pub(super) visibility: Visibility,
     pub(super) is_final: bool,
-    pub(super) value: php_syntax::tree::Expr,
+    /// The value as written; a `case` of a pure enum has none.
+    pub(super) value: Option<php_syntax::tree::Expr>,
+    /// `case A;` or `case A = 1;` in an enum's body, php's
+    /// `ZEND_AST_ENUM_CASE`, which stands in the constants table beside
+    /// the enum's own constants in the order written.
+    pub(super) is_case: bool,
     pub(super) doc_comment: Option<Vec<u8>>,
     pub(super) line: u32,
 }

@@ -1730,11 +1730,26 @@ fn class_constant_named(
 /// Deprecated: ReflectionClass::getConstant() for a non-existent constant is deprecated, use ReflectionClass::hasConstant() to check if the constant exists in %s on line 2
 /// bool(false)
 /// ```
+/// A class constant's value as the constants table holds it once it is
+/// updated: an enum's case is the enum's instance for it
+/// (`zend_enum_get_case`), and every other constant the expression it
+/// was written as, evaluated in the scope that declared it.
+fn constant_value(
+    req: &mut Request,
+    constant: &php_ext::decl::ClassConstDecl,
+    scope: ClassId,
+) -> Result<Value, Thrown> {
+    if constant.is_case {
+        return php_ext::call::class_constant(req, scope, &constant.name.0);
+    }
+    eval_const_expr(req, &constant.value, Some(scope))
+}
+
 fn reflection_class_get_constant(req: &mut Request) -> Result<Value, Thrown> {
     let name = one_string_argument(req)?;
     let class = this_class(req)?;
     if let Some((declaring, constant)) = class_constant_named(req, class, &name) {
-        return eval_const_expr(req, &constant.value, Some(declaring));
+        return constant_value(req, &constant, declaring);
     }
     deprecated(
         req,
@@ -3292,11 +3307,11 @@ fn class_string(
     );
 
     // `ZEND_CLASS_CONST_IS_CASE`: an enum's cases go first, under a
-    // heading shown only when there are any; the model has no case bit
-    // yet, so an enum's constants are its cases (#377).
+    // heading shown only when there are any, and its own constants
+    // after them.
     let (cases, constants): (Vec<_>, Vec<_>) = linked_constants(req, class)
         .into_iter()
-        .partition(|_| decl.kind == ClassKind::Enum);
+        .partition(|(constant, _)| constant.is_case);
     if !cases.is_empty() {
         let _ = write!(out, "\n{indent}  - Enum cases [{}] {{\n", cases.len());
         for (case, _) in &cases {

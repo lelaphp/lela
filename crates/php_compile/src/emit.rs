@@ -1240,7 +1240,7 @@ impl Emit<'_> {
                 let name = self.text(tree[id].name).to_vec();
                 self.label(&name)?;
             }
-            Stmt::ClassDecl(_) | Stmt::InterfaceDecl(_) => {
+            Stmt::ClassDecl(_) | Stmt::InterfaceDecl(_) | Stmt::EnumDecl(_) => {
                 let class = self.walk_class_decl(stmt)?;
                 self.class(&class)?;
             }
@@ -1256,7 +1256,6 @@ impl Emit<'_> {
             }
             Stmt::IfStmt(id) => self.r#if(id)?,
             Stmt::TraitDecl(_) => return Err(self.unread("a trait")),
-            Stmt::EnumDecl(_) => return Err(self.unread("an enum")),
             Stmt::GlobalStmt(id) => {
                 for var in tree[id].vars.clone() {
                     self.global_var(var)?;
@@ -3265,21 +3264,45 @@ impl Emit<'_> {
         for written in &class.interfaces {
             interfaces.push(self.inherited_name(written, "interface name")?);
         }
+        let backing = self.enum_backing(class, &name)?;
+        if class.kind == ClassKind::Enum {
+            // `zend_enum_add_interfaces`: every enum is a `UnitEnum` and
+            // a backed one a `BackedEnum`, after the ones written, so no
+            // enum is ever bound early.
+            interfaces.push(b"UnitEnum".to_vec());
+            if backing != EnumBacking::Pure {
+                interfaces.push(b"BackedEnum".to_vec());
+            }
+        }
         // `zend_lookup_class_ex(ce->parent_name, NULL,
         // ZEND_FETCH_CLASS_NO_AUTOLOAD)` stands before the class itself
         // goes into the table, so a class naming itself as its parent
         // finds nothing and binds as the program serves.
+        // An enum is never bound early, so a class naming one as its
+        // parent finds none in the table and binds as the program serves,
+        // where the link refuses it.
         let early = interfaces.is_empty()
             && match &parent {
                 None => true,
-                Some(parent) => self.known_class(parent).is_some(),
+                Some(parent) => self
+                    .known_class(parent)
+                    .is_some_and(|found| found.kind != ClassKind::Enum),
             };
         let (attributes, dynamic_properties) = self.class_attributes(class, &name, class.line)?;
+        let is_enum = class.kind == ClassKind::Enum;
         let mut decl = ClassDecl {
             name: Name(name.clone().into_boxed_slice()),
             kind: class.kind,
+            // An enum is final (`ZEND_ACC_FINAL` beside `ZEND_ACC_ENUM`
+            // from the parser) and takes no dynamic property
+            // (`zend_enum_register_props`).
             flags: ClassFlags {
-                dynamic_properties,
+                is_final: is_enum,
+                dynamic_properties: if is_enum {
+                    DynamicProperties::Forbidden
+                } else {
+                    dynamic_properties
+                },
                 ..ClassFlags::default()
             },
             parent: parent
@@ -3290,9 +3313,9 @@ impl Emit<'_> {
                 .map(|i| Name(i.clone().into_boxed_slice()))
                 .collect(),
             traits: Vec::new(),
-            backing: EnumBacking::Pure,
+            backing,
             constants: Vec::new(),
-            properties: Vec::new(),
+            properties: enum_properties(class.kind, backing),
             methods: Vec::new(),
             attributes,
             doc_comment: class.doc_comment.clone().map(Vec::into_boxed_slice),
@@ -3303,28 +3326,23 @@ impl Emit<'_> {
         self.active_class = Some(name.clone());
         self.active_parent.clone_from(&parent);
         self.class_constants(&mut decl, class, &name)?;
-        self.active_constants = decl
-            .constants
-            .iter()
-            .map(|c| (c.name.0.to_vec(), c.value.clone()))
-            .collect();
+        self.active_constants = foldable_constants(&decl.constants, usize::MAX);
         self.class_properties(&mut decl, class, &name)?;
         let at = self.classes.len();
         self.classes.push(decl);
         for method in &class.methods {
             self.line = method.function.line;
-            self.active_constants = self.classes[at]
-                .constants
-                .iter()
-                .take(method.constants_before)
-                .map(|decl| (decl.name.0.to_vec(), decl.value.clone()))
-                .collect();
+            self.active_constants =
+                foldable_constants(&self.classes[at].constants, method.constants_before);
             self.method_decl(at, method)?;
         }
         self.active_constants.clear();
         self.active_class = None;
         self.active_parent = None;
         self.line = line;
+        if is_enum {
+            self.verify_enum(at, &name)?;
+        }
         if early {
             // `zend_try_early_bind`, which links the class here: what
             // `zend_do_inheritance` refuses is php's `E_ERROR` while the
@@ -3335,6 +3353,140 @@ impl Emit<'_> {
             return Ok(());
         }
         self.declare_class(&name, parent.as_deref())
+    }
+
+    /// `zend_compile_enum_backing_type` (`Z/Zend/zend_compile.c:9221`):
+    /// `int` or `string` after an enum's `:`, and php's compile error for
+    /// any other type; a pure enum, and every other kind, is `Pure`.
+    ///
+    /// ```php
+    /// enum E: float {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Enum backing type must be int or string, float given in %s on line 2
+    /// ```
+    fn enum_backing(&mut self, class: &Class, name: &[u8]) -> Result<EnumBacking, CompileError> {
+        let _ = name;
+        match &class.backing {
+            None => Ok(EnumBacking::Pure),
+            Some(Type::Int) => Ok(EnumBacking::Int),
+            Some(Type::String) => Ok(EnumBacking::String),
+            Some(other) => Err(self.compile_error(format!(
+                "Enum backing type must be int or string, {} given",
+                type_to_string(other)
+            ))),
+        }
+    }
+
+    /// A class constant's value, or an enum case's
+    /// (`zend_compile_enum_case`, `Z/Zend/zend_compile.c:9460`): a case
+    /// of a backed enum must be written with its value and one of a pure
+    /// enum without, each refusal php's compile error at the case's
+    /// line; a pure case's value is `null`, which no reader takes for a
+    /// backing value.
+    ///
+    /// ```php
+    /// enum Suit: string { case Hearts = 'H'; case Spades; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Case Spades of backed enum Suit must have a value in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// enum Suit { case Hearts = 1; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Case Hearts of non-backed enum Suit must not have a value in %s on line 2
+    /// ```
+    fn case_or_constant(
+        &mut self,
+        decl: &ClassDecl,
+        constant: &walk::Constant,
+        name: &[u8],
+    ) -> Result<ConstExpr, CompileError> {
+        if !constant.is_case {
+            let Some(value) = constant.value else {
+                return Err(self.fatal("InternalError: a class constant with no value"));
+            };
+            return self.const_expr(value);
+        }
+        let backed = decl.backing != EnumBacking::Pure;
+        match (backed, constant.value) {
+            (true, None) => Err(self.compile_error(format!(
+                "Case {} of backed enum {} must have a value",
+                String::from_utf8_lossy(&constant.name),
+                String::from_utf8_lossy(name)
+            ))),
+            (false, Some(_)) => Err(self.compile_error(format!(
+                "Case {} of non-backed enum {} must not have a value",
+                String::from_utf8_lossy(&constant.name),
+                String::from_utf8_lossy(name)
+            ))),
+            (true, Some(value)) => self.const_expr(value),
+            (false, None) => Ok(ConstExpr::Null),
+        }
+    }
+
+    /// `zend_verify_enum_magic_methods` (`Z/Zend/zend_enum.c:79`) and
+    /// `zend_enum_register_funcs` over the enum at `at` of the unit's
+    /// classes: a magic method php keeps off an enum is its compile
+    /// error, in php's order of the checks, and the enum takes `cases`,
+    /// and for a backed one `from` and `tryFrom`, after its own methods,
+    /// a method of its own under one of those names being php's
+    /// `Cannot redeclare`.
+    ///
+    /// ```php
+    /// enum E { case A; public function __toString(): string { return ''; } }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Enum E cannot include magic method __toString in %s on line 2
+    /// ```
+    fn verify_enum(&mut self, at: usize, name: &[u8]) -> Result<(), CompileError> {
+        const FORBIDDEN: [&str; 14] = [
+            "__construct",
+            "__destruct",
+            "__clone",
+            "__get",
+            "__set",
+            "__unset",
+            "__isset",
+            "__toString",
+            "__debugInfo",
+            "__serialize",
+            "__unserialize",
+            "__sleep",
+            "__wakeup",
+            "__set_state",
+        ];
+        let Some(decl) = self.classes.get(at) else {
+            return Err(self.fatal("InternalError: an enum the unit has not"));
+        };
+        let has = |wanted: &str| {
+            decl.methods
+                .iter()
+                .any(|m| m.function.name.0.eq_ignore_ascii_case(wanted.as_bytes()))
+        };
+        if let Some(magic) = FORBIDDEN.iter().find(|magic| has(magic)) {
+            return Err(self.compile_error(format!(
+                "Enum {} cannot include magic method {magic}",
+                String::from_utf8_lossy(name)
+            )));
+        }
+        let builtins = php_unit::enum_methods(decl.backing);
+        if let Some(clash) = builtins
+            .iter()
+            .find(|builtin| has(&String::from_utf8_lossy(&builtin.function.name.0)))
+        {
+            return Err(self.compile_error(format!(
+                "Cannot redeclare {}::{}()",
+                String::from_utf8_lossy(name),
+                String::from_utf8_lossy(&clash.function.name.0)
+            )));
+        }
+        if let Some(decl) = self.classes.get_mut(at) {
+            decl.methods.extend(builtins);
+        }
+        Ok(())
     }
 
     /// `zend_compile_class_const_decl`: one declarator at a time, at its
@@ -3356,16 +3508,13 @@ impl Emit<'_> {
                     String::from_utf8_lossy(&constant.name)
                 )));
             }
-            self.active_constants = decl
-                .constants
-                .iter()
-                .map(|c| (c.name.0.to_vec(), c.value.clone()))
-                .collect();
-            let value = self.const_expr(constant.value)?;
+            self.active_constants = foldable_constants(&decl.constants, usize::MAX);
+            let value = self.case_or_constant(decl, constant, name)?;
             decl.constants.push(ClassConstDecl {
                 name: Name(constant.name.clone().into_boxed_slice()),
                 visibility: constant.visibility,
                 is_final: constant.is_final,
+                is_case: constant.is_case,
                 ty: None,
                 value,
                 attributes: Vec::new(),
@@ -3452,6 +3601,12 @@ impl Emit<'_> {
     ) -> Result<(), CompileError> {
         for property in &class.properties {
             self.line = property.line;
+            if class.kind == ClassKind::Enum {
+                return Err(self.compile_error(format!(
+                    "Enum {} cannot include properties",
+                    String::from_utf8_lossy(name)
+                )));
+            }
             if decl.properties.iter().any(|p| *p.name.0 == *property.name) {
                 return Err(self.compile_error(format!(
                     "Cannot redeclare {}::${}",
@@ -3603,7 +3758,14 @@ impl Emit<'_> {
 
     /// What `zend_do_inheritance` refuses at the early bind, which is
     /// `E_ERROR` while the file compiles and so runs nothing of it: a
-    /// parent that is an interface. The rest of inheritance is the
+    /// parent that is an interface or a final class.
+    ///
+    /// ```php
+    /// class G extends Generator {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Class G cannot extend final class Generator in %s on line 2
+    /// ``` The rest of inheritance is the
     /// engine's, since a class this cannot link here it declares with a
     /// `DECLARE_CLASS` instead. The refusal stands while the file
     /// compiles, so nothing of it runs:
@@ -3620,14 +3782,18 @@ impl Emit<'_> {
         let Some(found) = self.known_class(parent) else {
             return Ok(());
         };
-        if found.kind != ClassKind::Interface {
-            return Ok(());
-        }
+        // `zend_do_inheritance`'s refusal of a final parent, which
+        // `Generator`, `Closure` and every enum are.
+        let what = match found.kind {
+            ClassKind::Interface => "interface",
+            _ if found.flags.is_final => "final class",
+            _ => return Ok(()),
+        };
         let parent = String::from_utf8_lossy(&found.name.0).into_owned();
         Err(CompileError {
             level: Level::Error,
             message: format!(
-                "Class {} cannot extend interface {parent}",
+                "Class {} cannot extend {what} {parent}",
                 String::from_utf8_lossy(name)
             ),
             line: self.line,
@@ -10974,6 +11140,14 @@ impl Emit<'_> {
             .classes
             .iter()
             .find(|decl| decl.name.0.to_ascii_lowercase() == class)?;
+        // The methods `zend_enum_register_funcs` gives an enum are the
+        // engine's, added at the link: php's compile-time table has none
+        // of them, so a call to one is compiled as to a method unknown.
+        if decl.kind == ClassKind::Enum
+            && matches!(method.as_slice(), b"cases" | b"from" | b"tryfrom")
+        {
+            return None;
+        }
         decl.methods
             .iter()
             .any(|m| {
@@ -12771,6 +12945,7 @@ mod tests {
         let read = Class {
             name: b"M".to_vec(),
             kind: ClassKind::Class,
+            backing: None,
             parent: None,
             interfaces: Vec::new(),
             attributes: Vec::new(),
@@ -13123,6 +13298,49 @@ fn is_auto_global(name: &[u8]) -> bool {
             | b"_REQUEST"
             | b"_FILES"
     )
+}
+
+/// The first `before` constants of the class being compiled that
+/// `zend_try_ct_eval_class_const` may substitute, by name with the value
+/// each was written as: an enum's case is left out, since its value is
+/// the enum's instance for it (`ZEND_AST_CONST_ENUM_INIT`) and never
+/// the scalar it is backed by.
+fn foldable_constants(constants: &[ClassConstDecl], before: usize) -> Vec<(Vec<u8>, ConstExpr)> {
+    constants
+        .iter()
+        .take(before)
+        .filter(|c| !c.is_case)
+        .map(|c| (c.name.0.to_vec(), c.value.clone()))
+        .collect()
+}
+
+/// `zend_enum_register_props` (`Z/Zend/zend_enum.c:475`): an enum's
+/// `public readonly string $name`, and a backed one's
+/// `public readonly int|string $value` of its backing type, declared
+/// before anything its body declares; nothing for any other kind.
+fn enum_properties(kind: ClassKind, backing: EnumBacking) -> Vec<PropertyDecl> {
+    if kind != ClassKind::Enum {
+        return Vec::new();
+    }
+    let property = |name: &str, ty: Type| PropertyDecl {
+        name: Name::from(name),
+        visibility: Visibility::Public,
+        set_visibility: None,
+        is_instance: true,
+        is_readonly: true,
+        is_final: false,
+        ty: Some(ty),
+        default: None,
+        attributes: Vec::new(),
+        doc_comment: None,
+    };
+    let mut out = vec![property("name", Type::String)];
+    match backing {
+        EnumBacking::Int => out.push(property("value", Type::Int)),
+        EnumBacking::String => out.push(property("value", Type::String)),
+        EnumBacking::Pure => {}
+    }
+    out
 }
 
 /// `zend_mark_function_as_generator`'s test of a declared return type

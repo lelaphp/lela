@@ -221,6 +221,29 @@ pub(crate) enum MethodAt {
     Trampoline(u32),
 }
 
+/// `zend_register_internal_enum`'s `zend_register_functions` over the
+/// enum methods: a native enum takes `cases`, and `from` and `tryFrom`
+/// for a backed one, after the methods its stub declares, served by the
+/// entries every enum's are ([`crate::enums::EnumMethod`]).
+fn link_enum_methods(decl: &mut ClassDecl, class: ClassId, methods: &mut Vec<NativeMethod>) {
+    if decl.kind != php_unit::decl::ClassKind::Enum {
+        return;
+    }
+    for method in php_unit::enum_methods(decl.backing) {
+        let lowered = method.function.name.0.to_ascii_lowercase();
+        let Some(served) = crate::enums::EnumMethod::of(&lowered, decl.backing) else {
+            continue;
+        };
+        let index = u32::try_from(decl.methods.len()).unwrap_or(u32::MAX);
+        decl.methods.push(method);
+        methods.push(NativeMethod {
+            class,
+            at: MethodAt::Declared(index),
+            entry: served.entry(),
+        });
+    }
+}
+
 /// `zend_register_closure_ce` leaves `__invoke` off `Closure`'s table
 /// and `zend_closure_get_method` answers it on the lookup: every
 /// trampoline [`crate::classes::trampolines`] names is numbered past
@@ -747,6 +770,7 @@ impl EngineBuilder {
                     entry: *entry,
                 });
             }
+            link_enum_methods(&mut decl, class, &mut methods);
             classes.push(decl);
         }
         let trampolines = link_trampolines(&classes, &mut methods);

@@ -561,6 +561,16 @@ pub struct Request {
     /// and immutable and an object is neither, so the slot is the
     /// request's and the cases go with it.
     enum_cases: Vec<((ClassId, Vec<u8>), PhpObject)>,
+    /// The backed enums whose case values `zend_enum_build_backed_enum_table`
+    /// has held to their backing type and found no two alike, php's
+    /// `ZEND_ACC_CONSTANTS_UPDATED` on each; a check that failed is made
+    /// again on the next read, as php's is.
+    enums_updated: Vec<ClassId>,
+    /// The methods `zend_enum_register_funcs` gives each enum a program
+    /// declares, one function number each past
+    /// [`crate::enums::ENUM_FUNCTIONS`], as php allocates a
+    /// `zend_internal_function` per method per enum.
+    enum_functions: Vec<(ClassId, crate::enums::EnumMethod)>,
     /// `CE_STATIC_MEMBERS(ce)` (`Z/Zend/zend_object_handlers.c:2094`):
     /// one slot per declared `static` property, keyed by the class that
     /// declared it and by the property's name. php gives every class a
@@ -807,6 +817,8 @@ impl Request {
             included_files: Vec::new(),
             constants: Vec::new(),
             enum_cases: Vec::new(),
+            enums_updated: Vec::new(),
+            enum_functions: Vec::new(),
             statics: Vec::new(),
             guards: Vec::new(),
             ref_sources: Vec::new(),
@@ -1388,6 +1400,9 @@ impl Request {
     /// method numbered past them; none for a number nothing is linked
     /// under.
     fn entry_of(&self, function: Function) -> Option<crate::api::abi::Entry> {
+        if let Some((_, method)) = self.enum_method_of(function) {
+            return Some(method.entry());
+        }
         let at = usize::try_from(function.0).ok()?;
         match at.checked_sub(self.shared.functions.len()) {
             None => self.shared.functions.get(at).map(|(_, entry)| *entry),
@@ -1431,6 +1446,9 @@ impl Request {
     pub(crate) fn method_class(&self, function: Function) -> Option<ClassId> {
         if let Some(method) = self.native_method(function) {
             return Some(method.class);
+        }
+        if let Some((class, _)) = self.enum_method_of(function) {
+            return Some(class);
         }
         let user = self.user_function(function)?;
         let exec::Body::Method { class, .. } = user.body else {
@@ -1478,6 +1496,11 @@ impl Request {
         let decl = self.class_decl(class)?;
         let at = usize::try_from(class.0).ok()?;
         if let Some(declared) = at.checked_sub(self.shared.classes.len()) {
+            if decl.kind == ClassKind::Enum
+                && let Some(method) = crate::enums::EnumMethod::of(lowered, decl.backing)
+            {
+                return self.enum_function(class, method);
+            }
             let (unit, index) = self.declared.get(declared)?;
             let method = decl
                 .methods
@@ -1502,6 +1525,25 @@ impl Request {
                         .get(usize::try_from(index).unwrap_or(usize::MAX))
                         .is_some_and(|method| method.function.name.0.eq_ignore_ascii_case(lowered)))
         })
+    }
+
+    /// The function number `zend_enum_register_funcs` gave `method` of
+    /// the enum `class` a program declared.
+    fn enum_function(&self, class: ClassId, method: crate::enums::EnumMethod) -> Option<Function> {
+        let at = self
+            .enum_functions
+            .iter()
+            .position(|held| *held == (class, method))?;
+        crate::enums::ENUM_FUNCTIONS
+            .checked_add(u32::try_from(at).ok()?)
+            .map(Function)
+    }
+
+    /// The enum method a function number past
+    /// [`crate::enums::ENUM_FUNCTIONS`] names, and its enum.
+    fn enum_method_of(&self, function: Function) -> Option<(ClassId, crate::enums::EnumMethod)> {
+        let at = function.0.checked_sub(crate::enums::ENUM_FUNCTIONS)?;
+        self.enum_functions.get(usize::try_from(at).ok()?).copied()
     }
 
     /// The trampoline `class` answers under the lowered name, php's
@@ -1537,6 +1579,13 @@ impl Request {
 
     /// The declaration of a method, native or user, if `function` is one.
     pub(crate) fn method_decl(&self, function: Function) -> Option<&MethodDecl> {
+        if let Some((class, method)) = self.enum_method_of(function) {
+            return self
+                .class_decl(class)?
+                .methods
+                .iter()
+                .find(|decl| decl.function.name.0.eq_ignore_ascii_case(method.name()));
+        }
         if let Some(method) = self.native_method(function) {
             return match method.at {
                 MethodAt::Declared(index) => self
@@ -3106,6 +3155,7 @@ impl Request {
     /// as the fatal that ends the request.
     pub(crate) fn new_object(&mut self, class: ClassId) -> Result<PhpObject, Thrown> {
         let slots = self.class_slots(class);
+        let defaults = self.property_defaults(class)?;
         // `ce->create_object`: a class that declares a native payload
         // lays it down here, with the object, as
         // `zend_object_alloc(sizeof(custom), ce)` does; every other
@@ -3114,11 +3164,14 @@ impl Request {
             Some(new) => new(&mut self.heap, class.0, slots),
             None => self.heap.object(class.0, slots),
         };
-        let object = self.fatal_of(allocated).map(PhpObject::of)?;
-        if let Err(thrown) = self.init_properties(object) {
-            self.release(object.as_value());
-            return Err(thrown);
-        }
+        let object = match self.fatal_of(allocated).map(PhpObject::of) {
+            Ok(object) => object,
+            Err(thrown) => {
+                self.release_defaults(defaults);
+                return Err(thrown);
+            }
+        };
+        self.init_properties(object, defaults);
         // `zend_default_exception_new`, the throwables' `create_object`:
         // `file`, `line` and `trace` are the site of `new`, written as
         // the object is made and before any constructor runs.
@@ -3141,12 +3194,16 @@ impl Request {
         payload: T,
     ) -> Result<PhpObject, Thrown> {
         let slots = self.class_slots(class);
+        let defaults = self.property_defaults(class)?;
         let allocated = self.heap.object_with(class.0, slots, payload);
-        let object = self.fatal_of(allocated).map(PhpObject::of)?;
-        if let Err(thrown) = self.init_properties(object) {
-            self.release(object.as_value());
-            return Err(thrown);
-        }
+        let object = match self.fatal_of(allocated).map(PhpObject::of) {
+            Ok(object) => object,
+            Err(thrown) => {
+                self.release_defaults(defaults);
+                return Err(thrown);
+            }
+        };
+        self.init_properties(object, defaults);
         Ok(object)
     }
 
@@ -3158,22 +3215,65 @@ impl Request {
     /// where it is typed, as `zend_declare_typed_property` leaves it.
     /// The slots are [`Request::placed_properties`]', so an inherited
     /// property takes the parent's default in the parent's slot.
-    fn init_properties(&mut self, object: PhpObject) -> Result<(), Thrown> {
+    ///
+    /// The defaults are evaluated before the object is made, as
+    /// `zend_update_class_constants` runs inside `object_init_ex` before
+    /// `zend_objects_new`, so an object a default makes, an enum's case
+    /// among them, takes its number in the object store before the object being made does.
+    ///
+    /// ```php
+    /// class A { public $p = E::V; }
+    /// enum E { case V; }
+    /// var_dump(new A);
+    /// ```
+    /// ```expect
+    /// object(A)#2 (1) {
+    ///   ["p"]=>
+    ///   enum(E::V)
+    /// }
+    /// ```
+    fn property_defaults(&mut self, class: ClassId) -> Result<Vec<Option<Value>>, Thrown> {
         let defaults: Vec<(ClassId, bool, Option<php_unit::decl::ConstExpr>)> = self
-            .placed_properties(object.class())
+            .placed_properties(class)
             .into_iter()
             .map(|(declaring, p)| (declaring, p.ty.is_some(), p.default))
             .collect();
-        for (i, (declaring, typed, default)) in defaults.into_iter().enumerate() {
-            let value = match default {
-                Some(expr) => crate::api::call::eval_const_expr(self, &expr, Some(declaring))?,
-                None if typed => continue,
-                None => Value::null(),
+        let mut out = Vec::with_capacity(defaults.len());
+        for (declaring, typed, default) in defaults {
+            out.push(match default {
+                Some(expr) => match crate::api::call::eval_const_expr(self, &expr, Some(declaring))
+                {
+                    Ok(value) => Some(value),
+                    Err(thrown) => {
+                        self.release_defaults(out);
+                        return Err(thrown);
+                    }
+                },
+                None if typed => None,
+                None => Some(Value::null()),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Defaults [`Request::property_defaults`] evaluated for an object
+    /// that was never made, given up.
+    fn release_defaults(&mut self, defaults: Vec<Option<Value>>) {
+        for value in defaults.into_iter().flatten() {
+            self.release(value);
+        }
+    }
+
+    /// The defaults written into the object's slots, each slot's owner
+    /// from here; a typed property with none stays uninitialised.
+    fn init_properties(&mut self, object: PhpObject, defaults: Vec<Option<Value>>) {
+        for (i, value) in defaults.into_iter().enumerate() {
+            let Some(value) = value else {
+                continue;
             };
             let slot = u32::try_from(i).unwrap_or(u32::MAX);
             Heap::object_set_slot(&mut Hooks(self), object.heap(), slot, value.into_zval());
         }
-        Ok(())
     }
 
     /// `ce->default_properties_table` beside `ce->properties_info_table`
@@ -3484,16 +3584,112 @@ impl Request {
                 &format!("Cannot access {word} constant {class_name}::{shown}"),
             ));
         }
-        // `zend_fetch_class_constant`'s `ZEND_CLASS_CONST_IS_CASE` arm:
-        // a constant of an enum is a case, and a case is an instance of
-        // the enum and not the expression it was written with.
-        if self
-            .class_decl(class)
-            .is_some_and(|decl| decl.kind == ClassKind::Enum)
-        {
+        // `ZEND_FETCH_CLASS_CONSTANT` updates a backed enum's constants
+        // whole before it reads one (`zend_update_class_constants`), and
+        // `zend_fetch_class_constant`'s `ZEND_CLASS_CONST_IS_CASE` arm
+        // hands out a case as the enum's instance for it and not as the
+        // expression it was written with.
+        self.update_enum_constants(class)?;
+        if constant.is_case {
             return self.enum_case(class, name).map(|case| case.as_value());
         }
         crate::api::call::eval_const_expr(self, &value, Some(class))
+    }
+
+    /// `zend_enum_build_backed_enum_table` (`Z/Zend/zend_enum.c:197`),
+    /// which `zend_update_class_constants` runs for a backed enum a
+    /// program declared: each case's value evaluated and held to the
+    /// backing type, php's `TypeError` for one of another type, and two
+    /// cases of one value php's `Error`. A native enum's values are the
+    /// stub's and are not checked, as php checks only a user class's.
+    ///
+    /// ```php
+    /// enum Foo: int { case Bar = 'bar'; }
+    /// try { var_dump(Foo::Bar); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// enum Dup: int { case A = 1; case B = 1; }
+    /// try { Dup::from(1); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Enum case type string does not match enum backing type int
+    /// Duplicate value in enum Dup for cases A and B
+    /// ```
+    pub(crate) fn update_enum_constants(&mut self, class: ClassId) -> Result<(), Thrown> {
+        if self.enums_updated.contains(&class) || self.native_class(class) {
+            return Ok(());
+        }
+        let Some(decl) = self.class_decl(class) else {
+            return Ok(());
+        };
+        if decl.kind != ClassKind::Enum || decl.backing == php_unit::decl::EnumBacking::Pure {
+            return Ok(());
+        }
+        let backing = decl.backing;
+        let cases: Vec<(Vec<u8>, php_unit::decl::ConstExpr)> = decl
+            .constants
+            .iter()
+            .filter(|constant| constant.is_case)
+            .map(|constant| (constant.name.0.to_vec(), constant.value.clone()))
+            .collect();
+        let enum_name = self.class_name(class);
+        let mut seen: Vec<(Value, Vec<u8>)> = Vec::new();
+        let mut outcome = Ok(());
+        for (name, expr) in cases {
+            let value = match crate::api::call::eval_const_expr(self, &expr, Some(class)) {
+                Ok(value) => value,
+                Err(thrown) => {
+                    outcome = Err(thrown);
+                    break;
+                }
+            };
+            let wanted = match backing {
+                php_unit::decl::EnumBacking::Int => TypeTag::Int,
+                _ => TypeTag::String,
+            };
+            if value.tag() != wanted {
+                let given = value.type_name();
+                let want = if wanted == TypeTag::Int {
+                    "int"
+                } else {
+                    "string"
+                };
+                self.release(value);
+                outcome = Err(crate::api::raising::throw(
+                    self,
+                    "TypeError",
+                    &format!("Enum case type {given} does not match enum backing type {want}"),
+                ));
+                break;
+            }
+            if let Some((_, earlier)) = seen
+                .iter()
+                .find(|(held, _)| crate::api::coerce::identical(held, &value))
+            {
+                let earlier = String::from_utf8_lossy(earlier).into_owned();
+                self.release(value);
+                outcome = Err(crate::api::raising::throw(
+                    self,
+                    "Error",
+                    &format!(
+                        "Duplicate value in enum {enum_name} for cases {earlier} and {}",
+                        String::from_utf8_lossy(&name)
+                    ),
+                ));
+                break;
+            }
+            seen.push((value, name));
+        }
+        for (value, _) in seen {
+            self.release(value);
+        }
+        outcome?;
+        self.enums_updated.push(class);
+        Ok(())
+    }
+
+    /// Whether `class` is one the engine was built with, a native's,
+    /// rather than one a program declared.
+    fn native_class(&self, class: ClassId) -> bool {
+        usize::try_from(class.0).is_ok_and(|at| at < self.shared.classes.len())
     }
 
     /// `zend_enum_get_case` (`Z/Zend/zend_enum.c:410`): the one instance
@@ -5709,6 +5905,12 @@ impl Request {
             }
             at = self.class_parent(class);
         }
+        if self
+            .class_decl(class)
+            .is_some_and(|decl| decl.kind == ClassKind::Enum)
+        {
+            return &crate::enums::ENUM;
+        }
         &Std
     }
 
@@ -6858,10 +7060,25 @@ impl Request {
     /// declaration on every lookup, so nothing is copied.
     fn bind_declared(&mut self, unit: &Arc<Unit>, at: u32) {
         self.declared.push((Arc::clone(unit), at));
-        let methods = unit
-            .classes
-            .get(usize::try_from(at).unwrap_or(usize::MAX))
-            .map_or(0, |decl| decl.methods.len());
+        let decl = unit.classes.get(usize::try_from(at).unwrap_or(usize::MAX));
+        let methods = decl.map_or(0, |decl| decl.methods.len());
+        // `zend_enum_register_funcs` at the link: the enum's own
+        // `cases`, `from` and `tryFrom`, which the compiler declared
+        // after its methods and which no body of the unit serves.
+        if let Some(decl) = decl.filter(|decl| decl.kind == ClassKind::Enum) {
+            let class = self
+                .shared
+                .classes
+                .len()
+                .saturating_add(self.declared.len() - 1);
+            let class = ClassId(u32::try_from(class).unwrap_or(u32::MAX));
+            for method in &decl.methods {
+                let lowered = method.function.name.0.to_ascii_lowercase();
+                if let Some(method) = crate::enums::EnumMethod::of(&lowered, decl.backing) {
+                    self.enum_functions.push((class, method));
+                }
+            }
+        }
         for method in 0..methods {
             self.user_functions.push(UserFunction {
                 unit: Arc::clone(unit),
@@ -6949,7 +7166,27 @@ impl Request {
                 );
                 return Err(crate::api::raising::fatal(self, &message));
             }
+            // `zend_do_inheritance`'s refusals of an enum, checked before
+            // a final class since every enum is final (GH-16315).
+            let refused = match self.class_decl(found) {
+                Some(p) if p.kind == ClassKind::Enum => Some("enum"),
+                Some(p) if p.flags.is_final => Some("final class"),
+                _ => None,
+            };
+            if let Some(what) = refused {
+                let message = format!(
+                    "Class {name} cannot extend {what} {}",
+                    self.class_name(found)
+                );
+                return Err(crate::api::raising::fatal(self, &message));
+            }
         }
+        let object_type = match decl.kind {
+            ClassKind::Class => "Class",
+            ClassKind::Interface => "Interface",
+            ClassKind::Trait => "Trait",
+            ClassKind::Enum => "Enum",
+        };
         let mut implemented: Vec<ClassId> = Vec::new();
         for interface in &decl.interfaces {
             let Some(found) = self.class_named(&interface.0) else {
@@ -6971,9 +7208,12 @@ impl Request {
             }
             if implemented.contains(&found) {
                 let message = format!(
-                    "Class {name} cannot implement previously implemented interface {}",
+                    "{object_type} {name} cannot implement previously implemented interface {}",
                     self.class_name(found)
                 );
+                return Err(crate::api::raising::fatal(self, &message));
+            }
+            if let Some(message) = self.interface_gets_implemented(&decl, &name, found) {
                 return Err(crate::api::raising::fatal(self, &message));
             }
             implemented.push(found);
@@ -6986,6 +7226,70 @@ impl Request {
         };
         self.bind_declared(unit, at);
         Ok(())
+    }
+
+    /// `interface_gets_implemented` of the three Zend interfaces that
+    /// hold a class to what it is: `UnitEnum` and `BackedEnum` take an
+    /// enum alone and `BackedEnum` a backed one
+    /// (`zend_implement_unit_enum`, `zend_implement_backed_enum`), and
+    /// `Throwable` takes nothing that is not under `Exception` or `Error`
+    /// (`zend_implement_throwable`); the refusal is php's `E_ERROR`.
+    ///
+    /// ```php
+    /// class Foo implements UnitEnum { public static function cases(): array { return []; } }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Non-enum class Foo cannot implement interface UnitEnum in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// enum Foo implements Throwable {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Enum Foo cannot implement interface Throwable in %s on line 2
+    /// ```
+    fn interface_gets_implemented(
+        &self,
+        decl: &ClassDecl,
+        name: &str,
+        interface: ClassId,
+    ) -> Option<String> {
+        let lowered = self.class_name(interface).to_ascii_lowercase();
+        let shown = self.class_name(interface);
+        let is_enum = decl.kind == ClassKind::Enum;
+        match lowered.as_str() {
+            "unitenum" | "backedenum" if !is_enum => Some(format!(
+                "Non-enum class {name} cannot implement interface {shown}"
+            )),
+            "backedenum" if decl.backing == php_unit::decl::EnumBacking::Pure => Some(format!(
+                "Non-backed enum {name} cannot implement interface {shown}"
+            )),
+            "throwable" => {
+                let mut root = decl.parent.clone();
+                let mut last = None;
+                for _ in 0..64 {
+                    let Some(parent) = root else {
+                        break;
+                    };
+                    last = Some(parent.0.to_ascii_lowercase());
+                    root = self
+                        .class_named(&parent.0)
+                        .and_then(|found| self.class_decl(found))
+                        .and_then(|found| found.parent.clone());
+                }
+                if matches!(last.as_deref(), Some(b"exception" | b"error")) {
+                    return None;
+                }
+                Some(if is_enum {
+                    format!("Enum {name} cannot implement interface {shown}")
+                } else {
+                    format!(
+                        "Class {name} cannot implement interface {shown}, extend Exception or Error instead"
+                    )
+                })
+            }
+            _ => None,
+        }
     }
 
     /// `zend_hash_find(EG(function_table), lcname)`: the native of that

@@ -22,6 +22,7 @@
 pub mod api;
 mod classes;
 mod engine;
+mod enums;
 mod exec;
 mod generator;
 mod handlers;

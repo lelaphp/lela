@@ -293,12 +293,18 @@ pub struct PropertyDecl {
     pub doc_comment: Option<Box<[u8]>>,
 }
 
-/// A class constant, or an enum case when the class is an enum.
+/// A class constant, or an enum's case: `is_case` is php's
+/// `ZEND_CLASS_CONST_IS_CASE`, which `case A;` sets and `const A = 1;`
+/// inside the same enum does not, so an enum's constants table holds
+/// both. A case's `value` is its backing value as written, `Null` for a
+/// pure enum's; the case itself is the one instance the engine makes of
+/// the enum for it (`zend_enum_new`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClassConstDecl {
     pub name: Name,
     pub visibility: Visibility,
     pub is_final: bool,
+    pub is_case: bool,
     pub ty: Option<Type>,
     pub value: ConstExpr,
     pub attributes: Vec<Attribute>,

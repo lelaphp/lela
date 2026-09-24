@@ -11,7 +11,7 @@
 //! eight lazy-object entries, each of which takes
 //! a `Closure` (#415).
 
-use php_ext::call::{eval_const_expr, instantiate, read_class_prop_silent, write_static_prop};
+use php_ext::call::{instantiate, read_class_prop_silent, write_static_prop};
 use php_ext::coerce::value_name;
 use php_ext::decl::{ClassKind, MethodDecl, Visibility};
 use php_ext::raising::{Thrown, arg_count_error, arg_type_error, throw};
@@ -810,7 +810,7 @@ pub(super) fn reflection_class_get_constants(req: &mut Request) -> Result<Value,
         if bits & filter == 0 {
             continue;
         }
-        let value = eval_const_expr(req, &decl.value, Some(scope))?;
+        let value = super::constant_value(req, &decl, scope)?;
         let key = PhpString::new(req, &decl.name.0)?;
         constants.set(req, Key::Str(key), value)?;
     }
@@ -955,16 +955,20 @@ pub(super) fn reflection_class_new_instance_args(req: &mut Request) -> Result<Va
 ///
 /// ```php
 /// var_dump((new ReflectionClass('JsonException'))->newInstanceWithoutConstructor() instanceof JsonException);
+/// enum Foo { case Bar; }
+/// try { (new ReflectionClass('Foo'))->newInstanceWithoutConstructor(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
 /// ```
 /// ```expect
 /// bool(true)
+/// Cannot instantiate enum Foo
 /// ```
 pub(super) fn reflection_class_new_instance_without_constructor(
     req: &mut Request,
 ) -> Result<Value, Thrown> {
     exactly_arguments(req, 0)?;
     let class = this_class(req)?;
-    instantiable(req, class)?;
+    // `object_init_ex`, whose own refusal of what cannot be instantiated
+    // is the `Error` `new` raises, not a `ReflectionException`.
     let object = new_object(req, class)?;
     Ok(object.as_value())
 }
