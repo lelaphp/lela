@@ -62,6 +62,7 @@ mod head;
 mod hrtime;
 mod html;
 mod http;
+mod image;
 mod ini;
 mod levenshtein;
 mod link;
@@ -260,6 +261,7 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
         pageinfo::natives(),
         syslog::natives(),
         mail::natives(),
+        image::natives(),
     ]
     .into_iter()
     .flatten()
@@ -279,6 +281,7 @@ fn file_constants() -> Vec<ConstDecl> {
         password::constants(),
         assert::constants(),
         syslog::constants(),
+        image::constants(),
     ]
     .into_iter()
     .flatten()
