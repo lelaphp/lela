@@ -24,11 +24,11 @@ const CURRENT_AS_SELF: i64 = 0x10;
 const CURRENT_MODE_MASK: i64 = 0xF0;
 const KEY_AS_PATHNAME: i64 = 0;
 const KEY_AS_FILENAME: i64 = 0x100;
-const FOLLOW_SYMLINKS: i64 = 0x200;
+const FOLLOW_SYMLINKS: i64 = 0x4000;
 const KEY_MODE_MASK: i64 = 0xF00;
 const SKIP_DOTS: i64 = 0x1000;
 const UNIX_PATHS: i64 = 0x2000;
-const OTHER_MODE_MASK: i64 = 0x3000;
+const OTHER_MODE_MASK: i64 = 0x7000;
 const DROP_NEW_LINE: i64 = 1;
 const READ_AHEAD: i64 = 2;
 const SKIP_EMPTY: i64 = 4;
@@ -74,6 +74,31 @@ pub(crate) struct Fs {
 pub(crate) struct Handlers;
 
 pub(crate) static HANDLERS: Handlers = Handlers;
+
+/// `spl_filesystem_object_check_handlers`, `SplFileObject`'s and
+/// `SplTempFileObject`'s: the same slots with `clone_obj` null, so the
+/// two are uncloneable as php's are.
+pub(crate) struct FileHandlers;
+
+pub(crate) static FILE_HANDLERS: FileHandlers = FileHandlers;
+
+/// The table a class of this file is reached through.
+///
+/// ```php
+/// $i = clone new SplFileInfo(__FILE__);
+/// echo get_class($i), "\n";
+/// try { clone new SplTempFileObject(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// SplFileInfo
+/// Trying to clone an uncloneable object of class SplTempFileObject
+/// ```
+pub(crate) fn handlers(decl: &php_ext::decl::ClassDecl) -> &'static dyn ObjectHandlers {
+    match decl.name.0.as_ref() {
+        b"SplFileObject" | b"SplTempFileObject" => &FILE_HANDLERS,
+        _ => &HANDLERS,
+    }
+}
 
 const STUB: &str = "
 class SplFileInfo implements Stringable {
@@ -131,10 +156,10 @@ class FilesystemIterator extends DirectoryIterator {
     public const int CURRENT_AS_SELF = 16;
     public const int KEY_MODE_MASK = 3840;
     public const int KEY_AS_PATHNAME = 0;
-    public const int FOLLOW_SYMLINKS = 512;
+    public const int FOLLOW_SYMLINKS = 16384;
     public const int KEY_AS_FILENAME = 256;
     public const int NEW_CURRENT_AND_KEY = 256;
-    public const int OTHER_MODE_MASK = 12288;
+    public const int OTHER_MODE_MASK = 28672;
     public const int SKIP_DOTS = 4096;
     public const int UNIX_PATHS = 8192;
     public function __construct(string $directory, int $flags = FilesystemIterator::KEY_AS_PATHNAME | FilesystemIterator::CURRENT_AS_FILEINFO | FilesystemIterator::SKIP_DOTS) {}
@@ -504,6 +529,16 @@ impl ObjectHandlers for Handlers {
     }
 }
 
+impl ObjectHandlers for FileHandlers {
+    fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        HANDLERS.free_obj(req, object);
+    }
+
+    fn clone_obj(&self) -> Option<CloneObj> {
+        None
+    }
+}
+
 /// `spl_filesystem_object_clone`: an info copied; a directory opened
 /// again and read to where it stood; a file refused, as php's
 /// `ZEND_UNREACHABLE` guards.
@@ -555,6 +590,7 @@ fn clone_fs(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
 /// var_dump($i->getPath(), $i->getFilename(), $i->getPathname(), $i->getExtension(), $i->getBasename('.gz'));
 /// $j = new SplFileInfo('plain');
 /// var_dump($j->getPath(), $j->getFilename(), (string) $j);
+/// try { new SplFileInfo("a\0b"); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
 /// ```
 /// ```expect
 /// string(4) "/a/b"
@@ -565,6 +601,7 @@ fn clone_fs(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
 /// string(0) ""
 /// string(5) "plain"
 /// string(5) "plain"
+/// SplFileInfo::__construct(): Argument #1 ($filename) must not contain any null bytes
 /// ```
 fn info_construct(req: &mut Request) -> Result<Value, Thrown> {
     crate::arity(req, 1, 1)?;
@@ -578,11 +615,7 @@ fn info_construct(req: &mut Request) -> Result<Value, Thrown> {
 fn path_argument(req: &mut Request, position: u32) -> Result<Vec<u8>, Thrown> {
     let path = crate::string(req, position)?.as_bytes().to_vec();
     if path.contains(&0) {
-        return Err(arg_value_error(
-            req,
-            position,
-            "must not contain any null bytes",
-        ));
+        return Err(arg_value_error(req, position, "not contain any null bytes"));
     }
     Ok(path)
 }
@@ -1416,7 +1449,16 @@ fn fs_current(req: &mut Request) -> Result<Value, Thrown> {
     create_info(req, &name, class)
 }
 
-/// `getFlags(): int`.
+/// `getFlags(): int`, the flags under `SPL_FILE_DIR_KEY_MODE_MASK`,
+/// `SPL_FILE_DIR_CURRENT_MODE_MASK` and `SPL_FILE_DIR_OTHERS_MASK`.
+///
+/// ```php
+/// $it = new FilesystemIterator(__DIR__, -1);
+/// printf("%08X %d %d\n", $it->getFlags(), FilesystemIterator::FOLLOW_SYMLINKS, FilesystemIterator::OTHER_MODE_MASK);
+/// ```
+/// ```expect
+/// 00007FF0 16384 28672
+/// ```
 fn fs_get_flags(req: &mut Request) -> Result<Value, Thrown> {
     crate::arity(req, 0, 0)?;
     let this = crate::this(req)?;
@@ -1644,6 +1686,7 @@ fn file_open(
 /// echo "\n";
 /// try { new SplFileObject(__DIR__ . '/nope.txt'); } catch (RuntimeException $e) { echo str_replace(__DIR__, '', $e->getMessage()), "\n"; }
 /// var_dump($o->getFilename(), str_replace(__DIR__, '', $o->getPath()), $o->getFlags());
+/// try { clone $o; } catch (Error $e) { echo $e->getMessage(), "\n"; }
 /// ```
 /// ```expect
 /// 0=a;1=b;
@@ -1651,6 +1694,7 @@ fn file_open(
 /// string(12) "spl-file.txt"
 /// string(0) ""
 /// int(7)
+/// Trying to clone an uncloneable object of class SplFileObject
 /// ```
 fn file_construct(req: &mut Request) -> Result<Value, Thrown> {
     crate::arity(req, 1, 4)?;

@@ -86,7 +86,8 @@ pub fn extension() -> Extension {
         builder = builder.class_payload::<array::SplArray>(decl, methods, &array::HANDLERS);
     }
     for (decl, methods) in directory::classes() {
-        builder = builder.class_payload::<directory::Fs>(decl, methods, &directory::HANDLERS);
+        let handlers = directory::handlers(&decl);
+        builder = builder.class_payload::<directory::Fs>(decl, methods, handlers);
     }
     for (decl, methods) in dllist::classes() {
         builder = builder.class_payload::<dllist::SplDllist>(decl, methods, &dllist::HANDLERS);
