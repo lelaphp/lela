@@ -332,6 +332,15 @@ impl Emit<'_> {
     /// ```expect exit=255
     /// Fatal error: '\self' is an invalid class name in %s on line 2
     /// ```
+    ///
+    /// A name written relative to the namespace is qualified all the same:
+    ///
+    /// ```php
+    /// function f(namespace\int $i) {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Type declaration 'int' must be unqualified in %s on line 2
+    /// ```
     fn single_typename(&mut self, id: NodeId<tree::NamedType>) -> Result<Type, CompileError> {
         let written = self.text(self.parsed.tree[id].name).to_vec();
         let lowered = written.to_ascii_lowercase();
@@ -348,14 +357,10 @@ impl Emit<'_> {
             b"callable" => return Ok(Type::Callable),
             _ => {}
         }
-        let fully_qualified = written.first() == Some(&b'\\');
-        let bare = if fully_qualified {
-            &lowered[1..]
-        } else {
-            &lowered[..]
-        };
+        let (qualified, prefix) = NameKind::of(&lowered);
+        let bare = &lowered[prefix..];
         if let Some(builtin) = builtin_type(bare) {
-            if fully_qualified {
+            if qualified != NameKind::Unqualified {
                 return Err(self.compile_error(format!(
                     "Type declaration '{}' must be unqualified",
                     String::from_utf8_lossy(bare)
@@ -363,6 +368,7 @@ impl Emit<'_> {
             }
             return Ok(builtin);
         }
+        let fully_qualified = qualified == NameKind::FullyQualified;
         if fully_qualified && class_fetch_type(&written[1..]) != FETCH_CLASS_DEFAULT {
             return Err(self.compile_error(format!(
                 "'\\{}' is an invalid class name",
@@ -479,6 +485,30 @@ impl Emit<'_> {
                 "Type {larger_text} is redundant as it is more restrictive than type {smaller_text}"
             )
         }))
+    }
+}
+
+/// How a name is written, php's `ZEND_NAME_NOT_FQ`, `ZEND_NAME_FQ` and
+/// `ZEND_NAME_RELATIVE`: as written, after a `\\`, or after
+/// `namespace\\`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum NameKind {
+    Unqualified,
+    FullyQualified,
+    Relative,
+}
+
+impl NameKind {
+    /// The kind of a lowered name, with the length of the prefix that
+    /// makes it so.
+    fn of(lowered: &[u8]) -> (NameKind, usize) {
+        if lowered.starts_with(b"\\") {
+            (NameKind::FullyQualified, 1)
+        } else if lowered.starts_with(b"namespace\\") {
+            (NameKind::Relative, b"namespace\\".len())
+        } else {
+            (NameKind::Unqualified, 0)
+        }
     }
 }
 
