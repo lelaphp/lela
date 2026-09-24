@@ -99,6 +99,13 @@ mod versioning;
 mod virtual_cwd;
 mod zpp;
 
+/// What `php_string.h`, `html.h` and `php_var.h` declare `PHPAPI` for the
+/// extensions that include them, ext/filter's sanitizers and ext/session's
+/// serializers (ADR-0004; design §4.10).
+pub use html::escape as escape_html_entities;
+pub use string::strip_tags_ex;
+pub use var::{Serializer, Unserializer};
+
 use php_ext::abi::{Callable, Dependency, DependencyKind, Extension, ExtensionBuilder};
 use php_ext::call::{call_array, call_named, fetch_constant};
 use php_ext::coerce::{callable_checked, coerce_param, is_type};

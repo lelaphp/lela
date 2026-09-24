@@ -744,9 +744,19 @@ fn row_of(table: &'static [(u32, Row)], cp: u32) -> Option<&'static Row> {
 /// `php_escape_html_entities_ex(old, oldlen, all, flags, hint_charset,
 /// double_encode, quiet)`: the escaped bytes, or the empty string for
 /// input ill-formed in its charset where neither `ENT_IGNORE` nor
-/// `ENT_SUBSTITUTE` says what to do.
+/// `ENT_SUBSTITUTE` says what to do. `PHPAPI` in `html.h`, which
+/// ext/filter's `FILTER_SANITIZE_FULL_SPECIAL_CHARS` calls with `all`
+/// set and `double_encode` off.
+///
+/// ```php
+/// var_dump(htmlentities("<é> &amp;", ENT_QUOTES, null, false), filter_var("<é> &amp; 'q'", FILTER_SANITIZE_FULL_SPECIAL_CHARS));
+/// ```
+/// ```expect
+/// string(22) "&lt;&eacute;&gt; &amp;"
+/// string(36) "&lt;&eacute;&gt; &amp; &#039;q&#039;"
+/// ```
 #[allow(clippy::too_many_lines)]
-fn escape(
+pub fn escape(
     req: &mut Request,
     old: &[u8],
     all: bool,

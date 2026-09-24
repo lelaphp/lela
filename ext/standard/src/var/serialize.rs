@@ -151,6 +151,48 @@ pub(super) fn serialize(req: &mut Request) -> Result<Value, Thrown> {
     Ok(Value::string(PhpString::new(req, &out)?))
 }
 
+/// `php_serialize_data_t` with `php_var_serialize`, `PHPAPI` in
+/// `php_var.h`: one var hash across several values, so a second sight of
+/// an object or a reference in a later value is the `r:n;` or `R:n;` of
+/// its first. What ext/session's encoders write every session variable
+/// through, and what `serialize()` is for one value.
+///
+/// ```php
+/// ob_start(); session_start(["save_path" => __DIR__, "use_cookies" => 0, "cache_limiter" => ""]);
+/// session_decode('a|O:8:"stdClass":0:{}b|r:1;c|a:1:{i:0;r:1;}'); echo session_encode(), "\n";
+/// session_write_close(); ob_end_flush();
+/// ```
+/// ```expect
+/// a|O:8:"stdClass":0:{}b|r:1;c|a:1:{i:0;r:1;}
+/// ```
+pub struct Serializer {
+    hash: VarHash,
+}
+
+impl Default for Serializer {
+    fn default() -> Serializer {
+        Serializer {
+            hash: VarHash {
+                n: 0,
+                seen: Vec::new(),
+            },
+        }
+    }
+}
+
+impl Serializer {
+    /// `php_var_serialize(buf, struc, &var_hash)`: `value` appended to
+    /// `out` as a root.
+    pub fn write(
+        &mut self,
+        req: &mut Request,
+        out: &mut Vec<u8>,
+        value: &Value,
+    ) -> Result<(), Thrown> {
+        write(req, out, value, &mut self.hash, false, true)
+    }
+}
+
 fn write_long(out: &mut Vec<u8>, n: i64) {
     out.extend_from_slice(b"i:");
     out.extend_from_slice(n.to_string().as_bytes());
