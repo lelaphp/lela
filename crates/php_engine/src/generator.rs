@@ -41,7 +41,8 @@ use crate::api::values::{Key, PhpArray, PhpObject, PhpString, TypeTag, Value};
 use crate::exec::{self, CallState, FrameState};
 
 /// Where a generator's frame is: php's `execute_data`, and
-/// `ZEND_GENERATOR_CURRENTLY_RUNNING` beside it in [`Generator::running`].
+/// `ZEND_GENERATOR_CURRENTLY_RUNNING` as the one state its frame is on
+/// a stack in, which is also the only one a resumption holds it in.
 #[derive(Default)]
 enum Execution {
     /// Off the stack, between two runs or before the first.
@@ -70,11 +71,12 @@ enum Delegated {
     Nothing,
     /// An array and the position `Z_FE_POS` holds.
     Array { array: Value, pos: u32 },
-    /// A `Traversable`'s iterator and php's `iter->index`.
-    Iterator { iterator: PhpObject, index: i64 },
+    /// A `Traversable`'s iterator and how many elements it has handed
+    /// out, php's `iter->index`, which moves it forward past the first.
+    Iterator { iterator: PhpObject, fetched: u64 },
 }
 
-// `running` to `destroying` are php's `ZEND_GENERATOR_*` flags and
+// `forced_close` to `destroying` are php's `ZEND_GENERATOR_*` flags and
 // `IS_OBJ_DESTRUCTOR_CALLED`, each one fact.
 #[allow(clippy::struct_excessive_bools)]
 /// `zend_generator`'s payload: the frame, the current value and key,
@@ -100,7 +102,6 @@ pub(crate) struct Generator {
     /// `node.ptr`: the leaf a root caches, or the root a leaf does; no
     /// owner, and which of the two it is is whether `parent` is set.
     link: Option<PhpObject>,
-    running: bool,
     forced_close: bool,
     at_first_yield: bool,
     do_init: bool,
@@ -125,7 +126,6 @@ impl Default for Generator {
             parent: None,
             children: Vec::new(),
             link: None,
-            running: false,
             forced_close: false,
             at_first_yield: false,
             do_init: false,
@@ -369,6 +369,15 @@ fn read<R>(req: &Request, object: PhpObject, f: impl FnOnce(&Generator) -> R) ->
     object.native::<Generator>(req).map(f)
 }
 
+/// `ZEND_GENERATOR_CURRENTLY_RUNNING`: a resumption holds the frame on
+/// a stack.
+fn is_running(req: &Request, object: PhpObject) -> bool {
+    read(req, object, |generator| {
+        matches!(generator.execution, Execution::Running)
+    })
+    .unwrap_or(false)
+}
+
 /// `generator->execute_data != NULL`: suspended or running.
 fn has_frame(req: &Request, object: PhpObject) -> bool {
     read(req, object, |generator| {
@@ -526,7 +535,7 @@ fn update_current(req: &mut Request, generator: PhpObject) -> PhpObject {
             if let Some(thrown) = thrown {
                 req.leave_pending(&thrown);
             }
-            let old_running = read(req, old_root, |g| g.running).unwrap_or(false);
+            let old_running = is_running(req, old_root);
             if !old_running {
                 with(req, root, |g| g.parent = None);
                 req.release(root_parent.as_value());
@@ -872,7 +881,10 @@ pub(crate) fn yield_from(
         return Err(thrown);
     }
     with(req, generator, |g| {
-        g.values = Delegated::Iterator { iterator, index: 0 };
+        g.values = Delegated::Iterator {
+            iterator,
+            fetched: 0,
+        };
         g.send_target = None;
     });
     Ok(From::Delegating)
@@ -917,11 +929,11 @@ fn next_delegated(req: &mut Request, generator: PhpObject) -> bool {
             }
             true
         }
-        Delegated::Iterator { iterator, index } => {
+        Delegated::Iterator { iterator, fetched } => {
             let spent = |req: &mut Request| {
                 req.release(iterator.as_value());
             };
-            if index > 0
+            if fetched > 0
                 && let Err(thrown) = crate::iterate::move_forward(req, iterator)
             {
                 spent(req);
@@ -948,6 +960,7 @@ fn next_delegated(req: &mut Request, generator: PhpObject) -> bool {
                     return false;
                 }
             };
+            let index = i64::try_from(fetched).unwrap_or(i64::MAX);
             let key = match crate::iterate::key(req, iterator, index) {
                 Ok(key) => key,
                 Err(thrown) => {
@@ -960,7 +973,7 @@ fn next_delegated(req: &mut Request, generator: PhpObject) -> bool {
             let old = with(req, generator, |g| {
                 g.values = Delegated::Iterator {
                     iterator,
-                    index: index.saturating_add(1),
+                    fetched: fetched.saturating_add(1),
                 };
                 (
                     std::mem::replace(&mut g.value, value),
@@ -999,7 +1012,7 @@ pub(crate) fn resume(req: &mut Request, orig: PhpObject) -> Result<(), Fatal> {
         return Ok(());
     }
     loop {
-        if read(req, generator, |g| g.running).unwrap_or(false) {
+        if is_running(req, generator) {
             let thrown = throw(req, "Error", "Cannot resume an already running generator");
             req.leave_pending(&thrown);
             return Ok(());
@@ -1011,7 +1024,6 @@ pub(crate) fn resume(req: &mut Request, orig: PhpObject) -> Result<(), Fatal> {
             return Ok(());
         }
         with(req, orig, |g| g.at_first_yield = false);
-        with(req, generator, |g| g.running = true);
         // The generators between the one resumed and the one that runs
         // stand below it on the stack while it runs, so a trace reads the
         // whole delegation, which php's `execute_fake` placeholder
@@ -1022,7 +1034,6 @@ pub(crate) fn resume(req: &mut Request, orig: PhpObject) -> Result<(), Fatal> {
         }
         let standing = req.vm().frames().len();
         let Some(frame) = push(req, generator) else {
-            with(req, generator, |g| g.running = false);
             unwind_chain(req, &chain);
             return Ok(());
         };
@@ -1032,7 +1043,6 @@ pub(crate) fn resume(req: &mut Request, orig: PhpObject) -> Result<(), Fatal> {
             suspend(req, generator)?;
             unwind_chain(req, &chain);
             with(req, orig, |g| g.do_init = false);
-            with(req, generator, |g| g.running = false);
             return Ok(());
         }
         if !req.is_pending() {
@@ -1040,7 +1050,6 @@ pub(crate) fn resume(req: &mut Request, orig: PhpObject) -> Result<(), Fatal> {
         }
         let run = req.resume_loop();
         let served = run(req, frame);
-        with(req, generator, |g| g.running = false);
         if req.vm().frames().len() > standing {
             // The body left the frame standing: a throwable it did not
             // catch, which the unwinder has already cleaned the frame
@@ -1663,8 +1672,9 @@ fn send(req: &mut Request) -> Result<Value, Thrown> {
         return Ok(Value::null());
     }
     let root = current(req, this);
-    let target = read(req, root, |g| {
-        (!g.running).then_some(g.send_target).flatten()
+    let target = read(req, root, |g| match g.execution {
+        Execution::Running => None,
+        _ => g.send_target,
     })
     .flatten();
     if let Some(slot) = target {
@@ -1744,7 +1754,7 @@ fn throw_into(req: &mut Request) -> Result<Value, Thrown> {
         return Err(Thrown::of(Some(throwable)));
     }
     let root = current(req, this);
-    if read(req, root, |g| g.running).unwrap_or(false) {
+    if is_running(req, root) {
         req.release(throwable.as_value());
         return Err(throw(
             req,

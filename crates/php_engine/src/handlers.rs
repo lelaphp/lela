@@ -9905,9 +9905,9 @@ pub(crate) fn fe_reset_r<T: Tier>(
 /// `FE_RESET_R` over an object whose class has a `get_iterator`: the
 /// iterator asked for ([`crate::iterate::get_iterator`]), rewound, and
 /// asked whether it is empty, which jumps past the loop as an empty
-/// array does; the `VAR` holds the iterator with php's `index` of -1,
-/// all ones in `Z_FE_POS`, so the first `FE_FETCH_R` reads without
-/// moving forward. The operand is freed after (`FREE_OP1`).
+/// array does; the `VAR` holds the iterator, and `Z_FE_POS` counts the
+/// elements it has handed out, none yet, so the first `FE_FETCH_R`
+/// reads without moving forward. The operand is freed after (`FREE_OP1`).
 ///
 /// ```php
 /// function g() { echo "[start]"; yield 'a' => 1; yield 'b' => 2; }
@@ -9961,7 +9961,7 @@ fn fe_reset_iterator(
     let previous = req.set_slot(frame, slot, iterator.as_value());
     req.release(previous);
     if let Some(cell) = req.slot_ptr(frame, slot) {
-        cell.set_fe_pos(u32::MAX);
+        cell.set_fe_pos(0);
     }
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
     if empty {
@@ -9972,8 +9972,9 @@ fn fe_reset_iterator(
 }
 
 /// `zend_fe_fetch_object_helper`'s iterator arm (`Z/Zend/zend_vm_def.h:7125`):
-/// php's `++iter->index > 0` moves the iterator forward past the first
-/// fetch, the loop ends where it is no longer valid, and the value and,
+/// the iterator is moved forward past the first fetch, which php's
+/// `++iter->index > 0` tests and the count of fetches in `Z_FE_POS` does
+/// here, the loop ends where it is no longer valid, and the value and,
 /// where the opline reads one, the key are the iterator's; the value is
 /// assigned to the CV `op2` names as an array element's is.
 ///
@@ -9991,13 +9992,12 @@ fn fe_fetch_iterator(
     code: &OpArray,
     op: &Opline,
     iterator: PhpObject,
-    index: u32,
+    fetched: u32,
     by_ref: bool,
 ) -> Edge {
     let slot = exec::temporary_slot(code, op.op1);
-    let index = index.wrapping_add(1);
     if let Some(cell) = req.slot_ptr(frame, slot) {
-        cell.set_fe_pos(index);
+        cell.set_fe_pos(fetched.saturating_add(1));
     }
     let undef_result = |req: &mut Request| {
         if op.out_type != OperandKind::Unused {
@@ -10005,7 +10005,7 @@ fn fe_fetch_iterator(
             req.release(garbage);
         }
     };
-    if index != 0 {
+    if fetched > 0 {
         if let Err(thrown) = crate::iterate::move_forward(req, iterator) {
             undef_result(req);
             return threw(req, frame, &thrown);
@@ -10035,7 +10035,7 @@ fn fe_fetch_iterator(
         }
     };
     if op.out_type != OperandKind::Unused {
-        let key = match crate::iterate::key(req, iterator, i64::from(index)) {
+        let key = match crate::iterate::key(req, iterator, i64::from(fetched)) {
             Ok(key) => key,
             Err(thrown) => {
                 req.release(value);
