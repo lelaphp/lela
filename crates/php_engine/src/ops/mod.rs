@@ -2068,6 +2068,149 @@ pub(crate) fn concat(req: &mut Request, left: &Value, right: &Value) -> Result<V
     Ok(Value::string(joined?))
 }
 
+/// `concat_function` where `result` is `op1` (`Z/Zend/zend_operators.c:2125`),
+/// `$a .= $b`: the value is written back where `left` came from, so the
+/// left string is grown where it stands when the place held its one
+/// owner, and copied only when it is interned or shared
+/// ([`Request::string_append`], `zend_string_extend`). A loop of `.=`
+/// is then linear in what it appends. `ASSIGN_OP` over a CV,
+/// `ASSIGN_DIM_OP` over an array's element, `ASSIGN_OBJ_OP` over a
+/// declared property and `ASSIGN_STATIC_PROP_OP` call it where php's
+/// `zend_binary_op(var_ptr, var_ptr, value)` stands; a property served
+/// by `__get` and `__set` or an `ArrayAccess` offset is read and written
+/// back, as php's is, and takes [`concat`].
+///
+/// php converts both sides first, holding one more owner of the left
+/// string while a `__toString` on the right is served, and only then
+/// destroys what the place holds (`i_zval_ptr_dtor(result)`) and leaves
+/// it `null` until the joined string lands; `vacate` is that, the caller's
+/// place given up, called once both sides are strings and never on an
+/// `Err`, which leaves the place as it stood. A right side that is
+/// already a string, beside a left one, is read where it stands and
+/// takes no owner, as php's `Z_STR_P(op2)`, so `$s .= $s` grows `$s` in
+/// place too. The `Ok` is the value for the place, with one owner.
+///
+/// A string two variables hold is copied, and the other keeps its
+/// bytes; a reference's cell is the one place, so both names read the
+/// append:
+///
+/// ```php
+/// $a = str_repeat('ab', 2); $b = $a; $a .= 'c'; $c = 'lit'; $c .= $c;
+/// $r = &$c; $c .= '!'; var_dump($a, $b, $c, $r, 'lit');
+/// ```
+/// ```expect
+/// string(5) "ababc"
+/// string(4) "abab"
+/// string(7) "litlit!"
+/// string(7) "litlit!"
+/// string(3) "lit"
+/// ```
+///
+/// The right side is converted while the variable still holds the left
+/// string, read here through the reference a class's property holds, and
+/// a value that is no string is converted before it is grown:
+///
+/// ```php
+/// class T { static $r; function __toString(): string { echo "[", T::$r, "]"; return "t"; } }
+/// $s = "ab"; T::$r = &$s; $s .= new T; $n = 12; $n .= 3; var_dump($s, $n);
+/// ```
+/// ```expect
+/// [ab]string(3) "abt"
+/// string(3) "123"
+/// ```
+///
+/// What the appends take is what php's `erealloc` takes: the slot grows
+/// with its bin, then a `run` of pages with the pages after it, and the
+/// peak is where the larger of the two footprints put it, not both.
+///
+/// ```php
+/// $s = str_repeat('x', 100); memory_reset_peak_usage(); $m = memory_get_usage();
+/// for ($i = 0; $i < 1000; $i++) { $s .= 'abcdefghij'; }
+/// var_dump(strlen($s), memory_get_usage() - $m, memory_get_peak_usage() - $m);
+/// ```
+/// ```expect
+/// int(10100)
+/// int(12128)
+/// int(12128)
+/// ```
+///
+/// A declared property, a typed one over a string, a class's property
+/// and an array's element are each such a place, and each grows where it
+/// stands, the peak not moving past what the four already held; the
+/// copy an array's separation made, the string read out of a property
+/// and the class's own string appended to it keep their bytes:
+///
+/// ```php
+/// class C { public $p; public string $q = ''; public static $s; }
+/// $o = new C; $o->p = str_repeat('a', 5000); $o->q = str_repeat('a', 5000); C::$s = str_repeat('a', 5000); $a = ['k' => str_repeat('a', 5000)];
+/// $t = str_repeat('b', 2000); memory_reset_peak_usage(); $m = memory_get_usage();
+/// $o->p .= $t; $o->q .= $t; C::$s .= $t; $a['k'] .= $t;
+/// var_dump(memory_get_peak_usage() - $m, strlen($o->p), strlen($o->q), strlen(C::$s), strlen($a['k']));
+/// $b = $a; $a['k'] .= '!'; $p = $o->p; $o->p .= '?'; $s = C::$s; C::$s .= $s;
+/// var_dump(strlen($b['k']), strlen($a['k']), strlen($p), strlen($o->p), strlen($s), strlen(C::$s));
+/// ```
+/// ```expect
+/// int(0)
+/// int(7000)
+/// int(7000)
+/// int(7000)
+/// int(7000)
+/// int(7000)
+/// int(7001)
+/// int(7000)
+/// int(7001)
+/// int(7000)
+/// int(14000)
+/// ```
+pub(crate) fn concat_assign(
+    req: &mut Request,
+    left: &Value,
+    right: &Value,
+    vacate: impl FnOnce(&mut Request),
+) -> Result<Value, Thrown> {
+    // Only a place that holds a string is given up without running
+    // anything, so the right side is read unowned only then: what a
+    // destructor `vacate` served could free is held.
+    let quiet = left.deref().as_php_string().is_some();
+    let a = to_string(req, left)?;
+    let right = right.deref();
+    let (b, owned) = match right.as_php_string() {
+        Some(b) if quiet => (*b, false),
+        _ => match to_string(req, &right) {
+            Ok(b) => (b, true),
+            Err(thrown) => {
+                req.release(Value::string(a));
+                return Err(thrown);
+            }
+        },
+    };
+    if a.len() > ZSTR_MAX_LEN - b.len() {
+        req.release(Value::string(a));
+        if owned {
+            req.release(Value::string(b));
+        }
+        return Err(throw(req, "Error", "String size overflow"));
+    }
+    vacate(req);
+    // An empty side hands the other side on, `ZVAL_STR_COPY` of it.
+    if a.is_empty() {
+        if !owned {
+            req.addref(&Value::string(b));
+        }
+        req.release(Value::string(a));
+        return Ok(Value::string(b));
+    }
+    let joined = if b.is_empty() {
+        Ok(a)
+    } else {
+        req.string_append(a, b)
+    };
+    if owned {
+        req.release(Value::string(b));
+    }
+    Ok(Value::string(joined?))
+}
+
 /// `zend_compare` (`Z/Zend/zend_operators.c:2312`), the one ordering
 /// every comparison opcode reads: [`php_heap::compare`] over the scalar
 /// pairs, which the compiler folds `<` through as well, and here the

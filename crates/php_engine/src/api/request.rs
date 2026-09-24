@@ -11290,6 +11290,19 @@ impl Request {
         self.allocated(allocated)
     }
 
+    /// `s` with `tail`'s bytes after its own, `zend_string_extend` and
+    /// the `memcpy` after it ([`php_heap::Heap::string_append`]): one
+    /// owner of `s` handed over, one of the longer string handed back, grown
+    /// where it stands when that owner was the only one.
+    pub(crate) fn string_append(
+        &mut self,
+        s: PhpString,
+        tail: PhpString,
+    ) -> Result<PhpString, Thrown> {
+        let allocated = self.heap.string_append(s.heap(), tail.heap());
+        self.allocated(allocated)
+    }
+
     /// What the heap answered, as the native sees it: the string, or the
     /// memory limit as php's fatal, which `zend_mm` raises where the
     /// allocation was asked for and which ends the request from there.

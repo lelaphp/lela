@@ -258,6 +258,18 @@ impl Heap {
         Ok(unsafe { Str::init_with(at, len, 0, fill) })
     }
 
+    /// `s` with the bytes of `tail` after its own, php's
+    /// `zend_string_extend` and the `memcpy` after it: the caller hands
+    /// one owner of `s` over and holds one of the string handed back.
+    /// Where that owner is the only one and `s` is the request's, the
+    /// allocation is grown where it stands as `erealloc` grows it, so a
+    /// loop of `.=` is linear; an interned or shared `s` is copied into
+    /// a new string and left to its other holders as it was. `tail` is
+    /// read and keeps its owners, and may be `s`.
+    pub fn string_append(&mut self, s: Str, tail: Str) -> Result<Str, Fatal> {
+        Str::append(&mut self.mm, s, tail)
+    }
+
     /// `zend_string_safe_alloc(n, m, l, 0)`: a string of `n * m + l`
     /// bytes whose allocation is that product plus the aligned header of
     /// a string of `l` bytes, which is not the allocation of
@@ -730,6 +742,50 @@ mod tests {
         assert_eq!(s.refcount(), 1);
         Heap::release(&mut nothing, z);
         assert_eq!(nothing.heap.memory_usage(false), start);
+    }
+
+    /// `zend_string_extend` over a string of one owner grows it where it
+    /// stands while the bin holds it, and over a shared one copies it and
+    /// leaves the other holder's bytes as they were.
+    #[test]
+    fn an_append_extends_the_one_owner_s_string_and_copies_a_shared_one() {
+        let _alone = alone();
+        let mut nothing = Recorder { heap: Heap::new() };
+        let pair = (nothing.heap.string(b"abc"), nothing.heap.string(b"de"));
+        assert!(
+            pair.0.is_ok() && pair.1.is_ok(),
+            "the heap would not allocate five bytes"
+        );
+        let (Ok(s), Ok(tail)) = pair else { return };
+        let start = nothing.heap.memory_usage(false);
+        // 24 + 3 + 1 and 24 + 5 + 1 both round into the 32-byte bin.
+        let grown = nothing.heap.string_append(s, tail);
+        assert!(grown.is_ok(), "the append was refused");
+        let Ok(grown) = grown else { return };
+        assert!(
+            grown.is_same(s),
+            "a string with one owner moved within its bin"
+        );
+        assert_eq!(grown.bytes(), b"abcde");
+        assert_eq!(nothing.heap.memory_usage(false), start);
+        // Ten bytes are the 40-byte bin: the slot moves up, once.
+        let twice = nothing.heap.string_append(grown, grown);
+        assert!(twice.is_ok(), "the append was refused");
+        let Ok(twice) = twice else { return };
+        assert_eq!(twice.bytes(), b"abcdeabcde");
+        assert_eq!(nothing.heap.memory_usage(false), start - 32 + 40);
+        twice.addref();
+        let copy = nothing.heap.string_append(twice, tail);
+        assert!(copy.is_ok(), "the append was refused");
+        let Ok(copy) = copy else { return };
+        assert!(!copy.is_same(twice), "a shared string was written into");
+        assert_eq!(twice.bytes(), b"abcdeabcde");
+        assert_eq!(twice.refcount(), 1);
+        assert_eq!(copy.bytes(), b"abcdeabcdede");
+        for z in [twice, copy, tail] {
+            Heap::release(&mut nothing, Zval::string(z));
+        }
+        assert_eq!(nothing.heap.memory_usage(false), start - 32 - 32);
     }
 
     /// The limit is met on chunk growth, with php's own text.

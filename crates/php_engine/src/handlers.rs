@@ -6625,7 +6625,14 @@ pub(crate) fn assign_op<T: Tier>(
         let previous = req.set_slot(frame, op.op1, Value::null());
         req.release(previous);
     }
-    let computed = kernel(req, &held, &value);
+    let computed = if grows_in_place(req, op.extended_value, &held) {
+        crate::ops::concat_assign(req, &held, &value, |req| {
+            let at = req.slot_ptr(frame, op.op1);
+            vacate(req, at);
+        })
+    } else {
+        kernel(req, &held, &value)
+    };
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
     let stepped = match computed {
         Ok(stepped) => stepped,
@@ -7423,6 +7430,48 @@ fn binary_op_of(extended_value: u32) -> Option<BinaryKernel> {
     })
 }
 
+/// Whether a compound assignment over `held` is `concat_function` with
+/// its own left operand as the place written,
+/// [`crate::ops::concat_assign`]: the operator is `.`, and the place is
+/// not a cell carrying types over a value that is no string, which php
+/// hands to `zend_binary_op` and the check of each type instead
+/// (`zend_binary_assign_op_typed_ref`, `Z/Zend/zend_execute.c:1677-1682`).
+fn grows_in_place(req: &Request, extended_value: u32, held: &Value) -> bool {
+    if !is_concat(extended_value) {
+        return false;
+    }
+    match held.as_php_ref() {
+        Some(cell) => {
+            req.ref_type_sources(cell.heap()).is_empty() || cell.get().as_php_string().is_some()
+        }
+        None => true,
+    }
+}
+
+/// Whether `extended_value` names `.`, the operator of `.=`.
+fn is_concat(extended_value: u32) -> bool {
+    u8::try_from(extended_value)
+        .ok()
+        .and_then(Opcode::from_u8)
+        .is_some_and(|opcode| opcode == Opcode::Concat)
+}
+
+/// `i_zval_ptr_dtor(result); ZVAL_NULL(result)` of `concat_function`
+/// over a place, read again where it stands now: a reference there is
+/// followed to its cell, `null` is written, and the owner the place held
+/// is given up.
+fn vacate(req: &mut Request, at: Option<php_heap::ZvalRef>) {
+    let Some(mut at) = at else {
+        return;
+    };
+    if let Some(cell) = exec::value_of(at.read()).as_php_ref() {
+        at = cell.heap().val_ref();
+    }
+    let held = exec::value_of(at.read());
+    at.write(Value::null().to_zval());
+    req.release(held);
+}
+
 /// `ZEND_ASSIGN_STATIC_PROP_OP` (`Z/Zend/zend_vm_def.h:2714`),
 /// `C::$p op= v`, two oplines: this one names the property in `op1`,
 /// the class's constant pair in `op2` and the operator in
@@ -7556,8 +7605,28 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
             return threw(req, frame, &thrown);
         }
     };
-    let computed = kernel(req, &held, &value);
-    req.release(held);
+    // php's `.=` over a string grows it where the slot holds it
+    // (`zend_binary_assign_op_typed_prop`'s first arm, and
+    // `zend_binary_op` over an untyped slot); `vacate` gives up the
+    // read's owner and the slot's, so the append holds the only one.
+    let in_place = is_concat(op.extended_value)
+        && (held.as_php_string().is_some()
+            || ty.is_none()
+                && req
+                    .static_slot_cell(declaring, &name)
+                    .is_none_or(|cell| req.ref_type_sources(cell.heap()).is_empty()));
+    let computed = if in_place {
+        crate::ops::concat_assign(req, &held, &value, |req| {
+            req.release(held);
+            req.store_static_property(declaring, &name, Value::null());
+        })
+    } else {
+        kernel(req, &held, &value)
+    };
+    // An `Err` never vacated, so the read's owner is still ours then.
+    if !in_place || computed.is_err() {
+        req.release(held);
+    }
     req.release(value);
     let stepped = match computed {
         Ok(stepped) => stepped,
@@ -8791,8 +8860,13 @@ fn stepped_entry(
 ) -> Result<(), Thrown> {
     let Compound { op, data, kernel } = step;
     let value = exec::operand(req, frame, code, data.op1_type, data.op1);
-    let held = exec::value_of(entry.read()).deref();
-    let computed = kernel(req, &held, &value);
+    let raw = exec::value_of(entry.read());
+    let held = raw.deref();
+    let computed = if grows_in_place(req, op.extended_value, &raw) {
+        crate::ops::concat_assign(req, &held, &value, |req| vacate(req, Some(entry)))
+    } else {
+        kernel(req, &held, &value)
+    };
     exec::free_operand(req, frame, code, data.op1_type, data.op1);
     let stepped = computed?;
     let strict = req.caller_strict_types(frame);
@@ -8958,7 +9032,7 @@ fn step_property(
     object: PhpObject,
     name: &Value,
 ) -> Result<Result<(), Thrown>, Fatal> {
-    let Compound { op, data, kernel } = step;
+    let Compound { op, data, .. } = step;
     let bytes = name.as_str_bytes().unwrap_or_default().to_vec();
     // `zend_std_get_property_ptr_ptr`, whose silence is
     // `ce->__get != NULL`: a class with a `__get` hands out no place
@@ -9028,10 +9102,7 @@ fn step_property(
         crate::api::raising::warning(req, &format!("Undefined property: {class}::${shown}"));
     }
     let value = exec::operand(req, frame, code, data.op1_type, data.op1);
-    let held = exec::value_of(object.heap().slot(slot))
-        .deref()
-        .undef_as_null();
-    let computed = kernel(req, &held, &value);
+    let computed = slot_step(req, step, object, (slot, typed), &value);
     exec::free_operand(req, frame, code, data.op1_type, data.op1);
     let stepped = match computed {
         Ok(stepped) => stepped,
@@ -9165,6 +9236,32 @@ fn dynamic_property_step(
         return Err(thrown);
     }
     overloaded_property_step(req, frame, code, step, object, name)
+}
+
+/// The kernel of a compound assignment over what a declared slot holds
+/// and `value`: `.=` grows the string in the slot where it stands
+/// ([`crate::ops::concat_assign`]), over a typed slot only where it holds
+/// a string, the first arm of `zend_binary_assign_op_typed_prop`; every
+/// other operator and value is the step's kernel, whose value the caller
+/// writes back.
+fn slot_step(
+    req: &mut Request,
+    step: Compound<'_>,
+    object: PhpObject,
+    (slot, typed): (u32, bool),
+    value: &Value,
+) -> Result<Value, Thrown> {
+    let raw = exec::value_of(object.heap().slot(slot));
+    let held = raw.deref().undef_as_null();
+    if grows_in_place(req, step.op.extended_value, &raw)
+        && (!typed || held.as_php_string().is_some())
+    {
+        return crate::ops::concat_assign(req, &held, value, |req| {
+            let at = object.heap().slot_ref(slot);
+            vacate(req, at);
+        });
+    }
+    (step.kernel)(req, &held, value)
 }
 
 /// `zend_assign_op_overloaded_property` (`Z/Zend/zend_execute.c:2429`),
@@ -11482,13 +11579,74 @@ pub(crate) fn sr<T: Tier>(req: &mut Request, frame: FrameRef, code: &OpArray, op
     binary(req, frame, code, op, crate::ops::shift_right)
 }
 
-/// `ZEND_CONCAT`: [`crate::ops::concat`], the same way.
+/// `ZEND_CONCAT` (`Z/Zend/zend_vm_def.h:374`): [`crate::ops::concat`],
+/// the same way, but for php's own arm for a left temporary
+/// ([`concat_into`]), which grows the left string where it stands.
+///
+/// The string `str_repeat` returned is the temporary's alone and grows
+/// into the `run` the joined string needs, the old slot given back as
+/// it moves, so the peak moves by the joined string alone and not by
+/// the two standing together; a string a variable holds is copied into
+/// a new one beside it:
+///
+/// ```php
+/// $a = str_repeat('a', 5000); memory_reset_peak_usage(); $m = memory_get_usage();
+/// $b = str_repeat('b', 3000) . $a; $p = memory_get_peak_usage() - $m;
+/// memory_reset_peak_usage(); $m = memory_get_usage();
+/// $c = $b . '!'; $q = memory_get_peak_usage() - $m;
+/// var_dump(strlen($b), $c === str_repeat('b', 3000) . $a . '!', $p, $q, $b[0], $b[7999]);
+/// ```
+/// ```expect
+/// int(8000)
+/// bool(true)
+/// int(8192)
+/// int(8192)
+/// string(1) "b"
+/// string(1) "a"
+/// ```
 pub(crate) fn concat<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    concat_into(req, frame, code, op)
+}
+
+/// The body `CONCAT` and `FAST_CONCAT` share: php's arm for a left
+/// operand that is a temporary, when both sides are strings and neither
+/// is empty (`Z/Zend/zend_vm_def.h:407-418`, `:3317-3328`), hands the
+/// temporary's owner to [`Request::string_append`], which grows the
+/// string where it stands when that owner is its only one and copies it
+/// otherwise, as `zend_string_extend` and php's alloc arm beside it do;
+/// every other pair is [`binary`] over [`crate::ops::concat`].
+fn concat_into(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
+    if matches!(op.op1_type, OperandKind::Tmp | OperandKind::Var) {
+        let left = exec::operand(req, frame, code, op.op1_type, op.op1);
+        let right = exec::operand(req, frame, code, op.op2_type, op.op2);
+        if let (Some(&a), Some(&b)) = (left.as_php_string(), right.as_php_string())
+            && !a.is_empty()
+            && !b.is_empty()
+        {
+            // The temporary's owner is the append's now, and nothing
+            // releases it again.
+            req.take_slot(frame, exec::temporary_slot(code, op.op1));
+            let joined = req.string_append(a, b);
+            exec::free_operand(req, frame, code, op.op2_type, op.op2);
+            return match joined {
+                Ok(joined) => {
+                    let slot = exec::temporary_slot(code, op.out);
+                    let previous = req.set_slot(frame, slot, Value::string(joined));
+                    req.release(previous);
+                    Ok(advance(req, frame))
+                }
+                Err(thrown) => {
+                    req.leave_pending(&thrown);
+                    Ok(Stepped::Threw(frame))
+                }
+            };
+        }
+    }
     binary(req, frame, code, op, crate::ops::concat)
 }
 
@@ -11500,7 +11658,9 @@ pub(crate) fn concat<T: Tier>(
 /// which is the kernel's first arm and its rest: each non-string piece
 /// converted where php converts it, the `Array to string conversion`
 /// warning and an object's `__toString` raised in operand order, and
-/// the operands freed after the kernel (`FREE_OP1`, `FREE_OP2`).
+/// the operands freed after the kernel (`FREE_OP1`, `FREE_OP2`). A left
+/// piece that is a temporary string grows where it stands, as
+/// [`concat`]'s does ([`concat_into`]).
 ///
 /// ```php
 /// $a = 1; echo "x$a", "$a";
@@ -11530,7 +11690,7 @@ pub(crate) fn fast_concat<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    binary(req, frame, code, op, crate::ops::concat)
+    concat_into(req, frame, code, op)
 }
 
 /// `ZEND_ROPE_INIT` (`Z/Zend/zend_vm_def.h:3410`): the first piece of
