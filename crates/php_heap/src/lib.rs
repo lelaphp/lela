@@ -198,6 +198,32 @@ impl Heap {
         self.mm.set_limit(limit);
     }
 
+    /// The fatal the heap raised when it refused an allocation is
+    /// rendered: php's `heap->overflow = 0` in `zend_mm_safe_error`. From
+    /// that refusal until here the limit refuses nothing, so the
+    /// rendering, a backtrace of every frame of a recursion the limit
+    /// stopped among it, is not refused by the limit it reports; from
+    /// here the limit holds again, for the shutdown functions and the
+    /// destructors after.
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '8M');
+    /// ini_set('fatal_error_backtraces', '1');
+    /// function f() { f(); }
+    /// f();
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 262144 bytes) in %s on line 4
+    /// Stack trace:
+    /// #0 %s(4): f()
+    /// %a
+    /// #%d %s(5): f()
+    /// #%d {main}
+    /// ```
+    pub fn overflow_rendered(&mut self) {
+        self.mm.overflow_rendered();
+    }
+
     /// A request-scoped string of `bytes`, php's `zend_string_init`:
     /// one allocation out of this heap, one owner, and the bytes as
     /// given.
@@ -758,6 +784,9 @@ mod tests {
                     .to_string()
             )
         );
+        // The fatal is rendered, as the engine says after each, so the
+        // limit holds for the next ask.
+        heap.overflow_rendered();
         // A 1760-byte string is the 1792-byte bin, a `run` of seven
         // pages, which neither chunk has free. Nothing is on a free
         // list, so the sweep collects nothing and the limit stands.
@@ -768,6 +797,7 @@ mod tests {
                     .to_string()
             ))
         );
+        heap.overflow_rendered();
         // Every slot back on its bin's free list. The pages are still
         // the request's until the sweep walks them, so the same
         // allocation still finds no seven free pages anywhere.
@@ -869,6 +899,38 @@ mod tests {
             hooks.heap.take_freed_use(),
             Some(Fatal::Error(message)) if message.starts_with("InternalError: an addref of the block at ")
         ));
+    }
+
+    /// php's `heap->overflow`: the allocation the limit refuses raises
+    /// the fatal and lifts the limit, so what renders the fatal is not
+    /// refused, and the limit holds again once the engine says the
+    /// fatal is rendered.
+    #[test]
+    fn the_limit_is_lifted_while_its_fatal_is_rendered() {
+        let _alone = alone();
+        let mut heap = Heap::new();
+        heap.set_memory_limit(4 * 1024 * 1024);
+        let bytes = vec![b'x'; 1024 * 1024];
+        let mut held = Vec::new();
+        let refused = loop {
+            match heap.string(&bytes) {
+                Ok(s) => held.push(s),
+                Err(fatal) => break fatal,
+            }
+        };
+        assert!(
+            matches!(&refused, Fatal::Error(m) if m.starts_with("Allowed memory size of 4194304 bytes exhausted"))
+        );
+        let rendering = heap.string(&bytes);
+        assert!(rendering.is_ok(), "the rendering is not refused");
+        assert!(heap.memory_usage(true) > 4 * 1024 * 1024);
+        held.extend(rendering);
+        heap.overflow_rendered();
+        let after = (0..4).map(|_| heap.string(&bytes)).find_map(Result::err);
+        assert!(after.is_some(), "the limit holds again");
+        for s in held {
+            heap.release_string(s);
+        }
     }
 
     /// What the heap's tests pass where a request would serve a

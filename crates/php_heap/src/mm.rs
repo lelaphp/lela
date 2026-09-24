@@ -209,6 +209,12 @@ pub(crate) struct Mm {
     real_size: usize,
     real_peak: usize,
     limit: usize,
+    /// `overflow`: set where the heap refuses an allocation with its
+    /// fatal, `zend_mm_safe_error`, and cleared once the fatal is
+    /// rendered ([`Mm::overflow_rendered`]). While it is set the limit
+    /// refuses nothing, so rendering the fatal, its backtrace among it,
+    /// is not refused by the limit it reports.
+    overflow: bool,
 }
 
 impl Mm {
@@ -232,6 +238,7 @@ impl Mm {
             real_size: 0,
             real_peak: 0,
             limit: NO_LIMIT,
+            overflow: false,
         };
         if let Some(chunk) = chunk_alloc(CHUNK_SIZE) {
             chunk_init(chunk, 0);
@@ -278,6 +285,21 @@ impl Mm {
     /// Set the `memory_limit`.
     pub(crate) fn set_limit(&mut self, limit: usize) {
         self.limit = limit;
+    }
+
+    /// `heap->overflow = 0` after `zend_error` returns in
+    /// `zend_mm_safe_error` (`Z/Zend/zend_alloc.c:417`): the fatal the
+    /// heap raised is rendered, and the limit holds again.
+    pub(crate) fn overflow_rendered(&mut self) {
+        self.overflow = false;
+    }
+
+    /// `zend_mm_safe_error`'s `heap->overflow = 1`
+    /// (`Z/Zend/zend_alloc.c:405`): the fatal, with the limit lifted
+    /// until it is rendered.
+    fn refuse(&mut self, fatal: Fatal) -> Fatal {
+        self.overflow = true;
+        fatal
     }
 
     /// `_emalloc`: `size` usable bytes, from the bin its size falls in,
@@ -671,7 +693,9 @@ impl Mm {
                 if self.gc() != 0 {
                     continue;
                 }
-                return Err(limit_exhausted(self.limit, asked));
+                if !self.overflow {
+                    return Err(self.refuse(limit_exhausted(self.limit, asked)));
+                }
             }
             let mapped = match chunk_alloc(CHUNK_SIZE) {
                 Some(chunk) => Some(chunk),
@@ -679,7 +703,7 @@ impl Mm {
                 None => None,
             };
             let Some(chunk) = mapped else {
-                return Err(out_of_memory(self.real_size, asked));
+                return Err(self.refuse(out_of_memory(self.real_size, asked)));
             };
             self.real_size += CHUNK_SIZE;
             self.real_peak = self.real_peak.max(self.real_size);
@@ -892,8 +916,9 @@ impl Mm {
         let new_size = size.next_multiple_of(real_page_size());
         if new_size > self.limit - self.real_size.min(self.limit)
             && (self.gc() == 0 || new_size > self.limit - self.real_size.min(self.limit))
+            && !self.overflow
         {
-            return Err(limit_exhausted(self.limit, size));
+            return Err(self.refuse(limit_exhausted(self.limit, size)));
         }
         let mapped = match chunk_alloc(new_size) {
             Some(at) => Some(at),
@@ -901,7 +926,7 @@ impl Mm {
             None => None,
         };
         let Some(at) = mapped else {
-            return Err(out_of_memory(self.real_size, size));
+            return Err(self.refuse(out_of_memory(self.real_size, size)));
         };
         let at = at.cast::<u8>();
         let node = match self.alloc_small(size_to_bin(HUGE_LIST_SIZE)) {

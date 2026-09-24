@@ -3596,6 +3596,9 @@ impl Request {
                 self.ini_parse_bytes_of("memory_limit")
             )),
         }
+        // A fatal the heap raised lifted its limit for the rendering, as
+        // `zend_mm_safe_error` does; it holds again from here.
+        self.heap.overflow_rendered();
     }
 
     /// `zend_objects_new` over `class` (`object_init_ex` without the

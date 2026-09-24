@@ -88,6 +88,7 @@ Heap::object_set_properties
 Heap::object_set_slot
 Heap::object_with
 Heap::objects
+Heap::overflow_rendered
 Heap::reference
 Heap::reference_separate
 Heap::reference_set
