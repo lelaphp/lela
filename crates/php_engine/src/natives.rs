@@ -36,14 +36,95 @@ use crate::api::raising::{
 use crate::api::request::Request;
 use crate::api::values::{ClassId, Key, PhpArray, PhpString, TypeTag, Value, ValueRef};
 
-/// The engine's own natives, in the order php declares them, each
-/// declaration beside its entry.
+mod backtrace;
+mod classes;
+mod errors;
+mod functions;
+mod stub;
+
+/// The engine's own natives, each declaration beside its entry: the
+/// ones of `zend_builtin_functions.c` first, in the order its stub
+/// declares them, which is the order `get_defined_functions()` and
+/// `get_extension_funcs('Core')` list them in; then the ones php keeps
+/// in `ext/standard` and this engine here, in the order they were
+/// declared.
 pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
     let mut natives = zend_natives();
     natives.extend(constant_natives());
     natives.extend(class_natives());
+    natives.extend(classes::natives());
+    natives.extend(functions::natives());
+    natives.extend(errors::natives());
+    natives.extend(backtrace::natives());
+    natives.sort_by_key(|(decl, _)| {
+        CORE.iter()
+            .position(|name| name.as_bytes() == decl.name.0.as_ref())
+            .unwrap_or(CORE.len())
+    });
     natives
 }
+
+/// `zend_builtin_functions.stub.php`'s functions in its order, the
+/// `gc_*` five and `zend_thread_id`, which a build without `ZEND_DEBUG`
+/// and `ZTS` does not declare, left out.
+const CORE: &[&str] = &[
+    "clone",
+    "exit",
+    "die",
+    "zend_version",
+    "func_num_args",
+    "func_get_arg",
+    "func_get_args",
+    "strlen",
+    "strcmp",
+    "strncmp",
+    "strcasecmp",
+    "strncasecmp",
+    "error_reporting",
+    "define",
+    "defined",
+    "get_class",
+    "get_called_class",
+    "get_parent_class",
+    "is_subclass_of",
+    "is_a",
+    "get_class_vars",
+    "get_object_vars",
+    "get_mangled_object_vars",
+    "get_class_methods",
+    "method_exists",
+    "property_exists",
+    "class_exists",
+    "interface_exists",
+    "trait_exists",
+    "enum_exists",
+    "function_exists",
+    "class_alias",
+    "get_included_files",
+    "get_required_files",
+    "trigger_error",
+    "user_error",
+    "set_error_handler",
+    "restore_error_handler",
+    "get_error_handler",
+    "set_exception_handler",
+    "restore_exception_handler",
+    "get_exception_handler",
+    "get_declared_classes",
+    "get_declared_traits",
+    "get_declared_interfaces",
+    "get_defined_functions",
+    "get_defined_vars",
+    "get_resource_type",
+    "get_resource_id",
+    "get_resources",
+    "get_loaded_extensions",
+    "get_defined_constants",
+    "debug_backtrace",
+    "debug_print_backtrace",
+    "extension_loaded",
+    "get_extension_funcs",
+];
 
 /// The two that read the linked table (#259), `clone`, which reads an
 /// object's handler table (#281), and `exit` with `die`, in the order
@@ -531,30 +612,7 @@ fn exit(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// ```
 fn class_exists(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if !(1..=2).contains(&count) {
-        return Err(wrong_argument_count(req, 1, 2, count));
-    }
-    let name = string_argument(req, 1)?;
-    let autoload = if count == 2 {
-        let given = req.argument(2).unwrap_or_default();
-        coerce_param(req, &given, &Type::Bool, 2)?
-            .as_bool()
-            .unwrap_or(true)
-    } else {
-        true
-    };
-    let bytes = name.as_bytes();
-    let bytes = bytes.strip_prefix(b"\\").unwrap_or(bytes);
-    let found = match req.class_named(bytes) {
-        Some(class) => Some(class),
-        None if autoload => crate::api::call::autoload(req, bytes)?,
-        None => None,
-    };
-    let exists = found
-        .and_then(|class| req.class_decl(class))
-        .is_some_and(|decl| !matches!(decl.kind, ClassKind::Interface | ClassKind::Trait));
-    Ok(Value::bool(exists))
+    classes::exists(req, &[ClassKind::Class, ClassKind::Enum])
 }
 
 /// `get_class(object $object = UNKNOWN): string`, php's

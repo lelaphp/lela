@@ -399,6 +399,15 @@ impl Resources {
             .map(|(name, _)| name.as_slice())
     }
 
+    /// `zend_fetch_list_dtor_id`: the type registered under `name`.
+    fn type_named(&self, name: &[u8]) -> Option<ResourceType> {
+        self.types
+            .iter()
+            .position(|(registered, _)| registered == name)
+            .and_then(|at| u32::try_from(at).ok())
+            .map(ResourceType)
+    }
+
     /// The type's destructor, if it registered one.
     fn dtor(&self, kind: ResourceType) -> Option<ResourceDtor> {
         self.types.get(kind.0 as usize).and_then(|(_, dtor)| *dtor)
@@ -628,7 +637,19 @@ pub struct Request {
     next_ref_source: usize,
     pub(crate) wrappers: Vec<StreamWrapper>,
     filters: Vec<StreamFilter>,
-    error_handlers: Vec<Option<Callable>>,
+    /// php's `EG(user_error_handler)`, the handler `set_error_handler`
+    /// installed, `IS_UNDEF` as none; the stack under it is
+    /// `EG(user_error_handlers)`, each row the handler it replaced and
+    /// that handler's mask, `EG(user_error_handlers_error_reporting)`
+    /// kept beside it. Every handler here is one owner of its value.
+    error_handler: Option<Callable>,
+    /// `EG(user_error_handler_error_reporting)`: the levels the handler
+    /// is handed, `set_error_handler`'s `$error_levels`.
+    error_handler_levels: i64,
+    error_handlers: Vec<(Option<Callable>, i64)>,
+    /// php's `EG(user_exception_handler)` and the stack under it,
+    /// `EG(user_exception_handlers)`, the same shape without a mask.
+    exception_handler: Option<Callable>,
     exception_handlers: Vec<Option<Callable>>,
     shutdown_functions: Vec<(Callable, Vec<Value>)>,
     tick_functions: Vec<(Callable, Vec<Value>)>,
@@ -684,6 +705,16 @@ pub struct Request {
     /// so every class a unit declares is this request's, the
     /// `DECLARE_CLASS_DELAYED` path, and dropped with it.
     declared: Vec<(Arc<Unit>, u32)>,
+    /// The aliases `class_alias()` added to `EG(class_table)`, each the
+    /// lowered name it is keyed by, the class it names, and how many
+    /// classes the table held when it was added, which is where php's
+    /// table has it among them: `ZVAL_ALIAS_PTR` rows, request state as
+    /// the classes the request declared are.
+    aliases: Vec<(usize, Vec<u8>, ClassId)>,
+    /// `PHP_SAPI`, `sapi_module.name` as `php_module_startup` registers
+    /// it: the host's, so the request's, the engine's interned string
+    /// for the name the description carries.
+    sapi_constant: Value,
     /// The functions and methods the units this request served declared,
     /// each the unit that holds it and which of its op arrays is the
     /// body: php's `EG(function_table)` past the natives and each user
@@ -691,6 +722,27 @@ pub struct Request {
     /// native methods counts into this list (design §5.6).
     user_functions: Vec<UserFunction>,
 }
+
+/// One row of an object's property table as [`Request::property_rows`]
+/// reads it: the name, the value, and for a declared slot the class
+/// that declared it and its visibility.
+pub(crate) type PropertyRow = (PhpString, Value, Option<(ClassId, Visibility)>);
+
+/// What called the native being served ([`Request::native_caller`]):
+/// a user function's frame and its arguments, a code frame, or another
+/// native.
+pub(crate) enum NativeCaller {
+    Function(FrameRef, Vec<Value>),
+    Code(FrameRef),
+    Native,
+}
+
+/// `DEBUG_BACKTRACE_PROVIDE_OBJECT` (`Z/Zend/zend_constants.h`): a
+/// method's row carries its receiver.
+pub(crate) const DEBUG_BACKTRACE_PROVIDE_OBJECT: i64 = 1;
+
+/// `DEBUG_BACKTRACE_IGNORE_ARGS`: no row carries its arguments.
+pub(crate) const DEBUG_BACKTRACE_IGNORE_ARGS: i64 = 2;
 
 /// One bucket of a symbol table, php's zval in `EG(symbol_table)` or a
 /// rebuilt one: the value the table owns, or `IS_INDIRECT`, the CV of the
@@ -849,7 +901,10 @@ impl Request {
             next_ref_source: 1,
             wrappers: Vec::new(),
             filters: Vec::new(),
+            error_handler: None,
+            error_handler_levels: 0,
             error_handlers: Vec::new(),
+            exception_handler: None,
             exception_handlers: Vec::new(),
             shutdown_functions: Vec::new(),
             tick_functions: Vec::new(),
@@ -869,8 +924,16 @@ impl Request {
             timer: None,
             stack_limit: StackLimit::UNCHECKED,
             declared: Vec::new(),
+            aliases: Vec::new(),
+            sapi_constant: Value::null(),
             user_functions: Vec::new(),
         };
+        if let Some(name) = req
+            .shared
+            .sapi_constant(req.description.sapi_name.as_bytes())
+        {
+            req.sapi_constant = name;
+        }
         // Request state in bundle order (ADR-0005).
         for extension in &req.shared.extensions {
             if let Some((type_id, build)) = &extension.request_state {
@@ -1941,6 +2004,10 @@ impl Request {
     /// rendering; `a_parse_error_is_rendered_as_its_level` in
     /// `api::raising` holds it without the extension.
     pub(crate) fn uncaught(&mut self) -> Result<(), Fatal> {
+        // `zend_execute_scripts` and `zend_throw_exception_internal` with
+        // no frame standing: a user exception handler takes the
+        // throwable first, and what it leaves is rendered.
+        self.user_exception_handler();
         let Some(throwable) = self.pending.take() else {
             // `zend_exception_error` on the unwind exit: "We
             // successfully unwound, nothing more to do", and the
@@ -2079,7 +2146,7 @@ impl Request {
             .prop(self, b"trace")
             .and_then(|value| value.as_array().copied())
         {
-            Some(trace) => self.trace_to_string(trace),
+            Some(trace) => self.trace_to_string(trace, true),
             None => String::from("#0 {main}"),
         }
     }
@@ -2137,8 +2204,38 @@ impl Request {
     /// #2 {main}
     /// ```
     fn debug_backtrace(&mut self) -> Result<PhpArray, Thrown> {
-        let ignore_arguments = self.exception_ignore_args();
-        let links = self.trace_chain();
+        let options = if self.exception_ignore_args() {
+            DEBUG_BACKTRACE_IGNORE_ARGS
+        } else {
+            0
+        };
+        self.fetch_debug_backtrace(false, options, 0)
+    }
+
+    /// `zend_fetch_debug_backtrace` with its three parameters: the link
+    /// of the native being served left out where `skip_last` says, as
+    /// `debug_backtrace()` leaves itself out; `options`,
+    /// `DEBUG_BACKTRACE_PROVIDE_OBJECT` for an `object` row of a
+    /// method's receiver between `class` and `type`, where php adds it,
+    /// and `DEBUG_BACKTRACE_IGNORE_ARGS` for no `args`; and `limit`
+    /// rows at most, none meaning every row.
+    pub(crate) fn fetch_debug_backtrace(
+        &mut self,
+        skip_last: bool,
+        options: i64,
+        limit: i64,
+    ) -> Result<PhpArray, Thrown> {
+        let ignore_arguments = options & DEBUG_BACKTRACE_IGNORE_ARGS != 0;
+        let provide_object = options & DEBUG_BACKTRACE_PROVIDE_OBJECT != 0;
+        let mut links = self.trace_chain();
+        if skip_last && !links.is_empty() {
+            links.remove(0);
+        }
+        if let Ok(limit) = usize::try_from(limit)
+            && limit > 0
+        {
+            links.truncate(limit);
+        }
         let mut trace = PhpArray::new(self)?;
         for (traced, this, scope, mut arguments, named, site) in links {
             let mut row = PhpArray::new(self)?;
@@ -2168,6 +2265,10 @@ impl Request {
             if let Some((class, join)) = method {
                 let class = Value::string(PhpString::new(self, class.as_bytes())?);
                 self.set_string_key(&mut row, b"class", class)?;
+                if provide_object && let Some(this) = this {
+                    self.addref(&this.as_value());
+                    self.set_string_key(&mut row, b"object", this.as_value())?;
+                }
                 let join = Value::string(PhpString::new(self, join.as_bytes())?);
                 self.set_string_key(&mut row, b"type", join)?;
             }
@@ -2389,13 +2490,15 @@ impl Request {
         row.set(self, key, value)
     }
 
-    /// `zend_trace_to_string` (`Z/Zend/zend_exceptions.c:668`) with
-    /// `include_main`: `_build_trace_string` over each row that is an
-    /// array, `#N file(line): ` where the row names a `file`, `[internal
+    /// `zend_trace_to_string` (`Z/Zend/zend_exceptions.c:668`):
+    /// `_build_trace_string` over each row that is an array, `#N
+    /// file(line): ` where the row names a `file`, `[internal
     /// function]: ` where it names none, the `class` and `type` where
     /// there are ones, the `function`, and the `args` between the
-    /// parentheses; then `#N {main}`.
-    fn trace_to_string(&self, trace: PhpArray) -> String {
+    /// parentheses; then, under `include_main`, `#N {main}`, and without
+    /// it every line closed by its newline, which is what
+    /// `debug_print_backtrace()` writes.
+    pub(crate) fn trace_to_string(&self, trace: PhpArray, include_main: bool) -> String {
         let mut frames: Vec<String> = Vec::new();
         for (_, row) in &trace {
             let Some(row) = row.as_array() else {
@@ -2431,6 +2534,13 @@ impl Request {
                 frames.len()
             ));
         }
+        if !include_main {
+            let mut out = frames.join("\n");
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            return out;
+        }
         let main = frames.len();
         frames.push(format!("#{main} {{main}}"));
         frames.join("\n")
@@ -2444,7 +2554,7 @@ impl Request {
         let Ok(trace) = self.debug_backtrace() else {
             return String::from("#0 {main}");
         };
-        let text = self.trace_to_string(trace);
+        let text = self.trace_to_string(trace, true);
         self.release(Value::array(trace));
         text
     }
@@ -2670,9 +2780,11 @@ impl Request {
     /// and to the body while `display_errors` is, in whichever of php's
     /// two display forms `html_errors` names, with
     /// `error_prepend_string` and `error_append_string` standing around
-    /// it. The message-id table, the user handler, `EH_THROW` and the
-    /// `@` scope are the rest of that branch and are not read yet.
-    pub(crate) fn note_error(&mut self, level: Level, message: &str) {
+    /// it. The user handler takes it first where one stands
+    /// ([`Request::note_error_in`]); the message-id table and `EH_THROW`
+    /// are the rest of that branch and are not read yet. `true` says the
+    /// built-in handler served it.
+    pub(crate) fn note_error(&mut self, level: Level, message: &str) -> bool {
         // `zend_error_va_list`'s site (`Z/Zend/zend.c:1633-1651`): the
         // executing frame's file and line, and, where nothing is
         // executing and nothing compiling, no file at all, which
@@ -2680,19 +2792,18 @@ impl Request {
         // (`ZEND_STR_UNKNOWN_CAPITALIZED`). A destructor the shutdown
         // walk refuses to serve raises there.
         if !self.executing() {
-            self.note_error_in(level, message, b"Unknown", 0);
-            return;
+            return self.note_error_in(level, message, b"Unknown", 0);
         }
         let line = self.current_line();
-        self.note_error_at(level, message, line);
+        self.note_error_at(level, message, line)
     }
 
     /// The same diagnostic at a line no frame stands on: what a
     /// compile-time error carries, since php's `zend_error_cb` is given
     /// the compiler's line while `zend_get_executed_lineno` has none.
-    pub(crate) fn note_error_at(&mut self, level: Level, message: &str, line: u32) {
+    pub(crate) fn note_error_at(&mut self, level: Level, message: &str, line: u32) -> bool {
         let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
-        self.note_error_in(level, message, &file, line);
+        self.note_error_in(level, message, &file, line)
     }
 
     /// The same diagnostic at a file and line of its own, which is what
@@ -2867,13 +2978,23 @@ impl Request {
     /// raises one while serving, so
     /// `the_second_html_format_carries_the_trace_after_the_line` below
     /// holds it to the oracle's bytes for `trigger_error()`.
-    pub(crate) fn note_error_in(&mut self, level: Level, message: &str, file: &[u8], line: u32) {
+    pub(crate) fn note_error_in(
+        &mut self,
+        level: Level,
+        message: &str,
+        file: &[u8],
+        line: u32,
+    ) -> bool {
         // "Always clear the last backtrace."
         self.last_fatal_error_backtrace = None;
         if self.pending.is_none() && self.fatal_error_backtraces() && fatal_errors(level) {
             self.last_fatal_error_backtrace = Some(self.trace_as_string());
         }
+        if self.user_error_handler(level, message, file, line) {
+            return false;
+        }
         self.error_cb(level, message, file, line);
+        true
     }
 
     /// `php_error_cb` (`Z/main/main.c:1370-1500`): the diagnostic stored,
@@ -3116,6 +3237,23 @@ impl Request {
         self.last_fatal_error_backtrace = None;
         self.error_cb(level, message, file, line);
         self.end_at_level(level, message, file, line);
+    }
+
+    /// `php_error_cb`'s `_zend_bailout` (`Z/main/main.c:1492-1520`) for a level
+    /// it cannot recover from that the built-in handler served, raised
+    /// where the request stands: every object marked destructed,
+    /// `zend_objects_store_mark_destructed`, so no destructor is served
+    /// after it, and the request ended at the level. What
+    /// `trigger_error()` reaches with `E_USER_ERROR`.
+    pub(crate) fn bail_out(&mut self, level: Level, message: &str) {
+        let (file, line) = if self.executing() {
+            let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
+            (file, self.current_line())
+        } else {
+            (b"Unknown".to_vec(), 0)
+        };
+        self.marked_destructed = true;
+        self.end_at_level(level, message, &file, line);
     }
 
     /// The ending alone, the diagnostic already rendered at its own
@@ -4893,6 +5031,35 @@ impl Request {
     /// declared name is the interned string php's `prop_info->name` is,
     /// never refcounted, so a caller that takes an owner of it takes
     /// none; the `Err` is the memory limit refusing the intern.
+    /// The rows `get_properties` answers for `object`, each beside the
+    /// declared slot it is, the class that declared what stands there
+    /// and its visibility, or none for a dynamic row: the rows of the
+    /// std table are the slots that hold a value, in slot order, and
+    /// then the dynamic table, so the slots are walked with a cursor
+    /// beside them, as `zend_mangle_property_name` is walked by the
+    /// `(array)` cast. Views, no owner taken.
+    pub(crate) fn property_rows(&mut self, object: PhpObject) -> Result<Vec<PropertyRow>, Thrown> {
+        let table = self.object_handlers(object.heap());
+        let rows = table.get_properties(self, object)?;
+        let placed = self.placed_properties(object.class());
+        let mut at = 0;
+        Ok(rows
+            .into_iter()
+            .map(|(name, value)| {
+                let slot = placed
+                    .iter()
+                    .skip(at)
+                    .position(|(_, p)| &*p.name.0 == name.as_bytes())
+                    .map(|i| i + at);
+                let declared = slot.and_then(|i| {
+                    at = i + 1;
+                    placed.get(i).map(|(class, p)| (*class, p.visibility))
+                });
+                (name, value, declared)
+            })
+            .collect())
+    }
+
     pub(crate) fn object_entries(&mut self, o: Obj) -> Result<Vec<(PhpString, Value)>, Thrown> {
         let mut entries = Vec::new();
         let declared: Vec<Box<[u8]>> = self
@@ -6840,6 +7007,30 @@ impl Request {
             .position(|name| name.0.to_ascii_lowercase() == wanted)
             .and_then(|i| u32::try_from(i).ok())
             .map(ClassId)
+            .or_else(|| {
+                self.aliases
+                    .iter()
+                    .find(|(_, alias, _)| *alias == wanted)
+                    .map(|(_, _, class)| *class)
+            })
+    }
+
+    /// `EG(class_table)` in its order, each row the class and, for a row
+    /// `class_alias()` added, the lowered name it is keyed by: the
+    /// engine's classes, then the request's in the order they were
+    /// bound, each alias standing where it was added.
+    pub(crate) fn class_table(&self) -> Vec<(ClassId, Option<Vec<u8>>)> {
+        let count = self.shared.classes.len() + self.declared.len();
+        let mut rows = Vec::with_capacity(count + self.aliases.len());
+        let mut aliases = self.aliases.iter().peekable();
+        for at in 0..count {
+            while let Some((_, alias, class)) = aliases.next_if(|(before, _, _)| *before <= at) {
+                rows.push((*class, Some(alias.clone())));
+            }
+            rows.push((ClassId(u32::try_from(at).unwrap_or(u32::MAX)), None));
+        }
+        rows.extend(aliases.map(|(_, alias, class)| (*class, Some(alias.clone()))));
+        rows
     }
 
     /// `do_bind_class` for every class the unit declares that php bound
@@ -7186,6 +7377,9 @@ impl Request {
     }
 
     pub(crate) fn constant_named(&self, name: &[u8]) -> Option<Value> {
+        if name == b"PHP_SAPI" {
+            return Some(self.sapi_constant);
+        }
         self.constants
             .iter()
             .find(|(n, _)| n.as_slice() == name)
@@ -7631,29 +7825,216 @@ impl Request {
         self.ini_get(b"error_reporting").map_or(E_ALL, ini_atol)
     }
 
-    /// `set_error_handler()`: the previous handler.
+    /// `ZEND_FUNCTION(set_error_handler)`
+    /// (`Z/Zend/zend_builtin_functions.c:1306`): the handler standing is
+    /// pushed with its mask, `zend_stack_push` of both, and `handler`
+    /// stands with `levels` as its mask; none leaves no handler and the
+    /// mask where it was. The answer is the handler that stood, a view
+    /// the stack keeps the owner of, which the native copies. The
+    /// handler given is one more owner from here.
     pub fn set_error_handler(&mut self, handler: Option<Callable>, levels: i64) -> Option<Value> {
-        let _ = levels;
-        let previous = self.error_handlers.last().cloned().flatten();
-        self.error_handlers.push(handler);
-        previous.map(Callable::into_value)
+        let previous = self.error_handler.take();
+        let answer = previous.as_ref().map(Callable::value);
+        self.error_handlers
+            .push((previous, self.error_handler_levels));
+        if let Some(handler) = handler {
+            self.addref(&handler.value());
+            self.error_handler = Some(handler);
+            self.error_handler_levels = levels;
+        }
+        answer
     }
 
-    /// `restore_error_handler()`.
+    /// `ZEND_FUNCTION(restore_error_handler)`
+    /// (`Z/Zend/zend_builtin_functions.c:1332`): the handler standing
+    /// released and the top of the stack standing in its place with its
+    /// mask; with the stack empty, no handler and the mask where it was.
+    /// php answers `true` whatever it found.
     pub fn restore_error_handler(&mut self) -> bool {
-        self.error_handlers.pop().is_some()
+        if let Some(handler) = self.error_handler.take() {
+            self.release(handler.into_value());
+        }
+        if let Some((handler, levels)) = self.error_handlers.pop() {
+            self.error_handler = handler;
+            self.error_handler_levels = levels;
+        }
+        true
     }
 
-    /// `set_exception_handler()`: the previous handler.
+    /// `EG(user_error_handler)` as `get_error_handler()` reads it: the
+    /// value the handler was set from, a view, none while no handler
+    /// stands.
+    pub(crate) fn error_handler(&self) -> Option<Value> {
+        self.error_handler.as_ref().map(Callable::value)
+    }
+
+    /// `ZEND_FUNCTION(set_exception_handler)`
+    /// (`Z/Zend/zend_builtin_functions.c:1367`): the error handler's
+    /// shape without a mask.
     pub fn set_exception_handler(&mut self, handler: Option<Callable>) -> Option<Value> {
-        let previous = self.exception_handlers.last().cloned().flatten();
-        self.exception_handlers.push(handler);
-        previous.map(Callable::into_value)
+        let previous = self.exception_handler.take();
+        let answer = previous.as_ref().map(Callable::value);
+        self.exception_handlers.push(previous);
+        if let Some(handler) = handler {
+            self.addref(&handler.value());
+            self.exception_handler = Some(handler);
+        }
+        answer
     }
 
-    /// `restore_exception_handler()`.
+    /// `ZEND_FUNCTION(restore_exception_handler)`
+    /// (`Z/Zend/zend_builtin_functions.c:1399`).
     pub fn restore_exception_handler(&mut self) -> bool {
-        self.exception_handlers.pop().is_some()
+        if let Some(handler) = self.exception_handler.take() {
+            self.release(handler.into_value());
+        }
+        if let Some(handler) = self.exception_handlers.pop() {
+            self.exception_handler = handler;
+        }
+        true
+    }
+
+    /// `EG(user_exception_handler)` as `get_exception_handler()` reads
+    /// it, a view.
+    pub(crate) fn exception_handler(&self) -> Option<Value> {
+        self.exception_handler.as_ref().map(Callable::value)
+    }
+
+    /// `zend_shutdown_executor_values`' release of both handlers and
+    /// both stacks (`Z/Zend/zend_execute_API.c:410-420`), after the open
+    /// resources are closed, so a resource's destructor that raises
+    /// still reaches the handler that stood.
+    pub(crate) fn free_user_handlers(&mut self) {
+        let error = self.error_handler.take().into_iter().chain(
+            std::mem::take(&mut self.error_handlers)
+                .into_iter()
+                .filter_map(|(handler, _)| handler),
+        );
+        let exception = self.exception_handler.take().into_iter().chain(
+            std::mem::take(&mut self.exception_handlers)
+                .into_iter()
+                .flatten(),
+        );
+        let all: Vec<Callable> = error.chain(exception).collect();
+        for handler in all {
+            self.release(handler.into_value());
+        }
+    }
+
+    /// `zend_error_impl`'s user branch (`Z/Zend/zend.c:1527-1604`): the
+    /// handler standing is handed the diagnostic where its mask has the
+    /// level, and where the level is not one php holds unsafe to hand to
+    /// user code, `E_ERROR`, `E_PARSE`, the two core levels and the two
+    /// compile levels. The handler is taken down while it runs, so a
+    /// diagnostic it raises reaches the built-in handler, and put back
+    /// after unless it set one of its own. It is handed the level, the
+    /// message, the file and the line; `true` says the diagnostic is
+    /// served, which is every answer but `false` and a throw, which is
+    /// left pending in the diagnostic's place. With a throwable already
+    /// pending, php's `zend_call_function` returns before the call and
+    /// the diagnostic is dropped, handled by nobody.
+    fn user_error_handler(&mut self, level: Level, message: &str, file: &[u8], line: u32) -> bool {
+        if self.error_handler.is_none()
+            || self.error_handler_levels & level.bit() == 0
+            || matches!(
+                level,
+                Level::Error
+                    | Level::Parse
+                    | Level::CoreError
+                    | Level::CoreWarning
+                    | Level::CompileError
+                    | Level::CompileWarning
+            )
+        {
+            return false;
+        }
+        if self.is_pending() {
+            return true;
+        }
+        let Some(handler) = self.error_handler.take() else {
+            return false;
+        };
+        let arguments = (|| -> Result<[Value; 4], Thrown> {
+            Ok([
+                Value::int(level.bit()),
+                Value::string(PhpString::new(self, message.as_bytes())?),
+                Value::string(PhpString::new(self, file)?),
+                Value::int(i64::from(line)),
+            ])
+        })();
+        let served = match arguments {
+            Ok(arguments) => {
+                let answer = crate::api::call::call(self, &handler, &arguments);
+                for argument in arguments {
+                    self.release(argument);
+                }
+                match answer {
+                    Ok(value) => {
+                        let fall_through = matches!(value.as_ref(), ValueRef::Bool(false));
+                        self.release(value);
+                        !fall_through
+                    }
+                    Err(thrown) => {
+                        self.leave_pending(&thrown);
+                        true
+                    }
+                }
+            }
+            Err(thrown) => {
+                self.leave_pending(&thrown);
+                true
+            }
+        };
+        if self.error_handler.is_none() {
+            self.error_handler = Some(handler);
+        } else {
+            self.release(handler.into_value());
+        }
+        served
+    }
+
+    /// `zend_user_exception_handler` (`Z/Zend/zend.c:1931`): the pending
+    /// throwable handed to the handler standing, which is taken down
+    /// onto the stack while it runs and stands again after unless it
+    /// set one of its own. The throwable is released once the handler
+    /// returns; what the handler throws is rendered as the uncaught
+    /// fatal, since no handler stands to take it, which ends the
+    /// request as php's `zend_throw_exception_internal` does with no
+    /// frame standing. Nothing is done for the unwind exit.
+    pub(crate) fn user_exception_handler(&mut self) {
+        if self.exception_handler.is_none() {
+            return;
+        }
+        let Some(throwable) = self.pending.take() else {
+            return;
+        };
+        let handler = self.exception_handler.take();
+        self.exception_handlers.push(handler.clone());
+        if let Some(handler) = handler {
+            match crate::api::call::call(self, &handler, &[throwable.as_value()]) {
+                Ok(value) => self.release(value),
+                Err(thrown) => {
+                    self.leave_pending(&thrown);
+                    if let Err(fatal) = self.uncaught() {
+                        self.end_in(&fatal);
+                    }
+                }
+            }
+        }
+        self.release(throwable.as_value());
+        if self.exception_handler.is_none()
+            && let Some(top) = self.exception_handlers.pop()
+        {
+            self.exception_handler = top;
+        }
+    }
+
+    /// Whether a user handler for throwables stands, which is what
+    /// decides whether a throwable the main op array did not catch is
+    /// rendered in its frame or handed to the handler once the frame is
+    /// left.
+    pub(crate) fn has_exception_handler(&self) -> bool {
+        self.exception_handler.is_some()
     }
 
     /// `assert_options(ASSERT_CALLBACK)` as it stands.
@@ -7667,11 +8048,11 @@ impl Request {
         self.assert_callback = callback;
     }
 
-    /// `debug_backtrace()` with php's options and limit; empty while no
-    /// frame is live.
+    /// `zend_fetch_debug_backtrace(return_value, 1, options, limit)`,
+    /// what `debug_backtrace()` answers from inside the native being
+    /// served: the rows below it, under php's options and limit.
     pub fn backtrace(&mut self, options: i64, limit: i64) -> Result<PhpArray, Thrown> {
-        let _ = (options, limit);
-        PhpArray::new(self)
+        self.fetch_debug_backtrace(true, options, limit)
     }
 
     /// The file of the frame that called the native,
@@ -7793,6 +8174,66 @@ impl Request {
         self.release(previous);
     }
 
+    /// What called the native being served, `EX(prev_execute_data)` as
+    /// `func_get_args` and `get_defined_vars` read it: a user function's
+    /// frame, with the arguments it was passed as its slots hold them
+    /// now, the extra ones after, `ZEND_CALL_NUM_ARGS` of them in all;
+    /// a code frame, the main op array or an included file's, which
+    /// php's `ZEND_CALL_CODE` names; or another native, which is a call
+    /// `zend_call_function` made and php's `ZEND_CALL_DYNAMIC`.
+    pub(crate) fn native_caller(&self) -> NativeCaller {
+        let mut chain = self.chain();
+        let _served = chain.next();
+        match chain.next() {
+            // A frame on a stack below the running one is a fiber's
+            // resumer: a native that is a fiber's own callable was called
+            // from the fiber's bottom frame, which is `zend_fiber_function`,
+            // a native's, so it answers as a native caller below.
+            Some(Link::Frame(stack, place, state))
+                if std::ptr::eq(stack, &raw const self.stack) && state.function.is_some() =>
+            {
+                let frame = FrameRef(u32::try_from(place).unwrap_or(u32::MAX));
+                let passed = usize::try_from(state.num_args).unwrap_or(0);
+                let mut arguments: Vec<Value> = (0..passed.saturating_sub(state.extra_args.len()))
+                    .map(|slot| self.slot(frame, u32::try_from(slot).unwrap_or(u32::MAX)))
+                    .collect();
+                arguments.extend(state.extra_args.iter().copied());
+                NativeCaller::Function(frame, arguments)
+            }
+            Some(Link::Frame(stack, place, _)) if std::ptr::eq(stack, &raw const self.stack) => {
+                NativeCaller::Code(FrameRef(u32::try_from(place).unwrap_or(u32::MAX)))
+            }
+            Some(Link::Frame(..) | Link::Call(_)) | None => NativeCaller::Native,
+        }
+    }
+
+    /// `zend_rebuild_symbol_table` for `frame` and `zend_array_dup` of
+    /// it: every name the frame's table holds that has a value, in the
+    /// table's order, each value one more owner, a reference kept as
+    /// one; what `get_defined_vars()` answers.
+    pub(crate) fn defined_vars(&mut self, frame: FrameRef) -> Result<PhpArray, Thrown> {
+        let table = self.rebuild_symbol_table(frame);
+        let entries: Vec<(Vec<u8>, Symbol)> = self
+            .tables
+            .get(table.0 as usize)
+            .map(|table| table.entries.clone())
+            .unwrap_or_default();
+        let mut array = PhpArray::new(self)?;
+        for (name, symbol) in entries {
+            let value = match symbol {
+                Symbol::Value(value) => value,
+                Symbol::Indirect(frame, slot) => self.slot(frame, slot),
+            };
+            if value.tag() == TypeTag::Undef {
+                continue;
+            }
+            self.addref(&value);
+            let key = Key::from_string(PhpString::new(self, &name)?);
+            array.set(self, key, value)?;
+        }
+        Ok(array)
+    }
+
     /// The arguments of the frame `depth` levels up, `func_get_args` from
     /// outside.
     #[must_use]
@@ -7909,28 +8350,94 @@ impl Request {
             .collect()
     }
 
-    /// `get_defined_functions()`: `internal` and `user` lists, the names
-    /// strings of the request's.
+    /// `get_defined_functions()` over `EG(function_table)`: `internal`,
+    /// every native's key, and `user`, every user function's, each the
+    /// lowered name the table is keyed by and in the order the table
+    /// took them. A closure is no row, since php never adds one to the
+    /// table; a method is none either, being its class's.
     pub fn defined_functions(&mut self) -> Result<PhpArray, Thrown> {
-        let mut internal = PhpArray::new(self)?;
-        let shared = Arc::clone(&self.shared);
-        for (decl, _) in &shared.functions {
-            let name = Value::string(PhpString::new(self, &decl.name.0)?);
-            internal.append(self, name)?;
-        }
+        let internal: Vec<Vec<u8>> = self
+            .shared
+            .functions
+            .iter()
+            .map(|(decl, _)| decl.name.0.to_ascii_lowercase())
+            .collect();
+        let user: Vec<Vec<u8>> = self
+            .user_functions
+            .iter()
+            .filter_map(user_function_decl)
+            .map(|decl| decl.name.0.to_ascii_lowercase())
+            .filter(|name| !name.starts_with(b"{"))
+            .collect();
         let mut array = PhpArray::new(self)?;
-        let key = Key::Str(PhpString::new(self, b"internal")?);
-        array.set(self, key, Value::array(internal))?;
-        let key = Key::Str(PhpString::new(self, b"user")?);
-        let user = PhpArray::new(self)?;
-        array.set(self, key, Value::array(user))?;
+        for (list, names) in [(&b"internal"[..], internal), (b"user", user)] {
+            let mut rows = PhpArray::new(self)?;
+            for name in names {
+                let name = Value::string(PhpString::new(self, &name)?);
+                rows.append(self, name)?;
+            }
+            let key = Key::Str(PhpString::new(self, list)?);
+            array.set(self, key, Value::array(rows))?;
+        }
         Ok(array)
     }
 
-    /// `class_alias()`.
-    pub fn class_alias(&mut self, class: ClassId, alias: &[u8]) -> Result<(), Thrown> {
-        let _ = (class, alias);
-        Ok(())
+    /// `EG(zend_constants)` in its order, each row the extension it was
+    /// registered under, `ZEND_CONSTANT_MODULE_NUMBER`, by name, none for
+    /// one the program defined, `PHP_USER_CONSTANT`: the engine's own
+    /// under `Core`, then each extension's in bundle order, then what
+    /// `define()` and `const` wrote. A value is a view, no owner taken;
+    /// a declared constant whose value the engine did not publish is no
+    /// row.
+    pub(crate) fn constant_table(&self) -> Vec<(Option<&str>, Vec<u8>, Value)> {
+        let decls = self.shared.declared().constants;
+        let from_extensions: usize = self
+            .shared
+            .extensions
+            .iter()
+            .map(|e| e.constants.len())
+            .sum();
+        let own = decls.len().saturating_sub(from_extensions);
+        let mut modules: Vec<&str> = vec!["Core"; own];
+        for extension in &self.shared.extensions {
+            modules.extend(std::iter::repeat_n(
+                extension.name.as_str(),
+                extension.constants.len(),
+            ));
+        }
+        let mut rows: Vec<(Option<&str>, Vec<u8>, Value)> = decls
+            .iter()
+            .zip(modules)
+            .flat_map(|(decl, module)| {
+                // `PHP_SAPI` stands where php registers it, before
+                // `PHP_BINARY`, and is the request's.
+                let sapi = (decl.name.0.as_ref() == b"PHP_BINARY")
+                    .then(|| (Some("Core"), b"PHP_SAPI".to_vec(), self.sapi_constant));
+                let value = self.shared.constant(&decl.name.0);
+                sapi.into_iter()
+                    .chain(value.map(|value| (Some(module), decl.name.0.to_vec(), value)))
+            })
+            .collect();
+        rows.extend(
+            self.constants
+                .iter()
+                .map(|(name, value)| (None, name.clone(), *value)),
+        );
+        rows
+    }
+
+    /// `zend_register_class_alias_ex`'s `zend_hash_add` into
+    /// `EG(class_table)`: `class` under the lowered name `alias`, and
+    /// `false` where the table has that name already, a class's or
+    /// another alias's, and nothing is added. The name is the caller's
+    /// to have lowered and held to php's reserved names.
+    pub fn class_alias(&mut self, class: ClassId, alias: &[u8]) -> bool {
+        if self.class_named(alias).is_some() {
+            return false;
+        }
+        let at = self.shared.classes.len() + self.declared.len();
+        self.aliases.push((at, alias.to_ascii_lowercase(), class));
+        true
     }
 
     /// `get_defined_constants()`: what `define()` declared in this
@@ -8004,10 +8511,10 @@ impl Request {
     }
 
     /// `get_included_files()`: the paths, as `EG(included_files)` holds
-    /// them.
+    /// them, the primary file's first.
     #[must_use]
     pub fn included_files(&self) -> Vec<Vec<u8>> {
-        self.description.script_name.iter().cloned().collect()
+        self.included_files.clone()
     }
 
     /// `get_loaded_extensions()`: the bundle in `MINIT` order, after
@@ -8314,6 +8821,27 @@ impl Request {
     /// The request's resource types, for an extension registering one.
     pub fn resources(&mut self) -> &mut Resources {
         &mut self.resources
+    }
+
+    /// `EG(regular_list)` in id order, every resource whose entry stands,
+    /// closed or not: what `get_resources()` walks.
+    pub(crate) fn resource_list(&self) -> Vec<Resource> {
+        let live = self.heap.resources();
+        let mut found = Vec::with_capacity(live);
+        let mut id = 1;
+        while found.len() < live && id < i64::MAX {
+            if let Some(resource) = self.resource(id) {
+                found.push(resource);
+            }
+            id += 1;
+        }
+        found
+    }
+
+    /// `zend_fetch_list_dtor_id`: the resource type registered under
+    /// `name`, as `get_resources()` is given it.
+    pub(crate) fn resource_type_named(&self, name: &[u8]) -> Option<ResourceType> {
+        self.resources.type_named(name)
     }
 
     /// `zend_hash_index_find(&EG(regular_list), id)`: the resource with
@@ -9385,7 +9913,7 @@ fn ini_truth(value: Option<&[u8]>) -> bool {
 /// `E_ALL` (`Z/Zend/zend_errors.h:43`), the fourteen levels php 8.5
 /// raises, which is every bit below `E_USER_DEPRECATED`'s but
 /// `E_STRICT`'s, the one 8.4 removed from the sum.
-const E_ALL: i64 = 32767 & !Level::Strict.bit();
+pub(crate) const E_ALL: i64 = 32767 & !Level::Strict.bit();
 
 /// `ZEND_ATOL`, which is `atoll` (`Z/Zend/zend_long.h:77`): leading
 /// whitespace skipped, one sign, the digits up to the first byte that is

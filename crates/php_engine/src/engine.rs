@@ -20,9 +20,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use php_compile::{CompileError, StackLimit};
 use php_heap::{Fatal, FrameRef, Intern, Strings, Zval};
-use php_unit::decl::{
-    Attribute, AttributeArgument, ClassDecl, ConstDecl, ConstExpr, FunctionDecl, MethodDecl, Name,
-};
+use php_unit::decl::{ClassDecl, ConstDecl, ConstExpr, FunctionDecl, MethodDecl, Name};
 use php_unit::{FramelessEntry, Unit, frameless_table};
 
 use crate::api::abi::{Cache, Entry, Extension, NativeNew, ObjectHandlers, StartupIni};
@@ -150,6 +148,10 @@ pub(crate) struct Shared {
     /// table as `REGISTER_STRING_CONSTANT` interns php's at `MINIT`, so
     /// a request reading one allocates nothing and counts nothing.
     constant_values: Vec<(Box<[u8]>, Zval)>,
+    /// `PHP_SAPI`'s value under each host's name, interned at build with
+    /// the other constants, so a request that reads the name its host
+    /// gave it allocates nothing ([`crate::constants::HOSTS`]).
+    sapi_names: Vec<(Box<[u8]>, Zval)>,
     entry: Loop,
     /// The same loop for a serving inside a serving, `zend_call_function`
     /// over a user function: what [`Request::serve_user`] enters a
@@ -266,69 +268,6 @@ pub(crate) struct Declared<'a> {
     pub(crate) classes: &'a [ClassDecl],
 }
 
-/// The error levels `register_zend_constants_symbols` registers
-/// (`Z/Zend/zend_constants_arginfo.h:6-20`), in the order php
-/// registers them, with `E_STRICT` among them carrying the one
-/// attribute `zend_add_global_constant_attribute` hangs on a Zend
-/// constant at the tag: `#[\Deprecated(since: '8.4', message: 'the
-/// error level was removed')]`, which is the whole of its
-/// `CONST_DEPRECATED` (`Z/Zend/zend_constants_arginfo.h:32-37`).
-/// `E_ALL`, beside the constants `main.c` registers above, is their
-/// union without `E_STRICT`, the level 8.4 dropped from the mask
-/// (`Z/Zend/zend_errors.h:43`).
-///
-/// ```php
-/// var_dump(E_ERROR, E_WARNING, E_USER_DEPRECATED, E_ALL);
-/// ```
-/// ```expect
-/// int(1)
-/// int(2)
-/// int(16384)
-/// int(30719)
-/// ```
-fn error_levels() -> Vec<ConstDecl> {
-    [
-        ("E_ERROR", 1 << 0),
-        ("E_WARNING", 1 << 1),
-        ("E_PARSE", 1 << 2),
-        ("E_NOTICE", 1 << 3),
-        ("E_CORE_ERROR", 1 << 4),
-        ("E_CORE_WARNING", 1 << 5),
-        ("E_COMPILE_ERROR", 1 << 6),
-        ("E_COMPILE_WARNING", 1 << 7),
-        ("E_USER_ERROR", 1 << 8),
-        ("E_USER_WARNING", 1 << 9),
-        ("E_USER_NOTICE", 1 << 10),
-        ("E_STRICT", 1 << 11),
-        ("E_RECOVERABLE_ERROR", 1 << 12),
-        ("E_DEPRECATED", 1 << 13),
-        ("E_USER_DEPRECATED", 1 << 14),
-    ]
-    .into_iter()
-    .map(|(name, value)| ConstDecl {
-        name: Name::from(name),
-        value: ConstExpr::Long(value),
-        attributes: if name == "E_STRICT" {
-            vec![Attribute {
-                name: Name::from("Deprecated"),
-                arguments: vec![
-                    AttributeArgument {
-                        name: Some(Name::from("since")),
-                        value: ConstExpr::Str(b"8.4".as_slice().into()),
-                    },
-                    AttributeArgument {
-                        name: Some(Name::from("message")),
-                        value: ConstExpr::Str(b"the error level was removed".as_slice().into()),
-                    },
-                ],
-            }]
-        } else {
-            Vec::new()
-        },
-    })
-    .collect()
-}
-
 impl Shared {
     /// The tables the compiler reads, as [`Declared`].
     pub(crate) fn declared(&self) -> Declared<'_> {
@@ -339,72 +278,10 @@ impl Shared {
         }
     }
 
-    /// The engine's own constants, php's `zend_register_standard_constants`
-    /// and `main.c`'s `PHP_VERSION` and `PHP_EOL`: the ones a program
-    /// reaches with no extension loaded, as `ConstDecl`s the compiler
-    /// folds where they stand (`zend_try_ct_eval_const`, design §6.1)
-    /// and the request table reads while a program executes, both from
-    /// one row. The error levels are [`error_levels`], the one block
-    /// of them carrying an attribute.
-    ///
-    /// ```php
-    /// echo PHP_VERSION, PHP_EOL;
-    /// var_dump(PHP_INT_SIZE, E_ALL, PHP_INT_MAX, PHP_INT_MIN);
-    /// var_dump(PHP_OUTPUT_HANDLER_STDFLAGS, \PHP_EOL === "\n");
-    /// ```
-    /// ```expect
-    /// 8.5.9
-    /// int(8)
-    /// int(30719)
-    /// int(9223372036854775807)
-    /// int(-9223372036854775808)
-    /// int(112)
-    /// bool(true)
-    /// ```
+    /// The engine's own constants, Core's, in php's order
+    /// ([`crate::constants::core_constants`]).
     fn zend_constants() -> Vec<ConstDecl> {
-        let mut decls = vec![
-            (
-                "PHP_VERSION",
-                ConstExpr::Str(crate::api::request::PHP_VERSION.as_bytes().into()),
-            ),
-            ("PHP_EOL", ConstExpr::Str(b"\n".as_slice().into())),
-            ("PHP_INT_MAX", ConstExpr::Long(i64::MAX)),
-            ("PHP_INT_MIN", ConstExpr::Long(i64::MIN)),
-            ("PHP_INT_SIZE", ConstExpr::Long(8)),
-            ("E_ALL", ConstExpr::Long(30719)),
-        ];
-        // `main/main.stub.php:260-328`: the output layer's constants,
-        // the operation `ob_start`'s callback is handed and the flags
-        // it is started with (`Z/main/php_output.h:23-45`).
-        decls.extend(
-            [
-                ("PHP_OUTPUT_HANDLER_START", 0x01),
-                ("PHP_OUTPUT_HANDLER_WRITE", 0x00),
-                ("PHP_OUTPUT_HANDLER_FLUSH", 0x04),
-                ("PHP_OUTPUT_HANDLER_CLEAN", 0x02),
-                ("PHP_OUTPUT_HANDLER_FINAL", 0x08),
-                ("PHP_OUTPUT_HANDLER_CONT", 0x00),
-                ("PHP_OUTPUT_HANDLER_END", 0x08),
-                ("PHP_OUTPUT_HANDLER_CLEANABLE", 0x10),
-                ("PHP_OUTPUT_HANDLER_FLUSHABLE", 0x20),
-                ("PHP_OUTPUT_HANDLER_REMOVABLE", 0x40),
-                ("PHP_OUTPUT_HANDLER_STDFLAGS", 0x70),
-                ("PHP_OUTPUT_HANDLER_STARTED", 0x1000),
-                ("PHP_OUTPUT_HANDLER_DISABLED", 0x2000),
-                ("PHP_OUTPUT_HANDLER_PROCESSED", 0x4000),
-            ]
-            .map(|(name, value)| (name, ConstExpr::Long(value))),
-        );
-        let mut out: Vec<ConstDecl> = decls
-            .into_iter()
-            .map(|(name, value)| ConstDecl {
-                name: Name::from(name),
-                value,
-                attributes: Vec::new(),
-            })
-            .collect();
-        out.extend(error_levels());
-        out
+        crate::constants::core_constants()
     }
 
     /// One source compiled with its constant strings interned into the
@@ -510,6 +387,23 @@ impl Shared {
     /// The value of the constant `name` as the bundle declared it, or as
     /// the engine's own table has it: a value nothing owns, since the
     /// string ones are the engine's interned strings.
+    /// `PHP_SAPI` for a request its host named `sapi`: the string the
+    /// engine interned for that name at build, or, for a name no host
+    /// of [`crate::constants::HOSTS`] has, one interned into the
+    /// engine's table the first time a request asks, where every later
+    /// request finds it.
+    pub(crate) fn sapi_constant(&self, sapi: &[u8]) -> Option<Value> {
+        if let Some((_, z)) = self.sapi_names.iter().find(|(n, _)| n.as_ref() == sapi) {
+            return Some(exec::value_of(*z));
+        }
+        let mut strings = match self.strings.lock() {
+            Ok(strings) => strings,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let interned = strings.intern(sapi).ok()?;
+        Some(exec::value_of(Zval::string(interned)))
+    }
+
     pub(crate) fn constant(&self, name: &[u8]) -> Option<Value> {
         self.constant_values
             .iter()
@@ -548,11 +442,9 @@ const CORE_INI: [(&str, &str); 23] = [
     ("memory_limit", "128M"),
     ("max_execution_time", "0"),
     ("default_charset", "UTF-8"),
-    // `PHP_INCLUDE_PATH`, php's build constant `.:${PEAR_INSTALLDIR}`,
-    // which `configure` with no prefix makes `.:/usr/local/lib/php`;
-    // a package's build has its own, so a `-d include_path` under the
-    // recipe is what a comparison stands on.
-    ("include_path", ".:/usr/local/lib/php"),
+    // `PHP_INCLUDE_PATH`, the pinned build's `.:${PEAR_INSTALLDIR}`,
+    // which `DEFAULT_INCLUDE_PATH` says too.
+    ("include_path", crate::constants::PHP_INCLUDE_PATH),
     ("zend.exception_ignore_args", "0"),
     ("zend.exception_string_param_max_len", "15"),
     ("zend.max_allowed_stack_size", "0"),
@@ -773,6 +665,7 @@ impl EngineBuilder {
             };
             constant_values.push((decl.name.0.clone(), value));
         }
+        let sapi_names = crate::constants::host_names(&mut strings);
         Engine {
             shared: Arc::new(Shared {
                 extensions,
@@ -787,6 +680,7 @@ impl EngineBuilder {
                 engine_states,
                 ini,
                 constant_values,
+                sapi_names,
                 entry: self.entry,
                 reenter: self.reenter,
                 units: Cache::new(MAX_ACCELERATED_FILES),
@@ -1083,6 +977,7 @@ impl Engine {
         crate::output::deactivate(&mut req);
         req.free_shutdown_functions();
         req.close_resources();
+        req.free_user_handlers();
         req.destroy_symbol_table();
         req.free_object_storage();
         // `php_error_cb` rendered the fatal where it was raised, on
@@ -1258,6 +1153,13 @@ fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) {
     }
     req.detach_symbol_table(frame);
     req.pop_frame();
+    // What the loop left pending for the user exception handler, served
+    // with the main frame left (`zend_execute_scripts`).
+    if req.is_pending()
+        && let Err(fatal) = req.uncaught()
+    {
+        req.end_in(&fatal);
+    }
 }
 
 #[cfg(test)]
@@ -1982,13 +1884,28 @@ mod tests {
 
     /// `Engine::builder().build()` interns a string constant's value into
     /// its table at build, as php's `MINIT` does, and no request grows
-    /// the table for reading one: `PHP_VERSION` is the one string long
-    /// enough to be allocated among the engine's own, `PHP_EOL` being
-    /// the frozen one-byte string.
+    /// the table for reading one: every value of Core's longer than one
+    /// byte, each once however many constants share it, and the hosts'
+    /// names `PHP_SAPI` is read from, `PHP_EOL` being the frozen one-byte
+    /// string.
     #[test]
     fn a_string_constant_is_interned_into_the_engine_at_build() {
         let engine = Engine::builder().build();
-        assert_eq!(strings_of(&engine), 1, "PHP_VERSION, and nothing else");
+        let distinct: std::collections::BTreeSet<&[u8]> = engine
+            .shared
+            .constants
+            .iter()
+            .filter_map(|decl| match &decl.value {
+                ConstExpr::Str(s) if s.len() > 1 => Some(&**s),
+                _ => None,
+            })
+            .chain(crate::constants::HOSTS.iter().map(|name| name.as_bytes()))
+            .collect();
+        assert_eq!(
+            strings_of(&engine),
+            distinct.len(),
+            "Core's strings and the hosts' names, each once"
+        );
         let version = engine.shared.constant(b"PHP_VERSION");
         assert_eq!(
             version.as_ref().and_then(Value::as_str_bytes),
