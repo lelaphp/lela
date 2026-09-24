@@ -1880,7 +1880,7 @@ fn has_to_string(req: &mut Request, object: PhpObject) -> Result<bool, Thrown> {
 ///   string(12) "php://output"
 /// }
 /// ```
-fn stream_get_meta_data(req: &mut Request) -> Result<Value, Thrown> {
+pub(super) fn stream_get_meta_data(req: &mut Request) -> Result<Value, Thrown> {
     argument_count_between(req, 1, 1)?;
     let stream = stream_argument(req, 1)?;
     Ok(Value::array(stream.meta_data(req)?))

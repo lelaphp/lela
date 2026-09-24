@@ -72,6 +72,7 @@ mod quot_print;
 mod scanf;
 mod sha1;
 mod soundex;
+mod streamsfuncs;
 mod string;
 mod strnatcmp;
 mod stub;
@@ -106,6 +107,7 @@ struct State {
     string: string::State,
     uniqid: uniqid::State,
     hrtime: hrtime::State,
+    contexts: streamsfuncs::Contexts,
 }
 
 /// The extension value (design §7.1): declarations paired with entries,
@@ -240,6 +242,7 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
         basic_functions::natives(),
         dir::natives(),
         link::natives(),
+        streamsfuncs::natives(),
     ]
     .into_iter()
     .flatten()
@@ -254,6 +257,7 @@ fn file_constants() -> Vec<ConstDecl> {
         html::constants(),
         basic_functions::constants(),
         dir::constants(),
+        streamsfuncs::constants(),
     ]
     .into_iter()
     .flatten()
