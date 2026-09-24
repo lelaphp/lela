@@ -1271,6 +1271,121 @@ impl Request {
         )
     }
 
+    /// `Closure::call`'s serving (`Z/Zend/zend_closures.c:190-231`): the
+    /// closure's function on `this`, in `scope`, with the closure itself
+    /// on the call so the body's `BIND_STATIC` prologue finds what it
+    /// bound. php serves a copy of the function whose scope is `scope`
+    /// and puts no object in the store for it; here the closure's own
+    /// payload carries the scope for the length of the call and has its
+    /// own back after, so no object id is spent where php spends none.
+    pub(crate) fn serve_closure_as(
+        &mut self,
+        object: PhpObject,
+        this: PhpObject,
+        scope: ClassId,
+        arguments: &[Value],
+        extra_named: &[(PhpString, Value)],
+    ) -> Result<Value, Thrown> {
+        let Some(closure) = object.closure(self).cloned() else {
+            return Ok(Value::null());
+        };
+        let held = object
+            .native_mut::<ClosureInfo>(self)
+            .map(|payload| payload.scope.replace(scope));
+        self.addref(&object.as_value());
+        let served = self.serve_call(
+            closure.function,
+            Some(this),
+            Some(scope),
+            Some(object),
+            arguments,
+            extra_named,
+        );
+        if let Some(held) = held
+            && let Some(payload) = object.native_mut::<ClosureInfo>(self)
+        {
+            payload.scope = held;
+        }
+        served
+    }
+
+    /// Whether a closure's function is `ZEND_ACC_STATIC`: a closure
+    /// written `static function`, or one made of a `static` method.
+    pub(crate) fn closure_is_static(&self, closure: &ClosureInfo) -> bool {
+        if let Some(decl) = self.method_decl(closure.function) {
+            return !decl.is_instance;
+        }
+        self.closure_code(closure.function)
+            .is_some_and(|code| code.no_receiver)
+    }
+
+    /// `ZEND_ACC_USES_THIS`, which `zend_compile` sets on an op array
+    /// that reads `$this`: a `FETCH_THIS`, or an object opcode whose
+    /// object operand is the frame's own (`UNUSED`).
+    pub(crate) fn closure_uses_this(&self, closure: &ClosureInfo) -> bool {
+        use php_unit::{Opcode, OperandKind};
+        let Some(code) = self.closure_code(closure.function) else {
+            return false;
+        };
+        code.oplines.iter().any(|op| {
+            op.opcode == Opcode::FetchThis
+                || (op.op1_type == OperandKind::Unused
+                    && matches!(
+                        op.opcode,
+                        Opcode::FetchObjR
+                            | Opcode::FetchObjW
+                            | Opcode::FetchObjRw
+                            | Opcode::FetchObjIs
+                            | Opcode::FetchObjUnset
+                            | Opcode::FetchObjFuncArg
+                            | Opcode::AssignObj
+                            | Opcode::AssignObjOp
+                            | Opcode::AssignObjRef
+                            | Opcode::PreIncObj
+                            | Opcode::PreDecObj
+                            | Opcode::PostIncObj
+                            | Opcode::PostDecObj
+                            | Opcode::UnsetObj
+                            | Opcode::IssetIsemptyPropObj
+                            | Opcode::InitMethodCall
+                    ))
+        })
+    }
+
+    /// The op array a user function serves, none for a native.
+    fn closure_code(&self, function: Function) -> Option<&php_unit::OpArray> {
+        let user = self.user_function(function)?;
+        exec::body_of(&user.unit, user.body)
+    }
+
+    /// `ce->type == ZEND_INTERNAL_CLASS`: a class the engine or an
+    /// extension declared, and not one a program did.
+    pub(crate) fn class_is_internal(&self, class: ClassId) -> bool {
+        usize::try_from(class.0).is_ok_and(|at| at < self.shared.classes.len())
+    }
+
+    /// `func->common.function_name`: a function's name as declared.
+    pub(crate) fn function_name(&self, function: Function) -> String {
+        self.declared_name(function)
+    }
+
+    /// The `Closure` whose body is the first user frame standing, what
+    /// `Closure::getCurrent` reads off `EX(prev_execute_data)`: none
+    /// where that frame serves no closure, or a closure made of a named
+    /// function (`ZEND_ACC_FAKE_CLOSURE`).
+    pub(crate) fn calling_closure(&self) -> Option<PhpObject> {
+        for link in self.chain() {
+            if let Link::Frame(_, state) = link {
+                let closure = state.closure?;
+                return closure
+                    .closure(self)
+                    .filter(|info| !info.fake)
+                    .map(|_| closure);
+            }
+        }
+        None
+    }
+
     /// `zend_call_function` over a native function: [`Request::serve_method`]
     /// with no receiver and no called scope, what `Closure::__invoke`
     /// serves for a closure over a function.
@@ -7558,9 +7673,14 @@ impl Request {
     /// handed as the scope of a closure declared there, and none in a
     /// function or the main op array. Read off the frame and not off
     /// [`Request::executed_scope`], which answers for the native being
-    /// served where one is.
+    /// served where one is. A closure's frame serves the closure's own
+    /// copy of its function, whose scope is the one the closure was
+    /// made or bound in, which `Closure::bind` and `Closure::call` move.
     pub(crate) fn frame_scope(&self, frame: FrameRef) -> Option<ClassId> {
         let state = self.vm.at(frame)?;
+        if state.closure.is_some() {
+            return self.closure_scope(state.closure);
+        }
         match state.function {
             Some(function) => self.method_class(function),
             None => state.scope,
