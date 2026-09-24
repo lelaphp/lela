@@ -1329,14 +1329,32 @@ impl Request {
 
     /// The served call off the stack, `zend_vm_stack_free_args` over what
     /// the `SEND_*` oplines placed and `zend_vm_stack_free_call_frame`
-    /// after it.
+    /// after it. A native's argument is given up as php's `nogc` gives it
+    /// up and is no possible root of the cycle collector, where a user
+    /// function's, a CV of its frame, is one when the frame is left.
+    ///
+    /// ```php
+    /// $o = new stdClass;
+    /// var_dump(is_object($o), gc_status()["roots"]);
+    /// function f($x) {}
+    /// f($o);
+    /// var_dump(gc_status()["roots"]);
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// int(0)
+    /// int(1)
+    /// ```
     pub(crate) fn pop_call(&mut self) {
         if let Some(call) = self.vm.pop_call() {
+            // `zend_vm_stack_free_args`, whose `zval_ptr_dtor_nogc` makes
+            // no argument a possible root; the receiver and the closure
+            // after them are `OBJ_RELEASE`, which does.
             for value in call.coerced {
-                self.release(value);
+                self.release_nogc(value);
             }
             for value in call.arguments {
-                self.release(value);
+                self.release_nogc(value);
             }
             if let Some(name) = call.name {
                 self.release(Value::string(name));
@@ -10725,6 +10743,60 @@ impl HeapHooks for Hooks<'_> {
         let class = ClassId(obj.class());
         self.0.method_named(class, b"__destruct").is_some()
             || crate::fiber::serves_destructor(self.0.object_handlers(obj))
+    }
+
+    /// The live temporaries of every frame of the running execution,
+    /// innermost first (`zend_gc_check_root_tmpvars`): each frame's
+    /// `ZEND_LIVE_TMPVAR` and `ZEND_LIVE_LOOP` ranges open at the opline
+    /// it stands at, a range that starts past it ending the walk of that
+    /// frame's table, as php's sorted table does. A `foreach` by
+    /// reference that a collection ran inside holds its array in a live
+    /// `LOOP` temporary, which the collection roots again after it, and
+    /// the array's cycles are found by the next one.
+    ///
+    /// ```php
+    /// $a = [0, 1];
+    /// foreach ($a as &$v) {
+    ///     $a[0] =& $a;
+    ///     $a[1] = array();
+    ///     $a[1][0] =& $a[1];
+    ///     $b = 1;
+    ///     $a =& $b;
+    ///     var_dump(gc_collect_cycles());
+    ///     break;
+    /// }
+    /// var_dump(gc_status()['roots']);
+    /// unset($v);
+    /// var_dump(gc_collect_cycles());
+    /// ```
+    /// ```expect
+    /// int(0)
+    /// int(1)
+    /// int(2)
+    /// ```
+    fn gc_live_temporaries(&mut self, visit: &mut dyn FnMut(Zval)) {
+        let req = &*self.0;
+        for (at, state) in req.vm.frames().iter().enumerate().rev() {
+            let Some(code) = crate::exec::body_of(&state.unit, state.body) else {
+                continue;
+            };
+            let frame = FrameRef(u32::try_from(at).unwrap_or(u32::MAX));
+            for range in &code.live_ranges {
+                if range.start.0 > state.opline {
+                    break;
+                }
+                if range.end.0 <= state.opline {
+                    continue;
+                }
+                if matches!(
+                    range.kind,
+                    php_unit::LiveKind::TmpVar | php_unit::LiveKind::Loop
+                ) {
+                    let slot = crate::exec::temporary_slot(code, range.var);
+                    visit(req.slot(frame, slot).to_zval());
+                }
+            }
+        }
     }
 
     /// `get_gc`, through the table: what the payload owns, handed to the

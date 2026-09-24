@@ -92,6 +92,17 @@ pub trait HeapHooks {
         let _ = end;
         false
     }
+    /// The temporaries live where every frame of the running execution
+    /// stands, php's `ZEND_LIVE_TMPVAR` and `ZEND_LIVE_LOOP` ranges open
+    /// at each frame's opline, innermost frame first: what
+    /// `zend_gc_remove_root_tmpvars` takes out of the root buffer before
+    /// a collection and `zend_gc_check_root_tmpvars` puts back after it,
+    /// since a temporary is freed without a root and one the producing
+    /// code rooted would otherwise be lost. A heap with no frames has
+    /// none.
+    fn gc_live_temporaries(&mut self, visit: &mut dyn FnMut(Zval)) {
+        let _ = visit;
+    }
     /// `zend_weakrefs_notify` (`Z/Zend/zend_weakrefs.c:212`): the object
     /// is being freed, its destructor served and its members not yet
     /// released, and every `WeakReference` naming it is cleared and

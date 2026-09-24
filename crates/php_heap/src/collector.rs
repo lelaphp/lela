@@ -1080,6 +1080,9 @@ impl Heap {
         let mut should_rerun = false;
         let mut did_rerun = false;
         let mut kids = Vec::new();
+        if hooks.heap().gc.num_roots != 0 && !hooks.heap().gc.active {
+            Heap::gc_remove_root_tmpvars(hooks);
+        }
         loop {
             if hooks.heap().gc.num_roots == 0 {
                 hooks.heap().gc.compact();
@@ -1150,8 +1153,38 @@ impl Heap {
             }
             break;
         }
+        // No collection while the temporaries are rooted again, before
+        // the threshold is adjusted, which php guards against unbounded
+        // recursion.
+        hooks.heap().gc.active = true;
+        Heap::gc_check_root_tmpvars(hooks);
+        hooks.heap().gc.active = false;
         hooks.heap().gc.collecting += start.elapsed();
         total
+    }
+
+    /// `zend_gc_remove_root_tmpvars`: every live temporary out of the
+    /// root buffer, so the collection counts it as the outside owner it
+    /// is.
+    fn gc_remove_root_tmpvars(hooks: &mut dyn HeapHooks) {
+        let mut live = Vec::new();
+        hooks.gc_live_temporaries(&mut |z| live.push(z));
+        let gc = &mut hooks.heap().gc;
+        for z in live {
+            if let Some(node) = Node::of(z) {
+                gc.remove_from_buffer(node);
+            }
+        }
+    }
+
+    /// `zend_gc_check_root_tmpvars`: every live temporary a possible
+    /// root again.
+    fn gc_check_root_tmpvars(hooks: &mut dyn HeapHooks) {
+        let mut live = Vec::new();
+        hooks.gc_live_temporaries(&mut |z| live.push(z));
+        for z in live {
+            Heap::gc_check_possible_root(hooks, z);
+        }
     }
 
     /// `gc_enable`: whether the collector was on. The first enable lays
