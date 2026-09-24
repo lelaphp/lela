@@ -15,19 +15,28 @@
 
 use std::ffi::CString;
 
-/// `errno` as `iconv` leaves it: `EINVAL`, `EILSEQ` and `E2BIG`.
-pub(super) const EINVAL: i32 = libc::EINVAL;
-pub(super) const EILSEQ: i32 = libc::EILSEQ;
-pub(super) const E2BIG: i32 = libc::E2BIG;
+/// `errno` as `iconv_open` and `iconv` leave it, decoded once, here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Errno {
+    /// `EINVAL`: `iconv`'s incomplete sequence at the input's end, and
+    /// `iconv_open`'s conversion it does not know.
+    Inval,
+    /// `EILSEQ`: an illegal sequence in the input.
+    Ilseq,
+    /// `E2BIG`: no room left for what comes next.
+    TooBig,
+    /// Any other, which php prints by number.
+    Other(i32),
+}
 
 /// One `iconv_t` converter, closed when dropped.
 pub(super) struct Cd(libc::iconv_t);
 
 impl Cd {
     /// `iconv_open(to, from)`: the converter, or `errno`.
-    pub(super) fn open(to: &[u8], from: &[u8]) -> Result<Cd, i32> {
+    pub(super) fn open(to: &[u8], from: &[u8]) -> Result<Cd, Errno> {
         let (Ok(to), Ok(from)) = (CString::new(to), CString::new(from)) else {
-            return Err(EINVAL);
+            return Err(Errno::Inval);
         };
         // SAFETY: both are NUL-terminated strings that outlive the call,
         // which reads them and keeps neither.
@@ -46,7 +55,7 @@ impl Cd {
         &mut self,
         input: Option<&mut &[u8]>,
         out: &mut [u8],
-    ) -> (usize, Result<usize, i32>) {
+    ) -> (usize, Result<usize, Errno>) {
         prime();
         let mut out_p = out.as_mut_ptr().cast::<libc::c_char>();
         let mut out_left = out.len();
@@ -98,14 +107,14 @@ impl Cd {
     /// for `input.len() + 32` bytes grown by the input's length at each
     /// `E2BIG`, then the shift state flushed, growing by 16. The bytes
     /// converted come back beside the `errno` of the call that stopped.
-    pub(super) fn convert(&mut self, input: &[u8]) -> (Vec<u8>, Result<(), i32>) {
+    pub(super) fn convert(&mut self, input: &[u8]) -> (Vec<u8>, Result<(), Errno>) {
         let mut out = vec![0u8; input.len() + 32];
         let (mut used, mut rest, mut result) = (0, input, Ok(0));
         while !rest.is_empty() {
             let (written, step) = self.step(Some(&mut rest), &mut out[used..]);
             used += written;
             result = step;
-            if result == Err(E2BIG) && !rest.is_empty() {
+            if result == Err(Errno::TooBig) && !rest.is_empty() {
                 out.resize(out.len() + input.len(), 0);
                 continue;
             }
@@ -115,7 +124,7 @@ impl Cd {
             let (written, step) = self.step(None, &mut out[used..]);
             used += written;
             result = step;
-            if result != Err(E2BIG) {
+            if result != Err(Errno::TooBig) {
                 break;
             }
             out.resize(out.len() + 16, 0);
@@ -127,7 +136,7 @@ impl Cd {
     /// `_php_iconv_appendl`: `input` onto `out` in room of 128 bytes and
     /// doubling, `None` flushing the shift state; the `errno` of a call
     /// that failed other than for room.
-    pub(super) fn append(&mut self, input: Option<&[u8]>, out: &mut Vec<u8>) -> Result<(), i32> {
+    pub(super) fn append(&mut self, input: Option<&[u8]>, out: &mut Vec<u8>) -> Result<(), Errno> {
         let mut room = 128;
         let mut rest = input.unwrap_or_default();
         loop {
@@ -135,7 +144,7 @@ impl Cd {
             let (written, result) = self.step(input.map(|_| &mut rest), &mut chunk);
             out.extend_from_slice(&chunk[..written]);
             match result {
-                Err(E2BIG) => {}
+                Err(Errno::TooBig) => {}
                 Err(errno) => return Err(errno),
                 Ok(_) if input.is_none() => return Ok(()),
                 Ok(_) => {}
@@ -153,26 +162,27 @@ impl Cd {
     /// call's bytes handed to `each` with the walk's `errno` until it
     /// answers `false` or a call writes nothing. The answer is the `errno`
     /// the last failing call left, which strlen and substr read, and that
-    /// of the last failing call that wrote, which is all strpos checks.
+    /// of the last failing call that wrote, which is all strpos checks;
+    /// `None` where no call failed.
     pub(super) fn walk(
         &mut self,
         input: &[u8],
         width: usize,
-        mut each: impl FnMut(&[u8], &mut i32) -> bool,
-    ) -> (i32, i32) {
-        let (mut rest, mut more, mut errno, mut wrote) = (input, !input.is_empty(), 0, 0);
+        mut each: impl FnMut(&[u8], &mut Option<Errno>) -> bool,
+    ) -> (Option<Errno>, Option<Errno>) {
+        let (mut rest, mut more, mut errno, mut wrote) = (input, !input.is_empty(), None, None);
         while more {
             let mut buf = [0u8; 8];
             more = !rest.is_empty();
             let (written, result) = self.step(more.then_some(&mut rest), &mut buf[..width]);
             if let Err(e) = result {
-                errno = e;
+                errno = Some(e);
             }
             if written == 0 {
                 break;
             }
             if let Err(e) = result {
-                wrote = e;
+                wrote = Some(e);
             }
             if !each(&buf[..written], &mut errno) {
                 break;
@@ -222,6 +232,11 @@ fn prime() {
 }
 
 /// The calling thread's `errno`, read right after the call that set it.
-fn errno() -> i32 {
-    std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+fn errno() -> Errno {
+    match std::io::Error::last_os_error().raw_os_error().unwrap_or(0) {
+        libc::EINVAL => Errno::Inval,
+        libc::EILSEQ => Errno::Ilseq,
+        libc::E2BIG => Errno::TooBig,
+        other => Errno::Other(other),
+    }
 }

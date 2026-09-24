@@ -24,7 +24,7 @@
 
 mod ffi;
 
-use ffi::{Cd, E2BIG, EILSEQ, EINVAL};
+use ffi::{Cd, Errno};
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::coerce::coerce_param;
 use php_ext::decl::{ConstDecl, ConstExpr, FunctionDecl, IniDecl, Name, Parameter, Type};
@@ -47,8 +47,35 @@ type Entry = fn(&mut Request) -> Result<Value, Thrown>;
 const UCS4: &[u8] = b"UCS-4LE";
 /// `ICONV_CSNMAXLEN`.
 const MAX_NAME: usize = 64;
-/// The three entries, as `iconv_get_encoding('all')` lists them.
-const KINDS: [&str; 3] = ["input_encoding", "output_encoding", "internal_encoding"];
+/// The three encodings, in the order `iconv_get_encoding('all')` lists
+/// them.
+#[derive(Clone, Copy)]
+#[rustfmt::skip]
+enum Kind { Input, Output, Internal }
+
+impl Kind {
+    const ALL: [Kind; 3] = [Kind::Input, Kind::Output, Kind::Internal];
+
+    /// php's own entry, and the `$type` the two natives take.
+    fn name(self) -> &'static str {
+        match self {
+            Kind::Input => "input_encoding",
+            Kind::Output => "output_encoding",
+            Kind::Internal => "internal_encoding",
+        }
+    }
+
+    /// The `iconv.*` entry.
+    fn entry(self) -> String {
+        format!("iconv.{}", self.name())
+    }
+
+    /// `$type`, as php's `strcasecmp` reads it.
+    fn parse(given: &[u8]) -> Option<Kind> {
+        let named = |kind: &Kind| kind.name().as_bytes().eq_ignore_ascii_case(given);
+        Kind::ALL.into_iter().find(named)
+    }
+}
 
 /// The extension value (design §7.1): declarations paired with entries,
 /// and the state declared on it.
@@ -70,8 +97,8 @@ pub fn extension() -> Extension {
         value,
         attributes: Vec::new(),
     };
-    let ini = |kind: &str| IniDecl {
-        name: Name(format!("iconv.{kind}").into_bytes().into()),
+    let ini = |kind: Kind| IniDecl {
+        name: Name(kind.entry().into_bytes().into()),
         default: Box::new([]),
         user: true,
         per_dir: true,
@@ -85,7 +112,7 @@ pub fn extension() -> Extension {
             constant("ICONV_MIME_DECODE_STRICT", ConstExpr::Long(1)),
             constant("ICONV_MIME_DECODE_CONTINUE_ON_ERROR", ConstExpr::Long(2)),
         ])
-        .ini(KINDS.map(ini).to_vec())
+        .ini(Kind::ALL.map(ini).to_vec())
         .info(info)
         .engine_state(|_| {
             ffi::reset_lc_ctype();
@@ -119,7 +146,7 @@ fn info(req: &mut Request) {
         &["iconv implementation", "libiconv"],
         &["iconv library version", "1.11"],
     ]);
-    let names = KINDS.map(|kind| format!("iconv.{kind}"));
+    let names = Kind::ALL.map(Kind::entry);
     req.info_ini_entries(&names.each_ref().map(String::as_bytes));
 }
 
@@ -246,34 +273,30 @@ fn argument(req: &mut Request, position: u32, ty: &Type) -> Result<Option<Value>
     }
 }
 
+/// `ty`, or with `nullable` its `?ty`.
+#[rustfmt::skip]
+fn or_null(ty: Type, nullable: bool) -> Type {
+    if nullable { Type::Nullable(Box::new(ty)) } else { ty }
+}
+
 /// `Z_PARAM_STR`, and with `nullable` its `_OR_NULL`.
 fn string(req: &mut Request, position: u32, nullable: bool) -> Result<Option<Vec<u8>>, Thrown> {
-    let ty = if nullable {
-        Type::Nullable(Box::new(Type::String))
-    } else {
-        Type::String
-    };
-    let value = argument(req, position, &ty)?;
+    let value = argument(req, position, &or_null(Type::String, nullable))?;
     let bytes = value.and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec));
     Ok(bytes.or((!nullable).then(Vec::new)))
 }
 
 /// `Z_PARAM_LONG`, and with `nullable` its `_OR_NULL`.
 fn long(req: &mut Request, position: u32, nullable: bool) -> Result<Option<i64>, Thrown> {
-    let ty = if nullable {
-        Type::Nullable(Box::new(Type::Int))
-    } else {
-        Type::Int
-    };
-    Ok(argument(req, position, &ty)?.and_then(|v| v.as_int()))
+    Ok(argument(req, position, &or_null(Type::Int, nullable))?.and_then(|v| v.as_int()))
 }
 
 /// `get_input_encoding`, `get_output_encoding` and
 /// `get_internal_encoding`: the `iconv.*` entry, then php's own, then
 /// `default_charset`, then `UTF-8`.
-fn encoding(req: &Request, kind: &str) -> Vec<u8> {
-    let own = format!("iconv.{kind}");
-    [own.as_bytes(), kind.as_bytes(), b"default_charset"]
+fn encoding(req: &Request, kind: Kind) -> Vec<u8> {
+    let own = kind.entry();
+    [own.as_bytes(), kind.name().as_bytes(), b"default_charset"]
         .iter()
         .find_map(|name| {
             req.ini_get(name)
@@ -287,7 +310,7 @@ fn encoding(req: &Request, kind: &str) -> Vec<u8> {
 /// `None` after php's warning for a name of 64 bytes or more.
 fn charset(req: &mut Request, position: u32) -> Result<Option<Vec<u8>>, Thrown> {
     match string(req, position, true)? {
-        None => Ok(Some(encoding(req, "internal_encoding"))),
+        None => Ok(Some(encoding(req, Kind::Internal))),
         Some(name) if name.len() >= MAX_NAME => {
             too_long(req);
             Ok(None)
@@ -313,21 +336,34 @@ enum Error {
     Unknown(i32),
 }
 
-/// `iconv_open`, its failure as php reads it.
-fn opened(to: &[u8], from: &[u8]) -> Result<Cd, Error> {
-    let kind = |errno| [Error::Converter, Error::WrongCharset][usize::from(errno == EINVAL)];
-    Cd::open(to, from).map_err(kind)
+impl From<Errno> for Error {
+    /// `errno` after `iconv`, as `php_iconv_string` reads it.
+    fn from(errno: Errno) -> Error {
+        match errno {
+            Errno::Inval => Error::IllegalChar,
+            Errno::Ilseq => Error::IllegalSeq,
+            Errno::TooBig => Error::TooBig,
+            Errno::Other(n) => Error::Unknown(n),
+        }
+    }
 }
 
-/// `errno` after a walk, as the character natives switch on it; an
-/// `errno` the switch has no case for is `Unknown` where `strict`.
-fn by_errno(errno: i32, strict: bool) -> Result<(), Error> {
+/// `iconv_open`, its failure as php reads it.
+fn opened(to: &[u8], from: &[u8]) -> Result<Cd, Error> {
+    Cd::open(to, from).map_err(|errno| match errno {
+        Errno::Inval => Error::WrongCharset,
+        _ => Error::Converter,
+    })
+}
+
+/// `errno` after a walk, as the character natives switch on it: room
+/// is no error, and an `errno` the switch has no case for is `Unknown`
+/// only where `strict`.
+fn by_errno(errno: Option<Errno>, strict: bool) -> Result<(), Error> {
     match errno {
-        EINVAL => Err(Error::IllegalChar),
-        EILSEQ => Err(Error::IllegalSeq),
-        0 | E2BIG => Ok(()),
-        other if strict => Err(Error::Unknown(other)),
-        _ => Ok(()),
+        None | Some(Errno::TooBig) => Ok(()),
+        Some(Errno::Other(_)) if !strict => Ok(()),
+        Some(errno) => Err(errno.into()),
     }
 }
 
@@ -348,16 +384,11 @@ fn failed(req: &mut Request, error: Error, to: &[u8], from: &[u8]) -> Result<Val
     Ok(Value::bool(false))
 }
 
-/// `php_iconv_string`: what was converted comes back beside the error.
-fn convert(input: &[u8], to: &[u8], from: &[u8]) -> Result<(Vec<u8>, Option<Error>), Error> {
+/// `php_iconv_string`: the bytes, which every caller here drops on an
+/// error.
+fn convert(input: &[u8], to: &[u8], from: &[u8]) -> Result<Vec<u8>, Error> {
     let (out, result) = opened(to, from)?.convert(input);
-    match result {
-        Ok(()) => Ok((out, None)),
-        Err(EINVAL) => Ok((out, Some(Error::IllegalChar))),
-        Err(EILSEQ) => Ok((out, Some(Error::IllegalSeq))),
-        Err(E2BIG) => Ok((out, Some(Error::TooBig))),
-        Err(errno) => Err(Error::Unknown(errno)),
-    }
+    result.map(|()| out).map_err(Error::from)
 }
 
 /// `_php_iconv_strlen`: the characters counted eight bytes of
@@ -446,7 +477,7 @@ fn substr(input: &[u8], offset: i64, len: i64, charset: &[u8]) -> Result<Vec<u8>
                 len > 0
             }
             Some(Err(e)) => {
-                *errno = e;
+                *errno = Some(e);
                 false
             }
             None => false,
@@ -502,10 +533,7 @@ fn strpos(
     charset: &[u8],
     reverse: bool,
 ) -> Result<Option<usize>, Error> {
-    let (ndl, error) = convert(needle, UCS4, charset)?;
-    if let Some(error) = error {
-        return Err(error);
-    }
+    let ndl = convert(needle, UCS4, charset)?;
     let (mut at, mut start, mut found, mut index) = (0usize, None::<usize>, None, 0);
     let (_, errno) = opened(UCS4, charset)?.walk(haystack, 4, |buf, _| {
         index += 1;
@@ -663,8 +691,8 @@ fn iconv(req: &mut Request) -> Result<Value, Thrown> {
         return Ok(Value::bool(false));
     }
     match convert(&input, &to, &from) {
-        Ok((out, None)) => Ok(Value::string(PhpString::new(req, &out)?)),
-        Ok((_, Some(error))) | Err(error) => failed(req, error, &to, &from),
+        Ok(out) => Ok(Value::string(PhpString::new(req, &out)?)),
+        Err(error) => failed(req, error, &to, &from),
     }
 }
 
@@ -691,13 +719,10 @@ fn iconv_set_encoding(req: &mut Request) -> Result<Value, Thrown> {
         too_long(req);
         return Ok(Value::bool(false));
     }
-    let Some(kind) = KINDS
-        .iter()
-        .find(|k| k.as_bytes().eq_ignore_ascii_case(&kind))
-    else {
+    let Some(kind) = Kind::parse(&kind) else {
         return Ok(Value::bool(false));
     };
-    let name = format!("iconv.{kind}");
+    let name = kind.entry();
     // `OnUpdateInternalEncoding` and its kin, at the runtime stage.
     docref(
         req,
@@ -733,20 +758,17 @@ fn iconv_get_encoding(req: &mut Request) -> Result<Value, Thrown> {
     let kind = string(req, 1, true)?.unwrap_or_else(|| b"all".to_vec());
     if kind.eq_ignore_ascii_case(b"all") {
         let mut out = PhpArray::new(req)?;
-        for name in KINDS {
-            let key = PhpString::new(req, name.as_bytes())?;
-            let charset = encoding(req, name);
+        for kind in Kind::ALL {
+            let key = PhpString::new(req, kind.name().as_bytes())?;
+            let charset = encoding(req, kind);
             let value = PhpString::new(req, &charset)?;
             out.set(req, Key::Str(key), Value::string(value))?;
         }
         return Ok(Value::array(out));
     }
-    match KINDS
-        .iter()
-        .find(|k| k.as_bytes().eq_ignore_ascii_case(&kind))
-    {
-        Some(name) => {
-            let charset = encoding(req, name);
+    match Kind::parse(&kind) {
+        Some(kind) => {
+            let charset = encoding(req, kind);
             Ok(Value::string(PhpString::new(req, &charset)?))
         }
         None => Ok(Value::bool(false)),
