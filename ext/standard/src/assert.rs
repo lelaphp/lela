@@ -5,13 +5,14 @@
 //! php reads `ASSERTG`; `ASSERTG(callback)` is the request's assert
 //! callback, the engine's.
 //!
-//! What waits elsewhere: php's compiler hands `assert` the assertion's
-//! source as its description (`zend_compile_assert`) and skips the call
-//! under `zend.assertions = -1`, which the compiler here does not do yet,
-//! so an assertion with no description fails with an empty message; and
-//! the entries' `OnUpdate*` handlers raise `assert.* INI setting is
-//! deprecated` when a program or a startup ini changes one, which needs a
-//! face the api has not got (#684).
+//! The compiler hands `assert` the assertion's source as its description
+//! where none is written, and skips the call while `zend.assertions` is
+//! at or below zero (`zend_compile_assert`, `ZEND_ASSERT_CHECK`), so
+//! what reaches here under `zend.assertions <= 0` is a call by another
+//! name, `$f = 'assert'; $f(false)`, which the native answers `true`.
+//! What waits elsewhere: the entries' `OnUpdate*` handlers raise
+//! `assert.* INI setting is deprecated` when a program or a startup ini
+//! changes one, which needs a face the api has not got (#684).
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 

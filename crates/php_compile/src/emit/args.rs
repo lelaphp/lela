@@ -25,6 +25,7 @@
 //! for writing or for reading by it; `SEND_FUNC_ARG` then sends what
 //! was fetched the same way.
 
+use php_heap::Zval;
 use php_syntax::tree::{self, Node, NodeId};
 use php_unit::decl::Parameter;
 use php_unit::{Opcode, OperandKind, Opline};
@@ -35,12 +36,16 @@ use crate::CompileError;
 /// One argument at a call site, php's child of a `ZEND_AST_ARG_LIST`:
 /// a plain expression, one written `name: value`
 /// (`ZEND_AST_NAMED_ARG`), or one written `...value`
-/// (`ZEND_AST_UNPACK`).
+/// (`ZEND_AST_UNPACK`); or one the compiler adds to the list itself,
+/// a constant written nowhere, at its name where it has one, which is
+/// the description `zend_compile_assert` hands `assert()`
+/// (`zend_ast_create_zval_from_str`).
 #[derive(Clone)]
 pub(super) enum Arg {
     Positional(tree::Expr),
     Named(Box<[u8]>, tree::Expr),
     Unpack(tree::Expr),
+    Made(Option<Box<[u8]>>, Zval),
 }
 
 /// A call site's argument list: the arguments as written, and the
@@ -70,7 +75,7 @@ impl Args {
             .iter()
             .map(|arg| match arg {
                 Arg::Positional(value) => Some(*value),
-                Arg::Named(..) | Arg::Unpack(_) => None,
+                Arg::Named(..) | Arg::Unpack(_) | Arg::Made(..) => None,
             })
             .collect()
     }
@@ -166,7 +171,7 @@ enum ArgAt {
 /// reaches it.
 enum Placed {
     Send {
-        value: tree::Expr,
+        value: Sent,
         at: ArgAt,
         number: Option<u32>,
     },
@@ -175,6 +180,14 @@ enum Placed {
         count: u32,
     },
     Refused(&'static str),
+}
+
+/// What a placed argument sends: an expression the list holds, or the
+/// constant the compiler made ([`Arg::Made`]).
+#[derive(Clone, Copy)]
+enum Sent {
+    Written(tree::Expr),
+    Made(Zval),
 }
 
 /// `zend_compile_args`' placement of a whole list, which reads the
@@ -207,45 +220,53 @@ impl Plan {
         let mut callee = callee;
         let mut uses_unpack = false;
         for argument in &arguments.list {
-            let placed = match argument {
-                Arg::Unpack(_) if uses_named => {
-                    Placed::Refused("Cannot use argument unpacking after named arguments")
-                }
+            let (name, value) = match argument {
                 Arg::Unpack(value) => {
-                    // "Unpack may contain named arguments."
-                    plan.may_have_undef = true;
-                    if callee.is_none_or(|callee| callee.variadic.is_some()) {
-                        plan.extra_named = true;
-                    }
-                    uses_unpack = true;
-                    callee = None;
-                    Placed::Unpack {
-                        value: *value,
-                        count: plan.count,
-                    }
+                    let placed = if uses_named {
+                        Placed::Refused("Cannot use argument unpacking after named arguments")
+                    } else {
+                        // "Unpack may contain named arguments."
+                        plan.may_have_undef = true;
+                        if callee.is_none_or(|callee| callee.variadic.is_some()) {
+                            plan.extra_named = true;
+                        }
+                        uses_unpack = true;
+                        callee = None;
+                        Placed::Unpack {
+                            value: *value,
+                            count: plan.count,
+                        }
+                    };
+                    plan.placed.push(placed);
+                    continue;
                 }
-                Arg::Positional(_) if uses_unpack => {
+                Arg::Positional(value) => (None, Sent::Written(*value)),
+                Arg::Named(name, value) => (Some(name), Sent::Written(*value)),
+                Arg::Made(name, value) => (name.as_ref(), Sent::Made(*value)),
+            };
+            let placed = match name {
+                None if uses_unpack => {
                     Placed::Refused("Cannot use positional argument after argument unpacking")
                 }
-                Arg::Positional(_) if uses_named => {
+                None if uses_named => {
                     Placed::Refused("Cannot use positional argument after named argument")
                 }
-                Arg::Positional(value) => {
+                None => {
                     plan.count += 1;
                     Placed::Send {
-                        value: *value,
+                        value,
                         at: ArgAt::Number(plan.count),
                         number: Some(plan.count),
                     }
                 }
-                Arg::Named(name, value) => {
+                Some(name) => {
                     uses_named = true;
                     let number = callee.and_then(|callee| callee.arg_num(name));
                     if callee.is_some() && number == Some(plan.count + 1) && !plan.may_have_undef {
                         // "Using named arguments, but passing in order."
                         plan.count += 1;
                         Placed::Send {
-                            value: *value,
+                            value,
                             at: ArgAt::Number(plan.count),
                             number,
                         }
@@ -256,7 +277,7 @@ impl Plan {
                             plan.extra_named = true;
                         }
                         Placed::Send {
-                            value: *value,
+                            value,
                             at: ArgAt::Name(name.clone()),
                             number,
                         }
@@ -363,8 +384,27 @@ impl Emit<'_> {
     ) -> Result<(), CompileError> {
         for placed in &plan.placed {
             match placed {
-                Placed::Send { value, at, number } => {
+                Placed::Send {
+                    value: Sent::Written(value),
+                    at,
+                    number,
+                } => {
                     self.send_arg(*value, at, callee, *number, arguments.line)?;
+                }
+                Placed::Send {
+                    value: Sent::Made(value),
+                    at,
+                    number,
+                } => {
+                    // A constant, which `zend_compile_args` sends as any
+                    // expression that is no variable and no call.
+                    let known = callee.map(|callee| callee.mode(*number));
+                    let opcode = match known.filter(|_| number.is_some()) {
+                        Some(SendMode::Value | SendMode::PreferRef) => Opcode::SendVal,
+                        Some(SendMode::Ref) | None => Opcode::SendValEx,
+                    };
+                    let operand = self.operand(super::Where::Constant(*value));
+                    self.send(opcode, operand, at)?;
                 }
                 Placed::Unpack { value, count } => self.send_unpack(*value, *count)?,
                 Placed::Refused(message) => return Err(self.compile_error(*message)),
