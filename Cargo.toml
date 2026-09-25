@@ -4,7 +4,7 @@
 # only `api.lock` today.
 [workspace]
 resolver = "3"
-members = ["crates/*", "xtask", "ext/standard", "ext/spl", "ext/date", "ext/reflection", "ext/pcre", "ext/mbstring", "ext/session", "ext/pdo", "ext/dom", "ext/random", "ext/pdo_mysql", "ext/filter", "ext/tokenizer", "ext/json", "ext/openssl", "ext/curl", "ext/iconv", "ext/pdo_sqlite", "ext/ctype", "ext/hash"]
+members = ["crates/*", "xtask", "ext/standard", "ext/spl", "ext/date", "ext/reflection", "ext/pcre", "ext/mbstring", "ext/session", "ext/pdo", "ext/dom", "ext/random", "ext/pdo_mysql", "ext/filter", "ext/tokenizer", "ext/json", "ext/openssl", "ext/curl", "ext/iconv", "ext/pdo_sqlite", "ext/ctype", "ext/hash", "ext/libxml"]
 
 [workspace.package]
 edition = "2024"
@@ -37,4 +37,5 @@ sha2 = { version = "0.11", default-features = false }  # ext/hash: `compress256`
 keccak = "0.2"                      # ext/hash: Keccak-f[1600] under php's SHA-3 sponge (design §7.2)
 twox-hash = { version = "2", default-features = false, features = ["alloc", "xxhash3_64", "xxhash3_128"] }  # ext/hash: xxh3 and xxh128, which php cannot serialise (design §7.2)
 pcre2-sys = "0.2.10"                # libpcre2-8 with its JIT, built from the crate's bundled source (design §7.2, `.cargo/config.toml`'s PCRE2_SYS_STATIC)
+pkg-config = "0.3"                  # ext/libxml's build.rs finds the platform's libxml2 (design §7.2, #731)
 libsqlite3-sys = { version = "0.38", features = ["bundled"] } # ext/pdo_sqlite's libsqlite3, built from the crate's bundled amalgamation (design §7.2, `.cargo/config.toml`'s LIBSQLITE3_FLAGS)

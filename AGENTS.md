@@ -87,7 +87,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=a548d15b3ea52702473b4bf9da48b2fdf35aa711ca83bfd292f5e472fb1acc3d out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=e4f9ff40f7d7d52aa0c00c1677417530ee61d6621990c1d2dffb806d114c73a8 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -102,15 +102,15 @@ third-engine-design.md
 
 | seam | lock | items | ceiling | reading |
 |---|---|---|---|---|
-| heap | heap.lock | 266 |  | pass |
-| unit | unit.lock | 48 |  | pass |
+| heap | heap.lock | 273 |  | pass |
+| unit | unit.lock | 59 |  | pass |
 | ops | ops.lock | 209 |  | pass |
-| api | api.lock | 537 | 560 | pass |
-| sapi | sapi.lock | 6 |  | pass |
+| api | api.lock | 553 | 560 | pass |
+| sapi | sapi.lock | 7 |  | pass |
 | tier | tier.lock |  |  | skip |
-| harness | xtask.lock | 329 |  | pass |
+| harness | xtask.lock | 332 |  | pass |
 
-<!-- /computed in=7b269238be2dee227d4ac49a40d645c540c3feee30c94d705b9ef00b08d4c7d1 out=6f2377e5da8a7e3f59cf59a3a4ea8bf6a5b2d59a17d3f692dd97050fc625caad -->
+<!-- /computed in=9526a325acb5846d0c5880fad781260b6d75a9e6c449c238b86313a1937bf23f out=6111852cd1f3fd27d283245f536c868f46dd47acf81dc0fc870b4a30f5aed988 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
@@ -129,16 +129,16 @@ third-engine-design.md
 | vocab.avoid |  | avoid_from | pass | The glossary's _Avoid_ words appear in no public item name or rustdoc prose; a lock line mirrors php's names and is not read. |
 | vocab.harness |  | avoid_from | pass | The Harness section's _Avoid_ words appear in no public item name or rustdoc prose of the harness; xtask/fixtures/** are other crates' sources and are not read. |
 | generated.committed |  | generated | pass | ext/clippy.toml is generated from the manifest and committed; a stale copy fails budget. |
-| git.no-verify |  | deny_argv | no reading | Commits run the pre-commit hook; --no-verify is not available to agents. |
-| ticket.close |  | deny_argv | no reading | A ticket closes through `xtask ticket close`, the instrument that read its acceptance criteria; `gh issue close` and `gh issue reopen` are not available to agents. |
+| git.no-verify |  | deny_argv | fail | Commits run the pre-commit hook; --no-verify is not available to agents. |
+| ticket.close |  | deny_argv | fail | A ticket closes through `xtask ticket close`, the instrument that read its acceptance criteria; `gh issue close` and `gh issue reopen` are not available to agents. |
 | ticket.close-api |  | deny_pattern | no reading | The same act through `gh api`: an issue's state is set by `xtask ticket close` and by nothing else. |
 | ticket.reply-unfiled |  | deny_pattern | no reading | A session that closed a ticket names what it found and did not do in a ticket, a divergence row or a rule proposed in a commit message, never in its reply alone (CONTEXT.md, Ticket): a reply that hands work to a person, leaves a decision open or calls a thing worth filing is held once. A heuristic beside the close's own conditions; the second Stop passes. |
-| lanes.nightly |  | deny_pattern | no reading | Nightly lanes run in CI only; run the per-crate subset. |
-| computed.force |  | deny_pattern | no reading | `computed run --force` discards a hand edit; a person decides that. |
+| lanes.nightly |  | deny_pattern | fail | Nightly lanes run in CI only; run the per-crate subset. |
+| computed.force |  | deny_pattern | fail | `computed run --force` discards a hand edit; a person decides that. |
 | harness.self |  | deny | fail | Harness configuration, the oracle pin and the divergence registry are edited by a person. |
 | divergence.reason |  | check | no reading | A divergence row with status accepted has a reason a person wrote; done fails while an open row touches the scope (harness §4.3). |
 
-<!-- /computed in=9a4bbe4efcf2e04e169c433acd0bf2649fd0db1ea45b431ac0197d7ab81da7e5 out=348df72d5731806397e50fbaf172c0a968c3a7e08885e53f61c6b58168ba37f8 -->
+<!-- /computed in=07ecccf26b5b5dd9e148c8eb66ebf5dcf4b23d5be2f2cade62bc6c221fd5a9f4 out=574d8bc98e123d98197bcb890d15e930ed43512b3b3f09def3ca75d75ba85c38 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -206,6 +206,7 @@ Options:
 ├── hash
 ├── iconv
 ├── json
+├── libxml
 ├── mbstring
 ├── openssl
 ├── pcre
@@ -219,4 +220,4 @@ Options:
 ├── standard
 └── tokenizer
 ```
-<!-- /computed in=e842b2ad94ece6af566c4fb7a154bd521ccffdf204020e6be4e195738446c10e out=fd690685c66c1c8116533139fffd6e4712c3b133860a8bb97ad22dd173f97d5d -->
+<!-- /computed in=53f1b1493c0fd7d8cb063d9d4aa5b1394bbdddb72a6ecb599de01484041ef955 out=094bbaabfdfe64ed038b0760d430cc5d637e6b69ac49b77f7e7e929588c13af8 -->

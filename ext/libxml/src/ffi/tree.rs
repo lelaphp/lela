@@ -1,0 +1,1380 @@
+//! libxml2's tree as handles: [`Node`] for `xmlNodePtr` and the structs
+//! that share its prefix, [`Ns`] for `xmlNsPtr`, and the tree calls php's
+//! dom makes over them. A `Node` names a node of a live tree; it is made
+//! from a node object's proxy or from a walk inside one native call, and
+//! the field a `Node` reads is the one its kind has, as php reads it after
+//! the same test of `->type`.
+
+use std::ffi::{c_char, c_int, c_void};
+use std::ptr::{self, NonNull};
+
+use super::{Alloc, Library, NodeObject, SharedDoc, Tree, cstr, sys};
+
+/// A NUL-terminated copy or null, for a C argument php passes as `NULL`.
+fn opt_ptr(bytes: Option<&Vec<u8>>) -> *const u8 {
+    bytes.map_or(ptr::null(), Vec::as_ptr)
+}
+
+/// The bytes of a string libxml owns, copied.
+fn owned(p: *const u8) -> Vec<u8> {
+    // SAFETY: libxml's strings are NUL-terminated and live while the
+    // node that holds them does, which outlives this copy.
+    unsafe { Alloc::bytes(p) }.to_vec()
+}
+
+/// A string libxml allocated for the caller, taken and freed.
+fn taken(p: *mut u8) -> Option<Vec<u8>> {
+    // SAFETY: an allocation libxml handed over, freed once here.
+    unsafe { Alloc::take(p) }
+}
+
+/// `xmlElementType`, decoded once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Element,
+    Attribute,
+    Text,
+    CData,
+    EntityRef,
+    Entity,
+    Pi,
+    Comment,
+    Document,
+    DocumentType,
+    Fragment,
+    Notation,
+    HtmlDocument,
+    Dtd,
+    ElementDecl,
+    AttributeDecl,
+    EntityDecl,
+    NamespaceDecl,
+    XIncludeStart,
+    XIncludeEnd,
+}
+
+impl Kind {
+    fn of(raw: c_int) -> Kind {
+        match raw {
+            sys::XML_ELEMENT_NODE => Kind::Element,
+            sys::XML_ATTRIBUTE_NODE => Kind::Attribute,
+            sys::XML_TEXT_NODE => Kind::Text,
+            sys::XML_CDATA_SECTION_NODE => Kind::CData,
+            sys::XML_ENTITY_REF_NODE => Kind::EntityRef,
+            sys::XML_ENTITY_NODE => Kind::Entity,
+            sys::XML_PI_NODE => Kind::Pi,
+            sys::XML_COMMENT_NODE => Kind::Comment,
+            sys::XML_DOCUMENT_NODE => Kind::Document,
+            sys::XML_DOCUMENT_TYPE_NODE => Kind::DocumentType,
+            sys::XML_DOCUMENT_FRAG_NODE => Kind::Fragment,
+            sys::XML_NOTATION_NODE => Kind::Notation,
+            sys::XML_HTML_DOCUMENT_NODE => Kind::HtmlDocument,
+            sys::XML_DTD_NODE => Kind::Dtd,
+            sys::XML_ELEMENT_DECL => Kind::ElementDecl,
+            sys::XML_ATTRIBUTE_DECL => Kind::AttributeDecl,
+            sys::XML_ENTITY_DECL => Kind::EntityDecl,
+            sys::XML_NAMESPACE_DECL => Kind::NamespaceDecl,
+            sys::XML_XINCLUDE_START => Kind::XIncludeStart,
+            _ => Kind::XIncludeEnd,
+        }
+    }
+
+    /// The number `nodeType` and the `XML_*_NODE` constants carry.
+    pub fn number(self) -> i64 {
+        i64::from(match self {
+            Kind::Element => sys::XML_ELEMENT_NODE,
+            Kind::Attribute => sys::XML_ATTRIBUTE_NODE,
+            Kind::Text => sys::XML_TEXT_NODE,
+            Kind::CData => sys::XML_CDATA_SECTION_NODE,
+            Kind::EntityRef => sys::XML_ENTITY_REF_NODE,
+            Kind::Entity => sys::XML_ENTITY_NODE,
+            Kind::Pi => sys::XML_PI_NODE,
+            Kind::Comment => sys::XML_COMMENT_NODE,
+            Kind::Document => sys::XML_DOCUMENT_NODE,
+            Kind::DocumentType => sys::XML_DOCUMENT_TYPE_NODE,
+            Kind::Fragment => sys::XML_DOCUMENT_FRAG_NODE,
+            Kind::Notation => sys::XML_NOTATION_NODE,
+            Kind::HtmlDocument => sys::XML_HTML_DOCUMENT_NODE,
+            Kind::Dtd => sys::XML_DTD_NODE,
+            Kind::ElementDecl => sys::XML_ELEMENT_DECL,
+            Kind::AttributeDecl => sys::XML_ATTRIBUTE_DECL,
+            Kind::EntityDecl => sys::XML_ENTITY_DECL,
+            Kind::NamespaceDecl => sys::XML_NAMESPACE_DECL,
+            Kind::XIncludeStart => sys::XML_XINCLUDE_START,
+            Kind::XIncludeEnd => sys::XML_XINCLUDE_END,
+        })
+    }
+
+    fn raw(self) -> c_int {
+        c_int::try_from(self.number()).unwrap_or(sys::XML_ELEMENT_NODE)
+    }
+
+    /// Whether the node is a document, XML or HTML.
+    pub fn is_document(self) -> bool {
+        matches!(self, Kind::Document | Kind::HtmlDocument)
+    }
+
+    /// Whether the struct behind the node is an `xmlNode` in full, whose
+    /// `ns`, `content`, `properties` and `nsDef` are there to read.
+    fn has_node_tail(self) -> bool {
+        matches!(
+            self,
+            Kind::Element
+                | Kind::Text
+                | Kind::CData
+                | Kind::EntityRef
+                | Kind::Pi
+                | Kind::Comment
+                | Kind::Fragment
+                | Kind::NamespaceDecl
+                | Kind::XIncludeStart
+                | Kind::XIncludeEnd
+        )
+    }
+}
+
+/// `xmlNodePtr`, and an `xmlAttrPtr`, `xmlDocPtr`, `xmlDtdPtr` or
+/// `xmlEntityPtr` read through the prefix they share with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Node(NonNull<sys::xmlNode>);
+
+/// `xmlNsPtr`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Ns(NonNull<sys::xmlNs>);
+
+impl Node {
+    pub(crate) fn from_raw(p: *mut sys::xmlNode) -> Option<Node> {
+        NonNull::new(p).map(Node)
+    }
+
+    pub(crate) fn raw(self) -> *mut sys::xmlNode {
+        self.0.as_ptr()
+    }
+
+    fn read<T>(self, f: impl FnOnce(&sys::xmlNode) -> T) -> T {
+        // SAFETY: a handle names a live node (the module's invariant); the
+        // borrow ends with `f`, before anything else touches the node.
+        f(unsafe { &*self.0.as_ptr() })
+    }
+
+    fn write(self, f: impl FnOnce(&mut sys::xmlNode)) {
+        // SAFETY: as in `read`; no other reference into the node is held
+        // across `f`.
+        f(unsafe { &mut *self.0.as_ptr() });
+    }
+
+    fn attr<T>(self, f: impl FnOnce(&mut sys::xmlAttr) -> T) -> Option<T> {
+        if self.kind() != Kind::Attribute {
+            return None;
+        }
+        // SAFETY: an attribute node is an `xmlAttr`, live by the invariant.
+        Some(f(unsafe { &mut *self.0.as_ptr().cast::<sys::xmlAttr>() }))
+    }
+
+    pub fn kind(self) -> Kind {
+        self.read(|n| Kind::of(n.type_))
+    }
+
+    /// `node->type = kind`, the retyping php does around one libxml call.
+    pub fn set_kind(self, kind: Kind) {
+        self.write(|n| n.type_ = kind.raw());
+    }
+
+    /// `node->name`, empty where it is null.
+    pub fn name(self) -> Vec<u8> {
+        owned(self.read(|n| n.name))
+    }
+
+    pub fn has_name(self) -> bool {
+        !self.read(|n| n.name).is_null()
+    }
+
+    pub fn children(self) -> Option<Node> {
+        Node::from_raw(self.read(|n| n.children))
+    }
+    pub fn last(self) -> Option<Node> {
+        Node::from_raw(self.read(|n| n.last))
+    }
+    pub fn parent(self) -> Option<Node> {
+        Node::from_raw(self.read(|n| n.parent))
+    }
+    pub fn next(self) -> Option<Node> {
+        Node::from_raw(self.read(|n| n.next))
+    }
+    pub fn prev(self) -> Option<Node> {
+        Node::from_raw(self.read(|n| n.prev))
+    }
+    pub fn set_children(self, to: Option<Node>) {
+        self.write(|n| n.children = to.map_or(ptr::null_mut(), Node::raw));
+    }
+    pub fn set_last(self, to: Option<Node>) {
+        self.write(|n| n.last = to.map_or(ptr::null_mut(), Node::raw));
+    }
+    pub fn set_parent(self, to: Option<Node>) {
+        self.write(|n| n.parent = to.map_or(ptr::null_mut(), Node::raw));
+    }
+    pub fn set_next(self, to: Option<Node>) {
+        self.write(|n| n.next = to.map_or(ptr::null_mut(), Node::raw));
+    }
+    pub fn set_prev(self, to: Option<Node>) {
+        self.write(|n| n.prev = to.map_or(ptr::null_mut(), Node::raw));
+    }
+
+    /// `node->doc`, as the document node.
+    pub fn doc(self) -> Option<Node> {
+        Node::from_raw(self.read(|n| n.doc).cast())
+    }
+
+    /// `node->ns`: an element's, an attribute's, a namespace node's.
+    pub fn ns(self) -> Option<Ns> {
+        let kind = self.kind();
+        if !(kind.has_node_tail() || kind == Kind::Attribute) {
+            return None;
+        }
+        Ns::from_raw(self.read(|n| n.ns))
+    }
+
+    /// `node->ns = ns` for an element or an attribute, no reconciliation.
+    pub fn set_ns(self, ns: Option<Ns>) {
+        let kind = self.kind();
+        if kind.has_node_tail() || kind == Kind::Attribute {
+            self.write(|n| n.ns = ns.map_or(ptr::null_mut(), Ns::raw));
+        }
+    }
+
+    /// `node->content`: text, CDATA, comment, PI, entity reference and
+    /// entity declaration content; `None` for null or another kind.
+    pub fn content(self) -> Option<Vec<u8>> {
+        let kind = self.kind();
+        if !(kind.has_node_tail() || matches!(kind, Kind::EntityDecl | Kind::Notation)) {
+            return None;
+        }
+        let p = self.read(|n| n.content);
+        (!p.is_null()).then(|| owned(p))
+    }
+
+    /// `node->content = value`, as `dom_entity_reference_fetch_and_sync_declaration`
+    /// points a reference at its declaration's content; nothing is freed.
+    pub fn alias_content_of(self, entity: Option<Node>) {
+        if self.kind() != Kind::EntityRef {
+            return;
+        }
+        let content = entity.map_or(ptr::null_mut(), |e| e.read(|n| n.content));
+        self.write(|n| n.content = content);
+    }
+
+    /// An element's attribute list.
+    pub fn properties(self) -> Option<Node> {
+        if self.kind() != Kind::Element {
+            return None;
+        }
+        Node::from_raw(self.read(|n| n.properties).cast())
+    }
+
+    pub fn set_properties(self, to: Option<Node>) {
+        if self.kind() == Kind::Element {
+            self.write(|n| n.properties = to.map_or(ptr::null_mut(), |a| a.raw().cast()));
+        }
+    }
+
+    /// An element's namespace declarations.
+    pub fn ns_def(self) -> Option<Ns> {
+        if self.kind() != Kind::Element {
+            return None;
+        }
+        Ns::from_raw(self.read(|n| n.nsDef))
+    }
+
+    pub fn set_ns_def(self, to: Option<Ns>) {
+        if self.kind() == Kind::Element {
+            self.write(|n| n.nsDef = to.map_or(ptr::null_mut(), Ns::raw));
+        }
+    }
+
+    /// `attr->atype`.
+    pub fn atype(self) -> i32 {
+        self.attr(|a| a.atype).unwrap_or(0)
+    }
+
+    pub fn set_atype(self, atype: i32) {
+        let _ = self.attr(|a| a.atype = atype);
+    }
+
+    /// Whether an object stands for the node, `node->_private != NULL`.
+    pub fn is_named(self) -> bool {
+        !self.read(|n| n.private).is_null()
+    }
+
+    /// The object standing for the node, `php_dom_object_get_data`.
+    pub fn object(self) -> Option<php_ext::values::PhpObject> {
+        // SAFETY: a live node.
+        unsafe { Tree::object_of(self.raw()) }
+    }
+
+    /// The libxml half of the object standing for the node.
+    pub fn wrapper(self) -> Option<super::Borrowed> {
+        // SAFETY: a live node; the borrow is used and dropped by the caller
+        // before any other reaches the same object.
+        unsafe { Tree::borrowed(self.raw()) }
+    }
+
+    // ---- xmlDoc, through the prefix a document node shares
+
+    fn doc_read<T>(self, f: impl FnOnce(&sys::xmlDoc) -> T) -> Option<T> {
+        if !self.kind().is_document() {
+            return None;
+        }
+        // SAFETY: a document node is an `xmlDoc`, live by the invariant.
+        Some(f(unsafe { &*self.0.as_ptr().cast::<sys::xmlDoc>() }))
+    }
+
+    fn doc_write(self, f: impl FnOnce(&mut sys::xmlDoc)) {
+        if self.kind().is_document() {
+            // SAFETY: as in `doc_read`; no other reference is held.
+            f(unsafe { &mut *self.0.as_ptr().cast::<sys::xmlDoc>() });
+        }
+    }
+
+    pub fn doc_encoding(self) -> Option<Vec<u8>> {
+        self.doc_read(|d| d.encoding)
+            .filter(|p| !p.is_null())
+            .map(owned)
+    }
+    pub fn doc_version(self) -> Option<Vec<u8>> {
+        self.doc_read(|d| d.version)
+            .filter(|p| !p.is_null())
+            .map(owned)
+    }
+    pub fn doc_url(self) -> Option<Vec<u8>> {
+        self.doc_read(|d| d.URL).filter(|p| !p.is_null()).map(owned)
+    }
+    pub fn doc_standalone(self) -> i32 {
+        self.doc_read(|d| d.standalone).unwrap_or(0)
+    }
+    pub fn set_doc_standalone(self, value: i32) {
+        self.doc_write(|d| d.standalone = value);
+    }
+
+    /// Replace one of the document's strings, freeing the old one, as php
+    /// does for `encoding`, `version` and `URL`.
+    pub fn set_doc_string(self, field: DocString, value: Option<&[u8]>) {
+        let fresh = value.map_or(ptr::null_mut(), |v| {
+            let c = cstr(v);
+            // SAFETY: a NUL-terminated copy libxml duplicates.
+            unsafe { sys::xmlStrdup(c.as_ptr()) }
+        });
+        self.doc_write(|d| {
+            let slot = match field {
+                DocString::Encoding => &mut d.encoding,
+                DocString::Version => &mut d.version,
+                DocString::Url => &mut d.URL,
+            };
+            let old = std::mem::replace(slot, fresh);
+            // SAFETY: the document owned the old string.
+            unsafe { Alloc::free(old.cast_mut().cast()) };
+        });
+    }
+
+    /// `doc->intSubset`, what `xmlGetIntSubset` answers.
+    pub fn int_subset(self) -> Option<Node> {
+        // SAFETY: a live document read as one.
+        Node::from_raw(unsafe { sys::xmlGetIntSubset(self.raw().cast()) }.cast())
+    }
+
+    pub fn set_int_subset(self, dtd: Option<Node>) {
+        self.doc_write(|d| d.intSubset = dtd.map_or(ptr::null_mut(), |n| n.raw().cast()));
+    }
+
+    /// `xmlDocGetRootElement`.
+    pub fn root(self) -> Option<Node> {
+        // SAFETY: a live node read as a document; libxml answers null for
+        // one with no element child.
+        Node::from_raw(unsafe { sys::xmlDocGetRootElement(self.raw().cast()) })
+    }
+
+    // ---- xmlDtd and xmlEntity, through the prefix they share
+
+    fn dtd_read<T>(self, f: impl FnOnce(&sys::xmlDtd) -> T) -> Option<T> {
+        if !matches!(self.kind(), Kind::Dtd | Kind::DocumentType) {
+            return None;
+        }
+        // SAFETY: a DTD node is an `xmlDtd`, live by the invariant.
+        Some(f(unsafe { &*self.0.as_ptr().cast::<sys::xmlDtd>() }))
+    }
+
+    pub fn dtd_external_id(self) -> Option<Vec<u8>> {
+        self.dtd_read(|d| d.ExternalID)
+            .filter(|p| !p.is_null())
+            .map(owned)
+    }
+    pub fn dtd_system_id(self) -> Option<Vec<u8>> {
+        self.dtd_read(|d| d.SystemID)
+            .filter(|p| !p.is_null())
+            .map(owned)
+    }
+
+    /// A DTD's entity or notation table.
+    pub fn dtd_table(self, which: DtdTable) -> Option<HashTable> {
+        self.dtd_read(|d| match which {
+            DtdTable::Entities => d.entities,
+            DtdTable::Notations => d.notations,
+        })
+        .and_then(|t| NonNull::new(t).map(HashTable))
+    }
+
+    fn entity_read<T>(self, f: impl FnOnce(&sys::xmlEntity) -> T) -> Option<T> {
+        if !matches!(self.kind(), Kind::EntityDecl | Kind::Notation) {
+            return None;
+        }
+        // SAFETY: an entity declaration, or `create_notation`'s entity in
+        // disguise, is an `xmlEntity`, live by the invariant.
+        Some(f(unsafe { &*self.0.as_ptr().cast::<sys::xmlEntity>() }))
+    }
+
+    pub fn entity_type(self) -> i32 {
+        self.entity_read(|e| e.etype).unwrap_or(0)
+    }
+    pub fn entity_external_id(self) -> Option<Vec<u8>> {
+        self.entity_read(|e| e.ExternalID)
+            .filter(|p| !p.is_null())
+            .map(owned)
+    }
+    pub fn entity_system_id(self) -> Option<Vec<u8>> {
+        self.entity_read(|e| e.SystemID)
+            .filter(|p| !p.is_null())
+            .map(owned)
+    }
+    pub fn entity_content(self) -> Option<Vec<u8>> {
+        self.entity_read(|e| e.content.cast_const())
+            .filter(|p| !p.is_null())
+            .map(owned)
+    }
+
+    // ---- libxml2's tree calls
+
+    /// `xmlUnlinkNode`.
+    pub fn unlink(self) {
+        // SAFETY: a live node.
+        unsafe { sys::xmlUnlinkNode(self.raw()) };
+    }
+
+    /// `xmlAddChild`: the node added, or the text it merged into.
+    pub fn add_child(self, child: Node) -> Option<Node> {
+        // SAFETY: two live nodes.
+        Node::from_raw(unsafe { sys::xmlAddChild(self.raw(), child.raw()) })
+    }
+
+    /// `xmlAddChildList`.
+    pub fn add_child_list(self, list: Node) -> Option<Node> {
+        // SAFETY: a live node and a live list.
+        Node::from_raw(unsafe { sys::xmlAddChildList(self.raw(), list.raw()) })
+    }
+
+    /// `xmlAddPrevSibling`.
+    pub fn add_prev_sibling(self, elem: Node) -> Option<Node> {
+        // SAFETY: two live nodes.
+        Node::from_raw(unsafe { sys::xmlAddPrevSibling(self.raw(), elem.raw()) })
+    }
+
+    /// `xmlAddNextSibling`.
+    pub fn add_next_sibling(self, elem: Node) -> Option<Node> {
+        // SAFETY: two live nodes.
+        Node::from_raw(unsafe { sys::xmlAddNextSibling(self.raw(), elem.raw()) })
+    }
+
+    /// `xmlReplaceNode(old, cur)`.
+    pub fn replace_with(self, cur: Node) {
+        // SAFETY: two live nodes.
+        unsafe { sys::xmlReplaceNode(self.raw(), cur.raw()) };
+    }
+
+    /// `xmlFreeNode`, of a node nothing names and no tree holds.
+    pub fn free(self) {
+        if self.kind() == Kind::Attribute {
+            // SAFETY: an unlinked attribute, freed once.
+            unsafe { sys::xmlFreeProp(self.raw().cast()) };
+        } else {
+            // SAFETY: an unlinked node, freed once.
+            unsafe { sys::xmlFreeNode(self.raw()) };
+        }
+    }
+
+    /// `xmlFree(node)`: the struct alone, as php frees an emptied
+    /// temporary fragment whose children were moved away.
+    pub fn free_shell(self) {
+        // SAFETY: a node with no children, freed once.
+        unsafe { Alloc::free(self.raw().cast()) };
+    }
+
+    /// `php_libxml_node_free_resource`.
+    pub fn free_resource(self) {
+        // SAFETY: a live node nothing names any more.
+        unsafe { Tree::free_resource(self.raw()) };
+    }
+
+    /// `php_libxml_node_free_list` over the node's children.
+    pub fn free_list(first: Option<Node>) {
+        // SAFETY: a live list nothing else frees.
+        unsafe { Tree::free_list(first.map_or(ptr::null_mut(), Node::raw)) };
+    }
+
+    /// `xmlReconciliateNs(doc, node)`.
+    pub fn reconciliate_ns(self, doc: Option<Node>) {
+        // SAFETY: a live tree and its document or none.
+        unsafe {
+            sys::xmlReconciliateNs(doc.map_or(ptr::null_mut(), |d| d.raw().cast()), self.raw())
+        };
+    }
+
+    /// `xmlSetTreeDoc`.
+    pub fn set_tree_doc(self, doc: Option<Node>) {
+        // SAFETY: a live tree and a live document or none.
+        unsafe { sys::xmlSetTreeDoc(self.raw(), doc.map_or(ptr::null_mut(), |d| d.raw().cast())) };
+    }
+
+    /// `xmlDocCopyNode(node, doc, recursive)`.
+    pub fn copy(self, doc: Option<Node>, recursive: i32) -> Option<Node> {
+        // SAFETY: a live node and document or none.
+        Node::from_raw(unsafe {
+            sys::xmlDocCopyNode(
+                self.raw(),
+                doc.map_or(ptr::null_mut(), |d| d.raw().cast()),
+                recursive,
+            )
+        })
+    }
+
+    /// `xmlCopyDtd`, then `xmlSetTreeDoc` onto `doc`.
+    pub fn copy_dtd(self, doc: Option<Node>) -> Option<Node> {
+        // SAFETY: a live DTD.
+        let copy = Node::from_raw(unsafe { sys::xmlCopyDtd(self.raw().cast()) }.cast())?;
+        copy.set_tree_doc(doc);
+        Some(copy)
+    }
+
+    /// `xmlNodeGetContent`.
+    pub fn get_content(self) -> Option<Vec<u8>> {
+        // SAFETY: a live node.
+        taken(unsafe { sys::xmlNodeGetContent(self.raw()) })
+    }
+
+    /// `xmlNodeSetContent`.
+    pub fn set_content(self, content: &[u8]) {
+        let c = cstr(content);
+        // SAFETY: a live node and a NUL-terminated string.
+        unsafe { sys::xmlNodeSetContent(self.raw(), c.as_ptr()) };
+    }
+
+    /// `xmlNodeSetContentLen`, the bytes as they are.
+    pub fn set_content_len(self, content: &[u8]) {
+        let len = c_int::try_from(content.len()).unwrap_or(c_int::MAX);
+        // SAFETY: a live node and `len` readable bytes.
+        unsafe { sys::xmlNodeSetContentLen(self.raw(), content.as_ptr(), len) };
+    }
+
+    /// `xmlNodeAddContent`.
+    pub fn add_content(self, content: &[u8]) {
+        let c = cstr(content);
+        // SAFETY: a live node and a NUL-terminated string.
+        unsafe { sys::xmlNodeAddContent(self.raw(), c.as_ptr()) };
+    }
+
+    /// `xmlTextConcat`.
+    pub fn text_concat(self, content: &[u8]) {
+        let len = c_int::try_from(content.len()).unwrap_or(c_int::MAX);
+        // SAFETY: a live node and `len` readable bytes.
+        unsafe { sys::xmlTextConcat(self.raw(), content.as_ptr(), len) };
+    }
+
+    /// `xmlNodeListGetString(doc, list, 1)` over the node's children.
+    pub fn list_string(self) -> Option<Vec<u8>> {
+        let doc = self.doc().map_or(ptr::null_mut(), |d| d.raw().cast());
+        let list = self.children().map_or(ptr::null_mut(), Node::raw);
+        // SAFETY: a live list and its document.
+        taken(unsafe { sys::xmlNodeListGetString(doc, list, 1) })
+    }
+
+    /// `xmlNodeGetBase(node->doc, node)`.
+    pub fn base(self) -> Option<Vec<u8>> {
+        let doc = self.doc().map_or(ptr::null_mut(), |d| d.raw().cast());
+        // SAFETY: a live node and its document.
+        taken(unsafe { sys::xmlNodeGetBase(doc, self.raw()) })
+    }
+
+    /// `xmlGetNodePath`.
+    pub fn path(self) -> Option<Vec<u8>> {
+        // SAFETY: a live node.
+        taken(unsafe { sys::xmlGetNodePath(self.raw()) })
+    }
+
+    /// `xmlGetLineNo`.
+    pub fn line_no(self) -> i64 {
+        // SAFETY: a live node.
+        unsafe { sys::xmlGetLineNo(self.raw()) }
+    }
+
+    /// `xmlIsBlankNode`.
+    pub fn is_blank(self) -> bool {
+        // SAFETY: a live node.
+        unsafe { sys::xmlIsBlankNode(self.raw()) != 0 }
+    }
+
+    /// `xmlHasProp`.
+    pub fn has_prop(self, name: &[u8]) -> Option<Node> {
+        let n = cstr(name);
+        // SAFETY: a live node and a NUL-terminated name.
+        Node::from_raw(unsafe { sys::xmlHasProp(self.raw(), n.as_ptr()) }.cast())
+    }
+
+    /// `xmlHasNsProp`, `ns` null for "no namespace".
+    pub fn has_ns_prop(self, name: &[u8], ns: Option<&[u8]>) -> Option<Node> {
+        let n = cstr(name);
+        let u = ns.map(cstr);
+        // SAFETY: a live node and NUL-terminated strings or null.
+        Node::from_raw(
+            unsafe { sys::xmlHasNsProp(self.raw(), n.as_ptr(), opt_ptr(u.as_ref())) }.cast(),
+        )
+    }
+
+    /// `xmlGetNsProp`.
+    pub fn get_ns_prop(self, name: &[u8], ns: Option<&[u8]>) -> Option<Vec<u8>> {
+        let n = cstr(name);
+        let u = ns.map(cstr);
+        // SAFETY: as above.
+        taken(unsafe { sys::xmlGetNsProp(self.raw(), n.as_ptr(), opt_ptr(u.as_ref())) })
+    }
+
+    /// `xmlGetNoNsProp`.
+    pub fn get_no_ns_prop(self, name: &[u8]) -> Option<Vec<u8>> {
+        let n = cstr(name);
+        // SAFETY: as above.
+        taken(unsafe { sys::xmlGetNoNsProp(self.raw(), n.as_ptr()) })
+    }
+
+    /// `xmlSetProp`.
+    pub fn set_prop(self, name: &[u8], value: &[u8]) -> Option<Node> {
+        let n = cstr(name);
+        let v = cstr(value);
+        // SAFETY: a live element and NUL-terminated strings.
+        Node::from_raw(unsafe { sys::xmlSetProp(self.raw(), n.as_ptr(), v.as_ptr()) }.cast())
+    }
+
+    /// `xmlSetNsProp`.
+    pub fn set_ns_prop(self, ns: Option<Ns>, name: &[u8], value: &[u8]) -> Option<Node> {
+        let n = cstr(name);
+        let v = cstr(value);
+        let ns = ns.map_or(ptr::null_mut(), Ns::raw);
+        // SAFETY: as above.
+        Node::from_raw(unsafe { sys::xmlSetNsProp(self.raw(), ns, n.as_ptr(), v.as_ptr()) }.cast())
+    }
+
+    /// `xmlSearchNs(node->doc, node, prefix)`.
+    pub fn search_ns(self, prefix: Option<&[u8]>) -> Option<Ns> {
+        let p = prefix.map(cstr);
+        let doc = self.doc().map_or(ptr::null_mut(), |d| d.raw().cast());
+        // SAFETY: a live node, its document and a prefix or null.
+        Ns::from_raw(unsafe { sys::xmlSearchNs(doc, self.raw(), opt_ptr(p.as_ref())) })
+    }
+
+    /// `xmlSearchNsByHref(doc, node, href)`.
+    pub fn search_ns_by_href(self, doc: Option<Node>, href: &[u8]) -> Option<Ns> {
+        let h = cstr(href);
+        let doc = doc.map_or(ptr::null_mut(), |d| d.raw().cast());
+        // SAFETY: a live node, a document or none, a NUL-terminated href.
+        Ns::from_raw(unsafe { sys::xmlSearchNsByHref(doc, self.raw(), h.as_ptr()) })
+    }
+
+    /// `xmlNewNs(node, href, prefix)`: a declaration on the element, or
+    /// none where the prefix is taken or reserved.
+    pub fn new_ns(self, href: &[u8], prefix: Option<&[u8]>) -> Option<Ns> {
+        Ns::new(Some(self), Some(href), prefix)
+    }
+
+    /// `xmlSetNs`.
+    pub fn set_ns_call(self, ns: Option<Ns>) {
+        // SAFETY: a live node and a namespace or null.
+        unsafe { sys::xmlSetNs(self.raw(), ns.map_or(ptr::null_mut(), Ns::raw)) };
+    }
+
+    /// `xmlRemoveID(node->doc, attr)`.
+    pub fn remove_id(self) {
+        let Some(doc) = self.doc() else {
+            return;
+        };
+        // SAFETY: a live attribute and its document.
+        unsafe { sys::xmlRemoveID(doc.raw().cast(), self.raw().cast()) };
+    }
+
+    /// `xmlDocSetRootElement(doc, root)`.
+    pub fn set_root(self, root: Node) {
+        // SAFETY: a live document and element.
+        unsafe { sys::xmlDocSetRootElement(self.raw().cast(), root.raw()) };
+    }
+
+    /// `xmlGetID(doc, id)`'s attribute.
+    pub fn get_id(self, id: &[u8]) -> Option<Node> {
+        let i = cstr(id);
+        // SAFETY: a live document and a NUL-terminated id.
+        Node::from_raw(unsafe { sys::xmlGetID(self.raw().cast(), i.as_ptr()) }.cast())
+    }
+
+    /// `xmlGetDocEntity(node->doc, node->name)`.
+    pub fn doc_entity(self) -> Option<Node> {
+        let doc = self.doc().map_or(ptr::null_mut(), |d| d.raw().cast());
+        let name = self.read(|n| n.name);
+        // SAFETY: a live document or none and the node's own name.
+        Node::from_raw(unsafe { sys::xmlGetDocEntity(doc, name) }.cast())
+    }
+
+    /// `xmlDOMWrapAdoptNode(NULL, node->doc, node, doc, NULL, 0)`.
+    pub fn adopt_into(self, doc: Node) -> bool {
+        let old = self.doc().map_or(ptr::null_mut(), |d| d.raw().cast());
+        // SAFETY: a live node, its document and the destination document.
+        unsafe {
+            sys::xmlDOMWrapAdoptNode(
+                ptr::null_mut(),
+                old,
+                self.raw(),
+                doc.raw().cast(),
+                ptr::null_mut(),
+                0,
+            ) == 0
+        }
+    }
+
+    /// The node's name and content moved off `old`'s dictionary before it
+    /// joins `new`, php's `libxml_fixup_name_and_content` for a library
+    /// before 2.13, so the strings outlive the old document.
+    pub fn undict(self, old: Option<Node>, new: Node) {
+        let src = old.map_or(ptr::null_mut(), Node::dict);
+        if src.is_null() {
+            return;
+        }
+        let dst = new.dict();
+        let owns = |s: *const u8| -> bool {
+            // SAFETY: a live dictionary and a string or null.
+            !s.is_null() && unsafe { sys::xmlDictOwns(src, s) } == 1
+        };
+        let name = self.read(|n| n.name);
+        if owns(name) {
+            let copy = if dst.is_null() {
+                // SAFETY: a dictionary string, duplicated.
+                unsafe { sys::xmlStrdup(name) }.cast_const()
+            } else {
+                // SAFETY: a live dictionary and a NUL-terminated string.
+                unsafe { sys::xmlDictLookup(dst, name, -1) }
+            };
+            self.write(|n| n.name = copy);
+        }
+        if self.kind().has_node_tail() {
+            let content = self.read(|n| n.content);
+            if owns(content) {
+                // SAFETY: a dictionary string, duplicated.
+                let copy = unsafe { sys::xmlStrdup(content) };
+                self.write(|n| n.content = copy);
+            }
+        }
+    }
+
+    /// The document's dictionary, for [`Node::undict`].
+    fn dict(self) -> *mut c_void {
+        self.doc_read(|d| d.dict).unwrap_or(ptr::null_mut())
+    }
+
+    /// `php_libxml_attr_value`: an attribute's value.
+    pub fn attr_value(self) -> Vec<u8> {
+        if self.kind() != Kind::Attribute {
+            return Vec::new();
+        }
+        // SAFETY: a live attribute.
+        unsafe { Tree::attr_value(self.raw().cast()) }
+    }
+
+    /// `php_libxml_invalidate_node_list_cache_from_doc` over the node's
+    /// document.
+    pub fn invalidate_document_lists(self) {
+        if let Some(doc) = self.doc() {
+            // SAFETY: a live document.
+            unsafe { Tree::invalidate_from_doc(doc.raw().cast()) };
+        }
+    }
+
+    /// `node->line`.
+    pub fn line(self) -> u16 {
+        self.read(|n| n.line)
+    }
+}
+
+/// Which of a document's strings [`Node::set_doc_string`] replaces.
+#[derive(Debug, Clone, Copy)]
+pub enum DocString {
+    Encoding,
+    Version,
+    Url,
+}
+
+/// Which of a DTD's tables [`Node::dtd_table`] reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DtdTable {
+    Entities,
+    Notations,
+}
+
+/// `xmlHashTablePtr`, a DTD's entity or notation table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HashTable(NonNull<c_void>);
+
+impl HashTable {
+    /// Whether the table holds nothing.
+    #[must_use]
+    pub fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+
+    /// `xmlHashSize`.
+    pub fn len(self) -> usize {
+        // SAFETY: a live table of a live DTD.
+        usize::try_from(unsafe { sys::xmlHashSize(self.0.as_ptr()) }).unwrap_or(0)
+    }
+
+    /// The entity at `index` in `xmlHashScan`'s order, what
+    /// `php_dom_libxml_hash_iter` walks to.
+    pub fn entity_at(self, index: usize) -> Option<Node> {
+        self.entries().get(index).copied().and_then(entity_node)
+    }
+
+    /// The entity named, `xmlHashLookup`.
+    pub fn entity(self, name: &[u8]) -> Option<Node> {
+        entity_node(self.lookup(name))
+    }
+
+    /// A fresh notation node of the entry at `index`, as `create_notation`
+    /// makes one for each read: the caller's to own.
+    pub fn notation_at(self, index: usize) -> Option<Node> {
+        self.entries().get(index).copied().and_then(notation_node)
+    }
+
+    /// A fresh notation node of the entry named.
+    pub fn notation(self, name: &[u8]) -> Option<Node> {
+        notation_node(self.lookup(name))
+    }
+
+    /// Every entry, in `xmlHashScan`'s order.
+    fn entries(self) -> Vec<*mut c_void> {
+        unsafe extern "C" fn push(payload: *mut c_void, data: *mut c_void, _name: *const u8) {
+            // SAFETY: `entries` hands its own `Vec`, live for the scan.
+            let into = unsafe { &mut *data.cast::<Vec<*mut c_void>>() };
+            into.push(payload);
+        }
+        let mut out: Vec<*mut c_void> = Vec::new();
+        // SAFETY: a live table; `out` outlives the scan.
+        unsafe { sys::xmlHashScan(self.0.as_ptr(), push, ptr::from_mut(&mut out).cast()) };
+        out
+    }
+
+    /// `xmlHashLookup(table, name)`.
+    fn lookup(self, name: &[u8]) -> *mut c_void {
+        let n = cstr(name);
+        // SAFETY: a live table and a NUL-terminated name.
+        unsafe { sys::xmlHashLookup(self.0.as_ptr(), n.as_ptr()) }
+    }
+}
+
+/// An entity table's entry as the node it is.
+fn entity_node(entry: *mut c_void) -> Option<Node> {
+    Node::from_raw(entry.cast())
+}
+
+/// `xmlNotation`, which the binding reads as three strings.
+#[repr(C)]
+struct Notation {
+    name: *const u8,
+    public_id: *const u8,
+    system_id: *const u8,
+}
+
+/// `create_notation(notation->name, notation->PublicID, notation->SystemID)`:
+/// an `xmlEntity` in disguise, typed `XML_NOTATION_NODE`, owning its
+/// strings, which php hands out for a notation table's entry.
+fn notation_node(entry: *mut c_void) -> Option<Node> {
+    let n = entry.cast::<Notation>();
+    if n.is_null() {
+        return None;
+    }
+    // SAFETY: a notation table's entry is an `xmlNotation`, live with its
+    // DTD.
+    let notation = unsafe { &*n };
+    let (name, public_id, system_id) = (notation.name, notation.public_id, notation.system_id);
+    // SAFETY: a variable libxml2 sets at load and nothing here writes.
+    let alloc = unsafe { sys::xmlMalloc };
+    // SAFETY: a fresh allocation of the struct's size.
+    let entity = unsafe { alloc(std::mem::size_of::<sys::xmlEntity>()) }.cast::<sys::xmlEntity>();
+    if entity.is_null() {
+        return None;
+    }
+    // SAFETY: the fresh allocation, zeroed as php's `memset` does.
+    unsafe { ptr::write_bytes(entity, 0, 1) };
+    let copy = |s: *const u8| {
+        // SAFETY: a NUL-terminated string of the notation, or null.
+        unsafe { sys::xmlStrdup(s) }
+    };
+    let copies = (copy(name), copy(public_id), copy(system_id));
+    // SAFETY: the zeroed struct this owns.
+    let e = unsafe { &mut *entity };
+    e.type_ = sys::XML_NOTATION_NODE;
+    e.name = copies.0;
+    e.ExternalID = copies.1;
+    e.SystemID = copies.2;
+    Node::from_raw(entity.cast())
+}
+
+impl Ns {
+    pub(crate) fn from_raw(p: *mut sys::xmlNs) -> Option<Ns> {
+        NonNull::new(p).map(Ns)
+    }
+
+    pub(crate) fn raw(self) -> *mut sys::xmlNs {
+        self.0.as_ptr()
+    }
+
+    fn read<T>(self, f: impl FnOnce(&sys::xmlNs) -> T) -> T {
+        // SAFETY: a handle names a live declaration.
+        f(unsafe { &*self.0.as_ptr() })
+    }
+
+    fn write(self, f: impl FnOnce(&mut sys::xmlNs)) {
+        // SAFETY: as in `read`; no other reference is held across `f`.
+        f(unsafe { &mut *self.0.as_ptr() });
+    }
+
+    pub fn href(self) -> Option<Vec<u8>> {
+        let p = self.read(|n| n.href);
+        (!p.is_null()).then(|| owned(p))
+    }
+
+    pub fn prefix(self) -> Option<Vec<u8>> {
+        let p = self.read(|n| n.prefix);
+        (!p.is_null()).then(|| owned(p))
+    }
+
+    pub fn next(self) -> Option<Ns> {
+        Ns::from_raw(self.read(|n| n.next))
+    }
+
+    pub fn set_next(self, next: Option<Ns>) {
+        self.write(|n| n.next = next.map_or(ptr::null_mut(), Ns::raw));
+    }
+
+    /// The href replaced, the old one freed, as `setAttributeNS` rewrites an
+    /// `xmlns` declaration.
+    pub fn set_href(self, href: &[u8]) {
+        let c = cstr(href);
+        // SAFETY: a NUL-terminated copy.
+        let fresh = unsafe { sys::xmlStrdup(c.as_ptr()) };
+        self.write(|n| {
+            let old = std::mem::replace(&mut n.href, fresh);
+            // SAFETY: the declaration owned its href.
+            unsafe { Alloc::free(old.cast_mut().cast()) };
+        });
+    }
+
+    /// `dom_eliminate_ns`'s first half: href and prefix freed and nulled.
+    pub fn clear(self) {
+        self.write(|n| {
+            let href = std::mem::replace(&mut n.href, ptr::null());
+            let prefix = std::mem::replace(&mut n.prefix, ptr::null());
+            // SAFETY: the declaration owned both strings.
+            unsafe { Alloc::free(href.cast_mut().cast()) };
+            // SAFETY: as above.
+            unsafe { Alloc::free(prefix.cast_mut().cast()) };
+        });
+    }
+
+    /// An `XPath` namespace node's element, the one libxml keeps in its
+    /// `next` (`xmlXPathNodeSetDupNs`).
+    pub fn xpath_parent(self) -> Option<Node> {
+        Node::from_raw(self.read(|n| n.next).cast())
+    }
+
+    /// `php_libxml_set_old_ns(doc, ns)`.
+    pub fn move_to_old(self, doc: Option<Node>) {
+        // SAFETY: a live declaration no list holds, and a live document or
+        // none.
+        unsafe { Tree::set_old_ns(doc.map_or(ptr::null_mut(), |d| d.raw().cast()), self.raw()) };
+    }
+}
+
+impl Ns {
+    /// `xmlNewNs(node, href, prefix)`, `node` none for a declaration no element
+    /// holds yet.
+    pub fn new(node: Option<Node>, href: Option<&[u8]>, prefix: Option<&[u8]>) -> Option<Ns> {
+        let h = href.map(cstr);
+        let p = prefix.map(cstr);
+        // SAFETY: a live element or none, NUL-terminated strings or null.
+        Ns::from_raw(unsafe {
+            sys::xmlNewNs(
+                node.map_or(ptr::null_mut(), Node::raw),
+                opt_ptr(h.as_ref()),
+                opt_ptr(p.as_ref()),
+            )
+        })
+    }
+}
+
+// ---- constructors
+
+fn doc_ptr(doc: Option<Node>) -> *mut sys::xmlDoc {
+    doc.map_or(ptr::null_mut(), |d| d.raw().cast())
+}
+
+impl Node {
+    /// `xmlNewDoc(version)`.
+    pub fn new_doc(version: Option<&[u8]>) -> Option<Node> {
+        let v = version.map(cstr);
+        // SAFETY: a version or null.
+        Node::from_raw(unsafe { sys::xmlNewDoc(opt_ptr(v.as_ref())) }.cast())
+    }
+
+    /// `xmlNewDocNode(doc, ns, name, content)`.
+    pub fn new_element(
+        doc: Option<Node>,
+        ns: Option<Ns>,
+        name: &[u8],
+        content: Option<&[u8]>,
+    ) -> Option<Node> {
+        let n = cstr(name);
+        let c = content.map(cstr);
+        // SAFETY: a document or none, a namespace or none, NUL-terminated
+        // strings or null.
+        Node::from_raw(unsafe {
+            sys::xmlNewDocNode(
+                doc_ptr(doc),
+                ns.map_or(ptr::null_mut(), Ns::raw),
+                n.as_ptr(),
+                opt_ptr(c.as_ref()),
+            )
+        })
+    }
+
+    /// `xmlNewDocText(doc, content)`.
+    pub fn new_text(doc: Option<Node>, content: &[u8]) -> Option<Node> {
+        let c = cstr(content);
+        // SAFETY: as above.
+        Node::from_raw(unsafe { sys::xmlNewDocText(doc_ptr(doc), c.as_ptr()) })
+    }
+
+    /// `xmlNewDocTextLen(doc, content, len)`, the bytes as they are.
+    pub fn new_text_len(doc: Option<Node>, content: &[u8]) -> Option<Node> {
+        let len = c_int::try_from(content.len()).unwrap_or(c_int::MAX);
+        // SAFETY: a document or none and `len` readable bytes.
+        Node::from_raw(unsafe { sys::xmlNewDocTextLen(doc_ptr(doc), content.as_ptr(), len) })
+    }
+
+    /// `xmlNewDocComment(doc, content)`.
+    pub fn new_comment(doc: Option<Node>, content: &[u8]) -> Option<Node> {
+        let c = cstr(content);
+        // SAFETY: as above.
+        Node::from_raw(unsafe { sys::xmlNewDocComment(doc_ptr(doc), c.as_ptr()) })
+    }
+
+    /// `xmlNewCDataBlock(doc, content, len)`.
+    pub fn new_cdata(doc: Option<Node>, content: &[u8]) -> Option<Node> {
+        let len = c_int::try_from(content.len()).unwrap_or(c_int::MAX);
+        // SAFETY: as above.
+        Node::from_raw(unsafe { sys::xmlNewCDataBlock(doc_ptr(doc), content.as_ptr(), len) })
+    }
+
+    /// `xmlNewDocPI(doc, name, content)`.
+    pub fn new_pi(doc: Option<Node>, name: &[u8], content: Option<&[u8]>) -> Option<Node> {
+        let n = cstr(name);
+        let c = content.map(cstr);
+        // SAFETY: as above.
+        Node::from_raw(unsafe { sys::xmlNewDocPI(doc_ptr(doc), n.as_ptr(), opt_ptr(c.as_ref())) })
+    }
+
+    /// `xmlNewReference(doc, name)`.
+    pub fn new_reference(doc: Option<Node>, name: &[u8]) -> Option<Node> {
+        let n = cstr(name);
+        // SAFETY: as above.
+        Node::from_raw(unsafe { sys::xmlNewReference(doc_ptr(doc), n.as_ptr()) })
+    }
+
+    /// `xmlNewDocFragment(doc)`.
+    pub fn new_fragment(doc: Option<Node>) -> Option<Node> {
+        // SAFETY: a document or none.
+        Node::from_raw(unsafe { sys::xmlNewDocFragment(doc_ptr(doc)) })
+    }
+
+    /// `xmlNewDocProp(doc, name, value)`.
+    pub fn new_attr(doc: Option<Node>, name: &[u8], value: Option<&[u8]>) -> Option<Node> {
+        let n = cstr(name);
+        let v = value.map(cstr);
+        // SAFETY: as above.
+        Node::from_raw(
+            unsafe { sys::xmlNewDocProp(doc_ptr(doc), n.as_ptr(), opt_ptr(v.as_ref())) }.cast(),
+        )
+    }
+
+    /// `xmlNewProp(NULL, name, value)`.
+    pub fn new_prop(name: &[u8], value: Option<&[u8]>) -> Option<Node> {
+        let n = cstr(name);
+        let v = value.map(cstr);
+        // SAFETY: NUL-terminated strings or null.
+        Node::from_raw(
+            unsafe { sys::xmlNewProp(ptr::null_mut(), n.as_ptr(), opt_ptr(v.as_ref())) }.cast(),
+        )
+    }
+
+    /// `xmlNewPI(name, content)`.
+    pub fn new_pi_detached(name: &[u8], content: Option<&[u8]>) -> Option<Node> {
+        let n = cstr(name);
+        let c = content.map(cstr);
+        // SAFETY: as above.
+        Node::from_raw(unsafe { sys::xmlNewPI(n.as_ptr(), opt_ptr(c.as_ref())) })
+    }
+
+    /// `xmlNewComment(content)`, null content for none.
+    pub fn new_comment_detached(content: Option<&[u8]>) -> Option<Node> {
+        let c = content.map(cstr);
+        // SAFETY: as above.
+        Node::from_raw(unsafe { sys::xmlNewComment(opt_ptr(c.as_ref())) })
+    }
+
+    /// `xmlNewText(content)`, null content for none.
+    pub fn new_text_detached(content: Option<&[u8]>) -> Option<Node> {
+        let c = content.map(cstr);
+        // SAFETY: as above.
+        Node::from_raw(unsafe { sys::xmlNewText(opt_ptr(c.as_ref())) })
+    }
+
+    /// `xmlCreateIntSubset(doc, name, external_id, system_id)`.
+    pub fn create_int_subset(
+        doc: Option<Node>,
+        name: &[u8],
+        external_id: Option<&[u8]>,
+        system_id: Option<&[u8]>,
+    ) -> Option<Node> {
+        let n = cstr(name);
+        let e = external_id.map(cstr);
+        let s = system_id.map(cstr);
+        // SAFETY: as above.
+        Node::from_raw(
+            unsafe {
+                sys::xmlCreateIntSubset(
+                    doc_ptr(doc),
+                    n.as_ptr(),
+                    opt_ptr(e.as_ref()),
+                    opt_ptr(s.as_ref()),
+                )
+            }
+            .cast(),
+        )
+    }
+
+    /// `htmlNewDocNoDtD(NULL, NULL)`.
+    pub fn new_html_doc() -> Option<Node> {
+        // SAFETY: no argument.
+        Node::from_raw(unsafe { sys::htmlNewDocNoDtD(ptr::null(), ptr::null()) }.cast())
+    }
+}
+
+// ---- names
+
+/// A name as libxml2 validates and splits it.
+pub struct Name;
+
+impl Name {
+    /// `xmlValidateName(name, 0) == 0`.
+    pub fn valid(name: &[u8]) -> bool {
+        let n = cstr(name);
+        // SAFETY: a NUL-terminated name.
+        unsafe { sys::xmlValidateName(n.as_ptr(), 0) == 0 }
+    }
+
+    /// `xmlValidateQName(name, 0) == 0`.
+    pub fn valid_qname(name: &[u8]) -> bool {
+        let n = cstr(name);
+        // SAFETY: as above.
+        unsafe { sys::xmlValidateQName(n.as_ptr(), 0) == 0 }
+    }
+
+    /// `xmlValidateNCName(name, 0) == 0`.
+    pub fn valid_ncname(name: &[u8]) -> bool {
+        let n = cstr(name);
+        // SAFETY: as above.
+        unsafe { sys::xmlValidateNCName(n.as_ptr(), 0) == 0 }
+    }
+
+    /// `xmlSplitQName2(name, &prefix)`: the local name and the prefix, `None`
+    /// where the name has no prefix.
+    pub fn split2(name: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+        let n = cstr(name);
+        let mut prefix: *mut u8 = ptr::null_mut();
+        // SAFETY: a NUL-terminated name and a local out-pointer.
+        let local = unsafe { sys::xmlSplitQName2(n.as_ptr(), &raw mut prefix) };
+        let local = taken(local)?;
+        Some((local, taken(prefix).unwrap_or_default()))
+    }
+
+    /// `xmlSplitQName3(name, &len)`: where the local part starts, `None` for a
+    /// name with no `:`.
+    pub fn split3(name: &[u8]) -> Option<usize> {
+        let n = cstr(name);
+        let mut len: c_int = 0;
+        // SAFETY: a NUL-terminated name and a local out-pointer.
+        let local = unsafe { sys::xmlSplitQName3(n.as_ptr(), &raw mut len) };
+        if local.is_null() {
+            return None;
+        }
+        // `len` is the prefix's length; the local part is past its `:`.
+        usize::try_from(len).ok().map(|len| len + 1)
+    }
+}
+
+// ---- UTF-8, as libxml counts it
+
+/// UTF-8 as libxml2 counts it, in characters.
+pub struct Utf8;
+
+impl Utf8 {
+    /// `xmlUTF8Strlen`, `-1` for bytes that are no UTF-8.
+    pub fn len(s: &[u8]) -> i64 {
+        let c = cstr(s);
+        // SAFETY: a NUL-terminated string.
+        i64::from(unsafe { sys::xmlUTF8Strlen(c.as_ptr()) })
+    }
+
+    /// `xmlUTF8Strsub(s, start, len)`.
+    pub fn sub(s: &[u8], start: i64, len: i64) -> Option<Vec<u8>> {
+        let c = cstr(s);
+        let start = c_int::try_from(start).ok()?;
+        let len = c_int::try_from(len).ok()?;
+        // SAFETY: a NUL-terminated string.
+        taken(unsafe { sys::xmlUTF8Strsub(c.as_ptr(), start, len) })
+    }
+
+    /// `xmlUTF8Strndup(s, len)`.
+    pub fn ndup(s: &[u8], len: i64) -> Option<Vec<u8>> {
+        let c = cstr(s);
+        let len = c_int::try_from(len).ok()?;
+        // SAFETY: as above.
+        taken(unsafe { sys::xmlUTF8Strndup(c.as_ptr(), len) })
+    }
+}
+
+impl Library {
+    /// `xmlFindCharEncodingHandler(name) != NULL`, the handler closed again.
+    pub fn known_encoding(name: &[u8]) -> bool {
+        let n = cstr(name);
+        // SAFETY: a NUL-terminated name.
+        let handler = unsafe { sys::xmlFindCharEncodingHandler(n.as_ptr().cast::<c_char>()) };
+        if handler.is_null() {
+            return false;
+        }
+        // SAFETY: the handler just found, closed once.
+        unsafe { sys::xmlCharEncCloseFunc(handler) };
+        true
+    }
+
+    /// `xmlBuildURI`, unused by the legacy classes beyond a base's check.
+    pub fn canonic_path(path: &[u8]) -> Option<Vec<u8>> {
+        let p = cstr(path);
+        // SAFETY: a NUL-terminated path.
+        taken(unsafe { sys::xmlCanonicPath(p.as_ptr()) })
+    }
+}
+
+impl NodeObject {
+    /// `php_dom_instantiate_object_helper`'s libxml half: the document
+    /// counted (shared with `shared` where one is given) where the node has
+    /// one, and the node's proxy taken.
+    pub fn attach(&mut self, node: Node, shared: Option<SharedDoc>) {
+        if let Some(doc) = node.doc() {
+            // SAFETY: `shared` was read off a live object's reference in the
+            // same native call, and `doc` is the live node's document.
+            unsafe { self.increment_doc_ref_shared(shared, doc.raw().cast()) };
+        }
+        // SAFETY: a live node, and this is the half of the object standing
+        // for it.
+        unsafe { self.increment_node_ptr(node.raw()) };
+    }
+
+    /// `intern->document = NULL; php_libxml_increment_doc_ref(intern, doc)`:
+    /// a first reference to a document nothing counts yet, as a document
+    /// object takes the tree it just parsed or made.
+    pub fn adopt_document(&mut self, doc: Node) {
+        // SAFETY: `doc` is a live document no reference counts yet.
+        unsafe { self.increment_doc_ref(doc.raw().cast()) };
+    }
+
+    /// `intern->document = docobj->document;
+    /// php_libxml_increment_doc_ref(intern, doc)`: one more owner of the
+    /// document another object counts, as `DOMXPath` takes its
+    /// document's, and a first reference to `doc` where there is none.
+    pub fn share(&mut self, shared: Option<SharedDoc>, doc: Node) {
+        // SAFETY: `shared` was read off a live object's reference in the
+        // same native call, and `doc` is a live document.
+        unsafe { self.increment_doc_ref_shared(shared, doc.raw().cast()) };
+    }
+
+    /// `php_libxml_increment_node_ptr(intern, node, intern)`.
+    pub fn take_node(&mut self, node: Node) {
+        // SAFETY: a live node the object will stand for.
+        unsafe { self.increment_node_ptr(node.raw()) };
+    }
+}
+
+impl Node {
+    /// `dom_set_document_ref_obj_single`: the object standing for the node,
+    /// where one counts no document, counting `document`; `false` where one
+    /// counts another already.
+    pub fn share_document(self, document: SharedDoc) -> bool {
+        let Some(mut wrapper) = self.wrapper() else {
+            return true;
+        };
+        if wrapper.has_document() {
+            return false;
+        }
+        // SAFETY: `document` is counted by the live object the caller read
+        // it off, and this object counts none.
+        unsafe { wrapper.increment_doc_ref_shared(Some(document), ptr::null_mut()) };
+        true
+    }
+
+    /// `php_dom_transfer_document_ref_single_node`.
+    pub fn transfer_document(self, document: SharedDoc) {
+        if let Some(mut wrapper) = self.wrapper() {
+            // SAFETY: as above.
+            unsafe { wrapper.transfer_document(document) };
+        }
+    }
+}
+
+impl Node {
+    /// `php_dom_create_fake_namespace_decl_node_ptr`: a node standing for
+    /// the declaration of `href` and `prefix` on `parent`, typed `XML_NAMESPACE_DECL`,
+    /// named by the prefix (or `xmlns`), its content the href, owning a
+    /// copy of the declaration; the object that stands for it frees it.
+    pub fn fake_namespace_decl(
+        parent: Node,
+        href: Option<&[u8]>,
+        prefix: Option<&[u8]>,
+    ) -> Option<Node> {
+        let copy = Ns::new(None, href, None)?;
+        if let Some(p) = prefix {
+            let c = cstr(p);
+            // SAFETY: a NUL-terminated prefix, duplicated for the copy,
+            // whose prefix is null so nothing is lost.
+            let owned = unsafe { sys::xmlStrdup(c.as_ptr()) };
+            copy.write(|n| n.prefix = owned);
+        }
+        let name = prefix.unwrap_or(b"xmlns");
+        let node = Node::new_element(parent.doc(), None, name, href)?;
+        node.write(|n| {
+            n.type_ = sys::XML_NAMESPACE_DECL;
+            n.parent = parent.raw();
+            n.ns = copy.raw();
+        });
+        Some(node)
+    }
+}
