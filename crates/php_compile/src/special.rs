@@ -6,8 +6,8 @@
 //! compiler serves the constant for the four names whose constant needs
 //! no opcode, `strlen`, `chr`, `ord` and `defined`, and the opcode for
 //! the rows whose kernel the engine has: `ZEND_STRLEN`, `ZEND_TYPE_CHECK`
-//! with its type mask, `ZEND_DEFINED` with its cache slot and
-//! `ZEND_COUNT` with `sizeof`'s bit. Every other row is
+//! with its type mask, `ZEND_DEFINED` with its cache slot, `ZEND_COUNT`
+//! with `sizeof`'s bit and `ZEND_IN_ARRAY` with its table. Every other row is
 //! [`Special::Opcode`] and is compiled as the ordinary `INIT_FCALL`,
 //! `SEND_*` and `DO_ICALL`, never folded to something else, so the value
 //! is php's where the op array is not yet; a row moves off
@@ -28,11 +28,11 @@
 //! reader does not read. `chr` and `ord` fold only in a call read for
 //! its value (`type == BP_VAR_R`), which every call here is.
 
-use php_heap::{Zval, ZvalType};
+use php_heap::{Key, Zval, ZvalType, numeric_prefix};
 use php_unit::Opcode;
 
 use crate::CompileError;
-use crate::emit::{Emit, Where};
+use crate::emit::{Emit, Where, truth};
 use php_syntax::tree;
 
 /// What php's compiler makes of one name in the table.
@@ -60,12 +60,17 @@ pub(crate) enum Special {
     /// `extended_value` set where the name written was `sizeof`, so the
     /// `TypeError` names the function as written.
     Count { sizeof: bool },
+    /// `zend_compile_func_in_array`: `ZEND_IN_ARRAY` over the needle and
+    /// a table built from a haystack of constants, with `$strict`, read
+    /// off a constant third argument by `zend_is_true`, in
+    /// `extended_value`; the call otherwise.
+    InArray,
     /// `zend_compile_func_clone`: `ZEND_CLONE` over the one argument,
     /// which is what `clone $o` and `clone($o)` both are; two arguments
     /// or none is the call to php 8.5's `clone()` function.
     Clone,
     /// A shape that is an opcode of its own (`ZEND_BOOL`, `ZEND_CAST`,
-    /// `ZEND_INIT_USER_CALL`, `ZEND_IN_ARRAY`, `ZEND_GET_CLASS`,
+    /// `ZEND_INIT_USER_CALL`, `ZEND_GET_CLASS`,
     /// `ZEND_GET_CALLED_CLASS`, `ZEND_GET_TYPE`, `ZEND_FUNC_NUM_ARGS`,
     /// `ZEND_FUNC_GET_ARGS`, `ZEND_ARRAY_KEY_EXISTS`, the ropes of
     /// `sprintf`) and has no kernel here yet: the ordinary call.
@@ -118,7 +123,7 @@ pub(crate) const TABLE: &[(&[u8], Special)] = &[
     (b"ord", Special::Ord),
     (b"call_user_func_array", Special::Opcode),
     (b"call_user_func", Special::Opcode),
-    (b"in_array", Special::Opcode),
+    (b"in_array", Special::InArray),
     (b"count", Special::Count { sizeof: false }),
     (b"sizeof", Special::Count { sizeof: true }),
     (b"get_class", Special::Opcode),
@@ -190,6 +195,7 @@ impl Emit<'_> {
                 self.over_one(Opcode::Count, arguments, u32::from(sizeof))
             }
             Some(Special::Clone) => self.over_one(Opcode::Clone, arguments, 0),
+            Some(Special::InArray) => self.in_array(arguments),
             Some(Special::Opcode) | None => Ok(None),
         }
     }
@@ -213,7 +219,11 @@ impl Emit<'_> {
             Some(Special::Ord) => self.ord(arguments),
             Some(Special::Defined) => self.defined_constant(arguments),
             Some(
-                Special::TypeCheck(_) | Special::Count { .. } | Special::Clone | Special::Opcode,
+                Special::TypeCheck(_)
+                | Special::Count { .. }
+                | Special::Clone
+                | Special::InArray
+                | Special::Opcode,
             )
             | None => Ok(None),
         }
@@ -263,6 +273,101 @@ impl Emit<'_> {
         };
         let value = self.expr(*argument)?;
         Ok(Some(self.emit_unary(opcode, value, extended_value)))
+    }
+
+    /// `zend_compile_func_in_array` (`Z/Zend/zend_compile.c:4419`): two
+    /// arguments, or three whose third is a value written as such or a
+    /// constant the compiler substitutes, read by `zend_is_true` and so
+    /// never type-checked; and a haystack that is an array expression of
+    /// constants. The table is built from the haystack's values, each a
+    /// key holding `true`: under `$strict` a string by
+    /// `zend_hash_add` and a long by `zend_hash_index_add`, anything
+    /// else refusing; without it a string that is not numeric, anything
+    /// else refusing, since a hash lookup could not compare it as `==`
+    /// does. The empty haystack is the empty table either way. Then the
+    /// needle, compiled, and `ZEND_IN_ARRAY` over it and the table into a
+    /// temporary, `$strict` in `extended_value`. Every refusal is the
+    /// ordinary call, which refuses a third argument that is no bool
+    /// under `strict_types` as any native parameter is refused, and
+    /// raises nothing of the haystack's fold, since the call folds it
+    /// again where php reads the node it folded in place.
+    ///
+    /// ```php
+    /// declare(strict_types=1);
+    /// class S { function __toString(): string { return "s"; } }
+    /// var_dump(in_array(1, [1], 1), in_array(1, [], 1), in_array(1, [], null), in_array('1', [1, 'x'], true), in_array(1, ['1', 'x'], TRUE), in_array('a', ['a', 'b'], null), in_array(1, [1], PHP_INT_SIZE), in_array(1, [], \null));
+    /// var_dump(in_array('b', ['a', 'b']), in_array(0, ['a']), in_array(true, ['a']), in_array(null, ['', 'a']), in_array(new S, ['s']), in_array(1.0, ['a']));
+    /// $f = 'in_array';
+    /// try { $f(1, [1], 1); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// try { in_array(1, [1], null); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// try { in_array('a', ['a', '1'], null); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// try { in_array('a', ['a', 'b'], $s ?? null); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump(in_array('1', ['a', '1']), in_array($u, ['', 'a']));
+    /// var_dump(in_array(1, [NAN . '', 1]));
+    /// ```
+    /// ```expect
+    /// Warning: unexpected NAN value was coerced to string in %s on line 12
+    /// bool(true)
+    /// bool(false)
+    /// bool(false)
+    /// bool(false)
+    /// bool(false)
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// in_array(): Argument #3 ($strict) must be of type bool, int given
+    /// in_array(): Argument #3 ($strict) must be of type bool, null given
+    /// in_array(): Argument #3 ($strict) must be of type bool, null given
+    /// in_array(): Argument #3 ($strict) must be of type bool, null given
+    ///
+    /// Warning: Undefined variable $u in %s on line 11
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// ```
+    fn in_array(&mut self, arguments: &[tree::Expr]) -> Result<Option<Where>, CompileError> {
+        let (needle, haystack, strict) = match arguments {
+            [needle, haystack] => (*needle, *haystack, false),
+            [needle, haystack, flag] => match self.in_array_flag(*flag)? {
+                Some(strict) => (*needle, *haystack, strict),
+                None => return Ok(None),
+            },
+            _ => return Ok(None),
+        };
+        let raised = self.raised();
+        let Some(keys) = self
+            .array_entries(haystack)?
+            .and_then(|entries| in_array_keys(&entries, strict))
+        else {
+            self.unraise(raised);
+            return Ok(None);
+        };
+        let table = self.lay_array(&keys)?;
+        let needle = self.expr(needle)?;
+        Ok(Some(self.emit_binary(
+            Opcode::InArray,
+            needle,
+            Where::Constant(table),
+            u32::from(strict),
+        )))
+    }
+
+    /// The `$strict` `zend_compile_func_in_array` reads off a third
+    /// argument: `zend_is_true` over a value written as such
+    /// (`ZEND_AST_ZVAL`) or over a constant `zend_try_ct_eval_const`
+    /// substitutes (`ZEND_AST_CONST`), and nothing for any other
+    /// argument, a constant left to the program among them.
+    fn in_array_flag(&mut self, flag: tree::Expr) -> Result<Option<bool>, CompileError> {
+        if let tree::Expr::NameRef(token) = self.peel(flag) {
+            return Ok(self.named_constant(token)?.map(truth));
+        }
+        Ok(self.written(flag)?.map(truth))
     }
 
     /// `zend_compile_func_chr`: the one-byte string for a long written
@@ -394,6 +499,34 @@ impl Emit<'_> {
             _ => Ok(None),
         }
     }
+}
+
+/// The table `zend_compile_func_in_array` builds from a haystack's
+/// values: each value a key holding `true`, the first of equal keys
+/// kept (`zend_hash_add`), a string as its bytes and never the integer
+/// a decimal one would be under `zend_symtable_update`. Under
+/// `$strict` a string or a long is a key; without it a string that is not
+/// numeric (`is_numeric_string` with no errors allowed) is. Any other
+/// value is nothing, which is the ordinary call.
+fn in_array_keys(entries: &[(Key, Zval)], strict: bool) -> Option<Vec<(Key, Zval)>> {
+    let mut keys: Vec<(Key, Zval)> = Vec::with_capacity(entries.len());
+    for (_, value) in entries {
+        let key = match (value.kind(), value.as_str()) {
+            (ZvalType::String, Some(s)) if strict || !is_numeric(s.bytes()) => Key::Str(s),
+            (ZvalType::Long, _) if strict => Key::Long(value.as_long()?),
+            _ => return None,
+        };
+        if !keys.iter().any(|(held, _)| *held == key) {
+            keys.push((key, Zval::bool(true)));
+        }
+    }
+    Some(keys)
+}
+
+/// `is_numeric_string` with `allow_errors` off: the whole string is one
+/// number, whitespace around it allowed.
+fn is_numeric(bytes: &[u8]) -> bool {
+    numeric_prefix(bytes).is_some_and(|(_, trailing)| !trailing)
 }
 
 /// `ZVAL_LONG(&result->u.constant, Z_STRLEN(...))`: a length as the long

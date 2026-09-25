@@ -1136,6 +1136,20 @@ impl Emit<'_> {
         });
     }
 
+    /// Where the diagnostics raised so far end: the mark
+    /// [`Self::unraise`] goes back to.
+    pub(crate) fn raised(&self) -> Raised {
+        Raised(self.diagnostics.len())
+    }
+
+    /// The diagnostics raised past `mark` taken back: a fold tried for
+    /// a shape that then refuses, whose expressions the ordinary call
+    /// folds again and raises again. php folds each node once, in place
+    /// (`zend_eval_const_expr`), so what it raised stands once.
+    pub(crate) fn unraise(&mut self, mark: Raised) {
+        self.diagnostics.truncate(mark.0);
+    }
+
     /// The constant string for these bytes, interned into whichever home
     /// this compilation was given: php's `zend_new_interned_string` over
     /// the string a `CONST` operand holds. A home with no memory left
@@ -1792,6 +1806,18 @@ impl Emit<'_> {
             b"null" => Some(Zval::null()),
             _ => None,
         }
+    }
+
+    /// `zend_try_ct_eval_const` over a name written as a constant,
+    /// php's `ZEND_AST_CONST`: one of [`Self::constant_name`]'s three,
+    /// then the persistent constant [`Self::const_name`] substitutes,
+    /// and nothing where php leaves the name to `FETCH_CONSTANT`.
+    pub(crate) fn named_constant(&mut self, token: TokenId) -> Result<Option<Zval>, CompileError> {
+        if let Some(value) = self.constant_name(token) {
+            return Ok(Some(value));
+        }
+        let name = self.text(token).to_vec();
+        self.const_name(&name)
     }
 
     /// The class a `::`, a `new` or an `instanceof` stands on: a name
@@ -8721,7 +8747,7 @@ impl Emit<'_> {
         let opcode = Self::opcode_of(op);
         let left = self.expr(left)?;
         let right = self.expr(right)?;
-        Ok(self.emit_binary(opcode, left, right))
+        Ok(self.emit_binary(opcode, left, right, 0))
     }
 
     /// `zend_compile_binary_op`'s `ZEND_CONCAT` arm: both sides
@@ -8739,7 +8765,7 @@ impl Emit<'_> {
         }
         let left = self.string_operand(left)?;
         let right = self.string_operand(right)?;
-        Ok(self.emit_binary(Opcode::Concat, left, right))
+        Ok(self.emit_binary(Opcode::Concat, left, right, 0))
     }
 
     /// `zend_compile_binary_op`'s `ZEND_BW_OR`, `ZEND_BW_XOR` and
@@ -8760,7 +8786,7 @@ impl Emit<'_> {
         }
         let left = self.expr(left)?;
         let right = self.expr(right)?;
-        Ok(self.emit_binary(Self::opcode_of(op), left, right))
+        Ok(self.emit_binary(Self::opcode_of(op), left, right, 0))
     }
 
     /// `zend_try_ct_eval_binary_op` over `bitwise_or_function`,
@@ -8816,9 +8842,9 @@ impl Emit<'_> {
             return Ok(self.emit_unary(Opcode::TypeCheck, operand, mask));
         }
         Ok(match op {
-            BinaryOp::Greater => self.emit_binary(Opcode::IsSmaller, right, left),
-            BinaryOp::GreaterOrEqual => self.emit_binary(Opcode::IsSmallerOrEqual, right, left),
-            _ => self.emit_binary(Self::opcode_of(op), left, right),
+            BinaryOp::Greater => self.emit_binary(Opcode::IsSmaller, right, left, 0),
+            BinaryOp::GreaterOrEqual => self.emit_binary(Opcode::IsSmallerOrEqual, right, left, 0),
+            _ => self.emit_binary(Self::opcode_of(op), left, right, 0),
         })
     }
 
@@ -9001,7 +9027,7 @@ impl Emit<'_> {
             return Ok(Where::Constant(folded));
         }
         let operand = self.expr(operand)?;
-        Ok(self.emit_binary(Opcode::Mul, operand, Where::Constant(sign)))
+        Ok(self.emit_binary(Opcode::Mul, operand, Where::Constant(sign), 0))
     }
 
     /// `zend_compile_unary_op` (`Z/Zend/zend_compile.c:10309`) for the
@@ -9663,9 +9689,16 @@ impl Emit<'_> {
         Where::Temporary(out)
     }
 
-    /// `zend_emit_op_tmp`: the opline with both operands and a temporary
-    /// for what it leaves, which is where the value is.
-    fn emit_binary(&mut self, opcode: Opcode, left: Where, right: Where) -> Where {
+    /// `zend_emit_op_tmp`: the opline with both operands,
+    /// `extended_value` as the caller sets it after the emission, and a
+    /// temporary for what it leaves, which is where the value is.
+    pub(crate) fn emit_binary(
+        &mut self,
+        opcode: Opcode,
+        left: Where,
+        right: Where,
+        extended_value: u32,
+    ) -> Where {
         let (op1_type, op1) = self.operand(left);
         let (op2_type, op2) = self.operand(right);
         let out = self.temporary();
@@ -9677,6 +9710,7 @@ impl Emit<'_> {
             op2,
             out_type: OperandKind::Tmp,
             out,
+            extended_value,
             ..Opline::default()
         });
         Where::Temporary(out)
@@ -9753,14 +9787,9 @@ impl Emit<'_> {
                 }
                 self.string(&bytes)
             }
-            tree::Expr::NameRef(token) => {
-                if let Some(value) = self.constant_name(token) {
-                    return Ok(value);
-                }
-                let name = self.text(token).to_vec();
-                self.const_name(&name)?
-                    .ok_or_else(|| self.fatal("a constant this compiler cannot read yet"))
-            }
+            tree::Expr::NameRef(token) => self
+                .named_constant(token)?
+                .ok_or_else(|| self.fatal("a constant this compiler cannot read yet")),
             // A `"…"` or a heredoc with nothing interpolated is one
             // string php's parser folded before the compiler saw it;
             // one with a variable in it is `ZEND_AST_ENCAPS_LIST`, whose
@@ -10035,6 +10064,36 @@ impl Emit<'_> {
         &mut self,
         elements: &[NodeId<tree::ArrayElement>],
     ) -> Result<Option<Zval>, CompileError> {
+        match self.constant_entries(elements)? {
+            Some(entries) => self.lay_array(&entries).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// `zend_try_ct_eval_array` over an argument php's tree holds as
+    /// `ZEND_AST_ARRAY`, an array expression under any parentheses: its
+    /// entries as [`Self::constant_entries`] folds them, laid down
+    /// nowhere, and nothing where the argument is any other node or
+    /// folds to no constant. What `zend_compile_func_in_array` builds a
+    /// table of its own from.
+    pub(crate) fn array_entries(
+        &mut self,
+        expr: tree::Expr,
+    ) -> Result<Option<Vec<(Key, Zval)>>, CompileError> {
+        let tree::Expr::ArrayExpr(id) = self.peel(expr) else {
+            return Ok(None);
+        };
+        let elements = self.parsed.tree[id].array_elements.clone();
+        self.constant_entries(&elements)
+    }
+
+    /// [`Self::constant_array`]'s entries before they are laid down: the
+    /// keys and values `zend_try_ct_eval_array` folds, in order, and
+    /// nothing where it folds none.
+    fn constant_entries(
+        &mut self,
+        elements: &[NodeId<tree::ArrayElement>],
+    ) -> Result<Option<Vec<(Key, Zval)>>, CompileError> {
         let mut folded: Vec<(Option<Zval>, Zval)> = Vec::with_capacity(elements.len());
         for element in elements {
             let (key, value) = self.element_of(*element)?;
@@ -10090,8 +10149,15 @@ impl Emit<'_> {
                 None => entries.push((key, value)),
             }
         }
-        match self.strings.constant_array(&entries) {
-            Ok(array) => Ok(Some(Zval::array(array))),
+        Ok(Some(entries))
+    }
+
+    /// One constant array laid down in the home the unit's strings are
+    /// in ([`Intern::constant_array`]), and the fatal php's allocator
+    /// raises where there is no memory for it.
+    pub(crate) fn lay_array(&mut self, entries: &[(Key, Zval)]) -> Result<Zval, CompileError> {
+        match self.strings.constant_array(entries) {
+            Ok(array) => Ok(Zval::array(array)),
             Err(Fatal::Error(message)) => Err(self.fatal(message)),
             Err(Fatal::OutOfMemory(_)) => Err(self.fatal("Out of memory")),
         }
@@ -12523,11 +12589,16 @@ fn number(value: Zval) -> Option<Number> {
     }
 }
 
+/// How many diagnostics a compilation had raised at one point
+/// ([`Emit::raised`]).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Raised(usize);
+
 /// `zval_is_true` over a folded constant: [`Scalar::is_true`] for a
 /// scalar and, for an array, whether it holds anything
 /// (`i_zend_is_true`'s `IS_ARRAY` arm). No object, resource or
 /// reference is a constant a compiler folds.
-fn truth(value: Zval) -> bool {
+pub(crate) fn truth(value: Zval) -> bool {
     if let Some(array) = value.as_arr() {
         return !array.is_empty();
     }

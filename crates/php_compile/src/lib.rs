@@ -2634,6 +2634,38 @@ mod tests {
         );
     }
 
+    /// The oracle's dump of `zend_compile_func_in_array`'s shape:
+    /// `IN_ARRAY` with `$strict` before its operands, over a haystack
+    /// of non-numeric strings with no third argument, of strings and
+    /// longs under `true`, of nothing under `null`, of a numeric string
+    /// and a long under `\TRUE`, and of a string under `''`, each third
+    /// argument read by `zend_is_true`. The arms that are the call are the
+    /// witness's on [`special`], since php's call there is frameless.
+    #[test]
+    fn in_array_over_a_literal_haystack_is_in_array_with_its_flag() {
+        assert_eq!(
+            dump_of(
+                b"<?php echo in_array($a, [\"x\", \"y\"]), in_array($a, [1, \"b\"], true), in_array($a, [], null), in_array($a, [\"1\", 2], \\TRUE), in_array($a, ['y'], '');"
+            ),
+            main_dump(
+                11,
+                1,
+                5,
+                "0000 T1 = IN_ARRAY 0 CV0($a) array(...)\n\
+                 0001 ECHO T1\n\
+                 0002 T2 = IN_ARRAY 1 CV0($a) array(...)\n\
+                 0003 ECHO T2\n\
+                 0004 T3 = IN_ARRAY 0 CV0($a) array(...)\n\
+                 0005 ECHO T3\n\
+                 0006 T4 = IN_ARRAY 1 CV0($a) array(...)\n\
+                 0007 ECHO T4\n\
+                 0008 T5 = IN_ARRAY 0 CV0($a) array(...)\n\
+                 0009 ECHO T5\n\
+                 0010 RETURN int(1)\n"
+            )
+        );
+    }
+
     /// A count no entry serves is the ordinary call, whatever the
     /// name: `str_contains` of one argument is below its required
     /// count, `trim` of three is above every arity, and a name the
