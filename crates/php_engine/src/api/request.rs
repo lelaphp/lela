@@ -7110,7 +7110,7 @@ impl Request {
         self.release_symbol(symbol);
     }
 
-    /// `zend_hash_del_ind` (`Z/Zend/zend_hash.c:1583`), what `UNSET_VAR`
+    /// `zend_hash_del_ind` (`Z/Zend/zend_hash.c:1572`), what `UNSET_VAR`
     /// deletes a name with: a bucket attached to a CV stays and the CV is
     /// left `UNDEF`, what it held released after it is gone; any other
     /// bucket is deleted as [`Request::symbol_del`] deletes it.
@@ -10635,6 +10635,37 @@ impl Request {
             }
             Some(Link::Frame(..) | Link::Call(_)) | None => NativeCaller::Native,
         }
+    }
+
+    /// `zend_proptable_to_symtable(&EG(symbol_table), 1)`
+    /// (`Z/Zend/zend_hash.c:3396`), what `FETCH_GLOBALS` hands the
+    /// program as `$GLOBALS`: a copy of the global table, every name
+    /// that has a value in the table's order, a CV the name is attached
+    /// to read where it stands and skipped where it holds nothing, a
+    /// name that reads as an integer that integer (`ZEND_HANDLE_NUMERIC_STR`),
+    /// and a reference nothing else holds its value, as
+    /// `zend_array_dup` unwraps one; each value one more owner.
+    pub(crate) fn symbol_table_array(&mut self) -> Result<PhpArray, Thrown> {
+        let entries: Vec<(Vec<u8>, Symbol)> = self.globals().clone();
+        let mut array = PhpArray::new(self)?;
+        for (name, symbol) in entries {
+            let value = match symbol {
+                Symbol::Value(value) => value,
+                Symbol::Held(cell) => cell.get(),
+                Symbol::Indirect(frame, slot) => self.slot(frame, slot),
+            };
+            if value.tag() == TypeTag::Undef {
+                continue;
+            }
+            let value = match value.as_php_ref() {
+                Some(cell) if value.refcount() == 1 => cell.get(),
+                _ => value,
+            };
+            self.addref(&value);
+            let key = Key::from_string(PhpString::new(self, &name)?);
+            array.set(self, key, value)?;
+        }
+        Ok(array)
     }
 
     /// `zend_rebuild_symbol_table` for `frame` and `zend_array_dup` of

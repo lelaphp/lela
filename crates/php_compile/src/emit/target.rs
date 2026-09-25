@@ -87,12 +87,14 @@ impl Emit<'_> {
         let tree = &parsed.tree;
         Ok(match expr {
             // `$$x`, `${expr}` and an auto-global, a `ZEND_AST_VAR` no CV
-            // holds: the variable fetched by its name.
+            // holds, and `$GLOBALS['k']`, which `zend_compile_assign`
+            // treats as one: the variable fetched by its name.
             _ if self.is_by_name(expr) => Target::ByName(expr),
             tree::Expr::SimpleVarExpr(id) => match self.simple_var_of(id, line)? {
                 SimpleVar::Cv(name) => Target::Cv(name),
                 SimpleVar::This => return Err(self.compile_error("Cannot re-assign $this")),
                 SimpleVar::Auto(_) => Target::ByName(expr),
+                SimpleVar::Globals => return Err(self.fatal("`$GLOBALS` past its writable check")),
             },
             tree::Expr::SubscriptExpr(_) => Target::Dim(expr),
             tree::Expr::MemberAccessExpr(id) => {

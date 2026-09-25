@@ -117,6 +117,10 @@ impl Emit<'_> {
                         Where::Temporary(out)
                     }
                     SimpleVar::This | SimpleVar::Auto(_) => self.expr(written)?,
+                    // `zend_try_compile_cv` fails and
+                    // `zend_compile_simple_var_no_cv` fetches the name,
+                    // which `EG(symbol_table)` has not: php's own warning.
+                    SimpleVar::Globals => self.fetch_by_name(b"GLOBALS", super::Symbols::Global)?,
                 },
                 _ => self.expr(value)?,
             }
@@ -142,6 +146,10 @@ impl Emit<'_> {
                     self.operand(this)
                 }
                 SimpleVar::Auto(_) => return Err(self.fatal("an auto-global not fetched by name")),
+                SimpleVar::Globals => {
+                    let globals = self.fetch_globals(OperandKind::Var);
+                    self.operand(globals)
+                }
             }),
             tree::Expr::SubscriptExpr(_) | tree::Expr::MemberAccessExpr(_) => {
                 self.var_for_reference(expr)

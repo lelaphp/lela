@@ -7540,6 +7540,73 @@ class C {
         }
     }
 
+    /// `$GLOBALS` under the oracle's `[regime.dump]`: read whole it is
+    /// `FETCH_GLOBALS` into a temporary; `$GLOBALS['a']` is the fetch by
+    /// name over `'a'` from the global table wherever it stands, the
+    /// variable of an `ASSIGN`, the base of a dimension's compound
+    /// assignment, `UNSET_VAR` and `ISSET_ISEMPTY_VAR`; `isset($GLOBALS)`
+    /// is `true` before the request runs.
+    #[test]
+    fn globals_is_a_copy_of_the_table_and_its_element_a_fetch_by_name_as_php_emits_it() {
+        let cases: &[(&[u8], usize, u32, u32, &str)] = &[
+            (
+                b"<?php $x = $GLOBALS;",
+                3,
+                1,
+                2,
+                "0000 T1 = FETCH_GLOBALS\n\
+                 0001 ASSIGN CV0($x) T1\n\
+                 0002 RETURN int(1)\n",
+            ),
+            (
+                b"<?php $GLOBALS[\"a\"] = 1;",
+                3,
+                0,
+                2,
+                "0000 V0 = FETCH_W (global) string(\"a\")\n\
+                 0001 ASSIGN V0 int(1)\n\
+                 0002 RETURN int(1)\n",
+            ),
+            (
+                b"<?php $GLOBALS[\"a\"][\"b\"] .= \"c\";",
+                4,
+                0,
+                2,
+                "0000 V0 = FETCH_RW (global) string(\"a\")\n\
+                 0001 ASSIGN_DIM_OP (CONCAT) V0 string(\"b\")\n\
+                 0002 OP_DATA string(\"c\")\n\
+                 0003 RETURN int(1)\n",
+            ),
+            (
+                b"<?php unset($GLOBALS[\"a\"]);",
+                2,
+                0,
+                0,
+                "0000 UNSET_VAR (global) string(\"a\")\n\
+                 0001 RETURN int(1)\n",
+            ),
+            (
+                b"<?php $b = isset($GLOBALS[\"a\"]) || isset($GLOBALS);",
+                5,
+                1,
+                2,
+                "0000 T1 = ISSET_ISEMPTY_VAR (global) (isset) string(\"a\")\n\
+                 0001 T1 = JMPNZ_EX T1 0003\n\
+                 0002 T1 = BOOL bool(true)\n\
+                 0003 ASSIGN CV0($b) T1\n\
+                 0004 RETURN int(1)\n",
+            ),
+        ];
+        for (source, lines, vars, tmps, oplines) in cases {
+            assert_eq!(
+                dump_of(source),
+                main_dump(*lines, *vars, *tmps, oplines),
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+    }
+
     /// `zend_is_auto_global` arms what the compiler meets, in the order
     /// it meets it, once, whether or not the line runs: the unit carries
     /// that order ([`Unit::arms`]), which is the order php lays the

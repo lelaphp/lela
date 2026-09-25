@@ -3568,6 +3568,72 @@ pub(crate) fn fetch_unset<T: Tier>(
     fetch_by_name(req, frame, code, op, ByName::Unset)
 }
 
+/// `ZEND_FETCH_GLOBALS` (`Z/Zend/zend_vm_def.h:9229`), `$GLOBALS`: a
+/// copy of `EG(symbol_table)` into the temporary
+/// ([`Request::symbol_table_array`]), so what the program writes into it
+/// is its own and never a variable, the table's names in the table's
+/// order, each auto-global first, a numeric name an integer key, and a
+/// reference two variables share kept as one.
+///
+/// ```php
+/// $a = 1; $GLOBALS['b'] = 2;
+/// var_dump($GLOBALS['a'], $b, isset($GLOBALS['c']), array_key_exists('a', $GLOBALS));
+/// unset($GLOBALS['a']);
+/// var_dump(isset($a));
+/// var_dump(array_slice(array_keys($GLOBALS), 0, 7));
+/// $GLOBALS['7'] = 'seven';
+/// $r = 1; $ref = &$r;
+/// $g = $GLOBALS;
+/// var_dump(array_key_last($g), $g['r'], $g['ref']);
+/// $g['r'] = 2;
+/// var_dump($r);
+/// ```
+/// ```expect
+/// int(1)
+/// int(2)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// array(7) {
+///   [0]=>
+///   string(4) "argv"
+///   [1]=>
+///   string(4) "argc"
+///   [2]=>
+///   string(4) "_GET"
+///   [3]=>
+///   string(5) "_POST"
+///   [4]=>
+///   string(7) "_COOKIE"
+///   [5]=>
+///   string(6) "_FILES"
+///   [6]=>
+///   string(7) "_SERVER"
+/// }
+/// int(7)
+/// int(1)
+/// int(1)
+/// int(2)
+/// ```
+pub(crate) fn fetch_globals<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let array = match req.symbol_table_array() {
+        Ok(array) => array,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    let previous = req.set_slot(
+        frame,
+        exec::temporary_slot(code, op.out),
+        Value::array(array),
+    );
+    req.release(previous);
+    Ok(advance(req, frame))
+}
+
 /// `ZEND_ISSET_ISEMPTY_VAR` (`Z/Zend/zend_vm_def.h:7481`), `isset($$x)`,
 /// `isset($_SERVER)` and `empty(${'a'})`: the name read as
 /// `zval_get_tmp_string` reads it ([`isset_name`]), the table

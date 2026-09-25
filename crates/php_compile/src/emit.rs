@@ -251,12 +251,14 @@ fn class_fetch_type(name: &[u8]) -> u32 {
 /// `is_this_fetch` picks out, fetched by `FETCH_THIS` and never a CV, or
 /// an auto-global, which `zend_try_compile_cv` refuses and
 /// `zend_compile_simple_var_no_cv` fetches by its name from
-/// `EG(symbol_table)` ([`by_name`]).
+/// `EG(symbol_table)` ([`by_name`]), or `$GLOBALS`, `is_globals_fetch`,
+/// which is `FETCH_GLOBALS` and no variable.
 #[derive(PartialEq, Eq)]
 enum SimpleVar {
     Cv(Vec<u8>),
     This,
     Auto(AutoGlobal),
+    Globals,
 }
 
 /// `ZEND_FETCH_LOCAL` (`Z/Zend/zend_compile.h:1083`), the
@@ -1424,9 +1426,8 @@ impl Emit<'_> {
     /// `$name` as `zend_compile_simple_var` sorts it: `$this`, which
     /// `is_this_fetch` picks out and no CV holds; an auto-global, which
     /// `zend_is_auto_global` arms ([`Self::arm`]) and php fetches by its
-    /// name; `$GLOBALS`, which php reads by `FETCH_GLOBALS` and this
-    /// compiler cannot read yet; and the CV `zend_try_compile_cv` makes
-    /// of every other name.
+    /// name; `$GLOBALS`, which php reads by `FETCH_GLOBALS`; and the CV
+    /// `zend_try_compile_cv` makes of every other name.
     fn simple_var_of(
         &mut self,
         id: NodeId<tree::SimpleVarExpr>,
@@ -1444,7 +1445,7 @@ impl Emit<'_> {
             return Ok(SimpleVar::Auto(global));
         }
         if name == b"GLOBALS" {
-            return Err(walk::unread(line, "a variable"));
+            return Ok(SimpleVar::Globals);
         }
         Ok(SimpleVar::Cv(name))
     }
@@ -1527,6 +1528,9 @@ impl Emit<'_> {
             self.ensure_writable(target)?;
         }
         if op == Some(SyntaxKind::QUESTION_QUESTION_EQ) {
+            if self.is_by_name(target) {
+                return self.assign_coalesce_by_name(target, value);
+            }
             let tree::Expr::SimpleVarExpr(var) = target else {
                 return Err(self.unread("a `??=` over what is no variable"));
             };
@@ -1542,17 +1546,18 @@ impl Emit<'_> {
             return Err(self.unread("an assignment operator"));
         };
         match target {
+            // `$GLOBALS['k'] .= v` is a `ZEND_AST_VAR` to php, and so is
+            // an auto-global.
+            _ if self.is_by_name(target) => {
+                self.assign_op_by_name(target, u32::from(Self::opcode_of(op) as u8), value)
+            }
             tree::Expr::SimpleVarExpr(var) => match self.simple_var_of(var, line)? {
                 SimpleVar::Cv(name) => self.assign_op(&name, op, value),
-                SimpleVar::This => Err(self.unread("a compound assignment to what is no variable")),
-                SimpleVar::Auto(_) => {
-                    self.assign_op_by_name(target, u32::from(Self::opcode_of(op) as u8), value)
+                SimpleVar::This | SimpleVar::Auto(_) | SimpleVar::Globals => {
+                    Err(self.unread("a compound assignment to what is no variable"))
                 }
             },
             tree::Expr::SubscriptExpr(_) => self.assign_dim_op(target, op, value),
-            tree::Expr::VarVarExpr(_) | tree::Expr::DynamicVarExpr(_) => {
-                self.assign_op_by_name(target, u32::from(Self::opcode_of(op) as u8), value)
-            }
             tree::Expr::MemberAccessExpr(access) => {
                 let name = self.member_name_of(access, line)?;
                 let object = self.parsed.tree[access].obj;
@@ -1640,7 +1645,11 @@ impl Emit<'_> {
                 }
                 // An auto-global: `FETCH_RW (global)` and the step.
                 SimpleVar::Auto(_) => self.step_by_name(target, opcode),
+                SimpleVar::Globals => Err(self.fatal("`$GLOBALS` past its writable check")),
             },
+            // `$GLOBALS['k']++`: `zend_compile_var` under `BP_VAR_RW` is
+            // `FETCH_RW (global)` over the name, and the step.
+            _ if self.is_by_name(target) => self.step_by_name(target, opcode),
             tree::Expr::ScopedAccessExpr(scoped) => match self.scoped_of(scoped, line)? {
                 Scoped::Property { class, name } => {
                     let step = match (pre, up) {
@@ -2152,7 +2161,7 @@ impl Emit<'_> {
                         return Err(walk::refused(line, "Cannot unset $this"));
                     }
                     SimpleVar::Cv(name) => self.lookup_cv(&name),
-                    SimpleVar::Auto(_) => {
+                    SimpleVar::Auto(_) | SimpleVar::Globals => {
                         return Err(self.fatal("an auto-global not fetched by name"));
                     }
                 };
@@ -2255,6 +2264,13 @@ impl Emit<'_> {
             }
             by_name::Named::Fetch { name, table } => {
                 self.global_by_name(name, table);
+                return Ok(());
+            }
+            // `zend_try_compile_cv` refuses `GLOBALS` as the auto-global
+            // php registers it as, so the name is fetched as one.
+            by_name::Named::Globals => {
+                let name = self.string(b"GLOBALS")?;
+                self.global_by_name(Where::Constant(name), Symbols::Global);
                 return Ok(());
             }
             by_name::Named::Cv(name) => name,
@@ -5689,8 +5705,9 @@ impl Emit<'_> {
                 SimpleVar::Cv(name) => (OperandKind::Cv, self.lookup_cv(&name)),
                 SimpleVar::This => return Err(self.compile_error("Cannot re-assign $this")),
                 // `zend_try_compile_cv` refuses an auto-global, so the
-                // fetch writes a `VAR` the variable is assigned from.
-                SimpleVar::Auto(_) => (OperandKind::Var, self.temporary()),
+                // fetch writes a `VAR` the variable is assigned from; the
+                // assignment is where `$GLOBALS` meets its compile error.
+                SimpleVar::Auto(_) | SimpleVar::Globals => (OperandKind::Var, self.temporary()),
             },
             _ => (OperandKind::Var, self.temporary()),
         };
@@ -5764,6 +5781,10 @@ impl Emit<'_> {
                 OperandKind::Cv => Where::Cv(at),
                 _ => Where::Returned(at),
             });
+        }
+        // `$GLOBALS` under `BP_VAR_W`: `FETCH_GLOBALS` into a `VAR`.
+        if by_ref && self.is_globals(node) {
+            return Ok(self.fetch_globals(OperandKind::Var));
         }
         let subject = self.expr(expr)?;
         if by_ref && self.is_call(expr) {
@@ -5869,12 +5890,18 @@ impl Emit<'_> {
             Some(_) if !by_ref => 0,
             Some(tree::Expr::CallExpr(_)) => RETURNS_FUNCTION,
             Some(tree::Expr::SimpleVarExpr(_) | tree::Expr::SubscriptExpr(_)) | None => 0,
+            Some(expr) if self.is_by_name(expr) => 0,
             Some(_) => RETURNS_VALUE,
         };
         // `zend_compile_var(BP_VAR_W, 1)` over a variable returned by
         // reference: a dimension is fetched for writing, so the cell the
-        // caller is bound to is the array's own slot.
+        // caller is bound to is the array's own slot, and a variable
+        // fetched by name is its `FETCH_W`.
         let compiled = match written {
+            Some(expr) if by_ref && self.is_by_name(expr) => {
+                let (_, at) = self.var_for_reference(expr)?;
+                Where::Returned(at)
+            }
             Some(expr @ tree::Expr::SubscriptExpr(_)) if by_ref => {
                 let (_, at) = self.var_for_reference(expr)?;
                 Where::Returned(at)
@@ -7489,6 +7516,7 @@ impl Emit<'_> {
                 SimpleVar::Cv(name) => Ok(Where::Cv(self.lookup_cv(&name))),
                 SimpleVar::This => Ok(self.fetch_this(OperandKind::Tmp)),
                 SimpleVar::Auto(global) => self.fetch_by_name(global.name(), Symbols::Global),
+                SimpleVar::Globals => Ok(self.fetch_globals(OperandKind::Tmp)),
             },
             tree::Expr::VarVarExpr(id) => {
                 let inner = self.required(tree[id].inner, "a variable")?;
@@ -7779,9 +7807,14 @@ impl Emit<'_> {
         let word = if empty { "empty" } else { "isset" };
         let var = self.peel(var);
         // `zend_compile_simple_var_no_cv` under `BP_VAR_IS` made
-        // `ISSET_ISEMPTY_VAR`: `$$x` and an auto-global.
+        // `ISSET_ISEMPTY_VAR`: `$$x`, an auto-global and `$GLOBALS['k']`.
         if self.is_by_name(var) {
             return self.isset_by_name(var, empty);
+        }
+        // `is_globals_fetch`: `$GLOBALS` is set and not empty, answered
+        // while the file compiles.
+        if self.is_globals(var) {
+            return Ok(Where::Constant(Zval::bool(!empty)));
         }
         if let tree::Expr::SimpleVarExpr(id) = var {
             let SimpleVar::Cv(name) = self.simple_var_of(id, line)? else {
@@ -8857,6 +8890,9 @@ impl Emit<'_> {
                     self.operand(this)
                 }
                 SimpleVar::Auto(_) => return Err(self.fatal("an auto-global not fetched by name")),
+                SimpleVar::Globals => {
+                    return Err(self.compile_error("Cannot acquire reference to $GLOBALS"));
+                }
             },
             tree::Expr::SubscriptExpr(_) | tree::Expr::MemberAccessExpr(_) => {
                 self.var_for_reference(node)?
@@ -9129,7 +9165,11 @@ impl Emit<'_> {
     ) -> Result<(Base, Vec<DimLink>), CompileError> {
         let mut dimensions = Vec::new();
         let mut base = self.peel(target);
-        while let tree::Expr::SubscriptExpr(id) = base {
+        // `$GLOBALS['k']` is no dimension but the fetch by name the chain
+        // stands on (`zend_delayed_compile_dim`'s first arm).
+        while let tree::Expr::SubscriptExpr(id) = base
+            && self.global_var_fetch(base).is_none()
+        {
             let node = &self.parsed.tree[id];
             dimensions.push(node.index);
             base = self.peel(node.base);
@@ -9295,6 +9335,13 @@ impl Emit<'_> {
             (_, Fetch::Write | Fetch::Rw) if self.is_this(base) => {
                 let this = self.fetch_this(OperandKind::Var);
                 Base::Settled(self.operand(this))
+            }
+            // The `is_globals_fetch` arm under a write, `$GLOBALS->p = 1`:
+            // `FETCH_GLOBALS` into a `VAR`, which the fetch over it finds
+            // no object in as the program serves.
+            (_, Fetch::Write | Fetch::Rw) if self.is_globals(base) => {
+                let globals = self.fetch_globals(OperandKind::Var);
+                Base::Settled(self.operand(globals))
             }
             // `zend_compile_var`'s default arm under a write.
             (_, Fetch::Write | Fetch::Rw) => {
@@ -10422,6 +10469,9 @@ impl Emit<'_> {
                 SimpleVar::Cv(name) => self.fetch_by_name(&name, Symbols::Local)?,
                 SimpleVar::This => self.fetch_by_name(b"this", Symbols::Local)?,
                 SimpleVar::Auto(global) => self.fetch_by_name(global.name(), Symbols::Global)?,
+                // `zend_compile_simple_var_no_cv` itself, past the
+                // `is_globals_fetch` arm: the name the table has not.
+                SimpleVar::Globals => self.fetch_by_name(b"GLOBALS", Symbols::Global)?,
             },
             _ => self.expr(operand)?,
         };
@@ -10470,8 +10520,8 @@ impl Emit<'_> {
     /// `${1}` are `$a` and `$1` with no opline. Otherwise
     /// `zend_compile_simple_var_no_cv`: the expression compiled, a
     /// constant converted to a string, and `FETCH_R (local)` over it
-    /// into a temporary ([`by_name`]). `$GLOBALS` by value,
-    /// `FETCH_GLOBALS`, is not read yet.
+    /// into a temporary ([`by_name`]). `${'GLOBALS'}` is `$GLOBALS`,
+    /// `FETCH_GLOBALS` into a temporary.
     ///
     /// ```php
     /// $a = 5; $ab = 7;
@@ -10491,6 +10541,7 @@ impl Emit<'_> {
         Ok(match self.named_by_expr(name)? {
             by_name::Named::Cv(name) => Where::Cv(self.lookup_cv(&name)),
             by_name::Named::This => self.fetch_this(OperandKind::Tmp),
+            by_name::Named::Globals => self.fetch_globals(OperandKind::Tmp),
             by_name::Named::Fetch { name, table } => self.fetch_r(name, table),
         })
     }
@@ -10659,6 +10710,17 @@ impl Emit<'_> {
         match fetch {
             Fetched::Text(bytes) => Ok(Where::Constant(self.string(bytes)?)),
             Fetched::Var(name) => self.in_string_var(name),
+            // `"$GLOBALS[k]"`: the fetch by the offset's name from
+            // `EG(symbol_table)`, `zend_delayed_compile_dim`'s first arm.
+            Fetched::Dim(name, index) if name == b"GLOBALS" => {
+                let name = match index {
+                    Offset::Value(value) => {
+                        Where::Constant(self.stringified(*value)?.unwrap_or(*value))
+                    }
+                    Offset::Var(name) => self.in_string_var(name)?,
+                };
+                Ok(self.fetch_r(name, Symbols::Global))
+            }
             Fetched::Dim(name, index) => {
                 // `zend_compile_dim` under `BP_VAR_R`: an auto-global's
                 // fetch by name held back while the offset compiles.
@@ -10730,6 +10792,9 @@ impl Emit<'_> {
     fn in_string_var(&mut self, name: &[u8]) -> Result<Where, CompileError> {
         if name == b"this" {
             return Ok(self.fetch_this(OperandKind::Tmp));
+        }
+        if name == b"GLOBALS" {
+            return Ok(self.fetch_globals(OperandKind::Tmp));
         }
         if let Some(global) = AutoGlobal::of(name) {
             self.arm(global);
@@ -13256,7 +13321,7 @@ impl Emit<'_> {
                 let cv = match self.peel(*argument) {
                     tree::Expr::SimpleVarExpr(id) => match self.simple_var_of(id, self.line)? {
                         SimpleVar::Cv(name) => Some(self.lookup_cv(&name)),
-                        SimpleVar::This | SimpleVar::Auto(_) => None,
+                        SimpleVar::This | SimpleVar::Auto(_) | SimpleVar::Globals => None,
                     },
                     _ => None,
                 };

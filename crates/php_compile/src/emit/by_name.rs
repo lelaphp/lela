@@ -9,13 +9,17 @@
 //!
 //! What the name is, is decided once ([`Named`]): a name written out is
 //! the CV `zend_try_compile_cv` gives it, `$this` when it is `this`,
-//! and a fetch by name from `EG(symbol_table)` when it is an
+//! `$GLOBALS` when it is `GLOBALS` (`FETCH_GLOBALS`, a copy of the global
+//! table), and a fetch by name from `EG(symbol_table)` when it is an
 //! auto-global's ([`AutoGlobal`], which the unit arms); any other name is
 //! the value the program computes, fetched by name from the frame's
 //! own table. The table is [`Symbols`], decoded once where the name is.
+//! `$GLOBALS['k']` is the fetch by name over `'k'` from the global table
+//! (`is_global_var_fetch`, `Z/Zend/zend_compile.c:2974`), which php
+//! compiles as the variable `$k` of that table wherever it stands.
 
 use php_heap::Zval;
-use php_syntax::tree;
+use php_syntax::tree::{self, NodeId};
 use php_unit::{AutoGlobal, Opcode, OperandKind, Opline};
 
 use super::target::Source;
@@ -27,7 +31,7 @@ use crate::CompileError;
 /// for the fetch after it to read and free.
 const FETCH_GLOBAL_LOCK: u32 = 1 << 3;
 
-/// `ZEND_ISEMPTY` (`Z/Zend/zend_compile.h:1005`), the bit of an
+/// `ZEND_ISEMPTY` (`Z/Zend/zend_compile.h:1100`), the bit of an
 /// `ISSET_ISEMPTY_*` opline's `extended_value` that says `empty`.
 const ISEMPTY: u32 = 1 << 0;
 
@@ -54,25 +58,31 @@ impl Symbols {
 
 /// What a variable's name makes of it, decided once: the CV
 /// `zend_try_compile_cv` gives a name written out, `$this`
-/// (`is_this_fetch`), or a fetch by the name's value from the table
-/// [`Symbols`] names.
+/// (`is_this_fetch`), `$GLOBALS` (`is_globals_fetch`), or a fetch by the
+/// name's value from the table [`Symbols`] names.
 pub(super) enum Named {
     Cv(Vec<u8>),
     This,
+    Globals,
     Fetch { name: Where, table: Symbols },
 }
 
 impl Emit<'_> {
-    /// `$name`, `$$x` or `${expr}` sorted as [`Named`], the name's own
-    /// oplines laid down where it is not written out; `None` for what is
-    /// no variable.
+    /// `$name`, `$$x`, `${expr}` or `$GLOBALS['k']` sorted as [`Named`],
+    /// the name's own oplines laid down where it is not written out;
+    /// `None` for what is no variable.
     pub(super) fn named(&mut self, expr: tree::Expr) -> Result<Option<Named>, CompileError> {
         let line = self.line_of(expr);
+        if let Some(id) = self.global_var_fetch(expr) {
+            let index = self.parsed.tree[id].index;
+            return self.named_in_globals(index).map(Some);
+        }
         let inner = match self.peel(expr) {
             tree::Expr::SimpleVarExpr(id) => {
                 return Ok(Some(match self.simple_var_of(id, line)? {
                     SimpleVar::Cv(name) => Named::Cv(name),
                     SimpleVar::This => Named::This,
+                    SimpleVar::Globals => Named::Globals,
                     SimpleVar::Auto(global) => self.auto_global(global)?,
                 }));
             }
@@ -87,15 +97,98 @@ impl Emit<'_> {
     }
 
     /// Whether `expr` is a variable fetched by name: `$$x` and `${expr}`,
-    /// and an auto-global written out.
+    /// an auto-global written out, and `$GLOBALS['k']`.
     pub(super) fn is_by_name(&self, expr: tree::Expr) -> bool {
         match self.peel(expr) {
             tree::Expr::VarVarExpr(_) | tree::Expr::DynamicVarExpr(_) => true,
             tree::Expr::SimpleVarExpr(id) => self.parsed.tree[id]
                 .var
                 .is_some_and(|var| AutoGlobal::of(&self.variable_name(var)).is_some()),
-            _ => false,
+            expr => self.global_var_fetch(expr).is_some(),
         }
+    }
+
+    /// `is_global_var_fetch`: the `[…]` directly over `$GLOBALS`.
+    pub(super) fn global_var_fetch(&self, expr: tree::Expr) -> Option<NodeId<tree::SubscriptExpr>> {
+        let tree::Expr::SubscriptExpr(id) = self.peel(expr) else {
+            return None;
+        };
+        self.is_globals(self.parsed.tree[id].base).then_some(id)
+    }
+
+    /// `$GLOBALS[]`, the append over `$GLOBALS`, which each construct
+    /// refuses in words of its own.
+    fn is_globals_append(&self, expr: tree::Expr) -> bool {
+        self.global_var_fetch(expr)
+            .is_some_and(|id| self.parsed.tree[id].index.is_none())
+    }
+
+    /// `zend_delayed_compile_dim`'s first arm over `$GLOBALS[…]`: the
+    /// index compiled, a constant converted to a string
+    /// (`convert_to_string`), and the fetch by that name from
+    /// `EG(symbol_table)`; the append is php's compile error. Every
+    /// place a variable fetched by name stands, `$GLOBALS['k']` stands:
+    /// read, written, stepped, compounded, bound, under `??`, `isset`
+    /// and `unset`, and under a further dimension or property.
+    ///
+    /// ```php
+    /// $a = 1;
+    /// $GLOBALS['b'] = 2;
+    /// $GLOBALS['a'] += 10;
+    /// $GLOBALS['c'][] = 3;
+    /// $GLOBALS[1] = 'one';
+    /// $GLOBALS['a']++;
+    /// $GLOBALS['o'] = new stdClass;
+    /// $GLOBALS['o']->p = 'p';
+    /// $r = &$GLOBALS['b'];
+    /// $r = 20;
+    /// function f() { $GLOBALS['q'] = 5; return $GLOBALS['q'] + $GLOBALS['a']; }
+    /// var_dump($a, $b, $c, ${1}, $o->p, f(), $q, $GLOBALS['z'] ?? 'no', isset($GLOBALS['a']), empty($GLOBALS['z']));
+    /// unset($GLOBALS['a']);
+    /// var_dump(isset($a), "$GLOBALS[b] {$GLOBALS['q']}");
+    /// ```
+    /// ```expect
+    /// int(12)
+    /// int(20)
+    /// array(1) {
+    ///   [0]=>
+    ///   int(3)
+    /// }
+    /// string(3) "one"
+    /// string(1) "p"
+    /// int(17)
+    /// int(5)
+    /// string(2) "no"
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// string(4) "20 5"
+    /// ```
+    ///
+    /// ```php
+    /// $GLOBALS[] = 1;
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot append to $GLOBALS in %s on line 2
+    /// ```
+    fn named_in_globals(&mut self, index: Option<tree::Expr>) -> Result<Named, CompileError> {
+        let Some(index) = index else {
+            return Err(self.compile_error("Cannot append to $GLOBALS"));
+        };
+        let name = self.global_name(index)?;
+        Ok(Named::Fetch {
+            name,
+            table: Symbols::Global,
+        })
+    }
+
+    /// The index under `$GLOBALS[…]` as the name it fetches: compiled,
+    /// and a constant converted to a string.
+    fn global_name(&mut self, index: tree::Expr) -> Result<Where, CompileError> {
+        Ok(match self.expr(index)? {
+            Where::Constant(value) => Where::Constant(self.stringified(value)?.unwrap_or(value)),
+            name => name,
+        })
     }
 
     /// An auto-global the compiler met, `zend_is_auto_global`: armed by
@@ -192,7 +285,7 @@ impl Emit<'_> {
         // `is_globals_fetch`: `$GLOBALS` is `FETCH_GLOBALS`, no fetch by
         // name, and not read yet.
         if name == b"GLOBALS" {
-            return Err(self.unread("a variable"));
+            return Ok(Named::Globals);
         }
         if let Some(global) = AutoGlobal::of(&name) {
             return self.auto_global(global);
@@ -238,9 +331,49 @@ impl Emit<'_> {
         (out_type, out)
     }
 
+    /// `FETCH_GLOBALS` (`Z/Zend/zend_vm_def.h:9229`), `$GLOBALS` itself
+    /// (`zend_compile_simple_var`'s `is_globals_fetch` arm): a copy of
+    /// `EG(symbol_table)` into a temporary under a read and into a `VAR`
+    /// under a write, which `isset` and `empty` never reach, since php
+    /// answers them while it compiles.
+    ///
+    /// ```php
+    /// $a = 1;
+    /// function f() { return $GLOBALS; }
+    /// $g = f();
+    /// $g['a'] = 2;
+    /// var_dump($a, $g['a'], isset($GLOBALS), empty($GLOBALS), is_array($GLOBALS));
+    /// foreach ($GLOBALS as $name => $value) { if ($name === 'a') echo "a is $value\n"; }
+    /// var_dump(count(${'GLOBALS'}) === count($GLOBALS), @$GLOBALS);
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// int(2)
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// a is 1
+    /// bool(true)
+    /// NULL
+    /// ```
+    pub(super) fn fetch_globals(&mut self, out_type: OperandKind) -> Where {
+        let out = self.temporary();
+        self.push(Opline {
+            opcode: Opcode::FetchGlobals,
+            out_type,
+            out,
+            ..Opline::default()
+        });
+        match out_type {
+            OperandKind::Var => Where::Returned(out),
+            _ => Where::Temporary(out),
+        }
+    }
+
     /// [`Self::named`] under `fetch` as `zend_delayed_compile_var` holds
-    /// it: a CV settled, `$this` its `FETCH_THIS`, and a fetch by name
-    /// held back. `None` for what is no variable.
+    /// it: a CV settled, `$this` its `FETCH_THIS`, `$GLOBALS` its
+    /// `FETCH_GLOBALS`, and a fetch by name held back. `None` for what is
+    /// no variable.
     pub(super) fn delayed_named(
         &mut self,
         expr: tree::Expr,
@@ -256,6 +389,15 @@ impl Emit<'_> {
                 };
                 let this = self.fetch_this(kind);
                 Some(Base::Settled(self.operand(this)))
+            }
+            Some(Named::Globals) => {
+                let kind = if matches!(fetch, Fetch::Read | Fetch::Is) {
+                    OperandKind::Tmp
+                } else {
+                    OperandKind::Var
+                };
+                let globals = self.fetch_globals(kind);
+                Some(Base::Settled(self.operand(globals)))
             }
             Some(Named::Fetch { name, table }) => Some(self.held_by_name(name, table)),
         })
@@ -378,6 +520,82 @@ impl Emit<'_> {
         Ok(Where::Temporary(out))
     }
 
+    /// `zend_compile_assign_coalesce`'s `ZEND_AST_VAR` arm over a variable
+    /// fetched by name, `$GLOBALS['k'] ??= v` among them (bug #81684):
+    /// `FETCH_IS` by the name into a temporary, `COALESCE` over it with
+    /// the jump learnt after the rest, the value, then `FETCH_W` by the
+    /// same name, the memoized operand php's `ZEND_MEMOIZE_FETCH` hands
+    /// back, `ASSIGN` over it and `QM_ASSIGN` of that into the coalesce's
+    /// temporary. A name computed into a temporary is memoized by a
+    /// `COPY_TMP` and freed on the jump's arm, which this does not
+    /// compile.
+    ///
+    /// ```php
+    /// $GLOBALS['x'] ??= 'x';
+    /// $n = 'y';
+    /// $$n ??= 1;
+    /// $$n ??= 2;
+    /// function f() { echo "f\n"; return 3; }
+    /// $_SERVER ??= f();
+    /// $v = ($GLOBALS['w'] ??= 'w');
+    /// var_dump($GLOBALS['x'], $y, is_array($_SERVER), $v, $w);
+    /// ```
+    /// ```expect
+    /// string(1) "x"
+    /// int(1)
+    /// bool(true)
+    /// string(1) "w"
+    /// string(1) "w"
+    /// ```
+    pub(super) fn assign_coalesce_by_name(
+        &mut self,
+        target: tree::Expr,
+        value: tree::Expr,
+    ) -> Result<Where, CompileError> {
+        let Some(Named::Fetch { name, table }) = self.named(target)? else {
+            return Err(self.fatal("a `??=` by name over what is no fetch by name"));
+        };
+        if !matches!(name, Where::Constant(_) | Where::Cv(_)) {
+            return Err(self.unread("a `??=` over a variable named by a temporary"));
+        }
+        let held = self.held_by_name(name, table);
+        let (op1_type, op1) = self.base_fetch(held, Fetch::Is, Over::Dim);
+        let out = self.temporary();
+        let opnum = self.push(Opline {
+            opcode: Opcode::Coalesce,
+            op1_type,
+            op1,
+            out_type: OperandKind::Tmp,
+            out,
+            ..Opline::default()
+        });
+        let value = self.expr(value)?;
+        let (op2_type, op2) = self.operand(value);
+        let held = self.held_by_name(name, table);
+        let (op1_type, op1) = self.base_fetch(held, Fetch::Write, Over::Dim);
+        let assigned = self.temporary();
+        self.push(Opline {
+            opcode: Opcode::Assign,
+            op1_type,
+            op1,
+            op2_type,
+            op2,
+            out_type: OperandKind::Tmp,
+            out: assigned,
+            ..Opline::default()
+        });
+        self.push(Opline {
+            opcode: Opcode::QmAssign,
+            op1_type: OperandKind::Tmp,
+            op1: assigned,
+            out_type: OperandKind::Tmp,
+            out,
+            ..Opline::default()
+        });
+        self.update_jump_target_to_next(opnum);
+        Ok(Where::Temporary(out))
+    }
+
     /// `zend_compile_global_var`'s second arm (`Z/Zend/zend_compile.c:5441`),
     /// a `global` over a name no CV has, an auto-global or one the
     /// program computes: `FETCH_W (global+lock)` over the name into a
@@ -462,6 +680,10 @@ impl Emit<'_> {
         var: tree::Expr,
         empty: bool,
     ) -> Result<Where, CompileError> {
+        // `zend_compile_isset_or_empty`'s own arm over `$GLOBALS[]`.
+        if self.is_globals_append(var) {
+            return Err(self.compile_error("Cannot use [] for reading"));
+        }
         let Some(Named::Fetch { name, table }) = self.named(var)? else {
             return Err(self.fatal("an `isset` by name over what is no fetch by name"));
         };
@@ -498,6 +720,10 @@ impl Emit<'_> {
     /// bool(false)
     /// ```
     pub(super) fn unset_by_name(&mut self, var: tree::Expr) -> Result<(), CompileError> {
+        // `zend_compile_unset`'s own arm over `$GLOBALS[]`.
+        if self.is_globals_append(var) {
+            return Err(self.compile_error("Cannot use [] for unsetting"));
+        }
         let Some(Named::Fetch { name, table }) = self.named(var)? else {
             return Err(self.fatal("an `unset` by name over what is no fetch by name"));
         };

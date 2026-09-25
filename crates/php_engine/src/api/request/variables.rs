@@ -196,7 +196,7 @@ impl Request {
     }
 
     /// `php_import_environment_variables`
-    /// (`Z/main/php_variables.c:619`): each variable of the environment
+    /// (`Z/main/php_variables.c:629`): each variable of the environment
     /// whose name is not empty and holds no space, dot or `[`, under a
     /// name that reads as an integer as that integer, in the order the
     /// environment has them. What `$_ENV` is under a `variables_order`
