@@ -209,11 +209,14 @@ pub enum Refusal {
     /// `Class %s contains %d abstract method%s and must therefore be
     /// declared abstract or implement the remaining method%s (%s)`, with
     /// every method left, of which php names three; an enum, which
-    /// cannot be abstract, `must implement` them.
+    /// cannot be abstract, and a class declared abstract, which is left
+    /// with a private abstract method no other class may implement,
+    /// `must implement` them.
     AbstractLeft {
         kind: ClassKind,
         class: String,
         methods: Vec<String>,
+        must_implement: bool,
     },
     /// `Trait method %s::%s has not been applied as %s::%s, because of
     /// collision with %s::%s`: two traits' methods under one name.
@@ -620,6 +623,7 @@ impl fmt::Display for Refusal {
                 kind,
                 class,
                 methods,
+                must_implement,
             } => {
                 let count = methods.len();
                 let plural = if count > 1 { "s" } else { "" };
@@ -631,7 +635,7 @@ impl fmt::Display for Refusal {
                     .join(", ");
                 let more = if count > 3 { ", ..." } else { "" };
                 let what = object_type_uc(*kind);
-                if *kind == ClassKind::Enum {
+                if *must_implement {
                     return write!(
                         f,
                         "{what} {class} must implement {count} abstract method{plural} ({named}{more})"
@@ -2720,7 +2724,17 @@ fn same_method(a: &MethodDecl, b: &MethodDecl) -> bool {
 /// linked: a
 /// class not declared abstract left with an abstract method, one it
 /// inherited or one an interface declares, `E_ERROR` in php and a fatal
-/// all the same.
+/// all the same. A class declared abstract is held to its private
+/// abstract methods alone, which only it could implement, as a trait's
+/// `abstract private` method leaves one.
+///
+/// ```php
+/// trait T { abstract private function m(int $a); }
+/// abstract class C { use T; }
+/// ```
+/// ```expect exit=255
+/// Fatal error: Class C must implement 1 abstract method (C::m) in %s on line 3
+/// ```
 ///
 /// ```php
 /// abstract class A { abstract function f(); abstract function g(); }
@@ -2733,13 +2747,15 @@ fn abstract_left(
     child: &ClassDecl,
     methods: &[(Option<&ClassDecl>, &MethodDecl)],
 ) -> Option<Refusal> {
-    if !matches!(child.kind, ClassKind::Class | ClassKind::Enum) || child.flags.is_abstract {
+    if !matches!(child.kind, ClassKind::Class | ClassKind::Enum) {
         return None;
     }
+    let explicit = child.flags.is_abstract;
     let left: Vec<String> = methods
         .iter()
         .filter(|(by, method)| {
-            method.is_abstract || by.is_some_and(|by| by.kind == ClassKind::Interface)
+            (method.is_abstract || by.is_some_and(|by| by.kind == ClassKind::Interface))
+                && (!explicit || method.visibility == Visibility::Private)
         })
         .map(|(by, method)| {
             let scope = by.map_or(&child.name, |by| &by.name);
@@ -2750,6 +2766,7 @@ fn abstract_left(
         kind: child.kind,
         class: text(&child.name.0),
         methods: left,
+        must_implement: explicit || child.kind == ClassKind::Enum,
     })
 }
 
