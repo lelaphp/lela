@@ -247,6 +247,29 @@ fn class_parents(req: &mut Request) -> Result<Value, Thrown> {
 /// }
 /// bool(false)
 /// ```
+///
+/// A trait another trait uses is that trait's to list, and a class
+/// lists none of its parent's:
+///
+/// ```php
+/// trait T {} trait U { use T; }
+/// class C { use U, T; } class D extends C {}
+/// var_dump(class_uses('C'), class_uses(new D), class_uses('U'));
+/// ```
+/// ```expect
+/// array(2) {
+///   ["U"]=>
+///   string(1) "U"
+///   ["T"]=>
+///   string(1) "T"
+/// }
+/// array(0) {
+/// }
+/// array(1) {
+///   ["T"]=>
+///   string(1) "T"
+/// }
+/// ```
 fn class_uses(req: &mut Request) -> Result<Value, Thrown> {
     let Some(class) = subject(req)? else {
         return Ok(Value::bool(false));
