@@ -9,7 +9,7 @@
 
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
@@ -43,27 +43,39 @@ pub fn head_commit(root: &Path) -> Result<String> {
     }
 }
 
-/// `HEAD` through `.git` (a directory, or a worktree's file naming one),
-/// a symbolic ref through `refs/` and then `packed-refs`, shortened to the
-/// seven characters `rev-parse --short` prints on a small repository.
-fn read_head(root: &Path) -> Option<String> {
+/// The two directories git keeps for the checkout at `root`, read from
+/// its `.git` alone: the checkout's own, where `HEAD` is, and the one
+/// every worktree of the repository shares, where the refs are. `.git`
+/// is that directory in the main worktree and a file naming it in a
+/// linked one, whose `commondir` names the shared one.
+fn git_dirs(root: &Path) -> Option<(PathBuf, PathBuf)> {
     let dot_git = root.join(".git");
     let git_dir = if dot_git.is_dir() {
         dot_git
     } else {
         let line = fs::read_to_string(&dot_git).ok()?;
-        let target = line.strip_prefix("gitdir:")?.trim();
-        let target = Path::new(target);
-        if target.is_absolute() {
-            target.to_path_buf()
-        } else {
-            root.join(target)
-        }
+        root.join(line.strip_prefix("gitdir:")?.trim())
     };
     let common = match fs::read_to_string(git_dir.join("commondir")) {
         Ok(rel) => git_dir.join(rel.trim()),
         Err(_) => git_dir.clone(),
     };
+    Some((git_dir, common))
+}
+
+/// The directory every worktree of the repository `root` is checked out
+/// from shares, canonical: two checkouts are worktrees of one repository
+/// when theirs are equal, wherever either was laid down. `None` for a
+/// directory whose `.git` does not say.
+pub(crate) fn common_dir(root: &Path) -> Option<PathBuf> {
+    git_dirs(root).and_then(|(_, common)| fs::canonicalize(common).ok())
+}
+
+/// `HEAD` through `.git` ([`git_dirs`]), a symbolic ref through `refs/`
+/// and then `packed-refs`, shortened to the seven characters `rev-parse
+/// --short` prints on a small repository.
+fn read_head(root: &Path) -> Option<String> {
+    let (git_dir, common) = git_dirs(root)?;
     let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
     let head = head.trim();
     let full = match head.strip_prefix("ref:") {
