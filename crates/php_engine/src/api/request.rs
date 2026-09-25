@@ -1107,9 +1107,17 @@ pub(crate) const DEBUG_BACKTRACE_IGNORE_ARGS: i64 = 2;
 /// rebuilt one: the value the table owns, or `IS_INDIRECT`, the CV of the
 /// frame the name is attached to (`zend_attach_symbol_table`), which
 /// owns the value while the frame stands.
+///
+/// `Held` is the value the table owns kept in a place of its own: php
+/// hands a fetch by name for writing the bucket's own `zval *`, and a
+/// bucket here moves as the list of names grows, so the first such fetch
+/// moves the value into a cell that does not ([`Request::symbol_place`]).
+/// The cell is the table's alone and never a PHP reference: what it holds
+/// is the bucket's value, a reference among them.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Symbol {
     Value(Value),
+    Held(PhpRef),
     Indirect(FrameRef, u32),
 }
 
@@ -6333,6 +6341,18 @@ impl Request {
         } else {
             let key = php_heap::Key::Str(name.heap());
             let held = o.properties().is_some_and(|table| table.contains(key));
+            // `zend_assign_to_variable` over the entry found: one that
+            // holds a reference, what `$o->p = &$x` bound, is written
+            // through, so every name of the cell reads the value.
+            let bound = o
+                .properties()
+                .and_then(|table| table.get(key))
+                .and_then(|found| Value::of_zval(found).as_php_ref().copied());
+            if let Some(cell) = bound {
+                self.reference_set(cell.heap(), value);
+                self.release(Value::string(name));
+                return Ok(());
+            }
             if !held
                 && let Err(thrown) = self.dynamic_property_creation(object.class(), name.as_bytes())
             {
@@ -7332,6 +7352,7 @@ impl Request {
             });
             let value = match found {
                 Some(Symbol::Value(value)) => value,
+                Some(Symbol::Held(cell)) => self.unhold(cell),
                 Some(Symbol::Indirect(other, slot)) => self.take_slot(other, slot),
                 None => {
                     if let Some(entries) = self.table_mut(table) {
@@ -7441,9 +7462,7 @@ impl Request {
             return;
         };
         for (_, symbol) in table.entries {
-            if let Symbol::Value(value) = symbol {
-                self.release(value);
-            }
+            self.release_symbol(symbol);
         }
     }
 
@@ -7462,6 +7481,17 @@ impl Request {
             self.globals().len() - 1
         });
         let cell = match self.globals()[at].1 {
+            Symbol::Held(held) => {
+                let place = held.heap().val_ref();
+                let value = Value::of_zval(place.read());
+                if let Some(cell) = value.as_php_ref() {
+                    *cell
+                } else {
+                    let cell = self.reference(value.undef_as_null())?;
+                    place.write(cell.as_value().to_zval());
+                    cell
+                }
+            }
             Symbol::Indirect(frame, slot) => {
                 let Some(place) = self.slot_ptr(frame, slot) else {
                     return Err(crate::api::raising::fatal(
@@ -7504,9 +7534,7 @@ impl Request {
         };
         if let Some(at) = entries.iter().position(|(key, _)| *key == name) {
             let old = std::mem::replace(&mut entries[at].1, Symbol::Value(value));
-            if let Symbol::Value(old) = old {
-                self.release(old);
-            }
+            self.release_symbol(old);
             return;
         }
         entries.push((name, Symbol::Value(value)));
@@ -7523,9 +7551,90 @@ impl Request {
             return;
         };
         let (_, symbol) = entries.remove(at);
-        if let Symbol::Value(value) = symbol {
-            self.release(value);
+        self.release_symbol(symbol);
+    }
+
+    /// What a bucket owns given up: its value, or the cell a fetch by
+    /// name moved it into with the value in it; an attached bucket owns
+    /// nothing.
+    fn release_symbol(&mut self, symbol: Symbol) {
+        match symbol {
+            Symbol::Value(value) => self.release(value),
+            Symbol::Held(cell) => self.release(cell.as_value()),
+            Symbol::Indirect(..) => {}
         }
+    }
+
+    /// The value a [`Symbol::Held`] cell holds taken out of it, the owner
+    /// the cell had the caller's, and the cell given up.
+    fn unhold(&mut self, cell: PhpRef) -> Value {
+        let place = cell.heap().val_ref();
+        let value = Value::of_zval(place.read());
+        place.write(Value::undef().to_zval());
+        self.release(cell.as_value());
+        value
+    }
+
+    /// `EG(symbol_table)`, laid down where nothing has written it yet.
+    pub(crate) fn global_table(&mut self) -> TableId {
+        let _ = self.globals();
+        TableId::GLOBAL
+    }
+    /// `zend_hash_find` in a symbol table for a fetch by name that
+    /// reads: what the bucket `name` holds, an `IS_INDIRECT` bucket
+    /// followed to the CV of the frame attached to it; `None` where the
+    /// table has no such name. A view: no owner taken.
+    pub(crate) fn symbol_value(&mut self, table: TableId, name: &[u8]) -> Option<Value> {
+        let symbol = self
+            .table_mut(table)?
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, symbol)| *symbol)?;
+        Some(match symbol {
+            Symbol::Value(value) => value,
+            Symbol::Held(cell) => cell.get(),
+            Symbol::Indirect(frame, at) => self.slot(frame, at),
+        })
+    }
+
+    /// `zend_hash_find` in a symbol table for a fetch by name that
+    /// writes, php's `zval *` into the table that the `VAR` holds as an
+    /// `IS_INDIRECT`: an attached name is its CV's slot, and a bucket
+    /// that holds its value in the table is moved into a place of its
+    /// own first ([`Symbol::Held`]), where php's bucket already is one;
+    /// with `add`, a name the table has not is laid down holding `null`
+    /// (`zend_hash_add_new`). `None` where the name is not there and
+    /// `add` is not asked.
+    pub(crate) fn symbol_place(
+        &mut self,
+        table: TableId,
+        name: &[u8],
+        add: bool,
+    ) -> Result<Option<php_heap::ZvalRef>, Thrown> {
+        let Some(entries) = self.table_mut(table) else {
+            return Ok(None);
+        };
+        let at = match entries.iter().position(|(key, _)| key == name) {
+            Some(at) => at,
+            None if add => {
+                entries.push((name.to_vec(), Symbol::Value(Value::null())));
+                entries.len() - 1
+            }
+            None => return Ok(None),
+        };
+        let symbol = entries[at].1;
+        let cell = match symbol {
+            Symbol::Indirect(frame, slot) => return Ok(self.slot_ptr(frame, slot)),
+            Symbol::Held(cell) => cell,
+            Symbol::Value(value) => {
+                let cell = self.reference(value)?;
+                if let Some(entries) = self.table_mut(table) {
+                    entries[at].1 = Symbol::Held(cell);
+                }
+                cell
+            }
+        };
+        Ok(Some(cell.heap().val_ref()))
     }
 
     /// `shutdown_destructors` (`Z/Zend/zend_execute_API.c:251`), the
@@ -7592,13 +7701,16 @@ impl Request {
             while at > 0 && !self.marked_destructed {
                 at -= 1;
                 let alone = self.globals().get(at).is_some_and(|(_, symbol)| {
-                    matches!(symbol, Symbol::Value(value) if value.as_object().is_some() && value.refcount() == 1)
+                    let value = match symbol {
+                        Symbol::Value(value) => *value,
+                        Symbol::Held(cell) => cell.get(),
+                        Symbol::Indirect(..) => return false,
+                    };
+                    value.as_object().is_some() && value.refcount() == 1
                 });
                 if alone {
                     let (_, symbol) = self.globals().remove(at);
-                    if let Symbol::Value(value) = symbol {
-                        self.release(value);
-                    }
+                    self.release_symbol(symbol);
                 }
             }
             if symbols == self.globals().len() || self.marked_destructed {
@@ -7624,9 +7736,7 @@ impl Request {
     /// marked every object, so this frees and serves nothing.
     pub(crate) fn destroy_symbol_table(&mut self) {
         while let Some((_, symbol)) = self.globals().pop() {
-            if let Symbol::Value(value) = symbol {
-                self.release(value);
-            }
+            self.release_symbol(symbol);
         }
     }
 
@@ -10960,6 +11070,7 @@ impl Request {
             .find(|(key, _)| key == name)
             .map(|(_, symbol)| match symbol {
                 Symbol::Value(value) => Ok(*value),
+                Symbol::Held(cell) => Ok(cell.get()),
                 Symbol::Indirect(frame, at) => Err((*frame, *at)),
             })?;
         let value = match symbol {
@@ -10988,7 +11099,7 @@ impl Request {
                 .find(|(key, _)| key == name)
                 .and_then(|(_, symbol)| match symbol {
                     Symbol::Indirect(frame, at) => Some((*frame, *at)),
-                    Symbol::Value(_) => None,
+                    Symbol::Value(_) | Symbol::Held(_) => None,
                 })
         });
         match indirect {
@@ -11154,6 +11265,7 @@ impl Request {
         for (name, symbol) in entries {
             let value = match symbol {
                 Symbol::Value(value) => value,
+                Symbol::Held(cell) => cell.get(),
                 Symbol::Indirect(frame, slot) => self.slot(frame, slot),
             };
             if value.tag() == TypeTag::Undef {

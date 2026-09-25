@@ -586,8 +586,31 @@ impl Emit<'_> {
     /// variable's CV, `$this`, or a dimension, a property or a class's
     /// property, which are fetched; none for anything else. A variable
     /// named as the program serves is not read here, and is sent as the value it
-    /// reads.
+    /// reads, and so is a chain a `?->` stands in, php's
+    /// `zend_is_variable(arg) && !zend_ast_is_short_circuited(arg)`.
+    ///
+    /// ```php
+    /// function v($x) { var_dump($x); }
+    /// $o = null;
+    /// v($o?->p);
+    /// u($o?->p['k']);
+    /// $o = new stdClass;
+    /// $o->p = ['k' => 'v'];
+    /// u($o?->p['k']);
+    /// try { r($o?->p); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// function u($x) { var_dump($x); }
+    /// function r(&$x) {}
+    /// ```
+    /// ```expect
+    /// NULL
+    /// NULL
+    /// string(1) "v"
+    /// r(): Argument #1 ($x) could not be passed by reference
+    /// ```
     fn variable_of(&mut self, value: tree::Expr) -> Result<Option<Variable>, CompileError> {
+        if self.is_short_circuited(value) {
+            return Ok(None);
+        }
         Ok(match value {
             tree::Expr::SimpleVarExpr(id) => Some(match self.simple_var_of(id, self.line)? {
                 SimpleVar::Cv(name) => Variable::Cv(self.lookup_cv(&name)),
