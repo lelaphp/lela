@@ -2,7 +2,10 @@ target/
 # The reading store lives under target/harness/ (harness-design.md §4.2).
 # The local region file, rendered only by name (harness-design.md §5).
 /.claude/harness.local.md
-# The worktrees: a track's, laid by `xtask worktree add`, and Claude Code's own.
+# The worktrees laid under the checkout before revision 56, a track's by
+# `xtask worktree add` and Claude Code's own. `worktree add` lays one beside
+# the checkout now, at <checkout>-worktrees/<branch>; the line stays while a
+# worktree laid here stands, and goes once the last is retired.
 /.claude/worktrees/
 
 # Where the function-hook declarations were written before #62; they are tracked at harness-plugins/types now, and a stale copy here does no harm.

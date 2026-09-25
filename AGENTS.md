@@ -87,7 +87,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=e4f9ff40f7d7d52aa0c00c1677417530ee61d6621990c1d2dffb806d114c73a8 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=8b233873fe4558eec244ab6cafc3a224788a74ceda9113a4b13af8d9e4d025d9 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -151,7 +151,7 @@ Commands:
   permit             Judge one intended call from the `PreToolUse` hook's stdin; the decision is the JSON on stdout and the exit is 0 always
   done               The definition of done: print the conditions unmet for the changes since the base and exit 1 while any is; the Stop hook, pre-push and CI read the same list
   track              Say which track the branch is on, the commit `done` measures since, the track's store root, the branch's ticket and the track's model; as text or as one object. Writes no reading
-  worktree           A track's worktrees: `add` lays one down under .claude/worktrees/<branch>, `retire` appends its log into the track's store and removes it. Writes no reading
+  worktree           A track's worktrees: `add` lays one down beside the checkout, at <checkout>-worktrees/<branch>, `retire` appends its log into the track's store and removes it. Writes no reading
   ticket             A ticket, one GitHub issue: `read <n>` holds it to its acceptance criteria, `close <n>` closes it naming what it opened, `parent <n>` says whether a chart sheet is at the cap
   usage              What a session spent, per turn from the plugin: `record` reads the `SessionUsage` object on stdin and writes one `usage` reading under the branch's ticket, or the session id
   regions            Render the named files' regions with `computed run` and say what it did, one line per file, for pre-commit to re-stage. Writes no reading
@@ -175,7 +175,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=388be3eff8d35faa18df68412950c24b8c943d8421feea6984fed5c07a23ffb7 out=61da392a23ffd98faceaf334c37191699fc7318a1a7cc61623e3bc4381b59c40 -->
+<!-- /computed in=b54f8d4747c9b02358cf83cc42ea541ff66e6aa6f763e3187209ce96e63d8055 out=536119cf1f418fb0dd368e364531eb97b343f4037861bb43100437c333c6e0f7 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

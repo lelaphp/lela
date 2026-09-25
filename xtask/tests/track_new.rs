@@ -259,6 +259,15 @@ fn a_track_is_laid_down_by_one_command() {
         "{out}"
     );
     assert!(out.contains("a person runs, once"), "{out}");
+    // And the one over the worktrees' directory beside the clone, which
+    // the clone's does not cover (revision 56).
+    assert!(
+        out.contains(&format!(
+            "computed trust {}",
+            clone.with_file_name("repo-t-y-worktrees").display()
+        )),
+        "{out}"
+    );
 }
 
 /// A branch the repository or `origin` has, and a directory that exists,

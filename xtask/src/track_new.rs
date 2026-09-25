@@ -3,10 +3,11 @@
 //! up by hand. A track lives on `origin` as a branch, since git's ref
 //! store refuses `refs/heads/t-x` beside `refs/heads/t-x/witness` (ledger
 //! 14), and its root is a clone beside the repository, detached at that
-//! branch: the clone's `target/harness` is the track's store, and its
-//! `.claude/worktrees` holds the worktrees of its tickets, which
-//! [`worktree::add`] lays down and whose [`Track::of`] reads the clone as
-//! the store. So the command, in order: pushes `main` to `origin/<name>`;
+//! branch: the clone's `target/harness` is the track's store, and the
+//! worktrees of its tickets are laid down beside it
+//! ([`worktree::homes`]) by [`worktree::add`], whose [`Track::of`] reads
+//! the clone as the store.
+//! So the command, in order: pushes `main` to `origin/<name>`;
 //! clones `origin` beside the repository, named `<repository>-<name>`,
 //! and detaches the clone at the track, so the clone has no branch of the
 //! track's name either; records the track and its model on the clone,
@@ -18,8 +19,9 @@
 //! inside the hook's timeout (§12 item 8); adds the track's row to the
 //! console's track list, `console/tracks.json`, after the rows it had,
 //! since the first is the one the console opens on; and prints the
-//! `computed trust` line for a person to run, the grant being keyed by
-//! the root path and a person's (§11).
+//! `computed trust` lines for a person to run, the clone's and the one
+//! over its worktrees' directory beside it, the grant being keyed by the
+//! path and a person's (§11).
 //!
 //! A branch the repository or `origin` has (`origin` asked, not the
 //! remote-tracking refs, which may be stale), a directory that exists, a
@@ -48,7 +50,7 @@ const NEW: &str = "track new";
 
 /// Lay the track `name` down: `origin/<name>` at `main`, the clone beside
 /// `root` recording the track and `model`, `xtask` built there, the
-/// console's row, the trust line printed; or refuse and change nothing.
+/// console's row, the trust lines printed; or refuse and change nothing.
 /// `Ok` is the clone's directory, ready.
 pub fn lay(root: &Path, name: &str, model: &Model) -> Result<PathBuf> {
     if name.is_empty() || name.contains('/') {
@@ -56,7 +58,7 @@ pub fn lay(root: &Path, name: &str, model: &Model) -> Result<PathBuf> {
             "{name:?} is not a track's name: a track names its branches by being a path prefix of theirs, so it has no slash of its own"
         );
     }
-    let dir = beside(root, name)?;
+    let dir = worktree::beside(root, name)?;
     let list = root.join(TRACKS);
     if has_ref(root, &format!("refs/heads/{name}")) {
         bail!(
@@ -124,7 +126,7 @@ pub fn lay(root: &Path, name: &str, model: &Model) -> Result<PathBuf> {
     say(
         NEW,
         &format!(
-            "cloned {} detached at origin/{name}, whose target/harness is the track's store and whose .claude/worktrees holds its tickets' worktrees",
+            "cloned {} detached at origin/{name}, whose target/harness is the track's store",
             dir.display()
         ),
     );
@@ -138,7 +140,7 @@ pub fn lay(root: &Path, name: &str, model: &Model) -> Result<PathBuf> {
             "added the row {name}: {relative} to {TRACKS}, uncommitted; a person commits it from the main checkout, which is where the console runs"
         ),
     );
-    say(NEW, &computed::trust_line(&dir));
+    grants(&dir)?;
     worktree::carried_over(NEW, &dir);
     if ready {
         say(NEW, &format!("ready: cd {}", dir.display()));
@@ -150,6 +152,24 @@ pub fn lay(root: &Path, name: &str, model: &Model) -> Result<PathBuf> {
         );
         Err(NotReady { dir }.into())
     }
+}
+
+/// The two `computed trust` lines a person runs once for the clone at
+/// `dir`: the clone's, and the one over the directory beside it that its
+/// worktrees are laid down in ([`worktree::homes`]), which the clone's
+/// grant does not cover (revision 56).
+fn grants(dir: &Path) -> Result<()> {
+    say(NEW, &computed::trust_line(dir));
+    let homes = worktree::homes(dir)?;
+    say(
+        NEW,
+        &format!(
+            "the track's worktrees are laid down in {}, beside the clone, which its grant does not cover; a person runs, once: computed trust {}",
+            homes.display(),
+            homes.display()
+        ),
+    );
+    Ok(())
 }
 
 /// The track and its model recorded on the clone at `dir`, and said, one
@@ -183,19 +203,6 @@ fn record(dir: &Path, name: &str, model: &Model) -> Result<()> {
         ),
     );
     Ok(())
-}
-
-/// Where the track's root goes: beside `root`, named after it, as
-/// `dax-php-t-opus-5` is beside `dax-php`.
-fn beside(root: &Path, name: &str) -> Result<PathBuf> {
-    let parent = root
-        .parent()
-        .context("the repository has no parent directory to clone beside")?;
-    let stem = root
-        .file_name()
-        .and_then(|s| s.to_str())
-        .context("the repository's directory has no name")?;
-    Ok(parent.join(format!("{stem}-{name}")))
 }
 
 /// The list with the row `name: relative` appended after the rows it
