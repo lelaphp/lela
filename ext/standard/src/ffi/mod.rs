@@ -1052,6 +1052,50 @@ pub(super) fn loadavg() -> Option<[f64; 3]> {
     (got != -1).then_some(load)
 }
 
+/// Whose usage `getrusage` reads, `RUSAGE_SELF` or `RUSAGE_CHILDREN`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Who {
+    Process,
+    Children,
+}
+
+/// `struct rusage`'s fields in the order `PHP_FUNCTION(getrusage)` adds
+/// them (`Z/ext/standard/microtime.c:115-140`), each under its C name.
+pub(super) fn rusage(who: Who) -> Option<[(&'static str, i64); 17]> {
+    let who = match who {
+        Who::Process => libc::RUSAGE_SELF,
+        Who::Children => libc::RUSAGE_CHILDREN,
+    };
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+    // SAFETY: `usage` is room for the one `struct rusage` the call writes.
+    let rc = unsafe { libc::getrusage(who, usage.as_mut_ptr()) };
+    if rc == -1 {
+        return None;
+    }
+    // SAFETY: zeroed storage is a valid `rusage`, and the call succeeded
+    // over it.
+    let u = unsafe { usage.assume_init() };
+    Some([
+        ("ru_oublock", u.ru_oublock),
+        ("ru_inblock", u.ru_inblock),
+        ("ru_msgsnd", u.ru_msgsnd),
+        ("ru_msgrcv", u.ru_msgrcv),
+        ("ru_maxrss", u.ru_maxrss),
+        ("ru_ixrss", u.ru_ixrss),
+        ("ru_idrss", u.ru_idrss),
+        ("ru_minflt", u.ru_minflt),
+        ("ru_majflt", u.ru_majflt),
+        ("ru_nsignals", u.ru_nsignals),
+        ("ru_nvcsw", u.ru_nvcsw),
+        ("ru_nivcsw", u.ru_nivcsw),
+        ("ru_nswap", u.ru_nswap),
+        ("ru_utime.tv_usec", i64::from(u.ru_utime.tv_usec)),
+        ("ru_utime.tv_sec", u.ru_utime.tv_sec),
+        ("ru_stime.tv_usec", i64::from(u.ru_stime.tv_usec)),
+        ("ru_stime.tv_sec", u.ru_stime.tv_sec),
+    ])
+}
+
 /// The login name of `uid`, `getpwuid_r(3)` with its buffer grown while
 /// it is too small, as `php_get_current_user` reads it; `None` where
 /// the host has no entry.
