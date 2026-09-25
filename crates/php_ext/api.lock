@@ -401,6 +401,9 @@ syntax::Element
 syntax::Element::id
 syntax::Element::kind
 syntax::FileId
+syntax::IniEvent
+syntax::IniScanner
+syntax::IniValue
 syntax::Level
 syntax::Level::is_fatal
 syntax::LexOptions
@@ -422,6 +425,7 @@ syntax::lex
 syntax::magic_const_name
 syntax::operator_name
 syntax::parse
+syntax::parse_ini
 test::Capture
 test::Engine
 test::Engine::builder
