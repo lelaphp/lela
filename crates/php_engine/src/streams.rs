@@ -1513,14 +1513,23 @@ fn open_options(mode: &[u8]) -> Option<std::fs::OpenOptions> {
 /// for a fresh open and `-1` with `NO_SEEK` for one that cannot. The
 /// `Err` is what `php_stream_display_wrapper_errors` prints after
 /// `Failed to open stream: `.
-fn plain_open(req: &Request, path: &[u8], mode: &[u8]) -> Result<PhpStream, String> {
+fn plain_open(req: &mut Request, path: &[u8], mode: &[u8]) -> Result<PhpStream, String> {
     let Some(options) = open_options(mode) else {
         return Err(format!(
             "`{}' is not a valid mode for fopen",
             String::from_utf8_lossy(mode)
         ));
     };
-    let host = req.absolutize(path).0;
+    // `_php_stream_fopen`'s `expand_filepath`, under `CWD_FILEPATH`, which
+    // enters the path in the realpath cache; where it refuses, the host
+    // is handed the path as written and answers for it.
+    let cwd = req.cwd().0.into_os_string().into_encoded_bytes();
+    let host = match req.virtual_file_ex(&cwd, path, crate::api::request::Resolve::FilePath) {
+        Some(expanded) => std::path::PathBuf::from(
+            <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(&expanded),
+        ),
+        None => req.absolutize(path).0,
+    };
     let creates = matches!(mode.first(), Some(b'w' | b'a' | b'x' | b'c'))
         && std::fs::symlink_metadata(&host).is_err();
     let mut file = options.open(&host).map_err(|error| strerror(&error))?;
