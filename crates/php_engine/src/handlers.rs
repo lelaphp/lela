@@ -3685,7 +3685,10 @@ pub(crate) fn init_static_method_call<T: Tier>(
         _ => {
             let class = match class_operand(req, frame, code, op.op1_type, op.op1, None) {
                 Ok(class) => class,
-                Err(thrown) => return threw(req, frame, &thrown),
+                Err(thrown) => {
+                    exec::free_operand(req, frame, code, op.op2_type, op.op2);
+                    return threw(req, frame, &thrown);
+                }
             };
             // `if (OP2_TYPE != IS_CONST) { CACHE_PTR(opline->result.num, ce); }`:
             // where the callee is named as the program serves, or not
@@ -3759,11 +3762,7 @@ pub(crate) fn init_static_method_call<T: Tier>(
             }
             (function, Some(written))
         }
-        _ => {
-            return Err(Fatal::Error(String::from(
-                "InternalError: ZEND_INIT_STATIC_METHOD_CALL over a method named at run time",
-            )));
-        }
+        _ => return static_call_named(req, frame, code, op, class),
     };
     // `CACHE_POLYMORPHIC_PTR(opline->result.num, ce, fbc)`, where the
     // callee was named by a constant: after the lookup and its access
@@ -3776,6 +3775,39 @@ pub(crate) fn init_static_method_call<T: Tier>(
         req.prime(frame, slot, Cached::ClassAndCallee { class, function });
     }
     static_call_frame(req, frame, op, class, function, name)
+}
+
+/// `INIT_STATIC_METHOD_CALL` over a method the program names, once the
+/// class is resolved: the name held to be a string
+/// ([`exec::MethodName`]), then the method found as
+/// `zend_std_get_static_method` finds it with no key, with its access
+/// rule and a trait's deprecation, and nothing cached, since the next
+/// pass may name another.
+fn static_call_named(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    class: crate::api::values::ClassId,
+) -> Edge {
+    let method = match exec::MethodName::of(req, frame, code, op) {
+        Ok(method) => method,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    let written = method.written.as_str_bytes().unwrap_or_default();
+    let found = match req.method_named(class, &method.lowered) {
+        None => Err(undefined_method(req, class, &method.written)),
+        Some(function) => req
+            .check_method_access(function, written)
+            .and_then(|()| req.static_method_found(function))
+            .map(|_| function),
+    };
+    let edge = match found {
+        Ok(function) => static_call_frame(req, frame, op, class, function, Some(method.written)),
+        Err(thrown) => threw(req, frame, &thrown),
+    };
+    method.release(req);
+    edge
 }
 
 /// What `INIT_STATIC_METHOD_CALL` does once it has its class and its
@@ -3914,55 +3946,39 @@ pub(crate) fn init_method_call<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let written = match op.op2_type {
-        OperandKind::Const => exec::constant(code, ConstIdx(op.op2)),
-        _ => {
-            return Err(Fatal::Error(String::from(
-                "InternalError: ZEND_INIT_METHOD_CALL over a method named at run time",
-            )));
+    // A method the program names is held to be a string before the
+    // receiver is read ([`exec::MethodName`]).
+    let method = match exec::MethodName::of(req, frame, code, op) {
+        Ok(method) => method,
+        Err(thrown) => {
+            exec::free_operand(req, frame, code, op.op1_type, op.op1);
+            return threw(req, frame, &thrown);
         }
     };
-    let lowered = exec::constant(code, ConstIdx(op.op2.saturating_add(1)));
     let receiver = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
-    let Some(object) = receiver.as_object().copied() else {
-        let thrown = crate::api::raising::throw(
+    let found = match receiver.as_object().copied() {
+        Some(object) => method_on(req, object, &method).map(|found| (object, found)),
+        None => Err(crate::api::raising::throw(
             req,
             "Error",
             &format!(
                 "Call to a member function {}() on {}",
-                String::from_utf8_lossy(written.as_str_bytes().unwrap_or_default()),
+                String::from_utf8_lossy(method.written.as_str_bytes().unwrap_or_default()),
                 crate::ops::value_name(req, &receiver)
             ),
-        );
-        exec::free_operand(req, frame, code, op.op1_type, op.op1);
-        return threw(req, frame, &thrown);
+        )),
     };
-    let class = object.class();
-    let table = req.object_handlers(object.heap());
-    let found = lowered.as_str_bytes().and_then(|lowered| {
-        table
-            .get_method(req, object, lowered)
-            .map(|function| (function, None))
-            .or_else(|| {
-                let inner = table.method_receiver(req, object)?;
-                let inner_table = req.object_handlers(inner.heap());
-                inner_table
-                    .get_method(req, inner, lowered)
-                    .map(|function| (function, Some(inner)))
-            })
-    });
-    let Some((function, receiver)) = found else {
-        let thrown = undefined_method(req, class, &written);
-        exec::free_operand(req, frame, code, op.op1_type, op.op1);
-        return threw(req, frame, &thrown);
+    let (object, (function, receiver)) = match found {
+        Ok(found) => found,
+        Err(thrown) => {
+            method.release(req);
+            exec::free_operand(req, frame, code, op.op1_type, op.op1);
+            return threw(req, frame, &thrown);
+        }
     };
-    if let Err(thrown) =
-        req.check_method_access(function, written.as_str_bytes().unwrap_or_default())
-    {
-        exec::free_operand(req, frame, code, op.op1_type, op.op1);
-        return threw(req, frame, &thrown);
-    }
-    let name = match crate::ops::to_string(req, &written) {
+    let name = crate::ops::to_string(req, &method.written);
+    method.release(req);
+    let name = match name {
         Ok(name) => name,
         Err(thrown) => return threw(req, frame, &thrown),
     };
@@ -4008,6 +4024,35 @@ pub(crate) fn init_method_call<T: Tier>(
         coerced: Vec::new(),
     });
     Ok(advance(req, frame))
+}
+
+/// `obj->handlers->get_method(&obj, name, key)` and what
+/// `INIT_METHOD_CALL` holds the answer to: the method by its lowered
+/// name on the object, or on the receiver its class hands the call to
+/// instead ([`ObjectHandlers::method_receiver`]); `Call to undefined
+/// method X::m()` where neither has one, and `zend_std_get_method`'s
+/// access rule over the one found.
+fn method_on(
+    req: &mut Request,
+    object: PhpObject,
+    method: &exec::MethodName,
+) -> Result<(Function, Option<PhpObject>), Thrown> {
+    let table = req.object_handlers(object.heap());
+    let found = table
+        .get_method(req, object, &method.lowered)
+        .map(|function| (function, None))
+        .or_else(|| {
+            let inner = table.method_receiver(req, object)?;
+            let inner_table = req.object_handlers(inner.heap());
+            inner_table
+                .get_method(req, inner, &method.lowered)
+                .map(|function| (function, Some(inner)))
+        });
+    let Some((function, receiver)) = found else {
+        return Err(undefined_method(req, object.class(), &method.written));
+    };
+    req.check_method_access(function, method.written.as_str_bytes().unwrap_or_default())?;
+    Ok((function, receiver))
 }
 
 /// `ZEND_FETCH_THIS` (`Z/Zend/zend_vm_def.h:9214`): `$this` read as a
@@ -5208,12 +5253,12 @@ pub(crate) fn fetch_obj_is<T: Tier>(
 }
 
 /// The body `FETCH_OBJ_R` and `FETCH_OBJ_IS` share, which is php's one
-/// handler under two fetch types: the property's name off the constant
-/// table, the container read as the fetch type reads it, the
+/// handler under two fetch types: the container read as the fetch type
+/// reads it, then the property's name ([`exec::Member`]) and the
 /// `read_property` slot over an object and, over anything else, the
-/// warning `BP_VAR_R` raises and `BP_VAR_IS` does not; the container
-/// freed after it (`FREE_OP1`) and `null` or the value written into the
-/// temporary.
+/// warning `BP_VAR_R` raises and `BP_VAR_IS` does not; the name and the
+/// container freed after it (`FREE_OP2`, `FREE_OP1`) and `null` or the
+/// value written into the temporary.
 fn fetch_obj(
     req: &mut Request,
     frame: FrameRef,
@@ -5221,15 +5266,7 @@ fn fetch_obj(
     op: &Opline,
     fetch: PropertyRead,
 ) -> Edge {
-    let name = match op.op2_type {
-        OperandKind::Const => exec::constant(code, ConstIdx(op.op2)),
-        _ => {
-            return Err(Fatal::Error(String::from(
-                "InternalError: ZEND_FETCH_OBJ_R over a property named at run time",
-            )));
-        }
-    };
-    let name = name.as_str_bytes().unwrap_or_default().to_vec();
+    let mut name = exec::Member::default();
     // `GET_OP1_OBJ_ZVAL_PTR(BP_VAR_R)` warns of a variable nothing
     // wrote; the `BP_VAR_IS` reader takes the same slot as the `UNDEF`
     // it is and says nothing.
@@ -5239,10 +5276,12 @@ fn fetch_obj(
     }
     .deref();
     let read = if let Some(object) = container.as_object().copied() {
-        let table = req.object_handlers(object.heap());
-        table.read_property(req, object, &name, fetch)
-    } else {
-        if fetch == PropertyRead::Warning {
+        name.bytes(req, frame, code, op).and_then(|name| {
+            let table = req.object_handlers(object.heap());
+            table.read_property(req, object, &name, fetch)
+        })
+    } else if fetch == PropertyRead::Warning {
+        name.bytes(req, frame, code, op).map(|name| {
             crate::api::raising::warning(
                 req,
                 &format!(
@@ -5251,9 +5290,13 @@ fn fetch_obj(
                     crate::ops::value_name(req, &container)
                 ),
             );
-        }
+            Value::null()
+        })
+    } else {
+        exec::Member::touch(req, frame, code, op);
         Ok(Value::null())
     };
+    name.release(req, frame, code, op);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
     let value = match read {
         Ok(value) => value,
@@ -5591,7 +5634,10 @@ fn fetch_obj_place(
     op: &Opline,
     read: PropertyRead,
 ) -> Edge {
-    let at = match property_place(req, frame, code, op, read)? {
+    let mut name = exec::Member::default();
+    let found = property_place(req, frame, code, op, read, &mut name);
+    name.release(req, frame, code, op);
+    let at = match found? {
         PropertyFound::At(at, _, _) => at,
         PropertyFound::Served(object, name) => {
             return fetch_obj_read(req, frame, code, op, object, &name);
@@ -5625,26 +5671,26 @@ enum PropertyFound {
 /// `zend_fetch_property_address` (`Z/Zend/zend_execute.c`) under
 /// `BP_VAR_W` or `BP_VAR_RW`, the place `FETCH_OBJ_W`, `FETCH_OBJ_RW`
 /// and `ASSIGN_OBJ_REF` write through: the object `op1` holds and the
-/// slot or the dynamic entry of the name in `op2`.
+/// slot or the dynamic entry of the name in `op2`, which the caller
+/// gives up after ([`exec::Member::release`]).
 fn property_place(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
     read: PropertyRead,
+    member: &mut exec::Member,
 ) -> Result<PropertyFound, Fatal> {
-    let name = match op.op2_type {
-        OperandKind::Const => exec::constant(code, ConstIdx(op.op2)),
-        _ => {
-            return Err(Fatal::Error(String::from(
-                "InternalError: ZEND_FETCH_OBJ_W over a property named at run time",
-            )));
-        }
-    };
-    let name_value = name;
-    let name = name.as_str_bytes().unwrap_or_default().to_vec();
     let container =
         exec::container(req, frame, code, op.op1_type, op.op1, "ZEND_FETCH_OBJ_W")?.deref();
+    let name_value = match member.name(req, frame, code, op) {
+        Ok(name) => name,
+        Err(thrown) => {
+            exec::free_operand(req, frame, code, op.op1_type, op.op1);
+            return Ok(PropertyFound::Threw(thrown));
+        }
+    };
+    let name = name_value.as_str_bytes().unwrap_or_default().to_vec();
     let Some(object) = container.as_object().copied() else {
         exec::free_operand(req, frame, code, op.op1_type, op.op1);
         let shown = crate::ops::value_name(req, &container.undef_as_null());
@@ -8384,7 +8430,10 @@ pub(crate) fn assign_obj_ref<T: Tier>(
         )));
     };
     let (data_type, data_at) = (data.op1_type, data.op1);
-    let (place, object, name) = match property_place(req, frame, code, op, PropertyRead::Silent)? {
+    let mut member = exec::Member::default();
+    let found = property_place(req, frame, code, op, PropertyRead::Silent, &mut member);
+    member.release(req, frame, code, op);
+    let (place, object, name) = match found? {
         PropertyFound::At(place, object, name) => (place, object, name),
         PropertyFound::Served(object, name) => {
             let thrown = overloaded_reference(req, object, &name);
@@ -8667,14 +8716,6 @@ pub(crate) fn assign_obj<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let name = match op.op2_type {
-        OperandKind::Const => exec::constant(code, ConstIdx(op.op2)),
-        _ => {
-            return Err(Fatal::Error(String::from(
-                "InternalError: ZEND_ASSIGN_OBJ over a property named at run time",
-            )));
-        }
-    };
     let at = req.vm().opline(frame);
     let Some(data) = exec::opline_at(code, at.saturating_add(1))
         .filter(|next| next.opcode == php_unit::Opcode::OpData)
@@ -8686,20 +8727,30 @@ pub(crate) fn assign_obj<T: Tier>(
     let container =
         exec::container(req, frame, code, op.op1_type, op.op1, "ZEND_ASSIGN_OBJ")?.deref();
     let value = exec::take_operand(req, frame, code, data.op1_type, data.op1);
-    let written = if let Some(object) = container.as_object().copied() {
-        assign_property(req, frame, code, op, object, &name, value)?
-    } else {
-        let shown_name = String::from_utf8_lossy(name.as_str_bytes().unwrap_or_default());
-        let shown = crate::ops::value_name(req, &container.undef_as_null());
-        let thrown = crate::api::raising::throw(
-            req,
-            "Error",
-            &format!("Attempt to assign property \"{shown_name}\" on {shown}"),
-        );
-        write_out(req, frame, code, op, &Value::null());
-        req.release(value);
-        Err(thrown)
+    let mut member = exec::Member::default();
+    let written = match (
+        member.name(req, frame, code, op),
+        container.as_object().copied(),
+    ) {
+        (Ok(name), Some(object)) => assign_property(req, frame, code, op, object, &name, value)?,
+        (Ok(name), None) => {
+            let shown_name = String::from_utf8_lossy(name.as_str_bytes().unwrap_or_default());
+            let shown = crate::ops::value_name(req, &container.undef_as_null());
+            let thrown = crate::api::raising::throw(
+                req,
+                "Error",
+                &format!("Attempt to assign property \"{shown_name}\" on {shown}"),
+            );
+            write_out(req, frame, code, op, &Value::null());
+            req.release(value);
+            Err(thrown)
+        }
+        (Err(thrown), _) => {
+            req.release(value);
+            Err(thrown)
+        }
     };
+    member.release(req, frame, code, op);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
     if let Err(thrown) = written {
         return threw(req, frame, &thrown);
@@ -10664,14 +10715,6 @@ pub(crate) fn assign_obj_op<T: Tier>(
             op.extended_value
         )));
     };
-    let name = match op.op2_type {
-        OperandKind::Const => exec::constant(code, ConstIdx(op.op2)),
-        _ => {
-            return Err(Fatal::Error(String::from(
-                "InternalError: ZEND_ASSIGN_OBJ_OP over a property named at run time",
-            )));
-        }
-    };
     let at = req.vm().opline(frame);
     let Some(data) =
         exec::opline_at(code, at.saturating_add(1)).filter(|next| next.opcode == Opcode::OpData)
@@ -10684,20 +10727,31 @@ pub(crate) fn assign_obj_op<T: Tier>(
     let step = Compound { op, data, kernel };
     let container =
         exec::container(req, frame, code, op.op1_type, op.op1, "ZEND_ASSIGN_OBJ_OP")?.deref();
-    let written = if let Some(object) = container.as_object().copied() {
-        step_property(req, frame, code, step, object, &name)?
-    } else {
-        let shown_name = String::from_utf8_lossy(name.as_str_bytes().unwrap_or_default());
-        let shown = crate::ops::value_name(req, &container.undef_as_null());
-        let thrown = crate::api::raising::throw(
-            req,
-            "Error",
-            &format!("Attempt to assign property \"{shown_name}\" on {shown}"),
-        );
-        exec::free_operand(req, frame, code, data.op1_type, data.op1);
-        write_out(req, frame, code, op, &Value::null());
-        Err(thrown)
+    let mut member = exec::Member::default();
+    let written = match (
+        member.name(req, frame, code, op),
+        container.as_object().copied(),
+    ) {
+        (Ok(name), Some(object)) => step_property(req, frame, code, step, object, &name)?,
+        (Ok(name), None) => {
+            let shown_name = String::from_utf8_lossy(name.as_str_bytes().unwrap_or_default());
+            let shown = crate::ops::value_name(req, &container.undef_as_null());
+            let thrown = crate::api::raising::throw(
+                req,
+                "Error",
+                &format!("Attempt to assign property \"{shown_name}\" on {shown}"),
+            );
+            exec::free_operand(req, frame, code, data.op1_type, data.op1);
+            write_out(req, frame, code, op, &Value::null());
+            Err(thrown)
+        }
+        (Err(thrown), _) => {
+            exec::free_operand(req, frame, code, data.op1_type, data.op1);
+            write_out(req, frame, code, op, &Value::null());
+            Err(thrown)
+        }
     };
+    member.release(req, frame, code, op);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
     if let Err(thrown) = written {
         return threw(req, frame, &thrown);
@@ -11244,32 +11298,34 @@ fn incdec_obj(
     op: &Opline,
     step: IncDec,
 ) -> Edge {
-    let name = match op.op2_type {
-        OperandKind::Const => exec::constant(code, ConstIdx(op.op2)),
-        _ => {
-            return Err(Fatal::Error(String::from(
-                "InternalError: an increment of a property named at run time",
-            )));
-        }
-    };
     let container = match op.op1_type {
         OperandKind::Cv => exec::operand(req, frame, code, op.op1_type, op.op1),
         _ => exec::container(req, frame, code, op.op1_type, op.op1, "ZEND_PRE_INC_OBJ")?,
     }
     .deref();
-    let stepped = if let Some(object) = container.as_object().copied() {
-        incdec_property(req, frame, code, op, step, object, &name)?
-    } else {
-        let shown_name = String::from_utf8_lossy(name.as_str_bytes().unwrap_or_default());
-        let shown = crate::ops::value_name(req, &container.undef_as_null());
-        let thrown = crate::api::raising::throw(
-            req,
-            "Error",
-            &format!("Attempt to increment/decrement property \"{shown_name}\" on {shown}"),
-        );
-        write_out(req, frame, code, op, &Value::null());
-        Err(thrown)
+    let mut member = exec::Member::default();
+    let stepped = match (
+        member.name(req, frame, code, op),
+        container.as_object().copied(),
+    ) {
+        (Ok(name), Some(object)) => incdec_property(req, frame, code, op, step, object, &name)?,
+        (Ok(name), None) => {
+            let shown_name = String::from_utf8_lossy(name.as_str_bytes().unwrap_or_default());
+            let shown = crate::ops::value_name(req, &container.undef_as_null());
+            let thrown = crate::api::raising::throw(
+                req,
+                "Error",
+                &format!("Attempt to increment/decrement property \"{shown_name}\" on {shown}"),
+            );
+            write_out(req, frame, code, op, &Value::null());
+            Err(thrown)
+        }
+        (Err(thrown), _) => {
+            write_out(req, frame, code, op, &Value::null());
+            Err(thrown)
+        }
     };
+    member.release(req, frame, code, op);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
     match stepped {
         Ok(()) => Ok(advance(req, frame)),
@@ -11763,25 +11819,19 @@ pub(crate) fn unset_obj<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let name = match op.op2_type {
-        OperandKind::Const => exec::constant(code, ConstIdx(op.op2)),
-        _ => {
-            return Err(Fatal::Error(String::from(
-                "InternalError: ZEND_UNSET_OBJ over a property named at run time",
-            )));
-        }
-    };
     let container =
         exec::container(req, frame, code, op.op1_type, op.op1, "ZEND_UNSET_OBJ")?.deref();
-    let unset = match container.as_object().copied() {
-        Some(object) => {
-            let bytes = name.as_str_bytes().unwrap_or_default();
+    let mut member = exec::Member::default();
+    let unset = if let Some(object) = container.as_object().copied() {
+        member.bytes(req, frame, code, op).and_then(|bytes| {
             let table = req.object_handlers(object.heap());
-            table.unset_property(req, object, bytes)
-        }
-        None => Ok(()),
+            table.unset_property(req, object, &bytes)
+        })
+    } else {
+        exec::Member::touch(req, frame, code, op);
+        Ok(())
     };
-    exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    member.release(req, frame, code, op);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
     if let Err(thrown) = unset {
         return threw(req, frame, &thrown);
@@ -14789,18 +14839,10 @@ pub(crate) fn isset_isempty_prop_obj<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let empty = op.extended_value & ISEMPTY != 0;
-    let name = match op.op2_type {
-        OperandKind::Const => exec::constant(code, ConstIdx(op.op2)),
-        _ => {
-            return Err(Fatal::Error(String::from(
-                "InternalError: ZEND_ISSET_ISEMPTY_PROP_OBJ over a property named at run time",
-            )));
-        }
-    };
-    let name = name.as_str_bytes().unwrap_or_default().to_vec();
     let container = exec::operand_undef(req, frame, code, op.op1_type, op.op1).deref();
-    let answer = match container.as_object().copied() {
-        Some(object) => {
+    let mut member = exec::Member::default();
+    let answer = if let Some(object) = container.as_object().copied() {
+        member.bytes(req, frame, code, op).and_then(|name| {
             let test = if empty {
                 PropertyTest::NotEmpty
             } else {
@@ -14810,9 +14852,12 @@ pub(crate) fn isset_isempty_prop_obj<T: Tier>(
             table
                 .has_property(req, object, &name, test)
                 .map(|held| held != empty)
-        }
-        None => Ok(empty),
+        })
+    } else {
+        exec::Member::touch(req, frame, code, op);
+        Ok(empty)
     };
+    member.release(req, frame, code, op);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
     match answer {
         Ok(answer) => {

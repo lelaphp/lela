@@ -945,6 +945,184 @@ pub(crate) fn free_operand(
     }
 }
 
+/// A property's name as the opline carries it in `op2`, php's `name` and
+/// `tmp_name` pair: the constant string the compiler wrote, or the value
+/// a `CV` or a temporary holds (`$o->$p`, `$o->{expr}`), read and
+/// converted once where the handler asks for it, which is where php's
+/// `zval_try_get_tmp_string(GET_OP2_ZVAL_PTR(BP_VAR_R), &tmp_name)`
+/// stands, and given up with the operand when the handler is done
+/// ([`Member::release`], `zend_tmp_string_release` and `FREE_OP2`).
+///
+/// The read warns of a variable nothing wrote and names the empty
+/// property; the conversion is `zval_try_get_string`'s, so an array is
+/// `"Array"` after its warning and an object without `__toString` is the
+/// `Error` in place of the fetch.
+///
+/// ```php
+/// class C { public $a = 1; function __toString(): string { return 'a'; } }
+/// $o = new C;
+/// echo $o->$undefined ?? 'n', "\n";
+/// echo $o->{new C}, "\n";
+/// try { echo $o->{new stdClass}; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// $n = null;
+/// echo $n->$undefined, "|\n";
+/// $x = 'b';
+/// try { $n->$x = 1; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// $k = [1];
+/// echo $o->$k ?? 'arr', "\n";
+/// $t = true;
+/// $o->$t = 2;
+/// var_dump(isset($n->$x), isset($o->{1}), $o->$t);
+/// ```
+/// ```expect
+/// Warning: Undefined variable $undefined in %s on line 4
+/// n
+/// 1
+/// Object of class stdClass could not be converted to string
+///
+/// Warning: Undefined variable $undefined in %s on line 8
+///
+/// Warning: Attempt to read property "" on null in %s on line 8
+/// |
+/// Attempt to assign property "b" on null
+///
+/// Warning: Array to string conversion in %s on line 12
+/// arr
+///
+/// Deprecated: Creation of dynamic property C::$1 is deprecated in %s on line 14
+/// bool(false)
+/// bool(true)
+/// int(2)
+/// ```
+#[derive(Default)]
+pub(crate) struct Member {
+    read: Option<Value>,
+    /// Whether the handler holds an owner of what was read: a
+    /// constant string is the op array's, and anything else is the
+    /// string the conversion answered with one owner.
+    owned: bool,
+}
+
+impl Member {
+    /// The name, read and converted on the first ask and the same value
+    /// after it: the constant itself, or a string the handler holds one
+    /// owner of until [`Member::release`].
+    pub(crate) fn name(
+        &mut self,
+        req: &mut Request,
+        frame: FrameRef,
+        code: &OpArray,
+        op: &Opline,
+    ) -> Result<Value, Thrown> {
+        if let Some(read) = self.read {
+            return Ok(read);
+        }
+        let value = operand(req, frame, code, op.op2_type, op.op2).deref();
+        let name = if op.op2_type == OperandKind::Const && value.as_str_bytes().is_some() {
+            value
+        } else {
+            self.owned = true;
+            Value::string(crate::ops::to_string(req, &value)?)
+        };
+        self.read = Some(name);
+        Ok(name)
+    }
+
+    /// The name's bytes, as [`Member::name`] reads them.
+    pub(crate) fn bytes(
+        &mut self,
+        req: &mut Request,
+        frame: FrameRef,
+        code: &OpArray,
+        op: &Opline,
+    ) -> Result<Vec<u8>, Thrown> {
+        let name = self.name(req, frame, code, op)?;
+        Ok(name.as_str_bytes().unwrap_or_default().to_vec())
+    }
+
+    /// `if (OP2_TYPE == IS_CV && Z_TYPE_P(EX_VAR(opline->op2.var)) ==
+    /// IS_UNDEF) ZVAL_UNDEFINED_OP2()`: the one thing a `BP_VAR_IS` fetch
+    /// over what is no object asks of its name, which it never converts.
+    pub(crate) fn touch(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) {
+        if op.op2_type == OperandKind::Cv {
+            operand(req, frame, code, op.op2_type, op.op2);
+        }
+    }
+
+    /// `zend_tmp_string_release(tmp_name)` and `FREE_OP2()`: the string
+    /// the conversion made given up, and the operand's temporary with it.
+    pub(crate) fn release(self, req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) {
+        if let Some(read) = self.read.filter(|_| self.owned) {
+            req.release(read);
+        }
+        free_operand(req, frame, code, op.op2_type, op.op2);
+    }
+}
+
+/// A method's name as `INIT_METHOD_CALL` and `INIT_STATIC_METHOD_CALL`
+/// carry it in `op2`: the constant pair the compiler wrote, the name as
+/// written and lowered, or the string a `CV` or a temporary holds, which
+/// the handler takes an owner of, lowers itself as `get_method` does
+/// with no key, and gives up with [`MethodName::release`].
+pub(crate) struct MethodName {
+    pub(crate) written: Value,
+    pub(crate) lowered: Vec<u8>,
+    owned: bool,
+}
+
+impl MethodName {
+    /// The name `op2` carries. A method the program names is
+    /// `GET_OP2_ZVAL_PTR_UNDEF(BP_VAR_R)`: the string the operand holds,
+    /// through a reference, and php's `Error` `Method name must be a
+    /// string` for anything else, after the warning for a variable
+    /// nothing wrote; either way the operand is freed here (`FREE_OP2`),
+    /// since nothing after reads it.
+    pub(crate) fn of(
+        req: &mut Request,
+        frame: FrameRef,
+        code: &OpArray,
+        op: &Opline,
+    ) -> Result<MethodName, Thrown> {
+        if op.op2_type == OperandKind::Const {
+            let lowered = constant(code, ConstIdx(op.op2.saturating_add(1)));
+            return Ok(MethodName {
+                written: constant(code, ConstIdx(op.op2)),
+                lowered: lowered.as_str_bytes().unwrap_or_default().to_vec(),
+                owned: false,
+            });
+        }
+        let value = operand_undef(req, frame, code, op.op2_type, op.op2);
+        let held = value.deref();
+        let name = if let Some(bytes) = held.as_str_bytes() {
+            let lowered = bytes.to_ascii_lowercase();
+            req.addref(&held);
+            Ok(MethodName {
+                written: held,
+                lowered,
+                owned: true,
+            })
+        } else {
+            if value.tag() == TypeTag::Undef {
+                operand(req, frame, code, op.op2_type, op.op2);
+            }
+            Err(crate::api::raising::throw(
+                req,
+                "Error",
+                "Method name must be a string",
+            ))
+        };
+        free_operand(req, frame, code, op.op2_type, op.op2);
+        name
+    }
+
+    /// The owner of a name the program computed given up.
+    pub(crate) fn release(self, req: &mut Request) {
+        if self.owned {
+            req.release(self.written);
+        }
+    }
+}
+
 /// `FREE_VAR_PTR_AND_EXTRACT_RESULT_IF_NECESSARY`
 /// (`Z/Zend/zend_execute.c:163`): a `FETCH_DIM_W`, `FETCH_DIM_RW`,
 /// `FETCH_OBJ_W` or `FETCH_OBJ_RW` over a `VAR` gives the container up

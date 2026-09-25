@@ -120,8 +120,10 @@ impl Emit<'_> {
                 Some(tree::ScopedSelector::SimpleVarExpr(_))
             )
             .then_some(ChainEnd::Expr),
+            // The callee as written: a parenthesised one is a value
+            // whose own chain ended inside the parentheses.
             tree::Expr::CallExpr(id) => matches!(
-                self.peel(tree[id].callee),
+                tree[id].callee,
                 tree::Expr::MemberAccessExpr(_) | tree::Expr::ScopedAccessExpr(_)
             )
             .then_some(ChainEnd::Expr),

@@ -4628,10 +4628,11 @@ mod tests {
     /// What stands beside a `C::$p` read and is not read yet is refused
     /// as such (#372): a compound assignment over what is no variable,
     /// the property the program names as it serves, `self`, `parent`
-    /// and `static` as the class, `C::$p()` whose method the local `$p`
-    /// names, and such a fetch in a constant expression, which php
-    /// refuses outright. `C::$p = &$o->q` was one of them until #611
-    /// made the source of a `= &` `zend_compile_var`'s.
+    /// and `static` as the class, and such a fetch in a constant
+    /// expression, which php refuses outright. `C::$p = &$o->q` was one
+    /// of them until #611 made the source of a `= &` `zend_compile_var`'s,
+    /// and `C::$p()`, whose method the local `$p` names, until it was
+    /// read as `INIT_STATIC_METHOD_CALL` over the CV.
     #[test]
     fn what_stands_beside_a_static_property_read_is_refused_as_not_yet_read() {
         let refused = |source: &[u8]| {
@@ -4656,10 +4657,7 @@ mod tests {
             refused(b"<?php C::${'p'};").as_deref(),
             Some("a static property named at run time this compiler cannot read yet")
         );
-        assert_eq!(
-            refused(b"<?php C::$p();").as_deref(),
-            Some("a static call whose method is named at run time this compiler cannot read yet")
-        );
+        assert_eq!(refused(b"<?php C::$p();").as_deref(), None);
         assert_eq!(refused(b"<?php echo self::$p;").as_deref(), None);
         assert_eq!(
             refused(b"<?php class D { const X = C::$p; }").as_deref(),
@@ -6443,6 +6441,35 @@ class C {
         );
     }
 
+    /// A member and a callee the program names, as the oracle's
+    /// `[regime.dump]` has them: the name's CV in `op2` of `FETCH_OBJ_R`,
+    /// `INIT_METHOD_CALL` and `INIT_STATIC_METHOD_CALL`, none of them
+    /// with a cache slot but the class's one, and a callee that is no
+    /// name, a parenthesised property among them, in `INIT_DYNAMIC_CALL`.
+    #[test]
+    fn a_member_and_a_callee_named_at_run_time_are_the_oracle_s_operands() {
+        assert_eq!(
+            dump_of(b"<?php echo $o->$p; $o->$m(); C::$m(); $f(); ($o->p)();"),
+            main_dump(
+                12,
+                4,
+                6,
+                "0000 T4 = FETCH_OBJ_R CV0($o) CV1($p)\n\
+                 0001 ECHO T4\n\
+                 0002 INIT_METHOD_CALL 0 CV0($o) CV2($m)\n\
+                 0003 DO_FCALL\n\
+                 0004 INIT_STATIC_METHOD_CALL 0 string(\"C\") CV2($m)\n\
+                 0005 DO_FCALL\n\
+                 0006 INIT_DYNAMIC_CALL 0 CV3($f)\n\
+                 0007 DO_FCALL\n\
+                 0008 T8 = FETCH_OBJ_R CV0($o) string(\"p\")\n\
+                 0009 INIT_DYNAMIC_CALL 0 T8\n\
+                 0010 DO_FCALL\n\
+                 0011 RETURN int(1)\n"
+            )
+        );
+    }
+
     /// What stands beside these four and is not read yet is refused as
     /// such.
     #[test]
@@ -6458,10 +6485,6 @@ class C {
             .map(|e| e.message)
         };
         assert_eq!(refused(b"<?php echo E::class;").as_deref(), None);
-        assert_eq!(
-            refused(b"<?php echo $o->$p;").as_deref(),
-            Some("a property named at run time this compiler cannot read yet")
-        );
         assert_eq!(refused(b"<?php f($o->p, name: $o->q);").as_deref(), None);
     }
 
