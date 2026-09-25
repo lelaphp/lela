@@ -2039,15 +2039,15 @@ impl Request {
     }
 
     /// `ZEND_ACC_USES_THIS`, which `zend_compile` sets on an op array
-    /// that reads `$this`: a `FETCH_THIS`, or an object opcode whose
-    /// object operand is the frame's own (`UNUSED`).
+    /// that reads `$this`: a `FETCH_THIS`, an `ISSET_ISEMPTY_THIS`, or an
+    /// object opcode whose object operand is the frame's own (`UNUSED`).
     pub(crate) fn closure_uses_this(&self, closure: &ClosureInfo) -> bool {
         use php_unit::{Opcode, OperandKind};
         let Some(code) = self.closure_code(closure.function) else {
             return false;
         };
         code.oplines.iter().any(|op| {
-            op.opcode == Opcode::FetchThis
+            matches!(op.opcode, Opcode::FetchThis | Opcode::IssetIsemptyThis)
                 || (op.op1_type == OperandKind::Unused
                     && matches!(
                         op.opcode,

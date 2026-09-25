@@ -8058,11 +8058,16 @@ impl Emit<'_> {
     /// `zend_compile_isset_or_empty` (`Z/Zend/zend_compile.c:10816`),
     /// whose arms are the variable nodes: a `ZEND_AST_VAR` that
     /// `zend_try_compile_cv` makes a CV is `ISSET_ISEMPTY_CV` over the
-    /// CV into a temporary, and a `ZEND_AST_DIM` is the chain compiled
-    /// under `BP_VAR_IS` with the last link's opcode overwritten,
-    /// `opline->opcode = ZEND_ISSET_ISEMPTY_DIM_OBJ`, so the link that
-    /// would have fetched asks the table instead. `ZEND_ISEMPTY` goes
-    /// into `extended_value` for `empty` and nothing for `isset`.
+    /// CV into a temporary, `$this` is `ISSET_ISEMPTY_THIS`, and a name
+    /// the program computes `ISSET_ISEMPTY_VAR` over the name; a
+    /// dimension, a property and a class's property are the chain
+    /// compiled under `BP_VAR_IS` with the last link's opcode
+    /// overwritten, `ISSET_ISEMPTY_DIM_OBJ`, `ISSET_ISEMPTY_PROP_OBJ` or
+    /// `ISSET_ISEMPTY_STATIC_PROP`, so the link that would have fetched
+    /// asks instead. `ZEND_ISEMPTY` goes into `extended_value` for
+    /// `empty` and nothing for `isset`. What is no variable is `!expr`
+    /// under `empty`, and php's compile error under `isset`; `$GLOBALS`
+    /// itself is set.
     ///
     /// php's handler branches on the answer where a `JMPZ` or a `JMPNZ`
     /// follows (`ZEND_VM_SMART_BRANCH`); the temporary stands and the
@@ -8092,95 +8097,124 @@ impl Emit<'_> {
     /// bool(false)
     /// bool(false)
     /// ```
+    ///
+    /// A class's property, `$this`, a name the program computes and a
+    /// property under a property, each asked and none fetched, and
+    /// `empty` over an expression:
+    ///
+    /// ```php
+    /// class C { public static $s = 1; private static $p = 2; public static $n; public $o;
+    ///     function m() { return [isset($this), empty($this), isset($this->o->q), isset(self::$p)]; } }
+    /// $c = new C; $c->o = new stdClass; $c->o->q = [0];
+    /// var_dump(isset(C::$s), isset(C::$n), isset(C::$p), isset(C::$none), empty(C::$s), $c->m());
+    /// $n = 'c'; $m = 'none';
+    /// var_dump(isset($$n), isset($$m), empty($$n), isset($$n->o->q[0]), empty($c->o->q[0]), isset($this));
+    /// var_dump(empty([]), empty([0]), empty(f()));
+    /// function f() { return ''; }
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(false)
+    /// bool(false)
+    /// bool(false)
+    /// bool(false)
+    /// array(4) {
+    ///   [0]=>
+    ///   bool(true)
+    ///   [1]=>
+    ///   bool(false)
+    ///   [2]=>
+    ///   bool(true)
+    ///   [3]=>
+    ///   bool(true)
+    /// }
+    /// bool(true)
+    /// bool(false)
+    /// bool(false)
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// ```
+    ///
+    /// ```php
+    /// isset(1 + 1);
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use isset() on the result of an expression (you can use "null !== expression" instead) in %s on line 2
+    /// ```
     fn isset_or_empty(&mut self, var: tree::Expr, empty: bool) -> Result<Where, CompileError> {
         let extended_value = u32::from(empty);
-        let line = self.line_of(var);
-        let word = if empty { "empty" } else { "isset" };
         let var = self.peel(var);
-        if let tree::Expr::SimpleVarExpr(id) = var {
-            let SimpleVar::Cv(name) = self.simple_var_of(id, line)? else {
-                return Err(walk::unread(
-                    line,
-                    &format!("an `{word}` over $this, whose opcode is `ISSET_ISEMPTY_THIS`,"),
-                ));
-            };
-            let cv = self.lookup_cv(&name);
-            let out = self.temporary();
-            self.push(Opline {
-                opcode: Opcode::IssetIsemptyCv,
-                op1_type: OperandKind::Cv,
-                op1: cv,
-                out_type: OperandKind::Tmp,
-                out,
-                extended_value,
-                ..Opline::default()
-            });
-            return Ok(Where::Temporary(out));
-        }
-        // `zend_compile_prop(result, var_ast, BP_VAR_IS, 0)` with
-        // `opline->opcode = ZEND_ISSET_ISEMPTY_PROP_OBJ` over it: the
-        // fetch that would have read the property asks the object's
-        // `has_property` instead. The three cache slots stand in
-        // `extended_value` where `FETCH_OBJ_IS` left them, with
-        // `ZEND_ISEMPTY` in the bit below them, which is free because a
-        // slot is eight bytes wide.
-        if let tree::Expr::MemberAccessExpr(id) = var {
-            let object = self.peel(self.parsed.tree[id].obj);
-            // Every link under the last is `BP_VAR_IS` too, so a
-            // property or a dimension under this one is a `FETCH_OBJ_IS`
-            // or a `FETCH_DIM_IS` chain, which `zend_delayed_compile_var`
-            // builds and this arm does not; a receiver compiled where it
-            // stands would read where php says nothing.
-            if !matches!(object, tree::Expr::SimpleVarExpr(_)) {
-                return Err(self.fatal(
-                    "an `isset` over a property under a property or a dimension, whose links are `FETCH_OBJ_IS`, this compiler cannot read yet",
-                ));
+        let by_name = matches!(
+            var,
+            tree::Expr::VarVarExpr(_) | tree::Expr::DynamicVarExpr(_)
+        );
+        // `!zend_is_variable(var_ast)`: `empty(expr)` is `!expr`, and
+        // `isset(expr)` php's compile error.
+        if !self.is_variable(var) && !by_name {
+            if empty {
+                return self.bool_not(var);
             }
-            let name = self.member_name_of(id, line)?;
-            let (op1_type, op1) = self.receiver(object)?;
-            if self.is_nullsafe(id) && !self.is_this(object) {
-                self.jmp_null((op1_type, op1), true);
-            }
-            let name = self.string(&name)?;
-            let name_at = self.literal(name);
-            let out = self.temporary();
-            let slots = self.cache_slots(3);
-            self.push(Opline {
-                opcode: Opcode::IssetIsemptyPropObj,
-                op1_type,
-                op1,
-                op2_type: OperandKind::Const,
-                op2: name_at,
-                out_type: OperandKind::Tmp,
-                out,
-                extended_value: slots | extended_value,
-                ..Opline::default()
-            });
-            return Ok(Where::Temporary(out));
-        }
-        if !matches!(var, tree::Expr::SubscriptExpr(_)) {
-            return Err(walk::unread(
-                line,
-                &format!("an `{word}` over what is no variable"),
+            return Err(self.compile_error(
+                "Cannot use isset() on the result of an expression (you can use \"null !== expression\" instead)",
             ));
         }
-        let (container, links) = self.dim_chain(var, Fetch::Is)?;
-        let Some((last, fetches)) = links.split_last() else {
-            return Err(self.fatal("a dimension with no dimension"));
+        // `is_globals_fetch`: `$GLOBALS` itself is always set.
+        if self.is_globals(var) {
+            return Ok(Where::Constant(Zval::bool(!empty)));
+        }
+        if by_name || matches!(var, tree::Expr::SimpleVarExpr(_)) {
+            let Some(named) = self.named(var)? else {
+                return Err(self.fatal("an `isset` over a name that is no variable"));
+            };
+            let (opcode, (op1_type, op1), scope) = match named {
+                by_name::Named::Cv(name) => (
+                    Opcode::IssetIsemptyCv,
+                    (OperandKind::Cv, self.lookup_cv(&name)),
+                    0,
+                ),
+                by_name::Named::This => (Opcode::IssetIsemptyThis, (OperandKind::Unused, 0), 0),
+                by_name::Named::Fetch { name, scope } => {
+                    (Opcode::IssetIsemptyVar, self.operand(name), scope)
+                }
+            };
+            let out = self.temporary();
+            self.push(Opline {
+                opcode,
+                op1_type,
+                op1,
+                out_type: OperandKind::Tmp,
+                out,
+                extended_value: scope | extended_value,
+                ..Opline::default()
+            });
+            return Ok(Where::Temporary(out));
+        }
+        // `zend_compile_dim`, `zend_compile_prop` or
+        // `zend_compile_static_prop` under `BP_VAR_IS`, the `??`'s own
+        // chain ([`Self::silent_link`]), with the last fetch's opcode
+        // overwritten: the link that would have read asks instead. The
+        // cache slots of a property stand in `extended_value` where the
+        // fetch left them, `ZEND_ISEMPTY` in the bit below them.
+        let mut delayed = Vec::new();
+        self.silent_link(var, &mut delayed)?;
+        let Some(last) = delayed.last_mut() else {
+            return Err(self.fatal("an `isset` over a chain with no link"));
         };
-        let (op1_type, op1) = self.dim_fetches(container, fetches, Fetch::Is, Over::Dim);
-        self.push(Opline {
-            opcode: Opcode::IssetIsemptyDimObj,
-            op1_type,
-            op1,
-            op2_type: last.kind,
-            op2: last.at,
-            out_type: OperandKind::Tmp,
-            out: last.out,
-            extended_value,
-            ..Opline::default()
-        });
-        Ok(Where::Temporary(last.out))
+        last.opcode = match last.opcode {
+            Opcode::FetchDimIs => Opcode::IssetIsemptyDimObj,
+            Opcode::FetchObjIs => Opcode::IssetIsemptyPropObj,
+            Opcode::FetchStaticPropIs => Opcode::IssetIsemptyStaticProp,
+            _ => return Err(self.fatal("an `isset` over a link that is no fetch")),
+        };
+        last.extended_value |= extended_value;
+        let Some(out) = self.lay_silent(&mut delayed, None) else {
+            return Err(self.fatal("an `isset` over a chain with no link"));
+        };
+        Ok(Where::Temporary(out))
     }
 
     /// `zend_compile_print` (`Z/Zend/zend_compile.c:10700`): the operand,

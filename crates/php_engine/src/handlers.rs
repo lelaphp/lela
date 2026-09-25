@@ -15049,6 +15049,158 @@ pub(crate) fn isset_isempty_cv<T: Tier>(
     Ok(advance(req, frame))
 }
 
+/// `ZEND_ISSET_ISEMPTY_THIS` (`Z/Zend/zend_vm_def.h:9239`),
+/// `isset($this)` and `empty($this)`: whether the frame has a receiver,
+/// the other way round under `ZEND_ISEMPTY`.
+///
+/// ```php
+/// class C { function m() { return [isset($this), empty($this)]; } static function s() { return isset($this); } }
+/// var_dump((new C)->m(), C::s(), isset($this), empty($this));
+/// ```
+/// ```expect
+/// array(2) {
+///   [0]=>
+///   bool(true)
+///   [1]=>
+///   bool(false)
+/// }
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// ```
+pub(crate) fn isset_isempty_this<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let has = req.vm().this(frame).is_some();
+    let answer = has != (op.extended_value & ISEMPTY != 0);
+    write_out(req, frame, code, op, &Value::bool(answer));
+    Ok(advance(req, frame))
+}
+
+/// `ZEND_ISSET_ISEMPTY_VAR` (`Z/Zend/zend_vm_def.h:7481`), `isset($$n)`
+/// and `empty($$n)`: the name read as a fetch by name reads it
+/// ([`fetched_name`]) and looked up in the table `extended_value` names,
+/// nothing fetched and nothing warned of. Under `isset` the answer is
+/// that the name holds something other than `null`, a reference
+/// followed; under `ZEND_ISEMPTY` that it holds nothing or
+/// [`crate::ops::is_true`] says no.
+///
+/// ```php
+/// function f() { $a = 0; $b = null; $n = 'a'; $m = 'b'; $o = 'none';
+///     return [isset($$n), empty($$n), isset($$m), isset($$o), empty($$o)]; }
+/// var_dump(f());
+/// $g = 'x'; $x = 1; var_dump(isset($$g));
+/// ```
+/// ```expect
+/// array(5) {
+///   [0]=>
+///   bool(true)
+///   [1]=>
+///   bool(true)
+///   [2]=>
+///   bool(false)
+///   [3]=>
+///   bool(false)
+///   [4]=>
+///   bool(true)
+/// }
+/// bool(true)
+/// ```
+pub(crate) fn isset_isempty_var<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let name = match fetched_name(req, frame, code, op) {
+        Ok(name) => name,
+        Err(thrown) => {
+            exec::free_operand(req, frame, code, op.op1_type, op.op1);
+            return threw(req, frame, &thrown);
+        }
+    };
+    let table = if op.extended_value & (FETCH_GLOBAL | FETCH_GLOBAL_LOCK) != 0 {
+        req.global_table()
+    } else {
+        req.rebuild_symbol_table(frame)
+    };
+    let held = req.symbol_value(table, &name).unwrap_or_else(Value::undef);
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    let answer = if op.extended_value & ISEMPTY == 0 {
+        crate::ops::is_set(&held)
+    } else {
+        !crate::ops::is_true(req, &held)
+    };
+    write_out(req, frame, code, op, &Value::bool(answer));
+    if req.is_pending() {
+        return Ok(Stepped::Threw(frame));
+    }
+    Ok(advance(req, frame))
+}
+
+/// `ZEND_ISSET_ISEMPTY_STATIC_PROP` (`Z/Zend/zend_vm_def.h:7526`),
+/// `isset(C::$s)` and `empty(C::$s)`: the class fetched as a `static`
+/// property's is, a class nothing declares php's `Error` even here, and
+/// the property read under `BP_VAR_IS`, which says nothing of one the
+/// class has not or the scope may not reach
+/// (`zend_std_get_static_property_with_info`); the answer is then
+/// [`isset_isempty_cv`]'s over what was read.
+///
+/// ```php
+/// class P { private static $p = 1; }
+/// class C extends P { public static $s = 0; public static ?int $t; public static $r;
+///     static function inside() { return isset(parent::$p); } }
+/// $x = null; C::$r = &$x;
+/// var_dump(isset(C::$s), empty(C::$s), isset(C::$t), isset(C::$r), isset(C::$none), C::inside());
+/// try { isset(Nope::$s); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// Class "Nope" not found
+/// ```
+pub(crate) fn isset_isempty_static_prop<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    if op.op1_type != OperandKind::Const {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_ISSET_ISEMPTY_STATIC_PROP over a property named at run time",
+        )));
+    }
+    let class = match class_operand(req, frame, code, op.op2_type, op.op2, None) {
+        Ok(class) => class,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    let name = exec::constant(code, ConstIdx(op.op1));
+    let name = name.as_str_bytes().unwrap_or_default().to_vec();
+    let scope = req.executed_scope();
+    let held = match req.static_property(class, &name, scope, PropertyRead::Silent) {
+        Ok(held) => held,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    let answer = if op.extended_value & ISEMPTY == 0 {
+        crate::ops::is_set(&held)
+    } else {
+        !crate::ops::is_true(req, &held)
+    };
+    req.release(held);
+    write_out(req, frame, code, op, &Value::bool(answer));
+    if req.is_pending() {
+        return Ok(Stepped::Threw(frame));
+    }
+    Ok(advance(req, frame))
+}
+
 /// `ZEND_ISSET_ISEMPTY_DIM_OBJ` (`Z/Zend/zend_vm_def.h:7546`), what
 /// `isset($a[0])` and `empty($a[0])` compile to over the last link of a
 /// chain: the container read as `GET_OP1_OBJ_ZVAL_PTR_UNDEF(BP_VAR_IS)`
