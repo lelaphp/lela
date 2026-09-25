@@ -358,14 +358,17 @@ fn a_program_the_compiler_refused_is_unread_and_names_the_construct() {
 /// The construct moves as the compiler grows, and the fixture moves with
 /// it: `$a and $b` was the first and `b16f247` taught the compiler to
 /// read it, `1 | 2` the second and `ad386d9` did the same, `print` the
-/// third and `e83e41e` did the same, and each time the test found no
-/// refusal at all (#483). The sentence moves too:
-/// `emit`'s walk of the tree names the construct inside the parentheses
-/// and not the parentheses (#595), so what the lane reads here is the
-/// `eval`. The program is the one `php_compile`'s own test for this
-/// refusal names,
-/// `an_unread_expression_inside_parentheses_names_the_expression`, so the
-/// two move together.
+/// third and `e83e41e` did the same, `eval` the fourth and #573 did the
+/// same, and each time the test found no refusal at all (#483). The
+/// sentence moves too: `emit`'s walk of the tree names the construct
+/// inside the parentheses and not the parentheses (#595), so what the
+/// lane reads here is the static property named at run time, `C::$$p`,
+/// which the unread census of Zend/tests still counts. `php_compile`'s
+/// own test for this refusal,
+/// `an_unread_expression_inside_parentheses_names_the_expression`, names
+/// an anonymous class instead; this one does not follow it there while
+/// anonymous classes are being built (#777), so the two need not move
+/// together.
 #[test]
 fn the_refusal_for_an_unread_expression_inside_parentheses_is_read_as_unread() {
     let pin = manifest().pin;
@@ -379,7 +382,7 @@ fn the_refusal_for_an_unread_expression_inside_parentheses_is_read_as_unread() {
     let served = crate::oracle::linked::serve(&pin.recipe, None, &snippet).unwrap();
     assert_eq!(
         adapter::unread(&served.stdout),
-        Some("an `eval` this compiler cannot read yet".to_owned()),
+        Some("a static property named at run time this compiler cannot read yet".to_owned()),
         "{}",
         String::from_utf8_lossy(&served.stdout)
     );
