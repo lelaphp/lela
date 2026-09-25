@@ -348,9 +348,9 @@ pub(crate) fn declare_const<T: Tier>(
 /// otherwise; and the receiver is bound unless the closure was written
 /// `static` or the frame has none. The closure carries its own table
 /// for the variables the `BIND_LEXICAL` oplines after it bind
-/// ([`ClosureInfo::bound`]), one slot per name of the op array's
-/// `bound_vars`, as `zend_create_closure_ex` gives every closure a
-/// `zend_array_dup` of the op array's.
+/// ([`ClosureInfo::bound`]), one slot per entry of the op array's
+/// `bound_vars` at its starting value, as `zend_create_closure_ex`
+/// gives every closure a `zend_array_dup` of the op array's.
 ///
 /// ```php
 /// $f = function ($a) { return $a * 2; };
@@ -425,7 +425,7 @@ pub(crate) fn declare_lambda_function<T: Tier>(
             "InternalError: a DECLARE_LAMBDA_FUNCTION naming a definition the unit has not",
         )));
     };
-    let (slots, no_receiver) = (body.bound_vars.len(), body.no_receiver);
+    let (bound, no_receiver) = (exec::starting_statics(body), body.no_receiver);
     let Some(function) = req.closure_function(&serving.unit, at) else {
         return Err(Fatal::Error(String::from(
             "InternalError: a DECLARE_LAMBDA_FUNCTION naming a definition the unit has not",
@@ -444,7 +444,7 @@ pub(crate) fn declare_lambda_function<T: Tier>(
         this,
         scope,
         called_scope,
-        bound: vec![Value::undef(); slots],
+        bound,
         fake: false,
     };
     let Some(class) = req.class_named(b"closure") else {
@@ -598,14 +598,73 @@ pub(crate) fn bind_lexical<T: Tier>(
     Ok(advance(req, frame))
 }
 
-/// `ZEND_BIND_STATIC` (`Z/Zend/zend_vm_def.h:9137`): the prologue of a
-/// closure's body, one opline per bound variable, which reads the slot
-/// `extended_value` names of the closure's table into the CV in `op1`.
-/// By value the slot's value is copied, one more owner; by reference
-/// the CV becomes the cell the slot holds, which is the one the
-/// enclosing scope's variable is. A `static` variable of a plain
-/// function shares the opcode and no compiler here emits one, so a
-/// frame that is no closure's is this engine's error.
+/// `ZEND_BIND_STATIC` (`Z/Zend/zend_vm_def.h:9133`): the slot
+/// `extended_value` names of the frame's `static` table read into the
+/// CV in `op1`. The table is the closure's own for a closure's frame and
+/// otherwise the request's copy for the function or the main op array
+/// ([`Request::statics_of`]), laid down from the unit's starting values
+/// at the first touch, so the unit is never written. By value, a
+/// closure's `use` variable, the slot's value is copied, one more owner;
+/// by reference the CV becomes the cell the slot holds, made over the
+/// slot's value where it holds none yet, or over `op2`'s where a
+/// `static`'s initializer ran, whose value is freed after.
+///
+/// A `static` keeps its value from one call to the next, in a function,
+/// a method and a closure alike:
+///
+/// ```php
+/// function f() { static $n = 0, $seen = []; $n++; $seen[] = $n; return count($seen); }
+/// class C { function m() { static $m = 10; return ++$m; } }
+/// $g = function () { static $k = 0; return ++$k; };
+/// $c = new C;
+/// echo f(), f(), f(), ' ', $c->m(), ' ', $c->m(), ' ', $g(), $g(), "\n";
+/// ```
+/// ```expect
+/// 123 11 12 12
+/// ```
+///
+/// An initializer that folds to no constant runs once, at the first
+/// call, and the value it computed is the one every later call binds:
+///
+/// ```php
+/// function h($x) { static $o = new stdClass, $v = $x * 2; $o->n = ($o->n ?? 0) + 1; return [$o->n, $v]; }
+/// echo json_encode([h(1), h(5), h(9)]), "\n";
+/// ```
+/// ```expect
+/// [[1,2],[2,2],[3,2]]
+/// ```
+///
+/// A method a trait gave two classes is a function of each, with a
+/// table of its own, where one a class inherits is its parent's, table
+/// and all:
+///
+/// ```php
+/// trait T { function n() { static $n = 0; return ++$n; } }
+/// class A { use T; }
+/// class B { use T; }
+/// class P { function m() { static $m = 0; return ++$m; } }
+/// class Q extends P {}
+/// $a = new A; $b = new B;
+/// echo $a->n(), $a->n(), $b->n(), ' ', (new P)->m(), (new Q)->m(), "\n";
+/// ```
+/// ```expect
+/// 121 12
+/// ```
+///
+/// Each closure object has its table, so two closures of one declaration
+/// count apart:
+///
+/// ```php
+/// function mk() { return function () { static $k = 0; return ++$k; }; }
+/// $x = mk(); $y = mk();
+/// echo $x(), $x(), $y(), "\n";
+/// ```
+/// ```expect
+/// 121
+/// ```
+///
+/// The closure's `use` variables are the first entries of the same
+/// table, read by value in the prologue:
 ///
 /// ```php
 /// $b = 1;
@@ -668,43 +727,39 @@ pub(crate) fn bind_lexical<T: Tier>(
 pub(crate) fn bind_static<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
-    _: &OpArray,
+    code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let Some(object) = req.vm().at(frame).and_then(|state| state.closure) else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: a BIND_STATIC on a frame that is no closure's, and a static variable of a function is not served yet",
-        )));
-    };
     let slot = (op.extended_value >> 3) as usize;
     let by_ref = op.extended_value & BIND_REF != 0;
-    let held = match object
-        .closure(req)
-        .and_then(|closure| closure.bound.get(slot))
-    {
-        Some(held) => *held,
-        None => {
-            return Err(Fatal::Error(String::from(
-                "InternalError: a BIND_STATIC naming a slot the closure has not",
-            )));
-        }
+    let at = req.statics_of(frame, code);
+    let Some(held) = req.static_at(at, code, slot) else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: a BIND_STATIC naming a slot the static table has not",
+        )));
     };
     let bound = if by_ref {
         let cell = if let Some(cell) = held.as_php_ref() {
             *cell
         } else {
-            let cell = match req.reference(held.undef_as_null()) {
+            // `ZVAL_COPY(&ref->val, GET_OP2_ZVAL_PTR_DEREF(BP_VAR_R))`
+            // where an initializer ran, the slot's own value otherwise.
+            let value = if op.op2_type == OperandKind::Unused {
+                held.undef_as_null()
+            } else {
+                let value = exec::operand(req, frame, code, op.op2_type, op.op2).deref();
+                req.addref(&value);
+                value
+            };
+            let cell = match req.reference(value) {
                 Ok(cell) => cell,
                 Err(thrown) => return threw(req, frame, &thrown),
             };
             // The owner the table's slot had is the cell's now.
-            if let Some(payload) = object.native_mut::<ClosureInfo>(req)
-                && let Some(at) = payload.bound.get_mut(slot)
-            {
-                *at = cell.as_value();
-            }
+            let _moved = req.set_static(at, slot, cell.as_value());
             cell
         };
+        exec::free_operand(req, frame, code, op.op2_type, op.op2);
         let bound = cell.as_value();
         req.addref(&bound);
         bound
@@ -715,6 +770,58 @@ pub(crate) fn bind_static<T: Tier>(
     let previous = req.set_slot(frame, op.op1, bound);
     req.release(previous);
     Ok(advance(req, frame))
+}
+
+/// `ZEND_BIND_INIT_STATIC_OR_JMP` (`Z/Zend/zend_vm_def.h:9186`): the
+/// guard before a `static`'s initializer that folds to no constant. The
+/// slot `extended_value` names still holds the `null` the table starts
+/// it at until the `BIND_STATIC` after the initializer binds it, so a
+/// `null` runs the initializer; a reference is what an earlier call
+/// computed, which the CV in `op1` is bound to, and the initializer is
+/// jumped over to `op2`.
+///
+/// ```php
+/// function next_id() { echo "init\n"; return 7; }
+/// function f() { static $id = next_id(); return $id++; }
+/// echo f(), f(), f(), "\n";
+/// ```
+/// ```expect
+/// init
+/// 789
+/// ```
+///
+/// An initializer that throws binds nothing, so the next call runs it
+/// again:
+///
+/// ```php
+/// function pick($fail) { if ($fail) { throw new Exception("no"); } return 5; }
+/// function g($fail) { static $v = pick($fail); return $v; }
+/// try { g(true); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// echo g(false), "\n";
+/// ```
+/// ```expect
+/// no
+/// 5
+/// ```
+pub(crate) fn bind_init_static_or_jmp<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let slot = (op.extended_value >> 3) as usize;
+    let at = req.statics_of(frame, code);
+    let Some(cell) = req
+        .static_at(at, code, slot)
+        .and_then(|held| held.as_php_ref().copied())
+    else {
+        return Ok(advance(req, frame));
+    };
+    let bound = cell.as_value();
+    req.addref(&bound);
+    let previous = req.set_slot(frame, op.op1, bound);
+    req.release(previous);
+    jump_to(req, frame, op.op2)
 }
 
 /// `ZEND_BIND_GLOBAL` (`Z/Zend/zend_vm_def.h:8679`), one variable of a

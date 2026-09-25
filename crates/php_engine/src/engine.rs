@@ -1374,6 +1374,7 @@ impl Engine {
         req.close_resources();
         req.free_user_handlers();
         req.destroy_symbol_table();
+        req.destroy_static_vars();
         req.free_object_storage();
         // `php_error_cb` rendered the fatal where it was raised, on
         // whichever of the two streams the ini entries name; what is left

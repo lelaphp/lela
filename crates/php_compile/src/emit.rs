@@ -105,17 +105,19 @@ use php_unit::decl::{
     Parameter, ParameterDefault, PropertyDecl, TraitAdaptation, TraitMethodRef, Type, Visibility,
 };
 use php_unit::{
-    ConstIdx, Diagnostic, FramelessEntry, Level, MethodBody, OpArray, Opcode, OperandKind, Opline,
-    OplineIdx, TryCatch, Unit, frameless_table,
+    BoundVar, ConstIdx, Diagnostic, FramelessEntry, Level, MethodBody, OpArray, Opcode,
+    OperandKind, Opline, OplineIdx, TryCatch, Unit, frameless_table,
 };
 
 use php_syntax::magic_const_name;
 
 use crate::{CompileError, Options, StackLimit};
 use attributes::InternalAttribute;
+use imports::{Imports, Symbol};
 use walk::{Class, Closure, Function, Method, Property};
 
 mod attributes;
+mod imports;
 mod magic;
 mod types;
 mod walk;
@@ -272,6 +274,11 @@ const RETURNS_FUNCTION: u32 = 1 << 0;
 /// `RETURN_BY_REF` returning what is no variable.
 const RETURNS_VALUE: u32 = 1 << 1;
 
+/// `ZEND_BIND_REF` (`Z/Zend/zend_compile.h:1194`), on a `BIND_STATIC`
+/// that binds its CV to the table's entry by reference, which every
+/// `static` does.
+const BIND_REF: u32 = 1;
+
 /// `sizeof(zval)`, sixteen bytes on php's every target, which
 /// `zend_compile_rope_finalize` divides a rope's string pointers into
 /// to reserve its temporaries.
@@ -303,6 +310,10 @@ pub(crate) struct Emit<'a> {
     /// `FC(current_namespace)`: the namespace a `namespace` statement
     /// put what follows it in, and none before one.
     namespace: Option<Vec<u8>>,
+    /// `FC(imports)`, `FC(imports_function)`, `FC(imports_const)` and
+    /// `FC(seen_symbols)`: what the `use` statements of the current
+    /// namespace imported and what the file declared in it.
+    imports: Imports,
     /// `CG(active_class_entry)`: the class whose members are being
     /// compiled, and none outside a class body.
     active_class: Option<ActiveClass>,
@@ -439,11 +450,14 @@ pub(crate) struct Emit<'a> {
     /// `CG(context).try_catch_offset`: which element of [`Emit::try_catch`]
     /// the oplines being emitted stand in, `-1` outside every `try`.
     try_catch_offset: Option<u32>,
-    /// `op_array->static_variables`: the names the op array being
+    /// `op_array->static_variables`: the variables the op array being
     /// compiled binds through `BIND_STATIC`, in the order
     /// `zend_compile_static_var_common` added them, which is what a
     /// `BIND_LEXICAL`'s and a `BIND_STATIC`'s `extended_value` names.
-    static_vars: Vec<Name>,
+    static_vars: Vec<BoundVar>,
+    /// Whose fold is running, `zend_compile_expr`'s or
+    /// `zend_eval_const_expr`'s ([`Fold`]).
+    fold: Fold,
     /// `op_array->fn_flags` of the op array being compiled, the bits
     /// this compiler reads back.
     fn_flags: FnFlags,
@@ -451,6 +465,17 @@ pub(crate) struct Emit<'a> {
     /// ([`walk::generators`]): php's parser marks `ZEND_ACC_GENERATOR`
     /// on a declaration before its body compiles.
     generators: Vec<u32>,
+}
+
+/// Which of php's two folds is running: `zend_compile_expr`'s, which
+/// folds a call of a function [`crate::special`] knows over constants,
+/// or `zend_eval_const_expr`'s, which folds no call. A `static`'s
+/// initializer is the one place the second runs over an expression the
+/// first would otherwise fold ([`Emit::static_var`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Fold {
+    Compile,
+    EvalConstExpr,
 }
 
 /// `op_array->fn_flags` (`Z/Zend/zend_compile.h:283-296`), the two bits
@@ -886,6 +911,7 @@ pub(crate) fn unit(
         known_classes: &options.classes,
         frameless: frameless_table(&options.functions),
         namespace: None,
+        imports: Imports::default(),
         active_class: None,
         active_parent: None,
         active_constants: Vec::new(),
@@ -914,6 +940,7 @@ pub(crate) fn unit(
         dynamic: Vec::new(),
         dynamic_func_defs: Vec::new(),
         static_vars: Vec::new(),
+        fold: Fold::Compile,
         fn_flags: FnFlags::default(),
         numeric_dims: Vec::new(),
         methods: Vec::new(),
@@ -988,7 +1015,7 @@ struct Saved {
     return_type: Option<Type>,
     returns_by_ref: bool,
     dynamic_func_defs: Vec<u32>,
-    static_vars: Vec<Name>,
+    static_vars: Vec<BoundVar>,
     fn_flags: FnFlags,
     numeric_dims: Vec<ConstIdx>,
 }
@@ -1315,8 +1342,8 @@ impl Emit<'_> {
                     self.global_var(var)?;
                 }
             }
-            Stmt::StaticVarStmt(_) => return Err(self.unread("a `static` variable")),
-            Stmt::UseStmt(_) => return Err(self.unread("a `use` statement")),
+            Stmt::StaticVarStmt(id) => self.static_var(id)?,
+            Stmt::UseStmt(id) => self.use_stmt(id)?,
             Stmt::HaltCompilerStmt(_) => return Err(self.unread("a `__halt_compiler`")),
         }
         Ok(())
@@ -2522,7 +2549,7 @@ impl Emit<'_> {
     /// when it was a user function. A function declared inside a block,
     /// a loop or another body is [`Self::nested_function_decl`].
     fn function_decl(&mut self, function: &Function) -> Result<(), CompileError> {
-        let name = self.prefix_with_ns(&function.name);
+        let name = self.declare_symbol(Symbol::Function, &function.name)?;
         if self.depth != 1 {
             return self.nested_function_decl(function, &name);
         }
@@ -2761,7 +2788,11 @@ impl Emit<'_> {
                     String::from_utf8_lossy(&bind.name)
                 )));
             }
-            self.static_vars.push(Name(bind.name.as_slice().into()));
+            self.static_vars.push(BoundVar {
+                name: Name(bind.name.as_slice().into()),
+                value: Zval::null(),
+                lexical: true,
+            });
             let op1 = self.lookup_cv(&bind.name);
             self.push(Opline {
                 opcode: Opcode::BindStatic,
@@ -2770,6 +2801,116 @@ impl Emit<'_> {
                 extended_value: bind.slot_and_mode(true),
                 ..Opline::default()
             });
+        }
+        Ok(())
+    }
+
+    /// `zend_compile_static_var` (`Z/Zend/zend_compile.c:5501`) over each
+    /// variable of one `static` statement: `$this` and a name the op
+    /// array's table already has are php's compile errors, then the
+    /// initializer is folded as `zend_eval_const_expr` folds it. A value
+    /// it folds to, or `null` where none is written, is what the table
+    /// starts with, and one `BIND_STATIC` binds the CV to the table's
+    /// entry by reference. An initializer it cannot fold leaves `null`
+    /// in the table and runs where it stands: `BIND_INIT_STATIC_OR_JMP`
+    /// steps over it once the entry holds a value, and the
+    /// `BIND_STATIC` after it binds the value it computed the first
+    /// time. The slot and the `ZEND_BIND_REF` bit share `extended_value`
+    /// as [`Bind::slot_and_mode`] lays them out.
+    ///
+    /// ```php
+    /// function g($x) { static $v = $x * 2; return $v; }
+    /// var_dump(g(1), g(5));
+    /// for ($i = 0; $i < 3; $i++) { static $t = 10; $t++; }
+    /// echo $t, "\n";
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// int(2)
+    /// 13
+    /// ```
+    ///
+    /// ```php
+    /// function f() { static $this; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use $this as static variable in %s on line 2
+    /// ```
+    ///
+    /// A closure's `use` variables are entries of the same table, so a
+    /// `static` of one of their names is the duplicate:
+    ///
+    /// ```php
+    /// $f = function () use ($a) { static $a; };
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Duplicate declaration of static variable $a in %s on line 2
+    /// ```
+    fn static_var(&mut self, id: NodeId<tree::StaticVarStmt>) -> Result<(), CompileError> {
+        for declarator in self.parsed.tree[id].static_var_declarators.clone() {
+            let declarator = &self.parsed.tree[declarator];
+            let (line, init) = (declarator.line, declarator.init);
+            let name = self.variable_name(declarator.var);
+            self.line = line;
+            if name == b"this" {
+                return Err(self.compile_error("Cannot use $this as static variable"));
+            }
+            if self.static_vars.iter().any(|held| *held.name.0 == *name) {
+                return Err(self.compile_error(format!(
+                    "Duplicate declaration of static variable ${}",
+                    String::from_utf8_lossy(&name)
+                )));
+            }
+            let slot = u32::try_from(self.static_vars.len()).unwrap_or(u32::MAX) << 3;
+            let folded = match init {
+                None => Some(Zval::null()),
+                Some(init) => {
+                    let mark = self.raised();
+                    self.fold = Fold::EvalConstExpr;
+                    let folded = self.constant_of(init);
+                    self.fold = Fold::Compile;
+                    let folded = folded?;
+                    if folded.is_none() {
+                        self.unraise(mark);
+                    }
+                    folded
+                }
+            };
+            self.static_vars.push(BoundVar {
+                name: Name(name.as_slice().into()),
+                value: folded.unwrap_or_else(Zval::null),
+                lexical: false,
+            });
+            let op1 = self.lookup_cv(&name);
+            let (Some(init), None) = (init, folded) else {
+                self.push(Opline {
+                    opcode: Opcode::BindStatic,
+                    op1_type: OperandKind::Cv,
+                    op1,
+                    extended_value: slot | BIND_REF,
+                    ..Opline::default()
+                });
+                continue;
+            };
+            let jump = self.push(Opline {
+                opcode: Opcode::BindInitStaticOrJmp,
+                op1_type: OperandKind::Cv,
+                op1,
+                extended_value: slot,
+                ..Opline::default()
+            });
+            let value = self.expr(init)?;
+            let (op2_type, op2) = self.operand(value);
+            self.push(Opline {
+                opcode: Opcode::BindStatic,
+                op1_type: OperandKind::Cv,
+                op1,
+                op2_type,
+                op2,
+                extended_value: slot | BIND_REF,
+                ..Opline::default()
+            });
+            self.update_jump_target_to_next(jump);
         }
         Ok(())
     }
@@ -3611,7 +3752,7 @@ impl Emit<'_> {
             return Err(self
                 .fatal("a class declared inside a block or a body this compiler cannot read yet"));
         }
-        let name = self.prefix_with_ns(&class.name);
+        let name = self.declare_symbol(Symbol::Class, &class.name)?;
         let wanted = name.to_ascii_lowercase();
         if self
             .classes
@@ -4866,12 +5007,21 @@ impl Emit<'_> {
                 Some(inner) => self.const_expr(inner),
                 None => Err(self.unread("an expression inside parentheses")),
             },
-            tree::Expr::NameRef(token) => match self.constant_name(token) {
-                Some(value) => folded_const_expr(value).ok_or_else(|| {
-                    self.fatal("a constant expression this compiler cannot read yet")
-                }),
-                None => Ok(ConstExpr::Constant(Name(self.text(token).into()))),
-            },
+            // `zend_compile_const_expr_const`: the name resolved through
+            // the constant imports, and an unqualified one no import
+            // names, in a namespace, left as written for the fallback
+            // the engine's fetch makes.
+            tree::Expr::NameRef(token) => {
+                if let Some(value) = self.constant_name(token) {
+                    return folded_const_expr(value).ok_or_else(|| {
+                        self.fatal("a constant expression this compiler cannot read yet")
+                    });
+                }
+                let written = self.text(token).to_vec();
+                let (resolved, runtime) = self.constant_resolved(&written);
+                let name = if runtime { written } else { resolved };
+                Ok(ConstExpr::Constant(Name(name.into_boxed_slice())))
+            }
             // `zend_compile_const_expr_magic_const`: `__CLASS__` in a
             // trait is the one magic constant the fold leaves, kept as
             // `ZEND_AST_CONSTANT_CLASS` for the scope that evaluates it.
@@ -5091,6 +5241,7 @@ impl Emit<'_> {
             )));
         }
         self.namespace = Some(name.to_vec());
+        self.imports.reset();
         // php's `zend_is_first_statement` steps over a `ZEND_AST_DECLARE`
         // before the node it is asked about and over nothing else, so a
         // `namespace` statement is one a later `strict_types` finds.
@@ -5214,7 +5365,8 @@ impl Emit<'_> {
                     String::from_utf8_lossy(&name)
                 )));
             }
-            let name = self.string(&self.prefix_with_ns(&name))?;
+            let full = self.declare_symbol(Symbol::Const, &name)?;
+            let name = self.string(&full)?;
             let op1 = self.literal(name);
             let op2 = self.literal(value);
             self.push(Opline {
@@ -10926,6 +11078,9 @@ impl Emit<'_> {
             // for the first-class callable alone, `f(...)`, which this
             // compiler does not read; the arguments are read before the
             // callee so that refusal is the one that stands.
+            tree::Expr::CallExpr(_) if self.fold == Fold::EvalConstExpr => {
+                Err(self.fatal("a call is no constant expression"))
+            }
             tree::Expr::CallExpr(id) => {
                 let node = &tree[id];
                 let (callee, args) = (node.callee, node.args);
@@ -12411,45 +12566,33 @@ impl Emit<'_> {
     }
 
     /// `zend_compile_function_name` over `zend_resolve_function_name`:
-    /// the name a call is resolved to, and whether the resolution waits
-    /// for the program to be served. A name written with a leading `\` is
-    /// what follows it, fully qualified; `namespace\f` is the current
-    /// namespace before `f`, fully qualified; a name with a `\` in it
-    /// is the current namespace before it, fully qualified, since no
-    /// `use` is read here; and an unqualified name is itself where no
-    /// namespace stands, and the namespace before it where one does,
-    /// resolved as the program serves, which is the `true`.
+    /// the name a call is resolved to through the file's imports
+    /// ([`Self::resolve_non_class`]), and whether the resolution waits
+    /// for the program to be served, which is php's
+    /// `!is_fully_qualified && FC(current_namespace)`: an unqualified
+    /// name no `use function` names, inside a namespace.
     fn function_name(&self, name: &[u8]) -> (Vec<u8>, bool) {
-        if let Some(fully_qualified) = name.strip_prefix(b"\\") {
-            return (fully_qualified.to_vec(), false);
-        }
-        let Some(namespace) = &self.namespace else {
-            return (name.to_vec(), false);
-        };
-        let prefixed = |rest: &[u8]| {
-            let mut full = namespace.clone();
-            full.push(b'\\');
-            full.extend_from_slice(rest);
-            full
-        };
-        if name.len() > 10 && name[..10].eq_ignore_ascii_case(b"namespace\\") {
-            return (prefixed(&name[10..]), false);
-        }
-        (prefixed(name), !name.contains(&b'\\'))
+        let (resolved, fully_qualified) = self.resolve_non_class(name, Symbol::Function);
+        (resolved, !fully_qualified && self.namespace.is_some())
     }
 
-    /// `zend_resolve_class_name` for a name no `use` is read for: a name
-    /// written with a leading `\` is what follows it, and in a namespace
-    /// `namespace\C` and any other name take the namespace before them,
-    /// as [`Self::function_name`] resolves a function's, with nothing
-    /// waiting for the program, since a class name resolves at compile
-    /// time. `self`, `parent` and `static` written without the `\` are
-    /// no class's name and resolve to themselves.
+    /// [`Self::function_name`] for a constant, `zend_resolve_const_name`,
+    /// which reads the constant imports, whose aliases keep their case.
+    fn constant_resolved(&self, name: &[u8]) -> (Vec<u8>, bool) {
+        let (resolved, fully_qualified) = self.resolve_non_class(name, Symbol::Const);
+        (resolved, !fully_qualified && self.namespace.is_some())
+    }
+
+    /// `zend_resolve_class_name`: `self`, `parent` and `static` written
+    /// without the `\` are no class's name and resolve to themselves;
+    /// every other name is [`Self::resolve_class`]'s, the file's imports
+    /// read, with nothing waiting for the program, since a class name
+    /// resolves at compile time.
     fn class_name(&self, name: &[u8]) -> Vec<u8> {
         if class_fetch_type(name) != FETCH_CLASS_DEFAULT {
             return name.to_vec();
         }
-        self.function_name(name).0
+        self.resolve_class(name)
     }
 
     /// `zend_prefix_with_ns`: the name a declaration takes, the current
@@ -12634,10 +12777,11 @@ impl Emit<'_> {
     }
 
     fn const_name(&mut self, name: &[u8]) -> Result<Option<Zval>, CompileError> {
-        if self.namespace.is_some() && !name.starts_with(b"\\") {
+        let (resolved, runtime) = self.constant_resolved(name);
+        if runtime {
             return Ok(None);
         }
-        self.persistent(name)
+        self.persistent(&resolved)
     }
 
     /// `zend_compile_const`'s second half (`Z/Zend/zend_compile.c:11048`),
@@ -12646,11 +12790,10 @@ impl Emit<'_> {
     /// `IS_CONSTANT_UNQUALIFIED_IN_NAMESPACE` in `op1` where the name
     /// stood unqualified inside a namespace, and the cache slot
     /// `zend_alloc_cache_slot` takes in `extended_value`. The resolution
-    /// is [`Self::function_name`]'s, since `zend_resolve_const_name` and
-    /// `zend_resolve_function_name` are one `zend_resolve_non_class_name`
-    /// and no `use` is read by either here: a leading `\` and a `\`
-    /// inside the name are both fully qualified, and only a bare name in
-    /// a namespace waits for the program.
+    /// is [`Self::constant_resolved`]'s, `zend_resolve_const_name` over
+    /// the constant imports: a leading `\`, a `\` inside the name and an
+    /// imported alias are all fully qualified, and only a bare name no
+    /// `use const` names, in a namespace, waits for the program.
     ///
     /// ```php
     /// define("W", 1);
@@ -12663,7 +12806,7 @@ impl Emit<'_> {
         if let Some(value) = self.const_name(name)? {
             return Ok(Where::Constant(value));
         }
-        let (resolved, unqualified) = self.function_name(name);
+        let (resolved, unqualified) = self.constant_resolved(name);
         let op2 = self.const_name_literal(&resolved, unqualified)?;
         let extended_value = self.cache_slot();
         let out = self.temporary();
@@ -14145,6 +14288,7 @@ mod tests {
             known_classes: &options.classes,
             frameless: Vec::new(),
             namespace: Some(b"A".to_vec()),
+            imports: Imports::default(),
             active_class: None,
             active_parent: None,
             active_constants: Vec::new(),
@@ -14175,6 +14319,7 @@ mod tests {
             dynamic: Vec::new(),
             dynamic_func_defs: Vec::new(),
             static_vars: Vec::new(),
+            fold: Fold::Compile,
             fn_flags: FnFlags::default(),
             numeric_dims: Vec::new(),
             methods: Vec::new(),

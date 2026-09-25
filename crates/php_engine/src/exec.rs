@@ -1003,6 +1003,23 @@ pub(crate) fn free_container_var(req: &mut Request, frame: FrameRef, code: &OpAr
     req.release_nogc(container);
 }
 
+/// `zend_array_dup(op_array->static_variables)`: the values a request's
+/// copy of the op array's `static` table starts at, each a view of the
+/// unit's immutable value, and a closure's `use` variable undefined
+/// until its `BIND_LEXICAL` fills it.
+pub(crate) fn starting_statics(code: &OpArray) -> Vec<Value> {
+    code.bound_vars
+        .iter()
+        .map(|var| {
+            if var.lexical {
+                Value::undef()
+            } else {
+                value_of(var.value)
+            }
+        })
+        .collect()
+}
+
 /// The op array's constant at `at`, as a value.
 pub(crate) fn constant(code: &OpArray, at: ConstIdx) -> Value {
     code.literals

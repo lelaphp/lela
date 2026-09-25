@@ -9,6 +9,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 use std::any::{Any, TypeId};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -22,7 +23,7 @@ use php_unit::decl::{
     Attribute, ClassConstDecl, ClassDecl, ClassKind, FunctionDecl, IniDecl, MethodDecl, Name,
     PropertyDecl, Visibility,
 };
-use php_unit::{CacheSlot, FramelessEntry, Opcode, Unit};
+use php_unit::{CacheSlot, FramelessEntry, OpArray, Opcode, Unit};
 
 use crate::api::abi::{
     Callable, Dependency, Extension, IniVerdict, NativeNew, ObjectHandlers, PropertyRead,
@@ -1066,6 +1067,12 @@ pub struct Request {
     /// class's `function_table`. A `Function` past the natives and the
     /// native methods counts into this list (design §5.6).
     user_functions: Vec<UserFunction>,
+    /// `ZEND_MAP_PTR(op_array->static_variables_ptr)` for every function
+    /// and main op array whose `static` variables the request has
+    /// touched: the values, one per entry of the op array's
+    /// [`php_unit::OpArray::bound_vars`], which the published unit never
+    /// holds (design §5.14). A closure's are its object's.
+    static_vars: HashMap<Statics, Vec<Value>>,
 }
 
 /// One row of an object's property table as [`Request::property_rows`]
@@ -1201,6 +1208,23 @@ pub(crate) struct TypedProperty {
     pub(crate) declaring: ClassId,
     pub(crate) ty: php_unit::decl::Type,
     pub(crate) readonly: bool,
+}
+
+/// Whose `static` table the request holds: a linked function's, the
+/// `zend_function` a request's function table or a class's method table
+/// holds, or a file's main op array's, by its map pointer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Statics {
+    Function(Function),
+    Main(u32),
+}
+
+/// Where the `static` variables of what a frame runs stand: in a
+/// closure's object, or in one of the request's tables.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum StaticsAt {
+    Closure(PhpObject),
+    Table(Statics),
 }
 
 /// One user function or method a request declared: the unit and the
@@ -1344,6 +1368,7 @@ impl Request {
             aliases: Vec::new(),
             sapi_constant: Value::null(),
             user_functions: Vec::new(),
+            static_vars: HashMap::new(),
             #[cfg(debug_assertions)]
             dirty: None,
         };
@@ -1473,6 +1498,7 @@ impl Request {
         let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
         let frame = self.stack.push_frame(&mut self.heap, slots, 0)?;
         exec::init_runtime_cache(&mut self.map, code, exec::Body::Main);
+        self.forget_main_statics(code.runtime_cache);
         self.vm.push(unit);
         // `zend_execute` gives the main op array's frame `EG(symbol_table)`
         // and `i_init_code_execute_data` attaches it, so every CV name
@@ -1516,6 +1542,7 @@ impl Request {
         }
         let table = self.rebuild_symbol_table(caller);
         exec::init_runtime_cache(&mut self.map, code, exec::Body::Main);
+        self.forget_main_statics(code.runtime_cache);
         self.vm.push_body(
             unit,
             exec::Body::Main,
@@ -3291,9 +3318,13 @@ impl Request {
     /// `ZEND_MAP_PTR_GET(closure->func.op_array.static_variables_ptr)`
     /// beside the names the op array carries: what the closure bound,
     /// name and value, in the order the table took them, with a slot
-    /// nothing filled left out. Empty for an object that is no closure
-    /// and for a closure whose op array binds nothing.
-    pub(crate) fn closure_bound(&self, object: PhpObject) -> Vec<(Vec<u8>, Value)> {
+    /// nothing filled left out, and with `lexical` the `use` variables
+    /// alone. A closure made of a named function shares that function's
+    /// table (`zend_create_closure_ex` under `is_fake`), which is read
+    /// where the request has laid it down and at its starting values
+    /// where it has not. Empty for an object that is no closure and for
+    /// a closure whose op array binds nothing.
+    pub(crate) fn closure_bound(&self, object: PhpObject, lexical: bool) -> Vec<(Vec<u8>, Value)> {
         let Some(closure) = object.closure(self) else {
             return Vec::new();
         };
@@ -3303,12 +3334,148 @@ impl Request {
         let Some(code) = exec::body_of(&user.unit, user.body) else {
             return Vec::new();
         };
+        let starting: Vec<Value>;
+        let values = if closure.fake {
+            if let Some(held) = self.static_vars.get(&Statics::Function(closure.function)) {
+                held.as_slice()
+            } else {
+                starting = exec::starting_statics(code);
+                starting.as_slice()
+            }
+        } else {
+            closure.bound.as_slice()
+        };
         code.bound_vars
             .iter()
-            .zip(closure.bound.iter())
-            .filter(|(_, value)| value.tag() != TypeTag::Undef)
-            .map(|(name, value)| (name.0.to_vec(), *value))
+            .zip(values.iter())
+            .filter(|(var, value)| value.tag() != TypeTag::Undef && (var.lexical || !lexical))
+            .map(|(var, value)| (var.name.0.to_vec(), *value))
             .collect()
+    }
+
+    /// The `static` variables of what `frame` runs, php's
+    /// `ZEND_MAP_PTR_GET(EX(func)->op_array.static_variables_ptr)`: a
+    /// closure's own table, which its object holds; a function's or a
+    /// method's, which the request holds per linked function, so a
+    /// method a trait gave two classes counts apart in each and an
+    /// inherited one counts with its parent's; or, for the main op array
+    /// of a file, the request's table for that op array.
+    pub(crate) fn statics_of(&self, frame: FrameRef, code: &OpArray) -> StaticsAt {
+        let Some(state) = self.vm.at(frame) else {
+            return StaticsAt::Table(Statics::Main(code.runtime_cache));
+        };
+        if let Some(object) = state.closure
+            && object.closure(self).is_some_and(|closure| !closure.fake)
+        {
+            return StaticsAt::Closure(object);
+        }
+        match state.function {
+            Some(function) => StaticsAt::Table(Statics::Function(function)),
+            None => StaticsAt::Table(Statics::Main(code.runtime_cache)),
+        }
+    }
+
+    /// The value at `slot` of a `static` table, the table laid down from
+    /// `code`'s starting values where the request has not touched it
+    /// yet, which is `zend_array_dup(op_array->static_variables)` at the
+    /// first `BIND_STATIC`. None for a slot the table has not.
+    pub(crate) fn static_at(
+        &mut self,
+        at: StaticsAt,
+        code: &OpArray,
+        slot: usize,
+    ) -> Option<Value> {
+        match at {
+            StaticsAt::Closure(object) => object.closure(self)?.bound.get(slot).copied(),
+            StaticsAt::Table(of) => self
+                .static_vars
+                .entry(of)
+                .or_insert_with(|| exec::starting_statics(code))
+                .get(slot)
+                .copied(),
+        }
+    }
+
+    /// `value` into `slot` of a `static` table, which takes the owner
+    /// the caller held; what stood there is handed back, since the table
+    /// only ever trades a value for the reference made over it.
+    pub(crate) fn set_static(&mut self, at: StaticsAt, slot: usize, value: Value) -> Value {
+        let cell = match at {
+            StaticsAt::Closure(object) => object
+                .native_mut::<ClosureInfo>(self)
+                .and_then(|payload| payload.bound.get_mut(slot)),
+            StaticsAt::Table(of) => self
+                .static_vars
+                .get_mut(&of)
+                .and_then(|table| table.get_mut(slot)),
+        };
+        match cell {
+            Some(cell) => std::mem::replace(cell, value),
+            None => value,
+        }
+    }
+
+    /// The `static` variables `callable` reads, name and value, as
+    /// `ReflectionFunctionAbstract::getStaticVariables` copies them: a
+    /// closure's own table, and a function's or a method's laid down
+    /// from its starting values where no call has yet, as php lays it
+    /// down there. Empty for a native and for a function with none.
+    pub(crate) fn static_variables(&mut self, target: Target) -> Vec<(Vec<u8>, Value)> {
+        let function = match target {
+            Target::Closure(object) => {
+                let fake = object.closure(self).is_some_and(|closure| closure.fake);
+                match object.closure(self).map(|closure| closure.function) {
+                    Some(function) if fake => function,
+                    _ => return self.closure_bound(object, false),
+                }
+            }
+            Target::Function(function) | Target::Method { function, .. } => function,
+        };
+        let Some((unit, body)) = self
+            .user_function(function)
+            .map(|user| (Arc::clone(&user.unit), user.body))
+        else {
+            return Vec::new();
+        };
+        let Some(code) = exec::body_of(&unit, body) else {
+            return Vec::new();
+        };
+        if code.bound_vars.is_empty() {
+            return Vec::new();
+        }
+        let values = self
+            .static_vars
+            .entry(Statics::Function(function))
+            .or_insert_with(|| exec::starting_statics(code));
+        code.bound_vars
+            .iter()
+            .zip(values.iter())
+            .map(|(var, value)| (var.name.0.to_vec(), *value))
+            .collect()
+    }
+
+    /// The `static` variables of the main op array whose map pointer is
+    /// `offset` given up: php compiles a file afresh at each include, so
+    /// its main op array's table starts over each time it is entered.
+    fn forget_main_statics(&mut self, offset: u32) {
+        if let Some(values) = self.static_vars.remove(&Statics::Main(offset)) {
+            for value in values {
+                self.release(value);
+            }
+        }
+    }
+
+    /// The request's `static` tables given up, php's walk over
+    /// `EG(function_table)` in `zend_shutdown_executor_values`
+    /// (`Z/Zend/zend_execute_API.c:313`), after the symbol table: the
+    /// destructors are behind the request by then, so this frees and
+    /// serves nothing.
+    pub(crate) fn destroy_static_vars(&mut self) {
+        for (_, values) in std::mem::take(&mut self.static_vars) {
+            for value in values {
+                self.release(value);
+            }
+        }
     }
 
     /// `func->common.scope` of a closure's own copy of its function: the

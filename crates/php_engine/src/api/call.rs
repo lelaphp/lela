@@ -576,6 +576,28 @@ pub fn lookup_function(req: &Request, name: &[u8]) -> Option<Function> {
     req.function_named(name)
 }
 
+/// The `static` variables of what `callable` names, name and value in the
+/// order the op array's table holds them, as
+/// `ReflectionFunctionAbstract::getStaticVariables` copies
+/// `ZEND_MAP_PTR_GET(static_variables_ptr)`: a closure's own table, its
+/// `use` variables first, and a function's or a method's the request's
+/// copy, laid down at its starting values where no call has touched it,
+/// as php lays it down there. A variable a `static` bound is the cell
+/// the function binds, as php's bucket holds it. Empty for a native and
+/// for a function with none. The values are views, no owner taken; the
+/// `Err` is the memory limit refusing a name.
+pub fn bound_variables(
+    req: &mut Request,
+    callable: &Callable,
+) -> Result<Vec<(PhpString, Value)>, Thrown> {
+    let rows = req.static_variables(callable.target());
+    let mut out = Vec::with_capacity(rows.len());
+    for (name, value) in rows {
+        out.push((PhpString::new(req, &name)?, value));
+    }
+    Ok(out)
+}
+
 /// Serve the autoloaders for `name`, `zend_lookup_class_ex` after the
 /// table miss (`Z/Zend/zend_execute_API.c:1228`) over
 /// `spl_perform_autoload` (`Z/ext/spl/php_spl.c:414`): a name that is
