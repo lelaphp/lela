@@ -230,6 +230,93 @@ pub(crate) fn declare_class_delayed<T: Tier>(
     }
 }
 
+/// `ZEND_DECLARE_ANON_CLASS` (`Z/Zend/zend_vm_def.h:7988`): the class
+/// the opline's cache slot holds, or the anonymous class the unit files
+/// under the lowered name in `op1` ([`Request::declare_anonymous`]),
+/// linked the first time any opline of its declaration runs and the same
+/// class every time after, written into the `VAR` the `NEW` after it
+/// reads. `op2`, the parent's lowered name, is the declaration's own
+/// parent and is not read.
+///
+/// ```php
+/// class P { function __construct(public $v) { echo "P($v)\n"; } }
+/// function make($v) { return new class($v) extends P {}; }
+/// $a = make(1); $b = make(2);
+/// var_dump(get_class($a) === get_class($b), $b->v, $a instanceof P);
+/// ```
+/// ```expect
+/// P(1)
+/// P(2)
+/// bool(true)
+/// int(2)
+/// bool(true)
+/// ```
+///
+/// What the link refuses is refused where the declaration runs, after
+/// what ran before it, and an anonymous class is told to implement what
+/// it left abstract, never to be declared abstract:
+///
+/// ```php
+/// echo "before\n";
+/// $o = new class extends Nope {};
+/// ```
+/// ```expect exit=255
+/// before
+///
+/// Fatal error: Uncaught Error: Class "Nope" not found in %s:3
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 3
+/// ```
+///
+/// ```php
+/// interface I { function f(); }
+/// echo "before\n";
+/// $o = new class implements I {};
+/// ```
+/// ```expect exit=255
+/// before
+///
+/// Fatal error: Class I@anonymous must implement 1 abstract method (I::f) in %s on line 4
+/// ```
+pub(crate) fn declare_anon_class<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let slot = CacheSlot(op.extended_value);
+    let class = if let Cached::Class(class) = req.cached(frame, slot) {
+        class
+    } else {
+        let Some(serving) = req.vm().serving(frame) else {
+            return Err(Fatal::Error(String::from(
+                "InternalError: a DECLARE_ANON_CLASS on a frame serving no op array",
+            )));
+        };
+        let Some(key) = exec::constant(code, ConstIdx(op.op1))
+            .as_str_bytes()
+            .map(<[u8]>::to_vec)
+        else {
+            return Err(Fatal::Error(String::from(
+                "InternalError: a DECLARE_ANON_CLASS with no name in its op1",
+            )));
+        };
+        match req.declare_anonymous(&serving.unit, &key) {
+            Ok(class) => {
+                req.prime(frame, slot, Cached::Class(class));
+                class
+            }
+            Err(thrown) => {
+                req.leave_pending(&thrown);
+                return Ok(Stepped::Threw(frame));
+            }
+        }
+    };
+    hold_class(req, frame, code, op.out, class);
+    Ok(advance(req, frame))
+}
+
 /// `ZEND_DECLARE_FUNCTION` (`Z/Zend/zend_vm_def.h:8013`):
 /// `do_bind_function` over the op array the frame's
 /// `dynamic_func_defs` holds at `op2`, under the lowered name in

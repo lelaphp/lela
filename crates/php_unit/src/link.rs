@@ -1041,8 +1041,9 @@ fn strength(visibility: Visibility) -> u8 {
     }
 }
 
+/// A name for a message, as php's `%s` prints it ([`crate::decl::shown`]).
 fn text(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
+    crate::decl::shown(bytes).into_owned()
 }
 
 /// `required_num_args`: the parameters up to the last one with no
@@ -1076,7 +1077,7 @@ fn default_text(default: &ConstExpr) -> String {
         ConstExpr::Str(bytes) => {
             let shown = &bytes[..bytes.len().min(10)];
             let more = if bytes.len() > 10 { "..." } else { "" };
-            format!("'{}{more}'", text(shown))
+            format!("'{}{more}'", String::from_utf8_lossy(shown))
         }
         ConstExpr::Array(elements) if elements.is_empty() => String::from("[]"),
         ConstExpr::Array(_) => String::from("[...]"),
@@ -2766,7 +2767,9 @@ fn abstract_left(
         kind: child.kind,
         class: text(&child.name.0),
         methods: left,
-        must_implement: explicit || child.kind == ClassKind::Enum,
+        // `can_be_abstract`: an enum and an anonymous class cannot be
+        // declared abstract, so neither is told it could.
+        must_implement: explicit || child.kind == ClassKind::Enum || child.flags.is_anonymous,
     })
 }
 

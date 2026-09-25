@@ -298,7 +298,7 @@ impl Emit<'_> {
             return Ok(());
         };
         let signature = magic.signature();
-        let class = String::from_utf8_lossy(class).into_owned();
+        let class = php_unit::decl::shown(class).into_owned();
         let name = String::from_utf8_lossy(&method.function.name.0).into_owned();
         let parameters = &method.function.parameters;
         if let Some(count) = signature.arity {

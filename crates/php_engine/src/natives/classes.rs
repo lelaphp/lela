@@ -156,8 +156,8 @@ fn object_or_class_name(req: &mut Request, position: u32) -> Result<ClassId, Thr
 
 /// The declared name of a class as a string of the request's.
 fn class_name_value(req: &mut Request, class: ClassId) -> Result<Value, Thrown> {
-    let name = req.class_name(class);
-    Ok(Value::string(PhpString::new(req, name.as_bytes())?))
+    let name = req.class_name_bytes(class);
+    Ok(Value::string(PhpString::new(req, &name)?))
 }
 
 /// `get_called_class(): string`, php's `ZEND_FUNCTION(get_called_class)`
@@ -273,7 +273,7 @@ fn is_a_impl(req: &mut Request, only_subclass: bool) -> Result<Value, Thrown> {
         _ => return Ok(Value::bool(false)),
     };
     let wanted = class_name.as_bytes().to_vec();
-    if !only_subclass && req.class_name(instance).as_bytes() == wanted.as_slice() {
+    if !only_subclass && req.class_name_bytes(instance) == wanted {
         return Ok(Value::bool(true));
     }
     let answer = match lookup_class(req, &wanted, false)? {

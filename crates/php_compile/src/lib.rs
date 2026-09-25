@@ -109,6 +109,14 @@ pub struct Options {
     /// (`zend_call_stack_init`) and the compiler's recursion is held to
     /// (`zend_check_stack_limit`); unchecked where a caller says nothing.
     pub stack: StackLimit,
+    /// `CG(rtd_key_counter)` as the source starts compiling: how many
+    /// runtime definition keys and anonymous class names were made before
+    /// it, which the `$` of each one this source makes counts on from. A
+    /// file compiled for the cache starts from none; an `eval`'s string
+    /// continues the request's count, so two `eval`s of one string
+    /// declare two anonymous classes, as php's one `CG(rtd_key_counter)`
+    /// makes them.
+    pub keys_before: u32,
 }
 
 impl Default for Options {
@@ -124,6 +132,7 @@ impl Default for Options {
             functions: Vec::new(),
             classes: Vec::new(),
             stack: StackLimit::UNCHECKED,
+            keys_before: 0,
         }
     }
 }
@@ -3419,11 +3428,11 @@ mod tests {
             line: 0,
             raised: Vec::new(),
         };
-        let error = refused(b"<?php\n$a = (new class {});\n").unwrap_or_else(compiled);
+        let error = refused(b"<?php\n$a = (strlen(...));\n").unwrap_or_else(compiled);
         assert_eq!(error.level, Level::Parse);
         assert_eq!(
             error.message,
-            "an anonymous class this compiler cannot read yet"
+            "a first-class callable this compiler cannot read yet"
         );
         assert_eq!(error.line, 2);
         let unclosed = refused(b"<?php\n$a = (1 + 2;\n").unwrap_or_else(compiled);
