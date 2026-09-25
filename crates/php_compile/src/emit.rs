@@ -5251,6 +5251,14 @@ impl Emit<'_> {
     /// ```
     ///
     /// ```php
+    /// #[Attribute(...)]
+    /// class Foo {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot create Closure as attribute argument in %s on line 3
+    /// ```
+    ///
+    /// ```php
     /// #[Attribute] class A { function __construct(public $x = 0, public $y = 0) {} }
     /// #[A(1, y: 2)] class C {}
     /// $a = (new ReflectionClass('C'))->getAttributes()[0];
@@ -5270,9 +5278,19 @@ impl Emit<'_> {
         name: Vec<u8>,
         declared_at: u32,
     ) -> Result<Attribute, CompileError> {
+        if attribute
+            .arguments
+            .contains(&walk::AttrArgument::CallableConvert)
+        {
+            return Err(walk::refused(
+                declared_at,
+                "Cannot create Closure as attribute argument",
+            ));
+        }
         let mut arguments: Vec<AttributeArgument> = Vec::new();
         for argument in &attribute.arguments {
             let (named, expr) = match argument {
+                walk::AttrArgument::CallableConvert => continue,
                 walk::AttrArgument::Unpack => {
                     return Err(walk::refused(
                         declared_at,
