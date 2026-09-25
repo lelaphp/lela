@@ -43,6 +43,7 @@ mod streams;
 #[cfg(any(feature = "test", test))]
 pub mod test;
 pub mod tier;
+mod virtual_cwd;
 mod weakrefs;
 mod wrapper;
 

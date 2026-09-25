@@ -6,8 +6,9 @@
 //! kind clears it; `chown`, `chgrp`, `lchown`, `lchgrp`, `chmod` and
 //! `touch`, which call the C library themselves for a plain path and
 //! hand any other, a `file://` one included, to the wrapper's
-//! `stream_metadata`; `clearstatcache`; and `disk_total_space` and
-//! `disk_free_space` over `statvfs(3)`. In the stub's order
+//! `stream_metadata`; `clearstatcache`; `disk_total_space` and
+//! `disk_free_space` over `statvfs(3)`; and `realpath_cache_get` and
+//! `realpath_cache_size` over the engine's realpath cache. In the stub's order
 //! (`basic_functions.stub.php`). `access(2)` and the rest `std` has no
 //! answer for are `ffi`'s.
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
@@ -223,7 +224,83 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
             stub("diskfreespace(string $directory): float|false"),
             disk_free_space,
         ),
+        (stub("realpath_cache_get(): array"), realpath_cache_get),
+        (stub("realpath_cache_size(): int"), realpath_cache_size),
     ]
+}
+
+/// `realpath_cache_get(): array`, php's `PHP_FUNCTION(realpath_cache_get)`:
+/// the realpath cache, each bucket under its path as its `key` (a float
+/// past `PHP_INT_MAX`, as php adds it), `is_dir`, `realpath` and
+/// `expires`, in the cache's own order. The cache holds each absolute
+/// path the request resolved, the served file's among them; the keys
+/// and the times are the host's, so the witness pins the shape.
+///
+/// ```php
+/// $file = realpath(__FILE__); $entry = realpath_cache_get()[$file];
+/// var_dump(array_keys($entry), is_int($entry['key']) || is_float($entry['key']), $entry['is_dir'], $entry['realpath'] === $file, $entry['expires'] >= time());
+/// ```
+/// ```expect
+/// array(4) {
+///   [0]=>
+///   string(3) "key"
+///   [1]=>
+///   string(6) "is_dir"
+///   [2]=>
+///   string(8) "realpath"
+///   [3]=>
+///   string(7) "expires"
+/// }
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// ```
+fn realpath_cache_get(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 0, 0)?;
+    let mut all = PhpArray::new(req)?;
+    for entry in req.realpath_cache() {
+        let key = match i64::try_from(entry.key) {
+            Ok(key) => Value::int(key),
+            #[allow(clippy::cast_precision_loss)] // php's `(double)bucket->key`
+            Err(_) => Value::float(entry.key as f64),
+        };
+        let mut row = PhpArray::new(req)?;
+        for (name, value) in [
+            (&b"key"[..], key),
+            (b"is_dir", Value::bool(entry.is_dir)),
+            (
+                b"realpath",
+                Value::string(PhpString::new(req, &entry.realpath)?),
+            ),
+            (b"expires", Value::int(entry.expires)),
+        ] {
+            let name = Key::Str(PhpString::new(req, name)?);
+            row.set(req, name, value)?;
+        }
+        let path = Key::Str(PhpString::new(req, &entry.path)?);
+        all.set(req, path, Value::array(row))?;
+    }
+    Ok(Value::array(all))
+}
+
+/// `realpath_cache_size(): int`: the bytes the realpath cache's buckets
+/// count, each the bucket structure and its two paths with their NULs.
+///
+/// ```php
+/// realpath(__FILE__); var_dump(realpath_cache_size() > 0);
+/// clearstatcache(true);
+/// var_dump(realpath_cache_size());
+/// ```
+/// ```expect
+/// bool(true)
+/// int(0)
+/// ```
+fn realpath_cache_size(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 0, 0)?;
+    Ok(Value::int(
+        req.realpath_cache().iter().map(|entry| entry.size).sum(),
+    ))
 }
 
 /// `disk_total_space(string $directory): float|false`: the size of the
@@ -1154,12 +1231,15 @@ fn touch(req: &mut Request) -> Result<Value, Thrown> {
 /// ```
 fn clearstatcache(req: &mut Request) -> Result<Value, Thrown> {
     argument_count_between(req, 0, 2)?;
-    if req.argument_count() >= 1 {
-        bool_argument(req, 1)?;
-    }
-    if req.argument_count() >= 2 {
-        path_argument(req, 2)?;
-    }
+    let clear_realpath_cache = req.argument_count() >= 1 && bool_argument(req, 1)?;
+    let filename = if req.argument_count() >= 2 {
+        Some(path_argument(req, 2)?)
+    } else {
+        None
+    };
     req.clear_stat_cache();
+    if clear_realpath_cache {
+        req.realpath_cache_clear(filename.as_ref().map(PhpString::as_bytes));
+    }
     Ok(Value::null())
 }

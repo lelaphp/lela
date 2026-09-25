@@ -21,7 +21,7 @@ use php_ext::decl::{
     FunctionDecl, MethodDecl, Name, PropertyDecl, Type, Visibility,
 };
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
-use php_ext::request::{HostPath, Request, Stream, Whence};
+use php_ext::request::{HostPath, Request, Resolve, Stream, Whence};
 use php_ext::values::{PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::file::{context_argument, set_default_dir};
@@ -29,7 +29,6 @@ use crate::md5::path_argument;
 use crate::output::Entry;
 use crate::streamsfuncs::{NullContext, stream_context};
 use crate::stub::stub;
-use crate::virtual_cwd::{Resolve, virtual_file_ex};
 use crate::zpp::optional_long;
 use crate::{State, argument_count_between, constant, ffi};
 
@@ -453,7 +452,7 @@ fn chdir(req: &mut Request) -> Result<Value, Thrown> {
     let directory = path_argument(req, 1)?;
     let cwd = req.cwd().0.as_os_str().as_bytes().to_vec();
     let refused = |code: i32| Err(std::io::Error::from_raw_os_error(code));
-    let target = match virtual_file_ex(&cwd, directory.as_bytes(), Resolve::RealPath) {
+    let target = match req.virtual_file_ex(&cwd, directory.as_bytes(), Resolve::RealPath) {
         None if directory.as_bytes().is_empty() => refused(libc_errno::ENOENT),
         None => std::fs::metadata(req.absolutize(directory.as_bytes()).0)
             .and_then(|_| refused(libc_errno::ENOENT)),

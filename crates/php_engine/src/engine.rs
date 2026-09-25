@@ -691,7 +691,7 @@ impl Shared {
 /// string(0) ""
 /// string(10) "ISO-8859-1"
 /// ```
-const CORE_INI: [(&str, &str); 50] = [
+const CORE_INI: [(&str, &str); 52] = [
     ("short_open_tag", "1"),
     ("fatal_error_backtraces", "1"),
     ("precision", "14"),
@@ -761,6 +761,10 @@ const CORE_INI: [(&str, &str); 50] = [
     // `ignore_user_abort`, `PG(ignore_user_abort)`, and the two `dl()`
     // reads, `enable_dl` and `extension_dir`, `PHP_INI_SYSTEM`.
     ("ignore_user_abort", "0"),
+    // `realpath_cache_size` and `realpath_cache_ttl`, `PHP_INI_SYSTEM`,
+    // the realpath cache's limit and time to live (`crate::virtual_cwd`).
+    ("realpath_cache_size", "4096K"),
+    ("realpath_cache_ttl", "120"),
     ("enable_dl", "1"),
     ("extension_dir", crate::constants::PHP_EXTENSION_DIR),
 ];

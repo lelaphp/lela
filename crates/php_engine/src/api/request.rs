@@ -10,6 +10,7 @@
 
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
+use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -40,6 +41,8 @@ use crate::engine::{
 };
 use crate::exec::{self, CallStage, CallState, IncludeKind, TableId, Vm};
 use crate::output::Output;
+use crate::virtual_cwd::RealpathCache;
+pub use crate::virtual_cwd::Resolve;
 
 mod lazy;
 
@@ -85,6 +88,19 @@ pub struct IniEntry {
     pub extension: Option<ExtensionId>,
     pub value: Box<[u8]>,
     pub original: Option<Box<[u8]>>,
+}
+
+/// One bucket of the realpath cache, `realpath_cache_bucket` as
+/// `realpath_cache_get()` shows it, with the bytes `realpath_cache_size()`
+/// counts it as.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RealpathEntry {
+    pub path: Vec<u8>,
+    pub realpath: Vec<u8>,
+    pub key: u64,
+    pub is_dir: bool,
+    pub expires: i64,
+    pub size: i64,
 }
 
 /// Who a row the request added to `EG(zend_constants)` belongs to,
@@ -1012,6 +1028,9 @@ pub struct Request {
     /// `BG(CurrentStatFile)` and `BG(CurrentLStatFile)`, `php_stat`'s
     /// cache, which the plain files kind clears (design §4.3 seam 5).
     pub(crate) stat_cache: crate::wrapper::StatCache,
+    /// `CWDG(realpath_cache)`, which every absolute path resolved through
+    /// [`Request::virtual_file_ex`] is entered in (`crate::virtual_cwd`).
+    realpath_cache: RealpathCache,
     cwd: PathBuf,
     /// `le_stream`, the resource type every stream is registered under.
     stream_type: ResourceType,
@@ -1337,6 +1356,8 @@ impl Request {
         let mut stack = VmStack::new();
         let _laid = stack.open(&mut heap);
         let mut req = Request {
+            // Read before `shared` moves in, as fields are in the order written.
+            realpath_cache: RealpathCache::startup(&shared),
             shared,
             description,
             heap,
@@ -11000,7 +11021,7 @@ impl Request {
     /// open left, and this engine as a file that is not there. The
     /// `Err` is the last attempt's reason, which the stream warning
     /// prints.
-    pub(crate) fn resolve_path(&self, written: &[u8]) -> Result<Vec<u8>, std::io::Error> {
+    pub(crate) fn resolve_path(&mut self, written: &[u8]) -> Result<Vec<u8>, std::io::Error> {
         let not_found = || std::io::Error::from(std::io::ErrorKind::NotFound);
         if let Some(at) = written.windows(3).position(|w| w == b"://")
             && at > 1
@@ -11045,8 +11066,14 @@ impl Request {
     /// `tsrm_realpath` of a path that is a regular file: the canonical
     /// path, against the request's working directory where the path is
     /// relative.
-    fn realpath_file(&self, path: &[u8]) -> Result<Vec<u8>, std::io::Error> {
-        let real = std::fs::canonicalize(self.absolutize(path).0)?;
+    fn realpath_file(&mut self, path: &[u8]) -> Result<Vec<u8>, std::io::Error> {
+        // `virtual_file_ex` sets `errno = ENOENT` for a path it could not
+        // resolve.
+        const ENOENT: i32 = 2;
+        let real = self
+            .realpath(path)
+            .ok_or_else(|| std::io::Error::from_raw_os_error(ENOENT))?
+            .0;
         if !real.is_file() {
             return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
         }
@@ -13574,12 +13601,70 @@ impl Request {
         }
     }
 
-    /// `realpath()`: `None` where the path does not exist.
+    /// `VCWD_REALPATH`, `tsrm_realpath`: the path against the request's
+    /// working directory with every link resolved, through the realpath
+    /// cache; `None` where the path does not exist.
+    pub fn realpath(&mut self, path: &[u8]) -> Option<HostPath> {
+        let cwd = self.cwd.as_os_str().as_encoded_bytes().to_vec();
+        let real = self.virtual_file_ex(&cwd, path, Resolve::RealPath)?;
+        Some(HostPath(PathBuf::from(std::ffi::OsStr::from_bytes(&real))))
+    }
+
+    /// `virtual_file_ex(state, path, NULL, how)` (`Z/Zend/zend_virtual_cwd.c:1007`)
+    /// with `state` the directory `cwd`: `path` made absolute against it
+    /// where it is relative (and left relative where `cwd` is empty),
+    /// `.` and `..` taken out, and under [`Resolve::FilePath`] and
+    /// [`Resolve::RealPath`] each link resolved, `tsrm_realpath_r`, every
+    /// absolute path met entered in and read from the realpath cache;
+    /// `None` where php answers `1`, an empty path, one of `MAXPATHLEN`
+    /// bytes or more, and under `RealPath` one that is not there.
+    ///
+    /// ```php
+    /// $dir = dirname(realpath(__FILE__));
+    /// var_dump(realpath_cache_size() > 0, isset(realpath_cache_get()[$dir]), realpath_cache_get()[$dir]['is_dir'], realpath_cache_get()[$dir]['realpath'] === realpath($dir));
+    /// clearstatcache(true, $dir); var_dump(isset(realpath_cache_get()[$dir]));
+    /// clearstatcache(true); var_dump(realpath_cache_size(), realpath_cache_get());
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// int(0)
+    /// array(0) {
+    /// }
+    /// ```
+    pub fn virtual_file_ex(&mut self, cwd: &[u8], path: &[u8], how: Resolve) -> Option<Vec<u8>> {
+        crate::virtual_cwd::virtual_file_ex(&mut self.realpath_cache, cwd, path, how)
+    }
+
+    /// `CWDG(realpath_cache)` as `realpath_cache_get()` walks it, slot by
+    /// slot and each chain newest first: each bucket's path as it was
+    /// written, what it resolved to, its key, whether it is a directory,
+    /// when it expires, and the bytes `realpath_cache_size()` counts it as.
     #[must_use]
-    pub fn realpath(&self, path: &[u8]) -> Option<HostPath> {
-        std::fs::canonicalize(self.absolutize(path).0)
-            .ok()
-            .map(HostPath)
+    pub fn realpath_cache(&self) -> Vec<RealpathEntry> {
+        self.realpath_cache
+            .buckets()
+            .map(|bucket| RealpathEntry {
+                path: bucket.path.clone(),
+                realpath: bucket.realpath.clone(),
+                key: bucket.key,
+                is_dir: bucket.is_dir,
+                expires: bucket.expires,
+                size: bucket.size(),
+            })
+            .collect()
+    }
+
+    /// `clearstatcache(true, ...)`'s half: `realpath_cache_del` of one
+    /// path, or with none `realpath_cache_clean`.
+    pub fn realpath_cache_clear(&mut self, path: Option<&[u8]>) {
+        match path {
+            Some(path) => self.realpath_cache.delete(path),
+            None => self.realpath_cache.clean(),
+        }
     }
 
     /// The `open_basedir` guard Mahout's `check_fs_access` performed at

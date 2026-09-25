@@ -19,7 +19,7 @@ use php_ext::call::lookup_class;
 use php_ext::coerce::{coerce_param, to_string, value_name};
 use php_ext::decl::{ConstDecl, ConstExpr, FunctionDecl, Name, Parameter, ParameterDefault, Type};
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw};
-use php_ext::request::{Request, Stream, Whence, WrapperOp};
+use php_ext::request::{Request, Resolve, Stream, Whence, WrapperOp};
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use std::os::unix::ffi::OsStrExt;
@@ -27,7 +27,7 @@ use std::os::unix::ffi::OsStrExt;
 use crate::output::Entry;
 use crate::streamsfuncs::{NullContext, stream_context};
 use crate::stub::stub;
-use crate::virtual_cwd::{MAXPATHLEN, Resolve, virtual_file_ex};
+use crate::virtual_cwd::MAXPATHLEN;
 use crate::zpp::{
     array_argument, assign_ref, nullable_long, nullable_string, optional_bool, optional_long,
     optional_string,
@@ -3342,7 +3342,7 @@ fn realpath(req: &mut Request) -> Result<Value, Thrown> {
     } else {
         &cwd
     };
-    match virtual_file_ex(cwd, &written, Resolve::RealPath) {
+    match req.virtual_file_ex(cwd, &written, Resolve::RealPath) {
         Some(resolved) => Ok(Value::string(PhpString::new(req, &resolved)?)),
         None => Ok(Value::bool(false)),
     }

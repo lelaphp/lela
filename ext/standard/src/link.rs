@@ -214,11 +214,12 @@ fn symlink(req: &mut Request) -> Result<Value, Thrown> {
     argument_count_between(req, 2, 2)?;
     let target = path_argument(req, 1)?;
     let link = path_argument(req, 2)?;
-    let Some(source) = expand_filepath(link.as_bytes(), &cwd(req)) else {
+    let cwd_now = cwd(req);
+    let Some(source) = expand_filepath(req, link.as_bytes(), &cwd_now) else {
         return Ok(no_such_file(req));
     };
     let dirname = zend_dirname(&source);
-    if expand_filepath(target.as_bytes(), &dirname).is_none() {
+    if expand_filepath(req, target.as_bytes(), &dirname).is_none() {
         return Ok(no_such_file(req));
     }
     match std::os::unix::fs::symlink(host(target.as_bytes()), host(&source)) {
@@ -261,8 +262,8 @@ fn link(req: &mut Request) -> Result<Value, Thrown> {
     let link = path_argument(req, 2)?;
     let cwd = cwd(req);
     let (Some(source), Some(dest)) = (
-        expand_filepath(link.as_bytes(), &cwd),
-        expand_filepath(target.as_bytes(), &cwd),
+        expand_filepath(req, link.as_bytes(), &cwd),
+        expand_filepath(req, target.as_bytes(), &cwd),
     ) else {
         return Ok(no_such_file(req));
     };

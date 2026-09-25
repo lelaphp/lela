@@ -1,0 +1,466 @@
+//! `Z/Zend/zend_virtual_cwd.c`'s path resolution, `virtual_file_ex` over
+//! `tsrm_realpath_r`, which `expand_filepath` (`Z/main/fopen_wrappers.c:787`),
+//! `VCWD_REALPATH` and the engine's own include and primary-file
+//! resolution reach: a path made absolute against a working directory,
+//! `.` and `..` taken out, and, where the file is there, each symbolic
+//! link on the way replaced by what it points at; and the realpath cache
+//! beside it, `CWDG(realpath_cache)`, which every absolute path resolved
+//! under `CWD_FILEPATH` or `CWD_REALPATH` is entered in and read from,
+//! and which `realpath_cache_get()` and `realpath_cache_size()` show. The
+//! separator is `/` alone and `MAXPATHLEN` is the host's 1024. The cache
+//! is the request's, where php's is the thread's: a request starts with
+//! none, as php's CLI does.
+
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
+
+/// `MAXPATHLEN` on this host.
+pub(crate) const MAXPATHLEN: usize = 1024;
+
+/// `LINK_MAX` as `zend_virtual_cwd.c` redefines it: how many links one
+/// resolution follows before it gives up.
+const LINK_MAX: i32 = 32;
+
+/// `CWD_EXPAND`, `CWD_FILEPATH` and `CWD_REALPATH`: expand `.` and `..`
+/// only; resolve links where the file is there and expand otherwise;
+/// resolve links and fail where the file is not there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resolve {
+    Expand,
+    FilePath,
+    RealPath,
+}
+
+/// The slots of `CWDG(realpath_cache)`, a bucket's key modulo which
+/// chooses its chain.
+const SLOTS: usize = 1024;
+
+/// `sizeof(realpath_cache_bucket)` on a 64-bit host without `ZEND_WIN32`:
+/// five words, two `uint16_t` and a bit field, padded to eight.
+const BUCKET_SIZE: i64 = 48;
+
+/// One `realpath_cache_bucket`: a path as it was written, after `.` and
+/// `..`, and what it resolved to.
+#[derive(Debug, Clone)]
+pub(crate) struct Bucket {
+    pub(crate) key: u64,
+    pub(crate) path: Vec<u8>,
+    pub(crate) realpath: Vec<u8>,
+    pub(crate) is_dir: bool,
+    pub(crate) expires: i64,
+}
+
+impl Bucket {
+    /// What `realpath_cache_add` counts the bucket as: the structure,
+    /// the path with its NUL, and the resolved path with its NUL where
+    /// it is not the same bytes.
+    pub(crate) fn size(&self) -> i64 {
+        let mut size = BUCKET_SIZE + len_of(self.path.len()) + 1;
+        if self.realpath != self.path {
+            size += len_of(self.realpath.len()) + 1;
+        }
+        size
+    }
+}
+
+fn len_of(n: usize) -> i64 {
+    i64::try_from(n).unwrap_or(i64::MAX)
+}
+
+/// `CWDG(realpath_cache)` with `realpath_cache_size`, the bytes its
+/// buckets count, and the two ini entries read at startup,
+/// `realpath_cache_size` as the limit and `realpath_cache_ttl`.
+#[derive(Debug, Clone)]
+pub(crate) struct RealpathCache {
+    slots: Vec<Vec<Bucket>>,
+    size: i64,
+    limit: i64,
+    ttl: i64,
+}
+
+impl RealpathCache {
+    /// The cache a request starts with: empty, its limit and time to
+    /// live the startup values of `realpath_cache_size` and
+    /// `realpath_cache_ttl`, `PHP_INI_SYSTEM` both, read into `CWDG` once.
+    pub(crate) fn startup(shared: &crate::engine::Shared) -> RealpathCache {
+        let read = |name: &[u8]| {
+            shared
+                .ini_default(name)
+                .map_or(0, crate::api::request::Request::ini_parse_bytes)
+        };
+        RealpathCache::new(read(b"realpath_cache_size"), read(b"realpath_cache_ttl"))
+    }
+
+    fn new(limit: i64, ttl: i64) -> RealpathCache {
+        RealpathCache {
+            slots: vec![Vec::new(); SLOTS],
+            size: 0,
+            limit,
+            ttl,
+        }
+    }
+
+    /// `realpath_cache_key`: FNV-1 over the path's bytes, each read as
+    /// a C `char`, signed on the hosts php builds for here.
+    fn key(path: &[u8]) -> u64 {
+        path.iter().fold(2_166_136_261_u64, |h, &c| {
+            let c = i64::from(i8::from_ne_bytes([c]));
+            h.wrapping_mul(16_777_619) ^ u64::from_ne_bytes(c.to_ne_bytes())
+        })
+    }
+
+    fn slot(key: u64) -> usize {
+        usize::try_from(key % SLOTS as u64).unwrap_or(0)
+    }
+
+    /// `realpath_cache_find`: the bucket for `path`, the expired buckets
+    /// met on its chain dropped on the way.
+    fn find(&mut self, path: &[u8], now: i64) -> Option<Bucket> {
+        let key = RealpathCache::key(path);
+        let ttl = self.ttl;
+        let chain = &mut self.slots[RealpathCache::slot(key)];
+        let mut freed = 0;
+        let mut found = None;
+        let mut at = 0;
+        while at < chain.len() {
+            if ttl != 0 && chain[at].expires < now {
+                freed += chain.remove(at).size();
+                continue;
+            }
+            if chain[at].key == key && chain[at].path == path {
+                found = Some(chain[at].clone());
+                break;
+            }
+            at += 1;
+        }
+        self.size -= freed;
+        found
+    }
+
+    /// `realpath_cache_add`, where the limit leaves room.
+    fn add(&mut self, path: &[u8], realpath: &[u8], is_dir: bool, now: i64) {
+        let bucket = Bucket {
+            key: RealpathCache::key(path),
+            path: path.to_vec(),
+            realpath: realpath.to_vec(),
+            is_dir,
+            expires: now.saturating_add(self.ttl),
+        };
+        let size = bucket.size();
+        if self.size + size <= self.limit {
+            self.slots[RealpathCache::slot(bucket.key)].insert(0, bucket);
+            self.size += size;
+        }
+    }
+
+    /// `realpath_cache_del`: the bucket for `path` dropped.
+    pub(crate) fn delete(&mut self, path: &[u8]) {
+        let key = RealpathCache::key(path);
+        let chain = &mut self.slots[RealpathCache::slot(key)];
+        if let Some(at) = chain.iter().position(|b| b.key == key && b.path == path) {
+            self.size -= chain.remove(at).size();
+        }
+    }
+
+    /// `realpath_cache_clean`: every bucket dropped.
+    pub(crate) fn clean(&mut self) {
+        for chain in &mut self.slots {
+            chain.clear();
+        }
+        self.size = 0;
+    }
+
+    /// The buckets in `realpath_cache_get()`'s order: slot by slot, each
+    /// chain newest first.
+    pub(crate) fn buckets(&self) -> impl Iterator<Item = &Bucket> {
+        self.slots.iter().flatten()
+    }
+}
+
+/// `*t` of `tsrm_realpath_r`: the time read once, where the cache has a
+/// time to live, on the first lookup.
+struct Now {
+    at: Option<i64>,
+}
+
+impl Now {
+    fn get(&mut self) -> i64 {
+        *self.at.get_or_insert_with(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+        })
+    }
+}
+
+/// The C buffer `tsrm_realpath_r` works in place on: a read past what
+/// is written is the NUL php's buffer holds there, and a write past it
+/// grows it.
+struct Buf(Vec<u8>);
+
+impl Buf {
+    fn at(&self, i: usize) -> u8 {
+        self.0.get(i).copied().unwrap_or(0)
+    }
+
+    fn put(&mut self, i: usize, byte: u8) {
+        if self.0.len() <= i {
+            self.0.resize(i + 1, 0);
+        }
+        if let Some(slot) = self.0.get_mut(i) {
+            *slot = byte;
+        }
+    }
+
+    fn write(&mut self, at: usize, bytes: &[u8]) {
+        for (k, &byte) in bytes.iter().enumerate() {
+            self.put(at + k, byte);
+        }
+    }
+
+    fn head(&self, len: usize) -> Vec<u8> {
+        (0..len).map(|i| self.at(i)).collect()
+    }
+}
+
+fn host(bytes: &[u8]) -> &Path {
+    Path::new(OsStr::from_bytes(bytes))
+}
+
+/// `tsrm_realpath_r` (`Z/Zend/zend_virtual_cwd.c:488`), the Unix half:
+/// the path in `p` up to `len` resolved from its last component back,
+/// the part before `start` kept as it is; the new length, or `None` for
+/// php's `(size_t)-1`.
+#[allow(clippy::too_many_lines)] // one C function, kept whole
+fn realpath_r(
+    walk: &mut Walk<'_>,
+    p: &mut Buf,
+    start: usize,
+    mut len: usize,
+    how: Resolve,
+    mut is_dir: bool,
+    mut link_is_dir: Option<&mut bool>,
+) -> Option<usize> {
+    loop {
+        if len <= start {
+            if let Some(d) = link_is_dir.as_deref_mut() {
+                *d = true;
+            }
+            return Some(start);
+        }
+        let mut i = len;
+        while i > start && p.at(i - 1) != b'/' {
+            i -= 1;
+        }
+        if i == len || (i + 1 == len && p.at(i) == b'.') {
+            // A doubled slash or a `.`.
+            len = i.saturating_sub(1);
+            is_dir = true;
+            continue;
+        }
+        if i + 2 == len && p.at(i) == b'.' && p.at(i + 1) == b'.' {
+            // A `..` and the directory before it.
+            if let Some(d) = link_is_dir.as_deref_mut() {
+                *d = true;
+            }
+            if i <= start + 1 {
+                return Some(if start > 0 { start } else { len });
+            }
+            return match realpath_r(walk, p, start, i - 1, how, true, None) {
+                Some(mut j) if j > start => {
+                    j -= 1;
+                    while j > start && p.at(j) != b'/' {
+                        j -= 1;
+                    }
+                    if start == 0 {
+                        // A leading `..` of a relative path stays.
+                        if j == 0 && p.at(0) == b'.' && p.at(1) == b'.' && p.at(2) == b'/' {
+                            p.write(3, b"../");
+                            j = 5;
+                        } else if j > 0
+                            && p.at(j + 1) == b'.'
+                            && p.at(j + 2) == b'.'
+                            && p.at(j + 3) == b'/'
+                        {
+                            j += 4;
+                            p.write(j, b"../");
+                            j += 2;
+                        }
+                    }
+                    Some(j)
+                }
+                Some(0) if start == 0 => {
+                    p.write(0, b"../");
+                    Some(2)
+                }
+                other => other,
+            };
+        }
+        let mut save = how != Resolve::Expand;
+        if start > 0 && save && walk.cache.limit != 0 {
+            // The cache lookup for an absolute path.
+            let now = walk.now.get();
+            if let Some(bucket) = walk.cache.find(&p.head(len), now) {
+                if is_dir && !bucket.is_dir {
+                    return None;
+                }
+                if let Some(d) = link_is_dir.as_deref_mut() {
+                    *d = bucket.is_dir;
+                }
+                p.write(0, &bucket.realpath);
+                return Some(bucket.realpath.len());
+            }
+        }
+        let tmp = p.head(len);
+        let meta = if save {
+            std::fs::symlink_metadata(host(&tmp)).ok()
+        } else {
+            None
+        };
+        if save && meta.is_none() {
+            if how == Resolve::RealPath {
+                return None;
+            }
+            save = false;
+        }
+        let mut directory = false;
+        if meta.as_ref().is_some_and(|m| m.file_type().is_symlink()) {
+            walk.links += 1;
+            if walk.links > LINK_MAX {
+                return None;
+            }
+            let target = std::fs::read_link(host(&tmp)).ok()?;
+            let target = target.as_os_str().as_bytes();
+            let target = target.get(..MAXPATHLEN).unwrap_or(target).to_vec();
+            let j = if target.first() == Some(&b'/') {
+                p.write(0, &target);
+                realpath_r(walk, p, 1, target.len(), how, is_dir, Some(&mut directory))?
+            } else {
+                if i + target.len() >= MAXPATHLEN - 1 {
+                    return None;
+                }
+                p.write(i, &target);
+                p.write(0, tmp.get(..i - 1).unwrap_or_default());
+                p.put(i - 1, b'/');
+                realpath_r(
+                    walk,
+                    p,
+                    start,
+                    i + target.len(),
+                    how,
+                    is_dir,
+                    Some(&mut directory),
+                )?
+            };
+            if let Some(d) = link_is_dir.as_deref_mut() {
+                *d = directory;
+            }
+            walk.save(start, &tmp, &p.head(j), directory);
+            return Some(j);
+        }
+        if save {
+            directory = meta.as_ref().is_some_and(std::fs::Metadata::is_dir);
+            if let Some(d) = link_is_dir.as_deref_mut() {
+                *d = directory;
+            }
+            if is_dir && !directory {
+                return None;
+            }
+        }
+        let j = if i <= start + 1 {
+            start
+        } else {
+            // Some leading directories may be inaccessible.
+            let prefix = if save { Resolve::FilePath } else { how };
+            let j = realpath_r(walk, p, start, i - 1, prefix, true, None)?;
+            if j > start {
+                p.put(j, b'/');
+                j + 1
+            } else {
+                j
+            }
+        };
+        if j + len >= MAXPATHLEN - 1 + i {
+            return None;
+        }
+        p.write(j, tmp.get(i..len).unwrap_or_default());
+        let j = j + (len - i);
+        if save {
+            walk.save(start, &tmp, &p.head(j), directory);
+        }
+        return Some(j);
+    }
+}
+
+/// What one `virtual_file_ex` carries down its recursion: the links
+/// followed, `*ll`, the time, `*t`, and the cache it reads and fills.
+struct Walk<'c> {
+    links: i32,
+    now: Now,
+    cache: &'c mut RealpathCache,
+}
+
+impl Walk<'_> {
+    /// `realpath_cache_add(tmp, len, path, j, directory, *t)` for an
+    /// absolute path, where the cache is on.
+    fn save(&mut self, start: usize, path: &[u8], realpath: &[u8], is_dir: bool) {
+        if start > 0 && self.cache.limit != 0 {
+            let now = self.now.get();
+            self.cache.add(path, realpath, is_dir, now);
+        }
+    }
+}
+
+/// `virtual_file_ex(state, path, NULL, how)` (`Z/Zend/zend_virtual_cwd.c:1007`)
+/// with `state` the directory `cwd`: the path resolved, or `None` where
+/// php answers `1`, an empty path or one of `MAXPATHLEN` or more among
+/// them.
+pub(crate) fn virtual_file_ex(
+    cache: &mut RealpathCache,
+    cwd: &[u8],
+    path: &[u8],
+    how: Resolve,
+) -> Option<Vec<u8>> {
+    if path.is_empty() || path.len() >= MAXPATHLEN - 1 {
+        return None;
+    }
+    let mut start = 1;
+    let resolved = if path.first() == Some(&b'/') {
+        path.to_vec()
+    } else if cwd.is_empty() {
+        start = 0;
+        path.to_vec()
+    } else {
+        if path.len() + cwd.len() + 1 >= MAXPATHLEN - 1 {
+            return None;
+        }
+        let mut joined = cwd.to_vec();
+        if cwd.last() != Some(&b'/') {
+            joined.push(b'/');
+        }
+        joined.extend_from_slice(path);
+        joined
+    };
+    let add_slash = how != Resolve::RealPath && resolved.last() == Some(&b'/');
+    let length = resolved.len();
+    let mut buf = Buf(resolved);
+    let mut walk = Walk {
+        links: 0,
+        now: Now { at: None },
+        cache,
+    };
+    let mut len = realpath_r(&mut walk, &mut buf, start, length, how, false, None)?;
+    if start == 0 && len == 0 {
+        buf.put(0, b'.');
+        len = 1;
+    }
+    if add_slash && len > 0 && buf.at(len - 1) != b'/' {
+        if len >= MAXPATHLEN - 1 {
+            return None;
+        }
+        buf.put(len, b'/');
+        len += 1;
+    }
+    Some(buf.head(len))
+}
