@@ -156,6 +156,8 @@ pub(super) fn reflection_enum_has_case(req: &mut Request) -> Result<Value, Throw
 /// $e = new ReflectionEnum('PropertyHookType');
 /// var_dump($e->getCase('Get'));
 /// try { $e->getCase('Nope'); } catch (Throwable $t) { echo get_class($t), ': ', $t->getMessage(), "\n"; }
+/// enum F { case A; const C = 1; }
+/// try { (new ReflectionEnum('F'))->getCase('C'); } catch (ReflectionException $t) { echo $t->getMessage(), "\n"; }
 /// ```
 /// ```expect
 /// object(ReflectionEnumBackedCase)#2 (2) {
@@ -165,21 +167,24 @@ pub(super) fn reflection_enum_has_case(req: &mut Request) -> Result<Value, Throw
 ///   string(16) "PropertyHookType"
 /// }
 /// ReflectionException: Case PropertyHookType::Nope does not exist
+/// F::C is not a case
 /// ```
 pub(super) fn reflection_enum_get_case(req: &mut Request) -> Result<Value, Thrown> {
     let name = one_string_argument(req)?;
     let class = this_enum(req)?;
     if !case_names(req, class).contains(&name) {
         let held = class_name_of(req, class);
-        return Err(throw(
-            req,
-            "ReflectionException",
-            &format!(
-                "Case {}::{} does not exist",
-                String::from_utf8_lossy(&held),
-                String::from_utf8_lossy(&name)
-            ),
-        ));
+        // A constant of that name that is no case is php's second
+        // refusal, `ZEND_CLASS_CONST_IS_CASE` unset.
+        let format = if class_constant_named(req, class, &name).is_some() {
+            "{}::{} is not a case"
+        } else {
+            "Case {}::{} does not exist"
+        };
+        let message = format
+            .replacen("{}", &String::from_utf8_lossy(&held), 1)
+            .replacen("{}", &String::from_utf8_lossy(&name), 1);
+        return Err(throw(req, "ReflectionException", &message));
     }
     let object = case_factory(req, class, &name)?;
     Ok(object.as_value())
@@ -289,10 +294,12 @@ fn this_case(req: &mut Request) -> Result<(ClassId, Vec<u8>), Thrown> {
 /// enum E { case A; const C = 1; }
 /// try { new ReflectionEnumUnitCase('E', 'C'); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
 /// try { new ReflectionEnumBackedCase('E', 'A'); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+/// try { new ReflectionEnumUnitCase('E', 'Q'); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
 /// ```
 /// ```expect
 /// Constant E::C is not a case
 /// Enum case E::A is not a backed case
+/// Constant E::Q does not exist
 /// ```
 pub(super) fn reflection_enum_case_construct(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 2)?;
@@ -300,12 +307,14 @@ pub(super) fn reflection_enum_case_construct(req: &mut Request) -> Result<Value,
     let name = string_argument(req, 2)?;
     held_to_enum(req, class)?;
     if class_constant_named(req, class, &name).is_none() {
+        // `ReflectionClassConstant::__construct`'s refusal, which the
+        // case constructor runs first.
         let held = class_name_of(req, class);
         return Err(throw(
             req,
             "ReflectionException",
             &format!(
-                "Case {}::{} does not exist",
+                "Constant {}::{} does not exist",
                 String::from_utf8_lossy(&held),
                 String::from_utf8_lossy(&name)
             ),
