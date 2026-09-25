@@ -6757,6 +6757,32 @@ class C {
         );
     }
 
+    /// `zend_compile_array`'s `...` and `&` arms against the oracle's
+    /// dump: a `...` first is an `INIT_ARRAY` with no operand and no
+    /// count, the string key still marks it `ZEND_ARRAY_NOT_PACKED`, and
+    /// a `&` element is the write fetch and `ZEND_ARRAY_ELEMENT_REF`. A
+    /// constant array spread into a constant array folds.
+    #[test]
+    fn a_spread_and_a_reference_element_are_emitted_as_php_emits_them() {
+        assert_eq!(
+            oplines_of(b"<?php $z = [...$x, 'k' => &$x[0], &$w];"),
+            "0000 T3 = INIT_ARRAY 0 NEXT\n\
+             0001 T3 = ADD_ARRAY_UNPACK CV1($x)\n\
+             0002 V4 = FETCH_DIM_W CV1($x) int(0)\n\
+             0003 T3 = ADD_ARRAY_ELEMENT (ref) V4 string(\"k\")\n\
+             0004 T3 = ADD_ARRAY_ELEMENT (ref) CV2($w) NEXT\n\
+             0005 ASSIGN CV0($z) T3\n\
+             0006 RETURN int(1)\n\
+             LIVE RANGES:\n\
+             \x20    3: 0001 - 0005 (tmp/var)\n"
+        );
+        assert_eq!(
+            oplines_of(b"<?php $q = [...[1, 2], 3, ...['k' => 4]];"),
+            "0000 ASSIGN CV0($q) array(...)\n\
+             0001 RETURN int(1)\n"
+        );
+    }
+
     /// `T_ARRAY '(' array_pair_list ')'`
     /// (`Z/Zend/zend_language_parser.y:1491`) is the same
     /// `ZEND_AST_ARRAY` over the same `array_pair_list` as `[…]`, with

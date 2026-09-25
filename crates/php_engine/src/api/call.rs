@@ -1157,6 +1157,13 @@ pub fn eval_const_expr(
         ConstExpr::Array(elements) => {
             let mut array = crate::api::values::PhpArray::new(req)?;
             for (key, value) in elements {
+                if let ConstExpr::Unpack(inner) = value {
+                    let spread = eval_const_expr(req, inner, scope)?;
+                    let added = add_unpacked_element(req, &mut array, &spread);
+                    req.release(spread);
+                    added?;
+                    continue;
+                }
                 let value = eval_const_expr(req, value, scope)?;
                 match key {
                     Some(key) => {
@@ -1193,6 +1200,55 @@ pub fn eval_const_expr(
         }
         _ => Err(invalid_operations(req)),
     }
+}
+
+/// `zend_ast_add_unpacked_element` (`Z/Zend/zend_ast.c:531`), a `...`
+/// inside an array of a constant expression: an array's string keys
+/// written as they stand and its integer keys dropped for the next
+/// index, a reference among its elements kept as it is; anything else,
+/// a `Traversable` among them, is php's `Error`.
+///
+/// ```php
+/// const A = [1, 'k' => 'a'];
+/// const X = 1;
+/// class C { const D = [...A, ...self::E, 'k' => 'b']; const E = [7 => 2]; const F = [...X]; }
+/// var_dump(C::D);
+/// try { var_dump(C::F); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// array(3) {
+///   [0]=>
+///   int(1)
+///   ["k"]=>
+///   string(1) "b"
+///   [1]=>
+///   int(2)
+/// }
+/// Only arrays can be unpacked in constant expression
+/// ```
+fn add_unpacked_element(
+    req: &mut Request,
+    array: &mut PhpArray,
+    spread: &Value,
+) -> Result<(), Thrown> {
+    let Some(source) = spread.deref().as_array().copied() else {
+        return Err(throw(
+            req,
+            "Error",
+            "Only arrays can be unpacked in constant expression",
+        ));
+    };
+    for (key, value) in source.snapshot_refs() {
+        req.addref(&value);
+        match key {
+            Key::Str(name) => {
+                req.addref(&Value::string(name));
+                array.set(req, Key::Str(name), value)?;
+            }
+            Key::Int(_) => array.append(req, value)?,
+        }
+    }
+    Ok(())
 }
 
 /// php's `Error` for a node its constant-expression walk does not

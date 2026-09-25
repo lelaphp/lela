@@ -182,6 +182,10 @@ pub enum ConstExpr {
         rhs: Box<ConstExpr>,
     },
     Array(Vec<(Option<ConstExpr>, ConstExpr)>),
+    /// `...value` inside an array, php's `ZEND_AST_UNPACK`: the value
+    /// of an element with no key, whose array or `Traversable` is
+    /// spread into the array being built.
+    Unpack(Box<ConstExpr>),
     New {
         class: Name,
         arguments: Vec<ConstExpr>,

@@ -1423,21 +1423,28 @@ fn send_by_ref(
             "InternalError: ZEND_SEND_REF over an operand php compiles no write over",
         )));
     };
+    match bound_at(req, at) {
+        Ok(bound) => place_argument(req, frame, slot, bound),
+        Err(thrown) => threw(req, frame, &thrown),
+    }
+}
+
+/// `ZVAL_MAKE_REF_EX(place, 2)`: the cell a place holds, or a new one
+/// over what it held, `null` for what nothing wrote, written back into
+/// the place, which gives the cell the owner the place had of the
+/// value; the cell comes back with one more owner, the caller's.
+fn bound_at(req: &mut Request, at: php_heap::ZvalRef) -> Result<Value, Thrown> {
     let held = exec::value_of(at.read());
     let cell = if let Some(cell) = held.as_php_ref() {
         *cell
     } else {
-        let cell = match req.reference(held.undef_as_null()) {
-            Ok(cell) => cell,
-            Err(thrown) => return threw(req, frame, &thrown),
-        };
-        // The owner the variable had of what it held is the cell's.
+        let cell = req.reference(held.undef_as_null())?;
         at.write(cell.as_value().to_zval());
         cell
     };
     let bound = cell.as_value();
     req.addref(&bound);
-    place_argument(req, frame, slot, bound)
+    Ok(bound)
 }
 
 /// `ZEND_ARG_SEND_MODE` (`Z/Zend/zend_compile.h:1141`) over the callee
@@ -10849,9 +10856,11 @@ pub(crate) fn add_array_element<T: Tier>(
 /// warning and `null`); `op2` read as it stands
 /// (`GET_OP2_ZVAL_PTR_UNDEF`), a CV nothing wrote warned on here and
 /// handed on as the `UNDEF` it is, a `CONST` marked constant so the
-/// kernel keeps a numeric string; then `FREE_OP2`. The
-/// `ZEND_ARRAY_ELEMENT_REF` arm, `[&$x]`, is not compiled yet and is an
-/// internal error rather than a value written by the wrong rule.
+/// kernel keeps a numeric string; then `FREE_OP2`. Under
+/// `ZEND_ARRAY_ELEMENT_REF`, `[&$x]`, `op1` is the place a CV or a write
+/// fetch names (`GET_OP1_ZVAL_PTR_PTR(BP_VAR_W)`, which warns of
+/// nothing), made a reference where it holds none, and the entry is
+/// that cell.
 fn add_element(
     req: &mut Request,
     frame: FrameRef,
@@ -10859,12 +10868,19 @@ fn add_element(
     op: &Opline,
     array: crate::api::values::PhpArray,
 ) -> Edge {
-    if op.extended_value & ARRAY_ELEMENT_REF != 0 {
-        return Err(Fatal::Error(String::from(
-            "InternalError: ADD_ARRAY_ELEMENT by reference, which this compiler does not emit yet",
-        )));
-    }
-    let value = exec::take_operand(req, frame, code, op.op1_type, op.op1);
+    let value = if op.extended_value & ARRAY_ELEMENT_REF != 0 {
+        let Some(at) = write_place(req, frame, code, op.op1_type, op.op1) else {
+            return Err(Fatal::Error(String::from(
+                "InternalError: ADD_ARRAY_ELEMENT by reference over an operand php compiles no write over",
+            )));
+        };
+        match bound_at(req, at) {
+            Ok(bound) => bound,
+            Err(thrown) => return threw(req, frame, &thrown),
+        }
+    } else {
+        exec::take_operand(req, frame, code, op.op1_type, op.op1)
+    };
     let offset = if op.op2_type == OperandKind::Unused {
         Offset::Next
     } else {
@@ -10883,6 +10899,200 @@ fn add_element(
         Ok(()) => Ok(advance(req, frame)),
         Err(thrown) => threw(req, frame, &thrown),
     }
+}
+
+/// `ZEND_ADD_ARRAY_UNPACK` (`Z/Zend/zend_vm_def.h:6334`), `...$x`
+/// inside an array: the operand read (`GET_OP1_ZVAL_PTR(BP_VAR_R)`, a CV
+/// nothing wrote the warning and `null`) and spread into the array the
+/// `result` temporary holds ([`unpack_into`]), then `FREE_OP1`.
+///
+/// ```php
+/// function g() { yield 'a' => 1; yield 3 => 2; yield '7' => 3; }
+/// $x = [5 => 'x', 'k' => 'y'];
+/// var_dump([0, ...$x, ...g(), ...new ArrayIterator(['k' => 'z'])]);
+/// $a = [1]; $r = &$a[0]; $b = [...$a]; $b[0] = 2; var_dump($a[0]);
+/// ```
+/// ```expect
+/// array(6) {
+///   [0]=>
+///   int(0)
+///   [1]=>
+///   string(1) "x"
+///   ["k"]=>
+///   string(1) "z"
+///   ["a"]=>
+///   int(1)
+///   [2]=>
+///   int(2)
+///   [3]=>
+///   int(3)
+/// }
+/// int(2)
+/// ```
+///
+/// What is neither an array nor a `Traversable` is php's `Error`, an
+/// object that is no `Traversable` its `TypeError`, and a key an
+/// iterator hands over that is neither an int nor a string its `Error`:
+///
+/// ```php
+/// $n = null;
+/// try { var_dump([...$n]); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// try { var_dump([...new stdClass]); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// function k() { yield 1.5 => 1; }
+/// try { var_dump([...k()]); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Error: Only arrays and Traversables can be unpacked, null given
+/// TypeError: Only arrays and Traversables can be unpacked, stdClass given
+/// Error: Keys must be of type int|string during array unpacking
+/// ```
+pub(crate) fn add_array_unpack<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let held = req.slot(frame, exec::temporary_slot(code, op.out));
+    let Some(array) = held.as_array().copied() else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ADD_ARRAY_UNPACK over a temporary holding no array",
+        )));
+    };
+    let spread = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
+    let added = unpack_into(req, array, &spread);
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    match added {
+        Ok(()) => Ok(advance(req, frame)),
+        Err(thrown) => threw(req, frame, &thrown),
+    }
+}
+
+/// The body of [`add_array_unpack`] over `array`, which has one owner:
+/// an array's elements in order, a string key written as it stands
+/// (`zend_hash_update`) and an integer one dropped for the next index
+/// (`zend_hash_next_index_insert`, php's `Error` when it is taken), a
+/// reference only this array held followed and any other kept as the
+/// reference it is; a `Traversable`'s through its iterator, a string
+/// key that is a decimal and an int alike taking the next index and
+/// every value's reference followed.
+fn unpack_into(req: &mut Request, array: PhpArray, spread: &Value) -> Result<(), Thrown> {
+    let a = array.heap();
+    if let Some(source) = spread.as_array().copied() {
+        for (key, value) in source.snapshot_refs() {
+            let value = match value.as_php_ref() {
+                Some(cell) if value.refcount() == 1 => cell.get(),
+                _ => value,
+            };
+            req.addref(&value);
+            match key {
+                crate::api::values::Key::Str(_) => req.array_update(a, key.heap(), value)?,
+                crate::api::values::Key::Int(_) => append_unpacked(req, a, value)?,
+            }
+        }
+        return Ok(());
+    }
+    let Some(object) = spread.as_object().copied() else {
+        let given = crate::ops::value_name(req, spread);
+        return Err(crate::api::raising::throw(
+            req,
+            "Error",
+            &format!("Only arrays and Traversables can be unpacked, {given} given"),
+        ));
+    };
+    let wrapper = unpack_iterator(req, object)?;
+    let walked = (|| -> Result<(), Thrown> {
+        crate::interfaces::rewind(req, wrapper)?;
+        while let Some((value, key)) = crate::interfaces::delegated(req, wrapper)? {
+            let value = owned_deref(req, value);
+            let name = match unpacked_key(req, key, "array") {
+                Ok(name) => name,
+                Err(thrown) => {
+                    req.release(value);
+                    return Err(thrown);
+                }
+            };
+            match name {
+                Some(name) => {
+                    let updated = req.array_update(a, php_heap::Key::Str(name.heap()), value);
+                    req.release(Value::string(name));
+                    updated?;
+                }
+                None => append_unpacked(req, a, value)?,
+            }
+        }
+        Ok(())
+    })();
+    req.release(wrapper.as_value());
+    walked
+}
+
+/// `zend_hash_next_index_insert` of an unpacked element, and
+/// `zend_cannot_add_element` where the next index is taken.
+fn append_unpacked(req: &mut Request, a: php_heap::Arr, value: Value) -> Result<(), Thrown> {
+    if req.array_append(a, value)? {
+        return Ok(());
+    }
+    Err(crate::api::raising::throw(
+        req,
+        "Error",
+        "Cannot add element to the array as the next element is already occupied",
+    ))
+}
+
+/// `ce->get_iterator` over an object a `...` spreads: its iterator, one
+/// owner the caller's, or php's `TypeError` for an object whose class is
+/// no `Traversable`.
+fn unpack_iterator(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
+    if !crate::interfaces::is_traversable(req, object.class()) {
+        let given = crate::ops::value_name(req, &object.as_value());
+        return Err(crate::api::raising::throw(
+            req,
+            "TypeError",
+            &format!("Only arrays and Traversables can be unpacked, {given} given"),
+        ));
+    }
+    crate::interfaces::get_iterator(req, object, false)
+}
+
+/// `ZVAL_DEREF` over a value one owner of which the caller holds: what
+/// the reference held, with the owner moved onto it.
+fn owned_deref(req: &mut Request, value: Value) -> Value {
+    let Some(cell) = value.as_php_ref().copied() else {
+        return value;
+    };
+    let held = cell.get();
+    req.addref(&held);
+    req.release(value);
+    held
+}
+
+/// The key an iterator handed a `...` over, one owner the caller holds,
+/// read as both unpack handlers read it: an int, or a string that is a
+/// decimal (`ZEND_HANDLE_NUMERIC`), is none, the next position; any other
+/// string is the name, its owner the caller's; anything else is php's
+/// `Error` naming what the unpacking was `during`.
+fn unpacked_key(req: &mut Request, key: Value, during: &str) -> Result<Option<PhpString>, Thrown> {
+    let key = owned_deref(req, key);
+    if let Some(name) = key.as_php_string().copied() {
+        if matches!(
+            crate::api::values::Key::from_string(name),
+            crate::api::values::Key::Int(_)
+        ) {
+            req.release(key);
+            return Ok(None);
+        }
+        return Ok(Some(name));
+    }
+    let is_int = key.as_int().is_some();
+    req.release(key);
+    if is_int {
+        return Ok(None);
+    }
+    Err(crate::api::raising::throw(
+        req,
+        "Error",
+        &format!("Keys must be of type int|string during {during} unpacking"),
+    ))
 }
 
 /// `ZEND_FE_RESET_R` (`Z/Zend/zend_vm_def.h:6882`), the first opline of
