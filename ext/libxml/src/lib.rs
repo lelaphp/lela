@@ -27,12 +27,12 @@
 pub mod ffi;
 
 use php_ext::abi::{Callable, Dependency, DependencyKind, Extension, ExtensionBuilder};
-use php_ext::coerce::{argument, callable_argument};
+use php_ext::coerce::{argument, callable_argument, value_name};
 use php_ext::decl::{
     Attribute, AttributeArgument, ClassDecl, ClassFlags, ClassKind, ConstDecl, ConstExpr,
     EnumBacking, FunctionDecl, Name, Parameter, PropertyDecl, Type, Visibility,
 };
-use php_ext::raising::{Level, Thrown, arg_count_error, arg_type_error, docref};
+use php_ext::raising::{Level, Thrown, arg_count_error, arg_type_error, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpString, Value};
 
@@ -469,24 +469,33 @@ impl Errors {
 /// ```php
 /// libxml_set_streams_context(stream_context_create());
 /// try { libxml_set_streams_context(1); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { libxml_set_streams_context(new stdClass); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { libxml_set_streams_context(fopen('php://memory', 'r')); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
 /// ```
 /// ```expect
 /// libxml_set_streams_context(): Argument #1 ($context) must be of type resource, int given
+/// libxml_set_streams_context(): Argument #1 ($context) must be of type resource, stdClass given
+/// libxml_set_streams_context(): supplied resource is not a valid Stream-Context resource
 /// ```
 fn set_streams_context(req: &mut Request) -> Result<Value, Thrown> {
     arity(req, 1, 1)?;
     let given = argument(req, 1)?.unwrap_or_default();
     let Some(resource) = given.as_resource() else {
-        let name = given.type_name();
+        let name = value_name(req, &given);
         return Err(arg_type_error(
             req,
             1,
             &format!("be of type resource, {name} given"),
         ));
     };
+    // `zend_fetch_resource_ex(arg, "Stream-Context", le_stream_context)`.
     let is_context = resource.type_name(req) == Some(b"stream-context".as_slice());
     if !is_context {
-        return Err(arg_type_error(req, 1, "be a valid stream/context"));
+        return Err(throw(
+            req,
+            "TypeError",
+            "libxml_set_streams_context(): supplied resource is not a valid Stream-Context resource",
+        ));
     }
     req.addref(&given);
     if let Some(old) = req.state::<State>().stream_context.replace(given) {
