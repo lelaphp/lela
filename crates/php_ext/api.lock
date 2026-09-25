@@ -98,6 +98,7 @@ call::eval_const_expr
 call::fetch_constant
 call::initialize_lazy
 call::instantiate
+call::instantiate_named
 call::internal_iterator
 call::iterate
 call::known_method

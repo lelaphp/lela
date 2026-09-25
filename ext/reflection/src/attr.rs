@@ -15,8 +15,8 @@
 
 use std::fmt::Write as _;
 
-use php_ext::call::{call_named, eval_const_expr, instantiate, lookup_class};
-use php_ext::coerce::{to_callable, to_long, value_name};
+use php_ext::call::{eval_const_expr, instantiate_named, lookup_class};
+use php_ext::coerce::{to_long, value_name};
 use php_ext::decl::Attribute;
 use php_ext::raising::{Thrown, arg_value_error, throw};
 use php_ext::request::Request;
@@ -478,8 +478,9 @@ fn marker_flags(req: &mut Request, class: ClassId, written: &str) -> Result<i64,
 }
 
 /// `zend_get_attribute_object`: the instance, its constructor served
-/// with the attribute's arguments, the named ones by their names as
-/// `zend_call_function`'s walk of `named_params` places them.
+/// with the attribute's arguments, the named ones by their names, as
+/// `object_init_with_constructor` serves them
+/// ([`instantiate_named`]).
 fn construct(req: &mut Request, class: ClassId, kept: &AttributeRef) -> Result<PhpObject, Thrown> {
     let mut positional = Vec::new();
     let mut named: Vec<(PhpString, Value)> = Vec::new();
@@ -490,36 +491,13 @@ fn construct(req: &mut Request, class: ClassId, kept: &AttributeRef) -> Result<P
             None => positional.push(value),
         }
     }
-    if named.is_empty() {
-        return instantiate(req, class, &positional);
+    let made = instantiate_named(req, class, &positional, &named);
+    for value in positional {
+        req.release(value);
     }
-    let object = new_object(req, class)?;
-    let pair = constructor_callable(req, object)?;
-    let served = to_callable(req, &pair)
-        .and_then(|callable| call_named(req, &callable, &positional, &named));
-    req.release(pair);
-    match served {
-        Ok(value) => {
-            req.release(value);
-            Ok(object)
-        }
-        Err(thrown) => {
-            req.release(object.as_value());
-            Err(thrown)
-        }
+    for (name, value) in named {
+        req.release(Value::string(name));
+        req.release(value);
     }
-}
-
-/// `[$object, '__construct']`, the callable `call_named` takes for a
-/// constructor served with named arguments; a class with no
-/// constructor takes the arguments and serves nothing, so the pair is
-/// only made where there is one.
-fn constructor_callable(req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
-    let value = object.as_value();
-    req.addref(&value);
-    let method = string_value(req, b"__construct")?;
-    let mut pair = PhpArray::new(req)?;
-    pair.set(req, Key::Int(0), value)?;
-    pair.set(req, Key::Int(1), method)?;
-    Ok(Value::array(pair))
+    made
 }

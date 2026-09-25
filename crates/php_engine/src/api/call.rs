@@ -809,7 +809,17 @@ pub fn instantiate(
 /// parameter`. The object is the caller's, one owner; what the
 /// constructor threw is the `Err`, the object given up. The arguments
 /// stay the caller's.
-pub(crate) fn instantiate_named(
+///
+/// ```php
+/// #[Attribute] class MyAttrib {}
+/// #[MyAttrib(notinterned: '')] class Test1 {}
+/// $attr = (new ReflectionClass(Test1::class))->getAttributes()[0];
+/// try { $attr->newInstance(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Unknown named parameter $notinterned
+/// ```
+pub fn instantiate_named(
     req: &mut Request,
     class: ClassId,
     arguments: &[Value],
