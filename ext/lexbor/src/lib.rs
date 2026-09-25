@@ -1,10 +1,13 @@
 //! The `lexbor` extension: `php-src/ext/lexbor` as one crate under `ext/`
 //! (ADR-0004), as php 8.5 has it, an extension of its own with no function
 //! and no class, which `dom` requires. The library is php-src's vendored
-//! lexbor, compiled by `build.rs` (design §7.2, #731). One dependency,
-//! the facade; one entry, `extension()`; no state (ADR-0005). The phpt
-//! subset is `php-src/ext/lexbor/tests`, through `xtask phpt --subset`.
-#![forbid(unsafe_code)]
+//! lexbor, compiled by `build.rs` (design §7.2, #731) and bound in
+//! [`ffi`] alone. One dependency, the facade; one entry, `extension()`; no
+//! state (ADR-0005). Beside `extension()` the crate exports [`ffi`]'s safe
+//! types to ext/dom, which includes lexbor's headers in php (design
+//! §4.10). The phpt subset is `php-src/ext/lexbor/tests`, through `xtask
+//! phpt --subset`.
+#![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
     clippy::unwrap_used,
@@ -16,6 +19,8 @@
 )]
 // The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
+
+pub mod ffi;
 
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::request::Request;
