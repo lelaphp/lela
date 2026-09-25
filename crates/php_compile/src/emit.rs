@@ -115,6 +115,7 @@ use crate::{CompileError, Options, SourceKind, StackLimit};
 use args::{Args, Callee, Plan};
 use attributes::InternalAttribute;
 use imports::{Imports, Namespacing, Symbol};
+use member::{Member, MethodName, PropName};
 use target::{Source, Target};
 use walk::{Class, Closure, Function, Method, Property};
 
@@ -125,6 +126,7 @@ mod chain;
 mod imports;
 mod list;
 mod magic;
+mod member;
 mod target;
 mod types;
 mod walk;
@@ -770,16 +772,14 @@ const FETCH_DIM_WRITE: u32 = 2;
 /// with `ZEND_FETCH_OBJ_FLAGS`, and the dump prints it `(ref)`.
 const FETCH_REF: u32 = 1;
 
-/// One held-back `FETCH_OBJ_RW` of a property chain, php's delayed
-/// `zend_delayed_compile_prop`: the name's constant, the `VAR` the
-/// fetch writes into and the three cache slots it carries, all taken
-/// where the fetch was written and the opline laid down after the
-/// value.
+/// One held-back `FETCH_OBJ_RW` or `FETCH_OBJ_W` of a property chain,
+/// php's delayed `zend_delayed_compile_prop`: the name's operand with
+/// its cache slots and the `VAR` the fetch writes into, all taken where
+/// the fetch was written and the opline laid down after the value.
 #[derive(Clone, Copy)]
 struct PropLink {
-    name_at: u32,
+    name: PropName,
     out: u32,
-    slots: u32,
 }
 
 /// What a chain of dimensions or of property fetches stands on, php's
@@ -801,9 +801,8 @@ enum Base {
     },
     Prop {
         object: Box<Base>,
-        name_at: u32,
+        name: PropName,
         out: u32,
-        slots: u32,
     },
     StaticProp {
         name_at: u32,
@@ -1520,23 +1519,6 @@ impl Emit<'_> {
         }
     }
 
-    /// The property's name of `$o->name` or `$o?->name`, as written; a
-    /// name the program computes is refused as not read yet.
-    fn member_name_of(
-        &self,
-        id: NodeId<tree::MemberAccessExpr>,
-        line: u32,
-    ) -> Result<Vec<u8>, CompileError> {
-        let node = &self.parsed.tree[id];
-        let Some(tree::MemberSelector::MemberName(member)) = node.member else {
-            return Err(walk::unread(line, "a property named at run time"));
-        };
-        let Some(name) = self.parsed.tree[member].name else {
-            return Err(walk::unread(line, "a property fetch"));
-        };
-        Ok(self.text(name).to_vec())
-    }
-
     /// The receiver of a property fetch or a method call, php's
     /// `zend_compile_prop`'s first step: `$this` inside a method is the
     /// `IS_UNUSED` operand, `$this` elsewhere a `FETCH_THIS` into a
@@ -1604,9 +1586,9 @@ impl Emit<'_> {
                 self.assign_op_by_name(target, u32::from(Self::opcode_of(op) as u8), value)
             }
             tree::Expr::MemberAccessExpr(access) => {
-                let name = self.member_name_of(access, line)?;
+                let name = self.member_of(access)?;
                 let object = self.parsed.tree[access].obj;
-                self.assign_obj_op(object, &name, op, value)
+                self.assign_obj_op(object, name, op, value)
             }
             tree::Expr::ScopedAccessExpr(scoped) => match self.scoped_of(scoped, line)? {
                 Scoped::Property { class, name } => {
@@ -1660,15 +1642,7 @@ impl Emit<'_> {
         match self.peel(target) {
             // `zend_ensure_writable_variable` (`Z/Zend/zend_compile.c:3388`):
             // what a call returned is no place to step.
-            tree::Expr::CallExpr(id) => {
-                let callee = self.peel(self.parsed.tree[id].callee);
-                Err(self.compile_error(match callee {
-                    tree::Expr::MemberAccessExpr(_) | tree::Expr::ScopedAccessExpr(_) => {
-                        "Can't use method return value in write context"
-                    }
-                    _ => "Can't use function return value in write context",
-                }))
-            }
+            tree::Expr::CallExpr(id) => Err(self.call_written(id)),
             tree::Expr::SimpleVarExpr(var) => match self.simple_var_of(var, line)? {
                 SimpleVar::Cv(name) => Ok(self.incdec(&name, opcode)),
                 // `zend_compile_var` over `$this` under `BP_VAR_RW`:
@@ -1707,9 +1681,9 @@ impl Emit<'_> {
             }
             tree::Expr::SubscriptExpr(_) => self.dim_step(target, up, pre),
             tree::Expr::MemberAccessExpr(access) => {
-                let name = self.member_name_of(access, line)?;
+                let name = self.member_of(access)?;
                 let object = self.parsed.tree[access].obj;
-                self.prop_step(object, &name, up, pre)
+                self.prop_step(object, name, up, pre)
             }
             _ => Err(self.stepless(up)),
         }
@@ -1804,16 +1778,14 @@ impl Emit<'_> {
     fn prop_step(
         &mut self,
         object: tree::Expr,
-        name: &[u8],
+        name: Member,
         up: bool,
         pre: bool,
     ) -> Result<Where, CompileError> {
-        let (receiver, links) = self.prop_chain(object)?;
-        let name = self.string(name)?;
-        let name_at = self.literal(name);
+        let (receiver, links) = self.prop_chain(object, Fetch::Rw)?;
+        let name = self.prop_name(name)?;
         let out = self.temporary();
-        let slots = self.cache_slots(3);
-        let (op1_type, op1) = self.prop_fetches(receiver, &links);
+        let (op1_type, op1) = self.prop_fetches(receiver, &links, Fetch::Rw);
         self.push(Opline {
             opcode: match (pre, up) {
                 (true, true) => Opcode::PreIncObj,
@@ -1823,11 +1795,11 @@ impl Emit<'_> {
             },
             op1_type,
             op1,
-            op2_type: OperandKind::Const,
-            op2: name_at,
+            op2_type: name.kind,
+            op2: name.at,
             out_type: OperandKind::Tmp,
             out,
-            extended_value: slots,
+            extended_value: name.slots,
             ..Opline::default()
         });
         Ok(Where::Temporary(out))
@@ -1845,11 +1817,40 @@ impl Emit<'_> {
     /// A call by the callee's shape, php's four call nodes: a named
     /// function (`ZEND_AST_CALL` over a `ZEND_AST_ZVAL`), a class's
     /// method (`ZEND_AST_STATIC_CALL`), an object's method
-    /// (`ZEND_AST_METHOD_CALL`), or a variable holding a callable
-    /// (`ZEND_AST_CALL` over an expression).
+    /// (`ZEND_AST_METHOD_CALL`), or any other value, a callable the
+    /// program holds (`ZEND_AST_CALL` over an expression). The callee is
+    /// read as written, since php's `callable_expr: '(' expr ')'` makes
+    /// a parenthesised one a value: `($o->p)()` calls what the property
+    /// holds where `$o->p()` calls the method. A string written out, or
+    /// folded by php's parser, is a name, fully qualified as
+    /// `zend_resolve_function_name` reads a `ZEND_AST_ZVAL`.
+    ///
+    /// ```php
+    /// class C {
+    ///     public $p;
+    ///     function __construct() { $this->p = fn ($x) => "prop $x"; }
+    ///     function p($x) { return "method $x"; }
+    ///     static function s($x) { return "static $x"; }
+    /// }
+    /// $o = new C;
+    /// echo $o->p(1), ' | ', ($o->p)(2), "\n";
+    /// echo 'strtoupper'('a'), ('str' . 'rev')('bc'), 'C::s'(3), "\n";
+    /// echo (function ($x) { return "iife $x"; })(4), "\n";
+    /// $f = [$o, 'p'];
+    /// echo $f(5), ' | ', [new C, 'p'](6), ' | ', [C::class, 's'](7), "\n";
+    /// $g = 'C::s';
+    /// echo $g(8), (fn () => $g)()(9), "\n";
+    /// ```
+    /// ```expect
+    /// method 1 | prop 2
+    /// Acbstatic 3
+    /// iife 4
+    /// method 5 | method 6 | static 7
+    /// static 8static 9
+    /// ```
     fn call_of(&mut self, id: NodeId<tree::CallExpr>, line: u32) -> Result<Where, CompileError> {
         let node = &self.parsed.tree[id];
-        let (callee, args) = (self.peel(node.callee), node.args);
+        let (callee, args) = (node.callee, node.args);
         match callee {
             tree::Expr::NameRef(name) => {
                 let name = self.text(name).to_vec();
@@ -1857,30 +1858,36 @@ impl Emit<'_> {
                 self.call(&name, &arguments)
             }
             tree::Expr::ScopedAccessExpr(scoped) => {
-                let node = &self.parsed.tree[scoped];
-                let class = self.class_spec(node.scope);
-                let Some(tree::ScopedSelector::MemberName(method)) = node.member else {
-                    return Err(self.unread("a static call whose method is named at run time"));
-                };
-                let Some(method) = self.parsed.tree[method].name else {
-                    return Err(self.unread("a static call"));
-                };
-                let method = self.text(method).to_vec();
+                let class = self.class_spec(self.parsed.tree[scoped].scope);
+                let method = self.scoped_method_of(scoped)?;
                 let arguments = self.arguments(args, line)?;
-                self.static_call(class, &method, &arguments)
+                self.static_call(class, method, &arguments)
             }
             tree::Expr::MemberAccessExpr(access) => {
-                let method = self.member_name_of(access, line)?;
+                let method = self.member_of(access)?;
                 let object = self.parsed.tree[access].obj;
                 let nullsafe = self.is_nullsafe(access);
                 let arguments = self.arguments(args, line)?;
-                self.method_call(object, &method, &arguments, nullsafe)
+                self.method_call(object, method, &arguments, nullsafe)
             }
-            tree::Expr::SimpleVarExpr(_) | tree::Expr::CallExpr(_) => {
+            _ => {
                 let arguments = self.arguments(args, line)?;
+                // `zend_compile_function_name` over a `ZEND_AST_ZVAL`,
+                // whose `attr` is `ZEND_NAME_FQ`: the string is the name,
+                // a leading `\` dropped.
+                if let Some(written) = self.written(callee)?
+                    && let Some(name) = written.as_str()
+                {
+                    let name = name.bytes();
+                    let mut qualified = Vec::with_capacity(name.len() + 1);
+                    if name.first() != Some(&b'\\') {
+                        qualified.push(b'\\');
+                    }
+                    qualified.extend_from_slice(name);
+                    return self.call(&qualified, &arguments);
+                }
                 self.call_var(callee, &arguments)
             }
-            _ => Err(self.unread("a call of what is no name")),
         }
     }
 
@@ -2239,18 +2246,17 @@ impl Emit<'_> {
                         "an `unset` over a property of what is no variable",
                     ));
                 }
-                let name = self.member_name_of(id, line)?;
-                let (op1_type, op1) = self.receiver_of(node.obj)?;
-                let name = self.string(&name)?;
-                let name_at = self.literal(name);
-                let slots = self.cache_slots(3);
+                let object = node.obj;
+                let name = self.member_of(id)?;
+                let (op1_type, op1) = self.receiver_of(object)?;
+                let name = self.prop_name(name)?;
                 self.push(Opline {
                     opcode: Opcode::UnsetObj,
                     op1_type,
                     op1,
-                    op2_type: OperandKind::Const,
-                    op2: name_at,
-                    extended_value: slots,
+                    op2_type: name.kind,
+                    op2: name.at,
+                    extended_value: name.slots,
                     ..Opline::default()
                 });
             }
@@ -7894,11 +7900,7 @@ impl Emit<'_> {
                 self.include_or_eval(IncludeKind::Eval, code)
             }
             tree::Expr::CallExpr(id) => self.call_of(id, line),
-            tree::Expr::MemberAccessExpr(id) => {
-                let name = self.member_name_of(id, line)?;
-                let nullsafe = self.is_nullsafe(id);
-                self.prop(tree[id].obj, &name, nullsafe)
-            }
+            tree::Expr::MemberAccessExpr(_) => self.prop(expr),
             tree::Expr::ScopedAccessExpr(id) => match self.scoped_of(id, line)? {
                 Scoped::Constant { class, name } => self.class_const(class, &name),
                 Scoped::Property { class, name } => self.static_prop(class, &name),
@@ -8063,24 +8065,22 @@ impl Emit<'_> {
                     "an `isset` over a property under a property or a dimension, whose links are `FETCH_OBJ_IS`, this compiler cannot read yet",
                 ));
             }
-            let name = self.member_name_of(id, line)?;
+            let name = self.member_of(id)?;
             let (op1_type, op1) = self.receiver(object)?;
             if self.is_nullsafe(id) && !self.is_this(object) {
                 self.jmp_null((op1_type, op1), true);
             }
-            let name = self.string(&name)?;
-            let name_at = self.literal(name);
+            let name = self.prop_name(name)?;
             let out = self.temporary();
-            let slots = self.cache_slots(3);
             self.push(Opline {
                 opcode: Opcode::IssetIsemptyPropObj,
                 op1_type,
                 op1,
-                op2_type: OperandKind::Const,
-                op2: name_at,
+                op2_type: name.kind,
+                op2: name.at,
                 out_type: OperandKind::Tmp,
                 out,
-                extended_value: slots | extended_value,
+                extended_value: name.slots | extended_value,
                 ..Opline::default()
             });
             return Ok(Where::Temporary(out));
@@ -8789,7 +8789,7 @@ impl Emit<'_> {
                 Ok(())
             }
             tree::Expr::MemberAccessExpr(id) => {
-                let name = self.member_name_of(id, line)?;
+                let name = self.member_of(id)?;
                 let object = self.parsed.tree[id].obj;
                 let mut under = self.silent_under(object, delayed)?;
                 // A `?->`: the links under it laid down now and the
@@ -8808,17 +8808,15 @@ impl Emit<'_> {
                     self.jmp_null(pair, true);
                 }
                 let op1 = self.settled(&under);
-                let name = self.string(&name)?;
-                let op2 = self.literal(name);
+                let name = self.prop_name(name)?;
                 let out = self.temporary();
-                let extended_value = self.cache_slots(3);
                 delayed.push(IsLink {
                     opcode: Opcode::FetchObjIs,
                     op1,
-                    op2_type: OperandKind::Const,
-                    op2,
+                    op2_type: name.kind,
+                    op2: name.at,
                     out,
-                    extended_value,
+                    extended_value: name.slots,
                 });
                 Ok(())
             }
@@ -9271,23 +9269,17 @@ impl Emit<'_> {
         // fetch becomes `ASSIGN_OBJ_REF` over the object's own fetch,
         // `ZEND_FETCH_REF` off and `ZEND_RETURNS_FUNCTION` on, the source
         // in the `OP_DATA` after it, and the fetch's `VAR` what it leaves.
-        if let Base::Prop {
-            object,
-            name_at,
-            out,
-            slots,
-        } = held
-        {
+        if let Base::Prop { object, name, out } = held {
             let (op1_type, op1) = self.base_fetch(*object, Fetch::Write, Over::Obj);
             self.push(Opline {
                 opcode: Opcode::AssignObjRef,
                 op1_type,
                 op1,
-                op2_type: OperandKind::Const,
-                op2: name_at,
+                op2_type: name.kind,
+                op2: name.at,
                 out_type: OperandKind::Var,
                 out,
-                extended_value: slots | flags,
+                extended_value: name.slots | flags,
                 ..Opline::default()
             });
             self.push(Opline {
@@ -9475,7 +9467,7 @@ impl Emit<'_> {
             // taken here and its opline laid down by
             // [`Self::base_fetch`].
             (tree::Expr::MemberAccessExpr(id), _) => {
-                let name = self.member_name_of(id, line)?;
+                let name = self.member_of(id)?;
                 let object = self.parsed.tree[id].obj;
                 let mut held = self.delayed_object(object, fetch)?;
                 // `zend_delayed_compile_prop` under a `?->`: what the
@@ -9487,15 +9479,12 @@ impl Emit<'_> {
                     held = Base::Settled(settled);
                 }
                 let object = held;
-                let name = self.string(&name)?;
-                let name_at = self.literal(name);
+                let name = self.prop_name(name)?;
                 let out = self.temporary();
-                let slots = self.cache_slots(3);
                 Base::Prop {
                     object: Box::new(object),
-                    name_at,
+                    name,
                     out,
-                    slots,
                 }
             }
             // `zend_compile_static_prop` with `delayed`, the other
@@ -9668,12 +9657,7 @@ impl Emit<'_> {
             // base reads is the last of them, and it is the one `over`
             // patches.
             Base::Dim { container, links } => self.dim_fetches(*container, &links, fetch, over),
-            Base::Prop {
-                object,
-                name_at,
-                out,
-                slots,
-            } => {
+            Base::Prop { object, name, out } => {
                 let (op1_type, op1) = self.base_fetch(*object, fetch, Over::Obj);
                 self.push(Opline {
                     opcode: match fetch {
@@ -9685,11 +9669,11 @@ impl Emit<'_> {
                     },
                     op1_type,
                     op1,
-                    op2_type: OperandKind::Const,
-                    op2: name_at,
+                    op2_type: name.kind,
+                    op2: name.at,
                     out_type,
                     out,
-                    extended_value: extended_value(slots),
+                    extended_value: extended_value(name.slots),
                     ..Opline::default()
                 });
                 (out_type, out)
@@ -9846,59 +9830,27 @@ impl Emit<'_> {
     fn assign_prop(
         &mut self,
         object: tree::Expr,
-        name: &[u8],
+        name: Member,
         value: Source,
     ) -> Result<Where, CompileError> {
-        let line = self.line;
-        let mut names = vec![name.to_vec()];
-        let mut base = self.peel(object);
-        while let tree::Expr::MemberAccessExpr(id) = base {
-            names.push(self.member_name_of(id, line)?);
-            base = self.peel(self.parsed.tree[id].obj);
-        }
-        let base = self.delayed_object(base, Fetch::Write)?;
-        let mut links = Vec::with_capacity(names.len());
-        for name in names.clone().iter().rev() {
-            let name = self.string(name)?;
-            let name_at = self.literal(name);
-            let out = self.temporary();
-            let slots = self.cache_slots(3);
-            links.push((name_at, out, slots));
-        }
+        let (base, links) = self.prop_chain(object, Fetch::Write)?;
+        let name = self.prop_name(name)?;
+        let out = self.temporary();
         // The delayed fetch's line, as [`Self::assign_dim`] keeps it.
         let line = self.line;
         let value = self.source(value)?;
         let (data_type, data) = self.operand(value);
-        let Some((last, fetches)) = links.split_last() else {
-            return Err(self.fatal("a property assignment with no property"));
-        };
         self.line = line;
-        let (mut op1_type, mut op1) = self.base_fetch(base, Fetch::Write, Over::Obj);
-        for &(name_at, out, slots) in fetches {
-            self.push(Opline {
-                opcode: Opcode::FetchObjW,
-                op1_type,
-                op1,
-                op2_type: OperandKind::Const,
-                op2: name_at,
-                out_type: OperandKind::Var,
-                out,
-                extended_value: slots,
-                ..Opline::default()
-            });
-            op1_type = OperandKind::Var;
-            op1 = out;
-        }
-        let &(name_at, out, slots) = last;
+        let (op1_type, op1) = self.prop_fetches(base, &links, Fetch::Write);
         self.push(Opline {
             opcode: Opcode::AssignObj,
             op1_type,
             op1,
-            op2_type: OperandKind::Const,
-            op2: name_at,
+            op2_type: name.kind,
+            op2: name.at,
             out_type: OperandKind::Tmp,
             out,
-            extended_value: slots,
+            extended_value: name.slots,
             ..Opline::default()
         });
         self.push(Opline {
@@ -10038,27 +9990,25 @@ impl Emit<'_> {
     fn assign_obj_op(
         &mut self,
         object: tree::Expr,
-        name: &[u8],
+        name: Member,
         op: BinaryOp,
         value: tree::Expr,
     ) -> Result<Where, CompileError> {
-        let (receiver, links) = self.prop_chain(object)?;
-        let name = self.string(name)?;
-        let name_at = self.literal(name);
+        let (receiver, links) = self.prop_chain(object, Fetch::Rw)?;
+        let name = self.prop_name(name)?;
         let out = self.temporary();
-        let slots = self.cache_slots(3);
         // The delayed fetch's line, as [`Self::assign_prop`] keeps it.
         let line = self.line;
         let value = self.expr(value)?;
         let (data_type, data) = self.operand(value);
-        let (op1_type, op1) = self.prop_fetches(receiver, &links);
+        let (op1_type, op1) = self.prop_fetches(receiver, &links, Fetch::Rw);
         self.line = line;
         self.push(Opline {
             opcode: Opcode::AssignObjOp,
             op1_type,
             op1,
-            op2_type: OperandKind::Const,
-            op2: name_at,
+            op2_type: name.kind,
+            op2: name.at,
             out_type: OperandKind::Tmp,
             out,
             extended_value: u32::from(Self::opcode_of(op) as u8),
@@ -10068,60 +10018,68 @@ impl Emit<'_> {
             opcode: Opcode::OpData,
             op1_type: data_type,
             op1: data,
-            extended_value: slots,
+            extended_value: name.slots,
             ..Opline::default()
         });
         Ok(Where::Temporary(out))
     }
 
-    /// `zend_delayed_compile_prop` under `BP_VAR_RW` over the receiver
-    /// of a property fetch: the innermost receiver, compiled where it
-    /// stands, and one held-back link per `->` under the last, each
-    /// taking its temporary and its three cache slots here and its
-    /// opline laid down by [`Self::prop_fetches`] after the value, so
-    /// `$o->p->q += f()` calls `f` before it fetches `p`, as php's
-    /// delayed emission does. The receiver is
-    /// [`Self::delayed_object`]'s, so a dimension under it is
-    /// `FETCH_DIM_RW` held back with the rest (`$a[0]->p += 1`).
-    fn prop_chain(&mut self, object: tree::Expr) -> Result<(Base, Vec<PropLink>), CompileError> {
-        let line = self.line;
+    /// `zend_delayed_compile_prop` under `BP_VAR_RW` or `BP_VAR_W` over
+    /// the receiver of a property fetch: the innermost receiver,
+    /// compiled where it stands, and one held-back link per `->` under
+    /// the last, each taking its name, its temporary and its cache
+    /// slots here and its opline laid down by [`Self::prop_fetches`]
+    /// after the value, so `$o->p->q += f()` calls `f` before it fetches
+    /// `p`, as php's delayed emission does. A name the program computes
+    /// is compiled here too, innermost first, before the value. The
+    /// receiver is [`Self::delayed_object`]'s, so a dimension under it
+    /// is `FETCH_DIM_RW` or `FETCH_DIM_W` held back with the rest
+    /// (`$a[0]->p += 1`).
+    fn prop_chain(
+        &mut self,
+        object: tree::Expr,
+        fetch: Fetch,
+    ) -> Result<(Base, Vec<PropLink>), CompileError> {
         let mut names = Vec::new();
         let mut base = self.peel(object);
         while let tree::Expr::MemberAccessExpr(id) = base {
-            names.push(self.member_name_of(id, line)?);
+            names.push(self.member_of(id)?);
             base = self.peel(self.parsed.tree[id].obj);
         }
-        let receiver = self.delayed_object(base, Fetch::Rw)?;
+        let receiver = self.delayed_object(base, fetch)?;
         let mut links = Vec::with_capacity(names.len());
-        for name in names.clone().iter().rev() {
-            let name = self.string(name)?;
-            let name_at = self.literal(name);
+        for &name in names.iter().rev() {
+            let name = self.prop_name(name)?;
             let out = self.temporary();
-            let slots = self.cache_slots(3);
-            links.push(PropLink {
-                name_at,
-                out,
-                slots,
-            });
+            links.push(PropLink { name, out });
         }
         Ok((receiver, links))
     }
 
-    /// The held-back `FETCH_OBJ_RW` oplines of a property chain, laid
-    /// down at `zend_delayed_compile_end` in the order they were taken,
-    /// each over the `VAR` the one under it left.
-    fn prop_fetches(&mut self, receiver: Base, links: &[PropLink]) -> (OperandKind, u32) {
-        let (mut op1_type, mut op1) = self.base_fetch(receiver, Fetch::Rw, Over::Obj);
+    /// The held-back `FETCH_OBJ_RW` or `FETCH_OBJ_W` oplines of a
+    /// property chain, laid down at `zend_delayed_compile_end` in the
+    /// order they were taken, each over the `VAR` the one under it left.
+    fn prop_fetches(
+        &mut self,
+        receiver: Base,
+        links: &[PropLink],
+        fetch: Fetch,
+    ) -> (OperandKind, u32) {
+        let (mut op1_type, mut op1) = self.base_fetch(receiver, fetch, Over::Obj);
         for link in links {
             self.push(Opline {
-                opcode: Opcode::FetchObjRw,
+                opcode: if fetch == Fetch::Write {
+                    Opcode::FetchObjW
+                } else {
+                    Opcode::FetchObjRw
+                },
                 op1_type,
                 op1,
-                op2_type: OperandKind::Const,
-                op2: link.name_at,
+                op2_type: link.name.kind,
+                op2: link.name.at,
                 out_type: OperandKind::Var,
                 out: link.out,
-                extended_value: link.slots,
+                extended_value: link.name.slots,
                 ..Opline::default()
             });
             op1_type = OperandKind::Var;
@@ -11944,15 +11902,7 @@ impl Emit<'_> {
     fn element_ref(&mut self, value: tree::Expr) -> Result<(OperandKind, u32), CompileError> {
         let line = self.line_of(value);
         match self.peel(value) {
-            tree::Expr::CallExpr(id) => {
-                let callee = self.peel(self.parsed.tree[id].callee);
-                Err(self.compile_error(match callee {
-                    tree::Expr::MemberAccessExpr(_) | tree::Expr::ScopedAccessExpr(_) => {
-                        "Can't use method return value in write context"
-                    }
-                    _ => "Can't use function return value in write context",
-                }))
-            }
+            tree::Expr::CallExpr(id) => Err(self.call_written(id)),
             tree::Expr::SimpleVarExpr(id) => match self.simple_var_of(id, line)? {
                 SimpleVar::Cv(name) => Ok((OperandKind::Cv, self.lookup_cv(&name))),
                 SimpleVar::This => {
@@ -12201,9 +12151,34 @@ impl Emit<'_> {
     /// is written for an `INIT_FCALL` alone, so `op1` stays unused).
     /// The engine resolves the pair's lowered name at the `INIT` and
     /// raises php's `Error` over the written one where nothing declares
-    /// it.
+    /// it. A name whose last `:` follows another, `'C::m'`, is the class
+    /// and the method: `INIT_STATIC_METHOD_CALL` over the class's pair in
+    /// `op1` and the method's in `op2`, with two cache slots, and
+    /// `DO_FCALL`.
     fn dynamic_call(&mut self, name: &[u8], arguments: &Args) -> Result<Where, CompileError> {
         let line = self.line;
+        // `zend_memrchr(str, ':')` with `colon > str && *(colon - 1) == ':'`.
+        if let Some(colon) = name.iter().rposition(|&byte| byte == b':')
+            && colon > 0
+            && name.get(colon - 1) == Some(&b':')
+        {
+            let class = self.resolved_class_literal(&name[..colon - 1])?;
+            let method = self.func_name_literal(&name[colon + 1..])?;
+            let plan = Plan::of(arguments, None);
+            let slots = self.cache_slots(2);
+            self.push(Opline {
+                opcode: Opcode::InitStaticMethodCall,
+                op1_type: OperandKind::Const,
+                op1: class,
+                op2_type: OperandKind::Const,
+                op2: method,
+                out: slots,
+                extended_value: plan.count,
+                ..Opline::default()
+            });
+            self.send_args(&plan, arguments, None)?;
+            return Ok(self.call_op(Opcode::DoFcall, line, plan.extra_named));
+        }
         let pair = self.func_name_literal(name)?;
         let plan = Plan::of(arguments, None);
         let slot = self.cache_slot();
@@ -12226,10 +12201,39 @@ impl Emit<'_> {
     /// is known until the opline runs; then the arguments sent for a
     /// callee nothing is known of and `DO_FCALL`, which is what
     /// `zend_get_call_op` picks with `fbc` null over an opline that is
-    /// no `INIT_FCALL_BY_NAME`.
+    /// no `INIT_FCALL_BY_NAME`. A callee the compiler folds to a
+    /// string is the name [`Self::dynamic_call`] calls by.
+    ///
+    /// A closure written where it is called is the value the call
+    /// makes, and a value that is no callable is php's `Error` in the
+    /// initialiser's words:
+    ///
+    /// ```php
+    /// echo (function () { return 'a'; })(), (fn ($x) => $x)('b'), (static fn () => 'c')(), "\n";
+    /// function f() { return 'strrev'; }
+    /// echo f()('de'), ('strre' . 'v')('fgh'), "\n";
+    /// $a = ['x' => fn () => 'y'];
+    /// echo $a['x'](), "\n";
+    /// try { (1.5)(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { ([1, 2, 3])(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { (new stdClass)(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// abc
+    /// edhgf
+    /// y
+    /// Value of type float is not callable
+    /// Array callback must have exactly two elements
+    /// Object of type stdClass is not callable
+    /// ```
     fn call_var(&mut self, callee: tree::Expr, arguments: &Args) -> Result<Where, CompileError> {
         let line = self.line;
         let value = self.expr(callee)?;
+        if let Where::Constant(name) = value
+            && let Some(name) = name.as_str()
+        {
+            return self.dynamic_call(name.bytes(), arguments);
+        }
         let (op2_type, op2) = self.operand(value);
         let plan = Plan::of(arguments, None);
         self.push(Opline {
@@ -12344,14 +12348,71 @@ impl Emit<'_> {
     /// string(1) "C"
     /// string(1) "C"
     /// ```
+    ///
+    /// A method the program names is `op2`'s `CV` or temporary, with one
+    /// cache slot for a class named at compile time and none otherwise,
+    /// and no callee known; the engine holds the name to be a string,
+    /// php's `Method name must be a string`. `class` after `::` in a
+    /// call is a method's name like any semi-reserved word.
+    ///
+    /// ```php
+    /// class A {
+    ///     static function hi($x) { return "hi $x"; }
+    ///     function me() { $m = 'who'; return static::$m(); }
+    ///     static function who() { return static::class; }
+    ///     static function class() { return 'kw'; }
+    /// }
+    /// class B extends A {}
+    /// $m = 'hi';
+    /// $c = 'A';
+    /// echo A::$m(1), ' ', $c::$m(2), ' ', A::{'h' . 'i'}(3), ' ', (new B)->me(), ' ', A::class(), "\n";
+    /// $n = 5;
+    /// try { A::$n(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { A::$undefined(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// $m = 'nope';
+    /// try { A::$m(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// hi 1 hi 2 hi 3 B kw
+    /// Method name must be a string
+    ///
+    /// Warning: Undefined variable $undefined in %s on line 14
+    /// Method name must be a string
+    /// Call to undefined method A::nope()
+    /// ```
     fn static_call(
         &mut self,
         class: ClassSpec,
-        method: &[u8],
+        method: Member,
         arguments: &Args,
     ) -> Result<Where, CompileError> {
         let line = self.line;
         let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
+        let method = match self.method_name(method)? {
+            MethodName::Constant(method) => method,
+            MethodName::Computed((op2_type, op2)) => {
+                let plan = Plan::of(arguments, None);
+                let (op1_type, op1) = self.class_operand(&class)?;
+                let out = if op1_type == OperandKind::Const {
+                    self.cache_slot()
+                } else {
+                    0
+                };
+                self.push(Opline {
+                    opcode: Opcode::InitStaticMethodCall,
+                    op1_type,
+                    op1,
+                    op2_type,
+                    op2,
+                    out,
+                    extended_value: plan.count,
+                    ..Opline::default()
+                });
+                self.send_args(&plan, arguments, None)?;
+                return Ok(self.call_op(Opcode::DoFcall, line, plan.extra_named));
+            }
+        };
+        let method = method.as_slice();
         let constructor = method.eq_ignore_ascii_case(b"__construct");
         let known = match &class {
             _ if constructor => None,
@@ -12406,11 +12467,38 @@ impl Emit<'_> {
     /// `INIT_METHOD_CALL` over it with the method's constant pair in
     /// `op2`, two cache slots in `result` and the number of arguments in
     /// `extended_value`, the arguments sent for a callee nothing is
-    /// known of, and `DO_FCALL`.
+    /// known of, and `DO_FCALL`. A method the program names is `op2`'s
+    /// `CV` or temporary and takes no cache slot; the engine holds it to
+    /// be a string before it reads the receiver, so `Method name must be
+    /// a string` stands before what a receiver that is no object raises.
+    ///
+    /// ```php
+    /// class C { function hi($x) { return "hi $x"; } }
+    /// $o = new C;
+    /// $m = 'hi';
+    /// echo $o->$m(1), ' ', $o->{'h' . 'i'}(2), ' ', $o?->$m(3), "\n";
+    /// $n = null;
+    /// var_dump($n?->$m());
+    /// try { $o->$n(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { $n->$n(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { $n->$m(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { $o->{$m . 'x'}(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// $r = &$m;
+    /// echo $o->$r(4), "\n";
+    /// ```
+    /// ```expect
+    /// hi 1 hi 2 hi 3
+    /// NULL
+    /// Method name must be a string
+    /// Method name must be a string
+    /// Call to a member function hi() on null
+    /// Call to undefined method C::hix()
+    /// hi 4
+    /// ```
     fn method_call(
         &mut self,
         object: tree::Expr,
-        method: &[u8],
+        method: Member,
         arguments: &Args,
         nullsafe: bool,
     ) -> Result<Where, CompileError> {
@@ -12421,16 +12509,21 @@ impl Emit<'_> {
         if nullsafe && !self.is_this(object) {
             self.jmp_null((op1_type, op1), false);
         }
-        let method_at = self.func_name_literal(method)?;
+        let (op2_type, op2, out) = match self.method_name(method)? {
+            MethodName::Constant(method) => {
+                let at = self.func_name_literal(&method)?;
+                (OperandKind::Const, at, self.cache_slots(2))
+            }
+            MethodName::Computed((kind, at)) => (kind, at, 0),
+        };
         let plan = Plan::of(arguments, None);
-        let slot = self.cache_slots(2);
         self.push(Opline {
             opcode: Opcode::InitMethodCall,
             op1_type,
             op1,
-            op2_type: OperandKind::Const,
-            op2: method_at,
-            out: slot,
+            op2_type,
+            op2,
+            out,
             extended_value: plan.count,
             ..Opline::default()
         });
@@ -12786,36 +12879,36 @@ impl Emit<'_> {
         }
     }
 
-    /// `zend_delayed_compile_prop` under `BP_VAR_R`, which delays nothing
-    /// this compiler reads: the receiver, then `FETCH_OBJ_R` over it with
-    /// the property's name as one constant in `op2`, three cache slots in
-    /// `extended_value` (`zend_alloc_cache_slots(3)`), written into a
-    /// temporary (`zend_adjust_for_fetch_type`).
-    fn prop(
-        &mut self,
-        object: tree::Expr,
-        name: &[u8],
-        nullsafe: bool,
-    ) -> Result<Where, CompileError> {
-        let (op1_type, op1) = self.receiver(object)?;
-        if nullsafe && !self.is_this(object) {
-            self.jmp_null((op1_type, op1), false);
-        }
-        let name = self.string(name)?;
-        let name_at = self.literal(name);
-        let out = self.temporary();
-        let slots = self.cache_slots(3);
-        self.push(Opline {
-            opcode: Opcode::FetchObjR,
-            op1_type,
-            op1,
-            op2_type: OperandKind::Const,
-            op2: name_at,
-            out_type: OperandKind::Tmp,
-            out,
-            extended_value: slots,
-            ..Opline::default()
-        });
+    /// `zend_compile_prop` under `BP_VAR_R`: the chain the property
+    /// stands on compiled delayed ([`Self::delayed_var`]), every name
+    /// the program computes compiled where it stands, and the fetches
+    /// laid down after them at `zend_delayed_compile_end`, each
+    /// `FETCH_OBJ_R` over the one under it with the name in `op2`, three
+    /// cache slots in `extended_value` for a constant one
+    /// (`zend_alloc_cache_slots(3)`), written into a temporary
+    /// (`zend_adjust_for_fetch_type`). So `$a->$b->{$c[1]}` reads
+    /// `$c[1]` before it fetches `$a->$b`:
+    ///
+    /// ```php
+    /// var_dump($a->$b->{$c[1]});
+    /// ```
+    /// ```expect
+    /// Warning: Undefined variable $c in %s on line 2
+    ///
+    /// Warning: Trying to access array offset on null in %s on line 2
+    ///
+    /// Warning: Undefined variable $a in %s on line 2
+    ///
+    /// Warning: Undefined variable $b in %s on line 2
+    ///
+    /// Warning: Attempt to read property "" on null in %s on line 2
+    ///
+    /// Warning: Attempt to read property "" on null in %s on line 2
+    /// NULL
+    /// ```
+    fn prop(&mut self, expr: tree::Expr) -> Result<Where, CompileError> {
+        let held = self.delayed_var(expr, Fetch::Read)?;
+        let (_, out) = self.base_fetch(held, Fetch::Read, Over::Obj);
         Ok(Where::Temporary(out))
     }
 
@@ -13867,6 +13960,13 @@ impl Emit<'_> {
             tree::Expr::CallExpr(id) => {
                 let node = &tree[id];
                 self.implicit_uses(names, node.callee);
+                // `C::$m()` names its method by the variable, a
+                // `ZEND_AST_VAR` where `C::$p` alone names a property.
+                if let tree::Expr::ScopedAccessExpr(scoped) = node.callee
+                    && let Some(tree::ScopedSelector::SimpleVarExpr(var)) = tree[scoped].member
+                {
+                    self.implicit_uses(names, tree::Expr::SimpleVarExpr(var));
+                }
                 self.implicit_uses_of_args(names, node.args);
             }
             tree::Expr::MemberAccessExpr(id) => {
