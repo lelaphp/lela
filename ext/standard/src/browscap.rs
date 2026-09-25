@@ -14,11 +14,11 @@ use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 
-use crate::ini::{Event, SCANNER_RAW, Scalar};
 use crate::output::Entry;
 use crate::stub::stub;
 use crate::zpp::{nullable_string, optional_bool};
 use crate::{State, argument_count_between};
+use php_ext::syntax::{IniEvent as Event, IniScanner, IniValue as Scalar};
 
 /// `BROWSCAP_NUM_CONTAINS`: how many fixed runs after the prefix a
 /// pattern keeps for the quick refusal.
@@ -143,7 +143,7 @@ fn load(events: Vec<Event>) -> Vec<BrowscapEntry> {
     for event in events {
         match event {
             Event::Section(name) => {
-                let pattern = text(&name.value);
+                let pattern = text(&name);
                 if pattern.len() > usize::from(u16::MAX) {
                     current = None;
                     continue;
@@ -168,14 +168,14 @@ fn load(events: Vec<Event>) -> Vec<BrowscapEntry> {
                 let Some(entry) = current.and_then(|at| entries.get_mut(at)) else {
                     continue;
                 };
-                let value = text(&value.value);
+                let value = text(&value);
                 let lower = value.to_ascii_lowercase();
                 let value = match lower.as_slice() {
                     b"on" | b"yes" | b"true" => b"1".to_vec(),
                     b"no" | b"off" | b"none" | b"false" => Vec::new(),
                     _ => value,
                 };
-                let key = text(&key.value);
+                let key = text(&key);
                 if key.eq_ignore_ascii_case(b"parent") {
                     entry.parent = Some(value);
                 } else {
@@ -318,7 +318,8 @@ fn loaded(req: &mut Request) -> Result<(), Thrown> {
     let Ok(bytes) = std::fs::read(path) else {
         return Ok(());
     };
-    let events: Vec<Event> = crate::ini::parse(req, &bytes, SCANNER_RAW)?.unwrap_or_default();
+    let events: Vec<Event> =
+        php_ext::syntax::parse_ini(req, &bytes, IniScanner::Raw)?.unwrap_or_default();
     req.state::<State>().browscap.entries = load(events);
     Ok(())
 }

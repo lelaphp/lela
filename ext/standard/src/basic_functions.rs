@@ -436,11 +436,11 @@ fn parse_ini(
     sections: bool,
     mode: i64,
 ) -> Result<Value, Thrown> {
-    if !matches!(mode, SCANNER_NORMAL | SCANNER_RAW | SCANNER_TYPED) {
+    let Some(scanner) = crate::ini::scanner(mode) else {
         warning(req, "Invalid scanner mode");
         return Ok(Value::bool(false));
-    }
-    match crate::ini::parse(req, bytes, mode)? {
+    };
+    match php_ext::syntax::parse_ini(req, bytes, scanner)? {
         Ok(events) => crate::ini::assemble(req, events, sections),
         Err((message, line)) => {
             let file = String::from_utf8_lossy(file);
