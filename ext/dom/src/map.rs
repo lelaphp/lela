@@ -846,10 +846,21 @@ impl ObjectHandlers for MapHandlers {
             return Ok(None);
         }
         let key = if named_keys(req, object) {
+            // `php_dom_iterator_current_key`: a modern attribute by its
+            // qualified name.
+            let modern = value
+                .as_object()
+                .is_some_and(|o| crate::modern::follows_spec(req, *o));
             let name = value
                 .as_object()
                 .and_then(|o| node_of(req, *o))
-                .map(Node::name)
+                .map(|n| {
+                    if modern && n.kind() == Kind::Attribute {
+                        crate::qualified_name(n)
+                    } else {
+                        n.name()
+                    }
+                })
                 .unwrap_or_default();
             string(req, &name)?
         } else {
