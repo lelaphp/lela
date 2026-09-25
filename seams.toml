@@ -188,6 +188,16 @@ name = "ext/hash"
 budget = 17000    # design ledger 9: no Mahout crate; a thin port over the RustCrypto hash crates
 # The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
 porting = true
+[[crate]]
+name = "ext/libxml"
+budget = 2000     # #731: libxml's natives, LibXMLError and the error state every XML extension reads; libxml2's binding is in src/ffi/, the bindings pool's
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
+[[crate]]
+name = "ext/lexbor"
+budget = 500      # #731: php-src's vendored lexbor compiled by build.rs, and its binding in src/ffi/, the bindings pool's
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
 
 # ---------------------------------------------------------------- seams
 # The six locked seams (design §4.5). `effects.lock` is retired; its content is
