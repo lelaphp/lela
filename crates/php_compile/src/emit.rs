@@ -114,7 +114,7 @@ use php_syntax::magic_const_name;
 use crate::{CompileError, Options, SourceKind, StackLimit};
 use args::{Args, Callee, Plan};
 use attributes::InternalAttribute;
-use imports::{Imports, Symbol};
+use imports::{Imports, Namespacing, Symbol};
 use walk::{Class, Closure, Function, Method, Property};
 
 mod args;
@@ -312,6 +312,9 @@ pub(crate) struct Emit<'a> {
     /// `FC(current_namespace)`: the namespace a `namespace` statement
     /// put what follows it in, and none before one.
     namespace: Option<Vec<u8>>,
+    /// How the file's `namespace` statements are written so far, and
+    /// whether the braces of one are open.
+    namespacing: Namespacing,
     /// `FC(imports)`, `FC(imports_function)`, `FC(imports_const)` and
     /// `FC(seen_symbols)`: what the `use` statements of the current
     /// namespace imported and what the file declared in it.
@@ -345,9 +348,10 @@ pub(crate) struct Emit<'a> {
     /// was written `function &f()`, which makes every `return` in it a
     /// `RETURN_BY_REF`.
     returns_by_ref: bool,
-    /// How many statement lists stand open: one inside the file's own,
-    /// which is where `zend_compile_top_stmt` binds a function at compile
-    /// time; more inside a block, a loop or a body.
+    /// How many statement lists stand open: one inside the file's own
+    /// or a bracketed namespace's, whose statements are both php's top
+    /// statements and where `zend_compile_top_stmt` binds a function at
+    /// compile time; more inside a block, a loop or a body.
     depth: u32,
     /// `CG(context).active_property_info_name`: the property whose
     /// default is being compiled, which `__PROPERTY__` folds to.
@@ -920,6 +924,7 @@ pub(crate) fn unit(
         known_classes: &options.classes,
         frameless: frameless_table(&options.functions),
         namespace: None,
+        namespacing: Namespacing::Global,
         imports: Imports::default(),
         active_class: None,
         active_parent: None,
@@ -5187,52 +5192,6 @@ impl Emit<'_> {
             Err(refused) if refused.level == Level::CompileError => Err(refused),
             Err(_) => Err(self.compile_error("Constant expression contains invalid operations")),
         }
-    }
-
-    /// `zend_compile_namespace` for the unbraced form: the name is the
-    /// namespace of what follows, and a first one after any statement
-    /// but an empty one is php's compile error (`zend_is_first_statement`);
-    /// a later one moves the namespace, as php's does. No opline.
-    ///
-    /// `namespace` is no namespace's name, whatever its case, since
-    /// `namespace\X` is the relative name:
-    ///
-    /// ```php
-    /// namespace NAMEspace;
-    /// ```
-    /// ```expect exit=255
-    /// Fatal error: Cannot use 'NAMEspace' as namespace name in %s on line 2
-    /// ```
-    fn namespace(&mut self, id: NodeId<tree::NamespaceDef>) -> Result<(), CompileError> {
-        let node = &self.parsed.tree[id];
-        let Some(name) = node.name else {
-            return Err(self.unread("a namespace declaration naming nothing"));
-        };
-        if node.body.is_some() {
-            return Err(self.unread("a braced namespace declaration"));
-        }
-        let name = self.text(name);
-        if name.starts_with(b"\\") {
-            return Err(self.unread("a namespace declaration"));
-        }
-        if self.namespace.is_none() && self.statements_seen > 0 {
-            return Err(self.compile_error(
-                "Namespace declaration statement has to be the very first statement or after any declare call in the script",
-            ));
-        }
-        if name.eq_ignore_ascii_case(b"namespace") {
-            return Err(self.compile_error(format!(
-                "Cannot use '{}' as namespace name",
-                String::from_utf8_lossy(name)
-            )));
-        }
-        self.namespace = Some(name.to_vec());
-        self.imports.reset();
-        // php's `zend_is_first_statement` steps over a `ZEND_AST_DECLARE`
-        // before the node it is asked about and over nothing else, so a
-        // `namespace` statement is one a later `strict_types` finds.
-        self.statements_seen = self.statements_seen.saturating_add(1);
-        Ok(())
     }
 
     /// `zend_compile_declare` (`Z/Zend/zend_compile.c:6982`): each
@@ -14174,6 +14133,7 @@ mod tests {
             known_classes: &options.classes,
             frameless: Vec::new(),
             namespace: Some(b"A".to_vec()),
+            namespacing: Namespacing::Unbracketed,
             imports: Imports::default(),
             active_class: None,
             active_parent: None,
