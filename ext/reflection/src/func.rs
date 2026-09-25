@@ -1319,13 +1319,28 @@ pub(super) fn reflection_function_invoke_args(req: &mut Request) -> Result<Value
 /// the first argument there; and for an instance method the object
 /// given, held to being an instance of the class that declared the
 /// method. php's two `ReflectionException`s are the object missing and
-/// the object of another class.
+/// the object of another class; before either, `o!` holds the argument
+/// to `?object` whatever the method is.
+///
+/// ```php
+/// class M { static function s() { echo "s\n"; } }
+/// try { (new ReflectionMethod('M', 's'))->invoke('x'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// (new ReflectionMethod('M', 's'))->invoke(null);
+/// ```
+/// ```expect
+/// ReflectionMethod::invoke(): Argument #1 ($object) must be of type ?object, string given
+/// s
+/// ```
 fn receiver(
     req: &mut Request,
     decl: &MethodDecl,
     scope: ClassId,
     position: u32,
 ) -> Result<Option<PhpObject>, Thrown> {
+    if let Some(given) = req.argument(position) {
+        let ty = php_ext::decl::Type::Nullable(Box::new(php_ext::decl::Type::Object));
+        php_ext::coerce::coerce_param(req, &given, &ty, position)?;
+    }
     if !decl.is_instance {
         return Ok(None);
     }
