@@ -7184,17 +7184,6 @@ impl Request {
         self.handlers_of(ClassId(o.class()))
     }
 
-    /// `zend_std_get_property_ptr_ptr` without the write: the declared
-    /// slot `name` sits in where the executed scope may reach it, and
-    /// none for a dynamic name or a property the scope may not see,
-    /// which the read and the write handlers take instead.
-    pub(crate) fn property_slot(&self, object: PhpObject, name: &[u8]) -> Option<u32> {
-        let class = object.class();
-        let placed = self.declared_slot(class, name)?;
-        self.may_access(placed.declaring, placed.visibility)
-            .then_some(placed.slot)
-    }
-
     /// `zend_std_has_property`: the declared slot where the scope may
     /// reach it and it holds a value, else the dynamic table's entry;
     /// then what `test` asks of the value: that it is there, that it is

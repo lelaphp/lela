@@ -19,7 +19,8 @@
 use std::cmp::Ordering;
 
 use php_ext::abi::{
-    Callable, CloneObj, ObjectHandlers, PropertyPurpose, PropertyRead, PropertyTest, Std,
+    Callable, CloneObj, ObjectHandlers, PropertyPlace, PropertyPurpose, PropertyRead, PropertyTest,
+    Std,
 };
 use php_ext::call::{call, call_method, clone_with, instantiate, lookup_class};
 use php_ext::coerce::{callable_checked, compare, to_long, truthy};
@@ -682,9 +683,9 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         object: PhpObject,
         name: &[u8],
-    ) -> Option<u32> {
+    ) -> PropertyPlace {
         if as_props(req, object, name).unwrap_or(false) {
-            return None;
+            return PropertyPlace::Handlers;
         }
         Std.get_property_ptr_ptr(req, object, name)
     }

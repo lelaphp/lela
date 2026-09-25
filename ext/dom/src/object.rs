@@ -3,7 +3,7 @@
 //! object a libxml node answers as (`php_dom_create_object`), and the
 //! helpers every native reads its receiver and arguments through.
 
-use php_ext::abi::{CloneObj, ObjectHandlers, PropertyRead, PropertyTest};
+use php_ext::abi::{CloneObj, ObjectHandlers, PropertyPlace, PropertyRead, PropertyTest};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpObject, PhpString, Value};
@@ -12,7 +12,8 @@ use php_ext_libxml::ffi::NodeObject;
 use crate::map::Map;
 use crate::xpath::XPathState;
 use crate::{
-    debug_info, dom_mut, has_property, property_slot, read_property, unset_property, write_property,
+    debug_info, dom_mut, has_property, property_place, read_property, unset_property,
+    write_property,
 };
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
@@ -179,8 +180,8 @@ impl ObjectHandlers for NodeHandlers {
         req: &mut Request,
         object: PhpObject,
         name: &[u8],
-    ) -> Option<u32> {
-        property_slot(req, object, name)
+    ) -> PropertyPlace {
+        property_place(req, object, name)
     }
 
     fn has_property(

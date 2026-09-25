@@ -58,7 +58,7 @@
 use php_heap::{Fatal, FrameRef};
 use php_unit::{CacheSlot, ConstIdx, OpArray, OperandKind, Opline};
 
-use crate::api::abi::{PropertyRead, PropertyTest};
+use crate::api::abi::{PropertyPlace, PropertyRead, PropertyTest};
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::request::{Opened, Request};
@@ -6991,6 +6991,25 @@ pub(crate) fn assign_ref<T: Tier>(
 /// Error: Cannot modify readonly property C::$r
 /// int(1)
 /// ```
+///
+/// A property the class serves is its `write_property`'s, declared or
+/// not, as `ZEND_ASSIGN_OBJ` calls `zobj->handlers->write_property`
+/// wherever its cache slot has placed nothing: `DOMNode::$nodeValue`
+/// and `DOMDocument::$preserveWhiteSpace` are declared, and the write
+/// reaches the document.
+///
+/// ```php
+/// $d = new DOMDocument;
+/// $d->loadXML('<r><e/></r>');
+/// $e = $d->documentElement->firstChild;
+/// $e->nodeValue = 'a<b';
+/// var_dump($d->preserveWhiteSpace = false);
+/// echo $d->saveXML($e), "\n";
+/// ```
+/// ```expect
+/// bool(false)
+/// <e>a&lt;b</e>
+/// ```
 pub(crate) fn assign_obj<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -7042,8 +7061,9 @@ pub(crate) fn assign_obj<T: Tier>(
 /// ([`Request::declared_slot_for_write`]), the temporary `out` names
 /// written under `RETURN_VALUE_USED`, and the value into the declared
 /// slot in place or through the object's handler table's
-/// `write_property` for a name the class did not declare. `value` is
-/// given up on the `Error` path, as `FREE_OP_DATA` gives it up.
+/// `write_property` for a name the class did not declare or serves
+/// itself ([`PropertyPlace::Handlers`]). `value` is given up on the
+/// `Error` path, as `FREE_OP_DATA` gives it up.
 fn assign_property(
     req: &mut Request,
     frame: FrameRef,
@@ -7055,16 +7075,25 @@ fn assign_property(
 ) -> Result<Result<(), Thrown>, Fatal> {
     let bytes = name.as_str_bytes().unwrap_or_default();
     let shown_name = String::from_utf8_lossy(bytes).into_owned();
-    // `zend_get_property_offset(ce, name, ce->__set != NULL, ...)`:
-    // a class with a `__set` places the name quietly, so a property the
-    // scope may not reach reaches `write_property` and the accessor
-    // there, which is where php raises the `Error` if the guard stands.
-    let silent = req.serves_accessor(object.class(), b"__set");
-    let placed = match req.declared_slot_for_write(object.class(), bytes, "modify", silent) {
-        Ok(placed) => placed,
-        Err(thrown) => {
-            req.release(value);
-            return Ok(Err(thrown));
+    let placed = match place_of(req, object, bytes) {
+        // `zobj->handlers->write_property`: the class serves the name,
+        // declared or not, so the write is its handler's, as a name no
+        // class declared is.
+        PropertyPlace::Handlers => None,
+        // `zend_get_property_offset(ce, name, ce->__set != NULL, ...)`:
+        // a class with a `__set` places the name quietly, so a property
+        // the scope may not reach reaches `write_property` and the
+        // accessor there, which is where php raises the `Error` if the
+        // guard stands.
+        PropertyPlace::Std => {
+            let silent = req.serves_accessor(object.class(), b"__set");
+            match req.declared_slot_for_write(object.class(), bytes, "modify", silent) {
+                Ok(placed) => placed,
+                Err(thrown) => {
+                    req.release(value);
+                    return Ok(Err(thrown));
+                }
+            }
         }
     };
     match placed {
@@ -8949,6 +8978,23 @@ fn binary_assign_op_obj_dim(
 /// Error: Attempt to assign property "w" on null
 /// Error: Attempt to assign property "w" on int
 /// ```
+///
+/// A property the class serves, where its `get_property_ptr_ptr`
+/// answers `NULL`, is `zend_assign_op_overloaded_property`: read
+/// through `read_property`, the kernel over it, and the sum written
+/// back through `write_property`.
+///
+/// ```php
+/// $d = new DOMDocument;
+/// $d->loadXML('<r>a</r>');
+/// $r = $d->documentElement;
+/// var_dump($r->nodeValue .= 'b');
+/// echo $d->saveXML($r), "\n";
+/// ```
+/// ```expect
+/// string(2) "ab"
+/// <r>ab</r>
+/// ```
 pub(crate) fn assign_obj_op<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -9019,25 +9065,36 @@ fn step_property(
 ) -> Result<Result<(), Thrown>, Fatal> {
     let Compound { op, data, .. } = step;
     let bytes = name.as_str_bytes().unwrap_or_default().to_vec();
-    // `zend_std_get_property_ptr_ptr`, whose silence is
-    // `ce->__get != NULL`: a class with a `__get` hands out no place
-    // for a property the scope may not reach and takes the overloaded
-    // arm over it instead.
-    let silent = req.serves_accessor(object.class(), b"__get");
-    let placed = match req.declared_slot_for_write(object.class(), &bytes, "modify", silent) {
-        Ok(placed) => placed,
-        Err(thrown) => {
-            exec::free_operand(req, frame, code, data.op1_type, data.op1);
-            write_out(req, frame, code, op, &Value::null());
-            return Ok(Err(thrown));
+    let Some(key) = name.as_php_string().copied() else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_ASSIGN_OBJ_OP over a property whose name is no string",
+        )));
+    };
+    let placed = match place_of(req, object, &bytes) {
+        // php's `NULL` from the class's own slot: the class serves the
+        // name, so the pair of handlers takes the site.
+        PropertyPlace::Handlers => {
+            return Ok(overloaded_property_step(
+                req, frame, code, step, object, key,
+            ));
+        }
+        // `zend_std_get_property_ptr_ptr`, whose silence is
+        // `ce->__get != NULL`: a class with a `__get` hands out no
+        // place for a property the scope may not reach and takes the
+        // overloaded arm over it instead.
+        PropertyPlace::Std => {
+            let silent = req.serves_accessor(object.class(), b"__get");
+            match req.declared_slot_for_write(object.class(), &bytes, "modify", silent) {
+                Ok(placed) => placed,
+                Err(thrown) => {
+                    exec::free_operand(req, frame, code, data.op1_type, data.op1);
+                    write_out(req, frame, code, op, &Value::null());
+                    return Ok(Err(thrown));
+                }
+            }
         }
     };
     let Some((slot, typed)) = placed else {
-        let Some(key) = name.as_php_string().copied() else {
-            return Err(Fatal::Error(String::from(
-                "InternalError: ZEND_ASSIGN_OBJ_OP over a property whose name is no string",
-            )));
-        };
         // `zend_std_get_property_ptr_ptr`'s two answers for a name no
         // class declared: a class with a `__get` the guard is not
         // holding hands out no place and the overloaded pair takes the
@@ -9074,11 +9131,6 @@ fn step_property(
             return Ok(Err(thrown));
         }
         if req.overloaded_place(object, &bytes) {
-            let Some(key) = name.as_php_string().copied() else {
-                return Err(Fatal::Error(String::from(
-                    "InternalError: ZEND_ASSIGN_OBJ_OP over a property whose name is no string",
-                )));
-            };
             return Ok(overloaded_property_step(
                 req, frame, code, step, object, key,
             ));
@@ -9346,6 +9398,23 @@ fn overloaded_property_step(
 /// Warning: Undefined variable $u in %s on line 4
 /// Attempt to increment/decrement property "p" on null
 /// ```
+///
+/// A property the class serves is the overloaded pair, both ways
+/// round: `DateInterval` answers `d` from the interval itself, so the
+/// step lands there and no dynamic property is laid down.
+///
+/// ```php
+/// $i = new DateInterval('P1D');
+/// var_dump($i->d++, ++$i->d, $i->d--, --$i->d);
+/// var_dump($i->format('%d'));
+/// ```
+/// ```expect
+/// int(1)
+/// int(3)
+/// int(3)
+/// int(1)
+/// string(1) "1"
+/// ```
 pub(crate) fn pre_inc_obj<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -9563,12 +9632,21 @@ fn incdec_property(
             "InternalError: an increment of a property whose name is no string",
         )));
     };
-    let silent = req.serves_accessor(object.class(), b"__get");
-    let placed = match req.declared_slot_for_write(object.class(), &bytes, "modify", silent) {
-        Ok(placed) => placed,
-        Err(thrown) => {
-            write_out(req, frame, code, op, &Value::null());
-            return Ok(Err(thrown));
+    let placed = match place_of(req, object, &bytes) {
+        // php's `NULL` from the class's own slot: the class serves the
+        // name, so the pair of handlers takes the site.
+        PropertyPlace::Handlers => {
+            return Ok(overloaded_incdec(req, frame, code, op, step, object, key));
+        }
+        PropertyPlace::Std => {
+            let silent = req.serves_accessor(object.class(), b"__get");
+            match req.declared_slot_for_write(object.class(), &bytes, "modify", silent) {
+                Ok(placed) => placed,
+                Err(thrown) => {
+                    write_out(req, frame, code, op, &Value::null());
+                    return Ok(Err(thrown));
+                }
+            }
         }
     };
     let Some((slot, typed)) = placed else {
@@ -9727,6 +9805,15 @@ fn overloaded_incdec(
     req.addref(&Value::string(name));
     let table = req.object_handlers(object.heap());
     table.write_property(req, object, name, stepped)
+}
+
+/// `zobj->handlers->get_property_ptr_ptr` asked for its verdict alone
+/// ([`PropertyPlace`]): whether a write to `name` on the object is the
+/// standard place, which the property kernels lay down themselves, or
+/// goes through the class's `read_property` and `write_property`.
+fn place_of(req: &mut Request, object: PhpObject, name: &[u8]) -> PropertyPlace {
+    let table = req.object_handlers(object.heap());
+    table.get_property_ptr_ptr(req, object, name)
 }
 
 /// `if (RETURN_VALUE_USED(opline)) ZVAL_COPY(EX_VAR(opline->result.var), value)`:

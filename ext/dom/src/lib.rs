@@ -38,8 +38,8 @@ mod stub;
 mod xpath;
 
 use php_ext::abi::{
-    Dependency, DependencyKind, Extension, ExtensionBuilder, ObjectHandlers, PropertyPurpose,
-    PropertyRead, PropertyTest, Std,
+    Dependency, DependencyKind, Extension, ExtensionBuilder, ObjectHandlers, PropertyPlace,
+    PropertyPurpose, PropertyRead, PropertyTest, Std,
 };
 use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::{argument, to_string, truthy};
@@ -1241,9 +1241,12 @@ fn write_property(
     written
 }
 
-fn property_slot(req: &mut Request, object: PhpObject, name: &[u8]) -> Option<u32> {
+/// `dom_get_property_ptr_ptr`: php's `NULL` for a name a handler
+/// serves, so every write to it reaches `dom_write_property`, and the
+/// standard place for every other name.
+fn property_place(req: &mut Request, object: PhpObject, name: &[u8]) -> PropertyPlace {
     if handler(req, object, name).is_some() {
-        return None;
+        return PropertyPlace::Handlers;
     }
     Std.get_property_ptr_ptr(req, object, name)
 }
