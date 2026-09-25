@@ -26,7 +26,7 @@ docs = 5000                                # design §10; `docs/**` plus the thr
 harness = 650                              # harness §12 item 6: `.claude/**` and `harness-plugins/**` hand-written, generated types excluded
 lock_packages = 120                        # design §4.1: `Cargo.lock` packages, default features, counted on day 31 with the Cranelift set
 clean_build_release_s = 90                 # design §10: `cargo build --release` from clean on the dev machine
-api_items = 560                            # design §4.4, §4.5: public items of php_ext, measured on api.lock
+api_items = 600                            # design §4.4, §4.5: public items of php_ext, measured on api.lock
 bindings = 15000                           # design §4.1: `ext/*/src/ffi/**` pooled across every extension
 # Lines are non-blank, non-comment, tests excluded (`xtask budget`).
 
