@@ -1661,10 +1661,18 @@ fn dump_object(
             return;
         }
     };
+    // `php_var_dump_object_prefix`, read after the table as php reads
+    // it: what a lazy object is, before `object(`.
+    let prefix = match object.heap().laziness() {
+        php_heap::Laziness::Eager => "",
+        php_heap::Laziness::Ghost => "lazy ghost ",
+        php_heap::Laziness::Proxy | php_heap::Laziness::Forwarding => "lazy proxy ",
+    };
+    let common = format!("{common}{prefix}");
     if let Some(own) = own {
-        dump_rows(req, out, common, object, own, level);
+        dump_rows(req, out, &common, object, own, level);
     } else {
-        dump_members(req, out, common, object, level);
+        dump_members(req, out, &common, object, level);
     }
     object.heap().unprotect();
 }

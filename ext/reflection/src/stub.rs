@@ -5388,7 +5388,7 @@ fn reflection_class() -> Declared {
                     ],
                     Some(Type::Object),
                 ),
-                unbuilt as Entry,
+                super::lazy::reflection_class_new_lazy_ghost as Entry,
             ),
             (
                 method(
@@ -5399,7 +5399,7 @@ fn reflection_class() -> Declared {
                     ],
                     Some(Type::Object),
                 ),
-                unbuilt as Entry,
+                super::lazy::reflection_class_new_lazy_proxy as Entry,
             ),
             (
                 method(
@@ -5411,7 +5411,7 @@ fn reflection_class() -> Declared {
                     ],
                     Some(Type::Void),
                 ),
-                unbuilt as Entry,
+                super::lazy::reflection_class_reset_as_lazy_ghost as Entry,
             ),
             (
                 method(
@@ -5423,7 +5423,7 @@ fn reflection_class() -> Declared {
                     ],
                     Some(Type::Void),
                 ),
-                unbuilt as Entry,
+                super::lazy::reflection_class_reset_as_lazy_proxy as Entry,
             ),
             (
                 method(
@@ -5431,7 +5431,7 @@ fn reflection_class() -> Declared {
                     &[parameter(b"object", Type::Object)],
                     Some(Type::Object),
                 ),
-                unbuilt as Entry,
+                super::lazy::reflection_class_initialize_lazy_object as Entry,
             ),
             (
                 method(
@@ -5439,7 +5439,7 @@ fn reflection_class() -> Declared {
                     &[parameter(b"object", Type::Object)],
                     Some(Type::Bool),
                 ),
-                unbuilt as Entry,
+                super::lazy::reflection_class_is_uninitialized_lazy_object as Entry,
             ),
             (
                 method(
@@ -5447,7 +5447,7 @@ fn reflection_class() -> Declared {
                     &[parameter(b"object", Type::Object)],
                     Some(Type::Object),
                 ),
-                unbuilt as Entry,
+                super::lazy::reflection_class_mark_lazy_object_as_initialized as Entry,
             ),
             (
                 method(
@@ -5455,7 +5455,7 @@ fn reflection_class() -> Declared {
                     &[parameter(b"object", Type::Object)],
                     Some(nullable(Type::Callable)),
                 ),
-                unbuilt as Entry,
+                super::lazy::reflection_class_get_lazy_initializer as Entry,
             ),
             (
                 tentative(method(
@@ -5703,7 +5703,7 @@ fn reflection_property() -> Declared {
                     ],
                     Some(Type::Void),
                 ),
-                unbuilt as Entry,
+                super::lazy::reflection_property_set_raw_value_without_lazy_initialization as Entry,
             ),
             (
                 method(
@@ -5711,7 +5711,7 @@ fn reflection_property() -> Declared {
                     &[parameter(b"object", Type::Object)],
                     Some(Type::Void),
                 ),
-                unbuilt as Entry,
+                super::lazy::reflection_property_skip_lazy_initialization as Entry,
             ),
             (
                 method(
@@ -5719,7 +5719,7 @@ fn reflection_property() -> Declared {
                     &[parameter(b"object", Type::Object)],
                     Some(Type::Bool),
                 ),
-                unbuilt as Entry,
+                super::lazy::reflection_property_is_lazy as Entry,
             ),
             (
                 tentative(method(

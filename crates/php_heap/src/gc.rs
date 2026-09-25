@@ -50,6 +50,9 @@ pub(crate) const OBJ_FREE_CALLED: u32 = 1 << 9;
 /// where php keeps it (`Z/Zend/zend_types.h:867-870`), and not of this
 /// word, whose top twenty-two bits are the collector's.
 pub(crate) const OBJ_LAZY_UNINITIALIZED: u32 = 1 << 31;
+/// `IS_OBJ_LAZY_PROXY`: the other bit of `extra_flags`, standing on a
+/// proxy before its factory ran and after.
+pub(crate) const OBJ_LAZY_PROXY: u32 = 1 << 30;
 
 /// `GC_TYPE_MASK`: the type byte's four bits at the bottom of the word.
 const TYPE_MASK: u32 = 0x0000_000f;

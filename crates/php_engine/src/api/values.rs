@@ -919,29 +919,42 @@ impl PhpObject {
         req.native_mut(self.0)
     }
 
-    /// Whether the object is an uninitialised lazy ghost or proxy.
+    /// Whether the object is a lazy ghost or proxy nothing has
+    /// initialised, `zend_object_is_lazy(obj) &&
+    /// !zend_lazy_object_initialized(obj)`.
     #[must_use]
     pub fn is_lazy(&self) -> bool {
-        self.0.is_lazy()
+        matches!(self.0.laziness(), Laziness::Ghost | Laziness::Proxy)
     }
 
-    /// Whether `name` is a property whose read would initialise a lazy
-    /// object.
+    /// `OBJ_EXTRA_FLAGS(obj)`'s two lazy bits as the one state they
+    /// encode, what `php_var_dump_object_prefix` reads.
+    #[must_use]
+    pub fn laziness(&self) -> Laziness {
+        self.0.laziness()
+    }
+
+    /// `Z_PROP_FLAG_P(OBJ_PROP(obj, offset)) & IS_PROP_LAZY` for the
+    /// declared property `name`, on the object the initialised proxies
+    /// lead to: whether it still waits for the initializer.
     #[must_use]
     pub fn is_lazy_prop(&self, req: &Request, name: &[u8]) -> bool {
-        self.is_lazy() && self.prop(req, name).is_none()
+        req.lazy_property(*self, name)
     }
 
-    /// The initializer of a lazy object, while it is uninitialised.
+    /// `zend_lazy_object_get_initializer_zv`: the initializer of a lazy
+    /// object as it was given, a view, while nothing has initialised it.
     #[must_use]
-    pub fn lazy_initializer(&self) -> Option<&Value> {
-        None
+    pub fn lazy_initializer(&self, req: &Request) -> Option<Value> {
+        req.lazy_initializer(self.0)
     }
 
-    /// The real instance behind an initialised lazy proxy.
+    /// `zend_lazy_object_get_instance` over an initialised proxy: the
+    /// instance its factory returned, a view; `None` for any other
+    /// object.
     #[must_use]
-    pub fn lazy_real(&self) -> Option<&PhpObject> {
-        None
+    pub fn lazy_real(&self, req: &Request) -> Option<PhpObject> {
+        req.lazy_instance(self.0)
     }
 }
 
@@ -1056,6 +1069,12 @@ pub use php_heap::ResourceType;
 /// that is not transitive is what those natives observe. An array is
 /// sorted through [`PhpArray::sort_by`], which runs the same function.
 pub use php_heap::zend_sort;
+
+/// What an object's two lazy bits say of it (design §5.4): a ghost or a
+/// proxy nothing has initialised, a proxy that forwards to its
+/// instance, or neither, which a dumper reads to print `lazy ghost ` or
+/// `lazy proxy ` before `object(` ([`PhpObject::laziness`]).
+pub use php_heap::Laziness;
 
 /// A resource (design §5.5): php's `zend_resource *`, thirty-two bytes
 /// of the request's heap in the list `EG(regular_list)` is, its id the

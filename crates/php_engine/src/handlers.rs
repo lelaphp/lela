@@ -5244,6 +5244,10 @@ fn fetch_obj_place(
         );
         return threw(req, frame, &thrown);
     };
+    let object = match req.lazy_place(object, &name) {
+        Ok(object) => object,
+        Err(thrown) => return threw_freeing_container(req, frame, code, op, &thrown),
+    };
     let placed = match place_of(req, object, &name) {
         // `if (NULL == ptr) ptr = zobj->handlers->read_property(...)`:
         // a name the class serves is read, not placed.
@@ -7944,7 +7948,16 @@ fn assign_property(
 ) -> Result<Result<(), Thrown>, Fatal> {
     let bytes = name.as_str_bytes().unwrap_or_default();
     let shown_name = String::from_utf8_lossy(bytes).into_owned();
-    let placed = match place_of(req, object, bytes) {
+    // A lazy object takes the write through `write_property`, which is
+    // where php's slot nothing has written and name nothing holds reach
+    // `forward_write_to_lazy_object`.
+    let lazy = object.heap().laziness() != php_heap::Laziness::Eager;
+    let place = if lazy {
+        PropertyPlace::Handlers
+    } else {
+        place_of(req, object, bytes)
+    };
+    let placed = match place {
         // `zobj->handlers->write_property`: the class serves the name,
         // declared or not, so the write is its handler's, as a name no
         // class declared is.
@@ -9936,6 +9949,14 @@ fn step_property(
             "InternalError: ZEND_ASSIGN_OBJ_OP over a property whose name is no string",
         )));
     };
+    let object = match req.lazy_place(object, &bytes) {
+        Ok(object) => object,
+        Err(thrown) => {
+            exec::free_operand(req, frame, code, data.op1_type, data.op1);
+            write_out(req, frame, code, op, &Value::null());
+            return Ok(Err(thrown));
+        }
+    };
     let placed = match place_of(req, object, &bytes) {
         // php's `NULL` from the class's own slot: the class serves the
         // name, so the pair of handlers takes the site.
@@ -10497,6 +10518,13 @@ fn incdec_property(
         return Err(Fatal::Error(String::from(
             "InternalError: an increment of a property whose name is no string",
         )));
+    };
+    let object = match req.lazy_place(object, &bytes) {
+        Ok(object) => object,
+        Err(thrown) => {
+            write_out(req, frame, code, op, &Value::null());
+            return Ok(Err(thrown));
+        }
     };
     let placed = match place_of(req, object, &bytes) {
         // php's `NULL` from the class's own slot: the class serves the
@@ -11608,8 +11636,10 @@ fn foreach_var(req: &Request, held: php_heap::Zval) -> ForeachVar {
         if crate::interfaces::is_iterator_wrapper(req, object) {
             return ForeachVar::Iterator(object);
         }
+        // `Z_OBJPROP_P(array)` at each fetch: a proxy that forwards is
+        // walked over its instance's table.
         return walk.map_or(ForeachVar::Skipped, |walk| ForeachVar::Properties {
-            object,
+            object: req.lazy_reader(object),
             walk,
         });
     }
@@ -12136,7 +12166,12 @@ pub(crate) fn fe_fetch_rw<T: Tier>(
             if let Some(array) = subject.as_array().copied() {
                 fe_walk_array_rw(req, op, cell, array, walk)
             } else if let Some(object) = subject.as_object().copied() {
-                fe_walk_object_rw(req, op, object, walk)
+                // `Z_OBJPROP_P(array)` over what the variable holds now,
+                // which initialises an object made lazy since the reset.
+                match req.lazy_init(object) {
+                    Ok(object) => fe_walk_object_rw(req, op, object, walk),
+                    Err(thrown) => Ok(Err(thrown)),
+                }
             } else {
                 crate::api::raising::warning(
                     req,

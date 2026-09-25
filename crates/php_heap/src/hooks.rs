@@ -131,4 +131,15 @@ pub trait HeapHooks {
     fn weakrefs_notify(&mut self, obj: Obj) {
         let _ = obj;
     }
+    /// `zend_lazy_object_del_info` from `zend_object_std_dtor`
+    /// (`Z/Zend/zend_objects.c:85`): the object is being freed while
+    /// lazy, after the weak references were told and before its members
+    /// go, and what the engine keeps aside for it, the initializer or
+    /// the instance, is given up. Called only for an object whose
+    /// [`crate::Laziness`] is not `Eager`, which a heap that makes no
+    /// lazy object never sees, so it has a body of its own to do
+    /// nothing.
+    fn forget_lazy(&mut self, obj: Obj) {
+        let _ = obj;
+    }
 }
