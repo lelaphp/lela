@@ -1328,6 +1328,14 @@ pub(crate) fn properties_for(
     // carries unmangled here.
     let rows = match table.get_properties_for(req, object, purpose)? {
         Some(rows) => return Ok(rows),
+        // `zend_std_get_properties_for`'s `num_hooked_props` arm for the
+        // readers that run hooks.
+        None if matches!(purpose, PropertyPurpose::Json | PropertyPurpose::VarExport) => {
+            if let Some(rows) = req.hooked_properties_for(object)? {
+                return Ok(rows);
+            }
+            table.get_properties(req, object)?
+        }
         None => match purpose {
             // `zend_std_get_properties_for`: the debug table of a lazy
             // object and the `(array)` cast read what stands without

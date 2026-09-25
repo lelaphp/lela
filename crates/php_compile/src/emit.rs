@@ -101,11 +101,11 @@ use php_heap::{
 };
 use php_unit::decl::{
     AliasModifier, Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind,
-    ConstDecl, ConstExpr, DynamicProperties, EnumBacking, FunctionDecl, MethodDecl, Name,
+    ConstDecl, ConstExpr, DynamicProperties, EnumBacking, FunctionDecl, HookKind, MethodDecl, Name,
     Parameter, ParameterDefault, PropertyDecl, TraitAdaptation, TraitMethodRef, Type, Visibility,
 };
 use php_unit::{
-    BoundVar, ConstIdx, Diagnostic, FramelessEntry, Level, MethodBody, OpArray, Opcode,
+    BoundVar, ConstIdx, Diagnostic, FramelessEntry, HookBody, Level, MethodBody, OpArray, Opcode,
     OperandKind, Opline, OplineIdx, TryCatch, Unit, frameless_table,
 };
 
@@ -125,6 +125,7 @@ mod attributes;
 mod by_name;
 mod chain;
 mod export;
+mod hooks;
 mod imports;
 mod list;
 mod magic;
@@ -388,8 +389,12 @@ pub(crate) struct Emit<'a> {
     /// compile time; more inside a block, a loop or a body.
     depth: u32,
     /// `CG(context).active_property_info_name`: the property whose
-    /// default is being compiled, which `__PROPERTY__` folds to.
+    /// default or hook is being compiled, which `__PROPERTY__` folds to
+    /// and `parent::$x::get()` is held to.
     active_property: Option<Vec<u8>>,
+    /// `CG(context).active_property_hook_kind`: the hook whose body is
+    /// being compiled, none outside one.
+    active_hook: Option<HookKind>,
     /// `CG(context).in_jmp_frameless_branch`: whether a
     /// `JMP_FRAMELESS` branch is being compiled, in which no call takes
     /// a branch of its own.
@@ -465,6 +470,8 @@ pub(crate) struct Emit<'a> {
     numeric_dims: Vec<ConstIdx>,
     /// The method bodies of `classes`, [`Unit::methods`].
     methods: Vec<MethodBody>,
+    /// The hook bodies of the properties of `classes`, [`Unit::hooks`].
+    hooks: Vec<HookBody>,
     /// The file's name, [`Options::filename`], what a declaration
     /// records as its site.
     filename: Name,
@@ -552,6 +559,17 @@ struct FnFlags {
     /// on a method's op array by `zend_begin_method_decl` and on no
     /// other, a closure's included, which `__METHOD__` reads.
     method: bool,
+}
+
+/// What a body written as one expression after `=>` makes of it: the
+/// `return` `zend_compile_func_decl` makes of an arrow function's and
+/// `zend_compile_property_hooks` of a `get` hook's, or the assignment
+/// to the backing value `zend_compile_property_hooks` makes of a `set`
+/// hook's, `$this->name = expr;`.
+#[derive(Clone, Copy)]
+enum Short {
+    Return(tree::Expr),
+    Assign(tree::Expr),
 }
 
 /// One entry of `CG(loop_var_stack)` a `finally` puts there
@@ -1084,6 +1102,7 @@ pub(crate) fn unit(
         returns_by_ref: false,
         depth: 0,
         active_property: None,
+        active_hook: None,
         in_jmp_frameless_branch: false,
         statements_seen: 0,
         typing: Typing::of(options.strict_types),
@@ -1111,6 +1130,7 @@ pub(crate) fn unit(
         fn_flags: FnFlags::default(),
         numeric_dims: Vec::new(),
         methods: Vec::new(),
+        hooks: Vec::new(),
         filename: options.filename.clone(),
         cwd: options.cwd.clone(),
         loops: Vec::new(),
@@ -1150,6 +1170,7 @@ pub(crate) fn unit(
         functions: emit.functions_declared,
         dynamic,
         methods: emit.methods,
+        hooks: emit.hooks,
         diagnostics: emit.diagnostics,
         classes: emit.classes,
         runtime_keys: emit.runtime_keys,
@@ -1186,6 +1207,8 @@ struct Saved {
     static_vars: Vec<BoundVar>,
     fn_flags: FnFlags,
     numeric_dims: Vec<ConstIdx>,
+    active_property: Option<Vec<u8>>,
+    active_hook: Option<HookKind>,
 }
 
 /// `pass_two`'s `ZEND_FAST_CALL` arm (`Z/Zend/zend_opcode.c:1150`):
@@ -1978,6 +2001,9 @@ impl Emit<'_> {
                 self.call(&name, &arguments)
             }
             tree::Expr::ScopedAccessExpr(scoped) => {
+                if let Some(called) = self.parent_hook_call(scoped, args, line)? {
+                    return Ok(called);
+                }
                 let class = self.class_spec(self.parsed.tree[scoped].scope);
                 let method = self.scoped_method_of(scoped)?;
                 let arguments = self.arguments(args, line)?;
@@ -2875,8 +2901,13 @@ impl Emit<'_> {
             ..FnFlags::default()
         };
         let saved = self.begin_body(&name, this_in_scope, flags);
-        let outcome =
-            self.parameters_and_body(&closure.function, &name, None, &binds, closure.arrow);
+        let outcome = self.parameters_and_body(
+            &closure.function,
+            &name,
+            None,
+            &binds,
+            closure.arrow.map(Short::Return),
+        );
         self.end_body(saved);
         if let Some(slot) = self.dynamic.get_mut(at as usize) {
             *slot = Some(outcome?);
@@ -3206,7 +3237,11 @@ impl Emit<'_> {
             || self
                 .active_decl()
                 .is_some_and(|decl| decl.flags.is_readonly);
-        if is_readonly && ty.is_none() {
+        // A hooked one has no default until its link knows whether it
+        // is virtual, and is no untyped readonly one to refuse here,
+        // since its hooks refuse every readonly one.
+        let hooked = parameter.hooks.is_some();
+        if is_readonly && ty.is_none() && !hooked {
             return Err(self.compile_error(format!("Readonly property {member} must have type")));
         }
         let set_visibility = self
@@ -3217,20 +3252,41 @@ impl Emit<'_> {
                 &member,
             )?
             .or_else(|| implicit_set_visibility(is_readonly, promoted.visibility));
-        let default = ty.is_none().then_some(ConstExpr::Null);
+        let default = (ty.is_none() && !hooked).then_some(ConstExpr::Null);
+        let active = self.active_class.as_ref().map(|class| class.at);
+        let (at, kind, declared_properties) =
+            match active.and_then(|at| self.classes.get(at).map(|decl| (at, decl))) {
+                Some((at, decl)) => (at, decl.kind, decl.properties.len()),
+                None => {
+                    return Err(self
+                        .fatal("InternalError: a promoted property of a class the unit has not"));
+                }
+            };
+        let hooks = match &parameter.hooks {
+            Some(hooks) => {
+                let hooked = hooks::Hooked {
+                    class: u32::try_from(at).unwrap_or(u32::MAX),
+                    property: u32::try_from(declared_properties).unwrap_or(u32::MAX),
+                    class_name: &class_name,
+                    kind,
+                    name: &parameter.name,
+                    ty: parameter.ty,
+                    visibility: promoted.visibility,
+                    is_static: false,
+                    is_readonly,
+                    is_abstract: false,
+                };
+                Some(Box::new(self.property_hooks(&hooked, hooks)?))
+            }
+            None => None,
+        };
         let attributes = self.member_attributes(
             &parameter.attributes,
             attributes::TARGET_PROPERTY,
             attributes::TARGET_PARAMETER,
             parameter.line,
         )?;
-        let at = self.active_class.as_ref().map(|class| class.at);
-        let Some(decl) = at.and_then(|at| self.classes.get_mut(at)) else {
-            return Err(
-                self.fatal("InternalError: a promoted property of a class the unit has not")
-            );
-        };
-        decl.properties.push(PropertyDecl {
+        let declared = PropertyDecl {
             name: Name(parameter.name.clone().into_boxed_slice()),
             visibility: promoted.visibility,
             set_visibility,
@@ -3242,7 +3298,17 @@ impl Emit<'_> {
             default,
             attributes,
             doc_comment: parameter.doc_comment.clone().map(Vec::into_boxed_slice),
-        });
+            hooks,
+        };
+        if let Some(decl) = self.classes.get(at) {
+            self.hooked_property_verified(decl, &declared)?;
+        }
+        let Some(decl) = self.classes.get_mut(at) else {
+            return Err(
+                self.fatal("InternalError: a promoted property of a class the unit has not")
+            );
+        };
+        decl.properties.push(declared);
         Ok(())
     }
 
@@ -3350,10 +3416,22 @@ impl Emit<'_> {
     /// ```expect exit=255
     /// Fatal error: A never returning function does not return a value, but #[\NoDiscard] requires a return value in %s on line 2
     /// ```
+    ///
+    /// `validate_nodiscard` refuses it on a property's `get` or `set` first.
+    ///
+    /// ```php
+    /// class A { public $p { #[\NoDiscard] get => 1; } }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: #[\NoDiscard] is not supported for property hooks in %s on line 2
+    /// ```
     fn no_discard_refused(&self, attributes: &[Attribute]) -> Result<(), CompileError> {
         let marked = attributes
             .iter()
             .any(|a| InternalAttribute::named(&a.name.0) == Some(InternalAttribute::NoDiscard));
+        if marked && self.active_hook.is_some() {
+            return Err(self.compile_error("#[\\NoDiscard] is not supported for property hooks"));
+        }
         let Some(ty) = self.return_type.as_ref().filter(|_| marked) else {
             return Ok(());
         };
@@ -3587,16 +3665,16 @@ impl Emit<'_> {
     }
 
     /// The prologue, the binds, then the body: the statements as
-    /// written, or for an arrow function the one `return` of the
-    /// expression after `=>` that `zend_compile_func_decl` makes its
-    /// body of, at that expression's line.
+    /// written, or for an arrow function and a hook's short form the
+    /// one statement php makes of the expression after `=>`
+    /// ([`Short`]), at that expression's line.
     fn parameters_and_body(
         &mut self,
         function: &Function,
         name: &[u8],
         scope: Option<&[u8]>,
         binds: &[Bind],
-        arrow: Option<tree::Expr>,
+        arrow: Option<Short>,
     ) -> Result<(FunctionDecl, OpArray), CompileError> {
         let line = function.line;
         self.line = line;
@@ -3612,6 +3690,9 @@ impl Emit<'_> {
         // the same, which is what `Stringable::__toString` holds it to.
         self.return_type = match function.return_type {
             Some(written) => Some(self.typename(written, false)?.0),
+            // The `void` `zend_compile_property_hooks` writes as a `set`
+            // hook's return type.
+            None if function.void_return => Some(Type::Void),
             None if scope.is_some() && name.eq_ignore_ascii_case(b"__tostring") => {
                 Some(Type::String)
             }
@@ -3656,11 +3737,19 @@ impl Emit<'_> {
         }
         self.closure_uses(binds)?;
         self.statements(&function.body)?;
-        if let Some(value) = arrow {
+        if let Some(short) = arrow {
+            let value = match short {
+                Short::Return(value) | Short::Assign(value) => value,
+            };
             self.depth = self.depth.saturating_add(1);
             self.line = value.line(self.parsed);
             self.statements_seen = self.statements_seen.saturating_add(1);
-            self.r#return(Some(value))?;
+            match short {
+                Short::Return(value) => {
+                    self.r#return(Some(value))?;
+                }
+                Short::Assign(value) => self.assign_backing_value(value)?,
+            }
             self.depth = self.depth.saturating_sub(1);
         }
         self.line = function.end_line;
@@ -4120,6 +4209,10 @@ impl Emit<'_> {
             static_vars: std::mem::take(&mut self.static_vars),
             fn_flags: std::mem::replace(&mut self.fn_flags, fn_flags),
             numeric_dims: std::mem::take(&mut self.numeric_dims),
+            // `zend_compile_func_decl_ex` sets the context's property
+            // and hook to what it was handed, none but for a hook.
+            active_property: self.active_property.take(),
+            active_hook: self.active_hook.take(),
         }
     }
 
@@ -4149,6 +4242,8 @@ impl Emit<'_> {
         self.static_vars = saved.static_vars;
         self.fn_flags = saved.fn_flags;
         self.numeric_dims = saved.numeric_dims;
+        self.active_property = saved.active_property;
+        self.active_hook = saved.active_hook;
     }
 
     /// The op array the emitter holds, finished as `zend_compile` and
@@ -5531,19 +5626,7 @@ impl Emit<'_> {
             );
             self.active_property = Some(property.name.clone());
             let ty = match property.ty {
-                Some(written) => {
-                    let ty = self.typename(written, false)?.0;
-                    let mask = ty.mask();
-                    if mask & (types::MAY_BE_VOID | types::MAY_BE_NEVER | types::MAY_BE_CALLABLE)
-                        != 0
-                    {
-                        return Err(self.compile_error(format!(
-                            "Property {member} cannot have type {}",
-                            php_unit::type_to_string(&ty)
-                        )));
-                    }
-                    Some(ty)
-                }
+                Some(written) => Some(self.property_type(written, &member)?),
                 None => None,
             };
             if decl.properties.iter().any(|p| *p.name.0 == *property.name) {
@@ -5557,25 +5640,15 @@ impl Emit<'_> {
                 self.property_default_refused(ty, default, &member)?;
             }
             self.active_property = None;
-            // A readonly class's properties are readonly, and a readonly
-            // property is typed, has no default and is no static one.
+            // A readonly class's properties are readonly.
             let is_readonly = property.is_readonly || decl.flags.is_readonly;
             if is_readonly {
-                if ty.is_none() {
-                    return Err(
-                        self.compile_error(format!("Readonly property {member} must have type"))
-                    );
-                }
-                if default.is_some() {
-                    return Err(self.compile_error(format!(
-                        "Readonly property {member} cannot have default value"
-                    )));
-                }
-                if property.is_static {
-                    return Err(
-                        self.compile_error(format!("Static property {member} cannot be readonly"))
-                    );
-                }
+                self.readonly_refused(
+                    &member,
+                    ty.is_some(),
+                    default.is_some(),
+                    property.is_static,
+                )?;
             }
             let set_visibility = self
                 .set_visibility_of(
@@ -5585,13 +5658,36 @@ impl Emit<'_> {
                     &member,
                 )?
                 .or_else(|| implicit_set_visibility(is_readonly, property.visibility));
+            let hooks = match &property.hooks {
+                Some(hooks) => {
+                    let hooked = hooks::Hooked {
+                        class: u32::try_from(self.classes.len()).unwrap_or(u32::MAX),
+                        property: u32::try_from(decl.properties.len()).unwrap_or(u32::MAX),
+                        class_name: name,
+                        kind: class.kind,
+                        name: &property.name,
+                        ty: property.ty,
+                        visibility: property.visibility,
+                        is_static: property.is_static,
+                        is_readonly,
+                        is_abstract: property.is_abstract || class.kind == ClassKind::Interface,
+                    };
+                    Some(Box::new(self.property_hooks(&hooked, hooks)?))
+                }
+                None => None,
+            };
+            // `zend_compile_prop_decl` compiles the attributes under
+            // `active_property_info_name`, where `__PROPERTY__` reads it.
+            self.active_property = Some(property.name.clone());
             let attributes = self.member_attributes(
                 &property.attributes,
                 attributes::TARGET_PROPERTY,
                 0,
                 property.line,
-            )?;
-            decl.properties.push(PropertyDecl {
+            );
+            self.active_property = None;
+            let attributes = attributes?;
+            let declared = PropertyDecl {
                 name: Name(property.name.clone().into_boxed_slice()),
                 visibility: property.visibility,
                 set_visibility,
@@ -5604,10 +5700,80 @@ impl Emit<'_> {
                 ty,
                 default,
                 attributes,
+                hooks,
                 doc_comment: property.doc_comment.clone().map(Vec::into_boxed_slice),
-            });
+            };
+            self.hooked_property_verified(decl, &declared)?;
+            decl.properties.push(declared);
         }
         Ok(())
+    }
+
+    /// A declared property's type, `zend_compile_typename` in
+    /// `zend_compile_prop_decl`, which refuses one that takes `void`,
+    /// `never` or `callable`.
+    fn property_type(
+        &mut self,
+        written: tree::TypeExpr,
+        member: &str,
+    ) -> Result<Type, CompileError> {
+        let ty = self.typename(written, false)?.0;
+        let mask = ty.mask();
+        if mask & (types::MAY_BE_VOID | types::MAY_BE_NEVER | types::MAY_BE_CALLABLE) != 0 {
+            return Err(self.compile_error(format!(
+                "Property {member} cannot have type {}",
+                php_unit::type_to_string(&ty)
+            )));
+        }
+        Ok(ty)
+    }
+
+    /// What `zend_compile_prop_decl` refuses of a readonly property: one
+    /// with no type, one with a default, and one declared `static`.
+    fn readonly_refused(
+        &self,
+        member: &str,
+        typed: bool,
+        defaulted: bool,
+        is_static: bool,
+    ) -> Result<(), CompileError> {
+        if !typed {
+            return Err(self.compile_error(format!("Readonly property {member} must have type")));
+        }
+        if defaulted {
+            return Err(self.compile_error(format!(
+                "Readonly property {member} cannot have default value"
+            )));
+        }
+        if is_static {
+            return Err(self.compile_error(format!("Static property {member} cannot be readonly")));
+        }
+        Ok(())
+    }
+
+    /// `zend_verify_hooked_property` where `zend_compile_property_hooks`
+    /// makes it, over a hooked property of a class that names no
+    /// parent; a class that does is held to it by its link, once what
+    /// it inherits is known ([`php_unit::link::verify_hooked_property`]).
+    ///
+    /// ```php
+    /// class Test { public $prop = 0 { get {} set {} } }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot specify default value for virtual hooked property Test::$prop in %s on line 2
+    /// ```
+    fn hooked_property_verified(
+        &self,
+        decl: &ClassDecl,
+        property: &PropertyDecl,
+    ) -> Result<(), CompileError> {
+        if decl.parent.is_some() {
+            return Ok(());
+        }
+        match php_unit::link::verify_hooked_property(&decl.name.0, property) {
+            Some(refusal) => Err(self.compile_error(refusal.to_string())),
+            None => Ok(()),
+        }
     }
 
     /// What `zend_compile_prop_decl` refuses of a property's modifiers
@@ -5698,11 +5864,11 @@ impl Emit<'_> {
                     "Property in interface cannot be explicitly abstract. All interface members are implicitly abstract",
                 ));
             }
-            // What the walk reads is a property without an accessor
-            // list, which an interface may not declare.
-            return Err(self.compile_error("Interfaces may only include hooked properties"));
+            if property.hooks.is_none() {
+                return Err(self.compile_error("Interfaces may only include hooked properties"));
+            }
         }
-        if property.is_abstract {
+        if property.is_abstract && property.hooks.is_none() {
             return Err(self.compile_error("Only hooked properties may be declared abstract"));
         }
         Ok(())
@@ -14469,6 +14635,19 @@ impl Emit<'_> {
     /// ```expect
     /// [] h {closure:C::m():6} |g C::m
     /// ```
+    ///
+    /// `__PROPERTY__` is the property a declaration, its attributes, its
+    /// default or one of its `get` and `set` bodies is compiled for:
+    ///
+    /// ```php
+    /// #[Attribute] class A { function __construct(public $m) {} }
+    /// class C { #[A(__PROPERTY__)] public $p = __PROPERTY__ { get => $this->p . __PROPERTY__; } }
+    /// $r = new ReflectionProperty('C', 'p');
+    /// echo $r->getAttributes()[0]->getArguments()[0], ' ', (new C)->p, "\n";
+    /// ```
+    /// ```expect
+    /// p pp
+    /// ```
     fn magic_const(&self, which: Magic, line: u32) -> Folded {
         let text = match which {
             Magic::Line => return Folded::Line(i64::from(line)),
@@ -15979,6 +16158,7 @@ mod tests {
             // class binds at compile time.
             depth: 1,
             active_property: None,
+            active_hook: None,
             in_jmp_frameless_branch: false,
             statements_seen: 0,
             typing: Typing::of(options.strict_types),
@@ -16006,6 +16186,7 @@ mod tests {
             fn_flags: FnFlags::default(),
             numeric_dims: Vec::new(),
             methods: Vec::new(),
+            hooks: Vec::new(),
             filename: options.filename.clone(),
             cwd: options.cwd.clone(),
             loops: Vec::new(),
@@ -16427,6 +16608,7 @@ fn enum_properties(kind: ClassKind, backing: EnumBacking) -> Vec<PropertyDecl> {
         is_promoted: false,
         ty: Some(ty),
         default: None,
+        hooks: None,
         attributes: Vec::new(),
         doc_comment: None,
     };

@@ -1220,7 +1220,12 @@ impl State<'_> {
             };
             let name = PhpString::new(req, &key)?;
             req.addref(&Value::string(name));
-            object.unserialize_prop(req, name, Value::null())?;
+            // A key naming a virtual property fails the whole object,
+            // `is_property_visibility_changed`'s `-1`.
+            if !object.unserialize_prop(req, name, Value::null())? {
+                req.release(Value::string(name));
+                return Ok(false);
+            }
             if !self.value(req, Some(Slot::Property(object, name)))? {
                 return Ok(false);
             }

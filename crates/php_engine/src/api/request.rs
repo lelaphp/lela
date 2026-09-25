@@ -20,8 +20,8 @@ use php_heap::{
     SortEntry, VmStack, Zval, ZvalRef,
 };
 use php_unit::decl::{
-    Attribute, ClassConstDecl, ClassDecl, ClassKind, FunctionDecl, IniDecl, MethodDecl, Name,
-    PropertyDecl, Visibility,
+    Attribute, ClassConstDecl, ClassDecl, ClassKind, FunctionDecl, HookKind, IniDecl, MethodDecl,
+    Name, PropertyDecl, Visibility,
 };
 use php_unit::{CacheSlot, FramelessEntry, OpArray, Opcode, Unit};
 
@@ -39,8 +39,10 @@ use crate::engine::{MethodAt, NativeMethod, RequestDescription, Shared};
 use crate::exec::{self, CallStage, CallState, IncludeKind, TableId, Vm};
 use crate::output::Output;
 
+mod hooks;
 mod lazy;
 
+pub(crate) use hooks::parent_hook_trampolines;
 pub(crate) use lazy::Strategy;
 
 /// php's version, what `PHP_VERSION` and `phpversion()` say.
@@ -1270,12 +1272,21 @@ pub(crate) struct UserFunction {
     pub(crate) member: Option<Member>,
 }
 
-/// A method as its class holds it: the class, `common.scope`,
-/// and its index among the methods of the class's declaration.
+/// A method as its class holds it: the class, `common.scope`, and
+/// where among the class's declaration it stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Member {
     pub(crate) class: ClassId,
-    pub(crate) at: u32,
+    pub(crate) at: MemberAt,
+}
+
+/// Where a method stands in its class's declaration: among its methods,
+/// `ce->function_table`, or as one of a property's hooks,
+/// `prop_info->hooks[kind]`, which php's function table never lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MemberAt {
+    Method(u32),
+    Hook { property: u32, kind: HookKind },
 }
 
 /// One class a request declared: the unit that holds its declaration and
@@ -1314,7 +1325,7 @@ fn user_function_decl(user: &UserFunction) -> Option<&FunctionDecl> {
             .dynamic
             .get(usize::try_from(at).ok()?)
             .map(|(decl, _)| decl),
-        exec::Body::Main | exec::Body::Method { .. } => None,
+        exec::Body::Main | exec::Body::Method { .. } | exec::Body::Hook { .. } => None,
     }
 }
 
@@ -2446,6 +2457,11 @@ impl Request {
     /// user method; none for a function.
     pub(crate) fn method_class(&self, function: Function) -> Option<ClassId> {
         if let Some(method) = self.native_method(function) {
+            // A parent hook's trampoline has the property's class as its
+            // scope, which its call carries and no row of the table does.
+            if matches!(method.at, MethodAt::ParentHook { .. }) {
+                return None;
+            }
             return Some(method.class);
         }
         if let Some((class, _)) = self.enum_method_of(function) {
@@ -2501,13 +2517,9 @@ impl Request {
                 .position(|method| method.function.name.0.eq_ignore_ascii_case(lowered))?;
             let member = Member {
                 class,
-                at: u32::try_from(at).ok()?,
+                at: MemberAt::Method(u32::try_from(at).ok()?),
             };
-            let position = self
-                .user_functions
-                .iter()
-                .position(|user| user.member == Some(member))?;
-            return self.user_function_id(position);
+            return self.member_function(member);
         }
         self.native_method_id(|m| {
             m.class == class
@@ -2584,15 +2596,33 @@ impl Request {
                     .class_decl(method.class)?
                     .methods
                     .get(usize::try_from(index).ok()?),
-                MethodAt::Trampoline(index) => {
+                MethodAt::Trampoline(index) | MethodAt::ParentHook { at: index, .. } => {
                     self.shared.trampolines.get(usize::try_from(index).ok()?)
                 }
             };
         }
         let member = self.user_function(function)?.member?;
-        self.class_decl(member.class)?
-            .methods
-            .get(usize::try_from(member.at).ok()?)
+        let decl = self.class_decl(member.class)?;
+        match member.at {
+            MemberAt::Method(at) => decl.methods.get(usize::try_from(at).ok()?),
+            MemberAt::Hook { property, kind } => decl
+                .properties
+                .get(usize::try_from(property).ok()?)?
+                .hooks
+                .as_ref()?
+                .of(kind),
+        }
+    }
+
+    /// The number of the user function a class's declaration holds at
+    /// `member`, a method or a hook, among the functions the request
+    /// declared with it.
+    pub(crate) fn member_function(&self, member: Member) -> Option<Function> {
+        let position = self
+            .user_functions
+            .iter()
+            .position(|user| user.member == Some(member))?;
+        self.user_function_id(position)
     }
 
     /// `ZSTR_VAL(ce->name)` as a message's `%s` prints it: the name a
@@ -2660,7 +2690,13 @@ impl Request {
         for link in self.chain() {
             let (function, closure, carried) = match link {
                 Link::Frame(_, _, state) => (state.function, state.closure, state.scope),
-                Link::Call(call) => (Some(call.function), call.closure, None),
+                Link::Call(call) => (
+                    Some(call.function),
+                    call.closure,
+                    self.is_parent_hook_trampoline(call.function)
+                        .then_some(call.called_scope)
+                        .flatten(),
+                ),
             };
             let scope = self
                 .closure_scope(closure)
@@ -4686,22 +4722,38 @@ impl Request {
             chain.push(here);
             at = self.class_parent(here);
         }
-        let mut table: Vec<(ClassId, PropertyDecl)> = Vec::new();
+        // Each row beside whether it is still `ZEND_ACC_VIRTUAL`, which
+        // a hooked property is while no declaration of it up the chain
+        // is backed, and which has no slot (`ZEND_VIRTUAL_PROPERTY_OFFSET`):
+        // a backed redeclaration of a virtual one takes a slot of its
+        // own where the child's properties are, as
+        // `do_inherit_property` leaves the child's offset alone over a
+        // virtual parent.
+        let mut table: Vec<(ClassId, PropertyDecl, bool)> = Vec::new();
         for here in chain.into_iter().rev() {
             let Some(decl) = self.class_decl(here) else {
                 continue;
             };
             for property in decl.properties.iter().filter(|p| p.is_instance) {
-                let inherited = table.iter().position(|(_, p)| {
+                let declared_virtual = property.hooks.as_ref().is_some_and(|h| h.is_virtual);
+                let inherited = table.iter().position(|(_, p, _)| {
                     p.name == property.name && p.visibility != Visibility::Private
                 });
                 match inherited {
-                    Some(i) => table[i] = (here, property.clone()),
-                    None => table.push((here, property.clone())),
+                    Some(i) if !table[i].2 => table[i] = (here, property.clone(), false),
+                    Some(i) => {
+                        table.remove(i);
+                        table.push((here, property.clone(), declared_virtual));
+                    }
+                    None => table.push((here, property.clone(), declared_virtual)),
                 }
             }
         }
         table
+            .into_iter()
+            .filter(|(_, _, is_virtual)| !is_virtual)
+            .map(|(class, property, _)| (class, property))
+            .collect()
     }
 
     /// [`Request::new_object`] by the class's name; a name the tables do
@@ -5125,7 +5177,11 @@ impl Request {
     /// parent's table) and the scope its visibility is measured
     /// against. An instance property is found here too, as php finds
     /// one in the same table and rejects it after the access check.
-    fn property_info_of(&self, class: ClassId, name: &[u8]) -> Option<(ClassId, PropertyDecl)> {
+    pub(crate) fn property_info_of(
+        &self,
+        class: ClassId,
+        name: &[u8],
+    ) -> Option<(ClassId, PropertyDecl)> {
         let mut at = Some(class);
         for _ in 0..64 {
             let here = at?;
@@ -5893,6 +5949,9 @@ impl Request {
         let o = object.heap();
         let class = object.class();
         let shown = String::from_utf8_lossy(name).into_owned();
+        if let Some(read) = self.read_hooked_arm(object, name, read) {
+            return read;
+        }
         // `ZEND_WRONG_PROPERTY_OFFSET`: the placement found a property
         // the scope may not reach and said so quietly, because a
         // `__get` may serve it. php tests one pointer for that; the
@@ -6268,6 +6327,17 @@ impl Request {
         // class for one.
         let o = object.heap();
         let lazy = o.laziness() != php_heap::Laziness::Eager;
+        if let Some(hooked) = self.hooked(class, name.as_bytes()) {
+            if self.hooked_accessible(&hooked) {
+                return self.write_hooked(object, name, value, hooked);
+            }
+            if !self.serves_accessor(class, b"__set") {
+                let thrown = self.inaccessible_property(class, hooked.visibility, name.as_bytes());
+                self.release(value);
+                self.release(Value::string(name));
+                return Err(thrown);
+            }
+        }
         let placed = self.declared_slot(class, name.as_bytes());
         if let Some(p) = placed.as_ref()
             && self.may_access(p.declaring, p.visibility)
@@ -6497,7 +6567,7 @@ impl Request {
         object: PhpObject,
         key: PhpString,
         value: Value,
-    ) -> Result<(), Thrown> {
+    ) -> Result<bool, Thrown> {
         let class = object.class();
         let bytes = key.as_bytes().to_vec();
         let (mangled_class, name) = match bytes.strip_prefix(b"\0") {
@@ -6507,8 +6577,32 @@ impl Request {
             },
             None => (None, bytes.clone()),
         };
-        let placed = self.placed_properties(class);
         let class_name = self.class_name_bytes(class);
+        // `is_property_visibility_changed`'s `ZEND_ACC_VIRTUAL` arm: a
+        // key the class's table holds a virtual property under has no
+        // slot to take the value, and the whole unserialization fails.
+        let reaches = match &mangled_class {
+            None => true,
+            Some(c) => c.as_slice() == b"*" || c.eq_ignore_ascii_case(&class_name),
+        };
+        if reaches
+            && let Some(hooked) = self.hooked(class, &name)
+            && hooked.is_virtual
+        {
+            let declaring = self.class_name(hooked.declaring);
+            crate::api::raising::docref(
+                self,
+                Level::Warning,
+                &format!(
+                    "Cannot unserialize value for virtual property {declaring}::${}",
+                    String::from_utf8_lossy(&name)
+                ),
+            );
+            self.release(value);
+            self.release(Value::string(key));
+            return Ok(false);
+        }
+        let placed = self.placed_properties(class);
         let exact = placed.iter().rposition(|(declaring, p)| {
             if *p.name.0 != *name.as_slice() {
                 return false;
@@ -6538,7 +6632,7 @@ impl Request {
             let z = value.into_zval();
             Heap::object_set_slot(&mut Hooks(self), object.heap(), at, z);
             self.release(Value::string(key));
-            return Ok(());
+            return Ok(true);
         }
         let o = object.heap();
         let table_key = php_heap::Key::Str(key.heap());
@@ -6556,7 +6650,7 @@ impl Request {
         self.heap.object_set_properties(o, table);
         self.array_update(table, table_key, value)?;
         self.release(Value::string(key));
-        Ok(())
+        Ok(true)
     }
 
     /// The two arms php takes before it lays a name the class did not
@@ -6665,27 +6759,41 @@ impl Request {
         &mut self,
         object: PhpObject,
         idx: u32,
+        by_ref: bool,
     ) -> Result<Option<(php_heap::Key, Walked)>, Thrown> {
         let o = object.heap();
         let class = object.class();
-        let declared: Vec<(Box<[u8]>, ClassId, Visibility)> = self
-            .placed_properties(class)
-            .into_iter()
-            .map(|(declaring, p)| (p.name.0, declaring, p.visibility))
-            .collect();
-        let mut at = self.heap.iterator_lead(idx) as usize;
-        while let Some((name, declaring, visibility)) = declared.get(at) {
-            let slot = u32::try_from(at).unwrap_or(u32::MAX);
-            if !o.slot(slot).is_undef() && self.may_access(*declaring, *visibility) {
-                let interned = self.heap.intern(name);
-                let key = self.fatal_of(interned).map(php_heap::Key::Str)?;
-                self.heap.iterator_set_lead(idx, slot.saturating_add(1));
-                return Ok(Some((key, Walked::Slot(slot))));
+        // `zend_hooked_object_get_iterator`: a class with a hooked
+        // property walks its declared rows in the table's order, each
+        // hooked one read through its hook.
+        if self.class_has_hooks(class) {
+            let mut lead = self.heap.iterator_lead(idx) as usize;
+            let found = self.hooked_object_walk(object, &mut lead, by_ref);
+            self.heap
+                .iterator_set_lead(idx, u32::try_from(lead).unwrap_or(u32::MAX));
+            if let Some((key, walked)) = found? {
+                return Ok(Some((php_heap::Key::Str(key.heap()), walked)));
             }
-            at = at.saturating_add(1);
+        } else {
+            let declared: Vec<(Box<[u8]>, ClassId, Visibility)> = self
+                .placed_properties(class)
+                .into_iter()
+                .map(|(declaring, p)| (p.name.0, declaring, p.visibility))
+                .collect();
+            let mut at = self.heap.iterator_lead(idx) as usize;
+            while let Some((name, declaring, visibility)) = declared.get(at) {
+                let slot = u32::try_from(at).unwrap_or(u32::MAX);
+                if !o.slot(slot).is_undef() && self.may_access(*declaring, *visibility) {
+                    let interned = self.heap.intern(name);
+                    let key = self.fatal_of(interned).map(php_heap::Key::Str)?;
+                    self.heap.iterator_set_lead(idx, slot.saturating_add(1));
+                    return Ok(Some((key, Walked::Slot(slot))));
+                }
+                at = at.saturating_add(1);
+            }
+            self.heap
+                .iterator_set_lead(idx, u32::try_from(declared.len()).unwrap_or(u32::MAX));
         }
-        self.heap
-            .iterator_set_lead(idx, u32::try_from(declared.len()).unwrap_or(u32::MAX));
         let Some(table) = o.properties() else {
             return Ok(None);
         };
@@ -6707,6 +6815,7 @@ impl Request {
                 .properties()
                 .and_then(|table| table.get(key))
                 .unwrap_or(php_heap::Zval::UNDEF),
+            Walked::Hooked(value) => return value,
         };
         Value::of_zval(z)
     }
@@ -6768,6 +6877,15 @@ impl Request {
                     place.write(cell.as_value().to_zval());
                 }
                 Ok(cell)
+            }
+            // A hook that answered no reference has no place to bind; the
+            // walk refused one whose `get` hook returns none before it
+            // ran it ([`Request::hooked_object_walk`]).
+            Walked::Hooked(value) => {
+                self.release(value);
+                self.fatal_of(Err(Fatal::Error(String::from(
+                    "InternalError: a hooked property's value bound by reference that its hook did not return by reference",
+                ))))
             }
         }
     }
@@ -7996,6 +8114,11 @@ impl Request {
     ) -> Result<bool, Thrown> {
         let class = object.class();
         let o = object.heap();
+        if let Some(hooked) = self.hooked(class, name)
+            && self.hooked_accessible(&hooked)
+        {
+            return self.has_hooked(object, name, test, hooked);
+        }
         // php's `value`, the slot the placement found, which keeps a
         // lazy object from initialising unless the slot itself waits.
         let mut placed_slot = None;
@@ -8180,6 +8303,11 @@ impl Request {
     pub(crate) fn unset_property(&mut self, object: PhpObject, name: &[u8]) -> Result<(), Thrown> {
         let class = object.class();
         let o = object.heap();
+        if let Some(hooked) = self.hooked(class, name)
+            && self.hooked_accessible(&hooked)
+        {
+            return Err(self.unset_hooked(object, name));
+        }
         let unsetter = self.magic_accessor(class, b"__unset");
         let mut wrong = false;
         if let Some(placed) = self.declared_slot(class, name) {
@@ -9919,9 +10047,92 @@ impl Request {
             self.user_functions.push(UserFunction {
                 unit,
                 body,
-                member: Some(Member { class, at: method }),
+                member: Some(Member {
+                    class,
+                    at: MemberAt::Method(method),
+                }),
             });
         }
+        // Each hook of the class's own properties, `prop_info->hooks`,
+        // a function of its own that php's function table never lists.
+        let hooks: Vec<(u32, HookKind)> = self.class_decl(class).map_or_else(Vec::new, |decl| {
+            decl.properties
+                .iter()
+                .enumerate()
+                .flat_map(|(at, property)| {
+                    let at = u32::try_from(at).unwrap_or(u32::MAX);
+                    HookKind::ALL.into_iter().filter_map(move |kind| {
+                        property
+                            .hooks
+                            .as_ref()
+                            .and_then(|hooks| hooks.of(kind))
+                            .map(|_| (at, kind))
+                    })
+                })
+                .collect()
+        });
+        for (property, kind) in hooks {
+            let Some((unit, body)) = self.hook_body(class, property, kind) else {
+                continue;
+            };
+            self.user_functions.push(UserFunction {
+                unit,
+                body,
+                member: Some(Member {
+                    class,
+                    at: MemberAt::Hook { property, kind },
+                }),
+            });
+        }
+    }
+
+    /// Where the op array of a hook of the property at `property` of a
+    /// class the request declared is: its own unit's body, or for a
+    /// property a trait gave the class the body in the trait's unit,
+    /// which php shares between the copies as it shares a method's
+    /// (`zend_do_traits_property_binding`).
+    fn hook_body(
+        &self,
+        class: ClassId,
+        property: u32,
+        kind: HookKind,
+    ) -> Option<(Arc<Unit>, exec::Body)> {
+        let declared = self.declared.get(
+            usize::try_from(class.0)
+                .ok()?
+                .checked_sub(self.shared.classes.len())?,
+        )?;
+        let decl = declared.decl()?;
+        let name = &decl.properties.get(usize::try_from(property).ok()?)?.name;
+        let own = declared
+            .unit
+            .classes
+            .get(usize::try_from(declared.at).ok()?)?;
+        let (from, at) = match own.properties.iter().position(|p| p.name == *name) {
+            Some(at) => (declared, at),
+            None => decl.traits.iter().find_map(|trait_name| {
+                let holder = self.class_named(&trait_name.0)?;
+                let from = self.declared.get(
+                    usize::try_from(holder.0)
+                        .ok()?
+                        .checked_sub(self.shared.classes.len())?,
+                )?;
+                let at = from
+                    .decl()?
+                    .properties
+                    .iter()
+                    .position(|p| p.name == *name && p.hooks.is_some())?;
+                Some((from, at))
+            })?,
+        };
+        Some((
+            Arc::clone(&from.unit),
+            exec::Body::Hook {
+                class: from.at,
+                property: u32::try_from(at).ok()?,
+                kind,
+            },
+        ))
     }
 
     /// Where the op array of the method at `method` of a class the
@@ -13611,11 +13822,14 @@ impl Request {
 struct Hooks<'a>(&'a mut Request);
 
 /// Where a walk over an object stands at a property: a declared slot,
-/// or the key of a bucket of the dynamic table.
+/// the key of a bucket of the dynamic table, or a hooked property's
+/// value as its `get` hook answered it, one owner the walker's to give
+/// up.
 #[derive(Clone, Copy)]
 pub(crate) enum Walked {
     Slot(u32),
     Dynamic(php_heap::Key),
+    Hooked(Value),
 }
 
 /// One `zend_property_info *` of a reference's source list

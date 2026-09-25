@@ -100,6 +100,7 @@ fn property(name: &[u8], ty: Option<Type>, default: Option<ConstExpr>) -> Proper
         default,
         attributes: Vec::new(),
         doc_comment: None,
+        hooks: None,
     }
 }
 

@@ -445,9 +445,16 @@ fn get_class_vars(req: &mut Request) -> Result<Value, Thrown> {
         return Err(arg_type_error(req, 1, &tail));
     };
     let scope = req.scope();
+    // A virtual property has no default to list, having no slot.
     let rows: Vec<(ClassId, PropertyDecl)> = properties_info(req, class)
         .into_iter()
         .filter(|(declaring, p)| visible(req, *declaring, p.visibility, scope))
+        .filter(|(_, p)| {
+            !(p.is_instance
+                && req
+                    .hooked(class, &p.name.0)
+                    .is_some_and(|hooked| hooked.is_virtual))
+        })
         .collect();
     let mut array = PhpArray::new(req)?;
     for statics in [false, true] {
@@ -571,6 +578,28 @@ fn get_object_vars(req: &mut Request) -> Result<Value, Thrown> {
     let object = object_argument(req, 1)?;
     let class = object.class();
     let scope = req.scope();
+    // `zend_get_properties_for(ZEND_PROP_PURPOSE_GET_OBJECT_VARS)` over
+    // a class with a hooked property is the table its hooks answer,
+    // each row one owner of its own.
+    if let Some(rows) = req.hooked_object_rows(object)? {
+        let mut array = PhpArray::new(req)?;
+        for (name, value, declared) in rows {
+            let seen = declared
+                .is_none_or(|(declaring, visibility)| visible(req, declaring, visibility, scope));
+            if !seen {
+                req.release(value);
+                req.release(Value::string(name));
+                continue;
+            }
+            let key = if declared.is_some() {
+                Key::Str(name)
+            } else {
+                Key::from_string(name)
+            };
+            array.set(req, key, value)?;
+        }
+        return Ok(Value::array(array));
+    }
     let placed = req.placed_properties(class);
     let rows = req.property_rows(object)?;
     let mut array = PhpArray::new(req)?;

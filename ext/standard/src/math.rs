@@ -158,6 +158,7 @@ pub(crate) fn classes() -> Vec<(ClassDecl, Vec<(MethodDecl, Entry)>)> {
             default: None,
             attributes: Vec::new(),
             doc_comment: None,
+            hooks: None,
         }],
         methods: Vec::new(),
         attributes: Vec::new(),

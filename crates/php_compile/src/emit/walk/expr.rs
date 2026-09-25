@@ -107,6 +107,7 @@ impl Emit<'_> {
                 line,
                 end_line: self.line_after(node.range),
                 generator: self.is_generator_at(node.range.start),
+                void_return: false,
             },
             uses: Vec::new(),
             is_static,

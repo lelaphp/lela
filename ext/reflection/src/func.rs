@@ -72,6 +72,14 @@ fn this_method(req: &mut Request) -> Result<(ClassId, MethodDecl, ClassId), Thro
         ));
     };
     let class = class_named(req, &class)?;
+    // A hook's reflector holds the hook itself, found among the hooks
+    // of the property its name names.
+    if req.this().is_some_and(|this| super::kept_hook(req, this))
+        && let Some((property, kind)) = super::member::hook_name(&name)
+        && let Some((scope, decl)) = php_ext::call::property_hook(req, class, property, kind)
+    {
+        return Ok((class, decl, scope));
+    }
     let kept = req.this().and_then(|this| kept_closure(req, this));
     let Some(found) = method_or_invoke(req, class, &name, kept) else {
         let named = class_name_of(req, class);

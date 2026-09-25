@@ -509,6 +509,7 @@ impl Reader<'_> {
             ty,
             attributes: Vec::new(),
             doc_comment: None,
+            hooks: None,
         })
     }
 
@@ -651,6 +652,7 @@ fn enum_properties(kind: ClassKind, backing: EnumBacking) -> Vec<PropertyDecl> {
         ty: Some(ty),
         default: None,
         attributes: Vec::new(),
+        hooks: None,
         doc_comment: None,
     };
     let mut out = vec![property(b"name", Type::String)];

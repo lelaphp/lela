@@ -606,13 +606,17 @@ pub enum PropertyTest {
 
 /// Which read `read_property` is serving, php's `type` argument to the
 /// slot: `BP_VAR_R`, the read that warns of a property nothing holds
-/// and refuses one the scope may not reach, and `BP_VAR_IS`, the read
-/// an `isset`, an `empty` or a `??` makes, which raises none of the
-/// three and answers `null`.
+/// and refuses one the scope may not reach; `BP_VAR_IS`, the read an
+/// `isset`, an `empty` or a `??` makes, which raises none of the three
+/// and answers `null`; and `BP_VAR_W`, the read a write fetch falls
+/// back to where `get_property_ptr_ptr` answered no place, which reads
+/// as `BP_VAR_R` does and refuses a hooked property's value that no
+/// write through it could reach back into.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PropertyRead {
     Warning,
     Silent,
+    Write,
 }
 
 /// What `get_property_ptr_ptr` answers for one name, php's pointer or
@@ -790,8 +794,7 @@ pub trait ObjectHandlers: Send + Sync {
         object: PhpObject,
         name: &[u8],
     ) -> PropertyPlace {
-        let _ = (req, object, name);
-        PropertyPlace::Std
+        req.property_place(object, name)
     }
 
     /// `has_property`, `zend_std_has_property` at `Std`: whether the

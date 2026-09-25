@@ -17,6 +17,7 @@
 use std::sync::Arc;
 
 use php_heap::{FrameRef, MapPtr, MapTable, Zval};
+use php_unit::decl::HookKind;
 use php_unit::{CacheSlot, ConstIdx, Level, OpArray, OperandKind, Opline, Unit};
 
 use crate::api::call::Function;
@@ -27,14 +28,23 @@ use crate::api::values::{ClassId, PhpObject, PhpString, TypeTag, Value};
 /// Which op array of a unit a frame serves: the main one, the body of
 /// one of the unit's functions, the body of a function no name bound
 /// while the file compiled and a `DECLARE_FUNCTION` bound where it
-/// stands ([`Unit::dynamic`]), or the body of one of its classes'
-/// methods, each by index, as `EX(func)` names one `zend_op_array`.
+/// stands ([`Unit::dynamic`]), the body of one of its classes'
+/// methods, or of one of their properties' hooks ([`Unit::hooks`]),
+/// each by index, as `EX(func)` names one `zend_op_array`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Body {
     Main,
     Function(u32),
     Dynamic(u32),
-    Method { class: u32, method: u32 },
+    Method {
+        class: u32,
+        method: u32,
+    },
+    Hook {
+        class: u32,
+        property: u32,
+        kind: HookKind,
+    },
 }
 
 /// Which construct an `INCLUDE_OR_EVAL` is, php's `ZEND_INCLUDE`,
@@ -752,6 +762,15 @@ pub(crate) fn body_of(unit: &Unit, body: Body) -> Option<&OpArray> {
             .iter()
             .find(|m| m.class == class && m.method == method)
             .map(|m| &m.body),
+        Body::Hook {
+            class,
+            property,
+            kind,
+        } => unit
+            .hooks
+            .iter()
+            .find(|h| h.class == class && h.property == property && h.kind == kind)
+            .map(|h| &h.body),
     }
 }
 
