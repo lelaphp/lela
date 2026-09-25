@@ -1751,21 +1751,25 @@ fn is_equal_node(a: Node, b: Node) -> bool {
     }
 }
 
-/// `dom_get_valid_file_path`: a path libxml opens, absolute, a `file://`
-/// prefix dropped; another scheme's URI as it is.
-fn file_path(req: &Request, source: &[u8]) -> Vec<u8> {
+/// `dom_get_valid_file_path`: a `file://` URI's path, or a path, made
+/// absolute (`VCWD_REALPATH`, else `expand_filepath`); another scheme's
+/// URI as it is; `None` where the path does not fit `MAXPATHLEN`, as both
+/// of php's resolvers refuse it.
+fn file_path(req: &Request, source: &[u8]) -> Option<Vec<u8>> {
+    const MAXPATHLEN: usize = 1024;
     let lower: Vec<u8> = source.iter().take(17).map(u8::to_ascii_lowercase).collect();
     let local = if lower.starts_with(b"file://localhost/") {
         &source[16..]
     } else if lower.starts_with(b"file:///") {
         &source[7..]
     } else if has_scheme(source) {
-        return source.to_vec();
+        return Some(source.to_vec());
     } else {
         source
     };
     let resolved = req.realpath(local).unwrap_or_else(|| req.absolutize(local));
-    resolved.0.to_string_lossy().into_owned().into_bytes()
+    let bytes = resolved.0.to_string_lossy().into_owned().into_bytes();
+    (bytes.len() < MAXPATHLEN).then_some(bytes)
 }
 
 /// `dom_check_qname`: the local name and the prefix of a qualified name,

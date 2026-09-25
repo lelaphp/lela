@@ -393,7 +393,9 @@ fn parse_document(req: &mut Request, from_file: bool) -> Result<Value, Thrown> {
         if source.contains(&0) {
             return Err(arg_value_error(req, 1, "not contain any null bytes"));
         }
-        let path = file_path(req, &source);
+        let Some(path) = file_path(req, &source) else {
+            return Ok(Value::bool(false));
+        };
         Parser::xml(Source::File(&path), options, None, recover)
     } else {
         let dir = base_directory(req);
@@ -1224,7 +1226,11 @@ fn schema_validate_as(req: &mut Request, schema: Schema, from_file: bool) -> Res
         if source.contains(&0) {
             return Err(arg_value_error(req, 1, "not contain any null bytes"));
         }
-        path = file_path(req, &source);
+        let Some(resolved) = file_path(req, &source) else {
+            docref(req, Level::Warning, &format!("Invalid {label} file source"));
+            return Ok(Value::bool(false));
+        };
+        path = resolved;
         Source::File(&path)
     } else {
         Source::Memory(&source)
