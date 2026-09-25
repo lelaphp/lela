@@ -67,6 +67,19 @@ impl ObjectHandlers for ClosureHandlers {
     /// ```expect
     /// Instantiation of class Closure is not allowed
     /// ```
+    ///
+    /// The refusal is raised before any frame is pushed, so the trace
+    /// names no constructor:
+    ///
+    /// ```php
+    /// new Closure();
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught Error: Instantiation of class Closure is not allowed in %s:2
+    /// Stack trace:
+    /// #0 {main}
+    ///   thrown in %s on line 2
+    /// ```
     fn get_constructor(&self, req: &mut Request, _: PhpObject) -> Result<Option<Function>, Thrown> {
         Err(throw(
             req,
