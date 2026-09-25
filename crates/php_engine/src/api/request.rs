@@ -9138,6 +9138,7 @@ impl Request {
                 );
                 return Err(crate::api::raising::throw(self, "Error", &message));
             }
+            self.deprecated_trait(found, &decl.name.0)?;
         }
         for interface in &decl.interfaces {
             self.fetch_to_link(interface, "Interface")?;
@@ -9177,6 +9178,49 @@ impl Request {
             ));
         };
         self.bind_declared(unit, at, linking.composed);
+        Ok(())
+    }
+
+    /// `zend_use_of_deprecated_trait` (`Z/Zend/zend_execute.c:2012`), as
+    /// `zend_do_link_class` raises it for each trait it fetches that the
+    /// `#[\Deprecated]` attribute marks: `Trait T used by C is
+    /// deprecated`, with the attribute's `since` and `message`, at
+    /// `E_USER_DEPRECATED` for a program's trait. A handler that throws
+    /// stops the link.
+    ///
+    /// ```php
+    /// #[\Deprecated("use U", "2.0")]
+    /// trait T {}
+    /// class C { use T; }
+    /// class D extends C {}
+    /// echo "done\n";
+    /// ```
+    /// ```expect
+    ///
+    /// Deprecated: Trait T used by C is deprecated since 2.0, use U in %s on line 4
+    /// done
+    /// ```
+    fn deprecated_trait(&mut self, found: ClassId, used_by: &[u8]) -> Result<(), Thrown> {
+        let Some(suffix) = self
+            .class_decl(found)
+            .and_then(|decl| crate::api::raising::deprecation_suffix(&decl.attributes))
+        else {
+            return Ok(());
+        };
+        let level = if self.native_class(found) {
+            Level::Deprecated
+        } else {
+            Level::UserDeprecated
+        };
+        let message = format!(
+            "Trait {} used by {} is deprecated{suffix}",
+            self.class_name(found),
+            String::from_utf8_lossy(used_by)
+        );
+        crate::api::raising::raise(self, level, &message);
+        if self.is_pending() {
+            return Err(Thrown::of(None));
+        }
         Ok(())
     }
 
