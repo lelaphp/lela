@@ -742,7 +742,7 @@ mod tests {
             by_ref: false,
             prefer_ref: false,
             variadic,
-            default: None,
+            default: crate::decl::ParameterDefault::None,
             attributes: Vec::new(),
         };
         let decl = FunctionDecl {
@@ -788,7 +788,7 @@ mod tests {
                     by_ref: false,
                     prefer_ref: false,
                     variadic: false,
-                    default: None,
+                    default: crate::decl::ParameterDefault::None,
                     attributes: Vec::new(),
                 })
                 .collect(),

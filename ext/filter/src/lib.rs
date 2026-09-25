@@ -40,7 +40,7 @@ use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::coerce::{coerce_param, numeric_string, to_long, to_string, value_name};
 use php_ext::decl::{
     Attribute, AttributeArgument, ClassDecl, ClassFlags, ClassKind, ConstDecl, ConstExpr,
-    EnumBacking, FunctionDecl, IniDecl, Name, Parameter, Type,
+    EnumBacking, FunctionDecl, IniDecl, Name, Parameter, ParameterDefault, Type,
 };
 use php_ext::raising::{
     Level, Thrown, arg_count_error, arg_null_deprecated, arg_type_error, arg_value_error, docref,
@@ -527,7 +527,7 @@ fn parameter(name: &[u8], ty: Type, default: Option<ConstExpr>) -> Parameter {
         by_ref: false,
         prefer_ref: false,
         variadic: false,
-        default,
+        default: default.map_or(ParameterDefault::None, ParameterDefault::Expr),
         attributes: Vec::new(),
     }
 }

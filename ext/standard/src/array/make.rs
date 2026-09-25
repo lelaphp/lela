@@ -5,7 +5,7 @@
 
 use php_ext::call::{call, lookup_function};
 use php_ext::coerce::{numeric_string, to_array};
-use php_ext::decl::{ConstExpr, FunctionDecl, Parameter, Type};
+use php_ext::decl::{ConstExpr, FunctionDecl, Parameter, ParameterDefault, Type};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
@@ -116,7 +116,7 @@ pub(super) fn natives() -> Vec<(FunctionDecl, Entry)> {
                     parameter(b"start", number_or_string()),
                     parameter(b"end", number_or_string()),
                     Parameter {
-                        default: Some(ConstExpr::Long(1)),
+                        default: ParameterDefault::Expr(ConstExpr::Long(1)),
                         ..parameter(b"step", Type::Union(vec![Type::Int, Type::Float]))
                     },
                 ],
@@ -141,7 +141,7 @@ pub(super) fn natives() -> Vec<(FunctionDecl, Entry)> {
                 &[
                     parameter(b"array", Type::Array),
                     Parameter {
-                        default: Some(ConstExpr::Long(1)),
+                        default: ParameterDefault::Expr(ConstExpr::Long(1)),
                         ..parameter(b"num", Type::Int)
                     },
                 ],

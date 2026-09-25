@@ -15,19 +15,17 @@
 //! which would be wrong about a method the class has. The bodies
 //! arrive with the tests that call them.
 //!
-//! Two spellings of the stub the declaration model has no word for
-//! are carried as the stub writes them: `= UNKNOWN`, an optional
-//! parameter with no default to show, is [`unknown_default`], the
-//! constant named `UNKNOWN`, which the renderer prints as php prints it,
-//! `<default>`; and an enum's cases are its constants, since the model
-//! has no case bit and `PropertyHookType` declares no other constant.
+//! `= UNKNOWN`, an optional parameter with no default to show, is
+//! [`unknown_default`], the model's `ParameterDefault::Unshown`, which the
+//! renderer prints as php prints it, `<default>`.
 // A class's function is one row per method of the stub, and the rows
 // are what the linter counts.
 #![allow(clippy::too_many_lines)]
 
 use php_ext::decl::{
     Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind, ConstExpr,
-    EnumBacking, FunctionDecl, MethodDecl, Name, Parameter, PropertyDecl, Type, Visibility,
+    EnumBacking, FunctionDecl, MethodDecl, Name, Parameter, ParameterDefault, PropertyDecl, Type,
+    Visibility,
 };
 use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
@@ -38,16 +36,6 @@ use super::Entry;
 /// One class with its methods' entries, the shape
 /// `ExtensionBuilder::classes` takes.
 pub(super) type Declared = (ClassDecl, Vec<(MethodDecl, Entry)>);
-
-/// The spelling of an optional parameter the stub gives no default,
-/// `mixed $default = UNKNOWN`.
-const UNKNOWN: &str = "UNKNOWN";
-
-/// Whether a parameter's default is the stub's `UNKNOWN`, which
-/// `_parameter_string` prints as `<default>`.
-pub(super) fn is_unknown_default(expr: &ConstExpr) -> bool {
-    matches!(expr, ConstExpr::Constant(name) if name.0.as_ref() == UNKNOWN.as_bytes())
-}
 
 /// The entry of a method declared and not yet served: php's `Error`,
 /// as a native that cannot do what it was asked raises one.
@@ -156,7 +144,7 @@ fn parameter(name: &[u8], ty: Type) -> Parameter {
         by_ref: false,
         prefer_ref: false,
         variadic: false,
-        default: None,
+        default: ParameterDefault::None,
         attributes: Vec::new(),
     }
 }
@@ -171,14 +159,17 @@ fn untyped(name: &[u8]) -> Parameter {
 
 fn with_default(name: &[u8], ty: Type, default: ConstExpr) -> Parameter {
     Parameter {
-        default: Some(default),
+        default: ParameterDefault::Expr(default),
         ..parameter(name, ty)
     }
 }
 
 /// `type $name = UNKNOWN`: optional, with no default to show.
 fn unknown_default(name: &[u8], ty: Type) -> Parameter {
-    with_default(name, ty, ConstExpr::Constant(Name::from(UNKNOWN)))
+    Parameter {
+        default: ParameterDefault::Unshown,
+        ..parameter(name, ty)
+    }
 }
 
 fn variadic(name: &[u8], ty: Type) -> Parameter {

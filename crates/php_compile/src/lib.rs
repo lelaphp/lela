@@ -333,7 +333,10 @@ mod tests {
             by_ref: false,
             prefer_ref: false,
             variadic: false,
-            default,
+            default: default.map_or(
+                php_unit::decl::ParameterDefault::None,
+                php_unit::decl::ParameterDefault::Expr,
+            ),
             attributes: Vec::new(),
         };
         [
@@ -5143,7 +5146,7 @@ echo f(1), C::s(), $o->m(1), $o->p;
                 .0
                 .parameters
                 .iter()
-                .map(|p| p.default.clone())
+                .map(|p| p.default.expr().cloned())
                 .collect::<Vec<_>>(),
             vec![
                 Some(ConstExpr::Constant(Name(b"PHP_INT_MAX".as_slice().into()))),
@@ -5219,7 +5222,12 @@ class C {
         assert_eq!(
             f.parameters
                 .iter()
-                .map(|p| (p.ty.clone(), p.by_ref, p.variadic, p.default.is_some()))
+                .map(|p| (
+                    p.ty.clone(),
+                    p.by_ref,
+                    p.variadic,
+                    p.default.expr().is_some()
+                ))
                 .collect::<Vec<_>>(),
             vec![
                 (Some(Type::Int), false, false, false),

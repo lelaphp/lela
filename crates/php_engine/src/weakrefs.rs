@@ -22,7 +22,7 @@
 use php_heap::Obj;
 use php_unit::decl::{
     ClassDecl, ClassFlags, ClassKind, DynamicProperties, FunctionDecl, MethodDecl, Name, Parameter,
-    Type, Visibility,
+    ParameterDefault, Type, Visibility,
 };
 
 use crate::api::abi::{CloneObj, Entry, NativeClassDecl, ObjectHandlers};
@@ -725,7 +725,7 @@ fn untyped(name: &[u8]) -> Parameter {
         by_ref: false,
         prefer_ref: false,
         variadic: false,
-        default: None,
+        default: ParameterDefault::None,
         attributes: Vec::new(),
     }
 }

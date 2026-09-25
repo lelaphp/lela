@@ -37,7 +37,7 @@ use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::coerce::coerce_param;
 use php_ext::decl::{
     ClassDecl, ClassFlags, ClassKind, ConstDecl, ConstExpr, EnumBacking, FunctionDecl, MethodDecl,
-    Name, Parameter, Type, Visibility,
+    Name, Parameter, ParameterDefault, Type, Visibility,
 };
 use php_ext::raising::{Thrown, arg_count_error, arg_value_error, new_throwable, throw_value};
 use php_ext::request::Request;
@@ -103,7 +103,7 @@ struct State {
 /// ```
 pub fn extension() -> Extension {
     let int = |name: &[u8], ty: Type, default: i64| Parameter {
-        default: Some(ConstExpr::Long(default)),
+        default: ParameterDefault::Expr(ConstExpr::Long(default)),
         ..parameter(name, ty)
     };
     ExtensionBuilder::default()
@@ -127,7 +127,7 @@ pub fn extension() -> Extension {
                     &[
                         parameter(b"json", Type::String),
                         Parameter {
-                            default: Some(ConstExpr::Null),
+                            default: ParameterDefault::Expr(ConstExpr::Null),
                             ..parameter(b"associative", Type::Nullable(Box::new(Type::Bool)))
                         },
                         int(b"depth", Type::Int, DEFAULT_DEPTH),
@@ -326,7 +326,7 @@ fn parameter(name: &[u8], ty: Type) -> Parameter {
         by_ref: false,
         prefer_ref: false,
         variadic: false,
-        default: None,
+        default: ParameterDefault::None,
         attributes: Vec::new(),
     }
 }

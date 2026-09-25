@@ -20,7 +20,7 @@ use std::cmp::Ordering;
 
 use php_unit::decl::{
     ClassDecl, ClassFlags, ClassKind, ConstExpr, DynamicProperties, EnumBacking, FunctionDecl,
-    MethodDecl, Name, Parameter, PropertyDecl, Type, Visibility,
+    MethodDecl, Name, Parameter, ParameterDefault, PropertyDecl, Type, Visibility,
 };
 
 use crate::api::abi::{CloneObj, Entry, NativeClassDecl, ObjectHandlers};
@@ -280,7 +280,7 @@ impl ObjectHandlers for ClosureHandlers {
             let required = decl
                 .parameters
                 .iter()
-                .position(|p| p.default.is_some() || p.variadic)
+                .position(|p| !p.is_required())
                 .unwrap_or(decl.parameters.len());
             let mut parameters = PhpArray::new(req)?;
             for (at, parameter) in decl.parameters.iter().enumerate() {
@@ -595,7 +595,7 @@ fn backed_enum() -> ClassDecl {
         by_ref: false,
         prefer_ref: false,
         variadic: false,
-        default: None,
+        default: ParameterDefault::None,
         attributes: Vec::new(),
     };
     ClassDecl {
@@ -709,7 +709,7 @@ fn closure_class() -> ClassDecl {
 fn closure_methods() -> Vec<(MethodDecl, Entry)> {
     let closure = || Type::Named(Name(b"Closure".as_slice().into()));
     let scope = || Parameter {
-        default: Some(ConstExpr::Str(b"static".as_slice().into())),
+        default: ParameterDefault::Expr(ConstExpr::Str(b"static".as_slice().into())),
         ..parameter(
             b"newScope",
             Type::Union(vec![Type::Object, Type::String, Type::Null]),
@@ -827,7 +827,7 @@ fn parameter(name: &[u8], ty: Type) -> Parameter {
         by_ref: false,
         prefer_ref: false,
         variadic: false,
-        default: None,
+        default: ParameterDefault::None,
         attributes: Vec::new(),
     }
 }
@@ -1037,7 +1037,7 @@ fn array_access_methods() -> Vec<MethodDecl> {
         by_ref: false,
         prefer_ref: false,
         variadic: false,
-        default: None,
+        default: ParameterDefault::None,
         attributes: Vec::new(),
     };
     let value = Parameter {
@@ -1098,7 +1098,7 @@ fn throwable_methods() -> Vec<(MethodDecl, Entry)> {
         by_ref: false,
         prefer_ref: false,
         variadic: false,
-        default: Some(default),
+        default: ParameterDefault::Expr(default),
         attributes: Vec::new(),
     };
     let throwable = || Type::Nullable(Box::new(Type::Named(Name::from("Throwable"))));

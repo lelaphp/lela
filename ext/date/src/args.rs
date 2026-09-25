@@ -3,7 +3,9 @@
 //! it does not take, and the declarations the natives are made of.
 
 use php_ext::coerce::coerce_param;
-use php_ext::decl::{ConstExpr, FunctionDecl, MethodDecl, Name, Parameter, Type, Visibility};
+use php_ext::decl::{
+    ConstExpr, FunctionDecl, MethodDecl, Name, Parameter, ParameterDefault, Type, Visibility,
+};
 use php_ext::raising::{Thrown, arg_count_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
@@ -206,7 +208,7 @@ pub(super) fn p(name: &str, ty: Type) -> Parameter {
         by_ref: false,
         prefer_ref: false,
         variadic: false,
-        default: None,
+        default: ParameterDefault::None,
         attributes: Vec::new(),
     }
 }
@@ -214,7 +216,7 @@ pub(super) fn p(name: &str, ty: Type) -> Parameter {
 /// One parameter with its written default.
 pub(super) fn d(name: &str, ty: Type, default: ConstExpr) -> Parameter {
     Parameter {
-        default: Some(default),
+        default: ParameterDefault::Expr(default),
         ..p(name, ty)
     }
 }

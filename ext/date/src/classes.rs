@@ -7,7 +7,7 @@
 use php_ext::abi::ExtensionBuilder;
 use php_ext::decl::{
     Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind, ConstExpr,
-    EnumBacking, MethodDecl, Name, Parameter, PropertyDecl, Type, Visibility,
+    EnumBacking, MethodDecl, Name, Parameter, ParameterDefault, PropertyDecl, Type, Visibility,
 };
 
 use crate::args::{class, d, method, nullable, p, str_default, union, untyped};
@@ -563,7 +563,7 @@ fn date_interval() -> (ClassDecl, Vec<(MethodDecl, Entry)>) {
 /// no value Reflection can show.
 fn unknown(name: &str) -> Parameter {
     Parameter {
-        default: Some(ConstExpr::Constant(Name(b"UNKNOWN".as_slice().into()))),
+        default: ParameterDefault::Unshown,
         ..untyped(name)
     }
 }

@@ -12,7 +12,8 @@
 
 use php_ext::decl::{
     Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind, ConstExpr,
-    EnumBacking, FunctionDecl, MethodDecl, Name, Parameter, PropertyDecl, Type, Visibility,
+    EnumBacking, FunctionDecl, MethodDecl, Name, Parameter, ParameterDefault, PropertyDecl, Type,
+    Visibility,
 };
 
 use crate::Entry;
@@ -396,7 +397,17 @@ impl Reader<'_> {
             return None;
         }
         let name = self.word();
-        let default = self.eat(b'=').then(|| self.default());
+        let default = if self.eat(b'=') {
+            match self.default() {
+                // `= UNKNOWN`: optional, with no default to show.
+                ConstExpr::Constant(named) if named.0.as_ref() == b"UNKNOWN" => {
+                    ParameterDefault::Unshown
+                }
+                expr => ParameterDefault::Expr(expr),
+            }
+        } else {
+            ParameterDefault::None
+        };
         Some(Parameter {
             name: Name(name.into()),
             ty,

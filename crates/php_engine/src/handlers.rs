@@ -2546,7 +2546,7 @@ fn missing_argument(req: &mut Request, frame: FrameRef, passed: u32) -> Thrown {
         .map(|decl| {
             decl.parameters
                 .iter()
-                .map(|parameter| parameter.default.is_none() && !parameter.variadic)
+                .map(php_unit::decl::Parameter::is_required)
                 .collect()
         })
         .unwrap_or_default();

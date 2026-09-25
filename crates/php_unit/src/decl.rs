@@ -3,8 +3,8 @@
 //! constant expressions still unevaluated. Produced by the compiler for
 //! user code and by the native macros for natives; consumed by the linker,
 //! Reflection, the dumpers and the stub cross-check, which read one model.
-//! Data only: no method here, since the eighteen types are re-exported
-//! by `php_engine::api::decl` and their surface is `api.lock`'s.
+//! The types are re-exported by `php_engine::api::decl`, so their surface
+//! is `api.lock`'s as well as `unit.lock`'s.
 
 /// A name as written: bytes, interned by the engine at publication.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
@@ -202,6 +202,39 @@ pub struct Attribute {
     pub arguments: Vec<AttributeArgument>,
 }
 
+/// What stands after a parameter's name, decoded once where the
+/// declaration is written and matched wherever a default is read.
+///
+/// A user function's is the `RECV_INIT` constant, kept as written
+/// (design §4.7), and `None` where the opline is a plain `RECV`, which
+/// is what `zend_compile_params` makes of a default written before the
+/// last required parameter. A native's is the expression behind
+/// `gen_stub.php`'s `zend_internal_arg_info.default_value`, whose text
+/// is what the stub generator's printer makes of that expression, so
+/// the text is rendered from it and not carried beside it; and
+/// `Unshown` is the stub's `= UNKNOWN`, a parameter past
+/// `required_num_args` with no `default_value`, which
+/// `_parameter_string` prints as `<default>` and
+/// `ReflectionParameter::isDefaultValueAvailable` answers `false` for.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum ParameterDefault {
+    #[default]
+    None,
+    Unshown,
+    Expr(ConstExpr),
+}
+
+impl ParameterDefault {
+    /// The expression php's `get_parameter_default` hands back: none on
+    /// a required parameter and none on `Unshown`.
+    pub fn expr(&self) -> Option<&ConstExpr> {
+        match self {
+            ParameterDefault::None | ParameterDefault::Unshown => None,
+            ParameterDefault::Expr(expr) => Some(expr),
+        }
+    }
+}
+
 /// One declared parameter slot.
 ///
 /// `prefer_ref` is php's `ZEND_SEND_PREFER_REF` beside `by_ref`'s
@@ -218,8 +251,16 @@ pub struct Parameter {
     pub by_ref: bool,
     pub prefer_ref: bool,
     pub variadic: bool,
-    pub default: Option<ConstExpr>,
+    pub default: ParameterDefault,
     pub attributes: Vec<Attribute>,
+}
+
+impl Parameter {
+    /// Whether the slot counts toward php's `required_num_args`: not the
+    /// variadic one, and none with a default or `Unshown` after its name.
+    pub fn is_required(&self) -> bool {
+        !self.variadic && self.default == ParameterDefault::None
+    }
 }
 
 /// A function's declaration: its signature, doc comment and site; the

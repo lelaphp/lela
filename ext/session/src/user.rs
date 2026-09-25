@@ -7,7 +7,7 @@
 
 use php_ext::call::call;
 use php_ext::coerce::{callable_checked, value_name};
-use php_ext::decl::{ClassDecl, ClassKind, MethodDecl, Type};
+use php_ext::decl::{ClassDecl, ClassKind, MethodDecl, ParameterDefault, Type};
 use php_ext::raising::{Level, Thrown, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, Value, ValueRef};
@@ -299,7 +299,8 @@ pub(super) fn validate_sid(req: &mut Request, id: &[u8]) -> Result<bool, Thrown>
 /// bool(true)
 /// ```
 pub(super) fn classes() -> Vec<(ClassDecl, Vec<(MethodDecl, Entry)>)> {
-    let string = |name: &[u8]| parameter(name, Some(Type::String), None);
+    let typed = |name: &[u8], ty: Type| parameter(name, Some(ty), ParameterDefault::None);
+    let string = |name: &[u8]| typed(name, Type::String);
     let string_or_false = || Type::Union(vec![Type::String, Type::False]);
     let int_or_false = || Type::Union(vec![Type::Int, Type::False]);
     let handler: [(&[u8], Vec<_>, Type, Entry); 6] = [
@@ -325,7 +326,7 @@ pub(super) fn classes() -> Vec<(ClassDecl, Vec<(MethodDecl, Entry)>)> {
         (b"destroy", vec![string(b"id")], Type::Bool, handler_destroy),
         (
             b"gc",
-            vec![parameter(b"max_lifetime", Some(Type::Int), None)],
+            vec![typed(b"max_lifetime", Type::Int)],
             int_or_false(),
             handler_gc,
         ),

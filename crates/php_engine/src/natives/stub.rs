@@ -7,7 +7,7 @@
 //! default. The grammar is the one `ext/standard` reads its own stub
 //! with, cut to what this stub writes.
 
-use php_unit::decl::{ConstExpr, FunctionDecl, Name, Parameter, Type};
+use php_unit::decl::{ConstExpr, FunctionDecl, Name, Parameter, ParameterDefault, Type};
 
 /// The declaration a stub line writes. A line the grammar cannot read
 /// declares what it read up to there, since a declaration table is
@@ -130,7 +130,16 @@ impl Reader<'_> {
             return None;
         }
         let name = self.word();
-        let default = self.eat(b'=').then(|| self.operand());
+        let default = if self.eat(b'=') {
+            match self.operand() {
+                ConstExpr::Constant(named) if named.0.as_ref() == b"UNKNOWN" => {
+                    ParameterDefault::Unshown
+                }
+                operand => ParameterDefault::Expr(operand),
+            }
+        } else {
+            ParameterDefault::None
+        };
         Some(Parameter {
             name: Name(name.into()),
             ty,

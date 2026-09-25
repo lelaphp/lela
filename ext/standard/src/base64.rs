@@ -7,7 +7,7 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_ext::decl::{ConstExpr, FunctionDecl, Parameter, Type};
+use php_ext::decl::{ConstExpr, FunctionDecl, Parameter, ParameterDefault, Type};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::{PhpString, Value};
@@ -53,7 +53,7 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
                 &[
                     parameter(b"string", Type::String),
                     Parameter {
-                        default: Some(ConstExpr::Bool(false)),
+                        default: ParameterDefault::Expr(ConstExpr::Bool(false)),
                         ..parameter(b"strict", Type::Bool)
                     },
                 ],

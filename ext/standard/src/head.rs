@@ -11,7 +11,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 use php_ext::coerce::{coerce_param, to_long, to_string, truthy};
-use php_ext::decl::{ConstExpr, FunctionDecl, Parameter, Type};
+use php_ext::decl::{ConstExpr, FunctionDecl, Parameter, ParameterDefault, Type};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
@@ -36,7 +36,7 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
     let by_ref = |name: &[u8]| Parameter {
         ty: None,
         by_ref: true,
-        default: Some(ConstExpr::Null),
+        default: ParameterDefault::Expr(ConstExpr::Null),
         ..parameter(name, Type::Mixed)
     };
     vec![
@@ -46,11 +46,11 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
                 &[
                     parameter(b"header", Type::String),
                     Parameter {
-                        default: Some(ConstExpr::Bool(true)),
+                        default: ParameterDefault::Expr(ConstExpr::Bool(true)),
                         ..parameter(b"replace", Type::Bool)
                     },
                     Parameter {
-                        default: Some(ConstExpr::Long(0)),
+                        default: ParameterDefault::Expr(ConstExpr::Long(0)),
                         ..parameter(b"response_code", Type::Int)
                     },
                 ],
@@ -62,7 +62,7 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
             declared(
                 b"header_remove",
                 &[Parameter {
-                    default: Some(ConstExpr::Null),
+                    default: ParameterDefault::Expr(ConstExpr::Null),
                     ..parameter(b"name", Type::Nullable(Box::new(Type::String)))
                 }],
                 Type::Void,
@@ -73,7 +73,7 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
             declared(
                 b"http_response_code",
                 &[Parameter {
-                    default: Some(ConstExpr::Long(0)),
+                    default: ParameterDefault::Expr(ConstExpr::Long(0)),
                     ..parameter(b"response_code", Type::Int)
                 }],
                 Type::Union(vec![Type::Int, Type::Bool]),

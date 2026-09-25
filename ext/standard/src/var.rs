@@ -11,7 +11,9 @@
 
 use php_ext::abi::PropertyPurpose;
 use php_ext::coerce::{Exponent, float_format, to_string};
-use php_ext::decl::{ClassKind, ConstExpr, EnumBacking, FunctionDecl, Parameter, Type};
+use php_ext::decl::{
+    ClassKind, ConstExpr, EnumBacking, FunctionDecl, Parameter, ParameterDefault, Type,
+};
 use php_ext::raising::{Thrown, warning};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpString, Value};
@@ -185,7 +187,7 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
                 &[
                     parameter(b"value", Type::Mixed),
                     Parameter {
-                        default: Some(ConstExpr::Bool(false)),
+                        default: ParameterDefault::Expr(ConstExpr::Bool(false)),
                         ..parameter(b"return", Type::Bool)
                     },
                 ],
@@ -199,7 +201,7 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
                 &[
                     parameter(b"value", Type::Mixed),
                     Parameter {
-                        default: Some(ConstExpr::Bool(false)),
+                        default: ParameterDefault::Expr(ConstExpr::Bool(false)),
                         ..parameter(b"return", Type::Bool)
                     },
                 ],
@@ -235,7 +237,7 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
                 &[
                     parameter(b"data", Type::String),
                     Parameter {
-                        default: Some(ConstExpr::Array(Vec::new())),
+                        default: ParameterDefault::Expr(ConstExpr::Array(Vec::new())),
                         ..parameter(b"options", Type::Array)
                     },
                 ],

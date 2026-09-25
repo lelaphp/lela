@@ -7,7 +7,7 @@
 use php_ext::coerce::{coerce_param, numeric_string};
 use php_ext::decl::{
     ClassConstDecl, ClassDecl, ClassFlags, ClassKind, ConstDecl, ConstExpr, EnumBacking,
-    FunctionDecl, MethodDecl, Name, Parameter, PropertyDecl, Type, Visibility,
+    FunctionDecl, MethodDecl, Name, Parameter, ParameterDefault, PropertyDecl, Type, Visibility,
 };
 use php_ext::raising::{Level, Thrown, arg_value_error, deprecated, docref, throw};
 use php_ext::request::Request;
@@ -298,11 +298,11 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
                 &[
                     parameter(b"num", number()),
                     Parameter {
-                        default: Some(ConstExpr::Long(0)),
+                        default: ParameterDefault::Expr(ConstExpr::Long(0)),
                         ..parameter(b"precision", Type::Int)
                     },
                     Parameter {
-                        default: Some(ConstExpr::EnumCase {
+                        default: ParameterDefault::Expr(ConstExpr::EnumCase {
                             class: Name(b"RoundingMode".as_slice().into()),
                             case: Name(b"HalfAwayFromZero".as_slice().into()),
                         }),
@@ -377,7 +377,9 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
                 &[
                     parameter(b"num", Type::Float),
                     Parameter {
-                        default: Some(ConstExpr::Constant(Name(b"M_E".as_slice().into()))),
+                        default: ParameterDefault::Expr(ConstExpr::Constant(Name(
+                            b"M_E".as_slice().into(),
+                        ))),
                         ..parameter(b"base", Type::Float)
                     },
                 ],
@@ -414,15 +416,15 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
                 &[
                     parameter(b"num", Type::Float),
                     Parameter {
-                        default: Some(ConstExpr::Long(0)),
+                        default: ParameterDefault::Expr(ConstExpr::Long(0)),
                         ..parameter(b"decimals", Type::Int)
                     },
                     Parameter {
-                        default: Some(ConstExpr::Str(b".".as_slice().into())),
+                        default: ParameterDefault::Expr(ConstExpr::Str(b".".as_slice().into())),
                         ..parameter(b"decimal_separator", Type::Nullable(Box::new(Type::String)))
                     },
                     Parameter {
-                        default: Some(ConstExpr::Str(b",".as_slice().into())),
+                        default: ParameterDefault::Expr(ConstExpr::Str(b",".as_slice().into())),
                         ..parameter(
                             b"thousands_separator",
                             Type::Nullable(Box::new(Type::String)),

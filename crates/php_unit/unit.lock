@@ -40,6 +40,9 @@ decl::IniDecl
 decl::MethodDecl
 decl::Name
 decl::Parameter
+decl::Parameter::is_required
+decl::ParameterDefault
+decl::ParameterDefault::expr
 decl::PropertyDecl
 decl::Type
 decl::Type::MAY_BE_ANY

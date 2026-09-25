@@ -698,6 +698,23 @@ pub(super) fn reflection_parameter_construct(req: &mut Request) -> Result<Value,
 /// ```expect
 /// Parameter #1 [ <optional> $b = NULL ]
 /// ```
+///
+/// A native's default is the text `gen_stub.php` printed from the
+/// stub's expression, a string double-quoted with its escapes, and
+/// `<default>` for the stub's `UNKNOWN`, which reads as optional with no
+/// value to fetch (#377):
+///
+/// ```php
+/// echo new ReflectionParameter('trim', 1), "\n", new ReflectionParameter('str_getcsv', 3), "\n", new ReflectionParameter('get_class', 0), "\n";
+/// var_dump((new ReflectionParameter('get_class', 0))->isOptional(), (new ReflectionParameter('get_class', 0))->isDefaultValueAvailable());
+/// ```
+/// ```expect
+/// Parameter #1 [ <optional> string $characters = " \n\r\t\v\x00" ]
+/// Parameter #3 [ <optional> string $escape = "\\" ]
+/// Parameter #0 [ <optional> object $object = <default> ]
+/// bool(true)
+/// bool(false)
+/// ```
 pub(super) fn reflection_parameter_to_string(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 0)?;
     let (reference, decl, parameter) = this_parameter(req)?;
@@ -988,10 +1005,7 @@ pub(super) fn reflection_parameter_is_default_value_available(
 /// back: the declared one, and none for the stub's `UNKNOWN`, which
 /// is an optional parameter with nothing to show.
 fn parameter_default(parameter: &Parameter) -> Option<&ConstExpr> {
-    parameter
-        .default
-        .as_ref()
-        .filter(|expr| !super::stub::is_unknown_default(expr))
+    parameter.default.expr()
 }
 
 /// php's `reflection_exception` for a parameter whose default

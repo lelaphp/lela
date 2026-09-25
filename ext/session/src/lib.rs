@@ -40,7 +40,7 @@ use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder};
 use php_ext::coerce::coerce_param;
 use php_ext::decl::{
     ClassDecl, ClassFlags, ClassKind, ConstDecl, ConstExpr, EnumBacking, FunctionDecl, MethodDecl,
-    Name, Parameter, Type, Visibility,
+    Name, Parameter, ParameterDefault, Type, Visibility,
 };
 use php_ext::raising::{Level, Thrown, arg_count_error, docref, throw};
 use php_ext::request::Request;
@@ -322,7 +322,7 @@ fn declared(name: &[u8], parameters: Vec<Parameter>, returns: Type) -> FunctionD
     }
 }
 
-fn parameter(name: &[u8], ty: Option<Type>, default: Option<ConstExpr>) -> Parameter {
+fn parameter(name: &[u8], ty: Option<Type>, default: ParameterDefault) -> Parameter {
     Parameter {
         name: Name(name.into()),
         ty,

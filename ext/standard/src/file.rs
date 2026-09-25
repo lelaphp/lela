@@ -17,7 +17,7 @@
 
 use php_ext::call::lookup_class;
 use php_ext::coerce::{coerce_param, to_string, value_name};
-use php_ext::decl::{ConstDecl, ConstExpr, FunctionDecl, Name, Parameter, Type};
+use php_ext::decl::{ConstDecl, ConstExpr, FunctionDecl, Name, Parameter, ParameterDefault, Type};
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw};
 use php_ext::request::{Request, Stream, Whence, WrapperOp};
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
@@ -150,7 +150,7 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
                 stream_parameter(),
                 parameter(b"data", Type::String),
                 Parameter {
-                    default: Some(ConstExpr::Null),
+                    default: ParameterDefault::Expr(ConstExpr::Null),
                     ..parameter(b"length", Type::Nullable(Box::new(Type::Int)))
                 },
             ],
@@ -183,7 +183,9 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
                     stream_parameter(),
                     parameter(b"offset", Type::Int),
                     Parameter {
-                        default: Some(ConstExpr::Constant(Name(b"SEEK_SET".as_slice().into()))),
+                        default: ParameterDefault::Expr(ConstExpr::Constant(Name(
+                            b"SEEK_SET".as_slice().into(),
+                        ))),
                         ..parameter(b"whence", Type::Int)
                     },
                 ],
@@ -225,7 +227,7 @@ fn stream_parameter() -> Parameter {
 pub(super) fn untyped_null(name: &[u8]) -> Parameter {
     Parameter {
         ty: None,
-        default: Some(ConstExpr::Null),
+        default: ParameterDefault::Expr(ConstExpr::Null),
         ..parameter(name, Type::Mixed)
     }
 }
@@ -257,7 +259,7 @@ fn read_natives() -> Vec<(FunctionDecl, Entry)> {
                 &[
                     stream_parameter(),
                     Parameter {
-                        default: Some(ConstExpr::Null),
+                        default: ParameterDefault::Expr(ConstExpr::Null),
                         ..parameter(b"length", Type::Nullable(Box::new(Type::Int)))
                     },
                 ],
@@ -282,7 +284,7 @@ fn read_natives() -> Vec<(FunctionDecl, Entry)> {
                         parameter(b"filename", Type::String),
                         parameter(b"mode", Type::String),
                         Parameter {
-                            default: Some(ConstExpr::Bool(false)),
+                            default: ParameterDefault::Expr(ConstExpr::Bool(false)),
                             ..parameter(b"use_include_path", Type::Bool)
                         },
                         untyped_null(b"context"),
@@ -341,16 +343,16 @@ fn contents_natives() -> Vec<(FunctionDecl, Entry)> {
                 &[
                     parameter(b"filename", Type::String),
                     Parameter {
-                        default: Some(ConstExpr::Bool(false)),
+                        default: ParameterDefault::Expr(ConstExpr::Bool(false)),
                         ..parameter(b"use_include_path", Type::Bool)
                     },
                     untyped_null(b"context"),
                     Parameter {
-                        default: Some(ConstExpr::Long(0)),
+                        default: ParameterDefault::Expr(ConstExpr::Long(0)),
                         ..parameter(b"offset", Type::Int)
                     },
                     Parameter {
-                        default: Some(ConstExpr::Null),
+                        default: ParameterDefault::Expr(ConstExpr::Null),
                         ..parameter(b"length", Type::Nullable(Box::new(Type::Int)))
                     },
                 ],
@@ -365,7 +367,7 @@ fn contents_natives() -> Vec<(FunctionDecl, Entry)> {
                     parameter(b"filename", Type::String),
                     parameter(b"data", Type::Mixed),
                     Parameter {
-                        default: Some(ConstExpr::Long(0)),
+                        default: ParameterDefault::Expr(ConstExpr::Long(0)),
                         ..parameter(b"flags", Type::Int)
                     },
                     untyped_null(b"context"),
@@ -1933,7 +1935,7 @@ fn path_natives() -> Vec<(FunctionDecl, Entry)> {
             declared(
                 b"umask",
                 &[Parameter {
-                    default: Some(ConstExpr::Null),
+                    default: ParameterDefault::Expr(ConstExpr::Null),
                     ..parameter(b"mask", Type::Nullable(Box::new(Type::Int)))
                 }],
                 Type::Int,
@@ -1946,11 +1948,11 @@ fn path_natives() -> Vec<(FunctionDecl, Entry)> {
                 &[
                     parameter(b"directory", Type::String),
                     Parameter {
-                        default: Some(ConstExpr::Long(0o777)),
+                        default: ParameterDefault::Expr(ConstExpr::Long(0o777)),
                         ..parameter(b"permissions", Type::Int)
                     },
                     Parameter {
-                        default: Some(ConstExpr::Bool(false)),
+                        default: ParameterDefault::Expr(ConstExpr::Bool(false)),
                         ..parameter(b"recursive", Type::Bool)
                     },
                     untyped_null(b"context"),

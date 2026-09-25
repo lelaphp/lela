@@ -4204,13 +4204,13 @@ fn function_body(
     let _ = writeln!(out, "{indent}}}");
 }
 
-/// `required_num_args`: every parameter before the first with a
-/// default or the variadic one.
+/// `required_num_args`: the parameters up to the last one that is
+/// required.
 fn required_parameters(decl: &FunctionDecl) -> usize {
     decl.parameters
         .iter()
-        .position(|p| p.default.is_some() || p.variadic)
-        .unwrap_or(decl.parameters.len())
+        .rposition(Parameter::is_required)
+        .map_or(0, |at| at + 1)
 }
 
 /// `_parameter_string`: one `Parameter #N [ ... ]` row, the modifier
@@ -4242,21 +4242,20 @@ fn parameter_string(
     }
     let _ = write!(out, "${}", String::from_utf8_lossy(&parameter.name.0));
     // A native's default is the text `gen_stub.php` wrote into the arg
-    // info; a user function's is the zval `RECV_INIT` holds, which
-    // `format_default_value` prints and `NULL` is the spelling of.
-    match (&parameter.default, internal) {
-        (Some(expr), false) => {
-            let _ = write!(out, " = {}", default_value_string(req, expr));
+    // info, `<default>` where it wrote none; a user function's is the
+    // zval `RECV_INIT` holds, which `format_default_value` prints and
+    // `NULL` is the spelling of.
+    if !required && !parameter.variadic {
+        match (parameter.default.expr(), internal) {
+            (Some(expr), true) => {
+                let _ = write!(out, " = {}", const_expr_string(expr));
+            }
+            (None, true) => out.push_str(" = <default>"),
+            (Some(expr), false) => {
+                let _ = write!(out, " = {}", default_value_string(req, expr));
+            }
+            (None, false) => {}
         }
-        (default, _) if !required && !parameter.variadic => {
-            out.push_str(" = ");
-            out.push_str(
-                &default
-                    .as_ref()
-                    .map_or_else(|| String::from("<default>"), const_expr_string),
-            );
-        }
-        _ => {}
     }
     out.push_str(" ]");
     out
@@ -4282,15 +4281,11 @@ fn function_parameter_string(
 }
 
 /// A native parameter's default as `gen_stub.php` writes it into
-/// `zend_internal_arg_info.default_value`: the expression's source
-/// text, which for a scalar is the scalar as written, and for a string
-/// the stub's spelling, double-quoted as `zend_exceptions.stub.php` and
-/// the rest of php-src write theirs, a class constant as `Class::NAME`,
-/// constants joined by `|` as the
-/// stub joins them, and `<default>` for the stub's
-/// `UNKNOWN`, an optional parameter with nothing to show; a string the
-/// stub spells with an escape needs the written text on the
-/// declaration, which the model does not carry (#377).
+/// `zend_internal_arg_info.default_value`: what the stub generator's
+/// printer makes of the expression, which for a scalar is the scalar as
+/// written, for a string the bytes double-quoted with its escapes
+/// ([`stub_escaped`]), a class constant as `Class::NAME`, and constants
+/// joined by `|` as the stub joins them.
 fn const_expr_string(expr: &php_ext::decl::ConstExpr) -> String {
     use php_ext::decl::ConstExpr;
     match expr {
@@ -4298,8 +4293,7 @@ fn const_expr_string(expr: &php_ext::decl::ConstExpr) -> String {
         ConstExpr::Bool(b) => String::from(if *b { "true" } else { "false" }),
         ConstExpr::Long(n) => n.to_string(),
         ConstExpr::Double(f) => f.to_string(),
-        ConstExpr::Str(s) => format!("\"{}\"", String::from_utf8_lossy(s)),
-        expr if stub::is_unknown_default(expr) => String::from("<default>"),
+        ConstExpr::Str(s) => format!("\"{}\"", stub_escaped(s)),
         ConstExpr::Constant(name) => String::from_utf8_lossy(&name.0).into_owned(),
         // `DateTimeZone::ALL`, as `timezone_identifiers_list`'s stub writes it.
         ConstExpr::ClassConstant { class, name } => format!(
@@ -4318,6 +4312,30 @@ fn const_expr_string(expr: &php_ext::decl::ConstExpr) -> String {
         ),
         _ => String::from("<default>"),
     }
+}
+
+/// php-parser's `escapeString` for a double-quoted string, which is how
+/// `gen_stub.php` prints a string default: `addcslashes` over `\n`,
+/// `\r`, `\t`, `\f`, `\v`, `$`, `"` and `\\`, then every other control
+/// byte as `\x` and two lowercase hex digits, so `trim`'s
+/// `" \n\r\t\v\0"` prints as `" \n\r\t\v\x00"`.
+fn stub_escaped(bytes: &[u8]) -> String {
+    let mut out: Vec<u8> = Vec::new();
+    for &byte in bytes {
+        match byte {
+            b'\n' => out.extend_from_slice(b"\\n"),
+            b'\r' => out.extend_from_slice(b"\\r"),
+            b'\t' => out.extend_from_slice(b"\\t"),
+            0x0C => out.extend_from_slice(b"\\f"),
+            0x0B => out.extend_from_slice(b"\\v"),
+            b'$' | b'"' | b'\\' => out.extend_from_slice(&[b'\\', byte]),
+            0x00..=0x08 | 0x0E..=0x1F => {
+                out.extend_from_slice(format!("\\x{byte:02x}").as_bytes());
+            }
+            _ => out.push(byte),
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// `zend_type_to_string`: class names first, then the scalar and
