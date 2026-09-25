@@ -33,6 +33,8 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_session::extension,
         #[cfg(feature = "pdo")]
         php_ext_pdo::extension,
+        #[cfg(feature = "libxml")]
+        php_ext_libxml::extension,
         #[cfg(feature = "dom")]
         php_ext_dom::extension,
         #[cfg(feature = "random")]

@@ -312,6 +312,7 @@ dependencies = [
  "php_ext_hash",
  "php_ext_iconv",
  "php_ext_json",
+ "php_ext_libxml",
  "php_ext_mbstring",
  "php_ext_openssl",
  "php_ext_pcre",
@@ -380,6 +381,7 @@ name = "php_ext_dom"
 version = "0.0.0"
 dependencies = [
  "php_ext",
+ "php_ext_libxml",
 ]
 
 [[package]]
@@ -409,6 +411,14 @@ name = "php_ext_json"
 version = "0.0.0"
 dependencies = [
  "php_ext",
+]
+
+[[package]]
+name = "php_ext_libxml"
+version = "0.0.0"
+dependencies = [
+ "php_ext",
+ "pkg-config",
 ]
 
 [[package]]
