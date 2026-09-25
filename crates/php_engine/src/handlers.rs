@@ -6726,7 +6726,30 @@ fn write_entry(
 /// `VAR` as a value and not an `IS_INDIRECT`, with php's notice
 /// `Indirect modification of overloaded element of C has no effect`
 /// where that value is no object, so the write after it lands in the
-/// temporary and reaches nothing.
+/// temporary and reaches nothing. An `&offsetGet` hands back the
+/// reference, the place itself, and warns of nothing:
+///
+/// ```php
+/// class A implements ArrayAccess {
+///     public $data = ['k' => []];
+///     public function &offsetGet($k): mixed { return $this->data[$k]; }
+///     public function offsetExists($k): bool { return true; }
+///     public function offsetSet($k, $v): void {}
+///     public function offsetUnset($k): void {}
+/// }
+/// $a = new A;
+/// $a['k']['x'] = 1;
+/// var_dump($a->data);
+/// ```
+/// ```expect
+/// array(1) {
+///   ["k"]=>
+///   array(1) {
+///     ["x"]=>
+///     int(1)
+///   }
+/// }
+/// ```
 ///
 /// A chain of dimensions builds the arrays under it as it goes, each
 /// link's entry `null` until the link over it writes through it.
@@ -6917,6 +6940,21 @@ fn fetch_dim_place(
                 placed.map(php_heap::Zval::indirect)
             } else {
                 match table.read_dimension(req, object, dim.as_ref()) {
+                    // A reference `offsetGet` handed back by reference is
+                    // the place itself, and warns of nothing; the last
+                    // owner of one is the value it holds (`ZVAL_UNREF`).
+                    Ok(value) if value.as_php_ref().is_some() => {
+                        if value.refcount() == 1
+                            && let Some(cell) = value.as_php_ref()
+                        {
+                            let held = cell.get();
+                            req.addref(&held);
+                            req.release(value);
+                            Ok(held.to_zval())
+                        } else {
+                            Ok(value.to_zval())
+                        }
+                    }
                     Ok(value) => {
                         if value.as_object().is_none() {
                             let class = req.class_name(object.class());
