@@ -1749,7 +1749,7 @@ impl Request {
         self.serve_call(
             closure.function,
             closure.this,
-            closure.scope,
+            closure.called_scope,
             Some(object),
             arguments,
             extra_named,
@@ -7531,6 +7531,7 @@ impl Request {
             function,
             this: Some(object),
             scope: Some(object.class()),
+            called_scope: Some(object.class()),
             bound: Vec::new(),
             fake: true,
         })

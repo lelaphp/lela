@@ -23,7 +23,7 @@ use php_unit::decl::{
     MethodDecl, Name, Parameter, ParameterDefault, PropertyDecl, Type, Visibility,
 };
 
-use crate::api::abi::{CloneObj, Entry, NativeClassDecl, ObjectHandlers};
+use crate::api::abi::{Callable, CloneObj, Entry, NativeClassDecl, ObjectHandlers};
 use crate::api::call::{Function, Target};
 use crate::api::coerce::coerce_param;
 use crate::api::raising::{Thrown, arg_count_error, throw, warning};
@@ -930,13 +930,27 @@ fn closure_from_callable(req: &mut Request) -> Result<Value, Thrown> {
             ));
         }
     };
-    let (function, this, scope) = match callable.target() {
+    fake_closure(req, &callable).map(|made| made.as_value())
+}
+
+/// `zend_create_fake_closure` over what a callable resolved to
+/// (`zend_closure_from_frame`'s arms): a closure hands back itself, one
+/// more owner, and so does a closure's own `__invoke`; a function is
+/// closed over with no scope, and a method over its class with the
+/// receiver it was taken with, the called scope the receiver's class or
+/// the class the callable named.
+pub(crate) fn fake_closure(req: &mut Request, callable: &Callable) -> Result<PhpObject, Thrown> {
+    let (function, this, scope, called_scope) = match callable.target() {
         Target::Closure(object) => {
             req.addref(&object.as_value());
-            return Ok(object.as_value());
+            return Ok(object);
         }
-        Target::Function(function) => (function, None, None),
-        Target::Method { function, this, .. } => {
+        Target::Function(function) => (function, None, None, None),
+        Target::Method {
+            function,
+            this,
+            scope: named,
+        } => {
             if let Some(this) = this
                 && this.closure(req).is_some()
                 && req
@@ -944,19 +958,20 @@ fn closure_from_callable(req: &mut Request) -> Result<Value, Thrown> {
                     .is_some_and(|decl| decl.function.name.0.eq_ignore_ascii_case(INVOKE))
             {
                 req.addref(&this.as_value());
-                return Ok(this.as_value());
+                return Ok(this);
             }
-            (function, this, req.method_class(function))
+            (function, this, req.method_class(function), Some(named))
         }
     };
     let fake = ClosureInfo {
         function,
         this,
         scope,
+        called_scope,
         bound: Vec::new(),
         fake: true,
     };
-    create_closure(req, &fake, scope, this).map(|made| made.as_value())
+    create_closure(req, &fake, scope, called_scope, this)
 }
 
 /// `Closure::__invoke(mixed ...$args): mixed`, `ZEND_METHOD(Closure,
@@ -1843,18 +1858,24 @@ fn do_closure_bind(
     if !valid_closure_binding(req, &info, this, scope) {
         return Ok(Value::null());
     }
+    // `called_scope = newthis ? Z_OBJCE_P(newthis) : ce`, the new scope
+    // before a receiver with none takes `Closure` as its dummy one.
+    let called_scope = scope;
     let scope = scope.or_else(|| this.and_then(|_| req.class_named(b"Closure")));
-    create_closure(req, &info, scope, this).map(|made| made.as_value())
+    create_closure(req, &info, scope, called_scope, this).map(|made| made.as_value())
 }
 
 /// `zend_create_closure` (`Z/Zend/zend_closures.c:855`) over the
 /// function a closure holds: a new `Closure` with the given receiver
 /// and scope, the receiver one more owner, and a copy of the variables
-/// it bound, each one more owner, as `zend_array_dup` makes it.
+/// it bound, each one more owner, as `zend_array_dup` makes it. The
+/// called scope is the receiver's class where there is one, else
+/// `called_scope`, as `zend_create_closure_ex` stores it.
 fn create_closure(
     req: &mut Request,
     info: &ClosureInfo,
     scope: Option<ClassId>,
+    called_scope: Option<ClassId>,
     this: Option<PhpObject>,
 ) -> Result<PhpObject, Thrown> {
     let Some(class) = req.class_named(b"Closure") else {
@@ -1872,6 +1893,7 @@ fn create_closure(
             function: info.function,
             this,
             scope,
+            called_scope: this.map(|object| object.class()).or(called_scope),
             bound: info.bound.clone(),
             fake: info.fake,
         },

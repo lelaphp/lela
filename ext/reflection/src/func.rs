@@ -7,15 +7,13 @@
 //!
 //! What stands beside `stub::unbuilt` still: `getStaticVariables`,
 //! whose table the declaration model has no field for (#420);
-//! `getClosureCalledClass`,
-//! whose `called_scope` the payload does not carry, and `getClosure`,
-//! which waits on `api::call::closure_from_callable`; `setAccessible`
+//! `setAccessible`
 //! and `ReflectionFunction`'s `isDisabled`, which the stub marks
 //! `#[\Deprecated]` and the engine does not raise the deprecation of
 //! yet (#412).
 
 use php_ext::abi::Callable;
-use php_ext::call::{call_array, call_named, known_method};
+use php_ext::call::{call_array, call_named, closure_from_callable, known_method};
 use php_ext::coerce::{is_callable, to_callable};
 use php_ext::decl::{FunctionDecl, MethodDecl, Visibility};
 use php_ext::raising::{Thrown, arg_count_error, throw};
@@ -93,6 +91,117 @@ fn this_method(req: &mut Request) -> Result<(ClassId, MethodDecl, ClassId), Thro
         ));
     };
     Ok((class, found.decl, found.scope))
+}
+
+/// `ReflectionFunction::getClosure()`: the closure a reflector over one
+/// keeps, one more owner, since a closure is immutable; else
+/// `zend_create_fake_closure` over the function with no scope.
+///
+/// ```php
+/// $c = function () { return 1; };
+/// var_dump((new ReflectionFunction($c))->getClosure() === $c, (new ReflectionFunction('strlen'))->getClosure()('abc'));
+/// ```
+/// ```expect
+/// bool(true)
+/// int(3)
+/// ```
+pub(super) fn reflection_function_get_closure(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    let (function, decl) = this_function(req)?;
+    if let FunctionRef::Closure(closure) = function {
+        req.addref(&closure.as_value());
+        return Ok(closure.as_value());
+    }
+    let name = Value::string(php_ext::values::PhpString::new(req, &decl.name.0)?);
+    let callable = to_callable(req, &name)?;
+    Ok(closure_from_callable(req, &callable)?.as_value())
+}
+
+/// `ReflectionMethod::getClosure(?object $object = null)`:
+/// `zend_create_fake_closure` over the method, a `static` one on its
+/// class with no receiver, an instance one on the object given, which
+/// must be of the method's class; a missing object is php's
+/// `ValueError`, and a closure given for its own `__invoke` is handed
+/// back.
+///
+/// ```php
+/// class A { private $v = 'a'; function get() { return $this->v; } static function s() { return static::class; } }
+/// class B extends A {}
+/// var_dump((new ReflectionMethod('A', 'get'))->getClosure(new B)(), (new ReflectionMethod('B', 's'))->getClosure()());
+/// try { (new ReflectionMethod('A', 'get'))->getClosure(); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// try { (new ReflectionMethod('A', 'get'))->getClosure(new stdClass); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// string(1) "a"
+/// string(1) "A"
+/// ReflectionMethod::getClosure(): Argument #1 ($object) cannot be null for non-static methods
+/// Given object is not an instance of the class this method was declared in
+/// ```
+pub(super) fn reflection_method_get_closure(req: &mut Request) -> Result<Value, Thrown> {
+    super::at_most_arguments(req, 1)?;
+    let given = req.argument(1).unwrap_or_default();
+    let ty = php_ext::decl::Type::Nullable(Box::new(php_ext::decl::Type::Object));
+    let given = php_ext::coerce::coerce_param(req, &given, &ty, 1)?;
+    let (_, decl, scope) = this_method(req)?;
+    let name = decl.function.name.clone();
+    if !decl.is_instance {
+        let Some(callable) = known_method(req, scope, &name, None) else {
+            return Ok(Value::null());
+        };
+        return Ok(closure_from_callable(req, &callable)?.as_value());
+    }
+    let Some(object) = given.as_object().copied() else {
+        return Err(throw(
+            req,
+            "ValueError",
+            "ReflectionMethod::getClosure(): Argument #1 ($object) cannot be null for non-static methods",
+        ));
+    };
+    if !object.instance_of(req, scope) {
+        return Err(throw(
+            req,
+            "ReflectionException",
+            "Given object is not an instance of the class this method was declared in",
+        ));
+    }
+    let Some(callable) = known_method(req, scope, &name, Some(object)) else {
+        return Ok(Value::null());
+    };
+    Ok(closure_from_callable(req, &callable)?.as_value())
+}
+
+/// `ReflectionFunctionAbstract::getClosureCalledClass()`: for a
+/// reflector over a closure, the closure's called scope, or its scope
+/// where it has none, as a `ReflectionClass`; nothing for a closure
+/// with neither and for a reflector over a named function.
+///
+/// ```php
+/// class A { function make() { return function () {}; } static function s() {} }
+/// class B extends A {}
+/// $r = fn ($c) => (new ReflectionFunction($c))->getClosureCalledClass();
+/// var_dump($r((new B)->make())->name, $r(Closure::fromCallable(['B', 's']))->name, $r(function () {}), (new ReflectionFunction('strlen'))->getClosureCalledClass());
+/// ```
+/// ```expect
+/// string(1) "B"
+/// string(1) "B"
+/// NULL
+/// NULL
+/// ```
+pub(super) fn reflection_function_get_closure_called_class(
+    req: &mut Request,
+) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    let (function, _) = this_function(req)?;
+    let FunctionRef::Closure(closure) = function else {
+        return Ok(Value::null());
+    };
+    let class = closure
+        .closure(req)
+        .and_then(|info| info.called_scope.or(info.scope));
+    match class {
+        Some(class) => Ok(reflection_class_factory(req, class)?.as_value()),
+        None => Ok(Value::null()),
+    }
 }
 
 /// `ReflectionFunctionAbstract::getName()`:

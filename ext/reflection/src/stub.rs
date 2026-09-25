@@ -4689,7 +4689,7 @@ fn reflection_function_abstract() -> Declared {
                     &[],
                     Some(nullable(named(b"ReflectionClass"))),
                 )),
-                unbuilt as Entry,
+                super::func::reflection_function_get_closure_called_class as Entry,
             ),
             (
                 method(b"getClosureUsedVariables", &[], Some(Type::Array)),
@@ -4875,7 +4875,7 @@ fn reflection_function() -> Declared {
             ),
             (
                 tentative(method(b"getClosure", &[], Some(named(b"Closure")))),
-                unbuilt as Entry,
+                super::func::reflection_function_get_closure as Entry,
             ),
         ],
     )
@@ -5025,7 +5025,7 @@ fn reflection_method() -> Declared {
                     )],
                     Some(named(b"Closure")),
                 )),
-                unbuilt as Entry,
+                super::func::reflection_method_get_closure as Entry,
             ),
             (
                 tentative(method(b"getModifiers", &[], Some(Type::Int))),

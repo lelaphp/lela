@@ -631,6 +631,12 @@ pub struct ClosureInfo {
     pub function: Function,
     pub this: Option<PhpObject>,
     pub scope: Option<ClassId>,
+    /// `closure->called_scope`, what `static::` names in the body and
+    /// what `zend_closure_get_closure` hands a call: the class of the
+    /// receiver where there is one, else the class late binding named when the
+    /// closure was made, which for a closure written in a class
+    /// method is the class the method was called on and not `scope`.
+    pub called_scope: Option<ClassId>,
     /// The closure's own copy of the op array's `static_variables`,
     /// which `zend_create_closure` makes with `zend_array_dup` and
     /// `ZEND_MAP_PTR_INIT`: one slot per name of
