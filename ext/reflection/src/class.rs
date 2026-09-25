@@ -19,9 +19,10 @@ use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, Value
 
 use super::{
     at_most_arguments, class_chain, class_constant_named, class_is, class_name_of, class_named,
-    exactly_arguments, is_constructor, keep, linked_constants, linked_interfaces, linked_methods,
-    linked_properties, lookup_class, new_object, one_string_argument, property_named,
-    reflection_class_factory, set_name, set_string_prop, string_argument, string_value, this_class,
+    dynamic_properties, exactly_arguments, is_constructor, keep, kept_object, linked_constants,
+    linked_interfaces, linked_methods, linked_properties, lookup_class, new_object,
+    one_string_argument, property_named, reflection_class_factory, set_name, set_string_prop,
+    string_argument, string_value, this_class,
 };
 
 /// `ZEND_ACC_INTERFACE`, `ZEND_ACC_TRAIT` and `ZEND_ACC_ENUM`.
@@ -750,23 +751,68 @@ pub(super) fn reflection_class_get_methods(req: &mut Request) -> Result<Value, T
 /// #1 {main}
 ///   thrown in %s on line 2
 /// ```
+///
+/// A `ReflectionObject` finds the object's dynamic properties too, with
+/// `$class` the object's class, and a `Base::name` spelling reaches the
+/// property through a class the reflected one extends:
+///
+/// ```php
+/// class A { public $a = 1; } class B extends A {}
+/// $o = new B; $o->d = 2;
+/// var_dump((new ReflectionObject($o))->getProperty('d')->class, (new ReflectionClass('B'))->getProperty('A::a')->class);
+/// try { (new ReflectionClass('A'))->getProperty('B::a'); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Deprecated: Creation of dynamic property B::$d is deprecated in %s on line 3
+/// string(1) "B"
+/// string(1) "A"
+/// Fully qualified property name B::$a does not specify a base class of A
+/// ```
 pub(super) fn reflection_class_get_property(req: &mut Request) -> Result<Value, Thrown> {
     let name = one_string_argument(req)?;
     let class = this_class(req)?;
-    let Some((scope, _)) = property_named(req, class, &name) else {
-        let named = class_name_of(req, class);
-        return Err(throw(
-            req,
-            "ReflectionException",
-            &format!(
-                "Property {}::${} does not exist",
-                String::from_utf8_lossy(&named),
-                String::from_utf8_lossy(&name)
-            ),
-        ));
-    };
-    let object = property_factory(req, &name, scope, class)?;
-    Ok(object.as_value())
+    if let Some((scope, _)) = property_named(req, class, &name) {
+        return Ok(property_factory(req, &name, scope, class)?.as_value());
+    }
+    if let Some(object) = req.this().and_then(|this| kept_object(req, this))
+        && dynamic_properties(req, class, object).contains(&name)
+    {
+        return Ok(property_factory(req, &name, class, class)?.as_value());
+    }
+    // `Base::name`: the property of a class the reflected one is, or
+    // the exception below naming the part after the colons.
+    let (mut ce, mut short) = (class, name.clone());
+    if let Some(at) = name.windows(2).position(|pair| pair == b"::") {
+        short = name[at + 2..].to_vec();
+        let base = class_named(req, &name[..at])?;
+        if !class_is(req, class, base, 0) {
+            let (base, named) = (class_name_of(req, base), class_name_of(req, class));
+            return Err(throw(
+                req,
+                "ReflectionException",
+                &format!(
+                    "Fully qualified property name {}::${} does not specify a base class of {}",
+                    String::from_utf8_lossy(&base),
+                    String::from_utf8_lossy(&short),
+                    String::from_utf8_lossy(&named)
+                ),
+            ));
+        }
+        ce = base;
+        if let Some((scope, _)) = property_named(req, ce, &short) {
+            return Ok(property_factory(req, &short, scope, ce)?.as_value());
+        }
+    }
+    let named = class_name_of(req, ce);
+    Err(throw(
+        req,
+        "ReflectionException",
+        &format!(
+            "Property {}::${} does not exist",
+            String::from_utf8_lossy(&named),
+            String::from_utf8_lossy(&short)
+        ),
+    ))
 }
 
 /// `ReflectionClass::getProperties(?int $filter = null)`: one
@@ -802,6 +848,16 @@ pub(super) fn reflection_class_get_properties(req: &mut Request) -> Result<Value
         }
         let object = property_factory(req, &decl.name.0, scope, class)?;
         properties.append(req, object.as_value())?;
+    }
+    // `_adddynproperty` over the kept object's table, where the filter
+    // keeps public ones: a dynamic property is public.
+    if filter & 1 != 0
+        && let Some(object) = req.this().and_then(|this| kept_object(req, this))
+    {
+        for name in dynamic_properties(req, class, object) {
+            let object = property_factory(req, &name, class, class)?;
+            properties.append(req, object.as_value())?;
+        }
     }
     Ok(Value::array(properties))
 }

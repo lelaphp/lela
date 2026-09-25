@@ -1804,7 +1804,16 @@ fn reflection_class_get_constant(req: &mut Request) -> Result<Value, Thrown> {
 fn reflection_class_has_property(req: &mut Request) -> Result<Value, Thrown> {
     let name = one_string_argument(req)?;
     let class = this_class(req)?;
-    Ok(Value::bool(property_named(req, class, &name).is_some()))
+    if property_named(req, class, &name).is_some() {
+        return Ok(Value::bool(true));
+    }
+    // `has_property(obj, name, ZEND_PROPERTY_EXISTS)` on the object a
+    // `ReflectionObject` kept: its dynamic properties.
+    let dynamic = match req.this().and_then(|this| kept_object(req, this)) {
+        Some(object) => dynamic_properties(req, class, object).contains(&name),
+        None => false,
+    };
+    Ok(Value::bool(dynamic))
 }
 
 /// The property `name` names in the class's info table: the class's
@@ -3416,10 +3425,11 @@ fn class_string(
 /// name (a private or protected slot, whose key begins with a zero
 /// byte) skipped as `ZSTR_VAL(prop_name)[0]` skips it.
 fn dynamic_properties(req: &mut Request, class: ClassId, object: PhpObject) -> Vec<Vec<u8>> {
-    let declared: Vec<Vec<u8>> = req
-        .class_decl(class)
-        .map(|decl| decl.properties.iter().map(|p| p.name.0.to_vec()).collect())
-        .unwrap_or_default();
+    let declared: Vec<Vec<u8>> = class_chain(req, class)
+        .into_iter()
+        .filter_map(|at| req.class_decl(at))
+        .flat_map(|decl| decl.properties.iter().map(|p| p.name.0.to_vec()))
+        .collect();
     let Ok(entries) = object.props(req) else {
         return Vec::new();
     };

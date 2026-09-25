@@ -222,19 +222,22 @@ fn set_visibility_is(req: &mut Request, wanted: Visibility) -> Result<Value, Thr
 /// the `PPP | PPP_SET | STATIC | READONLY | ABSTRACT | VIRTUAL |
 /// FINAL` mask. The `(set)` visibilities, `abstract`, `virtual` and
 /// `final` are bits `PropertyDecl` has no field for, so the answer is
-/// php's for a property that carries none of them.
+/// php's for a property that carries none of them. A dynamic property
+/// has no info, and `prop_get_flags` answers `ZEND_ACC_PUBLIC` for it.
 ///
 /// ```php
-/// var_dump((new ReflectionProperty('Exception', 'message'))->getModifiers());
+/// $o = new stdClass; $o->d = 1;
+/// var_dump((new ReflectionProperty('Exception', 'message'))->getModifiers(), (new ReflectionProperty($o, 'd'))->getModifiers());
 /// ```
 /// ```expect
 /// int(2)
+/// int(1)
 /// ```
 pub(super) fn reflection_property_get_modifiers(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 0)?;
     let (_, _, found) = this_declared(req)?;
     Ok(Value::int(
-        found.map_or(0, |(_, decl)| property_bits(&decl)),
+        found.map_or(1, |(_, decl)| property_bits(&decl)),
     ))
 }
 
