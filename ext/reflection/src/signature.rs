@@ -847,21 +847,22 @@ pub(super) fn reflection_parameter_can_be_passed_by_value(
     Ok(Value::bool(!parameter.by_ref || parameter.prefer_ref))
 }
 
-/// `ReflectionParameter::isPromoted()`:
-/// `ZEND_ARG_IS_PROMOTED`, the bit constructor promotion sets. The
-/// declaration model carries no such bit (#413), so the answer is
-/// php's for every parameter that was not promoted.
+/// `ReflectionParameter::isPromoted()`: `ZEND_ARG_IS_PROMOTED`, the
+/// bit constructor promotion sets on the parameter.
 ///
 /// ```php
-/// var_dump((new ReflectionParameter('str_repeat', 0))->isPromoted());
+/// class P { function __construct(public int $x, $y) {} }
+/// var_dump((new ReflectionParameter(['P', '__construct'], 0))->isPromoted(), (new ReflectionParameter(['P', '__construct'], 1))->isPromoted(), (new ReflectionParameter('str_repeat', 0))->isPromoted());
 /// ```
 /// ```expect
+/// bool(true)
+/// bool(false)
 /// bool(false)
 /// ```
 pub(super) fn reflection_parameter_is_promoted(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 0)?;
-    this_parameter(req)?;
-    Ok(Value::bool(false))
+    let (_, _, parameter) = this_parameter(req)?;
+    Ok(Value::bool(parameter.promoted))
 }
 
 /// `ReflectionParameter::hasType()`: `ZEND_TYPE_IS_SET`.

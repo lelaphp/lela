@@ -578,6 +578,7 @@ fn period_property(name: &str, ty: Type) -> PropertyDecl {
         is_instance: true,
         is_readonly: false,
         is_final: false,
+        is_promoted: false,
         ty: Some(ty),
         default: None,
         attributes: Vec::new(),

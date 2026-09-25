@@ -152,6 +152,7 @@ pub(crate) fn classes() -> Vec<(ClassDecl, Vec<(MethodDecl, Entry)>)> {
             is_instance: true,
             is_readonly: true,
             is_final: false,
+            is_promoted: false,
             ty: Some(Type::String),
             default: None,
             attributes: Vec::new(),

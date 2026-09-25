@@ -332,6 +332,7 @@ mod tests {
             ty: Some(ty),
             by_ref: false,
             prefer_ref: false,
+            promoted: false,
             variadic: false,
             default: default.map_or(
                 php_unit::decl::ParameterDefault::None,

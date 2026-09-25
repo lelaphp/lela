@@ -328,6 +328,7 @@ fn parameter(name: &[u8], ty: Option<Type>, default: ParameterDefault) -> Parame
         ty,
         by_ref: false,
         prefer_ref: false,
+        promoted: false,
         variadic: false,
         default,
         attributes: Vec::new(),

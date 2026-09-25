@@ -526,6 +526,7 @@ fn parameter(name: &[u8], ty: Type, default: Option<ConstExpr>) -> Parameter {
         ty: Some(ty),
         by_ref: false,
         prefer_ref: false,
+        promoted: false,
         variadic: false,
         default: default.map_or(ParameterDefault::None, ParameterDefault::Expr),
         attributes: Vec::new(),

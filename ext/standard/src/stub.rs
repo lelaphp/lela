@@ -201,6 +201,7 @@ impl Reader<'_> {
             ty,
             by_ref,
             prefer_ref: false,
+            promoted: false,
             variadic,
             default,
             attributes: Vec::new(),

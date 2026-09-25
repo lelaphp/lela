@@ -2786,10 +2786,11 @@ impl Emit<'_> {
             is_instance: true,
             is_readonly: promoted.is_readonly,
             is_final: false,
+            is_promoted: true,
             ty: ty.cloned(),
             default,
             attributes: Vec::new(),
-            doc_comment: None,
+            doc_comment: parameter.doc_comment.clone().map(Vec::into_boxed_slice),
         });
         Ok(())
     }
@@ -3128,6 +3129,7 @@ impl Emit<'_> {
                 ty,
                 by_ref: parameter.by_ref,
                 prefer_ref: false,
+                promoted: parameter.promote.is_some(),
                 variadic: parameter.variadic,
                 default: default.map_or(ParameterDefault::None, ParameterDefault::Expr),
                 attributes: Vec::new(),
@@ -4108,6 +4110,7 @@ impl Emit<'_> {
                 // `zend_declare_typed_property`: a `private(set)`
                 // property is implicitly final.
                 is_final: set_visibility == Some(Visibility::Private),
+                is_promoted: false,
                 ty,
                 default,
                 attributes: Vec::new(),
@@ -14157,6 +14160,7 @@ fn enum_properties(kind: ClassKind, backing: EnumBacking) -> Vec<PropertyDecl> {
         is_instance: true,
         is_readonly: true,
         is_final: false,
+        is_promoted: false,
         ty: Some(ty),
         default: None,
         attributes: Vec::new(),

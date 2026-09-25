@@ -243,13 +243,18 @@ impl ParameterDefault {
 /// stub marks `@prefer-ref` and only `extract()` and
 /// `array_multisort()` declare. It is set only where `by_ref` is, so
 /// `by_ref` alone is `ARG_SHOULD_BE_SENT_BY_REF` and `by_ref` without
-/// `prefer_ref` is `ARG_MUST_BE_SENT_BY_REF`.
+/// `prefer_ref` is `ARG_MUST_BE_SENT_BY_REF`. `promoted` is
+/// `ZEND_ARG_IS_PROMOTED`, which `zend_compile_params` sets on a
+/// constructor parameter that declares a property, and which
+/// `ReflectionParameter::isPromoted` reads.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::struct_excessive_bools)] // the ZEND_SEND_* and ZEND_ARG_* bits of a slot, each one fact
 pub struct Parameter {
     pub name: Name,
     pub ty: Option<Type>,
     pub by_ref: bool,
     pub prefer_ref: bool,
+    pub promoted: bool,
     pub variadic: bool,
     pub default: ParameterDefault,
     pub attributes: Vec<Attribute>,
@@ -329,7 +334,11 @@ pub struct MethodDecl {
 /// visibility equal to `visibility`, so what stands here is stricter
 /// than `visibility` and never `Public`. `is_final` is `ZEND_ACC_FINAL`,
 /// which the same function raises on a `private(set)` property.
+/// `is_promoted` is `ZEND_ACC_PROMOTED`, the property a constructor's
+/// promoted parameter declares, which `ReflectionProperty::isPromoted`
+/// reads.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::struct_excessive_bools)] // the ZEND_ACC_* bits of a property, each one fact
 pub struct PropertyDecl {
     pub name: Name,
     pub visibility: Visibility,
@@ -337,6 +346,7 @@ pub struct PropertyDecl {
     pub is_instance: bool,
     pub is_readonly: bool,
     pub is_final: bool,
+    pub is_promoted: bool,
     pub ty: Option<Type>,
     pub default: Option<ConstExpr>,
     pub attributes: Vec<Attribute>,

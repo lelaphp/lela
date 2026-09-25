@@ -21,6 +21,7 @@ pub fn enum_methods(backing: EnumBacking) -> Vec<MethodDecl> {
         ty: Some(Type::Union(vec![Type::Int, Type::String])),
         by_ref: false,
         prefer_ref: false,
+        promoted: false,
         variadic: false,
         default: ParameterDefault::None,
         attributes: Vec::new(),

@@ -95,6 +95,7 @@ fn property(name: &[u8], ty: Option<Type>, default: Option<ConstExpr>) -> Proper
         is_instance: true,
         is_readonly: false,
         is_final: false,
+        is_promoted: false,
         ty,
         default,
         attributes: Vec::new(),

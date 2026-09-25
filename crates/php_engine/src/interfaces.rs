@@ -97,6 +97,7 @@ pub(crate) fn classes() -> Vec<NativeClassDecl> {
         ty: Some(Type::String),
         by_ref: false,
         prefer_ref: false,
+        promoted: false,
         variadic: false,
         default: ParameterDefault::None,
         attributes: Vec::new(),

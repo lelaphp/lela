@@ -421,6 +421,7 @@ mod tests {
             ty: Some(ty),
             by_ref: false,
             prefer_ref: false,
+            promoted: false,
             variadic,
             default: ParameterDefault::None,
             attributes: Vec::new(),

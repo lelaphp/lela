@@ -414,6 +414,7 @@ impl Reader<'_> {
             by_ref,
             // No SPL stub marks a parameter `@prefer-ref`.
             prefer_ref: false,
+            promoted: false,
             variadic,
             default,
             attributes: Vec::new(),
@@ -434,6 +435,7 @@ impl Reader<'_> {
             is_instance: !modifiers.is_static,
             is_readonly: false,
             is_final: modifiers.is_final,
+            is_promoted: false,
             ty,
             default,
             attributes: Vec::new(),

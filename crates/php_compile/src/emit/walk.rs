@@ -461,6 +461,7 @@ impl Emit<'_> {
                 variadic: param.variadic.is_some(),
                 default: param.default,
                 promote,
+                doc_comment: self.doc_comment(param.doc_comment),
             });
         }
         Ok(out)
@@ -914,6 +915,10 @@ pub(super) struct Parameter {
     pub(super) variadic: bool,
     pub(super) default: Option<php_syntax::tree::Expr>,
     pub(super) promote: Option<Promoted>,
+    /// The doc comment before the parameter, `param_ast->child[4]`,
+    /// which `zend_compile_params` hands the property a promoted
+    /// parameter declares.
+    pub(super) doc_comment: Option<Vec<u8>>,
 }
 
 /// The modifiers that make a constructor's parameter a property,

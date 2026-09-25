@@ -724,6 +724,7 @@ fn untyped(name: &[u8]) -> Parameter {
         ty: None,
         by_ref: false,
         prefer_ref: false,
+        promoted: false,
         variadic: false,
         default: ParameterDefault::None,
         attributes: Vec::new(),

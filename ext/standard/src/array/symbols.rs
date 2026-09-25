@@ -88,6 +88,7 @@ pub(super) fn natives() -> Vec<(FunctionDecl, Entry)> {
                     Parameter {
                         by_ref: true,
                         prefer_ref: true,
+                        promoted: false,
                         ..parameter(b"array", Type::Array)
                     },
                     Parameter {

@@ -634,12 +634,14 @@ pub(super) fn multisort_native() -> (FunctionDecl, Entry) {
                 Parameter {
                     by_ref: true,
                     prefer_ref: true,
+                    promoted: false,
                     ty: None,
                     ..parameter(b"array", Type::Mixed)
                 },
                 Parameter {
                     by_ref: true,
                     prefer_ref: true,
+                    promoted: false,
                     variadic: true,
                     ty: None,
                     ..parameter(b"rest", Type::Mixed)

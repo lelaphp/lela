@@ -480,20 +480,25 @@ pub(super) fn reflection_property_is_dynamic(req: &mut Request) -> Result<Value,
     Ok(Value::bool(found.is_none()))
 }
 
-/// `ReflectionProperty::isPromoted()`: `ZEND_ACC_PROMOTED`, a bit the
-/// declaration model has no field for (#413), so the answer is php's
-/// for every property that was not promoted.
+/// `ReflectionProperty::isPromoted()`: `ZEND_ACC_PROMOTED`, the bit on
+/// the property a promoted constructor parameter declares; a dynamic
+/// property has no info and answers `false`.
 ///
 /// ```php
-/// var_dump((new ReflectionProperty('Exception', 'message'))->isPromoted());
+/// class P { function __construct(public int $x, /** D */ public $z, $y) {} public $w; }
+/// var_dump((new ReflectionProperty('P', 'x'))->isPromoted(), (new ReflectionProperty('P', 'w'))->isPromoted(), (new ReflectionProperty('Exception', 'message'))->isPromoted());
+/// var_dump((new ReflectionProperty('P', 'z'))->getDocComment());
 /// ```
 /// ```expect
+/// bool(true)
 /// bool(false)
+/// bool(false)
+/// string(8) "/** D */"
 /// ```
 pub(super) fn reflection_property_is_promoted(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 0)?;
-    this_declared(req)?;
-    Ok(Value::bool(false))
+    let (_, _, found) = this_declared(req)?;
+    Ok(Value::bool(found.is_some_and(|(_, decl)| decl.is_promoted)))
 }
 
 /// `ReflectionProperty::getDeclaringClass()`:
