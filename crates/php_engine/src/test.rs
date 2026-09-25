@@ -93,8 +93,26 @@ impl Engine {
         source: &str,
         mut sink: Capture,
     ) -> Served {
+        // `sapi_cli_register_variables`' rows, as the CLI host describes
+        // them: a piped source has no file behind it.
+        let file: &[u8] = if name == b"Standard input code" {
+            b""
+        } else {
+            name
+        };
+        let server = [
+            (b"PHP_SELF".as_slice(), name),
+            (b"SCRIPT_NAME", name),
+            (b"SCRIPT_FILENAME", file),
+            (b"PATH_TRANSLATED", file),
+            (b"DOCUMENT_ROOT", b""),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_vec(), value.to_vec()))
+        .collect();
         let description = RequestDescription {
             argv: vec![name.to_vec()],
+            server,
             sapi_name: String::from("cli"),
             script_name: Some(name.to_vec()),
             source: Some(source.as_bytes().to_vec()),

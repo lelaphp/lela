@@ -38,6 +38,8 @@ use crate::engine::{MethodAt, NativeMethod, RequestDescription, Shared};
 use crate::exec::{self, CallStage, CallState, IncludeKind, TableId, Vm};
 use crate::output::Output;
 
+mod variables;
+
 /// php's version, what `PHP_VERSION` and `phpversion()` say.
 pub const PHP_VERSION: &str = "8.5.9";
 
@@ -827,6 +829,11 @@ pub struct Request {
     exit_status: i32,
     resources: Resources,
     superglobals: Vec<(Vec<u8>, PhpArray)>,
+    /// Each auto-global made just in time and not made yet, php's
+    /// `armed` on each of `CG(auto_globals)`: the first
+    /// `zend_is_auto_global` of one lays it into `EG(symbol_table)`
+    /// ([`Request::arm`]).
+    armed: Vec<php_unit::AutoGlobal>,
     /// The symbol tables, [`TableId`] naming one: php's
     /// `EG(symbol_table)` first, the main op array's variables (design
     /// §5.6, §5.10), and after it one table per function frame that
@@ -1271,6 +1278,7 @@ impl Request {
             exit_status: 0,
             resources,
             superglobals: Vec::new(),
+            armed: Vec::new(),
             tables: vec![SymbolTable::default()],
             included_files: Vec::new(),
             constants: Vec::new(),
@@ -11670,61 +11678,6 @@ impl Request {
     pub fn set_superglobal(&mut self, name: &[u8], value: PhpArray) {
         self.superglobals.retain(|(n, _)| n.as_slice() != name);
         self.superglobals.push((name.to_vec(), value));
-    }
-
-    /// `php_build_argv` (`Z/main/php_variables.c:657-713`) under
-    /// `register_argc_argv`, which php's CLI forces on: `$argv` is the
-    /// host's `argv`, `php_self` first, as a list of strings, and
-    /// `$argc` its count, written into `EG(symbol_table)`, which for the
-    /// main op array is its CVs of those names (`zend_attach_symbol_table`
-    /// at its activation); a request the host describes with no `argv`
-    /// at all, php's web hosts, gets neither. `$_SERVER['argv']` and
-    /// `$_SERVER['argc']` wait on the superglobal fetch the compiler does
-    /// not read yet, and `global $argv` inside a function on the symbol
-    /// table (#280).
-    ///
-    /// ```php
-    /// var_dump($argc);
-    /// var_dump($argv);
-    /// ```
-    /// ```expect
-    /// int(1)
-    /// array(1) {
-    ///   [0]=>
-    ///   string(%d) "%s"
-    /// }
-    /// ```
-    pub(crate) fn seed_argv(&mut self, frame: FrameRef, unit: &Unit) -> Result<(), Thrown> {
-        if self.description.argv.is_empty() {
-            return Ok(());
-        }
-        let argc = i64::try_from(self.description.argv.len()).unwrap_or(i64::MAX);
-        let names: Vec<(u32, bool)> = exec::code_of(unit)
-            .vars
-            .iter()
-            .enumerate()
-            .filter_map(|(at, name)| match name.0.as_ref() {
-                b"argv" => Some((at, true)),
-                b"argc" => Some((at, false)),
-                _ => None,
-            })
-            .filter_map(|(at, is_argv)| u32::try_from(at).ok().map(|at| (at, is_argv)))
-            .collect();
-        for (at, is_argv) in names {
-            let value = if is_argv {
-                let mut array = PhpArray::new(self)?;
-                for word in self.description.argv.clone() {
-                    let word = PhpString::new(self, &word)?;
-                    array.append(self, Value::string(word))?;
-                }
-                Value::array(array)
-            } else {
-                Value::int(argc)
-            };
-            let old = self.set_slot(frame, at, value);
-            self.release(old);
-        }
-        Ok(())
     }
 
     /// `php_sapi_name()`: `sapi_module.name`.
