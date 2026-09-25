@@ -305,7 +305,7 @@ impl Emit<'_> {
         match stmt {
             Stmt::ClassDecl(id) => {
                 let node = &tree[id];
-                let modifiers = self.walk_class_modifiers(&node.modifiers)?;
+                let modifiers = self.walk_class_modifiers(&node.modifiers, false)?;
                 let Some(name) = node.name else {
                     return Err(unread(line, "a class"));
                 };
@@ -327,7 +327,7 @@ impl Emit<'_> {
                 let attributes = self.walk_attributes(&node.attrs)?;
                 self.walk_class(
                     ClassKind::Class,
-                    name,
+                    Some(name),
                     parent,
                     interfaces,
                     attributes,
@@ -354,7 +354,7 @@ impl Emit<'_> {
                 let attributes = self.walk_attributes(&node.attrs)?;
                 self.walk_class(
                     ClassKind::Interface,
-                    name,
+                    Some(name),
                     None,
                     interfaces,
                     attributes,
@@ -372,7 +372,7 @@ impl Emit<'_> {
                 let attributes = self.walk_attributes(&node.attrs)?;
                 self.walk_class(
                     ClassKind::Trait,
-                    name,
+                    Some(name),
                     None,
                     Vec::new(),
                     attributes,
@@ -419,7 +419,7 @@ impl Emit<'_> {
         let (doc_comment, body, range) = (node.doc_comment, node.body, node.range());
         let mut class = self.walk_class(
             ClassKind::Enum,
-            name,
+            Some(name),
             None,
             interfaces,
             attributes,
@@ -430,6 +430,48 @@ impl Emit<'_> {
         )?;
         class.backing = backing;
         Ok(class)
+    }
+
+    /// The class of `new class (...) extends P implements I { ... }`,
+    /// php's `anonymous_class` rule: a `zend_ast_decl` under
+    /// `ZEND_ACC_ANON_CLASS` with its modifiers, its parent and its
+    /// interfaces as a class's, its line the `class` keyword's, and no
+    /// name written ([`Emit::anonymous_class`] makes it). The arguments
+    /// are the `new`'s, which the caller sends.
+    pub(super) fn walk_anon_class(
+        &mut self,
+        id: NodeId<tree::AnonClassDecl>,
+    ) -> Result<Class, CompileError> {
+        let tree = &self.parsed.tree;
+        let node = &tree[id];
+        let line = node.line;
+        let modifiers = self.walk_class_modifiers(&node.modifiers, true)?;
+        let parent = node
+            .extends
+            .and_then(|extends| tree[extends].types.first())
+            .map(|id| self.text(*id).to_vec());
+        let interfaces = match node.implements {
+            Some(implements) => tree[implements]
+                .types
+                .iter()
+                .map(|id| self.text(*id).to_vec())
+                .collect(),
+            None => Vec::new(),
+        };
+        let attributes = self.walk_attributes(&node.attrs)?;
+        let (doc_comment, body, range) = (node.doc_comment, node.body, node.range());
+        let class = self.walk_class(
+            ClassKind::Class,
+            None,
+            parent,
+            interfaces,
+            attributes,
+            doc_comment,
+            body,
+            line,
+            range,
+        )?;
+        Ok(Class { modifiers, ..class })
     }
 
     /// A `function` declaration read from the tree, in the shape the
@@ -810,7 +852,36 @@ impl Emit<'_> {
     /// bool(true)
     /// bool(true)
     /// ```
-    fn walk_class_modifiers(&self, modifiers: &[Modifier]) -> Result<ClassModifiers, CompileError> {
+    ///
+    /// An anonymous class's go through `zend_add_anonymous_class_modifier`
+    /// instead, which takes `readonly` alone:
+    ///
+    /// ```php
+    /// echo "never\n";
+    /// $o = new final class {};
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use the final modifier on an anonymous class in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// $o = new abstract class {};
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use the abstract modifier on an anonymous class in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// $o = new readonly readonly class {};
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Multiple readonly modifiers are not allowed in %s on line 2
+    /// ```
+    fn walk_class_modifiers(
+        &self,
+        modifiers: &[Modifier],
+        anonymous: bool,
+    ) -> Result<ClassModifiers, CompileError> {
         let mut out = ClassModifiers::default();
         for modifier in modifiers {
             let (token, flag, word) = match modifier {
@@ -833,6 +904,12 @@ impl Emit<'_> {
                 .map_or(self.line, |token| {
                     self.parsed.lines.line_number(token.offset)
                 });
+            if anonymous && word != "readonly" {
+                return Err(refused(
+                    line,
+                    format!("Cannot use the {word} modifier on an anonymous class"),
+                ));
+            }
             if *flag {
                 return Err(refused(
                     line,
@@ -865,11 +942,13 @@ impl Emit<'_> {
     /// Deprecated: Using "_" as a class name is deprecated since 8.4 in %s on line 2
     /// ok
     /// ```
+    ///
+    /// An anonymous class has no name written, and none is held.
     #[allow(clippy::too_many_arguments)]
     fn walk_class(
         &mut self,
         kind: ClassKind,
-        name: TokenId,
+        name: Option<TokenId>,
         parent: Option<Vec<u8>>,
         interfaces: Vec<Vec<u8>>,
         attributes: Vec<Attr>,
@@ -878,7 +957,7 @@ impl Emit<'_> {
         line: u32,
         range: TextRange,
     ) -> Result<Class, CompileError> {
-        let name = self.text(name).to_vec();
+        let name = name.map_or_else(Vec::new, |name| self.text(name).to_vec());
         if super::types::is_reserved_class_name(&name) {
             return Err(refused(
                 line,

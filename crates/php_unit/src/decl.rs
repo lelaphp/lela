@@ -17,6 +17,17 @@ impl From<&str> for Name {
     }
 }
 
+/// A name as php's `%s` prints `ZSTR_VAL(name)` into a message or a
+/// dump: up to its first NUL. Only an anonymous class's name holds one,
+/// `class@anonymous` before it and the declaring file and line after,
+/// so the class is shown as `class@anonymous` wherever php formats it
+/// with `%s`, and every other name is shown whole.
+#[must_use]
+pub fn shown(name: &[u8]) -> std::borrow::Cow<'_, str> {
+    let end = name.iter().position(|b| *b == 0).unwrap_or(name.len());
+    String::from_utf8_lossy(&name[..end])
+}
+
 /// php's three member visibilities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Visibility {
@@ -37,11 +48,15 @@ pub enum ClassKind {
 }
 
 /// The modifiers of a class (`ZEND_ACC_*` on the class entry).
+#[allow(clippy::struct_excessive_bools)] // the ZEND_ACC_* bits of a class, each one fact
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct ClassFlags {
     pub is_abstract: bool,
     pub is_final: bool,
     pub is_readonly: bool,
+    /// `ZEND_ACC_ANON_CLASS`: declared by `new class`, under the name
+    /// `zend_generate_anon_class_name` made, which holds a NUL.
+    pub is_anonymous: bool,
     pub dynamic_properties: DynamicProperties,
 }
 

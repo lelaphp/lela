@@ -475,7 +475,9 @@ pub(super) fn render(
             return Ok(());
         };
         let (name, kind, backing) = (decl.name.0.to_vec(), decl.kind, decl.backing);
-        out.extend_from_slice(&name);
+        // `smart_str_appends(buf, ZSTR_VAL(class_name))`: up to the NUL
+        // of an anonymous class's name.
+        out.extend_from_slice(name.split(|b| *b == 0).next().unwrap_or_default());
         // `ZEND_ACC_ENUM`: a case is `Suit Enum:string` and its `name`
         // and `value` under it, where an object is `C Object`.
         if matches!(kind, ClassKind::Enum) {
@@ -560,7 +562,10 @@ fn hash(
 /// `zend_unmangle_property_name_ex`: the class a mangled name carries
 /// and the name itself, `*` for the class of a protected property and
 /// the declaring class for a private one; a name that is not mangled,
-/// a public property's and a dynamic one's, carries no class.
+/// a public property's and a dynamic one's, carries no class. A private
+/// property of an anonymous class is mangled with a name that holds a
+/// NUL of its own, so where a third NUL follows, the class runs through
+/// the second (`anonclass_src_len`).
 fn unmangle(key: &[u8]) -> (Option<&[u8]>, &[u8]) {
     let Some(rest) = key.strip_prefix(b"\0") else {
         return (None, key);
@@ -568,11 +573,27 @@ fn unmangle(key: &[u8]) -> (Option<&[u8]>, &[u8]) {
     let Some(end) = rest.iter().position(|b| *b == 0) else {
         return (None, key);
     };
+    let end = match rest[end + 1..].iter().position(|b| *b == 0) {
+        Some(source) => end + 1 + source,
+        None => end,
+    };
     (Some(&rest[..end]), &rest[end + 1..])
 }
 
 /// The name `print_hash` prints for an object's row: the unmangled name,
-/// and the visibility php spells after it where the key carried a class.
+/// and the visibility php spells after it where the key carried a class,
+/// the class up to its NUL (`smart_str_appends`).
+///
+/// ```php
+/// print_r(new class { private $p = 1; protected $q = 2; });
+/// ```
+/// ```expect
+/// class@anonymous Object
+/// (
+///     [p:class@anonymous:private] => 1
+///     [q:protected] => 2
+/// )
+/// ```
 fn unmangled(out: &mut Vec<u8>, key: &[u8]) {
     let (class, name) = unmangle(key);
     out.extend_from_slice(name);
@@ -581,7 +602,7 @@ fn unmangled(out: &mut Vec<u8>, key: &[u8]) {
         Some(b"*") => out.extend_from_slice(b":protected"),
         Some(class) => {
             out.push(b':');
-            out.extend_from_slice(class);
+            out.extend_from_slice(class.split(|b| *b == 0).next().unwrap_or_default());
             out.extend_from_slice(b":private");
         }
     }

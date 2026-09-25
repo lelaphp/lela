@@ -123,7 +123,7 @@ pub(crate) fn unit(unit: &Unit, frameless: &[Name]) -> String {
         };
         let name = format!(
             "{}::{}",
-            String::from_utf8_lossy(&class.name.0),
+            crate::decl::shown(&class.name.0),
             String::from_utf8_lossy(&decl.function.name.0)
         );
         op_array(
