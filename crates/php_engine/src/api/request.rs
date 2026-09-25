@@ -2067,6 +2067,7 @@ impl Request {
             extra_named: extra_named.to_vec(),
             stage: CallStage::Serving,
             frameless: false,
+            dynamic: false,
             coerced: Vec::new(),
             send_arg_by_ref: false,
         };
@@ -2128,40 +2129,50 @@ impl Request {
         let Some(decl) = self.function_decl(function) else {
             return Ok(Vec::new());
         };
-        let declared = decl.parameters.len();
         let variadic = decl.parameters.last().filter(|last| last.variadic);
-        let mut wrapped: Vec<(usize, Option<String>)> = Vec::new();
-        for (at, argument) in arguments.iter().enumerate() {
-            if matches!(argument.as_ref(), ValueRef::Undef | ValueRef::Reference(_)) {
-                continue;
-            }
-            let Some(parameter) = decl.parameters.get(at).or(variadic) else {
-                continue;
-            };
-            if parameter.by_ref && !parameter.prefer_ref {
-                let name = (at < declared && !parameter.variadic)
-                    .then(|| String::from_utf8_lossy(&parameter.name.0).into_owned());
-                wrapped.push((at, name));
-            }
-        }
-        if wrapped.is_empty() {
-            return Ok(Vec::new());
-        }
-        let callee = self.qualified_name(function, None);
-        let mut positions = Vec::with_capacity(wrapped.len());
-        for (at, name) in wrapped {
-            let name = name.map(|name| format!(" (${name})")).unwrap_or_default();
-            let message = format!(
-                "{callee}(): Argument #{}{name} must be passed by reference, value given",
-                at + 1
-            );
-            crate::api::raising::warning(self, &message);
+        let wrapped: Vec<usize> = arguments
+            .iter()
+            .enumerate()
+            .filter(|(_, argument)| {
+                !matches!(argument.as_ref(), ValueRef::Undef | ValueRef::Reference(_))
+            })
+            .filter(|(at, _)| {
+                decl.parameters
+                    .get(*at)
+                    .or(variadic)
+                    .is_some_and(|parameter| parameter.by_ref && !parameter.prefer_ref)
+            })
+            .map(|(at, _)| at)
+            .collect();
+        for at in &wrapped {
+            self.param_must_be_ref(function, u32::try_from(*at + 1).unwrap_or(u32::MAX));
             if self.is_pending() {
                 return Err(Thrown::of(self.take_pending()));
             }
-            positions.push(at);
         }
-        Ok(positions)
+        Ok(wrapped)
+    }
+
+    /// `zend_param_must_be_ref` (`Z/Zend/zend_execute.c`): the warning
+    /// for an argument that is no reference handed to a parameter that
+    /// takes one by reference and nothing else, naming the parameter
+    /// where it is one of the declared ones (`get_function_arg_name`)
+    /// and not where a variadic collects it. What `zend_call_function`,
+    /// `SEND_USER` and `SEND_ARRAY` raise before they wrap the value in
+    /// a reference of its own and go on.
+    pub(crate) fn param_must_be_ref(&mut self, function: Function, number: u32) {
+        let callee = self.qualified_name(function, None);
+        let at = usize::try_from(number.saturating_sub(1)).unwrap_or(usize::MAX);
+        let name = self
+            .function_decl(function)
+            .and_then(|decl| decl.parameters.get(at))
+            .filter(|parameter| !parameter.variadic)
+            .map(|parameter| format!(" (${})", String::from_utf8_lossy(&parameter.name.0)))
+            .unwrap_or_default();
+        let message = format!(
+            "{callee}(): Argument #{number}{name} must be passed by reference, value given"
+        );
+        crate::api::raising::warning(self, &message);
     }
 
     /// `zend_call_function` over a user function, the branch that calls
@@ -10524,10 +10535,31 @@ impl Request {
     /// now, the extra ones after, `ZEND_CALL_NUM_ARGS` of them in all;
     /// a code frame, the main op array or an included file's, which
     /// php's `ZEND_CALL_CODE` names; or another native, which is a call
-    /// `zend_call_function` made and php's `ZEND_CALL_DYNAMIC`.
+    /// `zend_call_function` made and php's `ZEND_CALL_DYNAMIC`, as is a
+    /// call whose callee the program named as it served
+    /// ([`exec::CallState::dynamic`]).
+    ///
+    /// ```php
+    /// function f() { $g = 'func_get_args'; return $g(); }
+    /// function h() { $g = 'func_num_args'; return call_user_func($g); }
+    /// function k() { return call_user_func('func_get_args'); }
+    /// foreach (['f', 'h', 'k'] as $fn) { try { var_dump($fn(1)); } catch (Error $e) { echo $e->getMessage(), "\n"; } }
+    /// ```
+    /// ```expect
+    /// Cannot call func_get_args() dynamically
+    /// Cannot call func_num_args() dynamically
+    /// array(1) {
+    ///   [0]=>
+    ///   int(1)
+    /// }
+    /// ```
     pub(crate) fn native_caller(&self) -> NativeCaller {
         let mut chain = self.chain();
-        let _served = chain.next();
+        if let Some(Link::Call(served)) = chain.next()
+            && served.dynamic
+        {
+            return NativeCaller::Native;
+        }
         match chain.next() {
             // A frame on a stack below the running one is a fiber's
             // resumer: a native that is a fiber's own callable was called

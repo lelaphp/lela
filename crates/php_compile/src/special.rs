@@ -7,7 +7,10 @@
 //! no opcode, `strlen`, `chr`, `ord` and `defined`, and the opcode for
 //! the rows whose kernel the engine has: `ZEND_STRLEN`, `ZEND_TYPE_CHECK`
 //! with its type mask, `ZEND_DEFINED` with its cache slot, `ZEND_COUNT`
-//! with `sizeof`'s bit and `ZEND_IN_ARRAY` with its table. Every other row is
+//! with `sizeof`'s bit and `ZEND_IN_ARRAY` with its table, and the call
+//! `call_user_func` and `call_user_func_array` are made without a frame
+//! of their own, `INIT_USER_CALL` with `SEND_USER` or `SEND_ARRAY`
+//! (`crate::emit::user_call`). Every other row is
 //! [`Special::Opcode`] and is compiled as the ordinary `INIT_FCALL`,
 //! `SEND_*` and `DO_ICALL`, never folded to something else, so the value
 //! is php's where the op array is not yet; a row moves off
@@ -65,12 +68,20 @@ pub(crate) enum Special {
     /// off a constant third argument by `zend_is_true`, in
     /// `extended_value`; the call otherwise.
     InArray,
+    /// `zend_compile_func_cufa`: the callback's `INIT_USER_CALL`, or the
+    /// `INIT_FCALL` of the function a written name holds, and the array
+    /// sent by `SEND_ARRAY`, where the call has exactly two arguments.
+    CallUserFuncArray,
+    /// `zend_compile_func_cuf`: the callback initialised as
+    /// [`Special::CallUserFuncArray`]'s is, and each argument after it
+    /// sent by `SEND_USER`, where the call has one argument or more.
+    CallUserFunc,
     /// `zend_compile_func_clone`: `ZEND_CLONE` over the one argument,
     /// which is what `clone $o` and `clone($o)` both are; two arguments
     /// or none is the call to php 8.5's `clone()` function.
     Clone,
     /// A shape that is an opcode of its own (`ZEND_BOOL`, `ZEND_CAST`,
-    /// `ZEND_INIT_USER_CALL`, `ZEND_GET_CLASS`,
+    /// `ZEND_GET_CLASS`,
     /// `ZEND_GET_CALLED_CLASS`, `ZEND_GET_TYPE`, `ZEND_FUNC_NUM_ARGS`,
     /// `ZEND_FUNC_GET_ARGS`, `ZEND_ARRAY_KEY_EXISTS`, the ropes of
     /// `sprintf`) and has no kernel here yet: the ordinary call.
@@ -121,8 +132,8 @@ pub(crate) const TABLE: &[(&[u8], Special)] = &[
     (b"defined", Special::Defined),
     (b"chr", Special::Chr),
     (b"ord", Special::Ord),
-    (b"call_user_func_array", Special::Opcode),
-    (b"call_user_func", Special::Opcode),
+    (b"call_user_func_array", Special::CallUserFuncArray),
+    (b"call_user_func", Special::CallUserFunc),
     (b"in_array", Special::InArray),
     (b"count", Special::Count { sizeof: false }),
     (b"sizeof", Special::Count { sizeof: true }),
@@ -196,6 +207,8 @@ impl Emit<'_> {
             }
             Some(Special::Clone) => self.over_one(Opcode::Clone, arguments, 0),
             Some(Special::InArray) => self.in_array(arguments),
+            Some(Special::CallUserFuncArray) => self.call_user_func_array(arguments),
+            Some(Special::CallUserFunc) => self.call_user_func(arguments),
             Some(Special::Opcode) | None => Ok(None),
         }
     }
@@ -223,6 +236,8 @@ impl Emit<'_> {
                 | Special::Count { .. }
                 | Special::Clone
                 | Special::InArray
+                | Special::CallUserFuncArray
+                | Special::CallUserFunc
                 | Special::Opcode,
             )
             | None => Ok(None),

@@ -909,6 +909,7 @@ pub(crate) fn init_dynamic_call<T: Tier>(
         stage: CallStage::Building,
         send_arg_by_ref: false,
         frameless: false,
+        dynamic: true,
         coerced: Vec::new(),
     });
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
@@ -1282,6 +1283,7 @@ fn init_call(
         stage: CallStage::Building,
         send_arg_by_ref: false,
         frameless: false,
+        dynamic: false,
         coerced: Vec::new(),
     });
     Ok(advance(req, frame))
@@ -1905,6 +1907,447 @@ pub(crate) fn check_undef_args<T: Tier>(
         return threw(req, frame, &thrown);
     }
     Ok(advance(req, frame))
+}
+
+/// `ZEND_INIT_USER_CALL` (`Z/Zend/zend_vm_def.h:3952`), what php's
+/// compiler makes of `call_user_func(...)` and `call_user_func_array(...)`
+/// spelled by a name it resolves (`zend_compile_init_user_func`): the
+/// callback in `op2` resolved by `zend_is_callable_ex` as a native's
+/// `callable` parameter resolves one ([`Request::callable_checked`]),
+/// and the call frame pushed for it straight from this frame, marked
+/// `ZEND_CALL_DYNAMIC`, with `extended_value` arguments to come. No
+/// frame of the native's is pushed, so a trace through the callee names
+/// the line of the call and no `[internal function]`, and a callback
+/// that is none is the `TypeError` in the native's words, `op1`'s name,
+/// raised on this frame.
+///
+/// ```php
+/// function f() { throw new Exception('in f'); }
+/// call_user_func('f');
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Exception: in f in %s:2
+/// Stack trace:
+/// #0 %s(3): f()
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// ```php
+/// call_user_func('nope');
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: call_user_func(): Argument #1 ($callback) must be a valid callback, function "nope" not found or invalid function name in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// ```php
+/// call_user_func_array('str_pad', ['abc', 'nope' => 6]);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Unknown named parameter $nope in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// Every shape a callback takes, and a callback the program names:
+///
+/// ```php
+/// class C { public $v = 'v'; function m($x) { return "m$x$this->v "; } static function s($x) { return "s$x "; } function __invoke($x) { return "i$x "; } }
+/// $c = new C; $cb = 'strtoupper';
+/// echo call_user_func([$c, 'm'], 1), call_user_func(['C', 's'], 2), call_user_func('C::s', 3), call_user_func($c, 4), call_user_func(fn ($x) => "c$x ", 5), call_user_func($cb, "u "), call_user_func_array([$c, 'm'], [6]), "|\n";
+/// try { call_user_func([$c, 'nope']); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { call_user_func_array(1, []); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// m1v s2 s3 i4 c5 U m6v |
+/// call_user_func(): Argument #1 ($callback) must be a valid callback, class C does not have a method "nope"
+/// call_user_func_array(): Argument #1 ($callback) must be a valid callback, no array or string given
+/// ```
+pub(crate) fn init_user_call<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let callback = exec::operand(req, frame, code, op.op2_type, op.op2);
+    let resolved = req.callable_checked(&callback);
+    if req.is_pending() {
+        exec::free_operand(req, frame, code, op.op2_type, op.op2);
+        return Ok(Stepped::Threw(frame));
+    }
+    let target = match resolved {
+        Ok(callable) => user_call_target(req, callable.target()),
+        Err(error) => {
+            let native = exec::constant(code, ConstIdx(op.op1));
+            let native = String::from_utf8_lossy(native.as_str_bytes().unwrap_or_default());
+            Err(crate::api::raising::throw(
+                req,
+                "TypeError",
+                &format!("{native}(): Argument #1 ($callback) must be a valid callback, {error}"),
+            ))
+        }
+    };
+    let target = match target {
+        Ok(target) => target,
+        Err(thrown) => {
+            exec::free_operand(req, frame, code, op.op2_type, op.op2);
+            return threw(req, frame, &thrown);
+        }
+    };
+    req.vm_mut().push_call(CallState {
+        function: target.function,
+        name: target.name,
+        arguments: Vec::new(),
+        count: usize::try_from(op.extended_value).unwrap_or(0),
+        this: target.this,
+        called_scope: target.called_scope,
+        closure: target.closure,
+        extra_named: Vec::new(),
+        stage: CallStage::Building,
+        send_arg_by_ref: false,
+        frameless: false,
+        dynamic: true,
+        coerced: Vec::new(),
+    });
+    exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    Ok(advance(req, frame))
+}
+
+/// The call frame a resolved callback takes, `zend_fcall_info_cache` as
+/// `ZEND_INIT_USER_CALL` reads it: a function alone; a method with its
+/// scope, and its receiver as one more owner (`GC_ADDREF` under
+/// `ZEND_CALL_RELEASE_THIS`); a closure as `INIT_DYNAMIC_CALL` takes
+/// one, the closure and its bound receiver held by the call.
+fn user_call_target(
+    req: &mut Request,
+    target: crate::api::call::Target,
+) -> Result<DynamicTarget, Thrown> {
+    match target {
+        crate::api::call::Target::Function(function) => Ok(DynamicTarget {
+            function,
+            name: None,
+            this: None,
+            called_scope: None,
+            closure: None,
+        }),
+        crate::api::call::Target::Method {
+            function,
+            scope,
+            this,
+        } => {
+            let name = req.method_name_string(function)?;
+            if let Some(this) = this {
+                req.addref(&this.as_value());
+            }
+            Ok(DynamicTarget {
+                function,
+                name: Some(name),
+                this,
+                called_scope: Some(scope),
+                closure: None,
+            })
+        }
+        crate::api::call::Target::Closure(object) => dynamic_call_object(req, object),
+    }
+}
+
+/// `ZEND_SEND_USER` (`Z/Zend/zend_vm_def.h:5635`), each argument after
+/// the callback of `call_user_func(...)`: the value read, a reference
+/// followed, and copied into the slot at its number; where the parameter
+/// takes its argument by reference and nothing else, php's warning
+/// (`zend_param_must_be_ref`) and the value in a reference of its own,
+/// so what the callee writes through it is lost.
+///
+/// ```php
+/// function r(&$x) { $x = 'written'; return 'r'; }
+/// $a = 'kept';
+/// function v(&...$all) { foreach ($all as &$one) { $one = 'written'; } return count($all); }
+/// var_dump(call_user_func('r', $a), $a, call_user_func('v', $a, 2), $a);
+/// ```
+/// ```expect
+/// Warning: r(): Argument #1 ($x) must be passed by reference, value given in %s on line 5
+///
+/// Warning: v(): Argument #1 must be passed by reference, value given in %s on line 5
+///
+/// Warning: v(): Argument #2 must be passed by reference, value given in %s on line 5
+/// string(1) "r"
+/// string(4) "kept"
+/// int(2)
+/// string(4) "kept"
+/// ```
+pub(crate) fn send_user<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let reserved = match reserve_arg(req, frame, code, op) {
+        Ok(reserved) => reserved,
+        Err(edge) => return edge,
+    };
+    let value = exec::take_operand(req, frame, code, op.op1_type, op.op1);
+    let value = if must_be_sent_by_ref(req, reserved.number) {
+        if let Some(function) = req.vm().building_call_function() {
+            req.param_must_be_ref(function, reserved.number);
+        }
+        match PhpRef::new(req, value) {
+            Ok(cell) => cell.as_value(),
+            Err(thrown) => return threw(req, frame, &thrown),
+        }
+    } else {
+        value
+    };
+    place_argument(req, frame, reserved.slot, value)
+}
+
+/// `ZEND_SEND_ARRAY` (`Z/Zend/zend_vm_def.h:5484`), the array of
+/// `call_user_func_array(...)`: what is no array php's `TypeError`; each
+/// integer-keyed element the next positional argument whatever its key,
+/// a string-keyed one placed by its name
+/// ([`crate::api::call::handle_named_arg`], the one placement every
+/// named argument takes), and a positional element after a named one
+/// php's `Error`. A parameter that takes its argument by reference and
+/// nothing else is handed an element that is no reference with php's
+/// warning, in a reference of its own; one that takes it by value is
+/// handed a reference's value. With `op2` the array is the
+/// `array_slice($array, <offset>, $length)` the compiler read: the
+/// offset in `extended_value`, the length in `op2`, `null` for the rest,
+/// and no key read.
+///
+/// ```php
+/// function f($a, &$b, ...$rest) { $b = 'b'; var_dump(func_get_args()); }
+/// $x = ['one', 'two', 'k' => 'three'];
+/// call_user_func_array('f', $x);
+/// call_user_func_array('f', ['one', 'b' => 'two']);
+/// var_dump(call_user_func_array('max', array_slice([3, 9, 4, 7], 1, 2)), call_user_func_array('max', array_slice([3, 9, 4, 7], 2, null)), call_user_func_array('max', array_slice([3, 9, 4, 7, 1], 0, -3)), call_user_func_array('max', array_slice([3, 9, 4, 7], 1, '2')));
+/// try { call_user_func_array('f', [1, 2, 'a' => 3]); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { call_user_func_array('f', ['a' => 1, 2]); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { call_user_func_array('f', 'x'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { call_user_func_array('max', array_slice([1], 0, [])); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Warning: f(): Argument #2 ($b) must be passed by reference, value given in %s on line 4
+/// array(2) {
+///   [0]=>
+///   string(3) "one"
+///   [1]=>
+///   string(1) "b"
+/// }
+///
+/// Warning: f(): Argument #2 ($b) must be passed by reference, value given in %s on line 5
+/// array(2) {
+///   [0]=>
+///   string(3) "one"
+///   [1]=>
+///   string(1) "b"
+/// }
+/// int(9)
+/// int(7)
+/// int(9)
+/// int(9)
+///
+/// Warning: f(): Argument #2 ($b) must be passed by reference, value given in %s on line 7
+/// Named parameter $a overwrites previous argument
+/// Cannot use positional argument after named argument
+/// call_user_func_array(): Argument #2 ($args) must be of type array, string given
+/// array_slice(): Argument #3 ($length) must be of type ?int, array given
+/// ```
+pub(crate) fn send_array<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let given = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
+    let Some(array) = given.as_array().copied() else {
+        let shown = crate::ops::value_name(req, &given.undef_as_null());
+        let thrown = crate::api::raising::throw(
+            req,
+            "TypeError",
+            &format!(
+                "call_user_func_array(): Argument #2 ($args) must be of type array, {shown} given"
+            ),
+        );
+        exec::free_operand(req, frame, code, op.op2_type, op.op2);
+        exec::free_operand(req, frame, code, op.op1_type, op.op1);
+        return threw(req, frame, &thrown);
+    };
+    let placed = if op.op2_type == OperandKind::Unused {
+        send_array_elements(req, array)
+    } else {
+        send_array_slice(req, frame, code, op, array)
+    };
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    match placed {
+        Ok(()) => Ok(advance(req, frame)),
+        Err(thrown) => threw(req, frame, &thrown),
+    }
+}
+
+/// `SEND_ARRAY`'s walk of the whole array, keys read.
+fn send_array_elements(req: &mut Request, array: PhpArray) -> Result<(), Thrown> {
+    let Some(function) = req.vm().building_call_function() else {
+        return Err(no_call_under(req));
+    };
+    let mut have_named = false;
+    for (key, value) in array.snapshot_refs() {
+        let (slot, number) = match key {
+            crate::api::values::Key::Str(name) => {
+                have_named = true;
+                let offset = crate::api::call::arg_offset_by_name(req, function, name.as_bytes());
+                let Some(call) = req.vm_mut().building_call() else {
+                    return Err(no_call_under(req));
+                };
+                match crate::api::call::handle_named_arg(
+                    offset,
+                    &mut call.arguments,
+                    &mut call.extra_named,
+                    name,
+                ) {
+                    Ok(named) => {
+                        if matches!(named.at, crate::api::call::NamedAt::Extra(_)) {
+                            req.addref(&Value::string(name));
+                        }
+                        (ArgSlot::Named(named.at), named.number)
+                    }
+                    Err(refused) => return Err(refused.throw(req, name)),
+                }
+            }
+            crate::api::values::Key::Int(_) => {
+                if have_named {
+                    return Err(crate::api::raising::throw(
+                        req,
+                        "Error",
+                        "Cannot use positional argument after named argument",
+                    ));
+                }
+                let Some(call) = req.vm_mut().building_call() else {
+                    return Err(no_call_under(req));
+                };
+                let at = call.count;
+                call.count += 1;
+                let number = u32::try_from(call.count).unwrap_or(u32::MAX);
+                (ArgSlot::Positional(at), number)
+            }
+        };
+        send_array_element(req, slot, number, value)?;
+    }
+    Ok(())
+}
+
+/// `SEND_ARRAY` over `array_slice($array, <offset>, $length)`: the
+/// length read as `array_slice`'s `?int $length` is, a negative one
+/// counted from the end, and the elements from the offset on sent in
+/// order, no key read.
+fn send_array_slice(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    array: PhpArray,
+) -> Result<(), Thrown> {
+    let given = exec::operand(req, frame, code, op.op2_type, op.op2).deref();
+    let skip = usize::try_from(op.extended_value).unwrap_or(usize::MAX);
+    let count = array.len();
+    let rest = i64::try_from(count.saturating_sub(skip)).unwrap_or(i64::MAX);
+    let length = match given.as_ref() {
+        ValueRef::Int(n) => Some(n),
+        ValueRef::Null | ValueRef::Undef => Some(rest),
+        ValueRef::Bool(b) if !req.frame_strict_types(frame) => Some(i64::from(b)),
+        _ if !req.frame_strict_types(frame) => crate::ops::arg_long_weak(req, &given),
+        _ => None,
+    };
+    let Some(mut length) = length else {
+        let shown = crate::ops::value_name(req, &given);
+        exec::free_operand(req, frame, code, op.op2_type, op.op2);
+        return Err(crate::api::raising::throw(
+            req,
+            "TypeError",
+            &format!("array_slice(): Argument #3 ($length) must be of type ?int, {shown} given"),
+        ));
+    };
+    exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    if length < 0 {
+        length += rest;
+    }
+    if skip >= count || length <= 0 {
+        return Ok(());
+    }
+    let length = usize::try_from(length.min(rest)).unwrap_or(0);
+    for (_, value) in array.snapshot_refs().into_iter().skip(skip).take(length) {
+        let Some(call) = req.vm_mut().building_call() else {
+            return Err(no_call_under(req));
+        };
+        let at = call.count;
+        call.count += 1;
+        let number = u32::try_from(call.count).unwrap_or(u32::MAX);
+        send_array_element(req, ArgSlot::Positional(at), number, value)?;
+    }
+    Ok(())
+}
+
+/// One element of `SEND_ARRAY` into its slot, by the parameter's way of
+/// taking it (`ARG_SHOULD_BE_SENT_BY_REF`, `ARG_MAY_BE_SENT_BY_REF`):
+/// the element with one more owner, a reference's value where the
+/// parameter takes a value, and a value that is no reference wrapped in
+/// one of its own, with php's warning, where the parameter takes a
+/// reference and nothing else. `number` is the parameter's, php's
+/// `arg_num`.
+fn send_array_element(
+    req: &mut Request,
+    slot: ArgSlot,
+    number: u32,
+    element: Value,
+) -> Result<(), Thrown> {
+    let is_ref = element.as_php_ref().is_some();
+    let value = if should_be_sent_by_ref(req, number) {
+        if !is_ref && must_be_sent_by_ref(req, number) {
+            if let Some(function) = req.vm().building_call_function() {
+                req.param_must_be_ref(function, number);
+            }
+            req.addref(&element);
+            PhpRef::new(req, element)?.as_value()
+        } else {
+            req.addref(&element);
+            element
+        }
+    } else {
+        let value = element.deref();
+        req.addref(&value);
+        value
+    };
+    let Some(call) = req.vm_mut().building_call() else {
+        req.release(value);
+        return Err(no_call_under(req));
+    };
+    let placed = match slot {
+        ArgSlot::Positional(at) => {
+            if call.arguments.len() <= at {
+                call.arguments.resize_with(at + 1, Value::undef);
+            }
+            call.arguments.get_mut(at)
+        }
+        ArgSlot::Named(at) => at.slot(&mut call.arguments, &mut call.extra_named),
+    };
+    let Some(placed) = placed else {
+        req.release(value);
+        return Err(no_call_under(req));
+    };
+    let previous = std::mem::replace(placed, value);
+    req.release(previous);
+    Ok(())
+}
+
+/// The internal error a `SEND_ARRAY` with no call frame under it is.
+fn no_call_under(req: &mut Request) -> Thrown {
+    crate::api::raising::fatal(
+        req,
+        "InternalError: a SEND_ARRAY opline with no call frame under it",
+    )
 }
 
 /// `ZEND_ASSERT_CHECK` (`Z/Zend/zend_vm_def.h:8880`), in front of every
@@ -3330,6 +3773,7 @@ pub(crate) fn new<T: Tier>(
         stage: CallStage::Building,
         send_arg_by_ref: false,
         frameless: false,
+        dynamic: false,
         coerced: Vec::new(),
     });
     Ok(advance(req, frame))
@@ -3628,6 +4072,7 @@ fn static_call_frame(
         stage: CallStage::Building,
         send_arg_by_ref: false,
         frameless: false,
+        dynamic: false,
         coerced: Vec::new(),
     });
     Ok(advance(req, frame))
@@ -3791,6 +4236,7 @@ pub(crate) fn init_method_call<T: Tier>(
         stage: CallStage::Building,
         send_arg_by_ref: false,
         frameless: false,
+        dynamic: false,
         coerced: Vec::new(),
     });
     Ok(advance(req, frame))
@@ -7094,6 +7540,7 @@ fn frameless_call(
         stage: CallStage::Serving,
         send_arg_by_ref: false,
         frameless: true,
+        dynamic: false,
         coerced: Vec::new(),
     });
     let served = req.serve_native(Function(entry.function));
@@ -14436,7 +14883,6 @@ pub(crate) fn handle_exception<T: Tier>(
 /// echo "after\n";
 /// ```
 /// ```expect exit=6
-///
 /// ```
 ///
 /// ```php
@@ -15472,6 +15918,7 @@ mod tests {
                 stage: CallStage::Serving,
                 send_arg_by_ref: false,
                 frameless: false,
+                dynamic: false,
                 coerced: Vec::new(),
             };
             let frame = req

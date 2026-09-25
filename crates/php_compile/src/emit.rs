@@ -122,6 +122,7 @@ mod attributes;
 mod export;
 mod magic;
 mod types;
+mod user_call;
 mod walk;
 
 /// One arm of an `if` as the tree holds it, php's `ZEND_AST_IF_ELEM`:
