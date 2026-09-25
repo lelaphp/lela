@@ -32,11 +32,18 @@ fn must_not_be_empty(req: &mut Request, position: u32) -> Thrown {
     arg_value_error(req, position, "not be empty")
 }
 
-/// Every error of `raised` routed to php's generic handler, as a validator
-/// meets them.
+/// The errors of a validator routed as php meets them: its own, raised
+/// through the handler `xmlSchemaSetParserErrors` and its kin set to php's
+/// generic one, as their bare message; and those of the parser libxml
+/// opens inside it to read a schema, which php never configured, as
+/// libxml's own handler reports them, through the same generic handler.
 fn generic(mut raised: Vec<php_ext_libxml::ffi::Raised>) -> Vec<php_ext_libxml::ffi::Raised> {
     for error in &mut raised {
-        error.route = Route::Generic;
+        error.route = if error.route == Route::Parser {
+            Route::Default
+        } else {
+            Route::Generic
+        };
     }
     raised
 }
@@ -934,7 +941,11 @@ fn get_elements_by_tag_name(req: &mut Request) -> Result<Value, Thrown> {
 /// `getElementsByTagNameNS(?string $namespace, string $localName): DOMNodeList`.
 fn get_elements_by_tag_name_ns(req: &mut Request) -> Result<Value, Thrown> {
     arity(req, 2, 2)?;
+    // `Z_PARAM_PATH_OR_NULL`, then `Z_PARAM_PATH`.
     let ns = nullable_bytes_arg(req, 1)?.unwrap_or_default();
+    if ns.contains(&0) {
+        return Err(arg_value_error(req, 1, "not contain any null bytes"));
+    }
     let name = path_arg(req, 2)?;
     let this = crate::this_intern(req)?;
     crate::create(
@@ -996,7 +1007,18 @@ fn import_node(req: &mut Request) -> Result<Value, Thrown> {
         let root = doc.root();
         let mut found = root.and_then(|r| r.search_ns_by_href(Some(doc), &href));
         if found.is_none_or(|n| n.prefix().is_none()) {
-            found = root.and_then(|r| get_ns(r, &href, ns.prefix().as_deref()).ok());
+            found = if let Some(r) = root {
+                get_ns(r, &href, ns.prefix().as_deref()).ok()
+            } else {
+                // No root to declare it on: `dom_get_ns(NULL, ...)` makes a
+                // declaration nothing holds, and the document's old list
+                // takes it.
+                let detached = Ns::new(None, Some(&href), ns.prefix().as_deref());
+                if let Some(d) = detached {
+                    d.move_to_old(Some(doc));
+                }
+                detached
+            };
         }
         copy.set_ns(found);
     }
@@ -1104,6 +1126,7 @@ fn xinclude(req: &mut Request) -> Result<Value, Thrown> {
         return Ok(Value::bool(false));
     };
     let (this, doc) = this_node(req)?;
+    strip_xinclude_references(doc);
     let (err, raised) = Parser::xinclude(doc, flags);
     Errors::route(req, raised);
     invalidate(req, this);
@@ -1112,6 +1135,55 @@ fn xinclude(req: &mut Request) -> Result<Value, Thrown> {
     } else {
         Value::int(i64::from(err))
     })
+}
+
+/// `dom_xinclude_strip_fallback_references` (GH-14702, GH-17847): every
+/// object standing for a node under an `xi:include` let go of before
+/// libxml2 clones the include's nodes and frees the originals, so such an
+/// object answers `Invalid State Error` rather than reading freed memory.
+fn strip_xinclude_references(doc: Node) {
+    const XINCLUDE_NS: &[u8] = b"http://www.w3.org/2001/XInclude";
+    const XINCLUDE_OLD_NS: &[u8] = b"http://www.w3.org/2003/XInclude";
+    let mut current = doc.children();
+    while let Some(node) = current {
+        if node.kind() == Kind::Element
+            && node.name() == b"include"
+            && node
+                .ns()
+                .and_then(Ns::href)
+                .is_some_and(|h| h == XINCLUDE_NS || h == XINCLUDE_OLD_NS)
+        {
+            strip_references(node);
+        }
+        current = crate::next_in_tree_order(node, doc);
+    }
+}
+
+/// `dom_xinclude_strip_references`: the node, its attributes and every
+/// node below it unregistered from the objects standing for them.
+fn strip_references(base: Node) {
+    let strip_attributes = |element: Node| {
+        let mut attr = element.properties();
+        while let Some(a) = attr {
+            a.free_resource();
+            let mut child = a.children();
+            while let Some(c) = child {
+                c.free_resource();
+                child = c.next();
+            }
+            attr = a.next();
+        }
+    };
+    base.free_resource();
+    strip_attributes(base);
+    let mut current = base.children();
+    while let Some(node) = current {
+        node.free_resource();
+        if node.kind() == Kind::Element {
+            strip_attributes(node);
+        }
+        current = crate::next_in_tree_order(node, base);
+    }
 }
 
 /// `DOMDocument::validate(): bool`.

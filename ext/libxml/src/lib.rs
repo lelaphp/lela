@@ -406,95 +406,59 @@ impl Errors {
                 list.push(error);
                 continue;
             }
-            let text = match error.route {
+            // libxml's own handler writes its report in pieces, one call
+            // of the generic handler per line, and php raises each.
+            let pieces: Vec<Vec<u8>> = match error.route {
                 Route::Silent => continue,
-                Route::Default => default_text(&error),
-                Route::Parser | Route::Generic => error.message.clone(),
+                Route::Default => error
+                    .printed
+                    .split_inclusive(|b| *b == b'\n')
+                    .map(<[u8]>::to_vec)
+                    .collect(),
+                Route::Parser | Route::Generic => vec![error.message.clone()],
             };
-            state.buffer.extend_from_slice(&text);
-            let mut end = state.buffer.len();
-            while end > 0 && state.buffer[end - 1] == b'\n' {
-                end -= 1;
-            }
-            if end == state.buffer.len() {
-                continue;
-            }
-            state.buffer.truncate(end);
-            let message = String::from_utf8_lossy(&std::mem::take(&mut state.buffer)).into_owned();
-            match error.route {
-                Route::Parser => {
-                    let level = if error.level == ffi::Level::Warning {
-                        Level::Notice
-                    } else {
-                        Level::Warning
-                    };
-                    let file = error.file.as_deref().map_or_else(
-                        || String::from("Entity"),
-                        |f| String::from_utf8_lossy(f).into_owned(),
-                    );
-                    docref(
-                        req,
-                        level,
-                        &format!("{message} in {file}, line: {}", error.line),
-                    );
-                }
-                Route::Generic | Route::Default | Route::Silent => {
-                    docref(req, Level::Warning, &message);
-                }
+            for piece in pieces {
+                Self::piece(req, &error, &piece);
             }
         }
     }
-}
 
-/// `xmlReportError`'s text for an error libxml's own default handler
-/// met: the site, the element, the domain and the level, then the
-/// message with its newline.
-fn default_text(error: &Raised) -> Vec<u8> {
-    let mut out = Vec::new();
-    if let Some(file) = &error.file {
-        out.extend_from_slice(file);
-        out.extend_from_slice(format!(":{}: ", error.line).as_bytes());
-    } else if error.line != 0 && error.domain == sys::XML_FROM_PARSER {
-        out.extend_from_slice(format!("Entity: line {}: ", error.line).as_bytes());
+    /// One call of php's handler: `text` joined to the buffer, and raised
+    /// once the buffer ends with a newline.
+    fn piece(req: &mut Request, error: &Raised, text: &[u8]) {
+        let state = req.state::<State>();
+        state.buffer.extend_from_slice(text);
+        let mut end = state.buffer.len();
+        while end > 0 && state.buffer[end - 1] == b'\n' {
+            end -= 1;
+        }
+        if end == state.buffer.len() {
+            return;
+        }
+        state.buffer.truncate(end);
+        let message = String::from_utf8_lossy(&std::mem::take(&mut state.buffer)).into_owned();
+        match error.route {
+            Route::Parser => {
+                let level = if error.level == ffi::Level::Warning {
+                    Level::Notice
+                } else {
+                    Level::Warning
+                };
+                let file = error.file.as_deref().map_or_else(
+                    || String::from("Entity"),
+                    |f| String::from_utf8_lossy(f).into_owned(),
+                );
+                docref(
+                    req,
+                    level,
+                    &format!("{message} in {file}, line: {}", error.line),
+                );
+            }
+            Route::Generic | Route::Default | Route::Silent => {
+                docref(req, Level::Warning, &message);
+            }
+        }
     }
-    if let Some(name) = &error.element {
-        out.extend_from_slice(b"element ");
-        out.extend_from_slice(name);
-        out.extend_from_slice(b": ");
-    }
-    out.extend_from_slice(match error.domain {
-        sys::XML_FROM_PARSER => b"parser ".as_slice(),
-        sys::XML_FROM_NAMESPACE => b"namespace ",
-        sys::XML_FROM_DTD | sys::XML_FROM_VALID => b"validity ",
-        sys::XML_FROM_HTML => b"HTML parser ",
-        sys::XML_FROM_MEMORY => b"memory ",
-        sys::XML_FROM_OUTPUT => b"output ",
-        sys::XML_FROM_IO => b"I/O ",
-        sys::XML_FROM_XINCLUDE => b"XInclude ",
-        sys::XML_FROM_XPATH => b"XPath ",
-        sys::XML_FROM_XPOINTER => b"parser ",
-        sys::XML_FROM_REGEXP => b"regexp ",
-        sys::XML_FROM_MODULE => b"module ",
-        sys::XML_FROM_SCHEMASV => b"Schemas validity ",
-        sys::XML_FROM_SCHEMASP => b"Schemas parser ",
-        sys::XML_FROM_RELAXNGP => b"Relax-NG parser ",
-        sys::XML_FROM_RELAXNGV => b"Relax-NG validity ",
-        sys::XML_FROM_CATALOG => b"Catalog ",
-        sys::XML_FROM_C14N => b"C14N ",
-        sys::XML_FROM_XSLT => b"XSLT ",
-        sys::XML_FROM_I18N => b"encoding ",
-        _ => b"",
-    });
-    out.extend_from_slice(match error.level {
-        ffi::Level::None => b": ".as_slice(),
-        ffi::Level::Warning => b"warning : ",
-        ffi::Level::Error | ffi::Level::Fatal => b"error : ",
-    });
-    out.extend_from_slice(&error.message);
-    if !error.message.ends_with(b"\n") {
-        out.push(b'\n');
-    }
-    out
 }
 
 // ---- the natives

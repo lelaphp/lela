@@ -2,7 +2,7 @@
 //! `php_dom.c` the other classes share.
 
 use php_ext::coerce::value_name;
-use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw};
+use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, Value};
 use php_ext_libxml::Errors;
@@ -635,8 +635,9 @@ fn c14n_query(
     };
     let Some(q) = query.as_str_bytes().map(<[u8]>::to_vec) else {
         let given = value_name(req, &query);
-        return Err(arg_type_error(
+        return Err(argument_error(
             req,
+            "TypeError",
             3 + base,
             &format!("\"query\" option must be a string, {given} given"),
         ));

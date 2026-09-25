@@ -170,7 +170,11 @@ fn document_read(req: &mut Request, object: PhpObject) -> Read {
 
 #[allow(clippy::unnecessary_wraps)] // the reader shape every row of a property table has
 fn register_node_ns_read(req: &mut Request, object: PhpObject) -> Read {
-    let on = matches!(dom(req, object), Some(d) if matches!(&d.extra, Extra::XPath(s) if s.register_node_ns));
+    // `dom_xpath_objects_new` sets it before any constructor runs.
+    let on = match dom(req, object).map(|d| &d.extra) {
+        Some(Extra::XPath(s)) => s.register_node_ns,
+        _ => true,
+    };
     Ok(Some(Value::bool(on)))
 }
 
@@ -208,7 +212,11 @@ pub(crate) const PROPS: &[Prop] = &[
 fn item_object(req: &mut Request, this: PhpObject, item: Item) -> Result<Value, Thrown> {
     match item {
         Item::Node(node) => object_for(req, node, Some(this)),
-        Item::Namespace { ns, parent } => {
+        Item::Namespace {
+            href,
+            prefix,
+            parent,
+        } => {
             let Some(parent) = parent else {
                 return Ok(Value::null());
             };
@@ -216,7 +224,8 @@ fn item_object(req: &mut Request, this: PhpObject, item: Item) -> Result<Value, 
             let Some(parent_obj) = parent_value.as_object().copied() else {
                 return Ok(Value::null());
             };
-            let Some(fake) = Node::fake_namespace_decl(parent, ns) else {
+            let Some(fake) = Node::fake_namespace_decl(parent, href.as_deref(), prefix.as_deref())
+            else {
                 req.release(parent_value);
                 return Err(crate::dom_throw(req, Code::InvalidState));
             };

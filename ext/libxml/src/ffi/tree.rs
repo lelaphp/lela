@@ -1352,22 +1352,24 @@ impl Node {
 
 impl Node {
     /// `php_dom_create_fake_namespace_decl_node_ptr`: a node standing for
-    /// the declaration `original` on `parent`, typed `XML_NAMESPACE_DECL`,
+    /// the declaration of `href` and `prefix` on `parent`, typed `XML_NAMESPACE_DECL`,
     /// named by the prefix (or `xmlns`), its content the href, owning a
     /// copy of the declaration; the object that stands for it frees it.
-    pub fn fake_namespace_decl(parent: Node, original: Ns) -> Option<Node> {
-        let href = original.href();
-        let prefix = original.prefix();
-        let copy = Ns::new(None, href.as_deref(), None)?;
-        if let Some(p) = &prefix {
+    pub fn fake_namespace_decl(
+        parent: Node,
+        href: Option<&[u8]>,
+        prefix: Option<&[u8]>,
+    ) -> Option<Node> {
+        let copy = Ns::new(None, href, None)?;
+        if let Some(p) = prefix {
             let c = cstr(p);
             // SAFETY: a NUL-terminated prefix, duplicated for the copy,
             // whose prefix is null so nothing is lost.
             let owned = unsafe { sys::xmlStrdup(c.as_ptr()) };
             copy.write(|n| n.prefix = owned);
         }
-        let name = prefix.unwrap_or_else(|| b"xmlns".to_vec());
-        let node = Node::new_element(parent.doc(), None, &name, href.as_deref())?;
+        let name = prefix.unwrap_or(b"xmlns");
+        let node = Node::new_element(parent.doc(), None, name, href)?;
         node.write(|n| {
             n.type_ = sys::XML_NAMESPACE_DECL;
             n.parent = parent.raw();

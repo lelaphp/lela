@@ -1301,14 +1301,21 @@ fn debug_info(req: &mut Request, object: PhpObject) -> Result<Option<PhpArray>, 
         return Ok(Some(out));
     };
     req.state::<State>().suppress_warnings = true;
-    let mut failed = None;
     for prop in table.iter().flat_map(|t| t.iter()) {
+        // A reader that fails is left out, as `dom_get_debug_info_helper`
+        // leaves it out. php leaves its exception pending, to be thrown
+        // once the dump is printed; a handler here cannot, so it is
+        // cleared, and one that cannot be cleared ends the dump.
         let read = match (prop.read)(req, object) {
             Ok(Some(v)) => v,
             Ok(None) => continue,
             Err(thrown) => {
-                failed = Some(thrown);
-                break;
+                if let Err(thrown) = php_ext::raising::clear(req, thrown) {
+                    req.state::<State>().suppress_warnings = false;
+                    req.release(Value::array(out));
+                    return Err(thrown);
+                }
+                continue;
             }
         };
         let shown = if read.as_object().is_some() {
@@ -1321,10 +1328,6 @@ fn debug_info(req: &mut Request, object: PhpObject) -> Result<Option<PhpArray>, 
         out.set(req, key, shown)?;
     }
     req.state::<State>().suppress_warnings = false;
-    if let Some(thrown) = failed {
-        req.release(Value::array(out));
-        return Err(thrown);
-    }
     Ok(Some(out))
 }
 
@@ -1592,11 +1595,40 @@ fn copy_document_ref(req: &mut Request, from: PhpObject, to: PhpObject) {
 }
 
 /// `dom_objects_store_clone_obj`: the object cloned with a copy of its
-/// node, the copy counting the document it lands in.
+/// node, the copy counting the document it lands in; a namespace node is
+/// `dom_object_namespace_node_clone_obj`'s, a fresh declaration node on
+/// the same element, which the clone keeps alive too.
 fn clone_object(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
     let node = node_of(req, object);
     let mut payload = crate::object::Dom::default();
     let mut copied = None;
+    if let Some(n) = node
+        && n.kind() == Kind::NamespaceDecl
+    {
+        let parent_obj = match dom(req, object).map(|d| &d.extra) {
+            Some(Extra::NamespaceParent(p)) => Some(*p),
+            _ => None,
+        };
+        if let Some(p) = parent_obj {
+            req.addref(&p.as_value());
+            payload.extra = Extra::NamespaceParent(p);
+        }
+        let ns = n.ns();
+        if let Some(parent) = n.parent()
+            && let Some(cloned) = Node::fake_namespace_decl(
+                parent,
+                ns.and_then(Ns::href).as_deref(),
+                ns.and_then(Ns::prefix).as_deref(),
+            )
+        {
+            payload.obj.attach(cloned, shared_doc(req, object));
+        }
+        let clone = object.clone_with(req, payload)?;
+        if let Some(d) = dom_mut(req, clone) {
+            d.obj.set_object(clone);
+        }
+        return Ok(clone);
+    }
     if instance_of(req, object, "DOMNode")
         && let Some(n) = node
         && let Some(cloned) = clone_node(n, n.doc(), true)

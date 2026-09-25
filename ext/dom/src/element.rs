@@ -251,7 +251,8 @@ fn has_attribute_ns(req: &mut Request) -> Result<Value, Thrown> {
 /// A namespace declaration handed out as a `DOMNameSpaceNode`, the
 /// element kept alive by it.
 fn namespace_node(req: &mut Request, this: PhpObject, elem: Node, ns: Ns) -> Result<Value, Thrown> {
-    let Some(fake) = Node::fake_namespace_decl(elem, ns) else {
+    let Some(fake) = Node::fake_namespace_decl(elem, ns.href().as_deref(), ns.prefix().as_deref())
+    else {
         return Err(dom_throw(req, Code::InvalidState));
     };
     let value = object_for(req, fake, Some(this))?;

@@ -14,11 +14,17 @@ use php_ext::request::Request;
 use super::tree::{Kind, Node, Ns};
 
 /// One member of a node set: a node, or a namespace node libxml made for
-/// the namespace axis, whose element it keeps in `next`.
-#[derive(Debug, Clone, Copy)]
+/// the namespace axis, copied out, since the set frees its copies with
+/// the object `XPath` answered: the declaration's `href` and `prefix`, and the element
+/// libxml kept in its `next`.
+#[derive(Debug, Clone)]
 pub enum Item {
     Node(Node),
-    Namespace { ns: Ns, parent: Option<Node> },
+    Namespace {
+        href: Option<Vec<u8>>,
+        prefix: Option<Vec<u8>>,
+        parent: Option<Node>,
+    },
 }
 
 fn items(set: *mut sys::xmlNodeSet) -> Vec<Item> {
@@ -42,7 +48,8 @@ fn items(set: *mut sys::xmlNodeSet) -> Vec<Item> {
             if node.kind() == Kind::NamespaceDecl {
                 let ns = Ns::from_raw(p.cast())?;
                 return Some(Item::Namespace {
-                    ns,
+                    href: ns.href(),
+                    prefix: ns.prefix(),
                     parent: ns.xpath_parent(),
                 });
             }

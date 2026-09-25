@@ -197,6 +197,11 @@ pub struct Raised {
     /// The name of the element `node` names, which `xmlReportError`
     /// prints.
     pub element: Option<Vec<u8>>,
+    /// `xmlReportError`'s text, what libxml's own handler writes through
+    /// `xmlGenericError`: one piece per line, the site, the element, the
+    /// domain, the level and the message, then the input's line and a
+    /// caret under the column where a parser raised it.
+    pub printed: Vec<u8>,
     pub route: Route,
 }
 
@@ -214,6 +219,7 @@ impl Raised {
             line: 0,
             column: 0,
             element: None,
+            printed: Vec::new(),
             route: Route::Generic,
         }
     }
@@ -241,21 +247,225 @@ unsafe extern "C" fn collect(user: *mut c_void, error: *mut sys::xmlError) {
         // SAFETY: an element's name is a NUL-terminated string it owns.
         (n.type_ == sys::XML_ELEMENT_NODE).then(|| unsafe { Alloc::bytes(n.name) }.to_vec())
     };
+    // `__xmlRaiseError` reads `ctx` as a parser context for these domains
+    // alone; for every other one it is whatever context raised it.
+    let parser = if matches!(
+        e.domain,
+        sys::XML_FROM_PARSER
+            | sys::XML_FROM_HTML
+            | sys::XML_FROM_DTD
+            | sys::XML_FROM_NAMESPACE
+            | sys::XML_FROM_IO
+            | sys::XML_FROM_VALID
+    ) {
+        e.ctxt.cast::<sys::xmlParserCtxt>()
+    } else {
+        ptr::null_mut()
+    };
+    let level = Level::of(e.level);
+    // SAFETY: `parser` is null or the live context raising the error.
+    let printed = unsafe {
+        printed_text(
+            e,
+            parser,
+            &message,
+            file.as_deref(),
+            element.as_deref(),
+            level,
+        )
+    };
     into.push(Raised {
         domain: e.domain,
         code: e.code,
-        level: Level::of(e.level),
+        level,
         message,
         file,
         line: e.line,
         column: e.int2,
         element,
-        route: if e.ctxt.is_null() {
+        printed,
+        route: if parser.is_null() {
             Route::Generic
         } else {
             Route::Parser
         },
     });
+}
+
+/// `xmlReportError` in 2.9.13, into bytes: the site from the parser's
+/// input (or the error's file and line), the element, the domain and the
+/// level, the message with its newline, then the input's line around the
+/// position.
+///
+/// # Safety
+/// `parser` is null or a live parser's `xmlParserCtxt`.
+unsafe fn printed_text(
+    e: &sys::xmlError,
+    parser: *mut sys::xmlParserCtxt,
+    message: &[u8],
+    file: Option<&[u8]>,
+    element: Option<&[u8]>,
+    level: Level,
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut input: *mut sys::xmlParserInput = ptr::null_mut();
+    let mut current: *mut sys::xmlParserInput = ptr::null_mut();
+    if parser.is_null() {
+        if let Some(f) = file {
+            out.extend_from_slice(f);
+            out.extend_from_slice(format!(":{}: ", e.line).as_bytes());
+        } else if e.line != 0
+            && matches!(
+                e.domain,
+                sys::XML_FROM_PARSER
+                    | sys::XML_FROM_SCHEMASV
+                    | sys::XML_FROM_SCHEMASP
+                    | sys::XML_FROM_DTD
+                    | sys::XML_FROM_RELAXNGP
+                    | sys::XML_FROM_RELAXNGV
+            )
+        {
+            out.extend_from_slice(format!("Entity: line {}: ", e.line).as_bytes());
+        }
+    } else {
+        // SAFETY: the caller's contract.
+        let p = unsafe { &*parser };
+        input = p.input;
+        // SAFETY: a live context's input is null or live.
+        if !input.is_null() && unsafe { (*input).filename.is_null() } && p.inputNr > 1 {
+            current = input;
+            let at = usize::try_from(p.inputNr - 2).unwrap_or(0);
+            // SAFETY: `inputNr` entries at `inputTab`, `at` below it.
+            let slot = unsafe { p.inputTab.add(at) };
+            // SAFETY: a live entry of the table.
+            input = unsafe { *slot };
+        }
+        if !input.is_null() {
+            // SAFETY: a live input.
+            let i = unsafe { &*input };
+            if !i.filename.is_null() {
+                // SAFETY: a NUL-terminated name the input owns.
+                out.extend_from_slice(unsafe { Alloc::bytes(i.filename.cast::<u8>()) });
+                out.extend_from_slice(format!(":{}: ", i.line).as_bytes());
+            } else if e.line != 0 && e.domain == sys::XML_FROM_PARSER {
+                out.extend_from_slice(format!("Entity: line {}: ", i.line).as_bytes());
+            }
+        }
+    }
+    if let Some(name) = element {
+        out.extend_from_slice(b"element ");
+        out.extend_from_slice(name);
+        out.extend_from_slice(b": ");
+    }
+    out.extend_from_slice(domain_name(e.domain));
+    out.extend_from_slice(match level {
+        Level::None => b": ".as_slice(),
+        Level::Warning => b"warning : ",
+        Level::Error | Level::Fatal => b"error : ",
+    });
+    out.extend_from_slice(message);
+    if !message.ends_with(b"\n") {
+        out.push(b'\n');
+    }
+    if !parser.is_null() {
+        // SAFETY: null or a live input of the live context.
+        unsafe { file_context(input, &mut out) };
+        if !current.is_null() {
+            // SAFETY: as above.
+            let c = unsafe { &*current };
+            if !c.filename.is_null() {
+                // SAFETY: a NUL-terminated name the input owns.
+                out.extend_from_slice(unsafe { Alloc::bytes(c.filename.cast::<u8>()) });
+                out.extend_from_slice(format!(":{}: \n", c.line).as_bytes());
+            } else if e.line != 0 && e.domain == sys::XML_FROM_PARSER {
+                out.extend_from_slice(format!("Entity: line {}: \n", c.line).as_bytes());
+            }
+            // SAFETY: as above.
+            unsafe { file_context(current, &mut out) };
+        }
+    }
+    out
+}
+
+/// `xmlReportError`'s domain word.
+fn domain_name(domain: c_int) -> &'static [u8] {
+    match domain {
+        sys::XML_FROM_PARSER | sys::XML_FROM_XPOINTER => b"parser ",
+        sys::XML_FROM_NAMESPACE => b"namespace ",
+        sys::XML_FROM_DTD | sys::XML_FROM_VALID => b"validity ",
+        sys::XML_FROM_HTML => b"HTML parser ",
+        sys::XML_FROM_MEMORY => b"memory ",
+        sys::XML_FROM_OUTPUT => b"output ",
+        sys::XML_FROM_IO => b"I/O ",
+        sys::XML_FROM_XINCLUDE => b"XInclude ",
+        sys::XML_FROM_XPATH => b"XPath ",
+        sys::XML_FROM_REGEXP => b"regexp ",
+        sys::XML_FROM_MODULE => b"module ",
+        sys::XML_FROM_SCHEMASV => b"Schemas validity ",
+        sys::XML_FROM_SCHEMASP => b"Schemas parser ",
+        sys::XML_FROM_RELAXNGP => b"Relax-NG parser ",
+        sys::XML_FROM_RELAXNGV => b"Relax-NG validity ",
+        sys::XML_FROM_CATALOG => b"Catalog ",
+        sys::XML_FROM_C14N => b"C14N ",
+        sys::XML_FROM_XSLT => b"XSLT ",
+        sys::XML_FROM_I18N => b"encoding ",
+        _ => b"",
+    }
+}
+
+/// `xmlParserPrintFileContextInternal` in 2.9.13: the input's line around
+/// the position, 80 bytes at most, and a line with `^` under the column.
+///
+/// # Safety
+/// `input` is null or a live parser input.
+unsafe fn file_context(input: *mut sys::xmlParserInput, out: &mut Vec<u8>) {
+    const ROOM: usize = 80;
+    if input.is_null() {
+        return;
+    }
+    // SAFETY: the caller's contract.
+    let i = unsafe { &*input };
+    if i.cur.is_null() || i.base.is_null() {
+        return;
+    }
+    let (base, at) = (i.base, i.cur);
+    // SAFETY: `base..cur` is one live buffer.
+    let read = |p: *const u8| unsafe { *p };
+    let mut cur = at;
+    while cur > base && matches!(read(cur), b'\n' | b'\r') {
+        // SAFETY: still inside the buffer, above `base`.
+        cur = unsafe { cur.sub(1) };
+    }
+    let mut n = 0;
+    while n < ROOM && cur > base && !matches!(read(cur), b'\n' | b'\r') {
+        n += 1;
+        // SAFETY: as above.
+        cur = unsafe { cur.sub(1) };
+    }
+    if matches!(read(cur), b'\n' | b'\r') {
+        // SAFETY: the byte after an end of line is inside the buffer.
+        cur = unsafe { cur.add(1) };
+    }
+    // SAFETY: both inside the one buffer, `cur` at or before `at`.
+    let col = usize::try_from(unsafe { at.offset_from(cur) }).unwrap_or(0);
+    let mut content = Vec::with_capacity(ROOM + 1);
+    while content.len() < ROOM && !matches!(read(cur), 0 | b'\n' | b'\r') {
+        content.push(read(cur));
+        // SAFETY: the buffer ends at a NUL this loop stops on.
+        cur = unsafe { cur.add(1) };
+    }
+    out.extend_from_slice(&content);
+    out.push(b'\n');
+    let mut caret = Vec::with_capacity(ROOM + 1);
+    for (k, byte) in content.iter().enumerate() {
+        if k >= col || k >= ROOM - 1 {
+            break;
+        }
+        caret.push(if *byte == b'\t' { b'\t' } else { b' ' });
+    }
+    caret.push(b'^');
+    out.extend_from_slice(&caret);
+    out.push(b'\n');
 }
 
 impl Raised {
