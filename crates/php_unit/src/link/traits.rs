@@ -821,6 +821,7 @@ mod tests {
             is_instance: true,
             is_readonly: false,
             is_final: false,
+            is_promoted: false,
             ty: None,
             default: None,
             attributes: Vec::new(),

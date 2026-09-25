@@ -87,7 +87,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=8b233873fe4558eec244ab6cafc3a224788a74ceda9113a4b13af8d9e4d025d9 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=e5c02d03885bdaf7b709c970d1f0572145547601a85800d83219e3ff8bfc8cc7 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -103,14 +103,14 @@ third-engine-design.md
 | seam | lock | items | ceiling | reading |
 |---|---|---|---|---|
 | heap | heap.lock | 273 |  | pass |
-| unit | unit.lock | 69 |  | pass |
+| unit | unit.lock | 73 |  | pass |
 | ops | ops.lock | 209 |  | pass |
-| api | api.lock | 553 | 600 | pass |
+| api | api.lock | 567 | 600 | pass |
 | sapi | sapi.lock | 7 |  | pass |
 | tier | tier.lock |  |  | skip |
 | harness | xtask.lock | 332 |  | pass |
 
-<!-- /computed in=8d9bf9bec5b0f0a38e2e6d6b87c58ad280fb7b9e6a17615bf56f0e140ff0c35b out=83af85eb5b955c7ff82d9e58fc131c81024e89f2092e603aa85810cdcbc0dbd7 -->
+<!-- /computed in=8d9dd7500271be5426c75dc45e9dc69bc99bcff73be800c09abf622fe37a14bf out=911f70fa341f4f32550f7c7ea9b71b69f3646ec020e0458bcf91862225c3a74d -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
@@ -124,21 +124,21 @@ third-engine-design.md
 | api.lock-line |  | on | pass | A new pub item in api needs its api.lock line in the same commit; api ≤ 400 items. |
 | xtask.lock-line |  | on | pass | A new pub item in xtask needs its xtask.lock line in the same commit. |
 | ext.pub-beyond-extension |  | on | pass | api-check prints each ext crate's pub items beyond extension(); anything beyond the pdo driver trait and the random handle needs a line in the design (§12). |
-| witness.exit-authored |  | deny_pattern | fail | exit= in a witness is captured by `xtask witness --accept`, never authored. |
+| witness.exit-authored |  | deny_pattern | no reading | exit= in a witness is captured by `xtask witness --accept`, never authored. |
 | witness.coverage |  | check | pass | A kernel or a native without a witness fails CI (design §8). |
 | vocab.avoid |  | avoid_from | pass | The glossary's _Avoid_ words appear in no public item name or rustdoc prose; a lock line mirrors php's names and is not read. |
 | vocab.harness |  | avoid_from | pass | The Harness section's _Avoid_ words appear in no public item name or rustdoc prose of the harness; xtask/fixtures/** are other crates' sources and are not read. |
 | generated.committed |  | generated | pass | ext/clippy.toml is generated from the manifest and committed; a stale copy fails budget. |
-| git.no-verify |  | deny_argv | no reading | Commits run the pre-commit hook; --no-verify is not available to agents. |
-| ticket.close |  | deny_argv | no reading | A ticket closes through `xtask ticket close`, the instrument that read its acceptance criteria; `gh issue close` and `gh issue reopen` are not available to agents. |
+| git.no-verify |  | deny_argv | fail | Commits run the pre-commit hook; --no-verify is not available to agents. |
+| ticket.close |  | deny_argv | fail | A ticket closes through `xtask ticket close`, the instrument that read its acceptance criteria; `gh issue close` and `gh issue reopen` are not available to agents. |
 | ticket.close-api |  | deny_pattern | no reading | The same act through `gh api`: an issue's state is set by `xtask ticket close` and by nothing else. |
 | ticket.reply-unfiled |  | deny_pattern | no reading | A session that closed a ticket names what it found and did not do in a ticket, a divergence row or a rule proposed in a commit message, never in its reply alone (CONTEXT.md, Ticket): a reply that hands work to a person, leaves a decision open or calls a thing worth filing is held once. A heuristic beside the close's own conditions; the second Stop passes. |
-| lanes.nightly |  | deny_pattern | no reading | Nightly lanes run in CI only; run the per-crate subset. |
-| computed.force |  | deny_pattern | no reading | `computed run --force` discards a hand edit; a person decides that. |
+| lanes.nightly |  | deny_pattern | fail | Nightly lanes run in CI only; run the per-crate subset. |
+| computed.force |  | deny_pattern | fail | `computed run --force` discards a hand edit; a person decides that. |
 | harness.self |  | deny | fail | Harness configuration, the oracle pin and the divergence registry are edited by a person. |
 | divergence.reason |  | check | no reading | A divergence row with status accepted has a reason a person wrote; done fails while an open row touches the scope (harness §4.3). |
 
-<!-- /computed in=0a358eda428b13f06a9c508cd9d56df43c86fd29866836cae625a041b7b3409a out=009c9288f5e3d79373c444d0134a851822c09fb15b5eec6348cd9f4e8feabe75 -->
+<!-- /computed in=0a358eda428b13f06a9c508cd9d56df43c86fd29866836cae625a041b7b3409a out=574d8bc98e123d98197bcb890d15e930ed43512b3b3f09def3ca75d75ba85c38 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -206,6 +206,7 @@ Options:
 ├── hash
 ├── iconv
 ├── json
+├── lexbor
 ├── libxml
 ├── mbstring
 ├── openssl
@@ -220,4 +221,4 @@ Options:
 ├── standard
 └── tokenizer
 ```
-<!-- /computed in=53f1b1493c0fd7d8cb063d9d4aa5b1394bbdddb72a6ecb599de01484041ef955 out=094bbaabfdfe64ed038b0760d430cc5d637e6b69ac49b77f7e7e929588c13af8 -->
+<!-- /computed in=642fe889e09075cd5c7439d397949d45b24bc8a087bc7567916e0b3e3a6aafa8 out=3ddad93dff769cb9fe450994a02fd5688a9fed64139fad260b105e969ed1566d -->

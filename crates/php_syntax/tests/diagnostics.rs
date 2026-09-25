@@ -334,6 +334,7 @@ fn the_options_are_the_file_and_the_lexers() {
             file: FileId(7),
             lex: LexOptions {
                 short_open_tag: false,
+                ..LexOptions::default()
             },
         },
     );

@@ -3,9 +3,9 @@
 //! constant expressions still unevaluated. Produced by the compiler for
 //! user code and by the native macros for natives; consumed by the linker,
 //! Reflection, the dumpers and the stub cross-check, which read one model.
-//! Data only: no method here, since the types a native declares with are
-//! re-exported by `php_engine::api::decl` and their surface is
-//! `api.lock`'s; the trait adaptations, which no native writes, are not.
+//! The types are re-exported by `php_engine::api::decl`, so their surface
+//! is `api.lock`'s as well as `unit.lock`'s; the trait adaptations, which
+//! no native writes, are not re-exported.
 
 /// A name as written: bytes, interned by the engine at publication.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
@@ -182,6 +182,10 @@ pub enum ConstExpr {
         rhs: Box<ConstExpr>,
     },
     Array(Vec<(Option<ConstExpr>, ConstExpr)>),
+    /// `...value` inside an array, php's `ZEND_AST_UNPACK`: the value
+    /// of an element with no key, whose array or `Traversable` is
+    /// spread into the array being built.
+    Unpack(Box<ConstExpr>),
     New {
         class: Name,
         arguments: Vec<ConstExpr>,
@@ -208,6 +212,39 @@ pub struct Attribute {
     pub arguments: Vec<AttributeArgument>,
 }
 
+/// What stands after a parameter's name, decoded once where the
+/// declaration is written and matched wherever a default is read.
+///
+/// A user function's is the `RECV_INIT` constant, kept as written
+/// (design §4.7), and `None` where the opline is a plain `RECV`, which
+/// is what `zend_compile_params` makes of a default written before the
+/// last required parameter. A native's is the expression behind
+/// `gen_stub.php`'s `zend_internal_arg_info.default_value`, whose text
+/// is what the stub generator's printer makes of that expression, so
+/// the text is rendered from it and not carried beside it; and
+/// `Unshown` is the stub's `= UNKNOWN`, a parameter past
+/// `required_num_args` with no `default_value`, which
+/// `_parameter_string` prints as `<default>` and
+/// `ReflectionParameter::isDefaultValueAvailable` answers `false` for.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum ParameterDefault {
+    #[default]
+    None,
+    Unshown,
+    Expr(ConstExpr),
+}
+
+impl ParameterDefault {
+    /// The expression php's `get_parameter_default` hands back: none on
+    /// a required parameter and none on `Unshown`.
+    pub fn expr(&self) -> Option<&ConstExpr> {
+        match self {
+            ParameterDefault::None | ParameterDefault::Unshown => None,
+            ParameterDefault::Expr(expr) => Some(expr),
+        }
+    }
+}
+
 /// One declared parameter slot.
 ///
 /// `prefer_ref` is php's `ZEND_SEND_PREFER_REF` beside `by_ref`'s
@@ -216,16 +253,29 @@ pub struct Attribute {
 /// stub marks `@prefer-ref` and only `extract()` and
 /// `array_multisort()` declare. It is set only where `by_ref` is, so
 /// `by_ref` alone is `ARG_SHOULD_BE_SENT_BY_REF` and `by_ref` without
-/// `prefer_ref` is `ARG_MUST_BE_SENT_BY_REF`.
+/// `prefer_ref` is `ARG_MUST_BE_SENT_BY_REF`. `promoted` is
+/// `ZEND_ARG_IS_PROMOTED`, which `zend_compile_params` sets on a
+/// constructor parameter that declares a property, and which
+/// `ReflectionParameter::isPromoted` reads.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::struct_excessive_bools)] // the ZEND_SEND_* and ZEND_ARG_* bits of a slot, each one fact
 pub struct Parameter {
     pub name: Name,
     pub ty: Option<Type>,
     pub by_ref: bool,
     pub prefer_ref: bool,
+    pub promoted: bool,
     pub variadic: bool,
-    pub default: Option<ConstExpr>,
+    pub default: ParameterDefault,
     pub attributes: Vec<Attribute>,
+}
+
+impl Parameter {
+    /// Whether the slot counts toward php's `required_num_args`: not the
+    /// variadic one, and none with a default or `Unshown` after its name.
+    pub fn is_required(&self) -> bool {
+        !self.variadic && self.default == ParameterDefault::None
+    }
 }
 
 /// A function's declaration: its signature, doc comment and site; the
@@ -294,7 +344,11 @@ pub struct MethodDecl {
 /// visibility equal to `visibility`, so what stands here is stricter
 /// than `visibility` and never `Public`. `is_final` is `ZEND_ACC_FINAL`,
 /// which the same function raises on a `private(set)` property.
+/// `is_promoted` is `ZEND_ACC_PROMOTED`, the property a constructor's
+/// promoted parameter declares, which `ReflectionProperty::isPromoted`
+/// reads.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::struct_excessive_bools)] // the ZEND_ACC_* bits of a property, each one fact
 pub struct PropertyDecl {
     pub name: Name,
     pub visibility: Visibility,
@@ -302,6 +356,7 @@ pub struct PropertyDecl {
     pub is_instance: bool,
     pub is_readonly: bool,
     pub is_final: bool,
+    pub is_promoted: bool,
     pub ty: Option<Type>,
     pub default: Option<ConstExpr>,
     pub attributes: Vec<Attribute>,

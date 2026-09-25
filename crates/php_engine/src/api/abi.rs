@@ -615,6 +615,23 @@ pub enum PropertyRead {
     Silent,
 }
 
+/// What `get_property_ptr_ptr` answers for one name, php's pointer or
+/// its `NULL`: whether a write to the property addresses the standard
+/// place, or goes through the class's `read_property` and
+/// `write_property` because the class serves the name itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PropertyPlace {
+    /// `zend_std_get_property_ptr_ptr`'s place: the declared slot or
+    /// the dynamic entry, which the kernel lays down itself under the
+    /// scope's access rule, with the `__get` arm and every diagnostic
+    /// the standard slot raises.
+    Std,
+    /// php's `NULL`: the class serves the name, so a write reaches its
+    /// `write_property`, and a compound write, an increment and a write
+    /// fetch read through its `read_property` first.
+    Handlers,
+}
+
 /// What `get_properties_for` is asked for, php's `zend_prop_purpose`:
 /// the five readers of an object's properties that a class may answer
 /// each in its own way.
@@ -734,16 +751,47 @@ pub trait ObjectHandlers: Send + Sync {
     }
 
     /// `get_property_ptr_ptr`, `zend_std_get_property_ptr_ptr` at
-    /// `Std`: the declared slot a write fetch may address in place,
-    /// `OBJ_PROP_NUM`'s index, and `None` where the fetch goes through
-    /// `read_property` and `write_property` instead.
+    /// `Std`: where a write to `name` goes, [`PropertyPlace::Std`] for
+    /// the standard place the kernel lays down itself, and
+    /// [`PropertyPlace::Handlers`], php's `NULL`, for a name the class
+    /// serves. The answer is a verdict with no effect, so `ASSIGN_OBJ`
+    /// asks it too: php's sends every name its cache slot has not placed
+    /// to `write_property`, and the cache is filled only by the standard
+    /// placement, so a name a class serves reaches its `write_property`
+    /// and every other name the in-place write. A class that overrides
+    /// `write_property` for a name answers `Handlers` for it, whether or
+    /// not the class declares it.
+    ///
+    /// A declared property the class serves is its handlers' on a
+    /// write, as `DatePeriod`'s are, whose handlers refuse the write;
+    /// and a compound write over a name `DateInterval` serves reads it
+    /// through `read_property` and writes the sum back through
+    /// `write_property`, with no dynamic property laid down.
+    ///
+    /// ```php
+    /// $p = new DatePeriod(new DateTime('2020-01-01'), new DateInterval('P1D'), 2);
+    /// try { $p->recurrences = 5; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump($p->recurrences);
+    /// $i = new DateInterval('P0Y');
+    /// $i->f = 0.5;
+    /// $i->f += 0.25;
+    /// var_dump($i->f, $i->f++, ++$i->f);
+    /// ```
+    /// ```expect
+    /// Cannot modify readonly property DatePeriod::$recurrences
+    /// int(3)
+    /// float(0.75)
+    /// float(0.75)
+    /// float(2.75)
+    /// ```
     fn get_property_ptr_ptr(
         &self,
         req: &mut Request,
         object: PhpObject,
         name: &[u8],
-    ) -> Option<u32> {
-        req.property_slot(object, name)
+    ) -> PropertyPlace {
+        let _ = (req, object, name);
+        PropertyPlace::Std
     }
 
     /// `has_property`, `zend_std_has_property` at `Std`: whether the
@@ -799,12 +847,15 @@ pub trait ObjectHandlers: Send + Sync {
 
     /// `get_properties`, `zend_std_get_properties` at `Std`: the
     /// declared slots that hold a value then the dynamic table, in
-    /// `rebuild_object_properties`' order; views, no owner taken.
+    /// `rebuild_object_properties`' order; views, no owner taken. A lazy
+    /// object is initialised first and the rows are those of what that
+    /// answers, `zend_lazy_object_get_properties`.
     fn get_properties(
         &self,
         req: &mut Request,
         object: PhpObject,
     ) -> Result<Vec<(PhpString, Value)>, Thrown> {
+        let object = req.lazy_init(object)?;
         req.object_entries(object.heap())
     }
 

@@ -496,7 +496,7 @@ SubscriptExpr = base:Expr! '[' index:Expr? ']'
 // has none, so the '{' is the token the enclosing site did not want, and
 // the parser says so as php says it (design §6.1).
 
-ArrayExpr = ( 'array' '(' ArrayElement,* ')' | '[' ArrayElement,* ']' )
+ArrayExpr = ( long:'array' '(' ArrayElement,* ')' | '[' ArrayElement,* ']' )
 ListExpr  = 'list' '(' ArrayElement,* ')'
 ArrayElement = spread:'...'? key:ArrayKey? byref:'&'? value:Expr?
 ArrayKey     = key:Expr! '=>'

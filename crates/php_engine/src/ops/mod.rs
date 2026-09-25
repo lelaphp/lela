@@ -670,9 +670,12 @@ pub(crate) fn to_array(req: &mut Request, value: &Value) -> Result<PhpArray, Thr
         }
         ValueRef::Object(&o) if req.class_named(b"Closure") != Some(o.class()) => {
             let table = req.object_handlers(o.heap());
+            // `ZEND_PROP_PURPOSE_ARRAY_CAST`, `zend_get_properties_no_lazy_init`
+            // under a class that answers no table of its own: a lazy
+            // object is cast as it stands.
             let rows = match table.get_properties_for(req, o, PropertyPurpose::ArrayCast)? {
                 Some(rows) => rows,
-                None => table.get_properties(req, o)?,
+                None => req.properties_no_lazy_init(o)?,
             };
             mangled_array(req, o, rows)
         }
@@ -1325,7 +1328,24 @@ pub(crate) fn properties_for(
     // carries unmangled here.
     let rows = match table.get_properties_for(req, object, purpose)? {
         Some(rows) => return Ok(rows),
-        None => table.get_properties(req, object)?,
+        None => match purpose {
+            // `zend_std_get_properties_for`: the debug table of a lazy
+            // object and the `(array)` cast read what stands without
+            // initialising it, and so does a serialization the object
+            // was made to skip it for; every other reader initialises.
+            PropertyPurpose::Debug => {
+                if let Some(instance) = req.lazy_instance(object.heap()) {
+                    let name = req.interned(b"instance")?;
+                    return Ok(vec![(name, instance.as_value())]);
+                }
+                req.properties_no_lazy_init(object)?
+            }
+            PropertyPurpose::ArrayCast => req.properties_no_lazy_init(object)?,
+            PropertyPurpose::Serialize if req.lazy_skips_serialize(object.heap()) => {
+                req.properties_no_lazy_init(object)?
+            }
+            _ => table.get_properties(req, object)?,
+        },
     };
     let mangled = mangled_names(req, object.class());
     let mut at = 0;

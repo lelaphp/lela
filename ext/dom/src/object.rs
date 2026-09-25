@@ -3,7 +3,7 @@
 //! object a libxml node answers as (`php_dom_create_object`), and the
 //! helpers every native reads its receiver and arguments through.
 
-use php_ext::abi::{CloneObj, ObjectHandlers, PropertyRead, PropertyTest};
+use php_ext::abi::{CloneObj, ObjectHandlers, PropertyPlace, PropertyRead, PropertyTest};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpObject, PhpString, Value};
@@ -12,7 +12,8 @@ use php_ext_libxml::ffi::NodeObject;
 use crate::map::Map;
 use crate::xpath::XPathState;
 use crate::{
-    debug_info, dom_mut, has_property, property_slot, read_property, unset_property, write_property,
+    debug_info, dom_mut, has_property, property_place, read_property, unset_property,
+    write_property,
 };
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
@@ -46,6 +47,8 @@ pub(crate) enum Extra {
     XPath(Box<XPathState>),
     /// `dom_object_namespace_node::parent_intern`, one owner held.
     NamespaceParent(PhpObject),
+    /// `dom_token_list_object`'s own fields.
+    TokenList(Box<crate::token_list::TokenSet>),
 }
 
 // ---- class names and lookups
@@ -117,6 +120,29 @@ impl Code {
         }
     }
 
+    /// The constant the `Dom\` namespace registers the code as; `Dom\`
+    /// has no `INVALID_ACCESS_ERR`.
+    pub(crate) fn modern_constant(self) -> Option<&'static [u8]> {
+        Some(match self {
+            Code::IndexSize => b"Dom\\INDEX_SIZE_ERR",
+            Code::StringSize => b"Dom\\STRING_SIZE_ERR",
+            Code::HierarchyRequest => b"Dom\\HIERARCHY_REQUEST_ERR",
+            Code::WrongDocument => b"Dom\\WRONG_DOCUMENT_ERR",
+            Code::InvalidCharacter => b"Dom\\INVALID_CHARACTER_ERR",
+            Code::NoDataAllowed => b"Dom\\NO_DATA_ALLOWED_ERR",
+            Code::NoModificationAllowed => b"Dom\\NO_MODIFICATION_ALLOWED_ERR",
+            Code::NotFound => b"Dom\\NOT_FOUND_ERR",
+            Code::NotSupported => b"Dom\\NOT_SUPPORTED_ERR",
+            Code::InuseAttribute => b"Dom\\INUSE_ATTRIBUTE_ERR",
+            Code::InvalidState => b"Dom\\INVALID_STATE_ERR",
+            Code::Syntax => b"Dom\\SYNTAX_ERR",
+            Code::InvalidModification => b"Dom\\INVALID_MODIFICATION_ERR",
+            Code::Namespace => b"Dom\\NAMESPACE_ERR",
+            Code::InvalidAccess => return None,
+            Code::Validation => b"Dom\\VALIDATION_ERR",
+        })
+    }
+
     /// `php_dom_throw_error`'s message.
     pub(crate) fn message(self) -> &'static str {
         match self {
@@ -147,11 +173,32 @@ impl Code {
 // ---- the property handlers php installs on every dom object
 
 /// The table every dom node class reaches its objects through:
-/// `dom_object_handlers`.
-pub(crate) struct NodeHandlers;
+/// `dom_object_handlers`, and the copies of it `PHP_MINIT_FUNCTION(dom)`
+/// makes with another `clone_obj`.
+pub(crate) struct NodeHandlers {
+    clone: Option<CloneObj>,
+}
 
-/// The handlers php gives a node object.
-pub(crate) static NODE_HANDLERS: NodeHandlers = NodeHandlers;
+/// The handlers php gives a node object, `dom_object_handlers`.
+pub(crate) static NODE_HANDLERS: NodeHandlers = NodeHandlers {
+    clone: Some(crate::clone_object),
+};
+
+/// `dom_modern_domimplementation_object_handlers`: `[SameObject]`, so no
+/// clone.
+pub(crate) static IMPLEMENTATION_HANDLERS: NodeHandlers = NodeHandlers { clone: None };
+
+/// `dom_modern_element_object_handlers`: a clone drops the cached
+/// `$classList` and `$children` (`dom_modern_element_clone_obj`).
+pub(crate) static ELEMENT_HANDLERS: NodeHandlers = NodeHandlers {
+    clone: Some(crate::modern::clone_element),
+};
+
+/// `dom_unset_children_property_object_handlers`: a clone drops the cached
+/// `$children` (`dom_clone_obj_unset_children_property`).
+pub(crate) static PARENT_HANDLERS: NodeHandlers = NodeHandlers {
+    clone: Some(crate::modern::clone_parent),
+};
 
 impl ObjectHandlers for NodeHandlers {
     fn read_property(
@@ -179,8 +226,8 @@ impl ObjectHandlers for NodeHandlers {
         req: &mut Request,
         object: PhpObject,
         name: &[u8],
-    ) -> Option<u32> {
-        property_slot(req, object, name)
+    ) -> PropertyPlace {
+        property_place(req, object, name)
     }
 
     fn has_property(
@@ -211,7 +258,7 @@ impl ObjectHandlers for NodeHandlers {
     }
 
     fn clone_obj(&self) -> Option<CloneObj> {
-        Some(crate::clone_object)
+        self.clone
     }
 
     fn free_obj(&self, req: &mut Request, object: PhpObject) {

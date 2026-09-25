@@ -3,7 +3,7 @@
 //! with `?` and `|`, `#[\SensitiveParameter]`, an untyped `$stream`, and
 //! a default that is `false`, `null`, `[]`, a number or a string.
 
-use php_ext::decl::{Attribute, ConstExpr, FunctionDecl, Name, Parameter, Type};
+use php_ext::decl::{Attribute, ConstExpr, FunctionDecl, Name, Parameter, ParameterDefault, Type};
 
 /// The declaration a stub line writes.
 ///
@@ -78,8 +78,9 @@ fn parameter(text: &str) -> Parameter {
         ty: (!declared.is_empty()).then(|| ty(declared)),
         by_ref: false,
         prefer_ref: false,
+        promoted: false,
         variadic: false,
-        default,
+        default: default.map_or(ParameterDefault::None, ParameterDefault::Expr),
         attributes,
     }
 }

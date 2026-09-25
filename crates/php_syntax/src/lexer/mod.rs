@@ -43,14 +43,32 @@ pub struct LexOptions {
     /// Honour `<?` short open tags: php's `short_open_tag`, whose built-in
     /// default is on. `<?=` is an open tag regardless of this setting.
     pub short_open_tag: bool,
+    /// Where in php's grammar the first byte stands.
+    pub position: Position,
 }
 
 impl Default for LexOptions {
     fn default() -> Self {
         LexOptions {
             short_open_tag: true,
+            position: Position::AtOpenTag,
         }
     }
+}
+
+/// Where the scanner begins, php's `zend_compile_position`
+/// (`Z/Zend/zend_compile.h:857`): a file begins in `INITIAL`, where bytes
+/// are inline HTML until an open tag; the string `compile_string` is
+/// handed for `eval` begins in `ST_IN_SCRIPTING`, as though an open tag
+/// stood before its first byte (`ZEND_COMPILE_POSITION_AFTER_OPEN_TAG`,
+/// `Z/Zend/zend_language_scanner.l:824`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Position {
+    /// `ZEND_COMPILE_POSITION_AT_OPEN_TAG`: inline HTML first.
+    #[default]
+    AtOpenTag,
+    /// `ZEND_COMPILE_POSITION_AFTER_OPEN_TAG`: code first.
+    AfterOpenTag,
 }
 
 /// What one lex produced: the token stream and the scanner's diagnostics.
@@ -70,8 +88,9 @@ pub struct Lexed {
     pub diagnostics: Vec<Diagnostic>,
 }
 
-/// Lexes `text` from the beginning, in [`State::InlineHtml`], Zend's
-/// `INITIAL`.
+/// Lexes `text` from the beginning, in the state
+/// [`LexOptions::position`] names: [`State::InlineHtml`], Zend's
+/// `INITIAL`, for a file, and [`State::Scripting`] after an open tag.
 #[must_use]
 pub fn lex(file: FileId, text: &[u8], options: &LexOptions) -> Lexed {
     lex_with_lines(file, text, options, &LineIndex::new(text))
@@ -220,7 +239,10 @@ impl<'a> Lexer<'a> {
             short_open_tag: options.short_open_tag,
             pos: 0,
             frames: vec![StateFrame {
-                state: State::InlineHtml,
+                state: match options.position {
+                    Position::AtOpenTag => State::InlineHtml,
+                    Position::AfterOpenTag => State::Scripting,
+                },
                 aux: StateAux {
                     opener: here,
                     heredoc: None,

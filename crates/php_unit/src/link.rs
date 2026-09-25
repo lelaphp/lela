@@ -33,7 +33,7 @@
 use crate::Level;
 use crate::decl::{
     ClassConstDecl, ClassDecl, ClassKind, ConstExpr, EnumBacking, FunctionDecl, MethodDecl, Name,
-    PropertyDecl, Type, Visibility,
+    Parameter, PropertyDecl, Type, Visibility,
 };
 use crate::type_to_string;
 use std::fmt;
@@ -1051,7 +1051,7 @@ fn required(function: &FunctionDecl) -> usize {
     function
         .parameters
         .iter()
-        .rposition(|p| p.default.is_none() && !p.variadic)
+        .rposition(Parameter::is_required)
         .map_or(0, |at| at + 1)
 }
 
@@ -1125,7 +1125,7 @@ fn declaration(function: &FunctionDecl, side: &Side<'_>) -> String {
             out.push_str(
                 &parameter
                     .default
-                    .as_ref()
+                    .expr()
                     .map_or_else(|| String::from("<default>"), default_text),
             );
         }

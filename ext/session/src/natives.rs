@@ -5,7 +5,7 @@
 use php_ext::abi::Callable;
 use php_ext::call::lookup_class;
 use php_ext::coerce::{callable_checked, is_callable, to_string, truthy, value_name};
-use php_ext::decl::{ConstExpr, FunctionDecl, Name, Type};
+use php_ext::decl::{ConstExpr, FunctionDecl, ParameterDefault, Type};
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, Value, ValueRef};
@@ -21,11 +21,11 @@ use crate::{
 /// of `session_write_close`.
 #[allow(clippy::too_many_lines)] // one row per native of the stub
 pub(super) fn table() -> Vec<(FunctionDecl, Entry)> {
-    let null = || Some(ConstExpr::Null);
+    let null = || ParameterDefault::Expr(ConstExpr::Null);
     let nullable = |ty: Type| Some(Type::Nullable(Box::new(ty)));
     let string_or_false = || Type::Union(vec![Type::String, Type::False]);
     let optional_string = |name: &[u8]| parameter(name, nullable(Type::String), null());
-    let unknown = || Some(ConstExpr::Constant(Name(b"UNKNOWN".as_slice().into())));
+    let unknown = || ParameterDefault::Unshown;
     let callable = |name: &[u8]| parameter(name, Some(Type::Callable), unknown());
     let nullable_callable = |name: &[u8]| parameter(name, nullable(Type::Callable), null());
     let none =
@@ -69,7 +69,7 @@ pub(super) fn table() -> Vec<(FunctionDecl, Entry)> {
                 vec![parameter(
                     b"prefix",
                     Some(Type::String),
-                    Some(ConstExpr::Str(Box::new([]))),
+                    ParameterDefault::Expr(ConstExpr::Str(Box::new([]))),
                 )],
                 string_or_false(),
             ),
@@ -81,7 +81,7 @@ pub(super) fn table() -> Vec<(FunctionDecl, Entry)> {
                 vec![parameter(
                     b"delete_old_session",
                     Some(Type::Bool),
-                    Some(ConstExpr::Bool(false)),
+                    ParameterDefault::Expr(ConstExpr::Bool(false)),
                 )],
                 Type::Bool,
             ),
@@ -90,7 +90,11 @@ pub(super) fn table() -> Vec<(FunctionDecl, Entry)> {
         (
             declared(
                 b"session_decode",
-                vec![parameter(b"data", Some(Type::String), None)],
+                vec![parameter(
+                    b"data",
+                    Some(Type::String),
+                    ParameterDefault::None,
+                )],
                 Type::Bool,
             ),
             session_decode,
@@ -122,7 +126,7 @@ pub(super) fn table() -> Vec<(FunctionDecl, Entry)> {
             declared(
                 b"session_set_save_handler",
                 vec![
-                    parameter(b"open", None, None),
+                    parameter(b"open", None, ParameterDefault::None),
                     parameter(b"close", None, unknown()),
                     callable(b"read"),
                     callable(b"write"),
@@ -159,7 +163,7 @@ pub(super) fn table() -> Vec<(FunctionDecl, Entry)> {
                     parameter(
                         b"lifetime_or_options",
                         Some(Type::Union(vec![Type::Array, Type::Int])),
-                        None,
+                        ParameterDefault::None,
                     ),
                     optional_string(b"path"),
                     optional_string(b"domain"),
@@ -176,7 +180,7 @@ pub(super) fn table() -> Vec<(FunctionDecl, Entry)> {
                 vec![parameter(
                     b"options",
                     Some(Type::Array),
-                    Some(ConstExpr::Array(Vec::new())),
+                    ParameterDefault::Expr(ConstExpr::Array(Vec::new())),
                 )],
                 Type::Bool,
             ),

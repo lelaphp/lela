@@ -40,9 +40,7 @@
 //! A reflector keeps php's `intern->ce` and `intern->obj` in the native
 //! payload [`Reflected`], which its class's `create_object` lays down
 //! (design §5.4), so the class it was asked about and the object it was
-//! made from are what the renderings read. An extension's `INI` block,
-//! `_extension_ini_string` and a closure's `Bound Variables` are not
-//! rendered yet (#375).
+//! made from are what the renderings read.
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -60,6 +58,7 @@ mod attr;
 mod class;
 mod enums;
 mod func;
+mod lazy;
 mod member;
 mod signature;
 mod stub;
@@ -70,15 +69,15 @@ use std::fmt::Write as _;
 use php_ext::abi::{CloneObj, DependencyKind, Extension, ExtensionBuilder, ObjectHandlers};
 use php_ext::call::{
     Function, constant, eval_const_expr, lookup_class, lookup_function, new_object,
-    read_static_prop, write_static_prop,
+    read_class_prop_silent, read_static_prop, write_static_prop,
 };
 use php_ext::decl::{
     ClassConstDecl, ClassDecl, ClassKind, ConstExpr, EnumBacking, FunctionDecl, MethodDecl, Name,
-    Parameter, PropertyDecl, Type, Visibility,
+    Parameter, ParameterDefault, PropertyDecl, Type, Visibility,
 };
 use php_ext::raising::{Thrown, arg_count_error, arg_type_error, deprecated, throw};
 use php_ext::request::{ExtensionId, PHP_VERSION, Request};
-use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
 /// private to this crate (ADR-0005); nothing in it is shared or synchronised.
@@ -91,6 +90,9 @@ use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, Value
 struct State {
     parameters: HashMap<u32, signature::ParameterRef>,
     types: HashMap<u32, signature::TypeRef>,
+    /// `REFLECTION_G(key)`, the request's secret `getId` hashes a
+    /// reference's identity under so no address is shown.
+    reference_key: std::hash::RandomState,
 }
 
 /// The extension value (design §7.1): declarations paired with entries,
@@ -143,6 +145,7 @@ const REFLECTORS: &[&[u8]] = &[
     b"ReflectionProperty",
     b"ReflectionFunction",
     b"ReflectionParameter",
+    b"ReflectionReference",
 ];
 
 /// php's `reflection_object` beside the `name` and `class` properties
@@ -162,6 +165,9 @@ struct Reflected {
     /// php's `attribute_reference`, which `ReflectionAttribute` keeps
     /// where the other reflectors keep `intern->ce`.
     attribute: Option<attr::AttributeRef>,
+    /// The reference a `ReflectionReference` holds in `intern->obj`,
+    /// one owner of it.
+    reference: Option<PhpRef>,
 }
 
 /// `reflection_object_handlers`
@@ -174,11 +180,15 @@ struct Reflector;
 
 impl ObjectHandlers for Reflector {
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        if let Some(kept) = object
-            .native_mut::<Reflected>(req)
-            .and_then(|reflected| reflected.object.take())
-        {
+        let Some(reflected) = object.native_mut::<Reflected>(req) else {
+            return;
+        };
+        let (kept, reference) = (reflected.object.take(), reflected.reference.take());
+        if let Some(kept) = kept {
             req.release(kept.as_value());
+        }
+        if let Some(reference) = reference {
+            req.release(reference.as_value());
         }
     }
 
@@ -187,11 +197,14 @@ impl ObjectHandlers for Reflector {
     }
 
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
-        if let Some(kept) = object
-            .native::<Reflected>(req)
-            .and_then(|reflected| reflected.object)
-        {
+        let Some(reflected) = object.native::<Reflected>(req) else {
+            return;
+        };
+        if let Some(kept) = reflected.object {
             visit(kept.as_value());
+        }
+        if let Some(reference) = reflected.reference {
+            visit(reference.as_value());
         }
     }
 }
@@ -302,15 +315,25 @@ fn exactly_arguments(req: &mut Request, expected: usize) -> Result<(), Thrown> {
 }
 
 /// `ZEND_PARSE_PARAMETERS_START(0, n)`'s count check: `expects at most
-/// N arguments, M given`.
+/// N argument(s), M given`, `zend_wrong_parameters_count_error`'s
+/// singular for one.
+///
+/// ```php
+/// class C { public $p = 1; }
+/// try { (new ReflectionProperty('C', 'p'))->getValue(new C, 2); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// ReflectionProperty::getValue() expects at most 1 argument, 2 given
+/// ```
 fn at_most_arguments(req: &mut Request, most: usize) -> Result<(), Thrown> {
     let count = req.argument_count();
     if count <= most {
         return Ok(());
     }
+    let plural = if most == 1 { "" } else { "s" };
     Err(arg_count_error(
         req,
-        &format!("at most {most} arguments, {count} given"),
+        &format!("at most {most} argument{plural}, {count} given"),
     ))
 }
 
@@ -810,7 +833,7 @@ fn reflection_extension_construct(req: &mut Request) -> Result<Value, Thrown> {
 /// ```
 fn reflection_extension_to_string(req: &mut Request) -> Result<Value, Thrown> {
     let extension = this_extension(req)?;
-    let text = extension_string(req, extension, "");
+    let text = extension_string(req, extension, "")?;
     string_value(req, text.as_bytes())
 }
 
@@ -1025,6 +1048,111 @@ fn reflection_extension_get_constants(req: &mut Request) -> Result<Value, Thrown
     Ok(Value::array(constants))
 }
 
+/// `ReflectionExtension::getINIEntries()`: `_addinientry` over the
+/// extension's entries, each name keyed to the value in force.
+///
+/// ```php
+/// ini_set('date.default_latitude', '1');
+/// var_dump((new ReflectionExtension('date'))->getINIEntries());
+/// ```
+/// ```expect
+/// array(5) {
+///   ["date.timezone"]=>
+///   string(3) "UTC"
+///   ["date.default_latitude"]=>
+///   string(1) "1"
+///   ["date.default_longitude"]=>
+///   string(7) "35.2333"
+///   ["date.sunset_zenith"]=>
+///   string(9) "90.833333"
+///   ["date.sunrise_zenith"]=>
+///   string(9) "90.833333"
+/// }
+/// ```
+fn reflection_extension_get_ini_entries(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    let extension = this_extension(req)?;
+    let mut entries = PhpArray::new(req)?;
+    for entry in req.extension_ini(extension) {
+        let key = Key::Str(PhpString::new(req, &entry.decl.name.0)?);
+        let value = Value::string(PhpString::new(req, &entry.value)?);
+        entries.set(req, key, value)?;
+    }
+    Ok(Value::array(entries))
+}
+
+/// `_extension_ini_string` over each of the extension's entries: the
+/// name, `<ALL>` or the `USER,PERDIR,SYSTEM` bits it may be changed
+/// at, the value in force and, where the request changed it, the value
+/// it had before.
+///
+/// ```php
+/// ini_set('date.default_latitude', '1');
+/// $s = (string) new ReflectionExtension('date');
+/// echo substr($s, 0, strpos($s, '  - Constants'));
+/// ```
+/// ```expect
+/// Extension [ <persistent> extension #1 date version %s ] {
+///
+///   - INI {
+///     Entry [ date.timezone <ALL> ]
+///       Current = 'UTC'
+///     }
+///     Entry [ date.default_latitude <ALL> ]
+///       Current = '1'
+///       Default = '31.7667'
+///     }
+///     Entry [ date.default_longitude <ALL> ]
+///       Current = '35.2333'
+///     }
+///     Entry [ date.sunset_zenith <ALL> ]
+///       Current = '90.833333'
+///     }
+///     Entry [ date.sunrise_zenith <ALL> ]
+///       Current = '90.833333'
+///     }
+///   }
+/// ```
+fn extension_ini_string(req: &Request, extension: ExtensionId, indent: &str) -> String {
+    let mut out = String::new();
+    for entry in req.extension_ini(extension) {
+        let decl = &entry.decl;
+        let modifiable = if decl.user && decl.per_dir && decl.system {
+            String::from("ALL")
+        } else {
+            [
+                (decl.user, "USER"),
+                (decl.per_dir, "PERDIR"),
+                (decl.system, "SYSTEM"),
+            ]
+            .iter()
+            .filter(|(set, _)| *set)
+            .map(|(_, word)| *word)
+            .collect::<Vec<_>>()
+            .join(",")
+        };
+        let _ = writeln!(
+            out,
+            "    {indent}Entry [ {} <{modifiable}> ]",
+            String::from_utf8_lossy(&decl.name.0)
+        );
+        let _ = writeln!(
+            out,
+            "    {indent}  Current = '{}'",
+            String::from_utf8_lossy(&entry.value)
+        );
+        if let Some(original) = &entry.original {
+            let _ = writeln!(
+                out,
+                "    {indent}  Default = '{}'",
+                String::from_utf8_lossy(original)
+            );
+        }
+        let _ = writeln!(out, "    {indent}}}");
+    }
+    out
+}
+
 /// `ReflectionExtension::getDependencies()`: `module->deps` walked into
 /// an array keyed by the other extension's name, each value the kind,
 /// `Required`, `Conflicts` or `Optional`, then the row's `rel` and
@@ -1103,6 +1231,191 @@ fn reflection_extension_is_temporary(req: &mut Request) -> Result<Value, Thrown>
     exactly_arguments(req, 0)?;
     this_extension(req)?;
     Ok(Value::bool(false))
+}
+
+// -------------------------------------------------- ReflectionReference
+
+/// `ReflectionReference::fromArrayElement(array $array, int|string
+/// $key)`: a reflector over the element at `key` where it is a
+/// reference, `null` where it is a plain value or a reference only the
+/// array holds (`is_ignorable_reference`, a directly self-referential
+/// array excepted), and php's `ReflectionException` for a key the array
+/// has not. The key is looked up as given, `zend_hash_find` for a
+/// string and `zend_hash_index_find` for an int.
+///
+/// ```php
+/// $a = [0, 1, 2]; $r = &$a[1]; $one = &$a[2]; unset($one);
+/// var_dump(ReflectionReference::fromArrayElement($a, 0), ReflectionReference::fromArrayElement($a, 1), ReflectionReference::fromArrayElement($a, 2));
+/// try { ReflectionReference::fromArrayElement($a, 3); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+/// try { ReflectionReference::fromArrayElement($a, []); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// $s = []; $s[0] = &$s; $t = [$s]; unset($s);
+/// var_dump(ReflectionReference::fromArrayElement($t[0], 0) instanceof ReflectionReference);
+/// ```
+/// ```expect
+/// NULL
+/// object(ReflectionReference)#1 (0) {
+/// }
+/// NULL
+/// Array key not found
+/// ReflectionReference::fromArrayElement(): Argument #2 ($key) must be of type string|int, array given
+/// bool(true)
+/// ```
+fn reflection_reference_from_array_element(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 2)?;
+    let given = req.argument(1).unwrap_or_default();
+    let array = php_ext::coerce::coerce_param(req, &given, &Type::Array, 1)?;
+    let given = req.argument(2).unwrap_or_default();
+    let key =
+        php_ext::coerce::coerce_param(req, &given, &Type::Union(vec![Type::String, Type::Int]), 2)?;
+    let Some(array) = array.as_array().copied() else {
+        return Ok(Value::null());
+    };
+    let key = match key.as_ref() {
+        ValueRef::Int(n) => Key::Int(n),
+        _ => Key::Str(PhpString::new(req, key.as_str_bytes().unwrap_or_default())?),
+    };
+    let Some(item) = array.get(&key) else {
+        return Err(throw(req, "ReflectionException", "Array key not found"));
+    };
+    let Some(reference) = item.as_php_ref().copied() else {
+        return Ok(Value::null());
+    };
+    // `is_ignorable_reference`: one owner, the array's, and no directly
+    // self-referential array, which `zend_array_dup` keeps as a
+    // reference despite the one owner.
+    let self_referential = reference
+        .get()
+        .as_array()
+        .and_then(|held| held.get(&key))
+        .and_then(|element| element.as_php_ref().copied())
+        == Some(reference);
+    if item.refcount() == 1 && !self_referential {
+        return Ok(Value::null());
+    }
+    let class = class_named(req, b"ReflectionReference")?;
+    let object = new_object(req, class)?;
+    req.addref(&reference.as_value());
+    if let Some(reflected) = object.native_mut::<Reflected>(req) {
+        reflected.reference = Some(reference);
+    } else {
+        req.release(reference.as_value());
+    }
+    Ok(object.as_value())
+}
+
+/// `ReflectionReference::getId()`: a string that is the same for two
+/// reflectors over one reference and differs between two references,
+/// twenty bytes as php's `SHA1(ref || key)` is, here the reference's
+/// identity hashed under the request's secret, so no address is shown;
+/// php's `Corrupted ReflectionReference object` for a reflector that
+/// holds none.
+///
+/// ```php
+/// $a = [1, 2]; $x = &$a[0]; $y = &$a[1]; $b = []; $b[0] = &$a[0];
+/// $r0 = ReflectionReference::fromArrayElement($a, 0); $r1 = ReflectionReference::fromArrayElement($a, 1); $rb = ReflectionReference::fromArrayElement($b, 0);
+/// var_dump($r0->getId() === $rb->getId(), $r0->getId() !== $r1->getId(), strlen($r0->getId()));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// int(20)
+/// ```
+fn reflection_reference_get_id(req: &mut Request) -> Result<Value, Thrown> {
+    use std::hash::BuildHasher as _;
+    exactly_arguments(req, 0)?;
+    let reference = req
+        .this()
+        .and_then(|this| this.native::<Reflected>(req))
+        .and_then(|reflected| reflected.reference);
+    let Some(reference) = reference else {
+        return Err(throw(
+            req,
+            "ReflectionException",
+            "Corrupted ReflectionReference object",
+        ));
+    };
+    let key = &req.state::<State>().reference_key;
+    let digest: Vec<u8> = (0u8..3)
+        .flat_map(|round| key.hash_one((reference, round)).to_le_bytes())
+        .take(20)
+        .collect();
+    string_value(req, &digest)
+}
+
+/// `ReflectionReference::__construct()`: private, and php's refusal
+/// when reached anyway, since a reflector is made by
+/// `fromArrayElement`.
+///
+/// ```php
+/// try { new ReflectionReference(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Call to private ReflectionReference::__construct() from global scope
+/// ```
+fn reflection_reference_construct(req: &mut Request) -> Result<Value, Thrown> {
+    Err(throw(
+        req,
+        "ReflectionException",
+        "Cannot directly instantiate ReflectionReference. Use ReflectionReference::fromArrayElement() instead",
+    ))
+}
+
+// -------------------------------------------------- ReflectionZendExtension
+
+/// `ReflectionZendExtension::__construct(string $name)`:
+/// `zend_get_extension(name)` or php's `ReflectionException`. The
+/// engine loads no Zend extension, `zend_extensions` being empty, so
+/// every name is refused and no reflector of this class ever holds one.
+///
+/// ```php
+/// try { new ReflectionZendExtension('zend_opcache'); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+/// try { new ReflectionZendExtension([]); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Zend Extension "zend_opcache" does not exist
+/// ReflectionZendExtension::__construct(): Argument #1 ($name) must be of type string, array given
+/// ```
+fn reflection_zend_extension_construct(req: &mut Request) -> Result<Value, Thrown> {
+    let name = one_string_argument(req)?;
+    Err(throw(
+        req,
+        "ReflectionException",
+        &format!(
+            "Zend Extension \"{}\" does not exist",
+            String::from_utf8_lossy(&name)
+        ),
+    ))
+}
+
+/// `ReflectionZendExtension`'s six readers, `__toString`, `getName`,
+/// `getVersion`, `getAuthor`, `getURL` and `getCopyright`: each reads
+/// `intern->ptr`, which only the constructor writes and which it never
+/// writes here ([`reflection_zend_extension_construct`]), so each is
+/// `GET_REFLECTION_OBJECT_PTR`'s `Error` after its count check.
+///
+/// ```php
+/// $r = (new ReflectionClass('ReflectionZendExtension'))->newInstanceWithoutConstructor();
+/// foreach (['getName', 'getVersion', 'getAuthor', 'getURL', 'getCopyright', '__toString'] as $m) {
+///     try { call_user_func([$r, $m]); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// try { $r->getName(1); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Internal error: Failed to retrieve the reflection object
+/// Internal error: Failed to retrieve the reflection object
+/// Internal error: Failed to retrieve the reflection object
+/// Internal error: Failed to retrieve the reflection object
+/// Internal error: Failed to retrieve the reflection object
+/// Internal error: Failed to retrieve the reflection object
+/// ReflectionZendExtension::getName() expects exactly 0 arguments, 1 given
+/// ```
+fn reflection_zend_extension_reader(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    Err(throw(
+        req,
+        "Error",
+        "Internal error: Failed to retrieve the reflection object",
+    ))
 }
 
 /// `ReflectionFunctionAbstract::isDeprecated()`:
@@ -1277,10 +1590,8 @@ fn reflection_function_construct(req: &mut Request) -> Result<Value, Thrown> {
 /// ```
 fn reflection_function_to_string(req: &mut Request) -> Result<Value, Thrown> {
     let (this, name) = this_name(req, "ReflectionFunction")?;
-    if let Some(closure) = kept_closure(req, this)
-        && let Some(function) = closure.closure(req).map(|info| info.function)
-    {
-        let text = function_string(req, function, "");
+    if let Some(closure) = kept_closure(req, this) {
+        let text = closure_string(req, closure, "")?;
         return Ok(Value::string(PhpString::new(req, text.as_bytes())?));
     }
     let Some(function) = lookup_function(req, &name) else {
@@ -1794,7 +2105,16 @@ fn reflection_class_get_constant(req: &mut Request) -> Result<Value, Thrown> {
 fn reflection_class_has_property(req: &mut Request) -> Result<Value, Thrown> {
     let name = one_string_argument(req)?;
     let class = this_class(req)?;
-    Ok(Value::bool(property_named(req, class, &name).is_some()))
+    if property_named(req, class, &name).is_some() {
+        return Ok(Value::bool(true));
+    }
+    // `has_property(obj, name, ZEND_PROPERTY_EXISTS)` on the object a
+    // `ReflectionObject` kept: its dynamic properties.
+    let dynamic = match req.this().and_then(|this| kept_object(req, this)) {
+        Some(object) => dynamic_properties(req, class, object).contains(&name),
+        None => false,
+    };
+    Ok(Value::bool(dynamic))
 }
 
 /// The property `name` names in the class's info table: the class's
@@ -1850,30 +2170,21 @@ fn reflection_class_get_default_properties(req: &mut Request) -> Result<Value, T
     exactly_arguments(req, 0)?;
     let class = this_class(req)?;
     let mut defaults = PhpArray::new(req)?;
-    let chain = class_chain(req, class);
+    let table = linked_properties(req, class);
     for statics in [true, false] {
-        for (depth, &at) in chain.iter().enumerate() {
-            let properties: Vec<PropertyDecl> = req
-                .class_decl(at)
-                .map(|decl| decl.properties.clone())
-                .unwrap_or_default();
-            for property in properties {
-                if property.is_instance == statics
-                    || (depth > 0 && property.visibility == Visibility::Private)
-                {
-                    continue;
-                }
-                let value = match &property.default {
-                    Some(expr) => eval_const_expr(req, expr, Some(at))?,
-                    None if property.ty.is_some() => continue,
-                    None => Value::null(),
-                };
-                let key = Key::Str(PhpString::new(req, &property.name.0)?);
-                if defaults.contains(&key) {
-                    continue;
-                }
-                defaults.set(req, key, value)?;
+        for (property, at) in &table {
+            if property.is_instance == statics
+                || (*at != class && property.visibility == Visibility::Private)
+            {
+                continue;
             }
+            let value = match &property.default {
+                Some(expr) => eval_const_expr(req, expr, Some(*at))?,
+                None if property.ty.is_some() => continue,
+                None => Value::null(),
+            };
+            let key = Key::Str(PhpString::new(req, &property.name.0)?);
+            defaults.set(req, key, value)?;
         }
     }
     Ok(Value::array(defaults))
@@ -2239,7 +2550,7 @@ fn reflection_class_to_string(req: &mut Request) -> Result<Value, Thrown> {
     // zval, which is what puts `Object of class` and the `Dynamic
     // properties` block on the one and not the other.
     let object = req.this().and_then(|this| kept_object(req, this));
-    let text = class_string(req, class, object, "");
+    let text = class_string(req, class, object, "")?;
     string_value(req, text.as_bytes())
 }
 
@@ -2310,6 +2621,13 @@ fn reflection_class_to_string(req: &mut Request) -> Result<Value, Thrown> {
 /// ```
 ///
 /// ```php
+/// try { new ReflectionMethod('Exception', []); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// ReflectionMethod::__construct(): Argument #2 ($method) must be of type ?string, array given
+/// ```
+///
+/// ```php
 /// new ReflectionMethod();
 /// ```
 /// ```expect exit=255
@@ -2331,15 +2649,21 @@ fn reflection_method_construct(req: &mut Request) -> Result<Value, Thrown> {
             "Calling ReflectionMethod::__construct() with 1 argument is deprecated, use ReflectionMethod::createFromMethodName() instead",
         );
     }
-    let second = req
-        .argument(2)
-        .map(|v| v.deref())
-        .filter(|v| !matches!(v.as_ref(), ValueRef::Null | ValueRef::Undef));
+    // `Z_PARAM_OBJ_OR_STR` then `Z_PARAM_STR_OR_NULL`, both parsed
+    // before either is looked at.
     let first = req.argument(1).unwrap_or_default();
     let ty = Type::Union(vec![Type::Object, Type::String]);
     let first = php_ext::coerce::coerce_param(req, &first, &ty, 1)?;
+    let second = match req.argument(2) {
+        Some(given) => {
+            let ty = Type::Nullable(Box::new(Type::String));
+            let held = php_ext::coerce::coerce_param(req, &given, &ty, 2)?;
+            held.as_str_bytes().map(<[u8]>::to_vec)
+        }
+        None => None,
+    };
     let (class, method_name) = match (first.as_ref(), second) {
-        (ValueRef::Object(object), Some(_)) => (object.class(), string_argument(req, 2)?),
+        (ValueRef::Object(object), Some(name)) => (object.class(), name),
         (ValueRef::Object(_), None) => {
             // `zend_argument_value_error` with no `must`.
             return Err(throw(
@@ -2348,9 +2672,9 @@ fn reflection_method_construct(req: &mut Request) -> Result<Value, Thrown> {
                 "ReflectionMethod::__construct(): Argument #2 ($method) cannot be null when argument #1 ($objectOrMethod) is an object",
             ));
         }
-        (_, Some(_)) => {
+        (_, Some(name)) => {
             let class = first.as_str_bytes().unwrap_or_default().to_vec();
-            (class_named(req, &class)?, string_argument(req, 2)?)
+            (class_named(req, &class)?, name)
         }
         (_, None) => {
             let given = first.as_str_bytes().unwrap_or_default().to_vec();
@@ -2365,11 +2689,18 @@ fn reflection_method_construct(req: &mut Request) -> Result<Value, Thrown> {
             (class, given[at + 2..].to_vec())
         }
     };
-    let lowered = method_name.to_ascii_lowercase();
-    let Some(found) = linked_methods(req, class)
-        .into_iter()
-        .find(|m| m.decl.function.name.0.to_ascii_lowercase() == lowered)
-    else {
+    // `zend_get_closure_invoke_method(orig_obj)` for a closure's
+    // `__invoke`, which php reaches only with the closure in hand.
+    let closure = first
+        .as_object()
+        .copied()
+        .filter(|o| o.closure(req).is_some());
+    let found = if let Some(closure) = closure {
+        method_or_invoke(req, class, &method_name, Some(closure))
+    } else {
+        table_method(req, class, &method_name)
+    };
+    let Some(found) = found else {
         let class = class_name_of(req, class);
         return Err(throw(
             req,
@@ -2387,8 +2718,10 @@ fn reflection_method_construct(req: &mut Request) -> Result<Value, Thrown> {
         set_string_prop(req, this, b"class", &scope)?;
         // `intern->ce = ce`: the class the reflector was asked about,
         // which `_function_string` takes as the method's scope, where
-        // `$class` is the class that declared the method.
-        keep(req, this, class, None);
+        // `$class` is the class that declared the method; and for a
+        // closure's `__invoke`, the closure the method was made over.
+        let kept = closure.filter(|_| found.via_handler);
+        keep(req, this, class, kept);
     }
     Ok(Value::null())
 }
@@ -2462,11 +2795,8 @@ fn reflection_method_to_string(req: &mut Request) -> Result<Value, Thrown> {
         ));
     };
     let class = class_named(req, &class)?;
-    let lowered = name.to_ascii_lowercase();
-    let Some(found) = linked_methods(req, class)
-        .into_iter()
-        .find(|m| m.decl.function.name.0.to_ascii_lowercase() == lowered)
-    else {
+    let kept = kept_closure(req, this);
+    let Some(found) = method_or_invoke(req, class, &name, kept) else {
         let class = class_name_of(req, class);
         return Err(throw(
             req,
@@ -2538,13 +2868,28 @@ fn reflection_method_to_string(req: &mut Request) -> Result<Value, Thrown> {
 /// #1 {main}
 ///   thrown in %s on line 2
 /// ```
+///
+/// A parent's private property is not the child's, from a class or from
+/// an object:
+///
+/// ```php
+/// class P { private $p = 1; } class C extends P {}
+/// foreach (['C', new C] as $from) { try { new ReflectionProperty($from, 'p'); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; } }
+/// ```
+/// ```expect
+/// Property C::$p does not exist
+/// Property C::$p does not exist
+/// ```
 fn reflection_property_construct(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 2)?;
     let (class, object) = class_argument(req, 1)?;
     let name = string_argument(req, 2)?;
     let declaring = match property_named(req, class, &name) {
         Some((declaring, _)) => declaring,
-        None if object.is_some_and(|o| o.prop(req, &name).is_some()) => class,
+        // The dynamic arm: a name in the object's table the class does
+        // not declare, and never a parent's private property, which the
+        // table holds under its mangled key.
+        None if object.is_some_and(|o| dynamic_properties(req, class, o).contains(&name)) => class,
         None => {
             let class = class_name_of(req, class);
             return Err(throw(
@@ -2655,20 +3000,31 @@ fn this_property(req: &mut Request) -> Result<(ClassId, Vec<u8>, Option<Property
 /// #1 {main}
 ///   thrown in %s on line 2
 /// ```
+///
+/// An object of the declaring class is read through a reflector asked
+/// about a subclass, and a missing dynamic property is php's warning:
+///
+/// ```php
+/// class A { public $p = 'p'; } class B extends A {}
+/// $b = new A; $b->d = 1;
+/// var_dump((new ReflectionProperty('B', 'p'))->getValue(new A), (new ReflectionProperty($b, 'd'))->getValue(new A));
+/// ```
+/// ```expect
+/// Deprecated: Creation of dynamic property A::$d is deprecated in %s on line 3
+///
+/// Warning: Undefined property: A::$d in %s on line 4
+/// string(1) "p"
+/// NULL
+/// ```
 fn reflection_property_get_value(req: &mut Request) -> Result<Value, Thrown> {
     at_most_arguments(req, 1)?;
     let given = req.argument(1).unwrap_or_default();
     let given =
         php_ext::coerce::coerce_param(req, &given, &Type::Nullable(Box::new(Type::Object)), 1)?;
     let (class, name, declared) = this_property(req)?;
-    // `instanceof_function(Z_OBJCE_P(object), intern->ce)`: the object
-    // is held to the class the reflector was asked about, which is the
-    // subclass where the property was reached through one, and not to
-    // the class that declared the property.
-    let asked = req
-        .this()
-        .and_then(|this| kept_class(req, this))
-        .unwrap_or(class);
+    // A `static` property is read through `intern->ce`, the class the
+    // reflector was asked about.
+    let asked = asked_class(req, class);
     if declared.as_ref().is_some_and(|decl| !decl.is_instance) {
         return read_static_prop(req, asked, &name);
     }
@@ -2679,20 +3035,44 @@ fn reflection_property_get_value(req: &mut Request) -> Result<Value, Thrown> {
             "be provided for instance properties",
         ));
     };
-    if !object.instance_of(req, asked) {
-        return Err(throw(
-            req,
-            "ReflectionException",
-            "Given object is not an instance of the class this property was declared in",
-        ));
+    // `ref->prop ? ref->prop->ce : intern->ce`: a declared property's
+    // object is held to the class that declared it, a dynamic one's to
+    // the class the reflector was asked about.
+    let holder = if declared.is_some() { class } else { asked };
+    held_to(req, *object, holder)?;
+    read_instance_property(req, *object, class, &name, declared.as_ref())
+}
+
+/// `instanceof_function(Z_OBJCE_P(object), ce)` or php's refusal.
+fn held_to(req: &mut Request, object: PhpObject, class: ClassId) -> Result<(), Thrown> {
+    if object.instance_of(req, class) {
+        return Ok(());
     }
-    match object.prop(req, &name) {
+    Err(throw(
+        req,
+        "ReflectionException",
+        "Given object is not an instance of the class this property was declared in",
+    ))
+}
+
+/// The instance arm `getValue` and `getRawValue` share, `read_property`
+/// under `fake_scope`: the slot or the dynamic table by name, a typed
+/// slot nothing has written php's `Error`, and any other miss php's
+/// `Undefined property` warning and `null`.
+fn read_instance_property(
+    req: &mut Request,
+    object: PhpObject,
+    class: ClassId,
+    name: &[u8],
+    declared: Option<&PropertyDecl>,
+) -> Result<Value, Thrown> {
+    match object.prop(req, name) {
         Some(value) => {
             let value = value.deref();
             req.addref(&value);
             Ok(value)
         }
-        None if declared.as_ref().is_some_and(|decl| decl.ty.is_some()) => {
+        None if declared.is_some_and(|decl| decl.ty.is_some()) => {
             let class = class_name_of(req, class);
             Err(throw(
                 req,
@@ -2700,12 +3080,160 @@ fn reflection_property_get_value(req: &mut Request) -> Result<Value, Thrown> {
                 &format!(
                     "Typed property {}::${} must not be accessed before initialization",
                     String::from_utf8_lossy(&class),
-                    String::from_utf8_lossy(&name)
+                    String::from_utf8_lossy(name)
                 ),
             ))
         }
-        None => Ok(Value::null()),
+        None => {
+            let of = class_name_of(req, object.class());
+            php_ext::raising::warning(
+                req,
+                &format!(
+                    "Undefined property: {}::${}",
+                    String::from_utf8_lossy(&of),
+                    String::from_utf8_lossy(name)
+                ),
+            );
+            Ok(Value::null())
+        }
     }
+}
+
+/// `intern->ce`, the class a property reflector was asked about, or
+/// the declaring class where the payload has none.
+fn asked_class(req: &mut Request, declaring: ClassId) -> ClassId {
+    req.this()
+        .and_then(|this| kept_class(req, this))
+        .unwrap_or(declaring)
+}
+
+/// `ReflectionProperty::getRawValue(object $object)`: the value as
+/// stored, past the `get` one of the property's hooks where it has them. Every
+/// property here is one without hooks (#427), so the read is
+/// `getValue`'s instance arm, the object held to `intern->ce`; a
+/// `static` property is php's `ReflectionException`.
+///
+/// ```php
+/// class C { public $p = 1; private int $q = 2; public static $s; } $o = new C;
+/// var_dump((new ReflectionProperty('C', 'p'))->getRawValue($o), (new ReflectionProperty('C', 'q'))->getRawValue($o));
+/// try { (new ReflectionProperty('C', 's'))->getRawValue($o); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+/// try { (new ReflectionProperty('C', 'p'))->getRawValue(new stdClass); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// int(1)
+/// int(2)
+/// May not use getRawValue on static properties
+/// Given object is not an instance of the class this property was declared in
+/// ```
+fn reflection_property_get_raw_value(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 1)?;
+    let given = req.argument(1).unwrap_or_default();
+    let given = php_ext::coerce::coerce_param(req, &given, &Type::Object, 1)?;
+    let (class, name, declared) = this_property(req)?;
+    let asked = asked_class(req, class);
+    let Some(object) = given.as_object().copied() else {
+        return Ok(Value::null());
+    };
+    held_to(req, object, asked)?;
+    if declared.as_ref().is_some_and(|decl| !decl.is_instance) {
+        return Err(throw(
+            req,
+            "ReflectionException",
+            "May not use getRawValue on static properties",
+        ));
+    }
+    read_instance_property(req, object, class, &name, declared.as_ref())
+}
+
+/// `ReflectionProperty::setRawValue(object $object, mixed $value)`: the
+/// value stored past the `set` one of the property's hooks where it has them. Every
+/// property here is one without hooks (#427), so the write is
+/// `write_property` under `fake_scope`, `setValue`'s instance arm; a
+/// `static` property is php's `ReflectionException`.
+///
+/// ```php
+/// class C { public $p = 1; public static $s; } $o = new C;
+/// (new ReflectionProperty('C', 'p'))->setRawValue($o, 5); var_dump($o->p);
+/// try { (new ReflectionProperty('C', 's'))->setRawValue($o, 1); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// int(5)
+/// May not use setRawValue on static properties
+/// ```
+fn reflection_property_set_raw_value(req: &mut Request) -> Result<Value, Thrown> {
+    let (_, name, declared) = this_property(req)?;
+    exactly_arguments(req, 2)?;
+    let given = req.argument(1).unwrap_or_default();
+    let given = php_ext::coerce::coerce_param(req, &given, &Type::Object, 1)?;
+    let Some(object) = given.as_object().copied() else {
+        return Ok(Value::null());
+    };
+    if declared.as_ref().is_some_and(|decl| !decl.is_instance) {
+        return Err(throw(
+            req,
+            "ReflectionException",
+            "May not use setRawValue on static properties",
+        ));
+    }
+    let value = req.argument(2).unwrap_or_default().deref();
+    req.addref(&value);
+    let key = PhpString::new(req, &name)?;
+    object.set_prop(req, key, value)?;
+    Ok(Value::null())
+}
+
+/// `ReflectionProperty::isInitialized(?object $object = null)`: for a
+/// `static` property, whether its slot holds a value, read silently
+/// through `intern->ce`; for an instance one, whether the object's slot
+/// or dynamic table holds one, `has_property(ZEND_PROPERTY_EXISTS)`
+/// under `fake_scope`, which asks no `__isset`. The object is held to
+/// the declaring class, php's `ref->prop->ce`, or to `intern->ce` for a
+/// dynamic property.
+///
+/// ```php
+/// class A { public static ?int $s; public static $t; public ?int $i; public $n; private int $p; }
+/// $a = new A;
+/// var_dump((new ReflectionProperty('A', 's'))->isInitialized(), (new ReflectionProperty('A', 't'))->isInitialized());
+/// var_dump((new ReflectionProperty('A', 'i'))->isInitialized($a), (new ReflectionProperty('A', 'n'))->isInitialized($a), (new ReflectionProperty('A', 'p'))->isInitialized($a));
+/// unset($a->n); var_dump((new ReflectionProperty('A', 'n'))->isInitialized($a));
+/// try { (new ReflectionProperty('A', 'n'))->isInitialized(); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { (new ReflectionProperty('A', 'n'))->isInitialized(new stdClass); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// ReflectionProperty::isInitialized(): Argument #1 ($object) must be provided for instance properties
+/// Given object is not an instance of the class this property was declared in
+/// ```
+fn reflection_property_is_initialized(req: &mut Request) -> Result<Value, Thrown> {
+    at_most_arguments(req, 1)?;
+    let given = req.argument(1).unwrap_or_default();
+    let given =
+        php_ext::coerce::coerce_param(req, &given, &Type::Nullable(Box::new(Type::Object)), 1)?;
+    let (class, name, declared) = this_property(req)?;
+    let asked = asked_class(req, class);
+    if declared.as_ref().is_some_and(|decl| !decl.is_instance) {
+        let Some(value) = read_class_prop_silent(req, asked, &name)? else {
+            return Ok(Value::bool(false));
+        };
+        let held = !matches!(value.as_ref(), ValueRef::Undef);
+        req.release(value);
+        return Ok(Value::bool(held));
+    }
+    let ValueRef::Object(object) = given.as_ref() else {
+        return Err(arg_type_error(
+            req,
+            1,
+            "be provided for instance properties",
+        ));
+    };
+    let holder = if declared.is_some() { class } else { asked };
+    held_to(req, *object, holder)?;
+    Ok(Value::bool(object.prop(req, &name).is_some()))
 }
 
 /// `ReflectionProperty::setValue(mixed $objectOrValue, mixed $value)`:
@@ -3138,7 +3666,11 @@ fn reflection_constant_get_attributes(req: &mut Request) -> Result<Value, Thrown
 /// `<persistent>`, as one compiled in is, and its version is
 /// `PHP_VERSION`, as `PHP_CTYPE_VERSION` and its kin are. The `INI`
 /// block is not rendered yet (#375); `json` has no ini entry.
-fn extension_string(req: &mut Request, extension: ExtensionId, indent: &str) -> String {
+fn extension_string(
+    req: &mut Request,
+    extension: ExtensionId,
+    indent: &str,
+) -> Result<String, Thrown> {
     let mut out = String::new();
     let name = req
         .extension_name(extension)
@@ -3171,6 +3703,12 @@ fn extension_string(req: &mut Request, extension: ExtensionId, indent: &str) -> 
         }
         let _ = writeln!(out, "{indent}  }}");
     }
+    let ini = extension_ini_string(req, extension, indent);
+    if !ini.is_empty() {
+        out.push_str("\n  - INI {\n");
+        out.push_str(&ini);
+        let _ = writeln!(out, "{indent}  }}");
+    }
     let constants = req.extension_constants(extension);
     if !constants.is_empty() {
         let _ = write!(out, "\n  - Constants [{}] {{\n", constants.len());
@@ -3193,12 +3731,12 @@ fn extension_string(req: &mut Request, extension: ExtensionId, indent: &str) -> 
         let sub_indent = format!("{indent}    ");
         for (class, _) in classes {
             out.push('\n');
-            out.push_str(&class_string(req, class, None, &sub_indent));
+            out.push_str(&class_string(req, class, None, &sub_indent)?);
         }
         let _ = writeln!(out, "{indent}  }}");
     }
     let _ = writeln!(out, "{indent}}}");
-    out
+    Ok(out)
 }
 
 /// `_const_string`: `Constant [ <persistent> type NAME ] { value }`,
@@ -3318,10 +3856,10 @@ fn class_string(
     class: ClassId,
     object: Option<PhpObject>,
     indent: &str,
-) -> String {
+) -> Result<String, Thrown> {
     let mut out = String::new();
     let Some(decl) = req.class_decl(class).cloned() else {
-        return out;
+        return Ok(out);
     };
     let sub_indent = format!("{indent}    ");
     let methods = linked_methods(req, class);
@@ -3349,8 +3887,14 @@ fn class_string(
         let _ = writeln!(out, "{indent}  }}");
     }
     let _ = write!(out, "\n{indent}  - Constants [{}] {{\n", constants.len());
-    for (constant, _) in &constants {
-        out.push_str(&class_const_string(req, constant, None, &sub_indent));
+    for (constant, scope) in &constants {
+        out.push_str(&class_const_string(
+            req,
+            constant,
+            *scope,
+            None,
+            &sub_indent,
+        )?);
     }
     let _ = writeln!(out, "{indent}  }}");
 
@@ -3421,7 +3965,7 @@ fn class_string(
         let _ = writeln!(out, "{indent}  }}");
     }
     let _ = writeln!(out, "{indent}}}");
-    out
+    Ok(out)
 }
 
 /// The names in the object's property table the class did not declare,
@@ -3429,10 +3973,11 @@ fn class_string(
 /// name (a private or protected slot, whose key begins with a zero
 /// byte) skipped as `ZSTR_VAL(prop_name)[0]` skips it.
 fn dynamic_properties(req: &mut Request, class: ClassId, object: PhpObject) -> Vec<Vec<u8>> {
-    let declared: Vec<Vec<u8>> = req
-        .class_decl(class)
-        .map(|decl| decl.properties.iter().map(|p| p.name.0.to_vec()).collect())
-        .unwrap_or_default();
+    let declared: Vec<Vec<u8>> = class_chain(req, class)
+        .into_iter()
+        .filter_map(|at| req.class_decl(at))
+        .flat_map(|decl| decl.properties.iter().map(|p| p.name.0.to_vec()))
+        .collect();
     let Ok(entries) = object.props(req) else {
         return Vec::new();
     };
@@ -3549,13 +4094,30 @@ fn class_header(
 /// value }`, the type the declaration's where it has one and the
 /// value's `zend_zval_type_name` otherwise, the value as
 /// `zval_get_string` prints it, `Array` for an array and `Object` for
-/// an object; a doc comment on the line above.
+/// an object; a doc comment on the line above. The value is evaluated
+/// in the class that declared it, so a private constant of that class
+/// is in reach from a subclass's rendering, and a failure is the
+/// `Thrown` it raised, which the whole `__toString` gives up for.
+///
+/// ```php
+/// class B { const X = NOPE; }
+/// try { echo new ReflectionClassConstant('B', 'X'); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { echo new ReflectionClass('B'); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// class A { private const T = 't'; const L = self::T . 'x'; } class C extends A {}
+/// echo new ReflectionClassConstant('C', 'L');
+/// ```
+/// ```expect
+/// Undefined constant "NOPE"
+/// Undefined constant "NOPE"
+/// Constant [ public string L ] { tx }
+/// ```
 fn class_const_string(
     req: &mut Request,
     constant: &ClassConstDecl,
+    scope: ClassId,
     enum_of: Option<&[u8]>,
     indent: &str,
-) -> String {
+) -> Result<String, Thrown> {
     let mut out = String::new();
     if let Some(doc) = &constant.doc_comment {
         out.push_str(indent);
@@ -3565,7 +4127,10 @@ fn class_const_string(
     // A case of an enum holds the enum's own instance, so
     // `zend_zval_type_name` names the enum and the `IS_OBJECT` arm
     // writes `Object` in place of the value.
-    let value = eval_const_expr(req, &constant.value, None).unwrap_or_default();
+    // `zval_update_constant_ex(&c->value, c->ce)`: evaluated in the
+    // class that declared it, a failure the exception it raised and no
+    // rendering.
+    let value = eval_const_expr(req, &constant.value, Some(scope))?;
     let ty = match (&constant.ty, enum_of) {
         (Some(ty), _) => type_to_string(ty),
         (None, Some(name)) => String::from_utf8_lossy(name).into_owned(),
@@ -3582,7 +4147,7 @@ fn class_const_string(
         visibility_word(constant.visibility),
         String::from_utf8_lossy(&constant.name.0)
     );
-    out
+    Ok(out)
 }
 
 /// `_enum_case_string`: `Case NAME` for a pure enum, `Case NAME = value`
@@ -3722,7 +4287,64 @@ fn default_value_string(req: &mut Request, expr: &ConstExpr) -> String {
             String::from_utf8_lossy(&class.0),
             String::from_utf8_lossy(&name.0)
         ),
+        ConstExpr::Unary { .. } | ConstExpr::Binary { .. } => ast_export(req, expr, 0),
         _ => String::from("<default>"),
+    }
+}
+
+/// `zend_ast_export_ex` over an operator of a constant expression, the
+/// text `format_default_value` prints for a default the compiler kept
+/// unevaluated: `BINARY_OP` and `PREFIX_OP` with php's priorities, a
+/// side whose operator binds looser than its place wrapped in
+/// parentheses, and every other node as [`default_value_string`] writes
+/// it.
+///
+/// ```php
+/// function m($a = U + 1, $b = -V, $c = W * (Y + 1), $d = Z . 'x') {}
+/// foreach ((new ReflectionFunction('m'))->getParameters() as $p) { echo $p, "\n"; }
+/// ```
+/// ```expect
+/// Parameter #0 [ <optional> $a = U + 1 ]
+/// Parameter #1 [ <optional> $b = -V ]
+/// Parameter #2 [ <optional> $c = W * (Y + 1) ]
+/// Parameter #3 [ <optional> $d = Z . 'x' ]
+/// ```
+fn ast_export(req: &mut Request, expr: &ConstExpr, priority: u32) -> String {
+    let (text, own) = match expr {
+        ConstExpr::Unary { op, operand } => {
+            let operand = ast_export(req, operand, 241);
+            (format!("{}{operand}", String::from_utf8_lossy(&op.0)), 240)
+        }
+        ConstExpr::Binary { op, lhs, rhs } => {
+            let (own, left, right) = match op.0.as_ref() {
+                b"**" => (250, 251, 250),
+                b"*" | b"/" | b"%" => (210, 210, 211),
+                b"+" | b"-" => (200, 200, 201),
+                b"<<" | b">>" => (190, 190, 191),
+                b"." => (185, 185, 186),
+                b"<" | b"<=" | b">" | b">=" | b"<=>" => (180, 181, 181),
+                b"==" | b"!=" | b"===" | b"!==" => (170, 171, 171),
+                b"&" => (160, 160, 161),
+                b"^" => (150, 150, 151),
+                b"|" => (140, 140, 141),
+                b"&&" => (130, 130, 131),
+                b"||" => (120, 120, 121),
+                b"??" => (110, 111, 110),
+                _ => (40, 40, 41),
+            };
+            let lhs = ast_export(req, lhs, left);
+            let rhs = ast_export(req, rhs, right);
+            (
+                format!("{lhs} {} {rhs}", String::from_utf8_lossy(&op.0)),
+                own,
+            )
+        }
+        leaf => return default_value_string(req, leaf),
+    };
+    if priority > own {
+        format!("({text})")
+    } else {
+        text
     }
 }
 
@@ -3759,6 +4381,124 @@ struct LinkedMethod {
     decl: MethodDecl,
     scope: ClassId,
     prototype: Option<ClassId>,
+    /// `ZEND_ACC_CALL_VIA_HANDLER`: a function no table holds, made on
+    /// the lookup, which is a closure's `__invoke`
+    /// ([`closure_invoke`]); its `module` is null, so it renders as
+    /// `<internal>` with no extension.
+    via_handler: bool,
+}
+
+/// `is_closure_invoke(ce, lcname)`: whether a lowered method name of
+/// `class` is the `__invoke` php makes for a `Closure` on the lookup.
+fn is_closure_invoke(req: &mut Request, class: ClassId, lowered: &[u8]) -> bool {
+    lowered == b"__invoke" && lookup_class(req, b"Closure").ok().flatten() == Some(class)
+}
+
+/// A method of `class` by name, `zend_hash_find_ptr(&ce->function_table,
+/// lcname)` over the linked table, and for `Closure`'s `__invoke`, which
+/// no table holds, the method php makes on the lookup over `closure`,
+/// or over a fresh one where none is given ([`closure_invoke`]).
+fn method_or_invoke(
+    req: &mut Request,
+    class: ClassId,
+    name: &[u8],
+    closure: Option<PhpObject>,
+) -> Option<LinkedMethod> {
+    let found = table_method(req, class, name);
+    if found.is_some() || !is_closure_invoke(req, class, &name.to_ascii_lowercase()) {
+        return found;
+    }
+    closure_invoke(req, closure)
+}
+
+/// `zend_hash_find_ptr(&ce->function_table, lcname)` alone: the linked
+/// method of that name, with no `__invoke` made for a `Closure`.
+fn table_method(req: &mut Request, class: ClassId, name: &[u8]) -> Option<LinkedMethod> {
+    let lowered = name.to_ascii_lowercase();
+    linked_methods(req, class)
+        .into_iter()
+        .find(|m| m.decl.function.name.0.to_ascii_lowercase() == lowered)
+}
+
+/// `zend_get_closure_invoke_method`: `Closure::__invoke` over one
+/// closure's own signature, public, an instance method, internal with
+/// no extension, no doc comment and no site, the return type and the
+/// by-reference bit kept. Its `arg_info` is the closure's, which a
+/// native reads as `zend_internal_arg_info` with no `default_value`, so
+/// a written default is one it does not show. `None` is the closure
+/// `object_init_ex(zend_ce_closure)` makes, which holds no function and
+/// so declares nothing.
+///
+/// ```php
+/// $c = function (int $a, $b = 5): int { return $a; };
+/// $m = new ReflectionMethod($c, '__invoke');
+/// echo $m, (new ReflectionClass('Closure'))->getMethod('__invoke');
+/// var_dump($m->isInternal(), $m->getFileName(), $m->getNumberOfRequiredParameters(), $m->invoke($c, 3), (new ReflectionObject($c))->hasMethod('__invoke'), count((new ReflectionObject($c))->getMethods()));
+/// try { new ReflectionMethod('Closure', '__invoke'); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Method [ <internal> public method __invoke ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> int $a ]
+///     Parameter #1 [ <optional> $b = <default> ]
+///   }
+///   - Return [ int ]
+/// }
+/// Method [ <internal> public method __invoke ] {
+/// }
+/// bool(true)
+/// bool(false)
+/// int(1)
+/// int(3)
+/// bool(true)
+/// int(7)
+/// Method Closure::__invoke() does not exist
+/// ```
+fn closure_invoke(req: &mut Request, closure: Option<PhpObject>) -> Option<LinkedMethod> {
+    let scope = lookup_class(req, b"Closure").ok().flatten()?;
+    let empty = || FunctionDecl {
+        name: Name::default(),
+        parameters: Vec::new(),
+        return_type: None,
+        returns_by_ref: false,
+        is_generator: false,
+        attributes: Vec::new(),
+        doc_comment: None,
+        file: Name::default(),
+        line: 0,
+        end_line: 0,
+        frameless: Vec::new(),
+    };
+    let mut function = closure
+        .and_then(|closure| signature::closure_decl(req, closure))
+        .unwrap_or_else(empty);
+    function.name = Name(b"__invoke".as_slice().into());
+    function.file = Name::default();
+    (function.line, function.end_line) = (0, 0);
+    function.doc_comment = None;
+    function.is_generator = false;
+    function
+        .attributes
+        .retain(|a| a.name.0.eq_ignore_ascii_case(b"Deprecated"));
+    for parameter in &mut function.parameters {
+        if let ParameterDefault::Expr(_) = parameter.default {
+            parameter.default = ParameterDefault::Unshown;
+        }
+    }
+    Some(LinkedMethod {
+        decl: MethodDecl {
+            function,
+            visibility: Visibility::Public,
+            is_instance: true,
+            is_abstract: false,
+            is_final: false,
+            tentative_return: false,
+        },
+        scope,
+        prototype: None,
+        via_handler: true,
+    })
 }
 
 /// `ZEND_ACC_CTOR`: the method named `__construct`.
@@ -3791,6 +4531,7 @@ fn linked_methods_at(req: &mut Request, class: ClassId, depth: u32) -> Vec<Linke
             decl: method.clone(),
             scope: class,
             prototype: None,
+            via_handler: false,
         })
         .collect();
     if depth > 64 {
@@ -3994,49 +4735,67 @@ fn linked_constants_at(
 }
 
 /// `ce->properties_info` after linking: the class's own properties
-/// and each of the parent's the class does not redeclare
+/// and each of the parent's table the class does not redeclare
 /// (`do_inherit_property`), a private one among them as the shadow
 /// `_class_string` skips, each with the class that declared it. A user
 /// class has its own first, compiled into the table before
-/// `zend_do_inheritance` appends the parent's; an internal class has
-/// the parent's first, `zend_register_internal_class_ex` inheriting
-/// before `zend_declare_typed_property` adds its own, which is why
-/// `ReflectionMethod` lists `$name` before `$class`.
+/// `zend_do_inheritance` appends the rows of the parent's table it
+/// does not hold, in that table's order, so a grandparent's rows come
+/// after the parent's; an internal class has the parent's first,
+/// `zend_register_internal_class_ex` inheriting before
+/// `zend_declare_typed_property` adds its own, a redeclaration moving
+/// to the end, which is why `ReflectionMethod` lists `$name` before
+/// `$class`.
+///
+/// ```php
+/// class A { static $a1 = 1; static $c = 1; } class B extends A { static $c = 2; static $b1 = 2; } class C extends B { static $c = 3; }
+/// print_r((new ReflectionClass('C'))->getDefaultProperties());
+/// ```
+/// ```expect
+/// Array
+/// (
+///     [c] => 3
+///     [b1] => 2
+///     [a1] => 1
+/// )
+/// ```
 fn linked_properties(req: &mut Request, class: ClassId) -> Vec<(PropertyDecl, ClassId)> {
-    let chain = class_chain(req, class);
-    let internal = req
-        .class_decl(class)
-        .is_none_or(|decl| decl.file.0.is_empty());
-    let mut table: Vec<(PropertyDecl, ClassId)> = Vec::new();
-    for at in chain.iter().rev() {
-        let Some(decl) = req.class_decl(*at) else {
-            continue;
-        };
-        for property in &decl.properties {
-            let at_index = table.iter().position(|(p, _)| p.name == property.name);
-            // A user class's own properties stand before the inherited
-            // ones, in the order the class declared them, since its
-            // table is compiled before `zend_do_inheritance` appends
-            // what the parent has and it does not: the place is after
-            // the ones this class has already put there, whether the
-            // name was inherited and is being redeclared or is new.
-            let own = table.iter().filter(|(_, d)| *d == class).count();
-            match at_index {
-                // An internal class declares its properties after
-                // `zend_do_inheritance` ran, and a redeclaration is
-                // `zend_hash_del` then `zend_hash_update_ptr` in
-                // `zend_declare_typed_property`, so it moves to the end.
-                Some(i) if internal => {
-                    table.remove(i);
-                    table.push((property.clone(), *at));
-                }
-                Some(i) => {
-                    table.remove(i);
-                    table.insert(own.min(table.len()), (property.clone(), *at));
-                }
-                None if internal || *at != class => table.push((property.clone(), *at)),
-                None => table.insert(own, (property.clone(), *at)),
+    linked_properties_at(req, class, 0)
+}
+
+fn linked_properties_at(
+    req: &mut Request,
+    class: ClassId,
+    depth: u32,
+) -> Vec<(PropertyDecl, ClassId)> {
+    let Some(decl) = req.class_decl(class).cloned() else {
+        return Vec::new();
+    };
+    let inherited = match decl.parent.as_ref() {
+        Some(name) if depth <= 64 => match lookup_class(req, &name.0).ok().flatten() {
+            Some(parent) => linked_properties_at(req, parent, depth + 1),
+            None => Vec::new(),
+        },
+        _ => Vec::new(),
+    };
+    if decl.file.0.is_empty() {
+        // An internal class inherits before it declares, and a
+        // redeclaration is `zend_hash_del` then `zend_hash_update_ptr`
+        // in `zend_declare_typed_property`, so it moves to the end.
+        let mut table = inherited;
+        for property in decl.properties {
+            if let Some(i) = table.iter().position(|(p, _)| p.name == property.name) {
+                table.remove(i);
             }
+            table.push((property, class));
+        }
+        return table;
+    }
+    let mut table: Vec<(PropertyDecl, ClassId)> =
+        decl.properties.into_iter().map(|p| (p, class)).collect();
+    for (property, at) in inherited {
+        if !table.iter().any(|(p, _)| p.name == property.name) {
+            table.push((property, at));
         }
     }
     table
@@ -4056,8 +4815,79 @@ fn function_string(req: &mut Request, function: Function, indent: &str) -> Strin
         .map(str::to_owned);
     let mut out = String::new();
     function_header(&mut out, &decl, module.as_deref(), None, indent);
-    function_body(req, &mut out, &decl, false, indent);
+    let arg_info = ArgInfo::of(&decl);
+    function_body(req, &mut out, &decl, false, arg_info, &[], indent);
     out
+}
+
+/// `_function_string` over a closure, `ZEND_ACC_CLOSURE` set: the
+/// function it holds, with `_function_closure_string`'s `Bound
+/// Variables` block over the names its table holds a value for, in the
+/// table's order, before the parameters.
+///
+/// ```php
+/// $a = 1; $b = 2;
+/// echo new ReflectionFunction(function ($x) use ($a, &$b) {}), new ReflectionFunction(fn () => 1);
+/// ```
+/// ```expect
+/// Closure [ <user> function {closure:%s:3} ] {
+///   @@ %s 3 - 3
+///
+///   - Bound Variables [2] {
+///       Variable #0 [ $a ]
+///       Variable #1 [ $b ]
+///   }
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <required> $x ]
+///   }
+/// }
+/// Closure [ <user> function {closure:%s:3} ] {
+///   @@ %s 3 - 3
+/// }
+/// ```
+fn closure_string(req: &mut Request, closure: PhpObject, indent: &str) -> Result<String, Thrown> {
+    let Some(decl) = signature::closure_decl(req, closure) else {
+        return Ok(String::new());
+    };
+    let bound: Vec<Vec<u8>> = closure
+        .closure_bound(req)?
+        .into_iter()
+        .map(|(name, _)| name.as_bytes().to_vec())
+        .collect();
+    let mut out = String::new();
+    function_header(&mut out, &decl, None, None, indent);
+    function_body(req, &mut out, &decl, false, ArgInfo::User, &bound, indent);
+    Ok(out)
+}
+
+/// Which `arg_info` a function carries, which decides whether
+/// `_function_parameter_string` prints anything: a native's
+/// `zend_internal_arg_info`, whose first row is the return and so is
+/// never null, or the compiler's `zend_arg_info`, which
+/// `zend_compile_params` leaves null for a function with neither a
+/// parameter nor a return type. A closure's `__invoke` carries its
+/// closure's, the user kind (`ZEND_ACC_USER_ARG_INFO`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ArgInfo {
+    Native,
+    User,
+}
+
+impl ArgInfo {
+    /// The kind a declaration's site says: a native has no file.
+    fn of(decl: &FunctionDecl) -> ArgInfo {
+        if decl.file.0.is_empty() {
+            ArgInfo::Native
+        } else {
+            ArgInfo::User
+        }
+    }
+
+    /// Whether php's pointer is null for `decl`.
+    fn is_null(self, decl: &FunctionDecl) -> bool {
+        self == ArgInfo::User && decl.parameters.is_empty() && decl.return_type.is_none()
+    }
 }
 
 /// `_function_string` with a scope, a method of `ce`: `Method [
@@ -4070,7 +4900,11 @@ fn function_string(req: &mut Request, function: Function, indent: &str) -> Strin
 /// method of the same name when the method is `ce`'s own and the
 /// parent's is not private; `prototype` names the prototype's scope.
 fn method_string(req: &mut Request, method: &LinkedMethod, ce: ClassId, indent: &str) -> String {
-    let module = req.class_extension_name(method.scope).map(str::to_owned);
+    let module = if method.via_handler {
+        None
+    } else {
+        req.class_extension_name(method.scope).map(str::to_owned)
+    };
     let mut words: Vec<String> = Vec::new();
     if method.scope != ce {
         let scope = class_name_of(req, method.scope);
@@ -4101,11 +4935,18 @@ fn method_string(req: &mut Request, method: &LinkedMethod, ce: ClassId, indent: 
         Some((&method.decl, &words)),
         indent,
     );
+    let arg_info = if method.via_handler {
+        ArgInfo::User
+    } else {
+        ArgInfo::of(&method.decl.function)
+    };
     function_body(
         req,
         &mut out,
         &method.decl.function,
         method.decl.tentative_return,
+        arg_info,
+        &[],
         indent,
     );
     out
@@ -4208,6 +5049,8 @@ fn function_body(
     out: &mut String,
     decl: &FunctionDecl,
     tentative: bool,
+    arg_info: ArgInfo,
+    bound: &[Vec<u8>],
     indent: &str,
 ) {
     if !decl.file.0.is_empty() {
@@ -4220,7 +5063,22 @@ fn function_body(
         );
     }
     let param_indent = format!("{indent}  ");
-    function_parameter_string(req, out, decl, &param_indent);
+    if !bound.is_empty() {
+        let _ = write!(
+            out,
+            "\n{param_indent}- Bound Variables [{}] {{\n",
+            bound.len()
+        );
+        for (at, name) in bound.iter().enumerate() {
+            let _ = writeln!(
+                out,
+                "{param_indent}    Variable #{at} [ ${} ]",
+                String::from_utf8_lossy(name)
+            );
+        }
+        let _ = writeln!(out, "{param_indent}}}");
+    }
+    function_parameter_string(req, out, decl, arg_info, &param_indent);
     if let Some(returns) = &decl.return_type {
         let word = if tentative {
             "Tentative return"
@@ -4232,13 +5090,13 @@ fn function_body(
     let _ = writeln!(out, "{indent}}}");
 }
 
-/// `required_num_args`: every parameter before the first with a
-/// default or the variadic one.
+/// `required_num_args`: the parameters up to the last one that is
+/// required.
 fn required_parameters(decl: &FunctionDecl) -> usize {
     decl.parameters
         .iter()
-        .position(|p| p.default.is_some() || p.variadic)
-        .unwrap_or(decl.parameters.len())
+        .rposition(Parameter::is_required)
+        .map_or(0, |at| at + 1)
 }
 
 /// `_parameter_string`: one `Parameter #N [ ... ]` row, the modifier
@@ -4270,36 +5128,60 @@ fn parameter_string(
     }
     let _ = write!(out, "${}", String::from_utf8_lossy(&parameter.name.0));
     // A native's default is the text `gen_stub.php` wrote into the arg
-    // info; a user function's is the zval `RECV_INIT` holds, which
-    // `format_default_value` prints and `NULL` is the spelling of.
-    match (&parameter.default, internal) {
-        (Some(expr), false) => {
-            let _ = write!(out, " = {}", default_value_string(req, expr));
+    // info, `<default>` where it wrote none; a user function's is the
+    // zval `RECV_INIT` holds, which `format_default_value` prints and
+    // `NULL` is the spelling of.
+    if !required && !parameter.variadic {
+        match (parameter.default.expr(), internal) {
+            (Some(expr), true) => {
+                let _ = write!(out, " = {}", const_expr_string(expr));
+            }
+            (None, true) => out.push_str(" = <default>"),
+            (Some(expr), false) => {
+                let _ = write!(out, " = {}", default_value_string(req, expr));
+            }
+            (None, false) => {}
         }
-        (default, _) if !required && !parameter.variadic => {
-            out.push_str(" = ");
-            out.push_str(
-                &default
-                    .as_ref()
-                    .map_or_else(|| String::from("<default>"), const_expr_string),
-            );
-        }
-        _ => {}
     }
     out.push_str(" ]");
     out
 }
 
 /// `_function_parameter_string`: `- Parameters [N] {` and one
-/// [`parameter_string`] line per parameter.
+/// [`parameter_string`] line per parameter, and nothing where php's
+/// `arg_info` is null, which is a user function that declares neither
+/// a parameter nor a return type (`zend_compile_params` allocates none
+/// for it); a native's `arg_info` always carries its return row.
+///
+/// ```php
+/// function f() {}
+/// function g(): int { return 1; }
+/// echo new ReflectionFunction('f'), new ReflectionFunction('g');
+/// ```
+/// ```expect
+/// Function [ <user> function f ] {
+///   @@ %s 2 - 2
+/// }
+/// Function [ <user> function g ] {
+///   @@ %s 3 - 3
+///
+///   - Parameters [0] {
+///   }
+///   - Return [ int ]
+/// }
+/// ```
 fn function_parameter_string(
     req: &mut Request,
     out: &mut String,
     decl: &FunctionDecl,
+    arg_info: ArgInfo,
     indent: &str,
 ) {
     let required = required_parameters(decl);
     let internal = decl.file.0.is_empty();
+    if arg_info.is_null(decl) {
+        return;
+    }
     out.push('\n');
     let _ = writeln!(out, "{indent}- Parameters [{}] {{", decl.parameters.len());
     for (offset, parameter) in decl.parameters.clone().iter().enumerate() {
@@ -4310,15 +5192,11 @@ fn function_parameter_string(
 }
 
 /// A native parameter's default as `gen_stub.php` writes it into
-/// `zend_internal_arg_info.default_value`: the expression's source
-/// text, which for a scalar is the scalar as written, and for a string
-/// the stub's spelling, double-quoted as `zend_exceptions.stub.php` and
-/// the rest of php-src write theirs, a class constant as `Class::NAME`,
-/// constants joined by `|` as the
-/// stub joins them, and `<default>` for the stub's
-/// `UNKNOWN`, an optional parameter with nothing to show; a string the
-/// stub spells with an escape needs the written text on the
-/// declaration, which the model does not carry (#377).
+/// `zend_internal_arg_info.default_value`: what the stub generator's
+/// printer makes of the expression, which for a scalar is the scalar as
+/// written, for a string the bytes double-quoted with its escapes
+/// ([`stub_escaped`]), a class constant as `Class::NAME`, and constants
+/// joined by `|` as the stub joins them.
 fn const_expr_string(expr: &php_ext::decl::ConstExpr) -> String {
     use php_ext::decl::ConstExpr;
     match expr {
@@ -4326,8 +5204,7 @@ fn const_expr_string(expr: &php_ext::decl::ConstExpr) -> String {
         ConstExpr::Bool(b) => String::from(if *b { "true" } else { "false" }),
         ConstExpr::Long(n) => n.to_string(),
         ConstExpr::Double(f) => f.to_string(),
-        ConstExpr::Str(s) => format!("\"{}\"", String::from_utf8_lossy(s)),
-        expr if stub::is_unknown_default(expr) => String::from("<default>"),
+        ConstExpr::Str(s) => format!("\"{}\"", stub_escaped(s)),
         ConstExpr::Constant(name) => String::from_utf8_lossy(&name.0).into_owned(),
         // `DateTimeZone::ALL`, as `timezone_identifiers_list`'s stub writes it.
         ConstExpr::ClassConstant { class, name } => format!(
@@ -4346,6 +5223,30 @@ fn const_expr_string(expr: &php_ext::decl::ConstExpr) -> String {
         ),
         _ => String::from("<default>"),
     }
+}
+
+/// php-parser's `escapeString` for a double-quoted string, which is how
+/// `gen_stub.php` prints a string default: `addcslashes` over `\n`,
+/// `\r`, `\t`, `\f`, `\v`, `$`, `"` and `\\`, then every other control
+/// byte as `\x` and two lowercase hex digits, so `trim`'s
+/// `" \n\r\t\v\0"` prints as `" \n\r\t\v\x00"`.
+fn stub_escaped(bytes: &[u8]) -> String {
+    let mut out: Vec<u8> = Vec::new();
+    for &byte in bytes {
+        match byte {
+            b'\n' => out.extend_from_slice(b"\\n"),
+            b'\r' => out.extend_from_slice(b"\\r"),
+            b'\t' => out.extend_from_slice(b"\\t"),
+            0x0C => out.extend_from_slice(b"\\f"),
+            0x0B => out.extend_from_slice(b"\\v"),
+            b'$' | b'"' | b'\\' => out.extend_from_slice(&[b'\\', byte]),
+            0x00..=0x08 | 0x0E..=0x1F => {
+                out.extend_from_slice(format!("\\x{byte:02x}").as_bytes());
+            }
+            _ => out.push(byte),
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// `zend_type_to_string`: class names first, then the scalar and

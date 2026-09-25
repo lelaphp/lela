@@ -32,19 +32,20 @@ mod tree;
 mod xpath;
 
 pub use io::{
-    C14nOut, C14nSelect, C14nTarget, Parsed, Parser, Save, Schema, Source, Validate, Validated,
+    C14nOut, C14nSelect, C14nTarget, Dump, Fragment, Parsed, Parser, Save, Schema, Source,
+    Validate, Validated,
 };
 pub use sys::{
     HTML_PARSE_NOBLANKS, HTML_PARSE_NODEFDTD, HTML_PARSE_NOERROR, HTML_PARSE_NOIMPLIED,
     HTML_PARSE_NONET, HTML_PARSE_NOWARNING, HTML_PARSE_RECOVER, XML_ATTRIBUTE_ID,
     XML_EXTERNAL_GENERAL_UNPARSED_ENTITY, XML_PARSE_BIG_LINES, XML_PARSE_COMPACT,
-    XML_PARSE_DTDATTR, XML_PARSE_DTDLOAD, XML_PARSE_DTDVALID, XML_PARSE_HUGE, XML_PARSE_NOBLANKS,
-    XML_PARSE_NOCDATA, XML_PARSE_NOENT, XML_PARSE_NOERROR, XML_PARSE_NONET, XML_PARSE_NOWARNING,
-    XML_PARSE_NSCLEAN, XML_PARSE_PEDANTIC, XML_PARSE_RECOVER, XML_PARSE_XINCLUDE, XML_SAVE_AS_XML,
-    XML_SAVE_FORMAT, XML_SAVE_NO_DECL, XML_SAVE_NO_EMPTY,
+    XML_PARSE_DTDATTR, XML_PARSE_DTDLOAD, XML_PARSE_DTDVALID, XML_PARSE_HUGE, XML_PARSE_IGNORE_ENC,
+    XML_PARSE_NOBLANKS, XML_PARSE_NOCDATA, XML_PARSE_NOENT, XML_PARSE_NOERROR, XML_PARSE_NONET,
+    XML_PARSE_NOWARNING, XML_PARSE_NSCLEAN, XML_PARSE_PEDANTIC, XML_PARSE_RECOVER,
+    XML_PARSE_XINCLUDE, XML_SAVE_AS_XML, XML_SAVE_FORMAT, XML_SAVE_NO_DECL, XML_SAVE_NO_EMPTY,
 };
 pub use tree::{DocString, DtdTable, HashTable, Kind, Name, Node, Ns, Utf8};
-pub use xpath::{Answer, Called, Handler, Item, Object, Operand, Returned, XPath};
+pub use xpath::{Answer, Called, Handler, Item, Object, Operand, Returned, Scope, XPath};
 
 /// A copy of `bytes` up to its first NUL with the NUL after, which is
 /// what a C function handed a `zend_string`'s `char *` reads.
@@ -559,6 +560,28 @@ impl Default for DocProps {
     }
 }
 
+/// `php_libxml_quirks_mode`: the compatibility the HTML5 parser left a
+/// document in, which CSS selector matching reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Quirks {
+    #[default]
+    NoQuirks,
+    Quirks,
+    LimitedQuirks,
+}
+
+/// `php_libxml_private_data_header`: what the extension that made a
+/// document keeps beside libxml's tree for the document's lifetime, dom's
+/// namespace mapper and template contents for its modern classes. It is
+/// dropped when the document's last reference goes, before `xmlFreeDoc`,
+/// as php runs the header's `dtor` first.
+pub trait PrivateData: std::any::Any {
+    /// The header's `ns_hook`: an element whose namespace carries the tag
+    /// ([`NodeObject::add_ns_tag`]) is being freed by
+    /// `php_libxml_node_free`.
+    fn element_freed(&mut self, element: Node);
+}
+
 /// `php_libxml_ref_obj`.
 struct DocRef {
     doc: *mut sys::xmlDoc,
@@ -567,6 +590,8 @@ struct DocRef {
     /// `cache_tag.modification_nr`.
     modification: usize,
     class_type: ClassType,
+    quirks: Quirks,
+    private: Option<Box<dyn PrivateData>>,
 }
 
 /// `php_libxml_node_ptr`: what a node's `_private` names while an object
@@ -741,6 +766,8 @@ impl NodeObject {
             props: None,
             modification: 1,
             class_type: ClassType::Unset,
+            quirks: Quirks::NoQuirks,
+            private: None,
         }));
         // SAFETY: the wrapper this owns.
         unsafe { (*w).document = d };
@@ -948,6 +975,63 @@ impl NodeObject {
         if let Some(d) = self.doc_ref_mut() {
             d.class_type = class_type;
         }
+    }
+
+    /// `document->quirks_mode`.
+    #[must_use]
+    pub fn quirks(&self) -> Quirks {
+        self.doc_ref().map_or(Quirks::NoQuirks, |d| d.quirks)
+    }
+
+    /// Set `document->quirks_mode`.
+    pub fn set_quirks(&mut self, quirks: Quirks) {
+        if let Some(d) = self.doc_ref_mut() {
+            d.quirks = quirks;
+        }
+    }
+
+    /// `document->private_data`, read as the type the extension that set
+    /// it put there; `None` where there is none or it is another type.
+    #[must_use]
+    pub fn private_data<T: PrivateData>(&self) -> Option<&T> {
+        let data: &dyn std::any::Any = self.doc_ref()?.private.as_deref()?;
+        data.downcast_ref::<T>()
+    }
+
+    /// `document->private_data`, to write.
+    pub fn private_data_mut<T: PrivateData>(&mut self) -> Option<&mut T> {
+        let data: &mut dyn std::any::Any = self.doc_ref_mut()?.private.as_deref_mut()?;
+        data.downcast_mut::<T>()
+    }
+
+    /// `document->private_data = data`, what was there dropped.
+    pub fn set_private_data(&mut self, data: Box<dyn PrivateData>) {
+        if let Some(d) = self.doc_ref_mut() {
+            d.private = Some(data);
+        }
+    }
+
+    /// `dom_add_element_ns_hook`: the element given a namespace of its
+    /// own, a copy of the one it has kept on the document's old list,
+    /// tagged so that `php_libxml_node_free` calls this document's
+    /// [`PrivateData::element_freed`] when it frees the element.
+    pub fn add_ns_tag(&mut self, element: Node) {
+        let w = self.w();
+        // SAFETY: the wrapper this owns.
+        let d = unsafe { (*w).document };
+        if d.is_null() {
+            return;
+        }
+        let Some(ns) = element.ns() else {
+            return;
+        };
+        let Some(copy) = Ns::owned(ns.href().as_deref(), ns.prefix().as_deref()) else {
+            return;
+        };
+        let tag = d.cast::<c_void>().wrapping_byte_add(NS_TAG_HOOK);
+        copy.set_private(tag);
+        element.set_ns(Some(copy));
+        copy.move_to_old(element.doc());
     }
 
     /// The count of the document, `document->refcount`.
@@ -1321,6 +1405,7 @@ unsafe fn decrement_doc_ref_directly(d: *mut DocRef) -> u32 {
     r.refcount -= 1;
     let left = r.refcount;
     if left == 0 {
+        drop(r.private.take());
         if !r.doc.is_null() {
             // SAFETY: the document this reference owned, freed once.
             unsafe { sys::xmlFreeDoc(r.doc) };
@@ -1381,6 +1466,37 @@ unsafe fn unregister_node(node: *mut sys::xmlNode) {
     borrowed.decrement_doc_ref();
 }
 
+/// `LIBXML_NS_TAG_HOOK`: the low bit of a namespace's `_private` that
+/// says the rest points at a document whose private data is told of the
+/// free.
+const NS_TAG_HOOK: usize = 1;
+
+/// `php_libxml_node_free`'s call of the private data's `ns_hook` for an
+/// element whose namespace carries the tag.
+///
+/// # Safety
+/// `node` is a live element.
+unsafe fn call_ns_hook(node: *mut sys::xmlNode) {
+    // SAFETY: the caller's contract.
+    let ns = unsafe { (*node).ns };
+    if ns.is_null() {
+        return;
+    }
+    // SAFETY: a live element's namespace.
+    let private = unsafe { (*ns).private };
+    if private.addr() & NS_TAG_HOOK == 0 {
+        return;
+    }
+    let d = private.wrapping_byte_sub(NS_TAG_HOOK).cast::<DocRef>();
+    // SAFETY: the tag names the reference of the element's document, which
+    // lives while any object of its tree does, and one does while this
+    // frees a node an object let go of.
+    let r = unsafe { &mut *d };
+    if let (Some(data), Some(element)) = (r.private.as_deref_mut(), Node::from_raw(node)) {
+        data.element_freed(element);
+    }
+}
+
 /// `php_libxml_node_free`.
 ///
 /// # Safety
@@ -1388,6 +1504,10 @@ unsafe fn unregister_node(node: *mut sys::xmlNode) {
 unsafe fn node_free(node: *mut sys::xmlNode) {
     // SAFETY: the caller's contract.
     let n = unsafe { &mut *node };
+    if n.type_ == sys::XML_ELEMENT_NODE {
+        // SAFETY: a live element.
+        unsafe { call_ns_hook(node) };
+    }
     if !n.private.is_null() {
         // SAFETY: a proxy a node names is live.
         unsafe { (*n.private.cast::<NodePtr>()).node = ptr::null_mut() };
