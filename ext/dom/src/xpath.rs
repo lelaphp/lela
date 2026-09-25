@@ -792,8 +792,8 @@ impl php_ext::abi::ObjectHandlers for XPathHandlers {
         req: &mut Request,
         object: PhpObject,
         name: &[u8],
-    ) -> Option<u32> {
-        crate::property_slot(req, object, name)
+    ) -> php_ext::abi::PropertyPlace {
+        crate::property_place(req, object, name)
     }
 
     fn has_property(

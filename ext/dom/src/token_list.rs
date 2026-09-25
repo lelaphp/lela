@@ -4,7 +4,7 @@
 //! keeps the set parsed from the attribute value it last saw, parsing
 //! again whenever the attribute has changed under it.
 
-use php_ext::abi::{CloneObj, ObjectHandlers, PropertyRead, PropertyTest};
+use php_ext::abi::{CloneObj, ObjectHandlers, PropertyPlace, PropertyRead, PropertyTest};
 use php_ext::coerce::{to_long, truthy};
 use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
@@ -569,8 +569,8 @@ impl ObjectHandlers for TokenListHandlers {
         req: &mut Request,
         object: PhpObject,
         name: &[u8],
-    ) -> Option<u32> {
-        crate::property_slot(req, object, name)
+    ) -> PropertyPlace {
+        crate::property_place(req, object, name)
     }
 
     fn has_property(

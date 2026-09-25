@@ -4,7 +4,7 @@
 //! entities or notations, or the node set an `XPath` query answered.
 
 use php_ext::abi::CloneObj;
-use php_ext::abi::{ObjectHandlers, PropertyRead, PropertyTest};
+use php_ext::abi::{ObjectHandlers, PropertyPlace, PropertyRead, PropertyTest};
 use php_ext::coerce::{numeric_string, to_long};
 use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
@@ -716,8 +716,8 @@ impl ObjectHandlers for MapHandlers {
         req: &mut Request,
         object: PhpObject,
         name: &[u8],
-    ) -> Option<u32> {
-        crate::property_slot(req, object, name)
+    ) -> PropertyPlace {
+        crate::property_place(req, object, name)
     }
 
     fn has_property(

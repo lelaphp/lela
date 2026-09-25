@@ -65,6 +65,7 @@ abi::OnModify
 abi::OrFalse
 abi::Out
 abi::Out::set
+abi::PropertyPlace
 abi::PropertyPurpose
 abi::PropertyRead
 abi::PropertyTest
