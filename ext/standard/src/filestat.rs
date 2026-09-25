@@ -6,23 +6,26 @@
 //! kind clears it; `chown`, `chgrp`, `lchown`, `lchgrp`, `chmod` and
 //! `touch`, which call the C library themselves for a plain path and
 //! hand any other, a `file://` one included, to the wrapper's
-//! `stream_metadata`; and `clearstatcache`. In the stub's order
+//! `stream_metadata`; `clearstatcache`; and `disk_total_space` and
+//! `disk_free_space` over `statvfs(3)`. In the stub's order
 //! (`basic_functions.stub.php`). `access(2)` and the rest `std` has no
 //! answer for are `ffi`'s.
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use php_ext::coerce::coerce_param;
 use php_ext::decl::{ConstExpr, FunctionDecl, Parameter, ParameterDefault, Type};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
-use php_ext::request::{Request, WrapperOp};
+use php_ext::request::{PathIntent, Request, WrapperOp};
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
 use crate::ffi;
 use crate::output::Entry;
+use crate::stub::stub;
 use crate::{argument_count_between, bool_argument, declared, long_argument, parameter};
 
 /// `S_IFMT` and the file types `filetype` names, with `S_IFLNK`, which
@@ -208,7 +211,76 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
             ),
             clearstatcache,
         ),
+        (
+            stub("disk_total_space(string $directory): float|false"),
+            disk_total_space,
+        ),
+        (
+            stub("disk_free_space(string $directory): float|false"),
+            disk_free_space,
+        ),
+        (
+            stub("diskfreespace(string $directory): float|false"),
+            disk_free_space,
+        ),
     ]
+}
+
+/// `disk_total_space(string $directory): float|false`: the size of the
+/// filesystem the path is on, `f_blocks` of `statvfs(3)` in units of
+/// `f_frsize`, for the path made absolute against the request's working
+/// directory (`expand_filepath`); the host's `strerror` as a warning and
+/// `false` where it refuses. The sizes are the host's, so the witnesses
+/// pin their shape.
+///
+/// ```php
+/// var_dump(is_float(disk_total_space(".")), disk_total_space(__DIR__) === disk_total_space(__DIR__ . "/."), disk_total_space(__DIR__ . "/nope"));
+/// try { disk_total_space("a\0b"); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Warning: disk_total_space(): No such file or directory in %s on line 2
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// disk_total_space(): Argument #1 ($directory) must not contain any null bytes
+/// ```
+fn disk_total_space(req: &mut Request) -> Result<Value, Thrown> {
+    disk_space(req, |space| space.total)
+}
+
+/// `disk_free_space(string $directory): float|false`, and its alias
+/// `diskfreespace`: the space on the path's filesystem a caller without
+/// privilege may take, `f_bavail` in units of `f_frsize`, as
+/// [`disk_total_space`] reads it.
+///
+/// ```php
+/// var_dump(is_float(disk_free_space(__DIR__)), disk_free_space(__DIR__) <= disk_total_space(__DIR__), diskfreespace(__DIR__ . "/nope"));
+/// ```
+/// ```expect
+/// Warning: diskfreespace(): No such file or directory in %s on line 2
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// ```
+fn disk_free_space(req: &mut Request) -> Result<Value, Thrown> {
+    disk_space(req, |space| space.available)
+}
+
+/// The two natives' one body: `Z_PARAM_PATH`, `expand_filepath`, the
+/// `open_basedir` check and `statvfs`, the answer read off it.
+fn disk_space(req: &mut Request, read: fn(&ffi::Space) -> f64) -> Result<Value, Thrown> {
+    argument_count_between(req, 1, 1)?;
+    let path = path_argument(req, 1)?;
+    let full = req.absolutize(path.as_bytes());
+    req.fs_guard(&full, PathIntent::Stat)?;
+    match ffi::statvfs(full.0.as_os_str().as_bytes()) {
+        Ok(space) => Ok(Value::float(read(&space))),
+        Err(errno) => {
+            let text = strerror(&std::io::Error::from_raw_os_error(errno));
+            docref(req, Level::Warning, &text);
+            Ok(Value::bool(false))
+        }
+    }
 }
 
 /// `strerror(errno)`: the text Rust's error carries before its own

@@ -1096,6 +1096,44 @@ pub(super) fn rusage(who: Who) -> Option<[(&'static str, i64); 17]> {
     ])
 }
 
+/// What `statvfs(path)` says of the filesystem a path is on, as
+/// `php_disk_total_space` and `php_disk_free_space` read it: blocks
+/// counted in `f_frsize`, or `f_bsize` where that is zero.
+pub(super) struct Space {
+    pub(super) total: f64,
+    pub(super) available: f64,
+}
+
+/// `statvfs(3)`: the space, or the `errno` of its failure.
+pub(super) fn statvfs(path: &[u8]) -> Result<Space, i32> {
+    let path = CString::new(path).map_err(|_| libc::ENOENT)?;
+    let mut buf = std::mem::MaybeUninit::<libc::statvfs>::zeroed();
+    // SAFETY: `path` is NUL-terminated and `buf` is room for the one
+    // `struct statvfs` the call writes.
+    let rc = unsafe { libc::statvfs(path.as_ptr(), buf.as_mut_ptr()) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(0));
+    }
+    // SAFETY: zeroed storage is a valid `statvfs`, and the call
+    // succeeded over it.
+    let buf = unsafe { buf.assume_init() };
+    // php's own `(double)` casts, over counts `u32` on one host and
+    // `u64` on another, so the widening is not the same on each.
+    #[allow(clippy::cast_precision_loss)]
+    let double = |n: u64| n as f64;
+    #[allow(clippy::useless_conversion)]
+    let (bsize, frsize) = (u64::from(buf.f_bsize), u64::from(buf.f_frsize));
+    let unit = if buf.f_frsize == 0 {
+        double(bsize)
+    } else {
+        double(frsize)
+    };
+    Ok(Space {
+        total: double(u64::from(buf.f_blocks)) * unit,
+        available: double(u64::from(buf.f_bavail)) * unit,
+    })
+}
+
 /// The login name of `uid`, `getpwuid_r(3)` with its buffer grown while
 /// it is too small, as `php_get_current_user` reads it; `None` where
 /// the host has no entry.
