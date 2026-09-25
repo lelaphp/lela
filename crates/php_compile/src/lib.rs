@@ -4829,7 +4829,14 @@ mod tests {
         );
         assert_eq!(
             refused(b"<?php\nclass M { abstract function f(); }"),
-            not_yet("a class member this compiler cannot read yet", 2)
+            compile_error(
+                "Class M declares abstract method f() and must therefore be declared abstract",
+                2
+            )
+        );
+        assert_eq!(
+            refused(b"<?php\nabstract class M { abstract function f(); }"),
+            None
         );
         assert_eq!(
             refused(b"<?php\nclass M { function f(): (A&B)|C {} }"),

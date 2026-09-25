@@ -8,6 +8,8 @@
 
 use php_unit::decl::ClassKind;
 
+use super::walk::ClassModifiers;
+
 /// `ZEND_ATTRIBUTE_TARGET_*` (`Z/Zend/zend_attributes.h`).
 pub(super) const TARGET_CLASS: u32 = 1 << 0;
 const TARGET_FUNCTION: u32 = 1 << 1;
@@ -97,20 +99,37 @@ impl InternalAttribute {
     }
 
     /// The validator `zend_compile_attributes` runs once the target
-    /// holds, over a class of this kind and name: php's compile error,
-    /// none where it takes the class.
+    /// holds, over a class of this kind, modifiers and name: php's
+    /// compile error, none where it takes the class.
+    ///
+    /// ```php
+    /// #[Attribute]
+    /// abstract class A {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot apply #[\Attribute] to abstract class A in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// #[AllowDynamicProperties]
+    /// readonly class A {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot apply #[\AllowDynamicProperties] to readonly class A in %s on line 3
+    /// ```
     pub(super) fn refused_on_class(
         self,
         kind: ClassKind,
-        is_abstract: bool,
+        modifiers: ClassModifiers,
         class: &str,
     ) -> Option<String> {
         use InternalAttribute::{AllowDynamicProperties, Attribute, Deprecated};
         let word = match (self, kind) {
             (Attribute | AllowDynamicProperties, ClassKind::Trait) => "trait",
             (Attribute | AllowDynamicProperties | Deprecated, ClassKind::Interface) => "interface",
+            (AllowDynamicProperties, ClassKind::Class) if modifiers.is_readonly => "readonly class",
             (Attribute | AllowDynamicProperties | Deprecated, ClassKind::Enum) => "enum",
-            (Attribute, ClassKind::Class) if is_abstract => "abstract class",
+            (Attribute, ClassKind::Class) if modifiers.is_abstract => "abstract class",
             (Deprecated, ClassKind::Class) => "class",
             _ => return None,
         };
