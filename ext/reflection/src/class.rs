@@ -19,7 +19,7 @@ use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, Value
 
 use super::{
     at_most_arguments, class_chain, class_constant_named, class_is, class_name_of, class_named,
-    exactly_arguments, is_constructor, linked_constants, linked_interfaces, linked_methods,
+    exactly_arguments, is_constructor, keep, linked_constants, linked_interfaces, linked_methods,
     linked_properties, lookup_class, new_object, one_string_argument, property_named,
     reflection_class_factory, set_name, set_string_prop, string_argument, string_value, this_class,
 };
@@ -57,25 +57,52 @@ fn constructor_of(req: &mut Request, class: ClassId) -> Option<(MethodDecl, Clas
         .map(|m| (m.decl, m.scope))
 }
 
-/// `reflection_method_factory`: a `ReflectionMethod` with `$name` the
-/// method's and `$class` the scope that declared it.
-fn method_factory(req: &mut Request, name: &[u8], scope: ClassId) -> Result<PhpObject, Thrown> {
+/// `reflection_method_factory(ce, mptr, ...)`: a `ReflectionMethod`
+/// with `$name` the method's, `$class` the scope that declared it and
+/// `intern->ce` the class it was reached through, which
+/// `_function_string` renders against, so a method `B` inherits from
+/// `A` reads `inherits A`.
+///
+/// ```php
+/// class A { function m() {} } class B extends A {}
+/// echo (new ReflectionClass('B'))->getMethod('m');
+/// ```
+/// ```expect
+/// Method [ <user, inherits A> public method m ] {
+///   @@ %s 2 - 2
+/// }
+/// ```
+fn method_factory(
+    req: &mut Request,
+    name: &[u8],
+    scope: ClassId,
+    ce: ClassId,
+) -> Result<PhpObject, Thrown> {
     let class = class_named(req, b"ReflectionMethod")?;
     let object = new_object(req, class)?;
     let scope = class_name_of(req, scope);
     set_name(req, object, name)?;
     set_string_prop(req, object, b"class", &scope)?;
+    keep(req, object, ce, None);
     Ok(object)
 }
 
-/// `reflection_property_factory`: a `ReflectionProperty` with `$name`
-/// the property's and `$class` the class that declared it.
-fn property_factory(req: &mut Request, name: &[u8], scope: ClassId) -> Result<PhpObject, Thrown> {
+/// `reflection_property_factory(ce, name, prop, ...)`: a
+/// `ReflectionProperty` with `$name` the property's, `$class` the
+/// class that declared it and `intern->ce` the class it was reached
+/// through, which `getValue` holds its object to.
+fn property_factory(
+    req: &mut Request,
+    name: &[u8],
+    scope: ClassId,
+    ce: ClassId,
+) -> Result<PhpObject, Thrown> {
     let class = class_named(req, b"ReflectionProperty")?;
     let object = new_object(req, class)?;
     let scope = class_name_of(req, scope);
     set_name(req, object, name)?;
     set_string_prop(req, object, b"class", &scope)?;
+    keep(req, object, ce, None);
     Ok(object)
 }
 
@@ -611,7 +638,7 @@ pub(super) fn reflection_class_get_method(req: &mut Request) -> Result<Value, Th
             ),
         ));
     };
-    let object = method_factory(req, &found.decl.function.name.0, found.scope)?;
+    let object = method_factory(req, &found.decl.function.name.0, found.scope, class)?;
     Ok(object.as_value())
 }
 
@@ -633,7 +660,7 @@ pub(super) fn reflection_class_get_constructor(req: &mut Request) -> Result<Valu
     let Some((decl, scope)) = constructor_of(req, class) else {
         return Ok(Value::null());
     };
-    let object = method_factory(req, &decl.function.name.0, scope)?;
+    let object = method_factory(req, &decl.function.name.0, scope, class)?;
     Ok(object.as_value())
 }
 
@@ -691,7 +718,7 @@ pub(super) fn reflection_class_get_methods(req: &mut Request) -> Result<Value, T
         if method_bits(&found.decl) & filter == 0 {
             continue;
         }
-        let object = method_factory(req, &found.decl.function.name.0, found.scope)?;
+        let object = method_factory(req, &found.decl.function.name.0, found.scope, class)?;
         methods.append(req, object.as_value())?;
     }
     Ok(Value::array(methods))
@@ -738,7 +765,7 @@ pub(super) fn reflection_class_get_property(req: &mut Request) -> Result<Value, 
             ),
         ));
     };
-    let object = property_factory(req, &name, scope)?;
+    let object = property_factory(req, &name, scope, class)?;
     Ok(object.as_value())
 }
 
@@ -773,7 +800,7 @@ pub(super) fn reflection_class_get_properties(req: &mut Request) -> Result<Value
         if bits & filter == 0 {
             continue;
         }
-        let object = property_factory(req, &decl.name.0, scope)?;
+        let object = property_factory(req, &decl.name.0, scope, class)?;
         properties.append(req, object.as_value())?;
     }
     Ok(Value::array(properties))
