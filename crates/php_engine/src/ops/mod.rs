@@ -250,6 +250,69 @@ pub(crate) fn match_target(subject: &Value, table: PhpArray) -> Switched {
     }
 }
 
+/// `ZEND_IN_ARRAY` (`Z/Zend/zend_vm_def.h:9408`): whether the needle is
+/// in the table `zend_compile_func_in_array` built, a reference followed.
+/// A string is looked up by `zend_hash_find`, its bytes and nothing
+/// else; under `$strict` a long by `zend_hash_index_find` and
+/// anything else is not there. Without it an undefined variable,
+/// `null` and `false` are the empty string's key, and any other needle
+/// is compared with each key by `zend_compare`, which is `==` and may
+/// call user code, `__toString` among it. An undefined variable is the
+/// handler's to have warned about.
+///
+/// ```php
+/// class S { function __toString(): string { return "s"; } }
+/// $x = 'b'; $r = &$x; $i = 1;
+/// var_dump(in_array($x, ['a', 'b']), in_array($i, [1, 'a'], true), in_array('1', [1], true), in_array(1.0, [1], true));
+/// var_dump(in_array(false, ['', 'a']), in_array(null, ['a']), in_array(0, ['a']), in_array(true, ['a']), in_array(new S, ['s']), in_array([], ['a']));
+/// var_dump(in_array($u, ['a', 'b'], true), in_array($v, ['', 'b']));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+///
+/// Warning: Undefined variable $u in %s on line 6
+///
+/// Warning: Undefined variable $v in %s on line 6
+/// bool(false)
+/// bool(true)
+/// ```
+pub(crate) fn in_array(
+    req: &mut Request,
+    needle: &Value,
+    table: PhpArray,
+    strict: bool,
+) -> Result<bool, Thrown> {
+    let needle = needle.deref();
+    match needle.as_ref() {
+        ValueRef::Str(s) => return Ok(table.contains(&Key::Str(*s))),
+        ValueRef::Int(n) if strict => return Ok(table.contains(&Key::Int(n))),
+        _ if strict => return Ok(false),
+        ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false) => {
+            let empty = PhpString::new(req, b"")?;
+            return Ok(table.contains(&Key::Str(empty)));
+        }
+        _ => {}
+    }
+    for (key, _) in &table {
+        let Key::Str(key) = key else {
+            continue;
+        };
+        if compare(req, &needle, &Value::string(key))? == Ordering::Equal {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// The target a table holds under a key, or the default where none.
 fn found(target: Option<Value>) -> Switched {
     match target.and_then(|target| target.as_int()) {

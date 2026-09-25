@@ -484,7 +484,6 @@ pub fn binary_op(
 /// str_repeat(): Argument #1 ($string) must be of type string, int given
 /// str_repeat(): Argument #2 ($times) must be of type int, string given
 /// fmod(): Argument #1 ($num1) must be of type float, string given
-/// in_array(): Argument #3 ($strict) must be of type bool, int given
 /// float(1)
 /// ```
 ///
@@ -986,7 +985,6 @@ pub(crate) fn scalar_type_hint(
 /// define(): Argument #1 ($constant_name) must be of type string, null given
 /// str_repeat(): Argument #2 ($times) must be of type int, null given
 /// round(): Argument #1 ($num) must be of type int|float, null given
-/// in_array(): Argument #3 ($strict) must be of type bool, null given
 /// memory_get_usage(): Argument #1 ($real_usage) must be of type bool, null given
 /// ```
 fn null_as_scalar(req: &mut Request, mask: u32) -> Result<Option<Value>, Thrown> {

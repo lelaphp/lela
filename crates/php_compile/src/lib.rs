@@ -1785,6 +1785,28 @@ mod tests {
         );
     }
 
+    /// `true`, `false` and `null` written with the leading `\` are the
+    /// values `zend_try_ct_eval_const` substitutes, as they are without
+    /// it: `zend_resolve_const_name` strips the `\` and
+    /// `zend_get_special_const` reads the rest. The oracle's dump under
+    /// `[regime.dump]` at 8.5.9 over the same source.
+    #[test]
+    fn a_special_constant_written_fully_qualified_is_substituted() {
+        assert_eq!(
+            dump_of(b"<?php echo \\true, \\NULL, \\False, TRUE;"),
+            main_dump(
+                5,
+                0,
+                0,
+                "0000 ECHO bool(true)\n\
+                 0001 ECHO null\n\
+                 0002 ECHO bool(false)\n\
+                 0003 ECHO bool(true)\n\
+                 0004 RETURN int(1)\n"
+            )
+        );
+    }
+
     /// The oracle's dump under the pin's `dump` regime of
     /// `$a = 1; echo $a, -$a, $A; $c = $b = $a + 1;`, `vars=4, tmps=5`:
     ///
@@ -2608,6 +2630,38 @@ mod tests {
                  LIVE RANGES:\n\
                  \x20    3: 0002 - 0003 (tmp/var)\n\
                  \x20    5: 0005 - 0006 (tmp/var)\n"
+            )
+        );
+    }
+
+    /// The oracle's dump of `zend_compile_func_in_array`'s shape:
+    /// `IN_ARRAY` with `$strict` before its operands, over a haystack
+    /// of non-numeric strings with no third argument, of strings and
+    /// longs under `true`, of nothing under `null`, of a numeric string
+    /// and a long under `\TRUE`, and of a string under `''`, each third
+    /// argument read by `zend_is_true`. The arms that are the call are the
+    /// witness's on [`special`], since php's call there is frameless.
+    #[test]
+    fn in_array_over_a_literal_haystack_is_in_array_with_its_flag() {
+        assert_eq!(
+            dump_of(
+                b"<?php echo in_array($a, [\"x\", \"y\"]), in_array($a, [1, \"b\"], true), in_array($a, [], null), in_array($a, [\"1\", 2], \\TRUE), in_array($a, ['y'], '');"
+            ),
+            main_dump(
+                11,
+                1,
+                5,
+                "0000 T1 = IN_ARRAY 0 CV0($a) array(...)\n\
+                 0001 ECHO T1\n\
+                 0002 T2 = IN_ARRAY 1 CV0($a) array(...)\n\
+                 0003 ECHO T2\n\
+                 0004 T3 = IN_ARRAY 0 CV0($a) array(...)\n\
+                 0005 ECHO T3\n\
+                 0006 T4 = IN_ARRAY 1 CV0($a) array(...)\n\
+                 0007 ECHO T4\n\
+                 0008 T5 = IN_ARRAY 0 CV0($a) array(...)\n\
+                 0009 ECHO T5\n\
+                 0010 RETURN int(1)\n"
             )
         );
     }

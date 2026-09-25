@@ -12982,6 +12982,30 @@ pub(crate) fn r#match<T: Tier>(
     ))
 }
 
+/// `ZEND_IN_ARRAY`: [`crate::ops::in_array`] over the needle, the table
+/// in `op2` and `$strict` in `extended_value`, into the
+/// temporary; the needle freed after it. An undefined CV is
+/// `ZVAL_UNDEFINED_OP1`, the warning [`exec::operand`] raises, and then
+/// `null`, which is what php's handler looks up after it warns. php
+/// branches on the answer where a `JMPZ` or a `JMPNZ` follows
+/// (`ZEND_VM_SMART_BRANCH`); the jump reads the temporary here, as
+/// after [`type_check`].
+pub(crate) fn in_array<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let table = exec::constant(code, ConstIdx(op.op2));
+    let Some(table) = table.as_array().copied() else {
+        return Err(no_table("IN_ARRAY"));
+    };
+    let strict = op.extended_value != 0;
+    unary(req, frame, code, op, |req, needle| {
+        crate::ops::in_array(req, needle, table, strict).map(Value::bool)
+    })
+}
+
 /// `ZEND_MATCH_ERROR`: [`crate::ops::match_unhandled_error`] over the
 /// subject as it stands, `GET_OP1_ZVAL_PTR_UNDEF`, left pending; the
 /// subject is not freed here, as php's handler frees nothing before
@@ -13303,11 +13327,12 @@ fn switched(req: &mut Request, frame: FrameRef, switched: Switched, op: &Opline)
     }
 }
 
-/// The fatal for a jump-table opcode whose `op2` is no array, which no
-/// unit the compiler wrote has (design §10).
+/// The fatal for an opcode over a constant table, a jump table or
+/// `IN_ARRAY`'s, whose `op2` is no array, which no unit the compiler
+/// wrote has (design §10).
 fn no_table(opcode: &str) -> Fatal {
     Fatal::Error(format!(
-        "InternalError: {opcode} names a constant that is no jump table"
+        "InternalError: {opcode} names a constant that is no table"
     ))
 }
 
