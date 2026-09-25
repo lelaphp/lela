@@ -307,6 +307,78 @@ fn link_enum_methods(decl: &mut ClassDecl, class: ClassId, methods: &mut Vec<Nat
     }
 }
 
+/// The classes the engine links: Zend's own and then each extension's,
+/// in bundle order, each with its methods, handler table and
+/// `create_object`, the constants later extensions add to them, and the
+/// trampolines.
+struct LinkedClasses {
+    classes: Vec<ClassDecl>,
+    handlers: Vec<Option<&'static dyn ObjectHandlers>>,
+    natives: Vec<Option<NativeNew>>,
+    methods: Vec<NativeMethod>,
+    trampolines: Vec<MethodDecl>,
+}
+
+/// [`LinkedClasses`] for `extensions`.
+fn link_classes(extensions: &[Extension]) -> LinkedClasses {
+    // `zend_register_internal_class_with_flags` and `zend_register_functions`
+    // over the class's methods: each declaration takes its methods,
+    // and each method's entry is numbered in the order it is met.
+    let mut zend = crate::interfaces::classes();
+    zend.extend(crate::classes::zend_classes());
+    zend.extend(crate::fiber::classes());
+    let mut classes: Vec<ClassDecl> = Vec::new();
+    let mut handlers = Vec::new();
+    let mut natives = Vec::new();
+    let mut methods = Vec::new();
+    for (decl, entries, table, native) in zend
+        .iter()
+        .chain(extensions.iter().flat_map(|e| e.classes.iter()))
+    {
+        handlers.push(*table);
+        natives.push(*native);
+        let mut decl = decl.clone();
+        let class = ClassId(u32::try_from(classes.len()).unwrap_or(u32::MAX));
+        for (method, entry) in entries {
+            let index = u32::try_from(decl.methods.len()).unwrap_or(u32::MAX);
+            decl.methods.push(method.clone());
+            methods.push(NativeMethod {
+                class,
+                at: MethodAt::Declared(index),
+                entry: *entry,
+            });
+        }
+        link_enum_methods(&mut decl, class, &mut methods);
+        classes.push(decl);
+    }
+    link_class_constants(&mut classes, extensions);
+    let trampolines = link_trampolines(&classes, extensions, &mut methods);
+    LinkedClasses {
+        classes,
+        handlers,
+        natives,
+        methods,
+        trampolines,
+    }
+}
+
+/// `zend_declare_class_constant_ex` over a class another extension
+/// registered, from a later `MINIT`: each extension's
+/// [`ExtensionBuilder::class_constants`] appended to the class it names,
+/// in bundle order.
+///
+/// [`ExtensionBuilder::class_constants`]: crate::api::abi::ExtensionBuilder::class_constants
+fn link_class_constants(classes: &mut [ClassDecl], extensions: &[Extension]) {
+    for (class_name, constants) in extensions.iter().flat_map(|e| e.class_constants.iter()) {
+        if let Some(decl) = classes
+            .iter_mut()
+            .find(|decl| decl.name.0.eq_ignore_ascii_case(&class_name.0))
+        {
+            decl.constants.extend(constants.iter().cloned());
+        }
+    }
+}
+
 /// `zend_register_closure_ce` leaves `__invoke` off `Closure`'s table
 /// and `zend_closure_get_method` answers it on the lookup: every
 /// trampoline [`crate::classes::trampolines`] names is numbered past
@@ -314,9 +386,17 @@ fn link_enum_methods(decl: &mut ClassDecl, class: ClassId, methods: &mut Vec<Nat
 /// `methods`, and its declaration stands beside the linked table
 /// rather than in it. A row naming a class nothing declares is left
 /// unlinked, as a method of an absent class would be.
-fn link_trampolines(classes: &[ClassDecl], methods: &mut Vec<NativeMethod>) -> Vec<MethodDecl> {
+fn link_trampolines(
+    classes: &[ClassDecl],
+    extensions: &[Extension],
+    methods: &mut Vec<NativeMethod>,
+) -> Vec<MethodDecl> {
     let mut trampolines = Vec::new();
-    for (class_name, method, entry) in crate::classes::trampolines() {
+    let own = crate::classes::trampolines();
+    let laid = extensions
+        .iter()
+        .flat_map(|e| e.trampolines.iter().cloned());
+    for (class_name, method, entry) in own.into_iter().chain(laid) {
         let Some(at) = classes
             .iter()
             .position(|decl| decl.name.0.eq_ignore_ascii_case(&class_name.0))
@@ -770,37 +850,13 @@ impl EngineBuilder {
             .collect();
         let (function_modules, functions) = function_table(&extensions, &ini);
         let frameless = frameless_table(functions.iter().map(|(decl, _)| decl));
-        // `zend_register_internal_class_with_flags` and `zend_register_functions`
-        // over the class's methods: each declaration takes its methods,
-        // and each method's entry is numbered in the order it is met.
-        let mut zend = crate::interfaces::classes();
-        zend.extend(crate::classes::zend_classes());
-        zend.extend(crate::fiber::classes());
-        let mut classes: Vec<ClassDecl> = Vec::new();
-        let mut handlers = Vec::new();
-        let mut natives = Vec::new();
-        let mut methods = Vec::new();
-        for (decl, entries, table, native) in zend
-            .iter()
-            .chain(extensions.iter().flat_map(|e| e.classes.iter()))
-        {
-            handlers.push(*table);
-            natives.push(*native);
-            let mut decl = decl.clone();
-            let class = ClassId(u32::try_from(classes.len()).unwrap_or(u32::MAX));
-            for (method, entry) in entries {
-                let index = u32::try_from(decl.methods.len()).unwrap_or(u32::MAX);
-                decl.methods.push(method.clone());
-                methods.push(NativeMethod {
-                    class,
-                    at: MethodAt::Declared(index),
-                    entry: *entry,
-                });
-            }
-            link_enum_methods(&mut decl, class, &mut methods);
-            classes.push(decl);
-        }
-        let trampolines = link_trampolines(&classes, &mut methods);
+        let LinkedClasses {
+            classes,
+            handlers,
+            natives,
+            methods,
+            trampolines,
+        } = link_classes(&extensions);
         // Zend's own constants stand before the bundle's, as
         // `zend_register_standard_constants` runs before any `MINIT`.
         let constants: Vec<ConstDecl> = Shared::zend_constants()

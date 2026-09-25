@@ -3129,7 +3129,8 @@ fn reflection_constant_get_attributes(req: &mut Request) -> Result<Value, Thrown
 }
 
 /// `_extension_string`: the header with the extension's number and
-/// version, then the blocks it has something for: `Constants`, one
+/// version, then the blocks it has something for: `Dependencies`, one
+/// row per `zend_module_dep`; `Constants`, one
 /// `_const_string` row per constant the extension declared;
 /// `Functions`, one `_function_string` per native; `Classes`, one
 /// `_class_string` per class, each preceded by a blank line as
@@ -3148,6 +3149,28 @@ fn extension_string(req: &mut Request, extension: ExtensionId, indent: &str) -> 
         "{indent}Extension [ <persistent> extension #{} {name} version {PHP_VERSION} ] {{",
         req.extension_number(extension)
     );
+    let dependencies = req.extension_dependencies(extension);
+    if !dependencies.is_empty() {
+        out.push_str("\n  - Dependencies {\n");
+        for dependency in dependencies {
+            let kind = match dependency.kind {
+                DependencyKind::Required => "Required",
+                DependencyKind::Conflicts => "Conflicts",
+                DependencyKind::Optional => "Optional",
+            };
+            let rel = dependency.rel.map(|r| format!(" {r}")).unwrap_or_default();
+            let version = dependency
+                .version
+                .map(|v| format!(" {v}"))
+                .unwrap_or_default();
+            let _ = writeln!(
+                out,
+                "{indent}    Dependency [ {} ({kind}{rel}{version}) ]",
+                dependency.name
+            );
+        }
+        let _ = writeln!(out, "{indent}  }}");
+    }
     let constants = req.extension_constants(extension);
     if !constants.is_empty() {
         let _ = write!(out, "\n  - Constants [{}] {{\n", constants.len());
@@ -3999,9 +4022,14 @@ fn linked_properties(req: &mut Request, class: ClassId) -> Vec<(PropertyDecl, Cl
             // name was inherited and is being redeclared or is new.
             let own = table.iter().filter(|(_, d)| *d == class).count();
             match at_index {
-                // The child's declaration stands where the parent's was
-                // inherited.
-                Some(i) if internal => table[i] = (property.clone(), *at),
+                // An internal class declares its properties after
+                // `zend_do_inheritance` ran, and a redeclaration is
+                // `zend_hash_del` then `zend_hash_update_ptr` in
+                // `zend_declare_typed_property`, so it moves to the end.
+                Some(i) if internal => {
+                    table.remove(i);
+                    table.push((property.clone(), *at));
+                }
                 Some(i) => {
                     table.remove(i);
                     table.insert(own.min(table.len()), (property.clone(), *at));

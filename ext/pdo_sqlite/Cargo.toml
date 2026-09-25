@@ -11,9 +11,15 @@ description = "The pdo_sqlite extension, php-src/ext/pdo_sqlite"
 [lints]
 workspace = true
 
-# The one dependency: the facade. The engine is out of reach (`[[edge]]` ext/*).
+# The facade, and `pdo`, whose driver face this crate implements, as
+# `ZEND_MOD_REQUIRED("pdo")` has it (design §4.10). The engine is out of
+# reach (`[[edge]]` ext/*).
 [dependencies]
 php_ext = { path = "../../crates/php_ext" }
+php_ext_pdo = { path = "../pdo" }
+# libsqlite3 built from the source the crate bundles, one version on every
+# machine (design §7.2), bound in `src/ffi/` alone (`unsafe.homes`).
+libsqlite3-sys = { workspace = true }
 
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
 [dev-dependencies]

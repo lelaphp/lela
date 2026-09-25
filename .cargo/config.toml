@@ -17,3 +17,9 @@ CARGO_WORKSPACE_DIR = { value = "", relative = true, force = true }
 # makes the pattern library whatever the machine has; set, it builds the
 # source the crate bundles, one version on every machine (design §7.2).
 PCRE2_SYS_STATIC = { value = "1", force = true }
+
+# libsqlite3-sys's bundled build turns foreign keys on by default, where
+# php's libsqlite3 leaves them off (`PRAGMA foreign_keys` reads 0 under the
+# oracle), and leaves the math functions out, which php's build carries;
+# the flags make the amalgamation the library php links (design §7.2).
+LIBSQLITE3_FLAGS = { value = "-USQLITE_DEFAULT_FOREIGN_KEYS -DSQLITE_ENABLE_MATH_FUNCTIONS", force = true }
