@@ -1133,9 +1133,9 @@ pub(crate) fn init_dynamic_call<T: Tier>(
     let resolved = if let Some(object) = callee.as_object().copied() {
         dynamic_call_object(req, object)
     } else if let Some(name) = callee.as_str_bytes().map(<[u8]>::to_vec) {
-        dynamic_call_string(req, &name)
+        dynamic_call_string(req, &name, req.vm().this(frame))
     } else if let Some(array) = callee.as_array().copied() {
-        dynamic_call_array(req, array)
+        dynamic_call_array(req, array, req.vm().this(frame))
     } else {
         Err(crate::api::raising::throw(
             req,
@@ -1234,14 +1234,18 @@ fn dynamic_call_object(req: &mut Request, object: PhpObject) -> Result<DynamicTa
 /// php's refusal of an instance method named on the class; any other
 /// string is the function of that name with a leading `\` skipped, and
 /// the `Error` naming it as written where there is none.
-fn dynamic_call_string(req: &mut Request, name: &[u8]) -> Result<DynamicTarget, Thrown> {
+fn dynamic_call_string(
+    req: &mut Request,
+    name: &[u8],
+    this: Option<PhpObject>,
+) -> Result<DynamicTarget, Thrown> {
     let split = name
         .windows(2)
         .rposition(|pair| pair == b"::")
         .filter(|at| *at > 0);
     if let Some(at) = split {
         let class = dynamic_call_class(req, &name[..at])?;
-        return dynamic_call_static(req, class, &name[at + 2..]);
+        return dynamic_call_static(req, class, &name[at + 2..], this);
     }
     let bare = name.strip_prefix(b"\\").unwrap_or(name);
     let Some(function) = exec::find_function(req, &bare.to_ascii_lowercase()) else {
@@ -1270,7 +1274,11 @@ fn dynamic_call_string(req: &mut Request, name: &[u8]) -> Result<DynamicTarget, 
 /// finds it, an object's through its `get_method` with the access rule
 /// `zend_std_get_method` holds it to, a `static` method on an object
 /// called with no receiver.
-fn dynamic_call_array(req: &mut Request, array: PhpArray) -> Result<DynamicTarget, Thrown> {
+fn dynamic_call_array(
+    req: &mut Request,
+    array: PhpArray,
+    this: Option<PhpObject>,
+) -> Result<DynamicTarget, Thrown> {
     let refuse = |req: &mut Request, text: &str| crate::api::raising::throw(req, "Error", text);
     if array.len() != 2 {
         return Err(refuse(req, "Array callback must have exactly two elements"));
@@ -1293,7 +1301,7 @@ fn dynamic_call_array(req: &mut Request, array: PhpArray) -> Result<DynamicTarge
     };
     if let Some(class) = first.as_str_bytes().map(<[u8]>::to_vec) {
         let class = dynamic_call_class(req, &class)?;
-        return dynamic_call_static(req, class, &method);
+        return dynamic_call_static(req, class, &method, this);
     }
     let Some(object) = first.as_object().copied() else {
         return Err(refuse(
@@ -1303,11 +1311,20 @@ fn dynamic_call_array(req: &mut Request, array: PhpArray) -> Result<DynamicTarge
     };
     let class = object.class();
     let table = req.object_handlers(object.heap());
-    let Some(function) = table.get_method(req, object, &method.to_ascii_lowercase()) else {
+    let found = table
+        .get_method(req, object, &method.to_ascii_lowercase())
+        .or_else(|| req.call_trampoline(class, &method, false));
+    let Some(function) = found else {
         let written = Value::string(PhpString::new(req, &method)?);
         let thrown = undefined_method(req, class, &written);
         req.release(written);
         return Err(thrown);
+    };
+    let function = if req.method_accessible(function) {
+        function
+    } else {
+        req.call_trampoline(class, &method, false)
+            .unwrap_or(function)
     };
     req.check_method_access(function, &method)?;
     let name = PhpString::new(req, &method)?;
@@ -1355,16 +1372,12 @@ fn dynamic_call_static(
     req: &mut Request,
     class: crate::api::values::ClassId,
     method: &[u8],
+    this: Option<PhpObject>,
 ) -> Result<DynamicTarget, Thrown> {
     let written = Value::string(PhpString::new(req, method)?);
-    let Some(function) = req.method_named(class, &method.to_ascii_lowercase()) else {
-        let thrown = undefined_method(req, class, &written);
-        req.release(written);
-        return Err(thrown);
-    };
+    let found = static_method(req, class, &method.to_ascii_lowercase(), &written, this);
     req.release(written);
-    req.check_method_access(function, method)?;
-    req.static_method_found(function)?;
+    let (function, _) = found?;
     if req
         .method_decl(function)
         .is_some_and(|decl| decl.is_instance)
@@ -3762,6 +3775,29 @@ pub(crate) fn verify_never_type<T: Tier>(
 /// }
 /// ```
 ///
+/// A name only `__call` or `__callStatic` answers is the trampoline the
+/// `INIT_*` resolved, and the closure is `zend_closure_call_magic` over
+/// it, which calls the magic method with the name, on the receiver or
+/// on the class the call named:
+///
+/// ```php
+/// class Foo {
+///     public function __call($method, $args) { return "$method(" . implode(',', $args) . ")"; }
+///     public static function __callStatic($method, $args) { return static::class . "::$method"; }
+/// }
+/// class Bar extends Foo {}
+/// $foo = new Foo;
+/// $i = $foo->anything(...);
+/// $s = Foo::anythingStatic(...);
+/// $b = Bar::anythingStatic(...);
+/// var_dump($i(1, 2), $s(), $b());
+/// ```
+/// ```expect
+/// string(13) "anything(1,2)"
+/// string(19) "Foo::anythingStatic"
+/// string(19) "Bar::anythingStatic"
+/// ```
+///
 /// What the `INIT_*` refuses stands, since the `CALLABLE_CONVERT` is
 /// never reached:
 ///
@@ -4404,23 +4440,15 @@ pub(crate) fn init_static_method_call<T: Tier>(
         OperandKind::Const => {
             let written = exec::constant(code, ConstIdx(op.op2));
             let lowered = exec::constant(code, ConstIdx(op.op2.saturating_add(1)));
-            let Some(function) = lowered
-                .as_str_bytes()
-                .and_then(|lowered| req.method_named(class, lowered))
-            else {
-                let thrown = undefined_method(req, class, &written);
-                return threw(req, frame, &thrown);
-            };
-            if let Err(thrown) =
-                req.check_method_access(function, written.as_str_bytes().unwrap_or_default())
-            {
-                return threw(req, frame, &thrown);
-            }
-            match req.static_method_found(function) {
-                Ok(of_trait) => uncached = of_trait,
+            let lowered = lowered.as_str_bytes().unwrap_or_default().to_vec();
+            let this = req.vm().this(frame);
+            match static_method(req, class, &lowered, &written, this) {
+                Ok((function, never_cached)) => {
+                    uncached = never_cached;
+                    (function, Some(written))
+                }
                 Err(thrown) => return threw(req, frame, &thrown),
             }
-            (function, Some(written))
         }
         _ => return static_call_named(req, frame, code, op, class),
     };
@@ -4435,6 +4463,44 @@ pub(crate) fn init_static_method_call<T: Tier>(
         req.prime(frame, slot, Cached::ClassAndCallee { class, function });
     }
     static_call_frame(req, frame, op, class, function, name)
+}
+
+/// `zend_std_get_static_method` (`Z/Zend/zend_object_handlers.c:2040`)
+/// over a name the program wrote: the method `class` has under the
+/// lowered name where the scope may call it, the trampoline
+/// `get_static_method_fallback` answers where the class has none or the
+/// scope may not call it ([`Request::static_trampoline`], over `this`,
+/// the calling frame's receiver), and php's `Error` where neither
+/// serves, `Call to undefined method` or the access rule's; then the
+/// end [`Request::static_method_found`] holds a method to. The `bool`
+/// is whether php keeps the callee out of the cache slot: a
+/// trampoline, and a method named on a trait.
+fn static_method(
+    req: &mut Request,
+    class: crate::api::values::ClassId,
+    lowered: &[u8],
+    written: &Value,
+    this: Option<PhpObject>,
+) -> Result<(Function, bool), Thrown> {
+    let name = written.as_str_bytes().unwrap_or_default().to_vec();
+    let function = match req.method_named(class, lowered) {
+        Some(function) if req.method_accessible(function) => function,
+        Some(function) => {
+            if let Some(trampoline) = req.static_trampoline(class, &name, this) {
+                trampoline
+            } else {
+                req.check_method_access(function, &name)?;
+                function
+            }
+        }
+        None => match req.static_trampoline(class, &name, this) {
+            Some(trampoline) => trampoline,
+            None => return Err(undefined_method(req, class, written)),
+        },
+    };
+    let trampoline = req.trampoline_of(function).is_some();
+    let of_trait = req.static_method_found(function)?;
+    Ok((function, trampoline || of_trait))
 }
 
 /// `INIT_STATIC_METHOD_CALL` over a method the program names, once the
@@ -4454,16 +4520,12 @@ fn static_call_named(
         Ok(method) => method,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let written = method.written.as_str_bytes().unwrap_or_default();
-    let found = match req.method_named(class, &method.lowered) {
-        None => Err(undefined_method(req, class, &method.written)),
-        Some(function) => req
-            .check_method_access(function, written)
-            .and_then(|()| req.static_method_found(function))
-            .map(|_| function),
-    };
+    let this = req.vm().this(frame);
+    let found = static_method(req, class, &method.lowered, &method.written, this);
     let edge = match found {
-        Ok(function) => static_call_frame(req, frame, op, class, function, Some(method.written)),
+        Ok((function, _)) => {
+            static_call_frame(req, frame, op, class, function, Some(method.written))
+        }
         Err(thrown) => threw(req, frame, &thrown),
     };
     method.release(req);
@@ -4690,30 +4752,42 @@ pub(crate) fn init_method_call<T: Tier>(
 
 /// `obj->handlers->get_method(&obj, name, key)` and what
 /// `INIT_METHOD_CALL` holds the answer to: the method by its lowered
-/// name on the object, or on the receiver its class hands the call to
-/// instead ([`ObjectHandlers::method_receiver`]); `Call to undefined
-/// method X::m()` where neither has one, and `zend_std_get_method`'s
-/// access rule over the one found.
+/// name on the object, the trampoline of its class's `__call` where the
+/// class has no such method (`zend_std_get_method`), or the method on
+/// the receiver its class hands the call to instead
+/// ([`ObjectHandlers::method_receiver`]); `Call to undefined method
+/// X::m()` where none answers. A method the scope may not call is
+/// `__call`'s too where the class has one, and `zend_std_get_method`'s
+/// access rule's `Error` where it has none.
 fn method_on(
     req: &mut Request,
     object: PhpObject,
     method: &exec::MethodName,
 ) -> Result<(Function, Option<PhpObject>), Thrown> {
+    let written = method.written.as_str_bytes().unwrap_or_default().to_vec();
     let table = req.object_handlers(object.heap());
-    let found = table
-        .get_method(req, object, &method.lowered)
-        .map(|function| (function, None))
-        .or_else(|| {
-            let inner = table.method_receiver(req, object)?;
-            let inner_table = req.object_handlers(inner.heap());
-            inner_table
-                .get_method(req, inner, &method.lowered)
-                .map(|function| (function, Some(inner)))
-        });
+    let found = match table.get_method(req, object, &method.lowered) {
+        Some(function) => Some((function, None)),
+        None => match req.call_trampoline(object.class(), &written, false) {
+            Some(trampoline) => Some((trampoline, None)),
+            None => table.method_receiver(req, object).and_then(|inner| {
+                let inner_table = req.object_handlers(inner.heap());
+                inner_table
+                    .get_method(req, inner, &method.lowered)
+                    .map(|function| (function, Some(inner)))
+            }),
+        },
+    };
     let Some((function, receiver)) = found else {
         return Err(undefined_method(req, object.class(), &method.written));
     };
-    req.check_method_access(function, method.written.as_str_bytes().unwrap_or_default())?;
+    let function = if req.method_accessible(function) {
+        function
+    } else {
+        req.call_trampoline(object.class(), &written, false)
+            .unwrap_or(function)
+    };
+    req.check_method_access(function, &written)?;
     Ok((function, receiver))
 }
 
@@ -8204,6 +8278,13 @@ fn do_call(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, opco
         return Err(Fatal::Error(format!(
             "InternalError: {opcode} with no call frame under it"
         )));
+    };
+    let function = match crate::trampoline::hand_to_magic(req, function) {
+        Ok(function) => function,
+        Err(thrown) => {
+            req.pop_call();
+            return threw(req, frame, &thrown);
+        }
     };
     if req.user_function(function).is_some() {
         return enter(req, frame, code, op, function);

@@ -912,6 +912,11 @@ pub struct Request {
     /// [`crate::enums::ENUM_FUNCTIONS`], as php allocates a
     /// `zend_internal_function` per method per enum.
     enum_functions: Vec<(ClassId, crate::enums::EnumMethod)>,
+    /// The functions `zend_get_call_trampoline_func` makes of a call to
+    /// a name only `__call` or `__callStatic` answers, one per magic
+    /// method and name, two function numbers each
+    /// ([`crate::trampoline`]).
+    trampolines: Vec<crate::trampoline::CallTrampoline>,
     /// `CE_STATIC_MEMBERS(ce)` (`Z/Zend/zend_object_handlers.c:2094`):
     /// one slot per declared `static` property, keyed by the class that
     /// declared it and by the property's name. php gives every class a
@@ -1200,8 +1205,39 @@ struct CallFrame {
 struct Fcc {
     calling: Option<ClassId>,
     called: Option<ClassId>,
-    function: Option<Function>,
+    function: Option<Callee>,
     object: Option<PhpObject>,
+}
+
+/// `fcc->function_handler` once `zend_is_callable_check_func` found
+/// one: a function the tables have, or the trampoline of a class's
+/// `__call`, or of its `__callStatic` where `is_static`, under the name
+/// written, which the resolver answers without making and
+/// [`Request::callable_made`] makes (`zend_get_call_trampoline_func`).
+#[derive(Clone)]
+enum Callee {
+    Function(Function),
+    Trampoline {
+        class: ClassId,
+        name: Vec<u8>,
+        is_static: bool,
+    },
+}
+
+/// What `zend_is_callable_ex` resolved a value to: a callable, or one
+/// whose callee is a trampoline still to be made, with the scope and
+/// the receiver it is called on.
+enum Resolved {
+    Made(Callable),
+    Trampoline {
+        held: Value,
+        name: String,
+        class: ClassId,
+        method: Vec<u8>,
+        is_static: bool,
+        scope: ClassId,
+        this: Option<PhpObject>,
+    },
 }
 
 /// One link of php's `prev_execute_data` chain as this engine holds it:
@@ -1358,6 +1394,7 @@ impl Request {
             enum_cases: Vec::new(),
             enums_updated: Vec::new(),
             enum_functions: Vec::new(),
+            trampolines: Vec::new(),
             statics: Vec::new(),
             guards: Vec::new(),
             ref_sources: Vec::new(),
@@ -2184,6 +2221,13 @@ impl Request {
             self.pop_call();
             return Err(thrown);
         }
+        let function = match crate::trampoline::hand_to_magic(self, function) {
+            Ok(function) => function,
+            Err(thrown) => {
+                self.pop_call();
+                return Err(thrown);
+            }
+        };
         if self.user_function(function).is_some() {
             let Some(call) = self.vm.pop_call() else {
                 return self.fatal_of(Err(Fatal::Error(String::from(
@@ -2404,6 +2448,10 @@ impl Request {
         if let Some((_, method)) = self.enum_method_of(function) {
             return Some(method.entry());
         }
+        if let Some((_, served)) = self.trampoline_of(function) {
+            return (served == crate::trampoline::Served::ClosureCall)
+                .then_some(crate::trampoline::closure_call_magic as crate::api::abi::Entry);
+        }
         let at = usize::try_from(function.0).ok()?;
         match at.checked_sub(self.shared.functions.len()) {
             None => self.shared.functions.get(at).map(|(_, entry)| *entry),
@@ -2451,9 +2499,83 @@ impl Request {
         if let Some((class, _)) = self.enum_method_of(function) {
             return Some(class);
         }
+        if let Some((trampoline, _)) = self.trampoline_of(function) {
+            return self.method_class(trampoline.magic);
+        }
         self.user_function(function)?
             .member
             .map(|member| member.class)
+    }
+
+    /// The trampoline a function number names and which of its two
+    /// functions it is; none for any other function.
+    pub(crate) fn trampoline_of(
+        &self,
+        function: Function,
+    ) -> Option<(
+        &crate::trampoline::CallTrampoline,
+        crate::trampoline::Served,
+    )> {
+        let (index, served) = crate::trampoline::decode(function)?;
+        Some((self.trampolines.get(index)?, served))
+    }
+
+    /// `zend_get_call_trampoline_func(ce, name, is_static)`
+    /// (`Z/Zend/zend_object_handlers.c:1764`): the trampoline `class`'s
+    /// `__call`, or its `__callStatic` where `is_static`, serves under
+    /// `name`, the one the request already made for that method and
+    /// name where it made one; none where the class has no such
+    /// method.
+    pub(crate) fn call_trampoline(
+        &mut self,
+        class: ClassId,
+        name: &[u8],
+        is_static: bool,
+    ) -> Option<Function> {
+        let magic = self.method_named(
+            class,
+            if is_static {
+                b"__callstatic"
+            } else {
+                b"__call"
+            },
+        )?;
+        let held = self
+            .trampolines
+            .iter()
+            .position(|trampoline| trampoline.is(magic, name));
+        let at = if let Some(at) = held {
+            at
+        } else {
+            let by_ref = self
+                .function_decl(magic)
+                .is_some_and(|decl| decl.returns_by_ref);
+            self.trampolines
+                .push(crate::trampoline::CallTrampoline::new(
+                    magic, name, is_static, by_ref,
+                ));
+            self.trampolines.len().checked_sub(1)?
+        };
+        crate::trampoline::number(at, crate::trampoline::Served::Trampoline)
+    }
+
+    /// `get_static_method_fallback` (`Z/Zend/zend_object_handlers.c:2016`):
+    /// where the name of a call on a class finds nothing `class` lets the scope
+    /// call, the trampoline of `this`'s class's `__call` where the
+    /// calling frame has a receiver that is an instance of `class`, and
+    /// otherwise `class`'s `__callStatic`'s; none where neither serves.
+    pub(crate) fn static_trampoline(
+        &mut self,
+        class: ClassId,
+        name: &[u8],
+        this: Option<PhpObject>,
+    ) -> Option<Function> {
+        if self.method_named(class, b"__call").is_some()
+            && let Some(this) = this.filter(|this| self.instance_of(this.class(), class))
+        {
+            return self.call_trampoline(this.class(), name, false);
+        }
+        self.call_trampoline(class, name, true)
     }
 
     /// `zend_hash_find_ptr(&ce->function_table, lcname)` over the
@@ -2577,6 +2699,9 @@ impl Request {
                 .methods
                 .iter()
                 .find(|decl| decl.function.name.0.eq_ignore_ascii_case(method.name()));
+        }
+        if let Some((trampoline, _)) = self.trampoline_of(function) {
+            return Some(&trampoline.decl);
         }
         if let Some(method) = self.native_method(function) {
             return match method.at {
@@ -2785,7 +2910,7 @@ impl Request {
     /// scope alone, and a protected one is a scope
     /// `zend_check_protected` relates to it. A function that is no
     /// method, and one the tables have no declaration for, is anyone's.
-    fn method_accessible(&self, function: Function) -> bool {
+    pub(crate) fn method_accessible(&self, function: Function) -> bool {
         let Some(class) = self.method_class(function) else {
             return true;
         };
@@ -9095,8 +9220,46 @@ impl Request {
     /// `zend_is_callable_ex` (`Z/Zend/zend_API.c:4250`) without the
     /// error text and with php's `IS_CALLABLE_SUPPRESS_DEPRECATIONS`:
     /// the callee a value names, or none.
-    pub(crate) fn callable_of(&self, value: &Value) -> Option<Callable> {
-        self.callable_resolved(value, &mut None).ok()
+    pub(crate) fn callable_of(&mut self, value: &Value) -> Option<Callable> {
+        let resolved = self.callable_resolved(value, &mut None).ok()?;
+        self.callable_made(resolved).ok()
+    }
+
+    /// Whether `zend_is_callable_ex` accepts a value, with php's
+    /// `IS_CALLABLE_SUPPRESS_DEPRECATIONS`; no trampoline is made.
+    pub(crate) fn is_callable_value(&self, value: &Value) -> bool {
+        self.callable_resolved(value, &mut None).is_ok()
+    }
+
+    /// The callable a resolution answered, the trampoline it names made
+    /// where it names one.
+    fn callable_made(&mut self, resolved: Resolved) -> Result<Callable, String> {
+        match resolved {
+            Resolved::Made(callable) => Ok(callable),
+            Resolved::Trampoline {
+                held,
+                name,
+                class,
+                method,
+                is_static,
+                scope,
+                this,
+            } => {
+                let Some(function) = self.call_trampoline(class, &method, is_static) else {
+                    return Err(format!(
+                        "class {} does not have a method \"{}\"",
+                        self.class_name(class),
+                        String::from_utf8_lossy(&method)
+                    ));
+                };
+                let target = Target::Method {
+                    function,
+                    scope,
+                    this,
+                };
+                Ok(Callable::of(held, name.as_bytes(), target))
+            }
+        }
     }
 
     /// `zend_is_callable_ex` with its `*error` (`Z/Zend/zend_API.c:4250`),
@@ -9211,7 +9374,7 @@ impl Request {
         if self.is_pending() {
             return Err(String::new());
         }
-        resolved
+        self.callable_made(resolved?)
     }
 
     /// `zend_is_callable_at_frame` (`Z/Zend/zend_API.c:4139`) over the
@@ -9223,7 +9386,7 @@ impl Request {
         &self,
         value: &Value,
         raised: &mut Option<Vec<String>>,
-    ) -> Result<Callable, String> {
+    ) -> Result<Resolved, String> {
         let frame = self.callable_frame();
         // `case IS_REFERENCE: goto again`.
         let held = value.deref();
@@ -9234,7 +9397,11 @@ impl Request {
             // reads the class's table and no visibility.
             if object.closure(self).is_some() {
                 let name = self.callable_name(&held);
-                return Ok(Callable::of(held, name.as_bytes(), Target::Closure(object)));
+                return Ok(Resolved::Made(Callable::of(
+                    held,
+                    name.as_bytes(),
+                    Target::Closure(object),
+                )));
             }
             let class = object.class();
             let Some(function) = self.method_named(class, b"__invoke") else {
@@ -9243,7 +9410,7 @@ impl Request {
             let this =
                 Some(object).filter(|_| self.method_decl(function).is_none_or(|d| d.is_instance));
             let name = self.callable_name(&held);
-            return Ok(Callable::of(
+            return Ok(Resolved::Made(Callable::of(
                 held,
                 name.as_bytes(),
                 Target::Method {
@@ -9251,7 +9418,7 @@ impl Request {
                     scope: class,
                     this,
                 },
-            ));
+            )));
         }
         let mut strict = false;
         let method = if let Some(array) = held.as_array().copied() {
@@ -9286,19 +9453,38 @@ impl Request {
             return Err(String::from("no array or string given"));
         };
         self.callable_func(&method, &frame, &mut fcc, strict, raised)?;
-        let Some(function) = fcc.function else {
+        let Some(callee) = fcc.function.take() else {
             return Err(String::from("no array or string given"));
         };
         let name = self.callable_name(&held);
-        let target = match fcc.calling.or(fcc.called) {
+        let scope = fcc.called.or(fcc.calling);
+        let function = match callee {
+            Callee::Function(function) => function,
+            Callee::Trampoline {
+                class,
+                name: method,
+                is_static,
+            } => {
+                return Ok(Resolved::Trampoline {
+                    held,
+                    name,
+                    class,
+                    method,
+                    is_static,
+                    scope: scope.unwrap_or(class),
+                    this: fcc.object,
+                });
+            }
+        };
+        let target = match scope {
             None if fcc.object.is_none() => Target::Function(function),
             scope => Target::Method {
                 function,
-                scope: fcc.called.or(scope).unwrap_or(ClassId(0)),
+                scope: scope.unwrap_or(ClassId(0)),
                 this: fcc.object,
             },
         };
-        Ok(Callable::of(held, name.as_bytes(), target))
+        Ok(Resolved::Made(Callable::of(held, name.as_bytes(), target)))
     }
 
     /// The frame `zend_is_callable_ex` resolves at: the first link of
@@ -9448,7 +9634,7 @@ impl Request {
         if ce_org.is_none() {
             let bare = callable.strip_prefix(b"\\").unwrap_or(callable);
             if let Some(function) = self.function_named(bare) {
-                fcc.function = Some(function);
+                fcc.function = Some(Callee::Function(function));
                 return Ok(());
             }
         }
@@ -9498,23 +9684,36 @@ impl Request {
             }
         };
         let lowered = method.to_ascii_lowercase();
-        let mut via_handler = false;
         let found = match fcc.calling {
-            Some(calling) if strict && lowered == b"__construct" => {
-                self.method_named(calling, b"__construct")
+            Some(calling) if strict && lowered == b"__construct" => self
+                .method_named(calling, b"__construct")
+                .map(|function| (Callee::Function(function), false)),
+            Some(calling) => {
+                // A method the frame's scope may not call, where a magic
+                // method would take the call, is looked for again
+                // through the handler: `goto get_function_via_handler`.
+                let magic: &[u8] = if fcc.object.is_some() {
+                    b"__call"
+                } else {
+                    b"__callstatic"
+                };
+                self.method_named(calling, &lowered)
+                    .filter(|function| {
+                        self.method_visibility(*function) == Visibility::Public
+                            || self.method_named(calling, magic).is_none()
+                            || self.method_accessible_from(*function, frame.scope)
+                    })
+                    .map(|function| (Callee::Function(function), false))
+                    .or_else(|| {
+                        self.callable_via_handler(
+                            calling, ce_org, &method, &lowered, strict, frame, fcc,
+                        )
+                        .map(|callee| (callee, true))
+                    })
             }
-            Some(calling) => self.method_named(calling, &lowered).or_else(|| {
-                // `get_function_via_handler`: the object's own
-                // `get_method` where the class half is the object's,
-                // which is `Closure`'s `__invoke` trampoline.
-                let object = fcc.object.filter(|_| fcc.calling == ce_org)?;
-                let function = self.trampoline_named(object.class(), &lowered)?;
-                via_handler = true;
-                Some(function)
-            }),
             None => None,
         };
-        let Some(function) = found else {
+        let Some((callee, via_handler)) = found else {
             return Err(match fcc.calling {
                 Some(calling) => format!(
                     "class {} does not have a method \"{}\"",
@@ -9527,7 +9726,55 @@ impl Request {
                 ),
             });
         };
-        self.callable_settle(function, frame, fcc, via_handler)
+        self.callable_settle(callee, frame, fcc, via_handler)
+    }
+
+    /// `get_function_via_handler` in `zend_is_callable_check_func`
+    /// (`Z/Zend/zend_API.c:3980`): on the object a pair named, its
+    /// class's `__call` where the class half was named strictly, and
+    /// otherwise its `get_method`, which is `Closure`'s `__invoke`
+    /// trampoline, or the method itself, or `__call`'s trampoline where
+    /// the scope may not call it or the class has none of that name; on
+    /// a class, `zend_std_get_static_method`'s fallback, `__call` on the
+    /// frame's `$this` where it is an instance of the class, which then
+    /// is the receiver, and `__callStatic` otherwise.
+    #[allow(clippy::too_many_arguments)] // `zend_is_callable_check_func`'s state, each one fact
+    fn callable_via_handler(
+        &self,
+        calling: ClassId,
+        ce_org: Option<ClassId>,
+        method: &[u8],
+        lowered: &[u8],
+        strict: bool,
+        frame: &CallFrame,
+        fcc: &mut Fcc,
+    ) -> Option<Callee> {
+        let trampoline = |class: ClassId, is_static: bool| Callee::Trampoline {
+            class,
+            name: method.to_vec(),
+            is_static,
+        };
+        if let Some(object) = fcc.object.filter(|_| Some(calling) == ce_org) {
+            let class = object.class();
+            let has_call = self.method_named(class, b"__call").is_some();
+            if strict && has_call {
+                return Some(trampoline(class, false));
+            }
+            if let Some(function) = self.trampoline_named(class, lowered) {
+                return Some(Callee::Function(function));
+            }
+            return has_call.then(|| trampoline(class, false));
+        }
+        if self.method_named(calling, b"__call").is_some()
+            && let Some(this) = frame
+                .this
+                .filter(|this| self.instance_of(this.class(), calling))
+        {
+            fcc.object = fcc.object.or(Some(this));
+            return Some(trampoline(this.class(), false));
+        }
+        self.method_named(calling, b"__callstatic")
+            .map(|_| trampoline(calling, true))
     }
 
     /// The end of `zend_is_callable_check_func` once a callee is found:
@@ -9537,17 +9784,22 @@ impl Request {
     /// reached through a trampoline is held to none of them.
     fn callable_settle(
         &self,
-        function: Function,
+        callee: Callee,
         frame: &CallFrame,
         fcc: &mut Fcc,
         via_handler: bool,
     ) -> Result<(), String> {
-        fcc.function = Some(function);
-        let decl = self.method_decl(function);
-        let is_static = decl.is_some_and(|decl| !decl.is_instance);
-        if let Some(calling) = fcc.calling
+        let is_static = match &callee {
+            Callee::Function(function) => self
+                .method_decl(*function)
+                .is_some_and(|decl| !decl.is_instance),
+            Callee::Trampoline { is_static, .. } => *is_static,
+        };
+        if let Callee::Function(function) = callee
+            && let Some(calling) = fcc.calling
             && !via_handler
         {
+            let decl = self.method_decl(function);
             let shown = || {
                 format!(
                     "{}::{}",
@@ -9577,6 +9829,7 @@ impl Request {
                 ));
             }
         }
+        fcc.function = Some(callee);
         if let Some(object) = fcc.object {
             fcc.called = Some(object.class());
             if is_static {
@@ -11578,6 +11831,40 @@ impl Request {
             .serving_call()
             .map(|call| call.extra_named.clone())
             .unwrap_or_default()
+    }
+
+    /// The callee of the call being served, its receiver and its called
+    /// scope, php's `EX(func)` and `EX(This)` inside a native.
+    pub(crate) fn serving_callee(&self) -> Option<(Function, Option<PhpObject>, Option<ClassId>)> {
+        self.vm
+            .serving_call()
+            .map(|call| (call.function, call.this, call.called_scope))
+    }
+
+    /// The arguments of the call being served and its extra named ones,
+    /// each owner moved out to the caller and the call left with none.
+    pub(crate) fn take_serving_arguments(&mut self) -> (Vec<Value>, Vec<(PhpString, Value)>) {
+        match self.vm.serving_call_mut() {
+            Some(call) => {
+                call.count = 0;
+                (
+                    std::mem::take(&mut call.arguments),
+                    std::mem::take(&mut call.extra_named),
+                )
+            }
+            None => (Vec::new(), Vec::new()),
+        }
+    }
+
+    /// The call being served handed to `function` with `arguments`,
+    /// each owner the call's from here: what `ZEND_CALL_TRAMPOLINE`
+    /// writes into the frame it reuses.
+    pub(crate) fn serve_instead(&mut self, function: Function, arguments: Vec<Value>) {
+        if let Some(call) = self.vm.serving_call_mut() {
+            call.function = function;
+            call.count = arguments.len();
+            call.arguments = arguments;
+        }
     }
 
     /// `zend_parse_arg_*_weak` writing what it coerced back into the

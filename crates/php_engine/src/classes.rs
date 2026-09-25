@@ -1038,6 +1038,9 @@ pub(crate) fn closure_from_frame(req: &mut Request, frame: CallFrame) -> Result<
         req.addref(&this.as_value());
         return Ok(this);
     }
+    // `ZEND_ACC_CALL_VIA_TRAMPOLINE`: `zend_closure_call_magic` in the
+    // trampoline's place, of its name and its scope.
+    let function = crate::trampoline::closure_call(function).unwrap_or(function);
     let scope = req.method_class(function);
     let fake = ClosureInfo {
         function,

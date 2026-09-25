@@ -195,7 +195,7 @@ pub fn to_object(req: &mut Request, value: &Value) -> Result<PhpObject, Thrown> 
 /// `zend_is_callable` with the request's scope.
 #[must_use]
 pub fn is_callable(req: &Request, value: &Value) -> bool {
-    req.callable_of(value).is_some()
+    req.is_callable_value(value)
 }
 
 /// `zend_is_callable_ex` with its `*error` (`Z/Zend/zend_API.c:4250`):
@@ -835,7 +835,7 @@ pub(crate) fn holds(req: &Request, value: &Value, ty: &Type, scopes: Scopes) -> 
             .all(|member| holds(req, &value, member, scopes)),
         Type::Named(name) => is(req.class_named(&name.0)),
         Type::Iterable => value.as_array().is_some() || is(req.class_named(b"Traversable")),
-        Type::Callable => req.callable_of(&value).is_some(),
+        Type::Callable => req.is_callable_value(&value),
         Type::SelfClass => is(scopes.own),
         Type::CalledClass => is(scopes.called),
         Type::ParentClass => is(scopes
