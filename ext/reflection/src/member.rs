@@ -591,10 +591,20 @@ pub(super) fn reflection_property_has_default_value(req: &mut Request) -> Result
     })))
 }
 
+/// `property_get_default`'s three answers: a written default, the
+/// implicit `null` of an untyped property, and nothing, which a typed
+/// property without one and a dynamic property both give.
+enum Default {
+    Written(php_ext::decl::ConstExpr, ClassId),
+    ImplicitNull,
+    Absent,
+}
+
 /// `ReflectionProperty::getDefaultValue()`: the default expression
 /// evaluated in the declaring class, php's implicit `null` for an
 /// untyped property with nothing written, and php's own
-/// `E_DEPRECATED` and `null` where there is no default at all.
+/// `E_DEPRECATED` and `null` where there is no default at all, a
+/// dynamic property among them, which has no info to hold one.
 ///
 /// ```php
 /// var_dump((new ReflectionProperty('Exception', 'message'))->getDefaultValue());
@@ -610,19 +620,30 @@ pub(super) fn reflection_property_has_default_value(req: &mut Request) -> Result
 /// Deprecated: ReflectionProperty::getDefaultValue() for a property without a default value is deprecated, use ReflectionProperty::hasDefaultValue() to check if the default value exists in %s on line 2
 /// NULL
 /// ```
+///
+/// ```php
+/// $o = new stdClass; $o->d = 1;
+/// var_dump((new ReflectionProperty($o, 'd'))->getDefaultValue());
+/// ```
+/// ```expect
+/// Deprecated: ReflectionProperty::getDefaultValue() for a property without a default value is deprecated, use ReflectionProperty::hasDefaultValue() to check if the default value exists in %s on line 3
+/// NULL
+/// ```
 pub(super) fn reflection_property_get_default_value(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 0)?;
     let (_, _, found) = this_declared(req)?;
-    let Some((scope, decl)) = found else {
-        return Ok(Value::null());
+    let default = match found {
+        Some((scope, decl)) => match (decl.default, decl.ty) {
+            (Some(expr), _) => Default::Written(expr, scope),
+            (None, None) => Default::ImplicitNull,
+            (None, Some(_)) => Default::Absent,
+        },
+        None => Default::Absent,
     };
-    match (&decl.default, &decl.ty) {
-        (Some(expr), _) => {
-            let expr = expr.clone();
-            eval_const_expr(req, &expr, Some(scope))
-        }
-        (None, None) => Ok(Value::null()),
-        (None, Some(_)) => {
+    match default {
+        Default::Written(expr, scope) => eval_const_expr(req, &expr, Some(scope)),
+        Default::ImplicitNull => Ok(Value::null()),
+        Default::Absent => {
             deprecated(
                 req,
                 "ReflectionProperty::getDefaultValue() for a property without a default value is deprecated, use ReflectionProperty::hasDefaultValue() to check if the default value exists",
