@@ -1918,7 +1918,7 @@ fn valid_closure_binding(
     this: Option<PhpObject>,
     scope: Option<ClassId>,
 ) -> bool {
-    let is_static = req.closure_is_static(info);
+    let is_static = req.closure_refuses_receiver(info);
     if let Some(this) = this {
         if is_static {
             warning(

@@ -1796,7 +1796,20 @@ impl Request {
 
     /// Whether a closure's function is `ZEND_ACC_STATIC`: a closure
     /// written `static function`, or one made of a `static` method.
-    pub(crate) fn closure_is_static(&self, closure: &ClosureInfo) -> bool {
+    ///
+    /// ```php
+    /// class F { static function s() {} function q() { return static function () {}; } }
+    /// $r = fn ($c) => (new ReflectionFunction($c))->isStatic();
+    /// var_dump($r(function () {}), $r(static function () {}), $r((new F)->q()), $r(Closure::fromCallable(['F', 's'])));
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// ```
+    #[must_use]
+    pub fn closure_refuses_receiver(&self, closure: &ClosureInfo) -> bool {
         if let Some(decl) = self.method_decl(closure.function) {
             return !decl.is_instance;
         }

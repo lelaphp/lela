@@ -452,19 +452,27 @@ pub(super) fn reflection_function_is_variadic(req: &mut Request) -> Result<Value
 }
 
 /// `ReflectionFunctionAbstract::isStatic()`: `ZEND_ACC_STATIC`, which
-/// a function outside a class never carries.
+/// a function outside a class never carries and a closure carries where
+/// it was written `static` or made of a `static` method.
 ///
 /// ```php
 /// var_dump((new ReflectionMethod('ReflectionMethod', 'createFromMethodName'))->isStatic());
-/// var_dump((new ReflectionFunction('json_encode'))->isStatic());
+/// var_dump((new ReflectionFunction('json_encode'))->isStatic(), (new ReflectionFunction(static fn () => 1))->isStatic());
 /// ```
 /// ```expect
 /// bool(true)
 /// bool(false)
+/// bool(true)
 /// ```
 pub(super) fn reflection_function_is_static(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 0)?;
     let (function, _) = this_function(req)?;
+    if let FunctionRef::Closure(closure) = &function {
+        let is_static = closure
+            .closure(req)
+            .is_some_and(|info| req.closure_refuses_receiver(info));
+        return Ok(Value::bool(is_static));
+    }
     let FunctionRef::Method(class, name) = &function else {
         return Ok(Value::bool(false));
     };
