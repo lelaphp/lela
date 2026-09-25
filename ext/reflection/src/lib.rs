@@ -2557,13 +2557,28 @@ fn reflection_method_to_string(req: &mut Request) -> Result<Value, Thrown> {
 /// #1 {main}
 ///   thrown in %s on line 2
 /// ```
+///
+/// A parent's private property is not the child's, from a class or from
+/// an object:
+///
+/// ```php
+/// class P { private $p = 1; } class C extends P {}
+/// foreach (['C', new C] as $from) { try { new ReflectionProperty($from, 'p'); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; } }
+/// ```
+/// ```expect
+/// Property C::$p does not exist
+/// Property C::$p does not exist
+/// ```
 fn reflection_property_construct(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 2)?;
     let (class, object) = class_argument(req, 1)?;
     let name = string_argument(req, 2)?;
     let declaring = match property_named(req, class, &name) {
         Some((declaring, _)) => declaring,
-        None if object.is_some_and(|o| o.prop(req, &name).is_some()) => class,
+        // The dynamic arm: a name in the object's table the class does
+        // not declare, and never a parent's private property, which the
+        // table holds under its mangled key.
+        None if object.is_some_and(|o| dynamic_properties(req, class, o).contains(&name)) => class,
         None => {
             let class = class_name_of(req, class);
             return Err(throw(
