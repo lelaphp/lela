@@ -193,6 +193,27 @@ enum Scoped {
     },
 }
 
+/// One element of an array expression as `zend_compile_array` reads
+/// it, decoded once from the tree: php's `ZEND_AST_ARRAY_ELEM`, whose
+/// `attr` is the by-reference bit, and `ZEND_AST_UNPACK`, which has no
+/// key.
+#[derive(Clone, Copy)]
+enum Element {
+    /// `value` or `key => value`.
+    Value {
+        key: Option<tree::Expr>,
+        value: tree::Expr,
+    },
+    /// `&value` or `key => &value`, the variable fetched for writing
+    /// and bound (`ZEND_ARRAY_ELEMENT_REF`).
+    Ref {
+        key: Option<tree::Expr>,
+        value: tree::Expr,
+    },
+    /// `...value`, `ADD_ARRAY_UNPACK`.
+    Unpack(tree::Expr),
+}
+
 /// The class a `::`, a `new` or an `instanceof` stands on, as the tree
 /// holds it: a name written out, php's `ZEND_AST_ZVAL`, or any other
 /// expression, whose value names the class as the program serves.
@@ -620,6 +641,10 @@ const UNQUALIFIED_IN_NAMESPACE: u32 = 0x800;
 /// the two flags it writes the element count.
 const ARRAY_NOT_PACKED: u32 = 1 << 1;
 const ARRAY_SIZE_SHIFT: u32 = 2;
+/// `ZEND_ARRAY_ELEMENT_REF` (`Z/Zend/zend_compile.h:1201`), the bit
+/// `zend_compile_array` sets on the `INIT_ARRAY` or `ADD_ARRAY_ELEMENT`
+/// of a `&` element.
+const ARRAY_ELEMENT_REF: u32 = 1 << 0;
 /// `ZEND_FREE_SWITCH`, the bit `zend_compile.h` sets on the `FREE` of a
 /// `switch` or `match` subject at its end.
 const FREE_SWITCH: u32 = 1 << 1;
@@ -1927,23 +1952,47 @@ impl Emit<'_> {
         }
     }
 
-    /// One element of an array expression, php's `ZEND_AST_ARRAY_ELEM`:
-    /// the key where one is written before `=>`, and the value; a
-    /// `...` and a `&` are not read yet.
-    fn element_of(
+    /// Every element of an array expression as [`Element`] reads it, in
+    /// order. An element with nothing in it, `[1, , 2]`, is php's
+    /// compile error, raised at the line of the last element before it
+    /// that had one (`zend_try_ct_eval_array`, `Z/Zend/zend_compile.c:10101`).
+    ///
+    /// ```php
+    /// $a = [1,
+    ///   , 2];
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use empty array elements in arrays in %s on line 2
+    /// ```
+    fn elements_of(
         &self,
-        id: NodeId<tree::ArrayElement>,
-    ) -> Result<(Option<tree::Expr>, tree::Expr), CompileError> {
-        let element = &self.parsed.tree[id];
-        let line = element.line();
-        if element.spread.is_some() || element.byref.is_some() {
-            return Err(walk::unread(line, "an array expression"));
+        ids: &[NodeId<tree::ArrayElement>],
+    ) -> Result<Vec<Element>, CompileError> {
+        let tree = &self.parsed.tree;
+        let mut elements = Vec::with_capacity(ids.len());
+        let mut last = self.line;
+        for id in ids {
+            let element = &tree[*id];
+            let Some(value) = element.value else {
+                return Err(CompileError {
+                    line: last,
+                    ..self.compile_error("Cannot use empty array elements in arrays")
+                });
+            };
+            last = element.line();
+            let key = element.key.map(|key| tree[key].key);
+            elements.push(match (element.spread, key, element.byref) {
+                (None, key, None) => Element::Value { key, value },
+                (None, key, Some(_)) => Element::Ref { key, value },
+                (Some(_), None, None) => Element::Unpack(value),
+                // php's grammar has no `...` beside a key or a `&`
+                // (`array_pair`, `Z/Zend/zend_language_parser.y`).
+                (Some(_), ..) => {
+                    return Err(walk::unread(last, "a `...` beside a key or a `&`"));
+                }
+            });
         }
-        let Some(value) = element.value else {
-            return Err(walk::unread(line, "an array expression"));
-        };
-        let key = element.key.map(|key| self.parsed.tree[key].key);
-        Ok((key, value))
+        Ok(elements)
     }
 
     /// `C::NAME` and `C::$name`: a class constant or a class's
@@ -5076,17 +5125,29 @@ impl Emit<'_> {
                 }
             },
             // `ZEND_AST_ARRAY` in a constant expression stays the tree
-            // it was written as, each element's key and value.
+            // it was written as, each element's key and value, and a
+            // `...` its `ZEND_AST_UNPACK` with no key; a `&` is what
+            // `zend_is_allowed_in_const_expr` refuses.
             tree::Expr::ArrayExpr(id) => {
-                let elements = tree[id].array_elements.clone();
+                let elements = self.elements_of(&tree[id].array_elements.clone())?;
                 let mut items = Vec::with_capacity(elements.len());
-                for element in &elements {
-                    let (key, value) = self.element_of(*element)?;
-                    let key = match key {
-                        Some(key) => Some(self.const_expr(key)?),
-                        None => None,
-                    };
-                    items.push((key, self.const_expr(value)?));
+                for element in elements {
+                    items.push(match element {
+                        Element::Value { key, value } => {
+                            let key = match key {
+                                Some(key) => Some(self.const_expr(key)?),
+                                None => None,
+                            };
+                            (key, self.const_expr(value)?)
+                        }
+                        Element::Unpack(value) => {
+                            (None, ConstExpr::Unpack(Box::new(self.const_expr(value)?)))
+                        }
+                        Element::Ref { .. } => {
+                            return Err(self
+                                .compile_error("Constant expression contains invalid operations"));
+                        }
+                    });
                 }
                 Ok(ConstExpr::Array(items))
             }
@@ -11292,14 +11353,61 @@ impl Emit<'_> {
 
     /// [`Self::constant_array`]'s entries before they are laid down: the
     /// keys and values `zend_try_ct_eval_array` folds, in order, and
-    /// nothing where it folds none.
+    /// nothing where it folds none. A `&` element is never constant, and
+    /// a `...` is where what it unpacks folds to an array, whose string
+    /// keys are written as they stand (`zend_hash_update`) and whose
+    /// integer keys are dropped for the next index
+    /// (`zend_hash_next_index_insert`); anything else unpacked is php's
+    /// compile error.
+    ///
+    /// ```php
+    /// const K = ['k' => 1];
+    /// var_dump([...[5 => 'a', 'b'], ...K, 'k' => 2, ...['x' => 3, 9 => 'c']]);
+    /// ```
+    /// ```expect
+    /// array(5) {
+    ///   [0]=>
+    ///   string(1) "a"
+    ///   [1]=>
+    ///   string(1) "b"
+    ///   ["k"]=>
+    ///   int(2)
+    ///   ["x"]=>
+    ///   int(3)
+    ///   [2]=>
+    ///   string(1) "c"
+    /// }
+    /// ```
+    ///
+    /// ```php
+    /// var_dump([...1]);
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Only arrays and Traversables can be unpacked, int given in %s on line 2
+    /// ```
     fn constant_entries(
         &mut self,
         elements: &[NodeId<tree::ArrayElement>],
     ) -> Result<Option<Vec<(Key, Zval)>>, CompileError> {
-        let mut folded: Vec<(Option<Zval>, Zval)> = Vec::with_capacity(elements.len());
+        /// One element folded, before its key is written.
+        enum Fold {
+            Pair(Option<Zval>, Zval),
+            Unpack(Zval),
+        }
+        let elements = self.elements_of(elements)?;
+        let mut folded: Vec<Fold> = Vec::with_capacity(elements.len());
         for element in elements {
-            let (key, value) = self.element_of(*element)?;
+            let (key, value) = match element {
+                Element::Value { key, value } => (key, value),
+                Element::Ref { .. } => return Ok(None),
+                Element::Unpack(value) => {
+                    let Some(value) = self.constant_of(value)? else {
+                        return Ok(None);
+                    };
+                    folded.push(Fold::Unpack(value));
+                    continue;
+                }
+            };
             let key = match key {
                 Some(key) => match self.constant_of(key)? {
                     Some(key) => Some(key),
@@ -11310,19 +11418,38 @@ impl Emit<'_> {
             let Some(value) = self.constant_of(value)? else {
                 return Ok(None);
             };
-            folded.push((key, value));
+            folded.push(Fold::Pair(key, value));
         }
-        let mut entries: Vec<(Key, Zval)> = Vec::with_capacity(elements.len());
+        let mut entries: Vec<(Key, Zval)> = Vec::with_capacity(folded.len());
         let mut next_free = i64::MIN;
-        for (key, value) in folded {
-            let key = match key {
-                None => {
-                    let index = if next_free == i64::MIN { 0 } else { next_free };
-                    if index == i64::MAX && entries.iter().any(|(k, _)| *k == Key::Long(index)) {
-                        return Ok(None);
+        for element in folded {
+            let (key, value) = match element {
+                Fold::Unpack(value) => {
+                    let Some(array) = value.as_arr() else {
+                        return Err(self.compile_error(format!(
+                            "Only arrays and Traversables can be unpacked, {} given",
+                            constant_value_name(&value)
+                        )));
+                    };
+                    for (key, held) in &array {
+                        let key = match key {
+                            Key::Str(s) => Key::Str(s),
+                            Key::Long(_) => match next_index(&entries, next_free) {
+                                Some(key) => key,
+                                None => return Ok(None),
+                            },
+                        };
+                        write_entry(&mut entries, &mut next_free, key, held);
                     }
-                    Key::Long(index)
+                    continue;
                 }
+                Fold::Pair(key, value) => (key, value),
+            };
+            let key = match key {
+                None => match next_index(&entries, next_free) {
+                    Some(key) => key,
+                    None => return Ok(None),
+                },
                 Some(key) => match key.kind() {
                     ZvalType::Long => Key::Long(key.as_long().unwrap_or(0)),
                     ZvalType::String => match key.as_str() {
@@ -11342,15 +11469,7 @@ impl Emit<'_> {
                     _ => return Err(self.compile_error("Illegal offset type")),
                 },
             };
-            if let Key::Long(n) = key
-                && n >= next_free
-            {
-                next_free = n.saturating_add(1);
-            }
-            match entries.iter_mut().find(|(k, _)| *k == key) {
-                Some(held) => held.1 = value,
-                None => entries.push((key, value)),
-            }
+            write_entry(&mut entries, &mut next_free, key, value);
         }
         Ok(Some(entries))
     }
@@ -11377,9 +11496,12 @@ impl Emit<'_> {
     /// `extended_value` above `ZEND_ARRAY_SIZE_SHIFT`, and every element
     /// after it `ADD_ARRAY_ELEMENT` over the two with the same temporary
     /// as its `result`. `ZEND_ARRAY_NOT_PACKED` is set on the
-    /// `INIT_ARRAY` once a constant string key is seen, and
-    /// `ZEND_ARRAY_ELEMENT_REF` never, since a `&` element is not read
-    /// yet; neither is `...`, which would be `ADD_ARRAY_UNPACK`.
+    /// `INIT_ARRAY` once a constant string key is seen. A `&` element's
+    /// value is the variable fetched for writing ([`Self::element_ref`])
+    /// and its opline carries `ZEND_ARRAY_ELEMENT_REF`; a `...` is
+    /// `ADD_ARRAY_UNPACK` over the value, and where it is the first
+    /// element an `INIT_ARRAY` with no operand and no count stands
+    /// before it.
     ///
     /// The `array(…)` spelling is the same node over the same
     /// `array_pair_list` (`Z/Zend/zend_language_parser.y:1491`), with
@@ -11416,16 +11538,43 @@ impl Emit<'_> {
     /// array(0) {
     /// }
     /// ```
-    fn array(&mut self, elements: &[NodeId<tree::ArrayElement>]) -> Result<Where, CompileError> {
-        if let Some(value) = self.constant_array(elements)? {
+    fn array(&mut self, ids: &[NodeId<tree::ArrayElement>]) -> Result<Where, CompileError> {
+        if let Some(value) = self.constant_array(ids)? {
             return Ok(Where::Constant(value));
         }
+        let elements = self.elements_of(ids)?;
         let count = u32::try_from(elements.len()).unwrap_or(u32::MAX);
         let mut init_at = 0usize;
         let mut out = 0u32;
         let mut packed = true;
-        for (i, element) in elements.iter().enumerate() {
-            let (key, value) = self.element_of(*element)?;
+        for (i, element) in elements.into_iter().enumerate() {
+            let (key, value, by_ref) = match element {
+                Element::Unpack(value) => {
+                    let value = self.walked(value)?;
+                    let (op1_type, op1) = self.operand(value);
+                    if i == 0 {
+                        out = self.temporary();
+                        init_at = self.oplines.len();
+                        self.push(Opline {
+                            opcode: Opcode::InitArray,
+                            out_type: OperandKind::Tmp,
+                            out,
+                            ..Opline::default()
+                        });
+                    }
+                    self.push(Opline {
+                        opcode: Opcode::AddArrayUnpack,
+                        op1_type,
+                        op1,
+                        out_type: OperandKind::Tmp,
+                        out,
+                        ..Opline::default()
+                    });
+                    continue;
+                }
+                Element::Value { key, value } => (key, value, false),
+                Element::Ref { key, value } => (key, value, true),
+            };
             let key = match key {
                 Some(key) => {
                     let key = self.walked(key)?;
@@ -11433,12 +11582,17 @@ impl Emit<'_> {
                 }
                 None => None,
             };
-            let value = self.walked(value)?;
-            let (op1_type, op1) = self.operand(value);
+            let (op1_type, op1) = if by_ref {
+                self.element_ref(value)?
+            } else {
+                let value = self.walked(value)?;
+                self.operand(value)
+            };
             let (op2_type, op2) = match key {
                 Some(key) => self.operand(key),
                 None => (OperandKind::Unused, 0),
             };
+            let reference = if by_ref { ARRAY_ELEMENT_REF } else { 0 };
             if i == 0 {
                 out = self.temporary();
                 init_at = self.oplines.len();
@@ -11450,7 +11604,7 @@ impl Emit<'_> {
                     op2,
                     out_type: OperandKind::Tmp,
                     out,
-                    extended_value: count << ARRAY_SIZE_SHIFT,
+                    extended_value: (count << ARRAY_SIZE_SHIFT) | reference,
                     ..Opline::default()
                 });
             } else {
@@ -11462,6 +11616,7 @@ impl Emit<'_> {
                     op2,
                     out_type: OperandKind::Tmp,
                     out,
+                    extended_value: reference,
                     ..Opline::default()
                 });
             }
@@ -11473,6 +11628,76 @@ impl Emit<'_> {
             init.extended_value |= ARRAY_NOT_PACKED;
         }
         Ok(Where::Temporary(out))
+    }
+
+    /// The value of a `&` element, `zend_ensure_writable_variable` and
+    /// then `zend_compile_var(…, BP_VAR_W, 1)`: what a call returned is
+    /// php's compile error, a plain variable is its CV, `$this` is
+    /// `FETCH_THIS` into a `VAR`, and a dimension, a property and a
+    /// class's property are the write fetch of the whole chain with the
+    /// `&`'s own bit on its last opline ([`Self::var_for_reference`]).
+    /// The array's entry and the variable are one cell from there:
+    ///
+    /// ```php
+    /// $n = [1, 2]; $o = new stdClass; $o->p = 'p';
+    /// $a = ['one' => &$n[0], &$o->p, &$fresh];
+    /// $a['one'] = 10; $a[0] = 'q'; $fresh = 'f';
+    /// var_dump($n[0], $o->p, $a);
+    /// ```
+    /// ```expect
+    /// int(10)
+    /// string(1) "q"
+    /// array(3) {
+    ///   ["one"]=>
+    ///   &int(10)
+    ///   [0]=>
+    ///   &string(1) "q"
+    ///   [1]=>
+    ///   &string(1) "f"
+    /// }
+    /// ```
+    ///
+    /// ```php
+    /// function f() { return 1; }
+    /// $a = [&f()];
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Can't use function return value in write context in %s on line 3
+    /// ```
+    fn element_ref(&mut self, value: tree::Expr) -> Result<(OperandKind, u32), CompileError> {
+        let line = self.line_of(value);
+        match self.peel(value) {
+            tree::Expr::CallExpr(id) => {
+                let callee = self.peel(self.parsed.tree[id].callee);
+                Err(self.compile_error(match callee {
+                    tree::Expr::MemberAccessExpr(_) | tree::Expr::ScopedAccessExpr(_) => {
+                        "Can't use method return value in write context"
+                    }
+                    _ => "Can't use function return value in write context",
+                }))
+            }
+            tree::Expr::SimpleVarExpr(id) => match self.simple_var_of(id, line)? {
+                SimpleVar::Cv(name) => Ok((OperandKind::Cv, self.lookup_cv(&name))),
+                SimpleVar::This => {
+                    let this = self.fetch_this(OperandKind::Var);
+                    Ok(self.operand(this))
+                }
+            },
+            node @ (tree::Expr::SubscriptExpr(_) | tree::Expr::MemberAccessExpr(_)) => {
+                self.line = line;
+                self.var_for_reference(node)
+            }
+            node @ tree::Expr::ScopedAccessExpr(id)
+                if matches!(self.scoped_of(id, line)?, Scoped::Property { .. }) =>
+            {
+                self.line = line;
+                self.var_for_reference(node)
+            }
+            tree::Expr::VarVarExpr(_) | tree::Expr::DynamicVarExpr(_) => {
+                Err(self.unread("a `&` element over a variable named at run time"))
+            }
+            _ => Err(self.compile_error("Cannot use temporary expression in write context")),
+        }
     }
 
     /// `zend_eval_const_expr` over one node and then
@@ -13558,6 +13783,46 @@ fn compound_op(kind: SyntaxKind) -> Option<BinaryOp> {
 /// (`xtask/src/phpt/adapter.rs`): the sentence [`walk::unread`] writes.
 fn unread(refused: &CompileError) -> bool {
     refused.level == Level::Parse && refused.message.ends_with("this compiler cannot read yet")
+}
+
+/// `nNextFreeElement` over the entries a constant array folded so far:
+/// one past the largest integer key, 0 before any, and none where the
+/// next index is taken past `ZEND_LONG_MAX`, which leaves the array to
+/// the request as php's `zend_hash_next_index_insert` failing does.
+fn next_index(entries: &[(Key, Zval)], next_free: i64) -> Option<Key> {
+    let index = if next_free == i64::MIN { 0 } else { next_free };
+    if index == i64::MAX && entries.iter().any(|(k, _)| *k == Key::Long(index)) {
+        return None;
+    }
+    Some(Key::Long(index))
+}
+
+/// One entry of a constant array written as `zend_hash_update` writes
+/// it: a key already there keeps its place and takes the value, and an
+/// integer key moves `nNextFreeElement` past it.
+fn write_entry(entries: &mut Vec<(Key, Zval)>, next_free: &mut i64, key: Key, value: Zval) {
+    if let Key::Long(n) = key
+        && n >= *next_free
+    {
+        *next_free = n.saturating_add(1);
+    }
+    match entries.iter_mut().find(|(k, _)| *k == key) {
+        Some(held) => held.1 = value,
+        None => entries.push((key, value)),
+    }
+}
+
+/// `zend_zval_value_name` over a folded constant that is no array.
+fn constant_value_name(value: &Zval) -> &'static str {
+    match value.kind() {
+        ZvalType::Null => "null",
+        ZvalType::False => "false",
+        ZvalType::True => "true",
+        ZvalType::Long => "int",
+        ZvalType::Double => "float",
+        ZvalType::String => "string",
+        _ => "array",
+    }
 }
 
 /// `ZEND_HANDLE_NUMERIC_STR` (`Z/Zend/zend_hash.h:402`,

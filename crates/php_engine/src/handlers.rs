@@ -1534,21 +1534,28 @@ fn send_by_ref(
             "InternalError: ZEND_SEND_REF over an operand php compiles no write over",
         )));
     };
+    match bound_at(req, at) {
+        Ok(bound) => place_argument(req, frame, slot, bound),
+        Err(thrown) => threw(req, frame, &thrown),
+    }
+}
+
+/// `ZVAL_MAKE_REF_EX(place, 2)`: the cell a place holds, or a new one
+/// over what it held, `null` for what nothing wrote, written back into
+/// the place, which gives the cell the owner the place had of the
+/// value; the cell comes back with one more owner, the caller's.
+fn bound_at(req: &mut Request, at: php_heap::ZvalRef) -> Result<Value, Thrown> {
     let held = exec::value_of(at.read());
     let cell = if let Some(cell) = held.as_php_ref() {
         *cell
     } else {
-        let cell = match req.reference(held.undef_as_null()) {
-            Ok(cell) => cell,
-            Err(thrown) => return threw(req, frame, &thrown),
-        };
-        // The owner the variable had of what it held is the cell's.
+        let cell = req.reference(held.undef_as_null())?;
         at.write(cell.as_value().to_zval());
         cell
     };
     let bound = cell.as_value();
     req.addref(&bound);
-    place_argument(req, frame, slot, bound)
+    Ok(bound)
 }
 
 /// `ZEND_ARG_SEND_MODE` (`Z/Zend/zend_compile.h:1141`) over the callee
@@ -2099,37 +2106,74 @@ fn reserve_arg(
                     "InternalError: a SEND_* opline names its argument by what is no string",
                 ))));
             };
-            let Some(function) = req.vm().building_call_function() else {
-                return no_call();
-            };
-            let offset = crate::api::call::arg_offset_by_name(req, function, name.as_bytes());
-            let Some(call) = req.vm_mut().building_call() else {
-                return no_call();
-            };
-            let placed = crate::api::call::handle_named_arg(
-                offset,
-                &mut call.arguments,
-                &mut call.extra_named,
-                name,
-            );
-            match placed {
-                Ok(named) => {
-                    if matches!(named.at, crate::api::call::NamedAt::Extra(_)) {
-                        req.addref(&Value::string(name));
-                    }
-                    Ok(Reserved {
-                        slot: ArgSlot::Named(named.at),
-                        number: named.number,
-                    })
-                }
-                Err(refused) => {
-                    let thrown = refused.throw(req, name);
+            match reserve_named(req, name) {
+                Ok(Ok(reserved)) => Ok(reserved),
+                Ok(Err(thrown)) => {
                     exec::free_operand(req, frame, code, op.op1_type, op.op1);
                     Err(threw(req, frame, &thrown))
                 }
+                Err(fatal) => Err(Err(fatal)),
             }
         }
     }
+}
+
+/// The slot `zend_handle_named_arg` gives a named argument of the call
+/// being built ([`crate::api::call::handle_named_arg`], the one
+/// placement), whose extra named entry holds one owner of the name of
+/// its own; what it refuses is php's `Error`, the inner `Err`. A `SEND_*`
+/// by name and a string key `SEND_UNPACK` spreads both reach it.
+fn reserve_named(req: &mut Request, name: PhpString) -> Result<Result<Reserved, Thrown>, Fatal> {
+    let no_call = || {
+        Fatal::Error(String::from(
+            "InternalError: a SEND_* opline with no call frame under it",
+        ))
+    };
+    let Some(function) = req.vm().building_call_function() else {
+        return Err(no_call());
+    };
+    let offset = crate::api::call::arg_offset_by_name(req, function, name.as_bytes());
+    let Some(call) = req.vm_mut().building_call() else {
+        return Err(no_call());
+    };
+    let placed = crate::api::call::handle_named_arg(
+        offset,
+        &mut call.arguments,
+        &mut call.extra_named,
+        name,
+    );
+    Ok(match placed {
+        Ok(named) => {
+            if matches!(named.at, crate::api::call::NamedAt::Extra(_)) {
+                req.addref(&Value::string(name));
+            }
+            Ok(Reserved {
+                slot: ArgSlot::Named(named.at),
+                number: named.number,
+            })
+        }
+        Err(refused) => Err(refused.throw(req, name)),
+    })
+}
+
+/// The next positional slot of the call being built, past every
+/// argument placed so far (`ZEND_CALL_NUM_ARGS(EX(call)) + 1`), which a
+/// `SEND_UNPACK` places an integer-keyed element in; the call's count
+/// grows to take it, as `zend_vm_stack_extend_call_frame` grows the
+/// frame.
+fn reserve_next(req: &mut Request) -> Result<Reserved, Fatal> {
+    let Some(call) = req.vm_mut().building_call() else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: SEND_UNPACK with no call frame under it",
+        )));
+    };
+    let at = call.arguments.len();
+    call.arguments.push(Value::undef());
+    call.count = call.count.max(at + 1);
+    Ok(Reserved {
+        slot: ArgSlot::Positional(at),
+        number: u32::try_from(at + 1).unwrap_or(u32::MAX),
+    })
 }
 
 /// `ZEND_DO_ICALL`: serve the native the call frame names, and write
@@ -11129,9 +11173,11 @@ pub(crate) fn add_array_element<T: Tier>(
 /// warning and `null`); `op2` read as it stands
 /// (`GET_OP2_ZVAL_PTR_UNDEF`), a CV nothing wrote warned on here and
 /// handed on as the `UNDEF` it is, a `CONST` marked constant so the
-/// kernel keeps a numeric string; then `FREE_OP2`. The
-/// `ZEND_ARRAY_ELEMENT_REF` arm, `[&$x]`, is not compiled yet and is an
-/// internal error rather than a value written by the wrong rule.
+/// kernel keeps a numeric string; then `FREE_OP2`. Under
+/// `ZEND_ARRAY_ELEMENT_REF`, `[&$x]`, `op1` is the place a CV or a write
+/// fetch names (`GET_OP1_ZVAL_PTR_PTR(BP_VAR_W)`, which warns of
+/// nothing), made a reference where it holds none, and the entry is
+/// that cell.
 fn add_element(
     req: &mut Request,
     frame: FrameRef,
@@ -11139,12 +11185,19 @@ fn add_element(
     op: &Opline,
     array: crate::api::values::PhpArray,
 ) -> Edge {
-    if op.extended_value & ARRAY_ELEMENT_REF != 0 {
-        return Err(Fatal::Error(String::from(
-            "InternalError: ADD_ARRAY_ELEMENT by reference, which this compiler does not emit yet",
-        )));
-    }
-    let value = exec::take_operand(req, frame, code, op.op1_type, op.op1);
+    let value = if op.extended_value & ARRAY_ELEMENT_REF != 0 {
+        let Some(at) = write_place(req, frame, code, op.op1_type, op.op1) else {
+            return Err(Fatal::Error(String::from(
+                "InternalError: ADD_ARRAY_ELEMENT by reference over an operand php compiles no write over",
+            )));
+        };
+        match bound_at(req, at) {
+            Ok(bound) => bound,
+            Err(thrown) => return threw(req, frame, &thrown),
+        }
+    } else {
+        exec::take_operand(req, frame, code, op.op1_type, op.op1)
+    };
     let offset = if op.op2_type == OperandKind::Unused {
         Offset::Next
     } else {
@@ -11163,6 +11216,512 @@ fn add_element(
         Ok(()) => Ok(advance(req, frame)),
         Err(thrown) => threw(req, frame, &thrown),
     }
+}
+
+/// `ZEND_ADD_ARRAY_UNPACK` (`Z/Zend/zend_vm_def.h:6334`), `...$x`
+/// inside an array: the operand read (`GET_OP1_ZVAL_PTR(BP_VAR_R)`, a CV
+/// nothing wrote the warning and `null`) and spread into the array the
+/// `result` temporary holds ([`unpack_into`]), then `FREE_OP1`.
+///
+/// ```php
+/// function g() { yield 'a' => 1; yield 3 => 2; yield '7' => 3; }
+/// $x = [5 => 'x', 'k' => 'y'];
+/// var_dump([0, ...$x, ...g(), ...new ArrayIterator(['k' => 'z'])]);
+/// $a = [1]; $r = &$a[0]; $b = [...$a]; $b[0] = 2; var_dump($a[0]);
+/// ```
+/// ```expect
+/// array(6) {
+///   [0]=>
+///   int(0)
+///   [1]=>
+///   string(1) "x"
+///   ["k"]=>
+///   string(1) "z"
+///   ["a"]=>
+///   int(1)
+///   [2]=>
+///   int(2)
+///   [3]=>
+///   int(3)
+/// }
+/// int(2)
+/// ```
+///
+/// What is neither an array nor a `Traversable` is php's `Error`, an
+/// object that is no `Traversable` its `TypeError`, and a key an
+/// iterator hands over that is neither an int nor a string its `Error`:
+///
+/// ```php
+/// $n = null;
+/// try { var_dump([...$n]); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// try { var_dump([...new stdClass]); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// function k() { yield 1.5 => 1; }
+/// try { var_dump([...k()]); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Error: Only arrays and Traversables can be unpacked, null given
+/// TypeError: Only arrays and Traversables can be unpacked, stdClass given
+/// Error: Keys must be of type int|string during array unpacking
+/// ```
+pub(crate) fn add_array_unpack<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let held = req.slot(frame, exec::temporary_slot(code, op.out));
+    let Some(array) = held.as_array().copied() else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ADD_ARRAY_UNPACK over a temporary holding no array",
+        )));
+    };
+    let spread = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
+    let added = unpack_into(req, array, &spread);
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    match added {
+        Ok(()) => Ok(advance(req, frame)),
+        Err(thrown) => threw(req, frame, &thrown),
+    }
+}
+
+/// The body of [`add_array_unpack`] over `array`, which has one owner:
+/// an array's elements in order, a string key written as it stands
+/// (`zend_hash_update`) and an integer one dropped for the next index
+/// (`zend_hash_next_index_insert`, php's `Error` when it is taken), a
+/// reference only this array held followed and any other kept as the
+/// reference it is; a `Traversable`'s through its iterator, a string
+/// key that is a decimal and an int alike taking the next index and
+/// every value's reference followed.
+fn unpack_into(req: &mut Request, array: PhpArray, spread: &Value) -> Result<(), Thrown> {
+    let a = array.heap();
+    if let Some(source) = spread.as_array().copied() {
+        for (key, value) in source.snapshot_refs() {
+            let value = match value.as_php_ref() {
+                Some(cell) if value.refcount() == 1 => cell.get(),
+                _ => value,
+            };
+            req.addref(&value);
+            match key {
+                crate::api::values::Key::Str(_) => req.array_update(a, key.heap(), value)?,
+                crate::api::values::Key::Int(_) => append_unpacked(req, a, value)?,
+            }
+        }
+        return Ok(());
+    }
+    let Some(object) = spread.as_object().copied() else {
+        let given = crate::ops::value_name(req, spread);
+        return Err(crate::api::raising::throw(
+            req,
+            "Error",
+            &format!("Only arrays and Traversables can be unpacked, {given} given"),
+        ));
+    };
+    let wrapper = unpack_iterator(req, object)?;
+    let walked = (|| -> Result<(), Thrown> {
+        crate::interfaces::rewind(req, wrapper)?;
+        while let Some((value, key)) = crate::interfaces::delegated(req, wrapper)? {
+            let value = owned_deref(req, value);
+            let name = match unpacked_key(req, key, "array") {
+                Ok(name) => name,
+                Err(thrown) => {
+                    req.release(value);
+                    return Err(thrown);
+                }
+            };
+            match name {
+                Some(name) => {
+                    let updated = req.array_update(a, php_heap::Key::Str(name.heap()), value);
+                    req.release(Value::string(name));
+                    updated?;
+                }
+                None => append_unpacked(req, a, value)?,
+            }
+        }
+        Ok(())
+    })();
+    req.release(wrapper.as_value());
+    walked
+}
+
+/// `zend_hash_next_index_insert` of an unpacked element, and
+/// `zend_cannot_add_element` where the next index is taken.
+fn append_unpacked(req: &mut Request, a: php_heap::Arr, value: Value) -> Result<(), Thrown> {
+    if req.array_append(a, value)? {
+        return Ok(());
+    }
+    Err(crate::api::raising::throw(
+        req,
+        "Error",
+        "Cannot add element to the array as the next element is already occupied",
+    ))
+}
+
+/// `ce->get_iterator` over an object a `...` spreads: its iterator, one
+/// owner the caller's, or php's `TypeError` for an object whose class is
+/// no `Traversable`.
+fn unpack_iterator(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
+    if !crate::interfaces::is_traversable(req, object.class()) {
+        let given = crate::ops::value_name(req, &object.as_value());
+        return Err(crate::api::raising::throw(
+            req,
+            "TypeError",
+            &format!("Only arrays and Traversables can be unpacked, {given} given"),
+        ));
+    }
+    crate::interfaces::get_iterator(req, object, false)
+}
+
+/// `ZVAL_DEREF` over a value one owner of which the caller holds: what
+/// the reference held, with the owner moved onto it.
+fn owned_deref(req: &mut Request, value: Value) -> Value {
+    let Some(cell) = value.as_php_ref().copied() else {
+        return value;
+    };
+    let held = cell.get();
+    req.addref(&held);
+    req.release(value);
+    held
+}
+
+/// The key an iterator handed a `...` over, one owner the caller holds,
+/// read as both unpack handlers read it: an int, or a string that is a
+/// decimal (`ZEND_HANDLE_NUMERIC`), is none, the next position; any other
+/// string is the name, its owner the caller's; anything else is php's
+/// `Error` naming what the unpacking was `during`.
+fn unpacked_key(req: &mut Request, key: Value, during: &str) -> Result<Option<PhpString>, Thrown> {
+    let key = owned_deref(req, key);
+    if let Some(name) = key.as_php_string().copied() {
+        if matches!(
+            crate::api::values::Key::from_string(name),
+            crate::api::values::Key::Int(_)
+        ) {
+            req.release(key);
+            return Ok(None);
+        }
+        return Ok(Some(name));
+    }
+    let is_int = key.as_int().is_some();
+    req.release(key);
+    if is_int {
+        return Ok(None);
+    }
+    Err(crate::api::raising::throw(
+        req,
+        "Error",
+        &format!("Keys must be of type int|string during {during} unpacking"),
+    ))
+}
+
+/// `ZEND_SEND_UNPACK` (`Z/Zend/zend_vm_def.h:5266`), `f(...$args)`: the
+/// operand's elements placed in the call being built after the
+/// arguments placed before it, a reference followed. An integer key is
+/// the next positional argument and a string key a named one, placed by
+/// `zend_handle_named_arg` ([`reserve_named`]), so a positional one
+/// after a name is php's `Error`; a `Traversable` is walked through its
+/// iterator, a key that is a decimal string read as an int.
+///
+/// ```php
+/// function f($a, $b = 'B', ...$rest) { echo $a, ' ', $b, ' ', implode(',', array_keys($rest)), '|', implode(',', $rest), "\n"; }
+/// f(...[1, 2, 3]);
+/// f(1, ...['b' => 2, 'x' => 3]);
+/// function g() { yield 1; yield 'b' => 2; }
+/// f(...new ArrayIterator(['a' => 'A', 'z' => 'Z']));
+/// f(...g());
+/// var_dump(max(...[3, 9, 4]), sprintf(...['%s-%s', 'x', 'y']));
+/// function h(...$v) { var_dump($v); }
+/// h(...[1, 2], ...['k' => 3], z: 4);
+/// ```
+/// ```expect
+/// 1 2 0|3
+/// 1 2 x|3
+/// A B z|Z
+/// 1 2 |
+/// int(9)
+/// string(3) "x-y"
+/// array(4) {
+///   [0]=>
+///   int(1)
+///   [1]=>
+///   int(2)
+///   ["k"]=>
+///   int(3)
+///   ["z"]=>
+///   int(4)
+/// }
+/// ```
+///
+/// ```php
+/// function f($a, $b = 'B', ...$rest) {}
+/// function named() { yield 'a' => 1; yield 2; }
+/// function nulled() { yield null => 1; }
+/// try { f(...['a' => 1, 2]); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { f(...named()); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { f(...1); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// try { f(...nulled()); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { f(...[1], a: 2); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Cannot use positional argument after named argument during unpacking
+/// Cannot use positional argument after named argument during unpacking
+/// TypeError: Only arrays and Traversables can be unpacked, int given
+/// Keys must be of type int|string during argument unpacking
+/// Named parameter $a overwrites previous argument
+/// ```
+///
+/// A parameter taken by reference is bound to the array's element,
+/// made a reference in place, the array separated first where the
+/// variable shares it; a `Traversable`'s element has no place to bind,
+/// and is passed by value with php's warning.
+///
+/// ```php
+/// function r(&$x, &$y) { $x .= '!'; $y .= '?'; }
+/// $a = ['p', 'q']; $c = $a;
+/// r(...$a);
+/// var_dump($a, $c);
+/// class C { function m(&$x) { $x = 1; } }
+/// (new C)->m(...new ArrayIterator(['s']));
+/// r(...['x' => 'u', 'y' => 'v']);
+/// ```
+/// ```expect
+/// array(2) {
+///   [0]=>
+///   string(2) "p!"
+///   [1]=>
+///   string(2) "q?"
+/// }
+/// array(2) {
+///   [0]=>
+///   string(1) "p"
+///   [1]=>
+///   string(1) "q"
+/// }
+///
+/// Warning: Cannot pass by-reference argument 1 of C::m() by unpacking a Traversable, passing by-value instead in %s on line 7
+/// ```
+pub(crate) fn send_unpack<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let held = exec::operand_undef(req, frame, code, op.op1_type, op.op1);
+    let spread = held.deref();
+    let sent = if let Some(array) = spread.as_array().copied() {
+        send_unpacked_array(req, frame, code, op, array)
+    } else if let Some(object) = spread.as_object().copied() {
+        match unpack_iterator(req, object) {
+            Ok(wrapper) => {
+                let sent = send_unpacked_iterator(req, wrapper);
+                req.release(wrapper.as_value());
+                sent
+            }
+            Err(thrown) => Ok(Err(thrown)),
+        }
+    } else {
+        if spread.tag() == TypeTag::Undef {
+            exec::operand(req, frame, code, op.op1_type, op.op1);
+        }
+        let given = crate::ops::value_name(req, &spread.undef_as_null());
+        Ok(Err(crate::api::raising::throw(
+            req,
+            "TypeError",
+            &format!("Only arrays and Traversables can be unpacked, {given} given"),
+        )))
+    };
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    match sent? {
+        Ok(()) => Ok(advance(req, frame)),
+        Err(thrown) => threw(req, frame, &thrown),
+    }
+}
+
+/// [`send_unpack`]'s array arm. Where the operand is a variable and an
+/// element goes to a parameter taken by reference, the array is
+/// separated in the variable first (`SEPARATE_ARRAY`), and each such
+/// element made a reference in place (`ZVAL_MAKE_REF_EX(arg, 2)`); an
+/// array that is no variable's gives such a parameter a new reference
+/// over a copy of the element.
+fn send_unpacked_array(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    array: PhpArray,
+) -> Result<Result<(), Thrown>, Fatal> {
+    let variable = matches!(op.op1_type, OperandKind::Cv | OperandKind::Var);
+    let mut array = array;
+    if variable && unpack_binds(req, array) {
+        let Some(place) = write_place(req, frame, code, op.op1_type, op.op1) else {
+            return Err(Fatal::Error(String::from(
+                "InternalError: SEND_UNPACK over a variable with no place",
+            )));
+        };
+        match separated_array(req, place) {
+            Ok((_, Some(separated))) => array = separated,
+            Ok((_, None)) => {}
+            Err(thrown) => return Ok(Err(thrown)),
+        }
+    }
+    let mut named = false;
+    for (key, element) in array.snapshot_refs() {
+        let reserved = match key {
+            crate::api::values::Key::Str(name) => {
+                named = true;
+                match reserve_named(req, name)? {
+                    Ok(reserved) => reserved,
+                    Err(thrown) => return Ok(Err(thrown)),
+                }
+            }
+            crate::api::values::Key::Int(_) if named => {
+                return Ok(Err(positional_after_named(req)));
+            }
+            crate::api::values::Key::Int(_) => reserve_next(req)?,
+        };
+        let value = if !should_be_sent_by_ref(req, reserved.number) {
+            let value = element.deref();
+            req.addref(&value);
+            value
+        } else if element.as_php_ref().is_some() {
+            req.addref(&element);
+            element
+        } else if variable {
+            let entry = match req.array_lookup(array.heap(), key.heap()) {
+                Ok(Some(entry)) => entry,
+                Ok(None) => {
+                    return Err(Fatal::Error(String::from(
+                        "InternalError: SEND_UNPACK lost an element of the array it spreads",
+                    )));
+                }
+                Err(thrown) => return Ok(Err(thrown)),
+            };
+            match bound_at(req, entry) {
+                Ok(bound) => bound,
+                Err(thrown) => return Ok(Err(thrown)),
+            }
+        } else {
+            req.addref(&element);
+            match req.reference(element) {
+                Ok(cell) => cell.as_value(),
+                Err(thrown) => return Ok(Err(thrown)),
+            }
+        };
+        put_argument(req, reserved.slot, value)?;
+    }
+    Ok(Ok(()))
+}
+
+/// Whether any element of `array` goes to a parameter of the call being
+/// built that takes it by reference, which is when php separates the
+/// array before it binds one.
+fn unpack_binds(req: &Request, array: PhpArray) -> bool {
+    let Some(function) = req.vm().building_call_function() else {
+        return false;
+    };
+    let mut next = req
+        .vm()
+        .calls()
+        .last()
+        .map_or(0, |call| call.arguments.len());
+    array.snapshot_refs().into_iter().any(|(key, _)| {
+        let number = match key {
+            crate::api::values::Key::Str(name) => {
+                crate::api::call::arg_offset_by_name(req, function, name.as_bytes()).number()
+            }
+            crate::api::values::Key::Int(_) => {
+                next += 1;
+                u32::try_from(next).ok()
+            }
+        };
+        number.is_some_and(|number| should_be_sent_by_ref(req, number))
+    })
+}
+
+/// [`send_unpack`]'s `Traversable` arm over the iterator `wrapper`: each
+/// element placed by its key as the array arm places it, its reference
+/// followed, and a parameter that must take a reference given a new one
+/// with php's warning, since an iterator's element is no place to bind.
+fn send_unpacked_iterator(
+    req: &mut Request,
+    wrapper: PhpObject,
+) -> Result<Result<(), Thrown>, Fatal> {
+    if let Err(thrown) = crate::interfaces::rewind(req, wrapper) {
+        return Ok(Err(thrown));
+    }
+    let mut named = false;
+    loop {
+        let (value, key) = match crate::interfaces::delegated(req, wrapper) {
+            Ok(Some(pair)) => pair,
+            Ok(None) => return Ok(Ok(())),
+            Err(thrown) => return Ok(Err(thrown)),
+        };
+        let value = owned_deref(req, value);
+        let name = match unpacked_key(req, key, "argument") {
+            Ok(name) => name,
+            Err(thrown) => {
+                req.release(value);
+                return Ok(Err(thrown));
+            }
+        };
+        let reserved = match name {
+            Some(name) => {
+                named = true;
+                let reserved = reserve_named(req, name);
+                req.release(Value::string(name));
+                match reserved {
+                    Ok(Ok(reserved)) => Ok(reserved),
+                    Ok(Err(thrown)) => Err(thrown),
+                    Err(fatal) => {
+                        req.release(value);
+                        return Err(fatal);
+                    }
+                }
+            }
+            None if named => Err(positional_after_named(req)),
+            None => match reserve_next(req) {
+                Ok(reserved) => Ok(reserved),
+                Err(fatal) => {
+                    req.release(value);
+                    return Err(fatal);
+                }
+            },
+        };
+        let reserved = match reserved {
+            Ok(reserved) => reserved,
+            Err(thrown) => {
+                req.release(value);
+                return Ok(Err(thrown));
+            }
+        };
+        let value = if must_be_sent_by_ref(req, reserved.number) {
+            let function = req.vm().building_call_function();
+            let callee =
+                function.map_or_else(String::new, |function| req.qualified_name_of(function));
+            crate::api::raising::warning(
+                req,
+                &format!(
+                    "Cannot pass by-reference argument {} of {callee}() by unpacking a Traversable, passing by-value instead",
+                    reserved.number
+                ),
+            );
+            match req.reference(value) {
+                Ok(cell) => cell.as_value(),
+                Err(thrown) => return Ok(Err(thrown)),
+            }
+        } else {
+            value
+        };
+        put_argument(req, reserved.slot, value)?;
+    }
+}
+
+/// php's `Error` for an integer key after a string one in what
+/// `SEND_UNPACK` spreads.
+fn positional_after_named(req: &mut Request) -> Thrown {
+    crate::api::raising::throw(
+        req,
+        "Error",
+        "Cannot use positional argument after named argument during unpacking",
+    )
 }
 
 /// `ZEND_FE_RESET_R` (`Z/Zend/zend_vm_def.h:6882`), the first opline of
@@ -14307,6 +14866,13 @@ fn send(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, slot: A
 /// The placing half of [`send`]: `value` into the call frame being
 /// built, in `slot`, the frame owning it from here.
 fn place_argument(req: &mut Request, frame: FrameRef, slot: ArgSlot, value: Value) -> Edge {
+    put_argument(req, slot, value)?;
+    Ok(advance(req, frame))
+}
+
+/// `value` written into `slot` of the call being built, the call owning
+/// it from here.
+fn put_argument(req: &mut Request, slot: ArgSlot, value: Value) -> Result<(), Fatal> {
     let Some(call) = req.vm_mut().building_call() else {
         return Err(Fatal::Error(String::from(
             "InternalError: a SEND_* opline with no call frame under it",
@@ -14328,7 +14894,7 @@ fn place_argument(req: &mut Request, frame: FrameRef, slot: ArgSlot, value: Valu
         )));
     };
     *placed = value;
-    Ok(advance(req, frame))
+    Ok(())
 }
 
 /// `ZEND_LAST_CATCH` (`Z/Zend/zend_compile.h`): the bit beside the cache
