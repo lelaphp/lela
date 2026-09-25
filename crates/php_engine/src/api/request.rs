@@ -5596,6 +5596,42 @@ impl Request {
         })
     }
 
+    /// `zend_verify_property_type` over a value about to land in a typed
+    /// property, the step `zend_assign_to_typed_prop`,
+    /// `zend_binary_assign_op_typed_prop`, `zend_incdec_typed_prop` and
+    /// `zend_std_write_property` share: the value as given where the
+    /// declared type accepts it, the weak rule's conversion in its place
+    /// where `strict` is off and the rule makes one, and php's
+    /// `TypeError` otherwise. `value` is given up on every arm that does
+    /// not land it.
+    pub(crate) fn hold_to_property_type(
+        &mut self,
+        typed: &TypedProperty,
+        name: &[u8],
+        value: Value,
+        strict: bool,
+    ) -> Result<Value, Thrown> {
+        let verified = crate::ops::verify_property_type(
+            self,
+            &value,
+            &typed.ty,
+            typed.declaring,
+            name,
+            strict,
+        );
+        match verified {
+            Ok(None) => Ok(value),
+            Ok(Some(coerced)) => {
+                self.release(value);
+                Ok(coerced)
+            }
+            Err(thrown) => {
+                self.release(value);
+                Err(thrown)
+            }
+        }
+    }
+
     /// `zend_assign_to_variable` over a declared slot, `ASSIGN_OBJ`'s
     /// fast path over a slot that holds a value (`fast_assign_obj`):
     /// `value` is the slot's from here and what it held is released

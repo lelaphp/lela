@@ -7100,23 +7100,9 @@ fn assign_property(
                 )));
             }
             let strict = req.frame_strict_types(frame);
-            let value = match crate::ops::verify_property_type(
-                req,
-                &value,
-                &typed.ty,
-                typed.declaring,
-                bytes,
-                strict,
-            ) {
-                Ok(None) => value,
-                Ok(Some(coerced)) => {
-                    req.release(value);
-                    coerced
-                }
-                Err(thrown) => {
-                    req.release(value);
-                    return Ok(Err(thrown));
-                }
+            let value = match req.hold_to_property_type(&typed, bytes, value, strict) {
+                Ok(value) => value,
+                Err(thrown) => return Ok(Err(thrown)),
             };
             write_out(req, frame, code, op, &value);
             req.assign_declared_slot(object.heap(), slot, value);
@@ -9126,21 +9112,9 @@ fn step_property(
         )));
     };
     let strict = req.caller_strict_types(frame);
-    let landed = match crate::ops::verify_property_type(
-        req,
-        &stepped,
-        &typed.ty,
-        typed.declaring,
-        &bytes,
-        strict,
-    ) {
-        Ok(None) => stepped,
-        Ok(Some(coerced)) => {
-            req.release(stepped);
-            coerced
-        }
+    let landed = match req.hold_to_property_type(&typed, &bytes, stepped, strict) {
+        Ok(landed) => landed,
         Err(thrown) => {
-            req.release(stepped);
             write_out(req, frame, code, op, &Value::null());
             return Ok(Err(thrown));
         }
@@ -9700,29 +9674,10 @@ fn typed_step(
         req.assign_declared_slot(object.heap(), slot, limit);
         return Ok(Err(thrown));
     }
+    // A refusal is `ZVAL_COPY_VALUE(var_ptr, copy)`: the slot keeps
+    // what it held.
     let strict = req.frame_strict_types(frame);
-    Ok(
-        match crate::ops::verify_property_type(
-            req,
-            &stepped,
-            &declared.ty,
-            declared.declaring,
-            bytes,
-            strict,
-        ) {
-            Ok(None) => Ok(stepped),
-            Ok(Some(coerced)) => {
-                req.release(stepped);
-                Ok(coerced)
-            }
-            // `ZVAL_COPY_VALUE(var_ptr, copy)`: the slot keeps what it
-            // held.
-            Err(thrown) => {
-                req.release(stepped);
-                Err(thrown)
-            }
-        },
-    )
+    Ok(req.hold_to_property_type(&declared, bytes, stepped, strict))
 }
 
 /// `zend_pre_incdec_overloaded_property` and
