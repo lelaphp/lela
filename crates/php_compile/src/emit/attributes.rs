@@ -6,7 +6,7 @@
 //! compiler reads them where php's `zend_internal_attribute_get` answers,
 //! by the attribute's lowered name.
 
-use php_unit::decl::{Attribute, ClassKind};
+use php_unit::decl::{Attribute, ClassFlags, ClassKind};
 
 use super::walk::ClassModifiers;
 
@@ -100,7 +100,8 @@ impl InternalAttribute {
 
     /// The validator `zend_compile_attributes` runs once the target
     /// holds, over a class of this kind, modifiers and name: php's
-    /// compile error, none where it takes the class.
+    /// compile error, none where it takes the class
+    /// ([`php_unit::decl::class_attribute_refusal`]).
     ///
     /// ```php
     /// #[Attribute]
@@ -123,20 +124,13 @@ impl InternalAttribute {
         modifiers: ClassModifiers,
         class: &str,
     ) -> Option<String> {
-        use InternalAttribute::{AllowDynamicProperties, Attribute, Deprecated};
-        let word = match (self, kind) {
-            (Attribute | AllowDynamicProperties, ClassKind::Trait) => "trait",
-            (Attribute | AllowDynamicProperties | Deprecated, ClassKind::Interface) => "interface",
-            (AllowDynamicProperties, ClassKind::Class) if modifiers.is_readonly => "readonly class",
-            (Attribute | AllowDynamicProperties | Deprecated, ClassKind::Enum) => "enum",
-            (Attribute, ClassKind::Class) if modifiers.is_abstract => "abstract class",
-            (Deprecated, ClassKind::Class) => "class",
-            _ => return None,
+        let flags = ClassFlags {
+            is_abstract: modifiers.is_abstract,
+            is_final: modifiers.is_final,
+            is_readonly: modifiers.is_readonly,
+            ..ClassFlags::default()
         };
-        Some(format!(
-            "Cannot apply #[\\{}] to {word} {class}",
-            self.declared()
-        ))
+        php_unit::decl::class_attribute_refusal(self.declared().as_bytes(), kind, &flags, class)
     }
 }
 

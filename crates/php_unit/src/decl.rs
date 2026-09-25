@@ -28,6 +28,57 @@ pub fn shown(name: &[u8]) -> std::borrow::Cow<'_, str> {
     String::from_utf8_lossy(&name[..end])
 }
 
+/// `validate_attribute`, `validate_allow_dynamic_properties` and
+/// `validate_deprecated` (`Z/Zend/zend_attributes.c`), the validators of
+/// the internal attributes that take a class: php's refusal of the
+/// attribute `attribute` names, by its resolved name in any case, over
+/// a class of this kind and these flags named `class`; none where the
+/// validator takes the class or the attribute has none. What the
+/// compiler raises where the class is declared, and what
+/// `ReflectionAttribute::newInstance` throws for an attribute
+/// `#[\DelayedTargetValidation]` deferred, php's
+/// `zend_attribute.validation_error`, so the rule stands in one place
+/// for both.
+#[must_use]
+pub fn class_attribute_refusal(
+    attribute: &[u8],
+    kind: ClassKind,
+    flags: &ClassFlags,
+    class: &str,
+) -> Option<String> {
+    let named = |name: &str| attribute.eq_ignore_ascii_case(name.as_bytes());
+    let (declared, word) = if named("Attribute") {
+        let word = match kind {
+            ClassKind::Trait => "trait",
+            ClassKind::Interface => "interface",
+            ClassKind::Enum => "enum",
+            ClassKind::Class if flags.is_abstract => "abstract class",
+            ClassKind::Class => return None,
+        };
+        ("Attribute", word)
+    } else if named("AllowDynamicProperties") {
+        let word = match kind {
+            ClassKind::Trait => "trait",
+            ClassKind::Interface => "interface",
+            ClassKind::Class if flags.is_readonly => "readonly class",
+            ClassKind::Enum => "enum",
+            ClassKind::Class => return None,
+        };
+        ("AllowDynamicProperties", word)
+    } else if named("Deprecated") {
+        let word = match kind {
+            ClassKind::Trait => return None,
+            ClassKind::Interface => "interface",
+            ClassKind::Enum => "enum",
+            ClassKind::Class => "class",
+        };
+        ("Deprecated", word)
+    } else {
+        return None;
+    };
+    Some(format!("Cannot apply #[\\{declared}] to {word} {class}"))
+}
+
 /// php's three member visibilities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Visibility {
