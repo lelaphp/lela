@@ -4522,6 +4522,18 @@ impl Request {
     /// Cannot modify readonly property A::$x
     /// Cannot unset readonly property A::$x
     /// ```
+    ///
+    /// `__clone` may unset and set one again, php's `IS_PROP_REINITABLE`:
+    ///
+    /// ```php
+    /// class F { function __construct(public readonly stdClass $b) {} function __clone() { unset($this->b); $this->b = new stdClass; } }
+    /// $f = new F(new stdClass);
+    /// $g = clone $f;
+    /// var_dump($f->b === $g->b);
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// ```
     fn set_inaccessible_property(
         &mut self,
         class: ClassId,
@@ -7523,8 +7535,17 @@ impl Request {
                 // an `unset` emptied is the `__unset`'s.
                 if !empty || placed.typed {
                     // `zend_readonly_property_unset_error`, ahead of the
-                    // set visibility.
-                    if placed.readonly && !empty {
+                    // set visibility. php raises it in the class's own
+                    // scope too, save in `__clone`, where the slot is
+                    // `IS_PROP_REINITABLE`, which this engine does not
+                    // keep; so it is raised here where the set visibility
+                    // would refuse the unset anyway.
+                    if placed.readonly
+                        && !empty
+                        && placed
+                            .set_visibility
+                            .is_some_and(|set| !self.has_set_access(placed.declaring, set))
+                    {
                         let declaring = self.class_name(placed.declaring);
                         let shown = String::from_utf8_lossy(name).into_owned();
                         return Err(crate::api::raising::throw(
