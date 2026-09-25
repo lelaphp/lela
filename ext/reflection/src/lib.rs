@@ -4272,7 +4272,28 @@ fn parameter_string(
 }
 
 /// `_function_parameter_string`: `- Parameters [N] {` and one
-/// [`parameter_string`] line per parameter.
+/// [`parameter_string`] line per parameter, and nothing where php's
+/// `arg_info` is null, which is a user function that declares neither
+/// a parameter nor a return type (`zend_compile_params` allocates none
+/// for it); a native's `arg_info` always carries its return row.
+///
+/// ```php
+/// function f() {}
+/// function g(): int { return 1; }
+/// echo new ReflectionFunction('f'), new ReflectionFunction('g');
+/// ```
+/// ```expect
+/// Function [ <user> function f ] {
+///   @@ %s 2 - 2
+/// }
+/// Function [ <user> function g ] {
+///   @@ %s 3 - 3
+///
+///   - Parameters [0] {
+///   }
+///   - Return [ int ]
+/// }
+/// ```
 fn function_parameter_string(
     req: &mut Request,
     out: &mut String,
@@ -4281,6 +4302,9 @@ fn function_parameter_string(
 ) {
     let required = required_parameters(decl);
     let internal = decl.file.0.is_empty();
+    if !internal && decl.parameters.is_empty() && decl.return_type.is_none() {
+        return;
+    }
     out.push('\n');
     let _ = writeln!(out, "{indent}- Parameters [{}] {{", decl.parameters.len());
     for (offset, parameter) in decl.parameters.clone().iter().enumerate() {
