@@ -187,6 +187,11 @@ pub enum ConstExpr {
         arguments: Vec<ConstExpr>,
     },
     Closure(u32),
+    /// `__CLASS__` in a trait's constant expression, php's
+    /// `ZEND_AST_CONSTANT_CLASS`: the name of the scope the expression
+    /// is evaluated in, which is the class that took the member from the
+    /// trait, and the empty string where there is none.
+    ScopeClass,
 }
 
 /// One argument of an attribute, positional or named.

@@ -855,6 +855,11 @@ pub fn eval_const_expr(
             };
             req.class_constant(id, &name.0)
         }
+        // `zend_ast_evaluate`'s `ZEND_AST_CONSTANT_CLASS` arm.
+        ConstExpr::ScopeClass => {
+            let name = scope.map(|scope| req.class_name(scope)).unwrap_or_default();
+            Ok(Value::string(PhpString::new(req, name.as_bytes())?))
+        }
         ConstExpr::Array(elements) => {
             let mut array = crate::api::values::PhpArray::new(req)?;
             for (key, value) in elements {

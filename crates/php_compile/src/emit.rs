@@ -4795,6 +4795,27 @@ impl Emit<'_> {
     ///   int(1)
     /// }
     /// ```
+    ///
+    /// `__CLASS__` in a trait is kept for the scope that evaluates it,
+    /// which is the class that took the member, through a trait that
+    /// uses the trait too:
+    ///
+    /// ```php
+    /// trait T { public static $s = __CLASS__; public $p = [__CLASS__, __TRAIT__]; const K = __CLASS__; }
+    /// trait U { use T; }
+    /// class C { use U; }
+    /// var_dump(C::$s, (new C)->p, C::K);
+    /// ```
+    /// ```expect
+    /// string(1) "C"
+    /// array(2) {
+    ///   [0]=>
+    ///   string(1) "C"
+    ///   [1]=>
+    ///   string(1) "T"
+    /// }
+    /// string(1) "C"
+    /// ```
     #[allow(clippy::too_many_lines)]
     fn const_expr(&mut self, expr: tree::Expr) -> Result<ConstExpr, CompileError> {
         let line = expr.line(self.parsed);
@@ -4811,6 +4832,18 @@ impl Emit<'_> {
                 }),
                 None => Ok(ConstExpr::Constant(Name(self.text(token).into()))),
             },
+            // `zend_compile_const_expr_magic_const`: `__CLASS__` in a
+            // trait is the one magic constant the fold leaves, kept as
+            // `ZEND_AST_CONSTANT_CLASS` for the scope that evaluates it.
+            tree::Expr::MagicConstExpr(id) => {
+                let (which, line) = self.magic_of(id)?;
+                if matches!(self.magic_const(which, line), Folded::UsingClass) {
+                    return Ok(ConstExpr::ScopeClass);
+                }
+                folded_const_expr(self.magic_node(id)?).ok_or_else(|| {
+                    self.fatal("a constant expression this compiler cannot read yet")
+                })
+            }
             // `zend_compile_const_expr_class_const`: the class named as
             // written, resolved in the namespace, and the constant's
             // name, kept as the tree for the engine to fetch on first
