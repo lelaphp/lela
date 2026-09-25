@@ -3718,6 +3718,98 @@ pub(crate) fn verify_never_type<T: Tier>(
     threw(req, frame, &thrown)
 }
 
+/// `ZEND_CALLABLE_CONVERT` (`Z/Zend/zend_vm_def.h:9725`), the `(...)`
+/// of a first-class callable: the call the `INIT_*` before it began is
+/// made a closure by [`crate::classes::closure_from_frame`] and never
+/// served, and the call frame is let go, its receiver with it. So what
+/// the `INIT_*` resolved is what the closure holds: a method's receiver
+/// and its scope, the class a method was called on by `C::m(...)` as its
+/// called scope, a private method reached from its own class, and a
+/// closure called through `$f(...)` or `->__invoke(...)` itself.
+///
+/// ```php
+/// class P {
+///     private function hidden($x) { return "hidden$x"; }
+///     function expose() { return $this->hidden(...); }
+///     static function who() { return static::class; }
+/// }
+/// class C extends P { public $v = 1; function m() { return $this->v; } }
+/// $c = new C;
+/// $m = $c->m(...);
+/// $who = C::who(...);
+/// $f = function () { return 'f'; };
+/// var_dump($m(), $c->expose()(1), $who(), $f(...) === $f, $f->__invoke(...) === $f);
+/// var_dump($m, $who);
+/// ```
+/// ```expect
+/// int(1)
+/// string(7) "hidden1"
+/// string(1) "C"
+/// bool(true)
+/// bool(true)
+/// object(Closure)#2 (2) {
+///   ["function"]=>
+///   string(4) "C::m"
+///   ["this"]=>
+///   object(C)#1 (1) {
+///     ["v"]=>
+///     int(1)
+///   }
+/// }
+/// object(Closure)#3 (1) {
+///   ["function"]=>
+///   string(6) "P::who"
+/// }
+/// ```
+///
+/// What the `INIT_*` refuses stands, since the `CALLABLE_CONVERT` is
+/// never reached:
+///
+/// ```php
+/// class T { private static function p() {} function i() {} }
+/// foreach ([fn () => does_not_exist(...), fn () => T::p(...), fn () => T::i(...), fn () => (new stdClass)->nope(...)] as $make) {
+///     try { $make(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// Call to undefined function does_not_exist()
+/// Call to private method T::p() from global scope
+/// Non-static method T::i() cannot be called statically
+/// Call to undefined method stdClass::nope()
+/// ```
+pub(crate) fn callable_convert<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let Some(call) = req.vm_mut().building_call() else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_CALLABLE_CONVERT with no call frame under it",
+        )));
+    };
+    let callee = match call.closure {
+        Some(closure) => crate::classes::CallFrame::Closure(closure),
+        None => crate::classes::CallFrame::Callee {
+            function: call.function,
+            this: call.this,
+            called_scope: call.called_scope,
+        },
+    };
+    let made = crate::classes::closure_from_frame(req, callee);
+    // `OBJ_RELEASE(Z_OBJ(call->This))` where `ZEND_CALL_RELEASE_THIS`,
+    // and `zend_vm_stack_free_call_frame`.
+    req.pop_call();
+    let made = match made {
+        Ok(made) => made,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    let slot = exec::temporary_slot(code, op.out);
+    let previous = req.set_slot(frame, slot, made.as_value());
+    req.release(previous);
+    Ok(advance(req, frame))
+}
+
 /// `zend_verify_arg_error` (`Z/Zend/zend_execute.c:707`): the `TypeError`
 /// a user function's argument of the wrong type raises. The sentence is
 /// `zend_argument_type_error`'s, `{fn}(): Argument #N ($name) must be of

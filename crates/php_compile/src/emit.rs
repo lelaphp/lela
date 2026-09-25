@@ -8854,7 +8854,11 @@ impl Emit<'_> {
                 let operand = match (node.operand, node.args) {
                     (Some(operand), _) => operand,
                     (None, Some(args)) => {
-                        let arguments = self.arguments(args, line)?.positional();
+                        let arguments = self.arguments(args, line)?;
+                        if let Args::CallableConvert = arguments {
+                            return self.call(b"\\clone", &arguments);
+                        }
+                        let arguments = arguments.positional();
                         let Some([operand]) = arguments.as_deref() else {
                             return Err(self.unread("a `clone` with an argument list"));
                         };
@@ -12460,7 +12464,11 @@ impl Emit<'_> {
             tree::Expr::CallExpr(id) => {
                 let node = &tree[id];
                 let (callee, args) = (node.callee, node.args);
-                let Some(arguments) = self.arguments(args, line)?.positional() else {
+                let arguments = self.arguments(args, line)?;
+                if let Args::CallableConvert = arguments {
+                    return Err(walk::unread(line, "a first-class callable"));
+                }
+                let Some(arguments) = arguments.positional() else {
                     return Err(walk::unread(
                         line,
                         "a named argument in a constant expression",
@@ -13147,11 +13155,12 @@ impl Emit<'_> {
     /// `RETURN_VALUE_USED`.
     fn call(&mut self, name: &[u8], arguments: &Args) -> Result<Where, CompileError> {
         let line = self.line;
+        let is_callable_convert = matches!(arguments, Args::CallableConvert);
         let (resolved, runtime) = self.function_name(name);
         if runtime {
             // `zend_compile_assert` over the name as written, which the
             // program resolves.
-            if name.eq_ignore_ascii_case(b"assert") {
+            if name.eq_ignore_ascii_case(b"assert") && !is_callable_convert {
                 return self.assert(&resolved, arguments, None);
             }
             return self.ns_call(&resolved, arguments);
@@ -13160,6 +13169,7 @@ impl Emit<'_> {
         // "Special assert() handling should apply independently of
         // compiler flags."
         if lowered == b"assert"
+            && !is_callable_convert
             && let Some(index) = self.native_index(&lowered)
         {
             return self.assert(&resolved, arguments, Some(index));
@@ -13208,8 +13218,7 @@ impl Emit<'_> {
             extended_value: plan.count,
             ..Opline::default()
         });
-        self.send_args(&plan, arguments, Some(&callee))?;
-        Ok(self.call_op(call_op, line, plan.extra_named))
+        self.call_common(&plan, arguments, Some(&callee), call_op, line)
     }
 
     /// `zend_hash_find_ptr(CG(function_table), lcname)` over the
@@ -13259,8 +13268,7 @@ impl Emit<'_> {
                 extended_value: plan.count,
                 ..Opline::default()
             });
-            self.send_args(&plan, arguments, None)?;
-            return Ok(self.call_op(Opcode::DoFcall, line, plan.extra_named));
+            return self.call_common(&plan, arguments, None, Opcode::DoFcall, line);
         }
         let pair = self.func_name_literal(name)?;
         let plan = Plan::of(arguments, None);
@@ -13273,8 +13281,7 @@ impl Emit<'_> {
             extended_value: plan.count,
             ..Opline::default()
         });
-        self.send_args(&plan, arguments, None)?;
-        Ok(self.call_op(Opcode::DoFcallByName, line, plan.extra_named))
+        self.call_common(&plan, arguments, None, Opcode::DoFcallByName, line)
     }
 
     /// `zend_compile_dynamic_call` over a callee that is no constant
@@ -13326,8 +13333,7 @@ impl Emit<'_> {
             extended_value: plan.count,
             ..Opline::default()
         });
-        self.send_args(&plan, arguments, None)?;
-        Ok(self.call_op(Opcode::DoFcall, line, plan.extra_named))
+        self.call_common(&plan, arguments, None, Opcode::DoFcall, line)
     }
 
     /// `zend_compile_new` (`Z/Zend/zend_compile.c:5410`): the class
@@ -13380,6 +13386,11 @@ impl Emit<'_> {
         arguments: &Args,
         line: u32,
     ) -> Result<Where, CompileError> {
+        // `zend_compile_call_common` over the `NEW` it follows: a closure
+        // is made of a call frame, and `new` has no function to make it of.
+        if matches!(arguments, Args::CallableConvert) {
+            return Err(self.compile_error("Cannot create Closure for new expression"));
+        }
         let out = self.temporary();
         let (op1_type, op1) = self.class_operand(class)?;
         let op2 = if op1_type == OperandKind::Const {
@@ -13504,8 +13515,7 @@ impl Emit<'_> {
                     extended_value: plan.count,
                     ..Opline::default()
                 });
-                self.send_args(&plan, arguments, None)?;
-                return Ok(self.call_op(Opcode::DoFcall, line, plan.extra_named));
+                return self.call_common(&plan, arguments, None, Opcode::DoFcall, line);
             }
         };
         let method = method.as_slice();
@@ -13555,8 +13565,7 @@ impl Emit<'_> {
             }
         };
         self.push(opline);
-        self.send_args(&plan, arguments, callee.as_ref())?;
-        Ok(self.call_op(call_op, line, plan.extra_named))
+        self.call_common(&plan, arguments, callee.as_ref(), call_op, line)
     }
 
     /// `zend_compile_method_call`: the receiver compiled,
@@ -13623,8 +13632,18 @@ impl Emit<'_> {
             extended_value: plan.count,
             ..Opline::default()
         });
-        self.send_args(&plan, arguments, None)?;
-        Ok(self.call_op(Opcode::DoFcall, line, plan.extra_named))
+        let served = self.call_common(&plan, arguments, None, Opcode::DoFcall, line)?;
+        // `short_circuiting_checkpoint != zend_short_circuiting_checkpoint()`
+        // once `zend_compile_call_common` made a closure: a `?->` the
+        // receiver stands on would leave it null.
+        if matches!(arguments, Args::CallableConvert)
+            && (nullsafe || self.is_short_circuited(object))
+        {
+            return Err(
+                self.compile_error("Cannot combine nullsafe operator with Closure creation")
+            );
+        }
+        Ok(served)
     }
 
     /// The receiver of a method call or a property fetch: `$this` is
@@ -14780,8 +14799,7 @@ impl Emit<'_> {
             extended_value: plan.count,
             ..Opline::default()
         });
-        self.send_args(&plan, arguments, None)?;
-        let returned = self.call_op(Opcode::DoFcallByName, line, plan.extra_named);
+        let returned = self.call_common(&plan, arguments, None, Opcode::DoFcallByName, line)?;
         if let Some((jmp_fl, index)) = branch
             && let Some(positional) = &positional
             && let Where::Returned(var) = returned
@@ -14824,6 +14842,79 @@ impl Emit<'_> {
         self.literal(lowered);
         self.literal(unqualified);
         Ok(at)
+    }
+
+    /// `zend_compile_call_common` past the `INIT_*` it follows: the
+    /// arguments [`Plan`] placed sent and the call op, or, for the `...`
+    /// of a first-class callable, nothing sent, the `INIT_*` counting no
+    /// argument, and `CALLABLE_CONVERT` into a temporary, which makes a
+    /// closure of the call the `INIT_*` began and serves nothing.
+    ///
+    /// ```php
+    /// class C {
+    ///     function m($x) { return "m$x"; }
+    ///     static function s($x) { return "s$x"; }
+    ///     function viaStatic() { return static::s(...); }
+    /// }
+    /// $o = new C;
+    /// $name = 'm';
+    /// $f = strlen(...);
+    /// $g = $o->m(...);
+    /// $h = $o->$name(...);
+    /// $i = C::s(...);
+    /// $j = $f(...);
+    /// $k = (fn ($x) => "k$x")(...);
+    /// var_dump($f('abc'), $g(1), $h(2), $i(3), $o->viaStatic()(4), $j === $f, $k(5));
+    /// ```
+    /// ```expect
+    /// int(3)
+    /// string(2) "m1"
+    /// string(2) "m2"
+    /// string(2) "s3"
+    /// string(2) "s4"
+    /// bool(true)
+    /// string(2) "k5"
+    /// ```
+    ///
+    /// `new` has no function to make a closure of, and a `?->` the
+    /// receiver stands on would leave none to make it of, each php's
+    /// compile error:
+    ///
+    /// ```php
+    /// class C {}
+    /// $c = new C(...);
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot create Closure for new expression in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// $o = null;
+    /// $f = $o?->m(...);
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot combine nullsafe operator with Closure creation in %s on line 3
+    /// ```
+    fn call_common(
+        &mut self,
+        plan: &Plan,
+        arguments: &Args,
+        callee: Option<&Callee>,
+        opcode: Opcode,
+        line: u32,
+    ) -> Result<Where, CompileError> {
+        if let Args::CallableConvert = arguments {
+            let out = self.temporary();
+            self.push(Opline {
+                opcode: Opcode::CallableConvert,
+                out_type: OperandKind::Tmp,
+                out,
+                ..Opline::default()
+            });
+            return Ok(Where::Temporary(out));
+        }
+        self.send_args(plan, arguments, callee)?;
+        Ok(self.call_op(opcode, line, plan.extra_named))
     }
 
     /// The call op `zend_get_call_op` picked, with the `VAR` for what

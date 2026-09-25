@@ -968,36 +968,77 @@ fn closure_from_callable(req: &mut Request) -> Result<Value, Thrown> {
     fake_closure(req, &callable).map(|made| made.as_value())
 }
 
-/// `zend_create_fake_closure` over what a callable resolved to
-/// (`zend_closure_from_frame`'s arms): a closure hands back itself, one
-/// more owner, and so does a closure's own `__invoke`; a function is
-/// closed over with no scope, and a method over its class with the
-/// receiver it was taken with, the called scope the receiver's class or
-/// the class the callable named.
+/// `zend_create_closure_from_callable` over what a callable resolved to:
+/// [`closure_from_frame`] over the call frame `zend_is_callable_ex`
+/// filled, a `Closure` as the frame's closure, a function with no scope,
+/// and a method with the receiver it was taken with and the class the
+/// callable named as its called scope.
 pub(crate) fn fake_closure(req: &mut Request, callable: &Callable) -> Result<PhpObject, Thrown> {
-    let (function, this, scope, called_scope) = match callable.target() {
-        Target::Closure(object) => {
-            req.addref(&object.as_value());
-            return Ok(object);
-        }
-        Target::Function(function) => (function, None, None, None),
+    let frame = match callable.target() {
+        Target::Closure(object) => CallFrame::Closure(object),
+        Target::Function(function) => CallFrame::Callee {
+            function,
+            this: None,
+            called_scope: None,
+        },
         Target::Method {
             function,
             this,
-            scope: named,
-        } => {
-            if let Some(this) = this
-                && this.closure(req).is_some()
-                && req
-                    .method_decl(function)
-                    .is_some_and(|decl| decl.function.name.0.eq_ignore_ascii_case(INVOKE))
-            {
-                req.addref(&this.as_value());
-                return Ok(this);
-            }
-            (function, this, req.method_class(function), Some(named))
-        }
+            scope,
+        } => CallFrame::Callee {
+            function,
+            this,
+            called_scope: Some(scope),
+        },
     };
+    closure_from_frame(req, frame)
+}
+
+/// The call frame `zend_closure_from_frame` reads: one made through a
+/// `Closure`, `ZEND_CALL_CLOSURE`, or any other callee with `EX(This)`,
+/// the receiver where `ZEND_CALL_HAS_THIS` is set and the called scope,
+/// which is the receiver's class where there is one. A view; no owner
+/// is taken of any of them.
+#[derive(Clone, Copy)]
+pub(crate) enum CallFrame {
+    Closure(PhpObject),
+    Callee {
+        function: Function,
+        this: Option<PhpObject>,
+        called_scope: Option<ClassId>,
+    },
+}
+
+/// `zend_closure_from_frame` (`Z/Zend/zend_closures.c:878`), the one
+/// closure made of a call frame, by `CALLABLE_CONVERT` and by
+/// `Closure::fromCallable` alike: a call made through a `Closure` is
+/// that closure, one more owner, and so is `__invoke` on one; every
+/// other callee is `zend_create_fake_closure` over it, its scope the
+/// class that declares it, bound to the frame's receiver, and its
+/// called scope the receiver's class where it has one and the frame's
+/// called scope where it has none.
+pub(crate) fn closure_from_frame(req: &mut Request, frame: CallFrame) -> Result<PhpObject, Thrown> {
+    let (function, this, called_scope) = match frame {
+        CallFrame::Closure(closure) => {
+            req.addref(&closure.as_value());
+            return Ok(closure);
+        }
+        CallFrame::Callee {
+            function,
+            this,
+            called_scope,
+        } => (function, this, called_scope),
+    };
+    if let Some(this) = this
+        && this.closure(req).is_some()
+        && req
+            .method_decl(function)
+            .is_some_and(|decl| decl.function.name.0.eq_ignore_ascii_case(INVOKE))
+    {
+        req.addref(&this.as_value());
+        return Ok(this);
+    }
+    let scope = req.method_class(function);
     let fake = ClosureInfo {
         function,
         this,
