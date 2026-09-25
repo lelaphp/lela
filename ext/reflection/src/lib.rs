@@ -2169,30 +2169,21 @@ fn reflection_class_get_default_properties(req: &mut Request) -> Result<Value, T
     exactly_arguments(req, 0)?;
     let class = this_class(req)?;
     let mut defaults = PhpArray::new(req)?;
-    let chain = class_chain(req, class);
+    let table = linked_properties(req, class);
     for statics in [true, false] {
-        for (depth, &at) in chain.iter().enumerate() {
-            let properties: Vec<PropertyDecl> = req
-                .class_decl(at)
-                .map(|decl| decl.properties.clone())
-                .unwrap_or_default();
-            for property in properties {
-                if property.is_instance == statics
-                    || (depth > 0 && property.visibility == Visibility::Private)
-                {
-                    continue;
-                }
-                let value = match &property.default {
-                    Some(expr) => eval_const_expr(req, expr, Some(at))?,
-                    None if property.ty.is_some() => continue,
-                    None => Value::null(),
-                };
-                let key = Key::Str(PhpString::new(req, &property.name.0)?);
-                if defaults.contains(&key) {
-                    continue;
-                }
-                defaults.set(req, key, value)?;
+        for (property, at) in &table {
+            if property.is_instance == statics
+                || (*at != class && property.visibility == Visibility::Private)
+            {
+                continue;
             }
+            let value = match &property.default {
+                Some(expr) => eval_const_expr(req, expr, Some(*at))?,
+                None if property.ty.is_some() => continue,
+                None => Value::null(),
+            };
+            let key = Key::Str(PhpString::new(req, &property.name.0)?);
+            defaults.set(req, key, value)?;
         }
     }
     Ok(Value::array(defaults))
@@ -4633,44 +4624,64 @@ fn linked_constants_at(
 }
 
 /// `ce->properties_info` after linking: the class's own properties
-/// and each of the parent's the class does not redeclare
+/// and each of the parent's table the class does not redeclare
 /// (`do_inherit_property`), a private one among them as the shadow
 /// `_class_string` skips, each with the class that declared it. A user
 /// class has its own first, compiled into the table before
-/// `zend_do_inheritance` appends the parent's; an internal class has
-/// the parent's first, `zend_register_internal_class_ex` inheriting
-/// before `zend_declare_typed_property` adds its own, which is why
-/// `ReflectionMethod` lists `$name` before `$class`.
+/// `zend_do_inheritance` appends the rows of the parent's table it
+/// does not hold, in that table's order, so a grandparent's rows come
+/// after the parent's; an internal class has the parent's first,
+/// `zend_register_internal_class_ex` inheriting before
+/// `zend_declare_typed_property` adds its own, a redeclaration taking
+/// the inherited row's place, which is why `ReflectionMethod` lists
+/// `$name` before `$class`.
+///
+/// ```php
+/// class A { static $a1 = 1; static $c = 1; } class B extends A { static $c = 2; static $b1 = 2; } class C extends B { static $c = 3; }
+/// print_r((new ReflectionClass('C'))->getDefaultProperties());
+/// ```
+/// ```expect
+/// Array
+/// (
+///     [c] => 3
+///     [b1] => 2
+///     [a1] => 1
+/// )
+/// ```
 fn linked_properties(req: &mut Request, class: ClassId) -> Vec<(PropertyDecl, ClassId)> {
-    let chain = class_chain(req, class);
-    let internal = req
-        .class_decl(class)
-        .is_none_or(|decl| decl.file.0.is_empty());
-    let mut table: Vec<(PropertyDecl, ClassId)> = Vec::new();
-    for at in chain.iter().rev() {
-        let Some(decl) = req.class_decl(*at) else {
-            continue;
-        };
-        for property in &decl.properties {
-            let at_index = table.iter().position(|(p, _)| p.name == property.name);
-            // A user class's own properties stand before the inherited
-            // ones, in the order the class declared them, since its
-            // table is compiled before `zend_do_inheritance` appends
-            // what the parent has and it does not: the place is after
-            // the ones this class has already put there, whether the
-            // name was inherited and is being redeclared or is new.
-            let own = table.iter().filter(|(_, d)| *d == class).count();
-            match at_index {
-                // The child's declaration stands where the parent's was
-                // inherited.
-                Some(i) if internal => table[i] = (property.clone(), *at),
-                Some(i) => {
-                    table.remove(i);
-                    table.insert(own.min(table.len()), (property.clone(), *at));
-                }
-                None if internal || *at != class => table.push((property.clone(), *at)),
-                None => table.insert(own, (property.clone(), *at)),
+    linked_properties_at(req, class, 0)
+}
+
+fn linked_properties_at(
+    req: &mut Request,
+    class: ClassId,
+    depth: u32,
+) -> Vec<(PropertyDecl, ClassId)> {
+    let Some(decl) = req.class_decl(class).cloned() else {
+        return Vec::new();
+    };
+    let inherited = match decl.parent.as_ref() {
+        Some(name) if depth <= 64 => match lookup_class(req, &name.0).ok().flatten() {
+            Some(parent) => linked_properties_at(req, parent, depth + 1),
+            None => Vec::new(),
+        },
+        _ => Vec::new(),
+    };
+    if decl.file.0.is_empty() {
+        let mut table = inherited;
+        for property in decl.properties {
+            match table.iter().position(|(p, _)| p.name == property.name) {
+                Some(i) => table[i] = (property, class),
+                None => table.push((property, class)),
             }
+        }
+        return table;
+    }
+    let mut table: Vec<(PropertyDecl, ClassId)> =
+        decl.properties.into_iter().map(|p| (p, class)).collect();
+    for (property, at) in inherited {
+        if !table.iter().any(|(p, _)| p.name == property.name) {
+            table.push((property, at));
         }
     }
     table
