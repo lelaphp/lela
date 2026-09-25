@@ -107,10 +107,19 @@ mod zpp;
 
 /// What `php_string.h`, `html.h` and `php_var.h` declare `PHPAPI` for the
 /// extensions that include them, ext/filter's sanitizers and ext/session's
-/// serializers (ADR-0004; design §4.10).
+/// and ext/spl's serializers (ADR-0004; design §4.10).
 pub use html::escape as escape_html_entities;
 pub use string::strip_tags_ex;
 pub use var::{Serializer, Unserializer};
+
+/// What `file.h`, `php_filestat.h`, `scanf.h` and `main/php_glob.h`
+/// declare `PHPAPI` for `spl_directory.c`, which calls them directly
+/// rather than through the function table (ADR-0004; design §4.10).
+pub use csv::fgetcsv as php_fgetcsv;
+pub use dir::glob::php_glob;
+pub use file::{php_fputcsv, php_fstat};
+pub use filestat::{Fs, php_stat};
+pub use scanf::php_sscanf_internal;
 
 use php_ext::abi::{Callable, Dependency, DependencyKind, Extension, ExtensionBuilder};
 use php_ext::call::{call_array, call_named, fetch_constant};

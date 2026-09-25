@@ -1152,6 +1152,25 @@ const STAT_NAMES: [&[u8]; 13] = [
 fn fstat(req: &mut Request) -> Result<Value, Thrown> {
     argument_count_between(req, 1, 1)?;
     let stream = stream_argument(req, 1)?;
+    php_fstat(req, stream)
+}
+
+/// `php_fstat(stream, return_value)`, `PHPAPI` in `file.h`
+/// (`Z/ext/standard/file.c:1327`): the stat array of `stream`, `false`
+/// for a stream with no stat. What `fstat()` answers, and what
+/// `SplFileObject::fstat()` calls directly, so neither `disable_functions`
+/// nor a namespaced `fstat` reaches it.
+///
+/// ```php
+/// $t = new SplTempFileObject(); $t->fwrite("abc"); $s = $t->fstat();
+/// var_dump(count($s), $s['size'], $s['mode'] & 0170000);
+/// ```
+/// ```expect
+/// int(26)
+/// int(3)
+/// int(32768)
+/// ```
+pub fn php_fstat(req: &mut Request, stream: Stream) -> Result<Value, Thrown> {
     let Some(sb) = stream.stat(req) else {
         return Ok(Value::bool(false));
     };
@@ -3029,10 +3048,7 @@ fn fscanf(req: &mut Request) -> Result<Value, Thrown> {
     let Some(line) = stream.get_line(req, None)? else {
         return Ok(Value::bool(false));
     };
-    let c_string = |bytes: &[u8]| bytes.split(|c| *c == 0).next().unwrap_or(&[]).to_vec();
-    let input = c_string(line.as_bytes());
-    let format = c_string(format.as_bytes());
-    crate::scanf::scan(req, &input, &format, 3, given - 2)
+    crate::scanf::php_sscanf_internal(req, line.as_bytes(), format.as_bytes(), 3, given - 2)
 }
 
 /// `php_stream_sync_supported`: the plain files kind, and the host's
@@ -3128,6 +3144,40 @@ fn fputcsv(req: &mut Request) -> Result<Value, Thrown> {
     let enclosure = one_byte(req, 4, b'"')?;
     let escape = crate::csv::escape_argument(req, 5)?;
     let eol = nullable_string(req, 6)?;
+    let eol = eol.as_ref().map(PhpString::as_bytes);
+    let written = php_fputcsv(req, stream, fields, (delimiter, enclosure, escape), eol)?;
+    Ok(written.map_or_else(
+        || Value::bool(false),
+        |n| Value::int(i64::try_from(n).unwrap_or(i64::MAX)),
+    ))
+}
+
+/// `php_fputcsv(stream, fields, delimiter, enclosure, escape_char,
+/// eol_str)`, `PHPAPI` in `file.h` (`Z/ext/standard/file.c:1683`): the
+/// fields as one CSV line written to `stream`, `eol` or `\n` after; the
+/// bytes written, `None` where the write failed. The control bytes are
+/// the separator, the enclosure and the escape, `None` for
+/// `PHP_CSV_NO_ESCAPE`. What `fputcsv()` writes through, and what
+/// `SplFileObject::fputcsv()` calls directly.
+///
+/// ```php
+/// $t = new SplTempFileObject();
+/// var_dump($t->fputcsv(['a', 'b c', 'd"e'], ';', '"', ''), $t->fputcsv([1, null], ',', '"', '', "!\n"));
+/// $t->rewind(); $t->fpassthru();
+/// ```
+/// ```expect
+/// int(15)
+/// int(4)
+/// a;"b c";"d""e"
+/// 1,!
+/// ```
+pub fn php_fputcsv(
+    req: &mut Request,
+    stream: Stream,
+    fields: PhpArray,
+    (delimiter, enclosure, escape): (u8, u8, Option<u8>),
+    eol: Option<&[u8]>,
+) -> Result<Option<usize>, Thrown> {
     let count = fields.len();
     let mut line = Vec::new();
     for (i, (_, field)) in fields.iter().enumerate() {
@@ -3159,13 +3209,10 @@ fn fputcsv(req: &mut Request) -> Result<Value, Thrown> {
         }
     }
     match eol {
-        Some(eol) => line.extend_from_slice(eol.as_bytes()),
+        Some(eol) => line.extend_from_slice(eol),
         None => line.push(b'\n'),
     }
-    Ok(stream.write(req, &line).map_or_else(
-        || Value::bool(false),
-        |n| Value::int(i64::try_from(n).unwrap_or(i64::MAX)),
-    ))
+    Ok(stream.write(req, &line))
 }
 
 /// `fgetcsv($stream, ?int $length = null, ...): array|false`,
