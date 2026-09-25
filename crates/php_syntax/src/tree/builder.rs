@@ -146,6 +146,15 @@ struct Frame {
     /// is what php's scanner had last returned when the node's first rule
     /// began ([`line`]).
     before: Option<usize>,
+    /// The kind of the innermost frame below this one that opened after a
+    /// different token, `Site::enclosing` in [`line`]. The frames below an
+    /// open one do not change while it is open, so this is read once, at
+    /// `Start`, off the frame directly below: its own kind where it
+    /// opened elsewhere, its own `enclosing` where it opened at the same
+    /// token. A left-nested chain opens every link at one token, and
+    /// looking down the open frames at each `Finish` instead cost the
+    /// chain's length per link.
+    enclosing: Option<SyntaxKind>,
 }
 
 struct Builder<'a> {
@@ -269,13 +278,22 @@ impl Builder<'_> {
     /// Open the nodes of one chain, outermost first.
     fn start(&mut self, chain: impl Iterator<Item = SyntaxKind>) {
         self.skip_insignificant();
+        let before = self.prev;
         for kind in chain {
+            let enclosing = self.frames.last().and_then(|below| {
+                if below.before == before {
+                    below.enclosing
+                } else {
+                    Some(below.kind)
+                }
+            });
             self.frames.push(Frame {
                 kind,
                 at: self.elements.len(),
                 children_from: self.pending.len(),
                 doc_comment: None,
-                before: self.prev,
+                before,
+                enclosing,
             });
             self.elements.push(Element::Node {
                 kind,
@@ -358,12 +376,7 @@ impl Builder<'_> {
             before: frame.before,
             last: self.prev,
             next: self.peek(),
-            enclosing: self
-                .frames
-                .iter()
-                .rev()
-                .find(|open| open.before != frame.before)
-                .map(|open| open.kind),
+            enclosing: frame.enclosing,
         };
         let children = &self.pending[frame.children_from..];
         let line = line::of(frame.kind, children, &site);
