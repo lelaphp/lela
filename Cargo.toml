@@ -33,5 +33,8 @@ libc = "0.2"                        # the platform's headers, for `php_heap`'s p
 corosensei = "0.3"                  # a fiber's machine stack and the switch onto it, in `php_heap` (design §4.1, §5.11)
 cc = "1"                            # ext/date's build.rs compiles the vendored timelib (design §7.2, §12)
 expect-test = "1.5"                 # the parser's snapshot fixtures, regenerated once per file (record §4.9)
+sha2 = { version = "0.11", default-features = false }  # ext/hash: `compress256` and `compress512` under php's own SHA-2 contexts (design §7.2)
+keccak = "0.2"                      # ext/hash: Keccak-f[1600] under php's SHA-3 sponge (design §7.2)
+twox-hash = { version = "2", default-features = false, features = ["alloc", "xxhash3_64", "xxhash3_128"] }  # ext/hash: xxh3 and xxh128, which php cannot serialise (design §7.2)
 pcre2-sys = "0.2.10"                # libpcre2-8 with its JIT, built from the crate's bundled source (design §7.2, `.cargo/config.toml`'s PCRE2_SYS_STATIC)
 libsqlite3-sys = { version = "0.38", features = ["bundled"] } # ext/pdo_sqlite's libsqlite3, built from the crate's bundled amalgamation (design §7.2, `.cargo/config.toml`'s LIBSQLITE3_FLAGS)

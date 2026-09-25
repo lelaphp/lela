@@ -333,6 +333,10 @@ fn trimmed_text(pin: &Pin, text: &str) -> String {
 
 /// A test's `--INI--`, one `-d` line each, with upstream's four
 /// substitutions; an unset `{ENV:NAME}` is a skip with upstream's reason.
+/// Each line is `name=value` with both halves trimmed, as
+/// `settings2array` (run-tests.php:2950) splits and trims them, so an
+/// `input_encoding = ISO-8859-1` is the entry and not a name php knows
+/// nothing of.
 fn ini_of(phpt: &Phpt, test: &Path) -> Result<Vec<String>, String> {
     let Some(body) = phpt.text("INI") else {
         return Ok(Vec::new());
@@ -353,9 +357,8 @@ fn ini_of(phpt: &Phpt, test: &Path) -> Result<Vec<String>, String> {
     }
     Ok(body
         .lines()
-        .map(str::trim)
-        .filter(|line| line.contains('='))
-        .map(str::to_owned)
+        .filter_map(|line| line.split_once('='))
+        .map(|(name, value)| format!("{}={}", name.trim(), value.trim()))
         .collect())
 }
 
@@ -468,6 +471,16 @@ mod tests {
         assert_eq!(
             reason_after("xfail", "xfail known"),
             Some("known".to_owned())
+        );
+    }
+
+    #[test]
+    fn an_ini_line_is_its_name_and_value_trimmed_around_the_first_equals() {
+        let text = "--TEST--\nn\n--INI--\ninput_encoding = ISO-8859-1\n  precision=14 \nno equals\na==b\n--FILE--\nx\n--EXPECT--\n1\n";
+        let phpt = Phpt::parse(Path::new("x.phpt"), text.as_bytes()).unwrap();
+        assert_eq!(
+            ini_of(&phpt, Path::new("x.phpt")).unwrap(),
+            ["input_encoding=ISO-8859-1", "precision=14", "a==b"]
         );
     }
 

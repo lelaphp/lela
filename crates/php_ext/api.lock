@@ -187,12 +187,17 @@ raising::throwing_warnings
 raising::too_few_arguments
 raising::warning
 request::Brigade
+request::BufferHandler
 request::Cast
+request::ContentType
 request::ExtensionId
 request::FdStream
 request::FilterFactory
 request::FilterFlags
 request::FilterStatus
+request::HandlerCall
+request::HandlerOp
+request::HandlerStatus
 request::HostPath
 request::Interrupt
 request::Interrupt::raise
@@ -211,6 +216,7 @@ request::Request::autoload_functions
 request::Request::autoload_register
 request::Request::autoload_unregister
 request::Request::backtrace
+request::Request::buffer_handler
 request::Request::called_scope
 request::Request::caller_var
 request::Request::class_alias
@@ -221,6 +227,7 @@ request::Request::clear_last_error
 request::Request::clear_stat_cache
 request::Request::constant_attributes
 request::Request::constants
+request::Request::content_type
 request::Request::core_ini_info
 request::Request::current_file
 request::Request::current_line
@@ -256,6 +263,7 @@ request::Request::header_remove
 request::Request::headers_list
 request::Request::headers_sent
 request::Request::included_files
+request::Request::info_ini_entries
 request::Request::info_table
 request::Request::ini_entries
 request::Request::ini_get
@@ -336,6 +344,7 @@ request::Request::xport_create
 request::ResourceDtor
 request::Resources
 request::Resources::register_type
+request::StartHandler
 request::Stream
 request::Stream::accept
 request::Stream::add_filter

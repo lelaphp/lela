@@ -51,16 +51,9 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
 }
 
 /// `PHP_SHA1Init`, `PHP_SHA1Update` and `PHP_SHA1Final` over one
-/// buffer: the twenty bytes. The names are FIPS 180-1's.
-#[allow(clippy::many_single_char_names)]
+/// buffer: the twenty bytes.
 fn digest(data: &[u8]) -> [u8; 20] {
-    let mut h: [u32; 5] = [
-        0x6745_2301,
-        0xEFCD_AB89,
-        0x98BA_DCFE,
-        0x1032_5476,
-        0xC3D2_E1F0,
-    ];
+    let mut h: [u32; 5] = INIT;
     let bits = (data.len() as u64).wrapping_mul(8);
     let mut message = data.to_vec();
     message.push(0x80);
@@ -69,47 +62,73 @@ fn digest(data: &[u8]) -> [u8; 20] {
     }
     message.extend_from_slice(&bits.to_be_bytes());
     for block in message.chunks_exact(64) {
-        let mut w = [0u32; 80];
-        for i in 0..16 {
-            w[i] = u32::from_be_bytes([
-                block[4 * i],
-                block[4 * i + 1],
-                block[4 * i + 2],
-                block[4 * i + 3],
-            ]);
-        }
-        for i in 16..80 {
-            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
-        }
-        let [mut a, mut b, mut c, mut d, mut e] = h;
-        for (i, word) in w.iter().enumerate() {
-            let (f, k) = match i / 20 {
-                0 => ((b & c) | (!b & d), 0x5A82_7999),
-                1 => (b ^ c ^ d, 0x6ED9_EBA1),
-                2 => ((b & c) | (b & d) | (c & d), 0x8F1B_BCDC),
-                _ => (b ^ c ^ d, 0xCA62_C1D6),
-            };
-            let t = a
-                .rotate_left(5)
-                .wrapping_add(f)
-                .wrapping_add(e)
-                .wrapping_add(k)
-                .wrapping_add(*word);
-            e = d;
-            d = c;
-            c = b.rotate_left(30);
-            b = a;
-            a = t;
-        }
-        for (word, add) in h.iter_mut().zip([a, b, c, d, e]) {
-            *word = word.wrapping_add(add);
-        }
+        transform(&mut h, block);
     }
     let mut out = [0u8; 20];
     for (i, word) in h.iter().enumerate() {
         out[4 * i..4 * i + 4].copy_from_slice(&word.to_be_bytes());
     }
     out
+}
+
+/// `PHP_SHA1InitArgs`' five words, which ext/hash's `sha1` starts from.
+pub const INIT: [u32; 5] = [
+    0x6745_2301,
+    0xEFCD_AB89,
+    0x98BA_DCFE,
+    0x1032_5476,
+    0xC3D2_E1F0,
+];
+
+/// `SHA1Transform`: one 64-byte block into the five words, which
+/// ext/hash's `sha1` state walks over php's `PHP_SHA1_CTX` buffer. The
+/// names are FIPS 180-1's.
+///
+/// ```php
+/// var_dump(sha1(str_repeat('a', 55)), sha1(str_repeat('a', 56)), sha1(str_repeat('a', 200)));
+/// ```
+/// ```expect
+/// string(40) "c1c8bbdc22796e28c0e15163d20899b65621d65a"
+/// string(40) "c2db330f6083854c99d4b5bfb6e8f29f201be699"
+/// string(40) "e61cfffe0d9195a525fc6cf06ca2d77119c24a40"
+/// ```
+#[allow(clippy::many_single_char_names)]
+pub fn transform(h: &mut [u32; 5], block: &[u8]) {
+    let mut w = [0u32; 80];
+    for i in 0..16 {
+        w[i] = u32::from_be_bytes([
+            block[4 * i],
+            block[4 * i + 1],
+            block[4 * i + 2],
+            block[4 * i + 3],
+        ]);
+    }
+    for i in 16..80 {
+        w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
+    }
+    let [mut a, mut b, mut c, mut d, mut e] = *h;
+    for (i, word) in w.iter().enumerate() {
+        let (f, k) = match i / 20 {
+            0 => ((b & c) | (!b & d), 0x5A82_7999),
+            1 => (b ^ c ^ d, 0x6ED9_EBA1),
+            2 => ((b & c) | (b & d) | (c & d), 0x8F1B_BCDC),
+            _ => (b ^ c ^ d, 0xCA62_C1D6),
+        };
+        let t = a
+            .rotate_left(5)
+            .wrapping_add(f)
+            .wrapping_add(e)
+            .wrapping_add(k)
+            .wrapping_add(*word);
+        e = d;
+        d = c;
+        c = b.rotate_left(30);
+        b = a;
+        a = t;
+    }
+    for (word, add) in h.iter_mut().zip([a, b, c, d, e]) {
+        *word = word.wrapping_add(add);
+    }
 }
 
 /// `sha1(string $string, bool $binary = false): string`.
@@ -139,6 +158,7 @@ fn sha1(req: &mut Request) -> Result<Value, Thrown> {
 /// var_dump(sha1_file($p), bin2hex(sha1_file($p, true)), sha1_file(__DIR__ . '/nope.txt'));
 /// ```
 /// ```expect
+///
 /// Warning: sha1_file(%s/nope.txt): Failed to open stream: No such file or directory in %s on line 3
 /// string(40) "13d726010b8b0a0cec871360a41b7bc5ba1e5045"
 /// string(40) "13d726010b8b0a0cec871360a41b7bc5ba1e5045"

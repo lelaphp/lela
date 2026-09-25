@@ -591,9 +591,24 @@ impl Shared {
 /// and `html_errors` are the two the CLI moves, from `30` and `1`.
 /// `error_prepend_string` and `error_append_string` are `NULL` in php's
 /// table and empty here, since an entry with no value at all is one
-/// `ini_set()` refuses to set. `short_open_tag` is the one entry the
-/// scanner reads, `CG(short_tags)`, and `token_get_all` with it.
-const CORE_INI: [(&str, &str); 37] = [
+/// `ini_set()` refuses to set; so are `internal_encoding`,
+/// `input_encoding` and `output_encoding`, which an extension reads
+/// before `default_charset` (`php_get_internal_encoding` and its kin),
+/// and `default_mimetype` is `SAPI_DEFAULT_MIMETYPE`. `short_open_tag`
+/// is the one entry the scanner reads, `CG(short_tags)`, and
+/// `token_get_all` with it.
+///
+/// ```php
+/// var_dump(ini_get('internal_encoding'), ini_get('output_encoding'), ini_get('default_mimetype'), ini_set('input_encoding', 'ISO-8859-1'), ini_get('input_encoding'));
+/// ```
+/// ```expect
+/// string(0) ""
+/// string(0) ""
+/// string(9) "text/html"
+/// string(0) ""
+/// string(10) "ISO-8859-1"
+/// ```
+const CORE_INI: [(&str, &str); 41] = [
     ("short_open_tag", "1"),
     ("fatal_error_backtraces", "1"),
     ("precision", "14"),
@@ -611,6 +626,10 @@ const CORE_INI: [(&str, &str); 37] = [
     ("memory_limit", "128M"),
     ("max_execution_time", "0"),
     ("default_charset", "UTF-8"),
+    ("default_mimetype", "text/html"),
+    ("internal_encoding", ""),
+    ("input_encoding", ""),
+    ("output_encoding", ""),
     // `PHP_INCLUDE_PATH`, the pinned build's `.:${PEAR_INSTALLDIR}`,
     // which `DEFAULT_INCLUDE_PATH` says too.
     ("include_path", crate::constants::PHP_INCLUDE_PATH),

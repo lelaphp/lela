@@ -80,7 +80,7 @@ pub enum PathIntent {
 #[derive(Debug, Clone, PartialEq)]
 pub enum OutputOp {
     Start {
-        callback: Option<Callable>,
+        handler: StartHandler,
         chunk_size: i64,
         flags: i64,
     },
@@ -98,6 +98,94 @@ pub enum OutputOp {
     },
     ListHandlers,
     ImplicitFlush(bool),
+}
+
+/// What `ob_start()` starts, `php_output_handler_create_user`'s switch
+/// over its `$callback` (`Z/main/output.c:466`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum StartHandler {
+    /// `null`: the default handler, which passes its buffer on.
+    Default,
+    /// A name an extension registered its handler under, found by
+    /// [`Request::buffer_handler`] before the name is read as a callable.
+    Registered(BufferHandler),
+    /// Anything else, as the callable it resolved to.
+    User(Callable),
+}
+
+/// A handler of the buffer stack an extension hands to
+/// [`ExtensionBuilder::register`] under a name `ob_start()` takes,
+/// `php_output_handler_alias_register` from its `MINIT`, with the
+/// handlers it cannot stand beside: while the stack is not empty and one
+/// of `conflicts` is on it, starting this one is php's warning and a
+/// refusal, the check every `php_output_handler_conflict_register` in
+/// php-src makes through `php_output_handler_conflict`.
+///
+/// [`ExtensionBuilder::register`]: crate::api::abi::ExtensionBuilder::register
+#[derive(Debug, Clone, Copy)]
+pub struct BufferHandler {
+    pub name: &'static str,
+    pub conflicts: &'static [&'static str],
+    /// `php_output_handler_context_func_t`.
+    pub handler: fn(&mut Request, &mut HandlerCall<'_>) -> Result<HandlerStatus, Thrown>,
+}
+
+impl PartialEq for BufferHandler {
+    /// One registration a name, as php's alias table keys them.
+    fn eq(&self, other: &BufferHandler) -> bool {
+        self.name == other.name
+    }
+}
+
+/// The operation a handler is served for, `php_output_context.op`'s
+/// bits read once; none set is a plain write.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // php's op bits, one field per bit, each read alone
+pub struct HandlerOp {
+    /// `PHP_OUTPUT_HANDLER_START`: the handler's first call.
+    pub start: bool,
+    /// `PHP_OUTPUT_HANDLER_CLEAN`.
+    pub clean: bool,
+    /// `PHP_OUTPUT_HANDLER_FLUSH`.
+    pub flush: bool,
+    /// `PHP_OUTPUT_HANDLER_FINAL`: its last.
+    pub finish: bool,
+}
+
+/// One call of an extension's buffer handler, `php_output_context`, and
+/// the one `php_output_handler_hook` an extension in php-src asks of the
+/// handler being served.
+#[derive(Debug)]
+pub struct HandlerCall<'a> {
+    pub op: HandlerOp,
+    /// `context->in`: the handler's buffered bytes.
+    pub input: &'a [u8],
+    /// `context->out`: what goes on, none being `PHP_OUTPUT_HANDLER_NO_DATA`.
+    pub out: Vec<u8>,
+    /// `php_output_handler_hook(PHP_OUTPUT_HANDLER_HOOK_IMMUTABLE)`: set,
+    /// the handler can no longer be cleaned or removed.
+    pub immutable: bool,
+}
+
+/// What an extension's buffer handler answers, its `zend_result`: on
+/// `Failure` the handler is disabled and its buffer goes on unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandlerStatus {
+    Success,
+    Failure,
+}
+
+/// `SG(sapi_headers)`'s content type, `mimetype` and
+/// `send_default_content_type` read as the one state they are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContentType {
+    /// The mimetype a `Content-Type` header, or the default one sent
+    /// with the block, laid down.
+    Held(Vec<u8>),
+    /// None yet, and the default one still to be sent.
+    Default,
+    /// None, and none to be sent.
+    Unset,
 }
 
 /// An open stream, php's `php_stream` (design §4.3 seam 5), named by its
@@ -9251,6 +9339,22 @@ impl Request {
         self.output.started_at()
     }
 
+    /// `php_output_handler_alias`: the handler an extension registered
+    /// under `name`, which `ob_start()` takes before it reads the name as
+    /// a callable.
+    #[must_use]
+    pub fn buffer_handler(&self, name: &[u8]) -> Option<BufferHandler> {
+        self.registered::<BufferHandler>()
+            .find(|handler| handler.name.as_bytes() == name)
+            .copied()
+    }
+
+    /// `SG(sapi_headers).mimetype` and `send_default_content_type`.
+    #[must_use]
+    pub fn content_type(&self) -> ContentType {
+        self.output.content_type()
+    }
+
     /// `header()`, `sapi_header_op` under `SAPI_HEADER_ADD` or
     /// `SAPI_HEADER_REPLACE` (`crate::output`): the line taken, replacing
     /// the lines of its name when `replace` is set, with `response_code`
@@ -10655,7 +10759,28 @@ impl Request {
             return;
         }
         self.info_table(&[&["Version", PHP_VERSION]]);
-        if module.ini.is_empty() {
+        let names: Vec<&[u8]> = module.ini.iter().map(|entry| &*entry.name.0).collect();
+        self.info_ini_entries(&names);
+    }
+
+    /// `DISPLAY_INI_ENTRIES()`, `display_ini_entries`
+    /// (`Z/main/php_ini.c:115`), for the entries named, as an
+    /// extension's `MINFO` ends with it: nothing for none, else a table
+    /// under `Directive => Local Value => Master Value`, the master being
+    /// the engine's default and an empty value `no value`.
+    ///
+    /// ```php
+    /// @ini_set('iconv.output_encoding', 'ISO-8859-1');
+    /// $e = new ReflectionExtension('iconv'); ob_start(); $e->info(); echo strstr(ob_get_clean(), 'Directive');
+    /// ```
+    /// ```expect
+    /// Directive => Local Value => Master Value
+    /// iconv.input_encoding => no value => no value
+    /// iconv.output_encoding => ISO-8859-1 => no value
+    /// iconv.internal_encoding => no value => no value
+    /// ```
+    pub fn info_ini_entries(&mut self, names: &[&[u8]]) {
+        if names.is_empty() {
             return;
         }
         let no_value = || String::from("no value");
@@ -10664,14 +10789,13 @@ impl Request {
                 .filter(|v| !v.is_empty())
                 .map_or_else(no_value, |v| String::from_utf8_lossy(v).into_owned())
         };
-        let rows: Vec<[String; 3]> = module
-            .ini
+        let rows: Vec<[String; 3]> = names
             .iter()
-            .map(|entry| {
+            .map(|name| {
                 [
-                    String::from_utf8_lossy(&entry.name.0).into_owned(),
-                    shown(self.ini_get(&entry.name.0)),
-                    shown(self.shared.ini_default(&entry.name.0)),
+                    String::from_utf8_lossy(name).into_owned(),
+                    shown(self.ini_get(name)),
+                    shown(self.shared.ini_default(name)),
                 ]
             })
             .collect();
