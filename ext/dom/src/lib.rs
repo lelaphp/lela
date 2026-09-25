@@ -27,14 +27,23 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 mod classes;
+mod css;
 mod document;
 mod element;
+mod html5_parser;
+mod html5_serializer;
+mod html_document;
+mod inner_html;
 mod map;
+mod modern;
 mod node;
 mod object;
 mod parent;
+mod private;
 mod props;
 mod stub;
+mod token_list;
+mod xml_serializer;
 mod xpath;
 
 use php_ext::abi::{
@@ -686,6 +695,519 @@ class DOMXPath
 }
 "#;
 
+/// The `Dom\` namespace as `php_dom.stub.php` declares it (8.4), with the
+/// docblocks the reader takes nothing from left out.
+const MODERN_STUB: &str = r#"
+namespace Dom
+{
+interface ParentNode
+{
+    public function append(Node|string ...$nodes): void;
+    public function prepend(Node|string ...$nodes): void;
+    public function replaceChildren(Node|string ...$nodes): void;
+    public function querySelector(string $selectors): ?Element;
+    public function querySelectorAll(string $selectors): NodeList;
+}
+interface ChildNode
+{
+    public function remove(): void;
+    public function before(Node|string ...$nodes): void;
+    public function after(Node|string ...$nodes): void;
+    public function replaceWith(Node|string ...$nodes): void;
+}
+/** @strict-properties */
+class Implementation
+{
+    public function createDocumentType(string $qualifiedName, string $publicId, string $systemId): DocumentType {}
+    public function createDocument(?string $namespace, string $qualifiedName, ?DocumentType $doctype = null): XMLDocument {}
+    public function createHTMLDocument(?string $title = null): HTMLDocument {}
+}
+/** @strict-properties */
+class Node
+{
+    private final function __construct() {}
+    public int $nodeType;
+    public string $nodeName;
+    public string $baseURI;
+    public bool $isConnected;
+    public ?Document $ownerDocument;
+    /** @implementation-alias DOMNode::getRootNode */
+    public function getRootNode(array $options = []): Node {}
+    public ?Node $parentNode;
+    public ?Element $parentElement;
+    /** @implementation-alias DOMNode::hasChildNodes */
+    public function hasChildNodes(): bool {}
+    public NodeList $childNodes;
+    public ?Node $firstChild;
+    public ?Node $lastChild;
+    public ?Node $previousSibling;
+    public ?Node $nextSibling;
+    public ?string $nodeValue;
+    public ?string $textContent;
+    /** @implementation-alias DOMNode::normalize */
+    public function normalize(): void {}
+    /** @implementation-alias DOMNode::cloneNode */
+    public function cloneNode(bool $deep = false): Node {}
+    public function isEqualNode(?Node $otherNode): bool {}
+    public function isSameNode(?Node $otherNode): bool {}
+    public const int DOCUMENT_POSITION_DISCONNECTED = 0x01;
+    public const int DOCUMENT_POSITION_PRECEDING = 0x02;
+    public const int DOCUMENT_POSITION_FOLLOWING = 0x04;
+    public const int DOCUMENT_POSITION_CONTAINS = 0x08;
+    public const int DOCUMENT_POSITION_CONTAINED_BY = 0x10;
+    public const int DOCUMENT_POSITION_IMPLEMENTATION_SPECIFIC = 0x20;
+    public function compareDocumentPosition(Node $other): int {}
+    public function contains(?Node $other): bool {}
+    public function lookupPrefix(?string $namespace): ?string {}
+    /** @implementation-alias DOMNode::lookupNamespaceURI */
+    public function lookupNamespaceURI(?string $prefix): ?string {}
+    public function isDefaultNamespace(?string $namespace): bool {}
+    public function insertBefore(Node $node, ?Node $child): Node {}
+    public function appendChild(Node $node): Node {}
+    public function replaceChild(Node $node, Node $child): Node {}
+    public function removeChild(Node $child): Node {}
+    /** @implementation-alias DOMNode::getLineNo */
+    public function getLineNo(): int {}
+    public function getNodePath(): string {}
+    /** @implementation-alias DOMNode::C14N */
+    public function C14N(bool $exclusive = false, bool $withComments = false, ?array $xpath = null, ?array $nsPrefixes = null): string|false {}
+    /** @implementation-alias DOMNode::C14NFile */
+    public function C14NFile(string $uri, bool $exclusive = false, bool $withComments = false, ?array $xpath = null, ?array $nsPrefixes = null): int|false {}
+    /** @implementation-alias DOMNode::__sleep */
+    public function __sleep(): array {}
+    /** @implementation-alias DOMNode::__wakeup */
+    public function __wakeup(): void {}
+}
+class NodeList implements \IteratorAggregate, \Countable
+{
+    public int $length;
+    /** @implementation-alias DOMNodeList::count */
+    public function count(): int {}
+    /** @implementation-alias DOMNodeList::getIterator */
+    public function getIterator(): \Iterator {}
+    /** @implementation-alias DOMNodeList::item */
+    public function item(int $index): ?Node {}
+}
+class NamedNodeMap implements \IteratorAggregate, \Countable
+{
+    public int $length;
+    /** @implementation-alias DOMNamedNodeMap::item */
+    public function item(int $index): ?Attr {}
+    /** @implementation-alias DOMNamedNodeMap::getNamedItem */
+    public function getNamedItem(string $qualifiedName): ?Attr {}
+    /** @implementation-alias DOMNamedNodeMap::getNamedItemNS */
+    public function getNamedItemNS(?string $namespace, string $localName): ?Attr {}
+    /** @implementation-alias DOMNamedNodeMap::count */
+    public function count(): int {}
+    /** @implementation-alias DOMNamedNodeMap::getIterator */
+    public function getIterator(): \Iterator {}
+}
+class DtdNamedNodeMap implements \IteratorAggregate, \Countable
+{
+    public int $length;
+    /** @implementation-alias DOMNamedNodeMap::item */
+    public function item(int $index): Entity|Notation|null {}
+    /** @implementation-alias DOMNamedNodeMap::getNamedItem */
+    public function getNamedItem(string $qualifiedName): Entity|Notation|null {}
+    /** @implementation-alias DOMNamedNodeMap::getNamedItemNS */
+    public function getNamedItemNS(?string $namespace, string $localName): Entity|Notation|null {}
+    /** @implementation-alias DOMNamedNodeMap::count */
+    public function count(): int {}
+    /** @implementation-alias DOMNamedNodeMap::getIterator */
+    public function getIterator(): \Iterator {}
+}
+class HTMLCollection implements \IteratorAggregate, \Countable
+{
+    public int $length;
+    /** @implementation-alias DOMNodeList::item */
+    public function item(int $index): ?Element {}
+    public function namedItem(string $key): ?Element {}
+    /** @implementation-alias DOMNodeList::count */
+    public function count(): int {}
+    /** @implementation-alias DOMNodeList::getIterator */
+    public function getIterator(): \Iterator {}
+}
+enum AdjacentPosition : string
+{
+    case BeforeBegin = "beforebegin";
+    case AfterBegin = "afterbegin";
+    case BeforeEnd = "beforeend";
+    case AfterEnd = "afterend";
+}
+class Element extends Node implements ParentNode, ChildNode
+{
+    public ?string $namespaceURI;
+    public ?string $prefix;
+    public string $localName;
+    public string $tagName;
+    public HTMLCollection $children;
+    public ?Element $firstElementChild;
+    public ?Element $lastElementChild;
+    public int $childElementCount;
+    public ?Element $previousElementSibling;
+    public ?Element $nextElementSibling;
+    public string $id;
+    public string $className;
+    public TokenList $classList;
+    /** @implementation-alias DOMNode::hasAttributes */
+    public function hasAttributes(): bool {}
+    public NamedNodeMap $attributes;
+    /** @implementation-alias DOMElement::getAttributeNames */
+    public function getAttributeNames(): array {}
+    /** @implementation-alias DOMElement::getAttribute */
+    public function getAttribute(string $qualifiedName): ?string {}
+    /** @implementation-alias DOMElement::getAttributeNS */
+    public function getAttributeNS(?string $namespace, string $localName): ?string {}
+    /** @implementation-alias DOMElement::setAttribute */
+    public function setAttribute(string $qualifiedName, string $value): void {}
+    /** @implementation-alias DOMElement::setAttributeNS */
+    public function setAttributeNS(?string $namespace, string $qualifiedName, string $value): void {}
+    public function removeAttribute(string $qualifiedName): void {}
+    /** @implementation-alias DOMElement::removeAttributeNS */
+    public function removeAttributeNS(?string $namespace, string $localName): void {}
+    /** @implementation-alias DOMElement::toggleAttribute */
+    public function toggleAttribute(string $qualifiedName, ?bool $force = null): bool {}
+    /** @implementation-alias DOMElement::hasAttribute */
+    public function hasAttribute(string $qualifiedName): bool {}
+    /** @implementation-alias DOMElement::hasAttributeNS */
+    public function hasAttributeNS(?string $namespace, string $localName): bool {}
+    /** @implementation-alias DOMElement::getAttributeNode */
+    public function getAttributeNode(string $qualifiedName): ?Attr {}
+    /** @implementation-alias DOMElement::getAttributeNodeNS */
+    public function getAttributeNodeNS(?string $namespace, string $localName): ?Attr {}
+    /** @implementation-alias Dom\Element::setAttributeNodeNS */
+    public function setAttributeNode(Attr $attr) : ?Attr {}
+    public function setAttributeNodeNS(Attr $attr) : ?Attr {}
+    public function removeAttributeNode(Attr $attr) : Attr {}
+    public function getElementsByTagName(string $qualifiedName): HTMLCollection {}
+    public function getElementsByTagNameNS(?string $namespace, string $localName): HTMLCollection {}
+    public function getElementsByClassName(string $classNames): HTMLCollection {}
+    public function insertAdjacentElement(AdjacentPosition $where, Element $element): ?Element {}
+    public function insertAdjacentText(AdjacentPosition $where, string $data): void {}
+    public function insertAdjacentHTML(AdjacentPosition $where, string $string): void {}
+    /** @implementation-alias DOMElement::setIdAttribute */
+    public function setIdAttribute(string $qualifiedName, bool $isId): void {}
+    /** @implementation-alias DOMElement::setIdAttributeNS */
+    public function setIdAttributeNS(?string $namespace, string $qualifiedName, bool $isId): void {}
+    public function setIdAttributeNode(Attr $attr, bool $isId): void {}
+    /** @implementation-alias DOMElement::remove */
+    public function remove(): void {}
+    /** @implementation-alias DOMElement::before */
+    public function before(Node|string ...$nodes): void {}
+    /** @implementation-alias DOMElement::after */
+    public function after(Node|string ...$nodes): void {}
+    /** @implementation-alias DOMElement::replaceWith */
+    public function replaceWith(Node|string ...$nodes): void {}
+    /** @implementation-alias DOMElement::append */
+    public function append(Node|string ...$nodes): void {}
+    /** @implementation-alias DOMElement::prepend */
+    public function prepend(Node|string ...$nodes): void {}
+    /** @implementation-alias DOMElement::replaceChildren */
+    public function replaceChildren(Node|string ...$nodes): void {}
+    public function querySelector(string $selectors): ?Element {}
+    public function querySelectorAll(string $selectors): NodeList {}
+    public function closest(string $selectors): ?Element {}
+    public function matches(string $selectors): bool {}
+    public string $innerHTML;
+    public string $outerHTML;
+    public string $substitutedNodeValue;
+    public function getInScopeNamespaces(): array {}
+    public function getDescendantNamespaces(): array {}
+    public function rename(?string $namespaceURI, string $qualifiedName): void {}
+}
+class HTMLElement extends Element
+{
+}
+class Attr extends Node
+{
+    public ?string $namespaceURI;
+    public ?string $prefix;
+    public string $localName;
+    public string $name;
+    public string $value;
+    public ?Element $ownerElement;
+    public bool $specified;
+    /** @implementation-alias DOMAttr::isId */
+    public function isId(): bool {}
+    /** @implementation-alias Dom\Element::rename */
+    public function rename(?string $namespaceURI, string $qualifiedName): void {}
+}
+class CharacterData extends Node implements ChildNode
+{
+    public ?Element $previousElementSibling;
+    public ?Element $nextElementSibling;
+    public string $data;
+    public int $length;
+    /** @implementation-alias DOMCharacterData::substringData */
+    public function substringData(int $offset, int $count): string {}
+    public function appendData(string $data): void {}
+    public function insertData(int $offset, string $data): void {}
+    public function deleteData(int $offset, int $count): void {}
+    public function replaceData(int $offset, int $count, string $data): void {}
+    /** @implementation-alias DOMElement::remove */
+    public function remove(): void {}
+    /** @implementation-alias DOMElement::before */
+    public function before(Node|string ...$nodes): void {}
+    /** @implementation-alias DOMElement::after */
+    public function after(Node|string ...$nodes): void {}
+    /** @implementation-alias DOMElement::replaceWith */
+    public function replaceWith(Node|string ...$nodes): void {}
+}
+class Text extends CharacterData
+{
+    /** @implementation-alias DOMText::splitText */
+    public function splitText(int $offset): Text {}
+    public string $wholeText;
+}
+class CDATASection extends Text {}
+class ProcessingInstruction extends CharacterData
+{
+    public string $target;
+}
+class Comment extends CharacterData
+{
+}
+class DocumentType extends Node implements ChildNode
+{
+    public string $name;
+    public DtdNamedNodeMap $entities;
+    public DtdNamedNodeMap $notations;
+    public string $publicId;
+    public string $systemId;
+    public ?string $internalSubset;
+    /** @implementation-alias DOMElement::remove */
+    public function remove(): void {}
+    /** @implementation-alias DOMElement::before */
+    public function before(Node|string ...$nodes): void {}
+    /** @implementation-alias DOMElement::after */
+    public function after(Node|string ...$nodes): void {}
+    /** @implementation-alias DOMElement::replaceWith */
+    public function replaceWith(Node|string ...$nodes): void {}
+}
+class DocumentFragment extends Node implements ParentNode
+{
+    public HTMLCollection $children;
+    public ?Element $firstElementChild;
+    public ?Element $lastElementChild;
+    public int $childElementCount;
+    /** @implementation-alias DOMDocumentFragment::appendXML */
+    public function appendXml(string $data): bool {}
+    /** @implementation-alias DOMElement::append */
+    public function append(Node|string ...$nodes): void {}
+    /** @implementation-alias DOMElement::prepend */
+    public function prepend(Node|string ...$nodes): void {}
+    /** @implementation-alias DOMElement::replaceChildren */
+    public function replaceChildren(Node|string ...$nodes): void {}
+    /** @implementation-alias Dom\Element::querySelector */
+    public function querySelector(string $selectors): ?Element {}
+    /** @implementation-alias Dom\Element::querySelectorAll */
+    public function querySelectorAll(string $selectors): NodeList {}
+}
+class Entity extends Node
+{
+    public ?string $publicId;
+    public ?string $systemId;
+    public ?string $notationName;
+}
+class EntityReference extends Node {}
+class Notation extends Node
+{
+    public string $publicId;
+    public string $systemId;
+}
+abstract class Document extends Node implements ParentNode
+{
+    public HTMLCollection $children;
+    public ?Element $firstElementChild;
+    public ?Element $lastElementChild;
+    public int $childElementCount;
+    public Implementation $implementation;
+    public string $URL;
+    public string $documentURI;
+    public string $characterSet;
+    public string $charset;
+    public string $inputEncoding;
+    public ?DocumentType $doctype;
+    public ?Element $documentElement;
+    /** @implementation-alias Dom\Element::getElementsByTagName */
+    public function getElementsByTagName(string $qualifiedName): HTMLCollection {}
+    /** @implementation-alias Dom\Element::getElementsByTagNameNS */
+    public function getElementsByTagNameNS(?string $namespace, string $localName): HTMLCollection {}
+    /** @implementation-alias Dom\Element::getElementsByClassName */
+    public function getElementsByClassName(string $classNames): HTMLCollection {}
+    public function createElement(string $localName): Element {}
+    public function createElementNS(?string $namespace, string $qualifiedName): Element {}
+    /** @implementation-alias DOMDocument::createDocumentFragment */
+    public function createDocumentFragment(): DocumentFragment {}
+    /** @implementation-alias DOMDocument::createTextNode */
+    public function createTextNode(string $data): Text {}
+    /** @implementation-alias DOMDocument::createCDATASection */
+    public function createCDATASection(string $data): CDATASection {}
+    /** @implementation-alias DOMDocument::createComment */
+    public function createComment(string $data): Comment {}
+    public function createProcessingInstruction(string $target, string $data): ProcessingInstruction {}
+    public function importNode(?Node $node, bool $deep = false): Node {}
+    public function adoptNode(Node $node): Node {}
+    /** @implementation-alias DOMDocument::createAttribute */
+    public function createAttribute(string $localName): Attr {}
+    /** @implementation-alias DOMDocument::createAttributeNS */
+    public function createAttributeNS(?string $namespace, string $qualifiedName): Attr {}
+    /** @implementation-alias DOMDocument::getElementById */
+    public function getElementById(string $elementId): ?Element {}
+    public function registerNodeClass(string $baseClass, ?string $extendedClass): void {}
+    /** @implementation-alias DOMDocument::schemaValidate */
+    public function schemaValidate(string $filename, int $flags = 0): bool {}
+    /** @implementation-alias DOMDocument::schemaValidateSource */
+    public function schemaValidateSource(string $source, int $flags = 0): bool {}
+    /** @implementation-alias DOMDocument::relaxNGValidate */
+    public function relaxNgValidate(string $filename): bool {}
+    /** @implementation-alias DOMDocument::relaxNGValidateSource */
+    public function relaxNgValidateSource(string $source): bool {}
+    /** @implementation-alias DOMElement::append */
+    public function append(Node|string ...$nodes): void {}
+    /** @implementation-alias DOMElement::prepend */
+    public function prepend(Node|string ...$nodes): void {}
+    /** @implementation-alias DOMDocument::replaceChildren */
+    public function replaceChildren(Node|string ...$nodes): void {}
+    public function importLegacyNode(\DOMNode $node, bool $deep = false): Node {}
+    /** @implementation-alias Dom\Element::querySelector */
+    public function querySelector(string $selectors): ?Element {}
+    /** @implementation-alias Dom\Element::querySelectorAll */
+    public function querySelectorAll(string $selectors): NodeList {}
+    public ?HTMLElement $body;
+    public ?HTMLElement $head;
+    public string $title;
+}
+final class HTMLDocument extends Document
+{
+    public static function createEmpty(string $encoding = "UTF-8"): HTMLDocument {}
+    public static function createFromFile(string $path, int $options = 0, ?string $overrideEncoding = null): HTMLDocument {}
+    public static function createFromString(string $source, int $options = 0, ?string $overrideEncoding = null): HTMLDocument {}
+    /** @implementation-alias Dom\XMLDocument::saveXml */
+    public function saveXml(?Node $node = null, int $options = 0): string|false {}
+    /** @implementation-alias DOMDocument::save */
+    public function saveXmlFile(string $filename, int $options = 0): int|false {}
+    public function saveHtml(?Node $node = null): string {}
+    public function saveHtmlFile(string $filename): int|false {}
+}
+final class XMLDocument extends Document
+{
+    public static function createEmpty(string $version = "1.0", string $encoding = "UTF-8"): XMLDocument {}
+    public static function createFromFile(string $path, int $options = 0, ?string $overrideEncoding = null): XMLDocument {}
+    public static function createFromString(string $source, int $options = 0, ?string $overrideEncoding = null): XMLDocument {}
+    public string $xmlEncoding;
+    public bool $xmlStandalone;
+    public string $xmlVersion;
+    public bool $formatOutput;
+    /** @implementation-alias DOMDocument::createEntityReference */
+    public function createEntityReference(string $name): EntityReference {}
+    /** @implementation-alias DOMDocument::validate */
+    public function validate(): bool {}
+    public function xinclude(int $options = 0): int {}
+    public function saveXml(?Node $node = null, int $options = 0): string|false {}
+    /** @implementation-alias DOMDocument::save */
+    public function saveXmlFile(string $filename, int $options = 0): int|false {}
+}
+/** @strict-properties */
+final class TokenList implements \IteratorAggregate, \Countable
+{
+    /** @implementation-alias Dom\Node::__construct */
+    private function __construct() {}
+    public int $length;
+    public function item(int $index): ?string {}
+    public function contains(string $token): bool {}
+    public function add(string ...$tokens): void {}
+    public function remove(string ...$tokens): void {}
+    public function toggle(string $token, ?bool $force = null): bool {}
+    public function replace(string $token, string $newToken): bool {}
+    public function supports(string $token): bool {}
+    public string $value;
+    public function count(): int {}
+    public function getIterator(): \Iterator {}
+}
+/** @strict-properties */
+readonly final class NamespaceInfo
+{
+    public ?string $prefix;
+    public ?string $namespaceURI;
+    public Element $element;
+    /** @implementation-alias Dom\Node::__construct */
+    private function __construct() {}
+}
+final class XPath
+{
+    public Document $document;
+    public bool $registerNodeNamespaces;
+    public function __construct(Document $document, bool $registerNodeNS = true) {}
+    public function evaluate(string $expression, ?Node $contextNode = null, bool $registerNodeNS = true): null|bool|float|string|NodeList {}
+    public function query(string $expression, ?Node $contextNode = null, bool $registerNodeNS = true): NodeList {}
+    /** @implementation-alias DOMXPath::registerNamespace */
+    public function registerNamespace(string $prefix, string $namespace): bool {}
+    /** @implementation-alias DOMXPath::registerPhpFunctions */
+    public function registerPhpFunctions(string|array|null $restrict = null): void {}
+    /** @implementation-alias DOMXPath::registerPhpFunctionNS */
+    public function registerPhpFunctionNS(string $namespaceURI, string $name, callable $callable): void {}
+    /** @implementation-alias DOMXPath::quote */
+    public static function quote(string $str): string {}
+}
+}
+"#;
+
+/// The order `PHP_MINIT_FUNCTION(dom)` registers the classes of both
+/// namespaces in, which `get_declared_classes()` shows.
+const MINIT_ORDER: [&str; 50] = [
+    "Dom\\AdjacentPosition",
+    "DOMException",
+    "DOMParentNode",
+    "Dom\\ParentNode",
+    "DOMChildNode",
+    "Dom\\ChildNode",
+    "DOMImplementation",
+    "Dom\\Implementation",
+    "DOMNode",
+    "Dom\\Node",
+    "DOMNameSpaceNode",
+    "Dom\\NamespaceInfo",
+    "DOMDocumentFragment",
+    "Dom\\DocumentFragment",
+    "Dom\\Document",
+    "DOMDocument",
+    "Dom\\HTMLDocument",
+    "Dom\\XMLDocument",
+    "DOMNodeList",
+    "Dom\\NodeList",
+    "DOMNamedNodeMap",
+    "Dom\\NamedNodeMap",
+    "Dom\\DtdNamedNodeMap",
+    "Dom\\HTMLCollection",
+    "DOMCharacterData",
+    "Dom\\CharacterData",
+    "DOMAttr",
+    "Dom\\Attr",
+    "DOMElement",
+    "Dom\\Element",
+    "Dom\\HTMLElement",
+    "DOMText",
+    "Dom\\Text",
+    "DOMComment",
+    "Dom\\Comment",
+    "DOMCdataSection",
+    "Dom\\CDATASection",
+    "DOMDocumentType",
+    "Dom\\DocumentType",
+    "DOMNotation",
+    "Dom\\Notation",
+    "DOMEntity",
+    "Dom\\Entity",
+    "DOMEntityReference",
+    "Dom\\EntityReference",
+    "DOMProcessingInstruction",
+    "Dom\\ProcessingInstruction",
+    "DOMXPath",
+    "Dom\\XPath",
+    "Dom\\TokenList",
+];
+
 /// The extension value (design §7.1).
 ///
 /// ```php
@@ -706,31 +1228,67 @@ class DOMXPath
 pub fn extension() -> Extension {
     let entries: Vec<(&str, Entry)> = [
         node::METHODS,
+        token_list::METHODS,
         document::METHODS,
         element::METHODS,
         classes::METHODS,
         map::METHODS,
         xpath::METHODS,
+        modern::METHODS,
+        xml_serializer::METHODS,
+        html5_serializer::METHODS,
+        inner_html::METHODS,
+        html5_parser::METHODS,
+        css::METHODS,
     ]
     .iter()
     .flat_map(|m| m.iter().copied())
     .collect();
     let mut builder = ExtensionBuilder::default()
-        .functions(vec![(
-            stub::function("dom_import_simplexml(object $node): DOMAttr|DOMElement"),
-            import_simplexml as Entry,
-        )])
+        .functions(vec![
+            (
+                stub::function("dom_import_simplexml(object $node): DOMAttr|DOMElement"),
+                import_simplexml as Entry,
+            ),
+            (
+                stub::function("Dom\\import_simplexml(object $node): Dom\\Attr|Dom\\Element"),
+                modern::import_simplexml as Entry,
+            ),
+        ])
         .constants(constants())
         .dependencies(vec![
             dependency("libxml", DependencyKind::Required),
             dependency("lexbor", DependencyKind::Required),
             dependency("domxml", DependencyKind::Conflicts),
         ]);
-    for (decl, methods) in stub::classes(STUB, &entries) {
+    let mut declared = stub::classes(STUB, &entries);
+    declared.extend(stub::classes(MODERN_STUB, &entries));
+    declared.sort_by_key(|(decl, _)| {
+        MINIT_ORDER
+            .iter()
+            .position(|name| name.as_bytes() == &*decl.name.0)
+            .unwrap_or(MINIT_ORDER.len())
+    });
+    for (decl, methods) in declared {
         let handlers: Option<&'static dyn ObjectHandlers> = match decl.name.0.as_ref() {
-            b"DOMException" | b"DOMParentNode" | b"DOMChildNode" => None,
-            b"DOMNodeList" | b"DOMNamedNodeMap" => Some(&map::HANDLERS),
-            b"DOMXPath" => Some(&xpath::HANDLERS),
+            b"DOMException"
+            | b"DOMParentNode"
+            | b"DOMChildNode"
+            | b"Dom\\ParentNode"
+            | b"Dom\\ChildNode"
+            | b"Dom\\AdjacentPosition"
+            | b"Dom\\NamespaceInfo" => None,
+            b"DOMNodeList"
+            | b"DOMNamedNodeMap"
+            | b"Dom\\NodeList"
+            | b"Dom\\NamedNodeMap"
+            | b"Dom\\DtdNamedNodeMap"
+            | b"Dom\\HTMLCollection" => Some(&map::HANDLERS),
+            b"DOMXPath" | b"Dom\\XPath" => Some(&xpath::HANDLERS),
+            b"Dom\\TokenList" => Some(&token_list::HANDLERS),
+            b"Dom\\Implementation" => Some(&object::IMPLEMENTATION_HANDLERS),
+            b"Dom\\Element" | b"Dom\\HTMLElement" => Some(&object::ELEMENT_HANDLERS),
+            b"Dom\\DocumentFragment" | b"Dom\\Document" => Some(&object::PARENT_HANDLERS),
             _ => Some(&object::NODE_HANDLERS),
         };
         builder = match handlers {
@@ -740,8 +1298,27 @@ pub fn extension() -> Extension {
     }
     builder
         .request_state::<object::State>()
+        .rinit(register_alias)
         .info(dom_info)
         .build("dom")
+}
+
+/// `zend_register_class_alias("Dom\\DOMException", ...)` of
+/// `register_class_DOMException`: `DOMException` under the modern
+/// namespace too.
+///
+/// ```php
+/// var_dump(new Dom\DOMException('m') instanceof DOMException, class_exists('Dom\DOMException'));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// ```
+fn register_alias(req: &mut Request) -> Result<(), Thrown> {
+    if let Some(class) = lookup_class(req, b"DOMException")? {
+        req.class_alias(class, b"dom\\domexception");
+    }
+    Ok(())
 }
 
 fn dependency(name: &str, kind: DependencyKind) -> Dependency {
@@ -753,8 +1330,13 @@ fn dependency(name: &str, kind: DependencyKind) -> Dependency {
     }
 }
 
+/// `DOM_HTML_NO_DEFAULT_NS`, the option that keeps the HTML5 parser's
+/// elements out of the HTML namespace.
+pub(crate) const HTML_NO_DEFAULT_NS: i64 = 1 << 31;
+
 /// `register_php_dom_symbols`: the node types, the attribute types and the
-/// error codes, `DOM_PHP_ERR` deprecated since 8.4.
+/// error codes, `DOM_PHP_ERR` deprecated since 8.4, then the `Dom\`
+/// codes and `Dom\HTML_NO_DEFAULT_NS`.
 fn constants() -> Vec<ConstDecl> {
     let rows: [(&[u8], i64); 29] = [
         (b"XML_ELEMENT_NODE", 1),
@@ -788,9 +1370,15 @@ fn constants() -> Vec<ConstDecl> {
         (b"DOM_PHP_ERR", 0),
     ];
     let codes = Code::ALL.iter().map(|c| (c.constant(), *c as i64));
+    let modern = Code::ALL
+        .iter()
+        .filter_map(|c| Some((c.modern_constant()?, *c as i64)));
+    let no_default_ns: (&[u8], i64) = (b"Dom\\HTML_NO_DEFAULT_NS", HTML_NO_DEFAULT_NS);
     rows.iter()
         .copied()
         .chain(codes)
+        .chain(modern)
+        .chain(std::iter::once(no_default_ns))
         .map(|(name, value)| ConstDecl {
             name: decl::Name(name.into()),
             value: ConstExpr::Long(value),
@@ -997,6 +1585,15 @@ fn dom_error(req: &mut Request, code: Code, strict: bool) -> Result<(), Thrown> 
     dom_error_message(req, code, code.message(), strict)
 }
 
+/// A `DOMException` of `code` with `message` thrown whatever strictness
+/// says, `php_dom_throw_error_with_message(code, message, true)`.
+fn dom_throw_message(req: &mut Request, code: Code, message: &str) -> Thrown {
+    match dom_error_message(req, code, message, true) {
+        Err(thrown) => thrown,
+        Ok(()) => fatal(req, "InternalError: a strict DOMException was not thrown"),
+    }
+}
+
 /// A `DOMException` of `code` thrown whatever strictness says.
 fn dom_throw(req: &mut Request, code: Code) -> Thrown {
     match dom_error(req, code, true) {
@@ -1152,7 +1749,8 @@ fn object_for(req: &mut Request, node: Node, context: Option<PhpObject>) -> Resu
         req.addref(&value);
         return Ok(value);
     }
-    let Some(name) = class_for(node.kind()) else {
+    let modern = context.is_some_and(|c| modern::follows_spec(req, c));
+    let Some(name) = class_for(node, modern) else {
         let n = node.kind().number();
         return Err(throw(req, "Error", &format!("Unsupported node type: {n}")));
     };
@@ -1402,6 +2000,30 @@ fn next_in_tree_order(node: Node, base: Node) -> Option<Node> {
     }
 }
 
+/// `php_dom_next_in_tree_order(node, base)` with `base` null or given: the
+/// next node of a preorder walk, entering an element's children, over the
+/// whole tree where `base` is none.
+fn next_in_tree_order_from(node: Node, base: Option<Node>) -> Option<Node> {
+    if node.kind() == Kind::Element
+        && let Some(child) = node.children()
+    {
+        return Some(child);
+    }
+    if let Some(next) = node.next() {
+        return Some(next);
+    }
+    let mut at = node;
+    loop {
+        at = at.parent()?;
+        if Some(at) == base {
+            return None;
+        }
+        if let Some(next) = at.next() {
+            return Some(next);
+        }
+    }
+}
+
 /// `php_dom_is_node_connected`.
 fn is_connected(node: Node) -> bool {
     let mut at = Some(node);
@@ -1595,7 +2217,9 @@ fn copy_document_ref(req: &mut Request, from: PhpObject, to: PhpObject) {
 }
 
 /// `dom_objects_store_clone_obj`: the object cloned with a copy of its
-/// node, the copy counting the document it lands in; a namespace node is
+/// node, the copy counting the document it lands in, made through the
+/// namespace mapper where the document follows the standard and a copied
+/// document given private data of its own; a namespace node is
 /// `dom_object_namespace_node_clone_obj`'s, a fresh declaration node on
 /// the same element, which the clone keeps alive too.
 fn clone_object(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
@@ -1629,17 +2253,34 @@ fn clone_object(req: &mut Request, object: PhpObject) -> Result<PhpObject, Throw
         }
         return Ok(clone);
     }
-    if instance_of(req, object, "DOMNode")
+    let mut fresh = None;
+    if (instance_of(req, object, "DOMNode") || instance_of(req, object, "Dom\\Node"))
         && let Some(n) = node
-        && let Some(cloned) = clone_node(n, n.doc(), true)
     {
-        let shared = if cloned.doc() == n.doc() {
-            shared_doc(req, object)
+        let cloned = if modern::follows_spec(req, object) {
+            if n.kind().is_document() {
+                let mut private = private::Private::default();
+                let cloned = node::clone_node_modern(&mut private.mapper, n, n.doc(), true);
+                fresh = Some(private);
+                cloned
+            } else {
+                match dom_mut(req, object).and_then(|d| private::of(&mut d.obj)) {
+                    Some(p) => node::clone_node_modern(&mut p.mapper, n, n.doc(), true),
+                    None => clone_node(n, n.doc(), true),
+                }
+            }
         } else {
-            None
+            clone_node(n, n.doc(), true)
         };
-        payload.obj.attach(cloned, shared);
-        copied = Some((n, cloned));
+        if let Some(cloned) = cloned {
+            let shared = if cloned.doc() == n.doc() {
+                shared_doc(req, object)
+            } else {
+                None
+            };
+            payload.obj.attach(cloned, shared);
+            copied = Some((n, cloned));
+        }
     }
     let clone = object.clone_with(req, payload)?;
     if let Some(d) = dom_mut(req, clone) {
@@ -1649,6 +2290,11 @@ fn clone_object(req: &mut Request, object: PhpObject) -> Result<PhpObject, Throw
         && cloned.doc() != n.doc()
     {
         copy_document_ref(req, object, clone);
+    }
+    if let Some(private) = fresh
+        && let Some(d) = dom_mut(req, clone)
+    {
+        d.obj.set_private_data(Box::new(private));
     }
     Ok(clone)
 }
@@ -1710,8 +2356,10 @@ fn is_equal_attr(a: Node, b: Node) -> bool {
     a.name() == b.name() && ns_uri_equal(a, b) && content_equal(a, b)
 }
 
-/// `php_dom_node_is_equal_node` for the legacy classes.
-fn is_equal_node(a: Node, b: Node) -> bool {
+/// `php_dom_node_is_equal_node`: the legacy classes compare an element's
+/// namespace declarations too, a document that follows the standard
+/// (`spec_compliant`) keeps none to compare.
+fn is_equal_node(a: Node, b: Node, spec_compliant: bool) -> bool {
     if a.kind() != b.kind() {
         return false;
     }
@@ -1720,9 +2368,9 @@ fn is_equal_node(a: Node, b: Node) -> bool {
             a.name() == b.name()
                 && ns_prefix_equal(a, b)
                 && ns_uri_equal(a, b)
-                && unordered_equal(a.properties(), b.properties())
-                && unordered_ns_equal(a.ns_def(), b.ns_def())
-                && ordered_equal(a.children(), b.children())
+                && unordered_equal(a.properties(), b.properties(), spec_compliant)
+                && (spec_compliant || unordered_ns_equal(a.ns_def(), b.ns_def()))
+                && ordered_equal(a.children(), b.children(), spec_compliant)
         }
         Kind::Dtd => {
             a.name() == b.name()
@@ -1745,7 +2393,7 @@ fn is_equal_node(a: Node, b: Node) -> bool {
                 && a.ns().and_then(Ns::href) == b.ns().and_then(Ns::href)
         }
         Kind::Fragment | Kind::HtmlDocument | Kind::Document => {
-            ordered_equal(a.children(), b.children())
+            ordered_equal(a.children(), b.children(), spec_compliant)
         }
         _ => false,
     }
@@ -1854,7 +2502,9 @@ fn validate_and_extract(
 }
 
 /// `php_dom_adopt_node`: the node moved into `doc`, every object of its
-/// subtree counting `doc`'s reference after.
+/// subtree counting `doc`'s reference after. The modern classes unlink it,
+/// set the tree's document and point its namespaces at `doc`'s mapper,
+/// where the legacy ones hand it to `xmlDOMWrapAdoptNode`.
 fn adopt(req: &mut Request, doc_obj: PhpObject, node: Node, doc: Node) -> bool {
     node.invalidate_document_lists();
     let old = node.doc();
@@ -1862,7 +2512,13 @@ fn adopt(req: &mut Request, doc_obj: PhpObject, node: Node, doc: Node) -> bool {
         node.unlink();
     } else {
         invalidate(req, doc_obj);
-        if !node.adopt_into(doc) {
+        if modern::follows_spec(req, doc_obj) {
+            node.unlink();
+            node.set_tree_doc(Some(doc));
+            if let Some(private) = dom_mut(req, doc_obj).and_then(|d| private::of(&mut d.obj)) {
+                private.mapper.reconcile(Some(doc), node);
+            }
+        } else if !node.adopt_into(doc) {
             return false;
         }
         node.undict(old, doc);
@@ -1904,15 +2560,23 @@ fn set_attribute_id(req: &mut Request, object: PhpObject, attr: Node, is_id: boo
 /// class php registers none for (`DOMImplementation`).
 fn table(name: &[u8]) -> Option<&'static [&'static [Prop]]> {
     use crate::props::{
-        ATTR, CHARACTER_DATA, DOCUMENT_TYPE, ELEMENT, ENTITY, ENTITY_REFERENCE, NAMESPACE_NODE,
-        NODE, NOTATION, PARENT, PROCESSING_INSTRUCTION, TEXT,
+        ATTR, CHARACTER_DATA, DOCUMENT_TYPE, ELEMENT, ENTITY, ENTITY_REFERENCE, MODERN_ATTR,
+        MODERN_CHARACTER_DATA, MODERN_DOCUMENT_TYPE, MODERN_ELEMENT, MODERN_ENTITY,
+        MODERN_ENTITY_REFERENCE, MODERN_NODE, MODERN_NODE_TEXT_WRITABLE, MODERN_NODE_WRITABLE,
+        MODERN_PARENT, MODERN_PROCESSING_INSTRUCTION, MODERN_TEXT, NAMESPACE_NODE, NODE, NOTATION,
+        PARENT, PROCESSING_INSTRUCTION, TEXT,
     };
     Some(match name {
         b"DOMNode" => &[NODE],
         b"DOMNameSpaceNode" => &[NAMESPACE_NODE],
         b"DOMDocumentFragment" => &[PARENT, NODE],
         b"DOMDocument" => &[crate::document::PROPS, PARENT, NODE],
-        b"DOMNodeList" | b"DOMNamedNodeMap" => &[crate::map::PROPS],
+        b"DOMNodeList"
+        | b"DOMNamedNodeMap"
+        | b"Dom\\NodeList"
+        | b"Dom\\NamedNodeMap"
+        | b"Dom\\DtdNamedNodeMap"
+        | b"Dom\\HTMLCollection" => &[crate::map::PROPS],
         b"DOMCharacterData" | b"DOMComment" => &[CHARACTER_DATA, NODE],
         b"DOMAttr" => &[ATTR, NODE],
         b"DOMElement" => &[ELEMENT, NODE],
@@ -1922,7 +2586,30 @@ fn table(name: &[u8]) -> Option<&'static [&'static [Prop]]> {
         b"DOMEntity" => &[ENTITY, NODE],
         b"DOMEntityReference" => &[ENTITY_REFERENCE],
         b"DOMProcessingInstruction" => &[PROCESSING_INSTRUCTION, NODE],
-        b"DOMXPath" => &[crate::xpath::PROPS],
+        b"DOMXPath" | b"Dom\\XPath" => &[crate::xpath::PROPS],
+        b"Dom\\Node" | b"Dom\\Notation" => &[MODERN_NODE],
+        b"Dom\\DocumentFragment" => &[MODERN_PARENT, MODERN_NODE_TEXT_WRITABLE],
+        b"Dom\\Document" | b"Dom\\HTMLDocument" => &[crate::html_document::PROPS, MODERN_NODE],
+        b"Dom\\XMLDocument" => &[
+            crate::document::MODERN_XML_PROPS,
+            crate::html_document::PROPS,
+            MODERN_NODE,
+        ],
+        b"Dom\\CharacterData" | b"Dom\\Comment" => &[MODERN_CHARACTER_DATA, MODERN_NODE_WRITABLE],
+        b"Dom\\Text" | b"Dom\\CDATASection" => {
+            &[MODERN_TEXT, MODERN_CHARACTER_DATA, MODERN_NODE_WRITABLE]
+        }
+        b"Dom\\ProcessingInstruction" => &[
+            MODERN_PROCESSING_INSTRUCTION,
+            MODERN_CHARACTER_DATA,
+            MODERN_NODE_WRITABLE,
+        ],
+        b"Dom\\Attr" => &[MODERN_ATTR, MODERN_NODE_WRITABLE],
+        b"Dom\\Element" | b"Dom\\HTMLElement" => &[MODERN_ELEMENT, MODERN_NODE_TEXT_WRITABLE],
+        b"Dom\\DocumentType" => &[MODERN_DOCUMENT_TYPE, MODERN_NODE],
+        b"Dom\\Entity" => &[MODERN_ENTITY, MODERN_NODE],
+        b"Dom\\EntityReference" => &[MODERN_ENTITY_REFERENCE],
+        b"Dom\\TokenList" => &[crate::token_list::PROPS],
         _ => return None,
     })
 }
@@ -1961,20 +2648,22 @@ fn create(
         d.extra = Extra::Map(Box::new(Map {
             base: Some(base),
             kind,
+            dims: map::Dims::of(class_name),
         }));
     }
     Ok(object.as_value())
 }
 
-/// A `DOMNodeList` over the objects `array` holds, the answer of an
+/// A list of `class_name` over the objects `array` holds, the answer of an
 /// `XPath` query; `array` is the list's from here.
-fn node_set(req: &mut Request, array: PhpArray) -> Result<Value, Thrown> {
-    let class = class(req, "DOMNodeList")?;
+fn node_set(req: &mut Request, class_name: &str, array: PhpArray) -> Result<Value, Thrown> {
+    let class = class(req, class_name)?;
     let object = php_ext::call::new_object(req, class)?;
     if let Some(d) = dom_mut(req, object) {
         d.extra = Extra::Map(Box::new(Map {
             base: None,
             kind: MapKind::NodeSet(array),
+            dims: map::Dims::of(class_name),
         }));
     }
     Ok(object.as_value())
@@ -1992,14 +2681,19 @@ fn ns_uri_equal(a: Node, b: Node) -> bool {
     a.ns().and_then(Ns::href) == b.ns().and_then(Ns::href)
 }
 
-fn ordered_equal(a: Option<Node>, b: Option<Node>) -> bool {
+fn ordered_equal(a: Option<Node>, b: Option<Node>, spec_compliant: bool) -> bool {
     let (a, b) = (node_list(a), node_list(b));
-    a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| is_equal_node(*x, *y))
+    a.len() == b.len()
+        && a.iter()
+            .zip(b.iter())
+            .all(|(x, y)| is_equal_node(*x, *y, spec_compliant))
 }
 
-fn unordered_equal(a: Option<Node>, b: Option<Node>) -> bool {
+fn unordered_equal(a: Option<Node>, b: Option<Node>, spec_compliant: bool) -> bool {
     let (a, b) = (node_list(a), node_list(b));
-    a.len() == b.len() && a.iter().all(|x| b.iter().any(|y| is_equal_node(*x, *y)))
+    a.len() == b.len()
+        && a.iter()
+            .all(|x| b.iter().any(|y| is_equal_node(*x, *y, spec_compliant)))
 }
 
 fn unordered_ns_equal(a: Option<Ns>, b: Option<Ns>) -> bool {
@@ -2153,9 +2847,32 @@ fn base_name(req: &mut Request, class: ClassId) -> Option<Vec<u8>> {
 }
 
 /// The class a node answers as, `php_dom_create_object`'s switch, before
-/// the document's class map is read.
-fn class_for(kind: Kind) -> Option<&'static str> {
-    Some(match kind {
+/// the document's class map is read: the `Dom\\` classes where the object
+/// asking follows the spec.
+fn class_for(node: Node, modern: bool) -> Option<&'static str> {
+    if modern {
+        return Some(match node.kind() {
+            Kind::Document => "Dom\\XMLDocument",
+            Kind::HtmlDocument => "Dom\\HTMLDocument",
+            Kind::Dtd | Kind::DocumentType => "Dom\\DocumentType",
+            Kind::Element if crate::private::ns_is(node, crate::private::HTML_NS) => {
+                "Dom\\HTMLElement"
+            }
+            Kind::Element => "Dom\\Element",
+            Kind::Attribute => "Dom\\Attr",
+            Kind::Text => "Dom\\Text",
+            Kind::Comment => "Dom\\Comment",
+            Kind::Pi => "Dom\\ProcessingInstruction",
+            Kind::EntityRef => "Dom\\EntityReference",
+            Kind::EntityDecl | Kind::ElementDecl => "Dom\\Entity",
+            Kind::CData => "Dom\\CDATASection",
+            Kind::Fragment => "Dom\\DocumentFragment",
+            Kind::Notation => "Dom\\Notation",
+            Kind::NamespaceDecl => "DOMNameSpaceNode",
+            _ => return None,
+        });
+    }
+    Some(match node.kind() {
         Kind::Document | Kind::HtmlDocument => "DOMDocument",
         Kind::Dtd | Kind::DocumentType => "DOMDocumentType",
         Kind::Element => "DOMElement",

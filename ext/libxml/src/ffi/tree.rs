@@ -506,6 +506,12 @@ impl Node {
         unsafe { Alloc::free(self.raw().cast()) };
     }
 
+    /// `xmlFreeDoc(doc)`: a document nothing names, with its tree.
+    pub fn free_document(self) {
+        // SAFETY: a live document nothing else frees, freed once.
+        unsafe { sys::xmlFreeDoc(self.raw().cast()) };
+    }
+
     /// `php_libxml_node_free_resource`.
     pub fn free_resource(self) {
         // SAFETY: a live node nothing names any more.
@@ -668,6 +674,26 @@ impl Node {
         Node::from_raw(unsafe { sys::xmlSetNsProp(self.raw(), ns, n.as_ptr(), v.as_ptr()) }.cast())
     }
 
+    /// `xmlSetNsProp(node, ns, name, NULL)`: the attribute made or reset
+    /// with no children, as php's modern `toggleAttribute` makes it.
+    pub fn set_ns_prop_bare(self, ns: Option<Ns>, name: &[u8]) -> Option<Node> {
+        let n = cstr(name);
+        let ns = ns.map_or(ptr::null_mut(), Ns::raw);
+        // SAFETY: a live element, a namespace or null, a NUL-terminated
+        // name and a null value, which libxml takes as none.
+        Node::from_raw(unsafe { sys::xmlSetNsProp(self.raw(), ns, n.as_ptr(), ptr::null()) }.cast())
+    }
+
+    /// `xmlNodeSetName`: the name replaced, interned in the document's
+    /// dictionary where it has one, the old name freed unless the
+    /// dictionary owns it; php's `Dom\Element::rename` does the same by
+    /// hand.
+    pub fn set_name(self, name: &[u8]) {
+        let n = cstr(name);
+        // SAFETY: a live node and a NUL-terminated name, copied by libxml.
+        unsafe { sys::xmlNodeSetName(self.raw(), n.as_ptr()) };
+    }
+
     /// `xmlSearchNs(node->doc, node, prefix)`.
     pub fn search_ns(self, prefix: Option<&[u8]>) -> Option<Ns> {
         let p = prefix.map(cstr);
@@ -802,6 +828,28 @@ impl Node {
     /// `node->line`.
     pub fn line(self) -> u16 {
         self.read(|n| n.line)
+    }
+
+    /// Set `node->line`, as php's HTML5 bridge carries lexbor's line over.
+    pub fn set_line(self, line: u16) {
+        self.write(|n| n.line = line);
+    }
+
+    /// `xmlAddID(NULL, doc, value, attr)`: the attribute registered as the
+    /// document's ID `value`; `false` where the ID is taken already.
+    pub fn add_id(self, doc: Node, value: &[u8]) -> bool {
+        let v = cstr(value);
+        // SAFETY: a live document and one of its attributes, and a
+        // NUL-terminated value the table copies.
+        !unsafe {
+            sys::xmlAddID(
+                ptr::null_mut(),
+                doc.raw().cast(),
+                v.as_ptr(),
+                self.raw().cast(),
+            )
+        }
+        .is_null()
     }
 }
 
@@ -1002,9 +1050,38 @@ impl Ns {
         // none.
         unsafe { Tree::set_old_ns(doc.map_or(ptr::null_mut(), |d| d.raw().cast()), self.raw()) };
     }
+
+    /// `xmlFreeNs`: a declaration no list holds any more, freed with its
+    /// strings, as `dom_unlink_ns_decls` frees what it lent C14N.
+    pub fn free(self) {
+        // SAFETY: a live declaration nothing links to, freed once.
+        unsafe { sys::xmlFreeNs(self.raw()) };
+    }
 }
 
 impl Ns {
+    /// `dom_create_owned_ns`: a declaration of `href` under `prefix` no
+    /// element holds, made field by field as php makes it, so the `xml`
+    /// prefix `xmlNewNs` refuses is made too. The caller hands it to a
+    /// document's old list ([`Ns::move_to_old`]), which frees it with the
+    /// document.
+    pub fn owned(href: Option<&[u8]>, prefix: Option<&[u8]>) -> Option<Ns> {
+        let ns = Ns::new(None, href, None)?;
+        if let Some(p) = prefix {
+            let c = cstr(p);
+            // SAFETY: a NUL-terminated prefix, duplicated for the
+            // declaration, whose prefix is null so nothing is lost.
+            let copy = unsafe { sys::xmlStrdup(c.as_ptr()) };
+            ns.write(|n| n.prefix = copy);
+        }
+        Some(ns)
+    }
+
+    /// The declaration's `_private`, php's magic token or free tag.
+    pub(crate) fn set_private(self, private: *mut c_void) {
+        self.write(|n| n.private = private);
+    }
+
     /// `xmlNewNs(node, href, prefix)`, `node` none for a declaration no element
     /// holds yet.
     pub fn new(node: Option<Node>, href: Option<&[u8]>, prefix: Option<&[u8]>) -> Option<Ns> {
@@ -1281,6 +1358,13 @@ impl Library {
         let p = cstr(path);
         // SAFETY: a NUL-terminated path.
         taken(unsafe { sys::xmlCanonicPath(p.as_ptr()) })
+    }
+
+    /// `xmlPathToURI`: a file path as the URI a document's URL keeps.
+    pub fn path_to_uri(path: &[u8]) -> Option<Vec<u8>> {
+        let p = cstr(path);
+        // SAFETY: a NUL-terminated path.
+        taken(unsafe { sys::xmlPathToURI(p.as_ptr()) })
     }
 }
 

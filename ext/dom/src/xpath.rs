@@ -10,7 +10,9 @@ use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, t
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, Value, ValueRef};
 use php_ext_libxml::Errors;
-use php_ext_libxml::ffi::{Answer, Called, Item, Name, Node, Operand, Returned, Route, XPath};
+use php_ext_libxml::ffi::{
+    Answer, Called, Item, Name, Node, Operand, Returned, Route, Scope, XPath,
+};
 
 use crate::object::{Code, Extra};
 use crate::props::Prop;
@@ -336,8 +338,13 @@ fn dispatch(
         }
     }
     let answer = answered?;
+    let node_class = if crate::modern::follows_spec(req, this) {
+        "Dom\\Node"
+    } else {
+        "DOMNode"
+    };
     let returned = match answer.as_ref() {
-        ValueRef::Object(o) if crate::instance_of(req, *o, "DOMNode") => {
+        ValueRef::Object(o) if crate::instance_of(req, *o, node_class) => {
             match crate::node_of(req, *o) {
                 Some(node) => {
                     state.node_list.push(answer);
@@ -370,11 +377,15 @@ fn eval(req: &mut Request, force_node_set: bool) -> Result<Value, Thrown> {
     let this = this(req)?;
     let default_ns = matches!(dom(req, this), Some(d) if matches!(&d.extra, Extra::XPath(s) if s.register_node_ns));
     let register = bool_arg(req, 3, default_ns)?;
+    let modern = crate::modern::follows_spec(req, this);
     let Some(mut state) = take(req, this) else {
         return Err(throw(req, "Error", "Invalid XPath Context"));
     };
     let Some(doc) = state.ctx.doc() else {
         put(req, this, state);
+        if modern {
+            return Err(throw(req, "Error", "Invalid XPath Document Pointer"));
+        }
         docref(req, Level::Warning, "Invalid XPath Document Pointer");
         return Ok(Value::bool(false));
     };
@@ -392,12 +403,24 @@ fn eval(req: &mut Request, force_node_set: bool) -> Result<Value, Thrown> {
         put(req, this, state);
         return Err(throw(req, "Error", "Node from wrong document"));
     }
+    let in_scope = match node {
+        Some(n) if register && modern => dom_mut(req, this)
+            .and_then(|d| crate::private::of(&mut d.obj))
+            .map(|p| p.mapper.in_scope(n, false))
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    let scope = match (register, modern) {
+        (false, _) => Scope::None,
+        (true, false) => Scope::InScope,
+        (true, true) => Scope::List(&in_scope),
+    };
     let (answer, raised, thrown) = {
         let XPathState { ctx, callbacks, .. } = &mut *state;
         let mut handler = |req: &mut Request, called: Called, operands: Vec<Operand>| {
             dispatch(req, this, callbacks, called, operands)
         };
-        ctx.eval(req, &expr, node, register, &mut handler)
+        ctx.eval_scoped(req, &expr, node, scope, &mut handler)
     };
     put(req, this, state);
     let mut raised = raised;
@@ -409,6 +432,9 @@ fn eval(req: &mut Request, force_node_set: bool) -> Result<Value, Thrown> {
         return Err(thrown);
     }
     let Some(answer) = answer else {
+        if modern {
+            return Err(throw(req, "Error", "Could not evaluate XPath expression"));
+        }
         return Ok(Value::bool(false));
     };
     let answer = if force_node_set && !matches!(answer, Answer::NodeSet(_)) {
@@ -420,10 +446,24 @@ fn eval(req: &mut Request, force_node_set: bool) -> Result<Value, Thrown> {
         Answer::NodeSet(items) => {
             let mut array = PhpArray::new(req)?;
             for item in items {
+                if modern && matches!(item, Item::Namespace { .. }) {
+                    req.release(Value::array(array));
+                    return Err(crate::dom_throw_message(
+                        req,
+                        Code::NotSupported,
+                        "The namespace axis is not well-defined in the living DOM specification. \
+                         Use Dom\\Element::getInScopeNamespaces() or Dom\\Element::getDescendantNamespaces() instead.",
+                    ));
+                }
                 let v = item_object(req, this, item)?;
                 array.append(req, v)?;
             }
-            crate::node_set(req, array)
+            let class = if modern {
+                "Dom\\NodeList"
+            } else {
+                "DOMNodeList"
+            };
+            crate::node_set(req, class, array)
         }
         Answer::Bool(b) => Ok(Value::bool(b)),
         Answer::Number(n) => Ok(Value::float(n)),
@@ -432,7 +472,28 @@ fn eval(req: &mut Request, force_node_set: bool) -> Result<Value, Thrown> {
     }
 }
 
-/// `DOMXPath::query(string $expression, ?DOMNode $contextNode = null, bool $registerNodeNS = true): mixed`.
+/// `DOMXPath::query(string $expression, ?DOMNode $contextNode = null, bool $registerNodeNS = true): mixed`,
+/// and `Dom\XPath::query`, whose failures throw and whose document's
+/// in-scope declarations come from its `xmlns` attributes.
+///
+/// ```php
+/// $d = Dom\XMLDocument::createFromString('<r xmlns:p="urn:p"><p:a>1</p:a><p:a>2</p:a></r>');
+/// $x = new Dom\XPath($d);
+/// $l = $x->query('//p:a');
+/// var_dump(get_class($l), $l->length, $x->evaluate('string(//p:a[2])'), $x->document === $d);
+/// try { $x->query('//['); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// try { $x->query('//namespace::*'); } catch (DOMException $e) { echo $e->code, "\n"; }
+/// ```
+/// ```expect
+/// string(12) "Dom\NodeList"
+/// int(2)
+/// string(1) "2"
+/// bool(true)
+///
+/// Warning: Dom\XPath::query(): Invalid expression in %s on line %d
+/// Error: Could not evaluate XPath expression
+/// 9
+/// ```
 fn query(req: &mut Request) -> Result<Value, Thrown> {
     eval(req, true)
 }
@@ -694,6 +755,9 @@ pub(crate) const METHODS: &[(&str, Entry)] = &[
     ("DOMXPath::registerPhpFunctions", register_php_functions),
     ("DOMXPath::registerPhpFunctionNS", register_php_function_ns),
     ("DOMXPath::quote", quote),
+    ("Dom\\XPath::__construct", construct),
+    ("Dom\\XPath::evaluate", evaluate),
+    ("Dom\\XPath::query", query),
 ];
 
 /// `dom_xpath_object_handlers`: the dom table with no clone, and the

@@ -1,17 +1,20 @@
 //! `DOMParentNode` and `DOMChildNode` (`parentnode/tree.c`): `append`,
 //! `prepend`, `replaceChildren`, `before`, `after`, `replaceWith` and
-//! `remove` over a list of nodes and strings, with the pre-insertion
-//! checks the legacy classes make.
+//! `remove` over a list of nodes and strings, and the pre-insertion
+//! validity both the legacy classes and the `Dom\` classes check, the
+//! latter held to the DOM standard's document rules where the document
+//! follows it.
 
-use php_ext::raising::{Thrown, arg_type_error};
+use php_ext::raising::{Thrown, arg_type_error, arg_value_error};
 use php_ext::request::Request;
 use php_ext::values::{PhpObject, Value, ValueRef};
 use php_ext_libxml::ffi::{Kind, Node};
 
+use crate::modern::follows_spec;
 use crate::object::Code;
 use crate::{
-    Entry, class_name, dom_error, dom_throw, fetch, hierarchy_ok, instance_of, invalidate, node_of,
-    strict, this_intern,
+    Entry, class_name, dom_error, dom_error_message, dom_throw, fetch, hierarchy_ok, instance_of,
+    invalidate, node_of, strict, this_intern,
 };
 
 /// One argument of the list, checked: a node's object, or the bytes of a
@@ -21,22 +24,35 @@ enum Piece {
     Text(Vec<u8>),
 }
 
-/// `dom_sanity_check_node_list_types` over the call's arguments.
-fn pieces(req: &mut Request) -> Result<Vec<Piece>, Thrown> {
+/// `dom_sanity_check_node_list_types` over the call's arguments, the node
+/// class the one the receiver's document hands out.
+fn pieces(req: &mut Request, this: PhpObject) -> Result<Vec<Piece>, Thrown> {
+    let class = if follows_spec(req, this) {
+        "Dom\\Node"
+    } else {
+        "DOMNode"
+    };
     let values = req.variadic_arguments(1)?;
     let mut out = Vec::with_capacity(values.len());
     for (i, value) in values.iter().enumerate() {
         let position = u32::try_from(i + 1).unwrap_or(u32::MAX);
         let v = value.deref();
         match v.as_ref() {
-            ValueRef::Object(o) if instance_of(req, *o, "DOMNode") => out.push(Piece::Node(*o)),
+            ValueRef::Object(o) if instance_of(req, *o, class) => out.push(Piece::Node(*o)),
+            ValueRef::Str(s) if i32::try_from(s.len()).is_err() => {
+                return Err(arg_value_error(
+                    req,
+                    position,
+                    &format!("be less than or equal to {} bytes long", i32::MAX),
+                ));
+            }
             ValueRef::Str(s) => out.push(Piece::Text(s.as_bytes().to_vec())),
             ValueRef::Object(o) => {
                 let name = class_name(req, o.class());
                 return Err(arg_type_error(
                     req,
                     position,
-                    &format!("be of type DOMNode|string, {name} given"),
+                    &format!("be of type {class}|string, {name} given"),
                 ));
             }
             _ => {
@@ -44,7 +60,7 @@ fn pieces(req: &mut Request) -> Result<Vec<Piece>, Thrown> {
                 return Err(arg_type_error(
                     req,
                     position,
-                    &format!("be of type DOMNode|string, {name} given"),
+                    &format!("be of type {class}|string, {name} given"),
                 ));
             }
         }
@@ -59,7 +75,261 @@ fn in_list(req: &Request, pieces: &[Piece], node: Node) -> bool {
         .any(|p| matches!(p, Piece::Node(o) if node_of(req, *o) == Some(node)))
 }
 
-/// `dom_is_pre_insert_valid_without_step_1` for the legacy classes.
+/// What `php_dom_throw_error_with_message(HIERARCHY_REQUEST_ERR, ...)`
+/// says where the standard's document rules refuse an insertion.
+const TEXT_IN_DOCUMENT: &str = "Cannot insert text as a child of a document";
+const DOCTYPE_OUTSIDE_DOCUMENT: &str =
+    "Cannot insert a document type into anything other than a document";
+const ONE_ELEMENT: &str = "Cannot have more than one element child in a document";
+const DOCTYPE_FIRST: &str = "Document types must be the first child in a document";
+const ONE_DOCTYPE: &str = "Cannot have more than one document type";
+
+/// `php_dom_pre_insert_is_parent_invalid`: whether `parent` is no document,
+/// fragment or element, which the standard's insertions refuse.
+///
+/// ```php
+/// $d = Dom\XMLDocument::createFromString('<r>t<!--c--></r>');
+/// $r = $d->documentElement;
+/// $t = $r->firstChild;
+/// $c = $r->lastChild;
+/// $e = $r->cloneNode();
+/// foreach ([fn() => $t->appendChild($e), fn() => $c->insertBefore($e, null), fn() => $r->appendChild($e)] as $g) {
+///     try { $g(); echo "ok\n"; } catch (DOMException $x) { echo $x->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// Hierarchy Request Error
+/// Hierarchy Request Error
+/// ok
+/// ```
+pub(crate) fn is_parent_invalid(parent: Node) -> bool {
+    !matches!(
+        parent.kind(),
+        Kind::Document | Kind::HtmlDocument | Kind::Element | Kind::Fragment
+    )
+}
+
+/// `php_dom_has_child_of_type`.
+fn has_child_of_type(node: Node, kind: Kind) -> bool {
+    let mut at = node.children();
+    while let Some(n) = at {
+        if n.kind() == kind {
+            return true;
+        }
+        at = n.next();
+    }
+    false
+}
+
+/// `php_dom_has_sibling_following_node`.
+fn has_sibling_following(node: Node, kind: Kind) -> bool {
+    let mut at = node.next();
+    while let Some(n) = at {
+        if n.kind() == kind {
+            return true;
+        }
+        at = n.next();
+    }
+    false
+}
+
+/// `php_dom_has_sibling_preceding_node`.
+fn has_sibling_preceding(node: Node, kind: Kind) -> bool {
+    let mut at = node.prev();
+    while let Some(n) = at {
+        if n.kind() == kind {
+            return true;
+        }
+        at = n.prev();
+    }
+    false
+}
+
+/// `dom_fragment_common_hierarchy_check_part`: the refusal a fragment's
+/// children earn under a document, else whether one of them is an element.
+fn fragment_common(node: Node) -> Result<bool, &'static str> {
+    let mut seen_element = false;
+    let mut at = node.children();
+    while let Some(n) = at {
+        match n.kind() {
+            Kind::Element if seen_element => return Err(ONE_ELEMENT),
+            Kind::Element => seen_element = true,
+            Kind::Text | Kind::CData => return Err(TEXT_IN_DOCUMENT),
+            _ => {}
+        }
+        at = n.next();
+    }
+    Ok(seen_element)
+}
+
+/// `php_dom_fragment_insertion_hierarchy_check_pre_insertion`.
+fn fragment_pre_insertion(
+    parent: Node,
+    node: Node,
+    child: Option<Node>,
+) -> Result<(), &'static str> {
+    if fragment_common(node)? {
+        if has_child_of_type(parent, Kind::Element) {
+            return Err(ONE_ELEMENT);
+        }
+        if child.is_some_and(|c| c.kind() == Kind::Dtd || has_sibling_following(c, Kind::Dtd)) {
+            return Err(DOCTYPE_FIRST);
+        }
+    }
+    Ok(())
+}
+
+/// `php_dom_fragment_insertion_hierarchy_check_replace`.
+fn fragment_replace(parent: Node, node: Node, child: Node) -> Result<(), &'static str> {
+    if fragment_common(node)? {
+        let mut at = parent.children();
+        while let Some(n) = at {
+            if n.kind() == Kind::Element && n != child {
+                return Err(ONE_ELEMENT);
+            }
+            at = n.next();
+        }
+        if has_sibling_following(child, Kind::Dtd) {
+            return Err(DOCTYPE_FIRST);
+        }
+    }
+    Ok(())
+}
+
+/// Steps 5 and 6 of the pre-insertion validity, which only a document
+/// that follows the standard checks: what may go under a document, and
+/// where.
+fn document_rules(parent: Node, node: Node, child: Option<Node>) -> Result<(), &'static str> {
+    let parent_is_document = parent.kind().is_document();
+    if parent_is_document && matches!(node.kind(), Kind::Text | Kind::CData) {
+        return Err(TEXT_IN_DOCUMENT);
+    }
+    if !parent_is_document && node.kind() == Kind::Dtd {
+        return Err(DOCTYPE_OUTSIDE_DOCUMENT);
+    }
+    if !parent_is_document {
+        return Ok(());
+    }
+    match node.kind() {
+        Kind::Fragment => fragment_pre_insertion(parent, node, child),
+        Kind::Element => {
+            if has_child_of_type(parent, Kind::Element) {
+                return Err(ONE_ELEMENT);
+            }
+            if child.is_some_and(|c| c.kind() == Kind::Dtd || has_sibling_following(c, Kind::Dtd)) {
+                return Err(DOCTYPE_FIRST);
+            }
+            Ok(())
+        }
+        Kind::Dtd => {
+            if has_child_of_type(parent, Kind::Dtd) {
+                return Err(ONE_DOCTYPE);
+            }
+            let element_before = match child {
+                Some(c) => has_sibling_preceding(c, Kind::Element),
+                None => has_child_of_type(parent, Kind::Element),
+            };
+            if element_before {
+                return Err(DOCTYPE_FIRST);
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// `dom_replace_node_validity_checks`: the standard's replace steps 1 to
+/// 6, each refusal thrown.
+///
+/// ```php
+/// $d = Dom\XMLDocument::createFromString('<!DOCTYPE r><r><a/></r>');
+/// $r = $d->documentElement;
+/// $a = $r->firstChild;
+/// $dt = $d->doctype;
+/// $f = $d->createDocumentFragment();
+/// $f->append('x');
+/// $pi = $d->createProcessingInstruction('p', 'd');
+/// foreach ([fn() => $a->replaceChild($pi, $a), fn() => $r->replaceChild($dt, $a), fn() => $d->replaceChild($f, $r), fn() => $d->replaceChild($r, $dt), fn() => $r->replaceChild($pi, $a)] as $g) {
+///     try { $g(); echo "ok\n"; } catch (DOMException $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// Not Found Error
+/// Cannot insert a document type into anything other than a document
+/// Cannot insert text as a child of a document
+/// Cannot have more than one element child in a document
+/// ok
+/// ```
+pub(crate) fn replace_validity(
+    req: &mut Request,
+    parent: Node,
+    node: Node,
+    child: Node,
+) -> Result<(), Thrown> {
+    let refusal = if is_parent_invalid(parent) || !hierarchy_ok(parent, node) {
+        Some((Code::HierarchyRequest, None))
+    } else if child.parent() != Some(parent) {
+        Some((Code::NotFound, None))
+    } else if !matches!(
+        node.kind(),
+        Kind::Fragment
+            | Kind::Dtd
+            | Kind::Element
+            | Kind::Text
+            | Kind::CData
+            | Kind::Comment
+            | Kind::Pi
+    ) {
+        Some((Code::HierarchyRequest, None))
+    } else {
+        replace_document_rules(parent, node, child).map(|m| (Code::HierarchyRequest, Some(m)))
+    };
+    match refusal {
+        None => Ok(()),
+        Some((code, None)) => Err(dom_throw(req, code)),
+        Some((code, Some(message))) => Err(crate::dom_throw_message(req, code, message)),
+    }
+}
+
+/// Steps 5 and 6 of the standard's replace: what may take a child's place
+/// under a document.
+fn replace_document_rules(parent: Node, node: Node, child: Node) -> Option<&'static str> {
+    let parent_is_document = parent.kind().is_document();
+    if parent_is_document && matches!(node.kind(), Kind::Text | Kind::CData) {
+        return Some(TEXT_IN_DOCUMENT);
+    }
+    if !parent_is_document && node.kind() == Kind::Dtd {
+        return Some(DOCTYPE_OUTSIDE_DOCUMENT);
+    }
+    if !parent_is_document {
+        return None;
+    }
+    match node.kind() {
+        Kind::Fragment => fragment_replace(parent, node, child).err(),
+        Kind::Element if parent.root() != Some(child) => Some(ONE_ELEMENT),
+        Kind::Element if has_sibling_following(child, Kind::Dtd) => Some(DOCTYPE_FIRST),
+        Kind::Dtd
+            if parent.int_subset() != Some(child)
+                || has_sibling_preceding(child, Kind::Element) =>
+        {
+            Some(DOCTYPE_FIRST)
+        }
+        _ => None,
+    }
+}
+
+/// Step 4 for a document that follows the standard: a node that is no
+/// fragment, doctype, element or character data.
+fn refused_kind(node: Node) -> bool {
+    matches!(
+        node.kind(),
+        Kind::EntityRef | Kind::Entity | Kind::Notation | Kind::Document | Kind::HtmlDocument
+    ) || node.kind().number() >= Kind::ElementDecl.number()
+}
+
+/// `dom_is_pre_insert_valid_without_step_1`: whether `node` may go under
+/// `parent` before `child`, the error raised as the receiver's document
+/// says where not.
 fn pre_insert_valid(
     req: &mut Request,
     this: PhpObject,
@@ -69,27 +339,30 @@ fn pre_insert_valid(
     doc: Option<Node>,
 ) -> Result<bool, Thrown> {
     let strict = strict(req, this);
-    let code = if !matches!(
-        parent.kind(),
-        Kind::Document | Kind::HtmlDocument | Kind::Element | Kind::Fragment
-    ) {
+    let modern = follows_spec(req, this);
+    let code = if is_parent_invalid(parent) {
         Some(Code::HierarchyRequest)
     } else if node.doc() != doc {
         Some(Code::WrongDocument)
     } else if child.is_some_and(|c| c.parent() != Some(parent)) {
         Some(Code::NotFound)
-    } else if !hierarchy_ok(parent, node) || node.kind() == Kind::Attribute {
+    } else if !hierarchy_ok(parent, node)
+        || node.kind() == Kind::Attribute
+        || (modern && refused_kind(node))
+    {
         Some(Code::HierarchyRequest)
     } else {
         None
     };
-    match code {
-        Some(code) => {
-            dom_error(req, code, strict)?;
-            Ok(false)
-        }
-        None => Ok(true),
+    if let Some(code) = code {
+        dom_error(req, code, strict)?;
+        return Ok(false);
     }
+    if modern && let Err(message) = document_rules(parent, node, child) {
+        dom_error_message(req, Code::HierarchyRequest, message, true)?;
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 /// `dom_add_child_without_merging`.
@@ -227,8 +500,10 @@ fn splice(point: Option<Node>, parent: Node, first: Node, last: Node) {
     }
 }
 
-/// `dom_insert_node_list_unchecked` for the legacy classes.
-fn insert_unchecked(node: Node, parent: Node, point: Option<Node>) {
+/// `dom_insert_node_list_unchecked`: the namespaces reconciled only where
+/// the document does not follow the standard (`modern`), whose elements
+/// carry no declarations of their own.
+fn insert_unchecked(node: Node, parent: Node, point: Option<Node>, modern: bool) {
     if node.kind() == Kind::Fragment {
         if let (Some(first), Some(last)) = (node.children(), node.last()) {
             splice(point, parent, first, last);
@@ -240,7 +515,9 @@ fn insert_unchecked(node: Node, parent: Node, point: Option<Node>) {
                 }
                 at = n.next();
             }
-            crate::reconcile_ns_list(parent.doc(), first, last);
+            if !modern {
+                crate::reconcile_ns_list(parent.doc(), first, last);
+            }
             if let Some(doc) = parent.doc()
                 && first.kind() == Kind::Dtd
             {
@@ -268,7 +545,8 @@ fn insert_unchecked(node: Node, parent: Node, point: Option<Node>) {
                 doc.set_int_subset(Some(node));
                 node.set_parent(Some(doc));
             }
-            doc => crate::reconcile_ns(doc, node),
+            doc if !modern => crate::reconcile_ns(doc, node),
+            _ => {}
         }
     }
 }
@@ -310,7 +588,8 @@ pub(crate) fn pre_insert(
     point: Option<Node>,
 ) -> Result<bool, Thrown> {
     if pre_insert_valid(req, this, parent, node, point, parent.doc())? {
-        insert_unchecked(node, parent, point);
+        let modern = follows_spec(req, this);
+        insert_unchecked(node, parent, point, modern);
         Ok(true)
     } else {
         cleanup(node);
@@ -344,8 +623,8 @@ pub(crate) fn pre_insert(
 /// DOMElement::append(): Argument #1 must be of type DOMNode|string, int given
 /// ```
 fn append(req: &mut Request) -> Result<Value, Thrown> {
-    let list = pieces(req)?;
     let this = this_intern(req)?;
+    let list = pieces(req, this)?;
     let parent = fetch(req, this)?;
     invalidate(req, this);
     if let Some(node) = single_node(req, this, parent, &list)? {
@@ -356,12 +635,12 @@ fn append(req: &mut Request) -> Result<Value, Thrown> {
 
 /// `prepend(DOMNode|string ...$nodes): void`.
 fn prepend(req: &mut Request) -> Result<Value, Thrown> {
-    let list = pieces(req)?;
     let this = this_intern(req)?;
     let parent = fetch(req, this)?;
     let Some(first) = parent.children() else {
         return append(req);
     };
+    let list = pieces(req, this)?;
     invalidate(req, this);
     if let Some(node) = single_node(req, this, parent, &list)? {
         pre_insert(req, this, node, parent, Some(first))?;
@@ -371,8 +650,8 @@ fn prepend(req: &mut Request) -> Result<Value, Thrown> {
 
 /// `after(DOMNode|string ...$nodes): void`.
 fn after(req: &mut Request) -> Result<Value, Thrown> {
-    let list = pieces(req)?;
     let this = this_intern(req)?;
+    let list = pieces(req, this)?;
     let node = fetch(req, this)?;
     let Some(parent) = node.parent() else {
         return Ok(Value::null());
@@ -390,8 +669,8 @@ fn after(req: &mut Request) -> Result<Value, Thrown> {
 
 /// `before(DOMNode|string ...$nodes): void`.
 fn before(req: &mut Request) -> Result<Value, Thrown> {
-    let list = pieces(req)?;
     let this = this_intern(req)?;
+    let list = pieces(req, this)?;
     let node = fetch(req, this)?;
     let Some(parent) = node.parent() else {
         return Ok(Value::null());
@@ -445,8 +724,8 @@ fn remove(req: &mut Request) -> Result<Value, Thrown> {
 
 /// `replaceWith(DOMNode|string ...$nodes): void`.
 fn replace_with(req: &mut Request) -> Result<Value, Thrown> {
-    let list = pieces(req)?;
     let this = this_intern(req)?;
+    let list = pieces(req, this)?;
     let child = fetch(req, this)?;
     let Some(parent) = child.parent() else {
         return Ok(Value::null());
@@ -466,7 +745,8 @@ fn replace_with(req: &mut Request) -> Result<Value, Thrown> {
         if child.parent() != Some(node) {
             child.unlink();
         }
-        insert_unchecked(node, parent, next);
+        let modern = follows_spec(req, this);
+        insert_unchecked(node, parent, next, modern);
     } else {
         cleanup(node);
     }
@@ -475,8 +755,8 @@ fn replace_with(req: &mut Request) -> Result<Value, Thrown> {
 
 /// `replaceChildren(DOMNode|string ...$nodes): void`.
 fn replace_children(req: &mut Request) -> Result<Value, Thrown> {
-    let list = pieces(req)?;
     let this = this_intern(req)?;
+    let list = pieces(req, this)?;
     let parent = fetch(req, this)?;
     invalidate(req, this);
     let Some(node) = single_node(req, this, parent, &list)? else {

@@ -72,13 +72,16 @@ pub struct Parser;
 
 impl Parser {
     /// `dom_document_parser`: the XML parser over `source` with `options`,
-    /// the directory a document read from memory takes as its base, and
-    /// recovery on or off.
+    /// the directory a document read from memory takes as its base,
+    /// recovery on or off, and the encoding the caller put in place of the
+    /// document's own (`xmlSwitchToEncoding`), which the caller has already
+    /// found known.
     pub fn xml(
         source: Source<'_>,
         options: c_int,
         directory: Option<&[u8]>,
         recover: bool,
+        encoding: Option<&[u8]>,
     ) -> (Parsed, Vec<Raised>) {
         Library::init();
         let (ctxt, mut created) = Raised::capture(|| match source {
@@ -96,6 +99,15 @@ impl Parser {
         route(&mut created, false, options);
         if ctxt.is_null() {
             return (Parsed::Nothing, created);
+        }
+        if let Some(name) = encoding {
+            let n = cstr(name);
+            // SAFETY: a NUL-terminated name.
+            let handler = unsafe { sys::xmlFindCharEncodingHandler(n.as_ptr().cast()) };
+            if !handler.is_null() {
+                // SAFETY: a live context and a handler it takes over.
+                unsafe { sys::xmlSwitchToEncoding(ctxt, handler) };
+            }
         }
         // SAFETY: the context just made, this function's alone until freed.
         let c = unsafe { &mut *ctxt };
@@ -644,4 +656,205 @@ pub enum Validated {
 pub enum Schema {
     Xsd,
     RelaxNg,
+}
+
+/// What `dom_xml_fragment_parsing_algorithm` had libxml parse.
+pub enum Fragment {
+    /// `xmlCreatePushParserCtxt` made no parser.
+    NoParser,
+    /// The markup was not well formed, or not namespace well formed: the
+    /// tree is already freed.
+    Malformed,
+    /// The document the parser built, the caller's to free
+    /// ([`Node::free_document`]), its dictionary unset since that one
+    /// belongs to the document the markup was parsed for; none where the
+    /// parser built none.
+    Document(Option<Node>),
+}
+
+/// `XML_MAX_DICTIONARY_LIMIT`.
+const MAX_DICTIONARY_LIMIT: usize = 10_000_000;
+
+impl Parser {
+    /// `dom_xml_fragment_parsing_algorithm`'s steps 1 to 5: a push parser
+    /// whose dictionary is `doc`'s (made the first time), php's sanitised
+    /// options with `XML_PARSE_IGNORE_ENC | XML_PARSE_NOERROR |
+    /// XML_PARSE_NOWARNING`, UTF-8 switched in, fed `chunks` in order with
+    /// the last one terminating the parse.
+    pub fn fragment(doc: Node, chunks: &[&[u8]]) -> (Fragment, Vec<Raised>) {
+        const OPTIONS: c_int =
+            sys::XML_PARSE_IGNORE_ENC | sys::XML_PARSE_NOERROR | sys::XML_PARSE_NOWARNING;
+        Library::init();
+        let (answer, mut raised) = Raised::capture(|| {
+            // SAFETY: no SAX handler, no user data, no initial chunk.
+            let ctxt = unsafe {
+                sys::xmlCreatePushParserCtxt(
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null(),
+                    0,
+                    ptr::null(),
+                )
+            };
+            if ctxt.is_null() {
+                return Fragment::NoParser;
+            }
+            // SAFETY: the context just made, this function's alone.
+            let c = unsafe { &mut *ctxt };
+            // SAFETY: the context's own dictionary, replaced below.
+            unsafe { sys::xmlDictFree(c.dict) };
+            // SAFETY: a live document; its dictionary is read and set once.
+            let d = unsafe { &mut *doc.raw().cast::<sys::xmlDoc>() };
+            if d.dict.is_null() {
+                // SAFETY: no argument.
+                d.dict = unsafe { sys::xmlDictCreate() };
+                // SAFETY: the dictionary just made.
+                unsafe { sys::xmlDictSetLimit(d.dict, MAX_DICTIONARY_LIMIT) };
+            }
+            c.dict = d.dict;
+            sanitize(c);
+            // SAFETY: a live context and options.
+            unsafe { sys::xmlCtxtUseOptions(ctxt, OPTIONS) };
+            // SAFETY: a NUL-terminated name.
+            let utf8 = unsafe { sys::xmlFindCharEncodingHandler(c"UTF-8".as_ptr()) };
+            // SAFETY: a live context and the handler it takes over.
+            unsafe { sys::xmlSwitchToEncoding(ctxt, utf8) };
+            let last = chunks.len().saturating_sub(1);
+            for (i, chunk) in chunks.iter().enumerate() {
+                let len = c_int::try_from(chunk.len()).unwrap_or(c_int::MAX);
+                // SAFETY: a live context and `len` readable bytes.
+                unsafe {
+                    sys::xmlParseChunk(ctxt, chunk.as_ptr().cast(), len, c_int::from(i == last))
+                };
+            }
+            // SAFETY: the context, read after the parse.
+            let c = unsafe { &mut *ctxt };
+            if c.wellFormed == 0 || c.nsWellFormed == 0 {
+                c.dict = ptr::null_mut();
+                // SAFETY: the tree the parser built, freed once.
+                unsafe { sys::xmlFreeDoc(c.myDoc) };
+                c.myDoc = ptr::null_mut();
+                // SAFETY: the context, freed once, the dictionary not with it.
+                unsafe { sys::xmlFreeParserCtxt(ctxt) };
+                return Fragment::Malformed;
+            }
+            let built = c.myDoc;
+            // SAFETY: the context, freed once; its dictionary reference is
+            // the one the built document took.
+            unsafe { sys::xmlFreeParserCtxt(ctxt) };
+            if !built.is_null() {
+                // SAFETY: the built document, whose dictionary is the context
+                // document's and is not freed with it.
+                unsafe { (*built).dict = ptr::null_mut() };
+            }
+            Fragment::Document(Node::from_raw(built.cast()))
+        });
+        route(&mut raised, true, OPTIONS);
+        (answer, raised)
+    }
+}
+
+/// The two writers of `php_new_dom_dump_node_to_str_ex`, both appending to
+/// one string: `xmlSaveToIO`'s `xmlSaveCtxt`, for what php hands libxml's own
+/// serialiser (a document's declaration, a DTD, an entity reference), and
+/// `xmlOutputBufferCreateIO`'s buffer, for what dom's XML serialiser
+/// writes. Each converts into the document's encoding with an encoder of
+/// its own, as php's do, so what either one starts its bytes with (a
+/// UTF-16 byte order mark) is written where php writes it.
+pub struct Dump {
+    ctxt: *mut sys::xmlSaveCtxt,
+    out: *mut sys::xmlOutputBuffer,
+}
+
+impl Dump {
+    /// The pair laid down for `encoding` (none: no conversion) with the
+    /// save `options`, `body` handed it, then the buffer flushed and
+    /// closed and the `xmlSaveCtxt` closed: the bytes where every step
+    /// succeeded, and what libxml raised.
+    pub fn serialise(
+        encoding: Option<&[u8]>,
+        options: c_int,
+        body: impl FnOnce(&mut Dump) -> bool,
+    ) -> (Option<Vec<u8>>, Vec<Raised>) {
+        Library::init();
+        let mut bytes: Vec<u8> = Vec::new();
+        let into: *mut c_void = ptr::from_mut(&mut bytes).cast();
+        let name = encoding.map(cstr);
+        let enc = name
+            .as_ref()
+            .map_or(ptr::null(), |n| n.as_ptr().cast::<c_char>());
+        let (ok, raised) = Raised::capture(|| {
+            // SAFETY: `bytes` outlives the context, closed below; an encoding
+            // name or null.
+            let ctxt = unsafe { sys::xmlSaveToIO(super::write_into, None, into, enc, options) };
+            if ctxt.is_null() {
+                return false;
+            }
+            let handler = if enc.is_null() {
+                ptr::null_mut()
+            } else {
+                // SAFETY: a NUL-terminated name.
+                unsafe { sys::xmlFindCharEncodingHandler(enc) }
+            };
+            // SAFETY: `bytes` outlives the buffer, closed below; the buffer
+            // takes the handler over.
+            let out =
+                unsafe { sys::xmlOutputBufferCreateIO(super::write_into, None, into, handler) };
+            let mut ok = if out.is_null() {
+                if !handler.is_null() {
+                    // SAFETY: the handler no buffer took.
+                    unsafe { sys::xmlCharEncCloseFunc(handler) };
+                }
+                false
+            } else {
+                let mut dump = Dump { ctxt, out };
+                let mut ok = body(&mut dump);
+                // SAFETY: the live buffer.
+                ok &= unsafe { sys::xmlOutputBufferFlush(out) } >= 0;
+                // SAFETY: the buffer, closed once.
+                ok &= unsafe { sys::xmlOutputBufferClose(out) } >= 0;
+                ok
+            };
+            // SAFETY: the context, closed once.
+            ok &= unsafe { sys::xmlSaveClose(ctxt) } >= 0;
+            ok
+        });
+        (ok.then_some(bytes), raised)
+    }
+
+    /// `xmlOutputBufferWrite` of `bytes` into dom's buffer.
+    pub fn write(&mut self, bytes: &[u8]) -> bool {
+        let Ok(len) = c_int::try_from(bytes.len()) else {
+            return false;
+        };
+        // SAFETY: a live buffer and `len` readable bytes.
+        unsafe { sys::xmlOutputBufferWrite(self.out, len, bytes.as_ptr().cast()) >= 0 }
+    }
+
+    /// `dom_xml_serializing_a_document_node`'s first half: dom's buffer
+    /// flushed, then libxml's `xmlSaveDoc` of the document with its
+    /// children hidden (its declaration and nothing under it), flushed.
+    pub fn document_head(&mut self, doc: Node) -> bool {
+        let children = doc.children();
+        doc.set_children(None);
+        // SAFETY: a live buffer.
+        let mut ok = unsafe { sys::xmlOutputBufferFlush(self.out) } >= 0;
+        // SAFETY: a live context and document.
+        ok = ok && unsafe { sys::xmlSaveDoc(self.ctxt, doc.raw().cast()) } >= 0;
+        // SAFETY: a live context.
+        ok = ok && unsafe { sys::xmlSaveFlush(self.ctxt) } >= 0;
+        doc.set_children(children);
+        ok
+    }
+
+    /// The default arm of `dom_xml_serialization_algorithm`: dom's buffer
+    /// flushed, then libxml's `xmlSaveTree` of the node, flushed.
+    pub fn tree(&mut self, node: Node) -> bool {
+        // SAFETY: a live buffer.
+        let mut ok = unsafe { sys::xmlOutputBufferFlush(self.out) } >= 0;
+        // SAFETY: a live context and node.
+        ok = ok && unsafe { sys::xmlSaveTree(self.ctxt, node.raw()) } >= 0;
+        // SAFETY: a live context.
+        ok && unsafe { sys::xmlSaveFlush(self.ctxt) } >= 0
+    }
 }
