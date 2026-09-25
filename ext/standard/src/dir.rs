@@ -218,6 +218,7 @@ pub(crate) fn directory_class() -> (
         default: None,
         attributes: Vec::new(),
         doc_comment: None,
+        hooks: None,
     };
     let method = |line: &str| MethodDecl {
         function: stub(line),

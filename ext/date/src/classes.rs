@@ -584,6 +584,7 @@ fn period_property(name: &str, ty: Type) -> PropertyDecl {
         default: None,
         attributes: Vec::new(),
         doc_comment: None,
+        hooks: None,
     }
 }
 

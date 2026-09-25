@@ -281,6 +281,7 @@ pub(super) fn engine_property() -> PropertyDecl {
         default: None,
         attributes: Vec::new(),
         doc_comment: None,
+        hooks: None,
     }
 }
 

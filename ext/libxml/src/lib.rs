@@ -286,6 +286,7 @@ fn error_class() -> ClassDecl {
         default: None,
         attributes: Vec::new(),
         doc_comment: None,
+        hooks: None,
     };
     ClassDecl {
         name: Name(b"LibXMLError".as_slice().into()),

@@ -28,6 +28,9 @@ use php_unit::Level;
 use php_unit::decl::{ClassKind, Visibility};
 
 mod expr;
+mod hooks;
+
+pub(super) use hooks::{Hook, HookBody};
 
 use super::Emit;
 use crate::CompileError;
@@ -53,14 +56,14 @@ enum Flag {
     Var,
 }
 
-/// What a modifier list is written on, php's `zend_modifier_target`
-/// less `ZEND_MODIFIER_TARGET_PROPERTY_HOOK`, whose list is not read yet.
+/// What a modifier list is written on, php's `zend_modifier_target`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Target {
     Property,
     Method,
     Constant,
     Parameter,
+    Hook,
 }
 
 impl Target {
@@ -71,6 +74,7 @@ impl Target {
             Target::Method => "method",
             Target::Constant => "class constant",
             Target::Parameter => "parameter",
+            Target::Hook => "property hook",
         }
     }
 }
@@ -107,7 +111,8 @@ impl Written {
     /// property alone.
     fn takes(self, target: Target) -> bool {
         match self {
-            Written::Visibility(_) | Written::Flag(Flag::Final | Flag::Var) => true,
+            Written::Flag(Flag::Final | Flag::Var) => true,
+            Written::Visibility(_) => target != Target::Hook,
             Written::SetVisibility(_) | Written::Flag(Flag::Readonly) => {
                 matches!(target, Target::Property | Target::Parameter)
             }
@@ -567,6 +572,7 @@ impl Emit<'_> {
             line,
             end_line: self.end_line(range),
             generator: self.is_generator_at(range.start),
+            void_return: false,
         })
     }
 
@@ -579,34 +585,39 @@ impl Emit<'_> {
             let param = self.parsed.tree[*param].clone();
             let line = param.line();
             let attributes = self.walk_attributes(&param.attrs)?;
-            if param.hooks.is_some() {
-                return Err(unread(line, "a property accessor list"));
-            }
             let modifiers = self.walk_modifiers(&param.modifiers, line, Target::Parameter)?;
+            let name = self.variable_name(param.var);
+            let hooks = match param.hooks {
+                Some(list) => Some(self.walk_hooks(list, &name)?),
+                None => None,
+            };
             if modifiers.has(Flag::Var) {
                 return Err(self.internal("a parameter the grammar wrote `var` before"));
             }
-            // `promotion_flags`: any of them promotes.
+            // `promotion_flags`, or a hook list: any of them promotes
+            // (`is_promoted = property_flags || hooks_ast`).
             let is_readonly = modifiers.has(Flag::Readonly);
             let is_final = modifiers.has(Flag::Final);
             let promote = (modifiers.visibility.is_some()
                 || modifiers.set_visibility.is_some()
                 || is_readonly
-                || is_final)
-                .then(|| Promoted {
-                    visibility: modifiers.visibility.unwrap_or_default(),
-                    set_visibility: modifiers.set_visibility,
-                    is_readonly,
-                    is_final,
-                });
+                || is_final
+                || hooks.is_some())
+            .then(|| Promoted {
+                visibility: modifiers.visibility.unwrap_or_default(),
+                set_visibility: modifiers.set_visibility,
+                is_readonly,
+                is_final,
+            });
             out.push(Parameter {
-                name: self.variable_name(param.var),
+                name,
                 ty: param.ty,
                 line,
                 by_ref: param.byref.is_some(),
                 variadic: param.variadic.is_some(),
                 default: param.default,
                 promote,
+                hooks,
                 attributes,
                 doc_comment: self.doc_comment(param.doc_comment),
             });
@@ -757,7 +768,7 @@ impl Emit<'_> {
                             "Cannot use the final modifier on an abstract property",
                         ));
                     }
-                    Target::Constant | Target::Parameter => {}
+                    Target::Constant | Target::Parameter | Target::Hook => {}
                 }
             }
             if repeated {
@@ -1134,14 +1145,32 @@ impl Emit<'_> {
         let node = self.parsed.tree[id].clone();
         let line = node.line();
         let modifiers = self.walk_modifiers(&node.modifiers, line, Target::Property)?;
-        if node.hooks.is_some() {
-            return Err(unread(line, "a property accessor list"));
+        if let Some(list) = node.hooks
+            && node.property_declarators.len() > 1
+        {
+            // php's `hooked_property` is one `T_VARIABLE`, so a list
+            // after a second declarator is the parser's.
+            let at = self.parsed.tree[list].line();
+            return Err(CompileError {
+                level: Level::Parse,
+                message: String::from(
+                    "syntax error, unexpected token \"{\", expecting \",\" or \";\"",
+                ),
+                line: at,
+                raised: Vec::new(),
+            });
         }
         for declarator in &node.property_declarators {
             let declarator = self.parsed.tree[*declarator].clone();
             let attributes = self.walk_attributes(&node.attrs)?;
+            let name = self.variable_name(declarator.var);
+            let hooks = match node.hooks {
+                Some(list) => Some(self.walk_hooks(list, &name)?),
+                None => None,
+            };
             class.properties.push(Property {
-                name: self.variable_name(declarator.var),
+                name,
+                hooks,
                 visibility: modifiers.visibility.unwrap_or_default(),
                 set_visibility: modifiers.set_visibility,
                 ty: node.ty,
@@ -1344,7 +1373,7 @@ pub(super) enum AsModifier {
 /// expressions. `zend_compile_attributes` is what turns a group of
 /// these into a declaration's, so a group is not a thing that outlives
 /// the reader: `#[A] #[B]` and `#[A, B]` are the same two attributes.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(super) struct Attr {
     pub(super) name: Vec<u8>,
     pub(super) arguments: Vec<AttrArgument>,
@@ -1354,7 +1383,7 @@ pub(super) struct Attr {
 /// One argument of an attribute's list as written, php's
 /// `ZEND_AST_ARG_LIST` child: an expression, `name: expression`, or
 /// `...expression`, which `zend_compile_attributes` refuses.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(super) enum AttrArgument {
     Positional(php_syntax::tree::Expr),
     Named(Vec<u8>, php_syntax::tree::Expr),
@@ -1386,13 +1415,16 @@ pub(super) struct Function {
     /// `ZEND_ACC_GENERATOR`: a `yield` stands in the body itself
     /// ([`generators`]).
     pub(super) generator: bool,
+    /// The `void` `zend_compile_property_hooks` writes as a `set`
+    /// hook's return type, where `return_type` is none.
+    pub(super) void_return: bool,
 }
 
 /// One parameter, php's `ZEND_AST_PARAM`: the declared type where one is
 /// written, `ZEND_PARAM_REF` for an `&` and `ZEND_PARAM_VARIADIC` for a
 /// `...` before the variable, the name, the default, and the modifiers
 /// that promote it to a property in a constructor.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(super) struct Parameter {
     pub(super) name: Vec<u8>,
     /// The type as written, compiled by the emitter.
@@ -1404,6 +1436,9 @@ pub(super) struct Parameter {
     pub(super) variadic: bool,
     pub(super) default: Option<php_syntax::tree::Expr>,
     pub(super) promote: Option<Promoted>,
+    /// The hook list after it, `param_ast->child[5]`, which alone
+    /// promotes it too; none where no list is written.
+    pub(super) hooks: Option<Vec<Hook>>,
     /// The attributes written before it, `param_ast->child[3]`.
     pub(super) attributes: Vec<Attr>,
     /// The doc comment before the parameter, `param_ast->child[4]`,
@@ -1485,6 +1520,10 @@ pub(super) struct Use {
 #[allow(clippy::struct_excessive_bools)] // the ZEND_ACC_* bits of a property as written, each one fact
 pub(super) struct Property {
     pub(super) name: Vec<u8>,
+    /// The hook list, `prop_ast->child[3]`: none where the declarator
+    /// ends in `;`, and an empty list for `{}`, which
+    /// `zend_compile_property_hooks` refuses.
+    pub(super) hooks: Option<Vec<Hook>>,
     pub(super) visibility: Visibility,
     pub(super) set_visibility: Option<Visibility>,
     /// The group's type as written, compiled by the emitter once per

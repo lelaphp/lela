@@ -1,7 +1,7 @@
 //! A unit (design §4.7): one compiled file, immutable once published, its
 //! declarations beside their op arrays.
 
-use crate::decl::{ClassDecl, ConstDecl, FunctionDecl, Name};
+use crate::decl::{ClassDecl, ConstDecl, FunctionDecl, HookKind, Name};
 use crate::op::OpArray;
 
 /// A compiled PHP program: the main op array, the functions with their
@@ -31,6 +31,11 @@ pub struct Unit {
     /// declares too, and a native's body is Rust. In the order
     /// `zend_compile_class_decl` compiled them, class by class.
     pub methods: Vec<MethodBody>,
+    /// The op array of each hook a property of a class of `classes`
+    /// declares with a body, php's `prop_info->hooks[kind]` laid beside
+    /// the declaration model as a method's is: in the order
+    /// `zend_compile_property_hooks` compiled them.
+    pub hooks: Vec<HookBody>,
     /// Every function of the file that no name binds while it compiles:
     /// one written inside a block, a loop or another body, which php
     /// compiles with `toplevel` false and binds with the
@@ -59,6 +64,17 @@ pub struct Unit {
 pub struct MethodBody {
     pub class: u32,
     pub method: u32,
+    pub body: OpArray,
+}
+
+/// One hook's body: which class of [`Unit::classes`], which of its
+/// `properties` and which of that property's hooks the op array is the
+/// body of.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HookBody {
+    pub class: u32,
+    pub property: u32,
+    pub kind: HookKind,
     pub body: OpArray,
 }
 

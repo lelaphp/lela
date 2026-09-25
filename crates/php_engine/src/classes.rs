@@ -1654,6 +1654,7 @@ fn throwable_properties() -> Vec<PropertyDecl> {
         default,
         attributes: Vec::new(),
         doc_comment: None,
+        hooks: None,
     };
     let empty = || Some(ConstExpr::Str(Box::new([])));
     vec![
