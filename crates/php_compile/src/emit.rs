@@ -113,9 +113,11 @@ use php_syntax::magic_const_name;
 
 use crate::{CompileError, Options, StackLimit};
 use attributes::InternalAttribute;
+use imports::{Imports, Symbol};
 use walk::{Class, Closure, Function, Method, Property};
 
 mod attributes;
+mod imports;
 mod magic;
 mod types;
 mod walk;
@@ -303,6 +305,10 @@ pub(crate) struct Emit<'a> {
     /// `FC(current_namespace)`: the namespace a `namespace` statement
     /// put what follows it in, and none before one.
     namespace: Option<Vec<u8>>,
+    /// `FC(imports)`, `FC(imports_function)`, `FC(imports_const)` and
+    /// `FC(seen_symbols)`: what the `use` statements of the current
+    /// namespace imported and what the file declared in it.
+    imports: Imports,
     /// `CG(active_class_entry)`: the class whose members are being
     /// compiled, and none outside a class body.
     active_class: Option<ActiveClass>,
@@ -886,6 +892,7 @@ pub(crate) fn unit(
         known_classes: &options.classes,
         frameless: frameless_table(&options.functions),
         namespace: None,
+        imports: Imports::default(),
         active_class: None,
         active_parent: None,
         active_constants: Vec::new(),
@@ -1316,7 +1323,7 @@ impl Emit<'_> {
                 }
             }
             Stmt::StaticVarStmt(_) => return Err(self.unread("a `static` variable")),
-            Stmt::UseStmt(_) => return Err(self.unread("a `use` statement")),
+            Stmt::UseStmt(id) => self.use_stmt(id)?,
             Stmt::HaltCompilerStmt(_) => return Err(self.unread("a `__halt_compiler`")),
         }
         Ok(())
@@ -2522,7 +2529,7 @@ impl Emit<'_> {
     /// when it was a user function. A function declared inside a block,
     /// a loop or another body is [`Self::nested_function_decl`].
     fn function_decl(&mut self, function: &Function) -> Result<(), CompileError> {
-        let name = self.prefix_with_ns(&function.name);
+        let name = self.declare_symbol(Symbol::Function, &function.name)?;
         if self.depth != 1 {
             return self.nested_function_decl(function, &name);
         }
@@ -3609,7 +3616,7 @@ impl Emit<'_> {
             return Err(self
                 .fatal("a class declared inside a block or a body this compiler cannot read yet"));
         }
-        let name = self.prefix_with_ns(&class.name);
+        let name = self.declare_symbol(Symbol::Class, &class.name)?;
         let wanted = name.to_ascii_lowercase();
         if self
             .classes
@@ -4863,12 +4870,21 @@ impl Emit<'_> {
                 Some(inner) => self.const_expr(inner),
                 None => Err(self.unread("an expression inside parentheses")),
             },
-            tree::Expr::NameRef(token) => match self.constant_name(token) {
-                Some(value) => folded_const_expr(value).ok_or_else(|| {
-                    self.fatal("a constant expression this compiler cannot read yet")
-                }),
-                None => Ok(ConstExpr::Constant(Name(self.text(token).into()))),
-            },
+            // `zend_compile_const_expr_const`: the name resolved through
+            // the constant imports, and an unqualified one no import
+            // names, in a namespace, left as written for the fallback
+            // the engine's fetch makes.
+            tree::Expr::NameRef(token) => {
+                if let Some(value) = self.constant_name(token) {
+                    return folded_const_expr(value).ok_or_else(|| {
+                        self.fatal("a constant expression this compiler cannot read yet")
+                    });
+                }
+                let written = self.text(token).to_vec();
+                let (resolved, runtime) = self.constant_resolved(&written);
+                let name = if runtime { written } else { resolved };
+                Ok(ConstExpr::Constant(Name(name.into_boxed_slice())))
+            }
             // `zend_compile_const_expr_magic_const`: `__CLASS__` in a
             // trait is the one magic constant the fold leaves, kept as
             // `ZEND_AST_CONSTANT_CLASS` for the scope that evaluates it.
@@ -5088,6 +5104,7 @@ impl Emit<'_> {
             )));
         }
         self.namespace = Some(name.to_vec());
+        self.imports.reset();
         // php's `zend_is_first_statement` steps over a `ZEND_AST_DECLARE`
         // before the node it is asked about and over nothing else, so a
         // `namespace` statement is one a later `strict_types` finds.
@@ -5211,7 +5228,8 @@ impl Emit<'_> {
                     String::from_utf8_lossy(&name)
                 )));
             }
-            let name = self.string(&self.prefix_with_ns(&name))?;
+            let full = self.declare_symbol(Symbol::Const, &name)?;
+            let name = self.string(&full)?;
             let op1 = self.literal(name);
             let op2 = self.literal(value);
             self.push(Opline {
@@ -12408,45 +12426,33 @@ impl Emit<'_> {
     }
 
     /// `zend_compile_function_name` over `zend_resolve_function_name`:
-    /// the name a call is resolved to, and whether the resolution waits
-    /// for the program to be served. A name written with a leading `\` is
-    /// what follows it, fully qualified; `namespace\f` is the current
-    /// namespace before `f`, fully qualified; a name with a `\` in it
-    /// is the current namespace before it, fully qualified, since no
-    /// `use` is read here; and an unqualified name is itself where no
-    /// namespace stands, and the namespace before it where one does,
-    /// resolved as the program serves, which is the `true`.
+    /// the name a call is resolved to through the file's imports
+    /// ([`Self::resolve_non_class`]), and whether the resolution waits
+    /// for the program to be served, which is php's
+    /// `!is_fully_qualified && FC(current_namespace)`: an unqualified
+    /// name no `use function` names, inside a namespace.
     fn function_name(&self, name: &[u8]) -> (Vec<u8>, bool) {
-        if let Some(fully_qualified) = name.strip_prefix(b"\\") {
-            return (fully_qualified.to_vec(), false);
-        }
-        let Some(namespace) = &self.namespace else {
-            return (name.to_vec(), false);
-        };
-        let prefixed = |rest: &[u8]| {
-            let mut full = namespace.clone();
-            full.push(b'\\');
-            full.extend_from_slice(rest);
-            full
-        };
-        if name.len() > 10 && name[..10].eq_ignore_ascii_case(b"namespace\\") {
-            return (prefixed(&name[10..]), false);
-        }
-        (prefixed(name), !name.contains(&b'\\'))
+        let (resolved, fully_qualified) = self.resolve_non_class(name, Symbol::Function);
+        (resolved, !fully_qualified && self.namespace.is_some())
     }
 
-    /// `zend_resolve_class_name` for a name no `use` is read for: a name
-    /// written with a leading `\` is what follows it, and in a namespace
-    /// `namespace\C` and any other name take the namespace before them,
-    /// as [`Self::function_name`] resolves a function's, with nothing
-    /// waiting for the program, since a class name resolves at compile
-    /// time. `self`, `parent` and `static` written without the `\` are
-    /// no class's name and resolve to themselves.
+    /// [`Self::function_name`] for a constant, `zend_resolve_const_name`,
+    /// which reads the constant imports, whose aliases keep their case.
+    fn constant_resolved(&self, name: &[u8]) -> (Vec<u8>, bool) {
+        let (resolved, fully_qualified) = self.resolve_non_class(name, Symbol::Const);
+        (resolved, !fully_qualified && self.namespace.is_some())
+    }
+
+    /// `zend_resolve_class_name`: `self`, `parent` and `static` written
+    /// without the `\` are no class's name and resolve to themselves;
+    /// every other name is [`Self::resolve_class`]'s, the file's imports
+    /// read, with nothing waiting for the program, since a class name
+    /// resolves at compile time.
     fn class_name(&self, name: &[u8]) -> Vec<u8> {
         if class_fetch_type(name) != FETCH_CLASS_DEFAULT {
             return name.to_vec();
         }
-        self.function_name(name).0
+        self.resolve_class(name)
     }
 
     /// `zend_prefix_with_ns`: the name a declaration takes, the current
@@ -12631,10 +12637,11 @@ impl Emit<'_> {
     }
 
     fn const_name(&mut self, name: &[u8]) -> Result<Option<Zval>, CompileError> {
-        if self.namespace.is_some() && !name.starts_with(b"\\") {
+        let (resolved, runtime) = self.constant_resolved(name);
+        if runtime {
             return Ok(None);
         }
-        self.persistent(name)
+        self.persistent(&resolved)
     }
 
     /// `zend_compile_const`'s second half (`Z/Zend/zend_compile.c:11048`),
@@ -12643,11 +12650,10 @@ impl Emit<'_> {
     /// `IS_CONSTANT_UNQUALIFIED_IN_NAMESPACE` in `op1` where the name
     /// stood unqualified inside a namespace, and the cache slot
     /// `zend_alloc_cache_slot` takes in `extended_value`. The resolution
-    /// is [`Self::function_name`]'s, since `zend_resolve_const_name` and
-    /// `zend_resolve_function_name` are one `zend_resolve_non_class_name`
-    /// and no `use` is read by either here: a leading `\` and a `\`
-    /// inside the name are both fully qualified, and only a bare name in
-    /// a namespace waits for the program.
+    /// is [`Self::constant_resolved`]'s, `zend_resolve_const_name` over
+    /// the constant imports: a leading `\`, a `\` inside the name and an
+    /// imported alias are all fully qualified, and only a bare name no
+    /// `use const` names, in a namespace, waits for the program.
     ///
     /// ```php
     /// define("W", 1);
@@ -12660,7 +12666,7 @@ impl Emit<'_> {
         if let Some(value) = self.const_name(name)? {
             return Ok(Where::Constant(value));
         }
-        let (resolved, unqualified) = self.function_name(name);
+        let (resolved, unqualified) = self.constant_resolved(name);
         let op2 = self.const_name_literal(&resolved, unqualified)?;
         let extended_value = self.cache_slot();
         let out = self.temporary();
@@ -14142,6 +14148,7 @@ mod tests {
             known_classes: &options.classes,
             frameless: Vec::new(),
             namespace: Some(b"A".to_vec()),
+            imports: Imports::default(),
             active_class: None,
             active_parent: None,
             active_constants: Vec::new(),
