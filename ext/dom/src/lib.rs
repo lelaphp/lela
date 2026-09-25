@@ -1511,6 +1511,42 @@ fn invalidate(req: &mut Request, object: PhpObject) {
     }
 }
 
+/// `dom_minimum_modification_nr_since_parsing`: a legacy document takes a
+/// `new` and a load to reach its parsed state, a modern one only its
+/// named constructor.
+fn minimum_modification(obj: &php_ext_libxml::ffi::NodeObject) -> usize {
+    if obj.class_type() == php_ext_libxml::ffi::ClassType::Modern {
+        1
+    } else {
+        2
+    }
+}
+
+/// `dom_is_document_cache_modified_since_parsing`: whether the tree may
+/// have changed since the parse, so libxml's ID cache is not to be
+/// trusted.
+///
+/// ```php
+/// $d = \Dom\HTMLDocument::createFromString("<p id=a>b</p><p id=a>c</p>", LIBXML_NOERROR);
+/// $p = $d->getElementById("a");
+/// echo $p->textContent, "\n";
+/// $p->remove();
+/// echo $d->getElementById("a")->textContent, "\n";
+/// $x = Dom\XMLDocument::createFromString("<r xmlns:x=\"urn:x\" x:a=\"1\"/>");
+/// foreach ($x->documentElement->attributes as $k => $v) echo $k, "=", $v->value, "\n";
+/// ```
+/// ```expect
+/// b
+/// c
+/// xmlns:x=urn:x
+/// x:a=1
+/// ```
+fn modified_since_parsing(req: &Request, object: PhpObject) -> bool {
+    dom(req, object).is_none_or(|d| {
+        !d.obj.has_document() || d.obj.modification() > minimum_modification(&d.obj)
+    })
+}
+
 /// `dom_mark_ids_modified(obj->document)`: the modification number past
 /// the minimum a fresh parse leaves, so `getElementById` stops trusting
 /// libxml's ID cache.
@@ -1518,7 +1554,7 @@ fn mark_ids_modified(req: &mut Request, object: PhpObject) {
     if let Some(d) = dom_mut(req, object)
         && d.obj.has_document()
     {
-        let at_least = 3;
+        let at_least = minimum_modification(&d.obj) + 1;
         if d.obj.modification() < at_least {
             d.obj.set_modification(at_least);
         }

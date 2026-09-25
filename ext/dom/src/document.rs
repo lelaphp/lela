@@ -16,7 +16,7 @@ use crate::map::MapKind;
 use crate::object::Code;
 use crate::props::Prop;
 use crate::{
-    Entry, Read, adopt, arity, bool_arg, bytes_arg, check_qname, dom, dom_error, dom_mut, fetch,
+    Entry, Read, adopt, arity, bool_arg, bytes_arg, check_qname, dom_error, dom_mut, fetch,
     file_path, get_ns, get_ns_unchecked, instance_of, invalidate, long_arg, nullable_bytes_arg,
     nullable_object, object_arg, object_for, path_arg, props_of, strict, string, this, this_node,
     validate_and_extract,
@@ -1539,7 +1539,7 @@ fn get_element_by_id(req: &mut Request) -> Result<Value, Thrown> {
     arity(req, 1, 1)?;
     let id = bytes_arg(req, 1)?;
     let (this, doc) = this_node(req)?;
-    let modified = dom(req, this).is_none_or(|d| !d.obj.has_document() || d.obj.modification() > 2);
+    let modified = crate::modified_since_parsing(req, this);
     if !modified {
         let found = doc.get_id(&id).and_then(Node::parent);
         return nullable_object(req, found, Some(this));
