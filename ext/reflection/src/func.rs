@@ -7,7 +7,7 @@
 //!
 //! What stands beside `stub::unbuilt` still: `getStaticVariables`,
 //! whose table the declaration model has no field for (#420);
-//! `getEndLine`, which is #376's; `getClosureCalledClass`,
+//! `getClosureCalledClass`,
 //! whose `called_scope` the payload does not carry, and `getClosure`,
 //! which waits on `api::call::closure_from_callable`; `setAccessible`
 //! and `ReflectionFunction`'s `isDisabled`, which the stub marks
@@ -235,6 +235,34 @@ pub(super) fn reflection_function_get_start_line(req: &mut Request) -> Result<Va
         return Ok(Value::bool(false));
     }
     Ok(Value::int(i64::from(decl.line)))
+}
+
+/// `ReflectionFunctionAbstract::getEndLine()`: `op_array.line_end`,
+/// the line of the closing brace, and `false` for a native.
+///
+/// ```php
+/// function f() {
+///     return 1;
+/// }
+/// class C { function m() {
+/// } }
+/// $c = function () {
+/// };
+/// var_dump((new ReflectionFunction('f'))->getEndLine(), (new ReflectionMethod('C', 'm'))->getEndLine(), (new ReflectionFunction($c))->getEndLine(), (new ReflectionFunction('strlen'))->getEndLine());
+/// ```
+/// ```expect
+/// int(4)
+/// int(6)
+/// int(8)
+/// bool(false)
+/// ```
+pub(super) fn reflection_function_get_end_line(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    let (_, decl) = this_function(req)?;
+    if is_internal(&decl) {
+        return Ok(Value::bool(false));
+    }
+    Ok(Value::int(i64::from(decl.end_line)))
 }
 
 /// `ReflectionFunctionAbstract::getDocComment()`:

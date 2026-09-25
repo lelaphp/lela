@@ -4709,7 +4709,7 @@ fn reflection_function_abstract() -> Declared {
                     &[],
                     Some(union(&[Type::Int, Type::False])),
                 )),
-                unbuilt as Entry,
+                super::func::reflection_function_get_end_line as Entry,
             ),
             (
                 tentative(method(
