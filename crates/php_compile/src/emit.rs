@@ -3751,6 +3751,14 @@ impl Emit<'_> {
     /// ```expect exit=255
     /// Fatal error: Cannot use "static" as trait name, as it is reserved in %s on line 2
     /// ```
+    ///
+    /// ```php
+    /// trait T { function f() {} }
+    /// class C { use T { static::f insteadof T; } }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use "static" as trait name, as it is reserved in %s on line 3
+    /// ```
     fn trait_uses(
         &mut self,
         class: &Class,

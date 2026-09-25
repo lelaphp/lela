@@ -704,7 +704,25 @@ impl Emit<'_> {
         let Some(method) = reference.method.and_then(|m| tree[m].name) else {
             return Err(unread(line, "a trait adaptation naming no method"));
         };
-        let trait_name = reference.r#trait.map(|t| self.text(t).to_vec());
+        // `static::m` is no name to the tree, which reads `static` as a
+        // keyword; php resolves it as a trait name and refuses it as
+        // reserved, which the compile does from its spelling.
+        let range = reference.range();
+        let written = self
+            .parsed
+            .source
+            .get(range.start as usize..(range.start + range.len) as usize)
+            .unwrap_or_default();
+        let trait_name = match reference.r#trait {
+            Some(t) => Some(self.text(t).to_vec()),
+            None if written.len() > 6
+                && written[..6].eq_ignore_ascii_case(b"static")
+                && written[6..].trim_ascii_start().starts_with(b"::") =>
+            {
+                Some(written[..6].to_vec())
+            }
+            None => None,
+        };
         let method = self.text(method).to_vec();
         match adaptation {
             tree::TraitAdaptation::InsteadofAdaptation(id) => {
