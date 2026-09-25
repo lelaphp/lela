@@ -3,16 +3,18 @@
 //! `Reflection` itself declares. Each reads the declaration the reflector's `$name`,
 //! and a member's `$class`, look up again.
 //!
-//! A property's hooks are a list `PropertyDecl` has no field for, since
-//! the compiler refuses one (#427), so `hasHooks`, `getHooks`, `hasHook`
-//! and `getHook` answer as php does for a property without hooks.
+//! A property's hooks are its declaration's with what it inherits, as
+//! `ce->properties_info` holds them once linked, which the engine
+//! resolves ([`php_ext::call::property_hook`]); a hook is reflected as a
+//! `ReflectionMethod` named `$name::get` or `$name::set` (#427).
 //!
-//! What stands beside `stub::unbuilt` still: `isAbstract`, `isVirtual`
-//! and `isFinal`, which are hooks proper (#427), and the four lazy entries;
-//! and `setAccessible`, which the stub marks `#[\\Deprecated]` (#412).
+//! What stands beside `stub::unbuilt` still: the four lazy entries, and
+//! `setAccessible`, which the stub marks `#[\\Deprecated]` (#412).
 
-use php_ext::call::{constant, eval_const_expr};
-use php_ext::decl::{ClassConstDecl, ClassKind, Name, PropertyDecl, Type, Visibility};
+use php_ext::call::{constant, eval_const_expr, property_hook, property_is_virtual};
+use php_ext::decl::{
+    ClassConstDecl, ClassKind, HookKind, MethodDecl, Name, PropertyDecl, Type, Visibility,
+};
 use php_ext::raising::{Thrown, deprecated, throw};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, PhpArray, Value};
@@ -104,92 +106,230 @@ fn this_declared(req: &mut Request) -> Result<Reflected, Thrown> {
     Ok((class, name, found))
 }
 
-/// `ReflectionProperty::hasHooks()`: `ref->prop && ref->prop->hooks`.
-/// `PropertyDecl` carries no list of hooks, since the compiler refuses one
-/// (#427), so every property here, declared or dynamic, is one without
-/// hooks and the answer is php's for it.
+/// A hook's name read back into the property it hooks and its kind,
+/// `$name::get` or `$name::set` as `zend_compile_property_hooks` names
+/// it.
+pub(super) fn hook_name(name: &[u8]) -> Option<(&[u8], HookKind)> {
+    let rest = name.strip_prefix(b"$")?;
+    if let Some(property) = rest.strip_suffix(b"::get") {
+        return Some((property, HookKind::Get));
+    }
+    rest.strip_suffix(b"::set")
+        .map(|property| (property, HookKind::Set))
+}
+
+/// `ref->prop->hooks[kind]`: the hook of `kind` a declared property's
+/// table entry carries, with the class that wrote it; none for a
+/// dynamic property.
+fn hook_of(
+    req: &Request,
+    found: Option<&(ClassId, PropertyDecl)>,
+    name: &[u8],
+    kind: HookKind,
+) -> Option<(ClassId, MethodDecl)> {
+    let (declaring, _) = found?;
+    property_hook(req, *declaring, name, kind)
+}
+
+/// `reflection_method_factory(hook->common.scope, hook, NULL, ...)`: a
+/// `ReflectionMethod` over one hook, its `$class` the hook's scope.
+fn hook_reflector(req: &mut Request, scope: ClassId, decl: &MethodDecl) -> Result<Value, Thrown> {
+    let object = super::class::method_factory(req, &decl.function.name.0, scope, scope)?;
+    super::keep_hook(req, object);
+    Ok(object.as_value())
+}
+
+/// `ReflectionProperty::hasHooks()`: `ref->prop && ref->prop->hooks`,
+/// the property's own hooks or ones it inherits.
 ///
 /// ```php
-/// class C { public $p; } $o = new C; $o->d = 1;
+/// class C { public $p; public $h { get => 1; } } $o = new C; $o->d = 1;
+/// class D extends C { public $h; }
 /// var_dump((new ReflectionProperty('C', 'p'))->hasHooks(), (new ReflectionProperty($o, 'd'))->hasHooks());
+/// var_dump((new ReflectionProperty('C', 'h'))->hasHooks(), (new ReflectionProperty('D', 'h'))->hasHooks());
 /// ```
 /// ```expect
 /// Deprecated: Creation of dynamic property C::$d is deprecated in %s on line 2
 /// bool(false)
 /// bool(false)
+/// bool(true)
+/// bool(true)
 /// ```
 pub(super) fn reflection_property_has_hooks(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 0)?;
-    this_declared(req)?;
-    Ok(Value::bool(false))
+    let (_, name, found) = this_declared(req)?;
+    Ok(Value::bool(HookKind::ALL.into_iter().any(|kind| {
+        hook_of(req, found.as_ref(), &name, kind).is_some()
+    })))
 }
 
 /// `ReflectionProperty::getHooks()`: the `get` and `set` hooks keyed by
-/// kind, and the empty array for a property without hooks, which every
-/// property here is ([`reflection_property_has_hooks`]).
+/// kind, each a `ReflectionMethod`, and the empty array for a property
+/// without hooks.
 ///
 /// ```php
-/// class C { public $p; }
-/// var_dump((new ReflectionProperty('C', 'p'))->getHooks());
+/// class C { public $p; public $h { set {} } }
+/// var_dump((new ReflectionProperty('C', 'p'))->getHooks(), (new ReflectionProperty('C', 'h'))->getHooks());
 /// ```
 /// ```expect
 /// array(0) {
 /// }
+/// array(1) {
+///   ["set"]=>
+///   object(ReflectionMethod)#%d (2) {
+///     ["name"]=>
+///     string(7) "$h::set"
+///     ["class"]=>
+///     string(1) "C"
+///   }
+/// }
 /// ```
 pub(super) fn reflection_property_get_hooks(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 0)?;
-    this_declared(req)?;
-    Ok(Value::array(PhpArray::new(req)?))
+    let (_, name, found) = this_declared(req)?;
+    let mut hooks = PhpArray::new(req)?;
+    for kind in HookKind::ALL {
+        let Some((scope, decl)) = hook_of(req, found.as_ref(), &name, kind) else {
+            continue;
+        };
+        let reflector = hook_reflector(req, scope, &decl)?;
+        let key = php_ext::values::Key::Str(php_ext::values::PhpString::new(
+            req,
+            kind.name().as_bytes(),
+        )?);
+        hooks.set(req, key, reflector)?;
+    }
+    Ok(Value::array(hooks))
 }
 
 /// `Z_PARAM_OBJ_OF_CLASS(type, reflection_property_hook_type_ptr)`, the
 /// one argument `hasHook` and `getHook` take, held to its count and to
-/// `PropertyHookType`.
-fn hook_type_argument(req: &mut Request) -> Result<(), Thrown> {
+/// `PropertyHookType`, and the kind its case names.
+fn hook_type_argument(req: &mut Request) -> Result<HookKind, Thrown> {
     exactly_arguments(req, 1)?;
     let given = req.argument(1).unwrap_or_default();
     let ty = Type::Named(Name(b"PropertyHookType".as_slice().into()));
-    php_ext::coerce::coerce_param(req, &given, &ty, 1)?;
-    Ok(())
+    let given = php_ext::coerce::coerce_param(req, &given, &ty, 1)?;
+    let case = given
+        .as_object()
+        .and_then(|case| case.prop(req, b"name"))
+        .and_then(|name| name.as_str_bytes().map(<[u8]>::to_vec));
+    Ok(if case.as_deref() == Some(b"Get") {
+        HookKind::Get
+    } else {
+        HookKind::Set
+    })
 }
 
 /// `ReflectionProperty::hasHook(PropertyHookType $type)`: whether the
-/// property's hooks include one of that kind, `false` for a property without
-/// hooks, which every property here is
-/// ([`reflection_property_has_hooks`]).
+/// property's hooks include one of that kind.
 ///
 /// ```php
-/// class C { public $p; } $r = new ReflectionProperty('C', 'p');
+/// class C { public $p; public $h { get => 1; } } $r = new ReflectionProperty('C', 'p');
 /// var_dump($r->hasHook(PropertyHookType::Get), $r->hasHook(PropertyHookType::Set));
+/// $h = new ReflectionProperty('C', 'h');
+/// var_dump($h->hasHook(PropertyHookType::Get), $h->hasHook(PropertyHookType::Set));
 /// try { $r->hasHook('get'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
 /// ```
 /// ```expect
 /// bool(false)
 /// bool(false)
+/// bool(true)
+/// bool(false)
 /// ReflectionProperty::hasHook(): Argument #1 ($type) must be of type PropertyHookType, string given
 /// ```
 pub(super) fn reflection_property_has_hook(req: &mut Request) -> Result<Value, Thrown> {
-    hook_type_argument(req)?;
-    this_declared(req)?;
-    Ok(Value::bool(false))
+    let kind = hook_type_argument(req)?;
+    let (_, name, found) = this_declared(req)?;
+    Ok(Value::bool(
+        hook_of(req, found.as_ref(), &name, kind).is_some(),
+    ))
 }
 
 /// `ReflectionProperty::getHook(PropertyHookType $type)`: a
-/// `ReflectionMethod` over the one of the property's hooks of that
-/// kind, `null` for a property without hooks, which every
-/// property here is ([`reflection_property_has_hooks`]).
+/// `ReflectionMethod` over the property's hook of that kind, `null`
+/// where it has none; the method reflected is the hook itself, which
+/// `invoke` runs.
 ///
 /// ```php
-/// class C { public $p; }
+/// class C { public $p; public $h = 1 { get => $this->h * 10; } }
 /// var_dump((new ReflectionProperty('C', 'p'))->getHook(PropertyHookType::Get));
+/// $g = (new ReflectionProperty('C', 'h'))->getHook(PropertyHookType::Get);
+/// var_dump($g->getName(), $g->invoke(new C), $g->getNumberOfParameters());
 /// ```
 /// ```expect
 /// NULL
+/// string(7) "$h::get"
+/// int(10)
+/// int(0)
 /// ```
 pub(super) fn reflection_property_get_hook(req: &mut Request) -> Result<Value, Thrown> {
-    hook_type_argument(req)?;
-    this_declared(req)?;
-    Ok(Value::null())
+    let kind = hook_type_argument(req)?;
+    let (_, name, found) = this_declared(req)?;
+    match hook_of(req, found.as_ref(), &name, kind) {
+        Some((scope, decl)) => hook_reflector(req, scope, &decl),
+        None => Ok(Value::null()),
+    }
+}
+
+/// `ReflectionProperty::isAbstract()`: `ZEND_ACC_ABSTRACT`, which a
+/// property carries where declared `abstract` and every interface
+/// property carries.
+///
+/// ```php
+/// interface I { public $i { get; } }
+/// abstract class A { abstract public $a { get; } public $p; }
+/// var_dump((new ReflectionProperty('I', 'i'))->isAbstract(), (new ReflectionProperty('A', 'a'))->isAbstract(), (new ReflectionProperty('A', 'p'))->isAbstract());
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// ```
+pub(super) fn reflection_property_is_abstract(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    let (_, _, found) = this_declared(req)?;
+    Ok(Value::bool(found.is_some_and(|(_, decl)| {
+        decl.hooks.as_ref().is_some_and(|hooks| hooks.is_abstract)
+    })))
+}
+
+/// `ReflectionProperty::isVirtual()`: `ZEND_ACC_VIRTUAL`, a hooked
+/// property no declaration of which up the chain has a backing value
+/// ([`php_ext::call::property_is_virtual`]).
+///
+/// ```php
+/// class C { public $v { get => 1; } public $b { get => $this->b; } }
+/// var_dump((new ReflectionProperty('C', 'v'))->isVirtual(), (new ReflectionProperty('C', 'b'))->isVirtual());
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(false)
+/// ```
+pub(super) fn reflection_property_is_virtual(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    let (_, name, found) = this_declared(req)?;
+    Ok(Value::bool(found.is_some_and(|(declaring, _)| {
+        property_is_virtual(req, declaring, &name)
+    })))
+}
+
+/// `ReflectionProperty::isFinal()`: `ZEND_ACC_FINAL`, written or given
+/// by a `private(set)`.
+///
+/// ```php
+/// class C { final public $f; public private(set) int $p; public $n; }
+/// foreach (['f', 'p', 'n'] as $x) var_dump((new ReflectionProperty('C', $x))->isFinal());
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// ```
+pub(super) fn reflection_property_is_final(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    let (_, _, found) = this_declared(req)?;
+    Ok(Value::bool(found.is_some_and(|(_, decl)| decl.is_final)))
 }
 
 /// `ReflectionProperty::getMangledName()`: `prop->name`, the key the
@@ -273,10 +413,19 @@ pub(super) fn reflection_property_get_name(req: &mut Request) -> Result<Value, T
 /// ```expect
 /// Property [ <dynamic> public $x ]
 /// ```
+///
+/// ```php
+/// abstract class A { abstract public int $a { get; } public $b = 1 { final set => $value; } }
+/// echo new ReflectionProperty('A', 'a'), new ReflectionProperty('A', 'b');
+/// ```
+/// ```expect
+/// Property [ abstract public virtual int $a { get; } ]
+/// Property [ public $b = 1 { final set; } ]
+/// ```
 pub(super) fn reflection_property_to_string(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 0)?;
     let (_, name, found) = this_declared(req)?;
-    let Some((_, decl)) = found else {
+    let Some((declaring, decl)) = found else {
         // `_property_string` with no property info: php's dynamic row,
         // which carries no modifier but `public` and no default.
         let text = format!(
@@ -285,7 +434,7 @@ pub(super) fn reflection_property_to_string(req: &mut Request) -> Result<Value, 
         );
         return string_value(req, text.as_bytes());
     };
-    let text = property_string(req, &decl, "");
+    let text = property_string(req, declaring, &decl, "");
     string_value(req, text.as_bytes())
 }
 
@@ -354,25 +503,47 @@ fn set_visibility_is(req: &mut Request, wanted: Visibility) -> Result<Value, Thr
 
 /// `ReflectionProperty::getModifiers()`: `prop_get_flags(ref)` kept to
 /// the `PPP | PPP_SET | STATIC | READONLY | ABSTRACT | VIRTUAL |
-/// FINAL` mask. The `(set)` visibilities, `abstract`, `virtual` and
-/// `final` are bits `PropertyDecl` has no field for, so the answer is
-/// php's for a property that carries none of them. A dynamic property
-/// has no info, and `prop_get_flags` answers `ZEND_ACC_PUBLIC` for it.
+/// FINAL` mask. A dynamic property has no info, and `prop_get_flags`
+/// answers `ZEND_ACC_PUBLIC` for it.
 ///
 /// ```php
 /// $o = new stdClass; $o->d = 1;
+/// abstract class A { abstract public $a { get; } public $v { get => 1; } }
 /// var_dump((new ReflectionProperty('Exception', 'message'))->getModifiers(), (new ReflectionProperty($o, 'd'))->getModifiers());
+/// var_dump((new ReflectionProperty('A', 'a'))->getModifiers(), (new ReflectionProperty('A', 'v'))->getModifiers());
 /// ```
 /// ```expect
 /// int(2)
 /// int(1)
+/// int(577)
+/// int(513)
 /// ```
 pub(super) fn reflection_property_get_modifiers(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 0)?;
-    let (_, _, found) = this_declared(req)?;
-    Ok(Value::int(
-        found.map_or(1, |(_, decl)| property_bits(&decl)),
-    ))
+    let (_, name, found) = this_declared(req)?;
+    let Some((declaring, decl)) = found else {
+        return Ok(Value::int(1));
+    };
+    Ok(Value::int(property_flags(req, declaring, &name, &decl)))
+}
+
+/// `prop_info->flags` as far as the stub's `IS_*` constants name them:
+/// [`property_bits`], then `ZEND_ACC_ABSTRACT` and `ZEND_ACC_VIRTUAL`,
+/// which the table of `declaring` settles.
+pub(super) fn property_flags(
+    req: &Request,
+    declaring: ClassId,
+    name: &[u8],
+    decl: &PropertyDecl,
+) -> i64 {
+    let mut bits = property_bits(decl);
+    if decl.hooks.as_ref().is_some_and(|hooks| hooks.is_abstract) {
+        bits |= 64;
+    }
+    if property_is_virtual(req, declaring, name) {
+        bits |= 512;
+    }
+    bits
 }
 
 /// `ReflectionProperty::isPublic()`: `ZEND_ACC_PUBLIC`, which a
@@ -558,46 +729,89 @@ pub(super) fn reflection_property_get_type(req: &mut Request) -> Result<Value, T
 }
 
 /// `ReflectionProperty::getSettableType()`: the type a write must
-/// satisfy, which for a property with no hooks is `getType()`'s.
+/// satisfy: `never` for a virtual property with no `set` hook, which no
+/// write reaches; the `set` hook's parameter's where it has one, none
+/// where that is untyped; and `getType()`'s otherwise.
 ///
 /// ```php
+/// class C { public int $v { get => 1; } public int $s { set(int|string $x) { } } public int $p; }
+/// foreach (['v', 's', 'p'] as $n) echo (new ReflectionProperty('C', $n))->getSettableType(), "\n";
 /// echo (new ReflectionProperty('ReflectionClass', 'name'))->getSettableType(), "\n";
 /// ```
 /// ```expect
+/// never
+/// string|int
+/// int
 /// string
 /// ```
 pub(super) fn reflection_property_get_settable_type(req: &mut Request) -> Result<Value, Thrown> {
-    reflection_property_get_type(req)
+    exactly_arguments(req, 0)?;
+    let (_, name, found) = this_declared(req)?;
+    let Some((declaring, decl)) = &found else {
+        return Ok(Value::null());
+    };
+    let set = hook_of(req, found.as_ref(), &name, HookKind::Set);
+    let hooked = set.is_some() || hook_of(req, found.as_ref(), &name, HookKind::Get).is_some();
+    let ty = match set {
+        None if hooked && property_is_virtual(req, *declaring, &name) => Some(Type::Never),
+        Some((_, set)) => set
+            .function
+            .parameters
+            .first()
+            .and_then(|parameter| parameter.ty.clone()),
+        None => decl.ty.clone(),
+    };
+    let Some(ty) = ty else {
+        return Ok(Value::null());
+    };
+    Ok(type_factory(req, &ty, true)?.as_value())
 }
 
 /// `ReflectionProperty::hasDefaultValue()`: whether
 /// `property_get_default` gives a value that is not `UNDEF`; an
 /// untyped property with nothing written has php's implicit `null` and
-/// a typed one has none.
+/// a typed one has none, and a virtual property has no slot to hold
+/// one.
 ///
 /// ```php
+/// class C { public $v { get => 1; } public $b { get => $this->b; } }
 /// var_dump((new ReflectionProperty('Exception', 'message'))->hasDefaultValue());
 /// var_dump((new ReflectionProperty('ReflectionClass', 'name'))->hasDefaultValue());
+/// var_dump((new ReflectionProperty('C', 'v'))->hasDefaultValue(), (new ReflectionProperty('C', 'b'))->hasDefaultValue());
 /// ```
 /// ```expect
 /// bool(true)
 /// bool(false)
+/// bool(false)
+/// bool(true)
 /// ```
 pub(super) fn reflection_property_has_default_value(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 0)?;
-    let (_, _, found) = this_declared(req)?;
-    Ok(Value::bool(found.is_some_and(|(_, decl)| {
-        decl.default.is_some() || decl.ty.is_none()
-    })))
+    let (_, name, found) = this_declared(req)?;
+    let default = default_of(req, &name, found);
+    Ok(Value::bool(!matches!(default, Default::Absent)))
 }
 
 /// `property_get_default`'s three answers: a written default, the
 /// implicit `null` of an untyped property, and nothing, which a typed
-/// property without one and a dynamic property both give.
+/// property without one, a virtual one and a dynamic property give.
 enum Default {
     Written(php_ext::decl::ConstExpr, ClassId),
     ImplicitNull,
     Absent,
+}
+
+/// [`Default`] of the property a reflector names.
+fn default_of(req: &Request, name: &[u8], found: Option<(ClassId, PropertyDecl)>) -> Default {
+    match found {
+        Some((scope, _)) if property_is_virtual(req, scope, name) => Default::Absent,
+        Some((scope, decl)) => match (decl.default, decl.ty) {
+            (Some(expr), _) => Default::Written(expr, scope),
+            (None, None) => Default::ImplicitNull,
+            (None, Some(_)) => Default::Absent,
+        },
+        None => Default::Absent,
+    }
 }
 
 /// `ReflectionProperty::getDefaultValue()`: the default expression
@@ -631,16 +845,8 @@ enum Default {
 /// ```
 pub(super) fn reflection_property_get_default_value(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 0)?;
-    let (_, _, found) = this_declared(req)?;
-    let default = match found {
-        Some((scope, decl)) => match (decl.default, decl.ty) {
-            (Some(expr), _) => Default::Written(expr, scope),
-            (None, None) => Default::ImplicitNull,
-            (None, Some(_)) => Default::Absent,
-        },
-        None => Default::Absent,
-    };
-    match default {
+    let (_, name, found) = this_declared(req)?;
+    match default_of(req, &name, found) {
         Default::Written(expr, scope) => eval_const_expr(req, &expr, Some(scope)),
         Default::ImplicitNull => Ok(Value::null()),
         Default::Absent => {
