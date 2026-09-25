@@ -1329,6 +1329,44 @@ impl Emit<'_> {
         }
     }
 
+    /// `zend_eval_const_expr` over one node, what an array's elements, a
+    /// declaration's constant expression and a `static`'s initializer are
+    /// folded by: [`Self::constant_of`] under [`Fold::EvalConstExpr`],
+    /// which folds a conditional, a `??` and a dimension over constants
+    /// and no call.
+    ///
+    /// ```php
+    /// $b = 5;
+    /// var_dump([1 ? 2 : 3, $b], [0 ?: "d"], [null ?? 'n', ['k' => 1]['k']]);
+    /// class C { const X = 1 ? 2 : 3; }
+    /// var_dump(C::X);
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   [0]=>
+    ///   int(2)
+    ///   [1]=>
+    ///   int(5)
+    /// }
+    /// array(1) {
+    ///   [0]=>
+    ///   string(1) "d"
+    /// }
+    /// array(2) {
+    ///   [0]=>
+    ///   string(1) "n"
+    ///   [1]=>
+    ///   int(1)
+    /// }
+    /// int(2)
+    /// ```
+    pub(crate) fn eval_const(&mut self, expr: tree::Expr) -> Result<Option<Zval>, CompileError> {
+        let outer = std::mem::replace(&mut self.fold, Fold::EvalConstExpr);
+        let folded = self.constant_of(expr);
+        self.fold = outer;
+        folded
+    }
+
     /// `zend_compile_stmt` (`Z/Zend/zend_compile.c:11686`) over one
     /// statement node of the tree (design §4.9): the empty statement
     /// is nothing, as php's `statement: ';'` reduces to no node; a
@@ -3021,10 +3059,7 @@ impl Emit<'_> {
                 None => Some(Zval::null()),
                 Some(init) => {
                     let mark = self.raised();
-                    self.fold = Fold::EvalConstExpr;
-                    let folded = self.constant_of(init);
-                    self.fold = Fold::Compile;
-                    let folded = folded?;
+                    let folded = self.eval_const(init)?;
                     if folded.is_none() {
                         self.unraise(mark);
                     }
@@ -5388,7 +5423,7 @@ impl Emit<'_> {
             // node's own shape after it, each child a constant
             // expression of its own.
             tree::Expr::UnaryExpr(id) => {
-                if let Some(folded) = self.constant_of(expr)? {
+                if let Some(folded) = self.eval_const(expr)? {
                     return folded_const_expr(folded).ok_or_else(|| {
                         self.fatal("a constant expression this compiler cannot read yet")
                     });
@@ -5408,7 +5443,7 @@ impl Emit<'_> {
                 })
             }
             tree::Expr::BinaryExpr(id) => {
-                if let Some(folded) = self.constant_of(expr)? {
+                if let Some(folded) = self.eval_const(expr)? {
                     return folded_const_expr(folded).ok_or_else(|| {
                         self.fatal("a constant expression this compiler cannot read yet")
                     });
@@ -5451,11 +5486,11 @@ impl Emit<'_> {
             | tree::Expr::YieldFromExpr(_)
             | tree::Expr::InterpolatedStringExpr(_)
             | tree::Expr::HeredocExpr(_) => self.const_refused(expr),
-            // What php's walk allows and this compiler cannot keep as
-            // the tree it was written as yet: a property fetch and a
-            // dimension (8.5), a `match`, a conditional, a `??`, a
-            // `new`, an `instanceof` and a closure.
-            _ => match self.constant_of(expr)? {
+            // What this compiler cannot keep as the tree it was written
+            // as yet: a closure (8.5), whose body would be a function of
+            // the unit the evaluation has no way to name, and a node php's
+            // walk refuses that folds to nothing.
+            _ => match self.eval_const(expr)? {
                 Some(folded) => folded_const_expr(folded).ok_or_else(|| {
                     self.fatal("a constant expression this compiler cannot read yet")
                 }),
@@ -11462,8 +11497,13 @@ impl Emit<'_> {
             // string php's parser folded before the compiler saw it;
             // one with a variable in it is `ZEND_AST_ENCAPS_LIST`, whose
             // oplines no fold replaces.
+            // Its line is the parser's and no compile's, so the compile
+            // that reads it leaves `CG(zend_lineno)` where it stood.
             tree::Expr::InterpolatedStringExpr(_) | tree::Expr::HeredocExpr(_) => {
-                match self.expr(expr)? {
+                let line = self.line;
+                let value = self.expr(expr);
+                self.line = line;
+                match value? {
                     Where::Constant(value) => Ok(value),
                     _ => Err(self.fatal("an interpolated string is no constant expression")),
                 }
@@ -11542,8 +11582,17 @@ impl Emit<'_> {
                         self.short_circuit_fold(true, left, right)
                     }
                     // `zend_compile_coalesce` emits two oplines whatever
-                    // stands on either side, and `zend_eval_const_expr`
-                    // folds neither.
+                    // stands on either side; `zend_eval_const_expr`'s
+                    // `ZEND_AST_COALESCE` arm folds a left side that
+                    // folds, to itself where it is not `null` and to the
+                    // right side's fold where it is.
+                    Some(SyntaxKind::QUESTION_QUESTION) if self.fold == Fold::EvalConstExpr => {
+                        let value = self.constant_expr(left)?;
+                        if value.kind() == ZvalType::Null {
+                            return self.constant_expr(right);
+                        }
+                        Ok(value)
+                    }
                     Some(SyntaxKind::QUESTION_QUESTION) => {
                         Err(self.fatal("a `??` is no constant expression"))
                     }
@@ -11601,15 +11650,21 @@ impl Emit<'_> {
             | tree::Expr::PostfixIncDecExpr(_) => {
                 Err(self.fatal("a variable is no constant expression"))
             }
-            // A property fetch and a dimension are what php's walk
-            // allows in a constant expression on 8.5 and this compiler
-            // does not fold: the refusal is the one the phpt lane counts
-            // as unread and not php's invalid-operations sentence.
+            // `zend_eval_const_expr` folds no property fetch, and
+            // `zend_compile_prop` emits its fetch.
             tree::Expr::MemberAccessExpr(_) => {
-                Err(self.unread("a property fetch in a constant expression"))
+                Err(self.fatal("a property fetch is read as the program serves"))
+            }
+            // `zend_eval_const_expr`'s `ZEND_AST_DIM` arm
+            // ([`Self::dimension_fold`]); `zend_compile_dim` folds
+            // nothing.
+            tree::Expr::SubscriptExpr(id) if self.fold == Fold::EvalConstExpr => {
+                let node = &tree[id];
+                let (base, index) = (node.base, node.index);
+                self.dimension_fold(base, index)
             }
             tree::Expr::SubscriptExpr(_) => {
-                Err(self.unread("a dimension in a constant expression"))
+                Err(self.fatal("a dimension is read as the program serves"))
             }
             // `zend_try_ct_eval_class_const` folds nothing under
             // `ZEND_COMPILE_NO_CONSTANT_SUBSTITUTION`, which opcache
@@ -11642,11 +11697,26 @@ impl Emit<'_> {
             tree::Expr::InstanceofExpr(_) => {
                 Err(self.fatal("an instanceof is no constant expression"))
             }
-            // `zend_compile_conditional` folds nothing either: the arm of
-            // `zend_eval_const_expr` that takes the branch a constant
-            // condition picks is not read yet (#437).
+            // `zend_eval_const_expr`'s `ZEND_AST_CONDITIONAL` arm: the
+            // condition folded, then the branch `zend_is_true` picks
+            // folded in its place, the condition itself for `a ?: b`;
+            // `zend_compile_conditional` folds nothing.
+            tree::Expr::TernaryExpr(id) if self.fold == Fold::EvalConstExpr => {
+                let node = &tree[id];
+                let (cond, then, otherwise) = (node.cond, node.then, node.else_branch);
+                let otherwise = self.required(otherwise, "a conditional")?;
+                let value = self.constant_expr(cond)?;
+                if value.as_double().is_some_and(f64::is_nan) {
+                    self.raise(Level::Warning, "unexpected NAN value was coerced to bool");
+                }
+                match (truth(value), then) {
+                    (true, None) => Ok(value),
+                    (true, Some(then)) => self.constant_expr(then),
+                    (false, _) => self.constant_expr(otherwise),
+                }
+            }
             tree::Expr::TernaryExpr(_) => {
-                Err(self.fatal("a conditional is no constant expression here"))
+                Err(self.fatal("a conditional is folded by no compile of it"))
             }
             // `zend_compile_throw` emits an opline whatever stands
             // around it, so a `throw` folds to nothing, and
@@ -11701,6 +11771,72 @@ impl Emit<'_> {
             return Ok(self.compare_fold(op, left, right));
         }
         fold(op, left, right).ok_or_else(|| self.fatal("arithmetic this compiler cannot fold yet"))
+    }
+
+    /// `zend_eval_const_expr`'s `ZEND_AST_DIM` arm
+    /// (`Z/Zend/zend_compile.c:12225`): `[]` with nothing in it is php's
+    /// compile error; the container and the dimension folded, then an
+    /// array's entry at an integer or a string key (`zend_symtable_find`,
+    /// a decimal string read as the integer) and a string's byte at an
+    /// integer offset inside it, as a one-byte string (`ZVAL_CHAR`). A key
+    /// the array has not, an offset past the string and any other pair
+    /// are left to the request, which raises what php raises for them.
+    ///
+    /// ```php
+    /// class C { const A = ['k' => [1, 2]]['k'][1]; const B = 'abc'[1]; const D = [1][0] ?? 2; }
+    /// var_dump(C::A, C::B, C::D, [[3, 4][1], 'xy'['1']]);
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// string(1) "b"
+    /// int(1)
+    /// array(2) {
+    ///   [0]=>
+    ///   int(4)
+    ///   [1]=>
+    ///   string(1) "y"
+    /// }
+    /// ```
+    fn dimension_fold(
+        &mut self,
+        base: tree::Expr,
+        index: Option<tree::Expr>,
+    ) -> Result<Zval, CompileError> {
+        let Some(index) = index else {
+            return Err(self.compile_error("Cannot use [] for reading"));
+        };
+        let container = self.constant_expr(base)?;
+        let dim = self.constant_expr(index)?;
+        let refused = |emit: &Self| emit.fatal("a dimension this compiler leaves to the request");
+        if let Some(array) = container.as_arr() {
+            let key = match (dim.as_long(), dim.as_str()) {
+                (Some(n), _) => Key::Long(n),
+                (None, Some(s)) => match php_heap::canonical_int(s.bytes()) {
+                    Some(n) => Key::Long(n),
+                    None => Key::Str(s),
+                },
+                (None, None) => return Err(refused(self)),
+            };
+            return array.get(key).ok_or_else(|| refused(self));
+        }
+        if let Some(text) = container.as_str() {
+            let offset = match (dim.as_long(), dim.as_str()) {
+                (Some(n), _) => n,
+                (None, Some(s)) => match numeric_prefix(s.bytes()) {
+                    Some((Number::Long(n), _)) => n,
+                    _ => return Err(refused(self)),
+                },
+                (None, None) => return Err(refused(self)),
+            };
+            let byte = usize::try_from(offset)
+                .ok()
+                .and_then(|at| text.bytes().get(at).copied());
+            return match byte {
+                Some(byte) => self.string(&[byte]),
+                None => Err(refused(self)),
+            };
+        }
+        Err(refused(self))
     }
 
     /// `zend_eval_const_expr`'s `ZEND_AST_AND` and `ZEND_AST_OR` arm:
@@ -11816,7 +11952,7 @@ impl Emit<'_> {
                 Element::Value { key, value } => (key, value),
                 Element::Ref { .. } => return Ok(None),
                 Element::Unpack(value) => {
-                    let Some(value) = self.constant_of(value)? else {
+                    let Some(value) = self.eval_const(value)? else {
                         return Ok(None);
                     };
                     folded.push(Fold::Unpack(value));
@@ -11824,13 +11960,13 @@ impl Emit<'_> {
                 }
             };
             let key = match key {
-                Some(key) => match self.constant_of(key)? {
+                Some(key) => match self.eval_const(key)? {
                     Some(key) => Some(key),
                     None => return Ok(None),
                 },
                 None => None,
             };
-            let Some(value) = self.constant_of(value)? else {
+            let Some(value) = self.eval_const(value)? else {
                 return Ok(None);
             };
             folded.push(Fold::Pair(key, value));
@@ -12124,7 +12260,7 @@ impl Emit<'_> {
     /// `zend_compile_cast` emits. The constant where the node folds,
     /// else the oplines that build it.
     fn walked(&mut self, expr: tree::Expr) -> Result<Where, CompileError> {
-        match self.constant_of(expr)? {
+        match self.eval_const(expr)? {
             Some(value) => Ok(Where::Constant(value)),
             None => self.expr(expr),
         }
