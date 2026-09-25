@@ -116,7 +116,7 @@ use args::{Args, Callee, Plan};
 use attributes::InternalAttribute;
 use imports::{Imports, Namespacing, Symbol};
 use target::{Source, Target};
-use walk::{Class, Closure, Function, Method, Property};
+use walk::{Class, Closure, Function, Method};
 
 mod args;
 mod attributes;
@@ -536,6 +536,9 @@ struct FnFlags {
     /// `ZEND_ACC_GENERATOR`, which a `yield` in the body sets and every
     /// `return` reads.
     generator: bool,
+    /// `ZEND_ACC_ABSTRACT`, which a method of an interface carries too:
+    /// a constructor that is may promote no parameter.
+    is_abstract: bool,
     /// Beside the bits, `op_array->scope` as the compiler leaves it: set
     /// on a method's op array by `zend_begin_method_decl` and on no
     /// other, a closure's included, which `__METHOD__` reads.
@@ -882,6 +885,80 @@ enum Folded {
 struct ActiveClass {
     name: Vec<u8>,
     kind: ClassKind,
+}
+
+/// The set visibility `zend_declare_typed_property` gives a public
+/// readonly property that writes none, `ZEND_ACC_PROTECTED_SET`: a
+/// readonly property is initialised from its class's scope or a related
+/// one, and that is the rule a set visibility already states.
+fn implicit_set_visibility(is_readonly: bool, visibility: Visibility) -> Option<Visibility> {
+    (is_readonly && visibility == Visibility::Public).then_some(Visibility::Protected)
+}
+
+/// The `ce_flags` a class declaration starts with: its modifiers as
+/// written, an enum final (`ZEND_ACC_FINAL` beside `ZEND_ACC_ENUM` from
+/// the parser) and taking no dynamic property
+/// (`zend_enum_register_props`), and a readonly class taking none
+/// either, `ZEND_ACC_NO_DYNAMIC_PROPERTIES` from the parser, which
+/// `#[\AllowDynamicProperties]` may not lift.
+fn class_flags(class: &Class, dynamic_properties: DynamicProperties) -> ClassFlags {
+    let is_enum = class.kind == ClassKind::Enum;
+    ClassFlags {
+        is_abstract: class.modifiers.is_abstract,
+        is_final: is_enum || class.modifiers.is_final,
+        is_readonly: class.modifiers.is_readonly,
+        dynamic_properties: if is_enum || class.modifiers.is_readonly {
+            DynamicProperties::Forbidden
+        } else {
+            dynamic_properties
+        },
+    }
+}
+
+/// `zend_is_valid_default_value` over a default or a constant's value
+/// folded to a value: whether the type takes it, an int where only a
+/// float is taken made the float in place, and the value's type where
+/// the type does not take it. A value still naming a constant is held
+/// where it is evaluated, so it is taken here.
+fn valid_default(ty: &Type, default: &mut ConstExpr) -> Result<(), ZvalType> {
+    let kind = match default {
+        ConstExpr::Null => ZvalType::Null,
+        ConstExpr::Bool(false) => ZvalType::False,
+        ConstExpr::Bool(true) => ZvalType::True,
+        ConstExpr::Long(_) => ZvalType::Long,
+        ConstExpr::Double(_) => ZvalType::Double,
+        ConstExpr::Str(_) => ZvalType::String,
+        ConstExpr::Array(elements)
+            if elements
+                .iter()
+                .all(|(key, value)| key.as_ref().is_none_or(is_literal) && is_literal(value)) =>
+        {
+            ZvalType::Array
+        }
+        _ => return Ok(()),
+    };
+    if ty.contains_code(kind as u8) {
+        return Ok(());
+    }
+    if let ConstExpr::Long(n) = default
+        && ty.contains_code(ZvalType::Double as u8)
+    {
+        *default = ConstExpr::Double(double_of(Zval::long(*n)));
+        return Ok(());
+    }
+    Err(kind)
+}
+
+/// `zend_zval_type_name` of a folded value's type.
+fn zval_type_name(kind: ZvalType) -> &'static str {
+    match kind {
+        ZvalType::Null => "null",
+        ZvalType::False | ZvalType::True => "bool",
+        ZvalType::Long => "int",
+        ZvalType::Double => "float",
+        ZvalType::String => "string",
+        _ => "array",
+    }
 }
 
 /// The `ConstExpr` a folded constant is, which a declaration carries in
@@ -2630,7 +2707,7 @@ impl Emit<'_> {
                 String::from_utf8_lossy(&name)
             )));
         }
-        let declared = self.body(function, &name, None, false)?;
+        let declared = self.body(function, &name, None, false, FnFlags::default())?;
         self.functions_declared.push(declared);
         Ok(())
     }
@@ -2677,7 +2754,7 @@ impl Emit<'_> {
         let class = self.active_class.take();
         let parent = self.active_parent.take();
         let constants = std::mem::take(&mut self.active_constants);
-        let declared = self.body(function, name, None, false);
+        let declared = self.body(function, name, None, false, FnFlags::default());
         self.active_class = class;
         self.active_parent = parent;
         self.active_constants = constants;
@@ -2738,8 +2815,7 @@ impl Emit<'_> {
         let flags = FnFlags {
             closure: true,
             is_static: closure.is_static,
-            generator: false,
-            method: false,
+            ..FnFlags::default()
         };
         let saved = self.begin_body(&name, this_in_scope, flags);
         let outcome =
@@ -2999,6 +3075,49 @@ impl Emit<'_> {
     /// ```expect exit=255
     /// Fatal error: Property C::$f cannot have type callable in %s on line 2
     /// ```
+    ///
+    /// A readonly class makes every one readonly:
+    ///
+    /// ```php
+    /// readonly class P { function __construct(public int $x) {} }
+    /// $p = new P(1);
+    /// try { $p->x = 2; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Cannot modify readonly property P::$x
+    /// ```
+    ///
+    /// ```php
+    /// readonly class Q { function __construct(public $y) {} }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Readonly property Q::$y must have type in %s on line 2
+    /// ```
+    ///
+    /// `final` promotes alone, and a set visibility is held to what a
+    /// declared property's is:
+    ///
+    /// ```php
+    /// class P { function __construct(final int $a, public private(set) int $b) {} }
+    /// $p = new P(1, 2);
+    /// var_dump($p->a, $p->b);
+    /// try { $p->b = 3; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump((new ReflectionProperty('P', 'a'))->getModifiers(), (new ReflectionProperty('P', 'b'))->getModifiers());
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// int(2)
+    /// Cannot modify private(set) property P::$b from global scope
+    /// int(33)
+    /// int(4129)
+    /// ```
+    ///
+    /// ```php
+    /// class P { function __construct(public private(set) $b) {} }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Property with asymmetric visibility P::$b must have type in %s on line 2
+    /// ```
     fn promoted_property(
         &mut self,
         parameter: &walk::Parameter,
@@ -3026,10 +3145,30 @@ impl Emit<'_> {
                 php_unit::type_to_string(ty)
             )));
         }
-        if promoted.is_readonly && ty.is_none() {
+        // A readonly class's promoted properties are readonly.
+        let is_readonly = promoted.is_readonly
+            || self
+                .classes
+                .last()
+                .is_some_and(|decl| decl.flags.is_readonly);
+        if is_readonly && ty.is_none() {
             return Err(self.compile_error(format!("Readonly property {member} must have type")));
         }
+        let set_visibility = self
+            .set_visibility_of(
+                promoted.visibility,
+                promoted.set_visibility,
+                ty.is_some(),
+                &member,
+            )?
+            .or_else(|| implicit_set_visibility(is_readonly, promoted.visibility));
         let default = ty.is_none().then_some(ConstExpr::Null);
+        let attributes = self.member_attributes(
+            &parameter.attributes,
+            attributes::TARGET_PROPERTY,
+            attributes::TARGET_PARAMETER,
+            parameter.line,
+        )?;
         let Some(decl) = self.classes.last_mut() else {
             return Err(
                 self.fatal("InternalError: a promoted property of a class the unit has not")
@@ -3038,14 +3177,14 @@ impl Emit<'_> {
         decl.properties.push(PropertyDecl {
             name: Name(parameter.name.clone().into_boxed_slice()),
             visibility: promoted.visibility,
-            set_visibility: None,
+            set_visibility,
             is_instance: true,
-            is_readonly: promoted.is_readonly,
-            is_final: false,
+            is_readonly,
+            is_final: promoted.is_final || set_visibility == Some(Visibility::Private),
             is_promoted: true,
             ty: ty.cloned(),
             default,
-            attributes: Vec::new(),
+            attributes,
             doc_comment: parameter.doc_comment.clone().map(Vec::into_boxed_slice),
         });
         Ok(())
@@ -3074,12 +3213,15 @@ impl Emit<'_> {
     /// 1
     /// ```
     fn method_decl(&mut self, class: usize, method: &Method) -> Result<(), CompileError> {
-        let class_name = self
+        let Some((class_name, kind, flags)) = self
             .classes
             .get(class)
-            .map(|decl| decl.name.0.to_vec())
-            .unwrap_or_default();
+            .map(|decl| (decl.name.0.to_vec(), decl.kind, decl.flags))
+        else {
+            return Err(self.fatal("InternalError: a method of a class the unit has not"));
+        };
         let name = method.function.name.clone();
+        let is_abstract = self.begin_method_decl(&class_name, kind, flags, method)?;
         if self.classes.get(class).is_some_and(|decl| {
             decl.methods
                 .iter()
@@ -3091,30 +3233,21 @@ impl Emit<'_> {
                 String::from_utf8_lossy(&name)
             )));
         }
-        // `zend_begin_method_decl`'s refusals of a body against the
-        // method's `abstract`, which only a trait's reach so far.
-        let shown = format!(
-            "{}::{}()",
-            String::from_utf8_lossy(&class_name),
-            String::from_utf8_lossy(&name)
-        );
-        if method.is_abstract && method.has_body {
-            return Err(
-                self.compile_error(format!("Abstract function {shown} cannot contain body"))
-            );
-        }
-        if !method.is_abstract && !method.has_body {
-            return Err(
-                self.compile_error(format!("Non-abstract method {shown} must contain body"))
-            );
-        }
-        let (function, body) =
-            self.body(&method.function, &name, Some(&class_name), method.is_static)?;
+        let (function, body) = self.body(
+            &method.function,
+            &name,
+            Some(&class_name),
+            method.is_static,
+            FnFlags {
+                is_abstract,
+                ..FnFlags::default()
+            },
+        )?;
         let declared = MethodDecl {
             function,
             visibility: method.visibility,
             is_instance: !method.is_static,
-            is_abstract: method.is_abstract,
+            is_abstract,
             is_final: method.is_final,
             tentative_return: false,
         };
@@ -3144,6 +3277,212 @@ impl Emit<'_> {
         Ok(())
     }
 
+    /// `zend_compile_func_decl`'s arm over `ZEND_ACC_NODISCARD`, which
+    /// the attribute's validator set: a function whose return type takes
+    /// `void` or `never` returns no value to use.
+    ///
+    /// ```php
+    /// class A { #[NoDiscard] function f(): void {} }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: A void method does not return a value, but #[\NoDiscard] requires a return value in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// #[NoDiscard] function f(): never { exit; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: A never returning function does not return a value, but #[\NoDiscard] requires a return value in %s on line 2
+    /// ```
+    fn no_discard_refused(&self, attributes: &[Attribute]) -> Result<(), CompileError> {
+        let marked = attributes
+            .iter()
+            .any(|a| InternalAttribute::named(&a.name.0) == Some(InternalAttribute::NoDiscard));
+        let Some(ty) = self.return_type.as_ref().filter(|_| marked) else {
+            return Ok(());
+        };
+        let what = if self.active_class.is_some() {
+            "method"
+        } else {
+            "function"
+        };
+        let mask = ty.mask();
+        if mask & types::MAY_BE_VOID != 0 {
+            return Err(self.compile_error(format!(
+                "A void {what} does not return a value, but #[\\NoDiscard] requires a return value"
+            )));
+        }
+        if mask & types::MAY_BE_NEVER != 0 {
+            return Err(self.compile_error(format!(
+                "A never returning {what} does not return a value, but #[\\NoDiscard] requires a return value"
+            )));
+        }
+        Ok(())
+    }
+
+    /// `zend_begin_method_decl`'s refusals of a method against its class,
+    /// in php's order, before the name goes into `ce->function_table`, and
+    /// whether the method is `ZEND_ACC_ABSTRACT`, which every method of
+    /// an interface is. An abstract method stands in an abstract class,
+    /// an interface or a trait, takes no body and is not private outside
+    /// a trait; every other method has a body.
+    ///
+    /// ```php
+    /// abstract class A { abstract function f(); }
+    /// class B extends A { function f() { echo "B::f\n"; } }
+    /// (new B)->f();
+    /// interface I { function g(); }
+    /// class C implements I { function g() { echo "C::g\n"; } }
+    /// (new C)->g();
+    /// ```
+    /// ```expect
+    /// B::f
+    /// C::g
+    /// ```
+    ///
+    /// ```php
+    /// class A { abstract function f(); }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Class A declares abstract method f() and must therefore be declared abstract in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// enum E { abstract function f(); }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Enum method E::f() must not be abstract in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// interface I { protected function f(); }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Access type for interface method I::f() must be public in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// interface I { final function f(); }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Interface method I::f() must not be final in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// abstract class A { abstract private function f(); }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Abstract function A::f() cannot be declared private in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// interface I { function f() {} }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Interface function I::f() cannot contain body in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// abstract class A { abstract function f() {} }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Abstract function A::f() cannot contain body in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// class A { function f(); }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Non-abstract method A::f() must contain body in %s on line 2
+    /// ```
+    ///
+    /// A private final method is php's warning, raised as the class
+    /// compiles, and a constructor is not:
+    ///
+    /// ```php
+    /// class A { private final function f() {} private final function __construct() {} }
+    /// echo "done\n";
+    /// ```
+    /// ```expect
+    /// Warning: Private methods cannot be final as they are never overridden by other classes in %s on line 2
+    /// done
+    /// ```
+    fn begin_method_decl(
+        &mut self,
+        class_name: &[u8],
+        kind: ClassKind,
+        flags: ClassFlags,
+        method: &Method,
+    ) -> Result<bool, CompileError> {
+        let shown = format!(
+            "{}::{}()",
+            String::from_utf8_lossy(class_name),
+            String::from_utf8_lossy(&method.function.name)
+        );
+        if method.visibility == Visibility::Private
+            && method.is_final
+            && !method.function.name.eq_ignore_ascii_case(b"__construct")
+        {
+            self.raise(
+                Level::CompileWarning,
+                "Private methods cannot be final as they are never overridden by other classes",
+            );
+        }
+        if method.is_abstract && !flags.is_abstract && kind != ClassKind::Trait {
+            let name = String::from_utf8_lossy(&method.function.name);
+            let class = String::from_utf8_lossy(class_name);
+            return Err(self.compile_error(match kind {
+                ClassKind::Enum | ClassKind::Interface => format!(
+                    "{} method {class}::{name}() must not be abstract",
+                    if kind == ClassKind::Enum {
+                        "Enum"
+                    } else {
+                        "Interface"
+                    }
+                ),
+                ClassKind::Class | ClassKind::Trait => format!(
+                    "Class {class} declares abstract method {name}() and must therefore be declared abstract"
+                ),
+            }));
+        }
+        let in_interface = kind == ClassKind::Interface;
+        if in_interface {
+            if method.visibility != Visibility::Public {
+                return Err(self.compile_error(format!(
+                    "Access type for interface method {shown} must be public"
+                )));
+            }
+            if method.is_final {
+                return Err(
+                    self.compile_error(format!("Interface method {shown} must not be final"))
+                );
+            }
+        }
+        let is_abstract = method.is_abstract || in_interface;
+        let what = if in_interface {
+            "Interface"
+        } else {
+            "Abstract"
+        };
+        if is_abstract {
+            if method.visibility == Visibility::Private && kind != ClassKind::Trait {
+                return Err(self.compile_error(format!(
+                    "{what} function {shown} cannot be declared private"
+                )));
+            }
+            if method.has_body {
+                return Err(
+                    self.compile_error(format!("{what} function {shown} cannot contain body"))
+                );
+            }
+        } else if !method.has_body {
+            return Err(
+                self.compile_error(format!("Non-abstract method {shown} must contain body"))
+            );
+        }
+        Ok(is_abstract)
+    }
+
     /// The body of one function or method as its own op array, what
     /// `zend_compile_func_decl` does between `zend_oparray_context_begin`
     /// and `zend_oparray_context_end`: the emitter's op array state set
@@ -3167,10 +3506,11 @@ impl Emit<'_> {
         name: &[u8],
         scope: Option<&[u8]>,
         is_static: bool,
+        fn_flags: FnFlags,
     ) -> Result<(FunctionDecl, OpArray), CompileError> {
         let flags = FnFlags {
             method: scope.is_some(),
-            ..FnFlags::default()
+            ..fn_flags
         };
         let saved = self.begin_body(name, scope.is_some() && !is_static, flags);
         let outcome = self.parameters_and_body(function, name, scope, &[], None);
@@ -3193,6 +3533,12 @@ impl Emit<'_> {
         let line = function.line;
         self.line = line;
         self.returns_by_ref = function.by_ref;
+        let target = if scope.is_some() {
+            attributes::TARGET_METHOD
+        } else {
+            attributes::TARGET_FUNCTION
+        };
+        let attributes = self.member_attributes(&function.attributes, target, 0, line)?;
         // `zend_compile_params`' `fallback_return_type`: a method named
         // `__toString` with no return type written returns `string` all
         // the same, which is what `Stringable::__toString` holds it to.
@@ -3218,6 +3564,7 @@ impl Emit<'_> {
             None => String::from_utf8_lossy(name).into_owned(),
         };
         let parameters = self.recv_prologue(function, is_ctor, &shown)?;
+        self.no_discard_refused(&attributes)?;
         // The entry safepoint is the opline after the prologue (design
         // §5.7), which `begin_body` numbered zero at opline zero; the
         // assignments a promoted parameter makes stand after it, as
@@ -3257,7 +3604,7 @@ impl Emit<'_> {
                 return_type: self.return_type.clone(),
                 returns_by_ref: function.by_ref,
                 is_generator: function.generator,
-                attributes: Vec::new(),
+                attributes,
                 doc_comment: function.doc_comment.clone().map(Vec::into_boxed_slice),
                 file: self.filename.clone(),
                 line,
@@ -3338,6 +3685,17 @@ impl Emit<'_> {
             self.parameter_refused(parameter, variadic_seen, is_ctor)?;
             variadic_seen = parameter.variadic;
             let mut folded = self.parameter_default(parameter)?;
+            let promoted_target = if parameter.promote.is_some() {
+                attributes::TARGET_PROPERTY
+            } else {
+                0
+            };
+            let attrs = self.member_attributes(
+                &parameter.attributes,
+                attributes::TARGET_PARAMETER,
+                promoted_target,
+                parameter.line,
+            )?;
             let (ty, implicitly_nullable) = self.parameter_type(parameter, &mut folded, shown)?;
             let keeps_default = !parameter.variadic
                 && (implicitly_nullable || last_required.is_none_or(|last| at > last));
@@ -3406,7 +3764,7 @@ impl Emit<'_> {
                 promoted: parameter.promote.is_some(),
                 variadic: parameter.variadic,
                 default: default.map_or(ParameterDefault::None, ParameterDefault::Expr),
-                attributes: Vec::new(),
+                attributes: attrs,
             });
         }
         Ok(parameters)
@@ -3592,7 +3950,15 @@ impl Emit<'_> {
 
     /// What `zend_compile_params` refuses about one parameter, in php's
     /// words: a second variadic, a variadic with a default, and a
-    /// promotion outside a constructor or on a variadic.
+    /// promotion outside a constructor, in an abstract one or on a
+    /// variadic.
+    ///
+    /// ```php
+    /// abstract class A { abstract function __construct(public int $x); }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot declare promoted property in an abstract constructor in %s on line 2
+    /// ```
     fn parameter_refused(
         &self,
         parameter: &walk::Parameter,
@@ -3610,6 +3976,10 @@ impl Emit<'_> {
                 return Err(
                     self.compile_error("Cannot declare promoted property outside a constructor")
                 );
+            }
+            if self.fn_flags.is_abstract {
+                return Err(self
+                    .compile_error("Cannot declare promoted property in an abstract constructor"));
             }
             if parameter.variadic {
                 return Err(self.compile_error("Cannot declare variadic promoted property"));
@@ -3913,18 +4283,7 @@ impl Emit<'_> {
         let mut decl = ClassDecl {
             name: Name(name.clone().into_boxed_slice()),
             kind: class.kind,
-            // An enum is final (`ZEND_ACC_FINAL` beside `ZEND_ACC_ENUM`
-            // from the parser) and takes no dynamic property
-            // (`zend_enum_register_props`).
-            flags: ClassFlags {
-                is_final: is_enum,
-                dynamic_properties: if is_enum {
-                    DynamicProperties::Forbidden
-                } else {
-                    dynamic_properties
-                },
-                ..ClassFlags::default()
-            },
+            flags: class_flags(class, dynamic_properties),
             parent: parent
                 .as_ref()
                 .map(|parent| Name(parent.clone().into_boxed_slice())),
@@ -3985,7 +4344,10 @@ impl Emit<'_> {
                 None => true,
                 Some(parent) => self.bound_class(parent).is_some(),
             };
-        if early && (parent.is_none() || self.try_early_bind(at)?) {
+        // A class with no parent is bound early too, and linked as
+        // `zend_compile_class_decl` links it, which is where its
+        // `#[\Override]` marks are held to what it overrides.
+        if early && self.try_early_bind(at)? {
             self.bound.push(at);
             return Ok(());
         }
@@ -4316,11 +4678,29 @@ impl Emit<'_> {
     ) -> Result<(), CompileError> {
         for constant in &class.constants {
             self.line = constant.line;
+            let member = format!(
+                "{}::{}",
+                String::from_utf8_lossy(name),
+                String::from_utf8_lossy(&constant.name)
+            );
+            let ty = match constant.ty {
+                Some(written) => Some(self.class_constant_type(written, &member)?),
+                None => None,
+            };
             if constant.visibility == Visibility::Private && constant.is_final {
                 return Err(self.compile_error(format!(
-                    "Private constant {}::{} cannot be final as it is not visible to other classes",
-                    String::from_utf8_lossy(name),
-                    String::from_utf8_lossy(&constant.name)
+                    "Private constant {member} cannot be final as it is not visible to other classes"
+                )));
+            }
+            self.active_constants = self.foldable_constants(&decl.constants, usize::MAX);
+            let mut value = self.case_or_constant(decl, constant, name)?;
+            if let Some(ty) = &ty
+                && let Err(kind) = valid_default(ty, &mut value)
+            {
+                return Err(self.compile_error(format!(
+                    "Cannot use {} as value for class constant {member} of type {}",
+                    zval_type_name(kind),
+                    php_unit::type_to_string(ty)
                 )));
             }
             if constant.name.eq_ignore_ascii_case(b"class") {
@@ -4335,21 +4715,93 @@ impl Emit<'_> {
                     String::from_utf8_lossy(&constant.name)
                 )));
             }
-            self.active_constants = self.foldable_constants(&decl.constants, usize::MAX);
-            let value = self.case_or_constant(decl, constant, name)?;
             let attributes = self.case_attributes(constant)?;
             decl.constants.push(ClassConstDecl {
                 name: Name(constant.name.clone().into_boxed_slice()),
                 visibility: constant.visibility,
                 is_final: constant.is_final,
                 is_case: constant.is_case,
-                ty: None,
+                ty,
                 value,
                 attributes,
                 doc_comment: constant.doc_comment.clone().map(Vec::into_boxed_slice),
             });
         }
         Ok(())
+    }
+
+    /// The type of a typed class constant, `zend_compile_typename` in
+    /// `zend_compile_class_const_decl`: any type but one that takes
+    /// `callable`, `void` or `never` short of `mixed`, and its value held
+    /// to it by `zend_is_valid_default_value`.
+    ///
+    /// ```php
+    /// class A { const callable X = 1; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Class constant A::X cannot have type callable in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// class A { const void X = 1; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Class constant A::X cannot have type void in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// class A { const int X = "a"; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use string as value for class constant A::X of type int in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// class A { const bool X = 1; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use int as value for class constant A::X of type bool in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// class A { const self X = null; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use null as value for class constant A::X of type A in %s on line 2
+    /// ```
+    ///
+    /// What php takes, it takes, an int where a float is taken made the
+    /// float:
+    ///
+    /// ```php
+    /// enum E { case A; }
+    /// class A { const float F = 1; const ?int N = null; const mixed M = []; const E C = E::A; const int|string U = 'u'; }
+    /// var_dump(A::F, A::N, A::M, A::C, A::U);
+    /// ```
+    /// ```expect
+    /// float(1)
+    /// NULL
+    /// array(0) {
+    /// }
+    /// enum(E::A)
+    /// string(1) "u"
+    /// ```
+    fn class_constant_type(
+        &mut self,
+        written: tree::TypeExpr,
+        member: &str,
+    ) -> Result<Type, CompileError> {
+        let ty = self.typename(written, false)?.0;
+        let mask = ty.mask();
+        if mask != Type::MAY_BE_ANY
+            && mask & (types::MAY_BE_CALLABLE | types::MAY_BE_VOID | types::MAY_BE_NEVER) != 0
+        {
+            return Err(self.compile_error(format!(
+                "Class constant {member} cannot have type {}",
+                php_unit::type_to_string(&ty)
+            )));
+        }
+        Ok(ty)
     }
 
     /// `zend_compile_attributes` for a class declaration
@@ -4412,6 +4864,17 @@ impl Emit<'_> {
     /// Fatal error: Cannot apply #[\AllowDynamicProperties] to interface Demo in %s on line 3
     /// ```
     ///
+    /// A validator's refusal is deferred as the target is:
+    ///
+    /// ```php
+    /// #[DelayedTargetValidation, Attribute]
+    /// trait T {}
+    /// echo "compiled\n";
+    /// ```
+    /// ```expect
+    /// compiled
+    /// ```
+    ///
     /// What php takes, it takes: an internal attribute on a target it
     /// allows, one deferred, and a user's attribute of any name:
     ///
@@ -4438,7 +4901,7 @@ impl Emit<'_> {
         for attribute in &class.attributes {
             self.line = attribute.line;
             let name = self.class_name(&attribute.name);
-            out.push(self.attribute(attribute, name)?);
+            out.push(self.attribute(attribute, name, declared_at)?);
         }
         self.line = declared_at;
         let internal = |attribute: &Attribute| InternalAttribute::named(&attribute.name.0);
@@ -4479,9 +4942,17 @@ impl Emit<'_> {
             if !on_target {
                 continue;
             }
-            if let Some(refused) =
-                known.refused_on_class(class.kind, false, &String::from_utf8_lossy(class_name))
-            {
+            // A validator's refusal under `#[\DelayedTargetValidation]`
+            // is kept for `ReflectionAttribute::newInstance` and not
+            // raised here.
+            if let Some(refused) = known.refused_on_class(
+                class.kind,
+                class.modifiers,
+                &String::from_utf8_lossy(class_name),
+            ) {
+                if delayed {
+                    continue;
+                }
                 return Err(self.compile_error(refused));
             }
             if known == InternalAttribute::AllowDynamicProperties {
@@ -4494,16 +4965,94 @@ impl Emit<'_> {
     /// One attribute as the declaration keeps it: the name resolved,
     /// each argument the constant expression `zend_const_expr_to_zval`
     /// leaves.
+    ///
+    /// Its list is held to `zend_compile_attributes`' rules at the line
+    /// of the declaration it stands on: no unpacking, a name once, and
+    /// no positional argument after a named one.
+    ///
+    /// ```php
+    /// #[A(a: 1, a: 2)]
+    /// class C {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Duplicate named parameter $a in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class C {
+    ///     #[A(a: 1, 2)]
+    ///     function f() {}
+    /// }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use positional argument after named argument in %s on line 4
+    /// ```
+    ///
+    /// ```php
+    /// #[A(...[1])]
+    /// function f() {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use unpacking in attribute argument list in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// #[Attribute] class A { function __construct(public $x = 0, public $y = 0) {} }
+    /// #[A(1, y: 2)] class C {}
+    /// $a = (new ReflectionClass('C'))->getAttributes()[0];
+    /// var_dump($a->getArguments());
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   [0]=>
+    ///   int(1)
+    ///   ["y"]=>
+    ///   int(2)
+    /// }
+    /// ```
     fn attribute(
         &mut self,
         attribute: &walk::Attr,
         name: Vec<u8>,
+        declared_at: u32,
     ) -> Result<Attribute, CompileError> {
-        let mut arguments = Vec::new();
+        let mut arguments: Vec<AttributeArgument> = Vec::new();
         for argument in &attribute.arguments {
+            let (named, expr) = match argument {
+                walk::AttrArgument::Unpack => {
+                    return Err(walk::refused(
+                        declared_at,
+                        "Cannot use unpacking in attribute argument list",
+                    ));
+                }
+                walk::AttrArgument::Named(named, expr) => {
+                    if arguments
+                        .iter()
+                        .any(|earlier| earlier.name.as_ref().is_some_and(|n| *n.0 == **named))
+                    {
+                        return Err(walk::refused(
+                            declared_at,
+                            format!(
+                                "Duplicate named parameter ${}",
+                                String::from_utf8_lossy(named)
+                            ),
+                        ));
+                    }
+                    (Some(Name(named.clone().into_boxed_slice())), *expr)
+                }
+                walk::AttrArgument::Positional(expr) => {
+                    if arguments.iter().any(|earlier| earlier.name.is_some()) {
+                        return Err(walk::refused(
+                            declared_at,
+                            "Cannot use positional argument after named argument",
+                        ));
+                    }
+                    (None, *expr)
+                }
+            };
             arguments.push(AttributeArgument {
-                name: None,
-                value: self.const_expr(*argument)?,
+                name: named,
+                value: self.const_expr(expr)?,
             });
         }
         Ok(Attribute {
@@ -4533,13 +5082,148 @@ impl Emit<'_> {
         &mut self,
         constant: &walk::Constant,
     ) -> Result<Vec<Attribute>, CompileError> {
-        let mut out = Vec::with_capacity(constant.attributes.len());
-        for attribute in &constant.attributes {
+        self.member_attributes(
+            &constant.attributes,
+            attributes::TARGET_CLASS_CONST,
+            0,
+            constant.line,
+        )
+    }
+
+    /// `zend_compile_attributes` for any target but a class, whose
+    /// validators this adds nothing to: each attribute's name resolved
+    /// and its arguments compiled, an internal attribute that does not
+    /// take `target` but takes `promoted` left to the promoted
+    /// property's list, then php's second loop at the declaration's
+    /// line, `declared_at`: an internal attribute on a target it does
+    /// not allow and one written twice are php's `E_ERROR`, unless
+    /// `#[\DelayedTargetValidation]` defers the target.
+    ///
+    /// ```php
+    /// class A {
+    ///     #[Attribute]
+    ///     public
+    ///     function f() {}
+    /// }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Attribute "Attribute" cannot target method (allowed targets: class) in %s on line 5
+    /// ```
+    ///
+    /// ```php
+    /// class A { #[Attribute] public $x; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Attribute "Attribute" cannot target property (allowed targets: class) in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// class A { #[\Override] const X = 1; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Attribute "Override" cannot target class constant (allowed targets: method, property) in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// #[\Override]
+    /// function f() {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Attribute "Override" cannot target function (allowed targets: method, property) in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// function f(
+    ///     #[Attribute]
+    ///     $x) {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Attribute "Attribute" cannot target parameter (allowed targets: class) in %s on line 4
+    /// ```
+    ///
+    /// ```php
+    /// function f(#[SensitiveParameter] #[SensitiveParameter] $x) {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Attribute "SensitiveParameter" must not be repeated in %s on line 2
+    /// ```
+    ///
+    /// What php takes, it takes, a user's attribute of any name on any
+    /// target and an internal one deferred:
+    ///
+    /// ```php
+    /// #[Attribute] class Tag { function __construct(public string $v = '') {} }
+    /// #[Tag('f')] function f(#[Tag('p')] $p) {}
+    /// class C {
+    ///     #[Tag('k')] const K = 1;
+    ///     #[Tag('x')] public $x;
+    ///     #[Tag('m'), DelayedTargetValidation, Attribute] function m() {}
+    ///     function __construct(#[Tag('q'), SensitiveParameter] public $q = 0) {}
+    /// }
+    /// $name = fn ($r) => $r->getAttributes()[0]->getArguments()[0];
+    /// echo $name(new ReflectionFunction('f')), $name(new ReflectionParameter('f', 'p')),
+    ///     $name(new ReflectionClassConstant('C', 'K')), $name(new ReflectionProperty('C', 'x')),
+    ///     $name(new ReflectionMethod('C', 'm')), $name(new ReflectionProperty('C', 'q')),
+    ///     count((new ReflectionProperty('C', 'q'))->getAttributes()), "\n";
+    /// ```
+    /// ```expect
+    /// fpkxmq1
+    /// ```
+    fn member_attributes(
+        &mut self,
+        written: &[walk::Attr],
+        target: u32,
+        promoted: u32,
+        declared_at: u32,
+    ) -> Result<Vec<Attribute>, CompileError> {
+        let mut out = Vec::with_capacity(written.len());
+        for attribute in written {
             self.line = attribute.line;
             let name = self.class_name(&attribute.name);
-            out.push(self.attribute(attribute, name)?);
+            if let Some(known) = InternalAttribute::named(&name) {
+                let targets = known.targets();
+                if targets & target == 0 && targets & promoted != 0 {
+                    continue;
+                }
+            }
+            out.push(self.attribute(attribute, name, declared_at)?);
         }
-        self.line = constant.line;
+        self.line = declared_at;
+        let internal = |attribute: &Attribute| InternalAttribute::named(&attribute.name.0);
+        let delayed = out.iter().any(|attribute| {
+            internal(attribute) == Some(InternalAttribute::DelayedTargetValidation)
+        });
+        for (at, attribute) in out.iter().enumerate() {
+            let Some(known) = internal(attribute) else {
+                continue;
+            };
+            let shown = String::from_utf8_lossy(&attribute.name.0).into_owned();
+            let targets = known.targets();
+            if targets & target == 0 && !delayed {
+                return Err(CompileError {
+                    level: Level::Error,
+                    message: format!(
+                        "Attribute \"{shown}\" cannot target {} (allowed targets: {})",
+                        attributes::target_names(target),
+                        attributes::target_names(targets)
+                    ),
+                    line: declared_at,
+                    raised: Vec::new(),
+                });
+            }
+            if out
+                .iter()
+                .enumerate()
+                .any(|(other, o)| other != at && o.name.0.eq_ignore_ascii_case(&attribute.name.0))
+            {
+                return Err(CompileError {
+                    level: Level::Error,
+                    message: format!("Attribute \"{shown}\" must not be repeated"),
+                    line: declared_at,
+                    raised: Vec::new(),
+                });
+            }
+        }
         Ok(out)
     }
 
@@ -4548,6 +5232,41 @@ impl Emit<'_> {
     /// default so `__PROPERTY__` folds to the declarator's name, and
     /// [`Self::set_visibility_of`] over the group's asymmetric
     /// visibility.
+    ///
+    /// Every property of a readonly class is readonly, held to what a
+    /// readonly property is held to:
+    ///
+    /// ```php
+    /// readonly class P { public int $x; function __construct() { $this->x = 1; } }
+    /// $p = new P;
+    /// try { $p->x = 2; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { $p->y = 2; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Cannot modify readonly property P::$x
+    /// Cannot create dynamic property P::$y
+    /// ```
+    ///
+    /// ```php
+    /// readonly class P { public $x; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Readonly property P::$x must have type in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// readonly class P { public int $x = 1; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Readonly property P::$x cannot have default value in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// readonly class P { public static int $x; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Static property P::$x cannot be readonly in %s on line 2
+    /// ```
     fn class_properties(
         &mut self,
         decl: &mut ClassDecl,
@@ -4562,6 +5281,7 @@ impl Emit<'_> {
                     String::from_utf8_lossy(name)
                 )));
             }
+            self.property_modifiers_refused(class.kind, property)?;
             let member = format!(
                 "{}::${}",
                 String::from_utf8_lossy(name),
@@ -4595,22 +5315,153 @@ impl Emit<'_> {
                 self.property_default_refused(ty, default, &member)?;
             }
             self.active_property = None;
-            let set_visibility = self.set_visibility_of(property, name)?;
+            // A readonly class's properties are readonly, and a readonly
+            // property is typed, has no default and is no static one.
+            let is_readonly = property.is_readonly || decl.flags.is_readonly;
+            if is_readonly {
+                if ty.is_none() {
+                    return Err(
+                        self.compile_error(format!("Readonly property {member} must have type"))
+                    );
+                }
+                if default.is_some() {
+                    return Err(self.compile_error(format!(
+                        "Readonly property {member} cannot have default value"
+                    )));
+                }
+                if property.is_static {
+                    return Err(
+                        self.compile_error(format!("Static property {member} cannot be readonly"))
+                    );
+                }
+            }
+            let set_visibility = self
+                .set_visibility_of(
+                    property.visibility,
+                    property.set_visibility,
+                    ty.is_some(),
+                    &member,
+                )?
+                .or_else(|| implicit_set_visibility(is_readonly, property.visibility));
+            let attributes = self.member_attributes(
+                &property.attributes,
+                attributes::TARGET_PROPERTY,
+                0,
+                property.line,
+            )?;
             decl.properties.push(PropertyDecl {
                 name: Name(property.name.clone().into_boxed_slice()),
                 visibility: property.visibility,
                 set_visibility,
                 is_instance: !property.is_static,
-                is_readonly: false,
+                is_readonly,
                 // `zend_declare_typed_property`: a `private(set)`
                 // property is implicitly final.
-                is_final: set_visibility == Some(Visibility::Private),
+                is_final: property.is_final || set_visibility == Some(Visibility::Private),
                 is_promoted: false,
                 ty,
                 default,
-                attributes: Vec::new(),
+                attributes,
                 doc_comment: property.doc_comment.clone().map(Vec::into_boxed_slice),
             });
+        }
+        Ok(())
+    }
+
+    /// What `zend_compile_prop_decl` refuses of a property's modifiers
+    /// against each other and its class, before its type, in php's
+    /// order: `final` beside `private`, what an interface's property may
+    /// not be, and `abstract` or an interface's property without the
+    /// accessor list that alone may make one.
+    ///
+    /// ```php
+    /// class A { final private $x; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Property cannot be both final and private in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// interface I { final public $x; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Property in interface cannot be final in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// interface I { protected $x; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Property in interface cannot be protected or private in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// class A { abstract public $x; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Only hooked properties may be declared abstract in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// interface I { public $x; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Interfaces may only include hooked properties in %s on line 2
+    /// ```
+    ///
+    /// What php takes, it takes:
+    ///
+    /// ```php
+    /// class A { final public int $x = 1; public readonly int $y; function __construct() { $this->y = 2; } }
+    /// $a = new A;
+    /// var_dump($a->x, $a->y);
+    /// try { $a->y = 3; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump((new ReflectionProperty('A', 'x'))->getModifiers(), (new ReflectionProperty('A', 'y'))->getModifiers());
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// int(2)
+    /// Cannot modify readonly property A::$y
+    /// int(33)
+    /// int(2177)
+    /// ```
+    ///
+    /// ```php
+    /// class A { final public $x; }
+    /// class B extends A { public $x; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot override final property A::$x in %s on line 3
+    /// ```
+    fn property_modifiers_refused(
+        &self,
+        kind: ClassKind,
+        property: &walk::Property,
+    ) -> Result<(), CompileError> {
+        if property.is_final && property.visibility == Visibility::Private {
+            return Err(self.compile_error("Property cannot be both final and private"));
+        }
+        let in_interface = kind == ClassKind::Interface;
+        if in_interface {
+            if property.is_final {
+                return Err(self.compile_error("Property in interface cannot be final"));
+            }
+            if property.visibility != Visibility::Public {
+                return Err(
+                    self.compile_error("Property in interface cannot be protected or private")
+                );
+            }
+            if property.is_abstract {
+                return Err(self.compile_error(
+                    "Property in interface cannot be explicitly abstract. All interface members are implicitly abstract",
+                ));
+            }
+            // What the walk reads is a property without an accessor
+            // list, which an interface may not declare.
+            return Err(self.compile_error("Interfaces may only include hooked properties"));
+        }
+        if property.is_abstract {
+            return Err(self.compile_error("Only hooked properties may be declared abstract"));
         }
         Ok(())
     }
@@ -4663,31 +5514,9 @@ impl Emit<'_> {
         default: &mut ConstExpr,
         member: &str,
     ) -> Result<(), CompileError> {
-        let kind = match default {
-            ConstExpr::Null => ZvalType::Null,
-            ConstExpr::Bool(false) => ZvalType::False,
-            ConstExpr::Bool(true) => ZvalType::True,
-            ConstExpr::Long(_) => ZvalType::Long,
-            ConstExpr::Double(_) => ZvalType::Double,
-            ConstExpr::Str(_) => ZvalType::String,
-            ConstExpr::Array(elements)
-                if elements.iter().all(|(key, value)| {
-                    key.as_ref().is_none_or(is_literal) && is_literal(value)
-                }) =>
-            {
-                ZvalType::Array
-            }
-            _ => return Ok(()),
+        let Err(kind) = valid_default(ty, default) else {
+            return Ok(());
         };
-        if ty.contains_code(kind as u8) {
-            return Ok(());
-        }
-        if let ConstExpr::Long(n) = default
-            && ty.contains_code(ZvalType::Double as u8)
-        {
-            *default = ConstExpr::Double(double_of(Zval::long(*n)));
-            return Ok(());
-        }
         let text = php_unit::type_to_string(ty);
         if kind == ZvalType::Null && !matches!(ty, Type::Intersection(_)) {
             let nullable = Type::Union(vec![ty.clone(), Type::Null]);
@@ -4764,18 +5593,15 @@ impl Emit<'_> {
     /// ```
     fn set_visibility_of(
         &self,
-        property: &Property,
-        class_name: &[u8],
+        visibility: Visibility,
+        set: Option<Visibility>,
+        typed: bool,
+        member: &str,
     ) -> Result<Option<Visibility>, CompileError> {
-        let Some(set) = property.set_visibility else {
+        let Some(set) = set else {
             return Ok(None);
         };
-        let member = format!(
-            "{}::${}",
-            String::from_utf8_lossy(class_name),
-            String::from_utf8_lossy(&property.name)
-        );
-        if property.ty.is_none() {
+        if !typed {
             return Err(self.compile_error(format!(
                 "Property with asymmetric visibility {member} must have type"
             )));
@@ -4785,12 +5611,12 @@ impl Emit<'_> {
             Visibility::Protected => 1,
             Visibility::Private => 2,
         };
-        if strength(property.visibility) > strength(set) {
+        if strength(visibility) > strength(set) {
             return Err(self.compile_error(format!(
                 "Visibility of property {member} must not be weaker than set visibility"
             )));
         }
-        Ok((property.visibility != set).then_some(set))
+        Ok((visibility != set).then_some(set))
     }
 
     /// `zend_resolve_const_class_name_reference` over a name written
@@ -14838,6 +15664,7 @@ mod tests {
         let read = Class {
             name: b"M".to_vec(),
             kind: ClassKind::Class,
+            modifiers: walk::ClassModifiers::default(),
             backing: None,
             parent: None,
             interfaces: Vec::new(),

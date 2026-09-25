@@ -5677,7 +5677,7 @@ fn property_place(
         // placement is loud and a property the scope may not reach is
         // the `Error`.
         PropertyPlace::Std => {
-            req.declared_slot_for_write(object.class(), &name, "indirectly modify", false)
+            req.declared_slot_for_write(object, &name, "indirectly modify", false)
         }
     };
     let at = match placed {
@@ -8747,7 +8747,7 @@ fn assign_property(
         // guard stands.
         PropertyPlace::Std => {
             let silent = req.serves_accessor(object.class(), b"__set");
-            match req.declared_slot_for_write(object.class(), bytes, "modify", silent) {
+            match req.declared_slot_for_write(object, bytes, "modify", silent) {
                 Ok(placed) => placed,
                 Err(thrown) => {
                     req.release(value);
@@ -10749,7 +10749,7 @@ fn step_property(
         // overloaded arm over it instead.
         PropertyPlace::Std => {
             let silent = req.serves_accessor(object.class(), b"__get");
-            match req.declared_slot_for_write(object.class(), &bytes, "modify", silent) {
+            match req.declared_slot_for_write(object, &bytes, "modify", silent) {
                 Ok(placed) => placed,
                 Err(thrown) => {
                     exec::free_operand(req, frame, code, data.op1_type, data.op1);
@@ -11312,7 +11312,7 @@ fn incdec_property(
         }
         PropertyPlace::Std => {
             let silent = req.serves_accessor(object.class(), b"__get");
-            match req.declared_slot_for_write(object.class(), &bytes, "modify", silent) {
+            match req.declared_slot_for_write(object, &bytes, "modify", silent) {
                 Ok(placed) => placed,
                 Err(thrown) => {
                     write_out(req, frame, code, op, &Value::null());

@@ -102,6 +102,7 @@ impl Emit<'_> {
                 return_type,
                 by_ref: node.byref.is_some(),
                 body: Vec::new(),
+                attributes: Vec::new(),
                 doc_comment: self.doc_comment(node.doc_comment),
                 line,
                 end_line: self.line_after(node.range),

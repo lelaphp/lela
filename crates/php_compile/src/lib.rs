@@ -4882,7 +4882,6 @@ mod tests {
             refused(b"<?php\nclass M { public private $x; }"),
             compile_error("Multiple access type modifiers are not allowed", 2)
         );
-        let not_yet = |message: &str, line| Some((Level::Parse, message.to_string(), line));
         assert_eq!(
             refused(b"<?php\nclass M {}\nclass m {}"),
             None,
@@ -4904,11 +4903,18 @@ mod tests {
         );
         assert_eq!(
             refused(b"<?php\nclass M { abstract function f(); }"),
-            not_yet("a class member this compiler cannot read yet", 2)
+            compile_error(
+                "Class M declares abstract method f() and must therefore be declared abstract",
+                2
+            )
+        );
+        assert_eq!(
+            refused(b"<?php\nabstract class M { abstract function f(); }"),
+            None
         );
         assert_eq!(
             refused(b"<?php\nclass M { function f(): (A&B)|C {} }"),
-            not_yet("a DNF type this compiler cannot read yet", 2)
+            None
         );
         assert_eq!(
             refused(b"<?php\nclass M { function f(public int $p) {} }"),
@@ -4919,13 +4925,7 @@ mod tests {
             compile_error("Cannot redeclare M::F()", 2)
         );
         assert_eq!(refused(b"<?php\n#[A] #[B(1), C] class M {}"), None);
-        assert_eq!(
-            refused(b"<?php\n#[A(x: 1)] class M {}"),
-            not_yet(
-                "an attribute's named argument this compiler cannot read yet",
-                2
-            )
-        );
+        assert_eq!(refused(b"<?php\n#[A(x: 1)] class M {}"), None);
         assert_eq!(
             refused(b"<?php\n#[\\AllowDynamicProperties] class M {}"),
             None,
@@ -4935,17 +4935,12 @@ mod tests {
             refused(b"<?php\n#[\\AllowDynamicProperties]\ninterface I {}"),
             compile_error("Cannot apply #[\\AllowDynamicProperties] to interface I", 3)
         );
+        assert_eq!(refused(b"<?php\n#[A] function f() {}"), None);
+        assert_eq!(refused(b"<?php\nclass M { #[A] public $x; }"), None);
         assert_eq!(
-            refused(b"<?php\n#[A] function f() {}"),
-            not_yet(
-                "an attribute before this declaration this compiler cannot read yet",
-                2
-            )
-        );
-        assert_eq!(
-            refused(b"<?php\nclass M { #[A] public $x; }"),
-            not_yet(
-                "an attribute before a class member this compiler cannot read yet",
+            refused(b"<?php\nclass M { #[\\Override] public $x; }"),
+            compile_error(
+                "M::$x has #[\\Override] attribute, but no matching parent property exists",
                 2
             )
         );
@@ -4972,13 +4967,10 @@ mod tests {
             None,
             "a property group's type is read where a modifier stood before it"
         );
+        assert_eq!(refused(b"<?php\nclass M { public readonly int $x; }"), None);
         assert_eq!(
-            refused(b"<?php\nclass M { public readonly int $x; }"),
-            Some((
-                Level::Parse,
-                String::from("a property this compiler cannot read yet"),
-                2
-            ))
+            refused(b"<?php\nclass M { public readonly int $x = 1; }"),
+            compile_error("Readonly property M::$x cannot have default value", 2)
         );
         assert_eq!(
             refused(b"<?php\nclass M { private(set) protected(set) int $x; }"),
