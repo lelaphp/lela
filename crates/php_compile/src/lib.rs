@@ -4840,7 +4840,7 @@ mod tests {
         );
         assert_eq!(
             refused(b"<?php\nclass M { function f(): (A&B)|C {} }"),
-            not_yet("a DNF type this compiler cannot read yet", 2)
+            None
         );
         assert_eq!(
             refused(b"<?php\nclass M { function f(public int $p) {} }"),
