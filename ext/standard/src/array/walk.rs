@@ -11,13 +11,13 @@ use std::collections::HashSet;
 use php_ext::abi::Callable;
 use php_ext::call::call;
 use php_ext::coerce::{coerce_param, truthy, value_name};
-use php_ext::decl::{ConstExpr, FunctionDecl, Name, Parameter, Type};
+use php_ext::decl::{ConstExpr, FunctionDecl, Name, Parameter, ParameterDefault, Type};
 use php_ext::raising::{Thrown, arg_type_error, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpRef, Value, ValueRef};
 
 use super::sort::key_value;
-use super::{copied, key_copy, unknown};
+use super::{copied, key_copy};
 use crate::output::Entry;
 use crate::{argument_count_between, callable_argument, declared, long_argument, parameter};
 
@@ -97,7 +97,7 @@ pub(super) fn natives() -> Vec<(FunctionDecl, Entry)> {
                     },
                     parameter(b"callback", Type::Callable),
                     Parameter {
-                        default: Some(unknown()),
+                        default: ParameterDefault::Unshown,
                         ..parameter(b"arg", Type::Mixed)
                     },
                 ],
@@ -129,7 +129,7 @@ pub(super) fn natives() -> Vec<(FunctionDecl, Entry)> {
                     parameter(b"array", Type::Array),
                     parameter(b"callback", Type::Callable),
                     Parameter {
-                        default: Some(ConstExpr::Null),
+                        default: ParameterDefault::Expr(ConstExpr::Null),
                         ..parameter(b"initial", Type::Mixed)
                     },
                 ],
@@ -143,11 +143,11 @@ pub(super) fn natives() -> Vec<(FunctionDecl, Entry)> {
                 &[
                     parameter(b"array", Type::Array),
                     Parameter {
-                        default: Some(ConstExpr::Null),
+                        default: ParameterDefault::Expr(ConstExpr::Null),
                         ..parameter(b"callback", Type::Nullable(Box::new(Type::Callable)))
                     },
                     Parameter {
-                        default: Some(ConstExpr::Long(0)),
+                        default: ParameterDefault::Expr(ConstExpr::Long(0)),
                         ..parameter(b"mode", Type::Int)
                     },
                 ],

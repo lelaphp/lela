@@ -638,8 +638,9 @@ fn get_mangled_object_vars(req: &mut Request) -> Result<Value, Thrown> {
         return Err(wrong_argument_count(req, 1, 1, count));
     }
     let object = object_argument(req, 1)?;
-    let table = req.object_handlers(object.heap());
-    let rows = table.get_properties(req, object)?;
+    // `zend_get_properties_no_lazy_init`: a lazy object's table as it
+    // stands, nothing initialised for it.
+    let rows = req.properties_no_lazy_init(object)?;
     Ok(Value::array(crate::ops::mangled_array(req, object, rows)?))
 }
 

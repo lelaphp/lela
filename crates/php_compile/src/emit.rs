@@ -102,23 +102,27 @@ use php_heap::{
 use php_unit::decl::{
     AliasModifier, Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind,
     ConstDecl, ConstExpr, DynamicProperties, EnumBacking, FunctionDecl, MethodDecl, Name,
-    Parameter, PropertyDecl, TraitAdaptation, TraitMethodRef, Type, Visibility,
+    Parameter, ParameterDefault, PropertyDecl, TraitAdaptation, TraitMethodRef, Type, Visibility,
 };
 use php_unit::{
-    ConstIdx, Diagnostic, FramelessEntry, Level, MethodBody, OpArray, Opcode, OperandKind, Opline,
-    OplineIdx, TryCatch, Unit, frameless_table,
+    BoundVar, ConstIdx, Diagnostic, FramelessEntry, Level, MethodBody, OpArray, Opcode,
+    OperandKind, Opline, OplineIdx, TryCatch, Unit, frameless_table,
 };
 
 use php_syntax::magic_const_name;
 
-use crate::{CompileError, Options, StackLimit};
+use crate::{CompileError, Options, SourceKind, StackLimit};
+use args::{Args, Callee, Plan};
 use attributes::InternalAttribute;
+use imports::{Imports, Symbol};
 use target::{Source, Target};
 use walk::{Class, Closure, Function, Method, Property};
 
+mod args;
 mod attributes;
 mod by_name;
 mod chain;
+mod imports;
 mod list;
 mod magic;
 mod target;
@@ -193,6 +197,27 @@ enum Scoped {
     ClassName {
         class: ClassSpec,
     },
+}
+
+/// One element of an array expression as `zend_compile_array` reads
+/// it, decoded once from the tree: php's `ZEND_AST_ARRAY_ELEM`, whose
+/// `attr` is the by-reference bit, and `ZEND_AST_UNPACK`, which has no
+/// key.
+#[derive(Clone, Copy)]
+enum Element {
+    /// `value` or `key => value`.
+    Value {
+        key: Option<tree::Expr>,
+        value: tree::Expr,
+    },
+    /// `&value` or `key => &value`, the variable fetched for writing
+    /// and bound (`ZEND_ARRAY_ELEMENT_REF`).
+    Ref {
+        key: Option<tree::Expr>,
+        value: tree::Expr,
+    },
+    /// `...value`, `ADD_ARRAY_UNPACK`.
+    Unpack(tree::Expr),
 }
 
 /// The class a `::`, a `new` or an `instanceof` stands on, as the tree
@@ -278,6 +303,11 @@ const RETURNS_FUNCTION: u32 = 1 << 0;
 /// `RETURN_BY_REF` returning what is no variable.
 const RETURNS_VALUE: u32 = 1 << 1;
 
+/// `ZEND_BIND_REF` (`Z/Zend/zend_compile.h:1194`), on a `BIND_STATIC`
+/// that binds its CV to the table's entry by reference, which every
+/// `static` does.
+const BIND_REF: u32 = 1;
+
 /// `sizeof(zval)`, sixteen bytes on php's every target, which
 /// `zend_compile_rope_finalize` divides a rope's string pointers into
 /// to reserve its temporaries.
@@ -309,6 +339,10 @@ pub(crate) struct Emit<'a> {
     /// `FC(current_namespace)`: the namespace a `namespace` statement
     /// put what follows it in, and none before one.
     namespace: Option<Vec<u8>>,
+    /// `FC(imports)`, `FC(imports_function)`, `FC(imports_const)` and
+    /// `FC(seen_symbols)`: what the `use` statements of the current
+    /// namespace imported and what the file declared in it.
+    imports: Imports,
     /// `CG(active_class_entry)`: the class whose members are being
     /// compiled, and none outside a class body.
     active_class: Option<ActiveClass>,
@@ -451,11 +485,14 @@ pub(crate) struct Emit<'a> {
     /// `CG(context).try_catch_offset`: which element of [`Emit::try_catch`]
     /// the oplines being emitted stand in, `-1` outside every `try`.
     try_catch_offset: Option<u32>,
-    /// `op_array->static_variables`: the names the op array being
+    /// `op_array->static_variables`: the variables the op array being
     /// compiled binds through `BIND_STATIC`, in the order
     /// `zend_compile_static_var_common` added them, which is what a
     /// `BIND_LEXICAL`'s and a `BIND_STATIC`'s `extended_value` names.
-    static_vars: Vec<Name>,
+    static_vars: Vec<BoundVar>,
+    /// Whose fold is running, `zend_compile_expr`'s or
+    /// `zend_eval_const_expr`'s ([`Fold`]).
+    fold: Fold,
     /// `op_array->fn_flags` of the op array being compiled, the bits
     /// this compiler reads back.
     fn_flags: FnFlags,
@@ -463,6 +500,17 @@ pub(crate) struct Emit<'a> {
     /// ([`walk::generators`]): php's parser marks `ZEND_ACC_GENERATOR`
     /// on a declaration before its body compiles.
     generators: Vec<u32>,
+}
+
+/// Which of php's two folds is running: `zend_compile_expr`'s, which
+/// folds a call of a function [`crate::special`] knows over constants,
+/// or `zend_eval_const_expr`'s, which folds no call. A `static`'s
+/// initializer is the one place the second runs over an expression the
+/// first would otherwise fold ([`Emit::static_var`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Fold {
+    Compile,
+    EvalConstExpr,
 }
 
 /// `op_array->fn_flags` (`Z/Zend/zend_compile.h:283-296`), the two bits
@@ -605,6 +653,10 @@ const UNQUALIFIED_IN_NAMESPACE: u32 = 0x800;
 /// the two flags it writes the element count.
 const ARRAY_NOT_PACKED: u32 = 1 << 1;
 const ARRAY_SIZE_SHIFT: u32 = 2;
+/// `ZEND_ARRAY_ELEMENT_REF` (`Z/Zend/zend_compile.h:1201`), the bit
+/// `zend_compile_array` sets on the `INIT_ARRAY` or `ADD_ARRAY_ELEMENT`
+/// of a `&` element.
+const ARRAY_ELEMENT_REF: u32 = 1 << 0;
 /// `ZEND_FREE_SWITCH`, the bit `zend_compile.h` sets on the `FREE` of a
 /// `switch` or `match` subject at its end.
 const FREE_SWITCH: u32 = 1 << 1;
@@ -664,8 +716,7 @@ struct DimLink {
 /// a temporary (`zend_adjust_for_fetch_type` under `BP_VAR_R`), where
 /// `[]` is php's compile error `Cannot use [] for reading`; a write is
 /// `FETCH_DIM_W` into a `VAR` carrying `ZEND_FETCH_DIM_DIM`, where `[]`
-/// is the append. `BP_VAR_IS`, `BP_VAR_RW`, `BP_VAR_FUNC_ARG` and
-/// `BP_VAR_UNSET` wait on the opcodes that name them.
+/// is the append. `BP_VAR_UNSET` waits on the opcodes that name it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Fetch {
     Read,
@@ -681,6 +732,14 @@ enum Fetch {
     /// not there: `zend_adjust_for_fetch_type`'s third arm, which is
     /// `FETCH_DIM_R` plus three and a temporary for what it leaves.
     Is,
+    /// `BP_VAR_FUNC_ARG`, the fetch of a variable sent to a callee the
+    /// compiler knows nothing of: `zend_adjust_for_fetch_type`'s fourth
+    /// arm, the `_R` opcode plus four into a `VAR`, which the engine
+    /// serves as the write or as the read by what the `CHECK_FUNC_ARG`
+    /// before it found. Its links are laid down as a write's are, and
+    /// what stands under them is compiled as a read's is, with no
+    /// `SEPARATE` over a call (`zend_separate_if_call_and_write`).
+    FuncArg,
 }
 
 /// `ZEND_FETCH_DIM_WRITE` (`Z/Zend/zend_compile.h:1096`), the bit
@@ -906,6 +965,7 @@ pub(crate) fn unit(
         known_classes: &options.classes,
         frameless: frameless_table(&options.functions),
         namespace: None,
+        imports: Imports::default(),
         active_class: None,
         active_parent: None,
         active_constants: Vec::new(),
@@ -936,6 +996,7 @@ pub(crate) fn unit(
         dynamic: Vec::new(),
         dynamic_func_defs: Vec::new(),
         static_vars: Vec::new(),
+        fold: Fold::Compile,
         fn_flags: FnFlags::default(),
         numeric_dims: Vec::new(),
         methods: Vec::new(),
@@ -957,7 +1018,7 @@ pub(crate) fn unit(
         refused.raised = emit.diagnostics;
         return Err(refused);
     }
-    let main = emit.finish(true, 1, lines.max(1))?;
+    let main = emit.finish(options.kind == SourceKind::File, 1, lines.max(1))?;
     let line = emit.line;
     let mut dynamic = Vec::with_capacity(emit.dynamic.len());
     for def in emit.dynamic {
@@ -1010,7 +1071,7 @@ struct Saved {
     return_type: Option<Type>,
     returns_by_ref: bool,
     dynamic_func_defs: Vec<u32>,
-    static_vars: Vec<Name>,
+    static_vars: Vec<BoundVar>,
     fn_flags: FnFlags,
     numeric_dims: Vec<ConstIdx>,
 }
@@ -1337,8 +1398,8 @@ impl Emit<'_> {
                     self.global_var(var)?;
                 }
             }
-            Stmt::StaticVarStmt(_) => return Err(self.unread("a `static` variable")),
-            Stmt::UseStmt(_) => return Err(self.unread("a `use` statement")),
+            Stmt::StaticVarStmt(id) => self.static_var(id)?,
+            Stmt::UseStmt(id) => self.use_stmt(id)?,
             Stmt::HaltCompilerStmt(_) => return Err(self.unread("a `__halt_compiler`")),
         }
         Ok(())
@@ -1897,46 +1958,47 @@ impl Emit<'_> {
         }
     }
 
-    /// The arguments of a call, each a plain expression; a named or an
-    /// unpacked argument, and the `...` of a first-class callable, are
-    /// refused as not read yet.
-    fn arguments(
+    /// Every element of an array expression as [`Element`] reads it, in
+    /// order. An element with nothing in it, `[1, , 2]`, is php's
+    /// compile error, raised at the line of the last element before it
+    /// that had one (`zend_try_ct_eval_array`, `Z/Zend/zend_compile.c:10101`).
+    ///
+    /// ```php
+    /// $a = [1,
+    ///   , 2];
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use empty array elements in arrays in %s on line 2
+    /// ```
+    fn elements_of(
         &self,
-        id: NodeId<tree::ArgList>,
-        line: u32,
-    ) -> Result<Vec<tree::Expr>, CompileError> {
-        let args = &self.parsed.tree[id].args;
-        let mut out = Vec::with_capacity(args.len());
-        for arg in args {
-            match arg {
-                tree::Arg::Expr(expr) => out.push(*expr),
-                tree::Arg::NamedArg(_) => return Err(walk::unread(line, "a named argument")),
-                tree::Arg::SpreadArg(_) => return Err(walk::unread(line, "an unpacked argument")),
-                tree::Arg::VariadicPlaceholder(_) => {
-                    return Err(walk::unread(line, "a first-class callable"));
+        ids: &[NodeId<tree::ArrayElement>],
+    ) -> Result<Vec<Element>, CompileError> {
+        let tree = &self.parsed.tree;
+        let mut elements = Vec::with_capacity(ids.len());
+        let mut last = self.line;
+        for id in ids {
+            let element = &tree[*id];
+            let Some(value) = element.value else {
+                return Err(CompileError {
+                    line: last,
+                    ..self.compile_error("Cannot use empty array elements in arrays")
+                });
+            };
+            last = element.line();
+            let key = element.key.map(|key| tree[key].key);
+            elements.push(match (element.spread, key, element.byref) {
+                (None, key, None) => Element::Value { key, value },
+                (None, key, Some(_)) => Element::Ref { key, value },
+                (Some(_), None, None) => Element::Unpack(value),
+                // php's grammar has no `...` beside a key or a `&`
+                // (`array_pair`, `Z/Zend/zend_language_parser.y`).
+                (Some(_), ..) => {
+                    return Err(walk::unread(last, "a `...` beside a key or a `&`"));
                 }
-            }
+            });
         }
-        Ok(out)
-    }
-
-    /// One element of an array expression, php's `ZEND_AST_ARRAY_ELEM`:
-    /// the key where one is written before `=>`, and the value; a
-    /// `...` and a `&` are not read yet.
-    fn element_of(
-        &self,
-        id: NodeId<tree::ArrayElement>,
-    ) -> Result<(Option<tree::Expr>, tree::Expr), CompileError> {
-        let element = &self.parsed.tree[id];
-        let line = element.line();
-        if element.spread.is_some() || element.byref.is_some() {
-            return Err(walk::unread(line, "an array expression"));
-        }
-        let Some(value) = element.value else {
-            return Err(walk::unread(line, "an array expression"));
-        };
-        let key = element.key.map(|key| self.parsed.tree[key].key);
-        Ok((key, value))
+        Ok(elements)
     }
 
     /// `C::NAME` and `C::$name`: a class constant or a class's
@@ -2529,7 +2591,7 @@ impl Emit<'_> {
     /// when it was a user function. A function declared inside a block,
     /// a loop or another body is [`Self::nested_function_decl`].
     fn function_decl(&mut self, function: &Function) -> Result<(), CompileError> {
-        let name = self.prefix_with_ns(&function.name);
+        let name = self.declare_symbol(Symbol::Function, &function.name)?;
         if self.depth != 1 {
             return self.nested_function_decl(function, &name);
         }
@@ -2768,7 +2830,11 @@ impl Emit<'_> {
                     String::from_utf8_lossy(&bind.name)
                 )));
             }
-            self.static_vars.push(Name(bind.name.as_slice().into()));
+            self.static_vars.push(BoundVar {
+                name: Name(bind.name.as_slice().into()),
+                value: Zval::null(),
+                lexical: true,
+            });
             let op1 = self.lookup_cv(&bind.name);
             self.push(Opline {
                 opcode: Opcode::BindStatic,
@@ -2777,6 +2843,116 @@ impl Emit<'_> {
                 extended_value: bind.slot_and_mode(true),
                 ..Opline::default()
             });
+        }
+        Ok(())
+    }
+
+    /// `zend_compile_static_var` (`Z/Zend/zend_compile.c:5501`) over each
+    /// variable of one `static` statement: `$this` and a name the op
+    /// array's table already has are php's compile errors, then the
+    /// initializer is folded as `zend_eval_const_expr` folds it. A value
+    /// it folds to, or `null` where none is written, is what the table
+    /// starts with, and one `BIND_STATIC` binds the CV to the table's
+    /// entry by reference. An initializer it cannot fold leaves `null`
+    /// in the table and runs where it stands: `BIND_INIT_STATIC_OR_JMP`
+    /// steps over it once the entry holds a value, and the
+    /// `BIND_STATIC` after it binds the value it computed the first
+    /// time. The slot and the `ZEND_BIND_REF` bit share `extended_value`
+    /// as [`Bind::slot_and_mode`] lays them out.
+    ///
+    /// ```php
+    /// function g($x) { static $v = $x * 2; return $v; }
+    /// var_dump(g(1), g(5));
+    /// for ($i = 0; $i < 3; $i++) { static $t = 10; $t++; }
+    /// echo $t, "\n";
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// int(2)
+    /// 13
+    /// ```
+    ///
+    /// ```php
+    /// function f() { static $this; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use $this as static variable in %s on line 2
+    /// ```
+    ///
+    /// A closure's `use` variables are entries of the same table, so a
+    /// `static` of one of their names is the duplicate:
+    ///
+    /// ```php
+    /// $f = function () use ($a) { static $a; };
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Duplicate declaration of static variable $a in %s on line 2
+    /// ```
+    fn static_var(&mut self, id: NodeId<tree::StaticVarStmt>) -> Result<(), CompileError> {
+        for declarator in self.parsed.tree[id].static_var_declarators.clone() {
+            let declarator = &self.parsed.tree[declarator];
+            let (line, init) = (declarator.line, declarator.init);
+            let name = self.variable_name(declarator.var);
+            self.line = line;
+            if name == b"this" {
+                return Err(self.compile_error("Cannot use $this as static variable"));
+            }
+            if self.static_vars.iter().any(|held| *held.name.0 == *name) {
+                return Err(self.compile_error(format!(
+                    "Duplicate declaration of static variable ${}",
+                    String::from_utf8_lossy(&name)
+                )));
+            }
+            let slot = u32::try_from(self.static_vars.len()).unwrap_or(u32::MAX) << 3;
+            let folded = match init {
+                None => Some(Zval::null()),
+                Some(init) => {
+                    let mark = self.raised();
+                    self.fold = Fold::EvalConstExpr;
+                    let folded = self.constant_of(init);
+                    self.fold = Fold::Compile;
+                    let folded = folded?;
+                    if folded.is_none() {
+                        self.unraise(mark);
+                    }
+                    folded
+                }
+            };
+            self.static_vars.push(BoundVar {
+                name: Name(name.as_slice().into()),
+                value: folded.unwrap_or_else(Zval::null),
+                lexical: false,
+            });
+            let op1 = self.lookup_cv(&name);
+            let (Some(init), None) = (init, folded) else {
+                self.push(Opline {
+                    opcode: Opcode::BindStatic,
+                    op1_type: OperandKind::Cv,
+                    op1,
+                    extended_value: slot | BIND_REF,
+                    ..Opline::default()
+                });
+                continue;
+            };
+            let jump = self.push(Opline {
+                opcode: Opcode::BindInitStaticOrJmp,
+                op1_type: OperandKind::Cv,
+                op1,
+                extended_value: slot,
+                ..Opline::default()
+            });
+            let value = self.expr(init)?;
+            let (op2_type, op2) = self.operand(value);
+            self.push(Opline {
+                opcode: Opcode::BindStatic,
+                op1_type: OperandKind::Cv,
+                op1,
+                op2_type,
+                op2,
+                extended_value: slot | BIND_REF,
+                ..Opline::default()
+            });
+            self.update_jump_target_to_next(jump);
         }
         Ok(())
     }
@@ -2837,10 +3013,11 @@ impl Emit<'_> {
             is_instance: true,
             is_readonly: promoted.is_readonly,
             is_final: false,
+            is_promoted: true,
             ty: ty.cloned(),
             default,
             attributes: Vec::new(),
-            doc_comment: None,
+            doc_comment: parameter.doc_comment.clone().map(Vec::into_boxed_slice),
         });
         Ok(())
     }
@@ -3193,8 +3370,9 @@ impl Emit<'_> {
                 ty,
                 by_ref: parameter.by_ref,
                 prefer_ref: false,
+                promoted: parameter.promote.is_some(),
                 variadic: parameter.variadic,
-                default,
+                default: default.map_or(ParameterDefault::None, ParameterDefault::Expr),
                 attributes: Vec::new(),
             });
         }
@@ -3616,7 +3794,7 @@ impl Emit<'_> {
             return Err(self
                 .fatal("a class declared inside a block or a body this compiler cannot read yet"));
         }
-        let name = self.prefix_with_ns(&class.name);
+        let name = self.declare_symbol(Symbol::Class, &class.name)?;
         let wanted = name.to_ascii_lowercase();
         if self
             .classes
@@ -4337,6 +4515,7 @@ impl Emit<'_> {
                 // `zend_declare_typed_property`: a `private(set)`
                 // property is implicitly final.
                 is_final: set_visibility == Some(Visibility::Private),
+                is_promoted: false,
                 ty,
                 default,
                 attributes: Vec::new(),
@@ -4870,12 +5049,21 @@ impl Emit<'_> {
                 Some(inner) => self.const_expr(inner),
                 None => Err(self.unread("an expression inside parentheses")),
             },
-            tree::Expr::NameRef(token) => match self.constant_name(token) {
-                Some(value) => folded_const_expr(value).ok_or_else(|| {
-                    self.fatal("a constant expression this compiler cannot read yet")
-                }),
-                None => Ok(ConstExpr::Constant(Name(self.text(token).into()))),
-            },
+            // `zend_compile_const_expr_const`: the name resolved through
+            // the constant imports, and an unqualified one no import
+            // names, in a namespace, left as written for the fallback
+            // the engine's fetch makes.
+            tree::Expr::NameRef(token) => {
+                if let Some(value) = self.constant_name(token) {
+                    return folded_const_expr(value).ok_or_else(|| {
+                        self.fatal("a constant expression this compiler cannot read yet")
+                    });
+                }
+                let written = self.text(token).to_vec();
+                let (resolved, runtime) = self.constant_resolved(&written);
+                let name = if runtime { written } else { resolved };
+                Ok(ConstExpr::Constant(Name(name.into_boxed_slice())))
+            }
             // `zend_compile_const_expr_magic_const`: `__CLASS__` in a
             // trait is the one magic constant the fold leaves, kept as
             // `ZEND_AST_CONSTANT_CLASS` for the scope that evaluates it.
@@ -4944,17 +5132,29 @@ impl Emit<'_> {
                 }
             },
             // `ZEND_AST_ARRAY` in a constant expression stays the tree
-            // it was written as, each element's key and value.
+            // it was written as, each element's key and value, and a
+            // `...` its `ZEND_AST_UNPACK` with no key; a `&` is what
+            // `zend_is_allowed_in_const_expr` refuses.
             tree::Expr::ArrayExpr(id) => {
-                let elements = tree[id].array_elements.clone();
+                let elements = self.elements_of(&tree[id].array_elements.clone())?;
                 let mut items = Vec::with_capacity(elements.len());
-                for element in &elements {
-                    let (key, value) = self.element_of(*element)?;
-                    let key = match key {
-                        Some(key) => Some(self.const_expr(key)?),
-                        None => None,
-                    };
-                    items.push((key, self.const_expr(value)?));
+                for element in elements {
+                    items.push(match element {
+                        Element::Value { key, value } => {
+                            let key = match key {
+                                Some(key) => Some(self.const_expr(key)?),
+                                None => None,
+                            };
+                            (key, self.const_expr(value)?)
+                        }
+                        Element::Unpack(value) => {
+                            (None, ConstExpr::Unpack(Box::new(self.const_expr(value)?)))
+                        }
+                        Element::Ref { .. } => {
+                            return Err(self
+                                .compile_error("Constant expression contains invalid operations"));
+                        }
+                    });
                 }
                 Ok(ConstExpr::Array(items))
             }
@@ -5095,6 +5295,7 @@ impl Emit<'_> {
             )));
         }
         self.namespace = Some(name.to_vec());
+        self.imports.reset();
         // php's `zend_is_first_statement` steps over a `ZEND_AST_DECLARE`
         // before the node it is asked about and over nothing else, so a
         // `namespace` statement is one a later `strict_types` finds.
@@ -5218,7 +5419,8 @@ impl Emit<'_> {
                     String::from_utf8_lossy(&name)
                 )));
             }
-            let name = self.string(&self.prefix_with_ns(&name))?;
+            let full = self.declare_symbol(Symbol::Const, &name)?;
+            let name = self.string(&full)?;
             let op1 = self.literal(name);
             let op2 = self.literal(value);
             self.push(Opline {
@@ -7491,20 +7693,21 @@ impl Emit<'_> {
                 let operand = match (node.operand, node.args) {
                     (Some(operand), _) => operand,
                     (None, Some(args)) => {
-                        let arguments = self.arguments(args, line)?;
-                        let [operand] = arguments[..] else {
+                        let arguments = self.arguments(args, line)?.positional();
+                        let Some([operand]) = arguments.as_deref() else {
                             return Err(self.unread("a `clone` with an argument list"));
                         };
-                        operand
+                        *operand
                     }
                     (None, None) => return Err(self.unread("a `clone`")),
                 };
-                self.call(b"\\clone", &[operand])
+                let arguments = Args::of(&[operand], self.line_of(operand));
+                self.call(b"\\clone", &arguments)
             }
             tree::Expr::ExitExpr(id) => {
                 let arguments = match tree[id].args {
                     Some(args) => self.arguments(args, line)?,
-                    None => Vec::new(),
+                    None => Args::of(&[], line),
                 };
                 self.call(b"\\exit", &arguments)
             }
@@ -7564,7 +7767,7 @@ impl Emit<'_> {
                 };
                 let arguments = match node.args {
                     Some(args) => self.arguments(args, line)?,
-                    None => Vec::new(),
+                    None => Args::of(&[], line),
                 };
                 self.new_expression(class, &arguments)
             }
@@ -7593,7 +7796,10 @@ impl Emit<'_> {
                 let target = self.required(tree[id].target, "an `empty`")?;
                 self.isset_or_empty(target, true)
             }
-            tree::Expr::EvalExpr(_) => Err(self.unread("an `eval`")),
+            tree::Expr::EvalExpr(id) => {
+                let code = self.required(tree[id].code, "an `eval`")?;
+                self.include_or_eval(IncludeKind::Eval, code)
+            }
             tree::Expr::CallExpr(id) => self.call_of(id, line),
             tree::Expr::MemberAccessExpr(id) => {
                 let name = self.member_name_of(id, line)?;
@@ -8055,9 +8261,9 @@ impl Emit<'_> {
     /// the operand, then one `INCLUDE_OR_EVAL` over it into a `VAR`, the
     /// construct's bit ([`IncludeKind::attr`]) in `extended_value`;
     /// `zend_do_free` marks the `VAR` unused where nothing reads it, as
-    /// it marks a call's. The engine's handler resolves the path, serves
-    /// the file on a frame of its own and leaves what it returned in the
-    /// `VAR`.
+    /// it marks a call's. The engine's handler resolves the path, or
+    /// compiles the string for an `eval`, serves the code on a frame of
+    /// its own and leaves what it returned in the `VAR`.
     ///
     /// ```php
     /// $n = ($n ?? 0) + 1;
@@ -8072,6 +8278,19 @@ impl Emit<'_> {
     /// int(30)
     /// bool(true)
     /// bool(true)
+    /// ```
+    ///
+    /// `eval` is the same opline under `ZEND_EVAL`, its operand the
+    /// string, whatever expression computes it:
+    ///
+    /// ```php
+    /// $a = 1;
+    /// var_dump(eval('return $a + 1;'), eval('$b = ' . '2;'), $b);
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// NULL
+    /// int(2)
     /// ```
     fn include_or_eval(
         &mut self,
@@ -9208,7 +9427,13 @@ impl Emit<'_> {
                     slots,
                 }
             }
-            (_, Fetch::Read | Fetch::Is) => {
+            // `zend_compile_simple_var`'s `is_this_fetch` arm under
+            // `BP_VAR_FUNC_ARG`, which leaves the `VAR` a write's does.
+            (_, Fetch::FuncArg) if self.is_this(base) => {
+                let this = self.fetch_this(OperandKind::Var);
+                Base::Settled(self.operand(this))
+            }
+            (_, Fetch::Read | Fetch::Is | Fetch::FuncArg) => {
                 let value = self.chain_link(base)?;
                 Base::Settled(self.operand(value))
             }
@@ -9277,6 +9502,7 @@ impl Emit<'_> {
             Fetch::Write => (Opcode::FetchDimW, OperandKind::Var),
             Fetch::Rw => (Opcode::FetchDimRw, OperandKind::Var),
             Fetch::Is => (Opcode::FetchDimIs, OperandKind::Tmp),
+            Fetch::FuncArg => (Opcode::FetchDimFuncArg, OperandKind::Var),
         };
         let under = if fetches.is_empty() { over } else { Over::Dim };
         let (mut op1_type, mut op1) = self.base_fetch(container, fetch, under);
@@ -9321,7 +9547,7 @@ impl Emit<'_> {
     /// dimension stands over it; under a read it is the `_R` opcode into
     /// a temporary (`zend_adjust_for_fetch_type`).
     fn base_fetch(&mut self, container: Base, fetch: Fetch, over: Over) -> (OperandKind, u32) {
-        let write = matches!(fetch, Fetch::Write | Fetch::Rw);
+        let write = matches!(fetch, Fetch::Write | Fetch::Rw | Fetch::FuncArg);
         let out_type = if write {
             OperandKind::Var
         } else {
@@ -9362,6 +9588,7 @@ impl Emit<'_> {
                         Fetch::Write => Opcode::FetchObjW,
                         Fetch::Rw => Opcode::FetchObjRw,
                         Fetch::Is => Opcode::FetchObjIs,
+                        Fetch::FuncArg => Opcode::FetchObjFuncArg,
                     },
                     op1_type,
                     op1,
@@ -9386,6 +9613,7 @@ impl Emit<'_> {
                         Fetch::Write => Opcode::FetchStaticPropW,
                         Fetch::Rw => Opcode::FetchStaticPropRw,
                         Fetch::Is => Opcode::FetchStaticPropIs,
+                        Fetch::FuncArg => Opcode::FetchStaticPropFuncArg,
                     },
                     op1_type: OperandKind::Const,
                     op1: name_at,
@@ -11107,10 +11335,18 @@ impl Emit<'_> {
             // for the first-class callable alone, `f(...)`, which this
             // compiler does not read; the arguments are read before the
             // callee so that refusal is the one that stands.
+            tree::Expr::CallExpr(_) if self.fold == Fold::EvalConstExpr => {
+                Err(self.fatal("a call is no constant expression"))
+            }
             tree::Expr::CallExpr(id) => {
                 let node = &tree[id];
                 let (callee, args) = (node.callee, node.args);
-                let arguments = self.arguments(args, line)?;
+                let Some(arguments) = self.arguments(args, line)?.positional() else {
+                    return Err(walk::unread(
+                        line,
+                        "a named argument in a constant expression",
+                    ));
+                };
                 let tree::Expr::NameRef(name) = self.peel(callee) else {
                     return Err(self.fatal("a call is no constant expression"));
                 };
@@ -11184,7 +11420,8 @@ impl Emit<'_> {
             // `zend_compile_throw` emits an opline whatever stands
             // around it, so a `throw` folds to nothing, and
             // `zend_compile_include_or_eval` emits its opline the same
-            // way; `zend_compile_isset_or_empty` emits one over the CV.
+            // way for a file and for an `eval`;
+            // `zend_compile_isset_or_empty` emits one over the CV.
             tree::Expr::ThrowExpr(_) => Err(self.fatal("a `throw` is no constant expression")),
             tree::Expr::IncludeExpr(_) => Err(self.fatal("an `include` is no constant expression")),
             tree::Expr::IssetExpr(_) | tree::Expr::EmptyExpr(_) => {
@@ -11196,7 +11433,7 @@ impl Emit<'_> {
             // `zend_compile_print` emits its `ECHO` whatever stands
             // around it, so a `print` folds to nothing.
             tree::Expr::PrintExpr(_) => Err(self.fatal("a `print` is no constant expression")),
-            tree::Expr::EvalExpr(_) => Err(self.unread("an `eval`")),
+            tree::Expr::EvalExpr(_) => Err(self.fatal("an `eval` is no constant expression")),
             // `zend_compile_yield` emits its opline whatever stands
             // around it.
             tree::Expr::YieldExpr(_) | tree::Expr::YieldFromExpr(_) => {
@@ -11300,14 +11537,61 @@ impl Emit<'_> {
 
     /// [`Self::constant_array`]'s entries before they are laid down: the
     /// keys and values `zend_try_ct_eval_array` folds, in order, and
-    /// nothing where it folds none.
+    /// nothing where it folds none. A `&` element is never constant, and
+    /// a `...` is where what it unpacks folds to an array, whose string
+    /// keys are written as they stand (`zend_hash_update`) and whose
+    /// integer keys are dropped for the next index
+    /// (`zend_hash_next_index_insert`); anything else unpacked is php's
+    /// compile error.
+    ///
+    /// ```php
+    /// const K = ['k' => 1];
+    /// var_dump([...[5 => 'a', 'b'], ...K, 'k' => 2, ...['x' => 3, 9 => 'c']]);
+    /// ```
+    /// ```expect
+    /// array(5) {
+    ///   [0]=>
+    ///   string(1) "a"
+    ///   [1]=>
+    ///   string(1) "b"
+    ///   ["k"]=>
+    ///   int(2)
+    ///   ["x"]=>
+    ///   int(3)
+    ///   [2]=>
+    ///   string(1) "c"
+    /// }
+    /// ```
+    ///
+    /// ```php
+    /// var_dump([...1]);
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Only arrays and Traversables can be unpacked, int given in %s on line 2
+    /// ```
     fn constant_entries(
         &mut self,
         elements: &[NodeId<tree::ArrayElement>],
     ) -> Result<Option<Vec<(Key, Zval)>>, CompileError> {
-        let mut folded: Vec<(Option<Zval>, Zval)> = Vec::with_capacity(elements.len());
+        /// One element folded, before its key is written.
+        enum Fold {
+            Pair(Option<Zval>, Zval),
+            Unpack(Zval),
+        }
+        let elements = self.elements_of(elements)?;
+        let mut folded: Vec<Fold> = Vec::with_capacity(elements.len());
         for element in elements {
-            let (key, value) = self.element_of(*element)?;
+            let (key, value) = match element {
+                Element::Value { key, value } => (key, value),
+                Element::Ref { .. } => return Ok(None),
+                Element::Unpack(value) => {
+                    let Some(value) = self.constant_of(value)? else {
+                        return Ok(None);
+                    };
+                    folded.push(Fold::Unpack(value));
+                    continue;
+                }
+            };
             let key = match key {
                 Some(key) => match self.constant_of(key)? {
                     Some(key) => Some(key),
@@ -11318,19 +11602,38 @@ impl Emit<'_> {
             let Some(value) = self.constant_of(value)? else {
                 return Ok(None);
             };
-            folded.push((key, value));
+            folded.push(Fold::Pair(key, value));
         }
-        let mut entries: Vec<(Key, Zval)> = Vec::with_capacity(elements.len());
+        let mut entries: Vec<(Key, Zval)> = Vec::with_capacity(folded.len());
         let mut next_free = i64::MIN;
-        for (key, value) in folded {
-            let key = match key {
-                None => {
-                    let index = if next_free == i64::MIN { 0 } else { next_free };
-                    if index == i64::MAX && entries.iter().any(|(k, _)| *k == Key::Long(index)) {
-                        return Ok(None);
+        for element in folded {
+            let (key, value) = match element {
+                Fold::Unpack(value) => {
+                    let Some(array) = value.as_arr() else {
+                        return Err(self.compile_error(format!(
+                            "Only arrays and Traversables can be unpacked, {} given",
+                            constant_value_name(&value)
+                        )));
+                    };
+                    for (key, held) in &array {
+                        let key = match key {
+                            Key::Str(s) => Key::Str(s),
+                            Key::Long(_) => match next_index(&entries, next_free) {
+                                Some(key) => key,
+                                None => return Ok(None),
+                            },
+                        };
+                        write_entry(&mut entries, &mut next_free, key, held);
                     }
-                    Key::Long(index)
+                    continue;
                 }
+                Fold::Pair(key, value) => (key, value),
+            };
+            let key = match key {
+                None => match next_index(&entries, next_free) {
+                    Some(key) => key,
+                    None => return Ok(None),
+                },
                 Some(key) => match key.kind() {
                     ZvalType::Long => Key::Long(key.as_long().unwrap_or(0)),
                     ZvalType::String => match key.as_str() {
@@ -11350,15 +11653,7 @@ impl Emit<'_> {
                     _ => return Err(self.compile_error("Illegal offset type")),
                 },
             };
-            if let Key::Long(n) = key
-                && n >= next_free
-            {
-                next_free = n.saturating_add(1);
-            }
-            match entries.iter_mut().find(|(k, _)| *k == key) {
-                Some(held) => held.1 = value,
-                None => entries.push((key, value)),
-            }
+            write_entry(&mut entries, &mut next_free, key, value);
         }
         Ok(Some(entries))
     }
@@ -11385,9 +11680,12 @@ impl Emit<'_> {
     /// `extended_value` above `ZEND_ARRAY_SIZE_SHIFT`, and every element
     /// after it `ADD_ARRAY_ELEMENT` over the two with the same temporary
     /// as its `result`. `ZEND_ARRAY_NOT_PACKED` is set on the
-    /// `INIT_ARRAY` once a constant string key is seen, and
-    /// `ZEND_ARRAY_ELEMENT_REF` never, since a `&` element is not read
-    /// yet; neither is `...`, which would be `ADD_ARRAY_UNPACK`.
+    /// `INIT_ARRAY` once a constant string key is seen. A `&` element's
+    /// value is the variable fetched for writing ([`Self::element_ref`])
+    /// and its opline carries `ZEND_ARRAY_ELEMENT_REF`; a `...` is
+    /// `ADD_ARRAY_UNPACK` over the value, and where it is the first
+    /// element an `INIT_ARRAY` with no operand and no count stands
+    /// before it.
     ///
     /// The `array(…)` spelling is the same node over the same
     /// `array_pair_list` (`Z/Zend/zend_language_parser.y:1491`), with
@@ -11424,16 +11722,43 @@ impl Emit<'_> {
     /// array(0) {
     /// }
     /// ```
-    fn array(&mut self, elements: &[NodeId<tree::ArrayElement>]) -> Result<Where, CompileError> {
-        if let Some(value) = self.constant_array(elements)? {
+    fn array(&mut self, ids: &[NodeId<tree::ArrayElement>]) -> Result<Where, CompileError> {
+        if let Some(value) = self.constant_array(ids)? {
             return Ok(Where::Constant(value));
         }
+        let elements = self.elements_of(ids)?;
         let count = u32::try_from(elements.len()).unwrap_or(u32::MAX);
         let mut init_at = 0usize;
         let mut out = 0u32;
         let mut packed = true;
-        for (i, element) in elements.iter().enumerate() {
-            let (key, value) = self.element_of(*element)?;
+        for (i, element) in elements.into_iter().enumerate() {
+            let (key, value, by_ref) = match element {
+                Element::Unpack(value) => {
+                    let value = self.walked(value)?;
+                    let (op1_type, op1) = self.operand(value);
+                    if i == 0 {
+                        out = self.temporary();
+                        init_at = self.oplines.len();
+                        self.push(Opline {
+                            opcode: Opcode::InitArray,
+                            out_type: OperandKind::Tmp,
+                            out,
+                            ..Opline::default()
+                        });
+                    }
+                    self.push(Opline {
+                        opcode: Opcode::AddArrayUnpack,
+                        op1_type,
+                        op1,
+                        out_type: OperandKind::Tmp,
+                        out,
+                        ..Opline::default()
+                    });
+                    continue;
+                }
+                Element::Value { key, value } => (key, value, false),
+                Element::Ref { key, value } => (key, value, true),
+            };
             let key = match key {
                 Some(key) => {
                     let key = self.walked(key)?;
@@ -11441,12 +11766,17 @@ impl Emit<'_> {
                 }
                 None => None,
             };
-            let value = self.walked(value)?;
-            let (op1_type, op1) = self.operand(value);
+            let (op1_type, op1) = if by_ref {
+                self.element_ref(value)?
+            } else {
+                let value = self.walked(value)?;
+                self.operand(value)
+            };
             let (op2_type, op2) = match key {
                 Some(key) => self.operand(key),
                 None => (OperandKind::Unused, 0),
             };
+            let reference = if by_ref { ARRAY_ELEMENT_REF } else { 0 };
             if i == 0 {
                 out = self.temporary();
                 init_at = self.oplines.len();
@@ -11458,7 +11788,7 @@ impl Emit<'_> {
                     op2,
                     out_type: OperandKind::Tmp,
                     out,
-                    extended_value: count << ARRAY_SIZE_SHIFT,
+                    extended_value: (count << ARRAY_SIZE_SHIFT) | reference,
                     ..Opline::default()
                 });
             } else {
@@ -11470,6 +11800,7 @@ impl Emit<'_> {
                     op2,
                     out_type: OperandKind::Tmp,
                     out,
+                    extended_value: reference,
                     ..Opline::default()
                 });
             }
@@ -11481,6 +11812,76 @@ impl Emit<'_> {
             init.extended_value |= ARRAY_NOT_PACKED;
         }
         Ok(Where::Temporary(out))
+    }
+
+    /// The value of a `&` element, `zend_ensure_writable_variable` and
+    /// then `zend_compile_var(…, BP_VAR_W, 1)`: what a call returned is
+    /// php's compile error, a plain variable is its CV, `$this` is
+    /// `FETCH_THIS` into a `VAR`, and a dimension, a property and a
+    /// class's property are the write fetch of the whole chain with the
+    /// `&`'s own bit on its last opline ([`Self::var_for_reference`]).
+    /// The array's entry and the variable are one cell from there:
+    ///
+    /// ```php
+    /// $n = [1, 2]; $o = new stdClass; $o->p = 'p';
+    /// $a = ['one' => &$n[0], &$o->p, &$fresh];
+    /// $a['one'] = 10; $a[0] = 'q'; $fresh = 'f';
+    /// var_dump($n[0], $o->p, $a);
+    /// ```
+    /// ```expect
+    /// int(10)
+    /// string(1) "q"
+    /// array(3) {
+    ///   ["one"]=>
+    ///   &int(10)
+    ///   [0]=>
+    ///   &string(1) "q"
+    ///   [1]=>
+    ///   &string(1) "f"
+    /// }
+    /// ```
+    ///
+    /// ```php
+    /// function f() { return 1; }
+    /// $a = [&f()];
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Can't use function return value in write context in %s on line 3
+    /// ```
+    fn element_ref(&mut self, value: tree::Expr) -> Result<(OperandKind, u32), CompileError> {
+        let line = self.line_of(value);
+        match self.peel(value) {
+            tree::Expr::CallExpr(id) => {
+                let callee = self.peel(self.parsed.tree[id].callee);
+                Err(self.compile_error(match callee {
+                    tree::Expr::MemberAccessExpr(_) | tree::Expr::ScopedAccessExpr(_) => {
+                        "Can't use method return value in write context"
+                    }
+                    _ => "Can't use function return value in write context",
+                }))
+            }
+            tree::Expr::SimpleVarExpr(id) => match self.simple_var_of(id, line)? {
+                SimpleVar::Cv(name) => Ok((OperandKind::Cv, self.lookup_cv(&name))),
+                SimpleVar::This => {
+                    let this = self.fetch_this(OperandKind::Var);
+                    Ok(self.operand(this))
+                }
+            },
+            node @ (tree::Expr::SubscriptExpr(_) | tree::Expr::MemberAccessExpr(_)) => {
+                self.line = line;
+                self.var_for_reference(node)
+            }
+            node @ tree::Expr::ScopedAccessExpr(id)
+                if matches!(self.scoped_of(id, line)?, Scoped::Property { .. }) =>
+            {
+                self.line = line;
+                self.var_for_reference(node)
+            }
+            tree::Expr::VarVarExpr(_) | tree::Expr::DynamicVarExpr(_) => {
+                Err(self.unread("a `&` element over a variable named at run time"))
+            }
+            _ => Err(self.compile_error("Cannot use temporary expression in write context")),
+        }
     }
 
     /// `zend_eval_const_expr` over one node and then
@@ -11611,6 +12012,7 @@ impl Emit<'_> {
                 Opcode::DoFcallByName
             },
             line,
+            false,
         ))
     }
 
@@ -11629,27 +12031,42 @@ impl Emit<'_> {
     /// anything reads it; [`Self::do_free`] marks it `UNUSED` when
     /// nothing does, which is what the engine's `DO_ICALL` reads as
     /// `RETURN_VALUE_USED`.
-    fn call(&mut self, name: &[u8], arguments: &[tree::Expr]) -> Result<Where, CompileError> {
+    fn call(&mut self, name: &[u8], arguments: &Args) -> Result<Where, CompileError> {
         let line = self.line;
         let (resolved, runtime) = self.function_name(name);
         if runtime {
             return self.ns_call(&resolved, arguments);
         }
         let lowered = resolved.to_ascii_lowercase();
-        let lowered_name = lowered.clone();
-        let count = u32::try_from(arguments.len()).unwrap_or(0);
-        let (stack, call_op) = match self.native_index(&lowered) {
+        let (callee, plan, stack, call_op) = match self.native_index(&lowered) {
             Some(index) => {
-                if let Some(served) = self.special(&lowered, arguments)? {
-                    return Ok(served);
+                // `zend_try_compile_special_func`, which a named argument
+                // keeps a call out of.
+                if let Some(positional) = arguments.positional() {
+                    if let Some(served) = self.special(&lowered, &positional)? {
+                        return Ok(served);
+                    }
+                    if let Some(served) = self.frameless_icall(index, &positional, None)? {
+                        return Ok(served);
+                    }
                 }
-                if let Some(served) = self.frameless_icall(index, arguments, None)? {
-                    return Ok(served);
-                }
-                (used_stack(count, None), Opcode::DoIcall)
+                let parameters = self
+                    .functions
+                    .get(index)
+                    .map(|decl| decl.parameters.as_slice())
+                    .unwrap_or_default();
+                let callee = Callee::of(parameters);
+                let plan = Plan::of(arguments, Some(&callee));
+                let stack = used_stack(plan.count, None);
+                (callee, plan, stack, Opcode::DoIcall)
             }
             None => match self.declared_function(&lowered) {
-                Some(body) => (used_stack(count, Some(body)), Opcode::DoUcall),
+                Some((decl, body)) => {
+                    let callee = Callee::of(&decl.parameters);
+                    let plan = Plan::of(arguments, Some(&callee));
+                    let stack = used_stack(plan.count, Some(body));
+                    (callee, plan, stack, Opcode::DoUcall)
+                }
                 None => return self.dynamic_call(&resolved, arguments),
             },
         };
@@ -11662,48 +12079,11 @@ impl Emit<'_> {
             op2_type: OperandKind::Const,
             op2: lowered,
             out: slot,
-            extended_value: count,
+            extended_value: plan.count,
             ..Opline::default()
         });
-        let modes = self.send_modes(&lowered_name, arguments.len());
-        self.args(arguments, true, &modes)?;
-        Ok(self.call_op(call_op, line))
-    }
-
-    /// `ZEND_ARG_SEND_MODE` (`Z/Zend/zend_compile.h:1141`) over the
-    /// callee the table has, one answer per argument: the parameter's
-    /// own way of being sent, and the variadic's for every argument past the declared
-    /// ones, since a variadic collects them all. A name the table has
-    /// not is every argument by value, which is what the `_EX` sends
-    /// read off the callee as the program serves.
-    fn send_modes(&self, lowered: &[u8], count: usize) -> Vec<SendMode> {
-        let parameters = match self.native_index(lowered) {
-            Some(index) => self.functions.get(index).map(|decl| &decl.parameters),
-            None => self
-                .functions_declared
-                .iter()
-                .find(|(decl, _)| decl.name.0.to_ascii_lowercase() == lowered)
-                .map(|(decl, _)| &decl.parameters),
-        };
-        let Some(parameters) = parameters else {
-            return Vec::new();
-        };
-        let variadic = parameters.last().filter(|last| last.variadic);
-        (0..count)
-            .map(|at| {
-                match parameters
-                    .get(at)
-                    .filter(|parameter| !parameter.variadic)
-                    .or(variadic)
-                {
-                    Some(parameter) if parameter.by_ref && parameter.prefer_ref => {
-                        SendMode::PreferRef
-                    }
-                    Some(parameter) if parameter.by_ref => SendMode::Ref,
-                    _ => SendMode::Value,
-                }
-            })
-            .collect()
+        self.send_args(&plan, arguments, Some(&callee))?;
+        Ok(self.call_op(call_op, line, plan.extra_named))
     }
 
     /// `zend_hash_find_ptr(CG(function_table), lcname)` over the
@@ -11713,11 +12093,11 @@ impl Emit<'_> {
     /// answers, and none for the function whose own body is being
     /// compiled, which is in php's table without `ZEND_ACC_DONE_PASS_TWO`
     /// and so compiles a call to itself by name.
-    fn declared_function(&self, lowered: &[u8]) -> Option<&OpArray> {
+    fn declared_function(&self, lowered: &[u8]) -> Option<(&FunctionDecl, &OpArray)> {
         self.functions_declared
             .iter()
             .find(|(decl, _)| decl.name.0.to_ascii_lowercase() == lowered)
-            .map(|(_, body)| body)
+            .map(|(decl, body)| (decl, body))
     }
 
     /// `zend_compile_dynamic_call` for a name written as a constant
@@ -11729,25 +12109,21 @@ impl Emit<'_> {
     /// The engine resolves the pair's lowered name at the `INIT` and
     /// raises php's `Error` over the written one where nothing declares
     /// it.
-    fn dynamic_call(
-        &mut self,
-        name: &[u8],
-        arguments: &[tree::Expr],
-    ) -> Result<Where, CompileError> {
+    fn dynamic_call(&mut self, name: &[u8], arguments: &Args) -> Result<Where, CompileError> {
         let line = self.line;
         let pair = self.func_name_literal(name)?;
-        let count = u32::try_from(arguments.len()).unwrap_or(0);
+        let plan = Plan::of(arguments, None);
         let slot = self.cache_slot();
         self.push(Opline {
             opcode: Opcode::InitFcallByName,
             op2_type: OperandKind::Const,
             op2: pair,
             out: slot,
-            extended_value: count,
+            extended_value: plan.count,
             ..Opline::default()
         });
-        self.args(arguments, false, &[])?;
-        Ok(self.call_op(Opcode::DoFcallByName, line))
+        self.send_args(&plan, arguments, None)?;
+        Ok(self.call_op(Opcode::DoFcallByName, line, plan.extra_named))
     }
 
     /// `zend_compile_dynamic_call` over a callee that is no constant
@@ -11758,24 +12134,20 @@ impl Emit<'_> {
     /// callee nothing is known of and `DO_FCALL`, which is what
     /// `zend_get_call_op` picks with `fbc` null over an opline that is
     /// no `INIT_FCALL_BY_NAME`.
-    fn call_var(
-        &mut self,
-        callee: tree::Expr,
-        arguments: &[tree::Expr],
-    ) -> Result<Where, CompileError> {
+    fn call_var(&mut self, callee: tree::Expr, arguments: &Args) -> Result<Where, CompileError> {
         let line = self.line;
         let value = self.expr(callee)?;
         let (op2_type, op2) = self.operand(value);
-        let count = u32::try_from(arguments.len()).unwrap_or(0);
+        let plan = Plan::of(arguments, None);
         self.push(Opline {
             opcode: Opcode::InitDynamicCall,
             op2_type,
             op2,
-            extended_value: count,
+            extended_value: plan.count,
             ..Opline::default()
         });
-        self.args(arguments, false, &[])?;
-        Ok(self.call_op(Opcode::DoFcall, line))
+        self.send_args(&plan, arguments, None)?;
+        Ok(self.call_op(Opcode::DoFcall, line, plan.extra_named))
     }
 
     /// `zend_compile_new` (`Z/Zend/zend_compile.c:5410`): the class
@@ -11811,7 +12183,7 @@ impl Emit<'_> {
     fn new_expression(
         &mut self,
         class: ClassSpec,
-        arguments: &[tree::Expr],
+        arguments: &Args,
     ) -> Result<Where, CompileError> {
         let line = self.line;
         let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
@@ -11822,7 +12194,7 @@ impl Emit<'_> {
         } else {
             0
         };
-        let count = u32::try_from(arguments.len()).unwrap_or(0);
+        let plan = Plan::of(arguments, None);
         self.push(Opline {
             opcode: Opcode::New,
             op1_type,
@@ -11830,11 +12202,11 @@ impl Emit<'_> {
             op2,
             out_type: OperandKind::Var,
             out,
-            extended_value: count,
+            extended_value: plan.count,
             ..Opline::default()
         });
-        self.args(arguments, false, &[])?;
-        let served = self.call_op(Opcode::DoFcall, line);
+        self.send_args(&plan, arguments, None)?;
+        let served = self.call_op(Opcode::DoFcall, line, plan.extra_named);
         self.do_free(served);
         Ok(Where::Returned(out))
     }
@@ -11883,7 +12255,7 @@ impl Emit<'_> {
         &mut self,
         class: ClassSpec,
         method: &[u8],
-        arguments: &[tree::Expr],
+        arguments: &Args,
     ) -> Result<Where, CompileError> {
         let line = self.line;
         let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
@@ -11897,13 +12269,14 @@ impl Emit<'_> {
             }
             ClassRef::Scope(_) | ClassRef::Fetched(_) => None,
         };
-        let call_op = match known {
-            Some(Known::User) => Opcode::DoUcall,
-            Some(Known::Native) | None => Opcode::DoFcall,
+        let (call_op, callee) = match known {
+            Some((Known::User, callee)) => (Opcode::DoUcall, Some(callee)),
+            Some((Known::Native, callee)) => (Opcode::DoFcall, Some(callee)),
+            None => (Opcode::DoFcall, None),
         };
-        let known = known.is_some();
+        let plan = Plan::of(arguments, callee.as_ref());
+        let count = plan.count;
         let (op1_type, op1) = self.class_operand(&class)?;
-        let count = u32::try_from(arguments.len()).unwrap_or(0);
         let opline = if constructor {
             let out = if op1_type == OperandKind::Const {
                 self.cache_slot()
@@ -11932,8 +12305,8 @@ impl Emit<'_> {
             }
         };
         self.push(opline);
-        self.args(arguments, known, &[])?;
-        Ok(self.call_op(call_op, line))
+        self.send_args(&plan, arguments, callee.as_ref())?;
+        Ok(self.call_op(call_op, line, plan.extra_named))
     }
 
     /// `zend_compile_method_call`: the receiver compiled,
@@ -11945,7 +12318,7 @@ impl Emit<'_> {
         &mut self,
         object: tree::Expr,
         method: &[u8],
-        arguments: &[tree::Expr],
+        arguments: &Args,
         nullsafe: bool,
     ) -> Result<Where, CompileError> {
         let line = self.line;
@@ -11956,7 +12329,7 @@ impl Emit<'_> {
             self.jmp_null((op1_type, op1), false);
         }
         let method_at = self.func_name_literal(method)?;
-        let count = u32::try_from(arguments.len()).unwrap_or(0);
+        let plan = Plan::of(arguments, None);
         let slot = self.cache_slots(2);
         self.push(Opline {
             opcode: Opcode::InitMethodCall,
@@ -11965,11 +12338,11 @@ impl Emit<'_> {
             op2_type: OperandKind::Const,
             op2: method_at,
             out: slot,
-            extended_value: count,
+            extended_value: plan.count,
             ..Opline::default()
         });
-        self.args(arguments, false, &[])?;
-        Ok(self.call_op(Opcode::DoFcall, line))
+        self.send_args(&plan, arguments, None)?;
+        Ok(self.call_op(Opcode::DoFcall, line, plan.extra_named))
     }
 
     /// The receiver of a method call or a property fetch: `$this` is
@@ -12546,10 +12919,12 @@ impl Emit<'_> {
     #[cfg(test)]
     fn known_method(&self, class: &[u8], method: &[u8]) -> Option<Known> {
         self.known_method_of(&self.class_name(class), method)
+            .map(|(known, _)| known)
     }
 
-    /// [`Self::known_method`] over a name already resolved.
-    fn known_method_of(&self, class: &[u8], method: &[u8]) -> Option<Known> {
+    /// [`Self::known_method`] over a name already resolved, with the
+    /// method's parameters as `zend_compile_args` reads them.
+    fn known_method_of(&self, class: &[u8], method: &[u8]) -> Option<(Known, Callee)> {
         let class = class.to_ascii_lowercase();
         let method = method.to_ascii_lowercase();
         let own = self
@@ -12564,11 +12939,11 @@ impl Emit<'_> {
             return decl
                 .methods
                 .iter()
-                .any(|m| {
+                .find(|m| {
                     m.function.name.0.to_ascii_lowercase() == method
                         && m.visibility == Visibility::Public
                 })
-                .then_some(Known::Native);
+                .map(|m| (Known::Native, Callee::of(&m.function.parameters)));
         }
         let decl = self
             .classes
@@ -12584,11 +12959,11 @@ impl Emit<'_> {
         }
         decl.methods
             .iter()
-            .any(|m| {
+            .find(|m| {
                 m.function.name.0.to_ascii_lowercase() == method
                     && (m.visibility == Visibility::Public || own)
             })
-            .then_some(Known::User)
+            .map(|m| (Known::User, Callee::of(&m.function.parameters)))
     }
 
     /// `zend_add_func_name_literal`: the name as written and its lowered
@@ -12606,45 +12981,33 @@ impl Emit<'_> {
     }
 
     /// `zend_compile_function_name` over `zend_resolve_function_name`:
-    /// the name a call is resolved to, and whether the resolution waits
-    /// for the program to be served. A name written with a leading `\` is
-    /// what follows it, fully qualified; `namespace\f` is the current
-    /// namespace before `f`, fully qualified; a name with a `\` in it
-    /// is the current namespace before it, fully qualified, since no
-    /// `use` is read here; and an unqualified name is itself where no
-    /// namespace stands, and the namespace before it where one does,
-    /// resolved as the program serves, which is the `true`.
+    /// the name a call is resolved to through the file's imports
+    /// ([`Self::resolve_non_class`]), and whether the resolution waits
+    /// for the program to be served, which is php's
+    /// `!is_fully_qualified && FC(current_namespace)`: an unqualified
+    /// name no `use function` names, inside a namespace.
     fn function_name(&self, name: &[u8]) -> (Vec<u8>, bool) {
-        if let Some(fully_qualified) = name.strip_prefix(b"\\") {
-            return (fully_qualified.to_vec(), false);
-        }
-        let Some(namespace) = &self.namespace else {
-            return (name.to_vec(), false);
-        };
-        let prefixed = |rest: &[u8]| {
-            let mut full = namespace.clone();
-            full.push(b'\\');
-            full.extend_from_slice(rest);
-            full
-        };
-        if name.len() > 10 && name[..10].eq_ignore_ascii_case(b"namespace\\") {
-            return (prefixed(&name[10..]), false);
-        }
-        (prefixed(name), !name.contains(&b'\\'))
+        let (resolved, fully_qualified) = self.resolve_non_class(name, Symbol::Function);
+        (resolved, !fully_qualified && self.namespace.is_some())
     }
 
-    /// `zend_resolve_class_name` for a name no `use` is read for: a name
-    /// written with a leading `\` is what follows it, and in a namespace
-    /// `namespace\C` and any other name take the namespace before them,
-    /// as [`Self::function_name`] resolves a function's, with nothing
-    /// waiting for the program, since a class name resolves at compile
-    /// time. `self`, `parent` and `static` written without the `\` are
-    /// no class's name and resolve to themselves.
+    /// [`Self::function_name`] for a constant, `zend_resolve_const_name`,
+    /// which reads the constant imports, whose aliases keep their case.
+    fn constant_resolved(&self, name: &[u8]) -> (Vec<u8>, bool) {
+        let (resolved, fully_qualified) = self.resolve_non_class(name, Symbol::Const);
+        (resolved, !fully_qualified && self.namespace.is_some())
+    }
+
+    /// `zend_resolve_class_name`: `self`, `parent` and `static` written
+    /// without the `\` are no class's name and resolve to themselves;
+    /// every other name is [`Self::resolve_class`]'s, the file's imports
+    /// read, with nothing waiting for the program, since a class name
+    /// resolves at compile time.
     fn class_name(&self, name: &[u8]) -> Vec<u8> {
         if class_fetch_type(name) != FETCH_CLASS_DEFAULT {
             return name.to_vec();
         }
-        self.function_name(name).0
+        self.resolve_class(name)
     }
 
     /// `zend_prefix_with_ns`: the name a declaration takes, the current
@@ -12829,10 +13192,11 @@ impl Emit<'_> {
     }
 
     fn const_name(&mut self, name: &[u8]) -> Result<Option<Zval>, CompileError> {
-        if self.namespace.is_some() && !name.starts_with(b"\\") {
+        let (resolved, runtime) = self.constant_resolved(name);
+        if runtime {
             return Ok(None);
         }
-        self.persistent(name)
+        self.persistent(&resolved)
     }
 
     /// `zend_compile_const`'s second half (`Z/Zend/zend_compile.c:11048`),
@@ -12841,11 +13205,10 @@ impl Emit<'_> {
     /// `IS_CONSTANT_UNQUALIFIED_IN_NAMESPACE` in `op1` where the name
     /// stood unqualified inside a namespace, and the cache slot
     /// `zend_alloc_cache_slot` takes in `extended_value`. The resolution
-    /// is [`Self::function_name`]'s, since `zend_resolve_const_name` and
-    /// `zend_resolve_function_name` are one `zend_resolve_non_class_name`
-    /// and no `use` is read by either here: a leading `\` and a `\`
-    /// inside the name are both fully qualified, and only a bare name in
-    /// a namespace waits for the program.
+    /// is [`Self::constant_resolved`]'s, `zend_resolve_const_name` over
+    /// the constant imports: a leading `\`, a `\` inside the name and an
+    /// imported alias are all fully qualified, and only a bare name no
+    /// `use const` names, in a namespace, waits for the program.
     ///
     /// ```php
     /// define("W", 1);
@@ -12858,7 +13221,7 @@ impl Emit<'_> {
         if let Some(value) = self.const_name(name)? {
             return Ok(Where::Constant(value));
         }
-        let (resolved, unqualified) = self.function_name(name);
+        let (resolved, unqualified) = self.constant_resolved(name);
         let op2 = self.const_name_literal(&resolved, unqualified)?;
         let extended_value = self.cache_slot();
         let out = self.temporary();
@@ -12925,7 +13288,7 @@ impl Emit<'_> {
         let required = decl
             .parameters
             .iter()
-            .take_while(|p| p.default.is_none() && !p.variadic)
+            .take_while(|p| p.is_required())
             .count();
         let variadic = decl.parameters.iter().any(|p| p.variadic);
         let count32 = u32::try_from(count).ok()?;
@@ -12981,7 +13344,7 @@ impl Emit<'_> {
                 .functions
                 .get(index)
                 .and_then(|decl| decl.parameters.get(at))
-                .and_then(|parameter| parameter.default.as_ref())
+                .and_then(|parameter| parameter.default.expr())
                 .and_then(|default| self.default_value(default).transpose())
                 .transpose()?;
             let Some(default) = default else {
@@ -13057,7 +13420,7 @@ impl Emit<'_> {
     /// a second time. The `JMP_FRAMELESS` takes its cache slot after
     /// the `INIT_NS_FCALL_BY_NAME` took its own, which is the number
     /// the dump prints.
-    fn ns_call(&mut self, name: &[u8], arguments: &[tree::Expr]) -> Result<Where, CompileError> {
+    fn ns_call(&mut self, name: &[u8], arguments: &Args) -> Result<Where, CompileError> {
         let line = self.line;
         let name_constants = self.ns_func_name_literal(name)?;
         let lowered = name.to_ascii_lowercase();
@@ -13067,9 +13430,13 @@ impl Emit<'_> {
             .unwrap_or_default()
             .to_vec();
         let mut branch = None;
+        // A named argument keeps the call out of the frameless branch
+        // (`!zend_args_contain_unpack_or_named`).
+        let positional = arguments.positional();
         if !self.in_jmp_frameless_branch
+            && let Some(positional) = &positional
             && let Some(index) = self.native_index(&unqualified)
-            && self.frameless_arity(index, arguments.len()).is_some()
+            && self.frameless_arity(index, positional.len()).is_some()
         {
             self.in_jmp_frameless_branch = true;
             let over = self.string(&lowered)?;
@@ -13082,19 +13449,20 @@ impl Emit<'_> {
             });
             branch = Some((at, index));
         }
-        let count = u32::try_from(arguments.len()).unwrap_or(0);
+        let plan = Plan::of(arguments, None);
         let slot = self.cache_slot();
         self.push(Opline {
             opcode: Opcode::InitNsFcallByName,
             op2_type: OperandKind::Const,
             op2: name_constants,
             out: slot,
-            extended_value: count,
+            extended_value: plan.count,
             ..Opline::default()
         });
-        self.args(arguments, false, &[])?;
-        let returned = self.call_op(Opcode::DoFcallByName, line);
+        self.send_args(&plan, arguments, None)?;
+        let returned = self.call_op(Opcode::DoFcallByName, line, plan.extra_named);
         if let Some((jmp_fl, index)) = branch
+            && let Some(positional) = &positional
             && let Where::Returned(var) = returned
         {
             let jmp_end = self.push(Opline {
@@ -13102,7 +13470,7 @@ impl Emit<'_> {
                 ..Opline::default()
             });
             let target = self.next();
-            self.frameless_icall(index, arguments, Some(var))?;
+            self.frameless_icall(index, positional, Some(var))?;
             let slot = self.cache_slot();
             if let Some(opline) = self.oplines.get_mut(jmp_fl as usize) {
                 opline.op2 = target;
@@ -13137,117 +13505,10 @@ impl Emit<'_> {
         Ok(at)
     }
 
-    /// `zend_compile_args` for arguments none of which is by reference,
-    /// unpacked or named: each compiled and sent at its number. A callee
-    /// the table has (`fbc`) takes a VAR or a CV by `SEND_VAR` and
-    /// anything else by `SEND_VAL`; one it has not takes a CV by
-    /// `SEND_VAR_EX`, what a call returned by `SEND_VAR_NO_REF_EX`, and a
-    /// constant or a temporary by `SEND_VAL_EX`, each of which reads the
-    /// parameter's by-reference bit off the callee as the program serves.
-    /// `$this` sent to a callee nothing is known of is `FETCH_THIS` into
-    /// a `VAR` and `SEND_VAR_EX`; a property fetch sent to one is php's
-    /// `CHECK_FUNC_ARG` and `FETCH_OBJ_FUNC_ARG`, not read yet.
-    fn args(
-        &mut self,
-        arguments: &[tree::Expr],
-        known: bool,
-        modes: &[SendMode],
-    ) -> Result<(), CompileError> {
-        for (at, argument) in arguments.iter().enumerate() {
-            let number = u32::try_from(at).unwrap_or(0) + 1;
-            let mode = modes.get(at).copied().unwrap_or(SendMode::Value);
-            // `ARG_SHOULD_BE_SENT_BY_REF` at a call site whose callee the
-            // table has: a variable is compiled under `BP_VAR_W` and sent
-            // by `SEND_REF`; anything else is sent by the `_EX` opcode
-            // its operand asks for, which php delays the error to, since
-            // `Only variables can be passed by reference` is raised where
-            // the argument is placed and not where it is written. Under
-            // `ARG_MAY_BE_SENT_BY_REF` a value is `SEND_VAL` and no error
-            // at all.
-            if mode != SendMode::Value {
-                let cv = match self.peel(*argument) {
-                    tree::Expr::SimpleVarExpr(id) => match self.simple_var_of(id, self.line)? {
-                        SimpleVar::Cv(name) => Some(self.lookup_cv(&name)),
-                        SimpleVar::This => None,
-                    },
-                    _ => None,
-                };
-                let (opcode, op1_type, op1) = if let Some(cv) = cv {
-                    (Opcode::SendRef, OperandKind::Cv, cv)
-                } else if mode == SendMode::PreferRef {
-                    let value = self.expr(*argument)?;
-                    let (op1_type, op1) = self.operand(value);
-                    (Opcode::SendVal, op1_type, op1)
-                } else {
-                    let value = self.expr(*argument)?;
-                    let (op1_type, op1) = self.operand(value);
-                    let opcode = match op1_type {
-                        OperandKind::Var => Opcode::SendVarNoRefEx,
-                        OperandKind::Cv => Opcode::SendVarEx,
-                        OperandKind::Const | OperandKind::Tmp | OperandKind::Unused => {
-                            Opcode::SendValEx
-                        }
-                    };
-                    (opcode, op1_type, op1)
-                };
-                self.push(Opline {
-                    opcode,
-                    op1_type,
-                    op1,
-                    op2: number,
-                    out: number - 1,
-                    ..Opline::default()
-                });
-                continue;
-            }
-            let value = match self.peel(*argument) {
-                _ if !known && self.is_this(*argument) => {
-                    let this = self.fetch_this(OperandKind::Var);
-                    let (op1_type, op1) = self.operand(this);
-                    self.push(Opline {
-                        opcode: Opcode::SendVarEx,
-                        op1_type,
-                        op1,
-                        op2: number,
-                        out: number - 1,
-                        ..Opline::default()
-                    });
-                    continue;
-                }
-                // `zend_is_variable(arg) && !zend_ast_is_short_circuited(arg)`:
-                // a chain a `?->` stands in is sent as the value it reads.
-                tree::Expr::MemberAccessExpr(_)
-                    if !known && !self.is_short_circuited(*argument) =>
-                {
-                    return Err(self.fatal(
-                        "a property fetch sent to a callee the table has not this compiler cannot read yet",
-                    ));
-                }
-                _ => self.expr(*argument)?,
-            };
-            let (op1_type, op1) = self.operand(value);
-            let opcode = match (known, op1_type) {
-                (true, OperandKind::Var | OperandKind::Cv) => Opcode::SendVar,
-                (true, _) => Opcode::SendVal,
-                (false, OperandKind::Cv) => Opcode::SendVarEx,
-                (false, OperandKind::Var) => Opcode::SendVarNoRefEx,
-                (false, _) => Opcode::SendValEx,
-            };
-            self.push(Opline {
-                opcode,
-                op1_type,
-                op1,
-                op2: number,
-                out: number - 1,
-                ..Opline::default()
-            });
-        }
-        Ok(())
-    }
-
     /// The call op `zend_get_call_op` picked, with the `VAR` for what
-    /// the call returns.
-    fn call_op(&mut self, opcode: Opcode, line: u32) -> Where {
+    /// the call returns, and `ZEND_FCALL_MAY_HAVE_EXTRA_NAMED_PARAMS` in
+    /// `extended_value` where a named argument may land in a variadic.
+    fn call_op(&mut self, opcode: Opcode, line: u32, extra_named: bool) -> Where {
         // `opline->lineno = lineno` after `zend_emit_op`
         // (`Z/Zend/zend_compile.c:3999`): the call's own line, not the
         // line the last argument ended on.
@@ -13257,6 +13518,7 @@ impl Emit<'_> {
             opcode,
             out_type: OperandKind::Var,
             out,
+            extended_value: u32::from(extra_named),
             ..Opline::default()
         });
         Where::Returned(out)
@@ -13719,6 +13981,46 @@ fn compound_op(kind: SyntaxKind) -> Option<BinaryOp> {
 /// (`xtask/src/phpt/adapter.rs`): the sentence [`walk::unread`] writes.
 fn unread(refused: &CompileError) -> bool {
     refused.level == Level::Parse && refused.message.ends_with("this compiler cannot read yet")
+}
+
+/// `nNextFreeElement` over the entries a constant array folded so far:
+/// one past the largest integer key, 0 before any, and none where the
+/// next index is taken past `ZEND_LONG_MAX`, which leaves the array to
+/// the request as php's `zend_hash_next_index_insert` failing does.
+fn next_index(entries: &[(Key, Zval)], next_free: i64) -> Option<Key> {
+    let index = if next_free == i64::MIN { 0 } else { next_free };
+    if index == i64::MAX && entries.iter().any(|(k, _)| *k == Key::Long(index)) {
+        return None;
+    }
+    Some(Key::Long(index))
+}
+
+/// One entry of a constant array written as `zend_hash_update` writes
+/// it: a key already there keeps its place and takes the value, and an
+/// integer key moves `nNextFreeElement` past it.
+fn write_entry(entries: &mut Vec<(Key, Zval)>, next_free: &mut i64, key: Key, value: Zval) {
+    if let Key::Long(n) = key
+        && n >= *next_free
+    {
+        *next_free = n.saturating_add(1);
+    }
+    match entries.iter_mut().find(|(k, _)| *k == key) {
+        Some(held) => held.1 = value,
+        None => entries.push((key, value)),
+    }
+}
+
+/// `zend_zval_value_name` over a folded constant that is no array.
+fn constant_value_name(value: &Zval) -> &'static str {
+    match value.kind() {
+        ZvalType::Null => "null",
+        ZvalType::False => "false",
+        ZvalType::True => "true",
+        ZvalType::Long => "int",
+        ZvalType::Double => "float",
+        ZvalType::String => "string",
+        _ => "array",
+    }
 }
 
 /// `ZEND_HANDLE_NUMERIC_STR` (`Z/Zend/zend_hash.h:402`,
@@ -14313,15 +14615,6 @@ enum Literal {
     Other,
 }
 
-/// How a call site whose callee the table has sends one argument, php's
-/// `ZEND_SEND_BY_VAL`, `ZEND_SEND_BY_REF` and `ZEND_SEND_PREFER_REF`.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SendMode {
-    Value,
-    Ref,
-    PreferRef,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -14344,6 +14637,7 @@ mod tests {
             known_classes: &options.classes,
             frameless: Vec::new(),
             namespace: Some(b"A".to_vec()),
+            imports: Imports::default(),
             active_class: None,
             active_parent: None,
             active_constants: Vec::new(),
@@ -14376,6 +14670,7 @@ mod tests {
             dynamic: Vec::new(),
             dynamic_func_defs: Vec::new(),
             static_vars: Vec::new(),
+            fold: Fold::Compile,
             fn_flags: FnFlags::default(),
             numeric_dims: Vec::new(),
             methods: Vec::new(),
@@ -14536,14 +14831,15 @@ mod tests {
 // magic constant a `__LINE__` is, which operator a `+` is, which type a
 // cast is to, which of the four step nodes a `++` is, and how a
 // variable piece of an interpolated string was written (design §4.9).
-/// Which of the four file constructs an `include` is: php's
-/// `ZEND_INCLUDE`, `ZEND_INCLUDE_ONCE`, `ZEND_REQUIRE` and
-/// `ZEND_REQUIRE_ONCE` (`Z/Zend/zend_compile.h:1076-1079`), one bit
-/// each, which the parser puts in the node's `attr` and
-/// `zend_compile_include_or_eval` copies into the opline's
-/// `extended_value`.
+/// Which of the five constructs of `ZEND_AST_INCLUDE_OR_EVAL` a node
+/// is: php's `ZEND_EVAL`, `ZEND_INCLUDE`, `ZEND_INCLUDE_ONCE`,
+/// `ZEND_REQUIRE` and `ZEND_REQUIRE_ONCE`
+/// (`Z/Zend/zend_compile.h:1075-1079`), one bit each, which the parser
+/// puts in the node's `attr` and `zend_compile_include_or_eval` copies
+/// into the opline's `extended_value`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IncludeKind {
+    Eval,
     Include,
     IncludeOnce,
     Require,
@@ -14554,6 +14850,7 @@ impl IncludeKind {
     /// The bit php names the construct by.
     fn attr(self) -> u32 {
         match self {
+            IncludeKind::Eval => 1,
             IncludeKind::Include => 1 << 1,
             IncludeKind::IncludeOnce => 1 << 2,
             IncludeKind::Require => 1 << 3,
@@ -14794,6 +15091,7 @@ fn enum_properties(kind: ClassKind, backing: EnumBacking) -> Vec<PropertyDecl> {
         is_instance: true,
         is_readonly: true,
         is_final: false,
+        is_promoted: false,
         ty: Some(ty),
         default: None,
         attributes: Vec::new(),

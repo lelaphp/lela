@@ -2,8 +2,9 @@
 //! one php never gives a CV, an auto-global: `zend_compile_simple_var`'s
 //! arm past `zend_try_compile_cv`, `zend_compile_simple_var_no_cv`
 //! (`Z/Zend/zend_compile.c:2915`), which fetches the variable by its
-//! name out of a symbol table, `FETCH_R`, `FETCH_W`, `FETCH_RW` or
-//! `FETCH_IS` by the fetch the place is compiled under, and the
+//! name out of a symbol table, `FETCH_R`, `FETCH_W`, `FETCH_RW`,
+//! `FETCH_IS` or `FETCH_FUNC_ARG` by the fetch the place is compiled
+//! under, and the
 //! `global` statement's arm over such a name (`zend_compile_global_var`,
 //! `:5441`).
 //!
@@ -118,8 +119,8 @@ impl Emit<'_> {
     }
 
     /// The fetch by name [`Self::base_fetch`] lays down: `FETCH_R` or
-    /// `FETCH_IS` into a temporary, `FETCH_W` or `FETCH_RW` into a `VAR`
-    /// (`zend_adjust_for_fetch_type`).
+    /// `FETCH_IS` into a temporary, `FETCH_W`, `FETCH_RW` or
+    /// `FETCH_FUNC_ARG` into a `VAR` (`zend_adjust_for_fetch_type`).
     pub(super) fn lay_fetch_by_name(
         &mut self,
         (op1_type, op1): (OperandKind, u32),
@@ -132,6 +133,7 @@ impl Emit<'_> {
             Fetch::Write => (Opcode::FetchW, OperandKind::Var),
             Fetch::Rw => (Opcode::FetchRw, OperandKind::Var),
             Fetch::Is => (Opcode::FetchIs, OperandKind::Tmp),
+            Fetch::FuncArg => (Opcode::FetchFuncArg, OperandKind::Var),
         };
         self.push(Opline {
             opcode,
@@ -159,7 +161,7 @@ impl Emit<'_> {
             Some(Named::This) => {
                 let kind = match fetch {
                     Fetch::Read | Fetch::Is => OperandKind::Tmp,
-                    Fetch::Write | Fetch::Rw => OperandKind::Var,
+                    Fetch::Write | Fetch::Rw | Fetch::FuncArg => OperandKind::Var,
                 };
                 let this = self.fetch_this(kind);
                 Some(Base::Settled(self.operand(this)))

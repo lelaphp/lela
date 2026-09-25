@@ -54,6 +54,8 @@ use php_unit::{Diagnostic, Level, Unit};
 pub struct Options {
     /// The file name the unit and its errors carry.
     pub filename: Name,
+    /// Whether the source is a file or the string an `eval` hands over.
+    pub kind: SourceKind,
     /// The working directory of the request the unit compiles for,
     /// php's virtual one under ZTS (`VCWD_GETCWD`), which is what
     /// `__DIR__` folds to where `zend_dirname` over `filename` answers
@@ -113,6 +115,7 @@ impl Default for Options {
     fn default() -> Options {
         Options {
             filename: Name::default(),
+            kind: SourceKind::File,
             cwd: Vec::new(),
             strict_types: false,
             precision: 14,
@@ -123,6 +126,25 @@ impl Default for Options {
             stack: StackLimit::UNCHECKED,
         }
     }
+}
+
+/// What the source is, the `type` php's `zend_compile` is called with
+/// (`Z/Zend/zend_language_scanner.l:593`): what the scanner begins in
+/// and what the main op array's implicit final return answers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SourceKind {
+    /// `compile_file`'s `ZEND_USER_FUNCTION`: a file, which begins in
+    /// inline HTML and whose main op array ends in `RETURN int(1)`, the
+    /// value an `include` of it answers where it returns nothing.
+    #[default]
+    File,
+    /// `compile_string`'s `ZEND_EVAL_CODE` at
+    /// `ZEND_COMPILE_POSITION_AFTER_OPEN_TAG`, the string an `eval`
+    /// hands over (`Z/Zend/zend_execute.c:5354`): it begins in code, as
+    /// though an open tag stood before its first byte, and its main op
+    /// array ends in `RETURN null`, the value an `eval` of it answers
+    /// where it returns nothing.
+    Eval,
 }
 
 /// A compile-time fatal: php's message, at php's line, at the level
@@ -196,6 +218,10 @@ pub fn compile_source(
     let syntax = php_syntax::Options {
         lex: php_syntax::LexOptions {
             short_open_tag: options.short_open_tag,
+            position: match options.kind {
+                SourceKind::File => php_syntax::Position::AtOpenTag,
+                SourceKind::Eval => php_syntax::Position::AfterOpenTag,
+            },
         },
         ..php_syntax::Options::default()
     };
@@ -332,8 +358,12 @@ mod tests {
             ty: Some(ty),
             by_ref: false,
             prefer_ref: false,
+            promoted: false,
             variadic: false,
-            default,
+            default: default.map_or(
+                php_unit::decl::ParameterDefault::None,
+                php_unit::decl::ParameterDefault::Expr,
+            ),
             attributes: Vec::new(),
         };
         [
@@ -2259,6 +2289,51 @@ mod tests {
         );
     }
 
+    /// The oracle's dump of `eval` (#573), the fifth construct of
+    /// `zend_compile_include_or_eval`: one `INCLUDE_OR_EVAL (eval)` over
+    /// the string, into a `VAR` that `zend_do_free` marks unused where
+    /// nothing reads it, as it marks an `include`'s; the operand of the
+    /// second is the whole `$x . "b"`, so the `CONCAT` stands before it.
+    #[test]
+    fn eval_is_the_fifth_include_or_eval() {
+        assert_eq!(
+            dump_of(b"<?php $r = eval(\"return 1;\"); eval($x . \"b\");"),
+            main_dump(
+                5,
+                2,
+                4,
+                "0000 V2 = INCLUDE_OR_EVAL (eval) string(\"return 1;\")\n\
+                 0001 ASSIGN CV0($r) V2\n\
+                 0002 T4 = CONCAT CV1($x) string(\"b\")\n\
+                 0003 INCLUDE_OR_EVAL (eval) T4\n\
+                 0004 RETURN int(1)\n"
+            )
+        );
+    }
+
+    /// The string an `eval` hands over, compiled as `compile_string`
+    /// compiles it (#573): code from its first byte, where a file's is
+    /// inline HTML, and a main op array that ends in `RETURN null`,
+    /// where a file's ends in `RETURN int(1)`.
+    #[test]
+    fn an_eval_string_begins_in_code_and_returns_null() {
+        let options = Options {
+            kind: SourceKind::Eval,
+            ..bundled()
+        };
+        let mut strings = php_heap::Strings::new();
+        let unit = compile_source(b"echo 1; ?>x", &options, &mut strings).unwrap_or_default();
+        assert_eq!(
+            unit.dump(&[]),
+            main_dump(
+                3,
+                0,
+                0,
+                "0000 ECHO int(1)\n0001 ECHO string(\"x\")\n0002 RETURN null\n"
+            )
+        );
+    }
+
     /// The oracle's dump of `echo nope($a);` (#252), a name php's
     /// function table has not: `zend_compile_dynamic_call`'s
     /// `INIT_FCALL_BY_NAME` with the argument count and no used stack,
@@ -3344,9 +3419,12 @@ mod tests {
             line: 0,
             raised: Vec::new(),
         };
-        let error = refused(b"<?php\n$a = (eval('1;'));\n").unwrap_or_else(compiled);
+        let error = refused(b"<?php\n$a = (new class {});\n").unwrap_or_else(compiled);
         assert_eq!(error.level, Level::Parse);
-        assert_eq!(error.message, "an `eval` this compiler cannot read yet");
+        assert_eq!(
+            error.message,
+            "an anonymous class this compiler cannot read yet"
+        );
         assert_eq!(error.line, 2);
         let unclosed = refused(b"<?php\n$a = (1 + 2;\n").unwrap_or_else(compiled);
         assert_eq!(unclosed.message, "syntax error, unexpected token \";\"");
@@ -5194,7 +5272,7 @@ echo f(1), C::s(), $o->m(1), $o->p;
                 .0
                 .parameters
                 .iter()
-                .map(|p| p.default.clone())
+                .map(|p| p.default.expr().cloned())
                 .collect::<Vec<_>>(),
             vec![
                 Some(ConstExpr::Constant(Name(b"PHP_INT_MAX".as_slice().into()))),
@@ -5270,7 +5348,12 @@ class C {
         assert_eq!(
             f.parameters
                 .iter()
-                .map(|p| (p.ty.clone(), p.by_ref, p.variadic, p.default.is_some()))
+                .map(|p| (
+                    p.ty.clone(),
+                    p.by_ref,
+                    p.variadic,
+                    p.default.expr().is_some()
+                ))
                 .collect::<Vec<_>>(),
             vec![
                 (Some(Type::Int), false, false, false),
@@ -6386,12 +6469,7 @@ class C {
             refused(b"<?php echo $o->$p;").as_deref(),
             Some("a property named at run time this compiler cannot read yet")
         );
-        assert_eq!(
-            refused(b"<?php f($o->p);").as_deref(),
-            Some(
-                "a property fetch sent to a callee the table has not this compiler cannot read yet"
-            )
-        );
+        assert_eq!(refused(b"<?php f($o->p, name: $o->q);").as_deref(), None);
     }
 
     /// A class reference of the scope and a class the program computes,
@@ -6755,6 +6833,45 @@ class C {
              0008 RETURN int(1)\n\
              LIVE RANGES:\n\
              \x20    1: 0003 - 0006 (tmp/var)\n"
+        );
+    }
+
+    /// `zend_compile_array`'s `...` and `&` arms and `zend_compile_args`'
+    /// unpack arm against the oracle's dump: a `...` first is an
+    /// `INIT_ARRAY` with no operand and no count, the string key still
+    /// marks it `ZEND_ARRAY_NOT_PACKED`, a `&` element is the write fetch
+    /// and `ZEND_ARRAY_ELEMENT_REF`, and an argument after an unpacked
+    /// one is sent by name for a callee nothing is known of, under a
+    /// `CHECK_UNDEF_ARGS`. A constant array spread into a constant array
+    /// folds.
+    #[test]
+    fn a_spread_a_reference_element_and_an_unpacked_argument_are_emitted_as_php_emits_them() {
+        assert_eq!(
+            oplines_of(b"<?php $z = [...$x, 'k' => &$x[0], &$w]; f(1, ...$x, c: 2);"),
+            "0000 T3 = INIT_ARRAY 0 NEXT\n\
+             0001 T3 = ADD_ARRAY_UNPACK CV1($x)\n\
+             0002 V4 = FETCH_DIM_W CV1($x) int(0)\n\
+             0003 T3 = ADD_ARRAY_ELEMENT (ref) V4 string(\"k\")\n\
+             0004 T3 = ADD_ARRAY_ELEMENT (ref) CV2($w) NEXT\n\
+             0005 ASSIGN CV0($z) T3\n\
+             0006 INIT_FCALL_BY_NAME 1 string(\"f\")\n\
+             0007 SEND_VAL_EX int(1) 1\n\
+             0008 SEND_UNPACK CV1($x)\n\
+             0009 SEND_VAL_EX int(2) string(\"c\")\n\
+             0010 CHECK_UNDEF_ARGS\n\
+             0011 DO_FCALL_BY_NAME\n\
+             0012 RETURN int(1)\n\
+             LIVE RANGES:\n\
+             \x20    3: 0001 - 0005 (tmp/var)\n"
+        );
+        assert_eq!(
+            oplines_of(b"<?php $q = [...[1, 2], 3, ...['k' => 4]];"),
+            "0000 ASSIGN CV0($q) array(...)\n\
+             0001 RETURN int(1)\n"
+        );
+        assert_eq!(
+            refused_message(b"<?php\nf(...$a, 1);\n").as_deref(),
+            Some("Cannot use positional argument after argument unpacking")
         );
     }
 

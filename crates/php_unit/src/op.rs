@@ -250,6 +250,22 @@ pub struct LiveRange {
     pub end: OplineIdx,
 }
 
+/// One entry of `op_array->static_variables` (`Z/Zend/zend_compile.h:534`):
+/// the variable's name and the value the table starts with, which a
+/// request copies before its first `BIND_STATIC` of the op array and
+/// keeps the copy of, since a published unit is never written
+/// (`ZEND_MAP_PTR(static_variables_ptr)`, design §5.14). A closure's
+/// `use` variable is `lexical` and starts `null`, as
+/// `zend_compile_static_var_common` puts it; a `static` starts at the
+/// value its initializer folded to, or `null` where the initializer is
+/// computed behind the `BIND_INIT_STATIC_OR_JMP` before it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoundVar {
+    pub name: Name,
+    pub value: Zval,
+    pub lexical: bool,
+}
+
 /// One op array with its tables (design §5.7). `safepoints` is the entry,
 /// the loop headers and the returns, the entry number zero; the site
 /// opcodes carry their number in `out`, php's `result`. One rule for
@@ -296,14 +312,14 @@ pub struct OpArray {
     /// no part of a unit points into another.
     pub dynamic_func_defs: Box<[u32]>,
     /// `op_array->static_variables` (`Z/Zend/zend_compile.h:534`): the
-    /// names of the variables the op array binds through
-    /// `BIND_STATIC`, in the order `zend_compile_static_var_common`
-    /// added them to the table, which is what a `BIND_LEXICAL`'s and a
-    /// `BIND_STATIC`'s `extended_value` names. A closure's are its
-    /// `use` variables, written or implied; php's table holds a value
-    /// per name and the engine holds those per closure, so what stands
-    /// in the unit is the shape alone.
-    pub bound_vars: Box<[Name]>,
+    /// variables the op array binds through `BIND_STATIC`, in the order
+    /// `zend_compile_static_var_common` added them to the table, which
+    /// is what a `BIND_LEXICAL`'s, a `BIND_STATIC`'s and a
+    /// `BIND_INIT_STATIC_OR_JMP`'s `extended_value` names: a closure's
+    /// `use` variables, written or implied, first, then every `static`
+    /// of the body. The values a request binds live in the request, per
+    /// closure object or per function, never here.
+    pub bound_vars: Box<[BoundVar]>,
     /// `ZEND_ACC_STATIC` on the op array (`Z/Zend/zend_compile.h:283`):
     /// a closure written `static function` or `static fn`, which
     /// `ZEND_DECLARE_LAMBDA_FUNCTION` reads to bind it no receiver. A

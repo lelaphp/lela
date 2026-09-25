@@ -116,6 +116,7 @@ pub const XML_PARSE_NSCLEAN: c_int = 1 << 13;
 pub const XML_PARSE_NOCDATA: c_int = 1 << 14;
 pub const XML_PARSE_COMPACT: c_int = 1 << 16;
 pub const XML_PARSE_HUGE: c_int = 1 << 19;
+pub const XML_PARSE_IGNORE_ENC: c_int = 1 << 21;
 pub const XML_PARSE_BIG_LINES: c_int = 1 << 22;
 
 /// `htmlParserOption`.
@@ -620,6 +621,7 @@ unsafe extern "C" {
     pub(crate) fn xmlCopyDtd(dtd: *mut xmlDtd) -> *mut xmlDtd;
     pub(crate) fn xmlNodeGetContent(node: *const xmlNode) -> *mut xmlChar;
     pub(crate) fn xmlNodeSetContent(node: *mut xmlNode, content: *const xmlChar);
+    pub(crate) fn xmlNodeSetName(node: *mut xmlNode, name: *const xmlChar);
     pub(crate) fn xmlNodeSetContentLen(node: *mut xmlNode, content: *const xmlChar, len: c_int);
     pub(crate) fn xmlNodeAddContent(node: *mut xmlNode, content: *const xmlChar);
     pub(crate) fn xmlNodeAddContentLen(node: *mut xmlNode, content: *const xmlChar, len: c_int);
@@ -713,6 +715,7 @@ unsafe extern "C" {
     pub(crate) fn xmlCtxtUseOptions(ctxt: *mut xmlParserCtxt, options: c_int) -> c_int;
     pub(crate) fn xmlParseDocument(ctxt: *mut xmlParserCtxt) -> c_int;
     pub(crate) fn xmlCanonicPath(path: *const xmlChar) -> *mut xmlChar;
+    pub(crate) fn xmlPathToURI(path: *const xmlChar) -> *mut xmlChar;
     pub(crate) fn xmlParseBalancedChunkMemory(
         doc: *mut xmlDoc,
         sax: *mut c_void,
@@ -771,7 +774,30 @@ unsafe extern "C" {
         options: c_int,
     ) -> *mut xmlSaveCtxt;
     pub(crate) fn xmlSaveDoc(ctxt: *mut xmlSaveCtxt, doc: *mut xmlDoc) -> c_long;
+    pub(crate) fn xmlSaveTree(ctxt: *mut xmlSaveCtxt, node: *mut xmlNode) -> c_long;
+    pub(crate) fn xmlSaveFlush(ctxt: *mut xmlSaveCtxt) -> c_int;
     pub(crate) fn xmlSaveClose(ctxt: *mut xmlSaveCtxt) -> c_int;
+    pub(crate) fn xmlOutputBufferWrite(
+        out: *mut xmlOutputBuffer,
+        len: c_int,
+        buf: *const c_char,
+    ) -> c_int;
+    pub(crate) fn xmlCreatePushParserCtxt(
+        sax: *mut c_void,
+        user_data: *mut c_void,
+        chunk: *const c_char,
+        size: c_int,
+        filename: *const c_char,
+    ) -> *mut xmlParserCtxt;
+    pub(crate) fn xmlParseChunk(
+        ctxt: *mut xmlParserCtxt,
+        chunk: *const c_char,
+        size: c_int,
+        terminate: c_int,
+    ) -> c_int;
+    pub(crate) fn xmlDictCreate() -> *mut c_void;
+    pub(crate) fn xmlDictFree(dict: *mut c_void);
+    pub(crate) fn xmlDictSetLimit(dict: *mut c_void, limit: usize) -> usize;
     pub(crate) fn xmlSaveFormatFileEnc(
         filename: *const c_char,
         doc: *mut xmlDoc,

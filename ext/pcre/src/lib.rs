@@ -38,7 +38,9 @@ pub use regex::Regex;
 
 use php_ext::abi::{Callable, Extension, ExtensionBuilder};
 use php_ext::coerce::coerce_param;
-use php_ext::decl::{ConstDecl, ConstExpr, FunctionDecl, IniDecl, Name, Parameter, Type};
+use php_ext::decl::{
+    ConstDecl, ConstExpr, FunctionDecl, IniDecl, Name, Parameter, ParameterDefault, Type,
+};
 use php_ext::raising::{Thrown, arg_count_error};
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpString, Value, ValueRef};
@@ -236,12 +238,12 @@ fn functions() -> Vec<(FunctionDecl, Entry)> {
     let string = |name: &[u8]| parameter(name, Some(Type::String));
     let either = |name: &[u8]| parameter(name, Some(Type::Union(vec![Type::Array, Type::String])));
     let int = |name: &[u8], default: i64| Parameter {
-        default: Some(ConstExpr::Long(default)),
+        default: ParameterDefault::Expr(ConstExpr::Long(default)),
         ..parameter(name, Some(Type::Int))
     };
     let by_ref = |name: &[u8]| Parameter {
         by_ref: true,
-        default: Some(ConstExpr::Null),
+        default: ParameterDefault::Expr(ConstExpr::Null),
         ..parameter(name, None)
     };
     let matcher = |name: &[u8], frameless: Vec<u32>| FunctionDecl {
@@ -333,7 +335,7 @@ fn functions() -> Vec<(FunctionDecl, Entry)> {
                 vec![
                     string(b"str"),
                     Parameter {
-                        default: Some(ConstExpr::Null),
+                        default: ParameterDefault::Expr(ConstExpr::Null),
                         ..parameter(b"delimiter", Some(Type::Nullable(Box::new(Type::String))))
                     },
                 ],
@@ -387,8 +389,9 @@ fn parameter(name: &[u8], ty: Option<Type>) -> Parameter {
         ty,
         by_ref: false,
         prefer_ref: false,
+        promoted: false,
         variadic: false,
-        default: None,
+        default: ParameterDefault::None,
         attributes: Vec::new(),
     }
 }

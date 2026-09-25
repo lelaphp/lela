@@ -3,17 +3,16 @@
 //! `Reflection` itself declares. Each reads the declaration the reflector's `$name`,
 //! and a member's `$class`, look up again.
 //!
-//! What stands beside `stub::unbuilt` still: the property's hooks
-//! (`hasHooks`, `getHooks`, `hasHook`, `getHook`), whose model
-//! `PropertyDecl` has no field for; `getMangledName`, which wants
-//! php's `\0Class\0name` spelling the declaration model does not carry;
-//! `getRawValue`, `setRawValue` and the four lazy entries;
-//! `setAccessible`, which the stub marks `#[\\Deprecated]` (#412); and
-//! `ReflectionConstant::getFileName`, which wants the file a `define`
-//! ran in.
+//! A property's hooks are a list `PropertyDecl` has no field for, since
+//! the compiler refuses one (#427), so `hasHooks`, `getHooks`, `hasHook`
+//! and `getHook` answer as php does for a property without hooks.
+//!
+//! What stands beside `stub::unbuilt` still: `isAbstract`, `isVirtual`
+//! and `isFinal`, which are hooks proper (#427), and the four lazy entries;
+//! and `setAccessible`, which the stub marks `#[\\Deprecated]` (#412).
 
 use php_ext::call::{constant, eval_const_expr};
-use php_ext::decl::{ClassConstDecl, ClassKind, PropertyDecl, Visibility};
+use php_ext::decl::{ClassConstDecl, ClassKind, Name, PropertyDecl, Type, Visibility};
 use php_ext::raising::{Thrown, deprecated, throw};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, PhpArray, Value};
@@ -103,6 +102,141 @@ fn this_declared(req: &mut Request) -> Result<Reflected, Thrown> {
     let class = class_named(req, &class)?;
     let found = property_named(req, class, &name);
     Ok((class, name, found))
+}
+
+/// `ReflectionProperty::hasHooks()`: `ref->prop && ref->prop->hooks`.
+/// `PropertyDecl` carries no list of hooks, since the compiler refuses one
+/// (#427), so every property here, declared or dynamic, is one without
+/// hooks and the answer is php's for it.
+///
+/// ```php
+/// class C { public $p; } $o = new C; $o->d = 1;
+/// var_dump((new ReflectionProperty('C', 'p'))->hasHooks(), (new ReflectionProperty($o, 'd'))->hasHooks());
+/// ```
+/// ```expect
+/// Deprecated: Creation of dynamic property C::$d is deprecated in %s on line 2
+/// bool(false)
+/// bool(false)
+/// ```
+pub(super) fn reflection_property_has_hooks(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    this_declared(req)?;
+    Ok(Value::bool(false))
+}
+
+/// `ReflectionProperty::getHooks()`: the `get` and `set` hooks keyed by
+/// kind, and the empty array for a property without hooks, which every
+/// property here is ([`reflection_property_has_hooks`]).
+///
+/// ```php
+/// class C { public $p; }
+/// var_dump((new ReflectionProperty('C', 'p'))->getHooks());
+/// ```
+/// ```expect
+/// array(0) {
+/// }
+/// ```
+pub(super) fn reflection_property_get_hooks(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    this_declared(req)?;
+    Ok(Value::array(PhpArray::new(req)?))
+}
+
+/// `Z_PARAM_OBJ_OF_CLASS(type, reflection_property_hook_type_ptr)`, the
+/// one argument `hasHook` and `getHook` take, held to its count and to
+/// `PropertyHookType`.
+fn hook_type_argument(req: &mut Request) -> Result<(), Thrown> {
+    exactly_arguments(req, 1)?;
+    let given = req.argument(1).unwrap_or_default();
+    let ty = Type::Named(Name(b"PropertyHookType".as_slice().into()));
+    php_ext::coerce::coerce_param(req, &given, &ty, 1)?;
+    Ok(())
+}
+
+/// `ReflectionProperty::hasHook(PropertyHookType $type)`: whether the
+/// property's hooks include one of that kind, `false` for a property without
+/// hooks, which every property here is
+/// ([`reflection_property_has_hooks`]).
+///
+/// ```php
+/// class C { public $p; } $r = new ReflectionProperty('C', 'p');
+/// var_dump($r->hasHook(PropertyHookType::Get), $r->hasHook(PropertyHookType::Set));
+/// try { $r->hasHook('get'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// bool(false)
+/// bool(false)
+/// ReflectionProperty::hasHook(): Argument #1 ($type) must be of type PropertyHookType, string given
+/// ```
+pub(super) fn reflection_property_has_hook(req: &mut Request) -> Result<Value, Thrown> {
+    hook_type_argument(req)?;
+    this_declared(req)?;
+    Ok(Value::bool(false))
+}
+
+/// `ReflectionProperty::getHook(PropertyHookType $type)`: a
+/// `ReflectionMethod` over the one of the property's hooks of that
+/// kind, `null` for a property without hooks, which every
+/// property here is ([`reflection_property_has_hooks`]).
+///
+/// ```php
+/// class C { public $p; }
+/// var_dump((new ReflectionProperty('C', 'p'))->getHook(PropertyHookType::Get));
+/// ```
+/// ```expect
+/// NULL
+/// ```
+pub(super) fn reflection_property_get_hook(req: &mut Request) -> Result<Value, Thrown> {
+    hook_type_argument(req)?;
+    this_declared(req)?;
+    Ok(Value::null())
+}
+
+/// `ReflectionProperty::getMangledName()`: `prop->name`, the key the
+/// property has in the object's table, as `zend_mangle_property_name`
+/// writes it: the name for a public property, `\0*\0name` for a
+/// protected one and `\0Class\0name`, the declaring class, for a
+/// private one; a dynamic property has no info and answers
+/// `ref->unmangled_name`.
+///
+/// ```php
+/// class P { public $a; protected $b; private $c; }
+/// $o = new P; $o->d = 1;
+/// foreach (['a', 'b', 'c'] as $n) { var_dump((new ReflectionProperty('P', $n))->getMangledName()); }
+/// var_dump((new ReflectionProperty($o, 'd'))->getMangledName(), array_keys((array) $o));
+/// ```
+/// ```expect
+/// Deprecated: Creation of dynamic property P::$d is deprecated in %s on line 3
+/// string(1) "a"
+/// string(4) "%0*%0b"
+/// string(4) "%0P%0c"
+/// string(1) "d"
+/// array(4) {
+///   [0]=>
+///   string(1) "a"
+///   [1]=>
+///   string(4) "%0*%0b"
+///   [2]=>
+///   string(4) "%0P%0c"
+///   [3]=>
+///   string(1) "d"
+/// }
+/// ```
+pub(super) fn reflection_property_get_mangled_name(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    let (_, name, found) = this_declared(req)?;
+    let mangled = match found {
+        Some((scope, decl)) => match decl.visibility {
+            Visibility::Public => name,
+            Visibility::Protected => [b"\0*\0".as_slice(), &name].concat(),
+            Visibility::Private => {
+                let class = class_name_of(req, scope);
+                [b"\0".as_slice(), &class, b"\0", &name].concat()
+            }
+        },
+        None => name,
+    };
+    string_value(req, &mangled)
 }
 
 /// `ReflectionProperty::getName()`: `ref->unmangled_name`.
@@ -222,19 +356,22 @@ fn set_visibility_is(req: &mut Request, wanted: Visibility) -> Result<Value, Thr
 /// the `PPP | PPP_SET | STATIC | READONLY | ABSTRACT | VIRTUAL |
 /// FINAL` mask. The `(set)` visibilities, `abstract`, `virtual` and
 /// `final` are bits `PropertyDecl` has no field for, so the answer is
-/// php's for a property that carries none of them.
+/// php's for a property that carries none of them. A dynamic property
+/// has no info, and `prop_get_flags` answers `ZEND_ACC_PUBLIC` for it.
 ///
 /// ```php
-/// var_dump((new ReflectionProperty('Exception', 'message'))->getModifiers());
+/// $o = new stdClass; $o->d = 1;
+/// var_dump((new ReflectionProperty('Exception', 'message'))->getModifiers(), (new ReflectionProperty($o, 'd'))->getModifiers());
 /// ```
 /// ```expect
 /// int(2)
+/// int(1)
 /// ```
 pub(super) fn reflection_property_get_modifiers(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 0)?;
     let (_, _, found) = this_declared(req)?;
     Ok(Value::int(
-        found.map_or(0, |(_, decl)| property_bits(&decl)),
+        found.map_or(1, |(_, decl)| property_bits(&decl)),
     ))
 }
 
@@ -343,20 +480,25 @@ pub(super) fn reflection_property_is_dynamic(req: &mut Request) -> Result<Value,
     Ok(Value::bool(found.is_none()))
 }
 
-/// `ReflectionProperty::isPromoted()`: `ZEND_ACC_PROMOTED`, a bit the
-/// declaration model has no field for (#413), so the answer is php's
-/// for every property that was not promoted.
+/// `ReflectionProperty::isPromoted()`: `ZEND_ACC_PROMOTED`, the bit on
+/// the property a promoted constructor parameter declares; a dynamic
+/// property has no info and answers `false`.
 ///
 /// ```php
-/// var_dump((new ReflectionProperty('Exception', 'message'))->isPromoted());
+/// class P { function __construct(public int $x, /** D */ public $z, $y) {} public $w; }
+/// var_dump((new ReflectionProperty('P', 'x'))->isPromoted(), (new ReflectionProperty('P', 'w'))->isPromoted(), (new ReflectionProperty('Exception', 'message'))->isPromoted());
+/// var_dump((new ReflectionProperty('P', 'z'))->getDocComment());
 /// ```
 /// ```expect
+/// bool(true)
 /// bool(false)
+/// bool(false)
+/// string(8) "/** D */"
 /// ```
 pub(super) fn reflection_property_is_promoted(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 0)?;
-    this_declared(req)?;
-    Ok(Value::bool(false))
+    let (_, _, found) = this_declared(req)?;
+    Ok(Value::bool(found.is_some_and(|(_, decl)| decl.is_promoted)))
 }
 
 /// `ReflectionProperty::getDeclaringClass()`:
@@ -449,10 +591,20 @@ pub(super) fn reflection_property_has_default_value(req: &mut Request) -> Result
     })))
 }
 
+/// `property_get_default`'s three answers: a written default, the
+/// implicit `null` of an untyped property, and nothing, which a typed
+/// property without one and a dynamic property both give.
+enum Default {
+    Written(php_ext::decl::ConstExpr, ClassId),
+    ImplicitNull,
+    Absent,
+}
+
 /// `ReflectionProperty::getDefaultValue()`: the default expression
 /// evaluated in the declaring class, php's implicit `null` for an
 /// untyped property with nothing written, and php's own
-/// `E_DEPRECATED` and `null` where there is no default at all.
+/// `E_DEPRECATED` and `null` where there is no default at all, a
+/// dynamic property among them, which has no info to hold one.
 ///
 /// ```php
 /// var_dump((new ReflectionProperty('Exception', 'message'))->getDefaultValue());
@@ -468,19 +620,30 @@ pub(super) fn reflection_property_has_default_value(req: &mut Request) -> Result
 /// Deprecated: ReflectionProperty::getDefaultValue() for a property without a default value is deprecated, use ReflectionProperty::hasDefaultValue() to check if the default value exists in %s on line 2
 /// NULL
 /// ```
+///
+/// ```php
+/// $o = new stdClass; $o->d = 1;
+/// var_dump((new ReflectionProperty($o, 'd'))->getDefaultValue());
+/// ```
+/// ```expect
+/// Deprecated: ReflectionProperty::getDefaultValue() for a property without a default value is deprecated, use ReflectionProperty::hasDefaultValue() to check if the default value exists in %s on line 3
+/// NULL
+/// ```
 pub(super) fn reflection_property_get_default_value(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 0)?;
     let (_, _, found) = this_declared(req)?;
-    let Some((scope, decl)) = found else {
-        return Ok(Value::null());
+    let default = match found {
+        Some((scope, decl)) => match (decl.default, decl.ty) {
+            (Some(expr), _) => Default::Written(expr, scope),
+            (None, None) => Default::ImplicitNull,
+            (None, Some(_)) => Default::Absent,
+        },
+        None => Default::Absent,
     };
-    match (&decl.default, &decl.ty) {
-        (Some(expr), _) => {
-            let expr = expr.clone();
-            eval_const_expr(req, &expr, Some(scope))
-        }
-        (None, None) => Ok(Value::null()),
-        (None, Some(_)) => {
+    match default {
+        Default::Written(expr, scope) => eval_const_expr(req, &expr, Some(scope)),
+        Default::ImplicitNull => Ok(Value::null()),
+        Default::Absent => {
             deprecated(
                 req,
                 "ReflectionProperty::getDefaultValue() for a property without a default value is deprecated, use ReflectionProperty::hasDefaultValue() to check if the default value exists",
@@ -588,7 +751,7 @@ pub(super) fn reflection_class_constant_to_string(req: &mut Request) -> Result<V
         .class_decl(scope)
         .is_some_and(|decl| decl.kind == ClassKind::Enum)
         .then_some(held.as_slice());
-    let text = class_const_string(req, &decl, enum_of, "");
+    let text = class_const_string(req, &decl, scope, enum_of, "")?;
     string_value(req, text.as_bytes())
 }
 
@@ -803,6 +966,28 @@ pub(super) fn reflection_constant_get_name(req: &mut Request) -> Result<Value, T
     exactly_arguments(req, 0)?;
     let name = this_global_constant(req)?;
     string_value(req, &name)
+}
+
+/// `ReflectionConstant::getFileName()`: `const_->filename`, the file
+/// executing when `define` or `const` wrote the constant, and `false`
+/// for one an extension or the engine registered.
+///
+/// ```php
+/// define('D', 1);
+/// var_dump(basename((new ReflectionConstant('D'))->getFileName()), (new ReflectionConstant('PHP_VERSION'))->getFileName(), (new ReflectionConstant('STDIN'))->getFileName());
+/// ```
+/// ```expect
+/// string(11) "witness.php"
+/// bool(false)
+/// bool(false)
+/// ```
+pub(super) fn reflection_constant_get_file_name(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    let name = this_global_constant(req)?;
+    match req.constant_file(&name).map(<[u8]>::to_vec) {
+        Some(file) => string_value(req, &file),
+        None => Ok(Value::bool(false)),
+    }
 }
 
 /// `ReflectionConstant::getShortName()`: the name after the last `\`.

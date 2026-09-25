@@ -8,7 +8,9 @@
 //! attributes that derive a declaration from the Rust signature replace
 //! this once their expansion lands.
 
-use php_ext::decl::{Attribute, AttributeArgument, ConstExpr, FunctionDecl, Name, Parameter, Type};
+use php_ext::decl::{
+    Attribute, AttributeArgument, ConstExpr, FunctionDecl, Name, Parameter, ParameterDefault, Type,
+};
 
 /// The declaration a stub line writes, with no frameless entries.
 ///
@@ -184,15 +186,22 @@ impl Reader<'_> {
         }
         let name = self.word();
         let default = if self.eat(b'=') {
-            Some(self.default())
+            match self.default() {
+                // `= UNKNOWN`: optional, with no default to show.
+                ConstExpr::Constant(named) if named.0.as_ref() == b"UNKNOWN" => {
+                    ParameterDefault::Unshown
+                }
+                expr => ParameterDefault::Expr(expr),
+            }
         } else {
-            None
+            ParameterDefault::None
         };
         Some(Parameter {
             name: Name(name.into()),
             ty,
             by_ref,
             prefer_ref: false,
+            promoted: false,
             variadic,
             default,
             attributes: Vec::new(),

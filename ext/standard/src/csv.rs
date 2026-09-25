@@ -63,8 +63,31 @@ const fn is_space(c: u8) -> bool {
 /// `php_stream_get_line(stream, NULL, 0, &new_len)`; `None` from it is
 /// the stream at its end, and for `str_getcsv`, which has no stream,
 /// the answer every time, so the field keeps what the line had.
+///
+/// `PHPAPI` in `file.h`: what `SplFileObject`'s CSV reading calls
+/// directly, the stream's next lines behind `more`.
+///
+/// ```php
+/// $t = new SplTempFileObject(); $t->fwrite("a,\"b\nc\",d\n\n"); $t->rewind();
+/// var_dump($t->fgetcsv(',', '"', ''), $t->fgetcsv(',', '"', ''));
+/// ```
+/// ```expect
+/// array(3) {
+///   [0]=>
+///   string(1) "a"
+///   [1]=>
+///   string(3) "b
+/// c"
+///   [2]=>
+///   string(1) "d"
+/// }
+/// array(1) {
+///   [0]=>
+///   NULL
+/// }
+/// ```
 #[allow(clippy::too_many_lines)]
-pub(super) fn fgetcsv(
+pub fn fgetcsv(
     first: &[u8],
     delimiter: u8,
     enclosure: u8,

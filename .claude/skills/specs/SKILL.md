@@ -92,6 +92,11 @@ A regression sends its branch back as a blocker (step 1), and the rest of the ba
 
 ## 7. Free the disk
 
-Retire a worktree with `cargo xtask worktree retire <branch>` once its branch has merged, or once its builder has finished and the branch waits to be merged; the branch stays, and a branch sent back gets a worktree again. Much of a `target/` is shared copy-on-write, so retiring frees less than `du` suggests: read `df` after each retire.
+Retire a worktree with `cargo xtask worktree retire <branch>` as soon as its branch has merged, or once its builder has finished and the branch waits to be merged; the branch stays, and a branch sent back gets a worktree again. A finished worktree left standing is gigabytes of debug and release build that nothing reads. #787's ancestry rule is on `main`, so a retired worktree's appended readings never stand in for the tip's, and a retire waits on no newer run. Much of a `target/` is shared copy-on-write, so retiring frees less than `du` suggests: read `df` after each retire.
 
-Until #787's ancestry rule is on `main`, retire only after a run at the tip has written newer readings. `worktree retire` appends the worktree's log into the checkout's store, and `xtask status` and the dashboard take the last reading written per scope, whatever commit it measured: retiring #742's and #751's worktrees, cut behind the tip, made the dashboard read 15.6% where the track stood at 44.6%.
+Lay no worktree while `df -h` shows less than 20 GB free. Below that, in this order until it does:
+
+1. Retire every worktree whose builder has finished.
+2. Remove `target/debug/incremental` in main's checkout and in every worktree no cargo or rustc is building in. `lsof -a -d cwd -c cargo -c rustc -Fn | sed -n 's/^n//p' | sort -u` names the directories they run in; an incremental cache is 5 GB or more, and a build that finds it gone compiles from scratch and is otherwise unharmed.
+
+A slot still empty after both is the loop at rest for `df`. Never give two worktrees one `CARGO_TARGET_DIR` to save space: the binaries, the store and `permit` each belong to one checkout (`xtask/src/worktree.rs`, #251).

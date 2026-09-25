@@ -25,7 +25,9 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_unit::decl::{ClassKind, ConstExpr, FunctionDecl, Name, Parameter, Type, Visibility};
+use php_unit::decl::{
+    ClassKind, ConstExpr, FunctionDecl, Name, Parameter, ParameterDefault, Type, Visibility,
+};
 
 use crate::api::abi::{Callable, Entry};
 use crate::api::coerce::{coerce_param, to_string};
@@ -138,7 +140,7 @@ const CORE: &[&str] = &[
 /// and parameters under a second name.
 fn class_natives() -> Vec<(FunctionDecl, Entry)> {
     let status = Parameter {
-        default: Some(ConstExpr::Long(0)),
+        default: ParameterDefault::Expr(ConstExpr::Long(0)),
         ..parameter(
             b"status",
             Some(Type::Union(vec![Type::String, Type::Int])),
@@ -152,7 +154,7 @@ fn class_natives() -> Vec<(FunctionDecl, Entry)> {
                 &[
                     parameter(b"object", Some(Type::Object), false),
                     Parameter {
-                        default: Some(ConstExpr::Array(Vec::new())),
+                        default: ParameterDefault::Expr(ConstExpr::Array(Vec::new())),
                         ..parameter(b"withProperties", Some(Type::Array), false)
                     },
                 ],
@@ -174,7 +176,7 @@ fn class_natives() -> Vec<(FunctionDecl, Entry)> {
                 &[
                     parameter(b"class", Some(Type::String), false),
                     Parameter {
-                        default: Some(ConstExpr::Bool(true)),
+                        default: ParameterDefault::Expr(ConstExpr::Bool(true)),
                         ..parameter(b"autoload", Some(Type::Bool), false)
                     },
                 ],
@@ -188,7 +190,7 @@ fn class_natives() -> Vec<(FunctionDecl, Entry)> {
                 &[
                     parameter(b"enum", Some(Type::String), false),
                     Parameter {
-                        default: Some(ConstExpr::Bool(true)),
+                        default: ParameterDefault::Expr(ConstExpr::Bool(true)),
                         ..parameter(b"autoload", Some(Type::Bool), false)
                     },
                 ],
@@ -199,7 +201,11 @@ fn class_natives() -> Vec<(FunctionDecl, Entry)> {
         (
             declared(
                 b"get_class",
-                &[parameter(b"object", Some(Type::Object), false)],
+                // `object $object = UNKNOWN`: optional, nothing to show.
+                &[Parameter {
+                    default: ParameterDefault::Unshown,
+                    ..parameter(b"object", Some(Type::Object), false)
+                }],
                 Some(Type::String),
             ),
             get_class as Entry,
@@ -220,7 +226,7 @@ fn constant_natives() -> Vec<(FunctionDecl, Entry)> {
                     parameter(b"constant_name", Some(Type::String), false),
                     parameter(b"value", Some(Type::Mixed), false),
                     Parameter {
-                        default: Some(ConstExpr::Bool(false)),
+                        default: ParameterDefault::Expr(ConstExpr::Bool(false)),
                         ..parameter(b"case_insensitive", Some(Type::Bool), false)
                     },
                 ],
@@ -624,7 +630,7 @@ fn ini_natives() -> Vec<(FunctionDecl, Entry)> {
             declared(
                 b"error_reporting",
                 &[Parameter {
-                    default: Some(ConstExpr::Null),
+                    default: ParameterDefault::Expr(ConstExpr::Null),
                     ..parameter(
                         b"error_level",
                         Some(Type::Nullable(Box::new(Type::Int))),
@@ -1655,10 +1661,18 @@ fn dump_object(
             return;
         }
     };
+    // `php_var_dump_object_prefix`, read after the table as php reads
+    // it: what a lazy object is, before `object(`.
+    let prefix = match object.heap().laziness() {
+        php_heap::Laziness::Eager => "",
+        php_heap::Laziness::Ghost => "lazy ghost ",
+        php_heap::Laziness::Proxy | php_heap::Laziness::Forwarding => "lazy proxy ",
+    };
+    let common = format!("{common}{prefix}");
     if let Some(own) = own {
-        dump_rows(req, out, common, object, own, level);
+        dump_rows(req, out, &common, object, own, level);
     } else {
-        dump_members(req, out, common, object, level);
+        dump_members(req, out, &common, object, level);
     }
     object.heap().unprotect();
 }
@@ -2503,8 +2517,9 @@ fn parameter(name: &[u8], ty: Option<Type>, variadic: bool) -> Parameter {
         ty,
         by_ref: false,
         prefer_ref: false,
+        promoted: false,
         variadic,
-        default: None,
+        default: ParameterDefault::None,
         attributes: Vec::new(),
     }
 }
@@ -2513,7 +2528,7 @@ fn parameter(name: &[u8], ty: Option<Type>, variadic: bool) -> Parameter {
 /// share.
 fn real_usage_parameter() -> Parameter {
     Parameter {
-        default: Some(ConstExpr::Bool(false)),
+        default: ParameterDefault::Expr(ConstExpr::Bool(false)),
         ..parameter(b"real_usage", Some(Type::Bool), false)
     }
 }

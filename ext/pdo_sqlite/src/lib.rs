@@ -34,7 +34,8 @@ use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder};
 use php_ext::coerce::{argument, callable_argument};
 use php_ext::decl::{
     Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind, ConstExpr,
-    DynamicProperties, EnumBacking, FunctionDecl, MethodDecl, Name, Parameter, Type, Visibility,
+    DynamicProperties, EnumBacking, FunctionDecl, MethodDecl, Name, Parameter, ParameterDefault,
+    Type, Visibility,
 };
 use php_ext::raising::{Thrown, arg_count_error, argument_error, deprecated, throw};
 use php_ext::request::Request;
@@ -172,8 +173,9 @@ fn parameter(name: &str, ty: Type, default: Option<ConstExpr>) -> Parameter {
         ty: Some(ty),
         by_ref: false,
         prefer_ref: false,
+        promoted: false,
         variadic: false,
-        default,
+        default: default.map_or(ParameterDefault::None, ParameterDefault::Expr),
         attributes: Vec::new(),
     }
 }

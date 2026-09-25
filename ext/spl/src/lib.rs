@@ -530,43 +530,31 @@ fn overridden(req: &mut Request, object: PhpObject, lowered: &[u8]) -> bool {
         .is_some_and(|decl| !decl.file.0.is_empty())
 }
 
-/// One value through `ext/standard`'s `serialize`, as
-/// `php_var_serialize` writes it.
+/// One value through `ext/standard`'s `php_var_serialize`, called
+/// directly as `spl_array.c`, `spl_dllist.c` and `spl_observer.c` call
+/// it, never `serialize()` through the function table.
 fn serialized(req: &mut Request, value: Value) -> Result<Vec<u8>, Thrown> {
-    let answered = standard(req, b"serialize", &[value])?;
-    let bytes = answered.as_str_bytes().unwrap_or_default().to_vec();
-    req.release(answered);
-    Ok(bytes)
+    let mut out = Vec::new();
+    php_ext_standard::Serializer::default().write(req, &mut out, &value)?;
+    Ok(out)
 }
 
-/// One value through `ext/standard`'s `unserialize`, `None` for what it
-/// could not read.
+/// One value through `ext/standard`'s `php_var_unserialize`, called
+/// directly as the serializable containers call it, `None` for what it
+/// could not read; the delayed `__unserialize()` and `__wakeup()` calls
+/// are made before it answers, `PHP_VAR_UNSERIALIZE_DESTROY`.
 fn unserialized(req: &mut Request, bytes: &[u8]) -> Result<Option<Value>, Thrown> {
-    let text = string_value(req, bytes)?;
-    let answered = standard(req, b"unserialize", &[text]);
-    req.release(text);
-    let answered = answered?;
-    if answered.as_bool() == Some(false) && bytes != b"b:0;" {
-        return Ok(None);
+    let mut reader = php_ext_standard::Unserializer::new(req, bytes);
+    let read = reader.value(req);
+    let finished = reader.finish(req);
+    let read = read?;
+    if let Err(thrown) = finished {
+        if let Some(value) = read {
+            req.release(value);
+        }
+        return Err(thrown);
     }
-    Ok(Some(answered))
-}
-
-/// A native of another extension served by name, php's `Error` for one
-/// the bundle has not.
-fn standard(req: &mut Request, name: &[u8], arguments: &[Value]) -> Result<Value, Thrown> {
-    let named = string_value(req, name)?;
-    let callable = php_ext::coerce::callable_checked(req, &named);
-    req.release(named);
-    let Ok(callable) = callable else {
-        let shown = String::from_utf8_lossy(name).into_owned();
-        return Err(throw(
-            req,
-            "Error",
-            &format!("Call to undefined function {shown}()"),
-        ));
-    };
-    php_ext::call::call(req, &callable, arguments)
+    Ok(read)
 }
 
 /// Where the serialized value starting at `at` ends, one past its last
