@@ -47,17 +47,58 @@ pub(crate) enum Served {
     ClosureCall,
 }
 
-/// One trampoline: the magic method that serves it, and the method
-/// declaration php's trampoline carries, public, variadic over
-/// `mixed ...$arguments` as `trampoline_arg_info` is, named as the call
-/// was written up to a NUL, returning by reference where the magic
-/// method does, and on the class where `__callStatic` serves it.
+/// One function php makes on a lookup: what serves it, and the method
+/// declaration it carries.
 pub(crate) struct CallTrampoline {
-    pub(crate) magic: Function,
+    pub(crate) via: Via,
     pub(crate) decl: MethodDecl,
 }
 
+/// What a made function is made of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Via {
+    /// `zend_get_call_trampoline_func`: the `__call` or `__callStatic`
+    /// that serves a name the class has no method for.
+    Magic(Function),
+    /// `zend_get_closure_invoke_method` (`Z/Zend/zend_closures.c:484`):
+    /// a closure's `__invoke`, `Closure::__invoke` with the closure's
+    /// own function's parameters, return type and by-reference return,
+    /// one per function a closure holds, served by the closure it is
+    /// called on.
+    Invoke(Function),
+}
+
 impl CallTrampoline {
+    /// `zend_get_closure_invoke_method` over the declaration of the
+    /// function a closure holds: that signature, public, an instance
+    /// method, named `__invoke`.
+    pub(crate) fn invoke(function: Function, decl: &FunctionDecl) -> Self {
+        CallTrampoline {
+            via: Via::Invoke(function),
+            decl: MethodDecl {
+                function: FunctionDecl {
+                    name: Name(b"__invoke".as_slice().into()),
+                    file: Name(Box::new([])),
+                    line: 0,
+                    end_line: 0,
+                    doc_comment: None,
+                    is_generator: false,
+                    ..decl.clone()
+                },
+                visibility: Visibility::Public,
+                is_instance: true,
+                is_abstract: false,
+                is_final: false,
+                tentative_return: false,
+            },
+        }
+    }
+
+    /// The trampoline `zend_get_call_trampoline_func` makes: public,
+    /// variadic over `mixed ...$arguments` as `trampoline_arg_info` is,
+    /// named as the call was written up to a NUL, returning by
+    /// reference where the magic method does, and on the class where
+    /// `__callStatic` serves it.
     pub(crate) fn new(magic: Function, name: &[u8], is_static: bool, by_ref: bool) -> Self {
         // `strlen(ZSTR_VAL(method_name))`: "keep compatibility for "\0"
         // characters".
@@ -73,7 +114,7 @@ impl CallTrampoline {
             attributes: Vec::new(),
         };
         CallTrampoline {
-            magic,
+            via: Via::Magic(magic),
             decl: MethodDecl {
                 function: FunctionDecl {
                     name: Name(name.into()),
@@ -100,7 +141,16 @@ impl CallTrampoline {
     /// Whether this is the trampoline of `magic` under `name`.
     pub(crate) fn is(&self, magic: Function, name: &[u8]) -> bool {
         let name = name.split(|byte| *byte == 0).next().unwrap_or_default();
-        self.magic == magic && *self.decl.function.name.0 == *name
+        self.via == Via::Magic(magic) && *self.decl.function.name.0 == *name
+    }
+
+    /// The magic method that serves a trampoline; none for an
+    /// `__invoke`.
+    pub(crate) fn magic(&self) -> Option<Function> {
+        match self.via {
+            Via::Magic(magic) => Some(magic),
+            Via::Invoke(_) => None,
+        }
     }
 }
 
@@ -136,10 +186,12 @@ pub(crate) fn decode(function: Function) -> Option<(usize, Served)> {
 /// What `zend_closure_from_frame` puts in a trampoline's place: the
 /// [`Served::ClosureCall`] of the same name and magic method; none for
 /// any other function.
-pub(crate) fn closure_call(function: Function) -> Option<Function> {
-    match decode(function)? {
-        (index, Served::Trampoline) => number(index, Served::ClosureCall),
-        (_, Served::ClosureCall) => Some(function),
+pub(crate) fn closure_call(req: &Request, function: Function) -> Option<Function> {
+    let (trampoline, served) = req.trampoline_of(function)?;
+    trampoline.magic()?;
+    match served {
+        Served::Trampoline => number(decode(function)?.0, Served::ClosureCall),
+        Served::ClosureCall => Some(function),
     }
 }
 
@@ -195,7 +247,9 @@ pub(crate) fn hand_to_magic(req: &mut Request, function: Function) -> Result<Fun
     let Some((magic, name)) = req
         .trampoline_of(function)
         .filter(|(_, served)| *served == Served::Trampoline)
-        .map(|(trampoline, _)| (trampoline.magic, trampoline.decl.function.name.clone()))
+        .and_then(|(trampoline, _)| {
+            Some((trampoline.magic()?, trampoline.decl.function.name.clone()))
+        })
     else {
         return Ok(function);
     };
@@ -269,10 +323,9 @@ pub(crate) fn closure_call_magic(req: &mut Request) -> Result<Value, Thrown> {
     let Some((function, this, called)) = req.serving_callee() else {
         return Ok(Value::null());
     };
-    let Some((magic, name)) = req
-        .trampoline_of(function)
-        .map(|(trampoline, _)| (trampoline.magic, trampoline.decl.function.name.clone()))
-    else {
+    let Some((magic, name)) = req.trampoline_of(function).and_then(|(trampoline, _)| {
+        Some((trampoline.magic()?, trampoline.decl.function.name.clone()))
+    }) else {
         return Ok(Value::null());
     };
     let count = u32::try_from(req.argument_count()).unwrap_or(u32::MAX);

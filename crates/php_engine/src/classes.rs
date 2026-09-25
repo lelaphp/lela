@@ -121,12 +121,27 @@ impl ObjectHandlers for ClosureHandlers {
     }
 
     /// `zend_closure_get_method` (`Z/Zend/zend_closures.c:528`):
-    /// `__invoke` is the trampoline `zend_get_closure_invoke_method`
-    /// makes on the lookup, a function `Closure`'s table has no row
-    /// for, and every other name falls to `zend_std_get_method`. So
-    /// `$f->__invoke()` reaches the same entry `$f()` reaches, and
-    /// nothing that reads the table, a rendering or a reflector, sees
-    /// a seventh method on the class.
+    /// `__invoke` is the function `zend_get_closure_invoke_method`
+    /// makes on the lookup ([`Request::invoke_trampoline`]), which
+    /// `Closure`'s table has no row for and which carries the closure's
+    /// own signature, and every other name falls to
+    /// `zend_std_get_method`. So `$f->__invoke()` reaches the same entry
+    /// `$f()` reaches, sending by reference where the closure takes a
+    /// reference, and nothing that reads the table, a rendering or a
+    /// reflector, sees a seventh method on the class.
+    ///
+    /// ```php
+    /// $inc = function (&$n) { $n++; };
+    /// $n = 1;
+    /// $inc->__INVOKE($n);
+    /// var_dump($n);
+    /// call_user_func([$inc, '__invoke'], $n);
+    /// ```
+    /// ```expect
+    /// int(2)
+    ///
+    /// Warning: Closure::__invoke(): Argument #1 ($n) must be passed by reference, value given in %s on line 6
+    /// ```
     ///
     /// ```php
     /// $f = function ($x) { return $x + 1; };
@@ -154,7 +169,7 @@ impl ObjectHandlers for ClosureHandlers {
     /// ```
     fn get_method(&self, req: &mut Request, object: PhpObject, lowered: &[u8]) -> Option<Function> {
         if lowered.eq_ignore_ascii_case(INVOKE) {
-            return req.trampoline_named(object.class(), INVOKE);
+            return req.invoke_trampoline(object);
         }
         req.method_named(object.class(), lowered)
     }
@@ -1062,7 +1077,7 @@ pub(crate) fn closure_from_frame(req: &mut Request, frame: CallFrame) -> Result<
     }
     // `ZEND_ACC_CALL_VIA_TRAMPOLINE`: `zend_closure_call_magic` in the
     // trampoline's place, of its name and its scope.
-    let function = crate::trampoline::closure_call(function).unwrap_or(function);
+    let function = crate::trampoline::closure_call(req, function).unwrap_or(function);
     let scope = req.method_class(function);
     let fake = ClosureInfo {
         function,
@@ -1081,7 +1096,7 @@ pub(crate) fn closure_from_frame(req: &mut Request, frame: CallFrame) -> Result<
 /// as `Z_PARAM_VARIADIC_WITH_NAMED` hands them, on the payload's
 /// receiver where the closure is bound and as a function where it is
 /// not (`zend_call_known_fcc`); what it returns is the call's.
-fn closure_invoke(req: &mut Request) -> Result<Value, Thrown> {
+pub(crate) fn closure_invoke(req: &mut Request) -> Result<Value, Thrown> {
     let Some(this) = req.this() else {
         return Err(throw(
             req,

@@ -1210,10 +1210,12 @@ struct Fcc {
 }
 
 /// `fcc->function_handler` once `zend_is_callable_check_func` found
-/// one: a function the tables have, or the trampoline of a class's
+/// one: a function the tables have; the trampoline of a class's
 /// `__call`, or of its `__callStatic` where `is_static`, under the name
-/// written, which the resolver answers without making and
-/// [`Request::callable_made`] makes (`zend_get_call_trampoline_func`).
+/// written (`zend_get_call_trampoline_func`); or a closure's own
+/// `__invoke` (`zend_get_closure_invoke_method`). The resolver answers
+/// the last two without making them, and [`Request::callable_made`]
+/// makes them.
 #[derive(Clone)]
 enum Callee {
     Function(Function),
@@ -1222,19 +1224,18 @@ enum Callee {
         name: Vec<u8>,
         is_static: bool,
     },
+    Invoke(PhpObject),
 }
 
 /// What `zend_is_callable_ex` resolved a value to: a callable, or one
-/// whose callee is a trampoline still to be made, with the scope and
-/// the receiver it is called on.
+/// whose callee is still to be made, with the scope and the receiver it
+/// is called on.
 enum Resolved {
     Made(Callable),
-    Trampoline {
+    Pending {
         held: Value,
         name: String,
-        class: ClassId,
-        method: Vec<u8>,
-        is_static: bool,
+        callee: Callee,
         scope: ClassId,
         this: Option<PhpObject>,
     },
@@ -2448,9 +2449,17 @@ impl Request {
         if let Some((_, method)) = self.enum_method_of(function) {
             return Some(method.entry());
         }
-        if let Some((_, served)) = self.trampoline_of(function) {
-            return (served == crate::trampoline::Served::ClosureCall)
-                .then_some(crate::trampoline::closure_call_magic as crate::api::abi::Entry);
+        if let Some((trampoline, served)) = self.trampoline_of(function) {
+            use crate::trampoline::{Served, Via};
+            return match (trampoline.via, served) {
+                (Via::Invoke(_), Served::Trampoline) => {
+                    Some(crate::classes::closure_invoke as crate::api::abi::Entry)
+                }
+                (Via::Magic(_), Served::ClosureCall) => {
+                    Some(crate::trampoline::closure_call_magic as crate::api::abi::Entry)
+                }
+                (Via::Magic(_), Served::Trampoline) | (Via::Invoke(_), Served::ClosureCall) => None,
+            };
         }
         let at = usize::try_from(function.0).ok()?;
         match at.checked_sub(self.shared.functions.len()) {
@@ -2500,7 +2509,10 @@ impl Request {
             return Some(class);
         }
         if let Some((trampoline, _)) = self.trampoline_of(function) {
-            return self.method_class(trampoline.magic);
+            return match trampoline.via {
+                crate::trampoline::Via::Magic(magic) => self.method_class(magic),
+                crate::trampoline::Via::Invoke(_) => self.class_named(b"Closure"),
+            };
         }
         self.user_function(function)?
             .member
@@ -2554,6 +2566,25 @@ impl Request {
                 .push(crate::trampoline::CallTrampoline::new(
                     magic, name, is_static, by_ref,
                 ));
+            self.trampolines.len().checked_sub(1)?
+        };
+        crate::trampoline::number(at, crate::trampoline::Served::Trampoline)
+    }
+
+    /// `zend_get_closure_invoke_method` (`Z/Zend/zend_closures.c:484`):
+    /// the `__invoke` of `closure`, which carries the signature of the
+    /// function it holds, the one the request already made for that
+    /// function where it made one; none for an object that is no
+    /// closure.
+    pub(crate) fn invoke_trampoline(&mut self, closure: PhpObject) -> Option<Function> {
+        let function = closure.closure(self)?.function;
+        let via = crate::trampoline::Via::Invoke(function);
+        let at = if let Some(at) = self.trampolines.iter().position(|made| made.via == via) {
+            at
+        } else {
+            let decl = self.function_decl(function)?.clone();
+            self.trampolines
+                .push(crate::trampoline::CallTrampoline::invoke(function, &decl));
             self.trampolines.len().checked_sub(1)?
         };
         crate::trampoline::number(at, crate::trampoline::Served::Trampoline)
@@ -9236,20 +9267,26 @@ impl Request {
     fn callable_made(&mut self, resolved: Resolved) -> Result<Callable, String> {
         match resolved {
             Resolved::Made(callable) => Ok(callable),
-            Resolved::Trampoline {
+            Resolved::Pending {
                 held,
                 name,
-                class,
-                method,
-                is_static,
+                callee,
                 scope,
                 this,
             } => {
-                let Some(function) = self.call_trampoline(class, &method, is_static) else {
+                let made = match &callee {
+                    Callee::Function(function) => Some(*function),
+                    Callee::Trampoline {
+                        class,
+                        name,
+                        is_static,
+                    } => self.call_trampoline(*class, name, *is_static),
+                    Callee::Invoke(closure) => self.invoke_trampoline(*closure),
+                };
+                let Some(function) = made else {
                     return Err(format!(
-                        "class {} does not have a method \"{}\"",
-                        self.class_name(class),
-                        String::from_utf8_lossy(&method)
+                        "class {} does not have a method \"{name}\"",
+                        self.class_name(scope),
                     ));
                 };
                 let target = Target::Method {
@@ -9460,18 +9497,21 @@ impl Request {
         let scope = fcc.called.or(fcc.calling);
         let function = match callee {
             Callee::Function(function) => function,
-            Callee::Trampoline {
-                class,
-                name: method,
-                is_static,
-            } => {
-                return Ok(Resolved::Trampoline {
+            Callee::Trampoline { class, .. } => {
+                return Ok(Resolved::Pending {
                     held,
                     name,
-                    class,
-                    method,
-                    is_static,
                     scope: scope.unwrap_or(class),
+                    callee,
+                    this: fcc.object,
+                });
+            }
+            Callee::Invoke(closure) => {
+                return Ok(Resolved::Pending {
+                    held,
+                    name,
+                    scope: scope.unwrap_or(closure.class()),
+                    callee,
                     this: fcc.object,
                 });
             }
@@ -9760,6 +9800,9 @@ impl Request {
             if strict && has_call {
                 return Some(trampoline(class, false));
             }
+            if lowered == b"__invoke" && object.closure(self).is_some() {
+                return Some(Callee::Invoke(object));
+            }
             if let Some(function) = self.trampoline_named(class, lowered) {
                 return Some(Callee::Function(function));
             }
@@ -9794,6 +9837,7 @@ impl Request {
                 .method_decl(*function)
                 .is_some_and(|decl| !decl.is_instance),
             Callee::Trampoline { is_static, .. } => *is_static,
+            Callee::Invoke(_) => false,
         };
         if let Callee::Function(function) = callee
             && let Some(calling) = fcc.calling
