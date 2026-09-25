@@ -359,9 +359,10 @@ fn a_program_the_compiler_refused_is_unread_and_names_the_construct() {
 /// it: `$a and $b` was the first and `b16f247` taught the compiler to
 /// read it, `1 | 2` the second and `ad386d9` did the same, `print` the
 /// third and `e83e41e` did the same, and each time the test found no
-/// refusal at all (#483). The sentence moves too: `emit`'s walk of the
-/// tree names the construct inside the parentheses and not the
-/// parentheses (#595), so what the lane reads here is the `eval`. The program is the one `php_compile`'s own test for this
+/// refusal at all (#483). The sentence moves too:
+/// `emit`'s walk of the tree names the construct inside the parentheses
+/// and not the parentheses (#595), so what the lane reads here is the
+/// `eval`. The program is the one `php_compile`'s own test for this
 /// refusal names,
 /// `an_unread_expression_inside_parentheses_names_the_expression`, so the
 /// two move together.

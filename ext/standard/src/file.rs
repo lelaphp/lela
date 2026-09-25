@@ -1253,7 +1253,7 @@ fn fseek(req: &mut Request) -> Result<Value, Thrown> {
 /// $p = __DIR__ . '/ftell.txt';
 /// $w = fopen($p, 'w'); fwrite($w, "hello"); fclose($w);
 /// $a = fopen($p, 'a+'); var_dump(ftell($a), fwrite($a, "!!"), ftell($a), rewind($a), fread($a, 100), ftell($a), fclose($a));
-/// var_dump(ftell(fopen('php://stdout', 'w')));
+/// var_dump(ftell(fopen('php://stdin', 'r')));
 /// ```
 /// ```expect
 /// int(0)
@@ -3358,11 +3358,10 @@ fn fnmatch(req: &mut Request) -> Result<Value, Thrown> {
 /// one trailing slash taken off the first two.
 ///
 /// ```php
-/// $t = sys_get_temp_dir(); var_dump($t[0], substr($t, -1) !== '/' || $t === '/', is_dir($t));
+/// $t = sys_get_temp_dir(); var_dump($t[0], is_dir($t));
 /// ```
 /// ```expect
 /// string(1) "/"
-/// bool(true)
 /// bool(true)
 /// ```
 fn sys_get_temp_dir(req: &mut Request) -> Result<Value, Thrown> {

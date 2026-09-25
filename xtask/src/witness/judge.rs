@@ -2,14 +2,20 @@
 //! the tally. The snippet runs under the oracle, whose status is what
 //! `--accept` captures onto a bare `exit`; then under the engine linked
 //! into this process, the one adapter this lane has and never the engine's
-//! own binary (harness §7, revision 48; #401); and the two streams and the
-//! status are held to what the fences pin through [`oracle::verdict`], so
-//! the registry decides what a difference means (harness §4.3).
+//! own binary (harness §7, revision 48; #401). Both runs are held to what
+//! the fences pin by one rule, [`held`]: the two streams and the status
+//! through [`met`] and [`oracle::verdict`], so the registry decides what a
+//! difference means (harness §4.3). The oracle's run is held as the
+//! engine's is, since what a fence pins is the oracle's bytes (design §8),
+//! and a fence typed by hand that the oracle does not print fails however
+//! the engine ran (#783).
 //!
 //! Both runs stand under the recipe, and under the `[regime.<name>]` the
 //! fence names where it names one, its ini after the recipe's in each
 //! (harness §8, ledger 55). The name is resolved against the pin before
 //! anything runs, so the two runs are handed one regime and never two.
+
+use std::fmt;
 
 use anyhow::Result;
 
@@ -106,34 +112,90 @@ pub(super) fn one(
             );
         }
     };
-    let met = match met(oracle.pin(), witness, exit, &ran) {
-        Ok(met) => met,
-        Err(trouble) => {
-            return judged(
-                witness,
-                Judgement::Bork,
-                format!("the pinned stream is not one this engine can match: {trouble:#}"),
-            );
-        }
-    };
+    held(
+        oracle.pin(),
+        registry,
+        witness,
+        exit,
+        [(Run::Oracle, &oracle_out), (Run::Engine, &ran)],
+    )
+}
+
+/// The two runs a witness stands on, which is what a miss names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Run {
+    Oracle,
+    Engine,
+}
+
+impl fmt::Display for Run {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Run::Oracle => "the oracle",
+            Run::Engine => "the linked engine",
+        })
+    }
+}
+
+/// The verdict on one witness from its two runs, each held to what the
+/// fences pin by [`met`] and [`oracle::verdict`], one rule for both. A run
+/// that misses is the registry's to accept; an accepted row names one side
+/// of a difference between the engine and the oracle, so a fence neither
+/// run meets fails whatever the registry says. The note names each run
+/// that missed, with its difference.
+pub(super) fn held(
+    pin: &Pin,
+    registry: &Registry,
+    witness: &Witness,
+    exit: Exit,
+    runs: [(Run, &Observation); 2],
+) -> Judged {
     let id = witness.id();
     let expected = shown(
         &witness.stdout,
         witness.stderr.as_deref().unwrap_or_default(),
         exit.asserted(),
     );
-    let actual = shown(
-        &String::from_utf8_lossy(&ran.stdout),
-        &String::from_utf8_lossy(&ran.stderr),
-        ran.exit,
-    );
-    match oracle::verdict(registry, &id, met, &expected, &actual) {
-        Compared::Same => judged(witness, Judgement::Pass, ""),
-        Compared::Diverged(row) => judged(witness, Judgement::Diverged, row.reason),
-        Compared::Differs(difference) => judged(
+    let mut missed = Vec::new();
+    for (run, observed) in runs {
+        let met = match met(pin, witness, exit, observed) {
+            Ok(met) => met,
+            Err(trouble) => {
+                return judged(
+                    witness,
+                    Judgement::Bork,
+                    format!("the pinned stream is not one this engine can match: {trouble:#}"),
+                );
+            }
+        };
+        let actual = shown(
+            &String::from_utf8_lossy(&observed.stdout),
+            &String::from_utf8_lossy(&observed.stderr),
+            observed.exit,
+        );
+        match oracle::verdict(registry, &id, met, &expected, &actual) {
+            Compared::Same => {}
+            verdict => missed.push((run, verdict, actual)),
+        }
+    }
+    match missed.as_slice() {
+        [] => judged(witness, Judgement::Pass, ""),
+        [(_, Compared::Diverged(row), _)] => {
+            judged(witness, Judgement::Diverged, row.reason.clone())
+        }
+        _ => judged(
             witness,
             Judgement::Fail,
-            format!("what the fences pin is not what ran:\n{difference}"),
+            missed
+                .iter()
+                .map(|(run, _, actual)| {
+                    format!(
+                        "what the fences pin is not what {run} ran:\n{}",
+                        oracle::diff(&expected, actual)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .concat(),
         ),
     }
 }

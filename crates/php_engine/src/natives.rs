@@ -971,28 +971,19 @@ fn enum_exists(req: &mut Request) -> Result<Value, Thrown> {
 /// ```php
 /// class M {} $m = new M;
 /// var_dump(get_class($m), get_class(new Exception));
-/// get_class(1);
+/// try { get_class(1); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
 /// ```
-/// ```expect exit=255
+/// ```expect
 /// string(1) "M"
 /// string(9) "Exception"
-///
-/// Fatal error: Uncaught TypeError: get_class(): Argument #1 ($object) must be of type object, int given in %s:4
-/// Stack trace:
-/// #0 %s(4): get_class(1)
-/// #1 {main}
-///   thrown in %s on line 4
+/// get_class(): Argument #1 ($object) must be of type object, int given
 /// ```
 ///
 /// ```php
-/// get_class();
+/// try { get_class(); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
 /// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught Error: get_class() without arguments must be called from within a class in %s:2
-/// Stack trace:
-/// #0 %s(2): get_class()
-/// #1 {main}
-///   thrown in %s on line 2
+/// ```expect
+/// Error: get_class() without arguments must be called from within a class
 /// ```
 fn get_class(req: &mut Request) -> Result<Value, Thrown> {
     let count = req.argument_count();

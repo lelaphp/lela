@@ -424,10 +424,13 @@ fn token_tokenize(req: &mut Request) -> Result<Value, Thrown> {
 /// four properties written by slot, no name in hand, `text` the
 /// object's from here. What a token costs is what php's costs: the
 /// object and its slots, and the text where [`Texts`] has no owner of
-/// it yet, which the peak reads.
+/// it yet, which the usage reads while the tokens are held. The peak
+/// reads nothing here: php's compiler has raised it past what a program
+/// this small tokenizes to, and this engine's compiler does not charge
+/// `mm` (design §5.13).
 ///
 /// ```php
-/// $b = memory_get_peak_usage(); PhpToken::tokenize('<?php echo 1; echo 2;'); var_dump(memory_get_peak_usage() - $b);
+/// $b = memory_get_usage(); $t = PhpToken::tokenize('<?php echo 1; echo 2;'); var_dump(memory_get_usage() - $b);
 /// ```
 /// ```expect
 /// int(1560)

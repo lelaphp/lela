@@ -190,11 +190,26 @@ fn a_witness_that_differs_is_a_difference_the_registry_can_accept() {
         reading.message
     );
 
-    let accepted = format!(
-        "[[divergence]]\nid = \"{}\"\nkind = \"witness\"\nreason = \"A row a person wrote.\"\nstatus = \"accepted\"\nsince = \"2026-09-09\"\n",
-        witness_id("echo 1;")
+    // An accepted row names one side of a difference between the engine
+    // and the oracle, so it never accepts a fence both runs miss (#783).
+    let accepted = |snippet: &str| {
+        format!(
+            "[[divergence]]\nid = \"{}\"\nkind = \"witness\"\nreason = \"A row a person wrote.\"\nstatus = \"accepted\"\nsince = \"2026-09-09\"\n",
+            witness_id(snippet)
+        )
+    };
+    let reading = run(&root, &registry(&accepted("echo 1;")), false);
+    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+
+    // A fence the oracle meets and the engine misses: the oracle runs the
+    // snippet by its scratch path, which the recipe normalises to its
+    // token, and the linked engine names it `witness.php` (#293).
+    let root = scratch(
+        "diverged",
+        "/// ```php\n/// echo __FILE__;\n/// ```\n/// ```expect\n/// %s/witness.php\n/// ```\npub fn native() {}\n",
     );
-    let reading = run(&root, &registry(&accepted), false);
+    assert_eq!(run(&root, &registry(""), false).status, Status::Fail);
+    let reading = run(&root, &registry(&accepted("echo __FILE__;")), false);
     assert_eq!(
         reading.status,
         Status::Pass,
@@ -382,6 +397,36 @@ fn a_fence_naming_a_regime_the_pin_does_not_carry_fails_the_crate_and_names_it()
             reading.message
         );
     }
+}
+
+/// The negative control of the oracle's run (harness §4.1, §8; #783): a
+/// workspace whose one fence pins what the linked engine prints and the
+/// oracle does not, which the instrument must fail on, since what a fence
+/// pins is the oracle's bytes.
+#[test]
+fn a_fence_the_oracle_does_not_meet_fails_the_crate() {
+    if oracle().is_none() {
+        return;
+    }
+    let root = fixture_at("witness", "oracle-unmet");
+    let manifest = Manifest::load(&root).unwrap();
+    let readings = witness::run(
+        &root,
+        &manifest,
+        &Registry::default(),
+        &Ask {
+            crates: vec!["ext/pcre".to_owned()],
+            accept: false,
+            staged: false,
+        },
+    )
+    .unwrap();
+    let [reading] = &readings[..] else {
+        panic!("{readings:#?}")
+    };
+    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+    assert_eq!(count(reading, "failed"), 1, "{reading:#?}");
+    assert_eq!(count(reading, "passed"), 0, "{reading:#?}");
 }
 
 /// A witness that cannot run for want of the pinned binary is a snippet

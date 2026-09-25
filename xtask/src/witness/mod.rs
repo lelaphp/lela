@@ -24,8 +24,10 @@
 //! defect that appears only through the binary's startup is not a
 //! witness's to catch. `phpt` has no second adapter and keeps its own rung
 //! in `done`, since nothing stands in for a corpus (#132). The oracle runs
-//! beside the linked engine, because the status a fence pins is the
-//! oracle's and `--accept` is where it is captured. A reading with nothing
+//! beside the linked engine and is held to the fences by the same rule,
+//! because what a fence pins is the oracle's bytes: a fence the oracle
+//! does not meet fails and says so, whatever the engine wrote (#783), and
+//! the oracle's status is what `--accept` captures. A reading with nothing
 //! judged, `run == 0`, is the run the pinned oracle was absent for, and is
 //! a skip that says so.
 //!

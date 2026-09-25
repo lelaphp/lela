@@ -11,12 +11,14 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use super::fence;
+use super::judge::{Run, held};
 use super::{Ask, Judgement, Tally, capture, judge};
 use crate::divergence::Registry;
 use crate::manifest::Manifest;
-use crate::oracle::Promise;
+use crate::oracle::{Observation, Promise};
 use crate::scratch::Tree;
 
 fn workspace() -> PathBuf {
@@ -200,22 +202,19 @@ fn the_snippet_runs_as_witness_php_with_the_code_on_line_two() {
 
 #[test]
 fn the_snippet_is_named_witness_php_as_the_recipe_names_it() {
-    if oracle().is_none() {
-        return;
-    }
     // The linked adapter serves the snippet under the recipe's
     // `script_name`, so a diagnostic's `in %s on line %d` names the file
     // the fresh-process adapter runs it as, and not `Standard input
     // code`, `serve_capture`'s name for a piped source (#293). The name
-    // is pinned literally, where every witness in the tree writes `%s`.
-    let file = Path::new("ext/fixture/src/lib.rs");
-    let text = format!(
-        "/// ```php\n/// ini_set('display_errors', 'stderr');\n/// echo $u, 'to the first';\n/// ```\n{}pub fn native() {{}}\n",
-        "/// ```expect\n/// to the first\n/// ```\n/// ```stderr\n/// Warning: Undefined variable $u in witness.php on line 3\n/// ```\n"
+    // is read off the linked run alone: the oracle names the file by its
+    // scratch path, so a fence both runs meet writes `%s` (#783).
+    let recipe = manifest().pin.recipe;
+    let snippet = "ini_set('display_errors', 'stderr');\necho $u, 'to the first';";
+    let served = crate::oracle::linked::serve(&recipe, None, snippet).unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&served.stderr),
+        "Warning: Undefined variable $u in witness.php on line 3"
     );
-    let tally = judged(file, &text, &registry(""), false);
-    let (judgement, note) = only(&tally);
-    assert_eq!(judgement, Judgement::Pass, "{note}");
 }
 
 #[test]
@@ -306,25 +305,121 @@ fn a_fence_naming_a_regime_the_pin_does_not_carry_is_a_block_the_lane_cannot_run
 }
 
 #[test]
-fn a_witness_that_differs_notes_the_difference_and_an_accepted_row_notes_its_reason() {
+fn a_witness_that_differs_notes_the_difference_under_each_run_that_missed() {
     if oracle().is_none() {
         return;
     }
-    let text = block("/// ```expect\n/// 2\n/// ```\n");
-    let tally = judge_text(&text, &registry(""));
+    let tally = judge_text(&block("/// ```expect\n/// 2\n/// ```\n"), &registry(""));
     let (judgement, note) = only(&tally);
     assert_eq!(judgement, Judgement::Fail, "{tally:#?}");
     assert!(note.contains("-2") && note.contains("+1"), "{note}");
-
-    let id = fence::extract(Path::new("ext/fixture/src/lib.rs"), &text).witnesses[0].id();
-    let accepted = format!(
-        "[[divergence]]\nid = \"{id}\"\nkind = \"witness\"\nreason = \"A row a person wrote.\"\nstatus = \"accepted\"\nsince = \"2026-09-09\"\n"
+    assert!(
+        note.contains("not what the oracle ran") && note.contains("not what the linked engine ran"),
+        "{note}"
     );
-    let tally = judge_text(&text, &registry(&accepted));
+}
+
+/// Two runs made up for [`held`], so the one rule both are held by is
+/// read without php: the oracle's streams and status, then the engine's.
+fn held_over(
+    fences: &str,
+    oracle: (&str, i32),
+    engine: (&str, i32),
+    rows: &str,
+) -> (Judgement, String) {
+    let text = block(fences);
+    let found = fence::extract(Path::new("ext/fixture/src/lib.rs"), &text);
+    let witness = &found.witnesses[0];
+    let observed = |(stdout, exit): (&str, i32)| Observation {
+        stdout: stdout.as_bytes().to_vec(),
+        stderr: Vec::new(),
+        exit: Some(exit),
+        wall: Duration::ZERO,
+    };
+    let (oracle, engine) = (observed(oracle), observed(engine));
+    let rows = rows.replace("{id}", &witness.id());
+    let judged = held(
+        &manifest().pin,
+        &registry(&rows),
+        witness,
+        witness.exit,
+        [(Run::Oracle, &oracle), (Run::Engine, &engine)],
+    );
+    (judged.judgement, judged.note)
+}
+
+const ROW: &str = "[[divergence]]\nid = \"{id}\"\nkind = \"witness\"\nreason = \"A row a person wrote.\"\nstatus = \"accepted\"\nsince = \"2026-09-09\"\n";
+
+/// The oracle's run is held to the fences as the engine's is (#783): a
+/// fence the oracle does not meet fails however the engine ran, and the
+/// note names the run that missed, by its stream or by its status.
+#[test]
+fn a_fence_the_oracle_does_not_meet_fails_and_names_the_oracle() {
+    let fence = "/// ```expect\n/// 1\n/// ```\n";
+    let (judgement, note) = held_over(fence, ("2", 0), ("1", 0), "");
+    assert_eq!(judgement, Judgement::Fail, "{note}");
+    assert!(
+        note.contains("not what the oracle ran") && note.contains("+2"),
+        "{note}"
+    );
+    assert!(!note.contains("linked engine"), "{note}");
+
+    let (judgement, note) = held_over(fence, ("1", 255), ("1", 0), "");
+    assert_eq!(judgement, Judgement::Fail, "{note}");
+    assert!(
+        note.contains("not what the oracle ran") && note.contains("+status 255"),
+        "{note}"
+    );
+
+    let (judgement, note) = held_over(fence, ("1", 0), ("2", 0), "");
+    assert_eq!(judgement, Judgement::Fail, "{note}");
+    assert!(
+        note.contains("not what the linked engine ran") && !note.contains("oracle"),
+        "{note}"
+    );
+
+    assert_eq!(held_over(fence, ("1", 0), ("1", 0), "").0, Judgement::Pass);
+}
+
+/// The negative control of the rule (harness §4.1, #783): the fixture's
+/// one fence pins `__FILE__` as the linked engine names the snippet, and
+/// the oracle, which runs it by its scratch path, misses it.
+#[test]
+fn the_fixture_whose_fence_the_oracle_does_not_meet_fails_naming_the_oracle() {
+    if oracle().is_none() {
+        return;
+    }
+    let root = workspace().join("xtask/fixtures/witness/oracle-unmet");
+    let fixture = Manifest::load(&root).unwrap();
+    let found = super::extract(&root, &fixture.crates[0], None).unwrap();
+    let tally = judge(
+        &fixture.pin.oracle(),
+        &registry(""),
+        &Ask::default(),
+        &found,
+    )
+    .unwrap();
     let (judgement, note) = only(&tally);
-    assert_eq!(judgement, Judgement::Diverged, "{tally:#?}");
-    assert_eq!(note, "A row a person wrote.");
-    assert!(!tally.failed(), "an accepted row is not a failure");
+    assert_eq!(judgement, Judgement::Fail, "{note}");
+    assert!(note.contains("not what the oracle ran"), "{note}");
+}
+
+/// An accepted row names one side of a difference, the oracle's or the
+/// engine's, so it accepts a fence one run misses and never one both miss.
+#[test]
+fn an_accepted_row_accepts_one_run_missing_the_fence_and_never_both() {
+    let fence = "/// ```expect\n/// 1\n/// ```\n";
+    for (oracle, engine) in [(("1", 0), ("2", 0)), (("2", 0), ("1", 0))] {
+        let (judgement, note) = held_over(fence, oracle, engine, ROW);
+        assert_eq!(judgement, Judgement::Diverged, "{note}");
+        assert_eq!(note, "A row a person wrote.");
+    }
+    let (judgement, note) = held_over(fence, ("2", 0), ("3", 0), ROW);
+    assert_eq!(judgement, Judgement::Fail, "{note}");
+    assert!(
+        note.contains("the oracle ran") && note.contains("the linked engine ran"),
+        "{note}"
+    );
 }
 
 #[test]

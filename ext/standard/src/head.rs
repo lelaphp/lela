@@ -290,7 +290,7 @@ fn http_response_code(req: &mut Request) -> Result<Value, Thrown> {
 /// ```
 ///
 /// ```php
-/// echo "x"; headers_sent($f, $l); var_dump($f, $l);
+/// echo "x"; headers_sent($f, $l); var_dump(basename($f), $l);
 /// ```
 /// ```expect
 /// xstring(11) "witness.php"

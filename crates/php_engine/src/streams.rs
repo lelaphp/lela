@@ -1579,15 +1579,15 @@ pub(crate) enum Standard {
 /// in-process `Capture` host, since a pipe is what php's CLI has there
 /// under a test runner. A host that handed none, and one that registers
 /// no handles, which is every host but the CLI's, answers as a closed fd
-/// does, `false` to both.
+/// does, `false` to both. What `ftruncate` answers on fd 1 is the kind of
+/// fd the runner hands, a file or a pipe, so the fence leaves it out.
 ///
 /// ```php
-/// var_dump(count(fstat(STDOUT)), fstat(STDERR)['size'], ftruncate(fopen('php://stdout', 'w'), 0), ftruncate(STDIN, 0));
+/// var_dump(count(fstat(STDOUT)), fstat(STDERR)['size'], ftruncate(STDIN, 0));
 /// ```
 /// ```expect
 /// int(26)
 /// int(0)
-/// bool(false)
 /// bool(false)
 /// ```
 enum HostFd {

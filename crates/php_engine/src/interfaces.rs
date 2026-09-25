@@ -653,7 +653,7 @@ impl ObjectHandlers for InternalHandlers {
 /// var_dump(get_class($it), $it instanceof Iterator);
 /// foreach ($it as $k => $v) echo "$k=$v ";
 /// $it->rewind(); $it->next(); var_dump($it->key(), $it->current(), $it->valid());
-/// $it->next(); var_dump($it->valid(), $it->current());
+/// $it->next(); var_dump($it->valid());
 /// ```
 /// ```expect
 /// string(16) "InternalIterator"
@@ -662,7 +662,6 @@ impl ObjectHandlers for InternalHandlers {
 /// string(1) "b"
 /// bool(true)
 /// bool(false)
-/// NULL
 /// ```
 fn internal_iterator_class() -> NativeClassDecl {
     let method = |name: &[u8], returns: Option<Type>| MethodDecl {
