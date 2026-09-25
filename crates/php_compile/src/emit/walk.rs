@@ -1004,6 +1004,7 @@ impl Emit<'_> {
             name: self.text(name).to_vec(),
             visibility: Visibility::Public,
             is_final: false,
+            ty: None,
             value: node.value,
             is_case: true,
             attributes,
@@ -1030,9 +1031,6 @@ impl Emit<'_> {
         if !node.attrs.is_empty() {
             return Err(unread(line, "an attribute before a class member"));
         }
-        if node.ty.is_some() {
-            return Err(unread(line, "a typed class constant"));
-        }
         for declarator in &node.const_declarators {
             let (name, value, line) = self.const_declarator(*declarator)?;
             let doc_comment = self.doc_comment(self.parsed.tree[*declarator].doc_comment);
@@ -1040,6 +1038,7 @@ impl Emit<'_> {
                 name,
                 visibility: modifiers.visibility.unwrap_or_default(),
                 is_final: modifiers.has(Flag::Final),
+                ty: node.ty,
                 value: Some(value),
                 is_case: false,
                 attributes: Vec::new(),
@@ -1403,6 +1402,9 @@ pub(super) struct Constant {
     pub(super) name: Vec<u8>,
     pub(super) visibility: Visibility,
     pub(super) is_final: bool,
+    /// The group's type as written, compiled by the emitter once per
+    /// declarator, as `zend_compile_class_const_decl` compiles it.
+    pub(super) ty: Option<TypeExpr>,
     /// The value as written; a `case` of a pure enum has none.
     pub(super) value: Option<php_syntax::tree::Expr>,
     /// `case A;` or `case A = 1;` in an enum's body, php's

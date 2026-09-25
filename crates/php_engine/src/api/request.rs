@@ -4653,7 +4653,13 @@ impl Request {
         if constant.is_case {
             return self.enum_case(class, name).map(|case| case.as_value());
         }
-        crate::api::call::eval_const_expr(self, &value, Some(class))
+        let evaluated = crate::api::call::eval_const_expr(self, &value, Some(class))?;
+        match &constant.ty {
+            Some(ty) if ty.mask() != php_unit::decl::Type::MAY_BE_ANY => {
+                crate::ops::verify_class_constant_type(self, evaluated, ty, class, name)
+            }
+            _ => Ok(evaluated),
+        }
     }
 
     /// `zend_enum_build_backed_enum_table` (`Z/Zend/zend_enum.c:197`),

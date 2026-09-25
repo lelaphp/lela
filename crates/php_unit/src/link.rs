@@ -136,6 +136,14 @@ pub enum Refusal {
         parent: String,
         constant: String,
     },
+    /// `Type of %s::%s must be compatible with %s::%s of type %s`, a
+    /// typed constant redeclared with no type or one that is no subtype.
+    ConstantType {
+        holder: String,
+        constant: String,
+        parent: String,
+        ty: String,
+    },
     /// `Access level to %s::%s must be %s (as in %s %s)%s`.
     ConstantVisibility {
         class: String,
@@ -504,6 +512,15 @@ impl fmt::Display for Refusal {
             Refusal::FinalMethod { parent, method } => {
                 write!(f, "Cannot override final method {parent}::{method}()")
             }
+            Refusal::ConstantType {
+                holder,
+                constant,
+                parent,
+                ty,
+            } => write!(
+                f,
+                "Type of {holder}::{constant} must be compatible with {parent}::{constant} of type {ty}"
+            ),
             Refusal::MethodReceiver {
                 parent,
                 method,
@@ -1958,8 +1975,73 @@ impl<'a> Linker<'a> {
     }
 
     /// `do_inherit_constant_check` for a constant the child's table
-    /// already holds, from `held_by`, none for the child's own.
+    /// already holds, from `held_by`, none for the child's own: the
+    /// refusals of [`Self::constant_flags_refused`], then a typed
+    /// parent's `class_constant_types_compatible`, php's covariant check
+    /// of the held constant's type in its class against the parent's in
+    /// the parent's, an unresolved outcome the obligation php delays.
+    ///
+    /// ```php
+    /// class P { const int X = 1; const ?int Y = 1; }
+    /// class C extends P { const int Y = 2; }
+    /// var_dump(C::X, C::Y);
+    /// class D extends P { const string X = 'a'; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Type of D::X must be compatible with P::X of type int in %s on line 5
+    /// ```
+    ///
+    /// ```php
+    /// interface I { const int X = 1; }
+    /// class C implements I { const X = 2; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Type of C::X must be compatible with I::X of type int in %s on line 3
+    /// ```
     fn constant_refused(
+        &self,
+        child: &'a ClassDecl,
+        held: &ClassConstDecl,
+        held_by: Option<&'a ClassDecl>,
+        parent: &ClassConstDecl,
+        parent_class: &'a ClassDecl,
+    ) -> Option<Linked> {
+        if let Some(refusal) =
+            Self::constant_flags_refused(child, held, held_by, parent, parent_class)
+        {
+            return Some(Linked::Refused(at_class(child, refusal)));
+        }
+        let parent_ty = parent.ty.as_ref()?;
+        if parent.visibility == Visibility::Private {
+            return None;
+        }
+        let holder = held_by.unwrap_or(child);
+        let fe_scope = Self::scope_of(child, held_by.map_or(Cls::Linking, Cls::Linked));
+        let proto_scope = Self::scope_of(child, Cls::Linked(parent_class));
+        let status = match &held.ty {
+            None => Status::Error,
+            Some(ty) => self.covariant(child, &fe_scope, ty, &proto_scope, parent_ty),
+        };
+        let refused = at_class(
+            child,
+            Refusal::ConstantType {
+                holder: text(&holder.name.0),
+                constant: text(&parent.name.0),
+                parent: text(&parent_class.name.0),
+                ty: type_to_string(&resolved(parent_ty, &proto_scope)),
+            },
+        );
+        match status {
+            Status::Error => Some(Linked::Refused(refused)),
+            Status::Unresolved => Some(Linked::Unresolved(refused)),
+            Status::Success | Status::Warning => None,
+        }
+    }
+
+    /// The modifier half of `do_inherit_constant_check`: a final constant
+    /// overridden, one inherited from two places, and a narrowed
+    /// visibility.
+    fn constant_flags_refused(
         child: &'a ClassDecl,
         held: &ClassConstDecl,
         held_by: Option<&'a ClassDecl>,
@@ -2255,10 +2337,10 @@ impl<'a> Linker<'a> {
         for &(declaring, constant) in &tables.constants {
             match constants.iter().find(|(_, c)| c.name == constant.name) {
                 Some((held_by, held)) => {
-                    if let Some(refusal) =
-                        Self::constant_refused(child, held, *held_by, constant, declaring)
+                    if let Some(linked) =
+                        self.constant_refused(child, held, *held_by, constant, declaring)
                     {
-                        return Some(Linked::Refused(at_class(child, refusal)));
+                        return Some(linked);
                     }
                 }
                 None if constant.visibility != Visibility::Private => {
@@ -2328,10 +2410,10 @@ impl<'a> Linker<'a> {
                 match constants.iter().find(|(_, c)| c.name == constant.name) {
                     Some((held_by, _)) if held_by.is_some_and(|by| same(by, interface)) => {}
                     Some((held_by, held)) => {
-                        if let Some(refusal) =
-                            Self::constant_refused(child, held, *held_by, constant, interface)
+                        if let Some(linked) =
+                            self.constant_refused(child, held, *held_by, constant, interface)
                         {
-                            return Some(Linked::Refused(at_class(child, refusal)));
+                            return Some(linked);
                         }
                     }
                     None => constants.push((Some(interface), constant)),

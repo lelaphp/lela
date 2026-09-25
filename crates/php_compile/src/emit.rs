@@ -824,6 +824,52 @@ fn class_flags(class: &Class, dynamic_properties: DynamicProperties) -> ClassFla
     }
 }
 
+/// `zend_is_valid_default_value` over a default or a constant's value
+/// folded to a value: whether the type takes it, an int where only a
+/// float is taken made the float in place, and the value's type where
+/// the type does not take it. A value still naming a constant is held
+/// where it is evaluated, so it is taken here.
+fn valid_default(ty: &Type, default: &mut ConstExpr) -> Result<(), ZvalType> {
+    let kind = match default {
+        ConstExpr::Null => ZvalType::Null,
+        ConstExpr::Bool(false) => ZvalType::False,
+        ConstExpr::Bool(true) => ZvalType::True,
+        ConstExpr::Long(_) => ZvalType::Long,
+        ConstExpr::Double(_) => ZvalType::Double,
+        ConstExpr::Str(_) => ZvalType::String,
+        ConstExpr::Array(elements)
+            if elements
+                .iter()
+                .all(|(key, value)| key.as_ref().is_none_or(is_literal) && is_literal(value)) =>
+        {
+            ZvalType::Array
+        }
+        _ => return Ok(()),
+    };
+    if ty.contains_code(kind as u8) {
+        return Ok(());
+    }
+    if let ConstExpr::Long(n) = default
+        && ty.contains_code(ZvalType::Double as u8)
+    {
+        *default = ConstExpr::Double(double_of(Zval::long(*n)));
+        return Ok(());
+    }
+    Err(kind)
+}
+
+/// `zend_zval_type_name` of a folded value's type.
+fn zval_type_name(kind: ZvalType) -> &'static str {
+    match kind {
+        ZvalType::Null => "null",
+        ZvalType::False | ZvalType::True => "bool",
+        ZvalType::Long => "int",
+        ZvalType::Double => "float",
+        ZvalType::String => "string",
+        _ => "array",
+    }
+}
+
 /// The `ConstExpr` a folded constant is, which a declaration carries in
 /// the written form `zend_eval_const_expr` left it; `None` for a value
 /// no constant expression of the unit format holds. An array is the
@@ -4289,11 +4335,29 @@ impl Emit<'_> {
     ) -> Result<(), CompileError> {
         for constant in &class.constants {
             self.line = constant.line;
+            let member = format!(
+                "{}::{}",
+                String::from_utf8_lossy(name),
+                String::from_utf8_lossy(&constant.name)
+            );
+            let ty = match constant.ty {
+                Some(written) => Some(self.class_constant_type(written, &member)?),
+                None => None,
+            };
             if constant.visibility == Visibility::Private && constant.is_final {
                 return Err(self.compile_error(format!(
-                    "Private constant {}::{} cannot be final as it is not visible to other classes",
-                    String::from_utf8_lossy(name),
-                    String::from_utf8_lossy(&constant.name)
+                    "Private constant {member} cannot be final as it is not visible to other classes"
+                )));
+            }
+            self.active_constants = self.foldable_constants(&decl.constants, usize::MAX);
+            let mut value = self.case_or_constant(decl, constant, name)?;
+            if let Some(ty) = &ty
+                && let Err(kind) = valid_default(ty, &mut value)
+            {
+                return Err(self.compile_error(format!(
+                    "Cannot use {} as value for class constant {member} of type {}",
+                    zval_type_name(kind),
+                    php_unit::type_to_string(ty)
                 )));
             }
             if constant.name.eq_ignore_ascii_case(b"class") {
@@ -4308,21 +4372,93 @@ impl Emit<'_> {
                     String::from_utf8_lossy(&constant.name)
                 )));
             }
-            self.active_constants = self.foldable_constants(&decl.constants, usize::MAX);
-            let value = self.case_or_constant(decl, constant, name)?;
             let attributes = self.case_attributes(constant)?;
             decl.constants.push(ClassConstDecl {
                 name: Name(constant.name.clone().into_boxed_slice()),
                 visibility: constant.visibility,
                 is_final: constant.is_final,
                 is_case: constant.is_case,
-                ty: None,
+                ty,
                 value,
                 attributes,
                 doc_comment: constant.doc_comment.clone().map(Vec::into_boxed_slice),
             });
         }
         Ok(())
+    }
+
+    /// The type of a typed class constant, `zend_compile_typename` in
+    /// `zend_compile_class_const_decl`: any type but one that takes
+    /// `callable`, `void` or `never` short of `mixed`, and its value held
+    /// to it by `zend_is_valid_default_value`.
+    ///
+    /// ```php
+    /// class A { const callable X = 1; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Class constant A::X cannot have type callable in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// class A { const void X = 1; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Class constant A::X cannot have type void in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// class A { const int X = "a"; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use string as value for class constant A::X of type int in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// class A { const bool X = 1; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use int as value for class constant A::X of type bool in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// class A { const self X = null; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use null as value for class constant A::X of type A in %s on line 2
+    /// ```
+    ///
+    /// What php takes, it takes, an int where a float is taken made the
+    /// float:
+    ///
+    /// ```php
+    /// enum E { case A; }
+    /// class A { const float F = 1; const ?int N = null; const mixed M = []; const E C = E::A; const int|string U = 'u'; }
+    /// var_dump(A::F, A::N, A::M, A::C, A::U);
+    /// ```
+    /// ```expect
+    /// float(1)
+    /// NULL
+    /// array(0) {
+    /// }
+    /// enum(E::A)
+    /// string(1) "u"
+    /// ```
+    fn class_constant_type(
+        &mut self,
+        written: tree::TypeExpr,
+        member: &str,
+    ) -> Result<Type, CompileError> {
+        let ty = self.typename(written, false)?.0;
+        let mask = ty.mask();
+        if mask != Type::MAY_BE_ANY
+            && mask & (types::MAY_BE_CALLABLE | types::MAY_BE_VOID | types::MAY_BE_NEVER) != 0
+        {
+            return Err(self.compile_error(format!(
+                "Class constant {member} cannot have type {}",
+                php_unit::type_to_string(&ty)
+            )));
+        }
+        Ok(ty)
     }
 
     /// `zend_compile_attributes` for a class declaration
@@ -4798,31 +4934,9 @@ impl Emit<'_> {
         default: &mut ConstExpr,
         member: &str,
     ) -> Result<(), CompileError> {
-        let kind = match default {
-            ConstExpr::Null => ZvalType::Null,
-            ConstExpr::Bool(false) => ZvalType::False,
-            ConstExpr::Bool(true) => ZvalType::True,
-            ConstExpr::Long(_) => ZvalType::Long,
-            ConstExpr::Double(_) => ZvalType::Double,
-            ConstExpr::Str(_) => ZvalType::String,
-            ConstExpr::Array(elements)
-                if elements.iter().all(|(key, value)| {
-                    key.as_ref().is_none_or(is_literal) && is_literal(value)
-                }) =>
-            {
-                ZvalType::Array
-            }
-            _ => return Ok(()),
+        let Err(kind) = valid_default(ty, default) else {
+            return Ok(());
         };
-        if ty.contains_code(kind as u8) {
-            return Ok(());
-        }
-        if let ConstExpr::Long(n) = default
-            && ty.contains_code(ZvalType::Double as u8)
-        {
-            *default = ConstExpr::Double(double_of(Zval::long(*n)));
-            return Ok(());
-        }
         let text = php_unit::type_to_string(ty);
         if kind == ZvalType::Null && !matches!(ty, Type::Intersection(_)) {
             let nullable = Type::Union(vec![ty.clone(), Type::Null]);
