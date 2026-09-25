@@ -7470,4 +7470,42 @@ class C {
             );
         }
     }
+
+    /// #444's shapes under the oracle's `[regime.dump]`: a property as
+    /// the target of `= &` is `ASSIGN_OBJ_REF` over its object with the
+    /// source in an `OP_DATA`, `(function)` and a `MAKE_REF` over a call.
+    #[test]
+    fn a_property_bound_by_reference_is_assign_obj_ref_as_php_emits_it() {
+        let cases: &[(&[u8], usize, u32, u32, &str)] = &[
+            (
+                b"<?php $o->p = &$x;",
+                3,
+                2,
+                1,
+                "0000 ASSIGN_OBJ_REF CV0($o) string(\"p\")\n\
+                 0001 OP_DATA CV1($x)\n\
+                 0002 RETURN int(1)\n",
+            ),
+            (
+                b"<?php $o->p = &f();",
+                6,
+                1,
+                3,
+                "0000 INIT_FCALL_BY_NAME 0 string(\"f\")\n\
+                 0001 V2 = DO_FCALL_BY_NAME\n\
+                 0002 V3 = MAKE_REF V2\n\
+                 0003 ASSIGN_OBJ_REF (function) CV0($o) string(\"p\")\n\
+                 0004 OP_DATA V3\n\
+                 0005 RETURN int(1)\n",
+            ),
+        ];
+        for (source, lines, vars, tmps, oplines) in cases {
+            assert_eq!(
+                dump_of(source),
+                main_dump(*lines, *vars, *tmps, oplines),
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+    }
 }

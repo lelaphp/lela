@@ -4668,6 +4668,41 @@ fn fetch_obj_place(
     op: &Opline,
     read: PropertyRead,
 ) -> Edge {
+    let at = match property_place(req, frame, code, op, read)? {
+        PropertyPlace::At(at, _, _) => at,
+        PropertyPlace::Threw(thrown) => return threw(req, frame, &thrown),
+    };
+    let out = exec::temporary_slot(code, op.out);
+    let previous = req.take_slot(frame, out);
+    req.release(previous);
+    let Some(var) = req.slot_ptr(frame, out) else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_FETCH_OBJ_W writes a VAR the frame does not have",
+        )));
+    };
+    var.write(php_heap::Zval::indirect(at));
+    exec::free_container_var(req, frame, code, op);
+    Ok(advance(req, frame))
+}
+
+/// What [`property_place`] found: the property's place, the object and
+/// the name, or the throwable, the container given up before it.
+enum PropertyPlace {
+    At(php_heap::ZvalRef, PhpObject, Vec<u8>),
+    Threw(Thrown),
+}
+
+/// `zend_fetch_property_address` (`Z/Zend/zend_execute.c`) under
+/// `BP_VAR_W` or `BP_VAR_RW`, the place `FETCH_OBJ_W`, `FETCH_OBJ_RW`
+/// and `ASSIGN_OBJ_REF` write through: the object `op1` holds and the
+/// slot or the dynamic entry of the name in `op2`.
+fn property_place(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    read: PropertyRead,
+) -> Result<PropertyPlace, Fatal> {
     let name = match op.op2_type {
         OperandKind::Const => exec::constant(code, ConstIdx(op.op2)),
         _ => {
@@ -4691,7 +4726,7 @@ fn fetch_obj_place(
                 String::from_utf8_lossy(&name)
             ),
         );
-        return threw(req, frame, &thrown);
+        return Ok(PropertyPlace::Threw(thrown));
     };
     // php places the name here with `zend_std_get_property_ptr_ptr`,
     // whose silence is `ce->__get != NULL`; the overloaded arm a class
@@ -4715,14 +4750,18 @@ fn fetch_obj_place(
                             "Typed property {class}::${shown} must not be accessed before initialization"
                         ),
                     );
-                    return threw_freeing_container(req, frame, code, op, &thrown);
+                    return Ok(PropertyPlace::Threw(freeing_container(
+                        req, frame, code, op, thrown,
+                    )));
                 }
                 crate::api::raising::warning(
                     req,
                     &format!("Undefined property: {class}::${shown}"),
                 );
                 if let Err(thrown) = req.write_declared_slot(object.heap(), slot, Value::null()) {
-                    return threw_freeing_container(req, frame, code, op, &thrown);
+                    return Ok(PropertyPlace::Threw(freeing_container(
+                        req, frame, code, op, thrown,
+                    )));
                 }
             }
             let Some(at) = object.heap().slot_ref(slot) else {
@@ -4752,36 +4791,34 @@ fn fetch_obj_place(
                         String::from_utf8_lossy(&name)
                     )));
                 }
-                Err(thrown) => return threw_freeing_container(req, frame, code, op, &thrown),
+                Err(thrown) => {
+                    return Ok(PropertyPlace::Threw(freeing_container(
+                        req, frame, code, op, thrown,
+                    )));
+                }
             }
         }
-        Err(thrown) => return threw_freeing_container(req, frame, code, op, &thrown),
+        Err(thrown) => {
+            return Ok(PropertyPlace::Threw(freeing_container(
+                req, frame, code, op, thrown,
+            )));
+        }
     };
-    let out = exec::temporary_slot(code, op.out);
-    let previous = req.take_slot(frame, out);
-    req.release(previous);
-    let Some(var) = req.slot_ptr(frame, out) else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: ZEND_FETCH_OBJ_W writes a VAR the frame does not have",
-        )));
-    };
-    var.write(php_heap::Zval::indirect(at));
-    exec::free_container_var(req, frame, code, op);
-    Ok(advance(req, frame))
+    Ok(PropertyPlace::At(at, object, name))
 }
 
-/// A throw out of [`fetch_obj_place`] once the object is found: the
+/// A throw out of [`property_place`] once the object is found: the
 /// container given up as `FREE_OP1_VAR_PTR` gives it up, with no place
-/// written to extract, and then the throw.
-fn threw_freeing_container(
+/// written to extract, before the throw.
+fn freeing_container(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
-    thrown: &Thrown,
-) -> Edge {
+    thrown: Thrown,
+) -> Thrown {
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
-    threw(req, frame, thrown)
+    thrown
 }
 
 /// `ZEND_FETCH_DIM_R` (`Z/Zend/zend_vm_def.h:1933`), `$a[k]` where a
@@ -7257,6 +7294,155 @@ pub(crate) fn assign_ref<T: Tier>(
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
     Ok(advance(req, frame))
+}
+
+/// `ZEND_ASSIGN_OBJ_REF` (`Z/Zend/zend_vm_def.h:2878`), `$o->p = &$x`,
+/// two oplines: this one names the object and the property, and the
+/// `OP_DATA` after it carries the source, so the handler steps over
+/// both. `zend_assign_to_property_reference`: the property's place
+/// found as `FETCH_OBJ_W` finds it ([`property_place`]), the source made
+/// a reference in place where it holds none, and the property bound to
+/// that cell; a typed property holds the cell to its type first and
+/// becomes one of the cell's type sources
+/// (`zend_assign_to_typed_property_reference`). A call that returned by
+/// value is php's notice and an assignment by value
+/// (`zend_wrong_assign_to_variable_reference`). The `VAR` takes the
+/// cell under `RETURN_VALUE_USED`.
+///
+/// ```php
+/// class C { public $p; public int $n = 0; }
+/// $o = new C;
+/// $x = 1;
+/// $o->p = &$x;
+/// $x = 2;
+/// $o->d = &$x;
+/// $o->d = 3;
+/// var_dump($o->p, $x);
+/// $s = "5";
+/// $o->n = &$s;
+/// var_dump($s);
+/// $t = "no";
+/// try { $o->n = &$t; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// function f() { return 7; }
+/// $o->p = &f();
+/// var_dump($o->p, $x);
+/// $z = $o->q = &$x;
+/// var_dump($z);
+/// ```
+/// ```expect
+/// Deprecated: Creation of dynamic property C::$d is deprecated in %s on line 7
+/// int(3)
+/// int(3)
+/// int(5)
+/// Cannot assign string to property C::$n of type int
+///
+/// Notice: Only variables should be assigned by reference in %s on line 16
+/// int(7)
+/// int(7)
+///
+/// Deprecated: Creation of dynamic property C::$q is deprecated in %s on line 18
+/// int(7)
+/// ```
+pub(crate) fn assign_obj_ref<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let at = req.vm().opline(frame);
+    let Some(data) =
+        exec::opline_at(code, at.saturating_add(1)).filter(|next| next.opcode == Opcode::OpData)
+    else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_ASSIGN_OBJ_REF with no OP_DATA after it",
+        )));
+    };
+    let (data_type, data_at) = (data.op1_type, data.op1);
+    let (place, object, name) = match property_place(req, frame, code, op, PropertyRead::Silent)? {
+        PropertyPlace::At(place, object, name) => (place, object, name),
+        PropertyPlace::Threw(thrown) => {
+            exec::free_operand(req, frame, code, data_type, data_at);
+            return threw(req, frame, &thrown);
+        }
+    };
+    let Some(source) = write_place(req, frame, code, data_type, data_at) else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_ASSIGN_OBJ_REF over a source php compiles no write over",
+        )));
+    };
+    let held = exec::value_of(source.read());
+    let strict = req.frame_strict_types(frame);
+    if op.extended_value & RETURNS_FUNCTION != 0 && held.as_php_ref().is_none() {
+        crate::api::raising::notice(req, "Only variables should be assigned by reference");
+        if req.is_pending() {
+            exec::free_operand(req, frame, code, data_type, data_at);
+            return Ok(Stepped::Threw(frame));
+        }
+        let value = held.undef_as_null();
+        req.addref(&value);
+        let (landed, garbage) = match assign_to_place(req, place, value, strict) {
+            Ok(pair) => pair,
+            Err(thrown) => return threw(req, frame, &thrown),
+        };
+        write_out(req, frame, code, op, &landed);
+        req.release(garbage);
+        exec::free_operand(req, frame, code, data_type, data_at);
+        req.vm_mut().jump(frame, at.saturating_add(2));
+        return Ok(Stepped::Same(frame));
+    }
+    let cell = if let Some(cell) = held.as_php_ref() {
+        *cell
+    } else {
+        let cell = match req.reference(held.undef_as_null()) {
+            Ok(cell) => cell,
+            Err(thrown) => return threw(req, frame, &thrown),
+        };
+        // The owner the source had of `held` is the cell's now.
+        source.write(cell.as_value().to_zval());
+        cell
+    };
+    let typed = req.declared_typed_property(object.class(), &name);
+    if let Some(typed) = typed.as_ref() {
+        match crate::ops::verify_prop_assignable_by_ref(
+            req,
+            cell.heap(),
+            &typed.ty,
+            typed.declaring,
+            &name,
+            strict,
+        ) {
+            Ok(None) => {}
+            Ok(Some(coerced)) => req.reference_set(cell.heap(), coerced),
+            Err(thrown) => {
+                exec::free_operand(req, frame, code, data_type, data_at);
+                return threw(req, frame, &thrown);
+            }
+        }
+    }
+    let garbage = exec::value_of(place.read());
+    // `ZEND_REF_DEL_TYPE_SOURCE`: the cell the slot held is no longer
+    // typed by this property.
+    if let (Some(typed), Some(old)) = (typed.as_ref(), garbage.as_php_ref()) {
+        req.ref_del_type_source(old.heap(), typed.declaring, &name);
+    }
+    let bound = cell.as_value();
+    req.addref(&bound);
+    place.write(bound.to_zval());
+    if let Some(typed) = typed {
+        req.ref_add_type_source(
+            cell.heap(),
+            crate::api::request::RefSource {
+                declaring: typed.declaring,
+                name: name.clone(),
+                ty: typed.ty,
+            },
+        );
+    }
+    write_out(req, frame, code, op, &bound);
+    req.release(garbage);
+    exec::free_operand(req, frame, code, data_type, data_at);
+    req.vm_mut().jump(frame, at.saturating_add(2));
+    Ok(Stepped::Same(frame))
 }
 
 /// `ZEND_ASSIGN_OBJ` (`Z/Zend/zend_vm_def.h:2466`), `$o->p = v`, two

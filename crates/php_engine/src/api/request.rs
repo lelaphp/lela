@@ -5898,6 +5898,18 @@ impl Request {
         } else {
             let key = php_heap::Key::Str(name.heap());
             let held = o.properties().is_some_and(|table| table.contains(key));
+            // `zend_assign_to_variable` over the entry found: one that
+            // holds a reference, what `$o->p = &$x` bound, is written
+            // through, so every name of the cell reads the value.
+            let bound = o
+                .properties()
+                .and_then(|table| table.get(key))
+                .and_then(|found| Value::of_zval(found).as_php_ref().copied());
+            if let Some(cell) = bound {
+                self.reference_set(cell.heap(), value);
+                self.release(Value::string(name));
+                return Ok(());
+            }
             if !held
                 && let Err(thrown) = self.dynamic_property_creation(object.class(), name.as_bytes())
             {

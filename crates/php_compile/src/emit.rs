@@ -8886,8 +8886,8 @@ impl Emit<'_> {
     /// where a plain write carries nothing, and `ASSIGN_REF` over the
     /// `VAR` it left: php turns the last delayed opline into an
     /// `ASSIGN_*_REF` only for a property and a class's own property,
-    /// and leaves a dimension's fetch standing. The property's half,
-    /// `$o->p = &$x` and its `ASSIGN_OBJ_REF`, is refused here still.
+    /// and leaves a dimension's fetch standing. A property is
+    /// `ASSIGN_OBJ_REF` over its object, the source in an `OP_DATA`.
     ///
     /// One dimension bound to another of the same array: the source is
     /// fetched for writing, so what both names hold is one cell and a
@@ -8940,8 +8940,10 @@ impl Emit<'_> {
                 return self.assign_static_prop_ref(class, &name, source);
             }
             Target::Cv(name) => Base::Settled((OperandKind::Cv, self.lookup_cv(&name))),
-            Target::Dim(_) | Target::ByName(_) => self.delayed_var(target, Fetch::Write)?,
-            Target::Prop { .. } | Target::List(_) => {
+            Target::Dim(_) | Target::ByName(_) | Target::Prop { .. } => {
+                self.delayed_var(target, Fetch::Write)?
+            }
+            Target::List(_) => {
                 return Err(walk::unread(
                     line,
                     "a by-reference assignment to what is no variable",
@@ -8953,6 +8955,37 @@ impl Emit<'_> {
         // `MAKE_REF` stands under.
         let plain = matches!(held, Base::Settled((OperandKind::Cv, _)));
         let (op2_type, op2, flags) = self.ref_source_of(source, plain)?;
+        // `opline->opcode == ZEND_FETCH_OBJ_W`: the held-back property
+        // fetch becomes `ASSIGN_OBJ_REF` over the object's own fetch,
+        // `ZEND_FETCH_REF` off and `ZEND_RETURNS_FUNCTION` on, the source
+        // in the `OP_DATA` after it, and the fetch's `VAR` what it leaves.
+        if let Base::Prop {
+            object,
+            name_at,
+            out,
+            slots,
+        } = held
+        {
+            let (op1_type, op1) = self.base_fetch(*object, Fetch::Write, Over::Obj);
+            self.push(Opline {
+                opcode: Opcode::AssignObjRef,
+                op1_type,
+                op1,
+                op2_type: OperandKind::Const,
+                op2: name_at,
+                out_type: OperandKind::Var,
+                out,
+                extended_value: slots | flags,
+                ..Opline::default()
+            });
+            self.push(Opline {
+                opcode: Opcode::OpData,
+                op1_type: op2_type,
+                op1: op2,
+                ..Opline::default()
+            });
+            return Ok(Where::Returned(out));
+        }
         let (op1_type, op1) = self.base_fetch(held, Fetch::Write, Over::Ref);
         let out = self.temporary();
         self.push(Opline {
