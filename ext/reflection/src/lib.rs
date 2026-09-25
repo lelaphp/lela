@@ -302,15 +302,25 @@ fn exactly_arguments(req: &mut Request, expected: usize) -> Result<(), Thrown> {
 }
 
 /// `ZEND_PARSE_PARAMETERS_START(0, n)`'s count check: `expects at most
-/// N arguments, M given`.
+/// N argument(s), M given`, `zend_wrong_parameters_count_error`'s
+/// singular for one.
+///
+/// ```php
+/// class C { public $p = 1; }
+/// try { (new ReflectionProperty('C', 'p'))->getValue(new C, 2); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// ReflectionProperty::getValue() expects at most 1 argument, 2 given
+/// ```
 fn at_most_arguments(req: &mut Request, most: usize) -> Result<(), Thrown> {
     let count = req.argument_count();
     if count <= most {
         return Ok(());
     }
+    let plural = if most == 1 { "" } else { "s" };
     Err(arg_count_error(
         req,
-        &format!("at most {most} arguments, {count} given"),
+        &format!("at most {most} argument{plural}, {count} given"),
     ))
 }
 
