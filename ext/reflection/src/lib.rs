@@ -40,9 +40,7 @@
 //! A reflector keeps php's `intern->ce` and `intern->obj` in the native
 //! payload [`Reflected`], which its class's `create_object` lays down
 //! (design §5.4), so the class it was asked about and the object it was
-//! made from are what the renderings read. An extension's `INI` block,
-//! `_extension_ini_string` and a closure's `Bound Variables` are not
-//! rendered yet (#375).
+//! made from are what the renderings read.
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -1591,10 +1589,8 @@ fn reflection_function_construct(req: &mut Request) -> Result<Value, Thrown> {
 /// ```
 fn reflection_function_to_string(req: &mut Request) -> Result<Value, Thrown> {
     let (this, name) = this_name(req, "ReflectionFunction")?;
-    if let Some(closure) = kept_closure(req, this)
-        && let Some(function) = closure.closure(req).map(|info| info.function)
-    {
-        let text = function_string(req, function, "");
+    if let Some(closure) = kept_closure(req, this) {
+        let text = closure_string(req, closure, "")?;
         return Ok(Value::string(PhpString::new(req, text.as_bytes())?));
     }
     let Some(function) = lookup_function(req, &name) else {
@@ -4682,8 +4678,49 @@ fn function_string(req: &mut Request, function: Function, indent: &str) -> Strin
     let mut out = String::new();
     function_header(&mut out, &decl, module.as_deref(), None, indent);
     let arg_info = ArgInfo::of(&decl);
-    function_body(req, &mut out, &decl, false, arg_info, indent);
+    function_body(req, &mut out, &decl, false, arg_info, &[], indent);
     out
+}
+
+/// `_function_string` over a closure, `ZEND_ACC_CLOSURE` set: the
+/// function it holds, with `_function_closure_string`'s `Bound
+/// Variables` block over the names its table holds a value for, in the
+/// table's order, before the parameters.
+///
+/// ```php
+/// $a = 1; $b = 2;
+/// echo new ReflectionFunction(function ($x) use ($a, &$b) {}), new ReflectionFunction(fn () => 1);
+/// ```
+/// ```expect
+/// Closure [ <user> function {closure:%s:3} ] {
+///   @@ %s 3 - 3
+///
+///   - Bound Variables [2] {
+///       Variable #0 [ $a ]
+///       Variable #1 [ $b ]
+///   }
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <required> $x ]
+///   }
+/// }
+/// Closure [ <user> function {closure:%s:3} ] {
+///   @@ %s 3 - 3
+/// }
+/// ```
+fn closure_string(req: &mut Request, closure: PhpObject, indent: &str) -> Result<String, Thrown> {
+    let Some(decl) = signature::closure_decl(req, closure) else {
+        return Ok(String::new());
+    };
+    let bound: Vec<Vec<u8>> = closure
+        .closure_bound(req)?
+        .into_iter()
+        .map(|(name, _)| name.as_bytes().to_vec())
+        .collect();
+    let mut out = String::new();
+    function_header(&mut out, &decl, None, None, indent);
+    function_body(req, &mut out, &decl, false, ArgInfo::User, &bound, indent);
+    Ok(out)
 }
 
 /// Which `arg_info` a function carries, which decides whether
@@ -4771,6 +4808,7 @@ fn method_string(req: &mut Request, method: &LinkedMethod, ce: ClassId, indent: 
         &method.decl.function,
         method.decl.tentative_return,
         arg_info,
+        &[],
         indent,
     );
     out
@@ -4874,6 +4912,7 @@ fn function_body(
     decl: &FunctionDecl,
     tentative: bool,
     arg_info: ArgInfo,
+    bound: &[Vec<u8>],
     indent: &str,
 ) {
     if !decl.file.0.is_empty() {
@@ -4886,6 +4925,21 @@ fn function_body(
         );
     }
     let param_indent = format!("{indent}  ");
+    if !bound.is_empty() {
+        let _ = write!(
+            out,
+            "\n{param_indent}- Bound Variables [{}] {{\n",
+            bound.len()
+        );
+        for (at, name) in bound.iter().enumerate() {
+            let _ = writeln!(
+                out,
+                "{param_indent}    Variable #{at} [ ${} ]",
+                String::from_utf8_lossy(name)
+            );
+        }
+        let _ = writeln!(out, "{param_indent}}}");
+    }
     function_parameter_string(req, out, decl, arg_info, &param_indent);
     if let Some(returns) = &decl.return_type {
         let word = if tentative {
