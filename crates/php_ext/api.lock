@@ -218,6 +218,7 @@ request::Request::active_function_name
 request::Request::addref
 request::Request::argument
 request::Request::argument_count
+request::Request::argv
 request::Request::assert_callback
 request::Request::autoload_functions
 request::Request::autoload_register

@@ -8,6 +8,7 @@
 
 use std::os::unix::ffi::OsStrExt;
 
+use php_ext::coerce::{numeric_string, to_string};
 use php_ext::decl::{ConstDecl, FunctionDecl};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw, warning};
 use php_ext::request::Request;
@@ -18,7 +19,7 @@ use crate::md5::path_argument;
 use crate::output::Entry;
 use crate::stub::stub;
 use crate::zpp::{
-    double_argument, given, nullable_string, optional_bool, optional_long, string_value,
+    assign_ref, double_argument, given, nullable_string, optional_bool, optional_long, string_value,
 };
 use crate::{argument_count_between, bool_argument, constant, long_argument, string_argument};
 
@@ -55,6 +56,12 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
             getenv,
         ),
         (stub("putenv(string $assignment): bool"), putenv),
+        (
+            stub(
+                "getopt(string $short_options, array $long_options = [], &$rest_index = null): array|false",
+            ),
+            getopt,
+        ),
         (
             stub("time_nanosleep(int $seconds, int $nanoseconds): array|bool"),
             time_nanosleep,
@@ -366,6 +373,112 @@ fn putenv(req: &mut Request) -> Result<Value, Thrown> {
         None => req.set_env(&text, None),
     };
     Ok(Value::bool(true))
+}
+
+/// One option `getopt` found: its name and each value it was given.
+type Found = (Vec<u8>, Vec<Option<Vec<u8>>>);
+
+/// `getopt(string $short_options, array $long_options = [], &$rest_index
+/// = null): array|false`, php's `PHP_FUNCTION(getopt)`: the options
+/// `php_getopt` finds in the host's `argv` ([`crate::getopt`]), each
+/// under its letter or name, an integer key where the name is one
+/// without a leading zero, as its value or `false`, and as a list where
+/// it was given more than once; `$rest_index` is where the first
+/// argument after them sits. A request with no `argv`, a web host's,
+/// answers `false`. Under the witness the `argv` is the file served alone.
+///
+/// ```php
+/// var_dump(getopt("ab:c::", ["long:", "flag"], $rest), $rest);
+/// try { getopt("a", null); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// array(0) {
+/// }
+/// int(1)
+/// getopt(): Argument #2 ($long_options) must be of type array, null given
+/// ```
+fn getopt(req: &mut Request) -> Result<Value, Thrown> {
+    use crate::getopt::{Getopt, Got, Named, long_option, short_options};
+    argument_count_between(req, 1, 3)?;
+    let spec = string_argument(req, 1)?;
+    let long = match given(req, 2) {
+        Some(_) => Some(crate::zpp::array_argument(req, 2)?),
+        None => None,
+    };
+    let rest_index = given(req, 3).is_some();
+    if rest_index {
+        assign_ref(req, 3, Value::int(1));
+    }
+    // `$_SERVER['argv']` as `php_build_argv` wrote it, each argument a C
+    // string; the one place `getopt` reads the host's `argv`.
+    let argv: Vec<Vec<u8>> = req.argv().iter().map(|a| c_string(a).to_vec()).collect();
+    if argv.is_empty() {
+        return Ok(Value::bool(false));
+    }
+    let mut opts = short_options(c_string(spec.as_bytes()));
+    if let Some(long) = long {
+        for (_, value) in long.snapshot() {
+            let text = to_string(req, &value)?;
+            opts.push(long_option(c_string(text.as_bytes())));
+            req.release(Value::string(text));
+        }
+    }
+    let mut walk = Getopt::new(&argv, &opts);
+    // Each option found, by name in the order first found, with each
+    // value it was given.
+    let mut found: Vec<Found> = Vec::new();
+    loop {
+        match walk.next() {
+            Got::End => break,
+            Got::Invalid => {}
+            Got::Found(at, value) => {
+                let name = match &opts[at].named {
+                    Named::Short(letter) => vec![*letter],
+                    Named::Long(name) => name.clone(),
+                };
+                match found.iter_mut().find(|(n, _)| *n == name) {
+                    Some((_, values)) => values.push(value),
+                    None => found.push((name, vec![value])),
+                }
+            }
+        }
+    }
+    let optind = walk.optind;
+    let mut result = PhpArray::new(req)?;
+    for (name, values) in found {
+        let key = if !(name.len() > 1 && name[0] == b'0')
+            && let Some(n) = numeric_string(&name).and_then(|v| v.as_int())
+        {
+            Key::Int(n)
+        } else {
+            Key::Str(PhpString::new(req, &name)?)
+        };
+        let mut items = Vec::new();
+        for value in values {
+            items.push(match value {
+                Some(bytes) => string_value(req, &bytes)?,
+                None => Value::bool(false),
+            });
+        }
+        let value = if items.len() == 1 {
+            items.remove(0)
+        } else {
+            let mut list = PhpArray::new(req)?;
+            for item in items {
+                list.append(req, item)?;
+            }
+            Value::array(list)
+        };
+        result.set(req, key, value)?;
+    }
+    if rest_index {
+        assign_ref(
+            req,
+            3,
+            Value::int(i64::try_from(optind).unwrap_or(i64::MAX)),
+        );
+    }
+    Ok(Value::array(result))
 }
 
 /// `time_nanosleep(int $seconds, int $nanoseconds): array|bool`: `true`

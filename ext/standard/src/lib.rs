@@ -62,6 +62,7 @@ mod file;
 mod filestat;
 mod filters;
 mod formatted_print;
+mod getopt;
 mod head;
 mod hrtime;
 mod html;

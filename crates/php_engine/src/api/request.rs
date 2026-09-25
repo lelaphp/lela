@@ -13007,6 +13007,16 @@ impl Request {
         &self.description.sapi_name
     }
 
+    /// The host's `argv`, `php_self` first: what `php_build_argv` puts in
+    /// `$_SERVER['argv']` (`Z/main/php_variables.c:657-713`), which a
+    /// write to `$_SERVER` from PHP code leaves as it was, and which
+    /// `getopt` reads; empty for a host that described none, php's web
+    /// hosts.
+    #[must_use]
+    pub fn argv(&self) -> &[Vec<u8>] {
+        &self.description.argv
+    }
+
     /// The file the request serves, `$_SERVER['SCRIPT_NAME']`.
     #[must_use]
     pub fn script_name(&self) -> Option<&[u8]> {
