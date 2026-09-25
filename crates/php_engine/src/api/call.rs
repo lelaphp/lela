@@ -1090,7 +1090,31 @@ pub fn class_constant(req: &mut Request, class: ClassId, name: &[u8]) -> Result<
     req.class_constant(class, name)
 }
 
-/// Evaluate a constant expression in `scope`, `zval_update_constant_ex`.
+/// Evaluate a constant expression in `scope`, `zval_update_constant_ex`:
+/// the value with one owner, the caller's, whatever the node, a
+/// constant by name among them, whose table keeps its own.
+///
+/// A constant's value in an array the expression builds is that array's
+/// to own, so the array outlives the evaluation that read it:
+///
+/// ```php
+/// define('V1', strtoupper('x'));
+/// #[A1([V1 => V1])]
+/// class C1 {}
+/// $attr = (new ReflectionClass('C1'))->getAttributes();
+/// $attr[0]->getArguments();
+/// var_dump($attr[0]->getArguments(), V1);
+/// ```
+/// ```expect
+/// array(1) {
+///   [0]=>
+///   array(1) {
+///     ["X"]=>
+///     string(1) "X"
+///   }
+/// }
+/// string(1) "X"
+/// ```
 ///
 /// A native's default of flags joined by `|` is one, evaluated where a
 /// named argument skipped the parameter:
@@ -1115,7 +1139,10 @@ pub fn eval_const_expr(
         ConstExpr::Double(f) => Ok(Value::float(*f)),
         ConstExpr::Str(s) => Ok(Value::string(PhpString::new(req, s)?)),
         ConstExpr::Constant(name) => match req.constant_named(&name.0) {
-            Some(value) => Ok(value),
+            Some(value) => {
+                req.addref(&value);
+                Ok(value)
+            }
             None => Err(throw(
                 req,
                 "Error",
@@ -1125,45 +1152,7 @@ pub fn eval_const_expr(
                 ),
             )),
         },
-        // `zend_ast_evaluate`'s `ZEND_AST_CLASS_CONST` arm: the class
-        // fetched by the name as written and its constant read through
-        // `zend_get_class_constant_ex`, whose `self` and `parent` are the
-        // scope the expression is evaluated in and its parent; `static`
-        // is refused while the file compiles.
-        ConstExpr::ClassConstant { class, name } => {
-            if class.0.eq_ignore_ascii_case(b"self") || class.0.eq_ignore_ascii_case(b"parent") {
-                let parent = class.0.eq_ignore_ascii_case(b"parent");
-                let word = if parent { "parent" } else { "self" };
-                let Some(scope) = scope else {
-                    return Err(throw(
-                        req,
-                        "Error",
-                        &format!("Cannot access \"{word}\" when no class scope is active"),
-                    ));
-                };
-                let id = if parent {
-                    let Some(up) = req.class_parent(scope) else {
-                        return Err(throw(
-                            req,
-                            "Error",
-                            "Cannot access \"parent\" when current class scope has no parent",
-                        ));
-                    };
-                    up
-                } else {
-                    scope
-                };
-                return req.class_constant(id, &name.0);
-            }
-            let Some(id) = req.class_named(&class.0) else {
-                return Err(throw(
-                    req,
-                    "Error",
-                    &format!("Class \"{}\" not found", String::from_utf8_lossy(&class.0)),
-                ));
-            };
-            req.class_constant(id, &name.0)
-        }
+        ConstExpr::ClassConstant { class, name } => class_constant_expr(req, class, name, scope),
         // `zend_ast_evaluate`'s `ZEND_AST_CONSTANT_CLASS` arm.
         ConstExpr::ScopeClass => {
             let name = scope
@@ -1196,27 +1185,84 @@ pub fn eval_const_expr(
         // `zend_ast_evaluate`'s `ZEND_AST_BINARY_OP`, `ZEND_AST_GREATER`
         // and unary arms: both sides evaluated, then the operator's own
         // kernel, which is what a native's default of flags joined by
-        // `|` is evaluated by where a named argument skipped it.
-        // The operands are what the walk answered for each side, which
-        // for a constant by name is the table's own value and no owner of
-        // it, so neither is given up here.
+        // `|` is evaluated by where a named argument skipped it,
+        // each operand given up once the kernel has answered.
         ConstExpr::Binary { op, lhs, rhs } => {
             let lhs = eval_const_expr(req, lhs, scope)?;
-            let rhs = eval_const_expr(req, rhs, scope)?;
-            binary(req, &op.0, &lhs, &rhs)
+            let rhs = match eval_const_expr(req, rhs, scope) {
+                Ok(rhs) => rhs,
+                Err(thrown) => {
+                    req.release(lhs);
+                    return Err(thrown);
+                }
+            };
+            let answered = binary(req, &op.0, &lhs, &rhs);
+            req.release(lhs);
+            req.release(rhs);
+            answered
         }
         ConstExpr::Unary { op, operand } => {
             let operand = eval_const_expr(req, operand, scope)?;
-            match &*op.0 {
+            let answered = match &*op.0 {
                 b"-" => crate::ops::mul(req, &operand, &Value::int(-1)),
                 b"+" => crate::ops::mul(req, &operand, &Value::int(1)),
                 b"~" => crate::ops::bitwise_not(req, &operand),
                 b"!" => Ok(Value::bool(!crate::ops::is_true(req, &operand))),
                 _ => Err(invalid_operations(req)),
-            }
+            };
+            req.release(operand);
+            answered
         }
         _ => Err(invalid_operations(req)),
     }
+}
+
+/// `zend_ast_evaluate`'s `ZEND_AST_CLASS_CONST` arm: the class fetched by
+/// the name as written and its constant read through
+/// `zend_get_class_constant_ex`, whose `self` and `parent` are the
+/// scope the expression is evaluated in and its parent, and whose
+/// access is checked against that scope; `static` is refused while the
+/// file compiles.
+fn class_constant_expr(
+    req: &mut Request,
+    class: &Name,
+    name: &Name,
+    scope: Option<ClassId>,
+) -> Result<Value, Thrown> {
+    if class.0.eq_ignore_ascii_case(b"self") || class.0.eq_ignore_ascii_case(b"parent") {
+        let parent = class.0.eq_ignore_ascii_case(b"parent");
+        let word = if parent { "parent" } else { "self" };
+        let Some(scope) = scope else {
+            return Err(throw(
+                req,
+                "Error",
+                &format!("Cannot access \"{word}\" when no class scope is active"),
+            ));
+        };
+        let id = if parent {
+            let Some(up) = req.class_parent(scope) else {
+                return Err(throw(
+                    req,
+                    "Error",
+                    "Cannot access \"parent\" when current class scope has no parent",
+                ));
+            };
+            up
+        } else {
+            scope
+        };
+        let shown = req.class_name(id);
+        return req.class_constant_from(id, &name.0, &shown, Some(scope));
+    }
+    let Some(id) = req.class_named(&class.0) else {
+        return Err(throw(
+            req,
+            "Error",
+            &format!("Class \"{}\" not found", String::from_utf8_lossy(&class.0)),
+        ));
+    };
+    let shown = req.class_name(id);
+    req.class_constant_from(id, &name.0, &shown, scope)
 }
 
 /// `zend_ast_add_unpacked_element` (`Z/Zend/zend_ast.c:531`), a `...`

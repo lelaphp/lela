@@ -4846,7 +4846,19 @@ impl Request {
     /// `zend_verify_property_access`: whether the executed scope may
     /// reach a property of `class` declared with `visibility`.
     fn may_access(&self, class: ClassId, visibility: Visibility) -> bool {
-        let scope = self.executed_scope();
+        self.may_access_from(class, visibility, self.executed_scope())
+    }
+
+    /// [`Request::may_access`] from a scope named rather than the one
+    /// executing: what `zend_verify_const_access` checks a class
+    /// constant against inside a constant expression, the scope it is
+    /// evaluated in.
+    fn may_access_from(
+        &self,
+        class: ClassId,
+        visibility: Visibility,
+        scope: Option<ClassId>,
+    ) -> bool {
         match visibility {
             Visibility::Public => true,
             _ if scope == Some(class) => true,
@@ -4921,6 +4933,34 @@ impl Request {
         name: &[u8],
         class_name: &str,
     ) -> Result<Value, Thrown> {
+        let scope = self.executed_scope();
+        self.class_constant_from(class, name, class_name, scope)
+    }
+
+    /// `zend_get_class_constant_ex` with the `scope` a constant
+    /// expression is evaluated in, `zend_ast_evaluate`'s: the access is
+    /// checked against it and not against the scope executing, so an
+    /// attribute's `parent::X` reads a protected constant its class may.
+    ///
+    /// ```php
+    /// #[Attribute(parent::x)]
+    /// class x extends y {}
+    /// class y { protected const x = Attribute::TARGET_CLASS; }
+    /// #[x]
+    /// class z {}
+    /// var_dump((new ReflectionClass(z::class))->getAttributes()[0]->newInstance());
+    /// ```
+    /// ```expect
+    /// object(x)#1 (0) {
+    /// }
+    /// ```
+    pub(crate) fn class_constant_from(
+        &mut self,
+        class: ClassId,
+        name: &[u8],
+        class_name: &str,
+        scope: Option<ClassId>,
+    ) -> Result<Value, Thrown> {
         let shown = String::from_utf8_lossy(name).into_owned();
         let Some((declaring, constant)) = self.class_constant_of(class, name, 0) else {
             return Err(crate::api::raising::throw(
@@ -4930,10 +4970,10 @@ impl Request {
             ));
         };
         let visibility = constant.visibility;
-        let value = constant.value;
+        let value = constant.value.clone();
         let asked = class;
         let class = declaring;
-        if !self.may_access(class, visibility) {
+        if !self.may_access_from(class, visibility, scope) {
             let word = match visibility {
                 Visibility::Public => "public",
                 Visibility::Protected => "protected",
