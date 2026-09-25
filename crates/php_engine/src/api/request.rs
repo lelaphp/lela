@@ -9903,7 +9903,20 @@ impl Request {
     /// as written or the object's class, a fake closure made of a method
     /// as `Scope::name` and any other closure by its function's name, an
     /// object of another class as `Class::__invoke`, and `Array` for a
-    /// pair of any other shape.
+    /// pair of any other shape. An object's class is named whole, so an
+    /// anonymous class's name resolves back to the class:
+    ///
+    /// ```php
+    /// new class {
+    ///     function __construct() {
+    ///         if (is_callable([$this, 'f'], false, $name)) { call_user_func($name); }
+    ///     }
+    ///     function f() { echo "nice\n"; }
+    /// };
+    /// ```
+    /// ```expect
+    /// nice
+    /// ```
     pub(crate) fn callable_name(&self, value: &Value) -> String {
         let held = value.deref();
         if let Some(name) = held.as_str_bytes() {
@@ -9921,7 +9934,7 @@ impl Request {
                     return format!("{}::{method}", String::from_utf8_lossy(class));
                 }
                 if let Some(object) = first.as_object() {
-                    return format!("{}::{method}", self.class_name(object.class()));
+                    return format!("{}::{method}", self.whole_class_name(object.class()));
                 }
             }
             return String::from("Array");
@@ -9930,13 +9943,20 @@ impl Request {
             if let Some(closure) = object.closure(self) {
                 let name = self.declared_name(closure.function);
                 return match closure.scope.filter(|_| closure.fake) {
-                    Some(scope) => format!("{}::{name}", self.class_name(scope)),
+                    Some(scope) => format!("{}::{name}", self.whole_class_name(scope)),
                     None => name,
                 };
             }
-            return format!("{}::__invoke", self.class_name(object.class()));
+            return format!("{}::__invoke", self.whole_class_name(object.class()));
         }
         String::new()
+    }
+    /// `ZSTR_VAL(ce->name)` at its whole length, as
+    /// `zend_create_member_string` joins it: an anonymous class's name
+    /// with its NUL and its site, which names the class again when the
+    /// string is resolved.
+    fn whole_class_name(&self, class: ClassId) -> String {
+        String::from_utf8_lossy(&self.class_name_bytes(class)).into_owned()
     }
 
     pub(crate) fn class_named(&self, name: &[u8]) -> Option<ClassId> {
