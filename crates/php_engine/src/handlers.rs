@@ -481,6 +481,100 @@ pub(crate) fn declare_const<T: Tier>(
     }
 }
 
+/// `ZEND_DECLARE_ATTRIBUTED_CONST` (`Z/Zend/zend_vm_def.h:8301`), the
+/// opline `zend_compile_const_decl` leaves for a `const` written with
+/// attributes: [`declare_const`]'s registration, then
+/// `zend_constant_add_attributes` over the attributes of the
+/// declaration the `OP_DATA` after it names, which raises
+/// `CONST_DEPRECATED` from a `#[\Deprecated]` among them; both oplines
+/// stepped over (`ZEND_VM_NEXT_OPCODE_EX(1, 2)`). A name that stands
+/// already warns as `DECLARE_CONST` does and keeps what it had, its
+/// attributes too.
+///
+/// ```php
+/// #[\MyAttribute]
+/// const MY_CONST = "Has attributes (1)";
+/// #[\MyOtherAttribute]
+/// const MY_CONST = "Has attributes (2)";
+/// echo MY_CONST, "\n";
+/// echo (new ReflectionConstant('MY_CONST'))->getAttributes()[0]->getName(), "\n";
+/// ```
+/// ```expect
+/// Warning: Constant MY_CONST already defined, this will be an error in PHP 9 in %s on line 5
+/// Has attributes (1)
+/// MyAttribute
+/// ```
+///
+/// ```php
+/// #[Deprecated]
+/// const OLD = 1;
+/// var_dump((new ReflectionConstant('OLD'))->isDeprecated());
+/// echo OLD, "\n";
+/// ```
+/// ```expect
+/// bool(true)
+///
+/// Deprecated: Constant OLD is deprecated in %s on line 5
+/// 1
+/// ```
+pub(crate) fn declare_attributed_const<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let at = req.vm().opline(frame);
+    let data = exec::opline_at(code, at.saturating_add(1))
+        .filter(|next| next.opcode == Opcode::OpData && next.op1_type == OperandKind::Const);
+    let (Some(written), Some(data)) = (
+        exec::constant(code, ConstIdx(op.op1))
+            .as_str_bytes()
+            .map(<[u8]>::to_vec),
+        data,
+    ) else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: a DECLARE_ATTRIBUTED_CONST with no name or no OP_DATA after it",
+        )));
+    };
+    let Some(serving) = req.vm().serving(frame) else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: a DECLARE_ATTRIBUTED_CONST on a frame serving no op array",
+        )));
+    };
+    let Some(decl) = code
+        .literals
+        .get(data.op1 as usize)
+        .and_then(|literal| literal.as_ptr())
+        .and_then(|index| serving.unit.constants.get(index as usize))
+    else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: a DECLARE_ATTRIBUTED_CONST whose OP_DATA names no declaration",
+        )));
+    };
+    let attributes = decl.attributes.clone();
+    let value = exec::constant(code, ConstIdx(op.op2));
+    let mut key = written;
+    if let Some(slash) = key.iter().rposition(|b| *b == b'\\') {
+        key[..slash].make_ascii_lowercase();
+    }
+    req.addref(&value);
+    if !req.define_attributed_constant(&key, value, attributes) {
+        req.release(value);
+        crate::api::raising::warning(
+            req,
+            &format!(
+                "Constant {} already defined, this will be an error in PHP 9",
+                String::from_utf8_lossy(&key)
+            ),
+        );
+    }
+    req.vm_mut().jump(frame, at.saturating_add(2));
+    if req.is_pending() {
+        return Ok(Stepped::Threw(frame));
+    }
+    Ok(Stepped::Same(frame))
+}
+
 /// `ZEND_DECLARE_LAMBDA_FUNCTION` (`Z/Zend/zend_vm_def.h:8343`):
 /// `zend_create_closure` over the op array the frame's
 /// `dynamic_func_defs` holds at `op2`, into the temporary `result`

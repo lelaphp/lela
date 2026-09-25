@@ -94,6 +94,28 @@ enum ConstantOwner {
     User(Option<Box<[u8]>>),
 }
 
+/// One row a request added to `EG(zend_constants)`: its owner, its name
+/// as `zend_register_constant` keys it, its value, and
+/// `zend_constant::attributes`, what a `DECLARE_ATTRIBUTED_CONST` hung
+/// on it.
+struct ConstantRow {
+    owner: ConstantOwner,
+    name: Vec<u8>,
+    value: Value,
+    attributes: Vec<Attribute>,
+}
+
+impl ConstantRow {
+    fn new(owner: ConstantOwner, name: Vec<u8>, value: Value) -> ConstantRow {
+        ConstantRow {
+            owner,
+            name,
+            value,
+            attributes: Vec::new(),
+        }
+    }
+}
+
 impl ConstantOwner {
     /// The extension's name, none for the program's.
     fn module(&self) -> Option<&'static str> {
@@ -893,7 +915,7 @@ pub struct Request {
     /// ([`crate::engine::FileHandles`]), `None` for what `define()` and
     /// `const` wrote, php's `PHP_USER_CONSTANT`, with the file it was
     /// defined in.
-    constants: Vec<(ConstantOwner, Vec<u8>, Value)>,
+    constants: Vec<ConstantRow>,
     /// `zend_enum_get_case`'s slot (`Z/Zend/zend_enum.c:410`): one
     /// instance per case of each enum, made on the first read of the
     /// case and handed back by identity from then on, so that
@@ -10692,8 +10714,8 @@ impl Request {
         }
         self.constants
             .iter()
-            .find(|(_, n, _)| n.as_slice() == name)
-            .map(|(_, _, v)| *v)
+            .find(|row| row.name == name)
+            .map(|row| row.value)
             .or_else(|| self.shared.constant(name))
     }
 
@@ -11919,7 +11941,7 @@ impl Request {
         rows.extend(
             self.constants
                 .iter()
-                .map(|(owner, name, value)| (owner.module(), name.clone(), *value)),
+                .map(|row| (row.owner.module(), row.name.clone(), row.value)),
         );
         rows
     }
@@ -11945,8 +11967,8 @@ impl Request {
         let constants: Vec<(Vec<u8>, Value)> = self
             .constants
             .iter()
-            .filter(|(owner, _, _)| matches!(owner, ConstantOwner::User(_)))
-            .map(|(_, name, value)| (name.clone(), *value))
+            .filter(|row| matches!(row.owner, ConstantOwner::User(_)))
+            .map(|row| (row.name.clone(), row.value))
             .collect();
         for (name, value) in constants {
             let key = Key::Str(PhpString::new(self, &name)?);
@@ -11960,8 +11982,21 @@ impl Request {
     /// file executing when it was written, `zend_register_constant`'s
     /// `filename`.
     pub fn define_constant(&mut self, name: &[u8], value: Value) -> Result<bool, Thrown> {
+        Ok(self.define_attributed_constant(name, value, Vec::new()))
+    }
+
+    /// `ZEND_DECLARE_ATTRIBUTED_CONST`'s `zend_register_constant` and
+    /// `zend_constant_add_attributes`: [`Request::define_constant`] with
+    /// the attributes the declaration carries hung on the row. `false`,
+    /// and nothing hung, where the name stands already.
+    pub(crate) fn define_attributed_constant(
+        &mut self,
+        name: &[u8],
+        value: Value,
+        attributes: Vec<Attribute>,
+    ) -> bool {
         if self.constant_named(name).is_some() {
-            return Ok(false);
+            return false;
         }
         // `zend_get_executed_filename_ex`: the innermost frame's file,
         // none where nothing is executing.
@@ -11969,9 +12004,13 @@ impl Request {
             .innermost_frame()
             .and_then(|state| exec::body_of(&state.unit, state.body))
             .map(|code| code.filename.0.clone());
-        let owner = ConstantOwner::User(file);
-        self.constants.push((owner, name.to_vec(), value));
-        Ok(true)
+        self.constants.push(ConstantRow {
+            owner: ConstantOwner::User(file),
+            name: name.to_vec(),
+            value,
+            attributes,
+        });
+        true
     }
 
     /// `zend_constant.filename`: the file a constant the program
@@ -11991,8 +12030,8 @@ impl Request {
     pub fn constant_file(&self, name: &[u8]) -> Option<&[u8]> {
         self.constants
             .iter()
-            .find(|(_, n, _)| n.as_slice() == name)
-            .and_then(|(owner, _, _)| match owner {
+            .find(|row| row.name == name)
+            .and_then(|row| match &row.owner {
                 ConstantOwner::User(file) => file.as_deref(),
                 ConstantOwner::Module(_) => None,
             })
@@ -12005,8 +12044,11 @@ impl Request {
     /// `Core`'s group and before what the program defines. The value's
     /// one owner is the table's.
     pub(crate) fn register_host_constant(&mut self, name: &'static [u8], value: Value) {
-        self.constants
-            .push((ConstantOwner::Module("Core"), name.to_vec(), value));
+        self.constants.push(ConstantRow::new(
+            ConstantOwner::Module("Core"),
+            name.to_vec(),
+            value,
+        ));
     }
 
     /// The fd the host handed under one of its standard streams
@@ -12024,18 +12066,32 @@ impl Request {
     }
 
     /// `zend_constant::attributes`: the attributes the declaration of
-    /// the global constant `name` carries, and the empty list for a
-    /// name no table has and for one a running program defined, which
-    /// carries none until the compiler reads the `#[...]` a program
-    /// writes on a `const` (#465). The key is the one
-    /// `zend_register_constant` writes, the namespace lowered.
-    ///
-    /// `#[\Deprecated]` among them is php's `CONST_DEPRECATED`, so
-    /// this is what `ReflectionConstant::isDeprecated()` reads and what
-    /// the deprecation a read raises is worded from
+    /// the global constant `name` carries, what an extension declared or
+    /// a program's `DECLARE_ATTRIBUTED_CONST` hung on it, and the empty
+    /// list for a name no table has. The key is the one
+    /// `zend_register_constant` writes, the namespace lowered. What
+    /// `ReflectionConstant::getAttributes()` reads, and what the
+    /// deprecation a read raises is worded from
     /// ([`crate::api::raising::deprecated_constant`]).
+    ///
+    /// ```php
+    /// #[MyAttribute(1)]
+    /// const C = 1;
+    /// define('D', 2);
+    /// var_dump(count((new ReflectionConstant('C'))->getAttributes()),
+    ///     count((new ReflectionConstant('D'))->getAttributes()),
+    ///     count((new ReflectionConstant('E_STRICT'))->getAttributes()));
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// int(0)
+    /// int(1)
+    /// ```
     #[must_use]
     pub fn constant_attributes(&self, name: &[u8]) -> &[Attribute] {
+        if let Some(row) = self.constants.iter().find(|row| row.name == name) {
+            return &row.attributes;
+        }
         self.shared
             .declared()
             .constants

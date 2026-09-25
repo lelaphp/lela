@@ -17,7 +17,7 @@ pub(super) const TARGET_METHOD: u32 = 1 << 2;
 pub(super) const TARGET_PROPERTY: u32 = 1 << 3;
 pub(super) const TARGET_CLASS_CONST: u32 = 1 << 4;
 pub(super) const TARGET_PARAMETER: u32 = 1 << 5;
-const TARGET_CONST: u32 = 1 << 6;
+pub(super) const TARGET_CONST: u32 = 1 << 6;
 const TARGET_ALL: u32 = (1 << 7) - 1;
 
 /// `target_names`, in the order of the bits.

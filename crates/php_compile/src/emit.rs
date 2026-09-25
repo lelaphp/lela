@@ -441,6 +441,10 @@ pub(crate) struct Emit<'a> {
     /// key its `DECLARE_CLASS` carries, [`Unit::runtime_keys`], in the
     /// order the keys were made.
     runtime_keys: Vec<(Name, u32)>,
+    /// Each constant a `const` statement declared with attributes,
+    /// [`Unit::constants`], which the `OP_DATA` after its
+    /// `DECLARE_ATTRIBUTED_CONST` names by index.
+    attributed_constants: Vec<ConstDecl>,
     /// [`Options::keys_before`]: the keys made before this source.
     keys_before: u32,
     /// The functions the file declares with their bodies,
@@ -1102,6 +1106,7 @@ pub(crate) fn unit(
         classes: Vec::new(),
         bound: Vec::new(),
         runtime_keys: Vec::new(),
+        attributed_constants: Vec::new(),
         keys_before: options.keys_before,
         functions_declared: Vec::new(),
         dynamic: Vec::new(),
@@ -1153,7 +1158,7 @@ pub(crate) fn unit(
         diagnostics: emit.diagnostics,
         classes: emit.classes,
         runtime_keys: emit.runtime_keys,
-        ..Unit::default()
+        constants: emit.attributed_constants,
     })
 }
 
@@ -5140,8 +5145,10 @@ impl Emit<'_> {
         declared_at: u32,
     ) -> Result<(Vec<Attribute>, DynamicProperties), CompileError> {
         let mut out = Vec::new();
+        // `CG(zend_lineno)` is the declaration's while its attributes
+        // compile, so what an argument raises is raised there.
+        self.line = declared_at;
         for attribute in &class.attributes {
-            self.line = attribute.line;
             let name = self.class_name(&attribute.name);
             out.push(self.attribute(attribute, name, declared_at)?);
         }
@@ -5419,8 +5426,8 @@ impl Emit<'_> {
         declared_at: u32,
     ) -> Result<Vec<Attribute>, CompileError> {
         let mut out = Vec::with_capacity(written.len());
+        self.line = declared_at;
         for attribute in written {
-            self.line = attribute.line;
             let name = self.class_name(&attribute.name);
             if let Some(known) = InternalAttribute::named(&name) {
                 let targets = known.targets();
@@ -6246,6 +6253,19 @@ impl Emit<'_> {
     /// }
     /// string(1) "C"
     /// ```
+    ///
+    /// A property fetch's object is evaluated before the fetch is looked
+    /// at, as `zend_eval_const_expr` walks it, so what the object
+    /// refuses is refused first, and an attribute's argument is compiled
+    /// at the line of the declaration it stands on (#855):
+    ///
+    /// ```php
+    /// #[Attribute([,]->e)]
+    /// class Foo {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use empty array elements in arrays in %s on line 3
+    /// ```
     #[allow(clippy::too_many_lines)]
     fn const_expr(&mut self, expr: tree::Expr) -> Result<ConstExpr, CompileError> {
         let line = expr.line(self.parsed);
@@ -6435,10 +6455,17 @@ impl Emit<'_> {
             | tree::Expr::YieldFromExpr(_)
             | tree::Expr::InterpolatedStringExpr(_)
             | tree::Expr::HeredocExpr(_) => self.const_refused(expr),
+            // A property fetch, whose object `zend_eval_const_expr`
+            // evaluates before `zend_compile_const_expr` looks at the
+            // fetch, so what the object refuses is refused first.
+            tree::Expr::MemberAccessExpr(id) => {
+                self.const_expr(tree[id].obj)?;
+                Err(self.fatal("a constant expression this compiler cannot read yet"))
+            }
             // What php's walk allows and this compiler cannot keep as
-            // the tree it was written as yet: a property fetch and a
-            // dimension (8.5), a `match`, a conditional, a `??`, a
-            // `new`, an `instanceof` and a closure.
+            // the tree it was written as yet: a dimension (8.5), a
+            // `match`, a conditional, a `??`, a `new`, an `instanceof`
+            // and a closure.
             _ => match self.constant_of(expr)? {
                 Some(folded) => folded_const_expr(folded).ok_or_else(|| {
                     self.fatal("a constant expression this compiler cannot read yet")
@@ -6562,11 +6589,52 @@ impl Emit<'_> {
     /// php keeps a value it could not fold as an `IS_CONSTANT_AST` for
     /// the opline to evaluate (`allow_dynamic`); this compiler folds
     /// what it can fold and refuses the rest as not read yet.
+    ///
+    /// Attributes before the statement are its one constant's, compiled
+    /// after the declarators at the first one's line with the target
+    /// `ZEND_ATTRIBUTE_TARGET_CONST`: a statement of more constants is
+    /// php's compile error, and the last `DECLARE_CONST` becomes
+    /// `DECLARE_ATTRIBUTED_CONST` with an `OP_DATA` after it naming the
+    /// constant's declaration, [`Unit::constants`], where php's names
+    /// the attribute table.
+    ///
+    /// ```php
+    /// #[\Foo]
+    /// const First = 1,
+    ///     Second = 2;
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot apply attributes to multiple constants at once in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// #[Attribute]
+    /// const EXAMPLE = 'Foo';
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Attribute "Attribute" cannot target constant (allowed targets: class) in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// namespace Foo;
+    /// #[Attr(1, x: 2)]
+    /// const MyConst = 'v';
+    /// $a = (new \ReflectionConstant('Foo\\MyConst'))->getAttributes()[0];
+    /// var_dump(MyConst, $a->getName(), $a->getArguments());
+    /// ```
+    /// ```expect
+    /// string(1) "v"
+    /// string(8) "Foo\Attr"
+    /// array(2) {
+    ///   [0]=>
+    ///   int(1)
+    ///   ["x"]=>
+    ///   int(2)
+    /// }
+    /// ```
     fn const_decl(&mut self, id: NodeId<tree::ConstStmt>) -> Result<(), CompileError> {
-        let node = &self.parsed.tree[id];
-        if !node.attrs.is_empty() {
-            return Err(self.unread("an attribute before this declaration"));
-        }
+        let node = self.parsed.tree[id].clone();
+        let mut declared = None;
         for declarator in &node.const_declarators {
             let (name, value, line) = self.const_declarator(*declarator)?;
             self.line = line;
@@ -6581,6 +6649,7 @@ impl Emit<'_> {
                 )));
             }
             let full = self.declare_symbol(Symbol::Const, &name)?;
+            declared = Some((full.clone(), value));
             let name = self.string(&full)?;
             let op1 = self.literal(name);
             let op2 = self.literal(value);
@@ -6593,6 +6662,43 @@ impl Emit<'_> {
                 ..Opline::default()
             });
         }
+        if node.attrs.is_empty() {
+            return Ok(());
+        }
+        let Some((name, value)) = declared else {
+            return Err(self.fatal("InternalError: an attributed `const` that declared nothing"));
+        };
+        let first = node
+            .const_declarators
+            .first()
+            .map_or(self.line, |declarator| self.parsed.tree[*declarator].line());
+        self.line = first;
+        if node.const_declarators.len() > 1 {
+            return Err(self.compile_error("Cannot apply attributes to multiple constants at once"));
+        }
+        let written = self.walk_attributes(&node.attrs)?;
+        let attributes = self.member_attributes(&written, attributes::TARGET_CONST, 0, first)?;
+        let Some(value) = folded_const_expr(value) else {
+            return Err(
+                self.fatal("InternalError: an attributed `const` whose value folded to no scalar")
+            );
+        };
+        let at = u32::try_from(self.attributed_constants.len()).unwrap_or(u32::MAX);
+        self.attributed_constants.push(ConstDecl {
+            name: Name(name.into_boxed_slice()),
+            value,
+            attributes,
+        });
+        if let Some(last) = self.oplines.last_mut() {
+            last.opcode = Opcode::DeclareAttributedConst;
+        }
+        let op1 = self.literal(Zval::ptr(at));
+        self.push(Opline {
+            opcode: Opcode::OpData,
+            op1_type: OperandKind::Const,
+            op1,
+            ..Opline::default()
+        });
         Ok(())
     }
 
@@ -15997,6 +16103,7 @@ mod tests {
             classes: Vec::new(),
             bound: Vec::new(),
             runtime_keys: Vec::new(),
+            attributed_constants: Vec::new(),
             keys_before: 0,
             functions_declared: Vec::new(),
             dynamic: Vec::new(),

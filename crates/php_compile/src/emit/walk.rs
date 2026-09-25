@@ -512,7 +512,7 @@ impl Emit<'_> {
     /// ```expect
     /// int(1)
     /// ```
-    fn walk_attributes(
+    pub(super) fn walk_attributes(
         &mut self,
         groups: &[NodeId<tree::AttributeGroup>],
     ) -> Result<Vec<Attr>, CompileError> {
