@@ -5,10 +5,10 @@
 //! again whenever the attribute has changed under it.
 
 use php_ext::abi::{CloneObj, ObjectHandlers, PropertyRead, PropertyTest};
-use php_ext::coerce::{numeric_string, to_long, truthy};
+use php_ext::coerce::{to_long, truthy};
 use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::Node;
 
 use crate::object::{Code, Dom, Extra};
@@ -508,12 +508,20 @@ pub(crate) const PROPS: &[crate::props::Prop] = &[
 fn offset(req: &mut Request, value: &Value) -> Result<Option<i64>, Thrown> {
     let v = value.deref();
     Ok(match v.as_ref() {
-        ValueRef::Str(s) => match numeric_string(s.as_bytes()) {
-            Some(n) if n.as_int().is_some() => n.as_int(),
-            _ => None,
+        ValueRef::Str(s) => match Key::from_string(*s) {
+            Key::Int(n) => Some(n),
+            Key::Str(_) => None,
         },
         ValueRef::Float(f) => Some(crate::map::float_offset(req, f)?),
         ValueRef::Int(_) | ValueRef::Bool(_) => Some(to_long(req, &v)?),
+        ValueRef::Resource(r) => {
+            let id = r.id();
+            php_ext::raising::warning(
+                req,
+                &format!("Resource ID#{id} used as offset, casting to integer ({id})"),
+            );
+            Some(id)
+        }
         _ => None,
     })
 }
