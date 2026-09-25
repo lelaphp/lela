@@ -1069,10 +1069,13 @@ pub(super) fn reflection_method_get_prototype(req: &mut Request) -> Result<Value
 /// ```php
 /// var_dump(ReflectionMethod::createFromMethodName('Exception::getCode')->getName());
 /// var_dump(ReflectionMethod::createFromMethodName('Exception::getCode')->getDeclaringClass()->getName());
+/// class M extends ReflectionMethod {}
+/// var_dump(get_class(M::createFromMethodName('Exception::getCode')));
 /// ```
 /// ```expect
 /// string(7) "getCode"
 /// string(9) "Exception"
+/// string(1) "M"
 /// ```
 ///
 /// ```php
@@ -1114,11 +1117,18 @@ pub(super) fn reflection_method_create_from_method_name(
             ),
         ));
     };
-    let reflector = class_named(req, b"ReflectionMethod")?;
+    // `object_init_ex(return_value, execute_data->This.value.ce)`: an
+    // object of the class the static call named, so a subclass of
+    // `ReflectionMethod` gets its own class back.
+    let reflector = match req.called_scope() {
+        Some(called) => called,
+        None => class_named(req, b"ReflectionMethod")?,
+    };
     let object = new_object(req, reflector)?;
     let scope = class_name_of(req, found.scope);
     set_name(req, object, &found.decl.function.name.0)?;
     set_string_prop(req, object, b"class", &scope)?;
+    super::keep(req, object, class, None);
     Ok(object.as_value())
 }
 
