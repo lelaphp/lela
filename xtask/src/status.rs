@@ -217,6 +217,17 @@ pub(crate) fn local_template() -> String {
     out
 }
 
+/// The widest a reading's message renders in a Markdown cell, in
+/// characters. A Markdown table is what a session scans, and the local
+/// facts it is handed at start are eight sections under the engine's cap
+/// on one block (§5, #64); so a row says its message in one line of at
+/// most this many, and a number the reading holds at zero, which says
+/// nothing happened, is left out of its `numbers` cell. `--format json`
+/// is the reading whole, every number and the message uncut (#820). A
+/// person's words, a rule's text and a divergence's reason, are
+/// rendered as written.
+const MESSAGE_WIDTH: usize = 120;
+
 /// One rendered row: the manifest's facts by name, and the reading, if any.
 #[derive(Debug)]
 struct Row {
@@ -265,27 +276,36 @@ impl Row {
         }
     }
 
+    /// The reading's message as a cell of at most [`MESSAGE_WIDTH`]
+    /// characters, the last an ellipsis where it was cut.
     fn message(&self) -> String {
         self.reading
             .as_ref()
-            .map(|x| cell(&x.message))
+            .map(|x| match x.message.char_indices().nth(MESSAGE_WIDTH - 1) {
+                Some((at, _)) if x.message[at..].chars().nth(1).is_some() => {
+                    cell(&format!("{}…", &x.message[..at]))
+                }
+                _ => cell(&x.message),
+            })
             .unwrap_or_default()
     }
 
-    /// Every number of the reading as `key=value`, space-separated.
+    /// Every number of the reading but those at zero, as `key=value`,
+    /// space-separated.
     fn numbers(&self) -> String {
         self.numbers_but(&[])
     }
 
-    /// Every number of the reading but the keys named, which a section
-    /// renders in columns of their own, as `key=value`, space-separated.
+    /// Every number of the reading but those at zero and the keys named,
+    /// which a section renders in columns of their own, as `key=value`,
+    /// space-separated.
     fn numbers_but(&self, shown: &[&str]) -> String {
         self.reading
             .as_ref()
             .map(|x| {
                 x.numbers
                     .iter()
-                    .filter(|(k, _)| !shown.contains(&k.as_str()))
+                    .filter(|(k, v)| !shown.contains(&k.as_str()) && v.as_f64() != 0.0)
                     .map(|(k, v)| format!("{k}={v}"))
                     .collect::<Vec<_>>()
                     .join(" ")

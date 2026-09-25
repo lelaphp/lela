@@ -294,9 +294,10 @@ fn over(name: &str, text: &str, cap: usize) -> Option<String> {
 /// session on 2026-09-10 started with no map because the map and the
 /// local facts together were over it (#64). The map is one block and the
 /// local facts another, and each is held here under the cap with room:
-/// the map as the hook hands it, and the facts as the local file renders
-/// from this workspace's store, whatever the local file here holds. A
-/// scratch map padded past the cap is what the hold refuses.
+/// the map as the hook hands it, and the facts as the template's regions,
+/// every one of them, render from this workspace's store, whatever the
+/// local file here holds. A scratch map padded past the cap is what the
+/// hold refuses.
 #[test]
 fn the_map_and_the_local_facts_are_each_under_the_engines_cap_with_room() {
     let cap = block_cap();
@@ -312,20 +313,35 @@ fn the_map_and_the_local_facts_are_each_under_the_engines_cap_with_room() {
         panic!("{why}");
     }
 
-    let mut facts = read(".claude/harness.local.md")
+    let root = Tree::new("map-cap").unwrap();
+    scratch_workspace(workspace(), &root).unwrap();
+    let padding = "a line a person wrote, one more of them\n".repeat(cap / 40 + 1);
+    std::fs::write(root.join("AGENTS.md"), format!("{map}{padding}")).unwrap();
+    let (padded, facts) = session_blocks(&root);
+    assert!(padded.len() > cap, "the scratch map is over the cap");
+    let why = over("map", &padded, cap).expect("a map padded past the cap is refused");
+    assert!(why.contains("over it is skipped"), "{why}");
+    assert!(
+        over("facts", &facts, cap).is_none(),
+        "the facts are their own block, unrendered here"
+    );
+
+    // The scratch workspace had no local file, so `--session` laid the
+    // template down there: its head and its regions, in its order, are
+    // what the local file renders, whatever the local file here holds.
+    let template = std::fs::read_to_string(root.join(".claude/harness.local.md")).unwrap();
+    let mut facts = template
         .lines()
         .take_while(|l| !l.starts_with("## "))
         .collect::<Vec<_>>()
         .join("\n");
-    for name in [
-        "budget",
-        "phpt",
-        "witness",
-        "mutants",
-        "divergence",
-        "permits",
-        "git",
-    ] {
+    let names: Vec<&str> = template
+        .lines()
+        .filter(|l| l.starts_with("<!-- computed "))
+        .filter_map(|l| l.split(" name=").nth(1)?.split(' ').next())
+        .collect();
+    assert!(names.contains(&"port-map"), "{names:?}");
+    for name in names {
         let _ = write!(
             facts,
             "\n\n## {name}\n\n<!-- computed -->\n{}\n<!-- /computed -->\n",
@@ -343,19 +359,6 @@ fn the_map_and_the_local_facts_are_each_under_the_engines_cap_with_room() {
     if let Some(why) = over("facts", &facts, cap) {
         panic!("{why}");
     }
-
-    let root = Tree::new("map-cap").unwrap();
-    scratch_workspace(workspace(), &root).unwrap();
-    let padding = "a line a person wrote, one more of them\n".repeat(cap / 40 + 1);
-    std::fs::write(root.join("AGENTS.md"), format!("{map}{padding}")).unwrap();
-    let (padded, facts) = session_blocks(&root);
-    assert!(padded.len() > cap, "the scratch map is over the cap");
-    let why = over("map", &padded, cap).expect("a map padded past the cap is refused");
-    assert!(why.contains("over it is skipped"), "{why}");
-    assert!(
-        over("facts", &facts, cap).is_none(),
-        "the facts are their own block, unrendered here"
-    );
 }
 
 /// The hook reads the same line the test does, and hands the engine the

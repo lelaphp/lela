@@ -449,7 +449,7 @@ fn the_local_sections_render_from_the_store_alone() {
         .find(|l| l.contains("| 28 |"))
         .unwrap_or_else(|| panic!("{md}"));
     assert!(
-        row.contains("905018f") && row.contains("session-") && row.contains("unticked=0"),
+        row.contains("905018f") && row.contains("session-") && row.contains("ticked=7"),
         "what closed it and the session, from the store alone: {row}"
     );
 
@@ -480,6 +480,48 @@ fn the_local_sections_render_from_the_store_alone() {
         .unwrap();
     assert_eq!(row["denials"], 2);
     assert_eq!(row["reading"]["status"], "fail");
+}
+
+/// A Markdown row is what a session scans at start, eight tables under
+/// the engine's cap on one block (#820): its message is one line cut at
+/// 120 characters and a number at zero is left out. What the row leaves
+/// out is the same section's JSON, the reading whole.
+#[test]
+fn a_row_clips_its_message_and_leaves_zeros_out_and_the_json_has_them() {
+    let root = scratch("clipped");
+    let store = Store::of_workspace(&root);
+    let mut phpt = Reading::new("phpt", "ext/dom");
+    phpt.status = Status::Fail;
+    phpt.numbers.insert("failed".into(), 691.into());
+    phpt.numbers.insert("passed".into(), 0.into());
+    phpt.numbers.insert("percent".into(), 0.0.into());
+    let names = (0..40).map(|n| format!("t{n:03}.phpt")).collect::<Vec<_>>();
+    phpt.message = format!("ext/dom: 691 of 871 missed:\n{}", names.join(", "));
+    store.record(std::slice::from_ref(&phpt)).unwrap();
+
+    let (ok, md, err) = status(&root, &["--section", "phpt"]);
+    assert!(ok, "{err}");
+    let row = md.lines().find(|l| l.starts_with("| ext/dom |")).unwrap();
+    let cells: Vec<&str> = row.trim_matches('|').split(" | ").collect();
+    assert_eq!(cells[2], "failed=691", "{row}");
+    let message = cells[3].trim_end();
+    assert_eq!(message.chars().count(), 120, "{message}");
+    assert!(
+        message.starts_with("ext/dom: 691 of 871 missed: t000.phpt"),
+        "{message}"
+    );
+    assert!(
+        message.ends_with('…') && !message.contains("t039"),
+        "{message}"
+    );
+
+    let (ok, json, _) = status(&root, &["--section", "phpt", "--format", "json"]);
+    assert!(ok);
+    let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let reading = &rows[0]["reading"];
+    assert_eq!(reading["message"], phpt.message.as_str());
+    assert_eq!(reading["numbers"]["passed"], 0);
+    assert_eq!(reading["numbers"]["percent"], 0.0);
 }
 
 /// `git` is volatile: the log and the status of the working tree.
