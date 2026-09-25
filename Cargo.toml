@@ -4,7 +4,7 @@
 # only `api.lock` today.
 [workspace]
 resolver = "3"
-members = ["crates/*", "xtask", "ext/standard", "ext/spl", "ext/date", "ext/reflection", "ext/pcre", "ext/mbstring", "ext/session", "ext/pdo", "ext/dom", "ext/random", "ext/pdo_mysql", "ext/filter", "ext/tokenizer", "ext/json", "ext/openssl", "ext/curl", "ext/iconv", "ext/pdo_sqlite", "ext/ctype", "ext/hash", "ext/libxml"]
+members = ["crates/*", "xtask", "ext/standard", "ext/spl", "ext/date", "ext/reflection", "ext/pcre", "ext/mbstring", "ext/session", "ext/pdo", "ext/dom", "ext/random", "ext/pdo_mysql", "ext/filter", "ext/tokenizer", "ext/json", "ext/openssl", "ext/curl", "ext/iconv", "ext/pdo_sqlite", "ext/ctype", "ext/hash", "ext/libxml", "ext/lexbor"]
 
 [workspace.package]
 edition = "2024"

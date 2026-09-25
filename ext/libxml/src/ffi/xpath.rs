@@ -190,7 +190,26 @@ impl XPath {
         namespaces: bool,
         handler: &mut Handler<'_>,
     ) -> (Option<Answer>, Vec<Raised>, Option<Thrown>) {
-        let (object, raised, thrown) = self.eval_raw(req, expr, node, namespaces, handler);
+        let scope = if namespaces {
+            Scope::InScope
+        } else {
+            Scope::None
+        };
+        self.eval_scoped(req, expr, node, scope, handler)
+    }
+
+    /// [`XPath::eval`] with the declarations registered for the
+    /// evaluation given as a [`Scope`], as the modern classes hand php's
+    /// `php_dom_get_in_scope_ns` list over.
+    pub fn eval_scoped(
+        &self,
+        req: &mut Request,
+        expr: &[u8],
+        node: Option<Node>,
+        scope: Scope<'_>,
+        handler: &mut Handler<'_>,
+    ) -> (Option<Answer>, Vec<Raised>, Option<Thrown>) {
+        let (object, raised, thrown) = self.eval_with(req, expr, node, scope, handler);
         let answer = object.map(|o| o.answer());
         (answer, raised, thrown)
     }
@@ -204,6 +223,22 @@ impl XPath {
         namespaces: bool,
         handler: &mut Handler<'_>,
     ) -> (Option<Object>, Vec<Raised>, Option<Thrown>) {
+        let scope = if namespaces {
+            Scope::InScope
+        } else {
+            Scope::None
+        };
+        self.eval_with(req, expr, node, scope, handler)
+    }
+
+    fn eval_with(
+        &self,
+        req: &mut Request,
+        expr: &[u8],
+        node: Option<Node>,
+        scope: Scope<'_>,
+        handler: &mut Handler<'_>,
+    ) -> (Option<Object>, Vec<Raised>, Option<Thrown>) {
         let ctx = self.0.as_ptr();
         let e = cstr(expr);
         let mut session = Session {
@@ -215,13 +250,21 @@ impl XPath {
         // evaluation.
         let c = unsafe { &mut *ctx };
         c.node = node.map_or(ptr::null_mut(), Node::raw);
-        let list = if namespaces && let Some(n) = node {
+        let list = if let (Scope::InScope, Some(n)) = (&scope, node) {
             let doc = n.doc().map_or(ptr::null_mut(), |d| d.raw().cast());
             // SAFETY: a live node and its document.
             unsafe { sys::xmlGetNsList(doc, n.raw()) }
         } else {
             ptr::null_mut()
         };
+        let mut given: Vec<*mut sys::xmlNs> = match scope {
+            Scope::List(list) if node.is_some() => list.iter().map(|ns| ns.raw()).collect(),
+            _ => Vec::new(),
+        };
+        if !given.is_empty() {
+            c.namespaces = given.as_mut_ptr();
+            c.nsNr = c_int::try_from(given.len()).unwrap_or(0);
+        }
         if !list.is_null() {
             let mut count = 0;
             loop {
@@ -247,18 +290,31 @@ impl XPath {
         let c = unsafe { &mut *ctx };
         c.userData = ptr::null_mut();
         c.node = ptr::null_mut();
-        if !list.is_null() {
+        if !list.is_null() || !given.is_empty() {
             c.namespaces = ptr::null_mut();
             c.nsNr = 0;
+        }
+        if !list.is_null() {
             // SAFETY: the array `xmlGetNsList` allocated, freed once.
             unsafe { Alloc::free(list.cast()) };
         }
+        drop(given);
         (
             NonNull::new(object).map(Object),
             raised,
             session.thrown.take(),
         )
     }
+}
+
+/// The declarations one evaluation registers: none, the ones in scope at
+/// the node it starts from as libxml lists them, or a list the caller
+/// made.
+#[derive(Clone, Copy)]
+pub enum Scope<'a> {
+    None,
+    InScope,
+    List(&'a [Ns]),
 }
 
 /// An `xmlXPathObjectPtr`, owned.

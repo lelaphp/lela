@@ -16,7 +16,7 @@ use crate::map::MapKind;
 use crate::object::Code;
 use crate::props::Prop;
 use crate::{
-    Entry, Read, adopt, arity, bool_arg, bytes_arg, check_qname, dom, dom_error, dom_mut, fetch,
+    Entry, Read, adopt, arity, bool_arg, bytes_arg, check_qname, dom_error, dom_mut, fetch,
     file_path, get_ns, get_ns_unchecked, instance_of, invalidate, long_arg, nullable_bytes_arg,
     nullable_object, object_arg, object_for, path_arg, props_of, strict, string, this, this_node,
     validate_and_extract,
@@ -69,7 +69,7 @@ fn doc_node(req: &mut Request, object: PhpObject) -> Result<Node, Thrown> {
 /// string(1) "r"
 /// string(1) "r"
 /// ```
-fn doctype(req: &mut Request, object: PhpObject) -> Read {
+pub(crate) fn doctype(req: &mut Request, object: PhpObject) -> Read {
     let doc = doc_node(req, object)?;
     Ok(Some(nullable_object(req, doc.int_subset(), Some(object))?))
 }
@@ -79,7 +79,22 @@ fn implementation(req: &mut Request, _object: PhpObject) -> Read {
     Ok(Some(php_ext::call::new_object(req, class)?.as_value()))
 }
 
-fn document_element(req: &mut Request, object: PhpObject) -> Read {
+/// `dom_document_document_element_read`.
+///
+/// ```php
+/// $d = new DOMDocument;
+/// var_dump($d->documentElement);
+/// $d->loadXML('<r><c/></r>');
+/// $m = Dom\XMLDocument::createFromString('<s/>');
+/// var_dump($d->documentElement->tagName, get_class($m->documentElement), $m->documentElement->tagName);
+/// ```
+/// ```expect
+/// NULL
+/// string(1) "r"
+/// string(11) "Dom\Element"
+/// string(1) "s"
+/// ```
+pub(crate) fn document_element(req: &mut Request, object: PhpObject) -> Read {
     let doc = doc_node(req, object)?;
     Ok(Some(nullable_object(req, doc.root(), Some(object))?))
 }
@@ -99,7 +114,7 @@ fn document_element(req: &mut Request, object: PhpObject) -> Read {
 /// NULL
 /// <?xml version="1.0" encoding="UTF-8"?>
 /// ```
-fn encoding(req: &mut Request, object: PhpObject) -> Read {
+pub(crate) fn encoding(req: &mut Request, object: PhpObject) -> Read {
     let doc = doc_node(req, object)?;
     Ok(Some(crate::nullable_string(
         req,
@@ -123,7 +138,23 @@ fn set_encoding(req: &mut Request, object: PhpObject, value: &Value) -> Result<(
     }
 }
 
-fn standalone(req: &mut Request, object: PhpObject) -> Read {
+/// `dom_document_standalone_read`.
+///
+/// ```php
+/// $d = new DOMDocument;
+/// var_dump($d->standalone, $d->xmlStandalone);
+/// $d->loadXML('<?xml version="1.0" standalone="yes"?><r/>');
+/// $m = Dom\XMLDocument::createFromString('<?xml version="1.0" standalone="no"?><r/>');
+/// var_dump($d->standalone, $d->xmlStandalone, $m->xmlStandalone);
+/// ```
+/// ```expect
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// ```
+pub(crate) fn standalone(req: &mut Request, object: PhpObject) -> Read {
     let doc = doc_node(req, object)?;
     Ok(Some(Value::bool(doc.doc_standalone() > 0)))
 }
@@ -134,7 +165,20 @@ fn set_standalone(req: &mut Request, object: PhpObject, value: &Value) -> Result
     Ok(())
 }
 
-fn version(req: &mut Request, object: PhpObject) -> Read {
+/// `dom_document_version_read`.
+///
+/// ```php
+/// $d = new DOMDocument('1.1');
+/// $m = Dom\XMLDocument::createEmpty('1.1');
+/// var_dump($d->version, $d->xmlVersion, $m->xmlVersion, Dom\XMLDocument::createFromString('<r/>')->xmlVersion);
+/// ```
+/// ```expect
+/// string(3) "1.1"
+/// string(3) "1.1"
+/// string(3) "1.1"
+/// string(3) "1.0"
+/// ```
+pub(crate) fn version(req: &mut Request, object: PhpObject) -> Read {
     let doc = doc_node(req, object)?;
     Ok(Some(crate::nullable_string(
         req,
@@ -144,6 +188,11 @@ fn version(req: &mut Request, object: PhpObject) -> Read {
 
 fn set_version(req: &mut Request, object: PhpObject, value: &Value) -> Result<(), Thrown> {
     let doc = doc_node(req, object)?;
+    if crate::modern::follows_spec(req, object)
+        && !matches!(value.as_str_bytes(), Some(b"1.0" | b"1.1"))
+    {
+        return Err(throw(req, "ValueError", "Invalid XML version"));
+    }
     doc.set_doc_string(
         DocString::Version,
         Some(value.as_str_bytes().unwrap_or_default()),
@@ -151,9 +200,24 @@ fn set_version(req: &mut Request, object: PhpObject, value: &Value) -> Result<()
     Ok(())
 }
 
-fn document_uri(req: &mut Request, object: PhpObject) -> Read {
+/// `dom_document_document_uri_read`: `about:blank` for a modern document
+/// with no URL.
+///
+/// ```php
+/// var_dump((new DOMDocument)->documentURI, Dom\XMLDocument::createEmpty()->URL, Dom\HTMLDocument::createEmpty()->documentURI);
+/// ```
+/// ```expect
+/// NULL
+/// string(11) "about:blank"
+/// string(11) "about:blank"
+/// ```
+pub(crate) fn document_uri(req: &mut Request, object: PhpObject) -> Read {
     let doc = doc_node(req, object)?;
-    Ok(Some(crate::nullable_string(req, doc.doc_url().as_deref())?))
+    match doc.doc_url() {
+        Some(url) => Ok(Some(string(req, &url)?)),
+        None if crate::modern::follows_spec(req, object) => Ok(Some(string(req, b"about:blank")?)),
+        None => Ok(Some(Value::null())),
+    }
 }
 
 fn set_document_uri(req: &mut Request, object: PhpObject, value: &Value) -> Result<(), Thrown> {
@@ -258,6 +322,20 @@ const fn rw(
     }
 }
 
+/// `URL` of `Dom\Document`.
+pub(crate) const MODERN_URL: Prop = rw(b"URL", document_uri, set_document_uri);
+
+/// `documentURI` of `Dom\Document`.
+pub(crate) const MODERN_DOCUMENT_URI: Prop = rw(b"documentURI", document_uri, set_document_uri);
+
+/// `dom_xml_document_prop_handlers`' own rows, `Dom\XMLDocument`'s.
+pub(crate) const MODERN_XML_PROPS: &[Prop] = &[
+    ro(b"xmlEncoding", encoding),
+    rw(b"xmlStandalone", standalone, set_standalone),
+    rw(b"xmlVersion", version, set_version),
+    rw(b"formatOutput", format_read, format_write),
+];
+
 /// `dom_document_prop_handlers`, before the node's merged behind them.
 pub(crate) const PROPS: &[Prop] = &[
     ro(b"doctype", doctype),
@@ -350,7 +428,18 @@ fn finish_loading(req: &mut Request, this: PhpObject, doc: Option<Node>) -> Valu
 
 /// The directory a document parsed from memory takes as its base, php's
 /// `VCWD_GETCWD` with its trailing slash.
-fn base_directory(req: &Request) -> Vec<u8> {
+///
+/// ```php
+/// $d = new DOMDocument;
+/// $d->loadXML('<r/>');
+/// $m = Dom\XMLDocument::createFromString('<r/>');
+/// var_dump($d->documentURI === getcwd() . '/', $m->documentURI === getcwd() . '/');
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// ```
+pub(crate) fn base_directory(req: &Request) -> Vec<u8> {
     let mut dir = req.cwd().0.to_string_lossy().into_owned().into_bytes();
     if !dir.ends_with(b"/") {
         dir.push(b'/');
@@ -396,10 +485,10 @@ fn parse_document(req: &mut Request, from_file: bool) -> Result<Value, Thrown> {
         let Some(path) = file_path(req, &source) else {
             return Ok(Value::bool(false));
         };
-        Parser::xml(Source::File(&path), options, None, recover)
+        Parser::xml(Source::File(&path), options, None, recover, None)
     } else {
         let dir = base_directory(req);
-        Parser::xml(Source::Memory(&source), options, Some(&dir), recover)
+        Parser::xml(Source::Memory(&source), options, Some(&dir), recover, None)
     };
     Errors::route(req, raised);
     match parsed {
@@ -521,7 +610,31 @@ fn load_html_file(req: &mut Request) -> Result<Value, Thrown> {
 /// <a></a>
 /// Wrong Document Error
 /// ```
-fn save_xml(req: &mut Request) -> Result<Value, Thrown> {
+///
+/// A `Dom\` document saves through php's own XML serialiser
+/// (`php_new_dom_dump_*`), in the document's encoding:
+///
+/// ```php
+/// $d = Dom\XMLDocument::createFromString('<r xmlns="urn:a"><p:x xmlns:p="urn:p" a="&quot;\'"/><y/></r>');
+/// $y = $d->documentElement->lastChild;
+/// echo $d->saveXml(), "\n", $d->saveXml($y), "\n";
+/// echo $d->saveXml(null, LIBXML_NOXMLDECL), "\n", $d->saveXml(null, LIBXML_NOEMPTYTAG), "\n";
+/// $e = Dom\XMLDocument::createEmpty('1.0', 'ISO-8859-1');
+/// $r = $e->createElementNS('urn:x', 'q:r');
+/// $r->append("\u{e9}\u{20ac}");
+/// $e->append($r);
+/// echo bin2hex($e->saveXml()), "\n";
+/// ```
+/// ```expect
+/// <?xml version="1.0" encoding="UTF-8"?>
+/// <r xmlns="urn:a"><p:x xmlns:p="urn:p" a="&quot;'"/><y/></r>
+/// <y xmlns="urn:a"/>
+/// <r xmlns="urn:a"><p:x xmlns:p="urn:p" a="&quot;'"/><y/></r>
+/// <?xml version="1.0" encoding="UTF-8"?>
+/// <r xmlns="urn:a"><p:x xmlns:p="urn:p" a="&quot;'"></p:x><y></y></r>
+/// 3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d2249534f2d383835392d31223f3e0a3c713a7220786d6c6e733a713d2275726e3a78223ee92623383336343b3c2f713a723e
+/// ```
+pub(crate) fn save_xml(req: &mut Request) -> Result<Value, Thrown> {
     arity(req, 0, 2)?;
     let node = object_arg(req, 1)?;
     let options = long_arg(req, 2, 0)?;
@@ -529,6 +642,7 @@ fn save_xml(req: &mut Request) -> Result<Value, Thrown> {
     let format = props_of(req, this).format;
     let no_empty = options & i64::from(php_ext_libxml::NOEMPTYTAG) != 0;
     let encoding = doc.doc_encoding();
+    let modern = crate::modern::follows_spec(req, this);
     let (saved, raised) = if let Some(node) = node {
         let node = fetch(req, node)?;
         if node.doc() != Some(doc) {
@@ -536,7 +650,12 @@ fn save_xml(req: &mut Request) -> Result<Value, Thrown> {
             dom_error(req, Code::WrongDocument, strict)?;
             return Ok(Value::bool(false));
         }
-        Save::node(doc, node, format, no_empty, encoding.as_deref())
+        if modern {
+            let encoding = encoding.as_deref();
+            crate::xml_serializer::dump_to_string(req, this, node, 0, format, no_empty, encoding)
+        } else {
+            Save::node(doc, node, format, no_empty, encoding.as_deref())
+        }
     } else {
         let mut converted = f::XML_SAVE_AS_XML;
         if options & i64::from(f::XML_SAVE_NO_DECL) != 0 {
@@ -545,7 +664,14 @@ fn save_xml(req: &mut Request) -> Result<Value, Thrown> {
         if format {
             converted |= f::XML_SAVE_FORMAT;
         }
-        Save::doc(doc, converted, no_empty, encoding.as_deref())
+        if modern {
+            let encoding = encoding.as_deref();
+            crate::xml_serializer::dump_to_string(
+                req, this, doc, converted, format, no_empty, encoding,
+            )
+        } else {
+            Save::doc(doc, converted, no_empty, encoding.as_deref())
+        }
     };
     Errors::route(req, raised);
     if let Some(bytes) = saved {
@@ -571,6 +697,23 @@ fn save_xml(req: &mut Request) -> Result<Value, Thrown> {
 /// <r/>
 /// "
 /// ```
+///
+/// `Dom\XMLDocument::saveXmlFile` aliases it: a `Dom\` document writes
+/// through php's streams and its own XML serialiser.
+///
+/// ```php
+/// $d = Dom\XMLDocument::createFromString('<r><a/></r>');
+/// $f = tempnam(sys_get_temp_dir(), 'dom');
+/// var_dump($d->saveXmlFile($f), file_get_contents($f));
+/// unlink($f);
+/// var_dump(@$d->saveXmlFile(sys_get_temp_dir() . '/no/such/dir/x.xml'));
+/// ```
+/// ```expect
+/// int(50)
+/// string(50) "<?xml version="1.0" encoding="UTF-8"?>
+/// <r><a/></r>"
+/// bool(false)
+/// ```
 fn save(req: &mut Request) -> Result<Value, Thrown> {
     arity(req, 1, 2)?;
     let file = path_arg(req, 1)?;
@@ -581,6 +724,23 @@ fn save(req: &mut Request) -> Result<Value, Thrown> {
     let (this, doc) = this_node(req)?;
     let format = props_of(req, this).format;
     let no_empty = options & i64::from(php_ext_libxml::NOEMPTYTAG) != 0;
+    if crate::modern::follows_spec(req, this) {
+        let encoding = doc.doc_encoding();
+        let written = crate::xml_serializer::dump_to_file(
+            req,
+            this,
+            &file,
+            doc,
+            format,
+            no_empty,
+            encoding.as_deref(),
+        )?;
+        return Ok(if written < 0 {
+            Value::bool(false)
+        } else {
+            Value::int(written)
+        });
+    }
     let (bytes, raised) = Save::file(&file, doc, doc.doc_encoding().as_deref(), format, no_empty);
     Errors::route(req, raised);
     Ok(if bytes == -1 {
@@ -692,6 +852,95 @@ fn create_element(req: &mut Request) -> Result<Value, Thrown> {
     created(req, this, node)
 }
 
+/// `Dom\Document::createElement(string $localName): Dom\Element`: an HTML
+/// document's element lowercased in the HTML namespace, an XML document's
+/// in none.
+///
+/// ```php
+/// $x = Dom\XMLDocument::createEmpty();
+/// $e = $x->createElement('Foo');
+/// var_dump(get_class($e), $e->tagName, $e->namespaceURI);
+/// $h = Dom\HTMLDocument::createEmpty();
+/// $e = $h->createElement('Foo');
+/// var_dump(get_class($e), $e->tagName, $e->localName, $e->namespaceURI);
+/// try { $x->createElement('1'); } catch (DOMException $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// string(11) "Dom\Element"
+/// string(3) "Foo"
+/// NULL
+/// string(15) "Dom\HTMLElement"
+/// string(3) "FOO"
+/// string(3) "foo"
+/// string(28) "http://www.w3.org/1999/xhtml"
+/// Invalid Character Error
+/// ```
+fn create_element_modern(req: &mut Request) -> Result<Value, Thrown> {
+    arity(req, 1, 1)?;
+    let name = bytes_arg(req, 1)?;
+    let (this, doc) = this_node(req)?;
+    if !Name::valid(&name) {
+        return Err(crate::dom_throw(req, Code::InvalidCharacter));
+    }
+    let node = if doc.kind() == Kind::HtmlDocument {
+        let ns = dom_mut(req, this)
+            .and_then(|d| crate::private::of(&mut d.obj))
+            .and_then(|p| p.mapper.html(Some(doc)));
+        Node::new_element(Some(doc), ns, &name.to_ascii_lowercase(), None)
+    } else {
+        Node::new_element(Some(doc), None, &name, None)
+    };
+    created(req, this, node)
+}
+
+/// `Dom\Document::createElementNS(?string $namespace, string $qualifiedName): Dom\Element`.
+///
+/// ```php
+/// $d = Dom\XMLDocument::createEmpty();
+/// $e = $d->createElementNS('urn:a', 'p:e');
+/// var_dump($e->tagName, $e->prefix, $e->localName, $e->namespaceURI);
+/// $f = $d->createElementNS(null, 'g');
+/// var_dump($f->namespaceURI, $f->prefix);
+/// $h = $d->createElementNS('http://www.w3.org/1999/xhtml', 'div');
+/// var_dump(get_class($h));
+/// try { $d->createElementNS(null, 'p:x'); } catch (DOMException $x) { echo $x->getMessage(), "\n"; }
+/// try { $d->createElementNS('urn:a', '1'); } catch (DOMException $x) { echo $x->getMessage(), "\n"; }
+/// try { $d->createElementNS('urn:a', 'xmlns:x'); } catch (DOMException $x) { echo $x->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// string(3) "p:e"
+/// string(1) "p"
+/// string(1) "e"
+/// string(5) "urn:a"
+/// NULL
+/// NULL
+/// string(15) "Dom\HTMLElement"
+/// Namespace Error
+/// Invalid Character Error
+/// Namespace Error
+/// ```
+fn create_element_ns_modern(req: &mut Request) -> Result<Value, Thrown> {
+    arity(req, 2, 2)?;
+    let uri = nullable_bytes_arg(req, 1)?;
+    let name = bytes_arg(req, 2)?;
+    let (this, doc) = this_node(req)?;
+    match validate_and_extract(uri.as_deref(), &name) {
+        Ok((local, prefix)) => {
+            let ns =
+                crate::element::mapped_ns(req, this, Some(doc), prefix.as_deref(), uri.as_deref());
+            match Node::new_element(Some(doc), ns, &local, None) {
+                Some(node) => object_for(req, node, Some(this)),
+                None => Err(crate::dom_throw(req, Code::InvalidState)),
+            }
+        }
+        Err(code) => {
+            let strict = strict(req, this);
+            dom_error(req, code, strict)?;
+            Ok(Value::null())
+        }
+    }
+}
+
 /// `DOMDocument::createDocumentFragment(): DOMDocumentFragment`.
 fn create_document_fragment(req: &mut Request) -> Result<Value, Thrown> {
     arity(req, 0, 0)?;
@@ -733,10 +982,40 @@ fn create_comment(req: &mut Request) -> Result<Value, Thrown> {
 }
 
 /// `DOMDocument::createCDATASection(string $data)`.
+///
+/// ```php
+/// $d = Dom\XMLDocument::createEmpty();
+/// $c = $d->createCDATASection('a]]b');
+/// var_dump(get_class($c), $c->data);
+/// try { $d->createCDATASection('a]]>b'); } catch (DOMException $e) { echo $e->getMessage(), "\n"; }
+/// try { Dom\HTMLDocument::createEmpty()->createCDATASection('x'); } catch (DOMException $e) { echo $e->getMessage(), ' ', $e->code, "\n"; }
+/// ```
+/// ```expect
+/// string(16) "Dom\CDATASection"
+/// string(4) "a]]b"
+/// Invalid character sequence "]]>" in CDATA section
+/// This operation is not supported for HTML documents 9
+/// ```
 fn create_cdata_section(req: &mut Request) -> Result<Value, Thrown> {
     arity(req, 1, 1)?;
     let data = bytes_arg(req, 1)?;
     let (this, doc) = this_node(req)?;
+    if crate::modern::follows_spec(req, this) {
+        if doc.kind() == Kind::HtmlDocument {
+            return Err(crate::dom_throw_message(
+                req,
+                Code::NotSupported,
+                "This operation is not supported for HTML documents",
+            ));
+        }
+        if data.windows(3).any(|w| w == b"]]>") {
+            return Err(crate::dom_throw_message(
+                req,
+                Code::InvalidCharacter,
+                "Invalid character sequence \"]]>\" in CDATA section",
+            ));
+        }
+    }
     created(req, this, Node::new_cdata(Some(doc), &data))
 }
 
@@ -750,6 +1029,40 @@ fn create_processing_instruction(req: &mut Request) -> Result<Value, Thrown> {
         return invalid_name(req, this);
     }
     created(req, this, Node::new_pi(Some(doc), &target, data.as_deref()))
+}
+
+/// `Dom\Document::createProcessingInstruction(string $target, string $data): Dom\ProcessingInstruction`.
+///
+/// ```php
+/// $d = Dom\XMLDocument::createEmpty();
+/// $p = $d->createProcessingInstruction('t', 'a ? > b');
+/// var_dump(get_class($p), $p->target, $p->data);
+/// try { $d->createProcessingInstruction('t', 'a?>b'); } catch (DOMException $e) { echo $e->getMessage(), "\n"; }
+/// try { $d->createProcessingInstruction('1', 'x'); } catch (DOMException $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// string(25) "Dom\ProcessingInstruction"
+/// string(1) "t"
+/// string(7) "a ? > b"
+/// Invalid character sequence "?>" in processing instruction
+/// Invalid Character Error
+/// ```
+fn create_processing_instruction_modern(req: &mut Request) -> Result<Value, Thrown> {
+    arity(req, 2, 2)?;
+    let target = bytes_arg(req, 1)?;
+    let data = bytes_arg(req, 2)?;
+    let (this, doc) = this_node(req)?;
+    if !Name::valid(&target) {
+        return invalid_name(req, this);
+    }
+    if data.windows(2).any(|w| w == b"?>") {
+        return Err(crate::dom_throw_message(
+            req,
+            Code::InvalidCharacter,
+            "Invalid character sequence \"?>\" in processing instruction",
+        ));
+    }
+    created(req, this, Node::new_pi(Some(doc), &target, Some(&data)))
 }
 
 /// `DOMDocument::createAttribute(string $localName)`.
@@ -766,6 +1079,18 @@ fn create_processing_instruction(req: &mut Request) -> Result<Value, Thrown> {
 /// string(0) ""
 /// DOMDocument::createAttribute(): Argument #1 ($localName) must not contain any null bytes
 /// ```
+///
+/// ```php
+/// $a = Dom\HTMLDocument::createEmpty()->createAttribute('Data-A');
+/// $b = Dom\XMLDocument::createEmpty()->createAttribute('Data-A');
+/// var_dump(get_class($a), $a->name, $b->name, $b->namespaceURI);
+/// ```
+/// ```expect
+/// string(8) "Dom\Attr"
+/// string(6) "data-a"
+/// string(6) "Data-A"
+/// NULL
+/// ```
 fn create_attribute(req: &mut Request) -> Result<Value, Thrown> {
     arity(req, 1, 1)?;
     let name = path_arg(req, 1)?;
@@ -773,6 +1098,11 @@ fn create_attribute(req: &mut Request) -> Result<Value, Thrown> {
     if !Name::valid(&name) {
         return invalid_name(req, this);
     }
+    let name = if doc.kind() == Kind::HtmlDocument && crate::modern::follows_spec(req, this) {
+        name.to_ascii_lowercase()
+    } else {
+        name
+    };
     created(req, this, Node::new_attr(Some(doc), &name, None))
 }
 
@@ -856,50 +1186,59 @@ fn create_element_ns(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// <r xmlns:p="urn:a" p:a=""/>
 /// ```
+///
+/// ```php
+/// $d = Dom\XMLDocument::createEmpty();
+/// $a = $d->createAttributeNS('urn:a', 'p:a');
+/// $b = $d->createAttributeNS(null, 'b');
+/// var_dump(get_class($a), $a->prefix, $a->localName, $a->namespaceURI, $b->namespaceURI);
+/// try { $d->createAttributeNS(null, 'p:x'); } catch (DOMException $x) { echo $x->getMessage(), "\n"; }
+/// try { $d->createAttributeNS('urn:a', '1'); } catch (DOMException $x) { echo $x->getMessage(), "\n"; }
+/// try { $d->createAttributeNS('urn:a', 'xmlns'); } catch (DOMException $x) { echo $x->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// string(8) "Dom\Attr"
+/// string(1) "p"
+/// string(1) "a"
+/// string(5) "urn:a"
+/// NULL
+/// Namespace Error
+/// Invalid Character Error
+/// Namespace Error
+/// ```
 fn create_attribute_ns(req: &mut Request) -> Result<Value, Thrown> {
     arity(req, 2, 2)?;
     let uri = nullable_bytes_arg(req, 1)?;
     let name = bytes_arg(req, 2)?;
     let (this, doc) = this_node(req)?;
-    let Some(root) = doc.root() else {
+    let modern = crate::modern::follows_spec(req, this);
+    let root = doc.root();
+    if root.is_none() && !modern {
         docref(req, Level::Warning, "Document Missing Root Element");
         return Ok(Value::bool(false));
+    }
+    let parts = match validate_and_extract(uri.as_deref(), &name) {
+        Ok(parts) => parts,
+        Err(code) => {
+            let code = if modern { code } else { Code::Namespace };
+            let strict = strict(req, this);
+            dom_error(req, code, strict)?;
+            return Ok(Value::bool(false));
+        }
     };
-    let result = validate_and_extract(uri.as_deref(), &name)
-        .map_err(|_| Code::Namespace)
-        .and_then(|(local, prefix)| {
-            let Some(node) = Node::new_attr(Some(doc), &local, None) else {
-                return Err(Code::InvalidState);
-            };
-            if let Some(uri) = uri.as_deref().filter(|u| !u.is_empty()) {
-                let found = root.search_ns_by_href(Some(doc), uri);
-                let ns = if name == b"xmlns" || prefix.as_deref() == Some(b"xml") {
-                    if let Some(ns) = found {
-                        Some(ns)
-                    } else {
-                        let ns = Ns::new(None, Some(uri), prefix.as_deref());
-                        if let Some(ns) = ns {
-                            ns.move_to_old(Some(doc));
-                        }
-                        ns
-                    }
-                } else {
-                    if let Some(ns) = found.filter(|ns| ns.prefix().is_some()) {
-                        Some(ns)
-                    } else {
-                        let p = prefix.clone().unwrap_or_else(|| b"default".to_vec());
-                        if let Some(ns) = get_ns_unchecked(root, uri, Some(&p)) {
-                            Some(ns)
-                        } else {
-                            node.free();
-                            return Err(Code::Namespace);
-                        }
-                    }
-                };
-                node.set_ns(ns);
-            }
-            Ok(node)
-        });
+    if modern {
+        let (local, prefix) = parts;
+        let Some(node) = Node::new_attr(Some(doc), &local, None) else {
+            return Err(crate::dom_throw(req, Code::InvalidState));
+        };
+        if let Some(uri) = uri.as_deref().filter(|u| !u.is_empty()) {
+            let ns = crate::element::mapped_ns(req, this, Some(doc), prefix.as_deref(), Some(uri));
+            node.set_ns(ns);
+        }
+        return object_for(req, node, Some(this));
+    }
+    let (local, prefix) = parts;
+    let result = legacy_attribute_ns(doc, root, uri.as_deref(), &name, &local, prefix.as_deref());
     match result {
         Ok(node) => object_for(req, node, Some(this)),
         Err(code) => {
@@ -908,6 +1247,52 @@ fn create_attribute_ns(req: &mut Request) -> Result<Value, Thrown> {
             Ok(Value::bool(false))
         }
     }
+}
+
+/// The legacy branch of `DOMDocument::createAttributeNS` past the name's
+/// check: the attribute, its namespace one the root declares or a fresh
+/// declaration on it.
+fn legacy_attribute_ns(
+    doc: Node,
+    root: Option<Node>,
+    uri: Option<&[u8]>,
+    name: &[u8],
+    local: &[u8],
+    prefix: Option<&[u8]>,
+) -> Result<Node, Code> {
+    let Some(node) = Node::new_attr(Some(doc), local, None) else {
+        return Err(Code::InvalidState);
+    };
+    if let Some(uri) = uri.filter(|u| !u.is_empty())
+        && let Some(root) = root
+    {
+        let found = root.search_ns_by_href(Some(doc), uri);
+        let ns = if name == b"xmlns" || prefix == Some(b"xml") {
+            if let Some(ns) = found {
+                Some(ns)
+            } else {
+                let ns = Ns::new(None, Some(uri), prefix);
+                if let Some(ns) = ns {
+                    ns.move_to_old(Some(doc));
+                }
+                ns
+            }
+        } else {
+            if let Some(ns) = found.filter(|ns| ns.prefix().is_some()) {
+                Some(ns)
+            } else {
+                let p = prefix.unwrap_or(b"default");
+                if let Some(ns) = get_ns_unchecked(root, uri, Some(p)) {
+                    Some(ns)
+                } else {
+                    node.free();
+                    return Err(Code::Namespace);
+                }
+            }
+        };
+        node.set_ns(ns);
+    }
+    Ok(node)
 }
 
 /// `DOMDocument::getElementsByTagName(string $qualifiedName): DOMNodeList`,
@@ -936,12 +1321,37 @@ fn get_elements_by_tag_name(req: &mut Request) -> Result<Value, Thrown> {
         MapKind::ByTagName {
             local: name,
             ns: None,
+            qname: false,
         },
     )
 }
 
 /// `getElementsByTagNameNS(?string $namespace, string $localName): DOMNodeList`.
 fn get_elements_by_tag_name_ns(req: &mut Request) -> Result<Value, Thrown> {
+    elements_by_tag_name_ns(req, "DOMNodeList")
+}
+
+/// `dom_element_get_elements_by_tag_name_ns`: a list of `class` over the
+/// elements of one namespace and local name, `null` for no namespace.
+///
+/// ```php
+/// $d = new DOMDocument;
+/// $d->loadXML('<r xmlns:p="urn:p"><a/><p:a/><p:b/></r>');
+/// $m = Dom\XMLDocument::createFromString('<r xmlns:p="urn:p"><a/><p:a/><p:b/></r>');
+/// $l = $d->getElementsByTagNameNS('urn:p', '*');
+/// $h = $m->getElementsByTagNameNS(null, 'a');
+/// var_dump(get_class($l), $l->length, get_class($h), $h->length, $m->documentElement->getElementsByTagNameNS('*', 'a')->length);
+/// try { $d->getElementsByTagNameNS("a\0", 'b'); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// string(11) "DOMNodeList"
+/// int(2)
+/// string(18) "Dom\HTMLCollection"
+/// int(1)
+/// int(2)
+/// DOMDocument::getElementsByTagNameNS(): Argument #1 ($namespace) must not contain any null bytes
+/// ```
+pub(crate) fn elements_by_tag_name_ns(req: &mut Request, class: &str) -> Result<Value, Thrown> {
     arity(req, 2, 2)?;
     // `Z_PARAM_PATH_OR_NULL`, then `Z_PARAM_PATH`.
     let ns = nullable_bytes_arg(req, 1)?.unwrap_or_default();
@@ -953,10 +1363,11 @@ fn get_elements_by_tag_name_ns(req: &mut Request) -> Result<Value, Thrown> {
     crate::create(
         req,
         this,
-        "DOMNodeList",
+        class,
         MapKind::ByTagName {
             local: name,
             ns: Some(ns),
+            qname: false,
         },
     )
 }
@@ -1027,6 +1438,89 @@ fn import_node(req: &mut Request) -> Result<Value, Thrown> {
     object_for(req, copy, Some(this))
 }
 
+/// `dom_modern_document_import_node`: `Dom\Document::importNode` and
+/// `importLegacyNode`, the copy made into this document with its
+/// namespaces the mapper's; a document refused, a failed copy an
+/// `Invalid State Error`.
+fn modern_import(req: &mut Request) -> Result<Value, Thrown> {
+    arity(req, 1, 2)?;
+    let node_obj = object_arg(req, 1)?;
+    let deep = bool_arg(req, 2, false)?;
+    let (this, doc) = this_node(req)?;
+    let Some(node_obj) = node_obj else {
+        // `?Dom\Node $node` lets `null` through to `O`, which refuses it.
+        return Err(arg_type_error(req, 1, "be of type Dom\\Node, null given"));
+    };
+    let node = fetch(req, node_obj)?;
+    if node.kind().is_document() {
+        return Err(crate::dom_throw(req, Code::NotSupported));
+    }
+    if node.doc() == Some(doc) {
+        return object_for(req, node, Some(this));
+    }
+    let copy = dom_mut(req, this)
+        .and_then(|d| crate::private::of(&mut d.obj))
+        .and_then(|p| crate::node::clone_node_modern(&mut p.mapper, node, Some(doc), deep));
+    let Some(copy) = copy else {
+        return Err(crate::dom_throw(req, Code::InvalidState));
+    };
+    object_for(req, copy, Some(this))
+}
+
+/// `Dom\Document::importNode(?Dom\Node $node, bool $deep = false): Dom\Node`.
+///
+/// ```php
+/// $a = Dom\XMLDocument::createFromString('<r xmlns:p="urn:p"><p:c x="1">t</p:c></r>');
+/// $b = Dom\XMLDocument::createFromString('<s/>');
+/// $r = $a->documentElement;
+/// $c = $r->firstChild;
+/// $n = $b->importNode($c, true);
+/// $shallow = $b->importNode($c);
+/// var_dump($n->ownerDocument === $b, $n->parentNode, $n->namespaceURI, $n->getAttribute('x'), $n->textContent, $shallow->hasChildNodes());
+/// $s = $b->documentElement;
+/// var_dump($b->importNode($s) === $s);
+/// try { $b->importNode($a); } catch (DOMException $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// bool(true)
+/// NULL
+/// string(5) "urn:p"
+/// string(1) "1"
+/// string(1) "t"
+/// bool(false)
+/// bool(true)
+/// Not Supported Error
+/// ```
+fn import_node_modern(req: &mut Request) -> Result<Value, Thrown> {
+    modern_import(req)
+}
+
+/// `Dom\Document::importLegacyNode(DOMNode $node, bool $deep = false): Dom\Node`.
+///
+/// ```php
+/// $old = new DOMDocument;
+/// $old->loadXML('<r xmlns="urn:d" xmlns:p="urn:p"><p:c a="1"/></r>');
+/// $d = Dom\XMLDocument::createEmpty();
+/// $root = $old->documentElement;
+/// $n = $d->importLegacyNode($root, true);
+/// $c = $n->firstChild;
+/// var_dump(get_class($n), $n->namespaceURI, $c->namespaceURI, $n->getAttributeNames());
+/// ```
+/// ```expect
+/// string(11) "Dom\Element"
+/// string(5) "urn:d"
+/// string(5) "urn:p"
+/// array(2) {
+///   [0]=>
+///   string(5) "xmlns"
+///   [1]=>
+///   string(7) "xmlns:p"
+/// }
+/// ```
+fn import_legacy_node(req: &mut Request) -> Result<Value, Thrown> {
+    modern_import(req)
+}
+
 /// `DOMDocument::getElementById(string $elementId): ?DOMElement`.
 ///
 /// ```php
@@ -1045,7 +1539,7 @@ fn get_element_by_id(req: &mut Request) -> Result<Value, Thrown> {
     arity(req, 1, 1)?;
     let id = bytes_arg(req, 1)?;
     let (this, doc) = this_node(req)?;
-    let modified = dom(req, this).is_none_or(|d| !d.obj.has_document() || d.obj.modification() > 2);
+    let modified = crate::modified_since_parsing(req, this);
     if !modified {
         let found = doc.get_id(&id).and_then(Node::parent);
         return nullable_object(req, found, Some(this));
@@ -1084,6 +1578,40 @@ fn get_element_by_id(req: &mut Request) -> Result<Value, Thrown> {
 /// <s><c/></s>
 /// ```
 fn adopt_node(req: &mut Request) -> Result<Value, Thrown> {
+    adopt_node_as(req, false)
+}
+
+/// `Dom\Document::adoptNode(Dom\Node $node): Dom\Node`: the node's
+/// namespaces moved to this document's mapper; a failed adoption an
+/// `Invalid State Error`.
+///
+/// ```php
+/// $a = Dom\XMLDocument::createFromString('<r xmlns:p="urn:p"><p:c q="1"/></r>');
+/// $b = Dom\XMLDocument::createFromString('<s/>');
+/// $r = $a->documentElement;
+/// $c = $r->firstChild;
+/// var_dump($b->adoptNode($c) === $c, $c->ownerDocument === $b, $r->hasChildNodes(), $c->namespaceURI, $c->parentNode);
+/// $s = $b->documentElement;
+/// $s->append($c);
+/// var_dump($s->firstChild === $c, $c->getAttribute('q'));
+/// try { $b->adoptNode($a); } catch (DOMException $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// string(5) "urn:p"
+/// NULL
+/// bool(true)
+/// string(1) "1"
+/// Not Supported Error
+/// ```
+fn adopt_node_modern(req: &mut Request) -> Result<Value, Thrown> {
+    adopt_node_as(req, true)
+}
+
+/// `dom_document_adopt_node`.
+fn adopt_node_as(req: &mut Request, modern: bool) -> Result<Value, Thrown> {
     arity(req, 1, 1)?;
     let Some(node_obj) = object_arg(req, 1)? else {
         return Ok(Value::bool(false));
@@ -1104,6 +1632,9 @@ fn adopt_node(req: &mut Request) -> Result<Value, Thrown> {
     }
     let (this, doc) = this_node(req)?;
     if !adopt(req, this, node, doc) {
+        if modern {
+            return Err(crate::dom_throw(req, Code::InvalidState));
+        }
         return Ok(Value::bool(false));
     }
     let value = node_obj.as_value();
@@ -1137,6 +1668,47 @@ fn xinclude(req: &mut Request) -> Result<Value, Thrown> {
     } else {
         Value::int(i64::from(err))
     })
+}
+
+/// `Dom\XMLDocument::xinclude(int $options = 0): int`: flags past an
+/// `int` a `ValueError`, a failed substitution an `Invalid Modification
+/// Error`.
+///
+/// ```php
+/// $f = tempnam(sys_get_temp_dir(), 'dom');
+/// file_put_contents($f, '<x/>');
+/// $d = Dom\XMLDocument::createFromString('<r xmlns:xi="http://www.w3.org/2001/XInclude"><xi:include href="' . $f . '"/></r>');
+/// var_dump($d->xinclude());
+/// $r = $d->documentElement;
+/// var_dump($r->firstChild->tagName);
+/// unlink($f);
+/// try { $d->xinclude(PHP_INT_MAX); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// int(1)
+/// string(1) "x"
+/// Dom\XMLDocument::xinclude(): Argument #1 ($options) is too large
+/// ```
+fn xinclude_modern(req: &mut Request) -> Result<Value, Thrown> {
+    arity(req, 0, 1)?;
+    let flags = long_arg(req, 1, 0)?;
+    let Ok(flags) = i32::try_from(flags) else {
+        return Err(php_ext::raising::argument_error(
+            req,
+            "ValueError",
+            1,
+            "is too large",
+        ));
+    };
+    let (this, doc) = this_node(req)?;
+    strip_xinclude_references(doc);
+    let (err, raised) = Parser::xinclude(doc, flags);
+    Errors::route(req, raised);
+    invalidate(req, this);
+    if err < 0 {
+        return Err(crate::dom_throw(req, Code::InvalidModification));
+    }
+    Ok(Value::int(i64::from(err)))
 }
 
 /// `dom_xinclude_strip_fallback_references` (GH-14702, GH-17847): every
@@ -1200,10 +1772,20 @@ fn strip_references(base: Node) {
 /// ```
 fn validate(req: &mut Request) -> Result<Value, Thrown> {
     arity(req, 0, 0)?;
-    let (_, doc) = this_node(req)?;
+    let (this, doc) = this_node(req)?;
+    let guard = ns_guard(req, this, doc);
     let (valid, raised) = Validate::dtd(doc);
+    drop(guard);
     Errors::route(req, generic(raised));
     Ok(Value::bool(valid))
+}
+
+/// `dom_validate_ns_guard_begin`: a document of the modern classes keeps
+/// its declarations as `xmlns` attributes, which libxml's validators do
+/// not read, so they are lent back to `nsDef` while one runs and taken
+/// back when the guard drops (`dom_validate_ns_guard_end`).
+fn ns_guard(req: &Request, this: PhpObject, doc: Node) -> Option<crate::node::NsLinks> {
+    crate::modern::follows_spec(req, this).then(|| crate::node::NsLinks::relink(doc.root()))
 }
 
 /// `dom_document_schema_validate` and `dom_document_relaxNG_validate`.
@@ -1215,7 +1797,7 @@ fn schema_validate_as(req: &mut Request, schema: Schema, from_file: bool) -> Res
     if source.is_empty() {
         return Err(must_not_be_empty(req, 1));
     }
-    let (_, doc) = this_node(req)?;
+    let (this, doc) = this_node(req)?;
     let label = if matches!(schema, Schema::Xsd) {
         "Schema"
     } else {
@@ -1235,7 +1817,9 @@ fn schema_validate_as(req: &mut Request, schema: Schema, from_file: bool) -> Res
     } else {
         Source::Memory(&source)
     };
+    let guard = ns_guard(req, this, doc);
     let (answer, raised) = Validate::schema(doc, schema, source, i32::try_from(flags).unwrap_or(0));
+    drop(guard);
     Errors::route(req, generic(raised));
     match answer {
         Validated::InvalidSchema => {
@@ -1255,6 +1839,25 @@ fn schema_validate(req: &mut Request) -> Result<Value, Thrown> {
     schema_validate_as(req, Schema::Xsd, true)
 }
 
+/// `DOMDocument::schemaValidateSource(string $source, int $flags = 0): bool`,
+/// which `Dom\Document` aliases; a modern document's declarations lent to
+/// the validator.
+///
+/// ```php
+/// $xml = '<root xmlns="urn:test" xmlns:ref="urn:other"><item target="ref:something"/></root>';
+/// $xsd = '<schema xmlns="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:test" elementFormDefault="qualified"><element name="root"><complexType><sequence><element name="item"><complexType><attribute name="target" type="QName"/></complexType></element></sequence></complexType></element></schema>';
+/// $d = Dom\XMLDocument::createFromString($xml);
+/// var_dump($d->schemaValidateSource($xsd), $d->documentElement->getAttributeNames());
+/// ```
+/// ```expect
+/// bool(true)
+/// array(2) {
+///   [0]=>
+///   string(5) "xmlns"
+///   [1]=>
+///   string(9) "xmlns:ref"
+/// }
+/// ```
 fn schema_validate_source(req: &mut Request) -> Result<Value, Thrown> {
     schema_validate_as(req, Schema::Xsd, false)
 }
@@ -1286,11 +1889,41 @@ fn relaxng_validate_source(req: &mut Request) -> Result<Value, Thrown> {
 /// Error: DOMDocument::registerNodeClass(): Argument #2 ($extendedClass) must be a class name derived from DOMElement or null, stdClass given
 /// ```
 fn register_node_class(req: &mut Request) -> Result<Value, Thrown> {
+    register_node_class_as(req, false)
+}
+
+/// `Dom\Document::registerNodeClass(string $baseClass, ?string $extendedClass): void`:
+/// the base a `Dom\Node` class.
+///
+/// ```php
+/// class E extends Dom\Element {}
+/// $d = Dom\XMLDocument::createFromString('<r/>');
+/// var_dump($d->registerNodeClass('Dom\Element', 'E'));
+/// echo get_class($d->documentElement), ' ', get_class($d->createElement('x')), "\n";
+/// $d->registerNodeClass('Dom\Element', null);
+/// echo get_class($d->createElement('y')), "\n";
+/// try { $d->registerNodeClass('DOMElement', null); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { $d->registerNodeClass('Dom\Element', 'Dom\Attr'); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// NULL
+/// E E
+/// Dom\Element
+/// Dom\Document::registerNodeClass(): Argument #1 ($baseClass) must be a class name derived from Dom\Node, DOMElement given
+/// Dom\Document::registerNodeClass(): Argument #2 ($extendedClass) must be a class name derived from Dom\Element or null, Dom\Attr given
+/// ```
+fn register_node_class_modern(req: &mut Request) -> Result<Value, Thrown> {
+    register_node_class_as(req, true)
+}
+
+/// `dom_document_register_node_class`.
+fn register_node_class_as(req: &mut Request, modern: bool) -> Result<Value, Thrown> {
     arity(req, 2, 2)?;
     let base_name = bytes_arg(req, 1)?;
     let extended = nullable_bytes_arg(req, 2)?;
     let this = crate::this_intern(req)?;
-    let node_class = crate::class(req, "DOMNode")?;
+    let node_name = if modern { "Dom\\Node" } else { "DOMNode" };
+    let node_class = crate::class(req, node_name)?;
     let base = match php_ext::call::lookup_class(req, &base_name)? {
         Some(c) if req.class_decl(c).is_some() && crate::class_extends(req, c, node_class) => c,
         Some(c) => {
@@ -1298,7 +1931,7 @@ fn register_node_class(req: &mut Request) -> Result<Value, Thrown> {
             return Err(arg_type_error(
                 req,
                 1,
-                &format!("be a class name derived from DOMNode, {shown} given"),
+                &format!("be a class name derived from {node_name}, {shown} given"),
             ));
         }
         None => {
@@ -1352,7 +1985,11 @@ fn register_node_class(req: &mut Request) -> Result<Value, Thrown> {
             p.classmap.push((base, ext));
         }
     }
-    Ok(Value::bool(true))
+    Ok(if modern {
+        Value::null()
+    } else {
+        Value::bool(true)
+    })
 }
 
 /// Whether the node object is of a legacy document class.
@@ -1419,6 +2056,20 @@ pub(crate) const METHODS: &[(&str, Entry)] = &[
         "DOMDocument::replaceChildren",
         crate::parent::REPLACE_CHILDREN,
     ),
+    ("Dom\\Document::createElement", create_element_modern),
+    ("Dom\\Document::createElementNS", create_element_ns_modern),
+    (
+        "Dom\\Document::createProcessingInstruction",
+        create_processing_instruction_modern,
+    ),
+    ("Dom\\Document::importNode", import_node_modern),
+    ("Dom\\Document::importLegacyNode", import_legacy_node),
+    ("Dom\\Document::adoptNode", adopt_node_modern),
+    (
+        "Dom\\Document::registerNodeClass",
+        register_node_class_modern,
+    ),
+    ("Dom\\XMLDocument::xinclude", xinclude_modern),
 ];
 
 /// `getElementsByTagName`, which `DOMElement` lists too.

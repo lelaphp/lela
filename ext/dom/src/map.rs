@@ -25,8 +25,21 @@ pub(crate) enum MapKind {
     /// `php_dom_obj_map_attributes`.
     Attributes,
     /// `php_dom_obj_map_by_tag_name`: `ns` none for any namespace, empty
-    /// for none.
-    ByTagName { local: Vec<u8>, ns: Option<Vec<u8>> },
+    /// for none; `qname` where the name is matched as a qualified name,
+    /// lowercased for an HTML element of an HTML document, the modern
+    /// classes' match when no namespace is given.
+    ByTagName {
+        local: Vec<u8>,
+        ns: Option<Vec<u8>>,
+        qname: bool,
+    },
+    /// `php_dom_obj_map_by_class_name`: the tokens every match carries.
+    ByClassName(Vec<Vec<u8>>),
+    /// `php_dom_obj_map_child_elements`.
+    ChildElements,
+    /// `php_dom_obj_map_noop`: nothing, what `getElementsByClassName`
+    /// answers for no token.
+    Noop,
     /// `php_dom_obj_map_entities`.
     Entities,
     /// `php_dom_obj_map_notations`.
@@ -40,6 +53,34 @@ pub(crate) struct Map {
     /// `baseobj`, one owner held; none for a node set.
     pub(crate) base: Option<PhpObject>,
     pub(crate) kind: MapKind,
+    /// The `read_dimension` and `has_dimension` its class installs.
+    pub(crate) dims: Dims,
+}
+
+/// The dimension handlers of the five list and map classes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Dims {
+    /// `dom_nodelist_read_dimension` and `dom_nodemap_read_dimension`,
+    /// told apart by whether the map is named ([`named_keys`]).
+    Legacy,
+    /// `dom_modern_nodelist_read_dimension`: an index only.
+    ModernList,
+    /// `dom_modern_nodemap_read_dimension`: an index, or a name.
+    ModernMap,
+    /// `dom_html_collection_read_dimension`: an index, or `namedItem`.
+    Collection,
+}
+
+impl Dims {
+    /// The handlers of the class named.
+    pub(crate) fn of(class: &str) -> Dims {
+        match class {
+            "Dom\\NodeList" => Dims::ModernList,
+            "Dom\\NamedNodeMap" | "Dom\\DtdNamedNodeMap" => Dims::ModernMap,
+            "Dom\\HTMLCollection" => Dims::Collection,
+            _ => Dims::Legacy,
+        }
+    }
 }
 
 /// The view `object` is, what a reader needs of it copied out.
@@ -57,9 +98,19 @@ enum View {
 #[derive(Clone)]
 enum Walk {
     Children,
+    ChildElements,
     Attributes,
-    ByTagName { local: Vec<u8>, ns: Option<Vec<u8>> },
+    ByTagName {
+        local: Vec<u8>,
+        ns: Option<Vec<u8>>,
+        qname: bool,
+    },
+    ByClassName {
+        tokens: Vec<Vec<u8>>,
+        quirks: bool,
+    },
     Table(DtdTable),
+    Noop,
 }
 
 fn view(req: &Request, object: PhpObject) -> View {
@@ -70,19 +121,30 @@ fn view(req: &Request, object: PhpObject) -> View {
     else {
         return View::None;
     };
+    let Some(base) = map.base else {
+        if let MapKind::NodeSet(array) = &map.kind {
+            return View::Set(*array);
+        }
+        return View::None;
+    };
     let walk = match &map.kind {
         MapKind::NodeSet(array) => return View::Set(*array),
         MapKind::ChildNodes => Walk::Children,
+        MapKind::ChildElements => Walk::ChildElements,
         MapKind::Attributes => Walk::Attributes,
-        MapKind::ByTagName { local, ns } => Walk::ByTagName {
+        MapKind::ByTagName { local, ns, qname } => Walk::ByTagName {
             local: local.clone(),
             ns: ns.clone(),
+            qname: *qname,
+        },
+        MapKind::ByClassName(tokens) => Walk::ByClassName {
+            tokens: tokens.clone(),
+            quirks: dom(req, base)
+                .is_some_and(|d| d.obj.quirks() == php_ext_libxml::ffi::Quirks::Quirks),
         },
         MapKind::Entities => Walk::Table(DtdTable::Entities),
         MapKind::Notations => Walk::Table(DtdTable::Notations),
-    };
-    let Some(base) = map.base else {
-        return View::None;
+        MapKind::Noop => Walk::Noop,
     };
     View::Nodes {
         base,
@@ -100,12 +162,51 @@ fn first_of_container(node: Node) -> Option<Node> {
     }
 }
 
+/// `dom_match_qualified_name_according_to_spec`: `qname` against the
+/// node's prefix and local name.
+///
+/// ```php
+/// $h = Dom\HTMLDocument::createFromString('<!doctype html><p DATA-X=1>x</p>');
+/// $p = $h->body->firstChild;
+/// var_dump($p->getAttributeNode('Data-X')->name, $p->attributes['DATA-x']->value, $h->getElementsByTagName('P')->length);
+/// $x = Dom\XMLDocument::createFromString('<r xmlns:q="urn:q"><q:a q:b="1"/><A/></r>');
+/// var_dump($x->getElementsByTagName('q:a')->length, $x->getElementsByTagName('a')->length, $x->documentElement->firstChild->getAttributeNode('q:b')->value);
+/// ```
+/// ```expect
+/// string(6) "data-x"
+/// string(1) "1"
+/// int(1)
+/// int(1)
+/// int(0)
+/// string(1) "1"
+/// ```
+pub(crate) fn qname_matches(qname: &[u8], node: Node) -> bool {
+    match node.ns().and_then(php_ext_libxml::ffi::Ns::prefix) {
+        Some(prefix) => {
+            qname.len() > prefix.len()
+                && qname.starts_with(&prefix)
+                && qname.get(prefix.len()) == Some(&b':')
+                && qname.get(prefix.len() + 1..) == Some(node.name().as_slice())
+        }
+        None => node.name() == qname,
+    }
+}
+
 /// `dom_get_elements_by_tag_name_ns_raw`'s test of one element.
-fn tag_matches(node: Node, local: &[u8], ns: Option<&[u8]>) -> bool {
+fn tag_matches(node: Node, local: &[u8], ns: Option<&[u8]>, qname: bool) -> bool {
     if node.kind() != Kind::Element {
         return false;
     }
-    let local_ok = local == b"*" || node.name() == local;
+    let local_ok = local == b"*"
+        || if qname {
+            if crate::private::html_in_html_document(node) {
+                qname_matches(&local.to_ascii_lowercase(), node)
+            } else {
+                qname_matches(local, node)
+            }
+        } else {
+            node.name() == local
+        };
     let ns_ok = match ns {
         None | Some(b"*") => true,
         Some(b"") => node.ns().is_none(),
@@ -135,18 +236,47 @@ fn nodes(node: Node, walk: &Walk) -> Vec<Node> {
                 at = n.next();
             }
         }
-        Walk::ByTagName { local, ns } => {
+        Walk::ChildElements => {
+            let mut at = node.children();
+            while let Some(n) = at {
+                if n.kind() == Kind::Element {
+                    out.push(n);
+                }
+                at = n.next();
+            }
+        }
+        Walk::ByTagName { local, ns, qname } => {
             let mut at = first_of_container(node);
             while let Some(n) = at {
-                if tag_matches(n, local, ns.as_deref()) {
+                if tag_matches(n, local, ns.as_deref(), *qname) {
                     out.push(n);
                 }
                 at = crate::next_in_tree_order(n, node);
             }
         }
-        Walk::Table(_) => {}
+        Walk::ByClassName { tokens, quirks } => {
+            let mut at = first_of_container(node);
+            while let Some(n) = at {
+                if matches_class_name(n, tokens, *quirks) {
+                    out.push(n);
+                }
+                at = crate::next_in_tree_order(n, node);
+            }
+        }
+        Walk::Table(_) | Walk::Noop => {}
     }
     out
+}
+
+/// `dom_matches_class_name`.
+fn matches_class_name(node: Node, tokens: &[Vec<u8>], quirks: bool) -> bool {
+    if node.kind() != Kind::Element {
+        return false;
+    }
+    let Some(attr) = node.has_ns_prop(b"class", None) else {
+        return false;
+    };
+    crate::token_list::all_contained(tokens, &attr.attr_value(), quirks)
 }
 
 /// `php_dom_get_nodelist_length` and `php_dom_get_namednodemap_length`.
@@ -228,6 +358,7 @@ fn named(
     let found = match kind {
         Walk::Attributes => match ns {
             Some(uri) => node.has_ns_prop(name, Some(uri)),
+            None if crate::modern::follows_spec(req, base) => attribute_node(node, name),
             None => node.has_prop(name),
         },
         Walk::Table(DtdTable::Entities) => node
@@ -241,6 +372,175 @@ fn named(
     match found {
         Some(n) => object_for(req, n, Some(base)),
         None => Ok(Value::null()),
+    }
+}
+
+/// `php_dom_get_attribute_node`: the first attribute whose qualified name
+/// is `name`, lowercased first on an HTML element of an HTML document.
+///
+/// ```php
+/// $h = Dom\HTMLDocument::createFromString('<!doctype html><p DATA-X=1>x</p>');
+/// $p = $h->body->firstChild;
+/// var_dump($p->getAttributeNode('Data-X')->name, $p->attributes['DATA-x']->value, $h->getElementsByTagName('P')->length);
+/// $x = Dom\XMLDocument::createFromString('<r xmlns:q="urn:q"><q:a q:b="1"/><A/></r>');
+/// var_dump($x->getElementsByTagName('q:a')->length, $x->getElementsByTagName('a')->length, $x->documentElement->firstChild->getAttributeNode('q:b')->value);
+/// ```
+/// ```expect
+/// string(6) "data-x"
+/// string(1) "1"
+/// int(1)
+/// int(1)
+/// int(0)
+/// string(1) "1"
+/// ```
+pub(crate) fn attribute_node(elem: Node, name: &[u8]) -> Option<Node> {
+    let name = if crate::private::html_in_html_document(elem) {
+        name.to_ascii_lowercase()
+    } else {
+        name.to_vec()
+    };
+    let mut at = elem.properties();
+    while let Some(attr) = at {
+        if qname_matches(&name, attr) {
+            return Some(attr);
+        }
+        at = attr.next();
+    }
+    None
+}
+
+/// `dom_html_collection_named_item`: the first element of the collection
+/// whose `id` is `key`, or, in the HTML namespace, whose `name` is.
+fn collection_named(req: &mut Request, object: PhpObject, key: &[u8]) -> Result<Value, Thrown> {
+    if key.is_empty() {
+        return Ok(Value::null());
+    }
+    let View::Nodes {
+        base,
+        node: Some(node),
+        kind,
+    } = view(req, object)
+    else {
+        return Ok(Value::null());
+    };
+    for candidate in nodes(node, &kind) {
+        let id = candidate.has_ns_prop(b"id", None);
+        let hit = id.is_some_and(|a| a.attr_value() == key)
+            || (crate::private::ns_is(candidate, crate::private::HTML_NS)
+                && candidate
+                    .has_ns_prop(b"name", None)
+                    .is_some_and(|a| a.attr_value() == key));
+        if hit {
+            return object_for(req, candidate, Some(base));
+        }
+    }
+    Ok(Value::null())
+}
+
+/// `Dom\HTMLCollection::namedItem(string $key): ?Dom\Element`. php's
+/// walk of a child-element collection never moves past the first child
+/// element (`dom_map_collection_named_item_elements_iter` advances only
+/// from a candidate that is not the first child), so a key the first
+/// element does not carry loops forever there; this walk moves on.
+///
+/// ```php
+/// $d = Dom\HTMLDocument::createEmpty();
+/// $r = $d->appendChild($d->createElement('div'));
+/// $a = $r->appendChild($d->createElement('p'));
+/// $a->setAttribute('name', 'n');
+/// $a->setAttribute('id', 'i');
+/// $c = $r->children;
+/// var_dump($c->length, $c->namedItem('n') === $a, $c['i'] === $a, $c->namedItem(''), $c[0] === $a, isset($c['n']));
+/// ```
+/// ```expect
+/// int(1)
+/// bool(true)
+/// bool(true)
+/// NULL
+/// bool(true)
+/// bool(true)
+/// ```
+fn named_item(req: &mut Request) -> Result<Value, Thrown> {
+    arity(req, 1, 1)?;
+    let key = crate::bytes_arg(req, 1)?;
+    let this = this(req)?;
+    collection_named(req, this, &key)
+}
+
+/// `dom_modern_nodelist_get_index`: an index, a name, or neither.
+enum Index {
+    Long(i64),
+    Str(PhpString),
+    Illegal,
+}
+
+fn modern_index(req: &mut Request, value: &Value) -> Result<Index, Thrown> {
+    let v = value.deref();
+    Ok(match v.as_ref() {
+        ValueRef::Int(n) => Index::Long(n),
+        ValueRef::Float(f) => Index::Long(float_offset(req, f)?),
+        ValueRef::Str(s) => match Key::from_string(*s) {
+            Key::Int(n) => Index::Long(n),
+            Key::Str(s) => Index::Str(s),
+        },
+        _ => Index::Illegal,
+    })
+}
+
+/// `zend_dval_to_lval_safe`: the integer a float offset makes, with php's
+/// deprecation where the cast drops a fraction.
+///
+/// ```php
+/// $d = Dom\XMLDocument::createFromString('<r><a/><b/></r>');
+/// $l = $d->documentElement->childNodes;
+/// var_dump($l[1.0]->localName, $l[1.1]->localName, isset($d->documentElement->classList[0.5]));
+/// ```
+/// ```expect
+///
+/// Deprecated: Implicit conversion from float 1.1 to int loses precision in %s on line 4
+///
+/// Deprecated: Implicit conversion from float 0.5 to int loses precision in %s on line 4
+/// string(1) "b"
+/// string(1) "b"
+/// bool(false)
+/// ```
+pub(crate) fn float_offset(req: &mut Request, f: f64) -> Result<i64, Thrown> {
+    let n = php_ext::coerce::float_to_long(f);
+    // `zend_is_long_compatible` is `(double)l == d`, an exact test.
+    #[allow(clippy::cast_precision_loss, clippy::float_cmp)]
+    let compatible = (n as f64) == f;
+    if !compatible && f.is_finite() && f.abs() < 9.2e18 {
+        let text = php_ext::coerce::to_string(req, &Value::float(f))?;
+        let shown = String::from_utf8_lossy(text.as_bytes()).into_owned();
+        req.release(Value::string(text));
+        php_ext::raising::deprecated(
+            req,
+            &format!("Implicit conversion from float {shown} to int loses precision"),
+        );
+    }
+    Ok(n)
+}
+
+/// `zend_illegal_container_offset`.
+fn illegal_offset(req: &mut Request, object: PhpObject, value: &Value, isset: bool) -> Thrown {
+    let given = php_ext::coerce::type_name(req, value);
+    let message = if isset {
+        format!("Cannot access offset of type {given} in isset or empty")
+    } else {
+        let class = class_name(req, object.class());
+        format!("Cannot access offset of type {given} on {class}")
+    };
+    throw(req, "TypeError", &message)
+}
+
+/// The dimensions a map's class reads, `Dims`.
+fn dims(req: &Request, object: PhpObject) -> Dims {
+    match dom(req, object) {
+        Some(Dom {
+            extra: Extra::Map(m),
+            ..
+        }) => m.dims,
+        _ => Dims::Legacy,
     }
 }
 
@@ -369,6 +669,7 @@ pub(crate) const METHODS: &[(&str, Entry)] = &[
     ("DOMNamedNodeMap::item", map_item),
     ("DOMNamedNodeMap::count", count),
     ("DOMNamedNodeMap::getIterator", get_iterator),
+    ("Dom\\HTMLCollection::namedItem", named_item),
 ];
 
 /// `dom_nodelist_length_read` and `dom_namednodemap_length_read`.
@@ -456,14 +757,26 @@ impl ObjectHandlers for MapHandlers {
         object: PhpObject,
         offset_value: Option<&Value>,
     ) -> Result<Value, Thrown> {
+        let dims = dims(req, object);
         let Some(offset_value) = offset_value else {
             let name = class_name(req, object.class());
-            return Err(throw(
-                req,
-                "Error",
-                &format!("Cannot access {name} without offset"),
-            ));
+            let message = if dims == Dims::Legacy {
+                format!("Cannot access {name} without offset")
+            } else {
+                format!("Cannot append to {name}")
+            };
+            return Err(throw(req, "Error", &message));
         };
+        if dims != Dims::Legacy {
+            return match (dims, modern_index(req, offset_value)?) {
+                (_, Index::Long(n)) => item(req, object, n),
+                (Dims::ModernMap, Index::Str(name)) => named(req, object, name.as_bytes(), None),
+                (Dims::Collection, Index::Str(name)) => {
+                    collection_named(req, object, name.as_bytes())
+                }
+                _ => Err(illegal_offset(req, object, offset_value, false)),
+            };
+        }
         let is_list = !named_keys(req, object);
         match offset(req, offset_value)? {
             Err(name) if is_list => {
@@ -488,6 +801,25 @@ impl ObjectHandlers for MapHandlers {
         offset_value: &Value,
         _not_empty: bool,
     ) -> Result<bool, Thrown> {
+        let dims = dims(req, object);
+        if dims != Dims::Legacy {
+            return match (dims, modern_index(req, offset_value)?) {
+                (_, Index::Long(n)) => Ok(n >= 0 && n < length(req, object)),
+                (Dims::ModernMap, Index::Str(name)) => {
+                    let found = named(req, object, name.as_bytes(), None)?;
+                    let present = found.as_object().is_some();
+                    req.release(found);
+                    Ok(present)
+                }
+                (Dims::Collection, Index::Str(name)) => {
+                    let found = collection_named(req, object, name.as_bytes())?;
+                    let present = found.as_object().is_some();
+                    req.release(found);
+                    Ok(present)
+                }
+                _ => Err(illegal_offset(req, object, offset_value, true)),
+            };
+        }
         let is_list = !named_keys(req, object);
         match offset(req, offset_value)? {
             Err(_) if is_list => Ok(false),
@@ -514,10 +846,21 @@ impl ObjectHandlers for MapHandlers {
             return Ok(None);
         }
         let key = if named_keys(req, object) {
+            // `php_dom_iterator_current_key`: a modern attribute by its
+            // qualified name.
+            let modern = value
+                .as_object()
+                .is_some_and(|o| crate::modern::follows_spec(req, *o));
             let name = value
                 .as_object()
                 .and_then(|o| node_of(req, *o))
-                .map(Node::name)
+                .map(|n| {
+                    if modern && n.kind() == Kind::Attribute {
+                        crate::qualified_name(n)
+                    } else {
+                        n.name()
+                    }
+                })
                 .unwrap_or_default();
             string(req, &name)?
         } else {
