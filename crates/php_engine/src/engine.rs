@@ -27,6 +27,7 @@ use crate::api::abi::{Cache, Entry, Extension, NativeNew, ObjectHandlers, Startu
 use crate::api::request::{Aside, Ending, ExtensionId, Request};
 use crate::api::values::{ClassId, Value};
 use crate::exec;
+use crate::ini_syntax::{IniEvent, IniScanner, IniValue};
 use crate::streams::Standard;
 use crate::tier::{Nop, Tier, execute, reenter, resume};
 
@@ -213,6 +214,9 @@ pub(crate) struct Shared {
     /// the other constants, so a request that reads the name its host
     /// gave it allocates nothing ([`crate::constants::HOSTS`]).
     sapi_names: Vec<(Box<[u8]>, Zval)>,
+    /// What reading the host's ini entries wrote to `stderr` in php
+    /// ([`Configuration`]), for the host to write before it serves.
+    startup_errors: String,
     entry: Loop,
     /// The same loop for a serving inside a serving, `zend_call_function`
     /// over a user function: what [`Request::serve_user`] enters a
@@ -664,29 +668,149 @@ const CORE_INI: [(&str, &str); 41] = [
     ("syslog.filter", "no-ctrl"),
 ];
 
-/// A host's ini value as the ini scanner hands it to the table
-/// (`Z/Zend/zend_ini_scanner.l:491-501`): a bare `true`, `on` or `yes`
-/// is `1`, a bare `false`, `off`, `no`, `none` or `null` is the empty
-/// string, each in any case and with the spaces and tabs after it eaten,
-/// and every other value stands as written. A `-d` goes through the same
-/// scanner, `php_ini_builder_define` (`Z/main/php_ini_builder.c:63-81`)
-/// writing it as a `php.ini` line, and one whose value begins with a byte
-/// that is not alphanumeric it quotes first, so ` off` stands and `off `
-/// does not. That is why `ini_get('fatal_error_backtraces')` under the
-/// recipe's `fatal_error_backtraces=Off` answers `""` and never `Off`.
-fn scanned_ini_value(value: &str) -> Vec<u8> {
-    let bare = value
+/// `php_ini_builder_define`'s line (`Z/main/php_ini_builder.c:63-81`)
+/// for one `name=value`: as given, or with the value in double quotes
+/// where it opens with a byte that is neither alphanumeric nor a quote,
+/// so that ` off` and `;x` stand as written while `off ` is the boolean
+/// and `UTC;` is `UTC` before a comment.
+fn define_line(entries: &mut Vec<u8>, name: &str, value: &str) {
+    let quoted = value
         .bytes()
         .next()
-        .is_some_and(|first| first.is_ascii_alphanumeric());
-    if !bare {
-        return value.as_bytes().to_vec();
+        .is_some_and(|first| !first.is_ascii_alphanumeric() && first != b'"' && first != b'\'');
+    entries.extend_from_slice(name.as_bytes());
+    entries.push(b'=');
+    if quoted {
+        entries.push(b'"');
     }
-    let word = value.trim_end_matches([' ', '\t']).to_ascii_lowercase();
-    match word.as_str() {
-        "true" | "on" | "yes" => b"1".to_vec(),
-        "false" | "off" | "no" | "none" | "null" => Vec::new(),
-        _ => value.as_bytes().to_vec(),
+    entries.extend_from_slice(value.as_bytes());
+    if quoted {
+        entries.push(b'"');
+    }
+    entries.push(b'\n');
+}
+
+/// `php_init_config` over the host's `ini_entries`
+/// (`Z/main/php_ini.c:718-722`): the text read by the one INI grammar
+/// ([`crate::ini_syntax`]) in the normal scanner, each entry into the
+/// configuration table by `php_ini_parser_cb`, in the order first set and
+/// the last value of a name winning. A syntax error stops the parse with
+/// the entries before it kept, and `ini_error` writes its line to the
+/// process's `stderr`, the string's file named `Unknown`.
+struct Configuration {
+    table: Vec<(Vec<u8>, Vec<u8>)>,
+    stderr: String,
+}
+
+impl Configuration {
+    fn read(entries: &[u8], constants: &[ConstDecl]) -> Configuration {
+        let mut startup = Startup {
+            constants,
+            table: Vec::new(),
+            special: false,
+            diverted: false,
+        };
+        let stderr = match crate::ini_syntax::parse(entries, IniScanner::Normal, &mut startup) {
+            Ok(Ok(())) => String::new(),
+            Ok(Err((message, line))) => format!("PHP:  {message} in Unknown on line {line}\n"),
+            Err(never) => match never {},
+        };
+        Configuration {
+            table: startup.table,
+            stderr,
+        }
+    }
+}
+
+/// The grammar's host at startup: Zend's own constants and `main`'s,
+/// registered before `php_init_config` runs and so before any
+/// extension's; a `${…}` reads what the text set before it, then the
+/// process's environment; and `php_ini_parser_cb` over the table.
+struct Startup<'c> {
+    constants: &'c [ConstDecl],
+    table: Vec<(Vec<u8>, Vec<u8>)>,
+    /// `is_special_section`: the last section header was `[PATH…]` or
+    /// `[HOST…]`, where `extension=` is an entry like any other.
+    special: bool,
+    /// `active_ini_hash` is such a section's array, which a CLI never
+    /// reads, so the entries after it reach no directive.
+    diverted: bool,
+}
+
+impl crate::ini_syntax::Host for Startup<'_> {
+    type Error = std::convert::Infallible;
+
+    fn constant(&mut self, name: &[u8]) -> Result<Option<Vec<u8>>, Self::Error> {
+        let Some(decl) = self.constants.iter().find(|c| &*c.name.0 == name) else {
+            return Ok(None);
+        };
+        Ok(match &decl.value {
+            ConstExpr::Null | ConstExpr::Bool(false) => Some(Vec::new()),
+            ConstExpr::Bool(true) => Some(b"1".to_vec()),
+            ConstExpr::Long(n) => Some(n.to_string().into_bytes()),
+            ConstExpr::Double(d) => Some(self.double(*d)?),
+            ConstExpr::Str(s) => Some(s.to_vec()),
+            _ => None,
+        })
+    }
+
+    fn directive(&mut self, name: &[u8]) -> Option<Vec<u8>> {
+        self.table
+            .iter()
+            .find(|(n, _)| n.as_slice() == name)
+            .map(|(_, value)| value.clone())
+    }
+
+    fn env(&mut self, name: &[u8]) -> Option<Vec<u8>> {
+        std::env::var_os(&*String::from_utf8_lossy(name))
+            .map(std::ffi::OsString::into_encoded_bytes)
+    }
+
+    /// `zend_double_to_str` before any ini entry is registered, when
+    /// `EG(precision)` is still zero and `zend_gcvt` is handed one digit.
+    fn double(&mut self, d: f64) -> Result<Vec<u8>, Self::Error> {
+        Ok(php_heap::double_to_string(d, 1, php_heap::Exponent::Upper).into_bytes())
+    }
+
+    fn event(&mut self, event: IniEvent) {
+        match event {
+            IniEvent::Section(name) => {
+                let name = ini_text(&name);
+                let key = [b"PATH".as_slice(), b"HOST"]
+                    .into_iter()
+                    .find(|prefix| name.len() >= 4 && name[..4].eq_ignore_ascii_case(prefix))
+                    .map(|_| &name[4..]);
+                self.special = key.is_some();
+                if key.is_some_and(|key| !key.is_empty()) {
+                    self.diverted = true;
+                }
+            }
+            IniEvent::Entry(label, Some(value)) => {
+                let label = ini_text(&label);
+                let loads = label.eq_ignore_ascii_case(b"extension")
+                    || label.eq_ignore_ascii_case(b"zend_extension");
+                if self.diverted || (loads && !self.special) {
+                    return;
+                }
+                let value = ini_text(&value);
+                match self.table.iter_mut().find(|(n, _)| *n == label) {
+                    Some(entry) => entry.1 = value,
+                    None => self.table.push((label, value)),
+                }
+            }
+            // A bare label sets nothing, and an entry with an offset is an
+            // array, which no directive reads.
+            IniEvent::Entry(_, None) | IniEvent::PopEntry(..) => {}
+        }
+    }
+}
+
+/// A label or a value of the normal scanner, which types nothing, so
+/// every one is a string.
+fn ini_text(value: &IniValue) -> Vec<u8> {
+    match value {
+        IniValue::Str(bytes) => bytes.clone(),
+        _ => Vec::new(),
     }
 }
 
@@ -803,7 +927,7 @@ fn function_table(
 /// Builds an [`Engine`]: the bundle, the tier and the startup ini.
 pub struct EngineBuilder {
     extensions: Vec<Extension>,
-    ini: Vec<(Vec<u8>, Vec<u8>)>,
+    ini_entries: Vec<u8>,
     entry: Loop,
     reenter: Loop,
     resume: Loop,
@@ -818,12 +942,29 @@ impl EngineBuilder {
         self
     }
 
-    /// One ini entry as the host's `-d` or `php.ini` sets it, the value
-    /// as the ini scanner hands it to the table ([`scanned_ini_value`]).
+    /// One ini entry as the host's `-d name=value` sets it: the line
+    /// `php_ini_builder_define` writes into the host's `ini_entries`
+    /// ([`define_line`]), which [`EngineBuilder::build`] reads with the
+    /// one INI grammar as `php_init_config` does, so a `;` starts a
+    /// comment, quotes are stripped, a bare value is trimmed, a Zend
+    /// constant and a `${…}` are read and `on`, `yes` and `true` are `1`
+    /// where `off`, `no`, `false`, `none` and `null` are empty. The
+    /// oracle's recipe comes this way into the engine that serves the
+    /// witnesses, `fatal_error_backtraces=Off`, `docref_ext=.html` and
+    /// `output_handler=` among it:
+    ///
+    /// ```php
+    /// var_dump(ini_get('fatal_error_backtraces'), ini_get('docref_ext'), ini_get('output_handler'), ini_get('date.timezone'));
+    /// ```
+    /// ```expect
+    /// string(0) ""
+    /// string(5) ".html"
+    /// string(0) ""
+    /// string(3) "UTC"
+    /// ```
     #[must_use]
     pub fn ini(mut self, name: &str, value: &str) -> EngineBuilder {
-        self.ini
-            .push((name.as_bytes().to_vec(), scanned_ini_value(value)));
+        define_line(&mut self.ini_entries, name, value);
         self
     }
 
@@ -855,7 +996,9 @@ impl EngineBuilder {
                 ini.push((entry.name.0.to_vec(), entry.default.to_vec()));
             }
         }
-        for (name, value) in self.ini {
+        let zend_constants = Shared::zend_constants();
+        let configuration = Configuration::read(&self.ini_entries, &zend_constants);
+        for (name, value) in configuration.table {
             ini.retain(|(n, _)| *n != name);
             ini.push((name, value));
         }
@@ -878,7 +1021,7 @@ impl EngineBuilder {
         } = link_classes(&extensions);
         // Zend's own constants stand before the bundle's, as
         // `zend_register_standard_constants` runs before any `MINIT`.
-        let constants: Vec<ConstDecl> = Shared::zend_constants()
+        let constants: Vec<ConstDecl> = zend_constants
             .into_iter()
             .chain(extensions.iter().flat_map(|e| e.constants.iter().cloned()))
             .collect();
@@ -918,6 +1061,7 @@ impl EngineBuilder {
                 ini,
                 constant_values,
                 sapi_names,
+                startup_errors: configuration.stderr,
                 entry: self.entry,
                 reenter: self.reenter,
                 resume: self.resume,
@@ -942,7 +1086,7 @@ impl Engine {
     pub fn builder() -> EngineBuilder {
         EngineBuilder {
             extensions: Vec::new(),
-            ini: Vec::new(),
+            ini_entries: Vec::new(),
             entry: execute::<Nop>,
             reenter: reenter::<Nop>,
             resume: resume::<Nop>,
@@ -968,6 +1112,15 @@ impl Engine {
                     .unwrap_or_default()
             })
             .collect()
+    }
+
+    /// What php writes to the process's `stderr` while it starts up and
+    /// this engine kept for its host, since it owns no stream: the line
+    /// `ini_error` writes for a syntax error in the host's ini entries,
+    /// or nothing. A host writes it before anything else it serves.
+    #[must_use]
+    pub fn startup_errors(&self) -> &str {
+        &self.shared.startup_errors
     }
 
     /// The extensions this engine loaded, `Core` first and then the
@@ -1571,6 +1724,48 @@ mod tests {
         for written in ["0", "2", "abc", "stderr", "1M", "of", " off", ""] {
             assert_eq!(read(written).as_deref(), Some(written), "{written:?}");
         }
+    }
+
+    /// What the pinned oracle answers for `ini_get` under `-n` and one
+    /// `-d` whose value carries a newline, so the text holds a section:
+    /// after `[PATH=/x]` no entry reaches a directive, after `[foo]` or a
+    /// bare `[PATH]` every one does. And a constant at startup is Zend's
+    /// or `main`'s, a double one written at one digit as
+    /// `zend_double_to_str` writes it before `precision` is registered,
+    /// while `M_PI`, `ext/standard`'s, is not there yet and stands.
+    #[test]
+    fn the_startup_entries_are_read_as_php_init_config_reads_them() {
+        let read = |name: &str, value: &str, probe: &[u8]| {
+            let engine = Engine::builder().ini(name, value).build();
+            engine
+                .shared
+                .ini_default(probe)
+                .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+        };
+        assert_eq!(
+            read("x", "1\n[PATH=/x]\nprecision=3", b"precision").as_deref(),
+            Some("14")
+        );
+        assert_eq!(
+            read("x", "1\n[foo]\nprecision=3", b"precision").as_deref(),
+            Some("3")
+        );
+        assert_eq!(
+            read("x", "1\n[PATH]\nprecision=3", b"precision").as_deref(),
+            Some("3")
+        );
+        assert_eq!(
+            read("error_log", "PHP_FLOAT_EPSILON", b"error_log").as_deref(),
+            Some("2.0E-16")
+        );
+        assert_eq!(
+            read("docref_root", "PHP_INT_SIZE | 1", b"docref_root").as_deref(),
+            Some("9")
+        );
+        assert_eq!(
+            read("precision", "M_PI", b"precision").as_deref(),
+            Some("M_PI")
+        );
     }
 
     /// What the pinned oracle answers under `-n -d disable_functions=<list>`
