@@ -122,11 +122,6 @@ impl Modifiers {
     fn has(&self, flag: Flag) -> bool {
         self.flags.contains(&flag)
     }
-
-    /// Whether any of `flags` was written.
-    fn any(&self, flags: &[Flag]) -> bool {
-        flags.iter().any(|flag| self.has(*flag))
-    }
 }
 
 /// The modifiers of a class, php's `class_modifiers` as
@@ -528,17 +523,22 @@ impl Emit<'_> {
                 return Err(unread(line, "a property accessor list"));
             }
             let modifiers = self.walk_modifiers(&param.modifiers, line, Target::Parameter)?;
-            if modifiers.set_visibility.is_some() {
-                return Err(unread(line, "an asymmetric visibility"));
+            if modifiers.has(Flag::Var) {
+                return Err(self.internal("a parameter the grammar wrote `var` before"));
             }
-            if modifiers.any(&[Flag::Final, Flag::Var]) {
-                return Err(unread(line, "a parameter"));
-            }
+            // `promotion_flags`: any of them promotes.
             let is_readonly = modifiers.has(Flag::Readonly);
-            let promote = (modifiers.visibility.is_some() || is_readonly).then(|| Promoted {
-                visibility: modifiers.visibility.unwrap_or_default(),
-                is_readonly,
-            });
+            let is_final = modifiers.has(Flag::Final);
+            let promote = (modifiers.visibility.is_some()
+                || modifiers.set_visibility.is_some()
+                || is_readonly
+                || is_final)
+                .then(|| Promoted {
+                    visibility: modifiers.visibility.unwrap_or_default(),
+                    set_visibility: modifiers.set_visibility,
+                    is_readonly,
+                    is_final,
+                });
             out.push(Parameter {
                 name: self.variable_name(param.var),
                 ty: param.ty,
@@ -1067,9 +1067,6 @@ impl Emit<'_> {
         if node.hooks.is_some() {
             return Err(unread(line, "a property accessor list"));
         }
-        if modifiers.any(&[Flag::Final, Flag::Abstract, Flag::Readonly]) {
-            return Err(unread(line, "a property"));
-        }
         for declarator in &node.property_declarators {
             let declarator = self.parsed.tree[*declarator].clone();
             class.properties.push(Property {
@@ -1078,6 +1075,9 @@ impl Emit<'_> {
                 set_visibility: modifiers.set_visibility,
                 ty: node.ty,
                 is_static: modifiers.has(Flag::Static),
+                is_final: modifiers.has(Flag::Final),
+                is_abstract: modifiers.has(Flag::Abstract),
+                is_readonly: modifiers.has(Flag::Readonly),
                 default: declarator.init,
                 doc_comment: self.doc_comment(declarator.doc_comment),
                 line: declarator.line(),
@@ -1305,12 +1305,14 @@ pub(super) struct Parameter {
 }
 
 /// The modifiers that make a constructor's parameter a property,
-/// php's `promotion_flags` in `zend_compile_params`: the visibility and
-/// the `readonly` bit.
+/// php's `promotion_flags` in `zend_compile_params`: the visibility, the
+/// set visibility as written, and the `readonly` and `final` bits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Promoted {
     pub(super) visibility: Visibility,
+    pub(super) set_visibility: Option<Visibility>,
     pub(super) is_readonly: bool,
+    pub(super) is_final: bool,
 }
 
 /// One method, php's `ZEND_AST_METHOD`: a function with the group's
@@ -1372,6 +1374,7 @@ pub(super) struct Use {
 /// `private(set)` as written, before `zend_declare_typed_property`
 /// holds it to the read visibility.
 #[derive(Debug, PartialEq)]
+#[allow(clippy::struct_excessive_bools)] // the ZEND_ACC_* bits of a property as written, each one fact
 pub(super) struct Property {
     pub(super) name: Vec<u8>,
     pub(super) visibility: Visibility,
@@ -1380,6 +1383,12 @@ pub(super) struct Property {
     /// declarator, as `zend_compile_prop_decl` compiles it.
     pub(super) ty: Option<TypeExpr>,
     pub(super) is_static: bool,
+    /// `ZEND_ACC_FINAL`, `ZEND_ACC_ABSTRACT` and `ZEND_ACC_READONLY` as
+    /// the group wrote them, before `zend_compile_prop_decl` holds them
+    /// to the class and to each other.
+    pub(super) is_final: bool,
+    pub(super) is_abstract: bool,
+    pub(super) is_readonly: bool,
     pub(super) default: Option<php_syntax::tree::Expr>,
     pub(super) doc_comment: Option<Vec<u8>>,
     pub(super) line: u32,

@@ -1155,6 +1155,8 @@ struct DeclaredSlot {
     visibility: Visibility,
     set_visibility: Option<Visibility>,
     typed: bool,
+    /// `ZEND_ACC_READONLY`, which the set visibility's refusal names.
+    readonly: bool,
 }
 
 /// What a write to a typed declared slot reads off its
@@ -4459,6 +4461,7 @@ impl Request {
             visibility: p.visibility,
             set_visibility: p.set_visibility,
             typed: p.ty.is_some(),
+            readonly: p.is_readonly,
         })
     }
 
@@ -4482,16 +4485,36 @@ impl Request {
     /// scope here, not the executed one; the two differ only where a
     /// method is reached through a class that inherited it, and the
     /// linker that inherits a method arrives with the classes of design
-    /// §11 days 8-14.
+    /// §11 days 8-14. A readonly property's `protected(set)` is named
+    /// with its `readonly`, which is the set visibility
+    /// `zend_declare_typed_property` gives every public readonly one:
+    ///
+    /// ```php
+    /// class A { public readonly int $x; function __construct(bool $set) { if ($set) { $this->x = 1; } } }
+    /// $a = new A(false);
+    /// try { $a->x = 1; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { unset($a->x); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// $b = new A(true);
+    /// try { $b->x = 2; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { unset($b->x); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Cannot modify protected(set) readonly property A::$x from global scope
+    /// Cannot unset protected(set) readonly property A::$x from global scope
+    /// Cannot modify readonly property A::$x
+    /// Cannot unset readonly property A::$x
+    /// ```
     fn set_inaccessible_property(
         &mut self,
         class: ClassId,
         set: Visibility,
+        readonly: bool,
         name: &[u8],
         operation: &str,
     ) -> Thrown {
         let word = match set {
             Visibility::Private => "private(set)",
+            _ if readonly => "protected(set) readonly",
             _ => "protected(set)",
         };
         let from = match self.executed_scope() {
@@ -5684,11 +5707,12 @@ impl Request {
     /// ```
     pub(crate) fn declared_slot_for_write(
         &mut self,
-        class: ClassId,
+        object: PhpObject,
         name: &[u8],
         operation: &str,
         silent: bool,
     ) -> Result<Option<(u32, bool)>, Thrown> {
+        let class = object.class();
         let Some(placed) = self.declared_slot(class, name) else {
             return Ok(None);
         };
@@ -5698,10 +5722,21 @@ impl Request {
             }
             return Err(self.inaccessible_property(class, placed.visibility, name));
         }
+        // An initialised readonly property is refused as readonly, the
+        // caller's, ahead of its set visibility
+        // (`zend_std_write_property`).
+        let readonly_first = placed.readonly && !object.heap().slot(placed.slot).is_undef();
         if let Some(set) = placed.set_visibility
+            && !readonly_first
             && !self.has_set_access(placed.declaring, set)
         {
-            return Err(self.set_inaccessible_property(class, set, name, operation));
+            return Err(self.set_inaccessible_property(
+                class,
+                set,
+                placed.readonly,
+                name,
+                operation,
+            ));
         }
         Ok(Some((placed.slot, placed.typed)))
     }
@@ -7463,10 +7498,27 @@ impl Request {
                 // are held to the set visibility here; an untyped slot
                 // an `unset` emptied is the `__unset`'s.
                 if !empty || placed.typed {
+                    // `zend_readonly_property_unset_error`, ahead of the
+                    // set visibility.
+                    if placed.readonly && !empty {
+                        let declaring = self.class_name(placed.declaring);
+                        let shown = String::from_utf8_lossy(name).into_owned();
+                        return Err(crate::api::raising::throw(
+                            self,
+                            "Error",
+                            &format!("Cannot unset readonly property {declaring}::${shown}"),
+                        ));
+                    }
                     if let Some(set) = placed.set_visibility
                         && !self.has_set_access(placed.declaring, set)
                     {
-                        return Err(self.set_inaccessible_property(class, set, name, "unset"));
+                        return Err(self.set_inaccessible_property(
+                            class,
+                            set,
+                            placed.readonly,
+                            name,
+                            "unset",
+                        ));
                     }
                     if !empty {
                         Heap::object_set_slot(&mut Hooks(self), o, placed.slot, Zval::UNDEF);

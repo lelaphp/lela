@@ -4904,13 +4904,10 @@ mod tests {
             None,
             "a property group's type is read where a modifier stood before it"
         );
+        assert_eq!(refused(b"<?php\nclass M { public readonly int $x; }"), None);
         assert_eq!(
-            refused(b"<?php\nclass M { public readonly int $x; }"),
-            Some((
-                Level::Parse,
-                String::from("a property this compiler cannot read yet"),
-                2
-            ))
+            refused(b"<?php\nclass M { public readonly int $x = 1; }"),
+            compile_error("Readonly property M::$x cannot have default value", 2)
         );
         assert_eq!(
             refused(b"<?php\nclass M { private(set) protected(set) int $x; }"),

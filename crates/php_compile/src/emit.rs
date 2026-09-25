@@ -113,7 +113,7 @@ use php_syntax::magic_const_name;
 
 use crate::{CompileError, Options, StackLimit};
 use attributes::InternalAttribute;
-use walk::{Class, Closure, Function, Method, Property};
+use walk::{Class, Closure, Function, Method};
 
 mod attributes;
 mod magic;
@@ -794,6 +794,14 @@ enum Folded {
 struct ActiveClass {
     name: Vec<u8>,
     kind: ClassKind,
+}
+
+/// The set visibility `zend_declare_typed_property` gives a public
+/// readonly property that writes none, `ZEND_ACC_PROTECTED_SET`: a
+/// readonly property is initialised from its class's scope or a related
+/// one, and that is the rule a set visibility already states.
+fn implicit_set_visibility(is_readonly: bool, visibility: Visibility) -> Option<Visibility> {
+    (is_readonly && visibility == Visibility::Public).then_some(Visibility::Protected)
 }
 
 /// The `ce_flags` a class declaration starts with: its modifiers as
@@ -2829,6 +2837,31 @@ impl Emit<'_> {
     /// ```expect exit=255
     /// Fatal error: Readonly property Q::$y must have type in %s on line 2
     /// ```
+    ///
+    /// `final` promotes alone, and a set visibility is held to what a
+    /// declared property's is:
+    ///
+    /// ```php
+    /// class P { function __construct(final int $a, public private(set) int $b) {} }
+    /// $p = new P(1, 2);
+    /// var_dump($p->a, $p->b);
+    /// try { $p->b = 3; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump((new ReflectionProperty('P', 'a'))->getModifiers(), (new ReflectionProperty('P', 'b'))->getModifiers());
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// int(2)
+    /// Cannot modify private(set) property P::$b from global scope
+    /// int(33)
+    /// int(4129)
+    /// ```
+    ///
+    /// ```php
+    /// class P { function __construct(public private(set) $b) {} }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Property with asymmetric visibility P::$b must have type in %s on line 2
+    /// ```
     fn promoted_property(
         &mut self,
         parameter: &walk::Parameter,
@@ -2865,6 +2898,14 @@ impl Emit<'_> {
         if is_readonly && ty.is_none() {
             return Err(self.compile_error(format!("Readonly property {member} must have type")));
         }
+        let set_visibility = self
+            .set_visibility_of(
+                promoted.visibility,
+                promoted.set_visibility,
+                ty.is_some(),
+                &member,
+            )?
+            .or_else(|| implicit_set_visibility(is_readonly, promoted.visibility));
         let default = ty.is_none().then_some(ConstExpr::Null);
         let Some(decl) = self.classes.last_mut() else {
             return Err(
@@ -2874,10 +2915,10 @@ impl Emit<'_> {
         decl.properties.push(PropertyDecl {
             name: Name(parameter.name.clone().into_boxed_slice()),
             visibility: promoted.visibility,
-            set_visibility: None,
+            set_visibility,
             is_instance: true,
             is_readonly,
-            is_final: false,
+            is_final: promoted.is_final || set_visibility == Some(Visibility::Private),
             ty: ty.cloned(),
             default,
             attributes: Vec::new(),
@@ -4531,6 +4572,7 @@ impl Emit<'_> {
                     String::from_utf8_lossy(name)
                 )));
             }
+            self.property_modifiers_refused(class.kind, property)?;
             let member = format!(
                 "{}::${}",
                 String::from_utf8_lossy(name),
@@ -4566,7 +4608,7 @@ impl Emit<'_> {
             self.active_property = None;
             // A readonly class's properties are readonly, and a readonly
             // property is typed, has no default and is no static one.
-            let is_readonly = decl.flags.is_readonly;
+            let is_readonly = property.is_readonly || decl.flags.is_readonly;
             if is_readonly {
                 if ty.is_none() {
                     return Err(
@@ -4584,7 +4626,14 @@ impl Emit<'_> {
                     );
                 }
             }
-            let set_visibility = self.set_visibility_of(property, name)?;
+            let set_visibility = self
+                .set_visibility_of(
+                    property.visibility,
+                    property.set_visibility,
+                    ty.is_some(),
+                    &member,
+                )?
+                .or_else(|| implicit_set_visibility(is_readonly, property.visibility));
             decl.properties.push(PropertyDecl {
                 name: Name(property.name.clone().into_boxed_slice()),
                 visibility: property.visibility,
@@ -4593,12 +4642,110 @@ impl Emit<'_> {
                 is_readonly,
                 // `zend_declare_typed_property`: a `private(set)`
                 // property is implicitly final.
-                is_final: set_visibility == Some(Visibility::Private),
+                is_final: property.is_final || set_visibility == Some(Visibility::Private),
                 ty,
                 default,
                 attributes: Vec::new(),
                 doc_comment: property.doc_comment.clone().map(Vec::into_boxed_slice),
             });
+        }
+        Ok(())
+    }
+
+    /// What `zend_compile_prop_decl` refuses of a property's modifiers
+    /// against each other and its class, before its type, in php's
+    /// order: `final` beside `private`, what an interface's property may
+    /// not be, and `abstract` or an interface's property without the
+    /// accessor list that alone may make one.
+    ///
+    /// ```php
+    /// class A { final private $x; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Property cannot be both final and private in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// interface I { final public $x; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Property in interface cannot be final in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// interface I { protected $x; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Property in interface cannot be protected or private in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// class A { abstract public $x; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Only hooked properties may be declared abstract in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// interface I { public $x; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Interfaces may only include hooked properties in %s on line 2
+    /// ```
+    ///
+    /// What php takes, it takes:
+    ///
+    /// ```php
+    /// class A { final public int $x = 1; public readonly int $y; function __construct() { $this->y = 2; } }
+    /// $a = new A;
+    /// var_dump($a->x, $a->y);
+    /// try { $a->y = 3; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump((new ReflectionProperty('A', 'x'))->getModifiers(), (new ReflectionProperty('A', 'y'))->getModifiers());
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// int(2)
+    /// Cannot modify readonly property A::$y
+    /// int(33)
+    /// int(2177)
+    /// ```
+    ///
+    /// ```php
+    /// class A { final public $x; }
+    /// class B extends A { public $x; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot override final property A::$x in %s on line 3
+    /// ```
+    fn property_modifiers_refused(
+        &self,
+        kind: ClassKind,
+        property: &walk::Property,
+    ) -> Result<(), CompileError> {
+        if property.is_final && property.visibility == Visibility::Private {
+            return Err(self.compile_error("Property cannot be both final and private"));
+        }
+        let in_interface = kind == ClassKind::Interface;
+        if in_interface {
+            if property.is_final {
+                return Err(self.compile_error("Property in interface cannot be final"));
+            }
+            if property.visibility != Visibility::Public {
+                return Err(
+                    self.compile_error("Property in interface cannot be protected or private")
+                );
+            }
+            if property.is_abstract {
+                return Err(self.compile_error(
+                    "Property in interface cannot be explicitly abstract. All interface members are implicitly abstract",
+                ));
+            }
+            // What the walk reads is a property without an accessor
+            // list, which an interface may not declare.
+            return Err(self.compile_error("Interfaces may only include hooked properties"));
+        }
+        if property.is_abstract {
+            return Err(self.compile_error("Only hooked properties may be declared abstract"));
         }
         Ok(())
     }
@@ -4752,18 +4899,15 @@ impl Emit<'_> {
     /// ```
     fn set_visibility_of(
         &self,
-        property: &Property,
-        class_name: &[u8],
+        visibility: Visibility,
+        set: Option<Visibility>,
+        typed: bool,
+        member: &str,
     ) -> Result<Option<Visibility>, CompileError> {
-        let Some(set) = property.set_visibility else {
+        let Some(set) = set else {
             return Ok(None);
         };
-        let member = format!(
-            "{}::${}",
-            String::from_utf8_lossy(class_name),
-            String::from_utf8_lossy(&property.name)
-        );
-        if property.ty.is_none() {
+        if !typed {
             return Err(self.compile_error(format!(
                 "Property with asymmetric visibility {member} must have type"
             )));
@@ -4773,12 +4917,12 @@ impl Emit<'_> {
             Visibility::Protected => 1,
             Visibility::Private => 2,
         };
-        if strength(property.visibility) > strength(set) {
+        if strength(visibility) > strength(set) {
             return Err(self.compile_error(format!(
                 "Visibility of property {member} must not be weaker than set visibility"
             )));
         }
-        Ok((property.visibility != set).then_some(set))
+        Ok((visibility != set).then_some(set))
     }
 
     /// `zend_resolve_const_class_name_reference` over a name written

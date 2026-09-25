@@ -4466,7 +4466,7 @@ fn fetch_obj_place(
     // with a `__get` takes, php's `Indirect modification of overloaded
     // property` notice, is not served yet (#513), so the placement is
     // loud and a property the scope may not reach is the `Error`.
-    let placed = req.declared_slot_for_write(object.class(), &name, "indirectly modify", false);
+    let placed = req.declared_slot_for_write(object, &name, "indirectly modify", false);
     let at = match placed {
         Ok(Some((slot, typed))) => {
             // `if (UNEXPECTED(Z_TYPE_P(retval) == IS_UNDEF))`: under
@@ -7110,7 +7110,7 @@ fn assign_property(
     // scope may not reach reaches `write_property` and the accessor
     // there, which is where php raises the `Error` if the guard stands.
     let silent = req.serves_accessor(object.class(), b"__set");
-    let placed = match req.declared_slot_for_write(object.class(), bytes, "modify", silent) {
+    let placed = match req.declared_slot_for_write(object, bytes, "modify", silent) {
         Ok(placed) => placed,
         Err(thrown) => {
             req.release(value);
@@ -9085,7 +9085,7 @@ fn step_property(
     // for a property the scope may not reach and takes the overloaded
     // arm over it instead.
     let silent = req.serves_accessor(object.class(), b"__get");
-    let placed = match req.declared_slot_for_write(object.class(), &bytes, "modify", silent) {
+    let placed = match req.declared_slot_for_write(object, &bytes, "modify", silent) {
         Ok(placed) => placed,
         Err(thrown) => {
             exec::free_operand(req, frame, code, data.op1_type, data.op1);
@@ -9637,7 +9637,7 @@ fn incdec_property(
         )));
     };
     let silent = req.serves_accessor(object.class(), b"__get");
-    let placed = match req.declared_slot_for_write(object.class(), &bytes, "modify", silent) {
+    let placed = match req.declared_slot_for_write(object, &bytes, "modify", silent) {
         Ok(placed) => placed,
         Err(thrown) => {
             write_out(req, frame, code, op, &Value::null());
