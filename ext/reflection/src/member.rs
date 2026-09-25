@@ -3,15 +3,18 @@
 //! `Reflection` itself declares. Each reads the declaration the reflector's `$name`,
 //! and a member's `$class`, look up again.
 //!
-//! What stands beside `stub::unbuilt` still: the property's hooks
-//! (`hasHooks`, `getHooks`, `hasHook`, `getHook`), whose model
-//! `PropertyDecl` has no field for; `getRawValue`, `setRawValue` and the four lazy entries;
+//! A property's hooks are a list `PropertyDecl` has no field for, since
+//! the compiler refuses one (#427), so `hasHooks`, `getHooks`, `hasHook`
+//! and `getHook` answer as php does for a property without hooks.
+//!
+//! What stands beside `stub::unbuilt` still: `isAbstract`, `isVirtual`
+//! and `isFinal`, which are hooks proper (#427), and the four lazy entries;
 //! `setAccessible`, which the stub marks `#[\\Deprecated]` (#412); and
 //! `ReflectionConstant::getFileName`, which wants the file a `define`
 //! ran in.
 
 use php_ext::call::{constant, eval_const_expr};
-use php_ext::decl::{ClassConstDecl, ClassKind, PropertyDecl, Visibility};
+use php_ext::decl::{ClassConstDecl, ClassKind, Name, PropertyDecl, Type, Visibility};
 use php_ext::raising::{Thrown, deprecated, throw};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, PhpArray, Value};
@@ -101,6 +104,94 @@ fn this_declared(req: &mut Request) -> Result<Reflected, Thrown> {
     let class = class_named(req, &class)?;
     let found = property_named(req, class, &name);
     Ok((class, name, found))
+}
+
+/// `ReflectionProperty::hasHooks()`: `ref->prop && ref->prop->hooks`.
+/// `PropertyDecl` carries no list of hooks, since the compiler refuses one
+/// (#427), so every property here, declared or dynamic, is one without
+/// hooks and the answer is php's for it.
+///
+/// ```php
+/// class C { public $p; } $o = new C; $o->d = 1;
+/// var_dump((new ReflectionProperty('C', 'p'))->hasHooks(), (new ReflectionProperty($o, 'd'))->hasHooks());
+/// ```
+/// ```expect
+/// Deprecated: Creation of dynamic property C::$d is deprecated in %s on line 2
+/// bool(false)
+/// bool(false)
+/// ```
+pub(super) fn reflection_property_has_hooks(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    this_declared(req)?;
+    Ok(Value::bool(false))
+}
+
+/// `ReflectionProperty::getHooks()`: the `get` and `set` hooks keyed by
+/// kind, and the empty array for a property without hooks, which every
+/// property here is ([`reflection_property_has_hooks`]).
+///
+/// ```php
+/// class C { public $p; }
+/// var_dump((new ReflectionProperty('C', 'p'))->getHooks());
+/// ```
+/// ```expect
+/// array(0) {
+/// }
+/// ```
+pub(super) fn reflection_property_get_hooks(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    this_declared(req)?;
+    Ok(Value::array(PhpArray::new(req)?))
+}
+
+/// `Z_PARAM_OBJ_OF_CLASS(type, reflection_property_hook_type_ptr)`, the
+/// one argument `hasHook` and `getHook` take, held to its count and to
+/// `PropertyHookType`.
+fn hook_type_argument(req: &mut Request) -> Result<(), Thrown> {
+    exactly_arguments(req, 1)?;
+    let given = req.argument(1).unwrap_or_default();
+    let ty = Type::Named(Name(b"PropertyHookType".as_slice().into()));
+    php_ext::coerce::coerce_param(req, &given, &ty, 1)?;
+    Ok(())
+}
+
+/// `ReflectionProperty::hasHook(PropertyHookType $type)`: whether the
+/// property's hooks include one of that kind, `false` for a property without
+/// hooks, which every property here is
+/// ([`reflection_property_has_hooks`]).
+///
+/// ```php
+/// class C { public $p; } $r = new ReflectionProperty('C', 'p');
+/// var_dump($r->hasHook(PropertyHookType::Get), $r->hasHook(PropertyHookType::Set));
+/// try { $r->hasHook('get'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// bool(false)
+/// bool(false)
+/// ReflectionProperty::hasHook(): Argument #1 ($type) must be of type PropertyHookType, string given
+/// ```
+pub(super) fn reflection_property_has_hook(req: &mut Request) -> Result<Value, Thrown> {
+    hook_type_argument(req)?;
+    this_declared(req)?;
+    Ok(Value::bool(false))
+}
+
+/// `ReflectionProperty::getHook(PropertyHookType $type)`: a
+/// `ReflectionMethod` over the one of the property's hooks of that
+/// kind, `null` for a property without hooks, which every
+/// property here is ([`reflection_property_has_hooks`]).
+///
+/// ```php
+/// class C { public $p; }
+/// var_dump((new ReflectionProperty('C', 'p'))->getHook(PropertyHookType::Get));
+/// ```
+/// ```expect
+/// NULL
+/// ```
+pub(super) fn reflection_property_get_hook(req: &mut Request) -> Result<Value, Thrown> {
+    hook_type_argument(req)?;
+    this_declared(req)?;
+    Ok(Value::null())
 }
 
 /// `ReflectionProperty::getMangledName()`: `prop->name`, the key the

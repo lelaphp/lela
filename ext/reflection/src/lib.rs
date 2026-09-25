@@ -70,7 +70,7 @@ use std::fmt::Write as _;
 use php_ext::abi::{CloneObj, DependencyKind, Extension, ExtensionBuilder, ObjectHandlers};
 use php_ext::call::{
     Function, constant, eval_const_expr, lookup_class, lookup_function, new_object,
-    read_static_prop, write_static_prop,
+    read_class_prop_silent, read_static_prop, write_static_prop,
 };
 use php_ext::decl::{
     ClassConstDecl, ClassDecl, ClassKind, ConstExpr, EnumBacking, FunctionDecl, MethodDecl, Name,
@@ -2689,20 +2689,31 @@ fn this_property(req: &mut Request) -> Result<(ClassId, Vec<u8>, Option<Property
 /// #1 {main}
 ///   thrown in %s on line 2
 /// ```
+///
+/// An object of the declaring class is read through a reflector asked
+/// about a subclass, and a missing dynamic property is php's warning:
+///
+/// ```php
+/// class A { public $p = 'p'; } class B extends A {}
+/// $b = new A; $b->d = 1;
+/// var_dump((new ReflectionProperty('B', 'p'))->getValue(new A), (new ReflectionProperty($b, 'd'))->getValue(new A));
+/// ```
+/// ```expect
+/// Deprecated: Creation of dynamic property A::$d is deprecated in %s on line 3
+///
+/// Warning: Undefined property: A::$d in %s on line 4
+/// string(1) "p"
+/// NULL
+/// ```
 fn reflection_property_get_value(req: &mut Request) -> Result<Value, Thrown> {
     at_most_arguments(req, 1)?;
     let given = req.argument(1).unwrap_or_default();
     let given =
         php_ext::coerce::coerce_param(req, &given, &Type::Nullable(Box::new(Type::Object)), 1)?;
     let (class, name, declared) = this_property(req)?;
-    // `instanceof_function(Z_OBJCE_P(object), intern->ce)`: the object
-    // is held to the class the reflector was asked about, which is the
-    // subclass where the property was reached through one, and not to
-    // the class that declared the property.
-    let asked = req
-        .this()
-        .and_then(|this| kept_class(req, this))
-        .unwrap_or(class);
+    // A `static` property is read through `intern->ce`, the class the
+    // reflector was asked about.
+    let asked = asked_class(req, class);
     if declared.as_ref().is_some_and(|decl| !decl.is_instance) {
         return read_static_prop(req, asked, &name);
     }
@@ -2713,20 +2724,44 @@ fn reflection_property_get_value(req: &mut Request) -> Result<Value, Thrown> {
             "be provided for instance properties",
         ));
     };
-    if !object.instance_of(req, asked) {
-        return Err(throw(
-            req,
-            "ReflectionException",
-            "Given object is not an instance of the class this property was declared in",
-        ));
+    // `ref->prop ? ref->prop->ce : intern->ce`: a declared property's
+    // object is held to the class that declared it, a dynamic one's to
+    // the class the reflector was asked about.
+    let holder = if declared.is_some() { class } else { asked };
+    held_to(req, *object, holder)?;
+    read_instance_property(req, *object, class, &name, declared.as_ref())
+}
+
+/// `instanceof_function(Z_OBJCE_P(object), ce)` or php's refusal.
+fn held_to(req: &mut Request, object: PhpObject, class: ClassId) -> Result<(), Thrown> {
+    if object.instance_of(req, class) {
+        return Ok(());
     }
-    match object.prop(req, &name) {
+    Err(throw(
+        req,
+        "ReflectionException",
+        "Given object is not an instance of the class this property was declared in",
+    ))
+}
+
+/// The instance arm `getValue` and `getRawValue` share, `read_property`
+/// under `fake_scope`: the slot or the dynamic table by name, a typed
+/// slot nothing has written php's `Error`, and any other miss php's
+/// `Undefined property` warning and `null`.
+fn read_instance_property(
+    req: &mut Request,
+    object: PhpObject,
+    class: ClassId,
+    name: &[u8],
+    declared: Option<&PropertyDecl>,
+) -> Result<Value, Thrown> {
+    match object.prop(req, name) {
         Some(value) => {
             let value = value.deref();
             req.addref(&value);
             Ok(value)
         }
-        None if declared.as_ref().is_some_and(|decl| decl.ty.is_some()) => {
+        None if declared.is_some_and(|decl| decl.ty.is_some()) => {
             let class = class_name_of(req, class);
             Err(throw(
                 req,
@@ -2734,12 +2769,160 @@ fn reflection_property_get_value(req: &mut Request) -> Result<Value, Thrown> {
                 &format!(
                     "Typed property {}::${} must not be accessed before initialization",
                     String::from_utf8_lossy(&class),
-                    String::from_utf8_lossy(&name)
+                    String::from_utf8_lossy(name)
                 ),
             ))
         }
-        None => Ok(Value::null()),
+        None => {
+            let of = class_name_of(req, object.class());
+            php_ext::raising::warning(
+                req,
+                &format!(
+                    "Undefined property: {}::${}",
+                    String::from_utf8_lossy(&of),
+                    String::from_utf8_lossy(name)
+                ),
+            );
+            Ok(Value::null())
+        }
     }
+}
+
+/// `intern->ce`, the class a property reflector was asked about, or
+/// the declaring class where the payload has none.
+fn asked_class(req: &mut Request, declaring: ClassId) -> ClassId {
+    req.this()
+        .and_then(|this| kept_class(req, this))
+        .unwrap_or(declaring)
+}
+
+/// `ReflectionProperty::getRawValue(object $object)`: the value as
+/// stored, past the `get` one of the property's hooks where it has them. Every
+/// property here is one without hooks (#427), so the read is
+/// `getValue`'s instance arm, the object held to `intern->ce`; a
+/// `static` property is php's `ReflectionException`.
+///
+/// ```php
+/// class C { public $p = 1; private int $q = 2; public static $s; } $o = new C;
+/// var_dump((new ReflectionProperty('C', 'p'))->getRawValue($o), (new ReflectionProperty('C', 'q'))->getRawValue($o));
+/// try { (new ReflectionProperty('C', 's'))->getRawValue($o); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+/// try { (new ReflectionProperty('C', 'p'))->getRawValue(new stdClass); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// int(1)
+/// int(2)
+/// May not use getRawValue on static properties
+/// Given object is not an instance of the class this property was declared in
+/// ```
+fn reflection_property_get_raw_value(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 1)?;
+    let given = req.argument(1).unwrap_or_default();
+    let given = php_ext::coerce::coerce_param(req, &given, &Type::Object, 1)?;
+    let (class, name, declared) = this_property(req)?;
+    let asked = asked_class(req, class);
+    let Some(object) = given.as_object().copied() else {
+        return Ok(Value::null());
+    };
+    held_to(req, object, asked)?;
+    if declared.as_ref().is_some_and(|decl| !decl.is_instance) {
+        return Err(throw(
+            req,
+            "ReflectionException",
+            "May not use getRawValue on static properties",
+        ));
+    }
+    read_instance_property(req, object, class, &name, declared.as_ref())
+}
+
+/// `ReflectionProperty::setRawValue(object $object, mixed $value)`: the
+/// value stored past the `set` one of the property's hooks where it has them. Every
+/// property here is one without hooks (#427), so the write is
+/// `write_property` under `fake_scope`, `setValue`'s instance arm; a
+/// `static` property is php's `ReflectionException`.
+///
+/// ```php
+/// class C { public $p = 1; public static $s; } $o = new C;
+/// (new ReflectionProperty('C', 'p'))->setRawValue($o, 5); var_dump($o->p);
+/// try { (new ReflectionProperty('C', 's'))->setRawValue($o, 1); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// int(5)
+/// May not use setRawValue on static properties
+/// ```
+fn reflection_property_set_raw_value(req: &mut Request) -> Result<Value, Thrown> {
+    let (_, name, declared) = this_property(req)?;
+    exactly_arguments(req, 2)?;
+    let given = req.argument(1).unwrap_or_default();
+    let given = php_ext::coerce::coerce_param(req, &given, &Type::Object, 1)?;
+    let Some(object) = given.as_object().copied() else {
+        return Ok(Value::null());
+    };
+    if declared.as_ref().is_some_and(|decl| !decl.is_instance) {
+        return Err(throw(
+            req,
+            "ReflectionException",
+            "May not use setRawValue on static properties",
+        ));
+    }
+    let value = req.argument(2).unwrap_or_default().deref();
+    req.addref(&value);
+    let key = PhpString::new(req, &name)?;
+    object.set_prop(req, key, value)?;
+    Ok(Value::null())
+}
+
+/// `ReflectionProperty::isInitialized(?object $object = null)`: for a
+/// `static` property, whether its slot holds a value, read silently
+/// through `intern->ce`; for an instance one, whether the object's slot
+/// or dynamic table holds one, `has_property(ZEND_PROPERTY_EXISTS)`
+/// under `fake_scope`, which asks no `__isset`. The object is held to
+/// the declaring class, php's `ref->prop->ce`, or to `intern->ce` for a
+/// dynamic property.
+///
+/// ```php
+/// class A { public static ?int $s; public static $t; public ?int $i; public $n; private int $p; }
+/// $a = new A;
+/// var_dump((new ReflectionProperty('A', 's'))->isInitialized(), (new ReflectionProperty('A', 't'))->isInitialized());
+/// var_dump((new ReflectionProperty('A', 'i'))->isInitialized($a), (new ReflectionProperty('A', 'n'))->isInitialized($a), (new ReflectionProperty('A', 'p'))->isInitialized($a));
+/// unset($a->n); var_dump((new ReflectionProperty('A', 'n'))->isInitialized($a));
+/// try { (new ReflectionProperty('A', 'n'))->isInitialized(); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { (new ReflectionProperty('A', 'n'))->isInitialized(new stdClass); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// ReflectionProperty::isInitialized(): Argument #1 ($object) must be provided for instance properties
+/// Given object is not an instance of the class this property was declared in
+/// ```
+fn reflection_property_is_initialized(req: &mut Request) -> Result<Value, Thrown> {
+    at_most_arguments(req, 1)?;
+    let given = req.argument(1).unwrap_or_default();
+    let given =
+        php_ext::coerce::coerce_param(req, &given, &Type::Nullable(Box::new(Type::Object)), 1)?;
+    let (class, name, declared) = this_property(req)?;
+    let asked = asked_class(req, class);
+    if declared.as_ref().is_some_and(|decl| !decl.is_instance) {
+        let Some(value) = read_class_prop_silent(req, asked, &name)? else {
+            return Ok(Value::bool(false));
+        };
+        let held = !matches!(value.as_ref(), ValueRef::Undef);
+        req.release(value);
+        return Ok(Value::bool(held));
+    }
+    let ValueRef::Object(object) = given.as_ref() else {
+        return Err(arg_type_error(
+            req,
+            1,
+            "be provided for instance properties",
+        ));
+    };
+    let holder = if declared.is_some() { class } else { asked };
+    held_to(req, *object, holder)?;
+    Ok(Value::bool(object.prop(req, &name).is_some()))
 }
 
 /// `ReflectionProperty::setValue(mixed $objectOrValue, mixed $value)`:

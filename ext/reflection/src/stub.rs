@@ -5678,7 +5678,7 @@ fn reflection_property() -> Declared {
                     &[parameter(b"object", Type::Object)],
                     Some(Type::Mixed),
                 ),
-                unbuilt as Entry,
+                super::reflection_property_get_raw_value as Entry,
             ),
             (
                 method(
@@ -5689,7 +5689,7 @@ fn reflection_property() -> Declared {
                     ],
                     Some(Type::Void),
                 ),
-                unbuilt as Entry,
+                super::reflection_property_set_raw_value as Entry,
             ),
             (
                 method(
@@ -5728,7 +5728,7 @@ fn reflection_property() -> Declared {
                     )],
                     Some(Type::Bool),
                 )),
-                unbuilt as Entry,
+                super::reflection_property_is_initialized as Entry,
             ),
             (
                 tentative(method(b"isPublic", &[], Some(Type::Bool))),
@@ -5849,10 +5849,13 @@ fn reflection_property() -> Declared {
                 ),
                 super::member::reflection_property_get_attributes as Entry,
             ),
-            (method(b"hasHooks", &[], Some(Type::Bool)), unbuilt as Entry),
+            (
+                method(b"hasHooks", &[], Some(Type::Bool)),
+                super::member::reflection_property_has_hooks as Entry,
+            ),
             (
                 method(b"getHooks", &[], Some(Type::Array)),
-                unbuilt as Entry,
+                super::member::reflection_property_get_hooks as Entry,
             ),
             (
                 method(
@@ -5860,7 +5863,7 @@ fn reflection_property() -> Declared {
                     &[parameter(b"type", named(b"PropertyHookType"))],
                     Some(Type::Bool),
                 ),
-                unbuilt as Entry,
+                super::member::reflection_property_has_hook as Entry,
             ),
             (
                 method(
@@ -5868,7 +5871,7 @@ fn reflection_property() -> Declared {
                     &[parameter(b"type", named(b"PropertyHookType"))],
                     Some(nullable(named(b"ReflectionMethod"))),
                 ),
-                unbuilt as Entry,
+                super::member::reflection_property_get_hook as Entry,
             ),
             (method(b"isFinal", &[], Some(Type::Bool)), unbuilt as Entry),
         ],
