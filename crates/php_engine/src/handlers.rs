@@ -1907,6 +1907,43 @@ pub(crate) fn check_undef_args<T: Tier>(
     Ok(advance(req, frame))
 }
 
+/// `ZEND_ASSERT_CHECK` (`Z/Zend/zend_vm_def.h:8880`), in front of every
+/// `assert()` php compiles while `zend.assertions` is at or above zero:
+/// while it stands at or below zero as the program serves, the jump in `op2` is
+/// taken over the whole call, so nothing of its arguments is evaluated,
+/// and `true` is what the call leaves where its value is read;
+/// otherwise the call is served.
+///
+/// ```php
+/// function f() { echo "evaluated\n"; return false; }
+/// ini_set('zend.assertions', 0);
+/// var_dump(assert(f()));
+/// assert(f(), 'x');
+/// ini_set('zend.assertions', 1);
+/// try { var_dump(assert(f())); } catch (AssertionError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// bool(true)
+/// evaluated
+/// assert(f())
+/// ```
+pub(crate) fn assert_check<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    if req.assertions() > 0 {
+        return Ok(advance(req, frame));
+    }
+    if op.out_type != OperandKind::Unused {
+        let slot = exec::temporary_slot(code, op.out);
+        let previous = req.set_slot(frame, slot, Value::bool(true));
+        req.release(previous);
+    }
+    jump_to(req, frame, op.op2)
+}
+
 /// Where a `SEND_*` or a `CHECK_FUNC_ARG` places its argument, php's
 /// `op2` decoded once: the argument's number, or, where `op2` is an
 /// `IS_CONST`, the name the compiler left because it could not place
@@ -14399,6 +14436,7 @@ pub(crate) fn handle_exception<T: Tier>(
 /// echo "after\n";
 /// ```
 /// ```expect exit=6
+///
 /// ```
 ///
 /// ```php

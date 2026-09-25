@@ -8120,6 +8120,44 @@ impl Request {
             .is_none_or(Request::ini_parse_bool)
     }
 
+    /// `EG(assertions)`, php's `zend.assertions` read as
+    /// `OnUpdateAssertions` reads it (`zend_ini_parse_quantity_warn`):
+    /// `1` compiles and runs an assertion, `0` compiles it behind an
+    /// `ASSERT_CHECK` that jumps over it, and `-1` compiles nothing of it.
+    pub(crate) fn assertions(&self) -> i64 {
+        self.ini_get(b"zend.assertions")
+            .map_or(1, Request::ini_parse_bytes)
+    }
+
+    /// `OnUpdateAssertions` (`Z/Zend/zend.c:156-172`) for an
+    /// `ini_set()`: a value that moves the entry to or from a negative
+    /// one is php's warning and a refusal that keeps the entry as it
+    /// was, since what is compiled already was compiled under it; any
+    /// other value is taken.
+    ///
+    /// ```php
+    /// var_dump(ini_get('zend.assertions'), ini_set('zend.assertions', '-1'), ini_set('zend.assertions', '0'), ini_get('zend.assertions'), ini_set('zend.assertions', '1'));
+    /// ```
+    /// ```expect
+    /// Warning: zend.assertions may be completely enabled or disabled only in php.ini in %s on line 2
+    /// string(1) "1"
+    /// bool(false)
+    /// string(1) "1"
+    /// string(1) "0"
+    /// string(1) "0"
+    /// ```
+    fn assertions_updated(&mut self, value: &[u8]) -> bool {
+        let (current, next) = (self.assertions(), Request::ini_parse_bytes(value));
+        if current != next && (current < 0 || next < 0) {
+            crate::api::raising::warning(
+                self,
+                "zend.assertions may be completely enabled or disabled only in php.ini",
+            );
+            return false;
+        }
+        true
+    }
+
     /// `serialize_precision`, what `var_dump`, `var_export`, `serialize`
     /// and `json_encode` print a float at; -1, its default, asks for the
     /// shortest text that reads back as the same double.
@@ -11374,6 +11412,9 @@ impl Request {
             return Ok(None);
         }
         if name == b"fiber.stack_size" && !crate::fiber::stack_size_updated(self, value) {
+            return Ok(None);
+        }
+        if name == b"zend.assertions" && !self.assertions_updated(value) {
             return Ok(None);
         }
         let handler = self.shared.extensions.iter().find_map(|e| {

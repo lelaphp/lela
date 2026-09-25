@@ -117,7 +117,9 @@ use attributes::InternalAttribute;
 use walk::{Class, Closure, Function, Method, Property};
 
 mod args;
+mod assert;
 mod attributes;
+mod export;
 mod magic;
 mod types;
 mod walk;
@@ -293,6 +295,8 @@ pub(crate) struct Emit<'a> {
     strings: &'a mut dyn Intern,
     /// php's `precision` while the file compiles, [`Options::precision`].
     precision: i32,
+    /// What an `assert()` compiles to, [`Options::assertions`].
+    assertions: assert::Assertions,
     /// The engine's persistent constants, [`Options::persistent`].
     persistent: &'a [ConstDecl],
     /// The engine's natives, [`Options::functions`].
@@ -890,6 +894,7 @@ pub(crate) fn unit(
         parsed,
         strings,
         precision: options.precision,
+        assertions: assert::Assertions::of(options.assertions),
         persistent: &options.persistent,
         functions: &options.functions,
         known_classes: &options.classes,
@@ -1013,6 +1018,29 @@ fn resolve_fast_calls(oplines: &mut [Opline], try_catch: &[TryCatch]) {
         }
         if let Some(element) = try_catch.get(op.op1 as usize) {
             op.op1 = element.finally_op.0;
+        }
+    }
+}
+
+/// `pass_two`'s `ZEND_ASSERT_CHECK` arm (`Z/Zend/zend_opcode.c:1190`):
+/// what the check leaves is unused where what the call returns is, the
+/// call being the opline before the check's jump target, which
+/// [`Emit::do_free`] marked `UNUSED` where nothing reads what it returns.
+fn unused_assert_checks(oplines: &mut [Opline]) {
+    for at in 0..oplines.len() {
+        let Some(check) = oplines
+            .get(at)
+            .filter(|op| op.opcode == Opcode::AssertCheck)
+        else {
+            continue;
+        };
+        let unused = check
+            .op2
+            .checked_sub(1)
+            .and_then(|call| oplines.get(call as usize))
+            .is_some_and(|call| call.out_type == OperandKind::Unused);
+        if unused && let Some(check) = oplines.get_mut(at) {
+            check.out_type = OperandKind::Unused;
         }
     }
 }
@@ -2509,6 +2537,13 @@ impl Emit<'_> {
     /// a loop or another body is [`Self::nested_function_decl`].
     fn function_decl(&mut self, function: &Function) -> Result<(), CompileError> {
         let name = self.prefix_with_ns(&function.name);
+        // `zend_begin_func_decl`, before either binding: `assert` is the
+        // compiler's own in every namespace (`zend_compile_assert`).
+        if function.name.eq_ignore_ascii_case(b"assert") {
+            return Err(self.compile_error(
+                "Defining a custom assert() function is not allowed, as the function has special semantics",
+            ));
+        }
         if self.depth != 1 {
             return self.nested_function_decl(function, &name);
         }
@@ -3505,6 +3540,7 @@ impl Emit<'_> {
             }
         }
         resolve_fast_calls(&mut self.oplines, &self.try_catch);
+        unused_assert_checks(&mut self.oplines);
         headers_numbered(&self.oplines, &self.safepoints)?;
         swap_commutative(&mut self.oplines);
         let mut oplines = std::mem::take(&mut self.oplines);
@@ -11441,6 +11477,9 @@ impl Emit<'_> {
     /// its own, and `INIT_FCALL` over the lowered name otherwise. Every
     /// callable this engine has is a native, so the call op after an
     /// `INIT_FCALL` is `DO_ICALL`; `DO_UCALL` comes with user functions.
+    /// `assert` is `zend_compile_assert`'s before any of that
+    /// ([`Self::assert`]), by the name the table holds and by the bare
+    /// name in a namespace alike.
     ///
     /// Every call is given a `VAR` for what it returns (`zend_emit_op`
     /// with a `result`, `zend_make_var_result`), numbered whether or not
@@ -11451,9 +11490,21 @@ impl Emit<'_> {
         let line = self.line;
         let (resolved, runtime) = self.function_name(name);
         if runtime {
+            // `zend_compile_assert` over the name as written, which the
+            // program resolves.
+            if name.eq_ignore_ascii_case(b"assert") {
+                return self.assert(&resolved, arguments, None);
+            }
             return self.ns_call(&resolved, arguments);
         }
         let lowered = resolved.to_ascii_lowercase();
+        // "Special assert() handling should apply independently of
+        // compiler flags."
+        if lowered == b"assert"
+            && let Some(index) = self.native_index(&lowered)
+        {
+            return self.assert(&resolved, arguments, Some(index));
+        }
         let (callee, plan, stack, call_op) = match self.native_index(&lowered) {
             Some(index) => {
                 // `zend_try_compile_special_func`, which a named argument
@@ -14006,6 +14057,7 @@ mod tests {
             parsed,
             strings,
             precision: options.precision,
+            assertions: assert::Assertions::of(options.assertions),
             persistent: &options.persistent,
             functions: &options.functions,
             known_classes: &options.classes,

@@ -81,6 +81,15 @@ pub struct Options {
     /// `PHP_INI_SYSTEM|PHP_INI_PERDIR`, so the value the request started
     /// under is the value every file it compiles is read under.
     pub short_open_tag: bool,
+    /// Whether php's `zend.assertions` stands at or above zero while the
+    /// file compiles, `EG(assertions) >= 0`, which is all
+    /// `zend_compile_assert` reads: a call of `assert()` is compiled
+    /// behind an `ASSERT_CHECK` where it does, and is the constant `true`
+    /// with nothing of its arguments compiled where the entry is `-1`.
+    /// The entry moves between `-1` and the rest only at startup
+    /// (`OnUpdateAssertions`), so what the request started under is what
+    /// every file it compiles reads; php's default is `1`.
+    pub assertions: bool,
     /// The persistent constants the engine's extensions declared
     /// (`CONST_PERSISTENT`), which `zend_try_ct_eval_const` substitutes
     /// where they are written; a name not here is fetched as the program serves.
@@ -117,6 +126,7 @@ impl Default for Options {
             strict_types: false,
             precision: 14,
             short_open_tag: true,
+            assertions: true,
             persistent: Vec::new(),
             functions: Vec::new(),
             classes: Vec::new(),
@@ -7156,6 +7166,39 @@ class C {
         assert_eq!(
             inside.map(|e| e.message),
             Some(String::from("jump into a finally block is disallowed"))
+        );
+    }
+
+    /// [`Options::assertions`] off, php's `zend.assertions = -1`: an
+    /// `assert()` is the constant `true` and nothing of its arguments
+    /// compiles (`zend_compile_assert`), so `f()` is never called. The
+    /// entry moves only at startup, so no witness runs php under it; the
+    /// dump is the oracle's under `-d zend.assertions=-1` and the dump
+    /// regime, and its behaviour `Zend/tests/assert/expect_017.phpt` and
+    /// `expect_019.phpt`, whose `--INI--` sets it. The bare name in a
+    /// namespace is `zend_compile_assert`'s whatever the table holds.
+    #[test]
+    fn an_assertion_under_assertions_off_is_the_constant_true() {
+        let mut strings = php_heap::Strings::new();
+        let options = Options {
+            assertions: false,
+            ..bundled()
+        };
+        let dump = compile_source(
+            b"<?php namespace A; $a = assert(f());",
+            &options,
+            &mut strings,
+        )
+        .unwrap_or_default()
+        .dump(&[]);
+        assert_eq!(
+            dump,
+            main_dump(
+                2,
+                1,
+                1,
+                "0000 ASSIGN CV0($a) bool(true)\n0001 RETURN int(1)\n"
+            )
         );
     }
 

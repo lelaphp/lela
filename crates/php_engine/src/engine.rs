@@ -509,6 +509,9 @@ impl Shared {
             short_open_tag: self
                 .ini_default(b"short_open_tag")
                 .is_none_or(Request::ini_parse_bool),
+            assertions: self
+                .ini_default(b"zend.assertions")
+                .is_none_or(|value| Request::ini_parse_bytes(value) >= 0),
         }
     }
 
@@ -608,7 +611,7 @@ impl Shared {
 /// string(0) ""
 /// string(10) "ISO-8859-1"
 /// ```
-const CORE_INI: [(&str, &str); 41] = [
+const CORE_INI: [(&str, &str); 42] = [
     ("short_open_tag", "1"),
     ("fatal_error_backtraces", "1"),
     ("precision", "14"),
@@ -637,6 +640,11 @@ const CORE_INI: [(&str, &str); 41] = [
     ("zend.exception_string_param_max_len", "15"),
     ("zend.max_allowed_stack_size", "0"),
     ("zend.reserved_stack_size", "0"),
+    // `zend.assertions`, `1` (`Z/Zend/zend.c:264`), `EG(assertions)`:
+    // what `zend_compile_assert` compiles under and `ASSERT_CHECK`
+    // reads, moved between `-1` and the rest only at startup
+    // (`OnUpdateAssertions`, [`Request::assertions_updated`]).
+    ("zend.assertions", "1"),
     // `zend.enable_gc`, `On` (`Z/Zend/zend.c:265`), whose `on_modify` is
     // the collector's `gc_enable`.
     ("zend.enable_gc", "1"),
@@ -1155,6 +1163,7 @@ impl Engine {
             let ini = CompileIni {
                 precision: req.precision(),
                 short_open_tag: req.short_open_tag(),
+                assertions: req.assertions() >= 0,
             };
             let shared = Arc::clone(&self.shared);
             let stack = req.stack_limit();
@@ -1252,9 +1261,11 @@ impl Engine {
 
 /// The ini entries php reads while a file compiles, read once where the
 /// compile begins and handed down: `precision`, which `zend_double_to_str`
-/// renders a folded double constant at (`EG(precision)`), and
+/// renders a folded double constant at (`EG(precision)`),
 /// `short_open_tag`, which php's scanner opens a `<?` under
-/// (`CG(short_tags)`, `Z/main/main.c:820`). php keeps both where its
+/// (`CG(short_tags)`, `Z/main/main.c:820`), and whether `zend.assertions`
+/// is at or above zero, which `zend_compile_assert` compiles a call of
+/// `assert()` under (`EG(assertions)`). php keeps them where its
 /// compiler reads them as it compiles, so what the ini says when the
 /// compile begins is what the whole file is compiled under: the startup ini's
 /// for a unit bound for the cache, which every request that serves it
@@ -1263,6 +1274,7 @@ impl Engine {
 struct CompileIni {
     precision: i32,
     short_open_tag: bool,
+    assertions: bool,
 }
 
 /// One source compiled, with what the compiler refused kept instead of
@@ -1294,6 +1306,7 @@ fn compile(
         strict_types: false,
         precision: ini.precision,
         short_open_tag: ini.short_open_tag,
+        assertions: ini.assertions,
         persistent: declared.constants.to_vec(),
         functions: declared
             .functions
@@ -2493,6 +2506,7 @@ mod tests {
                 CompileIni {
                     precision: 14,
                     short_open_tag: true,
+                    assertions: true,
                 },
                 Declared::default(),
                 StackLimit::UNCHECKED,
