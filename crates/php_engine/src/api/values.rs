@@ -1021,6 +1021,16 @@ impl PartialEq for PhpRef {
     }
 }
 
+impl Eq for PhpRef {}
+
+/// A reference hashes as the cell it names, so two equal names hash
+/// alike and a table keyed by references keys them by identity.
+impl std::hash::Hash for PhpRef {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
+
 impl std::fmt::Debug for PhpRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}", self.0)

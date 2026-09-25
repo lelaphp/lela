@@ -78,7 +78,7 @@ use php_ext::decl::{
 };
 use php_ext::raising::{Thrown, arg_count_error, arg_type_error, deprecated, throw};
 use php_ext::request::{ExtensionId, PHP_VERSION, Request};
-use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
 /// private to this crate (ADR-0005); nothing in it is shared or synchronised.
@@ -91,6 +91,9 @@ use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, Value
 struct State {
     parameters: HashMap<u32, signature::ParameterRef>,
     types: HashMap<u32, signature::TypeRef>,
+    /// `REFLECTION_G(key)`, the request's secret `getId` hashes a
+    /// reference's identity under so no address is shown.
+    reference_key: std::hash::RandomState,
 }
 
 /// The extension value (design §7.1): declarations paired with entries,
@@ -143,6 +146,7 @@ const REFLECTORS: &[&[u8]] = &[
     b"ReflectionProperty",
     b"ReflectionFunction",
     b"ReflectionParameter",
+    b"ReflectionReference",
 ];
 
 /// php's `reflection_object` beside the `name` and `class` properties
@@ -162,6 +166,9 @@ struct Reflected {
     /// php's `attribute_reference`, which `ReflectionAttribute` keeps
     /// where the other reflectors keep `intern->ce`.
     attribute: Option<attr::AttributeRef>,
+    /// The reference a `ReflectionReference` holds in `intern->obj`,
+    /// one owner of it.
+    reference: Option<PhpRef>,
 }
 
 /// `reflection_object_handlers`
@@ -174,11 +181,15 @@ struct Reflector;
 
 impl ObjectHandlers for Reflector {
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        if let Some(kept) = object
-            .native_mut::<Reflected>(req)
-            .and_then(|reflected| reflected.object.take())
-        {
+        let Some(reflected) = object.native_mut::<Reflected>(req) else {
+            return;
+        };
+        let (kept, reference) = (reflected.object.take(), reflected.reference.take());
+        if let Some(kept) = kept {
             req.release(kept.as_value());
+        }
+        if let Some(reference) = reference {
+            req.release(reference.as_value());
         }
     }
 
@@ -187,11 +198,14 @@ impl ObjectHandlers for Reflector {
     }
 
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
-        if let Some(kept) = object
-            .native::<Reflected>(req)
-            .and_then(|reflected| reflected.object)
-        {
+        let Some(reflected) = object.native::<Reflected>(req) else {
+            return;
+        };
+        if let Some(kept) = reflected.object {
             visit(kept.as_value());
+        }
+        if let Some(reference) = reflected.reference {
+            visit(reference.as_value());
         }
     }
 }
@@ -1113,6 +1127,133 @@ fn reflection_extension_is_temporary(req: &mut Request) -> Result<Value, Thrown>
     exactly_arguments(req, 0)?;
     this_extension(req)?;
     Ok(Value::bool(false))
+}
+
+// -------------------------------------------------- ReflectionReference
+
+/// `ReflectionReference::fromArrayElement(array $array, int|string
+/// $key)`: a reflector over the element at `key` where it is a
+/// reference, `null` where it is a plain value or a reference only the
+/// array holds (`is_ignorable_reference`, a directly self-referential
+/// array excepted), and php's `ReflectionException` for a key the array
+/// has not. The key is looked up as given, `zend_hash_find` for a
+/// string and `zend_hash_index_find` for an int.
+///
+/// ```php
+/// $a = [0, 1, 2]; $r = &$a[1]; $one = &$a[2]; unset($one);
+/// var_dump(ReflectionReference::fromArrayElement($a, 0), ReflectionReference::fromArrayElement($a, 1), ReflectionReference::fromArrayElement($a, 2));
+/// try { ReflectionReference::fromArrayElement($a, 3); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+/// try { ReflectionReference::fromArrayElement($a, []); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// $s = []; $s[0] = &$s; $t = [$s]; unset($s);
+/// var_dump(ReflectionReference::fromArrayElement($t[0], 0) instanceof ReflectionReference);
+/// ```
+/// ```expect
+/// NULL
+/// object(ReflectionReference)#1 (0) {
+/// }
+/// NULL
+/// Array key not found
+/// ReflectionReference::fromArrayElement(): Argument #2 ($key) must be of type string|int, array given
+/// bool(true)
+/// ```
+fn reflection_reference_from_array_element(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 2)?;
+    let given = req.argument(1).unwrap_or_default();
+    let array = php_ext::coerce::coerce_param(req, &given, &Type::Array, 1)?;
+    let given = req.argument(2).unwrap_or_default();
+    let key =
+        php_ext::coerce::coerce_param(req, &given, &Type::Union(vec![Type::String, Type::Int]), 2)?;
+    let Some(array) = array.as_array().copied() else {
+        return Ok(Value::null());
+    };
+    let key = match key.as_ref() {
+        ValueRef::Int(n) => Key::Int(n),
+        _ => Key::Str(PhpString::new(req, key.as_str_bytes().unwrap_or_default())?),
+    };
+    let Some(item) = array.get(&key) else {
+        return Err(throw(req, "ReflectionException", "Array key not found"));
+    };
+    let Some(reference) = item.as_php_ref().copied() else {
+        return Ok(Value::null());
+    };
+    // `is_ignorable_reference`: one owner, the array's, and no directly
+    // self-referential array, which `zend_array_dup` keeps as a
+    // reference despite the one owner.
+    let self_referential = reference
+        .get()
+        .as_array()
+        .and_then(|held| held.get(&key))
+        .and_then(|element| element.as_php_ref().copied())
+        == Some(reference);
+    if item.refcount() == 1 && !self_referential {
+        return Ok(Value::null());
+    }
+    let class = class_named(req, b"ReflectionReference")?;
+    let object = new_object(req, class)?;
+    req.addref(&reference.as_value());
+    if let Some(reflected) = object.native_mut::<Reflected>(req) {
+        reflected.reference = Some(reference);
+    } else {
+        req.release(reference.as_value());
+    }
+    Ok(object.as_value())
+}
+
+/// `ReflectionReference::getId()`: a string that is the same for two
+/// reflectors over one reference and differs between two references,
+/// twenty bytes as php's `SHA1(ref || key)` is, here the reference's
+/// identity hashed under the request's secret, so no address is shown;
+/// php's `Corrupted ReflectionReference object` for a reflector that
+/// holds none.
+///
+/// ```php
+/// $a = [1, 2]; $x = &$a[0]; $y = &$a[1]; $b = []; $b[0] = &$a[0];
+/// $r0 = ReflectionReference::fromArrayElement($a, 0); $r1 = ReflectionReference::fromArrayElement($a, 1); $rb = ReflectionReference::fromArrayElement($b, 0);
+/// var_dump($r0->getId() === $rb->getId(), $r0->getId() !== $r1->getId(), strlen($r0->getId()));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// int(20)
+/// ```
+fn reflection_reference_get_id(req: &mut Request) -> Result<Value, Thrown> {
+    use std::hash::BuildHasher as _;
+    exactly_arguments(req, 0)?;
+    let reference = req
+        .this()
+        .and_then(|this| this.native::<Reflected>(req))
+        .and_then(|reflected| reflected.reference);
+    let Some(reference) = reference else {
+        return Err(throw(
+            req,
+            "ReflectionException",
+            "Corrupted ReflectionReference object",
+        ));
+    };
+    let key = &req.state::<State>().reference_key;
+    let digest: Vec<u8> = (0u8..3)
+        .flat_map(|round| key.hash_one((reference, round)).to_le_bytes())
+        .take(20)
+        .collect();
+    string_value(req, &digest)
+}
+
+/// `ReflectionReference::__construct()`: private, and php's refusal
+/// when reached anyway, since a reflector is made by
+/// `fromArrayElement`.
+///
+/// ```php
+/// try { new ReflectionReference(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Call to private ReflectionReference::__construct() from global scope
+/// ```
+fn reflection_reference_construct(req: &mut Request) -> Result<Value, Thrown> {
+    Err(throw(
+        req,
+        "ReflectionException",
+        "Cannot directly instantiate ReflectionReference. Use ReflectionReference::fromArrayElement() instead",
+    ))
 }
 
 // -------------------------------------------------- ReflectionZendExtension

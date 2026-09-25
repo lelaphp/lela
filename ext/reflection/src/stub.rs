@@ -6340,14 +6340,20 @@ fn reflection_reference() -> Declared {
                     ],
                     Some(nullable(named(b"ReflectionReference"))),
                 )),
-                unbuilt as Entry,
+                super::reflection_reference_from_array_element as Entry,
             ),
-            (method(b"getId", &[], Some(Type::String)), unbuilt as Entry),
+            (
+                method(b"getId", &[], Some(Type::String)),
+                super::reflection_reference_get_id as Entry,
+            ),
             (
                 private(method(b"__clone", &[], Some(Type::Void))),
-                unbuilt as Entry,
+                super::func::reflection_clone as Entry,
             ),
-            (private(method(b"__construct", &[], None)), unbuilt as Entry),
+            (
+                private(method(b"__construct", &[], None)),
+                super::reflection_reference_construct as Entry,
+            ),
         ],
     )
 }

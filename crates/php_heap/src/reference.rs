@@ -170,6 +170,15 @@ impl Ref {
     }
 }
 
+/// A reference hashes as the one cell it names, by the address
+/// [`Ref::is_same`] compares, so a table keyed by references keys them
+/// by identity, as php's pointer would.
+impl std::hash::Hash for Ref {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
+
 impl std::fmt::Debug for Ref {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "reference({:?})", self.val().kind())
