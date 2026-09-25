@@ -290,6 +290,7 @@ fn class(name: &[u8], kind: ClassKind, parent: Option<&[u8]>) -> ClassDecl {
         parent: parent.map(|p| Name(p.into())),
         interfaces: Vec::new(),
         traits: Vec::new(),
+        adaptations: Vec::new(),
         backing: EnumBacking::Pure,
         constants: Vec::new(),
         properties: Vec::new(),

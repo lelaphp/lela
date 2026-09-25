@@ -150,6 +150,7 @@ pub(crate) fn assertion_error_class() -> (ClassDecl, Vec<(MethodDecl, Entry)>) {
         parent: Some(Name(b"Error".as_slice().into())),
         interfaces: Vec::new(),
         traits: Vec::new(),
+        adaptations: Vec::new(),
         backing: EnumBacking::Pure,
         constants: Vec::new(),
         properties: Vec::new(),

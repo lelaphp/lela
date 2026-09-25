@@ -411,7 +411,7 @@ impl Emit<'_> {
         }
         let substituted = match fetch {
             FETCH_CLASS_PARENT => self.active_parent.clone(),
-            _ => self.active_class.clone(),
+            _ => self.active_name(),
         };
         Ok(match substituted {
             Some(name) => Type::Named(Name(name.into_boxed_slice())),

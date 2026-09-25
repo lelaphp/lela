@@ -38,6 +38,7 @@ fn class_decl(name: &str, kind: ClassKind, parent: Option<&str>, interfaces: &[&
             .map(|i| Name(i.as_bytes().into()))
             .collect(),
         traits: Vec::new(),
+        adaptations: Vec::new(),
         backing: EnumBacking::Pure,
         constants: Vec::new(),
         properties: Vec::new(),

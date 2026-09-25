@@ -100,9 +100,9 @@ use php_heap::{
     Exponent, Fatal, Intern, Key, Number, Scalar, Zval, ZvalType, double_to_string, numeric_prefix,
 };
 use php_unit::decl::{
-    Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind, ConstDecl,
-    ConstExpr, DynamicProperties, EnumBacking, FunctionDecl, MethodDecl, Name, Parameter,
-    PropertyDecl, Type, Visibility,
+    AliasModifier, Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind,
+    ConstDecl, ConstExpr, DynamicProperties, EnumBacking, FunctionDecl, MethodDecl, Name,
+    Parameter, PropertyDecl, TraitAdaptation, TraitMethodRef, Type, Visibility,
 };
 use php_unit::{
     ConstIdx, Diagnostic, FramelessEntry, Level, MethodBody, OpArray, Opcode, OperandKind, Opline,
@@ -304,8 +304,8 @@ pub(crate) struct Emit<'a> {
     /// put what follows it in, and none before one.
     namespace: Option<Vec<u8>>,
     /// `CG(active_class_entry)`: the class whose members are being
-    /// compiled, by name, and none outside a class body.
-    active_class: Option<Vec<u8>>,
+    /// compiled, and none outside a class body.
+    active_class: Option<ActiveClass>,
     /// `CG(active_class_entry)->parent_name`: the name the class being
     /// compiled extends, which `parent` needs one of.
     active_parent: Option<Vec<u8>>,
@@ -777,6 +777,19 @@ enum Under {
 enum Folded {
     Line(i64),
     Text(Vec<u8>),
+    /// `__CLASS__` in a trait, the one magic constant
+    /// `zend_try_ct_eval_magic_const` leaves to the program: the class
+    /// that uses the trait, fetched as `FETCH_CLASS_NAME` of `self`.
+    UsingClass,
+}
+
+/// `CG(active_class_entry)` as the compiler reads it: the class's name,
+/// and its kind, of which a trait's is the one whose `self` names the
+/// class that will use it and so is known to no fold
+/// (`zend_is_scope_known`).
+struct ActiveClass {
+    name: Vec<u8>,
+    kind: ClassKind,
 }
 
 /// The `ConstExpr` a folded constant is, which a declaration carries in
@@ -1265,7 +1278,10 @@ impl Emit<'_> {
                 let name = self.text(tree[id].name).to_vec();
                 self.label(&name)?;
             }
-            Stmt::ClassDecl(_) | Stmt::InterfaceDecl(_) | Stmt::EnumDecl(_) => {
+            Stmt::ClassDecl(_)
+            | Stmt::InterfaceDecl(_)
+            | Stmt::TraitDecl(_)
+            | Stmt::EnumDecl(_) => {
                 let class = self.walk_class_decl(stmt)?;
                 self.class(&class)?;
             }
@@ -1280,7 +1296,6 @@ impl Emit<'_> {
                 }
             }
             Stmt::IfStmt(id) => self.r#if(id)?,
-            Stmt::TraitDecl(_) => return Err(self.unread("a trait")),
             Stmt::GlobalStmt(id) => {
                 for var in tree[id].vars.clone() {
                     self.global_var(var)?;
@@ -2625,7 +2640,7 @@ impl Emit<'_> {
             Some(enclosing) if self.fn_flags.closure => name.extend_from_slice(enclosing),
             Some(enclosing) => {
                 if let Some(class) = &self.active_class {
-                    name.extend_from_slice(class);
+                    name.extend_from_slice(&class.name);
                     name.extend_from_slice(b"::");
                 }
                 name.extend_from_slice(enclosing);
@@ -2749,7 +2764,7 @@ impl Emit<'_> {
         promoted: walk::Promoted,
         ty: Option<&Type>,
     ) -> Result<(), CompileError> {
-        let class_name = self.active_class.clone().unwrap_or_default();
+        let class_name = self.active_name().unwrap_or_default();
         let member = format!(
             "{}::${}",
             String::from_utf8_lossy(&class_name),
@@ -2834,13 +2849,30 @@ impl Emit<'_> {
                 String::from_utf8_lossy(&name)
             )));
         }
+        // `zend_begin_method_decl`'s refusals of a body against the
+        // method's `abstract`, which only a trait's reach so far.
+        let shown = format!(
+            "{}::{}()",
+            String::from_utf8_lossy(&class_name),
+            String::from_utf8_lossy(&name)
+        );
+        if method.is_abstract && method.has_body {
+            return Err(
+                self.compile_error(format!("Abstract function {shown} cannot contain body"))
+            );
+        }
+        if !method.is_abstract && !method.has_body {
+            return Err(
+                self.compile_error(format!("Non-abstract method {shown} must contain body"))
+            );
+        }
         let (function, body) =
             self.body(&method.function, &name, Some(&class_name), method.is_static)?;
         let declared = MethodDecl {
             function,
             visibility: method.visibility,
             is_instance: !method.is_static,
-            is_abstract: false,
+            is_abstract: method.is_abstract,
             is_final: method.is_final,
             tentative_return: false,
         };
@@ -2928,12 +2960,9 @@ impl Emit<'_> {
         let is_ctor = scope.is_some() && name.eq_ignore_ascii_case(b"__construct");
         // `get_function_or_method_name`, what a deprecation of the
         // prologue names the function by.
-        let owner = scope.map(<[u8]>::to_vec).or_else(|| {
-            self.fn_flags
-                .closure
-                .then(|| self.active_class.clone())
-                .flatten()
-        });
+        let owner = scope
+            .map(<[u8]>::to_vec)
+            .or_else(|| self.fn_flags.closure.then(|| self.active_name()).flatten());
         let shown = match owner {
             Some(owner) => format!(
                 "{}::{}",
@@ -3569,6 +3598,8 @@ impl Emit<'_> {
         for written in &class.interfaces {
             interfaces.push(self.inherited_name(written, "interface name")?);
         }
+        let (traits, adaptations) = self.trait_uses(class, &name)?;
+        self.line = line;
         let backing = self.enum_backing(class, &name)?;
         if class.kind == ClassKind::Enum {
             // `zend_enum_add_interfaces`: every enum is a `UnitEnum` and
@@ -3607,7 +3638,8 @@ impl Emit<'_> {
                 .iter()
                 .map(|i| Name(i.clone().into_boxed_slice()))
                 .collect(),
-            traits: Vec::new(),
+            traits,
+            adaptations,
             backing,
             constants: Vec::new(),
             properties: enum_properties(class.kind, backing),
@@ -3618,17 +3650,20 @@ impl Emit<'_> {
             line,
             end_line: class.end_line,
         };
-        self.active_class = Some(name.clone());
+        self.active_class = Some(ActiveClass {
+            name: name.clone(),
+            kind: class.kind,
+        });
         self.active_parent.clone_from(&parent);
         self.class_constants(&mut decl, class, &name)?;
-        self.active_constants = foldable_constants(&decl.constants, usize::MAX);
+        self.active_constants = self.foldable_constants(&decl.constants, usize::MAX);
         self.class_properties(&mut decl, class, &name)?;
         let at = self.classes.len();
         self.classes.push(decl);
         for method in &class.methods {
             self.line = method.function.line;
             self.active_constants =
-                foldable_constants(&self.classes[at].constants, method.constants_before);
+                self.foldable_constants(&self.classes[at].constants, method.constants_before);
             self.method_decl(at, method)?;
         }
         self.active_constants.clear();
@@ -3641,11 +3676,12 @@ impl Emit<'_> {
         // `zend_compile_class_decl` decides once the body has compiled,
         // so an interface `add_stringable_interface` gave the class
         // counts, and an enum, which `zend_enum_add_interfaces` gave
-        // `UnitEnum`, is never bound early.
+        // `UnitEnum`, is never bound early; nor is a class that uses a
+        // trait, whose methods only the link copies in.
         let early = self
             .classes
             .get(at)
-            .is_some_and(|decl| decl.interfaces.is_empty())
+            .is_some_and(|decl| decl.interfaces.is_empty() && decl.traits.is_empty())
             && match &parent {
                 None => true,
                 Some(parent) => self.bound_class(parent).is_some(),
@@ -3655,6 +3691,155 @@ impl Emit<'_> {
             return Ok(());
         }
         self.declare_class(&name, parent.as_deref())
+    }
+
+    /// The name of `CG(active_class_entry)`, and none outside a class
+    /// body.
+    fn active_name(&self) -> Option<Vec<u8>> {
+        self.active_class.as_ref().map(|class| class.name.clone())
+    }
+
+    /// `ZEND_ACC_TRAIT` on `CG(active_class_entry)`: the body being
+    /// compiled is a trait's.
+    fn in_trait(&self) -> bool {
+        self.active_class
+            .as_ref()
+            .is_some_and(|class| class.kind == ClassKind::Trait)
+    }
+
+    /// The constants of the class being compiled that
+    /// `zend_try_ct_eval_class_const` may substitute
+    /// ([`foldable_constants_of`]), and none of a trait's:
+    /// `zend_verify_ct_const_access` refuses a constant whose class is a
+    /// trait, since a composing class takes it as its own at the link.
+    fn foldable_constants(
+        &self,
+        constants: &[ClassConstDecl],
+        before: usize,
+    ) -> Vec<(Vec<u8>, ConstExpr)> {
+        if self.in_trait() {
+            return Vec::new();
+        }
+        foldable_constants_of(constants, before)
+    }
+
+    /// `zend_compile_use_trait` (`Z/Zend/zend_compile.c:9137`) over each
+    /// `use` of the body: every name resolved as a trait name, which an
+    /// interface may not take, and each adaptation with its names
+    /// resolved, an alias held to the modifiers
+    /// `zend_check_trait_alias_modifiers` allows. The names are
+    /// `ce->trait_names`; the adaptations go to the link as written.
+    ///
+    /// ```php
+    /// interface I { use T; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use traits inside of interfaces. T is used in I in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// trait T { function f() {} }
+    /// class C { use T { f as static g; } }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use "static" as method modifier in trait alias in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class C { use static; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use "static" as trait name, as it is reserved in %s on line 2
+    /// ```
+    fn trait_uses(
+        &mut self,
+        class: &Class,
+        name: &[u8],
+    ) -> Result<(Vec<Name>, Vec<TraitAdaptation>), CompileError> {
+        let mut traits = Vec::new();
+        let mut adaptations = Vec::new();
+        let as_name = |bytes: Vec<u8>| Name(bytes.into_boxed_slice());
+        for used in &class.traits {
+            self.line = used.line;
+            for written in &used.names {
+                if class.kind == ClassKind::Interface {
+                    return Err(self.compile_error(format!(
+                        "Cannot use traits inside of interfaces. {} is used in {}",
+                        String::from_utf8_lossy(written),
+                        String::from_utf8_lossy(name)
+                    )));
+                }
+                traits.push(as_name(self.inherited_name(written, "trait name")?));
+            }
+            for adaptation in &used.adaptations {
+                adaptations.push(match adaptation {
+                    walk::Adaptation::Insteadof {
+                        trait_name,
+                        method,
+                        excluded,
+                        line,
+                    } => {
+                        self.line = *line;
+                        let trait_name = as_name(self.inherited_name(trait_name, "trait name")?);
+                        let mut names = Vec::with_capacity(excluded.len());
+                        for written in excluded {
+                            names.push(as_name(self.inherited_name(written, "trait name")?));
+                        }
+                        TraitAdaptation::Insteadof {
+                            trait_name,
+                            method: as_name(method.clone()),
+                            excluded: names,
+                        }
+                    }
+                    walk::Adaptation::As {
+                        trait_name,
+                        method,
+                        modifier,
+                        alias,
+                        line,
+                    } => {
+                        self.line = *line;
+                        let modifier = match modifier {
+                            None => None,
+                            Some(walk::AsModifier::Visibility(visibility)) => {
+                                Some(AliasModifier::Visibility(*visibility))
+                            }
+                            Some(walk::AsModifier::Final) => Some(AliasModifier::Final),
+                            Some(walk::AsModifier::Readonly) => {
+                                return Err(self.compile_error(
+                                    "Cannot use the readonly modifier on a method",
+                                ));
+                            }
+                            Some(walk::AsModifier::Static) => {
+                                return Err(self.compile_error(
+                                    "Cannot use \"static\" as method modifier in trait alias",
+                                ));
+                            }
+                            Some(walk::AsModifier::Abstract) => {
+                                return Err(self.compile_error(
+                                    "Cannot use \"abstract\" as method modifier in trait alias",
+                                ));
+                            }
+                        };
+                        let trait_name = match trait_name {
+                            Some(written) => {
+                                Some(as_name(self.inherited_name(written, "trait name")?))
+                            }
+                            None => None,
+                        };
+                        TraitAdaptation::As {
+                            method: TraitMethodRef {
+                                trait_name,
+                                method: as_name(method.clone()),
+                            },
+                            modifier,
+                            alias: alias.clone().map(as_name),
+                        }
+                    }
+                });
+            }
+        }
+        Ok((traits, adaptations))
     }
 
     /// `zend_compile_enum_backing_type` (`Z/Zend/zend_compile.c:9221`):
@@ -3838,7 +4023,7 @@ impl Emit<'_> {
                     String::from_utf8_lossy(&constant.name)
                 )));
             }
-            self.active_constants = foldable_constants(&decl.constants, usize::MAX);
+            self.active_constants = self.foldable_constants(&decl.constants, usize::MAX);
             let value = self.case_or_constant(decl, constant, name)?;
             let attributes = self.case_attributes(constant)?;
             decl.constants.push(ClassConstDecl {
@@ -4504,13 +4689,16 @@ impl Emit<'_> {
         let Some(child) = self.classes.get(at) else {
             return Ok(false);
         };
-        let lookup = |name: &[u8]| self.bound_class(name);
+        let lookup = |name: &[u8]| {
+            self.bound_class(name)
+                .map(|decl| php_unit::link::Held { decl, bodies: None })
+        };
         let linking = php_unit::link::link(child, &lookup);
-        for deprecation in linking.deprecations {
+        for raised in linking.raised {
             self.diagnostics.push(Diagnostic {
-                level: Level::Deprecated,
-                line: deprecation.site.line,
-                message: deprecation.to_string().as_str().into(),
+                level: raised.level(),
+                line: raised.site().line,
+                message: raised.to_string().as_str().into(),
             });
         }
         match linking.outcome {
@@ -7086,9 +7274,10 @@ impl Emit<'_> {
                 Some(inner) => self.expr(inner),
                 None => Err(self.unread("an expression inside parentheses")),
             },
-            tree::Expr::LiteralExpr(_)
-            | tree::Expr::MagicConstExpr(_)
-            | tree::Expr::NowdocExpr(_) => Ok(Where::Constant(self.constant_expr(expr)?)),
+            tree::Expr::MagicConstExpr(id) => self.magic(id),
+            tree::Expr::LiteralExpr(_) | tree::Expr::NowdocExpr(_) => {
+                Ok(Where::Constant(self.constant_expr(expr)?))
+            }
             // `zend_compile_const`: `true`, `false` and `null` are the
             // values `zend_try_ct_eval_const` substitutes whatever their
             // case, and every other name is a constant fetched by the
@@ -7298,7 +7487,46 @@ impl Emit<'_> {
         match self.magic_const(which, line) {
             Folded::Line(n) => Ok(Zval::long(n)),
             Folded::Text(text) => self.string(&text),
+            Folded::UsingClass => {
+                Err(self.unread("a `__CLASS__` in a trait's constant expression"))
+            }
         }
+    }
+
+    /// `zend_compile_magic_const` (`Z/Zend/zend_compile.c:11301`): the
+    /// constant a magic constant folds to, and for `__CLASS__` in a
+    /// trait `FETCH_CLASS_NAME` with `ZEND_FETCH_CLASS_SELF` in an unused
+    /// `op1`, which the program answers with the using class.
+    ///
+    /// ```php
+    /// trait T { function f() { var_dump(__CLASS__, __TRAIT__, __METHOD__, __FUNCTION__); } }
+    /// class C { use T; }
+    /// class D extends C {}
+    /// (new D)->f();
+    /// var_dump(__TRAIT__);
+    /// ```
+    /// ```expect exit=0
+    /// string(1) "C"
+    /// string(1) "T"
+    /// string(4) "T::f"
+    /// string(1) "f"
+    /// string(0) ""
+    /// ```
+    fn magic(&mut self, id: NodeId<tree::MagicConstExpr>) -> Result<Where, CompileError> {
+        let (which, line) = self.magic_of(id)?;
+        if !matches!(self.magic_const(which, line), Folded::UsingClass) {
+            return Ok(Where::Constant(self.magic_node(id)?));
+        }
+        let out = self.temporary();
+        self.push(Opline {
+            opcode: Opcode::FetchClassName,
+            op1_type: OperandKind::Unused,
+            op1: FETCH_CLASS_SELF,
+            out_type: OperandKind::Tmp,
+            out,
+            ..Opline::default()
+        });
+        Ok(Where::Temporary(out))
     }
 
     /// Which magic constant a `MagicConstExpr` is, by its token's name
@@ -11370,7 +11598,7 @@ impl Emit<'_> {
             _ if constructor => None,
             ClassRef::Named(name) => self.known_method_of(name, method),
             ClassRef::Scope(fetch) if fetch & 0x0f == FETCH_CLASS_SELF && self.scope_known() => {
-                let active = self.active_class.clone().unwrap_or_default();
+                let active = self.active_name().unwrap_or_default();
                 self.known_method_of(&active, method)
             }
             ClassRef::Scope(_) | ClassRef::Fetched(_) => None,
@@ -11470,7 +11698,7 @@ impl Emit<'_> {
         self.ensure_valid_class_fetch_type(fetch)?;
         let name = match fetch {
             FETCH_CLASS_DEFAULT => self.class_name(&written),
-            FETCH_CLASS_SELF if self.scope_known() => match self.active_class.clone() {
+            FETCH_CLASS_SELF if self.scope_known() => match self.active_name() {
                 Some(active) => active,
                 None => return Ok(None),
             },
@@ -11687,7 +11915,7 @@ impl Emit<'_> {
         name: &[u8],
     ) -> Result<Option<Zval>, CompileError> {
         let written = self.text(token).to_vec();
-        let Some(active) = self.active_class.clone() else {
+        let Some(active) = self.active_name() else {
             return Ok(None);
         };
         let refers = match class_fetch_type(&written) {
@@ -11901,7 +12129,7 @@ impl Emit<'_> {
         }
         match self.active_class {
             None => self.active_function.is_some(),
-            Some(_) => true,
+            Some(_) => !self.in_trait(),
         }
     }
 
@@ -12019,7 +12247,7 @@ impl Emit<'_> {
         let own = self
             .active_class
             .as_ref()
-            .is_some_and(|active| active.to_ascii_lowercase() == class);
+            .is_some_and(|active| active.name.to_ascii_lowercase() == class);
         if let Some(decl) = self
             .known_classes
             .iter()
@@ -12266,7 +12494,8 @@ impl Emit<'_> {
                 }
             }
             Magic::Namespace => self.namespace.clone().unwrap_or_default(),
-            Magic::Class => self.active_class.clone().unwrap_or_default(),
+            Magic::Class if self.in_trait() => return Folded::UsingClass,
+            Magic::Class => self.active_name().unwrap_or_default(),
             Magic::Property => self.active_property.clone().unwrap_or_default(),
             // `zend_compile_func_decl` names the op array; the main one
             // has no `function_name`, and a member's constant expression
@@ -12274,9 +12503,9 @@ impl Emit<'_> {
             Magic::Function => self.active_function.clone().unwrap_or_default(),
             // `__METHOD__` is `Class::method` inside a method and the
             // function's name inside a function (`zend_compile_const`).
-            Magic::Method => match (&self.active_class, &self.active_function) {
+            Magic::Method => match (self.active_name(), &self.active_function) {
                 (Some(class), Some(function)) => {
-                    let mut text = class.clone();
+                    let mut text = class;
                     text.extend_from_slice(b"::");
                     text.extend_from_slice(function);
                     text
@@ -12284,7 +12513,8 @@ impl Emit<'_> {
                 (None, Some(function)) => function.clone(),
                 (_, None) => Vec::new(),
             },
-            // A trait is not read yet, so `__TRAIT__` names none.
+            // The trait's own name inside one, and none elsewhere.
+            Magic::Trait if self.in_trait() => self.active_name().unwrap_or_default(),
             Magic::Trait => Vec::new(),
         };
         Folded::Text(text)
@@ -13863,6 +14093,7 @@ mod tests {
             backing: None,
             parent: None,
             interfaces: Vec::new(),
+            traits: Vec::new(),
             attributes: Vec::new(),
             doc_comment: None,
             properties: Vec::new(),
@@ -14220,7 +14451,7 @@ fn is_auto_global(name: &[u8]) -> bool {
 /// each was written as: an enum's case is left out, since its value is
 /// the enum's instance for it (`ZEND_AST_CONST_ENUM_INIT`) and never
 /// the scalar it is backed by.
-fn foldable_constants(constants: &[ClassConstDecl], before: usize) -> Vec<(Vec<u8>, ConstExpr)> {
+fn foldable_constants_of(constants: &[ClassConstDecl], before: usize) -> Vec<(Vec<u8>, ConstExpr)> {
     constants
         .iter()
         .take(before)

@@ -671,6 +671,7 @@ fn final_class(name: &[u8], interfaces: Vec<Name>) -> ClassDecl {
         parent: None,
         interfaces,
         traits: Vec::new(),
+        adaptations: Vec::new(),
         backing: php_unit::decl::EnumBacking::Pure,
         constants: Vec::new(),
         properties: Vec::new(),

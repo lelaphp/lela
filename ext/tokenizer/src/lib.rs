@@ -155,6 +155,7 @@ fn php_token_class() -> (ClassDecl, Vec<(MethodDecl, Entry)>) {
         parent: None,
         interfaces: vec![Name(b"Stringable".as_slice().into())],
         traits: Vec::new(),
+        adaptations: Vec::new(),
         backing: EnumBacking::Pure,
         constants: Vec::new(),
         properties: vec![

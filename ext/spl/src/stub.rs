@@ -153,19 +153,9 @@ impl Reader<'_> {
         names
     }
 
-    /// One class, from its header to its closing brace.
-    fn class(&mut self, entries: &[(&str, Entry)]) -> Option<Declared> {
-        let mut flags = ClassFlags::default();
-        let kind = loop {
-            match self.word().as_slice() {
-                b"abstract" => flags.is_abstract = true,
-                b"final" => flags.is_final = true,
-                b"class" => break ClassKind::Class,
-                b"interface" => break ClassKind::Interface,
-                _ => return None,
-            }
-        };
-        let name = self.word();
+    /// The `extends` and `implements` of a class header: a class's
+    /// parent and interfaces, or the interfaces an interface extends.
+    fn heritage(&mut self, kind: ClassKind) -> (Option<Name>, Vec<Name>) {
         let mut parent = None;
         let mut interfaces = Vec::new();
         loop {
@@ -181,6 +171,23 @@ impl Reader<'_> {
                 break;
             }
         }
+        (parent, interfaces)
+    }
+
+    /// One class, from its header to its closing brace.
+    fn class(&mut self, entries: &[(&str, Entry)]) -> Option<Declared> {
+        let mut flags = ClassFlags::default();
+        let kind = loop {
+            match self.word().as_slice() {
+                b"abstract" => flags.is_abstract = true,
+                b"final" => flags.is_final = true,
+                b"class" => break ClassKind::Class,
+                b"interface" => break ClassKind::Interface,
+                _ => return None,
+            }
+        };
+        let name = self.word();
+        let (parent, interfaces) = self.heritage(kind);
         self.eat(b'{');
         let mut decl = ClassDecl {
             name: Name(name.clone().into()),
@@ -189,6 +196,7 @@ impl Reader<'_> {
             parent,
             interfaces,
             traits: Vec::new(),
+            adaptations: Vec::new(),
             backing: EnumBacking::Pure,
             constants: Vec::new(),
             properties: Vec::new(),
