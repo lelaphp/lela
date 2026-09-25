@@ -772,30 +772,96 @@ impl Emit<'_> {
         container: tree::Expr,
         index: tree::Expr,
     ) -> Result<(), CompileError> {
-        let Some(Named::Fetch { name, table }) = self.named(container)? else {
-            return Err(self.fatal("an `unset` by name over what is no fetch by name"));
-        };
-        let name = self.operand(name);
-        let out = self.temporary();
+        let held = self.held_unset(container)?;
         let dim = self.expr(index)?;
         let (op2_type, op2) = self.dim_operand(dim);
-        self.push(Opline {
-            opcode: Opcode::FetchUnset,
-            op1_type: name.0,
-            op1: name.1,
-            out_type: OperandKind::Var,
-            out,
-            extended_value: table.fetch_type(),
-            ..Opline::default()
-        });
+        let (op1_type, op1) = self.lay_fetch_unset(held);
         self.push(Opline {
             opcode: Opcode::UnsetDim,
-            op1_type: OperandKind::Var,
-            op1: out,
+            op1_type,
+            op1,
             op2_type,
             op2,
             ..Opline::default()
         });
         Ok(())
+    }
+
+    /// `zend_compile_prop` under `BP_VAR_UNSET` over a property of a
+    /// variable fetched by name, its last opline made `UNSET_OBJ`: the
+    /// fetch held back (`zend_delayed_compile_prop`), the property's
+    /// name, then `FETCH_UNSET` into a `VAR` and `UNSET_OBJ` over it, so
+    /// the object's own `unset_property` answers, a hooked property's
+    /// refusal among what it says.
+    ///
+    /// ```php
+    /// class C { public $p = 1; public $q = 1; public int $h { get => 2; } }
+    /// $_GET = new C;
+    /// $n = 'o';
+    /// $o = new C;
+    /// $k = 'p';
+    /// unset($_GET->p, $$n->$k, $GLOBALS['o']->q, $_POST->p);
+    /// var_dump(isset($_GET->p), isset($o->p), isset($o->q), $_GET->h);
+    /// try { unset($_GET->h); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// bool(false)
+    /// bool(false)
+    /// int(2)
+    /// Cannot unset hooked property C::$h
+    /// ```
+    pub(super) fn unset_prop_by_name(
+        &mut self,
+        object: tree::Expr,
+        id: NodeId<tree::MemberAccessExpr>,
+    ) -> Result<(), CompileError> {
+        let held = self.held_unset(object)?;
+        let member = self.member_of(id)?;
+        let name = self.prop_name(member)?;
+        let (op1_type, op1) = self.lay_fetch_unset(held);
+        self.push(Opline {
+            opcode: Opcode::UnsetObj,
+            op1_type,
+            op1,
+            op2_type: name.kind,
+            op2: name.at,
+            extended_value: name.slots,
+            ..Opline::default()
+        });
+        Ok(())
+    }
+
+    /// The fetch by name an `unset` over an element or a property of the
+    /// variable stands on, held back as `zend_delayed_compile_var` holds
+    /// it: the name's operand settled and its `VAR` numbered.
+    fn held_unset(
+        &mut self,
+        container: tree::Expr,
+    ) -> Result<((OperandKind, u32), Symbols, u32), CompileError> {
+        let Some(Named::Fetch { name, table }) = self.named(container)? else {
+            return Err(self.fatal("an `unset` by name over what is no fetch by name"));
+        };
+        let name = self.operand(name);
+        let out = self.temporary();
+        Ok((name, table, out))
+    }
+
+    /// `FETCH_UNSET` over what [`Self::held_unset`] held back, into its
+    /// `VAR`.
+    fn lay_fetch_unset(
+        &mut self,
+        ((op1_type, op1), table, out): ((OperandKind, u32), Symbols, u32),
+    ) -> (OperandKind, u32) {
+        self.push(Opline {
+            opcode: Opcode::FetchUnset,
+            op1_type,
+            op1,
+            out_type: OperandKind::Var,
+            out,
+            extended_value: table.fetch_type(),
+            ..Opline::default()
+        });
+        (OperandKind::Var, out)
     }
 }

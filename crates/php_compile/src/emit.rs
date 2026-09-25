@@ -2439,6 +2439,11 @@ impl Emit<'_> {
                     ..Opline::default()
                 });
             }
+            // `unset($_SERVER->p)` and `unset($$x->p)`: the object is the
+            // variable's `FETCH_UNSET`.
+            tree::Expr::MemberAccessExpr(id) if self.is_by_name(tree[id].obj) => {
+                return self.unset_prop_by_name(tree[id].obj, id);
+            }
             tree::Expr::MemberAccessExpr(id) => {
                 let node = &tree[id];
                 if !matches!(self.peel(node.obj), tree::Expr::SimpleVarExpr(_)) {
@@ -9336,6 +9341,30 @@ impl Emit<'_> {
     /// bool(false)
     /// bool(false)
     /// ```
+    ///
+    /// A property of a variable fetched by name stands on that variable's
+    /// `FETCH_IS`, so a name nothing holds is no warning, and a hooked
+    /// property's `get` answers `isset` and `empty` as the object has it:
+    ///
+    /// ```php
+    /// class C { public ?int $q = null; public int $h { get => 3; } }
+    /// $_GET = new C;
+    /// $n = 'o';
+    /// $o = new C;
+    /// $m = 'none';
+    /// var_dump(isset($_GET->h), empty($_GET->q), isset($$n?->h), isset($$m->p), empty($GLOBALS['o']->h));
+    /// unset($_COOKIE);
+    /// var_dump(isset($_COOKIE->p), isset($_COOKIE?->p));
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// bool(false)
+    /// bool(false)
+    /// bool(false)
+    /// ```
     fn isset_or_empty(&mut self, var: tree::Expr, empty: bool) -> Result<Where, CompileError> {
         let extended_value = u32::from(empty);
         let line = self.line_of(var);
@@ -9385,17 +9414,36 @@ impl Emit<'_> {
             // or a `FETCH_DIM_IS` chain, which `zend_delayed_compile_var`
             // builds and this arm does not; a receiver compiled where it
             // stands would read where php says nothing.
-            if !matches!(object, tree::Expr::SimpleVarExpr(_)) {
+            let by_name = self.is_by_name(object);
+            if !by_name && !matches!(object, tree::Expr::SimpleVarExpr(_)) {
                 return Err(self.fatal(
                     "an `isset` over a property under a property or a dimension, whose links are `FETCH_OBJ_IS`, this compiler cannot read yet",
                 ));
             }
             let name = self.member_of(id)?;
-            let (op1_type, op1) = self.receiver(object)?;
-            if self.is_nullsafe(id) && !self.is_this(object) {
-                self.jmp_null((op1_type, op1), true);
-            }
-            let name = self.prop_name(name)?;
+            let nullsafe = self.is_nullsafe(id) && !self.is_this(object);
+            let (op1_type, op1, name) = if by_name {
+                // A variable fetched by name, `$_SERVER` or `$$x`, is its
+                // `FETCH_IS` held back past the name, or laid down before
+                // the `JMP_NULL` a `?->` stands on.
+                let held = self.delayed_var(object, Fetch::Is)?;
+                if nullsafe {
+                    let receiver = self.base_fetch(held, Fetch::Is, Over::Obj);
+                    self.jmp_null(receiver, true);
+                    let name = self.prop_name(name)?;
+                    (receiver.0, receiver.1, name)
+                } else {
+                    let name = self.prop_name(name)?;
+                    let receiver = self.base_fetch(held, Fetch::Is, Over::Obj);
+                    (receiver.0, receiver.1, name)
+                }
+            } else {
+                let (op1_type, op1) = self.receiver(object)?;
+                if nullsafe {
+                    self.jmp_null((op1_type, op1), true);
+                }
+                (op1_type, op1, self.prop_name(name)?)
+            };
             let out = self.temporary();
             self.push(Opline {
                 opcode: Opcode::IssetIsemptyPropObj,
