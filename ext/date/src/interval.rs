@@ -585,10 +585,6 @@ pub(crate) fn unserialize(req: &mut Request) -> Result<Value, Thrown> {
 /// int(1)
 /// ```
 pub(crate) fn wakeup(req: &mut Request) -> Result<Value, Thrown> {
-    php_ext::raising::deprecated(
-        req,
-        "Method DateInterval::__wakeup() is deprecated since 8.5, this method is obsolete, as serialization hooks are provided by __unserialize() and __serialize()",
-    );
     count_between(req, 0, 0)?;
     let object = this(req)?;
     // `Z_OBJPROP_P`, which `date_object_get_properties_interval` fills

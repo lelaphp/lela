@@ -799,6 +799,66 @@ pub fn instantiate(
     Ok(object)
 }
 
+/// `object_init_with_constructor` (`Z/Zend/zend_API.c:1876`), what
+/// `zend_get_attribute_object` makes an attribute's object with:
+/// [`new_object`], the constructor the class's `get_constructor`
+/// answers, php's `Error` where the scope may not call it, then served
+/// with the positional arguments and the named ones placed as
+/// [`call_named`] places them. A class with no constructor takes
+/// positional arguments and no named one, php's `Unknown named
+/// parameter`. The object is the caller's, one owner; what the
+/// constructor threw is the `Err`, the object given up. The arguments
+/// stay the caller's.
+pub(crate) fn instantiate_named(
+    req: &mut Request,
+    class: ClassId,
+    arguments: &[Value],
+    named: &[(PhpString, Value)],
+) -> Result<PhpObject, Thrown> {
+    let object = new_object(req, class)?;
+    let constructor = match req.handlers_of(class).get_constructor(req, object) {
+        Ok(constructor) => constructor,
+        Err(thrown) => {
+            req.release(object.as_value());
+            return Err(thrown);
+        }
+    };
+    let Some(constructor) = constructor else {
+        if let Some((name, _)) = named.first() {
+            req.release(object.as_value());
+            let message = format!(
+                "Unknown named parameter ${}",
+                String::from_utf8_lossy(name.as_bytes())
+            );
+            return Err(throw(req, "Error", &message));
+        }
+        return Ok(object);
+    };
+    let mut placement = Placement::new(constructor, arguments);
+    let served = named
+        .iter()
+        .try_for_each(|(name, value)| placement.named(req, *name, *value))
+        .and_then(|()| {
+            req.serve_method(
+                constructor,
+                Some(object),
+                class,
+                &placement.arguments,
+                &placement.extra_named,
+            )
+        });
+    match served {
+        Ok(returned) => {
+            req.release(returned);
+            Ok(object)
+        }
+        Err(thrown) => {
+            req.release(object.as_value());
+            Err(thrown)
+        }
+    }
+}
+
 /// `object_init_ex`: an instance with its declared properties' defaults
 /// and no constructor call, a store entry of the request's heap with
 /// one owner, the caller's; an interface, a trait, an enum or an
@@ -1006,10 +1066,7 @@ pub fn fetch_constant(req: &mut Request, name: &[u8]) -> Result<Value, Thrown> {
             &format!("Undefined constant \"{}\"", String::from_utf8_lossy(name)),
         ));
     };
-    crate::api::raising::deprecated_constant(req, &key);
-    if let Some(pending) = req.pending() {
-        return Err(Thrown::of(Some(pending)));
-    }
+    crate::api::raising::deprecated_constant(req, &key)?;
     req.addref(&value);
     Ok(value)
 }
@@ -1138,8 +1195,11 @@ pub fn eval_const_expr(
         ConstExpr::Long(n) => Ok(Value::int(*n)),
         ConstExpr::Double(f) => Ok(Value::float(*f)),
         ConstExpr::Str(s) => Ok(Value::string(PhpString::new(req, s)?)),
+        // `zend_get_constant_ex`, which words a `CONST_DEPRECATED`
+        // constant's deprecation after it found it.
         ConstExpr::Constant(name) => match req.constant_named(&name.0) {
             Some(value) => {
+                crate::api::raising::deprecated_constant(req, &name.0)?;
                 req.addref(&value);
                 Ok(value)
             }

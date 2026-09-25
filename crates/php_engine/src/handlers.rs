@@ -5441,11 +5441,11 @@ pub(crate) fn fetch_constant<T: Tier>(
             "InternalError: ZEND_FETCH_CONSTANT over a name no literal carries",
         )));
     }
-    let key = named(code, op.op2.saturating_add(1));
+    let mut key = named(code, op.op2.saturating_add(1));
     let mut found = req.constant_named(&key);
     if found.is_none() && op.op1 & UNQUALIFIED_IN_NAMESPACE != 0 {
-        let global = named(code, op.op2.saturating_add(2));
-        found = req.constant_named(&global);
+        key = named(code, op.op2.saturating_add(2));
+        found = req.constant_named(&key);
     }
     let Some(value) = found else {
         let written = String::from_utf8_lossy(&named(code, op.op2)).into_owned();
@@ -5462,10 +5462,11 @@ pub(crate) fn fetch_constant<T: Tier>(
     // deprecation raised after, and the opline then advances under
     // `ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION`, so a handler that throws
     // leaves the temporary written and the throwable pending. The
-    // constant a deprecation is worded from is the one the compiler
-    // refused to substitute (`can_ct_eval_const`), so the scan of the
-    // declaration table is a scan this opline alone makes.
-    crate::api::raising::deprecated_constant(req, &key);
+    // constant a deprecation is worded from is the one found, under the
+    // name the table holds it by.
+    if let Err(thrown) = crate::api::raising::deprecated_constant(req, &key) {
+        req.leave_pending(&thrown);
+    }
     Ok(advance(req, frame))
 }
 
@@ -8202,6 +8203,12 @@ fn threw(req: &mut Request, frame: FrameRef, thrown: &Thrown) -> Edge {
 /// the callee's op array ([`enter`]), the `ZEND_INTERNAL_FUNCTION` arm
 /// serves the native on the call frame.
 fn do_call(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, opcode: &str) -> Edge {
+    if matches!(op.opcode, Opcode::DoFcall | Opcode::DoFcallByName)
+        && let Err(thrown) = flagged_call(req, op)
+    {
+        req.pop_call();
+        return threw(req, frame, &thrown);
+    }
     let Some(function) = req.vm_mut().activate_call() else {
         return Err(Fatal::Error(format!(
             "InternalError: {opcode} with no call frame under it"
@@ -8228,6 +8235,27 @@ fn do_call(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, opco
             Ok(Stepped::Threw(frame))
         }
     }
+}
+
+/// `DO_FCALL` and `DO_FCALL_BY_NAME` over a callee whose `fn_flags`
+/// carry `ZEND_ACC_DEPRECATED`, or `ZEND_ACC_NODISCARD` where the
+/// opline's `result` operand is `UNUSED` (`Z/Zend/zend_vm_def.h:4316-4335`): the
+/// deprecation and then the warning, raised with the call built and not
+/// yet entered, which is why `zend_get_call_op` keeps such a callee off
+/// `DO_UCALL` and `DO_ICALL`, the two that never test. What a handler
+/// threw is the `Err`, and the call is never made.
+fn flagged_call(req: &mut Request, op: &Opline) -> Result<(), Thrown> {
+    let Some(function) = req.vm().building_call_function() else {
+        return Ok(());
+    };
+    let flags = req.function_flags(function);
+    if flags.deprecated {
+        crate::attributes::deprecated_function(req, function)?;
+    }
+    if flags.no_discard && op.out_type == OperandKind::Unused {
+        crate::attributes::no_discard_function(req, function)?;
+    }
+    Ok(())
 }
 
 /// `ZEND_INIT_NS_FCALL_BY_NAME` (`Z/Zend/zend_vm_def.h:4024`): the call

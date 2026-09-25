@@ -4,7 +4,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 use php_ext::decl::{Attribute, AttributeArgument, ConstExpr, FunctionDecl, Name};
-use php_ext::raising::{Thrown, deprecated};
+use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 
@@ -81,10 +81,6 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
 /// bool(false)
 /// ```
 fn strptime(req: &mut Request) -> Result<Value, Thrown> {
-    deprecated(
-        req,
-        &format!("Function strptime() is deprecated since 8.2, {MESSAGE}"),
-    );
     argument_count_between(req, 2, 2)?;
     let timestamp = string_argument(req, 1)?;
     let format = string_argument(req, 2)?;

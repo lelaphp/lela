@@ -217,17 +217,16 @@ fn interface() -> ClassDecl {
     let mut decl = class_decl("DateTimeInterface", ClassKind::Interface, None, &[]);
     decl.constants = FORMATS
         .iter()
-        .map(|(name, _)| ClassConstDecl {
+        // `@cvalue DATE_FORMAT_*`: the format itself, as the stub's
+        // generated arginfo writes it, and no read of the `DATE_*`
+        // constant, whose own deprecation a read would raise.
+        .map(|(name, format)| ClassConstDecl {
             attributes: if *name == "RFC7231" {
                 rfc7231_deprecation()
             } else {
                 Vec::new()
             },
-            ..constant(
-                name,
-                Type::String,
-                ConstExpr::Constant(Name(format!("DATE_{name}").into_bytes().into())),
-            )
+            ..constant(name, Type::String, ConstExpr::Str(format.as_bytes().into()))
         })
         .collect();
     let abstract_ = |mut decl: MethodDecl| {

@@ -17,11 +17,363 @@ use php_unit::decl::{
     PropertyDecl, Type, Visibility,
 };
 
+use php_unit::Level;
+
 use crate::api::abi::{Entry, NativeClassDecl, ObjectHandlers, PropertyPurpose};
+use crate::api::call::{Function, eval_const_expr, instantiate_named};
 use crate::api::coerce::argument;
-use crate::api::raising::{Thrown, arg_count_error, throw};
+use crate::api::raising::{Thrown, arg_count_error, raise, throw};
 use crate::api::request::Request;
-use crate::api::values::{PhpArray, PhpObject, PhpString, Value};
+use crate::api::values::{ClassId, PhpArray, PhpObject, PhpString, Value};
+
+/// `fn_flags & (ZEND_ACC_DEPRECATED | ZEND_ACC_NODISCARD)` of a
+/// function, and `CONST_DEPRECATED` of a constant: what the
+/// `#[\Deprecated]` and `#[\NoDiscard]` attributes among a declaration's
+/// attributes raise, decoded once where the declaration is linked or
+/// registered, so a call and a fetch read a bit and never the
+/// attributes. php's compiler raises `ZEND_ACC_DEPRECATED` from the
+/// attribute's presence (`zend_compile_func_decl`) and
+/// `validate_nodiscard` raises `ZEND_ACC_NODISCARD`; `gen_stub.php`
+/// writes both from a native's stub.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Flags {
+    pub(crate) deprecated: bool,
+    pub(crate) no_discard: bool,
+}
+
+impl Flags {
+    /// The flags `attributes` raise, each attribute by its resolved name
+    /// as `zend_get_attribute_str` finds it.
+    pub(crate) fn of(attributes: &[Attribute]) -> Flags {
+        Flags {
+            deprecated: find(attributes, b"Deprecated").is_some(),
+            no_discard: find(attributes, b"NoDiscard").is_some(),
+        }
+    }
+}
+
+/// `zend_get_attribute_str`: the attribute of a lowered name among a
+/// declaration's, its name as resolved, a leading `\` dropped.
+fn find<'a>(attributes: &'a [Attribute], name: &[u8]) -> Option<&'a Attribute> {
+    attributes.iter().find(|one| {
+        let written = one.name.0.strip_prefix(b"\\").unwrap_or(&one.name.0);
+        written.eq_ignore_ascii_case(name)
+    })
+}
+
+/// `zend_get_attribute_object` with no call frame of its own, over the
+/// internal attribute `class` names among `attributes`, and the string
+/// each of its `properties` holds: `None` where the list
+/// carries no such attribute or one with no argument, which is the
+/// empty suffix php reads the two as; the object's constructor is the
+/// one that holds each argument to its `?string` under the caller's
+/// `strict_types`, and what it threw is the `Err`.
+fn internal_strings(
+    req: &mut Request,
+    attributes: &[Attribute],
+    class: &[u8],
+    properties: &[&[u8]],
+    scope: Option<ClassId>,
+) -> Result<Option<Vec<Vec<u8>>>, Thrown> {
+    let Some(attribute) = find(attributes, class).filter(|one| !one.arguments.is_empty()) else {
+        return Ok(None);
+    };
+    let Some(class) = req.class_named(class) else {
+        return Ok(None);
+    };
+    let mut positional = Vec::new();
+    let mut named = Vec::new();
+    for argument in &attribute.arguments {
+        let value = eval_const_expr(req, &argument.value, scope)?;
+        match &argument.name {
+            Some(name) => named.push((PhpString::new(req, &name.0)?, value)),
+            None => positional.push(value),
+        }
+    }
+    let made = instantiate_named(req, class, &positional, &named);
+    for value in positional {
+        req.release(value);
+    }
+    for (name, value) in named {
+        req.release(Value::string(name));
+        req.release(value);
+    }
+    let object = made?;
+    let read = properties
+        .iter()
+        .map(|name| {
+            object
+                .prop(req, name)
+                .and_then(|value| value.as_str_bytes().map(<[u8]>::to_vec))
+                .unwrap_or_default()
+        })
+        .collect();
+    req.release(object.as_value());
+    Ok(Some(read))
+}
+
+/// `Method C::m()` or `Function f()`, as `zend_deprecated_function` and
+/// `zend_nodiscard_function` name the callee: the class that declares
+/// it, `common.scope`, and the name it was declared under.
+fn callee_named(req: &Request, function: Function, method: &str, function_word: &str) -> String {
+    let name = req.declared_name(function);
+    match req.method_class(function) {
+        Some(class) => format!("{method} {}::{name}()", req.class_name(class)),
+        None => format!("{function_word} {name}()"),
+    }
+}
+
+/// `zend_deprecated_function` (`Z/Zend/zend_execute.c:1866`), raised
+/// where `fn_flags` carries `ZEND_ACC_DEPRECATED`: by `DO_FCALL` and
+/// `DO_FCALL_BY_NAME` before the callee runs and by
+/// `zend_call_function` before its arguments are placed. The suffix is
+/// the `Deprecated` object's `since` and `message`, the object made
+/// from the attribute's arguments in the callee's scope
+/// (`get_deprecation_suffix_from_attribute`), and the level
+/// `E_DEPRECATED` for a native and `E_USER_DEPRECATED` for a program's.
+/// What the raise left pending, or the object's constructor threw, is
+/// the `Err`.
+///
+/// ```php
+/// #[\Deprecated]
+/// function test() {}
+/// #[\Deprecated("use test() instead", since: "1.0")]
+/// function test2() {}
+/// class Clazz {
+///     #[\Deprecated] function m() {}
+///     #[\Deprecated(since: "2.0")] static function s() {}
+/// }
+/// test();
+/// test2();
+/// (new Clazz)->m();
+/// Clazz::s();
+/// call_user_func('test');
+/// set_error_handler(function ($errno, $errstr) { var_dump($errno === E_USER_DEPRECATED); });
+/// test();
+/// ```
+/// ```expect
+/// Deprecated: Function test() is deprecated in %s on line 10
+///
+/// Deprecated: Function test2() is deprecated since 1.0, use test() instead in %s on line 11
+///
+/// Deprecated: Method Clazz::m() is deprecated in %s on line 12
+///
+/// Deprecated: Method Clazz::s() is deprecated since 2.0 in %s on line 13
+///
+/// Deprecated: Function test() is deprecated in %s on line 14
+/// bool(true)
+/// ```
+///
+/// The message is the object's, so an argument is held to `?string`
+/// under the file's `strict_types`, and a handler that throws stops the
+/// call before the callee runs:
+///
+/// ```php
+/// #[\Deprecated(1234)]
+/// function test() { echo "not run\n"; }
+/// test();
+/// set_error_handler(function ($errno, $errstr) { throw new Exception($errstr); });
+/// try { test(); } catch (Exception $e) { echo "Caught: ", $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Deprecated: Function test() is deprecated, 1234 in %s on line 4
+/// not run
+/// Caught: Function test() is deprecated, 1234
+/// ```
+pub(crate) fn deprecated_function(req: &mut Request, function: Function) -> Result<(), Thrown> {
+    let attributes = req
+        .function_decl(function)
+        .map(|decl| decl.attributes.clone())
+        .unwrap_or_default();
+    let scope = req.method_class(function);
+    let suffix = match internal_strings(
+        req,
+        &attributes,
+        b"Deprecated",
+        &[b"message", b"since"],
+        scope,
+    )? {
+        Some(read) => joined_suffix(&read[0], &read[1]),
+        None => String::new(),
+    };
+    let level = if req.user_function(function).is_some() {
+        Level::UserDeprecated
+    } else {
+        Level::Deprecated
+    };
+    let named = callee_named(req, function, "Method", "Function");
+    raise(req, level, &format!("{named} is deprecated{suffix}"));
+    pending(req)
+}
+
+/// `zend_nodiscard_function` (`Z/Zend/zend_execute.c:1947`), raised by
+/// `DO_FCALL` and `DO_FCALL_BY_NAME` where `fn_flags` carries
+/// `ZEND_ACC_NODISCARD` and the opline's `result` operand is `UNUSED`: php's
+/// warning, `E_USER_WARNING` for a program's function, with the
+/// `NoDiscard` object's `message` after it.
+///
+/// ```php
+/// #[\NoDiscard]
+/// function test(): int { return 0; }
+/// #[\NoDiscard("this is important")]
+/// function test2(): int { return 0; }
+/// class Clazz { #[\NoDiscard] static function m(): int { return 0; } }
+/// test();
+/// test2();
+/// Clazz::m();
+/// $x = test();
+/// (void) test();
+/// call_user_func('test');
+/// ```
+/// ```expect
+/// Warning: The return value of function test() should either be used or intentionally ignored by casting it as (void) in %s on line 7
+///
+/// Warning: The return value of function test2() should either be used or intentionally ignored by casting it as (void), this is important in %s on line 8
+///
+/// Warning: The return value of method Clazz::m() should either be used or intentionally ignored by casting it as (void) in %s on line 9
+///
+/// Warning: The return value of function test() should either be used or intentionally ignored by casting it as (void) in %s on line 12
+/// ```
+pub(crate) fn no_discard_function(req: &mut Request, function: Function) -> Result<(), Thrown> {
+    let attributes = req
+        .function_decl(function)
+        .map(|decl| decl.attributes.clone())
+        .unwrap_or_default();
+    let scope = req.method_class(function);
+    let suffix = match internal_strings(req, &attributes, b"NoDiscard", &[b"message"], scope)? {
+        Some(read) if !read[0].is_empty() => {
+            format!(", {}", String::from_utf8_lossy(&read[0]))
+        }
+        _ => String::new(),
+    };
+    let level = if req.user_function(function).is_some() {
+        Level::UserWarning
+    } else {
+        Level::Warning
+    };
+    let named = callee_named(req, function, "method", "function");
+    raise(
+        req,
+        level,
+        &format!(
+            "The return value of {named} should either be used or intentionally ignored by casting it as (void){suffix}"
+        ),
+    );
+    pending(req)
+}
+
+/// `zend_deprecated_class_constant` (`Z/Zend/zend_execute.c:1966`):
+/// `Constant C::K is deprecated`, `Enum case` for a case, with the
+/// `Deprecated` object's suffix read in the declaring class's scope,
+/// `E_USER_DEPRECATED` for a program's class.
+///
+/// ```php
+/// class Clazz {
+///     #[\Deprecated] const A = 1;
+///     #[\Deprecated("use B", since: "1.0")] const B = 2;
+///     #[\Deprecated(self::C)] const C = "from itself";
+/// }
+/// enum E { #[\Deprecated] case Test; }
+/// echo Clazz::A, Clazz::B, Clazz::C, "\n";
+/// var_dump(E::Test, constant('Clazz::A'));
+/// ```
+/// ```expect
+/// Deprecated: Constant Clazz::A is deprecated in %s on line 8
+/// 1
+/// Deprecated: Constant Clazz::B is deprecated since 1.0, use B in %s on line 8
+/// 2
+/// Deprecated: Constant Clazz::C is deprecated, from itself in %s on line 8
+/// from itself
+///
+/// Deprecated: Enum case E::Test is deprecated in %s on line 9
+///
+/// Deprecated: Constant Clazz::A is deprecated in %s on line 9
+/// enum(E::Test)
+/// int(1)
+/// ```
+pub(crate) fn deprecated_class_constant(
+    req: &mut Request,
+    declaring: ClassId,
+    name: &[u8],
+    constant: &php_unit::decl::ClassConstDecl,
+    native: bool,
+) -> Result<(), Thrown> {
+    let suffix = match internal_strings(
+        req,
+        &constant.attributes,
+        b"Deprecated",
+        &[b"message", b"since"],
+        Some(declaring),
+    )? {
+        Some(read) => joined_suffix(&read[0], &read[1]),
+        None => String::new(),
+    };
+    let level = if native {
+        Level::Deprecated
+    } else {
+        Level::UserDeprecated
+    };
+    let what = if constant.is_case {
+        "Enum case"
+    } else {
+        "Constant"
+    };
+    let message = format!(
+        "{what} {}::{} is deprecated{suffix}",
+        req.class_name(declaring),
+        String::from_utf8_lossy(name)
+    );
+    raise(req, level, &message);
+    pending(req)
+}
+
+/// `get_deprecation_suffix_from_attribute` (`Z/Zend/zend_execute.c:1801`):
+/// what php prints after `is deprecated` for a declaration carrying
+/// `attributes`, read off the `Deprecated` object their `#[\Deprecated]`
+/// makes in `scope`; empty where the attribute takes no argument or
+/// is not there. What the object's constructor threw is the `Err`.
+pub(crate) fn deprecation_suffix(
+    req: &mut Request,
+    attributes: &[Attribute],
+    scope: Option<ClassId>,
+) -> Result<String, Thrown> {
+    Ok(
+        match internal_strings(
+            req,
+            attributes,
+            b"Deprecated",
+            &[b"message", b"since"],
+            scope,
+        )? {
+            Some(read) => joined_suffix(&read[0], &read[1]),
+            None => String::new(),
+        },
+    )
+}
+
+/// What php prints after `is deprecated`: ` since <since>` and
+/// `, <message>`, each only where it is no empty string.
+fn joined_suffix(message: &[u8], since: &[u8]) -> String {
+    let mut out = String::new();
+    if !since.is_empty() {
+        out.push_str(" since ");
+        out.push_str(&String::from_utf8_lossy(since));
+    }
+    if !message.is_empty() {
+        out.push_str(", ");
+        out.push_str(&String::from_utf8_lossy(message));
+    }
+    out
+}
+
+/// `if (UNEXPECTED(EG(exception)))` after a raise: a handler that
+/// threw is the `Err`, the throwable left pending.
+fn pending(req: &Request) -> Result<(), Thrown> {
+    if req.is_pending() {
+        return Err(Thrown::of(None));
+    }
+    Ok(())
+}
 
 /// `ZEND_ATTRIBUTE_TARGET_*` and `ZEND_ATTRIBUTE_IS_REPEATABLE`
 /// (`Z/Zend/zend_attributes.h:26-35`), under the names the stub's

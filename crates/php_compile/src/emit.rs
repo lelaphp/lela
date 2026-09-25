@@ -1484,8 +1484,13 @@ impl Emit<'_> {
                 }
             }
             Stmt::ExprStmt(id) => {
-                let value = self.expr(tree[id].expr)?;
-                self.do_free(value);
+                let expr = tree[id].expr;
+                if let Some(operand) = self.void_cast_operand(expr) {
+                    self.void_cast(operand)?;
+                } else {
+                    let value = self.expr(expr)?;
+                    self.do_free(value);
+                }
             }
             Stmt::Block(id) => self.block(id)?,
             Stmt::ForStmt(id) => self.r#for(id)?,
@@ -8559,9 +8564,63 @@ impl Emit<'_> {
         let mut last = Where::Constant(Zval::bool(true));
         for expr in exprs {
             self.do_free(last);
-            last = self.expr(*expr)?;
+            last = match self.void_cast_operand(*expr) {
+                Some(operand) => {
+                    self.void_cast(operand)?;
+                    Where::Constant(Zval::null())
+                }
+                None => self.expr(*expr)?,
+            };
         }
         Ok(last)
+    }
+
+    /// The operand of a `(void)` cast, php's `ZEND_AST_CAST_VOID`, which
+    /// the grammar allows at a statement's start and in a `for`
+    /// header's lists alone; none for any other expression.
+    fn void_cast_operand(&self, expr: tree::Expr) -> Option<tree::Expr> {
+        let tree::Expr::CastExpr(id) = expr else {
+            return None;
+        };
+        let node = &self.parsed.tree[id];
+        let op = node.op?;
+        (php_syntax::cast_name(self.text(op)) == "T_VOID_CAST").then_some(node.operand?)
+    }
+
+    /// `zend_compile_void_cast` (`Z/Zend/zend_compile.c`): the operand
+    /// compiled as any expression, so what a call returns is used and no
+    /// `#[\NoDiscard]` warning is raised for it, then freed by a `FREE`
+    /// marked `ZEND_FREE_VOID_CAST` where it is a temporary, and as
+    /// `zend_do_free` frees a constant.
+    ///
+    /// ```php
+    /// #[NoDiscard] function f(): int { return 1; }
+    /// (void) f();
+    /// (void) 1;
+    /// for ($i = 0; $i < 1; (void) $i++) {}
+    /// echo $i, "\n";
+    /// ```
+    /// ```expect
+    /// 1
+    /// ```
+    fn void_cast(&mut self, operand: tree::Expr) -> Result<(), CompileError> {
+        let (op1_type, op1) = match self.expr(operand)? {
+            Where::Temporary(at) => (OperandKind::Tmp, at),
+            Where::Returned(at) => (OperandKind::Var, at),
+            constant @ Where::Constant(_) => {
+                self.do_free(constant);
+                return Ok(());
+            }
+            Where::Cv(_) => return Ok(()),
+        };
+        self.push(Opline {
+            opcode: Opcode::Free,
+            op1_type,
+            op1,
+            extended_value: FREE_VOID_CAST,
+            ..Opline::default()
+        });
+        Ok(())
     }
 
     /// `zend_do_free` over a value nothing reads (`Z/Zend/zend_compile.c:755`).
@@ -13282,22 +13341,37 @@ impl Emit<'_> {
                         return Ok(served);
                     }
                 }
-                let parameters = self
+                let (parameters, flagged) = self
                     .functions
                     .get(index)
-                    .map(|decl| decl.parameters.as_slice())
+                    .map(|decl| {
+                        (
+                            decl.parameters.as_slice(),
+                            attributes::deprecated_or_no_discard(&decl.attributes),
+                        )
+                    })
                     .unwrap_or_default();
                 let callee = Callee::of(parameters);
                 let plan = Plan::of(arguments, Some(&callee));
                 let stack = used_stack(plan.count, None);
-                (callee, plan, stack, Opcode::DoIcall)
+                let call_op = if flagged {
+                    Opcode::DoFcallByName
+                } else {
+                    Opcode::DoIcall
+                };
+                (callee, plan, stack, call_op)
             }
             None => match self.declared_function(&lowered) {
                 Some((decl, body)) => {
                     let callee = Callee::of(&decl.parameters);
                     let plan = Plan::of(arguments, Some(&callee));
                     let stack = used_stack(plan.count, Some(body));
-                    (callee, plan, stack, Opcode::DoUcall)
+                    let call_op = if attributes::deprecated_or_no_discard(&decl.attributes) {
+                        Opcode::DoFcallByName
+                    } else {
+                        Opcode::DoUcall
+                    };
+                    (callee, plan, stack, call_op)
                 }
                 None => return self.dynamic_call(&resolved, arguments),
             },
@@ -13626,7 +13700,8 @@ impl Emit<'_> {
             ClassRef::Scope(_) | ClassRef::Fetched(_) => None,
         };
         let (call_op, callee) = match known {
-            Some((Known::User, callee)) => (Opcode::DoUcall, Some(callee)),
+            Some((Known::User { flagged: false }, callee)) => (Opcode::DoUcall, Some(callee)),
+            Some((Known::User { flagged: true }, callee)) => (Opcode::DoFcallByName, Some(callee)),
             Some((Known::Native, callee)) => (Opcode::DoFcall, Some(callee)),
             None => (Opcode::DoFcall, None),
         };
@@ -14363,7 +14438,10 @@ impl Emit<'_> {
                 m.function.name.0.to_ascii_lowercase() == method
                     && (m.visibility == Visibility::Public || own)
             })
-            .map(|m| (Known::User, Callee::of(&m.function.parameters)))
+            .map(|m| {
+                let flagged = attributes::deprecated_or_no_discard(&m.function.attributes);
+                (Known::User { flagged }, Callee::of(&m.function.parameters))
+            })
     }
 
     /// `zend_add_func_name_literal`: the name as written and its lowered
@@ -15354,11 +15432,14 @@ fn note(names: &mut Vec<Vec<u8>>, name: &[u8]) {
 
 /// What a call site knows of its callee once the table has it
 /// (`zend_get_call_op`): a native, served by `DO_ICALL` or `DO_FCALL`,
-/// or a user function of this file, served by `DO_UCALL`.
+/// or a user function of this file, served by `DO_UCALL`, or by
+/// `DO_FCALL_BY_NAME` where `flagged`, its `fn_flags` carrying
+/// `ZEND_ACC_DEPRECATED` or `ZEND_ACC_NODISCARD`, which the one tests
+/// and the other does not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Known {
     Native,
-    User,
+    User { flagged: bool },
 }
 
 /// The binary operator a token is, php's `zend_compile_binary_op`
@@ -15409,6 +15490,10 @@ fn compound_op(kind: SyntaxKind) -> Option<BinaryOp> {
         _ => return None,
     })
 }
+
+/// `ZEND_FREE_VOID_CAST` (`Z/Zend/zend_compile.h:1106`): the
+/// `extended_value` of the `FREE` a `(void)` cast leaves.
+const FREE_VOID_CAST: u32 = 1 << 2;
 
 /// Whether a refusal is the one-line shape a construct this compiler
 /// cannot emit yet is refused in, which `xtask phpt` reads as unread
@@ -16178,7 +16263,7 @@ mod tests {
             is_final: false,
             tentative_return: false,
         });
-        let user = Some(Known::User);
+        let user = Some(Known::User { flagged: false });
         assert_eq!(
             emit.known_method(b"M", b"f"),
             user,
@@ -16511,7 +16596,10 @@ fn foldable_constants_of(constants: &[ClassConstDecl], before: usize) -> Vec<(Ve
     constants
         .iter()
         .take(before)
-        .filter(|c| !c.is_case)
+        // `zend_verify_ct_const_access`: a `ZEND_ACC_DEPRECATED`
+        // constant is fetched as the program serves, where its
+        // deprecation is raised.
+        .filter(|c| !c.is_case && !attributes::is_deprecated(&c.attributes))
         .map(|c| (c.name.0.to_vec(), c.value.clone()))
         .collect()
 }

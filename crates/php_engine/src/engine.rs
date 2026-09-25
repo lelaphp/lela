@@ -176,6 +176,11 @@ pub(crate) struct Shared {
     /// `functions`: the extension that declared it, or none for one the
     /// engine declares itself.
     pub(crate) function_modules: Vec<Option<ExtensionId>>,
+    /// Each native's `ZEND_ACC_DEPRECATED` and `ZEND_ACC_NODISCARD`, one
+    /// row per row of `functions`, decoded from its declaration's
+    /// attributes once, as `zend_register_functions` copies the stub's
+    /// flags onto the `zend_internal_function`.
+    pub(crate) function_flags: Vec<crate::attributes::Flags>,
     /// `zend_flf_functions` (`Z/Zend/zend_API.c:3115-3133`): the natives
     /// with a frameless entry, one row per arity in registration order,
     /// which a `FRAMELESS_ICALL_*`'s `extended_value` indexes. Computed
@@ -208,8 +213,10 @@ pub(crate) struct Shared {
     ini: Vec<(Vec<u8>, Vec<u8>)>,
     /// The constants' values, the string ones interned into the engine's
     /// table as `REGISTER_STRING_CONSTANT` interns php's at `MINIT`, so
-    /// a request reading one allocates nothing and counts nothing.
-    constant_values: Vec<(Box<[u8]>, Zval)>,
+    /// a request reading one allocates nothing and counts nothing;
+    /// beside each, its `CONST_DEPRECATED`, decoded once from the
+    /// declaration's attributes as `gen_stub.php` writes it.
+    constant_values: Vec<(Box<[u8]>, Zval, crate::attributes::Flags)>,
     /// `PHP_SAPI`'s value under each host's name, interned at build with
     /// the other constants, so a request that reads the name its host
     /// gave it allocates nothing ([`crate::constants::HOSTS`]).
@@ -272,6 +279,9 @@ pub(crate) struct NativeMethod {
     pub(crate) class: ClassId,
     pub(crate) at: MethodAt,
     pub(crate) entry: Entry,
+    /// Its `ZEND_ACC_DEPRECATED` and `ZEND_ACC_NODISCARD`, decoded from
+    /// the declaration's attributes where the method is linked.
+    pub(crate) flags: crate::attributes::Flags,
 }
 
 /// Where a native method's declaration stands: among the class's own,
@@ -307,6 +317,7 @@ fn link_enum_methods(decl: &mut ClassDecl, class: ClassId, methods: &mut Vec<Nat
             class,
             at: MethodAt::Declared(index),
             entry: served.entry(),
+            flags: crate::attributes::Flags::default(),
         });
     }
 }
@@ -350,6 +361,7 @@ fn link_classes(extensions: &[Extension]) -> LinkedClasses {
                 class,
                 at: MethodAt::Declared(index),
                 entry: *entry,
+                flags: crate::attributes::Flags::of(&method.function.attributes),
             });
         }
         link_enum_methods(&mut decl, class, &mut methods);
@@ -412,6 +424,7 @@ fn link_trampolines(
             class: ClassId(u32::try_from(at).unwrap_or(u32::MAX)),
             at: MethodAt::Trampoline(index),
             entry,
+            flags: crate::attributes::Flags::of(&method.function.attributes),
         });
         trampolines.push(method);
     }
@@ -646,8 +659,17 @@ impl Shared {
     pub(crate) fn constant(&self, name: &[u8]) -> Option<Value> {
         self.constant_values
             .iter()
-            .find(|(n, _)| n.as_ref() == name)
-            .map(|(_, z)| exec::value_of(*z))
+            .find(|(n, _, _)| n.as_ref() == name)
+            .map(|(_, z, _)| exec::value_of(*z))
+    }
+
+    /// `CONST_DEPRECATED` of an extension's or the engine's constant,
+    /// none for a name no extension declared.
+    pub(crate) fn constant_deprecated(&self, name: &[u8]) -> Option<bool> {
+        self.constant_values
+            .iter()
+            .find(|(n, _, _)| n.as_ref() == name)
+            .map(|(_, _, flags)| flags.deprecated)
     }
 }
 
@@ -1083,6 +1105,10 @@ impl EngineBuilder {
             .map(|build| build(&startup))
             .collect();
         let (function_modules, functions) = function_table(&extensions, &ini);
+        let function_flags = functions
+            .iter()
+            .map(|(decl, _)| crate::attributes::Flags::of(&decl.attributes))
+            .collect();
         let frameless = frameless_table(functions.iter().map(|(decl, _)| decl));
         let LinkedClasses {
             classes,
@@ -1114,7 +1140,8 @@ impl EngineBuilder {
                 },
                 _ => continue,
             };
-            constant_values.push((decl.name.0.clone(), value));
+            let flags = crate::attributes::Flags::of(&decl.attributes);
+            constant_values.push((decl.name.0.clone(), value, flags));
         }
         let sapi_names = crate::constants::host_names(&mut strings);
         Engine {
@@ -1122,6 +1149,7 @@ impl EngineBuilder {
                 extensions,
                 functions,
                 function_modules,
+                function_flags,
                 frameless,
                 classes,
                 handlers,

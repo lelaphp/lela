@@ -112,12 +112,14 @@ impl Sensitive {
 /// One row a request added to `EG(zend_constants)`: its owner, its name
 /// as `zend_register_constant` keys it, its value, and
 /// `zend_constant::attributes`, what a `DECLARE_ATTRIBUTED_CONST` hung
-/// on it.
+/// on it, with `CONST_DEPRECATED` decoded from them where it was
+/// registered.
 struct ConstantRow {
     owner: ConstantOwner,
     name: Vec<u8>,
     value: Value,
     attributes: Vec<Attribute>,
+    deprecated: bool,
 }
 
 impl ConstantRow {
@@ -127,6 +129,7 @@ impl ConstantRow {
             name,
             value,
             attributes: Vec::new(),
+            deprecated: false,
         }
     }
 }
@@ -949,6 +952,12 @@ pub struct Request {
     /// [`crate::enums::ENUM_FUNCTIONS`], as php allocates a
     /// `zend_internal_function` per method per enum.
     enum_functions: Vec<(ClassId, crate::enums::EnumMethod)>,
+    /// `CONST_IS_RECURSIVE` over the constants a deprecation is being
+    /// worded for, so an attribute naming the constant it marks reads it
+    /// without raising again (GH-18463): the declaring class and the
+    /// name of a class constant, a program's alone, or the name of a
+    /// global one.
+    deprecating: Vec<(Option<ClassId>, Box<[u8]>)>,
     /// `CE_STATIC_MEMBERS(ce)` (`Z/Zend/zend_object_handlers.c:2094`):
     /// one slot per declared `static` property, keyed by the class that
     /// declared it and by the property's name. php gives every class a
@@ -1305,6 +1314,11 @@ pub(crate) struct UserFunction {
     pub(crate) unit: Arc<Unit>,
     pub(crate) body: exec::Body,
     pub(crate) member: Option<Member>,
+    /// `ZEND_ACC_DEPRECATED` and `ZEND_ACC_NODISCARD`, which
+    /// `zend_compile_func_decl` and the `#[\NoDiscard]` validator raise
+    /// from the declaration's attributes, decoded where the function is
+    /// declared.
+    pub(crate) flags: crate::attributes::Flags,
 }
 
 /// A method as its class holds it: the class, `common.scope`,
@@ -1333,6 +1347,16 @@ impl Declared {
             None => self.unit.classes.get(usize::try_from(self.at).ok()?),
         }
     }
+}
+
+/// The flags of the function at `at` of a unit's `dynamic` table, one
+/// a `DECLARE_FUNCTION` binds or a closure is made of.
+fn dynamic_flags(unit: &Unit, at: u32) -> crate::attributes::Flags {
+    usize::try_from(at)
+        .ok()
+        .and_then(|at| unit.dynamic.get(at))
+        .map(|(decl, _)| crate::attributes::Flags::of(&decl.attributes))
+        .unwrap_or_default()
 }
 
 /// The declaration of a user function the request's table holds, from
@@ -1395,6 +1419,7 @@ impl Request {
             enum_cases: Vec::new(),
             enums_updated: Vec::new(),
             enum_functions: Vec::new(),
+            deprecating: Vec::new(),
             statics: Vec::new(),
             guards: Vec::new(),
             ref_sources: Vec::new(),
@@ -2177,6 +2202,11 @@ impl Request {
         arguments: &[Value],
         extra_named: &[(PhpString, Value)],
     ) -> Result<Value, Thrown> {
+        // `zend_call_function`: the deprecation before the arguments
+        // are placed, and no call where a handler threw.
+        if self.function_flags(function).deprecated {
+            crate::attributes::deprecated_function(self, function)?;
+        }
         let wrapped = self.values_for_references(function, arguments)?;
         let name = self.declared_name(function);
         let name = self.interned(name.as_bytes())?;
@@ -2465,6 +2495,23 @@ impl Request {
             at.checked_sub(self.shared.functions.len())?
                 .checked_sub(self.shared.methods.len())?,
         )
+    }
+
+    /// `fbc->common.fn_flags & (ZEND_ACC_DEPRECATED | ZEND_ACC_NODISCARD)`:
+    /// what the callee's declaration raised where it was linked, none
+    /// for an enum's own method and the pass function.
+    pub(crate) fn function_flags(&self, function: Function) -> crate::attributes::Flags {
+        if let Some(user) = self.user_function(function) {
+            return user.flags;
+        }
+        if let Some(method) = self.native_method(function) {
+            return method.flags;
+        }
+        usize::try_from(function.0)
+            .ok()
+            .and_then(|at| self.shared.function_flags.get(at))
+            .copied()
+            .unwrap_or_default()
     }
 
     /// The number a user function at `index` of the table is known by.
@@ -5123,6 +5170,9 @@ impl Request {
                 &format!("Cannot access trait constant {class_name}::{shown} directly"),
             ));
         }
+        if crate::attributes::Flags::of(&constant.attributes).deprecated {
+            self.deprecated_class_constant(class, name, &constant)?;
+        }
         // `ZEND_FETCH_CLASS_CONSTANT` updates a backed enum's constants
         // whole before it reads one (`zend_update_class_constants`), and
         // `zend_fetch_class_constant`'s `ZEND_CLASS_CONST_IS_CASE` arm
@@ -5139,6 +5189,65 @@ impl Request {
             }
             _ => Ok(evaluated),
         }
+    }
+
+    /// `zend_get_class_constant_ex` under `ZEND_FETCH_CLASS_SILENT`, as
+    /// `defined()` asks it: whether `class` has a constant `name` the
+    /// executed scope may reach, not through a trait, with nothing
+    /// raised and nothing evaluated.
+    pub(crate) fn class_constant_defined(&self, class: ClassId, name: &[u8]) -> bool {
+        let trait_asked = self
+            .class_decl(class)
+            .is_some_and(|decl| decl.kind == ClassKind::Trait);
+        self.class_constant_of(class, name, 0)
+            .is_some_and(|(declaring, constant)| {
+                !trait_asked && self.may_access(declaring, constant.visibility)
+            })
+    }
+
+    /// `ZEND_ACC_DEPRECATED` on a class constant, as
+    /// `ZEND_FETCH_CLASS_CONSTANT` and `zend_get_class_constant_ex` test
+    /// it after the access checks and before the value is evaluated:
+    /// [`crate::attributes::deprecated_class_constant`], once per fetch,
+    /// and not again while its own attribute's arguments are read for
+    /// the message (`CONST_IS_RECURSIVE`, a program's class alone).
+    fn deprecated_class_constant(
+        &mut self,
+        declaring: ClassId,
+        name: &[u8],
+        constant: &ClassConstDecl,
+    ) -> Result<(), Thrown> {
+        let user = !self.native_class(declaring);
+        if user && !self.protect_recursion(Some(declaring), name) {
+            return Ok(());
+        }
+        let raised =
+            crate::attributes::deprecated_class_constant(self, declaring, name, constant, !user);
+        if user {
+            self.deprecating.pop();
+        }
+        raised
+    }
+
+    /// `CONST_PROTECT_RECURSION` over a constant, `class` none for a
+    /// global one: `false`, and nothing held, where it is held already,
+    /// which is `CONST_IS_RECURSIVE`; the caller pops what it held.
+    pub(crate) fn protect_recursion(&mut self, class: Option<ClassId>, name: &[u8]) -> bool {
+        if self
+            .deprecating
+            .iter()
+            .any(|(held_class, held)| *held_class == class && **held == *name)
+        {
+            return false;
+        }
+        self.deprecating.push((class, name.into()));
+        true
+    }
+
+    /// `CONST_UNPROTECT_RECURSION`: the last constant
+    /// [`Request::protect_recursion`] held let go.
+    pub(crate) fn unprotect_recursion(&mut self) {
+        self.deprecating.pop();
     }
 
     /// `zend_enum_build_backed_enum_table` (`Z/Zend/zend_enum.c:197`),
@@ -8946,7 +9055,7 @@ impl Request {
     /// under, and `native` for one the table has no declaration for. A
     /// method's is its own name alone, what `get_active_function_name`
     /// answers; the class before it is [`Request::qualified_name`]'s.
-    fn declared_name(&self, function: Function) -> String {
+    pub(crate) fn declared_name(&self, function: Function) -> String {
         self.function_decl(function).map_or_else(
             || String::from("native"),
             |decl| String::from_utf8_lossy(&decl.name.0).into_owned(),
@@ -10082,10 +10191,16 @@ impl Request {
             let Some((unit, body)) = self.method_body(class, method) else {
                 continue;
             };
+            let flags = self
+                .class_decl(class)
+                .and_then(|decl| decl.methods.get(usize::try_from(method).ok()?))
+                .map(|method| crate::attributes::Flags::of(&method.function.attributes))
+                .unwrap_or_default();
             self.user_functions.push(UserFunction {
                 unit,
                 body,
                 member: Some(Member { class, at: method }),
+                flags,
             });
         }
     }
@@ -10584,12 +10699,13 @@ impl Request {
     /// done
     /// ```
     fn deprecated_trait(&mut self, found: ClassId, used_by: &[u8]) -> Result<(), Thrown> {
-        let Some(suffix) = self
-            .class_decl(found)
-            .and_then(|decl| crate::api::raising::deprecation_suffix(&decl.attributes))
-        else {
-            return Ok(());
+        let attributes = match self.class_decl(found) {
+            Some(decl) if crate::attributes::Flags::of(&decl.attributes).deprecated => {
+                decl.attributes.clone()
+            }
+            _ => return Ok(()),
         };
+        let suffix = crate::attributes::deprecation_suffix(self, &attributes, Some(found))?;
         let level = if self.native_class(found) {
             Level::Deprecated
         } else {
@@ -10708,6 +10824,7 @@ impl Request {
             unit: Arc::clone(unit),
             body: exec::Body::Dynamic(at),
             member: None,
+            flags: dynamic_flags(unit, at),
         });
         Ok(())
     }
@@ -10735,6 +10852,7 @@ impl Request {
             unit: Arc::clone(unit),
             body,
             member: None,
+            flags: dynamic_flags(unit, at),
         });
         self.user_function_id(self.user_functions.len() - 1)
     }
@@ -10807,6 +10925,7 @@ impl Request {
                 unit: Arc::clone(unit),
                 body: exec::Body::Function(u32::try_from(at).unwrap_or(u32::MAX)),
                 member: None,
+                flags: crate::attributes::Flags::of(&decl.attributes),
             });
         }
         true
@@ -12091,8 +12210,9 @@ impl Request {
 
     /// `ZEND_DECLARE_ATTRIBUTED_CONST`'s `zend_register_constant` and
     /// `zend_constant_add_attributes`: [`Request::define_constant`] with
-    /// the attributes the declaration carries hung on the row. `false`,
-    /// and nothing hung, where the name stands already.
+    /// the attributes the declaration carries hung on the row, and
+    /// `CONST_DEPRECATED` raised from them. `false`, and nothing hung,
+    /// where the name stands already.
     pub(crate) fn define_attributed_constant(
         &mut self,
         name: &[u8],
@@ -12108,11 +12228,13 @@ impl Request {
             .innermost_frame()
             .and_then(|state| exec::body_of(&state.unit, state.body))
             .map(|code| code.filename.0.clone());
+        let deprecated = crate::attributes::Flags::of(&attributes).deprecated;
         self.constants.push(ConstantRow {
             owner: ConstantOwner::User(file),
             name: name.to_vec(),
             value,
             attributes,
+            deprecated,
         });
         true
     }
@@ -12202,6 +12324,20 @@ impl Request {
             .iter()
             .find(|decl| decl.name.0.as_ref() == name)
             .map_or(&[], |decl| decl.attributes.as_slice())
+    }
+
+    /// `ZEND_CONSTANT_FLAGS(c) & CONST_DEPRECATED` of the constant the
+    /// table holds under `name`, and whether a program defined it,
+    /// `PHP_USER_CONSTANT`: what a fetch reads before it words a
+    /// deprecation. None for a name no table has.
+    pub(crate) fn constant_deprecation(&self, name: &[u8]) -> Option<(bool, bool)> {
+        if let Some(row) = self.constants.iter().find(|row| row.name == name) {
+            let user = matches!(row.owner, ConstantOwner::User(_));
+            return Some((row.deprecated, user));
+        }
+        self.shared
+            .constant_deprecated(name)
+            .map(|deprecated| (deprecated, false))
     }
 
     /// `spl_autoload_register()`: the callable onto the stack, at its
