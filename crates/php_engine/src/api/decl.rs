@@ -5,5 +5,5 @@
 pub use php_unit::decl::{
     Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind, ConstDecl,
     ConstExpr, DynamicProperties, EnumBacking, FunctionDecl, IniDecl, MethodDecl, Name, Parameter,
-    PropertyDecl, Type, Visibility,
+    ParameterDefault, PropertyDecl, Type, Visibility,
 };

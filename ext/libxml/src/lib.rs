@@ -30,7 +30,7 @@ use php_ext::abi::{Callable, Dependency, DependencyKind, Extension, ExtensionBui
 use php_ext::coerce::{argument, callable_argument, value_name};
 use php_ext::decl::{
     Attribute, AttributeArgument, ClassDecl, ClassFlags, ClassKind, ConstDecl, ConstExpr,
-    EnumBacking, FunctionDecl, Name, Parameter, PropertyDecl, Type, Visibility,
+    EnumBacking, FunctionDecl, Name, Parameter, ParameterDefault, PropertyDecl, Type, Visibility,
 };
 use php_ext::raising::{Level, Thrown, arg_count_error, arg_type_error, docref, throw};
 use php_ext::request::Request;
@@ -281,6 +281,7 @@ fn error_class() -> ClassDecl {
         is_instance: true,
         is_readonly: false,
         is_final: false,
+        is_promoted: false,
         ty: Some(ty),
         default: None,
         attributes: Vec::new(),
@@ -319,8 +320,9 @@ fn parameter(name: &[u8], ty: Option<Type>, default: Option<ConstExpr>) -> Param
         ty,
         by_ref: false,
         prefer_ref: false,
+        promoted: false,
         variadic: false,
-        default,
+        default: default.map_or(ParameterDefault::None, ParameterDefault::Expr),
         attributes: Vec::new(),
     }
 }

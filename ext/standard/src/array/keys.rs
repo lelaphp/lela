@@ -11,7 +11,7 @@ use std::cmp::Ordering;
 use php_ext::coerce::{
     BinaryOp, binary_op, float_to_long, identical, loose_eq, numeric_string, to_string, value_name,
 };
-use php_ext::decl::{ConstExpr, FunctionDecl, Name, Parameter, Type};
+use php_ext::decl::{ConstExpr, FunctionDecl, Name, Parameter, ParameterDefault, Type};
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, deprecated, docref, throw, warning,
 };
@@ -20,7 +20,7 @@ use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
 use super::sort::key_value;
 use super::walk::array_argument;
-use super::{copied, key_copy, unknown};
+use super::{copied, key_copy};
 use crate::output::Entry;
 use crate::{
     argument_count_between, bool_argument, constant, declared, frameless, long_argument, parameter,
@@ -131,11 +131,11 @@ pub(super) fn constants() -> Vec<php_ext::decl::ConstDecl> {
 pub(super) fn natives() -> Vec<(FunctionDecl, Entry)> {
     let array = || parameter(b"array", Type::Array);
     let strict = || Parameter {
-        default: Some(ConstExpr::Bool(false)),
+        default: ParameterDefault::Expr(ConstExpr::Bool(false)),
         ..parameter(b"strict", Type::Bool)
     };
     let preserve = || Parameter {
-        default: Some(ConstExpr::Bool(false)),
+        default: ParameterDefault::Expr(ConstExpr::Bool(false)),
         ..parameter(b"preserve_keys", Type::Bool)
     };
     let one =
@@ -198,7 +198,7 @@ pub(super) fn natives() -> Vec<(FunctionDecl, Entry)> {
                 &[
                     array(),
                     Parameter {
-                        default: Some(unknown()),
+                        default: ParameterDefault::Unshown,
                         ..parameter(b"filter_value", Type::Mixed)
                     },
                     strict(),
@@ -220,7 +220,7 @@ pub(super) fn natives() -> Vec<(FunctionDecl, Entry)> {
                     array(),
                     parameter(b"column_key", key_or_null()),
                     Parameter {
-                        default: Some(ConstExpr::Null),
+                        default: ParameterDefault::Expr(ConstExpr::Null),
                         ..parameter(b"index_key", key_or_null())
                     },
                 ],
@@ -251,7 +251,9 @@ pub(super) fn natives() -> Vec<(FunctionDecl, Entry)> {
                 &[
                     array(),
                     Parameter {
-                        default: Some(ConstExpr::Constant(Name(b"CASE_LOWER".as_slice().into()))),
+                        default: ParameterDefault::Expr(ConstExpr::Constant(Name(
+                            b"CASE_LOWER".as_slice().into(),
+                        ))),
                         ..parameter(b"case", Type::Int)
                     },
                 ],

@@ -432,14 +432,18 @@ pub(crate) fn declare_lambda_function<T: Tier>(
         )));
     };
     let scope = req.frame_scope(frame);
-    let this = req
-        .vm()
-        .this(frame)
-        .filter(|_| !no_receiver && scope.is_some());
+    let receiver = req.vm().this(frame);
+    let this = receiver.filter(|_| !no_receiver && scope.is_some());
+    // `ZEND_DECLARE_LAMBDA_FUNCTION`: the class of `EX(This)` where it
+    // is an object, else `Z_CE(EX(This))`, the frame's called scope.
+    let called_scope = receiver
+        .map(|object| object.class())
+        .or_else(|| req.vm().at(frame).and_then(|state| state.called_scope));
     let closure = ClosureInfo {
         function,
         this,
         scope,
+        called_scope,
         bound: vec![Value::undef(); slots],
         fake: false,
     };
@@ -940,7 +944,7 @@ fn dynamic_call_object(req: &mut Request, object: PhpObject) -> Result<DynamicTa
             function: closure.function,
             name: None,
             this: closure.this,
-            called_scope: closure.scope,
+            called_scope: closure.called_scope,
             closure: Some(object),
         });
     }
@@ -2546,7 +2550,7 @@ fn missing_argument(req: &mut Request, frame: FrameRef, passed: u32) -> Thrown {
         .map(|decl| {
             decl.parameters
                 .iter()
-                .map(|parameter| parameter.default.is_none() && !parameter.variadic)
+                .map(php_unit::decl::Parameter::is_required)
                 .collect()
         })
         .unwrap_or_default();

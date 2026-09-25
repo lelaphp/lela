@@ -38,7 +38,7 @@ use php_ext::call::new_object;
 use php_ext::coerce::coerce_param;
 use php_ext::decl::{
     ClassDecl, ClassFlags, ClassKind, ConstDecl, ConstExpr, EnumBacking, FunctionDecl, MethodDecl,
-    Name, Parameter, PropertyDecl, Type, Visibility,
+    Name, Parameter, ParameterDefault, PropertyDecl, Type, Visibility,
 };
 use php_ext::raising::{
     Level, Thrown, arg_count_error, arg_type_error, raise, raise_at, throw, throw_at,
@@ -92,7 +92,7 @@ pub fn extension() -> Extension {
                     &[
                         parameter(b"code", Type::String),
                         Parameter {
-                            default: Some(ConstExpr::Long(0)),
+                            default: ParameterDefault::Expr(ConstExpr::Long(0)),
                             ..parameter(b"flags", Type::Int)
                         },
                     ],
@@ -143,6 +143,7 @@ fn php_token_class() -> (ClassDecl, Vec<(MethodDecl, Entry)>) {
         is_instance: true,
         is_readonly: false,
         is_final: false,
+        is_promoted: false,
         ty: Some(ty),
         default: None,
         attributes: Vec::new(),
@@ -177,7 +178,7 @@ fn php_token_class() -> (ClassDecl, Vec<(MethodDecl, Entry)>) {
 /// The six methods of `PhpToken`, each declaration beside its entry.
 fn php_token_methods() -> Vec<(MethodDecl, Entry)> {
     let minus_one = |name: &[u8]| Parameter {
-        default: Some(ConstExpr::Long(-1)),
+        default: ParameterDefault::Expr(ConstExpr::Long(-1)),
         ..parameter(name, Type::Int)
     };
     vec![
@@ -188,7 +189,7 @@ fn php_token_methods() -> Vec<(MethodDecl, Entry)> {
                     &[
                         parameter(b"code", Type::String),
                         Parameter {
-                            default: Some(ConstExpr::Long(0)),
+                            default: ParameterDefault::Expr(ConstExpr::Long(0)),
                             ..parameter(b"flags", Type::Int)
                         },
                     ],
@@ -1704,8 +1705,9 @@ fn parameter(name: &[u8], ty: Type) -> Parameter {
         ty: Some(ty),
         by_ref: false,
         prefer_ref: false,
+        promoted: false,
         variadic: false,
-        default: None,
+        default: ParameterDefault::None,
         attributes: Vec::new(),
     }
 }

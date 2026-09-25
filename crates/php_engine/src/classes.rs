@@ -20,10 +20,10 @@ use std::cmp::Ordering;
 
 use php_unit::decl::{
     ClassDecl, ClassFlags, ClassKind, ConstExpr, DynamicProperties, EnumBacking, FunctionDecl,
-    MethodDecl, Name, Parameter, PropertyDecl, Type, Visibility,
+    MethodDecl, Name, Parameter, ParameterDefault, PropertyDecl, Type, Visibility,
 };
 
-use crate::api::abi::{CloneObj, Entry, NativeClassDecl, ObjectHandlers};
+use crate::api::abi::{Callable, CloneObj, Entry, NativeClassDecl, ObjectHandlers};
 use crate::api::call::{Function, Target};
 use crate::api::coerce::coerce_param;
 use crate::api::raising::{Thrown, arg_count_error, throw, warning};
@@ -280,7 +280,7 @@ impl ObjectHandlers for ClosureHandlers {
             let required = decl
                 .parameters
                 .iter()
-                .position(|p| p.default.is_some() || p.variadic)
+                .position(|p| !p.is_required())
                 .unwrap_or(decl.parameters.len());
             let mut parameters = PhpArray::new(req)?;
             for (at, parameter) in decl.parameters.iter().enumerate() {
@@ -594,8 +594,9 @@ fn backed_enum() -> ClassDecl {
         ty: Some(Type::Union(vec![Type::Int, Type::String])),
         by_ref: false,
         prefer_ref: false,
+        promoted: false,
         variadic: false,
-        default: None,
+        default: ParameterDefault::None,
         attributes: Vec::new(),
     };
     ClassDecl {
@@ -709,7 +710,7 @@ fn closure_class() -> ClassDecl {
 fn closure_methods() -> Vec<(MethodDecl, Entry)> {
     let closure = || Type::Named(Name(b"Closure".as_slice().into()));
     let scope = || Parameter {
-        default: Some(ConstExpr::Str(b"static".as_slice().into())),
+        default: ParameterDefault::Expr(ConstExpr::Str(b"static".as_slice().into())),
         ..parameter(
             b"newScope",
             Type::Union(vec![Type::Object, Type::String, Type::Null]),
@@ -826,8 +827,9 @@ fn parameter(name: &[u8], ty: Type) -> Parameter {
         ty: Some(ty),
         by_ref: false,
         prefer_ref: false,
+        promoted: false,
         variadic: false,
-        default: None,
+        default: ParameterDefault::None,
         attributes: Vec::new(),
     }
 }
@@ -930,13 +932,27 @@ fn closure_from_callable(req: &mut Request) -> Result<Value, Thrown> {
             ));
         }
     };
-    let (function, this, scope) = match callable.target() {
+    fake_closure(req, &callable).map(|made| made.as_value())
+}
+
+/// `zend_create_fake_closure` over what a callable resolved to
+/// (`zend_closure_from_frame`'s arms): a closure hands back itself, one
+/// more owner, and so does a closure's own `__invoke`; a function is
+/// closed over with no scope, and a method over its class with the
+/// receiver it was taken with, the called scope the receiver's class or
+/// the class the callable named.
+pub(crate) fn fake_closure(req: &mut Request, callable: &Callable) -> Result<PhpObject, Thrown> {
+    let (function, this, scope, called_scope) = match callable.target() {
         Target::Closure(object) => {
             req.addref(&object.as_value());
-            return Ok(object.as_value());
+            return Ok(object);
         }
-        Target::Function(function) => (function, None, None),
-        Target::Method { function, this, .. } => {
+        Target::Function(function) => (function, None, None, None),
+        Target::Method {
+            function,
+            this,
+            scope: named,
+        } => {
             if let Some(this) = this
                 && this.closure(req).is_some()
                 && req
@@ -944,19 +960,20 @@ fn closure_from_callable(req: &mut Request) -> Result<Value, Thrown> {
                     .is_some_and(|decl| decl.function.name.0.eq_ignore_ascii_case(INVOKE))
             {
                 req.addref(&this.as_value());
-                return Ok(this.as_value());
+                return Ok(this);
             }
-            (function, this, req.method_class(function))
+            (function, this, req.method_class(function), Some(named))
         }
     };
     let fake = ClosureInfo {
         function,
         this,
         scope,
+        called_scope,
         bound: Vec::new(),
         fake: true,
     };
-    create_closure(req, &fake, scope, this).map(|made| made.as_value())
+    create_closure(req, &fake, scope, called_scope, this)
 }
 
 /// `Closure::__invoke(mixed ...$args): mixed`, `ZEND_METHOD(Closure,
@@ -1036,8 +1053,9 @@ fn array_access_methods() -> Vec<MethodDecl> {
         ty: Some(Type::Mixed),
         by_ref: false,
         prefer_ref: false,
+        promoted: false,
         variadic: false,
-        default: None,
+        default: ParameterDefault::None,
         attributes: Vec::new(),
     };
     let value = Parameter {
@@ -1097,8 +1115,9 @@ fn throwable_methods() -> Vec<(MethodDecl, Entry)> {
         ty: Some(ty),
         by_ref: false,
         prefer_ref: false,
+        promoted: false,
         variadic: false,
-        default: Some(default),
+        default: ParameterDefault::Expr(default),
         attributes: Vec::new(),
     };
     let throwable = || Type::Nullable(Box::new(Type::Named(Name::from("Throwable"))));
@@ -1597,6 +1616,7 @@ fn throwable_properties() -> Vec<PropertyDecl> {
         is_instance: true,
         is_readonly: false,
         is_final: false,
+        is_promoted: false,
         ty,
         default,
         attributes: Vec::new(),
@@ -1844,18 +1864,24 @@ fn do_closure_bind(
     if !valid_closure_binding(req, &info, this, scope) {
         return Ok(Value::null());
     }
+    // `called_scope = newthis ? Z_OBJCE_P(newthis) : ce`, the new scope
+    // before a receiver with none takes `Closure` as its dummy one.
+    let called_scope = scope;
     let scope = scope.or_else(|| this.and_then(|_| req.class_named(b"Closure")));
-    create_closure(req, &info, scope, this).map(|made| made.as_value())
+    create_closure(req, &info, scope, called_scope, this).map(|made| made.as_value())
 }
 
 /// `zend_create_closure` (`Z/Zend/zend_closures.c:855`) over the
 /// function a closure holds: a new `Closure` with the given receiver
 /// and scope, the receiver one more owner, and a copy of the variables
-/// it bound, each one more owner, as `zend_array_dup` makes it.
+/// it bound, each one more owner, as `zend_array_dup` makes it. The
+/// called scope is the receiver's class where there is one, else
+/// `called_scope`, as `zend_create_closure_ex` stores it.
 fn create_closure(
     req: &mut Request,
     info: &ClosureInfo,
     scope: Option<ClassId>,
+    called_scope: Option<ClassId>,
     this: Option<PhpObject>,
 ) -> Result<PhpObject, Thrown> {
     let Some(class) = req.class_named(b"Closure") else {
@@ -1873,6 +1899,7 @@ fn create_closure(
             function: info.function,
             this,
             scope,
+            called_scope: this.map(|object| object.class()).or(called_scope),
             bound: info.bound.clone(),
             fake: info.fake,
         },
@@ -1892,7 +1919,7 @@ fn valid_closure_binding(
     this: Option<PhpObject>,
     scope: Option<ClassId>,
 ) -> bool {
-    let is_static = req.closure_is_static(info);
+    let is_static = req.closure_refuses_receiver(info);
     if let Some(this) = this {
         if is_static {
             warning(

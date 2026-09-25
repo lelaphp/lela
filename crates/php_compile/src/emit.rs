@@ -102,7 +102,7 @@ use php_heap::{
 use php_unit::decl::{
     AliasModifier, Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind,
     ConstDecl, ConstExpr, DynamicProperties, EnumBacking, FunctionDecl, MethodDecl, Name,
-    Parameter, PropertyDecl, TraitAdaptation, TraitMethodRef, Type, Visibility,
+    Parameter, ParameterDefault, PropertyDecl, TraitAdaptation, TraitMethodRef, Type, Visibility,
 };
 use php_unit::{
     ConstIdx, Diagnostic, FramelessEntry, Level, MethodBody, OpArray, Opcode, OperandKind, Opline,
@@ -2830,10 +2830,11 @@ impl Emit<'_> {
             is_instance: true,
             is_readonly: promoted.is_readonly,
             is_final: false,
+            is_promoted: true,
             ty: ty.cloned(),
             default,
             attributes: Vec::new(),
-            doc_comment: None,
+            doc_comment: parameter.doc_comment.clone().map(Vec::into_boxed_slice),
         });
         Ok(())
     }
@@ -3186,8 +3187,9 @@ impl Emit<'_> {
                 ty,
                 by_ref: parameter.by_ref,
                 prefer_ref: false,
+                promoted: parameter.promote.is_some(),
                 variadic: parameter.variadic,
-                default,
+                default: default.map_or(ParameterDefault::None, ParameterDefault::Expr),
                 attributes: Vec::new(),
             });
         }
@@ -4330,6 +4332,7 @@ impl Emit<'_> {
                 // `zend_declare_typed_property`: a `private(set)`
                 // property is implicitly final.
                 is_final: set_visibility == Some(Visibility::Private),
+                is_promoted: false,
                 ty,
                 default,
                 attributes: Vec::new(),
@@ -12727,7 +12730,7 @@ impl Emit<'_> {
         let required = decl
             .parameters
             .iter()
-            .take_while(|p| p.default.is_none() && !p.variadic)
+            .take_while(|p| p.is_required())
             .count();
         let variadic = decl.parameters.iter().any(|p| p.variadic);
         let count32 = u32::try_from(count).ok()?;
@@ -12783,7 +12786,7 @@ impl Emit<'_> {
                 .functions
                 .get(index)
                 .and_then(|decl| decl.parameters.get(at))
-                .and_then(|parameter| parameter.default.as_ref())
+                .and_then(|parameter| parameter.default.expr())
                 .and_then(|default| self.default_value(default).transpose())
                 .transpose()?;
             let Some(default) = default else {
@@ -14590,6 +14593,7 @@ fn enum_properties(kind: ClassKind, backing: EnumBacking) -> Vec<PropertyDecl> {
         is_instance: true,
         is_readonly: true,
         is_final: false,
+        is_promoted: false,
         ty: Some(ty),
         default: None,
         attributes: Vec::new(),

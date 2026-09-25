@@ -10,7 +10,7 @@ use php_ext::coerce::{
     is_callable as callable, numeric_string, to_array, to_double, to_long, to_object, to_string,
     truthy,
 };
-use php_ext::decl::{ConstExpr, FunctionDecl, Parameter, Type};
+use php_ext::decl::{ConstExpr, FunctionDecl, Parameter, ParameterDefault, Type};
 use php_ext::raising::{Thrown, arg_value_error, throw};
 use php_ext::request::Request;
 use php_ext::values::{PhpString, Value, ValueRef};
@@ -150,7 +150,7 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
                 &[
                     value(),
                     Parameter {
-                        default: Some(ConstExpr::Long(10)),
+                        default: ParameterDefault::Expr(ConstExpr::Long(10)),
                         ..parameter(b"base", Type::Int)
                     },
                 ],
@@ -180,12 +180,12 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
                 &[
                     value(),
                     Parameter {
-                        default: Some(ConstExpr::Bool(false)),
+                        default: ParameterDefault::Expr(ConstExpr::Bool(false)),
                         ..parameter(b"syntax_only", Type::Bool)
                     },
                     Parameter {
                         by_ref: true,
-                        default: Some(ConstExpr::Null),
+                        default: ParameterDefault::Expr(ConstExpr::Null),
                         ty: None,
                         ..parameter(b"callable_name", Type::Mixed)
                     },

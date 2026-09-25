@@ -8,7 +8,7 @@
 //! rebuilt table is written into the reference.
 
 use php_ext::coerce::{coerce_param, to_array};
-use php_ext::decl::{ConstExpr, FunctionDecl, Parameter, Type};
+use php_ext::decl::{ConstExpr, FunctionDecl, Parameter, ParameterDefault, Type};
 use php_ext::raising::{Thrown, throw, too_few_arguments};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpRef, Value, ValueRef};
@@ -85,7 +85,7 @@ pub(super) fn natives() -> Vec<(FunctionDecl, Entry)> {
         ..parameter(b"values", Type::Mixed)
     };
     let length = || Parameter {
-        default: Some(ConstExpr::Null),
+        default: ParameterDefault::Expr(ConstExpr::Null),
         ..parameter(b"length", Type::Nullable(Box::new(Type::Int)))
     };
     vec![
@@ -113,7 +113,7 @@ pub(super) fn natives() -> Vec<(FunctionDecl, Entry)> {
                     parameter(b"offset", Type::Int),
                     length(),
                     Parameter {
-                        default: Some(ConstExpr::Array(Vec::new())),
+                        default: ParameterDefault::Expr(ConstExpr::Array(Vec::new())),
                         ..parameter(b"replacement", Type::Mixed)
                     },
                 ],
@@ -129,7 +129,7 @@ pub(super) fn natives() -> Vec<(FunctionDecl, Entry)> {
                     parameter(b"offset", Type::Int),
                     length(),
                     Parameter {
-                        default: Some(ConstExpr::Bool(false)),
+                        default: ParameterDefault::Expr(ConstExpr::Bool(false)),
                         ..parameter(b"preserve_keys", Type::Bool)
                     },
                 ],

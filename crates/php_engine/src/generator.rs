@@ -29,7 +29,7 @@
 use php_heap::{Fatal, FrameRef};
 use php_unit::decl::{
     ClassDecl, ClassFlags, ClassKind, DynamicProperties, EnumBacking, FunctionDecl, MethodDecl,
-    Name, Parameter, Type, Visibility,
+    Name, Parameter, ParameterDefault, Type, Visibility,
 };
 use php_unit::{OpArray, Opcode};
 
@@ -362,8 +362,9 @@ fn parameter(name: &[u8], ty: Type) -> Parameter {
         ty: Some(ty),
         by_ref: false,
         prefer_ref: false,
+        promoted: false,
         variadic: false,
-        default: None,
+        default: ParameterDefault::None,
         attributes: Vec::new(),
     }
 }

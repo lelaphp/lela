@@ -31,7 +31,9 @@ mod mime;
 use ffi::{Cd, Errno};
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::coerce::coerce_param;
-use php_ext::decl::{ConstDecl, ConstExpr, FunctionDecl, IniDecl, Name, Parameter, Type};
+use php_ext::decl::{
+    ConstDecl, ConstExpr, FunctionDecl, IniDecl, Name, Parameter, ParameterDefault, Type,
+};
 use php_ext::raising::{Level, Thrown, arg_count_error, arg_value_error, docref};
 use php_ext::request::{BufferHandler, ContentType, HandlerCall, HandlerStatus, Request};
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
@@ -208,8 +210,9 @@ fn declared(
                 ty: Some(ty(t)),
                 by_ref: false,
                 prefer_ref: false,
+                promoted: false,
                 variadic: false,
-                default: default.clone(),
+                default: (default.clone()).map_or(ParameterDefault::None, ParameterDefault::Expr),
                 attributes: Vec::new(),
             })
             .collect(),

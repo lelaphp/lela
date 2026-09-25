@@ -131,14 +131,6 @@ impl Iter {
     }
 }
 
-fn no_loop(req: &mut Request, what: &str) -> Thrown {
-    throw(
-        req,
-        "Error",
-        &format!("Call to undefined function {what}()"),
-    )
-}
-
 /// `zend_call_known_fcc` (`Z/Zend/zend_execute_API.c:1090`): the
 /// resolved callee on a call frame of its own, the branch of
 /// `zend_call_function` a filled `zend_fcall_info_cache` takes, which
@@ -913,9 +905,28 @@ pub fn iterate(req: &mut Request, value: &Value) -> Result<Iter, Thrown> {
     })
 }
 
-/// `Closure::fromCallable`.
+/// `zend_create_fake_closure` over a resolved callable, what
+/// `Closure::fromCallable` and `ReflectionFunction::getClosure` make: a
+/// closure hands back itself, one more owner; a function is closed over
+/// with no scope; a method over its class, with the receiver the
+/// callable holds and its class as the called scope, or the class the
+/// callable named where it holds none. The closure is fake
+/// (`ZEND_ACC_FAKE_CLOSURE`), so `bind` may not move its scope.
+///
+/// ```php
+/// class A { static function who() { return static::class; } function me() { return $this; } }
+/// class B extends A {}
+/// var_dump((new ReflectionMethod('A', 'who'))->getClosure()(), (new ReflectionMethod('B', 'who'))->getClosure()());
+/// $b = new B; var_dump((new ReflectionMethod('A', 'me'))->getClosure($b)() === $b, (new ReflectionFunction('strlen'))->getClosure()('ab'));
+/// ```
+/// ```expect
+/// string(1) "A"
+/// string(1) "A"
+/// bool(true)
+/// int(2)
+/// ```
 pub fn closure_from_callable(req: &mut Request, callable: &Callable) -> Result<PhpObject, Thrown> {
-    Err(no_loop(req, &callable.name()))
+    crate::classes::fake_closure(req, callable)
 }
 
 /// Read a property through the class's `read_property` handler: a

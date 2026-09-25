@@ -16,7 +16,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use php_ext::coerce::coerce_param;
-use php_ext::decl::{ConstExpr, FunctionDecl, Parameter, Type};
+use php_ext::decl::{ConstExpr, FunctionDecl, Parameter, ParameterDefault, Type};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
 use php_ext::request::{Request, WrapperOp};
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
@@ -139,7 +139,7 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
         )
     };
     let nullable_int = |name: &[u8]| Parameter {
-        default: Some(ConstExpr::Null),
+        default: ParameterDefault::Expr(ConstExpr::Null),
         ..parameter(name, Type::Nullable(Box::new(Type::Int)))
     };
     vec![
@@ -196,11 +196,11 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
                 b"clearstatcache",
                 &[
                     Parameter {
-                        default: Some(ConstExpr::Bool(false)),
+                        default: ParameterDefault::Expr(ConstExpr::Bool(false)),
                         ..parameter(b"clear_realpath_cache", Type::Bool)
                     },
                     Parameter {
-                        default: Some(ConstExpr::Str(Box::new([]))),
+                        default: ParameterDefault::Expr(ConstExpr::Str(Box::new([]))),
                         ..parameter(b"filename", Type::String)
                     },
                 ],

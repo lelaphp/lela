@@ -405,7 +405,7 @@ pub fn throwing_warnings<R>(
 
 #[cfg(test)]
 mod tests {
-    use php_unit::decl::{FunctionDecl, Name, Parameter, Type};
+    use php_unit::decl::{FunctionDecl, Name, Parameter, ParameterDefault, Type};
 
     use crate::api::abi::{Entry, ExtensionBuilder};
     use crate::api::request::Request;
@@ -421,8 +421,9 @@ mod tests {
             ty: Some(ty),
             by_ref: false,
             prefer_ref: false,
+            promoted: false,
             variadic,
-            default: None,
+            default: ParameterDefault::None,
             attributes: Vec::new(),
         }
     }

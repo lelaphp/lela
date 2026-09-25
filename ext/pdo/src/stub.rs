@@ -13,7 +13,8 @@
 
 use php_ext::decl::{
     Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind, ConstExpr,
-    EnumBacking, FunctionDecl, MethodDecl, Name, Parameter, PropertyDecl, Type, Visibility,
+    EnumBacking, FunctionDecl, MethodDecl, Name, Parameter, ParameterDefault, PropertyDecl, Type,
+    Visibility,
 };
 
 use crate::Entry;
@@ -402,6 +403,7 @@ impl Reader<'_> {
             is_instance: !modifiers.is_static,
             is_readonly: false,
             is_final: false,
+            is_promoted: false,
             default: default.or_else(|| ty.is_none().then_some(ConstExpr::Null)),
             ty,
             attributes: Vec::new(),
@@ -433,8 +435,9 @@ impl Reader<'_> {
             by_ref,
             // No PDO stub marks a parameter `@prefer-ref`.
             prefer_ref: false,
+            promoted: false,
             variadic,
-            default,
+            default: default.map_or(ParameterDefault::None, ParameterDefault::Expr),
             attributes,
         })
     }

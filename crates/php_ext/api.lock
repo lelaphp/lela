@@ -156,6 +156,9 @@ decl::IniDecl
 decl::MethodDecl
 decl::Name
 decl::Parameter
+decl::Parameter::is_required
+decl::ParameterDefault
+decl::ParameterDefault::expr
 decl::PropertyDecl
 decl::Type
 decl::Type::MAY_BE_ANY
@@ -199,6 +202,7 @@ request::HandlerCall
 request::HandlerOp
 request::HandlerStatus
 request::HostPath
+request::IniEntry
 request::Interrupt
 request::Interrupt::raise
 request::Interrupt::raised
@@ -225,7 +229,9 @@ request::Request::class_extension
 request::Request::class_extension_name
 request::Request::clear_last_error
 request::Request::clear_stat_cache
+request::Request::closure_refuses_receiver
 request::Request::constant_attributes
+request::Request::constant_file
 request::Request::constants
 request::Request::content_type
 request::Request::core_ini_info
@@ -244,6 +250,7 @@ request::Request::extension_constants
 request::Request::extension_dependencies
 request::Request::extension_functions
 request::Request::extension_info
+request::Request::extension_ini
 request::Request::extension_name
 request::Request::extension_named
 request::Request::extension_number

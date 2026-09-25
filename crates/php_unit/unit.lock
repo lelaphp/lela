@@ -41,6 +41,9 @@ decl::IniDecl
 decl::MethodDecl
 decl::Name
 decl::Parameter
+decl::Parameter::is_required
+decl::ParameterDefault
+decl::ParameterDefault::expr
 decl::PropertyDecl
 decl::TraitAdaptation
 decl::TraitMethodRef

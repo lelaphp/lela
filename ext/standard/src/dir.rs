@@ -213,6 +213,7 @@ pub(crate) fn directory_class() -> (
         is_instance: true,
         is_readonly: true,
         is_final: false,
+        is_promoted: false,
         ty: Some(ty),
         default: None,
         attributes: Vec::new(),

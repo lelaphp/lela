@@ -15,19 +15,17 @@
 //! which would be wrong about a method the class has. The bodies
 //! arrive with the tests that call them.
 //!
-//! Two spellings of the stub the declaration model has no word for
-//! are carried as the stub writes them: `= UNKNOWN`, an optional
-//! parameter with no default to show, is [`unknown_default`], the
-//! constant named `UNKNOWN`, which the renderer prints as php prints it,
-//! `<default>`; and an enum's cases are its constants, since the model
-//! has no case bit and `PropertyHookType` declares no other constant.
+//! `= UNKNOWN`, an optional parameter with no default to show, is
+//! [`unknown_default`], the model's `ParameterDefault::Unshown`, which the
+//! renderer prints as php prints it, `<default>`.
 // A class's function is one row per method of the stub, and the rows
 // are what the linter counts.
 #![allow(clippy::too_many_lines)]
 
 use php_ext::decl::{
     Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind, ConstExpr,
-    EnumBacking, FunctionDecl, MethodDecl, Name, Parameter, PropertyDecl, Type, Visibility,
+    EnumBacking, FunctionDecl, MethodDecl, Name, Parameter, ParameterDefault, PropertyDecl, Type,
+    Visibility,
 };
 use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
@@ -38,16 +36,6 @@ use super::Entry;
 /// One class with its methods' entries, the shape
 /// `ExtensionBuilder::classes` takes.
 pub(super) type Declared = (ClassDecl, Vec<(MethodDecl, Entry)>);
-
-/// The spelling of an optional parameter the stub gives no default,
-/// `mixed $default = UNKNOWN`.
-const UNKNOWN: &str = "UNKNOWN";
-
-/// Whether a parameter's default is the stub's `UNKNOWN`, which
-/// `_parameter_string` prints as `<default>`.
-pub(super) fn is_unknown_default(expr: &ConstExpr) -> bool {
-    matches!(expr, ConstExpr::Constant(name) if name.0.as_ref() == UNKNOWN.as_bytes())
-}
 
 /// The entry of a method declared and not yet served: php's `Error`,
 /// as a native that cannot do what it was asked raises one.
@@ -108,6 +96,7 @@ fn name_property() -> PropertyDecl {
         is_instance: true,
         is_readonly: false,
         is_final: false,
+        is_promoted: false,
         ty: Some(Type::String),
         default: None,
         attributes: Vec::new(),
@@ -156,8 +145,9 @@ fn parameter(name: &[u8], ty: Type) -> Parameter {
         ty: Some(ty),
         by_ref: false,
         prefer_ref: false,
+        promoted: false,
         variadic: false,
-        default: None,
+        default: ParameterDefault::None,
         attributes: Vec::new(),
     }
 }
@@ -172,14 +162,17 @@ fn untyped(name: &[u8]) -> Parameter {
 
 fn with_default(name: &[u8], ty: Type, default: ConstExpr) -> Parameter {
     Parameter {
-        default: Some(default),
+        default: ParameterDefault::Expr(default),
         ..parameter(name, ty)
     }
 }
 
 /// `type $name = UNKNOWN`: optional, with no default to show.
 fn unknown_default(name: &[u8], ty: Type) -> Parameter {
-    with_default(name, ty, ConstExpr::Constant(Name::from(UNKNOWN)))
+    Parameter {
+        default: ParameterDefault::Unshown,
+        ..parameter(name, ty)
+    }
 }
 
 fn variadic(name: &[u8], ty: Type) -> Parameter {
@@ -4699,7 +4692,7 @@ fn reflection_function_abstract() -> Declared {
                     &[],
                     Some(nullable(named(b"ReflectionClass"))),
                 )),
-                unbuilt as Entry,
+                super::func::reflection_function_get_closure_called_class as Entry,
             ),
             (
                 method(b"getClosureUsedVariables", &[], Some(Type::Array)),
@@ -4719,7 +4712,7 @@ fn reflection_function_abstract() -> Declared {
                     &[],
                     Some(union(&[Type::Int, Type::False])),
                 )),
-                unbuilt as Entry,
+                super::func::reflection_function_get_end_line as Entry,
             ),
             (
                 tentative(method(
@@ -4885,7 +4878,7 @@ fn reflection_function() -> Declared {
             ),
             (
                 tentative(method(b"getClosure", &[], Some(named(b"Closure")))),
-                unbuilt as Entry,
+                super::func::reflection_function_get_closure as Entry,
             ),
         ],
     )
@@ -5035,7 +5028,7 @@ fn reflection_method() -> Declared {
                     )],
                     Some(named(b"Closure")),
                 )),
-                unbuilt as Entry,
+                super::func::reflection_method_get_closure as Entry,
             ),
             (
                 tentative(method(b"getModifiers", &[], Some(Type::Int))),
@@ -5657,7 +5650,7 @@ fn reflection_property() -> Declared {
             ),
             (
                 method(b"getMangledName", &[], Some(Type::String)),
-                unbuilt as Entry,
+                super::member::reflection_property_get_mangled_name as Entry,
             ),
             (
                 tentative(method(
@@ -5688,7 +5681,7 @@ fn reflection_property() -> Declared {
                     &[parameter(b"object", Type::Object)],
                     Some(Type::Mixed),
                 ),
-                unbuilt as Entry,
+                super::reflection_property_get_raw_value as Entry,
             ),
             (
                 method(
@@ -5699,7 +5692,7 @@ fn reflection_property() -> Declared {
                     ],
                     Some(Type::Void),
                 ),
-                unbuilt as Entry,
+                super::reflection_property_set_raw_value as Entry,
             ),
             (
                 method(
@@ -5738,7 +5731,7 @@ fn reflection_property() -> Declared {
                     )],
                     Some(Type::Bool),
                 )),
-                unbuilt as Entry,
+                super::reflection_property_is_initialized as Entry,
             ),
             (
                 tentative(method(b"isPublic", &[], Some(Type::Bool))),
@@ -5859,10 +5852,13 @@ fn reflection_property() -> Declared {
                 ),
                 super::member::reflection_property_get_attributes as Entry,
             ),
-            (method(b"hasHooks", &[], Some(Type::Bool)), unbuilt as Entry),
+            (
+                method(b"hasHooks", &[], Some(Type::Bool)),
+                super::member::reflection_property_has_hooks as Entry,
+            ),
             (
                 method(b"getHooks", &[], Some(Type::Array)),
-                unbuilt as Entry,
+                super::member::reflection_property_get_hooks as Entry,
             ),
             (
                 method(
@@ -5870,7 +5866,7 @@ fn reflection_property() -> Declared {
                     &[parameter(b"type", named(b"PropertyHookType"))],
                     Some(Type::Bool),
                 ),
-                unbuilt as Entry,
+                super::member::reflection_property_has_hook as Entry,
             ),
             (
                 method(
@@ -5878,7 +5874,7 @@ fn reflection_property() -> Declared {
                     &[parameter(b"type", named(b"PropertyHookType"))],
                     Some(nullable(named(b"ReflectionMethod"))),
                 ),
-                unbuilt as Entry,
+                super::member::reflection_property_get_hook as Entry,
             ),
             (method(b"isFinal", &[], Some(Type::Bool)), unbuilt as Entry),
         ],
@@ -6253,7 +6249,7 @@ fn reflection_extension() -> Declared {
             ),
             (
                 tentative(method(b"getINIEntries", &[], Some(Type::Array))),
-                unbuilt as Entry,
+                super::reflection_extension_get_ini_entries as Entry,
             ),
             (
                 tentative(method(b"getClasses", &[], Some(Type::Array))),
@@ -6297,31 +6293,31 @@ fn reflection_zend_extension() -> Declared {
             ),
             (
                 method(b"__construct", &[parameter(b"name", Type::String)], None),
-                unbuilt as Entry,
+                super::reflection_zend_extension_construct as Entry,
             ),
             (
                 method(b"__toString", &[], Some(Type::String)),
-                unbuilt as Entry,
+                super::reflection_zend_extension_reader as Entry,
             ),
             (
                 tentative(method(b"getName", &[], Some(Type::String))),
-                unbuilt as Entry,
+                super::reflection_zend_extension_reader as Entry,
             ),
             (
                 tentative(method(b"getVersion", &[], Some(Type::String))),
-                unbuilt as Entry,
+                super::reflection_zend_extension_reader as Entry,
             ),
             (
                 tentative(method(b"getAuthor", &[], Some(Type::String))),
-                unbuilt as Entry,
+                super::reflection_zend_extension_reader as Entry,
             ),
             (
                 tentative(method(b"getURL", &[], Some(Type::String))),
-                unbuilt as Entry,
+                super::reflection_zend_extension_reader as Entry,
             ),
             (
                 tentative(method(b"getCopyright", &[], Some(Type::String))),
-                unbuilt as Entry,
+                super::reflection_zend_extension_reader as Entry,
             ),
         ],
     )
@@ -6347,14 +6343,20 @@ fn reflection_reference() -> Declared {
                     ],
                     Some(nullable(named(b"ReflectionReference"))),
                 )),
-                unbuilt as Entry,
+                super::reflection_reference_from_array_element as Entry,
             ),
-            (method(b"getId", &[], Some(Type::String)), unbuilt as Entry),
+            (
+                method(b"getId", &[], Some(Type::String)),
+                super::reflection_reference_get_id as Entry,
+            ),
             (
                 private(method(b"__clone", &[], Some(Type::Void))),
-                unbuilt as Entry,
+                super::func::reflection_clone as Entry,
             ),
-            (private(method(b"__construct", &[], None)), unbuilt as Entry),
+            (
+                private(method(b"__construct", &[], None)),
+                super::reflection_reference_construct as Entry,
+            ),
         ],
     )
 }
@@ -6609,7 +6611,7 @@ fn reflection_constant() -> Declared {
                     &[],
                     Some(union(&[Type::String, Type::False])),
                 ),
-                unbuilt as Entry,
+                super::member::reflection_constant_get_file_name as Entry,
             ),
             (
                 method(
