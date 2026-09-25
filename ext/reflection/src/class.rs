@@ -993,9 +993,7 @@ pub(super) fn reflection_class_new_instance(req: &mut Request) -> Result<Value, 
         let at = u32::try_from(position).unwrap_or(u32::MAX);
         arguments.push(req.argument(at).unwrap_or_default());
     }
-    instantiable(req, class)?;
-    let object = instantiate(req, class, &arguments)?;
-    Ok(object.as_value())
+    new_instance(req, class, &arguments)
 }
 
 /// `ReflectionClass::newInstanceArgs(array $args = [])`: the same,
@@ -1037,9 +1035,7 @@ pub(super) fn reflection_class_new_instance_args(req: &mut Request) -> Result<Va
             }
         }
     }
-    instantiable(req, class)?;
-    let object = instantiate(req, class, &arguments)?;
-    Ok(object.as_value())
+    new_instance(req, class, &arguments)
 }
 
 /// `ReflectionClass::newInstanceWithoutConstructor()`:
@@ -1071,6 +1067,47 @@ pub(super) fn reflection_class_new_instance_without_constructor(
 /// php's `zend_throw_exception_ex(reflection_exception_ptr, ...)` for
 /// a class `new` refuses, the message `ReflectionClass` gives before
 /// the engine's own.
+/// The body `newInstance` and `newInstanceArgs` share: `object_init_ex`,
+/// then `get_constructor` under the class's fake scope, a non-public one
+/// php's `Access to non-public constructor` and a class with none
+/// refusing arguments; else the constructor served with them.
+///
+/// ```php
+/// class Priv { private function __construct() {} } class None {} class Pub { function __construct(public $a = 0) {} }
+/// foreach ([['Priv', []], ['None', [1]], ['None', []], ['Pub', [2]]] as $row) {
+///     try { var_dump((new ReflectionClass($row[0]))->newInstanceArgs($row[1])); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// Access to non-public constructor of class Priv
+/// Class None does not have a constructor, so you cannot pass any constructor arguments
+/// object(None)#%d (0) {
+/// }
+/// object(Pub)#%d (1) {
+///   ["a"]=>
+///   int(2)
+/// }
+/// ```
+fn new_instance(req: &mut Request, class: ClassId, arguments: &[Value]) -> Result<Value, Thrown> {
+    instantiable(req, class)?;
+    let refusal = match constructor_of(req, class) {
+        Some((decl, _)) if decl.visibility != Visibility::Public => {
+            Some("Access to non-public constructor of class {}")
+        }
+        None if !arguments.is_empty() => Some(
+            "Class {} does not have a constructor, so you cannot pass any constructor arguments",
+        ),
+        _ => None,
+    };
+    if let Some(refusal) = refusal {
+        let name = class_name_of(req, class);
+        let message = refusal.replace("{}", &String::from_utf8_lossy(&name));
+        return Err(throw(req, "ReflectionException", &message));
+    }
+    let object = instantiate(req, class, arguments)?;
+    Ok(object.as_value())
+}
+
 fn instantiable(req: &mut Request, class: ClassId) -> Result<(), Thrown> {
     if !cannot_instantiate(req, class) {
         return Ok(());
