@@ -15,10 +15,18 @@ workspace = true
 # `pcre_get_compiled_regex_cache` and the `php_pcre_*_impl` functions
 # (`php_pcre.h`) that `RegexIterator` runs, ADR-0004's edge where php-src
 # includes the other extension's headers and `php_spl.c`'s
-# `ZEND_MOD_REQUIRED("pcre")`. The engine is out of reach (`[[edge]]` ext/*).
+# `ZEND_MOD_REQUIRED("pcre")`. And ext/standard for what `spl_array.c`,
+# `spl_dllist.c`, `spl_observer.c` and `spl_directory.c` include of it and
+# call directly, never through the function table: `php_var_serialize` and
+# `php_var_unserialize` (`php_var.h`), `php_fstat`, `php_fgetcsv` and
+# `php_fputcsv` (`file.h`), `php_stat` (`php_filestat.h`),
+# `php_sscanf_internal` (`scanf.h`), and `php_glob` (`main/php_glob.h`),
+# which the `glob://` wrapper calls and ext/standard ports here.
+# The engine is out of reach (`[[edge]]` ext/*).
 [dependencies]
 php_ext = { path = "../../crates/php_ext" }
 php_ext_pcre = { path = "../pcre" }
+php_ext_standard = { path = "../standard" }
 
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
 [dev-dependencies]

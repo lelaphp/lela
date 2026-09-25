@@ -103,17 +103,13 @@ impl Emit<'_> {
             line: arguments.line,
         };
         if let [only] = arguments.list.as_slice() {
-            let (name, value) = match only {
-                Arg::Positional(value) => (None, *value),
-                Arg::Named(name, value) => (Some(name.clone()), *value),
-                Arg::Made(..) => return Err(self.fatal("an assertion the compiler wrote")),
-            };
-            let text = self.assertion_text(name.as_deref(), value)?;
+            let text = self.assertion_text(only)?;
             let description = self.string(&text)?;
             // "If the original argument was named, add the new argument
             // as named as well, as mixing named and positional is not
             // allowed."
-            let named = name.map(|_| Box::<[u8]>::from(&b"description"[..]));
+            let named =
+                matches!(only, Arg::Named(..)).then(|| Box::<[u8]>::from(&b"description"[..]));
             arguments.list.push(Arg::Made(named, description));
         }
         let served = if let Some(index) = native {

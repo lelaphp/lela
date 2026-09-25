@@ -13,6 +13,17 @@ pub struct Unit {
     pub main: OpArray,
     pub functions: Vec<(FunctionDecl, OpArray)>,
     pub classes: Vec<ClassDecl>,
+    /// The runtime definition key of every class of `classes` that no
+    /// name bound while the file compiled, beside the class's index:
+    /// php's `CG(class_table)` holds such a class under the key
+    /// `zend_build_runtime_definition_key` made, `\0`, the lowered name,
+    /// the file, `:`, the declaration's first line, `$` and how many keys
+    /// the file made before it in hex, and the `DECLARE_CLASS` that binds
+    /// it where it was written carries the key in the constant after its
+    /// `op1`. So two classes of
+    /// one name, one in each arm of an `if`, are two keys. A class no key
+    /// names was bound early and is bound when the unit loads.
+    pub runtime_keys: Vec<(Name, u32)>,
     pub constants: Vec<ConstDecl>,
     /// The op array of each method a class of `classes` declares with a
     /// body, php's `ce->function_table` laid beside the declaration

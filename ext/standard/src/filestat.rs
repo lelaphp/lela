@@ -16,7 +16,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use php_ext::coerce::coerce_param;
-use php_ext::decl::{ConstExpr, FunctionDecl, Parameter, Type};
+use php_ext::decl::{ConstExpr, FunctionDecl, Parameter, ParameterDefault, Type};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
 use php_ext::request::{Request, WrapperOp};
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
@@ -44,9 +44,9 @@ const STAT_NAMES: [&[u8]; 13] = [
 ];
 
 /// `FS_*` (`Z/ext/standard/php_filestat.h:47`): what `php_stat` is
-/// asked of a path.
+/// asked of a path, one variant per define in the header's order.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Fs {
+pub enum Fs {
     Perms,
     Inode,
     Size,
@@ -139,7 +139,7 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
         )
     };
     let nullable_int = |name: &[u8]| Parameter {
-        default: Some(ConstExpr::Null),
+        default: ParameterDefault::Expr(ConstExpr::Null),
         ..parameter(name, Type::Nullable(Box::new(Type::Int)))
     };
     vec![
@@ -196,11 +196,11 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
                 b"clearstatcache",
                 &[
                     Parameter {
-                        default: Some(ConstExpr::Bool(false)),
+                        default: ParameterDefault::Expr(ConstExpr::Bool(false)),
                         ..parameter(b"clear_realpath_cache", Type::Bool)
                     },
                     Parameter {
-                        default: Some(ConstExpr::Str(Box::new([]))),
+                        default: ParameterDefault::Expr(ConstExpr::Str(Box::new([]))),
                         ..parameter(b"filename", Type::String)
                     },
                 ],
@@ -290,7 +290,21 @@ fn has_file_scheme(filename: &[u8]) -> bool {
 /// failed is `false`, with `stat failed for` or `Lstat failed for`
 /// where it is not. An access check of another wrapper's file reads the
 /// owner's, group's or other's permission bits by whose the file is.
-fn php_stat(req: &mut Request, filename: &[u8], ty: Fs) -> Result<Value, Thrown> {
+/// `PHPAPI` in `php_filestat.h`: what `SplFileInfo`'s `isWritable()`,
+/// `isReadable()` and `isExecutable()` call directly.
+///
+/// ```php
+/// $p = __DIR__ . '/spl-stat.txt'; touch($p); chmod($p, 0644);
+/// $i = new SplFileInfo($p);
+/// var_dump($i->isReadable(), $i->isWritable(), $i->isExecutable(), (new SplFileInfo(__DIR__ . '/nope'))->isReadable());
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// ```
+pub fn php_stat(req: &mut Request, filename: &[u8], ty: Fs) -> Result<Value, Thrown> {
     let bad = filename.is_empty() || filename.contains(&0);
     if ty.is_access_check() {
         if bad {

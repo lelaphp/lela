@@ -16,13 +16,14 @@ pub(crate) use crate::SyntaxKind::*;
 
 use crate::source::FileId;
 
-use super::{LexOptions, Lexed, lex};
+use super::{LexOptions, Lexed, Position, lex};
 
 pub(crate) const F: FileId = FileId(0);
 
 pub(crate) fn no_short_tags() -> LexOptions {
     LexOptions {
         short_open_tag: false,
+        ..LexOptions::default()
     }
 }
 

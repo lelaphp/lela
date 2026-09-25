@@ -6,7 +6,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 use php_ext::coerce::{callable_checked, coerce_param};
-use php_ext::decl::{ConstExpr, FunctionDecl, Name, Parameter, Type};
+use php_ext::decl::{ConstExpr, FunctionDecl, Name, Parameter, ParameterDefault, Type};
 use php_ext::raising::{Level, Thrown, arg_count_error, docref};
 use php_ext::request::{OutputOp, Request, StartHandler};
 use php_ext::values::{Value, ValueRef};
@@ -37,15 +37,15 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
                 &[
                     Parameter {
                         ty: None,
-                        default: Some(ConstExpr::Null),
+                        default: ParameterDefault::Expr(ConstExpr::Null),
                         ..parameter(b"callback", Type::Mixed)
                     },
                     Parameter {
-                        default: Some(ConstExpr::Long(0)),
+                        default: ParameterDefault::Expr(ConstExpr::Long(0)),
                         ..parameter(b"chunk_size", Type::Int)
                     },
                     Parameter {
-                        default: Some(ConstExpr::Constant(Name(
+                        default: ParameterDefault::Expr(ConstExpr::Constant(Name(
                             b"PHP_OUTPUT_HANDLER_STDFLAGS".as_slice().into(),
                         ))),
                         ..parameter(b"flags", Type::Int)
@@ -97,7 +97,7 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
             declared(
                 b"ob_get_status",
                 &[Parameter {
-                    default: Some(ConstExpr::Bool(false)),
+                    default: ParameterDefault::Expr(ConstExpr::Bool(false)),
                     ..parameter(b"full_status", Type::Bool)
                 }],
                 Type::Array,
@@ -108,7 +108,7 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
             declared(
                 b"ob_implicit_flush",
                 &[Parameter {
-                    default: Some(ConstExpr::Bool(true)),
+                    default: ParameterDefault::Expr(ConstExpr::Bool(true)),
                     ..parameter(b"enable", Type::Bool)
                 }],
                 Type::Void,

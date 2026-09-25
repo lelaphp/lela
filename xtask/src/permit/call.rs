@@ -8,7 +8,7 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-use crate::manifest;
+use crate::{git, manifest};
 
 /// One intended call, as the hook receives it on stdin. `cwd` places
 /// a call without a file in a worktree; `session_id` is what a reading
@@ -145,14 +145,16 @@ impl Call {
 
     /// The workspace whose manifest judges the call: the nearest ancestor
     /// of the file, or failing that of the call's `cwd`, that carries a
-    /// `seams.toml` of its own under `root`, else `root`. A directory with
-    /// a manifest is a workspace of its own, and a call into it is judged
-    /// by that manifest (#57): a track's worktree under
-    /// `.claude/worktrees/<branch>`, whose files are judged against that
-    /// checkout and not as `.claude/**` of the main one, and a fixture
-    /// under `xtask/fixtures/**` that carries one, whose sources are what
-    /// its own rules describe and not what the workspace's do. One rule
-    /// covers both, and a fixture without a manifest is the workspace's.
+    /// `seams.toml` of its own under `root` or in another checkout of
+    /// `root`'s repository ([`nearest`]), else `root`. A directory with a
+    /// manifest is a workspace of its own, and a call into it is judged
+    /// by that manifest (#57): a worktree of the repository, wherever it
+    /// was laid down, whose files are judged against that checkout and
+    /// not as `.claude/**` of the main one or as no file of the manifest
+    /// at all, and a fixture under `xtask/fixtures/**` that carries one,
+    /// whose sources are what its own rules describe and not what the
+    /// workspace's do. One rule covers both, and a fixture without a
+    /// manifest is the workspace's.
     pub fn workspace(&self, root: &Path) -> PathBuf {
         let root = canonical(root);
         self.nested(&root).unwrap_or(root)
@@ -169,22 +171,22 @@ impl Call {
         let root = canonical(root);
         let file = self.tool_input.file_path.as_deref();
         let cwd = self.cwd.as_deref();
-        file.and_then(|f| nearest_under(&root, &canonical(&root.join(f)), &[manifest::FILE]))
+        file.and_then(|f| nearest(&root, &canonical(&root.join(f)), &[manifest::FILE]))
             .or_else(|| {
                 let cwd = canonical(&root.join(cwd?));
-                nearest_under(&root, &cwd, &[manifest::FILE, ".git"])
+                nearest(&root, &cwd, &[manifest::FILE, ".git"])
             })
     }
 
     /// The checkout the call's workspace is in: the nearest ancestor of it
-    /// under `root` that has a `.git`, else `root`. A worktree is one; a
+    /// that has a `.git` ([`nearest`]), else `root`. A worktree is one; a
     /// fixture workspace is not, so the build that judges by its manifest
     /// is held to the checkout's, the one it could have been compiled
     /// against, and its readings go to the checkout's store.
     pub(super) fn checkout(&self, root: &Path) -> PathBuf {
         let root = canonical(root);
         self.nested(&root)
-            .and_then(|workspace| nearest_under(&root, &workspace, &[".git"]))
+            .and_then(|workspace| nearest(&root, &workspace, &[".git"]))
             .unwrap_or(root)
     }
 
@@ -203,6 +205,26 @@ impl Call {
             (None, None) => String::new(),
         }
     }
+}
+
+/// The nearest directory at or above `place` that holds every one of
+/// `names`, looked for under `root` ([`nearest_under`]) or, for a place
+/// outside it, under the checkout `place` is in when that checkout is a
+/// worktree of `root`'s repository with a manifest of its own, the
+/// checkout itself failing a nearer one. Which checkout that is, git's
+/// own `.git` says ([`git::common_dir`]) and not where worktrees are
+/// laid down, so a worktree beside the checkout and one under
+/// `.claude/worktrees` are found alike (harness-design.md §5, "A track's
+/// worktrees"); a place in no checkout of the repository has none, and
+/// no rule of the manifest describes it.
+fn nearest(root: &Path, place: &Path, names: &[&str]) -> Option<PathBuf> {
+    if place.starts_with(root) {
+        return nearest_under(root, place, names);
+    }
+    let checkout = place.ancestors().find(|dir| dir.join(".git").exists())?;
+    let ours = checkout.join(manifest::FILE).is_file()
+        && git::common_dir(checkout).is_some_and(|common| git::common_dir(root) == Some(common));
+    ours.then(|| nearest_under(checkout, place, names).unwrap_or_else(|| checkout.to_path_buf()))
 }
 
 /// The nearest directory at or above `place` that is strictly under

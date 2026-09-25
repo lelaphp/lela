@@ -9,20 +9,21 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 use std::any::{Any, TypeId};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
-use php_compile::{CompileError, StackLimit};
+use php_compile::{CompileError, SourceKind, StackLimit};
 use php_heap::{
     Arr, Fatal, FrameRef, Heap, HeapHooks, Intern, MapTable, Obj, Ref, Res, ResourceType, Slot,
     SortEntry, VmStack, Zval, ZvalRef,
 };
 use php_unit::decl::{
-    Attribute, ClassConstDecl, ClassDecl, ClassKind, FunctionDecl, MethodDecl, Name, PropertyDecl,
-    Visibility,
+    Attribute, ClassConstDecl, ClassDecl, ClassKind, FunctionDecl, IniDecl, MethodDecl, Name,
+    PropertyDecl, Visibility,
 };
-use php_unit::{CacheSlot, FramelessEntry, Opcode, Unit};
+use php_unit::{CacheSlot, FramelessEntry, OpArray, Opcode, Unit};
 
 use crate::api::abi::{
     Callable, Dependency, Extension, IniVerdict, NativeNew, ObjectHandlers, PropertyRead,
@@ -37,6 +38,10 @@ use crate::api::values::{
 use crate::engine::{MethodAt, NativeMethod, RequestDescription, Shared};
 use crate::exec::{self, CallStage, CallState, IncludeKind, TableId, Vm};
 use crate::output::Output;
+
+mod lazy;
+
+pub(crate) use lazy::Strategy;
 
 /// php's version, what `PHP_VERSION` and `phpversion()` say.
 pub const PHP_VERSION: &str = "8.5.9";
@@ -64,6 +69,40 @@ pub struct HostPath(pub PathBuf);
 /// `Extension` value of the bundle and has no identity here yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ExtensionId(pub(crate) u32);
+
+/// One of an extension's ini entries as this request sees it, php's
+/// `zend_ini_entry` read by `_extension_ini_string` and
+/// `ReflectionExtension::getINIEntries`: the declaration with its
+/// `modifiable` bits, the value in force, and the value the entry had
+/// before the request changed it, php's `orig_value`, which is `Some`
+/// exactly where php's `modified` is set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IniEntry {
+    pub decl: IniDecl,
+    pub value: Box<[u8]>,
+    pub original: Option<Box<[u8]>>,
+}
+
+/// Who a row the request added to `EG(zend_constants)` belongs to,
+/// php's `ZEND_CONSTANT_MODULE_NUMBER` beside `zend_constant.filename`:
+/// an extension that registers it at request start, or the program,
+/// `PHP_USER_CONSTANT`, with the file `zend_register_constant` read off
+/// `zend_get_executed_filename_ex` where one was executing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ConstantOwner {
+    Module(&'static str),
+    User(Option<Box<[u8]>>),
+}
+
+impl ConstantOwner {
+    /// The extension's name, none for the program's.
+    fn module(&self) -> Option<&'static str> {
+        match self {
+            ConstantOwner::Module(name) => Some(name),
+            ConstantOwner::User(_) => None,
+        }
+    }
+}
 
 /// What a native intends to do at a path, for the `open_basedir` guard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -852,8 +891,9 @@ pub struct Request {
     /// it added them, each under the extension it is registered by:
     /// `Core` for what the host registers at request start
     /// ([`crate::engine::FileHandles`]), `None` for what `define()` and
-    /// `const` wrote, php's `PHP_USER_CONSTANT`.
-    constants: Vec<(Option<&'static str>, Vec<u8>, Value)>,
+    /// `const` wrote, php's `PHP_USER_CONSTANT`, with the file it was
+    /// defined in.
+    constants: Vec<(ConstantOwner, Vec<u8>, Value)>,
     /// `zend_enum_get_case`'s slot (`Z/Zend/zend_enum.c:410`): one
     /// instance per case of each enum, made on the first read of the
     /// case and handed back by identity from then on, so that
@@ -908,6 +948,9 @@ pub struct Request {
     /// the `WeakReference` and `WeakMap` objects that name it
     /// (`crate::weakrefs`).
     pub(crate) weakrefs: crate::weakrefs::Table,
+    /// php's `EG(lazy_objects_store)`: what goes with each lazy object's
+    /// state, by its id ([`lazy`]).
+    lazy: lazy::Table,
     /// The next word [`Request::ref_add_type_source`] hands out, never
     /// reused, so a cell freed and a cell laid down at its address are
     /// never one row.
@@ -1015,6 +1058,14 @@ pub struct Request {
     /// so every class a unit declares is this request's, the
     /// `DECLARE_CLASS_DELAYED` path, and dropped with it.
     declared: Vec<Declared>,
+    /// The classes a unit's load bound early at their
+    /// `DECLARE_CLASS_DELAYED` ([`Request::declare_classes`]), each the
+    /// unit and the class's index, until that opline runs and passes
+    /// over it: php's runtime definition key gone from `EG(class_table)`
+    /// once `zend_accel_do_delayed_early_binding` has bound the class
+    /// under its name. A load that bound nothing leaves nothing here, so
+    /// the opline of a file loaded again declares, and is refused.
+    bound_at_load: Vec<(Arc<Unit>, u32)>,
     /// The aliases `class_alias()` added to `EG(class_table)`, each the
     /// lowered name it is keyed by, the class it names, and how many
     /// classes the table held when it was added, which is where php's
@@ -1031,6 +1082,12 @@ pub struct Request {
     /// class's `function_table`. A `Function` past the natives and the
     /// native methods counts into this list (design §5.6).
     user_functions: Vec<UserFunction>,
+    /// `ZEND_MAP_PTR(op_array->static_variables_ptr)` for every function
+    /// and main op array whose `static` variables the request has
+    /// touched: the values, one per entry of the op array's
+    /// [`php_unit::OpArray::bound_vars`], which the published unit never
+    /// holds (design §5.14). A closure's are its object's.
+    static_vars: HashMap<Statics, Vec<Value>>,
 }
 
 /// One row of an object's property table as [`Request::property_rows`]
@@ -1058,9 +1115,17 @@ pub(crate) const DEBUG_BACKTRACE_IGNORE_ARGS: i64 = 2;
 /// rebuilt one: the value the table owns, or `IS_INDIRECT`, the CV of the
 /// frame the name is attached to (`zend_attach_symbol_table`), which
 /// owns the value while the frame stands.
+///
+/// `Held` is the value the table owns kept in a place of its own: php
+/// hands a fetch by name for writing the bucket's own `zval *`, and a
+/// bucket here moves as the list of names grows, so the first such fetch
+/// moves the value into a cell that does not ([`Request::symbol_place`]).
+/// The cell is the table's alone and never a PHP reference: what it holds
+/// is the bucket's value, a reference among them.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Symbol {
     Value(Value),
+    Held(PhpRef),
     Indirect(FrameRef, u32),
 }
 
@@ -1075,9 +1140,9 @@ pub(crate) struct SymbolTable {
 
 /// What `zend_include_or_eval` handed the handler: `ZEND_FAKE_OP_ARRAY`,
 /// a once form over a path the table already had, which answers `true`;
-/// `NULL`, a path nothing opened, which answers `false`; or the unit of
-/// the file, whose main op array the handler serves on a frame of its
-/// own.
+/// `NULL`, a path nothing opened or an empty string to `eval`, which
+/// answers `false`; or the unit of the file or the string, whose main op
+/// array the handler serves on a frame of its own.
 pub(crate) enum Opened {
     Already,
     Failed,
@@ -1155,6 +1220,8 @@ struct DeclaredSlot {
     visibility: Visibility,
     set_visibility: Option<Visibility>,
     typed: bool,
+    /// `ZEND_ACC_READONLY`, which the set visibility's refusal names.
+    readonly: bool,
 }
 
 /// What a write to a typed declared slot reads off its
@@ -1166,6 +1233,23 @@ pub(crate) struct TypedProperty {
     pub(crate) declaring: ClassId,
     pub(crate) ty: php_unit::decl::Type,
     pub(crate) readonly: bool,
+}
+
+/// Whose `static` table the request holds: a linked function's, the
+/// `zend_function` a request's function table or a class's method table
+/// holds, or a file's main op array's, by its map pointer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Statics {
+    Function(Function),
+    Main(u32),
+}
+
+/// Where the `static` variables of what a frame runs stand: in a
+/// closure's object, or in one of the request's tables.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum StaticsAt {
+    Closure(PhpObject),
+    Table(Statics),
 }
 
 /// One user function or method a request declared: the unit and the
@@ -1273,6 +1357,7 @@ impl Request {
             guards: Vec::new(),
             ref_sources: Vec::new(),
             weakrefs: crate::weakrefs::Table::default(),
+            lazy: lazy::Table::default(),
             next_ref_source: 1,
             wrappers: Vec::new(),
             url_wrappers: None,
@@ -1306,9 +1391,11 @@ impl Request {
             timer: None,
             stack_limit: StackLimit::UNCHECKED,
             declared: Vec::new(),
+            bound_at_load: Vec::new(),
             aliases: Vec::new(),
             sapi_constant: Value::null(),
             user_functions: Vec::new(),
+            static_vars: HashMap::new(),
             #[cfg(debug_assertions)]
             dirty: None,
         };
@@ -1438,6 +1525,7 @@ impl Request {
         let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
         let frame = self.stack.push_frame(&mut self.heap, slots, 0)?;
         exec::init_runtime_cache(&mut self.map, code, exec::Body::Main);
+        self.forget_main_statics(code.runtime_cache);
         self.vm.push(unit);
         // `zend_execute` gives the main op array's frame `EG(symbol_table)`
         // and `i_init_code_execute_data` attaches it, so every CV name
@@ -1481,6 +1569,7 @@ impl Request {
         }
         let table = self.rebuild_symbol_table(caller);
         exec::init_runtime_cache(&mut self.map, code, exec::Body::Main);
+        self.forget_main_statics(code.runtime_cache);
         self.vm.push_body(
             unit,
             exec::Body::Main,
@@ -1883,7 +1972,7 @@ impl Request {
         self.serve_call(
             closure.function,
             closure.this,
-            closure.scope,
+            closure.called_scope,
             Some(object),
             arguments,
             extra_named,
@@ -1930,7 +2019,20 @@ impl Request {
 
     /// Whether a closure's function is `ZEND_ACC_STATIC`: a closure
     /// written `static function`, or one made of a `static` method.
-    pub(crate) fn closure_is_static(&self, closure: &ClosureInfo) -> bool {
+    ///
+    /// ```php
+    /// class F { static function s() {} function q() { return static function () {}; } }
+    /// $r = fn ($c) => (new ReflectionFunction($c))->isStatic();
+    /// var_dump($r(function () {}), $r(static function () {}), $r((new F)->q()), $r(Closure::fromCallable(['F', 's'])));
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// ```
+    #[must_use]
+    pub fn closure_refuses_receiver(&self, closure: &ClosureInfo) -> bool {
         if let Some(decl) = self.method_decl(closure.function) {
             return !decl.is_instance;
         }
@@ -2699,6 +2801,24 @@ impl Request {
 
     /// `object_init_ex`'s refusals: an interface, a trait, an enum or an
     /// abstract class is php's `Error` for what cannot be instantiated.
+    ///
+    /// ```php
+    /// abstract class A { static function make() { return new static; } }
+    /// class B extends A {}
+    /// var_dump(B::make());
+    /// try { A::make(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// new A;
+    /// ```
+    /// ```expect exit=255
+    /// object(B)#1 (0) {
+    /// }
+    /// Cannot instantiate abstract class A
+    ///
+    /// Fatal error: Uncaught Error: Cannot instantiate abstract class A in %s:6
+    /// Stack trace:
+    /// #0 {main}
+    ///   thrown in %s on line 6
+    /// ```
     pub(crate) fn instantiable(&mut self, class: ClassId) -> Result<(), Thrown> {
         let Some(decl) = self.class_decl(class) else {
             return Ok(());
@@ -3215,7 +3335,8 @@ impl Request {
                         else {
                             continue;
                         };
-                        let file = (at > 0)
+                        // `build_filename_arg`: an `eval` names no file.
+                        let file = (at > 0 && kind != IncludeKind::Eval)
                             .then(|| exec::body_of(&state.unit, state.body))
                             .flatten()
                             .map(|code| code.filename.0.to_vec());
@@ -3268,9 +3389,13 @@ impl Request {
     /// `ZEND_MAP_PTR_GET(closure->func.op_array.static_variables_ptr)`
     /// beside the names the op array carries: what the closure bound,
     /// name and value, in the order the table took them, with a slot
-    /// nothing filled left out. Empty for an object that is no closure
-    /// and for a closure whose op array binds nothing.
-    pub(crate) fn closure_bound(&self, object: PhpObject) -> Vec<(Vec<u8>, Value)> {
+    /// nothing filled left out, and with `lexical` the `use` variables
+    /// alone. A closure made of a named function shares that function's
+    /// table (`zend_create_closure_ex` under `is_fake`), which is read
+    /// where the request has laid it down and at its starting values
+    /// where it has not. Empty for an object that is no closure and for
+    /// a closure whose op array binds nothing.
+    pub(crate) fn closure_bound(&self, object: PhpObject, lexical: bool) -> Vec<(Vec<u8>, Value)> {
         let Some(closure) = object.closure(self) else {
             return Vec::new();
         };
@@ -3280,12 +3405,148 @@ impl Request {
         let Some(code) = exec::body_of(&user.unit, user.body) else {
             return Vec::new();
         };
+        let starting: Vec<Value>;
+        let values = if closure.fake {
+            if let Some(held) = self.static_vars.get(&Statics::Function(closure.function)) {
+                held.as_slice()
+            } else {
+                starting = exec::starting_statics(code);
+                starting.as_slice()
+            }
+        } else {
+            closure.bound.as_slice()
+        };
         code.bound_vars
             .iter()
-            .zip(closure.bound.iter())
-            .filter(|(_, value)| value.tag() != TypeTag::Undef)
-            .map(|(name, value)| (name.0.to_vec(), *value))
+            .zip(values.iter())
+            .filter(|(var, value)| value.tag() != TypeTag::Undef && (var.lexical || !lexical))
+            .map(|(var, value)| (var.name.0.to_vec(), *value))
             .collect()
+    }
+
+    /// The `static` variables of what `frame` runs, php's
+    /// `ZEND_MAP_PTR_GET(EX(func)->op_array.static_variables_ptr)`: a
+    /// closure's own table, which its object holds; a function's or a
+    /// method's, which the request holds per linked function, so a
+    /// method a trait gave two classes counts apart in each and an
+    /// inherited one counts with its parent's; or, for the main op array
+    /// of a file, the request's table for that op array.
+    pub(crate) fn statics_of(&self, frame: FrameRef, code: &OpArray) -> StaticsAt {
+        let Some(state) = self.vm.at(frame) else {
+            return StaticsAt::Table(Statics::Main(code.runtime_cache));
+        };
+        if let Some(object) = state.closure
+            && object.closure(self).is_some_and(|closure| !closure.fake)
+        {
+            return StaticsAt::Closure(object);
+        }
+        match state.function {
+            Some(function) => StaticsAt::Table(Statics::Function(function)),
+            None => StaticsAt::Table(Statics::Main(code.runtime_cache)),
+        }
+    }
+
+    /// The value at `slot` of a `static` table, the table laid down from
+    /// `code`'s starting values where the request has not touched it
+    /// yet, which is `zend_array_dup(op_array->static_variables)` at the
+    /// first `BIND_STATIC`. None for a slot the table has not.
+    pub(crate) fn static_at(
+        &mut self,
+        at: StaticsAt,
+        code: &OpArray,
+        slot: usize,
+    ) -> Option<Value> {
+        match at {
+            StaticsAt::Closure(object) => object.closure(self)?.bound.get(slot).copied(),
+            StaticsAt::Table(of) => self
+                .static_vars
+                .entry(of)
+                .or_insert_with(|| exec::starting_statics(code))
+                .get(slot)
+                .copied(),
+        }
+    }
+
+    /// `value` into `slot` of a `static` table, which takes the owner
+    /// the caller held; what stood there is handed back, since the table
+    /// only ever trades a value for the reference made over it.
+    pub(crate) fn set_static(&mut self, at: StaticsAt, slot: usize, value: Value) -> Value {
+        let cell = match at {
+            StaticsAt::Closure(object) => object
+                .native_mut::<ClosureInfo>(self)
+                .and_then(|payload| payload.bound.get_mut(slot)),
+            StaticsAt::Table(of) => self
+                .static_vars
+                .get_mut(&of)
+                .and_then(|table| table.get_mut(slot)),
+        };
+        match cell {
+            Some(cell) => std::mem::replace(cell, value),
+            None => value,
+        }
+    }
+
+    /// The `static` variables `callable` reads, name and value, as
+    /// `ReflectionFunctionAbstract::getStaticVariables` copies them: a
+    /// closure's own table, and a function's or a method's laid down
+    /// from its starting values where no call has yet, as php lays it
+    /// down there. Empty for a native and for a function with none.
+    pub(crate) fn static_variables(&mut self, target: Target) -> Vec<(Vec<u8>, Value)> {
+        let function = match target {
+            Target::Closure(object) => {
+                let fake = object.closure(self).is_some_and(|closure| closure.fake);
+                match object.closure(self).map(|closure| closure.function) {
+                    Some(function) if fake => function,
+                    _ => return self.closure_bound(object, false),
+                }
+            }
+            Target::Function(function) | Target::Method { function, .. } => function,
+        };
+        let Some((unit, body)) = self
+            .user_function(function)
+            .map(|user| (Arc::clone(&user.unit), user.body))
+        else {
+            return Vec::new();
+        };
+        let Some(code) = exec::body_of(&unit, body) else {
+            return Vec::new();
+        };
+        if code.bound_vars.is_empty() {
+            return Vec::new();
+        }
+        let values = self
+            .static_vars
+            .entry(Statics::Function(function))
+            .or_insert_with(|| exec::starting_statics(code));
+        code.bound_vars
+            .iter()
+            .zip(values.iter())
+            .map(|(var, value)| (var.name.0.to_vec(), *value))
+            .collect()
+    }
+
+    /// The `static` variables of the main op array whose map pointer is
+    /// `offset` given up: php compiles a file afresh at each include, so
+    /// its main op array's table starts over each time it is entered.
+    fn forget_main_statics(&mut self, offset: u32) {
+        if let Some(values) = self.static_vars.remove(&Statics::Main(offset)) {
+            for value in values {
+                self.release(value);
+            }
+        }
+    }
+
+    /// The request's `static` tables given up, php's walk over
+    /// `EG(function_table)` in `zend_shutdown_executor_values`
+    /// (`Z/Zend/zend_execute_API.c:313`), after the symbol table: the
+    /// destructors are behind the request by then, so this frees and
+    /// serves nothing.
+    pub(crate) fn destroy_static_vars(&mut self) {
+        for (_, values) in std::mem::take(&mut self.static_vars) {
+            for value in values {
+                self.release(value);
+            }
+        }
     }
 
     /// `func->common.scope` of a closure's own copy of its function: the
@@ -4484,6 +4745,7 @@ impl Request {
             visibility: p.visibility,
             set_visibility: p.set_visibility,
             typed: p.ty.is_some(),
+            readonly: p.is_readonly,
         })
     }
 
@@ -4507,16 +4769,48 @@ impl Request {
     /// scope here, not the executed one; the two differ only where a
     /// method is reached through a class that inherited it, and the
     /// linker that inherits a method arrives with the classes of design
-    /// §11 days 8-14.
+    /// §11 days 8-14. A readonly property's `protected(set)` is named
+    /// with its `readonly`, which is the set visibility
+    /// `zend_declare_typed_property` gives every public readonly one:
+    ///
+    /// ```php
+    /// class A { public readonly int $x; function __construct(bool $set) { if ($set) { $this->x = 1; } } }
+    /// $a = new A(false);
+    /// try { $a->x = 1; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { unset($a->x); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// $b = new A(true);
+    /// try { $b->x = 2; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { unset($b->x); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Cannot modify protected(set) readonly property A::$x from global scope
+    /// Cannot unset protected(set) readonly property A::$x from global scope
+    /// Cannot modify readonly property A::$x
+    /// Cannot unset readonly property A::$x
+    /// ```
+    ///
+    /// `__clone` may unset and set one again, php's `IS_PROP_REINITABLE`:
+    ///
+    /// ```php
+    /// class F { function __construct(public readonly stdClass $b) {} function __clone() { unset($this->b); $this->b = new stdClass; } }
+    /// $f = new F(new stdClass);
+    /// $g = clone $f;
+    /// var_dump($f->b === $g->b);
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// ```
     fn set_inaccessible_property(
         &mut self,
         class: ClassId,
         set: Visibility,
+        readonly: bool,
         name: &[u8],
         operation: &str,
     ) -> Thrown {
         let word = match set {
             Visibility::Private => "private(set)",
+            _ if readonly => "protected(set) readonly",
             _ => "protected(set)",
         };
         let from = match self.executed_scope() {
@@ -4655,7 +4949,13 @@ impl Request {
         if constant.is_case {
             return self.enum_case(class, name).map(|case| case.as_value());
         }
-        crate::api::call::eval_const_expr(self, &value, Some(class))
+        let evaluated = crate::api::call::eval_const_expr(self, &value, Some(class))?;
+        match &constant.ty {
+            Some(ty) if ty.mask() != php_unit::decl::Type::MAY_BE_ANY => {
+                crate::ops::verify_class_constant_type(self, evaluated, ty, class, name)
+            }
+            _ => Ok(evaluated),
+        }
     }
 
     /// `zend_enum_build_backed_enum_table` (`Z/Zend/zend_enum.c:197`),
@@ -5545,6 +5845,27 @@ impl Request {
     /// Warning: Undefined property: R::$a in %s on line 2
     /// NULL
     /// ```
+    ///
+    /// A lazy object is initialised where the read finds nothing
+    /// (`zend_lazy_object_init` at `uninit_error`): a declared slot that
+    /// waits skips `__get` and initialises the object, while a name no
+    /// class declared is the accessor's first.
+    ///
+    /// ```php
+    /// class C { public $a = 1; public function __get($n) { echo "get $n\n"; return 0; } }
+    /// $r = new ReflectionClass('C');
+    /// $o = $r->newLazyGhost(function ($o) { echo "init\n"; });
+    /// var_dump($o->dyn);
+    /// var_dump($r->isUninitializedLazyObject($o));
+    /// var_dump($o->a);
+    /// ```
+    /// ```expect
+    /// get dyn
+    /// int(0)
+    /// bool(true)
+    /// init
+    /// int(1)
+    /// ```
     pub(crate) fn read_property(
         &mut self,
         object: PhpObject,
@@ -5569,6 +5890,13 @@ impl Request {
                     let value = Value::of_zval(z).deref();
                     self.addref(&value);
                     return Ok(value);
+                }
+                // `IS_PROP_UNINIT | IS_PROP_LAZY`: a slot that waits for
+                // the initializer skips `__get` too, and the object is
+                // initialised and read instead (`uninit_error`).
+                if self.lazy_slot(o, placed.slot) {
+                    let instance = self.lazy_init(object)?;
+                    return self.read_property(instance, name, read);
                 }
                 // `IS_PROP_UNINIT`: a typed slot nothing has written
                 // skips `__get` and is the uninitialised-access error.
@@ -5604,13 +5932,22 @@ impl Request {
                 return Ok(value);
             }
         }
-        // `/* magic isset */`: under `BP_VAR_IS` a class with a
-        // `__isset` is asked first, and the `__get` after it only where
-        // it said yes.
         let getter = self.magic_accessor(class, b"__get");
         let issetter = silent
             .then(|| self.magic_accessor(class, b"__isset"))
             .flatten();
+        let guard_bit = if issetter.is_some() { IN_ISSET } else { IN_GET };
+        // GH-21478: a proxy that forwards, read from inside the
+        // instance's own accessor for this name, reads the instance
+        // directly rather than serving the accessor twice.
+        if let Some(instance) = self.lazy_instance(o)
+            && self.guard_word(instance, name) & guard_bit != 0
+        {
+            return self.read_property(instance, name, read);
+        }
+        // `/* magic isset */`: under `BP_VAR_IS` a class with a
+        // `__isset` is asked first, and the `__get` after it only where
+        // it said yes.
         if let Some(issetter) = issetter {
             if self.guard_word(object, name) & IN_ISSET == 0 {
                 let answered = self.call_accessor(object, issetter, IN_ISSET, name, &[])?;
@@ -5635,6 +5972,20 @@ impl Request {
             if wrong && let Some(placed) = self.declared_slot(class, name) {
                 return Err(self.inaccessible_property(class, placed.visibility, name));
             }
+        }
+        // `uninit_error` over a lazy object: a name nothing holds
+        // initialises it and is read on what that answers, under the
+        // guard the accessor above stood under where one did.
+        if o.laziness() != php_heap::Laziness::Eager {
+            let instance = self.lazy_init(object)?;
+            let guarded = getter.is_some() || issetter.is_some();
+            if guarded && self.guard_word(instance, name) & guard_bit == 0 {
+                self.guard_take(instance, name, guard_bit);
+                let read = self.read_property(instance, name, read);
+                self.guard_drop(instance, name, guard_bit);
+                return read;
+            }
+            return self.read_property(instance, name, read);
         }
         if !silent {
             let class = self.class_name(class);
@@ -5709,11 +6060,12 @@ impl Request {
     /// ```
     pub(crate) fn declared_slot_for_write(
         &mut self,
-        class: ClassId,
+        object: PhpObject,
         name: &[u8],
         operation: &str,
         silent: bool,
     ) -> Result<Option<(u32, bool)>, Thrown> {
+        let class = object.class();
         let Some(placed) = self.declared_slot(class, name) else {
             return Ok(None);
         };
@@ -5723,10 +6075,21 @@ impl Request {
             }
             return Err(self.inaccessible_property(class, placed.visibility, name));
         }
+        // An initialised readonly property is refused as readonly, the
+        // caller's, ahead of its set visibility
+        // (`zend_std_write_property`).
+        let readonly_first = placed.readonly && !object.heap().slot(placed.slot).is_undef();
         if let Some(set) = placed.set_visibility
+            && !readonly_first
             && !self.has_set_access(placed.declaring, set)
         {
-            return Err(self.set_inaccessible_property(class, set, name, operation));
+            return Err(self.set_inaccessible_property(
+                class,
+                set,
+                placed.readonly,
+                name,
+                operation,
+            ));
         }
         Ok(Some((placed.slot, placed.typed)))
     }
@@ -5751,6 +6114,42 @@ impl Request {
             ty,
             readonly: p.is_readonly,
         })
+    }
+
+    /// `zend_verify_property_type` over a value about to land in a typed
+    /// property, the step `zend_assign_to_typed_prop`,
+    /// `zend_binary_assign_op_typed_prop`, `zend_incdec_typed_prop` and
+    /// `zend_std_write_property` share: the value as given where the
+    /// declared type accepts it, the weak rule's conversion in its place
+    /// where `strict` is off and the rule makes one, and php's
+    /// `TypeError` otherwise. `value` is given up on every arm that does
+    /// not land it.
+    pub(crate) fn hold_to_property_type(
+        &mut self,
+        typed: &TypedProperty,
+        name: &[u8],
+        value: Value,
+        strict: bool,
+    ) -> Result<Value, Thrown> {
+        let verified = crate::ops::verify_property_type(
+            self,
+            &value,
+            &typed.ty,
+            typed.declaring,
+            name,
+            strict,
+        );
+        match verified {
+            Ok(None) => Ok(value),
+            Ok(Some(coerced)) => {
+                self.release(value);
+                Ok(coerced)
+            }
+            Err(thrown) => {
+                self.release(value);
+                Err(thrown)
+            }
+        }
     }
 
     /// `zend_assign_to_variable` over a declared slot, `ASSIGN_OBJ`'s
@@ -5850,28 +6249,47 @@ impl Request {
         // holds a value, and a typed one nothing has written, are both
         // the setter's business to stay out of, so neither asks the
         // class for one.
+        let o = object.heap();
+        let lazy = o.laziness() != php_heap::Laziness::Eager;
         let placed = self.declared_slot(class, name.as_bytes());
         if let Some(p) = placed.as_ref()
             && self.may_access(p.declaring, p.visibility)
-            && (!object.heap().slot(p.slot).is_undef() || p.typed)
         {
+            if !o.slot(p.slot).is_undef() {
+                return self.write_std_property(object, name, value);
+            }
+            // `IS_PROP_LAZY`: a slot that waits is the initializer's
+            // first, then the write's on what it answers.
+            if self.lazy_slot(o, p.slot) {
+                return self.lazy_write(object, name, value, false);
+            }
+            if p.typed {
+                return self.write_std_property(object, name, value);
+            }
+        }
+        let held = placed.is_none()
+            && o.properties()
+                .is_some_and(|table| table.contains(php_heap::Key::Str(name.heap())));
+        if held {
             return self.write_std_property(object, name, value);
         }
+        // GH-21478: a proxy that forwards, written from inside the
+        // instance's own `__set` for this name, writes the instance.
+        if let Some(instance) = self.lazy_instance(o)
+            && self.guard_word(instance, name.as_bytes()) & IN_SET != 0
+        {
+            return self.write_property(instance, name, value);
+        }
         let Some(setter) = self.magic_accessor(class, b"__set") else {
+            if lazy {
+                return self.lazy_write(object, name, value, false);
+            }
             return self.write_std_property(object, name, value);
         };
         let bytes = name.as_bytes().to_vec();
         let wrong = placed
             .as_ref()
             .is_some_and(|p| !self.may_access(p.declaring, p.visibility));
-        let held = placed.is_none()
-            && object
-                .heap()
-                .properties()
-                .is_some_and(|table| table.contains(php_heap::Key::Str(name.heap())));
-        if held {
-            return self.write_std_property(object, name, value);
-        }
         if self.guard_word(object, &bytes) & IN_SET == 0 {
             let served = self.call_accessor(object, setter, IN_SET, &bytes, &[value]);
             self.release(value);
@@ -5889,7 +6307,40 @@ impl Request {
             self.release(Value::string(name));
             return Err(thrown);
         }
+        if lazy {
+            return self.lazy_write(object, name, value, true);
+        }
         self.write_std_property(object, name, value)
+    }
+
+    /// `forward_write_to_lazy_object`
+    /// (`Z/Zend/zend_object_handlers.c:1029`): the object initialised,
+    /// and the write made on what that answers, under `IN_SET` there
+    /// where the `__set` guard stood on the lazy object. `value` and
+    /// `name` are given up whatever arm runs.
+    fn lazy_write(
+        &mut self,
+        object: PhpObject,
+        name: PhpString,
+        value: Value,
+        guarded: bool,
+    ) -> Result<(), Thrown> {
+        let instance = match self.lazy_init(object) {
+            Ok(instance) => instance,
+            Err(thrown) => {
+                self.release(value);
+                self.release(Value::string(name));
+                return Err(thrown);
+            }
+        };
+        let bytes = name.as_bytes().to_vec();
+        if guarded && self.guard_word(instance, &bytes) & IN_SET == 0 {
+            self.guard_take(instance, &bytes, IN_SET);
+            let written = self.write_property(instance, name, value);
+            self.guard_drop(instance, &bytes, IN_SET);
+            return written;
+        }
+        self.write_property(instance, name, value)
     }
 
     /// `write_std_property`, `zend_std_write_property`'s label and what
@@ -5900,8 +6351,55 @@ impl Request {
     /// of it. A name the table does not hold yet is a creation and goes
     /// through [`Request::dynamic_property_creation`] first, php's two
     /// arms at `write_std_property`'s `else`; the value is given up with
-    /// the `Error`, as `FREE_OP_DATA` gives it up. The typed-property
-    /// coercion arrives with the kernel that writes one.
+    /// the `Error`, as `FREE_OP_DATA` gives it up.
+    ///
+    /// A typed slot is `zend_verify_property_type` under
+    /// `property_uses_strict_types()` ([`Request::property_strict_types`])
+    /// first: the value the declared type accepts, the weak rule's
+    /// conversion where the frame the write stands in is not strict,
+    /// which a native's own frame never is, and php's `TypeError` with
+    /// the value given up where neither holds. The value then lands as
+    /// `zend_assign_to_variable_ex` lands it, through the cell where the
+    /// slot holds a reference.
+    ///
+    /// ```php
+    /// class Foo { public int $id; public ?float $f = null; }
+    /// $db = new PDO('sqlite::memory:');
+    /// $db->setAttribute(PDO::ATTR_STRINGIFY_FETCHES, true);
+    /// $st = $db->query("SELECT '1' AS id, '2.5' AS f");
+    /// var_dump($st->fetchObject(Foo::class));
+    /// $st = $db->query("SELECT 'x' AS id");
+    /// try { $st->fetchObject(Foo::class); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// object(Foo)#3 (2) {
+    ///   ["id"]=>
+    ///   int(1)
+    ///   ["f"]=>
+    ///   float(2.5)
+    /// }
+    /// Cannot assign string to property Foo::$id of type int
+    /// ```
+    ///
+    /// The weak rule holds while the native writes, though the file
+    /// that called it declares `strict_types`, since php's frame there
+    /// is the native's own; a reference the slot holds is written
+    /// through.
+    ///
+    /// ```php
+    /// declare(strict_types=1);
+    /// class Foo { public int $id = 0; }
+    /// $db = new PDO('sqlite::memory:');
+    /// $st = $db->query("SELECT '7' AS id");
+    /// $st->setFetchMode(PDO::FETCH_INTO, $o = new Foo);
+    /// $r = &$o->id;
+    /// $st->fetch();
+    /// var_dump($o->id, $r);
+    /// ```
+    /// ```expect
+    /// int(7)
+    /// int(7)
+    /// ```
     fn write_std_property(
         &mut self,
         object: PhpObject,
@@ -5909,12 +6407,43 @@ impl Request {
         value: Value,
     ) -> Result<(), Thrown> {
         let o = object.heap();
-        if let Some(i) = self.prop_slot(object.class(), name.as_bytes()) {
-            let z = value.into_zval();
-            Heap::object_set_slot(&mut Hooks(self), o, i, z);
+        if let Some(placed) = self.declared_slot(object.class(), name.as_bytes()) {
+            let value = if placed.typed {
+                let Some(typed) = self.declared_typed_property(object.class(), name.as_bytes())
+                else {
+                    self.release(value);
+                    self.release(Value::string(name));
+                    return self.fatal_of(Err(Fatal::Error(String::from(
+                        "InternalError: write_property placed a typed property whose declared type the class does not carry",
+                    ))));
+                };
+                let strict = self.property_strict_types();
+                match self.hold_to_property_type(&typed, name.as_bytes(), value, strict) {
+                    Ok(value) => value,
+                    Err(thrown) => {
+                        self.release(Value::string(name));
+                        return Err(thrown);
+                    }
+                }
+            } else {
+                value
+            };
+            self.assign_declared_slot(o, placed.slot, value);
         } else {
             let key = php_heap::Key::Str(name.heap());
             let held = o.properties().is_some_and(|table| table.contains(key));
+            // `zend_assign_to_variable` over the entry found: one that
+            // holds a reference, what `$o->p = &$x` bound, is written
+            // through, so every name of the cell reads the value.
+            let bound = o
+                .properties()
+                .and_then(|table| table.get(key))
+                .and_then(|found| Value::of_zval(found).as_php_ref().copied());
+            if let Some(cell) = bound {
+                self.reference_set(cell.heap(), value);
+                self.release(Value::string(name));
+                return Ok(());
+            }
             if !held
                 && let Err(thrown) = self.dynamic_property_creation(object.class(), name.as_bytes())
             {
@@ -6087,6 +6616,9 @@ impl Request {
     /// index is the loop variable's `Z_FE_ITER`. `None` is the empty
     /// table php jumps past the loop over with `Z_FE_ITER` at `-1`.
     pub(crate) fn object_walk_start(&mut self, object: PhpObject) -> Result<Option<u32>, Thrown> {
+        // `zend_lazy_object_init`: a lazy object is initialised before
+        // the walk, which goes over what that answers.
+        let object = self.lazy_init(object)?;
         self.separate_object_properties(object)?;
         let o = object.heap();
         let table = self.heap.object_properties(o);
@@ -6364,6 +6896,9 @@ impl Request {
     /// knows how to drop; `Std` reaching one is the internal-error fatal
     /// naming the class.
     pub(crate) fn clone_members(&mut self, object: PhpObject) -> Result<PhpObject, Thrown> {
+        if object.heap().laziness() != php_heap::Laziness::Eager {
+            return self.lazy_clone(object);
+        }
         let cloned = self.heap.object_clone(object.heap());
         let Some(new) = self.fatal_of(cloned)? else {
             let class = self.class_name(object.class());
@@ -6527,9 +7062,7 @@ impl Request {
     /// there, where php's `GC_ADDREF` and `OBJ_RELEASE` around the call
     /// hold it). A class with none serves nothing, and so does a lazy
     /// object, which is the first test php makes after finding the
-    /// destructor (`zend_object_is_lazy`); this engine makes none,
-    /// `newLazyGhost` and `newLazyProxy` being what does, so that branch
-    /// is php's sentence and no code here. The visibility check and the
+    /// destructor (`zend_object_is_lazy`). The visibility check and the
     /// pending-throwable rules are the branches under this one.
     ///
     /// An array gives its elements up in element order
@@ -6582,6 +7115,11 @@ impl Request {
         let Some(destructor) = self.method_named(class, b"__destruct") else {
             return;
         };
+        // `zend_object_is_lazy`: a lazy object's destructor is not
+        // served, nor a forwarding proxy's, whose instance serves its own.
+        if object.heap().laziness() != php_heap::Laziness::Eager {
+            return;
+        }
         if !self.destructor_reachable(object, destructor) {
             return;
         }
@@ -6905,6 +7443,7 @@ impl Request {
             });
             let value = match found {
                 Some(Symbol::Value(value)) => value,
+                Some(Symbol::Held(cell)) => self.unhold(cell),
                 Some(Symbol::Indirect(other, slot)) => self.take_slot(other, slot),
                 None => {
                     if let Some(entries) = self.table_mut(table) {
@@ -7014,9 +7553,7 @@ impl Request {
             return;
         };
         for (_, symbol) in table.entries {
-            if let Symbol::Value(value) = symbol {
-                self.release(value);
-            }
+            self.release_symbol(symbol);
         }
     }
 
@@ -7035,6 +7572,17 @@ impl Request {
             self.globals().len() - 1
         });
         let cell = match self.globals()[at].1 {
+            Symbol::Held(held) => {
+                let place = held.heap().val_ref();
+                let value = Value::of_zval(place.read());
+                if let Some(cell) = value.as_php_ref() {
+                    *cell
+                } else {
+                    let cell = self.reference(value.undef_as_null())?;
+                    place.write(cell.as_value().to_zval());
+                    cell
+                }
+            }
             Symbol::Indirect(frame, slot) => {
                 let Some(place) = self.slot_ptr(frame, slot) else {
                     return Err(crate::api::raising::fatal(
@@ -7077,9 +7625,7 @@ impl Request {
         };
         if let Some(at) = entries.iter().position(|(key, _)| *key == name) {
             let old = std::mem::replace(&mut entries[at].1, Symbol::Value(value));
-            if let Symbol::Value(old) = old {
-                self.release(old);
-            }
+            self.release_symbol(old);
             return;
         }
         entries.push((name, Symbol::Value(value)));
@@ -7096,9 +7642,90 @@ impl Request {
             return;
         };
         let (_, symbol) = entries.remove(at);
-        if let Symbol::Value(value) = symbol {
-            self.release(value);
+        self.release_symbol(symbol);
+    }
+
+    /// What a bucket owns given up: its value, or the cell a fetch by
+    /// name moved it into with the value in it; an attached bucket owns
+    /// nothing.
+    fn release_symbol(&mut self, symbol: Symbol) {
+        match symbol {
+            Symbol::Value(value) => self.release(value),
+            Symbol::Held(cell) => self.release(cell.as_value()),
+            Symbol::Indirect(..) => {}
         }
+    }
+
+    /// The value a [`Symbol::Held`] cell holds taken out of it, the owner
+    /// the cell had the caller's, and the cell given up.
+    fn unhold(&mut self, cell: PhpRef) -> Value {
+        let place = cell.heap().val_ref();
+        let value = Value::of_zval(place.read());
+        place.write(Value::undef().to_zval());
+        self.release(cell.as_value());
+        value
+    }
+
+    /// `EG(symbol_table)`, laid down where nothing has written it yet.
+    pub(crate) fn global_table(&mut self) -> TableId {
+        let _ = self.globals();
+        TableId::GLOBAL
+    }
+    /// `zend_hash_find` in a symbol table for a fetch by name that
+    /// reads: what the bucket `name` holds, an `IS_INDIRECT` bucket
+    /// followed to the CV of the frame attached to it; `None` where the
+    /// table has no such name. A view: no owner taken.
+    pub(crate) fn symbol_value(&mut self, table: TableId, name: &[u8]) -> Option<Value> {
+        let symbol = self
+            .table_mut(table)?
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, symbol)| *symbol)?;
+        Some(match symbol {
+            Symbol::Value(value) => value,
+            Symbol::Held(cell) => cell.get(),
+            Symbol::Indirect(frame, at) => self.slot(frame, at),
+        })
+    }
+
+    /// `zend_hash_find` in a symbol table for a fetch by name that
+    /// writes, php's `zval *` into the table that the `VAR` holds as an
+    /// `IS_INDIRECT`: an attached name is its CV's slot, and a bucket
+    /// that holds its value in the table is moved into a place of its
+    /// own first ([`Symbol::Held`]), where php's bucket already is one;
+    /// with `add`, a name the table has not is laid down holding `null`
+    /// (`zend_hash_add_new`). `None` where the name is not there and
+    /// `add` is not asked.
+    pub(crate) fn symbol_place(
+        &mut self,
+        table: TableId,
+        name: &[u8],
+        add: bool,
+    ) -> Result<Option<php_heap::ZvalRef>, Thrown> {
+        let Some(entries) = self.table_mut(table) else {
+            return Ok(None);
+        };
+        let at = match entries.iter().position(|(key, _)| key == name) {
+            Some(at) => at,
+            None if add => {
+                entries.push((name.to_vec(), Symbol::Value(Value::null())));
+                entries.len() - 1
+            }
+            None => return Ok(None),
+        };
+        let symbol = entries[at].1;
+        let cell = match symbol {
+            Symbol::Indirect(frame, slot) => return Ok(self.slot_ptr(frame, slot)),
+            Symbol::Held(cell) => cell,
+            Symbol::Value(value) => {
+                let cell = self.reference(value)?;
+                if let Some(entries) = self.table_mut(table) {
+                    entries[at].1 = Symbol::Held(cell);
+                }
+                cell
+            }
+        };
+        Ok(Some(cell.heap().val_ref()))
     }
 
     /// `shutdown_destructors` (`Z/Zend/zend_execute_API.c:251`), the
@@ -7165,13 +7792,16 @@ impl Request {
             while at > 0 && !self.marked_destructed {
                 at -= 1;
                 let alone = self.globals().get(at).is_some_and(|(_, symbol)| {
-                    matches!(symbol, Symbol::Value(value) if value.as_object().is_some() && value.refcount() == 1)
+                    let value = match symbol {
+                        Symbol::Value(value) => *value,
+                        Symbol::Held(cell) => cell.get(),
+                        Symbol::Indirect(..) => return false,
+                    };
+                    value.as_object().is_some() && value.refcount() == 1
                 });
                 if alone {
                     let (_, symbol) = self.globals().remove(at);
-                    if let Symbol::Value(value) = symbol {
-                        self.release(value);
-                    }
+                    self.release_symbol(symbol);
                 }
             }
             if symbols == self.globals().len() || self.marked_destructed {
@@ -7197,9 +7827,7 @@ impl Request {
     /// marked every object, so this frees and serves nothing.
     pub(crate) fn destroy_symbol_table(&mut self) {
         while let Some((_, symbol)) = self.globals().pop() {
-            if let Symbol::Value(value) = symbol {
-                self.release(value);
-            }
+            self.release_symbol(symbol);
         }
     }
 
@@ -7305,17 +7933,6 @@ impl Request {
         self.handlers_of(ClassId(o.class()))
     }
 
-    /// `zend_std_get_property_ptr_ptr` without the write: the declared
-    /// slot `name` sits in where the executed scope may reach it, and
-    /// none for a dynamic name or a property the scope may not see,
-    /// which the read and the write handlers take instead.
-    pub(crate) fn property_slot(&self, object: PhpObject, name: &[u8]) -> Option<u32> {
-        let class = object.class();
-        let placed = self.declared_slot(class, name)?;
-        self.may_access(placed.declaring, placed.visibility)
-            .then_some(placed.slot)
-    }
-
     /// `zend_std_has_property`: the declared slot where the scope may
     /// reach it and it holds a value, else the dynamic table's entry;
     /// then what `test` asks of the value: that it is there, that it is
@@ -7363,16 +7980,21 @@ impl Request {
         test: PropertyTest,
     ) -> Result<bool, Thrown> {
         let class = object.class();
+        let o = object.heap();
+        // php's `value`, the slot the placement found, which keeps a
+        // lazy object from initialising unless the slot itself waits.
+        let mut placed_slot = None;
         let value = match self.declared_slot(class, name) {
             Some(placed) => {
                 if self.may_access(placed.declaring, placed.visibility) {
-                    let z = object.heap().slot(placed.slot);
+                    placed_slot = Some(placed.slot);
+                    let z = o.slot(placed.slot);
                     (!z.is_undef()).then(|| Value::of_zval(z))
                 } else {
                     None
                 }
             }
-            None => self.object_prop(object.heap(), name),
+            None => self.object_prop(o, name),
         };
         if let Some(value) = value {
             let value = value.deref();
@@ -7382,13 +8004,37 @@ impl Request {
                 PropertyTest::NotEmpty => crate::api::coerce::truthy(self, &value),
             });
         }
-        let Some(issetter) = self
-            .magic_accessor(class, b"__isset")
-            .filter(|_| test != PropertyTest::Exists)
-        else {
+        // `lazy_init:`, which a slot that waits reaches past `__isset`
+        // and a name the placement found no slot for reaches where no
+        // accessor answers it.
+        let initialises = |req: &Request| match placed_slot {
+            Some(slot) => req.lazy_slot(o, slot),
+            None => o.laziness() != php_heap::Laziness::Eager,
+        };
+        if placed_slot.is_some_and(|slot| self.lazy_slot(o, slot)) {
+            return self.lazy_has(object, name, test);
+        }
+        // GH-21478: a proxy that forwards, asked from inside the
+        // instance's own `__isset` for this name, asks the instance.
+        if let Some(instance) = self.lazy_instance(o)
+            && self.guard_word(instance, name) & IN_ISSET != 0
+        {
+            return self.has_property(instance, name, test);
+        }
+        let issetter = self.magic_accessor(class, b"__isset");
+        if issetter.is_some() && test == PropertyTest::Exists {
+            return Ok(false);
+        }
+        let Some(issetter) = issetter else {
+            if initialises(self) {
+                return self.lazy_has(object, name, test);
+            }
             return Ok(false);
         };
         if self.guard_word(object, name) & IN_ISSET != 0 {
+            if initialises(self) {
+                return self.lazy_has(object, name, test);
+            }
             return Ok(false);
         }
         // php holds `IN_ISSET` across both calls, so the `__get` the
@@ -7431,6 +8077,48 @@ impl Request {
         }
         self.guard_drop(object, name, IN_ISSET);
         Ok(held)
+    }
+
+    /// `zend_std_has_property`'s `lazy_init:` arm: the object
+    /// initialised and asked again on what that answers, under
+    /// `IN_ISSET` there where its class has a `__isset`, so the accessor
+    /// is not served twice for one question.
+    ///
+    /// ```php
+    /// class C { public $a = 1; }
+    /// $r = new ReflectionClass('C');
+    /// $o = $r->newLazyGhost(function ($o) { echo "init o\n"; });
+    /// var_dump(isset($o->nope));
+    /// $p = $r->newLazyProxy(function () { echo "factory\n"; return new C; });
+    /// unset($p->a);
+    /// var_dump($p);
+    /// ```
+    /// ```expect
+    /// init o
+    /// bool(false)
+    /// factory
+    /// lazy proxy object(C)#4 (1) {
+    ///   ["instance"]=>
+    ///   object(C)#5 (0) {
+    ///   }
+    /// }
+    /// ```
+    fn lazy_has(
+        &mut self,
+        object: PhpObject,
+        name: &[u8],
+        test: PropertyTest,
+    ) -> Result<bool, Thrown> {
+        let instance = self.lazy_init(object)?;
+        if self.serves_accessor(instance.class(), b"__isset")
+            && self.guard_word(instance, name) & IN_ISSET == 0
+        {
+            self.guard_take(instance, name, IN_ISSET);
+            let held = self.has_property(instance, name, test);
+            self.guard_drop(instance, name, IN_ISSET);
+            return held;
+        }
+        self.has_property(instance, name, test)
     }
 
     /// `zend_std_unset_property`: a declared slot the scope may reach is
@@ -7487,14 +8175,46 @@ impl Request {
                 // holds a value, and a typed one nothing has written,
                 // are held to the set visibility here; an untyped slot
                 // an `unset` emptied is the `__unset`'s.
-                if !empty || placed.typed {
+                let waits = self.lazy_slot(o, placed.slot);
+                if !empty || placed.typed || waits {
+                    // `zend_readonly_property_unset_error`, ahead of the
+                    // set visibility. php raises it in the class's own
+                    // scope too, save in `__clone`, where the slot is
+                    // `IS_PROP_REINITABLE`, which this engine does not
+                    // keep; so it is raised here where the set visibility
+                    // would refuse the unset anyway.
+                    if placed.readonly
+                        && !empty
+                        && placed
+                            .set_visibility
+                            .is_some_and(|set| !self.has_set_access(placed.declaring, set))
+                    {
+                        let declaring = self.class_name(placed.declaring);
+                        let shown = String::from_utf8_lossy(name).into_owned();
+                        return Err(crate::api::raising::throw(
+                            self,
+                            "Error",
+                            &format!("Cannot unset readonly property {declaring}::${shown}"),
+                        ));
+                    }
                     if let Some(set) = placed.set_visibility
                         && !self.has_set_access(placed.declaring, set)
                     {
-                        return Err(self.set_inaccessible_property(class, set, name, "unset"));
+                        return Err(self.set_inaccessible_property(
+                            class,
+                            set,
+                            placed.readonly,
+                            name,
+                            "unset",
+                        ));
                     }
                     if !empty {
                         Heap::object_set_slot(&mut Hooks(self), o, placed.slot, Zval::UNDEF);
+                    } else if waits {
+                        // `IS_PROP_LAZY`: the object initialised and the
+                        // property unset on what that answers.
+                        let instance = self.lazy_init(object)?;
+                        return self.unset_property(instance, name);
                     }
                     return Ok(());
                 }
@@ -7514,16 +8234,35 @@ impl Request {
                 return Ok(());
             }
         }
-        let Some(unsetter) = unsetter else {
-            return Ok(());
-        };
-        if self.guard_word(object, name) & IN_UNSET == 0 {
-            let answered = self.call_accessor(object, unsetter, IN_UNSET, name, &[])?;
-            self.release(answered);
-            return Ok(());
+        // GH-21478: a proxy that forwards, unset from inside the
+        // instance's own `__unset` for this name, unsets the instance's.
+        if let Some(instance) = self.lazy_instance(o)
+            && self.guard_word(instance, name) & IN_UNSET != 0
+        {
+            return self.unset_property(instance, name);
         }
-        if wrong && let Some(placed) = self.declared_slot(class, name) {
-            return Err(self.inaccessible_property(class, placed.visibility, name));
+        if let Some(unsetter) = unsetter {
+            if self.guard_word(object, name) & IN_UNSET == 0 {
+                let answered = self.call_accessor(object, unsetter, IN_UNSET, name, &[])?;
+                self.release(answered);
+                return Ok(());
+            }
+            if wrong && let Some(placed) = self.declared_slot(class, name) {
+                return Err(self.inaccessible_property(class, placed.visibility, name));
+            }
+        }
+        // A lazy object with nothing that answered the name is
+        // initialised and the name unset on what that answers, under
+        // `IN_UNSET` there where the `__unset` guard stood here.
+        if o.laziness() != php_heap::Laziness::Eager {
+            let instance = self.lazy_init(object)?;
+            if unsetter.is_some() && self.guard_word(instance, name) & IN_UNSET == 0 {
+                self.guard_take(instance, name, IN_UNSET);
+                let unset = self.unset_property(instance, name);
+                self.guard_drop(instance, name, IN_UNSET);
+                return unset;
+            }
+            return self.unset_property(instance, name);
         }
         Ok(())
     }
@@ -7758,7 +8497,10 @@ impl Request {
     /// ```
     pub(crate) fn debug_info(&mut self, object: PhpObject) -> Result<Option<PhpArray>, Thrown> {
         if self.method_named(object.class(), b"__debuginfo").is_none() {
-            return Ok(None);
+            // `zend_lazy_object_debug_info`: a proxy that forwards shows
+            // its instance, and a lazy object that waits shows its
+            // members as they stand, neither initialised for it.
+            return self.lazy_debug_info(object);
         }
         let value = crate::api::call::call_method(self, &object, b"__debugInfo", &[])?;
         match value.as_array() {
@@ -7788,6 +8530,7 @@ impl Request {
             function,
             this: Some(object),
             scope: Some(object.class()),
+            called_scope: Some(object.class()),
             bound: Vec::new(),
             fake: true,
         })
@@ -7847,13 +8590,18 @@ impl Request {
         // `GC_ADDREF` on both for the walk, given up at `done`.
         self.addref(left);
         self.addref(right);
-        let order =
-            if x.properties().is_none() && y.properties().is_none() && !x.is_lazy() && !y.is_lazy()
-            {
-                self.compare_slots(x, y)
-            } else {
-                self.compare_tables(x, y)
-            };
+        let eager = |o: Obj| o.laziness() == php_heap::Laziness::Eager;
+        let order = if x.properties().is_none() && y.properties().is_none() && eager(x) && eager(y)
+        {
+            self.compare_slots(x, y)
+        } else {
+            // `zend_std_get_properties_ex` on each side, which
+            // initialises a lazy one first, the left before the right.
+            self.lazy_init(a).and_then(|a| {
+                let b = self.lazy_init(b)?;
+                self.compare_tables(a.heap(), b.heap())
+            })
+        };
         self.release(*left);
         self.release(*right);
         order.map(Some)
@@ -8292,6 +9040,27 @@ impl Request {
     /// its own frame and the innermost is only the same frame by luck.
     pub(crate) fn frame_strict_types(&self, frame: FrameRef) -> bool {
         self.vm.at(frame).is_some_and(crate::exec::strict_types_of)
+    }
+
+    /// `property_uses_strict_types()`
+    /// (`Z/Zend/zend_object_handlers.c:1022`): `ZEND_ACC_STRICT_TYPES` on
+    /// `EG(current_execute_data)`, the regime `zend_std_write_property`
+    /// holds a typed property to. While a native is being served above
+    /// the innermost frame, php's current frame is the native's own,
+    /// which carries no such bit, so the weak rule; otherwise the
+    /// innermost frame's own file, where the write a handler table makes
+    /// on an opcode's behalf stands.
+    pub(crate) fn property_strict_types(&self) -> bool {
+        let Some(innermost) = self.vm.innermost() else {
+            return false;
+        };
+        let floor = usize::try_from(innermost.calls_below).unwrap_or(usize::MAX);
+        let serving = self.vm.calls().get(floor..).is_some_and(|above| {
+            above
+                .iter()
+                .any(|call| call.stage == exec::CallStage::Serving)
+        });
+        !serving && crate::exec::strict_types_of(innermost)
     }
 
     /// `ZEND_ARG_USES_STRICT_TYPES()` (`Z/Zend/zend_compile.h:723`):
@@ -8904,31 +9673,62 @@ impl Request {
     /// top-level class implementing no interface, with no parent or one
     /// the table already held, is early bound and the compiler emitted
     /// no opline for it, so the request's table takes it here. Every
-    /// other class carries a `ZEND_DECLARE_CLASS` where it was written
-    /// and is bound as the program serves ([`Request::bind_class`]), so
-    /// the ones named by one of those oplines are passed over here. A
-    /// name already declared is `zend_class_redeclaration_error`,
+    /// other class carries a `ZEND_DECLARE_CLASS` where it was written,
+    /// in whichever op array of the unit that is, and is filed under its
+    /// runtime definition key ([`Unit::runtime_keys`]), so it is passed
+    /// over here and bound as the program serves ([`Request::bind_class`]).
+    /// A name already declared is `zend_class_redeclaration_error`,
     /// `E_COMPILE_ERROR` in php's two wordings, the site of the earlier
     /// declaration named when it was a user class, and the request ends
     /// before the frame is pushed; php runs nothing of a file whose
     /// class fails to bind.
+    ///
+    /// A class the main op array declares with `DECLARE_CLASS_DELAYED`
+    /// is tried again here, in its place among the others, as
+    /// `zend_accel_do_delayed_early_binding` tries it when opcache loads
+    /// a cached file: the compiler knows the engine's classes and the file's
+    /// own, and a parent an earlier file of the request declared is
+    /// what php's compiler, which sees the request's whole table, binds
+    /// early. So a class that extends one from an include before it
+    /// exists before its line runs:
+    ///
+    /// ```php
+    /// file_put_contents('child.php', '<?php var_dump(class_exists("C", false)); class C extends P {} class Q {}');
+    /// class P {}
+    /// include 'child.php';
+    /// echo implode(' ', array_slice(get_declared_classes(), -3)), "\n";
+    /// unlink('child.php');
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// P C Q
+    /// ```
     pub(crate) fn declare_classes(&mut self, unit: &Arc<Unit>) -> bool {
-        let at_run_time: Vec<Vec<u8>> = unit
+        let delayed: Vec<Vec<u8>> = unit
             .main
             .oplines
             .iter()
-            .filter(|op| op.opcode == Opcode::DeclareClass)
+            .filter(|op| op.opcode == Opcode::DeclareClassDelayed)
             .filter_map(|op| {
+                let key = usize::try_from(op.op1).ok()?.checked_add(1)?;
                 unit.main
                     .literals
-                    .get(usize::try_from(op.op1).ok()?)
-                    .and_then(|value| value.as_str())
-                    .map(|name| name.bytes().to_vec())
+                    .get(key)?
+                    .as_str()
+                    .map(|key| key.bytes().to_vec())
             })
             .collect();
         for (at, decl) in unit.classes.iter().enumerate() {
-            let lowered = decl.name.0.to_ascii_lowercase();
-            if at_run_time.contains(&lowered) {
+            let key = unit
+                .runtime_keys
+                .iter()
+                .find(|(_, class)| usize::try_from(*class).ok() == Some(at));
+            if let Some((key, _)) = key {
+                if delayed.iter().any(|delayed| **delayed == *key.0)
+                    && !self.bind_at_load(unit, at, decl)
+                {
+                    return false;
+                }
                 continue;
             }
             if let Some(existing) = self.class_named(&decl.name.0) {
@@ -8943,6 +9743,56 @@ impl Request {
             self.bind_declared(unit, at, None);
         }
         true
+    }
+
+    /// One entry of `zend_accel_do_delayed_early_binding`: the class at
+    /// `at` of `unit` bound now where its name is free and its parent,
+    /// if it names one, is already declared, looked up without
+    /// autoloading, then linked as the early bind links
+    /// ([`Request::link_declared`] under `early`), and recorded so its
+    /// opline passes over it. A link that cannot resolve yet leaves the
+    /// class to the opline; one that is refused ends the request before
+    /// the file runs, as php's compile-time early bind would. False when
+    /// the request ended.
+    fn bind_at_load(&mut self, unit: &Arc<Unit>, at: usize, decl: &ClassDecl) -> bool {
+        if self.class_named(&decl.name.0).is_some() {
+            return true;
+        }
+        if let Some(parent) = &decl.parent
+            && self.class_named(&parent.0).is_none()
+        {
+            return true;
+        }
+        match self.link_declared(unit, at, decl, true) {
+            Ok(true) => {
+                let at = u32::try_from(at).unwrap_or(u32::MAX);
+                self.bound_at_load.push((Arc::clone(unit), at));
+                true
+            }
+            Ok(false) => true,
+            Err(_) => false,
+        }
+    }
+
+    /// `ZEND_DECLARE_CLASS_DELAYED` (`Z/Zend/zend_vm_def.h:7968`):
+    /// nothing where the unit's load bound the class under the opline's
+    /// runtime definition key ([`Request::bind_at_load`]), and
+    /// [`Request::bind_class`] where it did not, the key still standing.
+    pub(crate) fn bind_delayed(&mut self, unit: &Arc<Unit>, key: &[u8]) -> Result<(), Thrown> {
+        let at = unit
+            .runtime_keys
+            .iter()
+            .find(|(filed, _)| *filed.0 == *key)
+            .map(|(_, at)| *at);
+        if let Some(bound) = self
+            .bound_at_load
+            .iter()
+            .position(|(held, class)| Arc::ptr_eq(held, unit) && Some(*class) == at)
+        {
+            self.bound_at_load.swap_remove(bound);
+            return Ok(());
+        }
+        self.bind_class(unit, key)
     }
 
     /// `zend_class_redeclaration_error`'s two wordings, which name the
@@ -9091,15 +9941,56 @@ impl Request {
         ))
     }
 
-    /// `zend_bind_class` at a `ZEND_DECLARE_CLASS`, `zend_do_link_class`
-    /// over the declaration the opline's lowered name finds in the unit:
-    /// the parent fetched first, then each trait, then each interface,
-    /// all of them before any is checked, which is the order php's
-    /// messages come in. A name nothing declares, once autoloading has
-    /// been asked, is php's `Error`, `Class "P" not found` for a parent,
-    /// `Trait "T" not found` for a trait and `Interface "I" not found`
-    /// for an interface, and a class used as a trait is refused as php's
+    /// `do_bind_class` at a `ZEND_DECLARE_CLASS`: the declaration the
+    /// unit files under the opline's runtime definition key
+    /// ([`Unit::runtime_keys`]), refused where its name is already
+    /// declared as `zend_class_redeclaration_error` refuses it, at
+    /// `E_COMPILE_ERROR` though the program is running, which is also
+    /// what the same opline running a second time meets; then
+    /// `zend_do_link_class`, the one link the early bind makes too
+    /// (`php_unit::link::link`), with the parent fetched first, then
+    /// each trait, then each interface, all of them before any is
+    /// checked, which is the order php's messages come in. A name
+    /// nothing declares, once autoloading has been asked, is php's
+    /// `Error`, `Class "P" not found` for a parent, `Trait "T" not
+    /// found` for a trait and `Interface "I" not found` for an
+    /// interface, and a class used as a trait is refused as php's
     /// `ZEND_FETCH_CLASS_TRAIT` refuses it.
+    ///
+    /// A class declared in a function body is bound each time the
+    /// function runs, and the second time is the redeclaration, at the
+    /// level `error_get_last()` reads as 64:
+    ///
+    /// ```php
+    /// register_shutdown_function(function () { var_dump(error_get_last()['type']); });
+    /// function f() {
+    ///     class G {}
+    ///     echo "declared\n";
+    /// }
+    /// f();
+    /// f();
+    /// ```
+    /// ```expect exit=255
+    /// declared
+    ///
+    /// Fatal error: Cannot redeclare class G (previously declared in %s:4) in %s on line 4
+    /// int(64)
+    /// ```
+    ///
+    /// A second top-level declaration of a name the file bound is not
+    /// bound early, and its opline raises the redeclaration where it
+    /// stands, after what ran before it:
+    ///
+    /// ```php
+    /// echo "a\n";
+    /// class A {}
+    /// class A {}
+    /// ```
+    /// ```expect exit=255
+    /// a
+    ///
+    /// Fatal error: Cannot redeclare class A (previously declared in %s:3) in %s on line 4
+    /// ```
     ///
     /// ```php
     /// class C { use Nope; }
@@ -9311,26 +10202,33 @@ impl Request {
     /// ```expect exit=255
     /// Fatal error: Interface J cannot implement previously implemented interface I in %s on line 3
     /// ```
-    pub(crate) fn bind_class(&mut self, unit: &Arc<Unit>, lowered: &[u8]) -> Result<(), Thrown> {
+    pub(crate) fn bind_class(&mut self, unit: &Arc<Unit>, key: &[u8]) -> Result<(), Thrown> {
         let Some(at) = unit
-            .classes
+            .runtime_keys
             .iter()
-            .position(|decl| decl.name.0.to_ascii_lowercase() == lowered)
+            .find(|(filed, _)| *filed.0 == *key)
+            .and_then(|(_, at)| usize::try_from(*at).ok())
         else {
             return Err(crate::api::raising::fatal(
                 self,
-                "InternalError: a DECLARE_CLASS names a class the unit does not declare",
+                "InternalError: a DECLARE_CLASS carries a key the unit files no class under",
             ));
         };
         let Some(decl) = unit.classes.get(at).cloned() else {
             return Err(crate::api::raising::fatal(
                 self,
-                "InternalError: a DECLARE_CLASS names a class the unit does not declare",
+                "InternalError: a DECLARE_CLASS carries a key the unit files no class under",
             ));
         };
+        // `zend_bind_class_in_slot`'s failed `zend_hash_set_bucket_key`,
+        // or `do_bind_class` finding its key gone because the opline ran
+        // before: `E_COMPILE_ERROR` at the site that runs it either way.
         if let Some(existing) = self.class_named(&decl.name.0) {
             let message = self.redeclaration(existing);
-            return Err(crate::api::raising::fatal(self, &message));
+            let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
+            let line = self.current_line();
+            self.end_in_compile_time(Level::CompileError, &message, &file, line);
+            return Err(Thrown::of(None));
         }
         if let Some(parent) = &decl.parent {
             self.fetch_to_link(parent, "Class")?;
@@ -9350,8 +10248,31 @@ impl Request {
         for interface in &decl.interfaces {
             self.fetch_to_link(interface, "Interface")?;
         }
+        self.link_declared(unit, at, &decl, false).map(|_| ())
+    }
+
+    /// `zend_do_link_class` over the class at `at` of `unit`, whose
+    /// parent, traits and interfaces the table already holds: the link
+    /// both the early bind and a `DECLARE_CLASS` make
+    /// (`php_unit::link::link`), its diagnostics raised at their sites,
+    /// a refusal the end of the request at its level, and the linked
+    /// class bound. A link that needs a class the table does not hold
+    /// yet is php's `INHERITANCE_UNRESOLVED`: under `early`, the answer
+    /// `zend_can_early_bind` gives before anything is raised or bound,
+    /// so the class is left for its opline and the answer is false;
+    /// otherwise the refusal it names.
+    fn link_declared(
+        &mut self,
+        unit: &Arc<Unit>,
+        at: usize,
+        decl: &ClassDecl,
+        early: bool,
+    ) -> Result<bool, Thrown> {
         let lookup = |name: &[u8]| self.held_class(name);
-        let linking = php_unit::link::link(&decl, &lookup);
+        let linking = php_unit::link::link(decl, &lookup);
+        if early && matches!(linking.outcome, php_unit::link::Linked::Unresolved(_)) {
+            return Ok(false);
+        }
         for raised in &linking.raised {
             crate::api::raising::raise_at(
                 self,
@@ -9385,7 +10306,7 @@ impl Request {
             ));
         };
         self.bind_declared(unit, at, linking.composed);
-        Ok(())
+        Ok(true)
     }
 
     /// `zend_use_of_deprecated_trait` (`Z/Zend/zend_execute.c:2012`), as
@@ -9892,6 +10813,79 @@ impl Request {
         }
     }
 
+    /// `zend_include_or_eval`'s `ZEND_EVAL` arm
+    /// (`Z/Zend/zend_execute.c:5354`): the string compiled as
+    /// `compile_string` compiles it, from after an open tag and ending in
+    /// `RETURN null` ([`SourceKind::Eval`]), under the name
+    /// `zend_make_compiled_string_description` gives it, the file and
+    /// line the `eval` stands at and `: eval()'d code`, which is what
+    /// `__FILE__` folds to inside it and what a diagnostic raised in it
+    /// names. The unit is this request's own, compiled into its memory
+    /// and never published ([`Shared::compile_for`]). An empty string is
+    /// `compile_string`'s `NULL` with nothing raised, which the handler
+    /// answers `false` for ([`Opened::Failed`]); a string the compiler
+    /// refuses is raised as an included file's refusal is, at the name
+    /// the unit would have carried.
+    ///
+    /// ```php
+    /// eval("echo __FILE__, ' ', __LINE__, \"\\n\";\necho \$nope;");
+    /// ```
+    /// ```expect
+    /// %s(2) : eval()'d code 1
+    ///
+    /// Warning: Undefined variable $nope in %s(2) : eval()'d code on line 2
+    /// ```
+    ///
+    /// A parse error in the string is the `ParseError` `zendparse`
+    /// throws, at the string's name and the line it stopped on, which
+    /// the caller may catch; one nothing catches ends the request as
+    /// php's `Parse error`. A refusal after the parse is the
+    /// `E_COMPILE_ERROR` that ends the request.
+    ///
+    /// ```php
+    /// try { eval("\n1 +;"); } catch (ParseError $e) { echo get_class($e), ": ", $e->getMessage(), " in ", $e->getFile(), ":", $e->getLine(), "\n"; }
+    /// eval('$a = ;');
+    /// ```
+    /// ```expect exit=255
+    /// ParseError: syntax error, unexpected token ";" in %s(2) : eval()'d code:2
+    ///
+    /// Parse error: syntax error, unexpected token ";" in %s(3) : eval()'d code on line 1
+    /// ```
+    ///
+    /// ```php
+    /// eval('break;');
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: 'break' not in the 'loop' or 'switch' context in %s(2) : eval()'d code on line 1
+    /// ```
+    ///
+    /// The unit lives as long as what holds it: the frame while the
+    /// string runs, and after it the functions, classes and closures
+    /// the string declared, which the request keeps as it keeps a file's.
+    ///
+    /// ```php
+    /// $f = eval('function g() { return "g"; } class K { const C = "k"; } return fn() => "closure";');
+    /// var_dump(g(), K::C, $f(), function_exists('g'));
+    /// ```
+    /// ```expect
+    /// string(1) "g"
+    /// string(1) "k"
+    /// string(7) "closure"
+    /// bool(true)
+    /// ```
+    pub(crate) fn eval_string(&mut self, code: &[u8]) -> Result<Opened, Thrown> {
+        if code.is_empty() {
+            return Ok(Opened::Failed);
+        }
+        let mut name = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
+        name.extend_from_slice(format!("({}) : eval()'d code", self.current_line()).as_bytes());
+        let shared = Arc::clone(&self.shared);
+        match shared.compile_for(self, code, &name, SourceKind::Eval) {
+            Ok(unit) => Ok(Opened::Unit(unit)),
+            Err(refused) => Err(self.refused_include(&refused, &name)),
+        }
+    }
+
     /// `php_resolve_path` (`Z/main/fopen_wrappers.c:500`) over the ini's
     /// `include_path`: a path that begins `./` or `../`, or is absolute,
     /// or is asked with no `include_path` at all, is `tsrm_realpath`
@@ -10383,6 +11377,7 @@ impl Request {
             .find(|(key, _)| key == name)
             .map(|(_, symbol)| match symbol {
                 Symbol::Value(value) => Ok(*value),
+                Symbol::Held(cell) => Ok(cell.get()),
                 Symbol::Indirect(frame, at) => Err((*frame, *at)),
             })?;
         let value = match symbol {
@@ -10411,7 +11406,7 @@ impl Request {
                 .find(|(key, _)| key == name)
                 .and_then(|(_, symbol)| match symbol {
                     Symbol::Indirect(frame, at) => Some((*frame, *at)),
-                    Symbol::Value(_) => None,
+                    Symbol::Value(_) | Symbol::Held(_) => None,
                 })
         });
         match indirect {
@@ -10598,6 +11593,7 @@ impl Request {
         for (name, symbol) in entries {
             let value = match symbol {
                 Symbol::Value(value) => value,
+                Symbol::Held(cell) => cell.get(),
                 Symbol::Indirect(frame, slot) => self.slot(frame, slot),
             };
             if value.tag() == TypeTag::Undef {
@@ -10794,7 +11790,7 @@ impl Request {
         rows.extend(
             self.constants
                 .iter()
-                .map(|(module, name, value)| (*module, name.clone(), *value)),
+                .map(|(owner, name, value)| (owner.module(), name.clone(), *value)),
         );
         rows
     }
@@ -10820,7 +11816,7 @@ impl Request {
         let constants: Vec<(Vec<u8>, Value)> = self
             .constants
             .iter()
-            .filter(|(module, _, _)| module.is_none())
+            .filter(|(owner, _, _)| matches!(owner, ConstantOwner::User(_)))
             .map(|(_, name, value)| (name.clone(), *value))
             .collect();
         for (name, value) in constants {
@@ -10831,13 +11827,46 @@ impl Request {
         Ok(array)
     }
 
-    /// `define()`: `false` when the constant exists.
+    /// `define()`: `false` when the constant exists. The row keeps the
+    /// file executing when it was written, `zend_register_constant`'s
+    /// `filename`.
     pub fn define_constant(&mut self, name: &[u8], value: Value) -> Result<bool, Thrown> {
         if self.constant_named(name).is_some() {
             return Ok(false);
         }
-        self.constants.push((None, name.to_vec(), value));
+        // `zend_get_executed_filename_ex`: the innermost frame's file,
+        // none where nothing is executing.
+        let file = self
+            .innermost_frame()
+            .and_then(|state| exec::body_of(&state.unit, state.body))
+            .map(|code| code.filename.0.clone());
+        let owner = ConstantOwner::User(file);
+        self.constants.push((owner, name.to_vec(), value));
         Ok(true)
+    }
+
+    /// `zend_constant.filename`: the file a constant the program
+    /// defined was defined in, and none for one an extension or the
+    /// engine registered, php's `NULL` for a persistent constant.
+    ///
+    /// ```php
+    /// define('D', 1); const C = 2;
+    /// var_dump((new ReflectionConstant('D'))->getFileName() === __FILE__, (new ReflectionConstant('C'))->getFileName() === __FILE__, (new ReflectionConstant('PHP_VERSION'))->getFileName());
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// ```
+    #[must_use]
+    pub fn constant_file(&self, name: &[u8]) -> Option<&[u8]> {
+        self.constants
+            .iter()
+            .find(|(_, n, _)| n.as_slice() == name)
+            .and_then(|(owner, _, _)| match owner {
+                ConstantOwner::User(file) => file.as_deref(),
+                ConstantOwner::Module(_) => None,
+            })
     }
 
     /// `zend_register_constant` at request start for a constant the
@@ -10847,7 +11876,8 @@ impl Request {
     /// `Core`'s group and before what the program defines. The value's
     /// one owner is the table's.
     pub(crate) fn register_host_constant(&mut self, name: &'static [u8], value: Value) {
-        self.constants.push((Some("Core"), name.to_vec(), value));
+        self.constants
+            .push((ConstantOwner::Module("Core"), name.to_vec(), value));
     }
 
     /// The fd the host handed under one of its standard streams
@@ -11133,6 +12163,32 @@ impl Request {
         self.extension_of(extension)
             .map(|e| e.dependencies.clone())
             .unwrap_or_default()
+    }
+
+    /// The ini entries an extension declared, in the order it declared
+    /// them, which is where `zend_register_ini_entries` put them in
+    /// `EG(ini_directives)`: each with the value in force, the request's
+    /// `ini_set` over the engine's startup value, and the startup value
+    /// again as `original` where the request changed it.
+    #[must_use]
+    pub fn extension_ini(&self, extension: ExtensionId) -> Vec<IniEntry> {
+        let Some(module) = self.extension_of(extension) else {
+            return Vec::new();
+        };
+        module
+            .ini
+            .iter()
+            .map(|decl| {
+                let name = decl.name.0.as_ref();
+                let startup = self.shared.ini_default(name).unwrap_or(&decl.default);
+                let changed = self.ini.iter().find(|(n, _)| n.as_slice() == name);
+                IniEntry {
+                    decl: decl.clone(),
+                    value: changed.map_or(startup, |(_, v)| v.as_slice()).into(),
+                    original: changed.map(|_| startup.into()),
+                }
+            })
+            .collect()
     }
 
     /// `php_info_print_module` as the CLI prints it, `phpinfo_as_text`
@@ -12589,6 +13645,9 @@ impl HeapHooks for Hooks<'_> {
         table.get_gc(self.0, PhpObject::of(obj), &mut |value| {
             visit(value.to_zval());
         });
+        // `zend_lazy_object_get_gc`: the initializer a lazy object waits
+        // for, or the instance a proxy forwards to.
+        self.0.lazy_gc(obj, &mut |value| visit(value.to_zval()));
     }
 
     /// `list_dtor_ex`: the type's destructor as registered, handed the
@@ -12616,6 +13675,12 @@ impl HeapHooks for Hooks<'_> {
     /// before its members go (`crate::weakrefs::notify`).
     fn weakrefs_notify(&mut self, obj: Obj) {
         crate::weakrefs::notify(self.0, obj);
+    }
+
+    /// `zend_lazy_object_del_info` as a lazy object is freed
+    /// ([`Request::lazy_forget`]).
+    fn forget_lazy(&mut self, obj: Obj) {
+        self.0.lazy_forget(obj);
     }
 }
 

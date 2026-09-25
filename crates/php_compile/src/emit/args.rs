@@ -34,8 +34,9 @@ use super::{Emit, Fetch, Over, SimpleVar, walk};
 use crate::CompileError;
 
 /// One argument at a call site, php's child of a `ZEND_AST_ARG_LIST`:
-/// a plain expression, or one written `name: value`
-/// (`ZEND_AST_NAMED_ARG`); or one the compiler adds to the list itself,
+/// a plain expression, one written `name: value`
+/// (`ZEND_AST_NAMED_ARG`), or one written `...value`
+/// (`ZEND_AST_UNPACK`); or one the compiler adds to the list itself,
 /// a constant written nowhere, at its name where it has one, which is
 /// the description `zend_compile_assert` hands `assert()`
 /// (`zend_ast_create_zval_from_str`).
@@ -43,6 +44,7 @@ use crate::CompileError;
 pub(super) enum Arg {
     Positional(tree::Expr),
     Named(Box<[u8]>, tree::Expr),
+    Unpack(tree::Expr),
     Made(Option<Box<[u8]>>, Zval),
 }
 
@@ -65,15 +67,15 @@ impl Args {
     }
 
     /// `!zend_args_contain_unpack_or_named`: the arguments as plain
-    /// expressions where none is named, which is all a special
-    /// function, a frameless call and a constant fold read; none where
-    /// one is.
+    /// expressions where none is named or unpacked, which is all a
+    /// special function, a frameless call and a constant fold read;
+    /// none where one is.
     pub(super) fn positional(&self) -> Option<Vec<tree::Expr>> {
         self.list
             .iter()
             .map(|arg| match arg {
                 Arg::Positional(value) => Some(*value),
-                Arg::Named(..) | Arg::Made(..) => None,
+                Arg::Named(..) | Arg::Unpack(_) | Arg::Made(..) => None,
             })
             .collect()
     }
@@ -162,16 +164,22 @@ enum ArgAt {
 
 /// One argument as [`Plan`] placed it: where it goes, and the number of
 /// the parameter it fills where the table has the callee and knows it,
-/// php's `arg_num` other than `(uint32_t) -1`; or the positional
-/// argument after a named one, php's compile error, raised where the
-/// compiler reaches it.
+/// php's `arg_num` other than `(uint32_t) -1`; an unpacked one, which
+/// the engine places element by element after the `count` placed
+/// before it (`SEND_UNPACK`); or php's compile error for an argument
+/// the list may not have where it stands, raised where the compiler
+/// reaches it.
 enum Placed {
     Send {
         value: Sent,
         at: ArgAt,
         number: Option<u32>,
     },
-    PositionalAfterNamed,
+    Unpack {
+        value: tree::Expr,
+        count: u32,
+    },
+    Refused(&'static str),
 }
 
 /// What a placed argument sends: an expression the list holds, or the
@@ -207,14 +215,42 @@ impl Plan {
             extra_named: false,
         };
         let mut uses_named = false;
+        // `fbc = NULL` once an argument is unpacked: what follows is sent
+        // for a callee nothing is known of.
+        let mut callee = callee;
+        let mut uses_unpack = false;
         for argument in &arguments.list {
             let (name, value) = match argument {
+                Arg::Unpack(value) => {
+                    let placed = if uses_named {
+                        Placed::Refused("Cannot use argument unpacking after named arguments")
+                    } else {
+                        // "Unpack may contain named arguments."
+                        plan.may_have_undef = true;
+                        if callee.is_none_or(|callee| callee.variadic.is_some()) {
+                            plan.extra_named = true;
+                        }
+                        uses_unpack = true;
+                        callee = None;
+                        Placed::Unpack {
+                            value: *value,
+                            count: plan.count,
+                        }
+                    };
+                    plan.placed.push(placed);
+                    continue;
+                }
                 Arg::Positional(value) => (None, Sent::Written(*value)),
                 Arg::Named(name, value) => (Some(name), Sent::Written(*value)),
                 Arg::Made(name, value) => (name.as_ref(), Sent::Made(*value)),
             };
             let placed = match name {
-                None if uses_named => Placed::PositionalAfterNamed,
+                None if uses_unpack => {
+                    Placed::Refused("Cannot use positional argument after argument unpacking")
+                }
+                None if uses_named => {
+                    Placed::Refused("Cannot use positional argument after named argument")
+                }
                 None => {
                     plan.count += 1;
                     Placed::Send {
@@ -255,9 +291,10 @@ impl Plan {
 }
 
 impl Emit<'_> {
-    /// The arguments of a call as written. An unpacked argument and the
-    /// `...` of a first-class callable are refused as not read yet, and
-    /// an unpacked one after a named one is php's compile error.
+    /// The arguments of a call as written; the `...` of a first-class
+    /// callable is refused as not read yet. An unpacked argument after a
+    /// named one is php's compile error, and so is a positional one after
+    /// an unpacked one, each raised where the compiler reaches it:
     ///
     /// ```php
     /// function f(...$a) {}
@@ -283,12 +320,11 @@ impl Emit<'_> {
                     };
                     list.push(Arg::Named(self.text(named.name).into(), value));
                 }
-                tree::Arg::SpreadArg(_) => {
-                    if list.iter().any(|arg| matches!(arg, Arg::Named(..))) {
-                        return Err(self
-                            .compile_error("Cannot use argument unpacking after named arguments"));
-                    }
-                    return Err(walk::unread(line, "an unpacked argument"));
+                tree::Arg::SpreadArg(spread) => {
+                    let Some(value) = self.parsed.tree[*spread].value else {
+                        return Err(walk::unread(line, "an unpacked argument"));
+                    };
+                    list.push(Arg::Unpack(value));
                 }
                 tree::Arg::VariadicPlaceholder(_) => {
                     return Err(walk::unread(line, "a first-class callable"));
@@ -370,11 +406,8 @@ impl Emit<'_> {
                     let operand = self.operand(super::Where::Constant(*value));
                     self.send(opcode, operand, at)?;
                 }
-                Placed::PositionalAfterNamed => {
-                    return Err(
-                        self.compile_error("Cannot use positional argument after named argument")
-                    );
-                }
+                Placed::Unpack { value, count } => self.send_unpack(*value, *count)?,
+                Placed::Refused(message) => return Err(self.compile_error(*message)),
             }
         }
         if plan.may_have_undef {
@@ -593,8 +626,31 @@ impl Emit<'_> {
     /// variable's CV, `$this`, or a dimension, a property or a class's
     /// property, which are fetched; none for anything else. A variable
     /// named as the program serves is not read here, and is sent as the value it
-    /// reads.
+    /// reads, and so is a chain a `?->` stands in, php's
+    /// `zend_is_variable(arg) && !zend_ast_is_short_circuited(arg)`.
+    ///
+    /// ```php
+    /// function v($x) { var_dump($x); }
+    /// $o = null;
+    /// v($o?->p);
+    /// u($o?->p['k']);
+    /// $o = new stdClass;
+    /// $o->p = ['k' => 'v'];
+    /// u($o?->p['k']);
+    /// try { r($o?->p); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// function u($x) { var_dump($x); }
+    /// function r(&$x) {}
+    /// ```
+    /// ```expect
+    /// NULL
+    /// NULL
+    /// string(1) "v"
+    /// r(): Argument #1 ($x) could not be passed by reference
+    /// ```
     fn variable_of(&mut self, value: tree::Expr) -> Result<Option<Variable>, CompileError> {
+        if self.is_short_circuited(value) {
+            return Ok(None);
+        }
         Ok(match value {
             tree::Expr::SimpleVarExpr(id) => Some(match self.simple_var_of(id, self.line)? {
                 SimpleVar::Cv(name) => Variable::Cv(self.lookup_cv(&name)),
@@ -608,6 +664,25 @@ impl Emit<'_> {
             }
             _ => None,
         })
+    }
+
+    /// `zend_compile_args`' unpack arm: the value compiled, then
+    /// `SEND_UNPACK` over it with the number of arguments placed before
+    /// it in `op2`, which the engine places the elements after
+    /// (`ZEND_CALL_NUM_ARGS`), and the frame slot of the last of them in
+    /// `result`, which php writes and never reads.
+    fn send_unpack(&mut self, value: tree::Expr, count: u32) -> Result<(), CompileError> {
+        let value = self.expr(value)?;
+        let (op1_type, op1) = self.operand(value);
+        self.push(Opline {
+            opcode: Opcode::SendUnpack,
+            op1_type,
+            op1,
+            op2: count,
+            out: count.saturating_sub(1),
+            ..Opline::default()
+        });
+        Ok(())
     }
 
     /// The `SEND_*` itself over `operand`, at where the plan put it.

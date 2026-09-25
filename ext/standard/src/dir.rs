@@ -33,7 +33,7 @@ use crate::virtual_cwd::{Resolve, virtual_file_ex};
 use crate::zpp::optional_long;
 use crate::{State, argument_count_between, constant, ffi};
 
-mod glob;
+pub(crate) mod glob;
 
 /// `PHP_SCANDIR_SORT_*`, `scandir`'s `$sorting_order`.
 const SCANDIR_SORT_ASCENDING: i64 = 0;
@@ -213,6 +213,7 @@ pub(crate) fn directory_class() -> (
         is_instance: true,
         is_readonly: true,
         is_final: false,
+        is_promoted: false,
         ty: Some(ty),
         default: None,
         attributes: Vec::new(),

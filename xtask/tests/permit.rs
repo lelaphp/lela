@@ -479,6 +479,86 @@ fn a_worktree_named_by_a_branch_with_a_slash_is_a_checkout_of_its_own() {
     std::fs::remove_dir_all(&track).unwrap();
 }
 
+/// A worktree laid down beside the checkout, where `worktree add` lays
+/// one (revision 56), is a checkout of the repository outside the root:
+/// a file in it is judged against that worktree's manifest, and is
+/// neither outside every workspace nor read against the checkout's. Git's
+/// own `.git` says which repository a checkout is of, so a clone laid
+/// beside it with a manifest of its own is another repository's, and its
+/// files stay outside the workspace as before.
+#[test]
+fn a_file_in_a_worktree_beside_the_checkout_is_judged_against_that_worktree() {
+    let tree = Tree::new("permit-beside").unwrap();
+    let root = tree.join("repo");
+    scratch_workspace(workspace(), &root).unwrap();
+    let beside = tree.join("repo-worktrees/t-x/beside");
+    sh(
+        &root,
+        &[
+            "git",
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "t-x/beside",
+            beside.to_str().unwrap(),
+        ],
+    );
+    let marker = "edited by a person, says the worktree's manifest";
+    let manifest = std::fs::read_to_string(beside.join("seams.toml")).unwrap();
+    let manifest = manifest.replacen("are edited by a person.", &format!("are {marker}."), 1);
+    assert!(
+        manifest.contains(marker),
+        "the harness.self text is rewritten"
+    );
+    std::fs::write(beside.join("seams.toml"), manifest).unwrap();
+
+    let edit = |file: &Path| {
+        Call::parse(
+            &serde_json::json!({"tool_name": "Edit", "cwd": root.to_str().unwrap(),
+                "tool_input": {"file_path": file.to_str().unwrap(),
+                    "old_string": "a", "new_string": "b"}})
+            .to_string(),
+        )
+        .unwrap()
+    };
+    let call = edit(&beside.join("oracle.toml"));
+    let judged_in = call.workspace(&root);
+    assert_eq!(judged_in, beside, "the worktree beside is the workspace");
+    assert_eq!(call.path(&judged_in).unwrap(), Path::new("oracle.toml"));
+    let judged = judge(&Manifest::load(&judged_in).unwrap(), &judged_in, &call).unwrap();
+    let denial = judged
+        .denial()
+        .expect("the pin is a person's in the worktree too");
+    assert_eq!(denial.rule, "harness.self");
+    assert!(denial.reason().contains(marker), "{}", denial.reason());
+
+    // A Bash call is placed by its cwd, there as under the root.
+    let shell = Call::parse(
+        &serde_json::json!({"tool_name": "Bash", "cwd": beside.to_str().unwrap(),
+            "tool_input": {"command": "cargo test -p xtask"}})
+        .to_string(),
+    )
+    .unwrap();
+    assert_eq!(shell.workspace(&root), beside);
+
+    // A clone beside is another repository: its files are no workspace's.
+    let clone = tree.join("repo-t-y");
+    sh(
+        &tree,
+        &[
+            "git",
+            "clone",
+            "-q",
+            root.to_str().unwrap(),
+            clone.to_str().unwrap(),
+        ],
+    );
+    let call = edit(&clone.join("oracle.toml"));
+    assert_eq!(call.workspace(&root), root);
+    assert_eq!(call.path(&root), None);
+}
+
 /// The unsafe attribute written into a file of the `unsafe.homes` fixture.
 fn edit_of(file: &Path) -> Call {
     Call::parse(

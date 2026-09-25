@@ -21,8 +21,8 @@
 //! program sees is the same.
 
 use php_unit::decl::{
-    ClassDecl, ClassFlags, ClassKind, EnumBacking, FunctionDecl, MethodDecl, Name, Parameter, Type,
-    Visibility,
+    ClassDecl, ClassFlags, ClassKind, EnumBacking, FunctionDecl, MethodDecl, Name, Parameter,
+    ParameterDefault, Type, Visibility,
 };
 
 use crate::api::abi::{Entry, NativeClassDecl, ObjectHandlers};
@@ -97,8 +97,9 @@ pub(crate) fn classes() -> Vec<NativeClassDecl> {
         ty: Some(Type::String),
         by_ref: false,
         prefer_ref: false,
+        promoted: false,
         variadic: false,
-        default: None,
+        default: ParameterDefault::None,
         attributes: Vec::new(),
     };
     [

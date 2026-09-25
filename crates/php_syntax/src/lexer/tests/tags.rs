@@ -254,3 +254,37 @@ fn close_tag_inside_braces_still_closes() {
         ],
     );
 }
+
+/// `compile_string`'s position for `eval`: the first byte is code, a
+/// `<?php` there is no open tag but the `<` and `?` php's scanner reads
+/// in code, and `?>` leaves for inline HTML as it does in a file.
+#[test]
+fn after_the_open_tag_the_first_byte_is_code() {
+    let code = LexOptions {
+        position: Position::AfterOpenTag,
+        ..LexOptions::default()
+    };
+    check_opts(
+        "$a = 1; ?>h<?php }",
+        &code,
+        &[
+            (VARIABLE, "$a"),
+            (WHITESPACE, " "),
+            (EQ, "="),
+            (WHITESPACE, " "),
+            (INT, "1"),
+            (SEMICOLON, ";"),
+            (WHITESPACE, " "),
+            (CLOSE_TAG, "?>"),
+            (INLINE_HTML, "h"),
+            (OPEN_TAG, "<?php "),
+            (R_CURLY, "}"),
+        ],
+    );
+    check_opts(
+        "\n\necho",
+        &code,
+        &[(WHITESPACE, "\n\n"), (ECHO_KW, "echo")],
+    );
+    check("echo", &[(INLINE_HTML, "echo")]);
+}

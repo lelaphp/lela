@@ -1,16 +1,21 @@
-//! The classes of `php_dom.stub.php`'s legacy namespace as declarations,
-//! read off the stub's own text, so the declaration model is php's and
-//! not a second spelling of it: `class`, `final class` and `interface`
-//! headers with `extends` and `implements`, a leading `\` on a name
-//! dropped; `public const int NAME = 0x01;`; a property with its type and
+//! The classes of `php_dom.stub.php` as declarations, read off the stub's
+//! own text, so the declaration model is php's and not a second spelling
+//! of it: `class`, `final class`, `abstract class`, `readonly final
+//! class`, `interface` and `enum Name: string` headers with `extends` and
+//! `implements`, inside a `namespace Name { ... }` block that qualifies
+//! every name not written with a leading `\`; `public const int NAME =
+//! 0x01;` and `case Name = "value";`; a property with its type and
 //! default; and `public function name(parameters): type {}` with its
-//! modifiers and the `/** @tentative-return-type */` docblock that sets
-//! the tentative bit. The grammar is `ext/pdo`'s reader's, with names
-//! written absolute and hexadecimal constants beside it.
+//! modifiers. Three docblock tags are read: `@tentative-return-type` sets
+//! the tentative bit, `@implementation-alias Class::method` names the
+//! entry a method shares, and `@strict-properties` on a class forbids
+//! dynamic properties. The grammar is `ext/pdo`'s reader's, with
+//! hexadecimal constants beside it.
 
 use php_ext::decl::{
     Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind, ConstExpr,
-    EnumBacking, FunctionDecl, MethodDecl, Name, Parameter, PropertyDecl, Type, Visibility,
+    DynamicProperties, EnumBacking, FunctionDecl, MethodDecl, Name, Parameter, ParameterDefault,
+    PropertyDecl, Type, Visibility,
 };
 
 use crate::Entry;
@@ -38,6 +43,7 @@ pub(super) fn classes(text: &str, entries: &[(&str, Entry)]) -> Vec<Declared> {
     let mut reader = Reader {
         bytes: text.as_bytes(),
         at: 0,
+        namespace: Vec::new(),
     };
     let mut out = Vec::new();
     while let Some(class) = reader.class(entries) {
@@ -59,15 +65,17 @@ pub(super) fn function(line: &str) -> FunctionDecl {
     let mut reader = Reader {
         bytes: line.as_bytes(),
         at: 0,
+        namespace: Vec::new(),
     };
     let name = reader.word();
     reader.signature(name)
 }
 
-/// The cursor over a stub's text.
+/// The cursor over a stub's text, and the namespace block it is in.
 struct Reader<'a> {
     bytes: &'a [u8],
     at: usize,
+    namespace: Vec<u8>,
 }
 
 /// What stands before a member: its modifiers, its attributes and
@@ -81,6 +89,8 @@ struct Modifiers {
     is_abstract: bool,
     is_final: bool,
     tentative: bool,
+    /// `@implementation-alias Class::method`.
+    alias: Option<Vec<u8>>,
     attributes: Vec<Attribute>,
 }
 
@@ -133,44 +143,104 @@ impl Reader<'_> {
         self.bytes.get(start..self.at).unwrap_or_default().to_vec()
     }
 
+    /// A class name as the stub writes it, qualified by the namespace
+    /// block unless written with a leading `\`.
+    fn class_name(&mut self) -> Vec<u8> {
+        let absolute = self.peek() == Some(b'\\');
+        let word = self.word();
+        self.qualify(word, absolute)
+    }
+
+    fn qualify(&self, word: Vec<u8>, absolute: bool) -> Vec<u8> {
+        if absolute || self.namespace.is_empty() || word.is_empty() {
+            return word;
+        }
+        [self.namespace.as_slice(), b"\\", word.as_slice()].concat()
+    }
+
     fn names(&mut self) -> Vec<Name> {
-        let mut names = vec![Name(self.word().into())];
+        let mut names = vec![Name(self.class_name().into())];
         while self.eat(b',') {
-            names.push(Name(self.word().into()));
+            names.push(Name(self.class_name().into()));
         }
         names
     }
 
-    /// One class, from its header to its closing brace.
-    fn class(&mut self, entries: &[(&str, Entry)]) -> Option<Declared> {
+    /// The tags of the docblock at the cursor, where one stands there.
+    fn docblock(&mut self) -> Option<Vec<u8>> {
+        if !self.eat_str(b"/**") {
+            return None;
+        }
+        let start = self.at;
+        while self.at < self.bytes.len() && !self.eat_str(b"*/") {
+            self.at += 1;
+        }
+        Some(self.bytes.get(start..self.at).unwrap_or_default().to_vec())
+    }
+
+    /// A class's header up to its opening brace, with the namespace block
+    /// it opens or closes on the way: the declaration, its body empty.
+    fn header(&mut self) -> Option<ClassDecl> {
         let mut flags = ClassFlags::default();
         let kind = loop {
+            if let Some(doc) = self.docblock() {
+                if contains(&doc, b"@strict-properties") {
+                    flags.dynamic_properties = DynamicProperties::Forbidden;
+                }
+                continue;
+            }
+            if self.eat(b'}') {
+                self.namespace.clear();
+                continue;
+            }
             match self.word().as_slice() {
+                b"namespace" => {
+                    self.namespace = self.word();
+                    self.eat(b'{');
+                }
                 b"abstract" => flags.is_abstract = true,
                 b"final" => flags.is_final = true,
+                b"readonly" => flags.is_readonly = true,
                 b"class" => break ClassKind::Class,
                 b"interface" => break ClassKind::Interface,
+                b"enum" => break ClassKind::Enum,
                 _ => return None,
             }
         };
-        let name = self.word();
+        let name = self.class_name();
         let mut parent = None;
         let mut interfaces = Vec::new();
+        let mut backing = EnumBacking::Pure;
+        if kind == ClassKind::Enum {
+            // `zend_register_internal_enum`: no dynamic property, and
+            // `UnitEnum`, or `BackedEnum`, which brings `UnitEnum` behind
+            // it, for a backed one.
+            flags.dynamic_properties = DynamicProperties::Forbidden;
+            if self.eat(b':') {
+                backing = match self.word().as_slice() {
+                    b"int" => EnumBacking::Int,
+                    _ => EnumBacking::String,
+                };
+                interfaces.push(Name(b"BackedEnum".as_slice().into()));
+            } else {
+                interfaces.push(Name(b"UnitEnum".as_slice().into()));
+            }
+        }
         loop {
             if self.eat_str(b"extends") {
                 if kind == ClassKind::Interface {
                     interfaces = self.names();
                 } else {
-                    parent = Some(Name(self.word().into()));
+                    parent = Some(Name(self.class_name().into()));
                 }
             } else if self.eat_str(b"implements") {
-                interfaces = self.names();
+                interfaces.extend(self.names());
             } else {
                 break;
             }
         }
         self.eat(b'{');
-        let mut decl = ClassDecl {
+        Some(ClassDecl {
             name: Name(name.clone().into()),
             kind,
             flags,
@@ -178,16 +248,23 @@ impl Reader<'_> {
             interfaces,
             traits: Vec::new(),
             adaptations: Vec::new(),
-            backing: EnumBacking::Pure,
+            backing,
             constants: Vec::new(),
-            properties: Vec::new(),
+            properties: enum_properties(kind, backing),
             methods: Vec::new(),
             attributes: Vec::new(),
             doc_comment: None,
             file: Name(Box::new([])),
             line: 0,
             end_line: 0,
-        };
+        })
+    }
+
+    /// One class, from its header to its closing brace.
+    fn class(&mut self, entries: &[(&str, Entry)]) -> Option<Declared> {
+        let mut decl = self.header()?;
+        let name = decl.name.0.to_vec();
+        let kind = decl.kind;
         let mut methods = Vec::new();
         while !self.eat(b'}') && self.at < self.bytes.len() {
             let modifiers = self.modifiers();
@@ -195,8 +272,13 @@ impl Reader<'_> {
                 decl.constants.push(self.constant(&modifiers));
                 continue;
             }
+            if self.eat_str(b"case ") {
+                decl.constants.push(self.case(&decl.name));
+                continue;
+            }
             if !self.eat_str(b"function") {
-                if let Some(property) = self.property(&modifiers) {
+                if let Some(mut property) = self.property(&modifiers) {
+                    property.is_readonly |= decl.flags.is_readonly;
                     decl.properties.push(property);
                 } else {
                     self.at += 1;
@@ -226,7 +308,14 @@ impl Reader<'_> {
                 continue;
             }
             let key = [name.as_slice(), b"::", method.as_slice()].concat();
-            if let Some((_, entry)) = entries.iter().find(|(k, _)| k.as_bytes() == key) {
+            let found = entries
+                .iter()
+                .find(|(k, _)| k.as_bytes() == key)
+                .or_else(|| {
+                    let alias = modifiers.alias.as_deref()?;
+                    entries.iter().find(|(k, _)| k.as_bytes() == alias)
+                });
+            if let Some((_, entry)) = found {
                 methods.push((method_decl, *entry));
             }
         }
@@ -237,18 +326,11 @@ impl Reader<'_> {
     fn modifiers(&mut self) -> Modifiers {
         let mut modifiers = Modifiers::default();
         loop {
-            if self.eat_str(b"/**") {
-                let start = self.at;
-                while self.at < self.bytes.len() && !self.eat_str(b"*/") {
-                    self.at += 1;
-                }
-                let doc = self.bytes.get(start..self.at).unwrap_or_default();
-                if doc
-                    .windows(b"@tentative-return-type".len())
-                    .any(|w| w == b"@tentative-return-type")
-                {
+            if let Some(doc) = self.docblock() {
+                if contains(&doc, b"@tentative-return-type") {
                     modifiers.tentative = true;
                 }
+                modifiers.alias = alias_of(&doc).or(modifiers.alias);
                 continue;
             }
             if self.eat_str(b"#[") {
@@ -338,6 +420,7 @@ impl Reader<'_> {
     }
 
     fn one_type(&mut self) -> Type {
+        let absolute = self.peek() == Some(b'\\');
         let word = self.word();
         match word.as_slice() {
             b"mixed" => Type::Mixed,
@@ -355,7 +438,31 @@ impl Reader<'_> {
             b"iterable" => Type::Iterable,
             b"callable" => Type::Callable,
             b"static" => Type::CalledClass,
-            _ => Type::Named(Name(word.into())),
+            _ => Type::Named(Name(self.qualify(word, absolute).into())),
+        }
+    }
+
+    /// `Name = "value";` after `case`, a backed enum's case.
+    fn case(&mut self, class: &Name) -> ClassConstDecl {
+        let case = self.word();
+        let value = if self.eat(b'=') {
+            self.operand()
+        } else {
+            ConstExpr::EnumCase {
+                class: class.clone(),
+                case: Name(case.clone().into()),
+            }
+        };
+        self.eat(b';');
+        ClassConstDecl {
+            name: Name(case.into()),
+            visibility: Visibility::Public,
+            is_final: false,
+            is_case: true,
+            ty: None,
+            value,
+            attributes: Vec::new(),
+            doc_comment: None,
         }
     }
 
@@ -397,6 +504,7 @@ impl Reader<'_> {
             is_instance: !modifiers.is_static,
             is_readonly: false,
             is_final: false,
+            is_promoted: false,
             default: default.or_else(|| ty.is_none().then_some(ConstExpr::Null)),
             ty,
             attributes: Vec::new(),
@@ -428,8 +536,9 @@ impl Reader<'_> {
             by_ref,
             // No dom stub marks a parameter `@prefer-ref`.
             prefer_ref: false,
+            promoted: false,
             variadic,
-            default,
+            default: default.map_or(ParameterDefault::None, ParameterDefault::Expr),
             attributes,
         })
     }
@@ -504,4 +613,51 @@ impl Reader<'_> {
             }
         }
     }
+}
+
+/// Whether `doc` holds `tag`.
+fn contains(doc: &[u8], tag: &[u8]) -> bool {
+    doc.windows(tag.len()).any(|w| w == tag)
+}
+
+/// The `Class::method` of an `@implementation-alias` tag.
+fn alias_of(doc: &[u8]) -> Option<Vec<u8>> {
+    const TAG: &[u8] = b"@implementation-alias";
+    let at = doc.windows(TAG.len()).position(|w| w == TAG)? + TAG.len();
+    let rest = doc.get(at..)?;
+    let start = rest.iter().position(|b| !b.is_ascii_whitespace())?;
+    let rest = rest.get(start..)?;
+    let end = rest
+        .iter()
+        .position(|b| b.is_ascii_whitespace() || *b == b'*')
+        .unwrap_or(rest.len());
+    rest.get(..end).map(<[u8]>::to_vec)
+}
+
+/// `zend_enum_register_props`: an enum's `name` and, backed, its `value`,
+/// both public and readonly.
+fn enum_properties(kind: ClassKind, backing: EnumBacking) -> Vec<PropertyDecl> {
+    if kind != ClassKind::Enum {
+        return Vec::new();
+    }
+    let property = |name: &[u8], ty: Type| PropertyDecl {
+        name: Name(name.into()),
+        visibility: Visibility::Public,
+        set_visibility: None,
+        is_instance: true,
+        is_readonly: true,
+        is_final: false,
+        is_promoted: false,
+        ty: Some(ty),
+        default: None,
+        attributes: Vec::new(),
+        doc_comment: None,
+    };
+    let mut out = vec![property(b"name", Type::String)];
+    match backing {
+        EnumBacking::Int => out.push(property(b"value", Type::Int)),
+        EnumBacking::String => out.push(property(b"value", Type::String)),
+        EnumBacking::Pure => {}
+    }
+    out
 }

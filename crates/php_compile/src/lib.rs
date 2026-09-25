@@ -54,6 +54,8 @@ use php_unit::{Diagnostic, Level, Unit};
 pub struct Options {
     /// The file name the unit and its errors carry.
     pub filename: Name,
+    /// Whether the source is a file or the string an `eval` hands over.
+    pub kind: SourceKind,
     /// The working directory of the request the unit compiles for,
     /// php's virtual one under ZTS (`VCWD_GETCWD`), which is what
     /// `__DIR__` folds to where `zend_dirname` over `filename` answers
@@ -122,6 +124,7 @@ impl Default for Options {
     fn default() -> Options {
         Options {
             filename: Name::default(),
+            kind: SourceKind::File,
             cwd: Vec::new(),
             strict_types: false,
             precision: 14,
@@ -133,6 +136,25 @@ impl Default for Options {
             stack: StackLimit::UNCHECKED,
         }
     }
+}
+
+/// What the source is, the `type` php's `zend_compile` is called with
+/// (`Z/Zend/zend_language_scanner.l:593`): what the scanner begins in
+/// and what the main op array's implicit final return answers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SourceKind {
+    /// `compile_file`'s `ZEND_USER_FUNCTION`: a file, which begins in
+    /// inline HTML and whose main op array ends in `RETURN int(1)`, the
+    /// value an `include` of it answers where it returns nothing.
+    #[default]
+    File,
+    /// `compile_string`'s `ZEND_EVAL_CODE` at
+    /// `ZEND_COMPILE_POSITION_AFTER_OPEN_TAG`, the string an `eval`
+    /// hands over (`Z/Zend/zend_execute.c:5354`): it begins in code, as
+    /// though an open tag stood before its first byte, and its main op
+    /// array ends in `RETURN null`, the value an `eval` of it answers
+    /// where it returns nothing.
+    Eval,
 }
 
 /// A compile-time fatal: php's message, at php's line, at the level
@@ -206,6 +228,10 @@ pub fn compile_source(
     let syntax = php_syntax::Options {
         lex: php_syntax::LexOptions {
             short_open_tag: options.short_open_tag,
+            position: match options.kind {
+                SourceKind::File => php_syntax::Position::AtOpenTag,
+                SourceKind::Eval => php_syntax::Position::AfterOpenTag,
+            },
         },
         ..php_syntax::Options::default()
     };
@@ -342,8 +368,12 @@ mod tests {
             ty: Some(ty),
             by_ref: false,
             prefer_ref: false,
+            promoted: false,
             variadic: false,
-            default,
+            default: default.map_or(
+                php_unit::decl::ParameterDefault::None,
+                php_unit::decl::ParameterDefault::Expr,
+            ),
             attributes: Vec::new(),
         };
         [
@@ -2269,6 +2299,51 @@ mod tests {
         );
     }
 
+    /// The oracle's dump of `eval` (#573), the fifth construct of
+    /// `zend_compile_include_or_eval`: one `INCLUDE_OR_EVAL (eval)` over
+    /// the string, into a `VAR` that `zend_do_free` marks unused where
+    /// nothing reads it, as it marks an `include`'s; the operand of the
+    /// second is the whole `$x . "b"`, so the `CONCAT` stands before it.
+    #[test]
+    fn eval_is_the_fifth_include_or_eval() {
+        assert_eq!(
+            dump_of(b"<?php $r = eval(\"return 1;\"); eval($x . \"b\");"),
+            main_dump(
+                5,
+                2,
+                4,
+                "0000 V2 = INCLUDE_OR_EVAL (eval) string(\"return 1;\")\n\
+                 0001 ASSIGN CV0($r) V2\n\
+                 0002 T4 = CONCAT CV1($x) string(\"b\")\n\
+                 0003 INCLUDE_OR_EVAL (eval) T4\n\
+                 0004 RETURN int(1)\n"
+            )
+        );
+    }
+
+    /// The string an `eval` hands over, compiled as `compile_string`
+    /// compiles it (#573): code from its first byte, where a file's is
+    /// inline HTML, and a main op array that ends in `RETURN null`,
+    /// where a file's ends in `RETURN int(1)`.
+    #[test]
+    fn an_eval_string_begins_in_code_and_returns_null() {
+        let options = Options {
+            kind: SourceKind::Eval,
+            ..bundled()
+        };
+        let mut strings = php_heap::Strings::new();
+        let unit = compile_source(b"echo 1; ?>x", &options, &mut strings).unwrap_or_default();
+        assert_eq!(
+            unit.dump(&[]),
+            main_dump(
+                3,
+                0,
+                0,
+                "0000 ECHO int(1)\n0001 ECHO string(\"x\")\n0002 RETURN null\n"
+            )
+        );
+    }
+
     /// The oracle's dump of `echo nope($a);` (#252), a name php's
     /// function table has not: `zend_compile_dynamic_call`'s
     /// `INIT_FCALL_BY_NAME` with the argument count and no used stack,
@@ -3354,9 +3429,12 @@ mod tests {
             line: 0,
             raised: Vec::new(),
         };
-        let error = refused(b"<?php\n$a = (eval('1;'));\n").unwrap_or_else(compiled);
+        let error = refused(b"<?php\n$a = (new class {});\n").unwrap_or_else(compiled);
         assert_eq!(error.level, Level::Parse);
-        assert_eq!(error.message, "an `eval` this compiler cannot read yet");
+        assert_eq!(
+            error.message,
+            "an anonymous class this compiler cannot read yet"
+        );
         assert_eq!(error.line, 2);
         let unclosed = refused(b"<?php\n$a = (1 + 2;\n").unwrap_or_else(compiled);
         assert_eq!(unclosed.message, "syntax error, unexpected token \";\"");
@@ -3364,20 +3442,16 @@ mod tests {
 
     /// `global $a, $b;` is `zend_compile_global_var`'s `BIND_GLOBAL` per
     /// variable, the CV in `op1` and its name in `op2`, where the
-    /// statement was refused as not read before; a name the program
-    /// computes still is.
+    /// statement was refused as not read before; a name written out
+    /// under `${…}` is the same CV.
     #[test]
     fn a_global_statement_binds_each_cv_by_name() {
         assert_eq!(
-            oplines_of(b"<?php global $a, $b; echo $a;"),
+            oplines_of(b"<?php global $a, ${'b'}; echo $a;"),
             "0000 BIND_GLOBAL CV0($a) string(\"a\")\n\
              0001 BIND_GLOBAL CV1($b) string(\"b\")\n\
              0002 ECHO CV0($a)\n\
              0003 RETURN int(1)\n"
-        );
-        assert_eq!(
-            refused_message(b"<?php global $$x;").as_deref(),
-            Some("a `global` of a variable named at run time this compiler cannot read yet")
         );
     }
 
@@ -4564,10 +4638,11 @@ mod tests {
     /// What stands beside a `C::$p` read and is not read yet is refused
     /// as such (#372): a compound assignment over what is no variable,
     /// the property the program names as it serves, `self`, `parent`
-    /// and `static` as the class, `C::$p()` whose method the local `$p`
-    /// names, and such a fetch in a constant expression, which php
-    /// refuses outright. `C::$p = &$o->q` was one of them until #611
-    /// made the source of a `= &` `zend_compile_var`'s.
+    /// and `static` as the class, and such a fetch in a constant
+    /// expression, which php refuses outright. `C::$p = &$o->q` was one
+    /// of them until #611 made the source of a `= &` `zend_compile_var`'s,
+    /// and `C::$p()`, whose method the local `$p` names, until it was
+    /// read as `INIT_STATIC_METHOD_CALL` over the CV.
     #[test]
     fn what_stands_beside_a_static_property_read_is_refused_as_not_yet_read() {
         let refused = |source: &[u8]| {
@@ -4592,10 +4667,7 @@ mod tests {
             refused(b"<?php C::${'p'};").as_deref(),
             Some("a static property named at run time this compiler cannot read yet")
         );
-        assert_eq!(
-            refused(b"<?php C::$p();").as_deref(),
-            Some("a static call whose method is named at run time this compiler cannot read yet")
-        );
+        assert_eq!(refused(b"<?php C::$p();").as_deref(), None);
         assert_eq!(refused(b"<?php echo self::$p;").as_deref(), None);
         assert_eq!(
             refused(b"<?php class D { const X = C::$p; }").as_deref(),
@@ -4818,10 +4890,10 @@ mod tests {
             refused(b"<?php\nclass M { public private $x; }"),
             compile_error("Multiple access type modifiers are not allowed", 2)
         );
-        let not_yet = |message: &str, line| Some((Level::Parse, message.to_string(), line));
         assert_eq!(
             refused(b"<?php\nclass M {}\nclass m {}"),
-            not_yet("a class declared twice this compiler cannot read yet", 3)
+            None,
+            "a second declaration of a name is the DECLARE_CLASS that refuses it as the program serves"
         );
         assert_eq!(
             refused(b"<?php\nclass M extends N {} class N {}"),
@@ -4839,11 +4911,18 @@ mod tests {
         );
         assert_eq!(
             refused(b"<?php\nclass M { abstract function f(); }"),
-            not_yet("a class member this compiler cannot read yet", 2)
+            compile_error(
+                "Class M declares abstract method f() and must therefore be declared abstract",
+                2
+            )
+        );
+        assert_eq!(
+            refused(b"<?php\nabstract class M { abstract function f(); }"),
+            None
         );
         assert_eq!(
             refused(b"<?php\nclass M { function f(): (A&B)|C {} }"),
-            not_yet("a DNF type this compiler cannot read yet", 2)
+            None
         );
         assert_eq!(
             refused(b"<?php\nclass M { function f(public int $p) {} }"),
@@ -4854,13 +4933,7 @@ mod tests {
             compile_error("Cannot redeclare M::F()", 2)
         );
         assert_eq!(refused(b"<?php\n#[A] #[B(1), C] class M {}"), None);
-        assert_eq!(
-            refused(b"<?php\n#[A(x: 1)] class M {}"),
-            not_yet(
-                "an attribute's named argument this compiler cannot read yet",
-                2
-            )
-        );
+        assert_eq!(refused(b"<?php\n#[A(x: 1)] class M {}"), None);
         assert_eq!(
             refused(b"<?php\n#[\\AllowDynamicProperties] class M {}"),
             None,
@@ -4870,17 +4943,12 @@ mod tests {
             refused(b"<?php\n#[\\AllowDynamicProperties]\ninterface I {}"),
             compile_error("Cannot apply #[\\AllowDynamicProperties] to interface I", 3)
         );
+        assert_eq!(refused(b"<?php\n#[A] function f() {}"), None);
+        assert_eq!(refused(b"<?php\nclass M { #[A] public $x; }"), None);
         assert_eq!(
-            refused(b"<?php\n#[A] function f() {}"),
-            not_yet(
-                "an attribute before this declaration this compiler cannot read yet",
-                2
-            )
-        );
-        assert_eq!(
-            refused(b"<?php\nclass M { #[A] public $x; }"),
-            not_yet(
-                "an attribute before a class member this compiler cannot read yet",
+            refused(b"<?php\nclass M { #[\\Override] public $x; }"),
+            compile_error(
+                "M::$x has #[\\Override] attribute, but no matching parent property exists",
                 2
             )
         );
@@ -4907,13 +4975,10 @@ mod tests {
             None,
             "a property group's type is read where a modifier stood before it"
         );
+        assert_eq!(refused(b"<?php\nclass M { public readonly int $x; }"), None);
         assert_eq!(
-            refused(b"<?php\nclass M { public readonly int $x; }"),
-            Some((
-                Level::Parse,
-                String::from("a property this compiler cannot read yet"),
-                2
-            ))
+            refused(b"<?php\nclass M { public readonly int $x = 1; }"),
+            compile_error("Readonly property M::$x cannot have default value", 2)
         );
         assert_eq!(
             refused(b"<?php\nclass M { private(set) protected(set) int $x; }"),
@@ -5208,7 +5273,7 @@ echo f(1), C::s(), $o->m(1), $o->p;
                 .0
                 .parameters
                 .iter()
-                .map(|p| p.default.clone())
+                .map(|p| p.default.expr().cloned())
                 .collect::<Vec<_>>(),
             vec![
                 Some(ConstExpr::Constant(Name(b"PHP_INT_MAX".as_slice().into()))),
@@ -5284,7 +5349,12 @@ class C {
         assert_eq!(
             f.parameters
                 .iter()
-                .map(|p| (p.ty.clone(), p.by_ref, p.variadic, p.default.is_some()))
+                .map(|p| (
+                    p.ty.clone(),
+                    p.by_ref,
+                    p.variadic,
+                    p.default.expr().is_some()
+                ))
                 .collect::<Vec<_>>(),
             vec![
                 (Some(Type::Int), false, false, false),
@@ -6381,6 +6451,35 @@ class C {
         );
     }
 
+    /// A member and a callee the program names, as the oracle's
+    /// `[regime.dump]` has them: the name's CV in `op2` of `FETCH_OBJ_R`,
+    /// `INIT_METHOD_CALL` and `INIT_STATIC_METHOD_CALL`, none of them
+    /// with a cache slot but the class's one, and a callee that is no
+    /// name, a parenthesised property among them, in `INIT_DYNAMIC_CALL`.
+    #[test]
+    fn a_member_and_a_callee_named_at_run_time_are_the_oracle_s_operands() {
+        assert_eq!(
+            dump_of(b"<?php echo $o->$p; $o->$m(); C::$m(); $f(); ($o->p)();"),
+            main_dump(
+                12,
+                4,
+                6,
+                "0000 T4 = FETCH_OBJ_R CV0($o) CV1($p)\n\
+                 0001 ECHO T4\n\
+                 0002 INIT_METHOD_CALL 0 CV0($o) CV2($m)\n\
+                 0003 DO_FCALL\n\
+                 0004 INIT_STATIC_METHOD_CALL 0 string(\"C\") CV2($m)\n\
+                 0005 DO_FCALL\n\
+                 0006 INIT_DYNAMIC_CALL 0 CV3($f)\n\
+                 0007 DO_FCALL\n\
+                 0008 T8 = FETCH_OBJ_R CV0($o) string(\"p\")\n\
+                 0009 INIT_DYNAMIC_CALL 0 T8\n\
+                 0010 DO_FCALL\n\
+                 0011 RETURN int(1)\n"
+            )
+        );
+    }
+
     /// What stands beside these four and is not read yet is refused as
     /// such.
     #[test]
@@ -6396,10 +6495,6 @@ class C {
             .map(|e| e.message)
         };
         assert_eq!(refused(b"<?php echo E::class;").as_deref(), None);
-        assert_eq!(
-            refused(b"<?php echo $o->$p;").as_deref(),
-            Some("a property named at run time this compiler cannot read yet")
-        );
         assert_eq!(refused(b"<?php f($o->p, name: $o->q);").as_deref(), None);
     }
 
@@ -6764,6 +6859,45 @@ class C {
              0008 RETURN int(1)\n\
              LIVE RANGES:\n\
              \x20    1: 0003 - 0006 (tmp/var)\n"
+        );
+    }
+
+    /// `zend_compile_array`'s `...` and `&` arms and `zend_compile_args`'
+    /// unpack arm against the oracle's dump: a `...` first is an
+    /// `INIT_ARRAY` with no operand and no count, the string key still
+    /// marks it `ZEND_ARRAY_NOT_PACKED`, a `&` element is the write fetch
+    /// and `ZEND_ARRAY_ELEMENT_REF`, and an argument after an unpacked
+    /// one is sent by name for a callee nothing is known of, under a
+    /// `CHECK_UNDEF_ARGS`. A constant array spread into a constant array
+    /// folds.
+    #[test]
+    fn a_spread_a_reference_element_and_an_unpacked_argument_are_emitted_as_php_emits_them() {
+        assert_eq!(
+            oplines_of(b"<?php $z = [...$x, 'k' => &$x[0], &$w]; f(1, ...$x, c: 2);"),
+            "0000 T3 = INIT_ARRAY 0 NEXT\n\
+             0001 T3 = ADD_ARRAY_UNPACK CV1($x)\n\
+             0002 V4 = FETCH_DIM_W CV1($x) int(0)\n\
+             0003 T3 = ADD_ARRAY_ELEMENT (ref) V4 string(\"k\")\n\
+             0004 T3 = ADD_ARRAY_ELEMENT (ref) CV2($w) NEXT\n\
+             0005 ASSIGN CV0($z) T3\n\
+             0006 INIT_FCALL_BY_NAME 1 string(\"f\")\n\
+             0007 SEND_VAL_EX int(1) 1\n\
+             0008 SEND_UNPACK CV1($x)\n\
+             0009 SEND_VAL_EX int(2) string(\"c\")\n\
+             0010 CHECK_UNDEF_ARGS\n\
+             0011 DO_FCALL_BY_NAME\n\
+             0012 RETURN int(1)\n\
+             LIVE RANGES:\n\
+             \x20    3: 0001 - 0005 (tmp/var)\n"
+        );
+        assert_eq!(
+            oplines_of(b"<?php $q = [...[1, 2], 3, ...['k' => 4]];"),
+            "0000 ASSIGN CV0($q) array(...)\n\
+             0001 RETURN int(1)\n"
+        );
+        assert_eq!(
+            refused_message(b"<?php\nf(...$a, 1);\n").as_deref(),
+            Some("Cannot use positional argument after argument unpacking")
         );
     }
 
@@ -7209,5 +7343,345 @@ class C {
             refused.map(|e| e.message),
             Some(String::from("Cannot use try without catch or finally"))
         );
+    }
+
+    /// `zend_compile_list_assign`'s oplines over the four shapes #583
+    /// names, as the oracle's `[regime.dump]` prints them: a plain list
+    /// reads the right side's copy once per element with `FETCH_LIST_R`
+    /// and frees it after the last, a keyed list reads by the key, a
+    /// nested list reads the element and then its elements, and an
+    /// element taken by reference is `FETCH_LIST_W` and `MAKE_REF` over
+    /// the right side made a reference; a `foreach` value that is a list
+    /// is fetched into a `VAR` and read the same way.
+    #[test]
+    fn a_list_compiles_to_what_zend_compile_list_assign_emits() {
+        let cases: &[(&[u8], usize, u32, u32, &str)] = &[
+            (
+                b"<?php [$a, $b] = $x;",
+                7,
+                3,
+                5,
+                "0000 T3 = QM_ASSIGN CV0($x)\n\
+                 0001 V4 = FETCH_LIST_R T3 int(0)\n\
+                 0002 ASSIGN CV1($a) V4\n\
+                 0003 V6 = FETCH_LIST_R T3 int(1)\n\
+                 0004 ASSIGN CV2($b) V6\n\
+                 0005 FREE T3\n\
+                 0006 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    3: 0001 - 0005 (tmp/var)\n",
+            ),
+            (
+                b"<?php list('k' => $a) = $x;",
+                5,
+                2,
+                3,
+                "0000 T2 = QM_ASSIGN CV0($x)\n\
+                 0001 V3 = FETCH_LIST_R T2 string(\"k\")\n\
+                 0002 ASSIGN CV1($a) V3\n\
+                 0003 FREE T2\n\
+                 0004 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    2: 0001 - 0003 (tmp/var)\n",
+            ),
+            (
+                b"<?php [$a, [$b, $c]] = $x;",
+                11,
+                4,
+                8,
+                "0000 T4 = QM_ASSIGN CV0($x)\n\
+                 0001 V5 = FETCH_LIST_R T4 int(0)\n\
+                 0002 ASSIGN CV1($a) V5\n\
+                 0003 V7 = FETCH_LIST_R T4 int(1)\n\
+                 0004 V8 = FETCH_LIST_R V7 int(0)\n\
+                 0005 ASSIGN CV2($b) V8\n\
+                 0006 V10 = FETCH_LIST_R V7 int(1)\n\
+                 0007 ASSIGN CV3($c) V10\n\
+                 0008 FREE V7\n\
+                 0009 FREE T4\n\
+                 0010 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    4: 0001 - 0009 (tmp/var)\n\
+                 \x20    7: 0004 - 0008 (tmp/var)\n",
+            ),
+            (
+                b"<?php [&$a] = $x;",
+                6,
+                2,
+                4,
+                "0000 V2 = MAKE_REF CV0($x)\n\
+                 0001 V3 = FETCH_LIST_W V2 int(0)\n\
+                 0002 V4 = MAKE_REF V3\n\
+                 0003 ASSIGN_REF CV1($a) V4\n\
+                 0004 FREE V2\n\
+                 0005 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    2: 0001 - 0004 (tmp/var)\n",
+            ),
+            (
+                b"<?php foreach ($xs as $k => [$a, $b]) {}",
+                11,
+                4,
+                8,
+                "0000 V4 = FE_RESET_R CV0($xs) 0009\n\
+                 0001 T10 = FE_FETCH_R V4 V5 0009\n\
+                 0002 V6 = FETCH_LIST_R V5 int(0)\n\
+                 0003 ASSIGN CV1($a) V6\n\
+                 0004 V8 = FETCH_LIST_R V5 int(1)\n\
+                 0005 ASSIGN CV2($b) V8\n\
+                 0006 FREE V5\n\
+                 0007 ASSIGN CV3($k) T10\n\
+                 0008 JMP 0001\n\
+                 0009 FE_FREE V4\n\
+                 0010 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    4: 0001 - 0009 (loop)\n\
+                 \x20    5: 0002 - 0006 (tmp/var)\n\
+                 \x20    10: 0002 - 0007 (tmp/var)\n",
+            ),
+        ];
+        for (source, lines, vars, tmps, oplines) in cases {
+            assert_eq!(
+                dump_of(source),
+                main_dump(*lines, *vars, *tmps, oplines),
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+    }
+
+    /// php's compile errors over a list's shape, each in php's words.
+    #[test]
+    fn a_list_of_the_wrong_shape_is_phps_compile_error() {
+        let cases: &[(&[u8], &str)] = &[
+            (b"<?php [] = $x;", "Cannot use empty list"),
+            (
+                b"<?php [$a, 'k' => $b] = $x;",
+                "Cannot mix keyed and unkeyed array entries in assignments",
+            ),
+            (
+                b"<?php $x = [list($a)];",
+                "Cannot use list() as standalone expression",
+            ),
+            (
+                b"<?php [...$a] = $x;",
+                "Spread operator is not supported in assignments",
+            ),
+            (
+                b"<?php [array($a)] = $x;",
+                "Cannot assign to array(), use [] instead",
+            ),
+            (b"<?php [list($a)] = $x;", "Cannot mix [] and list()"),
+            (
+                b"<?php ['k' => $a, , ] = $x;",
+                "Cannot use empty array entries in keyed array assignment",
+            ),
+            (
+                b"<?php [f()] = $x;",
+                "Can't use function return value in write context",
+            ),
+            (
+                b"<?php [1] = $x;",
+                "Assignments can only happen to writable values",
+            ),
+            (
+                b"<?php [&$a] = 1;",
+                "Cannot assign reference to non referenceable value",
+            ),
+            (
+                b"<?php foreach ($x as [$a] => $b) {}",
+                "Cannot use list as key element",
+            ),
+        ];
+        for (source, message) in cases {
+            assert_eq!(
+                refused(source).map(|e| e.message),
+                Some(String::from(*message)),
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+    }
+
+    /// #531's program under the oracle's `[regime.dump]`: a `JMP_NULL`
+    /// over the object before each `?->`, its target the opline after
+    /// the chain and its `result` the chain's own, a call's arguments
+    /// inside the jump, and `"$a?->b"` a chain of its own inside the
+    /// string.
+    #[test]
+    fn a_nullsafe_chain_is_jmp_null_over_each_link_as_php_emits_it() {
+        assert_eq!(
+            dump_of(b"<?php $a = null; echo $a?->b, $a?->m(1)?->c, \"$a?->b\";"),
+            main_dump(
+                16,
+                1,
+                6,
+                "0000 ASSIGN CV0($a) null\n\
+                 0001 T2 = JMP_NULL CV0($a) 0003\n\
+                 0002 T2 = FETCH_OBJ_R CV0($a) string(\"b\")\n\
+                 0003 ECHO T2\n\
+                 0004 T4 = JMP_NULL CV0($a) 0010\n\
+                 0005 INIT_METHOD_CALL 1 CV0($a) string(\"m\")\n\
+                 0006 SEND_VAL_EX int(1) 1\n\
+                 0007 V3 = DO_FCALL\n\
+                 0008 T4 = JMP_NULL V3 0010\n\
+                 0009 T4 = FETCH_OBJ_R V3 string(\"c\")\n\
+                 0010 ECHO T4\n\
+                 0011 T5 = JMP_NULL CV0($a) 0013\n\
+                 0012 T5 = FETCH_OBJ_R CV0($a) string(\"b\")\n\
+                 0013 T6 = CAST (string) T5\n\
+                 0014 ECHO T6\n\
+                 0015 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    3: 0008 - 0009 (tmp/var)\n",
+            )
+        );
+    }
+
+    /// php's compile errors where a `?->` chain is written to or bound.
+    #[test]
+    fn a_nullsafe_chain_written_to_is_phps_compile_error() {
+        let cases: &[(&[u8], &str)] = &[
+            (
+                b"<?php $a?->b = 1;",
+                "Can't use nullsafe operator in write context",
+            ),
+            (
+                b"<?php $a?->b++;",
+                "Can't use nullsafe operator in write context",
+            ),
+            (
+                b"<?php $a?->b .= 1;",
+                "Can't use nullsafe operator in write context",
+            ),
+            (
+                b"<?php unset($a?->b);",
+                "Can't use nullsafe operator in write context",
+            ),
+            (
+                b"<?php $a?->b[0] = 1;",
+                "Can't use nullsafe operator in write context",
+            ),
+            (
+                b"<?php foreach ($x as $a?->b) {}",
+                "Can't use nullsafe operator in write context",
+            ),
+            (
+                b"<?php $x = &$a?->b;",
+                "Cannot take reference of a nullsafe chain",
+            ),
+            (
+                b"<?php function &f() { return $a?->b[0]; }",
+                "Cannot take reference of a nullsafe chain",
+            ),
+            (
+                b"<?php [$a?->b] = $x;",
+                "Assignments can only happen to writable values",
+            ),
+            (
+                b"<?php $a?->m()++;",
+                "Can't use method return value in write context",
+            ),
+        ];
+        for (source, message) in cases {
+            assert_eq!(
+                refused(source).map(|e| e.message),
+                Some(String::from(*message)),
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+    }
+
+    /// #690's shapes under the oracle's `[regime.dump]`: a `global` over
+    /// a name no CV has is `FETCH_W (global+lock)` and an `ASSIGN_REF`
+    /// over a fetch by the same name, the local variable's or, for an
+    /// auto-global, the global's; `$$x++` is `FETCH_RW (local)` and the
+    /// step over the `VAR`.
+    #[test]
+    fn a_variable_named_at_run_time_is_fetched_by_name_as_php_emits_it() {
+        let cases: &[(&[u8], usize, u32, u32, &str)] = &[
+            (
+                b"<?php global ${$x[0]};",
+                5,
+                1,
+                4,
+                "0000 T1 = FETCH_DIM_R CV0($x) int(0)\n\
+                 0001 V2 = FETCH_W (global+lock) T1\n\
+                 0002 V3 = FETCH_W (local) T1\n\
+                 0003 ASSIGN_REF V3 V2\n\
+                 0004 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    1: 0001 - 0002 (tmp/var)\n\
+                 \x20    2: 0002 - 0003 (tmp/var)\n",
+            ),
+            (
+                b"<?php global $_SERVER;",
+                4,
+                0,
+                3,
+                "0000 V0 = FETCH_W (global+lock) string(\"_SERVER\")\n\
+                 0001 V1 = FETCH_W (global) string(\"_SERVER\")\n\
+                 0002 ASSIGN_REF V1 V0\n\
+                 0003 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    0: 0001 - 0002 (tmp/var)\n",
+            ),
+            (
+                b"<?php $$x++;",
+                3,
+                1,
+                2,
+                "0000 V1 = FETCH_RW (local) CV0($x)\n\
+                 0001 PRE_INC V1\n\
+                 0002 RETURN int(1)\n",
+            ),
+        ];
+        for (source, lines, vars, tmps, oplines) in cases {
+            assert_eq!(
+                dump_of(source),
+                main_dump(*lines, *vars, *tmps, oplines),
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+    }
+
+    /// #444's shapes under the oracle's `[regime.dump]`: a property as
+    /// the target of `= &` is `ASSIGN_OBJ_REF` over its object with the
+    /// source in an `OP_DATA`, `(function)` and a `MAKE_REF` over a call.
+    #[test]
+    fn a_property_bound_by_reference_is_assign_obj_ref_as_php_emits_it() {
+        let cases: &[(&[u8], usize, u32, u32, &str)] = &[
+            (
+                b"<?php $o->p = &$x;",
+                3,
+                2,
+                1,
+                "0000 ASSIGN_OBJ_REF CV0($o) string(\"p\")\n\
+                 0001 OP_DATA CV1($x)\n\
+                 0002 RETURN int(1)\n",
+            ),
+            (
+                b"<?php $o->p = &f();",
+                6,
+                1,
+                3,
+                "0000 INIT_FCALL_BY_NAME 0 string(\"f\")\n\
+                 0001 V2 = DO_FCALL_BY_NAME\n\
+                 0002 V3 = MAKE_REF V2\n\
+                 0003 ASSIGN_OBJ_REF (function) CV0($o) string(\"p\")\n\
+                 0004 OP_DATA V3\n\
+                 0005 RETURN int(1)\n",
+            ),
+        ];
+        for (source, lines, vars, tmps, oplines) in cases {
+            assert_eq!(
+                dump_of(source),
+                main_dump(*lines, *vars, *tmps, oplines),
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
     }
 }

@@ -30,7 +30,7 @@ use php_ext::abi::{Callable, Dependency, DependencyKind, Extension, ExtensionBui
 use php_ext::coerce::{argument, callable_argument, value_name};
 use php_ext::decl::{
     Attribute, AttributeArgument, ClassDecl, ClassFlags, ClassKind, ConstDecl, ConstExpr,
-    EnumBacking, FunctionDecl, Name, Parameter, PropertyDecl, Type, Visibility,
+    EnumBacking, FunctionDecl, Name, Parameter, ParameterDefault, PropertyDecl, Type, Visibility,
 };
 use php_ext::raising::{Level, Thrown, arg_count_error, arg_type_error, docref, throw};
 use php_ext::request::Request;
@@ -281,6 +281,7 @@ fn error_class() -> ClassDecl {
         is_instance: true,
         is_readonly: false,
         is_final: false,
+        is_promoted: false,
         ty: Some(ty),
         default: None,
         attributes: Vec::new(),
@@ -319,8 +320,9 @@ fn parameter(name: &[u8], ty: Option<Type>, default: Option<ConstExpr>) -> Param
         ty,
         by_ref: false,
         prefer_ref: false,
+        promoted: false,
         variadic: false,
-        default,
+        default: default.map_or(ParameterDefault::None, ParameterDefault::Expr),
         attributes: Vec::new(),
     }
 }
@@ -391,6 +393,33 @@ impl Errors {
             return;
         }
         docref(req, level, message);
+    }
+
+    /// `php_libxml_pretend_ctx_error_ex`: an error raised as if a parser
+    /// of `file` had raised it at `line` and `column`, which lexbor's
+    /// parse errors are: onto the list with the position and the file,
+    /// or a warning with the text alone.
+    pub fn pretend(req: &mut Request, file: &[u8], line: i32, column: i32, message: &str) {
+        let state = req.state::<State>();
+        state.buffer.extend_from_slice(message.as_bytes());
+        let mut end = state.buffer.len();
+        while end > 0 && state.buffer[end - 1] == b'\n' {
+            end -= 1;
+        }
+        if end == state.buffer.len() {
+            return;
+        }
+        state.buffer.truncate(end);
+        let text = std::mem::take(&mut state.buffer);
+        if let Some(list) = state.errors.as_mut() {
+            let mut error = Raised::internal(&text);
+            error.line = line;
+            error.column = column;
+            error.file = Some(file.to_vec());
+            list.push(error);
+            return;
+        }
+        docref(req, Level::Warning, &String::from_utf8_lossy(&text));
     }
 
     /// The errors [`ffi::capture`] copied out of one call, routed as php's

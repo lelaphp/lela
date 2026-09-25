@@ -368,6 +368,7 @@ dependencies = [
  "php_ext_hash",
  "php_ext_iconv",
  "php_ext_json",
+ "php_ext_lexbor",
  "php_ext_libxml",
  "php_ext_mbstring",
  "php_ext_openssl",
@@ -437,6 +438,7 @@ name = "php_ext_dom"
 version = "0.0.0"
 dependencies = [
  "php_ext",
+ "php_ext_lexbor",
  "php_ext_libxml",
 ]
 
@@ -472,6 +474,14 @@ dependencies = [
 name = "php_ext_json"
 version = "0.0.0"
 dependencies = [
+ "php_ext",
+]
+
+[[package]]
+name = "php_ext_lexbor"
+version = "0.0.0"
+dependencies = [
+ "cc",
  "php_ext",
 ]
 
@@ -557,6 +567,7 @@ version = "0.0.0"
 dependencies = [
  "php_ext",
  "php_ext_pcre",
+ "php_ext_standard",
 ]
 
 [[package]]

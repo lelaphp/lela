@@ -17,7 +17,7 @@
 
 use php_ext::call::lookup_class;
 use php_ext::coerce::{coerce_param, to_string, value_name};
-use php_ext::decl::{ConstDecl, ConstExpr, FunctionDecl, Name, Parameter, Type};
+use php_ext::decl::{ConstDecl, ConstExpr, FunctionDecl, Name, Parameter, ParameterDefault, Type};
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw};
 use php_ext::request::{Request, Stream, Whence, WrapperOp};
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
@@ -150,7 +150,7 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
                 stream_parameter(),
                 parameter(b"data", Type::String),
                 Parameter {
-                    default: Some(ConstExpr::Null),
+                    default: ParameterDefault::Expr(ConstExpr::Null),
                     ..parameter(b"length", Type::Nullable(Box::new(Type::Int)))
                 },
             ],
@@ -183,7 +183,9 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
                     stream_parameter(),
                     parameter(b"offset", Type::Int),
                     Parameter {
-                        default: Some(ConstExpr::Constant(Name(b"SEEK_SET".as_slice().into()))),
+                        default: ParameterDefault::Expr(ConstExpr::Constant(Name(
+                            b"SEEK_SET".as_slice().into(),
+                        ))),
                         ..parameter(b"whence", Type::Int)
                     },
                 ],
@@ -225,7 +227,7 @@ fn stream_parameter() -> Parameter {
 pub(super) fn untyped_null(name: &[u8]) -> Parameter {
     Parameter {
         ty: None,
-        default: Some(ConstExpr::Null),
+        default: ParameterDefault::Expr(ConstExpr::Null),
         ..parameter(name, Type::Mixed)
     }
 }
@@ -257,7 +259,7 @@ fn read_natives() -> Vec<(FunctionDecl, Entry)> {
                 &[
                     stream_parameter(),
                     Parameter {
-                        default: Some(ConstExpr::Null),
+                        default: ParameterDefault::Expr(ConstExpr::Null),
                         ..parameter(b"length", Type::Nullable(Box::new(Type::Int)))
                     },
                 ],
@@ -282,7 +284,7 @@ fn read_natives() -> Vec<(FunctionDecl, Entry)> {
                         parameter(b"filename", Type::String),
                         parameter(b"mode", Type::String),
                         Parameter {
-                            default: Some(ConstExpr::Bool(false)),
+                            default: ParameterDefault::Expr(ConstExpr::Bool(false)),
                             ..parameter(b"use_include_path", Type::Bool)
                         },
                         untyped_null(b"context"),
@@ -341,16 +343,16 @@ fn contents_natives() -> Vec<(FunctionDecl, Entry)> {
                 &[
                     parameter(b"filename", Type::String),
                     Parameter {
-                        default: Some(ConstExpr::Bool(false)),
+                        default: ParameterDefault::Expr(ConstExpr::Bool(false)),
                         ..parameter(b"use_include_path", Type::Bool)
                     },
                     untyped_null(b"context"),
                     Parameter {
-                        default: Some(ConstExpr::Long(0)),
+                        default: ParameterDefault::Expr(ConstExpr::Long(0)),
                         ..parameter(b"offset", Type::Int)
                     },
                     Parameter {
-                        default: Some(ConstExpr::Null),
+                        default: ParameterDefault::Expr(ConstExpr::Null),
                         ..parameter(b"length", Type::Nullable(Box::new(Type::Int)))
                     },
                 ],
@@ -365,7 +367,7 @@ fn contents_natives() -> Vec<(FunctionDecl, Entry)> {
                     parameter(b"filename", Type::String),
                     parameter(b"data", Type::Mixed),
                     Parameter {
-                        default: Some(ConstExpr::Long(0)),
+                        default: ParameterDefault::Expr(ConstExpr::Long(0)),
                         ..parameter(b"flags", Type::Int)
                     },
                     untyped_null(b"context"),
@@ -1150,6 +1152,25 @@ const STAT_NAMES: [&[u8]; 13] = [
 fn fstat(req: &mut Request) -> Result<Value, Thrown> {
     argument_count_between(req, 1, 1)?;
     let stream = stream_argument(req, 1)?;
+    php_fstat(req, stream)
+}
+
+/// `php_fstat(stream, return_value)`, `PHPAPI` in `file.h`
+/// (`Z/ext/standard/file.c:1327`): the stat array of `stream`, `false`
+/// for a stream with no stat. What `fstat()` answers, and what
+/// `SplFileObject::fstat()` calls directly, so neither `disable_functions`
+/// nor a namespaced `fstat` reaches it.
+///
+/// ```php
+/// $t = new SplTempFileObject(); $t->fwrite("abc"); $s = $t->fstat();
+/// var_dump(count($s), $s['size'], $s['mode'] & 0170000);
+/// ```
+/// ```expect
+/// int(26)
+/// int(3)
+/// int(32768)
+/// ```
+pub fn php_fstat(req: &mut Request, stream: Stream) -> Result<Value, Thrown> {
     let Some(sb) = stream.stat(req) else {
         return Ok(Value::bool(false));
     };
@@ -1933,7 +1954,7 @@ fn path_natives() -> Vec<(FunctionDecl, Entry)> {
             declared(
                 b"umask",
                 &[Parameter {
-                    default: Some(ConstExpr::Null),
+                    default: ParameterDefault::Expr(ConstExpr::Null),
                     ..parameter(b"mask", Type::Nullable(Box::new(Type::Int)))
                 }],
                 Type::Int,
@@ -1946,11 +1967,11 @@ fn path_natives() -> Vec<(FunctionDecl, Entry)> {
                 &[
                     parameter(b"directory", Type::String),
                     Parameter {
-                        default: Some(ConstExpr::Long(0o777)),
+                        default: ParameterDefault::Expr(ConstExpr::Long(0o777)),
                         ..parameter(b"permissions", Type::Int)
                     },
                     Parameter {
-                        default: Some(ConstExpr::Bool(false)),
+                        default: ParameterDefault::Expr(ConstExpr::Bool(false)),
                         ..parameter(b"recursive", Type::Bool)
                     },
                     untyped_null(b"context"),
@@ -3027,10 +3048,7 @@ fn fscanf(req: &mut Request) -> Result<Value, Thrown> {
     let Some(line) = stream.get_line(req, None)? else {
         return Ok(Value::bool(false));
     };
-    let c_string = |bytes: &[u8]| bytes.split(|c| *c == 0).next().unwrap_or(&[]).to_vec();
-    let input = c_string(line.as_bytes());
-    let format = c_string(format.as_bytes());
-    crate::scanf::scan(req, &input, &format, 3, given - 2)
+    crate::scanf::php_sscanf_internal(req, line.as_bytes(), format.as_bytes(), 3, given - 2)
 }
 
 /// `php_stream_sync_supported`: the plain files kind, and the host's
@@ -3126,6 +3144,40 @@ fn fputcsv(req: &mut Request) -> Result<Value, Thrown> {
     let enclosure = one_byte(req, 4, b'"')?;
     let escape = crate::csv::escape_argument(req, 5)?;
     let eol = nullable_string(req, 6)?;
+    let eol = eol.as_ref().map(PhpString::as_bytes);
+    let written = php_fputcsv(req, stream, fields, (delimiter, enclosure, escape), eol)?;
+    Ok(written.map_or_else(
+        || Value::bool(false),
+        |n| Value::int(i64::try_from(n).unwrap_or(i64::MAX)),
+    ))
+}
+
+/// `php_fputcsv(stream, fields, delimiter, enclosure, escape_char,
+/// eol_str)`, `PHPAPI` in `file.h` (`Z/ext/standard/file.c:1683`): the
+/// fields as one CSV line written to `stream`, `eol` or `\n` after; the
+/// bytes written, `None` where the write failed. The control bytes are
+/// the separator, the enclosure and the escape, `None` for
+/// `PHP_CSV_NO_ESCAPE`. What `fputcsv()` writes through, and what
+/// `SplFileObject::fputcsv()` calls directly.
+///
+/// ```php
+/// $t = new SplTempFileObject();
+/// var_dump($t->fputcsv(['a', 'b c', 'd"e'], ';', '"', ''), $t->fputcsv([1, null], ',', '"', '', "!\n"));
+/// $t->rewind(); $t->fpassthru();
+/// ```
+/// ```expect
+/// int(15)
+/// int(4)
+/// a;"b c";"d""e"
+/// 1,!
+/// ```
+pub fn php_fputcsv(
+    req: &mut Request,
+    stream: Stream,
+    fields: PhpArray,
+    (delimiter, enclosure, escape): (u8, u8, Option<u8>),
+    eol: Option<&[u8]>,
+) -> Result<Option<usize>, Thrown> {
     let count = fields.len();
     let mut line = Vec::new();
     for (i, (_, field)) in fields.iter().enumerate() {
@@ -3157,13 +3209,10 @@ fn fputcsv(req: &mut Request) -> Result<Value, Thrown> {
         }
     }
     match eol {
-        Some(eol) => line.extend_from_slice(eol.as_bytes()),
+        Some(eol) => line.extend_from_slice(eol),
         None => line.push(b'\n'),
     }
-    Ok(stream.write(req, &line).map_or_else(
-        || Value::bool(false),
-        |n| Value::int(i64::try_from(n).unwrap_or(i64::MAX)),
-    ))
+    Ok(stream.write(req, &line))
 }
 
 /// `fgetcsv($stream, ?int $length = null, ...): array|false`,

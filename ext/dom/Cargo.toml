@@ -17,6 +17,10 @@ php_ext = { path = "../../crates/php_ext" }
 # libxml2 through `ext/libxml`'s surface, `php_libxml.h`'s, as php's dom
 # includes it (`ZEND_MOD_REQUIRED("libxml")`, design §4.10).
 php_ext_libxml = { path = "../libxml" }
+# lexbor's HTML5 parser, CSS selectors and encodings through `ext/lexbor`,
+# as php's dom includes lexbor's headers (`ZEND_MOD_REQUIRED("lexbor")`,
+# design §4.10).
+php_ext_lexbor = { path = "../lexbor" }
 
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
 [dev-dependencies]

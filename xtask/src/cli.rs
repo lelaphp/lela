@@ -127,7 +127,7 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: Option<TrackCommand>,
     },
-    /// A track's worktrees: `add` lays one down under .claude/worktrees/<branch>,
+    /// A track's worktrees: `add` lays one down beside the checkout, at <checkout>-worktrees/<branch>,
     /// `retire` appends its log into the track's store and removes it.
     /// Writes no reading.
     ///

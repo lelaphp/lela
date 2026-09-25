@@ -1021,19 +1021,37 @@ fn bundle(manifest: &Manifest, readings: &[Reading]) -> Vec<Row> {
         .collect()
 }
 
+/// The paths of the working tree's status the `git` section prints below
+/// the branch's line: a merge that stages hundreds of files would
+/// otherwise push the local facts over the engine's cap alone (#822).
+const STATUS_LINES: usize = 20;
+
 /// The `git` section, volatile: the last ten commits and the status of
-/// the working tree, as git prints them.
+/// the working tree, as git prints them, cut after [`STATUS_LINES`] paths
+/// with the number left out named. The JSON's `status` is cut the same
+/// way, the number beside it as `status_omitted`.
 fn git_section(root: &Path, format: Format) -> Result<String> {
     let log = git(root, &["log", "--oneline", "-10"], None)?;
     let status = git(root, &["status", "--short", "--branch"], None)?;
+    let mut lines: Vec<&str> = status.lines().collect();
+    let omitted = lines.len().saturating_sub(STATUS_LINES + 1);
+    lines.truncate(STATUS_LINES + 1);
     Ok(match format {
         Format::Json => serde_json::to_string_pretty(&json!({
             "log": log.lines().collect::<Vec<_>>(),
-            "status": status.lines().collect::<Vec<_>>(),
+            "status": lines,
+            "status_omitted": omitted,
         }))?,
-        Format::Md => format!(
-            "```\n$ git log --oneline -10\n{log}\n$ git status --short --branch\n{status}```\n"
-        ),
+        Format::Md => {
+            let kept = lines.join("\n");
+            let more = match omitted {
+                0 => String::new(),
+                n => format!("… and {n} more; git status --short\n"),
+            };
+            format!(
+                "```\n$ git log --oneline -10\n{log}\n$ git status --short --branch\n{kept}\n{more}```\n"
+            )
+        }
     })
 }
 

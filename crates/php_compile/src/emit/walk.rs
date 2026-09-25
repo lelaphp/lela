@@ -33,9 +33,9 @@ use super::Emit;
 use crate::CompileError;
 
 /// A group of a member's modifiers as the tree holds them, read once:
-/// php's `member_modifier` list before `zend_add_member_modifier`
-/// folds it. The visibilities are read apart, since php refuses two of
-/// either; the rest are the flags written.
+/// php's `member_modifier` list after `zend_modifier_list_to_flags`
+/// folds it for its [`Target`]. The visibilities are read apart, since
+/// php refuses two of either; the rest are the flags written.
 #[derive(Default)]
 struct Modifiers {
     visibility: Option<Visibility>,
@@ -53,28 +53,86 @@ enum Flag {
     Var,
 }
 
-impl Modifiers {
-    /// One modifier more, `zend_modifier_list_to_flags`' duplicate refusal
-    /// in php's words for one already written.
-    fn push(&mut self, flag: Flag, word: &str, line: u32) -> Result<(), CompileError> {
-        if self.has(flag) {
-            return Err(refused(
-                line,
-                format!("Multiple {word} modifiers are not allowed"),
-            ));
+/// What a modifier list is written on, php's `zend_modifier_target`
+/// less `ZEND_MODIFIER_TARGET_PROPERTY_HOOK`, whose list is not read yet.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Target {
+    Property,
+    Method,
+    Constant,
+    Parameter,
+}
+
+impl Target {
+    /// The member `zend_modifier_token_to_flag` names in its refusal.
+    fn member(self) -> &'static str {
+        match self {
+            Target::Property => "property",
+            Target::Method => "method",
+            Target::Constant => "class constant",
+            Target::Parameter => "parameter",
         }
-        self.flags.push(flag);
-        Ok(())
+    }
+}
+
+/// One modifier token as `zend_modifier_token_to_flag` reads it, before
+/// the target has taken it.
+#[derive(Clone, Copy)]
+enum Written {
+    Visibility(Visibility),
+    SetVisibility(Visibility),
+    Flag(Flag),
+}
+
+impl Written {
+    /// `zend_modifier_token_to_string`.
+    fn word(self) -> &'static str {
+        match self {
+            Written::Visibility(Visibility::Public) => "public",
+            Written::Visibility(Visibility::Protected) => "protected",
+            Written::Visibility(Visibility::Private) => "private",
+            Written::SetVisibility(Visibility::Public) => "public(set)",
+            Written::SetVisibility(Visibility::Protected) => "protected(set)",
+            Written::SetVisibility(Visibility::Private) => "private(set)",
+            Written::Flag(Flag::Static) => "static",
+            Written::Flag(Flag::Abstract) => "abstract",
+            Written::Flag(Flag::Final) => "final",
+            Written::Flag(Flag::Readonly) => "readonly",
+            Written::Flag(Flag::Var) => "var",
+        }
     }
 
+    /// Whether `zend_modifier_token_to_flag` gives the token a bit on
+    /// `target`. `var` is the grammar's, which writes it before a
+    /// property alone.
+    fn takes(self, target: Target) -> bool {
+        match self {
+            Written::Visibility(_) | Written::Flag(Flag::Final | Flag::Var) => true,
+            Written::SetVisibility(_) | Written::Flag(Flag::Readonly) => {
+                matches!(target, Target::Property | Target::Parameter)
+            }
+            Written::Flag(Flag::Static | Flag::Abstract) => {
+                matches!(target, Target::Property | Target::Method)
+            }
+        }
+    }
+}
+
+impl Modifiers {
     fn has(&self, flag: Flag) -> bool {
         self.flags.contains(&flag)
     }
+}
 
-    /// Whether any of `flags` was written.
-    fn any(&self, flags: &[Flag]) -> bool {
-        flags.iter().any(|flag| self.has(*flag))
-    }
+/// The modifiers of a class, php's `class_modifiers` as
+/// `zend_add_class_modifier` folds them into `ZEND_ACC_EXPLICIT_ABSTRACT_CLASS`,
+/// `ZEND_ACC_FINAL` and `ZEND_ACC_READONLY_CLASS`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // the three class modifiers, each one fact
+pub(super) struct ClassModifiers {
+    pub(super) is_abstract: bool,
+    pub(super) is_final: bool,
+    pub(super) is_readonly: bool,
 }
 
 /// Where every generator the file declares starts: the offset of each
@@ -154,7 +212,61 @@ impl Emit<'_> {
             )));
         }
         let stmts = &self.parsed.tree[file].stmts;
-        self.statements(stmts)
+        self.depth = self.depth.saturating_add(1);
+        let compiled = self.top_statements(stmts);
+        self.depth = self.depth.saturating_sub(1);
+        compiled
+    }
+
+    /// `zend_compile_top_stmt` over a list of top statements, the
+    /// file's own or a bracketed namespace's: each at its own line, a
+    /// function or a class declaration leaving the line at its closing
+    /// brace (`CG(zend_lineno) = decl->end_lineno`), and after each but
+    /// a `namespace` and a `__halt_compiler` php's
+    /// `zend_verify_namespace`. An empty statement is php's `NULL`
+    /// child, which the walk returns from before either.
+    pub(super) fn top_statements(&mut self, stmts: &[Stmt]) -> Result<(), CompileError> {
+        for stmt in stmts {
+            if matches!(stmt, Stmt::EmptyStmt(_)) {
+                continue;
+            }
+            self.line = stmt.line(self.parsed);
+            self.statement(*stmt)?;
+            match stmt {
+                Stmt::NamespaceDef(_) | Stmt::HaltCompilerStmt(_) => continue,
+                Stmt::FunctionDecl(_)
+                | Stmt::ClassDecl(_)
+                | Stmt::InterfaceDecl(_)
+                | Stmt::TraitDecl(_)
+                | Stmt::EnumDecl(_) => self.line = self.end_line(stmt.range(self.parsed)),
+                _ => {}
+            }
+            self.verify_namespace()?;
+        }
+        Ok(())
+    }
+
+    /// A `namespace` statement as `zend_compile_namespace` reads it: the
+    /// name in `child[0]`, none for `namespace { … }`, and the braces'
+    /// statement list in `child[1]`, none for the `;` form.
+    pub(super) fn walk_namespace(
+        &self,
+        id: NodeId<tree::NamespaceDef>,
+    ) -> Result<Namespace, CompileError> {
+        let node = &self.parsed.tree[id];
+        let name = node.name.map(|name| self.text(name).to_vec());
+        match (name, node.body) {
+            // What only a statement the parser refused leaves.
+            (Some(name), _) if name.starts_with(b"\\") => {
+                Err(unread(node.line(), "a namespace declaration"))
+            }
+            (None, None) => Err(unread(node.line(), "a namespace declaration")),
+            (name, Some(body)) => Ok(Namespace::Bracketed {
+                name,
+                body: self.parsed.tree[body].stmts.to_vec(),
+            }),
+            (Some(name), None) => Ok(Namespace::Unbracketed(name)),
+        }
     }
 
     /// `InternalError`: the tree is not what the grammar promised
@@ -193,9 +305,7 @@ impl Emit<'_> {
         match stmt {
             Stmt::ClassDecl(id) => {
                 let node = &tree[id];
-                if !node.modifiers.is_empty() {
-                    return Err(unread(line, "a class with a modifier"));
-                }
+                let modifiers = self.walk_class_modifiers(&node.modifiers)?;
                 let Some(name) = node.name else {
                     return Err(unread(line, "a class"));
                 };
@@ -226,6 +336,7 @@ impl Emit<'_> {
                     line,
                     node.range(),
                 )
+                .map(|class| Class { modifiers, ..class })
             }
             Stmt::InterfaceDecl(id) => {
                 let node = &tree[id];
@@ -327,13 +438,11 @@ impl Emit<'_> {
         &mut self,
         id: NodeId<tree::FunctionDecl>,
     ) -> Result<Function, CompileError> {
-        let node = &self.parsed.tree[id];
+        let node = self.parsed.tree[id].clone();
         let line = node.line();
-        if !node.attrs.is_empty() {
-            return Err(unread(line, "an attribute before this declaration"));
-        }
+        let attributes = self.walk_attributes(&node.attrs)?;
         let name = self.text(node.name).to_vec();
-        self.walk_function(
+        let function = self.walk_function(
             name,
             node.byref.is_some(),
             node.params,
@@ -343,12 +452,16 @@ impl Emit<'_> {
             node.doc_comment,
             line,
             node.range(),
-        )
+        )?;
+        Ok(Function {
+            attributes,
+            ..function
+        })
     }
 
-    /// The attributes before a class, `#[A(1), B] #[C]`, php's
-    /// `attributed_statement` groups, each attribute with its arguments;
-    /// a named or unpacked argument is refused.
+    /// The attributes before a declaration, `#[A(1), B] #[C]`, php's
+    /// `attributed_statement` groups, each attribute with its arguments,
+    /// positional, named and unpacked as written.
     ///
     /// ```php
     /// #[A] #[B(1), C] class M { public $x = 1; }
@@ -368,7 +481,7 @@ impl Emit<'_> {
                 let attribute = self.parsed.tree[*attribute].clone();
                 let line = attribute.line();
                 let arguments = match attribute.args {
-                    Some(args) => self.plain_arguments(args, line, "an attribute's")?,
+                    Some(args) => self.attribute_arguments(args, line)?,
                     None => Vec::new(),
                 };
                 out.push(Attr {
@@ -381,26 +494,31 @@ impl Emit<'_> {
         Ok(out)
     }
 
-    /// The arguments of a list that are plain expressions;
-    /// anything else refused as what `whose` cannot carry yet.
-    fn plain_arguments(
+    /// The arguments of an attribute's list as written, which
+    /// `zend_compile_attributes` holds to its rules; a first-class
+    /// callable's `...` is refused as not read yet.
+    fn attribute_arguments(
         &mut self,
         id: NodeId<tree::ArgList>,
         line: u32,
-        whose: &str,
-    ) -> Result<Vec<tree::Expr>, CompileError> {
+    ) -> Result<Vec<AttrArgument>, CompileError> {
         let args = self.parsed.tree[id].args.clone();
         let mut out = Vec::with_capacity(args.len());
         for arg in &args {
-            match arg {
-                tree::Arg::Expr(expr) => out.push(*expr),
-                tree::Arg::NamedArg(_) => {
-                    return Err(unread(line, &format!("{whose} named argument")));
+            out.push(match arg {
+                tree::Arg::Expr(expr) => AttrArgument::Positional(*expr),
+                tree::Arg::NamedArg(named) => {
+                    let named = &self.parsed.tree[*named];
+                    let Some(value) = named.value else {
+                        return Err(unread(line, "an attribute's named argument"));
+                    };
+                    AttrArgument::Named(self.text(named.name).to_vec(), value)
                 }
-                tree::Arg::SpreadArg(_) | tree::Arg::VariadicPlaceholder(_) => {
-                    return Err(unread(line, &format!("{whose} argument list")));
+                tree::Arg::SpreadArg(_) => AttrArgument::Unpack,
+                tree::Arg::VariadicPlaceholder(_) => {
+                    return Err(unread(line, "an attribute's argument list"));
                 }
-            }
+            });
         }
         Ok(out)
     }
@@ -444,6 +562,7 @@ impl Emit<'_> {
             return_type,
             by_ref,
             body,
+            attributes: Vec::new(),
             doc_comment,
             line,
             end_line: self.end_line(range),
@@ -459,24 +578,27 @@ impl Emit<'_> {
         for param in &params {
             let param = self.parsed.tree[*param].clone();
             let line = param.line();
-            if !param.attrs.is_empty() {
-                return Err(unread(line, "an attribute"));
-            }
+            let attributes = self.walk_attributes(&param.attrs)?;
             if param.hooks.is_some() {
                 return Err(unread(line, "a property accessor list"));
             }
-            let modifiers = self.walk_modifiers(&param.modifiers, line)?;
-            if modifiers.set_visibility.is_some() {
-                return Err(unread(line, "an asymmetric visibility"));
+            let modifiers = self.walk_modifiers(&param.modifiers, line, Target::Parameter)?;
+            if modifiers.has(Flag::Var) {
+                return Err(self.internal("a parameter the grammar wrote `var` before"));
             }
-            if modifiers.any(&[Flag::Static, Flag::Final, Flag::Abstract, Flag::Var]) {
-                return Err(unread(line, "a parameter"));
-            }
+            // `promotion_flags`: any of them promotes.
             let is_readonly = modifiers.has(Flag::Readonly);
-            let promote = (modifiers.visibility.is_some() || is_readonly).then(|| Promoted {
-                visibility: modifiers.visibility.unwrap_or_default(),
-                is_readonly,
-            });
+            let is_final = modifiers.has(Flag::Final);
+            let promote = (modifiers.visibility.is_some()
+                || modifiers.set_visibility.is_some()
+                || is_readonly
+                || is_final)
+                .then(|| Promoted {
+                    visibility: modifiers.visibility.unwrap_or_default(),
+                    set_visibility: modifiers.set_visibility,
+                    is_readonly,
+                    is_final,
+                });
             out.push(Parameter {
                 name: self.variable_name(param.var),
                 ty: param.ty,
@@ -485,6 +607,8 @@ impl Emit<'_> {
                 variadic: param.variadic.is_some(),
                 default: param.default,
                 promote,
+                attributes,
+                doc_comment: self.doc_comment(param.doc_comment),
             });
         }
         Ok(out)
@@ -519,19 +643,47 @@ impl Emit<'_> {
     /// ```expect exit=255
     /// Fatal error: Multiple final modifiers are not allowed in %s on line 2
     /// ```
-    fn walk_modifiers(&self, modifiers: &[Modifier], line: u32) -> Result<Modifiers, CompileError> {
+    ///
+    /// A modifier the target takes no bit for is
+    /// `zend_modifier_token_to_flag`'s refusal, and `abstract` beside
+    /// `final` is `zend_add_member_modifier`'s, both before a repeat is
+    /// refused:
+    ///
+    /// ```php
+    /// class A { static const X = 1; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use the static modifier on a class constant in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// class A { readonly function f() {} }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use the readonly modifier on a method in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// abstract class A { final abstract function f(); }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use the final modifier on an abstract method in %s on line 2
+    /// ```
+    fn walk_modifiers(
+        &self,
+        modifiers: &[Modifier],
+        line: u32,
+        target: Target,
+    ) -> Result<Modifiers, CompileError> {
         let mut out = Modifiers::default();
         for modifier in modifiers {
-            let visibility = match modifier {
-                Modifier::PublicKw(_) => Some(Visibility::Public),
-                Modifier::ProtectedKw(_) => Some(Visibility::Protected),
-                Modifier::PrivateKw(_) => Some(Visibility::Private),
-                Modifier::VarKw(_) => {
-                    out.flags.push(Flag::Var);
-                    Some(Visibility::Public)
-                }
-                Modifier::SetVisibility(id) => {
-                    let seen = match self.parsed.tree[*id].vis.map(|vis| {
+            let written = match modifier {
+                Modifier::PublicKw(_) => Written::Visibility(Visibility::Public),
+                Modifier::ProtectedKw(_) => Written::Visibility(Visibility::Protected),
+                Modifier::PrivateKw(_) => Written::Visibility(Visibility::Private),
+                Modifier::VarKw(_) => Written::Flag(Flag::Var),
+                Modifier::SetVisibility(id) => Written::SetVisibility(
+                    match self.parsed.tree[*id].vis.map(|vis| {
                         self.parsed
                             .tokens
                             .get(vis.0 as usize)
@@ -540,40 +692,160 @@ impl Emit<'_> {
                         Some(Some(SyntaxKind::PROTECTED_KW)) => Visibility::Protected,
                         Some(Some(SyntaxKind::PRIVATE_KW)) => Visibility::Private,
                         _ => Visibility::Public,
-                    };
-                    if out.set_visibility.is_some() {
-                        return Err(refused(
-                            line,
-                            "Multiple access type modifiers are not allowed",
-                        ));
-                    }
-                    out.set_visibility = Some(seen);
-                    continue;
-                }
-                Modifier::StaticKw(_) => {
-                    out.push(Flag::Static, "static", line)?;
-                    continue;
-                }
-                Modifier::AbstractKw(_) => {
-                    out.push(Flag::Abstract, "abstract", line)?;
-                    continue;
-                }
-                Modifier::FinalKw(_) => {
-                    out.push(Flag::Final, "final", line)?;
-                    continue;
-                }
-                Modifier::ReadonlyKw(_) => {
-                    out.push(Flag::Readonly, "readonly", line)?;
-                    continue;
-                }
+                    },
+                ),
+                Modifier::StaticKw(_) => Written::Flag(Flag::Static),
+                Modifier::AbstractKw(_) => Written::Flag(Flag::Abstract),
+                Modifier::FinalKw(_) => Written::Flag(Flag::Final),
+                Modifier::ReadonlyKw(_) => Written::Flag(Flag::Readonly),
             };
-            if out.visibility.is_some() {
+            if !written.takes(target) {
                 return Err(refused(
                     line,
-                    "Multiple access type modifiers are not allowed",
+                    format!(
+                        "Cannot use the {} modifier on a {}",
+                        written.word(),
+                        target.member()
+                    ),
                 ));
             }
-            out.visibility = visibility;
+            // `zend_add_member_modifier`, then the repeat
+            // `zend_modifier_list_to_flags` holds back until it has run.
+            let multiple_access =
+                || refused(line, "Multiple access type modifiers are not allowed");
+            let repeated = match written {
+                Written::Visibility(visibility) => {
+                    if out.visibility.is_some() {
+                        return Err(multiple_access());
+                    }
+                    out.visibility = Some(visibility);
+                    false
+                }
+                Written::Flag(Flag::Var) => {
+                    // `var` is `ZEND_ACC_PUBLIC` to the grammar.
+                    if out.visibility.is_some() {
+                        return Err(multiple_access());
+                    }
+                    out.visibility = Some(Visibility::Public);
+                    out.flags.push(Flag::Var);
+                    false
+                }
+                Written::SetVisibility(visibility) => {
+                    if out.set_visibility.is_some() {
+                        return Err(multiple_access());
+                    }
+                    out.set_visibility = Some(visibility);
+                    false
+                }
+                Written::Flag(flag) => {
+                    let repeated = out.has(flag);
+                    out.flags.push(flag);
+                    repeated
+                }
+            };
+            if out.has(Flag::Abstract) && out.has(Flag::Final) {
+                match target {
+                    Target::Method => {
+                        return Err(refused(
+                            line,
+                            "Cannot use the final modifier on an abstract method",
+                        ));
+                    }
+                    Target::Property => {
+                        return Err(refused(
+                            line,
+                            "Cannot use the final modifier on an abstract property",
+                        ));
+                    }
+                    Target::Constant | Target::Parameter => {}
+                }
+            }
+            if repeated {
+                return Err(refused(
+                    line,
+                    format!("Multiple {} modifiers are not allowed", written.word()),
+                ));
+            }
+        }
+        Ok(out)
+    }
+
+    /// A class's modifiers read once, php's `class_modifiers`: each one
+    /// after the first goes through `zend_add_class_modifier`, which
+    /// refuses a repeat and `abstract` beside `final` at the line of the
+    /// modifier that made it.
+    ///
+    /// ```php
+    /// abstract
+    /// final class A {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use the final modifier on an abstract class in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// readonly final readonly class A {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Multiple readonly modifiers are not allowed in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// final abstract class A {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use the final modifier on an abstract class in %s on line 2
+    /// ```
+    ///
+    /// What php takes, it takes, each modifier once in any order:
+    ///
+    /// ```php
+    /// abstract class A {} final class F {} readonly final class R { public int $x; }
+    /// var_dump((new ReflectionClass('A'))->isAbstract(), (new ReflectionClass('F'))->isFinal(),
+    ///     (new ReflectionClass('R'))->isReadOnly(), (new ReflectionClass('R'))->isFinal());
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// ```
+    fn walk_class_modifiers(&self, modifiers: &[Modifier]) -> Result<ClassModifiers, CompileError> {
+        let mut out = ClassModifiers::default();
+        for modifier in modifiers {
+            let (token, flag, word) = match modifier {
+                Modifier::AbstractKw(token) => (*token, &mut out.is_abstract, "abstract"),
+                Modifier::FinalKw(token) => (*token, &mut out.is_final, "final"),
+                Modifier::ReadonlyKw(token) => (*token, &mut out.is_readonly, "readonly"),
+                Modifier::PublicKw(_)
+                | Modifier::ProtectedKw(_)
+                | Modifier::PrivateKw(_)
+                | Modifier::VarKw(_)
+                | Modifier::StaticKw(_)
+                | Modifier::SetVisibility(_) => {
+                    return Err(self.internal("a class modifier the grammar does not take"));
+                }
+            };
+            let line = self
+                .parsed
+                .tokens
+                .get(token.0 as usize)
+                .map_or(self.line, |token| {
+                    self.parsed.lines.line_number(token.offset)
+                });
+            if *flag {
+                return Err(refused(
+                    line,
+                    format!("Multiple {word} modifiers are not allowed"),
+                ));
+            }
+            *flag = true;
+            if out.is_abstract && out.is_final {
+                return Err(refused(
+                    line,
+                    "Cannot use the final modifier on an abstract class",
+                ));
+            }
         }
         Ok(out)
     }
@@ -632,6 +904,7 @@ impl Emit<'_> {
         let mut class = Class {
             name,
             kind,
+            modifiers: ClassModifiers::default(),
             backing: None,
             parent,
             interfaces,
@@ -807,6 +1080,7 @@ impl Emit<'_> {
             name: self.text(name).to_vec(),
             visibility: Visibility::Public,
             is_final: false,
+            ty: None,
             value: node.value,
             is_case: true,
             attributes,
@@ -826,28 +1100,22 @@ impl Emit<'_> {
     ) -> Result<(), CompileError> {
         let node = self.parsed.tree[id].clone();
         let line = node.line();
-        if !node.attrs.is_empty() {
-            return Err(unread(line, "an attribute before a class member"));
-        }
-        if node.ty.is_some() {
-            return Err(unread(line, "a typed class constant"));
-        }
-        let modifiers = self.walk_modifiers(&node.modifiers, line)?;
-        if modifiers.any(&[Flag::Static, Flag::Abstract, Flag::Readonly, Flag::Var])
-            || modifiers.set_visibility.is_some()
-        {
-            return Err(unread(line, "a class constant"));
+        let modifiers = self.walk_modifiers(&node.modifiers, line, Target::Constant)?;
+        if modifiers.has(Flag::Var) {
+            return Err(self.internal("a class constant the grammar wrote `var` before"));
         }
         for declarator in &node.const_declarators {
             let (name, value, line) = self.const_declarator(*declarator)?;
+            let attributes = self.walk_attributes(&node.attrs)?;
             let doc_comment = self.doc_comment(self.parsed.tree[*declarator].doc_comment);
             class.constants.push(Constant {
                 name,
                 visibility: modifiers.visibility.unwrap_or_default(),
                 is_final: modifiers.has(Flag::Final),
+                ty: node.ty,
                 value: Some(value),
                 is_case: false,
-                attributes: Vec::new(),
+                attributes,
                 doc_comment,
                 line,
             });
@@ -865,24 +1133,23 @@ impl Emit<'_> {
     ) -> Result<(), CompileError> {
         let node = self.parsed.tree[id].clone();
         let line = node.line();
-        if !node.attrs.is_empty() {
-            return Err(unread(line, "an attribute before a class member"));
-        }
+        let modifiers = self.walk_modifiers(&node.modifiers, line, Target::Property)?;
         if node.hooks.is_some() {
             return Err(unread(line, "a property accessor list"));
         }
-        let modifiers = self.walk_modifiers(&node.modifiers, line)?;
-        if modifiers.any(&[Flag::Final, Flag::Abstract, Flag::Readonly]) {
-            return Err(unread(line, "a property"));
-        }
         for declarator in &node.property_declarators {
             let declarator = self.parsed.tree[*declarator].clone();
+            let attributes = self.walk_attributes(&node.attrs)?;
             class.properties.push(Property {
                 name: self.variable_name(declarator.var),
                 visibility: modifiers.visibility.unwrap_or_default(),
                 set_visibility: modifiers.set_visibility,
                 ty: node.ty,
                 is_static: modifiers.has(Flag::Static),
+                is_final: modifiers.has(Flag::Final),
+                is_abstract: modifiers.has(Flag::Abstract),
+                is_readonly: modifiers.has(Flag::Readonly),
+                attributes,
                 default: declarator.init,
                 doc_comment: self.doc_comment(declarator.doc_comment),
                 line: declarator.line(),
@@ -900,19 +1167,11 @@ impl Emit<'_> {
     ) -> Result<(), CompileError> {
         let node = self.parsed.tree[id].clone();
         let line = node.line();
-        if !node.attrs.is_empty() {
-            return Err(unread(line, "an attribute before a class member"));
+        let modifiers = self.walk_modifiers(&node.modifiers, line, Target::Method)?;
+        if modifiers.has(Flag::Var) {
+            return Err(self.internal("a method the grammar wrote `var` before"));
         }
-        let modifiers = self.walk_modifiers(&node.modifiers, line)?;
-        // An abstract method is read in a trait alone so far, whose
-        // `zend_begin_method_decl` takes one with no class modifier.
-        let in_trait = class.kind == ClassKind::Trait;
-        if modifiers.any(&[Flag::Readonly, Flag::Var])
-            || (modifiers.has(Flag::Abstract) && !in_trait)
-            || modifiers.set_visibility.is_some()
-        {
-            return Err(unread(line, "a class member"));
-        }
+        let attributes = self.walk_attributes(&node.attrs)?;
         let Some(name) = node.name.and_then(|name| self.parsed.tree[name].name) else {
             return Err(unread(line, "a method"));
         };
@@ -923,13 +1182,16 @@ impl Emit<'_> {
             node.params,
             node.ret,
             node.body,
-            in_trait,
+            true,
             node.doc_comment,
             line,
             node.range(),
         )?;
         class.methods.push(Method {
-            function,
+            function: Function {
+                attributes,
+                ..function
+            },
             visibility: modifiers.visibility.unwrap_or_default(),
             is_static: modifiers.has(Flag::Static),
             is_abstract: modifiers.has(Flag::Abstract),
@@ -980,6 +1242,22 @@ pub(super) fn refused(line: u32, message: impl Into<String>) -> CompileError {
 // members and parameters under them into, each named after the tree
 // node it stands for and the `zend_ast` kind that node is, with the
 // expressions under it the tree's own nodes (design §4.9, #595).
+
+/// One `namespace` statement, php's `ZEND_AST_NAMESPACE`, in the form
+/// `zend_compile_namespace` tells apart by whether `child[1]` stands.
+#[derive(Debug, PartialEq)]
+pub(super) enum Namespace {
+    /// `namespace N;`: what follows is in `N`, up to the next one.
+    Unbracketed(Vec<u8>),
+    /// `namespace N { … }`, and `namespace { … }`, whose name is none
+    /// and whose statements are the global namespace's: the braces'
+    /// statements are top statements, compiled as the file's own are.
+    Bracketed {
+        name: Option<Vec<u8>>,
+        body: Vec<Stmt>,
+    },
+}
+
 /// One class declaration, php's `zend_ast_decl` for a class: the name as
 /// written, the doc comment taken before its `{` (`class_declaration_statement`
 /// reduces `backup_doc_comment` after `implements_list`), and its
@@ -996,6 +1274,9 @@ pub(super) fn refused(line: u32, message: impl Into<String>) -> CompileError {
 pub(super) struct Class {
     pub(super) name: Vec<u8>,
     pub(super) kind: ClassKind,
+    /// `abstract`, `final` and `readonly` as a class's `class_modifiers`
+    /// wrote them; none on every other kind.
+    pub(super) modifiers: ClassModifiers,
     /// An enum's backing type as written after the `:`, php's
     /// `decl->child[4]`; none for a pure enum and for every other kind.
     pub(super) backing: Option<TypeExpr>,
@@ -1066,8 +1347,18 @@ pub(super) enum AsModifier {
 #[derive(Debug, PartialEq)]
 pub(super) struct Attr {
     pub(super) name: Vec<u8>,
-    pub(super) arguments: Vec<php_syntax::tree::Expr>,
+    pub(super) arguments: Vec<AttrArgument>,
     pub(super) line: u32,
+}
+
+/// One argument of an attribute's list as written, php's
+/// `ZEND_AST_ARG_LIST` child: an expression, `name: expression`, or
+/// `...expression`, which `zend_compile_attributes` refuses.
+#[derive(Debug, PartialEq)]
+pub(super) enum AttrArgument {
+    Positional(php_syntax::tree::Expr),
+    Named(Vec<u8>, php_syntax::tree::Expr),
+    Unpack,
 }
 
 /// One function declaration, php's `zend_ast_decl` for a function or a
@@ -1086,6 +1377,9 @@ pub(super) struct Function {
     pub(super) return_type: Option<TypeExpr>,
     pub(super) by_ref: bool,
     pub(super) body: Vec<php_syntax::tree::Stmt>,
+    /// The attributes written before it, `decl->child[4]`, which the
+    /// emitter compiles for the function or the method target.
+    pub(super) attributes: Vec<Attr>,
     pub(super) doc_comment: Option<Vec<u8>>,
     pub(super) line: u32,
     pub(super) end_line: u32,
@@ -1110,15 +1404,23 @@ pub(super) struct Parameter {
     pub(super) variadic: bool,
     pub(super) default: Option<php_syntax::tree::Expr>,
     pub(super) promote: Option<Promoted>,
+    /// The attributes written before it, `param_ast->child[3]`.
+    pub(super) attributes: Vec<Attr>,
+    /// The doc comment before the parameter, `param_ast->child[4]`,
+    /// which `zend_compile_params` hands the property a promoted
+    /// parameter declares.
+    pub(super) doc_comment: Option<Vec<u8>>,
 }
 
 /// The modifiers that make a constructor's parameter a property,
-/// php's `promotion_flags` in `zend_compile_params`: the visibility and
-/// the `readonly` bit.
+/// php's `promotion_flags` in `zend_compile_params`: the visibility, the
+/// set visibility as written, and the `readonly` and `final` bits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Promoted {
     pub(super) visibility: Visibility,
+    pub(super) set_visibility: Option<Visibility>,
     pub(super) is_readonly: bool,
+    pub(super) is_final: bool,
 }
 
 /// One method, php's `ZEND_AST_METHOD`: a function with the group's
@@ -1180,6 +1482,7 @@ pub(super) struct Use {
 /// `private(set)` as written, before `zend_declare_typed_property`
 /// holds it to the read visibility.
 #[derive(Debug, PartialEq)]
+#[allow(clippy::struct_excessive_bools)] // the ZEND_ACC_* bits of a property as written, each one fact
 pub(super) struct Property {
     pub(super) name: Vec<u8>,
     pub(super) visibility: Visibility,
@@ -1188,6 +1491,14 @@ pub(super) struct Property {
     /// declarator, as `zend_compile_prop_decl` compiles it.
     pub(super) ty: Option<TypeExpr>,
     pub(super) is_static: bool,
+    /// `ZEND_ACC_FINAL`, `ZEND_ACC_ABSTRACT` and `ZEND_ACC_READONLY` as
+    /// the group wrote them, before `zend_compile_prop_decl` holds them
+    /// to the class and to each other.
+    pub(super) is_final: bool,
+    pub(super) is_abstract: bool,
+    pub(super) is_readonly: bool,
+    /// The group's attributes, compiled for each declarator.
+    pub(super) attributes: Vec<Attr>,
     pub(super) default: Option<php_syntax::tree::Expr>,
     pub(super) doc_comment: Option<Vec<u8>>,
     pub(super) line: u32,
@@ -1202,6 +1513,9 @@ pub(super) struct Constant {
     pub(super) name: Vec<u8>,
     pub(super) visibility: Visibility,
     pub(super) is_final: bool,
+    /// The group's type as written, compiled by the emitter once per
+    /// declarator, as `zend_compile_class_const_decl` compiles it.
+    pub(super) ty: Option<TypeExpr>,
     /// The value as written; a `case` of a pure enum has none.
     pub(super) value: Option<php_syntax::tree::Expr>,
     /// `case A;` or `case A = 1;` in an enum's body, php's
@@ -1209,7 +1523,8 @@ pub(super) struct Constant {
     /// the enum's own constants in the order written.
     pub(super) is_case: bool,
     /// The attributes written before a case, `ast->child[3]` of
-    /// `ZEND_AST_ENUM_CASE`; a constant's are refused before this.
+    /// `ZEND_AST_ENUM_CASE`, or before a constant's group, compiled for
+    /// each declarator.
     pub(super) attributes: Vec<Attr>,
     pub(super) doc_comment: Option<Vec<u8>>,
     pub(super) line: u32,

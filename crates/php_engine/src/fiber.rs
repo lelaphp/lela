@@ -43,7 +43,7 @@ use php_compile::StackLimit;
 use php_heap::{Block, Fatal, FiberStack, Heap, Host, Obj, StackRefused, Suspensions, Switched};
 use php_unit::decl::{
     ClassDecl, ClassFlags, ClassKind, ConstExpr, DynamicProperties, EnumBacking, FunctionDecl,
-    MethodDecl, Name, Parameter, Type, Visibility,
+    MethodDecl, Name, Parameter, ParameterDefault, Type, Visibility,
 };
 
 use crate::api::abi::{Callable, CloneObj, Entry, NativeClassDecl, ObjectHandlers};
@@ -469,7 +469,7 @@ fn fiber_class() -> ClassDecl {
 /// `class_Fiber_methods`, in the stub's order, each with its entry.
 fn fiber_methods() -> Vec<(MethodDecl, Entry)> {
     let value = || Parameter {
-        default: Some(ConstExpr::Null),
+        default: ParameterDefault::Expr(ConstExpr::Null),
         ..parameter(b"value", Type::Mixed)
     };
     let fiber = Type::Nullable(Box::new(Type::Named(Name(b"Fiber".as_slice().into()))));
@@ -579,8 +579,9 @@ fn parameter(name: &[u8], ty: Type) -> Parameter {
         ty: Some(ty),
         by_ref: false,
         prefer_ref: false,
+        promoted: false,
         variadic: false,
-        default: None,
+        default: ParameterDefault::None,
         attributes: Vec::new(),
     }
 }

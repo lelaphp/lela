@@ -40,9 +40,10 @@
 
 use php_heap::{Exponent, double_to_string};
 use php_syntax::tree::{self, NodeId, Stmt, TokenId};
-use php_syntax::{Holder, Parsed, SyntaxKind, TokenValue};
+use php_syntax::{Holder, Parsed, SyntaxKind, TextRange, TokenValue};
 
 use super::Emit;
+use super::args::Arg;
 use crate::CompileError;
 
 /// php's `ZEND_ACC_*` visibility and the modifiers `zend_ast_export`
@@ -364,20 +365,64 @@ fn builtin_type(name: &[u8]) -> Option<&'static str> {
 impl<'a> Emit<'a> {
     /// `zend_ast_export("assert(", arg, ")")`: the description
     /// `zend_compile_assert` gives an assertion written without one, the
-    /// argument as php prints it, with its name where it is named.
-    pub(super) fn assertion_text(
-        &mut self,
-        name: Option<&[u8]>,
-        value: tree::Expr,
-    ) -> Result<Vec<u8>, CompileError> {
+    /// argument as php prints it, with its name where it is named and
+    /// its `...` where it is unpacked (`ZEND_AST_NAMED_ARG`,
+    /// `ZEND_AST_UNPACK`). An argument the compiler made is none a
+    /// program wrote, and has no text.
+    ///
+    /// ```php
+    /// function t($f) { try { $f(); } catch (AssertionError $e) { echo $e->getMessage(), "\n"; } }
+    /// t(fn () => assert(false && (#[A] static fn (): (X&Y)|null => $a?->b(name: 1, ...$c))));
+    /// t(fn () => assert(false && [$a, [, 'k' => &$b]] = $c));
+    /// t(fn () => assert(false && #[A(1)] static function () {}));
+    /// t(fn () => assert(assertion: false && \A\B::c(...$d) && namespace\e()));
+    /// t(fn () => assert(false && $f()() && A::$m() && $o->{'m' . 1}() && ('str' . 'len')('x')));
+    /// ```
+    /// ```expect
+    /// assert(false && (#[A] static fn(): X&Y|null => $a?->b(name: 1, ...$c)))
+    /// assert(false && ([$a, [, 'k' => &$b]] = $c))
+    /// assert(false && #[A(1)] static function () {
+    /// })
+    /// assert(assertion: false && \A\B::c(...$d) && namespace\e())
+    /// assert(false && $f()() && A::$m() && $o->m1() && \strlen('x'))
+    /// ```
+    ///
+    /// An unpacked assertion is printed as written, and the description
+    /// after it is the positional argument php refuses there:
+    ///
+    /// ```php
+    /// assert(...[false]);
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use positional argument after argument unpacking in %s on line 2
+    /// ```
+    pub(super) fn assertion_text(&mut self, only: &Arg) -> Result<Vec<u8>, CompileError> {
         let mut out = b"assert(".to_vec();
-        if let Some(name) = name {
-            out.extend(name);
-            out.extend(b": ");
-        }
+        let value = match only {
+            Arg::Positional(value) => *value,
+            Arg::Named(name, value) => {
+                out.extend(name.iter());
+                out.extend(b": ");
+                *value
+            }
+            Arg::Unpack(value) => {
+                out.extend(b"...");
+                *value
+            }
+            Arg::Made(..) => return Err(self.fatal("an assertion the compiler wrote")),
+        };
         self.export(&mut out, value, 0, 0)?;
         out.push(b')');
         Ok(out)
+    }
+
+    /// Whether a closure or an arrow function was written `static`: the
+    /// first token after the attribute groups written before it.
+    fn written_static(&self, range: TextRange, attrs: &[NodeId<tree::AttributeGroup>]) -> bool {
+        let start = attrs
+            .last()
+            .map_or(range.start, |last| self.parsed.tree[*last].range.end());
+        self.first_kind(TextRange::new(start, range.end())) == Some(SyntaxKind::STATIC_KW)
     }
 
     /// `zend_ast_export_ex` over one expression at `priority`.
@@ -392,6 +437,9 @@ impl<'a> Emit<'a> {
         self.check_stack()?;
         let parsed: &'a Parsed = self.parsed;
         let tree = &parsed.tree;
+        // An arrow function written in parentheses keeps them, the one
+        // mark php's `'(' expr ')'` leaves (`ZEND_PARENTHESIZED_ARROW_FUNC`).
+        let parenthesized = matches!(expr, tree::Expr::ParenExpr(_));
         let expr = self.peel(expr);
         match expr {
             tree::Expr::ParenExpr(_) => Ok(()),
@@ -739,7 +787,19 @@ impl<'a> Emit<'a> {
                         out.extend(self.arrow(access.op));
                         self.export_member(out, access.member, true, indent)?;
                     }
-                    _ => self.export(out, callee, 0, indent)?,
+                    // `zend_ast_export_ns_name` over a string the parser
+                    // made a `ZEND_AST_ZVAL` of, whose `attr` is
+                    // `ZEND_NAME_FQ`: `'strlen'('x')` is `\strlen('x')`.
+                    _ => {
+                        let value = self.written(callee)?;
+                        match value.as_ref().and_then(|value| value.as_str()) {
+                            Some(name) => {
+                                out.push(b'\\');
+                                out.extend(name.bytes());
+                            }
+                            None => self.export(out, callee, 0, indent)?,
+                        }
+                    }
                 }
                 if wrapped {
                     out.push(b')');
@@ -814,7 +874,7 @@ impl<'a> Emit<'a> {
             }
             tree::Expr::ClosureExpr(id) => {
                 let node = &tree[id];
-                let is_static = self.first_kind(node.range) == Some(SyntaxKind::STATIC_KW);
+                let is_static = self.written_static(node.range, &node.attrs);
                 let decl = Decl {
                     kind: DeclKind::Closure,
                     attrs: &node.attrs,
@@ -833,7 +893,7 @@ impl<'a> Emit<'a> {
             }
             tree::Expr::ArrowFnExpr(id) => {
                 let node = &tree[id];
-                let is_static = self.first_kind(node.range) == Some(SyntaxKind::STATIC_KW);
+                let is_static = self.written_static(node.range, &node.attrs);
                 let decl = Decl {
                     kind: DeclKind::Arrow,
                     attrs: &node.attrs,
@@ -848,7 +908,7 @@ impl<'a> Emit<'a> {
                     ret: node.ret,
                     body: node.body.map_or(DeclBody::None, DeclBody::Arrow),
                 };
-                self.export_decl(out, &decl, false, indent)
+                self.export_decl(out, &decl, parenthesized, indent)
             }
         }
     }

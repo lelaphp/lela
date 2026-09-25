@@ -10,7 +10,7 @@
 use std::cmp::Ordering;
 
 use php_ext::coerce::{coerce_param, compare};
-use php_ext::decl::{ConstExpr, FunctionDecl, Name, Parameter, Type};
+use php_ext::decl::{ConstExpr, FunctionDecl, Name, Parameter, ParameterDefault, Type};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::{Key, Value, ValueRef};
@@ -105,7 +105,9 @@ pub(super) fn natives() -> Vec<(FunctionDecl, Entry)> {
         ..parameter(b"array", Type::Array)
     };
     let flags = || Parameter {
-        default: Some(ConstExpr::Constant(Name(b"SORT_REGULAR".as_slice().into()))),
+        default: ParameterDefault::Expr(ConstExpr::Constant(Name(
+            b"SORT_REGULAR".as_slice().into(),
+        ))),
         ..parameter(b"flags", Type::Int)
     };
     let flagged = |name: &[u8], entry: Entry| {
@@ -632,12 +634,14 @@ pub(super) fn multisort_native() -> (FunctionDecl, Entry) {
                 Parameter {
                     by_ref: true,
                     prefer_ref: true,
+                    promoted: false,
                     ty: None,
                     ..parameter(b"array", Type::Mixed)
                 },
                 Parameter {
                     by_ref: true,
                     prefer_ref: true,
+                    promoted: false,
                     variadic: true,
                     ty: None,
                     ..parameter(b"rest", Type::Mixed)

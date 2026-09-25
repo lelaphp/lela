@@ -64,7 +64,7 @@ pub use map::{MapPtr, MapTable};
 pub use numeric::{
     Exponent, Number, double_to_string, numeric_prefix, power, shift_left, shift_right,
 };
-pub use object::{Obj, ObjectId};
+pub use object::{Laziness, Obj, ObjectId};
 pub use reference::Ref;
 pub use resource::{Res, ResourceType};
 pub use sort::zend_sort;

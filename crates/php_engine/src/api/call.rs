@@ -8,12 +8,12 @@
 
 use std::sync::Arc;
 
-use php_unit::decl::{ConstExpr, Name};
+use php_unit::decl::{ConstExpr, Name, ParameterDefault};
 use php_unit::{ConstIdx, Opcode, Unit};
 
 use crate::api::abi::{Callable, PropertyRead};
 use crate::api::raising::{Thrown, argument_error, throw};
-use crate::api::request::Request;
+use crate::api::request::{Request, Strategy};
 use crate::api::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use crate::exec::{self, Body, CallStage};
 
@@ -133,14 +133,6 @@ impl Iter {
     pub fn value(&self) -> Option<&Value> {
         self.entries.get(self.at?).map(|(_, v)| v)
     }
-}
-
-fn no_loop(req: &mut Request, what: &str) -> Thrown {
-    throw(
-        req,
-        "Error",
-        &format!("Call to undefined function {what}()"),
-    )
 }
 
 /// `zend_call_known_fcc` (`Z/Zend/zend_execute_API.c:1090`): the
@@ -622,7 +614,9 @@ fn native_default(req: &mut Request, function: Function, at: usize) -> Result<Va
     let required = decl
         .parameters
         .iter()
-        .rposition(|parameter| parameter.default.is_none() && !parameter.variadic)
+        .rposition(|parameter| {
+            matches!(parameter.default, ParameterDefault::None) && !parameter.variadic
+        })
         .map_or(0, |last| last + 1);
     let parameter = decl.parameters.get(at).cloned();
     if at < required {
@@ -636,10 +630,9 @@ fn native_default(req: &mut Request, function: Function, at: usize) -> Result<Va
     let Some(parameter) = parameter else {
         return Ok(Value::null());
     };
-    let known = parameter.default.filter(
-        |default| !matches!(default, ConstExpr::Constant(Name(name)) if **name == *b"UNKNOWN"),
-    );
-    let Some(default) = known else {
+    // The stub's `= UNKNOWN` is `ParameterDefault::Unshown`: a default
+    // php cannot show, so it cannot be filled either.
+    let ParameterDefault::Expr(default) = parameter.default else {
         return Err(argument_error(
             req,
             "ArgumentCountError",
@@ -864,6 +857,28 @@ pub fn lookup_class(req: &mut Request, name: &[u8]) -> Result<Option<ClassId>, T
 #[must_use]
 pub fn lookup_function(req: &Request, name: &[u8]) -> Option<Function> {
     req.function_named(name)
+}
+
+/// The `static` variables of what `callable` names, name and value in the
+/// order the op array's table holds them, as
+/// `ReflectionFunctionAbstract::getStaticVariables` copies
+/// `ZEND_MAP_PTR_GET(static_variables_ptr)`: a closure's own table, its
+/// `use` variables first, and a function's or a method's the request's
+/// copy, laid down at its starting values where no call has touched it,
+/// as php lays it down there. A variable a `static` bound is the cell
+/// the function binds, as php's bucket holds it. Empty for a native and
+/// for a function with none. The values are views, no owner taken; the
+/// `Err` is the memory limit refusing a name.
+pub fn bound_variables(
+    req: &mut Request,
+    callable: &Callable,
+) -> Result<Vec<(PhpString, Value)>, Thrown> {
+    let rows = req.static_variables(callable.target());
+    let mut out = Vec::with_capacity(rows.len());
+    for (name, value) in rows {
+        out.push((PhpString::new(req, &name)?, value));
+    }
+    Ok(out)
 }
 
 /// Serve the autoloaders for `name`, `zend_lookup_class_ex` after the
@@ -1157,6 +1172,13 @@ pub fn eval_const_expr(
         ConstExpr::Array(elements) => {
             let mut array = crate::api::values::PhpArray::new(req)?;
             for (key, value) in elements {
+                if let ConstExpr::Unpack(inner) = value {
+                    let spread = eval_const_expr(req, inner, scope)?;
+                    let added = add_unpacked_element(req, &mut array, &spread);
+                    req.release(spread);
+                    added?;
+                    continue;
+                }
                 let value = eval_const_expr(req, value, scope)?;
                 match key {
                     Some(key) => {
@@ -1193,6 +1215,55 @@ pub fn eval_const_expr(
         }
         _ => Err(invalid_operations(req)),
     }
+}
+
+/// `zend_ast_add_unpacked_element` (`Z/Zend/zend_ast.c:531`), a `...`
+/// inside an array of a constant expression: an array's string keys
+/// written as they stand and its integer keys dropped for the next
+/// index, a reference among its elements kept as it is; anything else,
+/// a `Traversable` among them, is php's `Error`.
+///
+/// ```php
+/// const A = [1, 'k' => 'a'];
+/// const X = 1;
+/// class C { const D = [...A, ...self::E, 'k' => 'b']; const E = [7 => 2]; const F = [...X]; }
+/// var_dump(C::D);
+/// try { var_dump(C::F); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// array(3) {
+///   [0]=>
+///   int(1)
+///   ["k"]=>
+///   string(1) "b"
+///   [1]=>
+///   int(2)
+/// }
+/// Only arrays can be unpacked in constant expression
+/// ```
+fn add_unpacked_element(
+    req: &mut Request,
+    array: &mut PhpArray,
+    spread: &Value,
+) -> Result<(), Thrown> {
+    let Some(source) = spread.deref().as_array().copied() else {
+        return Err(throw(
+            req,
+            "Error",
+            "Only arrays can be unpacked in constant expression",
+        ));
+    };
+    for (key, value) in source.snapshot_refs() {
+        req.addref(&value);
+        match key {
+            Key::Str(name) => {
+                req.addref(&Value::string(name));
+                array.set(req, Key::Str(name), value)?;
+            }
+            Key::Int(_) => array.append(req, value)?,
+        }
+    }
+    Ok(())
 }
 
 /// php's `Error` for a node its constant-expression walk does not
@@ -1275,9 +1346,28 @@ pub fn iterate(req: &mut Request, value: &Value) -> Result<Iter, Thrown> {
     })
 }
 
-/// `Closure::fromCallable`.
+/// `zend_create_fake_closure` over a resolved callable, what
+/// `Closure::fromCallable` and `ReflectionFunction::getClosure` make: a
+/// closure hands back itself, one more owner; a function is closed over
+/// with no scope; a method over its class, with the receiver the
+/// callable holds and its class as the called scope, or the class the
+/// callable named where it holds none. The closure is fake
+/// (`ZEND_ACC_FAKE_CLOSURE`), so `bind` may not move its scope.
+///
+/// ```php
+/// class A { static function who() { return static::class; } function me() { return $this; } }
+/// class B extends A {}
+/// var_dump((new ReflectionMethod('A', 'who'))->getClosure()(), (new ReflectionMethod('B', 'who'))->getClosure()());
+/// $b = new B; var_dump((new ReflectionMethod('A', 'me'))->getClosure($b)() === $b, (new ReflectionFunction('strlen'))->getClosure()('ab'));
+/// ```
+/// ```expect
+/// string(1) "A"
+/// string(1) "A"
+/// bool(true)
+/// int(2)
+/// ```
 pub fn closure_from_callable(req: &mut Request, callable: &Callable) -> Result<PhpObject, Thrown> {
-    Err(no_loop(req, &callable.name()))
+    crate::classes::fake_closure(req, callable)
 }
 
 /// Read a property through the class's `read_property` handler: a
@@ -1353,54 +1443,99 @@ pub fn write_static_prop(
     req.set_static_property(class, name, Some(class), value, false)
 }
 
-/// `ReflectionClass::newLazyGhost`.
+/// `zend_object_make_lazy(NULL, class, ..., ZEND_LAZY_OBJECT_STRATEGY_GHOST
+/// | options)`, what `ReflectionClass::newLazyGhost` serves: a new
+/// object of `class` whose declared properties wait for `initializer`,
+/// served with the object the first time one of them is touched.
+/// `options` is php's user mask, which the caller has held to it;
+/// `SKIP_INITIALIZATION_ON_SERIALIZE` is the bit read here. An internal
+/// class other than `stdClass`, and one below such a class, is php's
+/// `Error`.
 pub fn new_lazy_ghost(
     req: &mut Request,
     class: ClassId,
     initializer: &Callable,
+    options: i64,
 ) -> Result<PhpObject, Thrown> {
-    let _ = initializer;
-    new_object(req, class)
+    req.make_lazy(None, class, initializer, Strategy::Ghost, options)
 }
 
-/// `ReflectionClass::newLazyProxy`.
+/// `zend_object_make_lazy` under `ZEND_LAZY_OBJECT_STRATEGY_PROXY`, what
+/// `ReflectionClass::newLazyProxy` serves: a new object of `class`
+/// whose accesses, once one is made, go to the instance `factory`
+/// returns.
 pub fn new_lazy_proxy(
     req: &mut Request,
     class: ClassId,
     factory: &Callable,
+    options: i64,
 ) -> Result<PhpObject, Thrown> {
-    let _ = factory;
-    new_object(req, class)
+    req.make_lazy(None, class, factory, Strategy::Proxy, options)
 }
 
-/// `ReflectionClass::resetAsLazyGhost`.
+/// `zend_object_make_lazy(obj, class, ...)` under the ghost strategy,
+/// what `ReflectionClass::resetAsLazyGhost` serves: `object`, an
+/// instance of `class`, reset, its destructor served first unless
+/// `options` carries `SKIP_DESTRUCTOR`, and left waiting for
+/// `initializer`. An object that is lazy and not initialised is the
+/// caller's to refuse.
 pub fn reset_as_lazy_ghost(
     req: &mut Request,
     object: &PhpObject,
+    class: ClassId,
     initializer: &Callable,
+    options: i64,
 ) -> Result<(), Thrown> {
-    let _ = (req, object, initializer);
-    Ok(())
+    req.make_lazy(Some(*object), class, initializer, Strategy::Ghost, options)
+        .map(|_| ())
 }
 
+/// [`reset_as_lazy_ghost`] under the proxy strategy,
 /// `ReflectionClass::resetAsLazyProxy`.
 pub fn reset_as_lazy_proxy(
     req: &mut Request,
     object: &PhpObject,
+    class: ClassId,
     factory: &Callable,
+    options: i64,
 ) -> Result<(), Thrown> {
-    let _ = (req, object, factory);
-    Ok(())
+    req.make_lazy(Some(*object), class, factory, Strategy::Proxy, options)
+        .map(|_| ())
 }
 
-/// `ReflectionClass::initializeLazyObject`: serve the initializer now.
-pub fn initialize_lazy(req: &mut Request, object: &PhpObject) -> Result<(), Thrown> {
-    let _ = (req, object);
-    Ok(())
+/// `zend_lazy_object_init`, what `ReflectionClass::initializeLazyObject`
+/// serves: a lazy object nothing has initialised is initialised now,
+/// and the answer is the object its properties are read on, the ghost
+/// itself or the proxy's instance, a view. An object that is not lazy is
+/// its own answer; what the initializer threw is the `Err`, the object
+/// left waiting.
+pub fn initialize_lazy(req: &mut Request, object: &PhpObject) -> Result<PhpObject, Thrown> {
+    req.lazy_init(*object)
 }
 
-/// `ReflectionClass::markLazyObjectAsInitialized`.
-pub fn skip_lazy_initialization(req: &mut Request, object: &PhpObject) -> Result<(), Thrown> {
-    let _ = (req, object);
-    Ok(())
+/// `zend_lazy_object_mark_as_initialized`, what
+/// `ReflectionClass::markLazyObjectAsInitialized` serves: each property
+/// still waiting takes its default and the initializer is never served.
+/// The answer is [`initialize_lazy`]'s, a view.
+pub fn mark_lazy_initialized(req: &mut Request, object: &PhpObject) -> Result<PhpObject, Thrown> {
+    if object.is_lazy() {
+        req.lazy_mark_initialized(*object)?;
+    }
+    req.lazy_init(*object)
+}
+
+/// `ReflectionProperty::skipLazyInitialization` under `None` and
+/// `ReflectionProperty::setRawValueWithoutLazyInitialization` under
+/// `Some`: the declared property `name`, on the object the initialised
+/// proxies lead to, stops waiting for the initializer, holding its
+/// default or `value` written past `__set` and hooks; the object stops
+/// being lazy once no property waits. `value` is the object's from here.
+/// The checks on the property php makes first are the caller's.
+pub fn skip_lazy_initialization(
+    req: &mut Request,
+    object: &PhpObject,
+    name: &[u8],
+    value: Option<Value>,
+) -> Result<(), Thrown> {
+    req.lazy_skip(*object, name, value)
 }

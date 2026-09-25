@@ -33,7 +33,7 @@
 use crate::Level;
 use crate::decl::{
     ClassConstDecl, ClassDecl, ClassKind, ConstExpr, EnumBacking, FunctionDecl, MethodDecl, Name,
-    PropertyDecl, Type, Visibility,
+    Parameter, PropertyDecl, Type, Visibility,
 };
 use crate::type_to_string;
 use std::fmt;
@@ -136,6 +136,14 @@ pub enum Refusal {
         parent: String,
         constant: String,
     },
+    /// `Type of %s::%s must be compatible with %s::%s of type %s`, a
+    /// typed constant redeclared with no type or one that is no subtype.
+    ConstantType {
+        holder: String,
+        constant: String,
+        parent: String,
+        ty: String,
+    },
     /// `Access level to %s::%s must be %s (as in %s %s)%s`.
     ConstantVisibility {
         class: String,
@@ -201,11 +209,14 @@ pub enum Refusal {
     /// `Class %s contains %d abstract method%s and must therefore be
     /// declared abstract or implement the remaining method%s (%s)`, with
     /// every method left, of which php names three; an enum, which
-    /// cannot be abstract, `must implement` them.
+    /// cannot be abstract, and a class declared abstract, which is left
+    /// with a private abstract method no other class may implement,
+    /// `must implement` them.
     AbstractLeft {
         kind: ClassKind,
         class: String,
         methods: Vec<String>,
+        must_implement: bool,
     },
     /// `Trait method %s::%s has not been applied as %s::%s, because of
     /// collision with %s::%s`: two traits' methods under one name.
@@ -277,6 +288,12 @@ pub enum Refusal {
     /// `Enum %s cannot include properties`, what `zend_verify_enum`
     /// raises of a property a trait gave the enum.
     EnumProperties { class: String },
+    /// `%s::%s() has #[\Override] attribute, but no matching parent
+    /// method exists`.
+    OverrideMethod { class: String, method: String },
+    /// `%s::$%s has #[\Override] attribute, but no matching parent
+    /// property exists`.
+    OverrideProperty { class: String, property: String },
 }
 
 /// The six names of a [`Refusal::TraitCollision`]: the trait a method
@@ -504,6 +521,15 @@ impl fmt::Display for Refusal {
             Refusal::FinalMethod { parent, method } => {
                 write!(f, "Cannot override final method {parent}::{method}()")
             }
+            Refusal::ConstantType {
+                holder,
+                constant,
+                parent,
+                ty,
+            } => write!(
+                f,
+                "Type of {holder}::{constant} must be compatible with {parent}::{constant} of type {ty}"
+            ),
             Refusal::MethodReceiver {
                 parent,
                 method,
@@ -597,6 +623,7 @@ impl fmt::Display for Refusal {
                 kind,
                 class,
                 methods,
+                must_implement,
             } => {
                 let count = methods.len();
                 let plural = if count > 1 { "s" } else { "" };
@@ -608,7 +635,7 @@ impl fmt::Display for Refusal {
                     .join(", ");
                 let more = if count > 3 { ", ..." } else { "" };
                 let what = object_type_uc(*kind);
-                if *kind == ClassKind::Enum {
+                if *must_implement {
                     return write!(
                         f,
                         "{what} {class} must implement {count} abstract method{plural} ({named}{more})"
@@ -710,6 +737,14 @@ impl fmt::Display for Refusal {
             Refusal::EnumProperties { class } => {
                 write!(f, "Enum {class} cannot include properties")
             }
+            Refusal::OverrideMethod { class, method } => write!(
+                f,
+                "{class}::{method}() has #[\\Override] attribute, but no matching parent method exists"
+            ),
+            Refusal::OverrideProperty { class, property } => write!(
+                f,
+                "{class}::${property} has #[\\Override] attribute, but no matching parent property exists"
+            ),
         }
     }
 }
@@ -1016,7 +1051,7 @@ fn required(function: &FunctionDecl) -> usize {
     function
         .parameters
         .iter()
-        .rposition(|p| p.default.is_none() && !p.variadic)
+        .rposition(Parameter::is_required)
         .map_or(0, |at| at + 1)
 }
 
@@ -1090,7 +1125,7 @@ fn declaration(function: &FunctionDecl, side: &Side<'_>) -> String {
             out.push_str(
                 &parameter
                     .default
-                    .as_ref()
+                    .expr()
                     .map_or_else(|| String::from("<default>"), default_text),
             );
         }
@@ -1712,6 +1747,28 @@ impl<'a> Linker<'a> {
 
     /// `do_inheritance_check_on_method` of `fe` over `proto`, each read
     /// on its side, with the checks `check` names.
+    ///
+    /// ```php
+    /// class P { function f() {} }
+    /// abstract class C extends P { abstract function f(); }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot make non abstract method P::f() abstract in class C in %s on line 3
+    /// ```
+    ///
+    /// An override of a native's tentative return type that does not
+    /// match it is php's deprecation, and `#[\ReturnTypeWillChange]` on
+    /// the override silences it:
+    ///
+    /// ```php
+    /// class C implements IteratorAggregate { #[\ReturnTypeWillChange] function getIterator() { return new ArrayIterator([1]); } }
+    /// class D implements IteratorAggregate { function getIterator() { return new ArrayIterator([2]); } }
+    /// foreach (new C as $v) echo $v, "\n";
+    /// ```
+    /// ```expect
+    /// Deprecated: Return type of D::getIterator() should either be compatible with IteratorAggregate::getIterator(): Traversable, or the #[\ReturnTypeWillChange] attribute should be used to temporarily suppress the notice in %s on line 3
+    /// 1
+    /// ```
     fn method_refused(
         &mut self,
         child: &'a ClassDecl,
@@ -1958,8 +2015,73 @@ impl<'a> Linker<'a> {
     }
 
     /// `do_inherit_constant_check` for a constant the child's table
-    /// already holds, from `held_by`, none for the child's own.
+    /// already holds, from `held_by`, none for the child's own: the
+    /// refusals of [`Self::constant_flags_refused`], then a typed
+    /// parent's `class_constant_types_compatible`, php's covariant check
+    /// of the held constant's type in its class against the parent's in
+    /// the parent's, an unresolved outcome the obligation php delays.
+    ///
+    /// ```php
+    /// class P { const int X = 1; const ?int Y = 1; }
+    /// class C extends P { const int Y = 2; }
+    /// var_dump(C::X, C::Y);
+    /// class D extends P { const string X = 'a'; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Type of D::X must be compatible with P::X of type int in %s on line 5
+    /// ```
+    ///
+    /// ```php
+    /// interface I { const int X = 1; }
+    /// class C implements I { const X = 2; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Type of C::X must be compatible with I::X of type int in %s on line 3
+    /// ```
     fn constant_refused(
+        &self,
+        child: &'a ClassDecl,
+        held: &ClassConstDecl,
+        held_by: Option<&'a ClassDecl>,
+        parent: &ClassConstDecl,
+        parent_class: &'a ClassDecl,
+    ) -> Option<Linked> {
+        if let Some(refusal) =
+            Self::constant_flags_refused(child, held, held_by, parent, parent_class)
+        {
+            return Some(Linked::Refused(at_class(child, refusal)));
+        }
+        let parent_ty = parent.ty.as_ref()?;
+        if parent.visibility == Visibility::Private {
+            return None;
+        }
+        let holder = held_by.unwrap_or(child);
+        let fe_scope = Self::scope_of(child, held_by.map_or(Cls::Linking, Cls::Linked));
+        let proto_scope = Self::scope_of(child, Cls::Linked(parent_class));
+        let status = match &held.ty {
+            None => Status::Error,
+            Some(ty) => self.covariant(child, &fe_scope, ty, &proto_scope, parent_ty),
+        };
+        let refused = at_class(
+            child,
+            Refusal::ConstantType {
+                holder: text(&holder.name.0),
+                constant: text(&parent.name.0),
+                parent: text(&parent_class.name.0),
+                ty: type_to_string(&resolved(parent_ty, &proto_scope)),
+            },
+        );
+        match status {
+            Status::Error => Some(Linked::Refused(refused)),
+            Status::Unresolved => Some(Linked::Unresolved(refused)),
+            Status::Success | Status::Warning => None,
+        }
+    }
+
+    /// The modifier half of `do_inherit_constant_check`: a final constant
+    /// overridden, one inherited from two places, and a narrowed
+    /// visibility.
+    fn constant_flags_refused(
         child: &'a ClassDecl,
         held: &ClassConstDecl,
         held_by: Option<&'a ClassDecl>,
@@ -1998,6 +2120,41 @@ impl<'a> Linker<'a> {
     }
 
     /// `zend_do_inheritance_ex`'s refusals of the parent itself.
+    ///
+    /// ```php
+    /// final class F {}
+    /// class G extends F {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Class G cannot extend final class F in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// readonly class R {}
+    /// class S extends R {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Non-readonly class S cannot extend readonly class R in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class N {}
+    /// readonly class S extends N {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Readonly class S cannot extend non-readonly class N in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// abstract class A {}
+    /// readonly class R {}
+    /// readonly class S extends R {}
+    /// class B extends A {}
+    /// echo get_class(new B), " ", get_class(new S), "\n";
+    /// ```
+    /// ```expect
+    /// B S
+    /// ```
     fn parent_refused(child: &ClassDecl, parent: &ClassDecl) -> Option<Refusal> {
         let (class, parent_name) = (text(&child.name.0), text(&parent.name.0));
         if child.kind == ClassKind::Interface {
@@ -2067,11 +2224,135 @@ impl<'a> Linker<'a> {
             Ok(stringable) => stringable,
             Err(linked) => return Settled::of(*linked),
         };
+        if let Some(refused) = self.override_refused(child, abstracts) {
+            return Settled::of(Linked::Refused(refused));
+        }
         Settled {
             outcome: Linked::Linked,
             added,
             stringable,
         }
+    }
+
+    /// `zend_inheritance_check_override`, once every other check held:
+    /// a method or a property of the class's own marked `#[\Override]`
+    /// that overrides nothing. A method overrides what
+    /// `do_inheritance_check_on_method` resets the mark over: a
+    /// parent's method that is abstract or, not being a constructor, is
+    /// not private; an interface's, the class's own or its parents'; and
+    /// a used trait's abstract one. A property overrides a parent's that
+    /// is not private. The method's refusal stands at its first line,
+    /// the property's at the class's.
+    ///
+    /// ```php
+    /// interface I { function i(); }
+    /// abstract class P { abstract function a(); function b() {} private function c() {} public $x; }
+    /// class C extends P implements I {
+    ///     #[\Override] function i() {}
+    ///     #[\Override] function a() {}
+    ///     #[\Override] function b() {}
+    ///     #[\Override] public $x;
+    /// }
+    /// echo "linked\n";
+    /// class D extends P { function a() {}
+    ///     #[\Override] private function c() {} }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: D::c() has #[\Override] attribute, but no matching parent method exists in %s on line 12
+    /// ```
+    ///
+    /// ```php
+    /// class P { function __construct() {} }
+    /// class C extends P { #[\Override] function __construct() {} }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: C::__construct() has #[\Override] attribute, but no matching parent method exists in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class C { #[\Override] public $x; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: C::$x has #[\Override] attribute, but no matching parent property exists in %s on line 2
+    /// ```
+    fn override_refused(
+        &self,
+        child: &'a ClassDecl,
+        abstracts: &[traits::Copy],
+    ) -> Option<Refused> {
+        if child.kind == ClassKind::Trait {
+            return None;
+        }
+        let marked = |attributes: &[crate::decl::Attribute]| {
+            attributes
+                .iter()
+                .any(|a| a.name.0.eq_ignore_ascii_case(b"Override"))
+        };
+        let parent = self.class_parent(child);
+        let inherited = parent.map(|parent| self.tables(parent));
+        let mut names = child.interfaces.clone();
+        let mut above = parent;
+        let mut depth = 0;
+        while let Some(class) = above
+            && depth < 64
+        {
+            names.extend(class.interfaces.iter().cloned());
+            above = self.class_parent(class);
+            depth += 1;
+        }
+        let mut interfaces = Vec::new();
+        self.interfaces_of(&names, &mut interfaces, 0);
+        for method in &child.methods {
+            if !marked(&method.function.attributes) {
+                continue;
+            }
+            let is_ctor = method.function.name.0.eq_ignore_ascii_case(b"__construct");
+            let by_parent = inherited.as_ref().is_some_and(|tables| {
+                tables.methods.iter().any(|(_, p)| {
+                    same_method(p, method)
+                        && (p.is_abstract || (!is_ctor && p.visibility != Visibility::Private))
+                })
+            });
+            let by_interface = interfaces
+                .iter()
+                .any(|interface| interface.methods.iter().any(|m| same_method(m, method)));
+            let by_trait = abstracts
+                .iter()
+                .any(|copy| method.function.name.0.eq_ignore_ascii_case(&copy.key));
+            if !(by_parent || by_interface || by_trait) {
+                return Some(Refused {
+                    refusal: Refusal::OverrideMethod {
+                        class: text(&child.name.0),
+                        method: text(&method.function.name.0),
+                    },
+                    site: Site {
+                        file: method.function.file.clone(),
+                        line: method.function.line,
+                    },
+                });
+            }
+        }
+        for property in &child.properties {
+            if !marked(&property.attributes) {
+                continue;
+            }
+            let by_parent = inherited.as_ref().is_some_and(|tables| {
+                tables
+                    .properties
+                    .iter()
+                    .any(|(_, p)| p.name == property.name && p.visibility != Visibility::Private)
+            });
+            if !by_parent {
+                return Some(at_class(
+                    child,
+                    Refusal::OverrideProperty {
+                        class: text(&child.name.0),
+                        property: text(&property.name.0),
+                    },
+                ));
+            }
+        }
+        None
     }
 
     /// The second pass of `zend_do_traits_method_binding`, made once the
@@ -2255,10 +2536,10 @@ impl<'a> Linker<'a> {
         for &(declaring, constant) in &tables.constants {
             match constants.iter().find(|(_, c)| c.name == constant.name) {
                 Some((held_by, held)) => {
-                    if let Some(refusal) =
-                        Self::constant_refused(child, held, *held_by, constant, declaring)
+                    if let Some(linked) =
+                        self.constant_refused(child, held, *held_by, constant, declaring)
                     {
-                        return Some(Linked::Refused(at_class(child, refusal)));
+                        return Some(linked);
                     }
                 }
                 None if constant.visibility != Visibility::Private => {
@@ -2328,10 +2609,10 @@ impl<'a> Linker<'a> {
                 match constants.iter().find(|(_, c)| c.name == constant.name) {
                     Some((held_by, _)) if held_by.is_some_and(|by| same(by, interface)) => {}
                     Some((held_by, held)) => {
-                        if let Some(refusal) =
-                            Self::constant_refused(child, held, *held_by, constant, interface)
+                        if let Some(linked) =
+                            self.constant_refused(child, held, *held_by, constant, interface)
                         {
-                            return Some(Linked::Refused(at_class(child, refusal)));
+                            return Some(linked);
                         }
                     }
                     None => constants.push((Some(interface), constant)),
@@ -2443,18 +2724,38 @@ fn same_method(a: &MethodDecl, b: &MethodDecl) -> bool {
 /// linked: a
 /// class not declared abstract left with an abstract method, one it
 /// inherited or one an interface declares, `E_ERROR` in php and a fatal
-/// all the same.
+/// all the same. A class declared abstract is held to its private
+/// abstract methods alone, which only it could implement, as a trait's
+/// `abstract private` method leaves one.
+///
+/// ```php
+/// trait T { abstract private function m(int $a); }
+/// abstract class C { use T; }
+/// ```
+/// ```expect exit=255
+/// Fatal error: Class C must implement 1 abstract method (C::m) in %s on line 3
+/// ```
+///
+/// ```php
+/// abstract class A { abstract function f(); abstract function g(); }
+/// class B extends A { function f() {} }
+/// ```
+/// ```expect exit=255
+/// Fatal error: Class B contains 1 abstract method and must therefore be declared abstract or implement the remaining method (A::g) in %s on line 3
+/// ```
 fn abstract_left(
     child: &ClassDecl,
     methods: &[(Option<&ClassDecl>, &MethodDecl)],
 ) -> Option<Refusal> {
-    if !matches!(child.kind, ClassKind::Class | ClassKind::Enum) || child.flags.is_abstract {
+    if !matches!(child.kind, ClassKind::Class | ClassKind::Enum) {
         return None;
     }
+    let explicit = child.flags.is_abstract;
     let left: Vec<String> = methods
         .iter()
         .filter(|(by, method)| {
-            method.is_abstract || by.is_some_and(|by| by.kind == ClassKind::Interface)
+            (method.is_abstract || by.is_some_and(|by| by.kind == ClassKind::Interface))
+                && (!explicit || method.visibility == Visibility::Private)
         })
         .map(|(by, method)| {
             let scope = by.map_or(&child.name, |by| &by.name);
@@ -2465,6 +2766,7 @@ fn abstract_left(
         kind: child.kind,
         class: text(&child.name.0),
         methods: left,
+        must_implement: explicit || child.kind == ClassKind::Enum,
     })
 }
 

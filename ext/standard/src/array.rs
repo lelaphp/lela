@@ -11,7 +11,7 @@ use std::cmp::Ordering;
 use php_ext::abi::Callable;
 use php_ext::call::call;
 use php_ext::coerce::{coerce_param, compare, to_double, to_long, to_string};
-use php_ext::decl::{ConstDecl, ConstExpr, FunctionDecl, Parameter, Type};
+use php_ext::decl::{ConstDecl, ConstExpr, FunctionDecl, Parameter, ParameterDefault, Type};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, Value, ValueRef, zend_sort};
@@ -111,7 +111,7 @@ pub(crate) fn constants() -> Vec<ConstDecl> {
 /// ```
 pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
     let flags = |default: &[u8]| Parameter {
-        default: Some(ConstExpr::Constant(php_ext::decl::Name(default.into()))),
+        default: ParameterDefault::Expr(ConstExpr::Constant(php_ext::decl::Name(default.into()))),
         ..parameter(b"flags", Type::Int)
     };
     let by_ref_array = || Parameter {
@@ -1006,10 +1006,4 @@ fn compare_left(a: &[u8], ap: &mut usize, b: &[u8], bp: &mut usize) -> Ordering 
         *ap += 1;
         *bp += 1;
     }
-}
-
-/// The stub's `= UNKNOWN`: a parameter that is optional with a default
-/// php does not print, which Reflection shows as `<default>`.
-fn unknown() -> ConstExpr {
-    ConstExpr::Constant(php_ext::decl::Name(b"UNKNOWN".as_slice().into()))
 }

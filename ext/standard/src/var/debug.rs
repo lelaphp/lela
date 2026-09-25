@@ -8,7 +8,7 @@ use php_ext::abi::PropertyPurpose;
 use php_ext::coerce::{Exponent, float_format};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{Key, Value, ValueRef};
+use php_ext::values::{Key, Laziness, Value, ValueRef};
 
 use super::class_name;
 
@@ -121,9 +121,15 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Re
             object.protect();
             let props = object.props_for(req, PropertyPurpose::Debug)?;
             let name = String::from_utf8_lossy(&class_name(req, *object)).into_owned();
+            // `php_var_dump_object_prefix`: what a lazy object is.
+            let prefix = match object.laziness() {
+                Laziness::Eager => "",
+                Laziness::Ghost => "lazy ghost ",
+                Laziness::Proxy | Laziness::Forwarding => "lazy proxy ",
+            };
             out.extend_from_slice(
                 format!(
-                    "object({name})#{} ({}) refcount({}){{\n",
+                    "{prefix}object({name})#{} ({}) refcount({}){{\n",
                     object.index(),
                     props.len(),
                     value.refcount()

@@ -9,6 +9,7 @@ use php_ext::request::Request;
 use php_ext::values::{PhpObject, Value};
 
 use crate::map::MapKind;
+use crate::modern::follows_spec;
 use crate::object::Code;
 use crate::{
     Read, attr_value_will_change, children_valid, content_value, deprecated_property, dom_error,
@@ -168,6 +169,241 @@ pub(crate) const ENTITY_REFERENCE: &[Prop] = &[
 pub(crate) const PROCESSING_INSTRUCTION: &[Prop] =
     &[ro(b"target", pi_target), rw(b"data", data, set_data)];
 
+// ---- the `Dom\` tables, `PHP_MINIT_FUNCTION(dom)`'s `dom_modern_*`
+
+/// `dom_modern_node_prop_handlers`: `nodeValue` and `textContent` read
+/// only, each class that writes them overwriting the row.
+pub(crate) const MODERN_NODE: &[Prop] = &[
+    ro(b"nodeType", node_type),
+    ro(b"nodeName", node_name),
+    ro(b"baseURI", modern_base_uri),
+    ro(b"isConnected", is_connected_read),
+    ro(b"ownerDocument", owner_document),
+    ro(b"parentNode", parent_node),
+    ro(b"parentElement", parent_element),
+    ro(b"childNodes", modern_child_nodes),
+    ro(b"firstChild", first_child),
+    ro(b"lastChild", last_child),
+    ro(b"previousSibling", previous_sibling),
+    ro(b"nextSibling", next_sibling),
+    ro(b"nodeValue", node_value),
+    ro(b"textContent", text_content),
+];
+
+/// `dom_modern_characterdata_prop_handlers`' own rows.
+pub(crate) const MODERN_CHARACTER_DATA: &[Prop] = &[
+    rw(b"data", data, set_data),
+    ro(b"length", data_length),
+    ro(b"previousElementSibling", previous_element_sibling),
+    ro(b"nextElementSibling", next_element_sibling),
+];
+
+/// `dom_modern_attr_prop_handlers`' own rows.
+pub(crate) const MODERN_ATTR: &[Prop] = &[
+    ro(b"namespaceURI", namespace_uri),
+    ro(b"prefix", modern_prefix),
+    ro(b"localName", local_name),
+    ro(b"name", attr_name),
+    rw(b"value", attr_value, set_attr_value),
+    ro(b"ownerElement", owner_element),
+    ro(b"specified", attr_specified),
+];
+
+/// `dom_modern_documenttype_prop_handlers`' own rows.
+pub(crate) const MODERN_DOCUMENT_TYPE: &[Prop] = &[
+    ro(b"name", doctype_name),
+    ro(b"entities", doctype_entities),
+    ro(b"notations", doctype_notations),
+    ro(b"publicId", doctype_public_id),
+    ro(b"systemId", doctype_system_id),
+    ro(b"internalSubset", internal_subset),
+];
+
+/// `dom_modern_entity_prop_handlers`' own rows.
+pub(crate) const MODERN_ENTITY: &[Prop] = &[
+    ro(b"publicId", entity_public_id),
+    ro(b"systemId", entity_system_id),
+    ro(b"notationName", entity_notation_name),
+];
+
+/// `dom_modern_entity_reference_prop_handlers`: the node's table with four
+/// rows overwritten.
+pub(crate) const MODERN_ENTITY_REFERENCE: &[Prop] = &[
+    ro(b"nodeType", node_type),
+    ro(b"nodeName", node_name),
+    ro(b"baseURI", modern_base_uri),
+    ro(b"isConnected", is_connected_read),
+    ro(b"ownerDocument", owner_document),
+    ro(b"parentNode", parent_node),
+    ro(b"parentElement", parent_element),
+    ro(b"childNodes", modern_entity_reference_child_nodes),
+    ro(b"firstChild", entity_reference_child),
+    ro(b"lastChild", entity_reference_child),
+    ro(b"previousSibling", previous_sibling),
+    ro(b"nextSibling", next_sibling),
+    ro(b"nodeValue", node_value),
+    ro(b"textContent", entity_reference_text_content),
+];
+
+/// `dom_modern_processinginstruction_prop_handlers`' own rows.
+pub(crate) const MODERN_PROCESSING_INSTRUCTION: &[Prop] =
+    &[ro(b"target", pi_target), rw(b"data", data, set_data)];
+
+/// `wholeText`, a modern text's own row.
+pub(crate) const MODERN_TEXT: &[Prop] = &[ro(b"wholeText", whole_text)];
+
+/// [`MODERN_NODE`] with `nodeValue` and `textContent` overwritten to
+/// write, in place, as `DOM_OVERWRITE_PROP_HANDLER` leaves the row where
+/// it was.
+pub(crate) const MODERN_NODE_WRITABLE: &[Prop] = &[
+    ro(b"nodeType", node_type),
+    ro(b"nodeName", node_name),
+    ro(b"baseURI", modern_base_uri),
+    ro(b"isConnected", is_connected_read),
+    ro(b"ownerDocument", owner_document),
+    ro(b"parentNode", parent_node),
+    ro(b"parentElement", parent_element),
+    ro(b"childNodes", modern_child_nodes),
+    ro(b"firstChild", first_child),
+    ro(b"lastChild", last_child),
+    ro(b"previousSibling", previous_sibling),
+    ro(b"nextSibling", next_sibling),
+    rw(b"nodeValue", node_value, set_node_value),
+    rw(b"textContent", text_content, set_text_content),
+];
+
+/// [`MODERN_NODE`] with `textContent` alone overwritten to write.
+pub(crate) const MODERN_NODE_TEXT_WRITABLE: &[Prop] = &[
+    ro(b"nodeType", node_type),
+    ro(b"nodeName", node_name),
+    ro(b"baseURI", modern_base_uri),
+    ro(b"isConnected", is_connected_read),
+    ro(b"ownerDocument", owner_document),
+    ro(b"parentNode", parent_node),
+    ro(b"parentElement", parent_element),
+    ro(b"childNodes", modern_child_nodes),
+    ro(b"firstChild", first_child),
+    ro(b"lastChild", last_child),
+    ro(b"previousSibling", previous_sibling),
+    ro(b"nextSibling", next_sibling),
+    ro(b"nodeValue", node_value),
+    rw(b"textContent", text_content, set_text_content),
+];
+
+/// The parent node rows of a modern fragment and document, `children`
+/// first.
+pub(crate) const MODERN_PARENT: &[Prop] = &[
+    ro(b"children", children),
+    ro(b"firstElementChild", first_element_child),
+    ro(b"lastElementChild", last_element_child),
+    ro(b"childElementCount", child_element_count),
+];
+
+/// `dom_modern_element_prop_handlers`' own rows.
+pub(crate) const MODERN_ELEMENT: &[Prop] = &[
+    ro(b"namespaceURI", namespace_uri),
+    ro(b"prefix", modern_prefix),
+    ro(b"localName", local_name),
+    ro(b"tagName", tag_name),
+    rw(b"id", id, set_id),
+    rw(b"className", class_name, set_class_name),
+    ro(b"classList", class_list),
+    ro(b"attributes", attributes),
+    ro(b"children", children),
+    ro(b"firstElementChild", first_element_child),
+    ro(b"lastElementChild", last_element_child),
+    ro(b"childElementCount", child_element_count),
+    ro(b"previousElementSibling", previous_element_sibling),
+    ro(b"nextElementSibling", next_element_sibling),
+    crate::inner_html::INNER_HTML,
+    crate::inner_html::OUTER_HTML,
+    rw(
+        b"substitutedNodeValue",
+        substituted_node_value,
+        set_substituted_node_value,
+    ),
+];
+
+// ---- the modern readers
+
+/// `dom_element_class_list_read`: one token list per element, kept in the
+/// declared `$classList` slot (`[SameObject]`).
+///
+/// ```php
+/// $d = Dom\HTMLDocument::createEmpty();
+/// $e = $d->createElement('p');
+/// var_dump($e->classList === $e->classList, get_class($e->classList));
+/// ```
+/// ```expect
+/// bool(true)
+/// string(13) "Dom\TokenList"
+/// ```
+fn class_list(req: &mut Request, object: PhpObject) -> Read {
+    if let Some(kept) = crate::modern::cached(req, object, b"classList") {
+        req.addref(&kept);
+        return some(kept);
+    }
+    let list = crate::token_list::create(req, object)?;
+    crate::modern::keep(req, object, b"classList", &list)?;
+    some(list)
+}
+
+/// `dom_parent_node_children_read`: one `Dom\HTMLCollection` of the child
+/// elements, kept in the declared `$children` slot.
+///
+/// ```php
+/// $d = Dom\XMLDocument::createFromString('<r><a/>t<b/></r>');
+/// $c = $d->documentElement->children;
+/// var_dump($c === $d->documentElement->children, $c->length, $c[1]->localName, $d->children->length);
+/// ```
+/// ```expect
+/// bool(true)
+/// int(2)
+/// string(1) "b"
+/// int(1)
+/// ```
+pub(crate) fn children(req: &mut Request, object: PhpObject) -> Read {
+    if let Some(kept) = crate::modern::cached(req, object, b"children") {
+        req.addref(&kept);
+        return some(kept);
+    }
+    let list = crate::create(req, object, "Dom\\HTMLCollection", MapKind::ChildElements)?;
+    crate::modern::keep(req, object, b"children", &list)?;
+    some(list)
+}
+
+/// `dom_modern_element_substituted_node_value_read`: `xmlNodeGetContent`.
+///
+/// ```php
+/// $d = Dom\XMLDocument::createFromString('<r>a<b>c</b></r>');
+/// $r = $d->documentElement;
+/// var_dump($r->substitutedNodeValue);
+/// ```
+/// ```expect
+/// string(2) "ac"
+/// ```
+fn substituted_node_value(req: &mut Request, object: PhpObject) -> Read {
+    let node = prop_node(req, object)?;
+    match node.get_content() {
+        Some(content) => some(string(req, &content)?),
+        None => Err(crate::dom_throw(req, Code::InvalidState)),
+    }
+}
+
+/// `dom_modern_element_substituted_node_value_write`: the children replaced
+/// by the content, entities substituted as `xmlNodeSetContentLen` does.
+fn set_substituted_node_value(
+    req: &mut Request,
+    object: PhpObject,
+    value: &Value,
+) -> Result<(), Thrown> {
+    let node = prop_node(req, object)?;
+    invalidate(req, object);
+    remove_all_children(node);
+    node.set_content_len(&written_bytes(value));
+    Ok(())
+}
+
 // ---- the helpers every reader shares
 
 #[allow(clippy::unnecessary_wraps)] // the reader shape every row of a property table has
@@ -212,6 +448,11 @@ fn written_bytes(value: &Value) -> Vec<u8> {
 fn node_name(req: &mut Request, object: PhpObject) -> Read {
     let node = prop_node(req, object)?;
     let name: Vec<u8> = match node.kind() {
+        Kind::Element
+            if follows_spec(req, object) && crate::private::html_in_html_document(node) =>
+        {
+            qualified_name(node).to_ascii_uppercase()
+        }
         Kind::Element | Kind::Attribute => qualified_name(node),
         Kind::NamespaceDecl => match node.ns().and_then(Ns::prefix) {
             Some(prefix) => [b"xmlns:".as_slice(), &prefix].concat(),
@@ -248,6 +489,7 @@ fn node_name(req: &mut Request, object: PhpObject) -> Read {
 fn node_value(req: &mut Request, object: PhpObject) -> Read {
     let node = prop_node(req, object)?;
     match node.kind() {
+        Kind::Element if follows_spec(req, object) => some(Value::null()),
         Kind::Element | Kind::Attribute | Kind::Text | Kind::Comment | Kind::CData | Kind::Pi => {
             some(content_value(req, node, true)?)
         }
@@ -267,7 +509,13 @@ fn set_node_value(req: &mut Request, object: PhpObject, value: &Value) -> Result
         Kind::Attribute => {
             attr_value_will_change(req, object, node);
             remove_all_children(node);
-            node.set_content_len(&bytes);
+            if follows_spec(req, object) {
+                if let Some(text) = Node::new_text_len(None, &bytes) {
+                    node.add_child(text);
+                }
+            } else {
+                node.set_content_len(&bytes);
+            }
         }
         Kind::Element => {
             remove_all_children(node);
@@ -360,6 +608,28 @@ fn child_nodes(req: &mut Request, object: PhpObject) -> Read {
         req,
         object,
         "DOMNodeList",
+        MapKind::ChildNodes,
+    )?)
+}
+
+/// `dom_modern_node_child_nodes_read`.
+///
+/// ```php
+/// $d = Dom\XMLDocument::createFromString('<r><a/>t</r>');
+/// $l = $d->documentElement->childNodes;
+/// var_dump(get_class($l), $l->length, get_class($l->item(1)));
+/// ```
+/// ```expect
+/// string(12) "Dom\NodeList"
+/// int(2)
+/// string(8) "Dom\Text"
+/// ```
+fn modern_child_nodes(req: &mut Request, object: PhpObject) -> Read {
+    prop_node(req, object)?;
+    some(crate::create(
+        req,
+        object,
+        "Dom\\NodeList",
         MapKind::ChildNodes,
     )?)
 }
@@ -475,12 +745,12 @@ fn attributes(req: &mut Request, object: PhpObject) -> Read {
     if node.kind() != Kind::Element {
         return some(Value::null());
     }
-    some(crate::create(
-        req,
-        object,
-        "DOMNamedNodeMap",
-        MapKind::Attributes,
-    )?)
+    let class = if follows_spec(req, object) {
+        "Dom\\NamedNodeMap"
+    } else {
+        "DOMNamedNodeMap"
+    };
+    some(crate::create(req, object, class, MapKind::Attributes)?)
 }
 
 /// `dom_node_is_connected_read`.
@@ -561,6 +831,21 @@ fn prefix(req: &mut Request, object: PhpObject) -> Read {
         _ => None,
     };
     string_or_empty(req, prefix)
+}
+
+/// `dom_modern_node_prefix_read`: `null` for no prefix.
+///
+/// ```php
+/// $d = Dom\XMLDocument::createFromString('<p:r xmlns:p="urn:p" a="1"/>');
+/// var_dump($d->documentElement->prefix, $d->documentElement->attributes->item(1)->prefix);
+/// ```
+/// ```expect
+/// string(1) "p"
+/// NULL
+/// ```
+fn modern_prefix(req: &mut Request, object: PhpObject) -> Read {
+    let node = prop_node(req, object)?;
+    string_or_null(req, node.ns().and_then(Ns::prefix).as_deref())
 }
 
 /// `dom_node_prefix_write`.
@@ -652,6 +937,24 @@ fn base_uri(req: &mut Request, object: PhpObject) -> Read {
     string_or_null(req, node.base().as_deref())
 }
 
+/// `dom_modern_node_base_uri_read`: the document's URL, or `about:blank`,
+/// where libxml finds no base.
+///
+/// ```php
+/// var_dump(Dom\XMLDocument::createEmpty()->baseURI);
+/// ```
+/// ```expect
+/// string(11) "about:blank"
+/// ```
+fn modern_base_uri(req: &mut Request, object: PhpObject) -> Read {
+    let node = prop_node(req, object)?;
+    let base = node
+        .base()
+        .or_else(|| node.doc().and_then(Node::doc_url))
+        .unwrap_or_else(|| b"about:blank".to_vec());
+    some(string(req, &base)?)
+}
+
 /// `dom_node_text_content_read`.
 ///
 /// ```php
@@ -665,7 +968,25 @@ fn base_uri(req: &mut Request, object: PhpObject) -> Read {
 /// ```
 fn text_content(req: &mut Request, object: PhpObject) -> Read {
     let node = prop_node(req, object)?;
+    if skip_text_content(req, object, node) {
+        return some(Value::null());
+    }
     some(content_value(req, node, false)?)
+}
+
+/// `dom_skip_text_content`: a modern node whose `textContent` is null.
+fn skip_text_content(req: &Request, object: PhpObject, node: Node) -> bool {
+    follows_spec(req, object)
+        && !matches!(
+            node.kind(),
+            Kind::Fragment
+                | Kind::Element
+                | Kind::Attribute
+                | Kind::Text
+                | Kind::CData
+                | Kind::Comment
+                | Kind::Pi
+        )
 }
 
 /// `dom_node_text_content_write`: a text node in place of the children of
@@ -703,7 +1024,7 @@ fn set_text_content(req: &mut Request, object: PhpObject, value: &Value) -> Resu
 /// string(1) "b"
 /// int(2)
 /// ```
-fn first_element_child(req: &mut Request, object: PhpObject) -> Read {
+pub(crate) fn first_element_child(req: &mut Request, object: PhpObject) -> Read {
     let node = prop_node(req, object)?;
     let mut at = node.children();
     while let Some(n) = at {
@@ -716,7 +1037,19 @@ fn first_element_child(req: &mut Request, object: PhpObject) -> Read {
 }
 
 /// `dom_parent_node_last_element_child_read`.
-fn last_element_child(req: &mut Request, object: PhpObject) -> Read {
+///
+/// ```php
+/// $d = Dom\XMLDocument::createFromString('<r><a/>t<b/>u</r>');
+/// $r = $d->documentElement;
+/// var_dump($r->firstElementChild->localName, $r->lastElementChild->localName, $r->childElementCount, $d->childElementCount);
+/// ```
+/// ```expect
+/// string(1) "a"
+/// string(1) "b"
+/// int(2)
+/// int(1)
+/// ```
+pub(crate) fn last_element_child(req: &mut Request, object: PhpObject) -> Read {
     let node = prop_node(req, object)?;
     let mut at = node.last();
     while let Some(n) = at {
@@ -729,7 +1062,19 @@ fn last_element_child(req: &mut Request, object: PhpObject) -> Read {
 }
 
 /// `dom_parent_node_child_element_count`.
-fn child_element_count(req: &mut Request, object: PhpObject) -> Read {
+///
+/// ```php
+/// $d = Dom\XMLDocument::createFromString('<r><a/>t<b/>u</r>');
+/// $r = $d->documentElement;
+/// var_dump($r->firstElementChild->localName, $r->lastElementChild->localName, $r->childElementCount, $d->childElementCount);
+/// ```
+/// ```expect
+/// string(1) "a"
+/// string(1) "b"
+/// int(2)
+/// int(1)
+/// ```
+pub(crate) fn child_element_count(req: &mut Request, object: PhpObject) -> Read {
     let node = prop_node(req, object)?;
     let mut count = 0;
     let mut at = node.children();
@@ -833,9 +1178,15 @@ fn pi_target(req: &mut Request, object: PhpObject) -> Read {
 /// string(1) "r"
 /// NULL
 /// ```
+/// `dom_attr_name_read`: the qualified name for the modern classes.
 fn attr_name(req: &mut Request, object: PhpObject) -> Read {
     let node = prop_node(req, object)?;
-    some(string(req, &node.name())?)
+    let name = if follows_spec(req, object) {
+        qualified_name(node)
+    } else {
+        node.name()
+    };
+    some(string(req, &name)?)
 }
 
 fn attr_specified(_req: &mut Request, _object: PhpObject) -> Read {
@@ -879,7 +1230,13 @@ fn owner_element(req: &mut Request, object: PhpObject) -> Read {
 /// ```
 fn tag_name(req: &mut Request, object: PhpObject) -> Read {
     let node = prop_node(req, object)?;
-    some(string(req, &qualified_name(node))?)
+    let name = qualified_name(node);
+    let name = if follows_spec(req, object) && crate::private::html_in_html_document(node) {
+        name.to_ascii_uppercase()
+    } else {
+        name
+    };
+    some(string(req, &name)?)
 }
 
 fn reflected_read(req: &mut Request, object: PhpObject, name: &[u8]) -> Read {
@@ -942,24 +1299,26 @@ fn doctype_name(req: &mut Request, object: PhpObject) -> Read {
     some(string(req, &node.name())?)
 }
 
+/// `dom_get_dtd_namednodemap_ce`: `Dom\DtdNamedNodeMap` for the modern
+/// classes.
+fn dtd_map_class(req: &Request, object: PhpObject) -> &'static str {
+    if follows_spec(req, object) {
+        "Dom\\DtdNamedNodeMap"
+    } else {
+        "DOMNamedNodeMap"
+    }
+}
+
 fn doctype_entities(req: &mut Request, object: PhpObject) -> Read {
     prop_node(req, object)?;
-    some(crate::create(
-        req,
-        object,
-        "DOMNamedNodeMap",
-        MapKind::Entities,
-    )?)
+    let class = dtd_map_class(req, object);
+    some(crate::create(req, object, class, MapKind::Entities)?)
 }
 
 fn doctype_notations(req: &mut Request, object: PhpObject) -> Read {
     prop_node(req, object)?;
-    some(crate::create(
-        req,
-        object,
-        "DOMNamedNodeMap",
-        MapKind::Notations,
-    )?)
+    let class = dtd_map_class(req, object);
+    some(crate::create(req, object, class, MapKind::Notations)?)
 }
 
 fn doctype_public_id(req: &mut Request, object: PhpObject) -> Read {
@@ -1094,4 +1453,11 @@ fn entity_reference_child_nodes(req: &mut Request, object: PhpObject) -> Read {
     let node = prop_node(req, object)?;
     sync_entity_reference(node);
     child_nodes(req, object)
+}
+
+/// `dom_modern_entity_reference_child_nodes_read`.
+fn modern_entity_reference_child_nodes(req: &mut Request, object: PhpObject) -> Read {
+    let node = prop_node(req, object)?;
+    sync_entity_reference(node);
+    modern_child_nodes(req, object)
 }

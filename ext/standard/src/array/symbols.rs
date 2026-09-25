@@ -6,7 +6,7 @@
 //! variable declared and not yet written reads as one the frame has not.
 
 use php_ext::coerce::value_name;
-use php_ext::decl::{ConstExpr, FunctionDecl, Name, Parameter, Type};
+use php_ext::decl::{ConstExpr, FunctionDecl, Name, Parameter, ParameterDefault, Type};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpRef, PhpString, Value, ValueRef};
@@ -88,16 +88,17 @@ pub(super) fn natives() -> Vec<(FunctionDecl, Entry)> {
                     Parameter {
                         by_ref: true,
                         prefer_ref: true,
+                        promoted: false,
                         ..parameter(b"array", Type::Array)
                     },
                     Parameter {
-                        default: Some(ConstExpr::Constant(Name(
+                        default: ParameterDefault::Expr(ConstExpr::Constant(Name(
                             b"EXTR_OVERWRITE".as_slice().into(),
                         ))),
                         ..parameter(b"flags", Type::Int)
                     },
                     Parameter {
-                        default: Some(ConstExpr::Str(b"".as_slice().into())),
+                        default: ParameterDefault::Expr(ConstExpr::Str(b"".as_slice().into())),
                         ..parameter(b"prefix", Type::String)
                     },
                 ],
