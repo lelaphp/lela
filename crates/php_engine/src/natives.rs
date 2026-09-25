@@ -1018,8 +1018,8 @@ fn get_class(req: &mut Request) -> Result<Value, Thrown> {
             None => return Ok(Value::null()),
         }
     };
-    let name = req.class_name(class);
-    Ok(Value::string(PhpString::new(req, name.as_bytes())?))
+    let name = req.class_name_bytes(class);
+    Ok(Value::string(PhpString::new(req, &name)?))
 }
 
 /// `strlen(string $string): int`, php's `ZEND_FUNCTION(strlen)`
@@ -1715,8 +1715,8 @@ fn dump_members(
                 Visibility::Public => name.clone(),
                 Visibility::Protected => [&b"\0*\0"[..], name].concat(),
                 Visibility::Private => {
-                    let class = req.class_name(*declaring);
-                    [&b"\0"[..], class.as_bytes(), b"\0", name].concat()
+                    let class = req.class_name_bytes(*declaring);
+                    [&b"\0"[..], &class, b"\0", name].concat()
                 }
             };
             Some((mangled, value, ty.clone()))

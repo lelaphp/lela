@@ -115,7 +115,7 @@ impl Emit<'_> {
     }
 
     /// The kind of the first significant token inside `range`.
-    fn first_kind(&self, range: TextRange) -> Option<SyntaxKind> {
+    pub(in crate::emit) fn first_kind(&self, range: TextRange) -> Option<SyntaxKind> {
         let at = self
             .parsed
             .tokens

@@ -1907,7 +1907,7 @@ fn debug_info(req: &mut Request) -> Result<Value, Thrown> {
             .unwrap_or_default();
         match req.method_class(function) {
             Some(class) => {
-                let mut full = req.class_name(class).into_bytes();
+                let mut full = req.class_name_bytes(class);
                 full.extend_from_slice(b"::");
                 full.extend_from_slice(&name);
                 full

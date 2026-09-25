@@ -56,6 +56,7 @@ decl::Type::MAY_BE_ANY
 decl::Type::contains_code
 decl::Type::mask
 decl::Visibility
+decl::shown
 enum_methods
 frameless_table
 link::Body

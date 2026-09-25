@@ -387,6 +387,22 @@ impl Emit<'_> {
     /// ```expect exit=255
     /// Fatal error: Type declaration 'int' must be unqualified in %s on line 2
     /// ```
+    ///
+    /// `self` and `parent` are the class's name in a known scope, and
+    /// stay as written in an anonymous class's (GH-18373):
+    ///
+    /// ```php
+    /// class P { function f(): self {} }
+    /// $o = new class extends P { function g(): self {} function h(): parent {} };
+    /// foreach ([[new P, 'f'], [$o, 'g'], [$o, 'h']] as [$on, $m]) {
+    ///     echo (new ReflectionMethod($on, $m))->getReturnType()->getName(), "\n";
+    /// }
+    /// ```
+    /// ```expect
+    /// P
+    /// self
+    /// parent
+    /// ```
     fn single_typename(&mut self, id: NodeId<tree::NamedType>) -> Result<Type, CompileError> {
         let written = self.text(self.parsed.tree[id].name).to_vec();
         let lowered = written.to_ascii_lowercase();
@@ -448,7 +464,10 @@ impl Emit<'_> {
             return Ok(Type::Named(Name(resolved.into_boxed_slice())));
         }
         self.ensure_valid_class_fetch_type(fetch)?;
-        if !self.scope_known() {
+        // `substitute_self_parent`: never in an anonymous class, whose
+        // name is no name to write.
+        let anonymous = self.active_class.as_ref().is_some_and(|c| c.anonymous);
+        if !self.scope_known() || anonymous {
             return Ok(if fetch == FETCH_CLASS_SELF {
                 Type::SelfClass
             } else {

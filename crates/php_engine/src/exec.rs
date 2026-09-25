@@ -438,6 +438,10 @@ pub(crate) struct CallState {
     /// not written over the argument, as `Z_FLF_PARAM_STR` converts in a
     /// temporary of the body's and a trace still reads the operand.
     pub(crate) frameless: bool,
+    /// `ZEND_CALL_DYNAMIC`: the callee was named as the program served,
+    /// by `INIT_DYNAMIC_CALL` or `INIT_USER_CALL`, which a native that
+    /// reads its caller's frame refuses (`zend_forbid_dynamic_call`).
+    pub(crate) dynamic: bool,
     /// php's `str_tmp`: what a coercion made for a frameless call, freed
     /// with the call as `Z_FLF_PARAM_FREE_STR` frees it at the body's end.
     pub(crate) coerced: Vec<Value>,

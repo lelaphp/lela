@@ -424,12 +424,15 @@ fn link_trampolines(
 /// (`VCWD_GETCWD`, the request's own under ZTS), which is the request's
 /// for a request and the process's for a unit compiled outside one
 /// ([`Engine::unit`]), and whether the source is a file or the string an
-/// `eval` handed over ([`SourceKind`]).
+/// `eval` handed over ([`SourceKind`]), with the runtime definition keys
+/// the request made before it where it is an `eval`'s
+/// ([`php_compile::Options::keys_before`]).
 #[derive(Clone, Copy)]
 struct Origin<'a> {
     filename: &'a [u8],
     cwd: &'a Path,
     kind: SourceKind,
+    keys_before: u32,
 }
 
 /// What the engine has declared, as the compiler reads it: php's
@@ -497,6 +500,21 @@ impl Shared {
     /// and for `eval`. Such a unit is never published: nothing outside
     /// the request reaches it, and it lives as long as the frame serving
     /// it or the functions and classes it declared.
+    ///
+    /// The runtime definition keys such a unit makes count on from the
+    /// ones the request's earlier compiles made, as php's one
+    /// `CG(rtd_key_counter)` does, so two `eval`s of one string declare
+    /// two anonymous classes:
+    ///
+    /// ```php
+    /// function make() { return eval('return new class { public $n; };'); }
+    /// $a = make(); $b = make();
+    /// var_dump(get_class($a) === get_class($b), $a instanceof $b);
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// bool(false)
+    /// ```
     pub(crate) fn compile_for(
         &self,
         req: &mut Request,
@@ -507,15 +525,17 @@ impl Shared {
         let ini = CompileIni {
             precision: req.precision(),
             short_open_tag: req.short_open_tag(),
+            assertions: req.assertions() >= 0,
         };
         let cwd = req.cwd().0;
         let origin = Origin {
             filename,
             cwd: &cwd,
             kind,
+            keys_before: req.keys_made,
         };
         let stack = req.stack_limit();
-        compile(
+        let unit = compile(
             source,
             origin,
             ini,
@@ -523,7 +543,10 @@ impl Shared {
             stack,
             req.heap_mut(),
             &self.map_ptr_last,
-        )
+        )?;
+        let made = u32::try_from(unit.runtime_keys.len()).unwrap_or(u32::MAX);
+        req.keys_made = req.keys_made.saturating_add(made);
+        Ok(unit)
     }
 
     /// `zend_call_stack_init` on the calling thread, from the startup
@@ -552,6 +575,9 @@ impl Shared {
             short_open_tag: self
                 .ini_default(b"short_open_tag")
                 .is_none_or(Request::ini_parse_bool),
+            assertions: self
+                .ini_default(b"zend.assertions")
+                .is_none_or(|value| Request::ini_parse_bytes(value) >= 0),
         }
     }
 
@@ -578,6 +604,7 @@ impl Shared {
                     filename: path,
                     cwd,
                     kind: SourceKind::File,
+                    keys_before: 0,
                 },
                 stack,
             ))
@@ -652,7 +679,7 @@ impl Shared {
 /// string(0) ""
 /// string(10) "ISO-8859-1"
 /// ```
-const CORE_INI: [(&str, &str); 43] = [
+const CORE_INI: [(&str, &str); 44] = [
     ("short_open_tag", "1"),
     ("fatal_error_backtraces", "1"),
     ("precision", "14"),
@@ -681,6 +708,11 @@ const CORE_INI: [(&str, &str); 43] = [
     ("zend.exception_string_param_max_len", "15"),
     ("zend.max_allowed_stack_size", "0"),
     ("zend.reserved_stack_size", "0"),
+    // `zend.assertions`, `1` (`Z/Zend/zend.c:264`), `EG(assertions)`:
+    // what `zend_compile_assert` compiles under and `ASSERT_CHECK`
+    // reads, moved between `-1` and the rest only at startup
+    // (`OnUpdateAssertions`, [`Request::assertions_updated`]).
+    ("zend.assertions", "1"),
     // `zend.enable_gc`, `On` (`Z/Zend/zend.c:265`), whose `on_modify` is
     // the collector's `gc_enable`.
     ("zend.enable_gc", "1"),
@@ -1189,6 +1221,7 @@ impl Engine {
             filename,
             cwd: &cwd,
             kind: SourceKind::File,
+            keys_before: 0,
         };
         self.shared.publish(source, origin, stack).ok()
     }
@@ -1234,6 +1267,7 @@ impl Engine {
                     filename: &script,
                     cwd: &description.cwd,
                     kind: SourceKind::File,
+                    keys_before: 0,
                 };
                 self.shared.publish(source, origin, stack).ok()?
             }
@@ -1449,9 +1483,11 @@ impl Engine {
 
 /// The ini entries php reads while a file compiles, read once where the
 /// compile begins and handed down: `precision`, which `zend_double_to_str`
-/// renders a folded double constant at (`EG(precision)`), and
+/// renders a folded double constant at (`EG(precision)`),
 /// `short_open_tag`, which php's scanner opens a `<?` under
-/// (`CG(short_tags)`, `Z/main/main.c:820`). php keeps both where its
+/// (`CG(short_tags)`, `Z/main/main.c:820`), and whether `zend.assertions`
+/// is at or above zero, which `zend_compile_assert` compiles a call of
+/// `assert()` under (`EG(assertions)`). php keeps them where its
 /// compiler reads them as it compiles, so what the ini says when the
 /// compile begins is what the whole file is compiled under: the startup ini's
 /// for a unit bound for the cache, which every request that serves it
@@ -1460,6 +1496,7 @@ impl Engine {
 struct CompileIni {
     precision: i32,
     short_open_tag: bool,
+    assertions: bool,
 }
 
 /// One source compiled, with what the compiler refused kept instead of
@@ -1492,6 +1529,7 @@ fn compile(
         strict_types: false,
         precision: ini.precision,
         short_open_tag: ini.short_open_tag,
+        assertions: ini.assertions,
         persistent: declared.constants.to_vec(),
         functions: declared
             .functions
@@ -1500,6 +1538,7 @@ fn compile(
             .collect(),
         classes: declared.classes.to_vec(),
         stack,
+        keys_before: origin.keys_before,
     };
     let mut unit = php_compile::compile_source(source, &options, strings)?;
     assign_map_ptrs(&mut unit, map_ptr_last);
@@ -2740,10 +2779,12 @@ mod tests {
                     filename: b"witness.php",
                     cwd: Path::new(""),
                     kind: SourceKind::File,
+                    keys_before: 0,
                 },
                 CompileIni {
                     precision: 14,
                     short_open_tag: true,
+                    assertions: true,
                 },
                 Declared::default(),
                 StackLimit::UNCHECKED,
@@ -3003,7 +3044,7 @@ mod tests {
         let unit = Unit {
             main: php_unit::OpArray {
                 oplines: vec![php_unit::Opline {
-                    opcode: php_unit::Opcode::DeclareAnonClass,
+                    opcode: php_unit::Opcode::ExtNop,
                     ..php_unit::Opline::default()
                 }]
                 .into_boxed_slice(),
@@ -3015,7 +3056,7 @@ mod tests {
         assert_eq!(
             crate::tier::execute::<Nop>(&mut req, frame),
             Err(Fatal::Error(String::from(
-                "InternalError: ZEND_DECLARE_ANON_CLASS has no handler in this engine yet"
+                "InternalError: ZEND_EXT_NOP has no handler in this engine yet"
             )))
         );
     }

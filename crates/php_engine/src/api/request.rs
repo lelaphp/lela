@@ -1072,6 +1072,11 @@ pub struct Request {
     /// under its name. A load that bound nothing leaves nothing here, so
     /// the opline of a file loaded again declares, and is refused.
     bound_at_load: Vec<(Arc<Unit>, u32)>,
+    /// `CG(rtd_key_counter)` over the units this request compiled for
+    /// itself: the runtime definition keys and anonymous class names
+    /// they made, which the next one counts on from
+    /// ([`crate::engine::Shared::compile_for`]).
+    pub(crate) keys_made: u32,
     /// The aliases `class_alias()` added to `EG(class_table)`, each the
     /// lowered name it is keyed by, the class it names, and how many
     /// classes the table held when it was added, which is where php's
@@ -1399,6 +1404,7 @@ impl Request {
             stack_limit: StackLimit::UNCHECKED,
             declared: Vec::new(),
             bound_at_load: Vec::new(),
+            keys_made: 0,
             aliases: Vec::new(),
             sapi_constant: Value::null(),
             user_functions: Vec::new(),
@@ -2176,6 +2182,7 @@ impl Request {
             extra_named: extra_named.to_vec(),
             stage: CallStage::Serving,
             frameless: false,
+            dynamic: false,
             coerced: Vec::new(),
             send_arg_by_ref: false,
         };
@@ -2237,40 +2244,50 @@ impl Request {
         let Some(decl) = self.function_decl(function) else {
             return Ok(Vec::new());
         };
-        let declared = decl.parameters.len();
         let variadic = decl.parameters.last().filter(|last| last.variadic);
-        let mut wrapped: Vec<(usize, Option<String>)> = Vec::new();
-        for (at, argument) in arguments.iter().enumerate() {
-            if matches!(argument.as_ref(), ValueRef::Undef | ValueRef::Reference(_)) {
-                continue;
-            }
-            let Some(parameter) = decl.parameters.get(at).or(variadic) else {
-                continue;
-            };
-            if parameter.by_ref && !parameter.prefer_ref {
-                let name = (at < declared && !parameter.variadic)
-                    .then(|| String::from_utf8_lossy(&parameter.name.0).into_owned());
-                wrapped.push((at, name));
-            }
-        }
-        if wrapped.is_empty() {
-            return Ok(Vec::new());
-        }
-        let callee = self.qualified_name(function, None);
-        let mut positions = Vec::with_capacity(wrapped.len());
-        for (at, name) in wrapped {
-            let name = name.map(|name| format!(" (${name})")).unwrap_or_default();
-            let message = format!(
-                "{callee}(): Argument #{}{name} must be passed by reference, value given",
-                at + 1
-            );
-            crate::api::raising::warning(self, &message);
+        let wrapped: Vec<usize> = arguments
+            .iter()
+            .enumerate()
+            .filter(|(_, argument)| {
+                !matches!(argument.as_ref(), ValueRef::Undef | ValueRef::Reference(_))
+            })
+            .filter(|(at, _)| {
+                decl.parameters
+                    .get(*at)
+                    .or(variadic)
+                    .is_some_and(|parameter| parameter.by_ref && !parameter.prefer_ref)
+            })
+            .map(|(at, _)| at)
+            .collect();
+        for at in &wrapped {
+            self.param_must_be_ref(function, u32::try_from(*at + 1).unwrap_or(u32::MAX));
             if self.is_pending() {
                 return Err(Thrown::of(self.take_pending()));
             }
-            positions.push(at);
         }
-        Ok(positions)
+        Ok(wrapped)
+    }
+
+    /// `zend_param_must_be_ref` (`Z/Zend/zend_execute.c`): the warning
+    /// for an argument that is no reference handed to a parameter that
+    /// takes one by reference and nothing else, naming the parameter
+    /// where it is one of the declared ones (`get_function_arg_name`)
+    /// and not where a variadic collects it. What `zend_call_function`,
+    /// `SEND_USER` and `SEND_ARRAY` raise before they wrap the value in
+    /// a reference of its own and go on.
+    pub(crate) fn param_must_be_ref(&mut self, function: Function, number: u32) {
+        let callee = self.qualified_name(function, None);
+        let at = usize::try_from(number.saturating_sub(1)).unwrap_or(usize::MAX);
+        let name = self
+            .function_decl(function)
+            .and_then(|decl| decl.parameters.get(at))
+            .filter(|parameter| !parameter.variadic)
+            .map(|parameter| format!(" (${})", String::from_utf8_lossy(&parameter.name.0)))
+            .unwrap_or_default();
+        let message = format!(
+            "{callee}(): Argument #{number}{name} must be passed by reference, value given"
+        );
+        crate::api::raising::warning(self, &message);
     }
 
     /// `zend_call_function` over a user function, the branch that calls
@@ -2585,13 +2602,22 @@ impl Request {
             .get(usize::try_from(member.at).ok()?)
     }
 
-    /// `ce->name`: the name a class was declared under, and `object`
-    /// for one the tables have no declaration for.
+    /// `ZSTR_VAL(ce->name)` as a message's `%s` prints it: the name a
+    /// class was declared under up to its NUL, so an anonymous class is
+    /// `class@anonymous` ([`php_unit::decl::shown`]), and `object` for
+    /// one the tables have no declaration for. A value holding the name,
+    /// `get_class()`'s, is [`Request::class_name_bytes`].
     pub(crate) fn class_name(&self, class: ClassId) -> String {
         self.class_decl(class).map_or_else(
             || String::from("object"),
-            |decl| String::from_utf8_lossy(&decl.name.0).into_owned(),
+            |decl| php_unit::decl::shown(&decl.name.0).into_owned(),
         )
+    }
+
+    /// `ce->name` whole, the NUL and what follows it included.
+    pub(crate) fn class_name_bytes(&self, class: ClassId) -> Vec<u8> {
+        self.class_decl(class)
+            .map_or_else(|| b"object".to_vec(), |decl| decl.name.0.to_vec())
     }
 
     /// `instanceof_function`: whether `class` is `of`, extends it, or
@@ -3732,8 +3758,10 @@ impl Request {
             ValueRef::Array(_) => out.push_str("Array"),
             ValueRef::Object(object) => {
                 let decl = self.class_decl(object.class());
+                // `smart_str_appends(str, ZSTR_VAL(class_name))`: up to
+                // the NUL of an anonymous class's name.
                 let class = decl.map_or_else(String::new, |decl| {
-                    String::from_utf8_lossy(&decl.name.0).into_owned()
+                    php_unit::decl::shown(&decl.name.0).into_owned()
                 });
                 let case = decl
                     .filter(|decl| decl.kind == ClassKind::Enum)
@@ -6487,7 +6515,7 @@ impl Request {
             None => (None, bytes.clone()),
         };
         let placed = self.placed_properties(class);
-        let class_name = self.class_name(class).into_bytes();
+        let class_name = self.class_name_bytes(class);
         let exact = placed.iter().rposition(|(declaring, p)| {
             if *p.name.0 != *name.as_slice() {
                 return false;
@@ -6495,9 +6523,7 @@ impl Request {
             match (&mangled_class, p.visibility) {
                 (None, Visibility::Public) => true,
                 (Some(c), Visibility::Protected) => c.as_slice() == b"*",
-                (Some(c), Visibility::Private) => {
-                    self.class_name(*declaring).as_bytes() == c.as_slice()
-                }
+                (Some(c), Visibility::Private) => self.class_name_bytes(*declaring) == c.as_slice(),
                 _ => false,
             }
         });
@@ -8894,6 +8920,44 @@ impl Request {
             .is_none_or(Request::ini_parse_bool)
     }
 
+    /// `EG(assertions)`, php's `zend.assertions` read as
+    /// `OnUpdateAssertions` reads it (`zend_ini_parse_quantity_warn`):
+    /// `1` compiles and runs an assertion, `0` compiles it behind an
+    /// `ASSERT_CHECK` that jumps over it, and `-1` compiles nothing of it.
+    pub(crate) fn assertions(&self) -> i64 {
+        self.ini_get(b"zend.assertions")
+            .map_or(1, Request::ini_parse_bytes)
+    }
+
+    /// `OnUpdateAssertions` (`Z/Zend/zend.c:156-172`) for an
+    /// `ini_set()`: a value that moves the entry to or from a negative
+    /// one is php's warning and a refusal that keeps the entry as it
+    /// was, since what is compiled already was compiled under it; any
+    /// other value is taken.
+    ///
+    /// ```php
+    /// var_dump(ini_get('zend.assertions'), ini_set('zend.assertions', '-1'), ini_set('zend.assertions', '0'), ini_get('zend.assertions'), ini_set('zend.assertions', '1'));
+    /// ```
+    /// ```expect
+    /// Warning: zend.assertions may be completely enabled or disabled only in php.ini in %s on line 2
+    /// string(1) "1"
+    /// bool(false)
+    /// string(1) "1"
+    /// string(1) "0"
+    /// string(1) "0"
+    /// ```
+    fn assertions_updated(&mut self, value: &[u8]) -> bool {
+        let (current, next) = (self.assertions(), Request::ini_parse_bytes(value));
+        if current != next && (current < 0 || next < 0) {
+            crate::api::raising::warning(
+                self,
+                "zend.assertions may be completely enabled or disabled only in php.ini",
+            );
+            return false;
+        }
+        true
+    }
+
     /// `serialize_precision`, what `var_dump`, `var_export`, `serialize`
     /// and `json_encode` print a float at; -1, its default, asks for the
     /// shortest text that reads back as the same double.
@@ -9701,6 +9765,12 @@ impl Request {
                 .iter()
                 .find(|(_, class)| usize::try_from(*class).ok() == Some(at));
             if let Some((key, _)) = key {
+                if decl.flags.is_anonymous {
+                    if !self.link_unbound(unit, at, decl) {
+                        return false;
+                    }
+                    continue;
+                }
                 if delayed.iter().any(|delayed| **delayed == *key.0)
                     && !self.bind_at_load(unit, at, decl)
                 {
@@ -9749,6 +9819,37 @@ impl Request {
             Ok(false) => true,
             Err(_) => false,
         }
+    }
+
+    /// `zend_compile_class_decl`'s `link_unbound` for the anonymous class
+    /// at `at` of `unit`: one with no parent, no interface and no trait
+    /// php links while the file compiles and holds in `CG(class_table)`
+    /// from then on, so it is linked and bound as the unit loads, and
+    /// its `DECLARE_ANON_CLASS` finds it by name
+    /// ([`Request::declare_anonymous`]); any other is linked by the
+    /// opline. A name already bound is the same unit loaded again, whose
+    /// class stands. False when the link ended the request.
+    ///
+    /// ```php
+    /// $before = array_map(fn($c) => strstr($c, "\0", true) ?: $c, array_slice(get_declared_classes(), -2));
+    /// $o = new class {};
+    /// class Q {}
+    /// var_dump($before);
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   [0]=>
+    ///   string(15) "class@anonymous"
+    ///   [1]=>
+    ///   string(1) "Q"
+    /// }
+    /// ```
+    fn link_unbound(&mut self, unit: &Arc<Unit>, at: usize, decl: &ClassDecl) -> bool {
+        let unbound = decl.parent.is_none() && decl.interfaces.is_empty() && decl.traits.is_empty();
+        if !unbound || self.class_named(&decl.name.0).is_some() {
+            return true;
+        }
+        self.link_declared(unit, at, decl, true).is_ok()
     }
 
     /// `ZEND_DECLARE_CLASS_DELAYED` (`Z/Zend/zend_vm_def.h:7968`):
@@ -10226,6 +10327,43 @@ impl Request {
             self.fetch_to_link(interface, "Interface")?;
         }
         self.link_declared(unit, at, &decl, false).map(|_| ())
+    }
+
+    /// The class of a `ZEND_DECLARE_ANON_CLASS`: the anonymous class the
+    /// unit files under `key`, its lowered name. php's compiler put it
+    /// in `CG(class_table)` under that name, and the opline links it the
+    /// first time it finds it unlinked (`zend_do_link_class`), which
+    /// here is [`Request::bind_class`]; after that, and where the unit's
+    /// load linked it ([`Request::declare_classes`]), the name finds the
+    /// class, so one declaration is one class however often its opline
+    /// is reached.
+    pub(crate) fn declare_anonymous(
+        &mut self,
+        unit: &Arc<Unit>,
+        key: &[u8],
+    ) -> Result<ClassId, Thrown> {
+        let name = unit
+            .runtime_keys
+            .iter()
+            .find(|(filed, _)| *filed.0 == *key)
+            .and_then(|(_, at)| unit.classes.get(usize::try_from(*at).ok()?))
+            .map(|decl| decl.name.0.to_vec());
+        let Some(name) = name else {
+            return Err(crate::api::raising::fatal(
+                self,
+                "InternalError: a DECLARE_ANON_CLASS names no class the unit files",
+            ));
+        };
+        if let Some(class) = self.class_named(&name) {
+            return Ok(class);
+        }
+        self.bind_class(unit, key)?;
+        self.class_named(&name).ok_or_else(|| {
+            crate::api::raising::fatal(
+                self,
+                "InternalError: an anonymous class its declaration did not bind",
+            )
+        })
     }
 
     /// `zend_do_link_class` over the class at `at` of `unit`, whose
@@ -11507,10 +11645,31 @@ impl Request {
     /// now, the extra ones after, `ZEND_CALL_NUM_ARGS` of them in all;
     /// a code frame, the main op array or an included file's, which
     /// php's `ZEND_CALL_CODE` names; or another native, which is a call
-    /// `zend_call_function` made and php's `ZEND_CALL_DYNAMIC`.
+    /// `zend_call_function` made and php's `ZEND_CALL_DYNAMIC`, as is a
+    /// call whose callee the program named as it served
+    /// ([`exec::CallState::dynamic`]).
+    ///
+    /// ```php
+    /// function f() { $g = 'func_get_args'; return $g(); }
+    /// function h() { $g = 'func_num_args'; return call_user_func($g); }
+    /// function k() { return call_user_func('func_get_args'); }
+    /// foreach (['f', 'h', 'k'] as $fn) { try { var_dump($fn(1)); } catch (Error $e) { echo $e->getMessage(), "\n"; } }
+    /// ```
+    /// ```expect
+    /// Cannot call func_get_args() dynamically
+    /// Cannot call func_num_args() dynamically
+    /// array(1) {
+    ///   [0]=>
+    ///   int(1)
+    /// }
+    /// ```
     pub(crate) fn native_caller(&self) -> NativeCaller {
         let mut chain = self.chain();
-        let _served = chain.next();
+        if let Some(Link::Call(served)) = chain.next()
+            && served.dynamic
+        {
+            return NativeCaller::Native;
+        }
         match chain.next() {
             // A frame on a stack below the running one is a fiber's
             // resumer: a native that is a fiber's own callable was called
@@ -12487,6 +12646,9 @@ impl Request {
             return Ok(None);
         }
         if name == b"fiber.stack_size" && !crate::fiber::stack_size_updated(self, value) {
+            return Ok(None);
+        }
+        if name == b"zend.assertions" && !self.assertions_updated(value) {
             return Ok(None);
         }
         let handler = self.shared.extensions.iter().find_map(|e| {
