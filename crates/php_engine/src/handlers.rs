@@ -8293,12 +8293,10 @@ fn do_call(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, opco
     req.pop_call();
     match served {
         Ok(value) => {
-            if op.out_type == OperandKind::Unused {
-                req.release(value);
-            } else {
-                let slot = exec::temporary_slot(code, op.out);
-                let previous = req.set_slot(frame, slot, value);
-                req.release(previous);
+            let into = (op.out_type != OperandKind::Unused)
+                .then(|| (frame, exec::temporary_slot(code, op.out)));
+            if handed_back(req, into, value) {
+                return Ok(Stepped::Threw(frame));
             }
             Ok(advance(req, frame))
         }
@@ -16274,17 +16272,53 @@ fn returned_to_caller<T: Tier>(
     let returns_to = req.vm().returns_to(frame);
     req.leave_frame(frame);
     let caller = req.stack_mut().current();
-    match returns_to {
-        Some((at, slot)) => {
-            let previous = req.set_slot(at, slot, returned);
-            req.release(previous);
-        }
-        None => req.release(returned),
+    if handed_back(req, returns_to, returned) {
+        return Ok(Stepped::Threw(caller));
     }
     // The caller stands at the call opline that pushed this frame, and
     // goes on from the one after it.
     req.vm_mut().advance(caller);
     Ok(Stepped::Popped(caller))
+}
+
+/// What a call returned, handed to the frame that made the call: into
+/// the frame's temporary `into` names where the call opline reads it, and given
+/// up where it does not (`RETURN_VALUE_USED`). Then whether a throwable
+/// is pending, which the popped callee's receiver or the value given up
+/// may have left by running a destructor that threw, and which php
+/// raises at the call opline (`zend_leave_helper`'s
+/// `zend_rethrow_exception`, `ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION` after
+/// an internal call), so the `try` around the call catches it. The
+/// caller still stands at its call opline; it goes on past it only
+/// where this answers `false`.
+///
+/// ```php
+/// class D {
+///     public function __destruct() { throw new Exception('dtor'); }
+///     public function m() { return $this; }
+///     public function __call($m, $a) { return $this; }
+/// }
+/// function make() { return new D(); }
+/// try { make()->m(); } catch (Exception $e) { echo "method: ", $e->getMessage(), "\n"; }
+/// try { make()->unknown(); } catch (Exception $e) { echo "__call: ", $e->getMessage(), "\n"; }
+/// try { array_pop(...[[make()]]); } catch (Exception $e) { echo "native: ", $e->getMessage(), "\n"; }
+/// echo "after\n";
+/// ```
+/// ```expect
+/// method: dtor
+/// __call: dtor
+/// native: dtor
+/// after
+/// ```
+fn handed_back(req: &mut Request, into: Option<(FrameRef, u32)>, value: Value) -> bool {
+    match into {
+        Some((at, slot)) => {
+            let previous = req.set_slot(at, slot, value);
+            req.release(previous);
+        }
+        None => req.release(value),
+    }
+    req.is_pending()
 }
 
 /// The body the binary operators' handlers share: both operands addressed,
