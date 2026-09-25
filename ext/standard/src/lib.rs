@@ -99,6 +99,7 @@ mod syslog;
 mod r#type;
 mod uniqid;
 mod url;
+mod url_scanner;
 mod user_filters;
 mod userspace;
 mod uuencode;
@@ -151,6 +152,8 @@ struct State {
     browscap: browscap::Browscap,
     proc_open: proc_open::ProcState,
     user_filters: user_filters::FilterState,
+    /// `BG(url_adapt_output_ex)`, the URL rewriter's state.
+    url_rewriter: url_scanner::Rewriter,
 }
 
 /// The extension value (design §7.1): declarations paired with entries,
@@ -262,6 +265,9 @@ pub fn extension() -> Extension {
         .classes(vec![assert::assertion_error_class()])
         .ini(assert::ini())
         .ini(browscap::ini())
+        .ini(url_scanner::ini())
+        .on_modify(b"session.trans_sid_tags", url_scanner::on_session_tags)
+        .on_modify(b"session.trans_sid_hosts", url_scanner::on_session_hosts)
         .request_state::<State>()
         .rshutdown(syslog::close)
         .rinit(rinit)
@@ -323,6 +329,7 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
         sockets::natives(),
         user_filters::natives(),
         userspace::natives(),
+        url_scanner::natives(),
     ]
     .into_iter()
     .flatten()

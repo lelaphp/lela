@@ -37,6 +37,9 @@ const DOC_HTML5: i64 = 16 | 32;
 const SUBSTITUTE_DISALLOWED: i64 = 128;
 /// `ENT_QUOTES | ENT_SUBSTITUTE`, every native's default `$flags`.
 const DEFAULT_FLAGS: i64 = QUOTE_SINGLE | QUOTE_DOUBLE | SUBSTITUTE_ERRORS;
+/// The same flags as `url_scanner_ex.re` hands `php_escape_html_entities_ex`
+/// for a rewrite variable's name and value.
+pub(super) const QUOTES_SUBSTITUTE: i64 = DEFAULT_FLAGS;
 /// `LONGEST_ENTITY_LENGTH`.
 const LONGEST_ENTITY_LENGTH: usize = 31;
 

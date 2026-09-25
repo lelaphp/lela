@@ -693,7 +693,7 @@ impl Shared {
 /// string(0) ""
 /// string(10) "ISO-8859-1"
 /// ```
-const CORE_INI: [(&str, &str); 52] = [
+const CORE_INI: [(&str, &str); 54] = [
     ("short_open_tag", "1"),
     ("fatal_error_backtraces", "1"),
     ("precision", "14"),
@@ -766,6 +766,11 @@ const CORE_INI: [(&str, &str); 52] = [
     // `realpath_cache_size` and `realpath_cache_ttl`, `PHP_INI_SYSTEM`,
     // the realpath cache's limit and time to live (`crate::virtual_cwd`).
     ("realpath_cache_size", "4096K"),
+    // `arg_separator.input` and `arg_separator.output`, `PHP_INI_ALL`:
+    // what `parse_str` splits on and what the URL rewriter and
+    // `http_build_query` join with.
+    ("arg_separator.input", "&"),
+    ("arg_separator.output", "&"),
     ("realpath_cache_ttl", "120"),
     ("enable_dl", "1"),
     ("extension_dir", crate::constants::PHP_EXTENSION_DIR),

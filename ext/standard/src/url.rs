@@ -215,15 +215,15 @@ fn add_header(
 
 /// `php_url`: the components `php_url_parse_ex2` found.
 #[derive(Default)]
-struct Url {
-    scheme: Option<Vec<u8>>,
-    user: Option<Vec<u8>>,
-    pass: Option<Vec<u8>>,
-    host: Option<Vec<u8>>,
-    port: Option<u16>,
-    path: Option<Vec<u8>>,
-    query: Option<Vec<u8>>,
-    fragment: Option<Vec<u8>>,
+pub(super) struct Url {
+    pub(super) scheme: Option<Vec<u8>>,
+    pub(super) user: Option<Vec<u8>>,
+    pub(super) pass: Option<Vec<u8>>,
+    pub(super) host: Option<Vec<u8>>,
+    pub(super) port: Option<u16>,
+    pub(super) path: Option<Vec<u8>>,
+    pub(super) query: Option<Vec<u8>>,
+    pub(super) fragment: Option<Vec<u8>>,
 }
 
 /// `php_replace_controlchars`: every control byte as `_`.
@@ -256,7 +256,7 @@ fn port_of(digits: &[u8]) -> Option<i64> {
 /// `php_url_parse_ex2(str, length, &has_port)`: `None` where php
 /// refuses the string as a URL.
 #[allow(clippy::too_many_lines)]
-fn parse(str: &[u8]) -> Option<Url> {
+pub(super) fn parse(str: &[u8]) -> Option<Url> {
     // What the scheme branch hands on: where the host starts, a port
     // read after a scheme-less colon, or straight to the path.
     enum Next {
