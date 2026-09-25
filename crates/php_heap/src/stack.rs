@@ -1,11 +1,56 @@
-//! The VM stack (design §5.6): frames of sixteen-byte slots that never
-//! move while they live, and the entry slot the loop reads at every
-//! `RETURN*` to know whether the frame returning is the entry frame of
-//! the innermost serving (`jit-design.md` §2.2).
+//! The VM stack (design §5.6): php's `zend_vm_stack`, pages of
+//! sixteen-byte slots taken from the request's heap, so the frames a
+//! program pushes are memory `memory_limit` bounds and
+//! `memory_get_usage()` reads (design §5.13: the allocator is the only
+//! accountant); and the entry slot the loop reads at every `RETURN*` to
+//! know whether the frame returning is the entry frame of the innermost
+//! serving (`jit-design.md` §2.2).
+//!
+//! The arithmetic is php's, because the pages are what a deep call
+//! chain moves `memory_get_usage()` by and what an unbounded one is
+//! refused on. A page is 256 KiB, `ZEND_VM_STACK_PAGE_SIZE`, or 16 KiB
+//! on a fiber's stack, `ZEND_FIBER_VM_STACK_SIZE`, and starts with the
+//! three words of its own header; a frame takes `ZEND_CALL_FRAME_SLOT`
+//! slots for php's `zend_execute_data`, then the CVs and the
+//! temporaries, then its extra arguments, which is
+//! `zend_vm_calc_used_stack`. A frame that does not fit on the page
+//! takes a page of its own, `zend_vm_stack_extend`, and gives it back
+//! when it pops, `zend_vm_stack_free_call_frame`; so a program that
+//! recurses without end asks the heap for 262144 bytes it may not have,
+//! and ends in php's fatal naming them.
+//!
+//! The slots of a frame's header and those of its extra arguments are
+//! laid down and not addressed: the engine keeps the frame header with
+//! its `Func` and the extra arguments beside it, and the room php's
+//! frame gives them is kept so that the pages fill at the depths php's
+//! fill.
+//!
+//! A page is an allocation of the heap the stack is pushed and popped
+//! with, and one stack is only ever given the heap of the request it is
+//! the stack of: a frame's slots are live while the frame is on the
+//! stack and that heap stands. Nothing gives a page back but
+//! [`VmStack::pop_frame`] and [`VmStack::close`]; a stack dropped
+//! without closing leaves its pages to the heap's own end, which is
+//! php's mass release.
 
 use std::ptr::NonNull;
 
-use crate::{Zval, ZvalRef};
+use crate::hooks::Fatal;
+use crate::{Heap, Zval, ZvalRef};
+
+/// `sizeof(zval)`: a slot.
+const SLOT: usize = size_of::<Zval>();
+/// `ZEND_VM_STACK_PAGE_SIZE` (`Z/Zend/zend_execute.c:186`):
+/// `ZEND_VM_STACK_PAGE_SLOTS`, sixteen thousand slots.
+const PAGE_SIZE: usize = 16 * 1024 * SLOT;
+/// `ZEND_FIBER_VM_STACK_SIZE` (`Z/Zend/zend_fibers.h:29`).
+const FIBER_PAGE_SIZE: usize = 1024 * SLOT;
+/// `ZEND_VM_STACK_HEADER_SLOTS`: `top`, `end` and `prev`, three words
+/// rounded up to slots.
+const PAGE_HEADER_SLOTS: usize = (3 * size_of::<usize>()).div_ceil(SLOT);
+/// `ZEND_CALL_FRAME_SLOT`: `sizeof(zend_execute_data)`, eighty bytes on
+/// a 64-bit build, rounded up to slots.
+const FRAME_HEADER_SLOTS: usize = 80usize.div_ceil(SLOT);
 
 /// A slot index within one frame: a CV, a temporary or an extra argument.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -16,41 +61,94 @@ pub struct Slot(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FrameRef(pub u32);
 
-/// One call frame: its header fields live with the engine's `Func`; here
-/// are its slots, typed and bounds-checked. A slot past the end reads as
-/// `UNDEF` and a write to it is dropped, as an uninitialised zval reads.
-#[derive(Debug, Default)]
-pub struct Frame {
-    slots: Box<[Zval]>,
+/// Whose stack this is, which is what php's `EG(vm_stack_page_size)`
+/// and the bottom of the first page say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Kind {
+    /// The request's own, `zend_vm_stack_init`.
+    #[default]
+    Request,
+    /// A fiber's, laid down by `zend_fiber_execute`.
+    Fiber,
 }
 
-impl Frame {
-    /// A frame with `slots` slots, all `UNDEF`.
-    #[must_use]
-    pub fn new(slots: usize) -> Frame {
-        Frame {
-            slots: vec![Zval::UNDEF; slots].into_boxed_slice(),
+impl Kind {
+    /// The size of every page but those a frame too large for one opens.
+    const fn page_size(self) -> usize {
+        match self {
+            Kind::Request => PAGE_SIZE,
+            Kind::Fiber => FIBER_PAGE_SIZE,
         }
     }
 
-    /// How many slots the frame has: the CVs, the temporaries and the
-    /// extra arguments, which is what `i_free_compiled_variables` and
-    /// the temporaries' release walk when the frame leaves.
+    /// The slots the first page holds below every frame: none on the
+    /// request's, and on a fiber's the `zend_execute_data` of
+    /// `zend_fiber_function` that `zend_fiber_execute` places there
+    /// (`EG(vm_stack_top) = stack->top + ZEND_CALL_FRAME_SLOT`).
+    const fn bottom(self) -> usize {
+        match self {
+            Kind::Request => 0,
+            Kind::Fiber => FRAME_HEADER_SLOTS,
+        }
+    }
+}
+
+/// One `zend_vm_stack` page: `slots` slots at `at`, the first
+/// [`PAGE_HEADER_SLOTS`] of them the header's, and `top` the first one
+/// no frame holds.
+#[derive(Debug)]
+struct Page {
+    at: NonNull<Zval>,
+    slots: usize,
+    top: usize,
+}
+
+/// Where a frame stands: on the page that was the top, from slot
+/// `from`, or at the start of a page it opened, php's
+/// `ZEND_CALL_ALLOCATED`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Placed {
+    On { from: usize },
+    Opened,
+}
+
+/// One call frame: its header fields live with the engine's `Func`; here
+/// are its slots, typed and bounds-checked. A slot past the end reads as
+/// `UNDEF` and a write to it is dropped, as an uninitialised zval reads.
+#[derive(Debug)]
+pub struct Frame {
+    /// The frame's first CV, on its page.
+    at: NonNull<Zval>,
+    len: usize,
+    placed: Placed,
+}
+
+// SAFETY: a frame's slots are the request's, moved with it and read on
+// its thread alone, as a `Block`'s bytes are.
+unsafe impl Send for Frame {}
+
+// SAFETY: as a frame's, a page is the request's and read on its thread.
+unsafe impl Send for Page {}
+
+impl Frame {
+    /// How many slots the frame has: the CVs and the temporaries, which
+    /// is what `i_free_compiled_variables` and the temporaries' release
+    /// walk when the frame leaves.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.slots.len()
+        self.len
     }
 
     /// Whether the frame has no slots at all.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.slots.is_empty()
+        self.len == 0
     }
 
     /// The zval in `slot`, copied.
     #[must_use]
     pub fn slot(&self, slot: Slot) -> Zval {
-        self.slots
+        self.cells()
             .get(slot.0 as usize)
             .copied()
             .unwrap_or(Zval::UNDEF)
@@ -58,20 +156,34 @@ impl Frame {
 
     /// Write `z` into `slot`.
     pub fn set(&mut self, slot: Slot, z: Zval) {
-        if let Some(cell) = self.slots.get_mut(slot.0 as usize) {
+        if let Some(cell) = self.cells_mut().get_mut(slot.0 as usize) {
             *cell = z;
         }
     }
 
     /// The zval in `slot` in place, php's `EX_VAR(var)`: what a
     /// `FETCH_*_W` points its `VAR` at and what the `ASSIGN*` over that
-    /// `VAR` reads through (design §5.6). The slots never move while
+    /// `VAR` reads through (design §5.6). The page never moves while
     /// the frame lives, so the name holds as long as the frame does.
     /// None for a slot the frame does not have.
     pub fn slot_ptr(&mut self, slot: Slot) -> Option<ZvalRef> {
-        self.slots
+        self.cells_mut()
             .get_mut(slot.0 as usize)
             .map(|cell| ZvalRef::new(NonNull::from(cell)))
+    }
+
+    fn cells(&self) -> &[Zval] {
+        // SAFETY: the frame's `len` slots at `at` are inside a page of
+        // the heap, written `UNDEF` by the push and live until the frame
+        // pops, and the borrow of the frame is a borrow of the stack
+        // that alone names them.
+        unsafe { std::slice::from_raw_parts(self.at.as_ptr(), self.len) }
+    }
+
+    fn cells_mut(&mut self) -> &mut [Zval] {
+        // SAFETY: as `cells`, and the mutable borrow of the frame is the
+        // one writer.
+        unsafe { std::slice::from_raw_parts_mut(self.at.as_ptr(), self.len) }
     }
 }
 
@@ -79,27 +191,183 @@ impl Frame {
 /// entry slot.
 #[derive(Debug, Default)]
 pub struct VmStack {
+    kind: Kind,
+    /// php's `EG(vm_stack)` and every page its `prev` reaches, oldest
+    /// first; frames are pushed on the last.
+    pages: Vec<Page>,
     frames: Vec<Frame>,
     entries: Vec<FrameRef>,
 }
 
 impl VmStack {
-    /// An empty stack.
+    /// The request's stack, no page laid down yet: [`VmStack::open`]
+    /// lays the first, and so does the first push.
     #[must_use]
     pub fn new() -> VmStack {
         VmStack::default()
     }
 
-    /// Push a frame with `slots` slots and return its position.
-    pub fn push_frame(&mut self, slots: usize) -> FrameRef {
-        let at = u32::try_from(self.frames.len()).unwrap_or(u32::MAX);
-        self.frames.push(Frame::new(slots));
-        FrameRef(at)
+    /// A fiber's stack: 16 KiB pages, the first holding the fiber
+    /// function's frame at its bottom.
+    #[must_use]
+    pub fn fiber() -> VmStack {
+        VmStack {
+            kind: Kind::Fiber,
+            ..VmStack::default()
+        }
     }
 
-    /// Pop the frame the loop is executing.
-    pub fn pop_frame(&mut self) {
-        self.frames.pop();
+    /// `zend_vm_stack_init`, or the page `zend_fiber_execute` takes: the
+    /// first page, out of `heap`, where none stands yet.
+    pub fn open(&mut self, heap: &mut Heap) -> Result<(), Fatal> {
+        if !self.pages.is_empty() {
+            return Ok(());
+        }
+        let mut page = Page::take(heap, self.kind.page_size())?;
+        page.top += self.kind.bottom();
+        self.pages.push(page);
+        Ok(())
+    }
+
+    /// `zend_vm_stack_destroy`: every page given back to `heap`, the
+    /// newest first, and every frame with them.
+    pub fn close(&mut self, heap: &mut Heap) {
+        self.frames.clear();
+        for page in self.pages.drain(..).rev() {
+            page.give_back(heap);
+        }
+    }
+
+    /// Push a frame of `slots` addressable slots, with the room of
+    /// `extra_args` extra arguments after them, and return its position:
+    /// `zend_vm_stack_push_call_frame_ex` over
+    /// `zend_vm_calc_used_stack`. A frame the top page cannot hold takes
+    /// a page of its own from `heap`, the stack's page size or, for a
+    /// frame larger than that, the page size it rounds up to; a heap
+    /// that cannot give it refuses the push with the fatal php raises.
+    ///
+    /// So a recursion without end is refused where php's is, asking for
+    /// a page, and not after the machine's memory is gone:
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '8M');
+    /// function f() { f(); }
+    /// f();
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 262144 bytes) in %s on line 3
+    /// ```
+    ///
+    /// And a deep call chain moves `memory_get_usage()` by the pages it
+    /// took, at the depths php takes them, and gives them back as it
+    /// returns. A frame of `f` is ten slots, php's five for the header,
+    /// one CV and four temporaries, so a page holds 1638 of them.
+    ///
+    /// ```php
+    /// function f($n) { return $n ? f($n - 1) : memory_get_usage(); }
+    /// $base = memory_get_usage();
+    /// foreach ([10, 1000, 2000, 3000, 20000] as $depth) {
+    ///     echo $depth, ': ', intdiv(f($depth) - $base, 262144), "\n";
+    /// }
+    /// echo intdiv(memory_get_usage() - $base, 262144), "\n";
+    /// ```
+    /// ```expect
+    /// 10: 0
+    /// 1000: 0
+    /// 2000: 1
+    /// 3000: 1
+    /// 20000: 12
+    /// 0
+    /// ```
+    pub fn push_frame(
+        &mut self,
+        heap: &mut Heap,
+        slots: usize,
+        extra_args: usize,
+    ) -> Result<FrameRef, Fatal> {
+        self.open(heap)?;
+        let used = FRAME_HEADER_SLOTS + slots + extra_args;
+        let fits = self
+            .pages
+            .last()
+            .is_some_and(|page| used <= page.slots - page.top);
+        let placed = if fits {
+            let from = self.pages.last().map_or(0, |page| page.top);
+            Placed::On { from }
+        } else {
+            // `zend_vm_stack_extend`: the stack's page, or for a frame
+            // that would not fit one, `ZEND_VM_STACK_PAGE_ALIGNED_SIZE`.
+            let page_size = self.kind.page_size();
+            let size = used * SLOT;
+            let page = if size < page_size - PAGE_HEADER_SLOTS * SLOT {
+                page_size
+            } else {
+                (size + PAGE_HEADER_SLOTS * SLOT).next_multiple_of(page_size)
+            };
+            self.pages.push(Page::take(heap, page)?);
+            Placed::Opened
+        };
+        let Some(page) = self.pages.last_mut() else {
+            return Err(Fatal::Error(String::from(
+                "InternalError: a VM stack with no page after its push laid one down",
+            )));
+        };
+        let from = page.top;
+        page.top += used;
+        let at = page.slot(from + FRAME_HEADER_SLOTS);
+        let mut frame = Frame {
+            at,
+            len: slots,
+            placed,
+        };
+        frame.cells_mut().fill(Zval::UNDEF);
+        let position = u32::try_from(self.frames.len()).unwrap_or(u32::MAX);
+        self.frames.push(frame);
+        Ok(FrameRef(position))
+    }
+
+    /// Pop the frame the loop is executing,
+    /// `zend_vm_stack_free_call_frame`: the page it stood on keeps its
+    /// room for the next push, and a page the frame opened goes back to
+    /// `heap`.
+    pub fn pop_frame(&mut self, heap: &mut Heap) {
+        let Some(frame) = self.frames.pop() else {
+            return;
+        };
+        match frame.placed {
+            Placed::On { from } => {
+                if let Some(page) = self.pages.last_mut() {
+                    page.top = from;
+                }
+            }
+            Placed::Opened => {
+                if let Some(page) = self.pages.pop() {
+                    page.give_back(heap);
+                }
+            }
+        }
+    }
+
+    /// The frame the loop is executing, off the stack and handed over
+    /// whole with every slot it holds (design §5.6, §5.11): what
+    /// `GENERATOR_CREATE` and `YIELD` do to a generator's frame, which
+    /// lives on the heap between its runs as php's `zend_generator`
+    /// keeps its own `execute_data`. The slots are one allocation that
+    /// moves with the frame and not through it, so a `ZvalRef` into one
+    /// names the same zval while the frame is off the stack. None on an
+    /// empty stack.
+    pub fn move_to_heap(&mut self) -> Option<Frame> {
+        self.frames.pop()
+    }
+
+    /// A frame [`VmStack::move_to_heap`] took, back on top of this
+    /// stack, whichever stack that is: the generator's resumption,
+    /// which pushes the frame where the resumer stands, on a fiber's
+    /// stack when a fiber resumes it (design §5.11).
+    pub fn resume_frame(&mut self, frame: Frame) -> FrameRef {
+        let at = u32::try_from(self.frames.len()).unwrap_or(u32::MAX);
+        self.frames.push(frame);
+        FrameRef(at)
     }
 
     /// The frame at `f`, if it is live.
@@ -155,6 +423,33 @@ impl VmStack {
     }
 }
 
+impl Page {
+    /// `zend_vm_stack_new_page`: `size` bytes of `heap`, the top just
+    /// past the header.
+    fn take(heap: &mut Heap, size: usize) -> Result<Page, Fatal> {
+        let at = heap.mm.alloc(size)?.cast::<Zval>();
+        Ok(Page {
+            at,
+            slots: size / SLOT,
+            top: PAGE_HEADER_SLOTS,
+        })
+    }
+
+    /// The page's slot `at`, which is inside it.
+    fn slot(&self, at: usize) -> NonNull<Zval> {
+        // SAFETY: every caller's `at` is under `slots`, the slots of the
+        // one allocation `take` made, so the offset stays inside it.
+        unsafe { self.at.add(at) }
+    }
+
+    /// `efree(page)`.
+    fn give_back(self, heap: &mut Heap) {
+        // SAFETY: the page came from this heap's `alloc` in `take`, and
+        // leaving the stack's list was its last name, so it is freed once.
+        unsafe { heap.mm.free(self.at.cast()) };
+    }
+}
+
 /// What [`VmStack::push_entry`] hands back, and what
 /// [`VmStack::pop_entry`] takes: one serving's claim on the entry slot.
 #[derive(Debug)]
@@ -167,15 +462,23 @@ pub struct EntryGuard {
 mod tests {
     use super::*;
 
+    use crate::serial::alone;
+
     #[test]
     fn the_entry_slot_pops_with_its_guard() {
+        let _alone = alone();
+        let mut heap = Heap::new();
         let mut stack = VmStack::new();
-        let outer = stack.push_frame(2);
+        let outer = stack.push_frame(&mut heap, 2, 0);
+        assert!(outer.is_ok(), "a first frame fits the first page");
+        let Ok(outer) = outer else {
+            return;
+        };
         let guard = stack.push_entry(outer);
-        let inner = stack.push_frame(1);
+        let inner = stack.push_frame(&mut heap, 1, 0);
         assert_eq!(stack.entry(), outer);
-        assert_eq!(stack.current(), inner);
-        stack.pop_frame();
+        assert_eq!(inner.ok(), Some(stack.current()));
+        stack.pop_frame(&mut heap);
         stack.pop_entry(guard);
         assert_eq!(stack.entry(), outer);
         if let Some(f) = stack.frame_mut(outer) {
@@ -189,5 +492,80 @@ mod tests {
             stack.frame(outer).map(|f| f.slot(Slot(5))),
             Some(Zval::UNDEF)
         );
+        stack.close(&mut heap);
+    }
+
+    /// php's page arithmetic, to the byte `memory_get_usage()` reads:
+    /// the first page is 256 KiB of the heap, a frame that does not fit
+    /// what is left of it opens a second of the same size, and the pop
+    /// of that frame gives the second back while the first stays. A
+    /// frame of ten slots and its five header slots is 240 bytes, so
+    /// 1092 of them fill the first page's 16382 slots past its header
+    /// and the 1093rd opens the next.
+    #[test]
+    fn a_frame_past_the_page_takes_a_page_of_its_own_and_gives_it_back() {
+        let _alone = alone();
+        let mut heap = Heap::new();
+        let start = heap.memory_usage(false);
+        let mut stack = VmStack::new();
+        assert_eq!(stack.open(&mut heap), Ok(()));
+        assert_eq!(heap.memory_usage(false) - start, PAGE_SIZE);
+        for _ in 0..1092 {
+            assert!(stack.push_frame(&mut heap, 10, 0).is_ok());
+        }
+        assert_eq!(heap.memory_usage(false) - start, PAGE_SIZE);
+        assert!(stack.push_frame(&mut heap, 10, 0).is_ok());
+        assert_eq!(heap.memory_usage(false) - start, 2 * PAGE_SIZE);
+        stack.pop_frame(&mut heap);
+        assert_eq!(heap.memory_usage(false) - start, PAGE_SIZE);
+        // A frame larger than a page takes one of its own, rounded up
+        // to the page size past the header.
+        assert!(stack.push_frame(&mut heap, PAGE_SIZE / SLOT, 0).is_ok());
+        assert_eq!(heap.memory_usage(false) - start, 3 * PAGE_SIZE);
+        stack.close(&mut heap);
+        assert_eq!(heap.memory_usage(false), start);
+    }
+
+    /// The limit meets a page as it meets any allocation: at the chunk
+    /// the heap would have to grow by, with php's message and the page's
+    /// 262144 bytes in it.
+    #[test]
+    fn a_stack_past_the_memory_limit_is_refused_with_php_s_fatal() {
+        let _alone = alone();
+        let mut heap = Heap::new();
+        heap.set_memory_limit(4 * 1024 * 1024);
+        let mut stack = VmStack::new();
+        let refused = (0..100_000)
+            .map(|_| stack.push_frame(&mut heap, 10, 0))
+            .find_map(Result::err);
+        assert_eq!(
+            refused,
+            Some(Fatal::Error(String::from(
+                "Allowed memory size of 4194304 bytes exhausted (tried to allocate 262144 bytes)"
+            )))
+        );
+        stack.close(&mut heap);
+    }
+
+    /// A fiber's pages are 16 KiB, and its first holds the fiber
+    /// function's frame below the first one pushed: 1024 slots less the
+    /// header's two and that frame's five leave 1017, sixty-seven frames
+    /// of fifteen.
+    #[test]
+    fn a_fiber_s_stack_grows_by_its_own_pages() {
+        let _alone = alone();
+        let mut heap = Heap::new();
+        let start = heap.memory_usage(false);
+        let mut stack = VmStack::fiber();
+        assert_eq!(stack.open(&mut heap), Ok(()));
+        assert_eq!(heap.memory_usage(false) - start, FIBER_PAGE_SIZE);
+        for _ in 0..67 {
+            assert!(stack.push_frame(&mut heap, 10, 0).is_ok());
+        }
+        assert_eq!(heap.memory_usage(false) - start, FIBER_PAGE_SIZE);
+        assert!(stack.push_frame(&mut heap, 10, 0).is_ok());
+        assert_eq!(heap.memory_usage(false) - start, 2 * FIBER_PAGE_SIZE);
+        stack.close(&mut heap);
+        assert_eq!(heap.memory_usage(false), start);
     }
 }

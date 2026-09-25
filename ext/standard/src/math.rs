@@ -4,15 +4,14 @@
 //! (`Z/ext/standard/math.c:62-252`), which `round`, `number_format` and
 //! `range` round with.
 
-use php_ext::call::{class_constant, lookup_class};
-use php_ext::coerce::{coerce_param, numeric_string, value_name};
+use php_ext::coerce::{coerce_param, numeric_string};
 use php_ext::decl::{
     ClassConstDecl, ClassDecl, ClassFlags, ClassKind, ConstDecl, ConstExpr, EnumBacking,
     FunctionDecl, MethodDecl, Name, Parameter, PropertyDecl, Type, Visibility,
 };
-use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, deprecated, docref, throw};
+use php_ext::raising::{Level, Thrown, arg_value_error, deprecated, docref, throw};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{PhpString, Value, ValueRef};
 
 use crate::output::Entry;
 use crate::{argument_count_between, constant, declared, frameless, long_argument, parameter};
@@ -104,7 +103,8 @@ pub(crate) fn constants() -> Vec<ConstDecl> {
 }
 
 /// `enum RoundingMode` as `basic_functions.stub.php` declares it, its
-/// eight cases in order and the `cases()` every enum has.
+/// eight cases in order; `cases()` is the engine's, which gives it to
+/// every enum it links as `zend_enum_register_funcs` does.
 ///
 /// ```php
 /// var_dump(RoundingMode::HalfEven, RoundingMode::cases()[7], count(RoundingMode::cases()), RoundingMode::TowardsZero->name, RoundingMode::HalfOdd instanceof UnitEnum);
@@ -135,6 +135,7 @@ pub(crate) fn classes() -> Vec<(ClassDecl, Vec<(MethodDecl, Entry)>)> {
                 name: Name((*case).into()),
                 visibility: Visibility::Public,
                 is_final: false,
+                is_case: true,
                 ty: None,
                 value: ConstExpr::EnumCase {
                     class: name(),
@@ -163,29 +164,7 @@ pub(crate) fn classes() -> Vec<(ClassDecl, Vec<(MethodDecl, Entry)>)> {
         line: 0,
         end_line: 0,
     };
-    let cases = MethodDecl {
-        function: declared(b"cases", &[], Type::Array),
-        visibility: Visibility::Public,
-        is_instance: false,
-        is_abstract: false,
-        is_final: false,
-        tentative_return: false,
-    };
-    vec![(decl, vec![(cases, rounding_mode_cases as Entry)])]
-}
-
-/// `RoundingMode::cases(): array`, what `zend_enum_cases_func` answers:
-/// every case in declaration order.
-fn rounding_mode_cases(req: &mut Request) -> Result<Value, Thrown> {
-    let mut out = PhpArray::new(req)?;
-    let Some(class) = lookup_class(req, b"RoundingMode")? else {
-        return Ok(Value::array(out));
-    };
-    for (case, _) in ROUNDING_MODES {
-        let value = class_constant(req, class, case)?;
-        out.append(req, value)?;
-    }
-    Ok(Value::array(out))
+    vec![(decl, Vec::new())]
 }
 
 /// The declarations, as `basic_functions.stub.php` has them. `round`'s
@@ -460,32 +439,15 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
     ]
 }
 
-/// `Z_PARAM_NUMBER` at `position`: an int or a float, a string or a bool
-/// coerced to one as php's weak typing does, php's `TypeError` otherwise.
+/// `Z_PARAM_NUMBER` at `position`: an int or a float, `coerce_param`'s
+/// over `int|float`.
 fn number_argument(req: &mut Request, position: u32) -> Result<Value, Thrown> {
-    let given = req.argument(position).unwrap_or_default().deref();
-    match given.as_ref() {
-        ValueRef::Int(_) | ValueRef::Float(_) => Ok(given),
-        ValueRef::Bool(b) => Ok(Value::int(i64::from(b))),
-        ValueRef::Null | ValueRef::Undef => {
-            php_ext::raising::arg_null_deprecated(req, position, "int|float");
-            Ok(Value::int(0))
-        }
-        ValueRef::Str(s) => match numeric_string(s.as_bytes()) {
-            Some(number) => Ok(number),
-            None => Err(not_a_number(req, position, &given)),
-        },
-        _ => Err(not_a_number(req, position, &given)),
-    }
-}
-
-/// `Z_PARAM_NUMBER`'s `TypeError`.
-fn not_a_number(req: &mut Request, position: u32, given: &Value) -> Thrown {
-    let name = value_name(req, given);
-    arg_type_error(
+    let given = req.argument(position).unwrap_or_default();
+    coerce_param(
         req,
+        &given,
+        &Type::Union(vec![Type::Int, Type::Float]),
         position,
-        &format!("be of type int|float, {name} given"),
     )
 }
 
@@ -660,11 +622,13 @@ fn round(req: &mut Request) -> Result<Value, Thrown> {
 /// `Z_PARAM_OBJ_OF_CLASS_OR_LONG(mode_object, rounding_mode_ce, mode)`:
 /// a `RoundingMode` case as the rounding its name is, or an int.
 fn rounding_mode(req: &mut Request, position: u32) -> Result<i32, Thrown> {
-    let given = req.argument(position).unwrap_or_default().deref();
-    if let Some(object) = given.as_object().copied()
-        && let Some(class) = lookup_class(req, b"RoundingMode")?
-        && object.instance_of(req, class)
-    {
+    let given = req.argument(position).unwrap_or_default();
+    let ty = Type::Union(vec![
+        Type::Named(Name(b"RoundingMode".as_slice().into())),
+        Type::Int,
+    ]);
+    let coerced = coerce_param(req, &given, &ty, position)?;
+    if let Some(object) = coerced.as_object().copied() {
         let name = object
             .prop(req, b"name")
             .and_then(|name| name.as_str_bytes().map(<[u8]>::to_vec))
@@ -674,22 +638,7 @@ fn rounding_mode(req: &mut Request, position: u32) -> Result<i32, Thrown> {
             .find(|(case, _)| *case == name.as_slice())
             .map_or(PHP_ROUND_HALF_UP, |(_, mode)| *mode));
     }
-    if matches!(
-        given.as_ref(),
-        ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Bool(_) | ValueRef::Null
-    ) || given
-        .as_str_bytes()
-        .is_some_and(|bytes| numeric_string(bytes).is_some())
-    {
-        let mode = long_argument(req, position)?;
-        return Ok(i32::try_from(mode).unwrap_or(0));
-    }
-    let name = value_name(req, &given);
-    Err(arg_type_error(
-        req,
-        position,
-        &format!("be of type RoundingMode|int, {name} given"),
-    ))
+    Ok(i32::try_from(coerced.as_int().unwrap_or(0)).unwrap_or(0))
 }
 
 /// `sin(float $num): float`.

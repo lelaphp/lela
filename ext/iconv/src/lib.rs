@@ -117,7 +117,7 @@ pub fn extension() -> Extension {
             constant("ICONV_MIME_DECODE_CONTINUE_ON_ERROR", ConstExpr::Long(2)),
         ])
         .ini(Kind::ALL.map(ini).to_vec())
-        .buffer_handler(BufferHandler {
+        .register(BufferHandler {
             name: "ob_iconv_handler",
             conflicts: &["ob_iconv_handler", "mb_output_handler"],
             handler: ob_iconv_handler,
@@ -215,6 +215,7 @@ fn declared(
             .collect(),
         return_type: Some(ty(returns)),
         returns_by_ref: false,
+        is_generator: false,
         attributes: Vec::new(),
         doc_comment: None,
         file: Name(Box::new([])),

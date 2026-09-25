@@ -227,8 +227,10 @@ ForeachTarget = byref:'&'? target:Expr
 
 SwitchStmt = 'switch' '(' subject:Expr ')'
              ( '{' SwitchArm* '}' | ':' SwitchArm* 'endswitch' ';' )
-SwitchArm  = ('case' value:Expr | 'default') (':' | ';') StmtList
-// NOTE: ';' after case/default is legal, archaic, and in the corpus.
+SwitchArm  = ('case' value:Expr | 'default') separator:(':' | ';') StmtList
+// NOTE: ';' after case/default is legal, archaic, and in the corpus, and
+// php keeps which of the two was written (ZEND_ALT_CASE_SYNTAX in `attr`)
+// to deprecate the ';' at 8.5, so `separator` names the token.
 
 BreakStmt    = 'break' level:Expr? ';'
 ContinueStmt = 'continue' level:Expr? ';'

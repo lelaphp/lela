@@ -45,6 +45,7 @@ pub(crate) fn stub(line: &str) -> FunctionDecl {
         parameters,
         return_type: (!returns.is_empty()).then(|| ty(returns)),
         returns_by_ref: false,
+        is_generator: false,
         attributes: Vec::new(),
         doc_comment: None,
         file: Name(Box::new([])),

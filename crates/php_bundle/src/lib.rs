@@ -19,14 +19,14 @@ pub fn enabled() -> &'static [fn() -> Extension] {
     &[
         #[cfg(feature = "standard")]
         php_ext_standard::extension,
+        #[cfg(feature = "pcre")]
+        php_ext_pcre::extension,
         #[cfg(feature = "spl")]
         php_ext_spl::extension,
         #[cfg(feature = "date")]
         php_ext_date::extension,
         #[cfg(feature = "reflection")]
         php_ext_reflection::extension,
-        #[cfg(feature = "pcre")]
-        php_ext_pcre::extension,
         #[cfg(feature = "mbstring")]
         php_ext_mbstring::extension,
         #[cfg(feature = "session")]

@@ -100,19 +100,6 @@ fn the_line_a_for_loops_jump_back_is_left_at_over_an_else_arm() {
     assert_eq!(line(arm, SyntaxKind::ELSE_CLAUSE), 3);
 }
 
-/// #601 pin 3: `Case statements followed by a semicolon (;) are
-/// deprecated … on line 4`. A `default`'s line is its empty statement
-/// list's, the `;`'s, comments on both sides uncounted. The engine
-/// compiles the program and raises no deprecation over it, so the line is
-/// not one it shows yet; pin 2, the same rule through the fatal
-/// `zend_compile_switch` raises over two `default` clauses, is a witness
-/// in `src/tree/line.rs`.
-#[test]
-fn a_switch_arms_empty_body_is_its_separators_line() {
-    let semi = "<?php\nswitch (1) { default /*\n\n*/ ; /*\n\n*/ }\n";
-    assert_eq!(line(semi, SyntaxKind::SWITCH_ARM), 4);
-}
-
 /// #601 pin 9 and the amendment's pin (reason 3): `The "yield" expression
 /// can only be used inside a function in %s on line 4`, and `… on line 5`
 /// for a `yield $k => $v` written over four lines, the value's line and

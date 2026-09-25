@@ -32,7 +32,7 @@ jit = []
 # witness lane serve a snippet through. Off by default.
 test = ["php_ext/test"]
 standard = ["dep:php_ext_standard"]
-spl = ["dep:php_ext_spl"]
+spl = ["dep:php_ext_spl", "pcre"] # php_spl.c: ZEND_MOD_REQUIRED("pcre")
 date = ["dep:php_ext_date"]
 reflection = ["dep:php_ext_reflection"]
 pcre = ["dep:php_ext_pcre"]

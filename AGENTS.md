@@ -37,11 +37,33 @@ I want Zend's design with better tooling, and nothing beside it. No second execu
 
 `xtask done` (harness §4.5) prints what is unmet since the merge base with the branch's track, `main` for a branch on none; the Stop hook, pre-push and CI run the same list. Walk it before proposing a change and say which entries applied: fresh passing readings for every touched crate, a witness on every kernel and native, a lock that differs in the same diff, no open divergence on a changed scope, `permit` over the diff denying nothing, and the manifest and the registry untouched or changed by a person.
 
+## Finish the whole task
+
+A session here runs on its own: the turn ends at the Stop hook, not at a question, and nobody is waiting to type "go ahead".
+
+You are operating autonomously. The user is not watching in real time and cannot answer questions mid-task, so asking 'Want me to…?' or 'Shall I…?' will block the work. For reversible actions that follow from the original request, proceed without asking. Stop only for destructive actions or genuine scope changes the user must decide. Offering follow-ups after the task is done is fine; asking permission before doing the work is not.
+
+Exception: when the user is describing a problem, asking a question, or thinking out loud rather than requesting a change, the deliverable is your assessment. Report your findings and stop. Don't apply a fix until they ask for one.
+
+Before ending your turn, check your last paragraph. If it is a plan, an analysis, a question, a list of next steps, or a promise about work you have not done ('I'll…', 'let me know when…'), do that work now with tool calls. That includes retrying after errors and gathering missing information yourself. Do not stop because the context or session is long. End your turn only when the task is complete or you are blocked on input only the user can provide.
+
+Before running a command that changes system state (such as restarts, deletes, or config edits), check that the evidence actually supports that specific action. A signal that pattern-matches to a known failure may have a different cause.
+
+What a session stops for here is listed, not judged in the moment: an edit `permit` denies, and an act that is a person's alone (harness §11) — a manifest row, a divergence reason, an oracle bump, the sentence a design revision states. Each of those is a `for-a-person` ticket, filed, with the work that waits on it wired to wait; asking in the reply instead ends the turn with nothing filed and nothing running.
+
+The user's request — or the plan they approved — sets the scope, and the scope is the deliverable: don't quietly narrow, widen, or swap it. Read ambiguity the way a careful colleague would: make routine judgment calls yourself, and check in only when different readings would lead to materially different work. If you see a real problem with the task as specified, say so in a sentence or two and keep building under stated assumptions; if the user hears the concern and reaffirms, that is their decision, so deliver the full request.
+
+If a question comes up partway, first do everything that doesn't depend on the answer; then state the assumption you made, or — when going ahead on a wrong guess would be unsafe or would make the work useless — put the question at the end of a turn that also delivers that progress. If one part turns out to be blocked, complete every other part in full and say exactly what you left out and why — the whole task is the deliverable, and scaling it down is the user's call, not yours. A step you have decided on is something to run, not to announce: describing the next step and ending the turn leaves it undone until the user replies.
+
+Keep changes to what the request needs. Something else you notice worth doing — cleanup or documentation the task didn't call for, a change to a file the task didn't require — is a suggestion to make at the end, not a change to make; actions clearly beyond what the ask implies, and risky or destructive ones, still need the user's go-ahead.
+
+Where those paragraphs say *suggestion* or *follow-up*, this repository says ticket. A thing found and not done is a ticket, filed before the turn ends: `ready-for-agent` when an agent may take it, `for-a-person` when the act is a person's alone (harness §11); the reply that names it and files nothing is what `ticket.reply-unfiled` holds you to (CONTEXT.md, Ticket). Filing one is the exception and never the shape of the work — the task is finished whole, and what a ticket carries is what the task did not ask for.
+
 ## Verifying and committing
 
 - `cargo xtask <instrument>` runs one instrument; `cargo xtask --help` lists the ones built so far. The smallest proof is the instrument for the crate you touched. The harness itself is tested by `cargo test -p xtask`, and every manifest rule has a fixture under `xtask/fixtures/` that must fail.
 - A change to behaviour comes with a witness beside the kernel or native, pinned by `--accept`. The witness is the test; write it before the body when you can. The phpt subset for an extension is `php-src/ext/<name>/tests`. A bench number is a claim a person signs off, with the A/A control read by a person: state the measurement, never the conclusion.
-- Stage and commit by pathspec, `git add -- <paths>` and `git commit -F <file> -- <paths>`: the index is shared with every session in the checkout, and `git add -A`, `git add .` or a commit that names no path takes what another session staged. The message file is named for the branch or its ticket and never `msg.txt`, for the same reason the staging is by pathspec: the scratchpad is one directory per project, shared across a track's worktrees, so a generic name is whichever session wrote it last. Commits are plain language, one concern, the change in one sentence: `xtask vocab: the glossary as a sensor`. If the message says "also", split it. The lock line, the witness and the regenerated `ext/clippy.toml` travel with the code that needs them. A rule you want, or a divergence you found, is a paragraph in the message proposing it, with the fixture that would fail. A thing found and not done is a ticket, filed: `ready-for-agent` when an agent may take it, `for-a-person` when the act is a person's alone (harness §11). What the work opened is the close's `--opens`, recorded as a reading, not a trailer in the message. A ticket's acceptance criteria are boxes its own label can tick. Where the work waits on a decision, the decision is a `for-a-person` ticket of its own and the work is wired to wait on it; a box inside an agent's ticket that reads *a person decides* is one box that is both, and it closes nothing however finished the code is.
+- Stage and commit by pathspec, `git add -- <paths>` and `git commit -F <file> -- <paths>`: the index is shared with every session in the checkout, and `git add -A`, `git add .` or a commit that names no path takes what another session staged. The message file is named for the branch or its ticket and never `msg.txt`, for the same reason the staging is by pathspec: the scratchpad is one directory per project, shared across a track's worktrees, so a generic name is whichever session wrote it last. Commits are plain language, one concern, the change in one sentence: `xtask vocab: the glossary as a sensor`. If the message says "also", split it. The lock line, the witness and the regenerated `ext/clippy.toml` travel with the code that needs them. A rule you want, or a divergence you found, is a paragraph in the message proposing it, with the fixture that would fail. What the work opened is the close's `--opens`, recorded as a reading, not a trailer in the message. A ticket's acceptance criteria are boxes its own label can tick. Where the work waits on a decision, the decision is a `for-a-person` ticket of its own and the work is wired to wait on it; a box inside an agent's ticket that reads *a person decides* is one box that is both, and it closes nothing however finished the code is.
 
 ## Documentation and where code lives
 
@@ -65,7 +87,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=6eaca42167b2696f9cb242a633a9db94f247bf46afdb8b4e58057f80408542aa out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=a548d15b3ea52702473b4bf9da48b2fdf35aa711ca83bfd292f5e472fb1acc3d out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -88,7 +110,7 @@ third-engine-design.md
 | tier | tier.lock |  |  | skip |
 | harness | xtask.lock | 329 |  | pass |
 
-<!-- /computed in=6bbb763fb1290c28495a726e35b82b0c23a25228ac593bfc508bdc74973a8757 out=6f2377e5da8a7e3f59cf59a3a4ea8bf6a5b2d59a17d3f692dd97050fc625caad -->
+<!-- /computed in=7b269238be2dee227d4ac49a40d645c540c3feee30c94d705b9ef00b08d4c7d1 out=6f2377e5da8a7e3f59cf59a3a4ea8bf6a5b2d59a17d3f692dd97050fc625caad -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
@@ -116,7 +138,7 @@ third-engine-design.md
 | harness.self |  | deny | fail | Harness configuration, the oracle pin and the divergence registry are edited by a person. |
 | divergence.reason |  | check | no reading | A divergence row with status accepted has a reason a person wrote; done fails while an open row touches the scope (harness §4.3). |
 
-<!-- /computed in=09357a5360495a4fef062111f3f4c4dd60d5f2e9958df9d4b4559204b2a4d564 out=348df72d5731806397e50fbaf172c0a968c3a7e08885e53f61c6b58168ba37f8 -->
+<!-- /computed in=9a4bbe4efcf2e04e169c433acd0bf2649fd0db1ea45b431ac0197d7ab81da7e5 out=348df72d5731806397e50fbaf172c0a968c3a7e08885e53f61c6b58168ba37f8 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine

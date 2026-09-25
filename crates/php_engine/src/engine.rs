@@ -27,7 +27,8 @@ use crate::api::abi::{Cache, Entry, Extension, NativeNew, ObjectHandlers, Startu
 use crate::api::request::{Aside, Ending, ExtensionId, Request};
 use crate::api::values::{ClassId, Value};
 use crate::exec;
-use crate::tier::{Nop, Tier, execute, reenter};
+use crate::streams::Standard;
+use crate::tier::{Nop, Tier, execute, reenter, resume};
 
 /// Everything a host knows about one request before it starts (design
 /// §4.3 seam 4): one plain `Send` value, handed over once.
@@ -46,6 +47,59 @@ pub struct RequestDescription {
     /// The source to serve, when the host has it in hand (`php -r`, the
     /// in-process tests); else the file is read by its name.
     pub source: Option<Vec<u8>>,
+    /// The CLI's standard handles, which `do_cli` registers after
+    /// `php_request_startup` and php's other hosts have none of; `None`
+    /// registers nothing.
+    pub file_handles: Option<FileHandles>,
+}
+
+/// What `do_cli` registers for a request it serves a program in
+/// (`Z/sapi/cli/php_cli.c:926-980` at 8.5.9), and the host's fds under
+/// it. `PHP_CLI_PROCESS_TITLE` first, then `cli_register_file_handles`
+/// (`:519`): `php://stdin`, `php://stdout` and `php://stderr` opened in
+/// that order, which makes them the request's resources 1, 2 and 3, and
+/// the constants `STDIN`, `STDOUT` and `STDERR` on them, each under
+/// `Core`. `do_cli`'s `-l` registers no stream, so a host leaves this
+/// `None` for a lint, and php's CGI and `FastCGI` hosts have none of it.
+///
+/// What is written to the streams goes to the sink, `STDOUT` past the
+/// `php_output` layer and `STDERR` onto its error stream (design
+/// revision 16), and `STDIN` reads the request's body. The fds are what
+/// `fstat` and `ftruncate` on the three ask, as php's `STDIO` kind asks
+/// `fstat(2)` and `ftruncate(2)` of fds 0, 1 and 2; a host with no fd for
+/// one of them hands `None`, which `fstat(2)` and `ftruncate(2)` answer
+/// as they answer a closed fd, so both answer `false`.
+#[derive(Debug, Clone)]
+pub struct FileHandles {
+    fds: Arc<[Option<std::os::fd::OwnedFd>; 3]>,
+}
+
+impl FileHandles {
+    /// The three over the fds the host hands, closed when the last
+    /// description holding them is dropped; a host hands copies of its
+    /// own, as `dup(2)` makes them.
+    #[must_use]
+    pub fn new(
+        stdin: Option<std::os::fd::OwnedFd>,
+        stdout: Option<std::os::fd::OwnedFd>,
+        stderr: Option<std::os::fd::OwnedFd>,
+    ) -> FileHandles {
+        FileHandles {
+            fds: Arc::new([stdin, stdout, stderr]),
+        }
+    }
+
+    /// The fd under one of the three, `None` where the host handed none.
+    pub(crate) fn fd(&self, standard: Standard) -> Option<std::os::fd::BorrowedFd<'_>> {
+        use std::os::fd::AsFd;
+        let [stdin, stdout, stderr] = &*self.fds;
+        let fd = match standard {
+            Standard::Stdin => stdin,
+            Standard::Stdout => stdout,
+            Standard::Stderr => stderr,
+        };
+        fd.as_ref().map(AsFd::as_fd)
+    }
 }
 
 /// Where a request's bytes go (design §4.3 seam 4): the engine owns the
@@ -165,6 +219,10 @@ pub(crate) struct Shared {
     /// destructor's or a callback's frame through, bound to the same
     /// tier as `entry`.
     pub(crate) reenter: Loop,
+    /// The same loop over a generator's frame the resumption put back on
+    /// the stack, `zend_generator_resume`'s `zend_execute_ex`, bound to
+    /// the same tier (design §5.11, [`crate::tier::resume`]).
+    pub(crate) resume: Loop,
     /// The unit cache (design §6.3): what a file compiled to, held for
     /// every request that asks for the same file unchanged. A source the
     /// host handed over is not in it, because php caches neither `-r`
@@ -226,6 +284,101 @@ pub(crate) enum MethodAt {
     Trampoline(u32),
 }
 
+/// `zend_register_internal_enum`'s `zend_register_functions` over the
+/// enum methods: a native enum takes `cases`, and `from` and `tryFrom`
+/// for a backed one, after the methods its stub declares, served by the
+/// entries every enum's are ([`crate::enums::EnumMethod`]).
+fn link_enum_methods(decl: &mut ClassDecl, class: ClassId, methods: &mut Vec<NativeMethod>) {
+    if decl.kind != php_unit::decl::ClassKind::Enum {
+        return;
+    }
+    for method in php_unit::enum_methods(decl.backing) {
+        let lowered = method.function.name.0.to_ascii_lowercase();
+        let Some(served) = crate::enums::EnumMethod::of(&lowered, decl.backing) else {
+            continue;
+        };
+        let index = u32::try_from(decl.methods.len()).unwrap_or(u32::MAX);
+        decl.methods.push(method);
+        methods.push(NativeMethod {
+            class,
+            at: MethodAt::Declared(index),
+            entry: served.entry(),
+        });
+    }
+}
+
+/// The classes the engine links: Zend's own and then each extension's,
+/// in bundle order, each with its methods, handler table and
+/// `create_object`, the constants later extensions add to them, and the
+/// trampolines.
+struct LinkedClasses {
+    classes: Vec<ClassDecl>,
+    handlers: Vec<Option<&'static dyn ObjectHandlers>>,
+    natives: Vec<Option<NativeNew>>,
+    methods: Vec<NativeMethod>,
+    trampolines: Vec<MethodDecl>,
+}
+
+/// [`LinkedClasses`] for `extensions`.
+fn link_classes(extensions: &[Extension]) -> LinkedClasses {
+    // `zend_register_internal_class_with_flags` and `zend_register_functions`
+    // over the class's methods: each declaration takes its methods,
+    // and each method's entry is numbered in the order it is met.
+    let mut zend = crate::interfaces::classes();
+    zend.extend(crate::classes::zend_classes());
+    zend.extend(crate::fiber::classes());
+    let mut classes: Vec<ClassDecl> = Vec::new();
+    let mut handlers = Vec::new();
+    let mut natives = Vec::new();
+    let mut methods = Vec::new();
+    for (decl, entries, table, native) in zend
+        .iter()
+        .chain(extensions.iter().flat_map(|e| e.classes.iter()))
+    {
+        handlers.push(*table);
+        natives.push(*native);
+        let mut decl = decl.clone();
+        let class = ClassId(u32::try_from(classes.len()).unwrap_or(u32::MAX));
+        for (method, entry) in entries {
+            let index = u32::try_from(decl.methods.len()).unwrap_or(u32::MAX);
+            decl.methods.push(method.clone());
+            methods.push(NativeMethod {
+                class,
+                at: MethodAt::Declared(index),
+                entry: *entry,
+            });
+        }
+        link_enum_methods(&mut decl, class, &mut methods);
+        classes.push(decl);
+    }
+    link_class_constants(&mut classes, extensions);
+    let trampolines = link_trampolines(&classes, extensions, &mut methods);
+    LinkedClasses {
+        classes,
+        handlers,
+        natives,
+        methods,
+        trampolines,
+    }
+}
+
+/// `zend_declare_class_constant_ex` over a class another extension
+/// registered, from a later `MINIT`: each extension's
+/// [`ExtensionBuilder::class_constants`] appended to the class it names,
+/// in bundle order.
+///
+/// [`ExtensionBuilder::class_constants`]: crate::api::abi::ExtensionBuilder::class_constants
+fn link_class_constants(classes: &mut [ClassDecl], extensions: &[Extension]) {
+    for (class_name, constants) in extensions.iter().flat_map(|e| e.class_constants.iter()) {
+        if let Some(decl) = classes
+            .iter_mut()
+            .find(|decl| decl.name.0.eq_ignore_ascii_case(&class_name.0))
+        {
+            decl.constants.extend(constants.iter().cloned());
+        }
+    }
+}
+
 /// `zend_register_closure_ce` leaves `__invoke` off `Closure`'s table
 /// and `zend_closure_get_method` answers it on the lookup: every
 /// trampoline [`crate::classes::trampolines`] names is numbered past
@@ -233,9 +386,17 @@ pub(crate) enum MethodAt {
 /// `methods`, and its declaration stands beside the linked table
 /// rather than in it. A row naming a class nothing declares is left
 /// unlinked, as a method of an absent class would be.
-fn link_trampolines(classes: &[ClassDecl], methods: &mut Vec<NativeMethod>) -> Vec<MethodDecl> {
+fn link_trampolines(
+    classes: &[ClassDecl],
+    extensions: &[Extension],
+    methods: &mut Vec<NativeMethod>,
+) -> Vec<MethodDecl> {
     let mut trampolines = Vec::new();
-    for (class_name, method, entry) in crate::classes::trampolines() {
+    let own = crate::classes::trampolines();
+    let laid = extensions
+        .iter()
+        .flat_map(|e| e.trampolines.iter().cloned());
+    for (class_name, method, entry) in own.into_iter().chain(laid) {
         let Some(at) = classes
             .iter()
             .position(|decl| decl.name.0.eq_ignore_ascii_case(&class_name.0))
@@ -645,6 +806,7 @@ pub struct EngineBuilder {
     ini: Vec<(Vec<u8>, Vec<u8>)>,
     entry: Loop,
     reenter: Loop,
+    resume: Loop,
     tier_extension: Option<Extension>,
 }
 
@@ -671,6 +833,7 @@ impl EngineBuilder {
     pub fn tier<T: Tier>(mut self) -> EngineBuilder {
         self.entry = execute::<T>;
         self.reenter = reenter::<T>;
+        self.resume = resume::<T>;
         self.tier_extension = T::extension();
         self
     }
@@ -706,36 +869,13 @@ impl EngineBuilder {
             .collect();
         let (function_modules, functions) = function_table(&extensions, &ini);
         let frameless = frameless_table(functions.iter().map(|(decl, _)| decl));
-        // `zend_register_internal_class_with_flags` and `zend_register_functions`
-        // over the class's methods: each declaration takes its methods,
-        // and each method's entry is numbered in the order it is met.
-        let mut zend = crate::interfaces::classes();
-        zend.extend(crate::classes::zend_classes());
-        zend.extend(crate::fiber::classes());
-        let mut classes: Vec<ClassDecl> = Vec::new();
-        let mut handlers = Vec::new();
-        let mut natives = Vec::new();
-        let mut methods = Vec::new();
-        for (decl, entries, table, native) in zend
-            .iter()
-            .chain(extensions.iter().flat_map(|e| e.classes.iter()))
-        {
-            handlers.push(*table);
-            natives.push(*native);
-            let mut decl = decl.clone();
-            let class = ClassId(u32::try_from(classes.len()).unwrap_or(u32::MAX));
-            for (method, entry) in entries {
-                let index = u32::try_from(decl.methods.len()).unwrap_or(u32::MAX);
-                decl.methods.push(method.clone());
-                methods.push(NativeMethod {
-                    class,
-                    at: MethodAt::Declared(index),
-                    entry: *entry,
-                });
-            }
-            classes.push(decl);
-        }
-        let trampolines = link_trampolines(&classes, &mut methods);
+        let LinkedClasses {
+            classes,
+            handlers,
+            natives,
+            methods,
+            trampolines,
+        } = link_classes(&extensions);
         // Zend's own constants stand before the bundle's, as
         // `zend_register_standard_constants` runs before any `MINIT`.
         let constants: Vec<ConstDecl> = Shared::zend_constants()
@@ -780,6 +920,7 @@ impl EngineBuilder {
                 sapi_names,
                 entry: self.entry,
                 reenter: self.reenter,
+                resume: self.resume,
                 units: Cache::new(MAX_ACCELERATED_FILES),
                 strings: Mutex::new(strings),
                 map_ptr_last: AtomicU32::new(0),
@@ -804,6 +945,7 @@ impl Engine {
             ini: Vec::new(),
             entry: execute::<Nop>,
             reenter: reenter::<Nop>,
+            resume: resume::<Nop>,
             tier_extension: Nop::extension(),
         }
     }
@@ -1000,6 +1142,9 @@ impl Engine {
                 let _ = rinit(&mut req);
             }
         }
+        // What `do_cli` registers once `php_request_startup` has run,
+        // before the program is compiled.
+        let _ = req.register_file_handles();
         // Where the unit's constant strings live is where the unit
         // lives (design §5.2): a file's unit is published into the
         // engine's table and shared by every request that serves it,
@@ -1239,7 +1384,13 @@ fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) {
     if !req.declare_classes(unit) || !req.declare_functions(unit) {
         return;
     }
-    let frame = req.push_frame(Arc::clone(unit));
+    let frame = match req.push_frame(Arc::clone(unit)) {
+        Ok(frame) => frame,
+        Err(fatal) => {
+            req.end_in(&fatal);
+            return;
+        }
+    };
     if req.seed_argv(frame, unit).is_err() {
         req.detach_symbol_table(frame);
         req.pop_frame();
@@ -2354,11 +2505,12 @@ mod tests {
                 "what the request interned is the request's own memory"
             );
         }
-        // The object store's table, and nothing else, before a line runs
-        // (design §5.4): 1024 buckets of a pointer each.
+        // The object store's table and the VM stack's first page, and
+        // nothing else, before a line runs (design §5.4, §5.6): 1024
+        // buckets of a pointer each, and `ZEND_VM_STACK_PAGE_SIZE`.
         assert_eq!(
             started_at,
-            vec![8192, 8192],
+            vec![8192 + 262_144, 8192 + 262_144],
             "every request starts where the one before it did"
         );
         assert_eq!(
@@ -2600,7 +2752,7 @@ mod tests {
         let unit = Unit {
             main: php_unit::OpArray {
                 oplines: vec![php_unit::Opline {
-                    opcode: php_unit::Opcode::Yield,
+                    opcode: php_unit::Opcode::DeclareAnonClass,
                     ..php_unit::Opline::default()
                 }]
                 .into_boxed_slice(),
@@ -2608,11 +2760,11 @@ mod tests {
             },
             ..Unit::default()
         };
-        let frame = req.push_frame(Arc::new(unit));
+        let frame = req.pushed(Arc::new(unit));
         assert_eq!(
             crate::tier::execute::<Nop>(&mut req, frame),
             Err(Fatal::Error(String::from(
-                "InternalError: ZEND_YIELD has no handler in this engine yet"
+                "InternalError: ZEND_DECLARE_ANON_CLASS has no handler in this engine yet"
             )))
         );
     }
@@ -2628,7 +2780,7 @@ mod tests {
             .unit(b"<?php echo 1;", b"witness.php")
             .unwrap_or_default();
         let unit = Unit::clone(&unit);
-        let frame = req.push_frame(Arc::new(unit));
+        let frame = req.pushed(Arc::new(unit));
         assert_eq!(crate::tier::execute::<Probe>(&mut req, frame), Ok(()));
         assert_eq!(
             req.state::<Asked>().sites,
@@ -2653,7 +2805,7 @@ mod tests {
             )
             .unwrap_or_default();
         req.declare_functions(&unit);
-        let frame = req.push_frame(unit);
+        let frame = req.pushed(unit);
         let outcome = crate::tier::execute::<Probe>(&mut req, frame);
         assert!(
             outcome.is_err(),

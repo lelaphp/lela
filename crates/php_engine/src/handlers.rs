@@ -56,7 +56,7 @@
 #![allow(clippy::extra_unused_type_parameters, clippy::unnecessary_wraps)]
 
 use php_heap::{Fatal, FrameRef};
-use php_unit::{CacheSlot, ConstIdx, Level, OpArray, OperandKind, Opline};
+use php_unit::{CacheSlot, ConstIdx, OpArray, OperandKind, Opline};
 
 use crate::api::abi::{PropertyRead, PropertyTest};
 use crate::api::call::Function;
@@ -65,7 +65,10 @@ use crate::api::request::{Opened, Request};
 use crate::api::values::{
     ClosureInfo, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value, ValueRef,
 };
-use crate::exec::{self, Cached, CallStage, CallState};
+use crate::exec::{
+    self, Cached, CallStage, CallState, E_FATAL_ERRORS, cleanup_live_vars,
+    cleanup_unfinished_calls, free_carried_value, has_only_fatal_errors, restore_silenced,
+};
 use crate::ops::{Offset, Switched};
 use crate::tier::{SafepointIdx, Site, Stepped, Tier, continued};
 use php_unit::Opcode;
@@ -88,16 +91,6 @@ const BIND_IMPLICIT: u32 = 2;
 /// (`1<<3`) name `EG(symbol_table)`, which the compiler emits no fetch
 /// of yet.
 const FETCH_LOCAL: u32 = 1 << 2;
-
-/// `E_FATAL_ERRORS` (`Z/Zend/zend_errors.h:47`): the six levels a `@`
-/// does not silence, and what `E_HAS_ONLY_FATAL_ERRORS` tests a mask
-/// against.
-const E_FATAL_ERRORS: i64 = Level::Error.bit()
-    | Level::CoreError.bit()
-    | Level::CompileError.bit()
-    | Level::UserError.bit()
-    | Level::RecoverableError.bit()
-    | Level::Parse.bit();
 
 /// `IS_CONSTANT_UNQUALIFIED_IN_NAMESPACE` (`Z/Zend/zend_types.h:637`),
 /// the one bit a `FETCH_CONSTANT`'s `op1` carries: the name was
@@ -1782,7 +1775,7 @@ pub(crate) fn include_or_eval<T: Tier>(
         req.addref(&value);
         return answered(req, frame, returns_to, value);
     }
-    let callee = req.push_code_frame(unit, frame, returns_to);
+    let callee = req.push_code_frame(unit, frame, returns_to)?;
     Ok(Stepped::Pushed(callee))
 }
 
@@ -1876,11 +1869,7 @@ fn enter(
     let returns_to =
         (op.out_type != OperandKind::Unused).then(|| (frame, exec::temporary_slot(code, op.out)));
     let passed = call.arguments.len();
-    let Some(callee) = req.push_user_frame(function, call, returns_to, Some(frame)) else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: a user function whose body the unit has not",
-        )));
-    };
+    let callee = req.push_user_frame(function, call, returns_to, Some(frame))?;
     let Some(serving) = req.vm().serving(callee) else {
         return Err(Fatal::Error(String::from(
             "InternalError: the frame just pushed is serving no op array",
@@ -2119,15 +2108,7 @@ fn verified_arg(
     else {
         return Ok(None);
     };
-    if ty.contains_code(argument.type_code()) {
-        return Ok(None);
-    }
-    if let Some(object) = argument.as_object()
-        && crate::ops::named_types(&ty).any(|name| {
-            req.class_named(&name.0)
-                .is_some_and(|of| req.instance_of(object.class(), of))
-        })
-    {
+    if crate::api::coerce::holds(req, argument, &ty, req.frame_scopes(frame)) {
         return Ok(None);
     }
     let strict = req.caller_strict_types(frame);
@@ -2373,15 +2354,7 @@ pub(crate) fn verify_return_type<T: Tier>(
         return threw(req, frame, &thrown);
     }
     let returned = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
-    if ty.contains_code(returned.type_code()) {
-        return Ok(advance(req, frame));
-    }
-    if let Some(object) = returned.as_object()
-        && crate::ops::named_types(&ty).any(|name| {
-            req.class_named(&name.0)
-                .is_some_and(|of| req.instance_of(object.class(), of))
-        })
-    {
+    if crate::api::coerce::holds(req, &returned, &ty, req.frame_scopes(frame)) {
         return Ok(advance(req, frame));
     }
     let strict = req.frame_strict_types(frame);
@@ -2801,6 +2774,22 @@ fn default_value(req: &mut Request, code: &OpArray, at: ConstIdx) -> Result<(Val
 /// int(80)
 /// int(0)
 /// ```
+///
+/// The constructor is what the handler table's `get_constructor` answers: a user
+/// class's is held to the scope that may call it, and `Generator`'s is
+/// php's refusal of a class reserved for internal use.
+///
+/// ```php
+/// class C { private function __construct() { echo "made\n"; } static function make() { return new C; } }
+/// C::make();
+/// try { new C; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { new Generator; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// made
+/// Call to private C::__construct() from global scope
+/// The "Generator" class is reserved for internal use and cannot be manually instantiated
+/// ```
 pub(crate) fn new<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -2826,7 +2815,13 @@ pub(crate) fn new<T: Tier>(
     let previous = req.set_slot(frame, slot, object.as_value());
     req.release(previous);
     let count = usize::try_from(op.extended_value).unwrap_or(0);
-    let constructor = req.method_named(class, b"__construct");
+    // `Z_OBJ_HT_P(result)->get_constructor`: the table's answer, which
+    // is `zend_std_get_constructor`'s visibility check for a user class
+    // and a refusal for a class php reserves, `Generator`'s.
+    let constructor = match req.handlers_of(class).get_constructor(req, object) {
+        Ok(constructor) => constructor,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
     if constructor.is_none() {
         let at = req.vm().opline(frame);
         let next_is_do_fcall = exec::opline_at(code, at.saturating_add(1))
@@ -3559,21 +3554,6 @@ pub(crate) fn end_silence<T: Tier>(
     restore_silenced(req, &saved);
     req.release(saved);
     Ok(advance(req, frame))
-}
-
-/// `E_HAS_ONLY_FATAL_ERRORS(mask)` (`Z/Zend/zend_errors.h:49`).
-fn has_only_fatal_errors(mask: i64) -> bool {
-    mask & !E_FATAL_ERRORS == 0
-}
-
-/// The restore `END_SILENCE` and the unwinder share: the word put back
-/// to what a `BEGIN_SILENCE` saved, where the word still holds only
-/// fatal levels and the saved one held more.
-fn restore_silenced(req: &mut Request, saved: &Value) {
-    let saved = saved.as_int().unwrap_or(0);
-    if has_only_fatal_errors(req.error_reporting()) && !has_only_fatal_errors(saved) {
-        req.set_error_reporting(saved);
-    }
 }
 
 /// `ZEND_FETCH_CLASS_CONSTANT` (`Z/Zend/zend_vm_def.h`, handler 181)
@@ -4438,7 +4418,6 @@ fn fetch_obj_place(
     // property` notice, is not served yet (#513), so the placement is
     // loud and a property the scope may not reach is the `Error`.
     let placed = req.declared_slot_for_write(object.class(), &name, "indirectly modify", false);
-    exec::free_operand(req, frame, code, op.op1_type, op.op1);
     let at = match placed {
         Ok(Some((slot, typed))) => {
             // `if (UNEXPECTED(Z_TYPE_P(retval) == IS_UNDEF))`: under
@@ -4455,14 +4434,14 @@ fn fetch_obj_place(
                             "Typed property {class}::${shown} must not be accessed before initialization"
                         ),
                     );
-                    return threw(req, frame, &thrown);
+                    return threw_freeing_container(req, frame, code, op, &thrown);
                 }
                 crate::api::raising::warning(
                     req,
                     &format!("Undefined property: {class}::${shown}"),
                 );
                 if let Err(thrown) = req.write_declared_slot(object.heap(), slot, Value::null()) {
-                    return threw(req, frame, &thrown);
+                    return threw_freeing_container(req, frame, code, op, &thrown);
                 }
             }
             let Some(at) = object.heap().slot_ref(slot) else {
@@ -4492,10 +4471,10 @@ fn fetch_obj_place(
                         String::from_utf8_lossy(&name)
                     )));
                 }
-                Err(thrown) => return threw(req, frame, &thrown),
+                Err(thrown) => return threw_freeing_container(req, frame, code, op, &thrown),
             }
         }
-        Err(thrown) => return threw(req, frame, &thrown),
+        Err(thrown) => return threw_freeing_container(req, frame, code, op, &thrown),
     };
     let out = exec::temporary_slot(code, op.out);
     let previous = req.take_slot(frame, out);
@@ -4506,7 +4485,22 @@ fn fetch_obj_place(
         )));
     };
     var.write(php_heap::Zval::indirect(at));
+    exec::free_container_var(req, frame, code, op);
     Ok(advance(req, frame))
+}
+
+/// A throw out of [`fetch_obj_place`] once the object is found: the
+/// container given up as `FREE_OP1_VAR_PTR` gives it up, with no place
+/// written to extract, and then the throw.
+fn threw_freeing_container(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    thrown: &Thrown,
+) -> Edge {
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    threw(req, frame, thrown)
 }
 
 /// `ZEND_FETCH_DIM_R` (`Z/Zend/zend_vm_def.h:1933`), `$a[k]` where a
@@ -5267,7 +5261,6 @@ fn write_entry(
     array: PhpArray,
     dim: Option<&Value>,
     constant: bool,
-    read: DimRead,
 ) -> Result<Result<Option<php_heap::ZvalRef>, Thrown>, Fatal> {
     let Some(dim) = dim else {
         return Ok(req.array_next_entry(array.heap()));
@@ -5276,20 +5269,6 @@ fn write_entry(
         Ok(key) => key,
         Err(thrown) => return Ok(Err(thrown)),
     };
-    // `zend_undefined_offset_write` and `zend_undefined_index_write`
-    // (`Z/Zend/zend_execute.c:2765`): under `BP_VAR_RW` the key the
-    // table has not got warns before it is laid down, which is the one
-    // thing `_RW` adds to `_W`.
-    if read == DimRead::Warning && array.heap().get(key).is_none() {
-        let message = match key {
-            php_heap::Key::Long(n) => format!("Undefined array key {n}"),
-            php_heap::Key::Str(s) => format!(
-                "Undefined array key \"{}\"",
-                String::from_utf8_lossy(s.bytes())
-            ),
-        };
-        crate::api::raising::warning(req, &message);
-    }
     Ok(req.array_lookup(array.heap(), key))
 }
 
@@ -5446,6 +5425,38 @@ pub(crate) fn fetch_dim_rw<T: Tier>(
     fetch_dim_place(req, frame, code, op, DimRead::Warning)
 }
 
+/// The array arm of [`fetch_dim_place`], `fetch_from_array`: the entry
+/// the dimension names as the `IS_INDIRECT` the `VAR` takes, laid down
+/// by [`write_entry`] under `BP_VAR_W` and by [`rw_entry`] under
+/// `BP_VAR_RW`, and `null` where the array went while the warning ran,
+/// php's `ZVAL_NULL(result)`.
+fn array_place(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    array: PhpArray,
+    read: DimRead,
+) -> Result<Result<php_heap::Zval, Thrown>, Fatal> {
+    let dim = (op.op2_type != OperandKind::Unused)
+        .then(|| exec::operand(req, frame, code, op.op2_type, op.op2));
+    let constant = op.op2_type == OperandKind::Const;
+    let landing = match read {
+        DimRead::Warning => rw_entry(req, array, dim.as_ref(), constant)?,
+        DimRead::Silent => write_entry(req, array, dim.as_ref(), constant)?.map(Landing::from),
+    };
+    Ok(match landing {
+        Ok(Landing::Entry(entry)) => Ok(php_heap::Zval::indirect(entry)),
+        Ok(Landing::Gone) => Ok(php_heap::Zval::null()),
+        Ok(Landing::Occupied) => Err(crate::api::raising::throw(
+            req,
+            "Error",
+            "Cannot add element to the array as the next element is already occupied",
+        )),
+        Err(thrown) => Err(thrown),
+    })
+}
+
 /// The body `FETCH_DIM_W` and `FETCH_DIM_RW` share, php's one
 /// `zend_fetch_dimension_address` under two `BP_VAR_*`: `read` is
 /// `BP_VAR_RW`'s own diagnostic for a key the table has not got, which
@@ -5464,26 +5475,7 @@ fn fetch_dim_place(
         )));
     };
     let written = match write_container(req, place) {
-        Ok(Container::Array(array)) => {
-            let dim = (op.op2_type != OperandKind::Unused)
-                .then(|| exec::operand(req, frame, code, op.op2_type, op.op2));
-            let written = write_entry(
-                req,
-                array,
-                dim.as_ref(),
-                op.op2_type == OperandKind::Const,
-                read,
-            )?;
-            match written {
-                Ok(Some(entry)) => Ok(php_heap::Zval::indirect(entry)),
-                Ok(None) => Err(crate::api::raising::throw(
-                    req,
-                    "Error",
-                    "Cannot add element to the array as the next element is already occupied",
-                )),
-                Err(thrown) => Err(thrown),
-            }
-        }
+        Ok(Container::Array(array)) => array_place(req, frame, code, op, array, read)?,
         Ok(Container::Object(object)) => {
             let dim = object_dim(req, frame, code, op);
             let table = req.object_handlers(object.heap());
@@ -5546,12 +5538,14 @@ fn fetch_dim_place(
         Err(thrown) => Err(thrown),
     };
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
-    exec::free_operand(req, frame, code, op.op1_type, op.op1);
     let previous = req.take_slot(frame, out);
     req.release(previous);
     let written = match written {
         Ok(written) => written,
-        Err(thrown) => return threw(req, frame, &thrown),
+        Err(thrown) => {
+            exec::free_operand(req, frame, code, op.op1_type, op.op1);
+            return threw(req, frame, &thrown);
+        }
     };
     let Some(var) = req.slot_ptr(frame, out) else {
         return Err(Fatal::Error(String::from(
@@ -5559,6 +5553,7 @@ fn fetch_dim_place(
         )));
     };
     var.write(written);
+    exec::free_container_var(req, frame, code, op);
     Ok(advance(req, frame))
 }
 
@@ -6630,7 +6625,14 @@ pub(crate) fn assign_op<T: Tier>(
         let previous = req.set_slot(frame, op.op1, Value::null());
         req.release(previous);
     }
-    let computed = kernel(req, &held, &value);
+    let computed = if grows_in_place(req, op.extended_value, &held) {
+        crate::ops::concat_assign(req, &held, &value, |req| {
+            let at = req.slot_ptr(frame, op.op1);
+            vacate(req, at);
+        })
+    } else {
+        kernel(req, &held, &value)
+    };
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
     let stepped = match computed {
         Ok(stepped) => stepped,
@@ -7428,6 +7430,48 @@ fn binary_op_of(extended_value: u32) -> Option<BinaryKernel> {
     })
 }
 
+/// Whether a compound assignment over `held` is `concat_function` with
+/// its own left operand as the place written,
+/// [`crate::ops::concat_assign`]: the operator is `.`, and the place is
+/// not a cell carrying types over a value that is no string, which php
+/// hands to `zend_binary_op` and the check of each type instead
+/// (`zend_binary_assign_op_typed_ref`, `Z/Zend/zend_execute.c:1677-1682`).
+fn grows_in_place(req: &Request, extended_value: u32, held: &Value) -> bool {
+    if !is_concat(extended_value) {
+        return false;
+    }
+    match held.as_php_ref() {
+        Some(cell) => {
+            req.ref_type_sources(cell.heap()).is_empty() || cell.get().as_php_string().is_some()
+        }
+        None => true,
+    }
+}
+
+/// Whether `extended_value` names `.`, the operator of `.=`.
+fn is_concat(extended_value: u32) -> bool {
+    u8::try_from(extended_value)
+        .ok()
+        .and_then(Opcode::from_u8)
+        .is_some_and(|opcode| opcode == Opcode::Concat)
+}
+
+/// `i_zval_ptr_dtor(result); ZVAL_NULL(result)` of `concat_function`
+/// over a place, read again where it stands now: a reference there is
+/// followed to its cell, `null` is written, and the owner the place held
+/// is given up.
+fn vacate(req: &mut Request, at: Option<php_heap::ZvalRef>) {
+    let Some(mut at) = at else {
+        return;
+    };
+    if let Some(cell) = exec::value_of(at.read()).as_php_ref() {
+        at = cell.heap().val_ref();
+    }
+    let held = exec::value_of(at.read());
+    at.write(Value::null().to_zval());
+    req.release(held);
+}
+
 /// `ZEND_ASSIGN_STATIC_PROP_OP` (`Z/Zend/zend_vm_def.h:2714`),
 /// `C::$p op= v`, two oplines: this one names the property in `op1`,
 /// the class's constant pair in `op2` and the operator in
@@ -7561,8 +7605,28 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
             return threw(req, frame, &thrown);
         }
     };
-    let computed = kernel(req, &held, &value);
-    req.release(held);
+    // php's `.=` over a string grows it where the slot holds it
+    // (`zend_binary_assign_op_typed_prop`'s first arm, and
+    // `zend_binary_op` over an untyped slot); `vacate` gives up the
+    // read's owner and the slot's, so the append holds the only one.
+    let in_place = is_concat(op.extended_value)
+        && (held.as_php_string().is_some()
+            || ty.is_none()
+                && req
+                    .static_slot_cell(declaring, &name)
+                    .is_none_or(|cell| req.ref_type_sources(cell.heap()).is_empty()));
+    let computed = if in_place {
+        crate::ops::concat_assign(req, &held, &value, |req| {
+            req.release(held);
+            req.store_static_property(declaring, &name, Value::null());
+        })
+    } else {
+        kernel(req, &held, &value)
+    };
+    // An `Err` never vacated, so the read's owner is still ours then.
+    if !in_place || computed.is_err() {
+        req.release(held);
+    }
     req.release(value);
     let stepped = match computed {
         Ok(stepped) => stepped,
@@ -8333,13 +8397,7 @@ pub(crate) fn assign_dim<T: Tier>(
         }
         Ok(Container::Array(array)) => {
             let dim = exec::operand(req, frame, code, op.op2_type, op.op2);
-            let entry = write_entry(
-                req,
-                array,
-                Some(&dim),
-                op.op2_type == OperandKind::Const,
-                DimRead::Silent,
-            )?;
+            let entry = write_entry(req, array, Some(&dim), op.op2_type == OperandKind::Const)?;
             match entry {
                 Ok(Some(entry)) => {
                     let value = exec::take_operand(req, frame, code, data.op1_type, data.op1);
@@ -8447,41 +8505,134 @@ struct Compound<'a> {
     kernel: BinaryKernel,
 }
 
+/// Where a dimension write under `BP_VAR_RW` lands, what
+/// `zend_fetch_dimension_address_inner` answers for it.
+enum Landing {
+    /// The entry at the key, in place.
+    Entry(php_heap::ZvalRef),
+    /// `$a[]` with `nNextFreeElement` at `ZEND_LONG_MAX` taken, which
+    /// is `zend_cannot_add_element`'s `Error` at the site.
+    Occupied,
+    /// php's `NULL` with nothing thrown: the handler the `Undefined
+    /// array key` warning reached destroyed the array or took an owner
+    /// of it, so there is no entry to write into and the site's
+    /// temporary takes `null` ([`undefined_key_write`]).
+    Gone,
+}
+
+impl From<Option<php_heap::ZvalRef>> for Landing {
+    fn from(entry: Option<php_heap::ZvalRef>) -> Landing {
+        entry.map_or(Landing::Occupied, Landing::Entry)
+    }
+}
+
 /// The entry a compound assignment to a dimension lands in, php's
 /// `zend_fetch_dimension_address_inner_RW` (`Z/Zend/zend_execute.c`):
 /// the entry at the key, laid down holding `null` where the table has
-/// none, and php's `Undefined array key` warning before it, which is
-/// the one thing the `BP_VAR_W` walk ([`write_entry`]) does not raise.
-/// The `UNUSED` dimension of `$a[] op= v` is an entry appended with
-/// nothing in it (`zend_hash_next_index_insert(ht,
-/// &EG(uninitialized_zval))`), which raises no warning at all.
+/// none after php's `Undefined array key` warning
+/// ([`undefined_key_write`]), which is the one thing the `BP_VAR_W`
+/// walk ([`write_entry`]) does not raise. The `UNUSED` dimension of
+/// `$a[] op= v` is an entry appended with nothing in it
+/// (`zend_hash_next_index_insert(ht, &EG(uninitialized_zval))`), which
+/// raises no warning at all.
 fn rw_entry(
     req: &mut Request,
     array: PhpArray,
     dim: Option<&Value>,
     constant: bool,
-) -> Result<Result<Option<php_heap::ZvalRef>, Thrown>, Fatal> {
+) -> Result<Result<Landing, Thrown>, Fatal> {
     let Some(dim) = dim else {
-        return Ok(req.array_next_entry(array.heap()));
+        return Ok(req.array_next_entry(array.heap()).map(Landing::from));
     };
     let key = match crate::ops::array_offset(req, dim, constant) {
         Ok(key) => key,
         Err(thrown) => return Ok(Err(thrown)),
     };
     if array.heap().get(key).is_none() {
-        let message = match key {
-            php_heap::Key::Long(n) => format!("Undefined array key {n}"),
-            php_heap::Key::Str(s) => format!(
-                "Undefined array key \"{}\"",
-                String::from_utf8_lossy(s.bytes())
-            ),
-        };
-        crate::api::raising::warning(req, &message);
-        if req.is_pending() {
-            return Ok(Err(Thrown::of(None)));
-        }
+        return Ok(undefined_key_write(req, array, key));
     }
-    Ok(req.array_lookup(array.heap(), key))
+    Ok(req.array_lookup(array.heap(), key).map(Landing::from))
+}
+
+/// `zend_undefined_offset_write` and `zend_undefined_index_write`
+/// (`Z/Zend/zend_execute.c:2507-2550`): the `Undefined array key`
+/// warning for a key `array` has not got, and the entry laid down
+/// holding `null` after it. The warning may reach a handler that
+/// overwrites the variable holding the array, so the array is held
+/// across it, `GC_ADDREF(ht)`, and a string key too, which the handler
+/// may free as well. Where the array has any owner but that one and
+/// its own after the warning, it is given up, `zend_array_destroy` at
+/// the last, and nothing is written: [`Landing::Gone`]. An immutable
+/// array is never held, as php's `IS_ARRAY_IMMUTABLE` test says.
+///
+/// ```php
+/// $v = null;
+/// set_error_handler(function () use (&$v) { $v = 0; });
+/// $v[0] .= "xyz";
+/// var_dump($v);
+/// $v = null;
+/// $v["k"]["j"] .= "xyz";
+/// var_dump($v);
+/// set_error_handler(function ($no, $message) use (&$v, &$copy) {
+///     echo $message, "\n";
+///     $copy = $v;
+/// });
+/// $v = [];
+/// $v[5] .= "x";
+/// $v[1][2] .= "y";
+/// var_dump($v, $copy);
+/// ```
+/// ```expect
+/// int(0)
+/// int(0)
+/// Undefined array key 5
+/// Undefined array key 1
+/// Undefined array key 2
+/// array(0) {
+/// }
+/// array(0) {
+/// }
+/// ```
+fn undefined_key_write(
+    req: &mut Request,
+    array: PhpArray,
+    key: php_heap::Key,
+) -> Result<Landing, Thrown> {
+    let held = (!array.heap().is_immutable()).then_some(Value::array(array));
+    if let Some(held) = &held {
+        req.addref(held);
+    }
+    let name = match key {
+        php_heap::Key::Str(s) => Some(exec::value_of(php_heap::Zval::string(s))),
+        php_heap::Key::Long(_) => None,
+    };
+    if let Some(name) = &name {
+        req.addref(name);
+    }
+    let message = match key {
+        php_heap::Key::Long(n) => format!("Undefined array key {n}"),
+        php_heap::Key::Str(s) => format!(
+            "Undefined array key \"{}\"",
+            String::from_utf8_lossy(s.bytes())
+        ),
+    };
+    crate::api::raising::warning(req, &message);
+    let gone = held.is_some_and(|held| {
+        let owners = held.refcount();
+        req.release_nogc(held);
+        owners != 2
+    });
+    let landing = if req.is_pending() {
+        Err(Thrown::of(None))
+    } else if gone {
+        Ok(Landing::Gone)
+    } else {
+        req.array_lookup(array.heap(), key).map(Landing::from)
+    };
+    if let Some(name) = name {
+        req.release(name);
+    }
+    landing
 }
 
 /// `ZEND_ASSIGN_DIM_OP` (`Z/Zend/zend_vm_def.h:1156`), `$a[k] op= v`
@@ -8652,8 +8803,15 @@ pub(crate) fn assign_dim_op<T: Tier>(
             let dim = (op.op2_type != OperandKind::Unused)
                 .then(|| exec::operand(req, frame, code, op.op2_type, op.op2));
             match rw_entry(req, array, dim.as_ref(), op.op2_type == OperandKind::Const)? {
-                Ok(Some(entry)) => stepped_entry(req, frame, code, step, entry),
-                Ok(None) => Err(crate::api::raising::throw(
+                Ok(Landing::Entry(entry)) => stepped_entry(req, frame, code, step, entry),
+                // `assign_dim_op_ret_null`: `FREE_OP_DATA` and a `null`
+                // result.
+                Ok(Landing::Gone) => {
+                    exec::free_operand(req, frame, code, data.op1_type, data.op1);
+                    write_out(req, frame, code, op, &Value::null());
+                    Ok(())
+                }
+                Ok(Landing::Occupied) => Err(crate::api::raising::throw(
                     req,
                     "Error",
                     "Cannot add element to the array as the next element is already occupied",
@@ -8702,8 +8860,13 @@ fn stepped_entry(
 ) -> Result<(), Thrown> {
     let Compound { op, data, kernel } = step;
     let value = exec::operand(req, frame, code, data.op1_type, data.op1);
-    let held = exec::value_of(entry.read()).deref();
-    let computed = kernel(req, &held, &value);
+    let raw = exec::value_of(entry.read());
+    let held = raw.deref();
+    let computed = if grows_in_place(req, op.extended_value, &raw) {
+        crate::ops::concat_assign(req, &held, &value, |req| vacate(req, Some(entry)))
+    } else {
+        kernel(req, &held, &value)
+    };
     exec::free_operand(req, frame, code, data.op1_type, data.op1);
     let stepped = computed?;
     let strict = req.caller_strict_types(frame);
@@ -8869,7 +9032,7 @@ fn step_property(
     object: PhpObject,
     name: &Value,
 ) -> Result<Result<(), Thrown>, Fatal> {
-    let Compound { op, data, kernel } = step;
+    let Compound { op, data, .. } = step;
     let bytes = name.as_str_bytes().unwrap_or_default().to_vec();
     // `zend_std_get_property_ptr_ptr`, whose silence is
     // `ce->__get != NULL`: a class with a `__get` hands out no place
@@ -8939,10 +9102,7 @@ fn step_property(
         crate::api::raising::warning(req, &format!("Undefined property: {class}::${shown}"));
     }
     let value = exec::operand(req, frame, code, data.op1_type, data.op1);
-    let held = exec::value_of(object.heap().slot(slot))
-        .deref()
-        .undef_as_null();
-    let computed = kernel(req, &held, &value);
+    let computed = slot_step(req, step, object, (slot, typed), &value);
     exec::free_operand(req, frame, code, data.op1_type, data.op1);
     let stepped = match computed {
         Ok(stepped) => stepped,
@@ -9076,6 +9236,32 @@ fn dynamic_property_step(
         return Err(thrown);
     }
     overloaded_property_step(req, frame, code, step, object, name)
+}
+
+/// The kernel of a compound assignment over what a declared slot holds
+/// and `value`: `.=` grows the string in the slot where it stands
+/// ([`crate::ops::concat_assign`]), over a typed slot only where it holds
+/// a string, the first arm of `zend_binary_assign_op_typed_prop`; every
+/// other operator and value is the step's kernel, whose value the caller
+/// writes back.
+fn slot_step(
+    req: &mut Request,
+    step: Compound<'_>,
+    object: PhpObject,
+    (slot, typed): (u32, bool),
+    value: &Value,
+) -> Result<Value, Thrown> {
+    let raw = exec::value_of(object.heap().slot(slot));
+    let held = raw.deref().undef_as_null();
+    if grows_in_place(req, step.op.extended_value, &raw)
+        && (!typed || held.as_php_string().is_some())
+    {
+        return crate::ops::concat_assign(req, &held, value, |req| {
+            let at = object.heap().slot_ref(slot);
+            vacate(req, at);
+        });
+    }
+    (step.kernel)(req, &held, value)
 }
 
 /// `zend_assign_op_overloaded_property` (`Z/Zend/zend_execute.c:2429`),
@@ -10278,6 +10464,21 @@ pub(crate) fn fe_reset_r<T: Tier>(
 /// iterator whose first `valid()` answered `false` jumps past the loop.
 /// A throw, the refusal of a loop by reference among them, leaves the
 /// `VAR` `UNDEF`.
+///
+/// A generator is walked the same way, through its own table of
+/// iterator functions: the reset runs its body to the first `yield`,
+/// and a body that returns before one is an empty loop.
+///
+/// ```php
+/// function g() { echo "[start]"; yield 'a' => 1; yield 'b' => 2; }
+/// foreach (g() as $k => $v) echo "$k=$v ";
+/// function e() { echo "[empty]"; return; yield; }
+/// foreach (e() as $v) echo "no";
+/// echo "\n";
+/// ```
+/// ```expect
+/// [start]a=1 b=2 [empty]
+/// ```
 fn fe_reset_iterator(
     req: &mut Request,
     frame: FrameRef,
@@ -10349,7 +10550,7 @@ fn fe_reset_refused(
 /// the heap's table of hash iterators (`zend_hash_iterator_add`), so
 /// the walk follows what the body adds, deletes and rehashes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct HashIter(u32);
+pub(crate) struct HashIter(u32);
 
 /// `(uint32_t)-1` in the loop variable's `u2` word: no hash iterator,
 /// the `Z_FE_ITER` of a reset that registered none. Only
@@ -10443,7 +10644,7 @@ const NO_WALK: u32 = u32::MAX;
 ///   thrown in %s on line 14
 /// ```
 #[derive(Clone, Copy)]
-enum ForeachVar {
+pub(crate) enum ForeachVar {
     /// `FE_RESET_R` over an array: the copy the loop reads, walked from
     /// `Z_FE_POS`.
     Array { array: php_heap::Arr, pos: u32 },
@@ -10461,6 +10662,23 @@ enum ForeachVar {
     /// refused operand's `UNDEF`, or an object of no property with
     /// `Z_FE_ITER` at `-1`. No fetch is reached over one.
     Skipped,
+}
+
+impl ForeachVar {
+    /// `if (Z_TYPE_P(var) != IS_ARRAY && Z_FE_ITER_P(var) != (uint32_t)-1)
+    /// zend_hash_iterator_del(Z_FE_ITER_P(var))` over the loop variable
+    /// `held`: what `FE_FREE` and the unwind of a `ZEND_LIVE_LOOP` range
+    /// do before the release, the unwind of a frame on the stack
+    /// ([`exec::cleanup_live_vars`]) and of a generator's frame off it
+    /// alike.
+    pub(crate) fn iterator_del(req: &mut Request, held: php_heap::Zval) {
+        match foreach_var(req, held) {
+            ForeachVar::Properties { walk, .. } | ForeachVar::Reference { walk, .. } => {
+                req.heap_mut().iterator_del(walk.0);
+            }
+            ForeachVar::Array { .. } | ForeachVar::Iterator(_) | ForeachVar::Skipped => {}
+        }
+    }
 }
 
 /// The one decoding of a loop variable ([`ForeachVar`]).
@@ -10600,7 +10818,18 @@ pub(crate) fn fe_fetch_r<T: Tier>(
 /// (`Z/Zend/zend_vm_def.h:7117`): the next element
 /// [`crate::interfaces::fetch`] finds, its key to `result` where the
 /// opline keeps one and its value to the variable as an array element's
-/// goes, or the jump to `extended_value` at the end.
+/// goes, or the jump to `extended_value` at the end. A generator's
+/// `move_forward` resumes it, so the value its `yield` receives is the
+/// `null` a resumption without `send()` hands it.
+///
+/// ```php
+/// function g() { $x = yield 1; echo "[$x]"; yield 2; }
+/// foreach (g() as $v) echo $v;
+/// echo "\n";
+/// ```
+/// ```expect
+/// 1[]2
+/// ```
 fn fe_fetch_iterator(
     req: &mut Request,
     frame: FrameRef,
@@ -10609,7 +10838,7 @@ fn fe_fetch_iterator(
     iterator: PhpObject,
 ) -> Edge {
     let keyed = op.out_type != OperandKind::Unused;
-    let (current, key) = match crate::interfaces::fetch(req, iterator, keyed) {
+    let (current, key) = match crate::interfaces::fetch(req, iterator, keyed, false) {
         Ok(Some(found)) => found,
         Ok(None) => {
             req.vm_mut().jump(frame, op.extended_value);
@@ -11146,13 +11375,29 @@ fn fe_walk_object_rw(req: &mut Request, op: &Opline, object: PhpObject, walk: Ha
 }
 
 /// `FE_FETCH_RW`'s iterator arm (`Z/Zend/zend_vm_def.h:7358`): the
-/// element [`crate::interfaces::fetch`] finds, its value made a
-/// reference where it is not one. No reset reaches it yet, since every
-/// iterator here is `zend_user_it_get_iterator`'s, which refuses a loop
-/// by reference; a class's own `get_iterator` that takes one is #735's.
+/// element [`crate::interfaces::fetch`] finds by reference, the zval
+/// `get_current_data` points at made a reference where it is not one.
+/// The one iterator a reset by reference makes is a generator's that
+/// yields by reference, whose current value is made a reference in the
+/// generator itself, so a write through the loop's variable is a write
+/// to what the body yielded; `zend_user_it_get_iterator` refuses a loop
+/// by reference, and a class's own `get_iterator` that takes one is
+/// #735's. A generator that does not yield by reference is
+/// `zend_generator_get_iterator`'s refusal.
+///
+/// ```php
+/// function &g() { $a = 1; yield $a; echo "a=$a\n"; }
+/// foreach (g() as &$v) $v = 5;
+/// function h() { yield 1; }
+/// try { foreach (h() as &$v) {} } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// a=5
+/// You can only iterate a generator by-reference if it declared that it yields by-reference
+/// ```
 fn fe_iterator_rw(req: &mut Request, iterator: PhpObject, op: &Opline) -> FoundRw {
     let keyed = op.out_type != OperandKind::Unused;
-    let (current, key) = match crate::interfaces::fetch(req, iterator, keyed) {
+    let (current, key) = match crate::interfaces::fetch(req, iterator, keyed, true) {
         Ok(Some(found)) => found,
         Ok(None) => return Ok(Ok(None)),
         Err(thrown) => return Ok(Err(thrown)),
@@ -11253,18 +11498,10 @@ pub(crate) fn fe_free<T: Tier>(
     Ok(advance(req, frame))
 }
 
-/// `if (Z_TYPE_P(var) != IS_ARRAY && Z_FE_ITER_P(var) != (uint32_t)-1)
-/// zend_hash_iterator_del(Z_FE_ITER_P(var))`: what `FE_FREE` and the
-/// unwind of a `ZEND_LIVE_LOOP` range both do before the release.
+/// [`ForeachVar::iterator_del`] over the loop variable in `slot`.
 fn fe_iterator_del(req: &mut Request, frame: FrameRef, slot: u32) {
-    let Some(held) = req.slot_ptr(frame, slot).map(php_heap::ZvalRef::read) else {
-        return;
-    };
-    match foreach_var(req, held) {
-        ForeachVar::Properties { walk, .. } | ForeachVar::Reference { walk, .. } => {
-            req.heap_mut().iterator_del(walk.0);
-        }
-        ForeachVar::Array { .. } | ForeachVar::Iterator(_) | ForeachVar::Skipped => {}
+    if let Some(held) = req.slot_ptr(frame, slot).map(php_heap::ZvalRef::read) {
+        ForeachVar::iterator_del(req, held);
     }
 }
 
@@ -11342,13 +11579,74 @@ pub(crate) fn sr<T: Tier>(req: &mut Request, frame: FrameRef, code: &OpArray, op
     binary(req, frame, code, op, crate::ops::shift_right)
 }
 
-/// `ZEND_CONCAT`: [`crate::ops::concat`], the same way.
+/// `ZEND_CONCAT` (`Z/Zend/zend_vm_def.h:374`): [`crate::ops::concat`],
+/// the same way, but for php's own arm for a left temporary
+/// ([`concat_into`]), which grows the left string where it stands.
+///
+/// The string `str_repeat` returned is the temporary's alone and grows
+/// into the `run` the joined string needs, the old slot given back as
+/// it moves, so the peak moves by the joined string alone and not by
+/// the two standing together; a string a variable holds is copied into
+/// a new one beside it:
+///
+/// ```php
+/// $a = str_repeat('a', 5000); memory_reset_peak_usage(); $m = memory_get_usage();
+/// $b = str_repeat('b', 3000) . $a; $p = memory_get_peak_usage() - $m;
+/// memory_reset_peak_usage(); $m = memory_get_usage();
+/// $c = $b . '!'; $q = memory_get_peak_usage() - $m;
+/// var_dump(strlen($b), $c === str_repeat('b', 3000) . $a . '!', $p, $q, $b[0], $b[7999]);
+/// ```
+/// ```expect
+/// int(8000)
+/// bool(true)
+/// int(8192)
+/// int(8192)
+/// string(1) "b"
+/// string(1) "a"
+/// ```
 pub(crate) fn concat<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    concat_into(req, frame, code, op)
+}
+
+/// The body `CONCAT` and `FAST_CONCAT` share: php's arm for a left
+/// operand that is a temporary, when both sides are strings and neither
+/// is empty (`Z/Zend/zend_vm_def.h:407-418`, `:3317-3328`), hands the
+/// temporary's owner to [`Request::string_append`], which grows the
+/// string where it stands when that owner is its only one and copies it
+/// otherwise, as `zend_string_extend` and php's alloc arm beside it do;
+/// every other pair is [`binary`] over [`crate::ops::concat`].
+fn concat_into(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
+    if matches!(op.op1_type, OperandKind::Tmp | OperandKind::Var) {
+        let left = exec::operand(req, frame, code, op.op1_type, op.op1);
+        let right = exec::operand(req, frame, code, op.op2_type, op.op2);
+        if let (Some(&a), Some(&b)) = (left.as_php_string(), right.as_php_string())
+            && !a.is_empty()
+            && !b.is_empty()
+        {
+            // The temporary's owner is the append's now, and nothing
+            // releases it again.
+            req.take_slot(frame, exec::temporary_slot(code, op.op1));
+            let joined = req.string_append(a, b);
+            exec::free_operand(req, frame, code, op.op2_type, op.op2);
+            return match joined {
+                Ok(joined) => {
+                    let slot = exec::temporary_slot(code, op.out);
+                    let previous = req.set_slot(frame, slot, Value::string(joined));
+                    req.release(previous);
+                    Ok(advance(req, frame))
+                }
+                Err(thrown) => {
+                    req.leave_pending(&thrown);
+                    Ok(Stepped::Threw(frame))
+                }
+            };
+        }
+    }
     binary(req, frame, code, op, crate::ops::concat)
 }
 
@@ -11360,7 +11658,9 @@ pub(crate) fn concat<T: Tier>(
 /// which is the kernel's first arm and its rest: each non-string piece
 /// converted where php converts it, the `Array to string conversion`
 /// warning and an object's `__toString` raised in operand order, and
-/// the operands freed after the kernel (`FREE_OP1`, `FREE_OP2`).
+/// the operands freed after the kernel (`FREE_OP1`, `FREE_OP2`). A left
+/// piece that is a temporary string grows where it stands, as
+/// [`concat`]'s does ([`concat_into`]).
 ///
 /// ```php
 /// $a = 1; echo "x$a", "$a";
@@ -11390,7 +11690,7 @@ pub(crate) fn fast_concat<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    binary(req, frame, code, op, crate::ops::concat)
+    concat_into(req, frame, code, op)
 }
 
 /// `ZEND_ROPE_INIT` (`Z/Zend/zend_vm_def.h:3410`): the first piece of
@@ -12682,6 +12982,30 @@ pub(crate) fn r#match<T: Tier>(
     ))
 }
 
+/// `ZEND_IN_ARRAY`: [`crate::ops::in_array`] over the needle, the table
+/// in `op2` and `$strict` in `extended_value`, into the
+/// temporary; the needle freed after it. An undefined CV is
+/// `ZVAL_UNDEFINED_OP1`, the warning [`exec::operand`] raises, and then
+/// `null`, which is what php's handler looks up after it warns. php
+/// branches on the answer where a `JMPZ` or a `JMPNZ` follows
+/// (`ZEND_VM_SMART_BRANCH`); the jump reads the temporary here, as
+/// after [`type_check`].
+pub(crate) fn in_array<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let table = exec::constant(code, ConstIdx(op.op2));
+    let Some(table) = table.as_array().copied() else {
+        return Err(no_table("IN_ARRAY"));
+    };
+    let strict = op.extended_value != 0;
+    unary(req, frame, code, op, |req, needle| {
+        crate::ops::in_array(req, needle, table, strict).map(Value::bool)
+    })
+}
+
 /// `ZEND_MATCH_ERROR`: [`crate::ops::match_unhandled_error`] over the
 /// subject as it stands, `GET_OP1_ZVAL_PTR_UNDEF`, left pending; the
 /// subject is not freed here, as php's handler frees nothing before
@@ -13003,11 +13327,12 @@ fn switched(req: &mut Request, frame: FrameRef, switched: Switched, op: &Opline)
     }
 }
 
-/// The fatal for a jump-table opcode whose `op2` is no array, which no
-/// unit the compiler wrote has (design §10).
+/// The fatal for an opcode over a constant table, a jump table or
+/// `IN_ARRAY`'s, whose `op2` is no array, which no unit the compiler
+/// wrote has (design §10).
 fn no_table(opcode: &str) -> Fatal {
     Fatal::Error(format!(
-        "InternalError: {opcode} names a constant that is no jump table"
+        "InternalError: {opcode} names a constant that is no table"
     ))
 }
 
@@ -13532,21 +13857,6 @@ fn fast_call_var(code: &OpArray, element: php_unit::TryCatch) -> Option<u32> {
     exec::opline_at(code, element.finally_end.0).map(|op| op.op1)
 }
 
-/// The value a `FAST_CALL` emitted by a `return` was carrying past the
-/// `finally` block in its `op2`, given up where the return never
-/// happened.
-fn free_carried_value(req: &mut Request, frame: FrameRef, code: &OpArray, from: u32) {
-    let Some(op) = exec::opline_at(code, from) else {
-        return;
-    };
-    if !matches!(op.op2_type, OperandKind::Tmp | OperandKind::Var) {
-        return;
-    }
-    let slot = exec::temporary_slot(code, op.op2);
-    let garbage = req.take_slot(frame, slot);
-    req.release(garbage);
-}
-
 /// `ZEND_HANDLE_EXCEPTION`'s free of the throwing opline's `result`: a
 /// temporary the opline was to write and did not. php leaves the four
 /// opcodes that build a structure to their live ranges, and the two
@@ -13571,57 +13881,6 @@ fn free_throwing_result(req: &mut Request, frame: FrameRef, code: &OpArray, op: 
     let slot = exec::temporary_slot(code, op.out);
     let garbage = req.take_slot(frame, slot);
     req.release(garbage);
-}
-
-/// `cleanup_live_vars` (`Z/Zend/zend_execute.c`): every live range the
-/// unwind leaves, given up. A range is left when it is open at `op_num`
-/// and the opline being landed on is outside it; `catch_op` of zero is
-/// php's "landing nowhere", the walk out of the frame, where every open
-/// range is left.
-///
-/// php frees each kind by what it holds; every kind here is one value in
-/// one temporary, freed the same way, but `ZEND_LIVE_SILENCE`, which
-/// holds the `error_reporting` a `BEGIN_SILENCE` saved: the word is put
-/// back as `END_SILENCE` would have put it ([`restore_silenced`]), so a
-/// throw under a `@` does not leave the request silenced.
-fn cleanup_live_vars(
-    req: &mut Request,
-    frame: FrameRef,
-    code: &OpArray,
-    op_num: u32,
-    catch_op: u32,
-) {
-    for range in &code.live_ranges {
-        if range.start.0 > op_num {
-            break;
-        }
-        if op_num >= range.end.0 {
-            continue;
-        }
-        if catch_op != 0 && catch_op >= range.start.0 && catch_op < range.end.0 {
-            continue;
-        }
-        let slot = exec::temporary_slot(code, range.var);
-        if range.kind == php_unit::LiveKind::Loop {
-            fe_iterator_del(req, frame, slot);
-        }
-        let garbage = req.take_slot(frame, slot);
-        if range.kind == php_unit::LiveKind::Silence {
-            restore_silenced(req, &garbage);
-        }
-        req.release(garbage);
-    }
-}
-
-/// `cleanup_unfinished_calls` (`Z/Zend/zend_execute.c`): the calls the
-/// frame was still building or serving when the throwable was raised,
-/// given up innermost first. A frame records how many calls stood below
-/// it, which is where its own begin.
-fn cleanup_unfinished_calls(req: &mut Request, frame: FrameRef) {
-    let below = req.vm().at(frame).map_or(0, |state| state.calls_below);
-    while u32::try_from(req.vm().calls().len()).unwrap_or(0) > below {
-        req.pop_call();
-    }
 }
 
 /// `ZEND_VM_JMP_EX(target, 0)`: the frame at `at`, with neither the
@@ -13754,6 +14013,274 @@ pub(crate) fn return_by_ref<T: Tier>(
     returned_to_caller::<T>(req, frame, op, returned)
 }
 
+/// `ZEND_GENERATOR_CREATE` (`Z/Zend/zend_vm_def.h:4652`): the frame
+/// moved into the `Generator` the call returns ([`crate::generator::create`]).
+pub(crate) fn generator_create<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    _: &OpArray,
+    _: &Opline,
+) -> Edge {
+    crate::generator::create(req, frame)
+}
+
+/// `ZEND_YIELD` (`Z/Zend/zend_vm_def.h:8397`): the previous value and
+/// key given up, the value and the key the opline names handed out, an
+/// integer key counted up where none is written, the `VAR` the opline
+/// writes set to `null` for `send()` to fill, and the frame suspended at
+/// the opline. A by-reference generator hands out its variable's own
+/// cell, a constant or a temporary with php's notice, and a call that
+/// returned by value with the same notice and a copy.
+///
+/// ```php
+/// function &g(array &$a) { yield $a[0]; $x = 1; yield $x; }
+/// $a = [1, 2];
+/// foreach (g($a) as &$v) $v = 9;
+/// var_dump($a);
+/// ```
+/// ```expect
+/// array(2) {
+///   [0]=>
+///   int(9)
+///   [1]=>
+///   int(2)
+/// }
+/// ```
+///
+/// ```php
+/// function &g() { $v = 1; yield $v; echo "v=$v\n"; yield 2; }
+/// foreach (g() as $k => $x) { var_dump($x); }
+/// ```
+/// ```expect
+/// int(1)
+/// v=1
+///
+/// Notice: Only variable references should be yielded by reference in %s on line 2
+/// int(2)
+/// ```
+pub(crate) fn r#yield<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let generator = crate::generator::running(req, frame)?;
+    if crate::generator::forced_close(req, generator) {
+        // `zend_yield_in_closed_generator_helper`.
+        let thrown = crate::api::raising::throw(
+            req,
+            "Error",
+            "Cannot yield from finally in a force-closed generator",
+        );
+        exec::free_operand(req, frame, code, op.op2_type, op.op2);
+        exec::free_operand(req, frame, code, op.op1_type, op.op1);
+        if op.out_type != OperandKind::Unused {
+            let garbage = req.take_slot(frame, exec::temporary_slot(code, op.out));
+            req.release(garbage);
+        }
+        return threw(req, frame, &thrown);
+    }
+    crate::generator::drop_current(req, generator);
+    let value = if op.op1_type == OperandKind::Unused {
+        Value::null()
+    } else if crate::generator::yields_by_ref(req, frame) {
+        match yielded_by_ref(req, frame, code, op) {
+            Ok(value) => value,
+            Err(thrown) => return threw(req, frame, &thrown),
+        }
+    } else {
+        exec::take_operand(req, frame, code, op.op1_type, op.op1)
+    };
+    let key = (op.op2_type != OperandKind::Unused)
+        .then(|| exec::take_operand(req, frame, code, op.op2_type, op.op2));
+    let send_target = (op.out_type != OperandKind::Unused).then(|| {
+        let slot = exec::temporary_slot(code, op.out);
+        let previous = req.set_slot(frame, slot, Value::null());
+        req.release(previous);
+        slot
+    });
+    crate::generator::yielded(req, generator, value, key, send_target);
+    crate::generator::suspend(req, generator)?;
+    Ok(Stepped::Done)
+}
+
+/// The value a by-reference `YIELD` hands out: `GET_OP1_ZVAL_PTR_PTR(BP_VAR_W)`
+/// made a reference (`ZVAL_MAKE_REF_EX(value_ptr, 2)`), the generator
+/// one owner of the cell, then `FREE_OP1`; a constant or a temporary,
+/// and a call's value that is no reference, the notice and a copy.
+fn yielded_by_ref(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Result<Value, Thrown> {
+    if matches!(op.op1_type, OperandKind::Const | OperandKind::Tmp) {
+        crate::api::raising::notice(
+            req,
+            "Only variable references should be yielded by reference",
+        );
+        return Ok(exec::take_operand(req, frame, code, op.op1_type, op.op1));
+    }
+    let Some(place) = write_place(req, frame, code, op.op1_type, op.op1) else {
+        return Ok(Value::null());
+    };
+    let held = exec::value_of(place.read());
+    let value = if op.op1_type == OperandKind::Var
+        && op.extended_value == RETURNS_FUNCTION
+        && held.as_php_ref().is_none()
+    {
+        crate::api::raising::notice(
+            req,
+            "Only variable references should be yielded by reference",
+        );
+        let value = held.deref();
+        req.addref(&value);
+        value
+    } else if let Some(cell) = held.as_php_ref() {
+        req.addref(&held);
+        cell.as_value()
+    } else {
+        let cell = req.reference(held.undef_as_null())?;
+        place.write(cell.as_value().to_zval());
+        req.addref(&cell.as_value());
+        cell.as_value()
+    };
+    if op.op1_type == OperandKind::Var {
+        let slot = exec::temporary_slot(code, op.op1);
+        let raw = req.slot_ptr(frame, slot).map(php_heap::ZvalRef::read);
+        if raw.is_some_and(|raw| raw.as_indirect().is_some()) {
+            let _place = req.take_slot(frame, slot);
+        } else {
+            exec::free_operand(req, frame, code, op.op1_type, op.op1);
+        }
+    }
+    Ok(value)
+}
+
+/// `ZEND_YIELD_FROM` (`Z/Zend/zend_vm_def.h:8518`): the operand becomes
+/// what the generator delegates to ([`crate::generator::yield_from`])
+/// and the frame is suspended at the opline, its temporary `null` until
+/// a generator delegated to returns into it; a generator that has
+/// already returned is its return value at once, and the frame goes on.
+///
+/// ```php
+/// function inner() { yield 1; return 2; }
+/// function outer($i) { $r = yield from $i; var_dump($r); }
+/// foreach (outer(inner()) as $v) var_dump($v);
+/// function bad() { yield from 1; }
+/// try { bad()->current(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// int(1)
+/// int(2)
+/// Can use "yield from" only with arrays and Traversables
+/// ```
+///
+/// A generator delegated to twice is closed the second time, which php
+/// checks before it reads what the generator returned:
+///
+/// ```php
+/// function inner() { yield 1; return 2; }
+/// function outer($i) { yield from $i; yield from $i; }
+/// foreach (outer(inner()) as $v) var_dump($v);
+/// ```
+/// ```expect exit=255
+/// int(1)
+///
+/// Fatal error: Uncaught Error: Generator passed to yield from was aborted without proper return and is unable to continue in %s:3
+/// Stack trace:
+/// #0 %s(4): outer(Object(Generator))
+/// #1 {main}
+///   thrown in %s on line 3
+/// ```
+pub(crate) fn yield_from<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let generator = crate::generator::running(req, frame)?;
+    let value = exec::operand(req, frame, code, op.op1_type, op.op1);
+    if crate::generator::forced_close(req, generator) {
+        let thrown = crate::api::raising::throw(
+            req,
+            "Error",
+            "Cannot use \"yield from\" in a force-closed generator",
+        );
+        exec::free_operand(req, frame, code, op.op1_type, op.op1);
+        return threw(req, frame, &thrown);
+    }
+    let owned = match op.op1_type {
+        OperandKind::Tmp | OperandKind::Var => {
+            req.take_slot(frame, exec::temporary_slot(code, op.op1))
+        }
+        _ => {
+            req.addref(&value);
+            value
+        }
+    };
+    let owned = match owned.as_php_ref() {
+        Some(cell) => {
+            let held = cell.get();
+            req.addref(&held);
+            req.release(owned);
+            held
+        }
+        None => owned,
+    };
+    let out = (op.out_type != OperandKind::Unused).then(|| exec::temporary_slot(code, op.out));
+    match crate::generator::yield_from(req, generator, owned, op.op1_type == OperandKind::Const) {
+        Ok(crate::generator::From::Finished(retval)) => {
+            match out {
+                Some(slot) => {
+                    let previous = req.set_slot(frame, slot, retval);
+                    req.release(previous);
+                }
+                None => req.release(retval),
+            }
+            Ok(advance(req, frame))
+        }
+        Ok(crate::generator::From::Delegating) => {
+            if let Some(slot) = out {
+                let previous = req.set_slot(frame, slot, Value::null());
+                req.release(previous);
+            }
+            crate::generator::suspend(req, generator)?;
+            Ok(Stepped::Done)
+        }
+        Err(thrown) => threw(req, frame, &thrown),
+    }
+}
+
+/// `ZEND_GENERATOR_RETURN` (`Z/Zend/zend_vm_def.h:4730`): the operand
+/// kept as what the generator returned, which `getReturn()` reads, and
+/// the frame closed; the resumption is over.
+///
+/// ```php
+/// function g() { $a = [1]; yield; return $a; }
+/// $g = g();
+/// $g->next();
+/// var_dump($g->valid(), $g->getReturn());
+/// ```
+/// ```expect
+/// bool(false)
+/// array(1) {
+///   [0]=>
+///   int(1)
+/// }
+/// ```
+pub(crate) fn generator_return<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let generator = crate::generator::running(req, frame)?;
+    let value = exec::take_operand(req, frame, code, op.op1_type, op.op1);
+    crate::generator::returned(req, generator, value);
+    Ok(Stepped::Done)
+}
+
 /// `ZEND_MAKE_REF` (`Z/Zend/zend_vm_def.h:9262`), what a by-reference
 /// `return` emits over its variable where a `finally` stands between
 /// it and the `RETURN_BY_REF`: the CV is made a reference where it
@@ -13883,7 +14410,7 @@ mod tests {
         let engine = Engine::builder().tier::<Probe>().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let unit = jumping(0, 1);
-        let frame = req.push_frame(Arc::clone(&unit));
+        let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let back = code.oplines.get(1).copied().unwrap_or_default();
         req.vm_mut().jump(frame, 1);
@@ -13919,7 +14446,7 @@ mod tests {
         let engine = Engine::builder().tier::<Probe>().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let unit = jumping(0, 1);
-        let frame = req.push_frame(Arc::clone(&unit));
+        let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let back = code.oplines.get(1).copied().unwrap_or_default();
         req.vm_mut().jump(frame, 1);
@@ -13967,7 +14494,7 @@ mod tests {
         let engine = Engine::builder().tier::<Probe>().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let taken = conditional(php_heap::Zval::bool(true));
-        let frame = req.push_frame(Arc::clone(&taken));
+        let frame = req.pushed(Arc::clone(&taken));
         let code = crate::exec::code_of(&taken);
         let op = code.oplines.get(1).copied().unwrap_or_default();
         req.vm_mut().jump(frame, 1);
@@ -13983,7 +14510,7 @@ mod tests {
         );
 
         let not_taken = conditional(php_heap::Zval::long(0));
-        let frame = req.push_frame(Arc::clone(&not_taken));
+        let frame = req.pushed(Arc::clone(&not_taken));
         let code = crate::exec::code_of(&not_taken);
         req.vm_mut().jump(frame, 1);
         assert_eq!(
@@ -14026,9 +14553,9 @@ mod tests {
         let engine = Engine::builder().tier::<Probe>().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let unit = returning(1);
-        let outer = req.push_frame(Arc::clone(&unit));
+        let outer = req.pushed(Arc::clone(&unit));
         let guard = req.stack_mut().push_entry(outer);
-        let inner = req.push_frame(Arc::clone(&unit));
+        let inner = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let op = code.oplines.first().copied().unwrap_or_default();
 
@@ -14120,7 +14647,7 @@ mod tests {
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
         let unit = by_name(&mut strings);
-        let frame = req.push_frame(Arc::clone(&unit));
+        let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let init = code.oplines.first().copied().unwrap_or_default();
         let send = code.oplines.get(1).copied().unwrap_or_default();
@@ -14154,7 +14681,7 @@ mod tests {
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
         let unit = by_name(&mut strings);
-        let frame = req.push_frame(Arc::clone(&unit));
+        let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let init = code.oplines.first().copied().unwrap_or_default();
         assert_eq!(req.cached(frame, CacheSlot(init.out)), Cached::Unprimed);
@@ -14198,6 +14725,7 @@ mod tests {
             parameters: Vec::new(),
             return_type: None,
             returns_by_ref: false,
+            is_generator: false,
             attributes: Vec::new(),
             doc_comment: None,
             file: Name::default(),
@@ -14230,7 +14758,7 @@ mod tests {
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
         let unit = declaring_f(&engine, &mut strings);
-        let main = req.push_frame(Arc::clone(&unit));
+        let main = req.pushed(Arc::clone(&unit));
         req.declare_functions(&unit);
         let f = req.function_named(b"f").unwrap_or(Function::PASS);
         let code = crate::exec::body_of(&unit, exec::Body::Function(0))
@@ -14322,7 +14850,7 @@ mod tests {
             },
             ..Unit::default()
         });
-        let frame = req.push_frame(Arc::clone(&unit));
+        let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let init = code.oplines.first().copied().unwrap_or_default();
         let strlen = req.function_named(b"strlen");
@@ -14375,7 +14903,7 @@ mod tests {
             },
             ..Unit::default()
         });
-        let frame = req.push_frame(Arc::clone(&unit));
+        let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let init = code.oplines.first().copied().unwrap_or_default();
         for pass in 1..=2 {
@@ -14431,7 +14959,7 @@ mod tests {
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
         let unit = catching(&mut strings, b"Error", b"error");
-        let frame = req.push_frame(Arc::clone(&unit));
+        let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let clause = code.oplines.first().copied().unwrap_or_default();
         let error = req.class_named(b"error");
@@ -14514,7 +15042,7 @@ mod tests {
             (b"Closure", b"closure"),
             Some((b"fromCallable", b"fromcallable")),
         );
-        let frame = req.push_frame(Arc::clone(&unit));
+        let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let op = code.oplines.first().copied().unwrap_or_default();
         let closure = req.class_named(b"closure");
@@ -14554,7 +15082,7 @@ mod tests {
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
         let unit = static_method_call(&mut strings, (b"Exception", b"exception"), None);
-        let frame = req.push_frame(Arc::clone(&unit));
+        let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let op = code.oplines.first().copied().unwrap_or_default();
         let exception = req.class_named(b"exception");
@@ -14588,7 +15116,7 @@ mod tests {
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
         let unit = catching(&mut strings, b"NoPe", b"nope");
-        let frame = req.push_frame(Arc::clone(&unit));
+        let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let clause = code.oplines.first().copied().unwrap_or_default();
         let thrown = crate::api::raising::throw(&mut req, "Error", "e");
@@ -14671,7 +15199,7 @@ mod tests {
             },
             ..Unit::default()
         });
-        let frame = req.push_frame(Arc::clone(&unit));
+        let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let named = req.class_named(b"stdclass");
         assert!(named.is_some(), "the engine declares stdClass");
@@ -14751,7 +15279,7 @@ mod tests {
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
         let unit = jmp_frameless_over(&mut strings, b"foo\\substr");
-        let frame = req.push_frame(Arc::clone(&unit));
+        let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let jmp = code.oplines.first().copied().unwrap_or_default();
         assert_eq!(req.cached(frame, CacheSlot(0)), Cached::Unprimed);
@@ -14780,7 +15308,7 @@ mod tests {
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let mut strings = php_heap::Strings::new();
         let unit = jmp_frameless_over(&mut strings, b"strlen");
-        let frame = req.push_frame(Arc::clone(&unit));
+        let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let jmp = code.oplines.first().copied().unwrap_or_default();
 
@@ -14814,6 +15342,7 @@ mod tests {
             parameters: Vec::new(),
             return_type: None,
             returns_by_ref: false,
+            is_generator: false,
             attributes: Vec::new(),
             doc_comment: None,
             file: Name::default(),
@@ -14863,7 +15392,7 @@ mod tests {
             },
             ..Unit::default()
         });
-        let frame = req.push_frame(Arc::clone(&unit));
+        let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let call = code.oplines.first().copied().unwrap_or_default();
         assert_eq!(
@@ -14899,7 +15428,7 @@ mod tests {
             },
             ..Unit::default()
         });
-        let frame = req.push_frame(Arc::clone(&unit));
+        let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let call = code.oplines.first().copied().unwrap_or_default();
         assert!(matches!(
@@ -14943,7 +15472,7 @@ mod tests {
             },
             ..Unit::default()
         });
-        let frame = req.push_frame(Arc::clone(&unit));
+        let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let init = code.oplines.first().copied().unwrap_or_default();
 
@@ -14999,7 +15528,7 @@ mod tests {
         let engine = Engine::builder().build();
         let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
         let unit = assigning();
-        let frame = req.push_frame(Arc::clone(&unit));
+        let frame = req.pushed(Arc::clone(&unit));
         let code = crate::exec::code_of(&unit);
         let mut op = code.oplines.first().copied().unwrap_or_default();
         op.out_type = OperandKind::Tmp;
@@ -15116,5 +15645,57 @@ mod tests {
             }
             req.release(object.as_value());
         }
+    }
+
+    /// A debug build stops at a write of a `TMP` over an owner the slot
+    /// still holds, #723's shape planted: a string left in the `TMP` a
+    /// `QM_ASSIGN` writes, as `FE_RESET_R` left its subject before #723,
+    /// is the `InternalError` naming the opcode, the opline and the
+    /// temporary, raised by the loop after the handler and before the
+    /// next one, and not a second release several allocations later.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn a_write_over_a_temporary_that_still_holds_a_value_is_an_internal_error() {
+        let engine = Engine::builder().build();
+        let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+        let unit = Arc::new(Unit {
+            main: OpArray {
+                oplines: vec![Opline {
+                    opcode: Opcode::QmAssign,
+                    op1_type: OperandKind::Const,
+                    op1: 0,
+                    out_type: OperandKind::Tmp,
+                    out: 0,
+                    ..Opline::default()
+                }]
+                .into_boxed_slice(),
+                literals: vec![php_heap::Zval::long(7)].into_boxed_slice(),
+                num_tmps: 1,
+                ..OpArray::default()
+            },
+            ..Unit::default()
+        });
+        let frame = req.pushed(Arc::clone(&unit));
+        let Ok(left) = crate::api::values::PhpString::new(&mut req, b"an owner left behind") else {
+            return;
+        };
+        let planted = req.set_slot(frame, 0, Value::string(left));
+        assert!(
+            planted.to_zval().is_undef(),
+            "the slot was empty before the plant"
+        );
+
+        assert_eq!(
+            crate::tier::step(&mut req, frame),
+            Err(Fatal::Error(String::from(
+                "InternalError: ZEND_QM_ASSIGN at opline 0 writes its TMP #0 over an owner it still holds (String): the handler that last read the slot moved it out and did not empty it"
+            )))
+        );
+        assert_eq!(
+            req.slot(frame, 0).as_int(),
+            Some(7),
+            "the write itself stood"
+        );
+        req.pop_frame();
     }
 }

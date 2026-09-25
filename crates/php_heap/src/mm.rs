@@ -20,7 +20,9 @@
 //! php's walk would have landed in. And php maps a chunk with `mmap`,
 //! which hands back zeroed pages; here a chunk comes from the system
 //! allocator aligned to its own size, which is what makes the chunk of
-//! an address a mask away, and the header is zeroed on the way in.
+//! an address a mask away, and the header is zeroed on the way in. A
+//! huge block is php's own mapping on a unix, aligned as php aligns it,
+//! because its tail is grown and cut where it stands.
 //!
 //! Before it declares the limit reached or the system out of memory, php
 //! sweeps: `zend_mm_gc` (`Z/Zend/zend_alloc.c:2101`) counts the free slots
@@ -209,6 +211,12 @@ pub(crate) struct Mm {
     real_size: usize,
     real_peak: usize,
     limit: usize,
+    /// `overflow`: set where the heap refuses an allocation with its
+    /// fatal, `zend_mm_safe_error`, and cleared once the fatal is
+    /// rendered ([`Mm::overflow_rendered`]). While it is set the limit
+    /// refuses nothing, so rendering the fatal, its backtrace among it,
+    /// is not refused by the limit it reports.
+    overflow: bool,
 }
 
 impl Mm {
@@ -232,6 +240,7 @@ impl Mm {
             real_size: 0,
             real_peak: 0,
             limit: NO_LIMIT,
+            overflow: false,
         };
         if let Some(chunk) = chunk_alloc(CHUNK_SIZE) {
             chunk_init(chunk, 0);
@@ -280,6 +289,21 @@ impl Mm {
         self.limit = limit;
     }
 
+    /// `heap->overflow = 0` after `zend_error` returns in
+    /// `zend_mm_safe_error` (`Z/Zend/zend_alloc.c:417`): the fatal the
+    /// heap raised is rendered, and the limit holds again.
+    pub(crate) fn overflow_rendered(&mut self) {
+        self.overflow = false;
+    }
+
+    /// `zend_mm_safe_error`'s `heap->overflow = 1`
+    /// (`Z/Zend/zend_alloc.c:405`): the fatal, with the limit lifted
+    /// until it is rendered.
+    fn refuse(&mut self, fatal: Fatal) -> Fatal {
+        self.overflow = true;
+        fatal
+    }
+
     /// `_emalloc`: `size` usable bytes, from the bin its size falls in,
     /// from a `run` of pages, or from a huge block of its own.
     pub(crate) fn alloc(&mut self, size: usize) -> Result<NonNull<u8>, Fatal> {
@@ -308,10 +332,8 @@ impl Mm {
     ///   the pages after it when they are free, and moves otherwise.
     /// - A huge block that keeps its rounded size is the same block, and
     ///   one that shrinks is cut to the new rounding as `zend_mm_chunk_truncate`
-    ///   cuts one. One that grows moves, always: php asks the machine for
-    ///   the pages after the block, `zend_mm_chunk_extend`, and the
-    ///   oracle answers that either way from one request to the next, so the
-    ///   engine takes the arm php takes when the answer is no.
+    ///   cuts one. One that grows asks the machine for the pages after
+    ///   it, `zend_mm_chunk_extend`, and moves where the answer is no.
     ///
     /// A move is `zend_mm_realloc_slow` (`:1569`): alloc, copy, free, and
     /// the peak put back where the larger of the two footprints put it,
@@ -440,13 +462,28 @@ impl Mm {
 
     /// `zend_mm_realloc_huge` (`Z/Zend/zend_alloc.c:1587`): the block
     /// stands when its rounding does not move; a shorter rounding cuts
-    /// its tail, `zend_mm_chunk_truncate`, and the two sizes move by the
-    /// difference; a longer one, or a size that is no longer huge, is
-    /// the slow path. php's `zend_mm_chunk_extend` is not tried, for the
-    /// reason on [`Mm::realloc`]. The cut is a mapping of the new size
-    /// with the bytes moved over, since a mapping here is the system
-    /// allocator's and has no tail to unmap; where the block stands is
-    /// not observable, what the heap counts is, and that is php's.
+    /// its tail where it stands, `zend_mm_chunk_truncate`, and the two
+    /// sizes move by the difference; a longer one is held to the limit by
+    /// the difference alone and then asks the machine for the pages
+    /// after the block, `zend_mm_chunk_extend`, the two sizes and their
+    /// peaks moving by the difference where it answers yes. Where it
+    /// answers no, or the size is no longer huge, the block moves, the
+    /// slow path. So a string grown by appends past 2 MiB is copied only
+    /// where the machine has mapped something after it, as php's is.
+    ///
+    /// A block grown where it stands never stands beside its copy, so
+    /// the real peak moves by what the block gained and no more:
+    ///
+    /// ```php
+    /// $s = str_repeat('x', 3000000); $t = str_repeat('y', 10000); memory_reset_peak_usage(); $r = memory_get_usage(true);
+    /// for ($i = 0; $i < 100; $i++) { $s .= $t; }
+    /// var_dump(strlen($s), memory_get_usage(true) - $r, memory_get_peak_usage(true) - $r);
+    /// ```
+    /// ```expect
+    /// int(4000000)
+    /// int(999424)
+    /// int(999424)
+    /// ```
     ///
     /// # Safety
     ///
@@ -467,19 +504,27 @@ impl Mm {
                 return Ok(at);
             }
             if new_size < old_size {
-                let Some(cut) = chunk_alloc(new_size) else {
-                    return Err(out_of_memory(self.real_size, size));
-                };
-                let cut = cut.cast::<u8>();
-                // SAFETY: `at` holds `copy` readable bytes and `cut` is a
-                // fresh mapping of `new_size`, which `copy` is under.
-                unsafe { copy_into(at, cut, copy.min(new_size)) };
-                chunk_free(at.cast(), old_size);
-                self.huge[index].at = cut;
-                self.huge[index].size = new_size;
-                self.real_size = self.real_size.saturating_sub(old_size - new_size);
-                self.size = self.size.saturating_sub(old_size - new_size);
-                return Ok(cut);
+                if huge_truncate(at, old_size, new_size) {
+                    self.huge[index].size = new_size;
+                    self.real_size = self.real_size.saturating_sub(old_size - new_size);
+                    self.size = self.size.saturating_sub(old_size - new_size);
+                    return Ok(at);
+                }
+            } else {
+                let more = new_size - old_size;
+                if more > self.limit - self.real_size.min(self.limit)
+                    && (self.gc() == 0 || more > self.limit - self.real_size.min(self.limit))
+                {
+                    return Err(limit_exhausted(self.limit, size));
+                }
+                if huge_extend(at, old_size, new_size) {
+                    self.huge[index].size = new_size;
+                    self.real_size += more;
+                    self.real_peak = self.real_peak.max(self.real_size);
+                    self.size += more;
+                    self.peak = self.peak.max(self.size);
+                    return Ok(at);
+                }
             }
         }
         // SAFETY: the caller's contract, and `old_size` is the block's.
@@ -512,6 +557,8 @@ impl Mm {
         } else {
             let pages_count = info & LRUN_PAGES_MASK;
             self.size = self.size.saturating_sub(pages_count as usize * PAGE_SIZE);
+            #[cfg(debug_assertions)]
+            freed::given_back(at, pages_count as usize * PAGE_SIZE);
             self.free_pages(chunk, page_num as u32, pages_count, true);
         }
     }
@@ -521,13 +568,18 @@ impl Mm {
     fn alloc_small(&mut self, bin_num: usize) -> Result<NonNull<u8>, Fatal> {
         self.size += BIN_DATA_SIZE[bin_num];
         self.peak = self.peak.max(self.size);
-        if let Some(slot) = NonNull::new(self.free_slot[bin_num]) {
-            // SAFETY: a slot on the free list is free memory of this
-            // heap, whose first word is the next free slot.
-            self.free_slot[bin_num] = unsafe { slot.as_ref() }.next;
-            return Ok(slot.cast());
-        }
-        self.alloc_small_slow(bin_num)
+        let slot = match NonNull::new(self.free_slot[bin_num]) {
+            Some(slot) => {
+                // SAFETY: a slot on the free list is free memory of this
+                // heap, whose first word is the next free slot.
+                self.free_slot[bin_num] = unsafe { slot.as_ref() }.next;
+                slot.cast()
+            }
+            None => self.alloc_small_slow(bin_num)?,
+        };
+        #[cfg(debug_assertions)]
+        freed::handed_out(slot, BIN_DATA_SIZE[bin_num]);
+        Ok(slot)
     }
 
     /// `zend_mm_alloc_small_slow` (`Z/Zend/zend_alloc.c:1338`): a `run` of
@@ -576,6 +628,8 @@ impl Mm {
     /// `at` is a live slot of bin `bin_num` in this heap.
     unsafe fn free_small(&mut self, at: NonNull<u8>, bin_num: usize) {
         self.size = self.size.saturating_sub(BIN_DATA_SIZE[bin_num]);
+        #[cfg(debug_assertions)]
+        freed::given_back(at, BIN_DATA_SIZE[bin_num]);
         let slot: *mut FreeSlot = at.as_ptr().cast();
         // SAFETY: the caller has given the slot up, so its bytes are the
         // heap's again and the link word may be written over them.
@@ -597,6 +651,8 @@ impl Mm {
         let at = self.alloc_pages(pages_count, PAGE_SIZE * pages_count as usize)?;
         self.size += pages_count as usize * PAGE_SIZE;
         self.peak = self.peak.max(self.size);
+        #[cfg(debug_assertions)]
+        freed::handed_out(at, pages_count as usize * PAGE_SIZE);
         Ok(at)
     }
 
@@ -660,7 +716,9 @@ impl Mm {
                 if self.gc() != 0 {
                     continue;
                 }
-                return Err(limit_exhausted(self.limit, asked));
+                if !self.overflow {
+                    return Err(self.refuse(limit_exhausted(self.limit, asked)));
+                }
             }
             let mapped = match chunk_alloc(CHUNK_SIZE) {
                 Some(chunk) => Some(chunk),
@@ -668,7 +726,7 @@ impl Mm {
                 None => None,
             };
             let Some(chunk) = mapped else {
-                return Err(out_of_memory(self.real_size, asked));
+                return Err(self.refuse(out_of_memory(self.real_size, asked)));
             };
             self.real_size += CHUNK_SIZE;
             self.real_peak = self.real_peak.max(self.real_size);
@@ -881,22 +939,22 @@ impl Mm {
         let new_size = size.next_multiple_of(real_page_size());
         if new_size > self.limit - self.real_size.min(self.limit)
             && (self.gc() == 0 || new_size > self.limit - self.real_size.min(self.limit))
+            && !self.overflow
         {
-            return Err(limit_exhausted(self.limit, size));
+            return Err(self.refuse(limit_exhausted(self.limit, size)));
         }
-        let mapped = match chunk_alloc(new_size) {
+        let mapped = match huge_map(new_size) {
             Some(at) => Some(at),
-            None if self.gc() != 0 => chunk_alloc(new_size),
+            None if self.gc() != 0 => huge_map(new_size),
             None => None,
         };
         let Some(at) = mapped else {
-            return Err(out_of_memory(self.real_size, size));
+            return Err(self.refuse(out_of_memory(self.real_size, size)));
         };
-        let at = at.cast::<u8>();
         let node = match self.alloc_small(size_to_bin(HUGE_LIST_SIZE)) {
             Ok(node) => node,
             Err(fatal) => {
-                chunk_free(at.cast(), new_size);
+                huge_unmap(at, new_size);
                 return Err(fatal);
             }
         };
@@ -925,7 +983,7 @@ impl Mm {
         unsafe { self.free_small(block.node, size_to_bin(HUGE_LIST_SIZE)) };
         self.real_size = self.real_size.saturating_sub(block.size);
         self.size = self.size.saturating_sub(block.size);
-        chunk_free(block.at.cast(), block.size);
+        huge_unmap(block.at, block.size);
     }
 }
 
@@ -955,7 +1013,7 @@ impl Drop for Mm {
             chunk_free(chunk, CHUNK_SIZE);
         }
         for block in self.huge.drain(..) {
-            chunk_free(block.at.cast(), block.size);
+            huge_unmap(block.at, block.size);
         }
     }
 }
@@ -1053,6 +1111,142 @@ fn chunk_free(chunk: NonNull<Chunk>, size: usize) {
     // SAFETY: the chunk came from `chunk_alloc` with this layout and has
     // left every list that named it.
     unsafe { dealloc(chunk.as_ptr().cast(), layout) };
+}
+
+/// `zend_mm_chunk_alloc_int(size, ZEND_MM_CHUNK_SIZE)`
+/// (`Z/Zend/zend_alloc.c:752`) for a huge block: a mapping of its own,
+/// as php's is, so that its tail can later be grown or cut where it
+/// stands. One the machine hands back off a chunk boundary is given up
+/// and asked for again a chunk wider, and the slack either side of the
+/// aligned block unmapped, php's arithmetic exactly.
+#[cfg(unix)]
+fn huge_map(size: usize) -> Option<NonNull<u8>> {
+    let at = mmap(std::ptr::null_mut(), size)?;
+    let at = if at.as_ptr().addr() & (CHUNK_SIZE - 1) == 0 {
+        at
+    } else {
+        munmap(at.as_ptr(), size);
+        let page = real_page_size();
+        let wide = mmap(std::ptr::null_mut(), size + CHUNK_SIZE - page)?;
+        let mut alignment = CHUNK_SIZE;
+        let mut offset = wide.as_ptr().addr() & (CHUNK_SIZE - 1);
+        let mut at = wide.as_ptr();
+        if offset != 0 {
+            offset = CHUNK_SIZE - offset;
+            munmap(at, offset);
+            at = at.wrapping_add(offset);
+            alignment -= offset;
+        }
+        if alignment > page {
+            munmap(at.wrapping_add(size), alignment - page);
+        }
+        NonNull::new(at)?
+    };
+    #[cfg(test)]
+    MAPPINGS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Some(at)
+}
+
+/// A platform with no `mmap` keeps the huge block on the system
+/// allocator, aligned to a chunk, and never grows or cuts it in place.
+#[cfg(not(unix))]
+fn huge_map(size: usize) -> Option<NonNull<u8>> {
+    chunk_alloc(size).map(NonNull::cast)
+}
+
+/// `zend_mm_chunk_free` over a huge block: its whole mapping goes back.
+#[cfg(unix)]
+fn huge_unmap(at: NonNull<u8>, size: usize) {
+    #[cfg(test)]
+    MAPPINGS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    munmap(at.as_ptr(), size);
+}
+
+/// The system allocator's block goes back, as [`chunk_free`] does.
+#[cfg(not(unix))]
+fn huge_unmap(at: NonNull<u8>, size: usize) {
+    chunk_free(at.cast(), size);
+}
+
+/// `zend_mm_chunk_extend` (`Z/Zend/zend_alloc.c:843`): the pages after a
+/// huge block asked for where they stand, `mremap` without
+/// `MREMAP_MAYMOVE` where the platform has it, and elsewhere
+/// `zend_mm_mmap_fixed`, a mapping hinted at the block's end and given
+/// back when the machine put it anywhere else. `false` is the machine
+/// saying no, and the caller moves the block as php does.
+#[cfg(target_os = "linux")]
+fn huge_extend(at: NonNull<u8>, old_size: usize, new_size: usize) -> bool {
+    // SAFETY: `at` is a mapping of `old_size` bytes this heap made, and
+    // without `MREMAP_MAYMOVE` the call grows it in place or fails.
+    let grown = unsafe { libc::mremap(at.as_ptr().cast(), old_size, new_size, 0) };
+    grown != libc::MAP_FAILED
+}
+
+/// `zend_mm_mmap_fixed((char*)addr + old_size, new_size - old_size)`, the
+/// arm of `zend_mm_chunk_extend` for a platform with no `mremap`.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn huge_extend(at: NonNull<u8>, old_size: usize, new_size: usize) -> bool {
+    let end = at.as_ptr().wrapping_add(old_size);
+    let Some(tail) = mmap(end, new_size - old_size) else {
+        return false;
+    };
+    if tail.as_ptr() == end {
+        return true;
+    }
+    munmap(tail.as_ptr(), new_size - old_size);
+    false
+}
+
+/// No platform mapping to grow: the block moves.
+#[cfg(not(unix))]
+fn huge_extend(_at: NonNull<u8>, _old_size: usize, _new_size: usize) -> bool {
+    false
+}
+
+/// `zend_mm_chunk_truncate` (`Z/Zend/zend_alloc.c:822`): the tail past
+/// `new_size` unmapped, the block standing where it is.
+#[cfg(unix)]
+fn huge_truncate(at: NonNull<u8>, old_size: usize, new_size: usize) -> bool {
+    munmap(at.as_ptr().wrapping_add(new_size), old_size - new_size);
+    true
+}
+
+/// No platform mapping to cut: the block moves.
+#[cfg(not(unix))]
+fn huge_truncate(_at: NonNull<u8>, _old_size: usize, _new_size: usize) -> bool {
+    false
+}
+
+/// `zend_mm_mmap` (`Z/Zend/zend_alloc.c:522`), with `hint` php's
+/// `zend_mm_mmap_fixed` address or null: `size` fresh, private,
+/// anonymous bytes, or `None` where the machine refuses them.
+#[cfg(unix)]
+fn mmap(hint: *mut u8, size: usize) -> Option<NonNull<u8>> {
+    // SAFETY: an anonymous private mapping names no file and, without
+    // `MAP_FIXED`, replaces nothing already mapped; `hint` is a hint.
+    let at = unsafe {
+        libc::mmap(
+            hint.cast(),
+            size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANON,
+            -1,
+            0,
+        )
+    };
+    if at == libc::MAP_FAILED {
+        return None;
+    }
+    NonNull::new(at.cast())
+}
+
+/// `zend_mm_munmap`: `size` bytes at `at`, which this heap mapped and
+/// nothing names any more, given back to the machine.
+#[cfg(unix)]
+fn munmap(at: *mut u8, size: usize) {
+    // SAFETY: the range is part of a mapping `mmap` made for this heap,
+    // and the caller holds no name into it.
+    unsafe { libc::munmap(at.cast(), size) };
 }
 
 /// php's exact text when a chunk would take the request past its
@@ -1157,4 +1351,70 @@ fn bitset_is_free_range(map: &[u64; PAGE_MAP_LEN], start: u32, len: u32) -> bool
 unsafe fn copy_into(from: NonNull<u8>, to: NonNull<u8>, len: usize) {
     // SAFETY: the caller's contract, handed on.
     unsafe { std::ptr::copy_nonoverlapping(from.as_ptr(), to.as_ptr(), len) };
+}
+
+/// A debug build's mark on a block the heap has freed (design §10), so
+/// that a refcount operation on one is found where it is made and not
+/// several allocations later, where a write into a freed bin slot's link
+/// word surfaces (#723, #750). A release build compiles none of it.
+///
+/// The mark is two words, the second and third of the block, laid when a
+/// bin slot or a `run` is given back and cleared when one is handed out,
+/// so a block the heap has out never carries it. The first word is left
+/// alone, being the free list's link. The pattern is no live value's:
+/// where every refcounted value keeps a hash and a length, a flags word
+/// and a pointer, a store index and a class number, a zval's payload and
+/// its type byte, or a list index and a type number, the pair of odd
+/// words below is none of them. A huge block goes back to the system and carries no
+/// mark; nor does a slot of the 8- and 16-byte bins, which no refcounted
+/// value is small enough for.
+#[cfg(debug_assertions)]
+pub(crate) mod freed {
+    use std::ptr::NonNull;
+
+    /// The two words a freed block carries.
+    const MARK: [u64; 2] = [0xA5A5_A5A5_A5A5_A5A5; 2];
+
+    /// Where the mark stands in a block: its second word, which every
+    /// block of this heap is aligned for, being at least eight-aligned.
+    fn mark_at(at: NonNull<u8>) -> *mut [u64; 2] {
+        let mark: *mut [u64; 2] = at.as_ptr().wrapping_add(8).cast();
+        mark
+    }
+
+    /// Where the mark stands in a block, when the block has room for it.
+    fn mark_of(at: NonNull<u8>, size: usize) -> Option<*mut [u64; 2]> {
+        (size >= 8 + size_of::<[u64; 2]>()).then(|| mark_at(at))
+    }
+
+    /// The block of `size` bytes at `at` is the heap's again.
+    pub(crate) fn given_back(at: NonNull<u8>, size: usize) {
+        if let Some(mark) = mark_of(at, size) {
+            // SAFETY: the block is `size` bytes of this heap its owner has
+            // given up, and the mark is inside it past the link word.
+            unsafe { mark.write(MARK) };
+        }
+    }
+
+    /// The block of `size` bytes at `at` is its caller's from here.
+    pub(crate) fn handed_out(at: NonNull<u8>, size: usize) {
+        if let Some(mark) = mark_of(at, size) {
+            // SAFETY: the block is `size` bytes of this heap nothing else
+            // holds yet, and the mark is inside it.
+            unsafe { mark.write([0; 2]) };
+        }
+    }
+
+    /// Whether the refcounted block at `at` is one the heap has freed and
+    /// not handed out since. Every refcounted value is at least 24 bytes,
+    /// so the two words are inside it.
+    pub(crate) fn is_freed(at: NonNull<u8>) -> bool {
+        let mark = mark_at(at);
+        // SAFETY: `at` names a refcounted block of this heap, live or
+        // freed into a bin or a `run` of a chunk still mapped, so its
+        // second and third words are readable; a block freed back to the
+        // system is the defect this read exists to name, and reading it
+        // is the refcount operation's own read, made one step earlier.
+        unsafe { mark.read() == MARK }
+    }
 }

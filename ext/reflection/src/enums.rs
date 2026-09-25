@@ -1,21 +1,13 @@
-//! The three entries `zend_enum_register_funcs` gives every enum —
-//! `UnitEnum::cases`, `BackedEnum::from` and `tryFrom` — and the three
-//! enum reflectors over them: `ReflectionEnum`, whose cases are the
-//! class's constants, and `ReflectionEnumUnitCase` with
-//! `ReflectionEnumBackedCase` under it, each of which names one case
-//! and hands back the instance the engine keeps for it
-//! (`zend_enum_get_case`, served here through `call::class_constant`).
-//!
-//! The one enum this engine can be asked about is the stub's own
-//! `PropertyHookType`, since the compiler reads no `enum` a program
-//! writes (#466). The three entries hang off the stub rather than off
-//! every linked enum for the same reason: php's `zend_enum_register_funcs`
-//! is served at link time and would have nothing else to reach, and the
-//! entries read [`Request::called_scope`], so they serve whichever enum
-//! they were called on once there is more than one.
+//! The three enum reflectors: `ReflectionEnum`, whose cases are the
+//! constants of the class that `ZEND_CLASS_CONST_IS_CASE` marks, and
+//! `ReflectionEnumUnitCase` with `ReflectionEnumBackedCase` under it,
+//! each of which names one case and hands back the instance the engine
+//! keeps for it (`zend_enum_get_case`, served here through
+//! `call::class_constant`). The three methods `zend_enum_register_funcs`
+//! gives every enum, `cases`, `from` and `tryFrom`, are the engine's,
+//! which links them onto every enum, a native's and a program's alike.
 
 use php_ext::call::class_constant;
-use php_ext::coerce::{coerce_param, to_string};
 use php_ext::decl::{ClassKind, EnumBacking, Type};
 use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
@@ -72,136 +64,10 @@ fn case_names(req: &Request, class: ClassId) -> Vec<Vec<u8>> {
     req.class_decl(class).map_or_else(Vec::new, |decl| {
         decl.constants
             .iter()
+            .filter(|constant| constant.is_case)
             .map(|constant| constant.name.0.to_vec())
             .collect()
     })
-}
-
-/// The enum the call was made on, `zend_get_called_scope`, which is
-/// what a case entry serves.
-fn called_enum(req: &mut Request) -> Result<ClassId, Thrown> {
-    let Some(class) = req.called_scope() else {
-        return Err(throw(
-            req,
-            "Error",
-            "Internal error: an enum entry served with no called scope",
-        ));
-    };
-    held_to_enum(req, class)?;
-    Ok(class)
-}
-
-/// `UnitEnum::cases(): array`, `zend_enum_cases`: every case of the
-/// enum, in declaration order, each the one instance the engine keeps
-/// for it.
-///
-/// ```php
-/// $cases = PropertyHookType::cases();
-/// var_dump($cases);
-/// var_dump($cases[0] === PropertyHookType::Get);
-/// ```
-/// ```expect
-/// array(2) {
-///   [0]=>
-///   enum(PropertyHookType::Get)
-///   [1]=>
-///   enum(PropertyHookType::Set)
-/// }
-/// bool(true)
-/// ```
-pub(super) fn enum_cases(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let class = called_enum(req)?;
-    let mut out = PhpArray::new(req)?;
-    for name in case_names(req, class) {
-        let case = class_constant(req, class, &name)?;
-        out.append(req, case)?;
-    }
-    Ok(Value::array(out))
-}
-
-/// `BackedEnum::from(int|string $value): static`, `zend_enum_from_base`
-/// with `try_from` clear: the case whose backing value is `$value`, and
-/// php's `ValueError` for one no case carries.
-///
-/// ```php
-/// var_dump(PropertyHookType::from('set'));
-/// try { PropertyHookType::from('nope'); } catch (Throwable $t) { echo get_class($t), ': ', $t->getMessage(), "\n"; }
-/// try { PropertyHookType::from(1); } catch (Throwable $t) { echo get_class($t), ': ', $t->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// enum(PropertyHookType::Set)
-/// ValueError: "nope" is not a valid backing value for enum PropertyHookType
-/// ValueError: "1" is not a valid backing value for enum PropertyHookType
-/// ```
-pub(super) fn enum_from(req: &mut Request) -> Result<Value, Thrown> {
-    from_backing(req, false)
-}
-
-/// `BackedEnum::tryFrom(int|string $value): ?static`, the same with
-/// `try_from` set: `null` where `from` raises.
-///
-/// ```php
-/// var_dump(PropertyHookType::tryFrom('get'), PropertyHookType::tryFrom('nope'));
-/// ```
-/// ```expect
-/// enum(PropertyHookType::Get)
-/// NULL
-/// ```
-pub(super) fn enum_try_from(req: &mut Request) -> Result<Value, Thrown> {
-    from_backing(req, true)
-}
-
-/// `zend_enum_from_base`: the argument coerced to the enum's backing
-/// type as the parameter's declared type coerces it, then the case
-/// whose backing value it equals.
-fn from_backing(req: &mut Request, try_from: bool) -> Result<Value, Thrown> {
-    exactly_arguments(req, 1)?;
-    let class = called_enum(req)?;
-    let Some(backing) = backing_of(req, class) else {
-        let name = class_name_of(req, class);
-        return Err(throw(
-            req,
-            "Error",
-            &format!("Enum {} is not backed", String::from_utf8_lossy(&name)),
-        ));
-    };
-    let given = req.argument(1).unwrap_or_default().deref();
-    let wanted = coerce_param(req, &given, &backing, 1)?;
-    for name in case_names(req, class) {
-        let case = class_constant(req, class, &name)?;
-        let held = case
-            .as_object()
-            .and_then(|object| object.prop(req, b"value"))
-            .unwrap_or_default();
-        if php_ext::coerce::identical(&held, &wanted) {
-            return Ok(case);
-        }
-        req.release(case);
-    }
-    if try_from {
-        return Ok(Value::null());
-    }
-    let name = class_name_of(req, class);
-    let shown = match backing {
-        Type::Int => to_string(req, &wanted)
-            .map(|s| String::from_utf8_lossy(s.as_bytes()).into_owned())
-            .unwrap_or_default(),
-        _ => format!(
-            "\"{}\"",
-            to_string(req, &wanted)
-                .map(|s| String::from_utf8_lossy(s.as_bytes()).into_owned())
-                .unwrap_or_default()
-        ),
-    };
-    Err(throw(
-        req,
-        "ValueError",
-        &format!(
-            "{shown} is not a valid backing value for enum {}",
-            String::from_utf8_lossy(&name)
-        ),
-    ))
 }
 
 /// `ReflectionEnum::__construct(object|string $objectOrClass)`:
@@ -328,6 +194,29 @@ pub(super) fn reflection_enum_get_case(req: &mut Request) -> Result<Value, Throw
 /// ```expect
 /// int(2)
 /// ```
+///
+/// A program's enum, pure and backed, its own constant no case:
+///
+/// ```php
+/// enum Suit: int { case Hearts = 1; case Spades = 2; const Wild = self::Spades; }
+/// enum Pure { case A; }
+/// $s = new ReflectionEnum('Suit');
+/// foreach ($s->getCases() as $case) echo get_class($case), ' ', $case->name, '=', $case->getBackingValue(), "\n";
+/// var_dump($s->isBacked(), (string) $s->getBackingType(), $s->hasCase('Wild'));
+/// $p = new ReflectionEnum('Pure');
+/// var_dump($p->isBacked(), $p->getBackingType(), get_class($p->getCases()[0]), $p->getCase('A')->getValue());
+/// ```
+/// ```expect
+/// ReflectionEnumBackedCase Hearts=1
+/// ReflectionEnumBackedCase Spades=2
+/// bool(true)
+/// string(3) "int"
+/// bool(false)
+/// bool(false)
+/// NULL
+/// string(22) "ReflectionEnumUnitCase"
+/// enum(Pure::A)
+/// ```
 pub(super) fn reflection_enum_get_cases(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 0)?;
     let class = this_enum(req)?;
@@ -392,6 +281,19 @@ fn this_case(req: &mut Request) -> Result<(ClassId, Vec<u8>), Thrown> {
 /// }
 /// ReflectionException: Class "Exception" is not an enum
 /// ```
+///
+/// A constant of an enum that is no case, and a pure enum's case under
+/// `ReflectionEnumBackedCase`, are php's two refusals after it:
+///
+/// ```php
+/// enum E { case A; const C = 1; }
+/// try { new ReflectionEnumUnitCase('E', 'C'); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+/// try { new ReflectionEnumBackedCase('E', 'A'); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Constant E::C is not a case
+/// Enum case E::A is not a backed case
+/// ```
 pub(super) fn reflection_enum_case_construct(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 2)?;
     let (class, _) = class_argument(req, 1)?;
@@ -413,6 +315,29 @@ pub(super) fn reflection_enum_case_construct(req: &mut Request) -> Result<Value,
     if let Some(this) = req.this() {
         set_name(req, this, &name)?;
         set_string_prop(req, this, b"class", &held)?;
+    }
+    let shown = format!(
+        "{}::{}",
+        String::from_utf8_lossy(&held),
+        String::from_utf8_lossy(&name)
+    );
+    if !case_names(req, class).contains(&name) {
+        return Err(throw(
+            req,
+            "ReflectionException",
+            &format!("Constant {shown} is not a case"),
+        ));
+    }
+    // `ReflectionEnumBackedCase::__construct` after the unit case's.
+    let backed_reflector = req.this().is_some_and(|this| {
+        class_name_of(req, this.class()).eq_ignore_ascii_case(b"ReflectionEnumBackedCase")
+    });
+    if backed_reflector && backing_of(req, class).is_none() {
+        return Err(throw(
+            req,
+            "ReflectionException",
+            &format!("Enum case {shown} is not a backed case"),
+        ));
     }
     Ok(Value::null())
 }

@@ -231,6 +231,22 @@ fn node_of(children: &[Element], kind: SyntaxKind) -> Option<(usize, TextRange, 
 /// Fatal error: Switch statements may only contain one default clause in %s on line 2
 /// ```
 ///
+/// The same line through the deprecation `zend_compile_switch` raises
+/// for the `;` spelling, the `;` being where the arm's empty statement
+/// list reduced and the comments on either side of it uncounted (#601
+/// pin 3):
+///
+/// ```php
+/// switch (1) { default /*
+///
+/// */ ; /*
+///
+/// */ }
+/// ```
+/// ```expect
+/// Deprecated: Case statements followed by a semicolon (;) are deprecated, use a colon (:) instead in %s on line 4
+/// ```
+///
 /// An empty array is its `]`'s line, the lookahead its rule reduced on,
 /// and the `ECHO` that converts it is emitted there (#601 pin 4):
 ///

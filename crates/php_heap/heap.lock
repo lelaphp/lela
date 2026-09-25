@@ -43,7 +43,6 @@ FiberStack::resume
 Frame
 Frame::is_empty
 Frame::len
-Frame::new
 Frame::set
 Frame::slot
 Frame::slot_ptr
@@ -97,6 +96,7 @@ Heap::object_set_properties
 Heap::object_set_slot
 Heap::object_with
 Heap::objects
+Heap::overflow_rendered
 Heap::reference
 Heap::reference_separate
 Heap::reference_set
@@ -115,8 +115,10 @@ Heap::separate
 Heap::set_memory_limit
 Heap::stored
 Heap::string
+Heap::string_append
 Heap::string_safe_alloc
 Heap::string_with
+Heap::take_freed_use
 HeapHooks
 HeapHooks::destruct
 HeapHooks::free_native
@@ -208,15 +210,20 @@ Strings::new
 Suspensions
 Switched
 VmStack
+VmStack::close
 VmStack::current
 VmStack::entry
+VmStack::fiber
 VmStack::frame
 VmStack::frame_mut
+VmStack::move_to_heap
 VmStack::new
+VmStack::open
 VmStack::pop_entry
 VmStack::pop_frame
 VmStack::push_entry
 VmStack::push_frame
+VmStack::resume_frame
 Zval
 Zval::UNDEF
 Zval::array

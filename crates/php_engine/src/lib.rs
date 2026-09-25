@@ -23,8 +23,10 @@ pub mod api;
 mod classes;
 mod constants;
 mod engine;
+mod enums;
 mod exec;
 mod fiber;
+mod generator;
 mod handlers;
 mod interfaces;
 mod interrupt;
@@ -43,4 +45,4 @@ mod weakrefs;
 mod wrapper;
 
 pub use api::request::PHP_VERSION;
-pub use engine::{Engine, EngineBuilder, Observables, OutputSink, RequestDescription};
+pub use engine::{Engine, EngineBuilder, FileHandles, Observables, OutputSink, RequestDescription};

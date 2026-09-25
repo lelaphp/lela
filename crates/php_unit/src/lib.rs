@@ -17,8 +17,11 @@
 
 pub mod decl;
 mod dump;
+mod enum_methods;
 mod frameless;
+pub mod link;
 mod op;
+mod types;
 mod unit;
 
 mod opcode {
@@ -27,10 +30,12 @@ mod opcode {
     include!(concat!(env!("OUT_DIR"), "/opcode.rs"));
 }
 
+pub use enum_methods::enum_methods;
 pub use frameless::{FramelessEntry, frameless_table};
 pub use op::{
     CacheSlot, ConstIdx, Effects, LiveKind, LiveRange, OpArray, OperandKind, Opline, OplineIdx,
     TryCatch,
 };
 pub use opcode::Opcode;
+pub use types::type_to_string;
 pub use unit::{Diagnostic, Level, MethodBody, Unit};

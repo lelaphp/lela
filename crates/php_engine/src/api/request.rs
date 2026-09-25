@@ -113,12 +113,15 @@ pub enum StartHandler {
     User(Callable),
 }
 
-/// A handler of the buffer stack an extension registers under a name
-/// `ob_start()` takes, `php_output_handler_alias_register`, with the
+/// A handler of the buffer stack an extension hands to
+/// [`ExtensionBuilder::register`] under a name `ob_start()` takes,
+/// `php_output_handler_alias_register` from its `MINIT`, with the
 /// handlers it cannot stand beside: while the stack is not empty and one
 /// of `conflicts` is on it, starting this one is php's warning and a
 /// refusal, the check every `php_output_handler_conflict_register` in
 /// php-src makes through `php_output_handler_conflict`.
+///
+/// [`ExtensionBuilder::register`]: crate::api::abi::ExtensionBuilder::register
 #[derive(Debug, Clone, Copy)]
 pub struct BufferHandler {
     pub name: &'static str,
@@ -454,6 +457,53 @@ impl Stream {
     }
 }
 
+/// `php_stream_ops` for a kind of stream an extension implements, which
+/// the engine's generic half of every stream runs over as it runs its
+/// own kinds: the label `stream_get_meta_data` prints as `stream_type`,
+/// the operations each answering as php's does, `None` for the `-1` an
+/// operation fails with, and a kind holding its own `abstract` as its
+/// fields. What `pdo_sqlite`'s blob streams and their kin are made of,
+/// through [`Request::new_stream`].
+pub trait StreamOps: Send {
+    /// `ops->label`.
+    fn label(&self) -> &'static str;
+
+    /// `ops->write`: how many bytes were taken.
+    fn write(&mut self, req: &mut Request, buf: &[u8]) -> Option<usize>;
+
+    /// `ops->read`: how many bytes were given, `eof` set where the kind
+    /// sets `stream->eof`.
+    fn read(&mut self, req: &mut Request, buf: &mut [u8], eof: &mut bool) -> Option<usize>;
+
+    /// `ops->close`, with what the kind holds.
+    fn close(&mut self, req: &mut Request);
+
+    /// `ops->seek`, `None` where the kind has none: `position` is php's
+    /// `*newoffs`, written as the kind writes it; `Some(true)` for
+    /// php's `0`.
+    fn seek(
+        &mut self,
+        req: &mut Request,
+        offset: i64,
+        whence: Option<Whence>,
+        position: &mut i64,
+    ) -> Option<bool> {
+        let _ = (req, offset, whence, position);
+        None
+    }
+
+    /// Whether the kind has an `ops->seek`.
+    fn seekable(&self) -> bool {
+        false
+    }
+
+    /// `ops->stat` for a kind that fills `st_size` alone, `None` where it
+    /// has none.
+    fn size(&self) -> Option<i64> {
+        None
+    }
+}
+
 /// A stream wrapper's operations, Zend's `php_stream_wrapper_ops` as a
 /// value: the scheme it serves and one function per operation, `None`
 /// where the wrapper does not support it.
@@ -713,6 +763,17 @@ pub(crate) enum Aside {
     Stderr(Vec<u8>),
 }
 
+/// A write a debug build stopped: the opline whose `TMP` it was, the
+/// opcode serving it, the temporary's number and what the slot held.
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone, Copy)]
+struct DirtyTemporary {
+    opline: u32,
+    opcode: Opcode,
+    number: u32,
+    held: php_heap::ZvalType,
+}
+
 /// One request (design §5.14): `Send`, single-threaded, dropped at the
 /// end of `serve`. Everything a native may touch is a method here or on
 /// a value it hands out.
@@ -787,7 +848,12 @@ pub struct Request {
     /// then each an `INCLUDE_OR_EVAL` opened, which the once forms read
     /// before they open one (`zend_include_or_eval`).
     included_files: Vec<Vec<u8>>,
-    constants: Vec<(Vec<u8>, Value)>,
+    /// The rows this request added to `EG(zend_constants)`, in the order
+    /// it added them, each under the extension it is registered by:
+    /// `Core` for what the host registers at request start
+    /// ([`crate::engine::FileHandles`]), `None` for what `define()` and
+    /// `const` wrote, php's `PHP_USER_CONSTANT`.
+    constants: Vec<(Option<&'static str>, Vec<u8>, Value)>,
     /// `zend_enum_get_case`'s slot (`Z/Zend/zend_enum.c:410`): one
     /// instance per case of each enum, made on the first read of the
     /// case and handed back by identity from then on, so that
@@ -796,6 +862,16 @@ pub struct Request {
     /// and immutable and an object is neither, so the slot is the
     /// request's and the cases go with it.
     enum_cases: Vec<((ClassId, Vec<u8>), PhpObject)>,
+    /// The backed enums whose case values `zend_enum_build_backed_enum_table`
+    /// has held to their backing type and found no two alike, php's
+    /// `ZEND_ACC_CONSTANTS_UPDATED` on each; a check that failed is made
+    /// again on the next read, as php's is.
+    enums_updated: Vec<ClassId>,
+    /// The methods `zend_enum_register_funcs` gives each enum a program
+    /// declares, one function number each past
+    /// [`crate::enums::ENUM_FUNCTIONS`], as php allocates a
+    /// `zend_internal_function` per method per enum.
+    enum_functions: Vec<(ClassId, crate::enums::EnumMethod)>,
     /// `CE_STATIC_MEMBERS(ce)` (`Z/Zend/zend_object_handlers.c:2094`):
     /// one slot per declared `static` property, keyed by the class that
     /// declared it and by the property's name. php gives every class a
@@ -925,6 +1001,11 @@ pub struct Request {
     /// (`zend_call_stack_init`) from the two `zend.*_stack_size`
     /// entries; what the compiler is held to (design §5.6).
     stack_limit: StackLimit,
+    /// A debug build's record of the first write of a `TMP` it found
+    /// over a slot that still held an owner, until the loop takes it
+    /// ([`Request::take_sensed`]).
+    #[cfg(debug_assertions)]
+    dirty: Option<DirtyTemporary>,
     /// The classes the units this request served declared, each the
     /// unit that holds it and the index of its declaration, in the
     /// order declared: php's `EG(class_table)` past what the engine
@@ -1121,11 +1202,18 @@ impl Request {
         let mut resources = Resources::default();
         let stream_type = crate::streams::register(&mut resources);
         let filter_type = resources.register_type(b"stream filter", None);
+        // `init_executor`'s `zend_vm_stack_init`: the first page of the
+        // VM stack, out of the heap the object store's table stands in.
+        // The main chunk holds it, so nothing refuses it; a heap that
+        // did would refuse the first push again, with php's fatal.
+        let mut heap = Heap::new();
+        let mut stack = VmStack::new();
+        let _laid = stack.open(&mut heap);
         let mut req = Request {
             shared,
             description,
-            heap: Heap::new(),
-            stack: VmStack::new(),
+            heap,
+            stack,
             vm: Vm::default(),
             map: MapTable::new(),
             states: Vec::new(),
@@ -1145,6 +1233,8 @@ impl Request {
             included_files: Vec::new(),
             constants: Vec::new(),
             enum_cases: Vec::new(),
+            enums_updated: Vec::new(),
+            enum_functions: Vec::new(),
             statics: Vec::new(),
             guards: Vec::new(),
             ref_sources: Vec::new(),
@@ -1185,6 +1275,8 @@ impl Request {
             aliases: Vec::new(),
             sapi_constant: Value::null(),
             user_functions: Vec::new(),
+            #[cfg(debug_assertions)]
+            dirty: None,
         };
         if let Some(name) = req
             .shared
@@ -1232,6 +1324,13 @@ impl Request {
 
     pub(crate) fn stack_mut(&mut self) -> &mut VmStack {
         &mut self.stack
+    }
+
+    /// The first page of the VM stack the request runs on, out of its
+    /// heap, where none stands: what `zend_fiber_execute` takes for a
+    /// fiber's stack before the fiber's function is called.
+    pub(crate) fn open_stack(&mut self) -> Result<(), Fatal> {
+        self.stack.open(&mut self.heap)
     }
 
     /// The engine's half of the frames: what the loop and the handlers
@@ -1290,14 +1389,21 @@ impl Request {
         self.marked_destructed
     }
 
+    /// The loop over a generator's frame, bound to the engine's tier
+    /// ([`crate::tier::resume`]).
+    pub(crate) fn resume_loop(&self) -> fn(&mut Request, FrameRef) -> Result<(), Fatal> {
+        self.shared.resume
+    }
+
     /// Push a frame for `unit`'s op array: its shape on the VM stack and
     /// its engine state, which are pushed and popped together and share a
-    /// `FrameRef`.
-    pub(crate) fn push_frame(&mut self, unit: Arc<Unit>) -> FrameRef {
+    /// `FrameRef`. A VM stack whose page the memory limit refuses is
+    /// the fatal php raises there, and nothing is pushed.
+    pub(crate) fn push_frame(&mut self, unit: Arc<Unit>) -> Result<FrameRef, Fatal> {
         let code = exec::code_of(&unit);
         let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
+        let frame = self.stack.push_frame(&mut self.heap, slots, 0)?;
         exec::init_runtime_cache(&mut self.map, code, exec::Body::Main);
-        let frame = self.stack.push_frame(slots);
         self.vm.push(unit);
         // `zend_execute` gives the main op array's frame `EG(symbol_table)`
         // and `i_init_code_execute_data` attaches it, so every CV name
@@ -1306,7 +1412,7 @@ impl Request {
             state.symbol_table = Some(TableId::GLOBAL);
         }
         self.attach_symbol_table(frame);
-        frame
+        Ok(frame)
     }
 
     /// The frame for the main op array of a file an `INCLUDE_OR_EVAL`
@@ -1322,15 +1428,17 @@ impl Request {
     /// to it, so the included code reads the includer's variables.
     /// `caller` is `prev_execute_data`, the frame whose opline is the
     /// `INCLUDE_OR_EVAL`, and `returns_to` its `VAR` where the value is
-    /// read.
+    /// read. The push comes first, as php's does, so a VM stack page the
+    /// memory limit refuses is the fatal and nothing else is touched.
     pub(crate) fn push_code_frame(
         &mut self,
         unit: Arc<Unit>,
         caller: FrameRef,
         returns_to: Option<(FrameRef, u32)>,
-    ) -> FrameRef {
+    ) -> Result<FrameRef, Fatal> {
         let code = exec::code_of(&unit);
         let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
+        let frame = self.stack.push_frame(&mut self.heap, slots, 0)?;
         let (this, called_scope, scope) = self.vm.at(caller).map_or((None, None, None), |state| {
             (state.this, state.called_scope, self.frame_scope(caller))
         });
@@ -1339,7 +1447,6 @@ impl Request {
         }
         let table = self.rebuild_symbol_table(caller);
         exec::init_runtime_cache(&mut self.map, code, exec::Body::Main);
-        let frame = self.stack.push_frame(slots);
         self.vm.push_body(
             unit,
             exec::Body::Main,
@@ -1355,7 +1462,7 @@ impl Request {
             state.symbol_table = Some(table);
         }
         self.attach_symbol_table(frame);
-        frame
+        Ok(frame)
     }
 
     /// `zend_leave_helper`'s arm for a nested code frame
@@ -1402,21 +1509,28 @@ impl Request {
     /// declared parameters kept beside the frame, and the receiver and
     /// the called scope carried over; `returns_to` is the caller's slot
     /// for what the frame returns and `caller` the frame whose opline
-    /// pushed the call, `None` where a native did. None for a function
-    /// that is no user function, which is the caller's internal error
-    /// to name.
+    /// pushed the call, `None` where a native did. The frame's room on
+    /// the VM stack is php's `zend_vm_calc_used_stack`, the extra
+    /// arguments' slots with it, and a page the memory limit refuses is
+    /// the fatal php raises at the push; a function that is no user
+    /// function is an internal error.
     pub(crate) fn push_user_frame(
         &mut self,
         function: Function,
         call: exec::CallState,
         returns_to: Option<(FrameRef, u32)>,
         caller: Option<FrameRef>,
-    ) -> Option<FrameRef> {
+    ) -> Result<FrameRef, Fatal> {
+        let no_body = || {
+            Fatal::Error(String::from(
+                "InternalError: a user function whose body the unit has not",
+            ))
+        };
         let (unit, body) = {
-            let user = self.user_function(function)?;
+            let user = self.user_function(function).ok_or_else(no_body)?;
             (Arc::clone(&user.unit), user.body)
         };
-        let code = exec::body_of(&unit, body)?;
+        let code = exec::body_of(&unit, body).ok_or_else(no_body)?;
         let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
         // The declared parameters, which is php's `common.num_args` and
         // excludes a variadic: an argument from the variadic's position
@@ -1426,9 +1540,10 @@ impl Request {
             decl.parameters.iter().filter(|p| !p.variadic).count()
         });
         let num_args = u32::try_from(call.arguments.len()).unwrap_or(u32::MAX);
+        let extra_args = call.arguments.len().saturating_sub(parameters);
+        let frame = self.stack.push_frame(&mut self.heap, slots, extra_args)?;
         let closure = call.closure;
         exec::init_runtime_cache(&mut self.map, code, body);
-        let frame = self.stack.push_frame(slots);
         self.vm.push_body(
             unit,
             body,
@@ -1460,7 +1575,7 @@ impl Request {
         for coerced in call.coerced {
             self.release(coerced);
         }
-        Some(frame)
+        Ok(frame)
     }
 
     /// The frame off both stacks, every owner its slots held given up
@@ -1514,7 +1629,7 @@ impl Request {
             }
         }
         self.vm.pop();
-        self.stack.pop_frame();
+        self.stack.pop_frame(&mut self.heap);
     }
 
     /// The value in a slot of `frame`, a view of it: `ZVAL_COPY_VALUE`,
@@ -1540,6 +1655,18 @@ impl Request {
     /// `value` into a slot, the slot owning it from here, and what the
     /// slot held handed back for the caller to release; a slot past the
     /// end takes nothing and hands `value` back.
+    ///
+    /// php writes an opline's `TMP` with `ZVAL_COPY_VALUE` and never
+    /// releases what stood there, because a live temporary is never
+    /// written over: the handler that reads one frees it or moves it out.
+    /// Here the write hands the old value back to be released, so a `TMP`
+    /// whose owner a handler moved without emptying the slot is released
+    /// a second time by the next write (#723). A debug build stops that
+    /// write: the `TMP` the opline the frame stands at writes, found
+    /// holding an owner, is recorded for [`Request::take_sensed`]. A
+    /// scalar left there is no owner and no second release, and php
+    /// writes over one itself: `JMPZ_EX` and `JMPNZ_EX` write the `TMP`
+    /// the `BOOL` after them writes again.
     pub(crate) fn set_slot(&mut self, frame: FrameRef, at: u32, value: Value) -> Value {
         let Some(f) = self
             .stack
@@ -1550,7 +1677,67 @@ impl Request {
         };
         let old = f.slot(Slot(at));
         f.set(Slot(at), value.to_zval());
+        #[cfg(debug_assertions)]
+        if old.is_refcounted() {
+            self.sense_dirty_temporary(frame, at, old.kind());
+        }
         Value::of_zval(old)
+    }
+
+    /// A debug build's question at a write over a slot that held an
+    /// owner of a `held`: whether the slot is the `TMP` of the opline
+    /// `frame` stands at, which the handler that read it last should
+    /// have left empty. The first such write is recorded.
+    #[cfg(debug_assertions)]
+    fn sense_dirty_temporary(&mut self, frame: FrameRef, at: u32, held: php_heap::ZvalType) {
+        if self.dirty.is_some() {
+            return;
+        }
+        let opline = self.vm.opline(frame);
+        let Some(serving) = self.vm.serving(frame) else {
+            return;
+        };
+        let Some(op) = serving
+            .code()
+            .and_then(|code| exec::opline_at(code, opline).map(|op| (code, *op)))
+        else {
+            return;
+        };
+        let (code, op) = op;
+        let its_own = match op.out_type {
+            php_unit::OperandKind::Tmp => exec::temporary_slot(code, op.out) == at,
+            php_unit::OperandKind::Var
+            | php_unit::OperandKind::Cv
+            | php_unit::OperandKind::Const
+            | php_unit::OperandKind::Unused => false,
+        };
+        if its_own {
+            self.dirty = Some(DirtyTemporary {
+                opline,
+                opcode: op.opcode,
+                number: op.out,
+                held,
+            });
+        }
+    }
+
+    /// What a debug build's two sensors found since the loop last asked
+    /// (design §10, #761): a `TMP` written over an owner it still held,
+    /// or a refcount operation on a block the heap had freed, as the
+    /// `InternalError` fatal that ends the request; the first of them,
+    /// and taken. The loop asks after every handler.
+    #[cfg(debug_assertions)]
+    pub(crate) fn take_sensed(&mut self) -> Option<Fatal> {
+        let dirty = self.dirty.take().map(|dirty| {
+            Fatal::Error(format!(
+                "InternalError: {} at opline {} writes its TMP #{} over an owner it still holds ({:?}): the handler that last read the slot moved it out and did not empty it",
+                dirty.opcode.name(),
+                dirty.opline,
+                dirty.number,
+                dirty.held,
+            ))
+        });
+        dirty.or_else(|| self.heap.take_freed_use())
     }
 
     /// The zval in a slot of `frame` in place, php's `EX_VAR(var)`
@@ -1811,10 +1998,18 @@ impl Request {
         arguments: &[Value],
         extra_named: &[(PhpString, Value)],
     ) -> Result<Value, Thrown> {
+        let wrapped = self.values_for_references(function, arguments)?;
         let name = self.declared_name(function);
         let name = self.interned(name.as_bytes())?;
-        for argument in arguments {
+        let mut sent = arguments.to_vec();
+        for (at, argument) in sent.iter_mut().enumerate() {
             self.addref(argument);
+            if wrapped.contains(&at) {
+                // `Z_TRY_ADDREF_P(arg); ZVAL_NEW_REF(param, arg)`: the
+                // owner just taken is the new cell's, and the frame
+                // holds the cell.
+                *argument = PhpRef::new(self, *argument)?.as_value();
+            }
         }
         for (extra, value) in extra_named {
             self.addref(&Value::string(*extra));
@@ -1826,8 +2021,8 @@ impl Request {
         let call = CallState {
             function,
             name: Some(name),
-            arguments: arguments.to_vec(),
-            count: arguments.len(),
+            count: sent.len(),
+            arguments: sent,
             this,
             called_scope,
             closure,
@@ -1843,6 +2038,82 @@ impl Request {
         let served = self.serve_native(function);
         self.pop_call();
         served
+    }
+
+    /// `zend_call_function`'s walk of `fci->params`
+    /// (`Z/Zend/zend_execute_API.c:883-902`) over the by-reference
+    /// parameters: an argument that is no reference, handed to a
+    /// parameter `ARG_SHOULD_BE_SENT_BY_REF` and not
+    /// `ARG_MAY_BE_SENT_BY_REF`, is `zend_param_must_be_ref`'s warning,
+    /// and the call goes on with the value wrapped in a reference of its
+    /// own, so what the callee writes through it is lost. The positions
+    /// to wrap come back; a warning a handler turned into a throw stops
+    /// the call before it is made, as php's `cleanup_args` does, and is
+    /// the `Err`. The parameter is named where it is one of the declared
+    /// ones, `get_function_arg_name`, and a variadic's is not.
+    ///
+    /// ```php
+    /// function f(&$v) { $v = 1; return 'f'; }
+    /// class C { static function m(&$v, ...$rest) { return 'm'; } }
+    /// $x = 5;
+    /// var_dump(call_user_func('f', $x), $x, array_map('f', [1]), call_user_func('C::m', 1, 2));
+    /// ```
+    /// ```expect
+    /// Warning: f(): Argument #1 ($v) must be passed by reference, value given in %s on line 5
+    ///
+    /// Warning: f(): Argument #1 ($v) must be passed by reference, value given in %s on line 5
+    ///
+    /// Warning: C::m(): Argument #1 ($v) must be passed by reference, value given in %s on line 5
+    /// string(1) "f"
+    /// int(5)
+    /// array(1) {
+    ///   [0]=>
+    ///   string(1) "f"
+    /// }
+    /// string(1) "m"
+    /// ```
+    fn values_for_references(
+        &mut self,
+        function: Function,
+        arguments: &[Value],
+    ) -> Result<Vec<usize>, Thrown> {
+        let Some(decl) = self.function_decl(function) else {
+            return Ok(Vec::new());
+        };
+        let declared = decl.parameters.len();
+        let variadic = decl.parameters.last().filter(|last| last.variadic);
+        let mut wrapped: Vec<(usize, Option<String>)> = Vec::new();
+        for (at, argument) in arguments.iter().enumerate() {
+            if matches!(argument.as_ref(), ValueRef::Undef | ValueRef::Reference(_)) {
+                continue;
+            }
+            let Some(parameter) = decl.parameters.get(at).or(variadic) else {
+                continue;
+            };
+            if parameter.by_ref && !parameter.prefer_ref {
+                let name = (at < declared && !parameter.variadic)
+                    .then(|| String::from_utf8_lossy(&parameter.name.0).into_owned());
+                wrapped.push((at, name));
+            }
+        }
+        if wrapped.is_empty() {
+            return Ok(Vec::new());
+        }
+        let callee = self.qualified_name(function, None);
+        let mut positions = Vec::with_capacity(wrapped.len());
+        for (at, name) in wrapped {
+            let name = name.map(|name| format!(" (${name})")).unwrap_or_default();
+            let message = format!(
+                "{callee}(): Argument #{}{name} must be passed by reference, value given",
+                at + 1
+            );
+            crate::api::raising::warning(self, &message);
+            if self.is_pending() {
+                return Err(Thrown::of(self.take_pending()));
+            }
+            positions.push(at);
+        }
+        Ok(positions)
     }
 
     /// `zend_call_function` over a user function, the branch that calls
@@ -1905,13 +2176,8 @@ impl Request {
     fn serve_user(&mut self, function: Function, call: CallState) -> Result<Value, Thrown> {
         let standing = self.vm.frames().len();
         let passed = call.arguments.len();
-        let Some(frame) = self.push_user_frame(function, call, None, None) else {
-            return self
-                .fatal_of::<()>(Err(Fatal::Error(String::from(
-                    "InternalError: a user function whose body the unit has not",
-                ))))
-                .map(|()| Value::null());
-        };
+        let pushed = self.push_user_frame(function, call, None, None);
+        let frame = self.fatal_of(pushed)?;
         // `enter`'s own prologue, so a body reached from here stands
         // where a body reached from `DO_UCALL` stands: every `RECV*`
         // php runs is run, which is where a declared parameter type is
@@ -1968,6 +2234,9 @@ impl Request {
     /// method numbered past them; none for a number nothing is linked
     /// under.
     fn entry_of(&self, function: Function) -> Option<crate::api::abi::Entry> {
+        if let Some((_, method)) = self.enum_method_of(function) {
+            return Some(method.entry());
+        }
         let at = usize::try_from(function.0).ok()?;
         match at.checked_sub(self.shared.functions.len()) {
             None => self.shared.functions.get(at).map(|(_, entry)| *entry),
@@ -2011,6 +2280,9 @@ impl Request {
     pub(crate) fn method_class(&self, function: Function) -> Option<ClassId> {
         if let Some(method) = self.native_method(function) {
             return Some(method.class);
+        }
+        if let Some((class, _)) = self.enum_method_of(function) {
+            return Some(class);
         }
         let user = self.user_function(function)?;
         let exec::Body::Method { class, .. } = user.body else {
@@ -2058,6 +2330,11 @@ impl Request {
         let decl = self.class_decl(class)?;
         let at = usize::try_from(class.0).ok()?;
         if let Some(declared) = at.checked_sub(self.shared.classes.len()) {
+            if decl.kind == ClassKind::Enum
+                && let Some(method) = crate::enums::EnumMethod::of(lowered, decl.backing)
+            {
+                return self.enum_function(class, method);
+            }
             let (unit, index) = self.declared.get(declared)?;
             let method = decl
                 .methods
@@ -2082,6 +2359,25 @@ impl Request {
                         .get(usize::try_from(index).unwrap_or(usize::MAX))
                         .is_some_and(|method| method.function.name.0.eq_ignore_ascii_case(lowered)))
         })
+    }
+
+    /// The function number `zend_enum_register_funcs` gave `method` of
+    /// the enum `class` a program declared.
+    fn enum_function(&self, class: ClassId, method: crate::enums::EnumMethod) -> Option<Function> {
+        let at = self
+            .enum_functions
+            .iter()
+            .position(|held| *held == (class, method))?;
+        crate::enums::ENUM_FUNCTIONS
+            .checked_add(u32::try_from(at).ok()?)
+            .map(Function)
+    }
+
+    /// The enum method a function number past
+    /// [`crate::enums::ENUM_FUNCTIONS`] names, and its enum.
+    fn enum_method_of(&self, function: Function) -> Option<(ClassId, crate::enums::EnumMethod)> {
+        let at = function.0.checked_sub(crate::enums::ENUM_FUNCTIONS)?;
+        self.enum_functions.get(usize::try_from(at).ok()?).copied()
     }
 
     /// The trampoline `class` answers under the lowered name, php's
@@ -2117,6 +2413,13 @@ impl Request {
 
     /// The declaration of a method, native or user, if `function` is one.
     pub(crate) fn method_decl(&self, function: Function) -> Option<&MethodDecl> {
+        if let Some((class, method)) = self.enum_method_of(function) {
+            return self
+                .class_decl(class)?
+                .methods
+                .iter()
+                .find(|decl| decl.function.name.0.eq_ignore_ascii_case(method.name()));
+        }
         if let Some(method) = self.native_method(function) {
             return match method.at {
                 MethodAt::Declared(index) => self
@@ -3799,6 +4102,9 @@ impl Request {
                 self.ini_parse_bytes_of("memory_limit")
             )),
         }
+        // A fatal the heap raised lifted its limit for the rendering, as
+        // `zend_mm_safe_error` does; it holds again from here.
+        self.heap.overflow_rendered();
     }
 
     /// `zend_objects_new` over `class` (`object_init_ex` without the
@@ -3808,6 +4114,7 @@ impl Request {
     /// as the fatal that ends the request.
     pub(crate) fn new_object(&mut self, class: ClassId) -> Result<PhpObject, Thrown> {
         let slots = self.class_slots(class);
+        let defaults = self.property_defaults(class)?;
         // `ce->create_object`: a class that declares a native payload
         // lays it down here, with the object, as
         // `zend_object_alloc(sizeof(custom), ce)` does; every other
@@ -3816,11 +4123,14 @@ impl Request {
             Some(new) => new(&mut self.heap, class.0, slots),
             None => self.heap.object(class.0, slots),
         };
-        let object = self.fatal_of(allocated).map(PhpObject::of)?;
-        if let Err(thrown) = self.init_properties(object) {
-            self.release(object.as_value());
-            return Err(thrown);
-        }
+        let object = match self.fatal_of(allocated).map(PhpObject::of) {
+            Ok(object) => object,
+            Err(thrown) => {
+                self.release_defaults(defaults);
+                return Err(thrown);
+            }
+        };
+        self.init_properties(object, defaults);
         // `zend_default_exception_new`, the throwables' `create_object`:
         // `file`, `line` and `trace` are the site of `new`, written as
         // the object is made and before any constructor runs.
@@ -3843,12 +4153,16 @@ impl Request {
         payload: T,
     ) -> Result<PhpObject, Thrown> {
         let slots = self.class_slots(class);
+        let defaults = self.property_defaults(class)?;
         let allocated = self.heap.object_with(class.0, slots, payload);
-        let object = self.fatal_of(allocated).map(PhpObject::of)?;
-        if let Err(thrown) = self.init_properties(object) {
-            self.release(object.as_value());
-            return Err(thrown);
-        }
+        let object = match self.fatal_of(allocated).map(PhpObject::of) {
+            Ok(object) => object,
+            Err(thrown) => {
+                self.release_defaults(defaults);
+                return Err(thrown);
+            }
+        };
+        self.init_properties(object, defaults);
         Ok(object)
     }
 
@@ -3860,22 +4174,65 @@ impl Request {
     /// where it is typed, as `zend_declare_typed_property` leaves it.
     /// The slots are [`Request::placed_properties`]', so an inherited
     /// property takes the parent's default in the parent's slot.
-    fn init_properties(&mut self, object: PhpObject) -> Result<(), Thrown> {
+    ///
+    /// The defaults are evaluated before the object is made, as
+    /// `zend_update_class_constants` runs inside `object_init_ex` before
+    /// `zend_objects_new`, so an object a default makes, an enum's case
+    /// among them, takes its number in the object store before the object being made does.
+    ///
+    /// ```php
+    /// class A { public $p = E::V; }
+    /// enum E { case V; }
+    /// var_dump(new A);
+    /// ```
+    /// ```expect
+    /// object(A)#2 (1) {
+    ///   ["p"]=>
+    ///   enum(E::V)
+    /// }
+    /// ```
+    fn property_defaults(&mut self, class: ClassId) -> Result<Vec<Option<Value>>, Thrown> {
         let defaults: Vec<(ClassId, bool, Option<php_unit::decl::ConstExpr>)> = self
-            .placed_properties(object.class())
+            .placed_properties(class)
             .into_iter()
             .map(|(declaring, p)| (declaring, p.ty.is_some(), p.default))
             .collect();
-        for (i, (declaring, typed, default)) in defaults.into_iter().enumerate() {
-            let value = match default {
-                Some(expr) => crate::api::call::eval_const_expr(self, &expr, Some(declaring))?,
-                None if typed => continue,
-                None => Value::null(),
+        let mut out = Vec::with_capacity(defaults.len());
+        for (declaring, typed, default) in defaults {
+            out.push(match default {
+                Some(expr) => match crate::api::call::eval_const_expr(self, &expr, Some(declaring))
+                {
+                    Ok(value) => Some(value),
+                    Err(thrown) => {
+                        self.release_defaults(out);
+                        return Err(thrown);
+                    }
+                },
+                None if typed => None,
+                None => Some(Value::null()),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Defaults [`Request::property_defaults`] evaluated for an object
+    /// that was never made, given up.
+    fn release_defaults(&mut self, defaults: Vec<Option<Value>>) {
+        for value in defaults.into_iter().flatten() {
+            self.release(value);
+        }
+    }
+
+    /// The defaults written into the object's slots, each slot's owner
+    /// from here; a typed property with none stays uninitialised.
+    fn init_properties(&mut self, object: PhpObject, defaults: Vec<Option<Value>>) {
+        for (i, value) in defaults.into_iter().enumerate() {
+            let Some(value) = value else {
+                continue;
             };
             let slot = u32::try_from(i).unwrap_or(u32::MAX);
             Heap::object_set_slot(&mut Hooks(self), object.heap(), slot, value.into_zval());
         }
-        Ok(())
     }
 
     /// `ce->default_properties_table` beside `ce->properties_info_table`
@@ -4186,16 +4543,112 @@ impl Request {
                 &format!("Cannot access {word} constant {class_name}::{shown}"),
             ));
         }
-        // `zend_fetch_class_constant`'s `ZEND_CLASS_CONST_IS_CASE` arm:
-        // a constant of an enum is a case, and a case is an instance of
-        // the enum and not the expression it was written with.
-        if self
-            .class_decl(class)
-            .is_some_and(|decl| decl.kind == ClassKind::Enum)
-        {
+        // `ZEND_FETCH_CLASS_CONSTANT` updates a backed enum's constants
+        // whole before it reads one (`zend_update_class_constants`), and
+        // `zend_fetch_class_constant`'s `ZEND_CLASS_CONST_IS_CASE` arm
+        // hands out a case as the enum's instance for it and not as the
+        // expression it was written with.
+        self.update_enum_constants(class)?;
+        if constant.is_case {
             return self.enum_case(class, name).map(|case| case.as_value());
         }
         crate::api::call::eval_const_expr(self, &value, Some(class))
+    }
+
+    /// `zend_enum_build_backed_enum_table` (`Z/Zend/zend_enum.c:197`),
+    /// which `zend_update_class_constants` runs for a backed enum a
+    /// program declared: each case's value evaluated and held to the
+    /// backing type, php's `TypeError` for one of another type, and two
+    /// cases of one value php's `Error`. A native enum's values are the
+    /// stub's and are not checked, as php checks only a user class's.
+    ///
+    /// ```php
+    /// enum Foo: int { case Bar = 'bar'; }
+    /// try { var_dump(Foo::Bar); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// enum Dup: int { case A = 1; case B = 1; }
+    /// try { Dup::from(1); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Enum case type string does not match enum backing type int
+    /// Duplicate value in enum Dup for cases A and B
+    /// ```
+    pub(crate) fn update_enum_constants(&mut self, class: ClassId) -> Result<(), Thrown> {
+        if self.enums_updated.contains(&class) || self.native_class(class) {
+            return Ok(());
+        }
+        let Some(decl) = self.class_decl(class) else {
+            return Ok(());
+        };
+        if decl.kind != ClassKind::Enum || decl.backing == php_unit::decl::EnumBacking::Pure {
+            return Ok(());
+        }
+        let backing = decl.backing;
+        let cases: Vec<(Vec<u8>, php_unit::decl::ConstExpr)> = decl
+            .constants
+            .iter()
+            .filter(|constant| constant.is_case)
+            .map(|constant| (constant.name.0.to_vec(), constant.value.clone()))
+            .collect();
+        let enum_name = self.class_name(class);
+        let mut seen: Vec<(Value, Vec<u8>)> = Vec::new();
+        let mut outcome = Ok(());
+        for (name, expr) in cases {
+            let value = match crate::api::call::eval_const_expr(self, &expr, Some(class)) {
+                Ok(value) => value,
+                Err(thrown) => {
+                    outcome = Err(thrown);
+                    break;
+                }
+            };
+            let wanted = match backing {
+                php_unit::decl::EnumBacking::Int => TypeTag::Int,
+                _ => TypeTag::String,
+            };
+            if value.tag() != wanted {
+                let given = value.type_name();
+                let want = if wanted == TypeTag::Int {
+                    "int"
+                } else {
+                    "string"
+                };
+                self.release(value);
+                outcome = Err(crate::api::raising::throw(
+                    self,
+                    "TypeError",
+                    &format!("Enum case type {given} does not match enum backing type {want}"),
+                ));
+                break;
+            }
+            if let Some((_, earlier)) = seen
+                .iter()
+                .find(|(held, _)| crate::api::coerce::identical(held, &value))
+            {
+                let earlier = String::from_utf8_lossy(earlier).into_owned();
+                self.release(value);
+                outcome = Err(crate::api::raising::throw(
+                    self,
+                    "Error",
+                    &format!(
+                        "Duplicate value in enum {enum_name} for cases {earlier} and {}",
+                        String::from_utf8_lossy(&name)
+                    ),
+                ));
+                break;
+            }
+            seen.push((value, name));
+        }
+        for (value, _) in seen {
+            self.release(value);
+        }
+        outcome?;
+        self.enums_updated.push(class);
+        Ok(())
+    }
+
+    /// Whether `class` is one the engine was built with, a native's,
+    /// rather than one a program declared.
+    fn native_class(&self, class: ClassId) -> bool {
+        usize::try_from(class.0).is_ok_and(|at| at < self.shared.classes.len())
     }
 
     /// `zend_enum_get_case` (`Z/Zend/zend_enum.c:410`): the one instance
@@ -4502,6 +4955,23 @@ impl Request {
     /// handler that has already held the value to the declared type
     /// reaches this one, since the verify raises a deprecation of its
     /// own and php runs it once (`zend_binary_assign_op_typed_prop`).
+    ///
+    /// The write through a reference gives what the cell held up once,
+    /// the cell's own release after the write, so each value written
+    /// over is freed and nothing is freed twice:
+    ///
+    /// ```php
+    /// class C { public static $p; }
+    /// $v = str_repeat("x", 32);
+    /// C::$p = &$v;
+    /// C::$p = str_repeat("y", 32);
+    /// C::$p = str_repeat("z", 32);
+    /// var_dump($v, C::$p);
+    /// ```
+    /// ```expect
+    /// string(32) "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+    /// string(32) "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+    /// ```
     pub(crate) fn store_static_property(&mut self, declaring: ClassId, name: &[u8], value: Value) {
         let held = self
             .statics
@@ -4512,10 +4982,9 @@ impl Request {
             return;
         };
         if let Some(ValueRef::Reference(cell)) = self.statics.get(at).map(|(_, v)| v.as_ref()) {
+            // `PhpRef::set` gives up what the cell held, after the write.
             let cell = *cell;
-            let previous = cell.get();
             cell.set(self, value);
-            self.release(previous);
             return;
         }
         let previous = self
@@ -6645,6 +7114,12 @@ impl Request {
             }
             at = self.class_parent(class);
         }
+        if self
+            .class_decl(class)
+            .is_some_and(|decl| decl.kind == ClassKind::Enum)
+        {
+            return &crate::enums::ENUM;
+        }
         &Std
     }
 
@@ -7026,8 +7501,20 @@ impl Request {
         let Some(constructor) = self.method_named(object.class(), b"__construct") else {
             return Ok(None);
         };
-        self.check_method_access(constructor, b"__construct")?;
-        Ok(Some(constructor))
+        if self.method_accessible(constructor) {
+            return Ok(Some(constructor));
+        }
+        // `zend_bad_constructor_call`: the sentence names no `method`.
+        let shown = visibility_string(self.method_visibility(constructor));
+        let class = self
+            .method_class(constructor)
+            .map_or_else(|| String::from("object"), |class| self.class_name(class));
+        let from = self.scope_phrase();
+        Err(crate::api::raising::throw(
+            self,
+            "Error",
+            &format!("Call to {shown} {class}::__construct() from {from}"),
+        ))
     }
 
     /// `zend_std_cast_object_tostring`: `__toString` for a string, its
@@ -7360,6 +7847,15 @@ impl Request {
         )
     }
 
+    /// `get_active_function_or_method_name`: the native being served as
+    /// a message names it, `Class::method` for a method, which is what
+    /// a native writes before `(): ` in a sentence of its own that no
+    /// raiser here words, as `pdo_sqlite`'s callback refusals do.
+    #[must_use]
+    pub fn active_function_name(&self) -> String {
+        self.active_native()
+    }
+
     /// `func->common.function_name`: the name a function was declared
     /// under, and `native` for one the table has no declaration for. A
     /// method's is its own name alone, what `get_active_function_name`
@@ -7401,14 +7897,34 @@ impl Request {
     }
 
     /// `arg_info->type` of the active native's parameter at `position`,
-    /// what `zend_null_arg_deprecated` names the type by; none where the
-    /// native declares no type there.
+    /// what `zend_null_arg_deprecated` names the type by and what
+    /// [`crate::api::coerce::argument`] holds the argument to: the
+    /// variadic's own past the declared count, as php's `arg_offset`
+    /// stops at `num_args` there; none where the native declares no
+    /// type there.
     pub(crate) fn active_parameter_type(&self, position: u32) -> Option<php_unit::decl::Type> {
         let decl = self.function_decl(self.active_native_function()?)?;
-        decl.parameters
-            .get(usize::try_from(position.checked_sub(1)?).ok()?)?
-            .ty
-            .clone()
+        let at = usize::try_from(position.checked_sub(1)?).ok()?;
+        let parameter = match decl.parameters.get(at) {
+            Some(parameter) => parameter,
+            None => decl.parameters.last().filter(|last| last.variadic)?,
+        };
+        parameter.ty.clone()
+    }
+
+    /// `func->common.scope` and `Z_CE(EX(This))` of the native being
+    /// served: the class its method is declared on and the class it was
+    /// called on, what a parameter typed `self`, `parent` or `static`
+    /// resolves against; none for a function.
+    pub(crate) fn active_native_scopes(&self) -> crate::api::coerce::Scopes {
+        let own = self
+            .active_native_function()
+            .and_then(|function| self.method_class(function));
+        let called = self.vm.serving_call().and_then(|call| call.called_scope);
+        crate::api::coerce::Scopes {
+            own,
+            called: called.or(own),
+        }
     }
 
     /// The `($name)` `zend_argument_error_variadic` and
@@ -7512,14 +8028,64 @@ impl Request {
             .unwrap_or(default)
     }
 
-    /// `EX_USES_STRICT_TYPES()` (`Z/Zend/zend_compile.h:719`): whether
-    /// the op array the innermost frame serves was compiled under
-    /// `declare(strict_types=1)`. What a return's type check and a write
-    /// to a typed property read, and what a native's own argument
-    /// parsing reads too: a native holds no frame of this engine's, so
-    /// the frame standing while one runs is the caller php reaches
-    /// through the native's `prev_execute_data`.
+    /// `ZEND_ARG_USES_STRICT_TYPES()` (`Z/Zend/zend_compile.h:723`) for
+    /// the native being served, and `EX_USES_STRICT_TYPES()` of the
+    /// innermost frame where none is: whether its caller was compiled
+    /// under `declare(strict_types=1)`, which is what a native's own
+    /// argument parsing reads. A native holds no frame of this engine's,
+    /// so its `prev_execute_data` is the innermost frame, unless another
+    /// native is being served above that frame, which is a call
+    /// `zend_call_function` made: php's caller there is that native's
+    /// frame, which carries no `ZEND_ACC_STRICT_TYPES`, so a native a
+    /// callback names coerces its arguments though the file that named
+    /// it is strict.
+    ///
+    /// ```php
+    /// declare(strict_types=1);
+    /// var_dump(array_map('strlen', [12]), array_map('str_repeat', ['a'], ['2']));
+    /// try { str_repeat(12, 2); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// array(1) {
+    ///   [0]=>
+    ///   int(2)
+    /// }
+    /// array(1) {
+    ///   [0]=>
+    ///   string(2) "aa"
+    /// }
+    /// str_repeat(): Argument #1 ($string) must be of type string, int given
+    /// ```
+    ///
+    /// `call_user_func` in a namespace is such a native too, since php
+    /// compiles it to `INIT_USER_CALL` only where it resolves the name at
+    /// compile time (`zend_compile_func_cuf`), so its callee coerces.
+    ///
+    /// ```php
+    /// declare(strict_types=1);
+    /// namespace Foo;
+    /// var_dump(call_user_func('strlen', false));
+    /// ```
+    /// ```expect
+    /// int(0)
+    /// ```
     pub(crate) fn strict_types(&self) -> bool {
+        let floor = self.vm.innermost().map_or(0, |state| {
+            usize::try_from(state.calls_below).unwrap_or(usize::MAX)
+        });
+        let calls = self.vm.calls();
+        let serving = calls
+            .iter()
+            .rposition(|call| call.stage == exec::CallStage::Serving);
+        if let Some(at) = serving
+            && calls.get(floor..at).is_some_and(|below| {
+                below
+                    .iter()
+                    .any(|call| call.stage == exec::CallStage::Serving)
+            })
+        {
+            return false;
+        }
         self.vm
             .innermost()
             .is_some_and(crate::exec::strict_types_of)
@@ -8171,7 +8737,7 @@ impl Request {
                 continue;
             }
             if let Some(existing) = self.class_named(&decl.name.0) {
-                let message = self.redeclaration(existing, &decl.name.0);
+                let message = self.redeclaration(existing);
                 let file = decl.file.0.to_vec();
                 self.end_in_compile_time(Level::CompileError, &message, &file, decl.line);
                 return false;
@@ -8184,18 +8750,30 @@ impl Request {
         true
     }
 
-    /// `zend_class_redeclaration_error`'s two wordings: the site of the
-    /// earlier declaration named when it was a user class.
-    fn redeclaration(&self, existing: ClassId, name: &[u8]) -> String {
-        match self.class_decl(existing) {
-            Some(earlier) if !earlier.file.0.is_empty() => format!(
-                "Cannot redeclare class {} (previously declared in {}:{})",
-                String::from_utf8_lossy(name),
-                String::from_utf8_lossy(&earlier.file.0),
-                earlier.line
-            ),
-            _ => format!("Cannot redeclare class {}", String::from_utf8_lossy(name)),
+    /// `zend_class_redeclaration_error`'s two wordings, which name the
+    /// earlier declaration as it was declared, what it is and its own
+    /// name, and its site when it was a user class.
+    ///
+    /// ```php
+    /// class stdclass {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot redeclare class stdClass in %s on line 2
+    /// ```
+    fn redeclaration(&self, existing: ClassId) -> String {
+        let Some(earlier) = self.class_decl(existing) else {
+            return String::from("InternalError: a class redeclared over none");
+        };
+        let what = php_unit::link::object_type(earlier.kind);
+        let name = String::from_utf8_lossy(&earlier.name.0);
+        if earlier.file.0.is_empty() {
+            return format!("Cannot redeclare {what} {name}");
         }
+        format!(
+            "Cannot redeclare {what} {name} (previously declared in {}:{})",
+            String::from_utf8_lossy(&earlier.file.0),
+            earlier.line
+        )
     }
 
     /// The class at `at` of `unit` into the request's table, with its
@@ -8204,10 +8782,25 @@ impl Request {
     /// declaration on every lookup, so nothing is copied.
     fn bind_declared(&mut self, unit: &Arc<Unit>, at: u32) {
         self.declared.push((Arc::clone(unit), at));
-        let methods = unit
-            .classes
-            .get(usize::try_from(at).unwrap_or(usize::MAX))
-            .map_or(0, |decl| decl.methods.len());
+        let decl = unit.classes.get(usize::try_from(at).unwrap_or(usize::MAX));
+        let methods = decl.map_or(0, |decl| decl.methods.len());
+        // `zend_enum_register_funcs` at the link: the enum's own
+        // `cases`, `from` and `tryFrom`, which the compiler declared
+        // after its methods and which no body of the unit serves.
+        if let Some(decl) = decl.filter(|decl| decl.kind == ClassKind::Enum) {
+            let class = self
+                .shared
+                .classes
+                .len()
+                .saturating_add(self.declared.len() - 1);
+            let class = ClassId(u32::try_from(class).unwrap_or(u32::MAX));
+            for method in &decl.methods {
+                let lowered = method.function.name.0.to_ascii_lowercase();
+                if let Some(method) = crate::enums::EnumMethod::of(&lowered, decl.backing) {
+                    self.enum_functions.push((class, method));
+                }
+            }
+        }
         for method in 0..methods {
             self.user_functions.push(UserFunction {
                 unit: Arc::clone(unit),
@@ -8221,14 +8814,11 @@ impl Request {
 
     /// `zend_bind_class` at a `ZEND_DECLARE_CLASS`, `zend_do_link_class`
     /// over the declaration the opline's lowered name finds in the unit:
-    /// the parent resolved first and then each interface, which is the
-    /// order php's messages come in. A name nothing declares is php's
-    /// `Error`, `Class "P" not found` for a parent and `Interface "I"
-    /// not found` for an interface; a parent that is an interface, an
-    /// interface list naming something that is not one, and the same
-    /// interface twice are `zend_do_inheritance`'s and
-    /// `zend_do_implement_interface`'s `E_ERROR`, which ends the request
-    /// where it stands.
+    /// the parent fetched first and then each interface, all of them
+    /// before any is checked, which is the order php's messages come in.
+    /// A name nothing declares, once autoloading has been asked, is
+    /// php's `Error`, `Class "P" not found` for a parent and `Interface
+    /// "I" not found` for an interface.
     ///
     /// Linking copies nothing: an inherited constant, property or
     /// method is found by walking `parent` from the declaration, so what
@@ -8251,12 +8841,170 @@ impl Request {
     ///   thrown in %s on line 3
     /// ```
     ///
+    /// Then the class is linked (`zend_do_link_class`) by the checks
+    /// `zend_inheritance.c` makes, [`php_unit::link`], which the early
+    /// bind runs too: a class implementing an interface is never early
+    /// bound, so what linking refuses about one is refused here, after
+    /// what the file printed, at the site php names, and a deprecation
+    /// a tentative return raises is raised here before the class runs.
+    ///
+    /// ```php
+    /// interface I { const X = 1; }
+    /// interface J { const X = 2; }
+    /// class C implements I, J {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Class C inherits both I::X and J::X, which is ambiguous in %s on line 4
+    /// ```
+    ///
+    /// ```php
+    /// interface I { const X = 1; }
+    /// class C implements I { protected const X = 2; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Access level to C::X must be public (as in interface I) in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class C implements Throwable {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Class C cannot implement interface Throwable, extend Exception or Error instead in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// class C implements UnitEnum {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Non-enum class C cannot implement interface UnitEnum in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// class Foo implements UnitEnum { public static function cases(): array { return []; } }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Non-enum class Foo cannot implement interface UnitEnum in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// enum Foo implements Throwable {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Enum Foo cannot implement interface Throwable in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// enum E implements BackedEnum {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Non-backed enum E cannot implement interface BackedEnum in %s on line 2
+    /// ```
+    ///
+    /// An interface's methods are held before what the interface itself
+    /// guards (`do_interface_implementation`), and the parent before the
+    /// interface list, of which a class is refused before a repeat:
+    ///
+    /// ```php
+    /// class C implements Throwable { function getMessage(): int {} }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Declaration of C::getMessage(): int must be compatible with Throwable::getMessage(): string in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// class P {}
+    /// class C extends Closure implements P {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Class C cannot extend final class Closure in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class P {}
+    /// interface I {}
+    /// class C implements I, P, I {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: C cannot implement P - it is not an interface in %s on line 4
+    /// ```
+    ///
     /// ```php
     /// class P {}
     /// class C implements P {}
     /// ```
     /// ```expect exit=255
     /// Fatal error: C cannot implement P - it is not an interface in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class C implements ArrayAccess {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Class C contains 4 abstract methods and must therefore be declared abstract or implement the remaining methods (ArrayAccess::offsetExists, ArrayAccess::offsetGet, ArrayAccess::offsetSet, ...) in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// echo "before\n";
+    /// class C implements ArrayAccess {
+    ///     function offsetExists($o): bool { return true; }
+    ///     function offsetGet($o): mixed { return 1; }
+    ///     function offsetSet(): void {}
+    ///     function offsetUnset($o): void {}
+    /// }
+    /// ```
+    /// ```expect exit=255
+    /// before
+    ///
+    /// Fatal error: Declaration of C::offsetSet(): void must be compatible with ArrayAccess::offsetSet(mixed $offset, mixed $value): void in %s on line 6
+    /// ```
+    ///
+    /// ```php
+    /// class A { function f(): X {} }
+    /// class B extends A implements Stringable {
+    ///     function __toString(): string { return ""; }
+    ///     function f(): Y {}
+    /// }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Could not check compatibility between B::f(): Y and A::f(): X, because class Y is not available in %s on line 5
+    /// ```
+    ///
+    /// What php takes, it takes: an override whose parameter is wider
+    /// and whose return is narrower, and one of a tentative return that
+    /// declares none, which is php's deprecation and links:
+    ///
+    /// ```php
+    /// class C implements ArrayAccess {
+    ///     function offsetExists(mixed $o): bool { return true; }
+    ///     function offsetGet($o) { return "got $o"; }
+    ///     function offsetSet($o, $v): void {}
+    ///     function offsetUnset($o): void {}
+    /// }
+    /// echo (new C)["k"], "\n";
+    /// ```
+    /// ```expect exit=0
+    /// Deprecated: Return type of C::offsetGet($o) should either be compatible with ArrayAccess::offsetGet(mixed $offset): mixed, or the #[\ReturnTypeWillChange] attribute should be used to temporarily suppress the notice in %s on line 4
+    /// got k
+    /// ```
+    ///
+    /// `Traversable` itself is php's `E_CORE_ERROR`, which names no site:
+    ///
+    /// ```php
+    /// class C implements Traversable {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Class C must implement interface Traversable as part of either Iterator or IteratorAggregate in Unknown on line 0
+    /// ```
+    ///
+    /// An interface list naming one interface twice is refused in the
+    /// words for what the declaration is:
+    ///
+    /// ```php
+    /// interface I {}
+    /// interface J extends I, I {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Interface J cannot implement previously implemented interface I in %s on line 3
     /// ```
     pub(crate) fn bind_class(&mut self, unit: &Arc<Unit>, lowered: &[u8]) -> Result<(), Thrown> {
         let Some(at) = unit
@@ -8275,62 +9023,43 @@ impl Request {
                 "InternalError: a DECLARE_CLASS names a class the unit does not declare",
             ));
         };
-        let name = String::from_utf8_lossy(&decl.name.0).into_owned();
         if let Some(existing) = self.class_named(&decl.name.0) {
-            let message = self.redeclaration(existing, &decl.name.0);
+            let message = self.redeclaration(existing);
             return Err(crate::api::raising::fatal(self, &message));
         }
         if let Some(parent) = &decl.parent {
-            let found = match self.class_named(&parent.0) {
-                Some(found) => Some(found),
-                None => crate::api::call::autoload(self, &parent.0)?,
-            };
-            let Some(found) = found else {
-                return Err(crate::api::raising::throw(
-                    self,
-                    "Error",
-                    &format!("Class \"{}\" not found", String::from_utf8_lossy(&parent.0)),
-                ));
-            };
-            if self.class_decl(found).map(|p| p.kind) == Some(ClassKind::Interface) {
-                let message = format!(
-                    "Class {name} cannot extend interface {}",
-                    self.class_name(found)
-                );
-                return Err(crate::api::raising::fatal(self, &message));
-            }
+            self.fetch_to_link(parent, "Class")?;
         }
-        let mut implemented: Vec<ClassId> = Vec::new();
         for interface in &decl.interfaces {
-            let found = match self.class_named(&interface.0) {
-                Some(found) => Some(found),
-                None => crate::api::call::autoload(self, &interface.0)?,
-            };
-            let Some(found) = found else {
-                return Err(crate::api::raising::throw(
-                    self,
-                    "Error",
-                    &format!(
-                        "Interface \"{}\" not found",
-                        String::from_utf8_lossy(&interface.0)
-                    ),
-                ));
-            };
-            if self.class_decl(found).map(|i| i.kind) != Some(ClassKind::Interface) {
-                let message = format!(
-                    "{name} cannot implement {} - it is not an interface",
-                    self.class_name(found)
-                );
-                return Err(crate::api::raising::fatal(self, &message));
+            self.fetch_to_link(interface, "Interface")?;
+        }
+        let lookup = |name: &[u8]| self.class_named(name).and_then(|id| self.class_decl(id));
+        let linking = php_unit::link::link(&decl, &lookup);
+        for deprecation in &linking.deprecations {
+            crate::api::raising::raise_at(
+                self,
+                Level::Deprecated,
+                &deprecation.to_string(),
+                &deprecation.site.file.0,
+                deprecation.site.line,
+            );
+        }
+        if let php_unit::link::Linked::Refused(refused)
+        | php_unit::link::Linked::Unresolved(refused) = linking.outcome
+        {
+            let message = refused.refusal.to_string();
+            match refused.refusal.level() {
+                Level::CoreError => self.end_in_core_error(&message),
+                level => {
+                    self.end_in_compile_time(
+                        level,
+                        &message,
+                        &refused.site.file.0,
+                        refused.site.line,
+                    );
+                }
             }
-            if implemented.contains(&found) {
-                let message = format!(
-                    "Class {name} cannot implement previously implemented interface {}",
-                    self.class_name(found)
-                );
-                return Err(crate::api::raising::fatal(self, &message));
-            }
-            implemented.push(found);
+            return Err(Thrown::of(None));
         }
         let Ok(at) = u32::try_from(at) else {
             return Err(crate::api::raising::fatal(
@@ -8340,6 +9069,29 @@ impl Request {
         };
         self.bind_declared(unit, at);
         Ok(())
+    }
+
+    /// `zend_fetch_class_by_name` under `ZEND_FETCH_CLASS_EXCEPTION`, as
+    /// `zend_do_link_class` fetches the parent and each interface before
+    /// any check is made of them: the class of that name, or the one
+    /// autoloading it declared, and php's `Error` where neither is,
+    /// `what` naming the class a parent and the interface an interface.
+    fn fetch_to_link(
+        &mut self,
+        name: &php_unit::decl::Name,
+        what: &str,
+    ) -> Result<ClassId, Thrown> {
+        let found = match self.class_named(&name.0) {
+            Some(found) => Some(found),
+            None => crate::api::call::autoload(self, &name.0)?,
+        };
+        found.ok_or_else(|| {
+            crate::api::raising::throw(
+                self,
+                "Error",
+                &format!("{what} \"{}\" not found", String::from_utf8_lossy(&name.0)),
+            )
+        })
     }
 
     /// `zend_hash_find(EG(function_table), lcname)`: the native of that
@@ -8454,6 +9206,19 @@ impl Request {
         }
     }
 
+    /// The classes a `self`, a `parent` and a `static` in a type checked
+    /// in `frame` name: the frame's scope and its called scope, which
+    /// is what `zend_check_type_slow` resolves them against for an
+    /// argument's `RECV` and for a return.
+    pub(crate) fn frame_scopes(&self, frame: FrameRef) -> crate::api::coerce::Scopes {
+        let own = self.frame_scope(frame);
+        let called = self.vm.at(frame).and_then(|state| state.called_scope);
+        crate::api::coerce::Scopes {
+            own,
+            called: called.or(own),
+        }
+    }
+
     /// `zend_hash_add_ptr(CG(function_table), …)` for every function the
     /// unit declares at its top level, before its main op array runs:
     /// php binds one at compile time and the compiler emitted no opline
@@ -8500,8 +9265,8 @@ impl Request {
         }
         self.constants
             .iter()
-            .find(|(n, _)| n.as_slice() == name)
-            .map(|(_, v)| *v)
+            .find(|(_, n, _)| n.as_slice() == name)
+            .map(|(_, _, v)| *v)
             .or_else(|| self.shared.constant(name))
     }
 
@@ -8579,10 +9344,7 @@ impl Request {
     /// a callable.
     #[must_use]
     pub fn buffer_handler(&self, name: &[u8]) -> Option<BufferHandler> {
-        self.shared
-            .extensions
-            .iter()
-            .flat_map(|extension| &extension.buffer_handlers)
+        self.registered::<BufferHandler>()
             .find(|handler| handler.name.as_bytes() == name)
             .copied()
     }
@@ -9053,10 +9815,12 @@ impl Request {
                 .into_iter()
                 .flatten(),
         );
-        let loaders = std::mem::take(&mut self.autoloaders);
-        let all: Vec<Callable> = error.chain(exception).chain(loaders).collect();
-        for handler in all {
+        let handlers: Vec<Callable> = error.chain(exception).collect();
+        for handler in handlers {
             self.release(handler.into_value());
+        }
+        for loader in std::mem::take(&mut self.autoloaders) {
+            loader.release(self);
         }
     }
 
@@ -9635,7 +10399,7 @@ impl Request {
         rows.extend(
             self.constants
                 .iter()
-                .map(|(name, value)| (None, name.clone(), *value)),
+                .map(|(module, name, value)| (*module, name.clone(), *value)),
         );
         rows
     }
@@ -9658,7 +10422,12 @@ impl Request {
     /// request, each name a string of the request's.
     pub fn constants(&mut self) -> Result<PhpArray, Thrown> {
         let mut array = PhpArray::new(self)?;
-        let constants = self.constants.clone();
+        let constants: Vec<(Vec<u8>, Value)> = self
+            .constants
+            .iter()
+            .filter(|(module, _, _)| module.is_none())
+            .map(|(_, name, value)| (name.clone(), *value))
+            .collect();
         for (name, value) in constants {
             let key = Key::Str(PhpString::new(self, &name)?);
             self.addref(&value);
@@ -9672,8 +10441,32 @@ impl Request {
         if self.constant_named(name).is_some() {
             return Ok(false);
         }
-        self.constants.push((name.to_vec(), value));
+        self.constants.push((None, name.to_vec(), value));
         Ok(true)
+    }
+
+    /// `zend_register_constant` at request start for a constant the
+    /// host registers under `Core`, as `do_cli` registers
+    /// `PHP_CLI_PROCESS_TITLE` and `cli_register_file_handles` the three
+    /// streams: after every extension's own, so it stands last in
+    /// `Core`'s group and before what the program defines. The value's
+    /// one owner is the table's.
+    pub(crate) fn register_host_constant(&mut self, name: &'static [u8], value: Value) {
+        self.constants.push((Some("Core"), name.to_vec(), value));
+    }
+
+    /// The fd the host handed under one of its standard streams
+    /// ([`crate::engine::FileHandles`]), `None` where it handed none.
+    pub(crate) fn host_fd(
+        &self,
+        standard: crate::streams::Standard,
+    ) -> Option<std::os::fd::BorrowedFd<'_>> {
+        self.description.file_handles.as_ref()?.fd(standard)
+    }
+
+    /// Whether the host asked for the CLI's standard handles.
+    pub(crate) fn registers_file_handles(&self) -> bool {
+        self.description.file_handles.is_some()
     }
 
     /// `zend_constant::attributes`: the attributes the declaration of
@@ -9700,10 +10493,32 @@ impl Request {
     /// `spl_autoload_register()`: the callable onto the stack, at its
     /// head under `prepend`, and nothing where one of the same target
     /// is there already (`spl_find_registered_function`). The stack
-    /// takes an owner of the callable's value, as
+    /// takes the callable's owners, [`Callable::addref`], as
     /// `autoload_func_info_from_fci` takes one of its object and closure,
-    /// and gives it up when the callable leaves the stack or the request
-    /// ends.
+    /// and gives them up when the callable leaves the stack or the
+    /// request ends.
+    /// A `Class::method` string registered with `$this` in scope is
+    /// served on that object after the expression that made it is gone:
+    ///
+    /// ```php
+    /// class Test {
+    ///     function register() { spl_autoload_register('Test::load'); }
+    ///     function load($name) { echo "load $name\n"; var_dump($this); }
+    ///     function __destruct() { echo "destructed\n"; }
+    /// }
+    /// (new Test)->register();
+    /// $a = [1, 2, 3];
+    /// var_dump(class_exists('Missing'));
+    /// echo "end\n";
+    /// ```
+    /// ```expect
+    /// load Missing
+    /// object(Test)#1 (0) {
+    /// }
+    /// bool(false)
+    /// end
+    /// destructed
+    /// ```
     pub fn autoload_register(&mut self, loader: Callable, prepend: bool) -> Result<(), Thrown> {
         if self
             .autoloaders
@@ -9712,7 +10527,7 @@ impl Request {
         {
             return Ok(());
         }
-        self.addref(&loader.value());
+        loader.addref(self);
         if prepend {
             self.autoloaders.insert(0, loader);
         } else {
@@ -9730,8 +10545,7 @@ impl Request {
         else {
             return false;
         };
-        let removed = self.autoloaders.remove(at);
-        self.release(removed.into_value());
+        self.autoloaders.remove(at).release(self);
         true
     }
 
@@ -10110,6 +10924,32 @@ impl Request {
             .find_map(|state| state.downcast_ref::<E>())
     }
 
+    /// Every value of type `T` an extension of the bundle handed over
+    /// with [`ExtensionBuilder::register`], in bundle order: what
+    /// `pdo_driver_hash` holds after every `MINIT` of the bundle has
+    /// registered into it, immutable for the engine's life
+    /// (ADR-0005).
+    ///
+    /// [`ExtensionBuilder::register`]: crate::api::abi::ExtensionBuilder::register
+    pub fn registered<T: Send + Sync + 'static>(&self) -> impl Iterator<Item = &T> {
+        self.shared
+            .extensions
+            .iter()
+            .flat_map(|e| e.registered.iter())
+            .filter_map(|value| value.downcast_ref::<T>())
+    }
+
+    /// The trampoline `class` answers under the lowered name, a method
+    /// its `get_method` synthesises and its table has no row for: one
+    /// an extension laid down with [`ExtensionBuilder::trampolines`],
+    /// which is what a class's own `get_method` hands back for it.
+    ///
+    /// [`ExtensionBuilder::trampolines`]: crate::api::abi::ExtensionBuilder::trampolines
+    #[must_use]
+    pub fn trampoline(&self, class: ClassId, lowered: &[u8]) -> Option<Function> {
+        self.trampoline_named(class, lowered)
+    }
+
     /// The request's resource types, for an extension registering one.
     pub fn resources(&mut self) -> &mut Resources {
         &mut self.resources
@@ -10477,7 +11317,7 @@ impl Request {
     }
 
     /// The request body as a stream, `php://stdin`, which is what the
-    /// CLI's `STDIN` constant will hold: the body as the description
+    /// CLI's `STDIN` constant holds: the body as the description
     /// carries it, read whole until #544 reads it lazily.
     pub fn stdin(&mut self) -> Result<Option<Stream>, Thrown> {
         self.open_stream(b"php://stdin", b"r", false)
@@ -10585,7 +11425,7 @@ impl Request {
     /// destroyed table.
     pub(crate) fn free_shutdown_functions(&mut self) {
         for (callback, arguments) in std::mem::take(&mut self.shutdown_functions) {
-            self.release(callback.into_value());
+            callback.release(self);
             for value in arguments {
                 self.release(value);
             }
@@ -10656,6 +11496,19 @@ impl Request {
         self.allocated(allocated)
     }
 
+    /// `s` with `tail`'s bytes after its own, `zend_string_extend` and
+    /// the `memcpy` after it ([`php_heap::Heap::string_append`]): one
+    /// owner of `s` handed over, one of the longer string handed back, grown
+    /// where it stands when that owner was the only one.
+    pub(crate) fn string_append(
+        &mut self,
+        s: PhpString,
+        tail: PhpString,
+    ) -> Result<PhpString, Thrown> {
+        let allocated = self.heap.string_append(s.heap(), tail.heap());
+        self.allocated(allocated)
+    }
+
     /// What the heap answered, as the native sees it: the string, or the
     /// memory limit as php's fatal, which `zend_mm` raises where the
     /// allocation was asked for and which ends the request from there.
@@ -10674,6 +11527,7 @@ impl Request {
     /// as its value, `RETURN_COPY` and `RETURN_STR_COPY`: the frame gives
     /// its owner up with the call, and the caller's temporary holds the
     /// one taken here.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn addref(&self, value: &Value) {
         self.heap.addref(value.to_zval());
     }
@@ -10690,6 +11544,7 @@ impl Request {
     // `Value` that is still in hand after this call names what may be
     // freed.
     #[allow(clippy::needless_pass_by_value)]
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn release(&mut self, value: Value) {
         Heap::release(&mut Hooks(self), value.to_zval());
     }
@@ -10700,6 +11555,7 @@ impl Request {
     /// operand and `zend_vm_stack_free_args` to an internal call's
     /// arguments.
     #[allow(clippy::needless_pass_by_value)]
+    #[cfg_attr(debug_assertions, track_caller)]
     pub(crate) fn release_nogc(&mut self, value: Value) {
         Heap::release_nogc(&mut Hooks(self), value.to_zval());
     }
@@ -11071,6 +11927,14 @@ impl Request {
         use_include_path: bool,
     ) -> Result<Option<Stream>, Thrown> {
         self.open_stream_wrapper(path, mode, use_include_path)
+    }
+
+    /// `php_stream_alloc(ops, abstract, 0, mode)`: a stream of a kind the
+    /// extension implements, as a resource of the `stream` type with one
+    /// owner, the caller's, at position zero with nothing read.
+    pub fn new_stream(&mut self, ops: Box<dyn StreamOps>, mode: &[u8]) -> Result<Stream, Thrown> {
+        let stream = crate::streams::of_extension(ops, mode);
+        self.stream_alloc(stream)
     }
 
     /// `opendir()`, `php_stream_opendir` under `REPORT_ERRORS`: the
@@ -11563,6 +12427,17 @@ pub(crate) fn append_escaped(out: &mut String, bytes: &[u8]) {
 }
 
 #[cfg(test)]
+impl Request {
+    /// [`Request::push_frame`] in a test, whose request no memory limit
+    /// holds, so the push is never refused.
+    pub(crate) fn pushed(&mut self, unit: Arc<Unit>) -> FrameRef {
+        let pushed = self.push_frame(unit);
+        assert_eq!(pushed.as_ref().err(), None, "a test's frame is pushed");
+        pushed.unwrap_or(FrameRef(0))
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::{Level, Request, append_escaped, escape_html, level_name};
     use crate::engine::{Engine, RequestDescription};
@@ -11592,6 +12467,7 @@ mod tests {
                     parameters: Vec::new(),
                     return_type: None,
                     returns_by_ref: false,
+                    is_generator: false,
                     attributes: Vec::new(),
                     doc_comment: None,
                     file: Name(Box::new([])),

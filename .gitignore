@@ -7,3 +7,6 @@ target/
 
 # Where the function-hook declarations were written before #62; they are tracked at harness-plugins/types now, and a stale copy here does no harm.
 .claude/types/
+
+# macOS Finder metadata.
+.DS_Store

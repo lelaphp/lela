@@ -3,7 +3,8 @@
 //! spelling of it: `class`, `abstract class` and `interface` headers
 //! with `extends` and `implements`; `public const int NAME = 1;` with
 //! the value the `@cvalue` names written where the stub writes
-//! `UNKNOWN`; and `public function name(parameters): type {}` with its
+//! `UNKNOWN`; `public ?string $name = null;`; and
+//! `public function name(parameters): type {}` with its
 //! modifiers, `#[\Deprecated(...)]` before it, and the
 //! `/** @tentative-return-type */` docblock that sets the tentative bit.
 //! The parameter grammar is the one `ext/standard` reads its natives'
@@ -11,7 +12,7 @@
 
 use php_ext::decl::{
     Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind, ConstExpr,
-    EnumBacking, FunctionDecl, MethodDecl, Name, Parameter, Type, Visibility,
+    EnumBacking, FunctionDecl, MethodDecl, Name, Parameter, PropertyDecl, Type, Visibility,
 };
 
 use crate::Entry;
@@ -211,6 +212,7 @@ impl Reader<'_> {
                     name: Name(constant.into()),
                     visibility: modifiers.visibility.unwrap_or(Visibility::Public),
                     is_final: modifiers.is_final,
+                    is_case: false,
                     ty: Some(ty),
                     value,
                     attributes: Vec::new(),
@@ -219,7 +221,10 @@ impl Reader<'_> {
                 continue;
             }
             if !self.eat_str(b"function") {
-                self.at += 1;
+                match modifiers.visibility {
+                    Some(visibility) => decl.properties.push(self.property(visibility, &modifiers)),
+                    None => self.at += 1,
+                }
                 continue;
             }
             let method = self.word();
@@ -330,6 +335,7 @@ impl Reader<'_> {
             parameters,
             return_type,
             returns_by_ref: false,
+            is_generator: false,
             attributes: Vec::new(),
             doc_comment: None,
             file: Name(Box::new([])),
@@ -401,6 +407,27 @@ impl Reader<'_> {
             default,
             attributes: Vec::new(),
         })
+    }
+
+    /// `[T] $name [= default];` after a property's modifiers.
+    fn property(&mut self, visibility: Visibility, modifiers: &Modifiers) -> PropertyDecl {
+        let ty = (self.peek() != Some(b'$')).then(|| self.ty());
+        self.eat(b'$');
+        let name = self.word();
+        let default = self.eat(b'=').then(|| self.default());
+        self.eat(b';');
+        PropertyDecl {
+            name: Name(name.into()),
+            visibility,
+            set_visibility: None,
+            is_instance: !modifiers.is_static,
+            is_readonly: false,
+            is_final: modifiers.is_final,
+            ty,
+            default,
+            attributes: Vec::new(),
+            doc_comment: None,
+        }
     }
 
     /// A default: one operand, or operands joined by `|`.

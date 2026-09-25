@@ -100,6 +100,7 @@ fn declared(name: &[u8]) -> FunctionDecl {
         }],
         return_type: Some(Type::Bool),
         returns_by_ref: false,
+        is_generator: false,
         attributes: Vec::new(),
         doc_comment: None,
         file: Name(Box::new([])),

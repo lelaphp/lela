@@ -48,14 +48,10 @@ use php_unit::decl::{
 
 use crate::api::abi::{Callable, CloneObj, Entry, NativeClassDecl, ObjectHandlers};
 use crate::api::call::call_named;
-use crate::api::raising::{Thrown, arg_count_error, arg_type_error, throw};
+use crate::api::raising::{Thrown, arg_count_error, throw};
 use crate::api::request::Request;
 use crate::api::values::{PhpObject, PhpString, Value};
 use crate::exec::Vm;
-
-/// `ZEND_FIBER_VM_STACK_SIZE`: the page a fiber's VM stack starts with,
-/// 1,024 zvals, where the request's own grows in 256 KiB pages.
-const VM_PAGE: usize = 1024 * 16;
 
 /// `sizeof(zend_fiber_stack)` on a 64-bit build without Valgrind or
 /// sanitizers: the pointer and the size `zend_fiber_stack_allocate`
@@ -167,8 +163,8 @@ struct Fiber {
     execution: Option<Execution>,
     /// `fiber->result`, one owner, `null` until the callable returns.
     result: Value,
-    /// The `emalloc`s php makes for a started fiber, the stack record
-    /// and the first VM page, counted by the heap as php's are.
+    /// The `emalloc` php makes for a started fiber beside its VM stack's
+    /// pages, the stack record, counted by the heap as php's is.
     blocks: Vec<Block>,
 }
 
@@ -559,6 +555,7 @@ fn method(
             parameters,
             return_type: returns,
             returns_by_ref: false,
+            is_generator: false,
             attributes: Vec::new(),
             doc_comment: None,
             file: Name(Box::new([])),
@@ -659,16 +656,11 @@ fn construct(req: &mut Request) -> Result<Value, Thrown> {
             &format!("exactly 1 argument, {count} given"),
         ));
     }
-    let given = req.argument(1).unwrap_or_default().deref();
-    let callable = match req.callable_checked(&given) {
-        Ok(callable) => callable,
-        Err(why) => {
-            return Err(arg_type_error(
-                req,
-                1,
-                &format!("be a valid callback, {why}"),
-            ));
-        }
+    let Some(callable) = crate::api::coerce::callable_argument(req, 1)? else {
+        return Err(crate::api::raising::fatal(
+            req,
+            "InternalError: a callable parameter read no callable",
+        ));
     };
     let this = this_fiber(req)?;
     let fiber = payload(req, this)?;
@@ -790,7 +782,7 @@ fn start(req: &mut Request) -> Result<Value, Thrown> {
         }
     };
     let execution = Execution {
-        stack: php_heap::VmStack::new(),
+        stack: php_heap::VmStack::fiber(),
         vm: Vm::default(),
         error_reporting: req.ini_error_reporting(),
         stack_limit: StackLimit::fiber(stack.base(), stack.end(), reserved),
@@ -902,15 +894,12 @@ fn run(
     arguments: &[Value],
     named: &[(PhpString, Value)],
 ) -> Transfer {
-    let page = req.heap_mut().block(VM_PAGE);
-    let Ok(page) = req.fatal_of(page) else {
+    let opened = req.open_stack();
+    if req.fatal_of(opened).is_err() {
         if let Some(fiber) = object.native_mut::<Fiber>(req) {
             fiber.bailout = true;
         }
         return Transfer::Fatal;
-    };
-    if let Some(fiber) = object.native_mut::<Fiber>(req) {
-        fiber.blocks.push(page);
     }
     let outcome = call_named(req, callable, arguments, named);
     let held = object
@@ -1016,10 +1005,12 @@ fn switch_into(
             for block in blocks {
                 req.heap_mut().free_block(block);
             }
+            execution.stack.close(req.heap_mut());
             Ok(back)
         }
         Err(fatal) => {
             fiber.status = Status::Dead;
+            execution.stack.close(req.heap_mut());
             req.fatal_of::<()>(Err(fatal))?;
             Ok(Transfer::Fatal)
         }
@@ -1135,21 +1126,13 @@ fn throw_into(req: &mut Request) -> Result<Value, Thrown> {
             &format!("exactly 1 argument, {count} given"),
         ));
     }
-    let given = req.argument(1).unwrap_or_default().deref();
-    let throwable = given.as_object().copied().filter(|object| {
-        req.class_named(b"Throwable")
-            .is_some_and(|throwable| req.instance_of(object.class(), throwable))
-    });
-    let Some(throwable) = throwable else {
-        // `zend_zval_value_name`: an object is named by its class.
-        let named = given.as_object().map_or_else(
-            || String::from(given.type_name()),
-            |object| req.class_name(object.class()),
-        );
-        return Err(arg_type_error(
+    let given = req.argument(1).unwrap_or_default();
+    let ty = Type::Named(Name(b"Throwable".as_slice().into()));
+    let given = crate::api::coerce::coerce_param(req, &given, &ty, 1)?;
+    let Some(throwable) = given.as_object().copied() else {
+        return Err(crate::api::raising::fatal(
             req,
-            1,
-            &format!("be of type Throwable, {named} given"),
+            "InternalError: coerce_param held a value that is no object to a class",
         ));
     };
     let this = this_fiber(req)?;
@@ -1420,10 +1403,16 @@ fn destroy(req: &mut Request, object: PhpObject) {
             .map_or(0, |frame| usize::try_from(frame.calls_below).unwrap_or(0));
         if calls > above {
             req.pop_call();
-        } else if req.vm().frames().is_empty() {
-            break;
+        } else if let Some(frame) = req.vm().frames().last() {
+            // A generator resumed inside the fiber has its frame here,
+            // and is closed with it rather than left pointing at a frame
+            // no stack holds.
+            match frame.generator {
+                Some(generator) => crate::generator::close_unwound(req, generator),
+                None => req.pop_frame(),
+            }
         } else {
-            req.pop_frame();
+            break;
         }
     }
     let mut execution = match req.fibers_mut().running.pop() {
@@ -1431,6 +1420,7 @@ fn destroy(req: &mut Request, object: PhpObject) {
         None => Execution::default(),
     };
     req.switch_execution(&mut execution);
+    execution.stack.close(req.heap_mut());
     let Some(fiber) = object.native_mut::<Fiber>(req) else {
         return;
     };

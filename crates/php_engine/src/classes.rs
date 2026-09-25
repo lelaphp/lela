@@ -26,11 +26,9 @@ use php_unit::decl::{
 use crate::api::abi::{CloneObj, Entry, NativeClassDecl, ObjectHandlers};
 use crate::api::call::{Function, Target};
 use crate::api::coerce::coerce_param;
-use crate::api::raising::{Thrown, arg_count_error, arg_type_error, throw, warning};
+use crate::api::raising::{Thrown, arg_count_error, throw, warning};
 use crate::api::request::Request;
-use crate::api::values::{
-    ClassId, ClosureInfo, Key, PhpArray, PhpObject, PhpString, Value, ValueRef,
-};
+use crate::api::values::{ClassId, ClosureInfo, Key, PhpArray, PhpObject, PhpString, Value};
 
 /// `default_exception_handlers`: `clone_obj` null, so every throwable
 /// is uncloneable (`zend_register_default_exception`), and the rest
@@ -60,6 +58,23 @@ pub(crate) fn records_throw_site(handlers: &'static dyn ObjectHandlers) -> bool 
 struct ClosureHandlers;
 
 impl ObjectHandlers for ClosureHandlers {
+    /// `zend_closure_get_constructor`: a closure is made by the engine
+    /// alone.
+    ///
+    /// ```php
+    /// try { new Closure; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Instantiation of class Closure is not allowed
+    /// ```
+    fn get_constructor(&self, req: &mut Request, _: PhpObject) -> Result<Option<Function>, Thrown> {
+        Err(throw(
+            req,
+            "Error",
+            "Instantiation of class Closure is not allowed",
+        ))
+    }
+
     /// `zend_closure_free_storage`: the bound `$this` given back; the
     /// payload's drop is the heap's.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
@@ -374,6 +389,8 @@ fn closure_clone(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thro
 /// `@implementation-alias`es of `Exception`'s, so one entry serves
 /// both. `__clone` is private, the one method the visibility rule of
 /// `zend_std_get_method` has to be held to.
+// One row per class Zend declares: the length is the list's.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn zend_classes() -> Vec<NativeClassDecl> {
     let mut classes: Vec<NativeClassDecl> = vec![
         (
@@ -468,36 +485,16 @@ pub(crate) fn zend_classes() -> Vec<NativeClassDecl> {
             None,
         ),
         (closure_class(), closure_methods(), Some(&CLOSURE), None),
+    ];
+    // `zend_register_generator_ce` after `zend_register_closure_ce`.
+    classes.extend(crate::generator::classes());
+    classes.extend([
         (std_class(), Vec::new(), None, None),
         (unit_enum(), Vec::new(), None, None),
         (backed_enum(), Vec::new(), None, None),
-    ];
-    classes.push((countable(), Vec::new(), None, None));
+    ]);
     classes.extend(crate::weakrefs::weakref_classes());
     classes
-}
-
-/// `interface Countable` as `zend_interfaces.stub.php` declares it:
-/// `count(): int`, abstract, its return type tentative. What `count()`
-/// asks of an object whose class has no `count_elements`, and what
-/// `WeakMap` implements.
-///
-/// ```php
-/// class N implements Countable { function count(): int { return 3; } }
-/// var_dump(count(new N), new N instanceof Countable);
-/// ```
-/// ```expect
-/// int(3)
-/// bool(true)
-/// ```
-fn countable() -> ClassDecl {
-    ClassDecl {
-        methods: vec![MethodDecl {
-            tentative_return: true,
-            ..abstract_method(b"count", Some(Type::Int))
-        }],
-        ..declared(b"Countable", ClassKind::Interface, None)
-    }
 }
 
 /// `interface UnitEnum` as `zend_enum.stub.php` declares it and
@@ -682,9 +679,9 @@ fn std_class() -> ClassDecl {
 /// `__construct` is the first row of the stub's table and stands here
 /// with the declaration, with no entry to pair, as an interface's
 /// methods do: php reaches its body through no lookup, since
-/// `zend_closure_get_constructor` raises `Instantiation of class
-/// Closure is not allowed` before `new` can find it, and the slot
-/// `ZEND_NEW` reads is not the class's here yet.
+/// `zend_closure_get_constructor` ([`ClosureHandlers::get_constructor`])
+/// raises `Instantiation of class Closure is not allowed` before `new`
+/// can find it.
 fn closure_class() -> ClassDecl {
     ClassDecl {
         flags: ClassFlags {
@@ -806,6 +803,7 @@ fn closure_method(
             parameters,
             return_type: returns,
             returns_by_ref: false,
+            is_generator: false,
             attributes: Vec::new(),
             doc_comment: None,
             file: Name(Box::new([])),
@@ -1001,6 +999,7 @@ fn throwable_method(name: &[u8], parameters: &[Parameter], returns: Option<Type>
             parameters: parameters.to_vec(),
             return_type: returns,
             returns_by_ref: false,
+            is_generator: false,
             attributes: Vec::new(),
             doc_comment: None,
             file: Name(Box::new([])),
@@ -1239,25 +1238,8 @@ fn throwable_construct(req: &mut Request) -> Result<Value, Thrown> {
         write_throwable_property(req, this, b"code", code)?;
     }
     if let Some(previous) = req.argument(3) {
-        let previous = previous.deref();
-        let is_throwable = match previous.as_object() {
-            Some(object) => req
-                .class_named(b"Throwable")
-                .is_some_and(|throwable| req.instance_of(object.class(), throwable)),
-            None => matches!(previous.as_ref(), ValueRef::Null | ValueRef::Undef),
-        };
-        if !is_throwable {
-            // `zend_zval_value_name`: an object is named by its class.
-            let given = previous.as_object().map_or_else(
-                || String::from(previous.type_name()),
-                |object| req.class_name(object.class()),
-            );
-            return Err(arg_type_error(
-                req,
-                3,
-                &format!("be of type ?Throwable, {given} given"),
-            ));
-        }
+        let ty = Type::Nullable(Box::new(Type::Named(Name::from("Throwable"))));
+        let previous = coerce_param(req, &previous, &ty, 3)?;
         req.addref(&previous);
         write_throwable_property(req, this, b"previous", previous)?;
     }

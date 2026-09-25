@@ -5,9 +5,9 @@
 //! `Z_PARAM_ARRAY_HT_OR_LONG`, each raising what php raises for a value
 //! it does not take.
 
-use php_ext::coerce::{coerce_param, value_name};
+use php_ext::coerce::coerce_param;
 use php_ext::decl::Type;
-use php_ext::raising::{Thrown, arg_type_error};
+use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpString, Value, ValueRef};
 
@@ -98,18 +98,13 @@ pub(super) fn nullable_array(req: &mut Request, position: u32) -> Result<Option<
     let Some(value) = given(req, position) else {
         return Ok(None);
     };
-    match value.deref().as_ref() {
-        ValueRef::Null => Ok(None),
-        ValueRef::Array(array) => Ok(Some(*array)),
-        _ => {
-            let name = value_name(req, &value.deref());
-            Err(arg_type_error(
-                req,
-                position,
-                &format!("be of type ?array, {name} given"),
-            ))
-        }
-    }
+    let coerced = coerce_param(
+        req,
+        &value,
+        &Type::Nullable(Box::new(Type::Array)),
+        position,
+    )?;
+    Ok(coerced.as_array().copied())
 }
 
 /// One side of a `Z_PARAM_ARRAY_HT_OR_*` union.
@@ -118,82 +113,48 @@ pub(super) enum ArrayOr<T> {
     Other(T),
 }
 
+/// `array|T`, and with `nullable` its `_OR_NULL` form, `array|T|null`:
+/// the union `coerce_param` holds the argument to.
+fn array_or(other: Type, nullable: bool) -> Type {
+    let mut members = vec![Type::Array, other];
+    if nullable {
+        members.push(Type::Null);
+    }
+    Type::Union(members)
+}
+
 /// `Z_PARAM_ARRAY_HT_OR_STR`: the array, or the argument read as
-/// `Z_PARAM_STR` reads it, with `array|string` the type the null
-/// deprecation and the `TypeError` name. `nullable` is the `_OR_NULL`
-/// form, where `null` is `None` and neither is raised.
+/// `Z_PARAM_STR` reads it, both `coerce_param`'s over `array|string`.
+/// `nullable` is the `_OR_NULL` form, where `null` is `None`.
 pub(super) fn array_or_string(
     req: &mut Request,
     position: u32,
     nullable: bool,
 ) -> Result<Option<ArrayOr<PhpString>>, Thrown> {
-    let value = req.argument(position).unwrap_or_default().deref();
-    match value.as_ref() {
-        ValueRef::Array(array) => Ok(Some(ArrayOr::Array(*array))),
-        ValueRef::Str(s) => Ok(Some(ArrayOr::Other(*s))),
-        ValueRef::Null | ValueRef::Undef if nullable => Ok(None),
-        ValueRef::Null
-        | ValueRef::Undef
-        | ValueRef::Int(_)
-        | ValueRef::Float(_)
-        | ValueRef::Bool(_) => {
-            // The null deprecation names the declared type, `array|string`.
-            let coerced = coerce_param(req, &value, &Type::String, position)?;
-            match coerced.as_php_string() {
-                Some(s) => Ok(Some(ArrayOr::Other(*s))),
-                None => Ok(Some(ArrayOr::Other(PhpString::new(req, b"")?))),
-            }
-        }
-        _ => {
-            let name = value_name(req, &value);
-            let question = if nullable {
-                "array|string|null"
-            } else {
-                "array|string"
-            };
-            Err(arg_type_error(
-                req,
-                position,
-                &format!("be of type {question}, {name} given"),
-            ))
-        }
-    }
+    let value = req.argument(position).unwrap_or_default();
+    let coerced = coerce_param(req, &value, &array_or(Type::String, nullable), position)?;
+    Ok(match coerced.as_ref() {
+        ValueRef::Array(array) => Some(ArrayOr::Array(*array)),
+        ValueRef::Str(s) => Some(ArrayOr::Other(*s)),
+        _ => None,
+    })
 }
 
 /// `Z_PARAM_ARRAY_HT_OR_LONG`, and with `nullable` its `_OR_NULL`
-/// form: the array, or the argument read as `Z_PARAM_LONG` reads it.
+/// form: the array, or the argument read as `Z_PARAM_LONG` reads it,
+/// both `coerce_param`'s over `array|int`.
 pub(super) fn array_or_long(
     req: &mut Request,
     position: u32,
     nullable: bool,
 ) -> Result<Option<ArrayOr<i64>>, Thrown> {
-    let value = req.argument(position).unwrap_or_default().deref();
-    match value.as_ref() {
-        ValueRef::Array(array) => Ok(Some(ArrayOr::Array(*array))),
-        ValueRef::Int(n) => Ok(Some(ArrayOr::Other(n))),
-        ValueRef::Null | ValueRef::Undef if nullable => Ok(None),
-        ValueRef::Null
-        | ValueRef::Undef
-        | ValueRef::Float(_)
-        | ValueRef::Bool(_)
-        | ValueRef::Str(_) => {
-            let coerced = coerce_param(req, &value, &Type::Int, position)?;
-            Ok(Some(ArrayOr::Other(coerced.as_int().unwrap_or(0))))
-        }
-        _ => {
-            let name = value_name(req, &value);
-            let union = if nullable {
-                "array|int|null"
-            } else {
-                "array|int"
-            };
-            Err(arg_type_error(
-                req,
-                position,
-                &format!("be of type {union}, {name} given"),
-            ))
-        }
-    }
+    let value = req.argument(position).unwrap_or_default();
+    let coerced = coerce_param(req, &value, &array_or(Type::Int, nullable), position)?;
+    Ok(match coerced.as_ref() {
+        ValueRef::Array(array) => Some(ArrayOr::Array(*array)),
+        ValueRef::Int(n) => Some(ArrayOr::Other(n)),
+        _ => None,
+    })
 }
 
 /// A new string of `bytes` as the return.

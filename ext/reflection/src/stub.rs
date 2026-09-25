@@ -66,6 +66,7 @@ fn case(name: &[u8], value: &[u8]) -> ClassConstDecl {
         name: Name(name.into()),
         visibility: Visibility::Public,
         is_final: false,
+        is_case: true,
         ty: None,
         value: ConstExpr::Str(value.into()),
         attributes: Vec::new(),
@@ -90,6 +91,7 @@ fn int_constant(name: &[u8], value: i64) -> ClassConstDecl {
         name: Name(name.into()),
         visibility: Visibility::Public,
         is_final: false,
+        is_case: false,
         ty: Some(Type::Int),
         value: ConstExpr::Long(value),
         attributes: Vec::new(),
@@ -194,6 +196,7 @@ fn method(name: &[u8], parameters: &[Parameter], returns: Option<Type>) -> Metho
             parameters: parameters.to_vec(),
             return_type: returns,
             returns_by_ref: false,
+            is_generator: false,
             attributes: Vec::new(),
             doc_comment: None,
             file: Name(Box::new([])),
@@ -4667,7 +4670,7 @@ fn reflection_function_abstract() -> Declared {
             ),
             (
                 tentative(method(b"isGenerator", &[], Some(Type::Bool))),
-                unbuilt as Entry,
+                super::func::reflection_function_is_generator as Entry,
             ),
             (
                 tentative(method(b"isVariadic", &[], Some(Type::Bool))),
@@ -5583,11 +5586,12 @@ fn reflection_object() -> Declared {
 }
 
 /// `enum PropertyHookType: string` as the stub declares it and
-/// `zend_register_internal_enum` links it: `BackedEnum` implemented,
-/// `cases`, `from` and `tryFrom` on its own table as
-/// `zend_enum_register_funcs` adds them, and `$name` and `$value` as
-/// `zend_enum_register_props` declares them. Registered last, after
-/// `ReflectionConstant`, as `PHP_MINIT_FUNCTION(reflection)` has it.
+/// `zend_register_internal_enum` links it: `BackedEnum` implemented, and
+/// `$name` and `$value` as `zend_enum_register_props` declares them.
+/// `cases`, `from` and `tryFrom` are the engine's, which gives them to
+/// every enum it links as `zend_enum_register_funcs` does. Registered
+/// last, after `ReflectionConstant`, as `PHP_MINIT_FUNCTION(reflection)`
+/// has it.
 fn property_hook_type() -> Declared {
     (
         ClassDecl {
@@ -5597,28 +5601,7 @@ fn property_hook_type() -> Declared {
             properties: vec![readonly_string(b"name"), readonly_string(b"value")],
             ..class(b"PropertyHookType", None, &[b"BackedEnum"])
         },
-        vec![
-            (
-                is_static(method(b"cases", &[], Some(Type::Array))),
-                super::enums::enum_cases as Entry,
-            ),
-            (
-                is_static(method(
-                    b"from",
-                    &[parameter(b"value", union(&[Type::Int, Type::String]))],
-                    Some(Type::CalledClass),
-                )),
-                super::enums::enum_from as Entry,
-            ),
-            (
-                is_static(method(
-                    b"tryFrom",
-                    &[parameter(b"value", union(&[Type::Int, Type::String]))],
-                    Some(nullable(Type::CalledClass)),
-                )),
-                super::enums::enum_try_from as Entry,
-            ),
-        ],
+        Vec::new(),
     )
 }
 

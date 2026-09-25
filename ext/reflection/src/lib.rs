@@ -41,8 +41,8 @@
 //! payload [`Reflected`], which its class's `create_object` lays down
 //! (design §5.4), so the class it was asked about and the object it was
 //! made from are what the renderings read. An extension's `INI` block,
-//! `_extension_ini_string`, a closure's `Bound Variables` and
-//! `<iterateable>` are not rendered yet (#375).
+//! `_extension_ini_string` and a closure's `Bound Variables` are not
+//! rendered yet (#375).
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -72,7 +72,6 @@ use php_ext::call::{
     Function, constant, eval_const_expr, lookup_class, lookup_function, new_object,
     read_static_prop, write_static_prop,
 };
-use php_ext::coerce::value_name;
 use php_ext::decl::{
     ClassConstDecl, ClassDecl, ClassKind, ConstExpr, EnumBacking, FunctionDecl, MethodDecl, Name,
     Parameter, PropertyDecl, Type, Visibility,
@@ -331,28 +330,20 @@ fn string_argument(req: &mut Request, position: u32) -> Result<Vec<u8>, Thrown> 
 /// constructors do with it: an object is its class, kept beside it; a
 /// string is `zend_lookup_class`, a leading `\` dropped, or php's
 /// `ReflectionException` `Class "X" does not exist` with the name as
-/// given; anything else is the `TypeError` naming `object|string`.
+/// given; the refusal is `coerce_param`'s over `object|string`.
 fn class_argument(
     req: &mut Request,
     position: u32,
 ) -> Result<(ClassId, Option<PhpObject>), Thrown> {
-    if let Some(given) = req.argument(position) {
-        match given.deref().as_ref() {
-            ValueRef::Object(object) => return Ok((object.class(), Some(*object))),
-            ValueRef::Array(_) | ValueRef::Resource(_) => {
-                return Err(arg_type_error(
-                    req,
-                    position,
-                    &format!(
-                        "be of type object|string, {} given",
-                        value_name(req, &given.deref())
-                    ),
-                ));
-            }
-            _ => {}
-        }
+    let Some(given) = req.argument(position) else {
+        return Ok((class_named(req, b"")?, None));
+    };
+    let ty = Type::Union(vec![Type::Object, Type::String]);
+    let held = php_ext::coerce::coerce_param(req, &given, &ty, position)?;
+    if let Some(object) = held.as_object() {
+        return Ok((object.class(), Some(*object)));
     }
-    let name = string_argument(req, position)?;
+    let name = held.as_str_bytes().unwrap_or_default().to_vec();
     Ok((class_named(req, &name)?, None))
 }
 
@@ -1197,32 +1188,57 @@ fn reflection_function_is_deprecated(req: &mut Request) -> Result<Value, Thrown>
 /// #1 {main}
 ///   thrown in %s on line 2
 /// ```
+///
+/// `null` is `coerce_param`'s over `Closure|string`: the deprecation
+/// naming the union and the empty string written over the argument,
+/// which is what the trace of the miss prints, and under
+/// `strict_types` the `TypeError`.
+///
+/// ```php
+/// new ReflectionFunction(null);
+/// ```
+/// ```expect exit=255
+/// Deprecated: ReflectionFunction::__construct(): Passing null to parameter #1 ($function) of type Closure|string is deprecated in %s on line 2
+///
+/// Fatal error: Uncaught ReflectionException: Function () does not exist in %s:2
+/// Stack trace:
+/// #0 %s(2): ReflectionFunction->__construct('')
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// ```php
+/// declare(strict_types=1);
+/// try { new ReflectionFunction(null); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// ReflectionFunction::__construct(): Argument #1 ($function) must be of type Closure|string, null given
+/// ```
 fn reflection_function_construct(req: &mut Request) -> Result<Value, Thrown> {
-    if let Some(given) = req.argument(1)
-        && let ValueRef::Object(object) = given.deref().as_ref()
-    {
-        let object = *object;
+    exactly_arguments(req, 1)?;
+    let given = req.argument(1).unwrap_or_default();
+    let ty = Type::Union(vec![
+        Type::Named(Name(b"Closure".as_slice().into())),
+        Type::String,
+    ]);
+    let held = php_ext::coerce::coerce_param(req, &given, &ty, 1)?;
+    if let Some(object) = held.as_object().copied() {
         // php's `IS_OBJECT` arm: `zend_get_closure_method_def` and
         // `intern->obj` holding the closure, `$name` the declaration's
         // own, which is the `{closure:…}` the compiler built.
-        if let Some(decl) = signature::closure_decl(req, object) {
-            if let Some(this) = req.this() {
-                set_name(req, this, &decl.name.0)?;
-                keep_closure(req, this, object);
-            }
-            return Ok(Value::null());
+        let Some(decl) = signature::closure_decl(req, object) else {
+            return Err(php_ext::raising::fatal(
+                req,
+                "InternalError: a Closure with no declaration behind it",
+            ));
+        };
+        if let Some(this) = req.this() {
+            set_name(req, this, &decl.name.0)?;
+            keep_closure(req, this, object);
         }
-        let class = req.class_decl(object.class()).map_or_else(
-            || String::from("object"),
-            |decl| String::from_utf8_lossy(&decl.name.0).into_owned(),
-        );
-        return Err(arg_type_error(
-            req,
-            1,
-            &format!("be of type Closure|string, {class} given"),
-        ));
+        return Ok(Value::null());
     }
-    let name = one_string_argument(req)?;
+    let name = held.as_str_bytes().unwrap_or_default().to_vec();
     let bare = name.strip_prefix(b"\\").unwrap_or(&name);
     let Some(function) = lookup_function(req, bare) else {
         return Err(throw(
@@ -1484,15 +1500,11 @@ fn reflection_class_construct(req: &mut Request) -> Result<Value, Thrown> {
 /// ```
 fn reflection_object_construct(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 1)?;
-    let given = req.argument(1).unwrap_or_default().deref();
-    let ValueRef::Object(object) = given.as_ref() else {
-        return Err(arg_type_error(
-            req,
-            1,
-            &format!("be of type object, {} given", value_name(req, &given)),
-        ));
+    let given = req.argument(1).unwrap_or_default();
+    let given = php_ext::coerce::coerce_param(req, &given, &Type::Object, 1)?;
+    let Some(object) = given.as_object().copied() else {
+        return Ok(Value::null());
     };
-    let object = *object;
     let name = class_name_of(req, object.class());
     if let Some(this) = req.this() {
         set_name(req, this, &name)?;
@@ -1730,11 +1742,26 @@ fn class_constant_named(
 /// Deprecated: ReflectionClass::getConstant() for a non-existent constant is deprecated, use ReflectionClass::hasConstant() to check if the constant exists in %s on line 2
 /// bool(false)
 /// ```
+/// A class constant's value as the constants table holds it once it is
+/// updated: an enum's case is the enum's instance for it
+/// (`zend_enum_get_case`), and every other constant the expression it
+/// was written as, evaluated in the scope that declared it.
+fn constant_value(
+    req: &mut Request,
+    constant: &php_ext::decl::ClassConstDecl,
+    scope: ClassId,
+) -> Result<Value, Thrown> {
+    if constant.is_case {
+        return php_ext::call::class_constant(req, scope, &constant.name.0);
+    }
+    eval_const_expr(req, &constant.value, Some(scope))
+}
+
 fn reflection_class_get_constant(req: &mut Request) -> Result<Value, Thrown> {
     let name = one_string_argument(req)?;
     let class = this_class(req)?;
     if let Some((declaring, constant)) = class_constant_named(req, class, &name) {
-        return eval_const_expr(req, &constant.value, Some(declaring));
+        return constant_value(req, &constant, declaring);
     }
     deprecated(
         req,
@@ -1885,47 +1912,27 @@ fn reflection_class_get_default_properties(req: &mut Request) -> Result<Value, T
 fn reflection_class_is_subclass_of(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 1)?;
     let class = this_class(req)?;
-    let given = req.argument(1).unwrap_or_default().deref();
-    let of = match given.as_ref() {
-        ValueRef::Object(object) => {
-            let reflector = lookup_class(req, b"ReflectionClass")?;
-            if !reflector.is_some_and(|reflector| object.instance_of(req, reflector)) {
-                let name = class_name_of(req, object.class());
-                return Err(arg_type_error(
-                    req,
-                    1,
-                    &format!(
-                        "be of type ReflectionClass|string, {} given",
-                        String::from_utf8_lossy(&name)
-                    ),
-                ));
-            }
-            let Some(name) = object
-                .prop(req, b"name")
-                .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
-            else {
-                return Err(throw(
-                    req,
-                    "Error",
-                    "Internal error: Failed to retrieve the argument's reflection object",
-                ));
-            };
-            class_named(req, &name)?
-        }
-        ValueRef::Array(_) | ValueRef::Resource(_) => {
-            return Err(arg_type_error(
+    let given = req.argument(1).unwrap_or_default();
+    let ty = Type::Union(vec![
+        Type::Named(Name(b"ReflectionClass".as_slice().into())),
+        Type::String,
+    ]);
+    let given = php_ext::coerce::coerce_param(req, &given, &ty, 1)?;
+    let of = if let ValueRef::Object(object) = given.as_ref() {
+        let Some(name) = object
+            .prop(req, b"name")
+            .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
+        else {
+            return Err(throw(
                 req,
-                1,
-                &format!(
-                    "be of type ReflectionClass|string, {} given",
-                    value_name(req, &given)
-                ),
+                "Error",
+                "Internal error: Failed to retrieve the argument's reflection object",
             ));
-        }
-        _ => {
-            let name = string_argument(req, 1)?;
-            class_named(req, &name)?
-        }
+        };
+        class_named(req, &name)?
+    } else {
+        let name = given.as_str_bytes().unwrap_or_default().to_vec();
+        class_named(req, &name)?
     };
     Ok(Value::bool(class != of && class_is(req, class, of, 0)))
 }
@@ -2328,7 +2335,9 @@ fn reflection_method_construct(req: &mut Request) -> Result<Value, Thrown> {
         .argument(2)
         .map(|v| v.deref())
         .filter(|v| !matches!(v.as_ref(), ValueRef::Null | ValueRef::Undef));
-    let first = req.argument(1).unwrap_or_default().deref();
+    let first = req.argument(1).unwrap_or_default();
+    let ty = Type::Union(vec![Type::Object, Type::String]);
+    let first = php_ext::coerce::coerce_param(req, &first, &ty, 1)?;
     let (class, method_name) = match (first.as_ref(), second) {
         (ValueRef::Object(object), Some(_)) => (object.class(), string_argument(req, 2)?),
         (ValueRef::Object(_), None) => {
@@ -2339,22 +2348,12 @@ fn reflection_method_construct(req: &mut Request) -> Result<Value, Thrown> {
                 "ReflectionMethod::__construct(): Argument #2 ($method) cannot be null when argument #1 ($objectOrMethod) is an object",
             ));
         }
-        (ValueRef::Array(_) | ValueRef::Resource(_), _) => {
-            return Err(arg_type_error(
-                req,
-                1,
-                &format!(
-                    "be of type object|string, {} given",
-                    value_name(req, &first)
-                ),
-            ));
-        }
         (_, Some(_)) => {
-            let class = string_argument(req, 1)?;
+            let class = first.as_str_bytes().unwrap_or_default().to_vec();
             (class_named(req, &class)?, string_argument(req, 2)?)
         }
         (_, None) => {
-            let given = string_argument(req, 1)?;
+            let given = first.as_str_bytes().unwrap_or_default().to_vec();
             let Some(at) = given.windows(2).position(|pair| pair == b"::") else {
                 return Err(throw(
                     req,
@@ -2658,17 +2657,9 @@ fn this_property(req: &mut Request) -> Result<(ClassId, Vec<u8>, Option<Property
 /// ```
 fn reflection_property_get_value(req: &mut Request) -> Result<Value, Thrown> {
     at_most_arguments(req, 1)?;
-    let given = req.argument(1).unwrap_or_default().deref();
-    if !matches!(
-        given.as_ref(),
-        ValueRef::Object(_) | ValueRef::Null | ValueRef::Undef
-    ) {
-        return Err(arg_type_error(
-            req,
-            1,
-            &format!("be of type ?object, {} given", value_name(req, &given)),
-        ));
-    }
+    let given = req.argument(1).unwrap_or_default();
+    let given =
+        php_ext::coerce::coerce_param(req, &given, &Type::Nullable(Box::new(Type::Object)), 1)?;
     let (class, name, declared) = this_property(req)?;
     // `instanceof_function(Z_OBJCE_P(object), intern->ce)`: the object
     // is held to the class the reflector was asked about, which is the
@@ -2830,13 +2821,10 @@ fn reflection_property_set_value(req: &mut Request) -> Result<Value, Thrown> {
         return Ok(Value::null());
     }
     exactly_arguments(req, 2)?;
-    let given = req.argument(1).unwrap_or_default().deref();
-    let ValueRef::Object(object) = given.as_ref() else {
-        return Err(arg_type_error(
-            req,
-            1,
-            &format!("be of type object, {} given", value_name(req, &given)),
-        ));
+    let given = req.argument(1).unwrap_or_default();
+    let given = php_ext::coerce::coerce_param(req, &given, &Type::Object, 1)?;
+    let Some(object) = given.as_object() else {
+        return Ok(Value::null());
     };
     let value = req.argument(2).unwrap_or_default().deref();
     req.addref(&value);
@@ -3141,7 +3129,8 @@ fn reflection_constant_get_attributes(req: &mut Request) -> Result<Value, Thrown
 }
 
 /// `_extension_string`: the header with the extension's number and
-/// version, then the blocks it has something for: `Constants`, one
+/// version, then the blocks it has something for: `Dependencies`, one
+/// row per `zend_module_dep`; `Constants`, one
 /// `_const_string` row per constant the extension declared;
 /// `Functions`, one `_function_string` per native; `Classes`, one
 /// `_class_string` per class, each preceded by a blank line as
@@ -3160,6 +3149,28 @@ fn extension_string(req: &mut Request, extension: ExtensionId, indent: &str) -> 
         "{indent}Extension [ <persistent> extension #{} {name} version {PHP_VERSION} ] {{",
         req.extension_number(extension)
     );
+    let dependencies = req.extension_dependencies(extension);
+    if !dependencies.is_empty() {
+        out.push_str("\n  - Dependencies {\n");
+        for dependency in dependencies {
+            let kind = match dependency.kind {
+                DependencyKind::Required => "Required",
+                DependencyKind::Conflicts => "Conflicts",
+                DependencyKind::Optional => "Optional",
+            };
+            let rel = dependency.rel.map(|r| format!(" {r}")).unwrap_or_default();
+            let version = dependency
+                .version
+                .map(|v| format!(" {v}"))
+                .unwrap_or_default();
+            let _ = writeln!(
+                out,
+                "{indent}    Dependency [ {} ({kind}{rel}{version}) ]",
+                dependency.name
+            );
+        }
+        let _ = writeln!(out, "{indent}  }}");
+    }
     let constants = req.extension_constants(extension);
     if !constants.is_empty() {
         let _ = write!(out, "\n  - Constants [{}] {{\n", constants.len());
@@ -3267,8 +3278,41 @@ fn value_string(req: &mut Request, value: &Value) -> String {
 /// its `@@ file start-end` line. `object` is php's `obj` argument, the
 /// instance an object reflector kept: it turns the header's word into
 /// `Object of class` and is the only thing that puts a `Dynamic
-/// properties` block there at all. `<iterateable>` is not rendered yet
-/// (#375).
+/// properties` block there at all. A class with `ce->get_iterator`,
+/// one `Traversable` through `Iterator` or `IteratorAggregate`, is
+/// marked `<iterateable>`.
+///
+/// ```php
+/// class A implements IteratorAggregate { function getIterator(): Iterator { yield 1; } }
+/// echo new ReflectionClass("A");
+/// ```
+/// ```expect
+/// Class [ <user> <iterateable> class A implements IteratorAggregate, Traversable ] {
+///   @@ %s 2-2
+///
+///   - Constants [0] {
+///   }
+///
+///   - Static properties [0] {
+///   }
+///
+///   - Static methods [0] {
+///   }
+///
+///   - Properties [0] {
+///   }
+///
+///   - Methods [1] {
+///     Method [ <user, prototype IteratorAggregate> public method getIterator ] {
+///       @@ %s 2 - 2
+///
+///       - Parameters [0] {
+///       }
+///       - Return [ Iterator ]
+///     }
+///   }
+/// }
+/// ```
 fn class_string(
     req: &mut Request,
     class: ClassId,
@@ -3292,11 +3336,11 @@ fn class_string(
     );
 
     // `ZEND_CLASS_CONST_IS_CASE`: an enum's cases go first, under a
-    // heading shown only when there are any; the model has no case bit
-    // yet, so an enum's constants are its cases (#377).
+    // heading shown only when there are any, and its own constants
+    // after them.
     let (cases, constants): (Vec<_>, Vec<_>) = linked_constants(req, class)
         .into_iter()
-        .partition(|_| decl.kind == ClassKind::Enum);
+        .partition(|(constant, _)| constant.is_case);
     if !cases.is_empty() {
         let _ = write!(out, "\n{indent}  - Enum cases [{}] {{\n", cases.len());
         for (case, _) in &cases {
@@ -3433,6 +3477,17 @@ fn class_header(
         let _ = write!(out, ":{extension}");
     }
     out.push_str("> ");
+    // `ce->get_iterator`, which `zend_implement_iterator` and
+    // `zend_implement_aggregate` give a class that is `Traversable`
+    // through `Iterator` or `IteratorAggregate`, and `Generator` has.
+    let iterable = matches!(decl.kind, ClassKind::Class | ClassKind::Enum)
+        && lookup_class(req, b"Traversable")
+            .ok()
+            .flatten()
+            .is_some_and(|traversable| class_is(req, class, traversable, 0));
+    if iterable {
+        out.push_str("<iterateable> ");
+    }
     match decl.kind {
         ClassKind::Interface => out.push_str("interface "),
         ClassKind::Trait => out.push_str("trait "),
@@ -3967,9 +4022,14 @@ fn linked_properties(req: &mut Request, class: ClassId) -> Vec<(PropertyDecl, Cl
             // name was inherited and is being redeclared or is new.
             let own = table.iter().filter(|(_, d)| *d == class).count();
             match at_index {
-                // The child's declaration stands where the parent's was
-                // inherited.
-                Some(i) if internal => table[i] = (property.clone(), *at),
+                // An internal class declares its properties after
+                // `zend_do_inheritance` ran, and a redeclaration is
+                // `zend_hash_del` then `zend_hash_update_ptr` in
+                // `zend_declare_typed_property`, so it moves to the end.
+                Some(i) if internal => {
+                    table.remove(i);
+                    table.push((property.clone(), *at));
+                }
                 Some(i) => {
                     table.remove(i);
                     table.insert(own.min(table.len()), (property.clone(), *at));

@@ -250,6 +250,69 @@ pub(crate) fn match_target(subject: &Value, table: PhpArray) -> Switched {
     }
 }
 
+/// `ZEND_IN_ARRAY` (`Z/Zend/zend_vm_def.h:9408`): whether the needle is
+/// in the table `zend_compile_func_in_array` built, a reference followed.
+/// A string is looked up by `zend_hash_find`, its bytes and nothing
+/// else; under `$strict` a long by `zend_hash_index_find` and
+/// anything else is not there. Without it an undefined variable,
+/// `null` and `false` are the empty string's key, and any other needle
+/// is compared with each key by `zend_compare`, which is `==` and may
+/// call user code, `__toString` among it. An undefined variable is the
+/// handler's to have warned about.
+///
+/// ```php
+/// class S { function __toString(): string { return "s"; } }
+/// $x = 'b'; $r = &$x; $i = 1;
+/// var_dump(in_array($x, ['a', 'b']), in_array($i, [1, 'a'], true), in_array('1', [1], true), in_array(1.0, [1], true));
+/// var_dump(in_array(false, ['', 'a']), in_array(null, ['a']), in_array(0, ['a']), in_array(true, ['a']), in_array(new S, ['s']), in_array([], ['a']));
+/// var_dump(in_array($u, ['a', 'b'], true), in_array($v, ['', 'b']));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+///
+/// Warning: Undefined variable $u in %s on line 6
+///
+/// Warning: Undefined variable $v in %s on line 6
+/// bool(false)
+/// bool(true)
+/// ```
+pub(crate) fn in_array(
+    req: &mut Request,
+    needle: &Value,
+    table: PhpArray,
+    strict: bool,
+) -> Result<bool, Thrown> {
+    let needle = needle.deref();
+    match needle.as_ref() {
+        ValueRef::Str(s) => return Ok(table.contains(&Key::Str(*s))),
+        ValueRef::Int(n) if strict => return Ok(table.contains(&Key::Int(n))),
+        _ if strict => return Ok(false),
+        ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false) => {
+            let empty = PhpString::new(req, b"")?;
+            return Ok(table.contains(&Key::Str(empty)));
+        }
+        _ => {}
+    }
+    for (key, _) in &table {
+        let Key::Str(key) = key else {
+            continue;
+        };
+        if compare(req, &needle, &Value::string(key))? == Ordering::Equal {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// The target a table holds under a key, or the default where none.
 fn found(target: Option<Value>) -> Switched {
     match target.and_then(|target| target.as_int()) {
@@ -727,38 +790,6 @@ fn mangled_prefix(mangled: &[MangledName], at: &mut usize, name: PhpString) -> O
     mangled.get(found).and_then(|slot| slot.prefix.clone())
 }
 
-/// Every class name a declared type holds, in the order it was written:
-/// the one name of a class type, and each member of a union or an
-/// intersection that is one, which `zend_check_type_slow` walks with
-/// `ZEND_TYPE_LIST_FOREACH`. What reads it is every check of a value
-/// against a declared type that a class name can stand in: a return, a
-/// parameter and a property.
-///
-/// ```php
-/// class A {} class B extends A {}
-/// function f(): A { return new B; }
-/// class C { public A $a; }
-/// $c = new C; $c->a = new B;
-/// var_dump(f() instanceof B, $c->a instanceof B);
-/// ```
-/// ```expect
-/// bool(true)
-/// bool(true)
-/// ```
-pub(crate) fn named_types(
-    ty: &php_unit::decl::Type,
-) -> Box<dyn Iterator<Item = &php_unit::decl::Name> + '_> {
-    use php_unit::decl::Type;
-    match ty {
-        Type::Named(name) => Box::new(std::iter::once(name)),
-        Type::Nullable(inner) => named_types(inner),
-        Type::Union(members) | Type::Intersection(members) => {
-            Box::new(members.iter().flat_map(named_types))
-        }
-        _ => Box::new(std::iter::empty()),
-    }
-}
-
 /// `zend_verify_property_type` (`Z/Zend/zend_object_handlers.c:1065`)
 /// under `zend_assign_to_typed_prop` (`Z/Zend/zend_execute.c:3583`):
 /// what a write to a property with a declared type is held to. Nothing
@@ -823,7 +854,7 @@ pub(crate) fn verify_property_type(
     strict: bool,
 ) -> Result<Option<Value>, Thrown> {
     let held = value.deref();
-    match type_assignable(req, &held, ty, strict) {
+    match type_assignable(req, &held, ty, declaring, strict) {
         Assignable::Yes => Ok(None),
         Assignable::Coerce => {
             match crate::api::coerce::scalar_type_hint(req, &held, ty.mask(), strict)? {
@@ -860,17 +891,18 @@ fn type_assignable(
     req: &mut Request,
     held: &Value,
     ty: &php_unit::decl::Type,
+    declaring: crate::api::values::ClassId,
     strict: bool,
 ) -> Assignable {
-    if ty.contains_code(held.type_code()) {
-        return Assignable::Yes;
-    }
-    if let Some(object) = held.as_object()
-        && named_types(ty).any(|named| {
-            req.class_named(&named.0)
-                .is_some_and(|of| req.instance_of(object.class(), of))
-        })
-    {
+    if crate::api::coerce::holds(
+        req,
+        held,
+        ty,
+        crate::api::coerce::Scopes {
+            own: Some(declaring),
+            called: Some(declaring),
+        },
+    ) {
         return Assignable::Yes;
     }
     let mask = ty.mask();
@@ -937,7 +969,7 @@ pub(crate) fn verify_ref_assignable(
     let mut first: Option<usize> = None;
     let mut coerced: Option<Value> = None;
     for (i, (declaring, name, ty)) in listed.iter().enumerate() {
-        let verdict = type_assignable(req, &held, ty, strict);
+        let verdict = type_assignable(req, &held, ty, *declaring, strict);
         if verdict == Assignable::Coerce {
             let made = crate::api::coerce::scalar_type_hint(req, &held, ty.mask(), strict)?;
             let Some(made) = made else {
@@ -1025,7 +1057,7 @@ pub(crate) fn verify_prop_assignable_by_ref(
     let Some((first_at, first_name, first_ty)) = first else {
         return verify_property_type(req, &held, ty, declaring, name, strict);
     };
-    match type_assignable(req, &held, ty, strict) {
+    match type_assignable(req, &held, ty, declaring, strict) {
         Assignable::Yes => return Ok(None),
         Assignable::Coerce => {
             // The value would convert, so what refuses the bind is the
@@ -2099,6 +2131,149 @@ pub(crate) fn concat(req: &mut Request, left: &Value, right: &Value) -> Result<V
     Ok(Value::string(joined?))
 }
 
+/// `concat_function` where `result` is `op1` (`Z/Zend/zend_operators.c:2125`),
+/// `$a .= $b`: the value is written back where `left` came from, so the
+/// left string is grown where it stands when the place held its one
+/// owner, and copied only when it is interned or shared
+/// ([`Request::string_append`], `zend_string_extend`). A loop of `.=`
+/// is then linear in what it appends. `ASSIGN_OP` over a CV,
+/// `ASSIGN_DIM_OP` over an array's element, `ASSIGN_OBJ_OP` over a
+/// declared property and `ASSIGN_STATIC_PROP_OP` call it where php's
+/// `zend_binary_op(var_ptr, var_ptr, value)` stands; a property served
+/// by `__get` and `__set` or an `ArrayAccess` offset is read and written
+/// back, as php's is, and takes [`concat`].
+///
+/// php converts both sides first, holding one more owner of the left
+/// string while a `__toString` on the right is served, and only then
+/// destroys what the place holds (`i_zval_ptr_dtor(result)`) and leaves
+/// it `null` until the joined string lands; `vacate` is that, the caller's
+/// place given up, called once both sides are strings and never on an
+/// `Err`, which leaves the place as it stood. A right side that is
+/// already a string, beside a left one, is read where it stands and
+/// takes no owner, as php's `Z_STR_P(op2)`, so `$s .= $s` grows `$s` in
+/// place too. The `Ok` is the value for the place, with one owner.
+///
+/// A string two variables hold is copied, and the other keeps its
+/// bytes; a reference's cell is the one place, so both names read the
+/// append:
+///
+/// ```php
+/// $a = str_repeat('ab', 2); $b = $a; $a .= 'c'; $c = 'lit'; $c .= $c;
+/// $r = &$c; $c .= '!'; var_dump($a, $b, $c, $r, 'lit');
+/// ```
+/// ```expect
+/// string(5) "ababc"
+/// string(4) "abab"
+/// string(7) "litlit!"
+/// string(7) "litlit!"
+/// string(3) "lit"
+/// ```
+///
+/// The right side is converted while the variable still holds the left
+/// string, read here through the reference a class's property holds, and
+/// a value that is no string is converted before it is grown:
+///
+/// ```php
+/// class T { static $r; function __toString(): string { echo "[", T::$r, "]"; return "t"; } }
+/// $s = "ab"; T::$r = &$s; $s .= new T; $n = 12; $n .= 3; var_dump($s, $n);
+/// ```
+/// ```expect
+/// [ab]string(3) "abt"
+/// string(3) "123"
+/// ```
+///
+/// What the appends take is what php's `erealloc` takes: the slot grows
+/// with its bin, then a `run` of pages with the pages after it, and the
+/// peak is where the larger of the two footprints put it, not both.
+///
+/// ```php
+/// $s = str_repeat('x', 100); memory_reset_peak_usage(); $m = memory_get_usage();
+/// for ($i = 0; $i < 1000; $i++) { $s .= 'abcdefghij'; }
+/// var_dump(strlen($s), memory_get_usage() - $m, memory_get_peak_usage() - $m);
+/// ```
+/// ```expect
+/// int(10100)
+/// int(12128)
+/// int(12128)
+/// ```
+///
+/// A declared property, a typed one over a string, a class's property
+/// and an array's element are each such a place, and each grows where it
+/// stands, the peak not moving past what the four already held; the
+/// copy an array's separation made, the string read out of a property
+/// and the class's own string appended to it keep their bytes:
+///
+/// ```php
+/// class C { public $p; public string $q = ''; public static $s; }
+/// $o = new C; $o->p = str_repeat('a', 5000); $o->q = str_repeat('a', 5000); C::$s = str_repeat('a', 5000); $a = ['k' => str_repeat('a', 5000)];
+/// $t = str_repeat('b', 2000); memory_reset_peak_usage(); $m = memory_get_usage();
+/// $o->p .= $t; $o->q .= $t; C::$s .= $t; $a['k'] .= $t;
+/// var_dump(memory_get_peak_usage() - $m, strlen($o->p), strlen($o->q), strlen(C::$s), strlen($a['k']));
+/// $b = $a; $a['k'] .= '!'; $p = $o->p; $o->p .= '?'; $s = C::$s; C::$s .= $s;
+/// var_dump(strlen($b['k']), strlen($a['k']), strlen($p), strlen($o->p), strlen($s), strlen(C::$s));
+/// ```
+/// ```expect
+/// int(0)
+/// int(7000)
+/// int(7000)
+/// int(7000)
+/// int(7000)
+/// int(7000)
+/// int(7001)
+/// int(7000)
+/// int(7001)
+/// int(7000)
+/// int(14000)
+/// ```
+pub(crate) fn concat_assign(
+    req: &mut Request,
+    left: &Value,
+    right: &Value,
+    vacate: impl FnOnce(&mut Request),
+) -> Result<Value, Thrown> {
+    // Only a place that holds a string is given up without running
+    // anything, so the right side is read unowned only then: what a
+    // destructor `vacate` served could free is held.
+    let quiet = left.deref().as_php_string().is_some();
+    let a = to_string(req, left)?;
+    let right = right.deref();
+    let (b, owned) = match right.as_php_string() {
+        Some(b) if quiet => (*b, false),
+        _ => match to_string(req, &right) {
+            Ok(b) => (b, true),
+            Err(thrown) => {
+                req.release(Value::string(a));
+                return Err(thrown);
+            }
+        },
+    };
+    if a.len() > ZSTR_MAX_LEN - b.len() {
+        req.release(Value::string(a));
+        if owned {
+            req.release(Value::string(b));
+        }
+        return Err(throw(req, "Error", "String size overflow"));
+    }
+    vacate(req);
+    // An empty side hands the other side on, `ZVAL_STR_COPY` of it.
+    if a.is_empty() {
+        if !owned {
+            req.addref(&Value::string(b));
+        }
+        req.release(Value::string(a));
+        return Ok(Value::string(b));
+    }
+    let joined = if b.is_empty() {
+        Ok(a)
+    } else {
+        req.string_append(a, b)
+    };
+    if owned {
+        req.release(Value::string(b));
+    }
+    Ok(Value::string(joined?))
+}
+
 /// `zend_compare` (`Z/Zend/zend_operators.c:2312`), the one ordering
 /// every comparison opcode reads: [`php_heap::compare`] over the scalar
 /// pairs, which the compiler folds `<` through as well, and here the
@@ -2901,10 +3076,12 @@ fn increment_string(req: &mut Request, bytes: &[u8]) -> Result<PhpString, Thrown
 /// so the native of the same name serves `strlen` only where the
 /// compiler could not see it. A string is its byte length. Anything else
 /// goes the way `Z_PARAM_STR` would take it: under `strict_types` a
-/// `TypeError`; otherwise `null` is the 8.1 deprecation and zero, a
-/// bool, a long or a double is the length of the string it converts to
-/// (`zend_parse_arg_str_weak`, so a NAN warns as [`to_string`] warns),
-/// and an array, a resource or an object with no `__toString` is
+/// `TypeError`; otherwise `null` is the 8.1 deprecation and zero, and
+/// anything else is the length of the string the weak rule makes of it,
+/// [`crate::api::coerce::scalar_type_hint`] (`zend_parse_arg_str_weak`,
+/// so a NAN warns as [`to_string`] warns and an object goes through its
+/// `__toString`), and an array, a resource or an object with no
+/// `__toString` is
 /// php's `TypeError`, both texts the handler's own literals with
 /// `zend_zval_value_name` in the second. A variable nothing has written
 /// is the undefined-variable warning and then null's deprecation, in
@@ -2959,13 +3136,18 @@ pub(crate) fn strlen(req: &mut Request, value: &Value) -> Result<Value, Thrown> 
                 );
                 return Ok(Value::int(0));
             }
-            ValueRef::Bool(_) | ValueRef::Int(_) | ValueRef::Float(_) => {
-                let text = to_string(req, value)?;
-                let len = i64::try_from(text.len()).unwrap_or(i64::MAX);
-                req.release(Value::string(text));
-                return Ok(Value::int(len));
+            _ => {
+                // `zend_parse_arg_str_weak` over a copy of the operand,
+                // the one weak rule a `string` parameter takes.
+                let mask = php_unit::decl::Type::String.mask();
+                if let Some(text) = crate::api::coerce::scalar_type_hint(req, value, mask, false)? {
+                    let len = text
+                        .as_php_string()
+                        .map_or(0, |text| i64::try_from(text.len()).unwrap_or(i64::MAX));
+                    req.release(text);
+                    return Ok(Value::int(len));
+                }
             }
-            _ => {}
         }
     }
     let name = value_name(req, value);

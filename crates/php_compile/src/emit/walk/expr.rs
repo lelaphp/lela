@@ -86,7 +86,7 @@ impl Emit<'_> {
         let parameters = self.walk_parameters(node.params)?;
         let return_type = match node.ret {
             Some(ret) => match self.parsed.tree[ret].ty {
-                Some(ty) => Some(self.walk_type(ty, line)?),
+                Some(ty) => Some(ty),
                 None => return Err(unread(line, "a return type")),
             },
             None => None,
@@ -104,6 +104,7 @@ impl Emit<'_> {
                 doc_comment: self.doc_comment(node.doc_comment),
                 line,
                 end_line: self.line_after(node.range),
+                generator: self.is_generator_at(node.range.start),
             },
             uses: Vec::new(),
             is_static,

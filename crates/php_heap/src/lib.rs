@@ -12,10 +12,10 @@
 //! nowhere else, an array is `zend_hash` to the byte and an object is
 //! `zend_object` in its store, `zend_objects_store`, the destructor
 //! served through the seam with the heap handed back for it. The VM
-//! stack is still a safe stand-in whose public shape is `heap.lock`,
-//! and the copy of `zend_vm_stack` lands behind it (design §11, days
-//! 3–7). Nothing here panics: a slot that is not there reads as `UNDEF`,
-//! as php's uninitialised zval does.
+//! stack is `zend_vm_stack`'s pages, taken from the same heap, so a
+//! frame is memory the limit bounds as any value is. Nothing here
+//! panics: a slot that is not there reads as `UNDEF`, as php's
+//! uninitialised zval does.
 #![deny(
     clippy::undocumented_unsafe_blocks,
     clippy::multiple_unsafe_ops_per_block
@@ -109,6 +109,29 @@ pub struct Heap {
     /// php's `zend_gc_globals`, the cycle collector's root buffer and
     /// numbers, the request's own (design §5.12).
     gc: collector::Collector,
+    /// A debug build's record of the first refcount operation it refused
+    /// on a block this heap had freed, until the engine takes it
+    /// ([`Heap::take_freed_use`]).
+    #[cfg(debug_assertions)]
+    freed_use: std::cell::Cell<Option<FreedUse>>,
+}
+
+/// What a refcount operation was asked to do.
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefOp {
+    Addref,
+    Release,
+}
+
+/// A refcount operation a debug build refused: the block, the operation
+/// and the line that asked for it.
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone, Copy)]
+struct FreedUse {
+    at: usize,
+    op: RefOp,
+    site: &'static std::panic::Location<'static>,
 }
 
 impl Default for Heap {
@@ -134,6 +157,8 @@ impl Heap {
             interned: string::Table::new(),
             iterators: iterators::Iterators::default(),
             gc,
+            #[cfg(debug_assertions)]
+            freed_use: std::cell::Cell::new(None),
         }
     }
 
@@ -183,6 +208,32 @@ impl Heap {
         self.mm.set_limit(limit);
     }
 
+    /// The fatal the heap raised when it refused an allocation is
+    /// rendered: php's `heap->overflow = 0` in `zend_mm_safe_error`. From
+    /// that refusal until here the limit refuses nothing, so the
+    /// rendering, a backtrace of every frame of a recursion the limit
+    /// stopped among it, is not refused by the limit it reports; from
+    /// here the limit holds again, for the shutdown functions and the
+    /// destructors after.
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '8M');
+    /// ini_set('fatal_error_backtraces', '1');
+    /// function f() { f(); }
+    /// f();
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 262144 bytes) in %s on line 4
+    /// Stack trace:
+    /// #0 %s(4): f()
+    /// %a
+    /// #%d %s(5): f()
+    /// #%d {main}
+    /// ```
+    pub fn overflow_rendered(&mut self) {
+        self.mm.overflow_rendered();
+    }
+
     /// A request-scoped string of `bytes`, php's `zend_string_init`:
     /// one allocation out of this heap, one owner, and the bytes as
     /// given.
@@ -205,6 +256,18 @@ impl Heap {
         // SAFETY: the allocation is exactly the size `init_with` asks for
         // and nothing else holds it.
         Ok(unsafe { Str::init_with(at, len, 0, fill) })
+    }
+
+    /// `s` with the bytes of `tail` after its own, php's
+    /// `zend_string_extend` and the `memcpy` after it: the caller hands
+    /// one owner of `s` over and holds one of the string handed back.
+    /// Where that owner is the only one and `s` is the request's, the
+    /// allocation is grown where it stands as `erealloc` grows it, so a
+    /// loop of `.=` is linear; an interned or shared `s` is copied into
+    /// a new string and left to its other holders as it was. `tail` is
+    /// read and keeps its owners, and may be `s`.
+    pub fn string_append(&mut self, s: Str, tail: Str) -> Result<Str, Fatal> {
+        Str::append(&mut self.mm, s, tail)
     }
 
     /// `zend_string_safe_alloc(n, m, l, 0)`: a string of `n * m + l`
@@ -257,10 +320,64 @@ impl Heap {
         unsafe { self.mm.free(s.address()) };
     }
 
+    /// The first refcount operation a debug build refused because the
+    /// block it named was one this heap had freed, as the `InternalError`
+    /// fatal that ends the request, naming the block, the operation and
+    /// the line that asked for it; taken, so it is reported once. The
+    /// operation itself did nothing, so the free list the block's first
+    /// word links stands. A release build looks for none and answers
+    /// `None`.
+    pub fn take_freed_use(&mut self) -> Option<Fatal> {
+        #[cfg(debug_assertions)]
+        {
+            self.freed_use.take().map(|refused| {
+                let op = match refused.op {
+                    RefOp::Addref => "an addref",
+                    RefOp::Release => "a release",
+                };
+                Fatal::Error(format!(
+                    "InternalError: {op} of the block at {:#x}, which the heap has freed, at {}",
+                    refused.at, refused.site
+                ))
+            })
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            None
+        }
+    }
+
+    /// A debug build's question before a refcount operation: whether `z`
+    /// names a block this heap has freed ([`mm::freed`]). One that does
+    /// is recorded for [`Heap::take_freed_use`], the first only, and the
+    /// operation is refused.
+    #[cfg(debug_assertions)]
+    fn refuses(&self, z: Zval, op: RefOp, site: &'static std::panic::Location<'static>) -> bool {
+        let Some(at) = z.counted() else {
+            return false;
+        };
+        if !mm::freed::is_freed(at) {
+            return false;
+        }
+        if self.freed_use.get().is_none() {
+            self.freed_use.set(Some(FreedUse {
+                at: at.as_ptr().addr(),
+                op,
+                site,
+            }));
+        }
+        true
+    }
+
     /// One more owner of `z`: a refcount increment for a refcounted
     /// value, nothing for a scalar or an immutable value (`ZVAL_COPY`).
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn addref(&self, z: Zval) {
         if !z.is_refcounted() {
+            return;
+        }
+        #[cfg(debug_assertions)]
+        if self.refuses(z, RefOp::Addref, std::panic::Location::caller()) {
             return;
         }
         if let Some(s) = z.as_str() {
@@ -287,6 +404,7 @@ impl Heap {
     /// may re-enter, and the heap is theirs: it is asked for at each
     /// step and again after every call up, since the destructor may have
     /// grown it.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn release(hooks: &mut dyn HeapHooks, z: Zval) {
         if Heap::release_nogc(hooks, z) {
             Heap::gc_check_possible_root(hooks, z);
@@ -298,8 +416,16 @@ impl Heap {
     /// temporary operand this way (`FREE_OP`), and an internal call's
     /// arguments, since neither is a place a cycle is left behind in.
     /// Whether owners are left.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn release_nogc(hooks: &mut dyn HeapHooks, z: Zval) -> bool {
         if !z.is_refcounted() {
+            return false;
+        }
+        #[cfg(debug_assertions)]
+        if hooks
+            .heap()
+            .refuses(z, RefOp::Release, std::panic::Location::caller())
+        {
             return false;
         }
         if let Some(s) = z.as_str() {
@@ -618,6 +744,50 @@ mod tests {
         assert_eq!(nothing.heap.memory_usage(false), start);
     }
 
+    /// `zend_string_extend` over a string of one owner grows it where it
+    /// stands while the bin holds it, and over a shared one copies it and
+    /// leaves the other holder's bytes as they were.
+    #[test]
+    fn an_append_extends_the_one_owner_s_string_and_copies_a_shared_one() {
+        let _alone = alone();
+        let mut nothing = Recorder { heap: Heap::new() };
+        let pair = (nothing.heap.string(b"abc"), nothing.heap.string(b"de"));
+        assert!(
+            pair.0.is_ok() && pair.1.is_ok(),
+            "the heap would not allocate five bytes"
+        );
+        let (Ok(s), Ok(tail)) = pair else { return };
+        let start = nothing.heap.memory_usage(false);
+        // 24 + 3 + 1 and 24 + 5 + 1 both round into the 32-byte bin.
+        let grown = nothing.heap.string_append(s, tail);
+        assert!(grown.is_ok(), "the append was refused");
+        let Ok(grown) = grown else { return };
+        assert!(
+            grown.is_same(s),
+            "a string with one owner moved within its bin"
+        );
+        assert_eq!(grown.bytes(), b"abcde");
+        assert_eq!(nothing.heap.memory_usage(false), start);
+        // Ten bytes are the 40-byte bin: the slot moves up, once.
+        let twice = nothing.heap.string_append(grown, grown);
+        assert!(twice.is_ok(), "the append was refused");
+        let Ok(twice) = twice else { return };
+        assert_eq!(twice.bytes(), b"abcdeabcde");
+        assert_eq!(nothing.heap.memory_usage(false), start - 32 + 40);
+        twice.addref();
+        let copy = nothing.heap.string_append(twice, tail);
+        assert!(copy.is_ok(), "the append was refused");
+        let Ok(copy) = copy else { return };
+        assert!(!copy.is_same(twice), "a shared string was written into");
+        assert_eq!(twice.bytes(), b"abcdeabcde");
+        assert_eq!(twice.refcount(), 1);
+        assert_eq!(copy.bytes(), b"abcdeabcdede");
+        for z in [twice, copy, tail] {
+            Heap::release(&mut nothing, Zval::string(z));
+        }
+        assert_eq!(nothing.heap.memory_usage(false), start - 32 - 32);
+    }
+
     /// The limit is met on chunk growth, with php's own text.
     #[test]
     fn the_memory_limit_is_php_s_message() {
@@ -703,6 +873,9 @@ mod tests {
                     .to_string()
             )
         );
+        // The fatal is rendered, as the engine says after each, so the
+        // limit holds for the next ask.
+        heap.overflow_rendered();
         // A 1760-byte string is the 1792-byte bin, a `run` of seven
         // pages, which neither chunk has free. Nothing is on a free
         // list, so the sweep collects nothing and the limit stands.
@@ -713,6 +886,7 @@ mod tests {
                     .to_string()
             ))
         );
+        heap.overflow_rendered();
         // Every slot back on its bin's free list. The pages are still
         // the request's until the sweep walks them, so the same
         // allocation still finds no seven free pages anywhere.
@@ -759,6 +933,93 @@ mod tests {
             assert_eq!(heap.memory_usage(false), object::INIT_BYTES);
         }
         assert_eq!(mm::MAPPINGS.load(Relaxed), before);
+    }
+
+    /// A debug build stops at a second release of a block, #723's
+    /// defect planted: the first release frees the string, the second
+    /// finds the block the heap's own and is refused, recorded as the
+    /// `InternalError` naming the block, the operation and this line,
+    /// and the free list the block's first word links is untouched, so
+    /// the bin hands the block out once and then the next one. An addref
+    /// of a freed block is refused the same way.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn a_release_of_a_freed_block_is_refused_and_named_where_it_was_made() {
+        let _alone = alone();
+        let mut hooks = Recorder { heap: Heap::new() };
+        let start = hooks.heap.memory_usage(false);
+        let made = hooks.heap.string(b"a string of its own block");
+        assert!(made.is_ok(), "the heap would not allocate");
+        let Ok(s) = made else {
+            return;
+        };
+        let z = Zval::string(s);
+        Heap::release(&mut hooks, z);
+        assert_eq!(hooks.heap.memory_usage(false), start);
+        assert_eq!(hooks.heap.take_freed_use(), None);
+
+        Heap::release(&mut hooks, z);
+        let site = line!() - 1;
+        let at = s.address().as_ptr().addr();
+        assert_eq!(
+            hooks.heap.take_freed_use(),
+            Some(Fatal::Error(format!(
+                "InternalError: a release of the block at {at:#x}, which the heap has freed, at {}:{site}:9",
+                file!()
+            )))
+        );
+        assert_eq!(hooks.heap.take_freed_use(), None, "it is reported once");
+        assert_eq!(hooks.heap.memory_usage(false), start);
+
+        let again = hooks.heap.string(b"a string of its own block");
+        let next = hooks.heap.string(b"a string of its own block");
+        assert_eq!(again.as_ref().map(|s| s.address().as_ptr().addr()), Ok(at));
+        assert!(
+            next.as_ref()
+                .is_ok_and(|s| s.address().as_ptr().addr() != at),
+            "the free list's link was not written over"
+        );
+        for s in [again, next].into_iter().flatten() {
+            hooks.heap.release_string(s);
+        }
+
+        hooks.heap.addref(z);
+        assert!(matches!(
+            hooks.heap.take_freed_use(),
+            Some(Fatal::Error(message)) if message.starts_with("InternalError: an addref of the block at ")
+        ));
+    }
+
+    /// php's `heap->overflow`: the allocation the limit refuses raises
+    /// the fatal and lifts the limit, so what renders the fatal is not
+    /// refused, and the limit holds again once the engine says the
+    /// fatal is rendered.
+    #[test]
+    fn the_limit_is_lifted_while_its_fatal_is_rendered() {
+        let _alone = alone();
+        let mut heap = Heap::new();
+        heap.set_memory_limit(4 * 1024 * 1024);
+        let bytes = vec![b'x'; 1024 * 1024];
+        let mut held = Vec::new();
+        let refused = loop {
+            match heap.string(&bytes) {
+                Ok(s) => held.push(s),
+                Err(fatal) => break fatal,
+            }
+        };
+        assert!(
+            matches!(&refused, Fatal::Error(m) if m.starts_with("Allowed memory size of 4194304 bytes exhausted"))
+        );
+        let rendering = heap.string(&bytes);
+        assert!(rendering.is_ok(), "the rendering is not refused");
+        assert!(heap.memory_usage(true) > 4 * 1024 * 1024);
+        held.extend(rendering);
+        heap.overflow_rendered();
+        let after = (0..4).map(|_| heap.string(&bytes)).find_map(Result::err);
+        assert!(after.is_some(), "the limit holds again");
+        for s in held {
+            heap.release_string(s);
+        }
     }
 
     /// What the heap's tests pass where a request would serve a
