@@ -691,7 +691,7 @@ fn convert(
             NodeKind::Element => {
                 let element = Node::new_element(Some(doc), None, node.qualified_name(), None)?;
                 item.parent.add_child(element);
-                element.set_line(u16::try_from(node.line()).unwrap_or(u16::MAX));
+                element.set_line(node.line());
                 let entering = node.namespace();
                 let mut current = item.ns;
                 if create_default_ns && Some(entering) != item.active {
@@ -735,7 +735,7 @@ fn convert(
             NodeKind::Text => {
                 let text = Node::new_text_len(Some(doc), node.data())?;
                 item.parent.add_child(text);
-                text.set_line(u16::try_from(node.line()).unwrap_or(u16::MAX));
+                text.set_line(node.line());
             }
             NodeKind::DocumentType => {
                 let public = node.doctype_public_id();
@@ -752,7 +752,7 @@ fn convert(
                 let end = data.iter().position(|b| *b == 0).unwrap_or(data.len());
                 let comment = Node::new_comment(Some(doc), data.get(..end).unwrap_or_default())?;
                 item.parent.add_child(comment);
-                comment.set_line(u16::try_from(node.line()).unwrap_or(u16::MAX));
+                comment.set_line(node.line());
             }
             _ => {}
         }

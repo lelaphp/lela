@@ -830,9 +830,22 @@ impl Node {
         self.read(|n| n.line)
     }
 
-    /// Set `node->line`, as php's HTML5 bridge carries lexbor's line over.
-    pub fn set_line(self, line: u16) {
-        self.write(|n| n.line = line);
+    /// Set `node->line`, as php's HTML5 bridge carries lexbor's line over;
+    /// a text node past 65,534 keeps the whole line in `psvi`, where
+    /// `xmlGetLineNo` reads it.
+    pub fn set_line(self, line: usize) {
+        match u16::try_from(line) {
+            Ok(short) if short < u16::MAX => self.write(|n| n.line = short),
+            _ => {
+                let text = self.kind() == Kind::Text;
+                self.write(|n| {
+                    n.line = u16::MAX;
+                    if text {
+                        n.psvi = std::ptr::without_provenance_mut(line);
+                    }
+                });
+            }
+        }
     }
 
     /// `xmlAddID(NULL, doc, value, attr)`: the attribute registered as the
