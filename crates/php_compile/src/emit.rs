@@ -113,10 +113,13 @@ use php_syntax::magic_const_name;
 
 use crate::{CompileError, Options, StackLimit};
 use attributes::InternalAttribute;
+use target::{Source, Target};
 use walk::{Class, Closure, Function, Method, Property};
 
 mod attributes;
+mod list;
 mod magic;
+mod target;
 mod types;
 mod walk;
 
@@ -1476,7 +1479,7 @@ impl Emit<'_> {
             if op != Some(SyntaxKind::EQ) {
                 return Err(self.unread("a by-reference compound assignment"));
             }
-            return self.assign_ref(target, value);
+            return self.assign_ref(target, Source::Expr(value));
         }
         if op == Some(SyntaxKind::QUESTION_QUESTION_EQ) {
             let tree::Expr::SimpleVarExpr(var) = target else {
@@ -1488,27 +1491,7 @@ impl Emit<'_> {
             return self.assign_coalesce(&name, value);
         }
         if op == Some(SyntaxKind::EQ) {
-            return match target {
-                tree::Expr::SimpleVarExpr(var) => match self.simple_var_of(var, line)? {
-                    SimpleVar::Cv(name) => self.assign(&name, value),
-                    SimpleVar::This => Err(self.unread("an assignment to what is no variable")),
-                },
-                tree::Expr::SubscriptExpr(_) => self.assign_dim(target, value),
-                tree::Expr::MemberAccessExpr(access) => {
-                    let name = self.member_name_of(access, line)?;
-                    let object = self.parsed.tree[access].obj;
-                    self.assign_prop(object, &name, value)
-                }
-                tree::Expr::ScopedAccessExpr(scoped) => match self.scoped_of(scoped, line)? {
-                    Scoped::Property { class, name } => {
-                        self.assign_static_prop(class, &name, value)
-                    }
-                    Scoped::Constant { .. } | Scoped::ClassName { .. } => {
-                        Err(self.unread("an assignment to what is no variable"))
-                    }
-                },
-                _ => Err(self.unread("an assignment to what is no variable")),
-            };
+            return self.assign_to(target, Source::Expr(value));
         }
         let Some(op) = op.and_then(compound_op) else {
             return Err(self.unread("an assignment operator"));
@@ -5539,7 +5522,14 @@ impl Emit<'_> {
         if key.is_some_and(|key| key.byref.is_some()) {
             return Err(self.compile_error("Key element cannot be a reference"));
         }
-        let by_ref = target.byref.is_some();
+        if key.is_some_and(|key| self.list_of(key.key).is_some()) {
+            return Err(self.compile_error("Cannot use list as key element"));
+        }
+        // `zend_propagate_list_refs`: a list with an element taken by
+        // reference takes the loop by reference.
+        let list = self.list_of(value);
+        let by_ref =
+            target.byref.is_some() || list.as_ref().is_some_and(|list| self.list_has_refs(list));
         let subject = self.foreach_subject(expr, by_ref)?;
         let (op1_type, op1) = self.operand(subject);
         let reset = self.temporary();
@@ -5566,19 +5556,7 @@ impl Emit<'_> {
             Some(header),
             false,
         );
-        let value_cv = self.foreach_target(value)?;
-        self.push(Opline {
-            opcode: if by_ref {
-                Opcode::FeFetchRw
-            } else {
-                Opcode::FeFetchR
-            },
-            op1_type: OperandKind::Var,
-            op1: reset,
-            op2_type: OperandKind::Cv,
-            op2: value_cv,
-            ..Opline::default()
-        });
+        self.foreach_value(reset, by_ref, value, list.as_ref())?;
         if let Some(key) = key {
             self.foreach_key(opnum_fetch, key.key)?;
         }
@@ -5604,6 +5582,63 @@ impl Emit<'_> {
             op1: reset,
             ..Opline::default()
         });
+        Ok(())
+    }
+
+    /// The value half of `zend_compile_foreach`: `$this` is php's
+    /// compile error; the fetch over the reset `VAR` writes a plain
+    /// variable's CV, and anything else into a `VAR` of its own that the
+    /// target is then assigned from, a list by `zend_compile_list_assign`
+    /// and any other place by the `ASSIGN` or `ASSIGN_REF`
+    /// `zend_emit_assign_znode` builds.
+    fn foreach_value(
+        &mut self,
+        reset: u32,
+        by_ref: bool,
+        value: tree::Expr,
+        list: Option<&target::List>,
+    ) -> Result<(), CompileError> {
+        if self.is_this(value) {
+            return Err(self.compile_error("Cannot re-assign $this"));
+        }
+        let fetch = self.push(Opline {
+            opcode: if by_ref {
+                Opcode::FeFetchRw
+            } else {
+                Opcode::FeFetchR
+            },
+            op1_type: OperandKind::Var,
+            op1: reset,
+            ..Opline::default()
+        });
+        // The value's CV where it is a plain variable; otherwise a `VAR`
+        // the fetch writes and the target is assigned from, as
+        // `zend_emit_assign_znode` assigns it.
+        let (op2_type, op2) = match (self.peel(value), list) {
+            (tree::Expr::SimpleVarExpr(var), None) => match self.simple_var_of(var, self.line)? {
+                SimpleVar::Cv(name) => (OperandKind::Cv, self.lookup_cv(&name)),
+                SimpleVar::This => return Err(self.compile_error("Cannot re-assign $this")),
+            },
+            _ => (OperandKind::Var, self.temporary()),
+        };
+        if let Some(opline) = self.oplines.get_mut(fetch as usize) {
+            opline.op2_type = op2_type;
+            opline.op2 = op2;
+        }
+        if op2_type == OperandKind::Var {
+            let fetched = Where::Returned(op2);
+            if let Some(list) = list {
+                self.list_assign(list, fetched, false)?;
+            } else {
+                self.line = self.line_of(value);
+                let assigned = if by_ref {
+                    self.assign_ref(value, Source::Node(fetched))?
+                } else {
+                    self.assign_to(value, Source::Node(fetched))?
+                };
+                self.do_free(assigned);
+            }
+        }
         Ok(())
     }
 
@@ -5676,38 +5711,16 @@ impl Emit<'_> {
     /// `zend_emit_assign_znode`'s `ASSIGN` of it into the key's CV, into
     /// a temporary nothing reads, which `zend_do_free` marks `UNUSED`.
     fn foreach_key(&mut self, opnum_fetch: u32, key: tree::Expr) -> Result<(), CompileError> {
-        let key_cv = self.foreach_target(key)?;
         let key_tmp = self.temporary();
         if let Some(fetch) = self.oplines.get_mut(opnum_fetch as usize) {
             fetch.out_type = OperandKind::Tmp;
             fetch.out = key_tmp;
         }
-        let out = self.temporary();
-        self.push(Opline {
-            opcode: Opcode::Assign,
-            op1_type: OperandKind::Cv,
-            op1: key_cv,
-            op2_type: OperandKind::Tmp,
-            op2: key_tmp,
-            out_type: OperandKind::Tmp,
-            out,
-            ..Opline::default()
-        });
-        self.do_free(Where::Temporary(out));
+        // `zend_compile_expr` over the `ASSIGN` php builds: the key's line.
+        self.line = self.line_of(key);
+        let assigned = self.assign_to(key, Source::Node(Where::Temporary(key_tmp)))?;
+        self.do_free(assigned);
         Ok(())
-    }
-
-    /// The CV a `foreach` value or key is assigned into: a variable
-    /// through `zend_try_compile_cv`, `$this` php's compile error, and
-    /// anything else, which php assigns through a `VAR`, not read yet.
-    fn foreach_target(&mut self, target: tree::Expr) -> Result<u32, CompileError> {
-        match self.peel(target) {
-            tree::Expr::SimpleVarExpr(id) => match self.simple_var_of(id, self.line)? {
-                SimpleVar::Cv(name) => Ok(self.lookup_cv(&name)),
-                SimpleVar::This => Err(self.compile_error("Cannot re-assign $this")),
-            },
-            _ => Err(self.fatal("a `foreach` whose target this compiler cannot read yet")),
-        }
     }
 
     /// `zend_compile_return` (`Z/Zend/zend_compile.c:5694`): the value,
@@ -7387,7 +7400,9 @@ impl Emit<'_> {
                 let elements = tree[id].array_elements.clone();
                 self.array(&elements)
             }
-            tree::Expr::ListExpr(_) => Err(self.unread("a `list`")),
+            tree::Expr::ListExpr(_) => {
+                Err(self.compile_error("Cannot use list() as standalone expression"))
+            }
             tree::Expr::UnaryExpr(id) => {
                 let node = &tree[id];
                 let operand = self.required(node.operand, "a unary operator")?;
@@ -8586,13 +8601,13 @@ impl Emit<'_> {
     /// anything reads it; [`Self::do_free`] marks it `UNUSED` when
     /// nothing does, which is what the engine's `ASSIGN` reads as
     /// `RETURN_VALUE_USED`.
-    fn assign(&mut self, var: &[u8], value: tree::Expr) -> Result<Where, CompileError> {
+    fn assign(&mut self, var: &[u8], value: Source) -> Result<Where, CompileError> {
         // `CG(zend_lineno) = zend_ast_get_lineno(var_ast)` before the
         // `ASSIGN` (`Z/Zend/zend_compile.c:3474`): the target's line,
         // which is this node's, and not the line its value ended on.
         let line = self.line;
         let cv = self.lookup_cv(var);
-        let value = self.expr(value)?;
+        let value = self.source(value)?;
         let (op2_type, op2) = self.operand(value);
         let out = self.temporary();
         self.line = line;
@@ -8716,6 +8731,23 @@ impl Emit<'_> {
         Ok((kind, at, if call { RETURNS_FUNCTION } else { 0 }))
     }
 
+    /// [`Self::ref_source`] over a [`Source`]: a value the compiler
+    /// already holds, php's `ZEND_AST_ZNODE`, is its own operand, takes no
+    /// `MAKE_REF` (`source_ast->kind != ZEND_AST_ZNODE`) and is no call.
+    fn ref_source_of(
+        &mut self,
+        source: Source,
+        plain_target: bool,
+    ) -> Result<(OperandKind, u32, u32), CompileError> {
+        match source {
+            Source::Expr(source) => self.ref_source(source, plain_target),
+            Source::Node(value) => {
+                let (kind, at) = self.operand(value);
+                Ok((kind, at, 0))
+            }
+        }
+    }
+
     /// `zend_compile_assign_ref` (`Z/Zend/zend_compile.c:3549`),
     /// `$b = &$a`: the target compiled first and held back
     /// (`zend_delayed_compile_var` under `BP_VAR_W` with `by_ref`, which
@@ -8770,33 +8802,28 @@ impl Emit<'_> {
     /// int(2)
     /// int(4)
     /// ```
-    fn assign_ref(
-        &mut self,
-        target: tree::Expr,
-        source: tree::Expr,
-    ) -> Result<Where, CompileError> {
+    fn assign_ref(&mut self, target: tree::Expr, source: Source) -> Result<Where, CompileError> {
         let line = self.line;
         let target = self.peel(target);
-        if let tree::Expr::ScopedAccessExpr(id) = target
-            && let Scoped::Property { class, name } = self.scoped_of(id, line)?
-        {
-            return self.assign_static_prop_ref(class, &name, source);
+        let decoded = self.target(target)?;
+        if let Source::Expr(source) = source {
+            if self.is_short_circuited(source) {
+                return Err(self.compile_error("Cannot take reference of a nullsafe chain"));
+            }
+            if self.is_globals(source) {
+                return Err(self.compile_error("Cannot acquire reference to $GLOBALS"));
+            }
         }
         // `zend_delayed_compile_var(&target_node, target_ast, BP_VAR_W, 1)`:
         // a plain CV settles where it stands and a dimension's fetches
         // wait for `base_fetch` below, after the source has compiled.
-        let held = match target {
-            tree::Expr::SimpleVarExpr(id) => match self.simple_var_of(id, line)? {
-                SimpleVar::Cv(name) => Base::Settled((OperandKind::Cv, self.lookup_cv(&name))),
-                SimpleVar::This => {
-                    return Err(walk::unread(
-                        line,
-                        "a by-reference assignment to what is no variable",
-                    ));
-                }
-            },
-            tree::Expr::SubscriptExpr(_) => self.delayed_var(target, Fetch::Write)?,
-            _ => {
+        let held = match decoded {
+            Target::StaticProp { class, name } => {
+                return self.assign_static_prop_ref(class, &name, source);
+            }
+            Target::Cv(name) => Base::Settled((OperandKind::Cv, self.lookup_cv(&name))),
+            Target::Dim(_) => self.delayed_var(target, Fetch::Write)?,
+            Target::Prop { .. } | Target::List(_) => {
                 return Err(walk::unread(
                     line,
                     "a by-reference assignment to what is no variable",
@@ -8807,7 +8834,7 @@ impl Emit<'_> {
         // target_ast->child[0]->kind != ZEND_AST_ZVAL`, the one shape no
         // `MAKE_REF` stands under.
         let plain = matches!(held, Base::Settled((OperandKind::Cv, _)));
-        let (op2_type, op2, flags) = self.ref_source(source, plain)?;
+        let (op2_type, op2, flags) = self.ref_source_of(source, plain)?;
         let (op1_type, op1) = self.base_fetch(held, Fetch::Write, Over::Ref);
         let out = self.temporary();
         self.push(Opline {
@@ -8834,14 +8861,17 @@ impl Emit<'_> {
     /// carrying `ZEND_FETCH_DIM_DIM`, the bit that names the dimension
     /// under a dimension in php's string-offset error; the `[]` of an
     /// append is an `UNUSED` `op2`, which the dump prints as `NEXT`.
-    fn assign_dim(&mut self, target: tree::Expr, value: tree::Expr) -> Result<Where, CompileError> {
+    fn assign_dim(&mut self, target: tree::Expr, value: Source) -> Result<Where, CompileError> {
         let (container, links) = self.dim_chain(target, Fetch::Write)?;
         // `zend_delayed_emit_op` stamped the fetch's line where the
         // fetch stood, and `zend_delayed_compile_end` carries it into
         // the op array unchanged, so the value compiled after it does
         // not move the `ASSIGN_DIM` (`Z/Zend/zend_compile.c:3487`).
         let line = self.line;
-        let value = self.assigned_value(target, value)?;
+        let value = match value {
+            Source::Expr(value) => self.assigned_value(target, value)?,
+            Source::Node(value) => value,
+        };
         let (data_type, data) = self.operand(value);
         let Some((last, fetches)) = links.split_last() else {
             return Err(self.fatal("a dimension assignment with no dimension"));
@@ -9327,7 +9357,7 @@ impl Emit<'_> {
         &mut self,
         object: tree::Expr,
         name: &[u8],
-        value: tree::Expr,
+        value: Source,
     ) -> Result<Where, CompileError> {
         let line = self.line;
         let mut names = vec![name.to_vec()];
@@ -9347,7 +9377,7 @@ impl Emit<'_> {
         }
         // The delayed fetch's line, as [`Self::assign_dim`] keeps it.
         let line = self.line;
-        let value = self.expr(value)?;
+        let value = self.source(value)?;
         let (data_type, data) = self.operand(value);
         let Some((last, fetches)) = links.split_last() else {
             return Err(self.fatal("a property assignment with no property"));
@@ -9409,7 +9439,7 @@ impl Emit<'_> {
         &mut self,
         class: ClassSpec,
         name: &[u8],
-        value: tree::Expr,
+        value: Source,
     ) -> Result<Where, CompileError> {
         let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
         let name = self.string(name)?;
@@ -9419,7 +9449,7 @@ impl Emit<'_> {
         let (class_type, class_at) = self.class_operand(&class)?;
         // The delayed fetch's line, as [`Self::assign_dim`] keeps it.
         let line = self.line;
-        let value = self.expr(value)?;
+        let value = self.source(value)?;
         let (data_type, data) = self.operand(value);
         self.line = line;
         self.push(Opline {
@@ -9718,7 +9748,7 @@ impl Emit<'_> {
         &mut self,
         class: ClassSpec,
         name: &[u8],
-        source: tree::Expr,
+        source: Source,
     ) -> Result<Where, CompileError> {
         let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
         let name = self.string(name)?;
@@ -9726,7 +9756,7 @@ impl Emit<'_> {
         let out = self.temporary();
         let slots = self.cache_slots(3);
         let (class_type, class_at) = self.class_operand(&class)?;
-        let (data_type, data, flags) = self.ref_source(source, false)?;
+        let (data_type, data, flags) = self.ref_source_of(source, false)?;
         self.push(Opline {
             opcode: Opcode::AssignStaticPropRef,
             op1_type: OperandKind::Const,
@@ -10918,7 +10948,9 @@ impl Emit<'_> {
                 self.constant_array(&elements)?
                     .ok_or_else(|| self.fatal("an array expression that is no constant"))
             }
-            tree::Expr::ListExpr(_) => Err(self.unread("a `list`")),
+            tree::Expr::ListExpr(_) => {
+                Err(self.compile_error("Cannot use list() as standalone expression"))
+            }
             // `zend_is_allowed_in_const_expr` allows `ZEND_AST_CALL`
             // for the first-class callable alone, `f(...)`, which this
             // compiler does not read; the arguments are read before the

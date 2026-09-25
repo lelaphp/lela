@@ -7172,4 +7172,162 @@ class C {
             Some(String::from("Cannot use try without catch or finally"))
         );
     }
+
+    /// `zend_compile_list_assign`'s oplines over the four shapes #583
+    /// names, as the oracle's `[regime.dump]` prints them: a plain list
+    /// reads the right side's copy once per element with `FETCH_LIST_R`
+    /// and frees it after the last, a keyed list reads by the key, a
+    /// nested list reads the element and then its elements, and an
+    /// element taken by reference is `FETCH_LIST_W` and `MAKE_REF` over
+    /// the right side made a reference; a `foreach` value that is a list
+    /// is fetched into a `VAR` and read the same way.
+    #[test]
+    fn a_list_compiles_to_what_zend_compile_list_assign_emits() {
+        let cases: &[(&[u8], usize, u32, u32, &str)] = &[
+            (
+                b"<?php [$a, $b] = $x;",
+                7,
+                3,
+                5,
+                "0000 T3 = QM_ASSIGN CV0($x)\n\
+                 0001 V4 = FETCH_LIST_R T3 int(0)\n\
+                 0002 ASSIGN CV1($a) V4\n\
+                 0003 V6 = FETCH_LIST_R T3 int(1)\n\
+                 0004 ASSIGN CV2($b) V6\n\
+                 0005 FREE T3\n\
+                 0006 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    3: 0001 - 0005 (tmp/var)\n",
+            ),
+            (
+                b"<?php list('k' => $a) = $x;",
+                5,
+                2,
+                3,
+                "0000 T2 = QM_ASSIGN CV0($x)\n\
+                 0001 V3 = FETCH_LIST_R T2 string(\"k\")\n\
+                 0002 ASSIGN CV1($a) V3\n\
+                 0003 FREE T2\n\
+                 0004 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    2: 0001 - 0003 (tmp/var)\n",
+            ),
+            (
+                b"<?php [$a, [$b, $c]] = $x;",
+                11,
+                4,
+                8,
+                "0000 T4 = QM_ASSIGN CV0($x)\n\
+                 0001 V5 = FETCH_LIST_R T4 int(0)\n\
+                 0002 ASSIGN CV1($a) V5\n\
+                 0003 V7 = FETCH_LIST_R T4 int(1)\n\
+                 0004 V8 = FETCH_LIST_R V7 int(0)\n\
+                 0005 ASSIGN CV2($b) V8\n\
+                 0006 V10 = FETCH_LIST_R V7 int(1)\n\
+                 0007 ASSIGN CV3($c) V10\n\
+                 0008 FREE V7\n\
+                 0009 FREE T4\n\
+                 0010 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    4: 0001 - 0009 (tmp/var)\n\
+                 \x20    7: 0004 - 0008 (tmp/var)\n",
+            ),
+            (
+                b"<?php [&$a] = $x;",
+                6,
+                2,
+                4,
+                "0000 V2 = MAKE_REF CV0($x)\n\
+                 0001 V3 = FETCH_LIST_W V2 int(0)\n\
+                 0002 V4 = MAKE_REF V3\n\
+                 0003 ASSIGN_REF CV1($a) V4\n\
+                 0004 FREE V2\n\
+                 0005 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    2: 0001 - 0004 (tmp/var)\n",
+            ),
+            (
+                b"<?php foreach ($xs as $k => [$a, $b]) {}",
+                11,
+                4,
+                8,
+                "0000 V4 = FE_RESET_R CV0($xs) 0009\n\
+                 0001 T10 = FE_FETCH_R V4 V5 0009\n\
+                 0002 V6 = FETCH_LIST_R V5 int(0)\n\
+                 0003 ASSIGN CV1($a) V6\n\
+                 0004 V8 = FETCH_LIST_R V5 int(1)\n\
+                 0005 ASSIGN CV2($b) V8\n\
+                 0006 FREE V5\n\
+                 0007 ASSIGN CV3($k) T10\n\
+                 0008 JMP 0001\n\
+                 0009 FE_FREE V4\n\
+                 0010 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    4: 0001 - 0009 (loop)\n\
+                 \x20    5: 0002 - 0006 (tmp/var)\n\
+                 \x20    10: 0002 - 0007 (tmp/var)\n",
+            ),
+        ];
+        for (source, lines, vars, tmps, oplines) in cases {
+            assert_eq!(
+                dump_of(source),
+                main_dump(*lines, *vars, *tmps, oplines),
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+    }
+
+    /// php's compile errors over a list's shape, each in php's words.
+    #[test]
+    fn a_list_of_the_wrong_shape_is_phps_compile_error() {
+        let cases: &[(&[u8], &str)] = &[
+            (b"<?php [] = $x;", "Cannot use empty list"),
+            (
+                b"<?php [$a, 'k' => $b] = $x;",
+                "Cannot mix keyed and unkeyed array entries in assignments",
+            ),
+            (
+                b"<?php $x = [list($a)];",
+                "Cannot use list() as standalone expression",
+            ),
+            (
+                b"<?php [...$a] = $x;",
+                "Spread operator is not supported in assignments",
+            ),
+            (
+                b"<?php [array($a)] = $x;",
+                "Cannot assign to array(), use [] instead",
+            ),
+            (b"<?php [list($a)] = $x;", "Cannot mix [] and list()"),
+            (
+                b"<?php ['k' => $a, , ] = $x;",
+                "Cannot use empty array entries in keyed array assignment",
+            ),
+            (
+                b"<?php [f()] = $x;",
+                "Can't use function return value in write context",
+            ),
+            (
+                b"<?php [1] = $x;",
+                "Assignments can only happen to writable values",
+            ),
+            (
+                b"<?php [&$a] = 1;",
+                "Cannot assign reference to non referenceable value",
+            ),
+            (
+                b"<?php foreach ($x as [$a] => $b) {}",
+                "Cannot use list as key element",
+            ),
+        ];
+        for (source, message) in cases {
+            assert_eq!(
+                refused(source).map(|e| e.message),
+                Some(String::from(*message)),
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+    }
 }

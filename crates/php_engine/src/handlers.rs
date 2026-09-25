@@ -4743,6 +4743,138 @@ pub(crate) fn fetch_dim_is<T: Tier>(
     Ok(advance(req, frame))
 }
 
+/// `ZEND_FETCH_LIST_R` (`Z/Zend/zend_vm_def.h:2431`), one element of a
+/// `list()` or a `[…]` on the left of an `=` or in a `foreach`:
+/// `zend_fetch_dimension_address_LIST_r`, which is the read of
+/// [`fetch_dim_r`] with `is_list` set. An array and an object are read
+/// as `FETCH_DIM_R` reads them; a string is no container here, so it
+/// falls with every other value to the last arm, where what is more than
+/// `null` warns `Cannot use int as array` in place of the read's
+/// `Trying to access array offset`, and the element is `null`. The
+/// container is not freed: the compiler reads it once per element and
+/// frees it after the last (`zend_do_free`'s `FETCH_LIST_*` arm).
+///
+/// ```php
+/// [$a, [$b, $c]] = [1, [2, 3]];
+/// ['k' => $d, 'm' => $e] = ['k' => 4];
+/// [$f, $g] = "ab";
+/// [$h] = 5;
+/// [$i] = null;
+/// list(, $j) = [1, 2];
+/// var_dump($a, $b, $c, $d, $e, $f, $g, $h, $i, $j);
+/// ```
+/// ```expect
+/// Warning: Undefined array key "m" in %s on line 3
+///
+/// Warning: Cannot use string as array in %s on line 4
+///
+/// Warning: Cannot use string as array in %s on line 4
+///
+/// Warning: Cannot use int as array in %s on line 5
+/// int(1)
+/// int(2)
+/// int(3)
+/// int(4)
+/// NULL
+/// NULL
+/// NULL
+/// NULL
+/// NULL
+/// int(2)
+/// ```
+pub(crate) fn fetch_list_r<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    list_read(req, frame, code, op)
+}
+
+/// The body of [`fetch_list_r`], and of [`fetch_list_w`] over what is
+/// no reference: the element read into the `VAR`, `FREE_OP2` and never
+/// `FREE_OP1`.
+fn list_read(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
+    let container = exec::operand_undef(req, frame, code, op.op1_type, op.op1).deref();
+    let read = if container.as_array().is_some() || container.as_object().is_some() {
+        read_dimension(req, frame, code, op, &container, DimRead::Warning)?
+    } else {
+        // `ZVAL_UNDEFINED_OP1` and `ZVAL_UNDEFINED_OP2`, then the list's
+        // own warning over what is more than `null`.
+        let _container = exec::operand(req, frame, code, op.op1_type, op.op1);
+        let _dim = exec::operand(req, frame, code, op.op2_type, op.op2);
+        if !matches!(container.as_ref(), ValueRef::Undef | ValueRef::Null) {
+            let named = crate::ops::type_name(req, &container);
+            crate::api::raising::warning(req, &format!("Cannot use {named} as array"));
+        }
+        Ok(Value::null())
+    };
+    exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    let value = match read {
+        Ok(value) => value,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    let slot = exec::temporary_slot(code, op.out);
+    let previous = req.set_slot(frame, slot, value);
+    req.release(previous);
+    Ok(advance(req, frame))
+}
+
+/// `ZEND_FETCH_LIST_W` (`Z/Zend/zend_vm_def.h:2443`), an element of a
+/// list taken by reference, `[&$a] = $x`: the container is the `VAR`
+/// the compiler's `MAKE_REF` left, and the element is fetched for
+/// writing as [`fetch_dim_w`] fetches it, so the `MAKE_REF` after it
+/// binds the variable to the array's own cell. A `VAR` holding neither
+/// a reference nor a place, what a call returned by value, is php's
+/// notice and the read of [`fetch_list_r`]. The container stays: the
+/// compiler frees it after the last element.
+///
+/// ```php
+/// $x = [1, [2]];
+/// [&$a, [&$b]] = $x;
+/// $a = 'a'; $b = 'b';
+/// var_dump($x);
+/// function f() { return [1]; }
+/// [&$d] = f();
+/// var_dump($d);
+/// ```
+/// ```expect
+/// array(2) {
+///   [0]=>
+///   &string(1) "a"
+///   [1]=>
+///   array(1) {
+///     [0]=>
+///     &string(1) "b"
+///   }
+/// }
+///
+/// Notice: Attempting to set reference to non referenceable value in %s on line 7
+/// int(1)
+/// ```
+pub(crate) fn fetch_list_w<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    if op.op1_type == OperandKind::Var {
+        let held = req
+            .slot_ptr(frame, exec::temporary_slot(code, op.op1))
+            .map(php_heap::ZvalRef::read);
+        let placed = held
+            .is_some_and(|z| z.as_indirect().is_some() || exec::value_of(z).as_php_ref().is_some());
+        if !placed {
+            crate::api::raising::notice(
+                req,
+                "Attempting to set reference to non referenceable value",
+            );
+            return list_read(req, frame, code, op);
+        }
+    }
+    fetch_dim_place(req, frame, code, op, DimRead::Silent, Keep::Container)
+}
+
 /// php's `type` argument to `zend_fetch_dimension_address_read`, of
 /// which the two reads use two values: `BP_VAR_R`, which warns of a key
 /// the table has not got, an offset past the end of a string and a
@@ -5422,7 +5554,7 @@ pub(crate) fn fetch_dim_w<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    fetch_dim_place(req, frame, code, op, DimRead::Silent)
+    fetch_dim_place(req, frame, code, op, DimRead::Silent, Keep::Nothing)
 }
 
 /// `ZEND_FETCH_DIM_RW` (`Z/Zend/zend_vm_def.h:2024`), the link of a
@@ -5471,7 +5603,7 @@ pub(crate) fn fetch_dim_rw<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    fetch_dim_place(req, frame, code, op, DimRead::Warning)
+    fetch_dim_place(req, frame, code, op, DimRead::Warning, Keep::Nothing)
 }
 
 /// The array arm of [`fetch_dim_place`], `fetch_from_array`: the entry
@@ -5516,6 +5648,7 @@ fn fetch_dim_place(
     code: &OpArray,
     op: &Opline,
     read: DimRead,
+    keep: Keep,
 ) -> Edge {
     let out = exec::temporary_slot(code, op.out);
     let Some(place) = write_place(req, frame, code, op.op1_type, op.op1) else {
@@ -5592,7 +5725,9 @@ fn fetch_dim_place(
     let written = match written {
         Ok(written) => written,
         Err(thrown) => {
-            exec::free_operand(req, frame, code, op.op1_type, op.op1);
+            if keep == Keep::Nothing {
+                exec::free_operand(req, frame, code, op.op1_type, op.op1);
+            }
             return threw(req, frame, &thrown);
         }
     };
@@ -5602,8 +5737,19 @@ fn fetch_dim_place(
         )));
     };
     var.write(written);
-    exec::free_container_var(req, frame, code, op);
+    if keep == Keep::Nothing {
+        exec::free_container_var(req, frame, code, op);
+    }
     Ok(advance(req, frame))
+}
+
+/// Whether a dimension fetched for writing gives its `VAR` container up
+/// after it, `FREE_OP1_VAR_PTR`: `FETCH_DIM_W` and `FETCH_DIM_RW` do,
+/// and `FETCH_LIST_W` keeps it for the elements after it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Keep {
+    Nothing,
+    Container,
 }
 
 /// `ZEND_CLONE` (`Z/Zend/zend_vm_def.h:6010`), what the compiler emits
@@ -10919,7 +11065,31 @@ fn fe_key(req: &mut Request, key: php_heap::Key) -> Result<Value, Thrown> {
 /// The value a by-value fetch hands its CV, `zend_assign_to_variable`
 /// (`Z/Zend/zend_execute.c`): one more owner with a reference followed,
 /// written through the cell the CV holds or over what it held, which is
-/// released after the write.
+/// released after the write. A `VAR`, what the compiler gives a fetch
+/// whose target is a list, a property or an element, takes the value as
+/// it stands with one more owner (`ZVAL_COPY_VALUE` and `GC_ADDREF`),
+/// for the assignment after it to read.
+///
+/// ```php
+/// $xs = [[1, 2], [3, 4]];
+/// foreach ($xs as [$a, $b]) { echo $a, $b, "\n"; }
+/// foreach ($xs as $k => [$a, $b]) { echo $k, $a, $b, "\n"; }
+/// $o = new stdClass;
+/// foreach ($xs as $o->p) {}
+/// var_dump($o->p);
+/// ```
+/// ```expect
+/// 12
+/// 34
+/// 012
+/// 134
+/// array(2) {
+///   [0]=>
+///   int(3)
+///   [1]=>
+///   int(4)
+/// }
+/// ```
 fn fe_assign(
     req: &mut Request,
     frame: FrameRef,
@@ -10927,7 +11097,13 @@ fn fe_assign(
     op: &Opline,
     value: Value,
 ) -> Edge {
-    let _ = code;
+    if op.op2_type == OperandKind::Var {
+        req.addref(&value);
+        let out = exec::temporary_slot(code, op.op2);
+        let previous = req.set_slot(frame, out, value);
+        req.release(previous);
+        return Ok(advance(req, frame));
+    }
     let value = value.deref();
     req.addref(&value);
     if let Some(r) = req.slot(frame, op.op2).as_php_ref() {
