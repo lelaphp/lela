@@ -6,6 +6,8 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use std::os::unix::ffi::OsStrExt;
+
 use php_ext::decl::{ConstDecl, FunctionDecl};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw, warning};
 use php_ext::request::Request;
@@ -151,6 +153,10 @@ fn host_natives() -> Vec<(FunctionDecl, Entry)> {
             move_uploaded_file,
         ),
         (stub("sys_getloadavg(): array|false"), sys_getloadavg),
+        (
+            stub("ftok(string $filename, string $project_id): int"),
+            ftok,
+        ),
         (stub("inet_ntop(string $ip): string|false"), inet_ntop),
         (stub("inet_pton(string $ip): string|false"), inet_pton),
         (
@@ -1355,6 +1361,44 @@ fn sys_getloadavg(req: &mut Request) -> Result<Value, Thrown> {
         array.append(req, Value::float(average))?;
     }
     Ok(Value::array(array))
+}
+
+/// `ftok(string $filename, string $project_id): int`, `Z/ext/standard/ftok.c`:
+/// the System V IPC key the host makes of the path and the one
+/// character; `-1` after php's warning where the host refuses.
+///
+/// ```php
+/// var_dump(ftok(__FILE__, "a") > 0, ftok("/nonexistent/f", "a"));
+/// try { ftok("", "a"); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// try { ftok(__FILE__, "ab"); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Warning: ftok(): ftok() failed - No such file or directory in %s on line 2
+/// bool(true)
+/// int(-1)
+/// ftok(): Argument #1 ($filename) must not be empty
+/// ftok(): Argument #2 ($project_id) must be a single character
+/// ```
+fn ftok(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 2, 2)?;
+    let path = path_argument(req, 1)?;
+    let project = string_argument(req, 2)?;
+    if path.is_empty() {
+        return Err(arg_value_error(req, 1, "not be empty"));
+    }
+    let &[project] = project.as_bytes() else {
+        return Err(arg_value_error(req, 2, "be a single character"));
+    };
+    let full = req.absolutize(path.as_bytes());
+    match crate::ffi::ftok(full.0.as_os_str().as_bytes(), project) {
+        Ok(key) => Ok(Value::int(key)),
+        Err(errno) => {
+            let error = std::io::Error::from_raw_os_error(errno);
+            let text = format!("ftok() failed - {}", crate::filestat::strerror(&error));
+            docref(req, Level::Warning, &text);
+            Ok(Value::int(-1))
+        }
+    }
 }
 
 /// `inet_ntop(string $ip): string|false`: four bytes as a dotted quad

@@ -1088,6 +1088,19 @@ pub(super) fn user_name(uid: u32) -> Option<Vec<u8>> {
     }
 }
 
+/// `ftok(pathname, proj)`: the key, or the `errno` of its `-1`; `proj`
+/// is a C `char`, signed on the hosts php builds for here.
+pub(super) fn ftok(path: &[u8], proj: u8) -> Result<i64, i32> {
+    let path = CString::new(path).map_err(|_| libc::ENOENT)?;
+    // SAFETY: `path` is NUL-terminated and outlives the call, which reads
+    // it and nothing else.
+    let key = unsafe { libc::ftok(path.as_ptr(), c_int::from(i8::from_ne_bytes([proj]))) };
+    if key == -1 {
+        return Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(0));
+    }
+    Ok(i64::from(key))
+}
+
 /// `inet_ntop(af, address, buffer, 40)` of `PHP_FUNCTION(inet_ntop)`:
 /// four bytes as `AF_INET`, sixteen as `AF_INET6`; `None` where the call
 /// answers `NULL`.
