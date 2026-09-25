@@ -117,6 +117,7 @@ use target::{Source, Target};
 use walk::{Class, Closure, Function, Method, Property};
 
 mod attributes;
+mod chain;
 mod list;
 mod magic;
 mod target;
@@ -152,15 +153,16 @@ struct Piece {
 }
 
 /// What one piece of an interpolated string stands for: the text
-/// written between the variables, a variable, the one `[…]` or `->p`
-/// the in-string grammar takes after it, an expression under `{…}`, or
+/// written between the variables, a variable, the one `[…]`, `->p` or
+/// `?->p` the in-string grammar takes after it (the `bool` is the `?`),
+/// an expression under `{…}`, or
 /// the variable an
 /// expression under `${…}` names.
 enum Fetched {
     Text(Vec<u8>),
     Var(Vec<u8>),
     Dim(Vec<u8>, Offset),
-    Prop(Vec<u8>, Vec<u8>),
+    Prop(Vec<u8>, Vec<u8>, bool),
     Node(tree::Expr),
     VarVar(tree::Expr),
 }
@@ -365,6 +367,12 @@ pub(crate) struct Emit<'a> {
     /// emitter recurses.
     stack: StackLimit,
     oplines: Vec<Opline>,
+    /// php's `CG(short_circuiting_opnums)`: the `JMP_NULL` of each `?->`
+    /// whose chain has not ended yet ([`chain`]).
+    short_circuits: Vec<u32>,
+    /// The node the next [`Self::expr`] compiles as a link of a chain the
+    /// caller ends, php's `ZEND_SHORT_CIRCUITING_INNER`.
+    chain_inner: Option<tree::Expr>,
     constants: Vec<Zval>,
     /// [`OpArray::const_exprs`]: the constant expressions a constant of
     /// kind `IS_CONSTANT_AST` indexes, in the order they were added.
@@ -903,6 +911,8 @@ pub(crate) fn unit(
         typing: Typing::of(options.strict_types),
         stack: options.stack,
         oplines: Vec::new(),
+        short_circuits: Vec::new(),
+        chain_inner: None,
         constants: Vec::new(),
         const_exprs: Vec::new(),
         vars: Vec::new(),
@@ -1424,17 +1434,14 @@ impl Emit<'_> {
         }
     }
 
-    /// The property's name of `$o->name`, as written; a nullsafe `?->`
-    /// and a name the program computes are refused as not read yet.
+    /// The property's name of `$o->name` or `$o?->name`, as written; a
+    /// name the program computes is refused as not read yet.
     fn member_name_of(
         &self,
         id: NodeId<tree::MemberAccessExpr>,
         line: u32,
     ) -> Result<Vec<u8>, CompileError> {
         let node = &self.parsed.tree[id];
-        if node.op.map(|op| self.kind(op)) == Some(SyntaxKind::NULLSAFE_ARROW) {
-            return Err(walk::unread(line, "a nullsafe property fetch"));
-        }
         let Some(tree::MemberSelector::MemberName(member)) = node.member else {
             return Err(walk::unread(line, "a property named at run time"));
         };
@@ -1456,7 +1463,7 @@ impl Emit<'_> {
             let this = self.fetch_this(OperandKind::Var);
             return Ok(self.operand(this));
         }
-        let value = self.expr(object)?;
+        let value = self.chain_link(object)?;
         Ok(self.operand(value))
     }
 
@@ -1480,6 +1487,11 @@ impl Emit<'_> {
                 return Err(self.unread("a by-reference compound assignment"));
             }
             return self.assign_ref(target, Source::Expr(value));
+        }
+        if op != Some(SyntaxKind::EQ) {
+            // `zend_ensure_writable_variable`, which `??=` and every
+            // compound operator run first.
+            self.ensure_writable(target)?;
         }
         if op == Some(SyntaxKind::QUESTION_QUESTION_EQ) {
             let tree::Expr::SimpleVarExpr(var) = target else {
@@ -1549,6 +1561,7 @@ impl Emit<'_> {
     /// ```
     fn step(&mut self, target: tree::Expr, up: bool, pre: bool) -> Result<Where, CompileError> {
         let line = self.line_of(target);
+        self.ensure_writable(target)?;
         let opcode = match (pre, up) {
             (true, true) => Opcode::PreInc,
             (true, false) => Opcode::PreDec,
@@ -1773,8 +1786,9 @@ impl Emit<'_> {
             tree::Expr::MemberAccessExpr(access) => {
                 let method = self.member_name_of(access, line)?;
                 let object = self.parsed.tree[access].obj;
+                let nullsafe = self.is_nullsafe(access);
                 let arguments = self.arguments(args, line)?;
-                self.method_call(object, &method, &arguments)
+                self.method_call(object, &method, &arguments, nullsafe)
             }
             tree::Expr::SimpleVarExpr(_) | tree::Expr::CallExpr(_) => {
                 let arguments = self.arguments(args, line)?;
@@ -2084,6 +2098,7 @@ impl Emit<'_> {
     /// it (bug #63217).
     fn unset(&mut self, target: tree::Expr) -> Result<(), CompileError> {
         let line = self.line_of(target);
+        self.ensure_writable(target)?;
         let tree = &self.parsed.tree;
         match self.peel(target) {
             tree::Expr::SimpleVarExpr(id) => {
@@ -5675,11 +5690,14 @@ impl Emit<'_> {
     /// ```
     fn foreach_subject(&mut self, expr: tree::Expr, by_ref: bool) -> Result<Where, CompileError> {
         let node = self.peel(expr);
+        // `zend_can_write_to_variable`: a chain a `?->` stands in is
+        // compiled as the value it reads.
         if by_ref
             && (matches!(
                 node,
                 tree::Expr::SubscriptExpr(_) | tree::Expr::MemberAccessExpr(_)
             ) || self.is_static_prop(node))
+            && !self.is_short_circuited(node)
         {
             let (kind, at) = self.var_for_reference(node)?;
             return Ok(match kind {
@@ -5771,6 +5789,11 @@ impl Emit<'_> {
         let generator = self.fn_flags.generator;
         let by_ref = self.returns_by_ref && !generator;
         let written = value.map(|value| self.peel(value));
+        // `zend_assert_not_short_circuited` over a variable returned by
+        // reference.
+        if by_ref && written.is_some_and(|expr| self.is_short_circuited(expr)) {
+            return Err(self.compile_error("Cannot take reference of a nullsafe chain"));
+        }
         if by_ref
             && written.is_some_and(|expr| {
                 matches!(expr, tree::Expr::MemberAccessExpr(_))
@@ -7346,8 +7369,25 @@ impl Emit<'_> {
     /// ```expect
     /// bool(false)
     /// ```
-    #[allow(clippy::too_many_lines)]
+    ///
+    /// Where the node is one a chain of `?->` can end in and no link over
+    /// it marked it inner ([`Self::chain_link`]), every `JMP_NULL` the
+    /// node laid down is aimed past it here ([`chain`]), php's
+    /// `zend_compile_expr` and its `zend_short_circuiting_commit`.
     pub(crate) fn expr(&mut self, expr: tree::Expr) -> Result<Where, CompileError> {
+        let node = self.peel(expr);
+        let inner = self.chain_inner.take() == Some(node);
+        let checkpoint = self.short_circuits.len();
+        let value = self.expr_node(node)?;
+        if !inner && let Some(end) = self.chain_end(node) {
+            self.short_circuit_commit(checkpoint, value, end);
+        }
+        Ok(value)
+    }
+
+    /// [`Self::expr`]'s body over one node, php's `zend_compile_expr_inner`.
+    #[allow(clippy::too_many_lines)]
+    fn expr_node(&mut self, expr: tree::Expr) -> Result<Where, CompileError> {
         let line = expr.line(self.parsed);
         self.line = line;
         self.check_stack()?;
@@ -7548,7 +7588,8 @@ impl Emit<'_> {
             tree::Expr::CallExpr(id) => self.call_of(id, line),
             tree::Expr::MemberAccessExpr(id) => {
                 let name = self.member_name_of(id, line)?;
-                self.prop(tree[id].obj, &name)
+                let nullsafe = self.is_nullsafe(id);
+                self.prop(tree[id].obj, &name, nullsafe)
             }
             tree::Expr::ScopedAccessExpr(id) => match self.scoped_of(id, line)? {
                 Scoped::Constant { class, name } => self.class_const(class, &name),
@@ -7716,6 +7757,9 @@ impl Emit<'_> {
             }
             let name = self.member_name_of(id, line)?;
             let (op1_type, op1) = self.receiver(object)?;
+            if self.is_nullsafe(id) && !self.is_this(object) {
+                self.jmp_null((op1_type, op1), true);
+            }
             let name = self.string(&name)?;
             let name_at = self.literal(name);
             let out = self.temporary();
@@ -8339,10 +8383,22 @@ impl Emit<'_> {
         if !self.is_fetch(expr) {
             return self.expr(expr);
         }
+        let checkpoint = self.short_circuits.len();
         let mut delayed = Vec::new();
         self.silent_link(expr, &mut delayed)?;
-        let mut last = None;
-        for link in delayed {
+        let Some(out) = self.lay_silent(&mut delayed, None) else {
+            return Err(self.fatal("a `??` over a chain with no link"));
+        };
+        let value = Where::Temporary(out);
+        self.short_circuit_commit(checkpoint, value, chain::ChainEnd::Expr);
+        Ok(value)
+    }
+
+    /// The links held back so far laid down in written order, each
+    /// reading the one before it, `last` the temporary a link laid down
+    /// earlier left; the temporary the last of them writes.
+    fn lay_silent(&mut self, delayed: &mut Vec<IsLink>, mut last: Option<u32>) -> Option<u32> {
+        for link in delayed.drain(..) {
             let (op1_type, op1) = link
                 .op1
                 .or_else(|| last.map(|out| (OperandKind::Tmp, out)))
@@ -8360,10 +8416,7 @@ impl Emit<'_> {
             });
             last = Some(link.out);
         }
-        match last {
-            Some(out) => Ok(Where::Temporary(out)),
-            None => Err(self.fatal("a `??` over a chain with no link")),
-        }
+        last
     }
 
     /// One link of a `BP_VAR_IS` chain and every link under it, each
@@ -8402,7 +8455,22 @@ impl Emit<'_> {
             tree::Expr::MemberAccessExpr(id) => {
                 let name = self.member_name_of(id, line)?;
                 let object = self.parsed.tree[id].obj;
-                let under = self.silent_under(object, delayed)?;
+                let mut under = self.silent_under(object, delayed)?;
+                // A `?->`: the links under it laid down now and the
+                // `JMP_NULL` over what they left, as
+                // `zend_delayed_compile_prop` flushes them.
+                if self.is_nullsafe(id) && !self.is_this(object) {
+                    let pair = match under {
+                        Under::Link => {
+                            let out = self.lay_silent(delayed, None).unwrap_or_default();
+                            under = Under::Value(Where::Temporary(out));
+                            (OperandKind::Tmp, out)
+                        }
+                        Under::This => (OperandKind::Unused, 0),
+                        Under::Value(value) => self.operand(value),
+                    };
+                    self.jmp_null(pair, true);
+                }
                 let op1 = self.settled(&under);
                 let name = self.string(&name)?;
                 let op2 = self.literal(name);
@@ -8480,7 +8548,7 @@ impl Emit<'_> {
             }
             return Ok(Under::Value(self.fetch_this(OperandKind::Var)));
         }
-        Ok(Under::Value(self.expr(expr)?))
+        Ok(Under::Value(self.chain_link(expr)?))
     }
 
     /// The `op1` a link carries: nothing where it reads the link under
@@ -8678,6 +8746,10 @@ impl Emit<'_> {
         self.check_stack()?;
         let line = self.line;
         let node = self.peel(source);
+        // `zend_assert_not_short_circuited`.
+        if self.is_short_circuited(node) {
+            return Err(self.compile_error("Cannot take reference of a nullsafe chain"));
+        }
         let (kind, at) = match node {
             tree::Expr::SimpleVarExpr(id) => match self.simple_var_of(id, line)? {
                 SimpleVar::Cv(name) => (OperandKind::Cv, self.lookup_cv(&name)),
@@ -9006,7 +9078,16 @@ impl Emit<'_> {
             (tree::Expr::MemberAccessExpr(id), _) => {
                 let name = self.member_name_of(id, line)?;
                 let object = self.parsed.tree[id].obj;
-                let object = self.delayed_object(object, fetch)?;
+                let mut held = self.delayed_object(object, fetch)?;
+                // `zend_delayed_compile_prop` under a `?->`: what the
+                // object's chain held back is laid down now, and the
+                // `JMP_NULL` over it stands before the member's own fetch.
+                if self.is_nullsafe(id) && !self.is_this(object) {
+                    let settled = self.base_fetch(held, fetch, Over::Obj);
+                    self.jmp_null(settled, fetch == Fetch::Is);
+                    held = Base::Settled(settled);
+                }
+                let object = held;
                 let name = self.string(&name)?;
                 let name_at = self.literal(name);
                 let out = self.temporary();
@@ -9041,7 +9122,7 @@ impl Emit<'_> {
                 }
             }
             (_, Fetch::Read | Fetch::Is) => {
-                let value = self.expr(base)?;
+                let value = self.chain_link(base)?;
                 Base::Settled(self.operand(value))
             }
             // `zend_separate_if_call_and_write`: a call under a write
@@ -10322,13 +10403,9 @@ impl Emit<'_> {
                         }
                         Some(tree::SimpleInterpolationSuffix::SimpleProp(prop)) => {
                             let prop = &self.parsed.tree[prop];
-                            if prop.op.map(|op| self.kind(op)) == Some(SyntaxKind::NULLSAFE_ARROW) {
-                                return Err(walk::unread(
-                                    var_line,
-                                    "a nullsafe property in a string",
-                                ));
-                            }
-                            Fetched::Prop(name, self.text(prop.name).to_vec())
+                            let nullsafe =
+                                prop.op.map(|op| self.kind(op)) == Some(SyntaxKind::NULLSAFE_ARROW);
+                            Fetched::Prop(name, self.text(prop.name).to_vec(), nullsafe)
                         }
                     };
                     Self::piece(&mut pieces, &mut bytes, at, fetch, var_line, Written::Plain);
@@ -10464,8 +10541,15 @@ impl Emit<'_> {
                     _ => Err(self.fatal("a dimension read with no dimension")),
                 }
             }
-            Fetched::Prop(name, prop) => {
+            // `"$a?->b"`, php's `ZEND_AST_NULLSAFE_PROP` inside
+            // `zend_compile_encaps_list`, is its own chain: the
+            // `JMP_NULL` over the variable and the commit after the fetch.
+            Fetched::Prop(name, prop, nullsafe) => {
+                let checkpoint = self.short_circuits.len();
                 let (op1_type, op1) = self.in_string_operand(name);
+                if *nullsafe && name != b"this" {
+                    self.jmp_null((op1_type, op1), false);
+                }
                 let name = self.string(prop)?;
                 let name_at = self.literal(name);
                 let out = self.temporary();
@@ -10481,7 +10565,9 @@ impl Emit<'_> {
                     extended_value: slots,
                     ..Opline::default()
                 });
-                Ok(Where::Temporary(out))
+                let value = Where::Temporary(out);
+                self.short_circuit_commit(checkpoint, value, chain::ChainEnd::Expr);
+                Ok(value)
             }
             Fetched::Node(expr) => self.expr(*expr),
             Fetched::VarVar(expr) => self.var_var(*expr),
@@ -11794,9 +11880,15 @@ impl Emit<'_> {
         object: tree::Expr,
         method: &[u8],
         arguments: &[tree::Expr],
+        nullsafe: bool,
     ) -> Result<Where, CompileError> {
         let line = self.line;
         let (op1_type, op1) = self.receiver(object)?;
+        // `zend_emit_jmp_null` over the receiver of a `?->`, but for
+        // `$this`, which throws where it does not exist.
+        if nullsafe && !self.is_this(object) {
+            self.jmp_null((op1_type, op1), false);
+        }
         let method_at = self.func_name_literal(method)?;
         let count = u32::try_from(arguments.len()).unwrap_or(0);
         let slot = self.cache_slots(2);
@@ -12167,8 +12259,16 @@ impl Emit<'_> {
     /// the property's name as one constant in `op2`, three cache slots in
     /// `extended_value` (`zend_alloc_cache_slots(3)`), written into a
     /// temporary (`zend_adjust_for_fetch_type`).
-    fn prop(&mut self, object: tree::Expr, name: &[u8]) -> Result<Where, CompileError> {
+    fn prop(
+        &mut self,
+        object: tree::Expr,
+        name: &[u8],
+        nullsafe: bool,
+    ) -> Result<Where, CompileError> {
         let (op1_type, op1) = self.receiver(object)?;
+        if nullsafe && !self.is_this(object) {
+            self.jmp_null((op1_type, op1), false);
+        }
         let name = self.string(name)?;
         let name_at = self.literal(name);
         let out = self.temporary();
@@ -13048,7 +13148,11 @@ impl Emit<'_> {
                     });
                     continue;
                 }
-                tree::Expr::MemberAccessExpr(_) if !known => {
+                // `zend_is_variable(arg) && !zend_ast_is_short_circuited(arg)`:
+                // a chain a `?->` stands in is sent as the value it reads.
+                tree::Expr::MemberAccessExpr(_)
+                    if !known && !self.is_short_circuited(*argument) =>
+                {
                     return Err(self.fatal(
                         "a property fetch sent to a callee the table has not this compiler cannot read yet",
                     ));
@@ -14190,6 +14294,8 @@ mod tests {
             typing: Typing::of(options.strict_types),
             stack: options.stack,
             oplines: Vec::new(),
+            short_circuits: Vec::new(),
+            chain_inner: None,
             constants: Vec::new(),
             const_exprs: Vec::new(),
             vars: Vec::new(),

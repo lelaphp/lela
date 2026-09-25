@@ -13087,6 +13087,95 @@ pub(crate) fn jmp_set<T: Tier>(
     Ok(Stepped::Same(frame))
 }
 
+/// `ZEND_JMP_NULL` (`Z/Zend/zend_vm_def.h:7841`), the short circuit of a
+/// `?->`: a receiver that is neither `null` nor undefined, a reference
+/// followed, goes on to the member after it; otherwise the chain's
+/// value is written into the `result` the whole chain's would be in, `null` for an
+/// expression, `false` under `isset` and `true` under `empty` (the
+/// opline's `ZEND_SHORT_CIRCUITING_CHAIN_*`), and the jump in `op2` is
+/// taken past the rest of the chain, the arguments of a call in it
+/// among what never runs. An undefined variable warns where the chain
+/// is read as an expression and not under `isset`, `empty` or `??`
+/// (`ZEND_JMP_NULL_BP_VAR_IS`). A `VAR` holding a reference to `null`
+/// is freed.
+///
+/// The jump is forward always, past oplines the compiler has yet to
+/// lay down when it emits this one, so there is no site here.
+///
+/// ```php
+/// function f() { echo "f called\n"; return 1; }
+/// $a = null;
+/// var_dump($a?->b, $a?->m(f()));
+/// class C { public $p = 'p'; public $o; function m($x) { return $this; } }
+/// $c = new C;
+/// var_dump($c?->p, $c?->m(1)?->p, "{$c?->p}!$c?->p", $c->o?->x, $c?->o?->x);
+/// var_dump(isset($a?->b), empty($a?->b), isset($c?->p), empty($c?->p));
+/// var_dump($u?->x);
+/// var_dump($c?->m(2)->p);
+/// ```
+/// ```expect
+/// NULL
+/// NULL
+/// string(1) "p"
+/// string(1) "p"
+/// string(3) "p!p"
+/// NULL
+/// NULL
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+///
+/// Warning: Undefined variable $u in %s on line 9
+/// NULL
+/// string(1) "p"
+/// ```
+pub(crate) fn jmp_null<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let held = exec::operand_undef(req, frame, code, op.op1_type, op.op1);
+    let value = held.deref();
+    if !matches!(value.as_ref(), ValueRef::Undef | ValueRef::Null) {
+        return Ok(advance(req, frame));
+    }
+    if held.as_php_ref().is_some() {
+        exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    }
+    let result = match op.extended_value & SHORT_CIRCUITING_CHAIN_MASK {
+        SHORT_CIRCUITING_CHAIN_EXPR => {
+            if op.op1_type == OperandKind::Cv
+                && matches!(held.as_ref(), ValueRef::Undef)
+                && op.extended_value & JMP_NULL_BP_VAR_IS == 0
+            {
+                // `ZVAL_UNDEFINED_OP1`.
+                let _ = exec::operand(req, frame, code, op.op1_type, op.op1);
+                if req.is_pending() {
+                    return Ok(Stepped::Threw(frame));
+                }
+            }
+            Value::null()
+        }
+        SHORT_CIRCUITING_CHAIN_ISSET => Value::bool(false),
+        _ => Value::bool(true),
+    };
+    let slot = exec::temporary_slot(code, op.out);
+    let previous = req.set_slot(frame, slot, result);
+    req.release(previous);
+    req.vm_mut().jump(frame, op.op2);
+    Ok(Stepped::Same(frame))
+}
+
+/// `ZEND_SHORT_CIRCUITING_CHAIN_MASK` and the three values under it
+/// (`Z/Zend/zend_compile.h:438`), and `ZEND_JMP_NULL_BP_VAR_IS` beside
+/// them, the bits the compiler leaves on a `JMP_NULL`.
+const SHORT_CIRCUITING_CHAIN_MASK: u32 = 0x3;
+const SHORT_CIRCUITING_CHAIN_EXPR: u32 = 0;
+const SHORT_CIRCUITING_CHAIN_ISSET: u32 = 1;
+const JMP_NULL_BP_VAR_IS: u32 = 4;
+
 /// `ZEND_COALESCE`: the left side of `a ?? b`, read as
 /// `GET_OP1_ZVAL_PTR(BP_VAR_IS)` reads it, which is the silent read: an
 /// undefined CV is `null` and no warning stands. A reference is

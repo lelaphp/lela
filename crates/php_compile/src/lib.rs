@@ -7330,4 +7330,94 @@ class C {
             );
         }
     }
+
+    /// #531's program under the oracle's `[regime.dump]`: a `JMP_NULL`
+    /// over the object before each `?->`, its target the opline after
+    /// the chain and its `result` the chain's own, a call's arguments
+    /// inside the jump, and `"$a?->b"` a chain of its own inside the
+    /// string.
+    #[test]
+    fn a_nullsafe_chain_is_jmp_null_over_each_link_as_php_emits_it() {
+        assert_eq!(
+            dump_of(b"<?php $a = null; echo $a?->b, $a?->m(1)?->c, \"$a?->b\";"),
+            main_dump(
+                16,
+                1,
+                6,
+                "0000 ASSIGN CV0($a) null\n\
+                 0001 T2 = JMP_NULL CV0($a) 0003\n\
+                 0002 T2 = FETCH_OBJ_R CV0($a) string(\"b\")\n\
+                 0003 ECHO T2\n\
+                 0004 T4 = JMP_NULL CV0($a) 0010\n\
+                 0005 INIT_METHOD_CALL 1 CV0($a) string(\"m\")\n\
+                 0006 SEND_VAL_EX int(1) 1\n\
+                 0007 V3 = DO_FCALL\n\
+                 0008 T4 = JMP_NULL V3 0010\n\
+                 0009 T4 = FETCH_OBJ_R V3 string(\"c\")\n\
+                 0010 ECHO T4\n\
+                 0011 T5 = JMP_NULL CV0($a) 0013\n\
+                 0012 T5 = FETCH_OBJ_R CV0($a) string(\"b\")\n\
+                 0013 T6 = CAST (string) T5\n\
+                 0014 ECHO T6\n\
+                 0015 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    3: 0008 - 0009 (tmp/var)\n",
+            )
+        );
+    }
+
+    /// php's compile errors where a `?->` chain is written to or bound.
+    #[test]
+    fn a_nullsafe_chain_written_to_is_phps_compile_error() {
+        let cases: &[(&[u8], &str)] = &[
+            (
+                b"<?php $a?->b = 1;",
+                "Can't use nullsafe operator in write context",
+            ),
+            (
+                b"<?php $a?->b++;",
+                "Can't use nullsafe operator in write context",
+            ),
+            (
+                b"<?php $a?->b .= 1;",
+                "Can't use nullsafe operator in write context",
+            ),
+            (
+                b"<?php unset($a?->b);",
+                "Can't use nullsafe operator in write context",
+            ),
+            (
+                b"<?php $a?->b[0] = 1;",
+                "Can't use nullsafe operator in write context",
+            ),
+            (
+                b"<?php foreach ($x as $a?->b) {}",
+                "Can't use nullsafe operator in write context",
+            ),
+            (
+                b"<?php $x = &$a?->b;",
+                "Cannot take reference of a nullsafe chain",
+            ),
+            (
+                b"<?php function &f() { return $a?->b[0]; }",
+                "Cannot take reference of a nullsafe chain",
+            ),
+            (
+                b"<?php [$a?->b] = $x;",
+                "Assignments can only happen to writable values",
+            ),
+            (
+                b"<?php $a?->m()++;",
+                "Can't use method return value in write context",
+            ),
+        ];
+        for (source, message) in cases {
+            assert_eq!(
+                refused(source).map(|e| e.message),
+                Some(String::from(*message)),
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+    }
 }
