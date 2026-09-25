@@ -178,6 +178,9 @@ port_map::CENSUS
 port_map::INSTRUMENT
 port_map::SEED
 port_map::command
+reading::Chain
+reading::Chain::of_head
+reading::Chain::standing
 reading::DIR
 reading::LOG
 reading::Log

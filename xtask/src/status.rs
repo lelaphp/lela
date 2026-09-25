@@ -82,10 +82,7 @@ pub fn render(
             BUDGET,
         ),
         Section::Divergence => return divergence(registry, format),
-        Section::Phpt => (
-            fold_uncreated(instrument(&readings, "phpt"), "scope")?,
-            INSTRUMENT,
-        ),
+        Section::Phpt => (fold_uncreated(standing(store, root)?, "scope")?, INSTRUMENT),
         Section::Witness => (
             fold_uncreated(instrument(&readings, "witness"), "scope")?,
             INSTRUMENT,
@@ -544,6 +541,19 @@ fn instrument(readings: &[Reading], name: &str) -> Vec<Row> {
         .into_iter()
         .map(|scope| Row::new(&[("scope", json!(scope))], latest_of(readings, name, scope)))
         .collect()
+}
+
+/// The `phpt` section: per subset, the reading off the log that stands
+/// for the track `root` is on, [`reading::Chain::standing`], and never a
+/// retired branch's appended after it (#787). The dashboard's data step
+/// reads this rendering as JSON rather than taking the log's last line.
+fn standing(store: &Store, root: &Path) -> Result<Vec<Row>> {
+    let log = store.log()?;
+    let chain = reading::Chain::of_head(root)?;
+    let rows = chain.standing(&log.readings, "phpt").into_iter();
+    Ok(rows
+        .map(|r| Row::new(&[("scope", json!(r.scope))], Some(r.clone())))
+        .collect())
 }
 
 /// The `track` section: the last run of `xtask track work`, read off the
