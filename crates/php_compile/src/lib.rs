@@ -3354,20 +3354,16 @@ mod tests {
 
     /// `global $a, $b;` is `zend_compile_global_var`'s `BIND_GLOBAL` per
     /// variable, the CV in `op1` and its name in `op2`, where the
-    /// statement was refused as not read before; a name the program
-    /// computes still is.
+    /// statement was refused as not read before; a name written out
+    /// under `${…}` is the same CV.
     #[test]
     fn a_global_statement_binds_each_cv_by_name() {
         assert_eq!(
-            oplines_of(b"<?php global $a, $b; echo $a;"),
+            oplines_of(b"<?php global $a, ${'b'}; echo $a;"),
             "0000 BIND_GLOBAL CV0($a) string(\"a\")\n\
              0001 BIND_GLOBAL CV1($b) string(\"b\")\n\
              0002 ECHO CV0($a)\n\
              0003 RETURN int(1)\n"
-        );
-        assert_eq!(
-            refused_message(b"<?php global $$x;").as_deref(),
-            Some("a `global` of a variable named at run time this compiler cannot read yet")
         );
     }
 
@@ -7415,6 +7411,60 @@ class C {
             assert_eq!(
                 refused(source).map(|e| e.message),
                 Some(String::from(*message)),
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+    }
+
+    /// #690's shapes under the oracle's `[regime.dump]`: a `global` over
+    /// a name no CV has is `FETCH_W (global+lock)` and an `ASSIGN_REF`
+    /// over a fetch by the same name, the local variable's or, for an
+    /// auto-global, the global's; `$$x++` is `FETCH_RW (local)` and the
+    /// step over the `VAR`.
+    #[test]
+    fn a_variable_named_at_run_time_is_fetched_by_name_as_php_emits_it() {
+        let cases: &[(&[u8], usize, u32, u32, &str)] = &[
+            (
+                b"<?php global ${$x[0]};",
+                5,
+                1,
+                4,
+                "0000 T1 = FETCH_DIM_R CV0($x) int(0)\n\
+                 0001 V2 = FETCH_W (global+lock) T1\n\
+                 0002 V3 = FETCH_W (local) T1\n\
+                 0003 ASSIGN_REF V3 V2\n\
+                 0004 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    1: 0001 - 0002 (tmp/var)\n\
+                 \x20    2: 0002 - 0003 (tmp/var)\n",
+            ),
+            (
+                b"<?php global $_SERVER;",
+                4,
+                0,
+                3,
+                "0000 V0 = FETCH_W (global+lock) string(\"_SERVER\")\n\
+                 0001 V1 = FETCH_W (global) string(\"_SERVER\")\n\
+                 0002 ASSIGN_REF V1 V0\n\
+                 0003 RETURN int(1)\n\
+                 LIVE RANGES:\n\
+                 \x20    0: 0001 - 0002 (tmp/var)\n",
+            ),
+            (
+                b"<?php $$x++;",
+                3,
+                1,
+                2,
+                "0000 V1 = FETCH_RW (local) CV0($x)\n\
+                 0001 PRE_INC V1\n\
+                 0002 RETURN int(1)\n",
+            ),
+        ];
+        for (source, lines, vars, tmps, oplines) in cases {
+            assert_eq!(
+                dump_of(source),
+                main_dump(*lines, *vars, *tmps, oplines),
                 "{}",
                 String::from_utf8_lossy(source)
             );

@@ -38,6 +38,9 @@ pub(super) enum Target {
     StaticProp { class: ClassSpec, name: Vec<u8> },
     /// `list(…)` or `[…]`, `ZEND_AST_ARRAY` as a target.
     List(List),
+    /// `$$x` or `${expr}`, a `ZEND_AST_VAR` whose name is no `ZEND_AST_ZVAL`:
+    /// the variable, fetched by the name the program computes.
+    ByName(tree::Expr),
 }
 
 /// A `list()` or a `[…]` written as a target: its elements, and which of
@@ -99,6 +102,7 @@ impl Emit<'_> {
                     return Err(walk::unread(line, "an assignment to what is no variable"));
                 }
             },
+            tree::Expr::VarVarExpr(_) | tree::Expr::DynamicVarExpr(_) => Target::ByName(expr),
             tree::Expr::ListExpr(id) => Target::List(List {
                 elements: tree[id].array_elements.clone(),
                 style: ListStyle::List,
@@ -215,6 +219,7 @@ impl Emit<'_> {
             Target::Dim(dim) => self.assign_dim(dim, value),
             Target::Prop { object, name } => self.assign_prop(object, &name, value),
             Target::StaticProp { class, name } => self.assign_static_prop(class, &name, value),
+            Target::ByName(target) => self.assign_by_name(target, value),
             Target::List(list) => match value {
                 Source::Expr(value) => self.list_assign_expr(&list, value),
                 Source::Node(value) => self

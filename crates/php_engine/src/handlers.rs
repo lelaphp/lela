@@ -85,13 +85,6 @@ const BIND_REF: u32 = 1;
 /// warning for a variable the scope has not.
 const BIND_IMPLICIT: u32 = 2;
 
-/// `ZEND_FETCH_LOCAL` (`Z/Zend/zend_compile.h:1083`), the one fetch
-/// type a `FETCH_*` by name carries here: the frame's own variables,
-/// where `ZEND_FETCH_GLOBAL` (`1<<1`) and `ZEND_FETCH_GLOBAL_LOCK`
-/// (`1<<3`) name `EG(symbol_table)`, which the compiler emits no fetch
-/// of yet.
-const FETCH_LOCAL: u32 = 1 << 2;
-
 /// `IS_CONSTANT_UNQUALIFIED_IN_NAMESPACE` (`Z/Zend/zend_types.h:637`),
 /// the one bit a `FETCH_CONSTANT`'s `op1` carries: the name was
 /// written unqualified inside a namespace, so the global spelling
@@ -3403,21 +3396,16 @@ pub(crate) fn fetch_this<T: Tier>(
     Ok(advance(req, frame))
 }
 
-/// `ZEND_FETCH_R` (`Z/Zend/zend_vm_def.h:1825`) over a constant name
-/// under `ZEND_FETCH_LOCAL`, through `zend_fetch_var_address_helper`
-/// at `BP_VAR_R` (`:1724`): what `zend_compile_silence` emits for a
-/// variable under `@`, so the read happens inside the span. php looks
-/// the name up in the frame's symbol table, which
-/// `zend_rebuild_symbol_table` lays down over the CVs; the CVs are
-/// that table here, so the name finds its CV, and `ZVAL_COPY_DEREF`
-/// puts what it holds into the temporary, the reference followed
-/// ([`exec::take_operand`]). A CV nothing wrote, or a name the op
-/// array numbered no CV for, is `Undefined variable $a` and `null`.
-/// `$this` is `zend_fetch_this_var`: the receiver with one more
-/// owner, and on a frame without one `Undefined variable $this`
-/// and `null`. A fetch over a temporary name, `$$b`, or a global one,
-/// is what the compiler does not emit yet, and the internal error
-/// says so.
+/// `ZEND_FETCH_R` (`Z/Zend/zend_vm_def.h:1825`), a variable the program
+/// names read, and a variable under `@`, which `zend_compile_silence`
+/// fetches by name so the read happens inside the span:
+/// [`fetch_by_name`] under `BP_VAR_R`. The name is looked up in the
+/// frame's symbol table, which `zend_rebuild_symbol_table` lays down
+/// over the CVs, so a name the op array has a CV for finds it, and a
+/// name it has none for finds what `extract` or a fetch for writing put
+/// there; a name nothing wrote is `Undefined variable $a` and `null`.
+/// `$this` is `zend_fetch_this_var`: the receiver with one more owner,
+/// and on a frame without one `Undefined variable $this` and `null`.
 ///
 /// ```php
 /// echo @$undefined;
@@ -3436,45 +3424,289 @@ pub(crate) fn fetch_this<T: Tier>(
 /// 2
 /// ```
 ///
+/// A name the program computes is read from the same table, and one
+/// that is no string is converted as a string is:
+///
+/// ```php
+/// $n = 'v'; $v = 3; ${'1'} = 'one';
+/// var_dump($$n, ${'v' . ''}, ${1}, $$m);
+/// function f() { $n = 'w'; $w = 4; return $$n; }
+/// var_dump(f());
+/// ```
+/// ```expect
+/// Warning: Undefined variable $m in %s on line 3
+///
+/// Warning: Undefined variable $ in %s on line 3
+/// int(3)
+/// int(3)
+/// string(3) "one"
+/// NULL
+/// int(4)
+/// ```
 pub(crate) fn fetch_r<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    if op.op1_type != OperandKind::Const || op.extended_value & FETCH_LOCAL == 0 {
-        return Err(Fatal::Error(String::from(
-            "InternalError: FETCH_R over a computed name or a global fetch, which the compiler does not emit yet",
-        )));
+    fetch_by_name(req, frame, code, op, ByName::R)
+}
+
+/// `ZEND_FETCH_IS` (`Z/Zend/zend_vm_def.h:1851`), a variable the program
+/// names under `isset`, `empty` or `??`: [`fetch_by_name`] under
+/// `BP_VAR_IS`, a name nothing wrote `null` in silence.
+///
+/// ```php
+/// $n = 'nope';
+/// var_dump($$n ?? 'd', ${'x'}['k'] ?? 'e');
+/// ```
+/// ```expect
+/// string(1) "d"
+/// string(1) "e"
+/// ```
+pub(crate) fn fetch_is<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    fetch_by_name(req, frame, code, op, ByName::Is)
+}
+
+/// `ZEND_FETCH_W` (`Z/Zend/zend_vm_def.h:1830`), a variable the program
+/// names fetched for writing, `$$x = 1`, `$$x[] = 1`, and the two halves
+/// of a `global` over a name no CV has: [`fetch_by_name`] under
+/// `BP_VAR_W`, a name the table has not laid down holding `null` and
+/// no warning, the `VAR` an `IS_INDIRECT` to it. Under
+/// `ZEND_FETCH_GLOBAL_LOCK` the name stays for the fetch after it.
+///
+/// ```php
+/// $x = 'a';
+/// $$x = 1;
+/// ${'b' . 'c'}['k'] = 2;
+/// var_dump($a, $bc);
+/// function f() { global ${sf('g')}; $g++; }
+/// function sf($n) { echo "sf\n"; return $n; }
+/// $g = 5;
+/// f();
+/// var_dump($g);
+/// try { global ${new stdClass}; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// int(1)
+/// array(1) {
+///   ["k"]=>
+///   int(2)
+/// }
+/// sf
+/// int(6)
+/// Object of class stdClass could not be converted to string
+/// ```
+pub(crate) fn fetch_w<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    fetch_by_name(req, frame, code, op, ByName::W)
+}
+
+/// `ZEND_FETCH_RW` (`Z/Zend/zend_vm_def.h:1835`), `$$x++` and `$$x .= 'a'`:
+/// [`fetch_by_name`] under `BP_VAR_RW`, a name the table has not warned
+/// of and then laid down holding `null`, so the step lands in it.
+///
+/// ```php
+/// $x = 'n';
+/// $$x++;
+/// $$x .= 'a';
+/// var_dump($n);
+/// ```
+/// ```expect
+/// Warning: Undefined variable $n in %s on line 3
+/// string(2) "1a"
+/// ```
+pub(crate) fn fetch_rw<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    fetch_by_name(req, frame, code, op, ByName::Rw)
+}
+
+/// php's `type` argument to `zend_fetch_var_address_helper`, the four
+/// the fetches by name serve.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ByName {
+    R,
+    W,
+    Rw,
+    Is,
+}
+
+/// `ZEND_FETCH_GLOBAL` and `ZEND_FETCH_GLOBAL_LOCK`
+/// (`Z/Zend/zend_compile.h:1082`): the table is `EG(symbol_table)`, and
+/// under `ZEND_FETCH_GLOBAL_LOCK` the name is left for the fetch after this one.
+const FETCH_GLOBAL: u32 = 1 << 1;
+const FETCH_GLOBAL_LOCK: u32 = 1 << 3;
+
+/// `zend_fetch_var_address_helper` (`Z/Zend/zend_vm_def.h:1724`): the
+/// name read as a string (`zval_try_get_tmp_string`, a CV nothing wrote
+/// warning first, an object with no `__toString` php's `Error`), the
+/// table `zend_get_target_symbol_table` names (`EG(symbol_table)` under
+/// `ZEND_FETCH_GLOBAL`, the frame's own, rebuilt where it has none,
+/// otherwise), and the bucket found: a missing name is laid down under
+/// `BP_VAR_W`, warned of and laid down under `BP_VAR_RW`, warned of and
+/// read as `null` under `BP_VAR_R`, and `null` in silence under
+/// `BP_VAR_IS`; `this`, where no bucket names it, is
+/// `zend_fetch_this_var`'s. A read takes the value with one more owner
+/// and a reference followed (`ZVAL_COPY_DEREF`) into the temporary; a
+/// write leaves the place as an `IS_INDIRECT` in the `VAR`.
+fn fetch_by_name(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    mode: ByName,
+) -> Edge {
+    let lock = op.extended_value & FETCH_GLOBAL_LOCK != 0;
+    let global = op.extended_value & (FETCH_GLOBAL | FETCH_GLOBAL_LOCK) != 0;
+    let out = exec::temporary_slot(code, op.out);
+    let name = match fetched_name(req, frame, code, op) {
+        Ok(name) => name,
+        Err(thrown) => {
+            if !lock {
+                exec::free_operand(req, frame, code, op.op1_type, op.op1);
+            }
+            let previous = req.set_slot(frame, out, Value::undef());
+            req.release(previous);
+            return threw(req, frame, &thrown);
+        }
+    };
+    let table = if global {
+        req.global_table()
+    } else {
+        req.rebuild_symbol_table(frame)
+    };
+    let shown = String::from_utf8_lossy(&name).into_owned();
+    let undefined = |req: &mut Request| {
+        let scope = if op.extended_value & FETCH_GLOBAL != 0 {
+            "global "
+        } else {
+            ""
+        };
+        crate::api::raising::warning(req, &format!("Undefined {scope}variable ${shown}"));
+    };
+    let held = req.symbol_value(table, &name);
+    let unset = held.is_none_or(|value| value.tag() == TypeTag::Undef);
+    // `zend_fetch_this_var`: `$this` where no bucket names it.
+    if unset && name == b"this" {
+        if !lock {
+            exec::free_operand(req, frame, code, op.op1_type, op.op1);
+        }
+        return fetch_this_by_name(req, frame, out, mode);
     }
-    let name = exec::constant(code, ConstIdx(op.op1));
-    let name = name.as_str_bytes().unwrap_or_default().to_vec();
-    let value = if name == b"this" {
-        if let Some(this) = req.vm().this(frame) {
+    let value = match mode {
+        ByName::R | ByName::Is => {
+            if unset && mode == ByName::R {
+                undefined(req);
+            }
+            let value = held
+                .filter(|_| !unset)
+                .map_or_else(Value::null, |held| held.deref());
+            req.addref(&value);
+            Some(value)
+        }
+        ByName::W | ByName::Rw => {
+            if unset && mode == ByName::Rw {
+                undefined(req);
+            }
+            if req.is_pending() {
+                None
+            } else {
+                let place = match req.symbol_place(table, &name, true) {
+                    Ok(place) => place,
+                    Err(thrown) => return threw(req, frame, &thrown),
+                };
+                let Some(place) = place else {
+                    return Err(Fatal::Error(format!(
+                        "InternalError: a fetch by name laid ${shown} down and the table does not hold it"
+                    )));
+                };
+                if exec::value_of(place.read()).tag() == TypeTag::Undef {
+                    place.write(php_heap::Zval::null());
+                }
+                let previous = req.take_slot(frame, out);
+                req.release(previous);
+                if let Some(var) = req.slot_ptr(frame, out) {
+                    var.write(php_heap::Zval::indirect(place));
+                }
+                if !lock {
+                    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+                }
+                return Ok(advance(req, frame));
+            }
+        }
+    };
+    if !lock {
+        exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    }
+    let previous = req.set_slot(frame, out, value.unwrap_or_else(Value::null));
+    req.release(previous);
+    if req.is_pending() {
+        return Ok(Stepped::Threw(frame));
+    }
+    Ok(advance(req, frame))
+}
+
+/// The name a fetch by name reads: the constant as it stands, a string
+/// as it is, and anything else converted as `zval_try_get_tmp_string`
+/// converts it, a CV nothing wrote warning first
+/// (`ZVAL_UNDEFINED_OP1`).
+fn fetched_name(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Result<Vec<u8>, Thrown> {
+    if op.op1_type == OperandKind::Const {
+        let name = exec::constant(code, ConstIdx(op.op1));
+        return Ok(name.as_str_bytes().unwrap_or_default().to_vec());
+    }
+    let held = exec::operand_undef(req, frame, code, op.op1_type, op.op1).deref();
+    if let Some(bytes) = held.as_str_bytes() {
+        return Ok(bytes.to_vec());
+    }
+    let held = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
+    let text = crate::ops::to_string(req, &held)?;
+    let bytes = text.as_bytes().to_vec();
+    req.release(Value::string(text));
+    Ok(bytes)
+}
+
+/// `zend_fetch_this_var` (`Z/Zend/zend_execute.c:4185`): `$this` read
+/// by name is the receiver, with php's warning where the frame has none
+/// under `BP_VAR_R`; under a write it is `Cannot re-assign $this`.
+fn fetch_this_by_name(req: &mut Request, frame: FrameRef, out: u32, mode: ByName) -> Edge {
+    let value = match (req.vm().this(frame), mode) {
+        (_, ByName::W | ByName::Rw) => {
+            let previous = req.set_slot(frame, out, Value::undef());
+            req.release(previous);
+            let thrown = crate::api::raising::throw(req, "Error", "Cannot re-assign $this");
+            return threw(req, frame, &thrown);
+        }
+        (Some(this), _) => {
             let value = this.as_value();
             req.addref(&value);
             value
-        } else {
+        }
+        (None, ByName::R) => {
             crate::api::raising::warning(req, "Undefined variable $this");
             Value::null()
         }
-    } else if let Some(cv) = code.vars.iter().position(|var| *var.0 == *name) {
-        exec::take_operand(
-            req,
-            frame,
-            code,
-            OperandKind::Cv,
-            u32::try_from(cv).unwrap_or(u32::MAX),
-        )
-    } else {
-        crate::api::raising::warning(
-            req,
-            &format!("Undefined variable ${}", String::from_utf8_lossy(&name)),
-        );
-        Value::null()
+        (None, ByName::Is) => Value::null(),
     };
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, value);
+    let previous = req.set_slot(frame, out, value);
     req.release(previous);
     Ok(advance(req, frame))
 }
@@ -6700,9 +6932,11 @@ pub(crate) fn assign<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let value = exec::take_operand(req, frame, code, op.op2_type, op.op2);
-    let Some(at) = req.slot_ptr(frame, op.op1) else {
+    // `GET_OP1_ZVAL_PTR_PTR_UNDEF(BP_VAR_W)`: a CV, or the place a fetch
+    // by name left in its `VAR` as an `IS_INDIRECT`.
+    let Some(at) = write_place(req, frame, code, op.op1_type, op.op1) else {
         return Err(Fatal::Error(String::from(
-            "InternalError: ZEND_ASSIGN over a CV the frame does not have",
+            "InternalError: ZEND_ASSIGN over a variable the frame does not have",
         )));
     };
     let strict = req.frame_strict_types(frame);
@@ -6809,20 +7043,23 @@ pub(crate) fn assign_op<T: Tier>(
             op.extended_value
         )));
     };
-    if op.op1_type != OperandKind::Cv {
-        return Err(Fatal::Error(String::from(
-            "InternalError: ZEND_ASSIGN_OP over what is no CV",
-        )));
-    }
     let value = exec::operand(req, frame, code, op.op2_type, op.op2);
-    let held = exec::operand(req, frame, code, op.op1_type, op.op1);
-    if req.slot(frame, op.op1).tag() == TypeTag::Undef {
-        let previous = req.set_slot(frame, op.op1, Value::null());
-        req.release(previous);
-    }
+    // A CV, or under a `VAR` the place `FETCH_RW` by name left there,
+    // which it has already made `null` where nothing was written.
+    let held = if op.op1_type == OperandKind::Cv {
+        let held = exec::operand(req, frame, code, op.op1_type, op.op1);
+        if req.slot(frame, op.op1).tag() == TypeTag::Undef {
+            let previous = req.set_slot(frame, op.op1, Value::null());
+            req.release(previous);
+        }
+        held
+    } else {
+        write_place(req, frame, code, op.op1_type, op.op1)
+            .map_or_else(Value::null, |place| exec::value_of(place.read()))
+    };
     let computed = if grows_in_place(req, op.extended_value, &held) {
         crate::ops::concat_assign(req, &held, &value, |req| {
-            let at = req.slot_ptr(frame, op.op1);
+            let at = write_place(req, frame, code, op.op1_type, op.op1);
             vacate(req, at);
         })
     } else {
@@ -6833,9 +7070,9 @@ pub(crate) fn assign_op<T: Tier>(
         Ok(stepped) => stepped,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let Some(at) = req.slot_ptr(frame, op.op1) else {
+    let Some(at) = write_place(req, frame, code, op.op1_type, op.op1) else {
         return Err(Fatal::Error(String::from(
-            "InternalError: ZEND_ASSIGN_OP over a CV the frame does not have",
+            "InternalError: ZEND_ASSIGN_OP over a variable the frame does not have",
         )));
     };
     // php's `ZEND_REF_HAS_TYPE_SOURCES` arm,
