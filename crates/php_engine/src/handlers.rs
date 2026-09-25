@@ -7310,6 +7310,17 @@ pub(crate) fn assign_ref<T: Tier>(
 /// cell under `RETURN_VALUE_USED`.
 ///
 /// ```php
+/// class C { public $p; }
+/// $o = new C;
+/// $o->p = &$x;
+/// $x = 1;
+/// var_dump($o->p);
+/// ```
+/// ```expect
+/// int(1)
+/// ```
+///
+/// ```php
 /// class C { public $p; public int $n = 0; }
 /// $o = new C;
 /// $x = 1;
