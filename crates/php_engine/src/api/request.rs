@@ -2676,6 +2676,24 @@ impl Request {
 
     /// `object_init_ex`'s refusals: an interface, a trait, an enum or an
     /// abstract class is php's `Error` for what cannot be instantiated.
+    ///
+    /// ```php
+    /// abstract class A { static function make() { return new static; } }
+    /// class B extends A {}
+    /// var_dump(B::make());
+    /// try { A::make(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// new A;
+    /// ```
+    /// ```expect exit=255
+    /// object(B)#1 (0) {
+    /// }
+    /// Cannot instantiate abstract class A
+    ///
+    /// Fatal error: Uncaught Error: Cannot instantiate abstract class A in %s:6
+    /// Stack trace:
+    /// #0 {main}
+    ///   thrown in %s on line 6
+    /// ```
     pub(crate) fn instantiable(&mut self, class: ClassId) -> Result<(), Thrown> {
         let Some(decl) = self.class_decl(class) else {
             return Ok(());

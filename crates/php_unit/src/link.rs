@@ -1743,6 +1743,28 @@ impl<'a> Linker<'a> {
 
     /// `do_inheritance_check_on_method` of `fe` over `proto`, each read
     /// on its side, with the checks `check` names.
+    ///
+    /// ```php
+    /// class P { function f() {} }
+    /// abstract class C extends P { abstract function f(); }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot make non abstract method P::f() abstract in class C in %s on line 3
+    /// ```
+    ///
+    /// An override of a native's tentative return type that does not
+    /// match it is php's deprecation, and `#[\ReturnTypeWillChange]` on
+    /// the override silences it:
+    ///
+    /// ```php
+    /// class C implements IteratorAggregate { #[\ReturnTypeWillChange] function getIterator() { return new ArrayIterator([1]); } }
+    /// class D implements IteratorAggregate { function getIterator() { return new ArrayIterator([2]); } }
+    /// foreach (new C as $v) echo $v, "\n";
+    /// ```
+    /// ```expect
+    /// Deprecated: Return type of D::getIterator() should either be compatible with IteratorAggregate::getIterator(): Traversable, or the #[\ReturnTypeWillChange] attribute should be used to temporarily suppress the notice in %s on line 3
+    /// 1
+    /// ```
     fn method_refused(
         &mut self,
         child: &'a ClassDecl,
@@ -2094,6 +2116,41 @@ impl<'a> Linker<'a> {
     }
 
     /// `zend_do_inheritance_ex`'s refusals of the parent itself.
+    ///
+    /// ```php
+    /// final class F {}
+    /// class G extends F {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Class G cannot extend final class F in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// readonly class R {}
+    /// class S extends R {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Non-readonly class S cannot extend readonly class R in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class N {}
+    /// readonly class S extends N {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Readonly class S cannot extend non-readonly class N in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// abstract class A {}
+    /// readonly class R {}
+    /// readonly class S extends R {}
+    /// class B extends A {}
+    /// echo get_class(new B), " ", get_class(new S), "\n";
+    /// ```
+    /// ```expect
+    /// B S
+    /// ```
     fn parent_refused(child: &ClassDecl, parent: &ClassDecl) -> Option<Refusal> {
         let (class, parent_name) = (text(&child.name.0), text(&parent.name.0));
         if child.kind == ClassKind::Interface {
@@ -2664,6 +2721,14 @@ fn same_method(a: &MethodDecl, b: &MethodDecl) -> bool {
 /// class not declared abstract left with an abstract method, one it
 /// inherited or one an interface declares, `E_ERROR` in php and a fatal
 /// all the same.
+///
+/// ```php
+/// abstract class A { abstract function f(); abstract function g(); }
+/// class B extends A { function f() {} }
+/// ```
+/// ```expect exit=255
+/// Fatal error: Class B contains 1 abstract method and must therefore be declared abstract or implement the remaining method (A::g) in %s on line 3
+/// ```
 fn abstract_left(
     child: &ClassDecl,
     methods: &[(Option<&ClassDecl>, &MethodDecl)],

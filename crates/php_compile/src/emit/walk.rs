@@ -741,6 +741,20 @@ impl Emit<'_> {
     /// ```expect exit=255
     /// Fatal error: Cannot use the final modifier on an abstract class in %s on line 2
     /// ```
+    ///
+    /// What php takes, it takes, each modifier once in any order:
+    ///
+    /// ```php
+    /// abstract class A {} final class F {} readonly final class R { public int $x; }
+    /// var_dump((new ReflectionClass('A'))->isAbstract(), (new ReflectionClass('F'))->isFinal(),
+    ///     (new ReflectionClass('R'))->isReadOnly(), (new ReflectionClass('R'))->isFinal());
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// ```
     fn walk_class_modifiers(&self, modifiers: &[Modifier]) -> Result<ClassModifiers, CompileError> {
         let mut out = ClassModifiers::default();
         for modifier in modifiers {
