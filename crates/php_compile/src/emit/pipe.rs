@@ -143,7 +143,7 @@ impl Emit<'_> {
 
     /// Whether an argument list is `(...)` alone, php's
     /// `ZEND_AST_CALLABLE_CONVERT`.
-    fn is_callable_convert(&self, args: tree::NodeId<tree::ArgList>) -> bool {
+    pub(super) fn is_callable_convert(&self, args: tree::NodeId<tree::ArgList>) -> bool {
         matches!(
             self.parsed.tree[args].args.as_ref(),
             [tree::Arg::VariadicPlaceholder(_)]

@@ -421,6 +421,9 @@ pub(crate) struct Emit<'a> {
     /// the compiler already holds for it, which [`Self::expr`] answers
     /// ([`pipe`]).
     znodes: Vec<(tree::Expr, Where)>,
+    /// How the constant expression [`Self::const_expr`] builds is
+    /// evaluated, php's `allow_dynamic` ([`Evaluation`]).
+    const_evaluation: Evaluation,
     constants: Vec<Zval>,
     /// [`OpArray::const_exprs`]: the constant expressions a constant of
     /// kind `IS_CONSTANT_AST` indexes, in the order they were added.
@@ -1013,6 +1016,7 @@ pub(crate) fn unit(
         chain_inner: None,
         memo: memo::Memo::default(),
         znodes: Vec::new(),
+        const_evaluation: Evaluation::Once,
         constants: Vec::new(),
         const_exprs: Vec::new(),
         vars: Vec::new(),
@@ -3485,7 +3489,7 @@ impl Emit<'_> {
                 });
                 let written = parameter
                     .default
-                    .map(|expr| self.const_expr(expr))
+                    .map(|expr| self.dynamic_const_expr(expr))
                     .transpose()?;
                 // `zend_is_valid_default_value` converted an int under
                 // a type with `float` and no `int` where it stood.
@@ -3598,17 +3602,27 @@ impl Emit<'_> {
     ) -> Result<Option<Zval>, CompileError> {
         Ok(match parameter.default {
             Some(expr) if self.names_a_constant(expr) => {
-                let unevaluated = self.const_expr(expr)?;
+                let unevaluated = self.dynamic_const_expr(expr)?;
                 Some(self.unevaluated(unevaluated))
             }
-            Some(expr) => {
-                let Some(folded) = self.constant_of(expr)? else {
-                    return Err(self.fatal("a parameter default this compiler cannot read yet"));
-                };
-                Some(folded)
-            }
+            // `zend_const_expr_to_zval` with `allow_dynamic`: the fold
+            // where `zend_eval_const_expr` folds it, the tree for the
+            // engine to evaluate at the `RECV_INIT` otherwise.
+            Some(expr) => Some(self.const_expr_to_zval(expr)?),
             None => None,
         })
+    }
+
+    /// `zend_const_expr_to_zval` with `allow_dynamic`: the fold where
+    /// `zend_eval_const_expr` folds the expression, and otherwise the
+    /// tree ([`Self::dynamic_const_expr`]) as the `IS_CONSTANT_AST` the
+    /// opline that reads it evaluates.
+    fn const_expr_to_zval(&mut self, expr: tree::Expr) -> Result<Zval, CompileError> {
+        if let Some(folded) = self.eval_const(expr)? {
+            return Ok(folded);
+        }
+        let unevaluated = self.dynamic_const_expr(expr)?;
+        Ok(self.unevaluated(unevaluated))
     }
 
     /// What `zend_compile_params` refuses about a parameter's compiled
@@ -4622,7 +4636,7 @@ impl Emit<'_> {
         for argument in &attribute.arguments {
             arguments.push(AttributeArgument {
                 name: None,
-                value: self.const_expr(*argument)?,
+                value: self.dynamic_const_expr(*argument)?,
             });
         }
         Ok(Attribute {
@@ -5310,13 +5324,15 @@ impl Emit<'_> {
             // `zend_compile_const_expr_const`: the name resolved through
             // the constant imports, and an unqualified one no import
             // names, in a namespace, left as written for the fallback
-            // the engine's fetch makes.
+            // the engine's fetch makes. It moves `CG(zend_lineno)` to the
+            // name's line, which the opline after the walk is emitted at.
             tree::Expr::NameRef(token) => {
                 if let Some(value) = self.constant_name(token) {
                     return folded_const_expr(value).ok_or_else(|| {
                         self.fatal("a constant expression this compiler cannot read yet")
                     });
                 }
+                self.line = line;
                 let written = self.text(token).to_vec();
                 let (resolved, runtime) = self.constant_resolved(&written);
                 let name = if runtime { written } else { resolved };
@@ -5451,15 +5467,128 @@ impl Emit<'_> {
                 let node = &tree[id];
                 let left = node.lhs;
                 let right = self.required(node.rhs, "a binary operator")?;
-                let Some(op) = node.op.map(|op| self.kind(op)).and_then(binary_op) else {
-                    return Err(self.fatal("a constant expression this compiler cannot read yet"));
+                // `ZEND_AST_AND`, `ZEND_AST_OR` and `ZEND_AST_COALESCE` kept
+                // under the spelling `zend_ast_export` writes them with;
+                // the pipe is none of the nodes php's walk allows.
+                let op: &[u8] = match node.op.map(|op| self.kind(op)) {
+                    Some(SyntaxKind::AMP_AMP | SyntaxKind::AND_KW) => b"&&",
+                    Some(SyntaxKind::PIPE_PIPE | SyntaxKind::OR_KW) => b"||",
+                    Some(SyntaxKind::QUESTION_QUESTION) => b"??",
+                    Some(SyntaxKind::PIPE_GT) => {
+                        return Err(
+                            self.compile_error("Constant expression contains invalid operations")
+                        );
+                    }
+                    Some(kind) => match binary_op(kind) {
+                        Some(op) => op.spelling().as_bytes(),
+                        None => return Err(self.unread("a binary operator")),
+                    },
+                    None => return Err(self.unread("a binary operator")),
                 };
                 Ok(ConstExpr::Binary {
-                    op: Name(op.spelling().as_bytes().into()),
+                    op: Name(op.into()),
                     lhs: Box::new(self.const_expr(left)?),
                     rhs: Box::new(self.const_expr(right)?),
                 })
             }
+            // `ZEND_AST_CONDITIONAL`, folded where
+            // `zend_eval_const_expr` folds it and kept otherwise.
+            tree::Expr::TernaryExpr(id) => {
+                if let Some(folded) = self.eval_const(expr)? {
+                    return folded_const_expr(folded).ok_or_else(|| {
+                        self.fatal("a constant expression this compiler cannot read yet")
+                    });
+                }
+                let node = &tree[id];
+                let (cond, then, otherwise) = (node.cond, node.then, node.else_branch);
+                let otherwise = self.required(otherwise, "a conditional")?;
+                let cond = Box::new(self.const_expr(cond)?);
+                let then = match then {
+                    Some(then) => Some(Box::new(self.const_expr(then)?)),
+                    None => None,
+                };
+                Ok(ConstExpr::Conditional {
+                    cond,
+                    then,
+                    otherwise: Box::new(self.const_expr(otherwise)?),
+                })
+            }
+            // `ZEND_AST_DIM`: `[]` with nothing in it is php's compile
+            // error, and a dimension `zend_eval_const_expr` does not fold
+            // is kept for the engine, which reads it as `FETCH_DIM_R`
+            // reads.
+            tree::Expr::SubscriptExpr(id) => {
+                let node = &tree[id];
+                let (base, index) = (node.base, node.index);
+                let Some(index) = index else {
+                    return Err(self.compile_error("Cannot use [] for reading"));
+                };
+                if let Some(folded) = self.eval_const(expr)? {
+                    return folded_const_expr(folded).ok_or_else(|| {
+                        self.fatal("a constant expression this compiler cannot read yet")
+                    });
+                }
+                Ok(ConstExpr::Dim {
+                    container: Box::new(self.const_expr(base)?),
+                    dim: Box::new(self.const_expr(index)?),
+                })
+            }
+            // `ZEND_AST_PROP` and `ZEND_AST_NULLSAFE_PROP`: the object and
+            // the name, which may be an expression written in braces; a
+            // name read out of a variable is none of the nodes php's walk
+            // allows.
+            tree::Expr::MemberAccessExpr(id) => {
+                let node = &tree[id];
+                let (object, member) = (node.obj, node.member);
+                let nullsafe = self.is_nullsafe(id);
+                let object = Box::new(self.const_expr(object)?);
+                let name = match member {
+                    Some(tree::MemberSelector::MemberName(member)) => {
+                        let Some(name) = self.parsed.tree[member].name else {
+                            return Err(self.unread("a property fetch"));
+                        };
+                        ConstExpr::Str(self.text(name).into())
+                    }
+                    Some(tree::MemberSelector::BracedMember(braced)) => {
+                        let inner = self.required(self.parsed.tree[braced].inner, "a property")?;
+                        self.const_expr(inner)?
+                    }
+                    _ => {
+                        return Err(
+                            self.compile_error("Constant expression contains invalid operations")
+                        );
+                    }
+                };
+                Ok(ConstExpr::Prop {
+                    object,
+                    name: Box::new(name),
+                    nullsafe,
+                })
+            }
+            // `ZEND_AST_CAST`, folded where `zend_eval_const_expr` folds
+            // it; `(object)` is php's compile error where the expression
+            // is evaluated once.
+            tree::Expr::CastExpr(id) => {
+                let node = &tree[id];
+                let (op, operand) = (node.op, node.operand);
+                let to = self.cast_to(op, line)?;
+                if to == CastTo::Object && self.const_evaluation == Evaluation::Once {
+                    return Err(
+                        self.compile_error("Object casts are not supported in this context")
+                    );
+                }
+                if let Some(folded) = self.eval_const(expr)? {
+                    return folded_const_expr(folded).ok_or_else(|| {
+                        self.fatal("a constant expression this compiler cannot read yet")
+                    });
+                }
+                let operand = self.required(operand, "a cast")?;
+                Ok(ConstExpr::Cast {
+                    to: to.ast_code(),
+                    operand: Box::new(self.const_expr(operand)?),
+                })
+            }
+            tree::Expr::NewExpr(id) => self.const_new(id),
             // `zend_is_allowed_in_const_expr` refuses these in php's
             // words: a variable, a call, an assignment, an increment,
             // `@`, `throw`, `include`, `isset` and an interpolated
@@ -5497,6 +5626,105 @@ impl Emit<'_> {
                 None => Err(self.fatal("a constant expression this compiler cannot read yet")),
             },
         }
+    }
+
+    /// [`Self::const_expr`] for an expression evaluated each time it is
+    /// read, php's `allow_dynamic`: a parameter's default, an attribute's
+    /// argument and a `const` statement's value ([`Evaluation`]).
+    fn dynamic_const_expr(&mut self, expr: tree::Expr) -> Result<ConstExpr, CompileError> {
+        let outer = std::mem::replace(&mut self.const_evaluation, Evaluation::EachTime);
+        let built = self.const_expr(expr);
+        self.const_evaluation = outer;
+        built
+    }
+
+    /// `ZEND_AST_NEW` in a constant expression
+    /// (`zend_compile_const_expr_new`, `Z/Zend/zend_compile.c:11470`):
+    /// php's compile error where the expression is evaluated once; then
+    /// the class a name written out, never an anonymous class, a class
+    /// the program computes or `static`, resolved in the namespace, with
+    /// `self` and `parent` kept for the scope that evaluates it; and the
+    /// arguments as `zend_compile_const_expr_args` holds them, `(...)`,
+    /// an unpacked argument and a positional one after a named one each
+    /// php's compile error.
+    ///
+    /// ```php
+    /// class P { function __construct(public $x = 'p') {} }
+    /// class C extends P {
+    ///     function __construct(public $x = 0, public $y = 0) {}
+    ///     static function make($a = new self(1, y: 2), $b = new parent, $c = new stdClass) { return [$a, $b, $c]; }
+    /// }
+    /// var_dump(C::make());
+    /// ```
+    /// ```expect
+    /// array(3) {
+    ///   [0]=>
+    ///   object(C)#1 (2) {
+    ///     ["x"]=>
+    ///     int(1)
+    ///     ["y"]=>
+    ///     int(2)
+    ///   }
+    ///   [1]=>
+    ///   object(P)#2 (1) {
+    ///     ["x"]=>
+    ///     string(1) "p"
+    ///   }
+    ///   [2]=>
+    ///   object(stdClass)#3 (0) {
+    ///   }
+    /// }
+    /// ```
+    fn const_new(&mut self, id: NodeId<tree::NewExpr>) -> Result<ConstExpr, CompileError> {
+        if self.const_evaluation == Evaluation::Once {
+            return Err(self.compile_error("New expressions are not supported in this context"));
+        }
+        let line = self.line;
+        let node = &self.parsed.tree[id];
+        let (anon, ctor, args) = (node.anon, node.ctor, node.args);
+        if anon.is_some() {
+            return Err(self.compile_error("Cannot use anonymous class in constant expression"));
+        }
+        let Some(ctor) = ctor else {
+            return Err(self.unread("a `new`"));
+        };
+        let ClassSpec::Name(token) = self.class_spec(ctor) else {
+            return Err(self.compile_error("Cannot use dynamic class name in constant expression"));
+        };
+        let written = self.text(token).to_vec();
+        if class_fetch_type(&written) == FETCH_CLASS_STATIC {
+            return Err(self.compile_error("\"static\" is not allowed in compile-time constants"));
+        }
+        let class = self.class_name(&written);
+        let mut arguments = Vec::new();
+        if let Some(args) = args {
+            if self.is_callable_convert(args) {
+                return Err(self.compile_error("Cannot create Closure for new expression"));
+            }
+            let mut named = false;
+            for argument in self.arguments(args, line)?.list {
+                arguments.push(match argument {
+                    args::Arg::Positional(_) if named => {
+                        return Err(self
+                            .compile_error("Cannot use positional argument after named argument"));
+                    }
+                    args::Arg::Positional(value) => (None, self.const_expr(value)?),
+                    args::Arg::Named(name, value) => {
+                        named = true;
+                        (Some(Name(name)), self.const_expr(value)?)
+                    }
+                    args::Arg::Unpack(_) => {
+                        return Err(self.compile_error(
+                            "Argument unpacking in constant expressions is not supported",
+                        ));
+                    }
+                });
+            }
+        }
+        Ok(ConstExpr::New {
+            class: Name(class.into_boxed_slice()),
+            arguments,
+        })
     }
 
     /// `zend_is_allowed_in_const_expr`'s refusal, php's
@@ -5621,7 +5849,8 @@ impl Emit<'_> {
         for declarator in &node.const_declarators {
             let (name, value, line) = self.const_declarator(*declarator)?;
             self.line = line;
-            let value = self.constant_expr(value)?;
+            // The fold, or the tree `DECLARE_CONST` evaluates as it runs.
+            let value = self.const_expr_to_zval(value)?;
             if [&b"true"[..], b"false", b"null"]
                 .iter()
                 .any(|special| name.eq_ignore_ascii_case(special))
@@ -15107,6 +15336,7 @@ mod tests {
             chain_inner: None,
             memo: memo::Memo::default(),
             znodes: Vec::new(),
+            const_evaluation: Evaluation::Once,
             constants: Vec::new(),
             const_exprs: Vec::new(),
             vars: Vec::new(),
@@ -15496,6 +15726,28 @@ impl CastTo {
             CastTo::Bool => 0,
         }
     }
+
+    /// php's type constant as a `ZEND_AST_CAST` carries it in `attr`,
+    /// `_IS_BOOL` for a bool, the constant expression's `to`.
+    fn ast_code(self) -> u32 {
+        match self {
+            CastTo::Bool => 18,
+            other => other.type_code(),
+        }
+    }
+}
+
+/// php's `allow_dynamic` over a constant expression
+/// (`zend_const_expr_to_zval`): whether it may differ each time it is
+/// evaluated. A parameter's default, an attribute's argument and a
+/// `const` statement's value are evaluated each time, and admit `new`
+/// and `(object)`; a class constant, a property's default and an enum
+/// case's value are evaluated once, and refuse both.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum Evaluation {
+    #[default]
+    Once,
+    EachTime,
 }
 
 /// `zend_is_auto_global`: the names `php_startup_auto_globals` and

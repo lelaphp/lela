@@ -69,7 +69,7 @@ use crate::exec::{
     self, Cached, CallStage, CallState, E_FATAL_ERRORS, cleanup_live_vars,
     cleanup_unfinished_calls, free_carried_value, has_only_fatal_errors, restore_silenced,
 };
-use crate::ops::{Offset, Switched};
+use crate::ops::{DimRead, Offset, Switched, array_entry, string_dim_offset, string_offset};
 use crate::tier::{SafepointIdx, Site, Stepped, Tier, continued};
 use php_unit::Opcode;
 
@@ -365,14 +365,19 @@ pub(crate) fn declare_const<T: Tier>(
             "InternalError: a DECLARE_CONST whose op1 is no constant name",
         )));
     };
-    let value = exec::constant(code, ConstIdx(op.op2));
+    // A value the compiler could not fold is its constant expression,
+    // evaluated here as `zval_update_constant` evaluates it; the value is
+    // the constant's, one owner.
+    let value = match exec::default_value(req, code, ConstIdx(op.op2)) {
+        Ok((value, _)) => value,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
     // `zend_register_constant`'s key: the namespace lowered and the
     // name itself as written.
     let mut key = written;
     if let Some(slash) = key.iter().rposition(|b| *b == b'\\') {
         key[..slash].make_ascii_lowercase();
     }
-    req.addref(&value);
     match req.define_constant(&key, value) {
         Ok(true) => Ok(advance(req, frame)),
         Ok(false) => {
@@ -6180,18 +6185,6 @@ pub(crate) fn fetch_list_w<T: Tier>(
     fetch_dim_place(req, frame, code, op, DimRead::Silent, Keep::Container)
 }
 
-/// php's `type` argument to `zend_fetch_dimension_address_read`, of
-/// which the two reads use two values: `BP_VAR_R`, which warns of a key
-/// the table has not got, an offset past the end of a string and a
-/// container that is neither; and `BP_VAR_IS`, which warns of none of
-/// the three and reads `null` instead, since what asks is an `isset` or
-/// a `??` and the answer is the question.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum DimRead {
-    Warning,
-    Silent,
-}
-
 /// The four arms of `zend_fetch_dimension_address_read`, the container
 /// already dereferenced. Each reads the dimension itself, as php reads
 /// it inside the arm it took: `ZVAL_UNDEFINED_OP2` sits in
@@ -6243,32 +6236,6 @@ fn read_dimension(
     let _dim = exec::operand(req, frame, code, op.op2_type, op.op2);
     crate::api::raising::warning(req, &format!("Trying to access array offset on {named}"));
     Ok(Ok(Value::null()))
-}
-
-/// `zend_fetch_dimension_address_inner` under `BP_VAR_R`
-/// (`Z/Zend/zend_execute.c:2802`): the entry at `key`, copied with one
-/// more owner and a reference it holds followed (`ZVAL_COPY_DEREF`);
-/// php's `Undefined array key` warning and `null` where the table has
-/// none, the key rendered as `zend_undefined_offset` renders a long and
-/// `zend_undefined_index` a string.
-fn array_entry(req: &mut Request, array: PhpArray, key: php_heap::Key, mode: DimRead) -> Value {
-    if let Some(found) = array.heap().get(key) {
-        let value = exec::value_of(found).deref();
-        req.addref(&value);
-        return value;
-    }
-    if mode == DimRead::Silent {
-        return Value::null();
-    }
-    let message = match key {
-        php_heap::Key::Long(n) => format!("Undefined array key {n}"),
-        php_heap::Key::Str(s) => format!(
-            "Undefined array key \"{}\"",
-            String::from_utf8_lossy(s.bytes())
-        ),
-    };
-    crate::api::raising::warning(req, &message);
-    Value::null()
 }
 
 /// The dimension a handler over an object reads, php's `if (OP2_TYPE ==
@@ -6323,146 +6290,6 @@ fn object_dim(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -
         );
     }
     Some(exec::operand(req, frame, code, op.op2_type, op.op2))
-}
-
-/// `zend_check_string_offset` (`Z/Zend/zend_execute.c`), which
-/// `try_string_offset` runs over the same set: the offset php reads out
-/// of a dimension over a string, for a read and for a write alike.
-///
-/// A long is itself, and a reference is followed once. A string is
-/// `is_numeric_string_ex` with php's errors allowed: an integer is the
-/// offset, with php's warning `Illegal string offset` where anything but
-/// whitespace follows it, and everything else, a written float among
-/// them, is `zend_illegal_string_offset`'s `TypeError`. `null`, a bool, a
-/// float and an unwritten variable warn `String offset cast occurred` and
-/// then convert, the float silently since the warning has been raised
-/// ([`crate::ops::dval_to_lval_silent`]). An array, an object and a
-/// resource are the `TypeError`.
-fn string_dim_offset(req: &mut Request, dim: &Value, mode: DimRead) -> Result<Option<i64>, Thrown> {
-    let dim = dim.deref();
-    let illegal = |req: &mut Request, dim: &Value| {
-        crate::api::raising::throw(
-            req,
-            "TypeError",
-            &format!("Cannot access offset of type {} on string", dim.type_name()),
-        )
-    };
-    match dim.as_ref() {
-        ValueRef::Int(n) => Ok(Some(n)),
-        ValueRef::Str(s) => match php_heap::numeric_prefix(s.as_bytes()) {
-            Some((php_heap::Number::Long(n), trailing)) => {
-                if trailing {
-                    crate::api::raising::warning(
-                        req,
-                        &format!(
-                            "Illegal string offset \"{}\"",
-                            String::from_utf8_lossy(s.as_bytes())
-                        ),
-                    );
-                }
-                Ok(Some(n))
-            }
-            // `if (type == BP_VAR_IS) { ZVAL_NULL(result); return; }`,
-            // the one arm that stands before `zend_illegal_string_offset`.
-            _ if mode == DimRead::Silent => Ok(None),
-            _ => Err(illegal(req, &dim)),
-        },
-        ValueRef::Undef | ValueRef::Null | ValueRef::Bool(_) | ValueRef::Float(_) => {
-            if mode == DimRead::Warning {
-                crate::api::raising::warning(req, "String offset cast occurred");
-            }
-            Ok(Some(match dim.as_ref() {
-                ValueRef::Float(f) => crate::ops::dval_to_lval_silent(f),
-                ValueRef::Bool(true) => 1,
-                _ => 0,
-            }))
-        }
-        ValueRef::Array(_)
-        | ValueRef::Object(_)
-        | ValueRef::Resource(_)
-        | ValueRef::Reference(_) => Err(illegal(req, &dim)),
-    }
-}
-
-/// `try_string_offset` and the `ZVAL_CHAR` after it
-/// (`zend_fetch_dimension_address_read`, `Z/Zend/zend_execute.c:3073`):
-/// the offset php reads out of the dimension, and the one byte at it as
-/// a string of one byte.
-///
-/// A long is itself. A string is `is_numeric_string_ex` with php's
-/// errors allowed: an integer is the offset, with php's warning `Illegal
-/// string offset` where anything but whitespace follows it, and
-/// everything else, a written float among them, is
-/// `zend_illegal_string_offset`'s `TypeError`. `null`, a bool, a float
-/// and an unwritten variable warn `String offset cast occurred` and then
-/// convert, the float silently since the warning has been raised
-/// ([`crate::ops::dval_to_lval_silent`]). An array, an object and a
-/// resource are the `TypeError`.
-///
-/// A negative offset counts from the end. An offset the string is not
-/// long enough for is php's warning `Uninitialized string offset` and
-/// the empty string.
-///
-/// ```php
-/// $s = "abc";
-/// var_dump($s[1], $s[-1], $s["1"], $s[1.7], $s[5], $s["0x1"]);
-/// ```
-/// ```expect
-/// Warning: String offset cast occurred in %s on line 3
-///
-/// Warning: Uninitialized string offset 5 in %s on line 3
-///
-/// Warning: Illegal string offset "0x1" in %s on line 3
-/// string(1) "b"
-/// string(1) "c"
-/// string(1) "b"
-/// string(1) "b"
-/// string(0) ""
-/// string(1) "a"
-/// ```
-///
-/// A dimension that is no offset php reads is its `TypeError`.
-///
-/// ```php
-/// $s = "abc";
-/// var_dump($s["x"]);
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught TypeError: Cannot access offset of type string on string in %s:3
-/// Stack trace:
-/// #0 {main}
-///   thrown in %s on line 3
-/// ```
-fn string_offset(
-    req: &mut Request,
-    text: PhpString,
-    dim: &Value,
-    mode: DimRead,
-) -> Result<Value, Thrown> {
-    let Some(offset) = string_dim_offset(req, dim, mode)? else {
-        return Ok(Value::null());
-    };
-    let len = i64::try_from(text.len()).unwrap_or(i64::MAX);
-    let at = if offset < 0 {
-        len.saturating_add(offset)
-    } else {
-        offset
-    };
-    if at < 0 || at >= len {
-        // `if (type != BP_VAR_IS)`: the warning and the empty string are
-        // the read's, and `null` with nothing raised is the other's.
-        if mode == DimRead::Silent {
-            return Ok(Value::null());
-        }
-        crate::api::raising::warning(req, &format!("Uninitialized string offset {offset}"));
-        return Ok(Value::string(PhpString::new(req, b"")?));
-    }
-    let byte = text
-        .as_bytes()
-        .get(usize::try_from(at).unwrap_or(0))
-        .copied()
-        .unwrap_or(0);
-    Ok(Value::string(PhpString::new(req, &[byte])?))
 }
 
 /// The place a dimension write lands in, php's

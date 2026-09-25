@@ -4287,9 +4287,48 @@ fn default_value_string(req: &mut Request, expr: &ConstExpr) -> String {
             String::from_utf8_lossy(&class.0),
             String::from_utf8_lossy(&name.0)
         ),
-        ConstExpr::Unary { .. } | ConstExpr::Binary { .. } => ast_export(req, expr, 0),
+        ConstExpr::Unary { .. }
+        | ConstExpr::Binary { .. }
+        | ConstExpr::Dim { .. }
+        | ConstExpr::Prop { .. }
+        | ConstExpr::Conditional { .. }
+        | ConstExpr::Cast { .. }
+        | ConstExpr::New { .. } => ast_export(req, expr, 0),
         _ => String::from("<default>"),
     }
+}
+
+/// `zend_ast_export_ns_name` over the class a constant expression's
+/// `new` names: `\` before a name the compiler resolved, which
+/// `zend_compile_const_expr_class_reference` marks `ZEND_NAME_FQ`, and
+/// `self` and `parent` as written.
+fn new_class_name(class: &[u8]) -> String {
+    let written = String::from_utf8_lossy(class);
+    if class.eq_ignore_ascii_case(b"self") || class.eq_ignore_ascii_case(b"parent") {
+        return written.into_owned();
+    }
+    format!("\\{written}")
+}
+
+/// `zend_ast_export_var` over a property's name: a string that is a
+/// valid name as it stands, and anything else in braces.
+fn property_name(req: &mut Request, name: &ConstExpr) -> String {
+    if let ConstExpr::Str(bytes) = name {
+        let valid = bytes
+            .first()
+            .is_some_and(|first| first.is_ascii_alphabetic() || *first == b'_' || *first >= 0x80)
+            && bytes
+                .iter()
+                .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_' || *byte >= 0x80);
+        // `zend_ast_export_name`: a string as it stands, in braces
+        // where it is no valid name.
+        let written = String::from_utf8_lossy(bytes);
+        if valid {
+            return written.into_owned();
+        }
+        return format!("{{{written}}}");
+    }
+    format!("{{{}}}", ast_export(req, name, 0))
 }
 
 /// `zend_ast_export_ex` over an operator of a constant expression, the
@@ -4308,6 +4347,24 @@ fn default_value_string(req: &mut Request, expr: &ConstExpr) -> String {
 /// Parameter #1 [ <optional> $b = -V ]
 /// Parameter #2 [ <optional> $c = W * (Y + 1) ]
 /// Parameter #3 [ <optional> $d = Z . 'x' ]
+/// ```
+///
+/// A `new` with its class written as resolved, a conditional, a `??`, a
+/// cast, a dimension and a property, `?->` and braces kept:
+///
+/// ```php
+/// class Foo { const BAR = 1; }
+/// function g($d = new Foo(1, x: new Foo), $g = X ? 1 : Foo::BAR, $h = Foo::BAR ?? 2, $i = (int) Foo::BAR, $j = Foo::BAR['x'], $k = FOO?->x, $l = FOO->{'a b'}) {}
+/// foreach ((new ReflectionFunction('g'))->getParameters() as $p) { echo $p, "\n"; }
+/// ```
+/// ```expect
+/// Parameter #0 [ <optional> $d = new \Foo(1, x: new \Foo()) ]
+/// Parameter #1 [ <optional> $g = X ? 1 : Foo::BAR ]
+/// Parameter #2 [ <optional> $h = Foo::BAR ?? 2 ]
+/// Parameter #3 [ <optional> $i = (int)Foo::BAR ]
+/// Parameter #4 [ <optional> $j = Foo::BAR['x'] ]
+/// Parameter #5 [ <optional> $k = FOO?->x ]
+/// Parameter #6 [ <optional> $l = FOO->{a b} ]
 /// ```
 fn ast_export(req: &mut Request, expr: &ConstExpr, priority: u32) -> String {
     let (text, own) = match expr {
@@ -4338,6 +4395,61 @@ fn ast_export(req: &mut Request, expr: &ConstExpr, priority: u32) -> String {
                 format!("{lhs} {} {rhs}", String::from_utf8_lossy(&op.0)),
                 own,
             )
+        }
+        ConstExpr::Conditional {
+            cond,
+            then,
+            otherwise,
+        } => {
+            let cond = ast_export(req, cond, 100);
+            let middle = match then {
+                Some(then) => format!(" ? {} : ", ast_export(req, then, 101)),
+                None => String::from(" ?: "),
+            };
+            let otherwise = ast_export(req, otherwise, 101);
+            (format!("{cond}{middle}{otherwise}"), 100)
+        }
+        ConstExpr::Cast { to, operand } => {
+            let written = match to {
+                18 => "(bool)",
+                4 => "(int)",
+                5 => "(float)",
+                6 => "(string)",
+                7 => "(array)",
+                _ => "(object)",
+            };
+            let operand = ast_export(req, operand, 241);
+            (format!("{written}{operand}"), 240)
+        }
+        // The primary expressions, which no priority wraps.
+        ConstExpr::Dim { container, dim } => {
+            let container = ast_export(req, container, 260);
+            let dim = ast_export(req, dim, 0);
+            return format!("{container}[{dim}]");
+        }
+        ConstExpr::Prop {
+            object,
+            name,
+            nullsafe,
+        } => {
+            let object = ast_export(req, object, 0);
+            let arrow = if *nullsafe { "?->" } else { "->" };
+            let name = property_name(req, name);
+            return format!("{object}{arrow}{name}");
+        }
+        ConstExpr::New { class, arguments } => {
+            let mut text = format!("new {}(", new_class_name(&class.0));
+            for (at, (name, value)) in arguments.iter().enumerate() {
+                if at > 0 {
+                    text.push_str(", ");
+                }
+                if let Some(name) = name {
+                    let _ = write!(text, "{}: ", String::from_utf8_lossy(&name.0));
+                }
+                text.push_str(&ast_export(req, value, 0));
+            }
+            text.push(')');
+            return text;
         }
         leaf => return default_value_string(req, leaf),
     };
