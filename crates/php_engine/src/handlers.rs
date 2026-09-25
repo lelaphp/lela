@@ -907,6 +907,7 @@ pub(crate) fn init_dynamic_call<T: Tier>(
         closure: target.closure,
         extra_named: Vec::new(),
         stage: CallStage::Building,
+        send_arg_by_ref: false,
         frameless: false,
         coerced: Vec::new(),
     });
@@ -1279,6 +1280,7 @@ fn init_call(
         closure: None,
         extra_named: Vec::new(),
         stage: CallStage::Building,
+        send_arg_by_ref: false,
         frameless: false,
         coerced: Vec::new(),
     });
@@ -1286,14 +1288,46 @@ fn init_call(
 }
 
 /// `ZEND_SEND_VAL`: an argument that is a constant or a temporary, placed
-/// in the call frame being built.
+/// in the call frame being built, at its number or, where `op2` is the
+/// name the compiler could not place, where `zend_handle_named_arg`
+/// places it ([`reserve_arg`]). A name the compiler placed is no name
+/// at all: an argument written `name:` in the order the callee declares
+/// its parameters is sent at its number, and one after a skipped
+/// parameter is sent by name, the skipped one filled by the
+/// `CHECK_UNDEF_ARGS` after the last argument.
+///
+/// ```php
+/// var_dump(str_pad('abc', length: 6, pad_type: STR_PAD_LEFT));
+/// var_dump(str_pad(string: 'abc', length: 5, pad_string: '-'));
+/// ```
+/// ```expect
+/// string(6) "   abc"
+/// string(5) "abc--"
+/// ```
+///
+/// A name the callee declares no parameter for is php's `Error`, and so
+/// is a name whose parameter an argument already filled; the value is
+/// given up and nothing is placed.
+///
+/// ```php
+/// try { str_pad('abc', 6, nope: 1); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { str_pad('abc', 6, string: 'x'); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Unknown named parameter $nope
+/// Named parameter $string overwrites previous argument
+/// ```
 pub(crate) fn send_val<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    send(req, frame, code, op)
+    let reserved = match reserve_arg(req, frame, code, op) {
+        Ok(reserved) => reserved,
+        Err(edge) => return edge,
+    };
+    send(req, frame, code, op, reserved.slot)
 }
 
 /// `ZEND_SEND_VAR`: an argument that is a variable or what a call
@@ -1301,14 +1335,26 @@ pub(crate) fn send_val<T: Tier>(
 /// table has whose parameter at this number takes its argument by
 /// value, and [`send_ref`] where the parameter takes one by reference,
 /// so a reference the operand holds is followed here and never passed
-/// on (`ZVAL_COPY_DEREF`).
+/// on (`ZVAL_COPY_DEREF`). By name as [`send_val`] sends one.
+///
+/// ```php
+/// $n = 6; $s = 'abc';
+/// var_dump(str_pad($s, pad_type: STR_PAD_BOTH, length: $n));
+/// ```
+/// ```expect
+/// string(6) " abc  "
+/// ```
 pub(crate) fn send_var<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    send(req, frame, code, op)
+    let reserved = match reserve_arg(req, frame, code, op) {
+        Ok(reserved) => reserved,
+        Err(edge) => return edge,
+    };
+    send(req, frame, code, op, reserved.slot)
 }
 
 /// `ZEND_SEND_REF` (`Z/Zend/zend_vm_def.h:5087`), the argument a call
@@ -1330,11 +1376,47 @@ pub(crate) fn send_var<T: Tier>(
 /// int(2)
 /// int(3)
 /// ```
+///
+/// A dimension, a property and a class's property are fetched for
+/// writing first, and the place the fetch left is what is bound; by
+/// name, the parameter the name gives is the one bound.
+///
+/// ```php
+/// class C { public $p = [3, 1, 2]; public static $s = [9, 8]; }
+/// $a = ['k' => [2, 1]]; $o = new C;
+/// sort($a['k']); sort($o->p); sort(C::$s);
+/// function f(&$x = null, &$y = null) { $y = 'y'; }
+/// f(y: $b);
+/// var_dump($a['k'][0], $o->p[0], C::$s[0], $b);
+/// ```
+/// ```expect
+/// int(1)
+/// int(1)
+/// int(8)
+/// string(1) "y"
+/// ```
 pub(crate) fn send_ref<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+) -> Edge {
+    let reserved = match reserve_arg(req, frame, code, op) {
+        Ok(reserved) => reserved,
+        Err(edge) => return edge,
+    };
+    send_by_ref(req, frame, code, op, reserved.slot)
+}
+
+/// The body of [`send_ref`] once the slot is reserved, which
+/// `SEND_VAR_EX` and `SEND_FUNC_ARG` dispatch to where the parameter
+/// takes its argument by reference.
+fn send_by_ref(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    slot: ArgSlot,
 ) -> Edge {
     let Some(at) = write_place(req, frame, code, op.op1_type, op.op1) else {
         return Err(Fatal::Error(String::from(
@@ -1355,7 +1437,7 @@ pub(crate) fn send_ref<T: Tier>(
     };
     let bound = cell.as_value();
     req.addref(&bound);
-    place_argument(req, frame, op, bound)
+    place_argument(req, frame, slot, bound)
 }
 
 /// `ZEND_ARG_SEND_MODE` (`Z/Zend/zend_compile.h:1141`) over the callee
@@ -1397,7 +1479,8 @@ fn must_be_sent_by_ref(req: &Request, number: u32) -> bool {
 /// `zend_cannot_pass_by_reference` (`Z/Zend/zend_execute.c`): the
 /// `Error` an argument that is no variable raises where the parameter
 /// takes one by reference, which php delays from the compiler to this
-/// opline.
+/// opline. The parameter is named where it is one of the declared ones
+/// (`get_function_arg_name`), and a variadic's is not.
 fn cannot_pass_by_reference(req: &mut Request, number: u32) -> Thrown {
     let function = req.vm().building_call_function();
     let name = function.map_or_else(String::new, |function| req.qualified_name_of(function));
@@ -1405,6 +1488,7 @@ fn cannot_pass_by_reference(req: &mut Request, number: u32) -> Thrown {
     let parameter = function
         .and_then(|function| req.function_decl(function))
         .and_then(|decl| decl.parameters.get(at).cloned())
+        .filter(|parameter| !parameter.variadic)
         .map(|parameter| format!(" (${})", String::from_utf8_lossy(&parameter.name.0)))
         .unwrap_or_default();
     let message =
@@ -1441,18 +1525,61 @@ fn cannot_pass_by_reference(req: &mut Request, number: u32) -> Thrown {
 /// #0 {main}
 ///   thrown in %s on line 2
 /// ```
+///
+/// By name, the bit is the named parameter's, and a name the callee
+/// declares no parameter for is its variadic's or php's `Error`; the
+/// extra named arguments a variadic collects follow the positional
+/// ones under their names, in the order they were written.
+///
+/// ```php
+/// class C {
+///     function m($a, $b = 'b', ...$rest) { var_dump($a, $b, $rest); }
+///     function r(&$x) {}
+/// }
+/// $o = new C;
+/// $o->m(b: 2, a: 1);
+/// $o->m(1, 2, 3, z: 'z', y: 'y');
+/// try { $o->m(1, a: 2); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { $o->m(1, z: 1, z: 2); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { $o->r(y: 1); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { $o->r(x: 1); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// int(1)
+/// int(2)
+/// array(0) {
+/// }
+/// int(1)
+/// int(2)
+/// array(3) {
+///   [0]=>
+///   int(3)
+///   ["z"]=>
+///   string(1) "z"
+///   ["y"]=>
+///   string(1) "y"
+/// }
+/// Named parameter $a overwrites previous argument
+/// Named parameter $z overwrites previous argument
+/// Unknown named parameter $y
+/// C::r(): Argument #1 ($x) could not be passed by reference
+/// ```
 pub(crate) fn send_val_ex<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    if must_be_sent_by_ref(req, op.op2) {
-        let thrown = cannot_pass_by_reference(req, op.op2);
+    let reserved = match reserve_arg(req, frame, code, op) {
+        Ok(reserved) => reserved,
+        Err(edge) => return edge,
+    };
+    if must_be_sent_by_ref(req, reserved.number) {
+        let thrown = cannot_pass_by_reference(req, reserved.number);
         exec::free_operand(req, frame, code, op.op1_type, op.op1);
         return threw(req, frame, &thrown);
     }
-    send(req, frame, code, op)
+    send(req, frame, code, op, reserved.slot)
 }
 
 /// `ZEND_SEND_VAR_EX`: `SEND_VAR` for a variable sent to a callee the
@@ -1484,16 +1611,38 @@ pub(crate) fn send_val_ex<T: Tier>(
 /// #0 {main}
 ///   thrown in %s on line 3
 /// ```
+///
+/// By name, the named parameter's bit decides, and a variadic taking
+/// its arguments by reference binds an extra named one too.
+///
+/// ```php
+/// class C {
+///     function m($a = 0, &$b = null) { $b = 'bound'; }
+///     function v(&...$refs) { foreach ($refs as &$r) { $r = 'v'; } }
+/// }
+/// $o = new C;
+/// $o->m(b: $x);
+/// $o->v(k: $y);
+/// var_dump($x, $y);
+/// ```
+/// ```expect
+/// string(5) "bound"
+/// string(1) "v"
+/// ```
 pub(crate) fn send_var_ex<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    if should_be_sent_by_ref(req, op.op2) {
-        return send_ref::<T>(req, frame, code, op);
+    let reserved = match reserve_arg(req, frame, code, op) {
+        Ok(reserved) => reserved,
+        Err(edge) => return edge,
+    };
+    if should_be_sent_by_ref(req, reserved.number) {
+        return send_by_ref(req, frame, code, op, reserved.slot);
     }
-    send(req, frame, code, op)
+    send(req, frame, code, op, reserved.slot)
 }
 
 /// `ZEND_SEND_VAR_NO_REF_EX` (`Z/Zend/zend_vm_def.h:5019`): what a call
@@ -1537,22 +1686,339 @@ pub(crate) fn send_var_no_ref_ex<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let (by_ref, prefer) = send_mode(req, op.op2);
+    let reserved = match reserve_arg(req, frame, code, op) {
+        Ok(reserved) => reserved,
+        Err(edge) => return edge,
+    };
+    let (by_ref, prefer) = send_mode(req, reserved.number);
     if !by_ref {
-        return send(req, frame, code, op);
+        return send(req, frame, code, op, reserved.slot);
     }
+    send_returned(req, frame, code, op, reserved.slot, prefer)
+}
+
+/// `ZEND_SEND_VAR_NO_REF` (`Z/Zend/zend_vm_def.h:4988`): what a call
+/// returned, sent where the compiler knew the parameter takes its
+/// argument by reference and nothing else: [`send_var_no_ref_ex`]'s
+/// by-reference arm, with the bit read at compile time. A call that
+/// returned by value has no place for the write to land in, and php's
+/// notice says so.
+///
+/// ```php
+/// function g() { return [3, 1, 2]; }
+/// var_dump(sort(g()));
+/// ```
+/// ```expect
+/// Notice: Only variables should be passed by reference in %s on line 3
+/// bool(true)
+/// ```
+pub(crate) fn send_var_no_ref<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let reserved = match reserve_arg(req, frame, code, op) {
+        Ok(reserved) => reserved,
+        Err(edge) => return edge,
+    };
+    send_returned(req, frame, code, op, reserved.slot, false)
+}
+
+/// What a call returned placed for a parameter taking it by reference:
+/// as it stands where it is a reference or the parameter takes one only
+/// where it can (`ARG_MAY_BE_SENT_BY_REF`), and otherwise wrapped in a
+/// cell of its own (`ZVAL_NEW_REF(arg, arg)`) with php's notice.
+fn send_returned(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    slot: ArgSlot,
+    prefer: bool,
+) -> Edge {
     // `GET_OP1_ZVAL_PTR(BP_VAR_R)` over a `VAR`, which follows no
     // reference: the operand's owner is the argument's from here.
     let returned = req.take_slot(frame, exec::temporary_slot(code, op.op1));
     if returned.as_php_ref().is_some() || prefer {
-        return place_argument(req, frame, op, returned);
+        return place_argument(req, frame, slot, returned);
     }
     let cell = match req.reference(returned) {
         Ok(cell) => cell,
         Err(thrown) => return threw(req, frame, &thrown),
     };
     crate::api::raising::notice(req, "Only variables should be passed by reference");
-    place_argument(req, frame, op, cell.as_value())
+    place_argument(req, frame, slot, cell.as_value())
+}
+
+/// `ZEND_CHECK_FUNC_ARG` (`Z/Zend/zend_vm_def.h:5183`), before a
+/// dimension, a property or a class's property sent to a callee the
+/// compiler knew nothing of: the parameter's by-reference bit read off
+/// the callee the `INIT` resolved, by its number or by its name, and
+/// kept on the call being built (`ZEND_CALL_SEND_ARG_BY_REF`) for the
+/// `_FUNC_ARG` fetch and the `SEND_FUNC_ARG` after it to serve the
+/// argument as a write or as a read by. A name the callee declares no
+/// parameter for is sent by value, and the send raises php's `Error`.
+///
+/// ```php
+/// class C {
+///     public $p = [3, 1, 2]; public $q = 'q';
+///     function byref(&$a) { sort($a); }
+///     function byval($a) { return $a; }
+/// }
+/// $o = new C;
+/// $o->byref($o->p);
+/// var_dump($o->p, $o->byval($o->q), $o->byval(a: $o->q));
+/// try { $o->byval(nope: $o->q); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// array(3) {
+///   [0]=>
+///   int(1)
+///   [1]=>
+///   int(2)
+///   [2]=>
+///   int(3)
+/// }
+/// string(1) "q"
+/// string(1) "q"
+/// Unknown named parameter $nope
+/// ```
+pub(crate) fn check_func_arg<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let number = match ArgAt::of(op) {
+        ArgAt::Number(number) => Some(number),
+        ArgAt::Name(at) => {
+            let name = exec::constant(code, at);
+            let function = req.vm().building_call_function();
+            match (name.as_str_bytes(), function) {
+                (Some(name), Some(function)) => {
+                    crate::api::call::arg_offset_by_name(req, function, name).number()
+                }
+                _ => None,
+            }
+        }
+    };
+    let by_ref = number.is_some_and(|number| should_be_sent_by_ref(req, number));
+    let Some(call) = req.vm_mut().building_call() else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_CHECK_FUNC_ARG with no call frame under it",
+        )));
+    };
+    call.send_arg_by_ref = by_ref;
+    Ok(advance(req, frame))
+}
+
+/// `ZEND_SEND_FUNC_ARG` (`Z/Zend/zend_vm_def.h:5215`): what a
+/// `_FUNC_ARG` fetch left, sent as the `CHECK_FUNC_ARG` before it read
+/// the parameter: the place the write fetch laid down, bound as
+/// [`send_ref`] binds a variable, or the value the read fetched, sent
+/// as `SEND_VAR` sends one, a reference it holds followed.
+///
+/// ```php
+/// class C { function m(&$a, $b) { $a[] = $b; } }
+/// class D { public static $s = []; public $list = ['k' => []]; }
+/// $o = new C; $d = new D;
+/// $o->m(D::$s, 1);
+/// $o->m($d->list['k'], 2);
+/// $o->m(b: 3, a: $d->list['k']);
+/// var_dump(D::$s, $d->list);
+/// ```
+/// ```expect
+/// array(1) {
+///   [0]=>
+///   int(1)
+/// }
+/// array(1) {
+///   ["k"]=>
+///   array(2) {
+///     [0]=>
+///     int(2)
+///     [1]=>
+///     int(3)
+///   }
+/// }
+/// ```
+pub(crate) fn send_func_arg<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let reserved = match reserve_arg(req, frame, code, op) {
+        Ok(reserved) => reserved,
+        Err(edge) => return edge,
+    };
+    if sends_arg_by_ref(req) {
+        return send_by_ref(req, frame, code, op, reserved.slot);
+    }
+    send(req, frame, code, op, reserved.slot)
+}
+
+/// `ZEND_CALL_INFO(EX(call)) & ZEND_CALL_SEND_ARG_BY_REF`: what the last
+/// `CHECK_FUNC_ARG` read for the call being built.
+fn sends_arg_by_ref(req: &Request) -> bool {
+    req.vm()
+        .calls()
+        .last()
+        .is_some_and(|call| call.send_arg_by_ref)
+}
+
+/// `ZEND_CHECK_UNDEF_ARGS` (`Z/Zend/zend_vm_def.h:5656`), after the last
+/// argument of a call where a named one may have skipped a parameter:
+/// nothing where every slot up to the last one placed is filled, and
+/// otherwise `zend_handle_undef_args` over the call
+/// ([`crate::api::call::handle_undef_args`]), which fills each skipped
+/// parameter with its default or raises php's `ArgumentCountError` for
+/// one that has none.
+///
+/// ```php
+/// function f($a = 'a', $b = 'b', $c = 'c') { echo "$a $b $c\n"; }
+/// f(c: 'C');
+/// f(b: 'B', c: 'C');
+/// class K { const D = 'd'; static function m($x = self::D, $y = 0) { echo "$x $y\n"; } }
+/// K::m(y: 1);
+/// try { str_pad('a', pad_type: 1); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// a b C
+/// a B C
+/// d 1
+/// str_pad(): Argument #2 ($length) not passed
+/// ```
+pub(crate) fn check_undef_args<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    _: &OpArray,
+    _: &Opline,
+) -> Edge {
+    let undef = req.vm().calls().last().is_some_and(|call| {
+        call.arguments
+            .iter()
+            .any(|argument| matches!(argument.as_ref(), ValueRef::Undef))
+    });
+    if undef && let Err(thrown) = crate::api::call::handle_undef_args(req) {
+        return threw(req, frame, &thrown);
+    }
+    Ok(advance(req, frame))
+}
+
+/// Where a `SEND_*` or a `CHECK_FUNC_ARG` places its argument, php's
+/// `op2` decoded once: the argument's number, or, where `op2` is an
+/// `IS_CONST`, the name the compiler left because it could not place
+/// the argument itself.
+#[derive(Debug, Clone, Copy)]
+enum ArgAt {
+    Number(u32),
+    Name(ConstIdx),
+}
+
+impl ArgAt {
+    fn of(op: &Opline) -> ArgAt {
+        match op.op2_type {
+            OperandKind::Const => ArgAt::Name(ConstIdx(op.op2)),
+            _ => ArgAt::Number(op.op2),
+        }
+    }
+}
+
+/// A slot of the call being built a send writes into: a positional
+/// argument's, or the one `zend_handle_named_arg` reserved for a named
+/// one.
+#[derive(Debug, Clone, Copy)]
+enum ArgSlot {
+    Positional(usize),
+    Named(crate::api::call::NamedAt),
+}
+
+/// A send's slot and the argument's number, php's `arg` and `arg_num`,
+/// the number the by-reference bit is read at.
+#[derive(Debug, Clone, Copy)]
+struct Reserved {
+    slot: ArgSlot,
+    number: u32,
+}
+
+/// The slot a send writes into: `ZEND_CALL_VAR` over the slot
+/// `EX_NUM_TO_VAR` numbered for a number, bounded by the count the `INIT`
+/// said, and `zend_handle_named_arg` for a name
+/// ([`crate::api::call::handle_named_arg`], the one placement
+/// `zend_call_function`'s named arguments take too), whose extra named
+/// entry holds one owner of the name. What it refuses is php's `Error`,
+/// the operand given up (`FREE_OP1`), and the `Err` is the edge the
+/// handler returns.
+fn reserve_arg(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Result<Reserved, Edge> {
+    let no_call = || -> Result<Reserved, Edge> {
+        Err(Err(Fatal::Error(String::from(
+            "InternalError: a SEND_* opline with no call frame under it",
+        ))))
+    };
+    match ArgAt::of(op) {
+        ArgAt::Number(number) => {
+            let at = usize::try_from(number.saturating_sub(1)).unwrap_or(usize::MAX);
+            let Some(call) = req.vm_mut().building_call() else {
+                return no_call();
+            };
+            // The `INIT_*` said how many arguments the call has in
+            // order, so a number past that is a compiler bug and not an
+            // allocation.
+            if at >= call.count {
+                return Err(Err(Fatal::Error(format!(
+                    "InternalError: a SEND_* opline places argument {number} of a call of {}",
+                    call.count
+                ))));
+            }
+            Ok(Reserved {
+                slot: ArgSlot::Positional(at),
+                number,
+            })
+        }
+        ArgAt::Name(at) => {
+            let Some(name) = exec::constant(code, at).as_php_string().copied() else {
+                return Err(Err(Fatal::Error(String::from(
+                    "InternalError: a SEND_* opline names its argument by what is no string",
+                ))));
+            };
+            let Some(function) = req.vm().building_call_function() else {
+                return no_call();
+            };
+            let offset = crate::api::call::arg_offset_by_name(req, function, name.as_bytes());
+            let Some(call) = req.vm_mut().building_call() else {
+                return no_call();
+            };
+            let placed = crate::api::call::handle_named_arg(
+                offset,
+                &mut call.arguments,
+                &mut call.extra_named,
+                name,
+            );
+            match placed {
+                Ok(named) => {
+                    if matches!(named.at, crate::api::call::NamedAt::Extra(_)) {
+                        req.addref(&Value::string(name));
+                    }
+                    Ok(Reserved {
+                        slot: ArgSlot::Named(named.at),
+                        number: named.number,
+                    })
+                }
+                Err(refused) => {
+                    let thrown = refused.throw(req, name);
+                    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+                    Err(threw(req, frame, &thrown))
+                }
+            }
+        }
+    }
 }
 
 /// `ZEND_DO_ICALL`: serve the native the call frame names, and write
@@ -2663,7 +3129,7 @@ pub(crate) fn recv_init<T: Tier>(
 ) -> Edge {
     let passed = req.vm().at(frame).map_or(0, |state| state.num_args);
     if op.op1 > passed {
-        let default = match default_value(req, code, ConstIdx(op.op2)) {
+        let default = match exec::default_value(req, code, ConstIdx(op.op2)) {
             Ok(default) => default,
             Err(thrown) => return threw(req, frame, &thrown),
         };
@@ -2686,31 +3152,6 @@ pub(crate) fn recv_init<T: Tier>(
         return threw(req, frame, &thrown);
     }
     Ok(advance(req, frame))
-}
-
-/// `RT_CONSTANT(opline, opline->op2)` as `ZEND_RECV_INIT` reads it: the
-/// value with one more owner, and, where it is the `IS_CONSTANT_AST` the
-/// compiler left for a default naming a constant (`zend_compile_params`
-/// under `ZEND_COMPILE_NO_PERSISTENT_CONSTANT_SUBSTITUTION`), the
-/// constant expression it indexes, evaluated in the function's scope
-/// (`zval_update_constant_with_ctx`, `EX(func)->op_array.scope`). The
-/// second word says which of the two it was, since php holds only what
-/// it evaluated to the parameter's type. php keeps an evaluated value
-/// that is not refcounted in the opline's runtime cache; nothing a
-/// program can see turns on that, and it is not kept here.
-fn default_value(req: &mut Request, code: &OpArray, at: ConstIdx) -> Result<(Value, bool), Thrown> {
-    let unevaluated = code
-        .literals
-        .get(at.0 as usize)
-        .and_then(|constant| constant.as_const_expr())
-        .and_then(|at| code.const_exprs.get(at as usize));
-    if let Some(expr) = unevaluated {
-        let scope = req.executed_scope();
-        return Ok((crate::api::call::eval_const_expr(req, expr, scope)?, true));
-    }
-    let value = exec::constant(code, at);
-    req.addref(&value);
-    Ok((value, false))
 }
 
 /// `ZEND_NEW` (`Z/Zend/zend_vm_def.h:5941`) over a class named at
@@ -2850,6 +3291,7 @@ pub(crate) fn new<T: Tier>(
         closure: None,
         extra_named: Vec::new(),
         stage: CallStage::Building,
+        send_arg_by_ref: false,
         frameless: false,
         coerced: Vec::new(),
     });
@@ -3147,6 +3589,7 @@ fn static_call_frame(
         closure: None,
         extra_named: Vec::new(),
         stage: CallStage::Building,
+        send_arg_by_ref: false,
         frameless: false,
         coerced: Vec::new(),
     });
@@ -3309,6 +3752,7 @@ pub(crate) fn init_method_call<T: Tier>(
         closure: None,
         extra_named: Vec::new(),
         stage: CallStage::Building,
+        send_arg_by_ref: false,
         frameless: false,
         coerced: Vec::new(),
     });
@@ -4423,6 +4867,170 @@ pub(crate) fn fetch_obj_rw<T: Tier>(
     op: &Opline,
 ) -> Edge {
     fetch_obj_place(req, frame, code, op, PropertyRead::Warning)
+}
+
+/// `ZEND_FETCH_OBJ_FUNC_ARG` (`Z/Zend/zend_vm_def.h:2397`), a property
+/// sent to a callee the compiler knew nothing of: [`fetch_obj_w`] where
+/// the `CHECK_FUNC_ARG` before it found the parameter takes its
+/// argument by reference, so the callee writes into the property, and
+/// [`fetch_obj_r`] otherwise, with the read's warnings. A property
+/// under it is fetched the same way, and a temporary has no place to
+/// write into.
+///
+/// ```php
+/// class N { public $list = [2, 1]; }
+/// class C {
+///     public $p = [3, 1, 2]; public $n;
+///     function __construct() { $this->n = new N; }
+///     function byref(&$a) { $a[] = 0; }
+///     function byval($a) { return is_array($a) ? count($a) : $a; }
+///     function own() { $this->byref($this->p); return $this->byval($this->p); }
+/// }
+/// $o = new C;
+/// $o->byref($o->p);
+/// $o->byref($o->n->list);
+/// var_dump($o->p, $o->n->list, $o->byval($o->p), $o->own());
+/// var_dump($o->byval($o->missing));
+/// ```
+/// ```expect
+/// array(4) {
+///   [0]=>
+///   int(3)
+///   [1]=>
+///   int(1)
+///   [2]=>
+///   int(2)
+///   [3]=>
+///   int(0)
+/// }
+/// array(3) {
+///   [0]=>
+///   int(2)
+///   [1]=>
+///   int(1)
+///   [2]=>
+///   int(0)
+/// }
+/// int(4)
+/// int(5)
+///
+/// Warning: Undefined property: C::$missing in %s on line 14
+/// NULL
+/// ```
+pub(crate) fn fetch_obj_func_arg<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    if !sends_arg_by_ref(req) {
+        return fetch_obj_r::<T>(req, frame, code, op);
+    }
+    if matches!(op.op1_type, OperandKind::Const | OperandKind::Tmp) {
+        return use_tmp_in_write_context(req, frame, code, op);
+    }
+    fetch_obj_w::<T>(req, frame, code, op)
+}
+
+/// `ZEND_FETCH_DIM_FUNC_ARG` (`Z/Zend/zend_vm_def.h:2035`), an element
+/// sent to a callee the compiler knew nothing of: [`fetch_dim_w`] where
+/// the parameter takes its argument by reference, which lays the
+/// element down where it was not and appends for `[]`, and
+/// [`fetch_dim_r`] otherwise, where `[]` is php's `Error`.
+///
+/// ```php
+/// class C { function byref(&$a) { $a = 'set'; } function byval($a) { return $a; } }
+/// $o = new C; $a = ['k' => 'v'];
+/// $o->byref($a['new']);
+/// $o->byref($a[]);
+/// var_dump($a, $o->byval($a['k']), $o->byval($a['none']));
+/// try { $o->byval($a[]); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Warning: Undefined array key "none" in %s on line 6
+/// array(3) {
+///   ["k"]=>
+///   string(1) "v"
+///   ["new"]=>
+///   string(3) "set"
+///   [0]=>
+///   string(3) "set"
+/// }
+/// string(1) "v"
+/// NULL
+/// Cannot use [] for reading
+/// ```
+pub(crate) fn fetch_dim_func_arg<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    if sends_arg_by_ref(req) {
+        if matches!(op.op1_type, OperandKind::Const | OperandKind::Tmp) {
+            return use_tmp_in_write_context(req, frame, code, op);
+        }
+        return fetch_dim_w::<T>(req, frame, code, op);
+    }
+    if op.op2_type == OperandKind::Unused {
+        // `zend_use_undef_in_read_context_helper`.
+        let thrown = crate::api::raising::throw(req, "Error", "Cannot use [] for reading");
+        exec::free_operand(req, frame, code, op.op1_type, op.op1);
+        return threw(req, frame, &thrown);
+    }
+    fetch_dim_r::<T>(req, frame, code, op)
+}
+
+/// `ZEND_FETCH_STATIC_PROP_FUNC_ARG` (`Z/Zend/zend_vm_def.h:1912`), a
+/// class's property sent to a callee the compiler knew nothing of:
+/// [`fetch_static_prop_w`] where the parameter takes its argument by
+/// reference and [`fetch_static_prop_r`] otherwise.
+///
+/// ```php
+/// class S { public static $list = [2, 1]; public static $n = 5; }
+/// class C { function byref(&$a) { sort($a); } function byval($a) { return $a + 1; } }
+/// $o = new C;
+/// $o->byref(S::$list);
+/// var_dump(S::$list, $o->byval(S::$n));
+/// ```
+/// ```expect
+/// array(2) {
+///   [0]=>
+///   int(1)
+///   [1]=>
+///   int(2)
+/// }
+/// int(6)
+/// ```
+pub(crate) fn fetch_static_prop_func_arg<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    if sends_arg_by_ref(req) {
+        return fetch_static_prop_w::<T>(req, frame, code, op);
+    }
+    fetch_static_prop_r::<T>(req, frame, code, op)
+}
+
+/// `zend_use_tmp_in_write_context_helper`: a `_FUNC_ARG` fetch over a
+/// temporary where the parameter takes its argument by reference, php's
+/// `Error`, both operands given up.
+fn use_tmp_in_write_context(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let thrown = crate::api::raising::throw(
+        req,
+        "Error",
+        "Cannot use temporary expression in write context",
+    );
+    exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    threw(req, frame, &thrown)
 }
 
 /// The body `FETCH_OBJ_W` and `FETCH_OBJ_RW` share, php's one
@@ -6447,6 +7055,7 @@ fn frameless_call(
         closure: None,
         extra_named: Vec::new(),
         stage: CallStage::Serving,
+        send_arg_by_ref: false,
         frameless: true,
         coerced: Vec::new(),
     });
@@ -13398,41 +14007,40 @@ fn advance(req: &mut Request, frame: FrameRef) -> Stepped {
     Stepped::Same(frame)
 }
 
-/// The body the two `SEND_*` handlers share: the operand placed in the
-/// call frame being built, at the argument number `op2` names, the frame
-/// owning it from here: a CV or a constant with one more owner
-/// (`ZVAL_COPY`, `SEND_VAR`'s and `SEND_VAL`'s copy), a temporary moved
+/// The body the by-value `SEND_*` handlers share: the operand placed in
+/// the slot [`reserve_arg`] gave the send, the frame owning it from
+/// here: a CV or a constant with one more owner (`ZVAL_COPY`,
+/// `SEND_VAR`'s and `SEND_VAL`'s copy), a temporary moved
 /// (`ZVAL_COPY_VALUE`).
-fn send(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
+fn send(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, slot: ArgSlot) -> Edge {
     let value = exec::take_operand(req, frame, code, op.op1_type, op.op1);
-    place_argument(req, frame, op, value)
+    place_argument(req, frame, slot, value)
 }
 
 /// The placing half of [`send`]: `value` into the call frame being
-/// built, at the argument number `op2` names, the frame owning it from
-/// here.
-fn place_argument(req: &mut Request, frame: FrameRef, op: &Opline, value: Value) -> Edge {
-    let at = usize::try_from(op.op2.saturating_sub(1)).unwrap_or(usize::MAX);
+/// built, in `slot`, the frame owning it from here.
+fn place_argument(req: &mut Request, frame: FrameRef, slot: ArgSlot, value: Value) -> Edge {
     let Some(call) = req.vm_mut().building_call() else {
         return Err(Fatal::Error(String::from(
             "InternalError: a SEND_* opline with no call frame under it",
         )));
     };
-    // The `INIT_FCALL` said how many arguments the call has, so an
-    // argument number past that is a compiler bug and not an allocation.
-    if at >= call.count {
-        return Err(Fatal::Error(format!(
-            "InternalError: a SEND_* opline places argument {} of a call of {}",
-            at.saturating_add(1),
-            call.count
+    let placed = match slot {
+        ArgSlot::Positional(at) => {
+            if call.arguments.len() <= at {
+                call.arguments.resize_with(at + 1, Value::null);
+            }
+            call.arguments.get_mut(at)
+        }
+        ArgSlot::Named(at) => at.slot(&mut call.arguments, &mut call.extra_named),
+    };
+    let Some(placed) = placed else {
+        req.release(value);
+        return Err(Fatal::Error(String::from(
+            "InternalError: a SEND_* opline places an argument in a slot the call has not",
         )));
-    }
-    if call.arguments.len() <= at {
-        call.arguments.resize_with(at + 1, Value::null);
-    }
-    if let Some(slot) = call.arguments.get_mut(at) {
-        *slot = value;
-    }
+    };
+    *placed = value;
     Ok(advance(req, frame))
 }
 
@@ -14824,6 +15432,7 @@ mod tests {
                 closure: None,
                 extra_named: Vec::new(),
                 stage: CallStage::Serving,
+                send_arg_by_ref: false,
                 frameless: false,
                 coerced: Vec::new(),
             };

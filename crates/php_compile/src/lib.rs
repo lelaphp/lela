@@ -6390,12 +6390,7 @@ class C {
             refused(b"<?php echo $o->$p;").as_deref(),
             Some("a property named at run time this compiler cannot read yet")
         );
-        assert_eq!(
-            refused(b"<?php f($o->p);").as_deref(),
-            Some(
-                "a property fetch sent to a callee the table has not this compiler cannot read yet"
-            )
-        );
+        assert_eq!(refused(b"<?php f($o->p, name: $o->q);").as_deref(), None);
     }
 
     /// A class reference of the scope and a class the program computes,

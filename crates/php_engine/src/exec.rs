@@ -20,7 +20,7 @@ use php_heap::{FrameRef, MapPtr, MapTable, Zval};
 use php_unit::{CacheSlot, ConstIdx, Level, OpArray, OperandKind, Opline, Unit};
 
 use crate::api::call::Function;
-use crate::api::raising::warning;
+use crate::api::raising::{Thrown, warning};
 use crate::api::request::Request;
 use crate::api::values::{ClassId, PhpObject, PhpString, TypeTag, Value};
 
@@ -419,15 +419,20 @@ pub(crate) struct CallState {
     pub(crate) closure: Option<PhpObject>,
     /// `ZEND_CALL_HAS_EXTRA_NAMED_PARAMS` and `call->extra_named_params`:
     /// the named arguments the callee declares no parameter for, placed
-    /// by `zend_handle_named_arg` for a variadic callee and by nothing
-    /// an opline runs, since the compiler reads no named argument yet.
-    /// A native reads them off the call as `Z_PARAM_VARIADIC_WITH_NAMED`
-    /// reads them, or refuses them as `Z_PARAM_VARIADIC` refuses them;
-    /// a user function's frame takes them over. Each name and value one
-    /// owner the call holds, given up with it.
+    /// by `zend_handle_named_arg` for a variadic callee, at a call site's
+    /// `SEND_*` and in `zend_call_function`'s walk alike. A native reads
+    /// them off the call as `Z_PARAM_VARIADIC_WITH_NAMED` reads them, or
+    /// refuses them as `Z_PARAM_VARIADIC` refuses them; a user
+    /// function's frame takes them over. Each name and value one owner
+    /// the call holds, given up with it.
     pub(crate) extra_named: Vec<(PhpString, Value)>,
     /// Where the call stands.
     pub(crate) stage: CallStage,
+    /// `ZEND_CALL_SEND_ARG_BY_REF`: what the last `CHECK_FUNC_ARG` read
+    /// off the callee for the argument after it, whether its parameter
+    /// takes it by reference, which the `_FUNC_ARG` fetch and the
+    /// `SEND_FUNC_ARG` after it serve as a write or as a read by.
+    pub(crate) send_arg_by_ref: bool,
     /// Whether the call is a `FRAMELESS_ICALL_*`'s, whose arguments are
     /// the opline's operands: a coercion of one is kept in `coerced` and
     /// not written over the argument, as `Z_FLF_PARAM_STR` converts in a
@@ -1009,6 +1014,38 @@ pub(crate) fn constant(code: &OpArray, at: ConstIdx) -> Value {
         .get(at.0 as usize)
         .copied()
         .map_or_else(Value::null, value_of)
+}
+
+/// `RT_CONSTANT(opline, opline->op2)` as `ZEND_RECV_INIT` reads it: the
+/// value with one more owner, and, where it is the `IS_CONSTANT_AST` the
+/// compiler left for a default naming a constant (`zend_compile_params`
+/// under `ZEND_COMPILE_NO_PERSISTENT_CONSTANT_SUBSTITUTION`), the
+/// constant expression it indexes, evaluated in the scope being executed,
+/// which is the function's own (`zval_update_constant_with_ctx`,
+/// `EX(func)->op_array.scope`) both where its `RECV_INIT` reads it and
+/// where `zend_handle_undef_args` fills a skipped parameter under the
+/// callee's frame. The second word says which of the two it was, since
+/// php holds only what it evaluated to the parameter's type. php keeps
+/// an evaluated value that is not refcounted in the opline's runtime
+/// cache; nothing a program can see turns on that, and it is not kept
+/// here.
+pub(crate) fn default_value(
+    req: &mut Request,
+    code: &OpArray,
+    at: ConstIdx,
+) -> Result<(Value, bool), Thrown> {
+    let unevaluated = code
+        .literals
+        .get(at.0 as usize)
+        .and_then(|constant| constant.as_const_expr())
+        .and_then(|at| code.const_exprs.get(at as usize));
+    if let Some(expr) = unevaluated {
+        let scope = req.executed_scope();
+        return Ok((crate::api::call::eval_const_expr(req, expr, scope)?, true));
+    }
+    let value = constant(code, at);
+    req.addref(&value);
+    Ok((value, false))
 }
 
 /// A zval as the value vocabulary holds it, no owner taken: the string

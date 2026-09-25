@@ -2052,6 +2052,10 @@ impl Request {
         if let Some(this) = this {
             self.addref(&this.as_value());
         }
+        // `ZEND_CALL_MAY_HAVE_UNDEF`: a named argument skipped a slot.
+        let may_have_undef = sent
+            .iter()
+            .any(|argument| matches!(argument.as_ref(), ValueRef::Undef));
         let call = CallState {
             function,
             name: Some(name),
@@ -2064,11 +2068,21 @@ impl Request {
             stage: CallStage::Serving,
             frameless: false,
             coerced: Vec::new(),
+            send_arg_by_ref: false,
         };
+        self.vm.push_call(call);
+        if may_have_undef && let Err(thrown) = crate::api::call::handle_undef_args(self) {
+            self.pop_call();
+            return Err(thrown);
+        }
         if self.user_function(function).is_some() {
+            let Some(call) = self.vm.pop_call() else {
+                return self.fatal_of(Err(Fatal::Error(String::from(
+                    "InternalError: the call just pushed is not on the call stack",
+                ))));
+            };
             return self.serve_user(function, call);
         }
-        self.vm.push_call(call);
         let served = self.serve_native(function);
         self.pop_call();
         served
