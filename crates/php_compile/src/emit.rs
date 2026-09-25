@@ -112,10 +112,12 @@ use php_unit::{
 use php_syntax::magic_const_name;
 
 use crate::{CompileError, Options, StackLimit};
+use args::{Args, Callee, Plan};
 use attributes::InternalAttribute;
 use imports::{Imports, Symbol};
 use walk::{Class, Closure, Function, Method, Property};
 
+mod args;
 mod attributes;
 mod imports;
 mod magic;
@@ -677,8 +679,7 @@ struct DimLink {
 /// a temporary (`zend_adjust_for_fetch_type` under `BP_VAR_R`), where
 /// `[]` is php's compile error `Cannot use [] for reading`; a write is
 /// `FETCH_DIM_W` into a `VAR` carrying `ZEND_FETCH_DIM_DIM`, where `[]`
-/// is the append. `BP_VAR_IS`, `BP_VAR_RW`, `BP_VAR_FUNC_ARG` and
-/// `BP_VAR_UNSET` wait on the opcodes that name them.
+/// is the append. `BP_VAR_UNSET` waits on the opcodes that name it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Fetch {
     Read,
@@ -694,6 +695,14 @@ enum Fetch {
     /// not there: `zend_adjust_for_fetch_type`'s third arm, which is
     /// `FETCH_DIM_R` plus three and a temporary for what it leaves.
     Is,
+    /// `BP_VAR_FUNC_ARG`, the fetch of a variable sent to a callee the
+    /// compiler knows nothing of: `zend_adjust_for_fetch_type`'s fourth
+    /// arm, the `_R` opcode plus four into a `VAR`, which the engine
+    /// serves as the write or as the read by what the `CHECK_FUNC_ARG`
+    /// before it found. Its links are laid down as a write's are, and
+    /// what stands under them is compiled as a read's is, with no
+    /// `SEPARATE` over a call (`zend_separate_if_call_and_write`).
+    FuncArg,
 }
 
 /// `ZEND_FETCH_DIM_WRITE` (`Z/Zend/zend_compile.h:1096`), the bit
@@ -1916,29 +1925,6 @@ impl Emit<'_> {
             )),
             _ => Err(walk::unread(line, "a cast")),
         }
-    }
-
-    /// The arguments of a call, each a plain expression; a named or an
-    /// unpacked argument, and the `...` of a first-class callable, are
-    /// refused as not read yet.
-    fn arguments(
-        &self,
-        id: NodeId<tree::ArgList>,
-        line: u32,
-    ) -> Result<Vec<tree::Expr>, CompileError> {
-        let args = &self.parsed.tree[id].args;
-        let mut out = Vec::with_capacity(args.len());
-        for arg in args {
-            match arg {
-                tree::Arg::Expr(expr) => out.push(*expr),
-                tree::Arg::NamedArg(_) => return Err(walk::unread(line, "a named argument")),
-                tree::Arg::SpreadArg(_) => return Err(walk::unread(line, "an unpacked argument")),
-                tree::Arg::VariadicPlaceholder(_) => {
-                    return Err(walk::unread(line, "a first-class callable"));
-                }
-            }
-        }
-        Ok(out)
     }
 
     /// One element of an array expression, php's `ZEND_AST_ARRAY_ELEM`:
@@ -7582,20 +7568,21 @@ impl Emit<'_> {
                 let operand = match (node.operand, node.args) {
                     (Some(operand), _) => operand,
                     (None, Some(args)) => {
-                        let arguments = self.arguments(args, line)?;
-                        let [operand] = arguments[..] else {
+                        let arguments = self.arguments(args, line)?.positional();
+                        let Some([operand]) = arguments.as_deref() else {
                             return Err(self.unread("a `clone` with an argument list"));
                         };
-                        operand
+                        *operand
                     }
                     (None, None) => return Err(self.unread("a `clone`")),
                 };
-                self.call(b"\\clone", &[operand])
+                let arguments = Args::of(&[operand], self.line_of(operand));
+                self.call(b"\\clone", &arguments)
             }
             tree::Expr::ExitExpr(id) => {
                 let arguments = match tree[id].args {
                     Some(args) => self.arguments(args, line)?,
-                    None => Vec::new(),
+                    None => Args::of(&[], line),
                 };
                 self.call(b"\\exit", &arguments)
             }
@@ -7655,7 +7642,7 @@ impl Emit<'_> {
                 };
                 let arguments = match node.args {
                     Some(args) => self.arguments(args, line)?,
-                    None => Vec::new(),
+                    None => Args::of(&[], line),
                 };
                 self.new_expression(class, &arguments)
             }
@@ -9165,7 +9152,13 @@ impl Emit<'_> {
                     slots,
                 }
             }
-            (_, Fetch::Read | Fetch::Is) => {
+            // `zend_compile_simple_var`'s `is_this_fetch` arm under
+            // `BP_VAR_FUNC_ARG`, which leaves the `VAR` a write's does.
+            (_, Fetch::FuncArg) if self.is_this(base) => {
+                let this = self.fetch_this(OperandKind::Var);
+                Base::Settled(self.operand(this))
+            }
+            (_, Fetch::Read | Fetch::Is | Fetch::FuncArg) => {
                 let value = self.expr(base)?;
                 Base::Settled(self.operand(value))
             }
@@ -9234,6 +9227,7 @@ impl Emit<'_> {
             Fetch::Write => (Opcode::FetchDimW, OperandKind::Var),
             Fetch::Rw => (Opcode::FetchDimRw, OperandKind::Var),
             Fetch::Is => (Opcode::FetchDimIs, OperandKind::Tmp),
+            Fetch::FuncArg => (Opcode::FetchDimFuncArg, OperandKind::Var),
         };
         let under = if fetches.is_empty() { over } else { Over::Dim };
         let (mut op1_type, mut op1) = self.base_fetch(container, fetch, under);
@@ -9278,7 +9272,7 @@ impl Emit<'_> {
     /// dimension stands over it; under a read it is the `_R` opcode into
     /// a temporary (`zend_adjust_for_fetch_type`).
     fn base_fetch(&mut self, container: Base, fetch: Fetch, over: Over) -> (OperandKind, u32) {
-        let write = matches!(fetch, Fetch::Write | Fetch::Rw);
+        let write = matches!(fetch, Fetch::Write | Fetch::Rw | Fetch::FuncArg);
         let out_type = if write {
             OperandKind::Var
         } else {
@@ -9318,6 +9312,7 @@ impl Emit<'_> {
                         Fetch::Write => Opcode::FetchObjW,
                         Fetch::Rw => Opcode::FetchObjRw,
                         Fetch::Is => Opcode::FetchObjIs,
+                        Fetch::FuncArg => Opcode::FetchObjFuncArg,
                     },
                     op1_type,
                     op1,
@@ -9342,6 +9337,7 @@ impl Emit<'_> {
                         Fetch::Write => Opcode::FetchStaticPropW,
                         Fetch::Rw => Opcode::FetchStaticPropRw,
                         Fetch::Is => Opcode::FetchStaticPropIs,
+                        Fetch::FuncArg => Opcode::FetchStaticPropFuncArg,
                     },
                     op1_type: OperandKind::Const,
                     op1: name_at,
@@ -11084,7 +11080,12 @@ impl Emit<'_> {
             tree::Expr::CallExpr(id) => {
                 let node = &tree[id];
                 let (callee, args) = (node.callee, node.args);
-                let arguments = self.arguments(args, line)?;
+                let Some(arguments) = self.arguments(args, line)?.positional() else {
+                    return Err(walk::unread(
+                        line,
+                        "a named argument in a constant expression",
+                    ));
+                };
                 let tree::Expr::NameRef(name) = self.peel(callee) else {
                     return Err(self.fatal("a call is no constant expression"));
                 };
@@ -11585,6 +11586,7 @@ impl Emit<'_> {
                 Opcode::DoFcallByName
             },
             line,
+            false,
         ))
     }
 
@@ -11603,27 +11605,42 @@ impl Emit<'_> {
     /// anything reads it; [`Self::do_free`] marks it `UNUSED` when
     /// nothing does, which is what the engine's `DO_ICALL` reads as
     /// `RETURN_VALUE_USED`.
-    fn call(&mut self, name: &[u8], arguments: &[tree::Expr]) -> Result<Where, CompileError> {
+    fn call(&mut self, name: &[u8], arguments: &Args) -> Result<Where, CompileError> {
         let line = self.line;
         let (resolved, runtime) = self.function_name(name);
         if runtime {
             return self.ns_call(&resolved, arguments);
         }
         let lowered = resolved.to_ascii_lowercase();
-        let lowered_name = lowered.clone();
-        let count = u32::try_from(arguments.len()).unwrap_or(0);
-        let (stack, call_op) = match self.native_index(&lowered) {
+        let (callee, plan, stack, call_op) = match self.native_index(&lowered) {
             Some(index) => {
-                if let Some(served) = self.special(&lowered, arguments)? {
-                    return Ok(served);
+                // `zend_try_compile_special_func`, which a named argument
+                // keeps a call out of.
+                if let Some(positional) = arguments.positional() {
+                    if let Some(served) = self.special(&lowered, &positional)? {
+                        return Ok(served);
+                    }
+                    if let Some(served) = self.frameless_icall(index, &positional, None)? {
+                        return Ok(served);
+                    }
                 }
-                if let Some(served) = self.frameless_icall(index, arguments, None)? {
-                    return Ok(served);
-                }
-                (used_stack(count, None), Opcode::DoIcall)
+                let parameters = self
+                    .functions
+                    .get(index)
+                    .map(|decl| decl.parameters.as_slice())
+                    .unwrap_or_default();
+                let callee = Callee::of(parameters);
+                let plan = Plan::of(arguments, Some(&callee));
+                let stack = used_stack(plan.count, None);
+                (callee, plan, stack, Opcode::DoIcall)
             }
             None => match self.declared_function(&lowered) {
-                Some(body) => (used_stack(count, Some(body)), Opcode::DoUcall),
+                Some((decl, body)) => {
+                    let callee = Callee::of(&decl.parameters);
+                    let plan = Plan::of(arguments, Some(&callee));
+                    let stack = used_stack(plan.count, Some(body));
+                    (callee, plan, stack, Opcode::DoUcall)
+                }
                 None => return self.dynamic_call(&resolved, arguments),
             },
         };
@@ -11636,48 +11653,11 @@ impl Emit<'_> {
             op2_type: OperandKind::Const,
             op2: lowered,
             out: slot,
-            extended_value: count,
+            extended_value: plan.count,
             ..Opline::default()
         });
-        let modes = self.send_modes(&lowered_name, arguments.len());
-        self.args(arguments, true, &modes)?;
-        Ok(self.call_op(call_op, line))
-    }
-
-    /// `ZEND_ARG_SEND_MODE` (`Z/Zend/zend_compile.h:1141`) over the
-    /// callee the table has, one answer per argument: the parameter's
-    /// own way of being sent, and the variadic's for every argument past the declared
-    /// ones, since a variadic collects them all. A name the table has
-    /// not is every argument by value, which is what the `_EX` sends
-    /// read off the callee as the program serves.
-    fn send_modes(&self, lowered: &[u8], count: usize) -> Vec<SendMode> {
-        let parameters = match self.native_index(lowered) {
-            Some(index) => self.functions.get(index).map(|decl| &decl.parameters),
-            None => self
-                .functions_declared
-                .iter()
-                .find(|(decl, _)| decl.name.0.to_ascii_lowercase() == lowered)
-                .map(|(decl, _)| &decl.parameters),
-        };
-        let Some(parameters) = parameters else {
-            return Vec::new();
-        };
-        let variadic = parameters.last().filter(|last| last.variadic);
-        (0..count)
-            .map(|at| {
-                match parameters
-                    .get(at)
-                    .filter(|parameter| !parameter.variadic)
-                    .or(variadic)
-                {
-                    Some(parameter) if parameter.by_ref && parameter.prefer_ref => {
-                        SendMode::PreferRef
-                    }
-                    Some(parameter) if parameter.by_ref => SendMode::Ref,
-                    _ => SendMode::Value,
-                }
-            })
-            .collect()
+        self.send_args(&plan, arguments, Some(&callee))?;
+        Ok(self.call_op(call_op, line, plan.extra_named))
     }
 
     /// `zend_hash_find_ptr(CG(function_table), lcname)` over the
@@ -11687,11 +11667,11 @@ impl Emit<'_> {
     /// answers, and none for the function whose own body is being
     /// compiled, which is in php's table without `ZEND_ACC_DONE_PASS_TWO`
     /// and so compiles a call to itself by name.
-    fn declared_function(&self, lowered: &[u8]) -> Option<&OpArray> {
+    fn declared_function(&self, lowered: &[u8]) -> Option<(&FunctionDecl, &OpArray)> {
         self.functions_declared
             .iter()
             .find(|(decl, _)| decl.name.0.to_ascii_lowercase() == lowered)
-            .map(|(_, body)| body)
+            .map(|(decl, body)| (decl, body))
     }
 
     /// `zend_compile_dynamic_call` for a name written as a constant
@@ -11703,25 +11683,21 @@ impl Emit<'_> {
     /// The engine resolves the pair's lowered name at the `INIT` and
     /// raises php's `Error` over the written one where nothing declares
     /// it.
-    fn dynamic_call(
-        &mut self,
-        name: &[u8],
-        arguments: &[tree::Expr],
-    ) -> Result<Where, CompileError> {
+    fn dynamic_call(&mut self, name: &[u8], arguments: &Args) -> Result<Where, CompileError> {
         let line = self.line;
         let pair = self.func_name_literal(name)?;
-        let count = u32::try_from(arguments.len()).unwrap_or(0);
+        let plan = Plan::of(arguments, None);
         let slot = self.cache_slot();
         self.push(Opline {
             opcode: Opcode::InitFcallByName,
             op2_type: OperandKind::Const,
             op2: pair,
             out: slot,
-            extended_value: count,
+            extended_value: plan.count,
             ..Opline::default()
         });
-        self.args(arguments, false, &[])?;
-        Ok(self.call_op(Opcode::DoFcallByName, line))
+        self.send_args(&plan, arguments, None)?;
+        Ok(self.call_op(Opcode::DoFcallByName, line, plan.extra_named))
     }
 
     /// `zend_compile_dynamic_call` over a callee that is no constant
@@ -11732,24 +11708,20 @@ impl Emit<'_> {
     /// callee nothing is known of and `DO_FCALL`, which is what
     /// `zend_get_call_op` picks with `fbc` null over an opline that is
     /// no `INIT_FCALL_BY_NAME`.
-    fn call_var(
-        &mut self,
-        callee: tree::Expr,
-        arguments: &[tree::Expr],
-    ) -> Result<Where, CompileError> {
+    fn call_var(&mut self, callee: tree::Expr, arguments: &Args) -> Result<Where, CompileError> {
         let line = self.line;
         let value = self.expr(callee)?;
         let (op2_type, op2) = self.operand(value);
-        let count = u32::try_from(arguments.len()).unwrap_or(0);
+        let plan = Plan::of(arguments, None);
         self.push(Opline {
             opcode: Opcode::InitDynamicCall,
             op2_type,
             op2,
-            extended_value: count,
+            extended_value: plan.count,
             ..Opline::default()
         });
-        self.args(arguments, false, &[])?;
-        Ok(self.call_op(Opcode::DoFcall, line))
+        self.send_args(&plan, arguments, None)?;
+        Ok(self.call_op(Opcode::DoFcall, line, plan.extra_named))
     }
 
     /// `zend_compile_new` (`Z/Zend/zend_compile.c:5410`): the class
@@ -11785,7 +11757,7 @@ impl Emit<'_> {
     fn new_expression(
         &mut self,
         class: ClassSpec,
-        arguments: &[tree::Expr],
+        arguments: &Args,
     ) -> Result<Where, CompileError> {
         let line = self.line;
         let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
@@ -11796,7 +11768,7 @@ impl Emit<'_> {
         } else {
             0
         };
-        let count = u32::try_from(arguments.len()).unwrap_or(0);
+        let plan = Plan::of(arguments, None);
         self.push(Opline {
             opcode: Opcode::New,
             op1_type,
@@ -11804,11 +11776,11 @@ impl Emit<'_> {
             op2,
             out_type: OperandKind::Var,
             out,
-            extended_value: count,
+            extended_value: plan.count,
             ..Opline::default()
         });
-        self.args(arguments, false, &[])?;
-        let served = self.call_op(Opcode::DoFcall, line);
+        self.send_args(&plan, arguments, None)?;
+        let served = self.call_op(Opcode::DoFcall, line, plan.extra_named);
         self.do_free(served);
         Ok(Where::Returned(out))
     }
@@ -11857,7 +11829,7 @@ impl Emit<'_> {
         &mut self,
         class: ClassSpec,
         method: &[u8],
-        arguments: &[tree::Expr],
+        arguments: &Args,
     ) -> Result<Where, CompileError> {
         let line = self.line;
         let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
@@ -11871,13 +11843,14 @@ impl Emit<'_> {
             }
             ClassRef::Scope(_) | ClassRef::Fetched(_) => None,
         };
-        let call_op = match known {
-            Some(Known::User) => Opcode::DoUcall,
-            Some(Known::Native) | None => Opcode::DoFcall,
+        let (call_op, callee) = match known {
+            Some((Known::User, callee)) => (Opcode::DoUcall, Some(callee)),
+            Some((Known::Native, callee)) => (Opcode::DoFcall, Some(callee)),
+            None => (Opcode::DoFcall, None),
         };
-        let known = known.is_some();
+        let plan = Plan::of(arguments, callee.as_ref());
+        let count = plan.count;
         let (op1_type, op1) = self.class_operand(&class)?;
-        let count = u32::try_from(arguments.len()).unwrap_or(0);
         let opline = if constructor {
             let out = if op1_type == OperandKind::Const {
                 self.cache_slot()
@@ -11906,8 +11879,8 @@ impl Emit<'_> {
             }
         };
         self.push(opline);
-        self.args(arguments, known, &[])?;
-        Ok(self.call_op(call_op, line))
+        self.send_args(&plan, arguments, callee.as_ref())?;
+        Ok(self.call_op(call_op, line, plan.extra_named))
     }
 
     /// `zend_compile_method_call`: the receiver compiled,
@@ -11919,12 +11892,12 @@ impl Emit<'_> {
         &mut self,
         object: tree::Expr,
         method: &[u8],
-        arguments: &[tree::Expr],
+        arguments: &Args,
     ) -> Result<Where, CompileError> {
         let line = self.line;
         let (op1_type, op1) = self.receiver(object)?;
         let method_at = self.func_name_literal(method)?;
-        let count = u32::try_from(arguments.len()).unwrap_or(0);
+        let plan = Plan::of(arguments, None);
         let slot = self.cache_slots(2);
         self.push(Opline {
             opcode: Opcode::InitMethodCall,
@@ -11933,11 +11906,11 @@ impl Emit<'_> {
             op2_type: OperandKind::Const,
             op2: method_at,
             out: slot,
-            extended_value: count,
+            extended_value: plan.count,
             ..Opline::default()
         });
-        self.args(arguments, false, &[])?;
-        Ok(self.call_op(Opcode::DoFcall, line))
+        self.send_args(&plan, arguments, None)?;
+        Ok(self.call_op(Opcode::DoFcall, line, plan.extra_named))
     }
 
     /// The receiver of a method call or a property fetch: `$this` is
@@ -12506,10 +12479,12 @@ impl Emit<'_> {
     #[cfg(test)]
     fn known_method(&self, class: &[u8], method: &[u8]) -> Option<Known> {
         self.known_method_of(&self.class_name(class), method)
+            .map(|(known, _)| known)
     }
 
-    /// [`Self::known_method`] over a name already resolved.
-    fn known_method_of(&self, class: &[u8], method: &[u8]) -> Option<Known> {
+    /// [`Self::known_method`] over a name already resolved, with the
+    /// method's parameters as `zend_compile_args` reads them.
+    fn known_method_of(&self, class: &[u8], method: &[u8]) -> Option<(Known, Callee)> {
         let class = class.to_ascii_lowercase();
         let method = method.to_ascii_lowercase();
         let own = self
@@ -12524,11 +12499,11 @@ impl Emit<'_> {
             return decl
                 .methods
                 .iter()
-                .any(|m| {
+                .find(|m| {
                     m.function.name.0.to_ascii_lowercase() == method
                         && m.visibility == Visibility::Public
                 })
-                .then_some(Known::Native);
+                .map(|m| (Known::Native, Callee::of(&m.function.parameters)));
         }
         let decl = self
             .classes
@@ -12544,11 +12519,11 @@ impl Emit<'_> {
         }
         decl.methods
             .iter()
-            .any(|m| {
+            .find(|m| {
                 m.function.name.0.to_ascii_lowercase() == method
                     && (m.visibility == Visibility::Public || own)
             })
-            .then_some(Known::User)
+            .map(|m| (Known::User, Callee::of(&m.function.parameters)))
     }
 
     /// `zend_add_func_name_literal`: the name as written and its lowered
@@ -13005,7 +12980,7 @@ impl Emit<'_> {
     /// a second time. The `JMP_FRAMELESS` takes its cache slot after
     /// the `INIT_NS_FCALL_BY_NAME` took its own, which is the number
     /// the dump prints.
-    fn ns_call(&mut self, name: &[u8], arguments: &[tree::Expr]) -> Result<Where, CompileError> {
+    fn ns_call(&mut self, name: &[u8], arguments: &Args) -> Result<Where, CompileError> {
         let line = self.line;
         let name_constants = self.ns_func_name_literal(name)?;
         let lowered = name.to_ascii_lowercase();
@@ -13015,9 +12990,13 @@ impl Emit<'_> {
             .unwrap_or_default()
             .to_vec();
         let mut branch = None;
+        // A named argument keeps the call out of the frameless branch
+        // (`!zend_args_contain_unpack_or_named`).
+        let positional = arguments.positional();
         if !self.in_jmp_frameless_branch
+            && let Some(positional) = &positional
             && let Some(index) = self.native_index(&unqualified)
-            && self.frameless_arity(index, arguments.len()).is_some()
+            && self.frameless_arity(index, positional.len()).is_some()
         {
             self.in_jmp_frameless_branch = true;
             let over = self.string(&lowered)?;
@@ -13030,19 +13009,20 @@ impl Emit<'_> {
             });
             branch = Some((at, index));
         }
-        let count = u32::try_from(arguments.len()).unwrap_or(0);
+        let plan = Plan::of(arguments, None);
         let slot = self.cache_slot();
         self.push(Opline {
             opcode: Opcode::InitNsFcallByName,
             op2_type: OperandKind::Const,
             op2: name_constants,
             out: slot,
-            extended_value: count,
+            extended_value: plan.count,
             ..Opline::default()
         });
-        self.args(arguments, false, &[])?;
-        let returned = self.call_op(Opcode::DoFcallByName, line);
+        self.send_args(&plan, arguments, None)?;
+        let returned = self.call_op(Opcode::DoFcallByName, line, plan.extra_named);
         if let Some((jmp_fl, index)) = branch
+            && let Some(positional) = &positional
             && let Where::Returned(var) = returned
         {
             let jmp_end = self.push(Opline {
@@ -13050,7 +13030,7 @@ impl Emit<'_> {
                 ..Opline::default()
             });
             let target = self.next();
-            self.frameless_icall(index, arguments, Some(var))?;
+            self.frameless_icall(index, positional, Some(var))?;
             let slot = self.cache_slot();
             if let Some(opline) = self.oplines.get_mut(jmp_fl as usize) {
                 opline.op2 = target;
@@ -13085,113 +13065,10 @@ impl Emit<'_> {
         Ok(at)
     }
 
-    /// `zend_compile_args` for arguments none of which is by reference,
-    /// unpacked or named: each compiled and sent at its number. A callee
-    /// the table has (`fbc`) takes a VAR or a CV by `SEND_VAR` and
-    /// anything else by `SEND_VAL`; one it has not takes a CV by
-    /// `SEND_VAR_EX`, what a call returned by `SEND_VAR_NO_REF_EX`, and a
-    /// constant or a temporary by `SEND_VAL_EX`, each of which reads the
-    /// parameter's by-reference bit off the callee as the program serves.
-    /// `$this` sent to a callee nothing is known of is `FETCH_THIS` into
-    /// a `VAR` and `SEND_VAR_EX`; a property fetch sent to one is php's
-    /// `CHECK_FUNC_ARG` and `FETCH_OBJ_FUNC_ARG`, not read yet.
-    fn args(
-        &mut self,
-        arguments: &[tree::Expr],
-        known: bool,
-        modes: &[SendMode],
-    ) -> Result<(), CompileError> {
-        for (at, argument) in arguments.iter().enumerate() {
-            let number = u32::try_from(at).unwrap_or(0) + 1;
-            let mode = modes.get(at).copied().unwrap_or(SendMode::Value);
-            // `ARG_SHOULD_BE_SENT_BY_REF` at a call site whose callee the
-            // table has: a variable is compiled under `BP_VAR_W` and sent
-            // by `SEND_REF`; anything else is sent by the `_EX` opcode
-            // its operand asks for, which php delays the error to, since
-            // `Only variables can be passed by reference` is raised where
-            // the argument is placed and not where it is written. Under
-            // `ARG_MAY_BE_SENT_BY_REF` a value is `SEND_VAL` and no error
-            // at all.
-            if mode != SendMode::Value {
-                let cv = match self.peel(*argument) {
-                    tree::Expr::SimpleVarExpr(id) => match self.simple_var_of(id, self.line)? {
-                        SimpleVar::Cv(name) => Some(self.lookup_cv(&name)),
-                        SimpleVar::This => None,
-                    },
-                    _ => None,
-                };
-                let (opcode, op1_type, op1) = if let Some(cv) = cv {
-                    (Opcode::SendRef, OperandKind::Cv, cv)
-                } else if mode == SendMode::PreferRef {
-                    let value = self.expr(*argument)?;
-                    let (op1_type, op1) = self.operand(value);
-                    (Opcode::SendVal, op1_type, op1)
-                } else {
-                    let value = self.expr(*argument)?;
-                    let (op1_type, op1) = self.operand(value);
-                    let opcode = match op1_type {
-                        OperandKind::Var => Opcode::SendVarNoRefEx,
-                        OperandKind::Cv => Opcode::SendVarEx,
-                        OperandKind::Const | OperandKind::Tmp | OperandKind::Unused => {
-                            Opcode::SendValEx
-                        }
-                    };
-                    (opcode, op1_type, op1)
-                };
-                self.push(Opline {
-                    opcode,
-                    op1_type,
-                    op1,
-                    op2: number,
-                    out: number - 1,
-                    ..Opline::default()
-                });
-                continue;
-            }
-            let value = match self.peel(*argument) {
-                _ if !known && self.is_this(*argument) => {
-                    let this = self.fetch_this(OperandKind::Var);
-                    let (op1_type, op1) = self.operand(this);
-                    self.push(Opline {
-                        opcode: Opcode::SendVarEx,
-                        op1_type,
-                        op1,
-                        op2: number,
-                        out: number - 1,
-                        ..Opline::default()
-                    });
-                    continue;
-                }
-                tree::Expr::MemberAccessExpr(_) if !known => {
-                    return Err(self.fatal(
-                        "a property fetch sent to a callee the table has not this compiler cannot read yet",
-                    ));
-                }
-                _ => self.expr(*argument)?,
-            };
-            let (op1_type, op1) = self.operand(value);
-            let opcode = match (known, op1_type) {
-                (true, OperandKind::Var | OperandKind::Cv) => Opcode::SendVar,
-                (true, _) => Opcode::SendVal,
-                (false, OperandKind::Cv) => Opcode::SendVarEx,
-                (false, OperandKind::Var) => Opcode::SendVarNoRefEx,
-                (false, _) => Opcode::SendValEx,
-            };
-            self.push(Opline {
-                opcode,
-                op1_type,
-                op1,
-                op2: number,
-                out: number - 1,
-                ..Opline::default()
-            });
-        }
-        Ok(())
-    }
-
     /// The call op `zend_get_call_op` picked, with the `VAR` for what
-    /// the call returns.
-    fn call_op(&mut self, opcode: Opcode, line: u32) -> Where {
+    /// the call returns, and `ZEND_FCALL_MAY_HAVE_EXTRA_NAMED_PARAMS` in
+    /// `extended_value` where a named argument may land in a variadic.
+    fn call_op(&mut self, opcode: Opcode, line: u32, extra_named: bool) -> Where {
         // `opline->lineno = lineno` after `zend_emit_op`
         // (`Z/Zend/zend_compile.c:3999`): the call's own line, not the
         // line the last argument ended on.
@@ -13201,6 +13078,7 @@ impl Emit<'_> {
             opcode,
             out_type: OperandKind::Var,
             out,
+            extended_value: u32::from(extra_named),
             ..Opline::default()
         });
         Where::Returned(out)
@@ -14255,15 +14133,6 @@ enum Literal {
     /// `T_DNUMBER` and `T_CONSTANT_ENCAPSED_STRING`: one php takes,
     /// whose value no directive this compiler serves reads.
     Other,
-}
-
-/// How a call site whose callee the table has sends one argument, php's
-/// `ZEND_SEND_BY_VAL`, `ZEND_SEND_BY_REF` and `ZEND_SEND_PREFER_REF`.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SendMode {
-    Value,
-    Ref,
-    PreferRef,
 }
 
 #[cfg(test)]
