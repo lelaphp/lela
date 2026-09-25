@@ -5779,8 +5779,55 @@ impl Request {
     /// of it. A name the table does not hold yet is a creation and goes
     /// through [`Request::dynamic_property_creation`] first, php's two
     /// arms at `write_std_property`'s `else`; the value is given up with
-    /// the `Error`, as `FREE_OP_DATA` gives it up. The typed-property
-    /// coercion arrives with the kernel that writes one.
+    /// the `Error`, as `FREE_OP_DATA` gives it up.
+    ///
+    /// A typed slot is `zend_verify_property_type` under
+    /// `property_uses_strict_types()` ([`Request::property_strict_types`])
+    /// first: the value the declared type accepts, the weak rule's
+    /// conversion where the frame the write stands in is not strict,
+    /// which a native's own frame never is, and php's `TypeError` with
+    /// the value given up where neither holds. The value then lands as
+    /// `zend_assign_to_variable_ex` lands it, through the cell where the
+    /// slot holds a reference.
+    ///
+    /// ```php
+    /// class Foo { public int $id; public ?float $f = null; }
+    /// $db = new PDO('sqlite::memory:');
+    /// $db->setAttribute(PDO::ATTR_STRINGIFY_FETCHES, true);
+    /// $st = $db->query("SELECT '1' AS id, '2.5' AS f");
+    /// var_dump($st->fetchObject(Foo::class));
+    /// $st = $db->query("SELECT 'x' AS id");
+    /// try { $st->fetchObject(Foo::class); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// object(Foo)#3 (2) {
+    ///   ["id"]=>
+    ///   int(1)
+    ///   ["f"]=>
+    ///   float(2.5)
+    /// }
+    /// Cannot assign string to property Foo::$id of type int
+    /// ```
+    ///
+    /// The weak rule holds while the native writes, though the file
+    /// that called it declares `strict_types`, since php's frame there
+    /// is the native's own; a reference the slot holds is written
+    /// through.
+    ///
+    /// ```php
+    /// declare(strict_types=1);
+    /// class Foo { public int $id = 0; }
+    /// $db = new PDO('sqlite::memory:');
+    /// $st = $db->query("SELECT '7' AS id");
+    /// $st->setFetchMode(PDO::FETCH_INTO, $o = new Foo);
+    /// $r = &$o->id;
+    /// $st->fetch();
+    /// var_dump($o->id, $r);
+    /// ```
+    /// ```expect
+    /// int(7)
+    /// int(7)
+    /// ```
     fn write_std_property(
         &mut self,
         object: PhpObject,
@@ -5788,9 +5835,28 @@ impl Request {
         value: Value,
     ) -> Result<(), Thrown> {
         let o = object.heap();
-        if let Some(i) = self.prop_slot(object.class(), name.as_bytes()) {
-            let z = value.into_zval();
-            Heap::object_set_slot(&mut Hooks(self), o, i, z);
+        if let Some(placed) = self.declared_slot(object.class(), name.as_bytes()) {
+            let value = if placed.typed {
+                let Some(typed) = self.declared_typed_property(object.class(), name.as_bytes())
+                else {
+                    self.release(value);
+                    self.release(Value::string(name));
+                    return self.fatal_of(Err(Fatal::Error(String::from(
+                        "InternalError: write_property placed a typed property whose declared type the class does not carry",
+                    ))));
+                };
+                let strict = self.property_strict_types();
+                match self.hold_to_property_type(&typed, name.as_bytes(), value, strict) {
+                    Ok(value) => value,
+                    Err(thrown) => {
+                        self.release(Value::string(name));
+                        return Err(thrown);
+                    }
+                }
+            } else {
+                value
+            };
+            self.assign_declared_slot(o, placed.slot, value);
         } else {
             let key = php_heap::Key::Str(name.heap());
             let held = o.properties().is_some_and(|table| table.contains(key));
@@ -8122,6 +8188,27 @@ impl Request {
     /// its own frame and the innermost is only the same frame by luck.
     pub(crate) fn frame_strict_types(&self, frame: FrameRef) -> bool {
         self.vm.at(frame).is_some_and(crate::exec::strict_types_of)
+    }
+
+    /// `property_uses_strict_types()`
+    /// (`Z/Zend/zend_object_handlers.c:1022`): `ZEND_ACC_STRICT_TYPES` on
+    /// `EG(current_execute_data)`, the regime `zend_std_write_property`
+    /// holds a typed property to. While a native is being served above
+    /// the innermost frame, php's current frame is the native's own,
+    /// which carries no such bit, so the weak rule; otherwise the
+    /// innermost frame's own file, where the write a handler table makes
+    /// on an opcode's behalf stands.
+    pub(crate) fn property_strict_types(&self) -> bool {
+        let Some(innermost) = self.vm.innermost() else {
+            return false;
+        };
+        let floor = usize::try_from(innermost.calls_below).unwrap_or(usize::MAX);
+        let serving = self.vm.calls().get(floor..).is_some_and(|above| {
+            above
+                .iter()
+                .any(|call| call.stage == exec::CallStage::Serving)
+        });
+        !serving && crate::exec::strict_types_of(innermost)
     }
 
     /// `ZEND_ARG_USES_STRICT_TYPES()` (`Z/Zend/zend_compile.h:723`):
