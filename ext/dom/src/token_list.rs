@@ -512,7 +512,8 @@ fn offset(req: &mut Request, value: &Value) -> Result<Option<i64>, Thrown> {
             Some(n) if n.as_int().is_some() => n.as_int(),
             _ => None,
         },
-        ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Bool(_) => Some(to_long(req, &v)?),
+        ValueRef::Float(f) => Some(crate::map::float_offset(req, f)?),
+        ValueRef::Int(_) | ValueRef::Bool(_) => Some(to_long(req, &v)?),
         _ => None,
     })
 }

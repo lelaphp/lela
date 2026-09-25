@@ -474,17 +474,51 @@ enum Index {
     Illegal,
 }
 
-fn modern_index(value: &Value) -> Index {
+fn modern_index(req: &mut Request, value: &Value) -> Result<Index, Thrown> {
     let v = value.deref();
-    match v.as_ref() {
+    Ok(match v.as_ref() {
         ValueRef::Int(n) => Index::Long(n),
-        ValueRef::Float(f) => Index::Long(php_ext::coerce::float_to_long(f)),
+        ValueRef::Float(f) => Index::Long(float_offset(req, f)?),
         ValueRef::Str(s) => match Key::from_string(*s) {
             Key::Int(n) => Index::Long(n),
             Key::Str(s) => Index::Str(s),
         },
         _ => Index::Illegal,
+    })
+}
+
+/// `zend_dval_to_lval_safe`: the integer a float offset makes, with php's
+/// deprecation where the cast drops a fraction.
+///
+/// ```php
+/// $d = Dom\XMLDocument::createFromString('<r><a/><b/></r>');
+/// $l = $d->documentElement->childNodes;
+/// var_dump($l[1.0]->localName, $l[1.1]->localName, isset($d->documentElement->classList[0.5]));
+/// ```
+/// ```expect
+///
+/// Deprecated: Implicit conversion from float 1.1 to int loses precision in %s on line 4
+///
+/// Deprecated: Implicit conversion from float 0.5 to int loses precision in %s on line 4
+/// string(1) "b"
+/// string(1) "b"
+/// bool(false)
+/// ```
+pub(crate) fn float_offset(req: &mut Request, f: f64) -> Result<i64, Thrown> {
+    let n = php_ext::coerce::float_to_long(f);
+    // `zend_is_long_compatible` is `(double)l == d`, an exact test.
+    #[allow(clippy::cast_precision_loss, clippy::float_cmp)]
+    let compatible = (n as f64) == f;
+    if !compatible && f.is_finite() && f.abs() < 9.2e18 {
+        let text = php_ext::coerce::to_string(req, &Value::float(f))?;
+        let shown = String::from_utf8_lossy(text.as_bytes()).into_owned();
+        req.release(Value::string(text));
+        php_ext::raising::deprecated(
+            req,
+            &format!("Implicit conversion from float {shown} to int loses precision"),
+        );
     }
+    Ok(n)
 }
 
 /// `zend_illegal_container_offset`.
@@ -734,7 +768,7 @@ impl ObjectHandlers for MapHandlers {
             return Err(throw(req, "Error", &message));
         };
         if dims != Dims::Legacy {
-            return match (dims, modern_index(offset_value)) {
+            return match (dims, modern_index(req, offset_value)?) {
                 (_, Index::Long(n)) => item(req, object, n),
                 (Dims::ModernMap, Index::Str(name)) => named(req, object, name.as_bytes(), None),
                 (Dims::Collection, Index::Str(name)) => {
@@ -769,7 +803,7 @@ impl ObjectHandlers for MapHandlers {
     ) -> Result<bool, Thrown> {
         let dims = dims(req, object);
         if dims != Dims::Legacy {
-            return match (dims, modern_index(offset_value)) {
+            return match (dims, modern_index(req, offset_value)?) {
                 (_, Index::Long(n)) => Ok(n >= 0 && n < length(req, object)),
                 (Dims::ModernMap, Index::Str(name)) => {
                     let found = named(req, object, name.as_bytes(), None)?;
