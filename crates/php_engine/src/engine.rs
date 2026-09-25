@@ -1921,13 +1921,15 @@ mod tests {
     /// A class the compiler bound with no opline (`zend_compile_class_decl`
     /// under `toplevel`) is declared into the request's table before the
     /// main op array runs, so the source the doc-comment witness of
-    /// `php_syntax` declares runs (#257); a name Zend registered is
-    /// `zend_class_redeclaration_error` in the wording for an internal
-    /// class, and one a unit of this request declared names its site.
-    /// Both are `E_COMPILE_ERROR` at the class's line, rendered before
-    /// any of the file runs, over `#0 {main}` under php's default
-    /// `fatal_error_backtraces`, which is what the pinned oracle writes
-    /// for `<?php\necho 1;\nclass Exception {}` under `php -n`.
+    /// `php_syntax` declares runs (#257). A name the table already holds
+    /// is no early bind: its `DECLARE_CLASS` raises
+    /// `zend_class_redeclaration_error` where it stands, after what ran
+    /// before it, in the wording for an internal class, or naming the
+    /// earlier declaration's site for one of the file's. Both are
+    /// `E_COMPILE_ERROR` at the class's line, over `#0 {main}` under
+    /// php's default `fatal_error_backtraces`, which is what the pinned
+    /// oracle writes for `<?php\necho 1;\nclass Exception {}` under
+    /// `php -n`.
     #[test]
     fn a_unit_s_classes_are_declared_before_its_main_op_array_runs() {
         let engine = Engine::builder().build();
@@ -1940,7 +1942,7 @@ mod tests {
         assert_eq!(
             (body.as_str(), observables.exit_code),
             (
-                "\nFatal error: Cannot redeclare class Exception in witness.php on line 3\nStack trace:\n#0 {main}\n",
+                "1\nFatal error: Cannot redeclare class Exception in witness.php on line 3\nStack trace:\n#0 {main}\n",
                 255
             )
         );
@@ -1948,10 +1950,10 @@ mod tests {
         assert_eq!(
             (body.as_str(), observables.exit_code),
             (
-                "\nParse error: a class declared twice this compiler cannot read yet in witness.php on line 4\n",
+                "1\nFatal error: Cannot redeclare class M (previously declared in witness.php:3) in witness.php on line 4\nStack trace:\n#0 {main}\n",
                 255
             ),
-            "php emits a DECLARE_CLASS for the second and fails it at run time; that opline is not emitted yet"
+            "php emits a DECLARE_CLASS for the second and fails it at run time"
         );
     }
 

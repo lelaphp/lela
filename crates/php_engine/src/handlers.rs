@@ -125,18 +125,17 @@ pub(crate) fn free<T: Tier>(
     Ok(advance(req, frame))
 }
 
-/// `ZEND_DECLARE_CLASS`: `zend_bind_class` for the class the opline's
-/// lowered name finds in the frame's unit, which is what php emits for
-/// every class it did not early bind — one with an interface list, one
-/// whose parent `CG(class_table)` did not yet hold, and one written
-/// inside a block or a body (`zend_compile_class_decl`'s tail). php
-/// finds its declaration by the runtime definition key beside `op1` and
-/// its parent by `op2`; the unit carries one declaration per class, so
-/// both are the declaration the name finds, and `op2` is not read.
-/// Linking is [`Request::bind_class`], whose refusals are php's:
-/// `Error` for a parent or an interface nothing declares, `E_ERROR` for
-/// a parent that is an interface or an interface list that names
-/// something else.
+/// `ZEND_DECLARE_CLASS` (`Z/Zend/zend_vm_def.h:7959`): `do_bind_class`
+/// for the class the frame's unit files under the runtime definition
+/// key in the constant after `op1`, which is what php emits for every
+/// class it did not early bind — one with an interface list, one whose
+/// parent `CG(class_table)` did not yet hold, a second of a name, and
+/// one written inside a block or a body (`zend_compile_class_decl`'s
+/// tail). `op2`, the parent's lowered name, is the declaration's own
+/// parent and is not read. Binding is [`Request::bind_class`], whose
+/// refusals are php's: `Error` for a parent or an interface nothing
+/// declares, `E_ERROR` for a parent that is an interface or an
+/// interface list that names something else, and the redeclaration.
 ///
 /// ```php
 /// class C extends P {}
@@ -146,6 +145,22 @@ pub(crate) fn free<T: Tier>(
 /// ```expect
 /// string(1) "p"
 /// bool(true)
+/// ```
+///
+/// The polyfill's shape, a class declared only where none is:
+///
+/// ```php
+/// foreach ([1, 2] as $i) {
+///     if (!class_exists('Poly', false)) {
+///         class Poly implements Countable { function count(): int { return 3; } }
+///         echo "declared\n";
+///     }
+/// }
+/// var_dump(count(new Poly));
+/// ```
+/// ```expect
+/// declared
+/// int(3)
 /// ```
 pub(crate) fn declare_class<T: Tier>(
     req: &mut Request,
@@ -158,15 +173,16 @@ pub(crate) fn declare_class<T: Tier>(
             "InternalError: a DECLARE_CLASS on a frame serving no op array",
         )));
     };
-    let Some(lowered) = exec::constant(code, ConstIdx(op.op1))
+    // `rtd_key = lcname + 1`.
+    let Some(key) = exec::constant(code, ConstIdx(op.op1.saturating_add(1)))
         .as_str_bytes()
         .map(<[u8]>::to_vec)
     else {
         return Err(Fatal::Error(String::from(
-            "InternalError: a DECLARE_CLASS whose op1 is no class name",
+            "InternalError: a DECLARE_CLASS with no runtime definition key after its op1",
         )));
     };
-    match req.bind_class(&serving.unit, &lowered) {
+    match req.bind_class(&serving.unit, &key) {
         Ok(()) => Ok(advance(req, frame)),
         Err(thrown) => {
             req.leave_pending(&thrown);

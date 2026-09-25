@@ -9408,31 +9408,22 @@ impl Request {
     /// top-level class implementing no interface, with no parent or one
     /// the table already held, is early bound and the compiler emitted
     /// no opline for it, so the request's table takes it here. Every
-    /// other class carries a `ZEND_DECLARE_CLASS` where it was written
-    /// and is bound as the program serves ([`Request::bind_class`]), so
-    /// the ones named by one of those oplines are passed over here. A
-    /// name already declared is `zend_class_redeclaration_error`,
+    /// other class carries a `ZEND_DECLARE_CLASS` where it was written,
+    /// in whichever op array of the unit that is, and is filed under its
+    /// runtime definition key ([`Unit::runtime_keys`]), so it is passed
+    /// over here and bound as the program serves ([`Request::bind_class`]).
+    /// A name already declared is `zend_class_redeclaration_error`,
     /// `E_COMPILE_ERROR` in php's two wordings, the site of the earlier
     /// declaration named when it was a user class, and the request ends
     /// before the frame is pushed; php runs nothing of a file whose
     /// class fails to bind.
     pub(crate) fn declare_classes(&mut self, unit: &Arc<Unit>) -> bool {
-        let at_run_time: Vec<Vec<u8>> = unit
-            .main
-            .oplines
-            .iter()
-            .filter(|op| op.opcode == Opcode::DeclareClass)
-            .filter_map(|op| {
-                unit.main
-                    .literals
-                    .get(usize::try_from(op.op1).ok()?)
-                    .and_then(|value| value.as_str())
-                    .map(|name| name.bytes().to_vec())
-            })
-            .collect();
         for (at, decl) in unit.classes.iter().enumerate() {
-            let lowered = decl.name.0.to_ascii_lowercase();
-            if at_run_time.contains(&lowered) {
+            if unit
+                .runtime_keys
+                .iter()
+                .any(|(_, class)| usize::try_from(*class).ok() == Some(at))
+            {
                 continue;
             }
             if let Some(existing) = self.class_named(&decl.name.0) {
@@ -9595,15 +9586,56 @@ impl Request {
         ))
     }
 
-    /// `zend_bind_class` at a `ZEND_DECLARE_CLASS`, `zend_do_link_class`
-    /// over the declaration the opline's lowered name finds in the unit:
-    /// the parent fetched first, then each trait, then each interface,
-    /// all of them before any is checked, which is the order php's
-    /// messages come in. A name nothing declares, once autoloading has
-    /// been asked, is php's `Error`, `Class "P" not found` for a parent,
-    /// `Trait "T" not found` for a trait and `Interface "I" not found`
-    /// for an interface, and a class used as a trait is refused as php's
+    /// `do_bind_class` at a `ZEND_DECLARE_CLASS`: the declaration the
+    /// unit files under the opline's runtime definition key
+    /// ([`Unit::runtime_keys`]), refused where its name is already
+    /// declared as `zend_class_redeclaration_error` refuses it, at
+    /// `E_COMPILE_ERROR` though the program is running, which is also
+    /// what the same opline running a second time meets; then
+    /// `zend_do_link_class`, the one link the early bind makes too
+    /// (`php_unit::link::link`), with the parent fetched first, then
+    /// each trait, then each interface, all of them before any is
+    /// checked, which is the order php's messages come in. A name
+    /// nothing declares, once autoloading has been asked, is php's
+    /// `Error`, `Class "P" not found` for a parent, `Trait "T" not
+    /// found` for a trait and `Interface "I" not found` for an
+    /// interface, and a class used as a trait is refused as php's
     /// `ZEND_FETCH_CLASS_TRAIT` refuses it.
+    ///
+    /// A class declared in a function body is bound each time the
+    /// function runs, and the second time is the redeclaration, at the
+    /// level `error_get_last()` reads as 64:
+    ///
+    /// ```php
+    /// register_shutdown_function(function () { var_dump(error_get_last()['type']); });
+    /// function f() {
+    ///     class G {}
+    ///     echo "declared\n";
+    /// }
+    /// f();
+    /// f();
+    /// ```
+    /// ```expect exit=255
+    /// declared
+    ///
+    /// Fatal error: Cannot redeclare class G (previously declared in %s:4) in %s on line 4
+    /// int(64)
+    /// ```
+    ///
+    /// A second top-level declaration of a name the file bound is not
+    /// bound early, and its opline raises the redeclaration where it
+    /// stands, after what ran before it:
+    ///
+    /// ```php
+    /// echo "a\n";
+    /// class A {}
+    /// class A {}
+    /// ```
+    /// ```expect exit=255
+    /// a
+    ///
+    /// Fatal error: Cannot redeclare class A (previously declared in %s:3) in %s on line 4
+    /// ```
     ///
     /// ```php
     /// class C { use Nope; }
@@ -9815,26 +9847,33 @@ impl Request {
     /// ```expect exit=255
     /// Fatal error: Interface J cannot implement previously implemented interface I in %s on line 3
     /// ```
-    pub(crate) fn bind_class(&mut self, unit: &Arc<Unit>, lowered: &[u8]) -> Result<(), Thrown> {
+    pub(crate) fn bind_class(&mut self, unit: &Arc<Unit>, key: &[u8]) -> Result<(), Thrown> {
         let Some(at) = unit
-            .classes
+            .runtime_keys
             .iter()
-            .position(|decl| decl.name.0.to_ascii_lowercase() == lowered)
+            .find(|(filed, _)| *filed.0 == *key)
+            .and_then(|(_, at)| usize::try_from(*at).ok())
         else {
             return Err(crate::api::raising::fatal(
                 self,
-                "InternalError: a DECLARE_CLASS names a class the unit does not declare",
+                "InternalError: a DECLARE_CLASS carries a key the unit files no class under",
             ));
         };
         let Some(decl) = unit.classes.get(at).cloned() else {
             return Err(crate::api::raising::fatal(
                 self,
-                "InternalError: a DECLARE_CLASS names a class the unit does not declare",
+                "InternalError: a DECLARE_CLASS carries a key the unit files no class under",
             ));
         };
+        // `zend_bind_class_in_slot`'s failed `zend_hash_set_bucket_key`,
+        // or `do_bind_class` finding its key gone because the opline ran
+        // before: `E_COMPILE_ERROR` at the site that runs it either way.
         if let Some(existing) = self.class_named(&decl.name.0) {
             let message = self.redeclaration(existing);
-            return Err(crate::api::raising::fatal(self, &message));
+            let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
+            let line = self.current_line();
+            self.end_in_compile_time(Level::CompileError, &message, &file, line);
+            return Err(Thrown::of(None));
         }
         if let Some(parent) = &decl.parent {
             self.fetch_to_link(parent, "Class")?;
