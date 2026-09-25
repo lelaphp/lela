@@ -431,6 +431,7 @@ syntax::Lexed
 syntax::Options
 syntax::Parsed
 syntax::Parsed::dump
+syntax::ScannedToken
 syntax::SyntaxKind
 syntax::Token
 syntax::TokenId
@@ -446,6 +447,7 @@ syntax::magic_const_name
 syntax::operator_name
 syntax::parse
 syntax::parse_ini
+syntax::scanned
 test::Capture
 test::Engine
 test::Engine::builder

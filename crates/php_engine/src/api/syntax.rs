@@ -14,6 +14,7 @@ pub use php_compile::syntax::{
 };
 
 pub use crate::ini_syntax::{IniEvent, IniScanner, IniValue};
+pub use crate::scanner::{ScannedToken, scanned};
 
 use crate::api::call::constant;
 use crate::api::coerce::to_string;

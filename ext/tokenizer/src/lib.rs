@@ -6,7 +6,8 @@
 //! Two natives, `token_get_all` and `token_name`, over the one lexer
 //! (design §4.9) through `php_ext::syntax` and the `T_*` constants of
 //! [`names`]. What php's scanner cuts differently from the lexer is put
-//! back in [`tokens`]; the names the lexer's kinds carry come from
+//! back in the engine's scanner view, which [`tokens`] cuts where
+//! `tokenize()` stops; the names the lexer's kinds carry come from
 //! `php_names` and are not repeated here. Under `TOKEN_PARSE` the one
 //! parser runs over the same stream and what it took as a name is read
 //! off the tree in [`feedback`]. `PhpToken` is the one native class,
@@ -1256,7 +1257,11 @@ impl<'a> Texts<'a> {
 /// Warning: Octal escape sequence overflow \777 is greater than \377 in %s on line 2
 /// int(4)
 /// ```
-fn tokenize(req: &mut Request, code: &[u8], short_open_tag: bool) -> Vec<tokens::PhpToken> {
+fn tokenize(
+    req: &mut Request,
+    code: &[u8],
+    short_open_tag: bool,
+) -> Vec<php_ext::syntax::ScannedToken> {
     let lexed = syntax::lex(
         FileId(0),
         code,
@@ -1577,7 +1582,7 @@ fn tokenize_parse(
     req: &mut Request,
     code: &[u8],
     short_open_tag: bool,
-) -> Result<Vec<tokens::PhpToken>, Thrown> {
+) -> Result<Vec<php_ext::syntax::ScannedToken>, Thrown> {
     let options = syntax::Options {
         file: FileId(0),
         lex: LexOptions {

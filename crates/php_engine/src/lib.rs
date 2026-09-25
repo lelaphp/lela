@@ -37,6 +37,7 @@ mod ops;
 mod output;
 #[cfg(test)]
 mod probe;
+mod scanner;
 mod streams;
 // The test face is on for an extension's dev-dependency, and for this
 // crate's own tests, which read a served request the same way.
