@@ -410,8 +410,10 @@ impl Scratch {
             .to_owned()
     }
 
+    /// Where the worktree for `branch` is laid down: beside the clone,
+    /// in `repo-worktrees`, inside the scratch (revision 56).
     fn worktree(&self, branch: &str) -> PathBuf {
-        self.root.join(".claude/worktrees").join(branch)
+        self.dir.join("repo-worktrees").join(branch)
     }
 
     fn worktrees(&self) -> Vec<String> {
@@ -508,10 +510,17 @@ fn a_closed_ticket_is_fast_forwarded_pushed_and_retired() {
         "20"
     );
 
-    // No trust line, no grant waited on (#74); the tracker was asked
+    // The one trust line is the grant over the worktrees' directory, and
+    // nothing waited on it (#74, revision 56); the tracker was asked
     // nothing but the list and the view.
-    assert!(!out.contains("computed trust"), "{out}");
-    assert!(!out.contains("a person runs"), "{out}");
+    assert!(
+        out.contains(&format!(
+            "computed trust {}\n",
+            scratch.dir.join("repo-worktrees").display()
+        )),
+        "{out}"
+    );
+    assert_eq!(out.matches("computed trust").count(), 1, "{out}");
     assert_eq!(scratch.wrote("calls"), "", "{out}");
 }
 
@@ -553,7 +562,7 @@ fn a_ticket_left_open_leaves_the_worktree_standing() {
         scratch.wrote("session.args"),
         "-p --model claude-opus-5 --permission-mode acceptEdits --effort max /build 20"
     );
-    assert!(!out.contains("computed trust"), "{out}");
+    assert_eq!(out.matches("computed trust").count(), 1, "{out}");
 }
 
 /// A ticket closed with the branch at the track's own commit is not a
@@ -1107,7 +1116,7 @@ fn a_worktree_of_another_track_is_not_swept() {
             "HEAD:refs/heads/t-y",
         ],
     );
-    let dir = scratch.root.join(".claude/worktrees/t-y/t30");
+    let dir = scratch.worktree("t-y/t30");
     sh(
         &scratch.root,
         &[

@@ -135,10 +135,32 @@ fn command(root: &Path, name: &str, args: &[&str]) -> (i32, String) {
     joined(&out)
 }
 
-/// Where a worktree of `root` lives: under the main checkout, one
-/// directory per branch, where `permit` resolves a workspace.
+/// Where a worktree of `root` lives: beside the main checkout, in the
+/// directory named after it, one directory per branch (revision 56).
 fn worktree_of(root: &Path, branch: &str) -> PathBuf {
-    root.join(".claude/worktrees").join(branch)
+    let name = root.file_name().unwrap().to_str().unwrap();
+    root.with_file_name(format!("{name}-worktrees"))
+        .join(branch)
+}
+
+/// A scratch repository at `repo` inside its tree, so the worktrees laid
+/// down beside it are inside the tree too and go with it.
+struct Repository {
+    _tree: Tree,
+    root: PathBuf,
+}
+
+impl AsRef<Path> for Repository {
+    fn as_ref(&self) -> &Path {
+        &self.root
+    }
+}
+
+impl std::ops::Deref for Repository {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.root
+    }
 }
 
 /// A scratch repository: this working tree's files, tracked or not yet, so the
@@ -147,8 +169,9 @@ fn worktree_of(root: &Path, branch: &str) -> PathBuf {
 /// real ones; one commit on `main`; and `origin/t-x` as the track a
 /// worktree is taken off, which is where a track's branch lives in a
 /// repository that has worktrees on it (harness-design.md ledger 14).
-fn repository(name: &str) -> Tree {
-    let root = Tree::new(&format!("worktree-{name}")).unwrap();
+fn repository(name: &str) -> Repository {
+    let tree = Tree::new(&format!("worktree-{name}")).unwrap();
+    let root = tree.join("repo");
     let listed = sh(
         workspace(),
         &[
@@ -173,7 +196,7 @@ fn repository(name: &str) -> Tree {
         &root,
         &["git", "update-ref", "refs/remotes/origin/t-x", "HEAD"],
     );
-    root
+    Repository { _tree: tree, root }
 }
 
 /// One commit of what is staged, unsigned and unhooked: a person's
@@ -205,10 +228,10 @@ fn worktrees(root: &Path) -> Vec<String> {
 }
 
 /// The add instrument: one call creates the branch off its track, adds the
-/// worktree, builds `xtask` so the first `Edit` is judged by a built
-/// binary rather than a cold `cargo run` (§12 item 8), lays the local file
-/// down and prints no trust line, the clone's grant covering the
-/// worktree (#74, §11).
+/// worktree beside the checkout (revision 56), builds `xtask` so the first
+/// `Edit` is judged by a built binary rather than a cold `cargo run` (§12
+/// item 8), lays the local file down and prints the one grant that covers
+/// the worktrees' directory, waiting on none (#74, §11).
 #[test]
 fn an_add_lays_a_worktree_down_ready_to_be_worked_in() {
     let root = repository("add");
@@ -240,11 +263,16 @@ fn an_add_lays_a_worktree_down_ready_to_be_worked_in() {
     assert_eq!(facts["branch"], "t-x/witness", "{facts}");
     assert_eq!(facts["store"], root.to_str().unwrap(), "{facts}");
 
-    // The local file is laid down by that build, and no grant is asked
-    // for the worktree: the clone's covers it (#74).
+    // The local file is laid down by that build. The worktree is beside
+    // the clone, so no grant on it covers the worktree: the line is the
+    // one grant over the directory the worktrees are laid down in, and
+    // nothing waits on it (#74, revision 56).
     assert!(dir.join(".claude/harness.local.md").is_file(), "{out}");
-    assert!(!out.contains("computed trust"), "no trust line: {out}");
-    assert!(!out.contains("a person runs"), "no grant waited on: {out}");
+    let homes = root.with_file_name("repo-worktrees");
+    assert!(
+        out.contains(&format!("computed trust {}\n", homes.display())),
+        "one trust line, over the worktrees' directory: {out}"
+    );
 
     // What the clone already has is reported, not repeated.
     assert!(out.contains("core.hooksPath"), "{out}");
@@ -590,6 +618,32 @@ fn retiring_appends_the_readings_to_the_tracks_store_and_removes_the_worktree() 
     assert_eq!(code, 1, "{gone}");
     let (code, usage) = retire(&root, &[]);
     assert_eq!(code, 2, "{usage}");
+}
+
+/// A worktree laid down under `.claude/worktrees/` before revision 56 is
+/// found where git's own list says it is, never where one is laid down
+/// now, so it is retired as any other.
+#[test]
+fn a_worktree_under_the_checkout_from_before_revision_56_is_retired_as_any_other() {
+    let root = repository("retire-old");
+    let dir = root.join(".claude/worktrees/t-x/old");
+    sh(
+        &root,
+        &[
+            "git",
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "t-x/old",
+            dir.to_str().unwrap(),
+            "origin/t-x",
+        ],
+    );
+    let (code, out) = retire(&root, &["t-x/old"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(!dir.exists(), "{out}");
+    assert_eq!(worktrees(&root).len(), 1, "{out}");
 }
 
 /// `scripts/worktree-retire.sh` is one `exec` of the instrument, so a

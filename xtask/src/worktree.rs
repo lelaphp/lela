@@ -5,13 +5,14 @@
 //! four facts about a fresh worktree are why the add is an instrument and
 //! not a bare `git worktree add`:
 //!
-//! * `computed` trust is a person's grant (§11), and the grant on a clone
-//!   covers every repository under the granted path, its worktrees among
-//!   them (#74, revision 18), so the local file is rendered here and no
-//!   trust line is printed and none waited on; a worktree `computed`
-//!   still answers untrusted for is said to be unrendered, with no line
-//!   to run. What `computed` answered is read by [`computed::render`],
-//!   once.
+//! * `computed` trust is a person's grant (§11), and a grant covers every
+//!   repository under the granted path (#74, revision 18). The worktrees
+//!   are laid down beside the clone ([`homes`], revision 56), so the grant
+//!   that covers them is the one over that directory, made once; the
+//!   local file is rendered here where it is, and where `computed`
+//!   answers untrusted the file is said to be unrendered with that grant's
+//!   line, and nothing waits on it. What `computed` answered is read by
+//!   [`computed::render`], once.
 //! * `PreToolUse` denies an `Edit` or a `Write` that no candidate judged,
 //!   and in a worktree with a cold `target/` the only candidate is `cargo
 //!   run … permit` inside the hook's 60 s timeout. So `xtask` is built
@@ -80,12 +81,33 @@ use crate::git::{git, has_ref};
 use crate::reading::{self, Store};
 use crate::track::{self, Ticket, Track};
 
-/// Where a worktree lives, under the main checkout, one directory per
-/// branch: the one convention `permit` resolves a call's workspace by and
-/// this instrument lays a worktree under, so a worktree it made is a
-/// checkout of its own to the judge. Claude Code's own worktrees are laid
-/// here too, and the directory is ignored.
-pub(crate) const WORKTREES: &str = ".claude/worktrees";
+/// Where the worktrees of the repository whose main checkout is
+/// `checkout` are laid down, one directory per branch: beside the
+/// checkout, in the directory named after it, `<checkout>-worktrees`, as
+/// `dax-php-worktrees` is beside `dax-php`. Outside the checkout, since
+/// everything under `.claude/` is the harness's own and an agent working
+/// there meets the rules held for its files (revision 56). Laying one
+/// down is the one thing that asks: a worktree that exists is found
+/// through git's own record, `git worktree list` ([`track::worktrees`])
+/// or its `.git`, so one laid under `.claude/worktrees/` before revision
+/// 56 is judged and retired as any other.
+pub(crate) fn homes(checkout: &Path) -> Result<PathBuf> {
+    beside(checkout, "worktrees")
+}
+
+/// A directory beside `root`, named after it with `-<what>` added, as
+/// `dax-php-t-opus-5` and `dax-php-worktrees` are beside `dax-php`.
+pub(crate) fn beside(root: &Path, what: &str) -> Result<PathBuf> {
+    let parent = root
+        .parent()
+        .context("the repository has no parent directory to lay anything beside")?;
+    let mut name = root
+        .file_name()
+        .context("the repository's directory has no name")?
+        .to_os_string();
+    name.push(format!("-{what}"));
+    Ok(parent.join(name))
+}
 
 /// The local file the session hook renders (harness-design.md §5).
 const LOCAL: &str = ".claude/harness.local.md";
@@ -120,7 +142,10 @@ impl std::error::Error for NotReady {}
 /// the worktree's directory, ready; [`NotReady`] is the directory laid
 /// down with a fact missing.
 pub fn add(root: &Path, branch: &str, ticket: Option<Ticket>) -> Result<PathBuf> {
-    let dir = root.join(WORKTREES).join(branch);
+    let track = Track::of(root, Some(branch))
+        .with_context(|| format!("which track {branch} is on could not be said"))?;
+    let homes = homes(&track.store)?;
+    let dir = homes.join(branch);
     if has_ref(root, &format!("refs/heads/{branch}")) {
         bail!(
             "the branch {branch} exists; work in its worktree, retire it, or name another branch"
@@ -145,8 +170,6 @@ pub fn add(root: &Path, branch: &str, ticket: Option<Ticket>) -> Result<PathBuf>
         );
     }
 
-    let track = Track::of(root, Some(branch))
-        .with_context(|| format!("which track {branch} is on could not be said"))?;
     git(
         root,
         &[
@@ -189,7 +212,7 @@ pub fn add(root: &Path, branch: &str, ticket: Option<Ticket>) -> Result<PathBuf>
     let mut ready = true;
     ready &= build(ADD, &dir);
     ready &= lay_local(&dir);
-    trust(&dir);
+    trust(&dir, &homes);
     carried_over(ADD, &dir);
     if ready {
         say(ADD, &format!("ready: cd {}", dir.display()));
@@ -454,19 +477,22 @@ fn lay_local(dir: &Path) -> bool {
 }
 
 /// The local file rendered, read as [`computed::Answer`]: the regions
-/// rendered where the clone's grant covers the worktree, and said to be
-/// unrendered where `computed` answers untrusted, with no line to run,
-/// since the grant is the clone's and a worktree asks for none (#74,
-/// §11); a broken marker and a missing `computed` are complaints, since
-/// the file is laid down either way.
-fn trust(dir: &Path) {
+/// rendered where a grant covers the worktree, and said to be unrendered
+/// where `computed` answers untrusted, with the line a person runs once
+/// over `homes`, which covers every worktree laid down there (§11); the
+/// clone's grant does not, the worktrees being beside it (revision 56).
+/// Nothing waits on the line. A broken marker and a missing `computed`
+/// are complaints, since the file is laid down either way.
+fn trust(dir: &Path, homes: &Path) {
     let files = [LOCAL.to_owned()];
     match computed::render(dir, &files) {
         Ok(computed::Answer::Rendered(_)) => say(ADD, &format!("rendered {LOCAL}")),
         Ok(computed::Answer::Untrusted { .. }) => say(
             ADD,
             &format!(
-                "{LOCAL}'s exec regions are unrendered here; the clone's grant covers the worktree (#74), so no grant is asked for it"
+                "{LOCAL}'s exec regions are unrendered here: no grant covers {}, where the worktrees are laid down; a person runs, once, for every worktree there (harness-design.md §11): computed trust {}",
+                homes.display(),
+                homes.display()
             ),
         ),
         Ok(answer) => complain(ADD, &answer.refusal().unwrap_or_default()),
