@@ -384,13 +384,11 @@ impl Emit<'_> {
         &mut self,
         id: NodeId<tree::FunctionDecl>,
     ) -> Result<Function, CompileError> {
-        let node = &self.parsed.tree[id];
+        let node = self.parsed.tree[id].clone();
         let line = node.line();
-        if !node.attrs.is_empty() {
-            return Err(unread(line, "an attribute before this declaration"));
-        }
+        let attributes = self.walk_attributes(&node.attrs)?;
         let name = self.text(node.name).to_vec();
-        self.walk_function(
+        let function = self.walk_function(
             name,
             node.byref.is_some(),
             node.params,
@@ -400,12 +398,16 @@ impl Emit<'_> {
             node.doc_comment,
             line,
             node.range(),
-        )
+        )?;
+        Ok(Function {
+            attributes,
+            ..function
+        })
     }
 
-    /// The attributes before a class, `#[A(1), B] #[C]`, php's
-    /// `attributed_statement` groups, each attribute with its arguments;
-    /// a named or unpacked argument is refused.
+    /// The attributes before a declaration, `#[A(1), B] #[C]`, php's
+    /// `attributed_statement` groups, each attribute with its arguments,
+    /// positional, named and unpacked as written.
     ///
     /// ```php
     /// #[A] #[B(1), C] class M { public $x = 1; }
@@ -425,7 +427,7 @@ impl Emit<'_> {
                 let attribute = self.parsed.tree[*attribute].clone();
                 let line = attribute.line();
                 let arguments = match attribute.args {
-                    Some(args) => self.plain_arguments(args, line, "an attribute's")?,
+                    Some(args) => self.attribute_arguments(args, line)?,
                     None => Vec::new(),
                 };
                 out.push(Attr {
@@ -438,26 +440,31 @@ impl Emit<'_> {
         Ok(out)
     }
 
-    /// The arguments of a list that are plain expressions;
-    /// anything else refused as what `whose` cannot carry yet.
-    fn plain_arguments(
+    /// The arguments of an attribute's list as written, which
+    /// `zend_compile_attributes` holds to its rules; a first-class
+    /// callable's `...` is refused as not read yet.
+    fn attribute_arguments(
         &mut self,
         id: NodeId<tree::ArgList>,
         line: u32,
-        whose: &str,
-    ) -> Result<Vec<tree::Expr>, CompileError> {
+    ) -> Result<Vec<AttrArgument>, CompileError> {
         let args = self.parsed.tree[id].args.clone();
         let mut out = Vec::with_capacity(args.len());
         for arg in &args {
-            match arg {
-                tree::Arg::Expr(expr) => out.push(*expr),
-                tree::Arg::NamedArg(_) => {
-                    return Err(unread(line, &format!("{whose} named argument")));
+            out.push(match arg {
+                tree::Arg::Expr(expr) => AttrArgument::Positional(*expr),
+                tree::Arg::NamedArg(named) => {
+                    let named = &self.parsed.tree[*named];
+                    let Some(value) = named.value else {
+                        return Err(unread(line, "an attribute's named argument"));
+                    };
+                    AttrArgument::Named(self.text(named.name).to_vec(), value)
                 }
-                tree::Arg::SpreadArg(_) | tree::Arg::VariadicPlaceholder(_) => {
-                    return Err(unread(line, &format!("{whose} argument list")));
+                tree::Arg::SpreadArg(_) => AttrArgument::Unpack,
+                tree::Arg::VariadicPlaceholder(_) => {
+                    return Err(unread(line, "an attribute's argument list"));
                 }
-            }
+            });
         }
         Ok(out)
     }
@@ -501,6 +508,7 @@ impl Emit<'_> {
             return_type,
             by_ref,
             body,
+            attributes: Vec::new(),
             doc_comment,
             line,
             end_line: self.end_line(range),
@@ -516,9 +524,7 @@ impl Emit<'_> {
         for param in &params {
             let param = self.parsed.tree[*param].clone();
             let line = param.line();
-            if !param.attrs.is_empty() {
-                return Err(unread(line, "an attribute"));
-            }
+            let attributes = self.walk_attributes(&param.attrs)?;
             if param.hooks.is_some() {
                 return Err(unread(line, "a property accessor list"));
             }
@@ -547,6 +553,7 @@ impl Emit<'_> {
                 variadic: param.variadic.is_some(),
                 default: param.default,
                 promote,
+                attributes,
             });
         }
         Ok(out)
@@ -1028,11 +1035,9 @@ impl Emit<'_> {
         if modifiers.has(Flag::Var) {
             return Err(self.internal("a class constant the grammar wrote `var` before"));
         }
-        if !node.attrs.is_empty() {
-            return Err(unread(line, "an attribute before a class member"));
-        }
         for declarator in &node.const_declarators {
             let (name, value, line) = self.const_declarator(*declarator)?;
+            let attributes = self.walk_attributes(&node.attrs)?;
             let doc_comment = self.doc_comment(self.parsed.tree[*declarator].doc_comment);
             class.constants.push(Constant {
                 name,
@@ -1041,7 +1046,7 @@ impl Emit<'_> {
                 ty: node.ty,
                 value: Some(value),
                 is_case: false,
-                attributes: Vec::new(),
+                attributes,
                 doc_comment,
                 line,
             });
@@ -1060,14 +1065,12 @@ impl Emit<'_> {
         let node = self.parsed.tree[id].clone();
         let line = node.line();
         let modifiers = self.walk_modifiers(&node.modifiers, line, Target::Property)?;
-        if !node.attrs.is_empty() {
-            return Err(unread(line, "an attribute before a class member"));
-        }
         if node.hooks.is_some() {
             return Err(unread(line, "a property accessor list"));
         }
         for declarator in &node.property_declarators {
             let declarator = self.parsed.tree[*declarator].clone();
+            let attributes = self.walk_attributes(&node.attrs)?;
             class.properties.push(Property {
                 name: self.variable_name(declarator.var),
                 visibility: modifiers.visibility.unwrap_or_default(),
@@ -1077,6 +1080,7 @@ impl Emit<'_> {
                 is_final: modifiers.has(Flag::Final),
                 is_abstract: modifiers.has(Flag::Abstract),
                 is_readonly: modifiers.has(Flag::Readonly),
+                attributes,
                 default: declarator.init,
                 doc_comment: self.doc_comment(declarator.doc_comment),
                 line: declarator.line(),
@@ -1098,9 +1102,7 @@ impl Emit<'_> {
         if modifiers.has(Flag::Var) {
             return Err(self.internal("a method the grammar wrote `var` before"));
         }
-        if !node.attrs.is_empty() {
-            return Err(unread(line, "an attribute before a class member"));
-        }
+        let attributes = self.walk_attributes(&node.attrs)?;
         let Some(name) = node.name.and_then(|name| self.parsed.tree[name].name) else {
             return Err(unread(line, "a method"));
         };
@@ -1117,7 +1119,10 @@ impl Emit<'_> {
             node.range(),
         )?;
         class.methods.push(Method {
-            function,
+            function: Function {
+                attributes,
+                ..function
+            },
             visibility: modifiers.visibility.unwrap_or_default(),
             is_static: modifiers.has(Flag::Static),
             is_abstract: modifiers.has(Flag::Abstract),
@@ -1257,8 +1262,18 @@ pub(super) enum AsModifier {
 #[derive(Debug, PartialEq)]
 pub(super) struct Attr {
     pub(super) name: Vec<u8>,
-    pub(super) arguments: Vec<php_syntax::tree::Expr>,
+    pub(super) arguments: Vec<AttrArgument>,
     pub(super) line: u32,
+}
+
+/// One argument of an attribute's list as written, php's
+/// `ZEND_AST_ARG_LIST` child: an expression, `name: expression`, or
+/// `...expression`, which `zend_compile_attributes` refuses.
+#[derive(Debug, PartialEq)]
+pub(super) enum AttrArgument {
+    Positional(php_syntax::tree::Expr),
+    Named(Vec<u8>, php_syntax::tree::Expr),
+    Unpack,
 }
 
 /// One function declaration, php's `zend_ast_decl` for a function or a
@@ -1277,6 +1292,9 @@ pub(super) struct Function {
     pub(super) return_type: Option<TypeExpr>,
     pub(super) by_ref: bool,
     pub(super) body: Vec<php_syntax::tree::Stmt>,
+    /// The attributes written before it, `decl->child[4]`, which the
+    /// emitter compiles for the function or the method target.
+    pub(super) attributes: Vec<Attr>,
     pub(super) doc_comment: Option<Vec<u8>>,
     pub(super) line: u32,
     pub(super) end_line: u32,
@@ -1301,6 +1319,8 @@ pub(super) struct Parameter {
     pub(super) variadic: bool,
     pub(super) default: Option<php_syntax::tree::Expr>,
     pub(super) promote: Option<Promoted>,
+    /// The attributes written before it, `param_ast->child[3]`.
+    pub(super) attributes: Vec<Attr>,
 }
 
 /// The modifiers that make a constructor's parameter a property,
@@ -1388,6 +1408,8 @@ pub(super) struct Property {
     pub(super) is_final: bool,
     pub(super) is_abstract: bool,
     pub(super) is_readonly: bool,
+    /// The group's attributes, compiled for each declarator.
+    pub(super) attributes: Vec<Attr>,
     pub(super) default: Option<php_syntax::tree::Expr>,
     pub(super) doc_comment: Option<Vec<u8>>,
     pub(super) line: u32,
@@ -1412,7 +1434,8 @@ pub(super) struct Constant {
     /// the enum's own constants in the order written.
     pub(super) is_case: bool,
     /// The attributes written before a case, `ast->child[3]` of
-    /// `ZEND_AST_ENUM_CASE`; a constant's are refused before this.
+    /// `ZEND_AST_ENUM_CASE`, or before a constant's group, compiled for
+    /// each declarator.
     pub(super) attributes: Vec<Attr>,
     pub(super) doc_comment: Option<Vec<u8>>,
     pub(super) line: u32,

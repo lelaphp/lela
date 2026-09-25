@@ -2953,6 +2953,12 @@ impl Emit<'_> {
             )?
             .or_else(|| implicit_set_visibility(is_readonly, promoted.visibility));
         let default = ty.is_none().then_some(ConstExpr::Null);
+        let attributes = self.member_attributes(
+            &parameter.attributes,
+            attributes::TARGET_PROPERTY,
+            attributes::TARGET_PARAMETER,
+            parameter.line,
+        )?;
         let Some(decl) = self.classes.last_mut() else {
             return Err(
                 self.fatal("InternalError: a promoted property of a class the unit has not")
@@ -2967,7 +2973,7 @@ impl Emit<'_> {
             is_final: promoted.is_final || set_visibility == Some(Visibility::Private),
             ty: ty.cloned(),
             default,
-            attributes: Vec::new(),
+            attributes,
             doc_comment: None,
         });
         Ok(())
@@ -3057,6 +3063,49 @@ impl Emit<'_> {
             method: at,
             body,
         });
+        Ok(())
+    }
+
+    /// `zend_compile_func_decl`'s arm over `ZEND_ACC_NODISCARD`, which
+    /// the attribute's validator set: a function whose return type takes
+    /// `void` or `never` returns no value to use.
+    ///
+    /// ```php
+    /// class A { #[NoDiscard] function f(): void {} }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: A void method does not return a value, but #[\NoDiscard] requires a return value in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// #[NoDiscard] function f(): never { exit; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: A never returning function does not return a value, but #[\NoDiscard] requires a return value in %s on line 2
+    /// ```
+    fn no_discard_refused(&self, attributes: &[Attribute]) -> Result<(), CompileError> {
+        let marked = attributes
+            .iter()
+            .any(|a| InternalAttribute::named(&a.name.0) == Some(InternalAttribute::NoDiscard));
+        let Some(ty) = self.return_type.as_ref().filter(|_| marked) else {
+            return Ok(());
+        };
+        let what = if self.active_class.is_some() {
+            "method"
+        } else {
+            "function"
+        };
+        let mask = ty.mask();
+        if mask & types::MAY_BE_VOID != 0 {
+            return Err(self.compile_error(format!(
+                "A void {what} does not return a value, but #[\\NoDiscard] requires a return value"
+            )));
+        }
+        if mask & types::MAY_BE_NEVER != 0 {
+            return Err(self.compile_error(format!(
+                "A never returning {what} does not return a value, but #[\\NoDiscard] requires a return value"
+            )));
+        }
         Ok(())
     }
 
@@ -3269,6 +3318,12 @@ impl Emit<'_> {
         let line = function.line;
         self.line = line;
         self.returns_by_ref = function.by_ref;
+        let target = if scope.is_some() {
+            attributes::TARGET_METHOD
+        } else {
+            attributes::TARGET_FUNCTION
+        };
+        let attributes = self.member_attributes(&function.attributes, target, 0, line)?;
         // `zend_compile_params`' `fallback_return_type`: a method named
         // `__toString` with no return type written returns `string` all
         // the same, which is what `Stringable::__toString` holds it to.
@@ -3294,6 +3349,7 @@ impl Emit<'_> {
             None => String::from_utf8_lossy(name).into_owned(),
         };
         let parameters = self.recv_prologue(function, is_ctor, &shown)?;
+        self.no_discard_refused(&attributes)?;
         // The entry safepoint is the opline after the prologue (design
         // §5.7), which `begin_body` numbered zero at opline zero; the
         // assignments a promoted parameter makes stand after it, as
@@ -3333,7 +3389,7 @@ impl Emit<'_> {
                 return_type: self.return_type.clone(),
                 returns_by_ref: function.by_ref,
                 is_generator: function.generator,
-                attributes: Vec::new(),
+                attributes,
                 doc_comment: function.doc_comment.clone().map(Vec::into_boxed_slice),
                 file: self.filename.clone(),
                 line,
@@ -3414,6 +3470,17 @@ impl Emit<'_> {
             self.parameter_refused(parameter, variadic_seen, is_ctor)?;
             variadic_seen = parameter.variadic;
             let mut folded = self.parameter_default(parameter)?;
+            let promoted_target = if parameter.promote.is_some() {
+                attributes::TARGET_PROPERTY
+            } else {
+                0
+            };
+            let attrs = self.member_attributes(
+                &parameter.attributes,
+                attributes::TARGET_PARAMETER,
+                promoted_target,
+                parameter.line,
+            )?;
             let (ty, implicitly_nullable) = self.parameter_type(parameter, &mut folded, shown)?;
             let keeps_default = !parameter.variadic
                 && (implicitly_nullable || last_required.is_none_or(|last| at > last));
@@ -3481,7 +3548,7 @@ impl Emit<'_> {
                 prefer_ref: false,
                 variadic: parameter.variadic,
                 default,
-                attributes: Vec::new(),
+                attributes: attrs,
             });
         }
         Ok(parameters)
@@ -4009,7 +4076,10 @@ impl Emit<'_> {
                 None => true,
                 Some(parent) => self.bound_class(parent).is_some(),
             };
-        if early && (parent.is_none() || self.try_early_bind(at)?) {
+        // A class with no parent is bound early too, and linked as
+        // `zend_compile_class_decl` links it, which is where its
+        // `#[\Override]` marks are held to what it overrides.
+        if early && self.try_early_bind(at)? {
             self.bound.push(at);
             return Ok(());
         }
@@ -4521,6 +4591,17 @@ impl Emit<'_> {
     /// Fatal error: Cannot apply #[\AllowDynamicProperties] to interface Demo in %s on line 3
     /// ```
     ///
+    /// A validator's refusal is deferred as the target is:
+    ///
+    /// ```php
+    /// #[DelayedTargetValidation, Attribute]
+    /// trait T {}
+    /// echo "compiled\n";
+    /// ```
+    /// ```expect
+    /// compiled
+    /// ```
+    ///
     /// What php takes, it takes: an internal attribute on a target it
     /// allows, one deferred, and a user's attribute of any name:
     ///
@@ -4547,7 +4628,7 @@ impl Emit<'_> {
         for attribute in &class.attributes {
             self.line = attribute.line;
             let name = self.class_name(&attribute.name);
-            out.push(self.attribute(attribute, name)?);
+            out.push(self.attribute(attribute, name, declared_at)?);
         }
         self.line = declared_at;
         let internal = |attribute: &Attribute| InternalAttribute::named(&attribute.name.0);
@@ -4588,11 +4669,17 @@ impl Emit<'_> {
             if !on_target {
                 continue;
             }
+            // A validator's refusal under `#[\DelayedTargetValidation]`
+            // is kept for `ReflectionAttribute::newInstance` and not
+            // raised here.
             if let Some(refused) = known.refused_on_class(
                 class.kind,
                 class.modifiers,
                 &String::from_utf8_lossy(class_name),
             ) {
+                if delayed {
+                    continue;
+                }
                 return Err(self.compile_error(refused));
             }
             if known == InternalAttribute::AllowDynamicProperties {
@@ -4605,16 +4692,94 @@ impl Emit<'_> {
     /// One attribute as the declaration keeps it: the name resolved,
     /// each argument the constant expression `zend_const_expr_to_zval`
     /// leaves.
+    ///
+    /// Its list is held to `zend_compile_attributes`' rules at the line
+    /// of the declaration it stands on: no unpacking, a name once, and
+    /// no positional argument after a named one.
+    ///
+    /// ```php
+    /// #[A(a: 1, a: 2)]
+    /// class C {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Duplicate named parameter $a in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class C {
+    ///     #[A(a: 1, 2)]
+    ///     function f() {}
+    /// }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use positional argument after named argument in %s on line 4
+    /// ```
+    ///
+    /// ```php
+    /// #[A(...[1])]
+    /// function f() {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use unpacking in attribute argument list in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// #[Attribute] class A { function __construct(public $x = 0, public $y = 0) {} }
+    /// #[A(1, y: 2)] class C {}
+    /// $a = (new ReflectionClass('C'))->getAttributes()[0];
+    /// var_dump($a->getArguments());
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   [0]=>
+    ///   int(1)
+    ///   ["y"]=>
+    ///   int(2)
+    /// }
+    /// ```
     fn attribute(
         &mut self,
         attribute: &walk::Attr,
         name: Vec<u8>,
+        declared_at: u32,
     ) -> Result<Attribute, CompileError> {
-        let mut arguments = Vec::new();
+        let mut arguments: Vec<AttributeArgument> = Vec::new();
         for argument in &attribute.arguments {
+            let (named, expr) = match argument {
+                walk::AttrArgument::Unpack => {
+                    return Err(walk::refused(
+                        declared_at,
+                        "Cannot use unpacking in attribute argument list",
+                    ));
+                }
+                walk::AttrArgument::Named(named, expr) => {
+                    if arguments
+                        .iter()
+                        .any(|earlier| earlier.name.as_ref().is_some_and(|n| *n.0 == **named))
+                    {
+                        return Err(walk::refused(
+                            declared_at,
+                            format!(
+                                "Duplicate named parameter ${}",
+                                String::from_utf8_lossy(named)
+                            ),
+                        ));
+                    }
+                    (Some(Name(named.clone().into_boxed_slice())), *expr)
+                }
+                walk::AttrArgument::Positional(expr) => {
+                    if arguments.iter().any(|earlier| earlier.name.is_some()) {
+                        return Err(walk::refused(
+                            declared_at,
+                            "Cannot use positional argument after named argument",
+                        ));
+                    }
+                    (None, *expr)
+                }
+            };
             arguments.push(AttributeArgument {
-                name: None,
-                value: self.const_expr(*argument)?,
+                name: named,
+                value: self.const_expr(expr)?,
             });
         }
         Ok(Attribute {
@@ -4644,13 +4809,148 @@ impl Emit<'_> {
         &mut self,
         constant: &walk::Constant,
     ) -> Result<Vec<Attribute>, CompileError> {
-        let mut out = Vec::with_capacity(constant.attributes.len());
-        for attribute in &constant.attributes {
+        self.member_attributes(
+            &constant.attributes,
+            attributes::TARGET_CLASS_CONST,
+            0,
+            constant.line,
+        )
+    }
+
+    /// `zend_compile_attributes` for any target but a class, whose
+    /// validators this adds nothing to: each attribute's name resolved
+    /// and its arguments compiled, an internal attribute that does not
+    /// take `target` but takes `promoted` left to the promoted
+    /// property's list, then php's second loop at the declaration's
+    /// line, `declared_at`: an internal attribute on a target it does
+    /// not allow and one written twice are php's `E_ERROR`, unless
+    /// `#[\DelayedTargetValidation]` defers the target.
+    ///
+    /// ```php
+    /// class A {
+    ///     #[Attribute]
+    ///     public
+    ///     function f() {}
+    /// }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Attribute "Attribute" cannot target method (allowed targets: class) in %s on line 5
+    /// ```
+    ///
+    /// ```php
+    /// class A { #[Attribute] public $x; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Attribute "Attribute" cannot target property (allowed targets: class) in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// class A { #[\Override] const X = 1; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Attribute "Override" cannot target class constant (allowed targets: method, property) in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// #[\Override]
+    /// function f() {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Attribute "Override" cannot target function (allowed targets: method, property) in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// function f(
+    ///     #[Attribute]
+    ///     $x) {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Attribute "Attribute" cannot target parameter (allowed targets: class) in %s on line 4
+    /// ```
+    ///
+    /// ```php
+    /// function f(#[SensitiveParameter] #[SensitiveParameter] $x) {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Attribute "SensitiveParameter" must not be repeated in %s on line 2
+    /// ```
+    ///
+    /// What php takes, it takes, a user's attribute of any name on any
+    /// target and an internal one deferred:
+    ///
+    /// ```php
+    /// #[Attribute] class Tag { function __construct(public string $v = '') {} }
+    /// #[Tag('f')] function f(#[Tag('p')] $p) {}
+    /// class C {
+    ///     #[Tag('k')] const K = 1;
+    ///     #[Tag('x')] public $x;
+    ///     #[Tag('m'), DelayedTargetValidation, Attribute] function m() {}
+    ///     function __construct(#[Tag('q'), SensitiveParameter] public $q = 0) {}
+    /// }
+    /// $name = fn ($r) => $r->getAttributes()[0]->getArguments()[0];
+    /// echo $name(new ReflectionFunction('f')), $name(new ReflectionParameter('f', 'p')),
+    ///     $name(new ReflectionClassConstant('C', 'K')), $name(new ReflectionProperty('C', 'x')),
+    ///     $name(new ReflectionMethod('C', 'm')), $name(new ReflectionProperty('C', 'q')),
+    ///     count((new ReflectionProperty('C', 'q'))->getAttributes()), "\n";
+    /// ```
+    /// ```expect
+    /// fpkxmq1
+    /// ```
+    fn member_attributes(
+        &mut self,
+        written: &[walk::Attr],
+        target: u32,
+        promoted: u32,
+        declared_at: u32,
+    ) -> Result<Vec<Attribute>, CompileError> {
+        let mut out = Vec::with_capacity(written.len());
+        for attribute in written {
             self.line = attribute.line;
             let name = self.class_name(&attribute.name);
-            out.push(self.attribute(attribute, name)?);
+            if let Some(known) = InternalAttribute::named(&name) {
+                let targets = known.targets();
+                if targets & target == 0 && targets & promoted != 0 {
+                    continue;
+                }
+            }
+            out.push(self.attribute(attribute, name, declared_at)?);
         }
-        self.line = constant.line;
+        self.line = declared_at;
+        let internal = |attribute: &Attribute| InternalAttribute::named(&attribute.name.0);
+        let delayed = out.iter().any(|attribute| {
+            internal(attribute) == Some(InternalAttribute::DelayedTargetValidation)
+        });
+        for (at, attribute) in out.iter().enumerate() {
+            let Some(known) = internal(attribute) else {
+                continue;
+            };
+            let shown = String::from_utf8_lossy(&attribute.name.0).into_owned();
+            let targets = known.targets();
+            if targets & target == 0 && !delayed {
+                return Err(CompileError {
+                    level: Level::Error,
+                    message: format!(
+                        "Attribute \"{shown}\" cannot target {} (allowed targets: {})",
+                        attributes::target_names(target),
+                        attributes::target_names(targets)
+                    ),
+                    line: declared_at,
+                    raised: Vec::new(),
+                });
+            }
+            if out
+                .iter()
+                .enumerate()
+                .any(|(other, o)| other != at && o.name.0.eq_ignore_ascii_case(&attribute.name.0))
+            {
+                return Err(CompileError {
+                    level: Level::Error,
+                    message: format!("Attribute \"{shown}\" must not be repeated"),
+                    line: declared_at,
+                    raised: Vec::new(),
+                });
+            }
+        }
         Ok(out)
     }
 
@@ -4770,6 +5070,12 @@ impl Emit<'_> {
                     &member,
                 )?
                 .or_else(|| implicit_set_visibility(is_readonly, property.visibility));
+            let attributes = self.member_attributes(
+                &property.attributes,
+                attributes::TARGET_PROPERTY,
+                0,
+                property.line,
+            )?;
             decl.properties.push(PropertyDecl {
                 name: Name(property.name.clone().into_boxed_slice()),
                 visibility: property.visibility,
@@ -4781,7 +5087,7 @@ impl Emit<'_> {
                 is_final: property.is_final || set_visibility == Some(Visibility::Private),
                 ty,
                 default,
-                attributes: Vec::new(),
+                attributes,
                 doc_comment: property.doc_comment.clone().map(Vec::into_boxed_slice),
             });
         }

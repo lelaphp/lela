@@ -12,11 +12,11 @@ use super::walk::ClassModifiers;
 
 /// `ZEND_ATTRIBUTE_TARGET_*` (`Z/Zend/zend_attributes.h`).
 pub(super) const TARGET_CLASS: u32 = 1 << 0;
-const TARGET_FUNCTION: u32 = 1 << 1;
-const TARGET_METHOD: u32 = 1 << 2;
-const TARGET_PROPERTY: u32 = 1 << 3;
-const TARGET_CLASS_CONST: u32 = 1 << 4;
-const TARGET_PARAMETER: u32 = 1 << 5;
+pub(super) const TARGET_FUNCTION: u32 = 1 << 1;
+pub(super) const TARGET_METHOD: u32 = 1 << 2;
+pub(super) const TARGET_PROPERTY: u32 = 1 << 3;
+pub(super) const TARGET_CLASS_CONST: u32 = 1 << 4;
+pub(super) const TARGET_PARAMETER: u32 = 1 << 5;
 const TARGET_CONST: u32 = 1 << 6;
 const TARGET_ALL: u32 = (1 << 7) - 1;
 

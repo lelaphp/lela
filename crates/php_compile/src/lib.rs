@@ -4851,13 +4851,7 @@ mod tests {
             compile_error("Cannot redeclare M::F()", 2)
         );
         assert_eq!(refused(b"<?php\n#[A] #[B(1), C] class M {}"), None);
-        assert_eq!(
-            refused(b"<?php\n#[A(x: 1)] class M {}"),
-            not_yet(
-                "an attribute's named argument this compiler cannot read yet",
-                2
-            )
-        );
+        assert_eq!(refused(b"<?php\n#[A(x: 1)] class M {}"), None);
         assert_eq!(
             refused(b"<?php\n#[\\AllowDynamicProperties] class M {}"),
             None,
@@ -4867,17 +4861,12 @@ mod tests {
             refused(b"<?php\n#[\\AllowDynamicProperties]\ninterface I {}"),
             compile_error("Cannot apply #[\\AllowDynamicProperties] to interface I", 3)
         );
+        assert_eq!(refused(b"<?php\n#[A] function f() {}"), None);
+        assert_eq!(refused(b"<?php\nclass M { #[A] public $x; }"), None);
         assert_eq!(
-            refused(b"<?php\n#[A] function f() {}"),
-            not_yet(
-                "an attribute before this declaration this compiler cannot read yet",
-                2
-            )
-        );
-        assert_eq!(
-            refused(b"<?php\nclass M { #[A] public $x; }"),
-            not_yet(
-                "an attribute before a class member this compiler cannot read yet",
+            refused(b"<?php\nclass M { #[\\Override] public $x; }"),
+            compile_error(
+                "M::$x has #[\\Override] attribute, but no matching parent property exists",
                 2
             )
         );

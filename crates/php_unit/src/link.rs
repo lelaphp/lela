@@ -285,6 +285,12 @@ pub enum Refusal {
     /// `Enum %s cannot include properties`, what `zend_verify_enum`
     /// raises of a property a trait gave the enum.
     EnumProperties { class: String },
+    /// `%s::%s() has #[\Override] attribute, but no matching parent
+    /// method exists`.
+    OverrideMethod { class: String, method: String },
+    /// `%s::$%s has #[\Override] attribute, but no matching parent
+    /// property exists`.
+    OverrideProperty { class: String, property: String },
 }
 
 /// The six names of a [`Refusal::TraitCollision`]: the trait a method
@@ -727,6 +733,14 @@ impl fmt::Display for Refusal {
             Refusal::EnumProperties { class } => {
                 write!(f, "Enum {class} cannot include properties")
             }
+            Refusal::OverrideMethod { class, method } => write!(
+                f,
+                "{class}::{method}() has #[\\Override] attribute, but no matching parent method exists"
+            ),
+            Refusal::OverrideProperty { class, property } => write!(
+                f,
+                "{class}::${property} has #[\\Override] attribute, but no matching parent property exists"
+            ),
         }
     }
 }
@@ -2149,11 +2163,135 @@ impl<'a> Linker<'a> {
             Ok(stringable) => stringable,
             Err(linked) => return Settled::of(*linked),
         };
+        if let Some(refused) = self.override_refused(child, abstracts) {
+            return Settled::of(Linked::Refused(refused));
+        }
         Settled {
             outcome: Linked::Linked,
             added,
             stringable,
         }
+    }
+
+    /// `zend_inheritance_check_override`, once every other check held:
+    /// a method or a property of the class's own marked `#[\Override]`
+    /// that overrides nothing. A method overrides what
+    /// `do_inheritance_check_on_method` resets the mark over: a
+    /// parent's method that is abstract or, not being a constructor, is
+    /// not private; an interface's, the class's own or its parents'; and
+    /// a used trait's abstract one. A property overrides a parent's that
+    /// is not private. The method's refusal stands at its first line,
+    /// the property's at the class's.
+    ///
+    /// ```php
+    /// interface I { function i(); }
+    /// abstract class P { abstract function a(); function b() {} private function c() {} public $x; }
+    /// class C extends P implements I {
+    ///     #[\Override] function i() {}
+    ///     #[\Override] function a() {}
+    ///     #[\Override] function b() {}
+    ///     #[\Override] public $x;
+    /// }
+    /// echo "linked\n";
+    /// class D extends P { function a() {}
+    ///     #[\Override] private function c() {} }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: D::c() has #[\Override] attribute, but no matching parent method exists in %s on line 12
+    /// ```
+    ///
+    /// ```php
+    /// class P { function __construct() {} }
+    /// class C extends P { #[\Override] function __construct() {} }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: C::__construct() has #[\Override] attribute, but no matching parent method exists in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class C { #[\Override] public $x; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: C::$x has #[\Override] attribute, but no matching parent property exists in %s on line 2
+    /// ```
+    fn override_refused(
+        &self,
+        child: &'a ClassDecl,
+        abstracts: &[traits::Copy],
+    ) -> Option<Refused> {
+        if child.kind == ClassKind::Trait {
+            return None;
+        }
+        let marked = |attributes: &[crate::decl::Attribute]| {
+            attributes
+                .iter()
+                .any(|a| a.name.0.eq_ignore_ascii_case(b"Override"))
+        };
+        let parent = self.class_parent(child);
+        let inherited = parent.map(|parent| self.tables(parent));
+        let mut names = child.interfaces.clone();
+        let mut above = parent;
+        let mut depth = 0;
+        while let Some(class) = above
+            && depth < 64
+        {
+            names.extend(class.interfaces.iter().cloned());
+            above = self.class_parent(class);
+            depth += 1;
+        }
+        let mut interfaces = Vec::new();
+        self.interfaces_of(&names, &mut interfaces, 0);
+        for method in &child.methods {
+            if !marked(&method.function.attributes) {
+                continue;
+            }
+            let is_ctor = method.function.name.0.eq_ignore_ascii_case(b"__construct");
+            let by_parent = inherited.as_ref().is_some_and(|tables| {
+                tables.methods.iter().any(|(_, p)| {
+                    same_method(p, method)
+                        && (p.is_abstract || (!is_ctor && p.visibility != Visibility::Private))
+                })
+            });
+            let by_interface = interfaces
+                .iter()
+                .any(|interface| interface.methods.iter().any(|m| same_method(m, method)));
+            let by_trait = abstracts
+                .iter()
+                .any(|copy| method.function.name.0.eq_ignore_ascii_case(&copy.key));
+            if !(by_parent || by_interface || by_trait) {
+                return Some(Refused {
+                    refusal: Refusal::OverrideMethod {
+                        class: text(&child.name.0),
+                        method: text(&method.function.name.0),
+                    },
+                    site: Site {
+                        file: method.function.file.clone(),
+                        line: method.function.line,
+                    },
+                });
+            }
+        }
+        for property in &child.properties {
+            if !marked(&property.attributes) {
+                continue;
+            }
+            let by_parent = inherited.as_ref().is_some_and(|tables| {
+                tables
+                    .properties
+                    .iter()
+                    .any(|(_, p)| p.name == property.name && p.visibility != Visibility::Private)
+            });
+            if !by_parent {
+                return Some(at_class(
+                    child,
+                    Refusal::OverrideProperty {
+                        class: text(&child.name.0),
+                        property: text(&property.name.0),
+                    },
+                ));
+            }
+        }
+        None
     }
 
     /// The second pass of `zend_do_traits_method_binding`, made once the
