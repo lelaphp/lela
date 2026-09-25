@@ -1036,3 +1036,100 @@ pub(super) fn socketpair(
     }
     Ok((first, second))
 }
+
+// ---------------------------------------------------------------- host facts
+
+// The calls the natives of `basic_functions.c` and its neighbours make
+// for facts only the host has, each one call; each answer is the host's,
+// which a witness pins by shape.
+
+/// `getloadavg(load, 3)`: the three averages, or `None` where the call
+/// answers `-1` (`PHP_FUNCTION(sys_getloadavg)`).
+pub(super) fn loadavg() -> Option<[f64; 3]> {
+    let mut load = [0.0f64; 3];
+    // SAFETY: `load` has room for the three doubles the call is asked for.
+    let got = unsafe { libc::getloadavg(load.as_mut_ptr(), 3) };
+    (got != -1).then_some(load)
+}
+
+/// The login name of `uid`, `getpwuid_r(3)` with its buffer grown while
+/// it is too small, as `php_get_current_user` reads it; `None` where
+/// the host has no entry.
+pub(super) fn user_name(uid: u32) -> Option<Vec<u8>> {
+    let mut buf: Vec<c_char> = vec![0; 1024];
+    loop {
+        let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
+        let mut found: *mut libc::passwd = std::ptr::null_mut();
+        // SAFETY: every pointer is to live storage of the size given, and
+        // the call writes only `entry`, `buf` up to its length and `found`.
+        let err = unsafe {
+            libc::getpwuid_r(
+                uid,
+                entry.as_mut_ptr(),
+                buf.as_mut_ptr(),
+                buf.len(),
+                &raw mut found,
+            )
+        };
+        if err == libc::ERANGE {
+            buf.resize(buf.len() * 2, 0);
+            continue;
+        }
+        if err != 0 || found.is_null() {
+            return None;
+        }
+        // SAFETY: the call returned 0 with `found` set, so it filled
+        // `entry`, whose `pw_name` points into `buf`.
+        let entry = unsafe { entry.assume_init() };
+        // SAFETY: `pw_name` is the NUL-terminated name the call wrote
+        // into `buf`, which lives across this read.
+        let name = unsafe { std::ffi::CStr::from_ptr(entry.pw_name) };
+        return Some(name.to_bytes().to_vec());
+    }
+}
+
+/// `inet_ntop(af, address, buffer, 40)` of `PHP_FUNCTION(inet_ntop)`:
+/// four bytes as `AF_INET`, sixteen as `AF_INET6`; `None` where the call
+/// answers `NULL`.
+pub(super) fn inet_text(address: &[u8]) -> Option<Vec<u8>> {
+    let af = match address.len() {
+        4 => libc::AF_INET,
+        16 => libc::AF_INET6,
+        _ => return None,
+    };
+    let mut buffer = [0 as c_char; 40];
+    let size = libc::socklen_t::try_from(buffer.len()).ok()?;
+    // SAFETY: `address` holds the four or sixteen bytes `af` reads, and
+    // `buffer` has room for `size` bytes, the most the call writes.
+    let text = unsafe {
+        inet_ntop(
+            af,
+            address.as_ptr().cast::<c_void>(),
+            buffer.as_mut_ptr(),
+            size,
+        )
+    };
+    if text.is_null() {
+        return None;
+    }
+    // SAFETY: a non-null answer is `buffer`, NUL-terminated by the call.
+    let text = unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr()) };
+    Some(text.to_bytes().to_vec())
+}
+
+/// `inet_pton(af, address, buffer)` of `PHP_FUNCTION(inet_pton)`: the
+/// four or sixteen bytes, `AF_INET6` where the text holds a `:`; `None`
+/// where the call answers zero or less.
+pub(super) fn inet_bytes(address: &[u8], six: bool) -> Option<Vec<u8>> {
+    let text = CString::new(address).ok()?;
+    let (af, len) = if six {
+        (libc::AF_INET6, 16)
+    } else {
+        (libc::AF_INET, 4)
+    };
+    let mut buffer = [0u8; 17];
+    // SAFETY: `text` is NUL-terminated and `buffer` has room for the
+    // sixteen bytes the widest family writes.
+    let rc = unsafe { inet_pton(af, text.as_ptr(), buffer.as_mut_ptr().cast::<c_void>()) };
+    (rc > 0).then(|| buffer[..len].to_vec())
+}

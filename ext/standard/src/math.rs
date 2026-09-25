@@ -14,6 +14,7 @@ use php_ext::request::Request;
 use php_ext::values::{PhpString, Value, ValueRef};
 
 use crate::output::Entry;
+use crate::zpp::double_argument;
 use crate::{argument_count_between, constant, declared, frameless, long_argument, parameter};
 
 /// `PHP_ROUND_HALF_UP` and the modes beside it (`Z/ext/standard/php_math_modes.h`).
@@ -453,13 +454,6 @@ fn number_argument(req: &mut Request, position: u32) -> Result<Value, Thrown> {
         &Type::Union(vec![Type::Int, Type::Float]),
         position,
     )
-}
-
-/// `Z_PARAM_DOUBLE` at `position`.
-fn double_argument(req: &mut Request, position: u32) -> Result<f64, Thrown> {
-    let given = req.argument(position).unwrap_or_default();
-    let coerced = coerce_param(req, &given, &Type::Float, position)?;
-    Ok(coerced.as_float().unwrap_or(0.0))
 }
 
 /// One `float` argument, and the native's answer over it.

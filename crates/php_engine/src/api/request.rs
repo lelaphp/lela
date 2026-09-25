@@ -35,7 +35,9 @@ use crate::api::values::{
     ClassId, ClosureInfo, Key, PhpArray, PhpObject, PhpRef, PhpString, Resource, TypeTag, Value,
     ValueRef,
 };
-use crate::engine::{MethodAt, NativeMethod, RequestDescription, Shared};
+use crate::engine::{
+    Configured, ConfiguredKey, MethodAt, NativeMethod, RequestDescription, Shared,
+};
 use crate::exec::{self, CallStage, CallState, IncludeKind, TableId, Vm};
 use crate::output::Output;
 
@@ -70,15 +72,17 @@ pub struct HostPath(pub PathBuf);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ExtensionId(pub(crate) u32);
 
-/// One of an extension's ini entries as this request sees it, php's
-/// `zend_ini_entry` read by `_extension_ini_string` and
-/// `ReflectionExtension::getINIEntries`: the declaration with its
-/// `modifiable` bits, the value in force, and the value the entry had
+/// One ini entry as this request sees it, php's `zend_ini_entry` read
+/// by `_extension_ini_string`, `ReflectionExtension::getINIEntries` and
+/// `ini_get_all`: the declaration with its `modifiable` bits, the
+/// extension that registered it (`module_number`), none for the
+/// engine's own table, the value in force, and the value the entry had
 /// before the request changed it, php's `orig_value`, which is `Some`
 /// exactly where php's `modified` is set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IniEntry {
     pub decl: IniDecl,
+    pub extension: Option<ExtensionId>,
     pub value: Box<[u8]>,
     pub original: Option<Box<[u8]>>,
 }
@@ -10785,9 +10789,14 @@ impl Request {
         }
     }
 
-    /// `header_register_callback()`.
+    /// `header_register_callback()` (`Z/main/SAPI.c:98`): the callable
+    /// held, with the owners `zend_fcc_addref` takes, for
+    /// `sapi_send_headers` to serve once; one held before is given up.
     pub fn set_header_callback(&mut self, callback: Callable) {
-        self.header_callback = Some(callback);
+        callback.addref(self);
+        if let Some(previous) = self.header_callback.replace(callback) {
+            previous.release(self);
+        }
     }
 
     /// `SG(sapi_headers).http_response_code` as it stands: 200 under a
@@ -11281,6 +11290,18 @@ impl Request {
         }
         for loader in std::mem::take(&mut self.autoloaders) {
             loader.release(self);
+        }
+        // `PHP_RSHUTDOWN(basic)`'s `zend_llist_destroy` of
+        // `BG(user_tick_functions)`, and `SG(callback_func)` where the
+        // header block was never sent.
+        for (callback, arguments) in std::mem::take(&mut self.tick_functions) {
+            callback.release(self);
+            for value in arguments {
+                self.release(value);
+            }
+        }
+        if let Some(callback) = self.header_callback.take() {
+            callback.release(self);
         }
     }
 
@@ -12267,17 +12288,25 @@ impl Request {
         module
             .ini
             .iter()
-            .map(|decl| {
-                let name = decl.name.0.as_ref();
-                let startup = self.shared.ini_default(name).unwrap_or(&decl.default);
-                let changed = self.ini.iter().find(|(n, _)| n.as_slice() == name);
-                IniEntry {
-                    decl: decl.clone(),
-                    value: changed.map_or(startup, |(_, v)| v.as_slice()).into(),
-                    original: changed.map(|_| startup.into()),
-                }
-            })
+            .map(|decl| self.ini_entry(decl.clone(), Some(extension)))
             .collect()
+    }
+
+    /// One entry as the request sees it: the value in force, the
+    /// request's `ini_set` over the engine's startup value, and the
+    /// startup value again as `original` where the request changed it.
+    fn ini_entry(&self, decl: IniDecl, extension: Option<ExtensionId>) -> IniEntry {
+        let name = decl.name.0.as_ref();
+        let startup = self.shared.ini_default(name).unwrap_or(&decl.default);
+        let changed = self.ini.iter().find(|(n, _)| n.as_slice() == name);
+        let value = changed.map_or(startup, |(_, v)| v.as_slice()).into();
+        let original = changed.map(|_| startup.into());
+        IniEntry {
+            decl,
+            extension,
+            value,
+            original,
+        }
     }
 
     /// `php_info_print_module` as the CLI prints it, `phpinfo_as_text`
@@ -12582,7 +12611,7 @@ impl Request {
     /// ```
     pub fn ini_set(&mut self, name: &[u8], value: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
         let previous = self.ini_get(name).map(<[u8]>::to_vec);
-        if previous.is_none() || !Request::ini_modifiable(name) || !self.ini_user(name) {
+        if previous.is_none() || !Request::ini_modifiable(name).0 || !self.ini_user(name) {
             return Ok(None);
         }
         if Request::ini_verdict(name, value) == IniVerdict::Rejected {
@@ -12631,11 +12660,13 @@ impl Request {
             .is_none_or(|decl| decl.user)
     }
 
-    /// Whether an entry's `modifiable` carries `PHP_INI_USER`, what
-    /// `ini_set()` asks: every entry of the table is `PHP_INI_ALL` but
-    /// `xmlrpc_errors`, `sys_temp_dir`, `sendmail_path`, `syslog.facility`,
-    /// `syslog.ident` and `disable_functions`, `PHP_INI_SYSTEM`
-    /// (`Z/main/main.c:806-890`), and
+    /// A core entry's `modifiable` bits as [`IniDecl`] spells them,
+    /// `PHP_INI_USER`, `PHP_INI_PERDIR` and `PHP_INI_SYSTEM`; the first
+    /// is what `ini_set()` asks: every entry of the table is
+    /// `PHP_INI_ALL` but `xmlrpc_errors`, `sys_temp_dir`,
+    /// `sendmail_path`, `syslog.facility`, `syslog.ident`,
+    /// `disable_functions`, `enable_dl` and `extension_dir`,
+    /// `PHP_INI_SYSTEM` (`Z/main/main.c:806-890`), and
     /// `short_open_tag` and the four `mail.*` beside `sendmail_path`,
     /// `PHP_INI_SYSTEM|PHP_INI_PERDIR` (`Z/main/main.c:820-871`).
     ///
@@ -12651,22 +12682,20 @@ impl Request {
     /// bool(true)
     /// int(3)
     /// ```
-    fn ini_modifiable(name: &[u8]) -> bool {
-        !matches!(
-            name,
-            b"xmlrpc_errors"
-                | b"short_open_tag"
-                | b"sys_temp_dir"
-                | b"mail.add_x_header"
-                | b"mail.mixed_lf_and_crlf"
-                | b"mail.cr_lf_mode"
-                | b"mail.log"
-                | b"sendmail_path"
-                | b"mail.force_extra_parameters"
-                | b"syslog.facility"
-                | b"syslog.ident"
-                | b"disable_functions"
-        )
+    fn ini_modifiable(name: &[u8]) -> (bool, bool, bool) {
+        match name {
+            b"xmlrpc_errors" | b"sys_temp_dir" | b"sendmail_path" | b"syslog.facility"
+            | b"syslog.ident" | b"disable_functions" | b"enable_dl" | b"extension_dir" => {
+                (false, false, true)
+            }
+            b"short_open_tag"
+            | b"mail.add_x_header"
+            | b"mail.mixed_lf_and_crlf"
+            | b"mail.cr_lf_mode"
+            | b"mail.log"
+            | b"mail.force_extra_parameters" => (false, true, true),
+            _ => (true, true, true),
+        }
     }
 
     /// What a core entry's `on_modify` says of a new value before
@@ -12709,18 +12738,70 @@ impl Request {
         }
     }
 
-    /// `ini_get_all()`: every entry with its current value, as strings
-    /// of the request's.
-    pub fn ini_entries(&mut self) -> Result<PhpArray, Thrown> {
-        let mut array = PhpArray::new(self)?;
-        let shared = Arc::clone(&self.shared);
-        for (name, default) in shared.ini_defaults() {
-            let value = self.ini_get(name).unwrap_or(default).to_vec();
-            let key = Key::Str(PhpString::new(self, name)?);
-            let value = Value::string(PhpString::new(self, &value)?);
-            array.set(self, key, value)?;
-        }
-        Ok(array)
+    /// `EG(ini_directives)`, what `ini_get_all()` walks: the engine's
+    /// own entries, registered with `module_number` zero before any
+    /// `MINIT`, then each extension's in bundle order, each as
+    /// [`Request::extension_ini`] reads one. A core entry's `modifiable`
+    /// bits are the table's ([`Request::ini_modifiable`]).
+    ///
+    /// ```php
+    /// ini_set('precision', '10');
+    /// var_dump(ini_get_all(null)['precision'], ini_get_all(null)['enable_dl'], ini_get_all('pcre', false));
+    /// ```
+    /// ```expect
+    /// array(3) {
+    ///   ["global_value"]=>
+    ///   string(2) "14"
+    ///   ["local_value"]=>
+    ///   string(2) "10"
+    ///   ["access"]=>
+    ///   int(7)
+    /// }
+    /// array(3) {
+    ///   ["global_value"]=>
+    ///   string(1) "1"
+    ///   ["local_value"]=>
+    ///   string(1) "1"
+    ///   ["access"]=>
+    ///   int(4)
+    /// }
+    /// array(3) {
+    ///   ["pcre.backtrack_limit"]=>
+    ///   string(7) "1000000"
+    ///   ["pcre.jit"]=>
+    ///   string(1) "1"
+    ///   ["pcre.recursion_limit"]=>
+    ///   string(6) "100000"
+    /// }
+    /// ```
+    #[must_use]
+    pub fn ini_entries(&self) -> Vec<IniEntry> {
+        let owned = |name: &[u8]| {
+            self.shared
+                .extensions
+                .iter()
+                .any(|e| e.ini.iter().any(|entry| entry.name.0.as_ref() == name))
+        };
+        let core = self
+            .shared
+            .ini_defaults()
+            .iter()
+            .filter(|(name, _)| !owned(name))
+            .map(|(name, default)| {
+                let (user, per_dir, system) = Request::ini_modifiable(name);
+                let decl = IniDecl {
+                    name: Name(name.as_slice().into()),
+                    default: default.as_slice().into(),
+                    user,
+                    per_dir,
+                    system,
+                };
+                self.ini_entry(decl, None)
+            });
+        let extensions = (0..self.shared.extensions.len())
+            .filter_map(|at| u32::try_from(at).ok())
+            .flat_map(|at| self.extension_ini(ExtensionId(at)));
+        core.chain(extensions).collect()
     }
 
     /// `zend_ini_parse_bool`: `1`, `on`, `yes`, `true` are true.
@@ -12734,20 +12815,93 @@ impl Request {
                     .is_ok_and(|n| n != 0)
     }
 
-    /// `zend_ini_parse_quantity`: a byte count with an optional `K`, `M`
-    /// or `G` suffix; `-1` and other text parse as php's `atoi` would.
+    /// `cfg_get_entry` as `get_cfg_var()` hands it back
+    /// (`Z/ext/standard/basic_functions.c:1306`): the row of
+    /// `configuration_hash` under `name`, what the host's ini text set
+    /// before any entry read it, a string or the array its `name[]=`
+    /// lines built, as strings of the request's; `None` where the text
+    /// set nothing under the name, a default no text named included.
+    ///
+    /// ```php
+    /// var_dump(get_cfg_var('precision'), get_cfg_var('highlight.string'), get_cfg_var('nope'));
+    /// ```
+    /// ```expect
+    /// string(2) "14"
+    /// bool(false)
+    /// bool(false)
+    /// ```
+    pub fn cfg_entry(&mut self, name: &[u8]) -> Result<Option<Value>, Thrown> {
+        let shared = Arc::clone(&self.shared);
+        let Some(entry) = shared.configured(name) else {
+            return Ok(None);
+        };
+        Ok(Some(match entry {
+            Configured::Str(bytes) => Value::string(PhpString::new(self, bytes)?),
+            Configured::Array(rows) => {
+                let mut array = PhpArray::new(self)?;
+                for (key, bytes) in rows {
+                    let key = match key {
+                        ConfiguredKey::Index(n) => Key::Int(*n),
+                        ConfiguredKey::Name(name) => Key::Str(PhpString::new(self, name)?),
+                    };
+                    let value = Value::string(PhpString::new(self, bytes)?);
+                    array.set(self, key, value)?;
+                }
+                Value::array(array)
+            }
+        }))
+    }
+
+    /// `zend_ini_parse_quantity`'s value alone, what `OnUpdateLong`
+    /// stores for a whole-number entry: [`Request::ini_parse_quantity`]
+    /// with the sentence it would say left unsaid.
     #[must_use]
     pub fn ini_parse_bytes(value: &[u8]) -> i64 {
-        let text = String::from_utf8_lossy(value);
-        let text = text.trim();
-        let (digits, shift) = match text.chars().last().map(|c| c.to_ascii_lowercase()) {
-            Some('k') => (&text[..text.len() - 1], 10),
-            Some('m') => (&text[..text.len() - 1], 20),
-            Some('g') => (&text[..text.len() - 1], 30),
-            _ => (text, 0),
-        };
-        let n: i64 = digits.trim().parse().unwrap_or(0);
-        n.checked_shl(shift).unwrap_or(i64::MAX)
+        crate::ini_quantity::parse(value).0
+    }
+
+    /// `zend_ini_parse_quantity` (`Z/Zend/zend_ini.c:613-841`): leading
+    /// and trailing whitespace ignored, an optional sign, a base prefix
+    /// (`0x`, `0o`, `0b`) or `strtoull`'s own reading under base zero,
+    /// where a leading `0` is octal, whitespace, and an optional `K`,
+    /// `M` or `G` read off the last byte; with the value, the sentence
+    /// php's `errstr` holds for a shape it interprets for backwards
+    /// compatibility, which `ini_parse_quantity()` raises as a warning
+    /// and an entry's `on_modify` as its own.
+    ///
+    /// ```php
+    /// foreach (['1M', ' 2k ', '0x10', '010', '0b101', '-0x0B', '', '1.5M', 'abc', '0x', '0z1', '5 KB', '99999999999999999999'] as $q) var_dump(ini_parse_quantity($q));
+    /// ```
+    /// ```expect
+    /// int(1048576)
+    /// int(2048)
+    /// int(16)
+    /// int(8)
+    /// int(5)
+    /// int(-11)
+    /// int(0)
+    ///
+    /// Warning: Invalid quantity "1.5M", interpreting as "1M" for backwards compatibility in %s on line 2
+    /// int(1048576)
+    ///
+    /// Warning: Invalid quantity "abc": no valid leading digits, interpreting as "0" for backwards compatibility in %s on line 2
+    /// int(0)
+    ///
+    /// Warning: Invalid quantity "0x": no digits after base prefix, interpreting as "0" for backwards compatibility in %s on line 2
+    /// int(0)
+    ///
+    /// Warning: Invalid prefix "0z", interpreting as "0" for backwards compatibility in %s on line 2
+    /// int(0)
+    ///
+    /// Warning: Invalid quantity "5 KB": unknown multiplier "B", interpreting as "5 " for backwards compatibility in %s on line 2
+    /// int(5)
+    ///
+    /// Warning: Invalid quantity "99999999999999999999": value is out of range, using overflow result for backwards compatibility in %s on line 2
+    /// int(-1)
+    /// ```
+    #[must_use]
+    pub fn ini_parse_quantity(value: &[u8]) -> (i64, Option<String>) {
+        crate::ini_quantity::parse(value)
     }
 
     // -------------------------------------------------- environment
@@ -12975,17 +13129,31 @@ impl Request {
         }
     }
 
-    /// `register_tick_function()`.
+    /// `register_tick_function()`: the callable and its arguments held,
+    /// with the owners `zend_fcc_addref` and `ZVAL_COPY` take, in
+    /// `BG(user_tick_functions)`.
     pub fn register_tick_function(&mut self, callback: Callable, arguments: Vec<Value>) -> bool {
+        callback.addref(self);
+        for value in &arguments {
+            self.addref(value);
+        }
         self.tick_functions.push((callback, arguments));
         true
     }
 
-    /// `unregister_tick_function()`.
+    /// `unregister_tick_function()`: `zend_llist_del_element`, the first
+    /// entry for the same callee, scope and object dropped and its
+    /// owners given up.
     pub fn unregister_tick_function(&mut self, callback: &Callable) -> bool {
-        let before = self.tick_functions.len();
-        self.tick_functions.retain(|(c, _)| c != callback);
-        self.tick_functions.len() != before
+        let Some(at) = self.tick_functions.iter().position(|(c, _)| c == callback) else {
+            return false;
+        };
+        let (held, arguments) = self.tick_functions.remove(at);
+        held.release(self);
+        for value in arguments {
+            self.release(value);
+        }
+        true
     }
 
     // -------------------------------------------------- memory and gc

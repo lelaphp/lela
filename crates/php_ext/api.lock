@@ -226,6 +226,7 @@ request::Request::backtrace
 request::Request::buffer_handler
 request::Request::called_scope
 request::Request::caller_var
+request::Request::cfg_entry
 request::Request::class_alias
 request::Request::class_decl
 request::Request::class_extension
@@ -279,6 +280,7 @@ request::Request::ini_entries
 request::Request::ini_get
 request::Request::ini_parse_bool
 request::Request::ini_parse_bytes
+request::Request::ini_parse_quantity
 request::Request::ini_set
 request::Request::interrupt
 request::Request::is_uploaded_file

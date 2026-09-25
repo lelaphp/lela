@@ -217,6 +217,10 @@ pub(crate) struct Shared {
     /// What reading the host's ini entries wrote to `stderr` in php
     /// ([`Configuration`]), for the host to write before it serves.
     startup_errors: String,
+    /// `configuration_hash`: what the host's ini text set, before any
+    /// entry read it, which `get_cfg_var()` answers from
+    /// ([`Request::cfg_entry`]).
+    configuration: Vec<(Vec<u8>, Configured)>,
     entry: Loop,
     /// The same loop for a serving inside a serving, `zend_call_function`
     /// over a user function: what [`Request::serve_user`] enters a
@@ -623,6 +627,14 @@ impl Shared {
         &self.ini
     }
 
+    /// `cfg_get_entry`: the row of `configuration_hash` under `name`.
+    pub(crate) fn configured(&self, name: &[u8]) -> Option<&Configured> {
+        self.configuration
+            .iter()
+            .find(|(n, _)| n.as_slice() == name)
+            .map(|(_, entry)| entry)
+    }
+
     /// The value of the constant `name` as the bundle declared it, or as
     /// the engine's own table has it: a value nothing owns, since the
     /// string ones are the engine's interned strings.
@@ -679,7 +691,7 @@ impl Shared {
 /// string(0) ""
 /// string(10) "ISO-8859-1"
 /// ```
-const CORE_INI: [(&str, &str); 42] = [
+const CORE_INI: [(&str, &str); 50] = [
     ("short_open_tag", "1"),
     ("fatal_error_backtraces", "1"),
     ("precision", "14"),
@@ -738,6 +750,19 @@ const CORE_INI: [(&str, &str); 42] = [
     ("syslog.facility", "LOG_USER"),
     ("syslog.ident", "php"),
     ("syslog.filter", "no-ctrl"),
+    // `main.c`'s `highlight.*`, `php_get_highlight_struct`'s colours,
+    // which `highlight_string()`, `highlight_file()` and `php -s` read
+    // (`Z/main/main.c:763-767`, `Z/main/php_ini.h`'s `HL_*_COLOR`).
+    ("highlight.comment", "#FF8000"),
+    ("highlight.default", "#0000BB"),
+    ("highlight.html", "#000000"),
+    ("highlight.keyword", "#007700"),
+    ("highlight.string", "#DD0000"),
+    // `ignore_user_abort`, `PG(ignore_user_abort)`, and the two `dl()`
+    // reads, `enable_dl` and `extension_dir`, `PHP_INI_SYSTEM`.
+    ("ignore_user_abort", "0"),
+    ("enable_dl", "1"),
+    ("extension_dir", crate::constants::PHP_EXTENSION_DIR),
 ];
 
 /// `php_ini_builder_define`'s line (`Z/main/php_ini_builder.c:63-81`)
@@ -770,8 +795,37 @@ fn define_line(entries: &mut Vec<u8>, name: &str, value: &str) {
 /// the entries before it kept, and `ini_error` writes its line to the
 /// process's `stderr`, the string's file named `Unknown`.
 struct Configuration {
-    table: Vec<(Vec<u8>, Vec<u8>)>,
+    table: Vec<(Vec<u8>, Configured)>,
     stderr: String,
+}
+
+/// One row of php's `configuration_hash`, what `cfg_get_entry` finds
+/// and `get_cfg_var()` answers: a string `name=value` set, or the array
+/// `name[]=value` and `name[offset]=value` lines built, whose values
+/// are strings (`php_ini_parser_cb`, `Z/main/php_ini.c:199-258`).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Configured {
+    Str(Vec<u8>),
+    Array(Vec<(ConfiguredKey, Vec<u8>)>),
+}
+
+/// A key of such an array, as `zend_symtable_update` makes it: an
+/// offset that reads as a canonical integer is that integer.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ConfiguredKey {
+    Index(i64),
+    Name(Vec<u8>),
+}
+
+impl Configured {
+    /// The string the entry holds; an array has none, and no directive
+    /// reads one.
+    fn text(&self) -> Option<&[u8]> {
+        match self {
+            Configured::Str(bytes) => Some(bytes),
+            Configured::Array(_) => None,
+        }
+    }
 }
 
 impl Configuration {
@@ -792,6 +846,13 @@ impl Configuration {
             stderr,
         }
     }
+
+    /// The directives the table sets, its strings, in the order first set.
+    fn directives(&self) -> impl Iterator<Item = (Vec<u8>, Vec<u8>)> + '_ {
+        self.table
+            .iter()
+            .filter_map(|(name, entry)| entry.text().map(|text| (name.clone(), text.to_vec())))
+    }
 }
 
 /// The grammar's host at startup: Zend's own constants and `main`'s,
@@ -800,7 +861,7 @@ impl Configuration {
 /// process's environment; and `php_ini_parser_cb` over the table.
 struct Startup<'c> {
     constants: &'c [ConstDecl],
-    table: Vec<(Vec<u8>, Vec<u8>)>,
+    table: Vec<(Vec<u8>, Configured)>,
     /// `is_special_section`: the last section header was `[PATH…]` or
     /// `[HOST…]`, where `extension=` is an entry like any other.
     special: bool,
@@ -830,7 +891,7 @@ impl crate::ini_syntax::Host for Startup<'_> {
         self.table
             .iter()
             .find(|(n, _)| n.as_slice() == name)
-            .map(|(_, value)| value.clone())
+            .and_then(|(_, value)| value.text().map(<[u8]>::to_vec))
     }
 
     fn env(&mut self, name: &[u8]) -> Option<Vec<u8>> {
@@ -864,17 +925,81 @@ impl crate::ini_syntax::Host for Startup<'_> {
                 if self.diverted || (loads && !self.special) {
                     return;
                 }
-                let value = ini_text(&value);
+                let value = Configured::Str(ini_text(&value));
                 match self.table.iter_mut().find(|(n, _)| *n == label) {
                     Some(entry) => entry.1 = value,
                     None => self.table.push((label, value)),
                 }
             }
-            // A bare label sets nothing, and an entry with an offset is an
-            // array, which no directive reads.
-            IniEvent::Entry(_, None) | IniEvent::PopEntry(..) => {}
+            // `ZEND_INI_PARSER_POP_ENTRY`: the array under the label,
+            // made where the label holds none, the value placed at the
+            // offset or appended where the offset is empty.
+            IniEvent::PopEntry(label, value, offset) => {
+                if self.diverted {
+                    return;
+                }
+                let label = ini_text(&label);
+                let (value, offset) = (ini_text(&value), ini_text(&offset));
+                let at = self
+                    .table
+                    .iter()
+                    .position(|(n, _)| *n == label)
+                    .unwrap_or_else(|| {
+                        self.table.push((label, Configured::Array(Vec::new())));
+                        self.table.len() - 1
+                    });
+                let entry = &mut self.table[at].1;
+                if !matches!(entry, Configured::Array(_)) {
+                    *entry = Configured::Array(Vec::new());
+                }
+                if let Configured::Array(rows) = entry {
+                    configured_insert(rows, &offset, value);
+                }
+            }
+            // A bare label sets nothing.
+            IniEvent::Entry(_, None) => {}
         }
     }
+}
+
+/// `zend_symtable_update` for a non-empty offset, else
+/// `zend_hash_next_index_insert`, over one array of the table.
+fn configured_insert(rows: &mut Vec<(ConfiguredKey, Vec<u8>)>, offset: &[u8], value: Vec<u8>) {
+    let key = if offset.is_empty() {
+        let next = rows
+            .iter()
+            .filter_map(|(key, _)| match key {
+                ConfiguredKey::Index(n) => Some(n.saturating_add(1)),
+                ConfiguredKey::Name(_) => None,
+            })
+            .max()
+            .unwrap_or(0)
+            .max(0);
+        ConfiguredKey::Index(next)
+    } else {
+        match canonical_integer(offset) {
+            Some(n) => ConfiguredKey::Index(n),
+            None => ConfiguredKey::Name(offset.to_vec()),
+        }
+    };
+    match rows.iter_mut().find(|(k, _)| *k == key) {
+        Some(row) => row.1 = value,
+        None => rows.push((key, value)),
+    }
+}
+
+/// `ZEND_HANDLE_NUMERIC_STR`: the offset as an integer where it is one
+/// written canonically, no leading zero, no `+`, within `i64`.
+fn canonical_integer(bytes: &[u8]) -> Option<i64> {
+    let digits = bytes.strip_prefix(b"-").unwrap_or(bytes);
+    let canonical = !digits.is_empty()
+        && digits.iter().all(u8::is_ascii_digit)
+        && (digits == b"0" || digits[0] != b'0')
+        && bytes != b"-0";
+    if !canonical {
+        return None;
+    }
+    std::str::from_utf8(bytes).ok()?.parse().ok()
 }
 
 /// A label or a value of the normal scanner, which types nothing, so
@@ -891,60 +1016,12 @@ fn ini_text(value: &IniValue) -> Vec<u8> {
 /// the compiler left it.
 const BEFORE_OPTIMIZER: i64 = 0x1_0000;
 
-/// `zend_ini_parse_quantity` (`Z/Zend/zend_ini.c:613-841`), which
-/// `OnUpdateLong` reads every whole-number ini entry by: leading and
-/// trailing whitespace ignored, an optional sign, then either a base
-/// prefix — `0x`, `0o`, `0b`, or a leading `0` before a digit, which is
-/// octal as `strtoul` with base zero reads it — or decimal digits, and
-/// last an optional `K`, `M` or `G` multiplier with whitespace allowed
-/// before it. Every shape php interprets as zero for backward
-/// compatibility is zero here: no digit after the sign, no digit after
-/// the prefix, an unknown prefix. What php says about those it says as an
-/// `E_WARNING` from `zend_ini_parse_quantity_warn`, which no ini entry in
-/// this engine raises yet; that gap is one entry's and not this
-/// function's.
+/// `zend_ini_parse_quantity`, which `OnUpdateLong` reads every
+/// whole-number ini entry by: `crate::ini_quantity`, the one reading
+/// of it, whose sentence for a shape php interprets for backwards
+/// compatibility no entry of this engine raises yet.
 fn ini_quantity(value: &[u8]) -> i64 {
-    let text = String::from_utf8_lossy(value);
-    let text = text.trim_matches([' ', '\t', '\n', '\r', '\x0b', '\x0c']);
-    let (negative, rest) = match text.as_bytes().first() {
-        Some(b'+') => (false, &text[1..]),
-        Some(b'-') => (true, &text[1..]),
-        _ => (false, text),
-    };
-    if !rest.as_bytes().first().is_some_and(u8::is_ascii_digit) {
-        return 0;
-    }
-    // php reads the multiplier off the last byte of the whole value and
-    // the digits off what `strtoul` stopped at, so `0k` is a multiplier
-    // over no prefix and `0x10` is a prefix over no multiplier.
-    let (digits, factor) = match rest.as_bytes().last().copied() {
-        Some(b'g' | b'G') => (&rest[..rest.len() - 1], 1i64 << 30),
-        Some(b'm' | b'M') => (&rest[..rest.len() - 1], 1i64 << 20),
-        Some(b'k' | b'K') => (&rest[..rest.len() - 1], 1i64 << 10),
-        _ => (rest, 1),
-    };
-    let digits = digits.trim_end_matches([' ', '\t', '\n', '\r', '\x0b', '\x0c']);
-    let (digits, radix) = match digits.as_bytes() {
-        [b'0', b'x' | b'X', rest @ ..] => (rest, 16),
-        [b'0', b'o' | b'O', rest @ ..] => (rest, 8),
-        [b'0', b'b' | b'B', rest @ ..] => (rest, 2),
-        [b'0', rest @ ..] if !rest.is_empty() => (rest, 8),
-        rest => (rest, 10),
-    };
-    let taken: String = String::from_utf8_lossy(digits)
-        .chars()
-        .take_while(|c| c.is_digit(radix))
-        .collect();
-    // `strtoul` stopping where it started is php's "no valid leading
-    // digits", which is zero; stopping at the end of what it can hold is
-    // the overflow it keeps the result of.
-    if taken.is_empty() {
-        return 0;
-    }
-    let magnitude = i64::from_str_radix(&taken, radix)
-        .unwrap_or(i64::MAX)
-        .saturating_mul(factor);
-    if negative { -magnitude } else { magnitude }
+    crate::ini_quantity::parse(value).0
 }
 
 /// `zend_disable_functions` (`Z/Zend/zend_API.c:3668-3710`): the names
@@ -1070,7 +1147,7 @@ impl EngineBuilder {
         }
         let zend_constants = Shared::zend_constants();
         let configuration = Configuration::read(&self.ini_entries, &zend_constants);
-        for (name, value) in configuration.table {
+        for (name, value) in configuration.directives() {
             ini.retain(|(n, _)| *n != name);
             ini.push((name, value));
         }
@@ -1134,6 +1211,7 @@ impl EngineBuilder {
                 constant_values,
                 sapi_names,
                 startup_errors: configuration.stderr,
+                configuration: configuration.table,
                 entry: self.entry,
                 reenter: self.reenter,
                 resume: self.resume,

@@ -941,7 +941,7 @@ fn send_headers(req: &mut Request) -> bool {
         if let Err(thrown) = call::call(req, &callback, &[]) {
             req.leave_pending(&thrown);
         }
-        req.release(callback.into_value());
+        callback.release(req);
     }
     req.output_mut().headers_sent = true;
     send_headers_free(req);
