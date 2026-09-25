@@ -2458,6 +2458,51 @@ impl Request {
         ))
     }
 
+    /// The end of `zend_std_get_static_method`
+    /// (`Z/Zend/zend_object_handlers.c:2066`), once the method is found
+    /// and the scope may reach it: an abstract method is
+    /// `zend_abstract_method_call`'s `Error`, and one whose scope is a
+    /// trait, which is a method named on the trait itself and never one
+    /// a class took from it, is php's deprecation, after which a
+    /// handler that threw stops the call. The answer is whether the
+    /// method is a trait's, which is the callee php never caches.
+    pub(crate) fn static_method_found(&mut self, function: Function) -> Result<bool, Thrown> {
+        let Some(decl) = self.method_decl(function) else {
+            return Ok(false);
+        };
+        let (is_abstract, name) = (decl.is_abstract, decl.function.name.clone());
+        let Some(class) = self.method_class(function) else {
+            return Ok(false);
+        };
+        let is_trait = self
+            .class_decl(class)
+            .is_some_and(|decl| decl.kind == ClassKind::Trait);
+        let shown = format!(
+            "{}::{}",
+            self.class_name(class),
+            String::from_utf8_lossy(&name.0)
+        );
+        if is_abstract {
+            return Err(crate::api::raising::throw(
+                self,
+                "Error",
+                &format!("Cannot call abstract method {shown}()"),
+            ));
+        }
+        if is_trait {
+            crate::api::raising::deprecated(
+                self,
+                &format!(
+                    "Calling static trait method {shown} is deprecated, it should only be called on a class using the trait"
+                ),
+            );
+            if self.is_pending() {
+                return Err(Thrown::of(None));
+            }
+        }
+        Ok(is_trait)
+    }
+
     /// `zend_check_method_accessible` (`Z/Zend/zend_execute.h:399`): a
     /// public method is anyone's, a private one is its own class's
     /// scope alone, and a protected one is a scope
@@ -4415,6 +4460,7 @@ impl Request {
         };
         let visibility = constant.visibility;
         let value = constant.value;
+        let asked = class;
         let class = declaring;
         if !self.may_access(class, visibility) {
             let word = match visibility {
@@ -4426,6 +4472,18 @@ impl Request {
                 self,
                 "Error",
                 &format!("Cannot access {word} constant {class_name}::{shown}"),
+            ));
+        }
+        // A constant a trait declares is the composing class's to hand
+        // out, never the trait's own.
+        if self
+            .class_decl(asked)
+            .is_some_and(|decl| decl.kind == ClassKind::Trait)
+        {
+            return Err(crate::api::raising::throw(
+                self,
+                "Error",
+                &format!("Cannot access trait constant {class_name}::{shown} directly"),
             ));
         }
         // `ZEND_FETCH_CLASS_CONSTANT` updates a backed enum's constants
@@ -4629,6 +4687,29 @@ impl Request {
     ///
     /// `ZEND_ASSIGN_STATIC_PROP` addresses the slot here before it
     /// reads the value operand, which is why the handlers reach this.
+    ///
+    /// A property addressed on a trait itself, and not on a class that
+    /// took it, is php's deprecation once the slot is found; each class
+    /// that uses the trait has a slot of its own:
+    ///
+    /// ```php
+    /// trait T { public static $s = 1; }
+    /// class C { use T; }
+    /// C::$s = 2;
+    /// echo T::$s, C::$s, "\n";
+    /// T::$s = 3;
+    /// echo T::$s, C::$s, "\n";
+    /// ```
+    /// ```expect
+    ///
+    /// Deprecated: Accessing static trait property T::$s is deprecated, it should only be accessed on a class using the trait in %s on line 5
+    /// 12
+    ///
+    /// Deprecated: Accessing static trait property T::$s is deprecated, it should only be accessed on a class using the trait in %s on line 6
+    ///
+    /// Deprecated: Accessing static trait property T::$s is deprecated, it should only be accessed on a class using the trait in %s on line 7
+    /// 32
+    /// ```
     pub(crate) fn static_slot(
         &mut self,
         class: ClassId,
@@ -4678,6 +4759,22 @@ impl Request {
                 None => Value::null(),
             };
             self.statics.push(((declaring, name.to_vec()), value));
+        }
+        if self
+            .class_decl(class)
+            .is_some_and(|decl| decl.kind == ClassKind::Trait)
+        {
+            let shown = format!(
+                "{}::${}",
+                self.class_name(declaring),
+                String::from_utf8_lossy(name)
+            );
+            crate::api::raising::deprecated(
+                self,
+                &format!(
+                    "Accessing static trait property {shown} is deprecated, it should only be accessed on a class using the trait"
+                ),
+            );
         }
         Ok(Some((declaring, property)))
     }
@@ -4794,7 +4891,7 @@ impl Request {
         class: ClassId,
         name: &[u8],
         scope: Option<ClassId>,
-        mut value: Value,
+        value: Value,
         strict: bool,
     ) -> Result<(), Thrown> {
         let (declaring, property) =
@@ -4811,6 +4908,21 @@ impl Request {
                     return Err(thrown);
                 }
             };
+        self.set_static_slot(declaring, &property, name, value, strict)
+    }
+
+    /// [`Request::set_static_property`] over a slot already addressed,
+    /// as `ZEND_ASSIGN_STATIC_PROP` addresses it before it reads its
+    /// value and writes it after: `declaring` is the class the slot is
+    /// in and `property` its declaration.
+    pub(crate) fn set_static_slot(
+        &mut self,
+        declaring: ClassId,
+        property: &PropertyDecl,
+        name: &[u8],
+        mut value: Value,
+        strict: bool,
+    ) -> Result<(), Thrown> {
         // `zend_verify_property_type`: the value held to the declared
         // type and coerced by the weak rule where the writer's regime is
         // not strict, and php's `TypeError` where it neither satisfies

@@ -1109,6 +1109,7 @@ fn dynamic_call_static(
     };
     req.release(written);
     req.check_method_access(function, method)?;
+    req.static_method_found(function)?;
     if req
         .method_decl(function)
         .is_some_and(|decl| decl.is_instance)
@@ -2944,6 +2945,34 @@ pub(crate) fn new<T: Tier>(
 /// m1
 /// m2
 /// ```
+///
+/// A method named on a trait itself, and never one a class took from
+/// it, is php's deprecation on every pass, since php caches no such
+/// callee, and an abstract one is `zend_abstract_method_call`'s `Error`
+/// ([`Request::static_method_found`]):
+///
+/// ```php
+/// trait T { static function f() { return 1; } abstract static function g(); }
+/// class C { use T; static function g() { return 2; } }
+/// echo C::f(), C::g(), "\n";
+/// $i = 0;
+/// while ($i < 2) { echo T::f(), "\n"; $i = $i + 1; }
+/// $name = 'T::f'; echo $name(), "\n";
+/// try { T::g(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// 12
+///
+/// Deprecated: Calling static trait method T::f is deprecated, it should only be called on a class using the trait in %s on line 6
+/// 1
+///
+/// Deprecated: Calling static trait method T::f is deprecated, it should only be called on a class using the trait in %s on line 6
+/// 1
+///
+/// Deprecated: Calling static trait method T::f is deprecated, it should only be called on a class using the trait in %s on line 7
+/// 1
+/// Cannot call abstract method T::g()
+/// ```
 pub(crate) fn init_static_method_call<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -2990,6 +3019,7 @@ pub(crate) fn init_static_method_call<T: Tier>(
         let written = exec::constant(code, ConstIdx(op.op2));
         return static_call_frame(req, frame, op, class, function, Some(written));
     }
+    let mut uncached = false;
     let (function, name) = match op.op2_type {
         OperandKind::Unused => {
             let Some(constructor) = req.method_named(class, b"__construct") else {
@@ -3031,6 +3061,10 @@ pub(crate) fn init_static_method_call<T: Tier>(
             {
                 return threw(req, frame, &thrown);
             }
+            match req.static_method_found(function) {
+                Ok(of_trait) => uncached = of_trait,
+                Err(thrown) => return threw(req, frame, &thrown),
+            }
             (function, Some(written))
         }
         _ => {
@@ -3045,9 +3079,8 @@ pub(crate) fn init_static_method_call<T: Tier>(
     // which php applies on the cached pass too. php holds the write off
     // a callee reached through a trampoline, one marked
     // `ZEND_ACC_NEVER_CACHE` and one a trait declared; this engine has
-    // none of the three, so the write stands whenever the name was a
-    // constant.
-    if op.op1_type == OperandKind::Const && op.op2_type == OperandKind::Const {
+    // only the last, whose deprecation is raised on every pass.
+    if op.op1_type == OperandKind::Const && op.op2_type == OperandKind::Const && !uncached {
         req.prime(frame, slot, Cached::ClassAndCallee { class, function });
     }
     static_call_frame(req, frame, op, class, function, name)
@@ -3582,6 +3615,23 @@ pub(crate) fn end_silence<T: Tier>(
 /// Stack trace:
 /// #0 {main}
 ///   thrown in %s on line 4
+/// ```
+///
+/// A constant a trait declares is the composing class's to hand out,
+/// and read on the trait itself it is php's `Error`, through the opline
+/// and through `constant()` alike:
+///
+/// ```php
+/// trait T { const X = 1; }
+/// class C { use T; }
+/// echo C::X, "\n";
+/// try { echo T::X; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { echo constant('T::X'); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// 1
+/// Cannot access trait constant T::X directly
+/// Cannot access trait constant T::X directly
 /// ```
 ///
 /// ```php
@@ -7321,22 +7371,19 @@ pub(crate) fn assign_static_prop<T: Tier>(
     let name = name.as_str_bytes().unwrap_or_default().to_vec();
     let scope = req.executed_scope();
     let addressed = match class_operand(req, frame, code, op.op2_type, op.op2, None) {
-        Ok(class) => req
-            .static_slot(class, &name, scope, PropertyRead::Warning)
-            .map(|placed| (class, placed)),
+        Ok(class) => req.static_slot(class, &name, scope, PropertyRead::Warning),
         Err(thrown) => Err(thrown),
     };
     let placed = match addressed {
-        Ok((class, Some((_, property)))) => Some((class, property)),
         // A write is never `BP_VAR_IS`, so the silent miss cannot stand
         // here.
-        Ok((_, None)) => None,
+        Ok(placed) => placed,
         Err(thrown) => {
             exec::free_operand(req, frame, code, data_type, data_at);
             return threw(req, frame, &thrown);
         }
     };
-    let Some((class, _)) = placed else {
+    let Some((declaring, property)) = placed else {
         exec::free_operand(req, frame, code, data_type, data_at);
         req.vm_mut().jump(frame, at.saturating_add(2));
         return Ok(Stepped::Same(frame));
@@ -7352,7 +7399,7 @@ pub(crate) fn assign_static_prop<T: Tier>(
     // `RETURN_VALUE_USED` copies, which php writes before the verify
     // too.
     let strict = req.frame_strict_types(frame);
-    if let Err(thrown) = req.set_static_property(class, &name, scope, value, strict) {
+    if let Err(thrown) = req.set_static_slot(declaring, &property, &name, value, strict) {
         return threw(req, frame, &thrown);
     }
     req.vm_mut().jump(frame, at.saturating_add(2));
