@@ -207,8 +207,25 @@ struct Glob {
 /// nonzero answer php returns (`PHP_GLOB_NOMATCH`, `PHP_GLOB_ABORTED`, or 1
 /// when a path overflows `PATH_MAX`). `pattern`
 /// ends at its first NUL, as a C string does. A relative pattern is walked
-/// from the process's working directory.
-pub(super) fn php_glob(pattern: &[u8], flags: i32) -> Result<Vec<Vec<u8>>, i32> {
+/// from the process's working directory. `PHPAPI` in `main/php_glob.h`:
+/// what `glob()` expands, and what `GlobIterator` calls directly, as php's
+/// `glob://` wrapper (`Z/main/streams/glob_wrapper.c`) does.
+///
+/// ```php
+/// $d = __DIR__ . '/glob-spl'; @mkdir($d); foreach (['b.txt', 'a.txt', 'c.php'] as $f) touch("$d/$f");
+/// chdir($d);
+/// $g = new GlobIterator('*.txt', FilesystemIterator::KEY_AS_FILENAME);
+/// foreach ($g as $k => $v) { echo $k, ' ', $v->getPathname(), "\n"; }
+/// var_dump($g->count(), (new GlobIterator("glob://$d/*.php"))->count() === 1, (new GlobIterator('nope*'))->count());
+/// ```
+/// ```expect
+/// a.txt a.txt
+/// b.txt b.txt
+/// int(2)
+/// bool(true)
+/// int(0)
+/// ```
+pub fn php_glob(pattern: &[u8], flags: i32) -> Result<Vec<Vec<u8>>, i32> {
     let pattern = pattern.split(|&b| b == 0).next().unwrap_or_default();
     let mut g = Glob {
         flags,
