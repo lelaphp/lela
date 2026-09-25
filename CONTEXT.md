@@ -26,6 +26,9 @@ _Avoid_: class table alone (functions and constants are linked too), registry
 An unevaluated expression tree carried by a declaration: a default value, an attribute argument, a class constant or an enum case. Evaluated by the engine on first use, kept in its written form for Reflection.
 _Avoid_: default value (that is the result, not the expression), literal
 
+**Property hook**:
+A property's `get` or `set` body, php's word since 8.4 (`zend_property_hook_kind`, `prop_info->hooks`, `ReflectionProperty::getHook`): declared with the property, inherited and overridden per kind, and run in place of the plain read or write. A property with a hook and no backing store is virtual.
+
 **Token stream**:
 The lossless sequence of tokens for one source file, including whitespace, comments and heredoc indentation, each token knowing its kind, offset and length. What the tokenizer extension, syntax highlighting and the halt-compiler offset read.
 _Avoid_: lexeme list, trivia (that names only the insignificant tokens)
@@ -111,8 +114,8 @@ What runs a program's op arrays: the interpreter alone, or the interpreter with 
 _Avoid_: JIT (the crate, not the seam), executor (there is one), mode
 
 **Safepoint**:
-One of three places the loop asks the tier what to do: a loop back-edge, the activation of a frame after its parameter prologue has run without raising, and a return. Nothing else in the loop consults the tier. The compiler numbers the safepoints of each op array; the entry is number zero, and a back-edge or return carries its number in a field php leaves unused.
-_Avoid_: hook, probe, counter handler (php's mechanism)
+One of three places the loop asks the tier what to do: a loop back-edge, the activation of a frame after its parameter prologue has run without raising, and a return. Nothing else in the loop consults the tier. The compiler numbers the safepoints of each op array; the entry is number zero, and a back-edge or return carries its number in a field php leaves unused. Not a hook: that word is php's, for a property's `get` and `set` (**Property hook**).
+_Avoid_: probe, counter handler (php's mechanism)
 
 **Word**:
 The opaque two-atomic slot the engine allocates per safepoint of a function, and the compiled tier allocates per exit, whose bits only the tier interprets: heat in one half while cold; recording, compiled with a trace index, or blacklisted in the other. The trace index is one number in one space whichever word holds it. A sealed word, all ones, is one the tier never acts on; a request-scoped op array (`eval`, an uncached include) has only sealed words.
