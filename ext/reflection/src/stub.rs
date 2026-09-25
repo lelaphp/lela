@@ -6246,7 +6246,7 @@ fn reflection_extension() -> Declared {
             ),
             (
                 tentative(method(b"getINIEntries", &[], Some(Type::Array))),
-                unbuilt as Entry,
+                super::reflection_extension_get_ini_entries as Entry,
             ),
             (
                 tentative(method(b"getClasses", &[], Some(Type::Array))),

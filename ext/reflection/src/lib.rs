@@ -1049,6 +1049,111 @@ fn reflection_extension_get_constants(req: &mut Request) -> Result<Value, Thrown
     Ok(Value::array(constants))
 }
 
+/// `ReflectionExtension::getINIEntries()`: `_addinientry` over the
+/// extension's entries, each name keyed to the value in force.
+///
+/// ```php
+/// ini_set('date.default_latitude', '1');
+/// var_dump((new ReflectionExtension('date'))->getINIEntries());
+/// ```
+/// ```expect
+/// array(5) {
+///   ["date.timezone"]=>
+///   string(3) "UTC"
+///   ["date.default_latitude"]=>
+///   string(1) "1"
+///   ["date.default_longitude"]=>
+///   string(7) "35.2333"
+///   ["date.sunset_zenith"]=>
+///   string(9) "90.833333"
+///   ["date.sunrise_zenith"]=>
+///   string(9) "90.833333"
+/// }
+/// ```
+fn reflection_extension_get_ini_entries(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    let extension = this_extension(req)?;
+    let mut entries = PhpArray::new(req)?;
+    for entry in req.extension_ini(extension) {
+        let key = Key::Str(PhpString::new(req, &entry.decl.name.0)?);
+        let value = Value::string(PhpString::new(req, &entry.value)?);
+        entries.set(req, key, value)?;
+    }
+    Ok(Value::array(entries))
+}
+
+/// `_extension_ini_string` over each of the extension's entries: the
+/// name, `<ALL>` or the `USER,PERDIR,SYSTEM` bits it may be changed
+/// at, the value in force and, where the request changed it, the value
+/// it had before.
+///
+/// ```php
+/// ini_set('date.default_latitude', '1');
+/// $s = (string) new ReflectionExtension('date');
+/// echo substr($s, 0, strpos($s, '  - Constants'));
+/// ```
+/// ```expect
+/// Extension [ <persistent> extension #1 date version %s ] {
+///
+///   - INI {
+///     Entry [ date.timezone <ALL> ]
+///       Current = 'UTC'
+///     }
+///     Entry [ date.default_latitude <ALL> ]
+///       Current = '1'
+///       Default = '31.7667'
+///     }
+///     Entry [ date.default_longitude <ALL> ]
+///       Current = '35.2333'
+///     }
+///     Entry [ date.sunset_zenith <ALL> ]
+///       Current = '90.833333'
+///     }
+///     Entry [ date.sunrise_zenith <ALL> ]
+///       Current = '90.833333'
+///     }
+///   }
+/// ```
+fn extension_ini_string(req: &Request, extension: ExtensionId, indent: &str) -> String {
+    let mut out = String::new();
+    for entry in req.extension_ini(extension) {
+        let decl = &entry.decl;
+        let modifiable = if decl.user && decl.per_dir && decl.system {
+            String::from("ALL")
+        } else {
+            [
+                (decl.user, "USER"),
+                (decl.per_dir, "PERDIR"),
+                (decl.system, "SYSTEM"),
+            ]
+            .iter()
+            .filter(|(set, _)| *set)
+            .map(|(_, word)| *word)
+            .collect::<Vec<_>>()
+            .join(",")
+        };
+        let _ = writeln!(
+            out,
+            "    {indent}Entry [ {} <{modifiable}> ]",
+            String::from_utf8_lossy(&decl.name.0)
+        );
+        let _ = writeln!(
+            out,
+            "    {indent}  Current = '{}'",
+            String::from_utf8_lossy(&entry.value)
+        );
+        if let Some(original) = &entry.original {
+            let _ = writeln!(
+                out,
+                "    {indent}  Default = '{}'",
+                String::from_utf8_lossy(original)
+            );
+        }
+        let _ = writeln!(out, "    {indent}}}");
+    }
+    out
+}
+
 /// `ReflectionExtension::getDependencies()`: `module->deps` walked into
 /// an array keyed by the other extension's name, each value the kind,
 /// `Required`, `Conflicts` or `Optional`, then the row's `rel` and
@@ -3564,6 +3669,12 @@ fn extension_string(req: &mut Request, extension: ExtensionId, indent: &str) -> 
         "{indent}Extension [ <persistent> extension #{} {name} version {PHP_VERSION} ] {{",
         req.extension_number(extension)
     );
+    let ini = extension_ini_string(req, extension, indent);
+    if !ini.is_empty() {
+        out.push_str("\n  - INI {\n");
+        out.push_str(&ini);
+        let _ = writeln!(out, "{indent}  }}");
+    }
     let constants = req.extension_constants(extension);
     if !constants.is_empty() {
         let _ = write!(out, "\n  - Constants [{}] {{\n", constants.len());

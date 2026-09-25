@@ -19,8 +19,8 @@ use php_heap::{
     SortEntry, VmStack, Zval, ZvalRef,
 };
 use php_unit::decl::{
-    Attribute, ClassConstDecl, ClassDecl, ClassKind, FunctionDecl, MethodDecl, Name, PropertyDecl,
-    Visibility,
+    Attribute, ClassConstDecl, ClassDecl, ClassKind, FunctionDecl, IniDecl, MethodDecl, Name,
+    PropertyDecl, Visibility,
 };
 use php_unit::{CacheSlot, FramelessEntry, Opcode, Unit};
 
@@ -64,6 +64,19 @@ pub struct HostPath(pub PathBuf);
 /// `Extension` value of the bundle and has no identity here yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ExtensionId(pub(crate) u32);
+
+/// One of an extension's ini entries as this request sees it, php's
+/// `zend_ini_entry` read by `_extension_ini_string` and
+/// `ReflectionExtension::getINIEntries`: the declaration with its
+/// `modifiable` bits, the value in force, and the value the entry had
+/// before the request changed it, php's `orig_value`, which is `Some`
+/// exactly where php's `modified` is set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IniEntry {
+    pub decl: IniDecl,
+    pub value: Box<[u8]>,
+    pub original: Option<Box<[u8]>>,
+}
 
 /// What a native intends to do at a path, for the `open_basedir` guard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -10578,6 +10591,32 @@ impl Request {
         self.extension_of(extension)
             .map(|e| e.dependencies.clone())
             .unwrap_or_default()
+    }
+
+    /// The ini entries an extension declared, in the order it declared
+    /// them, which is where `zend_register_ini_entries` put them in
+    /// `EG(ini_directives)`: each with the value in force, the request's
+    /// `ini_set` over the engine's startup value, and the startup value
+    /// again as `original` where the request changed it.
+    #[must_use]
+    pub fn extension_ini(&self, extension: ExtensionId) -> Vec<IniEntry> {
+        let Some(module) = self.extension_of(extension) else {
+            return Vec::new();
+        };
+        module
+            .ini
+            .iter()
+            .map(|decl| {
+                let name = decl.name.0.as_ref();
+                let startup = self.shared.ini_default(name).unwrap_or(&decl.default);
+                let changed = self.ini.iter().find(|(n, _)| n.as_slice() == name);
+                IniEntry {
+                    decl: decl.clone(),
+                    value: changed.map_or(startup, |(_, v)| v.as_slice()).into(),
+                    original: changed.map(|_| startup.into()),
+                }
+            })
+            .collect()
     }
 
     /// `php_info_print_module` as the CLI prints it, `phpinfo_as_text`

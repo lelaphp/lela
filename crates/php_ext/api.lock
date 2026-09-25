@@ -194,6 +194,7 @@ request::FilterFactory
 request::FilterFlags
 request::FilterStatus
 request::HostPath
+request::IniEntry
 request::Interrupt
 request::Interrupt::raise
 request::Interrupt::raised
@@ -236,6 +237,7 @@ request::Request::extension_constants
 request::Request::extension_dependencies
 request::Request::extension_functions
 request::Request::extension_info
+request::Request::extension_ini
 request::Request::extension_name
 request::Request::extension_named
 request::Request::extension_number
