@@ -78,6 +78,27 @@ pub struct IniEntry {
     pub original: Option<Box<[u8]>>,
 }
 
+/// Who a row the request added to `EG(zend_constants)` belongs to,
+/// php's `ZEND_CONSTANT_MODULE_NUMBER` beside `zend_constant.filename`:
+/// an extension that registers it at request start, or the program,
+/// `PHP_USER_CONSTANT`, with the file `zend_register_constant` read off
+/// `zend_get_executed_filename_ex` where one was executing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ConstantOwner {
+    Module(&'static str),
+    User(Option<Box<[u8]>>),
+}
+
+impl ConstantOwner {
+    /// The extension's name, none for the program's.
+    fn module(&self) -> Option<&'static str> {
+        match self {
+            ConstantOwner::Module(name) => Some(name),
+            ConstantOwner::User(_) => None,
+        }
+    }
+}
+
 /// What a native intends to do at a path, for the `open_basedir` guard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PathIntent {
@@ -730,8 +751,9 @@ pub struct Request {
     /// it added them, each under the extension it is registered by:
     /// `Core` for what the host registers at request start
     /// ([`crate::engine::FileHandles`]), `None` for what `define()` and
-    /// `const` wrote, php's `PHP_USER_CONSTANT`.
-    constants: Vec<(Option<&'static str>, Vec<u8>, Value)>,
+    /// `const` wrote, php's `PHP_USER_CONSTANT`, with the file it was
+    /// defined in.
+    constants: Vec<(ConstantOwner, Vec<u8>, Value)>,
     /// `zend_enum_get_case`'s slot (`Z/Zend/zend_enum.c:410`): one
     /// instance per case of each enum, made on the first read of the
     /// case and handed back by identity from then on, so that
@@ -10252,7 +10274,7 @@ impl Request {
         rows.extend(
             self.constants
                 .iter()
-                .map(|(module, name, value)| (*module, name.clone(), *value)),
+                .map(|(owner, name, value)| (owner.module(), name.clone(), *value)),
         );
         rows
     }
@@ -10278,7 +10300,7 @@ impl Request {
         let constants: Vec<(Vec<u8>, Value)> = self
             .constants
             .iter()
-            .filter(|(module, _, _)| module.is_none())
+            .filter(|(owner, _, _)| matches!(owner, ConstantOwner::User(_)))
             .map(|(_, name, value)| (name.clone(), *value))
             .collect();
         for (name, value) in constants {
@@ -10289,13 +10311,46 @@ impl Request {
         Ok(array)
     }
 
-    /// `define()`: `false` when the constant exists.
+    /// `define()`: `false` when the constant exists. The row keeps the
+    /// file executing when it was written, `zend_register_constant`'s
+    /// `filename`.
     pub fn define_constant(&mut self, name: &[u8], value: Value) -> Result<bool, Thrown> {
         if self.constant_named(name).is_some() {
             return Ok(false);
         }
-        self.constants.push((None, name.to_vec(), value));
+        // `zend_get_executed_filename_ex`: the innermost frame's file,
+        // none where nothing is executing.
+        let file = self
+            .innermost_frame()
+            .and_then(|state| exec::body_of(&state.unit, state.body))
+            .map(|code| code.filename.0.clone());
+        let owner = ConstantOwner::User(file);
+        self.constants.push((owner, name.to_vec(), value));
         Ok(true)
+    }
+
+    /// `zend_constant.filename`: the file a constant the program
+    /// defined was defined in, and none for one an extension or the
+    /// engine registered, php's `NULL` for a persistent constant.
+    ///
+    /// ```php
+    /// define('D', 1); const C = 2;
+    /// var_dump((new ReflectionConstant('D'))->getFileName() === __FILE__, (new ReflectionConstant('C'))->getFileName() === __FILE__, (new ReflectionConstant('PHP_VERSION'))->getFileName());
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// ```
+    #[must_use]
+    pub fn constant_file(&self, name: &[u8]) -> Option<&[u8]> {
+        self.constants
+            .iter()
+            .find(|(_, n, _)| n.as_slice() == name)
+            .and_then(|(owner, _, _)| match owner {
+                ConstantOwner::User(file) => file.as_deref(),
+                ConstantOwner::Module(_) => None,
+            })
     }
 
     /// `zend_register_constant` at request start for a constant the
@@ -10305,7 +10360,8 @@ impl Request {
     /// `Core`'s group and before what the program defines. The value's
     /// one owner is the table's.
     pub(crate) fn register_host_constant(&mut self, name: &'static [u8], value: Value) {
-        self.constants.push((Some("Core"), name.to_vec(), value));
+        self.constants
+            .push((ConstantOwner::Module("Core"), name.to_vec(), value));
     }
 
     /// The fd the host handed under one of its standard streams

@@ -9,9 +9,7 @@
 //!
 //! What stands beside `stub::unbuilt` still: `isAbstract`, `isVirtual`
 //! and `isFinal`, which are hooks proper (#427), and the four lazy entries;
-//! `setAccessible`, which the stub marks `#[\\Deprecated]` (#412); and
-//! `ReflectionConstant::getFileName`, which wants the file a `define`
-//! ran in.
+//! and `setAccessible`, which the stub marks `#[\\Deprecated]` (#412).
 
 use php_ext::call::{constant, eval_const_expr};
 use php_ext::decl::{ClassConstDecl, ClassKind, Name, PropertyDecl, Type, Visibility};
@@ -942,6 +940,28 @@ pub(super) fn reflection_constant_get_name(req: &mut Request) -> Result<Value, T
     exactly_arguments(req, 0)?;
     let name = this_global_constant(req)?;
     string_value(req, &name)
+}
+
+/// `ReflectionConstant::getFileName()`: `const_->filename`, the file
+/// executing when `define` or `const` wrote the constant, and `false`
+/// for one an extension or the engine registered.
+///
+/// ```php
+/// define('D', 1);
+/// var_dump(basename((new ReflectionConstant('D'))->getFileName()), (new ReflectionConstant('PHP_VERSION'))->getFileName(), (new ReflectionConstant('STDIN'))->getFileName());
+/// ```
+/// ```expect
+/// string(11) "witness.php"
+/// bool(false)
+/// bool(false)
+/// ```
+pub(super) fn reflection_constant_get_file_name(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    let name = this_global_constant(req)?;
+    match req.constant_file(&name).map(<[u8]>::to_vec) {
+        Some(file) => string_value(req, &file),
+        None => Ok(Value::bool(false)),
+    }
 }
 
 /// `ReflectionConstant::getShortName()`: the name after the last `\`.

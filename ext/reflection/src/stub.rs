@@ -6608,7 +6608,7 @@ fn reflection_constant() -> Declared {
                     &[],
                     Some(union(&[Type::String, Type::False])),
                 ),
-                unbuilt as Entry,
+                super::member::reflection_constant_get_file_name as Entry,
             ),
             (
                 method(
