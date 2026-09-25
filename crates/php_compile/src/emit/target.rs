@@ -38,8 +38,9 @@ pub(super) enum Target {
     StaticProp { class: ClassSpec, name: Vec<u8> },
     /// `list(…)` or `[…]`, `ZEND_AST_ARRAY` as a target.
     List(List),
-    /// `$$x` or `${expr}`, a `ZEND_AST_VAR` whose name is no `ZEND_AST_ZVAL`:
-    /// the variable, fetched by the name the program computes.
+    /// `$$x` or `${expr}`, a `ZEND_AST_VAR` whose name is no `ZEND_AST_ZVAL`,
+    /// or an auto-global, which no CV holds: the variable, fetched by its
+    /// name.
     ByName(tree::Expr),
 }
 
@@ -82,11 +83,16 @@ impl Emit<'_> {
             return Err(self.compile_error("Cannot re-assign $this"));
         }
         self.ensure_writable(expr)?;
-        let tree = &self.parsed.tree;
+        let parsed = self.parsed;
+        let tree = &parsed.tree;
         Ok(match expr {
+            // `$$x`, `${expr}` and an auto-global, a `ZEND_AST_VAR` no CV
+            // holds: the variable fetched by its name.
+            _ if self.is_by_name(expr) => Target::ByName(expr),
             tree::Expr::SimpleVarExpr(id) => match self.simple_var_of(id, line)? {
                 SimpleVar::Cv(name) => Target::Cv(name),
                 SimpleVar::This => return Err(self.compile_error("Cannot re-assign $this")),
+                SimpleVar::Auto(_) => Target::ByName(expr),
             },
             tree::Expr::SubscriptExpr(_) => Target::Dim(expr),
             tree::Expr::MemberAccessExpr(id) => {
@@ -102,7 +108,6 @@ impl Emit<'_> {
                     return Err(walk::unread(line, "an assignment to what is no variable"));
                 }
             },
-            tree::Expr::VarVarExpr(_) | tree::Expr::DynamicVarExpr(_) => Target::ByName(expr),
             tree::Expr::ListExpr(id) => Target::List(List {
                 elements: tree[id].array_elements.clone(),
                 style: ListStyle::List,

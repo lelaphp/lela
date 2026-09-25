@@ -3534,7 +3534,178 @@ pub(crate) fn fetch_rw<T: Tier>(
     fetch_by_name(req, frame, code, op, ByName::Rw)
 }
 
-/// php's `type` argument to `zend_fetch_var_address_helper`, the four
+/// `ZEND_FETCH_UNSET` (`Z/Zend/zend_vm_def.h:1848`), the base of
+/// `unset($_SERVER['k'])` and `unset($$x['k'])`: [`fetch_by_name`] under
+/// `BP_VAR_UNSET`, a name the table holds handed out as the place the
+/// `UNSET_DIM` after it deletes from, and a name it has not, or whose
+/// CV holds nothing, `null` in silence, nothing laid down.
+///
+/// ```php
+/// $_SERVER['k'] = 1;
+/// $_SERVER['l'] = 2;
+/// unset($_SERVER['k']);
+/// $n = 'a';
+/// $a = ['x' => 1, 'y' => 2];
+/// $m = 'none';
+/// unset($$n['x'], $$n['nope'], $$m['z']);
+/// var_dump(isset($_SERVER['k']), $_SERVER['l'], $a, isset($none));
+/// ```
+/// ```expect
+/// bool(false)
+/// int(2)
+/// array(1) {
+///   ["y"]=>
+///   int(2)
+/// }
+/// bool(false)
+/// ```
+pub(crate) fn fetch_unset<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    fetch_by_name(req, frame, code, op, ByName::Unset)
+}
+
+/// `ZEND_ISSET_ISEMPTY_VAR` (`Z/Zend/zend_vm_def.h:7481`), `isset($$x)`,
+/// `isset($_SERVER)` and `empty(${'a'})`: the name read as
+/// `zval_get_tmp_string` reads it ([`isset_name`]), the table
+/// `zend_get_target_symbol_table` names, and the bucket asked, never
+/// fetched: under `isset` that it stands and holds no `null`, a
+/// reference followed, and under `ZEND_ISEMPTY` that it is absent or
+/// `i_zend_is_true` says no. A CV attached to the name that holds
+/// nothing answers as an absent name.
+///
+/// ```php
+/// $a = 1; $z = 0; $nn = null;
+/// $names = ['a', 'z', 'nn', 'u'];
+/// foreach ($names as $name) { var_dump(isset($$name), empty($$name)); }
+/// var_dump(isset($_SERVER), empty($_FILES), isset($_GET), empty($_POST));
+/// function f() { $x = 1; $k = 'x'; $u = 'y'; var_dump(isset($$k), isset($$u), empty($$u)); }
+/// f();
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// ```
+pub(crate) fn isset_isempty_var<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let name = match isset_name(req, frame, code, op) {
+        Ok(name) => name,
+        Err(thrown) => {
+            exec::free_operand(req, frame, code, op.op1_type, op.op1);
+            return threw(req, frame, &thrown);
+        }
+    };
+    let table = if op.extended_value & FETCH_GLOBAL != 0 {
+        req.global_table()
+    } else {
+        req.rebuild_symbol_table(frame)
+    };
+    let held = req.symbol_value(table, &name);
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    let answer = match held {
+        None => op.extended_value & ISEMPTY != 0,
+        Some(value) if op.extended_value & ISEMPTY == 0 => crate::ops::is_set(&value),
+        Some(value) => !crate::ops::is_true(req, &value),
+    };
+    write_out(req, frame, code, op, &Value::bool(answer));
+    Ok(advance(req, frame))
+}
+
+/// The name an `ISSET_ISEMPTY_VAR` asks after,
+/// `GET_OP1_ZVAL_PTR(BP_VAR_IS)` and `zval_get_tmp_string`: the constant
+/// as it stands, a CV nothing wrote the empty string with no warning,
+/// and anything else converted as `zval_get_string` converts it, an
+/// object with no `__toString` php's `Error`.
+fn isset_name(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Result<Vec<u8>, Thrown> {
+    let held = exec::operand_undef(req, frame, code, op.op1_type, op.op1).deref();
+    if held.tag() == TypeTag::Undef {
+        return Ok(Vec::new());
+    }
+    if let Some(bytes) = held.as_str_bytes() {
+        return Ok(bytes.to_vec());
+    }
+    let text = crate::ops::to_string(req, &held)?;
+    let bytes = text.as_bytes().to_vec();
+    req.release(Value::string(text));
+    Ok(bytes)
+}
+
+/// `ZEND_UNSET_VAR` (`Z/Zend/zend_vm_def.h:6645`), `unset($$x)` and
+/// `unset($_SERVER)`: the name read as [`fetch_by_name`] reads it, and
+/// `zend_hash_del_ind` in the table `zend_get_target_symbol_table` names
+/// ([`Request::symbol_unset`]): a bucket that holds its value is
+/// deleted, and one attached to a CV leaves the CV holding nothing, the
+/// name staying where it was.
+///
+/// ```php
+/// $a = 1; $b = 2; $n = 'a';
+/// unset($$n);
+/// var_dump(isset($a), $b);
+/// function f() { $x = 1; $k = 'x'; unset($$k); var_dump(isset($x)); $x = 2; var_dump($x); }
+/// f();
+/// $_SERVER['q'] = 1;
+/// unset($_SERVER);
+/// var_dump(isset($_SERVER));
+/// ```
+/// ```expect
+/// bool(false)
+/// int(2)
+/// bool(false)
+/// int(2)
+/// bool(false)
+/// ```
+pub(crate) fn unset_var<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let name = match fetched_name(req, frame, code, op) {
+        Ok(name) => name,
+        Err(thrown) => {
+            exec::free_operand(req, frame, code, op.op1_type, op.op1);
+            return threw(req, frame, &thrown);
+        }
+    };
+    let table = if op.extended_value & FETCH_GLOBAL != 0 {
+        req.global_table()
+    } else {
+        req.rebuild_symbol_table(frame)
+    };
+    req.symbol_unset(table, &name);
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    if req.is_pending() {
+        return Ok(Stepped::Threw(frame));
+    }
+    Ok(advance(req, frame))
+}
+
+/// php's `type` argument to `zend_fetch_var_address_helper`, the five
 /// the fetches by name serve.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ByName {
@@ -3542,6 +3713,7 @@ enum ByName {
     W,
     Rw,
     Is,
+    Unset,
 }
 
 /// `ZEND_FETCH_GLOBAL` and `ZEND_FETCH_GLOBAL_LOCK`
@@ -3617,7 +3789,10 @@ fn fetch_by_name(
             req.addref(&value);
             Some(value)
         }
-        ByName::W | ByName::Rw => {
+        // `BP_VAR_UNSET` over a name the table has not, or whose CV
+        // holds nothing: `&EG(uninitialized_zval)`, nothing laid down.
+        ByName::Unset if unset => Some(Value::null()),
+        ByName::W | ByName::Rw | ByName::Unset => {
             if unset && mode == ByName::Rw {
                 undefined(req);
             }
@@ -3686,13 +3861,19 @@ fn fetched_name(
 
 /// `zend_fetch_this_var` (`Z/Zend/zend_execute.c:4185`): `$this` read
 /// by name is the receiver, with php's warning where the frame has none
-/// under `BP_VAR_R`; under a write it is `Cannot re-assign $this`.
+/// under `BP_VAR_R`; under a write it is `Cannot re-assign $this`, and
+/// under `BP_VAR_UNSET` `Cannot unset $this`.
 fn fetch_this_by_name(req: &mut Request, frame: FrameRef, out: u32, mode: ByName) -> Edge {
     let value = match (req.vm().this(frame), mode) {
-        (_, ByName::W | ByName::Rw) => {
+        (_, ByName::W | ByName::Rw | ByName::Unset) => {
             let previous = req.set_slot(frame, out, Value::undef());
             req.release(previous);
-            let thrown = crate::api::raising::throw(req, "Error", "Cannot re-assign $this");
+            let message = if mode == ByName::Unset {
+                "Cannot unset $this"
+            } else {
+                "Cannot re-assign $this"
+            };
+            let thrown = crate::api::raising::throw(req, "Error", message);
             return threw(req, frame, &thrown);
         }
         (Some(this), _) => {
