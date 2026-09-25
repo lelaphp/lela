@@ -964,6 +964,21 @@ pub(super) fn reflection_parameter_allows_null(req: &mut Request) -> Result<Valu
 ///   string(10) "str_repeat"
 /// }
 /// ```
+///
+/// A closure with a scope is reflected as a method of it, over the
+/// closure:
+///
+/// ```php
+/// class A {} $c = (function ($x) {})->bindTo(new A, A::class);
+/// $m = (new ReflectionFunction($c))->getParameters()[0]->getDeclaringFunction();
+/// var_dump(get_class($m), $m->class, $m->isClosure(), $m->getNumberOfParameters());
+/// ```
+/// ```expect
+/// string(16) "ReflectionMethod"
+/// string(1) "A"
+/// bool(true)
+/// int(1)
+/// ```
 pub(super) fn reflection_parameter_get_declaring_function(
     req: &mut Request,
 ) -> Result<Value, Thrown> {
@@ -978,13 +993,27 @@ pub(super) fn reflection_parameter_get_declaring_function(
         }
         // php's `reflection_function_factory` over the closure itself,
         // which is `intern->obj` again, so the reflector it hands back
-        // reflects the closure and not a name no table holds.
+        // reflects the closure and not a name no table holds; and
+        // `reflection_method_factory` where the closure has a scope,
+        // `$class` the scope's name.
         FunctionRef::Closure(closure) => {
             let closure = *closure;
-            let class = class_named(req, b"ReflectionFunction")?;
+            let scope = closure.closure(req).and_then(|info| info.scope);
+            let reflector = if scope.is_some() {
+                b"ReflectionMethod".as_slice()
+            } else {
+                b"ReflectionFunction".as_slice()
+            };
+            let class = class_named(req, reflector)?;
             let object = new_object(req, class)?;
             set_name(req, object, &decl.name.0)?;
-            super::keep_closure(req, object, closure);
+            if let Some(scope) = scope {
+                let named = class_name_of(req, scope);
+                set_string_prop(req, object, b"class", &named)?;
+                super::keep(req, object, scope, Some(closure));
+            } else {
+                super::keep_closure(req, object, closure);
+            }
             object
         }
         FunctionRef::Method(scope, name) => {
@@ -1233,14 +1262,15 @@ pub(super) fn this_function(req: &mut Request) -> Result<(FunctionRef, FunctionD
         .prop(req, b"class")
         .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec));
     let kept = super::kept_closure(req, this);
-    // `intern->obj`, which a function reflector over a closure keeps:
-    // php reads the declaration back off it with
-    // `zend_get_closure_method_def`, since the `{closure:…}` name is in
-    // no table to look up. A method reflector keeps one only for the
-    // closure's `__invoke`, which the lookup below reaches.
-    if scope.is_none()
-        && let Some(closure) = kept
+    // `intern->obj`, which a reflector over a closure keeps: php reads
+    // the declaration back off it with `zend_get_closure_method_def`,
+    // since the `{closure:…}` name is in no table to look up. A method
+    // reflector keeps one for a closure with a scope, whose parameter's
+    // `getDeclaringFunction` made it, and for the closure's `__invoke`,
+    // which the lookup below reaches.
+    if let Some(closure) = kept
         && let Some(decl) = closure_decl(req, closure)
+        && (scope.is_none() || decl.name.0.as_ref() == name.as_slice())
     {
         return Ok((FunctionRef::Closure(closure), decl));
     }
