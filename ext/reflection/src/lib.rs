@@ -4233,7 +4233,64 @@ fn default_value_string(req: &mut Request, expr: &ConstExpr) -> String {
             String::from_utf8_lossy(&class.0),
             String::from_utf8_lossy(&name.0)
         ),
+        ConstExpr::Unary { .. } | ConstExpr::Binary { .. } => ast_export(req, expr, 0),
         _ => String::from("<default>"),
+    }
+}
+
+/// `zend_ast_export_ex` over an operator of a constant expression, the
+/// text `format_default_value` prints for a default the compiler kept
+/// unevaluated: `BINARY_OP` and `PREFIX_OP` with php's priorities, a
+/// side whose operator binds looser than its place wrapped in
+/// parentheses, and every other node as [`default_value_string`] writes
+/// it.
+///
+/// ```php
+/// function m($a = U + 1, $b = -V, $c = W * (Y + 1), $d = Z . 'x') {}
+/// foreach ((new ReflectionFunction('m'))->getParameters() as $p) { echo $p, "\n"; }
+/// ```
+/// ```expect
+/// Parameter #0 [ <optional> $a = U + 1 ]
+/// Parameter #1 [ <optional> $b = -V ]
+/// Parameter #2 [ <optional> $c = W * (Y + 1) ]
+/// Parameter #3 [ <optional> $d = Z . 'x' ]
+/// ```
+fn ast_export(req: &mut Request, expr: &ConstExpr, priority: u32) -> String {
+    let (text, own) = match expr {
+        ConstExpr::Unary { op, operand } => {
+            let operand = ast_export(req, operand, 241);
+            (format!("{}{operand}", String::from_utf8_lossy(&op.0)), 240)
+        }
+        ConstExpr::Binary { op, lhs, rhs } => {
+            let (own, left, right) = match op.0.as_ref() {
+                b"**" => (250, 251, 250),
+                b"*" | b"/" | b"%" => (210, 210, 211),
+                b"+" | b"-" => (200, 200, 201),
+                b"<<" | b">>" => (190, 190, 191),
+                b"." => (185, 185, 186),
+                b"<" | b"<=" | b">" | b">=" | b"<=>" => (180, 181, 181),
+                b"==" | b"!=" | b"===" | b"!==" => (170, 171, 171),
+                b"&" => (160, 160, 161),
+                b"^" => (150, 150, 151),
+                b"|" => (140, 140, 141),
+                b"&&" => (130, 130, 131),
+                b"||" => (120, 120, 121),
+                b"??" => (110, 111, 110),
+                _ => (40, 40, 41),
+            };
+            let lhs = ast_export(req, lhs, left);
+            let rhs = ast_export(req, rhs, right);
+            (
+                format!("{lhs} {} {rhs}", String::from_utf8_lossy(&op.0)),
+                own,
+            )
+        }
+        leaf => return default_value_string(req, leaf),
+    };
+    if priority > own {
+        format!("({text})")
+    } else {
+        text
     }
 }
 
