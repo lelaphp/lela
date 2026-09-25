@@ -3,12 +3,12 @@
 //! `array_replace_recursive` beside `array_merge`, `range`, and the two
 //! that draw from the random engine, `shuffle` and `array_rand`.
 
-use php_ext::call::{call, lookup_function};
 use php_ext::coerce::{numeric_string, to_array};
 use php_ext::decl::{ConstExpr, FunctionDecl, Parameter, Type};
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
+use php_ext::raising::{Level, Thrown, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext_random::Rng;
 
 use super::sort::key_value;
 use super::stack::cell_array;
@@ -915,53 +915,17 @@ fn long_range(
     Ok(Value::array(out))
 }
 
-/// `php_mt_rand_range(0, max)`, what `php_random_default_engine()`'s
-/// `range` answers: `mt_rand(0, max)` served through the call seam where
-/// the bundle declares it, so a seed `mt_srand` set is the one drawn
-/// from, and a local generator seeded from the clock otherwise.
-fn draw(req: &mut Request, max: i64, fallback: &mut u64) -> Result<i64, Thrown> {
-    if lookup_function(req, b"mt_rand").is_some() {
-        let name = Value::string(PhpString::new(req, b"mt_rand")?);
-        let Ok(callable) = php_ext::coerce::callable_checked(req, &name) else {
-            return Ok(0);
-        };
-        let answer = call(req, &callable, &[Value::int(0), Value::int(max)])?;
-        let n = answer.as_int().unwrap_or(0);
-        req.release(answer);
-        return Ok(n);
-    }
-    // splitmix64 over the seed: uniform enough for an unseeded shuffle,
-    // which no program can hold to a sequence.
-    *fallback = fallback.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    let mut z = *fallback;
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^= z >> 31;
-    let span = max.cast_unsigned().wrapping_add(1);
-    Ok(if span == 0 {
-        z.cast_signed()
-    } else {
-        (z % span).cast_signed()
-    })
-}
-
-fn seed() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| {
-            u64::try_from(d.as_nanos() & u128::from(u64::MAX)).unwrap_or(0)
-        })
-}
-
 /// `shuffle(array &$array): true`, php's `php_array_data_shuffle`
 /// (`Z/ext/standard/array.c:3204`): the values of the array the
 /// reference holds, keys dropped, put in a random order by the
 /// Fisher-Yates walk php makes from the end, each swap drawn from the
-/// default engine.
+/// request's default engine through the RNG ext/random exports.
 ///
 /// ```php
 /// $a = range(1, 20); var_dump(shuffle($a)); sort($a); var_dump($a == range(1, 20), array_keys($a) === range(0, 19));
 /// $k = ["x" => 1, "y" => 2]; shuffle($k); var_dump(array_keys($k)); $e = []; var_dump(shuffle($e), $e);
+/// mt_srand(42); $a = range(1, 10); shuffle($a); echo implode(",", $a), "\n";
+/// mt_srand(42, MT_RAND_PHP); $a = range(1, 10); shuffle($a); echo implode(",", $a), "\n";
 /// ```
 /// ```expect
 /// bool(true)
@@ -976,23 +940,18 @@ fn seed() -> u64 {
 /// bool(true)
 /// array(0) {
 /// }
+/// 2,4,10,8,7,1,9,5,6,3
+///
+/// Deprecated: Constant MT_RAND_PHP is deprecated since 8.3, as it uses a biased non-standard variant of Mt19937 in %s on line 5
+///
+/// Deprecated: The MT_RAND_PHP variant of Mt19937 is deprecated in %s on line 5
+/// 3,4,2,9,10,1,8,5,6,7
 /// ```
 fn shuffle(req: &mut Request) -> Result<Value, Thrown> {
     argument_count_between(req, 1, 1)?;
     let (cell, array, owned) = cell_array(req, 1)?;
     let mut values: Vec<Value> = array.snapshot_refs().into_iter().map(|(_, v)| v).collect();
-    if !values.is_empty() {
-        let mut fallback = seed();
-        let mut left = values.len() - 1;
-        while left > 0 {
-            let at = draw(req, i64::try_from(left).unwrap_or(i64::MAX), &mut fallback)?;
-            let at = usize::try_from(at).unwrap_or(0);
-            if at != left {
-                values.swap(left, at);
-            }
-            left -= 1;
-        }
-    }
+    Rng::default_engine().shuffle(req, &mut values)?;
     let mut shuffled = PhpArray::new(req)?;
     for value in values {
         req.addref(&value);
@@ -1006,14 +965,16 @@ fn shuffle(req: &mut Request) -> Result<Value, Thrown> {
 }
 
 /// `array_rand(array $array, int $num = 1): int|string|array`, php's
-/// `php_array_pick_keys` (`Z/ext/standard/array.c:6269`): one random key,
-/// or a list of `$num` keys in the array's order, drawn from the default
-/// engine.
+/// `php_array_pick_keys` (`Z/ext/standard/array.c:6269`) over the
+/// request's default engine through the RNG ext/random exports: one key, sampled
+/// by bucket, or a list of `$num` keys in the array's order.
 ///
 /// ```php
 /// $a = ["a" => 1, "b" => 2, "c" => 3]; var_dump(in_array(array_rand($a), ["a", "b", "c"], true), array_rand($a, 3), count(array_rand($a, 2)));
 /// try { array_rand([]); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
 /// try { array_rand([1], 2); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// mt_srand(42); $h = range(0, 99); for ($i = 0; $i < 80; $i++) unset($h[$i]);
+/// echo array_rand(range(0, 9)), " ", implode(",", array_rand(range(0, 9), 4)), " ", array_rand($h), " ", array_rand(["x" => 1, "y" => 2]), "\n";
 /// ```
 /// ```expect
 /// bool(true)
@@ -1028,6 +989,7 @@ fn shuffle(req: &mut Request) -> Result<Value, Thrown> {
 /// int(2)
 /// array_rand(): Argument #1 ($array) must not be empty
 /// array_rand(): Argument #2 ($num) must be between 1 and the number of elements in argument #1 ($array)
+/// 2 4,5,6,7 80 x
 /// ```
 fn array_rand(req: &mut Request) -> Result<Value, Thrown> {
     argument_count_between(req, 1, 2)?;
@@ -1037,50 +999,17 @@ fn array_rand(req: &mut Request) -> Result<Value, Thrown> {
     } else {
         1
     };
-    let keys: Vec<Key> = array.snapshot_refs().into_iter().map(|(k, _)| k).collect();
-    let available = i64::try_from(keys.len()).unwrap_or(i64::MAX);
-    if available == 0 {
-        return Err(arg_value_error(req, 1, "not be empty"));
-    }
-    let mut fallback = seed();
+    let keys = Rng::default_engine().pick_keys(req, array, want)?;
     if want == 1 {
-        let at = draw(req, available - 1, &mut fallback)?;
-        let key = keys
-            .get(usize::try_from(at).unwrap_or(0))
-            .cloned()
-            .unwrap_or(Key::Int(0));
-        let value = key_value(&key);
+        let value = keys.first().map_or(Value::int(0), key_value);
         req.addref(&value);
         return Ok(value);
     }
-    if want <= 0 || want > available {
-        return Err(arg_value_error(
-            req,
-            2,
-            "be between 1 and the number of elements in argument #1 ($array)",
-        ));
-    }
-    let (count, negative) = if want > available >> 1 {
-        (available - want, true)
-    } else {
-        (want, false)
-    };
-    let mut chosen = vec![false; keys.len()];
-    let mut left = count;
-    while left > 0 {
-        let at = usize::try_from(draw(req, available - 1, &mut fallback)?).unwrap_or(0);
-        if !chosen[at] {
-            chosen[at] = true;
-            left -= 1;
-        }
-    }
     let mut out = PhpArray::new(req)?;
-    for (at, key) in keys.iter().enumerate() {
-        if chosen[at] != negative {
-            let value = key_value(key);
-            req.addref(&value);
-            out.append(req, value)?;
-        }
+    for key in &keys {
+        let value = key_value(key);
+        req.addref(&value);
+        out.append(req, value)?;
     }
     Ok(Value::array(out))
 }

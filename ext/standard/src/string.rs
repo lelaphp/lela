@@ -27,6 +27,7 @@ use php_ext::decl::FunctionDecl;
 use php_ext::raising::{Level, Thrown, arg_value_error, deprecated, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext_random::Rng;
 
 /// The request state `string.c` keeps: `BG(strtok_string)` and its
 /// cursor, and each locale category's name.
@@ -1823,15 +1824,14 @@ fn str_rot13(req: &mut Request) -> Result<Value, Thrown> {
     string_value(req, &out)
 }
 
-/// `str_shuffle(string $string): string`, `php_binary_string_shuffle`:
-/// the Fisher-Yates walk from the end. php draws from the request's
-/// default `Random\Engine\Mt19937`, which `mt_srand` seeds; this crate
-/// has no seeded engine yet, so the draw is a splitmix64 stream seeded
-/// from the clock and a seeded sequence is not reproduced. The multiset of
-/// bytes is what a program can hold the answer to.
+/// `str_shuffle(string $string): string`, `php_binary_string_shuffle`
+/// (`Z/ext/standard/string.c:5967`): the Fisher-Yates walk from the end,
+/// each swap drawn from the request's default `Random\Engine\Mt19937`,
+/// which `mt_srand` seeds.
 ///
 /// ```php
 /// $s = str_shuffle("aabbcc"); $c = count_chars($s, 1); var_dump(strlen($s), $c[97], $c[98], $c[99], str_shuffle(""), str_shuffle("x"));
+/// mt_srand(42); var_dump(str_shuffle("abcdefghij"), str_shuffle("0123456789"));
 /// ```
 /// ```expect
 /// int(6)
@@ -1840,29 +1840,14 @@ fn str_rot13(req: &mut Request) -> Result<Value, Thrown> {
 /// int(2)
 /// string(0) ""
 /// string(1) "x"
+/// string(10) "bdjhgaiefc"
+/// string(10) "9825107643"
 /// ```
 fn str_shuffle(req: &mut Request) -> Result<Value, Thrown> {
     argument_count_between(req, 1, 1)?;
     let string = string_argument(req, 1)?;
     let mut bytes = string.as_bytes().to_vec();
-    let mut seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0x9e37_79b9_7f4a_7c15, |d| {
-            u64::try_from(d.as_nanos() & u128::from(u64::MAX)).unwrap_or(0)
-        });
-    let mut next = move || {
-        seed = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
-        let mut z = seed;
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        z ^ (z >> 31)
-    };
-    let mut left = bytes.len();
-    while left > 1 {
-        left -= 1;
-        let pick = usize::try_from(next() % (left as u64 + 1)).unwrap_or(0);
-        bytes.swap(left, pick);
-    }
+    Rng::default_engine().shuffle(req, &mut bytes)?;
     string_value(req, &bytes)
 }
 

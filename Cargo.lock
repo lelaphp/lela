@@ -494,6 +494,7 @@ dependencies = [
  "libc",
  "miniz_oxide",
  "php_ext",
+ "php_ext_random",
 ]
 
 [[package]]
