@@ -128,6 +128,7 @@ pub(crate) fn classes() -> Vec<(ClassDecl, Vec<(MethodDecl, Entry)>)> {
         parent: None,
         interfaces: vec![Name(b"UnitEnum".as_slice().into())],
         traits: Vec::new(),
+        adaptations: Vec::new(),
         backing: EnumBacking::Pure,
         constants: ROUNDING_MODES
             .iter()

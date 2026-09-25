@@ -1535,6 +1535,7 @@ fn declared(name: &[u8], kind: ClassKind, parent: Option<&[u8]>) -> ClassDecl {
             _ => Vec::new(),
         },
         traits: Vec::new(),
+        adaptations: Vec::new(),
         backing: EnumBacking::Pure,
         constants: Vec::new(),
         // php declares the seven properties on `Exception` and `Error`

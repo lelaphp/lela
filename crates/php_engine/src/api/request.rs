@@ -1014,7 +1014,7 @@ pub struct Request {
     /// immutable linked class shared across requests is not built yet,
     /// so every class a unit declares is this request's, the
     /// `DECLARE_CLASS_DELAYED` path, and dropped with it.
-    declared: Vec<(Arc<Unit>, u32)>,
+    declared: Vec<Declared>,
     /// The aliases `class_alias()` added to `EG(class_table)`, each the
     /// lowered name it is keyed by, the class it names, and how many
     /// classes the table held when it was added, which is where php's
@@ -1169,10 +1169,44 @@ pub(crate) struct TypedProperty {
 }
 
 /// One user function or method a request declared: the unit and the
-/// body, from which the declaration and the op array are both read.
+/// body its op array is read from, and for a method the row of its
+/// class's method table it is, from which its declaration is read. The
+/// two differ for a method a trait gave a class: php copies the
+/// `zend_function` into the class with the class as its scope and
+/// shares the trait's opcodes (`zend_add_trait_method`), so the row is
+/// the class's and the op array the trait's unit's.
 pub(crate) struct UserFunction {
     pub(crate) unit: Arc<Unit>,
     pub(crate) body: exec::Body,
+    pub(crate) member: Option<Member>,
+}
+
+/// A method as its class holds it: the class, `common.scope`,
+/// and its index among the methods of the class's declaration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Member {
+    pub(crate) class: ClassId,
+    pub(crate) at: u32,
+}
+
+/// One class a request declared: the unit that holds its declaration and
+/// the declaration's index there, and, for a class that uses traits,
+/// the class composed with them at its link, which is the table's row
+/// in its place (`zend_do_bind_traits`).
+pub(crate) struct Declared {
+    unit: Arc<Unit>,
+    at: u32,
+    composed: Option<Box<php_unit::link::Composed>>,
+}
+
+impl Declared {
+    /// The declaration the table holds for the class.
+    fn decl(&self) -> Option<&ClassDecl> {
+        match &self.composed {
+            Some(composed) => Some(&composed.decl),
+            None => self.unit.classes.get(usize::try_from(self.at).ok()?),
+        }
+    }
 }
 
 /// The declaration of a user function the request's table holds, from
@@ -2284,17 +2318,9 @@ impl Request {
         if let Some((class, _)) = self.enum_method_of(function) {
             return Some(class);
         }
-        let user = self.user_function(function)?;
-        let exec::Body::Method { class, .. } = user.body else {
-            return None;
-        };
-        let declared = self
-            .declared
-            .iter()
-            .position(|(unit, at)| Arc::ptr_eq(unit, &user.unit) && *at == class)?;
-        u32::try_from(self.shared.classes.len().checked_add(declared)?)
-            .ok()
-            .map(ClassId)
+        self.user_function(function)?
+            .member
+            .map(|member| member.class)
     }
 
     /// `zend_hash_find_ptr(&ce->function_table, lcname)` over the
@@ -2335,20 +2361,19 @@ impl Request {
             {
                 return self.enum_function(class, method);
             }
-            let (unit, index) = self.declared.get(declared)?;
-            let method = decl
+            self.declared.get(declared)?;
+            let at = decl
                 .methods
                 .iter()
                 .position(|method| method.function.name.0.eq_ignore_ascii_case(lowered))?;
-            let method = u32::try_from(method).ok()?;
-            let position = self.user_functions.iter().position(|user| {
-                Arc::ptr_eq(&user.unit, unit)
-                    && user.body
-                        == exec::Body::Method {
-                            class: *index,
-                            method,
-                        }
-            })?;
+            let member = Member {
+                class,
+                at: u32::try_from(at).ok()?,
+            };
+            let position = self
+                .user_functions
+                .iter()
+                .position(|user| user.member == Some(member))?;
             return self.user_function_id(position);
         }
         self.native_method_id(|m| {
@@ -2431,15 +2456,10 @@ impl Request {
                 }
             };
         }
-        let user = self.user_function(function)?;
-        let exec::Body::Method { class, method } = user.body else {
-            return None;
-        };
-        user.unit
-            .classes
-            .get(usize::try_from(class).ok()?)?
+        let member = self.user_function(function)?.member?;
+        self.class_decl(member.class)?
             .methods
-            .get(usize::try_from(method).ok()?)
+            .get(usize::try_from(member.at).ok()?)
     }
 
     /// `ce->name`: the name a class was declared under, and `object`
@@ -2571,6 +2591,51 @@ impl Request {
                 String::from_utf8_lossy(written)
             ),
         ))
+    }
+
+    /// The end of `zend_std_get_static_method`
+    /// (`Z/Zend/zend_object_handlers.c:2066`), once the method is found
+    /// and the scope may reach it: an abstract method is
+    /// `zend_abstract_method_call`'s `Error`, and one whose scope is a
+    /// trait, which is a method named on the trait itself and never one
+    /// a class took from it, is php's deprecation, after which a
+    /// handler that threw stops the call. The answer is whether the
+    /// method is a trait's, which is the callee php never caches.
+    pub(crate) fn static_method_found(&mut self, function: Function) -> Result<bool, Thrown> {
+        let Some(decl) = self.method_decl(function) else {
+            return Ok(false);
+        };
+        let (is_abstract, name) = (decl.is_abstract, decl.function.name.clone());
+        let Some(class) = self.method_class(function) else {
+            return Ok(false);
+        };
+        let is_trait = self
+            .class_decl(class)
+            .is_some_and(|decl| decl.kind == ClassKind::Trait);
+        let shown = format!(
+            "{}::{}",
+            self.class_name(class),
+            String::from_utf8_lossy(&name.0)
+        );
+        if is_abstract {
+            return Err(crate::api::raising::throw(
+                self,
+                "Error",
+                &format!("Cannot call abstract method {shown}()"),
+            ));
+        }
+        if is_trait {
+            crate::api::raising::deprecated(
+                self,
+                &format!(
+                    "Calling static trait method {shown} is deprecated, it should only be called on a class using the trait"
+                ),
+            );
+            if self.is_pending() {
+                return Err(Thrown::of(None));
+            }
+        }
+        Ok(is_trait)
     }
 
     /// `zend_check_method_accessible` (`Z/Zend/zend_execute.h:399`): a
@@ -4530,6 +4595,7 @@ impl Request {
         };
         let visibility = constant.visibility;
         let value = constant.value;
+        let asked = class;
         let class = declaring;
         if !self.may_access(class, visibility) {
             let word = match visibility {
@@ -4541,6 +4607,18 @@ impl Request {
                 self,
                 "Error",
                 &format!("Cannot access {word} constant {class_name}::{shown}"),
+            ));
+        }
+        // A constant a trait declares is the composing class's to hand
+        // out, never the trait's own.
+        if self
+            .class_decl(asked)
+            .is_some_and(|decl| decl.kind == ClassKind::Trait)
+        {
+            return Err(crate::api::raising::throw(
+                self,
+                "Error",
+                &format!("Cannot access trait constant {class_name}::{shown} directly"),
             ));
         }
         // `ZEND_FETCH_CLASS_CONSTANT` updates a backed enum's constants
@@ -4744,6 +4822,29 @@ impl Request {
     ///
     /// `ZEND_ASSIGN_STATIC_PROP` addresses the slot here before it
     /// reads the value operand, which is why the handlers reach this.
+    ///
+    /// A property addressed on a trait itself, and not on a class that
+    /// took it, is php's deprecation once the slot is found; each class
+    /// that uses the trait has a slot of its own:
+    ///
+    /// ```php
+    /// trait T { public static $s = 1; }
+    /// class C { use T; }
+    /// C::$s = 2;
+    /// echo T::$s, C::$s, "\n";
+    /// T::$s = 3;
+    /// echo T::$s, C::$s, "\n";
+    /// ```
+    /// ```expect
+    ///
+    /// Deprecated: Accessing static trait property T::$s is deprecated, it should only be accessed on a class using the trait in %s on line 5
+    /// 12
+    ///
+    /// Deprecated: Accessing static trait property T::$s is deprecated, it should only be accessed on a class using the trait in %s on line 6
+    ///
+    /// Deprecated: Accessing static trait property T::$s is deprecated, it should only be accessed on a class using the trait in %s on line 7
+    /// 32
+    /// ```
     pub(crate) fn static_slot(
         &mut self,
         class: ClassId,
@@ -4793,6 +4894,22 @@ impl Request {
                 None => Value::null(),
             };
             self.statics.push(((declaring, name.to_vec()), value));
+        }
+        if self
+            .class_decl(class)
+            .is_some_and(|decl| decl.kind == ClassKind::Trait)
+        {
+            let shown = format!(
+                "{}::${}",
+                self.class_name(declaring),
+                String::from_utf8_lossy(name)
+            );
+            crate::api::raising::deprecated(
+                self,
+                &format!(
+                    "Accessing static trait property {shown} is deprecated, it should only be accessed on a class using the trait"
+                ),
+            );
         }
         Ok(Some((declaring, property)))
     }
@@ -4909,7 +5026,7 @@ impl Request {
         class: ClassId,
         name: &[u8],
         scope: Option<ClassId>,
-        mut value: Value,
+        value: Value,
         strict: bool,
     ) -> Result<(), Thrown> {
         let (declaring, property) =
@@ -4926,6 +5043,21 @@ impl Request {
                     return Err(thrown);
                 }
             };
+        self.set_static_slot(declaring, &property, name, value, strict)
+    }
+
+    /// [`Request::set_static_property`] over a slot already addressed,
+    /// as `ZEND_ASSIGN_STATIC_PROP` addresses it before it reads its
+    /// value and writes it after: `declaring` is the class the slot is
+    /// in and `property` its declaration.
+    pub(crate) fn set_static_slot(
+        &mut self,
+        declaring: ClassId,
+        property: &PropertyDecl,
+        name: &[u8],
+        mut value: Value,
+        strict: bool,
+    ) -> Result<(), Thrown> {
         // `zend_verify_property_type`: the value held to the declared
         // type and coerced by the weak rule where the writer's regime is
         // not strict, and php's `TypeError` where it neither satisfies
@@ -8672,7 +8804,7 @@ impl Request {
             .chain(
                 self.declared
                     .iter()
-                    .filter_map(|(unit, at)| unit.classes.get(usize::try_from(*at).ok()?))
+                    .filter_map(Declared::decl)
                     .map(|decl| &decl.name),
             )
             .position(|name| name.0.to_ascii_lowercase() == wanted)
@@ -8745,7 +8877,7 @@ impl Request {
             let Ok(at) = u32::try_from(at) else {
                 return false;
             };
-            self.bind_declared(unit, at);
+            self.bind_declared(unit, at, None);
         }
         true
     }
@@ -8780,49 +8912,159 @@ impl Request {
     /// methods into the function table beside it, which is the whole of
     /// what binding a class is here: the parent chain is walked from the
     /// declaration on every lookup, so nothing is copied.
-    fn bind_declared(&mut self, unit: &Arc<Unit>, at: u32) {
-        self.declared.push((Arc::clone(unit), at));
-        let decl = unit.classes.get(usize::try_from(at).unwrap_or(usize::MAX));
-        let methods = decl.map_or(0, |decl| decl.methods.len());
+    fn bind_declared(
+        &mut self,
+        unit: &Arc<Unit>,
+        at: u32,
+        composed: Option<php_unit::link::Composed>,
+    ) {
+        let class = self
+            .shared
+            .classes
+            .len()
+            .saturating_add(self.declared.len());
+        let class = ClassId(u32::try_from(class).unwrap_or(u32::MAX));
+        self.declared.push(Declared {
+            unit: Arc::clone(unit),
+            at,
+            composed: composed.map(Box::new),
+        });
+        let Some(decl) = self.class_decl(class) else {
+            return;
+        };
         // `zend_enum_register_funcs` at the link: the enum's own
         // `cases`, `from` and `tryFrom`, which the compiler declared
         // after its methods and which no body of the unit serves.
-        if let Some(decl) = decl.filter(|decl| decl.kind == ClassKind::Enum) {
-            let class = self
-                .shared
-                .classes
-                .len()
-                .saturating_add(self.declared.len() - 1);
-            let class = ClassId(u32::try_from(class).unwrap_or(u32::MAX));
+        let mut enum_functions = Vec::new();
+        if decl.kind == ClassKind::Enum {
             for method in &decl.methods {
                 let lowered = method.function.name.0.to_ascii_lowercase();
                 if let Some(method) = crate::enums::EnumMethod::of(&lowered, decl.backing) {
-                    self.enum_functions.push((class, method));
+                    enum_functions.push((class, method));
                 }
             }
         }
+        self.enum_functions.extend(enum_functions);
+        let methods = self.class_decl(class).map_or(0, |decl| decl.methods.len());
         for method in 0..methods {
+            let method = u32::try_from(method).unwrap_or(u32::MAX);
+            let Some((unit, body)) = self.method_body(class, method) else {
+                continue;
+            };
             self.user_functions.push(UserFunction {
-                unit: Arc::clone(unit),
-                body: exec::Body::Method {
-                    class: at,
-                    method: u32::try_from(method).unwrap_or(u32::MAX),
-                },
+                unit,
+                body,
+                member: Some(Member { class, at: method }),
             });
         }
     }
 
+    /// Where the op array of the method at `method` of a class the
+    /// request declared is: its own unit's body, or for a method a trait
+    /// gave it the body in the unit of the class the composition names,
+    /// which the table held when the class linked. The copy runs the
+    /// trait's op array with the class as its scope, as
+    /// `zend_fixup_trait_method` leaves it, so `self`, `static`, a
+    /// closure made in it and a `static` property are the using class's,
+    /// each class with its own:
+    ///
+    /// ```php
+    /// trait T {
+    ///     public static $n = 0;
+    ///     static function inc() { return ++self::$n; }
+    ///     function f() { return function () { return [static::class, self::class, __CLASS__]; }; }
+    /// }
+    /// class A { use T; }
+    /// class B { use T; }
+    /// class D extends A {}
+    /// A::inc(); A::inc(); B::inc();
+    /// var_dump(A::$n, B::$n, ((new D)->f())());
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// int(1)
+    /// array(3) {
+    ///   [0]=>
+    ///   string(1) "D"
+    ///   [1]=>
+    ///   string(1) "A"
+    ///   [2]=>
+    ///   string(1) "A"
+    /// }
+    /// ```
+    fn method_body(&self, class: ClassId, method: u32) -> Option<(Arc<Unit>, exec::Body)> {
+        let declared = self.declared.get(
+            usize::try_from(class.0)
+                .ok()?
+                .checked_sub(self.shared.classes.len())?,
+        )?;
+        let Some(composed) = &declared.composed else {
+            return Some((
+                Arc::clone(&declared.unit),
+                exec::Body::Method {
+                    class: declared.at,
+                    method,
+                },
+            ));
+        };
+        let body = composed.bodies.get(usize::try_from(method).ok()?)?;
+        let own = composed.decl.name.0.eq_ignore_ascii_case(&body.class.0);
+        let from = if own {
+            declared
+        } else {
+            let holder = self.class_named(&body.class.0)?;
+            self.declared.get(
+                usize::try_from(holder.0)
+                    .ok()?
+                    .checked_sub(self.shared.classes.len())?,
+            )?
+        };
+        Some((
+            Arc::clone(&from.unit),
+            exec::Body::Method {
+                class: from.at,
+                method: body.method,
+            },
+        ))
+    }
+
     /// `zend_bind_class` at a `ZEND_DECLARE_CLASS`, `zend_do_link_class`
     /// over the declaration the opline's lowered name finds in the unit:
-    /// the parent fetched first and then each interface, all of them
-    /// before any is checked, which is the order php's messages come in.
-    /// A name nothing declares, once autoloading has been asked, is
-    /// php's `Error`, `Class "P" not found` for a parent and `Interface
-    /// "I" not found` for an interface.
+    /// the parent fetched first, then each trait, then each interface,
+    /// all of them before any is checked, which is the order php's
+    /// messages come in. A name nothing declares, once autoloading has
+    /// been asked, is php's `Error`, `Class "P" not found` for a parent,
+    /// `Trait "T" not found` for a trait and `Interface "I" not found`
+    /// for an interface, and a class used as a trait is refused as php's
+    /// `ZEND_FETCH_CLASS_TRAIT` refuses it.
     ///
-    /// Linking copies nothing: an inherited constant, property or
-    /// method is found by walking `parent` from the declaration, so what
-    /// this adds is the class's own row and its methods.
+    /// ```php
+    /// class C { use Nope; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught Error: Trait "Nope" not found in %s:2
+    /// Stack trace:
+    /// #0 {main}
+    ///   thrown in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// class N {}
+    /// class C { use N; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught Error: C cannot use N - it is not a trait in %s:3
+    /// Stack trace:
+    /// #0 {main}
+    ///   thrown in %s on line 3
+    /// ```
+    ///
+    /// A class that uses no trait is linked without a copy: an inherited
+    /// constant, property or method is found by walking `parent` from
+    /// the declaration, so what this adds is the class's own row and its
+    /// methods. One that uses traits is the class composed with them
+    /// ([`php_unit::link::Composed`]), which stands in the table in its
+    /// place.
     ///
     /// The bind stands where the class was written, so what it refuses
     /// is refused after what the file has already printed, which is
@@ -9030,18 +9272,30 @@ impl Request {
         if let Some(parent) = &decl.parent {
             self.fetch_to_link(parent, "Class")?;
         }
+        for used in &decl.traits {
+            let found = self.fetch_to_link(used, "Trait")?;
+            if self.class_decl(found).map(|t| t.kind) != Some(ClassKind::Trait) {
+                let message = format!(
+                    "{} cannot use {} - it is not a trait",
+                    String::from_utf8_lossy(&decl.name.0),
+                    self.class_name(found)
+                );
+                return Err(crate::api::raising::throw(self, "Error", &message));
+            }
+            self.deprecated_trait(found, &decl.name.0)?;
+        }
         for interface in &decl.interfaces {
             self.fetch_to_link(interface, "Interface")?;
         }
-        let lookup = |name: &[u8]| self.class_named(name).and_then(|id| self.class_decl(id));
+        let lookup = |name: &[u8]| self.held_class(name);
         let linking = php_unit::link::link(&decl, &lookup);
-        for deprecation in &linking.deprecations {
+        for raised in &linking.raised {
             crate::api::raising::raise_at(
                 self,
-                Level::Deprecated,
-                &deprecation.to_string(),
-                &deprecation.site.file.0,
-                deprecation.site.line,
+                raised.level(),
+                &raised.to_string(),
+                &raised.site().file.0,
+                raised.site().line,
             );
         }
         if let php_unit::link::Linked::Refused(refused)
@@ -9067,8 +9321,65 @@ impl Request {
                 "InternalError: a unit declares more classes than can be numbered",
             ));
         };
-        self.bind_declared(unit, at);
+        self.bind_declared(unit, at, linking.composed);
         Ok(())
+    }
+
+    /// `zend_use_of_deprecated_trait` (`Z/Zend/zend_execute.c:2012`), as
+    /// `zend_do_link_class` raises it for each trait it fetches that the
+    /// `#[\Deprecated]` attribute marks: `Trait T used by C is
+    /// deprecated`, with the attribute's `since` and `message`, at
+    /// `E_USER_DEPRECATED` for a program's trait. A handler that throws
+    /// stops the link.
+    ///
+    /// ```php
+    /// #[\Deprecated("use U", "2.0")]
+    /// trait T {}
+    /// class C { use T; }
+    /// class D extends C {}
+    /// echo "done\n";
+    /// ```
+    /// ```expect
+    ///
+    /// Deprecated: Trait T used by C is deprecated since 2.0, use U in %s on line 4
+    /// done
+    /// ```
+    fn deprecated_trait(&mut self, found: ClassId, used_by: &[u8]) -> Result<(), Thrown> {
+        let Some(suffix) = self
+            .class_decl(found)
+            .and_then(|decl| crate::api::raising::deprecation_suffix(&decl.attributes))
+        else {
+            return Ok(());
+        };
+        let level = if self.native_class(found) {
+            Level::Deprecated
+        } else {
+            Level::UserDeprecated
+        };
+        let message = format!(
+            "Trait {} used by {} is deprecated{suffix}",
+            self.class_name(found),
+            String::from_utf8_lossy(used_by)
+        );
+        crate::api::raising::raise(self, level, &message);
+        if self.is_pending() {
+            return Err(Thrown::of(None));
+        }
+        Ok(())
+    }
+
+    /// A class as the link reads the table: its declaration, and the
+    /// bodies of its methods where it was composed with traits.
+    fn held_class(&self, name: &[u8]) -> Option<php_unit::link::Held<'_>> {
+        let class = self.class_named(name)?;
+        let decl = self.class_decl(class)?;
+        let bodies = usize::try_from(class.0)
+            .ok()
+            .and_then(|at| at.checked_sub(self.shared.classes.len()))
+            .and_then(|at| self.declared.get(at))
+            .and_then(|declared| declared.composed.as_ref())
+            .map(|composed| composed.bodies.as_slice());
+        Some(php_unit::link::Held { decl, bodies })
     }
 
     /// `zend_fetch_class_by_name` under `ZEND_FETCH_CLASS_EXCEPTION`, as
@@ -9157,6 +9468,7 @@ impl Request {
         self.user_functions.push(UserFunction {
             unit: Arc::clone(unit),
             body: exec::Body::Dynamic(at),
+            member: None,
         });
         Ok(())
     }
@@ -9183,6 +9495,7 @@ impl Request {
         self.user_functions.push(UserFunction {
             unit: Arc::clone(unit),
             body,
+            member: None,
         });
         self.user_function_id(self.user_functions.len() - 1)
     }
@@ -9254,6 +9567,7 @@ impl Request {
             self.user_functions.push(UserFunction {
                 unit: Arc::clone(unit),
                 body: exec::Body::Function(u32::try_from(at).unwrap_or(u32::MAX)),
+                member: None,
             });
         }
         true
@@ -10286,10 +10600,7 @@ impl Request {
         let at = usize::try_from(class.0).ok()?;
         match at.checked_sub(self.shared.classes.len()) {
             None => self.shared.classes.get(at),
-            Some(declared) => {
-                let (unit, index) = self.declared.get(declared)?;
-                unit.classes.get(usize::try_from(*index).ok()?)
-            }
+            Some(declared) => self.declared.get(declared)?.decl(),
         }
     }
 
@@ -12458,6 +12769,7 @@ mod tests {
             parent: None,
             interfaces: Vec::new(),
             traits: Vec::new(),
+            adaptations: Vec::new(),
             backing: EnumBacking::Pure,
             constants: Vec::new(),
             properties: Vec::new(),

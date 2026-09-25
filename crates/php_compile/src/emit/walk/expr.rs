@@ -61,6 +61,7 @@ impl Emit<'_> {
             node.params,
             node.ret,
             node.body,
+            false,
             node.doc_comment,
             line,
             node.range,

@@ -22,6 +22,13 @@
 //! each type, and a class a type names that no table holds is php's
 //! unresolved outcome, which the bind reports as php reports an
 //! obligation it could not discharge.
+//!
+//! A class that uses traits is the one case of copying something:
+//! `zend_do_bind_traits` puts the traits' methods, constants and
+//! properties into the class's own tables before the parent is
+//! inherited, so [`traits`] composes a declaration of the class with
+//! them as its own, each method with the [`Body`] it serves, and the
+//! checks above are made over that ([`Composed`]).
 
 use crate::Level;
 use crate::decl::{
@@ -30,6 +37,8 @@ use crate::decl::{
 };
 use crate::type_to_string;
 use std::fmt;
+
+mod traits;
 
 const MAY_BE_OBJECT: u32 = 1 << 8;
 const MAY_BE_CALLABLE: u32 = 1 << 12;
@@ -191,8 +200,97 @@ pub enum Refusal {
     Traversable { class: String },
     /// `Class %s contains %d abstract method%s and must therefore be
     /// declared abstract or implement the remaining method%s (%s)`, with
-    /// every method left, of which php names three.
-    AbstractLeft { class: String, methods: Vec<String> },
+    /// every method left, of which php names three; an enum, which
+    /// cannot be abstract, `must implement` them.
+    AbstractLeft {
+        kind: ClassKind,
+        class: String,
+        methods: Vec<String>,
+    },
+    /// `Trait method %s::%s has not been applied as %s::%s, because of
+    /// collision with %s::%s`: two traits' methods under one name.
+    TraitCollision(Box<Collision>),
+    /// `Could not find trait %s`, an adaptation naming a class no
+    /// table holds.
+    TraitNotFound { name: String },
+    /// `Class %s is not a trait, Only traits may be used in 'as' and
+    /// 'insteadof' statements`.
+    NotATrait { class: String },
+    /// `Required Trait %s wasn't added to %s`.
+    TraitNotUsed { name: String, class: String },
+    /// `A precedence rule was defined for %s::%s but this method does
+    /// not exist`.
+    PrecedenceMissing { name: String, method: String },
+    /// `Failed to evaluate a trait precedence (%s). Method of trait %s
+    /// was defined to be excluded multiple times`.
+    ExcludedTwice { method: String, name: String },
+    /// `Inconsistent insteadof definition. The method %s is to be used
+    /// from %s, but %s is also on the exclude list`.
+    InsteadofItself { method: String, name: String },
+    /// `An alias was defined for %s::%s but this method does not exist`.
+    AliasMissing { name: String, method: String },
+    /// `An alias was defined for method %s(), which exists in both %s
+    /// and %s. Use %s::%s or %s::%s to resolve the ambiguity`.
+    AliasAmbiguous {
+        method: String,
+        first: String,
+        second: String,
+    },
+    /// `An alias (%s) was defined for method %s(), but this method does
+    /// not exist`.
+    AliasNowhere { alias: String, method: String },
+    /// `The modifiers of the trait method %s() are changed, but this
+    /// method does not exist. Error`.
+    ModifiersNowhere { method: String },
+    /// `%s and %s define the same constant (%s) in the composition of
+    /// %s. However, the definition differs and is considered
+    /// incompatible. Class was composed`.
+    TraitConstant {
+        first: String,
+        from: String,
+        constant: String,
+        class: String,
+    },
+    /// `Cannot use trait %s, because %s::%s conflicts with enum case
+    /// %s::%s`.
+    TraitConstantCase {
+        from: String,
+        constant: String,
+        class: String,
+    },
+    /// `%s and %s define the same property ($%s) in the composition of
+    /// %s. However, the definition differs and is considered
+    /// incompatible. Class was composed`.
+    TraitProperty {
+        first: String,
+        from: String,
+        property: String,
+        class: String,
+    },
+    /// `Readonly class %s cannot use trait with a non-readonly property
+    /// %s::$%s`.
+    ReadonlyTraitProperty {
+        class: String,
+        from: String,
+        property: String,
+    },
+    /// `Enum %s cannot include properties`, what `zend_verify_enum`
+    /// raises of a property a trait gave the enum.
+    EnumProperties { class: String },
+}
+
+/// The six names of a [`Refusal::TraitCollision`]: the trait a method
+/// was copied from and its name there, the class and the name it was
+/// to go in under, and the trait whose method already stands there and
+/// that method's name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Collision {
+    pub from: String,
+    pub method: String,
+    pub class: String,
+    pub name: String,
+    pub holder: String,
+    pub held: String,
 }
 
 /// `zend_visibility_string`.
@@ -495,7 +593,11 @@ impl fmt::Display for Refusal {
                     "Non-backed enum {class} cannot implement interface {interface}"
                 )
             }
-            Refusal::AbstractLeft { class, methods } => {
+            Refusal::AbstractLeft {
+                kind,
+                class,
+                methods,
+            } => {
                 let count = methods.len();
                 let plural = if count > 1 { "s" } else { "" };
                 let named = methods
@@ -505,10 +607,108 @@ impl fmt::Display for Refusal {
                     .collect::<Vec<_>>()
                     .join(", ");
                 let more = if count > 3 { ", ..." } else { "" };
+                let what = object_type_uc(*kind);
+                if *kind == ClassKind::Enum {
+                    return write!(
+                        f,
+                        "{what} {class} must implement {count} abstract method{plural} ({named}{more})"
+                    );
+                }
                 write!(
                     f,
-                    "Class {class} contains {count} abstract method{plural} and must therefore be declared abstract or implement the remaining method{plural} ({named}{more})"
+                    "{what} {class} contains {count} abstract method{plural} and must therefore be declared abstract or implement the remaining method{plural} ({named}{more})"
                 )
+            }
+            Refusal::TraitCollision(collision) => {
+                let Collision {
+                    from,
+                    method,
+                    class,
+                    name,
+                    holder,
+                    held,
+                } = &**collision;
+                write!(
+                    f,
+                    "Trait method {from}::{method} has not been applied as {class}::{name}, because of collision with {holder}::{held}"
+                )
+            }
+            Refusal::TraitNotFound { name } => write!(f, "Could not find trait {name}"),
+            Refusal::NotATrait { class } => write!(
+                f,
+                "Class {class} is not a trait, Only traits may be used in 'as' and 'insteadof' statements"
+            ),
+            Refusal::TraitNotUsed { name, class } => {
+                write!(f, "Required Trait {name} wasn't added to {class}")
+            }
+            Refusal::PrecedenceMissing { name, method } => write!(
+                f,
+                "A precedence rule was defined for {name}::{method} but this method does not exist"
+            ),
+            Refusal::ExcludedTwice { method, name } => write!(
+                f,
+                "Failed to evaluate a trait precedence ({method}). Method of trait {name} was defined to be excluded multiple times"
+            ),
+            Refusal::InsteadofItself { method, name } => write!(
+                f,
+                "Inconsistent insteadof definition. The method {method} is to be used from {name}, but {name} is also on the exclude list"
+            ),
+            Refusal::AliasMissing { name, method } => write!(
+                f,
+                "An alias was defined for {name}::{method} but this method does not exist"
+            ),
+            Refusal::AliasAmbiguous {
+                method,
+                first,
+                second,
+            } => write!(
+                f,
+                "An alias was defined for method {method}(), which exists in both {first} and {second}. Use {first}::{method} or {second}::{method} to resolve the ambiguity"
+            ),
+            Refusal::AliasNowhere { alias, method } => write!(
+                f,
+                "An alias ({alias}) was defined for method {method}(), but this method does not exist"
+            ),
+            Refusal::ModifiersNowhere { method } => write!(
+                f,
+                "The modifiers of the trait method {method}() are changed, but this method does not exist. Error"
+            ),
+            Refusal::TraitConstant {
+                first,
+                from,
+                constant,
+                class,
+            } => write!(
+                f,
+                "{first} and {from} define the same constant ({constant}) in the composition of {class}. However, the definition differs and is considered incompatible. Class was composed"
+            ),
+            Refusal::TraitConstantCase {
+                from,
+                constant,
+                class,
+            } => write!(
+                f,
+                "Cannot use trait {from}, because {from}::{constant} conflicts with enum case {class}::{constant}"
+            ),
+            Refusal::TraitProperty {
+                first,
+                from,
+                property,
+                class,
+            } => write!(
+                f,
+                "{first} and {from} define the same property (${property}) in the composition of {class}. However, the definition differs and is considered incompatible. Class was composed"
+            ),
+            Refusal::ReadonlyTraitProperty {
+                class,
+                from,
+                property,
+            } => write!(
+                f,
+                "Readonly class {class} cannot use trait with a non-readonly property {from}::${property}"
+            ),
+            Refusal::EnumProperties { class } => {
+                write!(f, "Enum {class} cannot include properties")
             }
         }
     }
@@ -541,6 +741,98 @@ impl fmt::Display for TentativeReturn {
     }
 }
 
+/// What a link raised that is no refusal, in the order raised: php
+/// records each while the class links (`zend_begin_record_errors`) and
+/// emits them before a fatal or once the class stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Raised {
+    /// A tentative return overridden out of step, `E_DEPRECATED`.
+    TentativeReturn(TentativeReturn),
+    /// `zend_traits_check_private_final_inheritance`'s
+    /// `E_COMPILE_WARNING`, `Private methods cannot be final as they are
+    /// never overridden by other classes`, of an `as` that made a trait's
+    /// method both.
+    PrivateFinal(Site),
+}
+
+impl Raised {
+    /// The level php raises it at.
+    #[must_use]
+    pub fn level(&self) -> Level {
+        match self {
+            Raised::TentativeReturn(_) => Level::Deprecated,
+            Raised::PrivateFinal(_) => Level::CompileWarning,
+        }
+    }
+
+    /// Where php raises it.
+    #[must_use]
+    pub fn site(&self) -> &Site {
+        match self {
+            Raised::TentativeReturn(tentative) => &tentative.site,
+            Raised::PrivateFinal(site) => site,
+        }
+    }
+}
+
+impl fmt::Display for Raised {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Raised::TentativeReturn(tentative) => tentative.fmt(f),
+            Raised::PrivateFinal(_) => f.write_str(
+                "Private methods cannot be final as they are never overridden by other classes",
+            ),
+        }
+    }
+}
+
+/// Where the op array of a method is: the class that declared it with a
+/// body, by name, and the method's index among that class's own
+/// declared methods. A method a trait gave a class runs the trait's
+/// op array, which php shares between the copies
+/// (`zend_add_trait_method` copies the `zend_op_array` and not its
+/// opcodes), so two methods of one body are one method to
+/// `zend_add_trait_method`'s check of a trait used twice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Body {
+    pub class: Name,
+    pub method: u32,
+}
+
+/// A class as a table holds it for the link: its declaration, and where
+/// its methods' bodies are when composition put another class's there,
+/// one [`Body`] per method in order; none for a class whose every
+/// method is its own.
+#[derive(Debug, Clone, Copy)]
+pub struct Held<'a> {
+    pub decl: &'a ClassDecl,
+    pub bodies: Option<&'a [Body]>,
+}
+
+impl Held<'_> {
+    /// The body of the class's method at `at`.
+    #[must_use]
+    pub(crate) fn body(&self, at: usize) -> Body {
+        match self.bodies.and_then(|bodies| bodies.get(at)) {
+            Some(body) => body.clone(),
+            None => Body {
+                class: self.decl.name.clone(),
+                method: u32::try_from(at).unwrap_or(u32::MAX),
+            },
+        }
+    }
+}
+
+/// A class composed with the traits it uses, what `zend_do_bind_traits`
+/// leaves in its tables: the declaration with the traits' methods,
+/// constants and properties as its own, in php's order, and the body of
+/// each of its methods.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Composed {
+    pub decl: ClassDecl,
+    pub bodies: Vec<Body>,
+}
+
 /// What linking one class came to, `zend_do_link_class`'s outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Linked {
@@ -555,12 +847,14 @@ pub enum Linked {
     Unresolved(Refused),
 }
 
-/// [`link`]'s answer: the outcome, and the deprecations the checks
-/// raised before it, in the order raised.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// [`link`]'s answer: the outcome, what the checks raised before it in
+/// the order raised, and, for a class that uses traits and links, the
+/// class composed with them.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Linking {
     pub outcome: Linked,
-    pub deprecations: Vec<TentativeReturn>,
+    pub raised: Vec<Raised>,
+    pub composed: Option<Composed>,
 }
 
 /// `inheritance_status`.
@@ -756,18 +1050,21 @@ fn default_text(default: &ConstExpr) -> String {
             format!("{}::{}", text(&class.0), text(&name.0))
         }
         ConstExpr::EnumCase { class, case } => format!("{}::{}", text(&class.0), text(&case.0)),
+        ConstExpr::ScopeClass => String::from("__CLASS__"),
         _ => String::from("<expression>"),
     }
 }
 
 /// `zend_get_function_declaration`: a method as php writes it in an
-/// incompatibility, the class that declared it before its name.
-fn declaration(function: &FunctionDecl, scope: &Scope<'_>) -> String {
+/// incompatibility, its own scope's name before its name and its types
+/// read in the side's scope.
+fn declaration(function: &FunctionDecl, side: &Side<'_>) -> String {
+    let scope = &side.scope;
     let mut out = String::new();
     if function.returns_by_ref {
         out.push_str("& ");
     }
-    out.push_str(&text(scope.name));
+    out.push_str(&text(side.shown));
     out.push_str("::");
     out.push_str(&text(&function.name.0));
     out.push('(');
@@ -806,6 +1103,27 @@ fn declaration(function: &FunctionDecl, scope: &Scope<'_>) -> String {
     out
 }
 
+/// One side of `do_inheritance_check_on_method`: the scope its types
+/// resolve in, `fixup_trait_scope`'s answer, and the class
+/// `ZEND_FN_SCOPE_NAME` prints for it, which for a trait's method not
+/// yet fixed up is the trait.
+#[derive(Clone, Copy)]
+struct Side<'a> {
+    scope: Scope<'a>,
+    shown: &'a [u8],
+}
+
+/// Which of php's calls of `do_inheritance_check_on_method` a check is:
+/// a parent's method, an interface's, or a trait's abstract method held
+/// against the one the class has (`zend_add_trait_method`), which
+/// `ZEND_INHERITANCE_CHECK_VISIBILITY` is not passed to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Check {
+    Parent,
+    Interface,
+    TraitAbstract,
+}
+
 /// The member tables of the chain above a class, the way php's tables
 /// hold them after `zend_do_inheritance`: each class's own members,
 /// then what it inherited that it does not redeclare.
@@ -815,35 +1133,102 @@ struct Tables<'a> {
     constants: Vec<(&'a ClassDecl, &'a ClassConstDecl)>,
 }
 
-/// The class being linked, the table it is linked against, and the
-/// deprecations raised so far.
+/// The class being linked, the table it is linked against, and what
+/// was raised so far.
 struct Linker<'a> {
-    lookup: &'a dyn Fn(&[u8]) -> Option<&'a ClassDecl>,
-    deprecations: Vec<TentativeReturn>,
+    lookup: &'a dyn Fn(&[u8]) -> Option<Held<'a>>,
+    raised: Vec<Raised>,
 }
 
 /// `zend_do_link_class`'s checks of `child` against the classes
-/// `lookup` finds by name, its parent and its interfaces among them:
-/// every refusal `zend_do_inheritance_ex` and
-/// `do_interface_implementation` make, the first in php's order.
-pub fn link<'a>(
-    child: &'a ClassDecl,
-    lookup: &'a dyn Fn(&[u8]) -> Option<&'a ClassDecl>,
-) -> Linking {
-    let mut linker = Linker {
-        lookup,
-        deprecations: Vec::new(),
+/// `lookup` finds by name, its traits, its parent and its interfaces
+/// among them: the traits bound first ([`traits`]), then every refusal
+/// `zend_do_inheritance_ex` and `do_interface_implementation` make,
+/// the first in php's order.
+pub fn link<'a>(child: &'a ClassDecl, lookup: &'a dyn Fn(&[u8]) -> Option<Held<'a>>) -> Linking {
+    if child.traits.is_empty() {
+        let mut linker = Linker {
+            lookup,
+            raised: Vec::new(),
+        };
+        let settled = linker.link_refused(child, &[]);
+        return Linking {
+            outcome: settled.outcome,
+            raised: linker.raised,
+            composed: None,
+        };
+    }
+    let composition = match traits::compose(child, lookup) {
+        Ok(composition) => composition,
+        Err(failed) => {
+            let (refused, raised) = *failed;
+            return Linking {
+                outcome: Linked::Refused(refused),
+                raised,
+                composed: None,
+            };
+        }
     };
-    let outcome = linker.link_refused(child);
+    let traits::Composition {
+        mut decl,
+        mut bodies,
+        abstracts,
+        raised,
+    } = composition;
+    let (settled, raised) = link_composed(&|name| lookup(name), &decl, &abstracts, raised);
+    for at in settled.added {
+        if let Some(copy) = abstracts.get(at) {
+            decl.methods.push(copy.method.clone());
+            bodies.push(copy.body.clone());
+        }
+    }
+    if settled.stringable {
+        decl.interfaces.push(Name::from("Stringable"));
+    }
+    let composed = (settled.outcome == Linked::Linked).then_some(Composed { decl, bodies });
     Linking {
-        outcome,
-        deprecations: linker.deprecations,
+        outcome: settled.outcome,
+        raised,
+        composed,
+    }
+}
+
+/// [`Linker::link_refused`] over a composed declaration, which lives
+/// shorter than the table: the lookup narrowed to its lifetime.
+fn link_composed<'b>(
+    lookup: &'b dyn Fn(&[u8]) -> Option<Held<'b>>,
+    decl: &'b ClassDecl,
+    abstracts: &'b [traits::Copy],
+    raised: Vec<Raised>,
+) -> (Settled, Vec<Raised>) {
+    let mut linker = Linker { lookup, raised };
+    let settled = linker.link_refused(decl, abstracts);
+    (settled, linker.raised)
+}
+
+/// What [`Linker::link_refused`] settled: the outcome, which of a
+/// trait's abstract methods the class took as its own (indices into the
+/// copies it was handed), and whether a trait's `__toString` makes it
+/// `Stringable`.
+struct Settled {
+    outcome: Linked,
+    added: Vec<usize>,
+    stringable: bool,
+}
+
+impl Settled {
+    fn of(outcome: Linked) -> Settled {
+        Settled {
+            outcome,
+            added: Vec::new(),
+            stringable: false,
+        }
     }
 }
 
 impl<'a> Linker<'a> {
     fn class_named(&self, name: &[u8]) -> Option<&'a ClassDecl> {
-        (self.lookup)(name)
+        (self.lookup)(name).map(|held| held.decl)
     }
 
     fn class_parent(&self, class: &ClassDecl) -> Option<&'a ClassDecl> {
@@ -1310,18 +1695,34 @@ impl<'a> Linker<'a> {
             .find(|name| self.lookup(child, name).is_none())
     }
 
-    /// `do_inheritance_check_on_method` for a method the child declares
-    /// over the one its parent's table or an interface holds.
+    /// The two sides of a check of the child's own method against one a
+    /// parent or an interface declared.
+    fn own_over(child: &'a ClassDecl, proto_class: &'a ClassDecl) -> (Side<'a>, Side<'a>) {
+        (
+            Side {
+                scope: Self::scope_of(child, Cls::Linking),
+                shown: &child.name.0,
+            },
+            Side {
+                scope: Self::scope_of(child, Cls::Linked(proto_class)),
+                shown: &proto_class.name.0,
+            },
+        )
+    }
+
+    /// `do_inheritance_check_on_method` of `fe` over `proto`, each read
+    /// on its side, with the checks `check` names.
     fn method_refused(
         &mut self,
         child: &'a ClassDecl,
         fe: &MethodDecl,
+        fe_side: Side<'a>,
         proto: &MethodDecl,
-        proto_class: &'a ClassDecl,
-        interface: bool,
+        proto_side: Side<'a>,
+        check: Check,
     ) -> Option<Linked> {
-        let fe_scope = Self::scope_of(child, Cls::Linking);
-        let proto_scope = Self::scope_of(child, Cls::Linked(proto_class));
+        let (fe_scope, proto_scope) = (fe_side.scope, proto_side.scope);
+        let interface = check == Check::Interface;
         let site = Site {
             file: fe.function.file.clone(),
             line: fe.function.line,
@@ -1332,9 +1733,9 @@ impl<'a> Linker<'a> {
                 site: site.clone(),
             }))
         };
-        let parent = text(proto_scope.name);
+        let parent = text(proto_side.shown);
         let method = text(&fe.function.name.0);
-        let class = text(&child.name.0);
+        let class = text(fe_side.shown);
         let is_ctor = proto.function.name.0.eq_ignore_ascii_case(b"__construct");
         if proto.visibility == Visibility::Private && !proto.is_abstract && !is_ctor {
             return None;
@@ -1360,7 +1761,7 @@ impl<'a> Linker<'a> {
         if is_ctor && !proto.is_abstract && !interface {
             return None;
         }
-        if strength(fe.visibility) > strength(proto.visibility) {
+        if check != Check::TraitAbstract && strength(fe.visibility) > strength(proto.visibility) {
             return refused(Refusal::MethodVisibility {
                 class,
                 method,
@@ -1369,8 +1770,8 @@ impl<'a> Linker<'a> {
             });
         }
         let status = self.implementation(child, fe, &fe_scope, proto, &proto_scope);
-        let child_text = declaration(&fe.function, &fe_scope);
-        let parent_text = declaration(&proto.function, &proto_scope);
+        let child_text = declaration(&fe.function, &fe_side);
+        let parent_text = declaration(&proto.function, &proto_side);
         match status {
             Status::Success => None,
             Status::Warning => {
@@ -1380,11 +1781,11 @@ impl<'a> Linker<'a> {
                     .iter()
                     .any(|a| a.name.0.eq_ignore_ascii_case(b"ReturnTypeWillChange"));
                 if !silenced {
-                    self.deprecations.push(TentativeReturn {
+                    self.raised.push(Raised::TentativeReturn(TentativeReturn {
                         child: child_text,
                         parent: parent_text,
                         site,
-                    });
+                    }));
                 }
                 None
             }
@@ -1634,8 +2035,10 @@ impl<'a> Linker<'a> {
     }
 
     /// Everything `zend_do_link_class` refuses about `child`, the first
-    /// refusal in php's order.
-    fn link_refused(&mut self, child: &'a ClassDecl) -> Linked {
+    /// refusal in php's order, a class that uses traits already
+    /// composed with them and `abstracts` the copies of their abstract
+    /// methods, which php binds after the parent.
+    fn link_refused(&mut self, child: &'a ClassDecl, abstracts: &'a [traits::Copy]) -> Settled {
         // What the child's table holds as the checks go, each with the
         // class that put it there, none for the child's own.
         let mut constants: Table<'a, ClassConstDecl> =
@@ -1645,15 +2048,181 @@ impl<'a> Linker<'a> {
             && let Some(parent) = self.class_named(&parent_name.0)
             && let Some(linked) = self.inherit(child, parent, &mut constants, &mut methods)
         {
-            return linked;
+            return Settled::of(linked);
         }
+        let added = match self.trait_abstracts(child, abstracts, &mut methods) {
+            Ok(added) => added,
+            Err(linked) => return Settled::of(*linked),
+        };
         if let Some(linked) = self.implement(child, &mut constants, &mut methods) {
-            return linked;
+            return Settled::of(linked);
         }
-        match abstract_left(child, &methods) {
-            Some(refusal) => Linked::Refused(at_class(child, refusal)),
-            None => Linked::Linked,
+        if let Some(refusal) = abstract_left(child, &methods) {
+            return Settled::of(Linked::Refused(at_class(child, refusal)));
         }
+        if let Some(refusal) = enum_properties(child) {
+            return Settled::of(Linked::Refused(at_class(child, refusal)));
+        }
+        let stringable = match self.stringable(child, &methods) {
+            Ok(stringable) => stringable,
+            Err(linked) => return Settled::of(*linked),
+        };
+        Settled {
+            outcome: Linked::Linked,
+            added,
+            stringable,
+        }
+    }
+
+    /// The second pass of `zend_do_traits_method_binding`, made once the
+    /// parent is inherited: each abstract method of a used trait, in
+    /// php's order, is held against the method the class has under its
+    /// name, its own, a trait's or its parent's, as
+    /// `zend_add_trait_method` holds it, and taken as the class's own
+    /// where it has none. A copy the pass took itself still has its
+    /// trait's scope, so the same body at the same visibility again is
+    /// no second method. The answer is the copies taken, by index.
+    ///
+    /// ```php
+    /// trait T { abstract function f(); abstract public function g(int $a): int; }
+    /// class P { function f() { return "P"; } }
+    /// class C extends P { use T; function g(int $a): int { return $a; } }
+    /// echo (new C)->f(), (new C)->g(1), "\n";
+    /// ```
+    /// ```expect exit=0
+    /// P1
+    /// ```
+    ///
+    /// ```php
+    /// trait T { abstract private function f(int $a); }
+    /// class P { private function f(string $a) {} }
+    /// class C extends P { use T; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Declaration of P::f(string $a) must be compatible with T::f(int $a) in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// trait A { abstract static function f(); }
+    /// class C { use A; function f() {} }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot make static method A::f() non static in class C in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// trait A { abstract function f(); }
+    /// class C { use A; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Class C contains 1 abstract method and must therefore be declared abstract or implement the remaining method (C::f) in %s on line 3
+    /// ```
+    fn trait_abstracts(
+        &mut self,
+        child: &'a ClassDecl,
+        copies: &'a [traits::Copy],
+        methods: &mut Table<'a, MethodDecl>,
+    ) -> Result<Vec<usize>, Box<Linked>> {
+        let mut added: Vec<usize> = Vec::new();
+        for (at, copy) in copies.iter().enumerate() {
+            let Some(&(holder, existing)) = methods
+                .iter()
+                .find(|(_, m)| m.function.name.0.eq_ignore_ascii_case(&copy.key))
+            else {
+                methods.push((None, &copy.method));
+                added.push(at);
+                continue;
+            };
+            let taken = added
+                .iter()
+                .map(|a| &copies[*a])
+                .find(|taken| std::ptr::eq(&raw const taken.method, existing));
+            if let Some(taken) = taken
+                && taken.body == copy.body
+                && taken.method.visibility == copy.method.visibility
+            {
+                continue;
+            }
+            let fe_side = match (taken, holder) {
+                (Some(taken), _) => Side {
+                    scope: Self::scope_of(child, Cls::Linking),
+                    shown: &taken.from.0,
+                },
+                (None, None) => Side {
+                    scope: Self::scope_of(child, Cls::Linking),
+                    shown: &child.name.0,
+                },
+                (None, Some(declaring)) => Side {
+                    scope: Self::scope_of(child, Cls::Linked(declaring)),
+                    shown: &declaring.name.0,
+                },
+            };
+            let proto_side = Side {
+                scope: Self::scope_of(child, Cls::Linking),
+                shown: &copy.from.0,
+            };
+            if let Some(linked) = self.method_refused(
+                child,
+                existing,
+                fe_side,
+                &copy.method,
+                proto_side,
+                Check::TraitAbstract,
+            ) {
+                return Err(Box::new(linked));
+            }
+        }
+        Ok(added)
+    }
+
+    /// The end of `zend_do_link_class`: a class a trait gave
+    /// `__toString` implements `Stringable`, which the compiler adds for
+    /// a class that declares it, and is held to it as
+    /// `do_interface_implementation` holds any class.
+    ///
+    /// ```php
+    /// trait T { function __toString(): string { return "s"; } }
+    /// class C { use T; }
+    /// var_dump(new C instanceof Stringable, (string) new C);
+    /// ```
+    /// ```expect exit=0
+    /// bool(true)
+    /// string(1) "s"
+    /// ```
+    fn stringable(
+        &mut self,
+        child: &'a ClassDecl,
+        methods: &Table<'a, MethodDecl>,
+    ) -> Result<bool, Box<Linked>> {
+        if child.traits.is_empty() || child.kind == ClassKind::Trait {
+            return Ok(false);
+        }
+        let Some(&(None, own)) = methods
+            .iter()
+            .find(|(_, m)| m.function.name.0.eq_ignore_ascii_case(b"__toString"))
+        else {
+            return Ok(false);
+        };
+        let Some(stringable) = self.class_named(b"Stringable") else {
+            return Ok(false);
+        };
+        let mut all = Vec::new();
+        self.interfaces_of(&child.interfaces, &mut all, 0);
+        let through_parent = self
+            .class_parent(child)
+            .is_some_and(|parent| self.instance_of(parent, stringable));
+        if through_parent || all.iter().any(|interface| same(interface, stringable)) {
+            return Ok(false);
+        }
+        if let Some(proto) = stringable.methods.iter().find(|m| same_method(m, own)) {
+            let (fe_side, proto_side) = Self::own_over(child, stringable);
+            if let Some(linked) =
+                self.method_refused(child, own, fe_side, proto, proto_side, Check::Interface)
+            {
+                return Err(Box::new(linked));
+            }
+        }
+        Ok(true)
     }
 
     /// `zend_do_inheritance_ex`: the parent itself, then its properties,
@@ -1701,7 +2270,9 @@ impl<'a> Linker<'a> {
         for &(declaring, method) in &tables.methods {
             match methods.iter().find(|(_, m)| same_method(m, method)) {
                 Some((None, own)) => {
-                    if let Some(linked) = self.method_refused(child, own, method, declaring, false)
+                    let (fe_side, proto_side) = Self::own_over(child, declaring);
+                    if let Some(linked) =
+                        self.method_refused(child, own, fe_side, method, proto_side, Check::Parent)
                     {
                         return Some(linked);
                     }
@@ -1769,9 +2340,15 @@ impl<'a> Linker<'a> {
             for method in &interface.methods {
                 match methods.iter().find(|(_, m)| same_method(m, method)) {
                     Some((None, own)) => {
-                        if let Some(linked) =
-                            self.method_refused(child, own, method, interface, true)
-                        {
+                        let (fe_side, proto_side) = Self::own_over(child, interface);
+                        if let Some(linked) = self.method_refused(
+                            child,
+                            own,
+                            fe_side,
+                            method,
+                            proto_side,
+                            Check::Interface,
+                        ) {
                             return Some(linked);
                         }
                     }
@@ -1871,7 +2448,7 @@ fn abstract_left(
     child: &ClassDecl,
     methods: &[(Option<&ClassDecl>, &MethodDecl)],
 ) -> Option<Refusal> {
-    if child.kind != ClassKind::Class || child.flags.is_abstract {
+    if !matches!(child.kind, ClassKind::Class | ClassKind::Enum) || child.flags.is_abstract {
         return None;
     }
     let left: Vec<String> = methods
@@ -1885,9 +2462,37 @@ fn abstract_left(
         })
         .collect();
     (!left.is_empty()).then(|| Refusal::AbstractLeft {
+        kind: child.kind,
         class: text(&child.name.0),
         methods: left,
     })
+}
+
+/// `zend_verify_enum_properties`: an enum holds no property but its
+/// `name` and a backed one's `value`, which is what a trait's property
+/// is refused by once the trait put it there.
+///
+/// ```php
+/// trait A { public $x; }
+/// enum E { use A; case X; }
+/// ```
+/// ```expect exit=255
+/// Fatal error: Enum E cannot include properties in %s on line 3
+/// ```
+fn enum_properties(child: &ClassDecl) -> Option<Refusal> {
+    if child.kind != ClassKind::Enum {
+        return None;
+    }
+    child
+        .properties
+        .iter()
+        .any(|p| {
+            !(&*p.name.0 == b"name"
+                || (child.backing != EnumBacking::Pure && &*p.name.0 == b"value"))
+        })
+        .then(|| Refusal::EnumProperties {
+            class: text(&child.name.0),
+        })
 }
 
 #[cfg(test)]

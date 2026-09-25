@@ -152,6 +152,7 @@ fn interface(name: &[u8], extends: &[&[u8]], methods: Vec<MethodDecl>) -> ClassD
         parent: None,
         interfaces: extends.iter().map(|i| Name((*i).into())).collect(),
         traits: Vec::new(),
+        adaptations: Vec::new(),
         backing: EnumBacking::Pure,
         constants: Vec::new(),
         properties: Vec::new(),

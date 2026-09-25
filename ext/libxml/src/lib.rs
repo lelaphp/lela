@@ -293,6 +293,7 @@ fn error_class() -> ClassDecl {
         parent: None,
         interfaces: Vec::new(),
         traits: Vec::new(),
+        adaptations: Vec::new(),
         backing: EnumBacking::default(),
         constants: Vec::new(),
         properties: vec![

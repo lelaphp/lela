@@ -902,15 +902,17 @@ fn interface_exists(req: &mut Request) -> Result<Value, Thrown> {
 }
 
 /// `trait_exists(string $trait, bool $autoload = true): bool`, php's
-/// `ZEND_FUNCTION(trait_exists)`: `ZEND_ACC_TRAIT`. The compiler reads
-/// no trait yet and no extension declares one, so the witness holds the
-/// refusals alone.
+/// `ZEND_FUNCTION(trait_exists)`: `ZEND_ACC_TRAIT`, which neither
+/// `class_exists` nor `interface_exists` takes.
 ///
 /// ```php
-/// class C {} interface I {}
-/// var_dump(trait_exists('C'), trait_exists('I'), trait_exists('Nope', false));
+/// trait T {} class C {} interface I {}
+/// var_dump(trait_exists('t'), trait_exists('C'), trait_exists('I'), trait_exists('Nope', false), class_exists('T'), interface_exists('T'));
 /// ```
 /// ```expect
+/// bool(true)
+/// bool(false)
+/// bool(false)
 /// bool(false)
 /// bool(false)
 /// bool(false)
@@ -1135,11 +1137,15 @@ fn get_declared_classes(req: &mut Request) -> Result<Value, Thrown> {
 /// `ZEND_FUNCTION(get_declared_traits)`.
 ///
 /// ```php
-/// class C {}
+/// trait T {} class C { use T; } trait U {}
 /// var_dump(get_declared_traits());
 /// ```
 /// ```expect
-/// array(0) {
+/// array(2) {
+///   [0]=>
+///   string(1) "T"
+///   [1]=>
+///   string(1) "U"
 /// }
 /// ```
 fn get_declared_traits(req: &mut Request) -> Result<Value, Thrown> {

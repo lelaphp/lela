@@ -253,6 +253,24 @@ impl Emit<'_> {
                     node.range(),
                 )
             }
+            Stmt::TraitDecl(id) => {
+                let node = &tree[id];
+                let Some(name) = node.name else {
+                    return Err(unread(line, "a trait"));
+                };
+                let attributes = self.walk_attributes(&node.attrs)?;
+                self.walk_class(
+                    ClassKind::Trait,
+                    name,
+                    None,
+                    Vec::new(),
+                    attributes,
+                    node.doc_comment,
+                    node.body,
+                    line,
+                    node.range(),
+                )
+            }
             Stmt::EnumDecl(id) => self.walk_enum_decl(id, line),
             _ => Err(self.internal("a statement that is no class declaration")),
         }
@@ -321,6 +339,7 @@ impl Emit<'_> {
             node.params,
             node.ret,
             node.body,
+            false,
             node.doc_comment,
             line,
             node.range(),
@@ -397,6 +416,7 @@ impl Emit<'_> {
         params: NodeId<ParamList>,
         ret: Option<NodeId<tree::RetType>>,
         body: Option<NodeId<Block>>,
+        bodyless: bool,
         doc_comment: Option<TokenId>,
         line: u32,
         range: TextRange,
@@ -409,11 +429,15 @@ impl Emit<'_> {
             },
             None => None,
         };
-        let Some(body) = body else {
-            return Err(unread(line, "a function whose body is no block"));
+        let body = match body {
+            Some(body) => self.parsed.tree[body].stmts.to_vec(),
+            // A trait's method written with no block, which
+            // `zend_begin_method_decl` holds to its `abstract`; its op
+            // array is the prologue and the final return alone.
+            None if bodyless => Vec::new(),
+            None => return Err(unread(line, "a function whose body is no block")),
         };
         let doc_comment = self.doc_comment(doc_comment);
-        let body = self.parsed.tree[body].stmts.to_vec();
         Ok(Function {
             name,
             parameters,
@@ -589,11 +613,7 @@ impl Emit<'_> {
                 format!(
                     "Cannot use \"{}\" as {} as it is reserved",
                     String::from_utf8_lossy(&name),
-                    match kind {
-                        ClassKind::Interface => "an interface name",
-                        ClassKind::Enum => "an enum name",
-                        _ => "a class name",
-                    }
+                    class_name_kind(kind)
                 ),
             ));
         }
@@ -603,10 +623,7 @@ impl Emit<'_> {
                 line,
                 message: format!(
                     "Using \"_\" as {} is deprecated since 8.4",
-                    match kind {
-                        ClassKind::Interface => "an interface name",
-                        _ => "a class name",
-                    }
+                    class_name_kind(kind)
                 )
                 .as_str()
                 .into(),
@@ -618,6 +635,7 @@ impl Emit<'_> {
             backing: None,
             parent,
             interfaces,
+            traits: Vec::new(),
             attributes,
             doc_comment: self.doc_comment(doc_comment),
             properties: Vec::new(),
@@ -639,10 +657,126 @@ impl Emit<'_> {
             ClassMember::ClassConstDecl(id) => self.walk_constants(class, id),
             ClassMember::PropertyDecl(id) => self.walk_properties(class, id),
             ClassMember::MethodDecl(id) => self.walk_method(class, id),
-            ClassMember::TraitUseDecl(id) => {
-                Err(unread(self.parsed.tree[id].line(), "a `use` of a trait"))
-            }
+            ClassMember::TraitUseDecl(id) => self.walk_trait_use(class, id),
             ClassMember::EnumCaseDecl(id) => self.walk_case(class, id),
+        }
+    }
+
+    /// One `use A, B { ... }` of a class body, php's `ZEND_AST_USE_TRAIT`:
+    /// the names as written and each adaptation of its list, the method
+    /// references, the names an `insteadof` excludes, and an `as`'s
+    /// modifier and alias.
+    fn walk_trait_use(
+        &mut self,
+        class: &mut Class,
+        id: NodeId<tree::TraitUseDecl>,
+    ) -> Result<(), CompileError> {
+        let node = self.parsed.tree[id].clone();
+        let names = node.traits.iter().map(|t| self.text(*t).to_vec()).collect();
+        let mut adaptations = Vec::new();
+        if let Some(list) = node.adaptations {
+            let list = self.parsed.tree[list].trait_adaptations.clone();
+            for adaptation in &list {
+                adaptations.push(self.walk_adaptation(*adaptation)?);
+            }
+        }
+        class.traits.push(TraitUse {
+            names,
+            adaptations,
+            line: node.line(),
+        });
+        Ok(())
+    }
+
+    /// One adaptation of a trait `use`, `ZEND_AST_TRAIT_PRECEDENCE` or
+    /// `ZEND_AST_TRAIT_ALIAS`, its modifier read as
+    /// `zend_modifier_token_to_flag` reads a method's.
+    fn walk_adaptation(
+        &self,
+        adaptation: tree::TraitAdaptation,
+    ) -> Result<Adaptation, CompileError> {
+        let tree = &self.parsed.tree;
+        let (reference, line) = match adaptation {
+            tree::TraitAdaptation::InsteadofAdaptation(id) => (tree[id].r#ref, tree[id].line()),
+            tree::TraitAdaptation::AsAdaptation(id) => (tree[id].r#ref, tree[id].line()),
+        };
+        let reference = &tree[reference];
+        let Some(method) = reference.method.and_then(|m| tree[m].name) else {
+            return Err(unread(line, "a trait adaptation naming no method"));
+        };
+        // `static::m` is no name to the tree, which reads `static` as a
+        // keyword; php resolves it as a trait name and refuses it as
+        // reserved, which the compile does from its spelling.
+        let range = reference.range();
+        let written = self
+            .parsed
+            .source
+            .get(range.start as usize..(range.start + range.len) as usize)
+            .unwrap_or_default();
+        let trait_name = match reference.r#trait {
+            Some(t) => Some(self.text(t).to_vec()),
+            None if written.len() > 6
+                && written[..6].eq_ignore_ascii_case(b"static")
+                && written[6..].trim_ascii_start().starts_with(b"::") =>
+            {
+                Some(written[..6].to_vec())
+            }
+            None => None,
+        };
+        let method = self.text(method).to_vec();
+        match adaptation {
+            tree::TraitAdaptation::InsteadofAdaptation(id) => {
+                let Some(trait_name) = trait_name else {
+                    return Err(unread(line, "an `insteadof` naming no trait"));
+                };
+                Ok(Adaptation::Insteadof {
+                    trait_name,
+                    method,
+                    excluded: tree[id]
+                        .excluded
+                        .iter()
+                        .map(|t| self.text(*t).to_vec())
+                        .collect(),
+                    line,
+                })
+            }
+            tree::TraitAdaptation::AsAdaptation(id) => {
+                let node = &tree[id];
+                let modifier = match node
+                    .vis
+                    .and_then(|vis| self.parsed.tokens.get(vis.0 as usize))
+                {
+                    None => None,
+                    Some(token) => Some(match token.kind {
+                        SyntaxKind::PUBLIC_KW => AsModifier::Visibility(Visibility::Public),
+                        SyntaxKind::PROTECTED_KW => AsModifier::Visibility(Visibility::Protected),
+                        SyntaxKind::PRIVATE_KW => AsModifier::Visibility(Visibility::Private),
+                        SyntaxKind::FINAL_KW => AsModifier::Final,
+                        SyntaxKind::STATIC_KW => AsModifier::Static,
+                        SyntaxKind::ABSTRACT_KW => AsModifier::Abstract,
+                        SyntaxKind::READONLY_KW => AsModifier::Readonly,
+                        _ => {
+                            return Err(
+                                self.internal("an `as` modifier that is no member modifier")
+                            );
+                        }
+                    }),
+                };
+                let alias = match node.alias {
+                    Some(alias) => match tree[alias].name {
+                        Some(name) => Some(self.text(name).to_vec()),
+                        None => return Err(unread(line, "a trait alias")),
+                    },
+                    None => None,
+                };
+                Ok(Adaptation::As {
+                    trait_name,
+                    method,
+                    modifier,
+                    alias,
+                    line,
+                })
+            }
         }
     }
 
@@ -770,7 +904,11 @@ impl Emit<'_> {
             return Err(unread(line, "an attribute before a class member"));
         }
         let modifiers = self.walk_modifiers(&node.modifiers, line)?;
-        if modifiers.any(&[Flag::Abstract, Flag::Readonly, Flag::Var])
+        // An abstract method is read in a trait alone so far, whose
+        // `zend_begin_method_decl` takes one with no class modifier.
+        let in_trait = class.kind == ClassKind::Trait;
+        if modifiers.any(&[Flag::Readonly, Flag::Var])
+            || (modifiers.has(Flag::Abstract) && !in_trait)
             || modifiers.set_visibility.is_some()
         {
             return Err(unread(line, "a class member"));
@@ -785,6 +923,7 @@ impl Emit<'_> {
             node.params,
             node.ret,
             node.body,
+            in_trait,
             node.doc_comment,
             line,
             node.range(),
@@ -793,6 +932,8 @@ impl Emit<'_> {
             function,
             visibility: modifiers.visibility.unwrap_or_default(),
             is_static: modifiers.has(Flag::Static),
+            is_abstract: modifiers.has(Flag::Abstract),
+            has_body: node.body.is_some(),
             is_final: modifiers.has(Flag::Final),
             constants_before: class.constants.len(),
         });
@@ -809,6 +950,17 @@ pub(super) fn unread(line: u32, what: &str) -> CompileError {
         message: format!("{what} this compiler cannot read yet"),
         line,
         raised: Vec::new(),
+    }
+}
+
+/// What `zend_assert_valid_class_name` calls a declaration's name in
+/// its refusals, by the kind being declared.
+fn class_name_kind(kind: ClassKind) -> &'static str {
+    match kind {
+        ClassKind::Interface => "an interface name",
+        ClassKind::Enum => "an enum name",
+        ClassKind::Trait => "a trait name",
+        ClassKind::Class => "a class name",
     }
 }
 
@@ -849,6 +1001,8 @@ pub(super) struct Class {
     pub(super) backing: Option<TypeExpr>,
     pub(super) parent: Option<Vec<u8>>,
     pub(super) interfaces: Vec<Vec<u8>>,
+    /// Each `use` of a trait the body writes, in the order written.
+    pub(super) traits: Vec<TraitUse>,
     pub(super) attributes: Vec<Attr>,
     pub(super) doc_comment: Option<Vec<u8>>,
     pub(super) properties: Vec<Property>,
@@ -860,6 +1014,48 @@ pub(super) struct Class {
     pub(super) line: u32,
     /// The line of the closing brace, `ce->info.user.line_end`.
     pub(super) end_line: u32,
+}
+
+/// One `use` of traits in a class body, php's `ZEND_AST_USE_TRAIT`: the
+/// names as written, before `zend_resolve_const_class_name_reference`
+/// resolves them, the adaptations of its list, and the line of the
+/// `use`, where `zend_compile_use_trait` raises.
+#[derive(Debug, PartialEq)]
+pub(super) struct TraitUse {
+    pub(super) names: Vec<Vec<u8>>,
+    pub(super) adaptations: Vec<Adaptation>,
+    pub(super) line: u32,
+}
+
+/// One adaptation as written, php's `ZEND_AST_TRAIT_PRECEDENCE` or
+/// `ZEND_AST_TRAIT_ALIAS`, with the trait names still unresolved.
+#[derive(Debug, PartialEq)]
+pub(super) enum Adaptation {
+    Insteadof {
+        trait_name: Vec<u8>,
+        method: Vec<u8>,
+        excluded: Vec<Vec<u8>>,
+        line: u32,
+    },
+    As {
+        trait_name: Option<Vec<u8>>,
+        method: Vec<u8>,
+        modifier: Option<AsModifier>,
+        alias: Option<Vec<u8>>,
+        line: u32,
+    },
+}
+
+/// The modifier token an `as` wrote, before
+/// `zend_check_trait_alias_modifiers` refuses the ones a trait alias
+/// may not take.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AsModifier {
+    Visibility(Visibility),
+    Final,
+    Static,
+    Abstract,
+    Readonly,
 }
 
 /// One attribute as written, php's `ZEND_AST_ATTRIBUTE`: the class name
@@ -927,11 +1123,17 @@ pub(super) struct Promoted {
 
 /// One method, php's `ZEND_AST_METHOD`: a function with the group's
 /// modifiers beside it.
+#[allow(clippy::struct_excessive_bools)] // the ZEND_ACC_* bits as written, and whether a block follows
 #[derive(Debug, PartialEq)]
 pub(super) struct Method {
     pub(super) function: Function,
     pub(super) visibility: Visibility,
     pub(super) is_static: bool,
+    /// `ZEND_ACC_ABSTRACT` as written, and whether a block follows the
+    /// signature, the two facts `zend_begin_method_decl` holds against
+    /// each other.
+    pub(super) is_abstract: bool,
+    pub(super) has_body: bool,
     pub(super) is_final: bool,
     /// How many of the class's constants stand before the method in the
     /// body, which are the ones `CG(active_class_entry)->constants_table`

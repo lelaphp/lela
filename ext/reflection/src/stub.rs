@@ -125,6 +125,7 @@ fn class(name: &[u8], parent: Option<&[u8]>, interfaces: &[&[u8]]) -> ClassDecl 
         parent: parent.map(|p| Name(p.into())),
         interfaces: interfaces.iter().map(|i| Name((*i).into())).collect(),
         traits: Vec::new(),
+        adaptations: Vec::new(),
         backing: EnumBacking::Pure,
         constants: Vec::new(),
         properties: Vec::new(),

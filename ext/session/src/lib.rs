@@ -360,6 +360,7 @@ fn class(
         parent: None,
         interfaces: interfaces.iter().map(|i| Name((*i).into())).collect(),
         traits: Vec::new(),
+        adaptations: Vec::new(),
         backing: EnumBacking::Pure,
         constants: Vec::new(),
         properties: Vec::new(),

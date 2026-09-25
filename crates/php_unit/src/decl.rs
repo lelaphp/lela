@@ -3,8 +3,9 @@
 //! constant expressions still unevaluated. Produced by the compiler for
 //! user code and by the native macros for natives; consumed by the linker,
 //! Reflection, the dumpers and the stub cross-check, which read one model.
-//! Data only: no method here, since the eighteen types are re-exported
-//! by `php_engine::api::decl` and their surface is `api.lock`'s.
+//! Data only: no method here, since the types a native declares with are
+//! re-exported by `php_engine::api::decl` and their surface is
+//! `api.lock`'s; the trait adaptations, which no native writes, are not.
 
 /// A name as written: bytes, interned by the engine at publication.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
@@ -186,6 +187,11 @@ pub enum ConstExpr {
         arguments: Vec<ConstExpr>,
     },
     Closure(u32),
+    /// `__CLASS__` in a trait's constant expression, php's
+    /// `ZEND_AST_CONSTANT_CLASS`: the name of the scope the expression
+    /// is evaluated in, which is the class that took the member from the
+    /// trait, and the empty string where there is none.
+    ScopeClass,
 }
 
 /// One argument of an attribute, positional or named.
@@ -320,10 +326,57 @@ pub struct ClassConstDecl {
     pub doc_comment: Option<Box<[u8]>>,
 }
 
+/// A method a trait adaptation names, php's `zend_trait_method_reference`:
+/// `T::f` with the trait written, or `f` alone, which the link resolves
+/// to the one used trait that has it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraitMethodRef {
+    pub trait_name: Option<Name>,
+    pub method: Name,
+}
+
+/// The one modifier an `as` may write, php's `member_modifier` under
+/// `ZEND_MODIFIER_TARGET_METHOD` less the `static` and `abstract`
+/// `zend_check_trait_alias_modifiers` refuses: a visibility the copy
+/// takes, or `final`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AliasModifier {
+    Visibility(Visibility),
+    Final,
+}
+
+/// One adaptation of a class's trait `use` list, as written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TraitAdaptation {
+    /// `T::f insteadof A, B;`, php's `zend_trait_precedence`: the
+    /// method of `trait_name` is the one taken, the same-named method
+    /// of each trait `excluded` names is left out.
+    Insteadof {
+        trait_name: Name,
+        method: Name,
+        excluded: Vec<Name>,
+    },
+    /// `[T::]f as [modifier] [alias];`, php's `zend_trait_alias`: a
+    /// copy of the method under `alias`, or the method itself with the
+    /// modifier where no alias is written. The grammar writes at least
+    /// one of the two.
+    As {
+        method: TraitMethodRef,
+        modifier: Option<AliasModifier>,
+        alias: Option<Name>,
+    },
+}
+
 /// A class, interface, trait or enum, unlinked: names, not identities.
 /// `line` and `end_line` are `ce->info.user.line_start` and `line_end`,
 /// the lines of the keyword and of the closing brace, and zero on a
 /// native, whose `file` is empty.
+///
+/// `traits` is php's `ce->trait_names`, every trait each `use` of the
+/// body names, in the order written, and `adaptations` the
+/// `ce->trait_precedences` and `ce->trait_aliases` of their adaptation
+/// lists, in one list in the order written; the link reads each kind
+/// in its own order (`zend_traits_init_trait_structures`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClassDecl {
     pub name: Name,
@@ -332,6 +385,7 @@ pub struct ClassDecl {
     pub parent: Option<Name>,
     pub interfaces: Vec<Name>,
     pub traits: Vec<Name>,
+    pub adaptations: Vec<TraitAdaptation>,
     pub backing: EnumBacking,
     pub constants: Vec<ClassConstDecl>,
     pub properties: Vec<PropertyDecl>,

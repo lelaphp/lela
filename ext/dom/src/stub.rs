@@ -177,6 +177,7 @@ impl Reader<'_> {
             parent,
             interfaces,
             traits: Vec::new(),
+            adaptations: Vec::new(),
             backing: EnumBacking::Pure,
             constants: Vec::new(),
             properties: Vec::new(),

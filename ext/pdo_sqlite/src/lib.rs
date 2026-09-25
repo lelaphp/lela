@@ -328,6 +328,7 @@ fn pdo_sqlite_class() -> (ClassDecl, Vec<(MethodDecl, Entry)>) {
         parent: Some(Name(b"PDO".as_slice().into())),
         interfaces: Vec::new(),
         traits: Vec::new(),
+        adaptations: Vec::new(),
         backing: EnumBacking::Pure,
         constants: CONSTANTS
             .iter()

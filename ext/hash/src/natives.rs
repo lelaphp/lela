@@ -1181,6 +1181,7 @@ pub(crate) fn class() -> ClassDecl {
         parent: None,
         interfaces: Vec::new(),
         traits: Vec::new(),
+        adaptations: Vec::new(),
         backing: EnumBacking::Pure,
         constants: Vec::new(),
         properties: Vec::new(),

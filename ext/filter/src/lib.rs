@@ -491,6 +491,7 @@ fn class(name: &[u8], parent: &[u8]) -> ClassDecl {
         parent: Some(Name(parent.into())),
         interfaces: Vec::new(),
         traits: Vec::new(),
+        adaptations: Vec::new(),
         backing: EnumBacking::Pure,
         constants: Vec::new(),
         properties: Vec::new(),
