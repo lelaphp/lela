@@ -1257,7 +1257,14 @@ impl<'a> Texts<'a> {
 /// int(4)
 /// ```
 fn tokenize(req: &mut Request, code: &[u8], short_open_tag: bool) -> Vec<tokens::PhpToken> {
-    let lexed = syntax::lex(FileId(0), code, &LexOptions { short_open_tag });
+    let lexed = syntax::lex(
+        FileId(0),
+        code,
+        &LexOptions {
+            short_open_tag,
+            ..LexOptions::default()
+        },
+    );
     for raised in &lexed.diagnostics {
         if raised.level == syntax::Level::CompileWarning {
             raise(req, Level::CompileWarning, &raised.message);
@@ -1573,7 +1580,10 @@ fn tokenize_parse(
 ) -> Result<Vec<tokens::PhpToken>, Thrown> {
     let options = syntax::Options {
         file: FileId(0),
-        lex: LexOptions { short_open_tag },
+        lex: LexOptions {
+            short_open_tag,
+            ..LexOptions::default()
+        },
     };
     let parsed = syntax::parse(code, &options);
     for raised in &parsed.diagnostics {

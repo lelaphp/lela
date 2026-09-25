@@ -196,6 +196,7 @@ pub fn compile_source(
     let syntax = php_syntax::Options {
         lex: php_syntax::LexOptions {
             short_open_tag: options.short_open_tag,
+            ..php_syntax::LexOptions::default()
         },
         ..php_syntax::Options::default()
     };
