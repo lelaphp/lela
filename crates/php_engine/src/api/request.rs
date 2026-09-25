@@ -1058,6 +1058,14 @@ pub struct Request {
     /// so every class a unit declares is this request's, the
     /// `DECLARE_CLASS_DELAYED` path, and dropped with it.
     declared: Vec<Declared>,
+    /// The classes a unit's load bound early at their
+    /// `DECLARE_CLASS_DELAYED` ([`Request::declare_classes`]), each the
+    /// unit and the class's index, until that opline runs and passes
+    /// over it: php's runtime definition key gone from `EG(class_table)`
+    /// once `zend_accel_do_delayed_early_binding` has bound the class
+    /// under its name. A load that bound nothing leaves nothing here, so
+    /// the opline of a file loaded again declares, and is refused.
+    bound_at_load: Vec<(Arc<Unit>, u32)>,
     /// The aliases `class_alias()` added to `EG(class_table)`, each the
     /// lowered name it is keyed by, the class it names, and how many
     /// classes the table held when it was added, which is where php's
@@ -1373,6 +1381,7 @@ impl Request {
             timer: None,
             stack_limit: StackLimit::UNCHECKED,
             declared: Vec::new(),
+            bound_at_load: Vec::new(),
             aliases: Vec::new(),
             sapi_constant: Value::null(),
             user_functions: Vec::new(),
@@ -9417,13 +9426,53 @@ impl Request {
     /// declaration named when it was a user class, and the request ends
     /// before the frame is pushed; php runs nothing of a file whose
     /// class fails to bind.
+    ///
+    /// A class the main op array declares with `DECLARE_CLASS_DELAYED`
+    /// is tried again here, in its place among the others, as
+    /// `zend_accel_do_delayed_early_binding` tries it when opcache loads
+    /// a cached file: the compiler knows the engine's classes and the file's
+    /// own, and a parent an earlier file of the request declared is
+    /// what php's compiler, which sees the request's whole table, binds
+    /// early. So a class that extends one from an include before it
+    /// exists before its line runs:
+    ///
+    /// ```php
+    /// file_put_contents('child.php', '<?php var_dump(class_exists("C", false)); class C extends P {} class Q {}');
+    /// class P {}
+    /// include 'child.php';
+    /// echo implode(' ', array_slice(get_declared_classes(), -3)), "\n";
+    /// unlink('child.php');
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// P C Q
+    /// ```
     pub(crate) fn declare_classes(&mut self, unit: &Arc<Unit>) -> bool {
+        let delayed: Vec<Vec<u8>> = unit
+            .main
+            .oplines
+            .iter()
+            .filter(|op| op.opcode == Opcode::DeclareClassDelayed)
+            .filter_map(|op| {
+                let key = usize::try_from(op.op1).ok()?.checked_add(1)?;
+                unit.main
+                    .literals
+                    .get(key)?
+                    .as_str()
+                    .map(|key| key.bytes().to_vec())
+            })
+            .collect();
         for (at, decl) in unit.classes.iter().enumerate() {
-            if unit
+            let key = unit
                 .runtime_keys
                 .iter()
-                .any(|(_, class)| usize::try_from(*class).ok() == Some(at))
-            {
+                .find(|(_, class)| usize::try_from(*class).ok() == Some(at));
+            if let Some((key, _)) = key {
+                if delayed.iter().any(|delayed| **delayed == *key.0)
+                    && !self.bind_at_load(unit, at, decl)
+                {
+                    return false;
+                }
                 continue;
             }
             if let Some(existing) = self.class_named(&decl.name.0) {
@@ -9438,6 +9487,56 @@ impl Request {
             self.bind_declared(unit, at, None);
         }
         true
+    }
+
+    /// One entry of `zend_accel_do_delayed_early_binding`: the class at
+    /// `at` of `unit` bound now where its name is free and its parent,
+    /// if it names one, is already declared, looked up without
+    /// autoloading, then linked as the early bind links
+    /// ([`Request::link_declared`] under `early`), and recorded so its
+    /// opline passes over it. A link that cannot resolve yet leaves the
+    /// class to the opline; one that is refused ends the request before
+    /// the file runs, as php's compile-time early bind would. False when
+    /// the request ended.
+    fn bind_at_load(&mut self, unit: &Arc<Unit>, at: usize, decl: &ClassDecl) -> bool {
+        if self.class_named(&decl.name.0).is_some() {
+            return true;
+        }
+        if let Some(parent) = &decl.parent
+            && self.class_named(&parent.0).is_none()
+        {
+            return true;
+        }
+        match self.link_declared(unit, at, decl, true) {
+            Ok(true) => {
+                let at = u32::try_from(at).unwrap_or(u32::MAX);
+                self.bound_at_load.push((Arc::clone(unit), at));
+                true
+            }
+            Ok(false) => true,
+            Err(_) => false,
+        }
+    }
+
+    /// `ZEND_DECLARE_CLASS_DELAYED` (`Z/Zend/zend_vm_def.h:7968`):
+    /// nothing where the unit's load bound the class under the opline's
+    /// runtime definition key ([`Request::bind_at_load`]), and
+    /// [`Request::bind_class`] where it did not, the key still standing.
+    pub(crate) fn bind_delayed(&mut self, unit: &Arc<Unit>, key: &[u8]) -> Result<(), Thrown> {
+        let at = unit
+            .runtime_keys
+            .iter()
+            .find(|(filed, _)| *filed.0 == *key)
+            .map(|(_, at)| *at);
+        if let Some(bound) = self
+            .bound_at_load
+            .iter()
+            .position(|(held, class)| Arc::ptr_eq(held, unit) && Some(*class) == at)
+        {
+            self.bound_at_load.swap_remove(bound);
+            return Ok(());
+        }
+        self.bind_class(unit, key)
     }
 
     /// `zend_class_redeclaration_error`'s two wordings, which name the
@@ -9893,8 +9992,31 @@ impl Request {
         for interface in &decl.interfaces {
             self.fetch_to_link(interface, "Interface")?;
         }
+        self.link_declared(unit, at, &decl, false).map(|_| ())
+    }
+
+    /// `zend_do_link_class` over the class at `at` of `unit`, whose
+    /// parent, traits and interfaces the table already holds: the link
+    /// both the early bind and a `DECLARE_CLASS` make
+    /// (`php_unit::link::link`), its diagnostics raised at their sites,
+    /// a refusal the end of the request at its level, and the linked
+    /// class bound. A link that needs a class the table does not hold
+    /// yet is php's `INHERITANCE_UNRESOLVED`: under `early`, the answer
+    /// `zend_can_early_bind` gives before anything is raised or bound,
+    /// so the class is left for its opline and the answer is false;
+    /// otherwise the refusal it names.
+    fn link_declared(
+        &mut self,
+        unit: &Arc<Unit>,
+        at: usize,
+        decl: &ClassDecl,
+        early: bool,
+    ) -> Result<bool, Thrown> {
         let lookup = |name: &[u8]| self.held_class(name);
-        let linking = php_unit::link::link(&decl, &lookup);
+        let linking = php_unit::link::link(decl, &lookup);
+        if early && matches!(linking.outcome, php_unit::link::Linked::Unresolved(_)) {
+            return Ok(false);
+        }
         for raised in &linking.raised {
             crate::api::raising::raise_at(
                 self,
@@ -9928,7 +10050,7 @@ impl Request {
             ));
         };
         self.bind_declared(unit, at, linking.composed);
-        Ok(())
+        Ok(true)
     }
 
     /// `zend_use_of_deprecated_trait` (`Z/Zend/zend_execute.c:2012`), as

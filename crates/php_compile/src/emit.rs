@@ -3719,9 +3719,10 @@ impl Emit<'_> {
     /// `CG(class_table)` already holds, which `zend_try_early_bind` then
     /// links; the oracle's dump of `class M {} echo 1;` is the `ECHO`
     /// and the `RETURN` alone, and so is `class P {} class C extends P {}
-    /// echo 1;`. Everything else carries a `ZEND_DECLARE_CLASS` opline
-    /// where it was written, in whatever op array it stands in, which
-    /// binds the class as the program serves ([`Self::declare_class`]):
+    /// echo 1;`. Everything else carries a `ZEND_DECLARE_CLASS` opline,
+    /// or the `ZEND_DECLARE_CLASS_DELAYED` opcache emits for a top-level
+    /// one, where it was written, in whatever op array it stands in,
+    /// which binds the class as the program serves ([`Self::declare_class`]):
     /// `class C extends P {} class P {}` works because `P` went into the
     /// table while the file compiled, a class written inside an `if`, a
     /// loop or a function body is declared only where that statement
@@ -3932,7 +3933,12 @@ impl Emit<'_> {
             self.bound.push(at);
             return Ok(());
         }
-        self.declare_class(at, &name, parent.as_deref(), line)
+        let delayed = toplevel
+            && self
+                .classes
+                .get(at)
+                .is_some_and(|decl| decl.interfaces.is_empty() && decl.traits.is_empty());
+        self.declare_class(at, &name, parent.as_deref(), line, delayed)
     }
 
     /// The name of `CG(active_class_entry)`, and none outside a class
@@ -4986,14 +4992,24 @@ impl Emit<'_> {
     /// `do_bind_class` finds it by, so that no two declarations of one
     /// name are one class. The constants are added in php's order, the
     /// parent's first.
+    ///
+    /// A top-level class with no interface and no trait is one php's
+    /// opcache delays (`ZEND_COMPILE_DELAYED_BINDING`, set by
+    /// `persistent_compile_file`, the regime design §6.1 dumps under):
+    /// its opline is `ZEND_DECLARE_CLASS_DELAYED`, `op2` the empty string
+    /// where no parent is written, with a cache slot in
+    /// `extended_value`, and the unit's load tries the early bind
+    /// again against the classes declared by then
+    /// ([`Unit::runtime_keys`]).
     fn declare_class(
         &mut self,
         at: usize,
         name: &[u8],
         parent: Option<&[u8]>,
         line: u32,
+        delayed: bool,
     ) -> Result<(), CompileError> {
-        let (op2_type, op2) = match parent {
+        let (mut op2_type, mut op2) = match parent {
             Some(parent) => {
                 let lowered = self.string(&parent.to_ascii_lowercase())?;
                 (OperandKind::Const, self.literal(lowered))
@@ -5014,12 +5030,29 @@ impl Emit<'_> {
             Name(key.into_boxed_slice()),
             u32::try_from(at).unwrap_or(u32::MAX),
         ));
+        if !delayed {
+            self.push(Opline {
+                opcode: Opcode::DeclareClass,
+                op1_type: OperandKind::Const,
+                op1,
+                op2_type,
+                op2,
+                ..Opline::default()
+            });
+            return Ok(());
+        }
+        if parent.is_none() {
+            let empty = self.string(b"")?;
+            (op2_type, op2) = (OperandKind::Const, self.literal(empty));
+        }
+        let slot = self.cache_slot();
         self.push(Opline {
-            opcode: Opcode::DeclareClass,
+            opcode: Opcode::DeclareClassDelayed,
             op1_type: OperandKind::Const,
             op1,
             op2_type,
             op2,
+            extended_value: slot,
             ..Opline::default()
         });
         Ok(())

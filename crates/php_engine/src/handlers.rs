@@ -128,23 +128,25 @@ pub(crate) fn free<T: Tier>(
 /// `ZEND_DECLARE_CLASS` (`Z/Zend/zend_vm_def.h:7959`): `do_bind_class`
 /// for the class the frame's unit files under the runtime definition
 /// key in the constant after `op1`, which is what php emits for every
-/// class it did not early bind — one with an interface list, one whose
-/// parent `CG(class_table)` did not yet hold, a second of a name, and
-/// one written inside a block or a body (`zend_compile_class_decl`'s
-/// tail). `op2`, the parent's lowered name, is the declaration's own
-/// parent and is not read. Binding is [`Request::bind_class`], whose
-/// refusals are php's: `Error` for a parent or an interface nothing
-/// declares, `E_ERROR` for a parent that is an interface or an
-/// interface list that names something else, and the redeclaration.
+/// class it did not early bind and does not delay — one written inside
+/// a block or a body, and a top-level one with an interface list or a
+/// trait (`zend_compile_class_decl`'s tail; the rest are
+/// [`declare_class_delayed`]'s). `op2`, the parent's lowered name, is
+/// the declaration's own parent and is not read. Binding is
+/// [`Request::bind_class`], whose refusals are php's: `Error` for a
+/// parent or an interface nothing declares, `E_ERROR` for a parent that
+/// is an interface or an interface list that names something else, and
+/// the redeclaration.
 ///
 /// ```php
-/// class C extends P {}
-/// class P { const K = 'p'; }
-/// var_dump(C::K, (new C) instanceof P);
+/// interface I { const J = 3; }
+/// var_dump(class_exists('C', false));
+/// class C implements I {}
+/// var_dump(C::J);
 /// ```
 /// ```expect
-/// string(1) "p"
-/// bool(true)
+/// bool(false)
+/// int(3)
 /// ```
 ///
 /// The polyfill's shape, a class declared only where none is:
@@ -173,16 +175,60 @@ pub(crate) fn declare_class<T: Tier>(
             "InternalError: a DECLARE_CLASS on a frame serving no op array",
         )));
     };
-    // `rtd_key = lcname + 1`.
-    let Some(key) = exec::constant(code, ConstIdx(op.op1.saturating_add(1)))
+    let key = runtime_key(code, op)?;
+    match req.bind_class(&serving.unit, &key) {
+        Ok(()) => Ok(advance(req, frame)),
+        Err(thrown) => {
+            req.leave_pending(&thrown);
+            Ok(Stepped::Threw(frame))
+        }
+    }
+}
+
+/// The runtime definition key a class-declaring opline carries in the
+/// constant after its `op1`, php's `rtd_key = lcname + 1`.
+fn runtime_key(code: &OpArray, op: &Opline) -> Result<Vec<u8>, Fatal> {
+    exec::constant(code, ConstIdx(op.op1.saturating_add(1)))
         .as_str_bytes()
         .map(<[u8]>::to_vec)
-    else {
+        .ok_or_else(|| {
+            Fatal::Error(format!(
+                "InternalError: a {} with no runtime definition key after its op1",
+                op.opcode.name().trim_start_matches("ZEND_")
+            ))
+        })
+}
+
+/// `ZEND_DECLARE_CLASS_DELAYED` (`Z/Zend/zend_vm_def.h:7968`), what
+/// opcache's compiler emits for a top-level class with no interface
+/// and no trait that it could not bind early: nothing where the unit's
+/// load bound the class, and the declaration `ZEND_DECLARE_CLASS` makes
+/// where it did not ([`Request::bind_delayed`]).
+///
+/// ```php
+/// var_dump(class_exists('C', false));
+/// class C extends P {}
+/// class P { const K = 'p'; }
+/// var_dump(C::K, (new C) instanceof P);
+/// ```
+/// ```expect
+/// bool(false)
+/// string(1) "p"
+/// bool(true)
+/// ```
+pub(crate) fn declare_class_delayed<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let Some(serving) = req.vm().serving(frame) else {
         return Err(Fatal::Error(String::from(
-            "InternalError: a DECLARE_CLASS with no runtime definition key after its op1",
+            "InternalError: a DECLARE_CLASS_DELAYED on a frame serving no op array",
         )));
     };
-    match req.bind_class(&serving.unit, &key) {
+    let key = runtime_key(code, op)?;
+    match req.bind_delayed(&serving.unit, &key) {
         Ok(()) => Ok(advance(req, frame)),
         Err(thrown) => {
             req.leave_pending(&thrown);
