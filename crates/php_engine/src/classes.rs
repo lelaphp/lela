@@ -333,13 +333,14 @@ impl ObjectHandlers for ClosureHandlers {
         Ok(Some(out))
     }
 
-    /// `zend_closure_compare` (`Z/Zend/zend_closures.c:120`): two fake
-    /// closures are equal when they carry one function, one receiver
-    /// and one scope; any other pair is uncomparable, a closure the
-    /// program declared included, so two of them are equal only where
-    /// `zend_compare` found one object on both sides before the
-    /// handler was reached. A side that is no closure is
-    /// `ZEND_COMPARE_OBJECTS_FALLBACK`, `zend_std_compare_objects`.
+    /// `zend_closure_compare` (`Z/Zend/zend_closures.c:446`): two fake
+    /// closures are equal when they carry one receiver, one called
+    /// scope, and functions of one kind, one scope and one name; any
+    /// other pair is uncomparable, a closure the program declared
+    /// included, so two of them are equal only where `zend_compare`
+    /// found one object on both sides before the handler was reached. A
+    /// side that is no closure is `ZEND_COMPARE_OBJECTS_FALLBACK`,
+    /// `zend_std_compare_objects`.
     ///
     /// ```php
     /// $f = function () { return 1; };
@@ -359,6 +360,22 @@ impl ObjectHandlers for ClosureHandlers {
     /// bool(true)
     /// bool(false)
     /// ```
+    ///
+    /// A method of the class called on two classes differs by its called
+    /// scope, and two closures over one name `__call` answers are equal:
+    ///
+    /// ```php
+    /// class P { static function s() {} function __call($m, $a) {} }
+    /// class C extends P {}
+    /// $p = new P;
+    /// var_dump(P::s(...) == C::s(...), P::s(...) == P::s(...), $p->nope(...) == $p->nope(...), $p->nope(...) == $p->other(...));
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// ```
     fn compare(
         &self,
         req: &mut Request,
@@ -374,7 +391,12 @@ impl ObjectHandlers for ClosureHandlers {
         if !(x.fake && y.fake) {
             return Ok(None);
         }
-        let same = x.function == y.function && x.this == y.this && x.scope == y.scope;
+        let kind = |function| req.user_function(function).is_some();
+        let same = x.this == y.this
+            && x.called_scope == y.called_scope
+            && kind(x.function) == kind(y.function)
+            && req.method_class(x.function) == req.method_class(y.function)
+            && req.function_name(x.function) == req.function_name(y.function);
         Ok(same.then_some(Ordering::Equal))
     }
 }
