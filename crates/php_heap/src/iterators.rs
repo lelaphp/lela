@@ -86,8 +86,10 @@ impl Arr {
         (self.flags() >> COUNT_SHIFT) & 0xff
     }
 
-    /// `HT_HAS_ITERATORS(ht)`.
-    pub(crate) fn has_iterators(self) -> bool {
+    /// `HT_HAS_ITERATORS(ht)`: a `foreach` is registered at the table,
+    /// which is what `zlo_is_iterating` refuses a reset over.
+    #[must_use]
+    pub fn has_iterators(self) -> bool {
         self.iterators_count() != 0
     }
 

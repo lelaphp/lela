@@ -10,7 +10,7 @@ use php_unit::decl::{ConstExpr, Name};
 
 use crate::api::abi::{Callable, PropertyRead};
 use crate::api::raising::{Thrown, throw};
-use crate::api::request::Request;
+use crate::api::request::{Request, Strategy};
 use crate::api::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 /// A linked function: user or native, by identity. A native method is
@@ -1002,54 +1002,99 @@ pub fn write_static_prop(
     req.set_static_property(class, name, Some(class), value, false)
 }
 
-/// `ReflectionClass::newLazyGhost`.
+/// `zend_object_make_lazy(NULL, class, ..., ZEND_LAZY_OBJECT_STRATEGY_GHOST
+/// | options)`, what `ReflectionClass::newLazyGhost` serves: a new
+/// object of `class` whose declared properties wait for `initializer`,
+/// served with the object the first time one of them is touched.
+/// `options` is php's user mask, which the caller has held to it;
+/// `SKIP_INITIALIZATION_ON_SERIALIZE` is the bit read here. An internal
+/// class other than `stdClass`, and one below such a class, is php's
+/// `Error`.
 pub fn new_lazy_ghost(
     req: &mut Request,
     class: ClassId,
     initializer: &Callable,
+    options: i64,
 ) -> Result<PhpObject, Thrown> {
-    let _ = initializer;
-    new_object(req, class)
+    req.make_lazy(None, class, initializer, Strategy::Ghost, options)
 }
 
-/// `ReflectionClass::newLazyProxy`.
+/// `zend_object_make_lazy` under `ZEND_LAZY_OBJECT_STRATEGY_PROXY`, what
+/// `ReflectionClass::newLazyProxy` serves: a new object of `class`
+/// whose accesses, once one is made, go to the instance `factory`
+/// returns.
 pub fn new_lazy_proxy(
     req: &mut Request,
     class: ClassId,
     factory: &Callable,
+    options: i64,
 ) -> Result<PhpObject, Thrown> {
-    let _ = factory;
-    new_object(req, class)
+    req.make_lazy(None, class, factory, Strategy::Proxy, options)
 }
 
-/// `ReflectionClass::resetAsLazyGhost`.
+/// `zend_object_make_lazy(obj, class, ...)` under the ghost strategy,
+/// what `ReflectionClass::resetAsLazyGhost` serves: `object`, an
+/// instance of `class`, reset, its destructor served first unless
+/// `options` carries `SKIP_DESTRUCTOR`, and left waiting for
+/// `initializer`. An object that is lazy and not initialised is the
+/// caller's to refuse.
 pub fn reset_as_lazy_ghost(
     req: &mut Request,
     object: &PhpObject,
+    class: ClassId,
     initializer: &Callable,
+    options: i64,
 ) -> Result<(), Thrown> {
-    let _ = (req, object, initializer);
-    Ok(())
+    req.make_lazy(Some(*object), class, initializer, Strategy::Ghost, options)
+        .map(|_| ())
 }
 
+/// [`reset_as_lazy_ghost`] under the proxy strategy,
 /// `ReflectionClass::resetAsLazyProxy`.
 pub fn reset_as_lazy_proxy(
     req: &mut Request,
     object: &PhpObject,
+    class: ClassId,
     factory: &Callable,
+    options: i64,
 ) -> Result<(), Thrown> {
-    let _ = (req, object, factory);
-    Ok(())
+    req.make_lazy(Some(*object), class, factory, Strategy::Proxy, options)
+        .map(|_| ())
 }
 
-/// `ReflectionClass::initializeLazyObject`: serve the initializer now.
-pub fn initialize_lazy(req: &mut Request, object: &PhpObject) -> Result<(), Thrown> {
-    let _ = (req, object);
-    Ok(())
+/// `zend_lazy_object_init`, what `ReflectionClass::initializeLazyObject`
+/// serves: a lazy object nothing has initialised is initialised now,
+/// and the answer is the object its properties are read on, the ghost
+/// itself or the proxy's instance, a view. An object that is not lazy is
+/// its own answer; what the initializer threw is the `Err`, the object
+/// left waiting.
+pub fn initialize_lazy(req: &mut Request, object: &PhpObject) -> Result<PhpObject, Thrown> {
+    req.lazy_init(*object)
 }
 
-/// `ReflectionClass::markLazyObjectAsInitialized`.
-pub fn skip_lazy_initialization(req: &mut Request, object: &PhpObject) -> Result<(), Thrown> {
-    let _ = (req, object);
-    Ok(())
+/// `zend_lazy_object_mark_as_initialized`, what
+/// `ReflectionClass::markLazyObjectAsInitialized` serves: each property
+/// still waiting takes its default and the initializer is never served.
+/// The answer is [`initialize_lazy`]'s, a view.
+pub fn mark_lazy_initialized(req: &mut Request, object: &PhpObject) -> Result<PhpObject, Thrown> {
+    if object.is_lazy() {
+        req.lazy_mark_initialized(*object)?;
+    }
+    req.lazy_init(*object)
+}
+
+/// `ReflectionProperty::skipLazyInitialization` under `None` and
+/// `ReflectionProperty::setRawValueWithoutLazyInitialization` under
+/// `Some`: the declared property `name`, on the object the initialised
+/// proxies lead to, stops waiting for the initializer, holding its
+/// default or `value` written past `__set` and hooks; the object stops
+/// being lazy once no property waits. `value` is the object's from here.
+/// The checks on the property php makes first are the caller's.
+pub fn skip_lazy_initialization(
+    req: &mut Request,
+    object: &PhpObject,
+    name: &[u8],
+    value: Option<Value>,
+) -> Result<(), Thrown> {
+    req.lazy_skip(*object, name, value)
 }

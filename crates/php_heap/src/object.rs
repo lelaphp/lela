@@ -80,8 +80,9 @@ pub(crate) struct ObjHeader {
     /// php's `handle`: the store's index, `spl_object_id()`.
     handle: Cell<u32>,
     /// `extra_flags`, `OBJ_EXTRA_FLAGS()`, where php keeps
-    /// `IS_OBJ_LAZY_UNINITIALIZED` and `IS_OBJ_LAZY_PROXY`.
-    extra_flags: u32,
+    /// `IS_OBJ_LAZY_UNINITIALIZED` and `IS_OBJ_LAZY_PROXY`, read and
+    /// written together as one [`Laziness`].
+    extra_flags: Cell<u32>,
     /// php's `ce`: the class as the engine numbers it, which the heap
     /// reads nothing of, and the slots the class laid down, which php
     /// reads off `ce->default_properties_count`.
@@ -93,6 +94,27 @@ pub(crate) struct ObjHeader {
     /// `properties`: the dynamic table, none until something
     /// materialises it (`rebuild_object_properties`).
     properties: Cell<Option<Arr>>,
+}
+
+/// What an object's two lazy bits say of it (`zend_lazy_objects.h`):
+/// the strategy of an object nothing has initialised, or the proxy that
+/// forwards to the instance its factory returned. What goes with each,
+/// the initializer and the instance, is the engine's, kept aside by the
+/// object's id as php keeps `zend_lazy_object_info` in
+/// `EG(lazy_objects_store)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Laziness {
+    /// Neither bit: an object that was never lazy, has been initialised
+    /// in place, or is being initialised now.
+    Eager,
+    /// `IS_OBJ_LAZY_UNINITIALIZED`: a ghost, initialised in place.
+    Ghost,
+    /// `IS_OBJ_LAZY_UNINITIALIZED | IS_OBJ_LAZY_PROXY`: a proxy whose
+    /// factory has not been served.
+    Proxy,
+    /// `IS_OBJ_LAZY_PROXY` alone: a proxy whose factory was served, every
+    /// property access forwarded to the instance it returned.
+    Forwarding,
 }
 
 /// One object: php's `zend_object *`. Naming one does not keep it alive,
@@ -175,7 +197,7 @@ impl Obj {
             header.as_ptr().write(ObjHeader {
                 gc: Refcounted::new(ZvalType::Object, 0),
                 handle: Cell::new(0),
-                extra_flags: 0,
+                extra_flags: Cell::new(0),
                 class,
                 slots,
                 payload: Cell::new(payload),
@@ -230,13 +252,56 @@ impl Obj {
         self.0 == other.0
     }
 
-    /// `IS_OBJ_LAZY_UNINITIALIZED`: a lazy ghost or proxy nothing has
-    /// initialised (design §5.4). The bit is `extra_flags`'s, where php
-    /// keeps it (`Z/Zend/zend_types.h:867-870`), since the header word's
-    /// top bits are the collector's colour.
+    /// `IS_OBJ_LAZY_UNINITIALIZED` and `IS_OBJ_LAZY_PROXY` read as the
+    /// one state they encode (design §5.4). The bits are
+    /// `extra_flags`'s, where php keeps them
+    /// (`Z/Zend/zend_types.h:867-870`), since the header word's top bits
+    /// are the collector's colour.
     #[must_use]
-    pub fn is_lazy(&self) -> bool {
-        self.header().extra_flags & gc::OBJ_LAZY_UNINITIALIZED != 0
+    pub fn laziness(&self) -> Laziness {
+        let flags = self.header().extra_flags.get();
+        match (
+            flags & gc::OBJ_LAZY_UNINITIALIZED != 0,
+            flags & gc::OBJ_LAZY_PROXY != 0,
+        ) {
+            (false, false) => Laziness::Eager,
+            (true, false) => Laziness::Ghost,
+            (true, true) => Laziness::Proxy,
+            (false, true) => Laziness::Forwarding,
+        }
+    }
+
+    /// `OBJ_FLAGS(obj) & IS_OBJ_DESTRUCTOR_CALLED`: the destructor was
+    /// served, or the object is marked as though it had been.
+    #[must_use]
+    pub fn destructor_called(&self) -> bool {
+        self.has_flag(gc::OBJ_DESTRUCTOR_CALLED)
+    }
+
+    /// `GC_ADD_FLAGS` or `GC_DEL_FLAGS` of `IS_OBJ_DESTRUCTOR_CALLED`:
+    /// what `zend_object_make_lazy` writes around the destructor it
+    /// serves when it resets an object, so the object's own destructor
+    /// is served again once it is initialised.
+    pub fn set_destructor_called(&self, called: bool) {
+        if called {
+            self.add_flag(gc::OBJ_DESTRUCTOR_CALLED);
+        } else {
+            self.header().gc.del_flags(gc::OBJ_DESTRUCTOR_CALLED);
+        }
+    }
+
+    /// `OBJ_EXTRA_FLAGS(obj)`'s two lazy bits written as `state`
+    /// encodes them, the other bits of the word left as they stand.
+    pub fn set_laziness(&self, state: Laziness) {
+        let bits = match state {
+            Laziness::Eager => 0,
+            Laziness::Ghost => gc::OBJ_LAZY_UNINITIALIZED,
+            Laziness::Proxy => gc::OBJ_LAZY_UNINITIALIZED | gc::OBJ_LAZY_PROXY,
+            Laziness::Forwarding => gc::OBJ_LAZY_PROXY,
+        };
+        let word = &self.header().extra_flags;
+        let rest = word.get() & !(gc::OBJ_LAZY_UNINITIALIZED | gc::OBJ_LAZY_PROXY);
+        word.set(rest | bits);
     }
 
     /// `Z_IS_RECURSIVE_P`: a walk that guards itself with
@@ -639,6 +704,14 @@ impl Heap {
         o.header().properties.set(Some(table));
     }
 
+    /// `obj->properties = NULL`: the object's table taken off it, its
+    /// owner the caller's to give up, what `zend_lazy_object_init_proxy`
+    /// and the rollback of a ghost's initializer do to a table the
+    /// object must no longer read.
+    pub fn object_take_properties(&mut self, o: Obj) -> Option<Arr> {
+        o.header().properties.take()
+    }
+
     /// `zend_assign_to_variable` over a declared slot: `z` is the slot's
     /// from here, and what it held is released last, after the write,
     /// which is where a destructor is served.
@@ -754,9 +827,11 @@ impl Heap {
     /// `free_obj`: `zend_object_std_dtor` (`Z/Zend/zend_objects.c:77`),
     /// the weak references to the object told first
     /// (`zend_weakrefs_notify`, [`HeapHooks::weakrefs_notify`]), then
-    /// the dynamic table and the slots, and for an internal class the
-    /// payload, what it names of the heap given back by the engine
-    /// through [`HeapHooks::free_native`] and the rest by its drop.
+    /// what the engine keeps aside for a lazy object
+    /// ([`HeapHooks::forget_lazy`]), then the dynamic table and the
+    /// slots, and for an internal class the payload, what it names of
+    /// the heap given back by the engine through
+    /// [`HeapHooks::free_native`] and the rest by its drop.
     ///
     /// The dynamic table is given up as `zend_object_std_dtor` gives it
     /// up, `GC_DELREF` and `zend_array_destroy` at zero and never
@@ -764,6 +839,10 @@ impl Heap {
     pub(crate) fn object_free(hooks: &mut dyn HeapHooks, o: Obj) {
         if o.is_weakly_referenced() {
             hooks.weakrefs_notify(o);
+        }
+        if o.laziness() != Laziness::Eager {
+            o.set_laziness(Laziness::Eager);
+            hooks.forget_lazy(o);
         }
         if let Some(table) = o.header().properties.take() {
             Heap::release_nogc(hooks, Zval::array(table));

@@ -102,6 +102,7 @@ call::iterate
 call::known_method
 call::lookup_class
 call::lookup_function
+call::mark_lazy_initialized
 call::new_lazy_ghost
 call::new_lazy_proxy
 call::new_object
@@ -456,6 +457,7 @@ values::ClosureInfo
 values::Key
 values::Key::from_string
 values::Key::to_prop_name
+values::Laziness
 values::PhpArray
 values::PhpArray::append
 values::PhpArray::contains
@@ -500,6 +502,7 @@ values::PhpObject::instance_of
 values::PhpObject::is_lazy
 values::PhpObject::is_lazy_prop
 values::PhpObject::is_recursive
+values::PhpObject::laziness
 values::PhpObject::lazy_initializer
 values::PhpObject::lazy_real
 values::PhpObject::native

@@ -38,6 +38,10 @@ use crate::engine::{MethodAt, NativeMethod, RequestDescription, Shared};
 use crate::exec::{self, CallStage, CallState, IncludeKind, TableId, Vm};
 use crate::output::Output;
 
+mod lazy;
+
+pub(crate) use lazy::Strategy;
+
 /// php's version, what `PHP_VERSION` and `phpversion()` say.
 pub const PHP_VERSION: &str = "8.5.9";
 
@@ -943,6 +947,9 @@ pub struct Request {
     /// the `WeakReference` and `WeakMap` objects that name it
     /// (`crate::weakrefs`).
     pub(crate) weakrefs: crate::weakrefs::Table,
+    /// php's `EG(lazy_objects_store)`: what goes with each lazy object's
+    /// state, by its id ([`lazy`]).
+    lazy: lazy::Table,
     /// The next word [`Request::ref_add_type_source`] hands out, never
     /// reused, so a cell freed and a cell laid down at its address are
     /// never one row.
@@ -1308,6 +1315,7 @@ impl Request {
             guards: Vec::new(),
             ref_sources: Vec::new(),
             weakrefs: crate::weakrefs::Table::default(),
+            lazy: lazy::Table::default(),
             next_ref_source: 1,
             wrappers: Vec::new(),
             url_wrappers: None,
@@ -5568,6 +5576,27 @@ impl Request {
     /// Warning: Undefined property: R::$a in %s on line 2
     /// NULL
     /// ```
+    ///
+    /// A lazy object is initialised where the read finds nothing
+    /// (`zend_lazy_object_init` at `uninit_error`): a declared slot that
+    /// waits skips `__get` and initialises the object, while a name no
+    /// class declared is the accessor's first.
+    ///
+    /// ```php
+    /// class C { public $a = 1; public function __get($n) { echo "get $n\n"; return 0; } }
+    /// $r = new ReflectionClass('C');
+    /// $o = $r->newLazyGhost(function ($o) { echo "init\n"; });
+    /// var_dump($o->dyn);
+    /// var_dump($r->isUninitializedLazyObject($o));
+    /// var_dump($o->a);
+    /// ```
+    /// ```expect
+    /// get dyn
+    /// int(0)
+    /// bool(true)
+    /// init
+    /// int(1)
+    /// ```
     pub(crate) fn read_property(
         &mut self,
         object: PhpObject,
@@ -5592,6 +5621,13 @@ impl Request {
                     let value = Value::of_zval(z).deref();
                     self.addref(&value);
                     return Ok(value);
+                }
+                // `IS_PROP_UNINIT | IS_PROP_LAZY`: a slot that waits for
+                // the initializer skips `__get` too, and the object is
+                // initialised and read instead (`uninit_error`).
+                if self.lazy_slot(o, placed.slot) {
+                    let instance = self.lazy_init(object)?;
+                    return self.read_property(instance, name, read);
                 }
                 // `IS_PROP_UNINIT`: a typed slot nothing has written
                 // skips `__get` and is the uninitialised-access error.
@@ -5627,13 +5663,22 @@ impl Request {
                 return Ok(value);
             }
         }
-        // `/* magic isset */`: under `BP_VAR_IS` a class with a
-        // `__isset` is asked first, and the `__get` after it only where
-        // it said yes.
         let getter = self.magic_accessor(class, b"__get");
         let issetter = silent
             .then(|| self.magic_accessor(class, b"__isset"))
             .flatten();
+        let guard_bit = if issetter.is_some() { IN_ISSET } else { IN_GET };
+        // GH-21478: a proxy that forwards, read from inside the
+        // instance's own accessor for this name, reads the instance
+        // directly rather than serving the accessor twice.
+        if let Some(instance) = self.lazy_instance(o)
+            && self.guard_word(instance, name) & guard_bit != 0
+        {
+            return self.read_property(instance, name, read);
+        }
+        // `/* magic isset */`: under `BP_VAR_IS` a class with a
+        // `__isset` is asked first, and the `__get` after it only where
+        // it said yes.
         if let Some(issetter) = issetter {
             if self.guard_word(object, name) & IN_ISSET == 0 {
                 let answered = self.call_accessor(object, issetter, IN_ISSET, name, &[])?;
@@ -5658,6 +5703,20 @@ impl Request {
             if wrong && let Some(placed) = self.declared_slot(class, name) {
                 return Err(self.inaccessible_property(class, placed.visibility, name));
             }
+        }
+        // `uninit_error` over a lazy object: a name nothing holds
+        // initialises it and is read on what that answers, under the
+        // guard the accessor above stood under where one did.
+        if o.laziness() != php_heap::Laziness::Eager {
+            let instance = self.lazy_init(object)?;
+            let guarded = getter.is_some() || issetter.is_some();
+            if guarded && self.guard_word(instance, name) & guard_bit == 0 {
+                self.guard_take(instance, name, guard_bit);
+                let read = self.read_property(instance, name, read);
+                self.guard_drop(instance, name, guard_bit);
+                return read;
+            }
+            return self.read_property(instance, name, read);
         }
         if !silent {
             let class = self.class_name(class);
@@ -5909,28 +5968,47 @@ impl Request {
         // holds a value, and a typed one nothing has written, are both
         // the setter's business to stay out of, so neither asks the
         // class for one.
+        let o = object.heap();
+        let lazy = o.laziness() != php_heap::Laziness::Eager;
         let placed = self.declared_slot(class, name.as_bytes());
         if let Some(p) = placed.as_ref()
             && self.may_access(p.declaring, p.visibility)
-            && (!object.heap().slot(p.slot).is_undef() || p.typed)
         {
+            if !o.slot(p.slot).is_undef() {
+                return self.write_std_property(object, name, value);
+            }
+            // `IS_PROP_LAZY`: a slot that waits is the initializer's
+            // first, then the write's on what it answers.
+            if self.lazy_slot(o, p.slot) {
+                return self.lazy_write(object, name, value, false);
+            }
+            if p.typed {
+                return self.write_std_property(object, name, value);
+            }
+        }
+        let held = placed.is_none()
+            && o.properties()
+                .is_some_and(|table| table.contains(php_heap::Key::Str(name.heap())));
+        if held {
             return self.write_std_property(object, name, value);
         }
+        // GH-21478: a proxy that forwards, written from inside the
+        // instance's own `__set` for this name, writes the instance.
+        if let Some(instance) = self.lazy_instance(o)
+            && self.guard_word(instance, name.as_bytes()) & IN_SET != 0
+        {
+            return self.write_property(instance, name, value);
+        }
         let Some(setter) = self.magic_accessor(class, b"__set") else {
+            if lazy {
+                return self.lazy_write(object, name, value, false);
+            }
             return self.write_std_property(object, name, value);
         };
         let bytes = name.as_bytes().to_vec();
         let wrong = placed
             .as_ref()
             .is_some_and(|p| !self.may_access(p.declaring, p.visibility));
-        let held = placed.is_none()
-            && object
-                .heap()
-                .properties()
-                .is_some_and(|table| table.contains(php_heap::Key::Str(name.heap())));
-        if held {
-            return self.write_std_property(object, name, value);
-        }
         if self.guard_word(object, &bytes) & IN_SET == 0 {
             let served = self.call_accessor(object, setter, IN_SET, &bytes, &[value]);
             self.release(value);
@@ -5948,7 +6026,40 @@ impl Request {
             self.release(Value::string(name));
             return Err(thrown);
         }
+        if lazy {
+            return self.lazy_write(object, name, value, true);
+        }
         self.write_std_property(object, name, value)
+    }
+
+    /// `forward_write_to_lazy_object`
+    /// (`Z/Zend/zend_object_handlers.c:1029`): the object initialised,
+    /// and the write made on what that answers, under `IN_SET` there
+    /// where the `__set` guard stood on the lazy object. `value` and
+    /// `name` are given up whatever arm runs.
+    fn lazy_write(
+        &mut self,
+        object: PhpObject,
+        name: PhpString,
+        value: Value,
+        guarded: bool,
+    ) -> Result<(), Thrown> {
+        let instance = match self.lazy_init(object) {
+            Ok(instance) => instance,
+            Err(thrown) => {
+                self.release(value);
+                self.release(Value::string(name));
+                return Err(thrown);
+            }
+        };
+        let bytes = name.as_bytes().to_vec();
+        if guarded && self.guard_word(instance, &bytes) & IN_SET == 0 {
+            self.guard_take(instance, &bytes, IN_SET);
+            let written = self.write_property(instance, name, value);
+            self.guard_drop(instance, &bytes, IN_SET);
+            return written;
+        }
+        self.write_property(instance, name, value)
     }
 
     /// `write_std_property`, `zend_std_write_property`'s label and what
@@ -6212,6 +6323,9 @@ impl Request {
     /// index is the loop variable's `Z_FE_ITER`. `None` is the empty
     /// table php jumps past the loop over with `Z_FE_ITER` at `-1`.
     pub(crate) fn object_walk_start(&mut self, object: PhpObject) -> Result<Option<u32>, Thrown> {
+        // `zend_lazy_object_init`: a lazy object is initialised before
+        // the walk, which goes over what that answers.
+        let object = self.lazy_init(object)?;
         self.separate_object_properties(object)?;
         let o = object.heap();
         let table = self.heap.object_properties(o);
@@ -6489,6 +6603,9 @@ impl Request {
     /// knows how to drop; `Std` reaching one is the internal-error fatal
     /// naming the class.
     pub(crate) fn clone_members(&mut self, object: PhpObject) -> Result<PhpObject, Thrown> {
+        if object.heap().laziness() != php_heap::Laziness::Eager {
+            return self.lazy_clone(object);
+        }
         let cloned = self.heap.object_clone(object.heap());
         let Some(new) = self.fatal_of(cloned)? else {
             let class = self.class_name(object.class());
@@ -6652,9 +6769,7 @@ impl Request {
     /// there, where php's `GC_ADDREF` and `OBJ_RELEASE` around the call
     /// hold it). A class with none serves nothing, and so does a lazy
     /// object, which is the first test php makes after finding the
-    /// destructor (`zend_object_is_lazy`); this engine makes none,
-    /// `newLazyGhost` and `newLazyProxy` being what does, so that branch
-    /// is php's sentence and no code here. The visibility check and the
+    /// destructor (`zend_object_is_lazy`). The visibility check and the
     /// pending-throwable rules are the branches under this one.
     ///
     /// An array gives its elements up in element order
@@ -6707,6 +6822,11 @@ impl Request {
         let Some(destructor) = self.method_named(class, b"__destruct") else {
             return;
         };
+        // `zend_object_is_lazy`: a lazy object's destructor is not
+        // served, nor a forwarding proxy's, whose instance serves its own.
+        if object.heap().laziness() != php_heap::Laziness::Eager {
+            return;
+        }
         if !self.destructor_reachable(object, destructor) {
             return;
         }
@@ -7477,16 +7597,21 @@ impl Request {
         test: PropertyTest,
     ) -> Result<bool, Thrown> {
         let class = object.class();
+        let o = object.heap();
+        // php's `value`, the slot the placement found, which keeps a
+        // lazy object from initialising unless the slot itself waits.
+        let mut placed_slot = None;
         let value = match self.declared_slot(class, name) {
             Some(placed) => {
                 if self.may_access(placed.declaring, placed.visibility) {
-                    let z = object.heap().slot(placed.slot);
+                    placed_slot = Some(placed.slot);
+                    let z = o.slot(placed.slot);
                     (!z.is_undef()).then(|| Value::of_zval(z))
                 } else {
                     None
                 }
             }
-            None => self.object_prop(object.heap(), name),
+            None => self.object_prop(o, name),
         };
         if let Some(value) = value {
             let value = value.deref();
@@ -7496,13 +7621,37 @@ impl Request {
                 PropertyTest::NotEmpty => crate::api::coerce::truthy(self, &value),
             });
         }
-        let Some(issetter) = self
-            .magic_accessor(class, b"__isset")
-            .filter(|_| test != PropertyTest::Exists)
-        else {
+        // `lazy_init:`, which a slot that waits reaches past `__isset`
+        // and a name the placement found no slot for reaches where no
+        // accessor answers it.
+        let initialises = |req: &Request| match placed_slot {
+            Some(slot) => req.lazy_slot(o, slot),
+            None => o.laziness() != php_heap::Laziness::Eager,
+        };
+        if placed_slot.is_some_and(|slot| self.lazy_slot(o, slot)) {
+            return self.lazy_has(object, name, test);
+        }
+        // GH-21478: a proxy that forwards, asked from inside the
+        // instance's own `__isset` for this name, asks the instance.
+        if let Some(instance) = self.lazy_instance(o)
+            && self.guard_word(instance, name) & IN_ISSET != 0
+        {
+            return self.has_property(instance, name, test);
+        }
+        let issetter = self.magic_accessor(class, b"__isset");
+        if issetter.is_some() && test == PropertyTest::Exists {
+            return Ok(false);
+        }
+        let Some(issetter) = issetter else {
+            if initialises(self) {
+                return self.lazy_has(object, name, test);
+            }
             return Ok(false);
         };
         if self.guard_word(object, name) & IN_ISSET != 0 {
+            if initialises(self) {
+                return self.lazy_has(object, name, test);
+            }
             return Ok(false);
         }
         // php holds `IN_ISSET` across both calls, so the `__get` the
@@ -7545,6 +7694,48 @@ impl Request {
         }
         self.guard_drop(object, name, IN_ISSET);
         Ok(held)
+    }
+
+    /// `zend_std_has_property`'s `lazy_init:` arm: the object
+    /// initialised and asked again on what that answers, under
+    /// `IN_ISSET` there where its class has a `__isset`, so the accessor
+    /// is not served twice for one question.
+    ///
+    /// ```php
+    /// class C { public $a = 1; }
+    /// $r = new ReflectionClass('C');
+    /// $o = $r->newLazyGhost(function ($o) { echo "init o\n"; });
+    /// var_dump(isset($o->nope));
+    /// $p = $r->newLazyProxy(function () { echo "factory\n"; return new C; });
+    /// unset($p->a);
+    /// var_dump($p);
+    /// ```
+    /// ```expect
+    /// init o
+    /// bool(false)
+    /// factory
+    /// lazy proxy object(C)#4 (1) {
+    ///   ["instance"]=>
+    ///   object(C)#5 (0) {
+    ///   }
+    /// }
+    /// ```
+    fn lazy_has(
+        &mut self,
+        object: PhpObject,
+        name: &[u8],
+        test: PropertyTest,
+    ) -> Result<bool, Thrown> {
+        let instance = self.lazy_init(object)?;
+        if self.serves_accessor(instance.class(), b"__isset")
+            && self.guard_word(instance, name) & IN_ISSET == 0
+        {
+            self.guard_take(instance, name, IN_ISSET);
+            let held = self.has_property(instance, name, test);
+            self.guard_drop(instance, name, IN_ISSET);
+            return held;
+        }
+        self.has_property(instance, name, test)
     }
 
     /// `zend_std_unset_property`: a declared slot the scope may reach is
@@ -7601,7 +7792,8 @@ impl Request {
                 // holds a value, and a typed one nothing has written,
                 // are held to the set visibility here; an untyped slot
                 // an `unset` emptied is the `__unset`'s.
-                if !empty || placed.typed {
+                let waits = self.lazy_slot(o, placed.slot);
+                if !empty || placed.typed || waits {
                     if let Some(set) = placed.set_visibility
                         && !self.has_set_access(placed.declaring, set)
                     {
@@ -7609,6 +7801,11 @@ impl Request {
                     }
                     if !empty {
                         Heap::object_set_slot(&mut Hooks(self), o, placed.slot, Zval::UNDEF);
+                    } else if waits {
+                        // `IS_PROP_LAZY`: the object initialised and the
+                        // property unset on what that answers.
+                        let instance = self.lazy_init(object)?;
+                        return self.unset_property(instance, name);
                     }
                     return Ok(());
                 }
@@ -7628,16 +7825,35 @@ impl Request {
                 return Ok(());
             }
         }
-        let Some(unsetter) = unsetter else {
-            return Ok(());
-        };
-        if self.guard_word(object, name) & IN_UNSET == 0 {
-            let answered = self.call_accessor(object, unsetter, IN_UNSET, name, &[])?;
-            self.release(answered);
-            return Ok(());
+        // GH-21478: a proxy that forwards, unset from inside the
+        // instance's own `__unset` for this name, unsets the instance's.
+        if let Some(instance) = self.lazy_instance(o)
+            && self.guard_word(instance, name) & IN_UNSET != 0
+        {
+            return self.unset_property(instance, name);
         }
-        if wrong && let Some(placed) = self.declared_slot(class, name) {
-            return Err(self.inaccessible_property(class, placed.visibility, name));
+        if let Some(unsetter) = unsetter {
+            if self.guard_word(object, name) & IN_UNSET == 0 {
+                let answered = self.call_accessor(object, unsetter, IN_UNSET, name, &[])?;
+                self.release(answered);
+                return Ok(());
+            }
+            if wrong && let Some(placed) = self.declared_slot(class, name) {
+                return Err(self.inaccessible_property(class, placed.visibility, name));
+            }
+        }
+        // A lazy object with nothing that answered the name is
+        // initialised and the name unset on what that answers, under
+        // `IN_UNSET` there where the `__unset` guard stood here.
+        if o.laziness() != php_heap::Laziness::Eager {
+            let instance = self.lazy_init(object)?;
+            if unsetter.is_some() && self.guard_word(instance, name) & IN_UNSET == 0 {
+                self.guard_take(instance, name, IN_UNSET);
+                let unset = self.unset_property(instance, name);
+                self.guard_drop(instance, name, IN_UNSET);
+                return unset;
+            }
+            return self.unset_property(instance, name);
         }
         Ok(())
     }
@@ -7872,7 +8088,10 @@ impl Request {
     /// ```
     pub(crate) fn debug_info(&mut self, object: PhpObject) -> Result<Option<PhpArray>, Thrown> {
         if self.method_named(object.class(), b"__debuginfo").is_none() {
-            return Ok(None);
+            // `zend_lazy_object_debug_info`: a proxy that forwards shows
+            // its instance, and a lazy object that waits shows its
+            // members as they stand, neither initialised for it.
+            return self.lazy_debug_info(object);
         }
         let value = crate::api::call::call_method(self, &object, b"__debugInfo", &[])?;
         match value.as_array() {
@@ -7962,13 +8181,18 @@ impl Request {
         // `GC_ADDREF` on both for the walk, given up at `done`.
         self.addref(left);
         self.addref(right);
-        let order =
-            if x.properties().is_none() && y.properties().is_none() && !x.is_lazy() && !y.is_lazy()
-            {
-                self.compare_slots(x, y)
-            } else {
-                self.compare_tables(x, y)
-            };
+        let eager = |o: Obj| o.laziness() == php_heap::Laziness::Eager;
+        let order = if x.properties().is_none() && y.properties().is_none() && eager(x) && eager(y)
+        {
+            self.compare_slots(x, y)
+        } else {
+            // `zend_std_get_properties_ex` on each side, which
+            // initialises a lazy one first, the left before the right.
+            self.lazy_init(a).and_then(|a| {
+                let b = self.lazy_init(b)?;
+                self.compare_tables(a.heap(), b.heap())
+            })
+        };
         self.release(*left);
         self.release(*right);
         order.map(Some)
@@ -12723,6 +12947,9 @@ impl HeapHooks for Hooks<'_> {
         table.get_gc(self.0, PhpObject::of(obj), &mut |value| {
             visit(value.to_zval());
         });
+        // `zend_lazy_object_get_gc`: the initializer a lazy object waits
+        // for, or the instance a proxy forwards to.
+        self.0.lazy_gc(obj, &mut |value| visit(value.to_zval()));
     }
 
     /// `list_dtor_ex`: the type's destructor as registered, handed the
@@ -12750,6 +12977,12 @@ impl HeapHooks for Hooks<'_> {
     /// before its members go (`crate::weakrefs::notify`).
     fn weakrefs_notify(&mut self, obj: Obj) {
         crate::weakrefs::notify(self.0, obj);
+    }
+
+    /// `zend_lazy_object_del_info` as a lazy object is freed
+    /// ([`Request::lazy_forget`]).
+    fn forget_lazy(&mut self, obj: Obj) {
+        self.0.lazy_forget(obj);
     }
 }
 
