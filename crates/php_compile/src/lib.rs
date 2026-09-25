@@ -312,7 +312,7 @@ fn level_of(level: php_syntax::Level) -> Level {
 mod tests {
     use super::*;
     use php_unit::decl::{ConstExpr, Parameter, Type, Visibility};
-    use php_unit::{Opcode, OperandKind, OplineIdx, frameless_table};
+    use php_unit::{AutoGlobal, Opcode, OperandKind, OplineIdx, frameless_table};
 
     /// A unit whose constant strings are one engine's, which is what the
     /// unit cache holds (design §6.3).
@@ -7654,6 +7654,154 @@ class C {
                 String::from_utf8_lossy(source)
             );
         }
+    }
+
+    /// #633's shapes under the oracle's `[regime.dump]`: an auto-global
+    /// under an element's write is `FETCH_W (global)`, under a compound
+    /// assignment `FETCH_RW (global)`, under an `unset` of its element
+    /// `FETCH_UNSET (global)`; `isset` and `empty` over a variable fetched
+    /// by name are `ISSET_ISEMPTY_VAR`, and `unset` over one `UNSET_VAR`.
+    #[test]
+    fn an_auto_global_is_fetched_by_name_from_the_global_table_as_php_emits_it() {
+        let cases: &[(&[u8], usize, u32, u32, &str)] = &[
+            (
+                b"<?php $_SERVER[\"x\"] = 1;",
+                4,
+                0,
+                2,
+                "0000 V0 = FETCH_W (global) string(\"_SERVER\")\n\
+                 0001 ASSIGN_DIM V0 string(\"x\")\n\
+                 0002 OP_DATA int(1)\n\
+                 0003 RETURN int(1)\n",
+            ),
+            (
+                b"<?php $_SERVER[\"n\"] .= \"a\";",
+                4,
+                0,
+                2,
+                "0000 V0 = FETCH_RW (global) string(\"_SERVER\")\n\
+                 0001 ASSIGN_DIM_OP (CONCAT) V0 string(\"n\")\n\
+                 0002 OP_DATA string(\"a\")\n\
+                 0003 RETURN int(1)\n",
+            ),
+            (
+                b"<?php unset($_SERVER[\"x\"]);",
+                3,
+                0,
+                1,
+                "0000 V0 = FETCH_UNSET (global) string(\"_SERVER\")\n\
+                 0001 UNSET_DIM V0 string(\"x\")\n\
+                 0002 RETURN int(1)\n",
+            ),
+            (
+                b"<?php $a = isset($_SERVER) && empty($$a);",
+                6,
+                1,
+                3,
+                "0000 T1 = ISSET_ISEMPTY_VAR (global) (isset) string(\"_SERVER\")\n\
+                 0001 T1 = JMPZ_EX T1 0004\n\
+                 0002 T2 = ISSET_ISEMPTY_VAR (local) (empty) CV0($a)\n\
+                 0003 T1 = BOOL T2\n\
+                 0004 ASSIGN CV0($a) T1\n\
+                 0005 RETURN int(1)\n",
+            ),
+            (
+                b"<?php unset($$x, $_ENV);",
+                3,
+                1,
+                0,
+                "0000 UNSET_VAR (local) CV0($x)\n\
+                 0001 UNSET_VAR (global) string(\"_ENV\")\n\
+                 0002 RETURN int(1)\n",
+            ),
+        ];
+        for (source, lines, vars, tmps, oplines) in cases {
+            assert_eq!(
+                dump_of(source),
+                main_dump(*lines, *vars, *tmps, oplines),
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+    }
+
+    /// `$GLOBALS` under the oracle's `[regime.dump]`: read whole it is
+    /// `FETCH_GLOBALS` into a temporary; `$GLOBALS['a']` is the fetch by
+    /// name over `'a'` from the global table wherever it stands, the
+    /// variable of an `ASSIGN`, the base of a dimension's compound
+    /// assignment, `UNSET_VAR` and `ISSET_ISEMPTY_VAR`; `isset($GLOBALS)`
+    /// is `true` before the request runs.
+    #[test]
+    fn globals_is_a_copy_of_the_table_and_its_element_a_fetch_by_name_as_php_emits_it() {
+        let cases: &[(&[u8], usize, u32, u32, &str)] = &[
+            (
+                b"<?php $x = $GLOBALS;",
+                3,
+                1,
+                2,
+                "0000 T1 = FETCH_GLOBALS\n\
+                 0001 ASSIGN CV0($x) T1\n\
+                 0002 RETURN int(1)\n",
+            ),
+            (
+                b"<?php $GLOBALS[\"a\"] = 1;",
+                3,
+                0,
+                2,
+                "0000 V0 = FETCH_W (global) string(\"a\")\n\
+                 0001 ASSIGN V0 int(1)\n\
+                 0002 RETURN int(1)\n",
+            ),
+            (
+                b"<?php $GLOBALS[\"a\"][\"b\"] .= \"c\";",
+                4,
+                0,
+                2,
+                "0000 V0 = FETCH_RW (global) string(\"a\")\n\
+                 0001 ASSIGN_DIM_OP (CONCAT) V0 string(\"b\")\n\
+                 0002 OP_DATA string(\"c\")\n\
+                 0003 RETURN int(1)\n",
+            ),
+            (
+                b"<?php unset($GLOBALS[\"a\"]);",
+                2,
+                0,
+                0,
+                "0000 UNSET_VAR (global) string(\"a\")\n\
+                 0001 RETURN int(1)\n",
+            ),
+            (
+                b"<?php $b = isset($GLOBALS[\"a\"]) || isset($GLOBALS);",
+                5,
+                1,
+                2,
+                "0000 T1 = ISSET_ISEMPTY_VAR (global) (isset) string(\"a\")\n\
+                 0001 T1 = JMPNZ_EX T1 0003\n\
+                 0002 T1 = BOOL bool(true)\n\
+                 0003 ASSIGN CV0($b) T1\n\
+                 0004 RETURN int(1)\n",
+            ),
+        ];
+        for (source, lines, vars, tmps, oplines) in cases {
+            assert_eq!(
+                dump_of(source),
+                main_dump(*lines, *vars, *tmps, oplines),
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+    }
+
+    /// `zend_is_auto_global` arms what the compiler meets, in the order
+    /// it meets it, once, whether or not the line runs: the unit carries
+    /// that order ([`Unit::arms`]), which is the order php lays the
+    /// variables made just in time into `EG(symbol_table)`.
+    #[test]
+    fn the_unit_arms_each_auto_global_it_names_in_the_order_it_met_them() {
+        let (unit, _strings) = unit_and_strings(
+            b"<?php if (0) { $_REQUEST; } $_ENV['k'] ?? 1; \"$_REQUEST[x]\"; $n = '_GET'; $$n;",
+        );
+        assert_eq!(unit.arms, [AutoGlobal::Request, AutoGlobal::Env]);
     }
 
     /// #444's shapes under the oracle's `[regime.dump]`: a property as

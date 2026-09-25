@@ -697,7 +697,7 @@ impl Shared {
 /// string(0) ""
 /// string(10) "ISO-8859-1"
 /// ```
-const CORE_INI: [(&str, &str); 42] = [
+const CORE_INI: [(&str, &str); 44] = [
     ("short_open_tag", "1"),
     ("fatal_error_backtraces", "1"),
     ("precision", "14"),
@@ -740,6 +740,11 @@ const CORE_INI: [(&str, &str); 42] = [
     // `disable_functions`, `PHP_INI_SYSTEM` (`Z/main/main.c:872`): read
     // once, as the function table is built (`function_table`).
     ("disable_functions", ""),
+    // `variables_order` and `request_order`, `PHP_INI_SYSTEM|PHP_INI_PERDIR`
+    // (`Z/main/main.c:851`): which auto-globals the request fills and
+    // the order `$_REQUEST` merges them in, read as each is made.
+    ("variables_order", "EGPCS"),
+    ("request_order", ""),
     // `main.c`'s entries for `mail()` and `php_syslog`, and
     // `sys_temp_dir`, `PHP_INI_SYSTEM` or `PHP_INI_SYSTEM|PHP_INI_PERDIR`
     // but `SMTP`, `smtp_port` and `syslog.filter`; a `NULL` default is
@@ -1383,14 +1388,24 @@ impl Engine {
             .script_name
             .clone()
             .unwrap_or_else(|| b"Standard input code".to_vec());
+        let web = description.is_web;
         let mut req = Request::new(Arc::clone(&self.shared), description);
+        // `php_request_startup` hashes the environment before the
+        // extensions' `RINIT` (`Z/main/main.c:1942`); what can fail is the
+        // memory limit, which the first allocation after it meets again.
+        let _ = req.hash_environment();
         for extension in &self.shared.extensions {
             if let Some(rinit) = extension.rinit {
                 let _ = rinit(&mut req);
             }
         }
-        // What `do_cli` registers once `php_request_startup` has run,
-        // before the program is compiled.
+        // What `do_cli` does once `php_request_startup` has run, before
+        // the program is compiled: `$_SERVER` named, which makes it
+        // (`Z/sapi/cli/php_cli.c:941`), and the standard handles
+        // registered.
+        if !web {
+            let _ = req.arm(php_unit::AutoGlobal::Server);
+        }
         let _ = req.register_file_handles();
         // Where the unit's constant strings live is where the unit
         // lives (design §5.2): a file's unit is published into the
@@ -1596,7 +1611,19 @@ fn compile(
 /// Deprecated: Non-canonical cast (boolean) is deprecated, use the (bool) cast instead in %s on line 2
 /// 7|7|7 apples|1
 /// ```
+///
+/// Before them, each auto-global the unit names is armed
+/// ([`Unit::arms`]), as php's compiler arms one where it meets the name
+/// and opcache arms a cached file's `ping_auto_globals_mask` on a hit
+/// (`Z/ext/opcache/ZendAccelerator.c:1941`), so one made just in time is
+/// in `EG(symbol_table)` before the unit's first line, where the file
+/// names it and whether or not the line that names it is reached.
 pub(crate) fn note_compiled(req: &mut Request, unit: &Arc<Unit>) {
+    for global in &unit.arms {
+        // What a callback can raise is the memory limit, which the
+        // loop meets again at its first allocation.
+        let _ = req.arm(*global);
+    }
     for raised in &unit.diagnostics {
         req.note_error_in(
             raised.level,
@@ -1608,8 +1635,9 @@ pub(crate) fn note_compiled(req: &mut Request, unit: &Arc<Unit>) {
 }
 
 /// The unit's main op array served on a fresh entry frame, what it
-/// compiled to raised first and `$argv` and `$argc` seeded into the
-/// frame's CVs ([`Request::seed_argv`]); the loop's fatal, if any, ends
+/// compiled to raised first, the frame attached to `EG(symbol_table)`,
+/// which is how its `$argv` and `$argc` are the ones
+/// `php_hash_environment` wrote there; the loop's fatal, if any, ends
 /// the request.
 ///
 /// The frame is left the way php leaves the main one, which is not the
@@ -1631,11 +1659,6 @@ fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) {
             return;
         }
     };
-    if req.seed_argv(frame, unit).is_err() {
-        req.detach_symbol_table(frame);
-        req.pop_frame();
-        return;
-    }
     if let Err(fatal) = entry(req, frame) {
         req.end_in(&fatal);
     }

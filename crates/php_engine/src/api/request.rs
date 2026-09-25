@@ -41,6 +41,7 @@ use crate::output::Output;
 
 mod hooks;
 mod lazy;
+mod variables;
 
 pub(crate) use hooks::parent_hook_trampolines;
 pub(crate) use lazy::Strategy;
@@ -868,6 +869,11 @@ pub struct Request {
     exit_status: i32,
     resources: Resources,
     superglobals: Vec<(Vec<u8>, PhpArray)>,
+    /// Each auto-global made just in time and not made yet, php's
+    /// `armed` on each of `CG(auto_globals)`: the first
+    /// `zend_is_auto_global` of one lays it into `EG(symbol_table)`
+    /// ([`Request::arm`]).
+    armed: Vec<php_unit::AutoGlobal>,
     /// The symbol tables, [`TableId`] naming one: php's
     /// `EG(symbol_table)` first, the main op array's variables (design
     /// §5.6, §5.10), and after it one table per function frame that
@@ -1363,6 +1369,7 @@ impl Request {
             exit_status: 0,
             resources,
             superglobals: Vec::new(),
+            armed: Vec::new(),
             tables: vec![SymbolTable::default()],
             included_files: Vec::new(),
             constants: Vec::new(),
@@ -7778,6 +7785,25 @@ impl Request {
         self.release_symbol(symbol);
     }
 
+    /// `zend_hash_del_ind` (`Z/Zend/zend_hash.c:1572`), what `UNSET_VAR`
+    /// deletes a name with: a bucket attached to a CV stays and the CV is
+    /// left `UNDEF`, what it held released after it is gone; any other
+    /// bucket is deleted as [`Request::symbol_del`] deletes it.
+    pub(crate) fn symbol_unset(&mut self, table: TableId, name: &[u8]) {
+        let found = self
+            .table_mut(table)
+            .and_then(|entries| entries.iter().find(|(key, _)| key == name))
+            .map(|(_, symbol)| *symbol);
+        match found {
+            Some(Symbol::Indirect(frame, slot)) => {
+                let value = self.take_slot(frame, slot);
+                self.release(value);
+            }
+            Some(_) => self.symbol_del(table, name),
+            None => {}
+        }
+    }
+
     /// What a bucket owns given up: its value, or the cell a fetch by
     /// name moved it into with the value in it; an attached bucket owns
     /// nothing.
@@ -11878,6 +11904,37 @@ impl Request {
         }
     }
 
+    /// `zend_proptable_to_symtable(&EG(symbol_table), 1)`
+    /// (`Z/Zend/zend_hash.c:3396`), what `FETCH_GLOBALS` hands the
+    /// program as `$GLOBALS`: a copy of the global table, every name
+    /// that has a value in the table's order, a CV the name is attached
+    /// to read where it stands and skipped where it holds nothing, a
+    /// name that reads as an integer that integer (`ZEND_HANDLE_NUMERIC_STR`),
+    /// and a reference nothing else holds its value, as
+    /// `zend_array_dup` unwraps one; each value one more owner.
+    pub(crate) fn symbol_table_array(&mut self) -> Result<PhpArray, Thrown> {
+        let entries: Vec<(Vec<u8>, Symbol)> = self.globals().clone();
+        let mut array = PhpArray::new(self)?;
+        for (name, symbol) in entries {
+            let value = match symbol {
+                Symbol::Value(value) => value,
+                Symbol::Held(cell) => cell.get(),
+                Symbol::Indirect(frame, slot) => self.slot(frame, slot),
+            };
+            if value.tag() == TypeTag::Undef {
+                continue;
+            }
+            let value = match value.as_php_ref() {
+                Some(cell) if value.refcount() == 1 => cell.get(),
+                _ => value,
+            };
+            self.addref(&value);
+            let key = Key::from_string(PhpString::new(self, &name)?);
+            array.set(self, key, value)?;
+        }
+        Ok(array)
+    }
+
     /// `zend_rebuild_symbol_table` for `frame` and `zend_array_dup` of
     /// it: every name the frame's table holds that has a value, in the
     /// table's order, each value one more owner, a reference kept as
@@ -13001,61 +13058,6 @@ impl Request {
     pub fn set_superglobal(&mut self, name: &[u8], value: PhpArray) {
         self.superglobals.retain(|(n, _)| n.as_slice() != name);
         self.superglobals.push((name.to_vec(), value));
-    }
-
-    /// `php_build_argv` (`Z/main/php_variables.c:657-713`) under
-    /// `register_argc_argv`, which php's CLI forces on: `$argv` is the
-    /// host's `argv`, `php_self` first, as a list of strings, and
-    /// `$argc` its count, written into `EG(symbol_table)`, which for the
-    /// main op array is its CVs of those names (`zend_attach_symbol_table`
-    /// at its activation); a request the host describes with no `argv`
-    /// at all, php's web hosts, gets neither. `$_SERVER['argv']` and
-    /// `$_SERVER['argc']` wait on the superglobal fetch the compiler does
-    /// not read yet, and `global $argv` inside a function on the symbol
-    /// table (#280).
-    ///
-    /// ```php
-    /// var_dump($argc);
-    /// var_dump($argv);
-    /// ```
-    /// ```expect
-    /// int(1)
-    /// array(1) {
-    ///   [0]=>
-    ///   string(%d) "%s"
-    /// }
-    /// ```
-    pub(crate) fn seed_argv(&mut self, frame: FrameRef, unit: &Unit) -> Result<(), Thrown> {
-        if self.description.argv.is_empty() {
-            return Ok(());
-        }
-        let argc = i64::try_from(self.description.argv.len()).unwrap_or(i64::MAX);
-        let names: Vec<(u32, bool)> = exec::code_of(unit)
-            .vars
-            .iter()
-            .enumerate()
-            .filter_map(|(at, name)| match name.0.as_ref() {
-                b"argv" => Some((at, true)),
-                b"argc" => Some((at, false)),
-                _ => None,
-            })
-            .filter_map(|(at, is_argv)| u32::try_from(at).ok().map(|at| (at, is_argv)))
-            .collect();
-        for (at, is_argv) in names {
-            let value = if is_argv {
-                let mut array = PhpArray::new(self)?;
-                for word in self.description.argv.clone() {
-                    let word = PhpString::new(self, &word)?;
-                    array.append(self, Value::string(word))?;
-                }
-                Value::array(array)
-            } else {
-                Value::int(argc)
-            };
-            let old = self.set_slot(frame, at, value);
-            self.release(old);
-        }
-        Ok(())
     }
 
     /// `php_sapi_name()`: `sapi_module.name`.

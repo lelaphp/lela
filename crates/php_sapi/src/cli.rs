@@ -739,6 +739,11 @@ pub fn describe(program: &Program, arguments: &[OsString]) -> Result<RequestDesc
             (name.clone(), name, Some(source))
         }
     };
+    let file = match program {
+        Program::File(_) => script.clone(),
+        Program::Direct(_) | Program::Stdin => Vec::new(),
+    };
+    let server = server_variables(&php_self, &file);
     let mut argv = vec![php_self];
     argv.extend(arguments.iter().map(|a| a.as_encoded_bytes().to_vec()));
     Ok(RequestDescription {
@@ -747,12 +752,28 @@ pub fn describe(program: &Program, arguments: &[OsString]) -> Result<RequestDesc
             .map(|(n, v)| (n.as_encoded_bytes().to_vec(), v.as_encoded_bytes().to_vec()))
             .collect(),
         cwd: std::env::current_dir().unwrap_or_default(),
+        server,
         sapi_name: String::from(NAME),
         script_name: Some(script),
         source,
         file_handles: Some(process_handles()),
         ..RequestDescription::default()
     })
+}
+
+/// `sapi_cli_register_variables` (`Z/sapi/cli/php_cli.c:316`) past the
+/// environment, which the engine imports first for every host:
+/// `PHP_SELF` and `SCRIPT_NAME` are `php_self`, the file's name or
+/// `Standard input code`; `SCRIPT_FILENAME` and `PATH_TRANSLATED` are the
+/// file's name, empty for `-r` and stdin; `DOCUMENT_ROOT` is empty.
+fn server_variables(php_self: &[u8], file: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
+    vec![
+        (b"PHP_SELF".to_vec(), php_self.to_vec()),
+        (b"SCRIPT_NAME".to_vec(), php_self.to_vec()),
+        (b"SCRIPT_FILENAME".to_vec(), file.to_vec()),
+        (b"PATH_TRANSLATED".to_vec(), file.to_vec()),
+        (b"DOCUMENT_ROOT".to_vec(), Vec::new()),
+    ]
 }
 
 /// The process's fds 0, 1 and 2 as the engine is handed them, each a

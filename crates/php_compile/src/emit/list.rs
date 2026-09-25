@@ -116,7 +116,11 @@ impl Emit<'_> {
                         });
                         Where::Temporary(out)
                     }
-                    SimpleVar::This => self.expr(written)?,
+                    SimpleVar::This | SimpleVar::Auto(_) => self.expr(written)?,
+                    // `zend_try_compile_cv` fails and
+                    // `zend_compile_simple_var_no_cv` fetches the name,
+                    // which `EG(symbol_table)` has not: php's own warning.
+                    SimpleVar::Globals => self.fetch_by_name(b"GLOBALS", super::Symbols::Global)?,
                 },
                 _ => self.expr(value)?,
             }
@@ -127,17 +131,24 @@ impl Emit<'_> {
 
     /// `zend_compile_var(…, BP_VAR_W, 1)` over the right side of a list
     /// taken by reference: a plain variable is its CV, `$this` its
-    /// `FETCH_THIS`, an element or a property the `_W` fetch of the whole
-    /// chain with the reference's bit on its last link, and a call the
-    /// `VAR` it returned into.
+    /// `FETCH_THIS`, a variable fetched by name its `FETCH_W`, an element
+    /// or a property the `_W` fetch of the whole chain with the
+    /// reference's bit on its last link, and a call the `VAR` it returned
+    /// into.
     fn var_by_ref(&mut self, expr: tree::Expr) -> Result<(OperandKind, u32), CompileError> {
         let line = self.line;
         match expr {
+            _ if self.is_by_name(expr) => self.var_for_reference(expr),
             tree::Expr::SimpleVarExpr(id) => Ok(match self.simple_var_of(id, line)? {
                 SimpleVar::Cv(name) => (OperandKind::Cv, self.lookup_cv(&name)),
                 SimpleVar::This => {
                     let this = self.fetch_this(OperandKind::Var);
                     self.operand(this)
+                }
+                SimpleVar::Auto(_) => return Err(self.fatal("an auto-global not fetched by name")),
+                SimpleVar::Globals => {
+                    let globals = self.fetch_globals(OperandKind::Var);
+                    self.operand(globals)
                 }
             }),
             tree::Expr::SubscriptExpr(_) | tree::Expr::MemberAccessExpr(_) => {

@@ -38,4 +38,4 @@ pub use op::{
 };
 pub use opcode::Opcode;
 pub use types::type_to_string;
-pub use unit::{Diagnostic, HookBody, Level, MethodBody, Unit};
+pub use unit::{AutoGlobal, Diagnostic, HookBody, Level, MethodBody, Unit};
