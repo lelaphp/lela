@@ -5,9 +5,7 @@
 //!
 //! What stands beside `stub::unbuilt` still: the property's hooks
 //! (`hasHooks`, `getHooks`, `hasHook`, `getHook`), whose model
-//! `PropertyDecl` has no field for; `getMangledName`, which wants
-//! php's `\0Class\0name` spelling the declaration model does not carry;
-//! `getRawValue`, `setRawValue` and the four lazy entries;
+//! `PropertyDecl` has no field for; `getRawValue`, `setRawValue` and the four lazy entries;
 //! `setAccessible`, which the stub marks `#[\\Deprecated]` (#412); and
 //! `ReflectionConstant::getFileName`, which wants the file a `define`
 //! ran in.
@@ -103,6 +101,53 @@ fn this_declared(req: &mut Request) -> Result<Reflected, Thrown> {
     let class = class_named(req, &class)?;
     let found = property_named(req, class, &name);
     Ok((class, name, found))
+}
+
+/// `ReflectionProperty::getMangledName()`: `prop->name`, the key the
+/// property has in the object's table, as `zend_mangle_property_name`
+/// writes it: the name for a public property, `\0*\0name` for a
+/// protected one and `\0Class\0name`, the declaring class, for a
+/// private one; a dynamic property has no info and answers
+/// `ref->unmangled_name`.
+///
+/// ```php
+/// class P { public $a; protected $b; private $c; }
+/// $o = new P; $o->d = 1;
+/// foreach (['a', 'b', 'c'] as $n) { var_dump((new ReflectionProperty('P', $n))->getMangledName()); }
+/// var_dump((new ReflectionProperty($o, 'd'))->getMangledName(), array_keys((array) $o));
+/// ```
+/// ```expect
+/// Deprecated: Creation of dynamic property P::$d is deprecated in %s on line 3
+/// string(1) "a"
+/// string(4) "%0*%0b"
+/// string(4) "%0P%0c"
+/// string(1) "d"
+/// array(4) {
+///   [0]=>
+///   string(1) "a"
+///   [1]=>
+///   string(4) "%0*%0b"
+///   [2]=>
+///   string(4) "%0P%0c"
+///   [3]=>
+///   string(1) "d"
+/// }
+/// ```
+pub(super) fn reflection_property_get_mangled_name(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    let (_, name, found) = this_declared(req)?;
+    let mangled = match found {
+        Some((scope, decl)) => match decl.visibility {
+            Visibility::Public => name,
+            Visibility::Protected => [b"\0*\0".as_slice(), &name].concat(),
+            Visibility::Private => {
+                let class = class_name_of(req, scope);
+                [b"\0".as_slice(), &class, b"\0", &name].concat()
+            }
+        },
+        None => name,
+    };
+    string_value(req, &mangled)
 }
 
 /// `ReflectionProperty::getName()`: `ref->unmangled_name`.

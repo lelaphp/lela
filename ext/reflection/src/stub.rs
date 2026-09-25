@@ -5647,7 +5647,7 @@ fn reflection_property() -> Declared {
             ),
             (
                 method(b"getMangledName", &[], Some(Type::String)),
-                unbuilt as Entry,
+                super::member::reflection_property_get_mangled_name as Entry,
             ),
             (
                 tentative(method(
