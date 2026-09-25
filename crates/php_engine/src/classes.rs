@@ -962,6 +962,30 @@ fn variadic(name: &[u8]) -> Parameter {
 /// bool(true)
 /// ```
 ///
+/// A pair on an object shows the method's name with its class, the
+/// receiver and the parameters:
+///
+/// ```php
+/// class C { function m($x, $y = 1) { return $x; } }
+/// var_dump(Closure::fromCallable([new C, 'm']));
+/// ```
+/// ```expect
+/// object(Closure)#2 (3) {
+///   ["function"]=>
+///   string(4) "C::m"
+///   ["this"]=>
+///   object(C)#1 (0) {
+///   }
+///   ["parameter"]=>
+///   array(2) {
+///     ["$x"]=>
+///     string(10) "<required>"
+///     ["$y"]=>
+///     string(10) "<optional>"
+///   }
+/// }
+/// ```
+///
 /// ```php
 /// class C { private function p() {} }
 /// try { Closure::fromCallable([new C, 'p']); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
@@ -1951,6 +1975,50 @@ fn closure_bind_to(req: &mut Request) -> Result<Value, Thrown> {
 /// [`valid_closure_binding`]; then `zend_create_closure` over the
 /// closure's function with the new receiver and scope, a receiver with
 /// no scope taking `Closure` as its dummy scope as php's does.
+///
+/// The four spellings of the scope, through `bind` on a receiver and
+/// `bindTo` on none: `"static"`, the closure's own, which for one
+/// written at the top level is none, so a receiver takes `Closure`;
+/// `null`, none; an object, its class; a name, the class it names. Then
+/// the two refusals, a receiver for a `static` closure and the scope of
+/// an internal class, each spelled through both.
+///
+/// ```php
+/// class A {}
+/// class B extends A {}
+/// $get = function () {
+///     $r = new ReflectionFunction(Closure::getCurrent());
+///     return ($r->getClosureThis() ? 'A' : 'none') . ' in ' . $r->getClosureScopeClass()?->name;
+/// };
+/// foreach (['static', null, new B, 'A'] as $scope) {
+///     var_dump(Closure::bind($get, new A, $scope)(), $get->bindTo(null, $scope)());
+/// }
+/// $static = static function () {};
+/// var_dump(Closure::bind($static, new A), $static->bindTo(new A));
+/// var_dump(Closure::bind($get, null, 'stdClass'), $get->bindTo(new A, new ArrayObject));
+/// ```
+/// ```expect
+/// string(12) "A in Closure"
+/// string(8) "none in "
+/// string(12) "A in Closure"
+/// string(8) "none in "
+/// string(6) "A in B"
+/// string(9) "none in B"
+/// string(6) "A in A"
+/// string(9) "none in A"
+///
+/// Warning: Cannot bind an instance to a static closure, this will be an error in PHP 9 in %s on line 12
+///
+/// Warning: Cannot bind an instance to a static closure, this will be an error in PHP 9 in %s on line 12
+/// NULL
+/// NULL
+///
+/// Warning: Cannot bind closure to scope of internal class stdClass, this will be an error in PHP 9 in %s on line 13
+///
+/// Warning: Cannot bind closure to scope of internal class ArrayObject, this will be an error in PHP 9 in %s on line 13
+/// NULL
+/// NULL
+/// ```
 fn do_closure_bind(
     req: &mut Request,
     closure: PhpObject,
@@ -2114,6 +2182,17 @@ fn valid_closure_binding(
 /// int(21)
 ///
 /// Warning: Cannot bind closure to scope of internal class stdClass, this will be an error in PHP 9 in %s on line 6
+/// NULL
+/// ```
+///
+/// A `static` closure takes no receiver:
+///
+/// ```php
+/// class A {}
+/// var_dump((static function () { return 1; })->call(new A));
+/// ```
+/// ```expect
+/// Warning: Cannot bind an instance to a static closure, this will be an error in PHP 9 in %s on line 3
 /// NULL
 /// ```
 fn closure_call(req: &mut Request) -> Result<Value, Thrown> {
