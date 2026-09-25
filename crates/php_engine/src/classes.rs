@@ -221,6 +221,30 @@ impl ObjectHandlers for ClosureHandlers {
     /// )
     /// ```
     ///
+    /// A body's `static`s follow the `use` variables in the same table,
+    /// each shown as its value once the call that bound it is over:
+    ///
+    /// ```php
+    /// $b = 5;
+    /// $f = function () use ($b) { static $n = 1; $n++; };
+    /// $f();
+    /// print_r($f);
+    /// ```
+    /// ```expect
+    /// Closure Object
+    /// (
+    ///     [name] => {closure:%s:3}
+    ///     [file] => %s
+    ///     [line] => 3
+    ///     [static] => Array
+    ///         (
+    ///             [b] => 5
+    ///             [n] => 2
+    ///         )
+    ///
+    /// )
+    /// ```
+    ///
     /// ```php
     /// var_dump(Closure::fromCallable('strlen'));
     /// ```
@@ -262,10 +286,19 @@ impl ObjectHandlers for ClosureHandlers {
             set_row(req, &mut out, b"file", file)?;
             set_row(req, &mut out, b"line", Value::int(i64::from(decl.line)))?;
         }
-        let bound = object.closure_bound(req)?;
+        // The whole table, the `use` variables and the body's `static`s.
+        let bound = req.closure_bound(object, false);
         if !bound.is_empty() {
             let mut statics = PhpArray::new(req)?;
             for (name, value) in bound {
+                let name = PhpString::new(req, &name)?;
+                // `Z_ISREF_P(var) && Z_REFCOUNT_P(var) == 1`: a reference
+                // the table alone holds shows its value.
+                let value = if value.as_php_ref().is_some() && value.refcount() == 1 {
+                    value.deref()
+                } else {
+                    value
+                };
                 req.addref(&value);
                 statics.set(req, Key::from_string(name), value)?;
             }

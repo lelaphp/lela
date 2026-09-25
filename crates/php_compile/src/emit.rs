@@ -105,8 +105,8 @@ use php_unit::decl::{
     Parameter, PropertyDecl, TraitAdaptation, TraitMethodRef, Type, Visibility,
 };
 use php_unit::{
-    ConstIdx, Diagnostic, FramelessEntry, Level, MethodBody, OpArray, Opcode, OperandKind, Opline,
-    OplineIdx, TryCatch, Unit, frameless_table,
+    BoundVar, ConstIdx, Diagnostic, FramelessEntry, Level, MethodBody, OpArray, Opcode,
+    OperandKind, Opline, OplineIdx, TryCatch, Unit, frameless_table,
 };
 
 use php_syntax::magic_const_name;
@@ -273,6 +273,11 @@ const RETURNS_FUNCTION: u32 = 1 << 0;
 /// `ZEND_RETURNS_VALUE` (`Z/Zend/zend_compile.h:1199`), on a
 /// `RETURN_BY_REF` returning what is no variable.
 const RETURNS_VALUE: u32 = 1 << 1;
+
+/// `ZEND_BIND_REF` (`Z/Zend/zend_compile.h:1194`), on a `BIND_STATIC`
+/// that binds its CV to the table's entry by reference, which every
+/// `static` does.
+const BIND_REF: u32 = 1;
 
 /// `sizeof(zval)`, sixteen bytes on php's every target, which
 /// `zend_compile_rope_finalize` divides a rope's string pointers into
@@ -445,11 +450,14 @@ pub(crate) struct Emit<'a> {
     /// `CG(context).try_catch_offset`: which element of [`Emit::try_catch`]
     /// the oplines being emitted stand in, `-1` outside every `try`.
     try_catch_offset: Option<u32>,
-    /// `op_array->static_variables`: the names the op array being
+    /// `op_array->static_variables`: the variables the op array being
     /// compiled binds through `BIND_STATIC`, in the order
     /// `zend_compile_static_var_common` added them, which is what a
     /// `BIND_LEXICAL`'s and a `BIND_STATIC`'s `extended_value` names.
-    static_vars: Vec<Name>,
+    static_vars: Vec<BoundVar>,
+    /// Whose fold is running, `zend_compile_expr`'s or
+    /// `zend_eval_const_expr`'s ([`Fold`]).
+    fold: Fold,
     /// `op_array->fn_flags` of the op array being compiled, the bits
     /// this compiler reads back.
     fn_flags: FnFlags,
@@ -457,6 +465,17 @@ pub(crate) struct Emit<'a> {
     /// ([`walk::generators`]): php's parser marks `ZEND_ACC_GENERATOR`
     /// on a declaration before its body compiles.
     generators: Vec<u32>,
+}
+
+/// Which of php's two folds is running: `zend_compile_expr`'s, which
+/// folds a call of a function [`crate::special`] knows over constants,
+/// or `zend_eval_const_expr`'s, which folds no call. A `static`'s
+/// initializer is the one place the second runs over an expression the
+/// first would otherwise fold ([`Emit::static_var`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Fold {
+    Compile,
+    EvalConstExpr,
 }
 
 /// `op_array->fn_flags` (`Z/Zend/zend_compile.h:283-296`), the two bits
@@ -921,6 +940,7 @@ pub(crate) fn unit(
         dynamic: Vec::new(),
         dynamic_func_defs: Vec::new(),
         static_vars: Vec::new(),
+        fold: Fold::Compile,
         fn_flags: FnFlags::default(),
         numeric_dims: Vec::new(),
         methods: Vec::new(),
@@ -995,7 +1015,7 @@ struct Saved {
     return_type: Option<Type>,
     returns_by_ref: bool,
     dynamic_func_defs: Vec<u32>,
-    static_vars: Vec<Name>,
+    static_vars: Vec<BoundVar>,
     fn_flags: FnFlags,
     numeric_dims: Vec<ConstIdx>,
 }
@@ -1322,7 +1342,7 @@ impl Emit<'_> {
                     self.global_var(var)?;
                 }
             }
-            Stmt::StaticVarStmt(_) => return Err(self.unread("a `static` variable")),
+            Stmt::StaticVarStmt(id) => self.static_var(id)?,
             Stmt::UseStmt(id) => self.use_stmt(id)?,
             Stmt::HaltCompilerStmt(_) => return Err(self.unread("a `__halt_compiler`")),
         }
@@ -2768,7 +2788,11 @@ impl Emit<'_> {
                     String::from_utf8_lossy(&bind.name)
                 )));
             }
-            self.static_vars.push(Name(bind.name.as_slice().into()));
+            self.static_vars.push(BoundVar {
+                name: Name(bind.name.as_slice().into()),
+                value: Zval::null(),
+                lexical: true,
+            });
             let op1 = self.lookup_cv(&bind.name);
             self.push(Opline {
                 opcode: Opcode::BindStatic,
@@ -2777,6 +2801,116 @@ impl Emit<'_> {
                 extended_value: bind.slot_and_mode(true),
                 ..Opline::default()
             });
+        }
+        Ok(())
+    }
+
+    /// `zend_compile_static_var` (`Z/Zend/zend_compile.c:5501`) over each
+    /// variable of one `static` statement: `$this` and a name the op
+    /// array's table already has are php's compile errors, then the
+    /// initializer is folded as `zend_eval_const_expr` folds it. A value
+    /// it folds to, or `null` where none is written, is what the table
+    /// starts with, and one `BIND_STATIC` binds the CV to the table's
+    /// entry by reference. An initializer it cannot fold leaves `null`
+    /// in the table and runs where it stands: `BIND_INIT_STATIC_OR_JMP`
+    /// steps over it once the entry holds a value, and the
+    /// `BIND_STATIC` after it binds the value it computed the first
+    /// time. The slot and the `ZEND_BIND_REF` bit share `extended_value`
+    /// as [`Bind::slot_and_mode`] lays them out.
+    ///
+    /// ```php
+    /// function g($x) { static $v = $x * 2; return $v; }
+    /// var_dump(g(1), g(5));
+    /// for ($i = 0; $i < 3; $i++) { static $t = 10; $t++; }
+    /// echo $t, "\n";
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// int(2)
+    /// 13
+    /// ```
+    ///
+    /// ```php
+    /// function f() { static $this; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use $this as static variable in %s on line 2
+    /// ```
+    ///
+    /// A closure's `use` variables are entries of the same table, so a
+    /// `static` of one of their names is the duplicate:
+    ///
+    /// ```php
+    /// $f = function () use ($a) { static $a; };
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Duplicate declaration of static variable $a in %s on line 2
+    /// ```
+    fn static_var(&mut self, id: NodeId<tree::StaticVarStmt>) -> Result<(), CompileError> {
+        for declarator in self.parsed.tree[id].static_var_declarators.clone() {
+            let declarator = &self.parsed.tree[declarator];
+            let (line, init) = (declarator.line, declarator.init);
+            let name = self.variable_name(declarator.var);
+            self.line = line;
+            if name == b"this" {
+                return Err(self.compile_error("Cannot use $this as static variable"));
+            }
+            if self.static_vars.iter().any(|held| *held.name.0 == *name) {
+                return Err(self.compile_error(format!(
+                    "Duplicate declaration of static variable ${}",
+                    String::from_utf8_lossy(&name)
+                )));
+            }
+            let slot = u32::try_from(self.static_vars.len()).unwrap_or(u32::MAX) << 3;
+            let folded = match init {
+                None => Some(Zval::null()),
+                Some(init) => {
+                    let mark = self.raised();
+                    self.fold = Fold::EvalConstExpr;
+                    let folded = self.constant_of(init);
+                    self.fold = Fold::Compile;
+                    let folded = folded?;
+                    if folded.is_none() {
+                        self.unraise(mark);
+                    }
+                    folded
+                }
+            };
+            self.static_vars.push(BoundVar {
+                name: Name(name.as_slice().into()),
+                value: folded.unwrap_or_else(Zval::null),
+                lexical: false,
+            });
+            let op1 = self.lookup_cv(&name);
+            let (Some(init), None) = (init, folded) else {
+                self.push(Opline {
+                    opcode: Opcode::BindStatic,
+                    op1_type: OperandKind::Cv,
+                    op1,
+                    extended_value: slot | BIND_REF,
+                    ..Opline::default()
+                });
+                continue;
+            };
+            let jump = self.push(Opline {
+                opcode: Opcode::BindInitStaticOrJmp,
+                op1_type: OperandKind::Cv,
+                op1,
+                extended_value: slot,
+                ..Opline::default()
+            });
+            let value = self.expr(init)?;
+            let (op2_type, op2) = self.operand(value);
+            self.push(Opline {
+                opcode: Opcode::BindStatic,
+                op1_type: OperandKind::Cv,
+                op1,
+                op2_type,
+                op2,
+                extended_value: slot | BIND_REF,
+                ..Opline::default()
+            });
+            self.update_jump_target_to_next(jump);
         }
         Ok(())
     }
@@ -10941,6 +11075,9 @@ impl Emit<'_> {
             // for the first-class callable alone, `f(...)`, which this
             // compiler does not read; the arguments are read before the
             // callee so that refusal is the one that stands.
+            tree::Expr::CallExpr(_) if self.fold == Fold::EvalConstExpr => {
+                Err(self.fatal("a call is no constant expression"))
+            }
             tree::Expr::CallExpr(id) => {
                 let node = &tree[id];
                 let (callee, args) = (node.callee, node.args);
@@ -14179,6 +14316,7 @@ mod tests {
             dynamic: Vec::new(),
             dynamic_func_defs: Vec::new(),
             static_vars: Vec::new(),
+            fold: Fold::Compile,
             fn_flags: FnFlags::default(),
             numeric_dims: Vec::new(),
             methods: Vec::new(),

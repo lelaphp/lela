@@ -633,11 +633,12 @@ pub struct ClosureInfo {
     pub scope: Option<ClassId>,
     /// The closure's own copy of the op array's `static_variables`,
     /// which `zend_create_closure` makes with `zend_array_dup` and
-    /// `ZEND_MAP_PTR_INIT`: one slot per name of
-    /// [`php_unit::OpArray::bound_vars`], every one undefined until a
-    /// `BIND_LEXICAL` beside the declaration fills it, and what the
-    /// `BIND_STATIC` prologue of the body reads back. A clone of this
-    /// value is a view of them and takes no owner, as `this` is.
+    /// `ZEND_MAP_PTR_INIT`: one slot per entry of
+    /// [`php_unit::OpArray::bound_vars`], a `use` variable's undefined
+    /// until a `BIND_LEXICAL` beside the declaration fills it and a
+    /// `static`'s at the value the table starts it at, and what the
+    /// `BIND_STATIC`s of the body read and bind. A clone of this value
+    /// is a view of them and takes no owner, as `this` is.
     pub bound: Vec<Value>,
     /// `ZEND_ACC_FAKE_CLOSURE`: whether the closure was made of a
     /// function that already had a name, `zend_create_fake_closure`,
@@ -742,14 +743,15 @@ impl PhpObject {
     /// The variables a closure bound, by the names its declaration
     /// wrote, in the order the table holds them, which is what
     /// `ReflectionFunctionAbstract::getClosureUsedVariables` walks the
-    /// `BIND_STATIC` prologue for: a name whose slot nothing filled is
-    /// left out, php's `Z_ISUNDEF(bucket->val)`, and a name bound by
-    /// reference stands for the cell, as php's bucket holds one. Empty
-    /// for an object that is no closure and for a closure that bound
-    /// nothing. The values are views, no owner taken; the `Err` is the
-    /// memory limit refusing a name.
+    /// `BIND_STATIC` prologue for: the `use` variables alone and no
+    /// `static` of the body, a name whose slot nothing filled left out,
+    /// php's `Z_ISUNDEF(bucket->val)`, and a name bound by reference
+    /// standing for the cell, as php's bucket holds one. Empty for an
+    /// object that is no closure and for a closure that bound nothing.
+    /// The values are views, no owner taken; the `Err` is the memory
+    /// limit refusing a name.
     pub fn closure_bound(&self, req: &mut Request) -> Result<Vec<(PhpString, Value)>, Thrown> {
-        let bound = req.closure_bound(*self);
+        let bound = req.closure_bound(*self, true);
         let mut out = Vec::with_capacity(bound.len());
         for (name, value) in bound {
             out.push((PhpString::new(req, &name)?, value));

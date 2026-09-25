@@ -5,9 +5,8 @@
 //! declaration the reflector's `$name`, and a method's `$class`, look
 //! up again, through [`super::signature::this_function`].
 //!
-//! What stands beside `stub::unbuilt` still: `getStaticVariables`,
-//! whose table the declaration model has no field for (#420);
-//! `getEndLine`, which is #376's; `getClosureCalledClass`,
+//! What stands beside `stub::unbuilt` still: `getEndLine`, which is
+//! #376's; `getClosureCalledClass`,
 //! whose `called_scope` the payload does not carry, and `getClosure`,
 //! which waits on `api::call::closure_from_callable`; `setAccessible`
 //! and `ReflectionFunction`'s `isDisabled`, which the stub marks
@@ -15,9 +14,9 @@
 //! yet (#412).
 
 use php_ext::abi::Callable;
-use php_ext::call::{call_array, call_named, known_method};
+use php_ext::call::{bound_variables, call_array, call_named, known_method};
 use php_ext::coerce::{is_callable, to_callable};
-use php_ext::decl::{FunctionDecl, MethodDecl, Visibility};
+use php_ext::decl::{FunctionDecl, MethodDecl, Name, Visibility};
 use php_ext::raising::{Thrown, arg_count_error, throw};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, Value};
@@ -654,6 +653,118 @@ pub(super) fn reflection_function_get_closure_used_variables(
         used.set(req, Key::Str(name), value)?;
     }
     Ok(Value::array(used))
+}
+
+/// `ReflectionFunctionAbstract::getStaticVariables()`: a copy of the
+/// function's `static` table, `zend_hash_copy` over
+/// `ZEND_MAP_PTR_GET(static_variables_ptr)` with `zval_add_ref`, which
+/// php lays down from the op array's starting values where no call has
+/// yet ([`php_ext::call::bound_variables`]); the empty array for a
+/// native. Before the first call a `static` reads the value it was
+/// declared with, or `null` where its initializer runs at the call;
+/// after it, the value the function left there. A closure's table is
+/// its own and holds its `use` variables first; a method a trait gave a
+/// class is that class's, and the trait's own is untouched by it.
+///
+/// ```php
+/// function f() { static $x = 1, $y, $z = [1, 2], $o = PHP_INT_MAX + strlen("x"); $x++; return $x; }
+/// $r = new ReflectionFunction('f');
+/// var_dump($r->getStaticVariables());
+/// f();
+/// var_dump($r->getStaticVariables());
+/// var_dump((new ReflectionFunction('strlen'))->getStaticVariables());
+/// ```
+/// ```expect
+/// array(4) {
+///   ["x"]=>
+///   int(1)
+///   ["y"]=>
+///   NULL
+///   ["z"]=>
+///   array(2) {
+///     [0]=>
+///     int(1)
+///     [1]=>
+///     int(2)
+///   }
+///   ["o"]=>
+///   NULL
+/// }
+/// array(4) {
+///   ["x"]=>
+///   int(2)
+///   ["y"]=>
+///   NULL
+///   ["z"]=>
+///   array(2) {
+///     [0]=>
+///     int(1)
+///     [1]=>
+///     int(2)
+///   }
+///   ["o"]=>
+///   float(9.223372036854776E+18)
+/// }
+/// array(0) {
+/// }
+/// ```
+///
+/// ```php
+/// trait T { function n() { static $n = 0; return ++$n; } }
+/// class A { use T; }
+/// $a = new A; $a->n(); $a->n();
+/// var_dump((new ReflectionMethod('A', 'n'))->getStaticVariables(), (new ReflectionMethod('T', 'n'))->getStaticVariables());
+/// $b = 5;
+/// $c = function () use ($b) { static $k = 'k'; };
+/// var_dump((new ReflectionFunction($c))->getStaticVariables());
+/// ```
+/// ```expect
+/// array(1) {
+///   ["n"]=>
+///   int(2)
+/// }
+/// array(1) {
+///   ["n"]=>
+///   int(0)
+/// }
+/// array(2) {
+///   ["b"]=>
+///   int(5)
+///   ["k"]=>
+///   string(1) "k"
+/// }
+/// ```
+pub(super) fn reflection_function_get_static_variables(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    let (function, _) = this_function(req)?;
+    let callable = match &function {
+        FunctionRef::Method(scope, name) => {
+            known_method(req, *scope, &Name(name.as_slice().into()), None)
+        }
+        FunctionRef::Closure(object) => to_callable(req, &object.as_value()).ok(),
+        FunctionRef::Global(name) => {
+            let value = string_value(req, name)?;
+            let callable = to_callable(req, &value).ok();
+            req.release(value);
+            callable
+        }
+    };
+    let mut statics = PhpArray::new(req)?;
+    let Some(callable) = callable else {
+        return Ok(Value::array(statics));
+    };
+    for (name, value) in bound_variables(req, &callable)? {
+        // `zval_add_ref`: a reference the table alone holds is copied
+        // out of, so a `static` read after its call is its value.
+        let value = if value.as_php_ref().is_some() && value.refcount() == 1 {
+            value.deref()
+        } else {
+            value
+        };
+        req.addref(&value);
+        statics.set(req, Key::Str(name), value)?;
+    }
+    Ok(Value::array(statics))
 }
 
 /// `ReflectionFunctionAbstract::getAttributes(?string $name = null,

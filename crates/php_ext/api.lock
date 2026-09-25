@@ -83,6 +83,7 @@ call::Iter::key
 call::Iter::next
 call::Iter::value
 call::autoload
+call::bound_variables
 call::call
 call::call_array
 call::call_method

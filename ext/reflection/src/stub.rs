@@ -4783,7 +4783,7 @@ fn reflection_function_abstract() -> Declared {
             ),
             (
                 tentative(method(b"getStaticVariables", &[], Some(Type::Array))),
-                unbuilt as Entry,
+                super::func::reflection_function_get_static_variables as Entry,
             ),
             (
                 tentative(method(b"returnsReference", &[], Some(Type::Bool))),
