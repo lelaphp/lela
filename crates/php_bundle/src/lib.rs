@@ -25,6 +25,8 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_spl::extension,
         #[cfg(feature = "date")]
         php_ext_date::extension,
+        #[cfg(feature = "lexbor")]
+        php_ext_lexbor::extension,
         #[cfg(feature = "reflection")]
         php_ext_reflection::extension,
         #[cfg(feature = "mbstring")]

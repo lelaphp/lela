@@ -206,6 +206,7 @@ Options:
 ├── hash
 ├── iconv
 ├── json
+├── lexbor
 ├── libxml
 ├── mbstring
 ├── openssl
@@ -220,4 +221,4 @@ Options:
 ├── standard
 └── tokenizer
 ```
-<!-- /computed in=53f1b1493c0fd7d8cb063d9d4aa5b1394bbdddb72a6ecb599de01484041ef955 out=094bbaabfdfe64ed038b0760d430cc5d637e6b69ac49b77f7e7e929588c13af8 -->
+<!-- /computed in=642fe889e09075cd5c7439d397949d45b24bc8a087bc7567916e0b3e3a6aafa8 out=3ddad93dff769cb9fe450994a02fd5688a9fed64139fad260b105e969ed1566d -->

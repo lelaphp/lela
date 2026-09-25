@@ -1,0 +1,27 @@
+# ext/lexbor: one crate per extension (ADR-0004), laid down by `xtask new-ext`.
+[package]
+name = "php_ext_lexbor"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "The lexbor extension, php-src/ext/lexbor"
+# The one crate that links lexbor, which ext/dom reaches through it.
+links = "lexbor"
+
+[lints]
+workspace = true
+
+# The one dependency: the facade. The engine is out of reach (`[[edge]]` ext/*).
+[dependencies]
+php_ext = { path = "../../crates/php_ext" }
+
+# lexbor is php-src's vendored copy, compiled by `build.rs` (design §7.2,
+# #731) and bound in `src/ffi/` alone (`unsafe.homes`).
+[build-dependencies]
+cc = { workspace = true }
+
+# The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
+[dev-dependencies]
+php_ext = { path = "../../crates/php_ext", features = ["test"] }
