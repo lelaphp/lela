@@ -19,8 +19,9 @@
 //!
 //! A variable sent to a callee the compiler knows nothing of is fetched
 //! as php fetches it: a CV as it stands, `$this` by `FETCH_THIS`, and a
-//! dimension, a property or a class's property by the `_FUNC_ARG`
-//! fetch under a `CHECK_FUNC_ARG`, which reads the parameter's
+//! dimension, a property, a class's property or a variable fetched by
+//! name, an auto-global or `$$x`, by the `_FUNC_ARG` fetch under a
+//! `CHECK_FUNC_ARG`, which reads the parameter's
 //! by-reference bit off the callee as the program serves and fetches
 //! for writing or for reading by it; `SEND_FUNC_ARG` then sends what
 //! was fetched the same way.
@@ -28,7 +29,7 @@
 use php_heap::Zval;
 use php_syntax::tree::{self, Node, NodeId};
 use php_unit::decl::Parameter;
-use php_unit::{Opcode, OperandKind, Opline};
+use php_unit::{AutoGlobal, Opcode, OperandKind, Opline};
 
 use super::{Emit, Fetch, Over, SimpleVar, walk};
 use crate::CompileError;
@@ -460,7 +461,10 @@ impl Emit<'_> {
         let mode = callee.map(|callee| callee.mode(number));
         let known = mode.filter(|_| number.is_some());
         let value = self.peel(value);
-        if self.is_call(value) {
+        // "Treat passing of $GLOBALS the same as passing a call": its
+        // `FETCH_GLOBALS` temporary is `SEND_VAL_EX` where the parameter
+        // may take a reference, which is the error the program meets.
+        if self.is_call(value) || self.is_globals(value) {
             // `zend_is_call`: the call's `VAR`, or the constant or the
             // temporary a call php served itself left.
             let returned = self.expr(value)?;
@@ -623,10 +627,10 @@ impl Emit<'_> {
     }
 
     /// `zend_is_variable` over what `zend_compile_args` sends: a plain
-    /// variable's CV, `$this`, or a dimension, a property or a class's
-    /// property, which are fetched; none for anything else. A variable
-    /// named as the program serves is not read here, and is sent as the value it
-    /// reads, and so is a chain a `?->` stands in, php's
+    /// variable's CV, `$this`, or a dimension, a property, a class's
+    /// property, an auto-global or a variable named by a value the
+    /// program computes, which are fetched; none for anything else. A
+    /// chain a `?->` stands in is sent as the value it reads, php's
     /// `zend_is_variable(arg) && !zend_ast_is_short_circuited(arg)`.
     ///
     /// ```php
@@ -655,8 +659,15 @@ impl Emit<'_> {
             tree::Expr::SimpleVarExpr(id) => Some(match self.simple_var_of(id, self.line)? {
                 SimpleVar::Cv(name) => Variable::Cv(self.lookup_cv(&name)),
                 SimpleVar::This => Variable::This,
-                SimpleVar::Auto(_) | SimpleVar::Globals => return Ok(None),
+                // `zend_try_compile_cv` refuses an auto-global, so it is
+                // fetched by its name from `EG(symbol_table)`.
+                SimpleVar::Auto(_) => Variable::Fetched,
+                // [`Self::send_arg`] sends `$GLOBALS` as a call.
+                SimpleVar::Globals => return Ok(None),
             }),
+            tree::Expr::VarVarExpr(_) | tree::Expr::DynamicVarExpr(_) => {
+                self.named_variable(value)?
+            }
             tree::Expr::SubscriptExpr(_) | tree::Expr::MemberAccessExpr(_) => {
                 Some(Variable::Fetched)
             }
@@ -664,6 +675,77 @@ impl Emit<'_> {
                 Some(Variable::Fetched)
             }
             _ => None,
+        })
+    }
+
+    /// `$$x` or `${expr}` as `zend_compile_args` sorts it, nothing
+    /// compiled to answer: a name the program computes is no
+    /// `ZEND_AST_ZVAL`, which `zend_try_compile_cv` refuses, and so is an
+    /// auto-global's written out, both fetched by name; `${'this'}` is
+    /// `is_this_fetch`'s; any other name written out is the CV it names,
+    /// or `$GLOBALS`, and is sent as the value it reads.
+    ///
+    /// So to a callee nothing is known of, an auto-global and `$$x` are
+    /// `CHECK_FUNC_ARG` and `FETCH_FUNC_ARG` from the table they name,
+    /// and a parameter by reference binds the variable itself; `$GLOBALS`
+    /// is sent as a call's value is, which such a parameter refuses; and
+    /// to a callee the table has, `sort($_COOKIE)` is `FETCH_W (global)`
+    /// and `SEND_REF`:
+    ///
+    /// ```php
+    /// function run() {
+    ///     fill($_ENV);
+    ///     $n = 'loc';
+    ///     fill($$n);
+    ///     fill(v: ${'_POST'});
+    ///     var_dump($_ENV, $loc, $_POST, byval($_GET), byval($$n));
+    ///     try { fill($GLOBALS); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    ///     sort($_COOKIE);
+    /// }
+    /// $_COOKIE = [3, 1];
+    /// run();
+    /// var_dump($_COOKIE);
+    /// function fill(&$v) { $v = 'filled'; }
+    /// function byval($v) { return $v; }
+    /// ```
+    /// ```expect
+    /// string(6) "filled"
+    /// string(6) "filled"
+    /// string(6) "filled"
+    /// array(0) {
+    /// }
+    /// string(6) "filled"
+    /// fill(): Argument #1 ($v) could not be passed by reference
+    /// array(2) {
+    ///   [0]=>
+    ///   int(1)
+    ///   [1]=>
+    ///   int(3)
+    /// }
+    /// ```
+    fn named_variable(&mut self, value: tree::Expr) -> Result<Option<Variable>, CompileError> {
+        let inner = match value {
+            tree::Expr::VarVarExpr(id) => self.parsed.tree[id].inner,
+            tree::Expr::DynamicVarExpr(id) => self.parsed.tree[id].inner,
+            _ => None,
+        };
+        let Some(inner) = inner else {
+            return Ok(None);
+        };
+        let Some(written) = self.written(inner)? else {
+            return Ok(Some(Variable::Fetched));
+        };
+        let written = self.stringified(written)?.unwrap_or(written);
+        let Some(name) = written.as_str() else {
+            return Ok(None);
+        };
+        let name = name.bytes();
+        Ok(if name == b"this" {
+            Some(Variable::This)
+        } else if AutoGlobal::of(name).is_some() {
+            Some(Variable::Fetched)
+        } else {
+            None
         })
     }
 
