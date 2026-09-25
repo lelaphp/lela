@@ -2629,6 +2629,13 @@ fn reflection_class_to_string(req: &mut Request) -> Result<Value, Thrown> {
 /// ```
 ///
 /// ```php
+/// try { new ReflectionMethod('Exception', []); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// ReflectionMethod::__construct(): Argument #2 ($method) must be of type ?string, array given
+/// ```
+///
+/// ```php
 /// new ReflectionMethod();
 /// ```
 /// ```expect exit=255
@@ -2650,15 +2657,21 @@ fn reflection_method_construct(req: &mut Request) -> Result<Value, Thrown> {
             "Calling ReflectionMethod::__construct() with 1 argument is deprecated, use ReflectionMethod::createFromMethodName() instead",
         );
     }
-    let second = req
-        .argument(2)
-        .map(|v| v.deref())
-        .filter(|v| !matches!(v.as_ref(), ValueRef::Null | ValueRef::Undef));
+    // `Z_PARAM_OBJ_OR_STR` then `Z_PARAM_STR_OR_NULL`, both parsed
+    // before either is looked at.
     let first = req.argument(1).unwrap_or_default();
     let ty = Type::Union(vec![Type::Object, Type::String]);
     let first = php_ext::coerce::coerce_param(req, &first, &ty, 1)?;
+    let second = match req.argument(2) {
+        Some(given) => {
+            let ty = Type::Nullable(Box::new(Type::String));
+            let held = php_ext::coerce::coerce_param(req, &given, &ty, 2)?;
+            held.as_str_bytes().map(<[u8]>::to_vec)
+        }
+        None => None,
+    };
     let (class, method_name) = match (first.as_ref(), second) {
-        (ValueRef::Object(object), Some(_)) => (object.class(), string_argument(req, 2)?),
+        (ValueRef::Object(object), Some(name)) => (object.class(), name),
         (ValueRef::Object(_), None) => {
             // `zend_argument_value_error` with no `must`.
             return Err(throw(
@@ -2667,9 +2680,9 @@ fn reflection_method_construct(req: &mut Request) -> Result<Value, Thrown> {
                 "ReflectionMethod::__construct(): Argument #2 ($method) cannot be null when argument #1 ($objectOrMethod) is an object",
             ));
         }
-        (_, Some(_)) => {
+        (_, Some(name)) => {
             let class = first.as_str_bytes().unwrap_or_default().to_vec();
-            (class_named(req, &class)?, string_argument(req, 2)?)
+            (class_named(req, &class)?, name)
         }
         (_, None) => {
             let given = first.as_str_bytes().unwrap_or_default().to_vec();

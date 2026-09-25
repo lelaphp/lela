@@ -20,7 +20,7 @@
 use php_ext::call::{eval_const_expr, lookup_class};
 use php_ext::coerce::value_name;
 use php_ext::decl::{ConstExpr, FunctionDecl, Parameter, Type};
-use php_ext::raising::{Thrown, arg_type_error, throw};
+use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, Value, ValueRef};
 
@@ -525,8 +525,20 @@ fn this_parameter(req: &mut Request) -> Result<(ParameterRef, FunctionDecl, Para
 /// php's `switch (Z_TYPE_P(reference))`: a string is
 /// `zend_fetch_function` with a leading `\\` dropped, an array is
 /// `array($class, $method)` with the object's class where the first
-/// element is an object, and an object is a closure, which no seam
-/// hands an extension yet (#415).
+/// element is an object, an object is a closure, and anything else is
+/// php's argument error.
+///
+/// ```php
+/// class I { function __invoke($a) {} }
+/// try { new ReflectionParameter(0, 0); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+/// try { new ReflectionParameter(new stdClass, 0); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+/// echo new ReflectionParameter(new I, 0), "\n";
+/// ```
+/// ```expect
+/// ReflectionParameter::__construct(): Argument #1 ($function) must be a string, an array(class, method), or a callable object, int given
+/// Method stdClass::__invoke() does not exist
+/// Parameter #0 [ <required> $a ]
+/// ```
 fn construct_function(req: &mut Request) -> Result<FunctionRef, Thrown> {
     let first = req.argument(1).unwrap_or_default().deref();
     let function = match first.as_ref() {
@@ -573,24 +585,27 @@ fn construct_function(req: &mut Request) -> Result<FunctionRef, Thrown> {
             }
         }
         // php's `IS_OBJECT` arm: `zend_get_closure_method_def` where
-        // the object is a `Closure`, and the argument error for any
-        // other object, since no class here declares `__invoke` that
-        // php would reach through `zend_std_get_closure`.
+        // the object is a `Closure`, else its class's `__invoke` or
+        // `Method C::__invoke() does not exist`.
         ValueRef::Object(object) => {
             let object = *object;
-            if closure_decl(req, object).is_none() {
-                return Err(arg_type_error(
+            if closure_decl(req, object).is_some() {
+                FunctionRef::Closure(object)
+            } else if let Some(found) = super::table_method(req, object.class(), b"__invoke") {
+                FunctionRef::Method(found.scope, found.decl.function.name.0.to_vec())
+            } else {
+                let class = class_name_of(req, object.class());
+                return Err(throw(
                     req,
-                    1,
+                    "ReflectionException",
                     &format!(
-                        "be a string, an array(class, method), or a callable object, {} given",
-                        value_name(req, &first)
+                        "Method {}::__invoke() does not exist",
+                        String::from_utf8_lossy(&class)
                     ),
                 ));
             }
-            FunctionRef::Closure(object)
         }
-        _ => {
+        ValueRef::Str(_) => {
             let name = super::string_argument(req, 1)?;
             let bare = name.strip_prefix(b"\\").unwrap_or(&name);
             let Some(found) = lookup_function(req, bare) else {
@@ -608,6 +623,18 @@ fn construct_function(req: &mut Request) -> Result<FunctionRef, Thrown> {
                 .map(|decl| decl.name.0.to_vec())
                 .unwrap_or_default();
             FunctionRef::Global(declared)
+        }
+        // `default:` of php's `switch (Z_TYPE_P(reference))`,
+        // `zend_argument_error` with `ReflectionException` as its class.
+        _ => {
+            let given = value_name(req, &first);
+            return Err(throw(
+                req,
+                "ReflectionException",
+                &format!(
+                    "ReflectionParameter::__construct(): Argument #1 ($function) must be a string, an array(class, method), or a callable object, {given} given"
+                ),
+            ));
         }
     };
     Ok(function)
