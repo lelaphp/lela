@@ -17,6 +17,8 @@ use php_ext::abi::Extension;
 #[must_use]
 pub fn enabled() -> &'static [fn() -> Extension] {
     &[
+        #[cfg(feature = "random")]
+        php_ext_random::extension,
         #[cfg(feature = "standard")]
         php_ext_standard::extension,
         #[cfg(feature = "pcre")]
@@ -37,8 +39,6 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_libxml::extension,
         #[cfg(feature = "dom")]
         php_ext_dom::extension,
-        #[cfg(feature = "random")]
-        php_ext_random::extension,
         #[cfg(feature = "pdo_mysql")]
         php_ext_pdo_mysql::extension,
         #[cfg(feature = "filter")]

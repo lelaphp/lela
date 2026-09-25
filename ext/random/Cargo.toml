@@ -11,9 +11,12 @@ description = "The random extension, php-src/ext/random"
 [lints]
 workspace = true
 
-# The one dependency: the facade. The engine is out of reach (`[[edge]]` ext/*).
+# The facade; the engine is out of reach (`[[edge]]` ext/*). Beside it the
+# host's CSPRNG, what `csprng.c`'s `php_random_bytes_ex` reads: `getentropy`
+# on this host and `getrandom(2)` on Linux, with no `unsafe` of this crate's.
 [dependencies]
 php_ext = { path = "../../crates/php_ext" }
+getrandom = "0.4.3"
 
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
 [dev-dependencies]

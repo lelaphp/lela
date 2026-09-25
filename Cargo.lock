@@ -532,6 +532,7 @@ dependencies = [
 name = "php_ext_random"
 version = "0.0.0"
 dependencies = [
+ "getrandom",
  "php_ext",
 ]
 
@@ -565,6 +566,7 @@ dependencies = [
  "libc",
  "miniz_oxide",
  "php_ext",
+ "php_ext_random",
 ]
 
 [[package]]
