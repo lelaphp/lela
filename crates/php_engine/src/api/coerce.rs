@@ -209,6 +209,23 @@ pub fn callable_checked(req: &mut Request, value: &Value) -> Result<Callable, St
     req.callable_checked(value)
 }
 
+/// `zend_get_callable_name` (`Z/Zend/zend_API.c:4075`): the name php
+/// gives a value as a callable, whether or not it is one. A string is
+/// itself, a pair `Class::method`, a closure its function's name, one
+/// `zend_create_fake_closure` made of a method with its scope before
+/// it, any other object `Class::__invoke`, and any other value its
+/// string, as `zval_get_string` makes it.
+pub fn callable_name(req: &mut Request, value: &Value) -> Result<PhpString, Thrown> {
+    let held = value.deref();
+    match held.as_ref() {
+        ValueRef::Str(_) | ValueRef::Array(_) | ValueRef::Object(_) => {
+            let named = req.callable_name(&held);
+            PhpString::new(req, named.as_bytes())
+        }
+        _ => crate::ops::to_string(req, &held),
+    }
+}
+
 /// The callable a value names, or php's `TypeError` for one that is not.
 pub fn to_callable(req: &mut Request, value: &Value) -> Result<Callable, Thrown> {
     match req.callable_of(value) {

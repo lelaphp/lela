@@ -9607,7 +9607,7 @@ impl Request {
     /// as `Scope::name` and any other closure by its function's name, an
     /// object of another class as `Class::__invoke`, and `Array` for a
     /// pair of any other shape.
-    fn callable_name(&self, value: &Value) -> String {
+    pub(crate) fn callable_name(&self, value: &Value) -> String {
         let held = value.deref();
         if let Some(name) = held.as_str_bytes() {
             return String::from_utf8_lossy(name).into_owned();

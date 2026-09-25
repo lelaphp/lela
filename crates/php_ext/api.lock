@@ -122,6 +122,7 @@ coerce::argument
 coerce::binary_op
 coerce::callable_argument
 coerce::callable_checked
+coerce::callable_name
 coerce::coerce_param
 coerce::compare
 coerce::count
