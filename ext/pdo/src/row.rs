@@ -4,7 +4,8 @@
 //! `pdo_stmt_init` installs on it.
 
 use php_ext::abi::{
-    CloneObj, CloneObjWith, ObjectHandlers, PropertyPurpose, PropertyRead, PropertyTest, Std,
+    CloneObj, CloneObjWith, ObjectHandlers, PropertyPlace, PropertyPurpose, PropertyRead,
+    PropertyTest, Std,
 };
 use php_ext::call::{Function, lookup_class, new_object};
 use php_ext::coerce::{numeric_string, to_string, truthy};
@@ -214,9 +215,9 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         object: PhpObject,
         name: &[u8],
-    ) -> Option<u32> {
+    ) -> PropertyPlace {
         let _ = (req, object, name);
-        None
+        PropertyPlace::Handlers
     }
 
     /// `row_prop_exists`: a column there and not `null`, or not empty;

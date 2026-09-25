@@ -631,13 +631,20 @@ pub struct ClosureInfo {
     pub function: Function,
     pub this: Option<PhpObject>,
     pub scope: Option<ClassId>,
+    /// `closure->called_scope`, what `static::` names in the body and
+    /// what `zend_closure_get_closure` hands a call: the class of the
+    /// receiver where there is one, else the class late binding named when the
+    /// closure was made, which for a closure written in a class
+    /// method is the class the method was called on and not `scope`.
+    pub called_scope: Option<ClassId>,
     /// The closure's own copy of the op array's `static_variables`,
     /// which `zend_create_closure` makes with `zend_array_dup` and
-    /// `ZEND_MAP_PTR_INIT`: one slot per name of
-    /// [`php_unit::OpArray::bound_vars`], every one undefined until a
-    /// `BIND_LEXICAL` beside the declaration fills it, and what the
-    /// `BIND_STATIC` prologue of the body reads back. A clone of this
-    /// value is a view of them and takes no owner, as `this` is.
+    /// `ZEND_MAP_PTR_INIT`: one slot per entry of
+    /// [`php_unit::OpArray::bound_vars`], a `use` variable's undefined
+    /// until a `BIND_LEXICAL` beside the declaration fills it and a
+    /// `static`'s at the value the table starts it at, and what the
+    /// `BIND_STATIC`s of the body read and bind. A clone of this value
+    /// is a view of them and takes no owner, as `this` is.
     pub bound: Vec<Value>,
     /// `ZEND_ACC_FAKE_CLOSURE`: whether the closure was made of a
     /// function that already had a name, `zend_create_fake_closure`,
@@ -742,14 +749,15 @@ impl PhpObject {
     /// The variables a closure bound, by the names its declaration
     /// wrote, in the order the table holds them, which is what
     /// `ReflectionFunctionAbstract::getClosureUsedVariables` walks the
-    /// `BIND_STATIC` prologue for: a name whose slot nothing filled is
-    /// left out, php's `Z_ISUNDEF(bucket->val)`, and a name bound by
-    /// reference stands for the cell, as php's bucket holds one. Empty
-    /// for an object that is no closure and for a closure that bound
-    /// nothing. The values are views, no owner taken; the `Err` is the
-    /// memory limit refusing a name.
+    /// `BIND_STATIC` prologue for: the `use` variables alone and no
+    /// `static` of the body, a name whose slot nothing filled left out,
+    /// php's `Z_ISUNDEF(bucket->val)`, and a name bound by reference
+    /// standing for the cell, as php's bucket holds one. Empty for an
+    /// object that is no closure and for a closure that bound nothing.
+    /// The values are views, no owner taken; the `Err` is the memory
+    /// limit refusing a name.
     pub fn closure_bound(&self, req: &mut Request) -> Result<Vec<(PhpString, Value)>, Thrown> {
-        let bound = req.closure_bound(*self);
+        let bound = req.closure_bound(*self, true);
         let mut out = Vec::with_capacity(bound.len());
         for (name, value) in bound {
             out.push((PhpString::new(req, &name)?, value));
@@ -911,29 +919,42 @@ impl PhpObject {
         req.native_mut(self.0)
     }
 
-    /// Whether the object is an uninitialised lazy ghost or proxy.
+    /// Whether the object is a lazy ghost or proxy nothing has
+    /// initialised, `zend_object_is_lazy(obj) &&
+    /// !zend_lazy_object_initialized(obj)`.
     #[must_use]
     pub fn is_lazy(&self) -> bool {
-        self.0.is_lazy()
+        matches!(self.0.laziness(), Laziness::Ghost | Laziness::Proxy)
     }
 
-    /// Whether `name` is a property whose read would initialise a lazy
-    /// object.
+    /// `OBJ_EXTRA_FLAGS(obj)`'s two lazy bits as the one state they
+    /// encode, what `php_var_dump_object_prefix` reads.
+    #[must_use]
+    pub fn laziness(&self) -> Laziness {
+        self.0.laziness()
+    }
+
+    /// `Z_PROP_FLAG_P(OBJ_PROP(obj, offset)) & IS_PROP_LAZY` for the
+    /// declared property `name`, on the object the initialised proxies
+    /// lead to: whether it still waits for the initializer.
     #[must_use]
     pub fn is_lazy_prop(&self, req: &Request, name: &[u8]) -> bool {
-        self.is_lazy() && self.prop(req, name).is_none()
+        req.lazy_property(*self, name)
     }
 
-    /// The initializer of a lazy object, while it is uninitialised.
+    /// `zend_lazy_object_get_initializer_zv`: the initializer of a lazy
+    /// object as it was given, a view, while nothing has initialised it.
     #[must_use]
-    pub fn lazy_initializer(&self) -> Option<&Value> {
-        None
+    pub fn lazy_initializer(&self, req: &Request) -> Option<Value> {
+        req.lazy_initializer(self.0)
     }
 
-    /// The real instance behind an initialised lazy proxy.
+    /// `zend_lazy_object_get_instance` over an initialised proxy: the
+    /// instance its factory returned, a view; `None` for any other
+    /// object.
     #[must_use]
-    pub fn lazy_real(&self) -> Option<&PhpObject> {
-        None
+    pub fn lazy_real(&self, req: &Request) -> Option<PhpObject> {
+        req.lazy_instance(self.0)
     }
 }
 
@@ -1021,6 +1042,16 @@ impl PartialEq for PhpRef {
     }
 }
 
+impl Eq for PhpRef {}
+
+/// A reference hashes as the cell it names, so two equal names hash
+/// alike and a table keyed by references keys them by identity.
+impl std::hash::Hash for PhpRef {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
+
 impl std::fmt::Debug for PhpRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}", self.0)
@@ -1038,6 +1069,12 @@ pub use php_heap::ResourceType;
 /// that is not transitive is what those natives observe. An array is
 /// sorted through [`PhpArray::sort_by`], which runs the same function.
 pub use php_heap::zend_sort;
+
+/// What an object's two lazy bits say of it (design §5.4): a ghost or a
+/// proxy nothing has initialised, a proxy that forwards to its
+/// instance, or neither, which a dumper reads to print `lazy ghost ` or
+/// `lazy proxy ` before `object(` ([`PhpObject::laziness`]).
+pub use php_heap::Laziness;
 
 /// A resource (design §5.5): php's `zend_resource *`, thirty-two bytes
 /// of the request's heap in the list `EG(regular_list)` is, its id the

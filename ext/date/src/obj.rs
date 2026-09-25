@@ -8,7 +8,9 @@
 use std::cmp::Ordering;
 use std::sync::Arc;
 
-use php_ext::abi::{CloneObj, ObjectHandlers, PropertyPurpose, PropertyRead, PropertyTest, Std};
+use php_ext::abi::{
+    CloneObj, ObjectHandlers, PropertyPlace, PropertyPurpose, PropertyRead, PropertyTest, Std,
+};
 use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::{to_double, to_long, truthy};
 use php_ext::decl::Visibility;
@@ -807,9 +809,9 @@ impl ObjectHandlers for IntervalHandlers {
         req: &mut Request,
         object: PhpObject,
         name: &[u8],
-    ) -> Option<u32> {
+    ) -> PropertyPlace {
         if INTERVAL_FIELDS.contains(&name) {
-            return None;
+            return PropertyPlace::Handlers;
         }
         Std.get_property_ptr_ptr(req, object, name)
     }
@@ -1001,9 +1003,9 @@ impl ObjectHandlers for PeriodHandlers {
         req: &mut Request,
         object: PhpObject,
         name: &[u8],
-    ) -> Option<u32> {
+    ) -> PropertyPlace {
         if PERIOD_FIELDS.contains(&name) {
-            return None;
+            return PropertyPlace::Handlers;
         }
         Std.get_property_ptr_ptr(req, object, name)
     }

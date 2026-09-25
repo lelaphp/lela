@@ -90,8 +90,10 @@ fn main() -> ExitCode {
 }
 
 /// A fresh engine of `php_bundle::enabled()`, every extension in startup
-/// order and `php_bundle::Tier` bound, with the line's `-d` entries laid
-/// over the engine's own defaults in the order given.
+/// order and `php_bundle::Tier` bound, with the line's `-d` entries read
+/// by the engine's INI grammar over its own defaults in the order given,
+/// and what that reading wrote for `stderr` written there, as php's
+/// `ini_error` writes it during `php_module_startup`.
 fn engine(options: &Options) -> Engine {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
     let mut builder = Engine::builder()
@@ -100,7 +102,11 @@ fn engine(options: &Options) -> Engine {
     for (name, value) in &options.ini {
         builder = builder.ini(name, value);
     }
-    builder.build()
+    let engine = builder.build();
+    let _ = std::io::stderr()
+        .lock()
+        .write_all(engine.startup_errors().as_bytes());
+    engine
 }
 
 /// php's exit status as the process's: `exit()` takes the low byte.

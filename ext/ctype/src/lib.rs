@@ -26,7 +26,7 @@
 
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::coerce::type_name;
-use php_ext::decl::{FunctionDecl, Name, Parameter, Type};
+use php_ext::decl::{FunctionDecl, Name, Parameter, ParameterDefault, Type};
 use php_ext::raising::{Level, Thrown, docref, too_few_arguments};
 use php_ext::request::Request;
 use php_ext::values::{Value, ValueRef};
@@ -94,8 +94,9 @@ fn declared(name: &[u8]) -> FunctionDecl {
             ty: Some(Type::Mixed),
             by_ref: false,
             prefer_ref: false,
+            promoted: false,
             variadic: false,
-            default: None,
+            default: ParameterDefault::None,
             attributes: Vec::new(),
         }],
         return_type: Some(Type::Bool),

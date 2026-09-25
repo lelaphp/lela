@@ -2,6 +2,7 @@
 AutoGlobal
 AutoGlobal::name
 AutoGlobal::of
+BoundVar
 CacheSlot
 ConstIdx
 Diagnostic
@@ -44,6 +45,9 @@ decl::IniDecl
 decl::MethodDecl
 decl::Name
 decl::Parameter
+decl::Parameter::is_required
+decl::ParameterDefault
+decl::ParameterDefault::expr
 decl::PropertyDecl
 decl::TraitAdaptation
 decl::TraitMethodRef

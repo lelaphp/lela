@@ -19,9 +19,11 @@ use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, Value
 
 use super::{
     at_most_arguments, class_chain, class_constant_named, class_is, class_name_of, class_named,
-    exactly_arguments, is_constructor, linked_constants, linked_interfaces, linked_methods,
-    linked_properties, lookup_class, new_object, one_string_argument, property_named,
-    reflection_class_factory, set_name, set_string_prop, string_argument, string_value, this_class,
+    closure_invoke, dynamic_properties, exactly_arguments, is_closure_invoke, is_constructor, keep,
+    kept_closure, kept_object, linked_constants, linked_interfaces, linked_methods,
+    linked_properties, lookup_class, method_or_invoke, new_object, one_string_argument,
+    property_named, reflection_class_factory, set_name, set_string_prop, string_argument,
+    string_value, this_class,
 };
 
 /// `ZEND_ACC_INTERFACE`, `ZEND_ACC_TRAIT` and `ZEND_ACC_ENUM`.
@@ -57,25 +59,52 @@ fn constructor_of(req: &mut Request, class: ClassId) -> Option<(MethodDecl, Clas
         .map(|m| (m.decl, m.scope))
 }
 
-/// `reflection_method_factory`: a `ReflectionMethod` with `$name` the
-/// method's and `$class` the scope that declared it.
-fn method_factory(req: &mut Request, name: &[u8], scope: ClassId) -> Result<PhpObject, Thrown> {
+/// `reflection_method_factory(ce, mptr, ...)`: a `ReflectionMethod`
+/// with `$name` the method's, `$class` the scope that declared it and
+/// `intern->ce` the class it was reached through, which
+/// `_function_string` renders against, so a method `B` inherits from
+/// `A` reads `inherits A`.
+///
+/// ```php
+/// class A { function m() {} } class B extends A {}
+/// echo (new ReflectionClass('B'))->getMethod('m');
+/// ```
+/// ```expect
+/// Method [ <user, inherits A> public method m ] {
+///   @@ %s 2 - 2
+/// }
+/// ```
+fn method_factory(
+    req: &mut Request,
+    name: &[u8],
+    scope: ClassId,
+    ce: ClassId,
+) -> Result<PhpObject, Thrown> {
     let class = class_named(req, b"ReflectionMethod")?;
     let object = new_object(req, class)?;
     let scope = class_name_of(req, scope);
     set_name(req, object, name)?;
     set_string_prop(req, object, b"class", &scope)?;
+    keep(req, object, ce, None);
     Ok(object)
 }
 
-/// `reflection_property_factory`: a `ReflectionProperty` with `$name`
-/// the property's and `$class` the class that declared it.
-fn property_factory(req: &mut Request, name: &[u8], scope: ClassId) -> Result<PhpObject, Thrown> {
+/// `reflection_property_factory(ce, name, prop, ...)`: a
+/// `ReflectionProperty` with `$name` the property's, `$class` the
+/// class that declared it and `intern->ce` the class it was reached
+/// through, which `getValue` holds its object to.
+fn property_factory(
+    req: &mut Request,
+    name: &[u8],
+    scope: ClassId,
+    ce: ClassId,
+) -> Result<PhpObject, Thrown> {
     let class = class_named(req, b"ReflectionProperty")?;
     let object = new_object(req, class)?;
     let scope = class_name_of(req, scope);
     set_name(req, object, name)?;
     set_string_prop(req, object, b"class", &scope)?;
+    keep(req, object, ce, None);
     Ok(object)
 }
 
@@ -568,7 +597,9 @@ pub(super) fn reflection_class_has_method(req: &mut Request) -> Result<Value, Th
     let found = linked_methods(req, class)
         .into_iter()
         .any(|m| m.decl.function.name.0.to_ascii_lowercase() == lowered);
-    Ok(Value::bool(found))
+    Ok(Value::bool(
+        found || is_closure_invoke(req, class, &lowered),
+    ))
 }
 
 /// `ReflectionClass::getMethod(string $name)`:
@@ -595,11 +626,8 @@ pub(super) fn reflection_class_has_method(req: &mut Request) -> Result<Value, Th
 pub(super) fn reflection_class_get_method(req: &mut Request) -> Result<Value, Thrown> {
     let name = one_string_argument(req)?;
     let class = this_class(req)?;
-    let lowered = name.to_ascii_lowercase();
-    let Some(found) = linked_methods(req, class)
-        .into_iter()
-        .find(|m| m.decl.function.name.0.to_ascii_lowercase() == lowered)
-    else {
+    let kept = req.this().and_then(|this| kept_closure(req, this));
+    let Some(found) = method_or_invoke(req, class, &name, kept) else {
         let named = class_name_of(req, class);
         return Err(throw(
             req,
@@ -611,7 +639,13 @@ pub(super) fn reflection_class_get_method(req: &mut Request) -> Result<Value, Th
             ),
         ));
     };
-    let object = method_factory(req, &found.decl.function.name.0, found.scope)?;
+    let object = method_factory(req, &found.decl.function.name.0, found.scope, class)?;
+    // The `__invoke` php makes keeps the closure it was made over.
+    if found.via_handler
+        && let Some(kept) = kept
+    {
+        keep(req, object, class, Some(kept));
+    }
     Ok(object.as_value())
 }
 
@@ -633,7 +667,7 @@ pub(super) fn reflection_class_get_constructor(req: &mut Request) -> Result<Valu
     let Some((decl, scope)) = constructor_of(req, class) else {
         return Ok(Value::null());
     };
-    let object = method_factory(req, &decl.function.name.0, scope)?;
+    let object = method_factory(req, &decl.function.name.0, scope, class)?;
     Ok(object.as_value())
 }
 
@@ -691,7 +725,21 @@ pub(super) fn reflection_class_get_methods(req: &mut Request) -> Result<Value, T
         if method_bits(&found.decl) & filter == 0 {
             continue;
         }
-        let object = method_factory(req, &found.decl.function.name.0, found.scope)?;
+        let object = method_factory(req, &found.decl.function.name.0, found.scope, class)?;
+        methods.append(req, object.as_value())?;
+    }
+    // `zend_get_closure_invoke_method` over the kept closure, or a fresh
+    // one, appended where the filter keeps a public instance method.
+    let is_closure = lookup_class(req, b"Closure")?.is_some_and(|c| c == class);
+    let kept = req.this().and_then(|this| kept_closure(req, this));
+    if is_closure
+        && filter & 1 != 0
+        && let Some(invoke) = closure_invoke(req, kept)
+    {
+        let object = method_factory(req, &invoke.decl.function.name.0, invoke.scope, class)?;
+        if let Some(kept) = kept {
+            keep(req, object, class, Some(kept));
+        }
         methods.append(req, object.as_value())?;
     }
     Ok(Value::array(methods))
@@ -723,23 +771,68 @@ pub(super) fn reflection_class_get_methods(req: &mut Request) -> Result<Value, T
 /// #1 {main}
 ///   thrown in %s on line 2
 /// ```
+///
+/// A `ReflectionObject` finds the object's dynamic properties too, with
+/// `$class` the object's class, and a `Base::name` spelling reaches the
+/// property through a class the reflected one extends:
+///
+/// ```php
+/// class A { public $a = 1; } class B extends A {}
+/// $o = new B; $o->d = 2;
+/// var_dump((new ReflectionObject($o))->getProperty('d')->class, (new ReflectionClass('B'))->getProperty('A::a')->class);
+/// try { (new ReflectionClass('A'))->getProperty('B::a'); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Deprecated: Creation of dynamic property B::$d is deprecated in %s on line 3
+/// string(1) "B"
+/// string(1) "A"
+/// Fully qualified property name B::$a does not specify a base class of A
+/// ```
 pub(super) fn reflection_class_get_property(req: &mut Request) -> Result<Value, Thrown> {
     let name = one_string_argument(req)?;
     let class = this_class(req)?;
-    let Some((scope, _)) = property_named(req, class, &name) else {
-        let named = class_name_of(req, class);
-        return Err(throw(
-            req,
-            "ReflectionException",
-            &format!(
-                "Property {}::${} does not exist",
-                String::from_utf8_lossy(&named),
-                String::from_utf8_lossy(&name)
-            ),
-        ));
-    };
-    let object = property_factory(req, &name, scope)?;
-    Ok(object.as_value())
+    if let Some((scope, _)) = property_named(req, class, &name) {
+        return Ok(property_factory(req, &name, scope, class)?.as_value());
+    }
+    if let Some(object) = req.this().and_then(|this| kept_object(req, this))
+        && dynamic_properties(req, class, object).contains(&name)
+    {
+        return Ok(property_factory(req, &name, class, class)?.as_value());
+    }
+    // `Base::name`: the property of a class the reflected one is, or
+    // the exception below naming the part after the colons.
+    let (mut ce, mut short) = (class, name.clone());
+    if let Some(at) = name.windows(2).position(|pair| pair == b"::") {
+        short = name[at + 2..].to_vec();
+        let base = class_named(req, &name[..at])?;
+        if !class_is(req, class, base, 0) {
+            let (base, named) = (class_name_of(req, base), class_name_of(req, class));
+            return Err(throw(
+                req,
+                "ReflectionException",
+                &format!(
+                    "Fully qualified property name {}::${} does not specify a base class of {}",
+                    String::from_utf8_lossy(&base),
+                    String::from_utf8_lossy(&short),
+                    String::from_utf8_lossy(&named)
+                ),
+            ));
+        }
+        ce = base;
+        if let Some((scope, _)) = property_named(req, ce, &short) {
+            return Ok(property_factory(req, &short, scope, ce)?.as_value());
+        }
+    }
+    let named = class_name_of(req, ce);
+    Err(throw(
+        req,
+        "ReflectionException",
+        &format!(
+            "Property {}::${} does not exist",
+            String::from_utf8_lossy(&named),
+            String::from_utf8_lossy(&short)
+        ),
+    ))
 }
 
 /// `ReflectionClass::getProperties(?int $filter = null)`: one
@@ -773,8 +866,18 @@ pub(super) fn reflection_class_get_properties(req: &mut Request) -> Result<Value
         if bits & filter == 0 {
             continue;
         }
-        let object = property_factory(req, &decl.name.0, scope)?;
+        let object = property_factory(req, &decl.name.0, scope, class)?;
         properties.append(req, object.as_value())?;
+    }
+    // `_adddynproperty` over the kept object's table, where the filter
+    // keeps public ones: a dynamic property is public.
+    if filter & 1 != 0
+        && let Some(object) = req.this().and_then(|this| kept_object(req, this))
+    {
+        for name in dynamic_properties(req, class, object) {
+            let object = property_factory(req, &name, class, class)?;
+            properties.append(req, object.as_value())?;
+        }
     }
     Ok(Value::array(properties))
 }
@@ -890,9 +993,7 @@ pub(super) fn reflection_class_new_instance(req: &mut Request) -> Result<Value, 
         let at = u32::try_from(position).unwrap_or(u32::MAX);
         arguments.push(req.argument(at).unwrap_or_default());
     }
-    instantiable(req, class)?;
-    let object = instantiate(req, class, &arguments)?;
-    Ok(object.as_value())
+    new_instance(req, class, &arguments)
 }
 
 /// `ReflectionClass::newInstanceArgs(array $args = [])`: the same,
@@ -934,9 +1035,7 @@ pub(super) fn reflection_class_new_instance_args(req: &mut Request) -> Result<Va
             }
         }
     }
-    instantiable(req, class)?;
-    let object = instantiate(req, class, &arguments)?;
-    Ok(object.as_value())
+    new_instance(req, class, &arguments)
 }
 
 /// `ReflectionClass::newInstanceWithoutConstructor()`:
@@ -968,6 +1067,47 @@ pub(super) fn reflection_class_new_instance_without_constructor(
 /// php's `zend_throw_exception_ex(reflection_exception_ptr, ...)` for
 /// a class `new` refuses, the message `ReflectionClass` gives before
 /// the engine's own.
+/// The body `newInstance` and `newInstanceArgs` share: `object_init_ex`,
+/// then `get_constructor` under the class's fake scope, a non-public one
+/// php's `Access to non-public constructor` and a class with none
+/// refusing arguments; else the constructor served with them.
+///
+/// ```php
+/// class Priv { private function __construct() {} } class None {} class Pub { function __construct(public $a = 0) {} }
+/// foreach ([['Priv', []], ['None', [1]], ['None', []], ['Pub', [2]]] as $row) {
+///     try { var_dump((new ReflectionClass($row[0]))->newInstanceArgs($row[1])); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// Access to non-public constructor of class Priv
+/// Class None does not have a constructor, so you cannot pass any constructor arguments
+/// object(None)#%d (0) {
+/// }
+/// object(Pub)#%d (1) {
+///   ["a"]=>
+///   int(2)
+/// }
+/// ```
+fn new_instance(req: &mut Request, class: ClassId, arguments: &[Value]) -> Result<Value, Thrown> {
+    instantiable(req, class)?;
+    let refusal = match constructor_of(req, class) {
+        Some((decl, _)) if decl.visibility != Visibility::Public => {
+            Some("Access to non-public constructor of class {}")
+        }
+        None if !arguments.is_empty() => Some(
+            "Class {} does not have a constructor, so you cannot pass any constructor arguments",
+        ),
+        _ => None,
+    };
+    if let Some(refusal) = refusal {
+        let name = class_name_of(req, class);
+        let message = refusal.replace("{}", &String::from_utf8_lossy(&name));
+        return Err(throw(req, "ReflectionException", &message));
+    }
+    let object = instantiate(req, class, arguments)?;
+    Ok(object.as_value())
+}
+
 fn instantiable(req: &mut Request, class: ClassId) -> Result<(), Thrown> {
     if !cannot_instantiate(req, class) {
         return Ok(());

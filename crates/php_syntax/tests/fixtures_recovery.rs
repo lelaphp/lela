@@ -532,6 +532,40 @@ fn left_nested_chains_are_not_grammar_depth() {
     }
 }
 
+/// A left-nested chain parses in time linear in its length. The Pratt
+/// core opens every link of `1+1+…` at one `Start`, after one token, and
+/// the builder read the kind that encloses a node by looking down the
+/// open frames past every one that opened after the same token, so each
+/// link cost the chain's length and 200,000 links took minutes in a debug
+/// build. Held by growth, not by a clock: eight times the links costs
+/// about eight times the time linearly and sixty-four times
+/// quadratically, measured at 61× before the fix, and the bound sits
+/// between, each size's best of three runs so a busy machine does not
+/// decide it.
+#[test]
+fn a_left_nested_chain_parses_in_linear_time() {
+    use std::time::{Duration, Instant};
+    let best = |n: usize| -> Duration {
+        let src = format!("<?php $y = 1{};", "+1".repeat(n));
+        (0..3)
+            .map(|_| {
+                let at = Instant::now();
+                let parsed = php_syntax::parse(src.as_bytes(), &php_syntax::Options::default());
+                let took = at.elapsed();
+                assert!(parsed.diagnostics.is_empty() && parsed.missing.is_empty());
+                took
+            })
+            .min()
+            .unwrap_or_default()
+    };
+    let (short, long) = (best(5_000), best(40_000));
+    let ratio = long.as_secs_f64() / short.as_secs_f64().max(f64::EPSILON);
+    assert!(
+        ratio < 24.0,
+        "8× the links took {ratio:.1}× the time ({short:?} for 5,000, {long:?} for 40,000); linear is 8×, quadratic 64×"
+    );
+}
+
 /// `$$…$x` self-recurses in `variable_variable`, the one self-recursion in
 /// `grammar/` outside the Pratt core and the statement loop. php 8.5
 /// refuses the shape on the same axis (`Parse error: memory exhausted`,

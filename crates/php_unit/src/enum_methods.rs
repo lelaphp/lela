@@ -6,7 +6,9 @@
 //! enum a native declares, so both carry the same three rows in the
 //! same order after the enum's own methods.
 
-use crate::decl::{EnumBacking, FunctionDecl, MethodDecl, Name, Parameter, Type, Visibility};
+use crate::decl::{
+    EnumBacking, FunctionDecl, MethodDecl, Name, Parameter, ParameterDefault, Type, Visibility,
+};
 
 /// The rows, public and no instance member, each with the empty file
 /// and line zero a native's declaration carries: `cases` returning an
@@ -19,8 +21,9 @@ pub fn enum_methods(backing: EnumBacking) -> Vec<MethodDecl> {
         ty: Some(Type::Union(vec![Type::Int, Type::String])),
         by_ref: false,
         prefer_ref: false,
+        promoted: false,
         variadic: false,
-        default: None,
+        default: ParameterDefault::None,
         attributes: Vec::new(),
     };
     let mut out = vec![method(b"cases", Vec::new(), Type::Array)];

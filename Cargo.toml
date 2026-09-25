@@ -4,7 +4,20 @@
 # only `api.lock` today.
 [workspace]
 resolver = "3"
-members = ["crates/*", "xtask", "ext/standard", "ext/spl", "ext/date", "ext/reflection", "ext/pcre", "ext/mbstring", "ext/session", "ext/pdo", "ext/dom", "ext/random", "ext/pdo_mysql", "ext/filter", "ext/tokenizer", "ext/json", "ext/openssl", "ext/curl", "ext/iconv", "ext/pdo_sqlite", "ext/ctype", "ext/hash", "ext/libxml"]
+members = ["crates/*", "xtask", "ext/standard", "ext/spl", "ext/date", "ext/reflection", "ext/pcre", "ext/mbstring", "ext/session", "ext/pdo", "ext/dom", "ext/random", "ext/pdo_mysql", "ext/filter", "ext/tokenizer", "ext/json", "ext/openssl", "ext/curl", "ext/iconv", "ext/pdo_sqlite", "ext/ctype", "ext/hash", "ext/libxml", "ext/lexbor"]
+
+# On macOS the dev profile's default, `split-debuginfo = "unpacked"`, keeps
+# every codegen unit's object in target/debug/deps for its debuginfo, under a
+# name new to each incremental build, and nothing removes the old ones: a
+# worktree's target reached 36G in a day (#839). Packed, rustc gathers the
+# debuginfo into a .dSYM beside each binary (dsymutil; on Linux, split DWARF
+# into a .dwp) and deletes the objects. Line tables alone keep dsymutil as
+# fast as the link it follows, so a rebuild costs what it did: a backtrace
+# keeps every frame's file and line, and lldb breaks on a file and line but
+# shows no variables. `CARGO_PROFILE_DEV_DEBUG=full` builds with them.
+[profile.dev]
+split-debuginfo = "packed"
+debug = "line-tables-only"
 
 [workspace.package]
 edition = "2024"

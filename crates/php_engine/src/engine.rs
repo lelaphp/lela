@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 
-use php_compile::{CompileError, StackLimit};
+use php_compile::{CompileError, SourceKind, StackLimit};
 use php_heap::{Fatal, FrameRef, Intern, Strings, Zval};
 use php_unit::decl::{ClassDecl, ConstDecl, ConstExpr, FunctionDecl, MethodDecl, Name};
 use php_unit::{FramelessEntry, Unit, frameless_table};
@@ -27,6 +27,7 @@ use crate::api::abi::{Cache, Entry, Extension, NativeNew, ObjectHandlers, Startu
 use crate::api::request::{Aside, Ending, ExtensionId, Request};
 use crate::api::values::{ClassId, Value};
 use crate::exec;
+use crate::ini_syntax::{IniEvent, IniScanner, IniValue};
 use crate::streams::Standard;
 use crate::tier::{Nop, Tier, execute, reenter, resume};
 
@@ -213,6 +214,9 @@ pub(crate) struct Shared {
     /// the other constants, so a request that reads the name its host
     /// gave it allocates nothing ([`crate::constants::HOSTS`]).
     sapi_names: Vec<(Box<[u8]>, Zval)>,
+    /// What reading the host's ini entries wrote to `stderr` in php
+    /// ([`Configuration`]), for the host to write before it serves.
+    startup_errors: String,
     entry: Loop,
     /// The same loop for a serving inside a serving, `zend_call_function`
     /// over a user function: what [`Request::serve_user`] enters a
@@ -415,15 +419,17 @@ fn link_trampolines(
 }
 
 /// Where a unit is compiled from, as the request describes it: the name
-/// the unit and its diagnostics carry, `CG(compiled_filename)`, and the
+/// the unit and its diagnostics carry, `CG(compiled_filename)`, the
 /// working directory `__DIR__` folds to where that name has no directory
-/// (`VCWD_GETCWD`, the request's own under ZTS), which is
-/// [`RequestDescription::cwd`] for a request and the process's for a
-/// unit compiled outside one ([`Engine::unit`]).
+/// (`VCWD_GETCWD`, the request's own under ZTS), which is the request's
+/// for a request and the process's for a unit compiled outside one
+/// ([`Engine::unit`]), and whether the source is a file or the string an
+/// `eval` handed over ([`SourceKind`]).
 #[derive(Clone, Copy)]
 struct Origin<'a> {
     filename: &'a [u8],
     cwd: &'a Path,
+    kind: SourceKind,
 }
 
 /// What the engine has declared, as the compiler reads it: php's
@@ -483,6 +489,43 @@ impl Shared {
         )
     }
 
+    /// One source compiled for one request alone, under the request's
+    /// ini and working directory, its constant strings interned into the
+    /// request's own memory and gone with it (design §5.2): a source the
+    /// host handed over, and the string an `eval` hands over
+    /// ([`SourceKind::Eval`]), as php holds what it compiles for `-r`
+    /// and for `eval`. Such a unit is never published: nothing outside
+    /// the request reaches it, and it lives as long as the frame serving
+    /// it or the functions and classes it declared.
+    pub(crate) fn compile_for(
+        &self,
+        req: &mut Request,
+        source: &[u8],
+        filename: &[u8],
+        kind: SourceKind,
+    ) -> Result<Arc<Unit>, CompileError> {
+        let ini = CompileIni {
+            precision: req.precision(),
+            short_open_tag: req.short_open_tag(),
+        };
+        let cwd = req.cwd().0;
+        let origin = Origin {
+            filename,
+            cwd: &cwd,
+            kind,
+        };
+        let stack = req.stack_limit();
+        compile(
+            source,
+            origin,
+            ini,
+            self.declared(),
+            stack,
+            req.heap_mut(),
+            &self.map_ptr_last,
+        )
+    }
+
     /// `zend_call_stack_init` on the calling thread, from the startup
     /// ini's `zend.max_allowed_stack_size` and `zend.reserved_stack_size`
     /// (`Z/Zend/zend.c:277-279`), as php runs it once per thread at
@@ -534,6 +577,7 @@ impl Shared {
                 Origin {
                     filename: path,
                     cwd,
+                    kind: SourceKind::File,
                 },
                 stack,
             ))
@@ -669,29 +713,149 @@ const CORE_INI: [(&str, &str); 43] = [
     ("syslog.filter", "no-ctrl"),
 ];
 
-/// A host's ini value as the ini scanner hands it to the table
-/// (`Z/Zend/zend_ini_scanner.l:491-501`): a bare `true`, `on` or `yes`
-/// is `1`, a bare `false`, `off`, `no`, `none` or `null` is the empty
-/// string, each in any case and with the spaces and tabs after it eaten,
-/// and every other value stands as written. A `-d` goes through the same
-/// scanner, `php_ini_builder_define` (`Z/main/php_ini_builder.c:63-81`)
-/// writing it as a `php.ini` line, and one whose value begins with a byte
-/// that is not alphanumeric it quotes first, so ` off` stands and `off `
-/// does not. That is why `ini_get('fatal_error_backtraces')` under the
-/// recipe's `fatal_error_backtraces=Off` answers `""` and never `Off`.
-fn scanned_ini_value(value: &str) -> Vec<u8> {
-    let bare = value
+/// `php_ini_builder_define`'s line (`Z/main/php_ini_builder.c:63-81`)
+/// for one `name=value`: as given, or with the value in double quotes
+/// where it opens with a byte that is neither alphanumeric nor a quote,
+/// so that ` off` and `;x` stand as written while `off ` is the boolean
+/// and `UTC;` is `UTC` before a comment.
+fn define_line(entries: &mut Vec<u8>, name: &str, value: &str) {
+    let quoted = value
         .bytes()
         .next()
-        .is_some_and(|first| first.is_ascii_alphanumeric());
-    if !bare {
-        return value.as_bytes().to_vec();
+        .is_some_and(|first| !first.is_ascii_alphanumeric() && first != b'"' && first != b'\'');
+    entries.extend_from_slice(name.as_bytes());
+    entries.push(b'=');
+    if quoted {
+        entries.push(b'"');
     }
-    let word = value.trim_end_matches([' ', '\t']).to_ascii_lowercase();
-    match word.as_str() {
-        "true" | "on" | "yes" => b"1".to_vec(),
-        "false" | "off" | "no" | "none" | "null" => Vec::new(),
-        _ => value.as_bytes().to_vec(),
+    entries.extend_from_slice(value.as_bytes());
+    if quoted {
+        entries.push(b'"');
+    }
+    entries.push(b'\n');
+}
+
+/// `php_init_config` over the host's `ini_entries`
+/// (`Z/main/php_ini.c:718-722`): the text read by the one INI grammar
+/// ([`crate::ini_syntax`]) in the normal scanner, each entry into the
+/// configuration table by `php_ini_parser_cb`, in the order first set and
+/// the last value of a name winning. A syntax error stops the parse with
+/// the entries before it kept, and `ini_error` writes its line to the
+/// process's `stderr`, the string's file named `Unknown`.
+struct Configuration {
+    table: Vec<(Vec<u8>, Vec<u8>)>,
+    stderr: String,
+}
+
+impl Configuration {
+    fn read(entries: &[u8], constants: &[ConstDecl]) -> Configuration {
+        let mut startup = Startup {
+            constants,
+            table: Vec::new(),
+            special: false,
+            diverted: false,
+        };
+        let stderr = match crate::ini_syntax::parse(entries, IniScanner::Normal, &mut startup) {
+            Ok(Ok(())) => String::new(),
+            Ok(Err((message, line))) => format!("PHP:  {message} in Unknown on line {line}\n"),
+            Err(never) => match never {},
+        };
+        Configuration {
+            table: startup.table,
+            stderr,
+        }
+    }
+}
+
+/// The grammar's host at startup: Zend's own constants and `main`'s,
+/// registered before `php_init_config` runs and so before any
+/// extension's; a `${…}` reads what the text set before it, then the
+/// process's environment; and `php_ini_parser_cb` over the table.
+struct Startup<'c> {
+    constants: &'c [ConstDecl],
+    table: Vec<(Vec<u8>, Vec<u8>)>,
+    /// `is_special_section`: the last section header was `[PATH…]` or
+    /// `[HOST…]`, where `extension=` is an entry like any other.
+    special: bool,
+    /// `active_ini_hash` is such a section's array, which a CLI never
+    /// reads, so the entries after it reach no directive.
+    diverted: bool,
+}
+
+impl crate::ini_syntax::Host for Startup<'_> {
+    type Error = std::convert::Infallible;
+
+    fn constant(&mut self, name: &[u8]) -> Result<Option<Vec<u8>>, Self::Error> {
+        let Some(decl) = self.constants.iter().find(|c| &*c.name.0 == name) else {
+            return Ok(None);
+        };
+        Ok(match &decl.value {
+            ConstExpr::Null | ConstExpr::Bool(false) => Some(Vec::new()),
+            ConstExpr::Bool(true) => Some(b"1".to_vec()),
+            ConstExpr::Long(n) => Some(n.to_string().into_bytes()),
+            ConstExpr::Double(d) => Some(self.double(*d)?),
+            ConstExpr::Str(s) => Some(s.to_vec()),
+            _ => None,
+        })
+    }
+
+    fn directive(&mut self, name: &[u8]) -> Option<Vec<u8>> {
+        self.table
+            .iter()
+            .find(|(n, _)| n.as_slice() == name)
+            .map(|(_, value)| value.clone())
+    }
+
+    fn env(&mut self, name: &[u8]) -> Option<Vec<u8>> {
+        std::env::var_os(&*String::from_utf8_lossy(name))
+            .map(std::ffi::OsString::into_encoded_bytes)
+    }
+
+    /// `zend_double_to_str` before any ini entry is registered, when
+    /// `EG(precision)` is still zero and `zend_gcvt` is handed one digit.
+    fn double(&mut self, d: f64) -> Result<Vec<u8>, Self::Error> {
+        Ok(php_heap::double_to_string(d, 1, php_heap::Exponent::Upper).into_bytes())
+    }
+
+    fn event(&mut self, event: IniEvent) {
+        match event {
+            IniEvent::Section(name) => {
+                let name = ini_text(&name);
+                let key = [b"PATH".as_slice(), b"HOST"]
+                    .into_iter()
+                    .find(|prefix| name.len() >= 4 && name[..4].eq_ignore_ascii_case(prefix))
+                    .map(|_| &name[4..]);
+                self.special = key.is_some();
+                if key.is_some_and(|key| !key.is_empty()) {
+                    self.diverted = true;
+                }
+            }
+            IniEvent::Entry(label, Some(value)) => {
+                let label = ini_text(&label);
+                let loads = label.eq_ignore_ascii_case(b"extension")
+                    || label.eq_ignore_ascii_case(b"zend_extension");
+                if self.diverted || (loads && !self.special) {
+                    return;
+                }
+                let value = ini_text(&value);
+                match self.table.iter_mut().find(|(n, _)| *n == label) {
+                    Some(entry) => entry.1 = value,
+                    None => self.table.push((label, value)),
+                }
+            }
+            // A bare label sets nothing, and an entry with an offset is an
+            // array, which no directive reads.
+            IniEvent::Entry(_, None) | IniEvent::PopEntry(..) => {}
+        }
+    }
+}
+
+/// A label or a value of the normal scanner, which types nothing, so
+/// every one is a string.
+fn ini_text(value: &IniValue) -> Vec<u8> {
+    match value {
+        IniValue::Str(bytes) => bytes.clone(),
+        _ => Vec::new(),
     }
 }
 
@@ -808,7 +972,7 @@ fn function_table(
 /// Builds an [`Engine`]: the bundle, the tier and the startup ini.
 pub struct EngineBuilder {
     extensions: Vec<Extension>,
-    ini: Vec<(Vec<u8>, Vec<u8>)>,
+    ini_entries: Vec<u8>,
     entry: Loop,
     reenter: Loop,
     resume: Loop,
@@ -823,12 +987,29 @@ impl EngineBuilder {
         self
     }
 
-    /// One ini entry as the host's `-d` or `php.ini` sets it, the value
-    /// as the ini scanner hands it to the table ([`scanned_ini_value`]).
+    /// One ini entry as the host's `-d name=value` sets it: the line
+    /// `php_ini_builder_define` writes into the host's `ini_entries`
+    /// ([`define_line`]), which [`EngineBuilder::build`] reads with the
+    /// one INI grammar as `php_init_config` does, so a `;` starts a
+    /// comment, quotes are stripped, a bare value is trimmed, a Zend
+    /// constant and a `${…}` are read and `on`, `yes` and `true` are `1`
+    /// where `off`, `no`, `false`, `none` and `null` are empty. The
+    /// oracle's recipe comes this way into the engine that serves the
+    /// witnesses, `fatal_error_backtraces=Off`, `docref_ext=.html` and
+    /// `output_handler=` among it:
+    ///
+    /// ```php
+    /// var_dump(ini_get('fatal_error_backtraces'), ini_get('docref_ext'), ini_get('output_handler'), ini_get('date.timezone'));
+    /// ```
+    /// ```expect
+    /// string(0) ""
+    /// string(5) ".html"
+    /// string(0) ""
+    /// string(3) "UTC"
+    /// ```
     #[must_use]
     pub fn ini(mut self, name: &str, value: &str) -> EngineBuilder {
-        self.ini
-            .push((name.as_bytes().to_vec(), scanned_ini_value(value)));
+        define_line(&mut self.ini_entries, name, value);
         self
     }
 
@@ -860,7 +1041,9 @@ impl EngineBuilder {
                 ini.push((entry.name.0.to_vec(), entry.default.to_vec()));
             }
         }
-        for (name, value) in self.ini {
+        let zend_constants = Shared::zend_constants();
+        let configuration = Configuration::read(&self.ini_entries, &zend_constants);
+        for (name, value) in configuration.table {
             ini.retain(|(n, _)| *n != name);
             ini.push((name, value));
         }
@@ -883,7 +1066,7 @@ impl EngineBuilder {
         } = link_classes(&extensions);
         // Zend's own constants stand before the bundle's, as
         // `zend_register_standard_constants` runs before any `MINIT`.
-        let constants: Vec<ConstDecl> = Shared::zend_constants()
+        let constants: Vec<ConstDecl> = zend_constants
             .into_iter()
             .chain(extensions.iter().flat_map(|e| e.constants.iter().cloned()))
             .collect();
@@ -923,6 +1106,7 @@ impl EngineBuilder {
                 ini,
                 constant_values,
                 sapi_names,
+                startup_errors: configuration.stderr,
                 entry: self.entry,
                 reenter: self.reenter,
                 resume: self.resume,
@@ -947,7 +1131,7 @@ impl Engine {
     pub fn builder() -> EngineBuilder {
         EngineBuilder {
             extensions: Vec::new(),
-            ini: Vec::new(),
+            ini_entries: Vec::new(),
             entry: execute::<Nop>,
             reenter: reenter::<Nop>,
             resume: resume::<Nop>,
@@ -975,6 +1159,15 @@ impl Engine {
             .collect()
     }
 
+    /// What php writes to the process's `stderr` while it starts up and
+    /// this engine kept for its host, since it owns no stream: the line
+    /// `ini_error` writes for a syntax error in the host's ini entries,
+    /// or nothing. A host writes it before anything else it serves.
+    #[must_use]
+    pub fn startup_errors(&self) -> &str {
+        &self.shared.startup_errors
+    }
+
     /// The extensions this engine loaded, `Core` first and then the
     /// bundle's in startup order, as `get_loaded_extensions()` and the
     /// CLI's `-m` list them: what a host prints without a request.
@@ -995,6 +1188,7 @@ impl Engine {
         let origin = Origin {
             filename,
             cwd: &cwd,
+            kind: SourceKind::File,
         };
         self.shared.publish(source, origin, stack).ok()
     }
@@ -1039,6 +1233,7 @@ impl Engine {
                 let origin = Origin {
                     filename: &script,
                     cwd: &description.cwd,
+                    kind: SourceKind::File,
                 };
                 self.shared.publish(source, origin, stack).ok()?
             }
@@ -1167,24 +1362,10 @@ impl Engine {
         // interned into this request's own memory and gone with it, as
         // php holds what it compiles for `-r` and for `eval`.
         let compiled = if let Some(source) = source {
-            let ini = CompileIni {
-                precision: req.precision(),
-                short_open_tag: req.short_open_tag(),
-            };
-            let shared = Arc::clone(&self.shared);
-            let stack = req.stack_limit();
-            Some(compile(
-                &source,
-                Origin {
-                    filename: &script,
-                    cwd: &cwd,
-                },
-                ini,
-                shared.declared(),
-                stack,
-                req.heap_mut(),
-                &shared.map_ptr_last,
-            ))
+            Some(
+                self.shared
+                    .compile_for(&mut req, &source, &script, SourceKind::File),
+            )
         } else {
             req.note_primary_file(&script);
             self.shared.cached(&script, &cwd, req.stack_limit())
@@ -1236,6 +1417,7 @@ impl Engine {
         req.close_resources();
         req.free_user_handlers();
         req.destroy_symbol_table();
+        req.destroy_static_vars();
         req.free_object_storage();
         // `php_error_cb` rendered the fatal where it was raised, on
         // whichever of the two streams the ini entries name; what is left
@@ -1305,6 +1487,7 @@ fn compile(
 ) -> Result<Arc<Unit>, CompileError> {
     let options = php_compile::Options {
         filename: Name(origin.filename.into()),
+        kind: origin.kind,
         cwd: origin.cwd.as_os_str().as_encoded_bytes().to_vec(),
         strict_types: false,
         precision: ini.precision,
@@ -1596,6 +1779,48 @@ mod tests {
         }
     }
 
+    /// What the pinned oracle answers for `ini_get` under `-n` and one
+    /// `-d` whose value carries a newline, so the text holds a section:
+    /// after `[PATH=/x]` no entry reaches a directive, after `[foo]` or a
+    /// bare `[PATH]` every one does. And a constant at startup is Zend's
+    /// or `main`'s, a double one written at one digit as
+    /// `zend_double_to_str` writes it before `precision` is registered,
+    /// while `M_PI`, `ext/standard`'s, is not there yet and stands.
+    #[test]
+    fn the_startup_entries_are_read_as_php_init_config_reads_them() {
+        let read = |name: &str, value: &str, probe: &[u8]| {
+            let engine = Engine::builder().ini(name, value).build();
+            engine
+                .shared
+                .ini_default(probe)
+                .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+        };
+        assert_eq!(
+            read("x", "1\n[PATH=/x]\nprecision=3", b"precision").as_deref(),
+            Some("14")
+        );
+        assert_eq!(
+            read("x", "1\n[foo]\nprecision=3", b"precision").as_deref(),
+            Some("3")
+        );
+        assert_eq!(
+            read("x", "1\n[PATH]\nprecision=3", b"precision").as_deref(),
+            Some("3")
+        );
+        assert_eq!(
+            read("error_log", "PHP_FLOAT_EPSILON", b"error_log").as_deref(),
+            Some("2.0E-16")
+        );
+        assert_eq!(
+            read("docref_root", "PHP_INT_SIZE | 1", b"docref_root").as_deref(),
+            Some("9")
+        );
+        assert_eq!(
+            read("precision", "M_PI", b"precision").as_deref(),
+            Some("M_PI")
+        );
+    }
+
     /// What the pinned oracle answers under `-n -d disable_functions=<list>`
     /// for [`disabled_functions`]'s cases: a disabled native is no
     /// function to a call, a dynamic call, `function_exists()`,
@@ -1719,13 +1944,15 @@ mod tests {
     /// A class the compiler bound with no opline (`zend_compile_class_decl`
     /// under `toplevel`) is declared into the request's table before the
     /// main op array runs, so the source the doc-comment witness of
-    /// `php_syntax` declares runs (#257); a name Zend registered is
-    /// `zend_class_redeclaration_error` in the wording for an internal
-    /// class, and one a unit of this request declared names its site.
-    /// Both are `E_COMPILE_ERROR` at the class's line, rendered before
-    /// any of the file runs, over `#0 {main}` under php's default
-    /// `fatal_error_backtraces`, which is what the pinned oracle writes
-    /// for `<?php\necho 1;\nclass Exception {}` under `php -n`.
+    /// `php_syntax` declares runs (#257). A name the table already holds
+    /// is no early bind: its `DECLARE_CLASS` raises
+    /// `zend_class_redeclaration_error` where it stands, after what ran
+    /// before it, in the wording for an internal class, or naming the
+    /// earlier declaration's site for one of the file's. Both are
+    /// `E_COMPILE_ERROR` at the class's line, over `#0 {main}` under
+    /// php's default `fatal_error_backtraces`, which is what the pinned
+    /// oracle writes for `<?php\necho 1;\nclass Exception {}` under
+    /// `php -n`.
     #[test]
     fn a_unit_s_classes_are_declared_before_its_main_op_array_runs() {
         let engine = Engine::builder().build();
@@ -1738,7 +1965,7 @@ mod tests {
         assert_eq!(
             (body.as_str(), observables.exit_code),
             (
-                "\nFatal error: Cannot redeclare class Exception in witness.php on line 3\nStack trace:\n#0 {main}\n",
+                "1\nFatal error: Cannot redeclare class Exception in witness.php on line 3\nStack trace:\n#0 {main}\n",
                 255
             )
         );
@@ -1746,10 +1973,10 @@ mod tests {
         assert_eq!(
             (body.as_str(), observables.exit_code),
             (
-                "\nParse error: a class declared twice this compiler cannot read yet in witness.php on line 4\n",
+                "1\nFatal error: Cannot redeclare class M (previously declared in witness.php:3) in witness.php on line 4\nStack trace:\n#0 {main}\n",
                 255
             ),
-            "php emits a DECLARE_CLASS for the second and fails it at run time; that opline is not emitted yet"
+            "php emits a DECLARE_CLASS for the second and fails it at run time"
         );
     }
 
@@ -2512,6 +2739,7 @@ mod tests {
                 Origin {
                     filename: b"witness.php",
                     cwd: Path::new(""),
+                    kind: SourceKind::File,
                 },
                 CompileIni {
                     precision: 14,

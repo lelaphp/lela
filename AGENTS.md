@@ -87,7 +87,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=8b233873fe4558eec244ab6cafc3a224788a74ceda9113a4b13af8d9e4d025d9 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=e5c02d03885bdaf7b709c970d1f0572145547601a85800d83219e3ff8bfc8cc7 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -102,15 +102,15 @@ third-engine-design.md
 
 | seam | lock | items | ceiling | reading |
 |---|---|---|---|---|
-| heap | heap.lock | 273 |  | pass |
-| unit | unit.lock | 72 |  | pass |
+| heap | heap.lock | 280 |  | pass |
+| unit | unit.lock | 76 |  | pass |
 | ops | ops.lock | 209 |  | pass |
-| api | api.lock | 553 | 600 | pass |
+| api | api.lock | 570 | 600 | pass |
 | sapi | sapi.lock | 7 |  | pass |
 | tier | tier.lock |  |  | skip |
 | harness | xtask.lock | 332 |  | pass |
 
-<!-- /computed in=4aa1d6687a8c378e83771812f9402539e3df3a3aaf9eed4bf6bdedc2760496fc out=75691922bb2cbc402e67cf05c154708d7a5a9e96d83b16950bab016b12b40ec4 -->
+<!-- /computed in=c36ecaa1c7454b46df29ed6b88ca5acfa5be2c96454343701ea266e34fff67f0 out=ba1e462060e30c5996f056eefc22d7c5a0fcb184879943893dab89e3877019ff -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
@@ -206,6 +206,7 @@ Options:
 ├── hash
 ├── iconv
 ├── json
+├── lexbor
 ├── libxml
 ├── mbstring
 ├── openssl
@@ -220,4 +221,4 @@ Options:
 ├── standard
 └── tokenizer
 ```
-<!-- /computed in=53f1b1493c0fd7d8cb063d9d4aa5b1394bbdddb72a6ecb599de01484041ef955 out=094bbaabfdfe64ed038b0760d430cc5d637e6b69ac49b77f7e7e929588c13af8 -->
+<!-- /computed in=642fe889e09075cd5c7439d397949d45b24bc8a087bc7567916e0b3e3a6aafa8 out=3ddad93dff769cb9fe450994a02fd5688a9fed64139fad260b105e969ed1566d -->

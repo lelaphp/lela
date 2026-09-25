@@ -65,6 +65,7 @@ abi::OnModify
 abi::OrFalse
 abi::Out
 abi::Out::set
+abi::PropertyPlace
 abi::PropertyPurpose
 abi::PropertyRead
 abi::PropertyTest
@@ -83,6 +84,7 @@ call::Iter::key
 call::Iter::next
 call::Iter::value
 call::autoload
+call::bound_variables
 call::call
 call::call_array
 call::call_method
@@ -101,6 +103,7 @@ call::iterate
 call::known_method
 call::lookup_class
 call::lookup_function
+call::mark_lazy_initialized
 call::new_lazy_ghost
 call::new_lazy_proxy
 call::new_object
@@ -156,6 +159,9 @@ decl::IniDecl
 decl::MethodDecl
 decl::Name
 decl::Parameter
+decl::Parameter::is_required
+decl::ParameterDefault
+decl::ParameterDefault::expr
 decl::PropertyDecl
 decl::Type
 decl::Type::MAY_BE_ANY
@@ -199,6 +205,7 @@ request::HandlerCall
 request::HandlerOp
 request::HandlerStatus
 request::HostPath
+request::IniEntry
 request::Interrupt
 request::Interrupt::raise
 request::Interrupt::raised
@@ -225,7 +232,9 @@ request::Request::class_extension
 request::Request::class_extension_name
 request::Request::clear_last_error
 request::Request::clear_stat_cache
+request::Request::closure_refuses_receiver
 request::Request::constant_attributes
+request::Request::constant_file
 request::Request::constants
 request::Request::content_type
 request::Request::core_ini_info
@@ -244,6 +253,7 @@ request::Request::extension_constants
 request::Request::extension_dependencies
 request::Request::extension_functions
 request::Request::extension_info
+request::Request::extension_ini
 request::Request::extension_name
 request::Request::extension_named
 request::Request::extension_number
@@ -401,6 +411,9 @@ syntax::Element
 syntax::Element::id
 syntax::Element::kind
 syntax::FileId
+syntax::IniEvent
+syntax::IniScanner
+syntax::IniValue
 syntax::Level
 syntax::Level::is_fatal
 syntax::LexOptions
@@ -422,6 +435,7 @@ syntax::lex
 syntax::magic_const_name
 syntax::operator_name
 syntax::parse
+syntax::parse_ini
 test::Capture
 test::Engine
 test::Engine::builder
@@ -433,6 +447,7 @@ test::Engine::serve
 test::Engine::serve_capture
 test::Engine::serve_capture_as
 test::Engine::serve_capture_in
+test::Engine::startup_errors
 test::Engine::unit
 values::ArrayIter
 values::ArrayIter::advance
@@ -443,6 +458,7 @@ values::ClosureInfo
 values::Key
 values::Key::from_string
 values::Key::to_prop_name
+values::Laziness
 values::PhpArray
 values::PhpArray::append
 values::PhpArray::contains
@@ -487,6 +503,7 @@ values::PhpObject::instance_of
 values::PhpObject::is_lazy
 values::PhpObject::is_lazy_prop
 values::PhpObject::is_recursive
+values::PhpObject::laziness
 values::PhpObject::lazy_initializer
 values::PhpObject::lazy_real
 values::PhpObject::native

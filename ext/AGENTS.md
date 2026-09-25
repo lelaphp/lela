@@ -19,6 +19,7 @@ One crate per extension under `ext/` (ADR-0004), laid down by `xtask new-ext <na
 ├── hash
 ├── iconv
 ├── json
+├── lexbor
 ├── libxml
 ├── mbstring
 ├── openssl
@@ -33,12 +34,12 @@ One crate per extension under `ext/` (ADR-0004), laid down by `xtask new-ext <na
 ├── standard
 └── tokenizer
 ```
-<!-- /computed in=7b244187e1e8c15be170f38dac055862a57d16aa52f3d55ce9988238453a18d8 out=c6b813903caafe16c363ab6f06b8960e05e3c8720a6da40aeb624a82bcb0a691 -->
+<!-- /computed in=d21a0a8147c5d35afa78bdb1af9c6aa87e463e4e0fa088bd7258417172809042 out=475feb68037b5f8131bc0b8832b1a6110c87f321f1bcd44c2b5e933d91baa45a -->
 
 <!-- computed exec cmd="cargo xtask status --section bundle" inputs=../seams.toml name=bundle-order | do not edit; run computed -->
 
 | crate | order | extensions | reading | message |
 |---|---|---|---|---|
-| php_bundle | topological | 21 | pass | 22 workspace dependencies within its edges |
+| php_bundle | topological | 22 | pass | 23 workspace dependencies within its edges |
 
-<!-- /computed in=cb1d77455fd027a7d1392d8b2a3de72ebaeade982e08fa5f6d3b072e3a51c976 out=c203f9f4e30371022da07152bfbd18889f04dbc9832034bf335c43cebacf1d5e -->
+<!-- /computed in=cb1d77455fd027a7d1392d8b2a3de72ebaeade982e08fa5f6d3b072e3a51c976 out=c83977b4b1366584458d3ba6148cab21edcf9c1818959dd24c8a18f968a67a23 -->

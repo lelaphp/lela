@@ -107,15 +107,24 @@ mod zpp;
 
 /// What `php_string.h`, `html.h` and `php_var.h` declare `PHPAPI` for the
 /// extensions that include them, ext/filter's sanitizers and ext/session's
-/// serializers (ADR-0004; design §4.10).
+/// and ext/spl's serializers (ADR-0004; design §4.10).
 pub use html::escape as escape_html_entities;
 pub use string::strip_tags_ex;
 pub use var::{Serializer, Unserializer};
 
+/// What `file.h`, `php_filestat.h`, `scanf.h` and `main/php_glob.h`
+/// declare `PHPAPI` for `spl_directory.c`, which calls them directly
+/// rather than through the function table (ADR-0004; design §4.10).
+pub use csv::fgetcsv as php_fgetcsv;
+pub use dir::glob::php_glob;
+pub use file::{php_fputcsv, php_fstat};
+pub use filestat::{Fs, php_stat};
+pub use scanf::php_sscanf_internal;
+
 use php_ext::abi::{Callable, Dependency, DependencyKind, Extension, ExtensionBuilder};
 use php_ext::call::{call_array, call_named, fetch_constant};
 use php_ext::coerce::{coerce_param, is_type};
-use php_ext::decl::{ConstDecl, ConstExpr, FunctionDecl, Name, Parameter, Type};
+use php_ext::decl::{ConstDecl, ConstExpr, FunctionDecl, Name, Parameter, ParameterDefault, Type};
 use php_ext::raising::{
     Level, Thrown, arg_count_error, arg_value_error, docref, too_few_arguments,
 };
@@ -159,14 +168,10 @@ struct State {
 /// }
 /// ```
 pub fn extension() -> Extension {
-    let countable = || {
-        Type::Union(vec![
-            Type::Named(Name(b"Countable".as_slice().into())),
-            Type::Array,
-        ])
-    };
+    let countable = || Type::Union(vec![Type::Named(Name::from("Countable")), Type::Array]);
+    let normal = ParameterDefault::Expr(ConstExpr::Constant(Name::from("COUNT_NORMAL")));
     let mode = || Parameter {
-        default: Some(ConstExpr::Constant(Name(b"COUNT_NORMAL".as_slice().into()))),
+        default: normal.clone(),
         ..parameter(b"mode", Type::Int)
     };
     let directory = dir::directory_class();
@@ -421,7 +426,7 @@ fn string_natives() -> Vec<(FunctionDecl, output::Entry)> {
                     &[
                         parameter(b"string", Type::String),
                         Parameter {
-                            default: Some(ConstExpr::Str(TRIM_DEFAULT.into())),
+                            default: ParameterDefault::Expr(ConstExpr::Str(TRIM_DEFAULT.into())),
                             ..parameter(b"characters", Type::String)
                         },
                     ],
@@ -468,11 +473,11 @@ fn string_natives() -> Vec<(FunctionDecl, output::Entry)> {
                     parameter(b"string", Type::String),
                     parameter(b"length", Type::Int),
                     Parameter {
-                        default: Some(ConstExpr::Str(b" ".as_slice().into())),
+                        default: ParameterDefault::Expr(ConstExpr::Str(b" ".as_slice().into())),
                         ..parameter(b"pad_string", Type::String)
                     },
                     Parameter {
-                        default: Some(ConstExpr::Constant(Name(
+                        default: ParameterDefault::Expr(ConstExpr::Constant(Name(
                             b"STR_PAD_RIGHT".as_slice().into(),
                         ))),
                         ..parameter(b"pad_type", Type::Int)
@@ -490,7 +495,7 @@ fn string_natives() -> Vec<(FunctionDecl, output::Entry)> {
                         parameter(b"string", Type::String),
                         parameter(b"offset", Type::Int),
                         Parameter {
-                            default: Some(ConstExpr::Null),
+                            default: ParameterDefault::Expr(ConstExpr::Null),
                             ..parameter(b"length", Type::Nullable(Box::new(Type::Int)))
                         },
                     ],
@@ -2141,8 +2146,9 @@ fn parameter(name: &[u8], ty: Type) -> Parameter {
         ty: Some(ty),
         by_ref: false,
         prefer_ref: false,
+        promoted: false,
         variadic: false,
-        default: None,
+        default: ParameterDefault::None,
         attributes: Vec::new(),
     }
 }

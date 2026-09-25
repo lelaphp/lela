@@ -423,6 +423,9 @@ fn rows(req: &mut Request, value: &Value) -> Result<Vec<(Key, Value)>, Thrown> {
     let Some(object) = value.as_object() else {
         return Ok(Vec::new());
     };
+    // `zend_get_properties_for(val, ZEND_PROP_PURPOSE_JSON)`, which
+    // initialises a lazy object and reads what that answers.
+    let object = &php_ext::call::initialize_lazy(req, object)?;
     let hidden: Vec<Box<[u8]>> = req
         .class_decl(object.class())
         .map(|decl| {

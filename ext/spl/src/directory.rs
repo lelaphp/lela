@@ -4,10 +4,10 @@
 //! `spl_filesystem_object` ([`Fs`]), and the engine's streams layer: a
 //! directory is a stream `opendir` opens and `readdir` reads, a file a
 //! stream `fopen` opens, and a stat the wrapper's `url_stat`. The CSV
-//! methods and `GlobIterator`'s pattern hand their work to
-//! `ext/standard`'s `fgetcsv`, `fputcsv` and `glob` by name, as
-//! `spl_directory.c` calls `php_fgetcsv`, `php_fputcsv` and the `glob://`
-//! wrapper.
+//! methods, `fscanf()`, `fstat()`, the access tests and `GlobIterator`'s
+//! pattern call `ext/standard`'s `php_fgetcsv`, `php_fputcsv`,
+//! `php_sscanf_internal`, `php_fstat`, `php_stat` and `php_glob` directly,
+//! as `spl_directory.c` does, never a native through the function table.
 
 use php_ext::abi::{CloneObj, ObjectHandlers};
 use php_ext::call::{call_method, instantiate, lookup_class, new_object};
@@ -801,31 +801,29 @@ fn is_link(req: &mut Request) -> Result<Value, Thrown> {
     is_kind(req, true, 0o120_000)
 }
 
-/// The access test through `ext/standard`'s native of the same name,
-/// php's `FS_IS_W`, `FS_IS_R` and `FS_IS_X`.
-fn access(req: &mut Request, native: &[u8]) -> Result<Value, Thrown> {
+/// The access test through `ext/standard`'s `php_stat`, called directly
+/// as `FileInfoFunction` calls it with `FS_IS_W`, `FS_IS_R` and
+/// `FS_IS_X`.
+fn access(req: &mut Request, ty: php_ext_standard::Fs) -> Result<Value, Thrown> {
     crate::arity(req, 0, 0)?;
     let this = crate::this(req)?;
     let name = file_name(req, this)?;
-    let name = crate::string_value(req, &name)?;
-    let answered = crate::standard(req, native, &[name]);
-    req.release(name);
-    answered
+    php_ext_standard::php_stat(req, &name, ty)
 }
 
 /// `isWritable(): bool`.
 fn is_writable(req: &mut Request) -> Result<Value, Thrown> {
-    access(req, b"is_writable")
+    access(req, php_ext_standard::Fs::IsW)
 }
 
 /// `isReadable(): bool`.
 fn is_readable(req: &mut Request) -> Result<Value, Thrown> {
-    access(req, b"is_readable")
+    access(req, php_ext_standard::Fs::IsR)
 }
 
 /// `isExecutable(): bool`.
 fn is_executable(req: &mut Request) -> Result<Value, Thrown> {
-    access(req, b"is_executable")
+    access(req, php_ext_standard::Fs::IsX)
 }
 
 /// `getLinkTarget(): string|false`: the link read, php's
@@ -1595,7 +1593,11 @@ fn recursive_get_sub_pathname(req: &mut Request) -> Result<Value, Thrown> {
 
 /// `GlobIterator::__construct(string $pattern, int $flags =
 /// KEY_AS_PATHNAME | CURRENT_AS_FILEINFO)`: the pattern expanded through
-/// `ext/standard`'s `glob`, as the `glob://` wrapper expands it.
+/// `ext/standard`'s `php_glob`, called directly as the `glob://` wrapper's
+/// opener calls it (`Z/main/streams/glob_wrapper.c`), never `glob()`
+/// through the function table: a relative pattern under the working
+/// directory, no flags, and the directory stripped from each path again.
+/// A pattern `php_glob` refuses is no entries.
 fn glob_construct(req: &mut Request) -> Result<Value, Thrown> {
     crate::arity(req, 1, 2)?;
     let this = crate::this(req)?;
@@ -1608,20 +1610,7 @@ fn glob_construct(req: &mut Request) -> Result<Value, Thrown> {
         .strip_prefix(b"glob://")
         .unwrap_or(&pattern)
         .to_vec();
-    let arg = crate::string_value(req, &bare)?;
-    let found = crate::standard(req, b"glob", &[arg]);
-    req.release(arg);
-    let found = found?;
-    let entries: Vec<Vec<u8>> = found
-        .as_array()
-        .map(|a| {
-            a.snapshot()
-                .into_iter()
-                .filter_map(|(_, v)| v.as_str_bytes().map(<[u8]>::to_vec))
-                .collect()
-        })
-        .unwrap_or_default();
-    req.release(found);
+    let entries = glob_paths(req, &bare);
     fs(req, this, |it| {
         it.kind = Type::Dir;
         it.flags = flags;
@@ -1631,6 +1620,36 @@ fn glob_construct(req: &mut Request) -> Result<Value, Thrown> {
     })?;
     dir_read(req, this)?;
     Ok(Value::null())
+}
+
+/// `php_glob_stream_opener`'s expansion under ZTS, where each request
+/// has its own working directory: a relative pattern written after
+/// `getcwd()` and a slash, cut to `MAXPATHLEN - 1` bytes as its
+/// `snprintf` cuts it, `php_glob` with no flags, and the working
+/// directory's bytes stripped from each path again. `PHP_GLOB_NOMATCH`
+/// is no paths, as php's; so is every other refusal, where php's opener
+/// answers no stream and the constructor throws.
+fn glob_paths(req: &Request, pattern: &[u8]) -> Vec<Vec<u8>> {
+    /// `MAXPATHLEN`, darwin's `PATH_MAX`.
+    const MAXPATHLEN: usize = 1024;
+    let mut work = pattern.to_vec();
+    let mut cwd_skip = 0;
+    if work.first() != Some(&b'/') {
+        let mut cwd = req.cwd().0.into_os_string().into_encoded_bytes();
+        cwd_skip = cwd.len() + 1;
+        cwd.push(b'/');
+        cwd.extend_from_slice(&work);
+        cwd.truncate(MAXPATHLEN - 1);
+        work = cwd;
+    }
+    php_ext_standard::php_glob(&work, 0)
+        .map(|paths| {
+            paths
+                .into_iter()
+                .map(|path| path.get(cwd_skip..).unwrap_or_default().to_vec())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// `GlobIterator::count(): int`.
@@ -1867,12 +1886,15 @@ fn line_empty(req: &mut Request, this: PhpObject) -> Result<bool, Thrown> {
 }
 
 /// `spl_filesystem_file_read_csv`: a line read and handed to
-/// `ext/standard`'s `str_getcsv`, php's `php_fgetcsv` over the line.
+/// `ext/standard`'s `php_fgetcsv`, called directly with the stream
+/// beside it, so a field whose enclosure is open at the line's end reads
+/// on from the stream; the current line stays the one read. An empty
+/// line is `php_bc_fgetcsv_empty_line`, one `null`.
 fn read_csv(
     req: &mut Request,
     this: PhpObject,
     silent: bool,
-    control: (u8, u8, Option<u8>),
+    (delimiter, enclosure, escape): (u8, u8, Option<u8>),
 ) -> Result<bool, Thrown> {
     loop {
         if !read_line_counted(req, this, silent, true)? {
@@ -1883,81 +1905,37 @@ fn read_csv(
             break;
         }
     }
-    let mut line = fs(req, this, |it| it.line.clone())?.unwrap_or_default();
-    // `php_fgetcsv` reads on from the stream while a field's enclosure
-    // is open at the end of the line, so a quoted field spans lines.
-    while open_enclosure(&line, control) {
-        let Some(stream) = fs(req, this, |it| it.stream)? else {
-            break;
-        };
-        if stream.eof(req) {
-            break;
+    let (line, stream) = fs(req, this, |it| (it.line.clone(), it.stream))?;
+    let line = line.unwrap_or_default();
+    let mut failed = None;
+    let mut more = || {
+        let stream = stream?;
+        match stream.get_line(req, None) {
+            Ok(next) => next.map(|s| s.as_bytes().to_vec()),
+            Err(thrown) => {
+                failed = Some(thrown);
+                None
+            }
         }
-        match stream.get_line(req, None)? {
-            Some(more) if !more.as_bytes().is_empty() => line.extend_from_slice(more.as_bytes()),
-            _ => break,
-        }
-    }
-    fs(req, this, |it| it.line = Some(line.clone()))?;
-    let line = if line.ends_with(b"\n") {
-        let mut l = line;
-        l.pop();
-        if l.ends_with(b"\r") {
-            l.pop();
-        }
-        l
-    } else {
-        line
     };
-    let args = [
-        crate::string_value(req, &line)?,
-        crate::string_value(req, &[control.0])?,
-        crate::string_value(req, &[control.1])?,
-        crate::string_value(req, control.2.as_slice())?,
-    ];
-    let parsed = crate::standard(req, b"str_getcsv", &args);
-    for arg in args {
-        req.release(arg);
+    let fields = php_ext_standard::php_fgetcsv(&line, delimiter, enclosure, escape, &mut more);
+    if let Some(thrown) = failed {
+        return Err(thrown);
     }
-    let parsed = parsed?;
-    if let Some(old) = fs(req, this, |it| it.csv.replace(parsed))? {
+    let mut parsed = PhpArray::new(req)?;
+    match fields {
+        None => parsed.append(req, Value::null())?,
+        Some(fields) => {
+            for field in fields {
+                let value = crate::string_value(req, &field)?;
+                parsed.append(req, value)?;
+            }
+        }
+    }
+    if let Some(old) = fs(req, this, |it| it.csv.replace(Value::array(parsed)))? {
         req.release(old);
     }
     Ok(true)
-}
-
-/// Whether `line` ends inside an enclosed field, as `php_fgetcsv`'s
-/// state stands at the end of its buffer: an enclosure that opens a
-/// field opens it, a doubled one inside stands for itself, the escape takes
-/// the byte after it, and a lone one closes it.
-fn open_enclosure(line: &[u8], (delimiter, enclosure, escape): (u8, u8, Option<u8>)) -> bool {
-    let mut at = 0;
-    let mut inside = false;
-    let mut field_start = true;
-    while let Some(&c) = line.get(at) {
-        if inside {
-            if Some(c) == escape && escape != Some(enclosure) {
-                at += 2;
-                continue;
-            }
-            if c == enclosure {
-                if line.get(at + 1) == Some(&enclosure) {
-                    at += 2;
-                    continue;
-                }
-                inside = false;
-            }
-        } else if field_start && c == enclosure {
-            inside = true;
-            field_start = false;
-        } else if c == delimiter {
-            field_start = true;
-        } else if c != b' ' && c != b'\t' {
-            field_start = false;
-        }
-        at += 1;
-    }
-    inside
 }
 
 /// `spl_filesystem_file_read_line_ex`: CSV, a user `getCurrentLine()`,
@@ -2193,7 +2171,7 @@ fn file_fgetcsv(req: &mut Request) -> Result<Value, Thrown> {
 }
 
 /// `fputcsv(array $fields, ...): int|false`, through `ext/standard`'s
-/// `fputcsv` on the stream.
+/// `php_fputcsv` on the stream, called directly as php's method calls it.
 fn file_fputcsv(req: &mut Request) -> Result<Value, Thrown> {
     crate::arity(req, 1, 5)?;
     let (this, stream) = this_file(req)?;
@@ -2203,22 +2181,16 @@ fn file_fputcsv(req: &mut Request) -> Result<Value, Thrown> {
     let enclosure = control_char(req, 3, e)?;
     let escape = escape_arg(req, 4, this)?;
     let eol = match crate::given(req, 5) {
-        Some(_) => crate::string(req, 5)?.as_bytes().to_vec(),
-        None => b"\n".to_vec(),
+        Some(_) => Some(crate::string(req, 5)?),
+        None => None,
     };
-    let args = [
-        stream.as_value(),
-        Value::array(fields),
-        crate::string_value(req, &[delimiter])?,
-        crate::string_value(req, &[enclosure])?,
-        crate::string_value(req, escape.as_slice())?,
-        crate::string_value(req, &eol)?,
-    ];
-    let answered = crate::standard(req, b"fputcsv", &args);
-    for arg in &args[2..] {
-        req.release(*arg);
-    }
-    answered
+    let eol = eol.as_ref().map(PhpString::as_bytes);
+    let control = (delimiter, enclosure, escape);
+    let written = php_ext_standard::php_fputcsv(req, stream, fields, control, eol)?;
+    Ok(written.map_or_else(
+        || Value::bool(false),
+        |n| Value::int(i64::try_from(n).unwrap_or(i64::MAX)),
+    ))
 }
 
 /// `setCsvControl(string $separator = ",", string $enclosure = "\"",
@@ -2364,7 +2336,9 @@ fn file_fpassthru(req: &mut Request) -> Result<Value, Thrown> {
 }
 
 /// `fscanf(string $format, mixed &...$vars): array|int|null`: the next
-/// line through `ext/standard`'s `sscanf`.
+/// line through `ext/standard`'s `php_sscanf_internal`, called directly as
+/// php's method calls it, the variables from the method's second
+/// argument on.
 ///
 /// ```php
 /// $t = new SplTempFileObject(); $t->fwrite("7 apples\n"); $t->rewind();
@@ -2386,14 +2360,8 @@ fn file_fscanf(req: &mut Request) -> Result<Value, Thrown> {
     let format = crate::string(req, 1)?;
     read_line_counted(req, this, false, false)?;
     let line = fs(req, this, |it| it.line.clone())?.unwrap_or_default();
-    let line = crate::string_value(req, &line)?;
-    let mut args = vec![line, Value::string(format)];
-    for at in 2..=u32::try_from(req.argument_count()).unwrap_or(1) {
-        args.push(req.argument(at).unwrap_or_default());
-    }
-    let answered = crate::standard(req, b"sscanf", &args);
-    req.release(line);
-    answered
+    let num_vars = req.argument_count().saturating_sub(1);
+    php_ext_standard::php_sscanf_internal(req, &line, format.as_bytes(), 2, num_vars)
 }
 
 /// `fwrite(string $data, ?int $length = null): int|false`.
@@ -2417,11 +2385,25 @@ fn file_fwrite(req: &mut Request) -> Result<Value, Thrown> {
     })
 }
 
-/// `fstat(): array`, through `ext/standard`'s `fstat` on the stream.
+/// `fstat(): array`, through `ext/standard`'s `php_fstat` on the stream,
+/// called directly as php's method calls it, so `disable_functions`
+/// naming `fstat` leaves it standing; the witness under that ini is
+/// `tests/capture.rs`, since a fence carries no ini of its own.
+///
+/// ```php
+/// $t = new SplTempFileObject(); $t->fwrite("abc"); $s = $t->fstat();
+/// var_dump(count($s), $s['size'], $s[7], $s['mode'] & 0170000);
+/// ```
+/// ```expect
+/// int(26)
+/// int(3)
+/// int(3)
+/// int(32768)
+/// ```
 fn file_fstat(req: &mut Request) -> Result<Value, Thrown> {
     crate::arity(req, 0, 0)?;
     let (_, stream) = this_file(req)?;
-    crate::standard(req, b"fstat", &[stream.as_value()])
+    php_ext_standard::php_fstat(req, stream)
 }
 
 /// `ftruncate(int $size): bool`.

@@ -9,7 +9,7 @@
 use php_ext::decl::{
     Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind, ConstDecl,
     ConstExpr, DynamicProperties, EnumBacking, FunctionDecl, MethodDecl, Name, Parameter,
-    PropertyDecl, Type, Visibility,
+    ParameterDefault, PropertyDecl, Type, Visibility,
 };
 
 use crate::Entry;
@@ -31,8 +31,9 @@ pub(super) fn param(text: &str, ty: Type, default: Option<ConstExpr>) -> Paramet
         ty: Some(ty),
         by_ref: false,
         prefer_ref: false,
+        promoted: false,
         variadic: false,
-        default,
+        default: default.map_or(ParameterDefault::None, ParameterDefault::Expr),
         attributes: Vec::new(),
     }
 }
@@ -275,6 +276,7 @@ pub(super) fn engine_property() -> PropertyDecl {
         is_instance: true,
         is_readonly: true,
         is_final: false,
+        is_promoted: false,
         ty: Some(class_type("Random\\Engine")),
         default: None,
         attributes: Vec::new(),

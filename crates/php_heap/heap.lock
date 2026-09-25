@@ -7,6 +7,7 @@ Arr::end
 Arr::entry_at
 Arr::forward
 Arr::get
+Arr::has_iterators
 Arr::is_empty
 Arr::is_immutable
 Arr::is_packed
@@ -94,6 +95,7 @@ Heap::object_clone_with
 Heap::object_properties
 Heap::object_set_properties
 Heap::object_set_slot
+Heap::object_take_properties
 Heap::object_with
 Heap::objects
 Heap::overflow_rendered
@@ -121,6 +123,7 @@ Heap::string_with
 Heap::take_freed_use
 HeapHooks
 HeapHooks::destruct
+HeapHooks::forget_lazy
 HeapHooks::free_native
 HeapHooks::free_reference
 HeapHooks::free_resource
@@ -140,6 +143,7 @@ Intern
 Intern::constant_array
 Intern::intern
 Key
+Laziness
 MapPtr
 MapPtr::new
 MapPtr::offset
@@ -153,15 +157,18 @@ Number::double
 Obj
 Obj::addref
 Obj::class
+Obj::destructor_called
 Obj::has_native
 Obj::id
-Obj::is_lazy
 Obj::is_recursive
 Obj::is_same
 Obj::is_weakly_referenced
+Obj::laziness
 Obj::properties
 Obj::protect
 Obj::refcount
+Obj::set_destructor_called
+Obj::set_laziness
 Obj::set_weakly_referenced
 Obj::slot
 Obj::slot_ref

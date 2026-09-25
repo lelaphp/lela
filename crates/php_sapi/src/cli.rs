@@ -90,8 +90,11 @@ pub struct Options {
     /// `-n`: `php.ini` is not looked for. The engine reads no file yet, so
     /// the switch is taken and changes nothing (design §11, row 15–21).
     pub ini_ignore: bool,
-    /// Each `-d name=value`, in the order given; a `-d name` is `name=1`,
-    /// as `php_ini_builder_define` writes it.
+    /// Each `-d name=value` split at its first `=`, in the order given;
+    /// a `-d name` is `name=1`, as `php_ini_builder_define` writes it.
+    /// The value is the text the engine's builder writes as the define's
+    /// line and reads with the INI grammar (`EngineBuilder::ini`), so
+    /// `UTC;` stands here and is `UTC` once read.
     pub ini: Vec<(String, String)>,
     pub ask: Ask,
 }
@@ -522,7 +525,9 @@ fn os(bytes: &[u8]) -> OsString {
     OsString::from(String::from_utf8_lossy(bytes).into_owned())
 }
 
-/// `php_ini_builder_define`: `name=value`, or `name=1` for a bare name.
+/// `php_ini_builder_define`'s split: `name=value` at the first `=`, or
+/// `name=1` for a bare name. Its line, quoted or not, and what the INI
+/// grammar reads from it are the engine's builder's.
 fn define(given: &str) -> (String, String) {
     match given.split_once('=') {
         Some((name, value)) => (name.to_owned(), value.to_owned()),
@@ -1144,6 +1149,91 @@ mod tests {
         fn write_stderr(&mut self, bytes: &[u8]) {
             self.0.extend_from_slice(bytes);
         }
+    }
+
+    /// What `-r` prints under the `-d` switches given, served by an engine
+    /// built from them as the binary builds it.
+    fn served_under(switches: &[&str], code: &str) -> (String, String) {
+        let mut words = vec!["-n"];
+        for switch in switches {
+            words.extend(["-d", switch]);
+        }
+        words.extend(["-r", code]);
+        let Ok(options) = parse(&words) else {
+            return (String::from("refused"), String::new());
+        };
+        let mut builder = Engine::builder();
+        for (name, value) in &options.ini {
+            builder = builder.ini(name, value);
+        }
+        let engine = builder.build();
+        let Ask::Serve(program, arguments) = &options.ask else {
+            return (String::from("not served"), String::new());
+        };
+        let Ok(description) = describe(program, arguments) else {
+            return (String::from("not described"), String::new());
+        };
+        let mut sink = Capture::default();
+        engine.serve(description, &mut sink);
+        (
+            String::from_utf8_lossy(&sink.0).into_owned(),
+            engine.startup_errors().to_owned(),
+        )
+    }
+
+    /// The pinned oracle at 8.5.9 under `-n` and these switches: a `-d`
+    /// value is a line of INI text, so `;` opens a comment, an unquoted
+    /// value is trimmed, a quoted one keeps its `;`, one that opens with
+    /// a byte neither alphanumeric nor a quote is quoted by the define and
+    /// stands as written, `off` is empty and a bare name `1`, a Zend
+    /// constant and its operators are read, and `${…}` reads an entry set
+    /// before it.
+    #[test]
+    fn a_define_is_read_by_the_ini_grammar() {
+        let switches = [
+            "date.timezone=UTC;",
+            "precision=5 ; x",
+            "error_log=${precision}x",
+            "docref_root= 5",
+            "docref_ext=\"a;b\" ; c",
+            "display_errors=off",
+            "log_errors",
+            "error_reporting=E_ALL & ~E_NOTICE",
+            "serialize_precision=PHP_INT_SIZE",
+            "error_prepend_string=;x",
+            "error_append_string=",
+        ];
+        let code = r#"foreach (["date.timezone","precision","error_log","docref_root","docref_ext","display_errors","log_errors","error_reporting","serialize_precision","error_prepend_string","error_append_string"] as $n) echo $n, "=[", ini_get($n), "]\n";"#;
+        assert_eq!(
+            served_under(&switches, code),
+            (
+                String::from(
+                    "date.timezone=[UTC]\nprecision=[5]\nerror_log=[5x]\ndocref_root=[ 5]\n\
+                     docref_ext=[a;b]\ndisplay_errors=[]\nlog_errors=[1]\nerror_reporting=[30711]\n\
+                     serialize_precision=[8]\nerror_prepend_string=[;x]\nerror_append_string=[]\n"
+                ),
+                String::new()
+            )
+        );
+    }
+
+    /// A syntax error ends the reading where it stands: what came before
+    /// it is set and nothing after, and `ini_error`'s line is kept for
+    /// `stderr`. The oracle writes `on line 8` for the same two switches,
+    /// its CLI having put five lines of its own before them, which this
+    /// host does not.
+    #[test]
+    fn a_define_that_does_not_parse_keeps_what_came_before_it() {
+        let code = r#"echo ini_get("date.timezone"), "|", ini_get("precision");"#;
+        assert_eq!(
+            served_under(&["date.timezone=Europe/Paris", "precision=bar\""], code),
+            (
+                String::from("Europe/Paris|14"),
+                String::from(
+                    "PHP:  syntax error, unexpected end of file, expecting TC_DOLLAR_CURLY or TC_QUOTED_STRING or '\"' in Unknown on line 3\n"
+                )
+            )
+        );
     }
 
     fn scratch(name: &str, source: &str) -> PathBuf {

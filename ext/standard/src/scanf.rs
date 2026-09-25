@@ -405,26 +405,47 @@ pub(super) fn sscanf(req: &mut Request) -> Result<Value, Thrown> {
     }
     let string = string_argument(req, 1)?;
     let format = string_argument(req, 2)?;
-    let input = string
-        .as_bytes()
-        .split(|c| *c == 0)
-        .next()
-        .unwrap_or(&[])
-        .to_vec();
-    let format = format
-        .as_bytes()
-        .split(|c| *c == 0)
-        .next()
-        .unwrap_or(&[])
-        .to_vec();
-    let num_vars = given - 2;
-    scan(req, &input, &format, 3, num_vars)
+    php_sscanf_internal(req, string.as_bytes(), format.as_bytes(), 3, given - 2)
 }
 
 /// `php_sscanf_internal(string, format, argCount, args, varStart,
-/// return_value)`, the variables at `first..first + num_vars`.
+/// return_value)`, `PHPAPI` in `scanf.h` (`Z/ext/standard/scanf.c:574`):
+/// `string` read by `format`, each read as a C string up to its first
+/// NUL, into the calling native's arguments at `first..first + num_vars`
+/// where `num_vars` is not zero and into the returned array where it is.
+/// What `sscanf()` and `fscanf()` scan through, and what
+/// `SplFileObject::fscanf()` calls directly.
+///
+/// ```php
+/// $t = new SplTempFileObject(); $t->fwrite("7 apples\n3 pears\n"); $t->rewind();
+/// var_dump($t->fscanf('%d %s'), $t->fscanf('%d %s', $n, $fruit), $n, $fruit);
+/// ```
+/// ```expect
+/// array(2) {
+///   [0]=>
+///   int(7)
+///   [1]=>
+///   string(6) "apples"
+/// }
+/// int(2)
+/// int(3)
+/// string(5) "pears"
+/// ```
+pub fn php_sscanf_internal(
+    req: &mut Request,
+    string: &[u8],
+    format: &[u8],
+    first: u32,
+    num_vars: usize,
+) -> Result<Value, Thrown> {
+    let c_string = |bytes: &[u8]| bytes.split(|c| *c == 0).next().unwrap_or(&[]).to_vec();
+    let (input, format) = (c_string(string), c_string(format));
+    scan(req, &input, &format, first, num_vars)
+}
+
+/// The scan itself, over the NUL-free `input` and `format`.
 #[allow(clippy::too_many_lines)]
-pub(super) fn scan(
+fn scan(
     req: &mut Request,
     input: &[u8],
     format: &[u8],

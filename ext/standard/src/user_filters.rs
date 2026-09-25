@@ -20,7 +20,7 @@ use php_ext::call::{call_method, lookup_class, new_object, write_prop};
 use php_ext::coerce::{is_callable, to_long, value_name};
 use php_ext::decl::{
     ClassDecl, ClassFlags, ClassKind, ConstDecl, ConstExpr, EnumBacking, FunctionDecl, MethodDecl,
-    Name, Parameter, PropertyDecl, Type, Visibility,
+    Name, Parameter, ParameterDefault, PropertyDecl, Type, Visibility,
 };
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw};
 use php_ext::request::{Brigade, FilterFlags, FilterStatus, Request, Stream, StreamFilter};
@@ -95,6 +95,7 @@ fn property(name: &[u8], ty: Option<Type>, default: Option<ConstExpr>) -> Proper
         is_instance: true,
         is_readonly: false,
         is_final: false,
+        is_promoted: false,
         ty,
         default,
         attributes: Vec::new(),
@@ -393,7 +394,7 @@ fn user_filter_on_close(req: &mut Request) -> Result<Value, Thrown> {
 /// ```
 pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
     let params = || Parameter {
-        default: Some(ConstExpr::Constant(Name(b"UNKNOWN".as_slice().into()))),
+        default: ParameterDefault::Unshown,
         ..parameter(b"params", Type::Mixed)
     };
     let apply = |name: &[u8]| {
@@ -403,7 +404,7 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
                 untyped(b"stream"),
                 parameter(b"filter_name", Type::String),
                 Parameter {
-                    default: Some(ConstExpr::Long(0)),
+                    default: ParameterDefault::Expr(ConstExpr::Long(0)),
                     ..parameter(b"mode", Type::Int)
                 },
                 params(),

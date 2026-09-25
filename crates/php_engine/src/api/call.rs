@@ -6,12 +6,16 @@
 //! the request holds, and the rest still raise php's `Error` for an
 //! undefined function or class.
 
-use php_unit::decl::{ConstExpr, Name};
+use std::sync::Arc;
+
+use php_unit::decl::{ConstExpr, Name, ParameterDefault};
+use php_unit::{ConstIdx, Opcode, Unit};
 
 use crate::api::abi::{Callable, PropertyRead};
-use crate::api::raising::{Thrown, throw};
-use crate::api::request::Request;
+use crate::api::raising::{Thrown, argument_error, throw};
+use crate::api::request::{Request, Strategy};
 use crate::api::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use crate::exec::{self, Body, CallStage};
 
 /// A linked function: user or native, by identity. A native method is
 /// one too, numbered past the functions.
@@ -129,14 +133,6 @@ impl Iter {
     pub fn value(&self) -> Option<&Value> {
         self.entries.get(self.at?).map(|(_, v)| v)
     }
-}
-
-fn no_loop(req: &mut Request, what: &str) -> Thrown {
-    throw(
-        req,
-        "Error",
-        &format!("Call to undefined function {what}()"),
-    )
 }
 
 /// `zend_call_known_fcc` (`Z/Zend/zend_execute_API.c:1090`): the
@@ -302,7 +298,7 @@ pub fn call_named(
     let Some(function) = callee(req, target).filter(|_| !named.is_empty()) else {
         return serve(req, target, arguments, &[]);
     };
-    let mut placement = Placement::new(req, function, arguments);
+    let mut placement = Placement::new(function, arguments);
     for (name, value) in named {
         placement.named(req, *name, *value)?;
     }
@@ -329,7 +325,7 @@ pub fn call_array(
         let positional: Vec<Value> = array.snapshot().into_iter().map(|(_, v)| v).collect();
         return serve(req, target, &positional, &[]);
     };
-    let mut placement = Placement::new(req, function, &[]);
+    let mut placement = Placement::new(function, &[]);
     let mut have_named = false;
     for (key, value) in array.snapshot() {
         match key {
@@ -357,87 +353,366 @@ pub fn call_array(
 /// skipped `UNDEF`, and the extra named arguments a variadic callee
 /// collects, against the parameter names the callee declares.
 struct Placement {
-    /// The declared parameters' names and whether each is the variadic,
-    /// `fbc->common.arg_info` over `num_args` and `ZEND_ACC_VARIADIC`.
-    parameters: Vec<(Vec<u8>, bool)>,
+    function: Function,
     arguments: Vec<Value>,
     extra_named: Vec<(PhpString, Value)>,
 }
 
 impl Placement {
-    fn new(req: &Request, function: Function, arguments: &[Value]) -> Placement {
-        let parameters = req
-            .function_decl(function)
-            .map(|decl| {
-                decl.parameters
-                    .iter()
-                    .map(|parameter| (parameter.name.0.to_vec(), parameter.variadic))
-                    .collect()
-            })
-            .unwrap_or_default();
+    fn new(function: Function, arguments: &[Value]) -> Placement {
         Placement {
-            parameters,
+            function,
             arguments: arguments.to_vec(),
             extra_named: Vec::new(),
         }
     }
 
-    /// `zend_handle_named_arg` (`Z/Zend/zend_execute.c:5518`) over
-    /// `zend_get_arg_offset_by_name`: the offset of the declared
-    /// parameter of that name, the variadic's own name matching nothing
-    /// since php walks `num_args` alone; a callee with a variadic
-    /// collects a name it does not declare into `extra_named_params`,
-    /// where the same name twice is the `Error` a filled slot is; and a
-    /// callee without one has php's `Error` for an unknown named
-    /// parameter. A named argument lands in its slot, the slots between
-    /// the last positional one and it laid down `UNDEF`
-    /// (`ZEND_CALL_MAY_HAVE_UNDEF`), and one whose slot a positional
-    /// argument already filled is php's other `Error`.
+    /// One named argument placed by [`handle_named_arg`], the function
+    /// the `SEND_*` handlers place theirs by, and written where it went.
     fn named(&mut self, req: &mut Request, name: PhpString, value: Value) -> Result<(), Thrown> {
-        let wanted = name.as_bytes();
-        let spelled = String::from_utf8_lossy(wanted).into_owned();
-        let Some(at) = self
-            .parameters
-            .iter()
-            .position(|(declared, variadic)| !variadic && declared == wanted)
-        else {
-            if !self.parameters.iter().any(|(_, variadic)| *variadic) {
-                return Err(throw(
-                    req,
-                    "Error",
-                    &format!("Unknown named parameter ${spelled}"),
-                ));
+        let offset = arg_offset_by_name(req, self.function, name.as_bytes());
+        match handle_named_arg(offset, &mut self.arguments, &mut self.extra_named, name) {
+            Ok(Named { at, .. }) => {
+                if let Some(slot) = at.slot(&mut self.arguments, &mut self.extra_named) {
+                    *slot = value;
+                }
+                Ok(())
             }
-            if self
-                .extra_named
-                .iter()
-                .any(|(held, _)| held.as_bytes() == wanted)
-            {
-                return Err(throw(
-                    req,
-                    "Error",
-                    &format!("Named parameter ${spelled} overwrites previous argument"),
-                ));
+            Err(refused) => Err(refused.throw(req, name)),
+        }
+    }
+}
+
+/// `zend_get_arg_offset_by_name` (`Z/Zend/zend_execute.c:5466`): where
+/// a callee takes an argument of this name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ArgOffset {
+    /// The declared parameter at this offset, the name compared byte for
+    /// byte; the variadic's own name is none of them, since php walks
+    /// `num_args` alone.
+    Declared(usize),
+    /// A name the callee declares no parameter for, which its variadic
+    /// collects (`ZEND_ACC_VARIADIC`), at `num_args`.
+    Variadic(usize),
+    /// A name a callee without a variadic declares no parameter for.
+    Unknown,
+}
+
+impl ArgOffset {
+    /// The argument's number, php's `arg_offset + 1`: the variadic's is
+    /// the one after the declared parameters, which is the position
+    /// whose way of being sent is the variadic's. None for an unknown name.
+    pub(crate) fn number(self) -> Option<u32> {
+        match self {
+            ArgOffset::Declared(at) | ArgOffset::Variadic(at) => u32::try_from(at + 1).ok(),
+            ArgOffset::Unknown => None,
+        }
+    }
+}
+
+/// [`ArgOffset`] over the callee's declaration; a callee with none, the
+/// pass function a `NEW` without a constructor serves among them, takes
+/// no name.
+pub(crate) fn arg_offset_by_name(req: &Request, function: Function, name: &[u8]) -> ArgOffset {
+    let Some(decl) = req.function_decl(function) else {
+        return ArgOffset::Unknown;
+    };
+    let declared = decl.parameters.iter().filter(|p| !p.variadic);
+    if let Some(at) = declared.clone().position(|p| *p.name.0 == *name) {
+        return ArgOffset::Declared(at);
+    }
+    if decl.parameters.iter().any(|p| p.variadic) {
+        return ArgOffset::Variadic(declared.count());
+    }
+    ArgOffset::Unknown
+}
+
+/// Where [`handle_named_arg`] put a named argument: a slot of the call's
+/// arguments, or an entry of its extra named ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NamedAt {
+    Argument(usize),
+    Extra(usize),
+}
+
+impl NamedAt {
+    /// The slot itself, which [`handle_named_arg`] left `UNDEF`.
+    pub(crate) fn slot<'a>(
+        self,
+        arguments: &'a mut [Value],
+        extra_named: &'a mut [(PhpString, Value)],
+    ) -> Option<&'a mut Value> {
+        match self {
+            NamedAt::Argument(at) => arguments.get_mut(at),
+            NamedAt::Extra(at) => extra_named.get_mut(at).map(|(_, value)| value),
+        }
+    }
+}
+
+/// A named argument [`handle_named_arg`] placed: where, and the number
+/// php's `arg_num_ptr` answers, which the by-reference bit is read at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Named {
+    pub(crate) at: NamedAt,
+    pub(crate) number: u32,
+}
+
+/// Why [`handle_named_arg`] placed nothing, each php's `Error`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NamedRefused {
+    /// `Unknown named parameter $%s`.
+    Unknown,
+    /// `Named parameter $%s overwrites previous argument`: the slot is
+    /// filled, or the variadic already collected the name.
+    Overwrites,
+}
+
+impl NamedRefused {
+    pub(crate) fn throw(self, req: &mut Request, name: PhpString) -> Thrown {
+        let spelled = String::from_utf8_lossy(name.as_bytes()).into_owned();
+        let message = match self {
+            NamedRefused::Unknown => format!("Unknown named parameter ${spelled}"),
+            NamedRefused::Overwrites => {
+                format!("Named parameter ${spelled} overwrites previous argument")
             }
-            self.extra_named.push((name, value));
-            return Ok(());
         };
-        if self
-            .arguments
-            .get(at)
-            .is_some_and(|held| !matches!(held.as_ref(), ValueRef::Undef))
-        {
-            return Err(throw(
-                req,
-                "Error",
-                &format!("Named parameter ${spelled} overwrites previous argument"),
-            ));
+        throw(req, "Error", &message)
+    }
+}
+
+/// `zend_handle_undef_args` (`Z/Zend/zend_execute.c:5597`) over the call
+/// on top of the call stack, which `CHECK_UNDEF_ARGS` and
+/// `zend_call_function` reach once a named argument may have skipped a
+/// parameter: each slot left `UNDEF` filled before the callee is served. A
+/// user function's is its `RECV_INIT`'s default, evaluated where the
+/// parameter declares one, and php's `ArgumentCountError` where it
+/// declares none, at the parameter's `RECV`; a native's is the default
+/// its declaration carries, evaluated, and made a reference where the
+/// parameter takes one, and the same error where the parameter is
+/// required or its default is not known. php runs the walk under a
+/// frame for the callee (`start_fake_frame`), so what it raises names
+/// the callee and a trace carries the call with the arguments placed so
+/// far; the call is served for as long as the walk runs, and a user
+/// function's raise stands at its parameter's line, where php's frame
+/// stands.
+///
+/// ```php
+/// function f($a, $b = PHP_INT_SIZE * 2, $c = 1) { var_dump($a, $b, $c); }
+/// f(1, c: 3);
+/// var_dump(str_pad('abc', length: 6, pad_type: STR_PAD_LEFT));
+/// function g($a, $b, $c = 1) {}
+/// try { g(1, c: 3); } catch (ArgumentCountError $e) { echo $e->getMessage(), ' ', $e->getLine(), "\n"; }
+/// try { array_keys([], strict: true); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
+/// try { str_pad('a', pad_type: 1); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// int(1)
+/// int(16)
+/// int(3)
+/// string(6) "   abc"
+/// g(): Argument #2 ($b) not passed 5
+/// array_keys(): Argument #2 ($filter_value) must be passed explicitly, because the default value is not known
+/// str_pad(): Argument #2 ($length) not passed
+/// ```
+///
+/// A default naming nothing raises where it is evaluated, under the
+/// callee's frame:
+///
+/// ```php
+/// function h($a = NOPE, $b = 2) {}
+/// h(b: 1);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: Undefined constant "NOPE" in %s:2
+/// Stack trace:
+/// #0 %s(3): h(NULL, 1)
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+pub(crate) fn handle_undef_args(req: &mut Request) -> Result<(), Thrown> {
+    let Some(call) = req.vm_mut().building_call() else {
+        return Ok(());
+    };
+    let function = call.function;
+    let stage = std::mem::replace(&mut call.stage, CallStage::Serving);
+    let filled = fill_undef_args(req, function);
+    if let Some(call) = req.vm_mut().building_call() {
+        call.stage = stage;
+    }
+    filled
+}
+
+/// The walk of [`handle_undef_args`] under the callee's frame.
+fn fill_undef_args(req: &mut Request, function: Function) -> Result<(), Thrown> {
+    let user = req
+        .user_function(function)
+        .map(|user| (Arc::clone(&user.unit), user.body));
+    let count = req
+        .vm()
+        .calls()
+        .last()
+        .map_or(0, |call| call.arguments.len());
+    for at in 0..count {
+        let undef = req
+            .vm()
+            .calls()
+            .last()
+            .and_then(|call| call.arguments.get(at))
+            .is_some_and(|held| matches!(held.as_ref(), ValueRef::Undef));
+        if !undef {
+            continue;
         }
-        if self.arguments.len() <= at {
-            self.arguments.resize(at + 1, Value::undef());
+        let value = match &user {
+            Some((unit, body)) => user_default(req, unit, *body, at)?,
+            None => native_default(req, function, at)?,
+        };
+        let placed = req
+            .vm_mut()
+            .building_call()
+            .and_then(|call| call.arguments.get_mut(at));
+        match placed {
+            Some(slot) => *slot = value,
+            None => req.release(value),
         }
-        self.arguments[at] = value;
-        Ok(())
+    }
+    Ok(())
+}
+
+/// A user function's parameter at `at` filled as
+/// `zend_handle_undef_args` fills it off the op array's own prologue,
+/// whose oplines are the parameters in order.
+fn user_default(req: &mut Request, unit: &Unit, body: Body, at: usize) -> Result<Value, Thrown> {
+    let Some(code) = exec::body_of(unit, body) else {
+        return Ok(Value::null());
+    };
+    let Some(recv) = code.oplines.get(at).copied() else {
+        return Ok(Value::null());
+    };
+    let position = u32::try_from(at + 1).unwrap_or(u32::MAX);
+    let filled = if recv.opcode == Opcode::RecvInit {
+        exec::default_value(req, code, ConstIdx(recv.op2)).map(|(value, _)| value)
+    } else {
+        Err(argument_error(
+            req,
+            "ArgumentCountError",
+            position,
+            "not passed",
+        ))
+    };
+    filled.map_err(|thrown| at_site(req, thrown, &code.filename.0, recv.lineno))
+}
+
+/// A native's parameter at `at` filled from its declaration: the
+/// required ones and a default php's stub leaves `UNKNOWN` are
+/// `zend_argument_error`'s, and one taken by reference is a reference
+/// to the default (`ZVAL_NEW_REF`).
+fn native_default(req: &mut Request, function: Function, at: usize) -> Result<Value, Thrown> {
+    let position = u32::try_from(at + 1).unwrap_or(u32::MAX);
+    let Some(decl) = req.function_decl(function) else {
+        return Ok(Value::null());
+    };
+    let required = decl
+        .parameters
+        .iter()
+        .rposition(|parameter| {
+            matches!(parameter.default, ParameterDefault::None) && !parameter.variadic
+        })
+        .map_or(0, |last| last + 1);
+    let parameter = decl.parameters.get(at).cloned();
+    if at < required {
+        return Err(argument_error(
+            req,
+            "ArgumentCountError",
+            position,
+            "not passed",
+        ));
+    }
+    let Some(parameter) = parameter else {
+        return Ok(Value::null());
+    };
+    // The stub's `= UNKNOWN` is `ParameterDefault::Unshown`: a default
+    // php cannot show, so it cannot be filled either.
+    let ParameterDefault::Expr(default) = parameter.default else {
+        return Err(argument_error(
+            req,
+            "ArgumentCountError",
+            position,
+            "must be passed explicitly, because the default value is not known",
+        ));
+    };
+    let scope = req.executed_scope();
+    let value = eval_const_expr(req, &default, scope)?;
+    if parameter.by_ref {
+        return Ok(req.reference(value)?.as_value());
+    }
+    Ok(value)
+}
+
+/// A throwable raised under a user callee's frame, which php's
+/// `start_fake_frame` stands at the callee's opline: the file and the
+/// line it records are that opline's.
+fn at_site(req: &mut Request, thrown: Thrown, file: &[u8], line: u32) -> Thrown {
+    if let Some(object) = thrown.exception().copied() {
+        let placed = PhpString::new(req, b"file")
+            .and_then(|name| Ok((name, PhpString::new(req, file)?)))
+            .and_then(|(name, file)| object.set_prop(req, name, Value::string(file)))
+            .and_then(|()| PhpString::new(req, b"line"))
+            .and_then(|name| object.set_prop(req, name, Value::int(i64::from(line))));
+        if let Err(other) = placed {
+            return other;
+        }
+    }
+    thrown
+}
+
+/// `zend_handle_named_arg` (`Z/Zend/zend_execute.c:5518`), the one
+/// placement of a named argument, which a `SEND_*` at a call site and
+/// `zend_call_function`'s walk of `named_params` both reach: at the
+/// declared parameter's offset, the slots between the last argument and
+/// it laid down `UNDEF` for `CHECK_UNDEF_ARGS` to fill
+/// (`ZEND_CALL_MAY_HAVE_UNDEF`), and a slot something already filled
+/// refused; or, for a name a variadic collects, as one more extra named
+/// argument (`ZEND_CALL_HAS_EXTRA_NAMED_PARAMS`), the same name twice
+/// refused. The slot is left `UNDEF` for the caller to write, as php
+/// hands back the zval; the name is pushed as it is given, and whether
+/// it carries one more owner is the caller's to say.
+pub(crate) fn handle_named_arg(
+    offset: ArgOffset,
+    arguments: &mut Vec<Value>,
+    extra_named: &mut Vec<(PhpString, Value)>,
+    name: PhpString,
+) -> Result<Named, NamedRefused> {
+    let number = offset.number().ok_or(NamedRefused::Unknown)?;
+    match offset {
+        ArgOffset::Unknown => Err(NamedRefused::Unknown),
+        ArgOffset::Variadic(_) => {
+            if extra_named
+                .iter()
+                .any(|(held, _)| held.as_bytes() == name.as_bytes())
+            {
+                return Err(NamedRefused::Overwrites);
+            }
+            extra_named.push((name, Value::undef()));
+            Ok(Named {
+                at: NamedAt::Extra(extra_named.len() - 1),
+                number,
+            })
+        }
+        ArgOffset::Declared(at) => {
+            if arguments
+                .get(at)
+                .is_some_and(|held| !matches!(held.as_ref(), ValueRef::Undef))
+            {
+                return Err(NamedRefused::Overwrites);
+            }
+            if arguments.len() <= at {
+                arguments.resize(at + 1, Value::undef());
+            }
+            Ok(Named {
+                at: NamedAt::Argument(at),
+                number,
+            })
+        }
     }
 }
 
@@ -582,6 +857,28 @@ pub fn lookup_class(req: &mut Request, name: &[u8]) -> Result<Option<ClassId>, T
 #[must_use]
 pub fn lookup_function(req: &Request, name: &[u8]) -> Option<Function> {
     req.function_named(name)
+}
+
+/// The `static` variables of what `callable` names, name and value in the
+/// order the op array's table holds them, as
+/// `ReflectionFunctionAbstract::getStaticVariables` copies
+/// `ZEND_MAP_PTR_GET(static_variables_ptr)`: a closure's own table, its
+/// `use` variables first, and a function's or a method's the request's
+/// copy, laid down at its starting values where no call has touched it,
+/// as php lays it down there. A variable a `static` bound is the cell
+/// the function binds, as php's bucket holds it. Empty for a native and
+/// for a function with none. The values are views, no owner taken; the
+/// `Err` is the memory limit refusing a name.
+pub fn bound_variables(
+    req: &mut Request,
+    callable: &Callable,
+) -> Result<Vec<(PhpString, Value)>, Thrown> {
+    let rows = req.static_variables(callable.target());
+    let mut out = Vec::with_capacity(rows.len());
+    for (name, value) in rows {
+        out.push((PhpString::new(req, &name)?, value));
+    }
+    Ok(out)
 }
 
 /// Serve the autoloaders for `name`, `zend_lookup_class_ex` after the
@@ -794,6 +1091,18 @@ pub fn class_constant(req: &mut Request, class: ClassId, name: &[u8]) -> Result<
 }
 
 /// Evaluate a constant expression in `scope`, `zval_update_constant_ex`.
+///
+/// A native's default of flags joined by `|` is one, evaluated where a
+/// named argument skipped the parameter:
+///
+/// ```php
+/// echo htmlentities("The < character is encoded as &lt;", double_encode: false), "\n";
+/// echo htmlspecialchars("'a' & \"b\"", double_encode: true), "\n";
+/// ```
+/// ```expect
+/// The &lt; character is encoded as &lt;
+/// &#039;a&#039; &amp; &quot;b&quot;
+/// ```
 pub fn eval_const_expr(
     req: &mut Request,
     expr: &ConstExpr,
@@ -863,6 +1172,13 @@ pub fn eval_const_expr(
         ConstExpr::Array(elements) => {
             let mut array = crate::api::values::PhpArray::new(req)?;
             for (key, value) in elements {
+                if let ConstExpr::Unpack(inner) = value {
+                    let spread = eval_const_expr(req, inner, scope)?;
+                    let added = add_unpacked_element(req, &mut array, &spread);
+                    req.release(spread);
+                    added?;
+                    continue;
+                }
                 let value = eval_const_expr(req, value, scope)?;
                 match key {
                     Some(key) => {
@@ -875,11 +1191,128 @@ pub fn eval_const_expr(
             }
             Ok(Value::array(array))
         }
-        _ => Err(throw(
+        // `zend_ast_evaluate`'s `ZEND_AST_BINARY_OP`, `ZEND_AST_GREATER`
+        // and unary arms: both sides evaluated, then the operator's own
+        // kernel, which is what a native's default of flags joined by
+        // `|` is evaluated by where a named argument skipped it.
+        // The operands are what the walk answered for each side, which
+        // for a constant by name is the table's own value and no owner of
+        // it, so neither is given up here.
+        ConstExpr::Binary { op, lhs, rhs } => {
+            let lhs = eval_const_expr(req, lhs, scope)?;
+            let rhs = eval_const_expr(req, rhs, scope)?;
+            binary(req, &op.0, &lhs, &rhs)
+        }
+        ConstExpr::Unary { op, operand } => {
+            let operand = eval_const_expr(req, operand, scope)?;
+            match &*op.0 {
+                b"-" => crate::ops::mul(req, &operand, &Value::int(-1)),
+                b"+" => crate::ops::mul(req, &operand, &Value::int(1)),
+                b"~" => crate::ops::bitwise_not(req, &operand),
+                b"!" => Ok(Value::bool(!crate::ops::is_true(req, &operand))),
+                _ => Err(invalid_operations(req)),
+            }
+        }
+        _ => Err(invalid_operations(req)),
+    }
+}
+
+/// `zend_ast_add_unpacked_element` (`Z/Zend/zend_ast.c:531`), a `...`
+/// inside an array of a constant expression: an array's string keys
+/// written as they stand and its integer keys dropped for the next
+/// index, a reference among its elements kept as it is; anything else,
+/// a `Traversable` among them, is php's `Error`.
+///
+/// ```php
+/// const A = [1, 'k' => 'a'];
+/// const X = 1;
+/// class C { const D = [...A, ...self::E, 'k' => 'b']; const E = [7 => 2]; const F = [...X]; }
+/// var_dump(C::D);
+/// try { var_dump(C::F); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// array(3) {
+///   [0]=>
+///   int(1)
+///   ["k"]=>
+///   string(1) "b"
+///   [1]=>
+///   int(2)
+/// }
+/// Only arrays can be unpacked in constant expression
+/// ```
+fn add_unpacked_element(
+    req: &mut Request,
+    array: &mut PhpArray,
+    spread: &Value,
+) -> Result<(), Thrown> {
+    let Some(source) = spread.deref().as_array().copied() else {
+        return Err(throw(
             req,
             "Error",
-            "Constant expression contains invalid operations",
-        )),
+            "Only arrays can be unpacked in constant expression",
+        ));
+    };
+    for (key, value) in source.snapshot_refs() {
+        req.addref(&value);
+        match key {
+            Key::Str(name) => {
+                req.addref(&Value::string(name));
+                array.set(req, Key::Str(name), value)?;
+            }
+            Key::Int(_) => array.append(req, value)?,
+        }
+    }
+    Ok(())
+}
+
+/// php's `Error` for a node its constant-expression walk does not
+/// evaluate.
+fn invalid_operations(req: &mut Request) -> Thrown {
+    throw(
+        req,
+        "Error",
+        "Constant expression contains invalid operations",
+    )
+}
+
+/// One binary operator of a constant expression, by the spelling the
+/// declaration keeps it under, over the kernel the opcode of that
+/// operator is served by.
+fn binary(req: &mut Request, op: &[u8], lhs: &Value, rhs: &Value) -> Result<Value, Thrown> {
+    use crate::ops;
+    let ordered = |req: &mut Request, test: fn(std::cmp::Ordering) -> bool| {
+        ops::compare(req, lhs, rhs).map(|order| Value::bool(test(order)))
+    };
+    match op {
+        b"+" => ops::add(req, lhs, rhs),
+        b"-" => ops::sub(req, lhs, rhs),
+        b"*" => ops::mul(req, lhs, rhs),
+        b"/" => ops::div(req, lhs, rhs),
+        b"%" => ops::r#mod(req, lhs, rhs),
+        b"**" => ops::pow(req, lhs, rhs),
+        b"<<" => ops::shift_left(req, lhs, rhs),
+        b">>" => ops::shift_right(req, lhs, rhs),
+        b"." => ops::concat(req, lhs, rhs),
+        b"|" => ops::bitwise_or(req, lhs, rhs),
+        b"^" => ops::bitwise_xor(req, lhs, rhs),
+        b"&" => ops::bitwise_and(req, lhs, rhs),
+        b"<" => ordered(req, std::cmp::Ordering::is_lt),
+        b"<=" => ordered(req, std::cmp::Ordering::is_le),
+        b">" => ordered(req, std::cmp::Ordering::is_gt),
+        b">=" => ordered(req, std::cmp::Ordering::is_ge),
+        b"==" => ordered(req, std::cmp::Ordering::is_eq),
+        b"!=" => ordered(req, std::cmp::Ordering::is_ne),
+        b"<=>" => ops::compare(req, lhs, rhs).map(|order| {
+            Value::int(match order {
+                std::cmp::Ordering::Less => -1,
+                std::cmp::Ordering::Equal => 0,
+                std::cmp::Ordering::Greater => 1,
+            })
+        }),
+        b"===" => Ok(Value::bool(ops::identical(lhs, rhs))),
+        b"!==" => Ok(Value::bool(!ops::identical(lhs, rhs))),
+        _ => Err(invalid_operations(req)),
     }
 }
 
@@ -913,9 +1346,28 @@ pub fn iterate(req: &mut Request, value: &Value) -> Result<Iter, Thrown> {
     })
 }
 
-/// `Closure::fromCallable`.
+/// `zend_create_fake_closure` over a resolved callable, what
+/// `Closure::fromCallable` and `ReflectionFunction::getClosure` make: a
+/// closure hands back itself, one more owner; a function is closed over
+/// with no scope; a method over its class, with the receiver the
+/// callable holds and its class as the called scope, or the class the
+/// callable named where it holds none. The closure is fake
+/// (`ZEND_ACC_FAKE_CLOSURE`), so `bind` may not move its scope.
+///
+/// ```php
+/// class A { static function who() { return static::class; } function me() { return $this; } }
+/// class B extends A {}
+/// var_dump((new ReflectionMethod('A', 'who'))->getClosure()(), (new ReflectionMethod('B', 'who'))->getClosure()());
+/// $b = new B; var_dump((new ReflectionMethod('A', 'me'))->getClosure($b)() === $b, (new ReflectionFunction('strlen'))->getClosure()('ab'));
+/// ```
+/// ```expect
+/// string(1) "A"
+/// string(1) "A"
+/// bool(true)
+/// int(2)
+/// ```
 pub fn closure_from_callable(req: &mut Request, callable: &Callable) -> Result<PhpObject, Thrown> {
-    Err(no_loop(req, &callable.name()))
+    crate::classes::fake_closure(req, callable)
 }
 
 /// Read a property through the class's `read_property` handler: a
@@ -991,54 +1443,99 @@ pub fn write_static_prop(
     req.set_static_property(class, name, Some(class), value, false)
 }
 
-/// `ReflectionClass::newLazyGhost`.
+/// `zend_object_make_lazy(NULL, class, ..., ZEND_LAZY_OBJECT_STRATEGY_GHOST
+/// | options)`, what `ReflectionClass::newLazyGhost` serves: a new
+/// object of `class` whose declared properties wait for `initializer`,
+/// served with the object the first time one of them is touched.
+/// `options` is php's user mask, which the caller has held to it;
+/// `SKIP_INITIALIZATION_ON_SERIALIZE` is the bit read here. An internal
+/// class other than `stdClass`, and one below such a class, is php's
+/// `Error`.
 pub fn new_lazy_ghost(
     req: &mut Request,
     class: ClassId,
     initializer: &Callable,
+    options: i64,
 ) -> Result<PhpObject, Thrown> {
-    let _ = initializer;
-    new_object(req, class)
+    req.make_lazy(None, class, initializer, Strategy::Ghost, options)
 }
 
-/// `ReflectionClass::newLazyProxy`.
+/// `zend_object_make_lazy` under `ZEND_LAZY_OBJECT_STRATEGY_PROXY`, what
+/// `ReflectionClass::newLazyProxy` serves: a new object of `class`
+/// whose accesses, once one is made, go to the instance `factory`
+/// returns.
 pub fn new_lazy_proxy(
     req: &mut Request,
     class: ClassId,
     factory: &Callable,
+    options: i64,
 ) -> Result<PhpObject, Thrown> {
-    let _ = factory;
-    new_object(req, class)
+    req.make_lazy(None, class, factory, Strategy::Proxy, options)
 }
 
-/// `ReflectionClass::resetAsLazyGhost`.
+/// `zend_object_make_lazy(obj, class, ...)` under the ghost strategy,
+/// what `ReflectionClass::resetAsLazyGhost` serves: `object`, an
+/// instance of `class`, reset, its destructor served first unless
+/// `options` carries `SKIP_DESTRUCTOR`, and left waiting for
+/// `initializer`. An object that is lazy and not initialised is the
+/// caller's to refuse.
 pub fn reset_as_lazy_ghost(
     req: &mut Request,
     object: &PhpObject,
+    class: ClassId,
     initializer: &Callable,
+    options: i64,
 ) -> Result<(), Thrown> {
-    let _ = (req, object, initializer);
-    Ok(())
+    req.make_lazy(Some(*object), class, initializer, Strategy::Ghost, options)
+        .map(|_| ())
 }
 
+/// [`reset_as_lazy_ghost`] under the proxy strategy,
 /// `ReflectionClass::resetAsLazyProxy`.
 pub fn reset_as_lazy_proxy(
     req: &mut Request,
     object: &PhpObject,
+    class: ClassId,
     factory: &Callable,
+    options: i64,
 ) -> Result<(), Thrown> {
-    let _ = (req, object, factory);
-    Ok(())
+    req.make_lazy(Some(*object), class, factory, Strategy::Proxy, options)
+        .map(|_| ())
 }
 
-/// `ReflectionClass::initializeLazyObject`: serve the initializer now.
-pub fn initialize_lazy(req: &mut Request, object: &PhpObject) -> Result<(), Thrown> {
-    let _ = (req, object);
-    Ok(())
+/// `zend_lazy_object_init`, what `ReflectionClass::initializeLazyObject`
+/// serves: a lazy object nothing has initialised is initialised now,
+/// and the answer is the object its properties are read on, the ghost
+/// itself or the proxy's instance, a view. An object that is not lazy is
+/// its own answer; what the initializer threw is the `Err`, the object
+/// left waiting.
+pub fn initialize_lazy(req: &mut Request, object: &PhpObject) -> Result<PhpObject, Thrown> {
+    req.lazy_init(*object)
 }
 
-/// `ReflectionClass::markLazyObjectAsInitialized`.
-pub fn skip_lazy_initialization(req: &mut Request, object: &PhpObject) -> Result<(), Thrown> {
-    let _ = (req, object);
-    Ok(())
+/// `zend_lazy_object_mark_as_initialized`, what
+/// `ReflectionClass::markLazyObjectAsInitialized` serves: each property
+/// still waiting takes its default and the initializer is never served.
+/// The answer is [`initialize_lazy`]'s, a view.
+pub fn mark_lazy_initialized(req: &mut Request, object: &PhpObject) -> Result<PhpObject, Thrown> {
+    if object.is_lazy() {
+        req.lazy_mark_initialized(*object)?;
+    }
+    req.lazy_init(*object)
+}
+
+/// `ReflectionProperty::skipLazyInitialization` under `None` and
+/// `ReflectionProperty::setRawValueWithoutLazyInitialization` under
+/// `Some`: the declared property `name`, on the object the initialised
+/// proxies lead to, stops waiting for the initializer, holding its
+/// default or `value` written past `__set` and hooks; the object stops
+/// being lazy once no property waits. `value` is the object's from here.
+/// The checks on the property php makes first are the caller's.
+pub fn skip_lazy_initialization(
+    req: &mut Request,
+    object: &PhpObject,
+    name: &[u8],
+    value: Option<Value>,
+) -> Result<(), Thrown> {
+    req.lazy_skip(*object, name, value)
 }
