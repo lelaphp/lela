@@ -8,7 +8,13 @@
 //! `zend_resolve_non_class_name` read the tables, so every name is
 //! resolved once, here, while the file compiles; the unit carries the
 //! resolved name and nothing reads an import after it. A `namespace`
-//! statement empties all four (`zend_reset_import_tables`).
+//! statement empties all four (`zend_reset_import_tables`), and so does
+//! the end of a bracketed one (`zend_end_namespace`), so each namespace
+//! block reads its own imports. Beside them, the namespace the file
+//! stands in and how its `namespace` statements are written,
+//! `FC(current_namespace)`, `FC(in_namespace)` and
+//! `FC(has_bracketed_namespaces)`, which `zend_compile_namespace` holds
+//! each new one to.
 
 use std::collections::HashMap;
 
@@ -18,7 +24,23 @@ use php_unit::Level;
 
 use super::Emit;
 use super::types::is_reserved_class_name;
+use super::walk::Namespace;
 use crate::CompileError;
+
+/// How the file's `namespace` statements are written so far, php's
+/// `FC(has_bracketed_namespaces)` and `FC(in_namespace)` as the one
+/// value `zend_compile_namespace` and `zend_verify_namespace` read.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(super) enum Namespacing {
+    /// No `namespace` statement yet: the global namespace.
+    #[default]
+    Global,
+    /// `namespace N;`, the form every later one must take.
+    Unbracketed,
+    /// `namespace N { … }` or `namespace { … }`, the form every later
+    /// one must take; `open` while the braces of one are compiling.
+    Bracketed { open: bool },
+}
 
 /// What a `use` imports, php's `ZEND_SYMBOL_CLASS`, `ZEND_SYMBOL_FUNCTION`
 /// and `ZEND_SYMBOL_CONST`: which table the name goes in, whether the
@@ -151,6 +173,154 @@ fn concat(first: &[u8], second: &[u8]) -> Vec<u8> {
 }
 
 impl Emit<'_> {
+    /// `zend_compile_namespace` (`Z/Zend/zend_compile.c:9741`): the form
+    /// held to the file's earlier `namespace` statements, a first one
+    /// held to `zend_is_first_statement`, the name to `namespace`, then
+    /// the name is the namespace of what follows and the import tables
+    /// start empty. No opline. A bracketed one compiles its braces as
+    /// top statements, which is where a class or a function binds at
+    /// compile time, and `zend_end_namespace` after them leaves the file
+    /// in no namespace with the imports empty again, so each block reads
+    /// its own `use` statements and `namespace { … }` is the global one.
+    ///
+    /// ```php
+    /// namespace A {
+    ///     use ArrayObject as AO;
+    ///     function f() { return __FUNCTION__; }
+    ///     echo f(), ' ', AO::class, "\n";
+    /// }
+    /// namespace {
+    ///     echo __NAMESPACE__, '|', A\f(), ' ', AO::class, "\n";
+    /// }
+    /// ```
+    /// ```expect
+    /// A\f ArrayObject
+    /// |A\f AO
+    /// ```
+    ///
+    /// The refusals are php's `E_COMPILE_ERROR`s, in the order
+    /// `zend_compile_namespace` makes them:
+    ///
+    /// ```php
+    /// namespace A;
+    /// namespace B {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot mix bracketed namespace declarations with unbracketed namespace declarations in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// namespace A {
+    ///     namespace B {}
+    /// }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Namespace declarations cannot be nested in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// echo 1;
+    /// namespace B {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Namespace declaration statement has to be the very first statement or after any declare call in the script in %s on line 3
+    /// ```
+    ///
+    /// `namespace` is no namespace's name, whatever its case, since
+    /// `namespace\X` is the relative name:
+    ///
+    /// ```php
+    /// namespace NAMEspace;
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use 'NAMEspace' as namespace name in %s on line 2
+    /// ```
+    ///
+    /// The braces are not the file's own statement list, which is where
+    /// `zend_is_first_statement` looks for a `strict_types`:
+    ///
+    /// ```php
+    /// namespace A {
+    ///     declare(strict_types=1);
+    /// }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: strict_types declaration must be the very first statement in the script in %s on line 3
+    /// ```
+    pub(super) fn namespace(&mut self, id: NodeId<tree::NamespaceDef>) -> Result<(), CompileError> {
+        let declared = self.walk_namespace(id)?;
+        let bracketed = matches!(declared, Namespace::Bracketed { .. });
+        match (self.namespacing, bracketed) {
+            (Namespacing::Unbracketed, true) | (Namespacing::Bracketed { .. }, false) => {
+                return Err(self.compile_error(
+                    "Cannot mix bracketed namespace declarations with unbracketed namespace declarations",
+                ));
+            }
+            (Namespacing::Bracketed { open: true }, true) => {
+                return Err(self.compile_error("Namespace declarations cannot be nested"));
+            }
+            _ => {}
+        }
+        // A first one of either form: `zend_is_first_statement` with
+        // `allow_nop`, which steps over a `declare` and an empty
+        // statement and over nothing else.
+        if self.namespacing == Namespacing::Global && self.statements_seen > 0 {
+            return Err(self.compile_error(
+                "Namespace declaration statement has to be the very first statement or after any declare call in the script",
+            ));
+        }
+        let (name, body) = match declared {
+            Namespace::Unbracketed(name) => (Some(name), None),
+            Namespace::Bracketed { name, body } => (name, Some(body)),
+        };
+        if let Some(name) = &name
+            && name.eq_ignore_ascii_case(b"namespace")
+        {
+            return Err(self.compile_error(format!(
+                "Cannot use '{}' as namespace name",
+                String::from_utf8_lossy(name)
+            )));
+        }
+        self.namespace = name;
+        self.imports.reset();
+        // php's `zend_is_first_statement` steps over a `ZEND_AST_DECLARE`
+        // before the node it is asked about and over nothing else, so a
+        // `namespace` statement is one a later `strict_types` finds.
+        self.statements_seen = self.statements_seen.saturating_add(1);
+        let Some(body) = body else {
+            self.namespacing = Namespacing::Unbracketed;
+            return Ok(());
+        };
+        self.namespacing = Namespacing::Bracketed { open: true };
+        self.top_statements(&body)?;
+        // `zend_end_namespace`.
+        self.namespacing = Namespacing::Bracketed { open: false };
+        self.imports.reset();
+        self.namespace = None;
+        Ok(())
+    }
+
+    /// `zend_verify_namespace` (`Z/Zend/zend_compile.c:2166`), after
+    /// every top statement but a `namespace` and a `__halt_compiler`:
+    /// once the file's namespaces are bracketed, a statement outside
+    /// them is php's `E_COMPILE_ERROR`, at the line the statement left.
+    ///
+    /// ```php
+    /// namespace A {}
+    /// if (true) {
+    ///     echo 1;
+    /// }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: No code may exist outside of namespace {} in %s on line 4
+    /// ```
+    pub(super) fn verify_namespace(&self) -> Result<(), CompileError> {
+        if self.namespacing == (Namespacing::Bracketed { open: false }) {
+            return Err(self.compile_error("No code may exist outside of namespace {}"));
+        }
+        Ok(())
+    }
+
     /// `zend_compile_use` and `zend_compile_group_use` over one `use`
     /// statement: each name imported in written order under the kind
     /// the statement's keyword, or a group item's own, says. php's

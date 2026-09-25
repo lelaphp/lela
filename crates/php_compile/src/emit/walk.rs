@@ -154,7 +154,61 @@ impl Emit<'_> {
             )));
         }
         let stmts = &self.parsed.tree[file].stmts;
-        self.statements(stmts)
+        self.depth = self.depth.saturating_add(1);
+        let compiled = self.top_statements(stmts);
+        self.depth = self.depth.saturating_sub(1);
+        compiled
+    }
+
+    /// `zend_compile_top_stmt` over a list of top statements, the
+    /// file's own or a bracketed namespace's: each at its own line, a
+    /// function or a class declaration leaving the line at its closing
+    /// brace (`CG(zend_lineno) = decl->end_lineno`), and after each but
+    /// a `namespace` and a `__halt_compiler` php's
+    /// `zend_verify_namespace`. An empty statement is php's `NULL`
+    /// child, which the walk returns from before either.
+    pub(super) fn top_statements(&mut self, stmts: &[Stmt]) -> Result<(), CompileError> {
+        for stmt in stmts {
+            if matches!(stmt, Stmt::EmptyStmt(_)) {
+                continue;
+            }
+            self.line = stmt.line(self.parsed);
+            self.statement(*stmt)?;
+            match stmt {
+                Stmt::NamespaceDef(_) | Stmt::HaltCompilerStmt(_) => continue,
+                Stmt::FunctionDecl(_)
+                | Stmt::ClassDecl(_)
+                | Stmt::InterfaceDecl(_)
+                | Stmt::TraitDecl(_)
+                | Stmt::EnumDecl(_) => self.line = self.end_line(stmt.range(self.parsed)),
+                _ => {}
+            }
+            self.verify_namespace()?;
+        }
+        Ok(())
+    }
+
+    /// A `namespace` statement as `zend_compile_namespace` reads it: the
+    /// name in `child[0]`, none for `namespace { … }`, and the braces'
+    /// statement list in `child[1]`, none for the `;` form.
+    pub(super) fn walk_namespace(
+        &self,
+        id: NodeId<tree::NamespaceDef>,
+    ) -> Result<Namespace, CompileError> {
+        let node = &self.parsed.tree[id];
+        let name = node.name.map(|name| self.text(name).to_vec());
+        match (name, node.body) {
+            // What only a statement the parser refused leaves.
+            (Some(name), _) if name.starts_with(b"\\") => {
+                Err(unread(node.line(), "a namespace declaration"))
+            }
+            (None, None) => Err(unread(node.line(), "a namespace declaration")),
+            (name, Some(body)) => Ok(Namespace::Bracketed {
+                name,
+                body: self.parsed.tree[body].stmts.to_vec(),
+            }),
+            (Some(name), None) => Ok(Namespace::Unbracketed(name)),
+        }
     }
 
     /// `InternalError`: the tree is not what the grammar promised
@@ -981,6 +1035,22 @@ pub(super) fn refused(line: u32, message: impl Into<String>) -> CompileError {
 // members and parameters under them into, each named after the tree
 // node it stands for and the `zend_ast` kind that node is, with the
 // expressions under it the tree's own nodes (design §4.9, #595).
+
+/// One `namespace` statement, php's `ZEND_AST_NAMESPACE`, in the form
+/// `zend_compile_namespace` tells apart by whether `child[1]` stands.
+#[derive(Debug, PartialEq)]
+pub(super) enum Namespace {
+    /// `namespace N;`: what follows is in `N`, up to the next one.
+    Unbracketed(Vec<u8>),
+    /// `namespace N { … }`, and `namespace { … }`, whose name is none
+    /// and whose statements are the global namespace's: the braces'
+    /// statements are top statements, compiled as the file's own are.
+    Bracketed {
+        name: Option<Vec<u8>>,
+        body: Vec<Stmt>,
+    },
+}
+
 /// One class declaration, php's `zend_ast_decl` for a class: the name as
 /// written, the doc comment taken before its `{` (`class_declaration_statement`
 /// reduces `backup_doc_comment` after `implements_list`), and its

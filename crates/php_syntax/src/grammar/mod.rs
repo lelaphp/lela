@@ -1217,6 +1217,32 @@ fn try_stmt(p: &mut Parser<'_>) {
 // Namespaces, use, declare
 // ---------------------------------------------------------------------------
 
+/// `namespace N;`, `namespace N { … }` or `namespace { … }`. Each of
+/// php's three rules runs `RESET_DOC_COMMENT()`: the bracketed ones in
+/// a mid-rule action that needs the `{` as its lookahead, the other
+/// after its `;` with none, so the take stands before the `{` and
+/// before the `;`, and a doc comment written before the statement
+/// reaches no declaration after it:
+///
+/// ```php
+/// /** D */
+/// namespace A {
+///     class X {}
+///     var_dump((new \ReflectionClass(X::class))->getDocComment());
+/// }
+/// ```
+/// ```expect
+/// bool(false)
+/// ```
+///
+/// ```php
+/// /** D */
+/// namespace A; /** E */ class X {}
+/// var_dump((new \ReflectionClass(X::class))->getDocComment());
+/// ```
+/// ```expect
+/// string(8) "/** E */"
+/// ```
 fn namespace_def(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(K::NAMESPACE_KW);
@@ -1242,6 +1268,9 @@ fn namespace_def(p: &mut Parser<'_>) {
         let d = p.unexpected_here_expecting("\"{\"");
         p.error(d);
     }
+    // `RESET_DOC_COMMENT()`: the node takes what is pending and keeps
+    // nothing of it (the docs above).
+    p.doc_comment();
     if p.peek_at(K::L_CURLY) {
         block_of(p, true);
     } else {

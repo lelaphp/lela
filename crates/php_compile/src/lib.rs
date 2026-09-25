@@ -4885,7 +4885,8 @@ mod tests {
         let not_yet = |message: &str, line| Some((Level::Parse, message.to_string(), line));
         assert_eq!(
             refused(b"<?php\nclass M {}\nclass m {}"),
-            not_yet("a class declared twice this compiler cannot read yet", 3)
+            None,
+            "a second declaration of a name is the DECLARE_CLASS that refuses it as the program serves"
         );
         assert_eq!(
             refused(b"<?php\nclass M extends N {} class N {}"),

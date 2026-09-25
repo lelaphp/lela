@@ -114,7 +114,7 @@ use php_syntax::magic_const_name;
 use crate::{CompileError, Options, SourceKind, StackLimit};
 use args::{Args, Callee, Plan};
 use attributes::InternalAttribute;
-use imports::{Imports, Symbol};
+use imports::{Imports, Namespacing, Symbol};
 use target::{Source, Target};
 use walk::{Class, Closure, Function, Method, Property};
 
@@ -339,6 +339,9 @@ pub(crate) struct Emit<'a> {
     /// `FC(current_namespace)`: the namespace a `namespace` statement
     /// put what follows it in, and none before one.
     namespace: Option<Vec<u8>>,
+    /// How the file's `namespace` statements are written so far, and
+    /// whether the braces of one are open.
+    namespacing: Namespacing,
     /// `FC(imports)`, `FC(imports_function)`, `FC(imports_const)` and
     /// `FC(seen_symbols)`: what the `use` statements of the current
     /// namespace imported and what the file declared in it.
@@ -372,9 +375,10 @@ pub(crate) struct Emit<'a> {
     /// was written `function &f()`, which makes every `return` in it a
     /// `RETURN_BY_REF`.
     returns_by_ref: bool,
-    /// How many statement lists stand open: one inside the file's own,
-    /// which is where `zend_compile_top_stmt` binds a function at compile
-    /// time; more inside a block, a loop or a body.
+    /// How many statement lists stand open: one inside the file's own
+    /// or a bracketed namespace's, whose statements are both php's top
+    /// statements and where `zend_compile_top_stmt` binds a function at
+    /// compile time; more inside a block, a loop or a body.
     depth: u32,
     /// `CG(context).active_property_info_name`: the property whose
     /// default is being compiled, which `__PROPERTY__` folds to.
@@ -426,6 +430,10 @@ pub(crate) struct Emit<'a> {
     /// Which of [`Emit::classes`] were bound early, in the order bound:
     /// the file's classes `CG(class_table)` holds while it compiles.
     bound: Vec<usize>,
+    /// The rest of [`Emit::classes`], each under the runtime definition
+    /// key its `DECLARE_CLASS` carries, [`Unit::runtime_keys`], in the
+    /// order the keys were made.
+    runtime_keys: Vec<(Name, u32)>,
     /// The functions the file declares with their bodies,
     /// [`Unit::functions`]: `CG(function_table)` past the natives, each
     /// entry landing once its body has compiled, which is when php's
@@ -520,6 +528,7 @@ enum Fold {
 /// `{closure:…}()` of its own, and `ZEND_ACC_STATIC`, which a closure
 /// written `static function` or `static fn` carries and
 /// `ZEND_DECLARE_LAMBDA_FUNCTION` reads to leave `$this` unbound.
+#[allow(clippy::struct_excessive_bools)] // php's ZEND_ACC_* bits, one field each, and whether the op array has a scope
 #[derive(Clone, Copy, Default)]
 struct FnFlags {
     closure: bool,
@@ -527,6 +536,10 @@ struct FnFlags {
     /// `ZEND_ACC_GENERATOR`, which a `yield` in the body sets and every
     /// `return` reads.
     generator: bool,
+    /// Beside the bits, `op_array->scope` as the compiler leaves it: set
+    /// on a method's op array by `zend_begin_method_decl` and on no
+    /// other, a closure's included, which `__METHOD__` reads.
+    method: bool,
 }
 
 /// One entry of `CG(loop_var_stack)` a `finally` puts there
@@ -965,6 +978,7 @@ pub(crate) fn unit(
         known_classes: &options.classes,
         frameless: frameless_table(&options.functions),
         namespace: None,
+        namespacing: Namespacing::Global,
         imports: Imports::default(),
         active_class: None,
         active_parent: None,
@@ -992,6 +1006,7 @@ pub(crate) fn unit(
         diagnostics: Vec::new(),
         classes: Vec::new(),
         bound: Vec::new(),
+        runtime_keys: Vec::new(),
         functions_declared: Vec::new(),
         dynamic: Vec::new(),
         dynamic_func_defs: Vec::new(),
@@ -1041,6 +1056,7 @@ pub(crate) fn unit(
         methods: emit.methods,
         diagnostics: emit.diagnostics,
         classes: emit.classes,
+        runtime_keys: emit.runtime_keys,
         ..Unit::default()
     })
 }
@@ -2653,7 +2669,19 @@ impl Emit<'_> {
             op2: offset,
             ..Opline::default()
         });
-        let declared = self.body(function, name, None, false)?;
+        // "Do not leak the class scope into free standing functions,
+        // even if they are dynamically defined inside a class method"
+        // (`zend_compile_func_decl`): `CG(active_class_entry) = NULL`
+        // for the body, so `__CLASS__` is empty there and a class it
+        // declares is no nested one.
+        let class = self.active_class.take();
+        let parent = self.active_parent.take();
+        let constants = std::mem::take(&mut self.active_constants);
+        let declared = self.body(function, name, None, false);
+        self.active_class = class;
+        self.active_parent = parent;
+        self.active_constants = constants;
+        let declared = declared?;
         if let Some(slot) = self.dynamic.get_mut(at as usize) {
             *slot = Some(declared);
         }
@@ -2711,6 +2739,7 @@ impl Emit<'_> {
             closure: true,
             is_static: closure.is_static,
             generator: false,
+            method: false,
         };
         let saved = self.begin_body(&name, this_in_scope, flags);
         let outcome =
@@ -3139,7 +3168,11 @@ impl Emit<'_> {
         scope: Option<&[u8]>,
         is_static: bool,
     ) -> Result<(FunctionDecl, OpArray), CompileError> {
-        let saved = self.begin_body(name, scope.is_some() && !is_static, FnFlags::default());
+        let flags = FnFlags {
+            method: scope.is_some(),
+            ..FnFlags::default()
+        };
+        let saved = self.begin_body(name, scope.is_some() && !is_static, flags);
         let outcome = self.parameters_and_body(function, name, scope, &[], None);
         self.end_body(saved);
         outcome
@@ -3733,35 +3766,88 @@ impl Emit<'_> {
         })
     }
 
-    /// `zend_compile_class_decl` for a top-level class: the declaration
-    /// goes into the unit's classes, and whether an opline is emitted
-    /// beside it is php's early-binding question. php binds a class at
-    /// compile time (`zend_hash_add_ptr(CG(class_table), …)` under
-    /// `toplevel`) when it implements no interface and either has no
-    /// parent or names one `CG(class_table)` already holds, which
-    /// `zend_try_early_bind` then links; the oracle's dump of
-    /// `class M {} echo 1;` is the `ECHO` and the `RETURN` alone, and so
-    /// is `class P {} class C extends P {} echo 1;`. Everything else
-    /// carries a `ZEND_DECLARE_CLASS` opline where it was written, which
-    /// binds the class as the program serves
-    /// ([`Self::declare_class`]): `class C extends P {} class P {}`
-    /// dumps `DECLARE_CLASS string("c") string("p")` and works, because
-    /// `P` went into the table while the file compiled. The class's name is
+    /// `zend_compile_class_decl`: the declaration goes into the unit's
+    /// classes, and whether an opline is emitted beside it is php's
+    /// early-binding question. php binds a top-level class at compile
+    /// time (`zend_hash_add_ptr(CG(class_table), …)` under `toplevel`)
+    /// when it implements no interface, uses no trait, its name is not
+    /// yet in the table and either it has no parent or names one
+    /// `CG(class_table)` already holds, which `zend_try_early_bind` then
+    /// links; the oracle's dump of `class M {} echo 1;` is the `ECHO`
+    /// and the `RETURN` alone, and so is `class P {} class C extends P {}
+    /// echo 1;`. Everything else carries a `ZEND_DECLARE_CLASS` opline,
+    /// or the `ZEND_DECLARE_CLASS_DELAYED` opcache emits for a top-level
+    /// one, where it was written, in whatever op array it stands in,
+    /// which binds the class as the program serves ([`Self::declare_class`]):
+    /// `class C extends P {} class P {}` works because `P` went into the
+    /// table while the file compiled, a class written inside an `if`, a
+    /// loop or a function body is declared only where that statement
+    /// runs, and a second declaration of a name the file already bound
+    /// is php's redeclaration fatal when its opline runs. The class's name is
     /// `zend_prefix_with_ns` over the written one: `A\M` for `class M`
     /// under `namespace A;`, the name written where no namespace stands,
     /// so a fetch [`Self::class_name`] resolves in the same namespace
-    /// names it, `__CLASS__` folds to it and php's fatals name it. The
-    /// name a second declaration of the same file repeats fails that
-    /// bind in php, which then emits a `DECLARE_CLASS` for the runtime
-    /// fatal; that opline is not emitted here, so the repeat is refused
-    /// as not yet read. A class declared inside a block or a body is
-    /// refused as [`Self::function_decl`] refuses a function there: php
-    /// emits its `DECLARE_CLASS` in whatever op array it stands in, and
-    /// the engine reads only the main one's. The members are
+    /// names it, `__CLASS__` folds to it and php's fatals name it. A
+    /// class written while another's body compiles, in a method or a
+    /// closure of it, is php's first refusal. The members are
     /// `zend_compile_prop_decl` and `zend_compile_class_const_decl`: a
     /// name declared twice is php's fatal in php's words, at the
     /// declarator's line, and a default or a value is kept as the
     /// constant expression it was written as (design §4.7).
+    ///
+    /// ```php
+    /// class C {
+    ///     function f() {
+    ///         class D {}
+    ///     }
+    /// }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Class declarations may not be nested in %s on line 4
+    /// ```
+    ///
+    /// A function written in a method takes no class with it, so a class
+    /// it declares is not nested:
+    ///
+    /// ```php
+    /// class C {
+    ///     function m() {
+    ///         function g() { class D { const K = 1; } }
+    ///         g();
+    ///         return D::K;
+    ///     }
+    /// }
+    /// var_dump((new C)->m());
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// ```
+    ///
+    /// A class written in a block exists once its statement is executed,
+    /// and not before; which of two declarations of one name is bound is
+    /// the arm executed:
+    ///
+    /// ```php
+    /// var_dump(class_exists('C', false));
+    /// if (PHP_INT_SIZE > 4) {
+    ///     class C { const K = 'wide'; }
+    /// } else {
+    ///     class C { const K = 'narrow'; }
+    /// }
+    /// var_dump(C::K);
+    /// function f() {
+    ///     class G extends C {}
+    ///     return G::K;
+    /// }
+    /// var_dump(class_exists('G', false), f(), get_parent_class(new G));
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// string(4) "wide"
+    /// bool(false)
+    /// string(4) "wide"
+    /// string(1) "C"
+    /// ```
     ///
     /// A parent the table already holds is the early bind, which links
     /// the class before anything runs:
@@ -3790,19 +3876,13 @@ impl Emit<'_> {
     /// bool(true)
     /// ```
     fn class(&mut self, class: &Class) -> Result<(), CompileError> {
-        if self.depth != 1 {
-            return Err(self
-                .fatal("a class declared inside a block or a body this compiler cannot read yet"));
+        if self.active_class.is_some() {
+            return Err(self.compile_error("Class declarations may not be nested"));
         }
+        // `toplevel`: a statement of the file's own list or a bracketed
+        // namespace's, which `zend_compile_top_stmt` hands over.
+        let toplevel = self.depth == 1;
         let name = self.declare_symbol(Symbol::Class, &class.name)?;
-        let wanted = name.to_ascii_lowercase();
-        if self
-            .classes
-            .iter()
-            .any(|declared| declared.name.0.to_ascii_lowercase() == wanted)
-        {
-            return Err(self.fatal("a class declared twice this compiler cannot read yet"));
-        }
         let line = self.line;
         let parent = match &class.parent {
             Some(written) => Some(self.inherited_name(written, "class name")?),
@@ -3891,11 +3971,16 @@ impl Emit<'_> {
         // so an interface `add_stringable_interface` gave the class
         // counts, and an enum, which `zend_enum_add_interfaces` gave
         // `UnitEnum`, is never bound early; nor is a class that uses a
-        // trait, whose methods only the link copies in.
-        let early = self
-            .classes
-            .get(at)
-            .is_some_and(|decl| decl.interfaces.is_empty() && decl.traits.is_empty())
+        // trait, whose methods only the link copies in. A name the table
+        // already holds fails `zend_hash_add_ptr` before any link is
+        // tried (`register_early_bound_ce`), and the opline raises the
+        // redeclaration when it runs.
+        let early = toplevel
+            && self
+                .classes
+                .get(at)
+                .is_some_and(|decl| decl.interfaces.is_empty() && decl.traits.is_empty())
+            && self.bound_class(&name).is_none()
             && match &parent {
                 None => true,
                 Some(parent) => self.bound_class(parent).is_some(),
@@ -3904,7 +3989,12 @@ impl Emit<'_> {
             self.bound.push(at);
             return Ok(());
         }
-        self.declare_class(&name, parent.as_deref())
+        let delayed = toplevel
+            && self
+                .classes
+                .get(at)
+                .is_some_and(|decl| decl.interfaces.is_empty() && decl.traits.is_empty());
+        self.declare_class(at, &name, parent.as_deref(), line, delayed)
     }
 
     /// The name of `CG(active_class_entry)`, and none outside a class
@@ -4948,28 +5038,77 @@ impl Emit<'_> {
     }
 
     /// `ZEND_DECLARE_CLASS`, what php emits for a class it did not early
-    /// bind: the class's lowered name in `op1` and, where it has a
-    /// parent, the parent's lowered name in `op2`, which is what
-    /// `zend_bind_class` looks both up by. php adds the runtime
-    /// definition key to the constant table after `op1` and keys
-    /// `CG(class_table)` by it; the unit carries one declaration per
-    /// class under its own name, so the key is not modelled.
-    fn declare_class(&mut self, name: &[u8], parent: Option<&[u8]>) -> Result<(), CompileError> {
-        let lowered = self.string(&name.to_ascii_lowercase())?;
-        let op1 = self.literal(lowered);
-        let (op2_type, op2) = match parent {
+    /// bind, the class at `at` of [`Emit::classes`]: the parent's
+    /// lowered name in `op2` where it has one, the class's lowered name
+    /// in `op1`, and in the constant after it the runtime definition key
+    /// `zend_build_runtime_definition_key` makes (`Z/Zend/zend_compile.c:175`),
+    /// `\0`, the lowered name, the file, `:`, the declaration's first
+    /// line, `$` and the file's count of keys so far in hex, which is
+    /// what the class is filed under ([`Unit::runtime_keys`]) and what
+    /// `do_bind_class` finds it by, so that no two declarations of one
+    /// name are one class. The constants are added in php's order, the
+    /// parent's first.
+    ///
+    /// A top-level class with no interface and no trait is one php's
+    /// opcache delays (`ZEND_COMPILE_DELAYED_BINDING`, set by
+    /// `persistent_compile_file`, the regime design §6.1 dumps under):
+    /// its opline is `ZEND_DECLARE_CLASS_DELAYED`, `op2` the empty string
+    /// where no parent is written, with a cache slot in
+    /// `extended_value`, and the unit's load tries the early bind
+    /// again against the classes declared by then
+    /// ([`Unit::runtime_keys`]).
+    fn declare_class(
+        &mut self,
+        at: usize,
+        name: &[u8],
+        parent: Option<&[u8]>,
+        line: u32,
+        delayed: bool,
+    ) -> Result<(), CompileError> {
+        let (mut op2_type, mut op2) = match parent {
             Some(parent) => {
                 let lowered = self.string(&parent.to_ascii_lowercase())?;
                 (OperandKind::Const, self.literal(lowered))
             }
             None => (OperandKind::Unused, 0),
         };
+        let lowered = name.to_ascii_lowercase();
+        let mut key = Vec::with_capacity(lowered.len() + self.filename.0.len() + 16);
+        key.push(0);
+        key.extend_from_slice(&lowered);
+        key.extend_from_slice(&self.filename.0);
+        key.extend_from_slice(format!(":{line}${:x}", self.runtime_keys.len()).as_bytes());
+        let lowered = self.string(&lowered)?;
+        let op1 = self.literal(lowered);
+        let filed = self.string(&key)?;
+        self.literal(filed);
+        self.runtime_keys.push((
+            Name(key.into_boxed_slice()),
+            u32::try_from(at).unwrap_or(u32::MAX),
+        ));
+        if !delayed {
+            self.push(Opline {
+                opcode: Opcode::DeclareClass,
+                op1_type: OperandKind::Const,
+                op1,
+                op2_type,
+                op2,
+                ..Opline::default()
+            });
+            return Ok(());
+        }
+        if parent.is_none() {
+            let empty = self.string(b"")?;
+            (op2_type, op2) = (OperandKind::Const, self.literal(empty));
+        }
+        let slot = self.cache_slot();
         self.push(Opline {
-            opcode: Opcode::DeclareClass,
+            opcode: Opcode::DeclareClassDelayed,
             op1_type: OperandKind::Const,
             op1,
             op2_type,
             op2,
+            extended_value: slot,
             ..Opline::default()
         });
         Ok(())
@@ -5255,52 +5394,6 @@ impl Emit<'_> {
             Err(refused) if refused.level == Level::CompileError => Err(refused),
             Err(_) => Err(self.compile_error("Constant expression contains invalid operations")),
         }
-    }
-
-    /// `zend_compile_namespace` for the unbraced form: the name is the
-    /// namespace of what follows, and a first one after any statement
-    /// but an empty one is php's compile error (`zend_is_first_statement`);
-    /// a later one moves the namespace, as php's does. No opline.
-    ///
-    /// `namespace` is no namespace's name, whatever its case, since
-    /// `namespace\X` is the relative name:
-    ///
-    /// ```php
-    /// namespace NAMEspace;
-    /// ```
-    /// ```expect exit=255
-    /// Fatal error: Cannot use 'NAMEspace' as namespace name in %s on line 2
-    /// ```
-    fn namespace(&mut self, id: NodeId<tree::NamespaceDef>) -> Result<(), CompileError> {
-        let node = &self.parsed.tree[id];
-        let Some(name) = node.name else {
-            return Err(self.unread("a namespace declaration naming nothing"));
-        };
-        if node.body.is_some() {
-            return Err(self.unread("a braced namespace declaration"));
-        }
-        let name = self.text(name);
-        if name.starts_with(b"\\") {
-            return Err(self.unread("a namespace declaration"));
-        }
-        if self.namespace.is_none() && self.statements_seen > 0 {
-            return Err(self.compile_error(
-                "Namespace declaration statement has to be the very first statement or after any declare call in the script",
-            ));
-        }
-        if name.eq_ignore_ascii_case(b"namespace") {
-            return Err(self.compile_error(format!(
-                "Cannot use '{}' as namespace name",
-                String::from_utf8_lossy(name)
-            )));
-        }
-        self.namespace = Some(name.to_vec());
-        self.imports.reset();
-        // php's `zend_is_first_statement` steps over a `ZEND_AST_DECLARE`
-        // before the node it is asked about and over nothing else, so a
-        // `namespace` statement is one a later `strict_types` finds.
-        self.statements_seen = self.statements_seen.saturating_add(1);
-        Ok(())
     }
 
     /// `zend_compile_declare` (`Z/Zend/zend_compile.c:6982`): each
@@ -12945,9 +13038,21 @@ impl Emit<'_> {
                 })
                 .map(|m| (Known::Native, Callee::of(&m.function.parameters)));
         }
+        // `zend_hash_find_ptr(CG(class_table), lcname)`, else
+        // `CG(active_class_entry)`: a class of the file bound early, or
+        // the one whose body is compiling, and never one a
+        // `DECLARE_CLASS` binds, which the table holds under its key.
+        let active = self.active_class.as_ref().and_then(|active| {
+            self.classes
+                .iter()
+                .rev()
+                .find(|decl| *decl.name.0 == *active.name)
+        });
         let decl = self
-            .classes
+            .bound
             .iter()
+            .filter_map(|at| self.classes.get(*at))
+            .chain(active)
             .find(|decl| decl.name.0.to_ascii_lowercase() == class)?;
         // The methods `zend_enum_register_funcs` gives an enum are the
         // engine's, added at the link: php's compile-time table has none
@@ -13152,6 +13257,29 @@ impl Emit<'_> {
     /// ```expect exit=0
     /// M::p||
     /// ```
+    ///
+    /// and so it is where the class is declared inside a function, whose
+    /// op array the constant is compiled in. A closure's scope and a
+    /// function's written inside a method are none while the file
+    /// compiles, so `__METHOD__` is the op array's own name in both, and
+    /// the function has no class at all (`CG(active_class_entry) =
+    /// NULL` for a function declaration):
+    ///
+    /// ```php
+    /// function h() { class B { const X = __METHOD__, Y = __FUNCTION__; } }
+    /// h();
+    /// class C {
+    ///     function m() {
+    ///         $f = function () { return __METHOD__; };
+    ///         function g() { return __CLASS__ . '|' . __METHOD__; }
+    ///         return $f() . ' ' . g() . ' ' . __METHOD__;
+    ///     }
+    /// }
+    /// echo '[', B::X, '] ', B::Y, ' ', (new C)->m(), "\n";
+    /// ```
+    /// ```expect
+    /// [] h {closure:C::m():6} |g C::m
+    /// ```
     fn magic_const(&self, which: Magic, line: u32) -> Folded {
         let text = match which {
             Magic::Line => return Folded::Line(i64::from(line)),
@@ -13172,16 +13300,20 @@ impl Emit<'_> {
             // has no `function_name`, and a member's constant expression
             // stands directly inside the class.
             Magic::Function => self.active_function.clone().unwrap_or_default(),
-            // `__METHOD__` is `Class::method` inside a method and the
-            // function's name inside a function (`zend_compile_const`).
+            // `__METHOD__` is `Class::method` inside a method, the op
+            // array's own name inside a function or a closure, whose
+            // scope the compiler leaves unset, and nothing directly
+            // inside a class body, whatever op array the class stands in
+            // (`zend_try_ct_eval_magic_const`'s `T_METHOD_C`).
             Magic::Method => match (self.active_name(), &self.active_function) {
-                (Some(class), Some(function)) => {
+                (Some(class), Some(function)) if self.fn_flags.method => {
                     let mut text = class;
                     text.extend_from_slice(b"::");
                     text.extend_from_slice(function);
                     text
                 }
-                (None, Some(function)) => function.clone(),
+                (Some(_), Some(_)) if !self.fn_flags.closure => Vec::new(),
+                (_, Some(function)) => function.clone(),
                 (_, None) => Vec::new(),
             },
             // The trait's own name inside one, and none elsewhere.
@@ -14637,6 +14769,7 @@ mod tests {
             known_classes: &options.classes,
             frameless: Vec::new(),
             namespace: Some(b"A".to_vec()),
+            namespacing: Namespacing::Unbracketed,
             imports: Imports::default(),
             active_class: None,
             active_parent: None,
@@ -14666,6 +14799,7 @@ mod tests {
             diagnostics: Vec::new(),
             classes: Vec::new(),
             bound: Vec::new(),
+            runtime_keys: Vec::new(),
             functions_declared: Vec::new(),
             dynamic: Vec::new(),
             dynamic_func_defs: Vec::new(),
