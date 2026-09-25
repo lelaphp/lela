@@ -489,6 +489,43 @@ impl Callable {
         self.value
     }
 
+    /// `fci_cache.called_scope = called_scope` where
+    /// `instanceof_function(called_scope, fci_cache.calling_scope)`: a
+    /// method the callable resolved to is served with `called` as its
+    /// called scope where `called` is its class or a class that extends it,
+    /// the called scope `forward_static_call` forwards; a
+    /// function, a closure and a method of an unrelated class are
+    /// served as they were resolved. The value and the receiver are the
+    /// same, so the owners are the callable's.
+    ///
+    /// ```php
+    /// class A { public static function who() { return static::class; } }
+    /// class B extends A { public static function test() { return [forward_static_call(['A', 'who']), call_user_func(['A', 'who']), forward_static_call('strtoupper', 'x')]; } }
+    /// class C { public static function test() { return forward_static_call(['A', 'who']); } }
+    /// var_dump(B::test(), C::test());
+    /// ```
+    /// ```expect
+    /// array(3) {
+    ///   [0]=>
+    ///   string(1) "B"
+    ///   [1]=>
+    ///   string(1) "A"
+    ///   [2]=>
+    ///   string(1) "X"
+    /// }
+    /// string(1) "A"
+    /// ```
+    #[must_use]
+    pub fn with_called_scope(&self, req: &Request, called: ClassId) -> Callable {
+        let mut forwarded = self.clone();
+        if let Target::Method { scope, .. } = &mut forwarded.target
+            && req.instance_of(called, *scope)
+        {
+            *scope = called;
+        }
+        forwarded
+    }
+
     /// `zend_fcc_addref` (`Z/Zend/zend_API.h:773`): the owners a list
     /// that keeps the callable past the frame it was read off takes, its
     /// value's and, `GC_ADDREF(fcc->object)`, the receiver's it resolved

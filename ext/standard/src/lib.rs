@@ -123,7 +123,7 @@ pub use filestat::{Fs, php_stat};
 pub use scanf::php_sscanf_internal;
 
 use php_ext::abi::{Callable, Dependency, DependencyKind, Extension, ExtensionBuilder};
-use php_ext::call::{call_array, call_named, fetch_constant};
+use php_ext::call::{call, call_array, call_named, fetch_constant};
 use php_ext::coerce::{coerce_param, is_type};
 use php_ext::decl::{ConstDecl, ConstExpr, FunctionDecl, Name, Parameter, ParameterDefault, Type};
 use php_ext::raising::{
@@ -412,6 +412,31 @@ fn basic_natives() -> Vec<(FunctionDecl, output::Entry)> {
                 Type::Mixed,
             ),
             call_user_func_array,
+        ),
+        (
+            declared(
+                b"forward_static_call",
+                &[
+                    parameter(b"callback", Type::Callable),
+                    Parameter {
+                        variadic: true,
+                        ..parameter(b"args", Type::Mixed)
+                    },
+                ],
+                Type::Mixed,
+            ),
+            forward_static_call,
+        ),
+        (
+            declared(
+                b"forward_static_call_array",
+                &[
+                    parameter(b"callback", Type::Callable),
+                    parameter(b"args", Type::Array),
+                ],
+                Type::Mixed,
+            ),
+            forward_static_call_array,
         ),
     ]
 }
@@ -1000,6 +1025,78 @@ fn call_user_func_array(req: &mut Request) -> Result<Value, Thrown> {
         None => PhpArray::new(req)?,
     };
     call_array(req, &callback, array)
+}
+
+/// `forward_static_call(callable $callback, mixed ...$args): mixed`,
+/// php's `PHP_FUNCTION(forward_static_call)`
+/// (`Z/ext/standard/basic_functions.c:1522`): `call_user_func` from
+/// inside a class, the callee served with the caller's called scope as
+/// its own where that scope is the callee's class or extends it
+/// ([`Callable::with_called_scope`]). Outside a class scope it is
+/// php's `Error`, raised before the callee is entered.
+///
+/// ```php
+/// class A { const NAME = 'A'; public static function test() { echo static::NAME, ' ', implode(',', func_get_args()), "\n"; } }
+/// class B extends A { const NAME = 'B'; public static function test() { forward_static_call(['A', 'test'], 'more', 'args'); forward_static_call('printf', "%s\n", 'fn'); } }
+/// B::test();
+/// function outside() { forward_static_call(['A', 'test']); }
+/// try { outside(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// B more,args
+/// fn
+/// Cannot call forward_static_call() when no class scope is active
+/// ```
+fn forward_static_call(req: &mut Request) -> Result<Value, Thrown> {
+    if req.argument_count() < 1 {
+        return Err(too_few_arguments(req, 1, 0));
+    }
+    let callback = callable_argument(req, 1)?;
+    let arguments = req.variadic_arguments(2)?;
+    if req.scope().is_none() {
+        return Err(php_ext::raising::throw(
+            req,
+            "Error",
+            "Cannot call forward_static_call() when no class scope is active",
+        ));
+    }
+    let callback = forwarded(req, &callback);
+    call(req, &callback, &arguments)
+}
+
+/// `forward_static_call_array(callable $callback, array $args): mixed`,
+/// php's `PHP_FUNCTION(forward_static_call_array)`: the array handed
+/// over as `call_user_func_array` hands it, `fci.named_params`, with the
+/// called scope forwarded as [`forward_static_call`] forwards it and no
+/// class scope asked for.
+///
+/// ```php
+/// class A { public static function who($a, $b = 'b') { echo static::class, " $a $b\n"; } }
+/// class B extends A { public static function test() { forward_static_call_array(['A', 'who'], ['x', 'b' => 'y']); } }
+/// B::test();
+/// forward_static_call_array(['A', 'who'], ['z']);
+/// try { forward_static_call_array(['A', 'who'], ['a' => 1, 2]); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// B x y
+/// A z b
+/// Cannot use positional argument after named argument
+/// ```
+fn forward_static_call_array(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 2, 2)?;
+    let callback = callable_argument(req, 1)?;
+    let array = zpp::array_argument(req, 2)?;
+    let callback = forwarded(req, &callback);
+    call_array(req, &callback, array)
+}
+
+/// The callable with the called scope of the native being served
+/// forwarded to it, `zend_get_called_scope(execute_data)`.
+fn forwarded(req: &Request, callback: &Callable) -> Callable {
+    match req.called_scope() {
+        Some(called) => callback.with_called_scope(req, called),
+        None => callback.clone(),
+    }
 }
 
 /// One `Z_PARAM_FUNC` of a native, php's `"F"`: the argument at

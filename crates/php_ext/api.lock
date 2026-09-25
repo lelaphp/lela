@@ -5,6 +5,7 @@ abi::Cache
 abi::Cache::get_or_build
 abi::Cache::new
 abi::Callable
+abi::Callable::with_called_scope
 abi::CloneObj
 abi::CloneObjWith
 abi::Dependency
