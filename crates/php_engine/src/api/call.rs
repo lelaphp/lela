@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use php_unit::decl::{ConstExpr, Name, ParameterDefault};
+use php_unit::decl::{ConstExpr, HookKind, MethodDecl, Name, ParameterDefault};
 use php_unit::{ConstIdx, Opcode, Unit};
 
 use crate::api::abi::{Callable, PropertyRead};
@@ -761,7 +761,13 @@ pub fn known_method(
     this: Option<PhpObject>,
 ) -> Option<Callable> {
     let lowered = name.0.to_ascii_lowercase();
-    let function = req.method_named(class, &lowered)?;
+    // A hook, `$name::get` or `$name::set`, is no row of the class's
+    // table; a reflector over one holds the hook itself, as php's
+    // `reflection_method_factory` holds its `zend_function`.
+    let function = match hook_name(&name.0) {
+        Some((property, kind)) => req.property_hook_function(class, property, kind)?,
+        None => req.method_named(class, &lowered)?,
+    };
     let spelled = format!(
         "{}::{}",
         req.class_name(class),
@@ -776,6 +782,123 @@ pub fn known_method(
             this,
         },
     ))
+}
+
+/// A hook's name, `$name::get` or `$name::set` as
+/// `zend_compile_property_hooks` names it, read back into the property
+/// and the kind.
+fn hook_name(name: &[u8]) -> Option<(&[u8], HookKind)> {
+    let rest = name.strip_prefix(b"$")?;
+    if let Some(property) = rest.strip_suffix(b"::get") {
+        return Some((property, HookKind::Get));
+    }
+    rest.strip_suffix(b"::set")
+        .map(|property| (property, HookKind::Set))
+}
+
+/// `prop_info->hooks[kind]` of the property `name` as `class`'s table
+/// holds it, its own or one inherited: the class whose declaration
+/// wrote the hook, which is the hook's scope, and the hook as a method,
+/// named `$name::get` or `$name::set`; none where the property has no
+/// hook of that kind, or `class` no property of that name. An abstract
+/// hook is one, unless a backed declaration below it implements it.
+///
+/// ```php
+/// class A { public $p { get => 1; set {} } }
+/// class B extends A { public $p { get => 2; } }
+/// $h = (new ReflectionProperty('B', 'p'))->getHooks();
+/// var_dump($h['get']->class, $h['set']->class, $h['set']->name, $h['get']->invoke(new B));
+/// ```
+/// ```expect
+/// string(1) "B"
+/// string(1) "A"
+/// string(7) "$p::set"
+/// int(2)
+/// ```
+#[must_use]
+pub fn property_hook(
+    req: &Request,
+    class: ClassId,
+    name: &[u8],
+    kind: HookKind,
+) -> Option<(ClassId, MethodDecl)> {
+    req.property_hook_decl(class, name, kind)
+}
+
+/// `ZEND_ACC_VIRTUAL` of the property `name` as `class`'s table holds
+/// it: hooked, and backed by no declaration of it up the chain.
+///
+/// ```php
+/// class A { public $v { get => 1; } public $b { get => $this->b; } public $p; }
+/// foreach (['v', 'b', 'p'] as $n) var_dump((new ReflectionProperty('A', $n))->isVirtual());
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// ```
+#[must_use]
+pub fn property_is_virtual(req: &Request, class: ClassId, name: &[u8]) -> bool {
+    req.hooked(class, name)
+        .is_some_and(|hooked| hooked.is_virtual)
+}
+
+/// `zend_read_property_ex(prop_info->ce, ...)` over a hooked property,
+/// what `ReflectionProperty::getValue` reads: the `get` hook called, or
+/// the backing value where there is none, the property's own class
+/// being the scope, so a private one is read as from inside it; a
+/// virtual property with no `get` hook is php's `Error`. A property
+/// with no hooks is read through the object's `read_property`. One more
+/// owner of the value, the caller's.
+pub fn read_hooked_property(
+    req: &mut Request,
+    object: &PhpObject,
+    name: &[u8],
+) -> Result<Value, Thrown> {
+    req.read_in_class_scope(*object, name)
+}
+
+/// `zend_update_property_ex(prop_info->ce, ...)` over a hooked
+/// property, what `ReflectionProperty::setValue` writes: the `set` hook
+/// called, or the backing value written where there is none, the
+/// property's own class being the scope; a virtual property with no
+/// `set` hook is php's `Error`. A property with no hooks is written
+/// through the object's `write_property`. `value` and `name` are given
+/// up whatever arm runs.
+pub fn write_hooked_property(
+    req: &mut Request,
+    object: &PhpObject,
+    name: PhpString,
+    value: Value,
+) -> Result<(), Thrown> {
+    req.write_in_class_scope(*object, name, value)
+}
+
+/// A hooked property's backing value, read past its hooks as the
+/// `get` hook itself reads it, which is what
+/// `ReflectionProperty::getRawValue` reaches through
+/// `zend_get_property_hook_trampoline`: a virtual property has none,
+/// php's `Error`; a typed one nothing wrote is the uninitialised-access
+/// `Error`. One more owner of the value, the caller's.
+pub fn read_raw_property(
+    req: &mut Request,
+    object: &PhpObject,
+    name: &[u8],
+) -> Result<Value, Thrown> {
+    req.read_raw(*object, name)
+}
+
+/// A hooked property's backing value written past its hooks, as the
+/// `set` hook itself writes it, `ReflectionProperty::setRawValue`'s
+/// trampoline: a virtual property has none, php's `Error`. `value` and
+/// `name` are given up whatever arm runs.
+pub fn write_raw_property(
+    req: &mut Request,
+    object: &PhpObject,
+    name: PhpString,
+    value: Value,
+) -> Result<(), Thrown> {
+    req.write_raw(*object, name, value)
 }
 
 /// `new $class(...$arguments)`: [`new_object`] and then the class's

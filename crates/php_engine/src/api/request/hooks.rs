@@ -1,0 +1,1203 @@
+//! Property hooks as the standard handlers serve them (#427): the
+//! `IS_HOOKED_PROPERTY_OFFSET` arms of `zend_std_read_property`,
+//! `zend_std_write_property`, `zend_std_has_property`,
+//! `zend_std_unset_property` and `zend_std_get_property_ptr_ptr`
+//! (`Z/Zend/zend_object_handlers.c`). A hooked property is placed apart
+//! from a slot ([`Hooked`]), since what a read or a write of it does is
+//! its hook's to decide: from outside the hook the hook runs; inside
+//! it, on the object the hook runs on, the backing value is read and
+//! written directly (`zend_should_call_hook`), and a virtual property,
+//! which has none, is refused.
+
+use php_unit::decl::{
+    ClassDecl, FunctionDecl, HookKind, MethodDecl, Name, Parameter, ParameterDefault, Visibility,
+};
+use php_unit::link::{Held, ResolvedHook, resolve_property};
+
+use super::{Link, Member, MemberAt, Request};
+use crate::api::abi::{Entry, PropertyPlace, PropertyRead, PropertyTest};
+use crate::api::call::Function;
+use crate::api::raising::Thrown;
+use crate::api::values::{ClassId, PhpObject, PhpString, TypeTag, Value};
+use crate::engine::MethodAt;
+
+/// A hooked property as an object's class holds it, what
+/// `zend_get_property_offset` answers `ZEND_HOOKED_PROPERTY_OFFSET` and
+/// the `prop_info` for: the class whose declaration stands in the
+/// table, which the visibilities are measured against, the hook of
+/// each kind it carries, its own or one inherited, a hook still
+/// abstract being none, whether it has no backing value
+/// (`ZEND_ACC_VIRTUAL`), and the class of its prototype, which
+/// `zend_is_in_hook` compares.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Hooked {
+    pub(crate) declaring: ClassId,
+    pub(crate) visibility: Visibility,
+    pub(crate) set_visibility: Option<Visibility>,
+    pub(crate) get: Option<Function>,
+    pub(crate) set: Option<Function>,
+    pub(crate) is_virtual: bool,
+    root: ClassId,
+}
+
+impl Request {
+    /// The linked class a declaration names, the one `class` is where
+    /// the declaration is its own.
+    fn class_of_decl(&self, class: ClassId, decl: &ClassDecl) -> Option<ClassId> {
+        match self.class_decl(class) {
+            Some(own) if std::ptr::eq(own, decl) => Some(class),
+            _ => self.class_named(&decl.name.0),
+        }
+    }
+
+    /// The function a resolved hook is, none for an abstract one, which
+    /// no linked class that can make an object holds.
+    fn hook_function(
+        &self,
+        class: ClassId,
+        hook: Option<ResolvedHook<'_>>,
+        kind: HookKind,
+    ) -> Option<Function> {
+        let hook = hook?;
+        if hook.method.is_abstract {
+            return None;
+        }
+        let holder = self.class_of_decl(class, hook.class)?;
+        self.member_function(Member {
+            class: holder,
+            at: MemberAt::Hook {
+                property: hook.property,
+                kind,
+            },
+        })
+    }
+
+    /// `zend_get_property_offset`'s `property_info->hooks` arm: the
+    /// hooked instance property `name` of `class`, none for a property
+    /// with no hooks, one declared `static`, and a name no class of the chain
+    /// declares.
+    pub(crate) fn hooked(&self, class: ClassId, name: &[u8]) -> Option<Hooked> {
+        let decl = self.class_decl(class)?;
+        let lookup = |wanted: &[u8]| {
+            self.class_named(wanted)
+                .and_then(|id| self.class_decl(id))
+                .map(|decl| Held { decl, bodies: None })
+        };
+        let resolved = resolve_property(decl, name, &lookup)?;
+        if !resolved.is_hooked() || !resolved.property.is_instance {
+            return None;
+        }
+        Some(Hooked {
+            declaring: self.class_of_decl(class, resolved.class)?,
+            visibility: resolved.property.visibility,
+            set_visibility: resolved.property.set_visibility,
+            get: self.hook_function(class, resolved.get, HookKind::Get),
+            set: self.hook_function(class, resolved.set, HookKind::Set),
+            is_virtual: resolved.is_virtual,
+            root: self.class_of_decl(class, resolved.root)?,
+        })
+    }
+
+    /// `zend_get_property_offset`'s access rule over a hooked property:
+    /// public, the scope its declaring class, or, for a protected one, a
+    /// scope related to its prototype's class
+    /// (`is_protected_compatible_scope(property_info->prototype->ce, scope)`),
+    /// so two classes that each redeclare it reach each other's.
+    ///
+    /// ```php
+    /// abstract class P { abstract public mixed $foo { get; } }
+    /// class C1 extends P { public protected(set) mixed $foo { get => 1; set {} } }
+    /// class G extends C1 { public protected(set) mixed $foo { get => 2; set {} } }
+    /// class C2 extends C1 { static function foo($c) { return $c->foo += 1; } }
+    /// var_dump(C2::foo(new G));
+    /// ```
+    /// ```expect
+    /// int(3)
+    /// ```
+    pub(crate) fn hooked_accessible(&self, hooked: &Hooked) -> bool {
+        let scope = self.executed_scope();
+        match hooked.visibility {
+            Visibility::Public => true,
+            _ if scope == Some(hooked.declaring) => true,
+            Visibility::Private => false,
+            Visibility::Protected => self.check_protected(hooked.root, scope),
+        }
+    }
+
+    /// `zend_asymmetric_property_has_set_access` over a hooked property:
+    /// the declaring class writes it, and a `protected(set)` one a scope
+    /// related to its prototype's class.
+    fn hooked_settable(&self, hooked: &Hooked, set: Visibility) -> bool {
+        let scope = self.executed_scope();
+        scope == Some(hooked.declaring)
+            || (set == Visibility::Protected && self.check_protected(hooked.root, scope))
+    }
+
+    /// `EG(current_execute_data)`'s function and `$this`.
+    fn current_call(&self) -> Option<(Option<Function>, Option<PhpObject>)> {
+        Some(match self.chain().next()? {
+            Link::Frame(_, _, state) => (state.function, state.this),
+            Link::Call(call) => (Some(call.function), call.this),
+        })
+    }
+
+    /// Whether `function` is one of `zend_get_property_hook_trampoline`'s.
+    pub(crate) fn is_parent_hook_trampoline(&self, function: Function) -> bool {
+        self.native_method(function)
+            .is_some_and(|method| matches!(method.at, MethodAt::ParentHook { .. }))
+    }
+
+    /// The parent hook trampoline of `kind`, which the engine numbers
+    /// once among its native methods.
+    pub(crate) fn parent_hook_trampoline(&self, kind: HookKind) -> Function {
+        self.native_method_id(
+            |method| matches!(method.at, MethodAt::ParentHook { kind: k, .. } if k == kind),
+        )
+        .unwrap_or(Function::PASS)
+    }
+
+    /// The property a parent hook trampoline being served names, php's
+    /// `internal_function.reserved[0]`: the call's name `$name::get`
+    /// less its `$` and its hook, beside the property's class, the
+    /// call's scope.
+    fn trampoline_property(&self) -> Option<(Vec<u8>, Option<ClassId>)> {
+        let call = self.vm.serving_call()?;
+        let written = call.name?;
+        let bytes = written.as_bytes();
+        let name = bytes.strip_prefix(b"$")?;
+        let end = name.iter().rposition(|b| *b == b':')?.checked_sub(1)?;
+        Some((name.get(..end)?.to_vec(), call.called_scope))
+    }
+
+    /// `zend_is_in_hook`: whether the function running is a hook of the
+    /// property `name` of the same prototype as `hooked`, one of its
+    /// own hooks or one of a property it overrides or is overridden by,
+    /// or a parent hook's trampoline serving the same property.
+    fn in_hook(&self, hooked: &Hooked, name: &[u8]) -> bool {
+        let Some((Some(function), _)) = self.current_call() else {
+            return false;
+        };
+        if self.is_parent_hook_trampoline(function) {
+            return self.trampoline_property().is_some_and(|(property, scope)| {
+                property == name
+                    && scope
+                        .and_then(|scope| self.hooked(scope, name))
+                        .is_none_or(|parent| parent.root == hooked.root)
+            });
+        }
+        let Some(Member {
+            class,
+            at: MemberAt::Hook { property, .. },
+        }) = self.user_function(function).and_then(|user| user.member)
+        else {
+            return false;
+        };
+        let Some(decl) = self.class_decl(class) else {
+            return false;
+        };
+        let Some(own) = decl.properties.get(property as usize) else {
+            return false;
+        };
+        if &*own.name.0 != name {
+            return false;
+        }
+        self.hooked(class, name)
+            .is_some_and(|running| running.root == hooked.root)
+    }
+
+    /// `zend_should_call_hook`: the hook runs unless the function
+    /// running is a hook of the same property on the same object, or on
+    /// the lazy proxy whose instance the object is.
+    pub(crate) fn should_call_hook(&self, hooked: &Hooked, name: &[u8], object: PhpObject) -> bool {
+        if !self.in_hook(hooked, name) {
+            return true;
+        }
+        let Some((_, Some(this))) = self.current_call() else {
+            return true;
+        };
+        if this == object {
+            return false;
+        }
+        self.lazy_instance(this.heap()) != Some(object)
+    }
+
+    /// `zend_call_known_instance_method` over a hook, the object one
+    /// more owner while it runs.
+    fn call_hook(
+        &mut self,
+        object: PhpObject,
+        hook: Function,
+        arguments: &[Value],
+    ) -> Result<Value, Thrown> {
+        self.addref(&object.as_value());
+        let served = self.serve_method(hook, Some(object), object.class(), arguments, &[]);
+        self.release(object.as_value());
+        served
+    }
+
+    /// php's `Error` over a hooked property, naming the object's class
+    /// as `zobj->ce->name` names it.
+    fn hooked_error(&mut self, object: PhpObject, name: &[u8], sentence: &str) -> Thrown {
+        let class = self.class_name(object.class());
+        let shown = String::from_utf8_lossy(name).into_owned();
+        let message = sentence
+            .replace("{class}", &class)
+            .replace("{name}", &shown);
+        crate::api::raising::throw(self, "Error", &message)
+    }
+
+    /// `ZEND_HOOKED_PROPERTY_OFFSET` at `zend_std_read_property`, placed
+    /// after the scope's access to it is held as any declared
+    /// property's is: the read of [`Request::read_hooked`] where the
+    /// scope reaches it, `zend_bad_property_access`'s `Error` where it
+    /// does not and no `__get` may serve it instead, and none for a
+    /// name that is no hooked property, or one a `__get` may serve.
+    pub(crate) fn read_hooked_arm(
+        &mut self,
+        object: PhpObject,
+        name: &[u8],
+        read: PropertyRead,
+    ) -> Option<Result<Value, Thrown>> {
+        let class = object.class();
+        let hooked = self.hooked(class, name)?;
+        if self.hooked_accessible(&hooked) {
+            return Some(self.read_hooked(object, name, hooked, read));
+        }
+        if read != PropertyRead::Silent && !self.serves_accessor(class, b"__get") {
+            return Some(Err(self.inaccessible_property(
+                class,
+                hooked.visibility,
+                name,
+            )));
+        }
+        None
+    }
+
+    /// `zend_std_read_property`'s hooked arm: the `get` hook called, or,
+    /// where there is none, the backing value read, which a write fetch
+    /// may reach into only where it is an object; inside the hook, the
+    /// backing value.
+    ///
+    /// ```php
+    /// class C {
+    ///     public $w { set { echo "set\n"; } }
+    ///     public array $a = [1] { get => $this->a; }
+    ///     public $v { get => $this->missing ?? 'v'; }
+    /// }
+    /// $c = new C;
+    /// try { var_dump($c->w); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { $c->a[] = 2; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump($c->a, $c->v);
+    /// ```
+    /// ```expect
+    /// Property C::$w is write-only
+    /// Indirect modification of C::$a is not allowed
+    /// array(1) {
+    ///   [0]=>
+    ///   int(1)
+    /// }
+    /// string(1) "v"
+    /// ```
+    pub(crate) fn read_hooked(
+        &mut self,
+        object: PhpObject,
+        name: &[u8],
+        hooked: Hooked,
+        read: PropertyRead,
+    ) -> Result<Value, Thrown> {
+        let Some(get) = hooked.get else {
+            if hooked.is_virtual {
+                return Err(self.hooked_error(
+                    object,
+                    name,
+                    "Property {class}::${name} is write-only",
+                ));
+            }
+            let value = self.read_backing(object, name, read)?;
+            return self.refuse_indirect(object, name, value, read);
+        };
+        if !self.should_call_hook(&hooked, name, object) {
+            if hooked.is_virtual {
+                return Err(self.hooked_error(
+                    object,
+                    name,
+                    "Must not read from virtual property {class}::${name}",
+                ));
+            }
+            return self.read_backing(object, name, read);
+        }
+        let value = self.call_hook(object, get, &[])?;
+        self.refuse_indirect(object, name, value, read)
+    }
+
+    /// `Indirect modification of %s::$%s is not allowed`: a write
+    /// fetch's read of a hooked property that answered what no write
+    /// through it can reach, anything but an object or a reference.
+    fn refuse_indirect(
+        &mut self,
+        object: PhpObject,
+        name: &[u8],
+        value: Value,
+        read: PropertyRead,
+    ) -> Result<Value, Thrown> {
+        if read != PropertyRead::Write
+            || value.as_object().is_some()
+            || value.as_php_ref().is_some()
+        {
+            return Ok(value);
+        }
+        self.release(value);
+        Err(self.hooked_error(
+            object,
+            name,
+            "Indirect modification of {class}::${name} is not allowed",
+        ))
+    }
+
+    /// The backing value of a hooked property, its slot read as
+    /// `zend_std_read_property`'s `try_again` reads one: the value, one
+    /// more owner; the lazy object initialised where the slot waits; and
+    /// a typed slot nothing wrote the uninitialised-access `Error`.
+    fn read_backing(
+        &mut self,
+        object: PhpObject,
+        name: &[u8],
+        read: PropertyRead,
+    ) -> Result<Value, Thrown> {
+        let Some(placed) = self.declared_slot(object.class(), name) else {
+            return Ok(Value::null());
+        };
+        let o = object.heap();
+        let z = o.slot(placed.slot);
+        if !z.is_undef() {
+            let value = Value::of_zval(z).deref();
+            self.addref(&value);
+            return Ok(value);
+        }
+        if self.lazy_slot(o, placed.slot) {
+            let instance = self.lazy_init(object)?;
+            return self.read_backing(instance, name, read);
+        }
+        if read == PropertyRead::Silent {
+            return Ok(Value::null());
+        }
+        let class = self.class_name(object.class());
+        let shown = String::from_utf8_lossy(name).into_owned();
+        if placed.typed {
+            return Err(crate::api::raising::throw(
+                self,
+                "Error",
+                &format!(
+                    "Typed property {class}::${shown} must not be accessed before initialization"
+                ),
+            ));
+        }
+        crate::api::raising::warning(self, &format!("Undefined property: {class}::${shown}"));
+        Ok(Value::null())
+    }
+
+    /// `zend_std_write_property`'s hooked arm: the `set` hook called, held
+    /// to the property's set visibility first; where there is none, the
+    /// backing value written, which a virtual property has not; inside
+    /// the hook, the backing value. `value` and `name` are given up
+    /// whatever arm runs.
+    ///
+    /// ```php
+    /// class C {
+    ///     public $r { get => 1; }
+    ///     public int $n = 0 { set => $value * 2; }
+    ///     public private(set) int $p = 0 { set { $this->p = $value; } }
+    /// }
+    /// $c = new C;
+    /// try { $c->r = 2; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { $c->p = 2; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// $c->n = 21;
+    /// $c->n++;
+    /// var_dump($c->n);
+    /// ```
+    /// ```expect
+    /// Property C::$r is read-only
+    /// Cannot modify private(set) property C::$p from global scope
+    /// int(86)
+    /// ```
+    pub(crate) fn write_hooked(
+        &mut self,
+        object: PhpObject,
+        name: PhpString,
+        value: Value,
+        hooked: Hooked,
+    ) -> Result<(), Thrown> {
+        let bytes = name.as_bytes().to_vec();
+        let refused = |req: &mut Request, sentence: &str| {
+            req.release(value);
+            req.release(Value::string(name));
+            Err(req.hooked_error(object, &bytes, sentence))
+        };
+        let Some(set) = hooked.set else {
+            if hooked.is_virtual {
+                return refused(self, "Property {class}::${name} is read-only");
+            }
+            return self.write_backing(object, name, value, hooked);
+        };
+        if !self.should_call_hook(&hooked, &bytes, object) {
+            if hooked.is_virtual {
+                return refused(self, "Must not write to virtual property {class}::${name}");
+            }
+            return self.write_backing(object, name, value, hooked);
+        }
+        if let Some(set_visibility) = hooked.set_visibility
+            && !self.hooked_settable(&hooked, set_visibility)
+        {
+            let thrown = self.set_inaccessible_property(
+                object.class(),
+                set_visibility,
+                false,
+                &bytes,
+                "modify",
+            );
+            self.release(value);
+            self.release(Value::string(name));
+            return Err(thrown);
+        }
+        let served = self.call_hook(object, set, &[value]);
+        self.release(value);
+        self.release(Value::string(name));
+        let answered = served?;
+        self.release(answered);
+        Ok(())
+    }
+
+    /// The backing value written, as `zend_std_write_property`'s
+    /// `try_again` writes a slot: held to the set visibility, the lazy
+    /// object initialised where the slot waits, then the slot written
+    /// under its type.
+    fn write_backing(
+        &mut self,
+        object: PhpObject,
+        name: PhpString,
+        value: Value,
+        hooked: Hooked,
+    ) -> Result<(), Thrown> {
+        if let Some(set_visibility) = hooked.set_visibility
+            && !self.hooked_settable(&hooked, set_visibility)
+        {
+            let thrown = self.set_inaccessible_property(
+                object.class(),
+                set_visibility,
+                false,
+                name.as_bytes(),
+                "modify",
+            );
+            self.release(value);
+            self.release(Value::string(name));
+            return Err(thrown);
+        }
+        if let Some(placed) = self.declared_slot(object.class(), name.as_bytes())
+            && object.heap().slot(placed.slot).is_undef()
+            && self.lazy_slot(object.heap(), placed.slot)
+        {
+            return self.lazy_write(object, name, value, false);
+        }
+        self.write_std_property(object, name, value)
+    }
+
+    /// `zend_std_has_property`'s hooked arm: `property_exists` finds a
+    /// virtual property and a backed one's slot; `isset` and `empty` call
+    /// the `get` hook and read what it answered, or read the backing
+    /// value where there is no hook to call.
+    ///
+    /// ```php
+    /// class C { public $v { get => null; } public $b = 1 { set => $value; } }
+    /// $c = new C;
+    /// var_dump(isset($c->v), empty($c->v), isset($c->b), property_exists($c, 'v'));
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// ```
+    pub(crate) fn has_hooked(
+        &mut self,
+        object: PhpObject,
+        name: &[u8],
+        test: PropertyTest,
+        hooked: Hooked,
+    ) -> Result<bool, Thrown> {
+        if test == PropertyTest::Exists {
+            if hooked.is_virtual {
+                return Ok(true);
+            }
+            return self.has_backing(object, name, test);
+        }
+        let Some(get) = hooked.get else {
+            if hooked.is_virtual {
+                return Err(self.hooked_error(
+                    object,
+                    name,
+                    "Property {class}::${name} is write-only",
+                ));
+            }
+            return self.has_backing(object, name, test);
+        };
+        if !self.should_call_hook(&hooked, name, object) {
+            if hooked.is_virtual {
+                return Err(self.hooked_error(
+                    object,
+                    name,
+                    "Must not read from virtual property {class}::${name}",
+                ));
+            }
+            return self.has_backing(object, name, test);
+        }
+        let value = self.call_hook(object, get, &[])?;
+        let answer = match test {
+            PropertyTest::NotEmpty => crate::api::coerce::truthy(self, &value),
+            PropertyTest::Isset | PropertyTest::Exists => value.deref().tag() != TypeTag::Null,
+        };
+        self.release(value);
+        Ok(answer)
+    }
+
+    /// The backing value tested as `zend_std_has_property`'s slot arm
+    /// tests one, the lazy object initialised where the slot waits.
+    fn has_backing(
+        &mut self,
+        object: PhpObject,
+        name: &[u8],
+        test: PropertyTest,
+    ) -> Result<bool, Thrown> {
+        let Some(placed) = self.declared_slot(object.class(), name) else {
+            return Ok(false);
+        };
+        let o = object.heap();
+        let z = o.slot(placed.slot);
+        if z.is_undef() {
+            if self.lazy_slot(o, placed.slot) {
+                let instance = self.lazy_init(object)?;
+                return self.has_backing(instance, name, test);
+            }
+            return Ok(false);
+        }
+        let value = Value::of_zval(z).deref();
+        Ok(match test {
+            PropertyTest::Exists => true,
+            PropertyTest::Isset => value.tag() != TypeTag::Null,
+            PropertyTest::NotEmpty => crate::api::coerce::truthy(self, &value),
+        })
+    }
+
+    /// `zend_std_unset_property`'s hooked arm, php's `Error` whether or
+    /// not a hook is running.
+    ///
+    /// ```php
+    /// class C { public $p = 1 { get => $this->p; } }
+    /// $c = new C;
+    /// try { unset($c->p); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Cannot unset hooked property C::$p
+    /// ```
+    pub(crate) fn unset_hooked(&mut self, object: PhpObject, name: &[u8]) -> Thrown {
+        self.hooked_error(
+            object,
+            name,
+            "Cannot unset hooked property {class}::${name}",
+        )
+    }
+
+    /// `zend_std_get_property_ptr_ptr`: a hooked property's backing slot
+    /// in place where the hook reads it, and no place otherwise, so a
+    /// write goes to `write_property` and a write fetch reads through
+    /// `read_property`; every other name the standard place.
+    ///
+    /// ```php
+    /// class C {
+    ///     public array $log = [] { get => $this->log; set { $this->log = $value; $this->log[] = 'set'; } }
+    /// }
+    /// $c = new C;
+    /// $c->log = ['a'];
+    /// var_dump($c->log);
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   [0]=>
+    ///   string(1) "a"
+    ///   [1]=>
+    ///   string(3) "set"
+    /// }
+    /// ```
+    pub(crate) fn property_place(&self, object: PhpObject, name: &[u8]) -> PropertyPlace {
+        match self.hooked(object.class(), name) {
+            Some(hooked)
+                if self.hooked_accessible(&hooked)
+                    && (hooked.is_virtual || self.should_call_hook(&hooked, name, object)) =>
+            {
+                PropertyPlace::Handlers
+            }
+            _ => PropertyPlace::Std,
+        }
+    }
+}
+
+/// `zend_get_property_hook_trampoline`'s two functions, each with the
+/// declaration the engine numbers it under: named `$::get` and `$::set`
+/// where php names the one it makes after the property, since the
+/// call carries the property's own name ([`Request::trampoline_property`]),
+/// and taking what they are sent as a variadic, since each holds its
+/// own count as php's does with its `zpp`.
+pub(crate) fn parent_hook_trampolines() -> Vec<(HookKind, MethodDecl, Entry)> {
+    HookKind::ALL
+        .into_iter()
+        .map(|kind| {
+            let entry: Entry = match kind {
+                HookKind::Get => parent_hook_get,
+                HookKind::Set => parent_hook_set,
+            };
+            let method = MethodDecl {
+                function: FunctionDecl {
+                    name: Name(
+                        format!("$::{}", kind.name())
+                            .into_bytes()
+                            .into_boxed_slice(),
+                    ),
+                    parameters: vec![Parameter {
+                        name: Name(b"args".as_slice().into()),
+                        ty: None,
+                        by_ref: false,
+                        prefer_ref: false,
+                        promoted: false,
+                        variadic: true,
+                        default: ParameterDefault::None,
+                        attributes: Vec::new(),
+                    }],
+                    return_type: None,
+                    returns_by_ref: false,
+                    is_generator: false,
+                    attributes: Vec::new(),
+                    doc_comment: None,
+                    file: Name(Box::new([])),
+                    line: 0,
+                    end_line: 0,
+                    frameless: Vec::new(),
+                },
+                visibility: Visibility::Public,
+                is_instance: true,
+                is_abstract: false,
+                is_final: false,
+                tentative_return: false,
+            };
+            (kind, method, entry)
+        })
+        .collect()
+}
+
+/// The receiver and the property of the trampoline being served, and
+/// the sentence its `zpp` raises for `given` arguments where it takes
+/// `wanted`, `%s() expects exactly %d argument%s, %d given`.
+fn trampoline_call(
+    req: &mut Request,
+    kind: HookKind,
+    wanted: usize,
+) -> Result<(PhpObject, Vec<u8>), Thrown> {
+    let Some((name, scope)) = req.trampoline_property() else {
+        return Err(crate::api::raising::throw(
+            req,
+            "Error",
+            "InternalError: a parent hook trampoline served with no property",
+        ));
+    };
+    let given = req.argument_count();
+    if given != wanted {
+        let class = scope.map(|scope| req.class_name(scope)).unwrap_or_default();
+        let shown = String::from_utf8_lossy(&name).into_owned();
+        return Err(crate::api::raising::throw(
+            req,
+            "ArgumentCountError",
+            &format!(
+                "{class}::${shown}::{}() expects exactly {wanted} argument{}, {given} given",
+                kind.name(),
+                if wanted == 1 { "" } else { "s" }
+            ),
+        ));
+    }
+    let Some(this) = req.this() else {
+        return Err(crate::api::raising::throw(
+            req,
+            "Error",
+            "InternalError: a parent hook trampoline served with no receiver",
+        ));
+    };
+    Ok((this, name))
+}
+
+/// `zend_parent_hook_get_trampoline`: the property read through the
+/// object's `read_property`, which finds the trampoline running and so
+/// reads what the parent's property holds.
+fn parent_hook_get(req: &mut Request) -> Result<Value, Thrown> {
+    let (this, name) = trampoline_call(req, HookKind::Get, 0)?;
+    let table = req.object_handlers(this.heap());
+    table.read_property(req, this, &name, PropertyRead::Warning)
+}
+
+/// `zend_parent_hook_set_trampoline`: the value written through the
+/// object's `write_property`, and returned.
+fn parent_hook_set(req: &mut Request) -> Result<Value, Thrown> {
+    let (this, name) = trampoline_call(req, HookKind::Set, 1)?;
+    let value = req.argument(1).unwrap_or_else(Value::null).deref();
+    let key = PhpString::new(req, &name)?;
+    req.addref(&value);
+    req.addref(&value);
+    let table = req.object_handlers(this.heap());
+    if let Err(thrown) = table.write_property(req, this, key, value) {
+        req.release(value);
+        return Err(thrown);
+    }
+    Ok(value)
+}
+
+/// One row of [`Request::hooked_object_rows`]: the name as declared,
+/// the value, one owner the caller's, and for a declared row the class
+/// that declared it and its visibility, none for a dynamic one.
+pub(crate) type HookedRow = (PhpString, Value, Option<(ClassId, Visibility)>);
+
+/// Whose a key of `zho_build_properties_ex`'s table is: php keys the
+/// table by the mangled name, so a public property, the protected one
+/// every class of the line shares, and each class's private one are
+/// three keys for one name.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum KeyOwner {
+    Public,
+    Protected,
+    Private(ClassId),
+}
+
+impl Request {
+    /// The declared rows of `zho_build_properties_ex`'s table in its
+    /// order: the chain walked from its root, each class's own instance
+    /// properties updating the row of their key in place or adding one,
+    /// each row the name, the class whose declaration it is and its
+    /// visibility.
+    fn hooked_object_keys(&self, class: ClassId) -> Vec<(Box<[u8]>, ClassId, Visibility)> {
+        let mut chain = Vec::new();
+        let mut at = Some(class);
+        for _ in 0..64 {
+            let Some(here) = at else { break };
+            chain.push(here);
+            at = self.class_parent(here);
+        }
+        let mut keys: Vec<(Box<[u8]>, KeyOwner, ClassId, Visibility)> = Vec::new();
+        for here in chain.into_iter().rev() {
+            let Some(decl) = self.class_decl(here) else {
+                continue;
+            };
+            for property in decl.properties.iter().filter(|p| p.is_instance) {
+                let name = &property.name.0;
+                // "When promoting properties from protected to public,
+                // use the unmangled name to preserve order."
+                let owner = match property.visibility {
+                    Visibility::Public => KeyOwner::Public,
+                    Visibility::Protected
+                        if self
+                            .property_info_of(class, name)
+                            .is_some_and(|(_, p)| p.visibility == Visibility::Public) =>
+                    {
+                        KeyOwner::Public
+                    }
+                    Visibility::Protected => KeyOwner::Protected,
+                    Visibility::Private => KeyOwner::Private(here),
+                };
+                let row = (name.clone(), owner, here, property.visibility);
+                match keys.iter().position(|k| k.0 == row.0 && k.1 == owner) {
+                    Some(i) => keys[i] = row,
+                    None => keys.push(row),
+                }
+            }
+        }
+        keys.into_iter()
+            .map(|(name, _, declaring, visibility)| (name, declaring, visibility))
+            .collect()
+    }
+
+    /// `zend_hooked_object_get_iterator`'s walk over the declared rows,
+    /// what a `foreach` over an object whose class has a hooked property
+    /// reads: from the row `lead` stands at, the next the scope may
+    /// reach whose value there is, a hooked one's read through its `get`
+    /// hook under its class's scope, one owner the caller's
+    /// ([`super::Walked::Hooked`]), and a virtual one with no `get` hook
+    /// stepped over; none past the last, where the dynamic table's walk
+    /// takes over. `lead` is left one past the row answered.
+    ///
+    /// ```php
+    /// #[AllowDynamicProperties]
+    /// class C { public $a = 1; public $v { get => 'v'; } public $b = 2 { get => $this->b * 10; } public $w { set {} } }
+    /// $c = new C;
+    /// $c->d = 3;
+    /// foreach ($c as $k => $v) echo "$k=$v;";
+    /// try { foreach ($c as $k => &$v) {} } catch (Error $e) { echo "\n", $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// a=1;v=v;b=20;d=3;
+    /// Cannot create reference to property C::$v
+    /// ```
+    pub(crate) fn hooked_object_walk(
+        &mut self,
+        object: PhpObject,
+        lead: &mut usize,
+        by_ref: bool,
+    ) -> Result<Option<(PhpString, super::Walked)>, Thrown> {
+        let class = object.class();
+        let keys = self.hooked_object_keys(class);
+        let placed = self.placed_properties(class);
+        while let Some((name, declaring, visibility)) = keys.get(*lead).cloned() {
+            *lead += 1;
+            if let Some(hooked) = self.hooked(declaring, &name) {
+                if !self.hooked_accessible(&hooked) || (hooked.is_virtual && hooked.get.is_none()) {
+                    continue;
+                }
+                // A loop by reference binds only what a `get` hook
+                // returns by reference.
+                if by_ref
+                    && !hooked
+                        .get
+                        .and_then(|get| self.function_decl(get))
+                        .is_some_and(|decl| decl.returns_by_ref)
+                {
+                    return Err(self.hooked_error(
+                        object,
+                        &name,
+                        "Cannot create reference to property {class}::${name}",
+                    ));
+                }
+                // `value == &EG(uninitialized_zval)`: a backed property
+                // with no `get` hook whose slot nothing wrote is no row.
+                if hooked.get.is_none()
+                    && self
+                        .declared_slot(class, &name)
+                        .is_none_or(|placed| object.heap().slot(placed.slot).is_undef())
+                {
+                    continue;
+                }
+                let value = self.read_hooked(object, &name, hooked, PropertyRead::Silent)?;
+                let key = self.interned(&name)?;
+                return Ok(Some((key, super::Walked::Hooked(value))));
+            }
+            if !self.may_access(declaring, visibility) {
+                continue;
+            }
+            let Some(slot) = placed
+                .iter()
+                .position(|(held, p)| *held == declaring && p.name.0 == name)
+                .and_then(|at| u32::try_from(at).ok())
+            else {
+                continue;
+            };
+            if object.heap().slot(slot).is_undef() {
+                continue;
+            }
+            let key = self.interned(&name)?;
+            return Ok(Some((key, super::Walked::Slot(slot))));
+        }
+        Ok(None)
+    }
+
+    /// Whether any class of `class`'s chain declares a hooked property,
+    /// php's `ce->num_hooked_props`.
+    pub(crate) fn class_has_hooks(&self, class: ClassId) -> bool {
+        let mut at = Some(class);
+        for _ in 0..64 {
+            let Some(here) = at else {
+                return false;
+            };
+            if self
+                .class_decl(here)
+                .is_some_and(|decl| decl.properties.iter().any(|p| p.hooks.is_some()))
+            {
+                return true;
+            }
+            at = self.class_parent(here);
+        }
+        false
+    }
+
+    /// `zend_hooked_object_build_properties`, the table
+    /// `get_object_vars`, `json_encode` and `var_export` read an object
+    /// whose class has a hooked property through, with each hooked row
+    /// read as those readers read it: the chain walked from its root,
+    /// each class's own properties updating the row of their key in
+    /// place or adding one, a hooked property's value its `get` hook's
+    /// under the scope of the class that declared it
+    /// (`zend_read_property_ex(prop_info->ce, ...)`, silently), a
+    /// virtual one with no `get` hook no row, a slot nothing wrote no
+    /// row, then the dynamic table. None for a class with no hooked
+    /// property, whose readers read the object's own table.
+    ///
+    /// ```php
+    /// #[AllowDynamicProperties]
+    /// class T {
+    ///     public $a = 'a';
+    ///     public $v { get => 'V'; }
+    ///     public $b = 'b' { get => strtoupper($this->b); }
+    ///     public $w { set {} }
+    ///     private $p = 'p' { get => $this->p . 'P'; }
+    /// }
+    /// $t = new T;
+    /// $t->d = 'd';
+    /// var_dump(get_object_vars($t));
+    /// echo json_encode($t), "\n";
+    /// var_export($t);
+    /// ```
+    /// ```expect
+    /// array(4) {
+    ///   ["a"]=>
+    ///   string(1) "a"
+    ///   ["v"]=>
+    ///   string(1) "V"
+    ///   ["b"]=>
+    ///   string(1) "B"
+    ///   ["d"]=>
+    ///   string(1) "d"
+    /// }
+    /// {"a":"a","v":"V","b":"B","d":"d"}
+    /// \T::__set_state(array(
+    ///    'a' => 'a',
+    ///    'v' => 'V',
+    ///    'b' => 'B',
+    ///    'p' => 'pP',
+    ///    'd' => 'd',
+    /// ))
+    /// ```
+    pub(crate) fn hooked_object_rows(
+        &mut self,
+        object: PhpObject,
+    ) -> Result<Option<Vec<HookedRow>>, Thrown> {
+        let class = object.class();
+        if !self.class_has_hooks(class) {
+            return Ok(None);
+        }
+        let object = self.lazy_init(object)?;
+        let keys = self.hooked_object_keys(class);
+        let placed = self.placed_properties(class);
+        let mut rows = Vec::with_capacity(keys.len());
+        for (name, declaring, visibility) in keys {
+            let interned = self.interned(&name)?;
+            if let Some(hooked) = self.hooked(declaring, &name) {
+                if hooked.is_virtual && hooked.get.is_none() {
+                    continue;
+                }
+                let value = match self.read_hooked(object, &name, hooked, PropertyRead::Silent) {
+                    Ok(value) => value,
+                    Err(thrown) => {
+                        for (_, value, _) in rows {
+                            self.release(value);
+                        }
+                        return Err(thrown);
+                    }
+                };
+                rows.push((interned, value, Some((declaring, visibility))));
+                continue;
+            }
+            let Some(slot) = placed
+                .iter()
+                .position(|(held, p)| *held == declaring && p.name.0 == name)
+            else {
+                continue;
+            };
+            let z = object.heap().slot(u32::try_from(slot).unwrap_or(u32::MAX));
+            if z.is_undef() {
+                continue;
+            }
+            let value = Value::of_zval(z);
+            self.addref(&value);
+            rows.push((interned, value, Some((declaring, visibility))));
+        }
+        if let Some(table) = object.heap().properties() {
+            let dynamic: Vec<(PhpString, Value)> = table
+                .iter()
+                .filter_map(|(key, z)| match key {
+                    php_heap::Key::Str(s) => Some((PhpString::of(s), Value::of_zval(z))),
+                    php_heap::Key::Long(_) => None,
+                })
+                .collect();
+            for (name, value) in dynamic {
+                self.addref(&value);
+                self.addref(&Value::string(name));
+                rows.push((name, value, None));
+            }
+        }
+        Ok(Some(rows))
+    }
+}
+
+impl Request {
+    /// [`Request::hooked_object_rows`] as `zend_get_properties_for`
+    /// hands its table to `json_encode` and `var_export`: each declared
+    /// name mangled as php keys it, `\0*\0p` for a protected property
+    /// and `\0C\0p` for a private one, and each value a view whose owner
+    /// the native being served holds until it returns, as php's reader
+    /// holds the table until `zend_release_properties`. None for a class
+    /// with no hooked property.
+    pub(crate) fn hooked_properties_for(
+        &mut self,
+        object: PhpObject,
+    ) -> Result<Option<Vec<(PhpString, Value)>>, Thrown> {
+        let Some(rows) = self.hooked_object_rows(object)? else {
+            return Ok(None);
+        };
+        let mut out = Vec::with_capacity(rows.len());
+        let mut held = Vec::with_capacity(rows.len() * 2);
+        for (name, value, declared) in rows {
+            let prefix = match declared {
+                Some((_, Visibility::Protected)) => Some(b"\0*\0".to_vec()),
+                Some((declaring, Visibility::Private)) => self
+                    .class_decl(declaring)
+                    .map(|decl| [&b"\0"[..], &decl.name.0, &b"\0"[..]].concat()),
+                Some((_, Visibility::Public)) | None => None,
+            };
+            held.push(Value::string(name));
+            let key = if let Some(prefix) = prefix {
+                self.interned(&[prefix.as_slice(), name.as_bytes()].concat())?
+            } else {
+                name
+            };
+            held.push(value);
+            out.push((key, value));
+        }
+        let Some(call) = self.vm.serving_call_mut() else {
+            for value in held {
+                self.release(value);
+            }
+            return self.fatal_of(Err(php_heap::Fatal::Error(String::from(
+                "InternalError: a hooked object's properties read with no native to hold them",
+            ))));
+        };
+        call.coerced.extend(held);
+        Ok(Some(out))
+    }
+}
+
+impl Request {
+    /// [`crate::api::call::property_hook`]: the hook of `kind` the
+    /// property `name` of `class` carries, with the class that wrote it.
+    pub(crate) fn property_hook_decl(
+        &self,
+        class: ClassId,
+        name: &[u8],
+        kind: HookKind,
+    ) -> Option<(ClassId, MethodDecl)> {
+        let decl = self.class_decl(class)?;
+        let lookup = |wanted: &[u8]| {
+            self.class_named(wanted)
+                .and_then(|id| self.class_decl(id))
+                .map(|decl| Held { decl, bodies: None })
+        };
+        let resolved = resolve_property(decl, name, &lookup)?;
+        let hook = resolved.hook(kind)?;
+        Some((self.class_of_decl(class, hook.class)?, hook.method.clone()))
+    }
+
+    /// The function of the hook of `kind` the property `name` of `class`
+    /// carries, none for an abstract one or none at all.
+    pub(crate) fn property_hook_function(
+        &self,
+        class: ClassId,
+        name: &[u8],
+        kind: HookKind,
+    ) -> Option<Function> {
+        let hooked = self.hooked(class, name)?;
+        match kind {
+            HookKind::Get => hooked.get,
+            HookKind::Set => hooked.set,
+        }
+    }
+
+    /// [`crate::api::call::read_raw_property`].
+    pub(crate) fn read_raw(&mut self, object: PhpObject, name: &[u8]) -> Result<Value, Thrown> {
+        match self.hooked(object.class(), name) {
+            Some(hooked) if hooked.is_virtual => Err(self.hooked_error(
+                object,
+                name,
+                "Must not read from virtual property {class}::${name}",
+            )),
+            _ => self.read_backing(object, name, PropertyRead::Warning),
+        }
+    }
+
+    /// [`crate::api::call::write_raw_property`].
+    pub(crate) fn write_raw(
+        &mut self,
+        object: PhpObject,
+        name: PhpString,
+        value: Value,
+    ) -> Result<(), Thrown> {
+        let Some(hooked) = self.hooked(object.class(), name.as_bytes()) else {
+            return self.write_property(object, name, value);
+        };
+        if hooked.is_virtual {
+            let bytes = name.as_bytes().to_vec();
+            self.release(value);
+            self.release(Value::string(name));
+            return Err(self.hooked_error(
+                object,
+                &bytes,
+                "Must not write to virtual property {class}::${name}",
+            ));
+        }
+        if let Some(placed) = self.declared_slot(object.class(), name.as_bytes())
+            && object.heap().slot(placed.slot).is_undef()
+            && self.lazy_slot(object.heap(), placed.slot)
+        {
+            return self.lazy_write(object, name, value, false);
+        }
+        self.write_std_property(object, name, value)
+    }
+}
+
+impl Request {
+    /// [`crate::api::call::read_hooked_property`].
+    pub(crate) fn read_in_class_scope(
+        &mut self,
+        object: PhpObject,
+        name: &[u8],
+    ) -> Result<Value, Thrown> {
+        if let Some(hooked) = self.hooked(object.class(), name) {
+            return self.read_hooked(object, name, hooked, PropertyRead::Warning);
+        }
+        let table = self.object_handlers(object.heap());
+        table.read_property(self, object, name, PropertyRead::Warning)
+    }
+
+    /// [`crate::api::call::write_hooked_property`].
+    pub(crate) fn write_in_class_scope(
+        &mut self,
+        object: PhpObject,
+        name: PhpString,
+        value: Value,
+    ) -> Result<(), Thrown> {
+        let Some(hooked) = self.hooked(object.class(), name.as_bytes()) else {
+            let table = self.object_handlers(object.heap());
+            return table.write_property(self, object, name, value);
+        };
+        if hooked.set.is_none() && hooked.is_virtual {
+            let bytes = name.as_bytes().to_vec();
+            self.release(value);
+            self.release(Value::string(name));
+            return Err(self.hooked_error(
+                object,
+                &bytes,
+                "Property {class}::${name} is read-only",
+            ));
+        }
+        match hooked.set {
+            Some(set) if self.should_call_hook(&hooked, name.as_bytes(), object) => {
+                let served = self.call_hook(object, set, &[value]);
+                self.release(value);
+                self.release(Value::string(name));
+                let answered = served?;
+                self.release(answered);
+                Ok(())
+            }
+            _ => self.write_std_property(object, name, value),
+        }
+    }
+}
