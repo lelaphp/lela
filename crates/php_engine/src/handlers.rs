@@ -2219,7 +2219,7 @@ pub(crate) fn do_fcall<T: Tier>(
 }
 
 /// `ZEND_INCLUDE_OR_EVAL` (`Z/Zend/zend_vm_def.h:6544`), the four file
-/// constructs: the operand as a string (`zval_try_get_tmp_string`), the
+/// constructs and `eval`: the operand as a string (`zval_try_get_tmp_string`), the
 /// file resolved, compiled and put in the included-files table
 /// ([`Request::include_file`]), and its main op array served on a frame
 /// of its own that shares the includer's variables
@@ -2301,24 +2301,58 @@ pub(crate) fn do_fcall<T: Tier>(
 /// #1 %s(7): include('%s')
 /// #2 {main}
 /// ```
+///
+/// `eval` is the fifth arm, one opline with one path through here: the
+/// string compiled as the request's own unit ([`Request::eval_string`])
+/// and served on the same kind of frame an included file is, attached to
+/// the caller's variables, so what the string writes the caller reads.
+/// What it `return`s is the value; a string that returns nothing
+/// answers `null`, since `compile_string` ends its op array in `RETURN
+/// null`, and an empty string answers `false`, `compile_string`'s
+/// `NULL`, with no frame.
+///
+/// ```php
+/// function f($x) { $y = eval('return $x * 2;'); eval('$z = $y + 1;'); return [$y, $z]; }
+/// var_dump(f(3), eval(''), eval('$a = 1;'), $a, eval("?>raw\n<?php return __LINE__;"));
+/// ```
+/// ```expect
+/// raw
+/// array(2) {
+///   [0]=>
+///   int(6)
+///   [1]=>
+///   int(7)
+/// }
+/// bool(false)
+/// NULL
+/// int(1)
+/// int(2)
+/// ```
+///
+/// A throwable raised inside the string unwinds through the caller, and
+/// the frame the string ran on traces as `eval()` with no argument
+/// (`zend_fetch_debug_backtrace`'s `build_filename_arg = 0`), at the
+/// caller's line, while what it called traces at the string's own name.
+///
+/// ```php
+/// function boom() { throw new Exception('boom'); }
+/// try { eval("\n\nboom();"); } catch (Exception $e) { echo $e->getTraceAsString(), "\n"; }
+/// ```
+/// ```expect
+/// #0 %s(3) : eval()'d code(3): boom()
+/// #1 %s(3): eval()
+/// #2 {main}
+/// ```
 pub(crate) fn include_or_eval<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let kind = match exec::IncludeKind::of(op.extended_value) {
-        Some(exec::IncludeKind::Eval) => {
-            return Err(Fatal::Error(String::from(
-                "InternalError: an INCLUDE_OR_EVAL (eval), which the compiler does not emit yet",
-            )));
-        }
-        Some(kind) => kind,
-        None => {
-            return Err(Fatal::Error(String::from(
-                "InternalError: an INCLUDE_OR_EVAL whose extended_value names no construct",
-            )));
-        }
+    let Some(kind) = exec::IncludeKind::of(op.extended_value) else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: an INCLUDE_OR_EVAL whose extended_value names no construct",
+        )));
     };
     let operand = exec::operand(req, frame, code, op.op1_type, op.op1);
     let written = crate::ops::to_string(req, &operand);
@@ -2333,7 +2367,14 @@ pub(crate) fn include_or_eval<T: Tier>(
     };
     let returns_to =
         (op.out_type != OperandKind::Unused).then(|| (frame, exec::temporary_slot(code, op.out)));
-    let unit = match req.include_file(kind, &written) {
+    let opened = match kind {
+        exec::IncludeKind::Eval => req.eval_string(&written),
+        exec::IncludeKind::Include
+        | exec::IncludeKind::IncludeOnce
+        | exec::IncludeKind::Require
+        | exec::IncludeKind::RequireOnce => req.include_file(kind, &written),
+    };
+    let unit = match opened {
         Ok(Opened::Unit(unit)) => unit,
         Ok(Opened::Already) => return answered(req, frame, returns_to, Value::bool(true)),
         Ok(Opened::Failed) => return answered(req, frame, returns_to, Value::bool(false)),

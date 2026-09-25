@@ -111,7 +111,7 @@ use php_unit::{
 
 use php_syntax::magic_const_name;
 
-use crate::{CompileError, Options, StackLimit};
+use crate::{CompileError, Options, SourceKind, StackLimit};
 use args::{Args, Callee, Plan};
 use attributes::InternalAttribute;
 use imports::{Imports, Symbol};
@@ -971,7 +971,7 @@ pub(crate) fn unit(
         refused.raised = emit.diagnostics;
         return Err(refused);
     }
-    let main = emit.finish(true, 1, lines.max(1))?;
+    let main = emit.finish(options.kind == SourceKind::File, 1, lines.max(1))?;
     let line = emit.line;
     let mut dynamic = Vec::with_capacity(emit.dynamic.len());
     for def in emit.dynamic {
@@ -7671,7 +7671,10 @@ impl Emit<'_> {
                 let target = self.required(tree[id].target, "an `empty`")?;
                 self.isset_or_empty(target, true)
             }
-            tree::Expr::EvalExpr(_) => Err(self.unread("an `eval`")),
+            tree::Expr::EvalExpr(id) => {
+                let code = self.required(tree[id].code, "an `eval`")?;
+                self.include_or_eval(IncludeKind::Eval, code)
+            }
             tree::Expr::CallExpr(id) => self.call_of(id, line),
             tree::Expr::MemberAccessExpr(id) => {
                 let name = self.member_name_of(id, line)?;
@@ -8129,9 +8132,9 @@ impl Emit<'_> {
     /// the operand, then one `INCLUDE_OR_EVAL` over it into a `VAR`, the
     /// construct's bit ([`IncludeKind::attr`]) in `extended_value`;
     /// `zend_do_free` marks the `VAR` unused where nothing reads it, as
-    /// it marks a call's. The engine's handler resolves the path, serves
-    /// the file on a frame of its own and leaves what it returned in the
-    /// `VAR`.
+    /// it marks a call's. The engine's handler resolves the path, or
+    /// compiles the string for an `eval`, serves the code on a frame of
+    /// its own and leaves what it returned in the `VAR`.
     ///
     /// ```php
     /// $n = ($n ?? 0) + 1;
@@ -8146,6 +8149,19 @@ impl Emit<'_> {
     /// int(30)
     /// bool(true)
     /// bool(true)
+    /// ```
+    ///
+    /// `eval` is the same opline under `ZEND_EVAL`, its operand the
+    /// string, whatever expression computes it:
+    ///
+    /// ```php
+    /// $a = 1;
+    /// var_dump(eval('return $a + 1;'), eval('$b = ' . '2;'), $b);
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// NULL
+    /// int(2)
     /// ```
     fn include_or_eval(
         &mut self,
@@ -11159,7 +11175,8 @@ impl Emit<'_> {
             // `zend_compile_throw` emits an opline whatever stands
             // around it, so a `throw` folds to nothing, and
             // `zend_compile_include_or_eval` emits its opline the same
-            // way; `zend_compile_isset_or_empty` emits one over the CV.
+            // way for a file and for an `eval`;
+            // `zend_compile_isset_or_empty` emits one over the CV.
             tree::Expr::ThrowExpr(_) => Err(self.fatal("a `throw` is no constant expression")),
             tree::Expr::IncludeExpr(_) => Err(self.fatal("an `include` is no constant expression")),
             tree::Expr::IssetExpr(_) | tree::Expr::EmptyExpr(_) => {
@@ -11171,7 +11188,7 @@ impl Emit<'_> {
             // `zend_compile_print` emits its `ECHO` whatever stands
             // around it, so a `print` folds to nothing.
             tree::Expr::PrintExpr(_) => Err(self.fatal("a `print` is no constant expression")),
-            tree::Expr::EvalExpr(_) => Err(self.unread("an `eval`")),
+            tree::Expr::EvalExpr(_) => Err(self.fatal("an `eval` is no constant expression")),
             // `zend_compile_yield` emits its opline whatever stands
             // around it.
             tree::Expr::YieldExpr(_) | tree::Expr::YieldFromExpr(_) => {
@@ -14349,14 +14366,15 @@ mod tests {
 // magic constant a `__LINE__` is, which operator a `+` is, which type a
 // cast is to, which of the four step nodes a `++` is, and how a
 // variable piece of an interpolated string was written (design §4.9).
-/// Which of the four file constructs an `include` is: php's
-/// `ZEND_INCLUDE`, `ZEND_INCLUDE_ONCE`, `ZEND_REQUIRE` and
-/// `ZEND_REQUIRE_ONCE` (`Z/Zend/zend_compile.h:1076-1079`), one bit
-/// each, which the parser puts in the node's `attr` and
-/// `zend_compile_include_or_eval` copies into the opline's
-/// `extended_value`.
+/// Which of the five constructs of `ZEND_AST_INCLUDE_OR_EVAL` a node
+/// is: php's `ZEND_EVAL`, `ZEND_INCLUDE`, `ZEND_INCLUDE_ONCE`,
+/// `ZEND_REQUIRE` and `ZEND_REQUIRE_ONCE`
+/// (`Z/Zend/zend_compile.h:1075-1079`), one bit each, which the parser
+/// puts in the node's `attr` and `zend_compile_include_or_eval` copies
+/// into the opline's `extended_value`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IncludeKind {
+    Eval,
     Include,
     IncludeOnce,
     Require,
@@ -14367,6 +14385,7 @@ impl IncludeKind {
     /// The bit php names the construct by.
     fn attr(self) -> u32 {
         match self {
+            IncludeKind::Eval => 1,
             IncludeKind::Include => 1 << 1,
             IncludeKind::IncludeOnce => 1 << 2,
             IncludeKind::Require => 1 << 3,

@@ -54,6 +54,8 @@ use php_unit::{Diagnostic, Level, Unit};
 pub struct Options {
     /// The file name the unit and its errors carry.
     pub filename: Name,
+    /// Whether the source is a file or the string an `eval` hands over.
+    pub kind: SourceKind,
     /// The working directory of the request the unit compiles for,
     /// php's virtual one under ZTS (`VCWD_GETCWD`), which is what
     /// `__DIR__` folds to where `zend_dirname` over `filename` answers
@@ -113,6 +115,7 @@ impl Default for Options {
     fn default() -> Options {
         Options {
             filename: Name::default(),
+            kind: SourceKind::File,
             cwd: Vec::new(),
             strict_types: false,
             precision: 14,
@@ -123,6 +126,25 @@ impl Default for Options {
             stack: StackLimit::UNCHECKED,
         }
     }
+}
+
+/// What the source is, the `type` php's `zend_compile` is called with
+/// (`Z/Zend/zend_language_scanner.l:593`): what the scanner begins in
+/// and what the main op array's implicit final return answers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SourceKind {
+    /// `compile_file`'s `ZEND_USER_FUNCTION`: a file, which begins in
+    /// inline HTML and whose main op array ends in `RETURN int(1)`, the
+    /// value an `include` of it answers where it returns nothing.
+    #[default]
+    File,
+    /// `compile_string`'s `ZEND_EVAL_CODE` at
+    /// `ZEND_COMPILE_POSITION_AFTER_OPEN_TAG`, the string an `eval`
+    /// hands over (`Z/Zend/zend_execute.c:5354`): it begins in code, as
+    /// though an open tag stood before its first byte, and its main op
+    /// array ends in `RETURN null`, the value an `eval` of it answers
+    /// where it returns nothing.
+    Eval,
 }
 
 /// A compile-time fatal: php's message, at php's line, at the level
@@ -196,6 +218,10 @@ pub fn compile_source(
     let syntax = php_syntax::Options {
         lex: php_syntax::LexOptions {
             short_open_tag: options.short_open_tag,
+            position: match options.kind {
+                SourceKind::File => php_syntax::Position::AtOpenTag,
+                SourceKind::Eval => php_syntax::Position::AfterOpenTag,
+            },
         },
         ..php_syntax::Options::default()
     };
@@ -2263,6 +2289,51 @@ mod tests {
         );
     }
 
+    /// The oracle's dump of `eval` (#573), the fifth construct of
+    /// `zend_compile_include_or_eval`: one `INCLUDE_OR_EVAL (eval)` over
+    /// the string, into a `VAR` that `zend_do_free` marks unused where
+    /// nothing reads it, as it marks an `include`'s; the operand of the
+    /// second is the whole `$x . "b"`, so the `CONCAT` stands before it.
+    #[test]
+    fn eval_is_the_fifth_include_or_eval() {
+        assert_eq!(
+            dump_of(b"<?php $r = eval(\"return 1;\"); eval($x . \"b\");"),
+            main_dump(
+                5,
+                2,
+                4,
+                "0000 V2 = INCLUDE_OR_EVAL (eval) string(\"return 1;\")\n\
+                 0001 ASSIGN CV0($r) V2\n\
+                 0002 T4 = CONCAT CV1($x) string(\"b\")\n\
+                 0003 INCLUDE_OR_EVAL (eval) T4\n\
+                 0004 RETURN int(1)\n"
+            )
+        );
+    }
+
+    /// The string an `eval` hands over, compiled as `compile_string`
+    /// compiles it (#573): code from its first byte, where a file's is
+    /// inline HTML, and a main op array that ends in `RETURN null`,
+    /// where a file's ends in `RETURN int(1)`.
+    #[test]
+    fn an_eval_string_begins_in_code_and_returns_null() {
+        let options = Options {
+            kind: SourceKind::Eval,
+            ..bundled()
+        };
+        let mut strings = php_heap::Strings::new();
+        let unit = compile_source(b"echo 1; ?>x", &options, &mut strings).unwrap_or_default();
+        assert_eq!(
+            unit.dump(&[]),
+            main_dump(
+                3,
+                0,
+                0,
+                "0000 ECHO int(1)\n0001 ECHO string(\"x\")\n0002 RETURN null\n"
+            )
+        );
+    }
+
     /// The oracle's dump of `echo nope($a);` (#252), a name php's
     /// function table has not: `zend_compile_dynamic_call`'s
     /// `INIT_FCALL_BY_NAME` with the argument count and no used stack,
@@ -3348,9 +3419,12 @@ mod tests {
             line: 0,
             raised: Vec::new(),
         };
-        let error = refused(b"<?php\n$a = (eval('1;'));\n").unwrap_or_else(compiled);
+        let error = refused(b"<?php\n$a = (new class {});\n").unwrap_or_else(compiled);
         assert_eq!(error.level, Level::Parse);
-        assert_eq!(error.message, "an `eval` this compiler cannot read yet");
+        assert_eq!(
+            error.message,
+            "an anonymous class this compiler cannot read yet"
+        );
         assert_eq!(error.line, 2);
         let unclosed = refused(b"<?php\n$a = (1 + 2;\n").unwrap_or_else(compiled);
         assert_eq!(unclosed.message, "syntax error, unexpected token \";\"");

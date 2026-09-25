@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 
-use php_compile::{CompileError, StackLimit};
+use php_compile::{CompileError, SourceKind, StackLimit};
 use php_heap::{Fatal, FrameRef, Intern, Strings, Zval};
 use php_unit::decl::{ClassDecl, ConstDecl, ConstExpr, FunctionDecl, MethodDecl, Name};
 use php_unit::{FramelessEntry, Unit, frameless_table};
@@ -419,15 +419,17 @@ fn link_trampolines(
 }
 
 /// Where a unit is compiled from, as the request describes it: the name
-/// the unit and its diagnostics carry, `CG(compiled_filename)`, and the
+/// the unit and its diagnostics carry, `CG(compiled_filename)`, the
 /// working directory `__DIR__` folds to where that name has no directory
-/// (`VCWD_GETCWD`, the request's own under ZTS), which is
-/// [`RequestDescription::cwd`] for a request and the process's for a
-/// unit compiled outside one ([`Engine::unit`]).
+/// (`VCWD_GETCWD`, the request's own under ZTS), which is the request's
+/// for a request and the process's for a unit compiled outside one
+/// ([`Engine::unit`]), and whether the source is a file or the string an
+/// `eval` handed over ([`SourceKind`]).
 #[derive(Clone, Copy)]
 struct Origin<'a> {
     filename: &'a [u8],
     cwd: &'a Path,
+    kind: SourceKind,
 }
 
 /// What the engine has declared, as the compiler reads it: php's
@@ -487,6 +489,43 @@ impl Shared {
         )
     }
 
+    /// One source compiled for one request alone, under the request's
+    /// ini and working directory, its constant strings interned into the
+    /// request's own memory and gone with it (design §5.2): a source the
+    /// host handed over, and the string an `eval` hands over
+    /// ([`SourceKind::Eval`]), as php holds what it compiles for `-r`
+    /// and for `eval`. Such a unit is never published: nothing outside
+    /// the request reaches it, and it lives as long as the frame serving
+    /// it or the functions and classes it declared.
+    pub(crate) fn compile_for(
+        &self,
+        req: &mut Request,
+        source: &[u8],
+        filename: &[u8],
+        kind: SourceKind,
+    ) -> Result<Arc<Unit>, CompileError> {
+        let ini = CompileIni {
+            precision: req.precision(),
+            short_open_tag: req.short_open_tag(),
+        };
+        let cwd = req.cwd().0;
+        let origin = Origin {
+            filename,
+            cwd: &cwd,
+            kind,
+        };
+        let stack = req.stack_limit();
+        compile(
+            source,
+            origin,
+            ini,
+            self.declared(),
+            stack,
+            req.heap_mut(),
+            &self.map_ptr_last,
+        )
+    }
+
     /// `zend_call_stack_init` on the calling thread, from the startup
     /// ini's `zend.max_allowed_stack_size` and `zend.reserved_stack_size`
     /// (`Z/Zend/zend.c:277-279`), as php runs it once per thread at
@@ -538,6 +577,7 @@ impl Shared {
                 Origin {
                     filename: path,
                     cwd,
+                    kind: SourceKind::File,
                 },
                 stack,
             ))
@@ -1143,6 +1183,7 @@ impl Engine {
         let origin = Origin {
             filename,
             cwd: &cwd,
+            kind: SourceKind::File,
         };
         self.shared.publish(source, origin, stack).ok()
     }
@@ -1187,6 +1228,7 @@ impl Engine {
                 let origin = Origin {
                     filename: &script,
                     cwd: &description.cwd,
+                    kind: SourceKind::File,
                 };
                 self.shared.publish(source, origin, stack).ok()?
             }
@@ -1305,24 +1347,10 @@ impl Engine {
         // interned into this request's own memory and gone with it, as
         // php holds what it compiles for `-r` and for `eval`.
         let compiled = if let Some(source) = source {
-            let ini = CompileIni {
-                precision: req.precision(),
-                short_open_tag: req.short_open_tag(),
-            };
-            let shared = Arc::clone(&self.shared);
-            let stack = req.stack_limit();
-            Some(compile(
-                &source,
-                Origin {
-                    filename: &script,
-                    cwd: &cwd,
-                },
-                ini,
-                shared.declared(),
-                stack,
-                req.heap_mut(),
-                &shared.map_ptr_last,
-            ))
+            Some(
+                self.shared
+                    .compile_for(&mut req, &source, &script, SourceKind::File),
+            )
         } else {
             req.note_primary_file(&script);
             self.shared.cached(&script, &cwd, req.stack_limit())
@@ -1444,6 +1472,7 @@ fn compile(
 ) -> Result<Arc<Unit>, CompileError> {
     let options = php_compile::Options {
         filename: Name(origin.filename.into()),
+        kind: origin.kind,
         cwd: origin.cwd.as_os_str().as_encoded_bytes().to_vec(),
         strict_types: false,
         precision: ini.precision,
@@ -2685,6 +2714,7 @@ mod tests {
                 Origin {
                     filename: b"witness.php",
                     cwd: Path::new(""),
+                    kind: SourceKind::File,
                 },
                 CompileIni {
                     precision: 14,

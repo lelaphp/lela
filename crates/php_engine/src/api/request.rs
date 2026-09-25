@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
-use php_compile::{CompileError, StackLimit};
+use php_compile::{CompileError, SourceKind, StackLimit};
 use php_heap::{
     Arr, Fatal, FrameRef, Heap, HeapHooks, Intern, MapTable, Obj, Ref, Res, ResourceType, Slot,
     SortEntry, VmStack, Zval, ZvalRef,
@@ -1117,9 +1117,9 @@ pub(crate) struct SymbolTable {
 
 /// What `zend_include_or_eval` handed the handler: `ZEND_FAKE_OP_ARRAY`,
 /// a once form over a path the table already had, which answers `true`;
-/// `NULL`, a path nothing opened, which answers `false`; or the unit of
-/// the file, whose main op array the handler serves on a frame of its
-/// own.
+/// `NULL`, a path nothing opened or an empty string to `eval`, which
+/// answers `false`; or the unit of the file or the string, whose main op
+/// array the handler serves on a frame of its own.
 pub(crate) enum Opened {
     Already,
     Failed,
@@ -3279,7 +3279,8 @@ impl Request {
                         else {
                             continue;
                         };
-                        let file = (at > 0)
+                        // `build_filename_arg`: an `eval` names no file.
+                        let file = (at > 0 && kind != IncludeKind::Eval)
                             .then(|| exec::body_of(&state.unit, state.body))
                             .flatten()
                             .map(|code| code.filename.0.to_vec());
@@ -10168,6 +10169,79 @@ impl Request {
                 self.open_stream_failed(kind, written, &reason);
                 self.failed_opening(kind, written)
             }
+        }
+    }
+
+    /// `zend_include_or_eval`'s `ZEND_EVAL` arm
+    /// (`Z/Zend/zend_execute.c:5354`): the string compiled as
+    /// `compile_string` compiles it, from after an open tag and ending in
+    /// `RETURN null` ([`SourceKind::Eval`]), under the name
+    /// `zend_make_compiled_string_description` gives it, the file and
+    /// line the `eval` stands at and `: eval()'d code`, which is what
+    /// `__FILE__` folds to inside it and what a diagnostic raised in it
+    /// names. The unit is this request's own, compiled into its memory
+    /// and never published ([`Shared::compile_for`]). An empty string is
+    /// `compile_string`'s `NULL` with nothing raised, which the handler
+    /// answers `false` for ([`Opened::Failed`]); a string the compiler
+    /// refuses is raised as an included file's refusal is, at the name
+    /// the unit would have carried.
+    ///
+    /// ```php
+    /// eval("echo __FILE__, ' ', __LINE__, \"\\n\";\necho \$nope;");
+    /// ```
+    /// ```expect
+    /// %s(2) : eval()'d code 1
+    ///
+    /// Warning: Undefined variable $nope in %s(2) : eval()'d code on line 2
+    /// ```
+    ///
+    /// A parse error in the string is the `ParseError` `zendparse`
+    /// throws, at the string's name and the line it stopped on, which
+    /// the caller may catch; one nothing catches ends the request as
+    /// php's `Parse error`. A refusal after the parse is the
+    /// `E_COMPILE_ERROR` that ends the request.
+    ///
+    /// ```php
+    /// try { eval("\n1 +;"); } catch (ParseError $e) { echo get_class($e), ": ", $e->getMessage(), " in ", $e->getFile(), ":", $e->getLine(), "\n"; }
+    /// eval('$a = ;');
+    /// ```
+    /// ```expect exit=255
+    /// ParseError: syntax error, unexpected token ";" in %s(2) : eval()'d code:2
+    ///
+    /// Parse error: syntax error, unexpected token ";" in %s(3) : eval()'d code on line 1
+    /// ```
+    ///
+    /// ```php
+    /// eval('break;');
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: 'break' not in the 'loop' or 'switch' context in %s(2) : eval()'d code on line 1
+    /// ```
+    ///
+    /// The unit lives as long as what holds it: the frame while the
+    /// string runs, and after it the functions, classes and closures
+    /// the string declared, which the request keeps as it keeps a file's.
+    ///
+    /// ```php
+    /// $f = eval('function g() { return "g"; } class K { const C = "k"; } return fn() => "closure";');
+    /// var_dump(g(), K::C, $f(), function_exists('g'));
+    /// ```
+    /// ```expect
+    /// string(1) "g"
+    /// string(1) "k"
+    /// string(7) "closure"
+    /// bool(true)
+    /// ```
+    pub(crate) fn eval_string(&mut self, code: &[u8]) -> Result<Opened, Thrown> {
+        if code.is_empty() {
+            return Ok(Opened::Failed);
+        }
+        let mut name = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
+        name.extend_from_slice(format!("({}) : eval()'d code", self.current_line()).as_bytes());
+        let shared = Arc::clone(&self.shared);
+        match shared.compile_for(self, code, &name, SourceKind::Eval) {
+            Ok(unit) => Ok(Opened::Unit(unit)),
+            Err(refused) => Err(self.refused_include(&refused, &name)),
         }
     }
 
