@@ -58,6 +58,7 @@ mod attr;
 mod class;
 mod enums;
 mod func;
+mod lazy;
 mod member;
 mod signature;
 mod stub;
