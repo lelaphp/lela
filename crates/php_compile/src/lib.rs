@@ -6757,22 +6757,31 @@ class C {
         );
     }
 
-    /// `zend_compile_array`'s `...` and `&` arms against the oracle's
-    /// dump: a `...` first is an `INIT_ARRAY` with no operand and no
-    /// count, the string key still marks it `ZEND_ARRAY_NOT_PACKED`, and
-    /// a `&` element is the write fetch and `ZEND_ARRAY_ELEMENT_REF`. A
-    /// constant array spread into a constant array folds.
+    /// `zend_compile_array`'s `...` and `&` arms and `zend_compile_args`'
+    /// unpack arm against the oracle's dump: a `...` first is an
+    /// `INIT_ARRAY` with no operand and no count, the string key still
+    /// marks it `ZEND_ARRAY_NOT_PACKED`, a `&` element is the write fetch
+    /// and `ZEND_ARRAY_ELEMENT_REF`, and an argument after an unpacked
+    /// one is sent by name for a callee nothing is known of, under a
+    /// `CHECK_UNDEF_ARGS`. A constant array spread into a constant array
+    /// folds.
     #[test]
-    fn a_spread_and_a_reference_element_are_emitted_as_php_emits_them() {
+    fn a_spread_a_reference_element_and_an_unpacked_argument_are_emitted_as_php_emits_them() {
         assert_eq!(
-            oplines_of(b"<?php $z = [...$x, 'k' => &$x[0], &$w];"),
+            oplines_of(b"<?php $z = [...$x, 'k' => &$x[0], &$w]; f(1, ...$x, c: 2);"),
             "0000 T3 = INIT_ARRAY 0 NEXT\n\
              0001 T3 = ADD_ARRAY_UNPACK CV1($x)\n\
              0002 V4 = FETCH_DIM_W CV1($x) int(0)\n\
              0003 T3 = ADD_ARRAY_ELEMENT (ref) V4 string(\"k\")\n\
              0004 T3 = ADD_ARRAY_ELEMENT (ref) CV2($w) NEXT\n\
              0005 ASSIGN CV0($z) T3\n\
-             0006 RETURN int(1)\n\
+             0006 INIT_FCALL_BY_NAME 1 string(\"f\")\n\
+             0007 SEND_VAL_EX int(1) 1\n\
+             0008 SEND_UNPACK CV1($x)\n\
+             0009 SEND_VAL_EX int(2) string(\"c\")\n\
+             0010 CHECK_UNDEF_ARGS\n\
+             0011 DO_FCALL_BY_NAME\n\
+             0012 RETURN int(1)\n\
              LIVE RANGES:\n\
              \x20    3: 0001 - 0005 (tmp/var)\n"
         );
@@ -6780,6 +6789,10 @@ class C {
             oplines_of(b"<?php $q = [...[1, 2], 3, ...['k' => 4]];"),
             "0000 ASSIGN CV0($q) array(...)\n\
              0001 RETURN int(1)\n"
+        );
+        assert_eq!(
+            refused_message(b"<?php\nf(...$a, 1);\n").as_deref(),
+            Some("Cannot use positional argument after argument unpacking")
         );
     }
 
