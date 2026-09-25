@@ -117,6 +117,7 @@ pub(crate) fn object_to_string(
     let class = object.class();
     if req.method_named(class, b"__tostring").is_some() {
         let returned = crate::api::call::call_method(req, &object, b"__toString", &[])?;
+        let returned = req.unwrap_reference(returned);
         if let Some(text) = returned.as_php_string() {
             return Ok(*text);
         }

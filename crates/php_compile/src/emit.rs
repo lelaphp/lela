@@ -6158,6 +6158,59 @@ impl Emit<'_> {
     /// ```expect
     /// string(2) "ok"
     /// ```
+    ///
+    /// A property, a class's property, `$this`, a property under a
+    /// property and a variable the program names are the variable
+    /// fetched by reference too ([`Self::var_by_ref`]); what is no
+    /// variable is `ZEND_RETURNS_VALUE` and a call `ZEND_RETURNS_FUNCTION`,
+    /// each php's notice where no reference comes back:
+    ///
+    /// ```php
+    /// class C {
+    ///     public $p = [1]; public static $s = 2; public $o;
+    ///     function &prop() { return $this->p; }
+    ///     function &elem() { return $this->p[0]; }
+    ///     function &stat() { return self::$s; }
+    ///     function &me() { return $this; }
+    ///     function &deep() { return $this->o->q; }
+    ///     function &byname() { $n = 'x'; $x = 5; return $$n; }
+    ///     function &val() { return 1 + 1; }
+    ///     function &call() { return $this->val(); }
+    /// }
+    /// $c = new C; $c->o = new stdClass;
+    /// $r = &$c->prop(); $r[] = 2; var_dump($c->p);
+    /// $e = &$c->elem(); $e = 9; var_dump($c->p);
+    /// $s = &$c->stat(); $s = 3; var_dump(C::$s);
+    /// $d = &$c->deep(); $d = 'q'; var_dump($c->o);
+    /// var_dump($c->me() === $c, $c->byname(), $c->val(), $c->call());
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   [0]=>
+    ///   int(1)
+    ///   [1]=>
+    ///   int(2)
+    /// }
+    /// array(2) {
+    ///   [0]=>
+    ///   &int(9)
+    ///   [1]=>
+    ///   int(2)
+    /// }
+    /// int(3)
+    /// object(stdClass)#2 (1) {
+    ///   ["q"]=>
+    ///   &string(1) "q"
+    /// }
+    ///
+    /// Notice: Only variable references should be returned by reference in %s on line 10
+    ///
+    /// Notice: Only variable references should be returned by reference in %s on line 10
+    /// bool(true)
+    /// int(5)
+    /// int(2)
+    /// int(2)
+    /// ```
     fn r#return(&mut self, value: Option<tree::Expr>) -> Result<(), CompileError> {
         // For a generator the `&` is its yields', not its return's.
         let generator = self.fn_flags.generator;
@@ -6165,34 +6218,35 @@ impl Emit<'_> {
         let written = value.map(|value| self.peel(value));
         // `zend_assert_not_short_circuited` over a variable returned by
         // reference.
-        if by_ref && written.is_some_and(|expr| self.is_short_circuited(expr)) {
+        // `zend_is_variable`, the `ZEND_AST_VAR` of a name the program
+        // computes among them.
+        let variable = written.is_some_and(|expr| {
+            self.is_variable(expr)
+                || matches!(
+                    expr,
+                    tree::Expr::VarVarExpr(_) | tree::Expr::DynamicVarExpr(_)
+                )
+        });
+        if by_ref && variable && written.is_some_and(|expr| self.is_short_circuited(expr)) {
             return Err(self.compile_error("Cannot take reference of a nullsafe chain"));
         }
-        if by_ref
-            && written.is_some_and(|expr| {
-                matches!(expr, tree::Expr::MemberAccessExpr(_))
-                    || self.is_static_prop(expr)
-                    || self.is_this(expr)
-            })
-        {
-            return Err(self.fatal(
-                "a return by reference of what is no variable this compiler cannot read yet",
-            ));
-        }
+        // `ZEND_RETURNS_FUNCTION` over a call and `ZEND_RETURNS_VALUE`
+        // over what is no variable, the two the handler raises php's
+        // notice for where no reference comes back.
         let extended_value = match written {
             Some(_) if !by_ref => 0,
-            Some(tree::Expr::CallExpr(_)) => RETURNS_FUNCTION,
-            Some(tree::Expr::SimpleVarExpr(_) | tree::Expr::SubscriptExpr(_)) | None => 0,
-            Some(_) => RETURNS_VALUE,
+            Some(expr) if self.is_call(expr) => RETURNS_FUNCTION,
+            Some(_) if !variable => RETURNS_VALUE,
+            _ => 0,
         };
         // `zend_compile_var(BP_VAR_W, 1)` over a variable returned by
-        // reference: a dimension is fetched for writing, so the cell the
-        // caller is bound to is the array's own slot.
+        // reference ([`Self::var_by_ref`]): the cell the caller is bound
+        // to is the variable's own, an element's or a property's slot.
         let compiled = match written {
-            Some(expr @ tree::Expr::SubscriptExpr(_)) if by_ref => {
-                let (_, at) = self.var_for_reference(expr)?;
-                Where::Returned(at)
-            }
+            Some(expr) if by_ref && variable => match self.var_by_ref(expr)? {
+                (OperandKind::Cv, at) => Where::Cv(at),
+                (_, at) => Where::Returned(at),
+            },
             Some(expr) => self.expr(expr)?,
             None => Where::Constant(Zval::null()),
         };
@@ -9103,18 +9157,51 @@ impl Emit<'_> {
         Ok(self.base_fetch(held, Fetch::Write, Over::Ref))
     }
 
+    /// `zend_compile_var(…, BP_VAR_W, 1)`, a variable fetched by
+    /// reference, what the right of a `= &` and a `return` by reference
+    /// compile: a plain variable is its CV; a dimension, a property, a
+    /// `static` property and a variable the program names are the `_W`
+    /// fetch of the whole chain with the `&`'s own bit on its last opline
+    /// ([`Self::var_for_reference`]); `$this` is `FETCH_THIS` into a
+    /// `VAR` (`zend_compile_simple_var`'s `is_this_fetch` arm, whose
+    /// opline writes a `VAR` and not a temporary under `BP_VAR_W`); a call
+    /// is the `VAR` it returned into; and everything else is
+    /// `zend_compile_var_inner`'s default arm, php's
+    /// `Cannot use temporary expression in write context`.
+    fn var_by_ref(&mut self, node: tree::Expr) -> Result<(OperandKind, u32), CompileError> {
+        let line = self.line;
+        Ok(match self.peel(node) {
+            tree::Expr::SimpleVarExpr(id) => match self.simple_var_of(id, line)? {
+                SimpleVar::Cv(name) => (OperandKind::Cv, self.lookup_cv(&name)),
+                SimpleVar::This => {
+                    let this = self.fetch_this(OperandKind::Var);
+                    self.operand(this)
+                }
+            },
+            node @ (tree::Expr::SubscriptExpr(_)
+            | tree::Expr::MemberAccessExpr(_)
+            | tree::Expr::VarVarExpr(_)
+            | tree::Expr::DynamicVarExpr(_)) => self.var_for_reference(node)?,
+            node @ tree::Expr::ScopedAccessExpr(id)
+                if matches!(self.scoped_of(id, line)?, Scoped::Property { .. }) =>
+            {
+                self.var_for_reference(node)?
+            }
+            node @ tree::Expr::CallExpr(_) => {
+                let returned = self.expr(node)?;
+                self.operand(returned)
+            }
+            _ => {
+                return Err(self.compile_error("Cannot use temporary expression in write context"));
+            }
+        })
+    }
+
     /// `zend_compile_var(&source_node, source_ast, BP_VAR_W, 1)` and the
     /// `MAKE_REF` after it, what stands on the right of a `= &`
-    /// (`zend_compile_assign_ref`, `Z/Zend/zend_compile.c:3568`): a
-    /// plain variable is its CV; a dimension, a property and a `static`
-    /// property are the `_W` fetch of the whole chain with the `&`'s own
-    /// bit on its last opline ([`Self::var_for_reference`]); `$this` is
-    /// `FETCH_THIS` into a `VAR` (`zend_compile_simple_var`'s
-    /// `is_this_fetch` arm, whose opline writes a `VAR` and not a
-    /// temporary under `BP_VAR_W`); a call is the `VAR` it returned
-    /// into; and
-    /// everything else is `zend_compile_var_inner`'s default arm,
-    /// `Cannot use temporary expression in write context`.
+    /// (`zend_compile_assign_ref`, `Z/Zend/zend_compile.c:3568`): the
+    /// variable fetched by reference ([`Self::var_by_ref`]), after
+    /// `zend_assert_not_short_circuited`.
     ///
     /// `MAKE_REF` stands over what that left where the target is not a
     /// plain `$name` and the source is no CV, php's fix for bug #71539:
@@ -9138,37 +9225,12 @@ impl Emit<'_> {
         plain_target: bool,
     ) -> Result<(OperandKind, u32, u32), CompileError> {
         self.check_stack()?;
-        let line = self.line;
         let node = self.peel(source);
         // `zend_assert_not_short_circuited`.
         if self.is_short_circuited(node) {
             return Err(self.compile_error("Cannot take reference of a nullsafe chain"));
         }
-        let (kind, at) = match node {
-            tree::Expr::SimpleVarExpr(id) => match self.simple_var_of(id, line)? {
-                SimpleVar::Cv(name) => (OperandKind::Cv, self.lookup_cv(&name)),
-                SimpleVar::This => {
-                    let this = self.fetch_this(OperandKind::Var);
-                    self.operand(this)
-                }
-            },
-            tree::Expr::SubscriptExpr(_)
-            | tree::Expr::MemberAccessExpr(_)
-            | tree::Expr::VarVarExpr(_)
-            | tree::Expr::DynamicVarExpr(_) => self.var_for_reference(node)?,
-            tree::Expr::ScopedAccessExpr(id)
-                if matches!(self.scoped_of(id, line)?, Scoped::Property { .. }) =>
-            {
-                self.var_for_reference(node)?
-            }
-            tree::Expr::CallExpr(_) => {
-                let returned = self.expr(node)?;
-                self.operand(returned)
-            }
-            _ => {
-                return Err(self.compile_error("Cannot use temporary expression in write context"));
-            }
-        };
+        let (kind, at) = self.var_by_ref(node)?;
         // Bug #71539: `zend_emit_op(&source_node, ZEND_MAKE_REF,
         // &source_node, NULL)`, and `source_node` is the `VAR` it wrote
         // from here on, which is the node the arm below reads.

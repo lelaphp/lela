@@ -7563,6 +7563,35 @@ impl Request {
         self.release_symbol(symbol);
     }
 
+    /// `zend_unwrap_reference`: a reference a call handed back, which a
+    /// method declared `&__toString` or `&__debugInfo` does, given up for
+    /// the value it holds, one owner of that the caller's; any other
+    /// value as it stands.
+    ///
+    /// ```php
+    /// class S { private $s = 'x'; function &__toString(): string { return $this->s; } }
+    /// echo new S, "\n", (string) new S, "\n";
+    /// class D { private $d = ['k' => 1]; function &__debugInfo(): array { return $this->d; } }
+    /// var_dump(new D);
+    /// ```
+    /// ```expect
+    /// x
+    /// x
+    /// object(D)#1 (1) {
+    ///   ["k"]=>
+    ///   int(1)
+    /// }
+    /// ```
+    pub(crate) fn unwrap_reference(&mut self, value: Value) -> Value {
+        let Some(cell) = value.as_php_ref() else {
+            return value;
+        };
+        let held = cell.get();
+        self.addref(&held);
+        self.release(value);
+        held
+    }
+
     /// `zend_hash_del_ind`, what `UNSET_VAR` deletes a name by: a name
     /// attached to a CV keeps its bucket and the CV is emptied, what it
     /// held released after (`ZVAL_UNDEF` then the destructor); any other
@@ -8339,6 +8368,7 @@ impl Request {
                     return Ok(None);
                 }
                 let value = crate::api::call::call_method(self, &object, b"__toString", &[])?;
+                let value = self.unwrap_reference(value);
                 if value.as_php_string().is_some() {
                     return Ok(Some(value));
                 }
@@ -8414,6 +8444,7 @@ impl Request {
             return self.lazy_debug_info(object);
         }
         let value = crate::api::call::call_method(self, &object, b"__debugInfo", &[])?;
+        let value = self.unwrap_reference(value);
         match value.as_array() {
             // The array the method returned, its one owner the caller's,
             // which is php's `*is_temp = 1` over the same table.

@@ -3051,6 +3051,28 @@ pub(crate) fn recv_variadic<T: Tier>(
 /// #1 {main}
 ///   thrown in %s on line 2
 /// ```
+///
+/// A property returned by reference is the place its fetch found, read
+/// through, and a value the declared type coerces is written back into
+/// it:
+///
+/// ```php
+/// class C { public $a = [1]; public $f = 1;
+///     function &get(): array { return $this->a; }
+///     function &num(): float { return $this->f; } }
+/// $c = new C; $r = &$c->get(); $r[] = 2; var_dump($c->a);
+/// $n = &$c->num(); var_dump($n, $c->f);
+/// ```
+/// ```expect
+/// array(2) {
+///   [0]=>
+///   int(1)
+///   [1]=>
+///   int(2)
+/// }
+/// float(1)
+/// float(1)
+/// ```
 pub(crate) fn verify_return_type<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -3070,7 +3092,19 @@ pub(crate) fn verify_return_type<T: Tier>(
         let thrown = return_type_error(req, frame, &ty, None);
         return threw(req, frame, &thrown);
     }
-    let returned = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
+    // A `VAR` a by-reference return fetched is the place it found, read
+    // through (`Z_INDIRECT_P(retval_ptr)`), and a coerced value lands in
+    // that place.
+    let indirect = match op.op1_type {
+        OperandKind::Var => req
+            .slot_ptr(frame, exec::temporary_slot(code, op.op1))
+            .and_then(|at| at.read().as_indirect()),
+        _ => None,
+    };
+    let returned = match indirect {
+        Some(place) => exec::value_of(place.read()).deref(),
+        None => exec::operand(req, frame, code, op.op1_type, op.op1).deref(),
+    };
     if crate::api::coerce::holds(req, &returned, &ty, req.frame_scopes(frame)) {
         return Ok(advance(req, frame));
     }
@@ -3083,6 +3117,16 @@ pub(crate) fn verify_return_type<T: Tier>(
         let thrown = return_type_error(req, frame, &ty, Some(&returned));
         return threw(req, frame, &thrown);
     };
+    if let Some(place) = indirect {
+        let held = exec::value_of(place.read());
+        let place = held
+            .as_php_ref()
+            .map_or(place, |cell| cell.heap().val_ref());
+        let previous = exec::value_of(place.read());
+        place.write(coerced.to_zval());
+        req.release(previous);
+        return Ok(advance(req, frame));
+    }
     let slot = if op.op1_type == OperandKind::Cv {
         op.op1
     } else {
