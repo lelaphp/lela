@@ -7563,6 +7563,25 @@ impl Request {
         self.release_symbol(symbol);
     }
 
+    /// `zend_hash_del_ind`, what `UNSET_VAR` deletes a name by: a name
+    /// attached to a CV keeps its bucket and the CV is emptied, what it
+    /// held released after (`ZVAL_UNDEF` then the destructor); any other
+    /// name is [`Self::symbol_del`]'s.
+    pub(crate) fn symbol_del_ind(&mut self, table: TableId, name: &[u8]) {
+        let found = self
+            .table_mut(table)
+            .and_then(|entries| entries.iter().find(|(key, _)| key == name))
+            .map(|(_, symbol)| *symbol);
+        match found {
+            Some(Symbol::Indirect(frame, at)) => {
+                let garbage = self.take_slot(frame, at);
+                self.release(garbage);
+            }
+            Some(_) => self.symbol_del(table, name),
+            None => {}
+        }
+    }
+
     /// What a bucket owns given up: its value, or the cell a fetch by
     /// name moved it into with the value in it; an attached bucket owns
     /// nothing.

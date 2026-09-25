@@ -728,12 +728,12 @@ struct DimLink {
     out: u32,
 }
 
-/// `zend_delayed_compile_dim`'s `type`, the two of php's `BP_VAR_*` a
-/// dimension chain is compiled under here. A read is `FETCH_DIM_R` into
-/// a temporary (`zend_adjust_for_fetch_type` under `BP_VAR_R`), where
-/// `[]` is php's compile error `Cannot use [] for reading`; a write is
-/// `FETCH_DIM_W` into a `VAR` carrying `ZEND_FETCH_DIM_DIM`, where `[]`
-/// is the append. `BP_VAR_UNSET` waits on the opcodes that name it.
+/// `zend_delayed_compile_dim`'s `type`, php's `BP_VAR_*` a chain of
+/// dimensions and properties is compiled under. A read is `FETCH_DIM_R`
+/// into a temporary (`zend_adjust_for_fetch_type` under `BP_VAR_R`),
+/// where `[]` is php's compile error `Cannot use [] for reading`; a
+/// write is `FETCH_DIM_W` into a `VAR` carrying `ZEND_FETCH_DIM_DIM`,
+/// where `[]` is the append.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Fetch {
     Read,
@@ -757,6 +757,12 @@ enum Fetch {
     /// what stands under them is compiled as a read's is, with no
     /// `SEPARATE` over a call (`zend_separate_if_call_and_write`).
     FuncArg,
+    /// `BP_VAR_UNSET`, the links under what an `unset` deletes:
+    /// `zend_adjust_for_fetch_type`'s fifth arm, the `_R` opcode plus
+    /// five into a `VAR`, which finds a place and makes none, and `[]`
+    /// php's `Cannot use [] for unsetting`. A call under it is
+    /// `SEPARATE`d as under a write.
+    Unset,
 }
 
 /// `ZEND_FETCH_DIM_WRITE` (`Z/Zend/zend_compile.h:1096`), the bit
@@ -2161,88 +2167,104 @@ impl Emit<'_> {
     }
 
     /// `zend_compile_unset` (`Z/Zend/zend_compile.c:5555`), one operand:
-    /// the fetch php compiles under `BP_VAR_UNSET` with its opcode
-    /// overwritten, which for the three arms this reads is one opline
-    /// leaving no value. A plain variable is `UNSET_CV` over the CV
-    /// (`zend_try_compile_cv`), `$this` php's compile error; an element
-    /// of a variable is `zend_compile_dim` under `BP_VAR_UNSET`, whose
-    /// `FETCH_DIM_UNSET` becomes `UNSET_DIM`, with
-    /// `zend_handle_numeric_dim` over a constant offset and the append
-    /// php's compile error; a property of a variable or of `$this` is
-    /// `zend_compile_prop`, whose `FETCH_OBJ_UNSET` becomes `UNSET_OBJ`,
-    /// with the name as one constant in `op2` and three cache slots in
-    /// `extended_value` (`zend_alloc_cache_slots(3)`). A chain under
-    /// either, `$a[0][1]` and `$a->b->c`, is php's `FETCH_DIM_UNSET` and
-    /// `FETCH_OBJ_UNSET` under the last fetch and is not read; neither
-    /// is a property of a class, `unset(C::$p)`, whose arm is
-    /// `UNSET_STATIC_PROP`, nor `$GLOBALS['k']`.
+    /// `zend_ensure_writable_variable`, `$this` php's compile error, and
+    /// then the place decoded once ([`Self::place`]) and compiled under
+    /// `BP_VAR_UNSET` with its last fetch's opcode overwritten, which
+    /// leaves no value. A plain variable is `UNSET_CV` over the CV
+    /// (`zend_try_compile_cv`), and one the program names `UNSET_VAR` over
+    /// the name; an element is the chain under it held back
+    /// ([`Self::delayed_var`] under [`Fetch::Unset`], so `$a[0][1]` is
+    /// `FETCH_DIM_UNSET` under `UNSET_DIM`), the dimension, and the chain
+    /// laid down, the append php's compile error; a property is the object
+    /// the same way (`$a->b->c` is `FETCH_OBJ_UNSET` under `UNSET_OBJ`),
+    /// the name as one constant in `op2` and three cache slots in
+    /// `extended_value` (`zend_alloc_cache_slots(3)`); and a class's
+    /// property is `UNSET_STATIC_PROP`, which the engine refuses in
+    /// php's words.
     ///
     /// The constant offset goes through [`Self::dim_operand`], the one
     /// `zend_handle_numeric_dim` every dimension is held to, so the
     /// string as written stands in the slot after the long and
     /// `UNSET_DIM` hands `offsetUnset` on an `ArrayAccess` what php hands
     /// it (bug #63217).
+    ///
+    /// ```php
+    /// $a = ['x' => ['y' => 1, 'z' => 2]];
+    /// unset($a['x']['y'], $a['q']['r']);
+    /// $o = new stdClass; $o->p = new stdClass; $o->p->q = 1; $o->p->r = [1, 2];
+    /// unset($o->p->q, $o->p->r[0], $n->p, $n[0][1]);
+    /// function f() { global $a; return $a; }
+    /// $n = 'a';
+    /// unset($$n['x']['z']);
+    /// var_dump($a, $o);
+    /// $v = 1; unset($$n, ${'v'});
+    /// var_dump(isset($a), isset($v));
+    /// class C { public static $s = [1, 2]; }
+    /// unset(C::$s[0]);
+    /// var_dump(C::$s);
+    /// try { unset(C::$s); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    ///
+    /// Warning: Undefined variable $n in %s on line 5
+    /// array(1) {
+    ///   ["x"]=>
+    ///   array(0) {
+    ///   }
+    /// }
+    /// object(stdClass)#1 (1) {
+    ///   ["p"]=>
+    ///   object(stdClass)#2 (1) {
+    ///     ["r"]=>
+    ///     array(1) {
+    ///       [1]=>
+    ///       int(2)
+    ///     }
+    ///   }
+    /// }
+    /// bool(false)
+    /// bool(false)
+    /// array(1) {
+    ///   [1]=>
+    ///   int(2)
+    /// }
+    /// Attempt to unset static property C::$s
+    /// ```
     fn unset(&mut self, target: tree::Expr) -> Result<(), CompileError> {
         let line = self.line_of(target);
         self.ensure_writable(target)?;
-        let tree = &self.parsed.tree;
-        match self.peel(target) {
-            tree::Expr::SimpleVarExpr(id) => {
-                let cv = match self.simple_var_of(id, line)? {
-                    SimpleVar::This => {
-                        return Err(walk::refused(line, "Cannot unset $this"));
-                    }
-                    SimpleVar::Cv(name) => self.lookup_cv(&name),
+        if self.is_this(target) {
+            return Err(walk::refused(line, "Cannot unset $this"));
+        }
+        match self.place(target)? {
+            Target::Cv(name) => self.unset_cv(&name),
+            Target::Dim(dim) => {
+                let tree::Expr::SubscriptExpr(id) = self.peel(dim) else {
+                    return Err(self.fatal("an `unset` of an element that is no dimension"));
                 };
-                self.push(Opline {
-                    opcode: Opcode::UnsetCv,
-                    op1_type: OperandKind::Cv,
-                    op1: cv,
-                    ..Opline::default()
-                });
-            }
-            tree::Expr::SubscriptExpr(id) => {
-                let node = &tree[id];
-                let tree::Expr::SimpleVarExpr(var) = self.peel(node.base) else {
-                    return Err(walk::unread(
-                        line,
-                        "an `unset` over an element of what is no variable",
-                    ));
-                };
-                let SimpleVar::Cv(name) = self.simple_var_of(var, line)? else {
-                    return Err(walk::unread(
-                        line,
-                        "an `unset` over an element of what is no variable",
-                    ));
-                };
-                let Some(index) = node.index else {
+                let (base, index) = (self.parsed.tree[id].base, self.parsed.tree[id].index);
+                let container = self.delayed_var(base, Fetch::Unset)?;
+                let Some(index) = index else {
                     return Err(walk::refused(line, "Cannot use [] for unsetting"));
                 };
-                let cv = self.lookup_cv(&name);
                 let dim = self.expr(index)?;
                 let (op2_type, op2) = self.dim_operand(dim);
+                let (op1_type, op1) = self.base_fetch(container, Fetch::Unset, Over::Dim);
                 self.push(Opline {
                     opcode: Opcode::UnsetDim,
-                    op1_type: OperandKind::Cv,
-                    op1: cv,
+                    op1_type,
+                    op1,
                     op2_type,
                     op2,
                     ..Opline::default()
                 });
             }
-            tree::Expr::MemberAccessExpr(id) => {
-                let node = &tree[id];
-                if !matches!(self.peel(node.obj), tree::Expr::SimpleVarExpr(_)) {
-                    return Err(walk::unread(
-                        line,
-                        "an `unset` over a property of what is no variable",
-                    ));
-                }
-                let name = self.member_name_of(id, line)?;
-                let (op1_type, op1) = self.receiver_of(node.obj)?;
+            Target::Prop { object, name } => {
+                let object = self.delayed_object(object, Fetch::Unset)?;
                 let name = self.string(&name)?;
                 let name_at = self.literal(name);
                 let slots = self.cache_slots(3);
+                let (op1_type, op1) = self.base_fetch(object, Fetch::Unset, Over::Obj);
                 self.push(Opline {
                     opcode: Opcode::UnsetObj,
                     op1_type,
@@ -2253,9 +2275,58 @@ impl Emit<'_> {
                     ..Opline::default()
                 });
             }
-            _ => return Err(walk::unread(line, "an `unset` over what is no variable")),
+            Target::StaticProp { class, name } => {
+                let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
+                let name = self.string(&name)?;
+                let name_at = self.literal(name);
+                let slots = self.cache_slots(3);
+                let (op2_type, op2) = self.class_operand(&class)?;
+                self.push(Opline {
+                    opcode: Opcode::UnsetStaticProp,
+                    op1_type: OperandKind::Const,
+                    op1: name_at,
+                    op2_type,
+                    op2,
+                    extended_value: slots,
+                    ..Opline::default()
+                });
+            }
+            // `zend_compile_simple_var_no_cv` under `BP_VAR_UNSET`, its
+            // `FETCH_UNSET` made `UNSET_VAR`: the name in `op1` and the
+            // table it is deleted from in `extended_value`.
+            Target::ByName(expr) => match self.named(expr)? {
+                Some(by_name::Named::Cv(name)) => self.unset_cv(&name),
+                Some(by_name::Named::This) => {
+                    return Err(walk::refused(line, "Cannot unset $this"));
+                }
+                Some(by_name::Named::Fetch { name, scope }) => {
+                    let (op1_type, op1) = self.operand(name);
+                    self.push(Opline {
+                        opcode: Opcode::UnsetVar,
+                        op1_type,
+                        op1,
+                        extended_value: scope,
+                        ..Opline::default()
+                    });
+                }
+                None => return Err(self.fatal("an `unset` by a name that is no variable")),
+            },
+            Target::List(_) => {
+                return Err(walk::unread(line, "an `unset` over what is no variable"));
+            }
         }
         Ok(())
+    }
+
+    /// `ZEND_UNSET_CV` over the CV `name` is.
+    fn unset_cv(&mut self, name: &[u8]) {
+        let cv = self.lookup_cv(name);
+        self.push(Opline {
+            opcode: Opcode::UnsetCv,
+            op1_type: OperandKind::Cv,
+            op1: cv,
+            ..Opline::default()
+        });
     }
 
     /// `zend_compile_global_var` (`Z/Zend/zend_compile.c:5441`) over one
@@ -9337,6 +9408,9 @@ impl Emit<'_> {
                 None if matches!(fetch, Fetch::Read | Fetch::Is) => {
                     return Err(self.compile_error("Cannot use [] for reading"));
                 }
+                None if fetch == Fetch::Unset => {
+                    return Err(self.compile_error("Cannot use [] for unsetting"));
+                }
                 None => (OperandKind::Unused, 0),
             };
             links.push(DimLink {
@@ -9465,7 +9539,7 @@ impl Emit<'_> {
             // `zend_separate_if_call_and_write`: a call under a write
             // is `SEPARATE` over the `VAR` it returned into; a call php
             // answered in a temporary has no `VAR` to separate.
-            (_, Fetch::Write | Fetch::Rw) if self.is_call(base) => {
+            (_, Fetch::Write | Fetch::Rw | Fetch::Unset) if self.is_call(base) => {
                 let returned = self.expr(base)?;
                 let Where::Returned(at) = returned else {
                     return Err(self
@@ -9487,12 +9561,12 @@ impl Emit<'_> {
             // property fetch takes is `zend_delayed_compile_prop`'s own
             // arm and stands above this one
             // ([`Self::delayed_object`]).
-            (_, Fetch::Write | Fetch::Rw) if self.is_this(base) => {
+            (_, Fetch::Write | Fetch::Rw | Fetch::Unset) if self.is_this(base) => {
                 let this = self.fetch_this(OperandKind::Var);
                 Base::Settled(self.operand(this))
             }
             // `zend_compile_var`'s default arm under a write.
-            (_, Fetch::Write | Fetch::Rw) => {
+            (_, Fetch::Write | Fetch::Rw | Fetch::Unset) => {
                 return Err(self.compile_error("Cannot use temporary expression in write context"));
             }
         })
@@ -9528,6 +9602,7 @@ impl Emit<'_> {
             Fetch::Rw => (Opcode::FetchDimRw, OperandKind::Var),
             Fetch::Is => (Opcode::FetchDimIs, OperandKind::Tmp),
             Fetch::FuncArg => (Opcode::FetchDimFuncArg, OperandKind::Var),
+            Fetch::Unset => (Opcode::FetchDimUnset, OperandKind::Var),
         };
         let under = if fetches.is_empty() { over } else { Over::Dim };
         let (mut op1_type, mut op1) = self.base_fetch(container, fetch, under);
@@ -9572,7 +9647,10 @@ impl Emit<'_> {
     /// dimension stands over it; under a read it is the `_R` opcode into
     /// a temporary (`zend_adjust_for_fetch_type`).
     fn base_fetch(&mut self, container: Base, fetch: Fetch, over: Over) -> (OperandKind, u32) {
-        let write = matches!(fetch, Fetch::Write | Fetch::Rw | Fetch::FuncArg);
+        let write = matches!(
+            fetch,
+            Fetch::Write | Fetch::Rw | Fetch::FuncArg | Fetch::Unset
+        );
         let out_type = if write {
             OperandKind::Var
         } else {
@@ -9614,6 +9692,7 @@ impl Emit<'_> {
                         Fetch::Rw => Opcode::FetchObjRw,
                         Fetch::Is => Opcode::FetchObjIs,
                         Fetch::FuncArg => Opcode::FetchObjFuncArg,
+                        Fetch::Unset => Opcode::FetchObjUnset,
                     },
                     op1_type,
                     op1,
@@ -9639,6 +9718,7 @@ impl Emit<'_> {
                         Fetch::Rw => Opcode::FetchStaticPropRw,
                         Fetch::Is => Opcode::FetchStaticPropIs,
                         Fetch::FuncArg => Opcode::FetchStaticPropFuncArg,
+                        Fetch::Unset => Opcode::FetchStaticPropUnset,
                     },
                     op1_type: OperandKind::Const,
                     op1: name_at,

@@ -4270,7 +4270,7 @@ pub(crate) fn fetch_func_arg<T: Tier>(
     fetch_by_name(req, frame, code, op, mode)
 }
 
-/// php's `type` argument to `zend_fetch_var_address_helper`, the four
+/// php's `type` argument to `zend_fetch_var_address_helper`, the five
 /// the fetches by name serve.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ByName {
@@ -4278,6 +4278,7 @@ enum ByName {
     W,
     Rw,
     Is,
+    Unset,
 }
 
 /// `ZEND_FETCH_GLOBAL` and `ZEND_FETCH_GLOBAL_LOCK`
@@ -4353,14 +4354,17 @@ fn fetch_by_name(
             req.addref(&value);
             Some(value)
         }
-        ByName::W | ByName::Rw => {
+        // `BP_VAR_UNSET` finds a place and makes none: a name the table
+        // has not is `null` in silence.
+        ByName::Unset if unset => Some(Value::null()),
+        ByName::W | ByName::Rw | ByName::Unset => {
             if unset && mode == ByName::Rw {
                 undefined(req);
             }
             if req.is_pending() {
                 None
             } else {
-                let place = match req.symbol_place(table, &name, true) {
+                let place = match req.symbol_place(table, &name, mode != ByName::Unset) {
                     Ok(place) => place,
                     Err(thrown) => return threw(req, frame, &thrown),
                 };
@@ -4429,6 +4433,12 @@ fn fetch_this_by_name(req: &mut Request, frame: FrameRef, out: u32, mode: ByName
             let previous = req.set_slot(frame, out, Value::undef());
             req.release(previous);
             let thrown = crate::api::raising::throw(req, "Error", "Cannot re-assign $this");
+            return threw(req, frame, &thrown);
+        }
+        (_, ByName::Unset) => {
+            let previous = req.set_slot(frame, out, Value::undef());
+            req.release(previous);
+            let thrown = crate::api::raising::throw(req, "Error", "Cannot unset $this");
             return threw(req, frame, &thrown);
         }
         (Some(this), _) => {
@@ -6924,7 +6934,6 @@ fn fetch_dim_place(
     read: DimRead,
     keep: Keep,
 ) -> Edge {
-    let out = exec::temporary_slot(code, op.out);
     let Some(place) = write_place(req, frame, code, op.op1_type, op.op1) else {
         return Err(Fatal::Error(String::from(
             "InternalError: ZEND_FETCH_DIM_W over a constant or a temporary, which php compiles no write over",
@@ -6932,82 +6941,131 @@ fn fetch_dim_place(
     };
     let written = match write_container(req, place) {
         Ok(Container::Array(array)) => array_place(req, frame, code, op, array, read)?,
-        Ok(Container::Object(object)) => {
-            let dim = object_dim(req, frame, code, op);
-            let table = req.object_handlers(object.heap());
-            if let Some(placed) = crate::weakrefs::dimension_place(req, table, object, dim.as_ref())
-            {
-                placed.map(php_heap::Zval::indirect)
-            } else {
-                match table.read_dimension(req, object, dim.as_ref()) {
-                    // A reference `offsetGet` handed back by reference is
-                    // the place itself, and warns of nothing; the last
-                    // owner of one is the value it holds (`ZVAL_UNREF`).
-                    Ok(value) if value.as_php_ref().is_some() => {
-                        if value.refcount() == 1
-                            && let Some(cell) = value.as_php_ref()
-                        {
-                            let held = cell.get();
-                            req.addref(&held);
-                            req.release(value);
-                            Ok(held.to_zval())
-                        } else {
-                            Ok(value.to_zval())
-                        }
-                    }
-                    Ok(value) => {
-                        if value.as_object().is_none() {
-                            let class = req.class_name(object.class());
-                            crate::api::raising::notice(
-                                req,
-                                &format!(
-                                    "Indirect modification of overloaded element of {class} has no effect"
-                                ),
-                            );
-                        }
-                        Ok(value.to_zval())
-                    }
-                    Err(thrown) => Err(thrown),
-                }
-            }
-        }
-        Ok(Container::Text(_)) if op.op2_type == OperandKind::Unused => {
-            // `zend_use_new_element_for_string`.
-            Err(crate::api::raising::throw(
-                req,
-                "Error",
-                "[] operator not supported for strings",
-            ))
-        }
-        Ok(Container::Text(_)) => {
-            // `zend_check_string_offset`, whose diagnostics come first,
-            // then `zend_wrong_string_offset_error`, whose sentence the
-            // opline's `extended_value` picks.
-            let dim = exec::operand(req, frame, code, op.op2_type, op.op2);
-            Err(match string_dim_offset(req, &dim, DimRead::Warning) {
-                Ok(_) if op.extended_value == FETCH_DIM_REF => crate::api::raising::throw(
-                    req,
-                    "Error",
-                    "Cannot create references to/from string offsets",
-                ),
-                Ok(_) if op.extended_value == FETCH_DIM_OBJ => crate::api::raising::throw(
-                    req,
-                    "Error",
-                    "Cannot use string offset as an object",
-                ),
-                Ok(_) if op.extended_value == FETCH_DIM_INCDEC => crate::api::raising::throw(
-                    req,
-                    "Error",
-                    "Cannot increment/decrement string offsets",
-                ),
-                Ok(_) => {
-                    crate::api::raising::throw(req, "Error", "Cannot use string offset as an array")
-                }
-                Err(thrown) => thrown,
-            })
-        }
+        Ok(Container::Object(object)) => object_dim_place(req, frame, code, op, object),
+        Ok(Container::Text(_)) => Err(text_dim_place(req, frame, code, op, false)),
         Err(thrown) => Err(thrown),
     };
+    lay_dim_place(req, frame, code, op, written, keep)
+}
+
+/// `zend_fetch_dimension_address`'s object arm under a write or an
+/// unset: what the class's `read_dimension` hands back, `offsetGet` on
+/// an `ArrayAccess`, as the value the `VAR` holds, with php's notice
+/// `Indirect modification of overloaded element of C has no effect`
+/// where that value is no object and no reference. A reference an
+/// `&offsetGet` handed back is the place itself, and warns of nothing;
+/// the last owner of one is the value it holds (`ZVAL_UNREF`).
+fn object_dim_place(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    object: PhpObject,
+) -> Result<php_heap::Zval, Thrown> {
+    let dim = object_dim(req, frame, code, op);
+    let table = req.object_handlers(object.heap());
+    if let Some(placed) = crate::weakrefs::dimension_place(req, table, object, dim.as_ref()) {
+        return placed.map(php_heap::Zval::indirect);
+    }
+    let value = table.read_dimension(req, object, dim.as_ref())?;
+    if value.as_php_ref().is_some() {
+        if value.refcount() == 1
+            && let Some(cell) = value.as_php_ref()
+        {
+            let held = cell.get();
+            req.addref(&held);
+            req.release(value);
+            return Ok(held.to_zval());
+        }
+        return Ok(value.to_zval());
+    }
+    if value.as_object().is_none() {
+        let class = req.class_name(object.class());
+        crate::api::raising::notice(
+            req,
+            &format!("Indirect modification of overloaded element of {class} has no effect"),
+        );
+    }
+    Ok(value.to_zval())
+}
+
+/// `zend_fetch_dimension_address`'s string arm under a write or, with
+/// `unset`, an unset, which is always php's `Error`: `[] operator not
+/// supported for strings` for the append
+/// (`zend_use_new_element_for_string`), and otherwise
+/// `zend_check_string_offset`'s diagnostics and then
+/// `zend_wrong_string_offset_error`, whose sentence the opline's
+/// `extended_value` picks.
+fn text_dim_place(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    unset: bool,
+) -> Thrown {
+    if op.op2_type == OperandKind::Unused {
+        return crate::api::raising::throw(req, "Error", "[] operator not supported for strings");
+    }
+    let dim = exec::operand(req, frame, code, op.op2_type, op.op2);
+    let checked = if unset {
+        unset_string_offset(req, &dim)
+    } else {
+        string_dim_offset(req, &dim, DimRead::Warning).map(|_| ())
+    };
+    if let Err(thrown) = checked {
+        return thrown;
+    }
+    let message = match op.extended_value {
+        FETCH_DIM_REF => "Cannot create references to/from string offsets",
+        FETCH_DIM_OBJ => "Cannot use string offset as an object",
+        FETCH_DIM_INCDEC => "Cannot increment/decrement string offsets",
+        _ => "Cannot use string offset as an array",
+    };
+    crate::api::raising::throw(req, "Error", message)
+}
+
+/// `zend_check_string_offset` under `BP_VAR_UNSET`: what
+/// [`string_dim_offset`] reads with its one difference, that an offset
+/// php cannot read as an integer is `zend_illegal_container_offset`'s
+/// unset sentence, the `Error` `Cannot unset string offsets`, and a
+/// string with anything after its integer warns of nothing.
+fn unset_string_offset(req: &mut Request, dim: &Value) -> Result<(), Thrown> {
+    let dim = dim.deref();
+    let legal = match dim.as_ref() {
+        ValueRef::Int(_) => true,
+        ValueRef::Str(s) => matches!(
+            php_heap::numeric_prefix(s.as_bytes()),
+            Some((php_heap::Number::Long(_), _))
+        ),
+        ValueRef::Undef | ValueRef::Null | ValueRef::Bool(_) | ValueRef::Float(_) => {
+            crate::api::raising::warning(req, "String offset cast occurred");
+            true
+        }
+        _ => false,
+    };
+    if legal {
+        return Ok(());
+    }
+    Err(crate::api::raising::throw(
+        req,
+        "Error",
+        "Cannot unset string offsets",
+    ))
+}
+
+/// What a `FETCH_DIM_W`, `_RW` or `_UNSET` found laid into its `VAR`:
+/// the dimension freed, the place written, and the container `VAR`
+/// given up after it unless `keep` says the next opline reads it
+/// (`FREE_OP1_VAR_PTR`); a throwable leaves the `VAR` empty.
+fn lay_dim_place(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    written: Result<php_heap::Zval, Thrown>,
+    keep: Keep,
+) -> Edge {
+    let out = exec::temporary_slot(code, op.out);
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
     let previous = req.take_slot(frame, out);
     req.release(previous);
@@ -11598,6 +11656,323 @@ pub(crate) fn unset_cv<T: Tier>(
     Ok(advance(req, frame))
 }
 
+/// `ZEND_FETCH_DIM_UNSET` (`Z/Zend/zend_vm_def.h`, handler 96), a link
+/// under what an `unset` deletes, `$a[0]` of `unset($a[0][1])`:
+/// `zend_fetch_dimension_address` under `BP_VAR_UNSET`, which finds a
+/// place and makes none. An array is separated and the entry at the key
+/// is the `IS_INDIRECT` the `VAR` takes, a key the array has not `null`
+/// in silence; an object is `offsetGet` as under a write
+/// ([`object_dim_place`]); a string is the write's `Error`, or `Cannot
+/// unset string offsets` where the offset is none php reads as an
+/// integer ([`unset_string_offset`]); `null`, a variable nothing wrote
+/// (warned of) and `false` (deprecated) are `null`, no array made of
+/// them; anything else is php's `Error` `Cannot unset offset in a
+/// non-array variable`.
+///
+/// ```php
+/// $a = [[1, 2], 'k' => [3]];
+/// unset($a[0][0], $a['k'][0], $a['none'][0], $u[0][0]);
+/// var_dump($a);
+/// $s = "ab";
+/// try { unset($s[0][0]); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { unset($s['x']['y']); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// $i = 1;
+/// try { unset($i[0][0]); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+///
+/// Warning: Undefined variable $u in %s on line 3
+/// array(2) {
+///   [0]=>
+///   array(1) {
+///     [1]=>
+///     int(2)
+///   }
+///   ["k"]=>
+///   array(0) {
+///   }
+/// }
+/// Cannot use string offset as an array
+/// Cannot unset string offsets
+/// Cannot unset offset in a non-array variable
+/// ```
+pub(crate) fn fetch_dim_unset<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let Some(place) = write_place(req, frame, code, op.op1_type, op.op1) else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_FETCH_DIM_UNSET over a constant or a temporary, which php compiles no unset over",
+        )));
+    };
+    let written = match separated_array(req, place) {
+        Ok((_, Some(array))) => unset_entry(req, frame, code, op, array),
+        Ok((at, None)) => {
+            let held = exec::value_of(at.read());
+            match held.as_ref() {
+                ValueRef::Object(object) => object_dim_place(req, frame, code, op, *object),
+                ValueRef::Str(_) => Err(text_dim_place(req, frame, code, op, true)),
+                ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false) => {
+                    unset_under_nothing(req, frame, code, op, &held)
+                }
+                _ => Err(crate::api::raising::throw(
+                    req,
+                    "Error",
+                    "Cannot unset offset in a non-array variable",
+                )),
+            }
+        }
+        Err(thrown) => Err(thrown),
+    };
+    lay_dim_place(req, frame, code, op, written, Keep::Nothing)
+}
+
+/// `zend_fetch_dimension_address_inner` under `BP_VAR_UNSET`: the key
+/// the dimension makes, and the entry at it as the `IS_INDIRECT` the
+/// `VAR` takes, or `null` where the array has none
+/// (`&EG(uninitialized_zval)`); nothing is laid down.
+fn unset_entry(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    array: PhpArray,
+) -> Result<php_heap::Zval, Thrown> {
+    let dim = exec::operand(req, frame, code, op.op2_type, op.op2);
+    let key = crate::ops::array_offset(req, &dim, op.op2_type == OperandKind::Const)?;
+    if array.heap().get(key).is_none() {
+        return Ok(php_heap::Zval::null());
+    }
+    Ok(req
+        .array_lookup(array.heap(), key)?
+        .map_or_else(php_heap::Zval::null, php_heap::Zval::indirect))
+}
+
+/// `zend_fetch_dimension_address`'s `return_null` under `BP_VAR_UNSET`,
+/// a container of `null`, `false` or nothing: a CV nothing wrote warned
+/// of (`ZVAL_UNDEFINED_OP1`), `false` deprecated as the array it is not
+/// made into, and a CV dimension nothing wrote warned of after
+/// (`ZVAL_UNDEFINED_OP2`).
+fn unset_under_nothing(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    held: &Value,
+) -> Result<php_heap::Zval, Thrown> {
+    if held.tag() == TypeTag::Undef && op.op1_type == OperandKind::Cv {
+        let _ = exec::operand(req, frame, code, op.op1_type, op.op1);
+    }
+    if held.as_bool() == Some(false) {
+        crate::api::raising::deprecated(
+            req,
+            "Automatic conversion of false to array is deprecated",
+        );
+        if req.is_pending() {
+            return Err(Thrown::of(None));
+        }
+    }
+    if op.op2_type == OperandKind::Cv {
+        let _ = exec::operand(req, frame, code, op.op2_type, op.op2);
+    }
+    Ok(php_heap::Zval::null())
+}
+
+/// `ZEND_FETCH_OBJ_UNSET` (`Z/Zend/zend_vm_def.h`, handler 97), a
+/// property under what an `unset` deletes, `$o->p` of
+/// `unset($o->p->q)`: `zend_fetch_property_address` under
+/// `BP_VAR_UNSET`, [`fetch_obj_w`]'s place over an object, and over what
+/// is none `null` in silence (`if (type == BP_VAR_UNSET) { ZVAL_NULL(result);
+/// return; }`), a variable nothing wrote warned of first.
+///
+/// ```php
+/// $o = new stdClass; $o->p = new stdClass; $o->p->q = 1;
+/// unset($o->p->q, $n->p->q);
+/// var_dump($o);
+/// ```
+/// ```expect
+///
+/// Warning: Undefined variable $n in %s on line 3
+/// object(stdClass)#1 (1) {
+///   ["p"]=>
+///   object(stdClass)#2 (0) {
+///   }
+/// }
+/// ```
+pub(crate) fn fetch_obj_unset<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let container = exec::container(
+        req,
+        frame,
+        code,
+        op.op1_type,
+        op.op1,
+        "ZEND_FETCH_OBJ_UNSET",
+    )?;
+    if container.deref().as_object().is_some() {
+        return fetch_obj_place(req, frame, code, op, PropertyRead::Silent);
+    }
+    if container.tag() == TypeTag::Undef && op.op1_type == OperandKind::Cv {
+        let _ = exec::operand(req, frame, code, op.op1_type, op.op1);
+    }
+    exec::free_operand(req, frame, code, op.op2_type, op.op2);
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    let out = exec::temporary_slot(code, op.out);
+    let previous = req.set_slot(frame, out, Value::null());
+    req.release(previous);
+    Ok(advance(req, frame))
+}
+
+/// `ZEND_FETCH_STATIC_PROP_UNSET` (`Z/Zend/zend_vm_def.h`, handler 179's
+/// neighbour), a class's property under what an `unset` deletes:
+/// `zend_fetch_static_prop_helper` under `BP_VAR_UNSET`, the place
+/// [`fetch_static_prop_w`] finds.
+///
+/// ```php
+/// class C { public static $s = ['a' => 1, 'b' => 2]; }
+/// unset(C::$s['a']);
+/// var_dump(C::$s);
+/// ```
+/// ```expect
+/// array(1) {
+///   ["b"]=>
+///   int(2)
+/// }
+/// ```
+pub(crate) fn fetch_static_prop_unset<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    static_prop_place(req, frame, code, op, false)
+}
+
+/// `ZEND_FETCH_UNSET` (`Z/Zend/zend_vm_def.h`, handler 95), a variable
+/// the program names under what an `unset` deletes: [`fetch_by_name`]
+/// under `BP_VAR_UNSET`, a name the table has as the `IS_INDIRECT` the
+/// `VAR` takes and one it has not `null` in silence, nothing laid down.
+///
+/// ```php
+/// $n = 'a'; $m = 'none';
+/// $a = ['x' => 1, 'y' => 2];
+/// unset($$n['x'], $$m['x']);
+/// var_dump($a, isset($none));
+/// ```
+/// ```expect
+/// array(1) {
+///   ["y"]=>
+///   int(2)
+/// }
+/// bool(false)
+/// ```
+pub(crate) fn fetch_unset<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    fetch_by_name(req, frame, code, op, ByName::Unset)
+}
+
+/// `ZEND_UNSET_STATIC_PROP` (`Z/Zend/zend_vm_def.h`, handler 179),
+/// `unset(C::$s)`: the class fetched as a `static` property's is, and
+/// then `zend_std_unset_static_property`, which is always php's `Error`
+/// `Attempt to unset static property C::$s`.
+///
+/// ```php
+/// class C { public static $s = 1; }
+/// try { unset(C::$s); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(C::$s);
+/// ```
+/// ```expect
+/// Attempt to unset static property C::$s
+/// int(1)
+/// ```
+pub(crate) fn unset_static_prop<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let class = match class_operand(req, frame, code, op.op2_type, op.op2, None) {
+        Ok(class) => class,
+        Err(thrown) => {
+            exec::free_operand(req, frame, code, op.op1_type, op.op1);
+            return threw(req, frame, &thrown);
+        }
+    };
+    let name = match fetched_name(req, frame, code, op) {
+        Ok(name) => name,
+        Err(thrown) => {
+            exec::free_operand(req, frame, code, op.op1_type, op.op1);
+            return threw(req, frame, &thrown);
+        }
+    };
+    let class = req.class_name(class);
+    let thrown = crate::api::raising::throw(
+        req,
+        "Error",
+        &format!(
+            "Attempt to unset static property {class}::${}",
+            String::from_utf8_lossy(&name)
+        ),
+    );
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    threw(req, frame, &thrown)
+}
+
+/// `ZEND_UNSET_VAR` (`Z/Zend/zend_vm_def.h:6645`), `unset($$n)`: the
+/// name read as a fetch by name reads it ([`fetched_name`]) and deleted
+/// from the table `extended_value` names, `zend_hash_del_ind`
+/// ([`Request::symbol_del_ind`]): a name attached to a CV empties the
+/// CV, and what the name held is given up where the opline stands.
+///
+/// ```php
+/// function f() { $a = 1; $n = 'a'; unset($$n); var_dump(isset($a)); }
+/// f();
+/// $g = 2; $n = 'g'; unset($$n); var_dump(isset($g));
+/// class D { function __destruct() { echo "gone\n"; } }
+/// $d = new D; $m = 'd'; unset($$m); echo "after\n";
+/// ```
+/// ```expect
+/// bool(false)
+/// bool(false)
+/// gone
+/// after
+/// ```
+pub(crate) fn unset_var<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let name = match fetched_name(req, frame, code, op) {
+        Ok(name) => name,
+        Err(thrown) => {
+            exec::free_operand(req, frame, code, op.op1_type, op.op1);
+            return threw(req, frame, &thrown);
+        }
+    };
+    let table = if op.extended_value & (FETCH_GLOBAL | FETCH_GLOBAL_LOCK) != 0 {
+        req.global_table()
+    } else {
+        req.rebuild_symbol_table(frame)
+    };
+    req.symbol_del_ind(table, &name);
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    if req.is_pending() {
+        return Ok(Stepped::Threw(frame));
+    }
+    Ok(advance(req, frame))
+}
+
 /// `ZEND_UNSET_DIM` (`Z/Zend/zend_vm_def.h:6735`), what `unset($a[$k])`
 /// compiles to: the container read as a write fetch reads it
 /// (`GET_OP1_OBJ_ZVAL_PTR_PTR_UNDEF(BP_VAR_UNSET)`), a reference
@@ -11687,8 +12062,12 @@ pub(crate) fn unset_dim<T: Tier>(
     } else {
         // The two reads php raises a warning for stand here, after the
         // array arm and before the rest (`ZVAL_UNDEFINED_OP1`,
-        // `ZVAL_UNDEFINED_OP2`).
-        let container = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
+        // `ZVAL_UNDEFINED_OP2`); a `VAR` is the place a
+        // `FETCH_DIM_UNSET` or a `FETCH_OBJ_UNSET` left, read through.
+        let container = match op.op1_type {
+            OperandKind::Var => exec::value_of(found.0.read()).deref(),
+            _ => exec::operand(req, frame, code, op.op1_type, op.op1).deref(),
+        };
         // `if (OP2_TYPE == IS_CONST && Z_EXTRA_P(offset) ==
         // ZEND_EXTRA_VALUE) offset++`: an object is handed the dimension
         // as it was written, which is the only arm that reads it at all.

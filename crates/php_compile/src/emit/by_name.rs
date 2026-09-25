@@ -134,6 +134,7 @@ impl Emit<'_> {
             Fetch::Rw => (Opcode::FetchRw, OperandKind::Var),
             Fetch::Is => (Opcode::FetchIs, OperandKind::Tmp),
             Fetch::FuncArg => (Opcode::FetchFuncArg, OperandKind::Var),
+            Fetch::Unset => (Opcode::FetchUnset, OperandKind::Var),
         };
         self.push(Opline {
             opcode,
@@ -161,7 +162,7 @@ impl Emit<'_> {
             Some(Named::This) => {
                 let kind = match fetch {
                     Fetch::Read | Fetch::Is => OperandKind::Tmp,
-                    Fetch::Write | Fetch::Rw | Fetch::FuncArg => OperandKind::Var,
+                    Fetch::Write | Fetch::Rw | Fetch::FuncArg | Fetch::Unset => OperandKind::Var,
                 };
                 let this = self.fetch_this(kind);
                 Some(Base::Settled(self.operand(this)))
