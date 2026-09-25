@@ -416,6 +416,16 @@ fn enum_case(
 /// array's own, and an object's declared properties and then its
 /// dynamic ones with the private and protected of the class skipped,
 /// which is `ZSTR_VAL(key)[0] == '\0'` over `zend_get_properties_for`.
+/// A hooked property is what its `get` hook answers, and a virtual one
+/// with none is no row.
+///
+/// ```php
+/// class H { public $a = 1; public $v { get => 'v'; } protected $p = 2; public $w { set {} } }
+/// echo json_encode(new H), "\n";
+/// ```
+/// ```expect
+/// {"a":1,"v":"v"}
+/// ```
 fn rows(req: &mut Request, value: &Value) -> Result<Vec<(Key, Value)>, Thrown> {
     if let Some(array) = value.as_array() {
         return Ok(array.snapshot());
@@ -426,6 +436,33 @@ fn rows(req: &mut Request, value: &Value) -> Result<Vec<(Key, Value)>, Thrown> {
     // `zend_get_properties_for(val, ZEND_PROP_PURPOSE_JSON)`, which
     // initialises a lazy object and reads what that answers.
     let object = &php_ext::call::initialize_lazy(req, object)?;
+    // `ce->num_hooked_props`: a class of the chain declares a hooked
+    // property.
+    let mut hooked = false;
+    let mut at = Some(object.class());
+    for _ in 0..64 {
+        let Some(class) = at else { break };
+        let Some(decl) = req.class_decl(class) else {
+            break;
+        };
+        if decl.properties.iter().any(|p| p.hooks.is_some()) {
+            hooked = true;
+            break;
+        }
+        let parent = decl.parent.as_ref().map(|name| name.0.clone());
+        at = match parent {
+            Some(name) => call::lookup_class(req, &name)?,
+            None => None,
+        };
+    }
+    if hooked {
+        return Ok(object
+            .props_for(req, php_ext::abi::PropertyPurpose::Json)?
+            .into_iter()
+            .filter(|(name, _)| name.as_bytes().first() != Some(&0))
+            .map(|(name, value)| (Key::Str(name), value))
+            .collect());
+    }
     let hidden: Vec<Box<[u8]>> = req
         .class_decl(object.class())
         .map(|decl| {

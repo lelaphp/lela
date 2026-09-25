@@ -14,6 +14,7 @@ Effects::NONE
 Effects::THROW
 Effects::contains
 FramelessEntry
+HookBody
 Level
 Level::bit
 LiveKind
@@ -41,6 +42,9 @@ decl::ConstExpr
 decl::DynamicProperties
 decl::EnumBacking
 decl::FunctionDecl
+decl::HookKind
+decl::HookKind::ALL
+decl::HookKind::name
 decl::IniDecl
 decl::MethodDecl
 decl::Name
@@ -49,6 +53,8 @@ decl::Parameter::is_required
 decl::ParameterDefault
 decl::ParameterDefault::expr
 decl::PropertyDecl
+decl::PropertyHooks
+decl::PropertyHooks::of
 decl::TraitAdaptation
 decl::TraitMethodRef
 decl::Type
@@ -71,8 +77,15 @@ link::Raised::site
 link::Refusal
 link::Refusal::level
 link::Refused
+link::Resolved
+link::Resolved::hook
+link::Resolved::is_hooked
+link::ResolvedHook
 link::Site
 link::TentativeReturn
+link::Variance
 link::link
 link::object_type
+link::resolve_property
+link::verify_hooked_property
 type_to_string

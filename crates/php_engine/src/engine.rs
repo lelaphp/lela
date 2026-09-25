@@ -20,7 +20,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use php_compile::{CompileError, SourceKind, StackLimit};
 use php_heap::{Fatal, FrameRef, Intern, Strings, Zval};
-use php_unit::decl::{ClassDecl, ConstDecl, ConstExpr, FunctionDecl, MethodDecl, Name};
+use php_unit::decl::{ClassDecl, ConstDecl, ConstExpr, FunctionDecl, HookKind, MethodDecl, Name};
 use php_unit::{FramelessEntry, Unit, frameless_table};
 
 use crate::api::abi::{Cache, Entry, Extension, NativeNew, ObjectHandlers, StartupIni};
@@ -258,7 +258,8 @@ pub(crate) fn assign_map_ptrs(unit: &mut Unit, map_ptr_last: &AtomicU32) {
     let bodies = std::iter::once(&mut unit.main)
         .chain(unit.functions.iter_mut().map(|(_, code)| code))
         .chain(unit.dynamic.iter_mut().map(|(_, code)| code))
-        .chain(unit.methods.iter_mut().map(|method| &mut method.body));
+        .chain(unit.methods.iter_mut().map(|method| &mut method.body))
+        .chain(unit.hooks.iter_mut().map(|hook| &mut hook.body));
     for code in bodies {
         code.runtime_cache = map_ptr_last.fetch_add(1, Ordering::Relaxed);
     }
@@ -286,6 +287,12 @@ pub(crate) enum MethodAt {
     Declared(u32),
     /// The index among [`Shared::trampolines`].
     Trampoline(u32),
+    /// `zend_get_property_hook_trampoline`'s function of `kind`, what
+    /// `parent::$name::get()` calls where the parent's property has no
+    /// hook of that kind: no class holds it, its scope is the property's
+    /// class, carried on the call, and its declaration is the index
+    /// among [`Shared::trampolines`].
+    ParentHook { kind: HookKind, at: u32 },
 }
 
 /// `zend_register_internal_enum`'s `zend_register_functions` over the
@@ -411,6 +418,17 @@ fn link_trampolines(
         methods.push(NativeMethod {
             class: ClassId(u32::try_from(at).unwrap_or(u32::MAX)),
             at: MethodAt::Trampoline(index),
+            entry,
+        });
+        trampolines.push(method);
+    }
+    // `zend_get_property_hook_trampoline`'s two, which no class's table
+    // carries; the class a row names is never read for them.
+    for (kind, method, entry) in crate::api::request::parent_hook_trampolines() {
+        let index = u32::try_from(trampolines.len()).unwrap_or(u32::MAX);
+        methods.push(NativeMethod {
+            class: ClassId(0),
+            at: MethodAt::ParentHook { kind, at: index },
             entry,
         });
         trampolines.push(method);

@@ -74,7 +74,7 @@ fn constructor_of(req: &mut Request, class: ClassId) -> Option<(MethodDecl, Clas
 ///   @@ %s 2 - 2
 /// }
 /// ```
-fn method_factory(
+pub(super) fn method_factory(
     req: &mut Request,
     name: &[u8],
     scope: ClassId,
@@ -864,14 +864,7 @@ pub(super) fn reflection_class_get_properties(req: &mut Request) -> Result<Value
         if decl.visibility == Visibility::Private && scope != class {
             continue;
         }
-        let mut bits = match decl.visibility {
-            Visibility::Public => 1,
-            Visibility::Protected => 2,
-            Visibility::Private => 4,
-        };
-        if !decl.is_instance {
-            bits |= 16;
-        }
+        let bits = super::member::property_flags(req, scope, &decl.name.0, &decl);
         if bits & filter == 0 {
             continue;
         }

@@ -690,6 +690,17 @@ impl<'a> Composer<'a, '_> {
             for property in &used.decl.properties {
                 let from = text(&used.decl.name.0);
                 if let Some(existing) = table.iter().find(|p| p.name == property.name) {
+                    if existing.hooks.is_some() || property.hooks.is_some() {
+                        let first = self.first_definition(at, |held| {
+                            held.decl.properties.iter().any(|p| p.name == property.name)
+                        });
+                        return Err(Refusal::TraitHookedProperty {
+                            first,
+                            from,
+                            property: text(&property.name.0),
+                            class: text(&self.child.name.0),
+                        });
+                    }
                     let compatible = existing.visibility == property.visibility
                         && existing.is_instance == property.is_instance
                         && existing.is_readonly == property.is_readonly
@@ -826,6 +837,7 @@ mod tests {
             default: None,
             attributes: Vec::new(),
             doc_comment: None,
+            hooks: None,
         };
         assert_eq!(default_of(&property), Some(ConstExpr::Null));
         let typed = PropertyDecl {

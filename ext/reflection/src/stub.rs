@@ -101,6 +101,7 @@ fn name_property() -> PropertyDecl {
         default: None,
         attributes: Vec::new(),
         doc_comment: None,
+        hooks: None,
     }
 }
 
@@ -5771,11 +5772,11 @@ fn reflection_property() -> Declared {
             ),
             (
                 method(b"isAbstract", &[], Some(Type::Bool)),
-                unbuilt as Entry,
+                super::member::reflection_property_is_abstract as Entry,
             ),
             (
                 method(b"isVirtual", &[], Some(Type::Bool)),
-                unbuilt as Entry,
+                super::member::reflection_property_is_virtual as Entry,
             ),
             (
                 method(b"isPromoted", &[], Some(Type::Bool)),
@@ -5876,7 +5877,10 @@ fn reflection_property() -> Declared {
                 ),
                 super::member::reflection_property_get_hook as Entry,
             ),
-            (method(b"isFinal", &[], Some(Type::Bool)), unbuilt as Entry),
+            (
+                method(b"isFinal", &[], Some(Type::Bool)),
+                super::member::reflection_property_is_final as Entry,
+            ),
         ],
     )
 }

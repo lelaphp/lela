@@ -95,10 +95,11 @@ const UNQUALIFIED_IN_NAMESPACE: u32 = 0x800;
 /// Every op array of the unit, one block each, in php's order
 /// (`zend_foreach_op_array`): the main op array, then the functions as
 /// declared, then each class's methods as declared, named
-/// `Class::method`, and after each of those the functions written
-/// inside it that a `DECLARE_FUNCTION` binds, its `dynamic_func_defs`
-/// in order, each followed by its own. `frameless` is
-/// `zend_flf_functions` by name, what a `FRAMELESS_ICALL_*`'s
+/// `Class::method`, and its properties' hooks, `Class::$name::get`
+/// before `Class::$name::set`, and after each of those the functions
+/// written inside it that a `DECLARE_FUNCTION` binds, its
+/// `dynamic_func_defs` in order, each followed by its own. `frameless`
+/// is `zend_flf_functions` by name, what a `FRAMELESS_ICALL_*`'s
 /// `extended_value` indexes.
 pub(crate) fn unit(unit: &Unit, frameless: &[Name]) -> String {
     let mut out = String::new();
@@ -114,26 +115,56 @@ pub(crate) fn unit(unit: &Unit, frameless: &[Name]) -> String {
         );
         dynamic_defs(&mut out, unit, body, frameless, 0);
     }
+    // The class table's order: a class completes after the classes
+    // declared inside its methods, which is the order `unit.methods`
+    // holds its bodies in. A class with hooks and no method takes its
+    // place among its neighbours by declaration.
+    let mut order: Vec<u32> = Vec::new();
     for method in &unit.methods {
-        let Some(class) = unit.classes.get(method.class as usize) else {
+        if !order.contains(&method.class) {
+            order.push(method.class);
+        }
+    }
+    for hook in &unit.hooks {
+        if !order.contains(&hook.class) {
+            let at = order
+                .iter()
+                .position(|&class| class > hook.class)
+                .unwrap_or(order.len());
+            order.insert(at, hook.class);
+        }
+    }
+    for at in order {
+        let Some(class) = unit.classes.get(at as usize) else {
             continue;
         };
-        let Some(decl) = class.methods.get(method.method as usize) else {
-            continue;
-        };
-        let name = format!(
-            "{}::{}",
-            crate::decl::shown(&class.name.0),
-            String::from_utf8_lossy(&decl.function.name.0)
-        );
-        op_array(
-            &mut out,
-            &name,
-            num_args(&decl.function),
-            &method.body,
-            frameless,
-        );
-        dynamic_defs(&mut out, unit, &method.body, frameless, 0);
+        let methods = unit.methods.iter().filter(|method| method.class == at);
+        let mut hooks: Vec<_> = unit.hooks.iter().filter(|hook| hook.class == at).collect();
+        hooks.sort_by_key(|hook| (hook.property, hook.kind == crate::decl::HookKind::Set));
+        let bodies = methods
+            .filter_map(|method| {
+                class
+                    .methods
+                    .get(method.method as usize)
+                    .map(|decl| (decl, &method.body))
+            })
+            .chain(hooks.into_iter().filter_map(|hook| {
+                class
+                    .properties
+                    .get(hook.property as usize)
+                    .and_then(|property| property.hooks.as_ref())
+                    .and_then(|hooks| hooks.of(hook.kind))
+                    .map(|decl| (decl, &hook.body))
+            }));
+        for (decl, body) in bodies {
+            let name = format!(
+                "{}::{}",
+                crate::decl::shown(&class.name.0),
+                String::from_utf8_lossy(&decl.function.name.0)
+            );
+            op_array(&mut out, &name, num_args(&decl.function), body, frameless);
+            dynamic_defs(&mut out, unit, body, frameless, 0);
+        }
     }
     out
 }

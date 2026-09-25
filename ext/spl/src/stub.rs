@@ -448,6 +448,7 @@ impl Reader<'_> {
             default,
             attributes: Vec::new(),
             doc_comment: None,
+            hooks: None,
         }
     }
 

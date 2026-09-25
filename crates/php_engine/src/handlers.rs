@@ -4448,6 +4448,117 @@ fn static_call_frame(
     Ok(advance(req, frame))
 }
 
+/// `ZEND_INIT_PARENT_PROPERTY_HOOK_CALL` (`Z/Zend/zend_vm_def.h:9886`),
+/// `parent::$name::get()` and `parent::$name::set($v)` inside a hook:
+/// the parent of the running hook's class, the property it holds under
+/// the name in `op1`, and the hook of the kind in `op2` called on the
+/// hook's own `$this`, or, where the parent's property has none, the
+/// trampoline php makes, which reads or writes the property as the
+/// parent's hook would have found it ([`Request::parent_hook_trampoline`]).
+///
+/// ```php
+/// class P { public $x = 2; }
+/// class C extends P { public $x = 2 { get => parent::$x::get() * 3; set { parent::$x::set($value + 1); } } }
+/// $c = new C;
+/// var_dump($c->x);
+/// $c->x = 4;
+/// var_dump($c->x);
+/// class Q { public $p { get => parent::$p::get(); } }
+/// try { (new Q)->p; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// class R extends P { public $y { get => parent::$y::get(); } }
+/// try { (new R)->y; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// int(6)
+/// int(15)
+/// Cannot use "parent" when current class scope has no parent
+/// Undefined property P::$y
+/// ```
+pub(crate) fn init_parent_property_hook_call<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let scope = req
+        .vm()
+        .at(frame)
+        .and_then(|state| state.function)
+        .and_then(|function| req.method_class(function));
+    let Some(parent) = scope.and_then(|scope| req.class_parent(scope)) else {
+        let thrown = crate::api::raising::throw(
+            req,
+            "Error",
+            "Cannot use \"parent\" when current class scope has no parent",
+        );
+        return threw(req, frame, &thrown);
+    };
+    let name = exec::constant(code, ConstIdx(op.op1));
+    let name = name.as_str_bytes().unwrap_or_default().to_vec();
+    let shown = String::from_utf8_lossy(&name).into_owned();
+    let parent_name = req.class_name(parent);
+    let Some((declaring, property)) = req.property_info_of(parent, &name) else {
+        let thrown = crate::api::raising::throw(
+            req,
+            "Error",
+            &format!("Undefined property {parent_name}::${shown}"),
+        );
+        return threw(req, frame, &thrown);
+    };
+    if property.visibility == php_unit::decl::Visibility::Private {
+        let thrown = crate::api::raising::throw(
+            req,
+            "Error",
+            &format!("Cannot access private property {parent_name}::${shown}"),
+        );
+        return threw(req, frame, &thrown);
+    }
+    let kind = if op.op2 == 0 {
+        php_unit::decl::HookKind::Get
+    } else {
+        php_unit::decl::HookKind::Set
+    };
+    let hook = req.hooked(parent, &name).and_then(|hooked| match kind {
+        php_unit::decl::HookKind::Get => hooked.get,
+        php_unit::decl::HookKind::Set => hooked.set,
+    });
+    // The trampoline's scope is the property's class, which its call
+    // carries as its called scope; a hook is called on `$this` as any
+    // method is.
+    let (function, trampoline) = match hook {
+        Some(function) => (function, false),
+        None => (req.parent_hook_trampoline(kind), true),
+    };
+    let this = req.vm().this(frame);
+    if let Some(this) = this {
+        req.addref(&this.as_value());
+    }
+    let written = format!("${shown}::{}", kind.name());
+    let written = match crate::api::values::PhpString::new(req, written.as_bytes()) {
+        Ok(written) => written,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    req.vm_mut().push_call(CallState {
+        function,
+        name: Some(written),
+        arguments: Vec::new(),
+        count: usize::try_from(op.extended_value).unwrap_or(0),
+        this,
+        called_scope: Some(match this {
+            Some(this) if !trampoline => this.class(),
+            _ => declaring,
+        }),
+        closure: None,
+        extra_named: Vec::new(),
+        stage: CallStage::Building,
+        send_arg_by_ref: false,
+        frameless: false,
+        coerced: Vec::new(),
+        dynamic: false,
+    });
+    Ok(advance(req, frame))
+}
+
 /// `ZEND_INIT_METHOD_CALL` (`Z/Zend/zend_vm_def.h:3583`) over a
 /// receiver and a method named at compile time: the receiver read as
 /// `GET_OP1_OBJ_ZVAL_PTR_UNDEF` reads it, a reference followed, and
@@ -6088,7 +6199,9 @@ fn fetch_obj(
     // wrote; the `BP_VAR_IS` reader takes the same slot as the `UNDEF`
     // it is and says nothing.
     let container = match fetch {
-        PropertyRead::Warning => exec::operand(req, frame, code, op.op1_type, op.op1),
+        PropertyRead::Warning | PropertyRead::Write => {
+            exec::operand(req, frame, code, op.op1_type, op.op1)
+        }
         PropertyRead::Silent => exec::operand_undef(req, frame, code, op.op1_type, op.op1),
     }
     .deref();
@@ -6638,7 +6751,7 @@ fn fetch_obj_read(
     name: &[u8],
 ) -> Edge {
     let table = req.object_handlers(object.heap());
-    let read = table.read_property(req, object, name, PropertyRead::Warning);
+    let read = table.read_property(req, object, name, PropertyRead::Write);
     let value = match read {
         Ok(value) => value,
         Err(thrown) => {
@@ -13873,6 +13986,9 @@ pub(crate) fn fe_fetch_r<T: Tier>(
             "InternalError: FE_FETCH_R over a VAR the frame does not have",
         )));
     };
+    // A hooked property's value is the walk's own owner, given up once
+    // the loop's variable holds its own.
+    let mut owned = None;
     let (key, value) = match foreach_var(req, at.read()) {
         ForeachVar::Array { array, pos } => {
             let Some((found, key, value)) = array.live_from(pos) else {
@@ -13885,8 +14001,14 @@ pub(crate) fn fe_fetch_r<T: Tier>(
             at.set_fe_pos(found.saturating_add(1));
             (key, exec::value_of(value))
         }
-        ForeachVar::Properties { object, walk } => match req.object_walk(object, walk.0) {
-            Ok(Some((key, walked))) => (key, Request::walked_value(object, walked)),
+        ForeachVar::Properties { object, walk } => match req.object_walk(object, walk.0, false) {
+            Ok(Some((key, walked))) => {
+                let value = Request::walked_value(object, walked);
+                if matches!(walked, crate::api::request::Walked::Hooked(..)) {
+                    owned = Some(value);
+                }
+                (key, value)
+            }
             Ok(None) => {
                 req.vm_mut().jump(frame, op.extended_value);
                 return Ok(Stepped::Same(frame));
@@ -13909,7 +14031,11 @@ pub(crate) fn fe_fetch_r<T: Tier>(
         let previous = req.set_slot(frame, out, key);
         req.release(previous);
     }
-    fe_assign(req, frame, code, op, value)
+    let assigned = fe_assign(req, frame, code, op, value);
+    if let Some(owned) = owned {
+        req.release(owned);
+    }
+    assigned
 }
 
 /// The iterator arm of `zend_fe_fetch_object_helper`
@@ -14489,7 +14615,7 @@ fn fe_walk_array_rw(
 /// [`Request::walked_reference`], which gives a declared property's cell
 /// its type or refuses a `readonly` one.
 fn fe_walk_object_rw(req: &mut Request, op: &Opline, object: PhpObject, walk: HashIter) -> FoundRw {
-    let (key, walked) = match req.object_walk(object, walk.0) {
+    let (key, walked) = match req.object_walk(object, walk.0, true) {
         Ok(Some(walked)) => walked,
         Ok(None) => return Ok(Ok(None)),
         Err(thrown) => return Ok(Err(thrown)),
@@ -18863,7 +18989,7 @@ mod tests {
             );
             if let Ok(Some(idx)) = started {
                 assert!(
-                    matches!(req.object_walk(object, idx), Ok(None)),
+                    matches!(req.object_walk(object, idx, false), Ok(None)),
                     "the global scope sees none of Exception's properties"
                 );
                 req.heap_mut().iterator_del(idx);

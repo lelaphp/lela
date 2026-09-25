@@ -361,7 +361,10 @@ pub struct MethodDecl {
 /// which the same function raises on a `private(set)` property.
 /// `is_promoted` is `ZEND_ACC_PROMOTED`, the property a constructor's
 /// promoted parameter declares, which `ReflectionProperty::isPromoted`
-/// reads.
+/// reads. `hooks` is php's `prop_info->hooks`, none for a property the
+/// declaration wrote no hook list for; a property whose class inherits
+/// hooks for it carries none of its own here, since the link finds an
+/// inherited member by walking the chain.
 #[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::struct_excessive_bools)] // the ZEND_ACC_* bits of a property, each one fact
 pub struct PropertyDecl {
@@ -376,6 +379,58 @@ pub struct PropertyDecl {
     pub default: Option<ConstExpr>,
     pub attributes: Vec<Attribute>,
     pub doc_comment: Option<Box<[u8]>>,
+    pub hooks: Option<Box<PropertyHooks>>,
+}
+
+/// php's two hooks, `zend_property_hook_kind`, in the order
+/// `prop_info->hooks` indexes them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HookKind {
+    Get,
+    Set,
+}
+
+impl HookKind {
+    /// Both kinds, in php's order, `ZEND_PROPERTY_HOOK_GET` first.
+    pub const ALL: [HookKind; 2] = [HookKind::Get, HookKind::Set];
+
+    /// The name the hook is written with, `get` or `set`.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            HookKind::Get => "get",
+            HookKind::Set => "set",
+        }
+    }
+}
+
+/// A hooked property's hooks, `prop_info->hooks`, and the two bits only
+/// a hooked property carries. Each hook is a method as php keeps one: a
+/// `zend_function` named `$name::get` or `$name::set`, public unless the
+/// property is private, whose body is the unit's [`crate::HookBody`] of
+/// the same class, property and kind. `is_abstract` is the property's
+/// `ZEND_ACC_ABSTRACT`, written or given by an interface; `is_virtual`
+/// is `ZEND_ACC_VIRTUAL` as `zend_property_is_virtual` decides it where
+/// the property is declared, no hook body naming `$this->name`, and
+/// every interface property: such a property has no backing slot unless
+/// one it overrides has.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PropertyHooks {
+    pub get: Option<MethodDecl>,
+    pub set: Option<MethodDecl>,
+    pub is_abstract: bool,
+    pub is_virtual: bool,
+}
+
+impl PropertyHooks {
+    /// The hook of `kind`, `prop_info->hooks[kind]`.
+    #[must_use]
+    pub fn of(&self, kind: HookKind) -> Option<&MethodDecl> {
+        match kind {
+            HookKind::Get => self.get.as_ref(),
+            HookKind::Set => self.set.as_ref(),
+        }
+    }
 }
 
 /// A class constant, or an enum's case: `is_case` is php's

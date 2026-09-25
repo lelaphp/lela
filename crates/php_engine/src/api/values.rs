@@ -851,13 +851,15 @@ impl PhpObject {
     /// carries it, mangled for a protected or a private property, placed
     /// in the declared slot it names without the class's handlers, or
     /// written into the dynamic table under the key; the value and the
-    /// key are the object's from here.
+    /// key are the object's from here. `false` is a key naming a virtual
+    /// property, which php's `is_property_visibility_changed` refuses
+    /// with its warning, and which fails the unserialization.
     pub fn unserialize_prop(
         &self,
         req: &mut Request,
         key: PhpString,
         value: Value,
-    ) -> Result<(), Thrown> {
+    ) -> Result<bool, Thrown> {
         req.unserialize_property(*self, key, value)
     }
 
