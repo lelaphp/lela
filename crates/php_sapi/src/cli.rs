@@ -4,10 +4,11 @@
 //! the exit code as `serve` ends the request (design §4.1, §4.3 seam 4,
 //! §5.14).
 //!
-//! What the command line asks for is one of six things, as `do_cli`
+//! What the command line asks for is one of eight things, as `do_cli`
 //! settles it: the usage, the version, `phpinfo()` as text, the
-//! extension listing, a request over one program, or `-l`, the lint of
-//! each program named. A program is a file named on the line or after
+//! extension listing, a request over one program, `-l`, the lint of
+//! each program named, or `-s` and `-w`, the program highlighted or
+//! stripped as `zend_highlight` and `zend_strip` write it. A program is a file named on the line or after
 //! `-f`, the code after `-r`, or stdin. `-n` and every `-d` are the
 //! engine's to lay over its defaults before it is built, so the binary
 //! reads them off [`Options`] and builds the engine; the host then
@@ -16,7 +17,8 @@
 //! before anything is built.
 //!
 //! The switches taken are `php_cli.c`'s `OPTIONS` table as `main` and
-//! `do_cli` read it: `-a`, which is `do_cli`'s sentence for a build
+//! `do_cli` read it: `-s` and `-w`, each php's sentence where `-r`
+//! came before it; `-a`, which is `do_cli`'s sentence for a build
 //! without the readline extension, since this engine has none; `-c`,
 //! `-e`, `-H` and `-t`, each taken and changing nothing, as `-n` is: no
 //! `php.ini` is looked for anywhere, the compiler emits no extended
@@ -28,8 +30,7 @@
 //! switch taken.
 //!
 //! What php's CLI takes that this host refuses, each with php's usage on
-//! stdout and exit 1: `-s` and `-w` over the program, `-B`, `-R`, `-F`
-//! and `-E` over stdin's lines, `-S` the dev server, `--rf`, `--rc`,
+//! stdout and exit 1: `-B`, `-R`, `-F` and `-E` over stdin's lines, `-S` the dev server, `--rf`, `--rc`,
 //! `--re`, `--rz` and `--ri` the reflection printers, `--ini` and
 //! `--ini=diff`, and `--repeat`. A switch php does not know is
 //! `php_getopt`'s line on stderr before the usage.
@@ -82,6 +83,11 @@ pub enum Ask {
         programs: Vec<Program>,
         refused: Option<String>,
     },
+    /// `-s`: the program as `zend_highlight` writes it, stdin where no
+    /// file is named.
+    Highlight(Program, Vec<OsString>),
+    /// `-w`: the program as `zend_strip` writes it.
+    Strip(Program, Vec<OsString>),
 }
 
 /// The command line, read: the engine's switches and what is asked of it.
@@ -124,6 +130,8 @@ enum Mode {
     Standard,
     Direct,
     Lint,
+    Highlight,
+    Strip,
 }
 
 /// One row of `php_cli.c`'s `OPTIONS`: the code `php_getopt` returns, a
@@ -420,8 +428,13 @@ impl Options {
                 refused: None,
             }
         } else {
+            let program = program.unwrap_or(Program::Stdin);
             let arguments = rest.map(|word| os(word)).collect();
-            Ask::Serve(program.unwrap_or(Program::Stdin), arguments)
+            match settled.mode {
+                Mode::Highlight => Ask::Highlight(program, arguments),
+                Mode::Strip => Ask::Strip(program, arguments),
+                Mode::Standard | Mode::Direct | Mode::Lint => Ask::Serve(program, arguments),
+            }
         };
         Ok(options)
     }
@@ -496,7 +509,19 @@ impl Options {
                     settled.mode = Mode::Direct;
                     settled.program = Some(Program::Direct(value));
                 }
-                b'B' | b'E' | b'F' | b'R' | b's' | b'w' | 10..=16 => return Err(usage(1)),
+                b's' if settled.mode == Mode::Direct => {
+                    settled
+                        .param_error
+                        .get_or_insert("Source highlighting only works for files.\n");
+                }
+                b's' => settled.mode = Mode::Highlight,
+                b'w' if settled.mode == Mode::Direct => {
+                    settled
+                        .param_error
+                        .get_or_insert("Source stripping only works for files.\n");
+                }
+                b'w' => settled.mode = Mode::Strip,
+                b'B' | b'E' | b'F' | b'R' | 10..=16 => return Err(usage(1)),
                 _ => {}
             }
         }
@@ -804,6 +829,39 @@ fn dump(
     }
 }
 
+/// `-s` over one program, `do_cli`'s `PHP_CLI_MODE_HIGHLIGHT` arm
+/// (`php_cli.c:969-977`): the program as [`Engine::highlight`] writes it,
+/// and the exit code; a file that cannot be opened is exit 1 before a
+/// request begins. The arm registers no standard handles.
+pub fn highlight(engine: &Engine, program: &Program, arguments: &[OsString]) -> i32 {
+    view(program, arguments, |description, sink| {
+        engine.highlight(description, sink)
+    })
+}
+
+/// `-w` over one program, `do_cli`'s `PHP_CLI_MODE_STRIP` arm
+/// (`php_cli.c:963-968`), as [`highlight`] with [`Engine::strip`].
+pub fn strip(engine: &Engine, program: &Program, arguments: &[OsString]) -> i32 {
+    view(program, arguments, |description, sink| {
+        engine.strip(description, sink)
+    })
+}
+
+/// The request `-s` and `-w` describe, handed to what writes it.
+fn view(
+    program: &Program,
+    arguments: &[OsString],
+    write: impl FnOnce(RequestDescription, &mut dyn OutputSink) -> php_engine::Observables,
+) -> i32 {
+    match describe(program, arguments) {
+        Ok(mut description) => {
+            description.file_handles = None;
+            write(description, &mut Process).exit_code
+        }
+        Err(code) => code,
+    }
+}
+
 /// `-l` over one program, `do_cli`'s `PHP_CLI_MODE_LINT` arm
 /// (`php_cli.c:954-961`): the program compiled by [`Engine::lint`] and
 /// not served, then `No syntax errors detected in %s` and 0, or `Errors
@@ -1027,9 +1085,7 @@ mod tests {
     #[test]
     fn the_switches_refused_are_the_usage_and_exit_1() {
         for words in [
-            &["-n", "-s", "a.php"][..],
-            &["-n", "-w", "a.php"],
-            &["-n", "-B", "x"],
+            &["-n", "-B", "x"][..],
             &["-n", "-R", "x"],
             &["-n", "-F", "a.php"],
             &["-n", "-E", "x"],
@@ -1045,6 +1101,46 @@ mod tests {
         ] {
             assert_eq!(refused(words), (true, String::new(), 1), "{words:?}");
         }
+    }
+
+    #[test]
+    fn highlight_and_strip_take_a_file_or_stdin_and_the_last_of_the_two_wins() {
+        let file = || Program::File(PathBuf::from("a.php"));
+        assert_eq!(
+            ask(&["-n", "-s", "a.php"]),
+            Ok(Ask::Highlight(file(), Vec::new()))
+        );
+        assert_eq!(
+            ask(&["-n", "-w", "-f", "a.php"]),
+            Ok(Ask::Strip(file(), Vec::new()))
+        );
+        assert_eq!(
+            ask(&["-n", "-s"]),
+            Ok(Ask::Highlight(Program::Stdin, Vec::new()))
+        );
+        assert_eq!(
+            ask(&["-n", "-s", "-w", "a.php"]),
+            Ok(Ask::Strip(file(), Vec::new()))
+        );
+        assert_eq!(
+            ask(&["-n", "-w", "-s", "a.php"]),
+            Ok(Ask::Highlight(file(), Vec::new()))
+        );
+    }
+
+    #[test]
+    fn highlight_and_strip_after_r_are_phps_sentences_and_r_after_them_the_conflict() {
+        let sentence = |text: &str| Err((text.to_owned(), String::new(), 1));
+        assert_eq!(
+            ask(&["-n", "-r", "echo 1;", "-s"]),
+            sentence("Source highlighting only works for files.\n")
+        );
+        assert_eq!(
+            ask(&["-n", "-r", "echo 1;", "-w"]),
+            sentence("Source stripping only works for files.\n")
+        );
+        assert_eq!(ask(&["-n", "-s", "-r", "echo 1;"]), sentence(CONFLICT));
+        assert_eq!(ask(&["-n", "-w", "-r", "echo 1;"]), sentence(CONFLICT));
     }
 
     #[test]

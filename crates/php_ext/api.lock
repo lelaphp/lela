@@ -455,6 +455,7 @@ test::Engine
 test::Engine::builder
 test::Engine::dump_before_optimizer
 test::Engine::frameless
+test::Engine::highlight
 test::Engine::lint
 test::Engine::loaded_extensions
 test::Engine::serve
@@ -462,6 +463,7 @@ test::Engine::serve_capture
 test::Engine::serve_capture_as
 test::Engine::serve_capture_in
 test::Engine::startup_errors
+test::Engine::strip
 test::Engine::unit
 values::ArrayIter
 values::ArrayIter::advance

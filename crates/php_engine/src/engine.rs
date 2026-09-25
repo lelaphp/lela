@@ -13,6 +13,8 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 use std::any::Any;
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1417,7 +1419,7 @@ impl Engine {
     /// Fatal error: The (unset) cast is no longer supported in %s on line 3
     /// ```
     pub fn serve(&self, description: RequestDescription, sink: &mut dyn OutputSink) -> Observables {
-        self.transaction(description, sink, true)
+        self.transaction(description, sink, Work::Serve)
     }
 
     /// `php_lint_script` under the CLI's `-l` (`Z/main/main.c:2779-2798`,
@@ -1429,17 +1431,37 @@ impl Engine {
     /// not, whatever the compiler warned of; the two sentences `do_cli`
     /// prints around it are the host's, read off that status.
     pub fn lint(&self, description: RequestDescription, sink: &mut dyn OutputSink) -> Observables {
-        self.transaction(description, sink, false)
+        self.transaction(description, sink, Work::Lint)
     }
 
-    /// The one transaction behind [`Engine::serve`] and [`Engine::lint`]:
-    /// `run` says whether the compiled unit is served on a frame or, as
-    /// `php_lint_script` does, dropped once compiled.
+    /// The CLI's `-s`, `PHP_CLI_MODE_HIGHLIGHT` (`Z/sapi/cli/php_cli.c:969-977`):
+    /// the request started, the program read as `open_file_for_scanning`
+    /// reads it and written as `zend_highlight` writes it under the
+    /// request's `highlight.*` entries, and the request shut down with no
+    /// frame pushed and nothing compiled.
+    pub fn highlight(
+        &self,
+        description: RequestDescription,
+        sink: &mut dyn OutputSink,
+    ) -> Observables {
+        self.transaction(description, sink, Work::Highlight)
+    }
+
+    /// The CLI's `-w`, `PHP_CLI_MODE_STRIP` (`Z/sapi/cli/php_cli.c:963-968`):
+    /// as [`Engine::highlight`], with the program written as `zend_strip`
+    /// writes it.
+    pub fn strip(&self, description: RequestDescription, sink: &mut dyn OutputSink) -> Observables {
+        self.transaction(description, sink, Work::Strip)
+    }
+
+    /// The one transaction behind [`Engine::serve`], [`Engine::lint`],
+    /// [`Engine::highlight`] and [`Engine::strip`]: `work` says what the
+    /// program is for once the request has started.
     fn transaction(
         &self,
         description: RequestDescription,
         sink: &mut dyn OutputSink,
-        run: bool,
+        work: Work,
     ) -> Observables {
         let source = description.source.clone();
         let cwd = description.cwd.clone();
@@ -1462,6 +1484,20 @@ impl Engine {
         // and a source the host handed over is this request's alone,
         // interned into this request's own memory and gone with it, as
         // php holds what it compiles for `-r` and for `eval`.
+        if matches!(work, Work::Highlight | Work::Strip) {
+            // `open_file_for_scanning` over the program: the source the
+            // host handed over, or the file read whole.
+            let text = source.or_else(|| std::fs::read(cwd.join(OsStr::from_bytes(&script))).ok());
+            if let Some(text) = text {
+                let written = if work == Work::Highlight {
+                    crate::api::syntax::highlight(&req, &text)
+                } else {
+                    crate::api::syntax::strip(&req, &text)
+                };
+                req.write(&written);
+            }
+            return self.shutdown(req, sink);
+        }
         let compiled = if let Some(source) = source {
             Some(
                 self.shared
@@ -1472,7 +1508,9 @@ impl Engine {
             self.shared.cached(&script, &cwd, req.stack_limit())
         };
         match compiled {
-            Some(Ok(unit)) if run => serve_unit(&mut req, &unit, self.shared.entry),
+            Some(Ok(unit)) if work == Work::Serve => {
+                serve_unit(&mut req, &unit, self.shared.entry);
+            }
             // `php_lint_script` compiles and drops the op array, and what
             // the compiler warned of it rendered as it compiled.
             Some(Ok(unit)) => note_compiled(&mut req, &unit),
@@ -1488,6 +1526,11 @@ impl Engine {
             }
             None => {}
         }
+        self.shutdown(req, sink)
+    }
+
+    /// `php_request_shutdown` and what the host is handed after it.
+    fn shutdown(&self, mut req: Request, sink: &mut dyn OutputSink) -> Observables {
         // `php_request_shutdown`'s order (design §5.10): the shutdown
         // functions first, which is `php_call_shutdown_functions`; then
         // the destructors of what is still live, which is
@@ -1546,6 +1589,17 @@ impl Engine {
             fatal,
         }
     }
+}
+
+/// What a transaction is for once the request has started: the program
+/// served, linted, or written as `zend_highlight` or `zend_strip` writes
+/// it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Work {
+    Serve,
+    Lint,
+    Highlight,
+    Strip,
 }
 
 /// The ini entries php reads while a file compiles, read once where the
