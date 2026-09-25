@@ -1115,6 +1115,64 @@ fn reflection_extension_is_temporary(req: &mut Request) -> Result<Value, Thrown>
     Ok(Value::bool(false))
 }
 
+// -------------------------------------------------- ReflectionZendExtension
+
+/// `ReflectionZendExtension::__construct(string $name)`:
+/// `zend_get_extension(name)` or php's `ReflectionException`. The
+/// engine loads no Zend extension, `zend_extensions` being empty, so
+/// every name is refused and no reflector of this class ever holds one.
+///
+/// ```php
+/// try { new ReflectionZendExtension('zend_opcache'); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+/// try { new ReflectionZendExtension([]); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Zend Extension "zend_opcache" does not exist
+/// ReflectionZendExtension::__construct(): Argument #1 ($name) must be of type string, array given
+/// ```
+fn reflection_zend_extension_construct(req: &mut Request) -> Result<Value, Thrown> {
+    let name = one_string_argument(req)?;
+    Err(throw(
+        req,
+        "ReflectionException",
+        &format!(
+            "Zend Extension \"{}\" does not exist",
+            String::from_utf8_lossy(&name)
+        ),
+    ))
+}
+
+/// `ReflectionZendExtension`'s six readers, `__toString`, `getName`,
+/// `getVersion`, `getAuthor`, `getURL` and `getCopyright`: each reads
+/// `intern->ptr`, which only the constructor writes and which it never
+/// writes here ([`reflection_zend_extension_construct`]), so each is
+/// `GET_REFLECTION_OBJECT_PTR`'s `Error` after its count check.
+///
+/// ```php
+/// $r = (new ReflectionClass('ReflectionZendExtension'))->newInstanceWithoutConstructor();
+/// foreach (['getName', 'getVersion', 'getAuthor', 'getURL', 'getCopyright', '__toString'] as $m) {
+///     try { call_user_func([$r, $m]); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// try { $r->getName(1); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Internal error: Failed to retrieve the reflection object
+/// Internal error: Failed to retrieve the reflection object
+/// Internal error: Failed to retrieve the reflection object
+/// Internal error: Failed to retrieve the reflection object
+/// Internal error: Failed to retrieve the reflection object
+/// Internal error: Failed to retrieve the reflection object
+/// ReflectionZendExtension::getName() expects exactly 0 arguments, 1 given
+/// ```
+fn reflection_zend_extension_reader(req: &mut Request) -> Result<Value, Thrown> {
+    exactly_arguments(req, 0)?;
+    Err(throw(
+        req,
+        "Error",
+        "Internal error: Failed to retrieve the reflection object",
+    ))
+}
+
 /// `ReflectionFunctionAbstract::isDeprecated()`:
 /// `_function_check_flag(ZEND_ACC_DEPRECATED)`, the bit the
 /// `#[\Deprecated]` attribute sets on a native's or a user function's

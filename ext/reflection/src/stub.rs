@@ -6290,31 +6290,31 @@ fn reflection_zend_extension() -> Declared {
             ),
             (
                 method(b"__construct", &[parameter(b"name", Type::String)], None),
-                unbuilt as Entry,
+                super::reflection_zend_extension_construct as Entry,
             ),
             (
                 method(b"__toString", &[], Some(Type::String)),
-                unbuilt as Entry,
+                super::reflection_zend_extension_reader as Entry,
             ),
             (
                 tentative(method(b"getName", &[], Some(Type::String))),
-                unbuilt as Entry,
+                super::reflection_zend_extension_reader as Entry,
             ),
             (
                 tentative(method(b"getVersion", &[], Some(Type::String))),
-                unbuilt as Entry,
+                super::reflection_zend_extension_reader as Entry,
             ),
             (
                 tentative(method(b"getAuthor", &[], Some(Type::String))),
-                unbuilt as Entry,
+                super::reflection_zend_extension_reader as Entry,
             ),
             (
                 tentative(method(b"getURL", &[], Some(Type::String))),
-                unbuilt as Entry,
+                super::reflection_zend_extension_reader as Entry,
             ),
             (
                 tentative(method(b"getCopyright", &[], Some(Type::String))),
-                unbuilt as Entry,
+                super::reflection_zend_extension_reader as Entry,
             ),
         ],
     )
