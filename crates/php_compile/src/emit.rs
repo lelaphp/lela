@@ -13089,8 +13089,9 @@ impl Emit<'_> {
     /// The value of a `&` element, `zend_ensure_writable_variable` and
     /// then `zend_compile_var(…, BP_VAR_W, 1)`: what a call returned is
     /// php's compile error, a plain variable is its CV, `$this` is
-    /// `FETCH_THIS` into a `VAR`, and a dimension, a property and a
-    /// class's property are the write fetch of the whole chain with the
+    /// `FETCH_THIS` into a `VAR`, `$GLOBALS` is php's compile error, and
+    /// a dimension, a property, a class's property and a variable
+    /// fetched by name are the write fetch of the whole chain with the
     /// `&`'s own bit on its last opline ([`Self::var_for_reference`]).
     /// The array's entry and the variable are one cell from there:
     ///
@@ -13120,17 +13121,49 @@ impl Emit<'_> {
     /// ```expect exit=255
     /// Fatal error: Can't use function return value in write context in %s on line 3
     /// ```
+    ///
+    /// A variable fetched by name is bound where it stands, in the table
+    /// it names:
+    ///
+    /// ```php
+    /// $n = 'x';
+    /// $a = [&$_SERVER['k'], &$GLOBALS['g'], &$$n, &$_GET];
+    /// $a[0] = 1; $a[1] = 2; $a[2] = 3; $a[3] = [4];
+    /// var_dump($_SERVER['k'], $g, $x, $_GET);
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// int(2)
+    /// int(3)
+    /// array(1) {
+    ///   [0]=>
+    ///   int(4)
+    /// }
+    /// ```
+    ///
+    /// ```php
+    /// $a = [&$GLOBALS];
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: $GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax in %s on line 2
+    /// ```
     fn element_ref(&mut self, value: tree::Expr) -> Result<(OperandKind, u32), CompileError> {
         let line = self.line_of(value);
         match self.peel(value) {
             tree::Expr::CallExpr(id) => Err(self.call_written(id)),
+            // A variable fetched by name, `$$x`, an auto-global or
+            // `$GLOBALS['k']`: its `FETCH_W` into a `VAR`.
+            node if self.is_by_name(node) => {
+                self.line = line;
+                self.var_for_reference(node)
+            }
             tree::Expr::SimpleVarExpr(id) => match self.simple_var_of(id, line)? {
                 SimpleVar::Cv(name) => Ok((OperandKind::Cv, self.lookup_cv(&name))),
                 SimpleVar::This => {
                     let this = self.fetch_this(OperandKind::Var);
                     Ok(self.operand(this))
                 }
-                SimpleVar::Auto(_) => Err(self.unread("a `&` element over an auto-global")),
+                SimpleVar::Auto(_) => Err(self.fatal("an auto-global not fetched by name")),
                 SimpleVar::Globals => Err(self.compile_error(
                     "$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax",
                 )),
@@ -13144,9 +13177,6 @@ impl Emit<'_> {
             {
                 self.line = line;
                 self.var_for_reference(node)
-            }
-            tree::Expr::VarVarExpr(_) | tree::Expr::DynamicVarExpr(_) => {
-                Err(self.unread("a `&` element over a variable named at run time"))
             }
             _ => Err(self.compile_error("Cannot use temporary expression in write context")),
         }
