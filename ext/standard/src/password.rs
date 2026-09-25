@@ -275,7 +275,9 @@ fn make_salt(
         }
     }
     let mut buffer = vec![0u8; length * 3 / 4 + 1];
-    crate::ffi::random_bytes(&mut buffer);
+    if !crate::ffi::random_bytes(&mut buffer) {
+        return Err(throw(req, "ValueError", "Unable to generate salt"));
+    }
     let encoded = crate::base64::encode(&buffer);
     let salt = encoded.get(..length).unwrap_or_default();
     if salt.len() < length || salt.contains(&b'=') {

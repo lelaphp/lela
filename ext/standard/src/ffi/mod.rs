@@ -175,11 +175,38 @@ pub(super) fn fnmatch(pattern: &[u8], string: &[u8], flags: i32) -> bool {
 
 /// `arc4random_buf(3)`, the host's CSPRNG, which is what
 /// `php_random_bytes` reads on this host: `buf` filled with random
-/// bytes. It cannot fail.
-pub(super) fn random_bytes(buf: &mut [u8]) {
+/// bytes. It cannot fail, so the answer is always `true`.
+#[cfg(not(target_os = "linux"))]
+pub(super) fn random_bytes(buf: &mut [u8]) -> bool {
     // SAFETY: `buf` is live, writable storage of exactly the length
     // given, which is all the call writes.
-    unsafe { libc::arc4random_buf(buf.as_mut_ptr().cast(), buf.len()) }
+    unsafe { libc::arc4random_buf(buf.as_mut_ptr().cast(), buf.len()) };
+    true
+}
+
+/// `getrandom(2)` until `buf` is full, retried on `EINTR`, and
+/// `/dev/urandom` for the rest where it fails otherwise: the arm
+/// `php_random_bytes` takes on Linux (`Z/ext/random/csprng.c:100`).
+/// `false` where both fail, which php answers with its `FAILURE`.
+#[cfg(target_os = "linux")]
+pub(super) fn random_bytes(buf: &mut [u8]) -> bool {
+    use std::io::{ErrorKind, Read};
+    let mut filled = 0;
+    while let Some(rest) = buf.get_mut(filled..).filter(|rest| !rest.is_empty()) {
+        // SAFETY: `rest` is live, writable storage of exactly the length
+        // given, which is all the call writes.
+        let n = unsafe { libc::getrandom(rest.as_mut_ptr().cast(), rest.len(), 0) };
+        match usize::try_from(n) {
+            Ok(n) => filled += n,
+            Err(_) if std::io::Error::last_os_error().kind() == ErrorKind::Interrupted => {}
+            Err(_) => {
+                return std::fs::File::open("/dev/urandom")
+                    .and_then(|mut urandom| urandom.read_exact(rest))
+                    .is_ok();
+            }
+        }
+    }
+    true
 }
 
 /// `sysconf(_SC_ARG_MAX)`, what `PHP_MINIT_FUNCTION(exec)` sets
@@ -196,7 +223,11 @@ pub(super) fn arg_max() -> usize {
 pub(super) fn nice(increment: i32) -> bool {
     // SAFETY: `__error` answers the calling thread's `errno` location
     // and nothing else.
+    #[cfg(not(target_os = "linux"))]
     let errno = unsafe { libc::__error() };
+    // SAFETY: `__errno_location` is Linux's name for the same location.
+    #[cfg(target_os = "linux")]
+    let errno = unsafe { libc::__errno_location() };
     // SAFETY: that location is live and the thread's own for its life;
     // writing zero to it is what C's `errno = 0` does.
     unsafe { *errno = 0 };
@@ -407,6 +438,12 @@ pub(super) fn interfaces() -> std::io::Result<Vec<InterfaceAddress>> {
             // SAFETY: `ifa_addr` is non-null and the list's own.
             Some(i64::from(unsafe { (*entry.ifa_addr).sa_family }))
         };
+        // `ifa_dstaddr`, which glibc names `ifa_ifu`, the union it shares
+        // with `ifa_broadaddr` there as it does here.
+        #[cfg(not(target_os = "linux"))]
+        let dstaddr = entry.ifa_dstaddr;
+        #[cfg(target_os = "linux")]
+        let dstaddr = entry.ifa_ifu;
         let broadcast = flags & u32::try_from(libc::IFF_BROADCAST).unwrap_or(0) != 0;
         let ptp = flags & u32::try_from(libc::IFF_POINTOPOINT).unwrap_or(0) != 0;
         found.push(InterfaceAddress {
@@ -416,15 +453,11 @@ pub(super) fn interfaces() -> std::io::Result<Vec<InterfaceAddress>> {
             address: address_text(entry.ifa_addr),
             netmask: address_text(entry.ifa_netmask),
             broadcast: if broadcast {
-                address_text(entry.ifa_dstaddr)
+                address_text(dstaddr)
             } else {
                 None
             },
-            ptp: if ptp {
-                address_text(entry.ifa_dstaddr)
-            } else {
-                None
-            },
+            ptp: if ptp { address_text(dstaddr) } else { None },
         });
         at = entry.ifa_next;
     }
@@ -705,6 +738,7 @@ fn getnameinfo_namereqd(sa: *const libc::sockaddr, len: usize) -> Option<Vec<u8>
 /// `sockaddr_in6` with only its family and address set, as php leaves it.
 pub(super) fn name_of_v6(addr: [u8; 16]) -> Option<Vec<u8>> {
     let sa6 = libc::sockaddr_in6 {
+        #[cfg(not(target_os = "linux"))]
         sin6_len: 0,
         sin6_family: libc::sa_family_t::try_from(libc::AF_INET6).unwrap_or(0),
         sin6_port: 0,
@@ -722,6 +756,7 @@ pub(super) fn name_of_v6(addr: [u8; 16]) -> Option<Vec<u8>> {
 /// with only its family and address set, as php leaves it.
 pub(super) fn name_of_v4(addr: [u8; 4]) -> Option<Vec<u8>> {
     let sa4 = libc::sockaddr_in {
+        #[cfg(not(target_os = "linux"))]
         sin_len: 0,
         sin_family: libc::sa_family_t::try_from(libc::AF_INET).unwrap_or(0),
         sin_port: 0,
