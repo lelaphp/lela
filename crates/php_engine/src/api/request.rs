@@ -94,6 +94,21 @@ enum ConstantOwner {
     User(Option<Box<[u8]>>),
 }
 
+/// The parameters of one callee whose arguments a trace redacts:
+/// `declared` by position, the variadic's for the rest.
+#[derive(Default)]
+struct Sensitive {
+    declared: Vec<bool>,
+    variadic: bool,
+}
+
+impl Sensitive {
+    /// Whether the argument at `at`, from zero, is shown redacted.
+    fn at(&self, at: usize) -> bool {
+        self.declared.get(at).copied().unwrap_or(self.variadic)
+    }
+}
+
 /// One row a request added to `EG(zend_constants)`: its owner, its name
 /// as `zend_register_constant` keys it, its value, and
 /// `zend_constant::attributes`, what a `DECLARE_ATTRIBUTED_CONST` hung
@@ -3215,6 +3230,10 @@ impl Request {
         for (traced, this, scope, mut arguments, named, site) in links {
             let mut row = PhpArray::new(self)?;
             let is_function = matches!(traced, Traced::Function(_));
+            let sensitive = match traced {
+                Traced::Function(function) => self.sensitive_parameters(function),
+                Traced::Include { .. } => Sensitive::default(),
+            };
             let (name, method) = match traced {
                 Traced::Function(function) => (
                     self.declared_name(function),
@@ -3254,14 +3273,24 @@ impl Request {
             let with_args = is_function || !arguments.is_empty();
             if !ignore_arguments && with_args {
                 let mut args = PhpArray::new(self)?;
-                for argument in arguments {
+                for (at, argument) in arguments.into_iter().enumerate() {
                     let argument = argument.deref();
-                    self.addref(&argument);
+                    let argument = if sensitive.at(at) {
+                        self.sensitive_value(argument)?
+                    } else {
+                        self.addref(&argument);
+                        argument
+                    };
                     args.append(self, argument)?;
                 }
                 for (name, argument) in named {
                     let argument = argument.deref();
-                    self.addref(&argument);
+                    let argument = if sensitive.variadic {
+                        self.sensitive_value(argument)?
+                    } else {
+                        self.addref(&argument);
+                        argument
+                    };
                     self.addref(&Value::string(name));
                     args.set(self, Key::Str(name), argument)?;
                 }
@@ -3274,6 +3303,81 @@ impl Request {
             trace.append(self, Value::array(row))?;
         }
         Ok(trace)
+    }
+
+    /// Which arguments of a call to `function` a trace shows redacted,
+    /// php's `zend_get_parameter_attribute_str(..., "sensitiveparameter",
+    /// i)` over its parameters: each declared one by position, and the
+    /// variadic's for every argument past them and every extra named one.
+    fn sensitive_parameters(&self, function: Function) -> Sensitive {
+        let marked = |parameter: &php_unit::decl::Parameter| {
+            parameter.attributes.iter().any(|attribute| {
+                let name = attribute
+                    .name
+                    .0
+                    .strip_prefix(b"\\")
+                    .unwrap_or(&attribute.name.0);
+                name.eq_ignore_ascii_case(b"SensitiveParameter")
+            })
+        };
+        let Some(decl) = self.function_decl(function) else {
+            return Sensitive::default();
+        };
+        Sensitive {
+            declared: decl
+                .parameters
+                .iter()
+                .filter(|parameter| !parameter.variadic)
+                .map(marked)
+                .collect(),
+            variadic: decl
+                .parameters
+                .iter()
+                .find(|parameter| parameter.variadic)
+                .is_some_and(marked),
+        }
+    }
+
+    /// `object_init_ex(zend_ce_sensitive_parameter_value)` and its
+    /// constructor over `argument`: what a trace shows in place of an
+    /// argument `#[\SensitiveParameter]` marks, one owner, the trace's.
+    ///
+    /// ```php
+    /// function f($a, #[\SensitiveParameter] $secret, ...$rest) {
+    ///     debug_print_backtrace();
+    ///     var_dump(debug_backtrace()[0]['args'][1]->getValue());
+    ///     throw new Exception('boom');
+    /// }
+    /// function g(#[\SensitiveParameter] ...$all) { var_dump(debug_backtrace()[0]['args']); }
+    /// g(1, x: 2);
+    /// f(1, 'hunter2', 3);
+    /// ```
+    /// ```expect exit=255
+    /// array(2) {
+    ///   [0]=>
+    ///   object(SensitiveParameterValue)#1 (0) {
+    ///   }
+    ///   ["x"]=>
+    ///   object(SensitiveParameterValue)#2 (0) {
+    ///   }
+    /// }
+    /// #0 %s(9): f(1, Object(SensitiveParameterValue), 3)
+    /// string(7) "hunter2"
+    ///
+    /// Fatal error: Uncaught Exception: boom in %s:5
+    /// Stack trace:
+    /// #0 %s(9): f(1, Object(SensitiveParameterValue), 3)
+    /// #1 {main}
+    ///   thrown in %s on line 5
+    /// ```
+    fn sensitive_value(&mut self, argument: Value) -> Result<Value, Thrown> {
+        let Some(class) = self.class_named(b"SensitiveParameterValue") else {
+            return Err(crate::api::raising::fatal(
+                self,
+                "InternalError: SensitiveParameterValue is not linked",
+            ));
+        };
+        crate::api::call::instantiate(self, class, &[argument]).map(|object| object.as_value())
     }
 
     /// php's one `prev_execute_data` chain, innermost first, walked back
