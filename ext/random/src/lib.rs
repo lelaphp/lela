@@ -31,6 +31,8 @@ mod engine_pcgoneseq128xslrr64;
 mod engine_secure;
 mod engine_user;
 mod engine_xoshiro256starstar;
+mod gammasection;
+mod randomizer;
 mod rng;
 mod zpp;
 
@@ -51,6 +53,7 @@ use engine_mt19937::{Mode, Mt19937};
 use engine_pcgoneseq128xslrr64::PcgOneseq128XslRr64;
 use engine_secure::Secure;
 use engine_xoshiro256starstar::Xoshiro256StarStar;
+use randomizer::Randomizer;
 
 /// A native's entry, the shape `ExtensionBuilder::functions` takes.
 pub(crate) type Entry = fn(&mut Request) -> Result<Value, Thrown>;
@@ -125,6 +128,13 @@ pub(crate) trait Algo {
     /// `algo->range`: a uniform integer in `[min, max]`.
     fn range(&mut self, min: i64, max: i64) -> Result<i64, Failure> {
         range(self, min, max)
+    }
+
+    /// The state when the engine is `Mt19937`, which
+    /// `Randomizer::getInt` asks as php compares `algo->range` against
+    /// `php_random_algo_mt19937.range`.
+    fn as_mt19937(&mut self) -> Option<&mut Mt19937> {
+        None
     }
 }
 
@@ -532,7 +542,7 @@ static MT19937: Copying<Mt19937> = Copying(PhantomData);
 static PCG: Copying<PcgOneseq128XslRr64> = Copying(PhantomData);
 static XOSHIRO: Copying<Xoshiro256StarStar> = Copying(PhantomData);
 
-/// The handlers of `Secure`, whose `clone_obj` php
+/// The handlers of `Secure` and `Randomizer`, whose `clone_obj` php
 /// leaves null: an uncloneable object.
 struct Uncloneable;
 
@@ -560,6 +570,8 @@ fn classes(builder: ExtensionBuilder) -> ExtensionBuilder {
     {
         builder = builder.classes(vec![(decl, Vec::new())]);
     }
+    let mut randomizer = class("Random\\Randomizer", ClassKind::Class, None, &[]);
+    randomizer.properties.push(arginfo::engine_property());
     builder
         .class_payload::<Mt19937>(
             engine("Random\\Engine\\Mt19937", "Random\\Engine"),
@@ -581,6 +593,8 @@ fn classes(builder: ExtensionBuilder) -> ExtensionBuilder {
             vec![engine_mt19937::generate_method()],
             &UNCLONEABLE,
         )
+        .class_payload::<Randomizer>(randomizer, randomizer::methods(), &UNCLONEABLE)
+        .classes(vec![(arginfo::interval_boundary(), Vec::new())])
 }
 
 /// The extension value (design §7.1): declarations paired with entries,

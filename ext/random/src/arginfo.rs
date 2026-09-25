@@ -7,8 +7,9 @@
 //! from, and `= UNKNOWN` is the optional parameter with no default.
 
 use php_ext::decl::{
-    Attribute, AttributeArgument, ClassDecl, ClassFlags, ClassKind, ConstDecl, ConstExpr,
-    DynamicProperties, EnumBacking, FunctionDecl, MethodDecl, Name, Parameter, Type, Visibility,
+    Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind, ConstDecl,
+    ConstExpr, DynamicProperties, EnumBacking, FunctionDecl, MethodDecl, Name, Parameter,
+    PropertyDecl, Type, Visibility,
 };
 
 use crate::Entry;
@@ -16,6 +17,11 @@ use crate::Entry;
 /// A name as the stub spells it.
 pub(super) fn name(text: &str) -> Name {
     Name(text.as_bytes().into())
+}
+
+/// A class type, `Random\Engine`.
+pub(super) fn class_type(text: &str) -> Type {
+    Type::Named(name(text))
 }
 
 /// One parameter by value, with its default where it is optional.
@@ -257,4 +263,50 @@ pub(super) fn throwables() -> Vec<ClassDecl> {
             &[],
         ),
     ]
+}
+
+/// `public readonly Engine $engine;`, the Randomizer's one property.
+pub(super) fn engine_property() -> PropertyDecl {
+    PropertyDecl {
+        name: name("engine"),
+        visibility: Visibility::Public,
+        set_visibility: None,
+        is_instance: true,
+        is_readonly: true,
+        is_final: false,
+        ty: Some(class_type("Random\\Engine")),
+        default: None,
+        attributes: Vec::new(),
+        doc_comment: None,
+    }
+}
+
+/// `enum Random\IntervalBoundary`, its four cases in the stub's order;
+/// `cases()` is the engine's, as `zend_enum_register_funcs` gives it.
+pub(super) fn interval_boundary() -> ClassDecl {
+    let enum_name = "Random\\IntervalBoundary";
+    let mut decl = class(enum_name, ClassKind::Enum, None, &["UnitEnum"]);
+    decl.constants = ["ClosedOpen", "ClosedClosed", "OpenClosed", "OpenOpen"]
+        .into_iter()
+        .map(|case| ClassConstDecl {
+            name: name(case),
+            visibility: Visibility::Public,
+            is_final: false,
+            is_case: true,
+            ty: None,
+            value: ConstExpr::EnumCase {
+                class: name(enum_name),
+                case: name(case),
+            },
+            attributes: Vec::new(),
+            doc_comment: None,
+        })
+        .collect();
+    decl.flags.is_final = true;
+    decl.properties = vec![PropertyDecl {
+        name: name("name"),
+        ty: Some(Type::String),
+        ..engine_property()
+    }];
+    decl
 }

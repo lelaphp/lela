@@ -172,6 +172,10 @@ impl Algo for Mt19937 {
             size: 4,
         })
     }
+
+    fn as_mt19937(&mut self) -> Option<&mut Mt19937> {
+        Some(self)
+    }
 }
 
 impl Serial for Mt19937 {

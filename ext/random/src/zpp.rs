@@ -7,7 +7,7 @@
 use php_ext::coerce::argument;
 use php_ext::raising::{Thrown, arg_count_error, fatal};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpObject, Value};
+use php_ext::values::{PhpArray, PhpObject, PhpString, Value};
 
 /// `ZEND_PARSE_PARAMETERS_START(min, max)`: the count, or php's
 /// `ArgumentCountError`.
@@ -44,6 +44,24 @@ pub(super) fn long(req: &mut Request, position: u32) -> Result<i64, Thrown> {
 /// `Z_PARAM_LONG_OR_NULL`: `None` for `null` and for no argument.
 pub(super) fn nullable_long(req: &mut Request, position: u32) -> Result<Option<i64>, Thrown> {
     Ok(given(req, position)?.and_then(|v| v.as_int()))
+}
+
+/// `Z_PARAM_DOUBLE`.
+pub(super) fn double(req: &mut Request, position: u32) -> Result<f64, Thrown> {
+    let value = given(req, position)?.unwrap_or_default();
+    #[allow(clippy::cast_precision_loss)]
+    Ok(value
+        .as_float()
+        .or_else(|| value.as_int().map(|n| n as f64))
+        .unwrap_or(0.0))
+}
+
+/// `Z_PARAM_STR`.
+pub(super) fn string(req: &mut Request, position: u32) -> Result<PhpString, Thrown> {
+    match given(req, position)?.and_then(|v| v.as_php_string().copied()) {
+        Some(s) => Ok(s),
+        None => PhpString::new(req, b""),
+    }
 }
 
 /// `Z_PARAM_ARRAY`: the array, a view.

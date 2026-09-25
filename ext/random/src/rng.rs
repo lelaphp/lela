@@ -57,6 +57,14 @@ impl Rng {
     }
 
     /// `algo->range(state, min, max)`: a uniform integer in `[min, max]`.
+    ///
+    /// ```php
+    /// $r = new Random\Randomizer(new Random\Engine\Mt19937(7)); var_dump($r->getInt(-3, 3), $r->getInt(0, PHP_INT_MAX));
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// int(5163590386386658500)
+    /// ```
     pub fn range(self, req: &mut Request, min: i64, max: i64) -> Result<i64, Thrown> {
         self.with(req, |algo| algo.range(min, max))
             .map_err(|failure| failure.raise(req))
@@ -65,6 +73,13 @@ impl Rng {
     /// `php_array_data_shuffle` over the array's values once packed, and
     /// `php_binary_string_shuffle` over a string's bytes: from the last
     /// place down, each swapped with one drawn from `[0, place]`.
+    ///
+    /// ```php
+    /// $r = new Random\Randomizer(new Random\Engine\Mt19937(7)); echo $r->shuffleBytes("abcdefgh"), " ", implode(",", $r->shuffleArray(["x" => 1, 2, 3, 4])), "\n";
+    /// ```
+    /// ```expect
+    /// ceadfbgh 1,3,2,4
+    /// ```
     pub fn shuffle<T>(self, req: &mut Request, items: &mut [T]) -> Result<(), Thrown> {
         let walked = self.with(req, |algo| walk(algo, items));
         walked.map_err(|failure| failure.raise(req))
@@ -74,6 +89,14 @@ impl Rng {
     /// or for `num` of one the key of one element, sampled by bucket as
     /// php samples it. An empty array and a `num` out of range are php's
     /// `ValueError`s on the caller's first and second argument.
+    ///
+    /// ```php
+    /// $r = new Random\Randomizer(new Random\Engine\Mt19937(7)); $a = range(0, 9); unset($a[2], $a[3], $a[9]);
+    /// echo implode(",", $r->pickArrayKeys(["a" => 1, "b" => 2, "c" => 3], 1)), " ", implode(",", $r->pickArrayKeys($a, 3)), " ", implode(",", $r->pickArrayKeys($a, 1)), "\n";
+    /// ```
+    /// ```expect
+    /// a 1,6,8 8
+    /// ```
     pub fn pick_keys(
         self,
         req: &mut Request,
