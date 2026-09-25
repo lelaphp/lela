@@ -205,20 +205,29 @@ pub(super) fn reflection_class_is_read_only(req: &mut Request) -> Result<Value, 
     Ok(Value::bool(readonly))
 }
 
-/// `ReflectionClass::isAnonymous()`: `ZEND_ACC_ANON_CLASS`. A class
-/// the compiler has read is always named here, so the answer is php's
-/// for every class that is not anonymous.
+/// `ReflectionClass::isAnonymous()`: `ZEND_ACC_ANON_CLASS`, which a
+/// class declared by `new class` carries.
 ///
 /// ```php
-/// var_dump((new ReflectionClass('Exception'))->isAnonymous());
+/// class Named {}
+/// var_dump((new ReflectionClass('Exception'))->isAnonymous(), (new ReflectionClass('Named'))->isAnonymous());
+/// $r = new ReflectionClass(new class extends Named {});
+/// var_dump($r->isAnonymous(), $r->getShortName() === $r->getName(), strstr($r->getName(), "\0", true));
 /// ```
 /// ```expect
 /// bool(false)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// string(15) "Named@anonymous"
 /// ```
 pub(super) fn reflection_class_is_anonymous(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 0)?;
-    this_class(req)?;
-    Ok(Value::bool(false))
+    let class = this_class(req)?;
+    let anonymous = req
+        .class_decl(class)
+        .is_some_and(|decl| decl.flags.is_anonymous);
+    Ok(Value::bool(anonymous))
 }
 
 /// `ReflectionClass::getModifiers()`: the `ZEND_ACC_FINAL`,
