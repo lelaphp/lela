@@ -730,7 +730,7 @@ pub(super) fn reflection_class_constant_to_string(req: &mut Request) -> Result<V
         .class_decl(scope)
         .is_some_and(|decl| decl.kind == ClassKind::Enum)
         .then_some(held.as_slice());
-    let text = class_const_string(req, &decl, enum_of, "");
+    let text = class_const_string(req, &decl, scope, enum_of, "")?;
     string_value(req, text.as_bytes())
 }
 

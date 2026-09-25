@@ -832,7 +832,7 @@ fn reflection_extension_construct(req: &mut Request) -> Result<Value, Thrown> {
 /// ```
 fn reflection_extension_to_string(req: &mut Request) -> Result<Value, Thrown> {
     let extension = this_extension(req)?;
-    let text = extension_string(req, extension, "");
+    let text = extension_string(req, extension, "")?;
     string_value(req, text.as_bytes())
 }
 
@@ -2549,7 +2549,7 @@ fn reflection_class_to_string(req: &mut Request) -> Result<Value, Thrown> {
     // zval, which is what puts `Object of class` and the `Dynamic
     // properties` block on the one and not the other.
     let object = req.this().and_then(|this| kept_object(req, this));
-    let text = class_string(req, class, object, "");
+    let text = class_string(req, class, object, "")?;
     string_value(req, text.as_bytes())
 }
 
@@ -3664,7 +3664,11 @@ fn reflection_constant_get_attributes(req: &mut Request) -> Result<Value, Thrown
 /// `<persistent>`, as one compiled in is, and its version is
 /// `PHP_VERSION`, as `PHP_CTYPE_VERSION` and its kin are. The `INI`
 /// block is not rendered yet (#375); `json` has no ini entry.
-fn extension_string(req: &mut Request, extension: ExtensionId, indent: &str) -> String {
+fn extension_string(
+    req: &mut Request,
+    extension: ExtensionId,
+    indent: &str,
+) -> Result<String, Thrown> {
     let mut out = String::new();
     let name = req
         .extension_name(extension)
@@ -3703,12 +3707,12 @@ fn extension_string(req: &mut Request, extension: ExtensionId, indent: &str) -> 
         let sub_indent = format!("{indent}    ");
         for (class, _) in classes {
             out.push('\n');
-            out.push_str(&class_string(req, class, None, &sub_indent));
+            out.push_str(&class_string(req, class, None, &sub_indent)?);
         }
         let _ = writeln!(out, "{indent}  }}");
     }
     let _ = writeln!(out, "{indent}}}");
-    out
+    Ok(out)
 }
 
 /// `_const_string`: `Constant [ <persistent> type NAME ] { value }`,
@@ -3828,10 +3832,10 @@ fn class_string(
     class: ClassId,
     object: Option<PhpObject>,
     indent: &str,
-) -> String {
+) -> Result<String, Thrown> {
     let mut out = String::new();
     let Some(decl) = req.class_decl(class).cloned() else {
-        return out;
+        return Ok(out);
     };
     let sub_indent = format!("{indent}    ");
     let methods = linked_methods(req, class);
@@ -3859,8 +3863,14 @@ fn class_string(
         let _ = writeln!(out, "{indent}  }}");
     }
     let _ = write!(out, "\n{indent}  - Constants [{}] {{\n", constants.len());
-    for (constant, _) in &constants {
-        out.push_str(&class_const_string(req, constant, None, &sub_indent));
+    for (constant, scope) in &constants {
+        out.push_str(&class_const_string(
+            req,
+            constant,
+            *scope,
+            None,
+            &sub_indent,
+        )?);
     }
     let _ = writeln!(out, "{indent}  }}");
 
@@ -3931,7 +3941,7 @@ fn class_string(
         let _ = writeln!(out, "{indent}  }}");
     }
     let _ = writeln!(out, "{indent}}}");
-    out
+    Ok(out)
 }
 
 /// The names in the object's property table the class did not declare,
@@ -4060,13 +4070,30 @@ fn class_header(
 /// value }`, the type the declaration's where it has one and the
 /// value's `zend_zval_type_name` otherwise, the value as
 /// `zval_get_string` prints it, `Array` for an array and `Object` for
-/// an object; a doc comment on the line above.
+/// an object; a doc comment on the line above. The value is evaluated
+/// in the class that declared it, so a private constant of that class
+/// is in reach from a subclass's rendering, and a failure is the
+/// `Thrown` it raised, which the whole `__toString` gives up for.
+///
+/// ```php
+/// class B { const X = NOPE; }
+/// try { echo new ReflectionClassConstant('B', 'X'); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { echo new ReflectionClass('B'); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// class A { private const T = 't'; const L = self::T . 'x'; } class C extends A {}
+/// echo new ReflectionClassConstant('C', 'L');
+/// ```
+/// ```expect
+/// Undefined constant "NOPE"
+/// Undefined constant "NOPE"
+/// Constant [ public string L ] { tx }
+/// ```
 fn class_const_string(
     req: &mut Request,
     constant: &ClassConstDecl,
+    scope: ClassId,
     enum_of: Option<&[u8]>,
     indent: &str,
-) -> String {
+) -> Result<String, Thrown> {
     let mut out = String::new();
     if let Some(doc) = &constant.doc_comment {
         out.push_str(indent);
@@ -4076,7 +4103,10 @@ fn class_const_string(
     // A case of an enum holds the enum's own instance, so
     // `zend_zval_type_name` names the enum and the `IS_OBJECT` arm
     // writes `Object` in place of the value.
-    let value = eval_const_expr(req, &constant.value, None).unwrap_or_default();
+    // `zval_update_constant_ex(&c->value, c->ce)`: evaluated in the
+    // class that declared it, a failure the exception it raised and no
+    // rendering.
+    let value = eval_const_expr(req, &constant.value, Some(scope))?;
     let ty = match (&constant.ty, enum_of) {
         (Some(ty), _) => type_to_string(ty),
         (None, Some(name)) => String::from_utf8_lossy(name).into_owned(),
@@ -4093,7 +4123,7 @@ fn class_const_string(
         visibility_word(constant.visibility),
         String::from_utf8_lossy(&constant.name.0)
     );
-    out
+    Ok(out)
 }
 
 /// `_enum_case_string`: `Case NAME` for a pure enum, `Case NAME = value`
