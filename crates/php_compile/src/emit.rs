@@ -125,6 +125,7 @@ mod chain;
 mod imports;
 mod list;
 mod magic;
+mod memo;
 mod target;
 mod types;
 mod walk;
@@ -412,6 +413,9 @@ pub(crate) struct Emit<'a> {
     /// The node the next [`Self::expr`] compiles as a link of a chain the
     /// caller ends, php's `ZEND_SHORT_CIRCUITING_INNER`.
     chain_inner: Option<tree::Expr>,
+    /// php's `CG(memoize_mode)` and `CG(memoized_exprs)`, which a `??=`
+    /// opens over its place ([`memo`]).
+    memo: memo::Memo,
     constants: Vec<Zval>,
     /// [`OpArray::const_exprs`]: the constant expressions a constant of
     /// kind `IS_CONSTANT_AST` indexes, in the order they were added.
@@ -996,6 +1000,7 @@ pub(crate) fn unit(
         oplines: Vec::new(),
         short_circuits: Vec::new(),
         chain_inner: None,
+        memo: memo::Memo::default(),
         constants: Vec::new(),
         const_exprs: Vec::new(),
         vars: Vec::new(),
@@ -1574,19 +1579,13 @@ impl Emit<'_> {
             }
             return self.assign_ref(target, Source::Expr(value));
         }
-        if op != Some(SyntaxKind::EQ) {
-            // `zend_ensure_writable_variable`, which `??=` and every
-            // compound operator run first.
-            self.ensure_writable(target)?;
-        }
         if op == Some(SyntaxKind::QUESTION_QUESTION_EQ) {
-            let tree::Expr::SimpleVarExpr(var) = target else {
-                return Err(self.unread("a `??=` over what is no variable"));
-            };
-            let SimpleVar::Cv(name) = self.simple_var_of(var, line)? else {
-                return Err(self.unread("a `??=` over what is no variable"));
-            };
-            return self.assign_coalesce(&name, value);
+            return self.assign_coalesce(target, value);
+        }
+        if op != Some(SyntaxKind::EQ) {
+            // `zend_ensure_writable_variable`, which every compound
+            // operator runs first.
+            self.ensure_writable(target)?;
         }
         if op == Some(SyntaxKind::EQ) {
             return self.assign_to(target, Source::Expr(value));
@@ -7680,6 +7679,9 @@ impl Emit<'_> {
     /// `zend_compile_expr` and its `zend_short_circuiting_commit`.
     pub(crate) fn expr(&mut self, expr: tree::Expr) -> Result<Where, CompileError> {
         let node = self.peel(expr);
+        if self.memo.mode != memo::MemoMode::None {
+            return self.memoized(node);
+        }
         let inner = self.chain_inner.take() == Some(node);
         let checkpoint = self.short_circuits.len();
         let value = self.expr_node(node)?;
@@ -8545,76 +8547,6 @@ impl Emit<'_> {
             opcode: Opcode::QmAssign,
             op1_type,
             op1,
-            out_type: OperandKind::Tmp,
-            out,
-            ..Opline::default()
-        });
-        self.update_jump_target_to_next(opnum);
-        Ok(Where::Temporary(out))
-    }
-
-    /// `zend_compile_assign_coalesce` (`Z/Zend/zend_compile.c:10597`),
-    /// `$a ??= b`: [`Self::coalesce`]'s shape with an assignment where
-    /// its `QM_ASSIGN` stands. The target is compiled under `BP_VAR_IS`
-    /// and its oplines memoized, `COALESCE` over what that read holds
-    /// into a temporary with the jump target learnt after the value,
-    /// then the value, then the target compiled again under `BP_VAR_W`
-    /// and `ASSIGN` into a temporary of its own, and `QM_ASSIGN` of that
-    /// into the coalesce's temporary, which is where the operator leaves
-    /// its value. The target is read once however many oplines the two
-    /// fetches take, which is what the form is for.
-    ///
-    /// A `ZEND_AST_VAR` target is the CV under both fetch types, so the
-    /// memoized table holds nothing and no `FREE` arm stands after the
-    /// jump: php emits that arm only where a link of the chain left a
-    /// temporary to give up, which is the `need_frees` branch a
-    /// dimension and a property reach.
-    ///
-    /// The value is served only where the target holds null, and a
-    /// target nothing wrote raises nothing, since the read is
-    /// `BP_VAR_IS`:
-    ///
-    /// ```php
-    /// function f() { echo "f"; return 2; }
-    /// $a = 1; $n = null;
-    /// var_dump($a ??= f());
-    /// var_dump($n ??= f());
-    /// var_dump($undefined ??= 3, $undefined);
-    /// ```
-    /// ```expect
-    /// int(1)
-    /// fint(2)
-    /// int(3)
-    /// int(3)
-    /// ```
-    fn assign_coalesce(&mut self, var: &[u8], value: tree::Expr) -> Result<Where, CompileError> {
-        let cv = self.lookup_cv(var);
-        let out = self.temporary();
-        let opnum = self.push(Opline {
-            opcode: Opcode::Coalesce,
-            op1_type: OperandKind::Cv,
-            op1: cv,
-            out_type: OperandKind::Tmp,
-            out,
-            ..Opline::default()
-        });
-        let value = self.expr(value)?;
-        let (op2_type, op2) = self.operand(value);
-        let assigned = self.temporary();
-        self.push(Opline {
-            opcode: Opcode::Assign,
-            op1_type: OperandKind::Cv,
-            op1: cv,
-            op2_type,
-            op2,
-            out_type: OperandKind::Tmp,
-            out: assigned,
-            ..Opline::default()
-        });
-        self.push(Opline {
-            opcode: Opcode::QmAssign,
-            op1_type: OperandKind::Tmp,
-            op1: assigned,
             out_type: OperandKind::Tmp,
             out,
             ..Opline::default()
@@ -14789,6 +14721,7 @@ mod tests {
             oplines: Vec::new(),
             short_circuits: Vec::new(),
             chain_inner: None,
+            memo: memo::Memo::default(),
             constants: Vec::new(),
             const_exprs: Vec::new(),
             vars: Vec::new(),

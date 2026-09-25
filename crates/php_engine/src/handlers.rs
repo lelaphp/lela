@@ -15468,6 +15468,35 @@ pub(crate) fn qm_assign<T: Tier>(
     Ok(advance(req, frame))
 }
 
+/// `ZEND_COPY_TMP`: what the `TMP` or `VAR` in `op1` holds copied into
+/// `result` with one more owner (`ZVAL_COPY`), `op1` left standing, a
+/// reference copied as the reference it is. What a `??=` holds of an
+/// expression its read computed for its write to read again
+/// (`zend_compile_memoized_expr`), so a call on the way runs once:
+///
+/// ```php
+/// function k() { echo "k"; return 'k'; }
+/// $a = [];
+/// var_dump($a[k()] ??= 1, $a[k()] ??= 2);
+/// ```
+/// ```expect
+/// kkint(1)
+/// int(1)
+/// ```
+pub(crate) fn copy_tmp<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let value = req.slot(frame, exec::temporary_slot(code, op.op1));
+    req.addref(&value);
+    let slot = exec::temporary_slot(code, op.out);
+    let previous = req.set_slot(frame, slot, value);
+    req.release(previous);
+    Ok(advance(req, frame))
+}
+
 /// `ZEND_RETURN`: the operand taken as the caller's (`ZVAL_COPY` of a
 /// CV or a constant, a temporary moved), then the return safepoint, then
 /// the frame popped (design §4.3 seam 8, §5.8), its CVs, temporaries
