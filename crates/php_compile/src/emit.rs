@@ -126,6 +126,7 @@ mod imports;
 mod list;
 mod magic;
 mod memo;
+mod pipe;
 mod target;
 mod types;
 mod walk;
@@ -416,6 +417,10 @@ pub(crate) struct Emit<'a> {
     /// php's `CG(memoize_mode)` and `CG(memoized_exprs)`, which a `??=`
     /// opens over its place ([`memo`]).
     memo: memo::Memo,
+    /// The `ZEND_AST_ZNODE`s standing: a node of the tree and the value
+    /// the compiler already holds for it, which [`Self::expr`] answers
+    /// ([`pipe`]).
+    znodes: Vec<(tree::Expr, Where)>,
     constants: Vec<Zval>,
     /// [`OpArray::const_exprs`]: the constant expressions a constant of
     /// kind `IS_CONSTANT_AST` indexes, in the order they were added.
@@ -1007,6 +1012,7 @@ pub(crate) fn unit(
         short_circuits: Vec::new(),
         chain_inner: None,
         memo: memo::Memo::default(),
+        znodes: Vec::new(),
         constants: Vec::new(),
         const_exprs: Vec::new(),
         vars: Vec::new(),
@@ -2085,11 +2091,19 @@ impl Emit<'_> {
 
     /// `zend_is_call` (`Z/Zend/zend_compile.c:2728`): a call by name, a
     /// call through a value, a call on a class or a method call, whose
-    /// `VAR` is separated where it is written to. Each is one
-    /// `ZEND_AST_CALL`, `ZEND_AST_STATIC_CALL` or `ZEND_AST_METHOD_CALL`
-    /// in php and one `CallExpr` here, the callee telling them apart.
+    /// `VAR` is separated where it is written to, and a pipe, which is
+    /// one of them built over its left side ([`Self::pipe`]). Each of the
+    /// first four is one `ZEND_AST_CALL`, `ZEND_AST_STATIC_CALL` or
+    /// `ZEND_AST_METHOD_CALL` in php and one `CallExpr` here, the callee
+    /// telling them apart.
     fn is_call(&self, expr: tree::Expr) -> bool {
-        matches!(self.peel(expr), tree::Expr::CallExpr(_))
+        match self.peel(expr) {
+            tree::Expr::CallExpr(_) => true,
+            tree::Expr::BinaryExpr(id) => {
+                self.parsed.tree[id].op.map(|op| self.kind(op)) == Some(SyntaxKind::PIPE_GT)
+            }
+            _ => false,
+        }
     }
 
     /// The `ZEND_AST_ZVAL` an expression is, or nothing where php's node
@@ -7804,6 +7818,13 @@ impl Emit<'_> {
     /// `zend_compile_expr` and its `zend_short_circuiting_commit`.
     pub(crate) fn expr(&mut self, expr: tree::Expr) -> Result<Where, CompileError> {
         let node = self.peel(expr);
+        // `ZEND_AST_ZNODE`: the value [`Self::pipe`] holds for the node.
+        if let Some(value) = self.znode(node) {
+            if self.chain_inner == Some(node) {
+                self.chain_inner = None;
+            }
+            return Ok(value);
+        }
         if self.memo.mode != memo::MemoMode::None {
             return self.memoized(node);
         }
@@ -7951,6 +7972,7 @@ impl Emit<'_> {
                         self.short_circuiting(true, left, right)
                     }
                     Some(SyntaxKind::QUESTION_QUESTION) => self.coalesce(left, right),
+                    Some(SyntaxKind::PIPE_GT) => self.pipe(left, right),
                     Some(kind) => match binary_op(kind) {
                         Some(op) => self.binary(op, left, right),
                         None => Err(self.unread("a binary operator")),
@@ -9634,8 +9656,11 @@ impl Emit<'_> {
             }
             // `zend_separate_if_call_and_write`: a call under a write
             // is `SEPARATE` over the `VAR` it returned into; a call php
-            // answered in a temporary has no `VAR` to separate.
-            (_, Fetch::Write | Fetch::Rw | Fetch::Unset) if self.is_call(base) => {
+            // answered in a temporary has no `VAR` to separate. A pipe
+            // is `zend_compile_var_inner`'s default arm below.
+            (_, Fetch::Write | Fetch::Rw | Fetch::Unset)
+                if matches!(base, tree::Expr::CallExpr(_)) =>
+            {
                 let returned = self.expr(base)?;
                 let Where::Returned(at) = returned else {
                     return Err(self
@@ -11394,6 +11419,11 @@ impl Emit<'_> {
         // does emit was given.
         let line = expr.line(self.parsed);
         self.check_stack()?;
+        // `zend_eval_const_expr` has no `ZEND_AST_ZNODE` arm: a value the
+        // compiler holds folds nothing.
+        if self.znode(expr).is_some() {
+            return Err(self.fatal("a value the compiler holds is no constant expression"));
+        }
         let tree = &self.parsed.tree;
         match expr {
             tree::Expr::ParenExpr(id) => match tree[id].inner {
@@ -12327,23 +12357,65 @@ impl Emit<'_> {
         Ok(self.call_op(Opcode::DoFcallByName, line, plan.extra_named))
     }
 
-    /// `zend_compile_dynamic_call` over a callee that is no constant
-    /// string (`Z/Zend/zend_compile.c:4044`): `INIT_DYNAMIC_CALL` with
-    /// the callee in `op2` and the number of arguments in
-    /// `extended_value`, no cache slot, since nothing about the callee
-    /// is known until the opline runs; then the arguments sent for a
-    /// callee nothing is known of and `DO_FCALL`, which is what
-    /// `zend_get_call_op` picks with `fbc` null over an opline that is
-    /// no `INIT_FCALL_BY_NAME`.
+    /// `zend_compile_dynamic_call` (`Z/Zend/zend_compile.c:4044`) over a
+    /// callee compiled where it stands: `INIT_DYNAMIC_CALL` with the
+    /// callee in `op2` and the number of arguments in `extended_value`,
+    /// no cache slot, since nothing about the callee is known until the
+    /// opline runs; then the arguments sent for a callee nothing is
+    /// known of and `DO_FCALL`, which is what `zend_get_call_op` picks
+    /// with `fbc` null over an opline that is no `INIT_FCALL_BY_NAME`.
+    /// A callee that is a constant string, which a pipe's `'strlen'`
+    /// leaves, is its first arm: `C::m` a call on the class over the two
+    /// constant pairs ([`Self::dynamic_static_call`]), and any other
+    /// name `INIT_FCALL_BY_NAME` ([`Self::dynamic_call`]).
     fn call_var(&mut self, callee: tree::Expr, arguments: &Args) -> Result<Where, CompileError> {
         let line = self.line;
         let value = self.expr(callee)?;
+        if let Where::Constant(name) = value
+            && let Some(name) = name.as_str().map(|s| s.bytes().to_vec())
+        {
+            let colon = name.iter().rposition(|&byte| byte == b':');
+            if let Some(colon) = colon.filter(|&at| at > 0 && name[at - 1] == b':') {
+                return self.dynamic_static_call(&name[..colon - 1], &name[colon + 1..], arguments);
+            }
+            return self.dynamic_call(&name, arguments);
+        }
         let (op2_type, op2) = self.operand(value);
         let plan = Plan::of(arguments, None);
         self.push(Opline {
             opcode: Opcode::InitDynamicCall,
             op2_type,
             op2,
+            extended_value: plan.count,
+            ..Opline::default()
+        });
+        self.send_args(&plan, arguments, None)?;
+        Ok(self.call_op(Opcode::DoFcall, line, plan.extra_named))
+    }
+
+    /// `zend_compile_dynamic_call`'s arm over a constant string `C::m`:
+    /// `INIT_STATIC_METHOD_CALL` with the class's constant pair in `op1`
+    /// as written (`zend_add_class_name_literal`, no name resolved), the
+    /// method's in `op2`, two cache slots, and the arguments sent for a
+    /// callee nothing is known of.
+    fn dynamic_static_call(
+        &mut self,
+        class: &[u8],
+        method: &[u8],
+        arguments: &Args,
+    ) -> Result<Where, CompileError> {
+        let line = self.line;
+        let plan = Plan::of(arguments, None);
+        let class_at = self.resolved_class_literal(class)?;
+        let method_at = self.func_name_literal(method)?;
+        let slots = self.cache_slots(2);
+        self.push(Opline {
+            opcode: Opcode::InitStaticMethodCall,
+            op1_type: OperandKind::Const,
+            op1: class_at,
+            op2_type: OperandKind::Const,
+            op2: method_at,
+            out: slots,
             extended_value: plan.count,
             ..Opline::default()
         });
@@ -14898,6 +14970,7 @@ mod tests {
             short_circuits: Vec::new(),
             chain_inner: None,
             memo: memo::Memo::default(),
+            znodes: Vec::new(),
             constants: Vec::new(),
             const_exprs: Vec::new(),
             vars: Vec::new(),

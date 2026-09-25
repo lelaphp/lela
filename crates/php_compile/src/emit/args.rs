@@ -420,7 +420,10 @@ impl Emit<'_> {
         let mode = callee.map(|callee| callee.mode(number));
         let known = mode.filter(|_| number.is_some());
         let value = self.peel(value);
-        if self.is_call(value) {
+        // A `ZEND_AST_ZNODE` is no call and no variable: the value it
+        // holds is sent as any other expression's is.
+        let held = self.znode(value).is_some();
+        if !held && self.is_call(value) {
             // `zend_is_call`: the call's `VAR`, or the constant or the
             // temporary a call php served itself left.
             let returned = self.expr(value)?;
@@ -440,7 +443,7 @@ impl Emit<'_> {
             };
             return self.send(opcode, operand, at);
         }
-        if let Some(variable) = self.variable_of(value)? {
+        if !held && let Some(variable) = self.variable_of(value)? {
             return self.send_variable(value, variable, at, known, list_line);
         }
         let computed = self.expr(value)?;
