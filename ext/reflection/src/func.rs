@@ -22,9 +22,9 @@ use php_ext::values::{ClassId, Key, PhpArray, PhpObject, Value};
 
 use super::signature::{FunctionRef, this_function, type_factory};
 use super::{
-    class_name_of, class_named, exactly_arguments, is_constructor, linked_methods, namespace_end,
-    new_object, one_string_argument, reflection_class_factory, set_name, set_string_prop,
-    string_value, this_name,
+    class_name_of, class_named, exactly_arguments, is_constructor, kept_closure, linked_methods,
+    method_or_invoke, namespace_end, new_object, one_string_argument, reflection_class_factory,
+    set_name, set_string_prop, string_value, this_name,
 };
 
 /// `ZEND_ACC_PUBLIC`, `ZEND_ACC_PROTECTED` and `ZEND_ACC_PRIVATE`, the
@@ -74,11 +74,8 @@ fn this_method(req: &mut Request) -> Result<(ClassId, MethodDecl, ClassId), Thro
         ));
     };
     let class = class_named(req, &class)?;
-    let lowered = name.to_ascii_lowercase();
-    let Some(found) = linked_methods(req, class)
-        .into_iter()
-        .find(|m| m.decl.function.name.0.to_ascii_lowercase() == lowered)
-    else {
+    let kept = req.this().and_then(|this| kept_closure(req, this));
+    let Some(found) = method_or_invoke(req, class, &name, kept) else {
         let named = class_name_of(req, class);
         return Err(throw(
             req,
@@ -130,12 +127,14 @@ pub(super) fn reflection_function_get_closure(req: &mut Request) -> Result<Value
 /// var_dump((new ReflectionMethod('A', 'get'))->getClosure(new B)(), (new ReflectionMethod('B', 's'))->getClosure()());
 /// try { (new ReflectionMethod('A', 'get'))->getClosure(); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
 /// try { (new ReflectionMethod('A', 'get'))->getClosure(new stdClass); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+/// $c = function () { return 'c'; }; var_dump((new ReflectionMethod($c, '__invoke'))->getClosure($c) === $c);
 /// ```
 /// ```expect
 /// string(1) "a"
 /// string(1) "A"
 /// ReflectionMethod::getClosure(): Argument #1 ($object) cannot be null for non-static methods
 /// Given object is not an instance of the class this method was declared in
+/// bool(true)
 /// ```
 pub(super) fn reflection_method_get_closure(req: &mut Request) -> Result<Value, Thrown> {
     super::at_most_arguments(req, 1)?;
@@ -163,6 +162,12 @@ pub(super) fn reflection_method_get_closure(req: &mut Request) -> Result<Value, 
             "ReflectionException",
             "Given object is not an instance of the class this method was declared in",
         ));
+    }
+    // "This is an original closure object and __invoke is to be called":
+    // the closure itself, one more owner.
+    if super::is_closure_invoke(req, scope, &name.0.to_ascii_lowercase()) {
+        req.addref(&object.as_value());
+        return Ok(object.as_value());
     }
     let Some(callable) = known_method(req, scope, &name, Some(object)) else {
         return Ok(Value::null());
@@ -634,7 +639,8 @@ fn function_extension_name(req: &mut Request) -> Result<Option<String>, Thrown> 
     match function {
         // A closure is a user function, which `is_internal` answered
         // for above, so nothing reaches here.
-        FunctionRef::Closure(_) => Ok(None),
+        // A closure's `__invoke` is made with a null `module`.
+        FunctionRef::Closure(_) | FunctionRef::Invoke(_) => Ok(None),
         FunctionRef::Method(class, _) => Ok(req.class_extension_name(class).map(str::to_owned)),
         FunctionRef::Global(name) => {
             let found = super::lookup_function(req, &name);
@@ -1168,7 +1174,9 @@ fn invoke(
     serve: impl FnOnce(&mut Request, &Callable) -> Result<Value, Thrown>,
 ) -> Result<Value, Thrown> {
     let value = match function {
-        FunctionRef::Method(..) => return Err(invocation_failed(req, function)),
+        FunctionRef::Method(..) | FunctionRef::Invoke(_) => {
+            return Err(invocation_failed(req, function));
+        }
         FunctionRef::Closure(object) => {
             let value = object.as_value();
             req.addref(&value);
@@ -1201,6 +1209,16 @@ fn invoke_method(
     this: Option<PhpObject>,
     serve: impl FnOnce(&mut Request, &Callable) -> Result<Value, Thrown>,
 ) -> Result<Value, Thrown> {
+    // A closure's `__invoke` is no row of the table: php serves the
+    // handler, `Closure::__invoke`, on the closure given, which is the
+    // closure called.
+    let lowered = decl.function.name.0.to_ascii_lowercase();
+    if let Some(this) = this
+        && super::is_closure_invoke(req, scope, &lowered)
+    {
+        let callable = to_callable(req, &this.as_value())?;
+        return serve(req, &callable);
+    }
     let Some(callable) = known_method(req, class, &decl.function.name, this) else {
         let held = FunctionRef::Method(scope, decl.function.name.0.to_vec());
         return Err(invocation_failed(req, &held));
@@ -1231,6 +1249,7 @@ fn invocation_of(req: &mut Request, function: &FunctionRef) -> String {
             String::from_utf8_lossy(name)
         ),
         FunctionRef::Closure(_) => String::from("function {closure}()"),
+        FunctionRef::Invoke(_) => String::from("method Closure::__invoke()"),
     }
 }
 

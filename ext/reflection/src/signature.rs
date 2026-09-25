@@ -17,7 +17,7 @@
 //! (#412), so a witness beside a body here would pin a line the engine
 //! never prints.
 
-use php_ext::call::eval_const_expr;
+use php_ext::call::{eval_const_expr, lookup_class};
 use php_ext::coerce::value_name;
 use php_ext::decl::{ConstExpr, FunctionDecl, Parameter, Type};
 use php_ext::raising::{Thrown, arg_type_error, throw};
@@ -34,12 +34,15 @@ use super::{
 /// name this engine can look the declaration up with again: a global
 /// function, a method with the class that declared it, or a closure,
 /// whose `{closure:…}` name no table holds, so what stands for it is
-/// the object itself, as php's `intern->obj` does.
+/// the object itself, as php's `intern->obj` does; or the `__invoke`
+/// php makes for a closure on the lookup, over the closure, or over a
+/// fresh one where the reflector was made from the class alone.
 #[derive(Clone)]
 pub(super) enum FunctionRef {
     Global(Vec<u8>),
     Method(ClassId, Vec<u8>),
     Closure(PhpObject),
+    Invoke(Option<PhpObject>),
 }
 
 /// php's `parameter_reference`: the function, the offset in its
@@ -348,6 +351,9 @@ pub(super) fn reflection_union_type_get_types(req: &mut Request) -> Result<Value
 fn function_decl_of(req: &mut Request, function: &FunctionRef) -> Option<FunctionDecl> {
     match function {
         FunctionRef::Closure(object) => closure_decl(req, *object),
+        FunctionRef::Invoke(closure) => {
+            super::closure_invoke(req, *closure).map(|method| method.decl.function)
+        }
         FunctionRef::Global(name) => {
             let found = lookup_function(req, name)?;
             req.function_decl(found).cloned()
@@ -363,7 +369,7 @@ fn function_decl_of(req: &mut Request, function: &FunctionRef) -> Option<Functio
 }
 
 /// `param->fptr->common.scope`.
-fn scope_of(req: &Request, function: &FunctionRef) -> Option<ClassId> {
+fn scope_of(req: &mut Request, function: &FunctionRef) -> Option<ClassId> {
     match function {
         FunctionRef::Global(_) => None,
         FunctionRef::Method(class, _) => Some(*class),
@@ -372,6 +378,7 @@ fn scope_of(req: &Request, function: &FunctionRef) -> Option<ClassId> {
         // declaration back whatever the scope is, so the scope a
         // parameter's `declaringClass` reads is the closure's own.
         FunctionRef::Closure(object) => object.closure(req)?.scope,
+        FunctionRef::Invoke(_) => lookup_class(req, b"Closure").ok().flatten(),
     }
 }
 
@@ -533,18 +540,21 @@ fn construct_function(req: &mut Request) -> Result<FunctionRef, Thrown> {
                     "Expected array($object, $method) or array($classname, $method)",
                 ));
             };
-            let class = if let ValueRef::Object(object) = class.deref().as_ref() {
-                object.class()
+            let (class, object) = if let ValueRef::Object(object) = class.deref().as_ref() {
+                (object.class(), Some(*object))
             } else {
                 let name = class.as_str_bytes().unwrap_or_default().to_vec();
-                class_named(req, &name)?
+                (class_named(req, &name)?, None)
             };
             let method = method.as_str_bytes().unwrap_or_default().to_vec();
-            let lowered = method.to_ascii_lowercase();
-            let Some(found) = linked_methods(req, class)
-                .into_iter()
-                .find(|m| m.decl.function.name.0.to_ascii_lowercase() == lowered)
-            else {
+            // An object's class is looked up with the closure it is, so
+            // `[$closure, '__invoke']` reaches the method php makes.
+            let found = if let Some(object) = object {
+                super::method_or_invoke(req, class, &method, Some(object))
+            } else {
+                super::table_method(req, class, &method)
+            };
+            let Some(found) = found else {
                 let class = class_name_of(req, class);
                 return Err(throw(
                     req,
@@ -556,7 +566,11 @@ fn construct_function(req: &mut Request) -> Result<FunctionRef, Thrown> {
                     ),
                 ));
             };
-            FunctionRef::Method(found.scope, found.decl.function.name.0.to_vec())
+            if found.via_handler {
+                FunctionRef::Invoke(object)
+            } else {
+                FunctionRef::Method(found.scope, found.decl.function.name.0.to_vec())
+            }
         }
         // php's `IS_OBJECT` arm: `zend_get_closure_method_def` where
         // the object is a `Closure`, and the argument error for any
@@ -670,7 +684,9 @@ pub(super) fn reflection_parameter_construct(req: &mut Request) -> Result<Value,
         // `intern->obj`: a parameter of a closure keeps the closure, as
         // php's does, so the row's `FunctionRef::Closure` names an
         // object that stands for as long as the reflector does.
-        if let FunctionRef::Closure(closure) = reference.function {
+        if let FunctionRef::Closure(closure) | FunctionRef::Invoke(Some(closure)) =
+            reference.function
+        {
             super::keep_closure(req, this, closure);
         }
         req.state::<State>()
@@ -951,6 +967,18 @@ pub(super) fn reflection_parameter_get_declaring_function(
             set_string_prop(req, object, b"class", &scope)?;
             object
         }
+        // `reflection_method_factory` over the `__invoke` the parameter
+        // belongs to, keeping the closure it was made over.
+        FunctionRef::Invoke(closure) => {
+            let closure = *closure;
+            let class = class_named(req, b"ReflectionMethod")?;
+            let object = new_object(req, class)?;
+            set_name(req, object, b"__invoke")?;
+            set_string_prop(req, object, b"class", b"Closure")?;
+            let scope = class_named(req, b"Closure")?;
+            super::keep(req, object, scope, closure);
+            object
+        }
     };
     Ok(object.as_value())
 }
@@ -1125,7 +1153,8 @@ pub(super) fn reflection_parameter_get_attributes(req: &mut Request) -> Result<V
     let (reference, _, parameter) = this_parameter(req)?;
     let scope = match reference.function {
         FunctionRef::Method(scope, _) => Some(scope),
-        _ => None,
+        FunctionRef::Invoke(_) => lookup_class(req, b"Closure").ok().flatten(),
+        FunctionRef::Global(_) | FunctionRef::Closure(_) => None,
     };
     let attributes = parameter.attributes.clone();
     super::attr::reflect_attributes(req, &attributes, scope, super::attr::TARGET_PARAMETER)
@@ -1172,25 +1201,25 @@ pub(super) fn reflection_parameter_get_attributes(req: &mut Request) -> Result<V
 /// ```
 pub(super) fn this_function(req: &mut Request) -> Result<(FunctionRef, FunctionDecl), Thrown> {
     let (this, name) = this_name(req, "ReflectionFunctionAbstract")?;
-    // `intern->obj`, which a reflector over a closure keeps: php reads
-    // the declaration back off it with `zend_get_closure_method_def`,
-    // since the `{closure:…}` name is in no table to look up.
-    if let Some(closure) = super::kept_closure(req, this)
+    let scope = this
+        .prop(req, b"class")
+        .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec));
+    let kept = super::kept_closure(req, this);
+    // `intern->obj`, which a function reflector over a closure keeps:
+    // php reads the declaration back off it with
+    // `zend_get_closure_method_def`, since the `{closure:…}` name is in
+    // no table to look up. A method reflector keeps one only for the
+    // closure's `__invoke`, which the lookup below reaches.
+    if scope.is_none()
+        && let Some(closure) = kept
         && let Some(decl) = closure_decl(req, closure)
     {
         return Ok((FunctionRef::Closure(closure), decl));
     }
-    let scope = this
-        .prop(req, b"class")
-        .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec));
     let function = if let Some(scope) = scope {
         {
             let class = class_named(req, &scope)?;
-            let lowered = name.to_ascii_lowercase();
-            let Some(found) = linked_methods(req, class)
-                .into_iter()
-                .find(|m| m.decl.function.name.0.to_ascii_lowercase() == lowered)
-            else {
+            let Some(found) = super::method_or_invoke(req, class, &name, kept) else {
                 let class = class_name_of(req, class);
                 return Err(throw(
                     req,
@@ -1202,7 +1231,11 @@ pub(super) fn this_function(req: &mut Request) -> Result<(FunctionRef, FunctionD
                     ),
                 ));
             };
-            FunctionRef::Method(found.scope, found.decl.function.name.0.to_vec())
+            if found.via_handler {
+                FunctionRef::Invoke(kept)
+            } else {
+                FunctionRef::Method(found.scope, found.decl.function.name.0.to_vec())
+            }
         }
     } else {
         {

@@ -19,10 +19,11 @@ use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, Value
 
 use super::{
     at_most_arguments, class_chain, class_constant_named, class_is, class_name_of, class_named,
-    dynamic_properties, exactly_arguments, is_constructor, keep, kept_object, linked_constants,
-    linked_interfaces, linked_methods, linked_properties, lookup_class, new_object,
-    one_string_argument, property_named, reflection_class_factory, set_name, set_string_prop,
-    string_argument, string_value, this_class,
+    closure_invoke, dynamic_properties, exactly_arguments, is_closure_invoke, is_constructor, keep,
+    kept_closure, kept_object, linked_constants, linked_interfaces, linked_methods,
+    linked_properties, lookup_class, method_or_invoke, new_object, one_string_argument,
+    property_named, reflection_class_factory, set_name, set_string_prop, string_argument,
+    string_value, this_class,
 };
 
 /// `ZEND_ACC_INTERFACE`, `ZEND_ACC_TRAIT` and `ZEND_ACC_ENUM`.
@@ -596,7 +597,9 @@ pub(super) fn reflection_class_has_method(req: &mut Request) -> Result<Value, Th
     let found = linked_methods(req, class)
         .into_iter()
         .any(|m| m.decl.function.name.0.to_ascii_lowercase() == lowered);
-    Ok(Value::bool(found))
+    Ok(Value::bool(
+        found || is_closure_invoke(req, class, &lowered),
+    ))
 }
 
 /// `ReflectionClass::getMethod(string $name)`:
@@ -623,11 +626,8 @@ pub(super) fn reflection_class_has_method(req: &mut Request) -> Result<Value, Th
 pub(super) fn reflection_class_get_method(req: &mut Request) -> Result<Value, Thrown> {
     let name = one_string_argument(req)?;
     let class = this_class(req)?;
-    let lowered = name.to_ascii_lowercase();
-    let Some(found) = linked_methods(req, class)
-        .into_iter()
-        .find(|m| m.decl.function.name.0.to_ascii_lowercase() == lowered)
-    else {
+    let kept = req.this().and_then(|this| kept_closure(req, this));
+    let Some(found) = method_or_invoke(req, class, &name, kept) else {
         let named = class_name_of(req, class);
         return Err(throw(
             req,
@@ -640,6 +640,12 @@ pub(super) fn reflection_class_get_method(req: &mut Request) -> Result<Value, Th
         ));
     };
     let object = method_factory(req, &found.decl.function.name.0, found.scope, class)?;
+    // The `__invoke` php makes keeps the closure it was made over.
+    if found.via_handler
+        && let Some(kept) = kept
+    {
+        keep(req, object, class, Some(kept));
+    }
     Ok(object.as_value())
 }
 
@@ -720,6 +726,20 @@ pub(super) fn reflection_class_get_methods(req: &mut Request) -> Result<Value, T
             continue;
         }
         let object = method_factory(req, &found.decl.function.name.0, found.scope, class)?;
+        methods.append(req, object.as_value())?;
+    }
+    // `zend_get_closure_invoke_method` over the kept closure, or a fresh
+    // one, appended where the filter keeps a public instance method.
+    let is_closure = lookup_class(req, b"Closure")?.is_some_and(|c| c == class);
+    let kept = req.this().and_then(|this| kept_closure(req, this));
+    if is_closure
+        && filter & 1 != 0
+        && let Some(invoke) = closure_invoke(req, kept)
+    {
+        let object = method_factory(req, &invoke.decl.function.name.0, invoke.scope, class)?;
+        if let Some(kept) = kept {
+            keep(req, object, class, Some(kept));
+        }
         methods.append(req, object.as_value())?;
     }
     Ok(Value::array(methods))

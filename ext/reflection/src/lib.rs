@@ -74,7 +74,7 @@ use php_ext::call::{
 };
 use php_ext::decl::{
     ClassConstDecl, ClassDecl, ClassKind, ConstExpr, EnumBacking, FunctionDecl, MethodDecl, Name,
-    Parameter, PropertyDecl, Type, Visibility,
+    Parameter, ParameterDefault, PropertyDecl, Type, Visibility,
 };
 use php_ext::raising::{Thrown, arg_count_error, arg_type_error, deprecated, throw};
 use php_ext::request::{ExtensionId, PHP_VERSION, Request};
@@ -2688,11 +2688,18 @@ fn reflection_method_construct(req: &mut Request) -> Result<Value, Thrown> {
             (class, given[at + 2..].to_vec())
         }
     };
-    let lowered = method_name.to_ascii_lowercase();
-    let Some(found) = linked_methods(req, class)
-        .into_iter()
-        .find(|m| m.decl.function.name.0.to_ascii_lowercase() == lowered)
-    else {
+    // `zend_get_closure_invoke_method(orig_obj)` for a closure's
+    // `__invoke`, which php reaches only with the closure in hand.
+    let closure = first
+        .as_object()
+        .copied()
+        .filter(|o| o.closure(req).is_some());
+    let found = if let Some(closure) = closure {
+        method_or_invoke(req, class, &method_name, Some(closure))
+    } else {
+        table_method(req, class, &method_name)
+    };
+    let Some(found) = found else {
         let class = class_name_of(req, class);
         return Err(throw(
             req,
@@ -2710,8 +2717,10 @@ fn reflection_method_construct(req: &mut Request) -> Result<Value, Thrown> {
         set_string_prop(req, this, b"class", &scope)?;
         // `intern->ce = ce`: the class the reflector was asked about,
         // which `_function_string` takes as the method's scope, where
-        // `$class` is the class that declared the method.
-        keep(req, this, class, None);
+        // `$class` is the class that declared the method; and for a
+        // closure's `__invoke`, the closure the method was made over.
+        let kept = closure.filter(|_| found.via_handler);
+        keep(req, this, class, kept);
     }
     Ok(Value::null())
 }
@@ -2785,11 +2794,8 @@ fn reflection_method_to_string(req: &mut Request) -> Result<Value, Thrown> {
         ));
     };
     let class = class_named(req, &class)?;
-    let lowered = name.to_ascii_lowercase();
-    let Some(found) = linked_methods(req, class)
-        .into_iter()
-        .find(|m| m.decl.function.name.0.to_ascii_lowercase() == lowered)
-    else {
+    let kept = kept_closure(req, this);
+    let Some(found) = method_or_invoke(req, class, &name, kept) else {
         let class = class_name_of(req, class);
         return Err(throw(
             req,
@@ -4264,6 +4270,124 @@ struct LinkedMethod {
     decl: MethodDecl,
     scope: ClassId,
     prototype: Option<ClassId>,
+    /// `ZEND_ACC_CALL_VIA_HANDLER`: a function no table holds, made on
+    /// the lookup, which is a closure's `__invoke`
+    /// ([`closure_invoke`]); its `module` is null, so it renders as
+    /// `<internal>` with no extension.
+    via_handler: bool,
+}
+
+/// `is_closure_invoke(ce, lcname)`: whether a lowered method name of
+/// `class` is the `__invoke` php makes for a `Closure` on the lookup.
+fn is_closure_invoke(req: &mut Request, class: ClassId, lowered: &[u8]) -> bool {
+    lowered == b"__invoke" && lookup_class(req, b"Closure").ok().flatten() == Some(class)
+}
+
+/// A method of `class` by name, `zend_hash_find_ptr(&ce->function_table,
+/// lcname)` over the linked table, and for `Closure`'s `__invoke`, which
+/// no table holds, the method php makes on the lookup over `closure`,
+/// or over a fresh one where none is given ([`closure_invoke`]).
+fn method_or_invoke(
+    req: &mut Request,
+    class: ClassId,
+    name: &[u8],
+    closure: Option<PhpObject>,
+) -> Option<LinkedMethod> {
+    let found = table_method(req, class, name);
+    if found.is_some() || !is_closure_invoke(req, class, &name.to_ascii_lowercase()) {
+        return found;
+    }
+    closure_invoke(req, closure)
+}
+
+/// `zend_hash_find_ptr(&ce->function_table, lcname)` alone: the linked
+/// method of that name, with no `__invoke` made for a `Closure`.
+fn table_method(req: &mut Request, class: ClassId, name: &[u8]) -> Option<LinkedMethod> {
+    let lowered = name.to_ascii_lowercase();
+    linked_methods(req, class)
+        .into_iter()
+        .find(|m| m.decl.function.name.0.to_ascii_lowercase() == lowered)
+}
+
+/// `zend_get_closure_invoke_method`: `Closure::__invoke` over one
+/// closure's own signature, public, an instance method, internal with
+/// no extension, no doc comment and no site, the return type and the
+/// by-reference bit kept. Its `arg_info` is the closure's, which a
+/// native reads as `zend_internal_arg_info` with no `default_value`, so
+/// a written default is one it does not show. `None` is the closure
+/// `object_init_ex(zend_ce_closure)` makes, which holds no function and
+/// so declares nothing.
+///
+/// ```php
+/// $c = function (int $a, $b = 5): int { return $a; };
+/// $m = new ReflectionMethod($c, '__invoke');
+/// echo $m, (new ReflectionClass('Closure'))->getMethod('__invoke');
+/// var_dump($m->isInternal(), $m->getFileName(), $m->getNumberOfRequiredParameters(), $m->invoke($c, 3), (new ReflectionObject($c))->hasMethod('__invoke'), count((new ReflectionObject($c))->getMethods()));
+/// try { new ReflectionMethod('Closure', '__invoke'); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Method [ <internal> public method __invoke ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> int $a ]
+///     Parameter #1 [ <optional> $b = <default> ]
+///   }
+///   - Return [ int ]
+/// }
+/// Method [ <internal> public method __invoke ] {
+/// }
+/// bool(true)
+/// bool(false)
+/// int(1)
+/// int(3)
+/// bool(true)
+/// int(7)
+/// Method Closure::__invoke() does not exist
+/// ```
+fn closure_invoke(req: &mut Request, closure: Option<PhpObject>) -> Option<LinkedMethod> {
+    let scope = lookup_class(req, b"Closure").ok().flatten()?;
+    let empty = || FunctionDecl {
+        name: Name::default(),
+        parameters: Vec::new(),
+        return_type: None,
+        returns_by_ref: false,
+        is_generator: false,
+        attributes: Vec::new(),
+        doc_comment: None,
+        file: Name::default(),
+        line: 0,
+        end_line: 0,
+        frameless: Vec::new(),
+    };
+    let mut function = closure
+        .and_then(|closure| signature::closure_decl(req, closure))
+        .unwrap_or_else(empty);
+    function.name = Name(b"__invoke".as_slice().into());
+    function.file = Name::default();
+    (function.line, function.end_line) = (0, 0);
+    function.doc_comment = None;
+    function.is_generator = false;
+    function
+        .attributes
+        .retain(|a| a.name.0.eq_ignore_ascii_case(b"Deprecated"));
+    for parameter in &mut function.parameters {
+        if let ParameterDefault::Expr(_) = parameter.default {
+            parameter.default = ParameterDefault::Unshown;
+        }
+    }
+    Some(LinkedMethod {
+        decl: MethodDecl {
+            function,
+            visibility: Visibility::Public,
+            is_instance: true,
+            is_abstract: false,
+            is_final: false,
+            tentative_return: false,
+        },
+        scope,
+        prototype: None,
+        via_handler: true,
+    })
 }
 
 /// `ZEND_ACC_CTOR`: the method named `__construct`.
@@ -4296,6 +4420,7 @@ fn linked_methods_at(req: &mut Request, class: ClassId, depth: u32) -> Vec<Linke
             decl: method.clone(),
             scope: class,
             prototype: None,
+            via_handler: false,
         })
         .collect();
     if depth > 64 {
@@ -4556,8 +4681,38 @@ fn function_string(req: &mut Request, function: Function, indent: &str) -> Strin
         .map(str::to_owned);
     let mut out = String::new();
     function_header(&mut out, &decl, module.as_deref(), None, indent);
-    function_body(req, &mut out, &decl, false, indent);
+    let arg_info = ArgInfo::of(&decl);
+    function_body(req, &mut out, &decl, false, arg_info, indent);
     out
+}
+
+/// Which `arg_info` a function carries, which decides whether
+/// `_function_parameter_string` prints anything: a native's
+/// `zend_internal_arg_info`, whose first row is the return and so is
+/// never null, or the compiler's `zend_arg_info`, which
+/// `zend_compile_params` leaves null for a function with neither a
+/// parameter nor a return type. A closure's `__invoke` carries its
+/// closure's, the user kind (`ZEND_ACC_USER_ARG_INFO`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ArgInfo {
+    Native,
+    User,
+}
+
+impl ArgInfo {
+    /// The kind a declaration's site says: a native has no file.
+    fn of(decl: &FunctionDecl) -> ArgInfo {
+        if decl.file.0.is_empty() {
+            ArgInfo::Native
+        } else {
+            ArgInfo::User
+        }
+    }
+
+    /// Whether php's pointer is null for `decl`.
+    fn is_null(self, decl: &FunctionDecl) -> bool {
+        self == ArgInfo::User && decl.parameters.is_empty() && decl.return_type.is_none()
+    }
 }
 
 /// `_function_string` with a scope, a method of `ce`: `Method [
@@ -4570,7 +4725,11 @@ fn function_string(req: &mut Request, function: Function, indent: &str) -> Strin
 /// method of the same name when the method is `ce`'s own and the
 /// parent's is not private; `prototype` names the prototype's scope.
 fn method_string(req: &mut Request, method: &LinkedMethod, ce: ClassId, indent: &str) -> String {
-    let module = req.class_extension_name(method.scope).map(str::to_owned);
+    let module = if method.via_handler {
+        None
+    } else {
+        req.class_extension_name(method.scope).map(str::to_owned)
+    };
     let mut words: Vec<String> = Vec::new();
     if method.scope != ce {
         let scope = class_name_of(req, method.scope);
@@ -4601,11 +4760,17 @@ fn method_string(req: &mut Request, method: &LinkedMethod, ce: ClassId, indent: 
         Some((&method.decl, &words)),
         indent,
     );
+    let arg_info = if method.via_handler {
+        ArgInfo::User
+    } else {
+        ArgInfo::of(&method.decl.function)
+    };
     function_body(
         req,
         &mut out,
         &method.decl.function,
         method.decl.tentative_return,
+        arg_info,
         indent,
     );
     out
@@ -4708,6 +4873,7 @@ fn function_body(
     out: &mut String,
     decl: &FunctionDecl,
     tentative: bool,
+    arg_info: ArgInfo,
     indent: &str,
 ) {
     if !decl.file.0.is_empty() {
@@ -4720,7 +4886,7 @@ fn function_body(
         );
     }
     let param_indent = format!("{indent}  ");
-    function_parameter_string(req, out, decl, &param_indent);
+    function_parameter_string(req, out, decl, arg_info, &param_indent);
     if let Some(returns) = &decl.return_type {
         let word = if tentative {
             "Tentative return"
@@ -4816,11 +4982,12 @@ fn function_parameter_string(
     req: &mut Request,
     out: &mut String,
     decl: &FunctionDecl,
+    arg_info: ArgInfo,
     indent: &str,
 ) {
     let required = required_parameters(decl);
     let internal = decl.file.0.is_empty();
-    if !internal && decl.parameters.is_empty() && decl.return_type.is_none() {
+    if arg_info.is_null(decl) {
         return;
     }
     out.push('\n');
