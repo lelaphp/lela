@@ -662,6 +662,7 @@ impl Emit<'_> {
     /// $names = ['a', 'z', 'none'];
     /// foreach ($names as $name) { var_dump(isset($$name), empty(${$name})); }
     /// var_dump(isset($_SERVER), empty($_FILES), isset($_ENV['nothing']), empty($_GET));
+    /// var_dump(empty($_SERVER), isset($_ENV), empty($_ENV['nothing']));
     /// ```
     /// ```expect
     /// bool(true)
@@ -673,6 +674,9 @@ impl Emit<'_> {
     /// bool(true)
     /// bool(true)
     /// bool(false)
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
     /// bool(true)
     /// ```
     pub(super) fn isset_by_name(
