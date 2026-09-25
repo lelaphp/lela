@@ -13650,6 +13650,31 @@ impl Request {
         self.open_stream_wrapper(path, mode, use_include_path)
     }
 
+    /// `php_stream_open_wrapper_ex(url, mode, REPORT_ERRORS |
+    /// STREAM_USE_URL)`, what `get_headers()` opens: [`Request::open_stream`]
+    /// for a path whose wrapper is a URL wrapper, and for any other php's
+    /// warning that the function may only be used against URLs, and
+    /// `None`.
+    ///
+    /// ```php
+    /// var_dump(get_headers(__FILE__), get_headers("php://memory"), get_headers("foo://x"));
+    /// ```
+    /// ```expect
+    /// Warning: get_headers(): This function may only be used against URLs in %s on line 2
+    ///
+    /// Warning: get_headers(): This function may only be used against URLs in %s on line 2
+    ///
+    /// Warning: get_headers(): Unable to find the wrapper "foo" - did you forget to enable it when you configured PHP? in %s on line 2
+    ///
+    /// Warning: get_headers(): This function may only be used against URLs in %s on line 2
+    /// bool(false)
+    /// bool(false)
+    /// bool(false)
+    /// ```
+    pub fn open_url(&mut self, url: &[u8], mode: &[u8]) -> Result<Option<Stream>, Thrown> {
+        self.open_url_wrapper(url, mode)
+    }
+
     /// `php_stream_alloc(ops, abstract, 0, mode)`: a stream of a kind the
     /// extension implements, as a resource of the `stream` type with one
     /// owner, the caller's, at position zero with nothing read.

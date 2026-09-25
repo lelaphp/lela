@@ -2164,6 +2164,30 @@ impl Request {
         mode: &[u8],
         use_include_path: bool,
     ) -> Result<Option<Stream>, Thrown> {
+        self.open_wrapper_ex(path, mode, use_include_path, false)
+    }
+
+    /// `_php_stream_open_wrapper_ex` under `REPORT_ERRORS | STREAM_USE_URL`,
+    /// what `get_headers` opens with: a wrapper located that is no URL
+    /// wrapper, the plain files one, `php://` and a registered one not
+    /// flagged `STREAM_IS_URL` among them, is php's warning that the
+    /// function may only be used against URLs, and nothing is opened
+    /// (`Z/main/streams/streams.c:2278`).
+    pub(crate) fn open_url_wrapper(
+        &mut self,
+        path: &[u8],
+        mode: &[u8],
+    ) -> Result<Option<Stream>, Thrown> {
+        self.open_wrapper_ex(path, mode, false, true)
+    }
+
+    fn open_wrapper_ex(
+        &mut self,
+        path: &[u8],
+        mode: &[u8],
+        use_include_path: bool,
+        use_url: bool,
+    ) -> Result<Option<Stream>, Thrown> {
         if path.is_empty() {
             return Err(throw(self, "ValueError", "Path must not be empty"));
         }
@@ -2172,6 +2196,14 @@ impl Request {
             to_open = resolved;
         }
         let (wrapper, path_to_open) = self.locate_wrapper(&to_open);
+        if use_url && !matches!(&wrapper, Located::Space(user) if user.is_url) {
+            let text = format!(
+                "{}(): This function may only be used against URLs",
+                self.active_native()
+            );
+            warning(self, &text);
+            return Ok(None);
+        }
         let (label, opened) = match wrapper {
             Located::Plain => (
                 PLAIN_FILES,

@@ -1,19 +1,19 @@
 //! `Z/ext/standard/url.c`: `parse_url` over `php_url_parse_ex2`, and
 //! the four codecs over `php_url_encode_impl`, `php_url_decode_ex` and
 //! `php_raw_url_decode_ex`, which `http_build_query` and `parse_str`
-//! read too. `get_headers` needs the http wrapper's response headers,
-//! which the streams facet does not carry yet, and waits on it.
+//! read too; and `get_headers` over the `wrapper_data` a URL wrapper's
+//! stream carries.
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 use php_ext::decl::{ConstDecl, FunctionDecl};
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
 use crate::output::Entry;
 use crate::stub::stub;
-use crate::zpp::{optional_long, string_value};
+use crate::zpp::{optional_bool, optional_long, string_value};
 use crate::{argument_count_between, constant, string_argument};
 
 /// `PHP_URL_*`, `parse_url`'s component selectors, and `PHP_QUERY_*`,
@@ -114,7 +114,103 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
         (stub("urldecode(string $string): string"), urldecode),
         (stub("rawurlencode(string $string): string"), rawurlencode),
         (stub("rawurldecode(string $string): string"), rawurldecode),
+        (
+            stub(
+                "get_headers(string $url, bool $associative = false, $context = null): array|false",
+            ),
+            get_headers,
+        ),
     ]
+}
+
+/// `get_headers(string $url, bool $associative = false, $context = null):
+/// array|false`, php's `PHP_FUNCTION(get_headers)`: the URL opened `r`
+/// under `STREAM_USE_URL` ([`Request::open_url`]), and the header lines
+/// its wrapper left in the stream's `wrapper_data`, each as a string, or
+/// with `$associative` keyed by the name before its first `:` with the
+/// blanks after it skipped, a repeated name a list, and a line with no
+/// `:` under the next integer key; `false` where nothing opened or the
+/// wrapper left no array. A path whose wrapper is no URL wrapper is
+/// php's warning. This engine's streams have no http wrapper yet, and a
+/// registered one's `wrapper_data` is its object.
+///
+/// ```php
+/// class W { public $context; function stream_open($p, $m, $o, &$op) { return true; } function stream_read($n) { return ""; } function stream_eof() { return true; } }
+/// stream_wrapper_register("web", "W", STREAM_IS_URL);
+/// var_dump(get_headers("web://x"), get_headers("web://x", true, null));
+/// try { get_headers("web://x", false, 1); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { get_headers("a\0b"); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// bool(false)
+/// bool(false)
+/// get_headers(): Argument #3 ($context) must be of type resource or null, int given
+/// get_headers(): Argument #1 ($url) must not contain any null bytes
+/// ```
+fn get_headers(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 1, 3)?;
+    let url = string_argument(req, 1)?;
+    if url.as_bytes().contains(&0) {
+        return Err(arg_value_error(req, 1, "not contain any null bytes"));
+    }
+    let associative = optional_bool(req, 2, false)?;
+    crate::file::context_argument(req, 3)?;
+    let Some(stream) = req.open_url(url.as_bytes(), b"r")? else {
+        return Ok(Value::bool(false));
+    };
+    let meta = stream.meta_data(req)?;
+    let wrapper_data = Key::Str(PhpString::new(req, b"wrapper_data")?);
+    let lines = meta
+        .get(&wrapper_data)
+        .and_then(|value| value.deref().as_array().copied());
+    let Some(lines) = lines else {
+        stream.close(req);
+        return Ok(Value::bool(false));
+    };
+    let mut headers = PhpArray::new(req)?;
+    for (_, line) in lines.snapshot() {
+        let line = line.deref();
+        let ValueRef::Str(line) = line.as_ref() else {
+            continue;
+        };
+        add_header(req, &mut headers, line.as_bytes(), associative)?;
+    }
+    stream.close(req);
+    Ok(Value::array(headers))
+}
+
+/// One header line into `get_headers`' answer: appended as it is, or
+/// with `associative` and a `:` in it, under the name before the `:`
+/// with the blanks after it skipped. A name met again makes the first
+/// value a list, `convert_to_array`, and the rest are appended to it.
+fn add_header(
+    req: &mut Request,
+    headers: &mut PhpArray,
+    line: &[u8],
+    associative: bool,
+) -> Result<(), Thrown> {
+    let Some(at) = line.iter().position(|c| *c == b':').filter(|_| associative) else {
+        let value = string_value(req, line)?;
+        return headers.append(req, value);
+    };
+    let mut start = at + 1;
+    while line.get(start).is_some_and(u8::is_ascii_whitespace) {
+        start += 1;
+    }
+    let name = Key::Str(PhpString::new(req, &line[..at])?);
+    let value = string_value(req, &line[start..])?;
+    let Some(previous) = headers.get(&name) else {
+        return headers.set(req, name, value);
+    };
+    if let Some(list) = previous.as_array() {
+        let mut list = *list;
+        return list.append(req, value);
+    }
+    let mut list = PhpArray::new(req)?;
+    req.addref(&previous);
+    list.append(req, previous)?;
+    list.append(req, value)?;
+    headers.set(req, name, Value::array(list))
 }
 
 /// `php_url`: the components `php_url_parse_ex2` found.

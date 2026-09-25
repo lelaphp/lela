@@ -294,6 +294,7 @@ request::Request::named_arguments
 request::Request::new_stream
 request::Request::open_dir
 request::Request::open_stream
+request::Request::open_url
 request::Request::os_error_text
 request::Request::output_buffer_op
 request::Request::output_started_at
