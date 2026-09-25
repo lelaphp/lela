@@ -28,6 +28,7 @@ mod exec;
 mod fiber;
 mod generator;
 mod handlers;
+mod highlight;
 mod ini_quantity;
 mod ini_syntax;
 mod interfaces;

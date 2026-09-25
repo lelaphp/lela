@@ -112,6 +112,22 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
 fn host_natives() -> Vec<(FunctionDecl, Entry)> {
     vec![
         (stub("flush(): void"), flush as Entry),
+        (
+            stub("highlight_file(string $filename, bool $return = false): string|bool"),
+            highlight_file,
+        ),
+        (
+            stub("show_source(string $filename, bool $return = false): string|bool"),
+            highlight_file,
+        ),
+        (
+            stub("php_strip_whitespace(string $filename): string"),
+            php_strip_whitespace,
+        ),
+        (
+            stub("highlight_string(string $string, bool $return = false): string|true"),
+            highlight_string,
+        ),
         (stub("usleep(int $microseconds): void"), usleep),
         (
             stub("time_sleep_until(float $timestamp): bool"),
@@ -1584,5 +1600,118 @@ fn header_register_callback(req: &mut Request) -> Result<Value, Thrown> {
     argument_count_between(req, 1, 1)?;
     let callback = crate::callable_argument(req, 1)?;
     req.set_header_callback(callback);
+    Ok(Value::bool(true))
+}
+
+/// The source of a file as `open_file_for_scanning` reads it through
+/// `zend_stream_open`, the include path searched and the stream's
+/// warning raised where the file could not be opened: `None` then.
+fn scanned_file(req: &mut Request, filename: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
+    let Some(stream) = req.open_stream(filename, b"rb", true)? else {
+        return Ok(None);
+    };
+    let source = stream.copy_to_mem(req, None)?;
+    stream.close(req);
+    Ok(Some(source.as_bytes().to_vec()))
+}
+
+/// `highlight_file(string $filename, bool $return = false): string|bool`,
+/// php's `PHP_FUNCTION(highlight_file)`, and its alias `show_source`:
+/// the file as `zend_highlight` writes it (`php_ext::syntax::highlight`),
+/// to the body or, with `$return`, as the answer; a file that cannot
+/// be opened is the stream's warning, php's `Failed opening '%s' for
+/// highlighting` and `false`.
+///
+/// ```php
+/// $f = tempnam(sys_get_temp_dir(), 'h'); file_put_contents($f, "<?php echo 'a'; ?>\n");
+/// var_dump(highlight_file($f, true)); var_dump(show_source($f));
+/// var_dump(highlight_file("nope.php"));
+/// try { highlight_file("a\0b"); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// unlink($f);
+/// ```
+/// ```expect
+/// string(252) "<pre><code style="color: #000000"><span style="color: #0000BB">&lt;?php </span><span style="color: #007700">echo </span><span style="color: #DD0000">'a'</span><span style="color: #007700">; </span><span style="color: #0000BB">?&gt;
+/// </span></code></pre>"
+/// <pre><code style="color: #000000"><span style="color: #0000BB">&lt;?php </span><span style="color: #007700">echo </span><span style="color: #DD0000">'a'</span><span style="color: #007700">; </span><span style="color: #0000BB">?&gt;
+/// </span></code></pre>bool(true)
+///
+/// Warning: highlight_file(nope.php): Failed to open stream: No such file or directory in %s on line 4
+///
+/// Warning: highlight_file(): Failed opening 'nope.php' for highlighting in %s on line 4
+/// bool(false)
+/// highlight_file(): Argument #1 ($filename) must not contain any null bytes
+/// ```
+fn highlight_file(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 1, 2)?;
+    let filename = path_argument(req, 1)?;
+    let returned = optional_bool(req, 2, false)?;
+    let full = req.absolutize(filename.as_bytes());
+    req.fs_guard(&full, php_ext::request::PathIntent::Read)?;
+    let Some(source) = scanned_file(req, filename.as_bytes())? else {
+        let text = format!(
+            "Failed opening '{}' for highlighting",
+            String::from_utf8_lossy(filename.as_bytes())
+        );
+        docref(req, Level::Warning, &text);
+        return Ok(Value::bool(false));
+    };
+    let html = php_ext::syntax::highlight(req, &source);
+    if returned {
+        return string_value(req, &html);
+    }
+    req.write(&html);
+    Ok(Value::bool(true))
+}
+
+/// `php_strip_whitespace(string $filename): string`, php's
+/// `PHP_FUNCTION(php_strip_whitespace)`: the file as `zend_strip` writes
+/// it (`php_ext::syntax::strip`), comments dropped and whitespace one
+/// space; a file that cannot be opened is the stream's warning and the
+/// empty string.
+///
+/// ```php
+/// $f = tempnam(sys_get_temp_dir(), 'w'); file_put_contents($f, "<?php\n/* c */ \$a  =  1; // d\n\$b = <<<E\n x\n E;\n\n\techo \$a;\n");
+/// var_dump(php_strip_whitespace($f), php_strip_whitespace("nope.php")); unlink($f);
+/// ```
+/// ```expect
+/// Warning: php_strip_whitespace(nope.php): Failed to open stream: No such file or directory in %s on line 3
+/// string(41) "<?php
+///  $a = 1; $b = <<<E
+///  x
+///  E;
+/// echo $a; "
+/// string(0) ""
+/// ```
+fn php_strip_whitespace(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 1, 1)?;
+    let filename = path_argument(req, 1)?;
+    let Some(source) = scanned_file(req, filename.as_bytes())? else {
+        return string_value(req, b"");
+    };
+    let stripped = php_ext::syntax::strip(req, &source);
+    string_value(req, &stripped)
+}
+
+/// `highlight_string(string $string, bool $return = false): string|true`,
+/// php's `PHP_FUNCTION(highlight_string)`: the string as `zend_highlight`
+/// writes it, scanned from `INITIAL` as a file is, to the body or,
+/// with `$return`, as the answer.
+///
+/// ```php
+/// var_dump(highlight_string("<?php 1;", true), highlight_string("x"));
+/// ```
+/// ```expect
+/// <pre><code style="color: #000000">x</code></pre>string(130) "<pre><code style="color: #000000"><span style="color: #0000BB">&lt;?php 1</span><span style="color: #007700">;</span></code></pre>"
+/// bool(true)
+/// ```
+fn highlight_string(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 1, 2)?;
+    let string = string_argument(req, 1)?;
+    let returned = optional_bool(req, 2, false)?;
+    let html = php_ext::syntax::highlight(req, string.as_bytes());
+    if returned {
+        return string_value(req, &html);
+    }
+    req.write(&html);
     Ok(Value::bool(true))
 }

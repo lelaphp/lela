@@ -1,8 +1,8 @@
 //! php's scanner view: one [`ScannedToken`] per token php's scanner
 //! returns under `lex_scan`, named as php names it where a kind is one
 //! token there too, and reconstituted here where the two scanners cut the
-//! source differently (design §4.9), for `token_get_all` and whatever
-//! else reads php's scanner.
+//! source differently (design §4.9). `token_get_all`, `highlight_string`,
+//! `php_strip_whitespace` and the CLI's `-s` and `-w` read this one view.
 //! What is decided here and nowhere else:
 //!
 //! - the keyword names, with `private(set)` and its two siblings fused
@@ -21,6 +21,9 @@
 //!   `T_ENCAPSED_AND_WHITESPACE` for a `'` no `'` closes, which php's
 //!   scanner returns as that rather than as a string;
 //! - the `T_DNUMBER` an integer written past `ZEND_LONG_MAX` becomes;
+//! - which tokens carry a value, `zendlval` set by
+//!   `RETURN_TOKEN_WITH_VAL` or `RETURN_TOKEN_WITH_STR`, which is what
+//!   `zend_highlight` colours a token that is none of its named kinds by;
 //! - the line a token starts on, counted as `HANDLE_NEWLINES` counts, a
 //!   `\n` or a `\r` no `\n` follows.
 //!
@@ -40,6 +43,31 @@ pub struct ScannedToken {
     pub start: usize,
     pub end: usize,
     pub line: u32,
+}
+
+impl ScannedToken {
+    /// Whether php's scanner sets `zendlval` for the token,
+    /// `RETURN_TOKEN_WITH_VAL` and `RETURN_TOKEN_WITH_STR`; a keyword, an
+    /// operator and a character carry none.
+    pub(crate) fn carries_value(&self) -> bool {
+        matches!(
+            self.name,
+            Some(
+                "T_LNUMBER"
+                    | "T_DNUMBER"
+                    | "T_STRING"
+                    | "T_NAME_QUALIFIED"
+                    | "T_NAME_FULLY_QUALIFIED"
+                    | "T_NAME_RELATIVE"
+                    | "T_VARIABLE"
+                    | "T_STRING_VARNAME"
+                    | "T_NUM_STRING"
+                    | "T_INLINE_HTML"
+                    | "T_ENCAPSED_AND_WHITESPACE"
+                    | "T_CONSTANT_ENCAPSED_STRING"
+            )
+        )
+    }
 }
 
 /// php's tokens for `source` over the lexer's stream of it, the
