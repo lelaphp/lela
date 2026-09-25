@@ -1,6 +1,6 @@
 ---
 name: specs
-description: Coordinate the builders, three or four slots kept full of specs cut from the corpus, and merge what they finish into main through the merge check. `/specs`, from the coordinator's clone.
+description: Coordinate the builders, three or four slots kept full of specs cut from the corpus, and merge what they finish into main through the merge check. `/specs`, from main's checkout.
 disable-model-invocation: true
 ---
 
@@ -8,7 +8,8 @@ The coordinator keeps the builder **slots** full and merges what they finish. A 
 
 ## Where you stand
 
-- The coordinator's clone, its checkout detached at `main`'s tip, is where every merge happens; builders work under its `.claude/worktrees/t<n>/`, on branches that name no track, so `done` measures each since `main`. `cargo xtask track` in a worktree says so.
+- Main's checkout (`~/Projects/dax-php`, on the branch `main`) is where every merge happens, and its `target/harness` is the store. Builders work under its `.claude/worktrees/t<n>/`, on branches that name no track, so `done` measures each since `main`; `cargo xtask track` in a worktree says so. Start each batch from the pushed tip: `git pull --ff-only`.
+- The checkout is the coordinator's while `/specs` runs: other sessions work in worktrees, since a merge commit takes the whole index. A person's uncommitted edit in it (a `.gitignore` line) stays theirs: nothing here stages it, and every reset is `--keep`, which refuses where it would overwrite one.
 - `git worktree list` and `git config --get-regexp 'branch\..*\.ticket'` show the slots laid and each one's ticket. A builder this session didn't dispatch is gone; its branch's commits show how far it got.
 - `gh issue list --label ready-for-agent --state open` holds the open specs and blockers, and `--label for-a-person` the person's tickets. `df -h` shows the disk.
 - `$S` is your scratchpad. Runs and message files there are named for their commit, branch or ticket.
@@ -51,7 +52,7 @@ The spec is written when `cargo xtask ticket read <n>` prints its boxes.
 
 ## 4. Lay the worktree and dispatch
 
-- Laid on `main`: `cargo xtask worktree add t<n> --ticket <n>`, with the clone's local `main` first set to the pushed one (`git fetch origin && git branch -f main origin/main`). While the checkout holds a staged merge the workspace doesn't build, so run the clone's built `target/release/xtask --root <clone> worktree add …` instead.
+- Laid on `main`: `cargo xtask worktree add t<n> --ticket <n>`, after `git pull --ff-only` so it branches from the pushed tip. While the checkout holds a staged merge the workspace doesn't build, so run its built `target/release/xtask --root <checkout> worktree add …` instead.
 - Laid on an unmerged branch, which `worktree add` can't do because it branches only from `main`:
   ```
   git worktree add -b t<n> .claude/worktrees/t<n> t<m>
@@ -62,7 +63,7 @@ Recording the ticket on the branch also keeps `xtask track next` from naming the
 
 ## 5. Integrate
 
-In the clone's checkout, one branch at a time. A blocker's branch (a crash or a regression fix) merges on its own as soon as its builder finishes, ahead of the specs waiting: #723's fix waited on its branch while the same bug was found again as #771 and fixed a second time.
+In main's checkout, one branch at a time. A blocker's branch (a crash or a regression fix) merges on its own as soon as its builder finishes, ahead of the specs waiting: #723's fix waited on its branch while the same bug was found again as #771 and fixed a second time.
 
 1. `git merge --no-ff --no-commit <branch>`. Resolve every conflict, then `cargo build -p php` until it builds, since the build is where the conflicts git can't see surface. [merging.md](merging.md) holds the ones that recur.
 2. Commit through the hook with `git commit -F $S/msg-<branch>.txt` and no pathspec: a merge commit takes the whole index, which is why the checkout is the coordinator's alone. The subject is `Merge <branch>: <the spec's change in one sentence>`. A hook refusal is a conflict not yet resolved.
@@ -83,9 +84,9 @@ After the last merge of a batch, before any push:
    grep -E '^regressed |@against' $S/lane-<head>.out $S/zend-<head>.out
    ```
    No regression means every `@against` reading passes. A skip is no verdict (a stale binary, no run kept at the base, different subsets) and never reads as no regression. With no run kept at the base, take one in a checkout of the base with its engine built.
-4. Push only on no regressions and a fast-forward: `git fetch origin`, `git merge-base --is-ancestor origin/main HEAD`, `git push origin HEAD:main`. A `main` another session moved is merged in first, and the check runs again against the moved tip.
+4. Push only on no regressions and a fast-forward: `git fetch origin`, `git merge-base --is-ancestor origin/main HEAD`, `git push origin main`. A `main` another session moved is merged in first, and the check runs again against the moved tip.
 
-A regression sends its branch back as a blocker (step 1), and the rest of the batch goes on without it: return the checkout to the base with `git reset --hard <base>` (the merges are unpushed, and each branch keeps its own commits), merge the others again and run the check again.
+A regression sends its branch back as a blocker (step 1), and the rest of the batch goes on without it: return the checkout to the base with `git reset --keep <base>` (the merges are unpushed, each branch keeps its own commits, and `--keep` leaves a person's uncommitted edit standing where `--hard` would discard it), merge the others again and run the check again.
 
 **What stops a merge and goes to a person.** A ceiling (`api_items`, a crate's line budget), a `done` refusal on a crate without `porting` whose subset doesn't fully pass (until #725 lands), or a design line for a cross-extension export. File it `for-a-person` with the exact refusal and the saved resolution, as #684 did, and merge the rest of the batch.
 
@@ -93,4 +94,4 @@ A regression sends its branch back as a blocker (step 1), and the rest of the ba
 
 Retire a worktree with `cargo xtask worktree retire <branch>` once its branch has merged, or once its builder has finished and the branch waits to be merged; the branch stays, and a branch sent back gets a worktree again. Much of a `target/` is shared copy-on-write, so retiring frees less than `du` suggests: read `df` after each retire.
 
-Until #787's ancestry rule is on `main`, retire only after a run at the tip has written newer readings. `worktree retire` appends the worktree's log into the clone's store, and `xtask status` and the dashboard take the last reading written per scope, whatever commit it measured: retiring #742's and #751's worktrees, cut behind the tip, made the dashboard read 15.6% where the track stood at 44.6%.
+Until #787's ancestry rule is on `main`, retire only after a run at the tip has written newer readings. `worktree retire` appends the worktree's log into the checkout's store, and `xtask status` and the dashboard take the last reading written per scope, whatever commit it measured: retiring #742's and #751's worktrees, cut behind the tip, made the dashboard read 15.6% where the track stood at 44.6%.

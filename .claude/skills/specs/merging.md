@@ -1,6 +1,6 @@
 # Conflicts that recur
 
-Read when a merge into `main` conflicts, or the build or the hook refuses a merge that git took cleanly. In the clone's checkout, `--ours` is `main` and `--theirs` is the branch.
+Read when a merge into `main` conflicts, or the build or the hook refuses a merge that git took cleanly. In main's checkout, `--ours` is `main` and `--theirs` is the branch.
 
 ## The ones git shows
 

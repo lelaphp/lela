@@ -1,18 +1,18 @@
 # The builder prompt
 
-The skeleton every builder is dispatched with. Fill the `<…>` fields per spec (`<clone>` is the coordinator's clone, `<scratchpad>` its session scratchpad) and send the rest as written: each line fixed a failure a builder actually hit.
+The skeleton every builder is dispatched with. Fill the `<…>` fields per spec (`<checkout>` is main's checkout, `~/Projects/dax-php`, and `<scratchpad>` the coordinator's session scratchpad) and send the rest as written: each line fixed a failure a builder actually hit.
 
 ```
 You are the builder for #<n>, <title>. Build it as `.claude/skills/build/SKILL.md` says; it is user-invoked, so read it rather than calling it.
 
-Worktree: <clone>/.claude/worktrees/t<n>, on t<n>, laid on <main | t<m>, #<m>'s finished branch, not yet merged>. Every path you touch is under it, by absolute path.
+Worktree: <checkout>/.claude/worktrees/t<n>, on t<n>, laid on <main | t<m>, #<m>'s finished branch, not yet merged>. Every path you touch is under it, by absolute path.
 
 Your scratch files, commit messages and run output alike, go in <scratchpad>/t<n>/, never the scratchpad's top level: two builders both wrote `msg1.txt` there, and one commit landed under the other ticket's subject.
 <Laid on a branch only:> Before your first commit, run `cargo xtask status --session` once in the worktree; it lays `.claude/harness.local.md`, which the hook reads.
 
 Read first: AGENTS.md, CONTEXT.md, ext/AGENTS.md, the stage-commit skill, and <the ADRs and design sections the area names>.
 
-Validate in the build skill's four tiers (#663 holds them until the skill does). The one subset run, at the end, goes to a file read through `awk -f <clone>/.claude/skills/specs/first-failures.awk <file> | sort | uniq -c | sort -rn`, never raw: it prints about 200k lines. Regressions against the merge base are the coordinator's.
+Validate in the build skill's four tiers (#663 holds them until the skill does). The one subset run, at the end, goes to a file read through `awk -f <checkout>/.claude/skills/specs/first-failures.awk <file> | sort | uniq -c | sort -rn`, never raw: it prints about 200k lines. Regressions against the merge base are the coordinator's.
 
 Commit each piece as soon as it's done: sessions restart, and committed work survives them.
 
