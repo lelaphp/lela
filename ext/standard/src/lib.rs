@@ -55,6 +55,7 @@ mod crypt;
 mod csv;
 mod datetime;
 mod dir;
+mod dl;
 mod dns;
 mod exec;
 mod ffi;
@@ -302,6 +303,7 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
         basic_functions::natives(),
         dir::natives(),
         link::natives(),
+        dl::natives(),
         streamsfuncs::natives(),
         crypt::natives(),
         password::natives(),
