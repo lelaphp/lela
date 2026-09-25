@@ -4325,6 +4325,29 @@ fn fetch_obj(
 ///   }
 /// }
 /// ```
+///
+/// Where the class's `get_property_ptr_ptr` answers `NULL`, the fetch
+/// reads through `read_property` instead of placing the name, as
+/// `zend_fetch_property_address` falls back: `PDORow` serves every
+/// name, and one that is no column reads `null`, so no dynamic property
+/// is created on the row and the write over it is php's `Error`;
+/// `DOMDocument::$documentElement` reads the element, and the write
+/// lands on it.
+///
+/// ```php
+/// $db = new PDO('sqlite::memory:');
+/// $row = $db->query('SELECT 1 AS a')->fetch(PDO::FETCH_LAZY);
+/// try { $row->documentElement->firstChild = 1; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// $d = new DOMDocument;
+/// $d->loadXML('<r>old</r>');
+/// $d->documentElement->nodeValue = 'new';
+/// echo $d->saveXML();
+/// ```
+/// ```expect
+/// Attempt to assign property "firstChild" on null
+/// <?xml version="1.0"?>
+/// <r>new</r>
+/// ```
 pub(crate) fn fetch_obj_w<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -4411,12 +4434,20 @@ fn fetch_obj_place(
         );
         return threw(req, frame, &thrown);
     };
-    // php places the name here with `zend_std_get_property_ptr_ptr`,
-    // whose silence is `ce->__get != NULL`; the overloaded arm a class
-    // with a `__get` takes, php's `Indirect modification of overloaded
-    // property` notice, is not served yet (#513), so the placement is
-    // loud and a property the scope may not reach is the `Error`.
-    let placed = req.declared_slot_for_write(object.class(), &name, "indirectly modify", false);
+    let placed = match place_of(req, object, &name) {
+        // `if (NULL == ptr) ptr = zobj->handlers->read_property(...)`:
+        // a name the class serves is read, not placed.
+        PropertyPlace::Handlers => return fetch_obj_read(req, frame, code, op, object, &name),
+        // php places the name here with `zend_std_get_property_ptr_ptr`,
+        // whose silence is `ce->__get != NULL`; the overloaded arm a
+        // class with a `__get` takes, php's `Indirect modification of
+        // overloaded property` notice, is not served yet (#513), so the
+        // placement is loud and a property the scope may not reach is
+        // the `Error`.
+        PropertyPlace::Std => {
+            req.declared_slot_for_write(object.class(), &name, "indirectly modify", false)
+        }
+    };
     let at = match placed {
         Ok(Some((slot, typed))) => {
             // `if (UNEXPECTED(Z_TYPE_P(retval) == IS_UNDEF))`: under
@@ -4484,6 +4515,33 @@ fn fetch_obj_place(
         )));
     };
     var.write(php_heap::Zval::indirect(at));
+    exec::free_container_var(req, frame, code, op);
+    Ok(advance(req, frame))
+}
+
+/// `zend_fetch_property_address`'s fallback where the class's
+/// `get_property_ptr_ptr` answers `NULL` ([`PropertyPlace::Handlers`]):
+/// the class's `read_property` under the fetch's own type, which
+/// `zend_std_read_property` reads as `BP_VAR_R` for `_W` and `_RW`
+/// alike, and what it answers written into the `VAR` as a value of the
+/// fetch's own rather than a place. The write over the fetch then lands
+/// on that value, and never lays a property down on the object.
+fn fetch_obj_read(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    object: PhpObject,
+    name: &[u8],
+) -> Edge {
+    let table = req.object_handlers(object.heap());
+    let read = table.read_property(req, object, name, PropertyRead::Warning);
+    let value = match read {
+        Ok(value) => value,
+        Err(thrown) => return threw_freeing_container(req, frame, code, op, &thrown),
+    };
+    let previous = req.set_slot(frame, exec::temporary_slot(code, op.out), value);
+    req.release(previous);
     exec::free_container_var(req, frame, code, op);
     Ok(advance(req, frame))
 }
