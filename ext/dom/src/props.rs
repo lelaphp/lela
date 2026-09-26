@@ -848,7 +848,26 @@ fn modern_prefix(req: &mut Request, object: PhpObject) -> Read {
     string_or_null(req, node.ns().and_then(Ns::prefix).as_deref())
 }
 
-/// `dom_node_prefix_write`.
+/// `dom_node_prefix_write`: the empty prefix, and one a NUL starts, the
+/// default namespace; a prefix another declaration of the element holds
+/// php's "Namespace Error".
+///
+/// ```php
+/// $d = new DOMDocument;
+/// $d->loadXML('<h:r xmlns:c="urn:c" xmlns:h="urn:h"/>');
+/// $r = $d->documentElement;
+/// foreach (["", "\0x", "h", "c"] as $p) {
+///     try { $r->prefix = $p; } catch (DOMException $e) { echo $e->getMessage(), "\n"; }
+///     echo $d->saveXML($r), "\n";
+/// }
+/// ```
+/// ```expect
+/// <r xmlns:c="urn:c" xmlns:h="urn:h" xmlns="urn:h"/>
+/// <r xmlns:c="urn:c" xmlns:h="urn:h" xmlns="urn:h"/>
+/// <h:r xmlns:c="urn:c" xmlns:h="urn:h" xmlns="urn:h"/>
+/// Namespace Error
+/// <h:r xmlns:c="urn:c" xmlns:h="urn:h" xmlns="urn:h"/>
+/// ```
 fn set_prefix(req: &mut Request, object: PhpObject, value: &Value) -> Result<(), Thrown> {
     let node = prop_node(req, object)?;
     let holder = match node.kind() {
@@ -857,7 +876,14 @@ fn set_prefix(req: &mut Request, object: PhpObject, value: &Value) -> Result<(),
         _ => return Ok(()),
     };
     let given = written_bytes(value);
-    let prefix: Option<&[u8]> = if given.is_empty() { None } else { Some(&given) };
+    // `ZSTR_VAL(prefix_str)` read as the C string it is: up to its first
+    // NUL, and none where that leaves nothing, the default namespace.
+    let c_prefix = &given[..given.iter().position(|b| *b == 0).unwrap_or(given.len())];
+    let prefix: Option<&[u8]> = if c_prefix.is_empty() {
+        None
+    } else {
+        Some(c_prefix)
+    };
     let (Some(holder), Some(current)) = (holder, node.ns()) else {
         return Ok(());
     };
