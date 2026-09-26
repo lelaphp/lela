@@ -853,30 +853,82 @@ fn seek(req: &mut Request) -> Result<Value, Thrown> {
 }
 
 /// `serialize(): string`, php's `x:i:count;` then `obj,inf;` per row
-/// and `m:` with the members.
+/// and `m:` with the members. The rows are walked live and each is held
+/// across its write, as php holds them (GH-16588): a `__serialize` that
+/// empties the storage leaves the row being written whole.
 ///
-/// The witness waits on the ext/standard native it calls (#712).
+/// ```php
+/// class C { function __serialize(): array { global $s; $s->removeAll($s); return []; } }
+/// $s = new SplObjectStorage; $s[new C] = new stdClass; $s[new stdClass] = 1;
+/// var_dump($s->serialize(), count($s));
+/// ```
+/// ```expect
+/// string(47) "x:i:2;O:1:"C":0:{},O:8:"stdClass":0:{};m:a:0:{}"
+/// int(0)
+/// ```
 fn serialize(req: &mut Request) -> Result<Value, Thrown> {
     crate::arity(req, 0, 0)?;
     let this = crate::this(req)?;
-    let rows = with(req, this, |s| s.live())?;
+    let count = with(req, this, |s| s.len())?;
     let mut out = b"x:".to_vec();
     out.extend(crate::serialized(
         req,
-        Value::int(i64::try_from(rows.len()).unwrap_or(i64::MAX)),
+        Value::int(i64::try_from(count).unwrap_or(i64::MAX)),
     )?);
-    for (object, inf) in rows {
-        out.extend(crate::serialized(req, object.as_value())?);
-        out.push(b',');
-        out.extend(crate::serialized(req, inf)?);
-        out.push(b';');
+    // The objects written, each held from its row on, as the var hash's
+    // `Z_ADDREF` holds it until `PHP_VAR_SERIALIZE_DESTROY`, so one a
+    // later `__serialize` frees cannot have its handle reused meanwhile.
+    let mut held = Vec::new();
+    let rows = serialize_rows(req, this, &mut out, &mut held);
+    for object in held {
+        req.release(object.as_value());
     }
+    rows?;
     out.extend_from_slice(b"m:");
     let members = crate::members(req, this)?;
     let text = crate::serialized(req, Value::array(members));
     req.release(Value::array(members));
     out.extend(text?);
     crate::string_value(req, &out)
+}
+
+/// `SplObjectStorage::serialize`'s walk over the storage, live by
+/// position as `zend_hash_move_forward_ex` walks it, so a row an
+/// earlier row's `__serialize` detached is not written and one it
+/// attached is. Each row's information is held across its write, php's
+/// `inf_copy`, and each object from its row on, in `held`, which the
+/// caller gives up once the walk is done.
+fn serialize_rows(
+    req: &mut Request,
+    this: PhpObject,
+    out: &mut Vec<u8>,
+    held: &mut Vec<PhpObject>,
+) -> Result<(), Thrown> {
+    let mut from = 0;
+    loop {
+        let row = with(req, this, |s| {
+            let at = s.valid_from(from);
+            s.rows
+                .get(at)
+                .and_then(Option::as_ref)
+                .map(|(_, object, inf)| (at, *object, *inf))
+        })?;
+        let Some((at, object, inf)) = row else {
+            return Ok(());
+        };
+        req.addref(&object.as_value());
+        held.push(object);
+        req.addref(&inf);
+        let written = crate::serialized(req, object.as_value()).and_then(|object| {
+            out.extend(object);
+            out.push(b',');
+            crate::serialized(req, inf)
+        });
+        req.release(inf);
+        out.extend(written?);
+        out.push(b';');
+        from = at + 1;
+    }
 }
 
 /// `unserialize(string $data): void`: the `x:i:count` head, each
