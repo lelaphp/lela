@@ -91,7 +91,7 @@ LC_ALL = "C"
 [recipe.limits]
 # `run-tests.php:1187`: 60 s per test, 300 under valgrind. A witness's `wall=`
 # is disclosure, not a limit.
-timeout_s = 60
+timeout_s = 30
 
 [recipe.normalise]
 # `run-tests.php:2528`: `preg_replace("/\r\n/", "\n", trim($out))`. The trim set
