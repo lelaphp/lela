@@ -66,6 +66,7 @@ pub fn render(
     format: Format,
     week: Option<usize>,
     session_id: Option<&str>,
+    uncut: bool,
 ) -> Result<String> {
     if week.is_some() && section != Section::Week {
         bail!("--week picks a row of the week section; use --section week");
@@ -81,7 +82,7 @@ pub fn render(
             fold_uncreated(budget(manifest, &readings), "crate")?,
             BUDGET,
         ),
-        Section::Divergence => return divergence(registry, format),
+        Section::Divergence => return divergence(registry, format, uncut),
         Section::Phpt => (fold_uncreated(standing(store, root)?, "scope")?, INSTRUMENT),
         Section::Witness => (
             fold_uncreated(instrument(&readings, "witness"), "scope")?,
@@ -221,9 +222,21 @@ pub(crate) fn local_template() -> String {
 /// most this many, and a number the reading holds at zero, which says
 /// nothing happened, is left out of its `numbers` cell. `--format json`
 /// is the reading whole, every number and the message uncut (#820). A
-/// person's words, a rule's text and a divergence's reason, are
-/// rendered as written.
+/// rule's text is rendered as written. A divergence's reason is cut to
+/// the same width, since the registry only grows and the facts block
+/// has a cap. The reason stays whole in `docs/divergence.toml`, under
+/// `--uncut` (which `docs/divergence.md` renders) and under
+/// `--format json` (Mitchell, 2026-09-26).
 const MESSAGE_WIDTH: usize = 120;
+
+/// `text` as a cell of at most [`MESSAGE_WIDTH`] characters, the last an
+/// ellipsis where it was cut.
+fn clipped(text: &str) -> String {
+    match text.char_indices().nth(MESSAGE_WIDTH - 1) {
+        Some((at, _)) if text[at..].chars().nth(1).is_some() => cell(&format!("{}…", &text[..at])),
+        _ => cell(text),
+    }
+}
 
 /// One rendered row: the manifest's facts by name, and the reading, if any.
 #[derive(Debug)]
@@ -278,12 +291,7 @@ impl Row {
     fn message(&self) -> String {
         self.reading
             .as_ref()
-            .map(|x| match x.message.char_indices().nth(MESSAGE_WIDTH - 1) {
-                Some((at, _)) if x.message[at..].chars().nth(1).is_some() => {
-                    cell(&format!("{}…", &x.message[..at]))
-                }
-                _ => cell(&x.message),
-            })
+            .map(|x| clipped(&x.message))
             .unwrap_or_default()
     }
 
@@ -445,7 +453,7 @@ fn fold_uncreated(rows: Vec<Row>, key: &str) -> Result<Vec<Row>> {
 /// The divergence section: the registry's rows, then counts by kind (rows)
 /// and status (columns) with a total. It reads no reading; the registry is
 /// the truth and this is its view (harness-design.md §4.3).
-fn divergence(registry: &Registry, format: Format) -> Result<String> {
+fn divergence(registry: &Registry, format: Format, uncut: bool) -> Result<String> {
     let counts = registry.counts();
     let kinds = Kind::ALL
         .into_iter()
@@ -496,7 +504,11 @@ fn divergence(registry: &Registry, format: Format) -> Result<String> {
                     row.kind.as_str(),
                     row.status.as_str(),
                     row.since,
-                    cell(&row.reason)
+                    if uncut {
+                        cell(&row.reason)
+                    } else {
+                        clipped(&row.reason)
+                    }
                 );
             }
             let _ = writeln!(out);

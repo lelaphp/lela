@@ -46,6 +46,11 @@ pub(crate) enum Command {
         /// stdin head instead.
         #[arg(long = "session-id", value_name = "ID")]
         session_id: Option<String>,
+        /// A divergence's reason whole, as `docs/divergence.md` shows the
+        /// registry. Without it the reason is cut to the message width,
+        /// which is what the local facts render.
+        #[arg(long)]
+        uncut: bool,
         /// Print AGENTS.md and .claude/harness.local.md for the function
         /// hook's `prompt.context`: as one text, or with `--format json` as
         /// the two blocks `map` and `facts`, each under the engine's cap on

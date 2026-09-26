@@ -30,14 +30,16 @@ impl Stamp {
     }
 }
 
-/// The short id of `HEAD`, read from the repository's files; `git
-/// rev-parse` when the layout is one this reader does not know. A stamp is
-/// taken at every denial, so it spawns git once (`ls-files`) and not four
-/// times.
+/// The short id of `HEAD`, seven characters, read from the repository's
+/// files; `git rev-parse --short=7` when the layout is one this reader does
+/// not know. Seven is fixed, not git's own `--short`, which grows with the
+/// repository (eight since `d32ff307`) and would make one commit two
+/// stamps. A stamp is taken at every denial, so it spawns git once
+/// (`ls-files`) and not four times.
 pub fn head_commit(root: &Path) -> Result<String> {
     match read_head(root) {
         Some(id) => Ok(id),
-        None => Ok(git(root, &["rev-parse", "--short", "HEAD"], None)?
+        None => Ok(git(root, &["rev-parse", "--short=7", "HEAD"], None)?
             .trim()
             .to_owned()),
     }
@@ -72,8 +74,8 @@ pub(crate) fn common_dir(root: &Path) -> Option<PathBuf> {
 }
 
 /// `HEAD` through `.git` ([`git_dirs`]), a symbolic ref through `refs/`
-/// and then `packed-refs`, shortened to the seven characters `rev-parse
-/// --short` prints on a small repository.
+/// and then `packed-refs`, shortened to seven characters, every stored
+/// stamp's length.
 fn read_head(root: &Path) -> Option<String> {
     let (git_dir, common) = git_dirs(root)?;
     let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
@@ -368,7 +370,7 @@ mod tests {
 
     /// The stamp computed in process is the one git would compute: the
     /// tree hash matches `hash-object` over the same listing and the
-    /// commit matches `rev-parse --short HEAD`.
+    /// commit matches `rev-parse --short=7 HEAD`.
     #[test]
     fn the_stamp_agrees_with_git() {
         let root = built_root();
@@ -389,7 +391,7 @@ mod tests {
         };
         assert_eq!(
             head_commit(&root).unwrap(),
-            out(&["rev-parse", "--short", "HEAD"], None).trim()
+            out(&["rev-parse", "--short=7", "HEAD"], None).trim()
         );
         let paths = files(&root, Path::new("docs")).unwrap();
         let absolute = paths

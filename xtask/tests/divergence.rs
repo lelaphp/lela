@@ -299,9 +299,12 @@ fn the_instrument_writes_a_reading_and_exits_one_on_the_fixture() {
 fn status_divergence_renders_the_rows_with_counts_by_kind_and_status() {
     let root = scratch("status");
     let registry = Registry::load(&root).unwrap();
-    let (ok, md, err) = xtask(&root, &["status", "--section", "divergence"]);
+    let (ok, md, err) = xtask(&root, &["status", "--section", "divergence", "--uncut"]);
     assert!(ok, "{err}");
+    let (cut_ok, cut, cut_err) = xtask(&root, &["status", "--section", "divergence"]);
+    assert!(cut_ok, "{cut_err}");
     for row in &registry.rows {
+        assert!(cut.contains(&row.id), "{cut}");
         assert!(md.contains(&row.id), "{md}");
         // A multi-line reason renders on one line of the table, so the
         // newline TOML leaves at its end is a space here.
@@ -426,14 +429,17 @@ fn docs_divergence_md_is_the_status_section_as_a_computed_region() {
         .find(|l| l.starts_with("<!-- computed exec"))
         .expect("one exec region");
     assert!(
-        opener.contains("status --section divergence"),
-        "the command is the status section: {opener}"
+        opener.contains("status --section divergence --uncut"),
+        "the command is the status section, reasons whole: {opener}"
     );
     assert!(opener.contains("inputs=divergence.toml"), "{opener}");
     let start = page.find(opener).unwrap() + opener.len();
     let end = page[start..].find("<!-- /computed").unwrap() + start;
     let body = page[start..end].trim();
-    let (ok, md, err) = xtask(workspace(), &["status", "--section", "divergence"]);
+    let (ok, md, err) = xtask(
+        workspace(),
+        &["status", "--section", "divergence", "--uncut"],
+    );
     assert!(ok, "{err}");
     assert_eq!(
         body,

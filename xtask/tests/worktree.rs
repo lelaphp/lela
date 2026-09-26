@@ -590,6 +590,7 @@ fn retiring_appends_the_readings_to_the_tracks_store_and_removes_the_worktree() 
         Format::Json,
         None,
         Some("the-retired-agent"),
+        false,
     )
     .unwrap();
     let rendered: serde_json::Value = serde_json::from_str(&permits).unwrap();

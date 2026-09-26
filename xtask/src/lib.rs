@@ -139,8 +139,11 @@ fn command_line() -> Result<()> {
             format,
             week,
             session_id,
+            uncut,
             session: _,
-        } => status_command(&manifest, &store, &root, section, format, week, session_id),
+        } => status_command(
+            &manifest, &store, &root, section, format, week, session_id, uncut,
+        ),
         // The judge itself returned above; what is left of `permit` are the
         // two callers that read the manifest as a whole.
         Command::Permit {
@@ -464,6 +467,7 @@ fn track_command(root: &Path, branch: Option<&str>, json: bool) -> Result<()> {
 
 /// `xtask status`: one section, or with no section the map and the local
 /// facts for the session-start hook, whose stdin head names the session.
+#[allow(clippy::too_many_arguments)]
 fn status_command(
     manifest: &Manifest,
     store: &Store,
@@ -472,6 +476,7 @@ fn status_command(
     format: cli::Format,
     week: Option<usize>,
     session_id: Option<String>,
+    uncut: bool,
 ) -> Result<()> {
     let text = if let Some(section) = section {
         let registry = Registry::load(root)?;
@@ -484,6 +489,7 @@ fn status_command(
             format,
             week,
             session_id.as_deref(),
+            uncut,
         )?
     } else {
         let id = session_id.or_else(status::session_of_stdin);

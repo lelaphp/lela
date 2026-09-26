@@ -272,6 +272,7 @@ fn every_default_extension_reads_the_ports_reach_in_both_columns_and_the_floor_h
         Format::Md,
         None,
         None,
+        false,
     )
     .unwrap();
     // Every row the run wrote, with the status its reading carries: the
