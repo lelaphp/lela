@@ -308,7 +308,7 @@ fn log_date() -> String {
 /// message on its standard input, and its exit status read as php reads
 /// it.
 #[allow(clippy::too_many_lines)] // one C function, kept whole
-fn php_mail(
+pub(super) fn php_mail(
     req: &mut Request,
     to: &[u8],
     subject: &[u8],

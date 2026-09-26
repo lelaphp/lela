@@ -2442,7 +2442,7 @@ fn is_equal_node(a: Node, b: Node, spec_compliant: bool) -> bool {
 /// absolute (`VCWD_REALPATH`, else `expand_filepath`); another scheme's
 /// URI as it is; `None` where the path does not fit `MAXPATHLEN`, as both
 /// of php's resolvers refuse it.
-fn file_path(req: &Request, source: &[u8]) -> Option<Vec<u8>> {
+fn file_path(req: &mut Request, source: &[u8]) -> Option<Vec<u8>> {
     const MAXPATHLEN: usize = 1024;
     let lower: Vec<u8> = source.iter().take(17).map(u8::to_ascii_lowercase).collect();
     let local = if lower.starts_with(b"file://localhost/") {

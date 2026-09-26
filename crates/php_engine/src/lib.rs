@@ -28,6 +28,8 @@ mod exec;
 mod fiber;
 mod generator;
 mod handlers;
+mod highlight;
+mod ini_quantity;
 mod ini_syntax;
 mod interfaces;
 mod interrupt;
@@ -36,12 +38,14 @@ mod ops;
 mod output;
 #[cfg(test)]
 mod probe;
+mod scanner;
 mod streams;
 // The test face is on for an extension's dev-dependency, and for this
 // crate's own tests, which read a served request the same way.
 #[cfg(any(feature = "test", test))]
 pub mod test;
 pub mod tier;
+mod virtual_cwd;
 mod weakrefs;
 mod wrapper;
 

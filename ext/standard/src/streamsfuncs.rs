@@ -22,14 +22,14 @@ use std::os::unix::ffi::OsStrExt;
 use php_ext::coerce::{callable_checked, value_name};
 use php_ext::decl::{Attribute, AttributeArgument, ConstDecl, ConstExpr, FunctionDecl, Name};
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, deprecated, docref, throw};
-use php_ext::request::{Request, Stream, Whence};
+use php_ext::request::{Request, Resolve, Stream, Whence};
 use php_ext::values::{Key, PhpArray, PhpString, Resource, ResourceType, Value, ValueRef};
 
 use crate::file::stream_argument;
 use crate::md5::path_argument;
 use crate::output::Entry;
 use crate::stub::stub;
-use crate::virtual_cwd::{MAXPATHLEN, Resolve, virtual_file_ex};
+use crate::virtual_cwd::MAXPATHLEN;
 use crate::zpp::{
     ArrayOr, array_argument, array_or_string, given, nullable_array, nullable_long,
     nullable_string, optional_long,
@@ -1307,13 +1307,13 @@ fn stream_resolve_include_path(req: &mut Request) -> Result<Value, Thrown> {
     let filename = path_argument(req, 1)?;
     let filename = filename.as_bytes().to_vec();
     let cwd = req.cwd().0.as_os_str().as_bytes().to_vec();
-    let realpath = |path: &[u8]| {
+    let realpath = |req: &mut Request, path: &[u8]| {
         let base: &[u8] = if path.first() == Some(&b'/') {
             b""
         } else {
             &cwd
         };
-        virtual_file_ex(base, path, Resolve::RealPath)
+        req.virtual_file_ex(base, path, Resolve::RealPath)
     };
     let scheme = filename
         .iter()
@@ -1321,7 +1321,7 @@ fn stream_resolve_include_path(req: &mut Request) -> Result<Value, Thrown> {
         .filter(|&at| at > 1 && filename.get(at..at + 3) == Some(b"://".as_slice()));
     let resolved = if let Some(at) = scheme {
         if filename[..at].eq_ignore_ascii_case(b"file") {
-            filename.get(at + 3..).and_then(&realpath)
+            filename.get(at + 3..).and_then(|path| realpath(req, path))
         } else {
             None
         }
@@ -1337,17 +1337,17 @@ fn stream_resolve_include_path(req: &mut Request) -> Result<Value, Thrown> {
                         let mut trypath = entry.to_vec();
                         trypath.push(b'/');
                         trypath.extend_from_slice(&filename);
-                        realpath(&trypath)
+                        realpath(req, &trypath)
                     });
                 found.or_else(|| {
                     let executed = req.current_file()?.to_vec();
                     let dir = executed.iter().rposition(|c| *c == b'/')?;
                     let mut trypath = executed.get(..=dir)?.to_vec();
                     trypath.extend_from_slice(&filename);
-                    realpath(&trypath)
+                    realpath(req, &trypath)
                 })
             }
-            _ => realpath(&filename),
+            _ => realpath(req, &filename),
         }
     };
     match resolved {

@@ -1036,3 +1036,195 @@ pub(super) fn socketpair(
     }
     Ok((first, second))
 }
+
+// ---------------------------------------------------------------- host facts
+
+// The calls the natives of `basic_functions.c` and its neighbours make
+// for facts only the host has, each one call; each answer is the host's,
+// which a witness pins by shape.
+
+/// `getloadavg(load, 3)`: the three averages, or `None` where the call
+/// answers `-1` (`PHP_FUNCTION(sys_getloadavg)`).
+pub(super) fn loadavg() -> Option<[f64; 3]> {
+    let mut load = [0.0f64; 3];
+    // SAFETY: `load` has room for the three doubles the call is asked for.
+    let got = unsafe { libc::getloadavg(load.as_mut_ptr(), 3) };
+    (got != -1).then_some(load)
+}
+
+/// Whose usage `getrusage` reads, `RUSAGE_SELF` or `RUSAGE_CHILDREN`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Who {
+    Process,
+    Children,
+}
+
+/// `struct rusage`'s fields in the order `PHP_FUNCTION(getrusage)` adds
+/// them (`Z/ext/standard/microtime.c:115-140`), each under its C name.
+pub(super) fn rusage(who: Who) -> Option<[(&'static str, i64); 17]> {
+    let who = match who {
+        Who::Process => libc::RUSAGE_SELF,
+        Who::Children => libc::RUSAGE_CHILDREN,
+    };
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+    // SAFETY: `usage` is room for the one `struct rusage` the call writes.
+    let rc = unsafe { libc::getrusage(who, usage.as_mut_ptr()) };
+    if rc == -1 {
+        return None;
+    }
+    // SAFETY: zeroed storage is a valid `rusage`, and the call succeeded
+    // over it.
+    let u = unsafe { usage.assume_init() };
+    Some([
+        ("ru_oublock", u.ru_oublock),
+        ("ru_inblock", u.ru_inblock),
+        ("ru_msgsnd", u.ru_msgsnd),
+        ("ru_msgrcv", u.ru_msgrcv),
+        ("ru_maxrss", u.ru_maxrss),
+        ("ru_ixrss", u.ru_ixrss),
+        ("ru_idrss", u.ru_idrss),
+        ("ru_minflt", u.ru_minflt),
+        ("ru_majflt", u.ru_majflt),
+        ("ru_nsignals", u.ru_nsignals),
+        ("ru_nvcsw", u.ru_nvcsw),
+        ("ru_nivcsw", u.ru_nivcsw),
+        ("ru_nswap", u.ru_nswap),
+        ("ru_utime.tv_usec", i64::from(u.ru_utime.tv_usec)),
+        ("ru_utime.tv_sec", u.ru_utime.tv_sec),
+        ("ru_stime.tv_usec", i64::from(u.ru_stime.tv_usec)),
+        ("ru_stime.tv_sec", u.ru_stime.tv_sec),
+    ])
+}
+
+/// What `statvfs(path)` says of the filesystem a path is on, as
+/// `php_disk_total_space` and `php_disk_free_space` read it: blocks
+/// counted in `f_frsize`, or `f_bsize` where that is zero.
+pub(super) struct Space {
+    pub(super) total: f64,
+    pub(super) available: f64,
+}
+
+/// `statvfs(3)`: the space, or the `errno` of its failure.
+pub(super) fn statvfs(path: &[u8]) -> Result<Space, i32> {
+    let path = CString::new(path).map_err(|_| libc::ENOENT)?;
+    let mut buf = std::mem::MaybeUninit::<libc::statvfs>::zeroed();
+    // SAFETY: `path` is NUL-terminated and `buf` is room for the one
+    // `struct statvfs` the call writes.
+    let rc = unsafe { libc::statvfs(path.as_ptr(), buf.as_mut_ptr()) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(0));
+    }
+    // SAFETY: zeroed storage is a valid `statvfs`, and the call
+    // succeeded over it.
+    let buf = unsafe { buf.assume_init() };
+    // php's own `(double)` casts, over counts `u32` on one host and
+    // `u64` on another, so the widening is not the same on each.
+    #[allow(clippy::cast_precision_loss)]
+    let double = |n: u64| n as f64;
+    #[allow(clippy::useless_conversion)]
+    let (bsize, frsize) = (u64::from(buf.f_bsize), u64::from(buf.f_frsize));
+    let unit = if buf.f_frsize == 0 {
+        double(bsize)
+    } else {
+        double(frsize)
+    };
+    Ok(Space {
+        total: double(u64::from(buf.f_blocks)) * unit,
+        available: double(u64::from(buf.f_bavail)) * unit,
+    })
+}
+
+/// The login name of `uid`, `getpwuid_r(3)` with its buffer grown while
+/// it is too small, as `php_get_current_user` reads it; `None` where
+/// the host has no entry.
+pub(super) fn user_name(uid: u32) -> Option<Vec<u8>> {
+    let mut buf: Vec<c_char> = vec![0; 1024];
+    loop {
+        let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
+        let mut found: *mut libc::passwd = std::ptr::null_mut();
+        // SAFETY: every pointer is to live storage of the size given, and
+        // the call writes only `entry`, `buf` up to its length and `found`.
+        let err = unsafe {
+            libc::getpwuid_r(
+                uid,
+                entry.as_mut_ptr(),
+                buf.as_mut_ptr(),
+                buf.len(),
+                &raw mut found,
+            )
+        };
+        if err == libc::ERANGE {
+            buf.resize(buf.len() * 2, 0);
+            continue;
+        }
+        if err != 0 || found.is_null() {
+            return None;
+        }
+        // SAFETY: the call returned 0 with `found` set, so it filled
+        // `entry`, whose `pw_name` points into `buf`.
+        let entry = unsafe { entry.assume_init() };
+        // SAFETY: `pw_name` is the NUL-terminated name the call wrote
+        // into `buf`, which lives across this read.
+        let name = unsafe { std::ffi::CStr::from_ptr(entry.pw_name) };
+        return Some(name.to_bytes().to_vec());
+    }
+}
+
+/// `ftok(pathname, proj)`: the key, or the `errno` of its `-1`; `proj`
+/// is a C `char`, signed on the hosts php builds for here.
+pub(super) fn ftok(path: &[u8], proj: u8) -> Result<i64, i32> {
+    let path = CString::new(path).map_err(|_| libc::ENOENT)?;
+    // SAFETY: `path` is NUL-terminated and outlives the call, which reads
+    // it and nothing else.
+    let key = unsafe { libc::ftok(path.as_ptr(), c_int::from(i8::from_ne_bytes([proj]))) };
+    if key == -1 {
+        return Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(0));
+    }
+    Ok(i64::from(key))
+}
+
+/// `inet_ntop(af, address, buffer, 40)` of `PHP_FUNCTION(inet_ntop)`:
+/// four bytes as `AF_INET`, sixteen as `AF_INET6`; `None` where the call
+/// answers `NULL`.
+pub(super) fn inet_text(address: &[u8]) -> Option<Vec<u8>> {
+    let af = match address.len() {
+        4 => libc::AF_INET,
+        16 => libc::AF_INET6,
+        _ => return None,
+    };
+    let mut buffer = [0 as c_char; 40];
+    let size = libc::socklen_t::try_from(buffer.len()).ok()?;
+    // SAFETY: `address` holds the four or sixteen bytes `af` reads, and
+    // `buffer` has room for `size` bytes, the most the call writes.
+    let text = unsafe {
+        inet_ntop(
+            af,
+            address.as_ptr().cast::<c_void>(),
+            buffer.as_mut_ptr(),
+            size,
+        )
+    };
+    if text.is_null() {
+        return None;
+    }
+    // SAFETY: a non-null answer is `buffer`, NUL-terminated by the call.
+    let text = unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr()) };
+    Some(text.to_bytes().to_vec())
+}
+
+/// `inet_pton(af, address, buffer)` of `PHP_FUNCTION(inet_pton)`: the
+/// four or sixteen bytes, `AF_INET6` where the text holds a `:`; `None`
+/// where the call answers zero or less.
+pub(super) fn inet_bytes(address: &[u8], six: bool) -> Option<Vec<u8>> {
+    let text = CString::new(address).ok()?;
+    let (af, len) = if six {
+        (libc::AF_INET6, 16)
+    } else {
+        (libc::AF_INET, 4)
+    };
+    let mut buffer = [0u8; 17];
+    // SAFETY: `text` is NUL-terminated and `buffer` has room for the
+    // sixteen bytes the widest family writes.
+    let rc = unsafe { inet_pton(af, text.as_ptr(), buffer.as_mut_ptr().cast::<c_void>()) };
+    (rc > 0).then(|| buffer[..len].to_vec())
+}

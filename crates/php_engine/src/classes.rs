@@ -517,6 +517,19 @@ pub(crate) fn zend_classes() -> Vec<NativeClassDecl> {
             None,
             None,
         ),
+        // `zend_ce_request_parse_body_exception`, the last class
+        // `zend_register_default_exception` registers, which
+        // `request_parse_body()` throws.
+        (
+            declared(
+                b"RequestParseBodyException",
+                ClassKind::Class,
+                Some(b"Exception"),
+            ),
+            Vec::new(),
+            None,
+            None,
+        ),
         (closure_class(), closure_methods(), Some(&CLOSURE), None),
     ];
     // `zend_register_generator_ce` after `zend_register_closure_ce`.

@@ -618,6 +618,7 @@ fn ini_natives() -> Vec<(FunctionDecl, Entry)> {
             ),
             ini_set as Entry,
         ),
+        (ini_alter_declared(), ini_set as Entry),
         (
             declared(
                 b"set_time_limit",
@@ -2188,6 +2189,21 @@ fn ini_set(req: &mut Request) -> Result<Value, Thrown> {
         Some(previous) => Value::string(PhpString::new(req, &previous)?),
         None => Value::bool(false),
     })
+}
+
+/// `ini_alter`, the stub's `@alias ini_set`: the same entry under a
+/// second name with `ini_set`'s declaration.
+///
+/// ```php
+/// var_dump(ini_alter('precision', 10), ini_get('precision'), ini_alter('nope', 1));
+/// ```
+/// ```expect
+/// string(2) "14"
+/// string(2) "10"
+/// bool(false)
+/// ```
+fn ini_alter_declared() -> FunctionDecl {
+    stub::stub("ini_alter(string $option, string|int|float|bool|null $value): string|false")
 }
 
 /// `set_time_limit(int $seconds): bool`, php's `PHP_FUNCTION(set_time_limit)`

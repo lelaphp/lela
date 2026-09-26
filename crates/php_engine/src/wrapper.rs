@@ -159,11 +159,19 @@ fn host_bytes(path: &[u8]) -> PathBuf {
 }
 
 impl Request {
-    /// `php_clear_stat_cache` (`Z/ext/standard/filestat.c:697`): both
-    /// entries of the stat cache dropped. The realpath cache php also
-    /// clears is not modelled.
+    /// `php_clear_stat_cache(0, NULL, 0)` (`Z/ext/standard/filestat.c:697`):
+    /// both entries of the stat cache dropped.
     pub(crate) fn forget_stats(&mut self) {
         self.stat_cache = StatCache::default();
+    }
+
+    /// `php_clear_stat_cache(1, NULL, 0)`, what the plain files wrapper's
+    /// `unlink`, `rename` and `rmdir` do after they change the tree
+    /// (`Z/main/streams/plain_wrapper.c:1321`, `:1428`, `:1560`): the
+    /// stat cache and the realpath cache emptied.
+    pub(crate) fn forget_stats_and_realpaths(&mut self) {
+        self.forget_stats();
+        self.realpath_cache_clear(None);
     }
 
     /// What `chdir` does to the stat cache (`Z/ext/standard/dir.c:367`):
@@ -387,7 +395,7 @@ impl Request {
         let url = strip_file_scheme(url);
         match std::fs::remove_file(self.plain_host(url)) {
             Ok(()) => {
-                self.forget_stats();
+                self.forget_stats_and_realpaths();
                 true
             }
             Err(error) => {
@@ -471,7 +479,7 @@ impl Request {
         };
         match std::fs::rename(&source, &target) {
             Ok(()) => {
-                self.forget_stats();
+                self.forget_stats_and_realpaths();
                 true
             }
             Err(error) if error.raw_os_error() == Some(EXDEV) => {
@@ -639,7 +647,7 @@ impl Request {
         let url = strip_file_scheme(url);
         match std::fs::remove_dir(self.plain_host(url)) {
             Ok(()) => {
-                self.forget_stats();
+                self.forget_stats_and_realpaths();
                 true
             }
             Err(error) => {

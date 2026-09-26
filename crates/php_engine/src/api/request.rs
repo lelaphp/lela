@@ -10,6 +10,7 @@
 
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
+use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -35,9 +36,13 @@ use crate::api::values::{
     ClassId, ClosureInfo, Key, PhpArray, PhpObject, PhpRef, PhpString, Resource, TypeTag, Value,
     ValueRef,
 };
-use crate::engine::{MethodAt, NativeMethod, RequestDescription, Shared};
+use crate::engine::{
+    Configured, ConfiguredKey, MethodAt, NativeMethod, RequestDescription, Shared,
+};
 use crate::exec::{self, CallStage, CallState, IncludeKind, TableId, Vm};
 use crate::output::Output;
+use crate::virtual_cwd::RealpathCache;
+pub use crate::virtual_cwd::Resolve;
 
 mod hooks;
 mod lazy;
@@ -73,17 +78,32 @@ pub struct HostPath(pub PathBuf);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ExtensionId(pub(crate) u32);
 
-/// One of an extension's ini entries as this request sees it, php's
-/// `zend_ini_entry` read by `_extension_ini_string` and
-/// `ReflectionExtension::getINIEntries`: the declaration with its
-/// `modifiable` bits, the value in force, and the value the entry had
+/// One ini entry as this request sees it, php's `zend_ini_entry` read
+/// by `_extension_ini_string`, `ReflectionExtension::getINIEntries` and
+/// `ini_get_all`: the declaration with its `modifiable` bits, the
+/// extension that registered it (`module_number`), none for the
+/// engine's own table, the value in force, and the value the entry had
 /// before the request changed it, php's `orig_value`, which is `Some`
 /// exactly where php's `modified` is set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IniEntry {
     pub decl: IniDecl,
+    pub extension: Option<ExtensionId>,
     pub value: Box<[u8]>,
     pub original: Option<Box<[u8]>>,
+}
+
+/// One bucket of the realpath cache, `realpath_cache_bucket` as
+/// `realpath_cache_get()` shows it, with the bytes `realpath_cache_size()`
+/// counts it as.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RealpathEntry {
+    pub path: Vec<u8>,
+    pub realpath: Vec<u8>,
+    pub key: u64,
+    pub is_dir: bool,
+    pub expires: i64,
+    pub size: i64,
 }
 
 /// Who a row the request added to `EG(zend_constants)` belongs to,
@@ -1016,6 +1036,9 @@ pub struct Request {
     /// `BG(CurrentStatFile)` and `BG(CurrentLStatFile)`, `php_stat`'s
     /// cache, which the plain files kind clears (design §4.3 seam 5).
     pub(crate) stat_cache: crate::wrapper::StatCache,
+    /// `CWDG(realpath_cache)`, which every absolute path resolved through
+    /// [`Request::virtual_file_ex`] is entered in (`crate::virtual_cwd`).
+    realpath_cache: RealpathCache,
     cwd: PathBuf,
     /// `le_stream`, the resource type every stream is registered under.
     stream_type: ResourceType,
@@ -1350,6 +1373,8 @@ impl Request {
         let mut stack = VmStack::new();
         let _laid = stack.open(&mut heap);
         let mut req = Request {
+            // Read before `shared` moves in, as fields are in the order written.
+            realpath_cache: RealpathCache::startup(&shared),
             shared,
             description,
             heap,
@@ -1423,30 +1448,37 @@ impl Request {
             #[cfg(debug_assertions)]
             dirty: None,
         };
-        if let Some(name) = req
+        req.activate();
+        req
+    }
+
+    /// `php_request_startup` and `zend_activate` over a request just
+    /// laid: the host's constant, each extension's request state, the
+    /// timer, the memory limit, the collector and the error level.
+    fn activate(&mut self) {
+        if let Some(name) = self
             .shared
-            .sapi_constant(req.description.sapi_name.as_bytes())
+            .sapi_constant(self.description.sapi_name.as_bytes())
         {
-            req.sapi_constant = name;
+            self.sapi_constant = name;
         }
         // Request state in bundle order (ADR-0005).
-        for extension in &req.shared.extensions {
+        for extension in &self.shared.extensions {
             if let Some((type_id, build)) = &extension.request_state {
-                req.states.push((*type_id, build()));
+                self.states.push((*type_id, build()));
             }
         }
         // The execution timer, as `zend_set_timeout` arms one at the
         // start of a request (design §5.8), and the memory limit, as
         // `php_request_startup` sets one from the ini.
-        req.arm_timer();
-        req.set_memory_limit();
+        self.arm_timer();
+        self.set_memory_limit();
         // `zend.enable_gc` as the startup ini leaves the collector
         // (`OnUpdateGCEnabled`), and `gc_reset` from `zend_activate`.
-        let enable_gc = ini_truth(req.ini_get(b"zend.enable_gc"));
-        req.heap.gc_startup(enable_gc);
-        req.update_error_reporting();
-        req.stack_limit = req.shared.stack_limit();
-        req
+        let enable_gc = ini_truth(self.ini_get(b"zend.enable_gc"));
+        self.heap.gc_startup(enable_gc);
+        self.update_error_reporting();
+        self.stack_limit = self.shared.stack_limit();
     }
 
     /// The thread's stack limit as request start read it, for the
@@ -11022,9 +11054,14 @@ impl Request {
         }
     }
 
-    /// `header_register_callback()`.
+    /// `header_register_callback()` (`Z/main/SAPI.c:98`): the callable
+    /// held, with the owners `zend_fcc_addref` takes, for
+    /// `sapi_send_headers` to serve once; one held before is given up.
     pub fn set_header_callback(&mut self, callback: Callable) {
-        self.header_callback = Some(callback);
+        callback.addref(self);
+        if let Some(previous) = self.header_callback.replace(callback) {
+            previous.release(self);
+        }
     }
 
     /// `SG(sapi_headers).http_response_code` as it stands: 200 under a
@@ -11228,7 +11265,7 @@ impl Request {
     /// open left, and this engine as a file that is not there. The
     /// `Err` is the last attempt's reason, which the stream warning
     /// prints.
-    pub(crate) fn resolve_path(&self, written: &[u8]) -> Result<Vec<u8>, std::io::Error> {
+    pub(crate) fn resolve_path(&mut self, written: &[u8]) -> Result<Vec<u8>, std::io::Error> {
         let not_found = || std::io::Error::from(std::io::ErrorKind::NotFound);
         if let Some(at) = written.windows(3).position(|w| w == b"://")
             && at > 1
@@ -11273,8 +11310,14 @@ impl Request {
     /// `tsrm_realpath` of a path that is a regular file: the canonical
     /// path, against the request's working directory where the path is
     /// relative.
-    fn realpath_file(&self, path: &[u8]) -> Result<Vec<u8>, std::io::Error> {
-        let real = std::fs::canonicalize(self.absolutize(path).0)?;
+    fn realpath_file(&mut self, path: &[u8]) -> Result<Vec<u8>, std::io::Error> {
+        // `virtual_file_ex` sets `errno = ENOENT` for a path it could not
+        // resolve.
+        const ENOENT: i32 = 2;
+        let real = self
+            .realpath(path)
+            .ok_or_else(|| std::io::Error::from_raw_os_error(ENOENT))?
+            .0;
         if !real.is_file() {
             return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
         }
@@ -11518,6 +11561,18 @@ impl Request {
         }
         for loader in std::mem::take(&mut self.autoloaders) {
             loader.release(self);
+        }
+        // `PHP_RSHUTDOWN(basic)`'s `zend_llist_destroy` of
+        // `BG(user_tick_functions)`, and `SG(callback_func)` where the
+        // header block was never sent.
+        for (callback, arguments) in std::mem::take(&mut self.tick_functions) {
+            callback.release(self);
+            for value in arguments {
+                self.release(value);
+            }
+        }
+        if let Some(callback) = self.header_callback.take() {
+            callback.release(self);
         }
     }
 
@@ -12535,17 +12590,25 @@ impl Request {
         module
             .ini
             .iter()
-            .map(|decl| {
-                let name = decl.name.0.as_ref();
-                let startup = self.shared.ini_default(name).unwrap_or(&decl.default);
-                let changed = self.ini.iter().find(|(n, _)| n.as_slice() == name);
-                IniEntry {
-                    decl: decl.clone(),
-                    value: changed.map_or(startup, |(_, v)| v.as_slice()).into(),
-                    original: changed.map(|_| startup.into()),
-                }
-            })
+            .map(|decl| self.ini_entry(decl.clone(), Some(extension)))
             .collect()
+    }
+
+    /// One entry as the request sees it: the value in force, the
+    /// request's `ini_set` over the engine's startup value, and the
+    /// startup value again as `original` where the request changed it.
+    fn ini_entry(&self, decl: IniDecl, extension: Option<ExtensionId>) -> IniEntry {
+        let name = decl.name.0.as_ref();
+        let startup = self.shared.ini_default(name).unwrap_or(&decl.default);
+        let changed = self.ini.iter().find(|(n, _)| n.as_slice() == name);
+        let value = changed.map_or(startup, |(_, v)| v.as_slice()).into();
+        let original = changed.map(|_| startup.into());
+        IniEntry {
+            decl,
+            extension,
+            value,
+            original,
+        }
     }
 
     /// `php_info_print_module` as the CLI prints it, `phpinfo_as_text`
@@ -12850,7 +12913,7 @@ impl Request {
     /// ```
     pub fn ini_set(&mut self, name: &[u8], value: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
         let previous = self.ini_get(name).map(<[u8]>::to_vec);
-        if previous.is_none() || !Request::ini_modifiable(name) || !self.ini_user(name) {
+        if previous.is_none() || !Request::ini_modifiable(name).0 || !self.ini_user(name) {
             return Ok(None);
         }
         if Request::ini_verdict(name, value) == IniVerdict::Rejected {
@@ -12899,11 +12962,13 @@ impl Request {
             .is_none_or(|decl| decl.user)
     }
 
-    /// Whether an entry's `modifiable` carries `PHP_INI_USER`, what
-    /// `ini_set()` asks: every entry of the table is `PHP_INI_ALL` but
-    /// `xmlrpc_errors`, `sys_temp_dir`, `sendmail_path`, `syslog.facility`,
-    /// `syslog.ident` and `disable_functions`, `PHP_INI_SYSTEM`
-    /// (`Z/main/main.c:806-890`), and
+    /// A core entry's `modifiable` bits as [`IniDecl`] spells them,
+    /// `PHP_INI_USER`, `PHP_INI_PERDIR` and `PHP_INI_SYSTEM`; the first
+    /// is what `ini_set()` asks: every entry of the table is
+    /// `PHP_INI_ALL` but `xmlrpc_errors`, `sys_temp_dir`,
+    /// `sendmail_path`, `syslog.facility`, `syslog.ident`,
+    /// `disable_functions`, `enable_dl` and `extension_dir`,
+    /// `PHP_INI_SYSTEM` (`Z/main/main.c:806-890`), and
     /// `short_open_tag` and the four `mail.*` beside `sendmail_path`,
     /// `PHP_INI_SYSTEM|PHP_INI_PERDIR` (`Z/main/main.c:820-871`).
     ///
@@ -12919,22 +12984,20 @@ impl Request {
     /// bool(true)
     /// int(3)
     /// ```
-    fn ini_modifiable(name: &[u8]) -> bool {
-        !matches!(
-            name,
-            b"xmlrpc_errors"
-                | b"short_open_tag"
-                | b"sys_temp_dir"
-                | b"mail.add_x_header"
-                | b"mail.mixed_lf_and_crlf"
-                | b"mail.cr_lf_mode"
-                | b"mail.log"
-                | b"sendmail_path"
-                | b"mail.force_extra_parameters"
-                | b"syslog.facility"
-                | b"syslog.ident"
-                | b"disable_functions"
-        )
+    fn ini_modifiable(name: &[u8]) -> (bool, bool, bool) {
+        match name {
+            b"xmlrpc_errors" | b"sys_temp_dir" | b"sendmail_path" | b"syslog.facility"
+            | b"syslog.ident" | b"disable_functions" | b"enable_dl" | b"extension_dir" => {
+                (false, false, true)
+            }
+            b"short_open_tag"
+            | b"mail.add_x_header"
+            | b"mail.mixed_lf_and_crlf"
+            | b"mail.cr_lf_mode"
+            | b"mail.log"
+            | b"mail.force_extra_parameters" => (false, true, true),
+            _ => (true, true, true),
+        }
     }
 
     /// What a core entry's `on_modify` says of a new value before
@@ -12977,18 +13040,70 @@ impl Request {
         }
     }
 
-    /// `ini_get_all()`: every entry with its current value, as strings
-    /// of the request's.
-    pub fn ini_entries(&mut self) -> Result<PhpArray, Thrown> {
-        let mut array = PhpArray::new(self)?;
-        let shared = Arc::clone(&self.shared);
-        for (name, default) in shared.ini_defaults() {
-            let value = self.ini_get(name).unwrap_or(default).to_vec();
-            let key = Key::Str(PhpString::new(self, name)?);
-            let value = Value::string(PhpString::new(self, &value)?);
-            array.set(self, key, value)?;
-        }
-        Ok(array)
+    /// `EG(ini_directives)`, what `ini_get_all()` walks: the engine's
+    /// own entries, registered with `module_number` zero before any
+    /// `MINIT`, then each extension's in bundle order, each as
+    /// [`Request::extension_ini`] reads one. A core entry's `modifiable`
+    /// bits are the table's ([`Request::ini_modifiable`]).
+    ///
+    /// ```php
+    /// ini_set('precision', '10');
+    /// var_dump(ini_get_all(null)['precision'], ini_get_all(null)['enable_dl'], ini_get_all('pcre', false));
+    /// ```
+    /// ```expect
+    /// array(3) {
+    ///   ["global_value"]=>
+    ///   string(2) "14"
+    ///   ["local_value"]=>
+    ///   string(2) "10"
+    ///   ["access"]=>
+    ///   int(7)
+    /// }
+    /// array(3) {
+    ///   ["global_value"]=>
+    ///   string(1) "1"
+    ///   ["local_value"]=>
+    ///   string(1) "1"
+    ///   ["access"]=>
+    ///   int(4)
+    /// }
+    /// array(3) {
+    ///   ["pcre.backtrack_limit"]=>
+    ///   string(7) "1000000"
+    ///   ["pcre.jit"]=>
+    ///   string(1) "1"
+    ///   ["pcre.recursion_limit"]=>
+    ///   string(6) "100000"
+    /// }
+    /// ```
+    #[must_use]
+    pub fn ini_entries(&self) -> Vec<IniEntry> {
+        let owned = |name: &[u8]| {
+            self.shared
+                .extensions
+                .iter()
+                .any(|e| e.ini.iter().any(|entry| entry.name.0.as_ref() == name))
+        };
+        let core = self
+            .shared
+            .ini_defaults()
+            .iter()
+            .filter(|(name, _)| !owned(name))
+            .map(|(name, default)| {
+                let (user, per_dir, system) = Request::ini_modifiable(name);
+                let decl = IniDecl {
+                    name: Name(name.as_slice().into()),
+                    default: default.as_slice().into(),
+                    user,
+                    per_dir,
+                    system,
+                };
+                self.ini_entry(decl, None)
+            });
+        let extensions = (0..self.shared.extensions.len())
+            .filter_map(|at| u32::try_from(at).ok())
+            .flat_map(|at| self.extension_ini(ExtensionId(at)));
+        core.chain(extensions).collect()
     }
 
     /// `zend_ini_parse_bool`: `1`, `on`, `yes`, `true` are true.
@@ -13002,20 +13117,93 @@ impl Request {
                     .is_ok_and(|n| n != 0)
     }
 
-    /// `zend_ini_parse_quantity`: a byte count with an optional `K`, `M`
-    /// or `G` suffix; `-1` and other text parse as php's `atoi` would.
+    /// `cfg_get_entry` as `get_cfg_var()` hands it back
+    /// (`Z/ext/standard/basic_functions.c:1306`): the row of
+    /// `configuration_hash` under `name`, what the host's ini text set
+    /// before any entry read it, a string or the array its `name[]=`
+    /// lines built, as strings of the request's; `None` where the text
+    /// set nothing under the name, a default no text named included.
+    ///
+    /// ```php
+    /// var_dump(get_cfg_var('precision'), get_cfg_var('highlight.string'), get_cfg_var('nope'));
+    /// ```
+    /// ```expect
+    /// string(2) "14"
+    /// bool(false)
+    /// bool(false)
+    /// ```
+    pub fn cfg_entry(&mut self, name: &[u8]) -> Result<Option<Value>, Thrown> {
+        let shared = Arc::clone(&self.shared);
+        let Some(entry) = shared.configured(name) else {
+            return Ok(None);
+        };
+        Ok(Some(match entry {
+            Configured::Str(bytes) => Value::string(PhpString::new(self, bytes)?),
+            Configured::Array(rows) => {
+                let mut array = PhpArray::new(self)?;
+                for (key, bytes) in rows {
+                    let key = match key {
+                        ConfiguredKey::Index(n) => Key::Int(*n),
+                        ConfiguredKey::Name(name) => Key::Str(PhpString::new(self, name)?),
+                    };
+                    let value = Value::string(PhpString::new(self, bytes)?);
+                    array.set(self, key, value)?;
+                }
+                Value::array(array)
+            }
+        }))
+    }
+
+    /// `zend_ini_parse_quantity`'s value alone, what `OnUpdateLong`
+    /// stores for a whole-number entry: [`Request::ini_parse_quantity`]
+    /// with the sentence it would say left unsaid.
     #[must_use]
     pub fn ini_parse_bytes(value: &[u8]) -> i64 {
-        let text = String::from_utf8_lossy(value);
-        let text = text.trim();
-        let (digits, shift) = match text.chars().last().map(|c| c.to_ascii_lowercase()) {
-            Some('k') => (&text[..text.len() - 1], 10),
-            Some('m') => (&text[..text.len() - 1], 20),
-            Some('g') => (&text[..text.len() - 1], 30),
-            _ => (text, 0),
-        };
-        let n: i64 = digits.trim().parse().unwrap_or(0);
-        n.checked_shl(shift).unwrap_or(i64::MAX)
+        crate::ini_quantity::parse(value).0
+    }
+
+    /// `zend_ini_parse_quantity` (`Z/Zend/zend_ini.c:613-841`): leading
+    /// and trailing whitespace ignored, an optional sign, a base prefix
+    /// (`0x`, `0o`, `0b`) or `strtoull`'s own reading under base zero,
+    /// where a leading `0` is octal, whitespace, and an optional `K`,
+    /// `M` or `G` read off the last byte; with the value, the sentence
+    /// php's `errstr` holds for a shape it interprets for backwards
+    /// compatibility, which `ini_parse_quantity()` raises as a warning
+    /// and an entry's `on_modify` as its own.
+    ///
+    /// ```php
+    /// foreach (['1M', ' 2k ', '0x10', '010', '0b101', '-0x0B', '', '1.5M', 'abc', '0x', '0z1', '5 KB', '99999999999999999999'] as $q) var_dump(ini_parse_quantity($q));
+    /// ```
+    /// ```expect
+    /// int(1048576)
+    /// int(2048)
+    /// int(16)
+    /// int(8)
+    /// int(5)
+    /// int(-11)
+    /// int(0)
+    ///
+    /// Warning: Invalid quantity "1.5M", interpreting as "1M" for backwards compatibility in %s on line 2
+    /// int(1048576)
+    ///
+    /// Warning: Invalid quantity "abc": no valid leading digits, interpreting as "0" for backwards compatibility in %s on line 2
+    /// int(0)
+    ///
+    /// Warning: Invalid quantity "0x": no digits after base prefix, interpreting as "0" for backwards compatibility in %s on line 2
+    /// int(0)
+    ///
+    /// Warning: Invalid prefix "0z", interpreting as "0" for backwards compatibility in %s on line 2
+    /// int(0)
+    ///
+    /// Warning: Invalid quantity "5 KB": unknown multiplier "B", interpreting as "5 " for backwards compatibility in %s on line 2
+    /// int(5)
+    ///
+    /// Warning: Invalid quantity "99999999999999999999": value is out of range, using overflow result for backwards compatibility in %s on line 2
+    /// int(-1)
+    /// ```
+    #[must_use]
+    pub fn ini_parse_quantity(value: &[u8]) -> (i64, Option<String>) {
+        crate::ini_quantity::parse(value)
     }
 
     // -------------------------------------------------- environment
@@ -13064,6 +13252,16 @@ impl Request {
     #[must_use]
     pub fn sapi_name(&self) -> &str {
         &self.description.sapi_name
+    }
+
+    /// The host's `argv`, `php_self` first: what `php_build_argv` puts in
+    /// `$_SERVER['argv']` (`Z/main/php_variables.c:657-713`), which a
+    /// write to `$_SERVER` from PHP code leaves as it was, and which
+    /// `getopt` reads; empty for a host that described none, php's web
+    /// hosts.
+    #[must_use]
+    pub fn argv(&self) -> &[Vec<u8>] {
+        &self.description.argv
     }
 
     /// The file the request serves, `$_SERVER['SCRIPT_NAME']`.
@@ -13188,17 +13386,31 @@ impl Request {
         }
     }
 
-    /// `register_tick_function()`.
+    /// `register_tick_function()`: the callable and its arguments held,
+    /// with the owners `zend_fcc_addref` and `ZVAL_COPY` take, in
+    /// `BG(user_tick_functions)`.
     pub fn register_tick_function(&mut self, callback: Callable, arguments: Vec<Value>) -> bool {
+        callback.addref(self);
+        for value in &arguments {
+            self.addref(value);
+        }
         self.tick_functions.push((callback, arguments));
         true
     }
 
-    /// `unregister_tick_function()`.
+    /// `unregister_tick_function()`: `zend_llist_del_element`, the first
+    /// entry for the same callee, scope and object dropped and its
+    /// owners given up.
     pub fn unregister_tick_function(&mut self, callback: &Callable) -> bool {
-        let before = self.tick_functions.len();
-        self.tick_functions.retain(|(c, _)| c != callback);
-        self.tick_functions.len() != before
+        let Some(at) = self.tick_functions.iter().position(|(c, _)| c == callback) else {
+            return false;
+        };
+        let (held, arguments) = self.tick_functions.remove(at);
+        held.release(self);
+        for value in arguments {
+            self.release(value);
+        }
+        true
     }
 
     // -------------------------------------------------- memory and gc
@@ -13609,12 +13821,70 @@ impl Request {
         }
     }
 
-    /// `realpath()`: `None` where the path does not exist.
+    /// `VCWD_REALPATH`, `tsrm_realpath`: the path against the request's
+    /// working directory with every link resolved, through the realpath
+    /// cache; `None` where the path does not exist.
+    pub fn realpath(&mut self, path: &[u8]) -> Option<HostPath> {
+        let cwd = self.cwd.as_os_str().as_encoded_bytes().to_vec();
+        let real = self.virtual_file_ex(&cwd, path, Resolve::RealPath)?;
+        Some(HostPath(PathBuf::from(std::ffi::OsStr::from_bytes(&real))))
+    }
+
+    /// `virtual_file_ex(state, path, NULL, how)` (`Z/Zend/zend_virtual_cwd.c:1007`)
+    /// with `state` the directory `cwd`: `path` made absolute against it
+    /// where it is relative (and left relative where `cwd` is empty),
+    /// `.` and `..` taken out, and under [`Resolve::FilePath`] and
+    /// [`Resolve::RealPath`] each link resolved, `tsrm_realpath_r`, every
+    /// absolute path met entered in and read from the realpath cache;
+    /// `None` where php answers `1`, an empty path, one of `MAXPATHLEN`
+    /// bytes or more, and under `RealPath` one that is not there.
+    ///
+    /// ```php
+    /// $dir = dirname(realpath(__FILE__));
+    /// var_dump(realpath_cache_size() > 0, isset(realpath_cache_get()[$dir]), realpath_cache_get()[$dir]['is_dir'], realpath_cache_get()[$dir]['realpath'] === realpath($dir));
+    /// clearstatcache(true, $dir); var_dump(isset(realpath_cache_get()[$dir]));
+    /// clearstatcache(true); var_dump(realpath_cache_size(), realpath_cache_get());
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// int(0)
+    /// array(0) {
+    /// }
+    /// ```
+    pub fn virtual_file_ex(&mut self, cwd: &[u8], path: &[u8], how: Resolve) -> Option<Vec<u8>> {
+        crate::virtual_cwd::virtual_file_ex(&mut self.realpath_cache, cwd, path, how)
+    }
+
+    /// `CWDG(realpath_cache)` as `realpath_cache_get()` walks it, slot by
+    /// slot and each chain newest first: each bucket's path as it was
+    /// written, what it resolved to, its key, whether it is a directory,
+    /// when it expires, and the bytes `realpath_cache_size()` counts it as.
     #[must_use]
-    pub fn realpath(&self, path: &[u8]) -> Option<HostPath> {
-        std::fs::canonicalize(self.absolutize(path).0)
-            .ok()
-            .map(HostPath)
+    pub fn realpath_cache(&self) -> Vec<RealpathEntry> {
+        self.realpath_cache
+            .buckets()
+            .map(|bucket| RealpathEntry {
+                path: bucket.path.clone(),
+                realpath: bucket.realpath.clone(),
+                key: bucket.key,
+                is_dir: bucket.is_dir,
+                expires: bucket.expires,
+                size: bucket.size(),
+            })
+            .collect()
+    }
+
+    /// `clearstatcache(true, ...)`'s half: `realpath_cache_del` of one
+    /// path, or with none `realpath_cache_clean`.
+    pub fn realpath_cache_clear(&mut self, path: Option<&[u8]>) {
+        match path {
+            Some(path) => self.realpath_cache.delete(path),
+            None => self.realpath_cache.clean(),
+        }
     }
 
     /// The `open_basedir` guard Mahout's `check_fs_access` performed at
@@ -13683,6 +13953,31 @@ impl Request {
         use_include_path: bool,
     ) -> Result<Option<Stream>, Thrown> {
         self.open_stream_wrapper(path, mode, use_include_path)
+    }
+
+    /// `php_stream_open_wrapper_ex(url, mode, REPORT_ERRORS |
+    /// STREAM_USE_URL)`, what `get_headers()` opens: [`Request::open_stream`]
+    /// for a path whose wrapper is a URL wrapper, and for any other php's
+    /// warning that the function may only be used against URLs, and
+    /// `None`.
+    ///
+    /// ```php
+    /// var_dump(get_headers(__FILE__), get_headers("php://memory"), get_headers("foo://x"));
+    /// ```
+    /// ```expect
+    /// Warning: get_headers(): This function may only be used against URLs in %s on line 2
+    ///
+    /// Warning: get_headers(): This function may only be used against URLs in %s on line 2
+    ///
+    /// Warning: get_headers(): Unable to find the wrapper "foo" - did you forget to enable it when you configured PHP? in %s on line 2
+    ///
+    /// Warning: get_headers(): This function may only be used against URLs in %s on line 2
+    /// bool(false)
+    /// bool(false)
+    /// bool(false)
+    /// ```
+    pub fn open_url(&mut self, url: &[u8], mode: &[u8]) -> Result<Option<Stream>, Thrown> {
+        self.open_url_wrapper(url, mode)
     }
 
     /// `php_stream_alloc(ops, abstract, 0, mode)`: a stream of a kind the
