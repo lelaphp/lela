@@ -40,16 +40,60 @@ const INT_MASK: i64 = 0xFFFF_0000;
 const CLONE_MASK: i64 = 0x0100_FFFF;
 
 /// php's `spl_array_object` beside the `std` object: the storage, the
-/// flags, the position, the class `getIterator()` makes and the count
-/// of sorts under way (`nApplyCount`).
+/// flags a user sets, the position, the class `getIterator()` makes and
+/// the count of sorts under way (`nApplyCount`).
 #[derive(Default, Clone, Copy)]
 pub(crate) struct SplArray {
-    array: Option<PhpArray>,
-    backing: Option<PhpObject>,
+    storage: Storage,
+    /// `ar_flags` less `SPL_ARRAY_IS_SELF` and `SPL_ARRAY_USE_OTHER`,
+    /// which the storage is.
     flags: i64,
     pos: u32,
     iterator_class: Option<ClassId>,
     sorting: u32,
+}
+
+/// What `intern->array` is, with the two bits php reads it by
+/// (`SPL_ARRAY_IS_SELF`, `SPL_ARRAY_USE_OTHER`) folded in, decoded
+/// once: each handler matches it, and no bit is tested beside it.
+#[derive(Default, Clone, Copy)]
+enum Storage {
+    /// Nothing written yet: php's `array_init` in
+    /// `spl_array_object_new_ex`, laid down as [`Storage::Array`] on the
+    /// first touch.
+    #[default]
+    Fresh,
+    /// An array the object holds, one owner of it, shared copy-on-write
+    /// with whoever else holds it.
+    Array(PhpArray),
+    /// `SPL_ARRAY_USE_OTHER`: another `ArrayObject` or `ArrayIterator`
+    /// read through, one owner of it; what `getIterator()` hands out.
+    Other(PhpObject),
+    /// Another object's property table, one owner of the object.
+    Object(PhpObject),
+    /// `SPL_ARRAY_IS_SELF`: this object's own property table, no owner
+    /// taken.
+    OwnProps,
+}
+
+impl Storage {
+    /// `ar_flags`' two storage bits, as `serialize` writes them.
+    const fn bits(self) -> i64 {
+        match self {
+            Storage::OwnProps => IS_SELF,
+            Storage::Other(_) => USE_OTHER,
+            Storage::Fresh | Storage::Array(_) | Storage::Object(_) => 0,
+        }
+    }
+
+    /// What the storage holds of the heap, one owner, as a value.
+    fn held(self) -> Option<Value> {
+        match self {
+            Storage::Array(array) => Some(Value::array(array)),
+            Storage::Other(object) | Storage::Object(object) => Some(object.as_value()),
+            Storage::Fresh | Storage::OwnProps => None,
+        }
+    }
 }
 
 /// `spl_handler_ArrayObject`.
@@ -237,28 +281,17 @@ enum Table {
 fn table(req: &mut Request, object: PhpObject) -> Result<Table, Thrown> {
     let mut at = object;
     for _ in 0..64 {
-        let (flags, array, backing) = {
-            let p = payload(req, at)?;
-            (p.flags, p.array, p.backing)
-        };
-        if flags & IS_SELF != 0 {
-            return Ok(Table::Props(at));
-        }
-        if let Some(backing) = backing {
-            if flags & USE_OTHER != 0 && backing.native::<SplArray>(req).is_some() {
-                at = backing;
-                continue;
+        match payload(req, at)?.storage {
+            Storage::OwnProps => return Ok(Table::Props(at)),
+            Storage::Object(backing) => return Ok(Table::Props(backing)),
+            Storage::Other(backing) => at = backing,
+            Storage::Array(array) => return Ok(Table::Array(at, array)),
+            Storage::Fresh => {
+                let array = PhpArray::new(req)?;
+                with(req, at, |p| p.storage = Storage::Array(array))?;
+                return Ok(Table::Array(at, array));
             }
-            return Ok(Table::Props(backing));
         }
-        let array = if let Some(array) = array {
-            array
-        } else {
-            let array = PhpArray::new(req)?;
-            with(req, at, |p| p.array = Some(array))?;
-            array
-        };
-        return Ok(Table::Array(at, array));
     }
     Err(php_ext::raising::fatal(
         req,
@@ -274,7 +307,7 @@ fn is_object(req: &mut Request, object: PhpObject) -> Result<bool, Thrown> {
 /// The array written back to the object that holds it, after a write
 /// that may have separated it.
 fn store(req: &mut Request, owner: PhpObject, array: PhpArray) -> Result<(), Thrown> {
-    with(req, owner, |p| p.array = Some(array))?;
+    with(req, owner, |p| p.storage = Storage::Array(array))?;
     Ok(())
 }
 
@@ -536,9 +569,16 @@ fn has(
     Ok(answer)
 }
 
-/// The flags, less the internal ones.
+/// The flags a user sets, the storage bits left out.
 fn flags(req: &mut Request, object: PhpObject) -> Result<i64, Thrown> {
     Ok(payload(req, object)?.flags)
+}
+
+/// php's whole `ar_flags`: the flags with the storage's two bits, what
+/// `serialize` and `__serialize` write.
+fn ar_flags(req: &mut Request, object: PhpObject) -> Result<i64, Thrown> {
+    let p = payload(req, object)?;
+    Ok(p.flags | p.storage.bits())
 }
 
 /// Whether the property `name` stands on the object as `std` sees it,
@@ -552,25 +592,18 @@ impl ObjectHandlers for Handlers {
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         let held = object
             .native_mut::<SplArray>(req)
-            .map(|p| (p.array.take(), p.backing.take()));
-        if let Some((array, backing)) = held {
-            if let Some(array) = array {
-                req.release(Value::array(array));
-            }
-            if let Some(backing) = backing {
-                req.release(backing.as_value());
-            }
+            .and_then(|p| std::mem::take(&mut p.storage).held());
+        if let Some(held) = held {
+            req.release(held);
         }
     }
 
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
-        if let Some(p) = object.native::<SplArray>(req) {
-            if let Some(array) = p.array {
-                visit(Value::array(array));
-            }
-            if let Some(backing) = p.backing {
-                visit(backing.as_value());
-            }
+        if let Some(held) = object
+            .native::<SplArray>(req)
+            .and_then(|p| p.storage.held())
+        {
+            visit(held);
         }
     }
 
@@ -776,21 +809,15 @@ fn spl_array_debug_info(req: &mut Request, object: PhpObject) -> Result<PhpArray
         req.addref(&value);
         out.set(req, Key::Str(name), value)?;
     }
-    let (flags, array, backing) = {
-        let p = payload(req, object)?;
-        (p.flags, p.array, p.backing)
-    };
-    if flags & IS_SELF != 0 {
-        return Ok(out);
-    }
-    let storage = match (backing, array) {
-        (Some(backing), _) => backing.as_value(),
-        (None, Some(array)) => Value::array(array),
-        (None, None) => {
+    let storage = match payload(req, object)?.storage {
+        Storage::OwnProps => return Ok(out),
+        Storage::Fresh => {
             let array = PhpArray::new(req)?;
-            with(req, object, |p| p.array = Some(array))?;
+            with(req, object, |p| p.storage = Storage::Array(array))?;
             Value::array(array)
         }
+        Storage::Array(array) => Value::array(array),
+        Storage::Other(backing) | Storage::Object(backing) => backing.as_value(),
     };
     req.addref(&storage);
     let base: &[u8] = if crate::is_a(req, object.class(), b"ArrayIterator") {
@@ -808,24 +835,26 @@ fn spl_array_debug_info(req: &mut Request, object: PhpObject) -> Result<PhpArray
 /// an `ArrayObject` a copy of the table, an `ArrayIterator` reading
 /// through the object it was cloned from.
 fn clone_array(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
-    let (flags, iterator_class) = {
+    let (flags, iterator_class, storage) = {
         let p = payload(req, object)?;
-        (p.flags, p.iterator_class)
+        (p.flags, p.iterator_class, p.storage)
     };
-    let mut copy = SplArray {
+    let storage = match storage {
+        Storage::OwnProps => Storage::OwnProps,
+        _ if crate::is_a(req, object.class(), b"ArrayObject") => {
+            Storage::Array(table(req, object)?.copy(req)?)
+        }
+        _ => {
+            req.addref(&object.as_value());
+            Storage::Other(object)
+        }
+    };
+    let copy = SplArray {
+        storage,
         flags: flags & CLONE_MASK,
         iterator_class,
         ..SplArray::default()
     };
-    if flags & IS_SELF == 0 {
-        if crate::is_a(req, object.class(), b"ArrayObject") {
-            copy.array = Some(table(req, object)?.copy(req)?);
-        } else {
-            req.addref(&object.as_value());
-            copy.backing = Some(object);
-            copy.flags |= USE_OTHER;
-        }
-    }
     clone_with(req, &object, copy)
 }
 
@@ -842,9 +871,9 @@ fn set_array(
 ) -> Result<(), Thrown> {
     sorting_refused(req, object)?;
     let given = given.deref();
-    let (array, backing) = if let Some(array) = given.as_array() {
+    let storage = if let Some(array) = given.as_array() {
         req.addref(&given);
-        (Some(*array), None)
+        Storage::Array(*array)
     } else if let Some(other) = given.as_object().copied() {
         let what = if crate::is_a(req, object.class(), b"ArrayIterator") {
             "ArrayIterator"
@@ -863,12 +892,10 @@ fn set_array(
                 flags = payload(req, other)?.flags & !INT_MASK;
             }
             if other == object {
-                flags |= IS_SELF;
-                (None, None)
+                Storage::OwnProps
             } else {
-                flags |= USE_OTHER;
                 req.addref(&given);
-                (None, Some(other))
+                Storage::Other(other)
             }
         } else {
             if crate::is_a(req, other.class(), b"UnitEnum") {
@@ -881,24 +908,18 @@ fn set_array(
                 ));
             }
             req.addref(&given);
-            (None, Some(other))
+            Storage::Object(other)
         }
     } else {
         return Ok(());
     };
-    let (old_array, old_backing) = with(req, object, |p| {
-        let old = (p.array.take(), p.backing.take());
-        p.array = array;
-        p.backing = backing;
-        p.flags = (p.flags & !IS_SELF & !USE_OTHER) | flags;
+    let old = with(req, object, |p| {
+        p.flags |= flags;
         p.pos = 0;
-        old
+        std::mem::replace(&mut p.storage, storage)
     })?;
-    if let Some(old) = old_array {
-        req.release(Value::array(old));
-    }
-    if let Some(old) = old_backing {
-        req.release(old.as_value());
+    if let Some(old) = old.held() {
+        req.release(old);
     }
     Ok(())
 }
@@ -1255,9 +1276,11 @@ fn sort_through(req: &mut Request, native: &[u8], extra: Option<Value>) -> Resul
     let sorted = cell.separate_array(req)?;
     if let Some(sorted) = sorted {
         req.addref(&Value::array(sorted));
-        let old = with(req, owner, |p| p.array.replace(sorted))?;
-        if let Some(old) = old {
-            req.release(Value::array(old));
+        let old = with(req, owner, |p| {
+            std::mem::replace(&mut p.storage, Storage::Array(sorted))
+        })?;
+        if let Some(old) = old.held() {
+            req.release(old);
         }
     }
     req.release(cell.as_value());
@@ -1314,14 +1337,10 @@ fn natcasesort(req: &mut Request) -> Result<Value, Thrown> {
 /// The storage as `serialize` and `__serialize` write it: the array or
 /// the object read through, one more owner.
 fn storage(req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
-    let (array, backing) = {
-        let p = payload(req, object)?;
-        (p.array, p.backing)
-    };
-    let value = match (backing, array) {
-        (Some(backing), _) => backing.as_value(),
-        (None, Some(array)) => Value::array(array),
-        (None, None) => Value::array(PhpArray::new(req)?),
+    let value = match payload(req, object)?.storage {
+        Storage::Other(backing) | Storage::Object(backing) => backing.as_value(),
+        Storage::Array(array) => Value::array(array),
+        Storage::Fresh | Storage::OwnProps => Value::array(PhpArray::new(req)?),
     };
     req.addref(&value);
     Ok(value)
@@ -1333,7 +1352,7 @@ fn storage(req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
 fn serialize(req: &mut Request) -> Result<Value, Thrown> {
     crate::arity(req, 0, 0)?;
     let this = crate::this(req)?;
-    let flags = flags(req, this)? & CLONE_MASK;
+    let flags = ar_flags(req, this)? & CLONE_MASK;
     let mut out = b"x:".to_vec();
     out.extend(crate::serialized(req, Value::int(flags))?);
     if flags & IS_SELF == 0 {
@@ -1381,9 +1400,7 @@ fn unserialize(req: &mut Request) -> Result<Value, Thrown> {
         return refuse(req, 2);
     };
     let mut at = end;
-    with(req, this, |p| {
-        p.flags = (p.flags & !CLONE_MASK) | (flags & CLONE_MASK);
-    })?;
+    set_flags_and_self(req, this, flags)?;
     if flags & IS_SELF == 0 {
         let Some(end) = crate::serialized_end(&data, at) else {
             return refuse(req, at);
@@ -1437,10 +1454,8 @@ fn unserialize(req: &mut Request) -> Result<Value, Thrown> {
 fn magic_serialize(req: &mut Request) -> Result<Value, Thrown> {
     crate::arity(req, 0, 0)?;
     let this = crate::this(req)?;
-    let (flags, iterator_class) = {
-        let p = payload(req, this)?;
-        (p.flags, p.iterator_class)
-    };
+    let flags = ar_flags(req, this)?;
+    let iterator_class = payload(req, this)?.iterator_class;
     let mut out = PhpArray::new(req)?;
     out.append(req, Value::int(flags & CLONE_MASK))?;
     let stored = if flags & IS_SELF != 0 {
@@ -1460,6 +1475,22 @@ fn magic_serialize(req: &mut Request) -> Result<Value, Thrown> {
     };
     out.append(req, class)?;
     Ok(Value::array(out))
+}
+
+/// The flags an unserialization read, `ar_flags &= ~SPL_ARRAY_CLONE_MASK;
+/// ar_flags |= flags & SPL_ARRAY_CLONE_MASK`: the user's bits written,
+/// and `SPL_ARRAY_IS_SELF` among them made the storage, whatever the
+/// object held before given up.
+fn set_flags_and_self(req: &mut Request, object: PhpObject, flags: i64) -> Result<(), Thrown> {
+    let own = flags & IS_SELF != 0;
+    let old = with(req, object, |p| {
+        p.flags = (p.flags & !CLONE_MASK) | (flags & CLONE_MASK & !IS_SELF);
+        own.then(|| std::mem::replace(&mut p.storage, Storage::OwnProps))
+    })?;
+    if let Some(old) = old.and_then(Storage::held) {
+        req.release(old);
+    }
+    Ok(())
 }
 
 fn is_array_iterator(req: &mut Request, class: ClassId) -> bool {
@@ -1508,9 +1539,7 @@ fn magic_unserialize(req: &mut Request) -> Result<Value, Thrown> {
             "Incomplete or ill-typed serialization data",
         ));
     }
-    with(req, this, |p| {
-        p.flags = (p.flags & !CLONE_MASK) | (flags & CLONE_MASK);
-    })?;
+    set_flags_and_self(req, this, flags)?;
     if flags & IS_SELF == 0 {
         if stored.as_array().is_none() && stored.as_object().is_none() {
             return Err(throw(
@@ -1601,11 +1630,14 @@ fn get_iterator(req: &mut Request) -> Result<Value, Thrown> {
     };
     let iterator = php_ext::call::new_object(req, class)?;
     req.addref(&this.as_value());
-    with(req, iterator, |p| {
-        p.flags = (flags & CLONE_MASK) | USE_OTHER;
-        p.backing = Some(this);
+    let old = with(req, iterator, |p| {
+        p.flags = flags & CLONE_MASK;
         p.iterator_class = None;
+        std::mem::replace(&mut p.storage, Storage::Other(this))
     })?;
+    if let Some(old) = old.held() {
+        req.release(old);
+    }
     Ok(iterator.as_value())
 }
 
