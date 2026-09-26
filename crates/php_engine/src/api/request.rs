@@ -13119,10 +13119,17 @@ impl Request {
         std::mem::replace(&mut self.umask, mask)
     }
 
-    /// `strerror` text for an OS error code, as php's `%s` of it.
+    /// `strerror` text for an OS error code, as php's `%s` of it: the
+    /// system's sentence alone, without the ` (os error N)` Rust's
+    /// rendering of an OS error puts after it.
     #[must_use]
     pub fn os_error_text(&self, code: i32) -> String {
-        std::io::Error::from_raw_os_error(code).to_string()
+        let text = std::io::Error::from_raw_os_error(code).to_string();
+        let suffix = format!(" (os error {code})");
+        match text.strip_suffix(&suffix) {
+            Some(sentence) => sentence.to_owned(),
+            None => text,
+        }
     }
 
     /// `parse_str()`: a query string as an array, its strings the
@@ -14298,6 +14305,18 @@ mod tests {
 
         assert_eq!(String::from_utf8_lossy(&served.stdout), "d\nafter\n");
         assert_eq!(served.fatal, None);
+    }
+
+    /// `strerror(ENOENT)` is the sentence alone, which php prints inside
+    /// `open(%s, O_RDWR) failed: %s (%d)` and every message like it.
+    #[test]
+    fn os_error_text_is_strerror() {
+        let engine = Engine::builder().build();
+        let req = Request::new(
+            std::sync::Arc::clone(&engine.shared),
+            RequestDescription::default(),
+        );
+        assert_eq!(req.os_error_text(2), "No such file or directory");
     }
 
     /// An extension entry's `on_modify` (`PHP_INI_MH` at
