@@ -1023,7 +1023,11 @@ pub struct Request {
     /// `EG(user_exception_handlers)`, the same shape without a mask.
     exception_handler: Option<Callable>,
     exception_handlers: Vec<Option<Callable>>,
-    shutdown_functions: Vec<(Callable, Vec<Value>)>,
+    /// `BG(user_shutdown_function_names)`: each entry's callback and
+    /// arguments, under the name `register_user_shutdown_function` gave
+    /// it, or none for one `register_shutdown_function()` appended at the
+    /// next index.
+    shutdown_functions: Vec<(Option<Vec<u8>>, Callable, Vec<Value>)>,
     tick_functions: Vec<(Callable, Vec<Value>)>,
     autoloaders: Vec<Callable>,
     /// `EG(in_autoload)`: the lowered names an autoloader is loading.
@@ -13311,7 +13315,42 @@ impl Request {
     /// callback and the arguments are the entry's owners from here,
     /// given up by [`Request::free_shutdown_functions`].
     pub fn register_shutdown_function(&mut self, callback: Callable, arguments: Vec<Value>) {
-        self.shutdown_functions.push((callback, arguments));
+        self.shutdown_functions.push((None, callback, arguments));
+    }
+
+    /// `register_user_shutdown_function` and
+    /// `remove_user_shutdown_function` (`Z/ext/standard/basic_functions.c`),
+    /// the entry an extension keeps under a name of its own: `Some`
+    /// replaces the entry of that name where it stands, which
+    /// `zend_hash_str_update_mem` keeps in its place, or appends one;
+    /// `None` removes it. The owners are the list's as
+    /// [`Request::register_shutdown_function`]'s, and what an entry held
+    /// is given up where it goes. The session's `session_shutdown` is the
+    /// witness, in `ext/session`.
+    pub fn set_shutdown_function(&mut self, name: &[u8], entry: Option<(Callable, Vec<Value>)>) {
+        let at = self
+            .shutdown_functions
+            .iter()
+            .position(|(key, _, _)| key.as_deref() == Some(name));
+        let old = match (at, entry) {
+            (Some(at), Some((callback, arguments))) => Some(std::mem::replace(
+                &mut self.shutdown_functions[at],
+                (Some(name.to_vec()), callback, arguments),
+            )),
+            (Some(at), None) => Some(self.shutdown_functions.remove(at)),
+            (None, Some((callback, arguments))) => {
+                self.shutdown_functions
+                    .push((Some(name.to_vec()), callback, arguments));
+                None
+            }
+            (None, None) => None,
+        };
+        if let Some((_, callback, arguments)) = old {
+            callback.release(self);
+            for value in arguments {
+                self.release(value);
+            }
+        }
     }
 
     /// The registered entry at `at`, as `zend_hash_apply` reaches it:
@@ -13320,7 +13359,9 @@ impl Request {
     /// while it runs is reached by the same walk. `None` past the end
     /// is what ends it.
     pub(crate) fn shutdown_function(&self, at: usize) -> Option<(Callable, Vec<Value>)> {
-        self.shutdown_functions.get(at).cloned()
+        self.shutdown_functions
+            .get(at)
+            .map(|(_, callback, arguments)| (callback.clone(), arguments.clone()))
     }
 
     /// `php_free_shutdown_functions` (`Z/ext/standard/basic_functions.c:1660`),
@@ -13329,7 +13370,7 @@ impl Request {
     /// released, which is `user_shutdown_function_dtor` over the
     /// destroyed table.
     pub(crate) fn free_shutdown_functions(&mut self) {
-        for (callback, arguments) in std::mem::take(&mut self.shutdown_functions) {
+        for (_, callback, arguments) in std::mem::take(&mut self.shutdown_functions) {
             callback.release(self);
             for value in arguments {
                 self.release(value);

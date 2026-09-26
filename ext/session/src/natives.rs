@@ -1389,6 +1389,36 @@ fn implements(
 /// bool(true)
 /// session_set_save_handler(): Argument #1 ($open) must be of type SessionHandlerInterface, int given
 /// ```
+///
+/// The object form keeps `session_register_shutdown` under the name
+/// `session_shutdown`, replacing an earlier one, so the session is
+/// written by the shutdown functions, before the destructors; with
+/// `$register_shutdown = false`, or in the callbacks' form, the entry is
+/// removed and the session's `RSHUTDOWN` writes it, after them.
+///
+/// ```php
+/// class H implements SessionHandlerInterface { function open($p, $n): bool { return true; } function close(): bool { return true; }
+///   function read($id): string|false { return ""; } function write($id, $d): bool { echo "write\n"; return true; }
+///   function destroy($id): bool { return true; } function gc($l): int|false { return 0; } }
+/// class D { function __destruct() { echo "destruct\n"; } }
+/// $d = new D; $h = new H; session_set_save_handler($h); session_id("sh1"); session_start(["use_cookies" => 0, "cache_limiter" => ""]);
+/// ```
+/// ```expect
+/// write
+/// destruct
+/// ```
+///
+/// ```php
+/// class H implements SessionHandlerInterface { function open($p, $n): bool { return true; } function close(): bool { return true; }
+///   function read($id): string|false { return ""; } function write($id, $d): bool { echo "write\n"; return true; }
+///   function destroy($id): bool { return true; } function gc($l): int|false { return 0; } }
+/// class D { function __destruct() { echo "destruct\n"; } }
+/// $d = new D; $h = new H; session_set_save_handler($h); session_set_save_handler($h, false); session_id("sh1"); session_start(["use_cookies" => 0, "cache_limiter" => ""]);
+/// ```
+/// ```expect
+/// destruct
+/// write
+/// ```
 #[allow(clippy::too_many_lines)] // php's function, both arms
 fn session_set_save_handler(req: &mut Request) -> Result<Value, Thrown> {
     let count = req.argument_count();
@@ -1448,10 +1478,13 @@ fn session_set_save_handler(req: &mut Request) -> Result<Value, Thrown> {
             b"SessionUpdateTimestampHandlerInterface",
             b"updatetimestamp",
         )?;
-        if register && !req.state::<State>().shutdown_registered {
+        // `register_user_shutdown_function("session_shutdown", ...)`,
+        // replacing an earlier one, or `remove_user_shutdown_function`.
+        if register {
             let callable = named(req, b"session_register_shutdown")?;
-            req.register_shutdown_function(callable, Vec::new());
-            req.state::<State>().shutdown_registered = true;
+            req.set_shutdown_function(b"session_shutdown", Some((callable, Vec::new())));
+        } else {
+            req.set_shutdown_function(b"session_shutdown", None);
         }
         let state = req.state::<State>();
         if state.status != Status::Active && state.module != Some(Module::User) {
@@ -1489,6 +1522,7 @@ fn session_set_save_handler(req: &mut Request) -> Result<Value, Thrown> {
         return Ok(Value::bool(false));
     }
     req.state::<State>().class_name = None;
+    req.set_shutdown_function(b"session_shutdown", None);
     if req.state::<State>().module != Some(Module::User) {
         user_ini(req)?;
     }

@@ -139,8 +139,6 @@ struct State {
     vars: Option<PhpRef>,
     /// `PS(session_started_filename)` and its line.
     started_at: Option<(Vec<u8>, u32)>,
-    /// The `session_shutdown` entry `session_set_save_handler` registers.
-    shutdown_registered: bool,
     /// Whether [`ini::startup`] is running the rules, so the value it
     /// sets back meets the startup stage's rule, which checks no
     /// session state or header.
