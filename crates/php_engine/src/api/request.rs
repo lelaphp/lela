@@ -1042,6 +1042,10 @@ pub struct Request {
     /// opener is opening, which the same path opened from inside it is
     /// refused as.
     pub(crate) user_stream_current: Option<Vec<u8>>,
+    /// `PG(in_user_include)`: a user-space wrapper that is no URL wrapper
+    /// is opening for an include under `allow_url_include=0`, so the
+    /// opens it makes are held to `allow_url_include` as an include's are.
+    pub(crate) in_user_include: bool,
     /// `FG(pclose_ret)`: what the last stream freed by its resource's
     /// destructor answered from its kind's close, which `pclose()` reads.
     pub(crate) pclose_ret: i32,
@@ -1464,6 +1468,7 @@ impl Request {
             wrappers: Vec::new(),
             url_wrappers: None,
             user_stream_current: None,
+            in_user_include: false,
             pclose_ret: 0,
             filters: Vec::new(),
             error_handling: None,

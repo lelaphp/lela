@@ -468,17 +468,27 @@ impl Request {
         &mut self,
         name: &[u8],
         params: Option<&Value>,
-    ) -> Result<Option<Box<dyn StreamFilter>>, Thrown> {
+    ) -> Option<Box<dyn StreamFilter>> {
         let lookup = |req: &Request, wanted: &[u8]| -> Option<FilterFactory> {
             req.filters
                 .iter()
                 .find(|(n, _)| n.as_slice() == wanted)
                 .map(|(_, f)| *f)
         };
+        // A factory that threw is php's `create_filter` answering `NULL`
+        // with `EG(exception)` set: refused, and the throwable kept for
+        // the native.
+        let create = |req: &mut Request, found: FilterFactory| match found(req, name, params) {
+            Ok(filter) => filter,
+            Err(thrown) => {
+                defer(req, thrown);
+                None
+            }
+        };
         let mut factory = lookup(self, name);
         let mut filter = None;
         if let Some(found) = factory {
-            filter = found(self, name, params)?;
+            filter = create(self, found);
         } else if name.contains(&b'.') {
             let mut wild = name.to_vec();
             while let Some(period) = wild.iter().rposition(|b| *b == b'.') {
@@ -486,7 +496,7 @@ impl Request {
                 wild.push(b'*');
                 if let Some(found) = lookup(self, &wild) {
                     factory = Some(found);
-                    filter = found(self, name, params)?;
+                    filter = create(self, found);
                     if filter.is_some() {
                         break;
                     }
@@ -507,7 +517,7 @@ impl Request {
             );
             warning(self, &text);
         }
-        Ok(filter)
+        filter
     }
 
     /// `stream_filter_remove`'s work (`Z/ext/standard/streamsfuncs.c:1298`)
@@ -558,6 +568,41 @@ impl Request {
 }
 
 impl Stream {
+    /// `php_stream_apply_filter_list`'s one name
+    /// (`Z/ext/standard/php_fopen_wrapper.c:153`): a filter made by the
+    /// factory `name` finds, with no parameters, appended to the read
+    /// chain and to the write chain as `(read, write)` asks, each with no
+    /// resource of its own; php's `Unable to create filter (%s)` after
+    /// the filter layer's warning for each that cannot be made.
+    pub(crate) fn apply_filter(
+        self,
+        req: &mut Request,
+        name: &[u8],
+        (read, write): (bool, bool),
+    ) -> Result<(), Thrown> {
+        for (wanted, chain) in [(read, Chain::Read), (write, Chain::Write)] {
+            if !wanted {
+                continue;
+            }
+            let Some(ops) = req.filter_create(name, None) else {
+                let text = format!(
+                    "{}(): Unable to create filter ({})",
+                    req.active_native(),
+                    String::from_utf8_lossy(name)
+                );
+                warning(req, &text);
+                continue;
+            };
+            req.stream_op(self, |req, s| {
+                s.attach(req, chain, Attached { ops, res: None }, true)
+            });
+        }
+        match req.stream_thrown.take() {
+            Some(thrown) => Err(thrown),
+            None => Ok(()),
+        }
+    }
+
     /// `apply_filter_to_stream` (`Z/ext/standard/streamsfuncs.c:1208`)
     /// past its parameters: `read_write`, `STREAM_FILTER_READ`,
     /// `STREAM_FILTER_WRITE` or both, or neither for the chains the
@@ -593,8 +638,11 @@ impl Stream {
             if read_write & bit == 0 {
                 continue;
             }
-            let Some(ops) = req.filter_create(name, params)? else {
-                return Ok(None);
+            let Some(ops) = req.filter_create(name, params) else {
+                return match req.stream_thrown.take() {
+                    Some(thrown) => Err(thrown),
+                    None => Ok(None),
+                };
             };
             let attached = req
                 .stream_op(self, |req, s| {

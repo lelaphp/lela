@@ -159,7 +159,7 @@ fn parse(path: &[u8]) -> Result<(Meta, bool, &[u8]), &'static str> {
 
 /// `php_url_decode`: `+` a space, `%` and two hex digits a byte, and
 /// anything else as it is.
-fn url_decode(s: &[u8]) -> Vec<u8> {
+pub(super) fn url_decode(s: &[u8]) -> Vec<u8> {
     let hex = |c: u8| (c as char).to_digit(16);
     let mut out = Vec::with_capacity(s.len());
     let mut i = 0;

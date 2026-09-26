@@ -1863,13 +1863,59 @@ impl Ops for Output {
 /// nothing.
 type Opened = Result<Stream, String>;
 
+/// `php_stream_open_wrapper_ex`'s `options`, the bits of it this engine
+/// reads.
+#[derive(Debug, Clone, Copy, Default)]
+#[allow(clippy::struct_excessive_bools)] // php's bitset, one field per bit read
+pub(crate) struct OpenOptions {
+    /// `USE_PATH`: the path looked for along `include_path` first.
+    pub(crate) use_path: bool,
+    /// `STREAM_USE_URL`: a wrapper that is no URL wrapper refused.
+    pub(crate) use_url: bool,
+    /// `REPORT_ERRORS`: a refusal is a warning.
+    pub(crate) report: bool,
+    /// `STREAM_OPEN_FOR_INCLUDE`: the open is an include's, which
+    /// `allow_url_include` holds a URL wrapper to.
+    pub(crate) for_include: bool,
+}
+
+impl OpenOptions {
+    /// `REPORT_ERRORS` alone, what a native opens with.
+    pub(crate) const REPORT: OpenOptions = OpenOptions {
+        use_path: false,
+        use_url: false,
+        report: true,
+        for_include: false,
+    };
+
+    /// `options & ~REPORT_ERRORS`, what a wrapper's opener is handed.
+    const fn unreported(self) -> OpenOptions {
+        OpenOptions {
+            report: false,
+            ..self
+        }
+    }
+
+    /// The bits as php numbers them, what a user-space wrapper's
+    /// `stream_open` is handed: `STREAM_USE_PATH` 1, `REPORT_ERRORS` 8,
+    /// `STREAM_OPEN_FOR_INCLUDE` 128.
+    const fn bits(self) -> i64 {
+        (self.use_path as i64) | (self.report as i64) << 3 | (self.for_include as i64) << 7
+    }
+}
+
 /// `php_stream_url_wrap_php` (`Z/ext/standard/php_fopen_wrapper.c:176`):
 /// the path after `php://`, case-insensitively, as `temp`, with
 /// `/maxmemory:N` after it, `memory`, `output`, `input`, `stdin`,
-/// `stdout` or `stderr`; anything else is php's `Invalid php:// URL
-/// specified` and nothing opened. `fd/` and `filter/` are not here and
-/// open nothing.
-fn php_open(req: &mut Request, path: &[u8], mode: &[u8]) -> Result<Opened, Thrown> {
+/// `stdout`, `stderr`, `fd/N` or `filter/...`; anything else is php's
+/// `Invalid php:// URL specified` and nothing opened. `input`, `stdin`
+/// and `fd/` are refused an include under `allow_url_include=0`.
+fn php_open(
+    req: &mut Request,
+    path: &[u8],
+    mode: &[u8],
+    options: OpenOptions,
+) -> Result<Opened, Thrown> {
     let path = if path.len() >= 6 && path[..6].eq_ignore_ascii_case(b"php://") {
         &path[6..]
     } else {
@@ -1891,23 +1937,48 @@ fn php_open(req: &mut Request, path: &[u8], mode: &[u8]) -> Result<Opened, Throw
         }
         return Ok(Ok(temp(req, TempMode::of(mode), smax)?));
     }
+    if lower.starts_with(b"filter/") {
+        return filter_open(req, &path[6..], mode, options);
+    }
+    let for_include_refused = |req: &mut Request| {
+        let refused = options.for_include
+            && !req
+                .ini_get(b"allow_url_include")
+                .is_none_or(Request::ini_parse_bool);
+        if refused && options.report {
+            let text = format!(
+                "{}(): URL file-access is disabled in the server configuration",
+                req.active_native()
+            );
+            warning(req, &text);
+        }
+        refused
+    };
     let stream = match lower.as_slice() {
         b"memory" => memory(TempMode::of(mode)),
         b"output" => PhpStream::new(Box::new(Output), b"wb"),
         // `php_stream_input_ops` seeks the body it reads
         // (`php_stream_input_seek`).
-        b"input" => PhpStream::new(
-            Box::new(Memory {
-                data: req.body_bytes().to_vec(),
-                fpos: 0,
-                mode: TempMode::ReadOnly,
-                label: "Input",
-            }),
-            b"rb",
-        ),
+        b"input" => {
+            if for_include_refused(req) {
+                return Ok(Err(String::from("operation failed")));
+            }
+            PhpStream::new(
+                Box::new(Memory {
+                    data: req.body_bytes().to_vec(),
+                    fpos: 0,
+                    mode: TempMode::ReadOnly,
+                    label: "Input",
+                }),
+                b"rb",
+            )
+        }
         // Each a pipe or a terminal under the CLI, which
         // `detect_is_seekable` says does not seek.
         b"stdin" | b"stdout" | b"stderr" => {
+            if lower == b"stdin" && for_include_refused(req) {
+                return Ok(Err(String::from("operation failed")));
+            }
             let kind = match lower.as_slice() {
                 b"stdin" => HostFd::Stdin(Memory {
                     data: req.body_bytes().to_vec(),
@@ -1923,8 +1994,21 @@ fn php_open(req: &mut Request, path: &[u8], mode: &[u8]) -> Result<Opened, Throw
             stream.position = -1;
             stream
         }
-        _ if lower.starts_with(b"fd/") || lower.starts_with(b"filter/") => {
-            return Ok(Err(String::from("operation failed")));
+        _ if lower.starts_with(b"fd/") => {
+            if req.sapi_name() != "cli" {
+                if options.report {
+                    let text = format!(
+                        "{}(): Direct access to file descriptors is only available from command-line PHP",
+                        req.active_native()
+                    );
+                    warning(req, &text);
+                }
+                return Ok(Err(String::from("operation failed")));
+            }
+            if for_include_refused(req) {
+                return Ok(Err(String::from("operation failed")));
+            }
+            return fd_open(req, &path[3..], mode);
         }
         _ => {
             let text = format!("{}(): Invalid php:// URL specified", req.active_native());
@@ -1933,6 +2017,149 @@ fn php_open(req: &mut Request, path: &[u8], mode: &[u8]) -> Result<Opened, Throw
         }
     };
     Ok(Ok(req.stream_alloc(stream)?))
+}
+
+/// `php://filter/` (`Z/ext/standard/php_fopen_wrapper.c:339`): the
+/// resource after the first `/resource=` opened as its own wrapper opens
+/// it, reporting nothing of its own, then each `/`-separated part before
+/// it applied to it: `read=` a `|`-separated list for the read chain,
+/// `write=` one for the write chain, and a bare list for the chains
+/// `fopen`'s `$mode` reads and writes, each name URL-decoded, and php's `Unable to
+/// create filter (%s)` after the filter layer's own warning for one
+/// that cannot be made. A path with no `/resource=` is php's `Error`.
+///
+/// ```php
+/// var_dump(file_get_contents('php://filter/read=string.toupper|string.rot13/resource=data:,abc'));
+/// var_dump(file_get_contents('php://filter/string.toupper/nope%2Ex/resource=data:,abc'));
+/// $f = fopen('php://filter/read=string.rot13/resource=data:,abc', 'r');
+/// echo json_encode(array_slice(stream_get_meta_data($f), 1, 2)), ' ', stream_get_meta_data($f)['uri'], "\n";
+/// var_dump(@file_get_contents('php://filter/read=string.rot13/resource=nofile'), error_get_last()['message']);
+/// $w = fopen('php://filter/write=string.toupper/resource=php://memory', 'w+');
+/// fwrite($w, "shout"); rewind($w); var_dump(fread($w, 10));
+/// try { fopen('php://filter/read=string.rot13', 'r'); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// string(3) "NOP"
+///
+/// Warning: file_get_contents(): Unable to locate filter "nope.x" in %s on line 3
+///
+/// Warning: file_get_contents(): Unable to create filter (nope.x) in %s on line 3
+/// string(3) "ABC"
+/// {"wrapper_type":"PHP","stream_type":"RFC2397"} php://filter/read=string.rot13/resource=data:,abc
+/// bool(false)
+/// string(106) "file_get_contents(php://filter/read=string.rot13/resource=nofile): Failed to open stream: operation failed"
+/// string(5) "SHOUT"
+/// No URL resource specified
+/// ```
+fn filter_open(
+    req: &mut Request,
+    path: &[u8],
+    mode: &[u8],
+    options: OpenOptions,
+) -> Result<Opened, Thrown> {
+    let Some(at) = path.windows(10).position(|w| w == b"/resource=") else {
+        return Err(throw(req, "Error", "No URL resource specified"));
+    };
+    let Some(stream) = req.open_wrapper_ex(&path[at + 10..], mode, options)? else {
+        return Ok(Err(String::from("operation failed")));
+    };
+    let read = mode.contains(&b'r') || mode.contains(&b'+');
+    let write = mode.iter().any(|b| matches!(b, b'w' | b'+' | b'a'));
+    for part in path[..at].split(|b| *b == b'/').filter(|p| !p.is_empty()) {
+        let (list, chains) = if part.len() >= 5 && part[..5].eq_ignore_ascii_case(b"read=") {
+            (&part[5..], (true, false))
+        } else if part.len() >= 6 && part[..6].eq_ignore_ascii_case(b"write=") {
+            (&part[6..], (false, true))
+        } else {
+            (part, (read, write))
+        };
+        for name in list.split(|b| *b == b'|').filter(|n| !n.is_empty()) {
+            let name = rfc2397::url_decode(name);
+            // `if (EG(exception)) { php_stream_close(stream); return NULL; }`
+            if let Err(thrown) = stream.apply_filter(req, &name, chains) {
+                stream.close(req);
+                return Err(thrown);
+            }
+        }
+    }
+    Ok(Ok(stream))
+}
+
+/// `php://fd/N` (`Z/ext/standard/php_fopen_wrapper.c:292`): `N` all
+/// decimal digits, below `getdtablesize()`, and `dup(2)` of it, the
+/// host's own fd for 0, 1 and 2 where it handed them; a socket opens as
+/// a socket, anything else as a plain file's kind over the copy.
+///
+/// ```php
+/// foreach (['php://fd', 'php://fd/', 'php://fd/-2', 'php://fd/1/', 'php://fd/1023'] as $p) {
+///     var_dump(@fopen($p, 'w'));
+///     echo preg_replace('/smaller than \d+/', 'smaller than N', error_get_last()['message']), "\n";
+/// }
+/// var_dump(get_resource_type(fopen('php://fd/2', 'w')));
+/// ```
+/// ```expect
+/// bool(false)
+/// fopen(php://fd): Failed to open stream: operation failed
+/// bool(false)
+/// fopen(php://fd/): Failed to open stream: php://fd/ stream must be specified in the form php://fd/<orig fd>
+/// bool(false)
+/// fopen(php://fd/-2): Failed to open stream: The file descriptors must be non-negative numbers smaller than N
+/// bool(false)
+/// fopen(php://fd/1/): Failed to open stream: php://fd/ stream must be specified in the form php://fd/<orig fd>
+/// bool(false)
+/// fopen(php://fd/1023): Failed to open stream: Error duping file descriptor 1023; possibly it doesn't exist: [9]: Bad file descriptor
+/// string(6) "stream"
+/// ```
+fn fd_open(req: &mut Request, digits: &[u8], mode: &[u8]) -> Result<Opened, Thrown> {
+    let form = || String::from("php://fd/ stream must be specified in the form php://fd/<orig fd>");
+    let body = digits.trim_ascii_start();
+    let unsigned = body
+        .strip_prefix(b"-")
+        .or_else(|| body.strip_prefix(b"+"))
+        .unwrap_or(body);
+    if unsigned.is_empty() || !unsigned.iter().all(u8::is_ascii_digit) {
+        return Ok(Err(form()));
+    }
+    let fildes = strtol(digits);
+    let dtablesize = php_heap::fd_table_size();
+    if fildes < 0 || fildes >= i64::from(dtablesize) {
+        return Ok(Err(format!(
+            "The file descriptors must be non-negative numbers smaller than {dtablesize}"
+        )));
+    }
+    let standard = match fildes {
+        0 => Some(Standard::Stdin),
+        1 => Some(Standard::Stdout),
+        2 => Some(Standard::Stderr),
+        _ => None,
+    };
+    let duped = match standard.and_then(|s| req.host_fd(s)) {
+        Some(fd) => fd.try_clone_to_owned(),
+        None => php_heap::dup_fd(i32::try_from(fildes).unwrap_or(-1)),
+    };
+    let fd = match duped {
+        Ok(fd) => fd,
+        Err(error) => {
+            return Ok(Err(format!(
+                "Error duping file descriptor {fildes}; possibly it doesn't exist: [{}]: {}",
+                error.raw_os_error().unwrap_or(0),
+                strerror(&error)
+            )));
+        }
+    };
+    // `zend_fstat(fd, &st) == 0 && (st.st_mode & S_IFMT) == S_IFSOCK`.
+    let is_socket = fd.try_clone().is_ok_and(|copy| {
+        use std::os::unix::fs::FileTypeExt;
+        std::fs::File::from(copy)
+            .metadata()
+            .is_ok_and(|meta| meta.file_type().is_socket())
+    });
+    let kind = if is_socket {
+        FdStream::Socket
+    } else {
+        FdStream::File { mode }
+    };
+    Ok(Ok(req.stream_from_fd(fd, kind)?))
 }
 
 /// `ZEND_STRTOL(path, NULL, 10)`: leading white space, a sign and the
@@ -2091,9 +2318,15 @@ impl Request {
     /// is php's warning and no wrapper, and otherwise the path after the
     /// slashes; once a program changed the table, a plain path goes to
     /// whatever it registered as `file` and to none where it unregistered
-    /// that, php's `file:// wrapper is disabled`. A wrapper registered
-    /// as a URL wrapper under `allow_url_fopen=0` is refused.
+    /// that, php's `file:// wrapper is disabled`. A URL wrapper is refused
+    /// under `allow_url_fopen=0`, and under `allow_url_include=0` for an
+    /// include. Under `REPORT_ERRORS` alone is a refusal a warning; the
+    /// wrapper nobody registered is warned of always.
     pub(crate) fn locate_wrapper(&mut self, path: &[u8]) -> (Located, Vec<u8>) {
+        self.locate(path, OpenOptions::REPORT)
+    }
+
+    fn locate(&mut self, path: &[u8], options: OpenOptions) -> (Located, Vec<u8>) {
         let n = path
             .iter()
             .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
@@ -2126,12 +2359,14 @@ impl Request {
                 let localhost =
                     path.len() >= 17 && path[..17].eq_ignore_ascii_case(b"file://localhost/");
                 if !localhost && path.get(n + 3).is_some_and(|b| *b != b'/') {
-                    let text = format!(
-                        "{}(): Remote host file access not supported, {}",
-                        self.active_native(),
-                        String::from_utf8_lossy(path)
-                    );
-                    warning(self, &text);
+                    if options.report {
+                        let text = format!(
+                            "{}(): Remote host file access not supported, {}",
+                            self.active_native(),
+                            String::from_utf8_lossy(path)
+                        );
+                        warning(self, &text);
+                    }
                     return (Located::Nothing, path.to_vec());
                 }
                 let mut at = n + 1;
@@ -2147,11 +2382,13 @@ impl Request {
                 if let Some(found) = wrapper.or_else(|| Request::wrapper_row(&table, b"file")) {
                     return (found, local);
                 }
-                let text = format!(
-                    "{}(): file:// wrapper is disabled in the server configuration",
-                    self.active_native()
-                );
-                warning(self, &text);
+                if options.report {
+                    let text = format!(
+                        "{}(): file:// wrapper is disabled in the server configuration",
+                        self.active_native()
+                    );
+                    warning(self, &text);
+                }
                 return (Located::Nothing, local);
             }
             return (Located::Plain, local);
@@ -2159,18 +2396,29 @@ impl Request {
         let Some(found) = wrapper else {
             return (Located::Plain, path.to_vec());
         };
-        if found.is_url()
-            && !self
-                .ini_get(b"allow_url_fopen")
-                .is_none_or(Request::ini_parse_bool)
-        {
-            let text = format!(
-                "{}(): {}:// wrapper is disabled in the server configuration by allow_url_fopen=0",
-                self.active_native(),
-                String::from_utf8_lossy(&path[..n])
-            );
-            warning(self, &text);
-            return (Located::Nothing, path.to_vec());
+        let allowed =
+            |req: &Request, name: &[u8]| req.ini_get(name).is_none_or(Request::ini_parse_bool);
+        if found.is_url() {
+            let refused = if !allowed(self, b"allow_url_fopen") {
+                Some("allow_url_fopen")
+            } else if (options.for_include || self.in_user_include)
+                && !allowed(self, b"allow_url_include")
+            {
+                Some("allow_url_include")
+            } else {
+                None
+            };
+            if let Some(entry) = refused {
+                if options.report {
+                    let text = format!(
+                        "{}(): {}:// wrapper is disabled in the server configuration by {entry}=0",
+                        self.active_native(),
+                        String::from_utf8_lossy(&path[..n])
+                    );
+                    warning(self, &text);
+                }
+                return (Located::Nothing, path.to_vec());
+            }
         }
         (found, path.to_vec())
     }
@@ -2282,7 +2530,11 @@ impl Request {
         mode: &[u8],
         use_include_path: bool,
     ) -> Result<Option<Stream>, Thrown> {
-        self.open_wrapper_ex(path, mode, use_include_path, false)
+        let options = OpenOptions {
+            use_path: use_include_path,
+            ..OpenOptions::REPORT
+        };
+        self.open_wrapper_ex(path, mode, options)
     }
 
     /// `_php_stream_open_wrapper_ex` under `REPORT_ERRORS | STREAM_USE_URL`,
@@ -2296,25 +2548,33 @@ impl Request {
         path: &[u8],
         mode: &[u8],
     ) -> Result<Option<Stream>, Thrown> {
-        self.open_wrapper_ex(path, mode, false, true)
+        let options = OpenOptions {
+            use_url: true,
+            ..OpenOptions::REPORT
+        };
+        self.open_wrapper_ex(path, mode, options)
     }
 
-    fn open_wrapper_ex(
+    /// `_php_stream_open_wrapper_ex` under `options`; the opener is asked
+    /// without `REPORT_ERRORS`, as php's is, so a wrapper that opens
+    /// another, `php://filter`, reports nothing of the inner open.
+    pub(crate) fn open_wrapper_ex(
         &mut self,
         path: &[u8],
         mode: &[u8],
-        use_include_path: bool,
-        use_url: bool,
+        options: OpenOptions,
     ) -> Result<Option<Stream>, Thrown> {
         if path.is_empty() {
             return Err(throw(self, "ValueError", "Path must not be empty"));
         }
         let mut to_open = path.to_vec();
-        if use_include_path && let Ok(resolved) = self.resolve_path(path) {
+        if options.use_path
+            && let Ok(resolved) = self.resolve_path(path)
+        {
             to_open = resolved;
         }
-        let (wrapper, path_to_open) = self.locate_wrapper(&to_open);
-        if use_url && !wrapper.is_url() {
+        let (wrapper, path_to_open) = self.locate(&to_open, options);
+        if options.use_url && !wrapper.is_url() {
             let text = format!(
                 "{}(): This function may only be used against URLs",
                 self.active_native()
@@ -2335,7 +2595,10 @@ impl Request {
                     Err(message) => Err(message),
                 },
             ),
-            Located::Php => (PHP_WRAPPER, php_open(self, &path_to_open, mode)?),
+            Located::Php => (
+                PHP_WRAPPER,
+                php_open(self, &path_to_open, mode, options.unreported())?,
+            ),
             Located::Data => ("RFC2397", rfc2397::open(self, &path_to_open, mode)?),
             Located::Ext(at) => {
                 let open = self.wrappers[at].open;
@@ -2352,7 +2615,7 @@ impl Request {
                     &user,
                     &path_to_open,
                     mode,
-                    i64::from(use_include_path),
+                    options.unreported().bits(),
                 )?,
             ),
             Located::Nothing => ("", Err(String::from("no suitable wrapper could be found"))),
@@ -2374,7 +2637,9 @@ impl Request {
                 Ok(Some(stream))
             }
             Err(message) => {
-                self.display_wrapper_errors(&to_open, "Failed to open stream", &message);
+                if options.report {
+                    self.display_wrapper_errors(&to_open, "Failed to open stream", &message);
+                }
                 Ok(None)
             }
         }
