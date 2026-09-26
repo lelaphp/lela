@@ -146,12 +146,18 @@ pub(crate) trait Ops: Send {
         false
     }
 
-    /// `ops->cast` to `PHP_STREAM_AS_FD` or `PHP_STREAM_AS_FD_FOR_SELECT`,
-    /// which every kind here answers alike: the host fd the kind
-    /// reads and writes, `None` for php's `FAILURE`, a kind with no
-    /// fd.
-    fn fd(&self) -> Option<BorrowedFd<'_>> {
-        None
+    /// `ops->cast` to `PHP_STREAM_AS_FD` or `PHP_STREAM_AS_FD_FOR_SELECT`
+    /// (`select`), what the kind is to a cast, [`CastTarget`]; `own` is
+    /// the stream the kind is under, which a user-space stream's
+    /// `stream_cast` must not answer. [`CastTarget::Refused`] for a kind
+    /// with no fd, php's `FAILURE`.
+    fn cast_target(
+        &mut self,
+        _req: &mut Request,
+        _select: bool,
+        _own: Option<Stream>,
+    ) -> CastTarget<'_> {
+        CastTarget::Refused
     }
 
     /// `ops->set_option` for the options [`StreamOption`] names: php's
@@ -186,18 +192,58 @@ pub(crate) trait Ops: Send {
         None
     }
 
-    /// `php_userstreamop_cast`'s `stream_cast`: the stream a user-space
-    /// stream says it is to be cast as, `None` for every other kind.
-    fn user_cast(&mut self, _req: &mut Request, _select: bool) -> Option<Stream> {
-        None
-    }
-
     /// `PHP_STREAM_OPTION_XPORT_API`: one operation of a `transport`,
     /// `None` for php's `PHP_STREAM_OPTION_RETURN_NOTIMPL`, a kind that
     /// is no socket.
     fn xport(&mut self, _req: &mut Request, _op: sockets::XportOp<'_>) -> Option<sockets::Xported> {
         None
     }
+}
+
+/// What `ops->cast` makes of a kind asked for a fd, decoded once and
+/// matched where php casts (`_php_stream_cast`): the host fd the kind
+/// reads and writes (`php_stdiop_cast`, `php_sockop_cast`), one of the
+/// host's standard streams, whose fd is the one the host handed, another
+/// stream cast in its place (a user-space stream's `stream_cast`, a temp
+/// stream's file), or nothing.
+///
+/// ```php
+/// $t = fopen('php://temp', 'w+'); fwrite($t, "from temp\n"); rewind($t);
+/// $p = proc_open('cat', [0 => $t, 1 => ['pipe', 'w']], $pipes);
+/// var_dump(stream_get_contents($pipes[1]), proc_close($p));
+/// var_dump(@proc_open('true', [0 => fopen('php://memory', 'r')], $pipes), error_get_last()['message']);
+/// class W { public $context; public $with;
+///     function stream_open($p, $m, $o, &$op) { return true; }
+///     function stream_eof() { return false; }
+///     function stream_cast($as) { return $this->with; } }
+/// stream_wrapper_register('ww', 'W');
+/// $u = fopen('ww://x', 'r');
+/// stream_get_meta_data($u)['wrapper_data']->with = $t;
+/// $r = [$u]; $w = $e = null;
+/// var_dump(stream_select($r, $w, $e, 0));
+/// stream_get_meta_data($u)['wrapper_data']->with = $u;
+/// $r = [$u];
+/// var_dump(@stream_select($r, $w, $e, 0), error_get_last()['message']);
+/// ```
+/// ```expect exit=255
+/// string(10) "from temp
+/// "
+/// int(0)
+/// bool(false)
+/// string(74) "proc_open(): Cannot represent a stream of type MEMORY as a File Descriptor"
+/// int(1)
+///
+/// Fatal error: Uncaught ValueError: No stream arrays were passed in %s:17
+/// Stack trace:
+/// #0 %s(17): stream_select(Array, NULL, NULL, 0)
+/// #1 {main}
+///   thrown in %s on line 17
+/// ```
+pub(crate) enum CastTarget<'a> {
+    Fd(BorrowedFd<'a>),
+    Host(Standard),
+    Stream(Stream),
+    Refused,
 }
 
 /// `php_stream_statbuf`'s thirteen fields in the order `php_fstat` puts
@@ -776,12 +822,19 @@ impl PhpStream {
             }
             return None;
         }
-        if let Some(inner) = self.ops.user_cast(req, cast == Cast::Select) {
-            return req
+        let own = self.res.map(Stream::of);
+        let fd = match self.ops.cast_target(req, cast == Cast::Select, own) {
+            CastTarget::Fd(fd) => Some(fd.as_raw_fd()),
+            CastTarget::Host(standard) => req.host_fd(standard).map(|fd| fd.as_raw_fd()),
+            // `php_stream_cast(intstream, castas, retptr, 1)`: the stream
+            // in this one's place warns of itself, and this one of itself
+            // after it where that failed.
+            CastTarget::Stream(inner) => req
                 .stream_op(inner, |req, s| s.cast(req, cast, true))
-                .flatten();
-        }
-        let Some(fd) = self.ops.fd().map(|fd| fd.as_raw_fd()) else {
+                .flatten(),
+            CastTarget::Refused => None,
+        };
+        let Some(fd) = fd else {
             if warn {
                 let target = if cast == Cast::Select {
                     "select()able descriptor"
@@ -1100,6 +1153,19 @@ impl Temp {
     /// where the memory stream stood. `false` is the file that could not
     /// be made, after php's warning.
     fn spill(&mut self, req: &mut Request, inner: Stream, count: usize) -> Result<bool, Thrown> {
+        self.move_to_file(req, inner, Some(count))
+    }
+
+    /// The memory stream moved into a temporary file, where a write of
+    /// `count` at its position would reach `smax`, or always for `None`,
+    /// which is `php_stream_temp_cast`'s conversion
+    /// (`Z/main/streams/memory.c:463`).
+    fn move_to_file(
+        &mut self,
+        req: &mut Request,
+        inner: Stream,
+        count: Option<usize>,
+    ) -> Result<bool, Thrown> {
         let Some((pos, membuf)) = req
             .stream_op(inner, |_, s| {
                 s.ops
@@ -1110,7 +1176,9 @@ impl Temp {
         else {
             return Ok(true);
         };
-        if usize::try_from(pos).unwrap_or(0) + count < self.smax {
+        if let Some(count) = count
+            && usize::try_from(pos).unwrap_or(0) + count < self.smax
+        {
             return Ok(true);
         }
         let Some(file) = temporary_file(req, None, b"php")? else {
@@ -1230,6 +1298,24 @@ impl Ops for Temp {
 
     fn own_meta(&self) -> Vec<(Vec<u8>, MetaValue)> {
         self.meta.clone()
+    }
+
+    /// `php_stream_temp_cast` (`Z/main/streams/memory.c:463`): a file
+    /// cast in this stream's place, the memory stream moved into a
+    /// temporary one first where it is still in memory.
+    fn cast_target(
+        &mut self,
+        req: &mut Request,
+        _select: bool,
+        _own: Option<Stream>,
+    ) -> CastTarget<'_> {
+        let Some(inner) = self.inner else {
+            return CastTarget::Refused;
+        };
+        if !matches!(self.move_to_file(req, inner, None), Ok(true)) {
+            return CastTarget::Refused;
+        }
+        self.inner.map_or(CastTarget::Refused, CastTarget::Stream)
     }
 
     /// `php_stream_temp_set_option`'s default arm: the inner stream's,
@@ -1532,8 +1618,15 @@ impl Ops for Stdio {
 
     /// `php_stdiop_cast` (`Z/main/streams/plain_wrapper.c:645`): the
     /// file's fd, for either cast.
-    fn fd(&self) -> Option<BorrowedFd<'_>> {
-        self.file.as_ref().map(AsFd::as_fd)
+    fn cast_target(
+        &mut self,
+        _req: &mut Request,
+        _select: bool,
+        _own: Option<Stream>,
+    ) -> CastTarget<'_> {
+        self.file
+            .as_ref()
+            .map_or(CastTarget::Refused, |file| CastTarget::Fd(file.as_fd()))
     }
 }
 
@@ -1761,6 +1854,17 @@ impl Ops for HostFd {
 
     fn is_stdio(&self) -> bool {
         true
+    }
+
+    /// `php_stdiop_cast` over fd 0, 1 or 2: the host's own, which the
+    /// cast answers where the host handed its fds.
+    fn cast_target(
+        &mut self,
+        _req: &mut Request,
+        _select: bool,
+        _own: Option<Stream>,
+    ) -> CastTarget<'_> {
+        CastTarget::Host(self.standard())
     }
 }
 

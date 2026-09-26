@@ -19,7 +19,7 @@
 //! copied from the built-in one at the first change and dropped with
 //! the request (ADR-0005).
 
-use super::{MetaData, Ops, PhpStream, StatBuf};
+use super::{CastTarget, MetaData, Ops, PhpStream, StatBuf};
 use crate::api::raising::{Level, Thrown, docref};
 use crate::api::request::{OptionAnswer, Request, Stream, StreamOption, Whence, WrapperOp};
 use crate::api::values::{ClassId, Key, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
@@ -646,33 +646,43 @@ impl Ops for UserStream {
         true
     }
 
-    /// `php_userstreamop_cast` (`Z/main/streams/userspace.c:1413`) is
-    /// `stream_cast`, which answers a stream the cast is made of; here the
-    /// kind has no fd of its own.
-    fn user_cast(&mut self, req: &mut Request, select: bool) -> Option<Stream> {
+    /// `php_userstreamop_cast` (`Z/main/streams/userspace.c:1413`):
+    /// `stream_cast` with `STREAM_CAST_FOR_SELECT` or
+    /// `STREAM_CAST_AS_STREAM`, and the stream it answers cast in this
+    /// one's place; a class without it, an answer that is no stream and
+    /// the stream itself are php's warnings, and a false answer is
+    /// refused in silence.
+    fn cast_target(
+        &mut self,
+        req: &mut Request,
+        select: bool,
+        own: Option<Stream>,
+    ) -> CastTarget<'_> {
         let castas = if select { 3 } else { 0 };
         let value = match call(req, self.object, b"stream_cast", &[Value::int(castas)]) {
             Called::Missing => {
                 not_implemented(req, self.object, "stream_cast");
-                return None;
+                return CastTarget::Refused;
             }
-            Called::Threw => return None,
+            Called::Threw => return CastTarget::Refused,
             Called::Value(value) => value,
         };
         if !truthy(req, &value) {
             req.release(value);
-            return None;
+            return CastTarget::Refused;
         }
         let inner = Stream::from_value(req, &value.deref());
         req.release(value);
-        if inner.is_none() {
-            let text = format!(
-                "{}::stream_cast must return a stream resource",
-                class_name(req, self.object)
-            );
-            docref(req, Level::Warning, &text);
-        }
-        inner
+        let complaint = match inner {
+            None => "must return a stream resource",
+            Some(inner) if own.is_some_and(|own| own.resource() == inner.resource()) => {
+                "must not return itself"
+            }
+            Some(inner) => return CastTarget::Stream(inner),
+        };
+        let text = format!("{}::stream_cast {complaint}", class_name(req, self.object));
+        docref(req, Level::Warning, &text);
+        CastTarget::Refused
     }
 }
 

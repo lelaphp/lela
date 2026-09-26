@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use php_heap::Readiness;
 
-use super::{MetaData, Ops, PhpStream, StatBuf, stat_buf, strerror};
+use super::{CastTarget, MetaData, Ops, PhpStream, StatBuf, stat_buf, strerror};
 use crate::api::raising::{Level, Thrown, raise, warning};
 use crate::api::request::{OptionAnswer, Request, Stream, StreamOption, Xport, XportFailure};
 use crate::api::values::PhpString;
@@ -314,8 +314,15 @@ impl Ops for Socket {
     }
 
     /// `php_sockop_cast`: the socket, for either cast.
-    fn fd(&self) -> Option<BorrowedFd<'_>> {
-        self.sock.as_ref().map(Sock::fd)
+    fn cast_target(
+        &mut self,
+        _req: &mut Request,
+        _select: bool,
+        _own: Option<Stream>,
+    ) -> CastTarget<'_> {
+        self.sock
+            .as_ref()
+            .map_or(CastTarget::Refused, |sock| CastTarget::Fd(sock.fd()))
     }
 
     /// `php_sockop_set_option` (`Z/main/streams/xp_socket.c:296`):
