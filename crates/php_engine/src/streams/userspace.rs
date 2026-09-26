@@ -307,6 +307,41 @@ struct UserStream {
     no_seek: bool,
 }
 
+impl UserStream {
+    /// `user_stream_set_check_liveliness` (`Z/main/streams/userspace.c:952`):
+    /// `stream_eof`, `true` the stream's end and `false` its life; a class
+    /// without it, and an answer that is no bool, are php's warnings and
+    /// the end.
+    fn check_liveness(&mut self, req: &mut Request) -> OptionAnswer {
+        let value = match call(req, self.object, b"stream_eof", &[]) {
+            Called::Missing => {
+                let text = format!(
+                    "{}::stream_eof is not implemented! Assuming EOF",
+                    class_name(req, self.object)
+                );
+                docref(req, Level::Warning, &text);
+                return OptionAnswer::Err;
+            }
+            Called::Threw => return OptionAnswer::Err,
+            Called::Value(value) => value,
+        };
+        match value.as_ref() {
+            ValueRef::Bool(true) => OptionAnswer::Err,
+            ValueRef::Bool(false) => OptionAnswer::Ok,
+            _ => {
+                let name = crate::api::coerce::value_name(req, &value);
+                let text = format!(
+                    "{}::stream_eof value must be of type bool, {name} given",
+                    class_name(req, self.object)
+                );
+                docref(req, Level::Warning, &text);
+                req.release(value);
+                OptionAnswer::Err
+            }
+        }
+    }
+}
+
 /// `statbuf_from_array` (`Z/main/streams/userspace.c:799`): each of the
 /// thirteen fields read by its name, zero where it is not there.
 fn statbuf_from_array(req: &mut Request, array: PhpArray) -> Result<StatBuf, Thrown> {
@@ -623,6 +658,7 @@ impl Ops for UserStream {
                 Value::int(i64::from(timeout.subsec_micros())),
             ],
             StreamOption::ChunkSize(_) => return OptionAnswer::NotImplemented,
+            StreamOption::Liveness => return self.check_liveness(req),
         };
         match call(req, self.object, b"stream_set_option", &args) {
             Called::Missing => {

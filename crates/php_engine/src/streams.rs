@@ -471,10 +471,15 @@ impl PhpStream {
     }
 
     /// `_php_stream_eof` (`Z/main/streams/streams.c:840`): not while the
-    /// buffer holds a byte, else what the kind's last read said.
-    pub(crate) const fn eof(&self) -> bool {
+    /// buffer holds a byte, else what the kind's last read said, or, where
+    /// that was not eof, whether the kind answers
+    /// `PHP_STREAM_OPTION_CHECK_LIVENESS` with `_ERR`.
+    pub(crate) fn eof(&mut self, req: &mut Request) -> bool {
         if self.writepos > self.readpos {
             return false;
+        }
+        if !self.eof && self.set_option(req, StreamOption::Liveness) == OptionAnswer::Err {
+            self.eof = true;
         }
         self.eof
     }
@@ -678,7 +683,7 @@ impl PhpStream {
         {
             out.resize(max, 0);
             let mut len = 0;
-            while len < max && !self.eof() {
+            while len < max && !self.eof(req) {
                 match self.read(req, &mut out[len..]) {
                     Some(n) if n > 0 => len += n,
                     _ => break,
@@ -2819,12 +2824,16 @@ impl Request {
     /// `seekable` and, where it was opened by path, `uri`.
     pub(crate) fn stream_meta_data(&mut self, stream: Stream) -> Result<PhpArray, Thrown> {
         let mut out = PhpArray::new(self)?;
+        let generic_eof = match self.stream_ref(stream).map(|s| s.ops.meta_data()) {
+            Some(MetaData::Generic) => self.stream_op(stream, |req, s| s.eof(req)),
+            _ => None,
+        };
         let Some(s) = self.stream_ref(stream) else {
             return Ok(out);
         };
         let own = s.ops.own_meta();
         let head = match s.ops.meta_data() {
-            MetaData::Generic => Some((false, true, s.eof())),
+            MetaData::Generic => Some((false, true, generic_eof.unwrap_or(s.eof))),
             MetaData::Stdio { blocked } => Some((false, blocked, s.eof)),
             MetaData::Socket { timed_out, blocked } => Some((timed_out, blocked, s.eof)),
             MetaData::Own => None,

@@ -301,6 +301,10 @@ pub enum StreamOption {
     /// `PHP_STREAM_OPTION_SET_CHUNK_SIZE`: how much one read of the kind
     /// asks for, and one write of a user-space stream hands it.
     ChunkSize(usize),
+    /// `PHP_STREAM_OPTION_CHECK_LIVENESS`: whether the kind is still
+    /// there to read, [`OptionAnswer::Err`] for one that is not, which
+    /// `php_stream_eof` asks before it answers no.
+    Liveness,
 }
 
 /// What `php_stream_set_option` answers: `PHP_STREAM_OPTION_RETURN_OK`,
@@ -548,11 +552,34 @@ impl Stream {
         }
     }
 
-    /// `php_stream_eof`.
-    #[must_use]
-    pub fn eof(self, req: &Request) -> bool {
-        req.stream_ref(self)
-            .is_some_and(crate::streams::PhpStream::eof)
+    /// `php_stream_eof`: no byte left in the read buffer, and the kind at
+    /// eof or, asked `PHP_STREAM_OPTION_CHECK_LIVENESS`, found dead, which
+    /// a user-space stream answers from its `stream_eof`.
+    ///
+    /// ```php
+    /// class W { public $context; public $n = 0;
+    ///     function stream_open($p, $m, $o, &$op) { return true; }
+    ///     function stream_eof() { echo "eof? ", $this->n, "\n"; return $this->n++ > 0; }
+    ///     function stream_read($c) { return ""; } }
+    /// class V { public $context; function stream_open($p, $m, $o, &$op) { return true; } function stream_eof() { return 1; } }
+    /// stream_wrapper_register('ww', 'W'); stream_wrapper_register('vv', 'V');
+    /// $f = fopen('ww://x', 'r');
+    /// var_dump(feof($f), feof($f), feof($f));
+    /// var_dump(feof(fopen('vv://x', 'r')));
+    /// ```
+    /// ```expect
+    /// eof? 0
+    /// eof? 1
+    /// bool(false)
+    /// bool(true)
+    /// bool(true)
+    ///
+    /// Warning: feof(): V::stream_eof value must be of type bool, int given in %s on line 10
+    /// bool(true)
+    /// ```
+    pub fn eof(self, req: &mut Request) -> bool {
+        req.stream_op(self, |req, stream| stream.eof(req))
+            .unwrap_or(false)
     }
 
     /// `php_stream_flush`: `true` for php's `0`.
