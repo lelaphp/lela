@@ -283,34 +283,13 @@ fn rshutdown_globals(req: &mut Request) -> Result<(), Thrown> {
     Ok(())
 }
 
-/// The save handler and the serializer the ini entries name, taken where the
-/// request set a valid one without the on-modify function (#744) and no
-/// session is active.
-pub(super) fn sync(req: &mut Request) {
-    let format = Format::find(&ini(req, b"session.serialize_handler"));
-    let module = Module::find(&ini(req, b"session.save_handler"));
-    let state = req.state::<State>();
-    if state.status == Status::Active {
-        return;
-    }
-    if let Some(format) = format {
-        state.format = Some(format);
-    }
-    if let Some(module) = module
-        && state.module != Some(module)
-        && (module == Module::Files || state.handlers.is_set())
-        && state.module.is_some()
-    {
-        state.default_module = state.module;
-        state.module = Some(module);
-    }
-}
-
 /// `PHP_RINIT_FUNCTION(session)`: the save handler and the serializer the ini
 /// names, the session disabled where either is unknown, and started
-/// under `session.auto_start`.
+/// under `session.auto_start`. The startup rules are served first, over
+/// the host's values ([`crate::ini::startup`]).
 pub(super) fn rinit(req: &mut Request) -> Result<(), Thrown> {
     rinit_globals(req);
+    crate::ini::startup(req)?;
     let module = Module::find(&ini(req, b"session.save_handler"));
     let format = Format::find(&ini(req, b"session.serialize_handler"));
     let state = req.state::<State>();
@@ -376,7 +355,6 @@ pub(super) fn rshutdown(req: &mut Request) {
 /// `php_session_start`.
 #[allow(clippy::too_many_lines)] // php's function, arm for arm
 pub(super) fn start(req: &mut Request) -> Result<bool, Thrown> {
-    sync(req);
     match req.state::<State>().status {
         Status::Active => {
             started_error(

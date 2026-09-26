@@ -57,6 +57,21 @@ pub fn raise_at(req: &mut Request, level: Level, message: &str, file: &[u8], lin
     req.note_error_in(level, message, file, line);
 }
 
+/// `zend_error` while php starts, before any request (`zend_startup`,
+/// `php_module_startup`, the `ZEND_INI_STAGE_STARTUP` rules of the ini
+/// entries): the message as given, at `Unknown` on line 0, and displayed
+/// past the `php_output` layer, which is not active yet and writes
+/// straight to the host (`php_output_direct`), so it sends no header and
+/// no buffer takes it. An extension's startup rule over the host's ini
+/// values raises through this from the request's `RINIT`, since this
+/// engine raises nothing while it is built; `php_error_docref`'s own
+/// origin there, `PHP Startup: `, is the caller's to write. The session's
+/// `session.use_only_cookies=0` at startup is the witness, in
+/// `ext/session`.
+pub fn startup(req: &mut Request, level: Level, message: &str) {
+    req.note_startup_error(level, message);
+}
+
 /// `E_WARNING`.
 pub fn warning(req: &mut Request, message: &str) {
     raise(req, Level::Warning, message);

@@ -217,6 +217,7 @@ fn find_filter(id: i64) -> (&'static str, FilterFn) {
 ///   - Return [ array|false|null ]
 /// }
 /// ```
+#[allow(clippy::too_many_lines)] // one row per native of the stub
 pub fn extension() -> Extension {
     let int = |name: &[u8]| parameter(name, Type::Int, None);
     let string = |name: &[u8]| parameter(name, Type::String, None);
@@ -316,8 +317,37 @@ pub fn extension() -> Extension {
             ini_entry(b"filter.default_flags", b""),
         ])
         .request_state::<State>()
+        .rinit(startup_default)
         .info(filter_info)
         .build("filter")
+}
+
+/// `UpdateDefaultFilter` at `ZEND_INI_STAGE_STARTUP` over the value the
+/// host started the engine with: a name of `filter_list` other than the
+/// default's, without case, is php's deprecation, raised by `zend_error`
+/// with no origin; anything else falls back to the default in silence.
+/// The entry is `PHP_INI_SYSTEM|PHP_INI_PERDIR`, so `ini_set()` refuses
+/// it and the startup stage is the only one its rule meets. This engine
+/// raises nothing while it is built, so the request's `RINIT` raises it
+/// ([`php_ext::raising::startup`]); `filter_default_deprecation.phpt`
+/// holds it, and a witness waits on a regime of the pin that starts the
+/// oracle with `filter.default=int`.
+#[allow(clippy::unnecessary_wraps)] // `rinit`'s signature, which may throw
+fn startup_default(req: &mut Request) -> Result<(), Thrown> {
+    let Some(value) = req.ini_get(b"filter.default").map(<[u8]>::to_vec) else {
+        return Ok(());
+    };
+    let named = FILTERS
+        .iter()
+        .find(|(name, _, _)| name.as_bytes().eq_ignore_ascii_case(&value));
+    if named.is_some_and(|(_, id, _)| *id != DEFAULT) {
+        php_ext::raising::startup(
+            req,
+            Level::Deprecated,
+            "The filter.default ini setting is deprecated",
+        );
+    }
+    Ok(())
 }
 
 /// `PHP_MINFO_FUNCTION(filter)`: the one row, then the ini entries.

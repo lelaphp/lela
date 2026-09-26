@@ -1,13 +1,15 @@
 //! `PHP_INI_BEGIN()` of `session.c`: every `session.*` entry with php's
 //! default and where it may be changed, and the on-modify rule each
 //! runs, `SESSION_CHECK_ACTIVE_STATE` and `SESSION_CHECK_OUTPUT_STATE`
-//! first. [`alter`] is `zend_alter_ini_entry` at `PHP_INI_USER` as the
-//! natives call it; `ini_set()` reaches the same rules once the face
-//! carries an on-modify function for an extension's entry (#721, #744).
+//! first. Each rule is the entry's `on_modify` on the face, so
+//! `ini_set()` and the natives, which call [`alter`] where php calls
+//! `zend_alter_ini_entry`, meet the same rule; [`startup`] runs them
+//! over the values the host started the engine with (#744).
 
+use php_ext::abi::{ExtensionBuilder, OnModify};
 use php_ext::coerce::numeric_string;
 use php_ext::decl::{IniDecl, Name};
-use php_ext::raising::{Level, Thrown, docref};
+use php_ext::raising::{self, Level, Thrown, docref};
 use php_ext::request::Request;
 
 use crate::{Format, Module, State, headers_sent, sent_error, shown, started_error};
@@ -131,22 +133,49 @@ fn whole_number(value: &[u8]) -> Option<i64> {
     digits.parse().ok()
 }
 
-/// The entry's on-modify rule, `true` where it takes the value.
+/// When a rule runs, php's `ZEND_INI_STAGE_*` as the session's rules
+/// tell them apart: as the engine starts, over the host's values, or
+/// while a request runs, through `ini_set()` and the natives.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    Startup,
+    Runtime,
+}
+
+impl Stage {
+    /// `php_error_docref` at the stage: behind the active native's name
+    /// at runtime, and behind `PHP Startup` in `Unknown` on line 0 as
+    /// the engine starts, which is `php_verror`'s origin while
+    /// `php_during_module_startup()`.
+    fn raise(self, req: &mut Request, level: Level, message: &str) {
+        match self {
+            Stage::Runtime => docref(req, level, message),
+            Stage::Startup => raising::startup(req, level, &format!("PHP Startup: {message}")),
+        }
+    }
+}
+
+/// The entry's on-modify rule at `stage`, `true` where it takes the
+/// value. At startup no session is active and no header is sent, and
+/// `PG(modules_activated)` is not yet set, so an unknown save handler or
+/// serializer is taken without a word there, and the session is disabled
+/// when a request starts under it (`PHP_RINIT_FUNCTION(session)`).
 #[allow(clippy::too_many_lines)] // one arm per `PHP_INI_MH` of session.c
-fn on_modify(req: &mut Request, name: &[u8], value: &[u8]) -> bool {
+fn on_modify(req: &mut Request, name: &[u8], value: &[u8], stage: Stage) -> bool {
     let kind = ENTRIES
         .iter()
         .find(|(n, _, _)| n.as_bytes() == name)
         .map(|(_, _, kind)| *kind);
     match kind {
         None => return true,
-        Some(Kind::PerDir | Kind::PerDirBool) => return false,
+        Some(Kind::PerDir | Kind::PerDirBool) => return per_dir(req, name, value, stage),
         Some(_) => {}
     }
-    if !changeable(req) {
+    if stage == Stage::Runtime && !changeable(req) {
         return false;
     }
-    let deprecated = |req: &mut Request, message: &str| docref(req, Level::Deprecated, message);
+    let deprecated =
+        |req: &mut Request, message: &str| stage.raise(req, Level::Deprecated, message);
     match name {
         b"session.save_path" => !value.contains(&0),
         b"session.name" => {
@@ -156,7 +185,7 @@ fn on_modify(req: &mut Request, name: &[u8], value: &[u8]) -> bool {
                 || numeric_string(value).is_some()
                 || forbidden
             {
-                docref(
+                stage.raise(
                     req,
                     Level::Warning,
                     &format!(
@@ -170,6 +199,9 @@ fn on_modify(req: &mut Request, name: &[u8], value: &[u8]) -> bool {
         }
         b"session.save_handler" => {
             let Some(module) = Module::find(value) else {
+                if stage == Stage::Startup {
+                    return true;
+                }
                 docref(
                     req,
                     Level::Warning,
@@ -177,21 +209,28 @@ fn on_modify(req: &mut Request, name: &[u8], value: &[u8]) -> bool {
                 );
                 return false;
             };
-            let state = req.state::<State>();
-            if !state.set_handler && module == Module::User {
-                docref(
+            let session = req.state::<State>();
+            if !session.set_handler && module == Module::User {
+                let level = match stage {
+                    Stage::Runtime => Level::Warning,
+                    Stage::Startup => Level::Error,
+                };
+                stage.raise(
                     req,
-                    Level::Warning,
+                    level,
                     "Session save handler \"user\" cannot be set by ini_set()",
                 );
                 return false;
             }
-            state.default_module = state.module;
-            state.module = Some(module);
+            session.default_module = session.module;
+            session.module = Some(module);
             true
         }
         b"session.serialize_handler" => {
             let Some(format) = Format::find(value) else {
+                if stage == Stage::Startup {
+                    return true;
+                }
                 docref(
                     req,
                     Level::Warning,
@@ -204,7 +243,7 @@ fn on_modify(req: &mut Request, name: &[u8], value: &[u8]) -> bool {
         }
         b"session.cookie_lifetime" => {
             if crate::atol(value) < 0 {
-                docref(req, Level::Warning, "CookieLifetime cannot be negative");
+                stage.raise(req, Level::Warning, "CookieLifetime cannot be negative");
                 return false;
             }
             true
@@ -221,7 +260,7 @@ fn on_modify(req: &mut Request, name: &[u8], value: &[u8]) -> bool {
             if whole_number(value).is_some_and(|n| bounds.contains(&n)) {
                 return true;
             }
-            docref(
+            stage.raise(
                 req,
                 Level::Warning,
                 &format!(
@@ -233,7 +272,7 @@ fn on_modify(req: &mut Request, name: &[u8], value: &[u8]) -> bool {
             false
         }
         b"session.gc_probability" if Request::ini_parse_bytes(value) < 0 => {
-            docref(
+            stage.raise(
                 req,
                 Level::Warning,
                 "session.gc_probability must be greater than or equal to 0",
@@ -241,7 +280,7 @@ fn on_modify(req: &mut Request, name: &[u8], value: &[u8]) -> bool {
             false
         }
         b"session.gc_divisor" if Request::ini_parse_bytes(value) <= 0 => {
-            docref(
+            stage.raise(
                 req,
                 Level::Warning,
                 "session.gc_divisor must be greater than 0",
@@ -279,10 +318,137 @@ fn on_modify(req: &mut Request, name: &[u8], value: &[u8]) -> bool {
     }
 }
 
+/// The rules of the entries `ZEND_INI_PERDIR` leaves no user to
+/// change, which only the host's values meet: `OnUpdateRfc1867Freq`'s,
+/// and `OnUpdateBool` and `OnUpdateStr`, which take anything.
+fn per_dir(req: &mut Request, name: &[u8], value: &[u8], stage: Stage) -> bool {
+    if name != b"session.upload_progress.freq" {
+        return true;
+    }
+    let percent = crate::atol(value);
+    if percent < 0 {
+        stage.raise(
+            req,
+            Level::Warning,
+            "session.upload_progress.freq must be greater than or equal to 0",
+        );
+        return false;
+    }
+    if value.last() == Some(&b'%') && percent > 100 {
+        stage.raise(
+            req,
+            Level::Warning,
+            "session.upload_progress.freq must be less than or equal to 100%",
+        );
+        return false;
+    }
+    true
+}
+
+/// Entry `AT` of [`ENTRIES`]'s rule at runtime, what the face serves
+/// from `ini_set()` and [`alter`]; one function per entry, since an
+/// `on_modify` is told the value and not the name.
+#[allow(clippy::unnecessary_wraps)] // `OnModify`'s signature, which may throw
+fn modify<const AT: usize>(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
+    let Some((name, _, _)) = ENTRIES.get(AT) else {
+        return Ok(true);
+    };
+    let stage = if req.state::<State>().ini_startup {
+        Stage::Startup
+    } else {
+        Stage::Runtime
+    };
+    Ok(on_modify(req, name.as_bytes(), value, stage))
+}
+
+/// One [`modify`] per entry, in [`ENTRIES`]' order.
+macro_rules! modifiers {
+    ($($at:literal)*) => { [$(modify::<$at> as OnModify),*] };
+}
+const MODIFIERS: [OnModify; 31] =
+    modifiers!(0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30);
+
+/// Every entry's rule on the extension, as `PHP_INI_BEGIN()` pairs each
+/// with its `PHP_INI_MH`. The `ZEND_INI_PERDIR` ones are refused before
+/// any rule by `ini_set()`, and their rules are met only at [`startup`].
+///
+/// ```php
+/// ob_start(); var_dump(ini_set('session.name', '123'), ini_set('session.gc_divisor', '0'), ini_get('session.gc_divisor'), ini_set('session.save_handler', 'user'));
+/// var_dump(ini_set('session.auto_start', '1'), ini_set('session.upload_progress.freq', '5'));
+/// session_save_path(__DIR__); session_start(["use_cookies" => 0, "cache_limiter" => ""]);
+/// var_dump(ini_set('session.serialize_handler', 'php'), ini_set('session.use_only_cookies', '0')); session_write_close();
+/// var_dump(ini_set('session.serialize_handler', 'nope'), ini_set('session.serialize_handler', 'php_serialize'), ini_set('session.use_only_cookies', '0'));
+/// ```
+/// ```expect
+///
+/// Warning: ini_set(): session.name "123" must not be numeric, empty, contain null bytes or any of the following characters "=,;.[ \t\r\n\013\014" in %s on line 2
+///
+/// Warning: ini_set(): session.gc_divisor must be greater than 0 in %s on line 2
+///
+/// Warning: ini_set(): Session save handler "user" cannot be set by ini_set() in %s on line 2
+/// bool(false)
+/// bool(false)
+/// string(3) "100"
+/// bool(false)
+/// bool(false)
+/// bool(false)
+///
+/// Warning: ini_set(): Session ini settings cannot be changed when a session is active (started from %s on line 4) in %s on line 5
+///
+/// Warning: ini_set(): Session ini settings cannot be changed when a session is active (started from %s on line 4) in %s on line 5
+/// bool(false)
+/// bool(false)
+///
+/// Warning: ini_set(): Serialization handler "nope" cannot be found in %s on line 6
+///
+/// Deprecated: ini_set(): Disabling session.use_only_cookies INI setting is deprecated in %s on line 6
+/// bool(false)
+/// string(3) "php"
+/// string(1) "1"
+/// ```
+pub(super) fn register(builder: ExtensionBuilder) -> ExtensionBuilder {
+    ENTRIES
+        .iter()
+        .zip(MODIFIERS)
+        .filter(|((_, _, kind), _)| !matches!(kind, Kind::PerDir | Kind::PerDirBool))
+        .fold(builder, |builder, ((name, _, _), modify)| {
+            builder.on_modify(name.as_bytes(), modify)
+        })
+}
+
+/// `zend_register_ini_entries` at `ZEND_INI_STAGE_STARTUP` over the
+/// values the host started the engine with: each entry's rule, in
+/// `PHP_INI_BEGIN()`'s order, over a value that is not php's default,
+/// raised behind `PHP Startup`; one it refuses leaves the entry at its
+/// default, which is set again for the request, the rule meeting it at
+/// the startup stage too. This engine raises
+/// nothing while it is built, so a request's `RINIT` is where the rules
+/// are served, as ext/date's startup check is; a `ZEND_INI_PERDIR` value the
+/// rule refuses cannot be set back from a request, and stays.
+pub(super) fn startup(req: &mut Request) -> Result<(), Thrown> {
+    req.state::<State>().ini_startup = true;
+    let mut restored = Ok(());
+    for (name, default, kind) in ENTRIES {
+        let value = crate::ini(req, name.as_bytes());
+        if value == default.as_bytes() || on_modify(req, name.as_bytes(), &value, Stage::Startup) {
+            continue;
+        }
+        if !matches!(kind, Kind::PerDir | Kind::PerDirBool)
+            && let Err(thrown) = req.ini_set(name.as_bytes(), default.as_bytes())
+        {
+            restored = Err(thrown);
+            break;
+        }
+    }
+    req.state::<State>().ini_startup = false;
+    restored
+}
+
 /// `zend_alter_ini_entry(name, value, PHP_INI_USER,
-/// PHP_INI_STAGE_RUNTIME)` over a `session.*` entry: the entry's
-/// on-modify rule, then the value set; `false` where the entry does not
-/// exist or the rule refused it.
+/// PHP_INI_STAGE_RUNTIME)` over a `session.*` entry: the value set
+/// through the face, which serves the entry's rule first; `false` where
+/// the entry does not exist, may not change here, or the rule refused
+/// it.
 ///
 /// ```php
 /// ob_start();
@@ -321,8 +487,5 @@ fn on_modify(req: &mut Request, name: &[u8], value: &[u8]) -> bool {
 /// bool(true)
 /// ```
 pub(super) fn alter(req: &mut Request, name: &[u8], value: &[u8]) -> Result<bool, Thrown> {
-    if req.ini_get(name).is_none() || !on_modify(req, name, value) {
-        return Ok(false);
-    }
     Ok(req.ini_set(name, value)?.is_some())
 }

@@ -1048,6 +1048,10 @@ pub struct Request {
     /// outermost serving's end releases it, as `zend_exception_error`
     /// does.
     unwind_exit: bool,
+    /// Whether a diagnostic is displayed past the `php_output` layer,
+    /// `php_output_direct`, as php displays what it raises while the
+    /// engine starts ([`crate::api::raising::startup`]).
+    display_direct: bool,
     /// Where the request stands in `php_request_startup`,
     /// `php_execute_script` and `php_request_shutdown`, what `php_verror`
     /// names a diagnostic's origin by when no function is active.
@@ -1427,6 +1431,7 @@ impl Request {
             fibers: crate::fiber::Fibers::default(),
             pending: None,
             unwind_exit: false,
+            display_direct: false,
             phase: Phase::Startup,
             marked_destructed: false,
             returned: Value::null(),
@@ -4245,7 +4250,7 @@ impl Request {
                 "<?xml version=\"1.0\"?><methodResponse><fault><value><struct><member><name>faultCode</name><value><int>{}</int></value></member><member><name>faultString</name><value><string>{name}:{message} in {named} on line {line}{trace}</string></value></member></struct></value></fault></methodResponse>",
                 self.xmlrpc_error_number()
             );
-            self.write(text.as_bytes());
+            self.display(text.as_bytes());
         } else if self.html_errors() {
             // php's two html formats: the message of an `E_ERROR` or an
             // `E_PARSE` escaped and no trace after it, and every other
@@ -4262,7 +4267,7 @@ impl Request {
                     "{prepend}<br />\n<b>{name}</b>:  {message} in <b>{named}</b> on line <b>{line}</b><br />{trace}\n{append}"
                 ),
             };
-            self.write(text.as_bytes());
+            self.display(text.as_bytes());
         } else if display == Display::Stderr {
             // php's stderr form stands inside the same `else` as the
             // plain one, so `html_errors` takes a CLI diagnostic off the
@@ -4276,8 +4281,27 @@ impl Request {
                 self.ini_text(b"error_prepend_string"),
                 self.ini_text(b"error_append_string"),
             );
-            self.write(text.as_bytes());
+            self.display(text.as_bytes());
         }
+    }
+
+    /// A diagnostic's display on the body: through the `php_output`
+    /// layer, or past it where it is raised as the engine starts.
+    fn display(&mut self, text: &[u8]) {
+        if self.display_direct {
+            self.ub_write(text);
+        } else {
+            self.write(text);
+        }
+    }
+
+    /// A diagnostic raised as the engine starts, at `Unknown` on line
+    /// zero and displayed past the `php_output` layer
+    /// ([`crate::api::raising::startup`]).
+    pub(crate) fn note_startup_error(&mut self, level: Level, message: &str) {
+        self.display_direct = true;
+        self.note_error_in(level, message, b"Unknown", 0);
+        self.display_direct = false;
     }
 
     /// What `php_error_cb` writes after `on line N` for the fatal's trace:

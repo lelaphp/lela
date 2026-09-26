@@ -211,11 +211,6 @@ fn can_change(req: &mut Request, setting: &str, check_cookies: bool) -> bool {
     true
 }
 
-/// The status and the handler as the ini names them now (#744).
-fn synced(req: &mut Request) {
-    session::sync(req);
-}
-
 /// `session_name(?string $name = null): string|false`: the name, and a
 /// new one set through `session.name`'s rule.
 ///
@@ -260,7 +255,6 @@ fn session_name(req: &mut Request) -> Result<Value, Thrown> {
 /// ```
 fn session_module_name(req: &mut Request) -> Result<Value, Thrown> {
     arguments_between(req, 0, 1)?;
-    synced(req);
     let name = string_argument(req, 1, true, false)?;
     if name.is_some() && !can_change(req, "save handler module", false) {
         return Ok(Value::bool(false));
@@ -679,7 +673,6 @@ fn session_cache_expire(req: &mut Request) -> Result<Value, Thrown> {
 /// ```
 fn session_encode(req: &mut Request) -> Result<Value, Thrown> {
     arguments_between(req, 0, 0)?;
-    synced(req);
     let encoded = session::encode(req)?;
     let value = match encoded {
         Some(bytes) => string_value(req, &bytes)?,
@@ -709,7 +702,6 @@ fn session_decode(req: &mut Request) -> Result<Value, Thrown> {
         );
         return Ok(Value::bool(false));
     }
-    synced(req);
     let ok = session::decode(req, &data)?;
     answer(req, Value::bool(ok))
 }

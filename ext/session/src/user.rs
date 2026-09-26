@@ -47,10 +47,6 @@ pub(crate) enum Slot {
 }
 
 impl Handlers {
-    pub(crate) const fn is_set(&self) -> bool {
-        self.open.is_some()
-    }
-
     pub(crate) const fn slot(&mut self, slot: Slot) -> &mut Option<Value> {
         match slot {
             Slot::Open => &mut self.open,

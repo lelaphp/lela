@@ -197,6 +197,7 @@ raising::new_throwable
 raising::notice
 raising::raise
 raising::raise_at
+raising::startup
 raising::throw
 raising::throw_at
 raising::throw_value

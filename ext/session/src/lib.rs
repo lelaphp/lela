@@ -141,6 +141,10 @@ struct State {
     started_at: Option<(Vec<u8>, u32)>,
     /// The `session_shutdown` entry `session_set_save_handler` registers.
     shutdown_registered: bool,
+    /// Whether [`ini::startup`] is running the rules, so the value it
+    /// sets back meets the startup stage's rule, which checks no
+    /// session state or header.
+    ini_startup: bool,
     /// `EG(exception)` as a user handler left it: php goes on after a
     /// handler throws, and the native raises it when it returns.
     thrown: Option<Thrown>,
@@ -204,7 +208,7 @@ pub fn extension() -> Extension {
     for (class, methods) in user::classes() {
         builder = builder.classes(vec![(class, methods)]);
     }
-    builder
+    ini::register(builder)
         .request_state::<State>()
         .rinit(session::rinit)
         .rshutdown(session::rshutdown)
