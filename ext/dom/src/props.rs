@@ -1224,12 +1224,39 @@ fn attr_value(req: &mut Request, object: PhpObject) -> Read {
     some(content_value(req, node, false)?)
 }
 
-/// `dom_attr_value_write`.
+/// `dom_attr_value_write`: the modern classes take the text as it is
+/// written, one text node, where the legacy ones hand it to
+/// `xmlNodeSetContentLen`, which reads entity references in it.
+///
+/// ```php
+/// $m = Dom\XMLDocument::createFromString('<r a="x"/>');
+/// $a = $m->documentElement->getAttributeNode('a');
+/// $a->value = '&lt;&amp;';
+/// var_dump($a->value, $m->saveXML($m->documentElement));
+/// $d = new DOMDocument;
+/// $d->loadXML('<r a="x"/>');
+/// $b = $d->documentElement->getAttributeNode('a');
+/// $b->value = '&lt;&amp;';
+/// var_dump($b->value, $d->saveXML($d->documentElement));
+/// ```
+/// ```expect
+/// string(9) "&lt;&amp;"
+/// string(26) "<r a="&amp;lt;&amp;amp;"/>"
+/// string(2) "<&"
+/// string(18) "<r a="&lt;&amp;"/>"
+/// ```
 fn set_attr_value(req: &mut Request, object: PhpObject, value: &Value) -> Result<(), Thrown> {
     let node = prop_node(req, object)?;
     attr_value_will_change(req, object, node);
     remove_all_children(node);
-    node.set_content_len(&written_bytes(value));
+    let bytes = written_bytes(value);
+    if follows_spec(req, object) {
+        if let Some(text) = Node::new_text_len(node.doc(), &bytes) {
+            node.add_child(text);
+        }
+    } else {
+        node.set_content_len(&bytes);
+    }
     Ok(())
 }
 
