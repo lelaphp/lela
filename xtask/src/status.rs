@@ -381,7 +381,7 @@ fn locks(manifest: &Manifest, readings: &[Reading]) -> Vec<Row> {
         .map(|seam| {
             let ceiling = manifest
                 .lock_ceiling(seam)
-                .map_or(Value::Null, |n| json!(n));
+                .map_or(Value::Null, |n| json!(n.items));
             Row::new(
                 &[
                     ("seam", json!(seam.name)),

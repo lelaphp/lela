@@ -93,6 +93,12 @@ pub struct Budget {
     pub lock_packages: u64,
     pub clean_build_release_s: u64,
     pub api_items: u64,
+    /// `api.lock`'s `__private` lines, the helpers only a macro expansion
+    /// names, held apart from `api_items` (design §4.4, revision 34);
+    /// absent while a person has not written the row, and the whole lock
+    /// is then held to `api_items`.
+    #[serde(default)]
+    pub api_private_items: Option<u64>,
     pub bindings: u64,
     /// `scripts/**` against its ceiling, with what under it is a generator
     /// and not counted; absent while a person has not written the row,
@@ -103,8 +109,8 @@ pub struct Budget {
 
 impl Budget {
     /// Every ceiling `n`: the table a test builds when no ceiling is what
-    /// it measures. The optional `scripts` row stays absent, as the file
-    /// without it parses.
+    /// it measures. The optional `scripts` and `api_private_items` rows
+    /// stay absent, as the file without them parses.
     pub fn flat(n: u64) -> Budget {
         Budget {
             total: n,
@@ -114,10 +120,20 @@ impl Budget {
             lock_packages: n,
             clean_build_release_s: n,
             api_items: n,
+            api_private_items: None,
             bindings: n,
             scripts: None,
         }
     }
+}
+
+/// What one lock's lines are held to: `items` over every line but the
+/// `__private` module's, and `private` over those, where a person has
+/// written that row; without it, `items` holds every line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LockCeiling {
+    pub items: u64,
+    pub private: Option<u64>,
 }
 
 /// `[budget] scripts`: the one statement of what `scripts/**` is held to
@@ -771,10 +787,14 @@ impl Manifest {
             .find(|r| r.predicate.check.as_deref() == Some(instrument))
     }
 
-    /// The ceiling on a seam's lock width: `[budget] api_items` for the api
-    /// seam (design §4.4, §4.5); no other lock has one.
-    pub fn lock_ceiling(&self, seam: &Seam) -> Option<u64> {
-        (seam.name == "api").then_some(self.budget.api_items)
+    /// The ceilings on a seam's lock width: `[budget] api_items` and
+    /// `api_private_items` for the api seam (design §4.4, §4.5); no other
+    /// lock has one.
+    pub fn lock_ceiling(&self, seam: &Seam) -> Option<LockCeiling> {
+        (seam.name == "api").then_some(LockCeiling {
+            items: self.budget.api_items,
+            private: self.budget.api_private_items,
+        })
     }
 
     /// The title of `docs/adr/<number>-*.md`, when the workspace has it.

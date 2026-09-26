@@ -11,7 +11,9 @@
 //!   `allowlist`, or a seam with `allowlist = true`) is what the consumers
 //!   `use` from the producer; a rendered lock (`ops.lock`, the seam whose
 //!   producer is a file rather than a crate) is that file's rows, one line
-//!   an opcode. `api.lock` is held under `[budget] api_items`.
+//!   an opcode. `api.lock` is held under `[budget] api_items`, and its
+//!   `__private` lines, where a person has written the row, under
+//!   `api_private_items` instead.
 //! - A crate's workspace dependencies are held to the `[[edge]]` rows whose
 //!   `from` matches it: every row is exclusive, so `only = true` restates
 //!   what the instrument does for each crate. A `use` path across a `deny = true`
@@ -197,13 +199,29 @@ fn seam_reading(
         rewritten.numbers = std::mem::take(&mut reading.numbers);
         reading = rewritten;
     }
-    if let Some(ceiling) = manifest.lock_ceiling(seam)
-        && generated.len() as u64 > ceiling
-    {
-        problems.push(format!(
-            "{shown} has {} items; the ceiling is {ceiling} (api_items)",
-            generated.len()
-        ));
+    if let Some(ceiling) = manifest.lock_ceiling(seam) {
+        let mut items = generated.len();
+        let mut beside = "";
+        if let Some(cap) = ceiling.private {
+            // Split, `items` is what `api_items` holds, as the locks
+            // section reads it against that ceiling.
+            let private = generated.iter().filter(|line| private(line)).count();
+            items -= private;
+            beside = " beside __private's";
+            reading.numbers.insert("items".to_owned(), count(items));
+            reading.numbers.insert("private".to_owned(), count(private));
+            if private as u64 > cap {
+                problems.push(format!(
+                    "{shown} has {private} {PRIVATE} items; the ceiling is {cap} (api_private_items)"
+                ));
+            }
+        }
+        if items as u64 > ceiling.items {
+            problems.push(format!(
+                "{shown} has {items} items{beside}; the ceiling is {} (api_items)",
+                ceiling.items
+            ));
+        }
     }
     if problems.is_empty() {
         reading.status = Status::Pass;
@@ -560,6 +578,16 @@ fn matches(pattern: &str, name: &str) -> bool {
         Some(prefix) => name.starts_with(prefix) && name[prefix.len()..].starts_with('/'),
         None => pattern == name,
     }
+}
+
+/// The module the lines `api_private_items` holds stand under: the helpers
+/// only a macro expansion names (design §4.4, revision 34).
+const PRIVATE: &str = "__private";
+
+/// Whether a lock line stands under [`PRIVATE`], read off its own path.
+fn private(line: &str) -> bool {
+    line.strip_prefix(PRIVATE)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
 }
 
 /// A count as a reading's number.

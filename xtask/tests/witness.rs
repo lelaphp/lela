@@ -352,6 +352,50 @@ fn a_kernel_or_native_without_a_witness_is_missing_and_fails_the_crate() {
     }
 }
 
+/// The natives the attributes declare, read with the oracle away so the
+/// coverage half is all that is judged (harness §4.5 condition 2,
+/// revision 57): the `anchor-missing` fixture's unwitnessed
+/// `#[php_function]` and the method no fence of its class calls are both
+/// `missing`, and the plain `pub fn` beside them is no subject; in
+/// `anchor-covered`, a class fence on the header and one on the member
+/// impl cover the methods they call, and the body-less alias is no
+/// subject.
+#[test]
+fn the_attributes_declare_the_natives_and_a_class_fence_covers_what_it_calls() {
+    let coverage = |name: &str| {
+        let root = fixture_at("witness", name);
+        let mut manifest = Manifest::load(&root).unwrap();
+        manifest.pin.oracle.path = root.join("no-php-here");
+        let readings = witness::run(
+            &root,
+            &manifest,
+            &Registry::default(),
+            &Ask {
+                crates: vec!["ext/pcre".to_owned()],
+                accept: false,
+                staged: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(readings.len(), 1, "{readings:#?}");
+        readings.into_iter().next().unwrap()
+    };
+
+    let missing = coverage("anchor-missing");
+    assert_eq!(missing.status, Status::Fail, "{missing:#?}");
+    assert_eq!(count(&missing, "subjects"), 4, "{missing:#?}");
+    assert_eq!(count(&missing, "missing"), 2, "{missing:#?}");
+    for name in ["fn preg_last_error", "fn Pattern::replace"] {
+        assert!(missing.message.contains(name), "{}", missing.message);
+    }
+    assert!(!missing.message.contains("helper"), "{}", missing.message);
+
+    let covered = coverage("anchor-covered");
+    assert_ne!(covered.status, Status::Fail, "{covered:#?}");
+    assert_eq!(count(&covered, "subjects"), 3, "{covered:#?}");
+    assert_eq!(count(&covered, "missing"), 0, "{covered:#?}");
+}
+
 /// The negative control of the regime a fence may name (harness §4.1, §8,
 /// ledger 55): a workspace whose one fence names a regime `oracle.toml`
 /// does not carry, which the instrument must fail on. The name is read off

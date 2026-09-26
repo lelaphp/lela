@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use xtask::api_check;
-use xtask::manifest::{Manifest, OneOrMany, Rule, Seam};
+use xtask::manifest::{LockCeiling, Manifest, OneOrMany, Rule, Seam};
 use xtask::reading::{Reading, Status};
 use xtask::scratch::Tree;
 
@@ -123,24 +123,22 @@ fn a_lock_in_an_order_write_would_rewrite_fails_naming_the_line_and_its_place() 
     assert_eq!(failures(&readings).len(), 1);
 }
 
-/// The `ceiling` fixture is one item past `[budget] api_items` whatever the
-/// tracked manifest carries (#338): the fixture directory holds the
-/// crate's `Cargo.toml`, and the items and their lock lines are laid down
-/// here in a scratch workspace from the ceiling the manifest reads, so a
-/// person moving the ceiling moves the fixture with it.
-#[test]
-fn api_lock_over_the_ceiling_fails() {
-    let manifest = Manifest::load(workspace()).unwrap();
+/// The api seam's ceilings as the tracked manifest carries them.
+fn api_ceiling(manifest: &Manifest) -> LockCeiling {
     let seam = manifest
         .seams
         .iter()
         .find(|s| s.name == "api")
         .expect("the manifest has the api seam");
-    let ceiling = manifest
+    manifest
         .lock_ceiling(seam)
-        .expect("the api seam has a ceiling");
-    let items = ceiling + 1;
+        .expect("the api seam has a ceiling")
+}
 
+/// A scratch workspace whose `php_ext` has `beside` public items outside
+/// `__private` and `private` under it, every one with its lock line, laid
+/// down beside the `ceiling` fixture's `Cargo.toml`; the api reading.
+fn api_lock_of(manifest: &Manifest, beside: u64, private: u64) -> Reading {
     // A reading hashes its scope's tree through git, so the scratch tree
     // is a repository, the way every scratch workspace here is.
     let scratch = Tree::new("api-check-ceiling").unwrap();
@@ -152,28 +150,93 @@ fn api_lock_over_the_ceiling_fails() {
         crate_dir.join("Cargo.toml"),
     )
     .unwrap();
-    let names = (0..items)
-        .map(|i| format!("ITEM_{i:04}"))
-        .collect::<Vec<_>>();
-    let mut lib = format!("//! {items} public items: one over the ceiling of {ceiling}.\n");
-    let mut lock = format!("# {items} items, every one with a line; the ceiling is what fails.\n");
-    for name in &names {
-        writeln!(lib, "pub const {name}: u8 = 0;").unwrap();
-        writeln!(lock, "{name}").unwrap();
+    let mut lib = format!("//! {beside} public items, and {private} under `__private`.\n");
+    let mut lines = Vec::new();
+    for i in 0..beside {
+        writeln!(lib, "pub const ITEM_{i:04}: u8 = 0;").unwrap();
+        lines.push(format!("ITEM_{i:04}"));
     }
+    lib.push_str("pub mod __private {\n");
+    for i in 0..private {
+        writeln!(lib, "    pub const HELPER_{i:04}: u8 = 0;").unwrap();
+        lines.push(format!("__private::HELPER_{i:04}"));
+    }
+    lib.push_str("}\n");
+    lines.sort();
+    let lock = format!(
+        "# every item with a line; the ceiling is what fails.\n{}\n",
+        lines.join("\n")
+    );
     fs::write(crate_dir.join("src/lib.rs"), lib).unwrap();
     fs::write(crate_dir.join("api.lock"), lock).unwrap();
 
-    let readings = api_check::hold(&manifest, &scratch, false).unwrap();
-    let api = of(&readings, "api");
+    let readings = api_check::hold(manifest, &scratch, false).unwrap();
+    of(&readings, "api").clone()
+}
+
+/// The `ceiling` fixture is one item past `[budget] api_items` whatever the
+/// tracked manifest carries (#338): the fixture directory holds the
+/// crate's `Cargo.toml`, and the items and their lock lines are laid down
+/// here in a scratch workspace from the ceiling the manifest reads, so a
+/// person moving the ceiling moves the fixture with it. The `__private`
+/// lines stand at their own cap and are not what fails.
+#[test]
+fn api_lock_over_the_ceiling_fails() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    let ceiling = api_ceiling(&manifest);
+    let private = ceiling
+        .private
+        .expect("the manifest carries api_private_items");
+    let items = ceiling.items + 1;
+
+    let api = api_lock_of(&manifest, items, private);
     assert_eq!(api.status, Status::Fail, "{}", api.message);
     assert_eq!(api.numbers["items"], i64::try_from(items).unwrap().into());
+    assert_eq!(
+        api.numbers["private"],
+        i64::try_from(private).unwrap().into()
+    );
     assert!(api.message.contains(&items.to_string()), "{}", api.message);
     assert!(
-        api.message.contains(&ceiling.to_string()),
+        api.message
+            .contains(&format!("{} (api_items)", ceiling.items)),
         "{}",
         api.message
     );
+    assert!(
+        !api.message.contains("api_private_items"),
+        "{}",
+        api.message
+    );
+}
+
+/// The same fixture one `__private` line past `[budget]
+/// api_private_items`, with the rest at `api_items` exactly: the lock
+/// fails by the private cap's name alone, so neither side is counted
+/// against the other's ceiling.
+#[test]
+fn api_lock_private_lines_over_their_own_cap_fail() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    let ceiling = api_ceiling(&manifest);
+    let private = ceiling
+        .private
+        .expect("the manifest carries api_private_items")
+        + 1;
+
+    let api = api_lock_of(&manifest, ceiling.items, private);
+    assert_eq!(api.status, Status::Fail, "{}", api.message);
+    assert!(
+        api.message.contains(&format!(
+            "{private} __private items; the ceiling is {} (api_private_items)",
+            private - 1
+        )),
+        "{}",
+        api.message
+    );
+    assert!(!api.message.contains("(api_items)"), "{}", api.message);
+
+    let at_both = api_lock_of(&manifest, ceiling.items, private - 1);
+    assert_eq!(at_both.status, Status::Pass, "{}", at_both.message);
 }
 
 #[test]
