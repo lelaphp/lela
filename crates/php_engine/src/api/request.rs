@@ -1244,6 +1244,9 @@ pub struct Request {
     /// is laid down `IS_UNDEF`. php's table hangs off a map pointer and
     /// is the request's; so is this one.
     statics: Vec<((ClassId, Vec<u8>), Value)>,
+    /// The evaluated defaults of natives' absent arguments, each kept by
+    /// the request under its native and position (design §4.7).
+    defaults: Vec<((Function, u32), Value)>,
     /// `zend_get_property_guard` (`Z/Zend/zend_object_handlers.c:866`),
     /// what stops a magic accessor reaching itself: one word per
     /// property name per object, carrying `IN_GET`, `IN_SET`,
@@ -1783,6 +1786,7 @@ impl Request {
             trampolines: Vec::new(),
             deprecating: Vec::new(),
             statics: Vec::new(),
+            defaults: Vec::new(),
             guards: Vec::new(),
             ref_sources: Vec::new(),
             weakrefs: crate::weakrefs::Table::default(),
@@ -8119,6 +8123,52 @@ impl Request {
     /// The native payload of `o` as `T`, mutably.
     pub(crate) fn native_mut<T: std::any::Any + Send>(&mut self, o: Obj) -> Option<&mut T> {
         self.heap.native_mut(o)
+    }
+
+    /// [`Request::native_mut`], or the `InternalError` of a method served
+    /// on an object without the payload. The first read answers whether
+    /// it is there, so the fatal is raised with the request free; the
+    /// second cannot miss, since nothing runs between the two.
+    pub(crate) fn native_mut_or_fatal<T: std::any::Any + Send>(
+        &mut self,
+        o: Obj,
+    ) -> Result<&mut T, Thrown> {
+        if self.heap.native::<T>(o).is_none() {
+            return Err(crate::api::raising::fatal(
+                self,
+                "InternalError: a method served on an object without its payload",
+            ));
+        }
+        self.heap.native_mut(o).ok_or(Thrown::of(None))
+    }
+
+    /// The native being served, by identity.
+    pub(crate) fn serving_function(&self) -> Option<Function> {
+        self.active_native_function()
+    }
+
+    /// The default of the parameter `key` names, evaluated earlier in
+    /// this request: a view, the request keeping the owner.
+    pub(crate) fn default_argument(&self, key: (Function, u32)) -> Option<Value> {
+        self.defaults
+            .iter()
+            .find(|(at, _)| *at == key)
+            .map(|(_, value)| *value)
+    }
+
+    /// Keep the owner of an evaluated default until the request ends, as
+    /// php's `zend_get_default_from_internal_arg_info` evaluates one where
+    /// the call left it absent.
+    pub(crate) fn keep_default_argument(&mut self, key: (Function, u32), value: Value) {
+        self.defaults.push((key, value));
+    }
+
+    /// Give up the evaluated defaults, beside the functions' `static`
+    /// variables.
+    pub(crate) fn free_default_arguments(&mut self) {
+        for (_, value) in std::mem::take(&mut self.defaults) {
+            self.release(value);
+        }
     }
 
     /// `zend_objects_destroy_object` (`Z/Zend/zend_objects.c:114`): the

@@ -1,9 +1,9 @@
 //! The ABI group (design §4.4, §7.1): the [`Extension`] value and its
 //! builder, the marshalling vocabulary a native's signature is written
 //! in, and the two state declarations of ADR-0005 with [`Cache`], the
-//! one thing that changes across requests. The marshalling traits are
-//! markers here; the functions the macros expand to land with the macros
-//! and their lines in `api.lock`.
+//! one thing that changes across requests. The marshalling traits and
+//! the class traits the native attributes expand against are the two
+//! submodules', re-exported here.
 
 use std::any::{Any, TypeId};
 use std::cmp::Ordering;
@@ -22,6 +22,18 @@ use crate::api::raising::Thrown;
 use crate::api::request::Request;
 use crate::api::values::{
     ClassId, ClosureInfo, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value,
+};
+
+mod class;
+mod marshal;
+
+pub use class::{
+    Cases, Class, ClassRef, ConstArray, ConstValue, Header, IntoConst, Members, PropertyValue,
+    Typed,
+};
+pub use marshal::{
+    False, FromArgument, Instance, IntoReturn, Iterable, NamedVariadic, Never, Null, NullDefault,
+    OrFalse, Passed, Raw, Ref, Static, This, True, Union, Untyped, Variadic,
 };
 
 /// The startup ini view an extension's engine state is built from: what
@@ -103,13 +115,7 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
     }
 }
 
-/// A native function's entry: the concrete request, off which it reads
-/// its arguments with [`Request::argument_count`] and [`Request::argument`]
-/// as `ZEND_FUNCTION` reads them off `execute_data`, and the value or the
-/// pending throwable (ADR-0002). The call frame holding the arguments
-/// stays on the VM stack while the entry runs, which is what lets a
-/// backtrace taken inside it print them.
-pub(crate) type Entry = fn(&mut Request) -> Result<Value, Thrown>;
+pub(crate) use crate::api::__private::Entry;
 /// Builds one extension's request state at request start.
 pub(crate) type StateBuilder = (TypeId, fn() -> Box<dyn Any + Send>);
 
@@ -306,6 +312,34 @@ impl ExtensionBuilder {
         handlers: &'static dyn ObjectHandlers,
     ) -> ExtensionBuilder {
         self.classes.push((class, methods, Some(handlers), None));
+        self
+    }
+
+    /// The class `C` declares with the native attributes (design §7.1):
+    /// its header's declaration with its member impl's constants,
+    /// properties and methods, registered as the header says, at the
+    /// place the `extension()` value lists it. The `Members` bound is
+    /// what makes a forgotten member impl a build error on this line.
+    #[must_use]
+    pub fn class<C: Header + Members>(self) -> ExtensionBuilder {
+        let mut class = C::header();
+        let (constants, properties, methods) = C::members();
+        class.constants.extend(constants);
+        class.properties.extend(properties);
+        C::register(self, class, methods)
+    }
+
+    /// One native class with its handler table and its `create_object`,
+    /// what `__private::class_new` registers a payload class through.
+    pub(crate) fn class_created(
+        mut self,
+        class: ClassDecl,
+        methods: Vec<(MethodDecl, Entry)>,
+        handlers: &'static dyn ObjectHandlers,
+        new: NativeNew,
+    ) -> ExtensionBuilder {
+        self.classes
+            .push((class, methods, Some(handlers), Some(new)));
         self
     }
 
@@ -592,79 +626,6 @@ impl Callable {
         req.release(self.value);
     }
 }
-
-/// A type a native parameter may have: the engine coerces the argument
-/// through its own kernels and the caller's `strict_types`. The
-/// conversion functions the macros expand to land with the macros.
-pub trait FromArgument: Sized {}
-
-impl FromArgument for Value {}
-impl FromArgument for bool {}
-impl FromArgument for i64 {}
-impl FromArgument for f64 {}
-impl FromArgument for PhpString {}
-impl FromArgument for PhpObject {}
-impl FromArgument for Callable {}
-impl<T: FromArgument> FromArgument for Option<T> {}
-
-/// A type a native may return: converted to a value by the engine.
-pub trait IntoReturn {}
-
-impl IntoReturn for () {}
-impl IntoReturn for Value {}
-impl IntoReturn for bool {}
-impl IntoReturn for i64 {}
-impl IntoReturn for f64 {}
-impl IntoReturn for PhpString {}
-impl IntoReturn for PhpObject {}
-impl<T: IntoReturn> IntoReturn for Option<T> {}
-impl<T: IntoReturn> IntoReturn for OrFalse<T> {}
-
-/// The receiver of a native method: `$this`.
-#[derive(Debug, Clone)]
-pub struct This(pub PhpObject);
-
-/// A by-reference parameter written by the native and never read.
-#[derive(Debug, Clone, Default)]
-pub struct Out<T> {
-    value: Option<T>,
-}
-
-impl<T> Out<T> {
-    /// Write the value the caller's variable will hold.
-    pub fn set(&mut self, value: T) {
-        self.value = Some(value);
-    }
-}
-
-/// A by-reference parameter read and written by the native.
-#[derive(Debug, Clone)]
-pub struct InOut<T> {
-    pub value: T,
-}
-
-/// A return of `T|false`.
-#[derive(Debug, Clone, PartialEq)]
-pub enum OrFalse<T> {
-    Value(T),
-    False,
-}
-
-/// A parameter of two types, `array|string` and its kin; nested for
-/// wider unions.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Union<A, B> {
-    A(A),
-    B(B),
-}
-
-/// The variadic tail of a native's parameters.
-#[derive(Debug, Clone, Default)]
-pub struct Variadic<T>(pub Vec<T>);
-
-/// The native payload of an internal class (design §5.4): one typed slot
-/// on the object, its release and its tracing derived from the type.
-pub trait NativeClass: Any + Send + Sync {}
 
 /// What `has_property` is asked of a property, php's
 /// `ZEND_PROPERTY_ISSET`, `ZEND_PROPERTY_NOT_EMPTY` and

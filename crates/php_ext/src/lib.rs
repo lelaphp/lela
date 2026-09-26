@@ -2,17 +2,23 @@
 //! nothing defined. An extension depends on this crate and on no other
 //! engine crate, so the "api only" rule is crate visibility, not a lint
 //! over the bodies. The eight groups of `php_engine::api`, `tier::Nop`
-//! for the bundle's alias, the four attributes under `attr`, and, behind
-//! the `test` feature, the `Capture` sink and `Engine::serve_capture`
-//! for an extension's own tests. `api.lock` lists every public item here.
+//! for the bundle's alias, the three attributes under `attr` and
+//! `__private` for what they expand to, and, behind the `test` feature,
+//! the `Capture` sink and `Engine::serve_capture` for an extension's own
+//! tests. `api.lock` lists every public item here.
 #![forbid(unsafe_code)]
 
 pub use php_engine::api::{abi, call, coerce, decl, raising, request, syntax, values};
+
+/// What only a macro expansion names (design §4.4): listed in `api.lock`
+/// under a cap of its own, and named by no extension's source.
+#[doc(hidden)]
+pub use php_engine::api::__private;
 pub use php_engine::tier::Nop;
 
 /// The native attributes.
 pub mod attr {
-    pub use php_macros::{php_class, php_const, php_function, tentative};
+    pub use php_macros::{php_class, php_const, php_function};
 }
 
 /// The test face (design §4.3 seam 4, ADR-0002): a fresh engine with one

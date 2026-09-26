@@ -3446,22 +3446,22 @@ api = "abi::Callable"
 mahout = "mahout_native_abi::InOut"
 sites = 14
 crates = 1
-status = "same"
-api = "abi::InOut"
+status = "renamed"
+api = "abi::Ref"
 
 [[item]]
 mahout = "mahout_native_abi::Out"
 sites = 14
 crates = 3
-status = "same"
-api = "abi::Out"
+status = "renamed"
+api = "abi::Ref"
 
 [[item]]
 mahout = "mahout_native_abi::InOut::into_parts"
 sites = 14
 crates = 1
 status = "renamed"
-api = "abi::Out::set"
+api = "abi::Ref::get"
 
 [[item]]
 mahout = "mahout_native_abi::NativeError"
@@ -3482,7 +3482,7 @@ mahout = "mahout_native_abi::Out::cell"
 sites = 4
 crates = 2
 status = "renamed"
-api = "abi::Out::set"
+api = "abi::Ref::set"
 
 [[item]]
 mahout = "mahout_native_abi::NativeError::new"
@@ -3524,8 +3524,8 @@ api = "attr::php_class"
 mahout = "mahout_native_macros::php_method(tentative)"
 sites = 133
 crates = 2
-status = "renamed"
-api = "attr::tentative"
+status = "gone"
+rule = "#[php(tentative)] on the method, a key #[php_class] reads (design §4.7)"
 
 [[item]]
 mahout = "mahout_native_macros::php_const"
@@ -3609,7 +3609,7 @@ mahout = "mahout_native_macros::php_class(fields)"
 sites = 9
 crates = 5
 status = "renamed"
-api = "abi::NativeClass"
+api = "abi::Class"
 
 [[item]]
 mahout = "mahout_native_macros::php_class(props)"
@@ -4110,7 +4110,7 @@ mahout = "mahout_runtime::native_marshal::OutWrite"
 sites = 11
 crates = 3
 status = "renamed"
-api = "abi::Out::set"
+api = "abi::Ref::set"
 
 [[item]]
 mahout = "mahout_runtime::resources::io_error_text"
