@@ -1096,6 +1096,9 @@ pub(super) enum Who {
 
 /// `struct rusage`'s fields in the order `PHP_FUNCTION(getrusage)` adds
 /// them (`Z/ext/standard/microtime.c:115-140`), each under its C name.
+// `tv_usec` is `suseconds_t`, `i32` on Darwin and `i64` on Linux, so its
+// widening is a conversion on one host and the same type on the other.
+#[allow(clippy::useless_conversion)]
 pub(super) fn rusage(who: Who) -> Option<[(&'static str, i64); 17]> {
     let who = match who {
         Who::Process => libc::RUSAGE_SELF,
@@ -1157,15 +1160,20 @@ pub(super) fn statvfs(path: &[u8]) -> Result<Space, i32> {
     #[allow(clippy::cast_precision_loss)]
     let double = |n: u64| n as f64;
     #[allow(clippy::useless_conversion)]
-    let (bsize, frsize) = (u64::from(buf.f_bsize), u64::from(buf.f_frsize));
+    let (bsize, frsize, blocks, bavail) = (
+        u64::from(buf.f_bsize),
+        u64::from(buf.f_frsize),
+        u64::from(buf.f_blocks),
+        u64::from(buf.f_bavail),
+    );
     let unit = if buf.f_frsize == 0 {
         double(bsize)
     } else {
         double(frsize)
     };
     Ok(Space {
-        total: double(u64::from(buf.f_blocks)) * unit,
-        available: double(u64::from(buf.f_bavail)) * unit,
+        total: double(blocks) * unit,
+        available: double(bavail) * unit,
     })
 }
 
