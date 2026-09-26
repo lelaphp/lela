@@ -26,9 +26,9 @@ pub(super) fn parse_tzfile(req: &mut Request, name: &[u8]) -> Option<Arc<Zone>> 
 }
 
 /// `guess_timezone(tzdb)`: what `date_default_timezone_set` set, else
-/// `date.timezone` where it names a zone, else `UTC`. php checks the ini
-/// value when it is set (`OnUpdate_date_timezone`) and keeps the one
-/// before; here the value is checked where it is read.
+/// `date.timezone` where it is not empty, else `UTC`. The entry names a
+/// zone, since [`on_update_timezone`] refuses any other value at startup
+/// and at runtime alike.
 pub(super) fn guess_timezone(req: &mut Request) -> Vec<u8> {
     if let Some(tz) = &req.state::<State>().timezone
         && !tz.is_empty()
@@ -37,11 +37,42 @@ pub(super) fn guess_timezone(req: &mut Request) -> Vec<u8> {
     }
     if let Some(ini) = req.ini_get(b"date.timezone")
         && !ini.is_empty()
-        && Tzdb::builtin().is_valid(ini)
     {
         return ini.to_vec();
     }
     b"UTC".to_vec()
+}
+
+/// `OnUpdate_date_timezone`, `date.timezone`'s `on_modify`: a value
+/// `timelib_timezone_id_is_valid` does not find is refused with php's
+/// warning naming the zone kept, the entry's value before, `UTC` at
+/// startup; `ini_set()` answers `false` and the entry keeps its value.
+///
+/// ```php
+/// var_dump(ini_set('date.timezone', 'Europe/London'), ini_set('date.timezone', 'foo'), ini_get('date.timezone'), date_default_timezone_get());
+/// ```
+/// ```expect
+/// Warning: ini_set(): Invalid date.timezone value 'foo', using 'Europe/London' instead in %s on line 2
+/// string(3) "UTC"
+/// bool(false)
+/// string(13) "Europe/London"
+/// string(13) "Europe/London"
+/// ```
+#[allow(clippy::unnecessary_wraps)] // `OnModify`'s signature, which may throw
+pub(super) fn on_update_timezone(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
+    if Tzdb::builtin().is_valid(value) {
+        return Ok(true);
+    }
+    let kept = req
+        .ini_get(b"date.timezone")
+        .map_or_else(|| b"UTC".to_vec(), <[u8]>::to_vec);
+    let message = format!(
+        "Invalid date.timezone value '{}', using '{}' instead",
+        String::from_utf8_lossy(value.split(|b| *b == 0).next().unwrap_or_default()),
+        String::from_utf8_lossy(&kept)
+    );
+    docref(req, Level::Warning, &message);
+    Ok(false)
 }
 
 /// `get_timezone_info()`: the default zone, or the `DateError` php
