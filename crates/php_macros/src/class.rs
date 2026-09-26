@@ -761,6 +761,7 @@ fn method_entry(class: &Ident, method: &Method, entry: &Ident, manual: bool) -> 
         &method.signature.params,
         &quote!(Some(<#class as #root::abi::Class>::NAME)),
         manual,
+        (Some(class), ident),
     );
     let mut arguments = Vec::new();
     if method.signature.request {

@@ -218,3 +218,22 @@ fn new_by<C: Class>(
 ) -> Result<php_heap::Obj, php_heap::Fatal> {
     heap.object_with(class, slots, C::new_payload(ClassRef(ClassId(class))))
 }
+
+/// The entry of a native on its way in, named as the expansion names it:
+/// the crate, the `#[php_class]` type or `None`, the Rust identifier.
+/// Recorded where the request was served traced, for `xtask witness`'s
+/// coverage (harness §4.5 condition 2, revision 58); in a build without
+/// `php_engine`'s `witness-trace` feature it does nothing and compiles to
+/// nothing, so the host's binary pays no branch for it.
+#[inline]
+pub fn entered(
+    req: &mut Request,
+    krate: &'static str,
+    owner: Option<&'static str>,
+    name: &'static str,
+) {
+    #[cfg(feature = "witness-trace")]
+    req.entered(crate::test::Entered { krate, owner, name });
+    #[cfg(not(feature = "witness-trace"))]
+    let _ = (req, krate, owner, name);
+}

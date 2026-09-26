@@ -47,7 +47,8 @@ impl OutputSink for Capture {
 }
 
 /// What one captured request came to: the sink's bytes and the
-/// observables.
+/// observables, and under `witness-trace` the natives it entered, which
+/// [`Engine::serve_capture_traced_in`] alone records.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Served {
     pub stdout: Vec<u8>,
@@ -56,6 +57,23 @@ pub struct Served {
     pub log: Vec<u8>,
     pub exit_code: i32,
     pub fatal: Option<String>,
+    #[cfg(feature = "witness-trace")]
+    pub entered: Vec<Entered>,
+}
+
+/// One native a traced request entered, named as the macro expansion
+/// that built its entry names it (harness §4.5 condition 2, revision
+/// 58): the crate it is declared in, `CARGO_CRATE_NAME`; the Rust type
+/// whose `#[php_class]` member impl declares it, `None` for a
+/// `#[php_function]`; and its Rust identifier, `r#` stripped. These are
+/// the names `xtask witness` reads off the source, so a subject and what
+/// a fence entered meet without a translation between them.
+#[cfg(feature = "witness-trace")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Entered {
+    pub krate: &'static str,
+    pub owner: Option<&'static str>,
+    pub name: &'static str,
 }
 
 impl Engine {
@@ -86,12 +104,32 @@ impl Engine {
     /// serves each snippet in the scratch tree the file stands in, as the
     /// fresh-process adapter runs it there, so an `include` of the
     /// witness's own file reads the same file under both.
-    pub fn serve_capture_in(
+    pub fn serve_capture_in(&self, dir: &Path, name: &[u8], source: &str, sink: Capture) -> Served {
+        self.serve_capture_with(dir, name, source, sink, false)
+    }
+
+    /// [`Engine::serve_capture_in`] with every native the request enters
+    /// recorded in [`Served::entered`]: what the witness lane's linked
+    /// adapter serves a fence through, so coverage is what the fence ran
+    /// (harness §4.5 condition 2, revision 58).
+    #[cfg(feature = "witness-trace")]
+    pub fn serve_capture_traced_in(
+        &self,
+        dir: &Path,
+        name: &[u8],
+        source: &str,
+        sink: Capture,
+    ) -> Served {
+        self.serve_capture_with(dir, name, source, sink, true)
+    }
+
+    fn serve_capture_with(
         &self,
         dir: &Path,
         name: &[u8],
         source: &str,
         mut sink: Capture,
+        traced: bool,
     ) -> Served {
         // `sapi_cli_register_variables`' rows, as the CLI host describes
         // them: a piped source has no file behind it.
@@ -120,7 +158,17 @@ impl Engine {
             file_handles: Some(piped()),
             ..RequestDescription::default()
         };
-        let observables = self.serve(description, &mut sink);
+        #[cfg(feature = "witness-trace")]
+        let (observables, entered) = if traced {
+            self.serve_traced(description, &mut sink)
+        } else {
+            (self.serve(description, &mut sink), Vec::new())
+        };
+        #[cfg(not(feature = "witness-trace"))]
+        let observables = {
+            let _ = traced;
+            self.serve(description, &mut sink)
+        };
         Served {
             stdout: sink.stdout,
             stderr: sink.stderr,
@@ -128,6 +176,8 @@ impl Engine {
             log: sink.log,
             exit_code: observables.exit_code,
             fatal: observables.fatal,
+            #[cfg(feature = "witness-trace")]
+            entered,
         }
     }
 }
