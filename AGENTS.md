@@ -87,7 +87,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=6d6cf6198b236eef57401b209c8a2900433d0ea6cc1eaf1793372a51b063db2b out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=6e03c1923eae698bc4daa3655f2a22aaf035d5b04d78f17883c1e89677ab5bc9 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -96,8 +96,9 @@ third-engine-design.md
 - ADR-0004 (accepted, 2026-09-05): Extensions are one crate each under `ext/`, with `php_ext` as the facade below them and `php_bundle` as the enabled set above them
 - ADR-0005 (accepted, 2026-09-05): Extension state is request-scoped or immutable engine-scoped, and the engine owns the only cross-request cache
 - ADR-0006 (accepted, 2026-09-07): The compiled tier is a seam on `execute` with one engine-level word per safepoint, not a second executor with a per-request feedback table
+- ADR-0007 (accepted, 2026-09-26): `php_macros` depends on no workspace crate, and `php_engine` depends on it, so Core declares its natives with the same attributes
 
-<!-- /computed in=4e3a808240679783db4844df8019a1e73b4733623d05e36c143d14a739cc74e7 out=1f3c18c06af7268751e776de5e0802d533ba51482ac1afe4d73c8a3cc7b350cf -->
+<!-- /computed in=cd275c53f74aa46cb183bef21d9f5cbf3707cd65ed33af693a9646c2a8ece94b out=79651c9afa60ba42484b7ddc7e66010020efcdf67ee7c162e63876a9e6402e13 -->
 <!-- computed exec cmd="cargo xtask status --section locks --format md" inputs=seams.toml,crates/**/*.lock name=seams | do not edit; run computed -->
 
 | seam | lock | items | ceiling | reading |
@@ -105,12 +106,12 @@ third-engine-design.md
 | heap | heap.lock | 285 |  | pass |
 | unit | unit.lock | 91 |  | pass |
 | ops | ops.lock | 209 |  | pass |
-| api | api.lock | 621 | 650 | pass |
+| api | api.lock | 621 | 660 | pass |
 | sapi | sapi.lock | 7 |  | pass |
 | tier | tier.lock |  |  | skip |
 | harness | xtask.lock | 332 |  | pass |
 
-<!-- /computed in=65805a147e924590e5cdaebb58d76522e1445414aff7038c70c36f6fca70ccd8 out=181f7f1c882f9ed6792b9a6670bce53d7c25684bb7ff80ef17576f1d1698f2ce -->
+<!-- /computed in=000ee381ca2c2d735e15e871214166d45666f46f97ebc67b92a686f08acc8703 out=1b467bde73c3b35fedcd8e6688fe0135cc01a56bc0659227ffc6bcd237a9e229 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
@@ -121,7 +122,8 @@ third-engine-design.md
 | lints.no-panic |  | deny_lints | no reading | Internal invariant failures are InternalError fatals with a message, not panics (design §10). |
 | engine.reentry-signature |  | check | no reading | A function in php_engine that calls execute or release takes &mut Request. |
 | api.no-hot |  | deny_pattern | no reading | php_heap::hot is for the handlers; api never re-exports it (design §4.4, §10). |
-| api.lock-line |  | on | pass | A new pub item in api needs its api.lock line in the same commit; api ≤ 400 items. |
+| ext.no-private |  | deny_pattern | no reading | Only a macro expansion names php_ext::__private; an extension's source never does (design §4.4, revision 34). |
+| api.lock-line |  | on | pass | A new pub item in api needs its api.lock line in the same commit; api holds to [budget] api_items (design §4.4). |
 | xtask.lock-line |  | on | pass | A new pub item in xtask needs its xtask.lock line in the same commit. |
 | ext.pub-beyond-extension |  | on | pass | api-check prints each ext crate's pub items beyond extension(); anything beyond the pdo driver trait and the random handle needs a line in the design (§12). |
 | witness.exit-authored |  | deny_pattern | no reading | exit= in a witness is captured by `xtask witness --accept`, never authored. |
@@ -138,7 +140,7 @@ third-engine-design.md
 | harness.self |  | deny | fail | Harness configuration, the oracle pin and the divergence registry are edited by a person. |
 | divergence.reason |  | check | pass | A divergence row with status accepted has a reason a person wrote; done fails while an open row touches the scope (harness §4.3). |
 
-<!-- /computed in=2a18c41d57d10b445fec4b7f13bce960dee9e4082601396b195cc0744b882624 out=551c720911efd7e8c60a201a6760a30fbfea0151e4494edad50c70fc73df6dc2 -->
+<!-- /computed in=75f59d32b1f3b73998e47efbca89b01dd7db3c2cb28bc8e270cc90447ba361e1 out=90fe5aaea7c41f22233acec39009161542b871d2b0bc3811d40baddf509f0628 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
