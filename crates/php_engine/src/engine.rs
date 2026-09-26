@@ -1174,6 +1174,20 @@ impl EngineBuilder {
         if let Some(tier) = self.tier_extension {
             extensions.push(tier);
         }
+        // What a `MINIT` registers into another extension's tables, as
+        // `php_image_register_handler` adds `IMAGETYPE_SVG` to
+        // `standard`'s constants: each extension's constants rewritten
+        // once with every value the bundle registered.
+        let registered: Vec<_> = extensions
+            .iter()
+            .flat_map(|e| e.registered.iter().cloned())
+            .collect();
+        for extension in &mut extensions {
+            if let Some(link) = extension.constants_link.clone() {
+                let declared = std::mem::take(&mut extension.constants);
+                extension.constants = link(declared, &registered);
+            }
+        }
         for extension in &extensions {
             for entry in &extension.ini {
                 ini.push((entry.name.0.to_vec(), entry.default.to_vec()));

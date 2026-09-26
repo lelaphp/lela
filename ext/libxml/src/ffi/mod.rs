@@ -32,6 +32,7 @@ pub(crate) mod sys;
 mod tree;
 mod xpath;
 
+pub(crate) use io::Reader;
 pub use io::{
     C14nOut, C14nSelect, C14nTarget, Dump, Fragment, Parsed, Parser, Save, Schema, Source,
     Validate, Validated,

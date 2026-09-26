@@ -490,6 +490,7 @@ name = "php_ext_libxml"
 version = "0.0.0"
 dependencies = [
  "php_ext",
+ "php_ext_standard",
  "pkg-config",
 ]
 

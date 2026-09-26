@@ -69,6 +69,7 @@ mod hrtime;
 mod html;
 mod http;
 mod image;
+pub use image::{ImageHandler, ImageSize};
 mod info;
 mod ini;
 mod iptc;
@@ -255,6 +256,7 @@ pub fn extension() -> Extension {
         .constants(file::constants())
         .constants(file_constants())
         .constants(math::constants())
+        .constants_with::<ImageHandler>(image::link_constants)
         .classes(math::classes())
         .classes(var::classes())
         .classes(user_filters::classes())

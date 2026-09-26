@@ -875,3 +875,72 @@ impl Dump {
         ok && unsafe { sys::xmlSaveFlush(self.ctxt) } >= 0
     }
 }
+
+/// The first element an `xmlTextReader` meets, as
+/// `php_libxml_svg_image_handle` reads it: its local name, and its `width`
+/// and `height` attributes where it has them.
+#[derive(Debug, Clone)]
+pub(crate) struct FirstElement {
+    pub(crate) name: Option<Vec<u8>>,
+    pub(crate) width: Option<Vec<u8>>,
+    pub(crate) height: Option<Vec<u8>>,
+}
+
+/// libxml2's pull reader, `xmlreader.h`.
+pub(crate) struct Reader;
+
+impl Reader {
+    /// `xmlReaderForMemory` over `bytes` with `XML_PARSE_NOWARNING |
+    /// XML_PARSE_NOERROR | XML_PARSE_NONET`, read until its first element;
+    /// `None` where no reader could be made or the reader met no element.
+    /// What libxml raised meanwhile reaches no handler, as the options say.
+    pub(crate) fn first_element(bytes: &[u8]) -> Option<FirstElement> {
+        const OPTIONS: c_int =
+            sys::XML_PARSE_NOWARNING | sys::XML_PARSE_NOERROR | sys::XML_PARSE_NONET;
+        Library::init();
+        let len = c_int::try_from(bytes.len()).ok()?;
+        let (element, _silenced) = Raised::capture(|| {
+            // SAFETY: `len` readable bytes the reader reads for its life,
+            // which ends below; no URL, no encoding.
+            let reader = unsafe {
+                sys::xmlReaderForMemory(
+                    bytes.as_ptr().cast(),
+                    len,
+                    ptr::null(),
+                    ptr::null(),
+                    OPTIONS,
+                )
+            };
+            if reader.is_null() {
+                return None;
+            }
+            let mut found = None;
+            // SAFETY: a live reader.
+            while unsafe { sys::xmlTextReaderRead(reader) } == 1 {
+                // SAFETY: as above.
+                if unsafe { sys::xmlTextReaderNodeType(reader) } != sys::XML_READER_TYPE_ELEMENT {
+                    continue;
+                }
+                // SAFETY: a live reader; the name is the reader's own, or null.
+                let name = unsafe { sys::xmlTextReaderConstLocalName(reader) };
+                let attribute = |attr: &[u8]| {
+                    // SAFETY: a live reader and a NUL-terminated name.
+                    let value = unsafe { sys::xmlTextReaderGetAttribute(reader, attr.as_ptr()) };
+                    // SAFETY: a string of libxml's allocator nothing else frees.
+                    unsafe { Alloc::take(value) }
+                };
+                found = Some(FirstElement {
+                    // SAFETY: the name, live until the reader moves on.
+                    name: (!name.is_null()).then(|| unsafe { Alloc::bytes(name) }.to_vec()),
+                    width: attribute(b"width\0"),
+                    height: attribute(b"height\0"),
+                });
+                break;
+            }
+            // SAFETY: the reader, freed once.
+            unsafe { sys::xmlFreeTextReader(reader) };
+            found
+        });
+        element
+    }
+}

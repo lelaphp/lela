@@ -25,6 +25,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 pub mod ffi;
+mod image_svg;
 mod load;
 
 use php_ext::abi::{Callable, Dependency, DependencyKind, Extension, ExtensionBuilder};
@@ -82,91 +83,7 @@ pub fn extension() -> Extension {
     ffi::Library::init();
     ffi::Library::install_loader();
     ExtensionBuilder::default()
-        .functions(vec![
-            (
-                function(
-                    b"libxml_set_streams_context",
-                    vec![parameter(b"context", None, None)],
-                    Type::Void,
-                ),
-                set_streams_context as Entry,
-            ),
-            (
-                function(
-                    b"libxml_use_internal_errors",
-                    vec![parameter(
-                        b"use_errors",
-                        Some(Type::Nullable(Box::new(Type::Bool))),
-                        Some(ConstExpr::Null),
-                    )],
-                    Type::Bool,
-                ),
-                use_internal_errors as Entry,
-            ),
-            (
-                function(
-                    b"libxml_get_last_error",
-                    Vec::new(),
-                    Type::Union(vec![
-                        Type::Named(Name(b"LibXMLError".as_slice().into())),
-                        Type::False,
-                    ]),
-                ),
-                get_last_error as Entry,
-            ),
-            (
-                function(b"libxml_get_errors", Vec::new(), Type::Array),
-                get_errors as Entry,
-            ),
-            (
-                function(b"libxml_clear_errors", Vec::new(), Type::Void),
-                clear_errors as Entry,
-            ),
-            (
-                FunctionDecl {
-                    attributes: vec![Attribute {
-                        name: Name(b"Deprecated".as_slice().into()),
-                        arguments: vec![
-                            named(b"since", b"8.0"),
-                            named(
-                                b"message",
-                                b"as external entity loading is disabled by default",
-                            ),
-                        ],
-                    }],
-                    ..function(
-                        b"libxml_disable_entity_loader",
-                        vec![parameter(
-                            b"disable",
-                            Some(Type::Bool),
-                            Some(ConstExpr::Bool(true)),
-                        )],
-                        Type::Bool,
-                    )
-                },
-                disable_entity_loader as Entry,
-            ),
-            (
-                function(
-                    b"libxml_set_external_entity_loader",
-                    vec![parameter(
-                        b"resolver_function",
-                        Some(Type::Nullable(Box::new(Type::Callable))),
-                        None,
-                    )],
-                    Type::True,
-                ),
-                set_external_entity_loader as Entry,
-            ),
-            (
-                function(
-                    b"libxml_get_external_entity_loader",
-                    Vec::new(),
-                    Type::Nullable(Box::new(Type::Callable)),
-                ),
-                get_external_entity_loader as Entry,
-            ),
-        ])
+        .functions(natives())
         .constants(constants())
         .classes(vec![(error_class(), Vec::new())])
         .dependencies(vec![Dependency {
@@ -175,10 +92,100 @@ pub fn extension() -> Extension {
             rel: None,
             version: None,
         }])
+        .register(image_svg::SVG)
         .request_state::<State>()
         .rshutdown(rshutdown)
         .info(libxml_info)
         .build("libxml")
+}
+
+/// The natives in `libxml.stub.php`'s order, each with its entry.
+fn natives() -> Vec<(FunctionDecl, Entry)> {
+    vec![
+        (
+            function(
+                b"libxml_set_streams_context",
+                vec![parameter(b"context", None, None)],
+                Type::Void,
+            ),
+            set_streams_context as Entry,
+        ),
+        (
+            function(
+                b"libxml_use_internal_errors",
+                vec![parameter(
+                    b"use_errors",
+                    Some(Type::Nullable(Box::new(Type::Bool))),
+                    Some(ConstExpr::Null),
+                )],
+                Type::Bool,
+            ),
+            use_internal_errors as Entry,
+        ),
+        (
+            function(
+                b"libxml_get_last_error",
+                Vec::new(),
+                Type::Union(vec![
+                    Type::Named(Name(b"LibXMLError".as_slice().into())),
+                    Type::False,
+                ]),
+            ),
+            get_last_error as Entry,
+        ),
+        (
+            function(b"libxml_get_errors", Vec::new(), Type::Array),
+            get_errors as Entry,
+        ),
+        (
+            function(b"libxml_clear_errors", Vec::new(), Type::Void),
+            clear_errors as Entry,
+        ),
+        (
+            FunctionDecl {
+                attributes: vec![Attribute {
+                    name: Name(b"Deprecated".as_slice().into()),
+                    arguments: vec![
+                        named(b"since", b"8.0"),
+                        named(
+                            b"message",
+                            b"as external entity loading is disabled by default",
+                        ),
+                    ],
+                }],
+                ..function(
+                    b"libxml_disable_entity_loader",
+                    vec![parameter(
+                        b"disable",
+                        Some(Type::Bool),
+                        Some(ConstExpr::Bool(true)),
+                    )],
+                    Type::Bool,
+                )
+            },
+            disable_entity_loader as Entry,
+        ),
+        (
+            function(
+                b"libxml_set_external_entity_loader",
+                vec![parameter(
+                    b"resolver_function",
+                    Some(Type::Nullable(Box::new(Type::Callable))),
+                    None,
+                )],
+                Type::True,
+            ),
+            set_external_entity_loader as Entry,
+        ),
+        (
+            function(
+                b"libxml_get_external_entity_loader",
+                Vec::new(),
+                Type::Nullable(Box::new(Type::Callable)),
+            ),
+            get_external_entity_loader as Entry,
+        ),
+    ]
 }
 
 /// `PHP_MINFO_FUNCTION(libxml)`.

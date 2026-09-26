@@ -110,6 +110,11 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
 pub(crate) type Entry = fn(&mut Request) -> Result<Value, Thrown>;
 /// Builds one extension's request state at request start.
 pub(crate) type StateBuilder = (TypeId, fn() -> Box<dyn Any + Send>);
+
+/// What [`ExtensionBuilder::constants_with`] was handed: the declared
+/// constants rewritten with every value the bundle registered.
+pub(crate) type ConstantsLink =
+    Arc<dyn Fn(Vec<ConstDecl>, &[Arc<dyn Any + Send + Sync>]) -> Vec<ConstDecl> + Send + Sync>;
 /// Builds one extension's engine state from the startup ini, once.
 pub(crate) type EngineStateBuilder =
     Arc<dyn Fn(&StartupIni) -> Box<dyn Any + Send + Sync> + Send + Sync>;
@@ -190,6 +195,8 @@ pub struct Extension {
     pub(crate) info: Option<Info>,
     /// What [`ExtensionBuilder::register`] was handed, in its order.
     pub(crate) registered: Vec<Arc<dyn Any + Send + Sync>>,
+    /// What [`ExtensionBuilder::constants_with`] was handed.
+    pub(crate) constants_link: Option<ConstantsLink>,
     /// What [`ExtensionBuilder::class_constants`] was handed: each
     /// class another extension declares, with the constants this one
     /// adds to it.
@@ -224,6 +231,7 @@ pub struct ExtensionBuilder {
     rshutdown: Option<fn(&mut Request)>,
     info: Option<Info>,
     registered: Vec<Arc<dyn Any + Send + Sync>>,
+    constants_link: Option<ConstantsLink>,
     class_constants: Vec<(Name, Vec<ClassConstDecl>)>,
     trampolines: Vec<(Name, MethodDecl, Entry)>,
 }
@@ -386,6 +394,29 @@ impl ExtensionBuilder {
         self
     }
 
+    /// This extension's constants as the engine links them: what
+    /// [`ExtensionBuilder::constants`] declared, handed to `link` with
+    /// every value of type `T` the bundle registered
+    /// ([`ExtensionBuilder::register`]), in bundle order, and what `link`
+    /// answers is the extension's list. php's `php_image_register_handler`,
+    /// which another extension's `MINIT` calls into `standard` to add a
+    /// constant to `standard`'s own group and raise its `IMAGETYPE_COUNT`,
+    /// is this rewrite done once, when the engine is built.
+    #[must_use]
+    pub fn constants_with<T: Send + Sync + 'static>(
+        mut self,
+        link: fn(Vec<ConstDecl>, &[&T]) -> Vec<ConstDecl>,
+    ) -> ExtensionBuilder {
+        self.constants_link = Some(Arc::new(move |declared, registered| {
+            let values: Vec<&T> = registered
+                .iter()
+                .filter_map(|value| value.downcast_ref::<T>())
+                .collect();
+            link(declared, &values)
+        }));
+        self
+    }
+
     /// Constants this extension declares on a class another extension
     /// declares, php's `zend_declare_class_constant_ex` over a foreign
     /// `zend_class_entry` at `MINIT`, which is how `pdo_sqlite` puts its
@@ -441,6 +472,7 @@ impl ExtensionBuilder {
             rshutdown: self.rshutdown,
             info: self.info,
             registered: self.registered,
+            constants_link: self.constants_link,
             class_constants: self.class_constants,
             trampolines: self.trampolines,
         }

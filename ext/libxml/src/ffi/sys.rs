@@ -503,6 +503,15 @@ pub(crate) struct xmlSAXHandler {
     pub(crate) fatal_error: *mut c_void,
 }
 
+/// `xmlTextReader`, never read through.
+#[repr(C)]
+pub(crate) struct xmlTextReader {
+    _opaque: [u8; 0],
+}
+
+/// `XML_READER_TYPE_ELEMENT`.
+pub(crate) const XML_READER_TYPE_ELEMENT: c_int = 1;
+
 /// `xmlParserInputBuffer`, never read through.
 #[repr(C)]
 pub(crate) struct xmlParserInputBuffer {
@@ -813,15 +822,6 @@ unsafe extern "C" {
         func: Option<xmlOutputBufferCreateFilenameFunc>,
     ) -> Option<xmlOutputBufferCreateFilenameFunc>;
 
-    // uri.h
-    pub(crate) fn xmlParseURI(uri: *const c_char) -> *mut xmlURI;
-    pub(crate) fn xmlFreeURI(uri: *mut xmlURI);
-    pub(crate) fn xmlURIUnescapeString(
-        s: *const c_char,
-        len: c_int,
-        target: *mut c_char,
-    ) -> *mut c_char;
-
     // HTMLparser.h, HTMLtree.h
     pub(crate) fn htmlCreateMemoryParserCtxt(
         buffer: *const c_char,
@@ -963,6 +963,30 @@ unsafe extern "C" {
 
     // uri.h
     pub(crate) fn xmlBuildURI(uri: *const xmlChar, base: *const xmlChar) -> *mut xmlChar;
+    pub(crate) fn xmlParseURI(uri: *const c_char) -> *mut xmlURI;
+    pub(crate) fn xmlFreeURI(uri: *mut xmlURI);
+    pub(crate) fn xmlURIUnescapeString(
+        s: *const c_char,
+        len: c_int,
+        target: *mut c_char,
+    ) -> *mut c_char;
+
+    // xmlreader.h
+    pub(crate) fn xmlReaderForMemory(
+        buffer: *const c_char,
+        size: c_int,
+        url: *const c_char,
+        encoding: *const c_char,
+        options: c_int,
+    ) -> *mut xmlTextReader;
+    pub(crate) fn xmlTextReaderRead(reader: *mut xmlTextReader) -> c_int;
+    pub(crate) fn xmlTextReaderNodeType(reader: *mut xmlTextReader) -> c_int;
+    pub(crate) fn xmlTextReaderConstLocalName(reader: *mut xmlTextReader) -> *const xmlChar;
+    pub(crate) fn xmlTextReaderGetAttribute(
+        reader: *mut xmlTextReader,
+        name: *const xmlChar,
+    ) -> *mut xmlChar;
+    pub(crate) fn xmlFreeTextReader(reader: *mut xmlTextReader);
 
     // tree.h, xmlstring.h, globals.h: what php's dom reaches beside the above
     pub(crate) fn xmlNewProp(
