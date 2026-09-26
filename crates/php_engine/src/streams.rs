@@ -41,6 +41,7 @@ use crate::api::values::{ClassId, Key, PhpArray, PhpString, Resource, Value};
 
 mod filters;
 mod sockets;
+pub(crate) use filters::FilterCall;
 pub(crate) mod userspace;
 
 /// `FG(def_chunk_size)`, which `PHP_SOCK_CHUNK_SIZE` sets at 8192

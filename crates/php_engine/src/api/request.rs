@@ -375,10 +375,18 @@ impl Stream {
     /// a number that is none of the three, [`Whence::from_int`]'s
     /// `None`, which a stream that seeks refuses and one that cannot is
     /// php's warning for.
+    ///
+    /// Asked from inside a filter's call on the stream, while the stream
+    /// is out of its resource, the seek is taken when the call returns
+    /// ([`crate::streams::FilterCall`]).
     pub fn seek(self, req: &mut Request, offset: i64, whence: impl Into<Option<Whence>>) -> bool {
         let whence = whence.into();
-        req.stream_op(self, |req, stream| stream.seek(req, offset, whence))
-            .unwrap_or(false)
+        if let Some(sought) = req.stream_op(self, |req, stream| stream.seek(req, offset, whence)) {
+            return sought;
+        }
+        req.filtering
+            .as_mut()
+            .is_some_and(|call| call.defer_seek(self, offset, whence))
     }
 
     /// `php_stream_get_line`: the next line with its `\n`, at most
@@ -491,10 +499,18 @@ impl Stream {
     }
 
     /// `php_stream_tell`: the position, `-1` for a stream that has none.
+    /// Asked from inside a filter's call on the stream, it is the
+    /// position the call was made at ([`crate::streams::FilterCall`]).
     #[must_use]
     pub fn tell(self, req: &Request) -> i64 {
-        req.stream_ref(self)
-            .map_or(-1, crate::streams::PhpStream::position)
+        match req.stream_ref(self) {
+            Some(stream) => stream.position(),
+            None => req
+                .filtering
+                .as_ref()
+                .and_then(|call| call.position_of(self))
+                .unwrap_or(-1),
+        }
     }
 
     /// `php_stream_eof`.
@@ -1003,6 +1019,9 @@ pub struct Request {
     /// operation returns, which is when [`Request::serve_native`] raises
     /// it, and before which no more such code is served.
     pub(crate) stream_thrown: Option<Thrown>,
+    /// The filter call in progress, whose stream is out of its resource
+    /// while the filter runs.
+    pub(crate) filtering: Option<crate::streams::FilterCall>,
     /// `le_stream_filter`, the type of the resource a filter on a chain
     /// is named by.
     pub(crate) filter_type: ResourceType,
@@ -1415,6 +1434,7 @@ impl Request {
             error_handling: None,
             error_handling_thrown: None,
             stream_thrown: None,
+            filtering: None,
             filter_type,
             error_handler: None,
             error_handler_levels: 0,

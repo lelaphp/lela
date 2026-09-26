@@ -23,7 +23,7 @@ use std::collections::VecDeque;
 use super::PhpStream;
 use crate::api::raising::{Thrown, warning};
 use crate::api::request::{
-    Brigade, FilterFactory, FilterFlags, FilterStatus, Request, Stream, StreamFilter,
+    Brigade, FilterFactory, FilterFlags, FilterStatus, Request, Stream, StreamFilter, Whence,
 };
 use crate::api::values::{Resource, Value};
 
@@ -52,6 +52,68 @@ enum Chain {
 struct Named {
     stream: Stream,
     chain: Chain,
+}
+
+/// One filter's call on the stream it is attached to. The stream is out
+/// of its resource while the filter runs, so what php's filter reaches
+/// through its `stream` pointer, `php_stream_tell` and
+/// `php_stream_seek` as `consumed` calls them, is answered from here:
+/// the position the call was made at, and a seek the filter asks for,
+/// taken on the stream when the call returns.
+///
+/// ```php
+/// class F extends php_user_filter {
+///     function filter($in, $out, &$consumed, $closing): int {
+///         echo "at ", ftell($this->stream), $closing ? " closing" : "", "\n";
+///         while ($b = stream_bucket_make_writeable($in)) { $consumed += $b->datalen; stream_bucket_append($out, $b); }
+///         if ($closing) fseek($this->stream, 3);
+///         return PSFS_PASS_ON;
+///     }
+/// }
+/// stream_filter_register('f', 'F');
+/// $m = fopen('php://memory', 'w+'); fwrite($m, "abcdef"); rewind($m); fread($m, 1);
+/// $f = stream_filter_append($m, 'f', STREAM_FILTER_READ);
+/// var_dump(fread($m, 2));
+/// stream_filter_remove($f);
+/// var_dump(ftell($m), fread($m, 10));
+/// ```
+/// ```expect
+/// at 1
+/// string(2) "bc"
+/// at 3 closing
+/// int(3)
+/// string(3) "def"
+/// ```
+pub(crate) struct FilterCall {
+    stream: Stream,
+    position: i64,
+    seek: Option<(i64, Option<Whence>)>,
+}
+
+impl FilterCall {
+    /// The position of `stream`, where it is this call's.
+    pub(crate) fn position_of(&self, stream: Stream) -> Option<i64> {
+        let position = match self.seek {
+            Some((offset, Some(Whence::Set))) => offset,
+            _ => self.position,
+        };
+        (stream.resource() == self.stream.resource()).then_some(position)
+    }
+
+    /// A seek of `stream` kept for the call's return, `false` where the
+    /// stream is not this call's.
+    pub(crate) fn defer_seek(
+        &mut self,
+        stream: Stream,
+        offset: i64,
+        whence: Option<Whence>,
+    ) -> bool {
+        if stream.resource() != self.stream.resource() {
+            return false;
+        }
+        self.seek = Some((offset, whence));
+        true
+    }
 }
 
 /// A throwable a filter raised, kept for the native that asked, unless
@@ -90,20 +152,32 @@ impl PhpStream {
         let Some(stream) = self.res.map(Stream::of) else {
             return FilterStatus::ErrFatal;
         };
+        let position = self.position;
         let Some(filter) = self.chain_mut(chain).get_mut(at) else {
             return FilterStatus::ErrFatal;
         };
         let (input, output) = io;
-        match filter
+        let call = FilterCall {
+            stream,
+            position,
+            seek: None,
+        };
+        let outer = req.filtering.replace(call);
+        let answered = filter
             .ops
-            .filter(req, stream, input, output, consumed, flags)
-        {
+            .filter(req, stream, input, output, consumed, flags);
+        let call = std::mem::replace(&mut req.filtering, outer);
+        let status = match answered {
             Ok(status) => status,
             Err(thrown) => {
                 defer(req, thrown);
                 FilterStatus::ErrFatal
             }
+        };
+        if let Some((offset, whence)) = call.and_then(|call| call.seek) {
+            self.seek(req, offset, whence);
         }
+        status
     }
 
     /// `_php_stream_fill_read_buffer`'s filtered arm
