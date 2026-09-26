@@ -156,13 +156,17 @@ fn microtime(req: &mut Request) -> Result<Value, Thrown> {
 }
 
 /// `gettimeofday(bool $as_float = false): array|float`: `sec`, `usec`,
-/// `minuteswest` and `dsttime` of the time in `date.timezone`, which
-/// the witness regime pins to UTC, or the time as a float.
+/// and `minuteswest` and `dsttime` of the default zone's offset at `sec`,
+/// read through ext/date's `get_timezone_info()` and
+/// `timelib_get_time_zone_info` as `_php_gettimeofday` reads them, or the
+/// time as a float.
 ///
 /// ```php
 /// $t = gettimeofday(); $f = gettimeofday(true);
 /// foreach ($t as $k => $v) { echo $k, " ", is_int($v) ? "int" : "other", "\n"; }
 /// var_dump($t["minuteswest"], $t["dsttime"], $t["usec"] < 1000000, is_float($f), $f - $t["sec"] < 5);
+/// date_default_timezone_set('Asia/Kolkata'); $t = gettimeofday(); var_dump($t["minuteswest"], $t["dsttime"]);
+/// date_default_timezone_set('America/Sao_Paulo'); $t = gettimeofday(); var_dump($t["minuteswest"]);
 /// ```
 /// ```expect
 /// sec int
@@ -174,6 +178,9 @@ fn microtime(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(true)
 /// bool(true)
+/// int(-330)
+/// int(0)
+/// int(180)
 /// ```
 fn gettimeofday(req: &mut Request) -> Result<Value, Thrown> {
     argument_count_between(req, 0, 1)?;
@@ -182,12 +189,14 @@ fn gettimeofday(req: &mut Request) -> Result<Value, Thrown> {
     if float {
         return Ok(Value::float(as_float(sec, usec)));
     }
+    let sec = i64::try_from(sec).unwrap_or(i64::MAX);
+    let offset = php_ext_date::get_timezone_info(req)?.offset_at(sec);
     let mut array = PhpArray::new(req)?;
     let rows: [(&[u8], i64); 4] = [
-        (b"sec", i64::try_from(sec).unwrap_or(i64::MAX)),
+        (b"sec", sec),
         (b"usec", i64::from(usec)),
-        (b"minuteswest", 0),
-        (b"dsttime", 0),
+        (b"minuteswest", i64::from(-offset.offset / 60)),
+        (b"dsttime", i64::from(offset.is_dst)),
     ];
     for (name, value) in rows {
         let key = Key::Str(PhpString::new(req, name)?);

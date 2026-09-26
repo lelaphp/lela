@@ -54,7 +54,8 @@ use php_ext::request::Request;
 use php_ext::values::Value;
 
 use crate::args::{class, d, function, nullable, p, str_default, union};
-use crate::ffi::{Errors, Tzdb, Zone};
+use crate::ffi::{Errors, Tzdb};
+pub use crate::ffi::{Offset, Zone};
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
 /// private to this crate (ADR-0005); nothing in it is shared or
@@ -68,6 +69,27 @@ struct State {
     zones: HashMap<Vec<u8>, Arc<Zone>>,
     /// `DATEG(last_errors)`: the messages of the last parse that had any.
     last_errors: Option<Errors>,
+}
+
+/// `get_timezone_info()`, what `php_date.h` declares `PHPAPI` (design
+/// §4.10): the request's default zone, `guess_timezone` parsed through
+/// the request's cache, or php's `DateError` where the database cannot
+/// give it. `ext/standard`'s `gettimeofday` reads its offset.
+///
+/// ```php
+/// date_default_timezone_set('Asia/Kathmandu');
+/// $t = gettimeofday(); var_dump($t['minuteswest'], $t['dsttime']);
+/// ```
+/// ```expect
+/// int(-345)
+/// int(0)
+/// ```
+///
+/// # Errors
+///
+/// The thrown `DateError`.
+pub fn get_timezone_info(req: &mut Request) -> Result<Arc<Zone>, Thrown> {
+    zone::default_zone(req)
 }
 
 /// A native's entry, the shape `ExtensionBuilder::functions` takes.
