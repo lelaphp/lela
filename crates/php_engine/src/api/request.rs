@@ -1069,6 +1069,10 @@ pub struct Request {
     /// opener is opening, which the same path opened from inside it is
     /// refused as.
     pub(crate) user_stream_current: Option<Vec<u8>>,
+    /// The `php_stream_context` the stream operation in progress was
+    /// handed ([`Request::with_stream_ctx`]), which a user-space wrapper's
+    /// instance is given as its `$context`; `None` is php's `NULL`.
+    pub(crate) stream_ctx: Option<Resource>,
     /// `PG(in_user_include)`: a user-space wrapper that is no URL wrapper
     /// is opening for an include under `allow_url_include=0`, so the
     /// opens it makes are held to `allow_url_include` as an include's are.
@@ -1496,6 +1500,7 @@ impl Request {
             url_wrappers: None,
             user_stream_current: None,
             in_user_include: false,
+            stream_ctx: None,
             pclose_ret: 0,
             filters: Vec::new(),
             error_handling: None,
@@ -14152,6 +14157,60 @@ impl Request {
             )?)),
             None => Ok(None),
         }
+    }
+
+    /// `f` with `ctx` as the `php_stream_context` every stream operation
+    /// it makes is handed, the last argument of php's
+    /// `php_stream_open_wrapper_ex`, `php_stream_opendir` and the wrapper
+    /// operations: what a native resolved its `$context` to, the
+    /// `stream-context` resource given or `FG(default_context)`, or
+    /// `None`. A user-space wrapper's instance is given it as its
+    /// `$context` property, as `user_stream_create_object` sets it; the
+    /// one in effect before is back when `f` returns.
+    ///
+    /// ```php
+    /// class W { public $context;
+    ///     function stream_open($p, $m, $o, &$op) { var_dump($this->context, stream_context_get_options($this->context)); return true; }
+    ///     function unlink($p) { var_dump(stream_context_get_options($this->context)); return true; } }
+    /// stream_wrapper_register('ww', 'W');
+    /// $c = stream_context_create(['ww' => ['k' => 'v']]);
+    /// fopen('ww://x', 'r', false, $c);
+    /// fopen('ww://x', 'r');
+    /// unlink('ww://x', $c);
+    /// class T { public Exception $context; }
+    /// stream_wrapper_register('tt', 'T');
+    /// try { opendir('tt://'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// resource(%d) of type (stream-context)
+    /// array(1) {
+    ///   ["ww"]=>
+    ///   array(1) {
+    ///     ["k"]=>
+    ///     string(1) "v"
+    ///   }
+    /// }
+    /// resource(%d) of type (stream-context)
+    /// array(0) {
+    /// }
+    /// array(1) {
+    ///   ["ww"]=>
+    ///   array(1) {
+    ///     ["k"]=>
+    ///     string(1) "v"
+    ///   }
+    /// }
+    /// Cannot assign resource to property T::$context of type Exception
+    /// ```
+    pub fn with_stream_ctx<R>(
+        &mut self,
+        ctx: Option<Resource>,
+        f: impl FnOnce(&mut Request) -> R,
+    ) -> R {
+        let outer = std::mem::replace(&mut self.stream_ctx, ctx);
+        let answer = f(self);
+        self.stream_ctx = outer;
+        answer
     }
 
     /// `php_stream_fopen_tmpfile`, what `tmpfile()` is: a new file in the

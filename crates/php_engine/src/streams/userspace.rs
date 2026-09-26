@@ -121,8 +121,9 @@ fn truthy(req: &mut Request, value: &Value) -> bool {
 
 /// `user_stream_create_object` (`Z/main/streams/userspace.c:242`): an
 /// instance of the class, `None` for one that cannot be instantiated;
-/// its `context` set to `null`, since no stream here has a `context`, and
-/// its constructor called with nothing.
+/// its `$context` set to the `php_stream_context` the operation was
+/// handed, one owner more of it, or to `null` for none, and its
+/// constructor called with nothing.
 fn create_object(req: &mut Request, user: &UserWrapper) -> Result<Option<PhpObject>, Thrown> {
     if req.instantiable(user.class).is_err() {
         if let Some(pending) = req.take_pending() {
@@ -132,7 +133,15 @@ fn create_object(req: &mut Request, user: &UserWrapper) -> Result<Option<PhpObje
     }
     let object = req.new_object(user.class)?;
     let name = PhpString::new(req, b"context")?;
-    if let Err(thrown) = object.set_prop(req, name, Value::null()) {
+    let context = match req.stream_ctx {
+        Some(context) => {
+            let value = context.as_value();
+            req.addref(&value);
+            value
+        }
+        None => Value::null(),
+    };
+    if let Err(thrown) = object.set_prop(req, name, context) {
         req.release(object.as_value());
         return Err(thrown);
     }

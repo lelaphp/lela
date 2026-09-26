@@ -326,8 +326,9 @@ fn dir(req: &mut Request) -> Result<Value, Thrown> {
     argument_count_between(req, 1, 2)?;
     let directory = path_argument(req, 1)?;
     context_argument(req, 2)?;
-    stream_context(req, 2, NullContext::Default)?;
-    let Some(stream) = req.open_dir(directory.as_bytes())? else {
+    let context = stream_context(req, 2, NullContext::Default)?;
+    let Some(stream) = req.with_stream_ctx(context, |req| req.open_dir(directory.as_bytes()))?
+    else {
         return Ok(Value::bool(false));
     };
     set_default_dir(req, Some(stream));
@@ -558,7 +559,10 @@ fn scandir(req: &mut Request) -> Result<Value, Thrown> {
     if directory.as_bytes().is_empty() {
         return Err(arg_value_error(req, 1, "not be empty"));
     }
-    let Some(stream) = req.open_dir(directory.as_bytes())? else {
+    // `if (zcontext) context = php_stream_context_from_zval(zcontext, 0);`
+    let context = stream_context(req, 3, NullContext::None)?;
+    let Some(stream) = req.with_stream_ctx(context, |req| req.open_dir(directory.as_bytes()))?
+    else {
         // The errno the open left, which `php_stream_opendir` does not
         // hand back: the stat of the path says which it was.
         let path = req.absolutize(directory.as_bytes()).0;

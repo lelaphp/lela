@@ -405,33 +405,47 @@ pub(crate) enum NullContext {
 
 /// `php_stream_context_from_zval(zcontext, nocontext)`
 /// (`Z/main/streams/php_stream_context.h:36`) over the `$context` at
-/// `position`, which `Z_PARAM_RESOURCE_OR_NULL` has taken: the one given, or
-/// for `null` `FG(default_context)`, made on the first use and a
-/// resource of the request's from then, unless `nocontext` says none.
-/// The first open of a request that is handed no `$context` makes it,
-/// so under the CLI it is resource 4, after the three standard streams,
-/// and the stream is 5.
+/// `position`, which `Z_PARAM_RESOURCE_OR_NULL` has taken: the one given,
+/// which must be a `stream-context` (`zend_fetch_resource_ex`'s
+/// `supplied resource is not a valid Stream-Context resource`), or for
+/// `null` `FG(default_context)`, made on the first use and a resource of
+/// the request's from then, unless `nocontext` says none. The first open
+/// of a request that is handed no `$context` makes it, so under the CLI
+/// it is resource 4, after the three standard streams, and the stream is
+/// 5. What it answers is the `php_stream_context` the native's stream
+/// operations are handed ([`Request::with_stream_ctx`]).
 ///
 /// ```php
 /// var_dump(fopen('php://memory', 'r'), stream_context_get_default(), fopen('php://memory', 'r'));
+/// try { file_get_contents(__FILE__, false, STDIN); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
 /// ```
 /// ```expect
 /// resource(5) of type (stream)
 /// resource(4) of type (stream-context)
 /// resource(6) of type (stream)
+/// file_get_contents(): supplied resource is not a valid Stream-Context resource
 /// ```
 pub(crate) fn stream_context(
     req: &mut Request,
     position: u32,
     nocontext: NullContext,
-) -> Result<(), Thrown> {
+) -> Result<Option<Resource>, Thrown> {
     let given = req.argument(position).unwrap_or_default().deref();
-    if nocontext == NullContext::Default
-        && matches!(given.as_ref(), ValueRef::Null | ValueRef::Undef)
-    {
-        default_context(req)?;
+    if let Some(res) = given.as_resource().copied() {
+        let kind = context_type(req);
+        if res.is_closed() || res.kind() != Some(kind) {
+            let text = format!(
+                "{}(): supplied resource is not a valid Stream-Context resource",
+                req.active_function_name()
+            );
+            return Err(throw(req, "TypeError", &text));
+        }
+        return Ok(Some(res));
     }
-    Ok(())
+    if nocontext == NullContext::Default {
+        return Ok(Some(default_context(req)?));
+    }
+    Ok(None)
 }
 
 /// `Z_PARAM_RESOURCE` then `decode_context_param`
