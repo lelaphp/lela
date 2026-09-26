@@ -173,6 +173,33 @@ pub(crate) trait Ops: Send {
         Vec::new()
     }
 
+    /// Whether the kind has an `ops->write`: a directory and the `data:`
+    /// wrapper's stream have none, which a write is php's `Stream is not
+    /// writable` for. A kind that takes nothing, as a socket that would
+    /// block does, answers the write `0`, where one that failed answers
+    /// `false`.
+    ///
+    /// ```php
+    /// $d = opendir('.'); var_dump(fwrite($d, 'x'));
+    /// var_dump(file_put_contents('data:,abc', 'x'));
+    /// [$a, $b] = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
+    /// stream_set_blocking($a, false);
+    /// $big = str_repeat('a', 1000000);
+    /// var_dump(fwrite($a, $big) > 0, fwrite($a, $big));
+    /// ```
+    /// ```expect
+    /// Notice: fwrite(): Stream is not writable in %s on line 2
+    /// bool(false)
+    ///
+    /// Notice: file_put_contents(): Stream is not writable in %s on line 3
+    /// bool(false)
+    /// bool(true)
+    /// int(0)
+    /// ```
+    fn writable(&self) -> bool {
+        true
+    }
+
     /// `php_stream_is(stream, PHP_STREAM_IS_USERSPACE)`: a user-space
     /// stream, whose writes are handed to it a chunk at a time.
     fn is_userspace(&self) -> bool {
@@ -495,6 +522,11 @@ impl PhpStream {
         if buf.is_empty() {
             return Some(0);
         }
+        if !self.ops.writable() {
+            let text = format!("{}(): Stream is not writable", req.active_native());
+            raise(req, Level::Notice, &text);
+            return None;
+        }
         if self.writefilters.is_empty() {
             return self.write_buffer(req, buf);
         }
@@ -532,7 +564,10 @@ impl PhpStream {
                     didwrite += justwrote;
                     self.position += i64::try_from(justwrote).unwrap_or(i64::MAX);
                 }
-                _ if didwrite == 0 => return None,
+                // `retval = justwrote`: a kind that took nothing, as a
+                // socket that would block does, answers `0`, and one that
+                // failed `-1`, where nothing was written before.
+                answered if didwrite == 0 => return answered,
                 _ => break,
             }
         }
@@ -1303,6 +1338,12 @@ impl Ops for Temp {
 
     fn own_meta(&self) -> Vec<(Vec<u8>, MetaValue)> {
         self.meta.clone()
+    }
+
+    /// `php_stream_rfc2397_ops` has no `write`, where
+    /// `php_stream_temp_ops` has `php_stream_temp_write`.
+    fn writable(&self) -> bool {
+        self.label != "RFC2397"
     }
 
     /// `php_stream_temp_cast` (`Z/main/streams/memory.c:463`): a file
@@ -3088,6 +3129,10 @@ struct Dir {
 impl Ops for Dir {
     fn label(&self) -> &'static str {
         "dir"
+    }
+
+    fn writable(&self) -> bool {
+        false
     }
 
     /// `ops->write` is `NULL`: `-1`.

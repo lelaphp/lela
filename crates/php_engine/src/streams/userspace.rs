@@ -785,6 +785,11 @@ impl Ops for UserDir {
         "user-space-dir"
     }
 
+    /// `php_stream_userspace_dir_ops` has no `write`.
+    fn writable(&self) -> bool {
+        false
+    }
+
     fn write(&mut self, _req: &mut Request, _buf: &[u8]) -> Option<usize> {
         None
     }
