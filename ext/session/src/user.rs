@@ -480,8 +480,19 @@ fn handler_open(req: &mut Request) -> Result<Value, Thrown> {
     answer(req, Value::bool(opened))
 }
 
-/// `SessionHandler::close(): bool`.
+/// `SessionHandler::close(): bool`, which takes no argument
+/// (`ZEND_PARSE_PARAMETERS_NONE`).
+///
+/// ```php
+/// class H extends SessionHandler { function close(): bool { return parent::close(false); } }
+/// ob_start(); session_set_save_handler(new H); session_save_path(__DIR__); session_start(["use_cookies" => 0, "cache_limiter" => ""]);
+/// try { session_write_close(); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// SessionHandler::close() expects exactly 0 arguments, 1 given
+/// ```
 fn handler_close(req: &mut Request) -> Result<Value, Thrown> {
+    arguments_between(req, 0, 0)?;
     let Some(module) = sanity(req, true)? else {
         return Ok(Value::bool(false));
     };
