@@ -432,6 +432,20 @@ impl Ops for UserStream {
     /// `stream_read` with the count, its string taken, one past the count
     /// php's warning and cut; then `stream_eof`, which is how the stream
     /// learns it is at eof, and whose absence is php's warning and eof.
+    /// An answer that cannot be a string is `try_convert_to_string`'s
+    /// `Error`, thrown from the native that read.
+    ///
+    /// ```php
+    /// class M { public $context;
+    ///     function stream_open($p, $m, $o, &$op) { return true; }
+    ///     function stream_stat() { return false; }
+    ///     function stream_read($n) { return new stdClass; } }
+    /// stream_wrapper_register('mm', 'M');
+    /// try { var_dump(file_get_contents('mm://')); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Object of class stdClass could not be converted to string
+    /// ```
     fn read(&mut self, req: &mut Request, buf: &mut [u8], eof: &mut bool) -> Option<usize> {
         let count = i64::try_from(buf.len()).unwrap_or(i64::MAX);
         let value = match call(req, self.object, b"stream_read", &[Value::int(count)]) {
@@ -441,9 +455,15 @@ impl Ops for UserStream {
         if matches!(value.as_ref(), ValueRef::Bool(false)) {
             return None;
         }
-        let Ok(text) = crate::api::coerce::to_string(req, &value) else {
-            req.release(value);
-            return None;
+        // `try_convert_to_string`: what cannot be a string throws, and the
+        // read fails with it pending.
+        let text = match crate::api::coerce::to_string(req, &value) {
+            Ok(text) => text,
+            Err(thrown) => {
+                req.release(value);
+                defer(req, thrown);
+                return None;
+            }
         };
         req.release(value);
         let mut didread = text.len();
@@ -457,6 +477,7 @@ impl Ops for UserStream {
             didread = buf.len();
         }
         buf[..didread].copy_from_slice(&text.as_bytes()[..didread]);
+        req.release(Value::string(text));
         match call(req, self.object, b"stream_eof", &[]) {
             Called::Missing => {
                 let text = format!(
