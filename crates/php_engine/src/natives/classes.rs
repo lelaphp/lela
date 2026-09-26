@@ -10,7 +10,7 @@ use php_unit::decl::{ClassKind, FunctionDecl, PropertyDecl, Type, Visibility};
 
 use super::stub::stub;
 use super::{string_argument, wrong_argument_count};
-use crate::api::abi::Entry;
+use crate::api::abi::{Entry, PropertyTest};
 use crate::api::coerce::coerce_param;
 use crate::api::raising::{Thrown, arg_type_error, deprecated, throw, warning};
 use crate::api::request::Request;
@@ -841,10 +841,14 @@ fn method_exists(req: &mut Request) -> Result<Value, Thrown> {
 /// itself declared it; and for an object, a property its table has,
 /// `has_property` under `ZEND_PROPERTY_EXISTS`, which a `null` passes.
 ///
+/// A class that answers its own properties answers here too:
+/// `DateInterval`'s fields exist on an interval (`bug69587.phpt`).
+///
 /// ```php
 /// class P { private $pp; } class C extends P { public $a; protected $b; private $c; static $s; }
 /// $c = new C; $c->dyn = null;
 /// var_dump(property_exists('C', 'a'), property_exists('C', 'b'), property_exists('C', 'c'), property_exists('C', 's'), property_exists('C', 'pp'), property_exists('P', 'pp'), property_exists($c, 'dyn'), property_exists('C', 'dyn'), property_exists('Nope', 'a'));
+/// $i = new DateInterval('P1D'); var_dump(property_exists($i, 'd'), property_exists($i, 'nope'));
 /// property_exists(null, 'a');
 /// ```
 /// ```expect exit=255
@@ -858,12 +862,14 @@ fn method_exists(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(false)
 /// bool(false)
+/// bool(true)
+/// bool(false)
 ///
-/// Fatal error: Uncaught TypeError: property_exists(): Argument #1 ($object_or_class) must be of type object|string, null given in %s:5
+/// Fatal error: Uncaught TypeError: property_exists(): Argument #1 ($object_or_class) must be of type object|string, null given in %s:6
 /// Stack trace:
-/// #0 %s(5): property_exists(NULL, 'a')
+/// #0 %s(6): property_exists(NULL, 'a')
 /// #1 {main}
-///   thrown in %s on line 5
+///   thrown in %s on line 6
 /// ```
 fn property_exists(req: &mut Request) -> Result<Value, Thrown> {
     let count = req.argument_count();
@@ -883,10 +889,14 @@ fn property_exists(req: &mut Request) -> Result<Value, Thrown> {
     }
     if is_object && let Some(object) = req.argument(1).unwrap_or_default().deref().as_object() {
         let object = *object;
-        let rows = req.property_rows(object)?;
-        return Ok(Value::bool(rows.iter().any(|(row, _, declared)| {
-            declared.is_none() && row.as_bytes() == name
-        })));
+        let table = req.object_handlers(object.heap());
+        let name = name.to_vec();
+        return Ok(Value::bool(table.has_property(
+            req,
+            object,
+            &name,
+            PropertyTest::Exists,
+        )?));
     }
     Ok(Value::bool(false))
 }
