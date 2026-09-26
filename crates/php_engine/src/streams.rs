@@ -1985,6 +1985,13 @@ impl Request {
     /// that, php's `file:// wrapper is disabled`. A wrapper registered
     /// as a URL wrapper under `allow_url_fopen=0` is refused.
     pub(crate) fn locate_wrapper(&mut self, path: &[u8]) -> (Located, Vec<u8>) {
+        self.locate_wrapper_as(path, true)
+    }
+
+    /// [`Request::locate_wrapper`] with its `options`: `report` is
+    /// `REPORT_ERRORS`, without which each of its warnings is left
+    /// unsaid and the answer is the same.
+    pub(crate) fn locate_wrapper_as(&mut self, path: &[u8], report: bool) -> (Located, Vec<u8>) {
         let n = path
             .iter()
             .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
@@ -2003,7 +2010,9 @@ impl Request {
                     self.active_native(),
                     String::from_utf8_lossy(&scheme[..scheme.len().min(31)])
                 );
-                warning(self, &text);
+                if report {
+                    warning(self, &text);
+                }
                 protocol = None;
             }
         }
@@ -2021,7 +2030,9 @@ impl Request {
                         self.active_native(),
                         String::from_utf8_lossy(path)
                     );
-                    warning(self, &text);
+                    if report {
+                        warning(self, &text);
+                    }
                     return (Located::Nothing, path.to_vec());
                 }
                 let mut at = n + 1;
@@ -2041,7 +2052,9 @@ impl Request {
                     "{}(): file:// wrapper is disabled in the server configuration",
                     self.active_native()
                 );
-                warning(self, &text);
+                if report {
+                    warning(self, &text);
+                }
                 return (Located::Nothing, local);
             }
             return (Located::Plain, local);
@@ -2060,7 +2073,9 @@ impl Request {
                 self.active_native(),
                 String::from_utf8_lossy(&path[..n])
             );
-            warning(self, &text);
+            if report {
+                warning(self, &text);
+            }
             return (Located::Nothing, path.to_vec());
         }
         (found, path.to_vec())

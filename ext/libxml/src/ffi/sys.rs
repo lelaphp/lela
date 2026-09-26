@@ -338,7 +338,7 @@ pub(crate) struct xmlParserNodeInfoSeq {
 /// and writes, the tail left out since this binding never lays one down.
 #[repr(C)]
 pub(crate) struct xmlParserCtxt {
-    pub(crate) sax: *mut c_void,
+    pub(crate) sax: *mut xmlSAXHandler,
     pub(crate) userData: *mut c_void,
     pub(crate) myDoc: *mut xmlDoc,
     pub(crate) wellFormed: c_int,
@@ -492,6 +492,32 @@ pub(crate) struct xmlXPathParserContext {
 pub(crate) struct xmlOutputBuffer {
     _opaque: [u8; 0],
 }
+/// `struct _xmlSAXHandler`, as far as `fatalError`: the handlers an error
+/// of a parser reaches when no structured handler is set, which decide
+/// the route php would have printed it by.
+#[repr(C)]
+pub(crate) struct xmlSAXHandler {
+    pub(crate) callbacks: [*mut c_void; 21],
+    pub(crate) warning: *mut c_void,
+    pub(crate) error: *mut c_void,
+    pub(crate) fatal_error: *mut c_void,
+}
+
+/// `xmlParserInputBuffer`, never read through.
+#[repr(C)]
+pub(crate) struct xmlParserInputBuffer {
+    _opaque: [u8; 0],
+}
+
+/// `struct _xmlURI`, as far as `scheme`: the one field php reads.
+#[repr(C)]
+pub(crate) struct xmlURI {
+    pub(crate) scheme: *mut c_char,
+}
+
+/// `XML_CHAR_ENCODING_NONE`.
+pub(crate) const XML_CHAR_ENCODING_NONE: c_int = 0;
+
 /// `xmlSaveCtxt`, never read through.
 #[repr(C)]
 pub(crate) struct xmlSaveCtxt {
@@ -516,6 +542,21 @@ pub(crate) type xmlFreeFunc = unsafe extern "C" fn(mem: *mut c_void);
 pub(crate) type xmlC14NIsVisibleCallback =
     unsafe extern "C" fn(user_data: *mut c_void, node: *mut xmlNode, parent: *mut xmlNode) -> c_int;
 pub(crate) type xmlMallocFunc = unsafe extern "C" fn(size: usize) -> *mut c_void;
+pub(crate) type xmlInputReadCallback =
+    unsafe extern "C" fn(context: *mut c_void, buffer: *mut c_char, len: c_int) -> c_int;
+pub(crate) type xmlInputCloseCallback = unsafe extern "C" fn(context: *mut c_void) -> c_int;
+pub(crate) type xmlExternalEntityLoader = unsafe extern "C" fn(
+    url: *const c_char,
+    id: *const c_char,
+    ctxt: *mut xmlParserCtxt,
+) -> *mut xmlParserInput;
+pub(crate) type xmlParserInputBufferCreateFilenameFunc =
+    unsafe extern "C" fn(uri: *const c_char, enc: c_int) -> *mut xmlParserInputBuffer;
+pub(crate) type xmlOutputBufferCreateFilenameFunc = unsafe extern "C" fn(
+    uri: *const c_char,
+    encoder: *mut xmlCharEncodingHandler,
+    compression: c_int,
+) -> *mut xmlOutputBuffer;
 
 #[link(name = "xml2")]
 unsafe extern "C" {
@@ -731,6 +772,55 @@ unsafe extern "C" {
     pub(crate) fn xmlFindCharEncodingHandler(name: *const c_char) -> *mut xmlCharEncodingHandler;
     pub(crate) fn xmlCharEncCloseFunc(handler: *mut xmlCharEncodingHandler) -> c_int;
     pub(crate) fn xmlXIncludeProcessFlags(doc: *mut xmlDoc, flags: c_int) -> c_int;
+    pub(crate) fn xmlXIncludeProcessFlagsData(
+        doc: *mut xmlDoc,
+        flags: c_int,
+        data: *mut c_void,
+    ) -> c_int;
+
+    // xmlIO.h: the loader and the buffers php channels through its streams
+    pub(crate) fn xmlSetExternalEntityLoader(f: Option<xmlExternalEntityLoader>);
+    pub(crate) fn xmlGetExternalEntityLoader() -> Option<xmlExternalEntityLoader>;
+    pub(crate) fn xmlNoNetExternalEntityLoader(
+        url: *const c_char,
+        id: *const c_char,
+        ctxt: *mut xmlParserCtxt,
+    ) -> *mut xmlParserInput;
+    pub(crate) fn xmlNewInputFromFile(
+        ctxt: *mut xmlParserCtxt,
+        filename: *const c_char,
+    ) -> *mut xmlParserInput;
+    pub(crate) fn xmlNewIOInputStream(
+        ctxt: *mut xmlParserCtxt,
+        input: *mut xmlParserInputBuffer,
+        enc: c_int,
+    ) -> *mut xmlParserInput;
+    pub(crate) fn xmlParserInputBufferCreateIO(
+        ioread: xmlInputReadCallback,
+        ioclose: Option<xmlInputCloseCallback>,
+        ioctx: *mut c_void,
+        enc: c_int,
+    ) -> *mut xmlParserInputBuffer;
+    pub(crate) fn xmlFreeParserInputBuffer(input: *mut xmlParserInputBuffer);
+    pub(crate) fn __xmlParserInputBufferCreateFilename(
+        uri: *const c_char,
+        enc: c_int,
+    ) -> *mut xmlParserInputBuffer;
+    pub(crate) fn xmlParserInputBufferCreateFilenameDefault(
+        func: Option<xmlParserInputBufferCreateFilenameFunc>,
+    ) -> Option<xmlParserInputBufferCreateFilenameFunc>;
+    pub(crate) fn xmlOutputBufferCreateFilenameDefault(
+        func: Option<xmlOutputBufferCreateFilenameFunc>,
+    ) -> Option<xmlOutputBufferCreateFilenameFunc>;
+
+    // uri.h
+    pub(crate) fn xmlParseURI(uri: *const c_char) -> *mut xmlURI;
+    pub(crate) fn xmlFreeURI(uri: *mut xmlURI);
+    pub(crate) fn xmlURIUnescapeString(
+        s: *const c_char,
+        len: c_int,
+        target: *mut c_char,
+    ) -> *mut c_char;
 
     // HTMLparser.h, HTMLtree.h
     pub(crate) fn htmlCreateMemoryParserCtxt(

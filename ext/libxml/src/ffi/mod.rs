@@ -27,6 +27,7 @@
 )]
 
 mod io;
+mod loader;
 pub(crate) mod sys;
 mod tree;
 mod xpath;
@@ -35,6 +36,7 @@ pub use io::{
     C14nOut, C14nSelect, C14nTarget, Dump, Fragment, Parsed, Parser, Save, Schema, Source,
     Validate, Validated,
 };
+pub(crate) use loader::{Context, Site, Uri};
 pub use sys::{
     HTML_PARSE_NOBLANKS, HTML_PARSE_NODEFDTD, HTML_PARSE_NOERROR, HTML_PARSE_NOIMPLIED,
     HTML_PARSE_NONET, HTML_PARSE_NOWARNING, HTML_PARSE_RECOVER, XML_ATTRIBUTE_ID,
@@ -60,6 +62,8 @@ fn cstr(bytes: &[u8]) -> Vec<u8> {
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::ptr::{self, NonNull};
 
+use php_ext::raising::Thrown;
+use php_ext::request::Request;
 use php_ext::values::{ClassId, PhpObject};
 
 /// What libxml allocated: its strings read and copied, and its
@@ -121,6 +125,13 @@ impl Library {
     pub fn init() {
         // SAFETY: no argument; libxml guards its one-time setup itself.
         unsafe { sys::xmlInitParser() };
+    }
+
+    /// `php_libxml_initialize`'s `xmlSetExternalEntityLoader`: php's
+    /// loader, which every parse of the process reaches and which serves
+    /// libxml's own default outside a call that lends a request.
+    pub fn install_loader() {
+        loader::EntityLoader::install();
     }
 
     /// `xmlParserVersion`, the library's own version string: `"20913"`.
@@ -230,9 +241,15 @@ unsafe extern "C" fn collect(user: *mut c_void, error: *mut sys::xmlError) {
     if user.is_null() || error.is_null() {
         return;
     }
-    // SAFETY: `capture` set `user` to its own `Vec`, live for the call it
-    // wraps, and libxml calls back on that call's thread.
-    let into = unsafe { &mut *user.cast::<Vec<Raised>>() };
+    // SAFETY: `Call::run` set `user` to its own record, live for the call
+    // it wraps, and libxml calls back on that call's thread.
+    let call = unsafe { &mut *user.cast::<Call>() };
+    // An error raised after a program's code threw from inside the call
+    // reaches the list alone: php's handler raises nothing while
+    // `EG(exception)` is set.
+    let after_throw = call.thrown();
+    let routing = call.routing;
+    let into = &mut call.raised;
     // SAFETY: libxml hands a live error for the duration of the callback.
     let e = unsafe { &*error };
     // SAFETY: the error's strings are NUL-terminated and live as long as it.
@@ -285,8 +302,13 @@ unsafe extern "C" fn collect(user: *mut c_void, error: *mut sys::xmlError) {
         column: e.int2,
         element,
         printed,
-        route: if parser.is_null() {
+        route: if after_throw {
+            Route::Silent
+        } else if parser.is_null() {
             Route::Generic
+        } else if let Some(Routing::Parser { sax }) = routing {
+            // SAFETY: the live parser raising the error.
+            unsafe { Routing::parser_route(sax, parser, level) }
         } else {
             Route::Parser
         },
@@ -473,24 +495,53 @@ impl Raised {
     /// `f` served with php's structured handler set, and every error libxml
     /// raised meanwhile copied out beside `f`'s answer; the handler that was
     /// set before is set again after, so a callback that reaches libxml
-    /// inside `f` nests.
+    /// inside `f` nests. Inside a [`Raised::capture_io`] the loads `f`
+    /// makes read through that call's request.
     pub fn capture<R>(f: impl FnOnce() -> R) -> (R, Vec<Raised>) {
-        let mut raised: Vec<Raised> = Vec::new();
-        // SAFETY: the address of this thread's handler.
-        let handler = unsafe { sys::__xmlStructuredError() };
-        // SAFETY: the address of this thread's handler context.
-        let context = unsafe { sys::__xmlStructuredErrorContext() };
-        // SAFETY: both addresses are the thread's own globals, read by copy.
-        let saved_handler = unsafe { *handler };
-        // SAFETY: as above.
-        let saved_context = unsafe { *context };
-        // SAFETY: `raised` outlives the call, and the handler is taken off
-        // again before it is dropped.
-        unsafe { sys::xmlSetStructuredErrorFunc(ptr::from_mut(&mut raised).cast(), Some(collect)) };
-        let answered = f();
-        // SAFETY: the handler and context that were set before.
-        unsafe { sys::xmlSetStructuredErrorFunc(saved_context, saved_handler) };
-        (answered, raised)
+        Call::run(None, ptr::null_mut(), f)
+    }
+
+    /// [`Raised::capture`] for a call whose loads read through php's
+    /// streams: the request lent to libxml's reading and writing callbacks
+    /// and to the external entity loader for the length of `f`, as
+    /// `php_libxml_input_buffer_create_filename`,
+    /// `php_libxml_output_buffer_create_filename` and
+    /// `php_libxml_external_entity_loader` reach php from inside a
+    /// parse; and what a program's loader threw, handed back.
+    pub(crate) fn capture_io<R>(
+        req: &mut Request,
+        routing: Option<Routing>,
+        f: impl FnOnce() -> R,
+    ) -> (R, Vec<Raised>, Option<Thrown>) {
+        let mut io = Io {
+            req: ptr::from_mut(req),
+            thrown: None,
+        };
+        let (answer, raised) = {
+            let _creators = loader::Creators::set();
+            Call::run(routing, &raw mut io, f)
+        };
+        (answer, raised, io.thrown)
+    }
+
+    /// [`Raised::capture`] with the routes its errors take decided by
+    /// `routing`.
+    pub(crate) fn capture_with<R>(routing: Routing, f: impl FnOnce() -> R) -> (R, Vec<Raised>) {
+        Call::run(Some(routing), ptr::null_mut(), f)
+    }
+
+    /// One phase of a [`Raised::capture_io`] call: `f` captured on its
+    /// own, the routes its errors took decided by `routing` (the handlers
+    /// php had put on the parser by then), and the errors handed to the
+    /// enclosing call in the order they came.
+    pub(crate) fn phase<R>(routing: Routing, f: impl FnOnce() -> R) -> R {
+        let (answer, raised) = Call::run(Some(routing), ptr::null_mut(), f);
+        match Call::current() {
+            // SAFETY: the enclosing call's record, live while it runs.
+            Some(parent) => unsafe { (*parent).raised.extend(raised) },
+            None => drop(raised),
+        }
+        answer
     }
 
     /// `xmlGetLastError`, copied: what `libxml_get_last_error()` answers when
@@ -502,16 +553,176 @@ impl Raised {
         if last.is_null() {
             return None;
         }
-        let mut out: Vec<Raised> = Vec::new();
-        // SAFETY: `collect` reads the live error into `out`.
-        unsafe { collect(ptr::from_mut(&mut out).cast(), last) };
-        out.pop().filter(|e| e.code != 0)
+        let mut call = Call {
+            raised: Vec::new(),
+            routing: None,
+            io: ptr::null_mut(),
+            parent: ptr::null_mut(),
+        };
+        // SAFETY: `collect` reads the live error into `call`.
+        unsafe { collect((&raw mut call).cast(), last) };
+        call.raised.pop().filter(|e| e.code != 0)
     }
 
     /// `xmlResetLastError`.
     pub fn reset_last() {
         // SAFETY: no argument; the thread's own record.
         unsafe { sys::xmlResetLastError() };
+    }
+}
+
+/// The handlers php had put on the libxml `ctxt` an error came from,
+/// which decide the route it takes.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Routing {
+    /// A parser's: `sax` is the handler table of the parser php configured
+    /// (`dom_document_parser`'s `ctxt->sax->error = php_libxml_ctx_error`),
+    /// null before it has; see [`Routing::parser_route`].
+    Parser { sax: *mut sys::xmlSAXHandler },
+    /// A validator's: `xmlSchemaSetParserErrors` and its kin set to php's
+    /// generic handler, so its own errors are their bare message, and the
+    /// errors of a parser libxml opens inside it to read a schema, which
+    /// php never configured, are libxml's own text through the same
+    /// handler.
+    Validator,
+}
+
+impl Routing {
+    /// The route of an error `parser` raised at `level`, from the handler
+    /// libxml would have called on it: none where `LIBXML_NOERROR` or
+    /// `LIBXML_NOWARNING` took it off, php's where the parser reads the
+    /// table php configured (a parser libxml opens for an external entity
+    /// reads it once the entity is loaded), and libxml's own otherwise.
+    ///
+    /// # Safety
+    /// `parser` is the live parser that raised the error.
+    unsafe fn parser_route(
+        configured: *mut sys::xmlSAXHandler,
+        parser: *mut sys::xmlParserCtxt,
+        level: Level,
+    ) -> Route {
+        // SAFETY: the caller's contract.
+        let sax = unsafe { (*parser).sax };
+        if sax.is_null() {
+            return Route::Default;
+        }
+        // SAFETY: a live parser's handler table.
+        let table = unsafe { &*sax };
+        let handler = if level == Level::Warning {
+            table.warning
+        } else {
+            table.error
+        };
+        if handler.is_null() {
+            Route::Silent
+        } else if !configured.is_null() && sax == configured {
+            Route::Parser
+        } else {
+            Route::Default
+        }
+    }
+
+    /// The routes of `raised` decided at the end of a validator's call. A
+    /// route a throw already decided stays.
+    pub(crate) fn apply(self, raised: &mut [Raised]) {
+        if let Routing::Validator = self {
+            for error in raised {
+                error.route = match error.route {
+                    Route::Silent => Route::Silent,
+                    Route::Parser => Route::Default,
+                    Route::Generic | Route::Default => Route::Generic,
+                };
+            }
+        }
+    }
+}
+
+/// The request a [`Raised::capture_io`] call lends libxml's callbacks, and
+/// the first throwable a program's code raised from inside the call.
+pub(crate) struct Io {
+    req: *mut Request,
+    thrown: Option<Thrown>,
+}
+
+/// One capture's record, what the thread's structured handler data points
+/// at while the capture runs: the errors collected, the rule that routes
+/// them, the request the loads read through (inherited from the capture it
+/// nests in), and that capture.
+///
+/// libxml2 keeps the structured handler and its data per thread, and
+/// this crate is the only one that sets them, to [`collect`] and a record
+/// of this type for the length of one call from one request. So the
+/// thread's handler data is the one place a callback libxml makes without
+/// data of its own (the two buffer creators, the entity loader)
+/// finds the request that made the call: nothing is kept past the call,
+/// and nothing is shared between threads (ADR-0005).
+pub(crate) struct Call {
+    raised: Vec<Raised>,
+    routing: Option<Routing>,
+    io: *mut Io,
+    parent: *mut Call,
+}
+
+impl Call {
+    /// The record of the capture running on this thread, if one is.
+    fn current() -> Option<*mut Call> {
+        // SAFETY: the address of this thread's handler.
+        let handler_at = unsafe { sys::__xmlStructuredError() };
+        // SAFETY: the thread's own global, read by copy.
+        let handler = unsafe { *handler_at };
+        let ours: sys::xmlStructuredErrorFunc = collect;
+        if handler.map(|h| h as usize) != Some(ours as usize) {
+            return None;
+        }
+        // SAFETY: the address of this thread's handler context.
+        let context_at = unsafe { sys::__xmlStructuredErrorContext() };
+        // SAFETY: the thread's own global, a live record while `collect`
+        // is the handler.
+        let context = unsafe { *context_at };
+        (!context.is_null()).then(|| context.cast::<Call>())
+    }
+
+    /// `f` served with a record of its own as the thread's handler data, its
+    /// errors routed by `routing` at the end, and the thread's handler and
+    /// data put back after.
+    fn run<R>(routing: Option<Routing>, io: *mut Io, f: impl FnOnce() -> R) -> (R, Vec<Raised>) {
+        // SAFETY: the address of this thread's handler.
+        let handler = unsafe { sys::__xmlStructuredError() };
+        // SAFETY: the address of this thread's handler context.
+        let context = unsafe { sys::__xmlStructuredErrorContext() };
+        // SAFETY: both addresses are the thread's own globals, read by copy.
+        let saved_handler = unsafe { *handler };
+        // SAFETY: as above.
+        let saved_context = unsafe { *context };
+        let parent = Call::current().unwrap_or(ptr::null_mut());
+        let io = if io.is_null() && !parent.is_null() {
+            // SAFETY: the enclosing record, live while it runs.
+            unsafe { (*parent).io }
+        } else {
+            io
+        };
+        let mut call = Call {
+            raised: Vec::new(),
+            routing,
+            io,
+            parent,
+        };
+        // SAFETY: `call` outlives the call, and the handler is taken off
+        // again before it is dropped.
+        unsafe { sys::xmlSetStructuredErrorFunc((&raw mut call).cast(), Some(collect)) };
+        let answered = f();
+        // SAFETY: the handler and context that were set before.
+        unsafe { sys::xmlSetStructuredErrorFunc(saved_context, saved_handler) };
+        if let Some(routing) = call.routing {
+            routing.apply(&mut call.raised);
+        }
+        (answered, call.raised)
+    }
+
+    /// Whether a program's code threw from inside the call.
+    fn thrown(&self) -> bool {
+        // SAFETY: the call's `Io`, live while the call runs, or null.
+        !self.io.is_null() && unsafe { (*self.io).thrown.is_some() }
     }
 }
 

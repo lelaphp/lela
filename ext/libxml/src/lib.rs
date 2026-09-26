@@ -25,6 +25,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 pub mod ffi;
+mod load;
 
 use php_ext::abi::{Callable, Dependency, DependencyKind, Extension, ExtensionBuilder};
 use php_ext::coerce::{argument, callable_argument, value_name};
@@ -79,6 +80,7 @@ type Entry = fn(&mut Request) -> Result<Value, Thrown>;
 /// ```
 pub fn extension() -> Extension {
     ffi::Library::init();
+    ffi::Library::install_loader();
     ExtensionBuilder::default()
         .functions(vec![
             (
@@ -423,6 +425,88 @@ impl Errors {
         docref(req, Level::Warning, &String::from_utf8_lossy(&text));
     }
 
+    /// `php_libxml_ctx_error` from php's own code, the entity loader's:
+    /// the message joined to the buffer and, once it ends with its
+    /// newline, onto the list with the parser's line and column, or
+    /// raised as a warning with the parser's file (`Entity` for none) and
+    /// line where the parser has an input and alone where it has none;
+    /// nothing is raised while a throwable is pending, `suppressed`. The
+    /// external subset a parser loads is named with the parser's place in
+    /// the document; a resolver that throws is the error its caller sees,
+    /// and one that answers another resource php's `TypeError`.
+    ///
+    /// ```php
+    /// $d = new DOMDocument;
+    /// $d->resolveExternals = true;
+    /// libxml_set_external_entity_loader(function ($public, $system, $context) {
+    ///     var_dump($context);
+    ///     return null;
+    /// });
+    /// $d->loadXML("<!DOCTYPE r PUBLIC \"-//D\" \"r.dtd\">\n<r/>");
+    /// libxml_set_external_entity_loader(function ($public, $system, $context) {
+    ///     throw new Exception("from the resolver");
+    /// });
+    /// try { $d->loadXML('<!DOCTYPE r PUBLIC "-//D" "r.dtd"><r/>'); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+    /// libxml_set_external_entity_loader(fn($p, $s, $c) => stream_context_create());
+    /// try { $d->loadXML('<!DOCTYPE r PUBLIC "-//D" "r.dtd"><r/>'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// array(4) {
+    ///   ["directory"]=>
+    ///   string(%d) "%s/"
+    ///   ["intSubName"]=>
+    ///   string(1) "r"
+    ///   ["extSubURI"]=>
+    ///   string(5) "r.dtd"
+    ///   ["extSubSystem"]=>
+    ///   string(4) "-//D"
+    /// }
+    ///
+    /// Warning: DOMDocument::loadXML(): Failed to load external entity "-//D" in Entity, line: 1 in %s on line 8
+    /// from the resolver
+    /// DOMDocument::loadXML(): The user entity loader callback "{closure:%s:13}" has returned a resource, but it is not a stream
+    /// ```
+    pub(crate) fn ctx(
+        req: &mut Request,
+        site: Option<&ffi::Site>,
+        message: &[u8],
+        suppressed: bool,
+    ) {
+        let state = req.state::<State>();
+        let mut end = message.len();
+        while end > 0 && message[end - 1] == b'\n' {
+            end -= 1;
+        }
+        state.buffer.extend_from_slice(&message[..end]);
+        if end == message.len() {
+            return;
+        }
+        let text = std::mem::take(&mut state.buffer);
+        let (line, column) = site.map_or((0, 0), |s| (s.line, s.column));
+        if let Some(list) = state.errors.as_mut() {
+            let mut error = Raised::internal(&text);
+            error.line = line;
+            error.column = column;
+            list.push(error);
+            return;
+        }
+        if suppressed {
+            return;
+        }
+        let text = String::from_utf8_lossy(&text);
+        let message = match site {
+            Some(site) => {
+                let file = site.file.as_deref().map_or_else(
+                    || String::from("Entity"),
+                    |f| String::from_utf8_lossy(f).into_owned(),
+                );
+                format!("{text} in {file}, line: {line}")
+            }
+            None => text.into_owned(),
+        };
+        docref(req, Level::Warning, &message);
+    }
+
     /// The errors [`ffi::capture`] copied out of one call, routed as php's
     /// handlers would have met them: onto the list with internal errors on,
     /// `php_list_set_error_structure`; otherwise joined in the buffer until a
@@ -452,6 +536,21 @@ impl Errors {
                 Self::piece(req, &error, &piece);
             }
         }
+    }
+
+    /// The errors of a call that lent libxml the request, one of
+    /// [`ffi::Parser`]'s, [`ffi::Validate`]'s or [`ffi::Save`]'s that
+    /// loads or writes, routed as [`Errors::route`] routes
+    /// them, and what a program's code threw from inside the call handed
+    /// on: the errors raised after the throw reach the list alone, as
+    /// php's handlers raise nothing while `EG(exception)` is set.
+    pub fn settle(
+        req: &mut Request,
+        raised: Vec<Raised>,
+        thrown: Option<Thrown>,
+    ) -> Result<(), Thrown> {
+        Self::route(req, raised);
+        thrown.map_or(Ok(()), Err)
     }
 
     /// One call of php's handler: `text` joined to the buffer, and raised

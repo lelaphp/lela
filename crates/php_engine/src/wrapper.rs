@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use crate::api::raising::{Level, Thrown, docref, warning};
-use crate::api::request::{Request, Stream, WrapperOp};
+use crate::api::request::{Request, Stream, UrlStat, WrapperOp};
 use crate::api::values::{Key, PhpString};
 use crate::streams::{Located, StatBuf, stat_buf, strerror};
 
@@ -240,19 +240,58 @@ impl Request {
             }
         }
         let (wrapper, local) = self.locate_wrapper(path);
-        let sb = match wrapper {
+        let sb = match self.wrapper_stat(wrapper, &local, link, cached, quiet)? {
+            UrlStat::Found(sb) => Some(sb),
+            UrlStat::Failed | UrlStat::Unsupported => None,
+        };
+        if cached && let Some(sb) = sb {
+            if link {
+                self.stat_cache.lstat = Some((path.to_vec(), sb));
+            }
+            if !link || sb[2] & S_IFMT != S_IFLNK {
+                self.stat_cache.stat = Some((path.to_vec(), sb));
+            }
+        }
+        Ok(sb)
+    }
+
+    /// `php_stream_locate_url_wrapper(path, &local, 0)` and the located
+    /// wrapper's own `url_stat` under `PHP_STREAM_URL_STAT_QUIET`, as
+    /// `php_libxml_streams_IO_open_wrapper` asks it before it opens
+    /// (`Z/ext/libxml/libxml.c:487`): no warning, no stat cache, and a
+    /// wrapper without a `url_stat` told apart from one whose stat failed.
+    pub(crate) fn stat_url_quiet(&mut self, path: &[u8]) -> Result<UrlStat, Thrown> {
+        let (wrapper, local) = self.locate_wrapper_as(path, false);
+        self.wrapper_stat(wrapper, &local, false, false, true)
+    }
+
+    /// `wrapper->wops->url_stat(wrapper, local, flags, &ssb, NULL)` over a
+    /// located wrapper: `lstat(2)` under `link` and `stat(2)` otherwise
+    /// for the plain files wrapper, a program's `url_stat` with `link`,
+    /// `quiet` and `cached` as its flags, an extension's own stat, and
+    /// none for `php://` and for no wrapper.
+    fn wrapper_stat(
+        &mut self,
+        wrapper: Located,
+        local: &[u8],
+        link: bool,
+        cached: bool,
+        quiet: bool,
+    ) -> Result<UrlStat, Thrown> {
+        let found = |sb: Option<StatBuf>| sb.map_or(UrlStat::Failed, UrlStat::Found);
+        Ok(match wrapper {
             Located::Plain => {
                 // `php_plain_files_url_stater` strips `file://` again
                 // unless `PHP_STREAM_URL_STAT_IGNORE_OPEN_BASEDIR` is
                 // set, which `php_stat` sets and `_php_stream_stat_path`
                 // does not.
                 let url = if cached {
-                    &local[..]
+                    local
                 } else {
-                    strip_file_scheme(&local)
+                    strip_file_scheme(local)
                 };
                 if url.is_empty() {
-                    None
+                    UrlStat::Failed
                 } else {
                     let target = self.absolutize(url).0;
                     let meta = if link {
@@ -260,17 +299,19 @@ impl Request {
                     } else {
                         std::fs::metadata(target)
                     };
-                    meta.ok().map(|meta| stat_buf(&meta))
+                    found(meta.ok().map(|meta| stat_buf(&meta)))
                 }
             }
             Located::Space(user) => {
                 // `php_stat` adds `PHP_STREAM_URL_STAT_IGNORE_OPEN_BASEDIR`,
                 // and `PHP_STREAM_URL_STAT_QUIET` for an existence check.
                 let flags = i64::from(link) | i64::from(quiet) << 1 | i64::from(cached) << 2;
-                crate::streams::userspace::url_stat(self, &user, &local, flags)?
+                found(crate::streams::userspace::url_stat(
+                    self, &user, local, flags,
+                )?)
             }
             Located::Ext(at) => match self.wrappers[at].stat {
-                Some(stat) => match stat(self, &local)? {
+                Some(stat) => match stat(self, local)? {
                     Some(array) => {
                         // `statbuf_from_array`
                         // (`Z/main/streams/userspace.c:799`): each of the
@@ -284,23 +325,14 @@ impl Request {
                                 .and_then(|value| value.deref().as_int())
                                 .unwrap_or(0);
                         }
-                        Some(sb)
+                        UrlStat::Found(sb)
                     }
-                    None => None,
+                    None => UrlStat::Failed,
                 },
-                None => None,
+                None => UrlStat::Unsupported,
             },
-            Located::Php | Located::Nothing => None,
-        };
-        if cached && let Some(sb) = sb {
-            if link {
-                self.stat_cache.lstat = Some((path.to_vec(), sb));
-            }
-            if !link || sb[2] & S_IFMT != S_IFLNK {
-                self.stat_cache.stat = Some((path.to_vec(), sb));
-            }
-        }
-        Ok(sb)
+            Located::Php | Located::Nothing => UrlStat::Unsupported,
+        })
     }
 
     /// `php_stream_locate_url_wrapper(path, &local, 0) ==

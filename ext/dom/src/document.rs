@@ -8,8 +8,7 @@ use php_ext::values::{PhpObject, Value};
 use php_ext_libxml::Errors;
 use php_ext_libxml::ffi as f;
 use php_ext_libxml::ffi::{
-    DocString, Kind, Name, Node, Ns, Parsed, Parser, Route, Save, Schema, Source, Validate,
-    Validated,
+    DocString, Kind, Name, Node, Ns, Parsed, Parser, Save, Schema, Source, Validate, Validated,
 };
 
 use crate::map::MapKind;
@@ -30,22 +29,6 @@ pub(crate) const XMLNS_NS: &[u8] = b"http://www.w3.org/2000/xmlns/";
 /// `zend_argument_must_not_be_empty_error`.
 fn must_not_be_empty(req: &mut Request, position: u32) -> Thrown {
     arg_value_error(req, position, "not be empty")
-}
-
-/// The errors of a validator routed as php meets them: its own, raised
-/// through the handler `xmlSchemaSetParserErrors` and its kin set to php's
-/// generic one, as their bare message; and those of the parser libxml
-/// opens inside it to read a schema, which php never configured, as
-/// libxml's own handler reports them, through the same generic handler.
-fn generic(mut raised: Vec<php_ext_libxml::ffi::Raised>) -> Vec<php_ext_libxml::ffi::Raised> {
-    for error in &mut raised {
-        error.route = if error.route == Route::Parser {
-            Route::Default
-        } else {
-            Route::Generic
-        };
-    }
-    raised
 }
 
 // ---- the virtual properties
@@ -478,23 +461,31 @@ fn parse_document(req: &mut Request, from_file: bool) -> Result<Value, Thrown> {
     if recover {
         options |= f::XML_PARSE_RECOVER;
     }
-    let (parsed, raised) = if from_file {
+    let (parsed, raised, thrown) = if from_file {
         if source.contains(&0) {
             return Err(arg_value_error(req, 1, "not contain any null bytes"));
         }
         let Some(path) = file_path(req, &source) else {
             return Ok(Value::bool(false));
         };
-        Parser::xml(Source::File(&path), options, None, recover, None)
+        Parser::xml(req, Source::File(&path), options, None, recover, None)
     } else {
         let dir = base_directory(req);
-        Parser::xml(Source::Memory(&source), options, Some(&dir), recover, None)
+        Parser::xml(
+            req,
+            Source::Memory(&source),
+            options,
+            Some(&dir),
+            recover,
+            None,
+        )
     };
-    Errors::route(req, raised);
-    match parsed {
-        Parsed::Document(doc) => Ok(finish_loading(req, this, doc)),
-        Parsed::Nothing | Parsed::Malformed => Ok(Value::bool(false)),
-    }
+    let settled = Errors::settle(req, raised, thrown);
+    let loaded = match parsed {
+        Parsed::Document(doc) => finish_loading(req, this, doc),
+        Parsed::Nothing | Parsed::Malformed => Value::bool(false),
+    };
+    settled.map(|()| loaded)
 }
 
 /// `DOMDocument::load(string $filename, int $options = 0): bool`.
@@ -557,16 +548,17 @@ fn load_html_as(req: &mut Request, from_file: bool) -> Result<Value, Thrown> {
         docref(req, Level::Warning, "Invalid options");
         return Ok(Value::bool(false));
     };
-    let (doc, raised) = if from_file {
+    let (doc, raised, thrown) = if from_file {
         if source.contains(&0) {
             return Err(arg_value_error(req, 1, "not contain any null bytes"));
         }
-        Parser::html(Source::File(&source), options)
+        Parser::html(req, Source::File(&source), options)
     } else {
-        Parser::html(Source::Memory(&source), options)
+        Parser::html(req, Source::Memory(&source), options)
     };
-    Errors::route(req, raised);
-    Ok(finish_loading(req, this, doc))
+    let settled = Errors::settle(req, raised, thrown);
+    let loaded = finish_loading(req, this, doc);
+    settled.map(|()| loaded)
 }
 
 /// `DOMDocument::loadHTML(string $source, int $options = 0): bool`.
@@ -741,8 +733,15 @@ fn save(req: &mut Request) -> Result<Value, Thrown> {
             Value::int(written)
         });
     }
-    let (bytes, raised) = Save::file(&file, doc, doc.doc_encoding().as_deref(), format, no_empty);
-    Errors::route(req, raised);
+    let (bytes, raised, thrown) = Save::file(
+        req,
+        &file,
+        doc,
+        doc.doc_encoding().as_deref(),
+        format,
+        no_empty,
+    );
+    Errors::settle(req, raised, thrown)?;
     Ok(if bytes == -1 {
         Value::bool(false)
     } else {
@@ -801,8 +800,8 @@ fn save_html_file(req: &mut Request) -> Result<Value, Thrown> {
     let (this, doc) = this_node(req)?;
     let format = props_of(req, this).format;
     let encoding = Save::meta_encoding(doc);
-    let (bytes, raised) = Save::html_file(&file, doc, encoding.as_deref(), format);
-    Errors::route(req, raised);
+    let (bytes, raised, thrown) = Save::html_file(req, &file, doc, encoding.as_deref(), format);
+    Errors::settle(req, raised, thrown)?;
     Ok(if bytes == -1 {
         Value::bool(false)
     } else {
@@ -1660,9 +1659,10 @@ fn xinclude(req: &mut Request) -> Result<Value, Thrown> {
     };
     let (this, doc) = this_node(req)?;
     strip_xinclude_references(doc);
-    let (err, raised) = Parser::xinclude(doc, flags);
-    Errors::route(req, raised);
+    let (err, raised, thrown) = Parser::xinclude(req, doc, flags);
+    let settled = Errors::settle(req, raised, thrown);
     invalidate(req, this);
+    settled?;
     Ok(if err == 0 {
         Value::bool(false)
     } else {
@@ -1702,9 +1702,10 @@ fn xinclude_modern(req: &mut Request) -> Result<Value, Thrown> {
     };
     let (this, doc) = this_node(req)?;
     strip_xinclude_references(doc);
-    let (err, raised) = Parser::xinclude(doc, flags);
-    Errors::route(req, raised);
+    let (err, raised, thrown) = Parser::xinclude(req, doc, flags);
+    let settled = Errors::settle(req, raised, thrown);
     invalidate(req, this);
+    settled?;
     if err < 0 {
         return Err(crate::dom_throw(req, Code::InvalidModification));
     }
@@ -1774,9 +1775,9 @@ fn validate(req: &mut Request) -> Result<Value, Thrown> {
     arity(req, 0, 0)?;
     let (this, doc) = this_node(req)?;
     let guard = ns_guard(req, this, doc);
-    let (valid, raised) = Validate::dtd(doc);
+    let (valid, raised, thrown) = Validate::dtd(req, doc);
     drop(guard);
-    Errors::route(req, generic(raised));
+    Errors::settle(req, raised, thrown)?;
     Ok(Value::bool(valid))
 }
 
@@ -1818,9 +1819,10 @@ fn schema_validate_as(req: &mut Request, schema: Schema, from_file: bool) -> Res
         Source::Memory(&source)
     };
     let guard = ns_guard(req, this, doc);
-    let (answer, raised) = Validate::schema(doc, schema, source, i32::try_from(flags).unwrap_or(0));
+    let (answer, raised, thrown) =
+        Validate::schema(req, doc, schema, source, i32::try_from(flags).unwrap_or(0));
     drop(guard);
-    Errors::route(req, generic(raised));
+    Errors::settle(req, raised, thrown)?;
     match answer {
         Validated::InvalidSchema => {
             docref(req, Level::Warning, &format!("Invalid {label}"));
