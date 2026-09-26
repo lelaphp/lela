@@ -1038,6 +1038,17 @@ impl PhpObject {
         req.native_mut(self.0)
     }
 
+    /// The native payload, mutably, or the one `InternalError` a method
+    /// served on an object without it raises (design §5.4): what
+    /// `This::payload_mut` and `Instance::payload_mut` answer, so no class
+    /// writes the sentence and no receiver reads the payload twice.
+    pub fn native_mut_or_fatal<'a, T: Any + Send>(
+        &self,
+        req: &'a mut Request,
+    ) -> Result<&'a mut T, Thrown> {
+        req.native_mut_or_fatal(self.0)
+    }
+
     /// Whether the object is a lazy ghost or proxy nothing has
     /// initialised, `zend_object_is_lazy(obj) &&
     /// !zend_lazy_object_initialized(obj)`.

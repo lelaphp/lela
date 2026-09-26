@@ -2,9 +2,12 @@
 //! re-exported whole by `php_ext` and measured there as `api.lock`. Eight
 //! groups, mirroring the census: values, raising, coercion, calling back,
 //! the request environment, declarations, the ABI, and the token stream
-//! the tokenizer reads. Every item is a line of `api.lock`; a new `pub`
-//! here lands with its line.
+//! the tokenizer reads; and `__private`, what only a macro expansion
+//! names, held to a cap of its own. Every item is a line of `api.lock`; a
+//! new `pub` here lands with its line.
 
+#[doc(hidden)]
+pub mod __private;
 pub mod abi;
 pub mod call;
 pub mod coerce;

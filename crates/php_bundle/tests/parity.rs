@@ -1,0 +1,253 @@
+//! Seam 1 of #947's Testing Decisions: an extension declared with the
+//! attributes alone, held to the oracle's bytes.
+//!
+//! - **Renderings.** Each mirror's Reflection signature lines (headers,
+//!   parameters, returns, properties, constants), the extension's name
+//!   taken out, are the oracle's for the same php declaration. A shape no
+//!   php declaration has is held to the rendering of `parity/prelude.php`,
+//!   the same declaration written in PHP.
+//! - **Behaviour.** `parity/behaviour.php` prints the same bytes on the
+//!   engine as on the oracle, which runs it with the prelude on its first
+//!   line, so every line number stands.
+//!
+//! The `.expect` files are the pinned oracle's bytes, written by the
+//! ignored `recapture` test and read here, never typed.
+
+#[path = "parity/extension.rs"]
+mod extension;
+
+use std::fmt::Write as _;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+use php_ext::test::{Capture, Engine};
+
+const PRELUDE: &str = include_str!("parity/prelude.php");
+const BEHAVIOUR: &str = include_str!("parity/behaviour.php");
+const BEHAVIOUR_EXPECT: &str = include_str!("parity/behaviour.expect");
+const RENDERINGS_EXPECT: &str = include_str!("parity/renderings.expect");
+
+/// Declarations php makes, which the oracle renders as it has them.
+const MIRRORS: &[&str] = &[
+    "new ReflectionFunction('strspn')",
+    "new ReflectionFunction('explode')",
+    "new ReflectionFunction('htmlspecialchars')",
+    "new ReflectionFunction('round')",
+    "new ReflectionFunction('trim')",
+    "new ReflectionFunction('mkdir')",
+    "new ReflectionFunction('str_replace')",
+    "new ReflectionFunction('in_array')",
+    "new ReflectionFunction('array_keys')",
+    "new ReflectionFunction('array_push')",
+    "new ReflectionFunction('sscanf')",
+    "new ReflectionFunction('array_multisort')",
+    "new ReflectionFunction('preg_match')",
+    "new ReflectionFunction('wordwrap')",
+    "new ReflectionFunction('implode')",
+    "new ReflectionFunction('join')",
+    "new ReflectionFunction('utf8_encode')",
+    "new ReflectionFunction('password_verify')",
+    "new ReflectionClass('RoundingMode')",
+    "new ReflectionClass('php_user_filter')",
+    "new ReflectionMethod('SplFileInfo', '__construct')",
+    "new ReflectionMethod('SplFileInfo', 'setFileClass')",
+    "new ReflectionMethod('SplFileObject', '__construct')",
+    "new ReflectionMethod('SplFileObject', 'fgets')",
+    "new ReflectionMethod('SplFileObject', 'getCurrentLine')",
+    "new ReflectionMethod('SplTempFileObject', '__construct')",
+    "new ReflectionClass('JsonException')",
+    "new ReflectionProperty('DOMNode', 'nodeName')",
+    "new ReflectionClass('Dom\\AdjacentPosition')",
+    "new ReflectionMethod('Dom\\Element', 'insertAdjacentText')",
+];
+
+/// Shapes no php declaration has, which the oracle renders from the
+/// prelude. An enum is not among them: php lists a user enum's
+/// `UnitEnum` first and an internal one's `BackedEnum` first, and
+/// `Dom\AdjacentPosition` holds the internal order.
+const SHAPES: &[&str] = &[
+    "new ReflectionFunction('proto_seen')",
+    "new ReflectionFunction('proto_call')",
+    "new ReflectionFunction('proto_count')",
+    "new ReflectionFunction('proto_manual')",
+    "new ReflectionFunction('proto_describe')",
+    "new ReflectionFunction('proto_never')",
+    "new ReflectionFunction('proto_false')",
+    "new ReflectionClass('ProtoCounter')",
+    "new ReflectionClass('ProtoBase')",
+    "new ReflectionClass('ProtoBox')",
+    "new ReflectionClass('ProtoTally')",
+    "new ReflectionClass('ProtoLaid')",
+];
+
+fn engine(source: &str) -> String {
+    let engine = Engine::builder()
+        .extensions(&[extension::extension(), php_ext_reflection::extension()])
+        .build();
+    let served = engine.serve_capture(source, Capture::default());
+    let mut out = String::from_utf8_lossy(&served.stdout).into_owned();
+    if let Some(fatal) = served.fatal {
+        out.push_str("\nFATAL: ");
+        out.push_str(&fatal);
+    }
+    out
+}
+
+/// A program that renders each expression under a `== expr` line.
+fn rendering_script(expressions: &[&str]) -> String {
+    let mut script = String::from("<?php\n");
+    for expression in expressions {
+        let quoted = expression.replace('\\', "\\\\").replace('\'', "\\'");
+        let _ = writeln!(script, "echo '== {quoted}', \"\\n\", {expression};");
+    }
+    script
+}
+
+/// The declaration lines of a rendering, each trimmed, with where it was
+/// declared taken out: `<internal:standard>` and `<user>` alike are `<X`.
+fn signatures(rendering: &str) -> Vec<String> {
+    const KEPT: &[&str] = &[
+        "== ",
+        "Parameter #",
+        "- Return",
+        "- Tentative return",
+        "Property [",
+        "Constant [",
+        "Method [",
+        "Function [",
+        "Class [",
+        "Enum [",
+        "Interface [",
+    ];
+    rendering
+        .lines()
+        .map(str::trim)
+        .filter(|line| KEPT.iter().any(|kept| line.starts_with(kept)))
+        .map(|line| {
+            let Some(at) = line.find(" [ <") else {
+                return line.to_owned();
+            };
+            let (head, tail) = line.split_at(at + 4);
+            let origin = tail.find(['>', ',']).unwrap_or(0);
+            let tail = &tail[origin..];
+            match tail.find("deprecated:") {
+                Some(at) => {
+                    let name = tail[at..].find('>').unwrap_or(0);
+                    format!("{head}X{}deprecated:X{}", &tail[..at], &tail[at + name..])
+                }
+                None => format!("{head}X{tail}"),
+            }
+        })
+        .collect()
+}
+
+fn engine_renderings() -> Vec<String> {
+    let mut lines = signatures(&engine(&rendering_script(MIRRORS)));
+    lines.extend(signatures(&engine(&rendering_script(SHAPES))));
+    lines
+}
+
+#[test]
+fn renderings_match_the_oracle() {
+    let expected: Vec<&str> = RENDERINGS_EXPECT.lines().collect();
+    let engine = engine_renderings();
+    let differ: Vec<String> = expected
+        .iter()
+        .zip(engine.iter())
+        .filter(|(oracle, engine)| *oracle != engine)
+        .map(|(oracle, engine)| format!("  php:    {oracle}\n  engine: {engine}"))
+        .collect();
+    assert!(
+        differ.is_empty() && expected.len() == engine.len(),
+        "{} of {} lines differ ({} against {}):\n{}",
+        differ.len(),
+        expected.len(),
+        expected.len(),
+        engine.len(),
+        differ.join("\n")
+    );
+}
+
+#[test]
+fn behaviour_matches_the_oracle() {
+    let engine = engine(BEHAVIOUR);
+    if engine != BEHAVIOUR_EXPECT {
+        let at = engine
+            .lines()
+            .zip(BEHAVIOUR_EXPECT.lines())
+            .position(|(e, o)| e != o)
+            .unwrap_or(0);
+        let window = |text: &str| text.lines().skip(at).take(6).collect::<Vec<_>>().join("\n");
+        panic!(
+            "behaviour differs from line {}:\n--- php\n{}\n--- engine\n{}",
+            at + 1,
+            window(BEHAVIOUR_EXPECT),
+            window(&engine)
+        );
+    }
+}
+
+/// A constant an extension adds to a class another declares, which no
+/// prelude can write: `class_constants` on Core's `ArithmeticError`, and
+/// inherited by its child as a declared one is.
+#[test]
+fn an_extern_class_takes_the_constants_of_its_impl() {
+    let out =
+        engine("<?php var_dump(ArithmeticError::PROTO_ADDED, DivisionByZeroError::PROTO_ADDED);");
+    assert_eq!(out, "int(42)\nint(42)\n");
+}
+
+/// The oracle's binary, from the one file that pins it.
+fn oracle() -> PathBuf {
+    let pin = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../oracle.toml");
+    let text = std::fs::read_to_string(&pin).unwrap_or_default();
+    let path = text
+        .lines()
+        .skip_while(|line| line.trim() != "[oracle]")
+        .find_map(|line| line.trim().strip_prefix("path = \""))
+        .and_then(|rest| rest.split('"').next())
+        .unwrap_or_default();
+    PathBuf::from(path)
+}
+
+fn run_oracle(source: &str) -> String {
+    let Ok(mut child) = Command::new(oracle())
+        .arg("-n")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+    else {
+        return String::new();
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(source.as_bytes());
+    }
+    child
+        .wait_with_output()
+        .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+        .unwrap_or_default()
+}
+
+/// The prelude folded onto the program's first line, after its `<?php`.
+fn with_prelude(script: &str) -> String {
+    let body = script.strip_prefix("<?php\n").unwrap_or(script);
+    format!("<?php {}\n{body}", PRELUDE.replace('\n', " "))
+}
+
+/// Write the `.expect` files from the pinned oracle, as `xtask witness
+/// --accept` writes a witness's: `cargo test -p php_bundle --test parity
+/// -- --ignored recapture`, then read the diff.
+#[test]
+#[ignore = "runs the oracle and rewrites the pinned output"]
+fn recapture() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/parity");
+    let mut renderings = signatures(&run_oracle(&rendering_script(MIRRORS)));
+    renderings.extend(signatures(&run_oracle(&with_prelude(&rendering_script(
+        SHAPES,
+    )))));
+    let renderings = renderings.join("\n") + "\n";
+    assert!(std::fs::write(dir.join("renderings.expect"), renderings).is_ok());
+    let behaviour = run_oracle(&with_prelude(BEHAVIOUR));
+    assert!(std::fs::write(dir.join("behaviour.expect"), behaviour).is_ok());
+}

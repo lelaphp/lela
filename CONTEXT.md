@@ -77,7 +77,7 @@ _Avoid_: tenant, ext state, globals (php's word for the per-thread struct this r
 
 **Engine state**:
 One extension's per-engine value, built at module startup from the startup ini and immutable afterwards, shared by every request. What changes across requests lives in the engine's cache of immutable values inside it, never behind a lock the extension owns.
-_Avoid_: module globals, persistent state, static (php's `read_static_prop`, `write_static_prop`)
+_Avoid_: module globals, persistent state, static (php's `read_static_prop`, `write_static_prop`; `abi::Static`, php's `static` return type)
 
 ### Requests
 
