@@ -911,6 +911,38 @@ impl PhpObject {
         req.table_unset_row(*self, key)
     }
 
+    /// One row of the property table made a reference in place,
+    /// `ZVAL_MAKE_REF` over what `zend_symtable_find_ind` finds, `null`
+    /// laid down where the table has none: the place a write through an
+    /// `ArrayObject` over an object reaches. The cell is handed back
+    /// with one more owner, the caller's.
+    ///
+    /// ```php
+    /// $o = new stdClass; $o->list = [1];
+    /// $ao = @new ArrayObject($o);
+    /// $ao['list'][] = 2; $ao['fresh']['k'] = 'v';
+    /// var_dump($o);
+    /// ```
+    /// ```expect
+    /// object(stdClass)#1 (2) {
+    ///   ["list"]=>
+    ///   array(2) {
+    ///     [0]=>
+    ///     int(1)
+    ///     [1]=>
+    ///     int(2)
+    ///   }
+    ///   ["fresh"]=>
+    ///   array(1) {
+    ///     ["k"]=>
+    ///     string(1) "v"
+    ///   }
+    /// }
+    /// ```
+    pub fn row_ref(&self, req: &mut Request, key: &Key) -> Result<PhpRef, Thrown> {
+        req.table_row_ref(*self, key)
+    }
+
     /// One property by name, without a handler in the way: a view of
     /// it, and `None` for a property that is not there or a declared
     /// one nothing has written.

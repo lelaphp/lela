@@ -9,6 +9,7 @@ abi::CloneObj
 abi::CloneObjWith
 abi::Dependency
 abi::DependencyKind
+abi::DimensionRead
 abi::Extension
 abi::ExtensionBuilder
 abi::ExtensionBuilder::build
@@ -526,6 +527,7 @@ values::PhpObject::props
 values::PhpObject::props_for
 values::PhpObject::protect
 values::PhpObject::row
+values::PhpObject::row_ref
 values::PhpObject::set_prop
 values::PhpObject::set_row
 values::PhpObject::set_slot

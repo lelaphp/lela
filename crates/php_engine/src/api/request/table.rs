@@ -26,7 +26,7 @@ use php_unit::decl::Visibility;
 
 use super::{Hooks, Request};
 use crate::api::raising::Thrown;
-use crate::api::values::{ClassId, Key, PhpObject, PhpString, Value};
+use crate::api::values::{ClassId, Key, PhpObject, PhpRef, PhpString, Value};
 
 /// Where a key of the table stands: a declared slot, or a key of the
 /// dynamic table.
@@ -147,6 +147,37 @@ impl Request {
             }
         }
         Ok(())
+    }
+
+    /// [`PhpObject::row_ref`]: the row made a reference in place
+    /// (`ZVAL_MAKE_REF`), `null` laid down where the table has none,
+    /// and the cell handed back with one more owner, the caller's.
+    pub(crate) fn table_row_ref(&mut self, object: PhpObject, key: &Key) -> Result<PhpRef, Thrown> {
+        let object = self.table_owner(object)?;
+        let o = object.heap();
+        let place = match self.table_row_of(object.class(), key)? {
+            Row::Slot(i) => o.slot_ref(i),
+            Row::Dynamic(k) => {
+                let table = self.dynamic_table(o)?;
+                self.array_lookup(table, k)?
+            }
+        };
+        let Some(place) = place else {
+            return Err(crate::api::raising::fatal(
+                self,
+                "InternalError: a row of a property table with no place to stand",
+            ));
+        };
+        let held = Value::of_zval(place.read());
+        let cell = if let Some(cell) = held.as_php_ref() {
+            *cell
+        } else {
+            let cell = self.reference(held.undef_as_null())?;
+            place.write(cell.as_value().to_zval());
+            cell
+        };
+        self.addref(&cell.as_value());
+        Ok(cell)
     }
 
     /// [`PhpObject::entries`]: the rows in the table's order, the slots

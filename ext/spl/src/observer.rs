@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use php_ext::abi::{CloneObj, ObjectHandlers, PropertyPurpose, Std};
+use php_ext::abi::{CloneObj, DimensionRead, ObjectHandlers, PropertyPurpose, Std};
 use php_ext::call::{call_method, clone_with};
 use php_ext::coerce::{compare, identical, truthy, value_name};
 use php_ext::raising::{Thrown, throw};
@@ -342,11 +342,15 @@ impl ObjectHandlers for Handlers {
         Some(clone_storage)
     }
 
+    /// `spl_object_storage_read_dimension`: a key no row holds is
+    /// `null` under `BP_VAR_IS`, and every value comes back a copy even
+    /// under a write fetch, so no entry is taken by reference.
     fn read_dimension(
         &self,
         req: &mut Request,
         object: PhpObject,
         offset: Option<&Value>,
+        read: DimensionRead,
     ) -> Result<Value, Thrown> {
         let target = offset.and_then(|o| o.deref().as_object().copied());
         match target {
@@ -358,10 +362,11 @@ impl ObjectHandlers for Handlers {
                 })?;
                 match found {
                     Some(inf) => Ok(crate::copied(req, inf)),
+                    None if read == DimensionRead::Silent => Ok(Value::null()),
                     None => Err(throw(req, "UnexpectedValueException", "Object not found")),
                 }
             }
-            _ => Std.read_dimension(req, object, offset),
+            _ => Std.read_dimension(req, object, offset, read),
         }
     }
 

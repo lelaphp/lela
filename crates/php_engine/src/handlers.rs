@@ -58,7 +58,7 @@
 use php_heap::{Fatal, FrameRef};
 use php_unit::{CacheSlot, ConstIdx, OpArray, OperandKind, Opline};
 
-use crate::api::abi::{PropertyPlace, PropertyRead, PropertyTest};
+use crate::api::abi::{DimensionRead, PropertyPlace, PropertyRead, PropertyTest};
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::request::{Opened, Request};
@@ -7146,9 +7146,12 @@ fn read_dimension(
         return Ok(match mode {
             DimRead::Warning => {
                 let table = req.object_handlers(object.heap());
-                table.read_dimension(req, object, dim.as_ref())
+                table.read_dimension(req, object, dim.as_ref(), DimensionRead::Warning)
             }
-            DimRead::Silent => req.read_dimension_is(object, dim.as_ref()),
+            DimRead::Silent => {
+                let table = req.object_handlers(object.heap());
+                table.read_dimension(req, object, dim.as_ref(), DimensionRead::Silent)
+            }
         });
     }
     if mode == DimRead::Silent {
@@ -7885,30 +7888,7 @@ fn fetch_dim_place(
     };
     let written = match write_container(req, place) {
         Ok(Container::Array(array)) => array_place(req, frame, code, op, array, read)?,
-        Ok(Container::Object(object)) => {
-            let dim = object_dim(req, frame, code, op);
-            let table = req.object_handlers(object.heap());
-            if let Some(placed) = crate::weakrefs::dimension_place(req, table, object, dim.as_ref())
-            {
-                placed.map(php_heap::Zval::indirect)
-            } else {
-                match table.read_dimension(req, object, dim.as_ref()) {
-                    Ok(value) => {
-                        if value.as_object().is_none() {
-                            let class = req.class_name(object.class());
-                            crate::api::raising::notice(
-                                req,
-                                &format!(
-                                    "Indirect modification of overloaded element of {class} has no effect"
-                                ),
-                            );
-                        }
-                        Ok(value.to_zval())
-                    }
-                    Err(thrown) => Err(thrown),
-                }
-            }
-        }
+        Ok(Container::Object(object)) => object_place(req, frame, code, op, object, read),
         Ok(Container::Text(_)) if op.op2_type == OperandKind::Unused => {
             // `zend_use_new_element_for_string`.
             Err(crate::api::raising::throw(
@@ -7968,6 +7948,63 @@ fn fetch_dim_place(
         exec::free_container_var(req, frame, code, op);
     }
     Ok(advance(req, frame))
+}
+
+/// `zend_fetch_dimension_address`'s object arm under `BP_VAR_W` or
+/// `BP_VAR_RW` (`read`): the place the class's `read_dimension` hands
+/// back for the dimension, or the value written into nothing with php's
+/// notice where it is no place and no object.
+fn object_place(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    object: PhpObject,
+    read: DimRead,
+) -> Result<php_heap::Zval, Thrown> {
+    let dim = object_dim(req, frame, code, op);
+    let table = req.object_handlers(object.heap());
+    if let Some(placed) = crate::weakrefs::dimension_place(req, table, object, dim.as_ref()) {
+        placed.map(php_heap::Zval::indirect)
+    } else {
+        // php's `type`: `BP_VAR_RW` warns of a key it lays down,
+        // `BP_VAR_W` lays it down in silence.
+        let fetch = match read {
+            DimRead::Warning => DimensionRead::ReadWrite,
+            DimRead::Silent => DimensionRead::Write,
+        };
+        match table.read_dimension(req, object, dim.as_ref(), fetch) {
+            // `zend_fetch_dimension_address`'s object arm: a
+            // reference is the place itself and warns of
+            // nothing, and one the `VAR` is the last owner of is
+            // the value it holds (`ZVAL_UNREF`).
+            Ok(value) if value.as_php_ref().is_some() => {
+                if value.refcount() == 1
+                    && let Some(cell) = value.as_php_ref()
+                {
+                    let held = cell.get();
+                    req.addref(&held);
+                    req.release(value);
+                    Ok(held.to_zval())
+                } else {
+                    Ok(value.to_zval())
+                }
+            }
+            Ok(value) => {
+                if value.as_object().is_none() {
+                    let class = req.class_name(object.class());
+                    crate::api::raising::notice(
+                        req,
+                        &format!(
+                            "Indirect modification of overloaded element of {class} has no effect"
+                        ),
+                    );
+                }
+                Ok(value.to_zval())
+            }
+            Err(thrown) => Err(thrown),
+        }
+    }
 }
 
 /// Whether a dimension fetched for writing gives its `VAR` container up
@@ -11547,7 +11584,7 @@ fn binary_assign_op_obj_dim(
     let dim = object_dim(req, frame, code, op);
     let value = exec::operand(req, frame, code, data.op1_type, data.op1);
     let table = req.object_handlers(object.heap());
-    let read = table.read_dimension(req, object, dim.as_ref());
+    let read = table.read_dimension(req, object, dim.as_ref(), DimensionRead::Warning);
     let held = match read {
         Ok(held) => held,
         Err(thrown) => {
@@ -11559,6 +11596,9 @@ fn binary_assign_op_obj_dim(
     req.release(held);
     exec::free_operand(req, frame, code, data.op1_type, data.op1);
     let stepped = computed?;
+    // `write_dimension` gives its value up, where php's copies it, so
+    // the owner the temporary and the release below read is taken first.
+    req.addref(&stepped);
     let written = table.write_dimension(req, object, dim.as_ref(), stepped);
     if let Err(thrown) = written {
         req.release(stepped);

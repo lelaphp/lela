@@ -19,8 +19,8 @@
 use std::cmp::Ordering;
 
 use php_ext::abi::{
-    Callable, CloneObj, ObjectHandlers, PropertyPlace, PropertyPurpose, PropertyRead, PropertyTest,
-    Std,
+    Callable, CloneObj, DimensionRead, ObjectHandlers, PropertyPlace, PropertyPurpose,
+    PropertyRead, PropertyTest, Std,
 };
 use php_ext::call::{call, call_method, clone_with, instantiate, lookup_class};
 use php_ext::coerce::{callable_checked, compare, to_long, truthy};
@@ -473,13 +473,64 @@ fn read(req: &mut Request, object: PhpObject, offset: &Value, warn: bool) -> Res
         Ok(crate::copied(req, value))
     } else {
         if warn {
-            let shown = match &key {
-                Key::Int(n) => n.to_string(),
-                Key::Str(s) => format!("\"{}\"", String::from_utf8_lossy(s.as_bytes())),
-            };
-            warning(req, &format!("Undefined array key {shown}"));
+            warning(req, &format!("Undefined array key {}", shown(&key)));
         }
         Ok(Value::null())
+    }
+}
+
+/// `spl_array_get_dimension_ptr` under a write fetch, then
+/// `spl_array_read_dimension_ex`'s `ZVAL_NEW_REF`: the element made a
+/// reference in place, laid down `null` where the table has none (with
+/// php's warning first under `BP_VAR_RW`), and the cell handed back with
+/// one more owner. Under `BP_VAR_UNSET` a key the table has not is
+/// `None`, php's `EG(uninitialized_zval)`, and nothing is laid down.
+fn place(
+    req: &mut Request,
+    object: PhpObject,
+    offset: &Value,
+    read: DimensionRead,
+) -> Result<Option<PhpRef>, Thrown> {
+    if read != DimensionRead::Unset {
+        sorting_refused(req, object)?;
+    }
+    let Some(key) = hash_key(req, offset)? else {
+        return Err(illegal(req, object, offset, "write"));
+    };
+    let table = table(req, object)?;
+    let found = table.get(req, &key)?;
+    if found.is_none() {
+        match read {
+            DimensionRead::Unset => return Ok(None),
+            DimensionRead::ReadWrite => {
+                warning(req, &format!("Undefined array key {}", shown(&key)));
+            }
+            _ => {}
+        }
+    }
+    match table {
+        Table::Array(owner, mut array) => {
+            if let Some(cell) = found.and_then(|v| v.as_php_ref().copied()) {
+                req.addref(&cell.as_value());
+                return Ok(Some(cell));
+            }
+            let held = found.map_or_else(Value::null, |v| crate::copied(req, v));
+            let cell = PhpRef::new(req, held)?;
+            req.addref(&cell.as_value());
+            array.set(req, key, cell.as_value())?;
+            store(req, owner, array)?;
+            Ok(Some(cell))
+        }
+        Table::Props(backing) => backing.row_ref(req, &key).map(Some),
+    }
+}
+
+/// A key as php's `Undefined array key` warning shows it, a string
+/// quoted.
+fn shown(key: &Key) -> String {
+    match key {
+        Key::Int(n) => n.to_string(),
+        Key::Str(s) => format!("\"{}\"", String::from_utf8_lossy(s.as_bytes())),
     }
 }
 
@@ -611,19 +662,42 @@ impl ObjectHandlers for Handlers {
         Some(clone_array)
     }
 
+    /// `spl_array_read_dimension_ex`: an overriding `offsetGet` served,
+    /// after an overriding `offsetExists` said yes under `BP_VAR_IS`; else
+    /// `spl_array_get_dimension_ptr` over the storage, and under a write
+    /// fetch the element made a reference in place (`ZVAL_NEW_REF`) and
+    /// handed back as the place the write goes through.
     fn read_dimension(
         &self,
         req: &mut Request,
         object: PhpObject,
         offset: Option<&Value>,
+        read: DimensionRead,
     ) -> Result<Value, Thrown> {
-        if crate::overridden(req, object, b"offsetget") {
-            let offset = offset.copied().unwrap_or_default();
-            return call_method(req, &object, b"offsetGet", &[offset]);
+        let get = crate::overridden(req, object, b"offsetget");
+        let silent = read == DimensionRead::Silent;
+        if get || (silent && crate::overridden(req, object, b"offsetexists")) {
+            if silent {
+                let at = offset.copied().unwrap_or_default();
+                if !has(req, object, &at, 0, true)? {
+                    return Ok(Value::null());
+                }
+            }
+            if get {
+                let offset = offset.copied().unwrap_or_default();
+                return call_method(req, &object, b"offsetGet", &[offset]);
+            }
         }
-        match offset {
-            Some(offset) => read(req, object, offset, true),
-            None => Ok(Value::null()),
+        let Some(offset) = offset else {
+            return Ok(Value::null());
+        };
+        match read {
+            DimensionRead::Warning => self::read(req, object, offset, true),
+            DimensionRead::Silent => self::read(req, object, offset, false),
+            DimensionRead::Write | DimensionRead::ReadWrite | DimensionRead::Unset => {
+                Ok(place(req, object, offset, read)?
+                    .map_or_else(Value::null, |cell| cell.as_value()))
+            }
         }
     }
 
@@ -690,7 +764,12 @@ impl ObjectHandlers for Handlers {
     ) -> Result<Value, Thrown> {
         if as_props(req, object, name)? {
             let member = crate::string_value(req, name)?;
-            let read = self.read_dimension(req, object, Some(&member));
+            let fetch = match how {
+                PropertyRead::Warning => DimensionRead::Warning,
+                PropertyRead::Silent => DimensionRead::Silent,
+                PropertyRead::Write => DimensionRead::Write,
+            };
+            let read = self.read_dimension(req, object, Some(&member), fetch);
             req.release(member);
             return read;
         }

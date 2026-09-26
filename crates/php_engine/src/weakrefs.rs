@@ -25,7 +25,7 @@ use php_unit::decl::{
     ParameterDefault, Type, Visibility,
 };
 
-use crate::api::abi::{CloneObj, Entry, NativeClassDecl, ObjectHandlers};
+use crate::api::abi::{CloneObj, DimensionRead, Entry, NativeClassDecl, ObjectHandlers};
 use crate::api::coerce::coerce_param;
 use crate::api::raising::{Thrown, arg_count_error, throw};
 use crate::api::request::Request;
@@ -312,15 +312,27 @@ impl ObjectHandlers for WeakMapHandlers {
         Some(weakmap_clone)
     }
 
-    /// `zend_weakmap_read_dimension` (`Z/Zend/zend_weakrefs.c:346`) under
-    /// `BP_VAR_R`: php's `Error` for `$map[]`, its `TypeError` for a key
-    /// that is no object, the entry's value with one more owner, and
-    /// `Object C#n not contained in WeakMap` for a key it has not.
+    /// `zend_weakmap_read_dimension` (`Z/Zend/zend_weakrefs.c:346`):
+    /// php's `Error` for `$map[]`, its `TypeError` for a key that is no
+    /// object, the entry's value with one more owner, and `Object C#n
+    /// not contained in WeakMap` for a key it has not, which under
+    /// `BP_VAR_IS` is `null` in silence.
+    ///
+    /// ```php
+    /// $m = new WeakMap; $k = new stdClass; $m[$k] = ['a' => 1];
+    /// var_dump(isset($m[$k]['a']), $m[new stdClass] ?? 'none', isset($m[new stdClass]['a']));
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// string(4) "none"
+    /// bool(false)
+    /// ```
     fn read_dimension(
         &self,
         req: &mut Request,
         object: PhpObject,
         offset: Option<&Value>,
+        read: DimensionRead,
     ) -> Result<Value, Thrown> {
         let Some(offset) = offset else {
             return Err(throw(req, "Error", "Cannot append to WeakMap"));
@@ -328,6 +340,9 @@ impl ObjectHandlers for WeakMapHandlers {
         let key = map_key(req, offset)?;
         let found = entries_of(req, object).and_then(|e| e.get(&Key::Int(i64::from(key.index()))));
         let Some(value) = found else {
+            if read == DimensionRead::Silent {
+                return Ok(Value::null());
+            }
             let class = req.class_name(key.class());
             return Err(throw(
                 req,
@@ -917,7 +932,7 @@ fn weakmap_offset_get(req: &mut Request) -> Result<Value, Thrown> {
     exactly(req, 1)?;
     let this = receiver(req)?;
     let key = req.argument(1).unwrap_or_default();
-    WEAK_MAP.read_dimension(req, this, Some(&key))
+    WEAK_MAP.read_dimension(req, this, Some(&key), DimensionRead::Warning)
 }
 
 /// `WeakMap::offsetSet($object, mixed $value): void`: the write

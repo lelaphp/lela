@@ -619,6 +619,24 @@ pub enum PropertyRead {
     Write,
 }
 
+/// Which fetch `read_dimension` is serving, php's `type` argument to
+/// the slot: `BP_VAR_R`, the read that warns of a key the container has
+/// not; `BP_VAR_IS`, the read an `isset`, an `empty` or a `??` makes,
+/// which warns of nothing; and the three fetches a write through the
+/// element makes, `BP_VAR_W` (`$o[$k][] = v`, `$o[$k]->p = v`, `&$o[$k]`),
+/// `BP_VAR_RW` (`$o[$k][$j] .= v`, `$o[$k]++` over an array element of
+/// it) and `BP_VAR_UNSET` (`unset($o[$k][$j])`), under which a class
+/// whose elements are places hands the element back as a reference,
+/// the place itself, as `spl_array_read_dimension_ex` makes it one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DimensionRead {
+    Warning,
+    Silent,
+    Write,
+    ReadWrite,
+    Unset,
+}
+
 /// What `get_property_ptr_ptr` answers for one name, php's pointer or
 /// its `NULL`: whether a write to the property addresses the standard
 /// place, or goes through the class's `read_property` and
@@ -731,14 +749,64 @@ pub trait ObjectHandlers: Send + Sync {
 
     /// `read_dimension`, `zend_std_read_dimension` at `Std`:
     /// `offsetGet` on an `ArrayAccess`, `null` for `$o[]`, and php's
-    /// `Error` for an object of any other class.
+    /// `Error` for an object of any other class; under
+    /// [`DimensionRead::Silent`] `offsetExists` first, and `null` where
+    /// it says no. `read` is php's `type`: under a write fetch a class
+    /// whose elements are places answers the element as a reference,
+    /// which the fetch writes through; any other value is written into
+    /// nothing, with php's `Indirect modification of overloaded
+    /// element` notice where it is no object.
+    ///
+    /// ```php
+    /// class A implements ArrayAccess {
+    ///     public $data = ['k' => []];
+    ///     public function offsetGet($k): mixed { echo "get $k\n"; return $this->data[$k] ?? null; }
+    ///     public function offsetExists($k): bool { echo "exists $k\n"; return isset($this->data[$k]); }
+    ///     public function offsetSet($k, $v): void {}
+    ///     public function offsetUnset($k): void {}
+    /// }
+    /// $a = new A;
+    /// var_dump(isset($a['k']['x']), $a['nope']['x'] ?? 'dflt');
+    /// $a['k']['x'] = 1;
+    /// $o = new ArrayObject(['k' => []]);
+    /// $o['k']['x'] = 1; $o['new'][] = 2; $o['k']['x'] .= 'y';
+    /// var_dump($a->data, $o->getArrayCopy());
+    /// ```
+    /// ```expect
+    /// exists k
+    /// get k
+    /// exists nope
+    /// bool(false)
+    /// string(4) "dflt"
+    /// get k
+    ///
+    /// Notice: Indirect modification of overloaded element of A has no effect in %s on line 11
+    /// array(1) {
+    ///   ["k"]=>
+    ///   array(0) {
+    ///   }
+    /// }
+    /// array(2) {
+    ///   ["k"]=>
+    ///   array(1) {
+    ///     ["x"]=>
+    ///     string(2) "1y"
+    ///   }
+    ///   ["new"]=>
+    ///   array(1) {
+    ///     [0]=>
+    ///     int(2)
+    ///   }
+    /// }
+    /// ```
     fn read_dimension(
         &self,
         req: &mut Request,
         object: PhpObject,
         offset: Option<&Value>,
+        read: DimensionRead,
     ) -> Result<Value, Thrown> {
-        req.read_dimension(object, offset)
+        req.read_dimension(object, offset, read)
     }
 
     /// `write_dimension`, `zend_std_write_dimension` at `Std`:

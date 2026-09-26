@@ -4,7 +4,7 @@
 //! entities or notations, or the node set an `XPath` query answered.
 
 use php_ext::abi::CloneObj;
-use php_ext::abi::{ObjectHandlers, PropertyPlace, PropertyRead, PropertyTest};
+use php_ext::abi::{DimensionRead, ObjectHandlers, PropertyPlace, PropertyRead, PropertyTest};
 use php_ext::coerce::{numeric_string, to_long};
 use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
@@ -756,7 +756,9 @@ impl ObjectHandlers for MapHandlers {
         req: &mut Request,
         object: PhpObject,
         offset_value: Option<&Value>,
+        read: DimensionRead,
     ) -> Result<Value, Thrown> {
+        let isset = read == DimensionRead::Silent;
         let dims = dims(req, object);
         let Some(offset_value) = offset_value else {
             let name = class_name(req, object.class());
@@ -774,7 +776,7 @@ impl ObjectHandlers for MapHandlers {
                 (Dims::Collection, Index::Str(name)) => {
                     collection_named(req, object, name.as_bytes())
                 }
-                _ => Err(illegal_offset(req, object, offset_value, false)),
+                _ => Err(illegal_offset(req, object, offset_value, isset)),
             };
         }
         let is_list = !named_keys(req, object);
