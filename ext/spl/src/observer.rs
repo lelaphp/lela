@@ -552,34 +552,21 @@ fn clone_storage(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thro
     clone_with(req, &object, copy)
 }
 
-/// The three methods 8.5 deprecates, each raising php's deprecation
-/// before it does what its replacement does.
-fn deprecated_method(req: &mut Request, method: &str, instead: &str) {
-    php_ext::raising::deprecated(
-        req,
-        &format!(
-            "Method SplObjectStorage::{method}() is deprecated since 8.5, use method SplObjectStorage::{instead}() instead"
-        ),
-    );
-}
-
-/// `attach()`, deprecated for `offsetSet()`; the witness is `offsetSet`'s.
+/// `attach()`, deprecated for `offsetSet()`, whose deprecation the
+/// call raises from the declaration; the witness is `offsetSet`'s.
 fn deprecated_attach(req: &mut Request) -> Result<Value, Thrown> {
-    deprecated_method(req, "attach", "offsetSet");
     attach(req)
 }
 
 /// `detach()`, deprecated for `offsetUnset()`; the witness is
 /// `offsetUnset`'s.
 fn deprecated_detach(req: &mut Request) -> Result<Value, Thrown> {
-    deprecated_method(req, "detach", "offsetUnset");
     detach(req)
 }
 
 /// `contains()`, deprecated for `offsetExists()`; the witness is
 /// `offsetSet`'s.
 fn deprecated_contains(req: &mut Request) -> Result<Value, Thrown> {
-    deprecated_method(req, "contains", "offsetExists");
     contains(req)
 }
 

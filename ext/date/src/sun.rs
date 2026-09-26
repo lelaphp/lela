@@ -1,7 +1,7 @@
 //! `date_sunrise`, `date_sunset` and `date_sun_info` over timelib's
 //! `astro.c`.
 
-use php_ext::raising::{Thrown, arg_value_error, deprecated};
+use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, Value};
 
@@ -35,15 +35,6 @@ fn ini_float(req: &Request, name: &[u8]) -> f64 {
 
 /// `php_do_date_sunrise_sunset(INTERNAL_FUNCTION_PARAM_PASSTHRU, calc_sunset)`.
 fn sunrise_sunset(req: &mut Request, sunset: bool) -> Result<Value, Thrown> {
-    let name = if sunset {
-        "date_sunset"
-    } else {
-        "date_sunrise"
-    };
-    deprecated(
-        req,
-        &format!("Function {name}() is deprecated since 8.1, use date_sun_info() instead"),
-    );
     count_between(req, 1, 6)?;
     let time = long(req, 1)?;
     let format = optional_long(req, 2, RET_STRING)?;

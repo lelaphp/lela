@@ -517,7 +517,7 @@ impl Emit<'_> {
     /// ```expect
     /// int(1)
     /// ```
-    fn walk_attributes(
+    pub(super) fn walk_attributes(
         &mut self,
         groups: &[NodeId<tree::AttributeGroup>],
     ) -> Result<Vec<Attr>, CompileError> {
@@ -542,8 +542,8 @@ impl Emit<'_> {
     }
 
     /// The arguments of an attribute's list as written, which
-    /// `zend_compile_attributes` holds to its rules; a first-class
-    /// callable's `...` is refused as not read yet.
+    /// `zend_compile_attributes` holds to its rules, a first-class
+    /// callable's `...` among them.
     fn attribute_arguments(
         &mut self,
         id: NodeId<tree::ArgList>,
@@ -562,9 +562,7 @@ impl Emit<'_> {
                     AttrArgument::Named(self.text(named.name).to_vec(), value)
                 }
                 tree::Arg::SpreadArg(_) => AttrArgument::Unpack,
-                tree::Arg::VariadicPlaceholder(_) => {
-                    return Err(unread(line, "an attribute's argument list"));
-                }
+                tree::Arg::VariadicPlaceholder(_) => AttrArgument::CallableConvert,
             });
         }
         Ok(out)
@@ -1461,12 +1459,15 @@ pub(super) struct Attr {
 
 /// One argument of an attribute's list as written, php's
 /// `ZEND_AST_ARG_LIST` child: an expression, `name: expression`, or
-/// `...expression`, which `zend_compile_attributes` refuses.
+/// `...expression`, which `zend_compile_attributes` refuses, or the
+/// `...` that makes the list php's `ZEND_AST_CALLABLE_CONVERT`, which it
+/// refuses too.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum AttrArgument {
     Positional(php_syntax::tree::Expr),
     Named(Vec<u8>, php_syntax::tree::Expr),
     Unpack,
+    CallableConvert,
 }
 
 /// One function declaration, php's `zend_ast_decl` for a function or a

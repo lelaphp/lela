@@ -20,6 +20,7 @@
 )]
 
 pub mod api;
+mod attributes;
 mod classes;
 mod constants;
 mod engine;

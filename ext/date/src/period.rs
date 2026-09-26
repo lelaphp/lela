@@ -648,10 +648,6 @@ pub(crate) fn unserialize(req: &mut Request) -> Result<Value, Thrown> {
 /// Invalid serialization data for DatePeriod object
 /// ```
 pub(crate) fn wakeup(req: &mut Request) -> Result<Value, Thrown> {
-    deprecated(
-        req,
-        "Method DatePeriod::__wakeup() is deprecated since 8.5, this method is obsolete, as serialization hooks are provided by __unserialize() and __serialize()",
-    );
     count_between(req, 0, 0)?;
     let object = this(req)?;
     let own = std_rows(req, object)?;

@@ -645,10 +645,6 @@ pub(crate) fn unserialize(req: &mut Request) -> Result<Value, Thrown> {
 /// Invalid serialization data for DateTimeZone object
 /// ```
 pub(crate) fn wakeup(req: &mut Request) -> Result<Value, Thrown> {
-    php_ext::raising::deprecated(
-        req,
-        "Method DateTimeZone::__wakeup() is deprecated since 8.5, this method is obsolete, as serialization hooks are provided by __unserialize() and __serialize()",
-    );
     count_between(req, 0, 0)?;
     let object = this(req)?;
     let mut hash = PhpArray::new(req)?;

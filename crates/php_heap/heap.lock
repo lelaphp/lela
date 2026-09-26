@@ -241,6 +241,7 @@ Zval::as_double
 Zval::as_indirect
 Zval::as_long
 Zval::as_obj
+Zval::as_ptr
 Zval::as_reference
 Zval::as_resource
 Zval::as_str
@@ -255,6 +256,7 @@ Zval::kind
 Zval::long
 Zval::null
 Zval::object
+Zval::ptr
 Zval::reference
 Zval::resource
 Zval::set_fe_pos

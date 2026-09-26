@@ -37,7 +37,7 @@ use php_ext::decl::{
     DynamicProperties, EnumBacking, FunctionDecl, MethodDecl, Name, Parameter, ParameterDefault,
     Type, Visibility,
 };
-use php_ext::raising::{Thrown, arg_count_error, argument_error, deprecated, throw};
+use php_ext::raising::{Thrown, arg_count_error, argument_error, throw};
 use php_ext::request::Request;
 use php_ext::values::{PhpObject, Value};
 use php_ext_pdo::connector::Connector;
@@ -447,15 +447,6 @@ fn required_handler(req: &mut Request, position: u32) -> Result<Handler, Thrown>
 
 // ---- the methods
 
-/// `Method PDO::x() is deprecated since 8.5, use Pdo\Sqlite::y() instead`,
-/// what `zend_deprecated_function` raises before the call.
-fn deprecated_method(req: &mut Request, old: &str, new: &str) {
-    deprecated(
-        req,
-        &format!("Method PDO::{old}() is deprecated since 8.5, use Pdo\\Sqlite::{new}() instead"),
-    );
-}
-
 /// `Pdo\Sqlite::createFunction(string $function_name, callable $callback, int $num_args = -1, int $flags = 0): bool`.
 ///
 /// ```php
@@ -492,7 +483,6 @@ fn create_function(req: &mut Request) -> Result<Value, Thrown> {
 /// string(1) "A"
 /// ```
 fn sqlite_create_function(req: &mut Request) -> Result<Value, Thrown> {
-    deprecated_method(req, "sqliteCreateFunction", "createFunction");
     create_function_as(req)
 }
 
@@ -535,7 +525,6 @@ fn create_aggregate(req: &mut Request) -> Result<Value, Thrown> {
 /// int(1)
 /// ```
 fn sqlite_create_aggregate(req: &mut Request) -> Result<Value, Thrown> {
-    deprecated_method(req, "sqliteCreateAggregate", "createAggregate");
     create_aggregate_as(req)
 }
 
@@ -593,7 +582,6 @@ fn create_collation(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// ```
 fn sqlite_create_collation(req: &mut Request) -> Result<Value, Thrown> {
-    deprecated_method(req, "sqliteCreateCollation", "createCollation");
     create_collation_as(req)
 }
 

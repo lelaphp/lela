@@ -1796,12 +1796,6 @@ pub(crate) fn immutable_unserialize(req: &mut Request) -> Result<Value, Thrown> 
 /// `php_do_date_time_wakeup`: the object's own properties read back as
 /// its time.
 fn wakeup(req: &mut Request, class: &str) -> Result<Value, Thrown> {
-    php_ext::raising::deprecated(
-        req,
-        &format!(
-            "Method {class}::__wakeup() is deprecated since 8.5, this method is obsolete, as serialization hooks are provided by __unserialize() and __serialize()"
-        ),
-    );
     count_between(req, 0, 0)?;
     let object = this(req)?;
     let mut hash = PhpArray::new(req)?;

@@ -1231,8 +1231,11 @@ fn copy_constant_array(req: &mut Request, array: PhpArray) -> Result<PhpArray, T
 /// `defined(string $constant_name): bool`, php's `ZEND_FUNCTION(defined)`
 /// (`Z/Zend/zend_builtin_functions.c:608`), which is
 /// `zend_get_constant_ex` under `ZEND_FETCH_CLASS_SILENT`: a leading
-/// `\` is dropped; a `::` names a class constant, which waits with the
-/// classes (`zend_get_class_constant_ex`) and is `false` here; a `\`
+/// `\` is dropped; a `::` names a class constant, answered by
+/// `zend_get_class_constant_ex` as silently as `ZEND_FETCH_CLASS_SILENT`
+/// asks, the class
+/// autoloaded and nothing raised for one missing, one the scope may not
+/// reach or one `#[\Deprecated]` marks; a `\`
 /// left in the name is a namespaced constant, looked up with the
 /// namespace lowered and the name as written, in the table alone; and
 /// anything else is [`crate::ops::defined`], the table and then `true`,
@@ -1254,6 +1257,17 @@ fn copy_constant_array(req: &mut Request, array: PhpArray) -> Result<PhpArray, T
 /// bool(false)
 /// bool(false)
 /// bool(false)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// ```
+///
+/// ```php
+/// class C { #[\Deprecated] const D = 1; private const P = 2; }
+/// var_dump(defined('C::D'), defined('C::P'), defined('C::nope'), defined('Nope::D'));
+/// ```
+/// ```expect
 /// bool(true)
 /// bool(false)
 /// bool(false)
@@ -1284,7 +1298,21 @@ fn defined(req: &mut Request) -> Result<Value, Thrown> {
         && colon > 0
         && bytes.get(colon - 1) == Some(&b':')
     {
-        return Ok(Value::bool(false));
+        let (class_name, constant) = (&bytes[..colon - 1], &bytes[colon + 1..]);
+        let scoped = [&b"self"[..], b"parent", b"static"]
+            .iter()
+            .any(|word| class_name.eq_ignore_ascii_case(word));
+        let class = if scoped {
+            Some(crate::api::call::fetch_class(req, class_name)?)
+        } else {
+            match req.class_named(class_name) {
+                Some(class) => Some(class),
+                None => crate::api::call::autoload(req, class_name)?,
+            }
+        };
+        return Ok(Value::bool(
+            class.is_some_and(|class| req.class_constant_defined(class, constant)),
+        ));
     }
     if let Some(separator) = bytes.iter().rposition(|b| *b == b'\\') {
         let (namespace, constant) = bytes.split_at(separator);

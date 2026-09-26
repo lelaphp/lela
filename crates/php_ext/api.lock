@@ -99,6 +99,7 @@ call::eval_const_expr
 call::fetch_constant
 call::initialize_lazy
 call::instantiate
+call::instantiate_named
 call::internal_iterator
 call::iterate
 call::known_method
@@ -181,6 +182,7 @@ decl::Type::MAY_BE_ANY
 decl::Type::contains_code
 decl::Type::mask
 decl::Visibility
+decl::class_attribute_refusal
 raising::Level
 raising::Level::bit
 raising::Thrown

@@ -11,7 +11,7 @@ use php_ext::decl::{
     Attribute, AttributeArgument, ClassDecl, ClassFlags, ClassKind, ConstDecl, ConstExpr,
     EnumBacking, FunctionDecl, MethodDecl, Name, Type, Visibility,
 };
-use php_ext::raising::{self, Thrown, arg_count_error, arg_type_error, arg_value_error, throw};
+use php_ext::raising::{Thrown, arg_count_error, arg_type_error, arg_value_error, throw};
 use php_ext::request::{Request, Stream};
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -1006,13 +1006,6 @@ fn hash_hkdf(req: &mut Request) -> Result<Value, Thrown> {
     Ok(Value::string(PhpString::new(req, &out)?))
 }
 
-/// `zend_deprecated_function`, which php raises before the handler of
-/// a function its stub marks `#[\Deprecated]`; raised here, as
-/// ext/standard's `utf8_encode` raises its own.
-fn deprecated_call(req: &mut Request, name: &str) {
-    raising::deprecated(req, &format!("Function {name}() is deprecated since 8.1"));
-}
-
 /// An mhash number's row, `None` out of range or at one of the gaps.
 fn mhash_entry(number: i64) -> Option<(&'static str, &'static str)> {
     usize::try_from(number)
@@ -1038,7 +1031,6 @@ fn mhash_entry(number: i64) -> Option<(&'static str, &'static str)> {
 /// bool(false)
 /// ```
 fn mhash(req: &mut Request) -> Result<Value, Thrown> {
-    deprecated_call(req, "mhash");
     count(req, 2, 3)?;
     let number = long(req, 1, 0)?;
     let data = string(req, 2)?;
@@ -1071,7 +1063,6 @@ fn mhash(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// ```
 fn mhash_get_hash_name(req: &mut Request) -> Result<Value, Thrown> {
-    deprecated_call(req, "mhash_get_hash_name");
     count(req, 1, 1)?;
     let number = long(req, 1, 0)?;
     match mhash_entry(number) {
@@ -1089,7 +1080,6 @@ fn mhash_get_hash_name(req: &mut Request) -> Result<Value, Thrown> {
 /// int(41)
 /// ```
 fn mhash_count(req: &mut Request) -> Result<Value, Thrown> {
-    deprecated_call(req, "mhash_count");
     count(req, 0, 0)?;
     Ok(Value::int(41))
 }
@@ -1106,7 +1096,6 @@ fn mhash_count(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// ```
 fn mhash_get_block_size(req: &mut Request) -> Result<Value, Thrown> {
-    deprecated_call(req, "mhash_get_block_size");
     count(req, 1, 1)?;
     let number = long(req, 1, 0)?;
     let size = mhash_entry(number)
@@ -1131,7 +1120,6 @@ fn mhash_get_block_size(req: &mut Request) -> Result<Value, Thrown> {
 /// mhash_keygen_s2k(): Argument #4 ($length) must be a greater than 0
 /// ```
 fn mhash_keygen_s2k(req: &mut Request) -> Result<Value, Thrown> {
-    deprecated_call(req, "mhash_keygen_s2k");
     count(req, 4, 4)?;
     let number = long(req, 1, 0)?;
     let password = string(req, 2)?;

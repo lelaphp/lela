@@ -1179,13 +1179,10 @@ fn stream_set_timeout(req: &mut Request) -> Result<Value, Thrown> {
     Ok(Value::bool(false))
 }
 
-/// `socket_set_timeout`, `ZEND_ACC_DEPRECATED`: `zend_deprecated_function`'s
-/// sentence before the arguments are read, then `stream_set_timeout`.
+/// `socket_set_timeout`, `ZEND_ACC_DEPRECATED`: the call raises
+/// `zend_deprecated_function`'s sentence from the declaration before
+/// the arguments are read, then this is `stream_set_timeout`.
 fn socket_set_timeout(req: &mut Request) -> Result<Value, Thrown> {
-    deprecated(
-        req,
-        "Function socket_set_timeout() is deprecated since 8.5, use stream_set_timeout() instead",
-    );
     stream_set_timeout(req)
 }
 

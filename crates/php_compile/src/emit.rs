@@ -453,6 +453,10 @@ pub(crate) struct Emit<'a> {
     /// key its `DECLARE_CLASS` carries, [`Unit::runtime_keys`], in the
     /// order the keys were made.
     runtime_keys: Vec<(Name, u32)>,
+    /// Each constant a `const` statement declared with attributes,
+    /// [`Unit::constants`], which the `OP_DATA` after its
+    /// `DECLARE_ATTRIBUTED_CONST` names by index.
+    attributed_constants: Vec<ConstDecl>,
     /// [`Options::keys_before`]: the keys made before this source.
     keys_before: u32,
     /// The functions the file declares with their bodies,
@@ -1131,6 +1135,7 @@ pub(crate) fn unit(
         classes: Vec::new(),
         bound: Vec::new(),
         runtime_keys: Vec::new(),
+        attributed_constants: Vec::new(),
         keys_before: options.keys_before,
         functions_declared: Vec::new(),
         dynamic: Vec::new(),
@@ -1186,7 +1191,7 @@ pub(crate) fn unit(
         classes: emit.classes,
         arms: emit.arms,
         runtime_keys: emit.runtime_keys,
-        ..Unit::default()
+        constants: emit.attributed_constants,
     })
 }
 
@@ -1514,8 +1519,13 @@ impl Emit<'_> {
                 }
             }
             Stmt::ExprStmt(id) => {
-                let value = self.expr(tree[id].expr)?;
-                self.do_free(value);
+                let expr = tree[id].expr;
+                if let Some(operand) = self.void_cast_operand(expr) {
+                    self.void_cast(operand)?;
+                } else {
+                    let value = self.expr(expr)?;
+                    self.do_free(value);
+                }
             }
             Stmt::Block(id) => self.block(id)?,
             Stmt::ForStmt(id) => self.r#for(id)?,
@@ -5302,8 +5312,10 @@ impl Emit<'_> {
         declared_at: u32,
     ) -> Result<(Vec<Attribute>, DynamicProperties), CompileError> {
         let mut out = Vec::new();
+        // `CG(zend_lineno)` is the declaration's while its attributes
+        // compile, so what an argument raises is raised there.
+        self.line = declared_at;
         for attribute in &class.attributes {
-            self.line = attribute.line;
             let name = self.class_name(&attribute.name);
             out.push(self.attribute(attribute, name, declared_at)?);
         }
@@ -5401,6 +5413,14 @@ impl Emit<'_> {
     /// ```
     ///
     /// ```php
+    /// #[Attribute(...)]
+    /// class Foo {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot create Closure as attribute argument in %s on line 3
+    /// ```
+    ///
+    /// ```php
     /// #[Attribute] class A { function __construct(public $x = 0, public $y = 0) {} }
     /// #[A(1, y: 2)] class C {}
     /// $a = (new ReflectionClass('C'))->getAttributes()[0];
@@ -5420,9 +5440,19 @@ impl Emit<'_> {
         name: Vec<u8>,
         declared_at: u32,
     ) -> Result<Attribute, CompileError> {
+        if attribute
+            .arguments
+            .contains(&walk::AttrArgument::CallableConvert)
+        {
+            return Err(walk::refused(
+                declared_at,
+                "Cannot create Closure as attribute argument",
+            ));
+        }
         let mut arguments: Vec<AttributeArgument> = Vec::new();
         for argument in &attribute.arguments {
             let (named, expr) = match argument {
+                walk::AttrArgument::CallableConvert => continue,
                 walk::AttrArgument::Unpack => {
                     return Err(walk::refused(
                         declared_at,
@@ -5581,8 +5611,8 @@ impl Emit<'_> {
         declared_at: u32,
     ) -> Result<Vec<Attribute>, CompileError> {
         let mut out = Vec::with_capacity(written.len());
+        self.line = declared_at;
         for attribute in written {
-            self.line = attribute.line;
             let name = self.class_name(&attribute.name);
             if let Some(known) = InternalAttribute::named(&name) {
                 let targets = known.targets();
@@ -6479,6 +6509,19 @@ impl Emit<'_> {
     /// }
     /// string(1) "C"
     /// ```
+    ///
+    /// A property fetch's object is evaluated before the fetch is looked
+    /// at, as `zend_eval_const_expr` walks it, so what the object
+    /// refuses is refused first, and an attribute's argument is compiled
+    /// at the line of the declaration it stands on (#855):
+    ///
+    /// ```php
+    /// #[Attribute([,]->e)]
+    /// class Foo {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use empty array elements in arrays in %s on line 3
+    /// ```
     #[allow(clippy::too_many_lines)]
     fn const_expr(&mut self, expr: tree::Expr) -> Result<ConstExpr, CompileError> {
         let line = expr.line(self.parsed);
@@ -6668,10 +6711,17 @@ impl Emit<'_> {
             | tree::Expr::YieldFromExpr(_)
             | tree::Expr::InterpolatedStringExpr(_)
             | tree::Expr::HeredocExpr(_) => self.const_refused(expr),
+            // A property fetch, whose object `zend_eval_const_expr`
+            // evaluates before `zend_compile_const_expr` looks at the
+            // fetch, so what the object refuses is refused first.
+            tree::Expr::MemberAccessExpr(id) => {
+                self.const_expr(tree[id].obj)?;
+                Err(self.fatal("a constant expression this compiler cannot read yet"))
+            }
             // What php's walk allows and this compiler cannot keep as
-            // the tree it was written as yet: a property fetch and a
-            // dimension (8.5), a `match`, a conditional, a `??`, a
-            // `new`, an `instanceof` and a closure.
+            // the tree it was written as yet: a dimension (8.5), a
+            // `match`, a conditional, a `??`, a `new`, an `instanceof`
+            // and a closure.
             _ => match self.constant_of(expr)? {
                 Some(folded) => folded_const_expr(folded).ok_or_else(|| {
                     self.fatal("a constant expression this compiler cannot read yet")
@@ -6795,11 +6845,52 @@ impl Emit<'_> {
     /// php keeps a value it could not fold as an `IS_CONSTANT_AST` for
     /// the opline to evaluate (`allow_dynamic`); this compiler folds
     /// what it can fold and refuses the rest as not read yet.
+    ///
+    /// Attributes before the statement are its one constant's, compiled
+    /// after the declarators at the first one's line with the target
+    /// `ZEND_ATTRIBUTE_TARGET_CONST`: a statement of more constants is
+    /// php's compile error, and the last `DECLARE_CONST` becomes
+    /// `DECLARE_ATTRIBUTED_CONST` with an `OP_DATA` after it naming the
+    /// constant's declaration, [`Unit::constants`], where php's names
+    /// the attribute table.
+    ///
+    /// ```php
+    /// #[\Foo]
+    /// const First = 1,
+    ///     Second = 2;
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot apply attributes to multiple constants at once in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// #[Attribute]
+    /// const EXAMPLE = 'Foo';
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Attribute "Attribute" cannot target constant (allowed targets: class) in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// namespace Foo;
+    /// #[Attr(1, x: 2)]
+    /// const MyConst = 'v';
+    /// $a = (new \ReflectionConstant('Foo\\MyConst'))->getAttributes()[0];
+    /// var_dump(MyConst, $a->getName(), $a->getArguments());
+    /// ```
+    /// ```expect
+    /// string(1) "v"
+    /// string(8) "Foo\Attr"
+    /// array(2) {
+    ///   [0]=>
+    ///   int(1)
+    ///   ["x"]=>
+    ///   int(2)
+    /// }
+    /// ```
     fn const_decl(&mut self, id: NodeId<tree::ConstStmt>) -> Result<(), CompileError> {
-        let node = &self.parsed.tree[id];
-        if !node.attrs.is_empty() {
-            return Err(self.unread("an attribute before this declaration"));
-        }
+        let node = self.parsed.tree[id].clone();
+        let mut declared = None;
         for declarator in &node.const_declarators {
             let (name, value, line) = self.const_declarator(*declarator)?;
             self.line = line;
@@ -6814,6 +6905,7 @@ impl Emit<'_> {
                 )));
             }
             let full = self.declare_symbol(Symbol::Const, &name)?;
+            declared = Some((full.clone(), value));
             let name = self.string(&full)?;
             let op1 = self.literal(name);
             let op2 = self.literal(value);
@@ -6826,6 +6918,43 @@ impl Emit<'_> {
                 ..Opline::default()
             });
         }
+        if node.attrs.is_empty() {
+            return Ok(());
+        }
+        let Some((name, value)) = declared else {
+            return Err(self.fatal("InternalError: an attributed `const` that declared nothing"));
+        };
+        let first = node
+            .const_declarators
+            .first()
+            .map_or(self.line, |declarator| self.parsed.tree[*declarator].line());
+        self.line = first;
+        if node.const_declarators.len() > 1 {
+            return Err(self.compile_error("Cannot apply attributes to multiple constants at once"));
+        }
+        let written = self.walk_attributes(&node.attrs)?;
+        let attributes = self.member_attributes(&written, attributes::TARGET_CONST, 0, first)?;
+        let Some(value) = folded_const_expr(value) else {
+            return Err(
+                self.fatal("InternalError: an attributed `const` whose value folded to no scalar")
+            );
+        };
+        let at = u32::try_from(self.attributed_constants.len()).unwrap_or(u32::MAX);
+        self.attributed_constants.push(ConstDecl {
+            name: Name(name.into_boxed_slice()),
+            value,
+            attributes,
+        });
+        if let Some(last) = self.oplines.last_mut() {
+            last.opcode = Opcode::DeclareAttributedConst;
+        }
+        let op1 = self.literal(Zval::ptr(at));
+        self.push(Opline {
+            opcode: Opcode::OpData,
+            op1_type: OperandKind::Const,
+            op1,
+            ..Opline::default()
+        });
         Ok(())
     }
 
@@ -8702,9 +8831,63 @@ impl Emit<'_> {
         let mut last = Where::Constant(Zval::bool(true));
         for expr in exprs {
             self.do_free(last);
-            last = self.expr(*expr)?;
+            last = match self.void_cast_operand(*expr) {
+                Some(operand) => {
+                    self.void_cast(operand)?;
+                    Where::Constant(Zval::null())
+                }
+                None => self.expr(*expr)?,
+            };
         }
         Ok(last)
+    }
+
+    /// The operand of a `(void)` cast, php's `ZEND_AST_CAST_VOID`, which
+    /// the grammar allows at a statement's start and in a `for`
+    /// header's lists alone; none for any other expression.
+    fn void_cast_operand(&self, expr: tree::Expr) -> Option<tree::Expr> {
+        let tree::Expr::CastExpr(id) = expr else {
+            return None;
+        };
+        let node = &self.parsed.tree[id];
+        let op = node.op?;
+        (php_syntax::cast_name(self.text(op)) == "T_VOID_CAST").then_some(node.operand?)
+    }
+
+    /// `zend_compile_void_cast` (`Z/Zend/zend_compile.c`): the operand
+    /// compiled as any expression, so what a call returns is used and no
+    /// `#[\NoDiscard]` warning is raised for it, then freed by a `FREE`
+    /// marked `ZEND_FREE_VOID_CAST` where it is a temporary, and as
+    /// `zend_do_free` frees a constant.
+    ///
+    /// ```php
+    /// #[NoDiscard] function f(): int { return 1; }
+    /// (void) f();
+    /// (void) 1;
+    /// for ($i = 0; $i < 1; (void) $i++) {}
+    /// echo $i, "\n";
+    /// ```
+    /// ```expect
+    /// 1
+    /// ```
+    fn void_cast(&mut self, operand: tree::Expr) -> Result<(), CompileError> {
+        let (op1_type, op1) = match self.expr(operand)? {
+            Where::Temporary(at) => (OperandKind::Tmp, at),
+            Where::Returned(at) => (OperandKind::Var, at),
+            constant @ Where::Constant(_) => {
+                self.do_free(constant);
+                return Ok(());
+            }
+            Where::Cv(_) => return Ok(()),
+        };
+        self.push(Opline {
+            opcode: Opcode::Free,
+            op1_type,
+            op1,
+            extended_value: FREE_VOID_CAST,
+            ..Opline::default()
+        });
+        Ok(())
     }
 
     /// `zend_do_free` over a value nothing reads (`Z/Zend/zend_compile.c:755`).
@@ -13587,22 +13770,37 @@ impl Emit<'_> {
                         return Ok(served);
                     }
                 }
-                let parameters = self
+                let (parameters, flagged) = self
                     .functions
                     .get(index)
-                    .map(|decl| decl.parameters.as_slice())
+                    .map(|decl| {
+                        (
+                            decl.parameters.as_slice(),
+                            attributes::deprecated_or_no_discard(&decl.attributes),
+                        )
+                    })
                     .unwrap_or_default();
                 let callee = Callee::of(parameters);
                 let plan = Plan::of(arguments, Some(&callee));
                 let stack = used_stack(plan.count, None);
-                (callee, plan, stack, Opcode::DoIcall)
+                let call_op = if flagged {
+                    Opcode::DoFcallByName
+                } else {
+                    Opcode::DoIcall
+                };
+                (callee, plan, stack, call_op)
             }
             None => match self.declared_function(&lowered) {
                 Some((decl, body)) => {
                     let callee = Callee::of(&decl.parameters);
                     let plan = Plan::of(arguments, Some(&callee));
                     let stack = used_stack(plan.count, Some(body));
-                    (callee, plan, stack, Opcode::DoUcall)
+                    let call_op = if attributes::deprecated_or_no_discard(&decl.attributes) {
+                        Opcode::DoFcallByName
+                    } else {
+                        Opcode::DoUcall
+                    };
+                    (callee, plan, stack, call_op)
                 }
                 None => return self.dynamic_call(&resolved, arguments),
             },
@@ -13931,7 +14129,8 @@ impl Emit<'_> {
             ClassRef::Scope(_) | ClassRef::Fetched(_) => None,
         };
         let (call_op, callee) = match known {
-            Some((Known::User, callee)) => (Opcode::DoUcall, Some(callee)),
+            Some((Known::User { flagged: false }, callee)) => (Opcode::DoUcall, Some(callee)),
+            Some((Known::User { flagged: true }, callee)) => (Opcode::DoFcallByName, Some(callee)),
             Some((Known::Native, callee)) => (Opcode::DoFcall, Some(callee)),
             None => (Opcode::DoFcall, None),
         };
@@ -14677,7 +14876,10 @@ impl Emit<'_> {
                 m.function.name.0.to_ascii_lowercase() == method
                     && (m.visibility == Visibility::Public || own)
             })
-            .map(|m| (Known::User, Callee::of(&m.function.parameters)))
+            .map(|m| {
+                let flagged = attributes::deprecated_or_no_discard(&m.function.attributes);
+                (Known::User { flagged }, Callee::of(&m.function.parameters))
+            })
     }
 
     /// `zend_add_func_name_literal`: the name as written and its lowered
@@ -15753,11 +15955,14 @@ fn note(names: &mut Vec<Vec<u8>>, name: &[u8]) {
 
 /// What a call site knows of its callee once the table has it
 /// (`zend_get_call_op`): a native, served by `DO_ICALL` or `DO_FCALL`,
-/// or a user function of this file, served by `DO_UCALL`.
+/// or a user function of this file, served by `DO_UCALL`, or by
+/// `DO_FCALL_BY_NAME` where `flagged`, its `fn_flags` carrying
+/// `ZEND_ACC_DEPRECATED` or `ZEND_ACC_NODISCARD`, which the one tests
+/// and the other does not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Known {
     Native,
-    User,
+    User { flagged: bool },
 }
 
 /// The binary operator a token is, php's `zend_compile_binary_op`
@@ -15808,6 +16013,10 @@ fn compound_op(kind: SyntaxKind) -> Option<BinaryOp> {
         _ => return None,
     })
 }
+
+/// `ZEND_FREE_VOID_CAST` (`Z/Zend/zend_compile.h:1106`): the
+/// `extended_value` of the `FREE` a `(void)` cast leaves.
+const FREE_VOID_CAST: u32 = 1 << 2;
 
 /// Whether a refusal is the one-line shape a construct this compiler
 /// cannot emit yet is refused in, which `xtask phpt` reads as unread
@@ -16503,6 +16712,7 @@ mod tests {
             classes: Vec::new(),
             bound: Vec::new(),
             runtime_keys: Vec::new(),
+            attributed_constants: Vec::new(),
             keys_before: 0,
             functions_declared: Vec::new(),
             dynamic: Vec::new(),
@@ -16579,7 +16789,7 @@ mod tests {
             is_final: false,
             tentative_return: false,
         });
-        let user = Some(Known::User);
+        let user = Some(Known::User { flagged: false });
         assert_eq!(
             emit.known_method(b"M", b"f"),
             user,
@@ -16902,7 +17112,10 @@ fn foldable_constants_of(constants: &[ClassConstDecl], before: usize) -> Vec<(Ve
     constants
         .iter()
         .take(before)
-        .filter(|c| !c.is_case)
+        // `zend_verify_ct_const_access`: a `ZEND_ACC_DEPRECATED`
+        // constant is fetched as the program serves, where its
+        // deprecation is raised.
+        .filter(|c| !c.is_case && !attributes::is_deprecated(&c.attributes))
         .map(|c| (c.name.0.to_vec(), c.value.clone()))
         .collect()
 }

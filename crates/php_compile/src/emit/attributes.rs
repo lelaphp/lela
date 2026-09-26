@@ -6,7 +6,7 @@
 //! compiler reads them where php's `zend_internal_attribute_get` answers,
 //! by the attribute's lowered name.
 
-use php_unit::decl::ClassKind;
+use php_unit::decl::{Attribute, ClassFlags, ClassKind};
 
 use super::walk::ClassModifiers;
 
@@ -17,7 +17,7 @@ pub(super) const TARGET_METHOD: u32 = 1 << 2;
 pub(super) const TARGET_PROPERTY: u32 = 1 << 3;
 pub(super) const TARGET_CLASS_CONST: u32 = 1 << 4;
 pub(super) const TARGET_PARAMETER: u32 = 1 << 5;
-const TARGET_CONST: u32 = 1 << 6;
+pub(super) const TARGET_CONST: u32 = 1 << 6;
 const TARGET_ALL: u32 = (1 << 7) - 1;
 
 /// `target_names`, in the order of the bits.
@@ -100,7 +100,8 @@ impl InternalAttribute {
 
     /// The validator `zend_compile_attributes` runs once the target
     /// holds, over a class of this kind, modifiers and name: php's
-    /// compile error, none where it takes the class.
+    /// compile error, none where it takes the class
+    /// ([`php_unit::decl::class_attribute_refusal`]).
     ///
     /// ```php
     /// #[Attribute]
@@ -123,21 +124,67 @@ impl InternalAttribute {
         modifiers: ClassModifiers,
         class: &str,
     ) -> Option<String> {
-        use InternalAttribute::{AllowDynamicProperties, Attribute, Deprecated};
-        let word = match (self, kind) {
-            (Attribute | AllowDynamicProperties, ClassKind::Trait) => "trait",
-            (Attribute | AllowDynamicProperties | Deprecated, ClassKind::Interface) => "interface",
-            (AllowDynamicProperties, ClassKind::Class) if modifiers.is_readonly => "readonly class",
-            (Attribute | AllowDynamicProperties | Deprecated, ClassKind::Enum) => "enum",
-            (Attribute, ClassKind::Class) if modifiers.is_abstract => "abstract class",
-            (Deprecated, ClassKind::Class) => "class",
-            _ => return None,
+        let flags = ClassFlags {
+            is_abstract: modifiers.is_abstract,
+            is_final: modifiers.is_final,
+            is_readonly: modifiers.is_readonly,
+            ..ClassFlags::default()
         };
-        Some(format!(
-            "Cannot apply #[\\{}] to {word} {class}",
-            self.declared()
-        ))
+        php_unit::decl::class_attribute_refusal(self.declared().as_bytes(), kind, &flags, class)
     }
+}
+
+/// Whether a declaration's attributes carry `#[\Deprecated]`, which
+/// `zend_compile_class_const_decl` raises `ZEND_ACC_DEPRECATED` on a
+/// class constant for, so `zend_try_ct_eval_class_const` substitutes
+/// it nowhere.
+///
+/// ```php
+/// class C {
+///     #[Deprecated] const X = 1;
+///     function f() { return self::X; }
+/// }
+/// echo (new C)->f(), "\n";
+/// ```
+/// ```expect
+/// Deprecated: Constant C::X is deprecated in %s on line 4
+/// 1
+/// ```
+pub(super) fn is_deprecated(attributes: &[Attribute]) -> bool {
+    attributes.iter().any(|attribute| {
+        InternalAttribute::named(&attribute.name.0) == Some(InternalAttribute::Deprecated)
+    })
+}
+
+/// Whether a function's attributes raise `ZEND_ACC_DEPRECATED`, which
+/// `zend_compile_func_decl` sets for a `#[\Deprecated]`, or
+/// `ZEND_ACC_NODISCARD`, which `validate_nodiscard` sets: the two bits
+/// `zend_get_call_op` keeps a known callee's call off `DO_ICALL` and
+/// `DO_UCALL` for, since only `DO_FCALL` and `DO_FCALL_BY_NAME` test
+/// them. Whether what the call returns is used is not known where the
+/// call op is picked, so a `#[\NoDiscard]` callee is kept off them
+/// whatever is done with it.
+///
+/// ```php
+/// #[Deprecated] function d() { return 1; }
+/// #[NoDiscard] function n() { return 1; }
+/// class C { #[NoDiscard] static function m() { return 1; } }
+/// $x = d();
+/// $y = n();
+/// $z = C::m();
+/// echo $x + $y + $z, "\n";
+/// ```
+/// ```expect
+/// Deprecated: Function d() is deprecated in %s on line 5
+/// 3
+/// ```
+pub(super) fn deprecated_or_no_discard(attributes: &[Attribute]) -> bool {
+    attributes.iter().any(|attribute| {
+        matches!(
+            InternalAttribute::named(&attribute.name.0),
+            Some(InternalAttribute::Deprecated | InternalAttribute::NoDiscard)
+        )
+    })
 }
 
 /// `zend_get_attribute_target_names`: the targets of a mask, in bit

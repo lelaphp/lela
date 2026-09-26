@@ -24,7 +24,7 @@ pub use strip_tags::strip_tags_ex;
 
 use php_ext::coerce::to_string;
 use php_ext::decl::FunctionDecl;
-use php_ext::raising::{Level, Thrown, arg_value_error, deprecated, docref, throw};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 use php_ext_random::Rng;
@@ -2130,10 +2130,6 @@ fn binary_strncmp(left: &[u8], right: &[u8], length: usize, fold: bool) -> i64 {
 /// string(8) "61e93f3f"
 /// ```
 fn utf8_encode(req: &mut Request) -> Result<Value, Thrown> {
-    deprecated(
-        req,
-        "Function utf8_encode() is deprecated since 8.2, visit the php.net documentation for various alternatives",
-    );
     argument_count_between(req, 1, 1)?;
     let string = string_argument(req, 1)?;
     let mut out = Vec::with_capacity(string.len() * 2);
@@ -2163,10 +2159,6 @@ fn utf8_encode(req: &mut Request) -> Result<Value, Thrown> {
 /// string(0) ""
 /// ```
 fn utf8_decode(req: &mut Request) -> Result<Value, Thrown> {
-    deprecated(
-        req,
-        "Function utf8_decode() is deprecated since 8.2, visit the php.net documentation for various alternatives",
-    );
     argument_count_between(req, 1, 1)?;
     let string = string_argument(req, 1)?;
     let s = string.as_bytes();
