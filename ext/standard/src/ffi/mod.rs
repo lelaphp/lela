@@ -521,11 +521,11 @@ unsafe extern "C" {
 #[cfg(target_os = "linux")]
 #[link(name = "resolv")]
 unsafe extern "C" {
-    /// `res_search`, which glibc's `<resolv.h>` names `__res_search`:
-    /// `php_dns_search` where there is no `<dns.h>`. php takes
-    /// `res_nsearch` over a state of its own; glibc keeps `_res` per
-    /// thread, so the calling thread's state is as private as php's.
-    #[link_name = "__res_search"]
+    /// `res_search`, `<resolv.h>`: `php_dns_search` where there is no
+    /// `<dns.h>`. glibc exports it from libc under this name since 2.34,
+    /// and `__res_search` only as a compatibility symbol a link cannot
+    /// bind. php takes `res_nsearch` over a state of its own; glibc keeps
+    /// `_res` per thread, so the calling thread's state is as private.
     fn res_search(
         dname: *const c_char,
         class: c_int,
@@ -533,9 +533,8 @@ unsafe extern "C" {
         answer: *mut u8,
         anslen: c_int,
     ) -> c_int;
-    /// `dn_expand`, glibc's `__dn_expand`; called at
-    /// `Z/ext/standard/dns.c:461`.
-    #[link_name = "__dn_expand"]
+    /// `dn_expand`, `<resolv.h>`; called at `Z/ext/standard/dns.c:461`.
+    #[link_name = "dn_expand"]
     fn dn_expand_c(
         msg: *const u8,
         eom: *const u8,
@@ -543,9 +542,8 @@ unsafe extern "C" {
         dst: *mut c_char,
         dstsiz: c_int,
     ) -> c_int;
-    /// `dn_skipname`, glibc's `__dn_skipname`; called at
-    /// `Z/ext/standard/dns.c:996`.
-    #[link_name = "__dn_skipname"]
+    /// `dn_skipname`, `<resolv.h>`; called at `Z/ext/standard/dns.c:996`.
+    #[link_name = "dn_skipname"]
     fn dn_skipname_c(ptr: *const u8, eom: *const u8) -> c_int;
     /// The calling thread's `h_errno`, which `<netdb.h>` defines as
     /// `(*__h_errno_location ())` on glibc.
