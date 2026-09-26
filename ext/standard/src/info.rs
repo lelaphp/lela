@@ -287,7 +287,7 @@ fn general(req: &mut Request) {
             &["DTrace Support", "disabled"],
         ],
     );
-    let wrappers = crate::streamsfuncs::builtin_and_registered(req);
+    let wrappers = req.stream_wrappers();
     stream_hash(req, "PHP Streams", &wrappers);
     stream_hash(req, "Stream Socket Transports", &[]);
     stream_hash(req, "Stream Filters", &[]);

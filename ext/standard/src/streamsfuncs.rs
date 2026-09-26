@@ -1404,29 +1404,32 @@ fn stream_resolve_include_path(req: &mut Request) -> Result<Value, Thrown> {
     }
 }
 
-/// The engine's own wrappers, `php` and then `file`, in the order php
-/// registers them, and then those the program registered.
-pub(super) fn builtin_and_registered(req: &Request) -> Vec<String> {
-    let mut schemes = vec![String::from("php"), String::from("file")];
-    schemes.extend(req.stream_wrappers());
-    schemes
-}
-
 /// `stream_get_wrappers(): array`, `PHP_FUNCTION(stream_get_wrappers)`
 /// (`Z/ext/standard/streamsfuncs.c:583`): the schemes of the wrappers
-/// the request has, in the order they were registered.
+/// the request has, in the order they were registered, with what a
+/// program registered and without what it unregistered.
 ///
 /// ```php
 /// foreach (stream_get_wrappers() as $w) { if ($w === 'php' || $w === 'file') echo $w, "\n"; }
+/// class Foo {}
+/// stream_wrapper_register('foo', 'Foo');
+/// var_dump(in_array('foo', stream_get_wrappers()));
+/// stream_wrapper_unregister('file');
+/// var_dump(in_array('file', stream_get_wrappers()));
+/// stream_wrapper_restore('file');
+/// var_dump(in_array('file', stream_get_wrappers()));
 /// ```
 /// ```expect
 /// php
 /// file
+/// bool(true)
+/// bool(false)
+/// bool(true)
 /// ```
 fn stream_get_wrappers(req: &mut Request) -> Result<Value, Thrown> {
     argument_count_between(req, 0, 0)?;
     let mut array = PhpArray::new(req)?;
-    for scheme in builtin_and_registered(req) {
+    for scheme in req.stream_wrappers() {
         let scheme = Value::string(PhpString::new(req, scheme.as_bytes())?);
         array.append(req, scheme)?;
     }
@@ -1474,7 +1477,8 @@ fn stream_is_local(req: &mut Request) -> Result<Value, Thrown> {
         return Ok(Value::bool(true));
     }
     let scheme = &path[..n];
-    let known = builtin_and_registered(req)
+    let known = req
+        .stream_wrappers()
         .iter()
         .any(|w| w.as_bytes().eq_ignore_ascii_case(scheme));
     if !known {

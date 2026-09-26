@@ -14138,10 +14138,17 @@ impl Request {
         true
     }
 
-    /// `stream_get_wrappers()`.
+    /// `stream_get_wrappers()`: the schemes of
+    /// `php_stream_get_url_stream_wrappers_hash()`, the request's own
+    /// table once a program changed it, with what `stream_wrapper_register`
+    /// added and `stream_wrapper_unregister` took out, and the built-in
+    /// one before, in the order each row went in.
     #[must_use]
     pub fn stream_wrappers(&self) -> Vec<String> {
-        self.wrappers.iter().map(|w| w.scheme.clone()).collect()
+        self.wrapper_table()
+            .into_iter()
+            .map(|row| String::from_utf8_lossy(&row.scheme).into_owned())
+            .collect()
     }
 
     /// `php_stream_filter_register_factory_volatile`
