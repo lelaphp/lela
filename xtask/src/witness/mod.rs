@@ -52,7 +52,9 @@
 //! **What coverage is.** The manifest's `witness.coverage` rule names the
 //! scope, `crates/php_engine/src/ops/**` and `ext/*/src/**`; a kernel or a
 //! native there without a witness raises `missing`, and `done` prints it
-//! per crate. What counts as one is [`fence::Subject`]'s sentence.
+//! per crate. What counts as one is the attribute that declares it, in a
+//! crate whose natives stand on the attributes ([`anchor`]), and
+//! [`fence::Subject`]'s sentence in a crate whose natives do not yet.
 //!
 //! **What is the tally's.** The verdicts, the print loop, the runner
 //! ladder and the reading's status are [`tally`]'s, shared with `phpt`;
@@ -73,6 +75,7 @@
 //! does not carry is read before anything runs, and the block is one the
 //! lane cannot run, named beside the regimes the pin has.
 
+mod anchor;
 pub(crate) mod fence;
 mod judge;
 #[cfg(test)]
@@ -436,18 +439,27 @@ pub(crate) fn coverage_rule(manifest: &Manifest) -> Option<&Rule> {
 }
 
 /// Every witness in a crate's sources, and every kernel or native the
-/// coverage rule's scope covers there.
+/// coverage rule's scope covers there: the natives the attributes declare
+/// where the crate's covered sources carry one ([`anchor`]), and
+/// [`fence::Subject`]'s count where they carry none.
 pub(crate) fn extract(root: &Path, krate: &Crate, rule: Option<&Rule>) -> Result<Extracted> {
     let mut out = Extracted::default();
+    let mut anchored = anchor::Anchored::default();
     for path in sources::rust(root, krate)? {
         let file = root.join(&path);
         let text = fs::read_to_string(&file)
             .with_context(|| format!("{path} is not a source the fence grammar can read"))?;
         let mut found = fence::extract(Path::new(&path), &text);
-        if !covered(rule, Path::new(&path)) {
+        if covered(rule, Path::new(&path)) {
+            anchored.take(anchor::scan(Path::new(&path), &text, &found.witnesses));
+        } else {
             found.subjects.clear();
         }
         out.take(found);
+    }
+    // A crate whose natives stand on the attributes is counted by them.
+    if let Some(subjects) = anchored.subjects() {
+        out.subjects = subjects;
     }
     Ok(out)
 }

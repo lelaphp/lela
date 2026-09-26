@@ -1,0 +1,24 @@
+# The positive control beside `anchor-missing` (harness-design.md §4.5
+# condition 2, revision 57): a workspace whose every native is covered.
+# The pin is the real one, by path.
+[oracle]
+pin = "../../../../oracle.toml"
+[budget]
+total = 1000
+new = 1000
+docs = 1000
+harness = 1000
+lock_packages = 1000
+clean_build_release_s = 1000
+api_items = 1000
+bindings = 1000
+
+[[crate]]
+name = "ext/pcre"
+budget = 1000
+
+[[rule]]
+id = "witness.coverage"
+scope = ["crates/php_engine/src/ops/**", "ext/*/src/**"]
+check = "witness-coverage"
+text = "A kernel or a native without a witness fails CI (fixture)."
