@@ -23,6 +23,7 @@ use crate::oracle::expect::Expectation;
 use crate::oracle::{
     self, Invocation, Observation, Oracle, PastLimit, Pin, Program, Verdict as Compared,
 };
+use crate::scratch::Tree;
 
 /// The fresh-process adapter of design §8's `ScriptExec` seam, bound to
 /// one run: the oracle and the registry, the binary it runs, the tier lane
@@ -436,19 +437,29 @@ fn words(text: &str) -> Vec<String> {
 }
 
 /// A file written beside a test for the length of its run and taken away
-/// after, which is where upstream puts a test's program too.
-struct Written(PathBuf);
+/// after, which is where upstream puts a test's program too; and the
+/// scratch tree that names it, so a run killed while it stands, which
+/// drops nothing, leaves it for the next run's sweep to take away rather
+/// than for every later run to bork on (#860).
+struct Written {
+    path: PathBuf,
+    _claim: Tree,
+}
 
 impl Written {
     fn new(path: &Path, body: &[u8]) -> Result<Written> {
+        let claim = Tree::claiming("phpt-beside", path)?;
         fs::write(path, body).with_context(|| format!("writing {}", path.display()))?;
-        Ok(Written(path.to_path_buf()))
+        Ok(Written {
+            path: path.to_path_buf(),
+            _claim: claim,
+        })
     }
 }
 
 impl Drop for Written {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
+        let _ = fs::remove_file(&self.path);
     }
 }
 

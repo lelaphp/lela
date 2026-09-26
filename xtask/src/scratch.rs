@@ -38,7 +38,10 @@
 //! it either — being kept outlives the process that asked for it, which is
 //! the whole point of asking.
 
+use std::ffi::OsStr;
 use std::fs::File;
+use std::io::{Read, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Once;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -126,6 +129,20 @@ impl Tree {
             eprintln!("{KEEP}: keeping {}", path.display());
         }
         Ok(Tree { path, held })
+    }
+
+    /// A tree that also answers for one file outside it, whose path is
+    /// written into the tree's lock: the sweep that takes a dead run's
+    /// tree takes the file too. The caller removes the file while it
+    /// lives; this is for the run that never gets to.
+    pub(crate) fn claiming(name: &str, outside: &Path) -> Result<Tree> {
+        let tree = Tree::new(name)?;
+        if let Some((lock, file)) = &tree.held {
+            let mut file: &File = file;
+            file.write_all(outside.as_os_str().as_bytes())
+                .with_context(|| format!("naming {} in {}", outside.display(), lock.display()))?;
+        }
+        Ok(tree)
     }
 
     /// The directory itself, where a caller needs the `&Path` by name.
@@ -254,6 +271,14 @@ fn reap() {
         if file.try_lock().is_err() {
             continue;
         }
+        // The file outside the tree a claiming tree answers for, taken
+        // away and then unnamed, so a sweep that opened the lock before
+        // this one let it go finds nothing to take.
+        let mut outside = Vec::new();
+        if (&file).read_to_end(&mut outside).is_ok_and(|n| n > 0) {
+            let _ = std::fs::remove_file(OsStr::from_bytes(&outside));
+            let _ = file.set_len(0);
+        }
         let _ = std::fs::remove_dir_all(base.join(tree));
         let _ = std::fs::remove_file(&lock);
     }
@@ -295,5 +320,39 @@ impl Drop for Tree {
             let _ = std::fs::remove_dir_all(&self.path);
             let _ = std::fs::remove_file(lock);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A claiming tree a killed run left, as the run leaves it: the tree,
+    /// and beside it a lock nobody holds naming a file outside the tree.
+    /// The sweep takes the file with the tree (#860); a live claiming
+    /// tree's file, the control, stands through the same sweep.
+    #[test]
+    fn a_dead_runs_claimed_file_goes_with_its_tree_and_a_live_ones_stays() {
+        let beside = Tree::new("claimed-files").unwrap();
+        let dead = beside.join("dead.php");
+        let live = beside.join("live.php");
+        std::fs::write(&dead, "<?php").unwrap();
+        std::fs::write(&live, "<?php").unwrap();
+
+        let tree = std::env::temp_dir().join(format!("{PREFIX}claimed-dead-{}", u32::MAX));
+        std::fs::create_dir_all(&tree).unwrap();
+        let mut lock = tree.clone().into_os_string();
+        lock.push(LOCK);
+        std::fs::write(&lock, dead.as_os_str().as_bytes()).unwrap();
+        let claim = Tree::claiming("claimed-live", &live).unwrap();
+
+        reap();
+        assert!(!dead.exists(), "the dead run's file stands");
+        assert!(
+            !tree.exists() && !Path::new(&lock).exists(),
+            "its tree stands"
+        );
+        assert!(live.exists(), "the live run's file went");
+        assert!(claim.path().is_dir());
     }
 }
