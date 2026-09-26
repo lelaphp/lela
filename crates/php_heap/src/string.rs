@@ -689,13 +689,14 @@ const REQUEST_TABLE_SIZE: u32 = 1024;
 /// The absolute number, held to the oracle. The two function names this
 /// source interns cost 40 and 48, php's aligned string size over each,
 /// and the first of them charges this array's 40960; that much is php's
-/// own arithmetic and the two engines agree on it to the byte. What php
-/// reports beside it is the op array, the compiler, the syntax tree and
-/// the request arena, which design §5.13 puts on the system allocator
-/// here, so the witness reads a smaller total than the oracle's and
-/// stands under the divergence row that says so (#178). It is the row's
-/// fixture: without the row it is red, this engine's 41048 against
-/// php's number below. That number is php's under the harness's own
+/// own arithmetic and the two engines agree on it to the byte, as they do
+/// on the VM stack's pages, which come from the request's heap as php's
+/// do (#761). What php reports beside it is the op array, the compiler,
+/// the syntax tree and the request arena, which design §5.13 puts on the
+/// system allocator here, so the witness reads a smaller total than the
+/// oracle's and stands under the divergence row that says so (#178,
+/// #788). It is the row's fixture: without the row it is red, this
+/// engine's smaller number against php's below. That number is php's under the harness's own
 /// recipe and scratch tree, and it moves with what the CLI puts in
 /// `$_SERVER` before a line runs, the file's directory and the
 /// environment, so it is read off what the oracle printed, never worked out.
