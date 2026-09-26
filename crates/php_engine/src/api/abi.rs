@@ -676,8 +676,8 @@ pub enum PropertyPlace {
 }
 
 /// What `get_properties_for` is asked for, php's `zend_prop_purpose`:
-/// the five readers of an object's properties that a class may answer
-/// each in its own way.
+/// the six readers of an object's properties that a class may answer
+/// each in its own way, `GetObjectVars` being `get_object_vars()`'s.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PropertyPurpose {
     Debug,
@@ -685,6 +685,7 @@ pub enum PropertyPurpose {
     Serialize,
     VarExport,
     Json,
+    GetObjectVars,
 }
 
 /// The `clone_obj` slot: a fresh object holding what this one holds,

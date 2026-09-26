@@ -570,7 +570,12 @@ impl ObjectHandlers for DateHandlers {
         object: PhpObject,
         purpose: PropertyPurpose,
     ) -> Result<Option<Vec<(PhpString, Value)>>, Thrown> {
-        if purpose == PropertyPurpose::Debug {
+        // `date_object_get_properties_for`'s `default:`, the standard
+        // table, for the debug reader and for `get_object_vars()`.
+        if matches!(
+            purpose,
+            PropertyPurpose::Debug | PropertyPurpose::GetObjectVars
+        ) {
             return Ok(None);
         }
         let time = object.native::<DateObj>(req).and_then(|d| d.time.clone());
@@ -675,7 +680,12 @@ impl ObjectHandlers for TzHandlers {
         object: PhpObject,
         purpose: PropertyPurpose,
     ) -> Result<Option<Vec<(PhpString, Value)>>, Thrown> {
-        if purpose == PropertyPurpose::Debug {
+        // `date_object_get_properties_for`'s `default:`, the standard
+        // table, for the debug reader and for `get_object_vars()`.
+        if matches!(
+            purpose,
+            PropertyPurpose::Debug | PropertyPurpose::GetObjectVars
+        ) {
             return Ok(None);
         }
         let kind = object.native::<TzObj>(req).and_then(|t| t.tz.clone());

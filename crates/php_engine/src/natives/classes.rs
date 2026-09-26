@@ -10,7 +10,7 @@ use php_unit::decl::{ClassKind, FunctionDecl, PropertyDecl, Type, Visibility};
 
 use super::stub::stub;
 use super::{string_argument, wrong_argument_count};
-use crate::api::abi::{Entry, PropertyTest};
+use crate::api::abi::{Entry, PropertyPurpose, PropertyTest};
 use crate::api::coerce::coerce_param;
 use crate::api::raising::{Thrown, arg_type_error, deprecated, throw, warning};
 use crate::api::request::Request;
@@ -578,9 +578,14 @@ fn get_object_vars(req: &mut Request) -> Result<Value, Thrown> {
     let object = object_argument(req, 1)?;
     let class = object.class();
     let scope = req.scope();
-    // `zend_get_properties_for(ZEND_PROP_PURPOSE_GET_OBJECT_VARS)` over
-    // a class with a hooked property is the table its hooks answer,
-    // each row one owner of its own.
+    // `zend_get_properties_for(ZEND_PROP_PURPOSE_GET_OBJECT_VARS)`: a
+    // class that answers the purpose itself hands back its table.
+    let table = req.object_handlers(object.heap());
+    if let Some(rows) = table.get_properties_for(req, object, PropertyPurpose::GetObjectVars)? {
+        return answered_vars(req, class, scope, rows);
+    }
+    // Over a class with a hooked property it is the table its hooks
+    // answer, each row one owner of its own.
     if let Some(rows) = req.hooked_object_rows(object)? {
         let mut array = PhpArray::new(req)?;
         for (name, value, declared) in rows {
@@ -639,6 +644,53 @@ fn get_object_vars(req: &mut Request) -> Result<Value, Thrown> {
         } else {
             Key::from_string(name)
         };
+        array.set(req, key, value)?;
+    }
+    Ok(Value::array(array))
+}
+
+/// `get_object_vars()` over the table a class's `get_properties_for`
+/// answered, a table of its own and never the object's, so each row is
+/// dynamic to `zend_check_property_access`: a mangled name passes as it
+/// is and stays mangled, and a plain one is refused only where it names
+/// a declared property that is not public or that `scope` may not see;
+/// a plain one is keyed as a symbol table keys it. The rows are views,
+/// and each kept one takes its own owner. The witness is `DatePeriod`'s,
+/// whose seven fields php adds to the table, and `DateInterval`'s,
+/// which answers its fields for every reader.
+///
+/// ```php
+/// class P extends DatePeriod { public $own = 1; protected $prot = 2; }
+/// $p = P::createFromISO8601String('R2/2012-07-01T00:00:00Z/P7D');
+/// echo json_encode(array_keys(get_object_vars($p))), "\n";
+/// echo count(get_object_vars(new DateTime)), ' ', json_encode(array_keys(get_object_vars(new DateInterval('P1D')))), "\n";
+/// ```
+/// ```expect
+/// ["own","\u0000*\u0000prot","start","current","end","interval","recurrences","include_start_date","include_end_date"]
+/// 0 ["y","m","d","h","i","s","f","invert","days","from_string"]
+/// ```
+fn answered_vars(
+    req: &mut Request,
+    class: ClassId,
+    scope: Option<ClassId>,
+    rows: Vec<(PhpString, Value)>,
+) -> Result<Value, Thrown> {
+    let placed = req.placed_properties(class);
+    let mut array = PhpArray::new(req)?;
+    for (name, value) in rows {
+        let bytes = name.as_bytes();
+        let key = if bytes.first() == Some(&0) {
+            Key::Str(name)
+        } else {
+            match property_info(req, class, &placed, bytes, scope) {
+                Ok(None) => {}
+                Ok(Some(at)) if placed[at].1.visibility == Visibility::Public => {}
+                _ => continue,
+            }
+            Key::from_string(name)
+        };
+        req.addref(&Value::string(name));
+        req.addref(&value);
         array.set(req, key, value)?;
     }
     Ok(Value::array(array))
