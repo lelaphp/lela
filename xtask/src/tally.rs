@@ -34,16 +34,16 @@
 //! coverage is the lane's and is judged first, and a snippet that did not
 //! run is counted, never a refusal (#65).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::num::NonZeroUsize;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc;
+use std::sync::{Condvar, Mutex, PoisonError, mpsc};
 use std::thread;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 
 use crate::oracle::Runner;
 use crate::reading::{Reading, Status, listed};
@@ -168,15 +168,10 @@ impl<J: Judgement> Tally<J> {
         Ok(tally)
     }
 
-    /// [`Tally::judge`] on as many threads as the machine has, for a lane
-    /// whose items share nothing: each witness runs in a scratch tree of
-    /// its own, and most of its wall is the oracle's process starting,
-    /// which a thread spends waiting. The verdicts are printed and kept in
-    /// the items' order all the same, each once every one before it is
-    /// in, so the run reads as the one-at-a-time run does. The `phpt` lane
-    /// stays on [`Tally::judge`]: its tests run in the corpus's own
-    /// directories, where upstream's runner holds some apart
-    /// (`--CONFLICTS--`) and this one does not yet.
+    /// [`Tally::judge_apart`] on as many threads as the machine has, for a
+    /// lane whose items share nothing: each witness runs in a scratch tree
+    /// of its own, and most of its wall is the oracle's process starting,
+    /// which a thread spends waiting.
     pub fn judge_beside<I: Sync>(
         items: &[I],
         judge: impl Fn(&I) -> Result<Judged<J>> + Sync,
@@ -184,20 +179,61 @@ impl<J: Judgement> Tally<J> {
     where
         J: Send,
     {
-        let threads = thread::available_parallelism().map_or(1, NonZeroUsize::get);
-        let next = AtomicUsize::new(0);
+        Tally::judge_apart(items, cores(), |_| Apart::Keys(Vec::new()), judge)
+    }
+
+    /// [`Tally::judge`] on a pool of `threads`, each item held apart from
+    /// the items `apart` says it may not run beside, as [`Queue::take`]
+    /// holds them. The verdicts are printed and kept in the items' order
+    /// all the same, each once every one before it is in, so the run reads
+    /// as the one-at-a-time run does, and a pool of one is that run.
+    pub fn judge_apart<I: Sync>(
+        items: &[I],
+        threads: NonZeroUsize,
+        apart: impl FnMut(&I) -> Apart,
+        judge: impl Fn(&I) -> Result<Judged<J>> + Sync,
+    ) -> Result<Tally<J>>
+    where
+        J: Send,
+    {
+        let apart: Vec<Apart> = items.iter().map(apart).collect();
+        let queue = Mutex::new(Queue {
+            waiting: (0..items.len()).collect(),
+            ..Queue::default()
+        });
+        let freed = Condvar::new();
         let (sent, received) = mpsc::channel();
         thread::scope(|scope| {
-            for _ in 0..threads.min(items.len()) {
-                let (sent, next, judge) = (sent.clone(), &next, &judge);
-                // A send that fails is the receiver gone, a verdict before
-                // this one having ended the run: the thread stops too.
+            for _ in 0..threads.get().min(items.len()) {
+                let (sent, queue, freed) = (sent.clone(), &queue, &freed);
+                let (apart, judge) = (&apart, &judge);
                 scope.spawn(move || {
+                    let lock = || queue.lock().unwrap_or_else(PoisonError::into_inner);
                     loop {
-                        let at = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(item) = items.get(at) else { break };
-                        if sent.send((at, judge(item))).is_err() {
-                            break;
+                        let mut waiting = lock();
+                        let at = loop {
+                            if let Some(at) = waiting.take(apart) {
+                                break at;
+                            }
+                            if waiting.waiting.is_empty() {
+                                return;
+                            }
+                            waiting = freed.wait(waiting).unwrap_or_else(PoisonError::into_inner);
+                        };
+                        drop(waiting);
+                        // A judge that panics gives its keys back all the
+                        // same, so no thread waits on them for ever.
+                        let judged = panic::catch_unwind(AssertUnwindSafe(|| judge(&items[at])))
+                            .unwrap_or_else(|_| Err(anyhow!("judging item {at} panicked")));
+                        lock().done(&apart[at]);
+                        freed.notify_all();
+                        // A send that fails is the receiver gone, a verdict
+                        // before this one having ended the run: nothing
+                        // more starts.
+                        if sent.send((at, judged)).is_err() {
+                            lock().waiting.clear();
+                            freed.notify_all();
+                            return;
                         }
                     }
                 });
@@ -328,6 +364,84 @@ impl<J: Judgement> Tally<J> {
         reading.status = outcome.status();
         reading.message = message;
         Ok(reading)
+    }
+}
+
+/// What one item may not run beside: upstream's conflict keys
+/// (run-tests.php:1341-1372). No two items holding one key run at once,
+/// and an item alone runs with nothing beside it; an item holding no key
+/// runs beside anything but an item alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Apart {
+    Keys(Vec<String>),
+    /// Upstream's `all`.
+    Alone,
+}
+
+/// The pool a lane runs on unless it is told otherwise: as many threads
+/// as the machine has.
+pub fn cores() -> NonZeroUsize {
+    thread::available_parallelism().unwrap_or(NonZeroUsize::MIN)
+}
+
+/// The items not yet started and what the running ones hold: where the
+/// threads of [`Tally::judge_apart`] take their next item from.
+#[derive(Debug, Default)]
+struct Queue {
+    /// The items not yet started, in their order.
+    waiting: Vec<usize>,
+    /// The keys the running items hold.
+    held: BTreeSet<String>,
+    running: usize,
+    /// Whether the item running is one that runs alone.
+    alone: bool,
+}
+
+impl Queue {
+    /// The next item that may start now: the first waiting whose keys
+    /// neither a running item nor an earlier waiting item holds, so the
+    /// items sharing a key start in their order, which upstream keeps for
+    /// them (run-tests.php:1374-1378). An item alone starts when it is
+    /// first in line and nothing runs, and nothing after it starts first:
+    /// the items before it are done before it and the ones after it wait
+    /// for it, as a run of one would have it. Upstream runs those last
+    /// instead, which no verdict can tell from this.
+    fn take(&mut self, apart: &[Apart]) -> Option<usize> {
+        if self.alone {
+            return None;
+        }
+        let mut passed: Vec<&str> = Vec::new();
+        for (n, &at) in self.waiting.iter().enumerate() {
+            match &apart[at] {
+                Apart::Alone if n == 0 && self.running == 0 => self.alone = true,
+                Apart::Alone => return None,
+                Apart::Keys(keys)
+                    if keys
+                        .iter()
+                        .any(|key| self.held.contains(key) || passed.contains(&key.as_str())) =>
+                {
+                    passed.extend(keys.iter().map(String::as_str));
+                    continue;
+                }
+                Apart::Keys(keys) => self.held.extend(keys.iter().cloned()),
+            }
+            self.running += 1;
+            return Some(self.waiting.remove(n));
+        }
+        None
+    }
+
+    /// An item done: what it held given back.
+    fn done(&mut self, apart: &Apart) {
+        self.running -= 1;
+        match apart {
+            Apart::Alone => self.alone = false,
+            Apart::Keys(keys) => {
+                for key in keys {
+                    self.held.remove(key);
+                }
+            }
+        }
     }
 }
 
@@ -527,6 +641,114 @@ mod tests {
         let ids: Vec<String> = tally.judged.iter().map(|j| j.id.clone()).collect();
         let want: Vec<String> = (0..64).map(|i| i.to_string()).collect();
         assert_eq!(ids, want);
+    }
+
+    /// Items judged on a pool of eight, each holding what `apart` gives
+    /// it: what ran at once, as spans of an instant counted up across the
+    /// run, one per item in the items' order, and the order items started.
+    fn spans(
+        apart: &[Apart],
+        threads: usize,
+        took: impl Fn(usize) -> u64 + Sync,
+    ) -> (Vec<(u64, u64)>, Vec<usize>) {
+        let clock = std::time::Instant::now();
+        let at = || u64::try_from(clock.elapsed().as_micros()).unwrap();
+        let (spans, started) = (
+            Mutex::new(vec![(0, 0); apart.len()]),
+            Mutex::new(Vec::new()),
+        );
+        let items: Vec<usize> = (0..apart.len()).collect();
+        let tally = Tally::judge_apart(
+            &items,
+            NonZeroUsize::new(threads).unwrap(),
+            |n| apart[*n].clone(),
+            |n| {
+                started.lock().unwrap().push(*n);
+                let start = at();
+                thread::sleep(std::time::Duration::from_millis(took(*n)));
+                spans.lock().unwrap()[*n] = (start, at());
+                Ok(Judged::new(&n.to_string(), "item", Went::Pass, ""))
+            },
+        )
+        .unwrap();
+        let ids: Vec<String> = tally.judged.iter().map(|j| j.id.clone()).collect();
+        let want: Vec<String> = items.iter().map(ToString::to_string).collect();
+        assert_eq!(ids, want, "the verdicts are in the items' order");
+        (spans.into_inner().unwrap(), started.into_inner().unwrap())
+    }
+
+    fn overlap(a: (u64, u64), b: (u64, u64)) -> bool {
+        a.0 < b.1 && b.0 < a.1
+    }
+
+    fn keys(keys: &[&str]) -> Apart {
+        Apart::Keys(keys.iter().map(|k| (*k).to_owned()).collect())
+    }
+
+    /// Two items naming one key never run at once, and start in their
+    /// order; items naming none run beside them, which is the control
+    /// that shows the pool runs anything at once at all.
+    #[test]
+    fn items_sharing_a_key_never_run_at_once_and_keep_their_order() {
+        let apart = [
+            keys(&["disk"]),
+            keys(&[]),
+            keys(&["disk", "net"]),
+            keys(&[]),
+            keys(&["net"]),
+        ];
+        let (spans, started) = spans(&apart, 8, |_| 60);
+        assert!(!overlap(spans[0], spans[2]), "{spans:?}");
+        assert!(!overlap(spans[2], spans[4]), "{spans:?}");
+        assert!(
+            spans[0].1 <= spans[2].0 && spans[2].1 <= spans[4].0,
+            "{spans:?}"
+        );
+        assert!(overlap(spans[1], spans[3]), "the control: {spans:?}");
+        assert!(overlap(spans[0], spans[1]), "the control: {spans:?}");
+        let order = |n| started.iter().position(|s| *s == n).unwrap();
+        assert!(order(0) < order(2) && order(2) < order(4), "{started:?}");
+    }
+
+    /// An item alone runs with nothing beside it: everything before it is
+    /// done when it starts, and nothing after it starts until it is done.
+    #[test]
+    fn an_item_alone_runs_with_nothing_beside_it() {
+        let apart = [keys(&[]), keys(&[]), Apart::Alone, keys(&[]), keys(&[])];
+        let (spans, _) = spans(&apart, 8, |_| 40);
+        for (n, span) in spans.iter().enumerate().filter(|(n, _)| *n != 2) {
+            assert!(!overlap(spans[2], *span), "{n}: {spans:?}");
+        }
+        assert!(overlap(spans[0], spans[1]), "the control: {spans:?}");
+        assert!(overlap(spans[3], spans[4]), "the control: {spans:?}");
+    }
+
+    /// A pool of one is the one-at-a-time run: each item starts when the
+    /// one before it is done, in the items' order.
+    #[test]
+    fn a_pool_of_one_runs_the_items_one_at_a_time_in_order() {
+        let apart = [keys(&["a"]), keys(&[]), Apart::Alone, keys(&[])];
+        let (spans, started) = spans(&apart, 1, |_| 5);
+        assert_eq!(started, [0, 1, 2, 3]);
+        assert!(spans.windows(2).all(|w| w[0].1 <= w[1].0), "{spans:?}");
+    }
+
+    /// An item that takes long holds up only the items it conflicts with:
+    /// the rest are done before it is, while the one sharing its key waits.
+    #[test]
+    fn a_long_item_holds_up_only_what_it_conflicts_with() {
+        let apart = [
+            keys(&["slow"]),
+            keys(&[]),
+            keys(&[]),
+            keys(&["slow"]),
+            keys(&[]),
+        ];
+        let (spans, _) = spans(&apart, 2, |n| if n == 0 { 400 } else { 20 });
+        for n in [1, 2, 4] {
+            assert!(spans[n].1 < spans[0].1, "{n}: {spans:?}");
+        }
+        assert!(spans[3].0 >= spans[0].1, "{spans:?}");
     }
 
     /// An item the judge cannot judge ends the run with its error, as the

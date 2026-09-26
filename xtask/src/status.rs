@@ -7,7 +7,7 @@
 //! engine, laying the local file down from its template when the clone
 //! has none.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 use std::fs;
 use std::path::Path;
@@ -83,7 +83,14 @@ pub fn render(
             BUDGET,
         ),
         Section::Divergence => return divergence(registry, format, uncut),
-        Section::Phpt => (fold_uncreated(standing(store, root)?, "scope")?, INSTRUMENT),
+        Section::Phpt => {
+            let rows = fold_uncreated(standing(store, root)?, "scope")?;
+            let rows = match format {
+                Format::Md => outermost(rows),
+                Format::Json => rows,
+            };
+            (rows, INSTRUMENT)
+        }
         Section::Witness => (
             fold_uncreated(instrument(&readings, "witness"), "scope")?,
             INSTRUMENT,
@@ -566,6 +573,29 @@ fn standing(store: &Store, root: &Path) -> Result<Vec<Row>> {
     Ok(rows
         .map(|r| Row::new(&[("scope", json!(r.scope))], Some(r.clone())))
         .collect())
+}
+
+/// The rows of the phpt section a session is handed: each subset's, but
+/// not a narrower run inside one the section already shows
+/// (`Zend/tests/coalesce` inside `Zend/tests`, `ext/standard/tests/streams`
+/// inside `ext/standard`), whose tests the enclosing reading already
+/// holds. A narrower run is a builder's working reading, and its row would
+/// stand in the local facts for good, which have a cap. `--format json`
+/// keeps every reading.
+fn outermost(rows: Vec<Row>) -> Vec<Row> {
+    let base = |row: &Row| -> String {
+        let scope = row.facts.get("scope").and_then(Value::as_str).unwrap_or("");
+        scope.split('@').next().unwrap_or(scope).to_owned()
+    };
+    let bases: BTreeSet<String> = rows.iter().map(base).collect();
+    rows.into_iter()
+        .filter(|row| {
+            let own = base(row);
+            !bases
+                .iter()
+                .any(|other| *other != own && own.starts_with(&format!("{other}/")))
+        })
+        .collect()
 }
 
 /// The `track` section: the last run of `xtask track work`, read off the
@@ -1349,7 +1379,8 @@ fn table((head, line): Columns, rows: &[Row]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{LOCAL_SECTIONS, local_template};
+    use super::{LOCAL_SECTIONS, Row, local_template, outermost};
+    use serde_json::json;
 
     /// The opener of a region by name, if the text has one.
     fn opener<'a>(text: &'a str, name: &str) -> Option<&'a str> {
@@ -1374,6 +1405,40 @@ mod tests {
         assert!(
             ignored.contains("/.claude/harness.local.md"),
             "the local file is gitignored"
+        );
+    }
+
+    /// A narrower run inside a subset the section shows folds away, its
+    /// comparison with it; a subset nothing encloses stays, whatever its
+    /// name shares with another's.
+    #[test]
+    fn the_phpt_rows_are_the_outermost_subsets() {
+        let row = |scope: &str| Row::new(&[("scope", json!(scope))], None);
+        let rows = [
+            "Zend/tests",
+            "Zend/tests@against",
+            "Zend/tests/coalesce",
+            "Zend/tests/coalesce@against",
+            "ext/standard",
+            "ext/standard/tests/streams",
+            "ext/standard/tests/streams@control",
+            "ext/pdo",
+            "ext/pdo_sqlite",
+        ]
+        .map(row);
+        let kept: Vec<String> = outermost(rows.into())
+            .iter()
+            .map(|r| r.facts["scope"].as_str().unwrap_or_default().to_owned())
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                "Zend/tests",
+                "Zend/tests@against",
+                "ext/standard",
+                "ext/pdo",
+                "ext/pdo_sqlite"
+            ]
         );
     }
 }

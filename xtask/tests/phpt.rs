@@ -819,3 +819,67 @@ fn a_test_met_at_the_merge_base_and_failing_here_fails_the_comparison() {
         readings[0].message
     );
 }
+
+/// A subset run on a pool of four writes the reading and keeps the run a
+/// pool of one does, word for word, whatever order its tests finished in
+/// (#938): the status, every number and the message, and the kept run's
+/// bytes, which `--against` reads.
+#[test]
+fn a_pooled_run_writes_the_reading_and_keeps_the_run_a_run_of_one_does() {
+    if oracle().is_none() {
+        return;
+    }
+    let slow = |n: u8, said: &str| {
+        format!(
+            "--TEST--\nn{n}\n--FILE--\n<?php usleep({}); echo {n};\n--EXPECT--\n{said}\n",
+            u32::from(9 - n) * 30_000
+        )
+    };
+    let tests: Vec<(String, String)> = (1..=8)
+        .map(|n| {
+            let said = if n % 3 == 0 { "wrong".to_owned() } else { n.to_string() };
+            (format!("t{n}.phpt"), slow(n, &said))
+        })
+        .chain([(
+            "t9.phpt".to_owned(),
+            "--TEST--\nskipped\n--SKIPIF--\n<?php echo 'skip here';\n--FILE--\n<?php\n--EXPECT--\n\n".to_owned(),
+        )])
+        .collect();
+    let tests: Vec<(&str, &str)> = tests
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    let scratch = Scratch::new("pooled", &tests);
+    commit_all(&scratch.root, "pooled");
+    written_at(&scratch.engine, SystemTime::now() + Duration::from_mins(1));
+    let kept = |jobs: usize| {
+        let ask = Ask {
+            subset: Some("ext/fixture".to_owned()),
+            engine: Some(scratch.engine.clone()),
+            jobs: std::num::NonZeroUsize::new(jobs),
+            ..Ask::default()
+        };
+        let readings = phpt::run(&scratch.root, &scratch.manifest, &registry(""), &ask).unwrap();
+        let mut runs = Vec::new();
+        files_under(&scratch.root.join("target/phpt-runs"), &mut runs);
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        let run = fs::read(&runs[0]).unwrap();
+        let reading = readings.into_iter().next().unwrap();
+        (reading.status, reading.numbers, reading.message, run)
+    };
+    let one = kept(1);
+    assert_eq!(one.0, Status::Fail, "{one:?}");
+    assert_eq!(kept(4), one);
+}
+
+/// Every file under `dir`.
+fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {
+    for entry in fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            files_under(&path, out);
+        } else {
+            out.push(path);
+        }
+    }
+}

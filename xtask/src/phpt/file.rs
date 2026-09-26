@@ -17,6 +17,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use regex_lite::Regex;
+
 /// The sections upstream allows (run-tests.php:3678-3687). `TEST` is not
 /// among them: it is consumed before the loop, so a second one borks.
 pub const ALLOWED: [&str; 35] = [
@@ -228,6 +230,40 @@ impl Phpt {
     }
 }
 
+/// The conflict keys of the test at `path` as upstream reads them
+/// (run-tests.php:1344-1363): its `--CONFLICTS--` section, found in the
+/// file's text by upstream's own pattern and not by the parser above,
+/// else its directory's `CONFLICTS` file, read once per directory into
+/// `dirs`, and none where the directory has none.
+pub fn conflicts(path: &Path, dirs: &mut BTreeMap<PathBuf, Vec<String>>) -> Vec<String> {
+    let text = String::from_utf8_lossy(&fs::read(path).unwrap_or_default()).into_owned();
+    let section = Regex::new(r"(?ms)^--CONFLICTS--(.+?)^--").ok();
+    if let Some(found) = section.as_ref().and_then(|pattern| pattern.captures(&text)) {
+        return keys(&found[1]);
+    }
+    let dir = path.parent().unwrap_or(path).to_path_buf();
+    dirs.entry(dir)
+        .or_insert_with_key(|dir| {
+            fs::read_to_string(dir.join("CONFLICTS"))
+                .map_or_else(|_| Vec::new(), |text| keys(&text))
+        })
+        .clone()
+}
+
+/// Upstream's `parse_conflicts` (run-tests.php:3227-3232): `#` to the end
+/// of its line dropped, the text trimmed, and one key a line, trimmed.
+fn keys(text: &str) -> Vec<String> {
+    const TRIM: [char; 6] = [' ', '\t', '\n', '\r', '\0', '\x0B'];
+    let bare = Regex::new("#.*").map_or_else(
+        |_| text.to_owned(),
+        |comment| comment.replace_all(text, "").into_owned(),
+    );
+    bare.trim_matches(TRIM)
+        .split('\n')
+        .map(|key| key.trim_matches(TRIM).to_owned())
+        .collect()
+}
+
 /// The section a line opens, if it opens one: upstream's
 /// `preg_match('/^--([_A-Z]+)--/')`, which is not anchored at the end.
 fn opener(line: &[u8]) -> Option<String> {
@@ -355,5 +391,33 @@ mod tests {
         assert!(post.is_cgi());
         let cli = parse("--TEST--\nn\n--FILE--\nx\n--EXPECT--\n1\n").unwrap();
         assert!(!cli.is_cgi());
+    }
+
+    /// The keys of the fixture at `xtask/fixtures/phpt/conflicts`: a
+    /// test's own section, a comment in it dropped; none where neither the
+    /// test nor its directory names one; the directory's `CONFLICTS` file,
+    /// read once however many of its tests ask; and a test's own section
+    /// standing in place of its directory's file.
+    #[test]
+    fn the_keys_are_the_sections_else_the_directorys_file() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/phpt/conflicts");
+        let mut dirs = BTreeMap::new();
+        let mut keys = |test: &str| conflicts(&fixture.join(test), &mut dirs);
+        assert_eq!(keys("a-keyed/one.phpt"), ["shared"]);
+        assert_eq!(keys("a-keyed/two.phpt"), ["shared"]);
+        assert_eq!(keys("a-keyed/free1.phpt"), Vec::<String>::new());
+        assert_eq!(keys("b-alone/all.phpt"), ["all"]);
+        assert_eq!(keys("c-directory/one.phpt"), ["directory"]);
+        assert_eq!(keys("c-directory/two.phpt"), ["directory"]);
+        assert_eq!(keys("c-directory/own.phpt"), ["own"]);
+        assert_eq!(dirs.len(), 2, "{dirs:?}");
+    }
+
+    /// Upstream's `parse_conflicts` to the letter: an empty line between
+    /// two keys is a key of its own, and so is a text of comments alone.
+    #[test]
+    fn the_keys_are_split_and_trimmed_as_upstream_splits_them() {
+        assert_eq!(keys(" a # why\n\n\tb \r\n"), ["a", "", "b"]);
+        assert_eq!(keys("# nothing\n"), [""]);
     }
 }

@@ -41,9 +41,23 @@
 //! kept at the commit, test by test, in one more reading per subset; the
 //! `against` module says what keys a run and what gives no verdict (#664).
 //!
-//! **What one run is.** One process per test, one test at a time, so
-//! `--CONFLICTS--` is honoured by construction: nothing else of the corpus
-//! is running while a test does.
+//! **What one run is.** One process per test, on a pool of threads the
+//! size of the machine's cores or of `--jobs`, and the tests held apart as
+//! upstream's parallel runner holds them: two naming one key in their
+//! `--CONFLICTS--`, or in their directory's `CONFLICTS` file, never run at
+//! once, and one naming `all` runs with nothing beside it
+//! (run-tests.php:1341-1372). A test past the recipe's limit holds up only
+//! the tests it conflicts with. The verdicts are printed and kept in the
+//! tests' order whatever order they finish in, so the lines, the reading
+//! and the kept run are the ones a pool of one writes (#938).
+//!
+//! **Where a test writes.** Its program and its `SKIPIF` and `CLEAN`
+//! sections stand beside it in the shared php-src tree, where upstream
+//! puts them. Those three paths are among its keys, so two tests whose
+//! files would stand at one path never run at once; and each file is
+//! named in a scratch tree's lock while it stands, so a run killed with
+//! several tests going leaves them for the next run's sweep and not for a
+//! bork (#860).
 //!
 //! **Which subsets a lane runs.** The `[[crate]]` row, and nothing here:
 //! a crate owns the directories of the corpus its row names, an extension
@@ -69,7 +83,9 @@ pub(crate) mod against;
 mod census;
 pub(crate) mod file;
 
+use std::collections::BTreeMap;
 use std::fs;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -394,6 +410,8 @@ pub(crate) struct Under<'a> {
     pub runner: &'a Runner,
     pub lane: Option<Lane>,
     pub oracle_absent: Option<&'a str>,
+    /// How many tests run at once.
+    pub jobs: NonZeroUsize,
 }
 
 /// The subset's reading: the counts in `numbers`, the failures named in
@@ -410,6 +428,7 @@ pub(crate) fn reading(
         runner,
         lane,
         oracle_absent,
+        ..
     } = under;
     let scope = subset.scope(runner, lane);
     let absent = subset.absent();
@@ -583,6 +602,8 @@ pub struct Ask {
     /// one more reading per subset, at its scope with `@against` after it,
     /// failing while a test met there is not met here (#664).
     pub against: Option<String>,
+    /// How many tests run at once; the machine's cores unless named.
+    pub jobs: Option<NonZeroUsize>,
 }
 
 /// Run what was asked for: one reading per subset, each written by the
@@ -648,6 +669,7 @@ pub fn run(
         runner: &runner,
         lane: ask.lane,
         oracle_absent: oracle_absent.as_deref(),
+        jobs: ask.jobs.unwrap_or_else(tally::cores),
     };
     let mut readings = Vec::new();
     // The lane's census, folded over the subsets as each is run, so the
@@ -698,6 +720,7 @@ pub(crate) fn run_subset(
         runner,
         lane,
         oracle_absent,
+        jobs,
     } = under;
     let tests = subset.tests()?;
     let Some(binary) = runner.binary() else {
@@ -710,7 +733,13 @@ pub(crate) fn run_subset(
     // test rather than at its first SKIPIF.
     oracle.asserted()?;
     let adapter = Adapter::new(oracle, registry, binary, lane);
-    Tally::judge(&tests, |test| adapter.judge(subset, test))
+    let mut dirs = BTreeMap::new();
+    Tally::judge_apart(
+        &tests,
+        jobs,
+        |test| adapter::apart(test, &mut dirs),
+        |test| adapter.judge(subset, test),
+    )
 }
 
 #[cfg(test)]

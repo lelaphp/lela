@@ -390,6 +390,11 @@ pub(crate) struct Phpt {
     /// test met there is not met here, and the exit is those readings'.
     #[arg(long, value_name = "COMMIT")]
     pub against: Option<String>,
+    /// How many tests run at once: the machine's cores unless named, and
+    /// one test at a time at 1. Tests that share a `--CONFLICTS--` key
+    /// never run at once whatever the number.
+    #[arg(long, value_name = "N")]
+    pub jobs: Option<std::num::NonZeroUsize>,
 }
 
 /// What one `compile-identity` run is asked for, flattened onto the
