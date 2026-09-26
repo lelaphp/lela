@@ -7,8 +7,7 @@
 use php_ext::abi::ExtensionBuilder;
 use php_ext::decl::{
     Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind, ConstExpr,
-    EnumBacking, MethodDecl, Name, Parameter, ParameterDefault, PropertyDecl, PropertyHooks, Type,
-    Visibility,
+    EnumBacking, MethodDecl, Name, Parameter, ParameterDefault, PropertyDecl, Type, Visibility,
 };
 
 use crate::args::{class, d, method, nullable, p, str_default, union, untyped};
@@ -581,16 +580,12 @@ fn period_property(name: &str, ty: Type) -> PropertyDecl {
         is_readonly: false,
         is_final: false,
         is_promoted: false,
+        is_virtual: true,
         ty: Some(ty),
         default: None,
         attributes: Vec::new(),
         doc_comment: None,
-        hooks: Some(Box::new(PropertyHooks {
-            get: None,
-            set: None,
-            is_abstract: false,
-            is_virtual: true,
-        })),
+        hooks: None,
     }
 }
 

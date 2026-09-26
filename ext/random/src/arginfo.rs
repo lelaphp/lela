@@ -277,6 +277,7 @@ pub(super) fn engine_property() -> PropertyDecl {
         is_readonly: true,
         is_final: false,
         is_promoted: false,
+        is_virtual: false,
         ty: Some(class_type("Random\\Engine")),
         default: None,
         attributes: Vec::new(),

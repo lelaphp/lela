@@ -5539,7 +5539,7 @@ impl Request {
             at = self.class_parent(here);
         }
         // Each row beside whether it is still `ZEND_ACC_VIRTUAL`, which
-        // a hooked property is while no declaration of it up the chain
+        // a virtual property is while no declaration of it up the chain
         // is backed, and which has no slot (`ZEND_VIRTUAL_PROPERTY_OFFSET`):
         // a backed redeclaration of a virtual one takes a slot of its
         // own where the child's properties are, as
@@ -5551,7 +5551,7 @@ impl Request {
                 continue;
             };
             for property in decl.properties.iter().filter(|p| p.is_instance) {
-                let declared_virtual = property.hooks.as_ref().is_some_and(|h| h.is_virtual);
+                let declared_virtual = property.is_virtual;
                 let inherited = table.iter().position(|(_, p, _)| {
                     p.name == property.name && p.visibility != Visibility::Private
                 });

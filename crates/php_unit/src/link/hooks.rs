@@ -93,16 +93,6 @@ fn declarations<'a>(
     out
 }
 
-/// Whether a declaration of a property has no backing value of its own,
-/// `ZEND_ACC_VIRTUAL` as its compile left it: a hooked one whose hooks
-/// never name it.
-fn declared_virtual(property: &PropertyDecl) -> bool {
-    property
-        .hooks
-        .as_ref()
-        .is_some_and(|hooks| hooks.is_virtual)
-}
-
 /// `ce->properties_info[name]` of a linked class: the declaration the
 /// class finds, with each hook `inherit_property_hook` leaves on it,
 /// its own or the nearest parent's, and the virtual bit
@@ -138,7 +128,7 @@ pub fn resolve_property<'a>(
             // copy of it.
             if method.is_abstract
                 && chain[..at].iter().any(|(_, _, below)| {
-                    !declared_virtual(below) && (kind == HookKind::Get || !below.is_readonly)
+                    !below.is_virtual && (kind == HookKind::Get || !below.is_readonly)
                 })
             {
                 return None;
@@ -156,7 +146,7 @@ pub fn resolve_property<'a>(
         property,
         get: hook(HookKind::Get),
         set: hook(HookKind::Set),
-        is_virtual: chain.iter().all(|(_, _, p)| declared_virtual(p)),
+        is_virtual: chain.iter().all(|(_, _, p)| p.is_virtual),
         root,
     })
 }
@@ -182,7 +172,7 @@ pub fn resolve_property<'a>(
 pub fn verify_hooked_property(class: &[u8], property: &PropertyDecl) -> Option<Refusal> {
     let hooks = property.hooks.as_ref()?;
     let (class, name) = (text(class), text(&property.name.0));
-    if hooks.is_virtual && property.default.is_some() {
+    if property.is_virtual && property.default.is_some() {
         return Some(Refusal::VirtualDefault {
             class,
             property: name,
@@ -192,7 +182,7 @@ pub fn verify_hooked_property(class: &[u8], property: &PropertyDecl) -> Option<R
         .get
         .as_ref()
         .is_some_and(|get| get.function.returns_by_ref)
-        && !hooks.is_virtual
+        && !property.is_virtual
         && hooks.set.is_some()
     {
         return Some(Refusal::BackedGetByRef {
@@ -210,7 +200,7 @@ pub fn verify_hooked_property(class: &[u8], property: &PropertyDecl) -> Option<R
             property: name,
         });
     }
-    if hooks.is_virtual
+    if property.is_virtual
         && property.set_visibility.is_some()
         && (hooks.get.is_none() || hooks.set.is_none())
     {
@@ -316,8 +306,8 @@ impl<'a> Linker<'a> {
         parent_class: &'a ClassDecl,
     ) -> Option<(Refusal, Status)> {
         let variance = match &parent.hooks {
-            Some(hooks) if hooks.is_virtual && hooks.set.is_none() => Variance::Covariant,
-            Some(hooks) if hooks.is_virtual && hooks.get.is_none() => Variance::Contravariant,
+            Some(hooks) if parent.is_virtual && hooks.set.is_none() => Variance::Covariant,
+            Some(hooks) if parent.is_virtual && hooks.get.is_none() => Variance::Contravariant,
             _ => Variance::Invariant,
         };
         let fe_scope = Self::scope_of(child, Cls::Linking);
@@ -558,16 +548,13 @@ impl<'a> Linker<'a> {
     /// each over the virtual bit the chain leaves it.
     pub(super) fn hooked_properties_refused(&self, child: &'a ClassDecl) -> Option<Linked> {
         let lookup = |n: &[u8]| (self.lookup)(n);
-        for property in &child.properties {
-            let Some(hooks) = &property.hooks else {
-                continue;
-            };
+        for property in child.properties.iter().filter(|p| p.hooks.is_some()) {
             let is_virtual = resolve_property(child, &property.name.0, &lookup)
                 .is_some_and(|resolved| resolved.is_virtual);
-            let mut linked = property.clone();
-            if let Some(held) = linked.hooks.as_mut() {
-                held.is_virtual = is_virtual && hooks.is_virtual;
-            }
+            let linked = PropertyDecl {
+                is_virtual: is_virtual && property.is_virtual,
+                ..property.clone()
+            };
             if let Some(refusal) = verify_hooked_property(&child.name.0, &linked) {
                 return Some(Linked::Refused(at_class(child, refusal)));
             }
@@ -578,9 +565,10 @@ impl<'a> Linker<'a> {
     /// Whether a parent's set visibility binds the child: not over a
     /// virtual property with no `set` hook, which has none to hold.
     pub(super) fn set_visibility_binds(parent: &PropertyDecl) -> bool {
-        !parent
-            .hooks
-            .as_ref()
-            .is_some_and(|hooks| hooks.is_virtual && hooks.set.is_none())
+        !(parent.is_virtual
+            && parent
+                .hooks
+                .as_ref()
+                .is_some_and(|hooks| hooks.set.is_none()))
     }
 }

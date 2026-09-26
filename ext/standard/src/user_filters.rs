@@ -107,6 +107,7 @@ fn property(name: &[u8], ty: Option<Type>, default: Option<ConstExpr>) -> Proper
         is_readonly: false,
         is_final: false,
         is_promoted: false,
+        is_virtual: false,
         ty,
         default,
         attributes: Vec::new(),

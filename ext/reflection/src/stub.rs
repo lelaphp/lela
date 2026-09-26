@@ -97,6 +97,7 @@ fn name_property() -> PropertyDecl {
         is_readonly: false,
         is_final: false,
         is_promoted: false,
+        is_virtual: false,
         ty: Some(Type::String),
         default: None,
         attributes: Vec::new(),

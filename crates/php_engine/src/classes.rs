@@ -1788,6 +1788,7 @@ fn throwable_properties(error: bool) -> Vec<PropertyDecl> {
         is_readonly: false,
         is_final: false,
         is_promoted: false,
+        is_virtual: false,
         ty,
         default,
         attributes: Vec::new(),

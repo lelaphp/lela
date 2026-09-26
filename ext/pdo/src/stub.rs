@@ -404,6 +404,7 @@ impl Reader<'_> {
             is_readonly: false,
             is_final: false,
             is_promoted: false,
+            is_virtual: false,
             default: default.or_else(|| ty.is_none().then_some(ConstExpr::Null)),
             ty,
             attributes: Vec::new(),

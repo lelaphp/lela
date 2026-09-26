@@ -741,6 +741,7 @@ fn property(name: &[u8], visibility: Visibility, is_readonly: bool, ty: Type) ->
         is_readonly,
         is_final: false,
         is_promoted: false,
+        is_virtual: false,
         ty: Some(ty),
         default: None,
         attributes: Vec::new(),

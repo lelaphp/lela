@@ -430,6 +430,22 @@ fn visible(
 /// #1 {main}
 ///   thrown in %s on line 6
 /// ```
+///
+/// A virtual property is left out whether it has hooks or, as
+/// `DatePeriod`'s do, none:
+///
+/// ```php
+/// class H { public $v { get => 1; } public $b = 2; }
+/// var_dump(get_class_vars('H'), get_class_vars('DatePeriod'));
+/// ```
+/// ```expect
+/// array(1) {
+///   ["b"]=>
+///   int(2)
+/// }
+/// array(0) {
+/// }
+/// ```
 fn get_class_vars(req: &mut Request) -> Result<Value, Thrown> {
     let count = req.argument_count();
     if count != 1 {
@@ -449,12 +465,7 @@ fn get_class_vars(req: &mut Request) -> Result<Value, Thrown> {
     let rows: Vec<(ClassId, PropertyDecl)> = properties_info(req, class)
         .into_iter()
         .filter(|(declaring, p)| visible(req, *declaring, p.visibility, scope))
-        .filter(|(_, p)| {
-            !(p.is_instance
-                && req
-                    .hooked(class, &p.name.0)
-                    .is_some_and(|hooked| hooked.is_virtual))
-        })
+        .filter(|(_, p)| !req.property_virtual(class, &p.name.0))
         .collect();
     let mut array = PhpArray::new(req)?;
     for statics in [false, true] {

@@ -3483,7 +3483,7 @@ impl Emit<'_> {
                         .fatal("InternalError: a promoted property of a class the unit has not"));
                 }
             };
-        let hooks = match &parameter.hooks {
+        let (hooks, is_virtual) = match &parameter.hooks {
             Some(hooks) => {
                 let hooked = hooks::Hooked {
                     class: u32::try_from(at).unwrap_or(u32::MAX),
@@ -3497,9 +3497,10 @@ impl Emit<'_> {
                     is_readonly,
                     is_abstract: false,
                 };
-                Some(Box::new(self.property_hooks(&hooked, hooks)?))
+                let (hooks, is_virtual) = self.property_hooks(&hooked, hooks)?;
+                (Some(Box::new(hooks)), is_virtual)
             }
-            None => None,
+            None => (None, false),
         };
         let attributes = self.member_attributes(
             &parameter.attributes,
@@ -3515,6 +3516,7 @@ impl Emit<'_> {
             is_readonly,
             is_final: promoted.is_final || set_visibility == Some(Visibility::Private),
             is_promoted: true,
+            is_virtual,
             ty: ty.cloned(),
             default,
             attributes,
@@ -5909,7 +5911,7 @@ impl Emit<'_> {
                     &member,
                 )?
                 .or_else(|| implicit_set_visibility(is_readonly, property.visibility));
-            let hooks = match &property.hooks {
+            let (hooks, is_virtual) = match &property.hooks {
                 Some(hooks) => {
                     let hooked = hooks::Hooked {
                         class: u32::try_from(self.classes.len()).unwrap_or(u32::MAX),
@@ -5923,9 +5925,10 @@ impl Emit<'_> {
                         is_readonly,
                         is_abstract: property.is_abstract || class.kind == ClassKind::Interface,
                     };
-                    Some(Box::new(self.property_hooks(&hooked, hooks)?))
+                    let (hooks, is_virtual) = self.property_hooks(&hooked, hooks)?;
+                    (Some(Box::new(hooks)), is_virtual)
                 }
-                None => None,
+                None => (None, false),
             };
             // `zend_compile_prop_decl` compiles the attributes under
             // `active_property_info_name`, where `__PROPERTY__` reads it.
@@ -5948,6 +5951,7 @@ impl Emit<'_> {
                 // property is implicitly final.
                 is_final: property.is_final || set_visibility == Some(Visibility::Private),
                 is_promoted: false,
+                is_virtual,
                 ty,
                 default,
                 attributes,
@@ -17691,6 +17695,7 @@ fn enum_properties(kind: ClassKind, backing: EnumBacking) -> Vec<PropertyDecl> {
         is_readonly: true,
         is_final: false,
         is_promoted: false,
+        is_virtual: false,
         ty: Some(ty),
         default: None,
         hooks: None,

@@ -511,6 +511,29 @@ pub struct MethodDecl {
 /// declaration wrote no hook list for; a property whose class inherits
 /// hooks for it carries none of its own here, since the link finds an
 /// inherited member by walking the chain.
+///
+/// `is_virtual` is `ZEND_ACC_VIRTUAL` as the declaration leaves it: the
+/// property has no backing slot of its own. The compiler decides it as
+/// `zend_property_is_virtual` does, a hooked property whose hooks never
+/// name `$this->name`, and every hooked property of an interface; a
+/// native's is the stub's `@virtual`, a property its class's handlers
+/// serve with no hook, as `DOMNode::$nodeName` is. The link clears it
+/// where a declaration the property overrides is backed
+/// ([`crate::link::resolve_property`]), and Reflection renders it.
+///
+/// ```php
+/// $p = new ReflectionProperty('DOMNode', 'nodeName');
+/// var_dump($p->isVirtual());
+/// echo $p;
+/// class A { public $v { get => 1; } public $b { get => $this->b; } }
+/// echo new ReflectionProperty('A', 'v'), new ReflectionProperty('A', 'b');
+/// ```
+/// ```expect
+/// bool(true)
+/// Property [ public virtual string $nodeName ]
+/// Property [ public virtual $v { get; } ]
+/// Property [ public $b = NULL { get; } ]
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::struct_excessive_bools)] // the ZEND_ACC_* bits of a property, each one fact
 pub struct PropertyDecl {
@@ -521,6 +544,7 @@ pub struct PropertyDecl {
     pub is_readonly: bool,
     pub is_final: bool,
     pub is_promoted: bool,
+    pub is_virtual: bool,
     pub ty: Option<Type>,
     pub default: Option<ConstExpr>,
     pub attributes: Vec<Attribute>,
@@ -550,22 +574,20 @@ impl HookKind {
     }
 }
 
-/// A hooked property's hooks, `prop_info->hooks`, and the two bits only
-/// a hooked property carries. Each hook is a method as php keeps one: a
+/// A hooked property's hooks, `prop_info->hooks`, and the bit only a
+/// hooked property carries. Each hook is a method as php keeps one: a
 /// `zend_function` named `$name::get` or `$name::set`, public unless the
 /// property is private, whose body is the unit's [`crate::HookBody`] of
 /// the same class, property and kind. `is_abstract` is the property's
-/// `ZEND_ACC_ABSTRACT`, written or given by an interface; `is_virtual`
-/// is `ZEND_ACC_VIRTUAL` as `zend_property_is_virtual` decides it where
-/// the property is declared, no hook body naming `$this->name`, and
-/// every interface property: such a property has no backing slot unless
-/// one it overrides has.
+/// `ZEND_ACC_ABSTRACT`, written or given by an interface. Whether the
+/// property is virtual is the property's own bit,
+/// [`PropertyDecl::is_virtual`], which a property with no hooks carries
+/// too.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PropertyHooks {
     pub get: Option<MethodDecl>,
     pub set: Option<MethodDecl>,
     pub is_abstract: bool,
-    pub is_virtual: bool,
 }
 
 impl PropertyHooks {

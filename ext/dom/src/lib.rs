@@ -127,6 +127,11 @@ class DOMNode
     public const int DOCUMENT_POSITION_CONTAINS = 0x08;
     public const int DOCUMENT_POSITION_CONTAINED_BY = 0x10;
     public const int DOCUMENT_POSITION_IMPLEMENTATION_SPECIFIC = 0x20;
+
+    /**
+     * @readonly
+     * @virtual
+     */
     public string $nodeName;
     public ?string $nodeValue;
     public int $nodeType;

@@ -145,6 +145,7 @@ fn php_token_class() -> (ClassDecl, Vec<(MethodDecl, Entry)>) {
         is_readonly: false,
         is_final: false,
         is_promoted: false,
+        is_virtual: false,
         ty: Some(ty),
         default: None,
         attributes: Vec::new(),

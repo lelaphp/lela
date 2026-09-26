@@ -444,6 +444,7 @@ impl Reader<'_> {
             is_readonly: false,
             is_final: modifiers.is_final,
             is_promoted: false,
+            is_virtual: false,
             ty,
             default,
             attributes: Vec::new(),
