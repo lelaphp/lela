@@ -13,7 +13,7 @@ use php_ext::raising::{Level, Thrown, deprecated, docref, throw, warning};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
 
-use super::{INCOMPLETE_CLASS, MAGIC_MEMBER, has_method, is_enum_class};
+use super::{INCOMPLETE_CLASS, MAGIC_MEMBER, has_method, is_enum_class, not_serializable};
 use crate::argument_count_between;
 
 /// `HT_MAX_SIZE` on a 64-bit build.
@@ -1080,6 +1080,13 @@ impl State<'_> {
             return Ok(false);
         };
         self.p = after;
+        if let Some(shown) = not_serializable(req, class) {
+            return Err(throw(
+                req,
+                "Exception",
+                &format!("Unserialization of '{shown}' is not allowed"),
+            ));
+        }
         if custom {
             return self.custom(req, slot, entry, class, &name, incomplete);
         }

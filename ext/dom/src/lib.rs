@@ -675,6 +675,7 @@ class DOMProcessingInstruction extends DOMNode
 
     public function __construct(string $name, string $value = "") {}
 }
+/** @not-serializable */
 class DOMXPath
 {
     public DOMDocument $document;
@@ -720,7 +721,10 @@ interface ChildNode
     public function after(Node|string ...$nodes): void;
     public function replaceWith(Node|string ...$nodes): void;
 }
-/** @strict-properties */
+/**
+ * @strict-properties
+ * @not-serializable
+ */
 class Implementation
 {
     public function createDocumentType(string $qualifiedName, string $publicId, string $systemId): DocumentType {}
@@ -1113,7 +1117,10 @@ final class XMLDocument extends Document
     /** @implementation-alias DOMDocument::save */
     public function saveXmlFile(string $filename, int $options = 0): int|false {}
 }
-/** @strict-properties */
+/**
+ * @not-serializable
+ * @strict-properties
+ */
 final class TokenList implements \IteratorAggregate, \Countable
 {
     /** @implementation-alias Dom\Node::__construct */
@@ -1130,7 +1137,10 @@ final class TokenList implements \IteratorAggregate, \Countable
     public function count(): int {}
     public function getIterator(): \Iterator {}
 }
-/** @strict-properties */
+/**
+ * @not-serializable
+ * @strict-properties
+ */
 readonly final class NamespaceInfo
 {
     public ?string $prefix;
@@ -1139,6 +1149,7 @@ readonly final class NamespaceInfo
     /** @implementation-alias Dom\Node::__construct */
     private function __construct() {}
 }
+/** @not-serializable */
 final class XPath
 {
     public Document $document;

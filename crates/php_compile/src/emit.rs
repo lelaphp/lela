@@ -962,7 +962,8 @@ fn implicit_set_visibility(is_readonly: bool, visibility: Visibility) -> Option<
 /// the parser) and taking no dynamic property
 /// (`zend_enum_register_props`), and a readonly class taking none
 /// either, `ZEND_ACC_NO_DYNAMIC_PROPERTIES` from the parser, which
-/// `#[\AllowDynamicProperties]` may not lift.
+/// `#[\AllowDynamicProperties]` may not lift; an anonymous class is
+/// not serializable (`zend_compile_class_decl`).
 fn class_flags(
     class: &Class,
     dynamic_properties: DynamicProperties,
@@ -974,6 +975,7 @@ fn class_flags(
         is_final: is_enum || class.modifiers.is_final,
         is_readonly: class.modifiers.is_readonly,
         is_anonymous,
+        not_serializable: is_anonymous,
         dynamic_properties: if is_enum || class.modifiers.is_readonly {
             DynamicProperties::Forbidden
         } else {

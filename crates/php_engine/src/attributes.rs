@@ -583,12 +583,18 @@ fn attribute() -> NativeClassDecl {
     )
 }
 
-/// `final class SensitiveParameterValue`, no attribute.
+/// `final class SensitiveParameterValue`, no attribute, and
+/// `@not-serializable`.
 fn sensitive_value() -> NativeClassDecl {
+    let decl = class(b"SensitiveParameterValue", true);
     (
         ClassDecl {
+            flags: ClassFlags {
+                not_serializable: true,
+                ..decl.flags
+            },
             properties: vec![property(b"value", Visibility::Private, true, Type::Mixed)],
-            ..class(b"SensitiveParameterValue", true)
+            ..decl
         },
         vec![
             (

@@ -68,6 +68,45 @@ fn has_method(req: &mut Request, class: php_ext::values::ClassId, method: &[u8])
     false
 }
 
+/// `ce->ce_flags & ZEND_ACC_NOT_SERIALIZABLE`, the refusal
+/// `php_var_serialize_intern` and `object_common` raise before anything
+/// else of an object: the class, or a class it extends, declares
+/// `not_serializable`, which `zend_do_inheritance_ex` passes down.
+/// `Some` of the class's name as php's `%s` prints `ce->name`, up to
+/// its first NUL, so an anonymous class is `class@anonymous`.
+///
+/// ```php
+/// foreach ([(function () { yield 1; })(), new WeakMap, new class extends ArrayObject {}] as $o) {
+///     try { serialize($o); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// try { unserialize('a:1:{i:0;O:7:"WeakMap":0:{}}'); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// echo serialize(new ArrayObject([1])), "\n";
+/// ```
+/// ```expect
+/// Serialization of 'Generator' is not allowed
+/// Serialization of 'WeakMap' is not allowed
+/// Serialization of 'ArrayObject@anonymous' is not allowed
+/// Unserialization of 'WeakMap' is not allowed
+/// O:11:"ArrayObject":4:{i:0;i:0;i:1;a:1:{i:0;i:1;}i:2;a:0:{}i:3;N;}
+/// ```
+fn not_serializable(req: &mut Request, class: php_ext::values::ClassId) -> Option<String> {
+    let mut at = Some(class);
+    for _ in 0..64 {
+        let decl = req.class_decl(at?)?;
+        if decl.flags.not_serializable {
+            let name = req.class_decl(class)?.name.0.to_vec();
+            let end = name.iter().position(|b| *b == 0).unwrap_or(name.len());
+            return Some(String::from_utf8_lossy(&name[..end]).into_owned());
+        }
+        let parent = decl.parent.as_ref().map(|p| p.0.to_vec());
+        at = match parent {
+            Some(parent) => php_ext::call::lookup_class(req, &parent).ok().flatten(),
+            None => None,
+        };
+    }
+    None
+}
+
 /// Whether the object is an enum case.
 fn is_enum(req: &Request, object: php_ext::values::PhpObject) -> bool {
     is_enum_class(req, object.class())

@@ -6,11 +6,12 @@
 //! every name not written with a leading `\`; `public const int NAME =
 //! 0x01;` and `case Name = "value";`; a property with its type and
 //! default; and `public function name(parameters): type {}` with its
-//! modifiers. Four docblock tags are read: `@tentative-return-type` sets
+//! modifiers. Five docblock tags are read: `@tentative-return-type` sets
 //! the tentative bit, `@implementation-alias Class::method` names the
 //! entry a method shares, `@virtual` marks a property its class's
-//! handlers serve with no slot, and `@strict-properties` on a class
-//! forbids dynamic properties. The grammar is `ext/pdo`'s reader's, with
+//! handlers serve with no slot, and on a class `@strict-properties`
+//! forbids dynamic properties and `@not-serializable` refuses
+//! `serialize` and `unserialize`. The grammar is `ext/pdo`'s reader's, with
 //! hexadecimal constants beside it.
 
 use php_ext::decl::{
@@ -189,6 +190,9 @@ impl Reader<'_> {
             if let Some(doc) = self.docblock() {
                 if contains(&doc, b"@strict-properties") {
                     flags.dynamic_properties = DynamicProperties::Forbidden;
+                }
+                if contains(&doc, b"@not-serializable") {
+                    flags.not_serializable = true;
                 }
                 continue;
             }

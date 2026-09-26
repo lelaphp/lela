@@ -108,6 +108,30 @@ pub struct ClassFlags {
     /// `ZEND_ACC_ANON_CLASS`: declared by `new class`, under the name
     /// `zend_generate_anon_class_name` made, which holds a NUL.
     pub is_anonymous: bool,
+    /// `ZEND_ACC_NOT_SERIALIZABLE`: the stub's `@not-serializable`, and
+    /// what `zend_compile_class_decl` sets on an anonymous class.
+    /// `serialize` and `unserialize` refuse an object of the class and
+    /// of every class below it, since `zend_do_inheritance_ex` passes
+    /// the bit down.
+    ///
+    /// ```php
+    /// class R extends ReflectionClass {}
+    /// foreach ([new ReflectionClass('stdClass'), new R('stdClass'), new class {}] as $o) {
+    ///     try { serialize($o); } catch (Exception $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+    /// }
+    /// foreach (['O:15:"ReflectionClass":0:{}', 'O:1:"R":0:{}', 'C:15:"ReflectionClass":0:{}'] as $s) {
+    ///     try { unserialize($s); } catch (Exception $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+    /// }
+    /// ```
+    /// ```expect
+    /// Exception: Serialization of 'ReflectionClass' is not allowed
+    /// Exception: Serialization of 'R' is not allowed
+    /// Exception: Serialization of 'class@anonymous' is not allowed
+    /// Exception: Unserialization of 'ReflectionClass' is not allowed
+    /// Exception: Unserialization of 'R' is not allowed
+    /// Exception: Unserialization of 'ReflectionClass' is not allowed
+    /// ```
+    pub not_serializable: bool,
     pub dynamic_properties: DynamicProperties,
 }
 
