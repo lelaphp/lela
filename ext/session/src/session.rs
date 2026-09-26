@@ -330,7 +330,39 @@ pub(super) fn rinit(req: &mut Request) -> Result<(), Thrown> {
 }
 
 /// `PHP_RSHUTDOWN_FUNCTION(session)`: an active session written and
-/// closed, the handler's callables given up.
+/// closed, the handler's callables given up. The flush stands in a
+/// `zend_try`: a user handler that throws here has no frame to throw to,
+/// so the throwable is the uncaught fatal where it was thrown and the
+/// flush leaves by `zend_bailout`, `PS(in_save_handler)` still set; the
+/// close after it is then refused as a recursive call, and what the
+/// session raises here names `PHP Request Shutdown` as its origin.
+///
+/// ```php
+/// class H implements SessionHandlerInterface { function open($p, $n): bool { return true; } function close(): bool { echo "close\n"; return true; }
+///   function read($id): string|false { return ""; } function write($id, $d): bool { echo "write\n"; throw new Exception("w"); }
+///   function destroy($id): bool { return true; } function gc($l): int|false { return 0; } }
+/// ob_start(); session_set_save_handler(new H, false); session_id("rs1"); session_start(["use_cookies" => 0, "cache_limiter" => ""]); $_SESSION["k"] = 1;
+/// ```
+/// ```expect exit=255
+/// write
+///
+/// Fatal error: Uncaught Exception: w in %s:3
+/// Stack trace:
+/// #0 [internal function]: H->write('rs1', 'k|i:1;')
+/// #1 {main}
+///   thrown in %s on line 3
+///
+/// Warning: PHP Request Shutdown: Cannot call session save handler in a recursive manner in Unknown on line 0
+/// ```
+///
+/// A warning of the write itself is the request's shutdown's too:
+///
+/// ```php
+/// session_save_path(__DIR__); session_id("rs3"); session_start(["use_cookies" => 0, "cache_limiter" => ""]); $_SESSION['a|b'] = 1;
+/// ```
+/// ```expect
+/// Warning: PHP Request Shutdown: Failed to write session data. Data contains invalid key "a|b" in Unknown on line 0
+/// ```
 pub(super) fn rshutdown(req: &mut Request) {
     if req.state::<State>().status == Status::Active {
         let _ = flush(req, true);

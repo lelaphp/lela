@@ -565,12 +565,14 @@ fn unbind(req: &mut Request) {
 }
 
 /// A throwable made pending the way php leaves one in `EG(exception)`:
-/// kept while the native goes on, raised when it returns; a fatal or an
-/// `exit` is handed back at once, as php's `zend_bailout` unwinds.
+/// kept while the native goes on, raised when it returns. The unwind
+/// exit is kept the same way, since php's `exit` is a throwable that C
+/// code goes on past (`zend_is_unwind_exit`); a fatal is handed back at
+/// once, as php's `zend_bailout` unwinds.
 fn absorb<T>(req: &mut Request, done: Result<T, Thrown>) -> Result<Option<T>, Thrown> {
     match done {
         Ok(value) => Ok(Some(value)),
-        Err(thrown) if thrown.exception().is_some() => {
+        Err(thrown) if thrown.exception().is_some() || req.is_unwind_exit() => {
             let state = req.state::<State>();
             if state.thrown.is_none() {
                 state.thrown = Some(thrown);

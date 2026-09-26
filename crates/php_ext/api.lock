@@ -292,6 +292,7 @@ request::Request::ini_parse_bool
 request::Request::ini_parse_bytes
 request::Request::ini_set
 request::Request::interrupt
+request::Request::is_unwind_exit
 request::Request::is_uploaded_file
 request::Request::last_error
 request::Request::loaded_extensions

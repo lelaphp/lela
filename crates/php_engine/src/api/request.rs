@@ -107,6 +107,20 @@ impl ConstantOwner {
     }
 }
 
+/// Where a request stands, as `php_verror` reads it to name the origin
+/// of a diagnostic raised while no function is active
+/// (`Z/main/main.c:1086-1129`): `PG(during_request_startup)`, set by
+/// `php_request_startup` and cleared by the CLI before it compiles the
+/// file (`Z/sapi/cli/php_cli.c:943`), so the extensions' `RINIT` are
+/// served inside it; the main op array; and `EG_FLAGS_IN_SHUTDOWN`, which
+/// `php_request_shutdown` sets first (`Z/main/main.c:1960`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Phase {
+    Startup,
+    Running,
+    Shutdown,
+}
+
 /// What a native intends to do at a path, for the `open_basedir` guard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PathIntent {
@@ -1034,6 +1048,10 @@ pub struct Request {
     /// outermost serving's end releases it, as `zend_exception_error`
     /// does.
     unwind_exit: bool,
+    /// Where the request stands in `php_request_startup`,
+    /// `php_execute_script` and `php_request_shutdown`, what `php_verror`
+    /// names a diagnostic's origin by when no function is active.
+    phase: Phase,
     /// `zend_objects_store_mark_destructed`: every object behind the
     /// request, set where `shutdown_destructors` catches the
     /// `zend_bailout` a destructor's raise ends the walk with
@@ -1336,6 +1354,7 @@ fn user_function_decl(user: &UserFunction) -> Option<&FunctionDecl> {
 }
 
 impl Request {
+    #[allow(clippy::too_many_lines)] // one line per field of the request
     pub(crate) fn new(shared: Arc<Shared>, description: RequestDescription) -> Request {
         let cwd = description.cwd.clone();
         let web = description.is_web;
@@ -1408,6 +1427,7 @@ impl Request {
             fibers: crate::fiber::Fibers::default(),
             pending: None,
             unwind_exit: false,
+            phase: Phase::Startup,
             marked_destructed: false,
             returned: Value::null(),
             interrupt: Interrupt::default(),
@@ -3030,6 +3050,29 @@ impl Request {
         Err(fatal)
     }
 
+    /// The tail of `zend_call_function` where the callee left something
+    /// pending and no frame stands to take it
+    /// (`Z/Zend/zend_execute_API.c:1069`), as in an extension's
+    /// `RSHUTDOWN` or a shutdown function: `zend_throw_exception_internal`
+    /// with no frame hands a throwable to the handler `set_exception_handler` set,
+    /// and the call is done where the handler took it; otherwise it is
+    /// rendered as the uncaught fatal, and the unwind exit is dropped,
+    /// and either leaves by `zend_bailout`, which is the `Thrown` with
+    /// no throwable handed back. The session's write at request end is
+    /// the witness, in `ext/session`.
+    pub(crate) fn thrown_without_frame(&mut self, thrown: &Thrown) -> Result<Value, Thrown> {
+        let threw = thrown.exception().is_some();
+        self.leave_pending(thrown);
+        match self.uncaught() {
+            Err(fatal) => {
+                self.end_in(&fatal);
+                Err(Thrown::of(None))
+            }
+            Ok(()) if threw => Ok(Value::null()),
+            Ok(()) => Err(Thrown::of(None)),
+        }
+    }
+
     /// The declared name of a throwable's class, `Error` for one the
     /// tables do not know.
     fn class_name_of(&self, throwable: PhpObject) -> String {
@@ -4503,6 +4546,28 @@ impl Request {
     /// left.
     pub(crate) fn unwind_exit(&self) -> bool {
         self.unwind_exit
+    }
+
+    /// `zend_is_unwind_exit(EG(exception))` for a native: whether a
+    /// [`Thrown`] that carries no throwable is the `exit` a callback
+    /// unwinds, which php's C code goes on past with the unwind exit
+    /// pending, rather than a fatal, which `zend_bailout` leaves the
+    /// native by. The session's save handler reads it after a user
+    /// handler returns (`ps_call_handler`).
+    #[must_use]
+    pub fn is_unwind_exit(&self) -> bool {
+        self.unwind_exit
+    }
+
+    /// The request's [`Phase`].
+    pub(crate) fn phase(&self) -> Phase {
+        self.phase
+    }
+
+    /// The request moved to `phase`, as `serve` crosses php's startup
+    /// and shutdown.
+    pub(crate) fn enter_phase(&mut self, phase: Phase) {
+        self.phase = phase;
     }
 
     pub(crate) fn end_in(&mut self, fatal: &Fatal) {
@@ -7551,7 +7616,7 @@ impl Request {
     /// `EG(current_execute_data)`: whether a frame or a native's call
     /// stands, which is every release inside a serving and none of the
     /// releases `php_request_shutdown` makes after the main frame popped.
-    fn executing(&self) -> bool {
+    pub(crate) fn executing(&self) -> bool {
         self.fibers.active().is_some()
             || self.vm.innermost().is_some()
             || self.vm.serving_call().is_some()
@@ -8914,6 +8979,10 @@ impl Request {
     /// `get_active_function_name`: the declared name of the native being
     /// served, `func->common.function_name`, whatever case the call
     /// spelled it in.
+    pub(crate) fn vm_serving_native(&self) -> bool {
+        self.active_native_function().is_some()
+    }
+
     pub(crate) fn active_native(&self) -> String {
         self.active_native_function().map_or_else(
             || String::from("native"),

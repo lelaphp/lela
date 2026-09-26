@@ -146,8 +146,23 @@ pub(crate) fn deprecation_suffix(attributes: &[Attribute]) -> Option<String> {
 /// (`chr(): Providing a value not in-between 0 and 255 is deprecated,
 /// ...`). The docref itself, php's link into the manual, is off in the
 /// CLI's ini and is not rendered here.
+///
+/// Where no native is active, `php_verror` names the request's phase
+/// instead (`Z/main/main.c:1086-1129`): `PHP Request Startup` in an
+/// extension's `RINIT`, `PHP Request Shutdown` in its `RSHUTDOWN`, and
+/// `Unknown` between them, each with no `()`. The session's write at
+/// request end is the witness, in `ext/session`.
 pub fn docref(req: &mut Request, level: Level, message: &str) {
-    let text = format!("{}(): {message}", req.active_native());
+    let text = if req.vm_serving_native() {
+        format!("{}(): {message}", req.active_native())
+    } else {
+        let origin = match req.phase() {
+            crate::api::request::Phase::Startup => "PHP Request Startup",
+            crate::api::request::Phase::Running => "Unknown",
+            crate::api::request::Phase::Shutdown => "PHP Request Shutdown",
+        };
+        format!("{origin}: {message}")
+    };
     raise(req, level, &text);
 }
 

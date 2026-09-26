@@ -101,7 +101,20 @@ pub(super) fn store(req: &mut Request, slot: Slot, value: Option<Value>) {
 /// `ps_call_handler`: the callable called with `arguments`, which it
 /// gives up after; `None` is php's `UNDEF`, for a call that threw, a
 /// recursive call refused with php's warning, and a throwable already
-/// pending, as `zend_call_function` refuses to call then.
+/// pending, as `zend_call_function` refuses to call then. An `exit` in
+/// a handler is pending the same way, so the flush it stands in goes on
+/// with every later call refused and the session no longer active, and
+/// the request's end has nothing left to write:
+///
+/// ```php
+/// class H implements SessionHandlerInterface { function open($p, $n): bool { return true; } function close(): bool { die("close\n"); }
+///   function read($id): string|false { return ""; } function write($id, $d): bool { die("write\n"); }
+///   function destroy($id): bool { return true; } function gc($l): int|false { return 0; } }
+/// session_set_save_handler(new H); session_id("rs2"); session_start(["use_cookies" => 0, "cache_limiter" => ""]); session_write_close(); echo "after\n";
+/// ```
+/// ```expect
+/// write
+/// ```
 fn call_handler(
     req: &mut Request,
     slot: Slot,
@@ -122,7 +135,14 @@ fn call_handler(
     {
         req.state::<State>().in_save_handler = true;
         let answered = call(req, &callable, arguments);
-        req.state::<State>().in_save_handler = false;
+        // `zend_bailout` leaves `ps_call_handler` before it clears
+        // `PS(in_save_handler)`, so the next call is refused as a
+        // recursive one; an `exit` unwinds as a throwable does, and the
+        // flag is cleared behind it.
+        let bailed = matches!(&answered, Err(thrown) if thrown.exception().is_none() && !req.is_unwind_exit());
+        if !bailed {
+            req.state::<State>().in_save_handler = false;
+        }
         absorb(req, answered)
     } else {
         Ok(None)

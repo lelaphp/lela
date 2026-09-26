@@ -1407,6 +1407,7 @@ impl Engine {
             let _ = req.arm(php_unit::AutoGlobal::Server);
         }
         let _ = req.register_file_handles();
+        req.enter_phase(crate::api::request::Phase::Running);
         // Where the unit's constant strings live is where the unit
         // lives (design §5.2): a file's unit is published into the
         // engine's table and shared by every request that serves it,
@@ -1455,6 +1456,7 @@ impl Engine {
         // as php's `EG(symbol_table)` does, so the shutdown functions
         // and an extension's `rshutdown` read a request that still has
         // them.
+        req.enter_phase(crate::api::request::Phase::Shutdown);
         crate::natives::call_shutdown_functions(&mut req);
         req.shutdown_destructors();
         req.call_destructors();
