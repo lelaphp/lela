@@ -341,14 +341,16 @@ impl Table {
         }
     }
 
-    /// `zend_hash_update_ind`: `value` is the table's from here.
-    fn set(self, req: &mut Request, key: Key, value: Value) -> Result<(), Thrown> {
+    /// `zend_hash_update_ind`: `value` is the table's from here, and
+    /// `key` a view, the array taking its own owner of a string key.
+    fn set(self, req: &mut Request, key: &Key, value: Value) -> Result<(), Thrown> {
         match self {
             Table::Array(owner, mut array) => {
+                let key = crate::owned_key(req, key);
                 array.set(req, key, value)?;
                 store(req, owner, array)
             }
-            Table::Props(object) => object.set_row(req, &key, value),
+            Table::Props(object) => object.set_row(req, key, value),
         }
     }
 
@@ -386,6 +388,7 @@ impl Table {
                 let mut out = PhpArray::new(req)?;
                 for (key, value) in self.every_row(req)? {
                     req.addref(&value);
+                    let key = crate::owned_key(req, &key);
                     out.set(req, key, value)?;
                 }
                 Ok(out)
@@ -395,11 +398,12 @@ impl Table {
 
     /// The element at `key` made a reference in place, `found` what the
     /// table holds there, `null` laid down where it holds nothing; the
-    /// cell handed back with one more owner.
+    /// cell handed back with one more owner. `key` is a view, as for
+    /// [`Table::set`].
     fn element_ref(
         self,
         req: &mut Request,
-        key: Key,
+        key: &Key,
         found: Option<Value>,
     ) -> Result<PhpRef, Thrown> {
         match self {
@@ -411,11 +415,12 @@ impl Table {
                 let held = found.map_or_else(Value::null, |v| crate::copied(req, v));
                 let cell = PhpRef::new(req, held)?;
                 req.addref(&cell.as_value());
+                let key = crate::owned_key(req, key);
                 array.set(req, key, cell.as_value())?;
                 store(req, owner, array)?;
                 Ok(cell)
             }
-            Table::Props(backing) => backing.row_ref(req, &key),
+            Table::Props(backing) => backing.row_ref(req, key),
         }
     }
 
@@ -534,7 +539,7 @@ fn place(
             _ => {}
         }
     }
-    table.element_ref(req, key, found).map(Some)
+    table.element_ref(req, &key, found).map(Some)
 }
 
 /// `spl_array_it_get_current_data` under `by_ref`, the `current_place`
@@ -546,7 +551,7 @@ fn current_place(req: &mut Request, object: PhpObject) -> Result<Option<PhpRef>,
         return Ok(None);
     };
     let table = table(req, object)?;
-    table.element_ref(req, key, Some(value)).map(Some)
+    table.element_ref(req, &key, Some(value)).map(Some)
 }
 
 /// A key as php's `Undefined array key` warning shows it, a string
@@ -577,7 +582,7 @@ fn write(
         req.release(value);
         return Err(illegal(req, object, offset, "write"));
     };
-    table.set(req, key, value)
+    table.set(req, &key, value)
 }
 
 /// `spl_array_unset_dimension_ex` without the overrides; the position
@@ -905,8 +910,14 @@ impl ObjectHandlers for Handlers {
         }
         let rows = table(req, object)?.every_row(req)?;
         let mut out = Vec::with_capacity(rows.len());
+        // Views, as `get_properties_for`'s rows are: a string key as it
+        // is, with no owner taken for it.
         for (key, value) in rows {
-            out.push((key.to_prop_name(req)?, value));
+            let name = match key {
+                Key::Int(n) => PhpString::new(req, n.to_string().as_bytes())?,
+                Key::Str(s) => s,
+            };
+            out.push((name, value));
         }
         Ok(Some(out))
     }
@@ -918,7 +929,8 @@ fn spl_array_debug_info(req: &mut Request, object: PhpObject) -> Result<PhpArray
     let mut out = PhpArray::new(req)?;
     for (name, value) in object.props_for(req, PropertyPurpose::Debug)? {
         req.addref(&value);
-        out.set(req, Key::Str(name), value)?;
+        let key = crate::owned_key(req, &Key::Str(name));
+        out.set(req, key, value)?;
     }
     let storage = match payload(req, object)?.storage {
         Storage::OwnProps => return Ok(out),
@@ -1222,6 +1234,24 @@ fn offset_get(req: &mut Request) -> Result<Value, Thrown> {
 /// }
 /// Cannot access offset of type array on ArrayObject
 /// Cannot access offset of type stdClass on ArrayObject
+/// ```
+///
+/// A string key is a view of the offset until the table takes its own
+/// owner of it, so a key built for the call and freed after it stays
+/// in the table (bug #66834).
+///
+/// ```php
+/// class R extends ArrayObject { function offsetSet($k, $v): void { parent::offsetSet(str_rot13($k), $v); } }
+/// $r = new R; $r['foo'] = 1; $r[str_repeat('b', 3)] = 2;
+/// var_dump($r->getArrayCopy());
+/// ```
+/// ```expect
+/// array(2) {
+///   ["sbb"]=>
+///   int(1)
+///   ["ooo"]=>
+///   int(2)
+/// }
 /// ```
 fn offset_set(req: &mut Request) -> Result<Value, Thrown> {
     crate::arity(req, 2, 2)?;

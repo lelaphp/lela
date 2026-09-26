@@ -233,12 +233,18 @@ impl Key {
         }
     }
 
-    /// The key as a property name: an integer key printed in decimal,
-    /// `zend_long_to_str`, a string key as it is.
+    /// The key as a property name with one owner, the caller's: an
+    /// integer key printed in decimal, `zend_long_to_str`, and a string
+    /// key with an owner taken, `zend_string_copy`, so either arm can be
+    /// handed to [`PhpObject::set_prop`] or a `write_property`, which
+    /// give the name up once the object has taken its own.
     pub fn to_prop_name(&self, req: &mut Request) -> Result<PhpString, Thrown> {
         match self {
             Key::Int(n) => PhpString::new(req, n.to_string().as_bytes()),
-            Key::Str(s) => Ok(*s),
+            Key::Str(s) => {
+                req.addref(&Value::string(*s));
+                Ok(*s)
+            }
         }
     }
 }
