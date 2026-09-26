@@ -961,7 +961,7 @@ impl crate::ini_syntax::Host for Startup<'_> {
         Ok(match &decl.value {
             ConstExpr::Null | ConstExpr::Bool(false) => Some(Vec::new()),
             ConstExpr::Bool(true) => Some(b"1".to_vec()),
-            ConstExpr::Long(n) => Some(n.to_string().into_bytes()),
+            ConstExpr::Long { value: n, .. } => Some(n.to_string().into_bytes()),
             ConstExpr::Double(d) => Some(self.double(*d)?),
             ConstExpr::Str(s) => Some(s.to_vec()),
             _ => None,
@@ -1320,7 +1320,7 @@ impl EngineBuilder {
             let value = match &decl.value {
                 ConstExpr::Null => Zval::null(),
                 ConstExpr::Bool(b) => Zval::bool(*b),
-                ConstExpr::Long(n) => Zval::long(*n),
+                ConstExpr::Long { value: n, .. } => Zval::long(*n),
                 ConstExpr::Double(f) => Zval::double(*f),
                 ConstExpr::Str(s) => match strings.intern(s) {
                     Ok(interned) => Zval::string(interned),

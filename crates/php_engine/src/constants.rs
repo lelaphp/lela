@@ -194,7 +194,7 @@ fn error_levels() -> Vec<ConstDecl> {
     .into_iter()
     .map(|(name, value)| ConstDecl {
         name: Name::from(name),
-        value: ConstExpr::Long(value),
+        value: ConstExpr::long(value),
         attributes: if name == "E_STRICT" {
             vec![Attribute {
                 name: Name::from("Deprecated"),
@@ -291,8 +291,8 @@ fn error_levels() -> Vec<ConstDecl> {
 pub(crate) fn core_constants() -> Vec<ConstDecl> {
     let mut out = error_levels();
     let mut rows: Vec<(&'static str, ConstExpr)> = vec![
-        ("DEBUG_BACKTRACE_PROVIDE_OBJECT", ConstExpr::Long(1)),
-        ("DEBUG_BACKTRACE_IGNORE_ARGS", ConstExpr::Long(2)),
+        ("DEBUG_BACKTRACE_PROVIDE_OBJECT", ConstExpr::long(1)),
+        ("DEBUG_BACKTRACE_IGNORE_ARGS", ConstExpr::long(2)),
         ("ZEND_THREAD_SAFE", ConstExpr::Bool(false)),
         ("ZEND_DEBUG_BUILD", ConstExpr::Bool(false)),
         (
@@ -303,11 +303,11 @@ pub(crate) fn core_constants() -> Vec<ConstDecl> {
         ("FALSE", ConstExpr::Bool(false)),
         ("NULL", ConstExpr::Null),
         ("PHP_VERSION", ConstExpr::Str(PHP_VERSION.as_bytes().into())),
-        ("PHP_MAJOR_VERSION", ConstExpr::Long(8)),
-        ("PHP_MINOR_VERSION", ConstExpr::Long(5)),
-        ("PHP_RELEASE_VERSION", ConstExpr::Long(9)),
+        ("PHP_MAJOR_VERSION", ConstExpr::long(8)),
+        ("PHP_MINOR_VERSION", ConstExpr::long(5)),
+        ("PHP_RELEASE_VERSION", ConstExpr::long(9)),
         ("PHP_EXTRA_VERSION", ConstExpr::Str(Box::new([]))),
-        ("PHP_VERSION_ID", ConstExpr::Long(80509)),
+        ("PHP_VERSION_ID", ConstExpr::long(80509)),
         (
             "PHP_BUILD_DATE",
             ConstExpr::Str(b"Jul 28 2026 13:06:52".as_slice().into()),
@@ -328,12 +328,12 @@ pub(crate) fn core_constants() -> Vec<ConstDecl> {
     rows.extend(BUILD_PATHS.iter().map(|(name, value)| string(name, value)));
     rows.extend([
         ("PHP_EOL", ConstExpr::Str(b"\n".as_slice().into())),
-        ("PHP_MAXPATHLEN", ConstExpr::Long(MAXPATHLEN)),
-        ("PHP_INT_MAX", ConstExpr::Long(i64::MAX)),
-        ("PHP_INT_MIN", ConstExpr::Long(i64::MIN)),
-        ("PHP_INT_SIZE", ConstExpr::Long(8)),
-        ("PHP_FD_SETSIZE", ConstExpr::Long(1024)),
-        ("PHP_FLOAT_DIG", ConstExpr::Long(15)),
+        ("PHP_MAXPATHLEN", ConstExpr::long(MAXPATHLEN)),
+        ("PHP_INT_MAX", ConstExpr::long(i64::MAX)),
+        ("PHP_INT_MIN", ConstExpr::long(i64::MIN)),
+        ("PHP_INT_SIZE", ConstExpr::long(8)),
+        ("PHP_FD_SETSIZE", ConstExpr::long(1024)),
+        ("PHP_FLOAT_DIG", ConstExpr::long(15)),
         ("PHP_FLOAT_EPSILON", ConstExpr::Double(f64::EPSILON)),
         ("PHP_FLOAT_MAX", ConstExpr::Double(f64::MAX)),
         ("PHP_FLOAT_MIN", ConstExpr::Double(f64::MIN_POSITIVE)),
@@ -366,7 +366,7 @@ pub(crate) fn core_constants() -> Vec<ConstDecl> {
             ("UPLOAD_ERR_CANT_WRITE", 7),
             ("UPLOAD_ERR_EXTENSION", 8),
         ]
-        .map(|(name, value)| (name, ConstExpr::Long(value))),
+        .map(|(name, value)| (name, ConstExpr::long(value))),
     );
     // `php_binary_init` (`Z/main/main.c:418`): the realpath of the
     // executable the process runs, and the empty string where there is

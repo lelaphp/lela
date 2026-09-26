@@ -599,7 +599,7 @@ pub(crate) fn link_constants(
     let count = TYPE_FIXED_COUNT + i64::try_from(handlers.len()).unwrap_or(0);
     for decl in &mut declared {
         if &*decl.name.0 == b"IMAGETYPE_COUNT" {
-            decl.value = php_ext::decl::ConstExpr::Long(count);
+            decl.value = php_ext::decl::ConstExpr::long(count);
         }
     }
     for (at, handler) in (TYPE_FIXED_COUNT..).zip(handlers) {

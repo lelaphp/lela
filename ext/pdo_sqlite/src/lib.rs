@@ -149,7 +149,7 @@ fn class_constant(name: &str, value: i64) -> ClassConstDecl {
         is_final: false,
         is_case: false,
         ty: Some(Type::Int),
-        value: ConstExpr::Long(value),
+        value: ConstExpr::long(value),
         attributes: Vec::new(),
         doc_comment: None,
     }
@@ -221,13 +221,13 @@ enum Creates {
 
 /// The parameters of the `create*` methods and their deprecated twins.
 fn creating(kind: Creates) -> Vec<Parameter> {
-    let minus_one = || Some(ConstExpr::Long(-1));
+    let minus_one = || Some(ConstExpr::long(-1));
     let function = |name: &str, count: &str| {
         vec![
             parameter(name, Type::String, None),
             parameter("callback", Type::Callable, None),
             parameter(count, Type::Int, minus_one()),
-            parameter("flags", Type::Int, Some(ConstExpr::Long(0))),
+            parameter("flags", Type::Int, Some(ConstExpr::long(0))),
         ]
     };
     match kind {

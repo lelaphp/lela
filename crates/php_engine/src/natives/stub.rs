@@ -166,7 +166,7 @@ impl Reader<'_> {
                     self.at += 1;
                 }
                 let text = self.bytes.get(start..self.at).unwrap_or_default();
-                ConstExpr::Long(
+                ConstExpr::long(
                     std::str::from_utf8(text)
                         .ok()
                         .and_then(|text| text.parse().ok())

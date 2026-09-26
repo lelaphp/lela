@@ -178,8 +178,8 @@ fn set_time(returns: &str) -> MethodDecl {
         vec![
             p("hour", Type::Int),
             p("minute", Type::Int),
-            d("second", Type::Int, ConstExpr::Long(0)),
-            d("microsecond", Type::Int, ConstExpr::Long(0)),
+            d("second", Type::Int, ConstExpr::long(0)),
+            d("microsecond", Type::Int, ConstExpr::long(0)),
         ],
         class(returns),
     )
@@ -203,7 +203,7 @@ fn set_isodate(returns: &str) -> MethodDecl {
         vec![
             p("year", Type::Int),
             p("week", Type::Int),
-            d("dayOfWeek", Type::Int, ConstExpr::Long(1)),
+            d("dayOfWeek", Type::Int, ConstExpr::long(1)),
         ],
         class(returns),
     )
@@ -462,7 +462,7 @@ fn date_time_zone() -> (ClassDecl, Vec<(MethodDecl, Entry)>) {
     let mut decl = class_decl("DateTimeZone", ClassKind::Class, None, &[]);
     decl.constants = GROUPS
         .iter()
-        .map(|(name, value)| constant(name, Type::Int, ConstExpr::Long(*value)))
+        .map(|(name, value)| constant(name, Type::Int, ConstExpr::long(*value)))
         .collect();
     let methods: Vec<(MethodDecl, Entry)> = vec![
         (
@@ -490,7 +490,7 @@ fn date_time_zone() -> (ClassDecl, Vec<(MethodDecl, Entry)>) {
                         Type::Int,
                         ConstExpr::Constant(Name(b"PHP_INT_MIN".as_slice().into())),
                     ),
-                    d("timestampEnd", Type::Int, ConstExpr::Long(2_147_483_647)),
+                    d("timestampEnd", Type::Int, ConstExpr::long(2_147_483_647)),
                 ],
                 union(vec![Type::Array, Type::False]),
             ),
@@ -601,12 +601,12 @@ fn date_period() -> (ClassDecl, Vec<(MethodDecl, Entry)>) {
         constant(
             "EXCLUDE_START_DATE",
             Type::Int,
-            ConstExpr::Long(EXCLUDE_START_DATE),
+            ConstExpr::long(EXCLUDE_START_DATE),
         ),
         constant(
             "INCLUDE_END_DATE",
             Type::Int,
-            ConstExpr::Long(INCLUDE_END_DATE),
+            ConstExpr::long(INCLUDE_END_DATE),
         ),
     ];
     let date = || nullable(class("DateTimeInterface"));
@@ -625,7 +625,7 @@ fn date_period() -> (ClassDecl, Vec<(MethodDecl, Entry)>) {
                 "createFromISO8601String",
                 vec![
                     p("specification", Type::String),
-                    d("options", Type::Int, ConstExpr::Long(0)),
+                    d("options", Type::Int, ConstExpr::long(0)),
                 ],
                 Type::CalledClass,
             ),

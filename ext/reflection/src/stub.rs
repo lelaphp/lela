@@ -81,7 +81,7 @@ fn int_constant(name: &[u8], value: i64) -> ClassConstDecl {
         is_final: false,
         is_case: false,
         ty: Some(Type::Int),
-        value: ConstExpr::Long(value),
+        value: ConstExpr::long(value),
         attributes: Vec::new(),
         doc_comment: None,
     }
@@ -4812,7 +4812,7 @@ fn reflection_function_abstract() -> Declared {
                     b"getAttributes",
                     &[
                         with_default(b"name", nullable(Type::String), ConstExpr::Null),
-                        with_default(b"flags", Type::Int, ConstExpr::Long(0)),
+                        with_default(b"flags", Type::Int, ConstExpr::long(0)),
                     ],
                     Some(Type::Array),
                 ),
@@ -5385,7 +5385,7 @@ fn reflection_class() -> Declared {
                     b"newLazyGhost",
                     &[
                         parameter(b"initializer", Type::Callable),
-                        with_default(b"options", Type::Int, ConstExpr::Long(0)),
+                        with_default(b"options", Type::Int, ConstExpr::long(0)),
                     ],
                     Some(Type::Object),
                 ),
@@ -5396,7 +5396,7 @@ fn reflection_class() -> Declared {
                     b"newLazyProxy",
                     &[
                         parameter(b"factory", Type::Callable),
-                        with_default(b"options", Type::Int, ConstExpr::Long(0)),
+                        with_default(b"options", Type::Int, ConstExpr::long(0)),
                     ],
                     Some(Type::Object),
                 ),
@@ -5408,7 +5408,7 @@ fn reflection_class() -> Declared {
                     &[
                         parameter(b"object", Type::Object),
                         parameter(b"initializer", Type::Callable),
-                        with_default(b"options", Type::Int, ConstExpr::Long(0)),
+                        with_default(b"options", Type::Int, ConstExpr::long(0)),
                     ],
                     Some(Type::Void),
                 ),
@@ -5420,7 +5420,7 @@ fn reflection_class() -> Declared {
                     &[
                         parameter(b"object", Type::Object),
                         parameter(b"factory", Type::Callable),
-                        with_default(b"options", Type::Int, ConstExpr::Long(0)),
+                        with_default(b"options", Type::Int, ConstExpr::long(0)),
                     ],
                     Some(Type::Void),
                 ),
@@ -5559,7 +5559,7 @@ fn reflection_class() -> Declared {
                     b"getAttributes",
                     &[
                         with_default(b"name", nullable(Type::String), ConstExpr::Null),
-                        with_default(b"flags", Type::Int, ConstExpr::Long(0)),
+                        with_default(b"flags", Type::Int, ConstExpr::long(0)),
                     ],
                     Some(Type::Array),
                 ),
@@ -5847,7 +5847,7 @@ fn reflection_property() -> Declared {
                     b"getAttributes",
                     &[
                         with_default(b"name", nullable(Type::String), ConstExpr::Null),
-                        with_default(b"flags", Type::Int, ConstExpr::Long(0)),
+                        with_default(b"flags", Type::Int, ConstExpr::long(0)),
                     ],
                     Some(Type::Array),
                 ),
@@ -5973,7 +5973,7 @@ fn reflection_class_constant() -> Declared {
                     b"getAttributes",
                     &[
                         with_default(b"name", nullable(Type::String), ConstExpr::Null),
-                        with_default(b"flags", Type::Int, ConstExpr::Long(0)),
+                        with_default(b"flags", Type::Int, ConstExpr::long(0)),
                     ],
                     Some(Type::Array),
                 ),
@@ -6139,7 +6139,7 @@ fn reflection_parameter() -> Declared {
                     b"getAttributes",
                     &[
                         with_default(b"name", nullable(Type::String), ConstExpr::Null),
-                        with_default(b"flags", Type::Int, ConstExpr::Long(0)),
+                        with_default(b"flags", Type::Int, ConstExpr::long(0)),
                     ],
                     Some(Type::Array),
                 ),
@@ -6642,7 +6642,7 @@ fn reflection_constant() -> Declared {
                     b"getAttributes",
                     &[
                         with_default(b"name", nullable(Type::String), ConstExpr::Null),
-                        with_default(b"flags", Type::Int, ConstExpr::Long(0)),
+                        with_default(b"flags", Type::Int, ConstExpr::long(0)),
                     ],
                     Some(Type::Array),
                 ),

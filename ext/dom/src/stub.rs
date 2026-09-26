@@ -584,7 +584,7 @@ impl Reader<'_> {
                 }
                 let text = std::str::from_utf8(self.bytes.get(start..self.at).unwrap_or_default())
                     .unwrap_or("0");
-                ConstExpr::Long(i64::from_str_radix(text, 16).unwrap_or(0))
+                ConstExpr::long(i64::from_str_radix(text, 16).unwrap_or(0))
             }
             Some(b'-' | b'0'..=b'9') => {
                 let start = self.at;
@@ -594,7 +594,7 @@ impl Reader<'_> {
                 }
                 let text = std::str::from_utf8(self.bytes.get(start..self.at).unwrap_or_default())
                     .unwrap_or("0");
-                ConstExpr::Long(text.parse().unwrap_or(0))
+                ConstExpr::long(text.parse().unwrap_or(0))
             }
             _ => {
                 let word = self.word();

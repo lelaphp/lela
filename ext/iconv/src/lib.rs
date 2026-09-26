@@ -115,8 +115,8 @@ pub fn extension() -> Extension {
         .constants(vec![
             constant("ICONV_IMPL", ConstExpr::Str(b"libiconv".as_slice().into())),
             constant("ICONV_VERSION", ConstExpr::Str(b"1.11".as_slice().into())),
-            constant("ICONV_MIME_DECODE_STRICT", ConstExpr::Long(1)),
-            constant("ICONV_MIME_DECODE_CONTINUE_ON_ERROR", ConstExpr::Long(2)),
+            constant("ICONV_MIME_DECODE_STRICT", ConstExpr::long(1)),
+            constant("ICONV_MIME_DECODE_CONTINUE_ON_ERROR", ConstExpr::long(2)),
         ])
         .ini(Kind::ALL.map(ini).to_vec())
         .register(BufferHandler {
@@ -259,11 +259,11 @@ fn natives() -> Vec<(FunctionDecl, Entry)> {
     vec![
         (declared("iconv_strlen", &[("string", "string", None), enc()], "int|false"), iconv_strlen as Entry),
         (declared("iconv_substr", &[("string", "string", None), ("offset", "int", None), ("length", "?int", null()), enc()], "string|false"), iconv_substr),
-        (declared("iconv_strpos", &[("haystack", "string", None), ("needle", "string", None), ("offset", "int", Some(ConstExpr::Long(0))), enc()], "int|false"), iconv_strpos),
+        (declared("iconv_strpos", &[("haystack", "string", None), ("needle", "string", None), ("offset", "int", Some(ConstExpr::long(0))), enc()], "int|false"), iconv_strpos),
         (declared("iconv_strrpos", &[("haystack", "string", None), ("needle", "string", None), enc()], "int|false"), iconv_strrpos),
         (declared("iconv_mime_encode", &[("field_name", "string", None), ("field_value", "string", None), ("options", "array", Some(ConstExpr::Array(Vec::new())))], "string|false"), mime::iconv_mime_encode),
-        (declared("iconv_mime_decode", &[("string", "string", None), ("mode", "int", Some(ConstExpr::Long(0))), enc()], "string|false"), mime::iconv_mime_decode),
-        (declared("iconv_mime_decode_headers", &[("headers", "string", None), ("mode", "int", Some(ConstExpr::Long(0))), enc()], "array|false"), mime::iconv_mime_decode_headers),
+        (declared("iconv_mime_decode", &[("string", "string", None), ("mode", "int", Some(ConstExpr::long(0))), enc()], "string|false"), mime::iconv_mime_decode),
+        (declared("iconv_mime_decode_headers", &[("headers", "string", None), ("mode", "int", Some(ConstExpr::long(0))), enc()], "array|false"), mime::iconv_mime_decode_headers),
         (declared("iconv", &[("from_encoding", "string", None), ("to_encoding", "string", None), ("string", "string", None)], "string|false"), iconv),
         (declared("iconv_set_encoding", &[("type", "string", None), ("encoding", "string", None)], "bool"), iconv_set_encoding),
         (declared("iconv_get_encoding", &[("type", "string", Some(ConstExpr::Str(b"all".as_slice().into())))], "array|string|false"), iconv_get_encoding),

@@ -183,12 +183,12 @@ fn constants() -> Vec<ConstDecl> {
     };
     let mut all: Vec<ConstDecl> = ints
         .into_iter()
-        .map(|(name, value)| constant(name, ConstExpr::Long(value)))
+        .map(|(name, value)| constant(name, ConstExpr::long(value)))
         .collect();
     all.extend([
         constant("PCRE_VERSION", ConstExpr::Str(version.as_bytes().into())),
-        constant("PCRE_VERSION_MAJOR", ConstExpr::Long(number(0))),
-        constant("PCRE_VERSION_MINOR", ConstExpr::Long(number(1))),
+        constant("PCRE_VERSION_MAJOR", ConstExpr::long(number(0))),
+        constant("PCRE_VERSION_MINOR", ConstExpr::long(number(1))),
         constant("PCRE_JIT_SUPPORT", ConstExpr::Bool(ffi::jit_supported())),
     ]);
     all
@@ -238,7 +238,7 @@ fn functions() -> Vec<(FunctionDecl, Entry)> {
     let string = |name: &[u8]| parameter(name, Some(Type::String));
     let either = |name: &[u8]| parameter(name, Some(Type::Union(vec![Type::Array, Type::String])));
     let int = |name: &[u8], default: i64| Parameter {
-        default: ParameterDefault::Expr(ConstExpr::Long(default)),
+        default: ParameterDefault::Expr(ConstExpr::long(default)),
         ..parameter(name, Some(Type::Int))
     };
     let by_ref = |name: &[u8]| Parameter {

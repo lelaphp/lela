@@ -483,7 +483,7 @@ impl Reader<'_> {
                 }
                 let text = std::str::from_utf8(self.bytes.get(start..self.at).unwrap_or_default())
                     .unwrap_or("0");
-                ConstExpr::Long(text.parse().unwrap_or(0))
+                ConstExpr::long(text.parse().unwrap_or(0))
             }
             _ => {
                 let word = self.word();

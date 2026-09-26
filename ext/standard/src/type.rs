@@ -150,7 +150,7 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
                 &[
                     value(),
                     Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Long(10)),
+                        default: ParameterDefault::Expr(ConstExpr::long(10)),
                         ..parameter(b"base", Type::Int)
                     },
                 ],

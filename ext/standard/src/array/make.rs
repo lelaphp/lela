@@ -116,7 +116,7 @@ pub(super) fn natives() -> Vec<(FunctionDecl, Entry)> {
                     parameter(b"start", number_or_string()),
                     parameter(b"end", number_or_string()),
                     Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Long(1)),
+                        default: ParameterDefault::Expr(ConstExpr::long(1)),
                         ..parameter(b"step", Type::Union(vec![Type::Int, Type::Float]))
                     },
                 ],
@@ -141,7 +141,7 @@ pub(super) fn natives() -> Vec<(FunctionDecl, Entry)> {
                 &[
                     parameter(b"array", Type::Array),
                     Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Long(1)),
+                        default: ParameterDefault::Expr(ConstExpr::long(1)),
                         ..parameter(b"num", Type::Int)
                     },
                 ],

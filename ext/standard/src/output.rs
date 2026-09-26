@@ -41,7 +41,7 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
                         ..parameter(b"callback", Type::Mixed)
                     },
                     Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Long(0)),
+                        default: ParameterDefault::Expr(ConstExpr::long(0)),
                         ..parameter(b"chunk_size", Type::Int)
                     },
                     Parameter {

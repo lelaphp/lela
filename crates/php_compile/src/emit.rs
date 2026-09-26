@@ -992,7 +992,7 @@ fn valid_default(ty: &Type, default: &mut ConstExpr) -> Result<(), ZvalType> {
         ConstExpr::Null => ZvalType::Null,
         ConstExpr::Bool(false) => ZvalType::False,
         ConstExpr::Bool(true) => ZvalType::True,
-        ConstExpr::Long(_) => ZvalType::Long,
+        ConstExpr::Long { .. } => ZvalType::Long,
         ConstExpr::Double(_) => ZvalType::Double,
         ConstExpr::Str(_) => ZvalType::String,
         ConstExpr::Array(elements)
@@ -1007,7 +1007,7 @@ fn valid_default(ty: &Type, default: &mut ConstExpr) -> Result<(), ZvalType> {
     if ty.contains_code(kind as u8) {
         return Ok(());
     }
-    if let ConstExpr::Long(n) = default
+    if let ConstExpr::Long { value: n, .. } = default
         && ty.contains_code(ZvalType::Double as u8)
     {
         *default = ConstExpr::Double(double_of(Zval::long(*n)));
@@ -1038,7 +1038,7 @@ fn folded_const_expr(folded: Zval) -> Option<ConstExpr> {
         let mut items = Vec::with_capacity(array.len());
         for (key, held) in &array {
             let key = match key {
-                Key::Long(n) => ConstExpr::Long(n),
+                Key::Long(n) => ConstExpr::long(n),
                 Key::Str(s) => ConstExpr::Str(s.bytes().into()),
             };
             items.push((Some(key), folded_const_expr(held)?));
@@ -1049,7 +1049,7 @@ fn folded_const_expr(folded: Zval) -> Option<ConstExpr> {
         ZvalType::Null => ConstExpr::Null,
         ZvalType::False => ConstExpr::Bool(false),
         ZvalType::True => ConstExpr::Bool(true),
-        ZvalType::Long => ConstExpr::Long(folded.as_long()?),
+        ZvalType::Long => ConstExpr::long(folded.as_long()?),
         ZvalType::Double => ConstExpr::Double(folded.as_double()?),
         ZvalType::String => ConstExpr::Str(folded.as_str()?.bytes().into()),
         _ => return None,
@@ -1063,7 +1063,7 @@ fn is_literal(expr: &ConstExpr) -> bool {
     match expr {
         ConstExpr::Null
         | ConstExpr::Bool(_)
-        | ConstExpr::Long(_)
+        | ConstExpr::Long { .. }
         | ConstExpr::Double(_)
         | ConstExpr::Str(_) => true,
         ConstExpr::Array(elements) => elements
@@ -4107,7 +4107,7 @@ impl Emit<'_> {
                 // `zend_is_valid_default_value` converted an int under
                 // a type with `float` and no `int` where it stood.
                 match (written, folded.kind()) {
-                    (Some(ConstExpr::Long(n)), ZvalType::Double) => {
+                    (Some(ConstExpr::Long { value: n, .. }), ZvalType::Double) => {
                         Some(ConstExpr::Double(double_of(Zval::long(n))))
                     }
                     (written, _) => written,
@@ -15041,7 +15041,7 @@ impl Emit<'_> {
         Ok(Some(match value {
             ConstExpr::Null => Zval::null(),
             ConstExpr::Bool(b) => Zval::bool(b),
-            ConstExpr::Long(n) => Zval::long(n),
+            ConstExpr::Long { value: n, .. } => Zval::long(n),
             ConstExpr::Double(d) => Zval::double(d),
             ConstExpr::Str(bytes) => self.string(&bytes)?,
             _ => return Ok(None),
@@ -15885,7 +15885,7 @@ impl Emit<'_> {
         Ok(match default {
             ConstExpr::Null => Some(Zval::null()),
             ConstExpr::Bool(b) => Some(Zval::bool(*b)),
-            ConstExpr::Long(n) => Some(Zval::long(*n)),
+            ConstExpr::Long { value: n, .. } => Some(Zval::long(*n)),
             ConstExpr::Double(d) => Some(Zval::double(*d)),
             ConstExpr::Str(bytes) => Some(self.string(bytes)?),
             _ => None,
@@ -16717,7 +16717,7 @@ impl Emit<'_> {
         Ok(match &declared.value {
             ConstExpr::Null => Some(Zval::null()),
             ConstExpr::Bool(b) => Some(Zval::bool(*b)),
-            ConstExpr::Long(n) => Some(Zval::long(*n)),
+            ConstExpr::Long { value: n, .. } => Some(Zval::long(*n)),
             ConstExpr::Double(d) => Some(Zval::double(*d)),
             ConstExpr::Str(bytes) => Some(self.string(bytes)?),
             _ => None,

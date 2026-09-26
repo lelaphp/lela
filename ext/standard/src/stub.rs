@@ -267,7 +267,7 @@ impl Reader<'_> {
         if text.contains(['.', 'e', 'E']) {
             ConstExpr::Double(text.parse().unwrap_or(0.0))
         } else {
-            ConstExpr::Long(text.parse().unwrap_or(0))
+            ConstExpr::long(text.parse().unwrap_or(0))
         }
     }
 

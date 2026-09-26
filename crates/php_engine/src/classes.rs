@@ -1294,7 +1294,7 @@ fn throwable_methods() -> Vec<(MethodDecl, Entry)> {
                 b"__construct",
                 &[
                     string_parameter(b"message", Type::String, ConstExpr::Str(Box::new([]))),
-                    string_parameter(b"code", Type::Int, ConstExpr::Long(0)),
+                    string_parameter(b"code", Type::Int, ConstExpr::long(0)),
                     string_parameter(b"previous", throwable(), ConstExpr::Null),
                 ],
                 None,
@@ -1802,14 +1802,14 @@ fn throwable_properties(error: bool) -> Vec<PropertyDecl> {
             b"code",
             Visibility::Protected,
             None,
-            Some(ConstExpr::Long(0)),
+            Some(ConstExpr::long(0)),
         ),
         property(b"file", Visibility::Protected, Some(Type::String), empty()),
         property(
             b"line",
             Visibility::Protected,
             Some(Type::Int),
-            (!error).then_some(ConstExpr::Long(0)),
+            (!error).then_some(ConstExpr::long(0)),
         ),
         property(
             b"trace",

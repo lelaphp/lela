@@ -416,7 +416,7 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
                 untyped(b"stream"),
                 parameter(b"filter_name", Type::String),
                 Parameter {
-                    default: ParameterDefault::Expr(ConstExpr::Long(0)),
+                    default: ParameterDefault::Expr(ConstExpr::long(0)),
                     ..parameter(b"mode", Type::Int)
                 },
                 params(),

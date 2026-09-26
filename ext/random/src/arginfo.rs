@@ -118,12 +118,12 @@ pub(super) fn constants() -> Vec<ConstDecl> {
     vec![
         ConstDecl {
             name: name("MT_RAND_MT19937"),
-            value: ConstExpr::Long(0),
+            value: ConstExpr::long(0),
             attributes: Vec::new(),
         },
         ConstDecl {
             name: name("MT_RAND_PHP"),
-            value: ConstExpr::Long(1),
+            value: ConstExpr::long(1),
             attributes: vec![deprecated(
                 "8.3",
                 "as it uses a biased non-standard variant of Mt19937",

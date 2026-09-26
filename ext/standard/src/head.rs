@@ -50,7 +50,7 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
                         ..parameter(b"replace", Type::Bool)
                     },
                     Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Long(0)),
+                        default: ParameterDefault::Expr(ConstExpr::long(0)),
                         ..parameter(b"response_code", Type::Int)
                     },
                 ],
@@ -73,7 +73,7 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
             declared(
                 b"http_response_code",
                 &[Parameter {
-                    default: ParameterDefault::Expr(ConstExpr::Long(0)),
+                    default: ParameterDefault::Expr(ConstExpr::long(0)),
                     ..parameter(b"response_code", Type::Int)
                 }],
                 Type::Union(vec![Type::Int, Type::Bool]),

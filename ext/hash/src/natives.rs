@@ -141,14 +141,14 @@ const MHASH: [Option<(&str, &str)>; 42] = [
 pub(crate) fn constants() -> Vec<ConstDecl> {
     let mut out = vec![ConstDecl {
         name: Name(b"HASH_HMAC".as_slice().into()),
-        value: ConstExpr::Long(Flags::HMAC),
+        value: ConstExpr::long(Flags::HMAC),
         attributes: Vec::new(),
     }];
     for (number, entry) in (0i64..).zip(MHASH) {
         if let Some((name, _)) = entry {
             out.push(ConstDecl {
                 name: Name(format!("MHASH_{name}").into_bytes().into()),
-                value: ConstExpr::Long(number),
+                value: ConstExpr::long(number),
                 attributes: vec![deprecated(
                     "8.5",
                     Some("as the mhash*() functions were deprecated"),

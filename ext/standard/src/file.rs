@@ -19,7 +19,7 @@ use php_ext::call::lookup_class;
 use php_ext::coerce::{coerce_param, to_string, value_name};
 use php_ext::decl::{
     Attribute, AttributeArgument, ConstDecl, ConstExpr, FunctionDecl, Name, Parameter,
-    ParameterDefault, Type,
+    ParameterDefault, Radix, Type,
 };
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw};
 use php_ext::request::{Request, Resolve, Stream, StreamOption, Whence, WrapperOp};
@@ -68,7 +68,7 @@ const PHP_FILE_NO_DEFAULT_CONTEXT: i64 = 16;
 fn deprecated_zero(name: &[u8]) -> ConstDecl {
     ConstDecl {
         name: Name(name.into()),
-        value: ConstExpr::Long(0),
+        value: ConstExpr::long(0),
         attributes: vec![Attribute {
             name: Name(b"Deprecated".as_slice().into()),
             arguments: vec![
@@ -382,7 +382,7 @@ fn contents_natives() -> Vec<(FunctionDecl, Entry)> {
                     },
                     untyped_null(b"context"),
                     Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Long(0)),
+                        default: ParameterDefault::Expr(ConstExpr::long(0)),
                         ..parameter(b"offset", Type::Int)
                     },
                     Parameter {
@@ -401,7 +401,7 @@ fn contents_natives() -> Vec<(FunctionDecl, Entry)> {
                     parameter(b"filename", Type::String),
                     parameter(b"data", Type::Mixed),
                     Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Long(0)),
+                        default: ParameterDefault::Expr(ConstExpr::long(0)),
                         ..parameter(b"flags", Type::Int)
                     },
                     untyped_null(b"context"),
@@ -2013,7 +2013,10 @@ fn path_natives() -> Vec<(FunctionDecl, Entry)> {
                 &[
                     parameter(b"directory", Type::String),
                     Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Long(0o777)),
+                        default: ParameterDefault::Expr(ConstExpr::Long {
+                            value: 0o777,
+                            radix: Radix::Octal,
+                        }),
                         ..parameter(b"permissions", Type::Int)
                     },
                     Parameter {

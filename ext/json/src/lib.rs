@@ -103,7 +103,7 @@ struct State {
 /// ```
 pub fn extension() -> Extension {
     let int = |name: &[u8], ty: Type, default: i64| Parameter {
-        default: ParameterDefault::Expr(ConstExpr::Long(default)),
+        default: ParameterDefault::Expr(ConstExpr::long(default)),
         ..parameter(name, ty)
     };
     ExtensionBuilder::default()
@@ -229,7 +229,7 @@ fn constants() -> Vec<ConstDecl> {
     rows.into_iter()
         .map(|(name, value)| ConstDecl {
             name: Name(name.into()),
-            value: ConstExpr::Long(value),
+            value: ConstExpr::long(value),
             attributes: Vec::new(),
         })
         .collect()

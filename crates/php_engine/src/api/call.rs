@@ -1442,7 +1442,7 @@ pub fn eval_const_expr(
     match expr {
         ConstExpr::Null => Ok(Value::null()),
         ConstExpr::Bool(b) => Ok(Value::bool(*b)),
-        ConstExpr::Long(n) => Ok(Value::int(*n)),
+        ConstExpr::Long { value: n, .. } => Ok(Value::int(*n)),
         ConstExpr::Double(f) => Ok(Value::float(*f)),
         ConstExpr::Str(s) => Ok(Value::string(PhpString::new(req, s)?)),
         // `zend_get_constant_ex`, which words a `CONST_DEPRECATED`

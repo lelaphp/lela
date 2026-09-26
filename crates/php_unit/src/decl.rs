@@ -226,7 +226,14 @@ impl Type {
 pub enum ConstExpr {
     Null,
     Bool(bool),
-    Long(i64),
+    /// An integer and the radix it is written in, which Reflection
+    /// renders it in. The compiler folds a program's integers to
+    /// `Decimal`, as php's `zend_ast` holds a folded `zval` and
+    /// Reflection prints `511` for a user function's `$x = 0777`.
+    Long {
+        value: i64,
+        radix: Radix,
+    },
     Double(f64),
     Str(Box<[u8]>),
     Constant(Name),
@@ -295,6 +302,61 @@ pub enum ConstExpr {
     /// is evaluated in, which is the class that took the member from the
     /// trait, and the empty string where there is none.
     ScopeClass,
+}
+
+impl ConstExpr {
+    /// An integer written in decimal, as a program's integers are
+    /// folded and as most of the stubs write them.
+    #[must_use]
+    pub const fn long(value: i64) -> ConstExpr {
+        ConstExpr::Long {
+            value,
+            radix: Radix::Decimal,
+        }
+    }
+}
+
+/// The radix an integer of a native's declaration is written in, which
+/// `gen_stub.php` keeps by copying the stub's token into
+/// `zend_internal_arg_info.default_value`, and which Reflection prints
+/// back: `mkdir`'s `$permissions = 0777` is the octal `511`, rendered
+/// `0777`. The stubs write two octal spellings in a parameter's
+/// default, php's legacy `0777` and 8.1's explicit `0o644`; hexadecimal
+/// and binary stand only in constants' values, which are declared by
+/// value. Exhaustive, so a radix added later is a change every renderer
+/// answers before it builds.
+///
+/// ```php
+/// echo (new ReflectionFunction('mkdir'))->getParameters()[1], "\n";
+/// function f($x = 0777, $y = 0o17) {}
+/// echo implode(", ", (new ReflectionFunction('f'))->getParameters()), "\n";
+/// ```
+/// ```expect
+/// Parameter #1 [ <optional> int $permissions = 0777 ]
+/// Parameter #0 [ <optional> $x = 511 ], Parameter #1 [ <optional> $y = 15 ]
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Radix {
+    Decimal,
+    /// `0777`: a leading zero.
+    Octal,
+    /// `0o644`: the `0o` prefix of php 8.1.
+    OctalExplicit,
+}
+
+impl Radix {
+    /// `value` as this radix writes it, the text `gen_stub.php` copies
+    /// from the stub.
+    #[must_use]
+    pub fn written(self, value: i64) -> String {
+        let sign = if value < 0 { "-" } else { "" };
+        let magnitude = value.unsigned_abs();
+        match self {
+            Radix::Decimal => value.to_string(),
+            Radix::Octal => format!("{sign}0{magnitude:o}"),
+            Radix::OctalExplicit => format!("{sign}0o{magnitude:o}"),
+        }
+    }
 }
 
 /// One argument of an attribute, positional or named.

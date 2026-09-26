@@ -1381,7 +1381,7 @@ fn constants() -> Vec<ConstDecl> {
         .chain(std::iter::once(no_default_ns))
         .map(|(name, value)| ConstDecl {
             name: decl::Name(name.into()),
-            value: ConstExpr::Long(value),
+            value: ConstExpr::long(value),
             attributes: if name == b"DOM_PHP_ERR" {
                 vec![Attribute {
                     name: decl::Name(b"Deprecated".as_slice().into()),

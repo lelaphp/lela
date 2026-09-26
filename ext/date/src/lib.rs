@@ -286,7 +286,7 @@ fn constants() -> Vec<ConstDecl> {
     for (name, value) in [("TIMESTAMP", 0), ("STRING", 1), ("DOUBLE", 2)] {
         out.push(ConstDecl {
             name: Name(format!("SUNFUNCS_RET_{name}").into_bytes().into()),
-            value: ConstExpr::Long(value),
+            value: ConstExpr::long(value),
             attributes: deprecated(
                 "8.4",
                 "as date_sunrise() and date_sunset() were deprecated in 8.1",
@@ -564,8 +564,8 @@ fn functions() -> Vec<(FunctionDecl, Entry)> {
                     obj("DateTime"),
                     p("hour", Type::Int),
                     p("minute", Type::Int),
-                    d("second", Type::Int, ConstExpr::Long(0)),
-                    d("microsecond", Type::Int, ConstExpr::Long(0)),
+                    d("second", Type::Int, ConstExpr::long(0)),
+                    d("microsecond", Type::Int, ConstExpr::long(0)),
                 ],
                 Some(class("DateTime")),
             ),
@@ -591,7 +591,7 @@ fn functions() -> Vec<(FunctionDecl, Entry)> {
                     obj("DateTime"),
                     p("year", Type::Int),
                     p("week", Type::Int),
-                    d("dayOfWeek", Type::Int, ConstExpr::Long(1)),
+                    d("dayOfWeek", Type::Int, ConstExpr::long(1)),
                 ],
                 Some(class("DateTime")),
             ),
@@ -634,8 +634,8 @@ fn functions() -> Vec<(FunctionDecl, Entry)> {
                 "timezone_name_from_abbr",
                 vec![
                     p("abbr", Type::String),
-                    d("utcOffset", Type::Int, ConstExpr::Long(-1)),
-                    d("isDST", Type::Int, ConstExpr::Long(-1)),
+                    d("utcOffset", Type::Int, ConstExpr::long(-1)),
+                    d("isDST", Type::Int, ConstExpr::long(-1)),
                 ],
                 Some(union(vec![Type::String, Type::False])),
             ),
@@ -662,7 +662,7 @@ fn functions() -> Vec<(FunctionDecl, Entry)> {
                         Type::Int,
                         ConstExpr::Constant(Name(b"PHP_INT_MIN".as_slice().into())),
                     ),
-                    d("timestampEnd", Type::Int, ConstExpr::Long(2_147_483_647)),
+                    d("timestampEnd", Type::Int, ConstExpr::long(2_147_483_647)),
                 ],
                 Some(union(vec![Type::Array, Type::False])),
             ),
