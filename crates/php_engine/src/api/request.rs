@@ -88,23 +88,26 @@ pub struct IniEntry {
 
 /// Who a row the request added to `EG(zend_constants)` belongs to,
 /// php's `ZEND_CONSTANT_MODULE_NUMBER` beside `zend_constant.filename`:
-/// an extension that registers it at request start, or the program,
+/// the host, which registers under `Core` at request start; an
+/// extension that registers one while the request runs; or the program,
 /// `PHP_USER_CONSTANT`, with the file `zend_register_constant` read off
 /// `zend_get_executed_filename_ex` where one was executing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ConstantOwner {
-    Module(&'static str),
+    Core,
+    Extension(ExtensionId),
     User(Option<Box<[u8]>>),
 }
 
-impl ConstantOwner {
-    /// The extension's name, none for the program's.
-    fn module(&self) -> Option<&'static str> {
-        match self {
-            ConstantOwner::Module(name) => Some(name),
-            ConstantOwner::User(_) => None,
-        }
-    }
+/// One row the request added to `EG(zend_constants)`: its owner, name
+/// and value, whose one owner is the row's, and the attributes
+/// `zend_add_attribute` put on it.
+#[derive(Debug)]
+struct Constant {
+    owner: ConstantOwner,
+    name: Vec<u8>,
+    value: Value,
+    attributes: Vec<Attribute>,
 }
 
 /// Where a request stands, as `php_verror` reads it to name the origin
@@ -915,7 +918,7 @@ pub struct Request {
     /// ([`crate::engine::FileHandles`]), `None` for what `define()` and
     /// `const` wrote, php's `PHP_USER_CONSTANT`, with the file it was
     /// defined in.
-    constants: Vec<(ConstantOwner, Vec<u8>, Value)>,
+    constants: Vec<Constant>,
     /// `zend_enum_get_case`'s slot (`Z/Zend/zend_enum.c:410`): one
     /// instance per case of each enum, made on the first read of the
     /// case and handed back by identity from then on, so that
@@ -10982,8 +10985,8 @@ impl Request {
         }
         self.constants
             .iter()
-            .find(|(_, n, _)| n.as_slice() == name)
-            .map(|(_, _, v)| *v)
+            .find(|row| row.name == name)
+            .map(|row| row.value)
             .or_else(|| self.shared.constant(name))
     }
 
@@ -12237,11 +12240,14 @@ impl Request {
                     .chain(value.map(|value| (Some(module), decl.name.0.to_vec(), value)))
             })
             .collect();
-        rows.extend(
-            self.constants
-                .iter()
-                .map(|(owner, name, value)| (owner.module(), name.clone(), *value)),
-        );
+        rows.extend(self.constants.iter().map(|row| {
+            let module = match &row.owner {
+                ConstantOwner::Core => Some("Core"),
+                ConstantOwner::Extension(extension) => self.extension_name(*extension),
+                ConstantOwner::User(_) => None,
+            };
+            (module, row.name.clone(), row.value)
+        }));
         rows
     }
 
@@ -12266,8 +12272,8 @@ impl Request {
         let constants: Vec<(Vec<u8>, Value)> = self
             .constants
             .iter()
-            .filter(|(owner, _, _)| matches!(owner, ConstantOwner::User(_)))
-            .map(|(_, name, value)| (name.clone(), *value))
+            .filter(|row| matches!(row.owner, ConstantOwner::User(_)))
+            .map(|row| (row.name.clone(), row.value))
             .collect();
         for (name, value) in constants {
             let key = Key::Str(PhpString::new(self, &name)?);
@@ -12290,8 +12296,12 @@ impl Request {
             .innermost_frame()
             .and_then(|state| exec::body_of(&state.unit, state.body))
             .map(|code| code.filename.0.clone());
-        let owner = ConstantOwner::User(file);
-        self.constants.push((owner, name.to_vec(), value));
+        self.constants.push(Constant {
+            owner: ConstantOwner::User(file),
+            name: name.to_vec(),
+            value,
+            attributes: Vec::new(),
+        });
         Ok(true)
     }
 
@@ -12312,10 +12322,10 @@ impl Request {
     pub fn constant_file(&self, name: &[u8]) -> Option<&[u8]> {
         self.constants
             .iter()
-            .find(|(_, n, _)| n.as_slice() == name)
-            .and_then(|(owner, _, _)| match owner {
+            .find(|row| row.name == name)
+            .and_then(|row| match &row.owner {
                 ConstantOwner::User(file) => file.as_deref(),
-                ConstantOwner::Module(_) => None,
+                ConstantOwner::Core | ConstantOwner::Extension(_) => None,
             })
     }
 
@@ -12326,8 +12336,48 @@ impl Request {
     /// `Core`'s group and before what the program defines. The value's
     /// one owner is the table's.
     pub(crate) fn register_host_constant(&mut self, name: &'static [u8], value: Value) {
-        self.constants
-            .push((ConstantOwner::Module("Core"), name.to_vec(), value));
+        self.constants.push(Constant {
+            owner: ConstantOwner::Core,
+            name: name.to_vec(),
+            value,
+            attributes: Vec::new(),
+        });
+    }
+
+    /// `REGISTER_STRINGL_CONSTANT` and its kin while a request runs:
+    /// `name` registered under `extension`, php's `module_number`,
+    /// carrying `attributes` as `zend_add_attribute` puts them on the
+    /// constant, a `#[\Deprecated]` among them php's `CONST_DEPRECATED`,
+    /// which a read raises. Where the request has registered the name
+    /// already, by an extension or by `define()`, the row keeps its
+    /// owner and attributes and takes `value`, the old value released,
+    /// which is what an extension writes through the `zval` that
+    /// `zend_get_constant_str` finds. `value` is the row's from here;
+    /// `false`, and `value` still the caller's, for a name the engine or
+    /// an extension declared as it started, which no request writes.
+    /// The session's `SID` is the witness, in `ext/session`.
+    pub fn register_constant(
+        &mut self,
+        extension: ExtensionId,
+        name: &[u8],
+        value: Value,
+        attributes: Vec<Attribute>,
+    ) -> bool {
+        if let Some(row) = self.constants.iter_mut().find(|row| row.name == name) {
+            let old = std::mem::replace(&mut row.value, value);
+            self.release(old);
+            return true;
+        }
+        if name == b"PHP_SAPI" || self.shared.constant(name).is_some() {
+            return false;
+        }
+        self.constants.push(Constant {
+            owner: ConstantOwner::Extension(extension),
+            name: name.to_vec(),
+            value,
+            attributes,
+        });
+        true
     }
 
     /// The fd the host handed under one of its standard streams
@@ -12348,7 +12398,9 @@ impl Request {
     /// the global constant `name` carries, and the empty list for a
     /// name no table has and for one a running program defined, which
     /// carries none until the compiler reads the `#[...]` a program
-    /// writes on a `const` (#465). The key is the one
+    /// writes on a `const` (#465). A row an extension registered while
+    /// the request runs carries what it registered it with
+    /// ([`Request::register_constant`]). The key is the one
     /// `zend_register_constant` writes, the namespace lowered.
     ///
     /// `#[\Deprecated]` among them is php's `CONST_DEPRECATED`, so
@@ -12357,6 +12409,9 @@ impl Request {
     /// ([`crate::api::raising::deprecated_constant`]).
     #[must_use]
     pub fn constant_attributes(&self, name: &[u8]) -> &[Attribute] {
+        if let Some(row) = self.constants.iter().find(|row| row.name == name) {
+            return &row.attributes;
+        }
         self.shared
             .declared()
             .constants

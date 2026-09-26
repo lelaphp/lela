@@ -7,6 +7,7 @@
 
 use std::io::Read;
 
+use php_ext::decl::{Attribute, AttributeArgument, ConstExpr, Name};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::PhpArray;
@@ -705,7 +706,40 @@ pub(super) fn destroy(req: &mut Request) -> Result<bool, Thrown> {
 
 // ------------------------------------------------------------ the id's cookie
 
-/// `php_session_reset_id`: the cookie sent where it is due, and `SID`.
+/// `php_session_reset_id`: the cookie sent where it is due, and `SID`,
+/// registered under the session with php's `#[\Deprecated]` the first
+/// time and its value replaced every time after, `session_regenerate_id`
+/// among them, as the `zval` `zend_get_constant_str` finds is written.
+///
+/// ```php
+/// ob_start(); ini_set("session.use_only_cookies", "0"); session_save_path(__DIR__); session_id("sid1"); session_start(["use_cookies" => 0, "cache_limiter" => ""]);
+/// echo SID, "\n"; session_regenerate_id(true); var_dump(SID === "PHPSESSID=" . session_id(), SID !== "PHPSESSID=sid1");
+/// $c = get_defined_constants(true); var_dump(isset($c['session']['SID']), (new ReflectionConstant('SID'))->isDeprecated()); session_destroy();
+/// ```
+/// ```expect
+///
+/// Deprecated: ini_set(): Disabling session.use_only_cookies INI setting is deprecated in %s on line 2
+///
+/// Deprecated: Constant SID is deprecated since 8.4, as GET/POST sessions were deprecated in %s on line 3
+/// PHPSESSID=sid1
+///
+/// Deprecated: Constant SID is deprecated since 8.4, as GET/POST sessions were deprecated in %s on line 3
+///
+/// Deprecated: Constant SID is deprecated since 8.4, as GET/POST sessions were deprecated in %s on line 3
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// ```
+///
+/// A `SID` the program defined first is written the same way:
+///
+/// ```php
+/// define('SID', [0xdeadbeef]); ob_start(); session_save_path(__DIR__); session_start(["use_cookies" => 0, "cache_limiter" => ""]); var_dump(SID); session_destroy();
+/// ```
+/// ```expect
+/// string(0) ""
+/// ```
 pub(super) fn reset_id(req: &mut Request) -> Result<bool, Thrown> {
     let Some(id) = req.state::<State>().id.clone() else {
         docref(
@@ -730,10 +764,31 @@ pub(super) fn reset_id(req: &mut Request) -> Result<bool, Thrown> {
         Vec::new()
     };
     let sid = crate::string_value(req, &sid)?;
-    if !req.define_constant(b"SID", sid)? {
+    let registered = match req.extension_named(b"session") {
+        Some(session) => req.register_constant(session, b"SID", sid, sid_attributes()),
+        None => false,
+    };
+    if !registered {
         req.release(sid);
     }
     Ok(true)
+}
+
+/// What `php_session_reset_id` puts on a `SID` it registers:
+/// `#[\Deprecated(since: "8.4", message: "as GET/POST sessions were
+/// deprecated")]`, so a read of `SID` is php's deprecation.
+fn sid_attributes() -> Vec<Attribute> {
+    let argument = |name: &[u8], value: &[u8]| AttributeArgument {
+        name: Some(Name(name.into())),
+        value: ConstExpr::Str(value.into()),
+    };
+    vec![Attribute {
+        name: Name(b"Deprecated".as_slice().into()),
+        arguments: vec![
+            argument(b"since", b"8.4"),
+            argument(b"message", b"as GET/POST sessions were deprecated"),
+        ],
+    }]
 }
 
 /// `php_url_encode`.
