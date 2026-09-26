@@ -147,7 +147,13 @@ pub(crate) fn deprecation_suffix(attributes: &[Attribute]) -> Option<String> {
 /// ...`). The docref itself, php's link into the manual, is off in the
 /// CLI's ini and is not rendered here.
 pub fn docref(req: &mut Request, level: Level, message: &str) {
-    let text = format!("{}(): {message}", req.active_native());
+    // `php_verror`'s origin while modules start (`Z/main/main.c:1087`):
+    // `PHP Startup`, no function and so no `()`.
+    let text = if req.at_startup() {
+        format!("PHP Startup: {message}")
+    } else {
+        format!("{}(): {message}", req.active_native())
+    };
     raise(req, level, &text);
 }
 

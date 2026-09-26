@@ -876,6 +876,11 @@ pub struct Request {
     /// two in the order they were written.
     aside: Vec<Aside>,
     last_error: Option<(Level, String, Vec<u8>, u32)>,
+    /// The diagnostics raised while the engine registers its extensions'
+    /// ini entries (`php_during_module_startup()`), held in the order
+    /// raised rather than shown, on the one request the engine lays for
+    /// that stage; every request it serves raises them again first.
+    startup: Option<Vec<(Level, String)>>,
     /// php's `EG(last_fatal_error_backtrace)`, rendered by
     /// `zend_trace_to_string`: the trace `zend_error_impl` fetched for the
     /// fatal being raised under `fatal_error_backtraces`, cleared for
@@ -1389,6 +1394,7 @@ impl Request {
             header_callback: None,
             aside: Vec::new(),
             last_error: None,
+            startup: None,
             last_fatal_error_backtrace: None,
             ending: None,
             exit_status: 0,
@@ -4169,6 +4175,10 @@ impl Request {
         file: &[u8],
         line: u32,
     ) -> bool {
+        if let Some(held) = self.startup.as_mut() {
+            held.push((level, message.to_owned()));
+            return false;
+        }
         // `php_error_cb` under `EH_THROW` (`Z/main/main.c:1368`), which
         // `zend_error_impl` reaches past the user handler: a warning is
         // thrown as the class `zend_replace_error_handling` named, where
@@ -8941,6 +8951,23 @@ impl Request {
     /// caller's spelling.
     fn active_native_function(&self) -> Option<Function> {
         self.vm.serving_call().map(|call| call.function)
+    }
+
+    /// Enter php's startup on this request: what is raised from here is
+    /// held, not shown ([`Request::end_startup`]).
+    pub(crate) fn begin_startup(&mut self) {
+        self.startup = Some(Vec::new());
+    }
+
+    /// Leave the startup: what was raised during it, in order.
+    pub(crate) fn end_startup(&mut self) -> Vec<(Level, String)> {
+        self.startup.take().unwrap_or_default()
+    }
+
+    /// `php_during_module_startup()`, which `php_verror` names the
+    /// origin of a docref by, `PHP Startup` for a native's name.
+    pub(crate) fn at_startup(&self) -> bool {
+        self.startup.is_some()
     }
 
     /// `get_active_function_name`: the declared name of the native being
@@ -14643,6 +14670,55 @@ mod tests {
         assert!(
             out.ends_with("string(1) \"1\"\nbool(false)\nstring(1) \"0\"\n"),
             "{out}"
+        );
+    }
+
+    /// The same `on_modify` at `ZEND_INI_STAGE_STARTUP`, over the value
+    /// the host set (`zend_register_ini_entries_ex`): a value it refuses
+    /// leaves the entry at its default, for `ini_get()` and for what
+    /// `ini_set()` answers was there, and its docref is raised
+    /// first in every request as `PHP Startup: …` at no file; a value
+    /// it takes is the entry's.
+    #[test]
+    fn a_startup_value_the_on_modify_refuses_keeps_the_default() {
+        #[allow(clippy::unnecessary_wraps)] // `OnModify`'s signature
+        fn guarded(req: &mut Request, value: &[u8]) -> Result<bool, crate::api::raising::Thrown> {
+            if value == b"bad" {
+                crate::api::raising::docref(req, Level::Warning, "t.flag refused");
+                return Ok(false);
+            }
+            Ok(true)
+        }
+        let extension = || {
+            crate::api::abi::ExtensionBuilder::default()
+                .ini(vec![php_unit::decl::IniDecl {
+                    name: php_unit::decl::Name(b"t.flag".as_slice().into()),
+                    default: b"1".as_slice().into(),
+                    user: true,
+                    per_dir: true,
+                    system: true,
+                }])
+                .on_modify(b"t.flag", guarded)
+                .build("modified")
+        };
+        let script = "<?php var_dump(ini_get('t.flag'), ini_set('t.flag', '3'));";
+        let refused = Engine::builder()
+            .extensions(&[extension()])
+            .ini("t.flag", "bad")
+            .build()
+            .serve_capture(script, crate::test::Capture::default());
+        assert_eq!(
+            String::from_utf8_lossy(&refused.stdout),
+            "\nWarning: PHP Startup: t.flag refused in Unknown on line 0\nstring(1) \"1\"\nstring(1) \"1\"\n"
+        );
+        let taken = Engine::builder()
+            .extensions(&[extension()])
+            .ini("t.flag", "2")
+            .build()
+            .serve_capture(script, crate::test::Capture::default());
+        assert_eq!(
+            String::from_utf8_lossy(&taken.stdout),
+            "string(1) \"2\"\nstring(1) \"2\"\n"
         );
     }
 

@@ -116,12 +116,13 @@ pub(crate) type EngineStateBuilder =
 /// The `RINIT` function.
 pub(crate) type Rinit = fn(&mut Request) -> Result<(), Thrown>;
 
-/// An ini entry's `on_modify`, php's `PHP_INI_MH` at
-/// `ZEND_INI_STAGE_RUNTIME`: served by `ini_set()` with the new value
-/// before the entry takes it, raising what the entry's handler raises,
-/// and answering whether the value is taken, `false` being php's
-/// `FAILURE`, which leaves the entry as it was and makes `ini_set()`
-/// answer `false`.
+/// An ini entry's `on_modify`, php's `PHP_INI_MH`: served by `ini_set()`
+/// with the new value before the entry takes it
+/// (`ZEND_INI_STAGE_RUNTIME`), and by the engine as it is built with the
+/// value the host set (`ZEND_INI_STAGE_STARTUP`), raising what the
+/// entry's handler raises, and answering whether the value is taken,
+/// `false` being php's `FAILURE`, which leaves the entry as it was, its
+/// default at startup, and makes `ini_set()` answer `false`.
 pub type OnModify = fn(&mut Request, &[u8]) -> Result<bool, Thrown>;
 /// The `MINFO` function: writes the extension's `phpinfo()` table
 /// through [`Request::info_table`].
@@ -313,7 +314,8 @@ impl ExtensionBuilder {
     }
 
     /// The `on_modify` of the ini entry `name`, one of the extension's
-    /// own, served whenever a program changes it with `ini_set()`.
+    /// own, served whenever a program changes it with `ini_set()`, and
+    /// once over the value the host set as the engine is built.
     #[must_use]
     pub fn on_modify(mut self, name: &[u8], handler: OnModify) -> ExtensionBuilder {
         self.on_modify.push((name.to_vec(), handler));

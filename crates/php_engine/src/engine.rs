@@ -25,7 +25,8 @@ use php_heap::{Fatal, FrameRef, Intern, Strings, Zval};
 use php_unit::decl::{ClassDecl, ConstDecl, ConstExpr, FunctionDecl, HookKind, MethodDecl, Name};
 use php_unit::{FramelessEntry, Unit, frameless_table};
 
-use crate::api::abi::{Cache, Entry, Extension, NativeNew, ObjectHandlers, StartupIni};
+use crate::api::abi::{Cache, Entry, Extension, NativeNew, ObjectHandlers, OnModify, StartupIni};
+use crate::api::raising::Level;
 use crate::api::request::{Aside, Ending, ExtensionId, Request};
 use crate::api::values::{ClassId, Value};
 use crate::exec;
@@ -219,6 +220,11 @@ pub(crate) struct Shared {
     /// What reading the host's ini entries wrote to `stderr` in php
     /// ([`Configuration`]), for the host to write before it serves.
     startup_errors: String,
+    /// What the extensions' `on_modify` raised as the engine registered
+    /// their ini entries ([`Engine::register_ini`]), which php shows once
+    /// `php_module_startup` is done and before any request's `RINIT`:
+    /// each request raises it again first, at no file and no line.
+    startup_raised: Vec<(Level, String)>,
     /// `configuration_hash`: what the host's ini text set, before any
     /// entry read it, which `get_cfg_var()` answers from
     /// ([`Request::cfg_entry`]).
@@ -1181,18 +1187,17 @@ impl EngineBuilder {
         }
         let zend_constants = Shared::zend_constants();
         let configuration = Configuration::read(&self.ini_entries, &zend_constants);
+        // An entry with an `on_modify` keeps its default until the
+        // handler has taken the value the host set ([`Engine::register_ini`]).
+        let mut held = Vec::new();
         for (name, value) in configuration.directives() {
+            if on_modify(&extensions, &name).is_some() {
+                held.push((name, value));
+                continue;
+            }
             ini.retain(|(n, _)| *n != name);
             ini.push((name, value));
         }
-        let startup = StartupIni {
-            entries: ini.clone(),
-        };
-        let engine_states = extensions
-            .iter()
-            .filter_map(|e| e.engine_state.as_ref())
-            .map(|build| build(&startup))
-            .collect();
         let (function_modules, functions) = function_table(&extensions, &ini);
         let frameless = frameless_table(functions.iter().map(|(decl, _)| decl));
         let LinkedClasses {
@@ -1228,7 +1233,7 @@ impl EngineBuilder {
             constant_values.push((decl.name.0.clone(), value));
         }
         let sapi_names = crate::constants::host_names(&mut strings);
-        Engine {
+        let mut engine = Engine {
             shared: Arc::new(Shared {
                 extensions,
                 functions,
@@ -1240,11 +1245,12 @@ impl EngineBuilder {
                 methods,
                 trampolines,
                 constants,
-                engine_states,
+                engine_states: Vec::new(),
                 ini,
                 constant_values,
                 sapi_names,
                 startup_errors: configuration.stderr,
+                startup_raised: Vec::new(),
                 configuration: configuration.table,
                 entry: self.entry,
                 reenter: self.reenter,
@@ -1253,8 +1259,20 @@ impl EngineBuilder {
                 strings: Mutex::new(strings),
                 map_ptr_last: AtomicU32::new(0),
             }),
-        }
+        };
+        engine.register_ini(held);
+        engine
     }
+}
+
+/// The `on_modify` an extension of `extensions` gave the entry `name`.
+fn on_modify(extensions: &[Extension], name: &[u8]) -> Option<OnModify> {
+    extensions.iter().find_map(|e| {
+        e.on_modify
+            .iter()
+            .find(|(n, _)| n.as_slice() == name)
+            .map(|(_, handler)| *handler)
+    })
 }
 
 /// The process-wide engine (design §5.14): immutable once built, shared
@@ -1296,6 +1314,53 @@ impl Engine {
                     .unwrap_or_default()
             })
             .collect()
+    }
+
+    /// `zend_register_ini_entries_ex` at `ZEND_INI_STAGE_STARTUP`
+    /// (`Z/Zend/zend_ini.c:238-257`), then each extension's engine state
+    /// as `MINIT` builds its state from the entries: every value the
+    /// host set for an entry with an `on_modify` is handed to it, on a
+    /// request laid for the stage alone, and taken where it answers
+    /// `true`; where it refuses, the entry keeps its default, so
+    /// `ini_get()`, the master value and the startup ini the engine
+    /// states are built from all read the default. What the handlers
+    /// raise is kept for every request to raise first
+    /// ([`Engine::transaction`]), a docref as `PHP Startup: …`. No
+    /// witness reaches it, since a witness sets no startup ini; the
+    /// test below holds it, and `ext/date`'s `date.timezone` is the one
+    /// the phpt corpus reads.
+    fn register_ini(&mut self, held: Vec<(Vec<u8>, Vec<u8>)>) {
+        let mut taken = Vec::new();
+        let mut raised = Vec::new();
+        if !held.is_empty() {
+            let mut req = Request::new(Arc::clone(&self.shared), RequestDescription::default());
+            req.begin_startup();
+            for (name, value) in held {
+                let accepted = on_modify(&self.shared.extensions, &name)
+                    .is_some_and(|handler| matches!(handler(&mut req, &value), Ok(true)));
+                if accepted {
+                    taken.push((name, value));
+                }
+            }
+            raised = req.end_startup();
+        }
+        let Some(shared) = Arc::get_mut(&mut self.shared) else {
+            return;
+        };
+        for (name, value) in taken {
+            shared.ini.retain(|(n, _)| *n != name);
+            shared.ini.push((name, value));
+        }
+        shared.startup_raised = raised;
+        let startup = StartupIni {
+            entries: shared.ini.clone(),
+        };
+        shared.engine_states = shared
+            .extensions
+            .iter()
+            .filter_map(|e| e.engine_state.as_ref())
+            .map(|build| build(&startup))
+            .collect();
     }
 
     /// What php writes to the process's `stderr` while it starts up and
@@ -1503,6 +1568,9 @@ impl Engine {
         // extensions' `RINIT` (`Z/main/main.c:1942`); what can fail is the
         // memory limit, which the first allocation after it meets again.
         let _ = req.hash_environment();
+        for (level, message) in &self.shared.startup_raised {
+            req.note_error_in(*level, message, b"Unknown", 0);
+        }
         for extension in &self.shared.extensions {
             if let Some(rinit) = extension.rinit {
                 let _ = rinit(&mut req);
