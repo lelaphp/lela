@@ -945,8 +945,36 @@ pub(super) const PERIOD_FIELDS: [&[u8]; 7] = [
     b"include_end_date",
 ];
 
+/// `zend_readonly_property_modification_error_ex("DatePeriod", name)`,
+/// what a write to one of the seven fields meets, and a read for a write
+/// (`BP_VAR_W`, `BP_VAR_RW`), whatever the object's class.
+fn readonly(req: &mut Request, name: &[u8]) -> Thrown {
+    let field = String::from_utf8_lossy(name).into_owned();
+    throw(
+        req,
+        "Error",
+        &format!("Cannot modify readonly property DatePeriod::${field}"),
+    )
+}
+
 /// `DatePeriod`'s table: its seven fields read from the period and
 /// refused to writers, as php's virtual properties are.
+///
+/// ```php
+/// $p = new DatePeriod(new DateTime('2000-01-01'), new DateInterval('P1D'), 1);
+/// foreach (['recurrences', 'start', 'interval'] as $f) {
+///     try { $p->$f[] = 1; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+///     try { $r = &$p->$f; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// Cannot modify readonly property DatePeriod::$recurrences
+/// Cannot modify readonly property DatePeriod::$recurrences
+/// Cannot modify readonly property DatePeriod::$start
+/// Cannot modify readonly property DatePeriod::$start
+/// Cannot modify readonly property DatePeriod::$interval
+/// Cannot modify readonly property DatePeriod::$interval
+/// ```
 pub(crate) struct PeriodHandlers;
 
 impl ObjectHandlers for PeriodHandlers {
@@ -979,6 +1007,9 @@ impl ObjectHandlers for PeriodHandlers {
         if !PERIOD_FIELDS.contains(&name) {
             return Std.read_property(req, object, name, read);
         }
+        if read == PropertyRead::Write {
+            return Err(readonly(req, name));
+        }
         let fields = period_fields(req, object)?;
         let mut found = Value::null();
         for (field, value) in fields {
@@ -1000,13 +1031,9 @@ impl ObjectHandlers for PeriodHandlers {
     ) -> Result<(), Thrown> {
         if PERIOD_FIELDS.contains(&name.as_bytes()) {
             req.release(value);
-            let field = String::from_utf8_lossy(name.as_bytes()).into_owned();
+            let thrown = readonly(req, name.as_bytes());
             req.release(Value::string(name));
-            return Err(throw(
-                req,
-                "Error",
-                &format!("Cannot modify readonly property DatePeriod::${field}"),
-            ));
+            return Err(thrown);
         }
         Std.write_property(req, object, name, value)
     }
