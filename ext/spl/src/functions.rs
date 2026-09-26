@@ -291,18 +291,32 @@ fn class_uses(req: &mut Request) -> Result<Value, Thrown> {
 const DEFAULT_EXTENSIONS: &[u8] = b".inc,.php";
 
 /// `spl_autoload(string $class, ?string $file_extensions = null):
-/// void`: the lowered class name with each extension in turn, `\` made
-/// `/`, looked for along the `include_path`. A class whose file no path
-/// finds is nothing, raised or loaded; a file found is included by the
-/// engine's `require`, which the face does not offer an extension yet
-/// (#708), so that arm is php's `Error`.
+/// void`: for each extension in turn, the lowered class name with it,
+/// `\` made `/`, executed as php's default loader executes it
+/// ([`php_ext::call::load_file`]) along the `include_path`, until the
+/// class is declared. A name whose file no path finds is nothing,
+/// raised or loaded.
 ///
 /// ```php
+/// $dir = sys_get_temp_dir() . '/witness_spl_autoload_' . getmypid();
+/// @mkdir("$dir/ns", 0777, true);
+/// file_put_contents("$dir/ns/thing.inc", '<?php namespace Ns; class Thing {} echo "inc\n";');
+/// set_include_path($dir);
 /// spl_autoload('Nowhere\\Missing');
-/// var_dump(class_exists('Nowhere\\Missing', false));
+/// spl_autoload('\\Ns\\Thing');
+/// var_dump(class_exists('Nowhere\\Missing', false), class_exists('Ns\\Thing', false));
+/// spl_autoload_register();
+/// var_dump(spl_autoload_functions());
+/// unlink("$dir/ns/thing.inc"); rmdir("$dir/ns"); rmdir($dir);
 /// ```
 /// ```expect
+/// inc
 /// bool(false)
+/// bool(true)
+/// array(1) {
+///   [0]=>
+///   string(12) "spl_autoload"
+/// }
 /// ```
 fn spl_autoload(req: &mut Request) -> Result<Value, Thrown> {
     crate::arity(req, 1, 2)?;
@@ -327,12 +341,8 @@ fn spl_autoload(req: &mut Request) -> Result<Value, Thrown> {
             .map(|b| if *b == b'\\' { b'/' } else { *b })
             .collect();
         file.extend_from_slice(extension);
-        if req.realpath(&file).is_some() {
-            return Err(php_ext::raising::throw(
-                req,
-                "Error",
-                "spl_autoload(): including the class's file is not yet served by this engine",
-            ));
+        if php_ext::call::load_file(req, &file)? && lookup_class(req, &lowered)?.is_some() {
+            break;
         }
     }
     Ok(Value::null())

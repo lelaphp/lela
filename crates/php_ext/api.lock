@@ -104,6 +104,7 @@ call::instantiate
 call::internal_iterator
 call::iterate
 call::known_method
+call::load_file
 call::lookup_class
 call::lookup_function
 call::mark_lazy_initialized

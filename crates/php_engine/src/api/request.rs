@@ -41,6 +41,7 @@ use crate::output::Output;
 
 mod hooks;
 mod lazy;
+mod load_file;
 mod table;
 mod variables;
 

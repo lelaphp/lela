@@ -977,6 +977,36 @@ pub fn class_unserialize(
     Ok(true)
 }
 
+/// `zend_compile_file` and `zend_execute` over the file at `path`, what
+/// `spl_autoload` does with the class file it finds: the path opened
+/// along the `include_path` with nothing raised where nothing opens it
+/// (`php_stream_open_for_zend_ex` without `REPORT_ERRORS`), a file the
+/// request has included already left alone, and any other added to the
+/// included files, compiled as a `require` (a `ParseError` is the `Err`)
+/// and executed to its end on a frame that shares the calling user
+/// frame's variables and has no `$this` and no scope. `true` once the
+/// file ran; the `Err` is what it threw.
+///
+/// ```php
+/// $dir = sys_get_temp_dir() . '/witness_load_file_' . getmypid();
+/// @mkdir($dir);
+/// file_put_contents("$dir/loaded.php", '<?php class Loaded {} $seen = "set by the file";');
+/// set_include_path($dir);
+/// function load() { spl_autoload('Loaded', '.php'); return $seen ?? 'unset'; }
+/// var_dump(load(), class_exists('Loaded', false));
+/// spl_autoload('Loaded', '.php');
+/// var_dump(count(array_filter(get_included_files(), fn ($f) => str_ends_with($f, 'loaded.php'))));
+/// unlink("$dir/loaded.php"); rmdir($dir);
+/// ```
+/// ```expect
+/// string(15) "set by the file"
+/// bool(true)
+/// int(1)
+/// ```
+pub fn load_file(req: &mut Request, path: &[u8]) -> Result<bool, Thrown> {
+    req.load_file(path)
+}
+
 /// `object_init_ex`: an instance with its declared properties' defaults
 /// and no constructor call, a store entry of the request's heap with
 /// one owner, the caller's; an interface, a trait, an enum or an
