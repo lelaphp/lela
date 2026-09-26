@@ -1432,9 +1432,6 @@ pub(crate) fn to_object(req: &mut Request, value: &Value) -> Result<PhpObject, T
         ValueRef::Array(a) => {
             for (key, entry) in a.snapshot_refs() {
                 let name = key.to_prop_name(req)?;
-                if matches!(key, Key::Str(_)) {
-                    req.addref(&Value::string(name));
-                }
                 req.addref(&entry);
                 object.set_prop(req, name, entry)?;
             }

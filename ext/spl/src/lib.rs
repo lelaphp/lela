@@ -544,9 +544,32 @@ fn members(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thrown> {
     let mut out = PhpArray::new(req)?;
     for (name, value) in Std.get_properties(req, object)? {
         req.addref(&value);
-        out.set(req, Key::from_string(name), value)?;
+        let key = owned_key(req, &Key::from_string(name));
+        out.set(req, key, value)?;
     }
     Ok(out)
+}
+
+/// A view of a key made one the caller may hand to [`PhpArray::set`],
+/// which takes a string key's owner: `zend_string_copy` over a string
+/// key, nothing over an integer one. A dynamic property's name read
+/// through a view survives the table built from it, so an object
+/// serialized twice names it twice.
+///
+/// ```php
+/// #[AllowDynamicProperties] class S extends SplObjectStorage {}
+/// $s = new S; $s->{str_repeat('ab', 3)} = 1;
+/// echo $s->serialize(), "\n", $s->serialize(), "\n";
+/// ```
+/// ```expect
+/// x:i:0;m:a:1:{s:6:"ababab";i:1;}
+/// x:i:0;m:a:1:{s:6:"ababab";i:1;}
+/// ```
+pub(crate) fn owned_key(req: &Request, key: &Key) -> Key {
+    if let Key::Str(s) = key {
+        req.addref(&Value::string(*s));
+    }
+    key.clone()
 }
 
 /// `object_properties_load`: each member written onto the object.

@@ -1534,6 +1534,43 @@ fn defined(req: &mut Request) -> Result<Value, Thrown> {
 ///   resource(%d) of type (Unknown)
 /// }
 /// ```
+///
+/// The walk holds what it walks, as php's does (GH-19801): an array
+/// its own owner across the rows, so an element's `__debugInfo` that
+/// frees the array's last other owner leaves it standing, and an
+/// object's dynamic rows theirs, so a nested `__debugInfo` that unsets
+/// a sibling leaves this walk printing what it had, the next one
+/// printing what is left.
+///
+/// ```php
+/// $a = [new class { function __debugInfo() { global $b; $b->a = null; gc_collect_cycles(); return []; } }];
+/// $b = new stdClass; $b->a = &$a;
+/// var_dump($b);
+/// class D { function __debugInfo() { global $p; unset($p->x, $p->y); return ['d' => 1]; } }
+/// $p = new stdClass; $p->x = new D; $p->y = str_repeat('y', 3);
+/// var_dump($p, $p);
+/// ```
+/// ```expect
+/// object(stdClass)#2 (1) {
+///   ["a"]=>
+///   &array(1) {
+///     [0]=>
+///     object(class@anonymous)#1 (0) {
+///     }
+///   }
+/// }
+/// object(stdClass)#1 (2) {
+///   ["x"]=>
+///   object(D)#3 (1) {
+///     ["d"]=>
+///     int(1)
+///   }
+///   ["y"]=>
+///   string(3) "yyy"
+/// }
+/// object(stdClass)#1 (0) {
+/// }
+/// ```
 fn var_dump(req: &mut Request) -> Result<Value, Thrown> {
     let count = req.argument_count();
     if count == 0 {
@@ -1562,11 +1599,31 @@ fn var_dump(req: &mut Request) -> Result<Value, Thrown> {
 /// itself is unbounded recursion, which is a panic reaching a request
 /// (design §10).
 fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) {
+    dump_held(req, out, value, level, Held::Viewed);
+}
+
+/// Whether the walk printing a value holds an owner of it beside the
+/// names php's own table would count: a row the walk took an owner of
+/// to keep it alive across user code, where php held the table instead.
+#[derive(Clone, Copy)]
+enum Held {
+    Viewed,
+    Owned,
+}
+
+/// [`dump`] over a value the walk may hold an owner of itself, which
+/// php's `COMMON` never sees and so does not count.
+fn dump_held(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize, held: Held) {
     // `COMMON`: php's `&` stands before the value a shared cell holds and
     // before nothing else, so a cell one name holds prints as the value
-    // does; a cell is never in a cell, so this is read once.
+    // does; a cell is never in a cell, so this is read once, less the
+    // walk's own owner where it holds one.
+    let walk = match held {
+        Held::Viewed => 0,
+        Held::Owned => 1,
+    };
     let common = match value.as_ref() {
-        ValueRef::Reference(cell) if cell.heap().refcount() > 1 => "&",
+        ValueRef::Reference(cell) if cell.heap().refcount() > 1 + walk => "&",
         _ => "",
     };
     let value = &value.deref();
@@ -1595,9 +1652,17 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) {
             out.extend_from_slice(b"*RECURSION*\n");
             return;
         }
+        // `GC_ADDREF(myht)` beside the mark (GH-19801): the walk holds an
+        // owner of its own, so an element's `__debugInfo` that gives up
+        // the array's last other owner leaves it standing until the walk
+        // is done, and a write through another name separates rather than
+        // changing the rows under the walk. An immutable array is held by
+        // neither call.
+        let array = *array;
+        req.addref(&Value::array(array));
         array.protect();
         out.extend_from_slice(format!("{common}array({}) {{\n", array.len()).as_bytes());
-        for (key, element) in array {
+        for (key, element) in &array {
             out.extend(std::iter::repeat_n(b' ', level + 1));
             match key {
                 Key::Int(n) => out.extend_from_slice(format!("[{n}]=>\n").as_bytes()),
@@ -1610,6 +1675,9 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) {
             dump(req, out, &element, level + 2);
         }
         array.unprotect();
+        // `GC_DTOR_NO_REF(myht)`: the walk's owner given up, which frees
+        // the array where it was the last.
+        req.release(Value::array(array));
         if level > 1 {
             out.extend(std::iter::repeat_n(b' ', level - 1));
         }
@@ -1706,6 +1774,21 @@ fn dump_object(
     object.heap().unprotect();
 }
 
+/// One row of [`dump_members`]'s walk, as php's rebuilt property table
+/// holds it: a declared slot is an `IS_INDIRECT` read when it prints,
+/// and a dynamic row is a name and a value the walk holds an owner of.
+enum MemberRow {
+    Declared {
+        mangled: Vec<u8>,
+        slot: u32,
+        ty: Option<Type>,
+    },
+    Dynamic {
+        name: PhpString,
+        value: Value,
+    },
+}
+
 /// `php_var_dump`'s object arm over the members themselves, which is
 /// what every class that shows no table of its own shows: the declared
 /// slots in `ce->properties_info_table` order, each name with the
@@ -1732,12 +1815,12 @@ fn dump_members(
     // Each row's key as php's property table holds it, mangled by
     // `zend_mangle_property_name` for a declared one, so every name is
     // printed through the one unmangling below.
-    let mut rows: Vec<(Vec<u8>, Option<Value>, Option<Type>)> = declared
+    let mut rows: Vec<MemberRow> = declared
         .iter()
         .enumerate()
         .filter_map(|(at, (name, declaring, visibility, ty))| {
-            let value = object.slot(u32::try_from(at).unwrap_or(u32::MAX));
-            if value.is_none() && ty.is_none() {
+            let slot = u32::try_from(at).unwrap_or(u32::MAX);
+            if object.slot(slot).is_none() && ty.is_none() {
                 return None;
             }
             let mangled = match visibility {
@@ -1748,9 +1831,18 @@ fn dump_members(
                     [&b"\0"[..], &class, b"\0", name].concat()
                 }
             };
-            Some((mangled, value, ty.clone()))
+            Some(MemberRow::Declared {
+                mangled,
+                slot,
+                ty: ty.clone(),
+            })
         })
         .collect();
+    // `zend_std_get_properties_for`'s `GC_TRY_ADDREF` over the table the
+    // walk reads, which `zend_release_properties` gives up after it: the
+    // dynamic rows are the walk's to hold, so a nested `__debugInfo` that
+    // unsets one leaves this walk printing what it had, as php's
+    // separated table does.
     let dynamic: Vec<(PhpString, Value)> = object.props(req).unwrap_or_default();
     for (name, value) in dynamic {
         if declared
@@ -1759,9 +1851,17 @@ fn dump_members(
         {
             continue;
         }
-        rows.push((name.as_bytes().to_vec(), Some(value), None));
+        req.addref(&Value::string(name));
+        req.addref(&value);
+        rows.push(MemberRow::Dynamic { name, value });
     }
-    let count = rows.iter().filter(|(_, value, _)| value.is_some()).count();
+    let count = rows
+        .iter()
+        .filter(|row| match row {
+            MemberRow::Declared { slot, .. } => object.slot(*slot).is_some(),
+            MemberRow::Dynamic { .. } => true,
+        })
+        .count();
     let class_name = req.class_name(class);
     out.extend_from_slice(
         format!(
@@ -1770,14 +1870,34 @@ fn dump_members(
         )
         .as_bytes(),
     );
-    for (name, value, ty) in rows {
-        dump_property_name(req, out, level, &name);
-        if let Some(value) = value {
-            dump(req, out, &value, level + 2);
-        } else {
-            out.extend(std::iter::repeat_n(b' ', level + 1));
-            let ty = ty.as_ref().map(type_text).unwrap_or_default();
-            out.extend_from_slice(format!("uninitialized({ty})\n").as_bytes());
+    for row in rows {
+        match row {
+            // `IS_INDIRECT`: the slot is read as the row prints, so one a
+            // nested `__debugInfo` unset is skipped, or `uninitialized`
+            // where it is typed, as php's `prop_info` row is. The value is
+            // held while it prints, since its own dump may run user code
+            // that overwrites the slot.
+            MemberRow::Declared { mangled, slot, ty } => match object.slot(slot) {
+                Some(value) => {
+                    dump_property_name(req, out, level, &mangled);
+                    req.addref(&value);
+                    dump_held(req, out, &value, level + 2, Held::Owned);
+                    req.release(value);
+                }
+                None if ty.is_some() => {
+                    dump_property_name(req, out, level, &mangled);
+                    out.extend(std::iter::repeat_n(b' ', level + 1));
+                    let ty = ty.as_ref().map(type_text).unwrap_or_default();
+                    out.extend_from_slice(format!("uninitialized({ty})\n").as_bytes());
+                }
+                None => {}
+            },
+            MemberRow::Dynamic { name, value } => {
+                dump_property_name(req, out, level, name.as_bytes());
+                dump_held(req, out, &value, level + 2, Held::Owned);
+                req.release(value);
+                req.release(Value::string(name));
+            }
         }
     }
     if level > 1 {
