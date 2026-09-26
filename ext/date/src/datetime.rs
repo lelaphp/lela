@@ -1706,14 +1706,27 @@ pub(crate) fn serialize(req: &mut Request) -> Result<Value, Thrown> {
 }
 
 /// `restore_custom_*_properties`: every row of the hash but the class's
-/// own fields written back as a property.
+/// own fields and a reference written back as a property, php's
+/// `update_property` over each name: a private one only where the class
+/// its mangled name names exists, which `zend_lookup_class` finds.
+///
+/// ```php
+/// class I extends DateTimeImmutable { private $p = 0; }
+/// $u = unserialize(str_replace('!', "\0", 'O:1:"I":4:{s:4:"date";s:26:"2023-03-09 17:03:11.000000";s:13:"timezone_type";i:3;s:8:"timezone";s:3:"UTC";s:4:"!K!p";i:2;}'));
+/// var_dump((fn() => $this->p)->call($u));
+/// var_dump(count(get_object_vars(unserialize('O:12:"DateInterval":2:{s:1:"a";s:1:"x";s:1:"b";R:2;}'))));
+/// ```
+/// ```expect
+/// int(0)
+/// int(10)
+/// ```
 pub(super) fn restore_properties(
     req: &mut Request,
     object: PhpObject,
     hash: PhpArray,
     internal: &[&[u8]],
 ) -> Result<(), Thrown> {
-    for (key, value) in hash.snapshot() {
+    for (key, value) in hash.snapshot_refs() {
         let Key::Str(name) = key else {
             continue;
         };
@@ -1721,14 +1734,18 @@ pub(super) fn restore_properties(
             continue;
         }
         let bytes = name.as_bytes();
-        let plain: &[u8] = if bytes.first() == Some(&0) {
-            bytes
-                .iter()
-                .skip(1)
-                .position(|b| *b == 0)
-                .map_or(bytes, |at| &bytes[at + 2..])
-        } else {
-            bytes
+        let plain: &[u8] = match bytes.strip_prefix(b"\0") {
+            Some(rest) => {
+                let Some(at) = rest.iter().position(|b| *b == 0) else {
+                    continue;
+                };
+                let owner = &rest[..at];
+                if owner != b"*" && php_ext::call::lookup_class(req, owner)?.is_none() {
+                    continue;
+                }
+                &rest[at + 1..]
+            }
+            None => bytes,
         };
         let plain = php_ext::values::PhpString::new(req, plain)?;
         req.addref(&value);
