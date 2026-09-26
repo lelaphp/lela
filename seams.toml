@@ -26,7 +26,7 @@ docs = 5000                                # design §10; `docs/**` plus the thr
 harness = 650                              # harness §12 item 6: `.claude/**` and `harness-plugins/**` hand-written, generated types excluded
 lock_packages = 120                        # design §4.1: `Cargo.lock` packages, default features, counted on day 31 with the Cranelift set
 clean_build_release_s = 90                 # design §10: `cargo build --release` from clean on the dev machine
-api_items = 650                            # design §4.4, §4.5: public items of php_ext, measured on api.lock
+api_items = 660                            # design §4.4, §4.5: public items of php_ext, measured on api.lock (revision 34)
 bindings = 15000                           # design §4.1: `ext/*/src/ffi/**` pooled across every extension
 # Lines are non-blank, non-comment, tests excluded (`xtask budget`).
 
@@ -211,7 +211,7 @@ adr = "0003"
 [[seam]]
 name = "unit"
 producer = "php_unit"
-consumers = ["php_compile", "php_engine", "php_macros", "php_jit"]
+consumers = ["php_compile", "php_engine", "php_jit"]
 lock = "unit.lock"
 adr = "0001"
 [[seam]]
@@ -266,11 +266,8 @@ from = "php_compile"
 to = ["php_syntax", "php_unit", "php_heap"]
 [[edge]]
 from = "php_engine"
-to = ["php_compile", "php_unit", "php_heap"]
-[[edge]]
-from = "php_macros"
-to = ["php_engine"]
-adr = "0002"
+to = ["php_compile", "php_unit", "php_heap", "php_macros"]
+adr = "0007"
 [[edge]]
 from = "php_ext"
 to = ["php_engine", "php_macros"]
@@ -352,10 +349,16 @@ deny_pattern = 'php_heap::hot'
 text = "php_heap::hot is for the handlers; api never re-exports it (design §4.4, §10)."
 
 [[rule]]
+id = "ext.no-private"
+scope = "ext/*/src/**"
+deny_pattern = '__private'
+text = "Only a macro expansion names php_ext::__private; an extension's source never does (design §4.4, revision 34)."
+
+[[rule]]
 id = "api.lock-line"
 scope = "crates/php_engine/src/api/**"
 on = "pub"
-text = "A new pub item in api needs its api.lock line in the same commit; api ≤ 400 items."
+text = "A new pub item in api needs its api.lock line in the same commit; api holds to [budget] api_items (design §4.4)."
 [[rule]]
 id = "xtask.lock-line"
 scope = "xtask/src/**"
