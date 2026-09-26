@@ -7,8 +7,8 @@
 
 use php_ext::call::lookup_class;
 use php_ext::coerce::{
-    is_callable as callable, numeric_string, to_array, to_double, to_long, to_object, to_string,
-    truthy,
+    callable_name, is_callable as callable, numeric_string, to_array, to_double, to_long,
+    to_object, to_string, truthy,
 };
 use php_ext::decl::{ConstExpr, FunctionDecl, Parameter, ParameterDefault, Type};
 use php_ext::raising::{Thrown, arg_value_error, throw};
@@ -635,6 +635,27 @@ fn is_numeric(req: &mut Request) -> Result<Value, Thrown> {
 /// string(11) "K::__invoke"
 /// bool(false)
 /// ```
+///
+/// A closure is named by its function, one made of a method with the
+/// method's class before it, and a value of no callable's shape by its
+/// string:
+///
+/// ```php
+/// class K { static function s() {} function __invoke() {} }
+/// foreach ([K::s(...), (new K)(...), strlen(...), function () {}, 5, 1.5, null] as $v) {
+///     is_callable($v, false, $name);
+///     var_dump($name);
+/// }
+/// ```
+/// ```expect
+/// string(4) "K::s"
+/// string(11) "K::__invoke"
+/// string(6) "strlen"
+/// string(%d) "{closure:%s:3}"
+/// string(1) "5"
+/// string(3) "1.5"
+/// string(0) ""
+/// ```
 fn is_callable(req: &mut Request) -> Result<Value, Thrown> {
     argument_count_between(req, 1, 3)?;
     let value = req.argument(1).unwrap_or_default().deref();
@@ -662,60 +683,10 @@ fn is_callable(req: &mut Request) -> Result<Value, Thrown> {
         && let Some(ValueRef::Reference(cell)) = req.argument(3).as_ref().map(Value::as_ref)
     {
         let cell = *cell;
-        let name = callable_name(req, &value);
-        let name = Value::string(PhpString::new(req, &name)?);
+        let name = Value::string(callable_name(req, &value)?);
         cell.set(req, name);
     }
     Ok(Value::bool(answer))
-}
-
-/// The name `zend_get_callable_name_ex` gives a value: a string as it
-/// is, a pair as `Class::method`, a closure by its function's name, an
-/// object as `Class::__invoke`, and anything else as its string.
-fn callable_name(req: &mut Request, value: &Value) -> Vec<u8> {
-    match value.as_ref() {
-        ValueRef::Str(s) => s.as_bytes().to_vec(),
-        ValueRef::Array(array) => {
-            let rows = array.snapshot();
-            if rows.len() != 2 {
-                return b"Array".to_vec();
-            }
-            let class: Vec<u8> = match rows[0].1.as_ref() {
-                ValueRef::Object(object) => class_name(req, object.class()),
-                ValueRef::Str(s) => s.as_bytes().to_vec(),
-                _ => return b"Array".to_vec(),
-            };
-            let method = match rows[1].1.as_ref() {
-                ValueRef::Str(s) => s.as_bytes().to_vec(),
-                _ => return b"Array".to_vec(),
-            };
-            let mut name = class;
-            name.extend_from_slice(b"::");
-            name.extend_from_slice(&method);
-            name
-        }
-        ValueRef::Object(object) => {
-            if let Some(closure) = object.closure(req) {
-                let function = closure.function;
-                return req
-                    .function_decl(function)
-                    .map(|decl| decl.name.0.to_vec())
-                    .unwrap_or_default();
-            }
-            let mut name = class_name(req, object.class());
-            name.extend_from_slice(b"::__invoke");
-            name
-        }
-        _ => to_string(req, value)
-            .map(|s| s.as_bytes().to_vec())
-            .unwrap_or_default(),
-    }
-}
-
-fn class_name(req: &Request, class: php_ext::values::ClassId) -> Vec<u8> {
-    req.class_decl(class)
-        .map(|decl| decl.name.0.to_vec())
-        .unwrap_or_default()
 }
 
 /// Whether the object is an instance of the interface `name`, where the

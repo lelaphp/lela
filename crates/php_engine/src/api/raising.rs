@@ -9,8 +9,6 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_unit::decl::{Attribute, ConstExpr};
-
 use crate::api::request::Request;
 use crate::api::values::{PhpObject, PhpString, Value};
 
@@ -57,6 +55,21 @@ pub fn raise_at(req: &mut Request, level: Level, message: &str, file: &[u8], lin
     req.note_error_in(level, message, file, line);
 }
 
+/// `zend_error` while php starts, before any request (`zend_startup`,
+/// `php_module_startup`, the `ZEND_INI_STAGE_STARTUP` rules of the ini
+/// entries): the message as given, at `Unknown` on line 0, and displayed
+/// past the `php_output` layer, which is not active yet and writes
+/// straight to the host (`php_output_direct`), so it sends no header and
+/// no buffer takes it. An extension's startup rule over the host's ini
+/// values raises through this from the request's `RINIT`, since this
+/// engine raises nothing while it is built; `php_error_docref`'s own
+/// origin there, `PHP Startup: `, is the caller's to write. The session's
+/// `session.use_only_cookies=0` at startup is the witness, in
+/// `ext/session`.
+pub fn startup(req: &mut Request, level: Level, message: &str) {
+    req.note_startup_error(level, message);
+}
+
 /// `E_WARNING`.
 pub fn warning(req: &mut Request, message: &str) {
     raise(req, Level::Warning, message);
@@ -72,72 +85,73 @@ pub fn deprecated(req: &mut Request, message: &str) {
     raise(req, Level::Deprecated, message);
 }
 
-/// `zend_deprecated_constant` (`Z/Zend/zend_execute.c:1994`): the
-/// `E_DEPRECATED` a read of a constant the `#[\Deprecated]` attribute
-/// marks raises, named by the key the table holds it under and worded
-/// with [`deprecation_suffix`] after php's sentence. A constant with
-/// no such attribute raises nothing, which is every constant but
-/// `E_STRICT` today. php's level is `E_USER_DEPRECATED` for a
-/// constant a program defined and `E_DEPRECATED` for an extension's;
-/// a constant a program defined carries no attribute here (#465), so
-/// only the extension's arm is reachable and only it is written.
-pub(crate) fn deprecated_constant(req: &mut Request, key: &[u8]) {
-    let Some(suffix) = deprecation_suffix(req.constant_attributes(key)) else {
-        return;
+/// `zend_deprecated_constant` (`Z/Zend/zend_execute.c:1994`), where the
+/// constant the table holds under `key` carries `CONST_DEPRECATED`:
+/// `Constant K is deprecated`, named by that key, with the `Deprecated`
+/// object's suffix ([`crate::attributes::deprecation_suffix`]), at
+/// `E_USER_DEPRECATED` for a constant a program defined and
+/// `E_DEPRECATED` for an extension's. Every other constant raises
+/// nothing. What a handler threw is the `Err`.
+///
+/// ```php
+/// #[\Deprecated("use NEW", since: "2.0")]
+/// const OLD = 1;
+/// set_error_handler(function ($errno, $errstr) { var_dump($errno === E_USER_DEPRECATED); echo $errstr, "\n"; });
+/// echo OLD, "\n";
+/// ```
+/// ```expect
+/// bool(true)
+/// Constant OLD is deprecated since 2.0, use NEW
+/// 1
+/// ```
+///
+/// The constant is held while its deprecation is worded
+/// (`CONST_PROTECT_RECURSION`), so an attribute naming it reads it
+/// without raising twice:
+///
+/// ```php
+/// #[\Deprecated(TEST)]
+/// const TEST = "from itself";
+/// #[\Deprecated]
+/// const TEST2 = "from another";
+/// #[\Deprecated(TEST2)]
+/// const TEST3 = 1;
+/// TEST;
+/// TEST3;
+/// ```
+/// ```expect
+/// Deprecated: Constant TEST is deprecated, from itself in %s on line 8
+///
+/// Deprecated: Constant TEST2 is deprecated in %s on line 9
+///
+/// Deprecated: Constant TEST3 is deprecated, from another in %s on line 9
+/// ```
+pub(crate) fn deprecated_constant(req: &mut Request, key: &[u8]) -> Result<(), Thrown> {
+    let Some((true, user)) = req.constant_deprecation(key) else {
+        return Ok(());
+    };
+    if !req.protect_recursion(None, key) {
+        return Ok(());
+    }
+    let attributes = req.constant_attributes(key).to_vec();
+    let suffix = crate::attributes::deprecation_suffix(req, &attributes, None);
+    req.unprotect_recursion();
+    let suffix = suffix?;
+    let level = if user {
+        Level::UserDeprecated
+    } else {
+        Level::Deprecated
     };
     let name = String::from_utf8_lossy(key).into_owned();
-    deprecated(req, &format!("Constant {name} is deprecated{suffix}"));
-}
-
-/// `get_deprecation_suffix_from_attribute`
-/// (`Z/Zend/zend_execute.c:1801`): what php prints after `is
-/// deprecated`, ` since <since>` and `, <message>`, each written only
-/// where the argument of that name is a string; `None` where the list
-/// carries no `#[\Deprecated]` at all, which is the raise php does not
-/// make.
-///
-/// php builds the `Deprecated` object to read `$message` and `$since`
-/// off it, which sorts the positional arguments by the constructor's
-/// order; the class is not registered here yet (#464), so the
-/// arguments are read where they were written, by name and, for a
-/// positional one, by the position `Deprecated::__construct(?string
-/// $message = null, ?string $since = null)` gives it.
-pub(crate) fn deprecation_suffix(attributes: &[Attribute]) -> Option<String> {
-    let marked = attributes
-        .iter()
-        .find(|one| one.name.0.eq_ignore_ascii_case(b"Deprecated"))?;
-    let mut message = None;
-    let mut since = None;
-    let mut positional = 0;
-    for argument in &marked.arguments {
-        let written = match &argument.value {
-            ConstExpr::Str(bytes) => Some(String::from_utf8_lossy(bytes).into_owned()),
-            _ => None,
-        };
-        match argument.name.as_ref().map(|name| &*name.0) {
-            Some(b"message") => message = written,
-            Some(b"since") => since = written,
-            Some(_) => {}
-            None => {
-                if positional == 0 {
-                    message = written;
-                } else if positional == 1 {
-                    since = written;
-                }
-                positional += 1;
-            }
-        }
+    raise(
+        req,
+        level,
+        &format!("Constant {name} is deprecated{suffix}"),
+    );
+    if req.is_pending() {
+        return Err(Thrown::of(None));
     }
-    let mut suffix = String::new();
-    if let Some(since) = since.filter(|s| !s.is_empty()) {
-        suffix.push_str(" since ");
-        suffix.push_str(&since);
-    }
-    if let Some(message) = message.filter(|s| !s.is_empty()) {
-        suffix.push_str(", ");
-        suffix.push_str(&message);
-    }
-    Some(suffix)
+    Ok(())
 }
 
 /// `php_error_docref(NULL, level, ...)`: a diagnostic from inside a
@@ -146,8 +160,27 @@ pub(crate) fn deprecation_suffix(attributes: &[Attribute]) -> Option<String> {
 /// (`chr(): Providing a value not in-between 0 and 255 is deprecated,
 /// ...`). The docref itself, php's link into the manual, is off in the
 /// CLI's ini and is not rendered here.
+///
+/// Where no native is active, `php_verror` names the request's phase
+/// instead (`Z/main/main.c:1086-1129`): `PHP Request Startup` in an
+/// extension's `RINIT`, `PHP Request Shutdown` in its `RSHUTDOWN`, and
+/// `Unknown` between them, each with no `()`. The session's write at
+/// request end is the witness, in `ext/session`.
 pub fn docref(req: &mut Request, level: Level, message: &str) {
-    let text = format!("{}(): {message}", req.active_native());
+    // `php_verror`'s origin while modules start (`Z/main/main.c:1087`):
+    // `PHP Startup`, no function and so no `()`.
+    let text = if req.at_startup() {
+        format!("PHP Startup: {message}")
+    } else if req.vm_serving_native() {
+        format!("{}(): {message}", req.active_native())
+    } else {
+        let origin = match req.phase() {
+            crate::api::request::Phase::Startup => "PHP Request Startup",
+            crate::api::request::Phase::Running => "Unknown",
+            crate::api::request::Phase::Shutdown => "PHP Request Shutdown",
+        };
+        format!("{origin}: {message}")
+    };
     raise(req, level, &text);
 }
 

@@ -1513,14 +1513,23 @@ fn open_options(mode: &[u8]) -> Option<std::fs::OpenOptions> {
 /// for a fresh open and `-1` with `NO_SEEK` for one that cannot. The
 /// `Err` is what `php_stream_display_wrapper_errors` prints after
 /// `Failed to open stream: `.
-fn plain_open(req: &Request, path: &[u8], mode: &[u8]) -> Result<PhpStream, String> {
+fn plain_open(req: &mut Request, path: &[u8], mode: &[u8]) -> Result<PhpStream, String> {
     let Some(options) = open_options(mode) else {
         return Err(format!(
             "`{}' is not a valid mode for fopen",
             String::from_utf8_lossy(mode)
         ));
     };
-    let host = req.absolutize(path).0;
+    // `_php_stream_fopen`'s `expand_filepath`, under `CWD_FILEPATH`, which
+    // enters the path in the realpath cache; where it refuses, the host
+    // is handed the path as written and answers for it.
+    let cwd = req.cwd().0.into_os_string().into_encoded_bytes();
+    let host = match req.virtual_file_ex(&cwd, path, crate::api::request::Resolve::FilePath) {
+        Some(expanded) => std::path::PathBuf::from(
+            <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(&expanded),
+        ),
+        None => req.absolutize(path).0,
+    };
     let creates = matches!(mode.first(), Some(b'w' | b'a' | b'x' | b'c'))
         && std::fs::symlink_metadata(&host).is_err();
     let mut file = options.open(&host).map_err(|error| strerror(&error))?;
@@ -2164,6 +2173,30 @@ impl Request {
         mode: &[u8],
         use_include_path: bool,
     ) -> Result<Option<Stream>, Thrown> {
+        self.open_wrapper_ex(path, mode, use_include_path, false)
+    }
+
+    /// `_php_stream_open_wrapper_ex` under `REPORT_ERRORS | STREAM_USE_URL`,
+    /// what `get_headers` opens with: a wrapper located that is no URL
+    /// wrapper, the plain files one, `php://` and a registered one not
+    /// flagged `STREAM_IS_URL` among them, is php's warning that the
+    /// function may only be used against URLs, and nothing is opened
+    /// (`Z/main/streams/streams.c:2278`).
+    pub(crate) fn open_url_wrapper(
+        &mut self,
+        path: &[u8],
+        mode: &[u8],
+    ) -> Result<Option<Stream>, Thrown> {
+        self.open_wrapper_ex(path, mode, false, true)
+    }
+
+    fn open_wrapper_ex(
+        &mut self,
+        path: &[u8],
+        mode: &[u8],
+        use_include_path: bool,
+        use_url: bool,
+    ) -> Result<Option<Stream>, Thrown> {
         if path.is_empty() {
             return Err(throw(self, "ValueError", "Path must not be empty"));
         }
@@ -2172,6 +2205,14 @@ impl Request {
             to_open = resolved;
         }
         let (wrapper, path_to_open) = self.locate_wrapper(&to_open);
+        if use_url && !matches!(&wrapper, Located::Space(user) if user.is_url) {
+            let text = format!(
+                "{}(): This function may only be used against URLs",
+                self.active_native()
+            );
+            warning(self, &text);
+            return Ok(None);
+        }
         let (label, opened) = match wrapper {
             Located::Plain => (
                 PLAIN_FILES,

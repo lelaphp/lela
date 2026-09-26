@@ -7,7 +7,8 @@
 use php_ext::abi::ExtensionBuilder;
 use php_ext::decl::{
     Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind, ConstExpr,
-    EnumBacking, MethodDecl, Name, Parameter, ParameterDefault, PropertyDecl, Type, Visibility,
+    EnumBacking, MethodDecl, Name, Parameter, ParameterDefault, PropertyDecl, PropertyHooks, Type,
+    Visibility,
 };
 
 use crate::args::{class, d, method, nullable, p, str_default, union, untyped};
@@ -217,17 +218,16 @@ fn interface() -> ClassDecl {
     let mut decl = class_decl("DateTimeInterface", ClassKind::Interface, None, &[]);
     decl.constants = FORMATS
         .iter()
-        .map(|(name, _)| ClassConstDecl {
+        // `@cvalue DATE_FORMAT_*`: the format itself, as the stub's
+        // generated arginfo writes it, and no read of the `DATE_*`
+        // constant, whose own deprecation a read would raise.
+        .map(|(name, format)| ClassConstDecl {
             attributes: if *name == "RFC7231" {
                 rfc7231_deprecation()
             } else {
                 Vec::new()
             },
-            ..constant(
-                name,
-                Type::String,
-                ConstExpr::Constant(Name(format!("DATE_{name}").into_bytes().into())),
-            )
+            ..constant(name, Type::String, ConstExpr::Str(format.as_bytes().into()))
         })
         .collect();
     let abstract_ = |mut decl: MethodDecl| {
@@ -570,7 +570,8 @@ fn unknown(name: &str) -> Parameter {
 }
 
 /// One of `DatePeriod`'s seven properties, typed and without a default,
-/// which its handlers answer in place of a slot (php's `ZEND_ACC_VIRTUAL`).
+/// which its handlers answer in place of a slot: php's `ZEND_ACC_VIRTUAL`
+/// with no hooks, the stub's `@virtual`.
 fn period_property(name: &str, ty: Type) -> PropertyDecl {
     PropertyDecl {
         name: Name(name.as_bytes().into()),
@@ -584,15 +585,18 @@ fn period_property(name: &str, ty: Type) -> PropertyDecl {
         default: None,
         attributes: Vec::new(),
         doc_comment: None,
-        hooks: None,
+        hooks: Some(Box::new(PropertyHooks {
+            get: None,
+            set: None,
+            is_abstract: false,
+            is_virtual: true,
+        })),
     }
 }
 
-/// `class DatePeriod`. php declares it `implements IteratorAggregate`
-/// with `getIterator()`; the engine declares neither `Traversable` nor
-/// `InternalIterator` yet, so both wait for them (#714).
+/// `class DatePeriod implements IteratorAggregate`.
 fn date_period() -> (ClassDecl, Vec<(MethodDecl, Entry)>) {
-    let mut decl = class_decl("DatePeriod", ClassKind::Class, None, &[]);
+    let mut decl = class_decl("DatePeriod", ClassKind::Class, None, &["IteratorAggregate"]);
     decl.constants = vec![
         constant(
             "EXCLUDE_START_DATE",
@@ -656,6 +660,10 @@ fn date_period() -> (ClassDecl, Vec<(MethodDecl, Entry)>) {
         (unserialize(), period::unserialize),
         (wakeup(), period::wakeup),
         (set_state("DatePeriod"), period::set_state),
+        (
+            real("getIterator", vec![], class("Iterator")),
+            period::get_iterator,
+        ),
     ];
     (decl, methods)
 }

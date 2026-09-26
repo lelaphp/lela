@@ -13,6 +13,8 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 use std::any::Any;
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -23,7 +25,8 @@ use php_heap::{Fatal, FrameRef, Intern, Strings, Zval};
 use php_unit::decl::{ClassDecl, ConstDecl, ConstExpr, FunctionDecl, HookKind, MethodDecl, Name};
 use php_unit::{FramelessEntry, Unit, frameless_table};
 
-use crate::api::abi::{Cache, Entry, Extension, NativeNew, ObjectHandlers, StartupIni};
+use crate::api::abi::{Cache, Entry, Extension, NativeNew, ObjectHandlers, OnModify, StartupIni};
+use crate::api::raising::Level;
 use crate::api::request::{Aside, Ending, ExtensionId, Request};
 use crate::api::values::{ClassId, Value};
 use crate::exec;
@@ -176,6 +179,11 @@ pub(crate) struct Shared {
     /// `functions`: the extension that declared it, or none for one the
     /// engine declares itself.
     pub(crate) function_modules: Vec<Option<ExtensionId>>,
+    /// Each native's `ZEND_ACC_DEPRECATED` and `ZEND_ACC_NODISCARD`, one
+    /// row per row of `functions`, decoded from its declaration's
+    /// attributes once, as `zend_register_functions` copies the stub's
+    /// flags onto the `zend_internal_function`.
+    pub(crate) function_flags: Vec<crate::attributes::Flags>,
     /// `zend_flf_functions` (`Z/Zend/zend_API.c:3115-3133`): the natives
     /// with a frameless entry, one row per arity in registration order,
     /// which a `FRAMELESS_ICALL_*`'s `extended_value` indexes. Computed
@@ -208,8 +216,10 @@ pub(crate) struct Shared {
     ini: Vec<(Vec<u8>, Vec<u8>)>,
     /// The constants' values, the string ones interned into the engine's
     /// table as `REGISTER_STRING_CONSTANT` interns php's at `MINIT`, so
-    /// a request reading one allocates nothing and counts nothing.
-    constant_values: Vec<(Box<[u8]>, Zval)>,
+    /// a request reading one allocates nothing and counts nothing;
+    /// beside each, its `CONST_DEPRECATED`, decoded once from the
+    /// declaration's attributes as `gen_stub.php` writes it.
+    constant_values: Vec<(Box<[u8]>, Zval, crate::attributes::Flags)>,
     /// `PHP_SAPI`'s value under each host's name, interned at build with
     /// the other constants, so a request that reads the name its host
     /// gave it allocates nothing ([`crate::constants::HOSTS`]).
@@ -217,6 +227,15 @@ pub(crate) struct Shared {
     /// What reading the host's ini entries wrote to `stderr` in php
     /// ([`Configuration`]), for the host to write before it serves.
     startup_errors: String,
+    /// What the extensions' `on_modify` raised as the engine registered
+    /// their ini entries ([`Engine::register_ini`]), which php shows once
+    /// `php_module_startup` is done and before any request's `RINIT`:
+    /// each request raises it again first, at no file and no line.
+    startup_raised: Vec<(Level, String)>,
+    /// `configuration_hash`: what the host's ini text set, before any
+    /// entry read it, which `get_cfg_var()` answers from
+    /// ([`Request::cfg_entry`]).
+    configuration: Vec<(Vec<u8>, Configured)>,
     entry: Loop,
     /// The same loop for a serving inside a serving, `zend_call_function`
     /// over a user function: what [`Request::serve_user`] enters a
@@ -273,6 +292,9 @@ pub(crate) struct NativeMethod {
     pub(crate) class: ClassId,
     pub(crate) at: MethodAt,
     pub(crate) entry: Entry,
+    /// Its `ZEND_ACC_DEPRECATED` and `ZEND_ACC_NODISCARD`, decoded from
+    /// the declaration's attributes where the method is linked.
+    pub(crate) flags: crate::attributes::Flags,
 }
 
 /// Where a native method's declaration stands: among the class's own,
@@ -314,6 +336,7 @@ fn link_enum_methods(decl: &mut ClassDecl, class: ClassId, methods: &mut Vec<Nat
             class,
             at: MethodAt::Declared(index),
             entry: served.entry(),
+            flags: crate::attributes::Flags::default(),
         });
     }
 }
@@ -357,6 +380,7 @@ fn link_classes(extensions: &[Extension]) -> LinkedClasses {
                 class,
                 at: MethodAt::Declared(index),
                 entry: *entry,
+                flags: crate::attributes::Flags::of(&method.function.attributes),
             });
         }
         link_enum_methods(&mut decl, class, &mut methods);
@@ -419,6 +443,7 @@ fn link_trampolines(
             class: ClassId(u32::try_from(at).unwrap_or(u32::MAX)),
             at: MethodAt::Trampoline(index),
             entry,
+            flags: crate::attributes::Flags::of(&method.function.attributes),
         });
         trampolines.push(method);
     }
@@ -430,6 +455,7 @@ fn link_trampolines(
             class: ClassId(0),
             at: MethodAt::ParentHook { kind, at: index },
             entry,
+            flags: crate::attributes::Flags::of(&method.function.attributes),
         });
         trampolines.push(method);
     }
@@ -641,6 +667,14 @@ impl Shared {
         &self.ini
     }
 
+    /// `cfg_get_entry`: the row of `configuration_hash` under `name`.
+    pub(crate) fn configured(&self, name: &[u8]) -> Option<&Configured> {
+        self.configuration
+            .iter()
+            .find(|(n, _)| n.as_slice() == name)
+            .map(|(_, entry)| entry)
+    }
+
     /// The value of the constant `name` as the bundle declared it, or as
     /// the engine's own table has it: a value nothing owns, since the
     /// string ones are the engine's interned strings.
@@ -664,8 +698,17 @@ impl Shared {
     pub(crate) fn constant(&self, name: &[u8]) -> Option<Value> {
         self.constant_values
             .iter()
-            .find(|(n, _)| n.as_ref() == name)
-            .map(|(_, z)| exec::value_of(*z))
+            .find(|(n, _, _)| n.as_ref() == name)
+            .map(|(_, z, _)| exec::value_of(*z))
+    }
+
+    /// `CONST_DEPRECATED` of an extension's or the engine's constant,
+    /// none for a name no extension declared.
+    pub(crate) fn constant_deprecated(&self, name: &[u8]) -> Option<bool> {
+        self.constant_values
+            .iter()
+            .find(|(n, _, _)| n.as_ref() == name)
+            .map(|(_, _, flags)| flags.deprecated)
     }
 }
 
@@ -697,7 +740,7 @@ impl Shared {
 /// string(0) ""
 /// string(10) "ISO-8859-1"
 /// ```
-const CORE_INI: [(&str, &str); 44] = [
+const CORE_INI: [(&str, &str); 56] = [
     ("short_open_tag", "1"),
     ("fatal_error_backtraces", "1"),
     ("precision", "14"),
@@ -761,6 +804,28 @@ const CORE_INI: [(&str, &str); 44] = [
     ("syslog.facility", "LOG_USER"),
     ("syslog.ident", "php"),
     ("syslog.filter", "no-ctrl"),
+    // `main.c`'s `highlight.*`, `php_get_highlight_struct`'s colours,
+    // which `highlight_string()`, `highlight_file()` and `php -s` read
+    // (`Z/main/main.c:763-767`, `Z/main/php_ini.h`'s `HL_*_COLOR`).
+    ("highlight.comment", "#FF8000"),
+    ("highlight.default", "#0000BB"),
+    ("highlight.html", "#000000"),
+    ("highlight.keyword", "#007700"),
+    ("highlight.string", "#DD0000"),
+    // `ignore_user_abort`, `PG(ignore_user_abort)`, and the two `dl()`
+    // reads, `enable_dl` and `extension_dir`, `PHP_INI_SYSTEM`.
+    ("ignore_user_abort", "0"),
+    // `realpath_cache_size` and `realpath_cache_ttl`, `PHP_INI_SYSTEM`,
+    // the realpath cache's limit and time to live (`crate::virtual_cwd`).
+    ("realpath_cache_size", "4096K"),
+    // `arg_separator.input` and `arg_separator.output`, `PHP_INI_ALL`:
+    // what `parse_str` splits on and what the URL rewriter and
+    // `http_build_query` join with.
+    ("arg_separator.input", "&"),
+    ("arg_separator.output", "&"),
+    ("realpath_cache_ttl", "120"),
+    ("enable_dl", "1"),
+    ("extension_dir", crate::constants::PHP_EXTENSION_DIR),
 ];
 
 /// `php_ini_builder_define`'s line (`Z/main/php_ini_builder.c:63-81`)
@@ -793,8 +858,37 @@ fn define_line(entries: &mut Vec<u8>, name: &str, value: &str) {
 /// the entries before it kept, and `ini_error` writes its line to the
 /// process's `stderr`, the string's file named `Unknown`.
 struct Configuration {
-    table: Vec<(Vec<u8>, Vec<u8>)>,
+    table: Vec<(Vec<u8>, Configured)>,
     stderr: String,
+}
+
+/// One row of php's `configuration_hash`, what `cfg_get_entry` finds
+/// and `get_cfg_var()` answers: a string `name=value` set, or the array
+/// `name[]=value` and `name[offset]=value` lines built, whose values
+/// are strings (`php_ini_parser_cb`, `Z/main/php_ini.c:199-258`).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Configured {
+    Str(Vec<u8>),
+    Array(Vec<(ConfiguredKey, Vec<u8>)>),
+}
+
+/// A key of such an array, as `zend_symtable_update` makes it: an
+/// offset that reads as a canonical integer is that integer.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ConfiguredKey {
+    Index(i64),
+    Name(Vec<u8>),
+}
+
+impl Configured {
+    /// The string the entry holds; an array has none, and no directive
+    /// reads one.
+    fn text(&self) -> Option<&[u8]> {
+        match self {
+            Configured::Str(bytes) => Some(bytes),
+            Configured::Array(_) => None,
+        }
+    }
 }
 
 impl Configuration {
@@ -815,6 +909,13 @@ impl Configuration {
             stderr,
         }
     }
+
+    /// The directives the table sets, its strings, in the order first set.
+    fn directives(&self) -> impl Iterator<Item = (Vec<u8>, Vec<u8>)> + '_ {
+        self.table
+            .iter()
+            .filter_map(|(name, entry)| entry.text().map(|text| (name.clone(), text.to_vec())))
+    }
 }
 
 /// The grammar's host at startup: Zend's own constants and `main`'s,
@@ -823,7 +924,7 @@ impl Configuration {
 /// process's environment; and `php_ini_parser_cb` over the table.
 struct Startup<'c> {
     constants: &'c [ConstDecl],
-    table: Vec<(Vec<u8>, Vec<u8>)>,
+    table: Vec<(Vec<u8>, Configured)>,
     /// `is_special_section`: the last section header was `[PATH…]` or
     /// `[HOST…]`, where `extension=` is an entry like any other.
     special: bool,
@@ -853,7 +954,7 @@ impl crate::ini_syntax::Host for Startup<'_> {
         self.table
             .iter()
             .find(|(n, _)| n.as_slice() == name)
-            .map(|(_, value)| value.clone())
+            .and_then(|(_, value)| value.text().map(<[u8]>::to_vec))
     }
 
     fn env(&mut self, name: &[u8]) -> Option<Vec<u8>> {
@@ -887,17 +988,81 @@ impl crate::ini_syntax::Host for Startup<'_> {
                 if self.diverted || (loads && !self.special) {
                     return;
                 }
-                let value = ini_text(&value);
+                let value = Configured::Str(ini_text(&value));
                 match self.table.iter_mut().find(|(n, _)| *n == label) {
                     Some(entry) => entry.1 = value,
                     None => self.table.push((label, value)),
                 }
             }
-            // A bare label sets nothing, and an entry with an offset is an
-            // array, which no directive reads.
-            IniEvent::Entry(_, None) | IniEvent::PopEntry(..) => {}
+            // `ZEND_INI_PARSER_POP_ENTRY`: the array under the label,
+            // made where the label holds none, the value placed at the
+            // offset or appended where the offset is empty.
+            IniEvent::PopEntry(label, value, offset) => {
+                if self.diverted {
+                    return;
+                }
+                let label = ini_text(&label);
+                let (value, offset) = (ini_text(&value), ini_text(&offset));
+                let at = self
+                    .table
+                    .iter()
+                    .position(|(n, _)| *n == label)
+                    .unwrap_or_else(|| {
+                        self.table.push((label, Configured::Array(Vec::new())));
+                        self.table.len() - 1
+                    });
+                let entry = &mut self.table[at].1;
+                if !matches!(entry, Configured::Array(_)) {
+                    *entry = Configured::Array(Vec::new());
+                }
+                if let Configured::Array(rows) = entry {
+                    configured_insert(rows, &offset, value);
+                }
+            }
+            // A bare label sets nothing.
+            IniEvent::Entry(_, None) => {}
         }
     }
+}
+
+/// `zend_symtable_update` for a non-empty offset, else
+/// `zend_hash_next_index_insert`, over one array of the table.
+fn configured_insert(rows: &mut Vec<(ConfiguredKey, Vec<u8>)>, offset: &[u8], value: Vec<u8>) {
+    let key = if offset.is_empty() {
+        let next = rows
+            .iter()
+            .filter_map(|(key, _)| match key {
+                ConfiguredKey::Index(n) => Some(n.saturating_add(1)),
+                ConfiguredKey::Name(_) => None,
+            })
+            .max()
+            .unwrap_or(0)
+            .max(0);
+        ConfiguredKey::Index(next)
+    } else {
+        match canonical_integer(offset) {
+            Some(n) => ConfiguredKey::Index(n),
+            None => ConfiguredKey::Name(offset.to_vec()),
+        }
+    };
+    match rows.iter_mut().find(|(k, _)| *k == key) {
+        Some(row) => row.1 = value,
+        None => rows.push((key, value)),
+    }
+}
+
+/// `ZEND_HANDLE_NUMERIC_STR`: the offset as an integer where it is one
+/// written canonically, no leading zero, no `+`, within `i64`.
+fn canonical_integer(bytes: &[u8]) -> Option<i64> {
+    let digits = bytes.strip_prefix(b"-").unwrap_or(bytes);
+    let canonical = !digits.is_empty()
+        && digits.iter().all(u8::is_ascii_digit)
+        && (digits == b"0" || digits[0] != b'0')
+        && bytes != b"-0";
+    if !canonical {
+        return None;
+    }
+    std::str::from_utf8(bytes).ok()?.parse().ok()
 }
 
 /// A label or a value of the normal scanner, which types nothing, so
@@ -914,60 +1079,12 @@ fn ini_text(value: &IniValue) -> Vec<u8> {
 /// the compiler left it.
 const BEFORE_OPTIMIZER: i64 = 0x1_0000;
 
-/// `zend_ini_parse_quantity` (`Z/Zend/zend_ini.c:613-841`), which
-/// `OnUpdateLong` reads every whole-number ini entry by: leading and
-/// trailing whitespace ignored, an optional sign, then either a base
-/// prefix — `0x`, `0o`, `0b`, or a leading `0` before a digit, which is
-/// octal as `strtoul` with base zero reads it — or decimal digits, and
-/// last an optional `K`, `M` or `G` multiplier with whitespace allowed
-/// before it. Every shape php interprets as zero for backward
-/// compatibility is zero here: no digit after the sign, no digit after
-/// the prefix, an unknown prefix. What php says about those it says as an
-/// `E_WARNING` from `zend_ini_parse_quantity_warn`, which no ini entry in
-/// this engine raises yet; that gap is one entry's and not this
-/// function's.
+/// `zend_ini_parse_quantity`, which `OnUpdateLong` reads every
+/// whole-number ini entry by: `crate::ini_quantity`, the one reading
+/// of it, whose sentence for a shape php interprets for backwards
+/// compatibility no entry of this engine raises yet.
 fn ini_quantity(value: &[u8]) -> i64 {
-    let text = String::from_utf8_lossy(value);
-    let text = text.trim_matches([' ', '\t', '\n', '\r', '\x0b', '\x0c']);
-    let (negative, rest) = match text.as_bytes().first() {
-        Some(b'+') => (false, &text[1..]),
-        Some(b'-') => (true, &text[1..]),
-        _ => (false, text),
-    };
-    if !rest.as_bytes().first().is_some_and(u8::is_ascii_digit) {
-        return 0;
-    }
-    // php reads the multiplier off the last byte of the whole value and
-    // the digits off what `strtoul` stopped at, so `0k` is a multiplier
-    // over no prefix and `0x10` is a prefix over no multiplier.
-    let (digits, factor) = match rest.as_bytes().last().copied() {
-        Some(b'g' | b'G') => (&rest[..rest.len() - 1], 1i64 << 30),
-        Some(b'm' | b'M') => (&rest[..rest.len() - 1], 1i64 << 20),
-        Some(b'k' | b'K') => (&rest[..rest.len() - 1], 1i64 << 10),
-        _ => (rest, 1),
-    };
-    let digits = digits.trim_end_matches([' ', '\t', '\n', '\r', '\x0b', '\x0c']);
-    let (digits, radix) = match digits.as_bytes() {
-        [b'0', b'x' | b'X', rest @ ..] => (rest, 16),
-        [b'0', b'o' | b'O', rest @ ..] => (rest, 8),
-        [b'0', b'b' | b'B', rest @ ..] => (rest, 2),
-        [b'0', rest @ ..] if !rest.is_empty() => (rest, 8),
-        rest => (rest, 10),
-    };
-    let taken: String = String::from_utf8_lossy(digits)
-        .chars()
-        .take_while(|c| c.is_digit(radix))
-        .collect();
-    // `strtoul` stopping where it started is php's "no valid leading
-    // digits", which is zero; stopping at the end of what it can hold is
-    // the overflow it keeps the result of.
-    if taken.is_empty() {
-        return 0;
-    }
-    let magnitude = i64::from_str_radix(&taken, radix)
-        .unwrap_or(i64::MAX)
-        .saturating_mul(factor);
-    if negative { -magnitude } else { magnitude }
+    crate::ini_quantity::parse(value).0
 }
 
 /// `zend_disable_functions` (`Z/Zend/zend_API.c:3668-3710`): the names
@@ -1093,19 +1210,22 @@ impl EngineBuilder {
         }
         let zend_constants = Shared::zend_constants();
         let configuration = Configuration::read(&self.ini_entries, &zend_constants);
-        for (name, value) in configuration.table {
+        // An entry with an `on_modify` keeps its default until the
+        // handler has taken the value the host set ([`Engine::register_ini`]).
+        let mut held = Vec::new();
+        for (name, value) in configuration.directives() {
+            if on_modify(&extensions, &name).is_some() {
+                held.push((name, value));
+                continue;
+            }
             ini.retain(|(n, _)| *n != name);
             ini.push((name, value));
         }
-        let startup = StartupIni {
-            entries: ini.clone(),
-        };
-        let engine_states = extensions
-            .iter()
-            .filter_map(|e| e.engine_state.as_ref())
-            .map(|build| build(&startup))
-            .collect();
         let (function_modules, functions) = function_table(&extensions, &ini);
+        let function_flags = functions
+            .iter()
+            .map(|(decl, _)| crate::attributes::Flags::of(&decl.attributes))
+            .collect();
         let frameless = frameless_table(functions.iter().map(|(decl, _)| decl));
         let LinkedClasses {
             classes,
@@ -1137,14 +1257,16 @@ impl EngineBuilder {
                 },
                 _ => continue,
             };
-            constant_values.push((decl.name.0.clone(), value));
+            let flags = crate::attributes::Flags::of(&decl.attributes);
+            constant_values.push((decl.name.0.clone(), value, flags));
         }
         let sapi_names = crate::constants::host_names(&mut strings);
-        Engine {
+        let mut engine = Engine {
             shared: Arc::new(Shared {
                 extensions,
                 functions,
                 function_modules,
+                function_flags,
                 frameless,
                 classes,
                 handlers,
@@ -1152,11 +1274,13 @@ impl EngineBuilder {
                 methods,
                 trampolines,
                 constants,
-                engine_states,
+                engine_states: Vec::new(),
                 ini,
                 constant_values,
                 sapi_names,
                 startup_errors: configuration.stderr,
+                startup_raised: Vec::new(),
+                configuration: configuration.table,
                 entry: self.entry,
                 reenter: self.reenter,
                 resume: self.resume,
@@ -1164,8 +1288,20 @@ impl EngineBuilder {
                 strings: Mutex::new(strings),
                 map_ptr_last: AtomicU32::new(0),
             }),
-        }
+        };
+        engine.register_ini(held);
+        engine
     }
+}
+
+/// The `on_modify` an extension of `extensions` gave the entry `name`.
+fn on_modify(extensions: &[Extension], name: &[u8]) -> Option<OnModify> {
+    extensions.iter().find_map(|e| {
+        e.on_modify
+            .iter()
+            .find(|(n, _)| n.as_slice() == name)
+            .map(|(_, handler)| *handler)
+    })
 }
 
 /// The process-wide engine (design §5.14): immutable once built, shared
@@ -1207,6 +1343,53 @@ impl Engine {
                     .unwrap_or_default()
             })
             .collect()
+    }
+
+    /// `zend_register_ini_entries_ex` at `ZEND_INI_STAGE_STARTUP`
+    /// (`Z/Zend/zend_ini.c:238-257`), then each extension's engine state
+    /// as `MINIT` builds its state from the entries: every value the
+    /// host set for an entry with an `on_modify` is handed to it, on a
+    /// request laid for the stage alone, and taken where it answers
+    /// `true`; where it refuses, the entry keeps its default, so
+    /// `ini_get()`, the master value and the startup ini the engine
+    /// states are built from all read the default. What the handlers
+    /// raise is kept for every request to raise first
+    /// ([`Engine::transaction`]), a docref as `PHP Startup: …`. No
+    /// witness reaches it, since a witness sets no startup ini; the
+    /// test below holds it, and `ext/date`'s `date.timezone` is the one
+    /// the phpt corpus reads.
+    fn register_ini(&mut self, held: Vec<(Vec<u8>, Vec<u8>)>) {
+        let mut taken = Vec::new();
+        let mut raised = Vec::new();
+        if !held.is_empty() {
+            let mut req = Request::new(Arc::clone(&self.shared), RequestDescription::default());
+            req.begin_startup();
+            for (name, value) in held {
+                let accepted = on_modify(&self.shared.extensions, &name)
+                    .is_some_and(|handler| matches!(handler(&mut req, &value), Ok(true)));
+                if accepted {
+                    taken.push((name, value));
+                }
+            }
+            raised = req.end_startup();
+        }
+        let Some(shared) = Arc::get_mut(&mut self.shared) else {
+            return;
+        };
+        for (name, value) in taken {
+            shared.ini.retain(|(n, _)| *n != name);
+            shared.ini.push((name, value));
+        }
+        shared.startup_raised = raised;
+        let startup = StartupIni {
+            entries: shared.ini.clone(),
+        };
+        shared.engine_states = shared
+            .extensions
+            .iter()
+            .filter_map(|e| e.engine_state.as_ref())
+            .map(|build| build(&startup))
+            .collect();
     }
 
     /// What php writes to the process's `stderr` while it starts up and
@@ -1358,7 +1541,7 @@ impl Engine {
     /// Fatal error: The (unset) cast is no longer supported in %s on line 3
     /// ```
     pub fn serve(&self, description: RequestDescription, sink: &mut dyn OutputSink) -> Observables {
-        self.transaction(description, sink, true)
+        self.transaction(description, sink, Work::Serve)
     }
 
     /// `php_lint_script` under the CLI's `-l` (`Z/main/main.c:2779-2798`,
@@ -1370,17 +1553,37 @@ impl Engine {
     /// not, whatever the compiler warned of; the two sentences `do_cli`
     /// prints around it are the host's, read off that status.
     pub fn lint(&self, description: RequestDescription, sink: &mut dyn OutputSink) -> Observables {
-        self.transaction(description, sink, false)
+        self.transaction(description, sink, Work::Lint)
     }
 
-    /// The one transaction behind [`Engine::serve`] and [`Engine::lint`]:
-    /// `run` says whether the compiled unit is served on a frame or, as
-    /// `php_lint_script` does, dropped once compiled.
+    /// The CLI's `-s`, `PHP_CLI_MODE_HIGHLIGHT` (`Z/sapi/cli/php_cli.c:969-977`):
+    /// the request started, the program read as `open_file_for_scanning`
+    /// reads it and written as `zend_highlight` writes it under the
+    /// request's `highlight.*` entries, and the request shut down with no
+    /// frame pushed and nothing compiled.
+    pub fn highlight(
+        &self,
+        description: RequestDescription,
+        sink: &mut dyn OutputSink,
+    ) -> Observables {
+        self.transaction(description, sink, Work::Highlight)
+    }
+
+    /// The CLI's `-w`, `PHP_CLI_MODE_STRIP` (`Z/sapi/cli/php_cli.c:963-968`):
+    /// as [`Engine::highlight`], with the program written as `zend_strip`
+    /// writes it.
+    pub fn strip(&self, description: RequestDescription, sink: &mut dyn OutputSink) -> Observables {
+        self.transaction(description, sink, Work::Strip)
+    }
+
+    /// The one transaction behind [`Engine::serve`], [`Engine::lint`],
+    /// [`Engine::highlight`] and [`Engine::strip`]: `work` says what the
+    /// program is for once the request has started.
     fn transaction(
         &self,
         description: RequestDescription,
         sink: &mut dyn OutputSink,
-        run: bool,
+        work: Work,
     ) -> Observables {
         let source = description.source.clone();
         let cwd = description.cwd.clone();
@@ -1394,6 +1597,9 @@ impl Engine {
         // extensions' `RINIT` (`Z/main/main.c:1942`); what can fail is the
         // memory limit, which the first allocation after it meets again.
         let _ = req.hash_environment();
+        for (level, message) in &self.shared.startup_raised {
+            req.note_error_in(*level, message, b"Unknown", 0);
+        }
         for extension in &self.shared.extensions {
             if let Some(rinit) = extension.rinit {
                 let _ = rinit(&mut req);
@@ -1407,12 +1613,27 @@ impl Engine {
             let _ = req.arm(php_unit::AutoGlobal::Server);
         }
         let _ = req.register_file_handles();
+        req.enter_phase(crate::api::request::Phase::Running);
         // Where the unit's constant strings live is where the unit
         // lives (design §5.2): a file's unit is published into the
         // engine's table and shared by every request that serves it,
         // and a source the host handed over is this request's alone,
         // interned into this request's own memory and gone with it, as
         // php holds what it compiles for `-r` and for `eval`.
+        if matches!(work, Work::Highlight | Work::Strip) {
+            // `open_file_for_scanning` over the program: the source the
+            // host handed over, or the file read whole.
+            let text = source.or_else(|| std::fs::read(cwd.join(OsStr::from_bytes(&script))).ok());
+            if let Some(text) = text {
+                let written = if work == Work::Highlight {
+                    crate::api::syntax::highlight(&req, &text)
+                } else {
+                    crate::api::syntax::strip(&req, &text)
+                };
+                req.write(&written);
+            }
+            return self.shutdown(req, sink);
+        }
         let compiled = if let Some(source) = source {
             Some(
                 self.shared
@@ -1423,7 +1644,9 @@ impl Engine {
             self.shared.cached(&script, &cwd, req.stack_limit())
         };
         match compiled {
-            Some(Ok(unit)) if run => serve_unit(&mut req, &unit, self.shared.entry),
+            Some(Ok(unit)) if work == Work::Serve => {
+                serve_unit(&mut req, &unit, self.shared.entry);
+            }
             // `php_lint_script` compiles and drops the op array, and what
             // the compiler warned of it rendered as it compiled.
             Some(Ok(unit)) => note_compiled(&mut req, &unit),
@@ -1439,6 +1662,11 @@ impl Engine {
             }
             None => {}
         }
+        self.shutdown(req, sink)
+    }
+
+    /// `php_request_shutdown` and what the host is handed after it.
+    fn shutdown(&self, mut req: Request, sink: &mut dyn OutputSink) -> Observables {
         // `php_request_shutdown`'s order (design §5.10): the shutdown
         // functions first, which is `php_call_shutdown_functions`; then
         // the destructors of what is still live, which is
@@ -1455,6 +1683,7 @@ impl Engine {
         // as php's `EG(symbol_table)` does, so the shutdown functions
         // and an extension's `rshutdown` read a request that still has
         // them.
+        req.enter_phase(crate::api::request::Phase::Shutdown);
         crate::natives::call_shutdown_functions(&mut req);
         req.shutdown_destructors();
         req.call_destructors();
@@ -1497,6 +1726,17 @@ impl Engine {
             fatal,
         }
     }
+}
+
+/// What a transaction is for once the request has started: the program
+/// served, linted, or written as `zend_highlight` or `zend_strip` writes
+/// it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Work {
+    Serve,
+    Lint,
+    Highlight,
+    Strip,
 }
 
 /// The ini entries php reads while a file compiles, read once where the

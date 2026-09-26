@@ -7,7 +7,7 @@
 //! out Zend's `InternalIterator`, which walks the elements through
 //! [`Handlers::iterator_element`].
 
-use php_ext::abi::{CloneObj, ObjectHandlers, PropertyPurpose, Std};
+use php_ext::abi::{CloneObj, DimensionRead, ObjectHandlers, PropertyPurpose, Std};
 use php_ext::call::{call_method, clone_with, internal_iterator, new_object};
 use php_ext::coerce::{to_long, truthy};
 use php_ext::raising::{Thrown, arg_value_error, throw, warning};
@@ -244,12 +244,22 @@ impl ObjectHandlers for Handlers {
         Some(clone_array)
     }
 
+    /// `spl_fixedarray_object_read_dimension`: under `BP_VAR_IS` an
+    /// index `has_dimension` says is not there is `null`, asked before
+    /// an overriding `offsetGet` is served.
     fn read_dimension(
         &self,
         req: &mut Request,
         object: PhpObject,
         offset: Option<&Value>,
+        fetch: DimensionRead,
     ) -> Result<Value, Thrown> {
+        if fetch == DimensionRead::Silent
+            && let Some(at) = offset
+            && !self.has_dimension(req, object, at, false)?
+        {
+            return Ok(Value::null());
+        }
         if crate::overridden(req, object, b"offsetget") {
             let offset = offset.copied().unwrap_or_default();
             return call_method(req, &object, b"offsetGet", &[offset]);
@@ -317,13 +327,21 @@ impl ObjectHandlers for Handlers {
         Ok(Some(i64::try_from(n).unwrap_or(i64::MAX)))
     }
 
+    fn properties_overloaded(&self) -> bool {
+        true
+    }
+
     fn get_properties_for(
         &self,
         req: &mut Request,
         object: PhpObject,
         purpose: PropertyPurpose,
     ) -> Result<Option<Vec<(PhpString, Value)>>, Thrown> {
-        let _ = purpose;
+        // "The array elements are not *real properties*": what
+        // `get_object_vars()` reads is the object's own table alone.
+        if purpose == PropertyPurpose::GetObjectVars {
+            return Ok(None);
+        }
         let elements = with(req, object, |a| a.elements.clone())?;
         let props = Std.get_properties(req, object)?;
         if elements.is_empty() && props.is_empty() {

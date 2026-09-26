@@ -17,9 +17,12 @@
 
 use php_ext::call::lookup_class;
 use php_ext::coerce::{coerce_param, to_string, value_name};
-use php_ext::decl::{ConstDecl, ConstExpr, FunctionDecl, Name, Parameter, ParameterDefault, Type};
+use php_ext::decl::{
+    Attribute, AttributeArgument, ConstDecl, ConstExpr, FunctionDecl, Name, Parameter,
+    ParameterDefault, Type,
+};
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw};
-use php_ext::request::{Request, Stream, Whence, WrapperOp};
+use php_ext::request::{Request, Resolve, Stream, Whence, WrapperOp};
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use std::os::unix::ffi::OsStrExt;
@@ -27,7 +30,7 @@ use std::os::unix::ffi::OsStrExt;
 use crate::output::Entry;
 use crate::streamsfuncs::{NullContext, stream_context};
 use crate::stub::stub;
-use crate::virtual_cwd::{MAXPATHLEN, Resolve, virtual_file_ex};
+use crate::virtual_cwd::MAXPATHLEN;
 use crate::zpp::{
     array_argument, assign_ref, nullable_long, nullable_string, optional_bool, optional_long,
     optional_string,
@@ -60,11 +63,34 @@ const PHP_FILE_SKIP_EMPTY_LINES: i64 = 4;
 const PHP_FILE_APPEND: i64 = 8;
 const PHP_FILE_NO_DEFAULT_CONTEXT: i64 = 16;
 
+/// `FILE_TEXT` and `FILE_BINARY`, zero and `#[\Deprecated(since: '8.1',
+/// message: 'as the constant has no effect')]` in `file.stub.php`.
+fn deprecated_zero(name: &[u8]) -> ConstDecl {
+    ConstDecl {
+        name: Name(name.into()),
+        value: ConstExpr::Long(0),
+        attributes: vec![Attribute {
+            name: Name(b"Deprecated".as_slice().into()),
+            arguments: vec![
+                AttributeArgument {
+                    name: Some(Name(b"since".as_slice().into())),
+                    value: ConstExpr::Str(b"8.1".as_slice().into()),
+                },
+                AttributeArgument {
+                    name: Some(Name(b"message".as_slice().into())),
+                    value: ConstExpr::Str(b"as the constant has no effect".as_slice().into()),
+                },
+            ],
+        }],
+    }
+}
+
 /// The constants `file.stub.php` declares that the natives here read,
-/// in its order, less the two 8.1 deprecated.
+/// in its order, the two 8.1 deprecated among them.
 ///
 /// ```php
 /// var_dump(SEEK_SET, SEEK_CUR, SEEK_END, LOCK_SH, LOCK_EX, LOCK_UN, LOCK_NB, FILE_USE_INCLUDE_PATH, FILE_IGNORE_NEW_LINES, FILE_SKIP_EMPTY_LINES, FILE_APPEND, FILE_NO_DEFAULT_CONTEXT, FNM_NOESCAPE, FNM_PATHNAME, FNM_PERIOD, FNM_CASEFOLD);
+/// var_dump(FILE_TEXT, FILE_BINARY);
 /// ```
 /// ```expect
 /// int(0)
@@ -83,6 +109,12 @@ const PHP_FILE_NO_DEFAULT_CONTEXT: i64 = 16;
 /// int(2)
 /// int(4)
 /// int(16)
+///
+/// Deprecated: Constant FILE_TEXT is deprecated since 8.1, as the constant has no effect in %s on line 3
+///
+/// Deprecated: Constant FILE_BINARY is deprecated since 8.1, as the constant has no effect in %s on line 3
+/// int(0)
+/// int(0)
 /// ```
 pub(crate) fn constants() -> Vec<ConstDecl> {
     vec![
@@ -98,6 +130,8 @@ pub(crate) fn constants() -> Vec<ConstDecl> {
         constant(b"FILE_SKIP_EMPTY_LINES", PHP_FILE_SKIP_EMPTY_LINES),
         constant(b"FILE_APPEND", PHP_FILE_APPEND),
         constant(b"FILE_NO_DEFAULT_CONTEXT", PHP_FILE_NO_DEFAULT_CONTEXT),
+        deprecated_zero(b"FILE_TEXT"),
+        deprecated_zero(b"FILE_BINARY"),
         constant(b"FNM_NOESCAPE", FNM_NOESCAPE),
         constant(b"FNM_PATHNAME", FNM_PATHNAME),
         constant(b"FNM_PERIOD", FNM_PERIOD),
@@ -3342,7 +3376,7 @@ fn realpath(req: &mut Request) -> Result<Value, Thrown> {
     } else {
         &cwd
     };
-    match virtual_file_ex(cwd, &written, Resolve::RealPath) {
+    match req.virtual_file_ex(cwd, &written, Resolve::RealPath) {
         Some(resolved) => Ok(Value::string(PhpString::new(req, &resolved)?)),
         None => Ok(Value::bool(false)),
     }

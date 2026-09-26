@@ -4,7 +4,9 @@
 //! keeps the set parsed from the attribute value it last saw, parsing
 //! again whenever the attribute has changed under it.
 
-use php_ext::abi::{CloneObj, ObjectHandlers, PropertyPlace, PropertyRead, PropertyTest};
+use php_ext::abi::{
+    CloneObj, DimensionRead, ObjectHandlers, PropertyPlace, PropertyRead, PropertyTest,
+};
 use php_ext::coerce::{to_long, truthy};
 use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
@@ -609,13 +611,19 @@ impl ObjectHandlers for TokenListHandlers {
         req: &mut Request,
         object: PhpObject,
         offset_value: Option<&Value>,
+        read: DimensionRead,
     ) -> Result<Value, Thrown> {
         let Some(offset_value) = offset_value else {
             return Err(throw(req, "Error", "Cannot append to Dom\\TokenList"));
         };
         match offset(req, offset_value)? {
             Some(index) => item_value(req, object, index),
-            None => Err(illegal_offset(req, object, offset_value, false)),
+            None => Err(illegal_offset(
+                req,
+                object,
+                offset_value,
+                read == DimensionRead::Silent,
+            )),
         }
     }
 

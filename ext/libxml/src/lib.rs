@@ -680,10 +680,6 @@ fn clear_errors(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// ```
 fn disable_entity_loader(req: &mut Request) -> Result<Value, Thrown> {
-    php_ext::raising::deprecated(
-        req,
-        "Function libxml_disable_entity_loader() is deprecated since 8.0, as external entity loading is disabled by default",
-    );
     arity(req, 0, 1)?;
     let disable = argument(req, 1)?.and_then(|v| v.as_bool()).unwrap_or(true);
     let state = req.state::<State>();

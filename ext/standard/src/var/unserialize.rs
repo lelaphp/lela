@@ -25,6 +25,10 @@ const HT_MAX_SIZE: i64 = 0x4000_0000;
 #[derive(Clone)]
 enum Slot {
     Root,
+    /// A root [`Unserializer::value`] has handed its caller, php's
+    /// `var_tmp_var`: an `R:` naming it later shares the value the var
+    /// hash holds and writes nothing back.
+    Taken,
     Element(PhpArray, Key),
     Property(PhpObject, PhpString),
 }
@@ -350,6 +354,13 @@ impl<'a> Unserializer<'a> {
             return Ok(None);
         }
         let root = std::mem::replace(&mut self.state.root, Value::null());
+        // The next value is a root of its own, so what named this one
+        // names the caller's value from here, not the reader's root.
+        for (slot, _) in self.state.slots.iter_mut().flatten() {
+            if matches!(slot, Slot::Root) {
+                *slot = Slot::Taken;
+            }
+        }
         if let Some(cell) = root.as_php_ref() {
             let inner = cell.get();
             req.addref(&inner);
@@ -611,6 +622,12 @@ impl State<'_> {
                 let previous = std::mem::replace(&mut self.root, value);
                 req.release(previous);
             }
+            // Nothing names a taken root's place any more; the `R:`
+            // arm shares its value instead of writing here.
+            Slot::Taken => {
+                req.release(value);
+                return Ok(());
+            }
             Slot::Element(array, key) => {
                 let mut array = *array;
                 if let Key::Str(s) = key {
@@ -666,6 +683,16 @@ impl State<'_> {
                 else {
                     return Ok(false);
                 };
+                if c0 == b'R' && matches!(held_slot, Slot::Taken) {
+                    // php makes the `var_tmp_var` its caller holds a
+                    // reference whose other owner goes with the var hash,
+                    // so once the reader is done the element holds the
+                    // value alone, which it is given here.
+                    let shared = held.deref();
+                    req.addref(&shared);
+                    self.write(req, &slot, entry, shared)?;
+                    return Ok(true);
+                }
                 if c0 == b'R' {
                     if slots_equal(&held_slot, &slot) {
                         return Ok(false);
@@ -1134,9 +1161,10 @@ impl State<'_> {
         Ok(())
     }
 
-    /// `object_custom`, `C:`: the data's length and braces checked, and,
-    /// since no class here has a `Serializable` unserializer, php's
-    /// warning and an object with nothing written.
+    /// `object_custom`, `C:`: the data's length and braces checked, then
+    /// the class's unserializer over the payload, `ce->unserialize`
+    /// ([`php_ext::call::class_unserialize`]), and php's warning and an
+    /// object with nothing written for a class that has none.
     fn custom(
         &mut self,
         req: &mut Request,
@@ -1171,6 +1199,13 @@ impl State<'_> {
             self.p += datalen;
             return Ok(false);
         }
+        let object = new_object(req, class)?;
+        self.write(req, slot, entry, object.as_value())?;
+        let payload = self.buf[self.p..self.p + datalen].to_vec();
+        if !incomplete && php_ext::call::class_unserialize(req, object, &payload)? {
+            self.p += datalen + 1;
+            return Ok(true);
+        }
         let shown = String::from_utf8_lossy(
             &req.class_decl(class)
                 .map(|d| d.name.0.to_vec())
@@ -1178,8 +1213,6 @@ impl State<'_> {
         )
         .into_owned();
         warning(req, &format!("Class {shown} has no unserializer"));
-        let object = new_object(req, class)?;
-        self.write(req, slot, entry, object.as_value())?;
         if incomplete {
             let key = PhpString::new(req, MAGIC_MEMBER)?;
             let stored = Value::string(PhpString::new(req, name)?);
@@ -1319,7 +1352,7 @@ impl State<'_> {
 /// Whether two slots name the same place, php's `rval_ref == rval`.
 fn slots_equal(left: &Slot, right: &Slot) -> bool {
     match (left, right) {
-        (Slot::Root, Slot::Root) => true,
+        (Slot::Root, Slot::Root) | (Slot::Taken, Slot::Taken) => true,
         (Slot::Element(one, key), Slot::Element(other, key2)) => one == other && key == key2,
         (Slot::Property(one, name), Slot::Property(other, name2)) => one == other && name == name2,
         _ => false,

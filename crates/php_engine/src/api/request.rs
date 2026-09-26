@@ -10,6 +10,7 @@
 
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
+use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -26,8 +27,8 @@ use php_unit::decl::{
 use php_unit::{CacheSlot, FramelessEntry, OpArray, Opcode, Unit};
 
 use crate::api::abi::{
-    Callable, Dependency, Extension, IniVerdict, NativeNew, ObjectHandlers, PropertyRead,
-    PropertyTest, Std,
+    Callable, Dependency, DimensionRead, Extension, IniVerdict, NativeNew, ObjectHandlers,
+    PropertyRead, PropertyTest, Std,
 };
 use crate::api::call::{Function, Target};
 use crate::api::raising::{Level, Thrown};
@@ -35,12 +36,18 @@ use crate::api::values::{
     ClassId, ClosureInfo, Key, PhpArray, PhpObject, PhpRef, PhpString, Resource, TypeTag, Value,
     ValueRef,
 };
-use crate::engine::{MethodAt, NativeMethod, RequestDescription, Shared};
+use crate::engine::{
+    Configured, ConfiguredKey, MethodAt, NativeMethod, RequestDescription, Shared,
+};
 use crate::exec::{self, CallStage, CallState, IncludeKind, TableId, Vm};
 use crate::output::Output;
+use crate::virtual_cwd::RealpathCache;
+pub use crate::virtual_cwd::Resolve;
 
 mod hooks;
 mod lazy;
+mod load_file;
+mod table;
 mod variables;
 
 pub(crate) use hooks::parent_hook_trampolines;
@@ -73,38 +80,99 @@ pub struct HostPath(pub PathBuf);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ExtensionId(pub(crate) u32);
 
-/// One of an extension's ini entries as this request sees it, php's
-/// `zend_ini_entry` read by `_extension_ini_string` and
-/// `ReflectionExtension::getINIEntries`: the declaration with its
-/// `modifiable` bits, the value in force, and the value the entry had
+/// One ini entry as this request sees it, php's `zend_ini_entry` read
+/// by `_extension_ini_string`, `ReflectionExtension::getINIEntries` and
+/// `ini_get_all`: the declaration with its `modifiable` bits, the
+/// extension that registered it (`module_number`), none for the
+/// engine's own table, the value in force, and the value the entry had
 /// before the request changed it, php's `orig_value`, which is `Some`
 /// exactly where php's `modified` is set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IniEntry {
     pub decl: IniDecl,
+    pub extension: Option<ExtensionId>,
     pub value: Box<[u8]>,
     pub original: Option<Box<[u8]>>,
 }
 
+/// One bucket of the realpath cache, `realpath_cache_bucket` as
+/// `realpath_cache_get()` shows it, with the bytes `realpath_cache_size()`
+/// counts it as.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RealpathEntry {
+    pub path: Vec<u8>,
+    pub realpath: Vec<u8>,
+    pub key: u64,
+    pub is_dir: bool,
+    pub expires: i64,
+    pub size: i64,
+}
+
 /// Who a row the request added to `EG(zend_constants)` belongs to,
 /// php's `ZEND_CONSTANT_MODULE_NUMBER` beside `zend_constant.filename`:
-/// an extension that registers it at request start, or the program,
+/// the host, which registers under `Core` at request start; an
+/// extension that registers one while the request runs; or the program,
 /// `PHP_USER_CONSTANT`, with the file `zend_register_constant` read off
 /// `zend_get_executed_filename_ex` where one was executing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ConstantOwner {
-    Module(&'static str),
+    Core,
+    Extension(ExtensionId),
     User(Option<Box<[u8]>>),
 }
 
-impl ConstantOwner {
-    /// The extension's name, none for the program's.
-    fn module(&self) -> Option<&'static str> {
-        match self {
-            ConstantOwner::Module(name) => Some(name),
-            ConstantOwner::User(_) => None,
+/// The parameters of one callee whose arguments a trace redacts:
+/// `declared` by position, the variadic's for the rest.
+#[derive(Default)]
+struct Sensitive {
+    declared: Vec<bool>,
+    variadic: bool,
+}
+
+impl Sensitive {
+    /// Whether the argument at `at`, from zero, is shown redacted.
+    fn at(&self, at: usize) -> bool {
+        self.declared.get(at).copied().unwrap_or(self.variadic)
+    }
+}
+
+/// One row a request added to `EG(zend_constants)`: its owner, its name
+/// as `zend_register_constant` keys it, its value, and
+/// `zend_constant::attributes`, what a `DECLARE_ATTRIBUTED_CONST` hung
+/// on it, with `CONST_DEPRECATED` decoded from them where it was
+/// registered.
+struct ConstantRow {
+    owner: ConstantOwner,
+    name: Vec<u8>,
+    value: Value,
+    attributes: Vec<Attribute>,
+    deprecated: bool,
+}
+
+impl ConstantRow {
+    fn new(owner: ConstantOwner, name: Vec<u8>, value: Value) -> ConstantRow {
+        ConstantRow {
+            owner,
+            name,
+            value,
+            attributes: Vec::new(),
+            deprecated: false,
         }
     }
+}
+
+/// Where a request stands, as `php_verror` reads it to name the origin
+/// of a diagnostic raised while no function is active
+/// (`Z/main/main.c:1086-1129`): `PG(during_request_startup)`, set by
+/// `php_request_startup` and cleared by the CLI before it compiles the
+/// file (`Z/sapi/cli/php_cli.c:943`), so the extensions' `RINIT` are
+/// served inside it; the main op array; and `EG_FLAGS_IN_SHUTDOWN`, which
+/// `php_request_shutdown` sets first (`Z/main/main.c:1960`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Phase {
+    Startup,
+    Running,
+    Shutdown,
 }
 
 /// What a native intends to do at a path, for the `open_basedir` guard.
@@ -856,6 +924,11 @@ pub struct Request {
     /// two in the order they were written.
     aside: Vec<Aside>,
     last_error: Option<(Level, String, Vec<u8>, u32)>,
+    /// The diagnostics raised while the engine registers its extensions'
+    /// ini entries (`php_during_module_startup()`), held in the order
+    /// raised rather than shown, on the one request the engine lays for
+    /// that stage; every request it serves raises them again first.
+    startup: Option<Vec<(Level, String)>>,
     /// php's `EG(last_fatal_error_backtrace)`, rendered by
     /// `zend_trace_to_string`: the trace `zend_error_impl` fetched for the
     /// fatal being raised under `fatal_error_backtraces`, cleared for
@@ -901,7 +974,7 @@ pub struct Request {
     /// ([`crate::engine::FileHandles`]), `None` for what `define()` and
     /// `const` wrote, php's `PHP_USER_CONSTANT`, with the file it was
     /// defined in.
-    constants: Vec<(ConstantOwner, Vec<u8>, Value)>,
+    constants: Vec<ConstantRow>,
     /// `zend_enum_get_case`'s slot (`Z/Zend/zend_enum.c:410`): one
     /// instance per case of each enum, made on the first read of the
     /// case and handed back by identity from then on, so that
@@ -920,6 +993,17 @@ pub struct Request {
     /// [`crate::enums::ENUM_FUNCTIONS`], as php allocates a
     /// `zend_internal_function` per method per enum.
     enum_functions: Vec<(ClassId, crate::enums::EnumMethod)>,
+    /// The functions `zend_get_call_trampoline_func` makes of a call to
+    /// a name only `__call` or `__callStatic` answers, one per magic
+    /// method and name, two function numbers each
+    /// ([`crate::trampoline`]).
+    trampolines: Vec<crate::trampoline::CallTrampoline>,
+    /// `CONST_IS_RECURSIVE` over the constants a deprecation is being
+    /// worded for, so an attribute naming the constant it marks reads it
+    /// without raising again (GH-18463): the declaring class and the
+    /// name of a class constant, a program's alone, or the name of a
+    /// global one.
+    deprecating: Vec<(Option<ClassId>, Box<[u8]>)>,
     /// `CE_STATIC_MEMBERS(ce)` (`Z/Zend/zend_object_handlers.c:2094`):
     /// one slot per declared `static` property, keyed by the class that
     /// declared it and by the property's name. php gives every class a
@@ -1006,7 +1090,11 @@ pub struct Request {
     /// `EG(user_exception_handlers)`, the same shape without a mask.
     exception_handler: Option<Callable>,
     exception_handlers: Vec<Option<Callable>>,
-    shutdown_functions: Vec<(Callable, Vec<Value>)>,
+    /// `BG(user_shutdown_function_names)`: each entry's callback and
+    /// arguments, under the name `register_user_shutdown_function` gave
+    /// it, or none for one `register_shutdown_function()` appended at the
+    /// next index.
+    shutdown_functions: Vec<(Option<Vec<u8>>, Callable, Vec<Value>)>,
     tick_functions: Vec<(Callable, Vec<Value>)>,
     autoloaders: Vec<Callable>,
     /// `EG(in_autoload)`: the lowered names an autoloader is loading.
@@ -1016,6 +1104,9 @@ pub struct Request {
     /// `BG(CurrentStatFile)` and `BG(CurrentLStatFile)`, `php_stat`'s
     /// cache, which the plain files kind clears (design §4.3 seam 5).
     pub(crate) stat_cache: crate::wrapper::StatCache,
+    /// `CWDG(realpath_cache)`, which every absolute path resolved through
+    /// [`Request::virtual_file_ex`] is entered in (`crate::virtual_cwd`).
+    realpath_cache: RealpathCache,
     cwd: PathBuf,
     /// `le_stream`, the resource type every stream is registered under.
     stream_type: ResourceType,
@@ -1034,6 +1125,14 @@ pub struct Request {
     /// outermost serving's end releases it, as `zend_exception_error`
     /// does.
     unwind_exit: bool,
+    /// Whether a diagnostic is displayed past the `php_output` layer,
+    /// `php_output_direct`, as php displays what it raises while the
+    /// engine starts ([`crate::api::raising::startup`]).
+    display_direct: bool,
+    /// Where the request stands in `php_request_startup`,
+    /// `php_execute_script` and `php_request_shutdown`, what `php_verror`
+    /// names a diagnostic's origin by when no function is active.
+    phase: Phase,
     /// `zend_objects_store_mark_destructed`: every object behind the
     /// request, set where `shutdown_destructors` catches the
     /// `zend_bailout` a destructor's raise ends the walk with
@@ -1208,8 +1307,40 @@ struct CallFrame {
 struct Fcc {
     calling: Option<ClassId>,
     called: Option<ClassId>,
-    function: Option<Function>,
+    function: Option<Callee>,
     object: Option<PhpObject>,
+}
+
+/// `fcc->function_handler` once `zend_is_callable_check_func` found
+/// one: a function the tables have; the trampoline of a class's
+/// `__call`, or of its `__callStatic` where `is_static`, under the name
+/// written (`zend_get_call_trampoline_func`); or a closure's own
+/// `__invoke` (`zend_get_closure_invoke_method`). The resolver answers
+/// the last two without making them, and [`Request::callable_made`]
+/// makes them.
+#[derive(Clone)]
+enum Callee {
+    Function(Function),
+    Trampoline {
+        class: ClassId,
+        name: Vec<u8>,
+        is_static: bool,
+    },
+    Invoke(PhpObject),
+}
+
+/// What `zend_is_callable_ex` resolved a value to: a callable, or one
+/// whose callee is still to be made, with the scope and the receiver it
+/// is called on.
+enum Resolved {
+    Made(Callable),
+    Pending {
+        held: Value,
+        name: String,
+        callee: Callee,
+        scope: ClassId,
+        this: Option<PhpObject>,
+    },
 }
 
 /// One link of php's `prev_execute_data` chain as this engine holds it:
@@ -1276,6 +1407,11 @@ pub(crate) struct UserFunction {
     pub(crate) unit: Arc<Unit>,
     pub(crate) body: exec::Body,
     pub(crate) member: Option<Member>,
+    /// `ZEND_ACC_DEPRECATED` and `ZEND_ACC_NODISCARD`, which
+    /// `zend_compile_func_decl` and the `#[\NoDiscard]` validator raise
+    /// from the declaration's attributes, decoded where the function is
+    /// declared.
+    pub(crate) flags: crate::attributes::Flags,
 }
 
 /// A method as its class holds it: the class, `common.scope`, and
@@ -1315,6 +1451,16 @@ impl Declared {
     }
 }
 
+/// The flags of the function at `at` of a unit's `dynamic` table, one
+/// a `DECLARE_FUNCTION` binds or a closure is made of.
+fn dynamic_flags(unit: &Unit, at: u32) -> crate::attributes::Flags {
+    usize::try_from(at)
+        .ok()
+        .and_then(|at| unit.dynamic.get(at))
+        .map(|(decl, _)| crate::attributes::Flags::of(&decl.attributes))
+        .unwrap_or_default()
+}
+
 /// The declaration of a user function the request's table holds, from
 /// whichever table of its unit the body came out of: one the file
 /// declared at its top level, or one a `DECLARE_FUNCTION` bound where
@@ -1336,6 +1482,7 @@ fn user_function_decl(user: &UserFunction) -> Option<&FunctionDecl> {
 }
 
 impl Request {
+    #[allow(clippy::too_many_lines)] // one line per field of the request
     pub(crate) fn new(shared: Arc<Shared>, description: RequestDescription) -> Request {
         let cwd = description.cwd.clone();
         let web = description.is_web;
@@ -1350,6 +1497,8 @@ impl Request {
         let mut stack = VmStack::new();
         let _laid = stack.open(&mut heap);
         let mut req = Request {
+            // Read before `shared` moves in, as fields are in the order written.
+            realpath_cache: RealpathCache::startup(&shared),
             shared,
             description,
             heap,
@@ -1364,6 +1513,7 @@ impl Request {
             header_callback: None,
             aside: Vec::new(),
             last_error: None,
+            startup: None,
             last_fatal_error_backtrace: None,
             ending: None,
             exit_status: 0,
@@ -1376,6 +1526,8 @@ impl Request {
             enum_cases: Vec::new(),
             enums_updated: Vec::new(),
             enum_functions: Vec::new(),
+            trampolines: Vec::new(),
+            deprecating: Vec::new(),
             statics: Vec::new(),
             guards: Vec::new(),
             ref_sources: Vec::new(),
@@ -1408,6 +1560,8 @@ impl Request {
             fibers: crate::fiber::Fibers::default(),
             pending: None,
             unwind_exit: false,
+            display_direct: false,
+            phase: Phase::Startup,
             marked_destructed: false,
             returned: Value::null(),
             interrupt: Interrupt::default(),
@@ -1423,30 +1577,37 @@ impl Request {
             #[cfg(debug_assertions)]
             dirty: None,
         };
-        if let Some(name) = req
+        req.activate();
+        req
+    }
+
+    /// `php_request_startup` and `zend_activate` over a request just
+    /// laid: the host's constant, each extension's request state, the
+    /// timer, the memory limit, the collector and the error level.
+    fn activate(&mut self) {
+        if let Some(name) = self
             .shared
-            .sapi_constant(req.description.sapi_name.as_bytes())
+            .sapi_constant(self.description.sapi_name.as_bytes())
         {
-            req.sapi_constant = name;
+            self.sapi_constant = name;
         }
         // Request state in bundle order (ADR-0005).
-        for extension in &req.shared.extensions {
+        for extension in &self.shared.extensions {
             if let Some((type_id, build)) = &extension.request_state {
-                req.states.push((*type_id, build()));
+                self.states.push((*type_id, build()));
             }
         }
         // The execution timer, as `zend_set_timeout` arms one at the
         // start of a request (design §5.8), and the memory limit, as
         // `php_request_startup` sets one from the ini.
-        req.arm_timer();
-        req.set_memory_limit();
+        self.arm_timer();
+        self.set_memory_limit();
         // `zend.enable_gc` as the startup ini leaves the collector
         // (`OnUpdateGCEnabled`), and `gc_reset` from `zend_activate`.
-        let enable_gc = ini_truth(req.ini_get(b"zend.enable_gc"));
-        req.heap.gc_startup(enable_gc);
-        req.update_error_reporting();
-        req.stack_limit = req.shared.stack_limit();
-        req
+        let enable_gc = ini_truth(self.ini_get(b"zend.enable_gc"));
+        self.heap.gc_startup(enable_gc);
+        self.update_error_reporting();
+        self.stack_limit = self.shared.stack_limit();
     }
 
     /// The thread's stack limit as request start read it, for the
@@ -2158,6 +2319,11 @@ impl Request {
         arguments: &[Value],
         extra_named: &[(PhpString, Value)],
     ) -> Result<Value, Thrown> {
+        // `zend_call_function`: the deprecation before the arguments
+        // are placed, and no call where a handler threw.
+        if self.function_flags(function).deprecated {
+            crate::attributes::deprecated_function(self, function)?;
+        }
         let wrapped = self.values_for_references(function, arguments)?;
         let name = self.declared_name(function);
         let name = self.interned(name.as_bytes())?;
@@ -2202,6 +2368,13 @@ impl Request {
             self.pop_call();
             return Err(thrown);
         }
+        let function = match crate::trampoline::hand_to_magic(self, function) {
+            Ok(function) => function,
+            Err(thrown) => {
+                self.pop_call();
+                return Err(thrown);
+            }
+        };
         if self.user_function(function).is_some() {
             let Some(call) = self.vm.pop_call() else {
                 return self.fatal_of(Err(Fatal::Error(String::from(
@@ -2422,11 +2595,29 @@ impl Request {
         if let Some((_, method)) = self.enum_method_of(function) {
             return Some(method.entry());
         }
+        if let Some((trampoline, served)) = self.trampoline_of(function) {
+            use crate::trampoline::{Served, Via};
+            return match (trampoline.via, served) {
+                (Via::Invoke(_), Served::Trampoline) => {
+                    Some(crate::classes::closure_invoke as crate::api::abi::Entry)
+                }
+                (Via::Magic(_), Served::ClosureCall) => {
+                    Some(crate::trampoline::closure_call_magic as crate::api::abi::Entry)
+                }
+                (Via::Magic(_), Served::Trampoline) | (Via::Invoke(_), Served::ClosureCall) => None,
+            };
+        }
         let at = usize::try_from(function.0).ok()?;
         match at.checked_sub(self.shared.functions.len()) {
             None => self.shared.functions.get(at).map(|(_, entry)| *entry),
             Some(method) => self.shared.methods.get(method).map(|m| m.entry),
         }
+    }
+
+    /// Whether `function` is a native, php's `ZEND_INTERNAL_FUNCTION`:
+    /// numbered below the user functions and methods.
+    pub(crate) fn is_native_function(&self, function: Function) -> bool {
+        self.user_function(function).is_none()
     }
 
     /// The native method `function` is, if it is one: its class and its
@@ -2446,6 +2637,23 @@ impl Request {
             at.checked_sub(self.shared.functions.len())?
                 .checked_sub(self.shared.methods.len())?,
         )
+    }
+
+    /// `fbc->common.fn_flags & (ZEND_ACC_DEPRECATED | ZEND_ACC_NODISCARD)`:
+    /// what the callee's declaration raised where it was linked, none
+    /// for an enum's own method and the pass function.
+    pub(crate) fn function_flags(&self, function: Function) -> crate::attributes::Flags {
+        if let Some(user) = self.user_function(function) {
+            return user.flags;
+        }
+        if let Some(method) = self.native_method(function) {
+            return method.flags;
+        }
+        usize::try_from(function.0)
+            .ok()
+            .and_then(|at| self.shared.function_flags.get(at))
+            .copied()
+            .unwrap_or_default()
     }
 
     /// The number a user function at `index` of the table is known by.
@@ -2474,9 +2682,105 @@ impl Request {
         if let Some((class, _)) = self.enum_method_of(function) {
             return Some(class);
         }
+        if let Some((trampoline, _)) = self.trampoline_of(function) {
+            return match trampoline.via {
+                crate::trampoline::Via::Magic(magic) => self.method_class(magic),
+                crate::trampoline::Via::Invoke(_) => self.class_named(b"Closure"),
+            };
+        }
         self.user_function(function)?
             .member
             .map(|member| member.class)
+    }
+
+    /// The trampoline a function number names and which of its two
+    /// functions it is; none for any other function.
+    pub(crate) fn trampoline_of(
+        &self,
+        function: Function,
+    ) -> Option<(
+        &crate::trampoline::CallTrampoline,
+        crate::trampoline::Served,
+    )> {
+        let (index, served) = crate::trampoline::decode(function)?;
+        Some((self.trampolines.get(index)?, served))
+    }
+
+    /// `zend_get_call_trampoline_func(ce, name, is_static)`
+    /// (`Z/Zend/zend_object_handlers.c:1764`): the trampoline `class`'s
+    /// `__call`, or its `__callStatic` where `is_static`, serves under
+    /// `name`, the one the request already made for that method and
+    /// name where it made one; none where the class has no such
+    /// method.
+    pub(crate) fn call_trampoline(
+        &mut self,
+        class: ClassId,
+        name: &[u8],
+        is_static: bool,
+    ) -> Option<Function> {
+        let magic = self.method_named(
+            class,
+            if is_static {
+                b"__callstatic"
+            } else {
+                b"__call"
+            },
+        )?;
+        let held = self
+            .trampolines
+            .iter()
+            .position(|trampoline| trampoline.is(magic, name));
+        let at = if let Some(at) = held {
+            at
+        } else {
+            let by_ref = self
+                .function_decl(magic)
+                .is_some_and(|decl| decl.returns_by_ref);
+            self.trampolines
+                .push(crate::trampoline::CallTrampoline::new(
+                    magic, name, is_static, by_ref,
+                ));
+            self.trampolines.len().checked_sub(1)?
+        };
+        crate::trampoline::number(at, crate::trampoline::Served::Trampoline)
+    }
+
+    /// `zend_get_closure_invoke_method` (`Z/Zend/zend_closures.c:484`):
+    /// the `__invoke` of `closure`, which carries the signature of the
+    /// function it holds, the one the request already made for that
+    /// function where it made one; none for an object that is no
+    /// closure.
+    pub(crate) fn invoke_trampoline(&mut self, closure: PhpObject) -> Option<Function> {
+        let function = closure.closure(self)?.function;
+        let via = crate::trampoline::Via::Invoke(function);
+        let at = if let Some(at) = self.trampolines.iter().position(|made| made.via == via) {
+            at
+        } else {
+            let decl = self.function_decl(function)?.clone();
+            self.trampolines
+                .push(crate::trampoline::CallTrampoline::invoke(function, &decl));
+            self.trampolines.len().checked_sub(1)?
+        };
+        crate::trampoline::number(at, crate::trampoline::Served::Trampoline)
+    }
+
+    /// `get_static_method_fallback` (`Z/Zend/zend_object_handlers.c:2016`):
+    /// where the name of a call on a class finds nothing `class` lets the scope
+    /// call, the trampoline of `this`'s class's `__call` where the
+    /// calling frame has a receiver that is an instance of `class`, and
+    /// otherwise `class`'s `__callStatic`'s; none where neither serves.
+    pub(crate) fn static_trampoline(
+        &mut self,
+        class: ClassId,
+        name: &[u8],
+        this: Option<PhpObject>,
+    ) -> Option<Function> {
+        if self.method_named(class, b"__call").is_some()
+            && let Some(this) = this.filter(|this| self.instance_of(this.class(), class))
+        {
+            return self.call_trampoline(this.class(), name, false);
+        }
+        self.call_trampoline(class, name, true)
     }
 
     /// `zend_hash_find_ptr(&ce->function_table, lcname)` over the
@@ -2596,6 +2900,9 @@ impl Request {
                 .methods
                 .iter()
                 .find(|decl| decl.function.name.0.eq_ignore_ascii_case(method.name()));
+        }
+        if let Some((trampoline, _)) = self.trampoline_of(function) {
+            return Some(&trampoline.decl);
         }
         if let Some(method) = self.native_method(function) {
             return match method.at {
@@ -2828,7 +3135,7 @@ impl Request {
     /// scope alone, and a protected one is a scope
     /// `zend_check_protected` relates to it. A function that is no
     /// method, and one the tables have no declaration for, is anyone's.
-    fn method_accessible(&self, function: Function) -> bool {
+    pub(crate) fn method_accessible(&self, function: Function) -> bool {
         let Some(class) = self.method_class(function) else {
             return true;
         };
@@ -3028,6 +3335,29 @@ impl Request {
         // slot's owner, given up once the rendering has read it.
         self.release(throwable.as_value());
         Err(fatal)
+    }
+
+    /// The tail of `zend_call_function` where the callee left something
+    /// pending and no frame stands to take it
+    /// (`Z/Zend/zend_execute_API.c:1069`), as in an extension's
+    /// `RSHUTDOWN` or a shutdown function: `zend_throw_exception_internal`
+    /// with no frame hands a throwable to the handler `set_exception_handler` set,
+    /// and the call is done where the handler took it; otherwise it is
+    /// rendered as the uncaught fatal, and the unwind exit is dropped,
+    /// and either leaves by `zend_bailout`, which is the `Thrown` with
+    /// no throwable handed back. The session's write at request end is
+    /// the witness, in `ext/session`.
+    pub(crate) fn thrown_without_frame(&mut self, thrown: &Thrown) -> Result<Value, Thrown> {
+        let threw = thrown.exception().is_some();
+        self.leave_pending(thrown);
+        match self.uncaught() {
+            Err(fatal) => {
+                self.end_in(&fatal);
+                Err(Thrown::of(None))
+            }
+            Ok(()) if threw => Ok(Value::null()),
+            Ok(()) => Err(Thrown::of(None)),
+        }
     }
 
     /// The declared name of a throwable's class, `Error` for one the
@@ -3236,6 +3566,10 @@ impl Request {
         for (traced, this, scope, mut arguments, named, site) in links {
             let mut row = PhpArray::new(self)?;
             let is_function = matches!(traced, Traced::Function(_));
+            let sensitive = match traced {
+                Traced::Function(function) => self.sensitive_parameters(function),
+                Traced::Include { .. } => Sensitive::default(),
+            };
             let (name, method) = match traced {
                 Traced::Function(function) => (
                     self.declared_name(function),
@@ -3275,14 +3609,24 @@ impl Request {
             let with_args = is_function || !arguments.is_empty();
             if !ignore_arguments && with_args {
                 let mut args = PhpArray::new(self)?;
-                for argument in arguments {
+                for (at, argument) in arguments.into_iter().enumerate() {
                     let argument = argument.deref();
-                    self.addref(&argument);
+                    let argument = if sensitive.at(at) {
+                        self.sensitive_value(argument)?
+                    } else {
+                        self.addref(&argument);
+                        argument
+                    };
                     args.append(self, argument)?;
                 }
                 for (name, argument) in named {
                     let argument = argument.deref();
-                    self.addref(&argument);
+                    let argument = if sensitive.variadic {
+                        self.sensitive_value(argument)?
+                    } else {
+                        self.addref(&argument);
+                        argument
+                    };
                     self.addref(&Value::string(name));
                     args.set(self, Key::Str(name), argument)?;
                 }
@@ -3295,6 +3639,81 @@ impl Request {
             trace.append(self, Value::array(row))?;
         }
         Ok(trace)
+    }
+
+    /// Which arguments of a call to `function` a trace shows redacted,
+    /// php's `zend_get_parameter_attribute_str(..., "sensitiveparameter",
+    /// i)` over its parameters: each declared one by position, and the
+    /// variadic's for every argument past them and every extra named one.
+    fn sensitive_parameters(&self, function: Function) -> Sensitive {
+        let marked = |parameter: &php_unit::decl::Parameter| {
+            parameter.attributes.iter().any(|attribute| {
+                let name = attribute
+                    .name
+                    .0
+                    .strip_prefix(b"\\")
+                    .unwrap_or(&attribute.name.0);
+                name.eq_ignore_ascii_case(b"SensitiveParameter")
+            })
+        };
+        let Some(decl) = self.function_decl(function) else {
+            return Sensitive::default();
+        };
+        Sensitive {
+            declared: decl
+                .parameters
+                .iter()
+                .filter(|parameter| !parameter.variadic)
+                .map(marked)
+                .collect(),
+            variadic: decl
+                .parameters
+                .iter()
+                .find(|parameter| parameter.variadic)
+                .is_some_and(marked),
+        }
+    }
+
+    /// `object_init_ex(zend_ce_sensitive_parameter_value)` and its
+    /// constructor over `argument`: what a trace shows in place of an
+    /// argument `#[\SensitiveParameter]` marks, one owner, the trace's.
+    ///
+    /// ```php
+    /// function f($a, #[\SensitiveParameter] $secret, ...$rest) {
+    ///     debug_print_backtrace();
+    ///     var_dump(debug_backtrace()[0]['args'][1]->getValue());
+    ///     throw new Exception('boom');
+    /// }
+    /// function g(#[\SensitiveParameter] ...$all) { var_dump(debug_backtrace()[0]['args']); }
+    /// g(1, x: 2);
+    /// f(1, 'hunter2', 3);
+    /// ```
+    /// ```expect exit=255
+    /// array(2) {
+    ///   [0]=>
+    ///   object(SensitiveParameterValue)#1 (0) {
+    ///   }
+    ///   ["x"]=>
+    ///   object(SensitiveParameterValue)#2 (0) {
+    ///   }
+    /// }
+    /// #0 %s(9): f(1, Object(SensitiveParameterValue), 3)
+    /// string(7) "hunter2"
+    ///
+    /// Fatal error: Uncaught Exception: boom in %s:5
+    /// Stack trace:
+    /// #0 %s(9): f(1, Object(SensitiveParameterValue), 3)
+    /// #1 {main}
+    ///   thrown in %s on line 5
+    /// ```
+    fn sensitive_value(&mut self, argument: Value) -> Result<Value, Thrown> {
+        let Some(class) = self.class_named(b"SensitiveParameterValue") else {
+            return Err(crate::api::raising::fatal(
+                self,
+                "InternalError: SensitiveParameterValue is not linked",
+            ));
+        };
+        crate::api::call::instantiate(self, class, &[argument]).map(|object| object.as_value())
     }
 
     /// php's one `prev_execute_data` chain, innermost first, walked back
@@ -4137,6 +4556,10 @@ impl Request {
         file: &[u8],
         line: u32,
     ) -> bool {
+        if let Some(held) = self.startup.as_mut() {
+            held.push((level, message.to_owned()));
+            return false;
+        }
         // `php_error_cb` under `EH_THROW` (`Z/main/main.c:1368`), which
         // `zend_error_impl` reaches past the user handler: a warning is
         // thrown as the class `zend_replace_error_handling` named, where
@@ -4202,7 +4625,7 @@ impl Request {
                 "<?xml version=\"1.0\"?><methodResponse><fault><value><struct><member><name>faultCode</name><value><int>{}</int></value></member><member><name>faultString</name><value><string>{name}:{message} in {named} on line {line}{trace}</string></value></member></struct></value></fault></methodResponse>",
                 self.xmlrpc_error_number()
             );
-            self.write(text.as_bytes());
+            self.display(text.as_bytes());
         } else if self.html_errors() {
             // php's two html formats: the message of an `E_ERROR` or an
             // `E_PARSE` escaped and no trace after it, and every other
@@ -4219,7 +4642,7 @@ impl Request {
                     "{prepend}<br />\n<b>{name}</b>:  {message} in <b>{named}</b> on line <b>{line}</b><br />{trace}\n{append}"
                 ),
             };
-            self.write(text.as_bytes());
+            self.display(text.as_bytes());
         } else if display == Display::Stderr {
             // php's stderr form stands inside the same `else` as the
             // plain one, so `html_errors` takes a CLI diagnostic off the
@@ -4233,8 +4656,27 @@ impl Request {
                 self.ini_text(b"error_prepend_string"),
                 self.ini_text(b"error_append_string"),
             );
-            self.write(text.as_bytes());
+            self.display(text.as_bytes());
         }
+    }
+
+    /// A diagnostic's display on the body: through the `php_output`
+    /// layer, or past it where it is raised as the engine starts.
+    fn display(&mut self, text: &[u8]) {
+        if self.display_direct {
+            self.ub_write(text);
+        } else {
+            self.write(text);
+        }
+    }
+
+    /// A diagnostic raised as the engine starts, at `Unknown` on line
+    /// zero and displayed past the `php_output` layer
+    /// ([`crate::api::raising::startup`]).
+    pub(crate) fn note_startup_error(&mut self, level: Level, message: &str) {
+        self.display_direct = true;
+        self.note_error_in(level, message, b"Unknown", 0);
+        self.display_direct = false;
     }
 
     /// What `php_error_cb` writes after `on line N` for the fatal's trace:
@@ -4503,6 +4945,28 @@ impl Request {
     /// left.
     pub(crate) fn unwind_exit(&self) -> bool {
         self.unwind_exit
+    }
+
+    /// `zend_is_unwind_exit(EG(exception))` for a native: whether a
+    /// [`Thrown`] that carries no throwable is the `exit` a callback
+    /// unwinds, which php's C code goes on past with the unwind exit
+    /// pending, rather than a fatal, which `zend_bailout` leaves the
+    /// native by. The session's save handler reads it after a user
+    /// handler returns (`ps_call_handler`).
+    #[must_use]
+    pub fn is_unwind_exit(&self) -> bool {
+        self.unwind_exit
+    }
+
+    /// The request's [`Phase`].
+    pub(crate) fn phase(&self) -> Phase {
+        self.phase
+    }
+
+    /// The request moved to `phase`, as `serve` crosses php's startup
+    /// and shutdown.
+    pub(crate) fn enter_phase(&mut self, phase: Phase) {
+        self.phase = phase;
     }
 
     pub(crate) fn end_in(&mut self, fatal: &Fatal) {
@@ -4905,7 +5369,19 @@ impl Request {
     /// `zend_verify_property_access`: whether the executed scope may
     /// reach a property of `class` declared with `visibility`.
     fn may_access(&self, class: ClassId, visibility: Visibility) -> bool {
-        let scope = self.executed_scope();
+        self.may_access_from(class, visibility, self.executed_scope())
+    }
+
+    /// [`Request::may_access`] from a scope named rather than the one
+    /// executing: what `zend_verify_const_access` checks a class
+    /// constant against inside a constant expression, the scope it is
+    /// evaluated in.
+    fn may_access_from(
+        &self,
+        class: ClassId,
+        visibility: Visibility,
+        scope: Option<ClassId>,
+    ) -> bool {
         match visibility {
             Visibility::Public => true,
             _ if scope == Some(class) => true,
@@ -4980,6 +5456,34 @@ impl Request {
         name: &[u8],
         class_name: &str,
     ) -> Result<Value, Thrown> {
+        let scope = self.executed_scope();
+        self.class_constant_from(class, name, class_name, scope)
+    }
+
+    /// `zend_get_class_constant_ex` with the `scope` a constant
+    /// expression is evaluated in, `zend_ast_evaluate`'s: the access is
+    /// checked against it and not against the scope executing, so an
+    /// attribute's `parent::X` reads a protected constant its class may.
+    ///
+    /// ```php
+    /// #[Attribute(parent::x)]
+    /// class x extends y {}
+    /// class y { protected const x = Attribute::TARGET_CLASS; }
+    /// #[x]
+    /// class z {}
+    /// var_dump((new ReflectionClass(z::class))->getAttributes()[0]->newInstance());
+    /// ```
+    /// ```expect
+    /// object(x)#1 (0) {
+    /// }
+    /// ```
+    pub(crate) fn class_constant_from(
+        &mut self,
+        class: ClassId,
+        name: &[u8],
+        class_name: &str,
+        scope: Option<ClassId>,
+    ) -> Result<Value, Thrown> {
         let shown = String::from_utf8_lossy(name).into_owned();
         let Some((declaring, constant)) = self.class_constant_of(class, name, 0) else {
             return Err(crate::api::raising::throw(
@@ -4989,10 +5493,10 @@ impl Request {
             ));
         };
         let visibility = constant.visibility;
-        let value = constant.value;
+        let value = constant.value.clone();
         let asked = class;
         let class = declaring;
-        if !self.may_access(class, visibility) {
+        if !self.may_access_from(class, visibility, scope) {
             let word = match visibility {
                 Visibility::Public => "public",
                 Visibility::Protected => "protected",
@@ -5016,6 +5520,9 @@ impl Request {
                 &format!("Cannot access trait constant {class_name}::{shown} directly"),
             ));
         }
+        if crate::attributes::Flags::of(&constant.attributes).deprecated {
+            self.deprecated_class_constant(class, name, &constant)?;
+        }
         // `ZEND_FETCH_CLASS_CONSTANT` updates a backed enum's constants
         // whole before it reads one (`zend_update_class_constants`), and
         // `zend_fetch_class_constant`'s `ZEND_CLASS_CONST_IS_CASE` arm
@@ -5032,6 +5539,65 @@ impl Request {
             }
             _ => Ok(evaluated),
         }
+    }
+
+    /// `zend_get_class_constant_ex` under `ZEND_FETCH_CLASS_SILENT`, as
+    /// `defined()` asks it: whether `class` has a constant `name` the
+    /// executed scope may reach, not through a trait, with nothing
+    /// raised and nothing evaluated.
+    pub(crate) fn class_constant_defined(&self, class: ClassId, name: &[u8]) -> bool {
+        let trait_asked = self
+            .class_decl(class)
+            .is_some_and(|decl| decl.kind == ClassKind::Trait);
+        self.class_constant_of(class, name, 0)
+            .is_some_and(|(declaring, constant)| {
+                !trait_asked && self.may_access(declaring, constant.visibility)
+            })
+    }
+
+    /// `ZEND_ACC_DEPRECATED` on a class constant, as
+    /// `ZEND_FETCH_CLASS_CONSTANT` and `zend_get_class_constant_ex` test
+    /// it after the access checks and before the value is evaluated:
+    /// [`crate::attributes::deprecated_class_constant`], once per fetch,
+    /// and not again while its own attribute's arguments are read for
+    /// the message (`CONST_IS_RECURSIVE`, a program's class alone).
+    fn deprecated_class_constant(
+        &mut self,
+        declaring: ClassId,
+        name: &[u8],
+        constant: &ClassConstDecl,
+    ) -> Result<(), Thrown> {
+        let user = !self.native_class(declaring);
+        if user && !self.protect_recursion(Some(declaring), name) {
+            return Ok(());
+        }
+        let raised =
+            crate::attributes::deprecated_class_constant(self, declaring, name, constant, !user);
+        if user {
+            self.deprecating.pop();
+        }
+        raised
+    }
+
+    /// `CONST_PROTECT_RECURSION` over a constant, `class` none for a
+    /// global one: `false`, and nothing held, where it is held already,
+    /// which is `CONST_IS_RECURSIVE`; the caller pops what it held.
+    pub(crate) fn protect_recursion(&mut self, class: Option<ClassId>, name: &[u8]) -> bool {
+        if self
+            .deprecating
+            .iter()
+            .any(|(held_class, held)| *held_class == class && **held == *name)
+        {
+            return false;
+        }
+        self.deprecating.push((class, name.into()));
+        true
+    }
+
+    /// `CONST_UNPROTECT_RECURSION`: the last constant
+    /// [`Request::protect_recursion`] held let go.
+    pub(crate) fn unprotect_recursion(&mut self) {
+        self.deprecating.pop();
     }
 
     /// `zend_enum_build_backed_enum_table` (`Z/Zend/zend_enum.c:197`),
@@ -6525,6 +7091,20 @@ impl Request {
             self.assign_declared_slot(o, placed.slot, value);
         } else {
             let key = php_heap::Key::Str(name.heap());
+            // `zend_array_dup` over a table a clone or a cast shares,
+            // before the entry is looked for, so a reference the other
+            // holder's copy owns alone is its value here and not a cell
+            // both write through.
+            if let Some(table) = o.properties().filter(|table| table.refcount() > 1) {
+                match self.array_separate(table) {
+                    Ok(table) => self.heap.object_set_properties(o, table),
+                    Err(thrown) => {
+                        self.release(value);
+                        self.release(Value::string(name));
+                        return Err(thrown);
+                    }
+                }
+            }
             let held = o.properties().is_some_and(|table| table.contains(key));
             // `zend_assign_to_variable` over the entry found: one that
             // holds a reference, what `$o->p = &$x` bound, is written
@@ -7551,7 +8131,7 @@ impl Request {
     /// `EG(current_execute_data)`: whether a frame or a native's call
     /// stands, which is every release inside a serving and none of the
     /// releases `php_request_shutdown` makes after the main frame popped.
-    fn executing(&self) -> bool {
+    pub(crate) fn executing(&self) -> bool {
         self.fibers.active().is_some()
             || self.vm.innermost().is_some()
             || self.vm.serving_call().is_some()
@@ -8485,38 +9065,30 @@ impl Request {
     }
 
     /// `zend_std_read_dimension`: `offsetGet` on an `ArrayAccess`, the
-    /// offset `null` for `$o[]`.
+    /// offset `null` for `$o[]`; under `BP_VAR_IS` `offsetExists` first,
+    /// `null` where it says no, and `offsetGet` after it where it says
+    /// yes, so a chain under an `isset` calls the two in that order and
+    /// calls neither on a class that is no `ArrayAccess`.
     pub(crate) fn read_dimension(
         &mut self,
         object: PhpObject,
         offset: Option<&Value>,
+        read: DimensionRead,
     ) -> Result<Value, Thrown> {
         self.array_access(object)?;
         let offset = offset.copied().unwrap_or_else(Value::null);
-        crate::api::call::call_method(self, &object, b"offsetGet", &[offset])
-    }
-
-    /// `zend_std_read_dimension` under `BP_VAR_IS`: `offsetExists`
-    /// first, `null` where it says no, and `offsetGet` after it where it
-    /// says yes, so a chain under an `isset` calls the two in that order
-    /// and calls neither on a class that is no `ArrayAccess`.
-    pub(crate) fn read_dimension_is(
-        &mut self,
-        object: PhpObject,
-        offset: Option<&Value>,
-    ) -> Result<Value, Thrown> {
-        self.array_access(object)?;
-        let offset = offset.copied().unwrap_or_else(Value::null);
-        let exists = crate::api::call::call_method(
-            self,
-            &object,
-            b"offsetExists",
-            std::slice::from_ref(&offset),
-        )?;
-        let answer = crate::api::coerce::truthy(self, &exists);
-        self.release(exists);
-        if !answer {
-            return Ok(Value::null());
+        if read == DimensionRead::Silent {
+            let exists = crate::api::call::call_method(
+                self,
+                &object,
+                b"offsetExists",
+                std::slice::from_ref(&offset),
+            )?;
+            let answer = crate::api::coerce::truthy(self, &exists);
+            self.release(exists);
+            if !answer {
+                return Ok(Value::null());
+            }
         }
         crate::api::call::call_method(self, &object, b"offsetGet", &[offset])
     }
@@ -8942,9 +9514,33 @@ impl Request {
         self.vm.serving_call().map(|call| call.function)
     }
 
+    /// Enter php's startup on this request: what is raised from here is
+    /// held, not shown ([`Request::end_startup`]).
+    pub(crate) fn begin_startup(&mut self) {
+        self.startup = Some(Vec::new());
+    }
+
+    /// Leave the startup: what was raised during it, in order.
+    pub(crate) fn end_startup(&mut self) -> Vec<(Level, String)> {
+        self.startup.take().unwrap_or_default()
+    }
+
+    /// `php_during_module_startup()`, which `php_verror` names the
+    /// origin of a docref by, `PHP Startup` for a native's name, and
+    /// what an extension's on-modify rule reads as
+    /// `ZEND_INI_STAGE_STARTUP`: `true` while the engine serves the
+    /// rules over the host's values, before any request.
+    pub fn at_startup(&self) -> bool {
+        self.startup.is_some()
+    }
+
     /// `get_active_function_name`: the declared name of the native being
     /// served, `func->common.function_name`, whatever case the call
     /// spelled it in.
+    pub(crate) fn vm_serving_native(&self) -> bool {
+        self.active_native_function().is_some()
+    }
+
     pub(crate) fn active_native(&self) -> String {
         self.active_native_function().map_or_else(
             || String::from("native"),
@@ -8965,7 +9561,7 @@ impl Request {
     /// under, and `native` for one the table has no declaration for. A
     /// method's is its own name alone, what `get_active_function_name`
     /// answers; the class before it is [`Request::qualified_name`]'s.
-    fn declared_name(&self, function: Function) -> String {
+    pub(crate) fn declared_name(&self, function: Function) -> String {
         self.function_decl(function).map_or_else(
             || String::from("native"),
             |decl| String::from_utf8_lossy(&decl.name.0).into_owned(),
@@ -9280,8 +9876,52 @@ impl Request {
     /// `zend_is_callable_ex` (`Z/Zend/zend_API.c:4250`) without the
     /// error text and with php's `IS_CALLABLE_SUPPRESS_DEPRECATIONS`:
     /// the callee a value names, or none.
-    pub(crate) fn callable_of(&self, value: &Value) -> Option<Callable> {
-        self.callable_resolved(value, &mut None).ok()
+    pub(crate) fn callable_of(&mut self, value: &Value) -> Option<Callable> {
+        let resolved = self.callable_resolved(value, &mut None).ok()?;
+        self.callable_made(resolved).ok()
+    }
+
+    /// Whether `zend_is_callable_ex` accepts a value, with php's
+    /// `IS_CALLABLE_SUPPRESS_DEPRECATIONS`; no trampoline is made.
+    pub(crate) fn is_callable_value(&self, value: &Value) -> bool {
+        self.callable_resolved(value, &mut None).is_ok()
+    }
+
+    /// The callable a resolution answered, the trampoline it names made
+    /// where it names one.
+    fn callable_made(&mut self, resolved: Resolved) -> Result<Callable, String> {
+        match resolved {
+            Resolved::Made(callable) => Ok(callable),
+            Resolved::Pending {
+                held,
+                name,
+                callee,
+                scope,
+                this,
+            } => {
+                let made = match &callee {
+                    Callee::Function(function) => Some(*function),
+                    Callee::Trampoline {
+                        class,
+                        name,
+                        is_static,
+                    } => self.call_trampoline(*class, name, *is_static),
+                    Callee::Invoke(closure) => self.invoke_trampoline(*closure),
+                };
+                let Some(function) = made else {
+                    return Err(format!(
+                        "class {} does not have a method \"{name}\"",
+                        self.class_name(scope),
+                    ));
+                };
+                let target = Target::Method {
+                    function,
+                    scope,
+                    this,
+                };
+                Ok(Callable::of(held, name.as_bytes(), target))
+            }
+        }
     }
 
     /// `zend_is_callable_ex` with its `*error` (`Z/Zend/zend_API.c:4250`),
@@ -9396,7 +10036,7 @@ impl Request {
         if self.is_pending() {
             return Err(String::new());
         }
-        resolved
+        self.callable_made(resolved?)
     }
 
     /// `zend_is_callable_at_frame` (`Z/Zend/zend_API.c:4139`) over the
@@ -9408,7 +10048,7 @@ impl Request {
         &self,
         value: &Value,
         raised: &mut Option<Vec<String>>,
-    ) -> Result<Callable, String> {
+    ) -> Result<Resolved, String> {
         let frame = self.callable_frame();
         // `case IS_REFERENCE: goto again`.
         let held = value.deref();
@@ -9419,7 +10059,11 @@ impl Request {
             // reads the class's table and no visibility.
             if object.closure(self).is_some() {
                 let name = self.callable_name(&held);
-                return Ok(Callable::of(held, name.as_bytes(), Target::Closure(object)));
+                return Ok(Resolved::Made(Callable::of(
+                    held,
+                    name.as_bytes(),
+                    Target::Closure(object),
+                )));
             }
             let class = object.class();
             let Some(function) = self.method_named(class, b"__invoke") else {
@@ -9428,7 +10072,7 @@ impl Request {
             let this =
                 Some(object).filter(|_| self.method_decl(function).is_none_or(|d| d.is_instance));
             let name = self.callable_name(&held);
-            return Ok(Callable::of(
+            return Ok(Resolved::Made(Callable::of(
                 held,
                 name.as_bytes(),
                 Target::Method {
@@ -9436,7 +10080,7 @@ impl Request {
                     scope: class,
                     this,
                 },
-            ));
+            )));
         }
         let mut strict = false;
         let method = if let Some(array) = held.as_array().copied() {
@@ -9471,19 +10115,41 @@ impl Request {
             return Err(String::from("no array or string given"));
         };
         self.callable_func(&method, &frame, &mut fcc, strict, raised)?;
-        let Some(function) = fcc.function else {
+        let Some(callee) = fcc.function.take() else {
             return Err(String::from("no array or string given"));
         };
         let name = self.callable_name(&held);
-        let target = match fcc.calling.or(fcc.called) {
+        let scope = fcc.called.or(fcc.calling);
+        let function = match callee {
+            Callee::Function(function) => function,
+            Callee::Trampoline { class, .. } => {
+                return Ok(Resolved::Pending {
+                    held,
+                    name,
+                    scope: scope.unwrap_or(class),
+                    callee,
+                    this: fcc.object,
+                });
+            }
+            Callee::Invoke(closure) => {
+                return Ok(Resolved::Pending {
+                    held,
+                    name,
+                    scope: scope.unwrap_or(closure.class()),
+                    callee,
+                    this: fcc.object,
+                });
+            }
+        };
+        let target = match scope {
             None if fcc.object.is_none() => Target::Function(function),
             scope => Target::Method {
                 function,
-                scope: fcc.called.or(scope).unwrap_or(ClassId(0)),
+                scope: scope.unwrap_or(ClassId(0)),
                 this: fcc.object,
             },
         };
-        Ok(Callable::of(held, name.as_bytes(), target))
+        Ok(Resolved::Made(Callable::of(held, name.as_bytes(), target)))
     }
 
     /// The frame `zend_is_callable_ex` resolves at: the first link of
@@ -9633,7 +10299,7 @@ impl Request {
         if ce_org.is_none() {
             let bare = callable.strip_prefix(b"\\").unwrap_or(callable);
             if let Some(function) = self.function_named(bare) {
-                fcc.function = Some(function);
+                fcc.function = Some(Callee::Function(function));
                 return Ok(());
             }
         }
@@ -9683,23 +10349,36 @@ impl Request {
             }
         };
         let lowered = method.to_ascii_lowercase();
-        let mut via_handler = false;
         let found = match fcc.calling {
-            Some(calling) if strict && lowered == b"__construct" => {
-                self.method_named(calling, b"__construct")
+            Some(calling) if strict && lowered == b"__construct" => self
+                .method_named(calling, b"__construct")
+                .map(|function| (Callee::Function(function), false)),
+            Some(calling) => {
+                // A method the frame's scope may not call, where a magic
+                // method would take the call, is looked for again
+                // through the handler: `goto get_function_via_handler`.
+                let magic: &[u8] = if fcc.object.is_some() {
+                    b"__call"
+                } else {
+                    b"__callstatic"
+                };
+                self.method_named(calling, &lowered)
+                    .filter(|function| {
+                        self.method_visibility(*function) == Visibility::Public
+                            || self.method_named(calling, magic).is_none()
+                            || self.method_accessible_from(*function, frame.scope)
+                    })
+                    .map(|function| (Callee::Function(function), false))
+                    .or_else(|| {
+                        self.callable_via_handler(
+                            calling, ce_org, &method, &lowered, strict, frame, fcc,
+                        )
+                        .map(|callee| (callee, true))
+                    })
             }
-            Some(calling) => self.method_named(calling, &lowered).or_else(|| {
-                // `get_function_via_handler`: the object's own
-                // `get_method` where the class half is the object's,
-                // which is `Closure`'s `__invoke` trampoline.
-                let object = fcc.object.filter(|_| fcc.calling == ce_org)?;
-                let function = self.trampoline_named(object.class(), &lowered)?;
-                via_handler = true;
-                Some(function)
-            }),
             None => None,
         };
-        let Some(function) = found else {
+        let Some((callee, via_handler)) = found else {
             return Err(match fcc.calling {
                 Some(calling) => format!(
                     "class {} does not have a method \"{}\"",
@@ -9712,7 +10391,58 @@ impl Request {
                 ),
             });
         };
-        self.callable_settle(function, frame, fcc, via_handler)
+        self.callable_settle(callee, frame, fcc, via_handler)
+    }
+
+    /// `get_function_via_handler` in `zend_is_callable_check_func`
+    /// (`Z/Zend/zend_API.c:3980`): on the object a pair named, its
+    /// class's `__call` where the class half was named strictly, and
+    /// otherwise its `get_method`, which is `Closure`'s `__invoke`
+    /// trampoline, or the method itself, or `__call`'s trampoline where
+    /// the scope may not call it or the class has none of that name; on
+    /// a class, `zend_std_get_static_method`'s fallback, `__call` on the
+    /// frame's `$this` where it is an instance of the class, which then
+    /// is the receiver, and `__callStatic` otherwise.
+    #[allow(clippy::too_many_arguments)] // `zend_is_callable_check_func`'s state, each one fact
+    fn callable_via_handler(
+        &self,
+        calling: ClassId,
+        ce_org: Option<ClassId>,
+        method: &[u8],
+        lowered: &[u8],
+        strict: bool,
+        frame: &CallFrame,
+        fcc: &mut Fcc,
+    ) -> Option<Callee> {
+        let trampoline = |class: ClassId, is_static: bool| Callee::Trampoline {
+            class,
+            name: method.to_vec(),
+            is_static,
+        };
+        if let Some(object) = fcc.object.filter(|_| Some(calling) == ce_org) {
+            let class = object.class();
+            let has_call = self.method_named(class, b"__call").is_some();
+            if strict && has_call {
+                return Some(trampoline(class, false));
+            }
+            if lowered == b"__invoke" && object.closure(self).is_some() {
+                return Some(Callee::Invoke(object));
+            }
+            if let Some(function) = self.trampoline_named(class, lowered) {
+                return Some(Callee::Function(function));
+            }
+            return has_call.then(|| trampoline(class, false));
+        }
+        if self.method_named(calling, b"__call").is_some()
+            && let Some(this) = frame
+                .this
+                .filter(|this| self.instance_of(this.class(), calling))
+        {
+            fcc.object = fcc.object.or(Some(this));
+            return Some(trampoline(this.class(), false));
+        }
+        self.method_named(calling, b"__callstatic")
+            .map(|_| trampoline(calling, true))
     }
 
     /// The end of `zend_is_callable_check_func` once a callee is found:
@@ -9722,17 +10452,23 @@ impl Request {
     /// reached through a trampoline is held to none of them.
     fn callable_settle(
         &self,
-        function: Function,
+        callee: Callee,
         frame: &CallFrame,
         fcc: &mut Fcc,
         via_handler: bool,
     ) -> Result<(), String> {
-        fcc.function = Some(function);
-        let decl = self.method_decl(function);
-        let is_static = decl.is_some_and(|decl| !decl.is_instance);
-        if let Some(calling) = fcc.calling
+        let is_static = match &callee {
+            Callee::Function(function) => self
+                .method_decl(*function)
+                .is_some_and(|decl| !decl.is_instance),
+            Callee::Trampoline { is_static, .. } => *is_static,
+            Callee::Invoke(_) => false,
+        };
+        if let Callee::Function(function) = callee
+            && let Some(calling) = fcc.calling
             && !via_handler
         {
+            let decl = self.method_decl(function);
             let shown = || {
                 format!(
                     "{}::{}",
@@ -9762,6 +10498,7 @@ impl Request {
                 ));
             }
         }
+        fcc.function = Some(callee);
         if let Some(object) = fcc.object {
             fcc.called = Some(object.class());
             if is_static {
@@ -9791,8 +10528,21 @@ impl Request {
     /// as written or the object's class, a fake closure made of a method
     /// as `Scope::name` and any other closure by its function's name, an
     /// object of another class as `Class::__invoke`, and `Array` for a
-    /// pair of any other shape.
-    fn callable_name(&self, value: &Value) -> String {
+    /// pair of any other shape. An object's class is named whole, so an
+    /// anonymous class's name resolves back to the class:
+    ///
+    /// ```php
+    /// new class {
+    ///     function __construct() {
+    ///         if (is_callable([$this, 'f'], false, $name)) { call_user_func($name); }
+    ///     }
+    ///     function f() { echo "nice\n"; }
+    /// };
+    /// ```
+    /// ```expect
+    /// nice
+    /// ```
+    pub(crate) fn callable_name(&self, value: &Value) -> String {
         let held = value.deref();
         if let Some(name) = held.as_str_bytes() {
             return String::from_utf8_lossy(name).into_owned();
@@ -9809,7 +10559,7 @@ impl Request {
                     return format!("{}::{method}", String::from_utf8_lossy(class));
                 }
                 if let Some(object) = first.as_object() {
-                    return format!("{}::{method}", self.class_name(object.class()));
+                    return format!("{}::{method}", self.whole_class_name(object.class()));
                 }
             }
             return String::from("Array");
@@ -9818,13 +10568,20 @@ impl Request {
             if let Some(closure) = object.closure(self) {
                 let name = self.declared_name(closure.function);
                 return match closure.scope.filter(|_| closure.fake) {
-                    Some(scope) => format!("{}::{name}", self.class_name(scope)),
+                    Some(scope) => format!("{}::{name}", self.whole_class_name(scope)),
                     None => name,
                 };
             }
-            return format!("{}::__invoke", self.class_name(object.class()));
+            return format!("{}::__invoke", self.whole_class_name(object.class()));
         }
         String::new()
+    }
+    /// `ZSTR_VAL(ce->name)` at its whole length, as
+    /// `zend_create_member_string` joins it: an anonymous class's name
+    /// with its NUL and its site, which names the class again when the
+    /// string is resolved.
+    fn whole_class_name(&self, class: ClassId) -> String {
+        String::from_utf8_lossy(&self.class_name_bytes(class)).into_owned()
     }
 
     pub(crate) fn class_named(&self, name: &[u8]) -> Option<ClassId> {
@@ -10101,6 +10858,11 @@ impl Request {
             let Some((unit, body)) = self.method_body(class, method) else {
                 continue;
             };
+            let flags = self
+                .class_decl(class)
+                .and_then(|decl| decl.methods.get(usize::try_from(method).ok()?))
+                .map(|method| crate::attributes::Flags::of(&method.function.attributes))
+                .unwrap_or_default();
             self.user_functions.push(UserFunction {
                 unit,
                 body,
@@ -10108,6 +10870,7 @@ impl Request {
                     class,
                     at: MemberAt::Method(method),
                 }),
+                flags,
             });
         }
         // Each hook of the class's own properties, `prop_info->hooks`,
@@ -10132,6 +10895,12 @@ impl Request {
             let Some((unit, body)) = self.hook_body(class, property, kind) else {
                 continue;
             };
+            let flags = self
+                .class_decl(class)
+                .and_then(|decl| decl.properties.get(usize::try_from(property).ok()?))
+                .and_then(|property| property.hooks.as_ref()?.of(kind))
+                .map(|hook| crate::attributes::Flags::of(&hook.function.attributes))
+                .unwrap_or_default();
             self.user_functions.push(UserFunction {
                 unit,
                 body,
@@ -10139,6 +10908,7 @@ impl Request {
                     class,
                     at: MemberAt::Hook { property, kind },
                 }),
+                flags,
             });
         }
     }
@@ -10686,12 +11456,13 @@ impl Request {
     /// done
     /// ```
     fn deprecated_trait(&mut self, found: ClassId, used_by: &[u8]) -> Result<(), Thrown> {
-        let Some(suffix) = self
-            .class_decl(found)
-            .and_then(|decl| crate::api::raising::deprecation_suffix(&decl.attributes))
-        else {
-            return Ok(());
+        let attributes = match self.class_decl(found) {
+            Some(decl) if crate::attributes::Flags::of(&decl.attributes).deprecated => {
+                decl.attributes.clone()
+            }
+            _ => return Ok(()),
         };
+        let suffix = crate::attributes::deprecation_suffix(self, &attributes, Some(found))?;
         let level = if self.native_class(found) {
             Level::Deprecated
         } else {
@@ -10810,6 +11581,7 @@ impl Request {
             unit: Arc::clone(unit),
             body: exec::Body::Dynamic(at),
             member: None,
+            flags: dynamic_flags(unit, at),
         });
         Ok(())
     }
@@ -10837,6 +11609,7 @@ impl Request {
             unit: Arc::clone(unit),
             body,
             member: None,
+            flags: dynamic_flags(unit, at),
         });
         self.user_function_id(self.user_functions.len() - 1)
     }
@@ -10909,6 +11682,7 @@ impl Request {
                 unit: Arc::clone(unit),
                 body: exec::Body::Function(u32::try_from(at).unwrap_or(u32::MAX)),
                 member: None,
+                flags: crate::attributes::Flags::of(&decl.attributes),
             });
         }
         true
@@ -10920,8 +11694,8 @@ impl Request {
         }
         self.constants
             .iter()
-            .find(|(_, n, _)| n.as_slice() == name)
-            .map(|(_, _, v)| *v)
+            .find(|row| row.name == name)
+            .map(|row| row.value)
             .or_else(|| self.shared.constant(name))
     }
 
@@ -11053,9 +11827,14 @@ impl Request {
         }
     }
 
-    /// `header_register_callback()`.
+    /// `header_register_callback()` (`Z/main/SAPI.c:98`): the callable
+    /// held, with the owners `zend_fcc_addref` takes, for
+    /// `sapi_send_headers` to serve once; one held before is given up.
     pub fn set_header_callback(&mut self, callback: Callable) {
-        self.header_callback = Some(callback);
+        callback.addref(self);
+        if let Some(previous) = self.header_callback.replace(callback) {
+            previous.release(self);
+        }
     }
 
     /// `SG(sapi_headers).http_response_code` as it stands: 200 under a
@@ -11259,7 +12038,7 @@ impl Request {
     /// open left, and this engine as a file that is not there. The
     /// `Err` is the last attempt's reason, which the stream warning
     /// prints.
-    pub(crate) fn resolve_path(&self, written: &[u8]) -> Result<Vec<u8>, std::io::Error> {
+    pub(crate) fn resolve_path(&mut self, written: &[u8]) -> Result<Vec<u8>, std::io::Error> {
         let not_found = || std::io::Error::from(std::io::ErrorKind::NotFound);
         if let Some(at) = written.windows(3).position(|w| w == b"://")
             && at > 1
@@ -11304,8 +12083,14 @@ impl Request {
     /// `tsrm_realpath` of a path that is a regular file: the canonical
     /// path, against the request's working directory where the path is
     /// relative.
-    fn realpath_file(&self, path: &[u8]) -> Result<Vec<u8>, std::io::Error> {
-        let real = std::fs::canonicalize(self.absolutize(path).0)?;
+    fn realpath_file(&mut self, path: &[u8]) -> Result<Vec<u8>, std::io::Error> {
+        // `virtual_file_ex` sets `errno = ENOENT` for a path it could not
+        // resolve.
+        const ENOENT: i32 = 2;
+        let real = self
+            .realpath(path)
+            .ok_or_else(|| std::io::Error::from_raw_os_error(ENOENT))?
+            .0;
         if !real.is_file() {
             return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
         }
@@ -11549,6 +12334,18 @@ impl Request {
         }
         for loader in std::mem::take(&mut self.autoloaders) {
             loader.release(self);
+        }
+        // `PHP_RSHUTDOWN(basic)`'s `zend_llist_destroy` of
+        // `BG(user_tick_functions)`, and `SG(callback_func)` where the
+        // header block was never sent.
+        for (callback, arguments) in std::mem::take(&mut self.tick_functions) {
+            callback.release(self);
+            for value in arguments {
+                self.release(value);
+            }
+        }
+        if let Some(callback) = self.header_callback.take() {
+            callback.release(self);
         }
     }
 
@@ -11846,6 +12643,40 @@ impl Request {
             .serving_call()
             .map(|call| call.extra_named.clone())
             .unwrap_or_default()
+    }
+
+    /// The callee of the call being served, its receiver and its called
+    /// scope, php's `EX(func)` and `EX(This)` inside a native.
+    pub(crate) fn serving_callee(&self) -> Option<(Function, Option<PhpObject>, Option<ClassId>)> {
+        self.vm
+            .serving_call()
+            .map(|call| (call.function, call.this, call.called_scope))
+    }
+
+    /// The arguments of the call being served and its extra named ones,
+    /// each owner moved out to the caller and the call left with none.
+    pub(crate) fn take_serving_arguments(&mut self) -> (Vec<Value>, Vec<(PhpString, Value)>) {
+        match self.vm.serving_call_mut() {
+            Some(call) => {
+                call.count = 0;
+                (
+                    std::mem::take(&mut call.arguments),
+                    std::mem::take(&mut call.extra_named),
+                )
+            }
+            None => (Vec::new(), Vec::new()),
+        }
+    }
+
+    /// The call being served handed to `function` with `arguments`,
+    /// each owner the call's from here: what `ZEND_CALL_TRAMPOLINE`
+    /// writes into the frame it reuses.
+    pub(crate) fn serve_instead(&mut self, function: Function, arguments: Vec<Value>) {
+        if let Some(call) = self.vm.serving_call_mut() {
+            call.function = function;
+            call.count = arguments.len();
+            call.arguments = arguments;
+        }
     }
 
     /// `zend_parse_arg_*_weak` writing what it coerced back into the
@@ -12175,11 +13006,14 @@ impl Request {
                     .chain(value.map(|value| (Some(module), decl.name.0.to_vec(), value)))
             })
             .collect();
-        rows.extend(
-            self.constants
-                .iter()
-                .map(|(owner, name, value)| (owner.module(), name.clone(), *value)),
-        );
+        rows.extend(self.constants.iter().map(|row| {
+            let module = match &row.owner {
+                ConstantOwner::Core => Some("Core"),
+                ConstantOwner::Extension(extension) => self.extension_name(*extension),
+                ConstantOwner::User(_) => None,
+            };
+            (module, row.name.clone(), row.value)
+        }));
         rows
     }
 
@@ -12204,8 +13038,8 @@ impl Request {
         let constants: Vec<(Vec<u8>, Value)> = self
             .constants
             .iter()
-            .filter(|(owner, _, _)| matches!(owner, ConstantOwner::User(_)))
-            .map(|(_, name, value)| (name.clone(), *value))
+            .filter(|row| matches!(row.owner, ConstantOwner::User(_)))
+            .map(|row| (row.name.clone(), row.value))
             .collect();
         for (name, value) in constants {
             let key = Key::Str(PhpString::new(self, &name)?);
@@ -12219,8 +13053,22 @@ impl Request {
     /// file executing when it was written, `zend_register_constant`'s
     /// `filename`.
     pub fn define_constant(&mut self, name: &[u8], value: Value) -> Result<bool, Thrown> {
+        Ok(self.define_attributed_constant(name, value, Vec::new()))
+    }
+
+    /// `ZEND_DECLARE_ATTRIBUTED_CONST`'s `zend_register_constant` and
+    /// `zend_constant_add_attributes`: [`Request::define_constant`] with
+    /// the attributes the declaration carries hung on the row, and
+    /// `CONST_DEPRECATED` raised from them. `false`, and nothing hung,
+    /// where the name stands already.
+    pub(crate) fn define_attributed_constant(
+        &mut self,
+        name: &[u8],
+        value: Value,
+        attributes: Vec<Attribute>,
+    ) -> bool {
         if self.constant_named(name).is_some() {
-            return Ok(false);
+            return false;
         }
         // `zend_get_executed_filename_ex`: the innermost frame's file,
         // none where nothing is executing.
@@ -12228,9 +13076,15 @@ impl Request {
             .innermost_frame()
             .and_then(|state| exec::body_of(&state.unit, state.body))
             .map(|code| code.filename.0.clone());
-        let owner = ConstantOwner::User(file);
-        self.constants.push((owner, name.to_vec(), value));
-        Ok(true)
+        let deprecated = crate::attributes::Flags::of(&attributes).deprecated;
+        self.constants.push(ConstantRow {
+            owner: ConstantOwner::User(file),
+            name: name.to_vec(),
+            value,
+            attributes,
+            deprecated,
+        });
+        true
     }
 
     /// `zend_constant.filename`: the file a constant the program
@@ -12250,10 +13104,10 @@ impl Request {
     pub fn constant_file(&self, name: &[u8]) -> Option<&[u8]> {
         self.constants
             .iter()
-            .find(|(_, n, _)| n.as_slice() == name)
-            .and_then(|(owner, _, _)| match owner {
+            .find(|row| row.name == name)
+            .and_then(|row| match &row.owner {
                 ConstantOwner::User(file) => file.as_deref(),
-                ConstantOwner::Module(_) => None,
+                ConstantOwner::Core | ConstantOwner::Extension(_) => None,
             })
     }
 
@@ -12265,7 +13119,45 @@ impl Request {
     /// one owner is the table's.
     pub(crate) fn register_host_constant(&mut self, name: &'static [u8], value: Value) {
         self.constants
-            .push((ConstantOwner::Module("Core"), name.to_vec(), value));
+            .push(ConstantRow::new(ConstantOwner::Core, name.to_vec(), value));
+    }
+
+    /// `REGISTER_STRINGL_CONSTANT` and its kin while a request runs:
+    /// `name` registered under `extension`, php's `module_number`,
+    /// carrying `attributes` as `zend_add_attribute` puts them on the
+    /// constant, a `#[\Deprecated]` among them php's `CONST_DEPRECATED`,
+    /// which a read raises. Where the request has registered the name
+    /// already, by an extension or by `define()`, the row keeps its
+    /// owner and attributes and takes `value`, the old value released,
+    /// which is what an extension writes through the `zval` that
+    /// `zend_get_constant_str` finds. `value` is the row's from here;
+    /// `false`, and `value` still the caller's, for a name the engine or
+    /// an extension declared as it started, which no request writes.
+    /// The session's `SID` is the witness, in `ext/session`.
+    pub fn register_constant(
+        &mut self,
+        extension: ExtensionId,
+        name: &[u8],
+        value: Value,
+        attributes: Vec<Attribute>,
+    ) -> bool {
+        if let Some(row) = self.constants.iter_mut().find(|row| row.name == name) {
+            let old = std::mem::replace(&mut row.value, value);
+            self.release(old);
+            return true;
+        }
+        if name == b"PHP_SAPI" || self.shared.constant(name).is_some() {
+            return false;
+        }
+        let deprecated = crate::attributes::Flags::of(&attributes).deprecated;
+        self.constants.push(ConstantRow {
+            owner: ConstantOwner::Extension(extension),
+            name: name.to_vec(),
+            value,
+            attributes,
+            deprecated,
+        });
+        true
     }
 
     /// The fd the host handed under one of its standard streams
@@ -12283,24 +13175,54 @@ impl Request {
     }
 
     /// `zend_constant::attributes`: the attributes the declaration of
-    /// the global constant `name` carries, and the empty list for a
-    /// name no table has and for one a running program defined, which
-    /// carries none until the compiler reads the `#[...]` a program
-    /// writes on a `const` (#465). The key is the one
-    /// `zend_register_constant` writes, the namespace lowered.
-    ///
-    /// `#[\Deprecated]` among them is php's `CONST_DEPRECATED`, so
-    /// this is what `ReflectionConstant::isDeprecated()` reads and what
-    /// the deprecation a read raises is worded from
+    /// the global constant `name` carries, what an extension declared or
+    /// a program's `DECLARE_ATTRIBUTED_CONST` hung on it, or an extension
+    /// registered it with while the request runs
+    /// ([`Request::register_constant`]), and the empty list for a name no
+    /// table has. The key is the one
+    /// `zend_register_constant` writes, the namespace lowered. What
+    /// `ReflectionConstant::getAttributes()` reads, and what the
+    /// deprecation a read raises is worded from
     /// ([`crate::api::raising::deprecated_constant`]).
+    ///
+    /// ```php
+    /// #[MyAttribute(1)]
+    /// const C = 1;
+    /// define('D', 2);
+    /// var_dump(count((new ReflectionConstant('C'))->getAttributes()),
+    ///     count((new ReflectionConstant('D'))->getAttributes()),
+    ///     count((new ReflectionConstant('E_STRICT'))->getAttributes()));
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// int(0)
+    /// int(1)
+    /// ```
     #[must_use]
     pub fn constant_attributes(&self, name: &[u8]) -> &[Attribute] {
+        if let Some(row) = self.constants.iter().find(|row| row.name == name) {
+            return &row.attributes;
+        }
         self.shared
             .declared()
             .constants
             .iter()
             .find(|decl| decl.name.0.as_ref() == name)
             .map_or(&[], |decl| decl.attributes.as_slice())
+    }
+
+    /// `ZEND_CONSTANT_FLAGS(c) & CONST_DEPRECATED` of the constant the
+    /// table holds under `name`, and whether a program defined it,
+    /// `PHP_USER_CONSTANT`: what a fetch reads before it words a
+    /// deprecation. None for a name no table has.
+    pub(crate) fn constant_deprecation(&self, name: &[u8]) -> Option<(bool, bool)> {
+        if let Some(row) = self.constants.iter().find(|row| row.name == name) {
+            let user = matches!(row.owner, ConstantOwner::User(_));
+            return Some((row.deprecated, user));
+        }
+        self.shared
+            .constant_deprecated(name)
+            .map(|deprecated| (deprecated, false))
     }
 
     /// `spl_autoload_register()`: the callable onto the stack, at its
@@ -12566,17 +13488,25 @@ impl Request {
         module
             .ini
             .iter()
-            .map(|decl| {
-                let name = decl.name.0.as_ref();
-                let startup = self.shared.ini_default(name).unwrap_or(&decl.default);
-                let changed = self.ini.iter().find(|(n, _)| n.as_slice() == name);
-                IniEntry {
-                    decl: decl.clone(),
-                    value: changed.map_or(startup, |(_, v)| v.as_slice()).into(),
-                    original: changed.map(|_| startup.into()),
-                }
-            })
+            .map(|decl| self.ini_entry(decl.clone(), Some(extension)))
             .collect()
+    }
+
+    /// One entry as the request sees it: the value in force, the
+    /// request's `ini_set` over the engine's startup value, and the
+    /// startup value again as `original` where the request changed it.
+    fn ini_entry(&self, decl: IniDecl, extension: Option<ExtensionId>) -> IniEntry {
+        let name = decl.name.0.as_ref();
+        let startup = self.shared.ini_default(name).unwrap_or(&decl.default);
+        let changed = self.ini.iter().find(|(n, _)| n.as_slice() == name);
+        let value = changed.map_or(startup, |(_, v)| v.as_slice()).into();
+        let original = changed.map(|_| startup.into());
+        IniEntry {
+            decl,
+            extension,
+            value,
+            original,
+        }
     }
 
     /// `php_info_print_module` as the CLI prints it, `phpinfo_as_text`
@@ -12881,7 +13811,7 @@ impl Request {
     /// ```
     pub fn ini_set(&mut self, name: &[u8], value: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
         let previous = self.ini_get(name).map(<[u8]>::to_vec);
-        if previous.is_none() || !Request::ini_modifiable(name) || !self.ini_user(name) {
+        if previous.is_none() || !Request::ini_modifiable(name).0 || !self.ini_user(name) {
             return Ok(None);
         }
         if Request::ini_verdict(name, value) == IniVerdict::Rejected {
@@ -12930,11 +13860,13 @@ impl Request {
             .is_none_or(|decl| decl.user)
     }
 
-    /// Whether an entry's `modifiable` carries `PHP_INI_USER`, what
-    /// `ini_set()` asks: every entry of the table is `PHP_INI_ALL` but
-    /// `xmlrpc_errors`, `sys_temp_dir`, `sendmail_path`, `syslog.facility`,
-    /// `syslog.ident` and `disable_functions`, `PHP_INI_SYSTEM`
-    /// (`Z/main/main.c:806-890`), and
+    /// A core entry's `modifiable` bits as [`IniDecl`] spells them,
+    /// `PHP_INI_USER`, `PHP_INI_PERDIR` and `PHP_INI_SYSTEM`; the first
+    /// is what `ini_set()` asks: every entry of the table is
+    /// `PHP_INI_ALL` but `xmlrpc_errors`, `sys_temp_dir`,
+    /// `sendmail_path`, `syslog.facility`, `syslog.ident`,
+    /// `disable_functions`, `enable_dl` and `extension_dir`,
+    /// `PHP_INI_SYSTEM` (`Z/main/main.c:806-890`), and
     /// `short_open_tag` and the four `mail.*` beside `sendmail_path`,
     /// `PHP_INI_SYSTEM|PHP_INI_PERDIR` (`Z/main/main.c:820-871`).
     ///
@@ -12950,22 +13882,20 @@ impl Request {
     /// bool(true)
     /// int(3)
     /// ```
-    fn ini_modifiable(name: &[u8]) -> bool {
-        !matches!(
-            name,
-            b"xmlrpc_errors"
-                | b"short_open_tag"
-                | b"sys_temp_dir"
-                | b"mail.add_x_header"
-                | b"mail.mixed_lf_and_crlf"
-                | b"mail.cr_lf_mode"
-                | b"mail.log"
-                | b"sendmail_path"
-                | b"mail.force_extra_parameters"
-                | b"syslog.facility"
-                | b"syslog.ident"
-                | b"disable_functions"
-        )
+    fn ini_modifiable(name: &[u8]) -> (bool, bool, bool) {
+        match name {
+            b"xmlrpc_errors" | b"sys_temp_dir" | b"sendmail_path" | b"syslog.facility"
+            | b"syslog.ident" | b"disable_functions" | b"enable_dl" | b"extension_dir" => {
+                (false, false, true)
+            }
+            b"short_open_tag"
+            | b"mail.add_x_header"
+            | b"mail.mixed_lf_and_crlf"
+            | b"mail.cr_lf_mode"
+            | b"mail.log"
+            | b"mail.force_extra_parameters" => (false, true, true),
+            _ => (true, true, true),
+        }
     }
 
     /// What a core entry's `on_modify` says of a new value before
@@ -13008,18 +13938,70 @@ impl Request {
         }
     }
 
-    /// `ini_get_all()`: every entry with its current value, as strings
-    /// of the request's.
-    pub fn ini_entries(&mut self) -> Result<PhpArray, Thrown> {
-        let mut array = PhpArray::new(self)?;
-        let shared = Arc::clone(&self.shared);
-        for (name, default) in shared.ini_defaults() {
-            let value = self.ini_get(name).unwrap_or(default).to_vec();
-            let key = Key::Str(PhpString::new(self, name)?);
-            let value = Value::string(PhpString::new(self, &value)?);
-            array.set(self, key, value)?;
-        }
-        Ok(array)
+    /// `EG(ini_directives)`, what `ini_get_all()` walks: the engine's
+    /// own entries, registered with `module_number` zero before any
+    /// `MINIT`, then each extension's in bundle order, each as
+    /// [`Request::extension_ini`] reads one. A core entry's `modifiable`
+    /// bits are the table's ([`Request::ini_modifiable`]).
+    ///
+    /// ```php
+    /// ini_set('precision', '10');
+    /// var_dump(ini_get_all(null)['precision'], ini_get_all(null)['enable_dl'], ini_get_all('pcre', false));
+    /// ```
+    /// ```expect
+    /// array(3) {
+    ///   ["global_value"]=>
+    ///   string(2) "14"
+    ///   ["local_value"]=>
+    ///   string(2) "10"
+    ///   ["access"]=>
+    ///   int(7)
+    /// }
+    /// array(3) {
+    ///   ["global_value"]=>
+    ///   string(1) "1"
+    ///   ["local_value"]=>
+    ///   string(1) "1"
+    ///   ["access"]=>
+    ///   int(4)
+    /// }
+    /// array(3) {
+    ///   ["pcre.backtrack_limit"]=>
+    ///   string(7) "1000000"
+    ///   ["pcre.jit"]=>
+    ///   string(1) "1"
+    ///   ["pcre.recursion_limit"]=>
+    ///   string(6) "100000"
+    /// }
+    /// ```
+    #[must_use]
+    pub fn ini_entries(&self) -> Vec<IniEntry> {
+        let owned = |name: &[u8]| {
+            self.shared
+                .extensions
+                .iter()
+                .any(|e| e.ini.iter().any(|entry| entry.name.0.as_ref() == name))
+        };
+        let core = self
+            .shared
+            .ini_defaults()
+            .iter()
+            .filter(|(name, _)| !owned(name))
+            .map(|(name, default)| {
+                let (user, per_dir, system) = Request::ini_modifiable(name);
+                let decl = IniDecl {
+                    name: Name(name.as_slice().into()),
+                    default: default.as_slice().into(),
+                    user,
+                    per_dir,
+                    system,
+                };
+                self.ini_entry(decl, None)
+            });
+        let extensions = (0..self.shared.extensions.len())
+            .filter_map(|at| u32::try_from(at).ok())
+            .flat_map(|at| self.extension_ini(ExtensionId(at)));
+        core.chain(extensions).collect()
     }
 
     /// `zend_ini_parse_bool`: `1`, `on`, `yes`, `true` are true.
@@ -13033,20 +14015,93 @@ impl Request {
                     .is_ok_and(|n| n != 0)
     }
 
-    /// `zend_ini_parse_quantity`: a byte count with an optional `K`, `M`
-    /// or `G` suffix; `-1` and other text parse as php's `atoi` would.
+    /// `cfg_get_entry` as `get_cfg_var()` hands it back
+    /// (`Z/ext/standard/basic_functions.c:1306`): the row of
+    /// `configuration_hash` under `name`, what the host's ini text set
+    /// before any entry read it, a string or the array its `name[]=`
+    /// lines built, as strings of the request's; `None` where the text
+    /// set nothing under the name, a default no text named included.
+    ///
+    /// ```php
+    /// var_dump(get_cfg_var('precision'), get_cfg_var('highlight.string'), get_cfg_var('nope'));
+    /// ```
+    /// ```expect
+    /// string(2) "14"
+    /// bool(false)
+    /// bool(false)
+    /// ```
+    pub fn cfg_entry(&mut self, name: &[u8]) -> Result<Option<Value>, Thrown> {
+        let shared = Arc::clone(&self.shared);
+        let Some(entry) = shared.configured(name) else {
+            return Ok(None);
+        };
+        Ok(Some(match entry {
+            Configured::Str(bytes) => Value::string(PhpString::new(self, bytes)?),
+            Configured::Array(rows) => {
+                let mut array = PhpArray::new(self)?;
+                for (key, bytes) in rows {
+                    let key = match key {
+                        ConfiguredKey::Index(n) => Key::Int(*n),
+                        ConfiguredKey::Name(name) => Key::Str(PhpString::new(self, name)?),
+                    };
+                    let value = Value::string(PhpString::new(self, bytes)?);
+                    array.set(self, key, value)?;
+                }
+                Value::array(array)
+            }
+        }))
+    }
+
+    /// `zend_ini_parse_quantity`'s value alone, what `OnUpdateLong`
+    /// stores for a whole-number entry: [`Request::ini_parse_quantity`]
+    /// with the sentence it would say left unsaid.
     #[must_use]
     pub fn ini_parse_bytes(value: &[u8]) -> i64 {
-        let text = String::from_utf8_lossy(value);
-        let text = text.trim();
-        let (digits, shift) = match text.chars().last().map(|c| c.to_ascii_lowercase()) {
-            Some('k') => (&text[..text.len() - 1], 10),
-            Some('m') => (&text[..text.len() - 1], 20),
-            Some('g') => (&text[..text.len() - 1], 30),
-            _ => (text, 0),
-        };
-        let n: i64 = digits.trim().parse().unwrap_or(0);
-        n.checked_shl(shift).unwrap_or(i64::MAX)
+        crate::ini_quantity::parse(value).0
+    }
+
+    /// `zend_ini_parse_quantity` (`Z/Zend/zend_ini.c:613-841`): leading
+    /// and trailing whitespace ignored, an optional sign, a base prefix
+    /// (`0x`, `0o`, `0b`) or `strtoull`'s own reading under base zero,
+    /// where a leading `0` is octal, whitespace, and an optional `K`,
+    /// `M` or `G` read off the last byte; with the value, the sentence
+    /// php's `errstr` holds for a shape it interprets for backwards
+    /// compatibility, which `ini_parse_quantity()` raises as a warning
+    /// and an entry's `on_modify` as its own.
+    ///
+    /// ```php
+    /// foreach (['1M', ' 2k ', '0x10', '010', '0b101', '-0x0B', '', '1.5M', 'abc', '0x', '0z1', '5 KB', '99999999999999999999'] as $q) var_dump(ini_parse_quantity($q));
+    /// ```
+    /// ```expect
+    /// int(1048576)
+    /// int(2048)
+    /// int(16)
+    /// int(8)
+    /// int(5)
+    /// int(-11)
+    /// int(0)
+    ///
+    /// Warning: Invalid quantity "1.5M", interpreting as "1M" for backwards compatibility in %s on line 2
+    /// int(1048576)
+    ///
+    /// Warning: Invalid quantity "abc": no valid leading digits, interpreting as "0" for backwards compatibility in %s on line 2
+    /// int(0)
+    ///
+    /// Warning: Invalid quantity "0x": no digits after base prefix, interpreting as "0" for backwards compatibility in %s on line 2
+    /// int(0)
+    ///
+    /// Warning: Invalid prefix "0z", interpreting as "0" for backwards compatibility in %s on line 2
+    /// int(0)
+    ///
+    /// Warning: Invalid quantity "5 KB": unknown multiplier "B", interpreting as "5 " for backwards compatibility in %s on line 2
+    /// int(5)
+    ///
+    /// Warning: Invalid quantity "99999999999999999999": value is out of range, using overflow result for backwards compatibility in %s on line 2
+    /// int(-1)
+    /// ```
+    #[must_use]
+    pub fn ini_parse_quantity(value: &[u8]) -> (i64, Option<String>) {
+        crate::ini_quantity::parse(value)
     }
 
     // -------------------------------------------------- environment
@@ -13085,16 +14140,20 @@ impl Request {
             .map(|(_, a)| a)
     }
 
-    /// Replace a superglobal, what the GPC seeding and `session_start` do.
-    pub fn set_superglobal(&mut self, name: &[u8], value: PhpArray) {
-        self.superglobals.retain(|(n, _)| n.as_slice() != name);
-        self.superglobals.push((name.to_vec(), value));
-    }
-
     /// `php_sapi_name()`: `sapi_module.name`.
     #[must_use]
     pub fn sapi_name(&self) -> &str {
         &self.description.sapi_name
+    }
+
+    /// The host's `argv`, `php_self` first: what `php_build_argv` puts in
+    /// `$_SERVER['argv']` (`Z/main/php_variables.c:657-713`), which a
+    /// write to `$_SERVER` from PHP code leaves as it was, and which
+    /// `getopt` reads; empty for a host that described none, php's web
+    /// hosts.
+    #[must_use]
+    pub fn argv(&self) -> &[Vec<u8>] {
+        &self.description.argv
     }
 
     /// The file the request serves, `$_SERVER['SCRIPT_NAME']`.
@@ -13156,10 +14215,17 @@ impl Request {
         std::mem::replace(&mut self.umask, mask)
     }
 
-    /// `strerror` text for an OS error code, as php's `%s` of it.
+    /// `strerror` text for an OS error code, as php's `%s` of it: the
+    /// system's sentence alone, without the ` (os error N)` Rust's
+    /// rendering of an OS error puts after it.
     #[must_use]
     pub fn os_error_text(&self, code: i32) -> String {
-        std::io::Error::from_raw_os_error(code).to_string()
+        let text = std::io::Error::from_raw_os_error(code).to_string();
+        let suffix = format!(" (os error {code})");
+        match text.strip_suffix(&suffix) {
+            Some(sentence) => sentence.to_owned(),
+            None => text,
+        }
     }
 
     /// `parse_str()`: a query string as an array, its strings the
@@ -13193,7 +14259,42 @@ impl Request {
     /// callback and the arguments are the entry's owners from here,
     /// given up by [`Request::free_shutdown_functions`].
     pub fn register_shutdown_function(&mut self, callback: Callable, arguments: Vec<Value>) {
-        self.shutdown_functions.push((callback, arguments));
+        self.shutdown_functions.push((None, callback, arguments));
+    }
+
+    /// `register_user_shutdown_function` and
+    /// `remove_user_shutdown_function` (`Z/ext/standard/basic_functions.c`),
+    /// the entry an extension keeps under a name of its own: `Some`
+    /// replaces the entry of that name where it stands, which
+    /// `zend_hash_str_update_mem` keeps in its place, or appends one;
+    /// `None` removes it. The owners are the list's as
+    /// [`Request::register_shutdown_function`]'s, and what an entry held
+    /// is given up where it goes. The session's `session_shutdown` is the
+    /// witness, in `ext/session`.
+    pub fn set_shutdown_function(&mut self, name: &[u8], entry: Option<(Callable, Vec<Value>)>) {
+        let at = self
+            .shutdown_functions
+            .iter()
+            .position(|(key, _, _)| key.as_deref() == Some(name));
+        let old = match (at, entry) {
+            (Some(at), Some((callback, arguments))) => Some(std::mem::replace(
+                &mut self.shutdown_functions[at],
+                (Some(name.to_vec()), callback, arguments),
+            )),
+            (Some(at), None) => Some(self.shutdown_functions.remove(at)),
+            (None, Some((callback, arguments))) => {
+                self.shutdown_functions
+                    .push((Some(name.to_vec()), callback, arguments));
+                None
+            }
+            (None, None) => None,
+        };
+        if let Some((_, callback, arguments)) = old {
+            callback.release(self);
+            for value in arguments {
+                self.release(value);
+            }
+        }
     }
 
     /// The registered entry at `at`, as `zend_hash_apply` reaches it:
@@ -13202,7 +14303,9 @@ impl Request {
     /// while it runs is reached by the same walk. `None` past the end
     /// is what ends it.
     pub(crate) fn shutdown_function(&self, at: usize) -> Option<(Callable, Vec<Value>)> {
-        self.shutdown_functions.get(at).cloned()
+        self.shutdown_functions
+            .get(at)
+            .map(|(_, callback, arguments)| (callback.clone(), arguments.clone()))
     }
 
     /// `php_free_shutdown_functions` (`Z/ext/standard/basic_functions.c:1660`),
@@ -13211,7 +14314,7 @@ impl Request {
     /// released, which is `user_shutdown_function_dtor` over the
     /// destroyed table.
     pub(crate) fn free_shutdown_functions(&mut self) {
-        for (callback, arguments) in std::mem::take(&mut self.shutdown_functions) {
+        for (_, callback, arguments) in std::mem::take(&mut self.shutdown_functions) {
             callback.release(self);
             for value in arguments {
                 self.release(value);
@@ -13219,17 +14322,31 @@ impl Request {
         }
     }
 
-    /// `register_tick_function()`.
+    /// `register_tick_function()`: the callable and its arguments held,
+    /// with the owners `zend_fcc_addref` and `ZVAL_COPY` take, in
+    /// `BG(user_tick_functions)`.
     pub fn register_tick_function(&mut self, callback: Callable, arguments: Vec<Value>) -> bool {
+        callback.addref(self);
+        for value in &arguments {
+            self.addref(value);
+        }
         self.tick_functions.push((callback, arguments));
         true
     }
 
-    /// `unregister_tick_function()`.
+    /// `unregister_tick_function()`: `zend_llist_del_element`, the first
+    /// entry for the same callee, scope and object dropped and its
+    /// owners given up.
     pub fn unregister_tick_function(&mut self, callback: &Callable) -> bool {
-        let before = self.tick_functions.len();
-        self.tick_functions.retain(|(c, _)| c != callback);
-        self.tick_functions.len() != before
+        let Some(at) = self.tick_functions.iter().position(|(c, _)| c == callback) else {
+            return false;
+        };
+        let (held, arguments) = self.tick_functions.remove(at);
+        held.release(self);
+        for value in arguments {
+            self.release(value);
+        }
+        true
     }
 
     // -------------------------------------------------- memory and gc
@@ -13640,12 +14757,70 @@ impl Request {
         }
     }
 
-    /// `realpath()`: `None` where the path does not exist.
+    /// `VCWD_REALPATH`, `tsrm_realpath`: the path against the request's
+    /// working directory with every link resolved, through the realpath
+    /// cache; `None` where the path does not exist.
+    pub fn realpath(&mut self, path: &[u8]) -> Option<HostPath> {
+        let cwd = self.cwd.as_os_str().as_encoded_bytes().to_vec();
+        let real = self.virtual_file_ex(&cwd, path, Resolve::RealPath)?;
+        Some(HostPath(PathBuf::from(std::ffi::OsStr::from_bytes(&real))))
+    }
+
+    /// `virtual_file_ex(state, path, NULL, how)` (`Z/Zend/zend_virtual_cwd.c:1007`)
+    /// with `state` the directory `cwd`: `path` made absolute against it
+    /// where it is relative (and left relative where `cwd` is empty),
+    /// `.` and `..` taken out, and under [`Resolve::FilePath`] and
+    /// [`Resolve::RealPath`] each link resolved, `tsrm_realpath_r`, every
+    /// absolute path met entered in and read from the realpath cache;
+    /// `None` where php answers `1`, an empty path, one of `MAXPATHLEN`
+    /// bytes or more, and under `RealPath` one that is not there.
+    ///
+    /// ```php
+    /// $dir = dirname(realpath(__FILE__));
+    /// var_dump(realpath_cache_size() > 0, isset(realpath_cache_get()[$dir]), realpath_cache_get()[$dir]['is_dir'], realpath_cache_get()[$dir]['realpath'] === realpath($dir));
+    /// clearstatcache(true, $dir); var_dump(isset(realpath_cache_get()[$dir]));
+    /// clearstatcache(true); var_dump(realpath_cache_size(), realpath_cache_get());
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// int(0)
+    /// array(0) {
+    /// }
+    /// ```
+    pub fn virtual_file_ex(&mut self, cwd: &[u8], path: &[u8], how: Resolve) -> Option<Vec<u8>> {
+        crate::virtual_cwd::virtual_file_ex(&mut self.realpath_cache, cwd, path, how)
+    }
+
+    /// `CWDG(realpath_cache)` as `realpath_cache_get()` walks it, slot by
+    /// slot and each chain newest first: each bucket's path as it was
+    /// written, what it resolved to, its key, whether it is a directory,
+    /// when it expires, and the bytes `realpath_cache_size()` counts it as.
     #[must_use]
-    pub fn realpath(&self, path: &[u8]) -> Option<HostPath> {
-        std::fs::canonicalize(self.absolutize(path).0)
-            .ok()
-            .map(HostPath)
+    pub fn realpath_cache(&self) -> Vec<RealpathEntry> {
+        self.realpath_cache
+            .buckets()
+            .map(|bucket| RealpathEntry {
+                path: bucket.path.clone(),
+                realpath: bucket.realpath.clone(),
+                key: bucket.key,
+                is_dir: bucket.is_dir,
+                expires: bucket.expires,
+                size: bucket.size(),
+            })
+            .collect()
+    }
+
+    /// `clearstatcache(true, ...)`'s half: `realpath_cache_del` of one
+    /// path, or with none `realpath_cache_clean`.
+    pub fn realpath_cache_clear(&mut self, path: Option<&[u8]>) {
+        match path {
+            Some(path) => self.realpath_cache.delete(path),
+            None => self.realpath_cache.clean(),
+        }
     }
 
     /// The `open_basedir` guard Mahout's `check_fs_access` performed at
@@ -13714,6 +14889,31 @@ impl Request {
         use_include_path: bool,
     ) -> Result<Option<Stream>, Thrown> {
         self.open_stream_wrapper(path, mode, use_include_path)
+    }
+
+    /// `php_stream_open_wrapper_ex(url, mode, REPORT_ERRORS |
+    /// STREAM_USE_URL)`, what `get_headers()` opens: [`Request::open_stream`]
+    /// for a path whose wrapper is a URL wrapper, and for any other php's
+    /// warning that the function may only be used against URLs, and
+    /// `None`.
+    ///
+    /// ```php
+    /// var_dump(get_headers(__FILE__), get_headers("php://memory"), get_headers("foo://x"));
+    /// ```
+    /// ```expect
+    /// Warning: get_headers(): This function may only be used against URLs in %s on line 2
+    ///
+    /// Warning: get_headers(): This function may only be used against URLs in %s on line 2
+    ///
+    /// Warning: get_headers(): Unable to find the wrapper "foo" - did you forget to enable it when you configured PHP? in %s on line 2
+    ///
+    /// Warning: get_headers(): This function may only be used against URLs in %s on line 2
+    /// bool(false)
+    /// bool(false)
+    /// bool(false)
+    /// ```
+    pub fn open_url(&mut self, url: &[u8], mode: &[u8]) -> Result<Option<Stream>, Thrown> {
+        self.open_url_wrapper(url, mode)
     }
 
     /// `php_stream_alloc(ops, abstract, 0, mode)`: a stream of a kind the
@@ -14337,6 +15537,18 @@ mod tests {
         assert_eq!(served.fatal, None);
     }
 
+    /// `strerror(ENOENT)` is the sentence alone, which php prints inside
+    /// `open(%s, O_RDWR) failed: %s (%d)` and every message like it.
+    #[test]
+    fn os_error_text_is_strerror() {
+        let engine = Engine::builder().build();
+        let req = Request::new(
+            std::sync::Arc::clone(&engine.shared),
+            RequestDescription::default(),
+        );
+        assert_eq!(req.os_error_text(2), "No such file or directory");
+    }
+
     /// An extension entry's `on_modify` (`PHP_INI_MH` at
     /// `ZEND_INI_STAGE_RUNTIME`) as `ini_set()` serves it: before the
     /// value is taken, what it raises raised, and its refusal leaving the
@@ -14379,6 +15591,55 @@ mod tests {
         assert!(
             out.ends_with("string(1) \"1\"\nbool(false)\nstring(1) \"0\"\n"),
             "{out}"
+        );
+    }
+
+    /// The same `on_modify` at `ZEND_INI_STAGE_STARTUP`, over the value
+    /// the host set (`zend_register_ini_entries_ex`): a value it refuses
+    /// leaves the entry at its default, for `ini_get()` and for what
+    /// `ini_set()` answers was there, and its docref is raised
+    /// first in every request as `PHP Startup: …` at no file; a value
+    /// it takes is the entry's.
+    #[test]
+    fn a_startup_value_the_on_modify_refuses_keeps_the_default() {
+        #[allow(clippy::unnecessary_wraps)] // `OnModify`'s signature
+        fn guarded(req: &mut Request, value: &[u8]) -> Result<bool, crate::api::raising::Thrown> {
+            if value == b"bad" {
+                crate::api::raising::docref(req, Level::Warning, "t.flag refused");
+                return Ok(false);
+            }
+            Ok(true)
+        }
+        let extension = || {
+            crate::api::abi::ExtensionBuilder::default()
+                .ini(vec![php_unit::decl::IniDecl {
+                    name: php_unit::decl::Name(b"t.flag".as_slice().into()),
+                    default: b"1".as_slice().into(),
+                    user: true,
+                    per_dir: true,
+                    system: true,
+                }])
+                .on_modify(b"t.flag", guarded)
+                .build("modified")
+        };
+        let script = "<?php var_dump(ini_get('t.flag'), ini_set('t.flag', '3'));";
+        let refused = Engine::builder()
+            .extensions(&[extension()])
+            .ini("t.flag", "bad")
+            .build()
+            .serve_capture(script, crate::test::Capture::default());
+        assert_eq!(
+            String::from_utf8_lossy(&refused.stdout),
+            "\nWarning: PHP Startup: t.flag refused in Unknown on line 0\nstring(1) \"1\"\nstring(1) \"1\"\n"
+        );
+        let taken = Engine::builder()
+            .extensions(&[extension()])
+            .ini("t.flag", "2")
+            .build()
+            .serve_capture(script, crate::test::Capture::default());
+        assert_eq!(
+            String::from_utf8_lossy(&taken.stdout),
+            "string(1) \"2\"\nstring(1) \"2\"\n"
         );
     }
 

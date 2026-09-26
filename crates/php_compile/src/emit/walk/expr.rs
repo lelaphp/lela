@@ -9,7 +9,9 @@
 //! after `=>`, the one `return` php makes of it
 //! (`zend_compile_func_decl`). A doc comment is the token index the
 //! builder recorded on the node; the `static` before the keyword is the
-//! first significant token of its range, php's `ZEND_ACC_STATIC`.
+//! first significant token of its range, php's `ZEND_ACC_STATIC`. The
+//! attributes written before either are the closure's own, compiled at
+//! its declaration as a function's are (`zend_compile_func_decl`).
 
 use super::{Closure, Emit, Function, Use, unread};
 use crate::CompileError;
@@ -40,9 +42,7 @@ impl Emit<'_> {
         line: u32,
     ) -> Result<Closure, CompileError> {
         let node = self.parsed.tree[id].clone();
-        if !node.attrs.is_empty() {
-            return Err(unread(line, "an attribute before a closure"));
-        }
+        let attributes = self.walk_attributes(&node.attrs)?;
         let is_static = self.first_kind(node.range) == Some(SyntaxKind::STATIC_KW);
         let mut lexical = Vec::new();
         if let Some(clause) = node.uses {
@@ -67,7 +67,10 @@ impl Emit<'_> {
             node.range,
         )?;
         Ok(Closure {
-            function,
+            function: Function {
+                attributes,
+                ..function
+            },
             uses: lexical,
             is_static,
             arrow: None,
@@ -80,9 +83,7 @@ impl Emit<'_> {
     /// the body's (#601 row 18).
     fn arrow_fn(&mut self, id: NodeId<ArrowFnExpr>, line: u32) -> Result<Closure, CompileError> {
         let node = self.parsed.tree[id].clone();
-        if !node.attrs.is_empty() {
-            return Err(unread(line, "an attribute before an arrow function"));
-        }
+        let attributes = self.walk_attributes(&node.attrs)?;
         let is_static = self.first_kind(node.range) == Some(SyntaxKind::STATIC_KW);
         let parameters = self.walk_parameters(node.params)?;
         let return_type = match node.ret {
@@ -102,7 +103,7 @@ impl Emit<'_> {
                 return_type,
                 by_ref: node.byref.is_some(),
                 body: Vec::new(),
-                attributes: Vec::new(),
+                attributes,
                 doc_comment: self.doc_comment(node.doc_comment),
                 line,
                 end_line: self.line_after(node.range),

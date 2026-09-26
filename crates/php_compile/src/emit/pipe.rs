@@ -101,7 +101,10 @@ impl Emit<'_> {
         let arguments = Args::of(&[operand], line);
         let callable = self.peel(callable);
         if let tree::Expr::CallExpr(id) = callable
-            && self.is_callable_convert(self.parsed.tree[id].args)
+            && matches!(
+                self.arguments(self.parsed.tree[id].args, line)?,
+                Args::CallableConvert
+            )
         {
             match self.peel(self.parsed.tree[id].callee) {
                 tree::Expr::NameRef(token) => {
@@ -132,15 +135,6 @@ impl Emit<'_> {
         let callee = self.expr(callable)?;
         self.znodes.push((callable, callee));
         self.call_var(callable, &arguments)
-    }
-
-    /// Whether an argument list is `(...)` alone, php's
-    /// `ZEND_AST_CALLABLE_CONVERT`.
-    pub(super) fn is_callable_convert(&self, args: tree::NodeId<tree::ArgList>) -> bool {
-        matches!(
-            self.parsed.tree[args].args.as_ref(),
-            [tree::Arg::VariadicPlaceholder(_)]
-        )
     }
 
     /// The value php's `ZEND_AST_ZNODE` holds for `expr`, where

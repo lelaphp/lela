@@ -6,7 +6,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use php_ext::raising::{Level, Thrown, deprecated as raise_deprecated, docref};
+use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, Value};
 
@@ -708,15 +708,6 @@ pub(crate) fn getdate(req: &mut Request) -> Result<Value, Thrown> {
 /// locale: C's `strftime(3)` over the `struct tm` php fills, which is
 /// the locale-independent part #640 leaves here.
 fn php_strftime(req: &mut Request, gmt: bool) -> Result<Value, Thrown> {
-    // `zend_deprecated_function`, raised by the call before the body
-    // runs, as the stub's `#[\Deprecated]` asks.
-    let name = if gmt { "gmstrftime" } else { "strftime" };
-    raise_deprecated(
-        req,
-        &format!(
-            "Function {name}() is deprecated since 8.1, use IntlDateFormatter::format() instead"
-        ),
-    );
     count_between(req, 1, 2)?;
     let format = string(req, 1)?.as_bytes().to_vec();
     let ts = nullable_long(req, 2)?;

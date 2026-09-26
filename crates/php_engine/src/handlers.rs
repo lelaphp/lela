@@ -58,7 +58,7 @@
 use php_heap::{Fatal, FrameRef};
 use php_unit::{CacheSlot, ConstIdx, OpArray, OperandKind, Opline};
 
-use crate::api::abi::{PropertyPlace, PropertyRead, PropertyTest};
+use crate::api::abi::{DimensionRead, PropertyPlace, PropertyRead, PropertyTest};
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::request::{Opened, Request};
@@ -484,6 +484,100 @@ pub(crate) fn declare_const<T: Tier>(
             Ok(Stepped::Threw(frame))
         }
     }
+}
+
+/// `ZEND_DECLARE_ATTRIBUTED_CONST` (`Z/Zend/zend_vm_def.h:8301`), the
+/// opline `zend_compile_const_decl` leaves for a `const` written with
+/// attributes: [`declare_const`]'s registration, then
+/// `zend_constant_add_attributes` over the attributes of the
+/// declaration the `OP_DATA` after it names, which raises
+/// `CONST_DEPRECATED` from a `#[\Deprecated]` among them; both oplines
+/// stepped over (`ZEND_VM_NEXT_OPCODE_EX(1, 2)`). A name that stands
+/// already warns as `DECLARE_CONST` does and keeps what it had, its
+/// attributes too.
+///
+/// ```php
+/// #[\MyAttribute]
+/// const MY_CONST = "Has attributes (1)";
+/// #[\MyOtherAttribute]
+/// const MY_CONST = "Has attributes (2)";
+/// echo MY_CONST, "\n";
+/// echo (new ReflectionConstant('MY_CONST'))->getAttributes()[0]->getName(), "\n";
+/// ```
+/// ```expect
+/// Warning: Constant MY_CONST already defined, this will be an error in PHP 9 in %s on line 5
+/// Has attributes (1)
+/// MyAttribute
+/// ```
+///
+/// ```php
+/// #[Deprecated]
+/// const OLD = 1;
+/// var_dump((new ReflectionConstant('OLD'))->isDeprecated());
+/// echo OLD, "\n";
+/// ```
+/// ```expect
+/// bool(true)
+///
+/// Deprecated: Constant OLD is deprecated in %s on line 5
+/// 1
+/// ```
+pub(crate) fn declare_attributed_const<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let at = req.vm().opline(frame);
+    let data = exec::opline_at(code, at.saturating_add(1))
+        .filter(|next| next.opcode == Opcode::OpData && next.op1_type == OperandKind::Const);
+    let (Some(written), Some(data)) = (
+        exec::constant(code, ConstIdx(op.op1))
+            .as_str_bytes()
+            .map(<[u8]>::to_vec),
+        data,
+    ) else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: a DECLARE_ATTRIBUTED_CONST with no name or no OP_DATA after it",
+        )));
+    };
+    let Some(serving) = req.vm().serving(frame) else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: a DECLARE_ATTRIBUTED_CONST on a frame serving no op array",
+        )));
+    };
+    let Some(decl) = code
+        .literals
+        .get(data.op1 as usize)
+        .and_then(|literal| literal.as_ptr())
+        .and_then(|index| serving.unit.constants.get(index as usize))
+    else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: a DECLARE_ATTRIBUTED_CONST whose OP_DATA names no declaration",
+        )));
+    };
+    let attributes = decl.attributes.clone();
+    let value = exec::constant(code, ConstIdx(op.op2));
+    let mut key = written;
+    if let Some(slash) = key.iter().rposition(|b| *b == b'\\') {
+        key[..slash].make_ascii_lowercase();
+    }
+    req.addref(&value);
+    if !req.define_attributed_constant(&key, value, attributes) {
+        req.release(value);
+        crate::api::raising::warning(
+            req,
+            &format!(
+                "Constant {} already defined, this will be an error in PHP 9",
+                String::from_utf8_lossy(&key)
+            ),
+        );
+    }
+    req.vm_mut().jump(frame, at.saturating_add(2));
+    if req.is_pending() {
+        return Ok(Stepped::Threw(frame));
+    }
+    Ok(Stepped::Same(frame))
 }
 
 /// `ZEND_DECLARE_LAMBDA_FUNCTION` (`Z/Zend/zend_vm_def.h:8343`):
@@ -1138,9 +1232,9 @@ pub(crate) fn init_dynamic_call<T: Tier>(
     let resolved = if let Some(object) = callee.as_object().copied() {
         dynamic_call_object(req, object)
     } else if let Some(name) = callee.as_str_bytes().map(<[u8]>::to_vec) {
-        dynamic_call_string(req, &name)
+        dynamic_call_string(req, &name, req.vm().this(frame))
     } else if let Some(array) = callee.as_array().copied() {
-        dynamic_call_array(req, array)
+        dynamic_call_array(req, array, req.vm().this(frame))
     } else {
         Err(crate::api::raising::throw(
             req,
@@ -1239,14 +1333,18 @@ fn dynamic_call_object(req: &mut Request, object: PhpObject) -> Result<DynamicTa
 /// php's refusal of an instance method named on the class; any other
 /// string is the function of that name with a leading `\` skipped, and
 /// the `Error` naming it as written where there is none.
-fn dynamic_call_string(req: &mut Request, name: &[u8]) -> Result<DynamicTarget, Thrown> {
+fn dynamic_call_string(
+    req: &mut Request,
+    name: &[u8],
+    this: Option<PhpObject>,
+) -> Result<DynamicTarget, Thrown> {
     let split = name
         .windows(2)
         .rposition(|pair| pair == b"::")
         .filter(|at| *at > 0);
     if let Some(at) = split {
         let class = dynamic_call_class(req, &name[..at])?;
-        return dynamic_call_static(req, class, &name[at + 2..]);
+        return dynamic_call_static(req, class, &name[at + 2..], this);
     }
     let bare = name.strip_prefix(b"\\").unwrap_or(name);
     let Some(function) = exec::find_function(req, &bare.to_ascii_lowercase()) else {
@@ -1275,7 +1373,11 @@ fn dynamic_call_string(req: &mut Request, name: &[u8]) -> Result<DynamicTarget, 
 /// finds it, an object's through its `get_method` with the access rule
 /// `zend_std_get_method` holds it to, a `static` method on an object
 /// called with no receiver.
-fn dynamic_call_array(req: &mut Request, array: PhpArray) -> Result<DynamicTarget, Thrown> {
+fn dynamic_call_array(
+    req: &mut Request,
+    array: PhpArray,
+    this: Option<PhpObject>,
+) -> Result<DynamicTarget, Thrown> {
     let refuse = |req: &mut Request, text: &str| crate::api::raising::throw(req, "Error", text);
     if array.len() != 2 {
         return Err(refuse(req, "Array callback must have exactly two elements"));
@@ -1298,7 +1400,7 @@ fn dynamic_call_array(req: &mut Request, array: PhpArray) -> Result<DynamicTarge
     };
     if let Some(class) = first.as_str_bytes().map(<[u8]>::to_vec) {
         let class = dynamic_call_class(req, &class)?;
-        return dynamic_call_static(req, class, &method);
+        return dynamic_call_static(req, class, &method, this);
     }
     let Some(object) = first.as_object().copied() else {
         return Err(refuse(
@@ -1308,11 +1410,20 @@ fn dynamic_call_array(req: &mut Request, array: PhpArray) -> Result<DynamicTarge
     };
     let class = object.class();
     let table = req.object_handlers(object.heap());
-    let Some(function) = table.get_method(req, object, &method.to_ascii_lowercase()) else {
+    let found = table
+        .get_method(req, object, &method.to_ascii_lowercase())
+        .or_else(|| req.call_trampoline(class, &method, false));
+    let Some(function) = found else {
         let written = Value::string(PhpString::new(req, &method)?);
         let thrown = undefined_method(req, class, &written);
         req.release(written);
         return Err(thrown);
+    };
+    let function = if req.method_accessible(function) {
+        function
+    } else {
+        req.call_trampoline(class, &method, false)
+            .unwrap_or(function)
     };
     req.check_method_access(function, &method)?;
     let name = PhpString::new(req, &method)?;
@@ -1360,16 +1471,12 @@ fn dynamic_call_static(
     req: &mut Request,
     class: crate::api::values::ClassId,
     method: &[u8],
+    this: Option<PhpObject>,
 ) -> Result<DynamicTarget, Thrown> {
     let written = Value::string(PhpString::new(req, method)?);
-    let Some(function) = req.method_named(class, &method.to_ascii_lowercase()) else {
-        let thrown = undefined_method(req, class, &written);
-        req.release(written);
-        return Err(thrown);
-    };
+    let found = static_method(req, class, &method.to_ascii_lowercase(), &written, this);
     req.release(written);
-    req.check_method_access(function, method)?;
-    req.static_method_found(function)?;
+    let (function, _) = found?;
     if req
         .method_decl(function)
         .is_some_and(|decl| decl.is_instance)
@@ -3767,6 +3874,121 @@ pub(crate) fn verify_never_type<T: Tier>(
     threw(req, frame, &thrown)
 }
 
+/// `ZEND_CALLABLE_CONVERT` (`Z/Zend/zend_vm_def.h:9725`), the `(...)`
+/// of a first-class callable: the call the `INIT_*` before it began is
+/// made a closure by [`crate::classes::closure_from_frame`] and never
+/// served, and the call frame is let go, its receiver with it. So what
+/// the `INIT_*` resolved is what the closure holds: a method's receiver
+/// and its scope, the class a method was called on by `C::m(...)` as its
+/// called scope, a private method reached from its own class, and a
+/// closure called through `$f(...)` or `->__invoke(...)` itself.
+///
+/// ```php
+/// class P {
+///     private function hidden($x) { return "hidden$x"; }
+///     function expose() { return $this->hidden(...); }
+///     static function who() { return static::class; }
+/// }
+/// class C extends P { public $v = 1; function m() { return $this->v; } }
+/// $c = new C;
+/// $m = $c->m(...);
+/// $who = C::who(...);
+/// $f = function () { return 'f'; };
+/// var_dump($m(), $c->expose()(1), $who(), $f(...) === $f, $f->__invoke(...) === $f);
+/// var_dump($m, $who);
+/// ```
+/// ```expect
+/// int(1)
+/// string(7) "hidden1"
+/// string(1) "C"
+/// bool(true)
+/// bool(true)
+/// object(Closure)#2 (2) {
+///   ["function"]=>
+///   string(4) "C::m"
+///   ["this"]=>
+///   object(C)#1 (1) {
+///     ["v"]=>
+///     int(1)
+///   }
+/// }
+/// object(Closure)#3 (1) {
+///   ["function"]=>
+///   string(6) "P::who"
+/// }
+/// ```
+///
+/// A name only `__call` or `__callStatic` answers is the trampoline the
+/// `INIT_*` resolved, and the closure is `zend_closure_call_magic` over
+/// it, which calls the magic method with the name, on the receiver or
+/// on the class the call named:
+///
+/// ```php
+/// class Foo {
+///     public function __call($method, $args) { return "$method(" . implode(',', $args) . ")"; }
+///     public static function __callStatic($method, $args) { return static::class . "::$method"; }
+/// }
+/// class Bar extends Foo {}
+/// $foo = new Foo;
+/// $i = $foo->anything(...);
+/// $s = Foo::anythingStatic(...);
+/// $b = Bar::anythingStatic(...);
+/// var_dump($i(1, 2), $s(), $b());
+/// ```
+/// ```expect
+/// string(13) "anything(1,2)"
+/// string(19) "Foo::anythingStatic"
+/// string(19) "Bar::anythingStatic"
+/// ```
+///
+/// What the `INIT_*` refuses stands, since the `CALLABLE_CONVERT` is
+/// never reached:
+///
+/// ```php
+/// class T { private static function p() {} function i() {} }
+/// foreach ([fn () => does_not_exist(...), fn () => T::p(...), fn () => T::i(...), fn () => (new stdClass)->nope(...)] as $make) {
+///     try { $make(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// Call to undefined function does_not_exist()
+/// Call to private method T::p() from global scope
+/// Non-static method T::i() cannot be called statically
+/// Call to undefined method stdClass::nope()
+/// ```
+pub(crate) fn callable_convert<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    let Some(call) = req.vm_mut().building_call() else {
+        return Err(Fatal::Error(String::from(
+            "InternalError: ZEND_CALLABLE_CONVERT with no call frame under it",
+        )));
+    };
+    let callee = match call.closure {
+        Some(closure) => crate::classes::CallFrame::Closure(closure),
+        None => crate::classes::CallFrame::Callee {
+            function: call.function,
+            this: call.this,
+            called_scope: call.called_scope,
+        },
+    };
+    let made = crate::classes::closure_from_frame(req, callee);
+    // `OBJ_RELEASE(Z_OBJ(call->This))` where `ZEND_CALL_RELEASE_THIS`,
+    // and `zend_vm_stack_free_call_frame`.
+    req.pop_call();
+    let made = match made {
+        Ok(made) => made,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    let slot = exec::temporary_slot(code, op.out);
+    let previous = req.set_slot(frame, slot, made.as_value());
+    req.release(previous);
+    Ok(advance(req, frame))
+}
+
 /// `zend_verify_arg_error` (`Z/Zend/zend_execute.c:707`): the `TypeError`
 /// a user function's argument of the wrong type raises. The sentence is
 /// `zend_argument_type_error`'s, `{fn}(): Argument #N ($name) must be of
@@ -4361,23 +4583,15 @@ pub(crate) fn init_static_method_call<T: Tier>(
         OperandKind::Const => {
             let written = exec::constant(code, ConstIdx(op.op2));
             let lowered = exec::constant(code, ConstIdx(op.op2.saturating_add(1)));
-            let Some(function) = lowered
-                .as_str_bytes()
-                .and_then(|lowered| req.method_named(class, lowered))
-            else {
-                let thrown = undefined_method(req, class, &written);
-                return threw(req, frame, &thrown);
-            };
-            if let Err(thrown) =
-                req.check_method_access(function, written.as_str_bytes().unwrap_or_default())
-            {
-                return threw(req, frame, &thrown);
-            }
-            match req.static_method_found(function) {
-                Ok(of_trait) => uncached = of_trait,
+            let lowered = lowered.as_str_bytes().unwrap_or_default().to_vec();
+            let this = req.vm().this(frame);
+            match static_method(req, class, &lowered, &written, this) {
+                Ok((function, never_cached)) => {
+                    uncached = never_cached;
+                    (function, Some(written))
+                }
                 Err(thrown) => return threw(req, frame, &thrown),
             }
-            (function, Some(written))
         }
         _ => return static_call_named(req, frame, code, op, class),
     };
@@ -4392,6 +4606,44 @@ pub(crate) fn init_static_method_call<T: Tier>(
         req.prime(frame, slot, Cached::ClassAndCallee { class, function });
     }
     static_call_frame(req, frame, op, class, function, name)
+}
+
+/// `zend_std_get_static_method` (`Z/Zend/zend_object_handlers.c:2040`)
+/// over a name the program wrote: the method `class` has under the
+/// lowered name where the scope may call it, the trampoline
+/// `get_static_method_fallback` answers where the class has none or the
+/// scope may not call it ([`Request::static_trampoline`], over `this`,
+/// the calling frame's receiver), and php's `Error` where neither
+/// serves, `Call to undefined method` or the access rule's; then the
+/// end [`Request::static_method_found`] holds a method to. The `bool`
+/// is whether php keeps the callee out of the cache slot: a
+/// trampoline, and a method named on a trait.
+fn static_method(
+    req: &mut Request,
+    class: crate::api::values::ClassId,
+    lowered: &[u8],
+    written: &Value,
+    this: Option<PhpObject>,
+) -> Result<(Function, bool), Thrown> {
+    let name = written.as_str_bytes().unwrap_or_default().to_vec();
+    let function = match req.method_named(class, lowered) {
+        Some(function) if req.method_accessible(function) => function,
+        Some(function) => {
+            if let Some(trampoline) = req.static_trampoline(class, &name, this) {
+                trampoline
+            } else {
+                req.check_method_access(function, &name)?;
+                function
+            }
+        }
+        None => match req.static_trampoline(class, &name, this) {
+            Some(trampoline) => trampoline,
+            None => return Err(undefined_method(req, class, written)),
+        },
+    };
+    let trampoline = req.trampoline_of(function).is_some();
+    let of_trait = req.static_method_found(function)?;
+    Ok((function, trampoline || of_trait))
 }
 
 /// `INIT_STATIC_METHOD_CALL` over a method the program names, once the
@@ -4411,16 +4663,12 @@ fn static_call_named(
         Ok(method) => method,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let written = method.written.as_str_bytes().unwrap_or_default();
-    let found = match req.method_named(class, &method.lowered) {
-        None => Err(undefined_method(req, class, &method.written)),
-        Some(function) => req
-            .check_method_access(function, written)
-            .and_then(|()| req.static_method_found(function))
-            .map(|_| function),
-    };
+    let this = req.vm().this(frame);
+    let found = static_method(req, class, &method.lowered, &method.written, this);
     let edge = match found {
-        Ok(function) => static_call_frame(req, frame, op, class, function, Some(method.written)),
+        Ok((function, _)) => {
+            static_call_frame(req, frame, op, class, function, Some(method.written))
+        }
         Err(thrown) => threw(req, frame, &thrown),
     };
     method.release(req);
@@ -4758,30 +5006,42 @@ pub(crate) fn init_method_call<T: Tier>(
 
 /// `obj->handlers->get_method(&obj, name, key)` and what
 /// `INIT_METHOD_CALL` holds the answer to: the method by its lowered
-/// name on the object, or on the receiver its class hands the call to
-/// instead ([`ObjectHandlers::method_receiver`]); `Call to undefined
-/// method X::m()` where neither has one, and `zend_std_get_method`'s
-/// access rule over the one found.
+/// name on the object, the trampoline of its class's `__call` where the
+/// class has no such method (`zend_std_get_method`), or the method on
+/// the receiver its class hands the call to instead
+/// ([`ObjectHandlers::method_receiver`]); `Call to undefined method
+/// X::m()` where none answers. A method the scope may not call is
+/// `__call`'s too where the class has one, and `zend_std_get_method`'s
+/// access rule's `Error` where it has none.
 fn method_on(
     req: &mut Request,
     object: PhpObject,
     method: &exec::MethodName,
 ) -> Result<(Function, Option<PhpObject>), Thrown> {
+    let written = method.written.as_str_bytes().unwrap_or_default().to_vec();
     let table = req.object_handlers(object.heap());
-    let found = table
-        .get_method(req, object, &method.lowered)
-        .map(|function| (function, None))
-        .or_else(|| {
-            let inner = table.method_receiver(req, object)?;
-            let inner_table = req.object_handlers(inner.heap());
-            inner_table
-                .get_method(req, inner, &method.lowered)
-                .map(|function| (function, Some(inner)))
-        });
+    let found = match table.get_method(req, object, &method.lowered) {
+        Some(function) => Some((function, None)),
+        None => match req.call_trampoline(object.class(), &written, false) {
+            Some(trampoline) => Some((trampoline, None)),
+            None => table.method_receiver(req, object).and_then(|inner| {
+                let inner_table = req.object_handlers(inner.heap());
+                inner_table
+                    .get_method(req, inner, &method.lowered)
+                    .map(|function| (function, Some(inner)))
+            }),
+        },
+    };
     let Some((function, receiver)) = found else {
         return Err(undefined_method(req, object.class(), &method.written));
     };
-    req.check_method_access(function, method.written.as_str_bytes().unwrap_or_default())?;
+    let function = if req.method_accessible(function) {
+        function
+    } else {
+        req.call_trampoline(object.class(), &written, false)
+            .unwrap_or(function)
+    };
+    req.check_method_access(function, &written)?;
     Ok((function, receiver))
 }
 
@@ -5758,11 +6018,11 @@ pub(crate) fn fetch_constant<T: Tier>(
             "InternalError: ZEND_FETCH_CONSTANT over a name no literal carries",
         )));
     }
-    let key = named(code, op.op2.saturating_add(1));
+    let mut key = named(code, op.op2.saturating_add(1));
     let mut found = req.constant_named(&key);
     if found.is_none() && op.op1 & UNQUALIFIED_IN_NAMESPACE != 0 {
-        let global = named(code, op.op2.saturating_add(2));
-        found = req.constant_named(&global);
+        key = named(code, op.op2.saturating_add(2));
+        found = req.constant_named(&key);
     }
     let Some(value) = found else {
         let written = String::from_utf8_lossy(&named(code, op.op2)).into_owned();
@@ -5779,10 +6039,11 @@ pub(crate) fn fetch_constant<T: Tier>(
     // deprecation raised after, and the opline then advances under
     // `ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION`, so a handler that throws
     // leaves the temporary written and the throwable pending. The
-    // constant a deprecation is worded from is the one the compiler
-    // refused to substitute (`can_ct_eval_const`), so the scan of the
-    // declaration table is a scan this opline alone makes.
-    crate::api::raising::deprecated_constant(req, &key);
+    // constant a deprecation is worded from is the one found, under the
+    // name the table holds it by.
+    if let Err(thrown) = crate::api::raising::deprecated_constant(req, &key) {
+        req.leave_pending(&thrown);
+    }
     Ok(advance(req, frame))
 }
 
@@ -7187,9 +7448,12 @@ fn read_dimension(
         return Ok(match mode {
             DimRead::Warning => {
                 let table = req.object_handlers(object.heap());
-                table.read_dimension(req, object, dim.as_ref())
+                table.read_dimension(req, object, dim.as_ref(), DimensionRead::Warning)
             }
-            DimRead::Silent => req.read_dimension_is(object, dim.as_ref()),
+            DimRead::Silent => {
+                let table = req.object_handlers(object.heap());
+                table.read_dimension(req, object, dim.as_ref(), DimensionRead::Silent)
+            }
         });
     }
     if mode == DimRead::Silent {
@@ -7782,52 +8046,19 @@ fn fetch_dim_place(
     };
     let written = match write_container(req, place) {
         Ok(Container::Array(array)) => array_place(req, frame, code, op, array, read)?,
-        Ok(Container::Object(object)) => object_dim_place(req, frame, code, op, object),
+        Ok(Container::Object(object)) => {
+            // php's `type`: `BP_VAR_RW` warns of a key it lays down,
+            // `BP_VAR_W` lays it down in silence.
+            let fetch = match read {
+                DimRead::Warning => DimensionRead::ReadWrite,
+                DimRead::Silent => DimensionRead::Write,
+            };
+            object_place(req, frame, code, op, object, fetch)
+        }
         Ok(Container::Text(_)) => Err(text_dim_place(req, frame, code, op, false)),
         Err(thrown) => Err(thrown),
     };
     lay_dim_place(req, frame, code, op, written, keep)
-}
-
-/// `zend_fetch_dimension_address`'s object arm under a write or an
-/// unset: what the class's `read_dimension` hands back, `offsetGet` on
-/// an `ArrayAccess`, as the value the `VAR` holds, with php's notice
-/// `Indirect modification of overloaded element of C has no effect`
-/// where that value is no object and no reference. A reference an
-/// `&offsetGet` handed back is the place itself, and warns of nothing;
-/// the last owner of one is the value it holds (`ZVAL_UNREF`).
-fn object_dim_place(
-    req: &mut Request,
-    frame: FrameRef,
-    code: &OpArray,
-    op: &Opline,
-    object: PhpObject,
-) -> Result<php_heap::Zval, Thrown> {
-    let dim = object_dim(req, frame, code, op);
-    let table = req.object_handlers(object.heap());
-    if let Some(placed) = crate::weakrefs::dimension_place(req, table, object, dim.as_ref()) {
-        return placed.map(php_heap::Zval::indirect);
-    }
-    let value = table.read_dimension(req, object, dim.as_ref())?;
-    if value.as_php_ref().is_some() {
-        if value.refcount() == 1
-            && let Some(cell) = value.as_php_ref()
-        {
-            let held = cell.get();
-            req.addref(&held);
-            req.release(value);
-            return Ok(held.to_zval());
-        }
-        return Ok(value.to_zval());
-    }
-    if value.as_object().is_none() {
-        let class = req.class_name(object.class());
-        crate::api::raising::notice(
-            req,
-            &format!("Indirect modification of overloaded element of {class} has no effect"),
-        );
-    }
-    Ok(value.to_zval())
 }
 
 /// `zend_fetch_dimension_address`'s string arm under a write or, with
@@ -7929,6 +8160,58 @@ fn lay_dim_place(
         exec::free_container_var(req, frame, code, op);
     }
     Ok(advance(req, frame))
+}
+
+/// `zend_fetch_dimension_address`'s object arm under `BP_VAR_W`,
+/// `BP_VAR_RW` or `BP_VAR_UNSET` (`fetch`, which the class's
+/// `read_dimension` is handed): the place it hands back for the
+/// dimension, or the value written into nothing with php's notice where
+/// it is no place and no object.
+fn object_place(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    object: PhpObject,
+    fetch: DimensionRead,
+) -> Result<php_heap::Zval, Thrown> {
+    let dim = object_dim(req, frame, code, op);
+    let table = req.object_handlers(object.heap());
+    if let Some(placed) = crate::weakrefs::dimension_place(req, table, object, dim.as_ref()) {
+        placed.map(php_heap::Zval::indirect)
+    } else {
+        match table.read_dimension(req, object, dim.as_ref(), fetch) {
+            // `zend_fetch_dimension_address`'s object arm: a
+            // reference is the place itself and warns of
+            // nothing, and one the `VAR` is the last owner of is
+            // the value it holds (`ZVAL_UNREF`).
+            Ok(value) if value.as_php_ref().is_some() => {
+                if value.refcount() == 1
+                    && let Some(cell) = value.as_php_ref()
+                {
+                    let held = cell.get();
+                    req.addref(&held);
+                    req.release(value);
+                    Ok(held.to_zval())
+                } else {
+                    Ok(value.to_zval())
+                }
+            }
+            Ok(value) => {
+                if value.as_object().is_none() {
+                    let class = req.class_name(object.class());
+                    crate::api::raising::notice(
+                        req,
+                        &format!(
+                            "Indirect modification of overloaded element of {class} has no effect"
+                        ),
+                    );
+                }
+                Ok(value.to_zval())
+            }
+            Err(thrown) => Err(thrown),
+        }
+    }
 }
 
 /// Whether a dimension fetched for writing gives its `VAR` container up
@@ -8429,10 +8712,23 @@ fn threw(req: &mut Request, frame: FrameRef, thrown: &Thrown) -> Edge {
 /// the callee's op array ([`enter`]), the `ZEND_INTERNAL_FUNCTION` arm
 /// serves the native on the call frame.
 fn do_call(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, opcode: &str) -> Edge {
+    if matches!(op.opcode, Opcode::DoFcall | Opcode::DoFcallByName)
+        && let Err(thrown) = flagged_call(req, op)
+    {
+        req.pop_call();
+        return threw(req, frame, &thrown);
+    }
     let Some(function) = req.vm_mut().activate_call() else {
         return Err(Fatal::Error(format!(
             "InternalError: {opcode} with no call frame under it"
         )));
+    };
+    let function = match crate::trampoline::hand_to_magic(req, function) {
+        Ok(function) => function,
+        Err(thrown) => {
+            req.pop_call();
+            return threw(req, frame, &thrown);
+        }
     };
     if req.user_function(function).is_some() {
         return enter(req, frame, code, op, function);
@@ -8441,12 +8737,10 @@ fn do_call(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, opco
     req.pop_call();
     match served {
         Ok(value) => {
-            if op.out_type == OperandKind::Unused {
-                req.release(value);
-            } else {
-                let slot = exec::temporary_slot(code, op.out);
-                let previous = req.set_slot(frame, slot, value);
-                req.release(previous);
+            let into = (op.out_type != OperandKind::Unused)
+                .then(|| (frame, exec::temporary_slot(code, op.out)));
+            if handed_back(req, into, value) {
+                return Ok(Stepped::Threw(frame));
             }
             Ok(advance(req, frame))
         }
@@ -8455,6 +8749,27 @@ fn do_call(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, opco
             Ok(Stepped::Threw(frame))
         }
     }
+}
+
+/// `DO_FCALL` and `DO_FCALL_BY_NAME` over a callee whose `fn_flags`
+/// carry `ZEND_ACC_DEPRECATED`, or `ZEND_ACC_NODISCARD` where the
+/// opline's `result` operand is `UNUSED` (`Z/Zend/zend_vm_def.h:4316-4335`): the
+/// deprecation and then the warning, raised with the call built and not
+/// yet entered, which is why `zend_get_call_op` keeps such a callee off
+/// `DO_UCALL` and `DO_ICALL`, the two that never test. What a handler
+/// threw is the `Err`, and the call is never made.
+fn flagged_call(req: &mut Request, op: &Opline) -> Result<(), Thrown> {
+    let Some(function) = req.vm().building_call_function() else {
+        return Ok(());
+    };
+    let flags = req.function_flags(function);
+    if flags.deprecated {
+        crate::attributes::deprecated_function(req, function)?;
+    }
+    if flags.no_discard && op.out_type == OperandKind::Unused {
+        crate::attributes::no_discard_function(req, function)?;
+    }
+    Ok(())
 }
 
 /// `ZEND_INIT_NS_FCALL_BY_NAME` (`Z/Zend/zend_vm_def.h:4024`): the call
@@ -11508,7 +11823,7 @@ fn binary_assign_op_obj_dim(
     let dim = object_dim(req, frame, code, op);
     let value = exec::operand(req, frame, code, data.op1_type, data.op1);
     let table = req.object_handlers(object.heap());
-    let read = table.read_dimension(req, object, dim.as_ref());
+    let read = table.read_dimension(req, object, dim.as_ref(), DimensionRead::Warning);
     let held = match read {
         Ok(held) => held,
         Err(thrown) => {
@@ -11520,6 +11835,9 @@ fn binary_assign_op_obj_dim(
     req.release(held);
     exec::free_operand(req, frame, code, data.op1_type, data.op1);
     let stepped = computed?;
+    // `write_dimension` gives its value up, where php's copies it, so
+    // the owner the temporary and the release below read is taken first.
+    req.addref(&stepped);
     let written = table.write_dimension(req, object, dim.as_ref(), stepped);
     if let Err(thrown) = written {
         req.release(stepped);
@@ -12514,7 +12832,7 @@ pub(crate) fn unset_cv<T: Tier>(
 /// place and makes none. An array is separated and the entry at the key
 /// is the `IS_INDIRECT` the `VAR` takes, a key the array has not `null`
 /// in silence; an object is `offsetGet` as under a write
-/// ([`object_dim_place`]); a string is the write's `Error`, or `Cannot
+/// ([`object_place`] under `DimensionRead::Unset`); a string is the write's `Error`, or `Cannot
 /// unset string offsets` where the offset is none php reads as an
 /// integer ([`unset_string_offset`]); `null`, a variable nothing wrote
 /// (warned of) and `false` (deprecated) are `null`, no array made of
@@ -12564,7 +12882,9 @@ pub(crate) fn fetch_dim_unset<T: Tier>(
         Ok((at, None)) => {
             let held = exec::value_of(at.read());
             match held.as_ref() {
-                ValueRef::Object(object) => object_dim_place(req, frame, code, op, *object),
+                ValueRef::Object(object) => {
+                    object_place(req, frame, code, op, *object, DimensionRead::Unset)
+                }
                 ValueRef::Str(_) => Err(text_dim_place(req, frame, code, op, true)),
                 ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false) => {
                     unset_under_nothing(req, frame, code, op, &held)
@@ -16804,17 +17124,53 @@ fn returned_to_caller<T: Tier>(
     let returns_to = req.vm().returns_to(frame);
     req.leave_frame(frame);
     let caller = req.stack_mut().current();
-    match returns_to {
-        Some((at, slot)) => {
-            let previous = req.set_slot(at, slot, returned);
-            req.release(previous);
-        }
-        None => req.release(returned),
+    if handed_back(req, returns_to, returned) {
+        return Ok(Stepped::Threw(caller));
     }
     // The caller stands at the call opline that pushed this frame, and
     // goes on from the one after it.
     req.vm_mut().advance(caller);
     Ok(Stepped::Popped(caller))
+}
+
+/// What a call returned, handed to the frame that made the call: into
+/// the frame's temporary `into` names where the call opline reads it, and given
+/// up where it does not (`RETURN_VALUE_USED`). Then whether a throwable
+/// is pending, which the popped callee's receiver or the value given up
+/// may have left by running a destructor that threw, and which php
+/// raises at the call opline (`zend_leave_helper`'s
+/// `zend_rethrow_exception`, `ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION` after
+/// an internal call), so the `try` around the call catches it. The
+/// caller still stands at its call opline; it goes on past it only
+/// where this answers `false`.
+///
+/// ```php
+/// class D {
+///     public function __destruct() { throw new Exception('dtor'); }
+///     public function m() { return $this; }
+///     public function __call($m, $a) { return $this; }
+/// }
+/// function make() { return new D(); }
+/// try { make()->m(); } catch (Exception $e) { echo "method: ", $e->getMessage(), "\n"; }
+/// try { make()->unknown(); } catch (Exception $e) { echo "__call: ", $e->getMessage(), "\n"; }
+/// try { array_pop(...[[make()]]); } catch (Exception $e) { echo "native: ", $e->getMessage(), "\n"; }
+/// echo "after\n";
+/// ```
+/// ```expect
+/// method: dtor
+/// __call: dtor
+/// native: dtor
+/// after
+/// ```
+fn handed_back(req: &mut Request, into: Option<(FrameRef, u32)>, value: Value) -> bool {
+    match into {
+        Some((at, slot)) => {
+            let previous = req.set_slot(at, slot, value);
+            req.release(previous);
+        }
+        None => req.release(value),
+    }
+    req.is_pending()
 }
 
 /// The body the binary operators' handlers share: both operands addressed,

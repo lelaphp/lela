@@ -44,7 +44,7 @@ use php_ext::decl::{
 };
 use php_ext::raising::{Level, Thrown, arg_count_error, docref, throw};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{PhpArray, PhpRef, PhpString, Value, ValueRef};
 
 /// `php_session_status`: the three values `session_status()` answers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -132,12 +132,13 @@ struct State {
     send_cookie: bool,
     /// `PS(session_vars)`: the data read, for `lazy_write`.
     session_vars: Option<Vec<u8>>,
-    /// Whether `PS(http_session_vars)` holds the session's array.
-    tracked: bool,
+    /// `PS(http_session_vars)`: the reference `$_SESSION` in
+    /// `EG(symbol_table)` is bound to, one owner of it the session's, so
+    /// what the program assigns through `$_SESSION` is what the session
+    /// writes, and what it unsets from the table the session still holds.
+    vars: Option<PhpRef>,
     /// `PS(session_started_filename)` and its line.
     started_at: Option<(Vec<u8>, u32)>,
-    /// The `session_shutdown` entry `session_set_save_handler` registers.
-    shutdown_registered: bool,
     /// `EG(exception)` as a user handler left it: php goes on after a
     /// handler throws, and the native raises it when it returns.
     thrown: Option<Thrown>,
@@ -201,7 +202,7 @@ pub fn extension() -> Extension {
     for (class, methods) in user::classes() {
         builder = builder.classes(vec![(class, methods)]);
     }
-    builder
+    ini::register(builder)
         .request_state::<State>()
         .rinit(session::rinit)
         .rshutdown(session::rshutdown)
@@ -519,35 +520,57 @@ fn headers_sent(req: &Request) -> bool {
     req.headers_sent().is_some()
 }
 
-/// The session's array, `Z_REFVAL(PS(http_session_vars))`, while one is
-/// tracked.
+/// The session's array, `Z_REFVAL(PS(http_session_vars))`, where
+/// `IF_SESSION_VARS()` finds one: a reference bound and an array in it.
+/// A view: no owner taken.
 fn session_array(req: &mut Request) -> Option<PhpArray> {
-    if req.state::<State>().tracked {
-        req.superglobal(b"_SESSION").copied()
-    } else {
-        None
+    req.state::<State>()
+        .vars
+        .and_then(|vars| vars.get().as_array().copied())
+}
+
+/// The session's array made writable in place, `SEPARATE_ARRAY` over
+/// `Z_REFVAL(PS(http_session_vars))`, what `php_set_session_var` and
+/// `session_unset` write through.
+fn session_array_mut(req: &mut Request) -> Result<Option<PhpArray>, Thrown> {
+    match req.state::<State>().vars {
+        Some(vars) => vars.separate_array(req),
+        None => Ok(None),
     }
 }
 
-/// `$_SESSION` bound to `array`, which it owns from here; what it held
-/// before given up.
-fn bind_array(req: &mut Request, array: PhpArray) {
-    if let Some(old) = req.superglobal(b"_SESSION").copied() {
-        req.set_superglobal(b"_SESSION", array);
-        req.release(old.to_value());
-    } else {
-        req.set_superglobal(b"_SESSION", array);
+/// `array` bound as the session's variables, which own it from here:
+/// `PS(http_session_vars)` a new reference to it with a second owner,
+/// laid into `EG(symbol_table)` as `$_SESSION` by
+/// `zend_hash_update_ind`, and the reference held before given up.
+fn bind_array(req: &mut Request, array: PhpArray) -> Result<(), Thrown> {
+    if let Some(old) = req.state::<State>().vars.take() {
+        req.release(old.as_value());
     }
-    req.state::<State>().tracked = true;
+    let vars = PhpRef::new(req, array.to_value())?;
+    req.addref(&vars.as_value());
+    req.state::<State>().vars = Some(vars);
+    req.set_global(b"_SESSION", Some(vars.as_value()));
+    Ok(())
+}
+
+/// `PS(http_session_vars)` given up, `zval_ptr_dtor` and `ZVAL_UNDEF`;
+/// `$_SESSION` in the table keeps what it holds.
+fn unbind(req: &mut Request) {
+    if let Some(vars) = req.state::<State>().vars.take() {
+        req.release(vars.as_value());
+    }
 }
 
 /// A throwable made pending the way php leaves one in `EG(exception)`:
-/// kept while the native goes on, raised when it returns; a fatal or an
-/// `exit` is handed back at once, as php's `zend_bailout` unwinds.
+/// kept while the native goes on, raised when it returns. The unwind
+/// exit is kept the same way, since php's `exit` is a throwable that C
+/// code goes on past (`zend_is_unwind_exit`); a fatal is handed back at
+/// once, as php's `zend_bailout` unwinds.
 fn absorb<T>(req: &mut Request, done: Result<T, Thrown>) -> Result<Option<T>, Thrown> {
     match done {
         Ok(value) => Ok(Some(value)),
-        Err(thrown) if thrown.exception().is_some() => {
+        Err(thrown) if thrown.exception().is_some() || req.is_unwind_exit() => {
             let state = req.state::<State>();
             if state.thrown.is_none() {
                 state.thrown = Some(thrown);

@@ -146,7 +146,7 @@ fn serve(
     arguments: &[Value],
     extra_named: &[(PhpString, Value)],
 ) -> Result<Value, Thrown> {
-    match target {
+    let served = match target {
         Target::Function(function) => req.serve_function(function, arguments, extra_named),
         Target::Method {
             function,
@@ -154,6 +154,10 @@ fn serve(
             this,
         } => req.serve_method(function, this, scope, arguments, extra_named),
         Target::Closure(object) => req.serve_closure(object, arguments, extra_named),
+    };
+    match served {
+        Err(thrown) if !req.executing() => req.thrown_without_frame(&thrown),
+        served => served,
     }
 }
 
@@ -826,21 +830,23 @@ pub fn property_hook(
 }
 
 /// `ZEND_ACC_VIRTUAL` of the property `name` as `class`'s table holds
-/// it: hooked, and backed by no declaration of it up the chain.
+/// it: backed by no declaration of it up the chain, a hooked one whose
+/// hooks never name it, or an internal class's that its handlers serve.
 ///
 /// ```php
 /// class A { public $v { get => 1; } public $b { get => $this->b; } public $p; }
 /// foreach (['v', 'b', 'p'] as $n) var_dump((new ReflectionProperty('A', $n))->isVirtual());
+/// var_dump((new ReflectionProperty('DatePeriod', 'start'))->isVirtual());
 /// ```
 /// ```expect
 /// bool(true)
 /// bool(false)
 /// bool(false)
+/// bool(true)
 /// ```
 #[must_use]
 pub fn property_is_virtual(req: &Request, class: ClassId, name: &[u8]) -> bool {
-    req.hooked(class, name)
-        .is_some_and(|hooked| hooked.is_virtual)
+    req.property_virtual(class, name)
 }
 
 /// `zend_read_property_ex(prop_info->ce, ...)` over a hooked property,
@@ -920,6 +926,161 @@ pub fn instantiate(
         req.release(served.unwrap_or_default());
     }
     Ok(object)
+}
+
+/// `object_init_with_constructor` (`Z/Zend/zend_API.c:1876`), what
+/// `zend_get_attribute_object` makes an attribute's object with:
+/// [`new_object`], the constructor the class's `get_constructor`
+/// answers, php's `Error` where the scope may not call it, then served
+/// with the positional arguments and the named ones placed as
+/// [`call_named`] places them. A class with no constructor takes
+/// positional arguments and no named one, php's `Unknown named
+/// parameter`. The object is the caller's, one owner; what the
+/// constructor threw is the `Err`, the object given up. The arguments
+/// stay the caller's.
+///
+/// ```php
+/// #[Attribute] class MyAttrib {}
+/// #[MyAttrib(notinterned: '')] class Test1 {}
+/// $attr = (new ReflectionClass(Test1::class))->getAttributes()[0];
+/// try { $attr->newInstance(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Unknown named parameter $notinterned
+/// ```
+pub fn instantiate_named(
+    req: &mut Request,
+    class: ClassId,
+    arguments: &[Value],
+    named: &[(PhpString, Value)],
+) -> Result<PhpObject, Thrown> {
+    let object = new_object(req, class)?;
+    let constructor = match req.handlers_of(class).get_constructor(req, object) {
+        Ok(constructor) => constructor,
+        Err(thrown) => {
+            req.release(object.as_value());
+            return Err(thrown);
+        }
+    };
+    let Some(constructor) = constructor else {
+        if let Some((name, _)) = named.first() {
+            req.release(object.as_value());
+            let message = format!(
+                "Unknown named parameter ${}",
+                String::from_utf8_lossy(name.as_bytes())
+            );
+            return Err(throw(req, "Error", &message));
+        }
+        return Ok(object);
+    };
+    let mut placement = Placement::new(constructor, arguments);
+    let served = named
+        .iter()
+        .try_for_each(|(name, value)| placement.named(req, *name, *value))
+        .and_then(|()| {
+            req.serve_method(
+                constructor,
+                Some(object),
+                class,
+                &placement.arguments,
+                &placement.extra_named,
+            )
+        });
+    match served {
+        Ok(returned) => {
+            req.release(returned);
+            Ok(object)
+        }
+        Err(thrown) => {
+            req.release(object.as_value());
+            Err(thrown)
+        }
+    }
+}
+
+/// `ce->unserialize(rval, ce, buf, buf_len, data)` over an object
+/// `object_init_ex` made of the class: the class's unserializer handed
+/// the payload of a `C:` record, `true` once it has read it. The
+/// unserializer is the one php registers on the class entry:
+/// `zend_implement_serializable` gives a class that implements
+/// `Serializable`, and every class that inherits from one, php's
+/// `zend_user_unserialize`, which serves the object's `unserialize()`
+/// with the payload as a string. `false` is the class with none, whose
+/// payload `object_custom` warns of and skips; the `Err` is what
+/// `unserialize()` threw.
+///
+/// ```php
+/// class S implements Serializable {
+///     public $got;
+///     function serialize() { return ''; }
+///     function unserialize($data) { $this->got = $data; }
+///     function __serialize(): array { return []; }
+///     function __unserialize(array $a): void {}
+/// }
+/// var_dump(unserialize('C:1:"S":3:{abc}'), unserialize('C:11:"ArrayObject":21:{x:i:0;a:0:{};m:a:0:{}}'));
+/// var_dump(unserialize('C:8:"stdClass":0:{}'));
+/// ```
+/// ```expect
+/// object(S)#1 (1) {
+///   ["got"]=>
+///   string(3) "abc"
+/// }
+/// object(ArrayObject)#2 (1) {
+///   ["storage":"ArrayObject":private]=>
+///   array(0) {
+///   }
+/// }
+///
+/// Warning: Class stdClass has no unserializer in %s on line 10
+/// object(stdClass)#2 (0) {
+/// }
+/// ```
+pub fn class_unserialize(
+    req: &mut Request,
+    object: PhpObject,
+    data: &[u8],
+) -> Result<bool, Thrown> {
+    let serializable = req
+        .class_named(b"serializable")
+        .is_some_and(|interface| req.instance_of(object.class(), interface));
+    if !serializable {
+        return Ok(false);
+    }
+    let data = Value::string(PhpString::new(req, data)?);
+    let answered = call_method(req, &object, b"unserialize", &[data]);
+    req.release(data);
+    req.release(answered?);
+    Ok(true)
+}
+
+/// `zend_compile_file` and `zend_execute` over the file at `path`, what
+/// `spl_autoload` does with the class file it finds: the path opened
+/// along the `include_path` with nothing raised where nothing opens it
+/// (`php_stream_open_for_zend_ex` without `REPORT_ERRORS`), a file the
+/// request has included already left alone, and any other added to the
+/// included files, compiled as a `require` (a `ParseError` is the `Err`)
+/// and executed to its end on a frame that shares the calling user
+/// frame's variables and has no `$this` and no scope. `true` once the
+/// file ran; the `Err` is what it threw.
+///
+/// ```php
+/// $dir = sys_get_temp_dir() . '/witness_load_file_' . getmypid();
+/// @mkdir($dir);
+/// file_put_contents("$dir/loaded.php", '<?php class Loaded {} $seen = "set by the file";');
+/// set_include_path($dir);
+/// function load() { spl_autoload('Loaded', '.php'); return $seen ?? 'unset'; }
+/// var_dump(load(), class_exists('Loaded', false));
+/// spl_autoload('Loaded', '.php');
+/// var_dump(count(array_filter(get_included_files(), fn ($f) => str_ends_with($f, 'loaded.php'))));
+/// unlink("$dir/loaded.php"); rmdir($dir);
+/// ```
+/// ```expect
+/// string(15) "set by the file"
+/// bool(true)
+/// int(1)
+/// ```
+pub fn load_file(req: &mut Request, path: &[u8]) -> Result<bool, Thrown> {
+    req.load_file(path)
 }
 
 /// `object_init_ex`: an instance with its declared properties' defaults
@@ -1129,10 +1290,7 @@ pub fn fetch_constant(req: &mut Request, name: &[u8]) -> Result<Value, Thrown> {
             &format!("Undefined constant \"{}\"", String::from_utf8_lossy(name)),
         ));
     };
-    crate::api::raising::deprecated_constant(req, &key);
-    if let Some(pending) = req.pending() {
-        return Err(Thrown::of(Some(pending)));
-    }
+    crate::api::raising::deprecated_constant(req, &key)?;
     req.addref(&value);
     Ok(value)
 }
@@ -1213,7 +1371,31 @@ pub fn class_constant(req: &mut Request, class: ClassId, name: &[u8]) -> Result<
     req.class_constant(class, name)
 }
 
-/// Evaluate a constant expression in `scope`, `zval_update_constant_ex`.
+/// Evaluate a constant expression in `scope`, `zval_update_constant_ex`:
+/// the value with one owner, the caller's, whatever the node, a
+/// constant by name among them, whose table keeps its own.
+///
+/// A constant's value in an array the expression builds is that array's
+/// to own, so the array outlives the evaluation that read it:
+///
+/// ```php
+/// define('V1', strtoupper('x'));
+/// #[A1([V1 => V1])]
+/// class C1 {}
+/// $attr = (new ReflectionClass('C1'))->getAttributes();
+/// $attr[0]->getArguments();
+/// var_dump($attr[0]->getArguments(), V1);
+/// ```
+/// ```expect
+/// array(1) {
+///   [0]=>
+///   array(1) {
+///     ["X"]=>
+///     string(1) "X"
+///   }
+/// }
+/// string(1) "X"
+/// ```
 ///
 /// A native's default of flags joined by `|` is one, evaluated where a
 /// named argument skipped the parameter:
@@ -1263,8 +1445,14 @@ pub fn eval_const_expr(
         ConstExpr::Long(n) => Ok(Value::int(*n)),
         ConstExpr::Double(f) => Ok(Value::float(*f)),
         ConstExpr::Str(s) => Ok(Value::string(PhpString::new(req, s)?)),
+        // `zend_get_constant_ex`, which words a `CONST_DEPRECATED`
+        // constant's deprecation after it found it.
         ConstExpr::Constant(name) => match req.constant_named(&name.0) {
-            Some(value) => Ok(value),
+            Some(value) => {
+                crate::api::raising::deprecated_constant(req, &name.0)?;
+                req.addref(&value);
+                Ok(value)
+            }
             None => Err(throw(
                 req,
                 "Error",
@@ -1274,15 +1462,7 @@ pub fn eval_const_expr(
                 ),
             )),
         },
-        // `zend_ast_evaluate`'s `ZEND_AST_CLASS_CONST` arm: the class
-        // fetched by the name as written and its constant read through
-        // `zend_get_class_constant_ex`, whose `self` and `parent` are the
-        // scope the expression is evaluated in and its parent; `static`
-        // is refused while the file compiles.
-        ConstExpr::ClassConstant { class, name } => {
-            let id = const_class(req, &class.0, scope)?;
-            req.class_constant(id, &name.0)
-        }
+        ConstExpr::ClassConstant { class, name } => class_constant_expr(req, class, name, scope),
         // `ZEND_AST_CONST_ENUM_INIT` read back as the case it made: the
         // enum's one instance for the case (`zend_enum_get_case`), which
         // is what its constant of the case's name holds.
@@ -1325,22 +1505,22 @@ pub fn eval_const_expr(
         // `zend_ast_evaluate`'s `ZEND_AST_BINARY_OP`, `ZEND_AST_GREATER`
         // and unary arms: both sides evaluated, then the operator's own
         // kernel, which is what a native's default of flags joined by
-        // `|` is evaluated by where a named argument skipped it.
-        // The operands are what the walk answered for each side, which
-        // for a constant by name is the table's own value and no owner of
-        // it, so neither is given up here.
+        // `|` is evaluated by where a named argument skipped it,
+        // each operand given up once the kernel has answered.
         ConstExpr::Binary { op, lhs, rhs } => binary_node(req, &op.0, lhs, rhs, scope),
         // `ZEND_AST_UNARY_PLUS` is `0 + x` and `ZEND_AST_UNARY_MINUS`
         // `-1 * x`, as `zend_ast_evaluate` serves them.
         ConstExpr::Unary { op, operand } => {
             let operand = eval_const_expr(req, operand, scope)?;
-            match &*op.0 {
+            let answered = match &*op.0 {
                 b"-" => crate::ops::mul(req, &Value::int(-1), &operand),
                 b"+" => crate::ops::add(req, &Value::int(0), &operand),
                 b"~" => crate::ops::bitwise_not(req, &operand),
                 b"!" => Ok(Value::bool(!crate::ops::is_true(req, &operand))),
                 _ => Err(invalid_operations(req)),
-            }
+            };
+            req.release(operand);
+            answered
         }
         ConstExpr::Conditional {
             cond,
@@ -1348,25 +1528,28 @@ pub fn eval_const_expr(
             otherwise,
         } => {
             let held = eval_const_expr(req, cond, scope)?;
-            if !crate::ops::is_true(req, &held) {
-                return eval_const_expr(req, otherwise, scope);
-            }
-            match then {
-                Some(then) => eval_const_expr(req, then, scope),
-                None => Ok(held),
-            }
+            let taken = match (crate::ops::is_true(req, &held), then) {
+                (true, None) => return Ok(held),
+                (true, Some(then)) => then,
+                (false, _) => otherwise,
+            };
+            req.release(held);
+            eval_const_expr(req, taken, scope)
         }
         // `ZEND_AST_CAST`: the operand as the `CAST` opline converts it,
         // `_IS_BOOL` by its truth.
         ConstExpr::Cast { to, operand } => {
             let value = eval_const_expr(req, operand, scope)?;
-            if *to == IS_BOOL {
-                return Ok(Value::bool(crate::ops::is_true(req, &value)));
-            }
-            match crate::ops::CastTo::of(*to) {
-                Some(to) => crate::ops::cast(req, &value, to),
-                None => Err(invalid_operations(req)),
-            }
+            let cast = if *to == IS_BOOL {
+                Ok(Value::bool(crate::ops::is_true(req, &value)))
+            } else {
+                match crate::ops::CastTo::of(*to) {
+                    Some(to) => crate::ops::cast(req, &value, to),
+                    None => Err(invalid_operations(req)),
+                }
+            };
+            req.release(value);
+            cast
         }
         ConstExpr::Dim { .. } | ConstExpr::Prop { .. } => Ok(chain(req, expr, scope, false)?.value),
         ConstExpr::New { class, arguments } => construct(req, &class.0, arguments, scope),
@@ -1394,23 +1577,37 @@ fn binary_node(
         b"&&" | b"||" => {
             let or = op == b"||";
             let lhs = eval_const_expr(req, lhs, scope)?;
-            if crate::ops::is_true(req, &lhs) == or {
+            let held = crate::ops::is_true(req, &lhs);
+            req.release(lhs);
+            if held == or {
                 return Ok(Value::bool(or));
             }
             let rhs = eval_const_expr(req, rhs, scope)?;
-            Ok(Value::bool(crate::ops::is_true(req, &rhs)))
+            let held = crate::ops::is_true(req, &rhs);
+            req.release(rhs);
+            Ok(Value::bool(held))
         }
         b"??" => {
             let lhs = chain(req, lhs, scope, true)?.value;
             if !matches!(lhs.deref().as_ref(), ValueRef::Null | ValueRef::Undef) {
                 return Ok(lhs);
             }
+            req.release(lhs);
             eval_const_expr(req, rhs, scope)
         }
         _ => {
             let lhs = eval_const_expr(req, lhs, scope)?;
-            let rhs = eval_const_expr(req, rhs, scope)?;
-            binary(req, op, &lhs, &rhs)
+            let rhs = match eval_const_expr(req, rhs, scope) {
+                Ok(rhs) => rhs,
+                Err(thrown) => {
+                    req.release(lhs);
+                    return Err(thrown);
+                }
+            };
+            let answered = binary(req, op, &lhs, &rhs);
+            req.release(lhs);
+            req.release(rhs);
+            answered
         }
     }
 }
@@ -1491,21 +1688,30 @@ fn chain(
                 return Ok(short());
             }
             if under.value.deref().as_object().is_some() {
+                req.release(under.value);
                 return Err(throw(
                     req,
                     "Error",
                     "Cannot use [] on objects in constant expression",
                 ));
             }
-            let dim = eval_const_expr(req, dim, scope)?;
+            let dim = match eval_const_expr(req, dim, scope) {
+                Ok(dim) => dim,
+                Err(thrown) => {
+                    req.release(under.value);
+                    return Err(thrown);
+                }
+            };
             let mode = if silent {
                 crate::ops::DimRead::Silent
             } else {
                 crate::ops::DimRead::Warning
             };
-            let value = crate::ops::dimension_const(req, &under.value, &dim, mode)?;
+            let value = crate::ops::dimension_const(req, &under.value, &dim, mode);
+            req.release(dim);
+            req.release(under.value);
             Ok(Chained {
-                value,
+                value: value?,
                 short: false,
             })
         }
@@ -1515,44 +1721,73 @@ fn chain(
             nullsafe,
         } => {
             let under = link(req, object, false)?;
-            let object = under.value.deref();
-            if under.short || (*nullsafe && matches!(object.as_ref(), ValueRef::Null)) {
-                return Ok(short());
-            }
-            let name = eval_const_expr(req, name, scope)?;
-            let name = crate::ops::to_string(req, &name)?;
-            let Some(instance) = object.as_object().copied() else {
-                let shown = crate::ops::value_name(req, &object.undef_as_null());
-                crate::api::raising::warning(
-                    req,
-                    &format!(
-                        "Attempt to read property \"{}\" on {shown}",
-                        String::from_utf8_lossy(name.as_bytes())
-                    ),
-                );
-                return Ok(Chained {
-                    value: Value::null(),
-                    short: false,
-                });
-            };
-            let is_enum = req
-                .class_decl(instance.class())
-                .is_some_and(|decl| decl.kind == php_unit::decl::ClassKind::Enum);
-            if !is_enum {
-                return Err(throw(
-                    req,
-                    "Error",
-                    "Fetching properties on non-enums in constant expressions is not allowed",
-                ));
-            }
-            let value = req.read_property(instance, name.as_bytes(), PropertyRead::Warning)?;
-            Ok(Chained {
-                value,
-                short: false,
-            })
+            let read = prop_link(req, &under, name, *nullsafe, scope);
+            req.release(under.value);
+            read
         }
         other => link(req, other, silent),
     }
+}
+
+/// A property link of [`chain`] over what the link under it read, which
+/// stays the caller's: cut short under a `?->` over `null`, the name
+/// converted to a string, then the read off an enum's case, php's
+/// `Error` for any other object and `zend_wrong_property_read`'s warning
+/// for what is no object.
+fn prop_link(
+    req: &mut Request,
+    under: &Chained,
+    name: &ConstExpr,
+    nullsafe: bool,
+    scope: Option<ClassId>,
+) -> Result<Chained, Thrown> {
+    let object = under.value.deref();
+    if under.short || (nullsafe && matches!(object.as_ref(), ValueRef::Null)) {
+        return Ok(Chained {
+            value: Value::null(),
+            short: true,
+        });
+    }
+    let name = eval_const_expr(req, name, scope)?;
+    let text = crate::ops::to_string(req, &name);
+    req.release(name);
+    let name = text?;
+    let found = prop_read(req, &object, name.as_bytes());
+    req.release(Value::string(name));
+    found
+}
+
+/// [`prop_link`]'s read of `name` off `object`.
+fn prop_read(req: &mut Request, object: &Value, name: &[u8]) -> Result<Chained, Thrown> {
+    let Some(instance) = object.as_object().copied() else {
+        let shown = crate::ops::value_name(req, &object.undef_as_null());
+        crate::api::raising::warning(
+            req,
+            &format!(
+                "Attempt to read property \"{}\" on {shown}",
+                String::from_utf8_lossy(name)
+            ),
+        );
+        return Ok(Chained {
+            value: Value::null(),
+            short: false,
+        });
+    };
+    let is_enum = req
+        .class_decl(instance.class())
+        .is_some_and(|decl| decl.kind == php_unit::decl::ClassKind::Enum);
+    if !is_enum {
+        return Err(throw(
+            req,
+            "Error",
+            "Fetching properties on non-enums in constant expressions is not allowed",
+        ));
+    }
+    let value = req.read_property(instance, name, PropertyRead::Warning)?;
+    Ok(Chained {
+        value,
+        short: false,
+    })
 }
 
 /// `zend_ast_evaluate`'s `ZEND_AST_NEW` arm (`Z/Zend/zend_ast.c:1019`):
@@ -1599,6 +1834,13 @@ fn construct(
             None => Ok(Value::null()),
         },
     };
+    for value in positional {
+        req.release(value);
+    }
+    for (name, value) in named {
+        req.release(Value::string(name));
+        req.release(value);
+    }
     match served {
         Ok(value) => {
             req.release(value);
@@ -1609,6 +1851,21 @@ fn construct(
             Err(thrown)
         }
     }
+}
+
+/// `zend_ast_evaluate`'s `ZEND_AST_CLASS_CONST` arm: the class fetched in
+/// `scope` ([`const_class`]) and its constant read through
+/// `zend_get_class_constant_ex`, whose access is checked against that
+/// scope; `static` is refused while the file compiles.
+fn class_constant_expr(
+    req: &mut Request,
+    class: &Name,
+    name: &Name,
+    scope: Option<ClassId>,
+) -> Result<Value, Thrown> {
+    let id = const_class(req, &class.0, scope)?;
+    let shown = req.class_name(id);
+    req.class_constant_from(id, &name.0, &shown, scope)
 }
 
 /// `zend_fetch_class_with_scope` under `ZEND_FETCH_CLASS_EXCEPTION`, the

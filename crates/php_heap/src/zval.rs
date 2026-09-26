@@ -41,6 +41,12 @@ pub enum ZvalType {
     /// to write through (`ZVAL_INDIRECT`, `Z_INDIRECT`). Never
     /// refcounted, never a value a program can hold.
     Indirect = 12,
+    /// `IS_PTR`: an index a compiled program keeps into one of its
+    /// unit's own tables, where php keeps a pointer, which is what the
+    /// `OP_DATA` after a `DECLARE_ATTRIBUTED_CONST` carries: the
+    /// declaration of the constant, whose attributes the opline hangs on
+    /// it. Never refcounted, and never a value a program holds.
+    Ptr = 13,
 }
 
 /// A zval in place, php's `zval *` at the sites a handler keeps one from
@@ -296,6 +302,21 @@ impl Zval {
     pub fn as_const_expr(self) -> Option<u32> {
         match self.kind {
             ZvalType::ConstExpr => u32::try_from(self.value).ok(),
+            _ => None,
+        }
+    }
+
+    /// `ZVAL_PTR`: the entry at `at` of a table the unit keeps.
+    #[must_use]
+    pub const fn ptr(at: u32) -> Zval {
+        Zval::scalar(ZvalType::Ptr, at as u64)
+    }
+
+    /// `Z_PTR` of an `IS_PTR`, else `None`.
+    #[must_use]
+    pub fn as_ptr(self) -> Option<u32> {
+        match self.kind {
+            ZvalType::Ptr => u32::try_from(self.value).ok(),
             _ => None,
         }
     }

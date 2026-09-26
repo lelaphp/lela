@@ -9,22 +9,24 @@
 //! target bit of the subject it sits on, and whether the subject
 //! carries another of the same name.
 //!
-//! What php validates and this does not: `#[\DelayedTargetValidation]`
-//! and the `validation_error` an internal attribute's own validator
-//! leaves, neither of which the declaration model carries.
+//! The `validation_error` an internal attribute's own validator leaves
+//! where `#[\DelayedTargetValidation]` deferred it is the refusal
+//! [`class_attribute_refusal`] answers for the class the attribute
+//! stands on, the one rule the compiler raises by.
 
 use std::fmt::Write as _;
 
-use php_ext::call::{call_named, eval_const_expr, instantiate, lookup_class};
-use php_ext::coerce::{to_callable, to_long, value_name};
-use php_ext::decl::Attribute;
+use php_ext::call::{eval_const_expr, instantiate_named, lookup_class};
+use php_ext::coerce::{to_long, value_name};
+use php_ext::decl::{Attribute, class_attribute_refusal};
 use php_ext::raising::{Thrown, arg_value_error, throw};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use super::{
-    at_most_arguments, class_is, class_named, default_value_string, exactly_arguments, is_internal,
-    keep_attribute, new_object, set_name, string_argument, string_value, this_attribute,
+    at_most_arguments, class_is, class_name_of, class_named, default_value_string,
+    exactly_arguments, is_internal, keep_attribute, new_object, set_name, string_argument,
+    string_value, this_attribute,
 };
 
 /// `ZEND_ATTRIBUTE_TARGET_*` (`Z/Zend/zend_attributes.h:26-33`), the
@@ -94,6 +96,19 @@ fn target_names(flags: i64) -> String {
 /// `zend_string_equals_ci` does; with that bit set it is a class every
 /// match must be an instance of, and a name no class has is php's
 /// `Error`.
+///
+/// ```php
+/// $m = new ReflectionMethod('ReflectionFunction', 'isDisabled');
+/// var_dump(count($m->getAttributes('Deprecated', ReflectionAttribute::IS_INSTANCEOF)),
+///     count($m->getAttributes('Override', ReflectionAttribute::IS_INSTANCEOF)));
+/// try { $m->getAttributes('Nope', ReflectionAttribute::IS_INSTANCEOF); }
+/// catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// int(1)
+/// int(0)
+/// Class "Nope" not found
+/// ```
 pub(super) fn reflect_attributes(
     req: &mut Request,
     attributes: &[Attribute],
@@ -206,11 +221,8 @@ pub(super) fn reflection_attribute_construct(req: &mut Request) -> Result<Value,
 /// `ReflectionAttribute::getName()`: `attr->data->name`, the attribute
 /// as it was written.
 ///
-/// The attribute the stub's `deprecated` puts on
-/// `ReflectionFunction::isDisabled` is the one attribute this engine's
-/// declaration model carries, since the compiler reads no `#[...]`
-/// where a program writes it yet (#465), so every witness here reads
-/// that one.
+/// A native's attribute, the one the stub's `deprecated` puts on
+/// `ReflectionFunction::isDisabled`, is read as a program's is:
 ///
 /// ```php
 /// $a = (new ReflectionMethod('ReflectionFunction', 'isDisabled'))->getAttributes();
@@ -363,12 +375,71 @@ pub(super) fn reflection_attribute_to_string(req: &mut Request) -> Result<Value,
 /// a marker whose flags do not name this target, and a user attribute
 /// repeated where its marker did not allow it.
 ///
-/// No witness: the one attribute this engine's declaration model
-/// carries is `Deprecated`, whose class php registers in
-/// `zend_attributes.c` and this engine declares nowhere (#464), so
-/// serving it here answers php's `Attribute class "Deprecated" not
-/// found` where php answers the object. The witness lands with the
-/// class.
+/// An internal attribute is made from the class
+/// `zend_register_attribute_ce` registered, its marker's targets read
+/// as a user attribute's are:
+///
+/// ```php
+/// $a = (new ReflectionMethod('ReflectionFunction', 'isDisabled'))->getAttributes();
+/// var_dump($a[0]->newInstance());
+/// ```
+/// ```expect
+/// object(Deprecated)#1 (2) {
+///   ["message"]=>
+///   string(73) "as ReflectionFunction can no longer be constructed for disabled functions"
+///   ["since"]=>
+///   string(3) "8.0"
+/// }
+/// ```
+///
+/// A user attribute's own `#[Attribute(Attribute::TARGET_*)]` is held
+/// to the target it stands on, and to the repetition it allows:
+///
+/// ```php
+/// #[Attribute(Attribute::TARGET_METHOD)] class B {}
+/// class C { #[B] function m() {} #[B] public $p; }
+/// echo get_class((new ReflectionMethod('C', 'm'))->getAttributes()[0]->newInstance()), "\n";
+/// try { (new ReflectionProperty('C', 'p'))->getAttributes()[0]->newInstance(); }
+/// catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// #[Attribute] class D {}
+/// #[D] #[D] function f() {}
+/// try { (new ReflectionFunction('f'))->getAttributes()[0]->newInstance(); }
+/// catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// #[Attribute(Attribute::TARGET_ALL | Attribute::IS_REPEATABLE)] class E {}
+/// #[E] #[E] function g() {}
+/// echo get_class((new ReflectionFunction('g'))->getAttributes()[1]->newInstance()), "\n";
+/// #[Attribute(1024)] class G {}
+/// #[G] function i() {}
+/// try { (new ReflectionFunction('i'))->getAttributes()[0]->newInstance(); }
+/// catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// B
+/// Attribute "B" cannot target property (allowed targets: method)
+/// Attribute "D" must not be repeated
+/// E
+/// Invalid attribute flags specified
+/// ```
+///
+/// A validator's refusal `#[\DelayedTargetValidation]` deferred is
+/// thrown here, php's `validation_error`:
+///
+/// ```php
+/// #[DelayedTargetValidation]
+/// #[Attribute]
+/// trait T {}
+/// #[DelayedTargetValidation]
+/// #[AllowDynamicProperties]
+/// readonly class R {}
+/// foreach (['T', 'R'] as $c) {
+///     try { (new ReflectionClass($c))->getAttributes()[1]->newInstance(); }
+///     catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// Cannot apply #[\Attribute] to trait T
+/// Cannot apply #[\AllowDynamicProperties] to readonly class R
+/// ```
 pub(super) fn reflection_attribute_new_instance(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 0)?;
     let kept = this_attribute(req)?;
@@ -392,6 +463,21 @@ pub(super) fn reflection_attribute_new_instance(req: &mut Request) -> Result<Val
                 target_names(flags & TARGET_ALL)
             ),
         ));
+    }
+    // `zend_attribute.validation_error`: the refusal of an internal
+    // attribute's validator `#[\DelayedTargetValidation]` deferred,
+    // thrown where the object would be made.
+    if kept.target == TARGET_CLASS
+        && let Some(subject) = kept.scope
+        && let Some(decl) = req.class_decl(subject)
+        && let Some(refused) = class_attribute_refusal(
+            &looked_up,
+            decl.kind,
+            &decl.flags,
+            &String::from_utf8_lossy(&class_name_of(req, subject)),
+        )
+    {
+        return Err(throw(req, "Error", &refused));
     }
     if !is_internal(req, class) && flags & IS_REPEATABLE == 0 && kept.repeated {
         return Err(throw(
@@ -438,12 +524,17 @@ fn marker_flags(req: &mut Request, class: ClassId, written: &str) -> Result<i64,
             ),
         ));
     };
+    // `ZEND_ATTRIBUTE_FLAGS`, every target and `IS_REPEATABLE`.
+    if flags & !(TARGET_ALL | IS_REPEATABLE) != 0 {
+        return Err(throw(req, "Error", "Invalid attribute flags specified"));
+    }
     Ok(flags)
 }
 
 /// `zend_get_attribute_object`: the instance, its constructor served
-/// with the attribute's arguments, the named ones by their names as
-/// `zend_call_function`'s walk of `named_params` places them.
+/// with the attribute's arguments, the named ones by their names, as
+/// `object_init_with_constructor` serves them
+/// ([`instantiate_named`]).
 fn construct(req: &mut Request, class: ClassId, kept: &AttributeRef) -> Result<PhpObject, Thrown> {
     let mut positional = Vec::new();
     let mut named: Vec<(PhpString, Value)> = Vec::new();
@@ -454,36 +545,13 @@ fn construct(req: &mut Request, class: ClassId, kept: &AttributeRef) -> Result<P
             None => positional.push(value),
         }
     }
-    if named.is_empty() {
-        return instantiate(req, class, &positional);
+    let made = instantiate_named(req, class, &positional, &named);
+    for value in positional {
+        req.release(value);
     }
-    let object = new_object(req, class)?;
-    let pair = constructor_callable(req, object)?;
-    let served = to_callable(req, &pair)
-        .and_then(|callable| call_named(req, &callable, &positional, &named));
-    req.release(pair);
-    match served {
-        Ok(value) => {
-            req.release(value);
-            Ok(object)
-        }
-        Err(thrown) => {
-            req.release(object.as_value());
-            Err(thrown)
-        }
+    for (name, value) in named {
+        req.release(Value::string(name));
+        req.release(value);
     }
-}
-
-/// `[$object, '__construct']`, the callable `call_named` takes for a
-/// constructor served with named arguments; a class with no
-/// constructor takes the arguments and serves nothing, so the pair is
-/// only made where there is one.
-fn constructor_callable(req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
-    let value = object.as_value();
-    req.addref(&value);
-    let method = string_value(req, b"__construct")?;
-    let mut pair = PhpArray::new(req)?;
-    pair.set(req, Key::Int(0), value)?;
-    pair.set(req, Key::Int(1), method)?;
-    Ok(Value::array(pair))
+    made
 }

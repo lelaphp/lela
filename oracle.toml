@@ -136,3 +136,31 @@ ini = ["short_open_tag=1"]
 # compile-identity lane passes `-l` beside these, which compiles a file
 # without running it, so a corpus file's own bytes never reach the dump.
 ini = ["opcache.enable_cli=1", "opcache.opt_debug_level=0x10000"]
+
+[regime.no-assertions]
+# `zend.assertions` moves to -1 only at startup (OnUpdateAssertions refuses it
+# at runtime), so what php compiles with assertions off, no ASSERT_CHECK and no
+# evaluation of the argument, is pinned by a witness that names this regime
+# (#864, for #705).
+ini = ["zend.assertions=-1"]
+
+[regime.filter-default]
+# `filter.default` is PHP_INI_SYSTEM|PHP_INI_PERDIR, and setting it raises
+# php's startup deprecation, which no snippet can reach from inside (#901, for
+# #744 and #895).
+ini = ["filter.default=int"]
+
+[regime.session-startup]
+# ext/session's two startup deprecations: `session.use_only_cookies=0` and
+# `session.use_trans_sid=1` are read at startup and warn in `PHP Startup`
+# (#901, for #895). The other startup-only session entries change behaviour
+# for the whole request and stay held by their phpt tests.
+ini = ["session.use_only_cookies=0", "session.use_trans_sid=1"]
+
+[regime.immutable-literals]
+# opcache makes a unit's literal arrays immutable, as this engine's units are
+# by design (principle 3). A witness that pins GC roots or refcounts over a
+# copied literal names this regime, so it agrees exactly. Under the plain
+# recipe it differs, and a divergence row covers that (#770, interim until
+# the design question is settled).
+ini = ["opcache.enable_cli=1"]

@@ -14,12 +14,14 @@ pub use php_compile::syntax::{
 };
 
 pub use crate::ini_syntax::{IniEvent, IniScanner, IniValue};
+pub use crate::scanner::{ScannedToken, scanned};
 
 use crate::api::call::constant;
 use crate::api::coerce::to_string;
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
 use crate::api::values::Value;
+use crate::highlight::Colours;
 use crate::ini_syntax::Host;
 
 /// `zend_parse_ini_string` over `text` in a request, the one INI grammar
@@ -91,4 +93,67 @@ impl Host for InRequest<'_> {
     fn event(&mut self, event: IniEvent) {
         self.events.push(event);
     }
+}
+
+/// php's scanner view of `source` as a request's scanner reads a file,
+/// `short_open_tag` its `CG(short_tags)`; what the scanner raises is
+/// dropped, as `zend_highlight` and `zend_strip` clear it.
+fn scanned_file(req: &Request, source: &[u8]) -> Vec<ScannedToken> {
+    let short_open_tag = req
+        .ini_get(b"short_open_tag")
+        .is_none_or(Request::ini_parse_bool);
+    let options = LexOptions {
+        short_open_tag,
+        ..LexOptions::default()
+    };
+    let lexed = lex(FileId(0), source, &options);
+    scanned(source, &lexed.tokens)
+}
+
+/// `zend_highlight` over `source` under the request's
+/// `php_get_highlight_struct`, the five `highlight.*` entries: the HTML
+/// `highlight_string()`, `highlight_file()` and `php -s` write.
+///
+/// ```php
+/// ini_set('highlight.keyword', 'green');
+/// highlight_string("<p>\n<?php\n// c\n\$a = \"x{\$b}\\t\" . 1 <=> A::B; ?>\nend");
+/// ```
+/// ```expect
+/// <pre><code style="color: #000000">&lt;p&gt;
+/// <span style="color: #0000BB">&lt;?php
+/// </span><span style="color: #FF8000">// c
+/// </span><span style="color: #0000BB">$a </span><span style="color: green">= </span><span style="color: #DD0000">"x</span><span style="color: green">{</span><span style="color: #0000BB">$b</span><span style="color: green">}</span><span style="color: #DD0000">\t" </span><span style="color: green">. </span><span style="color: #0000BB">1 </span><span style="color: green">&lt;=&gt; </span><span style="color: #0000BB">A</span><span style="color: green">::</span><span style="color: #0000BB">B</span><span style="color: green">; </span><span style="color: #0000BB">?&gt;
+/// </span>end</code></pre>
+/// ```
+#[must_use]
+pub fn highlight(req: &Request, source: &[u8]) -> Vec<u8> {
+    let read = |name: &[u8]| req.ini_get(name).unwrap_or_default().to_vec();
+    let colours = Colours {
+        comment: read(b"highlight.comment"),
+        default: read(b"highlight.default"),
+        html: read(b"highlight.html"),
+        keyword: read(b"highlight.keyword"),
+        string: read(b"highlight.string"),
+    };
+    crate::highlight::highlight(source, &scanned_file(req, source), &colours)
+}
+
+/// `zend_strip` over `source`: what `php_strip_whitespace()` and
+/// `php -w` write, the comments dropped and each stretch of whitespace one
+/// space.
+///
+/// ```php
+/// $f = tempnam(sys_get_temp_dir(), 'w'); file_put_contents($f, "<?php\n/* c */ \$a  =  1; // d\n\$b = <<<E\n x\n E;\n\n\techo \$a;\n");
+/// var_dump(php_strip_whitespace($f)); unlink($f);
+/// ```
+/// ```expect
+/// string(41) "<?php
+///  $a = 1; $b = <<<E
+///  x
+///  E;
+/// echo $a; "
+/// ```
+#[must_use]
+pub fn strip(req: &Request, source: &[u8]) -> Vec<u8> {
+    crate::highlight::strip(source, &scanned_file(req, source))
 }

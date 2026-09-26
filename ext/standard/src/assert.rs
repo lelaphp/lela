@@ -22,9 +22,7 @@ use php_ext::decl::{
     Attribute, AttributeArgument, ClassDecl, ClassFlags, ClassKind, ConstDecl, ConstExpr,
     EnumBacking, FunctionDecl, IniDecl, MethodDecl, Name, Type,
 };
-use php_ext::raising::{
-    Level, Thrown, arg_value_error, deprecated, docref, new_throwable, throw_value,
-};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, new_throwable, throw_value};
 use php_ext::request::Request;
 use php_ext::values::{PhpString, Value, ValueRef};
 
@@ -362,7 +360,6 @@ fn assert(req: &mut Request) -> Result<Value, Thrown> {
 /// assert_options(): Argument #1 ($option) must be an ASSERT_* constant
 /// ```
 fn assert_options(req: &mut Request) -> Result<Value, Thrown> {
-    deprecated(req, "Function assert_options() is deprecated since 8.3");
     argument_count_between(req, 1, 2)?;
     let what = long_argument(req, 1)?;
     let value = given(req, 2);

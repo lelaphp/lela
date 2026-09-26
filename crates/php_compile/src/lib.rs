@@ -3438,11 +3438,11 @@ mod tests {
             line: 0,
             raised: Vec::new(),
         };
-        let error = refused(b"<?php\n$a = (strlen(...));\n").unwrap_or_else(compiled);
+        let error = refused(b"<?php\n$a = (clone($o, []));\n").unwrap_or_else(compiled);
         assert_eq!(error.level, Level::Parse);
         assert_eq!(
             error.message,
-            "a first-class callable this compiler cannot read yet"
+            "a `clone` with an argument list this compiler cannot read yet"
         );
         assert_eq!(error.line, 2);
         let unclosed = refused(b"<?php\n$a = (1 + 2;\n").unwrap_or_else(compiled);

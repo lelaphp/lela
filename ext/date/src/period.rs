@@ -2,16 +2,16 @@
 //! recurrences, read from objects or from an ISO 8601 string, with its
 //! getters and its serialised form.
 
-use php_ext::call::new_object;
+use php_ext::call::{internal_iterator, new_object};
 use php_ext::raising::{Thrown, deprecated, throw};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::args::{array, count_between, long, optional_long, string};
 use crate::datetime::restore_properties;
-use crate::ffi::{self, Time};
+use crate::ffi::{self, RelTime, Time};
 use crate::obj::{
-    DateObj, IntervalObj, PERIOD_FIELDS, PeriodObj, class_id, new_date, new_interval,
+    DateObj, IntervalObj, PERIOD_FIELDS, PeriodObj, class_id, new_date, new_interval, parent_of,
     period_fields, rows_array, std_rows, this, uninitialized,
 };
 
@@ -113,8 +113,16 @@ fn finish(
 /// The period's payload set.
 fn store(req: &mut Request, object: PhpObject, period: PeriodObj) {
     if let Some(payload) = object.native_mut::<PeriodObj>(req) {
-        *payload = period;
+        payload.replace(period);
     }
+}
+
+/// The period's state as it stands, to be changed and stored back.
+fn copied(req: &Request, object: PhpObject) -> PeriodObj {
+    object
+        .native::<PeriodObj>(req)
+        .map(PeriodObj::copied)
+        .unwrap_or_default()
 }
 
 /// `DatePeriod::createFromISO8601String`, of the called class, over
@@ -421,6 +429,161 @@ pub(crate) fn get_recurrences(req: &mut Request) -> Result<Value, Thrown> {
     Ok(if n == 0 { Value::null() } else { Value::int(n) })
 }
 
+/// `DatePeriod::getIterator(): Iterator`, php's
+/// `zend_create_internal_iterator_zval` over the period: an
+/// `InternalIterator` walking it by `date_period_it`'s rules
+/// ([`iterator_element`]), which `foreach` reaches through the same
+/// method, so a subclass that overrides it is walked by its own.
+///
+/// ```php
+/// $p = DatePeriod::createFromISO8601String('R2/2012-07-01T00:00:00Z/P7D');
+/// $it = $p->getIterator();
+/// var_dump(get_class($it));
+/// for (; $it->valid(); $it->next()) echo $it->key(), ': ', $it->current()->format('Y-m-d'), "\n";
+/// $it->rewind(); echo $it->current()->format('Y-m-d'), "\n";
+/// class P extends DatePeriod { function getIterator(): Iterator { return new ArrayIterator([7]); } }
+/// foreach (new P(new DateTime('2000-01-01'), new DateInterval('P1D'), 1) as $k => $v) echo "$k=$v\n";
+/// try { foreach ($p as &$d) {} } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// string(16) "InternalIterator"
+/// 0: 2012-07-01
+/// 1: 2012-07-08
+/// 2: 2012-07-15
+/// 2012-07-01
+/// 0=7
+/// An iterator cannot be used with foreach by reference
+/// ```
+pub(crate) fn get_iterator(req: &mut Request) -> Result<Value, Thrown> {
+    count_between(req, 0, 0)?;
+    let object = this(req)?;
+    Ok(internal_iterator(req, &object)?.as_value())
+}
+
+/// `date_period_advance`: the interval added to the time as its relative
+/// part, and the time read back from the seconds.
+fn advance(time: &mut Time, interval: &RelTime) {
+    time.have_relative = 1;
+    time.relative = *interval;
+    time.sse_uptodate = 0;
+    time.update_ts(None);
+    time.update_from_sse();
+}
+
+/// `date_period_it_has_more`: before the end, or at it to the microsecond
+/// under `INCLUDE_END_DATE`; with no end, fewer steps than the
+/// recurrences.
+fn has_more(period: &PeriodObj, index: usize) -> bool {
+    let Some(current) = &period.current else {
+        return false;
+    };
+    match &period.end {
+        Some(end) if current.sse == end.sse => {
+            if period.include_end_date {
+                current.us <= end.us
+            } else {
+                current.us < end.us
+            }
+        }
+        Some(end) => current.sse < end.sse,
+        None => i64::try_from(index).is_ok_and(|index| index < period.recurrences),
+    }
+}
+
+/// `get_base_date_class(start_ce)`: the class itself or the first
+/// ancestor that is `DateTime` or `DateTimeImmutable`, or the root.
+fn base_date_class(req: &mut Request, class: ClassId) -> Result<ClassId, Thrown> {
+    let mutable = class_id(req, "DateTime")?;
+    let immutable = class_id(req, "DateTimeImmutable")?;
+    let mut at = class;
+    while at != mutable && at != immutable {
+        match parent_of(req, at) {
+            Some(parent) => at = parent,
+            None => break,
+        }
+    }
+    Ok(at)
+}
+
+/// The element a walk of the period stands at `index` steps past its
+/// rewind, `date_period_it`'s functions over the period's `current`:
+/// `rewind` sets it to a copy of the start, moved once where the start
+/// is excluded; each step is `move_forward`'s `date_period_advance`;
+/// past the last `has_more` answers none; `current_data` is a new date
+/// of the start's base class over it, and `current_key` the index. The
+/// period keeps where `current` stands, so asking for the same index
+/// again moves nothing and the next one moves once, and an index behind
+/// it rewinds. A period whose constructor never ran is php's
+/// `DateObjectError`, raised where `rewind` raises it.
+///
+/// ```php
+/// $s = new DateTimeImmutable('2022-01-01 00:00:00.5 UTC'); $i = new DateInterval('P1D');
+/// foreach ([0, DatePeriod::EXCLUDE_START_DATE, DatePeriod::INCLUDE_END_DATE, 3] as $o) {
+///     foreach (new DatePeriod($s, $i, new DateTime('2022-01-03 00:00:00.5 UTC'), $o) as $k => $d) echo $k, '=', $d->format('md'), ',';
+///     foreach (new DatePeriod($s, $i, 2, $o) as $k => $d) echo $k, ':', $d->format('md'), ',';
+///     echo "\n";
+/// }
+/// $p = new DatePeriod($s, $i, 1);
+/// foreach ($p as $d) {}
+/// var_dump(get_class($d), $p->current->format('Y-m-d'));
+/// class NoCtor extends DatePeriod { function __construct() {} }
+/// try { foreach (new NoCtor as $d) {} } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// 0=0101,1=0102,0:0101,1:0102,2:0103,
+/// 0=0102,0:0102,1:0103,
+/// 0=0101,1=0102,2=0103,0:0101,1:0102,2:0103,3:0104,
+/// 0=0102,1=0103,0:0102,1:0103,2:0104,
+/// string(17) "DateTimeImmutable"
+/// string(10) "2022-01-03"
+/// DateObjectError: Object of type DatePeriod has not been correctly initialized by calling parent::__construct() in its constructor
+/// ```
+pub(super) fn iterator_element(
+    req: &mut Request,
+    object: PhpObject,
+    index: usize,
+) -> Result<Option<(Value, Value)>, Thrown> {
+    let start_ce = object.native::<PeriodObj>(req).and_then(|p| p.start_ce);
+    let base = match start_ce {
+        Some(class) => Some(base_date_class(req, class)?),
+        None => None,
+    };
+    let Some(period) = object.native_mut::<PeriodObj>(req) else {
+        return Ok(None);
+    };
+    let Some(start) = period.start.clone() else {
+        let class = class_id(req, "DatePeriod")?;
+        return Err(uninitialized(req, class));
+    };
+    let interval = period.interval.unwrap_or_default();
+    let steps = match period.cursor {
+        Some(at) if at <= index && period.current.is_some() => index - at,
+        _ => {
+            let mut current = start;
+            if !period.include_start_date {
+                advance(&mut current, &interval);
+            }
+            period.current = Some(current);
+            index
+        }
+    };
+    if let Some(current) = period.current.as_mut() {
+        for _ in 0..steps {
+            advance(current, &interval);
+        }
+    }
+    period.cursor = Some(index);
+    if !has_more(period, index) {
+        return Ok(None);
+    }
+    let (Some(current), Some(base)) = (period.current.clone(), base) else {
+        return Ok(None);
+    };
+    let date = new_date(req, base, current)?;
+    let key = Value::int(i64::try_from(index).unwrap_or(i64::MAX));
+    Ok(Some((key, date.as_value())))
+}
+
 /// `DatePeriod::__serialize(): array`.
 ///
 /// ```php
@@ -487,13 +650,15 @@ pub(crate) fn serialize(req: &mut Request) -> Result<Value, Thrown> {
 }
 
 /// `php_date_period_initialize_from_hash`: every field required, of the
-/// type php holds it to.
-fn from_hash(req: &mut Request, hash: PhpArray) -> Result<Option<PeriodObj>, Thrown> {
+/// type php holds it to, written into `period` in php's order as each is
+/// read, a `null` date leaving the field as it was, and nothing rolled
+/// back where a later one is refused; `false` for the refusal.
+fn from_hash(req: &mut Request, hash: PhpArray, period: &mut PeriodObj) -> Result<bool, Thrown> {
     let find = |req: &mut Request, name: &[u8]| -> Result<Option<Value>, Thrown> {
         let key = Key::Str(PhpString::new(req, name)?);
         Ok(hash.get(&key).map(|v| v.deref()))
     };
-    let mut period = PeriodObj::default();
+    // A date field: `Ok(None)` for `null`, `Err(())` for a refusal.
     let date_of =
         |req: &mut Request, v: &Value| -> Result<Result<Option<(Time, ClassId)>, ()>, Thrown> {
             if matches!(v.as_ref(), ValueRef::Null) {
@@ -509,7 +674,7 @@ fn from_hash(req: &mut Request, hash: PhpArray) -> Result<Option<PeriodObj>, Thr
             }
         };
     let Some(start) = find(req, b"start")? else {
-        return Ok(None);
+        return Ok(false);
     };
     match date_of(req, &start)? {
         Ok(Some((t, class))) => {
@@ -517,29 +682,22 @@ fn from_hash(req: &mut Request, hash: PhpArray) -> Result<Option<PeriodObj>, Thr
             period.start_ce = Some(class);
         }
         Ok(None) => {}
-        Err(()) => return Ok(None),
+        Err(()) => return Ok(false),
     }
     for (name, current) in [(&b"end"[..], false), (b"current", true)] {
         let Some(value) = find(req, name)? else {
-            return Ok(None);
+            return Ok(false);
         };
         match date_of(req, &value)? {
-            Ok(Some((t, _))) => {
-                if period.start_ce.is_none() {
-                    return Ok(None);
-                }
-                if current {
-                    period.current = Some(t);
-                } else {
-                    period.end = Some(t);
-                }
-            }
+            Ok(Some(_)) if period.start_ce.is_none() => return Ok(false),
+            Ok(Some((t, _))) if current => period.current = Some(t),
+            Ok(Some((t, _))) => period.end = Some(t),
             Ok(None) => {}
-            Err(()) => return Ok(None),
+            Err(()) => return Ok(false),
         }
     }
     let Some(interval) = find(req, b"interval")? else {
-        return Ok(None);
+        return Ok(false);
     };
     let interval_class = class_id(req, "DateInterval")?;
     let Some(diff) = interval
@@ -548,26 +706,26 @@ fn from_hash(req: &mut Request, hash: PhpArray) -> Result<Option<PeriodObj>, Thr
         .and_then(|o| o.native::<IntervalObj>(req))
         .and_then(|i| i.diff)
     else {
-        return Ok(None);
+        return Ok(false);
     };
     period.interval = Some(diff);
     let Some(recurrences) = find(req, b"recurrences")?
         .and_then(|v| v.as_int())
         .filter(|n| (0..=i64::from(i32::MAX)).contains(n))
     else {
-        return Ok(None);
+        return Ok(false);
     };
     period.recurrences = recurrences;
     let Some(include_start) = find(req, b"include_start_date")?.and_then(|v| v.as_bool()) else {
-        return Ok(None);
-    };
-    let Some(include_end) = find(req, b"include_end_date")?.and_then(|v| v.as_bool()) else {
-        return Ok(None);
+        return Ok(false);
     };
     period.include_start_date = include_start;
+    let Some(include_end) = find(req, b"include_end_date")?.and_then(|v| v.as_bool()) else {
+        return Ok(false);
+    };
     period.include_end_date = include_end;
     period.initialized = true;
-    Ok(Some(period))
+    Ok(true)
 }
 
 /// `DatePeriod::__set_state(array $array): DatePeriod`.
@@ -587,12 +745,13 @@ pub(crate) fn set_state(req: &mut Request) -> Result<Value, Thrown> {
     let hash = array(req, 1)?;
     let class = class_id(req, "DatePeriod")?;
     let object = new_object(req, class)?;
-    match from_hash(req, hash) {
-        Ok(Some(period)) => {
+    let mut period = PeriodObj::default();
+    match from_hash(req, hash, &mut period) {
+        Ok(true) => {
             store(req, object, period);
             Ok(object.as_value())
         }
-        Ok(None) => {
+        Ok(false) => {
             req.release(object.as_value());
             Err(throw(
                 req,
@@ -626,14 +785,16 @@ pub(crate) fn unserialize(req: &mut Request) -> Result<Value, Thrown> {
     count_between(req, 1, 1)?;
     let hash = array(req, 1)?;
     let object = this(req)?;
-    let Some(period) = from_hash(req, hash)? else {
+    let mut period = copied(req, object);
+    let taken = from_hash(req, hash, &mut period);
+    store(req, object, period);
+    if !taken? {
         return Err(throw(
             req,
             "Error",
             "Invalid serialization data for DatePeriod object",
         ));
-    };
-    store(req, object, period);
+    }
     restore_properties(req, object, hash, &PERIOD_FIELDS)?;
     Ok(Value::null())
 }
@@ -648,23 +809,20 @@ pub(crate) fn unserialize(req: &mut Request) -> Result<Value, Thrown> {
 /// Invalid serialization data for DatePeriod object
 /// ```
 pub(crate) fn wakeup(req: &mut Request) -> Result<Value, Thrown> {
-    deprecated(
-        req,
-        "Method DatePeriod::__wakeup() is deprecated since 8.5, this method is obsolete, as serialization hooks are provided by __unserialize() and __serialize()",
-    );
     count_between(req, 0, 0)?;
     let object = this(req)?;
     let own = std_rows(req, object)?;
     let hash = rows_array(req, &own, Vec::new(), false)?;
-    let found = from_hash(req, hash);
+    let mut period = copied(req, object);
+    let taken = from_hash(req, hash, &mut period);
     req.release(Value::array(hash));
-    let Some(period) = found? else {
+    store(req, object, period);
+    if !taken? {
         return Err(throw(
             req,
             "Error",
             "Invalid serialization data for DatePeriod object",
         ));
-    };
-    store(req, object, period);
+    }
     Ok(Value::null())
 }

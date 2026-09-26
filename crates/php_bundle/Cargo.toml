@@ -31,7 +31,7 @@ jit = []
 # engine of `enabled()`, which an extension's own tests and the harness's
 # witness lane serve a snippet through. Off by default.
 test = ["php_ext/test"]
-standard = ["dep:php_ext_standard", "random"] # array.c and string.c include ext/random/php_random.h
+standard = ["dep:php_ext_standard", "random", "date"] # array.c and string.c include ext/random/php_random.h, microtime.c ext/date/php_date.h
 spl = ["dep:php_ext_spl", "pcre"] # php_spl.c: ZEND_MOD_REQUIRED("pcre")
 date = ["dep:php_ext_date"]
 reflection = ["dep:php_ext_reflection"]

@@ -14,7 +14,7 @@ use crate::user::{Slot, method_of, store};
 use crate::{
     Entry, Module, State, Status, answer, arguments_between, bool_argument, coerced, declared,
     given, headers_sent, ini, ini_bool, ini_long, parameter, pending, sent_error, session,
-    session_array, started_error, string_argument, string_value,
+    started_error, string_argument, string_value,
 };
 
 /// The natives in `session.stub.php`'s order, `session_commit` the alias
@@ -211,11 +211,6 @@ fn can_change(req: &mut Request, setting: &str, check_cookies: bool) -> bool {
     true
 }
 
-/// The status and the handler as the ini names them now (#744).
-fn synced(req: &mut Request) {
-    session::sync(req);
-}
-
 /// `session_name(?string $name = null): string|false`: the name, and a
 /// new one set through `session.name`'s rule.
 ///
@@ -260,7 +255,6 @@ fn session_name(req: &mut Request) -> Result<Value, Thrown> {
 /// ```
 fn session_module_name(req: &mut Request) -> Result<Value, Thrown> {
     arguments_between(req, 0, 1)?;
-    synced(req);
     let name = string_argument(req, 1, true, false)?;
     if name.is_some() && !can_change(req, "save handler module", false) {
         return Ok(Value::bool(false));
@@ -679,7 +673,6 @@ fn session_cache_expire(req: &mut Request) -> Result<Value, Thrown> {
 /// ```
 fn session_encode(req: &mut Request) -> Result<Value, Thrown> {
     arguments_between(req, 0, 0)?;
-    synced(req);
     let encoded = session::encode(req)?;
     let value = match encoded {
         Some(bytes) => string_value(req, &bytes)?,
@@ -709,7 +702,6 @@ fn session_decode(req: &mut Request) -> Result<Value, Thrown> {
         );
         return Ok(Value::bool(false));
     }
-    synced(req);
     let ok = session::decode(req, &data)?;
     answer(req, Value::bool(ok))
 }
@@ -825,9 +817,7 @@ fn session_start(req: &mut Request) -> Result<Value, Thrown> {
     }
     session::start(req)?;
     if req.state::<State>().status != Status::Active {
-        if let Some(array) = session_array(req) {
-            clean(req, array)?;
-        }
+        clean(req)?;
         return answer(req, Value::bool(false));
     }
     if read_and_close {
@@ -836,12 +826,15 @@ fn session_start(req: &mut Request) -> Result<Value, Thrown> {
     answer(req, Value::bool(true))
 }
 
-/// `zend_hash_clean` over the session's array, in place.
-fn clean(req: &mut Request, mut array: PhpArray) -> Result<(), Thrown> {
+/// `zend_hash_clean` over the session's array, separated first, where
+/// there is one.
+fn clean(req: &mut Request) -> Result<(), Thrown> {
+    let Some(mut array) = crate::session_array_mut(req)? else {
+        return Ok(());
+    };
     for (key, _) in array.snapshot_refs() {
         array.unset(req, &key)?;
     }
-    req.set_superglobal(b"_SESSION", array);
     Ok(())
 }
 
@@ -904,9 +897,7 @@ fn session_unset(req: &mut Request) -> Result<Value, Thrown> {
     if req.state::<State>().status != Status::Active {
         return Ok(Value::bool(false));
     }
-    if let Some(array) = session_array(req) {
-        clean(req, array)?;
-    }
+    clean(req)?;
     Ok(Value::bool(true))
 }
 
@@ -1398,6 +1389,36 @@ fn implements(
 /// bool(true)
 /// session_set_save_handler(): Argument #1 ($open) must be of type SessionHandlerInterface, int given
 /// ```
+///
+/// The object form keeps `session_register_shutdown` under the name
+/// `session_shutdown`, replacing an earlier one, so the session is
+/// written by the shutdown functions, before the destructors; with
+/// `$register_shutdown = false`, or in the callbacks' form, the entry is
+/// removed and the session's `RSHUTDOWN` writes it, after them.
+///
+/// ```php
+/// class H implements SessionHandlerInterface { function open($p, $n): bool { return true; } function close(): bool { return true; }
+///   function read($id): string|false { return ""; } function write($id, $d): bool { echo "write\n"; return true; }
+///   function destroy($id): bool { return true; } function gc($l): int|false { return 0; } }
+/// class D { function __destruct() { echo "destruct\n"; } }
+/// $d = new D; $h = new H; session_set_save_handler($h); session_id("sh1"); session_start(["use_cookies" => 0, "cache_limiter" => ""]);
+/// ```
+/// ```expect
+/// write
+/// destruct
+/// ```
+///
+/// ```php
+/// class H implements SessionHandlerInterface { function open($p, $n): bool { return true; } function close(): bool { return true; }
+///   function read($id): string|false { return ""; } function write($id, $d): bool { echo "write\n"; return true; }
+///   function destroy($id): bool { return true; } function gc($l): int|false { return 0; } }
+/// class D { function __destruct() { echo "destruct\n"; } }
+/// $d = new D; $h = new H; session_set_save_handler($h); session_set_save_handler($h, false); session_id("sh1"); session_start(["use_cookies" => 0, "cache_limiter" => ""]);
+/// ```
+/// ```expect
+/// destruct
+/// write
+/// ```
 #[allow(clippy::too_many_lines)] // php's function, both arms
 fn session_set_save_handler(req: &mut Request) -> Result<Value, Thrown> {
     let count = req.argument_count();
@@ -1457,10 +1478,13 @@ fn session_set_save_handler(req: &mut Request) -> Result<Value, Thrown> {
             b"SessionUpdateTimestampHandlerInterface",
             b"updatetimestamp",
         )?;
-        if register && !req.state::<State>().shutdown_registered {
+        // `register_user_shutdown_function("session_shutdown", ...)`,
+        // replacing an earlier one, or `remove_user_shutdown_function`.
+        if register {
             let callable = named(req, b"session_register_shutdown")?;
-            req.register_shutdown_function(callable, Vec::new());
-            req.state::<State>().shutdown_registered = true;
+            req.set_shutdown_function(b"session_shutdown", Some((callable, Vec::new())));
+        } else {
+            req.set_shutdown_function(b"session_shutdown", None);
         }
         let state = req.state::<State>();
         if state.status != Status::Active && state.module != Some(Module::User) {
@@ -1498,6 +1522,7 @@ fn session_set_save_handler(req: &mut Request) -> Result<Value, Thrown> {
         return Ok(Value::bool(false));
     }
     req.state::<State>().class_name = None;
+    req.set_shutdown_function(b"session_shutdown", None);
     if req.state::<State>().module != Some(Module::User) {
         user_ini(req)?;
     }

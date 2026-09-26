@@ -326,6 +326,16 @@ fn a64i(req: &mut Request, value: &Value) -> Result<i64, Thrown> {
 
 /// `php_date_interval_initialize_from_hash`: a `date_string` read again
 /// through the parser, or every field read back with php's defaults.
+///
+/// ```php
+/// $i = unserialize('O:12:"DateInterval":2:{s:1:"d";i:4;s:1:"f";i:9999999999990;}');
+/// var_dump($i->d, $i->f);
+/// ```
+/// ```expect
+/// Warning: The float 9.99999999999E+18 is not representable as an int, cast occurred in %s on line 2
+/// int(4)
+/// float(-8446744073719.552)
+/// ```
 fn from_hash(req: &mut Request, object: PhpObject, hash: PhpArray) -> Result<(), Thrown> {
     if let Some(text) =
         find(req, hash, b"date_string")?.and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
@@ -369,10 +379,11 @@ fn from_hash(req: &mut Request, object: PhpObject, hash: PhpArray) -> Result<(),
     diff.h = long_field(req, b"h", -1)?;
     diff.i = long_field(req, b"i", -1)?;
     diff.s = long_field(req, b"s", -1)?;
+    // `zend_dval_to_lval(zval_get_double(f) * 1000000.0)`: past the
+    // long's range, php's warning and the modular long.
     if let Some(f) = find(req, hash, b"f")? {
-        #[allow(clippy::cast_possible_truncation)]
-        let us = (to_double(req, &f)? * 1_000_000.0) as i64;
-        diff.us = us;
+        let us = to_double(req, &f)? * 1_000_000.0;
+        diff.us = to_long(req, &Value::float(us))?;
     }
     #[allow(clippy::cast_possible_truncation)]
     {
@@ -585,10 +596,6 @@ pub(crate) fn unserialize(req: &mut Request) -> Result<Value, Thrown> {
 /// int(1)
 /// ```
 pub(crate) fn wakeup(req: &mut Request) -> Result<Value, Thrown> {
-    php_ext::raising::deprecated(
-        req,
-        "Method DateInterval::__wakeup() is deprecated since 8.5, this method is obsolete, as serialization hooks are provided by __unserialize() and __serialize()",
-    );
     count_between(req, 0, 0)?;
     let object = this(req)?;
     // `Z_OBJPROP_P`, which `date_object_get_properties_interval` fills

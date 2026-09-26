@@ -14,6 +14,7 @@ use php_ext::request::Request;
 use php_ext::values::{PhpString, Value, ValueRef};
 
 use crate::output::Entry;
+use crate::zpp::double_argument;
 use crate::{argument_count_between, constant, declared, frameless, long_argument, parameter};
 
 /// `PHP_ROUND_HALF_UP` and the modes beside it (`Z/ext/standard/php_math_modes.h`).
@@ -51,7 +52,7 @@ fn float_constant(name: &[u8], value: f64) -> ConstDecl {
 /// and the four `PHP_ROUND_*` modes.
 ///
 /// ```php
-/// var_dump(M_E, M_LOG2E, M_LOG10E, M_LN2, M_LN10, M_PI, M_PI_2, M_PI_4, M_1_PI, M_2_PI, M_SQRTPI, M_2_SQRTPI, M_LNPI, M_EULER, M_SQRT2, M_SQRT1_2, M_SQRT3, PHP_ROUND_HALF_UP, PHP_ROUND_HALF_DOWN, PHP_ROUND_HALF_EVEN, PHP_ROUND_HALF_ODD);
+/// var_dump(M_E, M_LOG2E, M_LOG10E, M_LN2, M_LN10, M_PI, M_PI_2, M_PI_4, M_1_PI, M_2_PI, M_SQRTPI, M_2_SQRTPI, M_LNPI, M_EULER, M_SQRT2, M_SQRT1_2, M_SQRT3, INF, NAN, PHP_ROUND_HALF_UP, PHP_ROUND_HALF_DOWN, PHP_ROUND_HALF_EVEN, PHP_ROUND_HALF_ODD);
 /// ```
 /// ```expect
 /// float(2.718281828459045)
@@ -71,6 +72,8 @@ fn float_constant(name: &[u8], value: f64) -> ConstDecl {
 /// float(1.4142135623730951)
 /// float(0.7071067811865476)
 /// float(1.7320508075688772)
+/// float(INF)
+/// float(NAN)
 /// int(1)
 /// int(2)
 /// int(3)
@@ -95,6 +98,8 @@ pub(crate) fn constants() -> Vec<ConstDecl> {
         float_constant(b"M_SQRT2", std::f64::consts::SQRT_2),
         float_constant(b"M_SQRT1_2", std::f64::consts::FRAC_1_SQRT_2),
         float_constant(b"M_SQRT3", 1.732_050_807_568_877_2_f64),
+        float_constant(b"INF", f64::INFINITY),
+        float_constant(b"NAN", f64::NAN),
         constant(b"PHP_ROUND_HALF_UP", i64::from(PHP_ROUND_HALF_UP)),
         constant(b"PHP_ROUND_HALF_DOWN", i64::from(PHP_ROUND_HALF_DOWN)),
         constant(b"PHP_ROUND_HALF_EVEN", i64::from(PHP_ROUND_HALF_EVEN)),
@@ -454,13 +459,6 @@ fn number_argument(req: &mut Request, position: u32) -> Result<Value, Thrown> {
         &Type::Union(vec![Type::Int, Type::Float]),
         position,
     )
-}
-
-/// `Z_PARAM_DOUBLE` at `position`.
-fn double_argument(req: &mut Request, position: u32) -> Result<f64, Thrown> {
-    let given = req.argument(position).unwrap_or_default();
-    let coerced = coerce_param(req, &given, &Type::Float, position)?;
-    Ok(coerced.as_float().unwrap_or(0.0))
 }
 
 /// One `float` argument, and the native's answer over it.

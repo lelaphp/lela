@@ -1160,12 +1160,17 @@ fn debug_info(req: &mut Request) -> Result<Value, Thrown> {
     Ok(Value::array(out))
 }
 
-/// `_bad_state_ex(): void`, deprecated: php's `Error`.
+/// `_bad_state_ex(): void`, deprecated, which the call raises from the
+/// declaration before this runs: php's `Error`.
+///
+/// ```php
+/// try { (new SplFileInfo('x'))->_bad_state_ex(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Deprecated: Method SplFileInfo::_bad_state_ex() is deprecated since 8.2 in %s on line 2
+/// The parent constructor was not called: the object is in an invalid state
+/// ```
 fn bad_state(req: &mut Request) -> Result<Value, Thrown> {
-    php_ext::raising::deprecated(
-        req,
-        "Method SplFileInfo::_bad_state_ex() is deprecated since 8.2",
-    );
     Err(throw(
         req,
         "Error",

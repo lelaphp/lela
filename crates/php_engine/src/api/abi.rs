@@ -20,7 +20,9 @@ use crate::api::call::{Function, Target};
 use crate::api::coerce::BinaryOp;
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
-use crate::api::values::{ClassId, ClosureInfo, PhpArray, PhpObject, PhpString, TypeTag, Value};
+use crate::api::values::{
+    ClassId, ClosureInfo, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value,
+};
 
 /// The startup ini view an extension's engine state is built from: what
 /// the host set before the first request, immutable afterwards.
@@ -116,12 +118,13 @@ pub(crate) type EngineStateBuilder =
 /// The `RINIT` function.
 pub(crate) type Rinit = fn(&mut Request) -> Result<(), Thrown>;
 
-/// An ini entry's `on_modify`, php's `PHP_INI_MH` at
-/// `ZEND_INI_STAGE_RUNTIME`: served by `ini_set()` with the new value
-/// before the entry takes it, raising what the entry's handler raises,
-/// and answering whether the value is taken, `false` being php's
-/// `FAILURE`, which leaves the entry as it was and makes `ini_set()`
-/// answer `false`.
+/// An ini entry's `on_modify`, php's `PHP_INI_MH`: served by `ini_set()`
+/// with the new value before the entry takes it
+/// (`ZEND_INI_STAGE_RUNTIME`), and by the engine as it is built with the
+/// value the host set (`ZEND_INI_STAGE_STARTUP`), raising what the
+/// entry's handler raises, and answering whether the value is taken,
+/// `false` being php's `FAILURE`, which leaves the entry as it was, its
+/// default at startup, and makes `ini_set()` answer `false`.
 pub type OnModify = fn(&mut Request, &[u8]) -> Result<bool, Thrown>;
 /// The `MINFO` function: writes the extension's `phpinfo()` table
 /// through [`Request::info_table`].
@@ -313,7 +316,8 @@ impl ExtensionBuilder {
     }
 
     /// The `on_modify` of the ini entry `name`, one of the extension's
-    /// own, served whenever a program changes it with `ini_set()`.
+    /// own, served whenever a program changes it with `ini_set()`, and
+    /// once over the value the host set as the engine is built.
     #[must_use]
     pub fn on_modify(mut self, name: &[u8], handler: OnModify) -> ExtensionBuilder {
         self.on_modify.push((name.to_vec(), handler));
@@ -489,6 +493,43 @@ impl Callable {
         self.value
     }
 
+    /// `fci_cache.called_scope = called_scope` where
+    /// `instanceof_function(called_scope, fci_cache.calling_scope)`: a
+    /// method the callable resolved to is served with `called` as its
+    /// called scope where `called` is its class or a class that extends it,
+    /// the called scope `forward_static_call` forwards; a
+    /// function, a closure and a method of an unrelated class are
+    /// served as they were resolved. The value and the receiver are the
+    /// same, so the owners are the callable's.
+    ///
+    /// ```php
+    /// class A { public static function who() { return static::class; } }
+    /// class B extends A { public static function test() { return [forward_static_call(['A', 'who']), call_user_func(['A', 'who']), forward_static_call('strtoupper', 'x')]; } }
+    /// class C { public static function test() { return forward_static_call(['A', 'who']); } }
+    /// var_dump(B::test(), C::test());
+    /// ```
+    /// ```expect
+    /// array(3) {
+    ///   [0]=>
+    ///   string(1) "B"
+    ///   [1]=>
+    ///   string(1) "A"
+    ///   [2]=>
+    ///   string(1) "X"
+    /// }
+    /// string(1) "A"
+    /// ```
+    #[must_use]
+    pub fn with_called_scope(&self, req: &Request, called: ClassId) -> Callable {
+        let mut forwarded = self.clone();
+        if let Target::Method { scope, .. } = &mut forwarded.target
+            && req.instance_of(called, *scope)
+        {
+            *scope = called;
+        }
+        forwarded
+    }
+
     /// `zend_fcc_addref` (`Z/Zend/zend_API.h:773`): the owners a list
     /// that keeps the callable past the frame it was read off takes, its
     /// value's and, `GC_ADDREF(fcc->object)`, the receiver's it resolved
@@ -619,6 +660,24 @@ pub enum PropertyRead {
     Write,
 }
 
+/// Which fetch `read_dimension` is serving, php's `type` argument to
+/// the slot: `BP_VAR_R`, the read that warns of a key the container has
+/// not; `BP_VAR_IS`, the read an `isset`, an `empty` or a `??` makes,
+/// which warns of nothing; and the three fetches a write through the
+/// element makes, `BP_VAR_W` (`$o[$k][] = v`, `$o[$k]->p = v`, `&$o[$k]`),
+/// `BP_VAR_RW` (`$o[$k][$j] .= v`, `$o[$k]++` over an array element of
+/// it) and `BP_VAR_UNSET` (`unset($o[$k][$j])`), under which a class
+/// whose elements are places hands the element back as a reference,
+/// the place itself, as `spl_array_read_dimension_ex` makes it one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DimensionRead {
+    Warning,
+    Silent,
+    Write,
+    ReadWrite,
+    Unset,
+}
+
 /// What `get_property_ptr_ptr` answers for one name, php's pointer or
 /// its `NULL`: whether a write to the property addresses the standard
 /// place, or goes through the class's `read_property` and
@@ -637,8 +696,8 @@ pub enum PropertyPlace {
 }
 
 /// What `get_properties_for` is asked for, php's `zend_prop_purpose`:
-/// the five readers of an object's properties that a class may answer
-/// each in its own way.
+/// the six readers of an object's properties that a class may answer
+/// each in its own way, `GetObjectVars` being `get_object_vars()`'s.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PropertyPurpose {
     Debug,
@@ -646,6 +705,7 @@ pub enum PropertyPurpose {
     Serialize,
     VarExport,
     Json,
+    GetObjectVars,
 }
 
 /// The `clone_obj` slot: a fresh object holding what this one holds,
@@ -655,6 +715,10 @@ pub type CloneObj = fn(&mut Request, PhpObject) -> Result<PhpObject, Thrown>;
 /// named property written through `write_property` from `scope`.
 pub type CloneObjWith =
     fn(&mut Request, PhpObject, Option<ClassId>, PhpArray) -> Result<PhpObject, Thrown>;
+/// The `current_place` slot: the element the object's own iterator
+/// stands at made a reference in place, the cell with one more owner,
+/// the caller's; `None` past the last element.
+pub type CurrentPlace = fn(&mut Request, PhpObject) -> Result<Option<PhpRef>, Thrown>;
 
 /// Seam 2 (design §4.3, §5.4): Zend's 25 handler slots in 8.5 order
 /// (`Z/Zend/zend_object_handlers.h:206-235`), one method each, the
@@ -731,14 +795,64 @@ pub trait ObjectHandlers: Send + Sync {
 
     /// `read_dimension`, `zend_std_read_dimension` at `Std`:
     /// `offsetGet` on an `ArrayAccess`, `null` for `$o[]`, and php's
-    /// `Error` for an object of any other class.
+    /// `Error` for an object of any other class; under
+    /// [`DimensionRead::Silent`] `offsetExists` first, and `null` where
+    /// it says no. `read` is php's `type`: under a write fetch a class
+    /// whose elements are places answers the element as a reference,
+    /// which the fetch writes through; any other value is written into
+    /// nothing, with php's `Indirect modification of overloaded
+    /// element` notice where it is no object.
+    ///
+    /// ```php
+    /// class A implements ArrayAccess {
+    ///     public $data = ['k' => []];
+    ///     public function offsetGet($k): mixed { echo "get $k\n"; return $this->data[$k] ?? null; }
+    ///     public function offsetExists($k): bool { echo "exists $k\n"; return isset($this->data[$k]); }
+    ///     public function offsetSet($k, $v): void {}
+    ///     public function offsetUnset($k): void {}
+    /// }
+    /// $a = new A;
+    /// var_dump(isset($a['k']['x']), $a['nope']['x'] ?? 'dflt');
+    /// $a['k']['x'] = 1;
+    /// $o = new ArrayObject(['k' => []]);
+    /// $o['k']['x'] = 1; $o['new'][] = 2; $o['k']['x'] .= 'y';
+    /// var_dump($a->data, $o->getArrayCopy());
+    /// ```
+    /// ```expect
+    /// exists k
+    /// get k
+    /// exists nope
+    /// bool(false)
+    /// string(4) "dflt"
+    /// get k
+    ///
+    /// Notice: Indirect modification of overloaded element of A has no effect in %s on line 11
+    /// array(1) {
+    ///   ["k"]=>
+    ///   array(0) {
+    ///   }
+    /// }
+    /// array(2) {
+    ///   ["k"]=>
+    ///   array(1) {
+    ///     ["x"]=>
+    ///     string(2) "1y"
+    ///   }
+    ///   ["new"]=>
+    ///   array(1) {
+    ///     [0]=>
+    ///     int(2)
+    ///   }
+    /// }
+    /// ```
     fn read_dimension(
         &self,
         req: &mut Request,
         object: PhpObject,
         offset: Option<&Value>,
+        read: DimensionRead,
     ) -> Result<Value, Thrown> {
-        req.read_dimension(object, offset)
+        req.read_dimension(object, offset, read)
     }
 
     /// `write_dimension`, `zend_std_write_dimension` at `Std`:
@@ -1003,6 +1117,35 @@ pub trait ObjectHandlers: Send + Sync {
         Ok(None)
     }
 
+    /// The `get_current_data` of an iterator php's class hands out from
+    /// its own `get_iterator` and walks in C, where that iterator can be
+    /// taken by reference: `spl_array_get_iterator`'s, whose element is
+    /// a place in the storage. A `foreach` by reference over an object
+    /// of such a class whose `Iterator` methods are all its natives
+    /// binds each element through the function this answers, and one
+    /// over any other `Iterator` is php's refusal. `None` at `Std`.
+    ///
+    /// ```php
+    /// $it = new ArrayIterator([1, 2]);
+    /// foreach ($it as &$v) { $v *= 10; }
+    /// unset($v);
+    /// class Over extends ArrayIterator { function current(): mixed { return parent::current(); } }
+    /// try { foreach (new Over([3]) as &$v) {} } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump($it->getArrayCopy());
+    /// ```
+    /// ```expect
+    /// An iterator cannot be used with foreach by reference
+    /// array(2) {
+    ///   [0]=>
+    ///   int(10)
+    ///   [1]=>
+    ///   int(20)
+    /// }
+    /// ```
+    fn current_place(&self) -> Option<CurrentPlace> {
+        None
+    }
+
     /// `get_properties_for`: the rows one purpose reads; `None` at
     /// `Std`, php's null slot, so every purpose reads `get_properties`.
     fn get_properties_for(
@@ -1013,6 +1156,30 @@ pub trait ObjectHandlers: Send + Sync {
     ) -> Result<Option<Vec<(PhpString, Value)>>, Thrown> {
         let _ = (req, object, purpose);
         Ok(None)
+    }
+
+    /// Whether the table's `get_properties` is not
+    /// `zend_std_get_properties` or its `get_properties_for` is set: the
+    /// class answers the reader of its properties itself, so its
+    /// property table is not what a reader sees. What
+    /// `spl_array_set_array` refuses an object as the backing of an
+    /// `ArrayObject` for; `false` at `Std`, and `true` for every table
+    /// that answers [`ObjectHandlers::get_properties_for`] for some
+    /// purpose, and for every table php sets either slot on.
+    ///
+    /// ```php
+    /// foreach ([new DateInterval('P1D'), new SplFixedArray(2), new stdClass] as $o) {
+    ///     try { @new ArrayObject($o); echo get_class($o), " backs\n"; }
+    ///     catch (InvalidArgumentException $e) { echo $e->getMessage(), "\n"; }
+    /// }
+    /// ```
+    /// ```expect
+    /// Overloaded object of type DateInterval is not compatible with ArrayObject
+    /// Overloaded object of type SplFixedArray is not compatible with ArrayObject
+    /// stdClass backs
+    /// ```
+    fn properties_overloaded(&self) -> bool {
+        false
     }
 }
 

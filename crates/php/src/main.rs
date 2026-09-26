@@ -67,6 +67,14 @@ fn main() -> ExitCode {
             let engine = engine(&options);
             code(php_sapi::cli::serve(&engine, program, arguments))
         }
+        Ask::Highlight(program, arguments) => {
+            let engine = engine(&options);
+            code(php_sapi::cli::highlight(&engine, program, arguments))
+        }
+        Ask::Strip(program, arguments) => {
+            let engine = engine(&options);
+            code(php_sapi::cli::strip(&engine, program, arguments))
+        }
         // `do_cli`'s lint loop: the status starts at 0, a lint that fails
         // sets 255 and a file that cannot be opened sets 1, each as it
         // comes, and one that passes changes nothing.

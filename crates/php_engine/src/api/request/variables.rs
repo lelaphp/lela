@@ -9,7 +9,7 @@
 
 use php_unit::AutoGlobal;
 
-use super::Request;
+use super::{Request, Symbol};
 use crate::api::raising::Thrown;
 use crate::api::values::{Key, PhpArray, PhpString, Value};
 use crate::exec::TableId;
@@ -69,6 +69,38 @@ impl Request {
             self.make(global)?;
         }
         Ok(())
+    }
+
+    /// A variable of `EG(symbol_table)` written or deleted, what an
+    /// extension that binds a global does: `Some` is
+    /// `zend_hash_update_ind`, `value` the table's from here, into the CV
+    /// a frame attached to the name where one is, and into the bucket
+    /// otherwise, a name the table has not added to it; `None` is
+    /// `zend_delete_global_variable`, `zend_hash_del_ind`. What stood
+    /// there is released after the write, where a destructor is served.
+    /// The session binds `$_SESSION` so (`php_session_track_init`).
+    pub fn set_global(&mut self, name: &[u8], value: Option<Value>) {
+        let table = self.global_table();
+        let Some(value) = value else {
+            self.symbol_unset(table, name);
+            return;
+        };
+        let attached = self.table_mut(table).and_then(|entries| {
+            entries
+                .iter()
+                .find(|(key, _)| key == name)
+                .and_then(|(_, symbol)| match symbol {
+                    Symbol::Indirect(frame, at) => Some((*frame, *at)),
+                    Symbol::Value(_) | Symbol::Held(_) => None,
+                })
+        });
+        match attached {
+            Some((frame, at)) => {
+                let previous = self.set_slot(frame, at, value);
+                self.release(previous);
+            }
+            None => self.symbol_update(table, name.to_vec(), value),
+        }
     }
 
     /// `zend_is_auto_global` (`Z/Zend/zend_compile.c:1987`) for one

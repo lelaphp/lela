@@ -17,6 +17,8 @@ use php_ext::abi::Extension;
 #[must_use]
 pub fn enabled() -> &'static [fn() -> Extension] {
     &[
+        #[cfg(feature = "date")]
+        php_ext_date::extension,
         #[cfg(feature = "random")]
         php_ext_random::extension,
         #[cfg(feature = "standard")]
@@ -25,8 +27,6 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_pcre::extension,
         #[cfg(feature = "spl")]
         php_ext_spl::extension,
-        #[cfg(feature = "date")]
-        php_ext_date::extension,
         #[cfg(feature = "lexbor")]
         php_ext_lexbor::extension,
         #[cfg(feature = "reflection")]

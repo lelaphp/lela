@@ -638,10 +638,6 @@ pub fn extension() -> Extension {
 /// bool(true)
 /// ```
 fn lcg_value(req: &mut Request) -> Result<Value, Thrown> {
-    deprecated(
-        req,
-        "Function lcg_value() is deprecated since 8.4, use \\Random\\Randomizer::getFloat() instead",
-    );
     zpp::arity(req, 0, 0)?;
     let globals = req.state::<Globals>();
     let state = globals.combined_lcg.get_or_insert_with(|| {

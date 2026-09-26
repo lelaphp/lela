@@ -28,6 +28,10 @@ use crate::api::request::PHP_VERSION;
 /// `DEFAULT_INCLUDE_PATH` says and what `include_path` defaults to.
 pub(crate) const PHP_INCLUDE_PATH: &str = ".:/opt/homebrew/Cellar/php/8.5.9/share/php/pear";
 
+/// `PHP_EXTENSION_DIR`, the pinned build's: the constant, and the
+/// default of `extension_dir`, which `dl()` names a library under.
+pub(crate) const PHP_EXTENSION_DIR: &str = "/opt/homebrew/Cellar/php/8.5.9/lib/php/20250925";
+
 /// The install paths the pinned build's `configure` wrote into
 /// `main/build-defs.h`, in `register_main_symbols`' order from
 /// `PEAR_INSTALL_DIR` to `PHP_CONFIG_FILE_SCAN_DIR`.
@@ -40,10 +44,7 @@ const BUILD_PATHS: [(&str, &str); 14] = [
         "PEAR_EXTENSION_DIR",
         "/opt/homebrew/Cellar/php/8.5.9/lib/php/20250925",
     ),
-    (
-        "PHP_EXTENSION_DIR",
-        "/opt/homebrew/Cellar/php/8.5.9/lib/php/20250925",
-    ),
+    ("PHP_EXTENSION_DIR", PHP_EXTENSION_DIR),
     ("PHP_PREFIX", "/opt/homebrew/Cellar/php/8.5.9"),
     ("PHP_BINDIR", "/opt/homebrew/Cellar/php/8.5.9/bin"),
     ("PHP_SBINDIR", "/opt/homebrew/Cellar/php/8.5.9/sbin"),

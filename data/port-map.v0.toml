@@ -1056,8 +1056,8 @@ rule = "the lazy-object table is the engine's; nothing polls it"
 mahout = "RequestCtx::set_superglobal"
 sites = 5
 crates = 1
-status = "same"
-api = "request::Request::set_superglobal"
+status = "renamed"
+api = "request::Request::set_global"
 
 [[item]]
 mahout = "RequestCtx::frame_vars_for_native_mut"

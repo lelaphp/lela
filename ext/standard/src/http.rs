@@ -2,15 +2,15 @@
 //! `php_url_encode_hash_ex`, and the two natives over the headers the
 //! http wrapper's last response left. This engine's streams have no
 //! http wrapper yet, so no request ever leaves headers and the first
-//! answers `null` as php does before one; `request_parse_body` reads
-//! the request body, which the host face does not hand an extension,
-//! and waits on it.
+//! answers `null` as php does before one. `request_parse_body` reads its
+//! `$options` as `cache_request_parse_body_options` does and the
+//! request's content type as `sapi_read_post_data` does.
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 use php_ext::coerce::{to_string, value_name};
 use php_ext::decl::{ClassKind, EnumBacking, FunctionDecl};
-use php_ext::raising::{Thrown, arg_type_error, throw};
+use php_ext::raising::{Thrown, arg_type_error, fatal, throw, warning};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, Value, ValueRef};
 
@@ -18,9 +18,9 @@ use crate::argument_count_between;
 use crate::output::Entry;
 use crate::stub::stub;
 use crate::url::{PHP_QUERY_RFC3986, url_encode};
-use crate::zpp::{nullable_string, optional_long, optional_string, string_value};
+use crate::zpp::{nullable_array, nullable_string, optional_long, optional_string, string_value};
 
-/// The three, in the stub's order.
+/// The four, in the stub's order.
 ///
 /// ```php
 /// foreach (['http_build_query', 'http_get_last_response_headers', 'http_clear_last_response_headers'] as $f) echo new ReflectionFunction($f);
@@ -65,7 +65,178 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
             stub("http_clear_last_response_headers(): void"),
             http_clear_last_response_headers,
         ),
+        (
+            stub("request_parse_body(?array $options = null): array"),
+            request_parse_body,
+        ),
     ]
+}
+
+/// The limits `$options` may name, `REQUEST_PARSE_BODY_OPTION_*`, each
+/// standing in for the ini entry of its name while the body is parsed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Limit {
+    MaxFileUploads,
+    MaxInputVars,
+    MaxMultipartBodyParts,
+    PostMaxSize,
+    UploadMaxFilesize,
+}
+
+impl Limit {
+    /// `CHECK_OPTION`'s `zend_string_equals_literal_ci`.
+    fn named(key: &[u8]) -> Option<Limit> {
+        [
+            (&b"max_file_uploads"[..], Limit::MaxFileUploads),
+            (b"max_input_vars", Limit::MaxInputVars),
+            (b"max_multipart_body_parts", Limit::MaxMultipartBodyParts),
+            (b"post_max_size", Limit::PostMaxSize),
+            (b"upload_max_filesize", Limit::UploadMaxFilesize),
+        ]
+        .into_iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(key))
+        .map(|(_, limit)| limit)
+    }
+}
+
+/// The content types `SG(known_post_content_types)` holds a handler for,
+/// `php_startup_sapi_content_types`: `sapi_read_post_data` lowers the
+/// request's type and cuts it at the first `;`, `,` or space before it
+/// looks one up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PostType {
+    UrlEncoded,
+    Multipart,
+}
+
+impl PostType {
+    fn of(content_type: &[u8]) -> Option<PostType> {
+        let end = content_type
+            .iter()
+            .position(|c| matches!(c, b';' | b',' | b' '))
+            .unwrap_or(content_type.len());
+        match content_type[..end].to_ascii_lowercase().as_slice() {
+            b"application/x-www-form-urlencoded" => Some(PostType::UrlEncoded),
+            b"multipart/form-data" => Some(PostType::Multipart),
+            _ => None,
+        }
+    }
+}
+
+/// `request_parse_body(?array $options = null): array`, php's
+/// `PHP_FUNCTION(request_parse_body)`: `$options` held to the five
+/// limits it may name, each an integer or a quantity string read as an
+/// ini entry reads one (its warning raised), then the request's content
+/// type, and the body parsed by the handler registered for it into the
+/// `[$_POST, $_FILES]` pair. A request with no content type, the CLI's,
+/// and one of a type no handler is registered for are
+/// `RequestParseBodyException`s.
+///
+/// ```php
+/// foreach ([['foo' => 1], [42 => 1], ['' => 1], ['max_input_vars' => []], ['UPLOAD_MAX_FILESIZE' => '1GB', 'post_max_size' => 5], null] as $options) {
+///     try { request_parse_body($options); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// ValueError: Invalid key "foo" in $options argument
+/// ValueError: Invalid integer key in $options argument
+/// ValueError: Invalid empty string key in $options argument
+/// ValueError: Invalid array value in $options argument
+///
+/// Warning: Invalid quantity "1GB": unknown multiplier "B", interpreting as "1" for backwards compatibility in %s on line 3
+/// RequestParseBodyException: Request does not provide a content type
+/// RequestParseBodyException: Request does not provide a content type
+/// ```
+fn request_parse_body(req: &mut Request) -> Result<Value, Thrown> {
+    argument_count_between(req, 0, 1)?;
+    if let Some(options) = nullable_array(req, 1)? {
+        body_limits(req, options)?;
+    }
+    let headers = req.request_headers()?;
+    let content_type = headers
+        .snapshot()
+        .into_iter()
+        .find_map(|(key, value)| match key {
+            Key::Str(name) if name.as_bytes().eq_ignore_ascii_case(b"content-type") => {
+                value.as_php_string().map(|s| s.as_bytes().to_vec())
+            }
+            _ => None,
+        });
+    let Some(content_type) = content_type else {
+        return Err(throw(
+            req,
+            "RequestParseBodyException",
+            "Request does not provide a content type",
+        ));
+    };
+    if PostType::of(&content_type).is_none() {
+        let text = format!(
+            "Content-Type \"{}\" is not supported",
+            String::from_utf8_lossy(&content_type)
+        );
+        return Err(throw(req, "RequestParseBodyException", &text));
+    }
+    // `sapi_handle_post` over `php_std_post_handler` and
+    // `rfc1867_post_handler`, the engine's POST readers, which it has
+    // not got; no host of this engine hands a request a content type
+    // yet, so no request reaches here.
+    Err(fatal(
+        req,
+        "InternalError: request_parse_body() has no POST reader for this content type yet (#877)",
+    ))
+}
+
+/// `cache_request_parse_body_options` (`Z/ext/standard/http.c:279`):
+/// every key a string naming one of the five limits, every value an
+/// integer or a quantity string, each refusal php's `ValueError`.
+fn body_limits(req: &mut Request, options: PhpArray) -> Result<Vec<(Limit, i64)>, Thrown> {
+    let mut limits = Vec::new();
+    for (key, value) in options.snapshot() {
+        let key = match key {
+            Key::Int(_) => {
+                return Err(throw(
+                    req,
+                    "ValueError",
+                    "Invalid integer key in $options argument",
+                ));
+            }
+            Key::Str(key) => key,
+        };
+        if key.is_empty() {
+            return Err(throw(
+                req,
+                "ValueError",
+                "Invalid empty string key in $options argument",
+            ));
+        }
+        let Some(limit) = Limit::named(key.as_bytes()) else {
+            let text = format!(
+                "Invalid key \"{}\" in $options argument",
+                String::from_utf8_lossy(key.as_bytes())
+            );
+            return Err(throw(req, "ValueError", &text));
+        };
+        let value = value.deref();
+        let quantity = match value.as_ref() {
+            ValueRef::Str(text) => {
+                let (quantity, said) = Request::ini_parse_quantity(text.as_bytes());
+                if let Some(said) = said {
+                    warning(req, &said);
+                }
+                quantity
+            }
+            ValueRef::Int(n) => n,
+            _ => {
+                let text = format!(
+                    "Invalid {} value in $options argument",
+                    value_name(req, &value)
+                );
+                return Err(throw(req, "ValueError", &text));
+            }
+        };
+        limits.push((limit, quantity));
+    }
+    Ok(limits)
 }
 
 /// Whether a value is an enum case, and its class's backing.
