@@ -265,6 +265,7 @@ fn open_with(
     let kind = UserStream {
         object,
         no_seek: false,
+        own: None,
     };
     let stream = req.stream_alloc(PhpStream::new(Box::new(kind), mode))?;
     Ok(Ok(stream))
@@ -336,69 +337,31 @@ fn open_dir_with(
 struct UserStream {
     object: PhpObject,
     no_seek: bool,
+    /// The stream the kind is under, which its methods hold against
+    /// `fclose`.
+    own: Option<Stream>,
 }
 
 impl UserStream {
-    /// `user_stream_set_check_liveliness` (`Z/main/streams/userspace.c:952`):
-    /// `stream_eof`, `true` the stream's end and `false` its life; a class
-    /// without it, and an answer that is no bool, are php's warnings and
-    /// the end.
-    fn check_liveness(&mut self, req: &mut Request) -> OptionAnswer {
-        let value = match call(req, self.object, b"stream_eof", &[]) {
-            Called::Missing => {
-                let text = format!(
-                    "{}::stream_eof is not implemented! Assuming EOF",
-                    class_name(req, self.object)
-                );
-                docref(req, Level::Warning, &text);
-                return OptionAnswer::Err;
-            }
-            Called::Threw => return OptionAnswer::Err,
-            Called::Value(value) => value,
-        };
-        match value.as_ref() {
-            ValueRef::Bool(true) => OptionAnswer::Err,
-            ValueRef::Bool(false) => OptionAnswer::Ok,
-            _ => {
-                let name = crate::api::coerce::value_name(req, &value);
-                let text = format!(
-                    "{}::stream_eof value must be of type bool, {name} given",
-                    class_name(req, self.object)
-                );
-                docref(req, Level::Warning, &text);
-                req.release(value);
-                OptionAnswer::Err
-            }
+    /// `f` with the stream held against `fclose`, php's
+    /// `PHP_STREAM_FLAG_NO_FCLOSE` around `stream_read`, `stream_eof`,
+    /// `stream_write`, `stream_seek` and `stream_cast`.
+    fn held<R>(&mut self, req: &mut Request, f: impl FnOnce(&mut Self, &mut Request) -> R) -> R {
+        let own = self.own.map(Stream::resource);
+        if let Some(res) = own {
+            req.held_streams.push(res);
         }
-    }
-}
-
-/// `statbuf_from_array` (`Z/main/streams/userspace.c:799`): each of the
-/// thirteen fields read by its name, zero where it is not there.
-fn statbuf_from_array(req: &mut Request, array: PhpArray) -> Result<StatBuf, Thrown> {
-    const NAMES: [&[u8]; 13] = [
-        b"dev", b"ino", b"mode", b"nlink", b"uid", b"gid", b"rdev", b"size", b"atime", b"mtime",
-        b"ctime", b"blksize", b"blocks",
-    ];
-    let mut sb = [0; 13];
-    for (field, name) in sb.iter_mut().zip(NAMES) {
-        let key = Key::Str(PhpString::new(req, name)?);
-        if let Some(value) = array.get(&key) {
-            *field = crate::api::coerce::to_long(req, &value.deref())?;
+        let answer = f(self, req);
+        if own.is_some() {
+            req.held_streams.pop();
         }
-    }
-    Ok(sb)
-}
-
-impl Ops for UserStream {
-    fn label(&self) -> &'static str {
-        "user-space"
+        answer
     }
 
     /// `php_userstreamop_write` (`Z/main/streams/userspace.c:562`):
     /// `stream_write` with the bytes; `false` is `-1`, anything else an
     /// int, one past what was handed php's warning and cut to it.
-    fn write(&mut self, req: &mut Request, buf: &[u8]) -> Option<usize> {
+    fn write_held(&mut self, req: &mut Request, buf: &[u8]) -> Option<usize> {
         let data = string_arg(req, buf).ok()?;
         let called = call(req, self.object, b"stream_write", &[data]);
         req.release(data);
@@ -446,7 +409,7 @@ impl Ops for UserStream {
     /// ```expect
     /// Object of class stdClass could not be converted to string
     /// ```
-    fn read(&mut self, req: &mut Request, buf: &mut [u8], eof: &mut bool) -> Option<usize> {
+    fn read_held(&mut self, req: &mut Request, buf: &mut [u8], eof: &mut bool) -> Option<usize> {
         let count = i64::try_from(buf.len()).unwrap_or(i64::MAX);
         let value = match call(req, self.object, b"stream_read", &[Value::int(count)]) {
             Called::Missing | Called::Threw => return None,
@@ -502,33 +465,12 @@ impl Ops for UserStream {
         Some(didread)
     }
 
-    /// `php_userstreamop_close` (`Z/main/streams/userspace.c:699`):
-    /// `stream_close` where it is there, then the instance given up.
-    fn close(&mut self, req: &mut Request) -> i32 {
-        if let Called::Value(value) = call(req, self.object, b"stream_close", &[]) {
-            req.release(value);
-        }
-        req.release(self.object.as_value());
-        0
-    }
-
-    /// `php_userstreamop_flush`: `stream_flush`, `true` its answer.
-    fn flush(&mut self, req: &mut Request) -> bool {
-        match call(req, self.object, b"stream_flush", &[]) {
-            Called::Value(value) => {
-                let flushed = truthy(req, &value);
-                req.release(value);
-                flushed
-            }
-            Called::Missing | Called::Threw => false,
-        }
-    }
-
     /// `php_userstreamop_seek` (`Z/main/streams/userspace.c:741`):
     /// `stream_seek` with the offset and the whence; a class with none
     /// makes the stream one that cannot seek; a true answer is followed
     /// by `stream_tell`, whose int is the position.
-    fn seek(
+    #[allow(clippy::unnecessary_wraps)] // `Ops::seek`'s answer, which it is
+    fn seek_held(
         &mut self,
         req: &mut Request,
         offset: i64,
@@ -578,6 +520,157 @@ impl Ops for UserStream {
                 Some(false)
             }
             Called::Threw => Some(false),
+        }
+    }
+
+    /// `php_userstreamop_cast` (`Z/main/streams/userspace.c:1413`):
+    /// `stream_cast` with `STREAM_CAST_FOR_SELECT` or
+    /// `STREAM_CAST_AS_STREAM`, and the stream it answers cast in this
+    /// one's place; a class without it, an answer that is no stream and
+    /// the stream itself are php's warnings, and a false answer is
+    /// refused in silence.
+    fn cast_target_held(
+        &mut self,
+        req: &mut Request,
+        select: bool,
+        own: Option<Stream>,
+    ) -> Option<Stream> {
+        let castas = if select { 3 } else { 0 };
+        let value = match call(req, self.object, b"stream_cast", &[Value::int(castas)]) {
+            Called::Missing => {
+                not_implemented(req, self.object, "stream_cast");
+                return None;
+            }
+            Called::Threw => return None,
+            Called::Value(value) => value,
+        };
+        if !truthy(req, &value) {
+            req.release(value);
+            return None;
+        }
+        let inner = Stream::from_value(req, &value.deref());
+        req.release(value);
+        let complaint = match inner {
+            None => "must return a stream resource",
+            Some(inner) if own.is_some_and(|own| own.resource() == inner.resource()) => {
+                "must not return itself"
+            }
+            Some(inner) => return Some(inner),
+        };
+        let text = format!("{}::stream_cast {complaint}", class_name(req, self.object));
+        docref(req, Level::Warning, &text);
+        None
+    }
+
+    /// `user_stream_set_check_liveliness` (`Z/main/streams/userspace.c:952`):
+    /// `stream_eof`, `true` the stream's end and `false` its life; a class
+    /// without it, and an answer that is no bool, are php's warnings and
+    /// the end.
+    fn check_liveness(&mut self, req: &mut Request) -> OptionAnswer {
+        let value = match call(req, self.object, b"stream_eof", &[]) {
+            Called::Missing => {
+                let text = format!(
+                    "{}::stream_eof is not implemented! Assuming EOF",
+                    class_name(req, self.object)
+                );
+                docref(req, Level::Warning, &text);
+                return OptionAnswer::Err;
+            }
+            Called::Threw => return OptionAnswer::Err,
+            Called::Value(value) => value,
+        };
+        match value.as_ref() {
+            ValueRef::Bool(true) => OptionAnswer::Err,
+            ValueRef::Bool(false) => OptionAnswer::Ok,
+            _ => {
+                let name = crate::api::coerce::value_name(req, &value);
+                let text = format!(
+                    "{}::stream_eof value must be of type bool, {name} given",
+                    class_name(req, self.object)
+                );
+                docref(req, Level::Warning, &text);
+                req.release(value);
+                OptionAnswer::Err
+            }
+        }
+    }
+}
+
+/// `statbuf_from_array` (`Z/main/streams/userspace.c:799`): each of the
+/// thirteen fields read by its name, zero where it is not there.
+fn statbuf_from_array(req: &mut Request, array: PhpArray) -> Result<StatBuf, Thrown> {
+    const NAMES: [&[u8]; 13] = [
+        b"dev", b"ino", b"mode", b"nlink", b"uid", b"gid", b"rdev", b"size", b"atime", b"mtime",
+        b"ctime", b"blksize", b"blocks",
+    ];
+    let mut sb = [0; 13];
+    for (field, name) in sb.iter_mut().zip(NAMES) {
+        let key = Key::Str(PhpString::new(req, name)?);
+        if let Some(value) = array.get(&key) {
+            *field = crate::api::coerce::to_long(req, &value.deref())?;
+        }
+    }
+    Ok(sb)
+}
+
+impl Ops for UserStream {
+    fn write(&mut self, req: &mut Request, buf: &[u8]) -> Option<usize> {
+        self.held(req, |this, req| this.write_held(req, buf))
+    }
+
+    fn read(&mut self, req: &mut Request, buf: &mut [u8], eof: &mut bool) -> Option<usize> {
+        self.held(req, |this, req| this.read_held(req, buf, eof))
+    }
+
+    fn seek(
+        &mut self,
+        req: &mut Request,
+        offset: i64,
+        whence: Option<Whence>,
+        position: &mut i64,
+    ) -> Option<bool> {
+        self.held(req, |this, req| {
+            this.seek_held(req, offset, whence, position)
+        })
+    }
+
+    fn cast_target(
+        &mut self,
+        req: &mut Request,
+        select: bool,
+        own: Option<Stream>,
+    ) -> CastTarget<'_> {
+        self.held(req, |this, req| this.cast_target_held(req, select, own))
+            .map_or(CastTarget::Refused, CastTarget::Stream)
+    }
+
+    fn adopt(&mut self, own: Stream) {
+        self.own = Some(own);
+    }
+
+    fn label(&self) -> &'static str {
+        "user-space"
+    }
+
+    /// `php_userstreamop_close` (`Z/main/streams/userspace.c:699`):
+    /// `stream_close` where it is there, then the instance given up.
+    fn close(&mut self, req: &mut Request) -> i32 {
+        if let Called::Value(value) = call(req, self.object, b"stream_close", &[]) {
+            req.release(value);
+        }
+        req.release(self.object.as_value());
+        0
+    }
+
+    /// `php_userstreamop_flush`: `stream_flush`, `true` its answer.
+    fn flush(&mut self, req: &mut Request) -> bool {
+        match call(req, self.object, b"stream_flush", &[]) {
+            Called::Value(value) => {
+                let flushed = truthy(req, &value);
+                req.release(value);
+                flushed
+            }
+            Called::Missing | Called::Threw => false,
         }
     }
 
@@ -732,45 +825,6 @@ impl Ops for UserStream {
 
     fn is_userspace(&self) -> bool {
         true
-    }
-
-    /// `php_userstreamop_cast` (`Z/main/streams/userspace.c:1413`):
-    /// `stream_cast` with `STREAM_CAST_FOR_SELECT` or
-    /// `STREAM_CAST_AS_STREAM`, and the stream it answers cast in this
-    /// one's place; a class without it, an answer that is no stream and
-    /// the stream itself are php's warnings, and a false answer is
-    /// refused in silence.
-    fn cast_target(
-        &mut self,
-        req: &mut Request,
-        select: bool,
-        own: Option<Stream>,
-    ) -> CastTarget<'_> {
-        let castas = if select { 3 } else { 0 };
-        let value = match call(req, self.object, b"stream_cast", &[Value::int(castas)]) {
-            Called::Missing => {
-                not_implemented(req, self.object, "stream_cast");
-                return CastTarget::Refused;
-            }
-            Called::Threw => return CastTarget::Refused,
-            Called::Value(value) => value,
-        };
-        if !truthy(req, &value) {
-            req.release(value);
-            return CastTarget::Refused;
-        }
-        let inner = Stream::from_value(req, &value.deref());
-        req.release(value);
-        let complaint = match inner {
-            None => "must return a stream resource",
-            Some(inner) if own.is_some_and(|own| own.resource() == inner.resource()) => {
-                "must not return itself"
-            }
-            Some(inner) => return CastTarget::Stream(inner),
-        };
-        let text = format!("{}::stream_cast {complaint}", class_name(req, self.object));
-        docref(req, Level::Warning, &text);
-        CastTarget::Refused
     }
 }
 

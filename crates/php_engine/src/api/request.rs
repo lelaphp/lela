@@ -632,9 +632,36 @@ impl Stream {
     /// `php_stream_close`, what `fclose` does past its checks: the
     /// resource closed and its destructor served, which flushes what was
     /// written and closes the kind; the resource stays for its owners,
-    /// `resource(N) of type (Unknown)` under `var_dump`.
-    pub fn close(self, req: &mut Request) {
+    /// `resource(N) of type (Unknown)` under `var_dump`. `false`, and
+    /// nothing closed, for a stream held by the operation serving PHP code
+    /// on it, php's `PHP_STREAM_FLAG_NO_FCLOSE`, which a user-space
+    /// stream's `stream_read`, `stream_eof`, `stream_write`, `stream_seek`
+    /// and `stream_cast` and a user filter's call set.
+    ///
+    /// ```php
+    /// class B { public $context;
+    ///     function stream_open($p, $m, $o, &$op) { return true; }
+    ///     function stream_read($n) { global $s; var_dump(fclose($s)); return ""; }
+    ///     function stream_eof() { return true; }
+    ///     function stream_flush() { global $s; var_dump(fclose($s)); return true; } }
+    /// stream_wrapper_register('bb', 'B');
+    /// $s = fopen('bb://x', 'r');
+    /// fread($s, 1);
+    /// fflush($s);
+    /// try { fclose($s); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Warning: fclose(): cannot close the provided stream, as it must not be manually closed in %s on line 4
+    /// bool(false)
+    /// bool(true)
+    /// fclose(): Argument #1 ($stream) must be an open stream resource
+    /// ```
+    pub fn close(self, req: &mut Request) -> bool {
+        if req.held_streams.contains(&self.0) {
+            return false;
+        }
         self.0.close(req);
+        true
     }
 }
 
@@ -1145,6 +1172,9 @@ pub struct Request {
     /// operation returns, which is when [`Request::serve_native`] raises
     /// it, and before which no more such code is served.
     pub(crate) stream_thrown: Option<Thrown>,
+    /// The streams an operation holds while it serves PHP code on them,
+    /// php's `PHP_STREAM_FLAG_NO_FCLOSE`, which `fclose` refuses.
+    pub(crate) held_streams: Vec<Resource>,
     /// The filter call in progress, whose stream is out of its resource
     /// while the filter runs.
     pub(crate) filtering: Option<crate::streams::FilterCall>,
@@ -1564,6 +1594,7 @@ impl Request {
             error_handling_thrown: None,
             stream_thrown: None,
             filtering: None,
+            held_streams: Vec::new(),
             filter_type,
             error_handler: None,
             error_handler_levels: 0,

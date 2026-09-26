@@ -196,9 +196,11 @@ impl PhpStream {
             seek: None,
         };
         let outer = req.filtering.replace(call);
+        req.held_streams.push(stream.resource());
         let answered = filter
             .ops
             .filter(req, stream, input, output, consumed, flags);
+        req.held_streams.pop();
         let call = std::mem::replace(&mut req.filtering, outer);
         let status = match answered {
             Ok(status) => status,

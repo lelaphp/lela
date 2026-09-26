@@ -731,7 +731,9 @@ fn rewind(req: &mut Request) -> Result<Value, Thrown> {
 fn fclose(req: &mut Request) -> Result<Value, Thrown> {
     argument_count_between(req, 1, 1)?;
     let stream = stream_argument(req, 1)?;
-    if stream.is_dir(req) {
+    // `PHP_STREAM_FLAG_NO_FCLOSE`: a directory, and a stream an operation
+    // holds while it serves PHP code on it, which `close` refuses.
+    if stream.is_dir(req) || !stream.close(req) {
         docref(
             req,
             Level::Warning,
@@ -739,7 +741,6 @@ fn fclose(req: &mut Request) -> Result<Value, Thrown> {
         );
         return Ok(Value::bool(false));
     }
-    stream.close(req);
     Ok(Value::bool(true))
 }
 

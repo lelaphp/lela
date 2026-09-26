@@ -173,6 +173,11 @@ pub(crate) trait Ops: Send {
         Vec::new()
     }
 
+    /// The stream the kind is under, handed once it is allocated: what a
+    /// user-space stream holds against `fclose` while one of its methods
+    /// runs.
+    fn adopt(&mut self, _own: Stream) {}
+
     /// Whether the kind has an `ops->write`: a directory and the `data:`
     /// wrapper's stream have none, which a write is php's `Stream is not
     /// writable` for. A kind that takes nothing, as a socket that would
@@ -3050,6 +3055,7 @@ impl Request {
         let res = self.new_resource(kind, Some(stream))?;
         if let Some(Some(stream)) = self.resource_native_mut::<Option<PhpStream>>(res.heap()) {
             stream.res = Some(res);
+            stream.ops.adopt(Stream::of(res));
         }
         Ok(Stream::of(res))
     }
