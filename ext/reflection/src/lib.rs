@@ -4352,7 +4352,13 @@ fn property_string(
                 .map(|(_, hook)| (kind, hook.is_final))
         })
         .collect();
-    if property.hooks.is_some() || !hooks.is_empty() {
+    // `prop->hooks`, which an internal class's virtual property with no
+    // hook of its own has not, `DatePeriod`'s seven.
+    let hooked = property
+        .hooks
+        .as_ref()
+        .is_some_and(|own| own.get.is_some() || own.set.is_some());
+    if hooked || !hooks.is_empty() {
         out.push_str(" {");
         for (kind, is_final) in hooks {
             let _ = write!(

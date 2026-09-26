@@ -72,6 +72,23 @@ impl Request {
         })
     }
 
+    /// `ZEND_ACC_VIRTUAL` of the instance property `name` as `class`'s
+    /// table holds it: every declaration of it up the chain virtual,
+    /// whether it has hooks or, as an internal class's property may,
+    /// none, its class's handlers serving it (`DatePeriod`'s seven).
+    pub(crate) fn property_virtual(&self, class: ClassId, name: &[u8]) -> bool {
+        let Some(decl) = self.class_decl(class) else {
+            return false;
+        };
+        let lookup = |wanted: &[u8]| {
+            self.class_named(wanted)
+                .and_then(|id| self.class_decl(id))
+                .map(|decl| Held { decl, bodies: None })
+        };
+        resolve_property(decl, name, &lookup)
+            .is_some_and(|resolved| resolved.property.is_instance && resolved.is_virtual)
+    }
+
     /// `zend_get_property_offset`'s `property_info->hooks` arm: the
     /// hooked instance property `name` of `class`, none for a property
     /// with no hooks, one declared `static`, and a name no class of the chain

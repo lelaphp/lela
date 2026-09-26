@@ -7,7 +7,8 @@
 use php_ext::abi::ExtensionBuilder;
 use php_ext::decl::{
     Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind, ConstExpr,
-    EnumBacking, MethodDecl, Name, Parameter, ParameterDefault, PropertyDecl, Type, Visibility,
+    EnumBacking, MethodDecl, Name, Parameter, ParameterDefault, PropertyDecl, PropertyHooks, Type,
+    Visibility,
 };
 
 use crate::args::{class, d, method, nullable, p, str_default, union, untyped};
@@ -570,7 +571,8 @@ fn unknown(name: &str) -> Parameter {
 }
 
 /// One of `DatePeriod`'s seven properties, typed and without a default,
-/// which its handlers answer in place of a slot (php's `ZEND_ACC_VIRTUAL`).
+/// which its handlers answer in place of a slot: php's `ZEND_ACC_VIRTUAL`
+/// with no hooks, the stub's `@virtual`.
 fn period_property(name: &str, ty: Type) -> PropertyDecl {
     PropertyDecl {
         name: Name(name.as_bytes().into()),
@@ -584,7 +586,12 @@ fn period_property(name: &str, ty: Type) -> PropertyDecl {
         default: None,
         attributes: Vec::new(),
         doc_comment: None,
-        hooks: None,
+        hooks: Some(Box::new(PropertyHooks {
+            get: None,
+            set: None,
+            is_abstract: false,
+            is_virtual: true,
+        })),
     }
 }
 
