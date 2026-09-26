@@ -285,8 +285,11 @@ fn rshutdown_globals(req: &mut Request) -> Result<(), Thrown> {
 
 /// `PHP_RINIT_FUNCTION(session)`: the save handler and the serializer the ini
 /// names, the session disabled where either is unknown, and started
-/// under `session.auto_start`. The startup rules are served first, over
-/// the host's values ([`crate::ini::startup`]).
+/// under `session.auto_start`, with no file executing to have started it
+/// from (`zend_get_executed_filename_ex()` is null there), so what names
+/// the start site later says the session started automatically. The
+/// startup rules are served first, over the host's values
+/// ([`crate::ini::startup`]).
 pub(super) fn rinit(req: &mut Request) -> Result<(), Thrown> {
     rinit_globals(req);
     crate::ini::startup(req)?;
@@ -301,6 +304,7 @@ pub(super) fn rinit(req: &mut Request) -> Result<(), Thrown> {
     }
     if ini_bool(req, b"session.auto_start") {
         start(req)?;
+        req.state::<State>().started_at = None;
         if let Some(thrown) = req.state::<State>().thrown.take() {
             return Err(thrown);
         }
