@@ -1501,7 +1501,7 @@ fn type_check_declared(name: &[u8]) -> FunctionDecl {
 fn constant(name: &[u8], value: i64) -> ConstDecl {
     ConstDecl {
         name: Name(name.into()),
-        value: ConstExpr::Long(value),
+        value: ConstExpr::long(value),
         attributes: Vec::new(),
     }
 }

@@ -107,6 +107,7 @@ fn property(name: &[u8], ty: Option<Type>, default: Option<ConstExpr>) -> Proper
         is_readonly: false,
         is_final: false,
         is_promoted: false,
+        is_virtual: false,
         ty,
         default,
         attributes: Vec::new(),
@@ -416,7 +417,7 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
                 untyped(b"stream"),
                 parameter(b"filter_name", Type::String),
                 Parameter {
-                    default: ParameterDefault::Expr(ConstExpr::Long(0)),
+                    default: ParameterDefault::Expr(ConstExpr::long(0)),
                     ..parameter(b"mode", Type::Int)
                 },
                 params(),

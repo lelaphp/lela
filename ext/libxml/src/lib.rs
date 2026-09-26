@@ -238,7 +238,7 @@ const DOTTED_VERSION: &str = "2.9.13";
 fn constants() -> Vec<ConstDecl> {
     let long = |name: &[u8], value: i32| ConstDecl {
         name: Name(name.into()),
-        value: ConstExpr::Long(i64::from(value)),
+        value: ConstExpr::long(i64::from(value)),
         attributes: Vec::new(),
     };
     let string = |name: &[u8], value: &[u8]| ConstDecl {
@@ -291,6 +291,7 @@ fn error_class() -> ClassDecl {
         is_readonly: false,
         is_final: false,
         is_promoted: false,
+        is_virtual: false,
         ty: Some(ty),
         default: None,
         attributes: Vec::new(),

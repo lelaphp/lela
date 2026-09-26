@@ -680,12 +680,15 @@ fn named(name: &[u8]) -> Type {
     Type::Named(Name(name.into()))
 }
 
+/// One of the two classes, as the stub's `final`, `@strict-properties`
+/// and `@not-serializable` make each.
 fn final_class(name: &[u8], interfaces: Vec<Name>) -> ClassDecl {
     ClassDecl {
         name: Name(name.into()),
         kind: ClassKind::Class,
         flags: ClassFlags {
             is_final: true,
+            not_serializable: true,
             dynamic_properties: DynamicProperties::Forbidden,
             ..ClassFlags::default()
         },

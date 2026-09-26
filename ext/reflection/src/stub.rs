@@ -81,7 +81,7 @@ fn int_constant(name: &[u8], value: i64) -> ClassConstDecl {
         is_final: false,
         is_case: false,
         ty: Some(Type::Int),
-        value: ConstExpr::Long(value),
+        value: ConstExpr::long(value),
         attributes: Vec::new(),
         doc_comment: None,
     }
@@ -97,6 +97,7 @@ fn name_property() -> PropertyDecl {
         is_readonly: false,
         is_final: false,
         is_promoted: false,
+        is_virtual: false,
         ty: Some(Type::String),
         default: None,
         attributes: Vec::new(),
@@ -4632,6 +4633,7 @@ fn reflection_function_abstract() -> Declared {
     (
         ClassDecl {
             flags: ClassFlags {
+                not_serializable: true,
                 is_abstract: true,
                 ..ClassFlags::default()
             },
@@ -4812,7 +4814,7 @@ fn reflection_function_abstract() -> Declared {
                     b"getAttributes",
                     &[
                         with_default(b"name", nullable(Type::String), ConstExpr::Null),
-                        with_default(b"flags", Type::Int, ConstExpr::Long(0)),
+                        with_default(b"flags", Type::Int, ConstExpr::long(0)),
                     ],
                     Some(Type::Array),
                 ),
@@ -4890,6 +4892,7 @@ fn reflection_generator() -> Declared {
     (
         ClassDecl {
             flags: ClassFlags {
+                not_serializable: true,
                 is_final: true,
                 ..ClassFlags::default()
             },
@@ -5097,6 +5100,10 @@ fn reflection_method() -> Declared {
 fn reflection_class() -> Declared {
     (
         ClassDecl {
+            flags: ClassFlags {
+                not_serializable: true,
+                ..ClassFlags::default()
+            },
             constants: vec![
                 int_constant(b"IS_IMPLICIT_ABSTRACT", 16),
                 int_constant(b"IS_EXPLICIT_ABSTRACT", 64),
@@ -5385,7 +5392,7 @@ fn reflection_class() -> Declared {
                     b"newLazyGhost",
                     &[
                         parameter(b"initializer", Type::Callable),
-                        with_default(b"options", Type::Int, ConstExpr::Long(0)),
+                        with_default(b"options", Type::Int, ConstExpr::long(0)),
                     ],
                     Some(Type::Object),
                 ),
@@ -5396,7 +5403,7 @@ fn reflection_class() -> Declared {
                     b"newLazyProxy",
                     &[
                         parameter(b"factory", Type::Callable),
-                        with_default(b"options", Type::Int, ConstExpr::Long(0)),
+                        with_default(b"options", Type::Int, ConstExpr::long(0)),
                     ],
                     Some(Type::Object),
                 ),
@@ -5408,7 +5415,7 @@ fn reflection_class() -> Declared {
                     &[
                         parameter(b"object", Type::Object),
                         parameter(b"initializer", Type::Callable),
-                        with_default(b"options", Type::Int, ConstExpr::Long(0)),
+                        with_default(b"options", Type::Int, ConstExpr::long(0)),
                     ],
                     Some(Type::Void),
                 ),
@@ -5420,7 +5427,7 @@ fn reflection_class() -> Declared {
                     &[
                         parameter(b"object", Type::Object),
                         parameter(b"factory", Type::Callable),
-                        with_default(b"options", Type::Int, ConstExpr::Long(0)),
+                        with_default(b"options", Type::Int, ConstExpr::long(0)),
                     ],
                     Some(Type::Void),
                 ),
@@ -5559,7 +5566,7 @@ fn reflection_class() -> Declared {
                     b"getAttributes",
                     &[
                         with_default(b"name", nullable(Type::String), ConstExpr::Null),
-                        with_default(b"flags", Type::Int, ConstExpr::Long(0)),
+                        with_default(b"flags", Type::Int, ConstExpr::long(0)),
                     ],
                     Some(Type::Array),
                 ),
@@ -5604,6 +5611,10 @@ fn property_hook_type() -> Declared {
 fn reflection_property() -> Declared {
     (
         ClassDecl {
+            flags: ClassFlags {
+                not_serializable: true,
+                ..ClassFlags::default()
+            },
             constants: vec![
                 int_constant(b"IS_STATIC", 16),
                 int_constant(b"IS_READONLY", 128),
@@ -5847,7 +5858,7 @@ fn reflection_property() -> Declared {
                     b"getAttributes",
                     &[
                         with_default(b"name", nullable(Type::String), ConstExpr::Null),
-                        with_default(b"flags", Type::Int, ConstExpr::Long(0)),
+                        with_default(b"flags", Type::Int, ConstExpr::long(0)),
                     ],
                     Some(Type::Array),
                 ),
@@ -5889,6 +5900,10 @@ fn reflection_property() -> Declared {
 fn reflection_class_constant() -> Declared {
     (
         ClassDecl {
+            flags: ClassFlags {
+                not_serializable: true,
+                ..ClassFlags::default()
+            },
             constants: vec![
                 int_constant(b"IS_PUBLIC", 1),
                 int_constant(b"IS_PROTECTED", 2),
@@ -5973,7 +5988,7 @@ fn reflection_class_constant() -> Declared {
                     b"getAttributes",
                     &[
                         with_default(b"name", nullable(Type::String), ConstExpr::Null),
-                        with_default(b"flags", Type::Int, ConstExpr::Long(0)),
+                        with_default(b"flags", Type::Int, ConstExpr::long(0)),
                     ],
                     Some(Type::Array),
                 ),
@@ -6003,6 +6018,10 @@ fn reflection_class_constant() -> Declared {
 fn reflection_parameter() -> Declared {
     (
         ClassDecl {
+            flags: ClassFlags {
+                not_serializable: true,
+                ..ClassFlags::default()
+            },
             properties: vec![name_property()],
             ..class(b"ReflectionParameter", None, &[b"Reflector"])
         },
@@ -6139,7 +6158,7 @@ fn reflection_parameter() -> Declared {
                     b"getAttributes",
                     &[
                         with_default(b"name", nullable(Type::String), ConstExpr::Null),
-                        with_default(b"flags", Type::Int, ConstExpr::Long(0)),
+                        with_default(b"flags", Type::Int, ConstExpr::long(0)),
                     ],
                     Some(Type::Array),
                 ),
@@ -6154,6 +6173,7 @@ fn reflection_type() -> Declared {
     (
         ClassDecl {
             flags: ClassFlags {
+                not_serializable: true,
                 is_abstract: true,
                 ..ClassFlags::default()
             },
@@ -6219,6 +6239,10 @@ fn reflection_intersection_type() -> Declared {
 fn reflection_extension() -> Declared {
     (
         ClassDecl {
+            flags: ClassFlags {
+                not_serializable: true,
+                ..ClassFlags::default()
+            },
             properties: vec![name_property()],
             ..class(b"ReflectionExtension", None, &[b"Reflector"])
         },
@@ -6287,6 +6311,10 @@ fn reflection_extension() -> Declared {
 fn reflection_zend_extension() -> Declared {
     (
         ClassDecl {
+            flags: ClassFlags {
+                not_serializable: true,
+                ..ClassFlags::default()
+            },
             properties: vec![name_property()],
             ..class(b"ReflectionZendExtension", None, &[b"Reflector"])
         },
@@ -6332,6 +6360,7 @@ fn reflection_reference() -> Declared {
     (
         ClassDecl {
             flags: ClassFlags {
+                not_serializable: true,
                 is_final: true,
                 ..ClassFlags::default()
             },
@@ -6369,6 +6398,10 @@ fn reflection_reference() -> Declared {
 fn reflection_attribute() -> Declared {
     (
         ClassDecl {
+            flags: ClassFlags {
+                not_serializable: true,
+                ..ClassFlags::default()
+            },
             constants: vec![int_constant(b"IS_INSTANCEOF", 2)],
             properties: vec![name_property()],
             ..class(b"ReflectionAttribute", None, &[b"Reflector"])
@@ -6531,6 +6564,7 @@ fn reflection_fiber() -> Declared {
     (
         ClassDecl {
             flags: ClassFlags {
+                not_serializable: true,
                 is_final: true,
                 ..ClassFlags::default()
             },
@@ -6581,6 +6615,10 @@ fn reflection_fiber() -> Declared {
 fn reflection_constant() -> Declared {
     (
         ClassDecl {
+            flags: ClassFlags {
+                not_serializable: true,
+                ..ClassFlags::default()
+            },
             properties: vec![name_property()],
             ..class(b"ReflectionConstant", None, &[b"Reflector"])
         },
@@ -6642,7 +6680,7 @@ fn reflection_constant() -> Declared {
                     b"getAttributes",
                     &[
                         with_default(b"name", nullable(Type::String), ConstExpr::Null),
-                        with_default(b"flags", Type::Int, ConstExpr::Long(0)),
+                        with_default(b"flags", Type::Int, ConstExpr::long(0)),
                     ],
                     Some(Type::Array),
                 ),

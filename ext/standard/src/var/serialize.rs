@@ -12,7 +12,7 @@ use php_ext::raising::{Level, Thrown, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
 
-use super::{INCOMPLETE_CLASS, MAGIC_MEMBER, class_name, has_method, is_enum};
+use super::{INCOMPLETE_CLASS, MAGIC_MEMBER, class_name, has_method, is_enum, not_serializable};
 use crate::argument_count_between;
 
 /// What the var hash keys an entry by: the object's identity, or the
@@ -329,18 +329,14 @@ fn object_value(
     object: PhpObject,
     hash: &mut VarHash,
 ) -> Result<(), Thrown> {
-    let name = class_name(req, object);
-    if object.closure(req).is_some() || name.windows(10).any(|w| w == b"@anonymous") {
-        let shown = String::from_utf8_lossy(
-            &name[..name.iter().position(|b| *b == 0).unwrap_or(name.len())],
-        )
-        .into_owned();
+    if let Some(shown) = not_serializable(req, object.class()) {
         return Err(throw(
             req,
             "Exception",
             &format!("Serialization of '{shown}' is not allowed"),
         ));
     }
+    let name = class_name(req, object);
     if is_enum(req, object) {
         let case = object
             .prop(req, b"name")

@@ -251,7 +251,7 @@ pub fn extension() -> Extension {
                     int(b"type"),
                     string(b"var_name"),
                     parameter(b"filter", Type::Int, constant()),
-                    options(Some(ConstExpr::Long(0))),
+                    options(Some(ConstExpr::long(0))),
                 ],
                 Type::Mixed,
             ),
@@ -263,7 +263,7 @@ pub fn extension() -> Extension {
                 vec![
                     parameter(b"value", Type::Mixed, None),
                     parameter(b"filter", Type::Int, constant()),
-                    options(Some(ConstExpr::Long(0))),
+                    options(Some(ConstExpr::long(0))),
                 ],
                 Type::Mixed,
             ),
@@ -489,7 +489,7 @@ fn constants() -> Vec<ConstDecl> {
     rows.into_iter()
         .map(|(name, value)| ConstDecl {
             name: Name(name.into()),
-            value: ConstExpr::Long(value),
+            value: ConstExpr::long(value),
             attributes: if name.starts_with(b"FILTER_SANITIZE_STR") {
                 vec![deprecated_since(b"8.1", b"use htmlspecialchars() instead")]
             } else {

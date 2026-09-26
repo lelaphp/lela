@@ -140,7 +140,7 @@ const CORE: &[&str] = &[
 /// and parameters under a second name.
 fn class_natives() -> Vec<(FunctionDecl, Entry)> {
     let status = Parameter {
-        default: ParameterDefault::Expr(ConstExpr::Long(0)),
+        default: ParameterDefault::Expr(ConstExpr::long(0)),
         ..parameter(
             b"status",
             Some(Type::Union(vec![Type::String, Type::Int])),

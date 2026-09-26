@@ -1177,7 +1177,7 @@ fn default_text(default: &ConstExpr) -> String {
         ConstExpr::Null => String::from("null"),
         ConstExpr::Bool(false) => String::from("false"),
         ConstExpr::Bool(true) => String::from("true"),
-        ConstExpr::Long(n) => n.to_string(),
+        ConstExpr::Long { value, radix } => radix.written(*value),
         ConstExpr::Double(d) => {
             if d.fract() == 0.0 && d.is_finite() && d.abs() < 1e15 {
                 format!("{d:.0}")

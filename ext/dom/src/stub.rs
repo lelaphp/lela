@@ -6,10 +6,12 @@
 //! every name not written with a leading `\`; `public const int NAME =
 //! 0x01;` and `case Name = "value";`; a property with its type and
 //! default; and `public function name(parameters): type {}` with its
-//! modifiers. Three docblock tags are read: `@tentative-return-type` sets
+//! modifiers. Five docblock tags are read: `@tentative-return-type` sets
 //! the tentative bit, `@implementation-alias Class::method` names the
-//! entry a method shares, and `@strict-properties` on a class forbids
-//! dynamic properties. The grammar is `ext/pdo`'s reader's, with
+//! entry a method shares, `@virtual` marks a property its class's
+//! handlers serve with no slot, and on a class `@strict-properties`
+//! forbids dynamic properties and `@not-serializable` refuses
+//! `serialize` and `unserialize`. The grammar is `ext/pdo`'s reader's, with
 //! hexadecimal constants beside it.
 
 use php_ext::decl::{
@@ -78,8 +80,9 @@ struct Reader<'a> {
     namespace: Vec<u8>,
 }
 
-/// What stands before a member: its modifiers, its attributes and
-/// whether its docblock marks the return type tentative.
+/// What stands before a member: its modifiers, its attributes, whether
+/// its docblock marks the return type tentative and whether it marks a
+/// property `@virtual`.
 // php's modifier bits and the docblock's mark, one each.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Default)]
@@ -89,6 +92,7 @@ struct Modifiers {
     is_abstract: bool,
     is_final: bool,
     tentative: bool,
+    is_virtual: bool,
     /// `@implementation-alias Class::method`.
     alias: Option<Vec<u8>>,
     attributes: Vec<Attribute>,
@@ -186,6 +190,9 @@ impl Reader<'_> {
             if let Some(doc) = self.docblock() {
                 if contains(&doc, b"@strict-properties") {
                     flags.dynamic_properties = DynamicProperties::Forbidden;
+                }
+                if contains(&doc, b"@not-serializable") {
+                    flags.not_serializable = true;
                 }
                 continue;
             }
@@ -329,6 +336,9 @@ impl Reader<'_> {
             if let Some(doc) = self.docblock() {
                 if contains(&doc, b"@tentative-return-type") {
                     modifiers.tentative = true;
+                }
+                if contains(&doc, b"@virtual") {
+                    modifiers.is_virtual = true;
                 }
                 modifiers.alias = alias_of(&doc).or(modifiers.alias);
                 continue;
@@ -505,6 +515,7 @@ impl Reader<'_> {
             is_readonly: false,
             is_final: false,
             is_promoted: false,
+            is_virtual: modifiers.is_virtual,
             default: default.or_else(|| ty.is_none().then_some(ConstExpr::Null)),
             ty,
             attributes: Vec::new(),
@@ -584,7 +595,7 @@ impl Reader<'_> {
                 }
                 let text = std::str::from_utf8(self.bytes.get(start..self.at).unwrap_or_default())
                     .unwrap_or("0");
-                ConstExpr::Long(i64::from_str_radix(text, 16).unwrap_or(0))
+                ConstExpr::long(i64::from_str_radix(text, 16).unwrap_or(0))
             }
             Some(b'-' | b'0'..=b'9') => {
                 let start = self.at;
@@ -594,7 +605,7 @@ impl Reader<'_> {
                 }
                 let text = std::str::from_utf8(self.bytes.get(start..self.at).unwrap_or_default())
                     .unwrap_or("0");
-                ConstExpr::Long(text.parse().unwrap_or(0))
+                ConstExpr::long(text.parse().unwrap_or(0))
             }
             _ => {
                 let word = self.word();
@@ -649,6 +660,7 @@ fn enum_properties(kind: ClassKind, backing: EnumBacking) -> Vec<PropertyDecl> {
         is_readonly: true,
         is_final: false,
         is_promoted: false,
+        is_virtual: false,
         ty: Some(ty),
         default: None,
         attributes: Vec::new(),

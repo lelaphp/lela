@@ -459,6 +459,7 @@ fn fiber_class() -> ClassDecl {
     ClassDecl {
         flags: ClassFlags {
             is_final: true,
+            not_serializable: true,
             dynamic_properties: DynamicProperties::Forbidden,
             ..ClassFlags::default()
         },

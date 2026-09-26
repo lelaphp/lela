@@ -159,6 +159,7 @@ pub(crate) fn classes() -> Vec<(ClassDecl, Vec<(MethodDecl, Entry)>)> {
             is_readonly: true,
             is_final: false,
             is_promoted: false,
+            is_virtual: false,
             ty: Some(Type::String),
             default: None,
             attributes: Vec::new(),
@@ -306,7 +307,7 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
                 &[
                     parameter(b"num", number()),
                     Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Long(0)),
+                        default: ParameterDefault::Expr(ConstExpr::long(0)),
                         ..parameter(b"precision", Type::Int)
                     },
                     Parameter {
@@ -424,7 +425,7 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
                 &[
                     parameter(b"num", Type::Float),
                     Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Long(0)),
+                        default: ParameterDefault::Expr(ConstExpr::long(0)),
                         ..parameter(b"decimals", Type::Int)
                     },
                     Parameter {

@@ -50,7 +50,10 @@ impl Hooked<'_> {
 impl Emit<'_> {
     /// `zend_compile_property_hooks` over the list: a readonly
     /// property and an empty list refused, then each hook held to its
-    /// property and compiled in the order written.
+    /// property and compiled in the order written; beside the hooks,
+    /// whether the property is virtual, as `zend_property_is_virtual`
+    /// decides it: no hook names `$this->name`, or the class is an
+    /// interface.
     ///
     /// ```php
     /// class A { public readonly int $a { get => 1; } }
@@ -87,7 +90,7 @@ impl Emit<'_> {
         &mut self,
         hooked: &Hooked<'_>,
         hooks: &[Hook],
-    ) -> Result<PropertyHooks, CompileError> {
+    ) -> Result<(PropertyHooks, bool), CompileError> {
         if hooked.is_readonly {
             return Err(self.compile_error("Hooked properties cannot be readonly"));
         }
@@ -98,10 +101,10 @@ impl Emit<'_> {
             get: None,
             set: None,
             is_abstract: hooked.is_abstract,
-            // `zend_property_is_virtual`.
-            is_virtual: hooked.kind == ClassKind::Interface
-                || !hooks.iter().any(|hook| hook.uses_property),
         };
+        // `zend_property_is_virtual`.
+        let is_virtual =
+            hooked.kind == ClassKind::Interface || !hooks.iter().any(|hook| hook.uses_property);
         let line = self.line;
         for hook in hooks.iter().cloned() {
             self.line = hook.line;
@@ -120,7 +123,7 @@ impl Emit<'_> {
             *slot = Some(method);
         }
         self.line = line;
-        Ok(out)
+        Ok((out, is_virtual))
     }
 
     /// One hook held to its property, php's arms of the loop in their

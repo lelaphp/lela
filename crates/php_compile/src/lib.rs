@@ -714,7 +714,7 @@ mod tests {
             persistent: vec![
                 ConstDecl {
                     name: Name(b"T_LNUMBER".to_vec().into_boxed_slice()),
-                    value: ConstExpr::Long(260),
+                    value: ConstExpr::long(260),
                     attributes: Vec::new(),
                 },
                 ConstDecl {
@@ -4799,7 +4799,7 @@ mod tests {
             props,
             vec![
                 (b"x".as_slice(), true, None, Some(b"/** P */".as_slice())),
-                (b"y", true, Some(ConstExpr::Long(1)), Some(b"/** P2 */")),
+                (b"y", true, Some(ConstExpr::long(1)), Some(b"/** P2 */")),
                 (b"s", false, None, None),
             ]
         );
@@ -4823,10 +4823,10 @@ mod tests {
                     b"A".as_slice(),
                     Visibility::Public,
                     false,
-                    ConstExpr::Long(1),
+                    ConstExpr::long(1),
                     Some(b"/** K */".as_slice())
                 ),
-                (b"B", Visibility::Public, false, ConstExpr::Long(2), None),
+                (b"B", Visibility::Public, false, ConstExpr::long(2), None),
                 (
                     b"C",
                     Visibility::Protected,
@@ -5226,10 +5226,10 @@ echo f(1), C::s(), $o->m(1), $o->p;
                 .collect::<Vec<_>>(),
             vec![
                 ConstExpr::Bool(true),
-                ConstExpr::Long(12),
+                ConstExpr::long(12),
                 ConstExpr::Double(1000.0),
                 ConstExpr::Str(b"1".as_slice().into()),
-                ConstExpr::Array(vec![(Some(ConstExpr::Long(0)), ConstExpr::Long(1))]),
+                ConstExpr::Array(vec![(Some(ConstExpr::long(0)), ConstExpr::long(1))]),
             ]
         );
     }
@@ -5290,7 +5290,7 @@ echo f(1), C::s(), $o->m(1), $o->p;
                     class: Name(b"A".as_slice().into()),
                     name: Name(b"X".as_slice().into()),
                 }),
-                Some(ConstExpr::Long(1)),
+                Some(ConstExpr::long(1)),
             ]
         );
     }

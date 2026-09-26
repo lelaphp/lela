@@ -556,7 +556,7 @@ fn attribute() -> NativeClassDecl {
             is_final: false,
             is_case: false,
             ty: Some(Type::Int),
-            value: ConstExpr::Long(*value),
+            value: ConstExpr::long(*value),
             attributes: Vec::new(),
             doc_comment: None,
         })
@@ -583,12 +583,18 @@ fn attribute() -> NativeClassDecl {
     )
 }
 
-/// `final class SensitiveParameterValue`, no attribute.
+/// `final class SensitiveParameterValue`, no attribute, and
+/// `@not-serializable`.
 fn sensitive_value() -> NativeClassDecl {
+    let decl = class(b"SensitiveParameterValue", true);
     (
         ClassDecl {
+            flags: ClassFlags {
+                not_serializable: true,
+                ..decl.flags
+            },
             properties: vec![property(b"value", Visibility::Private, true, Type::Mixed)],
-            ..class(b"SensitiveParameterValue", true)
+            ..decl
         },
         vec![
             (
@@ -710,7 +716,7 @@ fn attribute_class(name: &[u8], targets: &[u8], strict: bool) -> ClassDecl {
             class: Name::from("Attribute"),
             name: Name(target.into()),
         });
-    let first = flags.next().unwrap_or(ConstExpr::Long(0));
+    let first = flags.next().unwrap_or(ConstExpr::long(0));
     let value = flags.fold(first, |lhs, rhs| ConstExpr::Binary {
         op: Name::from("|"),
         lhs: Box::new(lhs),
@@ -741,6 +747,7 @@ fn property(name: &[u8], visibility: Visibility, is_readonly: bool, ty: Type) ->
         is_readonly,
         is_final: false,
         is_promoted: false,
+        is_virtual: false,
         ty: Some(ty),
         default: None,
         attributes: Vec::new(),

@@ -93,7 +93,7 @@ pub fn extension() -> Extension {
                     &[
                         parameter(b"code", Type::String),
                         Parameter {
-                            default: ParameterDefault::Expr(ConstExpr::Long(0)),
+                            default: ParameterDefault::Expr(ConstExpr::long(0)),
                             ..parameter(b"flags", Type::Int)
                         },
                     ],
@@ -145,6 +145,7 @@ fn php_token_class() -> (ClassDecl, Vec<(MethodDecl, Entry)>) {
         is_readonly: false,
         is_final: false,
         is_promoted: false,
+        is_virtual: false,
         ty: Some(ty),
         default: None,
         attributes: Vec::new(),
@@ -180,7 +181,7 @@ fn php_token_class() -> (ClassDecl, Vec<(MethodDecl, Entry)>) {
 /// The six methods of `PhpToken`, each declaration beside its entry.
 fn php_token_methods() -> Vec<(MethodDecl, Entry)> {
     let minus_one = |name: &[u8]| Parameter {
-        default: ParameterDefault::Expr(ConstExpr::Long(-1)),
+        default: ParameterDefault::Expr(ConstExpr::long(-1)),
         ..parameter(name, Type::Int)
     };
     vec![
@@ -191,7 +192,7 @@ fn php_token_methods() -> Vec<(MethodDecl, Entry)> {
                     &[
                         parameter(b"code", Type::String),
                         Parameter {
-                            default: ParameterDefault::Expr(ConstExpr::Long(0)),
+                            default: ParameterDefault::Expr(ConstExpr::long(0)),
                             ..parameter(b"flags", Type::Int)
                         },
                     ],
@@ -1750,7 +1751,7 @@ fn declared(name: &[u8], parameters: &[Parameter], returns: Type) -> FunctionDec
 fn constant(name: &[u8], value: i64) -> ConstDecl {
     ConstDecl {
         name: Name(name.into()),
-        value: ConstExpr::Long(value),
+        value: ConstExpr::long(value),
         attributes: Vec::new(),
     }
 }

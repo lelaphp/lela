@@ -108,6 +108,30 @@ pub struct ClassFlags {
     /// `ZEND_ACC_ANON_CLASS`: declared by `new class`, under the name
     /// `zend_generate_anon_class_name` made, which holds a NUL.
     pub is_anonymous: bool,
+    /// `ZEND_ACC_NOT_SERIALIZABLE`: the stub's `@not-serializable`, and
+    /// what `zend_compile_class_decl` sets on an anonymous class.
+    /// `serialize` and `unserialize` refuse an object of the class and
+    /// of every class below it, since `zend_do_inheritance_ex` passes
+    /// the bit down.
+    ///
+    /// ```php
+    /// class R extends ReflectionClass {}
+    /// foreach ([new ReflectionClass('stdClass'), new R('stdClass'), new class {}] as $o) {
+    ///     try { serialize($o); } catch (Exception $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+    /// }
+    /// foreach (['O:15:"ReflectionClass":0:{}', 'O:1:"R":0:{}', 'C:15:"ReflectionClass":0:{}'] as $s) {
+    ///     try { unserialize($s); } catch (Exception $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+    /// }
+    /// ```
+    /// ```expect
+    /// Exception: Serialization of 'ReflectionClass' is not allowed
+    /// Exception: Serialization of 'R' is not allowed
+    /// Exception: Serialization of 'class@anonymous' is not allowed
+    /// Exception: Unserialization of 'ReflectionClass' is not allowed
+    /// Exception: Unserialization of 'R' is not allowed
+    /// Exception: Unserialization of 'ReflectionClass' is not allowed
+    /// ```
+    pub not_serializable: bool,
     pub dynamic_properties: DynamicProperties,
 }
 
@@ -226,7 +250,14 @@ impl Type {
 pub enum ConstExpr {
     Null,
     Bool(bool),
-    Long(i64),
+    /// An integer and the radix it is written in, which Reflection
+    /// renders it in. The compiler folds a program's integers to
+    /// `Decimal`, as php's `zend_ast` holds a folded `zval` and
+    /// Reflection prints `511` for a user function's `$x = 0777`.
+    Long {
+        value: i64,
+        radix: Radix,
+    },
     Double(f64),
     Str(Box<[u8]>),
     Constant(Name),
@@ -295,6 +326,61 @@ pub enum ConstExpr {
     /// is evaluated in, which is the class that took the member from the
     /// trait, and the empty string where there is none.
     ScopeClass,
+}
+
+impl ConstExpr {
+    /// An integer written in decimal, as a program's integers are
+    /// folded and as most of the stubs write them.
+    #[must_use]
+    pub const fn long(value: i64) -> ConstExpr {
+        ConstExpr::Long {
+            value,
+            radix: Radix::Decimal,
+        }
+    }
+}
+
+/// The radix an integer of a native's declaration is written in, which
+/// `gen_stub.php` keeps by copying the stub's token into
+/// `zend_internal_arg_info.default_value`, and which Reflection prints
+/// back: `mkdir`'s `$permissions = 0777` is the octal `511`, rendered
+/// `0777`. The stubs write two octal spellings in a parameter's
+/// default, php's legacy `0777` and 8.1's explicit `0o644`; hexadecimal
+/// and binary stand only in constants' values, which are declared by
+/// value. Exhaustive, so a radix added later is a change every renderer
+/// answers before it builds.
+///
+/// ```php
+/// echo (new ReflectionFunction('mkdir'))->getParameters()[1], "\n";
+/// function f($x = 0777, $y = 0o17) {}
+/// echo implode(", ", (new ReflectionFunction('f'))->getParameters()), "\n";
+/// ```
+/// ```expect
+/// Parameter #1 [ <optional> int $permissions = 0777 ]
+/// Parameter #0 [ <optional> $x = 511 ], Parameter #1 [ <optional> $y = 15 ]
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Radix {
+    Decimal,
+    /// `0777`: a leading zero.
+    Octal,
+    /// `0o644`: the `0o` prefix of php 8.1.
+    OctalExplicit,
+}
+
+impl Radix {
+    /// `value` as this radix writes it, the text `gen_stub.php` copies
+    /// from the stub.
+    #[must_use]
+    pub fn written(self, value: i64) -> String {
+        let sign = if value < 0 { "-" } else { "" };
+        let magnitude = value.unsigned_abs();
+        match self {
+            Radix::Decimal => value.to_string(),
+            Radix::Octal => format!("{sign}0{magnitude:o}"),
+            Radix::OctalExplicit => format!("{sign}0o{magnitude:o}"),
+        }
+    }
 }
 
 /// One argument of an attribute, positional or named.
@@ -449,6 +535,29 @@ pub struct MethodDecl {
 /// declaration wrote no hook list for; a property whose class inherits
 /// hooks for it carries none of its own here, since the link finds an
 /// inherited member by walking the chain.
+///
+/// `is_virtual` is `ZEND_ACC_VIRTUAL` as the declaration leaves it: the
+/// property has no backing slot of its own. The compiler decides it as
+/// `zend_property_is_virtual` does, a hooked property whose hooks never
+/// name `$this->name`, and every hooked property of an interface; a
+/// native's is the stub's `@virtual`, a property its class's handlers
+/// serve with no hook, as `DOMNode::$nodeName` is. The link clears it
+/// where a declaration the property overrides is backed
+/// ([`crate::link::resolve_property`]), and Reflection renders it.
+///
+/// ```php
+/// $p = new ReflectionProperty('DOMNode', 'nodeName');
+/// var_dump($p->isVirtual());
+/// echo $p;
+/// class A { public $v { get => 1; } public $b { get => $this->b; } }
+/// echo new ReflectionProperty('A', 'v'), new ReflectionProperty('A', 'b');
+/// ```
+/// ```expect
+/// bool(true)
+/// Property [ public virtual string $nodeName ]
+/// Property [ public virtual $v { get; } ]
+/// Property [ public $b = NULL { get; } ]
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::struct_excessive_bools)] // the ZEND_ACC_* bits of a property, each one fact
 pub struct PropertyDecl {
@@ -459,6 +568,7 @@ pub struct PropertyDecl {
     pub is_readonly: bool,
     pub is_final: bool,
     pub is_promoted: bool,
+    pub is_virtual: bool,
     pub ty: Option<Type>,
     pub default: Option<ConstExpr>,
     pub attributes: Vec<Attribute>,
@@ -488,22 +598,20 @@ impl HookKind {
     }
 }
 
-/// A hooked property's hooks, `prop_info->hooks`, and the two bits only
-/// a hooked property carries. Each hook is a method as php keeps one: a
+/// A hooked property's hooks, `prop_info->hooks`, and the bit only a
+/// hooked property carries. Each hook is a method as php keeps one: a
 /// `zend_function` named `$name::get` or `$name::set`, public unless the
 /// property is private, whose body is the unit's [`crate::HookBody`] of
 /// the same class, property and kind. `is_abstract` is the property's
-/// `ZEND_ACC_ABSTRACT`, written or given by an interface; `is_virtual`
-/// is `ZEND_ACC_VIRTUAL` as `zend_property_is_virtual` decides it where
-/// the property is declared, no hook body naming `$this->name`, and
-/// every interface property: such a property has no backing slot unless
-/// one it overrides has.
+/// `ZEND_ACC_ABSTRACT`, written or given by an interface. Whether the
+/// property is virtual is the property's own bit,
+/// [`PropertyDecl::is_virtual`], which a property with no hooks carries
+/// too.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PropertyHooks {
     pub get: Option<MethodDecl>,
     pub set: Option<MethodDecl>,
     pub is_abstract: bool,
-    pub is_virtual: bool,
 }
 
 impl PropertyHooks {

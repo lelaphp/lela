@@ -182,7 +182,7 @@ struct State {
 pub fn extension() -> Extension {
     let status = |name: &[u8], value: Status| ConstDecl {
         name: Name(name.into()),
-        value: ConstExpr::Long(value as i64),
+        value: ConstExpr::long(value as i64),
         attributes: Vec::new(),
     };
     let mut builder = ExtensionBuilder::default()

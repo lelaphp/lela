@@ -962,7 +962,8 @@ fn implicit_set_visibility(is_readonly: bool, visibility: Visibility) -> Option<
 /// the parser) and taking no dynamic property
 /// (`zend_enum_register_props`), and a readonly class taking none
 /// either, `ZEND_ACC_NO_DYNAMIC_PROPERTIES` from the parser, which
-/// `#[\AllowDynamicProperties]` may not lift.
+/// `#[\AllowDynamicProperties]` may not lift; an anonymous class is
+/// not serializable (`zend_compile_class_decl`).
 fn class_flags(
     class: &Class,
     dynamic_properties: DynamicProperties,
@@ -974,6 +975,7 @@ fn class_flags(
         is_final: is_enum || class.modifiers.is_final,
         is_readonly: class.modifiers.is_readonly,
         is_anonymous,
+        not_serializable: is_anonymous,
         dynamic_properties: if is_enum || class.modifiers.is_readonly {
             DynamicProperties::Forbidden
         } else {
@@ -992,7 +994,7 @@ fn valid_default(ty: &Type, default: &mut ConstExpr) -> Result<(), ZvalType> {
         ConstExpr::Null => ZvalType::Null,
         ConstExpr::Bool(false) => ZvalType::False,
         ConstExpr::Bool(true) => ZvalType::True,
-        ConstExpr::Long(_) => ZvalType::Long,
+        ConstExpr::Long { .. } => ZvalType::Long,
         ConstExpr::Double(_) => ZvalType::Double,
         ConstExpr::Str(_) => ZvalType::String,
         ConstExpr::Array(elements)
@@ -1007,7 +1009,7 @@ fn valid_default(ty: &Type, default: &mut ConstExpr) -> Result<(), ZvalType> {
     if ty.contains_code(kind as u8) {
         return Ok(());
     }
-    if let ConstExpr::Long(n) = default
+    if let ConstExpr::Long { value: n, .. } = default
         && ty.contains_code(ZvalType::Double as u8)
     {
         *default = ConstExpr::Double(double_of(Zval::long(*n)));
@@ -1038,7 +1040,7 @@ fn folded_const_expr(folded: Zval) -> Option<ConstExpr> {
         let mut items = Vec::with_capacity(array.len());
         for (key, held) in &array {
             let key = match key {
-                Key::Long(n) => ConstExpr::Long(n),
+                Key::Long(n) => ConstExpr::long(n),
                 Key::Str(s) => ConstExpr::Str(s.bytes().into()),
             };
             items.push((Some(key), folded_const_expr(held)?));
@@ -1049,7 +1051,7 @@ fn folded_const_expr(folded: Zval) -> Option<ConstExpr> {
         ZvalType::Null => ConstExpr::Null,
         ZvalType::False => ConstExpr::Bool(false),
         ZvalType::True => ConstExpr::Bool(true),
-        ZvalType::Long => ConstExpr::Long(folded.as_long()?),
+        ZvalType::Long => ConstExpr::long(folded.as_long()?),
         ZvalType::Double => ConstExpr::Double(folded.as_double()?),
         ZvalType::String => ConstExpr::Str(folded.as_str()?.bytes().into()),
         _ => return None,
@@ -1063,7 +1065,7 @@ fn is_literal(expr: &ConstExpr) -> bool {
     match expr {
         ConstExpr::Null
         | ConstExpr::Bool(_)
-        | ConstExpr::Long(_)
+        | ConstExpr::Long { .. }
         | ConstExpr::Double(_)
         | ConstExpr::Str(_) => true,
         ConstExpr::Array(elements) => elements
@@ -3483,7 +3485,7 @@ impl Emit<'_> {
                         .fatal("InternalError: a promoted property of a class the unit has not"));
                 }
             };
-        let hooks = match &parameter.hooks {
+        let (hooks, is_virtual) = match &parameter.hooks {
             Some(hooks) => {
                 let hooked = hooks::Hooked {
                     class: u32::try_from(at).unwrap_or(u32::MAX),
@@ -3497,9 +3499,10 @@ impl Emit<'_> {
                     is_readonly,
                     is_abstract: false,
                 };
-                Some(Box::new(self.property_hooks(&hooked, hooks)?))
+                let (hooks, is_virtual) = self.property_hooks(&hooked, hooks)?;
+                (Some(Box::new(hooks)), is_virtual)
             }
-            None => None,
+            None => (None, false),
         };
         let attributes = self.member_attributes(
             &parameter.attributes,
@@ -3515,6 +3518,7 @@ impl Emit<'_> {
             is_readonly,
             is_final: promoted.is_final || set_visibility == Some(Visibility::Private),
             is_promoted: true,
+            is_virtual,
             ty: ty.cloned(),
             default,
             attributes,
@@ -4107,7 +4111,7 @@ impl Emit<'_> {
                 // `zend_is_valid_default_value` converted an int under
                 // a type with `float` and no `int` where it stood.
                 match (written, folded.kind()) {
-                    (Some(ConstExpr::Long(n)), ZvalType::Double) => {
+                    (Some(ConstExpr::Long { value: n, .. }), ZvalType::Double) => {
                         Some(ConstExpr::Double(double_of(Zval::long(n))))
                     }
                     (written, _) => written,
@@ -5909,7 +5913,7 @@ impl Emit<'_> {
                     &member,
                 )?
                 .or_else(|| implicit_set_visibility(is_readonly, property.visibility));
-            let hooks = match &property.hooks {
+            let (hooks, is_virtual) = match &property.hooks {
                 Some(hooks) => {
                     let hooked = hooks::Hooked {
                         class: u32::try_from(self.classes.len()).unwrap_or(u32::MAX),
@@ -5923,9 +5927,10 @@ impl Emit<'_> {
                         is_readonly,
                         is_abstract: property.is_abstract || class.kind == ClassKind::Interface,
                     };
-                    Some(Box::new(self.property_hooks(&hooked, hooks)?))
+                    let (hooks, is_virtual) = self.property_hooks(&hooked, hooks)?;
+                    (Some(Box::new(hooks)), is_virtual)
                 }
-                None => None,
+                None => (None, false),
             };
             // `zend_compile_prop_decl` compiles the attributes under
             // `active_property_info_name`, where `__PROPERTY__` reads it.
@@ -5948,6 +5953,7 @@ impl Emit<'_> {
                 // property is implicitly final.
                 is_final: property.is_final || set_visibility == Some(Visibility::Private),
                 is_promoted: false,
+                is_virtual,
                 ty,
                 default,
                 attributes,
@@ -15041,7 +15047,7 @@ impl Emit<'_> {
         Ok(Some(match value {
             ConstExpr::Null => Zval::null(),
             ConstExpr::Bool(b) => Zval::bool(b),
-            ConstExpr::Long(n) => Zval::long(n),
+            ConstExpr::Long { value: n, .. } => Zval::long(n),
             ConstExpr::Double(d) => Zval::double(d),
             ConstExpr::Str(bytes) => self.string(&bytes)?,
             _ => return Ok(None),
@@ -15885,7 +15891,7 @@ impl Emit<'_> {
         Ok(match default {
             ConstExpr::Null => Some(Zval::null()),
             ConstExpr::Bool(b) => Some(Zval::bool(*b)),
-            ConstExpr::Long(n) => Some(Zval::long(*n)),
+            ConstExpr::Long { value: n, .. } => Some(Zval::long(*n)),
             ConstExpr::Double(d) => Some(Zval::double(*d)),
             ConstExpr::Str(bytes) => Some(self.string(bytes)?),
             _ => None,
@@ -16717,7 +16723,7 @@ impl Emit<'_> {
         Ok(match &declared.value {
             ConstExpr::Null => Some(Zval::null()),
             ConstExpr::Bool(b) => Some(Zval::bool(*b)),
-            ConstExpr::Long(n) => Some(Zval::long(*n)),
+            ConstExpr::Long { value: n, .. } => Some(Zval::long(*n)),
             ConstExpr::Double(d) => Some(Zval::double(*d)),
             ConstExpr::Str(bytes) => Some(self.string(bytes)?),
             _ => None,
@@ -17691,6 +17697,7 @@ fn enum_properties(kind: ClassKind, backing: EnumBacking) -> Vec<PropertyDecl> {
         is_readonly: true,
         is_final: false,
         is_promoted: false,
+        is_virtual: false,
         ty: Some(ty),
         default: None,
         hooks: None,

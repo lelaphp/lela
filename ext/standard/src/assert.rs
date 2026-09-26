@@ -92,7 +92,7 @@ pub(crate) fn constants() -> Vec<ConstDecl> {
     .into_iter()
     .map(|(name, value)| ConstDecl {
         name: Name(name.as_bytes().into()),
-        value: ConstExpr::Long(value),
+        value: ConstExpr::long(value),
         attributes: vec![deprecated_attribute(Some(
             "as assert_options() is deprecated",
         ))],

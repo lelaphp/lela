@@ -820,6 +820,7 @@ fn internal_iterator_class() -> NativeClassDecl {
     let mut decl = interface(b"InternalIterator", &[], Vec::new());
     decl.kind = ClassKind::Class;
     decl.flags.is_final = true;
+    decl.flags.not_serializable = true;
     decl.interfaces = vec![Name(b"Iterator".as_slice().into())];
     let methods: Vec<(MethodDecl, Entry)> = vec![
         (

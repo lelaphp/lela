@@ -4383,7 +4383,7 @@ fn default_value_string(req: &mut Request, expr: &ConstExpr) -> String {
     match expr {
         ConstExpr::Null => String::from("NULL"),
         ConstExpr::Bool(b) => String::from(if *b { "true" } else { "false" }),
-        ConstExpr::Long(n) => n.to_string(),
+        ConstExpr::Long { value, .. } => value.to_string(),
         ConstExpr::Double(f) => php_ext::coerce::to_string(req, &Value::float(*f)).map_or_else(
             |_| String::new(),
             |s| String::from_utf8_lossy(s.as_bytes()).into_owned(),
@@ -5483,7 +5483,7 @@ fn const_expr_string(expr: &php_ext::decl::ConstExpr) -> String {
     match expr {
         ConstExpr::Null => String::from("null"),
         ConstExpr::Bool(b) => String::from(if *b { "true" } else { "false" }),
-        ConstExpr::Long(n) => n.to_string(),
+        ConstExpr::Long { value, radix } => radix.written(*value),
         ConstExpr::Double(f) => f.to_string(),
         ConstExpr::Str(s) => format!("\"{}\"", stub_escaped(s)),
         ConstExpr::Constant(name) => String::from_utf8_lossy(&name.0).into_owned(),

@@ -147,7 +147,7 @@ pub(super) fn natives() -> Vec<(FunctionDecl, Entry)> {
                         ..parameter(b"callback", Type::Nullable(Box::new(Type::Callable)))
                     },
                     Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Long(0)),
+                        default: ParameterDefault::Expr(ConstExpr::long(0)),
                         ..parameter(b"mode", Type::Int)
                     },
                 ],

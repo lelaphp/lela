@@ -120,7 +120,7 @@ fn constant(text: &str) -> ConstExpr {
         "[]" => ConstExpr::Array(Vec::new()),
         _ => match text.strip_prefix('"').and_then(|t| t.strip_suffix('"')) {
             Some(string) => ConstExpr::Str(string.as_bytes().into()),
-            None => ConstExpr::Long(text.parse().unwrap_or(0)),
+            None => ConstExpr::long(text.parse().unwrap_or(0)),
         },
     }
 }
