@@ -6934,7 +6934,22 @@ pub(crate) fn fetch_dim_r<T: Tier>(
 /// container that is neither an array, a string nor an object are all
 /// `null` with nothing raised; an offset whose type is no key at all is
 /// still php's `TypeError`, since `slow_index_convert` and
-/// `zend_illegal_string_offset` raise it under either read.
+/// `zend_illegal_string_offset` raise it under either read. An object
+/// that is no `ArrayAccess` is read through its class's own
+/// `read_dimension`, as dom's maps and lists are.
+///
+/// ```php
+/// $d = new DOMDocument;
+/// $d->loadXML('<r a="1"><x/></r>');
+/// var_dump($d->documentElement->attributes[0]->nodeName ?? '/', $d->documentElement->attributes[3] ?? '/', $d->documentElement->childNodes[0]->nodeName ?? '/');
+/// try { var_dump((new stdClass)[0] ?? '/'); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// string(1) "a"
+/// string(1) "/"
+/// string(1) "x"
+/// Cannot use object of type stdClass as array
+/// ```
 ///
 /// ```php
 /// $a = [[1], 'k' => "ab"];
@@ -7143,12 +7158,21 @@ fn read_dimension(
     }
     if let Some(object) = container.as_object().copied() {
         let dim = object_dim(req, frame, code, op);
+        // `read_dimension(obj, dim, BP_VAR_IS, rv)`: an `ArrayAccess` is
+        // `zend_std_read_dimension`'s `offsetExists` then `offsetGet`, and
+        // any other class is read through its own handler, which for one
+        // with none is the same `Cannot use object` refusal and for a
+        // class php reads in C (dom's maps and lists) the handler that
+        // reads the element whatever the type.
+        let array_access = req
+            .class_named(b"ArrayAccess")
+            .is_some_and(|interface| req.instance_of(object.class(), interface));
         return Ok(match mode {
-            DimRead::Warning => {
+            DimRead::Silent if array_access => req.read_dimension_is(object, dim.as_ref()),
+            DimRead::Warning | DimRead::Silent => {
                 let table = req.object_handlers(object.heap());
                 table.read_dimension(req, object, dim.as_ref())
             }
-            DimRead::Silent => req.read_dimension_is(object, dim.as_ref()),
         });
     }
     if mode == DimRead::Silent {
