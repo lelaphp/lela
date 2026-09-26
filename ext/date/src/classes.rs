@@ -595,11 +595,9 @@ fn period_property(name: &str, ty: Type) -> PropertyDecl {
     }
 }
 
-/// `class DatePeriod`. php declares it `implements IteratorAggregate`
-/// with `getIterator()`; the engine declares neither `Traversable` nor
-/// `InternalIterator` yet, so both wait for them (#714).
+/// `class DatePeriod implements IteratorAggregate`.
 fn date_period() -> (ClassDecl, Vec<(MethodDecl, Entry)>) {
-    let mut decl = class_decl("DatePeriod", ClassKind::Class, None, &[]);
+    let mut decl = class_decl("DatePeriod", ClassKind::Class, None, &["IteratorAggregate"]);
     decl.constants = vec![
         constant(
             "EXCLUDE_START_DATE",
@@ -663,6 +661,10 @@ fn date_period() -> (ClassDecl, Vec<(MethodDecl, Entry)>) {
         (unserialize(), period::unserialize),
         (wakeup(), period::wakeup),
         (set_state("DatePeriod"), period::set_state),
+        (
+            real("getIterator", vec![], class("Iterator")),
+            period::get_iterator,
+        ),
     ];
     (decl, methods)
 }

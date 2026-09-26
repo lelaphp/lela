@@ -94,6 +94,9 @@ pub(crate) struct PeriodObj {
     pub include_start_date: bool,
     pub include_end_date: bool,
     pub initialized: bool,
+    /// How many steps past its rewind `current` stands, the index the
+    /// last iterator over the period asked for; none before any walk.
+    pub cursor: Option<usize>,
     rows: Vec<Value>,
 }
 
@@ -128,7 +131,7 @@ pub(super) fn class_name(req: &Request, class: ClassId) -> String {
 }
 
 /// The class's parent, linked.
-fn parent_of(req: &mut Request, class: ClassId) -> Option<ClassId> {
+pub(super) fn parent_of(req: &mut Request, class: ClassId) -> Option<ClassId> {
     let parent = req.class_decl(class)?.parent.clone()?;
     lookup_class(req, &parent.0).ok().flatten()
 }
@@ -1086,6 +1089,15 @@ impl ObjectHandlers for PeriodHandlers {
         rows_array(req, &own, fields, false).map(Some)
     }
 
+    fn iterator_element(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        index: usize,
+    ) -> Result<Option<(Value, Value)>, Thrown> {
+        crate::period::iterator_element(req, object, index)
+    }
+
     fn get_properties_for(
         &self,
         req: &mut Request,
@@ -1126,6 +1138,7 @@ fn clone_period(req: &mut Request, object: PhpObject) -> Result<PhpObject, Throw
         include_start_date: p.include_start_date,
         include_end_date: p.include_end_date,
         initialized: p.initialized,
+        cursor: None,
         rows: Vec::new(),
     });
     if let (Some(state), Some(payload)) = (state, copy.native_mut::<PeriodObj>(req)) {

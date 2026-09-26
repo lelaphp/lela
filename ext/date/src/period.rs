@@ -2,16 +2,16 @@
 //! recurrences, read from objects or from an ISO 8601 string, with its
 //! getters and its serialised form.
 
-use php_ext::call::new_object;
+use php_ext::call::{internal_iterator, new_object};
 use php_ext::raising::{Thrown, deprecated, throw};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::args::{array, count_between, long, optional_long, string};
 use crate::datetime::restore_properties;
-use crate::ffi::{self, Time};
+use crate::ffi::{self, RelTime, Time};
 use crate::obj::{
-    DateObj, IntervalObj, PERIOD_FIELDS, PeriodObj, class_id, new_date, new_interval,
+    DateObj, IntervalObj, PERIOD_FIELDS, PeriodObj, class_id, new_date, new_interval, parent_of,
     period_fields, rows_array, std_rows, this, uninitialized,
 };
 
@@ -419,6 +419,161 @@ pub(crate) fn get_recurrences(req: &mut Request) -> Result<Value, Thrown> {
         p.recurrences - i64::from(p.include_start_date) - i64::from(p.include_end_date)
     });
     Ok(if n == 0 { Value::null() } else { Value::int(n) })
+}
+
+/// `DatePeriod::getIterator(): Iterator`, php's
+/// `zend_create_internal_iterator_zval` over the period: an
+/// `InternalIterator` walking it by `date_period_it`'s rules
+/// ([`iterator_element`]), which `foreach` reaches through the same
+/// method, so a subclass that overrides it is walked by its own.
+///
+/// ```php
+/// $p = DatePeriod::createFromISO8601String('R2/2012-07-01T00:00:00Z/P7D');
+/// $it = $p->getIterator();
+/// var_dump(get_class($it));
+/// for (; $it->valid(); $it->next()) echo $it->key(), ': ', $it->current()->format('Y-m-d'), "\n";
+/// $it->rewind(); echo $it->current()->format('Y-m-d'), "\n";
+/// class P extends DatePeriod { function getIterator(): Iterator { return new ArrayIterator([7]); } }
+/// foreach (new P(new DateTime('2000-01-01'), new DateInterval('P1D'), 1) as $k => $v) echo "$k=$v\n";
+/// try { foreach ($p as &$d) {} } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// string(16) "InternalIterator"
+/// 0: 2012-07-01
+/// 1: 2012-07-08
+/// 2: 2012-07-15
+/// 2012-07-01
+/// 0=7
+/// An iterator cannot be used with foreach by reference
+/// ```
+pub(crate) fn get_iterator(req: &mut Request) -> Result<Value, Thrown> {
+    count_between(req, 0, 0)?;
+    let object = this(req)?;
+    Ok(internal_iterator(req, &object)?.as_value())
+}
+
+/// `date_period_advance`: the interval added to the time as its relative
+/// part, and the time read back from the seconds.
+fn advance(time: &mut Time, interval: &RelTime) {
+    time.have_relative = 1;
+    time.relative = *interval;
+    time.sse_uptodate = 0;
+    time.update_ts(None);
+    time.update_from_sse();
+}
+
+/// `date_period_it_has_more`: before the end, or at it to the microsecond
+/// under `INCLUDE_END_DATE`; with no end, fewer steps than the
+/// recurrences.
+fn has_more(period: &PeriodObj, index: usize) -> bool {
+    let Some(current) = &period.current else {
+        return false;
+    };
+    match &period.end {
+        Some(end) if current.sse == end.sse => {
+            if period.include_end_date {
+                current.us <= end.us
+            } else {
+                current.us < end.us
+            }
+        }
+        Some(end) => current.sse < end.sse,
+        None => i64::try_from(index).is_ok_and(|index| index < period.recurrences),
+    }
+}
+
+/// `get_base_date_class(start_ce)`: the class itself or the first
+/// ancestor that is `DateTime` or `DateTimeImmutable`, or the root.
+fn base_date_class(req: &mut Request, class: ClassId) -> Result<ClassId, Thrown> {
+    let mutable = class_id(req, "DateTime")?;
+    let immutable = class_id(req, "DateTimeImmutable")?;
+    let mut at = class;
+    while at != mutable && at != immutable {
+        match parent_of(req, at) {
+            Some(parent) => at = parent,
+            None => break,
+        }
+    }
+    Ok(at)
+}
+
+/// The element a walk of the period stands at `index` steps past its
+/// rewind, `date_period_it`'s functions over the period's `current`:
+/// `rewind` sets it to a copy of the start, moved once where the start
+/// is excluded; each step is `move_forward`'s `date_period_advance`;
+/// past the last `has_more` answers none; `current_data` is a new date
+/// of the start's base class over it, and `current_key` the index. The
+/// period keeps where `current` stands, so asking for the same index
+/// again moves nothing and the next one moves once, and an index behind
+/// it rewinds. A period whose constructor never ran is php's
+/// `DateObjectError`, raised where `rewind` raises it.
+///
+/// ```php
+/// $s = new DateTimeImmutable('2022-01-01 00:00:00.5 UTC'); $i = new DateInterval('P1D');
+/// foreach ([0, DatePeriod::EXCLUDE_START_DATE, DatePeriod::INCLUDE_END_DATE, 3] as $o) {
+///     foreach (new DatePeriod($s, $i, new DateTime('2022-01-03 00:00:00.5 UTC'), $o) as $k => $d) echo $k, '=', $d->format('md'), ',';
+///     foreach (new DatePeriod($s, $i, 2, $o) as $k => $d) echo $k, ':', $d->format('md'), ',';
+///     echo "\n";
+/// }
+/// $p = new DatePeriod($s, $i, 1);
+/// foreach ($p as $d) {}
+/// var_dump(get_class($d), $p->current->format('Y-m-d'));
+/// class NoCtor extends DatePeriod { function __construct() {} }
+/// try { foreach (new NoCtor as $d) {} } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// 0=0101,1=0102,0:0101,1:0102,2:0103,
+/// 0=0102,0:0102,1:0103,
+/// 0=0101,1=0102,2=0103,0:0101,1:0102,2:0103,3:0104,
+/// 0=0102,1=0103,0:0102,1:0103,2:0104,
+/// string(17) "DateTimeImmutable"
+/// string(10) "2022-01-03"
+/// DateObjectError: Object of type DatePeriod has not been correctly initialized by calling parent::__construct() in its constructor
+/// ```
+pub(super) fn iterator_element(
+    req: &mut Request,
+    object: PhpObject,
+    index: usize,
+) -> Result<Option<(Value, Value)>, Thrown> {
+    let start_ce = object.native::<PeriodObj>(req).and_then(|p| p.start_ce);
+    let base = match start_ce {
+        Some(class) => Some(base_date_class(req, class)?),
+        None => None,
+    };
+    let Some(period) = object.native_mut::<PeriodObj>(req) else {
+        return Ok(None);
+    };
+    let Some(start) = period.start.clone() else {
+        let class = class_id(req, "DatePeriod")?;
+        return Err(uninitialized(req, class));
+    };
+    let interval = period.interval.unwrap_or_default();
+    let steps = match period.cursor {
+        Some(at) if at <= index && period.current.is_some() => index - at,
+        _ => {
+            let mut current = start;
+            if !period.include_start_date {
+                advance(&mut current, &interval);
+            }
+            period.current = Some(current);
+            index
+        }
+    };
+    if let Some(current) = period.current.as_mut() {
+        for _ in 0..steps {
+            advance(current, &interval);
+        }
+    }
+    period.cursor = Some(index);
+    if !has_more(period, index) {
+        return Ok(None);
+    }
+    let (Some(current), Some(base)) = (period.current.clone(), base) else {
+        return Ok(None);
+    };
+    let date = new_date(req, base, current)?;
+    let key = Value::int(i64::try_from(index).unwrap_or(i64::MAX));
+    Ok(Some((key, date.as_value())))
 }
 
 /// `DatePeriod::__serialize(): array`.
