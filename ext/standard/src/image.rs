@@ -343,7 +343,7 @@ struct GfxInfo {
 }
 
 /// What `getimagesize` puts in its array, `Z/ext/standard/image.c:1569`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct ImageData {
     /// Key 0.
     pub(super) width: u32,
@@ -355,6 +355,11 @@ struct ImageData {
     pub(super) channels: u32,
     /// Key 2, an `IMAGETYPE_*` value.
     pub(super) image_type: i64,
+    /// A registered handler's MIME type, which stands in for the table's.
+    pub(super) mime: Option<&'static str>,
+    /// `"width_unit"` and `"height_unit"`, `"px"` where a reader set none.
+    pub(super) width_unit: Option<Vec<u8>>,
+    pub(super) height_unit: Option<Vec<u8>>,
 }
 
 /// A key of the array `getimagesize` returns, `Z/ext/standard/image.c:1570`.
@@ -386,16 +391,19 @@ impl ImageData {
     }
 
     /// The array in php's key order, `Z/ext/standard/image.c:1570`: 0, 1, 2,
-    /// 3, then `"bits"` and `"channels"` when nonzero, then `"mime"`,
-    /// `"width_unit"` and `"height_unit"` (both `"px"` for every format
-    /// image.c reads).
+    /// 3 where both units are pixels, then `"bits"` and `"channels"` when
+    /// nonzero, then `"mime"`, `"width_unit"` and `"height_unit"` (both
+    /// `"px"` for every format image.c reads itself).
     pub(super) fn entries(&self) -> Vec<(Key, Value)> {
+        let pixels = |unit: &Option<Vec<u8>>| unit.as_deref().is_none_or(|u| u == b"px");
         let mut e = vec![
             (Key::Index(0), Value::Int(i64::from(self.width))),
             (Key::Index(1), Value::Int(i64::from(self.height))),
             (Key::Index(2), Value::Int(self.image_type)),
-            (Key::Index(3), Value::Str(self.size_attr())),
         ];
+        if pixels(&self.width_unit) && pixels(&self.height_unit) {
+            e.push((Key::Index(3), Value::Str(self.size_attr())));
+        }
         if self.bits != 0 {
             e.push((Key::Name("bits"), Value::Int(i64::from(self.bits))));
         }
@@ -404,10 +412,20 @@ impl ImageData {
         }
         e.push((
             Key::Name("mime"),
-            Value::Str(mime_type(self.image_type).to_owned()),
+            Value::Str(
+                self.mime
+                    .unwrap_or_else(|| mime_type(self.image_type))
+                    .to_owned(),
+            ),
         ));
-        e.push((Key::Name("width_unit"), Value::Str("px".to_owned())));
-        e.push((Key::Name("height_unit"), Value::Str("px".to_owned())));
+        let unit = |u: &Option<Vec<u8>>| {
+            Value::Str(u.as_deref().map_or_else(
+                || "px".to_owned(),
+                |u| String::from_utf8_lossy(u).into_owned(),
+            ))
+        };
+        e.push((Key::Name("width_unit"), unit(&self.width_unit)));
+        e.push((Key::Name("height_unit"), unit(&self.height_unit)));
         e
     }
 }
@@ -454,12 +472,35 @@ struct Answer {
 // Public entry points.
 
 /// `php_getimagesize_from_stream`, `Z/ext/standard/image.c:1479`, over a
-/// whole file. `want_info` is whether the caller passed `$image_info`.
-fn image_size(bytes: &[u8], want_info: bool) -> Answer {
+/// whole file. `want_info` is whether the caller passed `$image_info`;
+/// `handlers` are the bundle's registered readers, which a file every
+/// fixed format refused after twelve bytes is handed to in turn
+/// (`Z/ext/standard/image.c:1468`).
+fn image_size(bytes: &[u8], want_info: bool, handlers: &[ImageHandler]) -> Answer {
     let mut s = Stream::new(bytes);
     let mut warnings = Vec::new();
     let mut segments = Vec::new();
     let (itype, unmatched) = get_image_type(&mut s, &mut warnings);
+    if unmatched {
+        for (at, handler) in (TYPE_FIXED_COUNT..).zip(handlers) {
+            if let Some(size) = (handler.read)(bytes) {
+                return Answer {
+                    data: Some(ImageData {
+                        width: size.width,
+                        height: size.height,
+                        bits: 0,
+                        channels: 0,
+                        image_type: at,
+                        mime: Some(handler.mime_type),
+                        width_unit: size.width_unit,
+                        height_unit: size.height_unit,
+                    }),
+                    segments,
+                    warnings,
+                };
+            }
+        }
+    }
     let gfx = match itype {
         TYPE_GIF => handle_gif(&mut s),
         TYPE_JPEG => {
@@ -490,7 +531,6 @@ fn image_size(bytes: &[u8], want_info: bool) -> Answer {
         }
         _ => None,
     };
-    let _ = unmatched;
     Answer {
         data: gfx.map(|g| ImageData {
             width: g.width,
@@ -498,10 +538,80 @@ fn image_size(bytes: &[u8], want_info: bool) -> Answer {
             bits: g.bits,
             channels: g.channels,
             image_type: itype,
+            mime: None,
+            width_unit: None,
+            height_unit: None,
         }),
         segments,
         warnings,
     }
+}
+
+/// `struct php_image_handler` (`Z/ext/standard/php_image.h`): an image type
+/// another extension reads, handed to this one with
+/// `ExtensionBuilder::register` as that extension's `MINIT` hands it to
+/// `php_image_register_handler`. Its number is
+/// `IMAGE_FILETYPE_FIXED_COUNT` and its place among the bundle's handlers,
+/// its constant stands after every constant of this extension's own, and
+/// `IMAGETYPE_COUNT` counts it (ext/libxml's SVG reader is php-src's one).
+#[derive(Debug, Clone, Copy)]
+pub struct ImageHandler {
+    pub mime_type: &'static str,
+    /// With its dot, `".svg"`.
+    pub extension: &'static str,
+    pub const_name: &'static str,
+    /// `identify` and `get_info` in one: the size, where the bytes are an
+    /// image of this type.
+    pub read: fn(&[u8]) -> Option<ImageSize>,
+}
+
+/// `struct php_gfxinfo` as a handler fills it: the size, and the unit each
+/// dimension was written in, none for pixels.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageSize {
+    pub width: u32,
+    pub height: u32,
+    pub width_unit: Option<Vec<u8>>,
+    pub height_unit: Option<Vec<u8>>,
+}
+
+/// `php_image_register_handler`'s constants, as the engine links this
+/// extension's: each handler's `IMAGETYPE_*` after every constant of its
+/// own, numbered from `IMAGE_FILETYPE_FIXED_COUNT`, and `IMAGETYPE_COUNT`
+/// raised by one for each.
+///
+/// ```php
+/// $c = (new ReflectionExtension('standard'))->getConstants();
+/// var_dump(array_slice($c, -1, 1, true), $c['IMAGETYPE_COUNT'], array_key_last(get_defined_constants(true)['standard']));
+/// ```
+/// ```expect
+/// array(1) {
+///   ["IMAGETYPE_SVG"]=>
+///   int(21)
+/// }
+/// int(22)
+/// string(13) "IMAGETYPE_SVG"
+/// ```
+pub(crate) fn link_constants(
+    mut declared: Vec<ConstDecl>,
+    handlers: &[&ImageHandler],
+) -> Vec<ConstDecl> {
+    let count = TYPE_FIXED_COUNT + i64::try_from(handlers.len()).unwrap_or(0);
+    for decl in &mut declared {
+        if &*decl.name.0 == b"IMAGETYPE_COUNT" {
+            decl.value = php_ext::decl::ConstExpr::Long(count);
+        }
+    }
+    for (at, handler) in (TYPE_FIXED_COUNT..).zip(handlers) {
+        declared.push(constant(handler.const_name.as_bytes(), at));
+    }
+    declared
+}
+
+/// The handler a number past the fixed types names, `zend_hash_index_find_ptr(&php_image_handlers, image_type)`.
+fn handler_of(req: &Request, image_type: i64) -> Option<ImageHandler> {
+    let at = usize::try_from(image_type.checked_sub(TYPE_FIXED_COUNT)?).ok()?;
+    req.registered::<ImageHandler>().nth(at).copied()
 }
 
 /// `php_image_type_to_mime_type`, `Z/ext/standard/image.c:1220`. php passes
@@ -566,8 +676,8 @@ fn extension(image_type: i64) -> Option<&'static str> {
 /// `php_getimagetype`, `Z/ext/standard/image.c:1370`. The second value is
 /// whether every fixed format failed with twelve bytes read, which is
 /// where php asks each `php_image_register_handler` handler in turn
-/// (`Z/ext/standard/image.c:1468`); php-src's only one is ext/libxml's
-/// SVG reader, which this bundle has not got.
+/// (`Z/ext/standard/image.c:1468`), which [`image_size`] does with the
+/// bundle's registered [`ImageHandler`]s.
 fn get_image_type(s: &mut Stream<'_>, w: &mut Vec<Warning>) -> (i64, bool) {
     let mut ft = [0u8; 12];
     if s.read(&mut ft[..3]) != 3 {
@@ -1468,7 +1578,7 @@ fn handle_avif(s: &mut Stream<'_>) -> Option<GfxInfo> {
 
 /// The `IMAGETYPE_*` constants image.c registers, in its order; the
 /// `IMAGETYPE_SVG` ext/libxml's reader adds, and the `IMAGETYPE_COUNT` it
-/// raises by one, are not this bundle's.
+/// raises by one, are [`link_constants`]'s.
 ///
 /// ```php
 /// var_dump(IMAGETYPE_GIF, IMAGETYPE_JPEG, IMAGETYPE_SWC, IMAGETYPE_JPEG2000, IMAGETYPE_XBM, IMAGETYPE_AVIF, IMAGETYPE_HEIF, IMAGETYPE_UNKNOWN);
@@ -1567,7 +1677,11 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
 fn image_type_to_mime_type(req: &mut Request) -> Result<php::Value, Thrown> {
     argument_count_between(req, 1, 1)?;
     let image_type = long_argument(req, 1)?;
-    string(req, mime_type(image_type).as_bytes())
+    // The C call truncates zend_long to int, on purpose here.
+    #[allow(clippy::cast_possible_truncation)]
+    let registered = handler_of(req, i64::from(image_type as i32));
+    let mime = registered.map_or_else(|| mime_type(image_type), |h| h.mime_type);
+    string(req, mime.as_bytes())
 }
 
 /// `image_type_to_extension(int $image_type, bool $include_dot = true): string|false`,
@@ -1588,9 +1702,19 @@ fn image_type_to_extension(req: &mut Request) -> Result<php::Value, Thrown> {
     argument_count_between(req, 1, 2)?;
     let image_type = long_argument(req, 1)?;
     let include_dot = crate::zpp::optional_bool(req, 2, true)?;
-    match extension(image_type) {
-        Some(ext) if include_dot => string(req, format!(".{ext}").as_bytes()),
-        Some(ext) => string(req, ext.as_bytes()),
+    if let Some(ext) = extension(image_type) {
+        return if include_dot {
+            string(req, format!(".{ext}").as_bytes())
+        } else {
+            string(req, ext.as_bytes())
+        };
+    }
+    match handler_of(req, image_type) {
+        Some(handler) if include_dot => string(req, handler.extension.as_bytes()),
+        Some(handler) => string(
+            req,
+            handler.extension.get(1..).unwrap_or_default().as_bytes(),
+        ),
         None => Ok(php::Value::bool(false)),
     }
 }
@@ -1609,7 +1733,8 @@ fn answer(
     shown: &[u8],
     want_info: bool,
 ) -> Result<php::Value, Thrown> {
-    let found = image_size(bytes, want_info);
+    let handlers: Vec<ImageHandler> = req.registered::<ImageHandler>().copied().collect();
+    let found = image_size(bytes, want_info, &handlers);
     for warning in &found.warnings {
         let text = String::from_utf8_lossy(&warning.text(shown)).into_owned();
         let level = match warning.level() {

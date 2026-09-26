@@ -1457,9 +1457,10 @@ pub fn eval_const_expr(
                 let value = eval_const_expr(req, value, scope)?;
                 match key {
                     Some(key) => {
-                        let key = eval_const_expr(req, key, scope)?;
-                        let key = crate::api::coerce::key_of(req, &key)?;
-                        array.set(req, key, value)?;
+                        let evaluated = eval_const_expr(req, key, scope)?;
+                        let key = crate::api::coerce::key_of(req, &evaluated);
+                        req.release(evaluated);
+                        array.set(req, key?, value)?;
                     }
                     None => array.append(req, value)?,
                 }

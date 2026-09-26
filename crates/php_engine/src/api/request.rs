@@ -354,6 +354,18 @@ pub enum FdStream<'a> {
     Socket,
 }
 
+/// What a path's wrapper answers to its own `url_stat`, asked as
+/// [`Request::wrapper_url_stat`] asks it: the stat, laid out as
+/// `php_fstat` lays it out; `Failed` for the wrapper's `-1`; and
+/// `Unsupported` where no wrapper was located or the one located has no
+/// `url_stat`, as `php://` has none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UrlStat {
+    Found([i64; 13]),
+    Failed,
+    Unsupported,
+}
+
 /// What `php_stream_xport_create` is asked to make of a `transport`'s
 /// name: a client connected within `timeout`, `None` to wait for ever,
 /// or a server bound to the name, listening where `listen` says.
@@ -14927,6 +14939,16 @@ impl Request {
     /// `STREAM_URL_STAT_QUIET` beside the link bit.
     pub fn url_stat_quiet(&mut self, path: &[u8], link: bool) -> Result<Option<[i64; 13]>, Thrown> {
         self.stat_url(path, link, true, true)
+    }
+
+    /// `php_stream_locate_url_wrapper(path, &local, 0)` and the located
+    /// wrapper's `url_stat` under `PHP_STREAM_URL_STAT_QUIET`, asked
+    /// directly as `php_libxml_streams_IO_open_wrapper` asks it before
+    /// it opens a path: no warning from the locate or the stat, the stat
+    /// cache neither read nor written, and a wrapper with no `url_stat`
+    /// told apart from a stat that failed.
+    pub fn wrapper_url_stat(&mut self, path: &[u8]) -> Result<UrlStat, Thrown> {
+        self.stat_url_quiet(path)
     }
 
     /// `php_clear_stat_cache`: the stat cache emptied, both entries.

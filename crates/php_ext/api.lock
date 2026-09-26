@@ -20,6 +20,7 @@ abi::ExtensionBuilder::class_payload
 abi::ExtensionBuilder::class_with
 abi::ExtensionBuilder::classes
 abi::ExtensionBuilder::constants
+abi::ExtensionBuilder::constants_with
 abi::ExtensionBuilder::dependencies
 abi::ExtensionBuilder::engine_state
 abi::ExtensionBuilder::functions
@@ -382,6 +383,7 @@ request::Request::wrapper_op
 request::Request::wrapper_register
 request::Request::wrapper_restore
 request::Request::wrapper_unregister
+request::Request::wrapper_url_stat
 request::Request::write
 request::Request::write_stderr
 request::Request::xport_create
@@ -434,6 +436,7 @@ request::StreamOps::seekable
 request::StreamOps::size
 request::StreamOps::write
 request::StreamWrapper
+request::UrlStat
 request::Whence
 request::Whence::from_int
 request::WrapperOp

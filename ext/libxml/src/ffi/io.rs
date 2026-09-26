@@ -6,7 +6,10 @@
 use std::ffi::{c_char, c_int, c_void};
 use std::ptr;
 
-use super::{Alloc, Level, Library, Raised, Route, Sink, Tree, cstr, sys};
+use php_ext::raising::Thrown;
+use php_ext::request::Request;
+
+use super::{Alloc, Library, Raised, Routing, Sink, Tree, cstr, sys};
 
 use super::tree::Node;
 
@@ -43,30 +46,6 @@ fn sanitize(ctxt: &mut sys::xmlParserCtxt) {
     ctxt.options = 0;
 }
 
-/// The routes an error took, given the handlers php had put on the
-/// parser when it came: libxml's own defaults before, php's after,
-/// none for a level `LIBXML_NOERROR` or `LIBXML_NOWARNING` took the
-/// handler of.
-fn route(raised: &mut [Raised], configured: bool, options: c_int) {
-    for error in raised {
-        if error.route == Route::Generic {
-            continue;
-        }
-        if !configured {
-            error.route = Route::Default;
-            continue;
-        }
-        let silenced = match error.level {
-            Level::Warning => options & sys::XML_PARSE_NOWARNING != 0,
-            Level::Error | Level::Fatal => options & sys::XML_PARSE_NOERROR != 0,
-            Level::None => false,
-        };
-        if silenced {
-            error.route = Route::Silent;
-        }
-    }
-}
-
 /// libxml2's parsers, and the `XInclude` pass over a parsed document.
 pub struct Parser;
 
@@ -75,121 +54,142 @@ impl Parser {
     /// the directory a document read from memory takes as its base,
     /// recovery on or off, and the encoding the caller put in place of the
     /// document's own (`xmlSwitchToEncoding`), which the caller has already
-    /// found known.
+    /// found known. What the parser loads, the file itself included, reads
+    /// through `req`'s streams ([`Raised::capture_io`]).
     pub fn xml(
+        req: &mut Request,
         source: Source<'_>,
         options: c_int,
         directory: Option<&[u8]>,
         recover: bool,
         encoding: Option<&[u8]>,
-    ) -> (Parsed, Vec<Raised>) {
+    ) -> (Parsed, Vec<Raised>, Option<Thrown>) {
         Library::init();
-        let (ctxt, mut created) = Raised::capture(|| match source {
-            Source::Memory(bytes) => {
-                let len = c_int::try_from(bytes.len()).unwrap_or(c_int::MAX);
-                // SAFETY: `len` readable bytes, copied by the context.
-                unsafe { sys::xmlCreateMemoryParserCtxt(bytes.as_ptr().cast(), len) }
+        Raised::capture_io(req, None, || {
+            let created = Routing::Parser {
+                sax: ptr::null_mut(),
+            };
+            let ctxt = Raised::phase(created, || match source {
+                Source::Memory(bytes) => {
+                    let len = c_int::try_from(bytes.len()).unwrap_or(c_int::MAX);
+                    // SAFETY: `len` readable bytes, copied by the context.
+                    unsafe { sys::xmlCreateMemoryParserCtxt(bytes.as_ptr().cast(), len) }
+                }
+                Source::File(path) => {
+                    let p = cstr(path);
+                    // SAFETY: a NUL-terminated path.
+                    unsafe { sys::xmlCreateFileParserCtxt(p.as_ptr().cast()) }
+                }
+            });
+            if ctxt.is_null() {
+                return Parsed::Nothing;
             }
-            Source::File(path) => {
-                let p = cstr(path);
-                // SAFETY: a NUL-terminated path.
-                unsafe { sys::xmlCreateFileParserCtxt(p.as_ptr().cast()) }
-            }
-        });
-        route(&mut created, false, options);
-        if ctxt.is_null() {
-            return (Parsed::Nothing, created);
-        }
-        if let Some(name) = encoding {
-            let n = cstr(name);
-            // SAFETY: a NUL-terminated name.
-            let handler = unsafe { sys::xmlFindCharEncodingHandler(n.as_ptr().cast()) };
-            if !handler.is_null() {
-                // SAFETY: a live context and a handler it takes over.
-                unsafe { sys::xmlSwitchToEncoding(ctxt, handler) };
-            }
-        }
-        // SAFETY: the context just made, this function's alone until freed.
-        let c = unsafe { &mut *ctxt };
-        if let (Source::Memory(_), Some(dir)) = (source, directory) {
-            let d = cstr(dir);
-            // SAFETY: the context's own string, replaced.
-            unsafe { Alloc::free(c.directory.cast()) };
-            // SAFETY: a NUL-terminated path, canonicalised into a new string.
-            c.directory = unsafe { sys::xmlCanonicPath(d.as_ptr()) }.cast::<c_char>();
-        }
-        sanitize(c);
-        let (well_formed, mut parsed) = Raised::capture(|| {
-            // SAFETY: a live context and options.
-            unsafe { sys::xmlCtxtUseOptions(ctxt, options) };
-            // SAFETY: a live context.
-            unsafe { sys::xmlParseDocument(ctxt) };
-            // SAFETY: the context, read after the parse.
-            unsafe { (*ctxt).wellFormed != 0 }
-        });
-        route(&mut parsed, true, options);
-        created.append(&mut parsed);
-        // SAFETY: the context this owns.
-        let c = unsafe { &mut *ctxt };
-        let answer = if well_formed || recover {
-            let doc = c.myDoc;
-            if !doc.is_null() && !c.directory.is_null() {
-                // SAFETY: the parsed document, whose URL is set once.
-                let d = unsafe { &mut *doc };
-                if d.URL.is_null() {
-                    // SAFETY: the context's NUL-terminated directory.
-                    d.URL = unsafe { sys::xmlStrdup(c.directory.cast::<u8>()) };
+            if let Some(name) = encoding {
+                let n = cstr(name);
+                // SAFETY: a NUL-terminated name.
+                let handler = unsafe { sys::xmlFindCharEncodingHandler(n.as_ptr().cast()) };
+                if !handler.is_null() {
+                    // SAFETY: a live context and a handler it takes over.
+                    unsafe { sys::xmlSwitchToEncoding(ctxt, handler) };
                 }
             }
-            Parsed::Document(Node::from_raw(doc.cast()))
-        } else {
-            // SAFETY: the malformed tree, freed once; the context forgets it.
-            unsafe { sys::xmlFreeDoc(c.myDoc) };
-            c.myDoc = ptr::null_mut();
-            Parsed::Malformed
-        };
-        // SAFETY: the context, freed once.
-        unsafe { sys::xmlFreeParserCtxt(ctxt) };
-        (answer, created)
+            // SAFETY: the context just made, this function's alone until freed.
+            let c = unsafe { &mut *ctxt };
+            if let (Source::Memory(_), Some(dir)) = (source, directory) {
+                let d = cstr(dir);
+                // SAFETY: the context's own string, replaced.
+                unsafe { Alloc::free(c.directory.cast()) };
+                // SAFETY: a NUL-terminated path, canonicalised into a new string.
+                c.directory = unsafe { sys::xmlCanonicPath(d.as_ptr()) }.cast::<c_char>();
+            }
+            sanitize(c);
+            // `ctxt->sax->error = php_libxml_ctx_error`: from here on the
+            // parser's errors reach php's handlers.
+            // SAFETY: the live context.
+            let sax = unsafe { (*ctxt).sax };
+            let parsing = Routing::Parser { sax };
+            let well_formed = Raised::phase(parsing, || {
+                // SAFETY: a live context and options.
+                unsafe { sys::xmlCtxtUseOptions(ctxt, options) };
+                // SAFETY: a live context.
+                unsafe { sys::xmlParseDocument(ctxt) };
+                // SAFETY: the context, read after the parse.
+                unsafe { (*ctxt).wellFormed != 0 }
+            });
+            // SAFETY: the context this owns.
+            let c = unsafe { &mut *ctxt };
+            let answer = if well_formed || recover {
+                let doc = c.myDoc;
+                if !doc.is_null() && !c.directory.is_null() {
+                    // SAFETY: the parsed document, whose URL is set once.
+                    let d = unsafe { &mut *doc };
+                    if d.URL.is_null() {
+                        // SAFETY: the context's NUL-terminated directory.
+                        d.URL = unsafe { sys::xmlStrdup(c.directory.cast::<u8>()) };
+                    }
+                }
+                Parsed::Document(Node::from_raw(doc.cast()))
+            } else {
+                // SAFETY: the malformed tree, freed once; the context forgets it.
+                unsafe { sys::xmlFreeDoc(c.myDoc) };
+                c.myDoc = ptr::null_mut();
+                Parsed::Malformed
+            };
+            // SAFETY: the context, freed once.
+            unsafe { sys::xmlFreeParserCtxt(ctxt) };
+            answer
+        })
     }
 
     /// `dom_load_html`'s parse: the HTML parser over `source`, `options` put
-    /// on the parser where any are given, and whatever tree it built.
-    pub fn html(source: Source<'_>, options: c_int) -> (Option<Node>, Vec<Raised>) {
+    /// on the parser where any are given, and whatever tree it built; what
+    /// it loads reads through `req`'s streams.
+    pub fn html(
+        req: &mut Request,
+        source: Source<'_>,
+        options: c_int,
+    ) -> (Option<Node>, Vec<Raised>, Option<Thrown>) {
         Library::init();
-        let (ctxt, mut created) = Raised::capture(|| match source {
-            Source::Memory(bytes) => {
-                let len = c_int::try_from(bytes.len()).unwrap_or(c_int::MAX);
-                // SAFETY: `len` readable bytes.
-                unsafe { sys::htmlCreateMemoryParserCtxt(bytes.as_ptr().cast(), len) }
+        Raised::capture_io(req, None, || {
+            let created = Routing::Parser {
+                sax: ptr::null_mut(),
+            };
+            let ctxt = Raised::phase(created, || match source {
+                Source::Memory(bytes) => {
+                    let len = c_int::try_from(bytes.len()).unwrap_or(c_int::MAX);
+                    // SAFETY: `len` readable bytes.
+                    unsafe { sys::htmlCreateMemoryParserCtxt(bytes.as_ptr().cast(), len) }
+                }
+                Source::File(path) => {
+                    let p = cstr(path);
+                    // SAFETY: a NUL-terminated path and no encoding.
+                    unsafe { sys::htmlCreateFileParserCtxt(p.as_ptr().cast(), ptr::null()) }
+                }
+            });
+            if ctxt.is_null() {
+                return None;
             }
-            Source::File(path) => {
-                let p = cstr(path);
-                // SAFETY: a NUL-terminated path and no encoding.
-                unsafe { sys::htmlCreateFileParserCtxt(p.as_ptr().cast(), ptr::null()) }
-            }
-        });
-        route(&mut created, false, options);
-        if ctxt.is_null() {
-            return (None, created);
-        }
-        // SAFETY: the context just made.
-        sanitize(unsafe { &mut *ctxt });
-        let (doc, mut parsed) = Raised::capture(|| {
-            if options != 0 {
+            // SAFETY: the context just made.
+            sanitize(unsafe { &mut *ctxt });
+            // `ctxt->sax->error = php_libxml_ctx_error`: from here on the
+            // parser's errors reach php's handlers.
+            // SAFETY: the live context.
+            let sax = unsafe { (*ctxt).sax };
+            let parsing = Routing::Parser { sax };
+            let doc = Raised::phase(parsing, || {
+                if options != 0 {
+                    // SAFETY: a live context.
+                    unsafe { sys::htmlCtxtUseOptions(ctxt, options) };
+                }
                 // SAFETY: a live context.
-                unsafe { sys::htmlCtxtUseOptions(ctxt, options) };
-            }
-            // SAFETY: a live context.
-            unsafe { sys::htmlParseDocument(ctxt) };
-            // SAFETY: the context, read after the parse.
-            unsafe { (*ctxt).myDoc }
-        });
-        route(&mut parsed, true, options);
-        created.append(&mut parsed);
-        // SAFETY: the context, freed once; the tree is the caller's.
-        unsafe { sys::htmlFreeParserCtxt(ctxt) };
-        (Node::from_raw(doc.cast()), created)
+                unsafe { sys::htmlParseDocument(ctxt) };
+                // SAFETY: the context, read after the parse.
+                unsafe { (*ctxt).myDoc }
+            });
+            // SAFETY: the context, freed once; the tree is the caller's.
+            unsafe { sys::htmlFreeParserCtxt(ctxt) };
+            Node::from_raw(doc.cast())
+        })
     }
 
     /// `xmlParseBalancedChunkMemory(doc, NULL, NULL, 0, data, &list)`: the
@@ -219,10 +219,20 @@ impl Parser {
         (answer, raised)
     }
 
-    /// `xmlXIncludeProcessFlags(doc, flags | XML_PARSE_NOXINCNODE)`.
-    pub fn xinclude(doc: Node, flags: c_int) -> (i32, Vec<Raised>) {
+    /// `xmlXIncludeProcessFlags(doc, flags | XML_PARSE_NOXINCNODE)`, what it
+    /// includes read through `req`'s streams; the parsers libxml opens for
+    /// an include are its own, never configured by php, so their errors
+    /// are printed in libxml's own words.
+    pub fn xinclude(
+        req: &mut Request,
+        doc: Node,
+        flags: c_int,
+    ) -> (i32, Vec<Raised>, Option<Thrown>) {
         const NOXINCNODE: c_int = 1 << 15;
-        Raised::capture(|| {
+        let unconfigured = Routing::Parser {
+            sax: ptr::null_mut(),
+        };
+        Raised::capture_io(req, Some(unconfigured), || {
             // SAFETY: a live document.
             unsafe { sys::xmlXIncludeProcessFlags(doc.raw().cast(), flags | NOXINCNODE) }
         })
@@ -284,17 +294,18 @@ impl Save {
     }
 
     /// `xmlSaveFormatFileEnc(file, doc, encoding, format)`: the bytes
-    /// written, `-1` on failure.
+    /// written, `-1` on failure; the file opened through `req`'s wrappers.
     pub fn file(
+        req: &mut Request,
         path: &[u8],
         doc: Node,
         encoding: Option<&[u8]>,
         format: bool,
         no_empty: bool,
-    ) -> (i64, Vec<Raised>) {
+    ) -> (i64, Vec<Raised>, Option<Thrown>) {
         let p = cstr(path);
         let e = encoding.map(cstr);
-        Raised::capture(|| {
+        Raised::capture_io(req, None, || {
             with_no_empty_tags(no_empty, || {
                 // SAFETY: a NUL-terminated path, a live document, an encoding or
                 // null.
@@ -357,16 +368,18 @@ impl Save {
         })
     }
 
-    /// `htmlSaveFileFormat(file, doc, encoding, format)`.
+    /// `htmlSaveFileFormat(file, doc, encoding, format)`, the file opened
+    /// through `req`'s wrappers.
     pub fn html_file(
+        req: &mut Request,
         path: &[u8],
         doc: Node,
         encoding: Option<&[u8]>,
         format: bool,
-    ) -> (i64, Vec<Raised>) {
+    ) -> (i64, Vec<Raised>, Option<Thrown>) {
         let p = cstr(path);
         let e = encoding.map(cstr);
-        Raised::capture(|| {
+        Raised::capture_io(req, None, || {
             // SAFETY: a NUL-terminated path, a live document, an encoding or
             // null.
             i64::from(unsafe {
@@ -388,15 +401,17 @@ impl Save {
         (!p.is_null()).then(|| unsafe { Alloc::bytes(p) }.to_vec())
     }
 
-    /// `xmlC14NExecute` or `xmlC14NDocSaveTo` into memory or a file.
+    /// `xmlC14NExecute` or `xmlC14NDocSaveTo` into memory or a file, a file
+    /// opened through `req`'s wrappers.
     pub fn c14n(
+        req: &mut Request,
         doc: Node,
         select: &C14nSelect<'_>,
         exclusive: bool,
         prefixes: Option<&[Vec<u8>]>,
         with_comments: bool,
         target: &C14nTarget<'_>,
-    ) -> (C14nOut, Vec<Raised>) {
+    ) -> (C14nOut, Vec<Raised>, Option<Thrown>) {
         let owned: Vec<Vec<u8>> = prefixes
             .unwrap_or_default()
             .iter()
@@ -409,7 +424,7 @@ impl Save {
         } else {
             ptr::null_mut()
         };
-        Raised::capture(|| {
+        Raised::capture_io(req, None, || {
             let run = |buf: *mut sys::xmlOutputBuffer| -> c_int {
                 match select {
                     C14nSelect::Subtree(root) => {
@@ -531,9 +546,10 @@ pub enum C14nOut {
 pub struct Validate;
 
 impl Validate {
-    /// `xmlValidateDocument` with a fresh validator.
-    pub fn dtd(doc: Node) -> (bool, Vec<Raised>) {
-        Raised::capture(|| {
+    /// `xmlValidateDocument` with a fresh validator, the external subset
+    /// it loads read through `req`'s streams.
+    pub fn dtd(req: &mut Request, doc: Node) -> (bool, Vec<Raised>, Option<Thrown>) {
+        Raised::capture_io(req, Some(Routing::Validator), || {
             // SAFETY: no argument.
             let cvp = unsafe { sys::xmlNewValidCtxt() };
             if cvp.is_null() {
@@ -548,14 +564,16 @@ impl Validate {
     }
 
     /// `dom_document_schema_validate` and `dom_document_relaxNG_validate`'s
-    /// libxml half over a schema read from `source`.
+    /// libxml half over a schema read from `source`, what it loads read
+    /// through `req`'s streams.
     pub fn schema(
+        req: &mut Request,
         doc: Node,
         schema: Schema,
         source: Source<'_>,
         flags: c_int,
-    ) -> (Validated, Vec<Raised>) {
-        Raised::capture(|| {
+    ) -> (Validated, Vec<Raised>, Option<Thrown>) {
+        Raised::capture_io(req, Some(Routing::Validator), || {
             let parser = match (schema, source) {
                 (Schema::Xsd, Source::File(path)) => {
                     let p = cstr(path);
@@ -685,7 +703,12 @@ impl Parser {
         const OPTIONS: c_int =
             sys::XML_PARSE_IGNORE_ENC | sys::XML_PARSE_NOERROR | sys::XML_PARSE_NOWARNING;
         Library::init();
-        let (answer, mut raised) = Raised::capture(|| {
+        // Every error of the parser php configures here reaches no handler,
+        // `XML_PARSE_NOERROR | XML_PARSE_NOWARNING` having taken them off.
+        let unconfigured = Routing::Parser {
+            sax: ptr::null_mut(),
+        };
+        let (answer, raised) = Raised::capture_with(unconfigured, || {
             // SAFETY: no SAX handler, no user data, no initial chunk.
             let ctxt = unsafe {
                 sys::xmlCreatePushParserCtxt(
@@ -749,7 +772,6 @@ impl Parser {
             }
             Fragment::Document(Node::from_raw(built.cast()))
         });
-        route(&mut raised, true, OPTIONS);
         (answer, raised)
     }
 }
@@ -856,5 +878,74 @@ impl Dump {
         ok = ok && unsafe { sys::xmlSaveTree(self.ctxt, node.raw()) } >= 0;
         // SAFETY: a live context.
         ok && unsafe { sys::xmlSaveFlush(self.ctxt) } >= 0
+    }
+}
+
+/// The first element an `xmlTextReader` meets, as
+/// `php_libxml_svg_image_handle` reads it: its local name, and its `width`
+/// and `height` attributes where it has them.
+#[derive(Debug, Clone)]
+pub(crate) struct FirstElement {
+    pub(crate) name: Option<Vec<u8>>,
+    pub(crate) width: Option<Vec<u8>>,
+    pub(crate) height: Option<Vec<u8>>,
+}
+
+/// libxml2's pull reader, `xmlreader.h`.
+pub(crate) struct Reader;
+
+impl Reader {
+    /// `xmlReaderForMemory` over `bytes` with `XML_PARSE_NOWARNING |
+    /// XML_PARSE_NOERROR | XML_PARSE_NONET`, read until its first element;
+    /// `None` where no reader could be made or the reader met no element.
+    /// What libxml raised meanwhile reaches no handler, as the options say.
+    pub(crate) fn first_element(bytes: &[u8]) -> Option<FirstElement> {
+        const OPTIONS: c_int =
+            sys::XML_PARSE_NOWARNING | sys::XML_PARSE_NOERROR | sys::XML_PARSE_NONET;
+        Library::init();
+        let len = c_int::try_from(bytes.len()).ok()?;
+        let (element, _silenced) = Raised::capture(|| {
+            // SAFETY: `len` readable bytes the reader reads for its life,
+            // which ends below; no URL, no encoding.
+            let reader = unsafe {
+                sys::xmlReaderForMemory(
+                    bytes.as_ptr().cast(),
+                    len,
+                    ptr::null(),
+                    ptr::null(),
+                    OPTIONS,
+                )
+            };
+            if reader.is_null() {
+                return None;
+            }
+            let mut found = None;
+            // SAFETY: a live reader.
+            while unsafe { sys::xmlTextReaderRead(reader) } == 1 {
+                // SAFETY: as above.
+                if unsafe { sys::xmlTextReaderNodeType(reader) } != sys::XML_READER_TYPE_ELEMENT {
+                    continue;
+                }
+                // SAFETY: a live reader; the name is the reader's own, or null.
+                let name = unsafe { sys::xmlTextReaderConstLocalName(reader) };
+                let attribute = |attr: &[u8]| {
+                    // SAFETY: a live reader and a NUL-terminated name.
+                    let value = unsafe { sys::xmlTextReaderGetAttribute(reader, attr.as_ptr()) };
+                    // SAFETY: a string of libxml's allocator nothing else frees.
+                    unsafe { Alloc::take(value) }
+                };
+                found = Some(FirstElement {
+                    // SAFETY: the name, live until the reader moves on.
+                    name: (!name.is_null()).then(|| unsafe { Alloc::bytes(name) }.to_vec()),
+                    width: attribute(b"width\0"),
+                    height: attribute(b"height\0"),
+                });
+                break;
+            }
+            // SAFETY: the reader, freed once.
+            unsafe { sys::xmlFreeTextReader(reader) };
+            found
+        });
+        element
     }
 }

@@ -2806,15 +2806,35 @@ fn readonly_error(req: &mut Request, object: PhpObject, name: &[u8]) -> Thrown {
 }
 
 /// What a handled property's declared type takes, `zend_verify_property_type`
-/// under the weak rule, over the three types dom's writable properties
-/// have.
+/// under the weak rule, over the types dom's writable properties have: a
+/// refusal names the class that declares the property, as php's
+/// `zend_verify_property_type_error` names `info->ce`.
+///
+/// ```php
+/// $d = new DOMDocument;
+/// try { $d->nodeValue = []; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// $h = Dom\HTMLDocument::createEmpty();
+/// try { $h->body = $h->createElementNS('urn:x', 'body'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { $h->URL = null; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// $h->appendChild($h->createElement('html'));
+/// $h->body = $h->createElement('body');
+/// var_dump($h->body->tagName);
+/// try { $h->body = null; } catch (DOMException $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Cannot assign array to property DOMNode::$nodeValue of type ?string
+/// Cannot assign Dom\Element to property Dom\Document::$body of type ?Dom\HTMLElement
+/// Cannot assign null to property Dom\Document::$URL of type string
+/// string(4) "BODY"
+/// The new body must either be a body or a frameset tag
+/// ```
 fn coerce_property(
     req: &mut Request,
     object: PhpObject,
     name: &[u8],
     value: &Value,
 ) -> Result<Value, Thrown> {
-    let declared = declared_type(req, object, name);
+    let (declaring, declared) = declared_type(req, object, name);
     let v = value.deref();
     let given = match v.as_ref() {
         ValueRef::Null => "null",
@@ -2826,7 +2846,7 @@ fn coerce_property(
         _ => "",
     };
     let fail = |req: &mut Request, shown: &str| -> Thrown {
-        let class = class_name(req, object.class());
+        let class = String::from_utf8_lossy(&declaring).into_owned();
         let prop = String::from_utf8_lossy(name);
         let given = if given.is_empty() {
             v.as_object()
@@ -2861,6 +2881,25 @@ fn coerce_property(
             ValueRef::Object(o) if has_to_string(req, *o) => Ok(Value::string(to_string(req, &v)?)),
             _ => Err(fail(req, if nullable { "?string" } else { "string" })),
         },
+        Declared::Object { class, nullable } => {
+            let accepted = match v.as_ref() {
+                ValueRef::Null => nullable,
+                ValueRef::Object(o) => {
+                    lookup_class(req, &class)?.is_some_and(|of| class_extends(req, o.class(), of))
+                }
+                _ => false,
+            };
+            if accepted {
+                req.addref(&v);
+                return Ok(v);
+            }
+            let shown = format!(
+                "{}{}",
+                if nullable { "?" } else { "" },
+                String::from_utf8_lossy(&class)
+            );
+            Err(fail(req, &shown))
+        }
     }
 }
 
@@ -3008,29 +3047,48 @@ fn has_to_string(req: &mut Request, object: PhpObject) -> bool {
     Std.get_method(req, object, b"__tostring").is_some()
 }
 
-/// The declared type of a handled property, as the stub writes it.
+/// The declared type of a handled property, as the stub writes it: a
+/// bool, a string, or a class (`Dom\Document::$body`'s
+/// `?Dom\HTMLElement`), each held as `zend_verify_property_type` holds it
+/// under the weak rule.
 enum Declared {
     Bool,
     String { nullable: bool },
+    Object { class: Vec<u8>, nullable: bool },
 }
 
-fn declared_type(req: &mut Request, object: PhpObject, name: &[u8]) -> Declared {
+fn declared_type(req: &mut Request, object: PhpObject, name: &[u8]) -> (Vec<u8>, Declared) {
+    use php_ext::decl::Type;
     let mut at = Some(object.class());
     while let Some(c) = at {
         let Some(decl) = req.class_decl(c) else {
             break;
         };
         if let Some(p) = decl.properties.iter().find(|p| &*p.name.0 == name) {
-            return match &p.ty {
-                Some(php_ext::decl::Type::Bool) => Declared::Bool,
-                Some(php_ext::decl::Type::Nullable(_)) => Declared::String { nullable: true },
+            let declared = match &p.ty {
+                Some(Type::Bool) => Declared::Bool,
+                Some(Type::Named(class)) => Declared::Object {
+                    class: class.0.to_vec(),
+                    nullable: false,
+                },
+                Some(Type::Nullable(inner)) => match &**inner {
+                    Type::Named(class) => Declared::Object {
+                        class: class.0.to_vec(),
+                        nullable: true,
+                    },
+                    _ => Declared::String { nullable: true },
+                },
                 _ => Declared::String { nullable: false },
             };
+            return (decl.name.0.to_vec(), declared);
         }
         let parent = decl.parent.clone();
         at = parent.and_then(|p| lookup_class(req, &p.0).ok().flatten());
     }
-    Declared::String { nullable: true }
+    (
+        class_name(req, object.class()).into_bytes(),
+        Declared::String { nullable: true },
+    )
 }
 
 /// `instanceof_function` over two classes: whether `class` is `of` or

@@ -848,7 +848,26 @@ fn modern_prefix(req: &mut Request, object: PhpObject) -> Read {
     string_or_null(req, node.ns().and_then(Ns::prefix).as_deref())
 }
 
-/// `dom_node_prefix_write`.
+/// `dom_node_prefix_write`: the empty prefix, and one a NUL starts, the
+/// default namespace; a prefix another declaration of the element holds
+/// php's "Namespace Error".
+///
+/// ```php
+/// $d = new DOMDocument;
+/// $d->loadXML('<h:r xmlns:c="urn:c" xmlns:h="urn:h"/>');
+/// $r = $d->documentElement;
+/// foreach (["", "\0x", "h", "c"] as $p) {
+///     try { $r->prefix = $p; } catch (DOMException $e) { echo $e->getMessage(), "\n"; }
+///     echo $d->saveXML($r), "\n";
+/// }
+/// ```
+/// ```expect
+/// <r xmlns:c="urn:c" xmlns:h="urn:h" xmlns="urn:h"/>
+/// <r xmlns:c="urn:c" xmlns:h="urn:h" xmlns="urn:h"/>
+/// <h:r xmlns:c="urn:c" xmlns:h="urn:h" xmlns="urn:h"/>
+/// Namespace Error
+/// <h:r xmlns:c="urn:c" xmlns:h="urn:h" xmlns="urn:h"/>
+/// ```
 fn set_prefix(req: &mut Request, object: PhpObject, value: &Value) -> Result<(), Thrown> {
     let node = prop_node(req, object)?;
     let holder = match node.kind() {
@@ -857,7 +876,14 @@ fn set_prefix(req: &mut Request, object: PhpObject, value: &Value) -> Result<(),
         _ => return Ok(()),
     };
     let given = written_bytes(value);
-    let prefix: Option<&[u8]> = if given.is_empty() { None } else { Some(&given) };
+    // `ZSTR_VAL(prefix_str)` read as the C string it is: up to its first
+    // NUL, and none where that leaves nothing, the default namespace.
+    let c_prefix = &given[..given.iter().position(|b| *b == 0).unwrap_or(given.len())];
+    let prefix: Option<&[u8]> = if c_prefix.is_empty() {
+        None
+    } else {
+        Some(c_prefix)
+    };
     let (Some(holder), Some(current)) = (holder, node.ns()) else {
         return Ok(());
     };
@@ -1198,12 +1224,39 @@ fn attr_value(req: &mut Request, object: PhpObject) -> Read {
     some(content_value(req, node, false)?)
 }
 
-/// `dom_attr_value_write`.
+/// `dom_attr_value_write`: the modern classes take the text as it is
+/// written, one text node, where the legacy ones hand it to
+/// `xmlNodeSetContentLen`, which reads entity references in it.
+///
+/// ```php
+/// $m = Dom\XMLDocument::createFromString('<r a="x"/>');
+/// $a = $m->documentElement->getAttributeNode('a');
+/// $a->value = '&lt;&amp;';
+/// var_dump($a->value, $m->saveXML($m->documentElement));
+/// $d = new DOMDocument;
+/// $d->loadXML('<r a="x"/>');
+/// $b = $d->documentElement->getAttributeNode('a');
+/// $b->value = '&lt;&amp;';
+/// var_dump($b->value, $d->saveXML($d->documentElement));
+/// ```
+/// ```expect
+/// string(9) "&lt;&amp;"
+/// string(26) "<r a="&amp;lt;&amp;amp;"/>"
+/// string(2) "<&"
+/// string(18) "<r a="&lt;&amp;"/>"
+/// ```
 fn set_attr_value(req: &mut Request, object: PhpObject, value: &Value) -> Result<(), Thrown> {
     let node = prop_node(req, object)?;
     attr_value_will_change(req, object, node);
     remove_all_children(node);
-    node.set_content_len(&written_bytes(value));
+    let bytes = written_bytes(value);
+    if follows_spec(req, object) {
+        if let Some(text) = Node::new_text_len(node.doc(), &bytes) {
+            node.add_child(text);
+        }
+    } else {
+        node.set_content_len(&bytes);
+    }
     Ok(())
 }
 
@@ -1299,10 +1352,25 @@ fn doctype_name(req: &mut Request, object: PhpObject) -> Read {
     some(string(req, &node.name())?)
 }
 
-/// `dom_get_dtd_namednodemap_ce`: `Dom\DtdNamedNodeMap` for the modern
-/// classes.
-fn dtd_map_class(req: &Request, object: PhpObject) -> &'static str {
-    if follows_spec(req, object) {
+/// `dom_get_dtd_namednodemap_ce(instanceof_function(obj->std.ce,
+/// dom_modern_documenttype_class_entry))`: `Dom\DtdNamedNodeMap` for a
+/// `Dom\DocumentType`, whether or not a document holds it.
+///
+/// ```php
+/// $t = (new Dom\Implementation)->createDocumentType('html', 'p', 's');
+/// $d = new DOMDocument;
+/// $d->loadXML('<!DOCTYPE r><r/>');
+/// echo get_class($t->entities), ' ', get_class($t->notations), ' ', get_class($d->doctype->entities), "\n";
+/// ```
+/// ```expect
+/// Dom\DtdNamedNodeMap Dom\DtdNamedNodeMap DOMNamedNodeMap
+/// ```
+fn dtd_map_class(req: &mut Request, object: PhpObject) -> &'static str {
+    let modern = php_ext::call::lookup_class(req, b"Dom\\DocumentType")
+        .ok()
+        .flatten()
+        .is_some_and(|class| crate::class_extends(req, object.class(), class));
+    if modern {
         "Dom\\DtdNamedNodeMap"
     } else {
         "DOMNamedNodeMap"

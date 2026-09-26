@@ -1436,7 +1436,8 @@ fn canonicalization(req: &mut Request, to_file: bool) -> Result<Value, Thrown> {
         Some(f) => C14nTarget::File(f),
         None => C14nTarget::Memory,
     };
-    let (out, raised) = Save::c14n(
+    let (out, raised, thrown) = Save::c14n(
+        req,
         doc,
         &select,
         exclusive,
@@ -1446,7 +1447,7 @@ fn canonicalization(req: &mut Request, to_file: bool) -> Result<Value, Thrown> {
     );
     drop(query_holder);
     drop(links);
-    Errors::route(req, raised);
+    Errors::settle(req, raised, thrown)?;
     match out {
         C14nOut::Bytes(bytes) => string(req, &bytes),
         C14nOut::Written(n) => Ok(Value::int(n)),

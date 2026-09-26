@@ -222,20 +222,22 @@ fn xml_load(req: &mut Request, from_file: bool) -> Result<Value, Thrown> {
         override_encoding,
     } = xml_load_args(req, from_file)?;
     let recover = options & f::XML_PARSE_RECOVER != 0;
-    let (parsed, raised) = if from_file {
+    let (parsed, raised, thrown) = if from_file {
         match crate::file_path(req, &source) {
             Some(path) => Parser::xml(
+                req,
                 Source::File(&path),
                 options,
                 None,
                 recover,
                 override_encoding.as_deref(),
             ),
-            None => (Parsed::Nothing, Vec::new()),
+            None => (Parsed::Nothing, Vec::new(), None),
         }
     } else {
         let dir = crate::document::base_directory(req);
         Parser::xml(
+            req,
             Source::Memory(&source),
             options,
             Some(&dir),
@@ -243,7 +245,12 @@ fn xml_load(req: &mut Request, from_file: bool) -> Result<Value, Thrown> {
             override_encoding.as_deref(),
         )
     };
-    Errors::route(req, raised);
+    if let Err(thrown) = Errors::settle(req, raised, thrown) {
+        if let Parsed::Document(Some(doc)) = parsed {
+            doc.free_document();
+        }
+        return Err(thrown);
+    }
     let doc = match parsed {
         Parsed::Document(Some(doc)) => doc,
         Parsed::Malformed => {
