@@ -20,7 +20,9 @@ use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::os::fd::RawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
-use std::ptr::{self, NonNull};
+use std::ptr;
+#[cfg(target_os = "macos")]
+use std::ptr::NonNull;
 
 /// `F_OK`, `R_OK`, `W_OK` and `X_OK`: what `access(2)` is asked.
 pub(super) const F_OK: i32 = libc::F_OK;
@@ -467,13 +469,16 @@ pub(super) fn interfaces() -> std::io::Result<Vec<InterfaceAddress>> {
     Ok(found)
 }
 
-// ---- dns.c: the darwin resolver of `<dns.h>`, `dn_expand` and
-// `dn_skipname` from libresolv, `getaddrinfo`, `getnameinfo`,
-// `inet_pton` and `gethostname`.
+// ---- dns.c: the resolver `Z/ext/standard/php_dns.h` picks per host,
+// darwin's `<dns.h>` (`HAVE_DNS_SEARCH`) and libresolv's `res_search`
+// elsewhere, `dn_expand` and `dn_skipname` from libresolv, `getaddrinfo`,
+// `getnameinfo`, `inet_pton` and `gethostname`.
 
 /// The opaque `dns_handle_t` of `<dns.h>`, `Z/ext/standard/dns.c:819`.
+#[cfg(target_os = "macos")]
 type DnsHandleT = *const c_void;
 
+#[cfg(target_os = "macos")]
 #[link(name = "resolv")]
 unsafe extern "C" {
     /// `dns_open`, `<dns.h>`, called at `Z/ext/standard/dns.c:416`.
@@ -495,7 +500,8 @@ unsafe extern "C" {
     ) -> i32;
     /// `dn_expand`, which `<resolv.h>` renames `res_9_dn_expand` on darwin;
     /// called at `Z/ext/standard/dns.c:461`.
-    fn res_9_dn_expand(
+    #[link_name = "res_9_dn_expand"]
+    fn dn_expand_c(
         msg: *const u8,
         eom: *const u8,
         src: *const u8,
@@ -504,25 +510,62 @@ unsafe extern "C" {
     ) -> c_int;
     /// `dn_skipname`, which `<resolv.h>` renames `res_9_dn_skipname` on
     /// darwin; called at `Z/ext/standard/dns.c:996`.
-    fn res_9_dn_skipname(ptr: *const u8, eom: *const u8) -> c_int;
-}
-
-unsafe extern "C" {
+    #[link_name = "res_9_dn_skipname"]
+    fn dn_skipname_c(ptr: *const u8, eom: *const u8) -> c_int;
     /// `h_errno`, `<netdb.h>`, read by `php_dns_errno`
     /// (`Z/ext/standard/php_dns.h:27`): a plain global on darwin, set by
     /// `dns_search`.
     static mut h_errno: c_int;
+}
+
+#[cfg(target_os = "linux")]
+#[link(name = "resolv")]
+unsafe extern "C" {
+    /// `res_search`, which glibc's `<resolv.h>` names `__res_search`:
+    /// `php_dns_search` where there is no `<dns.h>`. php takes
+    /// `res_nsearch` over a state of its own; glibc keeps `_res` per
+    /// thread, so the calling thread's state is as private as php's.
+    #[link_name = "__res_search"]
+    fn res_search(
+        dname: *const c_char,
+        class: c_int,
+        ty: c_int,
+        answer: *mut u8,
+        anslen: c_int,
+    ) -> c_int;
+    /// `dn_expand`, glibc's `__dn_expand`; called at
+    /// `Z/ext/standard/dns.c:461`.
+    #[link_name = "__dn_expand"]
+    fn dn_expand_c(
+        msg: *const u8,
+        eom: *const u8,
+        src: *const u8,
+        dst: *mut c_char,
+        dstsiz: c_int,
+    ) -> c_int;
+    /// `dn_skipname`, glibc's `__dn_skipname`; called at
+    /// `Z/ext/standard/dns.c:996`.
+    #[link_name = "__dn_skipname"]
+    fn dn_skipname_c(ptr: *const u8, eom: *const u8) -> c_int;
+    /// The calling thread's `h_errno`, which `<netdb.h>` defines as
+    /// `(*__h_errno_location ())` on glibc.
+    fn __h_errno_location() -> *mut c_int;
+}
+
+unsafe extern "C" {
     /// `inet_pton`, `<arpa/inet.h>`, called at `Z/ext/standard/dns.c:181`.
     fn inet_pton(af: c_int, src: *const c_char, dst: *mut c_void) -> c_int;
 }
 
 /// The `from`/`fromsize` pair php keeps for `dns_search` across one call of
 /// a native (`Z/ext/standard/dns.c:817`): `fromsize` is set once and
-/// `dns_search` may shrink it.
+/// `dns_search` may shrink it. `res_search` takes neither.
 pub(super) struct DnsFrom {
     /// `struct sockaddr_storage from`.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     storage: libc::sockaddr_storage,
     /// `uint32_t fromsize = sizeof(from)`.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     len: u32,
 }
 
@@ -539,8 +582,15 @@ impl DnsFrom {
 
 /// An open `dns_handle_t`, freed with `dns_free` when dropped
 /// (`php_dns_free_handle`, `Z/ext/standard/php_dns.h:25`).
+#[cfg(target_os = "macos")]
 pub(super) struct DnsHandle(NonNull<c_void>);
 
+/// The resolver `res_search` reads, the calling thread's own `_res`; there
+/// is nothing to open or to free.
+#[cfg(target_os = "linux")]
+pub(super) struct DnsHandle(());
+
+#[cfg(target_os = "macos")]
 impl DnsHandle {
     /// `dns_open(NULL)`, `Z/ext/standard/dns.c:416`; `None` where it gives
     /// `NULL`.
@@ -587,6 +637,40 @@ impl DnsHandle {
     }
 }
 
+#[cfg(target_os = "linux")]
+impl DnsHandle {
+    /// The thread's resolver, which `res_search` initialises on first use.
+    #[allow(clippy::unnecessary_wraps)] // darwin's `dns_open` can give `NULL`
+    pub(super) fn open() -> Option<DnsHandle> {
+        Some(DnsHandle(()))
+    }
+
+    /// `php_dns_search` without `<dns.h>`: `res_search` into `buf`. `Ok` is
+    /// the length of the answer; `Err` is the thread's `h_errno`, read right
+    /// after the call as `php_dns_errno` does.
+    #[allow(clippy::unused_self)] // the handle darwin's `dns_search` reads
+    pub(super) fn search(
+        &self,
+        name: &CStr,
+        class: u32,
+        ty: u32,
+        buf: &mut [u8],
+        _from: &mut DnsFrom,
+    ) -> Result<usize, c_int> {
+        let len = c_int::try_from(buf.len()).unwrap_or(c_int::MAX);
+        let class = c_int::try_from(class).unwrap_or(c_int::MAX);
+        let ty = c_int::try_from(ty).unwrap_or(c_int::MAX);
+        // SAFETY: `name` is NUL-terminated and `buf` is writable for `len`
+        // bytes, which is at most its length.
+        let n = unsafe { res_search(name.as_ptr(), class, ty, buf.as_mut_ptr(), len) };
+        if n < 0 {
+            return Err(last_h_errno());
+        }
+        Ok(usize::try_from(n).unwrap_or(0).min(buf.len()))
+    }
+}
+
+#[cfg(target_os = "macos")]
 impl Drop for DnsHandle {
     /// `dns_free`, `Z/ext/standard/php_dns.h:25`.
     fn drop(&mut self) {
@@ -595,11 +679,29 @@ impl Drop for DnsHandle {
     }
 }
 
+#[cfg(target_os = "linux")]
+impl Drop for DnsHandle {
+    /// `php_dns_free_handle`'s place: nothing to free, since `res_search`
+    /// reads the thread's own state.
+    fn drop(&mut self) {}
+}
+
 /// The value of `h_errno`, `Z/ext/standard/php_dns.h:27`.
+#[cfg(target_os = "macos")]
 fn last_h_errno() -> c_int {
     let p = &raw const h_errno;
     // SAFETY: `h_errno` is a C `int` that lives for the whole process; it
     // is read by value, with no reference kept.
+    unsafe { p.read() }
+}
+
+/// The calling thread's `h_errno`, `Z/ext/standard/php_dns.h:27`.
+#[cfg(target_os = "linux")]
+fn last_h_errno() -> c_int {
+    // SAFETY: `__h_errno_location` returns the calling thread's `h_errno`,
+    // valid for the thread's life.
+    let p = unsafe { __h_errno_location() };
+    // SAFETY: `p` points at a live, aligned `int` of this thread.
     unsafe { p.read() }
 }
 
@@ -619,7 +721,7 @@ pub(super) fn dn_expand(msg: &[u8], pos: usize, cap: usize) -> Option<(usize, Ve
     // libresolv reads only inside it and writes at most `size` bytes, no
     // more than `dst` holds, NUL included.
     let n = unsafe {
-        res_9_dn_expand(
+        dn_expand_c(
             range.start,
             range.end,
             tail.as_ptr(),
@@ -644,7 +746,7 @@ pub(super) fn dn_skipname(msg: &[u8], pos: usize) -> c_int {
     let range = tail.as_ptr_range();
     // SAFETY: `ptr..eom` is one live slice; libresolv reads only below
     // `eom`.
-    unsafe { res_9_dn_skipname(range.start, range.end) }
+    unsafe { dn_skipname_c(range.start, range.end) }
 }
 
 /// `gethostname(buf, sizeof(buf))` into a buffer of `size` bytes: the name
