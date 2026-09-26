@@ -1014,6 +1014,30 @@ pub trait ObjectHandlers: Send + Sync {
         let _ = (req, object, purpose);
         Ok(None)
     }
+
+    /// Whether the table's `get_properties` is not
+    /// `zend_std_get_properties` or its `get_properties_for` is set: the
+    /// class answers the reader of its properties itself, so its
+    /// property table is not what a reader sees. What
+    /// `spl_array_set_array` refuses an object as the backing of an
+    /// `ArrayObject` for; `false` at `Std`, and `true` for every table
+    /// that answers [`ObjectHandlers::get_properties_for`] for some
+    /// purpose, and for every table php sets either slot on.
+    ///
+    /// ```php
+    /// foreach ([new DateInterval('P1D'), new SplFixedArray(2), new stdClass] as $o) {
+    ///     try { @new ArrayObject($o); echo get_class($o), " backs\n"; }
+    ///     catch (InvalidArgumentException $e) { echo $e->getMessage(), "\n"; }
+    /// }
+    /// ```
+    /// ```expect
+    /// Overloaded object of type DateInterval is not compatible with ArrayObject
+    /// Overloaded object of type SplFixedArray is not compatible with ArrayObject
+    /// stdClass backs
+    /// ```
+    fn properties_overloaded(&self) -> bool {
+        false
+    }
 }
 
 /// `std_object_handlers`: every slot its default, the table a user

@@ -317,6 +317,10 @@ impl ObjectHandlers for Handlers {
         Ok(Some(i64::try_from(n).unwrap_or(i64::MAX)))
     }
 
+    fn properties_overloaded(&self) -> bool {
+        true
+    }
+
     fn get_properties_for(
         &self,
         req: &mut Request,

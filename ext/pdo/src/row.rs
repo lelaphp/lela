@@ -313,6 +313,10 @@ impl ObjectHandlers for Handlers {
         Ok(Some(out))
     }
 
+    fn properties_overloaded(&self) -> bool {
+        true
+    }
+
     /// `row_get_properties_for` under `ZEND_PROP_PURPOSE_DEBUG`: the
     /// statement's properties, then each column but one named
     /// `queryString`.

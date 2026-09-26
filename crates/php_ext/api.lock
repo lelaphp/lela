@@ -55,6 +55,7 @@ abi::ObjectHandlers::has_dimension
 abi::ObjectHandlers::has_property
 abi::ObjectHandlers::iterator_element
 abi::ObjectHandlers::method_receiver
+abi::ObjectHandlers::properties_overloaded
 abi::ObjectHandlers::read_dimension
 abi::ObjectHandlers::read_property
 abi::ObjectHandlers::unset_dimension
@@ -509,6 +510,7 @@ values::PhpObject::closure
 values::PhpObject::closure_bound
 values::PhpObject::debug_info
 values::PhpObject::entries
+values::PhpObject::handlers
 values::PhpObject::index
 values::PhpObject::instance_of
 values::PhpObject::is_lazy
@@ -523,11 +525,14 @@ values::PhpObject::prop
 values::PhpObject::props
 values::PhpObject::props_for
 values::PhpObject::protect
+values::PhpObject::row
 values::PhpObject::set_prop
+values::PhpObject::set_row
 values::PhpObject::set_slot
 values::PhpObject::slot
 values::PhpObject::unprotect
 values::PhpObject::unserialize_prop
+values::PhpObject::unset_row
 values::PhpRef
 values::PhpRef::as_value
 values::PhpRef::get

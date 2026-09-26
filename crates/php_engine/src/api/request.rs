@@ -41,6 +41,7 @@ use crate::output::Output;
 
 mod hooks;
 mod lazy;
+mod table;
 mod variables;
 
 pub(crate) use hooks::parent_hook_trampolines;

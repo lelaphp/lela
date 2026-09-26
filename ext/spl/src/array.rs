@@ -316,37 +316,39 @@ impl Table {
     /// protected and private rows left out, as `spl_array_skip_protected`
     /// leaves them.
     fn rows(self, req: &mut Request) -> Result<Vec<(Key, Value)>, Thrown> {
+        Ok(self
+            .every_row(req)?
+            .into_iter()
+            .filter(|(key, _)| !matches!(key, Key::Str(s) if s.as_bytes().starts_with(b"\0")))
+            .collect())
+    }
+
+    /// Every row, a property table's protected and private ones among
+    /// them under their mangled names: what `zend_array_dup` copies and
+    /// what `spl_array_get_properties_for` hands a cast; views.
+    fn every_row(self, req: &mut Request) -> Result<Vec<(Key, Value)>, Thrown> {
         match self {
             Table::Array(_, array) => Ok(array.snapshot_refs()),
-            Table::Props(object) => Ok(object
-                .props_for(req, PropertyPurpose::ArrayCast)?
-                .into_iter()
-                .filter(|(name, _)| !name.as_bytes().starts_with(b"\0"))
-                .map(|(name, value)| (Key::from_string(name), value))
-                .collect()),
+            Table::Props(object) => object.entries(req),
         }
     }
 
+    /// `zend_symtable_find_ind`, a view.
     fn get(self, req: &mut Request, key: &Key) -> Result<Option<Value>, Thrown> {
         match self {
             Table::Array(_, array) => Ok(array.get(key)),
-            Table::Props(object) => {
-                let name = key.to_prop_name(req)?;
-                Ok(object.prop(req, name.as_bytes()))
-            }
+            Table::Props(object) => object.row(req, key),
         }
     }
 
+    /// `zend_hash_update_ind`: `value` is the table's from here.
     fn set(self, req: &mut Request, key: Key, value: Value) -> Result<(), Thrown> {
         match self {
             Table::Array(owner, mut array) => {
                 array.set(req, key, value)?;
                 store(req, owner, array)
             }
-            Table::Props(object) => {
-                let name = key.to_prop_name(req)?;
-                Std.write_property(req, object, name, value)
-            }
+            Table::Props(object) => object.set_row(req, &key, value),
         }
     }
 
@@ -364,10 +366,7 @@ impl Table {
                 array.unset(req, key)?;
                 store(req, owner, array)
             }
-            Table::Props(object) => {
-                let name = key.to_prop_name(req)?;
-                Std.unset_property(req, object, name.as_bytes())
-            }
+            Table::Props(object) => object.unset_row(req, key),
         }
     }
 
@@ -378,13 +377,14 @@ impl Table {
         }
     }
 
-    /// The table as an array of its own, one owner, `zend_array_dup`.
+    /// The table as an array of its own, one owner, `zend_array_dup`:
+    /// a property table's every row, mangled names and all.
     fn copy(self, req: &mut Request) -> Result<PhpArray, Thrown> {
         match self {
             Table::Array(_, array) => array.copy(req),
             Table::Props(_) => {
                 let mut out = PhpArray::new(req)?;
-                for (key, value) in self.rows(req)? {
+                for (key, value) in self.every_row(req)? {
                     req.addref(&value);
                     out.set(req, key, value)?;
                 }
@@ -778,6 +778,10 @@ impl ObjectHandlers for Handlers {
         }
     }
 
+    fn properties_overloaded(&self) -> bool {
+        true
+    }
+
     fn get_properties_for(
         &self,
         req: &mut Request,
@@ -792,7 +796,7 @@ impl ObjectHandlers for Handlers {
         {
             return Ok(None);
         }
-        let rows = table(req, object)?.rows(req)?;
+        let rows = table(req, object)?.every_row(req)?;
         let mut out = Vec::with_capacity(rows.len());
         for (key, value) in rows {
             out.push((key.to_prop_name(req)?, value));
@@ -898,6 +902,21 @@ fn set_array(
                 Storage::Other(other)
             }
         } else {
+            if other.handlers(req).properties_overloaded() {
+                let (of, into) = (
+                    crate::class_name(req, other.class()),
+                    crate::class_name(req, object.class()),
+                );
+                return Err(throw(
+                    req,
+                    "InvalidArgumentException",
+                    &format!(
+                        "Overloaded object of type {} is not compatible with {}",
+                        String::from_utf8_lossy(&of),
+                        String::from_utf8_lossy(&into)
+                    ),
+                ));
+            }
             if crate::is_a(req, other.class(), b"UnitEnum") {
                 let class =
                     String::from_utf8_lossy(&crate::class_name(req, object.class())).into_owned();

@@ -278,6 +278,12 @@ fn entries_of(req: &Request, map: PhpObject) -> Option<PhpArray> {
 }
 
 impl ObjectHandlers for WeakMapHandlers {
+    /// `zend_weakmap_get_properties_for`, php's slot, which the debug
+    /// info serves here.
+    fn properties_overloaded(&self) -> bool {
+        true
+    }
+
     /// `zend_weakmap_free_obj` (`Z/Zend/zend_weakrefs.c:338`): every key
     /// unlisted without its entry being touched
     /// (`zend_weakrefs_hash_clean_ex`), then the entries released in
