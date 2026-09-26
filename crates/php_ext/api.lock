@@ -9,6 +9,7 @@ __private::case_of
 __private::case_value
 __private::class
 __private::class_new
+__private::entered
 __private::native_function
 __private::parameter
 __private::property
@@ -563,9 +564,11 @@ test::Engine::serve
 test::Engine::serve_capture
 test::Engine::serve_capture_as
 test::Engine::serve_capture_in
+test::Engine::serve_capture_traced_in
 test::Engine::startup_errors
 test::Engine::strip
 test::Engine::unit
+test::Entered
 values::ArrayIter
 values::ArrayIter::advance
 values::ArrayIter::key

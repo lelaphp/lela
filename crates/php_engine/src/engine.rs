@@ -1612,7 +1612,7 @@ impl Engine {
     /// Fatal error: The (unset) cast is no longer supported in %s on line 3
     /// ```
     pub fn serve(&self, description: RequestDescription, sink: &mut dyn OutputSink) -> Observables {
-        self.transaction(description, sink, Work::Serve)
+        self.transaction(description, sink, Work::Serve, false).0
     }
 
     /// `php_lint_script` under the CLI's `-l` (`Z/main/main.c:2779-2798`,
@@ -1624,7 +1624,7 @@ impl Engine {
     /// not, whatever the compiler warned of; the two sentences `do_cli`
     /// prints around it are the host's, read off that status.
     pub fn lint(&self, description: RequestDescription, sink: &mut dyn OutputSink) -> Observables {
-        self.transaction(description, sink, Work::Lint)
+        self.transaction(description, sink, Work::Lint, false).0
     }
 
     /// The CLI's `-s`, `PHP_CLI_MODE_HIGHLIGHT` (`Z/sapi/cli/php_cli.c:969-977`):
@@ -1637,14 +1637,15 @@ impl Engine {
         description: RequestDescription,
         sink: &mut dyn OutputSink,
     ) -> Observables {
-        self.transaction(description, sink, Work::Highlight)
+        self.transaction(description, sink, Work::Highlight, false)
+            .0
     }
 
     /// The CLI's `-w`, `PHP_CLI_MODE_STRIP` (`Z/sapi/cli/php_cli.c:963-968`):
     /// as [`Engine::highlight`], with the program written as `zend_strip`
     /// writes it.
     pub fn strip(&self, description: RequestDescription, sink: &mut dyn OutputSink) -> Observables {
-        self.transaction(description, sink, Work::Strip)
+        self.transaction(description, sink, Work::Strip, false).0
     }
 
     /// The one transaction behind [`Engine::serve`], [`Engine::lint`],
@@ -1655,7 +1656,8 @@ impl Engine {
         description: RequestDescription,
         sink: &mut dyn OutputSink,
         work: Work,
-    ) -> Observables {
+        traced: bool,
+    ) -> (Observables, Trace) {
         let source = description.source.clone();
         let cwd = description.cwd.clone();
         let script = description
@@ -1664,6 +1666,12 @@ impl Engine {
             .unwrap_or_else(|| b"Standard input code".to_vec());
         let web = description.is_web;
         let mut req = Request::new(Arc::clone(&self.shared), description);
+        #[cfg(feature = "witness-trace")]
+        if traced {
+            req.trace_natives();
+        }
+        #[cfg(not(feature = "witness-trace"))]
+        let _ = traced;
         if let Some(held) = sink.held() {
             req.hold(held);
         }
@@ -1741,7 +1749,7 @@ impl Engine {
     }
 
     /// `php_request_shutdown` and what the host is handed after it.
-    fn shutdown(&self, mut req: Request, sink: &mut dyn OutputSink) -> Observables {
+    fn shutdown(&self, mut req: Request, sink: &mut dyn OutputSink) -> (Observables, Trace) {
         // `php_request_shutdown`'s order (design §5.10): the shutdown
         // functions first, which is `php_call_shutdown_functions`; then
         // the destructors of what is still live, which is
@@ -1803,13 +1811,41 @@ impl Engine {
             Sink::Held(mut held) => held.flush(),
             Sink::Kept(kept) => kept.hand_to(sink),
         }
-        Observables {
-            exit_code,
-            headers_sent: true,
-            fatal,
-        }
+        // What the request entered, taken last, so a destructor or a
+        // shutdown function served above is in it.
+        #[cfg(feature = "witness-trace")]
+        let trace = req.take_trace();
+        #[cfg(not(feature = "witness-trace"))]
+        let trace = ();
+        (
+            Observables {
+                exit_code,
+                headers_sent: true,
+                fatal,
+            },
+            trace,
+        )
+    }
+
+    /// [`Engine::serve`] with the natives the request enters recorded
+    /// and handed back beside what it observed: the witness runner's
+    /// switch (harness §4.5 condition 2, revision 58).
+    #[cfg(feature = "witness-trace")]
+    pub(crate) fn serve_traced(
+        &self,
+        description: RequestDescription,
+        sink: &mut dyn OutputSink,
+    ) -> (Observables, Trace) {
+        self.transaction(description, sink, Work::Serve, true)
     }
 }
+
+/// What a transaction hands back beside its observables: the natives the
+/// request entered, under `witness-trace`, and nothing in any other build.
+#[cfg(feature = "witness-trace")]
+pub(crate) type Trace = Vec<crate::test::Entered>;
+#[cfg(not(feature = "witness-trace"))]
+pub(crate) type Trace = ();
 
 /// What a transaction is for once the request has started: the program
 /// served, linted, or written as `zend_highlight` or `zend_strip` writes

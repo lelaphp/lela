@@ -1125,6 +1125,12 @@ struct DirtyTemporary {
 pub struct Request {
     shared: Arc<Shared>,
     description: RequestDescription,
+    /// The natives the request has entered, in order, where the witness
+    /// runner asked for them (harness §4.5 condition 2, revision 58);
+    /// `None` records nothing. The field exists in a build with the
+    /// `witness-trace` feature alone, so the host's binary has none.
+    #[cfg(feature = "witness-trace")]
+    trace: Option<Vec<crate::test::Entered>>,
     heap: Heap,
     stack: VmStack,
     vm: Vm,
@@ -1758,6 +1764,8 @@ impl Request {
             // Read before `shared` moves in, as fields are in the order written.
             realpath_cache: RealpathCache::startup(&shared),
             shared,
+            #[cfg(feature = "witness-trace")]
+            trace: None,
             description,
             heap,
             stack,
@@ -4587,6 +4595,29 @@ impl Request {
     /// call reaches the host as the request makes it.
     pub(crate) fn hold(&mut self, held: Box<dyn OutputSink + Send>) {
         self.sink = Sink::Held(held);
+    }
+
+    /// Record the natives this request enters from here on, for the
+    /// witness runner (harness §4.5 condition 2, revision 58).
+    #[cfg(feature = "witness-trace")]
+    pub(crate) fn trace_natives(&mut self) {
+        self.trace = Some(Vec::new());
+    }
+
+    /// One native entered, where the request records them; what the
+    /// entry a macro expansion builds calls on its way in.
+    #[cfg(feature = "witness-trace")]
+    pub(crate) fn entered(&mut self, native: crate::test::Entered) {
+        if let Some(trace) = &mut self.trace {
+            trace.push(native);
+        }
+    }
+
+    /// The natives recorded, given up at the request's end; none where
+    /// nothing asked for them.
+    #[cfg(feature = "witness-trace")]
+    pub(crate) fn take_trace(&mut self) -> Vec<crate::test::Entered> {
+        self.trace.take().unwrap_or_default()
     }
 
     /// The sink the request wrote to, given back at its end: the held

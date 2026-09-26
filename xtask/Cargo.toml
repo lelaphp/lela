@@ -22,8 +22,10 @@ sha1_smol.workspace = true          # the digest of seams.toml this build is com
 # the oracle has and a crate the manifest marks `feature =` is held to its
 # witnesses on its merits (harness §7, revision 43); the `feature =` rows
 # name php's default build for the binary and the phpt lane alone.
+# `witness-trace` records the natives each fence enters, which is what
+# witness coverage counts (harness §4.5 condition 2, revision 58).
 php_bundle = { path = "../crates/php_bundle", features = [
-    "test",
+    "test", "witness-trace",
     "standard", "spl", "date", "reflection", "pcre", "mbstring", "session",
     "pdo", "dom", "random", "pdo_mysql", "filter", "tokenizer", "json",
     "openssl", "curl", "iconv", "pdo_sqlite", "ctype", "hash", "libxml",

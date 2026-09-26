@@ -354,14 +354,16 @@ fn a_kernel_or_native_without_a_witness_is_missing_and_fails_the_crate() {
 
 /// The natives the attributes declare, read with the oracle away so the
 /// coverage half is all that is judged (harness §4.5 condition 2,
-/// revision 57): the `anchor-missing` fixture's unwitnessed
-/// `#[php_function]` and the method no fence of its class calls are both
-/// `missing`, and the plain `pub fn` beside them is no subject; in
-/// `anchor-covered`, a class fence on the header and one on the member
-/// impl cover the methods they call, and the body-less alias is no
-/// subject.
+/// revision 58): the subjects are the attribute-declared `fn`s and the
+/// methods with a body, the plain `pub fn` beside them and the body-less
+/// alias none. Coverage is what a fence's run through the linked engine
+/// entered, and a fixture's natives are linked into no engine, so no fence
+/// enters one and every subject reads `missing`, however its fences spell
+/// the calls: a spelling covers nothing. The covered case needs a native
+/// an engine links, held by `anchor`'s unit tests over a trace in the
+/// expansion's own names and by `php_bundle`'s traced parity test.
 #[test]
-fn the_attributes_declare_the_natives_and_a_class_fence_covers_what_it_calls() {
+fn the_attributes_declare_the_natives_and_a_fence_covers_only_what_it_ran() {
     let coverage = |name: &str| {
         let root = fixture_at("witness", name);
         let mut manifest = Manifest::load(&root).unwrap();
@@ -384,16 +386,20 @@ fn the_attributes_declare_the_natives_and_a_class_fence_covers_what_it_calls() {
     let missing = coverage("anchor-missing");
     assert_eq!(missing.status, Status::Fail, "{missing:#?}");
     assert_eq!(count(&missing, "subjects"), 4, "{missing:#?}");
-    assert_eq!(count(&missing, "missing"), 2, "{missing:#?}");
+    assert_eq!(count(&missing, "missing"), 4, "{missing:#?}");
     for name in ["fn preg_last_error", "fn Pattern::replace"] {
         assert!(missing.message.contains(name), "{}", missing.message);
     }
     assert!(!missing.message.contains("helper"), "{}", missing.message);
 
-    let covered = coverage("anchor-covered");
-    assert_ne!(covered.status, Status::Fail, "{covered:#?}");
-    assert_eq!(count(&covered, "subjects"), 3, "{covered:#?}");
-    assert_eq!(count(&covered, "missing"), 0, "{covered:#?}");
+    let spelled = coverage("anchor-covered");
+    assert_eq!(spelled.status, Status::Fail, "{spelled:#?}");
+    assert_eq!(count(&spelled, "subjects"), 3, "{spelled:#?}");
+    assert_eq!(
+        count(&spelled, "missing"),
+        3,
+        "a fence that spells a call to a native no engine links covers nothing: {spelled:#?}"
+    );
 }
 
 /// The negative control of the regime a fence may name (harness §4.1, §8,

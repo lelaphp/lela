@@ -123,9 +123,9 @@ fn the_reading_is_the_unresolved_rows_at_the_crate_the_lock_lives_with() {
     assert_eq!(reading.instrument, port_map::INSTRUMENT);
     assert_eq!(reading.scope, "php_ext");
     assert_eq!(reading.numbers["rows"], 651.into());
-    assert_eq!(reading.numbers["same"], 162.into());
-    assert_eq!(reading.numbers["renamed"], 339.into());
-    assert_eq!(reading.numbers["gone"], 150.into());
+    assert_eq!(reading.numbers["same"], 160.into());
+    assert_eq!(reading.numbers["renamed"], 340.into());
+    assert_eq!(reading.numbers["gone"], 151.into());
     assert_eq!(reading.numbers["unmatched"], 0.into());
     assert_eq!(reading.numbers["unresolved"], 651.into());
     assert!(!reading.commit.is_empty(), "stamped: {reading:?}");

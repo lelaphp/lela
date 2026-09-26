@@ -6,19 +6,28 @@
 //! body-less member, an interface or abstract method or an
 //! `implementation =` alias, declares none either.
 //!
-//! A function carries its own witness. A method carries its own, or is
-//! covered by a fence of its class, on the header or on a member impl,
-//! that calls it by name (`->name(`, `::name(`). A crate whose covered
-//! sources declare no attribute is counted by [`super::fence::Subject`]'s
-//! older sentence, so the anchor moves coverage one crate at a time as
-//! natives move onto the attributes.
+//! A native is covered by what a fence ran, not by what its text spells
+//! (revision 58): a fence of its own, or for a method a fence of its
+//! class on the header or on a member impl, whose run through the linked
+//! engine entered it. The entry a `php_macros` expansion builds records
+//! itself under `php_engine`'s `witness-trace` feature, named as this scan
+//! names it: the crate's package, the `#[php_class]` type or none, the
+//! identifier. So `new C(`, `foreach`, `(string)`, `[]` and `count()`
+//! cover the methods php calls through them, and a fence that names a
+//! method it never reaches covers nothing. A crate whose covered sources
+//! declare no attribute is counted by [`super::fence::Subject`]'s older
+//! sentence, so the anchor moves coverage one crate at a time as natives
+//! move onto the attributes.
 //!
 //! The scan is textual over the source with its comments and literals
 //! blanked ([`rust::without_comments_or_literals`]), which keeps offsets
 //! and lines; the attribute's path is read as written, its last segment
 //! naming it (`#[php_function]`, `#[php_ext::attr::php_function]`).
 
+use std::collections::HashMap;
 use std::path::Path;
+
+use php_bundle::test::Entered;
 
 use super::fence::{Subject, Witness};
 use crate::rust;
@@ -49,25 +58,77 @@ impl Anchor {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Declared {
     /// A `fn` under `#[php_function]`.
-    Function,
+    Function { name: String },
     /// A method with a body in a `#[php_class]` impl of `class`.
     Method { class: String, name: String },
 }
 
-/// One native the attributes declare, before its class's fences are read.
+impl Declared {
+    /// Whether a traced entry is this native: the expansion names a
+    /// function with no owner and a method by its impl's type, each by
+    /// its identifier with `r#` stripped.
+    fn is(&self, entered: &Entered) -> bool {
+        match self {
+            Declared::Function { name } => entered.owner.is_none() && entered.name == name,
+            Declared::Method { class, name } => {
+                entered.owner == Some(class.as_str()) && entered.name == name
+            }
+        }
+    }
+}
+
+/// One native the attributes declare, with the ids of its own fences.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Native {
     subject: Subject,
     declared: Declared,
+    own: Vec<String>,
 }
 
 /// What the attributes of one crate's covered sources declare.
 #[derive(Debug, Clone, Default)]
 pub(super) struct Anchored {
     natives: Vec<Native>,
-    /// Each snippet on a `#[php_class]` header or member impl, beside its
-    /// class's name.
+    /// The id of each fence on a `#[php_class]` header or member impl,
+    /// beside its class's name.
     class_fences: Vec<(String, String)>,
+}
+
+/// A crate whose natives stand on the attributes: what they declare, and
+/// the cargo package their entries name themselves by.
+#[derive(Debug, Clone)]
+pub(crate) struct Coverage {
+    pub(super) package: String,
+    pub(super) anchored: Anchored,
+}
+
+impl Coverage {
+    /// The subjects, each witnessed where a fence it may be covered by
+    /// entered it, by what each fence's run entered keyed by its id.
+    pub(super) fn subjects(&self, entered: &HashMap<String, Vec<Entered>>) -> Vec<Subject> {
+        self.anchored.subjects(&Traced {
+            package: &self.package,
+            entered,
+        })
+    }
+}
+
+/// What each fence's run through the linked engine entered, by the
+/// fence's id, for the crate whose package is `package`.
+pub(super) struct Traced<'a> {
+    pub(super) package: &'a str,
+    pub(super) entered: &'a HashMap<String, Vec<Entered>>,
+}
+
+impl Traced<'_> {
+    /// Whether the fence `id` entered `native` of this crate.
+    fn entered(&self, id: &str, native: &Declared) -> bool {
+        self.entered.get(id).is_some_and(|entered| {
+            entered
+                .iter()
+                .any(|e| e.krate == self.package && native.is(e))
+        })
+    }
 }
 
 impl Anchored {
@@ -77,37 +138,37 @@ impl Anchored {
         self.class_fences.extend(other.class_fences);
     }
 
-    /// The subjects coverage counts: nothing where no attribute declares a
-    /// native, and the older count stands; otherwise one per native, a
-    /// method witnessed where a fence of its class calls it.
-    pub(super) fn subjects(self) -> Option<Vec<Subject>> {
-        if self.natives.is_empty() {
-            return None;
-        }
-        let fences = self.class_fences;
-        let subjects = self
-            .natives
-            .into_iter()
+    /// Whether any native stands on the attributes, so the anchor and not
+    /// the older count is what coverage reads.
+    pub(super) fn declares(&self) -> bool {
+        !self.natives.is_empty()
+    }
+
+    /// The subjects coverage counts, one per native, each witnessed where
+    /// a fence of its own, or for a method one of its class's, entered it
+    /// when the linked engine ran the fence.
+    pub(super) fn subjects(&self, traced: &Traced<'_>) -> Vec<Subject> {
+        self.natives
+            .iter()
             .map(|native| {
-                let mut subject = native.subject;
-                if let Declared::Method { class, name } = &native.declared {
-                    subject.witnessed |= fences
+                let mut subject = native.subject.clone();
+                let class = match &native.declared {
+                    Declared::Method { class, .. } => Some(class),
+                    Declared::Function { .. } => None,
+                };
+                let eligible = native.own.iter().chain(
+                    self.class_fences
                         .iter()
-                        .filter(|(of, _)| of == class)
-                        .any(|(_, snippet)| calls(snippet, name));
-                }
+                        .filter(|(of, _)| Some(of) == class)
+                        .map(|(_, id)| id),
+                );
+                subject.witnessed = eligible
+                    .into_iter()
+                    .any(|id| traced.entered(id, &native.declared));
                 subject
             })
-            .collect();
-        Some(subjects)
+            .collect()
     }
-}
-
-/// Whether a snippet calls a method by name.
-fn calls(snippet: &str, name: &str) -> bool {
-    ["->", "::"]
-        .iter()
-        .any(|via| snippet.contains(&format!("{via}{name}(")))
 }
 
 /// Every native the attributes in one file declare, and every fence on a
@@ -163,8 +224,11 @@ pub(super) fn scan(file: &Path, text: &str, witnesses: &[Witness]) -> Anchored {
                     "fn" => {
                         let name = scanner.identifier().unwrap_or_default().to_owned();
                         let member = classes.last().filter(|(members, _)| *members == depth);
+                        let name = name.strip_prefix("r#").unwrap_or(&name).to_owned();
                         let declared = match (pending, member) {
-                            (Some(Anchor::Function), _) => Some(Declared::Function),
+                            (Some(Anchor::Function), _) => {
+                                Some(Declared::Function { name: name.clone() })
+                            }
                             (_, Some((_, class))) if scanner.has_body() => Some(Declared::Method {
                                 class: class.clone(),
                                 name: name.clone(),
@@ -173,7 +237,7 @@ pub(super) fn scan(file: &Path, text: &str, witnesses: &[Witness]) -> Anchored {
                         };
                         if let Some(declared) = declared {
                             let shown = match &declared {
-                                Declared::Function => format!("fn {name}"),
+                                Declared::Function { .. } => format!("fn {name}"),
                                 Declared::Method { class, .. } => format!("fn {class}::{name}"),
                             };
                             out.natives.push(Native {
@@ -181,9 +245,10 @@ pub(super) fn scan(file: &Path, text: &str, witnesses: &[Witness]) -> Anchored {
                                     file: file.to_path_buf(),
                                     line: line + 1,
                                     name: shown,
-                                    witnessed: own().next().is_some(),
+                                    witnessed: false,
                                 },
                                 declared,
+                                own: own().map(Witness::id).collect(),
                             });
                         }
                         pending = None;
@@ -195,7 +260,7 @@ pub(super) fn scan(file: &Path, text: &str, witnesses: &[Witness]) -> Anchored {
                             scanner.identifier().unwrap_or_default().to_owned()
                         };
                         out.class_fences
-                            .extend(own().map(|w| (class.clone(), w.snippet.clone())));
+                            .extend(own().map(|w| (class.clone(), w.id())));
                         if word == "impl" {
                             classes.push((depth + 1, class));
                         }
@@ -380,50 +445,120 @@ mod tests {
     use super::*;
     use crate::witness::fence;
 
-    fn subjects(text: &str) -> Option<Vec<Subject>> {
+    const PACKAGE: &str = "php_ext_fixture";
+
+    /// A native as the fixture crate's expansion would record it.
+    fn native(owner: Option<&'static str>, name: &'static str) -> Entered {
+        Entered {
+            krate: PACKAGE,
+            owner,
+            name,
+        }
+    }
+
+    /// The subjects of `text`, each fence's run having entered what
+    /// `trace` gives it: the fence whose snippet contains the first half.
+    fn subjects(text: &str, trace: &[(&str, Vec<Entered>)]) -> Option<Vec<Subject>> {
         let file = Path::new("ext/fixture/src/lib.rs");
         let found = fence::extract(file, text);
-        scan(file, text, &found.witnesses).subjects()
+        let anchored = scan(file, text, &found.witnesses);
+        if !anchored.declares() {
+            return None;
+        }
+        let entered: HashMap<String, Vec<Entered>> = found
+            .witnesses
+            .iter()
+            .map(|w| {
+                let natives = trace
+                    .iter()
+                    .filter(|(marker, _)| w.snippet.contains(marker))
+                    .flat_map(|(_, natives)| natives.iter().copied())
+                    .collect();
+                (w.id(), natives)
+            })
+            .collect();
+        let coverage = Coverage {
+            package: PACKAGE.to_owned(),
+            anchored,
+        };
+        Some(coverage.subjects(&entered))
+    }
+
+    fn shown(found: &[Subject]) -> Vec<(&str, bool)> {
+        found
+            .iter()
+            .map(|s| (s.name.as_str(), s.witnessed))
+            .collect()
     }
 
     const WITNESS: &str = "/// ```php\n/// echo 1;\n/// ```\n/// ```expect\n/// 1\n/// ```\n";
 
     #[test]
     fn a_file_with_no_attribute_leaves_the_older_count_standing() {
-        assert_eq!(subjects(&format!("{WITNESS}pub fn native() {{}}\n")), None);
+        assert!(subjects(&format!("{WITNESS}pub fn native() {{}}\n"), &[]).is_none());
     }
 
     #[test]
-    fn a_function_under_the_attribute_is_one_subject_at_any_path_and_indentation() {
+    fn a_function_is_covered_by_its_own_fence_where_the_run_entered_it() {
         let text = format!(
-            "mod inner {{\n    {}    #[php_ext::attr::php_function]\n    pub(crate) fn witnessed() {{}}\n    #[php_function(arity = manual)]\n    fn bare() {{}}\n}}\npub fn helper() {{}}\n",
-            WITNESS.replace("///", "    ///")
+            "mod inner {{\n    {}    #[php_ext::attr::php_function]\n    pub(crate) fn witnessed() {{}}\n    #[php_function(arity = manual)]\n    fn bare() {{}}\n    {}    #[php_function]\n    fn r#type() {{}}\n}}\npub fn helper() {{}}\n",
+            WITNESS.replace("///", "    ///"),
+            WITNESS
+                .replace("echo 1", "echo 2")
+                .replace("///", "    ///"),
         );
-        let found = subjects(&text).expect("the attribute declares natives");
-        let shown: Vec<(&str, bool)> = found
-            .iter()
-            .map(|s| (s.name.as_str(), s.witnessed))
-            .collect();
-        assert_eq!(shown, [("fn witnessed", true), ("fn bare", false)]);
-        assert_eq!(found[1].line, 11);
-    }
-
-    #[test]
-    fn a_class_fence_covers_the_methods_it_calls_and_no_other() {
-        let text = "/// ```php\n/// $c = new C; $c->used(1); C::also();\n/// ```\n/// ```expect\n/// ```\n#[php_class]\npub struct C;\n\n#[php_class]\nimpl C {\n    const X: i64 = 1;\n    fn used(this: This<Self>, n: i64) -> i64 { let s = \"}\"; n }\n    fn also() {}\n    fn unused(this: This<Self>) {}\n    fn alias(this: This<Self>);\n}\n";
-        let found = subjects(text).expect("the attribute declares natives");
-        let shown: Vec<(&str, bool)> = found
-            .iter()
-            .map(|s| (s.name.as_str(), s.witnessed))
-            .collect();
+        let trace = [
+            ("echo 1", vec![native(None, "witnessed")]),
+            ("echo 2", vec![native(None, "type")]),
+        ];
+        let found = subjects(&text, &trace).expect("the attribute declares natives");
         assert_eq!(
-            shown,
+            shown(&found),
             [
-                ("fn C::used", true),
-                ("fn C::also", true),
-                ("fn C::unused", false)
+                ("fn witnessed", true),
+                ("fn bare", false),
+                ("fn type", true)
             ]
         );
+        assert_eq!(found[1].line, 11);
+        let untraced = subjects(&text, &[]).expect("the attribute declares natives");
+        assert!(
+            untraced.iter().all(|s| !s.witnessed),
+            "a fence of its own that did not enter it covers nothing"
+        );
+    }
+
+    #[test]
+    fn a_class_fence_covers_what_its_run_entered_and_nothing_it_only_names() {
+        // The constructor is reached through `new C(` alone, and `never`
+        // is named by the fence, which throws before reaching it.
+        let text = "/// ```php\n/// $c = new C(1); $c->used(1); throw new Exception; $c->never();\n/// ```\n/// ```expect\n/// ```\n#[php_class]\npub struct C;\n\n#[php_class]\nimpl C {\n    const X: i64 = 1;\n    fn __construct(this: This<Self>, n: i64) { let s = \"}\"; }\n    fn used(this: This<Self>, n: i64) -> i64 { n }\n    fn never(this: This<Self>) {}\n    fn alias(this: This<Self>);\n}\n";
+        let trace = [(
+            "new C(1)",
+            vec![native(Some("C"), "__construct"), native(Some("C"), "used")],
+        )];
+        let found = subjects(text, &trace).expect("the attribute declares natives");
+        assert_eq!(
+            shown(&found),
+            [
+                ("fn C::__construct", true),
+                ("fn C::used", true),
+                ("fn C::never", false)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_method_entered_only_by_another_class_or_another_crate_is_not_covered() {
+        let text = "/// ```php\n/// new A;\n/// ```\n/// ```expect\n/// ```\n#[php_class]\nimpl A {\n    fn go(this: This<Self>) {}\n}\n#[php_class]\nimpl B {\n    fn go(this: This<Self>) {}\n}\n";
+        let elsewhere = Entered {
+            krate: "php_ext_other",
+            owner: Some("A"),
+            name: "go",
+        };
+        let trace = [("new A", vec![native(Some("B"), "go"), elsewhere])];
+        let found = subjects(text, &trace).expect("the attribute declares natives");
+        assert_eq!(shown(&found), [("fn A::go", false), ("fn B::go", false)]);
     }
 
     #[test]
@@ -432,13 +567,13 @@ mod tests {
             "#[php_class(extends = Base)]\npub enum Suit {{ Hearts }}\n#[php_class]\nimpl<'a> Trait for crate::Suit {{\n{}    fn label(this: This<Self>) {{}}\n}}\n",
             WITNESS.replace("///", "    ///")
         );
-        let found = subjects(&text).expect("the attribute declares natives");
+        let trace = [("echo 1", vec![native(Some("Suit"), "label")])];
+        let found = subjects(&text, &trace).expect("the attribute declares natives");
         assert_eq!(found.len(), 1, "{found:#?}");
         assert_eq!(found[0].name, "fn Suit::label");
         assert!(found[0].witnessed);
-        assert_eq!(
-            subjects("#[php_class]\npub struct Only;\n"),
-            None,
+        assert!(
+            subjects("#[php_class]\npub struct Only;\n", &[]).is_none(),
             "a header declares no native"
         );
     }

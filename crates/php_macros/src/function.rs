@@ -5,6 +5,7 @@
 
 use proc_macro2::{Ident, TokenStream as Tokens, TokenTree};
 use quote::quote;
+use syn::ext::IdentExt;
 use syn::parse::Parser;
 use syn::spanned::Spanned;
 use syn::{FnArg, ItemFn, Pat, ReturnType, Type};
@@ -193,11 +194,31 @@ pub(crate) fn checks(signature: &Signature, class: Option<&Ident>) -> Vec<Tokens
     out
 }
 
-/// The entry's reads: the arity, then each argument held at its position,
-/// its default evaluated where the call gave none. `scope` names the
-/// declaring class for a default that reads `self::`.
-pub(crate) fn prologue(params: &[Param], scope: &Tokens, manual: bool) -> Tokens {
+/// The entry's reads: the native recorded as entered, then the arity,
+/// then each argument held at its position, its default evaluated where
+/// the call gave none. `scope` names the declaring class for a default
+/// that reads `self::`; `site` is the native as the source names it, its
+/// `#[php_class]` type or none and its identifier, which `xtask witness`
+/// reads a fence's coverage by (harness §4.5 condition 2, revision 58).
+pub(crate) fn prologue(
+    params: &[Param],
+    scope: &Tokens,
+    manual: bool,
+    site: (Option<&Ident>, &Ident),
+) -> Tokens {
     let root = root();
+    let (owner, name) = site;
+    let owner = owner.map_or_else(
+        || quote!(None),
+        |owner| {
+            let owner = owner.unraw().to_string();
+            quote!(Some(#owner))
+        },
+    );
+    let name = name.unraw().to_string();
+    let entered = quote! {
+        #root::__private::entered(__request, ::core::env!("CARGO_CRATE_NAME"), #owner, #name);
+    };
     let arity = if manual {
         quote!()
     } else {
@@ -249,6 +270,7 @@ pub(crate) fn prologue(params: &[Param], scope: &Tokens, manual: bool) -> Tokens
         }
     });
     quote! {
+        #entered
         #arity
         #(#reads)*
     }
@@ -291,7 +313,7 @@ pub(crate) fn expand(attribute: Tokens, item: Tokens) -> syn::Result<Tokens> {
     let ident = function.sig.ident.clone();
     let manual = manual(&keys)?;
     let parameters = declared_parameters(&signature.params)?;
-    let prologue = prologue(&signature.params, &quote!(None), manual);
+    let prologue = prologue(&signature.params, &quote!(None), manual, (None, &ident));
     let output = &signature.output;
     let arguments: Vec<&Ident> = signature.params.iter().map(|param| &param.ident).collect();
     let request = signature.request.then(|| quote!(__request,));
