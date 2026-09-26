@@ -14441,8 +14441,8 @@ impl Request {
         self.description.script_name.as_deref()
     }
 
-    /// The request body as a stream, `php://stdin`, which is what the
-    /// CLI's `STDIN` constant holds: the body as the description
+    /// `php://stdin`, which is what the CLI's `STDIN` constant holds: the
+    /// host's fd 0 where it handed one, else the body as the description
     /// carries it, read whole until #544 reads it lazily.
     pub fn stdin(&mut self) -> Result<Option<Stream>, Thrown> {
         self.open_stream(b"php://stdin", b"r", false)

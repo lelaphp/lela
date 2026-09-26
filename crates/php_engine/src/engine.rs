@@ -68,7 +68,8 @@ pub struct RequestDescription {
 ///
 /// What is written to the streams goes to the sink, `STDOUT` past the
 /// `php_output` layer and `STDERR` onto its error stream (design
-/// revision 16), and `STDIN` reads the request's body. The fds are what
+/// revision 16), and `STDIN` reads the host's fd 0 as php's CLI reads
+/// it, through the plain file's kind over a copy. The fds are what
 /// `fstat` and `ftruncate` on the three ask, as php's `STDIO` kind asks
 /// `fstat(2)` and `ftruncate(2)` of fds 0, 1 and 2; a host with no fd for
 /// one of them hands `None`, which `fstat(2)` and `ftruncate(2)` answer

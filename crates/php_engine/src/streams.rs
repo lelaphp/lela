@@ -26,8 +26,7 @@
 //! spills to a file past its `PHP_STREAM_MAX_MEM`, and the plain files
 //! wrapper opens directories as `php_plain_files_dirstream_ops`.
 //!
-//! What is not here: the lazy body under `php://stdin` and `php://input`
-//! (#544), `php://fd/` and `php://filter/`, the filter chains, and the
+//! What is not here: the lazy body under `php://input` (#544), `php://fd/` and `php://filter/`, the filter chains, and the
 //! read buffer's `DETECT_EOL` arm.
 
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -1053,8 +1052,8 @@ const S_IFREG: i64 = 0o100_000;
 /// which of the three ways it was opened. The label is `MEMORY` for
 /// `php://memory`; `php://input` reads the request's body through the
 /// same bytes under the label of the kind php reads it with, and
-/// `php://stdin` through [`HostFd`], since nothing in the engine reads a
-/// body lazily yet (#544).
+/// `php://stdin` through [`HostFd`] under a host that handed no fd 0,
+/// since nothing in the engine reads a body lazily yet (#544).
 struct Memory {
     data: Vec<u8>,
     fpos: usize,
@@ -1862,9 +1861,10 @@ pub(crate) enum Standard {
 /// What is read and written is the host's sink and body, not the fds:
 /// fd 1 is the body the sink is handed, past the `php_output` layer
 /// (`sapi_cli_ub_write`, since php's CLI writes both to the one fd), fd 2
-/// is the sink's error stream (design revision 16), and fd 0 is the
-/// request's body read whole until #544 reads it lazily. Reading fd 1 or
-/// fd 2 is the `EBADF` a write-only fd answers.
+/// is the sink's error stream (design revision 16), and fd 0, under a
+/// host that handed none, is the request's body read whole; a host that
+/// handed its fd 0 has `php://stdin` read it ([`stdin_open`]). Reading
+/// fd 1 or fd 2 is the `EBADF` a write-only fd answers.
 ///
 /// `fstat` and `ftruncate` are `fstat(2)` and `ftruncate(2)` of the fd
 /// the host handed under the stream ([`crate::engine::FileHandles`]):
@@ -1884,7 +1884,7 @@ pub(crate) enum Standard {
 /// bool(false)
 /// ```
 enum HostFd {
-    /// fd 0, over the body it reads.
+    /// fd 0 under a host that handed none, over the body it reads.
     Stdin(Memory),
     Stdout,
     Stderr,
@@ -2206,10 +2206,9 @@ fn php_open(
         }
         // Each a pipe or a terminal under the CLI, which
         // `detect_is_seekable` says does not seek.
+        b"stdin" if for_include_refused(req) => return Ok(Err(String::from("operation failed"))),
+        b"stdin" if req.host_fd(Standard::Stdin).is_some() => return stdin_open(req, mode),
         b"stdin" | b"stdout" | b"stderr" => {
-            if lower == b"stdin" && for_include_refused(req) {
-                return Ok(Err(String::from("operation failed")));
-            }
             let kind = match lower.as_slice() {
                 b"stdin" => HostFd::Stdin(Memory {
                     data: req.body_bytes().to_vec(),
@@ -2391,6 +2390,42 @@ fn fd_open(req: &mut Request, digits: &[u8], mode: &[u8]) -> Result<Opened, Thro
         FdStream::File { mode }
     };
     Ok(Ok(req.stream_from_fd(fd, kind)?))
+}
+
+/// `php://stdin` under a host that handed its fd 0
+/// (`Z/ext/standard/php_fopen_wrapper.c:238-256`): `php_stream_fopen_from_fd`
+/// over a copy of it, the plain file's kind, so a read waits on the fd
+/// as `read(2)` does and answers what the process at its other end has
+/// sent so far, `stream_set_blocking` sets `O_NONBLOCK` on it, and
+/// `stream_select` waits on it. What php's CLI reads its `STDIN` from is
+/// the process's fd 0 and never the host's request body, which is
+/// `php://input`'s. A child that reads its `STDIN` to the end before it
+/// writes, as `proc_open`'s tests start one, reads what its parent wrote
+/// and not the empty body. Under a test runner fd 0 is a pipe or
+/// `/dev/null` that ends at once:
+///
+/// ```php
+/// var_dump(stream_set_blocking(STDIN, false), fread(STDIN, 5), feof(STDIN));
+/// $r = [STDIN]; $w = $e = null;
+/// var_dump(stream_select($r, $w, $e, 0));
+/// $m = stream_get_meta_data(STDIN); unset($m['uri']); echo json_encode($m), "\n";
+/// ```
+/// ```expect
+/// bool(true)
+/// string(0) ""
+/// bool(true)
+/// int(1)
+/// {"timed_out":false,"blocked":false,"eof":true,"wrapper_type":"PHP","stream_type":"STDIO","mode":"rb","unread_bytes":0,"seekable":false}
+/// ```
+fn stdin_open(req: &mut Request, mode: &[u8]) -> Result<Opened, Thrown> {
+    let duped = req.host_fd(Standard::Stdin).map_or_else(
+        || Err(std::io::Error::from_raw_os_error(EBADF)),
+        |fd| fd.try_clone_to_owned(),
+    );
+    match duped {
+        Ok(fd) => Ok(Ok(req.stream_from_fd(fd, FdStream::File { mode })?)),
+        Err(error) => Ok(Err(strerror(&error))),
+    }
 }
 
 /// `ZEND_STRTOL(path, NULL, 10)`: leading white space, a sign and the
