@@ -1325,10 +1325,25 @@ fn doctype_name(req: &mut Request, object: PhpObject) -> Read {
     some(string(req, &node.name())?)
 }
 
-/// `dom_get_dtd_namednodemap_ce`: `Dom\DtdNamedNodeMap` for the modern
-/// classes.
-fn dtd_map_class(req: &Request, object: PhpObject) -> &'static str {
-    if follows_spec(req, object) {
+/// `dom_get_dtd_namednodemap_ce(instanceof_function(obj->std.ce,
+/// dom_modern_documenttype_class_entry))`: `Dom\DtdNamedNodeMap` for a
+/// `Dom\DocumentType`, whether or not a document holds it.
+///
+/// ```php
+/// $t = (new Dom\Implementation)->createDocumentType('html', 'p', 's');
+/// $d = new DOMDocument;
+/// $d->loadXML('<!DOCTYPE r><r/>');
+/// echo get_class($t->entities), ' ', get_class($t->notations), ' ', get_class($d->doctype->entities), "\n";
+/// ```
+/// ```expect
+/// Dom\DtdNamedNodeMap Dom\DtdNamedNodeMap DOMNamedNodeMap
+/// ```
+fn dtd_map_class(req: &mut Request, object: PhpObject) -> &'static str {
+    let modern = php_ext::call::lookup_class(req, b"Dom\\DocumentType")
+        .ok()
+        .flatten()
+        .is_some_and(|class| crate::class_extends(req, object.class(), class));
+    if modern {
         "Dom\\DtdNamedNodeMap"
     } else {
         "DOMNamedNodeMap"
