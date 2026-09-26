@@ -10,13 +10,14 @@
 //! the subsets and the reading are `phpt`'s; this is the per-item judge it
 //! contributes.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use regex_lite::Regex;
 
-use super::file::Phpt;
+use super::file::{self, Phpt};
 use super::{Judged, Judgement, Lane, Subset};
 use crate::divergence::Registry;
 use crate::oracle::expect::Expectation;
@@ -24,6 +25,7 @@ use crate::oracle::{
     self, Invocation, Observation, Oracle, PastLimit, Pin, Program, Verdict as Compared,
 };
 use crate::scratch::Tree;
+use crate::tally::Apart;
 
 /// The fresh-process adapter of design §8's `ScriptExec` seam, bound to
 /// one run: the oracle and the registry, the binary it runs, the tier lane
@@ -152,7 +154,7 @@ impl<'a> Adapter<'a> {
         test: &Path,
         ini: &[String],
     ) -> Result<Result<Vec<u8>, (Judgement, String)>> {
-        let program = test.with_extension("php");
+        let program = beside(test, None);
         if program.exists() {
             return Ok(Err((
                 Judgement::Bork,
@@ -199,7 +201,7 @@ impl<'a> Adapter<'a> {
     /// `SKIPIF` that asks what the engine has is answered here by php; it
     /// is the runner's one known difference from upstream's verdicts.
     fn run_section(&self, test: &Path, kind: &str, body: &[u8]) -> Result<Observation> {
-        let program = test.with_extension(format!("{kind}.php"));
+        let program = beside(test, Some(kind));
         let written = Written::new(&program, body)?;
         let out = self
             .oracle
@@ -226,6 +228,28 @@ impl<'a> Adapter<'a> {
             missing.join(", ")
         ))
     }
+}
+
+/// Where a test's run writes a file beside it, as upstream does: its
+/// program at `x.php`, and a section run beside it at `x.skip.php` or
+/// `x.clean.php`.
+fn beside(test: &Path, kind: Option<&str>) -> PathBuf {
+    test.with_extension(kind.map_or_else(|| "php".to_owned(), |kind| format!("{kind}.php")))
+}
+
+/// What a test may not run beside: alone where its conflict keys name
+/// `all`, as upstream has it (run-tests.php:1365-1370), and otherwise its
+/// keys and the three files its run writes beside it, so no two tests
+/// whose files would stand at one path run at once.
+pub(super) fn apart(test: &Path, dirs: &mut BTreeMap<PathBuf, Vec<String>>) -> Apart {
+    let mut keys = file::conflicts(test, dirs);
+    if keys.iter().any(|key| key == "all") {
+        return Apart::Alone;
+    }
+    keys.extend(
+        [None, Some("skip"), Some("clean")].map(|kind| beside(test, kind).display().to_string()),
+    );
+    Apart::Keys(keys)
 }
 
 /// The extensions a binary loads under the recipe, as upstream asks for

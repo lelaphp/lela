@@ -14,6 +14,7 @@
 //! the subsets they resolve being a fixture tree's.
 
 use std::fs;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 use super::*;
@@ -114,6 +115,7 @@ fn run(subset: &Subset, registry: &Registry) -> Tally {
         runner: &Runner::Engine(binary),
         lane: None,
         oracle_absent: None,
+        jobs: crate::tally::cores(),
     };
     run_subset(&oracle, registry, subset, under).unwrap()
 }
@@ -176,6 +178,7 @@ fn the_digest_is_asserted_once_over_a_run_of_three_tests() {
         runner: &Runner::Engine(binary),
         lane: None,
         oracle_absent: None,
+        jobs: crate::tally::cores(),
     };
     let tally = run_subset(&oracle, &registry(""), &subset, under).unwrap();
     assert_eq!(tally.judged.len(), 3, "{tally:#?}");
@@ -250,6 +253,7 @@ fn a_program_past_the_recipes_limit_fails_its_test_and_the_lane_goes_on() {
         runner: &Runner::Engine(binary),
         lane: None,
         oracle_absent: None,
+        jobs: crate::tally::cores(),
     };
     let tally = run_subset(&oracle, &registry(""), &subset, under).unwrap();
     let went: Vec<(&str, Judgement)> = tally
@@ -649,6 +653,7 @@ fn a_pinned_php_not_on_this_machine_runs_nothing_and_asserts_no_digest() {
         runner: &engine,
         lane: None,
         oracle_absent: Some(&why),
+        jobs: crate::tally::cores(),
     };
     let tally = run_subset(&oracle, &registry(""), &subset, under).unwrap();
     assert!(tally.judged.is_empty(), "{tally:#?}");
@@ -787,4 +792,152 @@ fn a_subset_with_no_unread_test_has_an_empty_census() {
     assert!(census.is_empty());
     assert_eq!(census.unread(), 0);
     assert!(census.rows().is_empty());
+}
+
+/// A fixture directory under `xtask/fixtures/phpt` laid down in a scratch
+/// tree standing where `php-src/ext/fixture/tests` would, so what its
+/// programs write lands there and not in the fixture.
+fn fixture_subset(name: &str) -> (Tree, Subset) {
+    fn copy(from: &Path, to: &Path) {
+        fs::create_dir_all(to).unwrap();
+        for entry in fs::read_dir(from).unwrap() {
+            let path = entry.unwrap().path();
+            let into = to.join(path.file_name().unwrap());
+            if path.is_dir() {
+                copy(&path, &into);
+            } else {
+                fs::copy(&path, &into).unwrap();
+            }
+        }
+    }
+    let (tree, subset) = subset(name, &[]);
+    copy(
+        &Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/phpt")
+            .join(name),
+        tree.path(),
+    );
+    (tree, subset)
+}
+
+/// The fixture's subset run with the pinned oracle standing in for the
+/// engine, on a pool of `jobs`, under a limit of `limit_s`.
+fn run_on(subset: &Subset, jobs: usize, limit_s: u64) -> Tally {
+    let binary = oracle().unwrap();
+    let mut manifest = manifest();
+    manifest.pin.recipe.limits.timeout_s = limit_s;
+    let oracle = manifest.pin.oracle();
+    let under = Under {
+        runner: &Runner::Engine(binary),
+        lane: None,
+        oracle_absent: None,
+        jobs: NonZeroUsize::new(jobs).unwrap(),
+    };
+    run_subset(&oracle, &registry(""), subset, under).unwrap()
+}
+
+/// The span each program of the fixture wrote beside itself, in seconds,
+/// by the test's path inside the fixture.
+fn spans(tree: &Tree, tests: &[&str]) -> Vec<(f64, f64)> {
+    tests
+        .iter()
+        .map(|test| {
+            let text = fs::read_to_string(tree.join(test).with_extension("php.span")).unwrap();
+            let (start, end) = text.split_once(' ').unwrap();
+            (start.parse().unwrap(), end.parse().unwrap())
+        })
+        .collect()
+}
+
+fn overlap(a: (f64, f64), b: (f64, f64)) -> bool {
+    a.0 < b.1 && b.0 < a.1
+}
+
+/// The fixture at `xtask/fixtures/phpt/conflicts` (#938), on a pool of
+/// eight: the two tests naming `shared` never run at once, the one naming
+/// `all` runs beside nothing, the directory's `CONFLICTS` file holds its
+/// two tests apart, and a test's own section stands in place of that file.
+/// The negative controls are the tests naming no key, which run at once,
+/// and `own.phpt`, which runs beside the directory's two. The verdicts, in
+/// order and word for word, are the ones a pool of one reaches.
+#[test]
+fn tests_that_conflict_never_run_at_once_and_the_verdicts_are_the_serial_runs() {
+    if oracle().is_none() {
+        return;
+    }
+    let (tree, subset) = fixture_subset("conflicts");
+    let tally = run_on(&subset, 8, 30);
+    let tests = [
+        "a-keyed/free1.phpt",
+        "a-keyed/free2.phpt",
+        "a-keyed/one.phpt",
+        "a-keyed/two.phpt",
+        "b-alone/all.phpt",
+        "c-directory/one.phpt",
+        "c-directory/own.phpt",
+        "c-directory/two.phpt",
+    ];
+    let names: Vec<&str> = tally.judged.iter().map(|j| j.name.as_str()).collect();
+    assert_eq!(names, tests);
+    assert!(
+        tally.judged.iter().all(|j| j.judgement == Judgement::Pass),
+        "{tally:#?}"
+    );
+    let span = spans(&tree, &tests);
+    assert!(!overlap(span[2], span[3]), "shared: {span:?}");
+    for n in (0..tests.len()).filter(|n| *n != 4) {
+        assert!(
+            !overlap(span[4], span[n]),
+            "all beside {}: {span:?}",
+            tests[n]
+        );
+    }
+    assert!(!overlap(span[5], span[7]), "directory: {span:?}");
+    assert!(overlap(span[0], span[1]), "the control, no key: {span:?}");
+    assert!(overlap(span[0], span[2]), "the control, no key: {span:?}");
+    assert!(overlap(span[5], span[6]), "the control, own: {span:?}");
+
+    let serial = run_on(&subset, 1, 30);
+    assert_eq!(serial.judged, tally.judged);
+    assert_eq!(serial.found, tally.found);
+    let span = spans(&tree, &tests);
+    assert!(
+        span.windows(2).all(|w| w[0].1 <= w[1].0),
+        "one at a time: {span:?}"
+    );
+}
+
+/// The fixture at `xtask/fixtures/phpt/past-limit` (#938): a test that
+/// never ends first, and two after it that conflict with nothing. On a
+/// pool of three, both are done before the first is past its limit; on a
+/// pool of one, the negative control, both start after it. The limit runs
+/// from the spawn and the span from the program's first line, so the line
+/// between the two is drawn half a second early. The verdicts are the same
+/// either way: the first fails naming the limit.
+#[test]
+fn a_test_past_the_limit_holds_up_none_of_the_tests_it_does_not_conflict_with() {
+    const LIMIT: u64 = 3;
+    if oracle().is_none() {
+        return;
+    }
+    let tests = ["a-never.phpt", "b-quick.phpt", "c-quick.phpt"];
+    let (tree, subset) = fixture_subset("past-limit");
+    #[allow(clippy::cast_precision_loss)]
+    let past = |span: &[(f64, f64)]| span[0].0 + LIMIT as f64 - 0.5;
+    let pooled = run_on(&subset, 3, LIMIT);
+    let span = spans(&tree, &tests);
+    assert!(
+        span[1].1 < past(&span) && span[2].1 < past(&span),
+        "{span:?}"
+    );
+
+    let serial = run_on(&subset, 1, LIMIT);
+    let span = spans(&tree, &tests);
+    assert!(
+        span[1].0 >= past(&span) && span[2].0 >= past(&span),
+        "{span:?}"
+    );
+    assert_eq!(pooled.judged, serial.judged);
+    let went: Vec<Judgement> = pooled.judged.iter().map(|j| j.judgement).collect();
+    assert_eq!(went, [Judgement::Fail, Judgement::Pass, Judgement::Pass]);
 }
