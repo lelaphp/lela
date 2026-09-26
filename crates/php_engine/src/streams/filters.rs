@@ -57,9 +57,10 @@ struct Named {
 /// One filter's call on the stream it is attached to. The stream is out
 /// of its resource while the filter runs, so what php's filter reaches
 /// through its `stream` pointer, `php_stream_tell` and
-/// `php_stream_seek` as `consumed` calls them, is answered from here:
-/// the position the call was made at, and a seek the filter asks for,
-/// taken on the stream when the call returns.
+/// `php_stream_seek` as `consumed` calls them and `php_stream_eof`, is
+/// answered from here: the position and the end as they stood when the
+/// call was made, and a seek the filter asks for, taken on the stream
+/// when the call returns.
 ///
 /// ```php
 /// class F extends php_user_filter {
@@ -84,9 +85,34 @@ struct Named {
 /// int(3)
 /// string(3) "def"
 /// ```
+///
+/// `feof` from inside the call answers what the stream was when the
+/// call was made, at its end for the last read:
+///
+/// ```php
+/// class F extends php_user_filter {
+///     function filter($in, $out, &$consumed, $closing): int {
+///         while ($b = stream_bucket_make_writeable($in)) { $consumed += $b->datalen; stream_bucket_append($out, $b); }
+///         echo "filtered", $closing ? " closing" : "", feof($this->stream) ? " at eof" : "", "\n";
+///         return PSFS_PASS_ON;
+///     }
+/// }
+/// stream_filter_register('f', 'F');
+/// $t = fopen('php://temp', 'r+b'); fwrite($t, str_repeat('a', 8200)); rewind($t);
+/// stream_filter_append($t, 'f', STREAM_FILTER_READ);
+/// var_dump(strlen(stream_get_contents($t)));
+/// ```
+/// ```expect
+/// filtered
+/// filtered closing at eof
+/// int(8200)
+/// ```
 pub(crate) struct FilterCall {
     stream: Stream,
     position: i64,
+    /// `php_stream_eof` as it stood when the call was made: nothing in
+    /// the read buffer and the kind at its end.
+    eof: bool,
     seek: Option<(i64, Option<Whence>)>,
 }
 
@@ -98,6 +124,11 @@ impl FilterCall {
             _ => self.position,
         };
         (stream.resource() == self.stream.resource()).then_some(position)
+    }
+
+    /// Whether `stream`, where it is this call's, was at its end.
+    pub(crate) fn eof_of(&self, stream: Stream) -> Option<bool> {
+        (stream.resource() == self.stream.resource()).then_some(self.eof)
     }
 
     /// A seek of `stream` kept for the call's return, `false` where the
@@ -153,6 +184,7 @@ impl PhpStream {
             return FilterStatus::ErrFatal;
         };
         let position = self.position;
+        let eof = self.eof && self.writepos == self.readpos;
         let Some(filter) = self.chain_mut(chain).get_mut(at) else {
             return FilterStatus::ErrFatal;
         };
@@ -160,6 +192,7 @@ impl PhpStream {
         let call = FilterCall {
             stream,
             position,
+            eof,
             seek: None,
         };
         let outer = req.filtering.replace(call);

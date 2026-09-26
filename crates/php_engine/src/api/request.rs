@@ -554,7 +554,9 @@ impl Stream {
 
     /// `php_stream_eof`: no byte left in the read buffer, and the kind at
     /// eof or, asked `PHP_STREAM_OPTION_CHECK_LIVENESS`, found dead, which
-    /// a user-space stream answers from its `stream_eof`.
+    /// a user-space stream answers from its `stream_eof`. Asked from
+    /// inside a filter's call on the stream, it is what it was when the
+    /// call was made ([`crate::streams::FilterCall`]).
     ///
     /// ```php
     /// class W { public $context; public $n = 0;
@@ -578,7 +580,12 @@ impl Stream {
     /// bool(true)
     /// ```
     pub fn eof(self, req: &mut Request) -> bool {
-        req.stream_op(self, |req, stream| stream.eof(req))
+        if let Some(eof) = req.stream_op(self, |req, stream| stream.eof(req)) {
+            return eof;
+        }
+        req.filtering
+            .as_ref()
+            .and_then(|call| call.eof_of(self))
             .unwrap_or(false)
     }
 
