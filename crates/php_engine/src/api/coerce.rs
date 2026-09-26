@@ -219,14 +219,45 @@ pub fn to_callable(req: &mut Request, value: &Value) -> Result<Callable, Thrown>
 
 /// The array key a value makes, php's offset rules: `null` is `""`, a
 /// `bool` and a `float` are an `int`, an `array` or an `object` is the
-/// `TypeError` "Illegal offset type".
+/// `TypeError` "Illegal offset type". A string key is the caller's, one
+/// owner, as [`PhpArray::set`] takes it, and `value` keeps its own.
+///
+/// ```php
+/// class It implements Iterator {
+///     private $i = 0;
+///     function current(): mixed { return $this->i; }
+///     function key(): mixed { return str_repeat(chr(97 + $this->i), 2); }
+///     function next(): void { $this->i++; }
+///     function rewind(): void { $this->i = 0; }
+///     function valid(): bool { return $this->i < 3; }
+/// }
+/// $a = iterator_to_array(new It);
+/// $b = str_repeat('z', 64);
+/// var_dump(array_keys($a));
+/// ```
+/// ```expect
+/// array(3) {
+///   [0]=>
+///   string(2) "aa"
+///   [1]=>
+///   string(2) "bb"
+///   [2]=>
+///   string(2) "cc"
+/// }
+/// ```
 pub fn key_of(req: &mut Request, value: &Value) -> Result<Key, Thrown> {
     match value.as_ref() {
         ValueRef::Undef | ValueRef::Null => Ok(Key::Str(PhpString::new(req, b"")?)),
         ValueRef::Bool(b) => Ok(Key::Int(i64::from(b))),
         ValueRef::Int(n) => Ok(Key::Int(n)),
         ValueRef::Float(f) => Ok(Key::Int(float_to_long(f))),
-        ValueRef::Str(s) => Ok(Key::from_string(*s)),
+        ValueRef::Str(s) => {
+            let key = Key::from_string(*s);
+            if let Key::Str(_) = key {
+                req.addref(&Value::string(*s));
+            }
+            Ok(key)
+        }
         ValueRef::Resource(r) => Ok(Key::Int(r.id())),
         ValueRef::Reference(r) => key_of(req, &r.get()),
         ValueRef::Array(_) | ValueRef::Object(_) => {
