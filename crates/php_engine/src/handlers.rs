@@ -17260,7 +17260,7 @@ pub(crate) fn catch<T: Tier>(
 ) -> Edge {
     let pending = match req.pending() {
         Some(pending) => Some(pending),
-        None if req.unwind_exit() => None,
+        None if req.unwinding() => None,
         None => return jump_to(req, frame, op.op2),
     };
     let slot = Some(CacheSlot(op.extended_value & !LAST_CATCH));
@@ -17528,7 +17528,7 @@ fn unwind_from<T: Tier>(
             return jump_to(req, frame, element.catch_op.0);
         }
         if op_num < element.finally_op.0 {
-            if req.unwind_exit() {
+            if req.unwinding() {
                 at = offset.checked_sub(1);
                 continue;
             }
@@ -17565,7 +17565,7 @@ fn unwind_from<T: Tier>(
             if let Some(delayed) = delayed {
                 match req.pending() {
                     Some(pending) => req.set_previous(pending, delayed),
-                    None if req.unwind_exit() => req.release(delayed.as_value()),
+                    None if req.unwinding() => req.release(delayed.as_value()),
                     None => req.leave_pending(&Thrown::of(Some(delayed))),
                 }
             }
@@ -18655,6 +18655,9 @@ mod tests {
             assert_eq!(req.vm().lookups, pass);
             assert_eq!(req.cached(frame, CacheSlot(0)), Cached::Unprimed);
             assert!(matches!(req.uncaught(), Err(Fatal::Error(_))));
+            // Each pass is a serving of its own, whose end catches the
+            // bailout the rendering began.
+            req.catch_bailout();
         }
     }
 

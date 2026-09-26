@@ -1743,17 +1743,25 @@ impl Engine {
         // as php's `EG(symbol_table)` does, so the shutdown functions
         // and an extension's `rshutdown` read a request that still has
         // them.
+        // Each step is its own `zend_try`, so a fatal's bailout leaves
+        // the step it was raised in and the next is served.
         req.enter_phase(crate::api::request::Phase::Shutdown);
+        req.catch_bailout();
         crate::natives::call_shutdown_functions(&mut req);
+        req.catch_bailout();
         req.shutdown_destructors();
         req.call_destructors();
+        req.catch_bailout();
         crate::output::end_all(&mut req);
+        req.catch_bailout();
         for extension in self.shared.extensions.iter().rev() {
             if let Some(rshutdown) = extension.rshutdown {
                 rshutdown(&mut req);
             }
         }
+        req.catch_bailout();
         crate::output::deactivate(&mut req);
+        req.catch_bailout();
         req.free_shutdown_functions();
         req.close_resources();
         req.free_user_handlers();

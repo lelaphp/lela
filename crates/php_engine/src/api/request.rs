@@ -1310,6 +1310,15 @@ pub struct Request {
     /// outermost serving's end releases it, as `zend_exception_error`
     /// does.
     unwind_exit: bool,
+    /// php's `zend_bailout` under way: a fatal was rendered where it was
+    /// raised and the request is leaving for the `zend_try` that catches
+    /// it, the outermost serving's end or the step of
+    /// `php_request_shutdown` it was raised in ([`Request::catch_bailout`]).
+    /// Nothing is served until then: the loop unwinds as it unwinds the
+    /// unwind exit, past every `catch` and `finally`, a native reading
+    /// what its callback left reads the fatal, and a second fatal raised
+    /// on the way is not rendered.
+    bailout: bool,
     /// Whether a diagnostic is displayed past the `php_output` layer,
     /// `php_output_direct`, as php displays what it raises while the
     /// engine starts ([`crate::api::raising::startup`]).
@@ -1750,6 +1759,7 @@ impl Request {
             fibers: crate::fiber::Fibers::default(),
             pending: None,
             unwind_exit: false,
+            bailout: false,
             display_direct: false,
             phase: Phase::Startup,
             marked_destructed: false,
@@ -2772,8 +2782,9 @@ impl Request {
             // The callback exited: what the native reads is php's
             // `EG(exception)` holding the unwind exit, and the native
             // returns with it standing, for the unwinder to go on
-            // from the call opline.
-            None if self.unwind_exit => Err(Thrown::of(None)),
+            // from the call opline; a fatal leaves the native as it left
+            // the callback.
+            None if self.unwinding() => Err(Thrown::of(None)),
             None => Ok(std::mem::replace(&mut self.returned, Value::null())),
         }
     }
@@ -3438,7 +3449,7 @@ impl Request {
         let Some(object) = thrown.exception().copied() else {
             return;
         };
-        if self.pending.is_none() && !self.unwind_exit {
+        if self.pending.is_none() && !self.unwinding() {
             self.pending = Some(object);
         } else {
             self.release(object.as_value());
@@ -3504,8 +3515,10 @@ impl Request {
         let Some(throwable) = self.pending.take() else {
             // `zend_exception_error` on the unwind exit: "We
             // successfully unwound, nothing more to do", and the
-            // object is released (`Z/Zend/zend_exceptions.c:1005`).
+            // object is released (`Z/Zend/zend_exceptions.c:1005`); a
+            // fatal's bailout is caught where the serving is left.
             self.unwind_exit = false;
+            self.bailout = false;
             return Ok(());
         };
         let (file, line) = self.throw_site(throwable);
@@ -3543,10 +3556,14 @@ impl Request {
         match self.uncaught() {
             Err(fatal) => {
                 self.end_in(&fatal);
+                self.bailout = true;
                 Err(Thrown::of(None))
             }
             Ok(()) if threw => Ok(Value::null()),
-            Ok(()) => Err(Thrown::of(None)),
+            Ok(()) => {
+                self.bailout = true;
+                Err(Thrown::of(None))
+            }
         }
     }
 
@@ -4998,9 +5015,10 @@ impl Request {
     /// say, and the request ends in it. It is rendered once, here, and
     /// `serve` writes nothing of its own.
     pub(crate) fn end_in_fatal(&mut self, message: &str) {
-        // The first fatal is the one that ends the request, since php
-        // leaves the request from the first and renders no second.
-        if self.ending.is_some() {
+        // One raised while a bailout is under way is not rendered: php
+        // left what raised it at the first. One raised after the bailout
+        // was caught, in a later step of `php_request_shutdown`, is.
+        if self.bailout {
             return;
         }
         let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
@@ -5015,7 +5033,7 @@ impl Request {
     /// `Z/Zend/zend.c:1642`), so it is rendered at `Unknown` on line
     /// zero wherever it was raised, and the request ends in it.
     fn end_in_core_error(&mut self, message: &str) {
-        if self.ending.is_some() {
+        if self.bailout {
             return;
         }
         self.note_error_in(Level::CoreError, message, b"Unknown", 0);
@@ -5031,7 +5049,7 @@ impl Request {
     /// `ParseError` or a `CompileError` is rendered at its own level and
     /// the rest as `E_ERROR`, and the request ends as the level ends it.
     pub(crate) fn end_in_uncaught(&mut self, level: Level, message: &str, file: &[u8], line: u32) {
-        if self.ending.is_some() {
+        if self.bailout {
             return;
         }
         self.last_fatal_error_backtrace = None;
@@ -5064,11 +5082,12 @@ impl Request {
     /// protects it (`Z/Zend/zend.c:1263`), and a collection serving
     /// destructors when the fatal came returns without freeing.
     fn end_at_level(&mut self, level: Level, message: &str, file: &[u8], line: u32) {
+        self.heap.gc_protect(true);
+        self.exit_status = 255;
+        self.bailout = true;
         if self.ending.is_some() {
             return;
         }
-        self.heap.gc_protect(true);
-        self.exit_status = 255;
         self.ending = Some(match level {
             Level::Parse => Ending::Parse,
             _ => Ending::Fatal(format!(
@@ -5135,6 +5154,52 @@ impl Request {
     /// left.
     pub(crate) fn unwind_exit(&self) -> bool {
         self.unwind_exit
+    }
+
+    /// What the unwinder leaves by that no `catch` takes and no `finally`
+    /// is served for: the unwind exit, or a fatal leaving for its
+    /// `zend_try`.
+    pub(crate) fn unwinding(&self) -> bool {
+        self.unwind_exit || self.bailout
+    }
+
+    /// `zend_end_try()` over a fatal's `zend_bailout`: the `zend_try` it left
+    /// for has caught it, and what follows is served again.
+    ///
+    /// A fatal a native raises inside a callback leaves the callback,
+    /// the native that called it and the program, as `zend_bailout`
+    /// leaves them all for the `zend_try` in `php_execute_script`:
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '2M');
+    /// array_map(function ($x) { echo "cb $x\n"; str_repeat('x', 4 << 20); echo "after $x\n"; }, [1, 2]);
+    /// echo "main after\n";
+    /// ```
+    /// ```expect exit=255
+    /// cb 1
+    ///
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 4194336 bytes) in %s on line 3
+    /// ```
+    ///
+    /// No `finally` is served on the way out, and each step of
+    /// `php_request_shutdown` is a `zend_try` of its own: the shutdown
+    /// functions are served after the program's fatal, one of them
+    /// raising a second, which is rendered and ends the walk.
+    ///
+    /// ```php
+    /// register_shutdown_function(function () { echo "sd1\n"; str_repeat('x', 4 << 20); echo "sd1 after\n"; });
+    /// register_shutdown_function(function () { echo "sd2\n"; });
+    /// ini_set('memory_limit', '2M');
+    /// try { str_repeat('y', 4 << 20); } finally { echo "finally\n"; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 4194336 bytes) in %s on line 5
+    /// sd1
+    ///
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 4194336 bytes) in %s on line 2
+    /// ```
+    pub(crate) fn catch_bailout(&mut self) {
+        self.bailout = false;
     }
 
     /// `zend_is_unwind_exit(EG(exception))` for a native: whether a
@@ -9908,7 +9973,7 @@ impl Request {
     }
 
     pub(crate) fn is_pending(&self) -> bool {
-        self.pending.is_some() || self.unwind_exit
+        self.pending.is_some() || self.unwinding()
     }
 
     /// The pending throwable as a view, no owner taken: what `CATCH`

@@ -87,7 +87,7 @@ impl Request {
         self.release(returned);
         match self.pending.take() {
             Some(pending) => Err(Thrown::of(Some(pending))),
-            None if self.unwind_exit => Err(Thrown::of(None)),
+            None if self.unwinding() => Err(Thrown::of(None)),
             None => Ok(()),
         }
     }

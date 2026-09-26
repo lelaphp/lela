@@ -1176,7 +1176,7 @@ fn pending_as_err(req: &mut Request) -> Result<(), Thrown> {
     if let Some(pending) = req.take_pending() {
         return Err(Thrown::of(Some(pending)));
     }
-    if req.unwind_exit() {
+    if req.unwinding() {
         return Err(Thrown::of(None));
     }
     Ok(())
