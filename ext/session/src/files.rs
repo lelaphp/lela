@@ -9,7 +9,7 @@
 //! offer (#746).
 
 use php_ext::raising::{Level, Thrown, docref, raise};
-use php_ext::request::{Request, Stream, WrapperOp};
+use php_ext::request::{Request, Stream, Whence, WrapperOp};
 
 use crate::{State, session};
 
@@ -153,7 +153,7 @@ fn write_key(req: &mut Request, key: &[u8], val: &[u8]) -> Result<bool, Thrown> 
     if i64::try_from(val.len()).unwrap_or(i64::MAX) < st_size {
         stream.truncate(req, 0);
     }
-    stream.seek(req, 0, None);
+    stream.seek(req, 0, Whence::Set);
     match stream.write(req, val) {
         Some(n) if n == val.len() => {
             stream.flush(req);
@@ -296,7 +296,7 @@ pub(super) fn read(req: &mut Request, key: &[u8]) -> Result<Option<Vec<u8>>, Thr
     if size == 0 {
         return Ok(Some(Vec::new()));
     }
-    stream.seek(req, 0, None);
+    stream.seek(req, 0, Whence::Set);
     let wanted = usize::try_from(size).unwrap_or(usize::MAX);
     let got = stream.copy_to_mem(req, Some(wanted))?;
     let bytes = got.as_bytes().to_vec();
@@ -312,7 +312,21 @@ pub(super) fn read(req: &mut Request, key: &[u8]) -> Result<Option<Vec<u8>>, Thr
     Ok(Some(bytes))
 }
 
-/// `PS_WRITE_FUNC(files)`.
+/// `PS_WRITE_FUNC(files)`: the data written from offset zero, `lseek(fd,
+/// 0, SEEK_SET)` after the read left the file at its end, over a file cut
+/// to nothing first where the data is shorter than what was read.
+///
+/// ```php
+/// ob_start(); session_save_path(__DIR__); session_id("seek1"); session_start(["use_cookies" => 0, "cache_limiter" => ""]);
+/// session_decode('a|i:1;b|i:22;'); session_write_close();
+/// session_start(); session_decode('b|i:33;'); session_write_close(); var_dump(file_get_contents(__DIR__ . "/sess_seek1"));
+/// session_start(); session_decode('b|i:4;'); session_write_close(); var_dump(file_get_contents(__DIR__ . "/sess_seek1"));
+/// ob_end_flush();
+/// ```
+/// ```expect
+/// string(13) "a|i:1;b|i:33;"
+/// string(12) "a|i:1;b|i:4;"
+/// ```
 pub(super) fn write(req: &mut Request, key: &[u8], val: &[u8]) -> Result<bool, Thrown> {
     write_key(req, key, val)
 }

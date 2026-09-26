@@ -110,7 +110,7 @@ third-engine-design.md
 | tier | tier.lock |  |  | skip |
 | harness | xtask.lock | 332 |  | pass |
 
-<!-- /computed in=6c28bf0cffd5d5890393f80ba93d55011561fddc6f36897cafde6df56be3fbb6 out=a050264fad3eb18ca8440e293fcd643ed85a6c360846f63293cd3fd82d60ed2d -->
+<!-- /computed in=7b8e570d20ff6fa1ddeb0c4f7d302000bbee837b2715af76e5f0d25323e3bb76 out=a050264fad3eb18ca8440e293fcd643ed85a6c360846f63293cd3fd82d60ed2d -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
