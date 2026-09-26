@@ -563,7 +563,7 @@ fn handler_destroy(req: &mut Request) -> Result<Value, Thrown> {
 ///
 /// ```php
 /// ob_start(); $h = new SessionHandler; session_set_save_handler($h); session_save_path(__DIR__); touch(__DIR__ . "/sess_stale", 1000);
-/// session_start(["use_cookies" => 0, "cache_limiter" => ""]); var_dump($h->gc(1440), file_exists(__DIR__ . "/sess_stale"));
+/// session_start(["use_cookies" => 0, "cache_limiter" => "", "gc_probability" => 0]); var_dump($h->gc(1440), file_exists(__DIR__ . "/sess_stale"));
 /// session_write_close(); ob_end_flush();
 /// ```
 /// ```expect

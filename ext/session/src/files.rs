@@ -430,7 +430,7 @@ pub(super) fn destroy(req: &mut Request, key: &[u8]) -> Result<bool, Thrown> {
 /// their count; `-1` for a split directory, which php leaves to cron.
 ///
 /// ```php
-/// ob_start(); ini_set("session.save_path", __DIR__); ini_set("session.use_cookies", 0);
+/// ob_start(); ini_set("session.save_path", __DIR__); ini_set("session.use_cookies", 0); ini_set("session.gc_probability", 0);
 /// touch(__DIR__ . "/sess_old", 1000); touch(__DIR__ . "/sess_new"); touch(__DIR__ . "/other", 1000);
 /// session_start(); var_dump(session_gc(), file_exists(__DIR__ . "/sess_old"), file_exists(__DIR__ . "/sess_new"), file_exists(__DIR__ . "/other"));
 /// session_write_close(); var_dump(session_gc()); ob_end_flush();
