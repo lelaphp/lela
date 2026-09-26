@@ -64,6 +64,7 @@ manifest::Crate::with_phpt
 manifest::Edge
 manifest::Edge::between
 manifest::FILE
+manifest::LockCeiling
 manifest::Manifest
 manifest::Manifest::adr_title
 manifest::Manifest::crate_named

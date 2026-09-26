@@ -138,7 +138,8 @@ fn api_lock_over_the_ceiling_fails() {
         .expect("the manifest has the api seam");
     let ceiling = manifest
         .lock_ceiling(seam)
-        .expect("the api seam has a ceiling");
+        .expect("the api seam has a ceiling")
+        .items;
     let items = ceiling + 1;
 
     // A reading hashes its scope's tree through git, so the scratch tree
