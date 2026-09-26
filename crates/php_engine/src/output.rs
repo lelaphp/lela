@@ -903,9 +903,9 @@ fn header(req: &mut Request) {
 /// ends in it and the CLI's, whose `header_handler` answers zero, frees
 /// it at once; the callback `header_register_callback` left served;
 /// `headers_sent` set; and `sapi_send_headers_free`, the status line
-/// given back. The host's `send_headers` answers that it sent them, and
-/// the block itself is rendered for the sink by `Request::header_block`
-/// when `serve` hands it over. Nothing here answers `headers_only`, the
+/// given back. The block is handed to the sink here, php's
+/// `sapi_module.send_headers`, whose answer is that it sent them.
+/// Nothing here answers `headers_only`, the
 /// `HEAD` request that refuses a body, since no host describes one yet.
 fn send_headers(req: &mut Request) -> bool {
     if req.output().headers_sent {
@@ -944,6 +944,7 @@ fn send_headers(req: &mut Request) -> bool {
         callback.release(req);
     }
     req.output_mut().headers_sent = true;
+    req.send_header_block();
     send_headers_free(req);
     true
 }

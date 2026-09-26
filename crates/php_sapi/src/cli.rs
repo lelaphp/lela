@@ -691,14 +691,20 @@ pub fn extensions(engine: &Engine) -> String {
 /// The sink on the process's streams, php's CLI: body bytes on stdout,
 /// the header block nowhere, since `sapi_cli_send_headers` sends none,
 /// and both the log and the error stream on stderr, each log entry with
-/// `\n` after it (`sapi_cli_log_message`). A stream that refuses a write
-/// is left refusing: php's `sapi_cli_single_write` reads no error either.
+/// `\n` after it (`sapi_cli_log_message`). The request holds it and each
+/// call reaches the fd as it is made, as `sapi_cli_ub_write` writes each
+/// chunk to fd 1, so what a child process the request starts writes to
+/// the stdout it inherits stands where php's would (#741). A stream that
+/// refuses a write is left refusing: php's `sapi_cli_single_write` reads
+/// no error either.
 #[derive(Debug, Default)]
 pub struct Process;
 
 impl OutputSink for Process {
     fn write(&mut self, bytes: &[u8]) {
-        let _ = std::io::stdout().lock().write_all(bytes);
+        let mut stdout = std::io::stdout().lock();
+        let _ = stdout.write_all(bytes);
+        let _ = stdout.flush();
     }
 
     fn flush(&mut self) {
@@ -715,6 +721,10 @@ impl OutputSink for Process {
 
     fn write_stderr(&mut self, bytes: &[u8]) {
         let _ = std::io::stderr().lock().write_all(bytes);
+    }
+
+    fn held(&mut self) -> Option<Box<dyn OutputSink + Send>> {
+        Some(Box::new(Process))
     }
 }
 
