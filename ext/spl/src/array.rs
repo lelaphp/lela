@@ -1389,34 +1389,89 @@ fn sort_through(req: &mut Request, native: &[u8], extra: Option<Value>) -> Resul
         ));
     };
     let table = table(req, this)?;
-    let Table::Array(owner, array) = table else {
-        return Ok(Value::bool(true));
+    let handed = match table {
+        Table::Array(_, array) => {
+            req.addref(&Value::array(array));
+            array
+        }
+        Table::Props(_) => table.copy(req)?,
     };
-    req.addref(&Value::array(array));
-    let cell = PhpRef::new(req, Value::array(array))?;
+    let cell = PhpRef::new(req, Value::array(handed))?;
     let mut arguments = vec![cell.as_value()];
     arguments.extend(extra);
     with(req, this, |p| p.sorting += 1)?;
     let answered = call(req, &callable, &arguments);
     with(req, this, |p| p.sorting -= 1)?;
-    let sorted = cell.separate_array(req)?;
-    if let Some(sorted) = sorted {
-        req.addref(&Value::array(sorted));
-        let old = with(req, owner, |p| {
-            std::mem::replace(&mut p.storage, Storage::Array(sorted))
-        })?;
-        if let Some(old) = old.held() {
-            req.release(old);
-        }
-    }
+    let sorted = cell.separate_array(req);
+    let put = match sorted {
+        Ok(Some(sorted)) => put_back(req, table, sorted),
+        Ok(None) => Ok(()),
+        Err(thrown) => Err(thrown),
+    };
     req.release(cell.as_value());
+    put?;
     answered
 }
 
+/// `spl_array_method`'s write-back, `*ht_ptr = Z_ARRVAL_P(ht_zv)`: the
+/// sorted array made the storage, or, over an object, the object's
+/// rows laid down again in the sorted order. A declared property keeps
+/// its slot and so its place among the rows, where php's table moves
+/// its `IS_INDIRECT` row with the rest (#912); a dynamic one moves.
+fn put_back(req: &mut Request, table: Table, sorted: PhpArray) -> Result<(), Thrown> {
+    match table {
+        Table::Array(owner, _) => {
+            req.addref(&Value::array(sorted));
+            let old = with(req, owner, |p| {
+                std::mem::replace(&mut p.storage, Storage::Array(sorted))
+            })?;
+            if let Some(old) = old.held() {
+                req.release(old);
+            }
+            Ok(())
+        }
+        Table::Props(object) => {
+            let rows = sorted.snapshot_refs();
+            for (key, _) in &rows {
+                object.unset_row(req, key)?;
+            }
+            for (key, value) in rows {
+                req.addref(&value);
+                object.set_row(req, &key, value)?;
+            }
+            Ok(())
+        }
+    }
+}
+
 /// `asort(int $flags = SORT_REGULAR): true`, `ext/standard`'s `asort`
-/// over the table.
+/// over the table: the storage array, or an object's rows, laid down
+/// again in the sorted order.
 ///
-/// The witness waits on the ext/standard native it calls (#712).
+/// ```php
+/// $o = new ArrayObject(['b' => 2, 'a' => 3, 'c' => 1]);
+/// $o->asort();
+/// $d = (object) ['y' => 'b', 'x' => 'a'];
+/// $p = @new ArrayObject($d);
+/// $p->asort(); $p->ksort();
+/// var_dump($o->getArrayCopy(), $d);
+/// ```
+/// ```expect
+/// array(3) {
+///   ["c"]=>
+///   int(1)
+///   ["b"]=>
+///   int(2)
+///   ["a"]=>
+///   int(3)
+/// }
+/// object(stdClass)#2 (2) {
+///   ["x"]=>
+///   string(1) "a"
+///   ["y"]=>
+///   string(1) "b"
+/// }
+/// ```
 fn asort(req: &mut Request) -> Result<Value, Thrown> {
     crate::arity(req, 0, 1)?;
     let flags = crate::long_or(req, 1, 0)?;
