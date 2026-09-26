@@ -254,6 +254,13 @@ impl Emit<'_> {
     /// ```
     ///
     /// ```php
+    /// class A { #[NoDiscard] function __clone() {} }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Method A::__clone cannot be #[\NoDiscard] in %s on line 2
+    /// ```
+    ///
+    /// ```php
     /// class A { function __construct(): void {} }
     /// ```
     /// ```expect exit=255
@@ -291,7 +298,7 @@ impl Emit<'_> {
             return Ok(());
         };
         let signature = magic.signature();
-        let class = String::from_utf8_lossy(class).into_owned();
+        let class = php_unit::decl::shown(class).into_owned();
         let name = String::from_utf8_lossy(&method.function.name.0).into_owned();
         let parameters = &method.function.parameters;
         if let Some(count) = signature.arity {
@@ -323,6 +330,23 @@ impl Emit<'_> {
             return Err(self.compile_error(format!(
                 "Method {class}::{name}() cannot declare a return type"
             )));
+        }
+        // `ZEND_ACC_NODISCARD` on a method that returns nothing to use:
+        // one that may declare no return type, after that refusal, and
+        // one whose return must be within `void`.
+        let no_discard = method.function.attributes.iter().any(|a| {
+            super::attributes::InternalAttribute::named(&a.name.0)
+                == Some(super::attributes::InternalAttribute::NoDiscard)
+        });
+        if no_discard
+            && matches!(
+                signature.returns,
+                Returns::Undeclared | Returns::Within(MAY_BE_VOID)
+            )
+        {
+            return Err(
+                self.compile_error(format!("Method {class}::{name} cannot be #[\\NoDiscard]"))
+            );
         }
         if signature.public && method.visibility != Visibility::Public {
             self.raise(

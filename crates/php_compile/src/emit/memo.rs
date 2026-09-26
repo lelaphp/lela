@@ -128,6 +128,15 @@ impl Emit<'_> {
     /// var_dump($o->p ??= 3, $o->p ??= 4, $o->q->r ??= 5);
     /// class C { public static $s; }
     /// var_dump(C::$s ??= 6, C::$s ??= 7);
+    /// $GLOBALS['x'] ??= 'x';
+    /// $nm = 'y';
+    /// $$nm ??= 1;
+    /// $$nm ??= 2;
+    /// ${'z' . 'z'} ??= 3;
+    /// $_SERVER ??= f();
+    /// $_GET['g'] ??= 4;
+    /// $v = ($GLOBALS['w'] ??= 'w');
+    /// var_dump($GLOBALS['x'], $y, $zz, is_array($_SERVER), $_GET['g'], $v, $w);
     /// ```
     /// ```expect
     /// int(1)
@@ -142,6 +151,13 @@ impl Emit<'_> {
     /// int(5)
     /// int(6)
     /// int(6)
+    /// string(1) "x"
+    /// int(1)
+    /// int(3)
+    /// bool(true)
+    /// int(4)
+    /// string(1) "w"
+    /// string(1) "w"
     /// ```
     pub(super) fn assign_coalesce(
         &mut self,

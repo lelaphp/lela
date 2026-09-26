@@ -12,7 +12,7 @@
 
 use php_syntax::tree::{self, NodeId};
 
-use super::{ClassSpec, Emit, Scoped, SimpleVar, Where, walk};
+use super::{ClassSpec, Emit, Member, Scoped, SimpleVar, Where, walk};
 use crate::CompileError;
 
 /// The value a write stores: an expression the write compiles where
@@ -32,14 +32,15 @@ pub(super) enum Target {
     Cv(Vec<u8>),
     /// `$a[k]`, `ZEND_AST_DIM`: the whole chain, as the node written.
     Dim(tree::Expr),
-    /// `$o->name`, `ZEND_AST_PROP`.
-    Prop { object: tree::Expr, name: Vec<u8> },
+    /// `$o->name` or `$o->$name`, `ZEND_AST_PROP`.
+    Prop { object: tree::Expr, name: Member },
     /// `C::$name`, `ZEND_AST_STATIC_PROP`.
     StaticProp { class: ClassSpec, name: Vec<u8> },
     /// `list(…)` or `[…]`, `ZEND_AST_ARRAY` as a target.
     List(List),
-    /// `$$x` or `${expr}`, a `ZEND_AST_VAR` whose name is no `ZEND_AST_ZVAL`:
-    /// the variable, fetched by the name the program computes.
+    /// `$$x` or `${expr}`, a `ZEND_AST_VAR` whose name is no `ZEND_AST_ZVAL`,
+    /// or an auto-global, which no CV holds: the variable, fetched by its
+    /// name.
     ByName(tree::Expr),
 }
 
@@ -91,15 +92,22 @@ impl Emit<'_> {
     pub(super) fn place(&mut self, expr: tree::Expr) -> Result<Target, CompileError> {
         let line = self.line_of(expr);
         let expr = self.peel(expr);
-        let tree = &self.parsed.tree;
+        let parsed = self.parsed;
+        let tree = &parsed.tree;
         Ok(match expr {
+            // `$$x`, `${expr}` and an auto-global, a `ZEND_AST_VAR` no CV
+            // holds, and `$GLOBALS['k']`, which `zend_compile_assign`
+            // treats as one: the variable fetched by its name.
+            _ if self.is_by_name(expr) => Target::ByName(expr),
             tree::Expr::SimpleVarExpr(id) => match self.simple_var_of(id, line)? {
                 SimpleVar::Cv(name) => Target::Cv(name),
                 SimpleVar::This => return Err(self.compile_error("Cannot re-assign $this")),
+                SimpleVar::Auto(_) => Target::ByName(expr),
+                SimpleVar::Globals => return Err(self.fatal("`$GLOBALS` past its writable check")),
             },
             tree::Expr::SubscriptExpr(_) => Target::Dim(expr),
             tree::Expr::MemberAccessExpr(id) => {
-                let name = self.member_name_of(id, line)?;
+                let name = self.member_of(id)?;
                 Target::Prop {
                     object: tree[id].obj,
                     name,
@@ -111,7 +119,6 @@ impl Emit<'_> {
                     return Err(walk::unread(line, "an assignment to what is no variable"));
                 }
             },
-            tree::Expr::VarVarExpr(_) | tree::Expr::DynamicVarExpr(_) => Target::ByName(expr),
             tree::Expr::ListExpr(id) => Target::List(List {
                 elements: tree[id].array_elements.clone(),
                 style: ListStyle::List,
@@ -134,14 +141,7 @@ impl Emit<'_> {
     pub(super) fn ensure_writable(&self, expr: tree::Expr) -> Result<(), CompileError> {
         let expr = self.peel(expr);
         if let tree::Expr::CallExpr(id) = expr {
-            return Err(
-                self.compile_error(match self.peel(self.parsed.tree[id].callee) {
-                    tree::Expr::MemberAccessExpr(_) | tree::Expr::ScopedAccessExpr(_) => {
-                        "Can't use method return value in write context"
-                    }
-                    _ => "Can't use function return value in write context",
-                }),
-            );
+            return Err(self.call_written(id));
         }
         if self.is_short_circuited(expr) {
             return Err(self.compile_error("Can't use nullsafe operator in write context"));
@@ -152,6 +152,18 @@ impl Emit<'_> {
             ));
         }
         Ok(())
+    }
+
+    /// What a call returned, where a place to write is wanted: php's
+    /// `zend_ensure_writable_variable`, by the callee as written, so
+    /// `($o->m)()` is a function's value as `$o->m()` is a method's.
+    pub(super) fn call_written(&self, id: NodeId<tree::CallExpr>) -> CompileError {
+        self.compile_error(match self.parsed.tree[id].callee {
+            tree::Expr::MemberAccessExpr(_) | tree::Expr::ScopedAccessExpr(_) => {
+                "Can't use method return value in write context"
+            }
+            _ => "Can't use function return value in write context",
+        })
     }
 
     /// `zend_ast_is_short_circuited` (`Z/Zend/zend_compile.c:2504`):
@@ -171,7 +183,9 @@ impl Emit<'_> {
                     Some(tree::ScopedSelector::SimpleVarExpr(_))
                 ) && self.is_short_circuited(tree[id].scope)
             }
-            tree::Expr::CallExpr(id) => match self.peel(tree[id].callee) {
+            // The callee as written: `($o?->f)()` calls a value, php's
+            // `ZEND_AST_CALL`, which no `?->` short-circuits.
+            tree::Expr::CallExpr(id) => match tree[id].callee {
                 tree::Expr::MemberAccessExpr(access) => {
                     self.is_nullsafe(access) || self.is_short_circuited(tree[access].obj)
                 }
@@ -226,7 +240,7 @@ impl Emit<'_> {
         match self.target(target)? {
             Target::Cv(name) => self.assign(&name, value),
             Target::Dim(dim) => self.assign_dim(dim, value),
-            Target::Prop { object, name } => self.assign_prop(object, &name, value),
+            Target::Prop { object, name } => self.assign_prop(object, name, value),
             Target::StaticProp { class, name } => self.assign_static_prop(class, &name, value),
             Target::ByName(target) => self.assign_by_name(target, value),
             Target::List(list) => match value {

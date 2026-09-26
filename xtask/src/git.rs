@@ -30,14 +30,17 @@ impl Stamp {
     }
 }
 
-/// The short id of `HEAD`, read from the repository's files; `git
-/// rev-parse` when the layout is one this reader does not know. A stamp is
+/// The short id of `HEAD`, its first seven digits, read from the
+/// repository's files; `git rev-parse --short=7` when the layout is one
+/// this reader does not know. Seven, and not git's own abbreviation,
+/// which grows with the repository, so a stamp names a commit the same
+/// way however many objects the store holds. A stamp is
 /// taken at every denial, so it spawns git once (`ls-files`) and not four
 /// times.
 pub fn head_commit(root: &Path) -> Result<String> {
     match read_head(root) {
         Some(id) => Ok(id),
-        None => Ok(git(root, &["rev-parse", "--short", "HEAD"], None)?
+        None => Ok(git(root, &["rev-parse", "--short=7", "HEAD"], None)?
             .trim()
             .to_owned()),
     }
@@ -368,7 +371,7 @@ mod tests {
 
     /// The stamp computed in process is the one git would compute: the
     /// tree hash matches `hash-object` over the same listing and the
-    /// commit matches `rev-parse --short HEAD`.
+    /// commit matches `rev-parse --short=7 HEAD`.
     #[test]
     fn the_stamp_agrees_with_git() {
         let root = built_root();
@@ -389,7 +392,7 @@ mod tests {
         };
         assert_eq!(
             head_commit(&root).unwrap(),
-            out(&["rev-parse", "--short", "HEAD"], None).trim()
+            out(&["rev-parse", "--short=7", "HEAD"], None).trim()
         );
         let paths = files(&root, Path::new("docs")).unwrap();
         let absolute = paths

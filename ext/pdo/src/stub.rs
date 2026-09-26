@@ -408,6 +408,7 @@ impl Reader<'_> {
             ty,
             attributes: Vec::new(),
             doc_comment: None,
+            hooks: None,
         })
     }
 

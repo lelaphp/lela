@@ -177,6 +177,43 @@ impl Emit<'_> {
     /// ```expect exit=255
     /// Fatal error: Type T|Traversable|object|array|null contains both object and a class type, which is redundant in %s on line 2
     /// ```
+    ///
+    /// A DNF member, `(A&B)`, is an intersection among the union's
+    /// members, held to the redundancies an intersection is:
+    ///
+    /// ```php
+    /// function f((A&B)|A $x) {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Type A&B is redundant as it is more restrictive than type A in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// function f((A&B)|(B&A) $x) {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Type B&A is redundant with type A&B in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// function f((A&int)|B $x) {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Type int cannot be part of an intersection type in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// interface A {} interface B {} class C implements A, B {}
+    /// function f((A&B)|null $x): (A&B)|int { return $x ?? 1; }
+    /// var_dump(f(new C), f(null));
+    /// try { f(new stdClass); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// object(C)#1 (0) {
+    /// }
+    /// int(1)
+    /// f(): Argument #1 ($x) must be of type (A&B)|null, stdClass given, called in %s on line 5
+    /// ```
     fn union_type(&mut self, members: &[TypeExpr]) -> Result<Type, CompileError> {
         let mut mask = 0;
         let mut out: Vec<Type> = Vec::with_capacity(members.len());
@@ -184,9 +221,19 @@ impl Emit<'_> {
         for member in members {
             let single = match member {
                 TypeExpr::NamedType(id) => self.single_typename(*id)?,
-                TypeExpr::IntersectionType(id) => {
+                // A DNF member, `(A&B)`, is the intersection in its
+                // parentheses, which is all the grammar puts there.
+                TypeExpr::IntersectionType(_) | TypeExpr::ParenType(_) => {
+                    let id = match member {
+                        TypeExpr::ParenType(id) => match self.parsed.tree[*id].ty {
+                            Some(TypeExpr::IntersectionType(inner)) => inner,
+                            _ => return Err(unread(self.line, "a DNF type")),
+                        },
+                        TypeExpr::IntersectionType(id) => *id,
+                        _ => return Err(unread(self.line, "a type")),
+                    };
                     has_only_iterable_class = false;
-                    let inner = self.parsed.tree[*id].types.to_vec();
+                    let inner = self.parsed.tree[id].types.to_vec();
                     let single = self.intersection_type(&inner)?;
                     for earlier in out.iter().filter(|ty| is_complex(ty)) {
                         match earlier {
@@ -199,7 +246,6 @@ impl Emit<'_> {
                     out.push(single);
                     continue;
                 }
-                TypeExpr::ParenType(_) => return Err(unread(self.line, "a DNF type")),
                 TypeExpr::NullableType(_) | TypeExpr::UnionType(_) => {
                     return Err(unread(self.line, "a type"));
                 }
@@ -341,6 +387,22 @@ impl Emit<'_> {
     /// ```expect exit=255
     /// Fatal error: Type declaration 'int' must be unqualified in %s on line 2
     /// ```
+    ///
+    /// `self` and `parent` are the class's name in a known scope, and
+    /// stay as written in an anonymous class's (GH-18373):
+    ///
+    /// ```php
+    /// class P { function f(): self {} }
+    /// $o = new class extends P { function g(): self {} function h(): parent {} };
+    /// foreach ([[new P, 'f'], [$o, 'g'], [$o, 'h']] as [$on, $m]) {
+    ///     echo (new ReflectionMethod($on, $m))->getReturnType()->getName(), "\n";
+    /// }
+    /// ```
+    /// ```expect
+    /// P
+    /// self
+    /// parent
+    /// ```
     fn single_typename(&mut self, id: NodeId<tree::NamedType>) -> Result<Type, CompileError> {
         let written = self.text(self.parsed.tree[id].name).to_vec();
         let lowered = written.to_ascii_lowercase();
@@ -402,7 +464,10 @@ impl Emit<'_> {
             return Ok(Type::Named(Name(resolved.into_boxed_slice())));
         }
         self.ensure_valid_class_fetch_type(fetch)?;
-        if !self.scope_known() {
+        // `substitute_self_parent`: never in an anonymous class, whose
+        // name is no name to write.
+        let anonymous = self.active_class.as_ref().is_some_and(|c| c.anonymous);
+        if !self.scope_known() || anonymous {
             return Ok(if fetch == FETCH_CLASS_SELF {
                 Type::SelfClass
             } else {

@@ -102,10 +102,12 @@ impl Emit<'_> {
                 return_type,
                 by_ref: node.byref.is_some(),
                 body: Vec::new(),
+                attributes: Vec::new(),
                 doc_comment: self.doc_comment(node.doc_comment),
                 line,
                 end_line: self.line_after(node.range),
                 generator: self.is_generator_at(node.range.start),
+                void_return: false,
             },
             uses: Vec::new(),
             is_static,
@@ -114,7 +116,7 @@ impl Emit<'_> {
     }
 
     /// The kind of the first significant token inside `range`.
-    fn first_kind(&self, range: TextRange) -> Option<SyntaxKind> {
+    pub(in crate::emit) fn first_kind(&self, range: TextRange) -> Option<SyntaxKind> {
         let at = self
             .parsed
             .tokens

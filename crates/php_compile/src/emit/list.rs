@@ -116,7 +116,11 @@ impl Emit<'_> {
                         });
                         Where::Temporary(out)
                     }
-                    SimpleVar::This => self.expr(written)?,
+                    SimpleVar::This | SimpleVar::Auto(_) => self.expr(written)?,
+                    // `zend_try_compile_cv` fails and
+                    // `zend_compile_simple_var_no_cv` fetches the name,
+                    // which `EG(symbol_table)` has not: php's own warning.
+                    SimpleVar::Globals => self.fetch_by_name(b"GLOBALS", super::Symbols::Global)?,
                 },
                 _ => self.expr(value)?,
             }

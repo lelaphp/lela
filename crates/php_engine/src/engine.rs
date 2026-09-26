@@ -20,7 +20,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use php_compile::{CompileError, SourceKind, StackLimit};
 use php_heap::{Fatal, FrameRef, Intern, Strings, Zval};
-use php_unit::decl::{ClassDecl, ConstDecl, ConstExpr, FunctionDecl, MethodDecl, Name};
+use php_unit::decl::{ClassDecl, ConstDecl, ConstExpr, FunctionDecl, HookKind, MethodDecl, Name};
 use php_unit::{FramelessEntry, Unit, frameless_table};
 
 use crate::api::abi::{Cache, Entry, Extension, NativeNew, ObjectHandlers, StartupIni};
@@ -258,7 +258,8 @@ pub(crate) fn assign_map_ptrs(unit: &mut Unit, map_ptr_last: &AtomicU32) {
     let bodies = std::iter::once(&mut unit.main)
         .chain(unit.functions.iter_mut().map(|(_, code)| code))
         .chain(unit.dynamic.iter_mut().map(|(_, code)| code))
-        .chain(unit.methods.iter_mut().map(|method| &mut method.body));
+        .chain(unit.methods.iter_mut().map(|method| &mut method.body))
+        .chain(unit.hooks.iter_mut().map(|hook| &mut hook.body));
     for code in bodies {
         code.runtime_cache = map_ptr_last.fetch_add(1, Ordering::Relaxed);
     }
@@ -286,6 +287,12 @@ pub(crate) enum MethodAt {
     Declared(u32),
     /// The index among [`Shared::trampolines`].
     Trampoline(u32),
+    /// `zend_get_property_hook_trampoline`'s function of `kind`, what
+    /// `parent::$name::get()` calls where the parent's property has no
+    /// hook of that kind: no class holds it, its scope is the property's
+    /// class, carried on the call, and its declaration is the index
+    /// among [`Shared::trampolines`].
+    ParentHook { kind: HookKind, at: u32 },
 }
 
 /// `zend_register_internal_enum`'s `zend_register_functions` over the
@@ -415,6 +422,17 @@ fn link_trampolines(
         });
         trampolines.push(method);
     }
+    // `zend_get_property_hook_trampoline`'s two, which no class's table
+    // carries; the class a row names is never read for them.
+    for (kind, method, entry) in crate::api::request::parent_hook_trampolines() {
+        let index = u32::try_from(trampolines.len()).unwrap_or(u32::MAX);
+        methods.push(NativeMethod {
+            class: ClassId(0),
+            at: MethodAt::ParentHook { kind, at: index },
+            entry,
+        });
+        trampolines.push(method);
+    }
     trampolines
 }
 
@@ -424,12 +442,15 @@ fn link_trampolines(
 /// (`VCWD_GETCWD`, the request's own under ZTS), which is the request's
 /// for a request and the process's for a unit compiled outside one
 /// ([`Engine::unit`]), and whether the source is a file or the string an
-/// `eval` handed over ([`SourceKind`]).
+/// `eval` handed over ([`SourceKind`]), with the runtime definition keys
+/// the request made before it where it is an `eval`'s
+/// ([`php_compile::Options::keys_before`]).
 #[derive(Clone, Copy)]
 struct Origin<'a> {
     filename: &'a [u8],
     cwd: &'a Path,
     kind: SourceKind,
+    keys_before: u32,
 }
 
 /// What the engine has declared, as the compiler reads it: php's
@@ -497,6 +518,21 @@ impl Shared {
     /// and for `eval`. Such a unit is never published: nothing outside
     /// the request reaches it, and it lives as long as the frame serving
     /// it or the functions and classes it declared.
+    ///
+    /// The runtime definition keys such a unit makes count on from the
+    /// ones the request's earlier compiles made, as php's one
+    /// `CG(rtd_key_counter)` does, so two `eval`s of one string declare
+    /// two anonymous classes:
+    ///
+    /// ```php
+    /// function make() { return eval('return new class { public $n; };'); }
+    /// $a = make(); $b = make();
+    /// var_dump(get_class($a) === get_class($b), $a instanceof $b);
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// bool(false)
+    /// ```
     pub(crate) fn compile_for(
         &self,
         req: &mut Request,
@@ -507,15 +543,17 @@ impl Shared {
         let ini = CompileIni {
             precision: req.precision(),
             short_open_tag: req.short_open_tag(),
+            assertions: req.assertions() >= 0,
         };
         let cwd = req.cwd().0;
         let origin = Origin {
             filename,
             cwd: &cwd,
             kind,
+            keys_before: req.keys_made,
         };
         let stack = req.stack_limit();
-        compile(
+        let unit = compile(
             source,
             origin,
             ini,
@@ -523,7 +561,10 @@ impl Shared {
             stack,
             req.heap_mut(),
             &self.map_ptr_last,
-        )
+        )?;
+        let made = u32::try_from(unit.runtime_keys.len()).unwrap_or(u32::MAX);
+        req.keys_made = req.keys_made.saturating_add(made);
+        Ok(unit)
     }
 
     /// `zend_call_stack_init` on the calling thread, from the startup
@@ -552,6 +593,9 @@ impl Shared {
             short_open_tag: self
                 .ini_default(b"short_open_tag")
                 .is_none_or(Request::ini_parse_bool),
+            assertions: self
+                .ini_default(b"zend.assertions")
+                .is_none_or(|value| Request::ini_parse_bytes(value) >= 0),
         }
     }
 
@@ -578,6 +622,7 @@ impl Shared {
                     filename: path,
                     cwd,
                     kind: SourceKind::File,
+                    keys_before: 0,
                 },
                 stack,
             ))
@@ -652,7 +697,7 @@ impl Shared {
 /// string(0) ""
 /// string(10) "ISO-8859-1"
 /// ```
-const CORE_INI: [(&str, &str); 41] = [
+const CORE_INI: [(&str, &str); 44] = [
     ("short_open_tag", "1"),
     ("fatal_error_backtraces", "1"),
     ("precision", "14"),
@@ -681,6 +726,11 @@ const CORE_INI: [(&str, &str); 41] = [
     ("zend.exception_string_param_max_len", "15"),
     ("zend.max_allowed_stack_size", "0"),
     ("zend.reserved_stack_size", "0"),
+    // `zend.assertions`, `1` (`Z/Zend/zend.c:264`), `EG(assertions)`:
+    // what `zend_compile_assert` compiles under and `ASSERT_CHECK`
+    // reads, moved between `-1` and the rest only at startup
+    // (`OnUpdateAssertions`, [`Request::assertions_updated`]).
+    ("zend.assertions", "1"),
     // `zend.enable_gc`, `On` (`Z/Zend/zend.c:265`), whose `on_modify` is
     // the collector's `gc_enable`.
     ("zend.enable_gc", "1"),
@@ -690,6 +740,11 @@ const CORE_INI: [(&str, &str); 41] = [
     // `disable_functions`, `PHP_INI_SYSTEM` (`Z/main/main.c:872`): read
     // once, as the function table is built (`function_table`).
     ("disable_functions", ""),
+    // `variables_order` and `request_order`, `PHP_INI_SYSTEM|PHP_INI_PERDIR`
+    // (`Z/main/main.c:851`): which auto-globals the request fills and
+    // the order `$_REQUEST` merges them in, read as each is made.
+    ("variables_order", "EGPCS"),
+    ("request_order", ""),
     // `main.c`'s entries for `mail()` and `php_syslog`, and
     // `sys_temp_dir`, `PHP_INI_SYSTEM` or `PHP_INI_SYSTEM|PHP_INI_PERDIR`
     // but `SMTP`, `smtp_port` and `syslog.filter`; a `NULL` default is
@@ -1184,6 +1239,7 @@ impl Engine {
             filename,
             cwd: &cwd,
             kind: SourceKind::File,
+            keys_before: 0,
         };
         self.shared.publish(source, origin, stack).ok()
     }
@@ -1229,6 +1285,7 @@ impl Engine {
                     filename: &script,
                     cwd: &description.cwd,
                     kind: SourceKind::File,
+                    keys_before: 0,
                 };
                 self.shared.publish(source, origin, stack).ok()?
             }
@@ -1331,14 +1388,24 @@ impl Engine {
             .script_name
             .clone()
             .unwrap_or_else(|| b"Standard input code".to_vec());
+        let web = description.is_web;
         let mut req = Request::new(Arc::clone(&self.shared), description);
+        // `php_request_startup` hashes the environment before the
+        // extensions' `RINIT` (`Z/main/main.c:1942`); what can fail is the
+        // memory limit, which the first allocation after it meets again.
+        let _ = req.hash_environment();
         for extension in &self.shared.extensions {
             if let Some(rinit) = extension.rinit {
                 let _ = rinit(&mut req);
             }
         }
-        // What `do_cli` registers once `php_request_startup` has run,
-        // before the program is compiled.
+        // What `do_cli` does once `php_request_startup` has run, before
+        // the program is compiled: `$_SERVER` named, which makes it
+        // (`Z/sapi/cli/php_cli.c:941`), and the standard handles
+        // registered.
+        if !web {
+            let _ = req.arm(php_unit::AutoGlobal::Server);
+        }
         let _ = req.register_file_handles();
         // Where the unit's constant strings live is where the unit
         // lives (design §5.2): a file's unit is published into the
@@ -1434,9 +1501,11 @@ impl Engine {
 
 /// The ini entries php reads while a file compiles, read once where the
 /// compile begins and handed down: `precision`, which `zend_double_to_str`
-/// renders a folded double constant at (`EG(precision)`), and
+/// renders a folded double constant at (`EG(precision)`),
 /// `short_open_tag`, which php's scanner opens a `<?` under
-/// (`CG(short_tags)`, `Z/main/main.c:820`). php keeps both where its
+/// (`CG(short_tags)`, `Z/main/main.c:820`), and whether `zend.assertions`
+/// is at or above zero, which `zend_compile_assert` compiles a call of
+/// `assert()` under (`EG(assertions)`). php keeps them where its
 /// compiler reads them as it compiles, so what the ini says when the
 /// compile begins is what the whole file is compiled under: the startup ini's
 /// for a unit bound for the cache, which every request that serves it
@@ -1445,6 +1514,7 @@ impl Engine {
 struct CompileIni {
     precision: i32,
     short_open_tag: bool,
+    assertions: bool,
 }
 
 /// One source compiled, with what the compiler refused kept instead of
@@ -1477,6 +1547,7 @@ fn compile(
         strict_types: false,
         precision: ini.precision,
         short_open_tag: ini.short_open_tag,
+        assertions: ini.assertions,
         persistent: declared.constants.to_vec(),
         functions: declared
             .functions
@@ -1485,6 +1556,7 @@ fn compile(
             .collect(),
         classes: declared.classes.to_vec(),
         stack,
+        keys_before: origin.keys_before,
     };
     let mut unit = php_compile::compile_source(source, &options, strings)?;
     assign_map_ptrs(&mut unit, map_ptr_last);
@@ -1539,7 +1611,19 @@ fn compile(
 /// Deprecated: Non-canonical cast (boolean) is deprecated, use the (bool) cast instead in %s on line 2
 /// 7|7|7 apples|1
 /// ```
+///
+/// Before them, each auto-global the unit names is armed
+/// ([`Unit::arms`]), as php's compiler arms one where it meets the name
+/// and opcache arms a cached file's `ping_auto_globals_mask` on a hit
+/// (`Z/ext/opcache/ZendAccelerator.c:1941`), so one made just in time is
+/// in `EG(symbol_table)` before the unit's first line, where the file
+/// names it and whether or not the line that names it is reached.
 pub(crate) fn note_compiled(req: &mut Request, unit: &Arc<Unit>) {
+    for global in &unit.arms {
+        // What a callback can raise is the memory limit, which the
+        // loop meets again at its first allocation.
+        let _ = req.arm(*global);
+    }
     for raised in &unit.diagnostics {
         req.note_error_in(
             raised.level,
@@ -1551,8 +1635,9 @@ pub(crate) fn note_compiled(req: &mut Request, unit: &Arc<Unit>) {
 }
 
 /// The unit's main op array served on a fresh entry frame, what it
-/// compiled to raised first and `$argv` and `$argc` seeded into the
-/// frame's CVs ([`Request::seed_argv`]); the loop's fatal, if any, ends
+/// compiled to raised first, the frame attached to `EG(symbol_table)`,
+/// which is how its `$argv` and `$argc` are the ones
+/// `php_hash_environment` wrote there; the loop's fatal, if any, ends
 /// the request.
 ///
 /// The frame is left the way php leaves the main one, which is not the
@@ -1574,11 +1659,6 @@ fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) {
             return;
         }
     };
-    if req.seed_argv(frame, unit).is_err() {
-        req.detach_symbol_table(frame);
-        req.pop_frame();
-        return;
-    }
     if let Err(fatal) = entry(req, frame) {
         req.end_in(&fatal);
     }
@@ -2717,10 +2797,12 @@ mod tests {
                     filename: b"witness.php",
                     cwd: Path::new(""),
                     kind: SourceKind::File,
+                    keys_before: 0,
                 },
                 CompileIni {
                     precision: 14,
                     short_open_tag: true,
+                    assertions: true,
                 },
                 Declared::default(),
                 StackLimit::UNCHECKED,
@@ -2980,7 +3062,7 @@ mod tests {
         let unit = Unit {
             main: php_unit::OpArray {
                 oplines: vec![php_unit::Opline {
-                    opcode: php_unit::Opcode::DeclareAnonClass,
+                    opcode: php_unit::Opcode::ExtNop,
                     ..php_unit::Opline::default()
                 }]
                 .into_boxed_slice(),
@@ -2992,7 +3074,7 @@ mod tests {
         assert_eq!(
             crate::tier::execute::<Nop>(&mut req, frame),
             Err(Fatal::Error(String::from(
-                "InternalError: ZEND_DECLARE_ANON_CLASS has no handler in this engine yet"
+                "InternalError: ZEND_EXT_NOP has no handler in this engine yet"
             )))
         );
     }

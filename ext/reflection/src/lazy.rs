@@ -407,6 +407,15 @@ fn lazy_compatible(
             &format!("Can not use {method} on static property {of}::${shown}"),
         ));
     }
+    // `ZEND_ACC_VIRTUAL`: a property with no slot has none to write.
+    if php_ext::call::property_is_virtual(req, class, &name) {
+        let of = String::from_utf8_lossy(&class_name_of(req, class)).into_owned();
+        return Err(throw(
+            req,
+            "ReflectionException",
+            &format!("Can not use {method} on virtual property {of}::${shown}"),
+        ));
+    }
     // `zend_class_can_be_lazy`: no internal class but `stdClass` on the
     // object's chain.
     let std_class = lookup_class(req, b"stdClass")?;

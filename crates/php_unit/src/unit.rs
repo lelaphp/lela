@@ -1,7 +1,7 @@
 //! A unit (design §4.7): one compiled file, immutable once published, its
 //! declarations beside their op arrays.
 
-use crate::decl::{ClassDecl, ConstDecl, FunctionDecl, Name};
+use crate::decl::{ClassDecl, ConstDecl, FunctionDecl, HookKind, Name};
 use crate::op::OpArray;
 
 /// A compiled PHP program: the main op array, the functions with their
@@ -31,6 +31,11 @@ pub struct Unit {
     /// declares too, and a native's body is Rust. In the order
     /// `zend_compile_class_decl` compiled them, class by class.
     pub methods: Vec<MethodBody>,
+    /// The op array of each hook a property of a class of `classes`
+    /// declares with a body, php's `prop_info->hooks[kind]` laid beside
+    /// the declaration model as a method's is: in the order
+    /// `zend_compile_property_hooks` compiled them.
+    pub hooks: Vec<HookBody>,
     /// Every function of the file that no name binds while it compiles:
     /// one written inside a block, a loop or another body, which php
     /// compiles with `toplevel` false and binds with the
@@ -51,6 +56,64 @@ pub struct Unit {
     /// and opcache replays them on a hit (`zend_emit_recorded_errors_ex`,
     /// `Z/ext/opcache/ZendAccelerator.c:1939`).
     pub diagnostics: Vec<Diagnostic>,
+    /// Each auto-global the file names, once, in the order the compiler
+    /// first met it: what compiling the file arms. php's compiler arms
+    /// one as it meets the name (`zend_is_auto_global`), which is when
+    /// one made just in time is laid into `EG(symbol_table)`, and opcache
+    /// keeps the same fact beside a cached file as its
+    /// `ping_auto_globals_mask` (`Z/ext/opcache/ZendAccelerator.c:1861`)
+    /// and arms each again on a hit. The engine arms each where it raises
+    /// [`Unit::diagnostics`].
+    pub arms: Vec<AutoGlobal>,
+}
+
+/// An auto-global that makes a variable: one of the names
+/// `php_startup_auto_globals` registers (`Z/main/php_variables.c:975`),
+/// which no CV holds and the compiler fetches by name from
+/// `EG(symbol_table)` (`ZEND_FETCH_GLOBAL`). `$GLOBALS` is registered too
+/// (`Z/Zend/zend.c:1060`) and makes no variable; the compiler reads it by
+/// oplines of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AutoGlobal {
+    Get,
+    Post,
+    Cookie,
+    Server,
+    Env,
+    Request,
+    Files,
+}
+
+impl AutoGlobal {
+    /// The one a variable's name is, `_SERVER` for `$_SERVER`; `None`
+    /// for every other name, `GLOBALS` among them.
+    #[must_use]
+    pub fn of(name: &[u8]) -> Option<AutoGlobal> {
+        Some(match name {
+            b"_GET" => AutoGlobal::Get,
+            b"_POST" => AutoGlobal::Post,
+            b"_COOKIE" => AutoGlobal::Cookie,
+            b"_SERVER" => AutoGlobal::Server,
+            b"_ENV" => AutoGlobal::Env,
+            b"_REQUEST" => AutoGlobal::Request,
+            b"_FILES" => AutoGlobal::Files,
+            _ => return None,
+        })
+    }
+
+    /// The variable's name without its `$`.
+    #[must_use]
+    pub fn name(self) -> &'static [u8] {
+        match self {
+            AutoGlobal::Get => b"_GET",
+            AutoGlobal::Post => b"_POST",
+            AutoGlobal::Cookie => b"_COOKIE",
+            AutoGlobal::Server => b"_SERVER",
+            AutoGlobal::Env => b"_ENV",
+            AutoGlobal::Request => b"_REQUEST",
+            AutoGlobal::Files => b"_FILES",
+        }
+    }
 }
 
 /// One method's body: which class of [`Unit::classes`] and which of its
@@ -59,6 +122,17 @@ pub struct Unit {
 pub struct MethodBody {
     pub class: u32,
     pub method: u32,
+    pub body: OpArray,
+}
+
+/// One hook's body: which class of [`Unit::classes`], which of its
+/// `properties` and which of that property's hooks the op array is the
+/// body of.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HookBody {
+    pub class: u32,
+    pub property: u32,
+    pub kind: HookKind,
     pub body: OpArray,
 }
 

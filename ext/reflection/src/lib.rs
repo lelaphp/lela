@@ -72,8 +72,8 @@ use php_ext::call::{
     read_class_prop_silent, read_static_prop, write_static_prop,
 };
 use php_ext::decl::{
-    ClassConstDecl, ClassDecl, ClassKind, ConstExpr, EnumBacking, FunctionDecl, MethodDecl, Name,
-    Parameter, ParameterDefault, PropertyDecl, Type, Visibility,
+    ClassConstDecl, ClassDecl, ClassKind, ConstExpr, EnumBacking, FunctionDecl, HookKind,
+    MethodDecl, Name, Parameter, ParameterDefault, PropertyDecl, Type, Visibility,
 };
 use php_ext::raising::{Thrown, arg_count_error, arg_type_error, deprecated, throw};
 use php_ext::request::{ExtensionId, PHP_VERSION, Request};
@@ -168,6 +168,11 @@ struct Reflected {
     /// The reference a `ReflectionReference` holds in `intern->obj`,
     /// one owner of it.
     reference: Option<PhpRef>,
+    /// Whether a `ReflectionMethod` reflects a property's hook, which
+    /// php's `intern->ptr` holds as the `zend_function` itself and no
+    /// method table lists: the reflector's `$name`, `$prop::get` or
+    /// `$prop::set`, names it among the hooks of `$class`'s property.
+    hook: bool,
 }
 
 /// `reflection_object_handlers`
@@ -243,6 +248,20 @@ fn keep_closure(req: &mut Request, this: PhpObject, object: PhpObject) {
     if let Some(released) = released {
         req.release(released.as_value());
     }
+}
+
+/// `intern->ptr` as `reflection_method_factory` writes it over a hook
+/// (`ReflectionProperty::getHook`), which the method accessors then
+/// find among the property's hooks rather than among its methods.
+fn keep_hook(req: &mut Request, this: PhpObject) {
+    if let Some(reflected) = this.native_mut::<Reflected>(req) {
+        reflected.hook = true;
+    }
+}
+
+/// Whether a `ReflectionMethod` reflects a hook ([`keep_hook`]).
+fn kept_hook(req: &Request, this: PhpObject) -> bool {
+    this.native::<Reflected>(req).is_some_and(|kept| kept.hook)
 }
 
 /// `intern->ptr` as `reflection_attribute_factory` writes it: the
@@ -3040,7 +3059,19 @@ fn reflection_property_get_value(req: &mut Request) -> Result<Value, Thrown> {
     // the class the reflector was asked about.
     let holder = if declared.is_some() { class } else { asked };
     held_to(req, *object, holder)?;
+    if hooked(req, object.class(), &name) {
+        return php_ext::call::read_hooked_property(req, object, &name);
+    }
     read_instance_property(req, *object, class, &name, declared.as_ref())
+}
+
+/// Whether the property `name` of `class` carries a hook, php's
+/// `prop_info->hooks`, which `getValue`, `setValue` and `isInitialized`
+/// reach the object's handlers for rather than its slot.
+fn hooked(req: &Request, class: ClassId, name: &[u8]) -> bool {
+    [HookKind::Get, HookKind::Set]
+        .into_iter()
+        .any(|kind| php_ext::call::property_hook(req, class, name, kind).is_some())
 }
 
 /// `instanceof_function(Z_OBJCE_P(object), ce)` or php's refusal.
@@ -3107,23 +3138,48 @@ fn asked_class(req: &mut Request, declaring: ClassId) -> ClassId {
         .unwrap_or(declaring)
 }
 
+/// `reflection_property_get_effective_prop`: the class whose table the
+/// property is read off for `object`, the object's own where it is not
+/// the class the reflector names and the property is not private, since
+/// the object's class may override it with hooks of its own.
+fn effective_class(
+    asked: ClassId,
+    object: PhpObject,
+    declared: Option<&PropertyDecl>,
+    declaring: ClassId,
+) -> ClassId {
+    if asked != object.class()
+        && !declared.is_some_and(|decl| decl.visibility == Visibility::Private)
+    {
+        object.class()
+    } else {
+        declaring
+    }
+}
+
 /// `ReflectionProperty::getRawValue(object $object)`: the value as
-/// stored, past the `get` one of the property's hooks where it has them. Every
-/// property here is one without hooks (#427), so the read is
-/// `getValue`'s instance arm, the object held to `intern->ce`; a
-/// `static` property is php's `ReflectionException`.
+/// stored, past the `get` hook of the property the object's class holds
+/// ([`php_ext::call::read_raw_property`], which a virtual property
+/// refuses); with no such hook, `getValue`'s instance arm, the object
+/// held to `intern->ce`; a `static` property is php's
+/// `ReflectionException`.
 ///
 /// ```php
 /// class C { public $p = 1; private int $q = 2; public static $s; } $o = new C;
 /// var_dump((new ReflectionProperty('C', 'p'))->getRawValue($o), (new ReflectionProperty('C', 'q'))->getRawValue($o));
 /// try { (new ReflectionProperty('C', 's'))->getRawValue($o); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
 /// try { (new ReflectionProperty('C', 'p'))->getRawValue(new stdClass); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+/// class H { public $b = 3 { get => $this->b * 100; } public $v { get => 1; } }
+/// var_dump((new ReflectionProperty('H', 'b'))->getRawValue(new H));
+/// try { (new ReflectionProperty('H', 'v'))->getRawValue(new H); } catch (Error $e) { echo $e->getMessage(), "\n"; }
 /// ```
 /// ```expect
 /// int(1)
 /// int(2)
 /// May not use getRawValue on static properties
 /// Given object is not an instance of the class this property was declared in
+/// int(3)
+/// Must not read from virtual property H::$v
 /// ```
 fn reflection_property_get_raw_value(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 1)?;
@@ -3142,26 +3198,36 @@ fn reflection_property_get_raw_value(req: &mut Request) -> Result<Value, Thrown>
             "May not use getRawValue on static properties",
         ));
     }
+    let effective = effective_class(asked, object, declared.as_ref(), class);
+    if php_ext::call::property_hook(req, effective, &name, HookKind::Get).is_some() {
+        return php_ext::call::read_raw_property(req, &object, &name);
+    }
     read_instance_property(req, object, class, &name, declared.as_ref())
 }
 
 /// `ReflectionProperty::setRawValue(object $object, mixed $value)`: the
-/// value stored past the `set` one of the property's hooks where it has them. Every
-/// property here is one without hooks (#427), so the write is
-/// `write_property` under `fake_scope`, `setValue`'s instance arm; a
-/// `static` property is php's `ReflectionException`.
+/// value stored past the `set` hook of the property the object's class
+/// holds ([`php_ext::call::write_raw_property`], which a virtual
+/// property refuses); with no such hook, `write_property` under
+/// `fake_scope`, `setValue`'s instance arm; a `static` property is
+/// php's `ReflectionException`.
 ///
 /// ```php
 /// class C { public $p = 1; public static $s; } $o = new C;
 /// (new ReflectionProperty('C', 'p'))->setRawValue($o, 5); var_dump($o->p);
 /// try { (new ReflectionProperty('C', 's'))->setRawValue($o, 1); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+/// class H { public $b { get => $this->b; set => $value * 2; } }
+/// $h = new H;
+/// (new ReflectionProperty('H', 'b'))->setRawValue($h, 7);
+/// var_dump($h->b);
 /// ```
 /// ```expect
 /// int(5)
 /// May not use setRawValue on static properties
+/// int(7)
 /// ```
 fn reflection_property_set_raw_value(req: &mut Request) -> Result<Value, Thrown> {
-    let (_, name, declared) = this_property(req)?;
+    let (class, name, declared) = this_property(req)?;
     exactly_arguments(req, 2)?;
     let given = req.argument(1).unwrap_or_default();
     let given = php_ext::coerce::coerce_param(req, &given, &Type::Object, 1)?;
@@ -3178,6 +3244,12 @@ fn reflection_property_set_raw_value(req: &mut Request) -> Result<Value, Thrown>
     let value = req.argument(2).unwrap_or_default().deref();
     req.addref(&value);
     let key = PhpString::new(req, &name)?;
+    let asked = asked_class(req, class);
+    let effective = effective_class(asked, object, declared.as_ref(), class);
+    if php_ext::call::property_hook(req, effective, &name, HookKind::Set).is_some() {
+        php_ext::call::write_raw_property(req, &object, key, value)?;
+        return Ok(Value::null());
+    }
     object.set_prop(req, key, value)?;
     Ok(Value::null())
 }
@@ -3233,6 +3305,11 @@ fn reflection_property_is_initialized(req: &mut Request) -> Result<Value, Thrown
     };
     let holder = if declared.is_some() { class } else { asked };
     held_to(req, *object, holder)?;
+    // `has_property(ZEND_PROPERTY_EXISTS)` finds a virtual property
+    // whatever it holds, having no slot to hold nothing in.
+    if php_ext::call::property_is_virtual(req, object.class(), &name) {
+        return Ok(Value::bool(true));
+    }
     Ok(Value::bool(object.prop(req, &name).is_some()))
 }
 
@@ -3357,6 +3434,10 @@ fn reflection_property_set_value(req: &mut Request) -> Result<Value, Thrown> {
     let value = req.argument(2).unwrap_or_default().deref();
     req.addref(&value);
     let key = PhpString::new(req, &name)?;
+    if hooked(req, object.class(), &name) {
+        php_ext::call::write_hooked_property(req, object, key, value)?;
+        return Ok(Value::null());
+    }
     object.set_prop(req, key, value)?;
     Ok(Value::null())
 }
@@ -3912,14 +3993,13 @@ fn class_string(
         } else {
             "Static properties"
         };
-        let chosen: Vec<&PropertyDecl> = properties
+        let chosen: Vec<&(PropertyDecl, ClassId)> = properties
             .iter()
             .filter(|(p, _)| p.is_instance == is_instance)
-            .map(|(p, _)| p)
             .collect();
         let _ = write!(out, "\n{indent}  - {block} [{}] {{\n", chosen.len());
-        for property in chosen {
-            out.push_str(&property_string(req, property, &sub_indent));
+        for (property, declaring) in chosen {
+            out.push_str(&property_string(req, *declaring, property, &sub_indent));
         }
         let _ = writeln!(out, "{indent}  }}");
 
@@ -4024,12 +4104,19 @@ fn class_header(
     out.push_str("> ");
     // `ce->get_iterator`, which `zend_implement_iterator` and
     // `zend_implement_aggregate` give a class that is `Traversable`
-    // through `Iterator` or `IteratorAggregate`, and `Generator` has.
-    let iterable = matches!(decl.kind, ClassKind::Class | ClassKind::Enum)
+    // through `Iterator` or `IteratorAggregate`, and `Generator` has,
+    // and `zend_compile_prop_decl` gives a class declaring a hooked
+    // property, `zend_hooked_object_get_iterator`, which a child
+    // inherits.
+    let traversable = matches!(decl.kind, ClassKind::Class | ClassKind::Enum)
         && lookup_class(req, b"Traversable")
             .ok()
             .flatten()
             .is_some_and(|traversable| class_is(req, class, traversable, 0));
+    let iterable = traversable
+        || linked_properties(req, class)
+            .iter()
+            .any(|(property, _)| property.hooks.is_some());
     if iterable {
         out.push_str("<iterateable> ");
     }
@@ -4192,10 +4279,15 @@ fn visibility_word(visibility: Visibility) -> &'static str {
 /// declaration has them, the default being the
 /// slot of `default_properties_table` as `format_default_value` prints
 /// it: an untyped property nothing initialised holds `NULL`, a typed
-/// one is `UNDEF` and prints no default. Hooks, `abstract`, `final`
-/// and the asymmetric `(set)` visibilities have no bit on the
-/// declaration model yet and are not rendered.
-fn property_string(req: &mut Request, property: &PropertyDecl, indent: &str) -> String {
+/// one is `UNDEF` and prints no default, and so is a virtual one. The
+/// `{ get; set; }` list is `prop->hooks` as the table of `declaring`
+/// holds it, the inherited ones included, each `final` where it is.
+fn property_string(
+    req: &mut Request,
+    declaring: ClassId,
+    property: &PropertyDecl,
+    indent: &str,
+) -> String {
     let mut out = String::new();
     if let Some(doc) = &property.doc_comment {
         out.push_str(indent);
@@ -4206,6 +4298,13 @@ fn property_string(req: &mut Request, property: &PropertyDecl, indent: &str) -> 
     out.push_str("Property [ ");
     // `_property_string`'s order: `abstract`, `final`, the visibility,
     // the set visibility, `static`, `readonly`, `virtual`, the type.
+    if property
+        .hooks
+        .as_ref()
+        .is_some_and(|hooks| hooks.is_abstract)
+    {
+        out.push_str("abstract ");
+    }
     if property.is_final {
         out.push_str("final ");
     }
@@ -4229,16 +4328,41 @@ fn property_string(req: &mut Request, property: &PropertyDecl, indent: &str) -> 
     if property.is_readonly {
         out.push_str("readonly ");
     }
+    let name = &property.name.0;
+    let is_virtual = php_ext::call::property_is_virtual(req, declaring, name);
+    if is_virtual {
+        out.push_str("virtual ");
+    }
     if let Some(ty) = &property.ty {
         let _ = write!(out, "{} ", type_to_string(ty));
     }
-    let _ = write!(out, "${}", String::from_utf8_lossy(&property.name.0));
+    let _ = write!(out, "${}", String::from_utf8_lossy(name));
     match (&property.default, &property.ty) {
+        _ if is_virtual => {}
         (Some(default), _) => {
             let _ = write!(out, " = {}", default_value_string(req, default));
         }
         (None, None) => out.push_str(" = NULL"),
         (None, Some(_)) => {}
+    }
+    let hooks: Vec<(HookKind, bool)> = HookKind::ALL
+        .into_iter()
+        .filter_map(|kind| {
+            php_ext::call::property_hook(req, declaring, name, kind)
+                .map(|(_, hook)| (kind, hook.is_final))
+        })
+        .collect();
+    if property.hooks.is_some() || !hooks.is_empty() {
+        out.push_str(" {");
+        for (kind, is_final) in hooks {
+            let _ = write!(
+                out,
+                " {}{};",
+                if is_final { "final " } else { "" },
+                kind.name()
+            );
+        }
+        out.push_str(" }");
     }
     out.push_str(" ]\n");
     out

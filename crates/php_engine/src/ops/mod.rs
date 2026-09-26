@@ -1220,6 +1220,59 @@ const MAY_BE_STRING: u32 = 1 << 6;
 /// `zend_verify_property_type_error` (`Z/Zend/zend_execute.c:961`): the
 /// `TypeError` naming the value, the class that declared the property,
 /// the property and the declared type, in php's words.
+/// `zend_verify_class_constant_type` (`Z/Zend/zend_execute.c:1524`),
+/// what `zend_update_class_constant` holds a typed constant's value to
+/// once its expression is evaluated: the type as a property's is held,
+/// strictly, so the one conversion is an int to a float, and php's
+/// `TypeError` naming the value's type where it neither satisfies nor
+/// converts, named as `zend_zval_type_name` names it, an object by its
+/// class. The value is the caller's to have back; the one it is refused
+/// is not given up here, since a constant's read hands out the value
+/// the table holds.
+///
+/// ```php
+/// class A { const int X = self::Y; const Y = 's'; const float F = self::I; const I = 2; }
+/// var_dump(A::F);
+/// try { var_dump(A::X); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// float(2)
+/// Cannot assign string to class constant A::X of type int
+/// ```
+pub(crate) fn verify_class_constant_type(
+    req: &mut Request,
+    value: Value,
+    ty: &php_unit::decl::Type,
+    declaring: crate::api::values::ClassId,
+    name: &[u8],
+) -> Result<Value, Thrown> {
+    let held = value.deref();
+    let coerced = match type_assignable(req, &held, ty, declaring, true) {
+        Assignable::Yes => return Ok(value),
+        // The one conversion a strict check makes is an int to a
+        // float, so what is given up for it holds nothing.
+        Assignable::Coerce => crate::api::coerce::scalar_type_hint(req, &held, ty.mask(), true)?,
+        Assignable::No => None,
+    };
+    if let Some(coerced) = coerced {
+        return Ok(coerced);
+    }
+    let class = req.class_name(declaring);
+    let declared = crate::api::coerce::declared_type_name(ty);
+    let given = match held.as_object() {
+        Some(object) => req.class_name(object.class()),
+        None => held.type_name().to_string(),
+    };
+    Err(throw(
+        req,
+        "TypeError",
+        &format!(
+            "Cannot assign {given} to class constant {class}::{} of type {declared}",
+            String::from_utf8_lossy(name)
+        ),
+    ))
+}
+
 fn property_type_error(
     req: &mut Request,
     value: &Value,
@@ -1276,6 +1329,14 @@ pub(crate) fn properties_for(
     // carries unmangled here.
     let rows = match table.get_properties_for(req, object, purpose)? {
         Some(rows) => return Ok(rows),
+        // `zend_std_get_properties_for`'s `num_hooked_props` arm for the
+        // readers that run hooks.
+        None if matches!(purpose, PropertyPurpose::Json | PropertyPurpose::VarExport) => {
+            if let Some(rows) = req.hooked_properties_for(object)? {
+                return Ok(rows);
+            }
+            table.get_properties(req, object)?
+        }
         None => match purpose {
             // `zend_std_get_properties_for`: the debug table of a lazy
             // object and the `(array)` cast read what stands without

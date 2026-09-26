@@ -115,21 +115,14 @@ impl Emit<'_> {
                     return self.call_var(callee, &arguments);
                 }
                 tree::Expr::ScopedAccessExpr(scoped) => {
-                    let node = &self.parsed.tree[scoped];
-                    let class = self.class_spec(node.scope);
-                    let Some(tree::ScopedSelector::MemberName(method)) = node.member else {
-                        return Err(self.unread("a static call whose method is named at run time"));
-                    };
-                    let Some(method) = self.parsed.tree[method].name else {
-                        return Err(self.unread("a static call"));
-                    };
-                    let method = self.text(method).to_vec();
-                    return self.static_call(class, &method, &arguments);
+                    let class = self.class_spec(self.parsed.tree[scoped].scope);
+                    let method = self.scoped_method_of(scoped)?;
+                    return self.static_call(class, method, &arguments);
                 }
                 tree::Expr::MemberAccessExpr(access) if !self.is_nullsafe(access) => {
-                    let method = self.member_name_of(access, line)?;
+                    let method = self.member_of(access)?;
                     let object = self.parsed.tree[access].obj;
-                    return self.method_call(object, &method, &arguments, false);
+                    return self.method_call(object, method, &arguments, false);
                 }
                 _ => {}
             }

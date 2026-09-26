@@ -19,15 +19,17 @@
 //!
 //! A variable sent to a callee the compiler knows nothing of is fetched
 //! as php fetches it: a CV as it stands, `$this` by `FETCH_THIS`, and a
-//! dimension, a property or a class's property by the `_FUNC_ARG`
-//! fetch under a `CHECK_FUNC_ARG`, which reads the parameter's
+//! dimension, a property, a class's property or a variable fetched by
+//! name, an auto-global or `$$x`, by the `_FUNC_ARG` fetch under a
+//! `CHECK_FUNC_ARG`, which reads the parameter's
 //! by-reference bit off the callee as the program serves and fetches
 //! for writing or for reading by it; `SEND_FUNC_ARG` then sends what
 //! was fetched the same way.
 
+use php_heap::Zval;
 use php_syntax::tree::{self, Node, NodeId};
 use php_unit::decl::Parameter;
-use php_unit::{Opcode, OperandKind, Opline};
+use php_unit::{AutoGlobal, Opcode, OperandKind, Opline};
 
 use super::{Emit, Fetch, Over, SimpleVar, walk};
 use crate::CompileError;
@@ -35,12 +37,16 @@ use crate::CompileError;
 /// One argument at a call site, php's child of a `ZEND_AST_ARG_LIST`:
 /// a plain expression, one written `name: value`
 /// (`ZEND_AST_NAMED_ARG`), or one written `...value`
-/// (`ZEND_AST_UNPACK`).
+/// (`ZEND_AST_UNPACK`); or one the compiler adds to the list itself,
+/// a constant written nowhere, at its name where it has one, which is
+/// the description `zend_compile_assert` hands `assert()`
+/// (`zend_ast_create_zval_from_str`).
 #[derive(Clone)]
 pub(super) enum Arg {
     Positional(tree::Expr),
     Named(Box<[u8]>, tree::Expr),
     Unpack(tree::Expr),
+    Made(Option<Box<[u8]>>, Zval),
 }
 
 /// A call site's argument list: the arguments as written, and the
@@ -70,7 +76,7 @@ impl Args {
             .iter()
             .map(|arg| match arg {
                 Arg::Positional(value) => Some(*value),
-                Arg::Named(..) | Arg::Unpack(_) => None,
+                Arg::Named(..) | Arg::Unpack(_) | Arg::Made(..) => None,
             })
             .collect()
     }
@@ -166,7 +172,7 @@ enum ArgAt {
 /// reaches it.
 enum Placed {
     Send {
-        value: tree::Expr,
+        value: Sent,
         at: ArgAt,
         number: Option<u32>,
     },
@@ -175,6 +181,14 @@ enum Placed {
         count: u32,
     },
     Refused(&'static str),
+}
+
+/// What a placed argument sends: an expression the list holds, or the
+/// constant the compiler made ([`Arg::Made`]).
+#[derive(Clone, Copy)]
+enum Sent {
+    Written(tree::Expr),
+    Made(Zval),
 }
 
 /// `zend_compile_args`' placement of a whole list, which reads the
@@ -207,45 +221,53 @@ impl Plan {
         let mut callee = callee;
         let mut uses_unpack = false;
         for argument in &arguments.list {
-            let placed = match argument {
-                Arg::Unpack(_) if uses_named => {
-                    Placed::Refused("Cannot use argument unpacking after named arguments")
-                }
+            let (name, value) = match argument {
                 Arg::Unpack(value) => {
-                    // "Unpack may contain named arguments."
-                    plan.may_have_undef = true;
-                    if callee.is_none_or(|callee| callee.variadic.is_some()) {
-                        plan.extra_named = true;
-                    }
-                    uses_unpack = true;
-                    callee = None;
-                    Placed::Unpack {
-                        value: *value,
-                        count: plan.count,
-                    }
+                    let placed = if uses_named {
+                        Placed::Refused("Cannot use argument unpacking after named arguments")
+                    } else {
+                        // "Unpack may contain named arguments."
+                        plan.may_have_undef = true;
+                        if callee.is_none_or(|callee| callee.variadic.is_some()) {
+                            plan.extra_named = true;
+                        }
+                        uses_unpack = true;
+                        callee = None;
+                        Placed::Unpack {
+                            value: *value,
+                            count: plan.count,
+                        }
+                    };
+                    plan.placed.push(placed);
+                    continue;
                 }
-                Arg::Positional(_) if uses_unpack => {
+                Arg::Positional(value) => (None, Sent::Written(*value)),
+                Arg::Named(name, value) => (Some(name), Sent::Written(*value)),
+                Arg::Made(name, value) => (name.as_ref(), Sent::Made(*value)),
+            };
+            let placed = match name {
+                None if uses_unpack => {
                     Placed::Refused("Cannot use positional argument after argument unpacking")
                 }
-                Arg::Positional(_) if uses_named => {
+                None if uses_named => {
                     Placed::Refused("Cannot use positional argument after named argument")
                 }
-                Arg::Positional(value) => {
+                None => {
                     plan.count += 1;
                     Placed::Send {
-                        value: *value,
+                        value,
                         at: ArgAt::Number(plan.count),
                         number: Some(plan.count),
                     }
                 }
-                Arg::Named(name, value) => {
+                Some(name) => {
                     uses_named = true;
                     let number = callee.and_then(|callee| callee.arg_num(name));
                     if callee.is_some() && number == Some(plan.count + 1) && !plan.may_have_undef {
                         // "Using named arguments, but passing in order."
                         plan.count += 1;
                         Placed::Send {
-                            value: *value,
+                            value,
                             at: ArgAt::Number(plan.count),
                             number,
                         }
@@ -256,7 +278,7 @@ impl Plan {
                             plan.extra_named = true;
                         }
                         Placed::Send {
-                            value: *value,
+                            value,
                             at: ArgAt::Name(name.clone()),
                             number,
                         }
@@ -363,8 +385,27 @@ impl Emit<'_> {
     ) -> Result<(), CompileError> {
         for placed in &plan.placed {
             match placed {
-                Placed::Send { value, at, number } => {
+                Placed::Send {
+                    value: Sent::Written(value),
+                    at,
+                    number,
+                } => {
                     self.send_arg(*value, at, callee, *number, arguments.line)?;
+                }
+                Placed::Send {
+                    value: Sent::Made(value),
+                    at,
+                    number,
+                } => {
+                    // A constant, which `zend_compile_args` sends as any
+                    // expression that is no variable and no call.
+                    let known = callee.map(|callee| callee.mode(*number));
+                    let opcode = match known.filter(|_| number.is_some()) {
+                        Some(SendMode::Value | SendMode::PreferRef) => Opcode::SendVal,
+                        Some(SendMode::Ref) | None => Opcode::SendValEx,
+                    };
+                    let operand = self.operand(super::Where::Constant(*value));
+                    self.send(opcode, operand, at)?;
                 }
                 Placed::Unpack { value, count } => self.send_unpack(*value, *count)?,
                 Placed::Refused(message) => return Err(self.compile_error(*message)),
@@ -423,7 +464,10 @@ impl Emit<'_> {
         // A `ZEND_AST_ZNODE` is no call and no variable: the value it
         // holds is sent as any other expression's is.
         let held = self.znode(value).is_some();
-        if !held && self.is_call(value) {
+        // "Treat passing of $GLOBALS the same as passing a call": its
+        // `FETCH_GLOBALS` temporary is `SEND_VAL_EX` where the parameter
+        // may take a reference, which is the error the program meets.
+        if !held && (self.is_call(value) || self.is_globals(value)) {
             // `zend_is_call`: the call's `VAR`, or the constant or the
             // temporary a call php served itself left.
             let returned = self.expr(value)?;
@@ -586,10 +630,10 @@ impl Emit<'_> {
     }
 
     /// `zend_is_variable` over what `zend_compile_args` sends: a plain
-    /// variable's CV, `$this`, or a dimension, a property or a class's
-    /// property, which are fetched; none for anything else. A variable
-    /// named as the program serves is not read here, and is sent as the value it
-    /// reads, and so is a chain a `?->` stands in, php's
+    /// variable's CV, `$this`, or a dimension, a property, a class's
+    /// property, an auto-global or a variable named by a value the
+    /// program computes, which are fetched; none for anything else. A
+    /// chain a `?->` stands in is sent as the value it reads, php's
     /// `zend_is_variable(arg) && !zend_ast_is_short_circuited(arg)`.
     ///
     /// ```php
@@ -618,7 +662,15 @@ impl Emit<'_> {
             tree::Expr::SimpleVarExpr(id) => Some(match self.simple_var_of(id, self.line)? {
                 SimpleVar::Cv(name) => Variable::Cv(self.lookup_cv(&name)),
                 SimpleVar::This => Variable::This,
+                // `zend_try_compile_cv` refuses an auto-global, so it is
+                // fetched by its name from `EG(symbol_table)`.
+                SimpleVar::Auto(_) => Variable::Fetched,
+                // [`Self::send_arg`] sends `$GLOBALS` as a call.
+                SimpleVar::Globals => return Ok(None),
             }),
+            tree::Expr::VarVarExpr(_) | tree::Expr::DynamicVarExpr(_) => {
+                self.named_variable(value)?
+            }
             tree::Expr::SubscriptExpr(_) | tree::Expr::MemberAccessExpr(_) => {
                 Some(Variable::Fetched)
             }
@@ -626,6 +678,77 @@ impl Emit<'_> {
                 Some(Variable::Fetched)
             }
             _ => None,
+        })
+    }
+
+    /// `$$x` or `${expr}` as `zend_compile_args` sorts it, nothing
+    /// compiled to answer: a name the program computes is no
+    /// `ZEND_AST_ZVAL`, which `zend_try_compile_cv` refuses, and so is an
+    /// auto-global's written out, both fetched by name; `${'this'}` is
+    /// `is_this_fetch`'s; any other name written out is the CV it names,
+    /// or `$GLOBALS`, and is sent as the value it reads.
+    ///
+    /// So to a callee nothing is known of, an auto-global and `$$x` are
+    /// `CHECK_FUNC_ARG` and `FETCH_FUNC_ARG` from the table they name,
+    /// and a parameter by reference binds the variable itself; `$GLOBALS`
+    /// is sent as a call's value is, which such a parameter refuses; and
+    /// to a callee the table has, `sort($_COOKIE)` is `FETCH_W (global)`
+    /// and `SEND_REF`:
+    ///
+    /// ```php
+    /// function run() {
+    ///     fill($_ENV);
+    ///     $n = 'loc';
+    ///     fill($$n);
+    ///     fill(v: ${'_POST'});
+    ///     var_dump($_ENV, $loc, $_POST, byval($_GET), byval($$n));
+    ///     try { fill($GLOBALS); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    ///     sort($_COOKIE);
+    /// }
+    /// $_COOKIE = [3, 1];
+    /// run();
+    /// var_dump($_COOKIE);
+    /// function fill(&$v) { $v = 'filled'; }
+    /// function byval($v) { return $v; }
+    /// ```
+    /// ```expect
+    /// string(6) "filled"
+    /// string(6) "filled"
+    /// string(6) "filled"
+    /// array(0) {
+    /// }
+    /// string(6) "filled"
+    /// fill(): Argument #1 ($v) could not be passed by reference
+    /// array(2) {
+    ///   [0]=>
+    ///   int(1)
+    ///   [1]=>
+    ///   int(3)
+    /// }
+    /// ```
+    fn named_variable(&mut self, value: tree::Expr) -> Result<Option<Variable>, CompileError> {
+        let inner = match value {
+            tree::Expr::VarVarExpr(id) => self.parsed.tree[id].inner,
+            tree::Expr::DynamicVarExpr(id) => self.parsed.tree[id].inner,
+            _ => None,
+        };
+        let Some(inner) = inner else {
+            return Ok(None);
+        };
+        let Some(written) = self.written(inner)? else {
+            return Ok(Some(Variable::Fetched));
+        };
+        let written = self.stringified(written)?.unwrap_or(written);
+        let Some(name) = written.as_str() else {
+            return Ok(None);
+        };
+        let name = name.bytes();
+        Ok(if name == b"this" {
+            Some(Variable::This)
+        } else if AutoGlobal::of(name).is_some() {
+            Some(Variable::Fetched)
+        } else {
+            None
         })
     }
 

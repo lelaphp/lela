@@ -359,6 +359,10 @@ fn function_decl_of(req: &mut Request, function: &FunctionRef) -> Option<Functio
             req.function_decl(found).cloned()
         }
         FunctionRef::Method(class, name) => {
+            if let Some((property, kind)) = super::member::hook_name(name) {
+                return php_ext::call::property_hook(req, *class, property, kind)
+                    .map(|(_, decl)| decl.function);
+            }
             let lowered = name.to_ascii_lowercase();
             linked_methods(req, *class)
                 .into_iter()
@@ -1277,6 +1281,17 @@ pub(super) fn this_function(req: &mut Request) -> Result<(FunctionRef, FunctionD
     let function = if let Some(scope) = scope {
         {
             let class = class_named(req, &scope)?;
+            // A hook's reflector names the hook, `$name::get`, which no
+            // method table holds.
+            if let Some((property, kind)) = super::member::hook_name(&name)
+                && let Some((scope, decl)) =
+                    php_ext::call::property_hook(req, class, property, kind)
+            {
+                return Ok((
+                    FunctionRef::Method(scope, decl.function.name.0.to_vec()),
+                    decl.function,
+                ));
+            }
             let Some(found) = super::method_or_invoke(req, class, &name, kept) else {
                 let class = class_name_of(req, class);
                 return Err(throw(

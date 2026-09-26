@@ -560,6 +560,54 @@ fn git_prints_the_log_and_the_status() {
     assert!(md.contains("?? untracked.txt"), "{md}");
 }
 
+/// #822: a working tree with more changed paths than the section prints
+/// keeps twenty of them, `STATUS_LINES` in `status.rs`, below the
+/// branch's line and names how many it left out; the JSON keeps the same
+/// lines with the number beside them.
+#[test]
+fn git_cuts_the_status_at_twenty_paths_and_names_the_rest() {
+    let root = scratch("git-cut");
+    for args in [
+        &["init", "-q", "-b", "main"][..],
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "cut",
+        ],
+    ] {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+    }
+    for i in 0..40 {
+        std::fs::write(root.join(format!("untracked-{i:02}.txt")), "x").unwrap();
+    }
+    // The scratch's own seams.toml, oracle.toml and docs/ are untracked too.
+    let (ok, md, err) = status(&root, &["--section", "git"]);
+    assert!(ok, "{err}");
+    let paths = md.lines().filter(|l| l.starts_with("?? ")).count();
+    assert_eq!(paths, 20, "{md}");
+    assert!(
+        md.contains("\n… and 23 more; git status --short\n```"),
+        "{md}"
+    );
+    let (ok, json, err) = status(&root, &["--section", "git", "--format", "json"]);
+    assert!(ok, "{err}");
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(value["status"].as_array().map(Vec::len), Some(21), "{json}");
+    assert_eq!(value["status_omitted"], 23, "{json}");
+}
+
 /// #787: a track's reading of a subset is the one at its tip or its
 /// nearest ancestor on the track. A branch cut behind the tip, whose
 /// worktree's log `worktree retire` appends into the track's store after

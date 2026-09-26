@@ -120,7 +120,11 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Re
             }
             object.protect();
             let props = object.props_for(req, PropertyPurpose::Debug)?;
-            let name = String::from_utf8_lossy(&class_name(req, *object)).into_owned();
+            // `ZSTR_VAL(class_name)` under `%s`: up to the NUL of an
+            // anonymous class's name.
+            let full = class_name(req, *object);
+            let name = String::from_utf8_lossy(full.split(|b| *b == 0).next().unwrap_or_default())
+                .into_owned();
             // `php_var_dump_object_prefix`: what a lazy object is.
             let prefix = match object.laziness() {
                 Laziness::Eager => "",
@@ -141,23 +145,20 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Re
                 out.extend(std::iter::repeat_n(b' ', level + 1));
                 let bytes = prop.as_bytes();
                 out.push(b'[');
-                match bytes.strip_prefix(b"\0").and_then(|rest| {
-                    let end = rest.iter().position(|b| *b == 0)?;
-                    Some((&rest[..end], &rest[end + 1..]))
-                }) {
-                    Some((b"*", name)) => {
+                match super::unmangle(bytes) {
+                    (Some(b"*"), name) => {
                         out.push(b'"');
                         out.extend_from_slice(name);
                         out.extend_from_slice(b"\":protected");
                     }
-                    Some((class, name)) => {
+                    (Some(class), name) => {
                         out.push(b'"');
                         out.extend_from_slice(name);
                         out.extend_from_slice(b"\":\"");
-                        out.extend_from_slice(class);
+                        out.extend_from_slice(class.split(|b| *b == 0).next().unwrap_or_default());
                         out.extend_from_slice(b"\":private");
                     }
-                    None => {
+                    (None, _) => {
                         out.push(b'"');
                         out.extend_from_slice(bytes);
                         out.push(b'"');

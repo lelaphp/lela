@@ -148,6 +148,7 @@ fn php_token_class() -> (ClassDecl, Vec<(MethodDecl, Entry)>) {
         default: None,
         attributes: Vec::new(),
         doc_comment: None,
+        hooks: None,
     };
     let decl = ClassDecl {
         name: Name(b"PhpToken".as_slice().into()),
