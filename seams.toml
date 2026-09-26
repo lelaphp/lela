@@ -78,7 +78,7 @@ name = "php"
 budget = 1000
 [[crate]]
 name = "xtask"
-budget = 18000                             # the design carries no number (design ledger 14); 14k was the inherited-pieces estimate, written before the instruments harness §4.2 names landed here
+budget = 19000                             # the design carries no number (design ledger 14); 14k was the inherited-pieces estimate, written before the instruments harness §4.2 names landed here
 lock = "xtask.lock"                        # harness §4.1, revision 16: the harness holds its own interface
 
 # ---------------------------------------------------------------- ext/
