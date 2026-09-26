@@ -68,7 +68,8 @@ pub struct RequestDescription {
 ///
 /// What is written to the streams goes to the sink, `STDOUT` past the
 /// `php_output` layer and `STDERR` onto its error stream (design
-/// revision 16), and `STDIN` reads the request's body. The fds are what
+/// revision 16), and `STDIN` reads the host's fd 0 as php's CLI reads
+/// it, through the plain file's kind over a copy. The fds are what
 /// `fstat` and `ftruncate` on the three ask, as php's `STDIO` kind asks
 /// `fstat(2)` and `ftruncate(2)` of fds 0, 1 and 2; a host with no fd for
 /// one of them hands `None`, which `fstat(2)` and `ftruncate(2)` answer
@@ -1742,17 +1743,25 @@ impl Engine {
         // as php's `EG(symbol_table)` does, so the shutdown functions
         // and an extension's `rshutdown` read a request that still has
         // them.
+        // Each step is its own `zend_try`, so a fatal's bailout leaves
+        // the step it was raised in and the next is served.
         req.enter_phase(crate::api::request::Phase::Shutdown);
+        req.catch_bailout();
         crate::natives::call_shutdown_functions(&mut req);
+        req.catch_bailout();
         req.shutdown_destructors();
         req.call_destructors();
+        req.catch_bailout();
         crate::output::end_all(&mut req);
+        req.catch_bailout();
         for extension in self.shared.extensions.iter().rev() {
             if let Some(rshutdown) = extension.rshutdown {
                 rshutdown(&mut req);
             }
         }
+        req.catch_bailout();
         crate::output::deactivate(&mut req);
+        req.catch_bailout();
         req.free_shutdown_functions();
         req.close_resources();
         req.free_user_handlers();
