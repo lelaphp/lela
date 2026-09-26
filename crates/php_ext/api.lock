@@ -390,6 +390,7 @@ request::Stream::flock
 request::Stream::flush
 request::Stream::from_value
 request::Stream::get_line
+request::Stream::get_record
 request::Stream::is_dir
 request::Stream::is_stdio
 request::Stream::meta_data

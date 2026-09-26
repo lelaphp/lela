@@ -651,6 +651,77 @@ impl PhpStream {
         false
     }
 
+    /// `_php_stream_search_delim` (`Z/main/streams/streams.c:1036`): where
+    /// `delim` starts in the buffered bytes, at most `maxlen` of them,
+    /// looked for past the first `skip`.
+    fn search_delim(&self, maxlen: usize, skip: usize, delim: &[u8]) -> Option<usize> {
+        let seek_len = (self.writepos - self.readpos).min(maxlen);
+        if skip >= seek_len {
+            return None;
+        }
+        let hay = &self.readbuf[self.readpos + skip..self.readpos + seek_len];
+        hay.windows(delim.len())
+            .position(|w| w == delim)
+            .map(|at| skip + at)
+    }
+
+    /// `php_stream_get_record` (`Z/main/streams/streams.c:1063`), what
+    /// `stream_get_line` reads: the buffer filled a chunk at a time, for
+    /// every kind, until `delim` is in it or `maxlen` bytes are; then the
+    /// bytes before the delimiter, which is skipped, or `maxlen` of them.
+    /// `None` is php's `NULL`: nothing found and nothing more to come yet
+    /// on a stream short of eof, which a non-blocking one answers, or no
+    /// byte at all at eof.
+    pub(crate) fn get_record(
+        &mut self,
+        req: &mut Request,
+        maxlen: usize,
+        delim: &[u8],
+    ) -> Option<Vec<u8>> {
+        if maxlen == 0 {
+            return None;
+        }
+        let has_delim = !delim.is_empty();
+        let mut found = if has_delim {
+            self.search_delim(maxlen, 0, delim)
+        } else {
+            None
+        };
+        let mut buffered_len = self.writepos - self.readpos;
+        while found.is_none() && buffered_len < maxlen {
+            let to_read_now = (maxlen - buffered_len).min(self.chunk_size);
+            self.fill_read_buffer(req, buffered_len + to_read_now);
+            let just_read = (self.writepos - self.readpos).saturating_sub(buffered_len);
+            if just_read == 0 {
+                break;
+            }
+            if has_delim {
+                let skip = buffered_len.saturating_sub(delim.len() - 1);
+                found = self.search_delim(maxlen, skip, delim);
+                if found.is_some() {
+                    break;
+                }
+            }
+            buffered_len += just_read;
+        }
+        let buffered = self.writepos - self.readpos;
+        let len = match found {
+            Some(at) => at,
+            None if !has_delim && buffered >= maxlen => maxlen,
+            None if buffered < maxlen && !self.eof => return None,
+            None if buffered == 0 && self.eof => return None,
+            None => buffered.min(maxlen),
+        };
+        let mut out = vec![0; len];
+        let got = self.read(req, &mut out).unwrap_or(0);
+        out.truncate(got);
+        if found.is_some() {
+            self.readpos += delim.len();
+            self.position += i64::try_from(delim.len()).unwrap_or(0);
+        }
+        Some(out)
+    }
+
     /// `_php_stream_get_line` (`Z/main/streams/streams.c:958`) without
     /// `DETECT_EOL`: bytes up to and including the first `\n`, taken
     /// from the read buffer and the buffer filled a chunk at a time

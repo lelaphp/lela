@@ -451,6 +451,40 @@ impl Stream {
         }
     }
 
+    /// `php_stream_get_record`, what `stream_get_line` answers: the bytes
+    /// before `delim`, which is read past, or `maxlen` of them where it
+    /// comes no sooner, the stream's read buffer filled a chunk at a
+    /// time; `None` for nothing found and nothing more to come yet short of
+    /// eof, as a non-blocking stream answers, and for no byte at eof.
+    ///
+    /// ```php
+    /// $m = fopen('php://memory', 'w+'); fwrite($m, "a\r\nbb\r\nccc"); rewind($m);
+    /// var_dump(stream_get_line($m, 100, "\r\n"), stream_get_meta_data($m)['unread_bytes']);
+    /// var_dump(stream_get_line($m, 1, "\r\n"), stream_get_line($m, 100, "\r\n"), stream_get_line($m, 100, "\r\n"), stream_get_line($m, 100, "\r\n"));
+    /// ```
+    /// ```expect
+    /// string(1) "a"
+    /// int(7)
+    /// string(1) "b"
+    /// string(1) "b"
+    /// string(3) "ccc"
+    /// bool(false)
+    /// ```
+    pub fn get_record(
+        self,
+        req: &mut Request,
+        maxlen: usize,
+        delim: &[u8],
+    ) -> Result<Option<PhpString>, Thrown> {
+        match req
+            .stream_op(self, |req, stream| stream.get_record(req, maxlen, delim))
+            .flatten()
+        {
+            Some(record) => Ok(Some(PhpString::new(req, &record)?)),
+            None => Ok(None),
+        }
+    }
+
     /// `_php_stream_copy_to_mem`: the rest of the stream, or up to
     /// `maxlen` bytes of it, as one string, empty where nothing was read.
     pub fn copy_to_mem(

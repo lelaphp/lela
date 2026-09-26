@@ -1294,8 +1294,24 @@ fn stream_set_chunk_size(req: &mut Request) -> Result<Value, Thrown> {
 /// with one, the bytes before the first ending found within that many,
 /// the ending consumed and not returned, or that many bytes where none
 /// is; what is left at the end of the stream, and `false` where nothing
-/// is. The stream is read a byte at a time, which consumes what php's
-/// look into the read buffer consumes.
+/// is, or where a stream that does not block has nothing more yet. The
+/// stream's read buffer is filled a chunk at a time, for every kind, so
+/// a filter appended after it sees the bytes it holds.
+///
+/// ```php
+/// $m = fopen('php://memory', 'wb+'); fwrite($m, ".\r\n==="); rewind($m);
+/// var_dump(stream_get_line($m, 8192, "\r\n"), stream_get_meta_data($m)['unread_bytes']);
+/// var_dump(stream_filter_append($m, 'convert.base64-decode'));
+/// ```
+/// ```expect
+/// string(1) "."
+/// int(3)
+///
+/// Warning: stream_filter_append(): Stream filter (convert.base64-decode): invalid byte sequence in %s on line 4
+///
+/// Warning: stream_filter_append(): Filter failed to process pre-buffered data in %s on line 4
+/// bool(false)
+/// ```
 ///
 /// ```php
 /// $m = fopen('php://memory', 'r+'); fwrite($m, "a||b||c"); rewind($m);
@@ -1329,21 +1345,10 @@ fn stream_get_line(req: &mut Request) -> Result<Value, Thrown> {
     } else {
         usize::try_from(length).unwrap_or(usize::MAX)
     };
-    let mut record: Vec<u8> = Vec::new();
-    while record.len() < maxlen {
-        match stream.read(req, 1)? {
-            Some(byte) if !byte.is_empty() => record.extend_from_slice(byte.as_bytes()),
-            _ => break,
-        }
-        if !ending.is_empty() && record.ends_with(&ending) {
-            record.truncate(record.len() - ending.len());
-            return Ok(Value::string(PhpString::new(req, &record)?));
-        }
+    match stream.get_record(req, maxlen, &ending)? {
+        Some(record) => Ok(Value::string(record)),
+        None => Ok(Value::bool(false)),
     }
-    if record.is_empty() {
-        return Ok(Value::bool(false));
-    }
-    Ok(Value::string(PhpString::new(req, &record)?))
 }
 
 /// `stream_resolve_include_path(string $filename): string|false`,
