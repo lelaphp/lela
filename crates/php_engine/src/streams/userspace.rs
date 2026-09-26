@@ -71,7 +71,7 @@ fn defer(req: &mut Request, thrown: Thrown) {
 /// the object, or the object's `__call` with the name and the arguments
 /// as an array where the class has no such method.
 fn call(req: &mut Request, object: PhpObject, name: &[u8], args: &[Value]) -> Called {
-    if req.stream_thrown.is_some() {
+    if req.stream_thrown.is_some() || req.is_pending() {
         return Called::Threw;
     }
     let class = object.class();
@@ -101,6 +101,12 @@ fn call(req: &mut Request, object: PhpObject, name: &[u8], args: &[Value]) -> Ca
         return Called::Missing;
     };
     match served {
+        // A method that ended the request, `exit` or a fatal error, is
+        // php's bailout: nothing after it is served.
+        Ok(value) if req.is_pending() => {
+            req.release(value);
+            Called::Threw
+        }
         Ok(value) => Called::Value(value),
         Err(thrown) => {
             defer(req, thrown);
@@ -185,10 +191,26 @@ pub(crate) fn open(
         return Ok(Err(String::from("infinite recursion prevented")));
     }
     let outer = req.user_stream_current.replace(path.to_vec());
+    // A wrapper that is no URL wrapper, opening for an include under
+    // `allow_url_include=0`, holds the opens it makes to
+    // `allow_url_include` as an include's are (`PG(in_user_include)`).
+    let in_user_include = req.in_user_include;
+    if !user.is_url
+        && options & STREAM_OPEN_FOR_INCLUDE != 0
+        && !req
+            .ini_get(b"allow_url_include")
+            .is_none_or(Request::ini_parse_bool)
+    {
+        req.in_user_include = true;
+    }
     let opened = open_with(req, user, path, mode, options);
+    req.in_user_include = in_user_include;
     req.user_stream_current = outer;
     opened
 }
+
+/// `STREAM_OPEN_FOR_INCLUDE`.
+const STREAM_OPEN_FOR_INCLUDE: i64 = 128;
 
 /// `REPORT_ERRORS`, which `mkdir` and `rmdir` hand their methods.
 const REPORT_ERRORS: i64 = 8;

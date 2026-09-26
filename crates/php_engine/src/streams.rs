@@ -2007,9 +2007,14 @@ impl OpenOptions {
 
     /// The bits as php numbers them, what a user-space wrapper's
     /// `stream_open` is handed: `STREAM_USE_PATH` 1, `REPORT_ERRORS` 8,
-    /// `STREAM_OPEN_FOR_INCLUDE` 128.
+    /// `STREAM_OPEN_FOR_INCLUDE` 128, with `STREAM_OPEN_FOR_ZEND_STREAM`
+    /// 0x10000 beside it, since the include's is the one open that sets
+    /// it here (`php_stream_open_for_zend_ex`).
     const fn bits(self) -> i64 {
-        (self.use_path as i64) | (self.report as i64) << 3 | (self.for_include as i64) << 7
+        (self.use_path as i64)
+            | (self.report as i64) << 3
+            | (self.for_include as i64) << 7
+            | (self.for_include as i64) << 16
     }
 }
 
@@ -2433,6 +2438,12 @@ impl Request {
     /// wrapper nobody registered is warned of always.
     pub(crate) fn locate_wrapper(&mut self, path: &[u8]) -> (Located, Vec<u8>) {
         self.locate(path, OpenOptions::REPORT)
+    }
+
+    /// [`Request::locate_wrapper`] under `options`, as `php_resolve_path`
+    /// asks it with `STREAM_OPEN_FOR_INCLUDE` and no `REPORT_ERRORS`.
+    pub(crate) fn locate_for(&mut self, path: &[u8], options: OpenOptions) -> (Located, Vec<u8>) {
+        self.locate(path, options)
     }
 
     fn locate(&mut self, path: &[u8], options: OpenOptions) -> (Located, Vec<u8>) {

@@ -715,6 +715,13 @@ impl Vm {
     /// The call being served, php's `execute_data` inside a native: the
     /// one the innermost `DO_*CALL` activated, and none while the loop is
     /// between calls or a call is still being built.
+    /// How many calls are on the stack, being made or served: what tells
+    /// a native served from inside an operation of the frame apart from
+    /// the operation itself.
+    pub(crate) fn call_depth(&self) -> usize {
+        self.calls.len()
+    }
+
     pub(crate) fn serving_call(&self) -> Option<&CallState> {
         self.calls
             .last()

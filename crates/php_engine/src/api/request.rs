@@ -1073,6 +1073,12 @@ pub struct Request {
     /// handed ([`Request::with_stream_ctx`]), which a user-space wrapper's
     /// instance is given as its `$context`; `None` is php's `NULL`.
     pub(crate) stream_ctx: Option<Resource>,
+    /// The include opening a file through a stream wrapper, and how many
+    /// calls stood when it began: php's `get_active_function_name` names
+    /// the construct (`include`, `require_once`) for what the stream layer
+    /// raises under it, and a native a user-space wrapper serves from
+    /// inside it is one call deeper.
+    pub(crate) including: Option<(IncludeKind, usize)>,
     /// `PG(in_user_include)`: a user-space wrapper that is no URL wrapper
     /// is opening for an include under `allow_url_include=0`, so the
     /// opens it makes are held to `allow_url_include` as an include's are.
@@ -1500,6 +1506,7 @@ impl Request {
             url_wrappers: None,
             user_stream_current: None,
             in_user_include: false,
+            including: None,
             stream_ctx: None,
             pclose_ret: 0,
             filters: Vec::new(),
@@ -9039,6 +9046,11 @@ impl Request {
     /// served, `func->common.function_name`, whatever case the call
     /// spelled it in.
     pub(crate) fn active_native(&self) -> String {
+        if let Some((kind, depth)) = self.including
+            && depth == self.vm.call_depth()
+        {
+            return String::from(kind.name());
+        }
         self.active_native_function().map_or_else(
             || String::from("native"),
             |function| self.qualified_name(function, None),
@@ -11239,7 +11251,16 @@ impl Request {
             return Ok(Opened::Already);
         }
         let path = match resolved {
-            Ok(path) => path,
+            Ok(path) if !is_wrapper_url(&path) => path,
+            // php's `resolved_path = zend_string_copy(inc_filename)` for a
+            // path it could not resolve, which a stream wrapper opens.
+            Ok(path) => return self.include_stream(kind, written, &path),
+            Err(_) if is_wrapper_url(written) => {
+                if kind.once() && self.included_files.iter().any(|p| p == written) {
+                    return Ok(Opened::Already);
+                }
+                return self.include_stream(kind, written, written);
+            }
             Err(reason) => {
                 self.open_stream_failed(kind, written, &reason);
                 return self.failed_opening(kind, written);
@@ -11266,6 +11287,97 @@ impl Request {
                 self.failed_opening(kind, written)
             }
         }
+    }
+
+    /// An include of a path a stream wrapper serves, `zend_stream_open`'s
+    /// `php_stream_open_for_zend_ex` under `USE_PATH | REPORT_ERRORS |
+    /// STREAM_OPEN_FOR_INCLUDE`: the stream opened as its wrapper opens it,
+    /// the warnings raised under it naming the construct, read whole, and
+    /// compiled as a file under the path, a unit of the request's own
+    /// that nothing publishes, since opcache keeps plain files alone. The
+    /// path goes in the included-files table as the construct puts a
+    /// file's there, before the compile for the once forms and after it
+    /// for the others.
+    ///
+    /// ```php
+    /// class M { public $context; private $s;
+    ///     function stream_open($p, $m, $o, &$op) { $this->s = '<?php echo __FILE__, " ", ' . strlen($p) . ', "\n"; return 7;'; return true; }
+    ///     function stream_read($n) { $r = $this->s; $this->s = ''; return $r; }
+    ///     function stream_eof() { return $this->s === ''; }
+    ///     function stream_stat() { return []; }
+    ///     function stream_set_option($o, $a, $b) { return false; }
+    ///     function url_stat($p, $f) { return []; } }
+    /// stream_wrapper_register('mm', 'M');
+    /// var_dump(include 'mm://one', include_once 'mm://two', include_once 'mm://two');
+    /// set_include_path('mm://dir:' . get_include_path());
+    /// var_dump(include 'three');
+    /// set_include_path('.');
+    /// set_error_handler(function ($no, $msg) { echo $msg, "\n"; return true; });
+    /// var_dump(include 'data:,x');
+    /// ```
+    /// ```expect
+    /// mm://one 8
+    /// mm://two 8
+    /// int(7)
+    /// int(7)
+    /// bool(true)
+    /// mm://dir/three 14
+    /// int(7)
+    /// include(): data:// wrapper is disabled in the server configuration by allow_url_include=0
+    /// include(data:,x): Failed to open stream: no suitable wrapper could be found
+    /// include(): Failed opening 'data:,x' for inclusion (include_path='.')
+    /// bool(false)
+    /// ```
+    fn include_stream(
+        &mut self,
+        kind: IncludeKind,
+        written: &[u8],
+        path: &[u8],
+    ) -> Result<Opened, Thrown> {
+        if kind.once() {
+            self.included_files.push(path.to_vec());
+        }
+        let options = crate::streams::OpenOptions {
+            use_path: true,
+            for_include: true,
+            ..crate::streams::OpenOptions::REPORT
+        };
+        let outer = self.including.replace((kind, self.vm.call_depth()));
+        let opened = self.open_wrapper_ex(path, b"rb", options);
+        let source = match &opened {
+            Ok(Some(stream)) => {
+                // "Disable buffering to avoid double buffering between PHP
+                // and Zend streams."
+                let unbuffered = StreamOption::ReadBuffer {
+                    buffered: false,
+                    size: php_heap::BUFSIZ,
+                };
+                stream.set_option(self, unbuffered);
+                let source = self
+                    .stream_op(*stream, |req, s| s.copy_to_mem(req, None))
+                    .unwrap_or_default();
+                stream.close(self);
+                Some(source)
+            }
+            _ => None,
+        };
+        self.including = outer;
+        opened?;
+        let Some(source) = source else {
+            return self.failed_opening(kind, written);
+        };
+        if let Some(thrown) = self.stream_thrown.take() {
+            return Err(thrown);
+        }
+        let shared = Arc::clone(&self.shared);
+        let unit = match shared.compile_for(self, &source, path, SourceKind::File) {
+            Ok(unit) => unit,
+            Err(refused) => return Err(self.refused_include(&refused, path)),
+        };
+        if !self.included_files.iter().any(|p| p == path) {
+            self.included_files.push(path.to_vec());
+        }
+        Ok(Opened::Unit(unit))
     }
 
     /// `zend_include_or_eval`'s `ZEND_EVAL` arm
@@ -11342,33 +11454,35 @@ impl Request {
     }
 
     /// `php_resolve_path` (`Z/main/fopen_wrappers.c:500`) over the ini's
-    /// `include_path`: a path that begins `./` or `../`, or is absolute,
-    /// or is asked with no `include_path` at all, is `tsrm_realpath`
-    /// over itself; any other is tried under each entry of
-    /// `include_path` in turn, and last under the directory of the file
-    /// being served (`zend_get_executed_filename`), which is how a file
-    /// beside the primary file is found from another working directory. A
-    /// `scheme://` other than `file://` names a stream wrapper this
-    /// engine has not, and resolves to nothing. `tsrm_realpath` is the
-    /// kernel's canonical path against the request's working directory
-    /// ([`Request::realpath`]), and here a regular file alone, which is
-    /// the `S_ISREG` the plain-files wrapper holds an include to when it
-    /// opens; php reports a directory with whatever `errno` the failed
-    /// open left, and this engine as a file that is not there. The
-    /// `Err` is the last attempt's reason, which the stream warning
-    /// prints.
+    /// `include_path`: a path with a scheme is resolved by its wrapper,
+    /// the plain files wrapper's to its realpath and any other's to
+    /// nothing; a path that begins `./` or `../`, or is absolute, or is
+    /// asked with no `include_path` at all, is `tsrm_realpath` over
+    /// itself; any other is tried under each entry of `include_path` in
+    /// turn, an entry that is a stream wrapper's URL (whose `://` is no
+    /// separator) found by that wrapper's `url_stat` and answered as the
+    /// URL, and last under the directory of the file being served
+    /// (`zend_get_executed_filename`), which is how a file beside the
+    /// primary file is found from another working directory.
+    /// `tsrm_realpath` is the kernel's canonical path against the
+    /// request's working directory ([`Request::realpath`]), and here a
+    /// regular file alone, which is the `S_ISREG` the plain-files wrapper
+    /// holds an include to when it opens; php reports a directory with
+    /// whatever `errno` the failed open left, and this engine as a file
+    /// that is not there. The `Err` is the last attempt's reason, which
+    /// the stream warning prints.
     pub(crate) fn resolve_path(&mut self, written: &[u8]) -> Result<Vec<u8>, std::io::Error> {
         let not_found = || std::io::Error::from(std::io::ErrorKind::NotFound);
-        if let Some(at) = written.windows(3).position(|w| w == b"://")
-            && at > 1
-            && written[..at]
-                .iter()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
-        {
-            if written[..at].eq_ignore_ascii_case(b"file") {
-                return self.realpath_file(&written[at + 3..]);
-            }
-            return Err(not_found());
+        let for_include = crate::streams::OpenOptions {
+            for_include: true,
+            report: false,
+            ..crate::streams::OpenOptions::default()
+        };
+        if scheme_length(written).is_some() {
+            return match self.locate_for(written, for_include) {
+                (crate::streams::Located::Plain, local) => self.realpath_file(&local),
+                _ => Err(not_found()),
+            };
         }
         let include_path = self.ini_get(b"include_path").unwrap_or_default().to_vec();
         let dot_relative = written.starts_with(b"./") || written.starts_with(b"../");
@@ -11376,21 +11490,32 @@ impl Request {
             return self.realpath_file(written);
         }
         let mut last = not_found();
-        for entry in include_path.split(|b| *b == b':') {
-            let mut candidate = entry.to_vec();
-            candidate.push(b'/');
-            candidate.extend_from_slice(written);
-            match self.realpath_file(&candidate) {
-                Ok(path) => return Ok(path),
-                Err(reason) => last = reason,
-            }
-        }
+        let mut entries: Vec<Vec<u8>> = include_path_entries(&include_path);
         if let Some(file) = self.current_file()
             && let Some(slash) = file.iter().rposition(|b| *b == b'/')
             && slash > 0
         {
-            let mut candidate = file[..=slash].to_vec();
+            entries.push(file[..slash].to_vec());
+        }
+        for entry in entries {
+            let mut candidate = entry.clone();
+            candidate.push(b'/');
             candidate.extend_from_slice(written);
+            if scheme_length(&entry).is_some() {
+                match self.locate_for(&candidate, for_include) {
+                    (crate::streams::Located::Nothing, _) => continue,
+                    (crate::streams::Located::Plain, local) => match self.realpath_file(&local) {
+                        Ok(path) => return Ok(path),
+                        Err(reason) => last = reason,
+                    },
+                    _ => {
+                        if matches!(self.url_stat_quiet(&candidate, false), Ok(Some(_))) {
+                            return Ok(candidate);
+                        }
+                    }
+                }
+                continue;
+            }
             match self.realpath_file(&candidate) {
                 Ok(path) => return Ok(path),
                 Err(reason) => last = reason,
@@ -14259,6 +14384,53 @@ impl Request {
     pub fn stream_filters(&self) -> Vec<Vec<u8>> {
         self.filters.iter().map(|(name, _)| name.clone()).collect()
     }
+}
+
+/// The length of a path's scheme where it has one as
+/// `php_stream_locate_url_wrapper` reads it: alphanumerics, `+`, `-` and
+/// `.`, two or more, then `://`, or `data:` alone.
+fn scheme_length(path: &[u8]) -> Option<usize> {
+    let n = path
+        .iter()
+        .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+        .count();
+    (n > 1
+        && path.get(n) == Some(&b':')
+        && (path[n + 1..].starts_with(b"//") || (n == 4 && path.starts_with(b"data:"))))
+    .then_some(n)
+}
+
+/// Whether a path names a stream wrapper other than the plain files one,
+/// which an include opens through that wrapper.
+fn is_wrapper_url(path: &[u8]) -> bool {
+    scheme_length(path).is_some_and(|n| !path[..n].eq_ignore_ascii_case(b"file"))
+}
+
+/// `include_path`'s entries as `php_resolve_path` walks them: split at
+/// `:`, where an entry that begins with a wrapper's scheme keeps its
+/// `://`, and `.://` or `..://` is no scheme.
+fn include_path_entries(include_path: &[u8]) -> Vec<Vec<u8>> {
+    let mut entries = Vec::new();
+    let mut rest = include_path;
+    while !rest.is_empty() {
+        let n = rest
+            .iter()
+            .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+            .count();
+        let skip = if n > 1 && rest[n..].starts_with(b"://") && &rest[..n] != b".." {
+            n + 3
+        } else {
+            0
+        };
+        if let Some(at) = rest[skip..].iter().position(|b| *b == b':') {
+            entries.push(rest[..skip + at].to_vec());
+            rest = &rest[skip + at + 1..];
+        } else {
+            entries.push(rest.to_vec());
+            rest = &[];
+        }
+    }
+    entries
 }
 
 /// The request's side of the heap's upward seam (design §4.3, seam 1):
