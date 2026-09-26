@@ -124,7 +124,7 @@ pub use file::{php_fputcsv, php_fstat};
 pub use filestat::{Fs, php_stat};
 pub use scanf::php_sscanf_internal;
 
-use php_ext::abi::{Callable, Dependency, DependencyKind, Extension, ExtensionBuilder};
+use php_ext::abi::{Callable, Dependency, DependencyKind, Extension, ExtensionBuilder, OnModify};
 use php_ext::call::{call, call_array, call_named, fetch_constant};
 use php_ext::coerce::{coerce_param, is_type};
 use php_ext::decl::{ConstDecl, ConstExpr, FunctionDecl, Name, Parameter, ParameterDefault, Type};
@@ -154,6 +154,7 @@ struct State {
     user_filters: user_filters::FilterState,
     /// `BG(url_adapt_output_ex)`, the URL rewriter's state.
     url_rewriter: url_scanner::Rewriter,
+    assert: assert::Stage,
 }
 
 /// The extension value (design §7.1): declarations paired with entries,
@@ -180,7 +181,7 @@ pub fn extension() -> Extension {
         ..parameter(b"mode", Type::Int)
     };
     let directory = dir::directory_class();
-    ExtensionBuilder::default()
+    let builder = ExtensionBuilder::default()
         .functions(vec![
             (
                 declared(
@@ -265,20 +266,38 @@ pub fn extension() -> Extension {
         .classes(vec![assert::assertion_error_class()])
         .ini(assert::ini())
         .ini(browscap::ini())
-        .ini(url_scanner::ini())
-        .on_modify(b"session.trans_sid_tags", url_scanner::on_session_tags)
-        .on_modify(b"session.trans_sid_hosts", url_scanner::on_session_hosts)
+        .ini(url_scanner::ini());
+    ini_handlers()
+        .into_iter()
+        .fold(builder, |b, (name, handler)| b.on_modify(name, handler))
         .request_state::<State>()
         .rshutdown(syslog::close)
         .rinit(rinit)
         .build("standard")
 }
 
-/// `PHP_RINIT(basic)`'s share here: the string filters, which php
-/// registers at `module` startup and this engine keeps in the request's
-/// filter table (`filters::register`).
+/// The `on_modify` of each entry that has one, php's `PHP_INI_MH` at
+/// runtime: the URL rewriter's two over session's entries, and the five
+/// of `assert.c`.
+fn ini_handlers() -> [(&'static [u8], OnModify); 7] {
+    [
+        (b"session.trans_sid_tags", url_scanner::on_session_tags),
+        (b"session.trans_sid_hosts", url_scanner::on_session_hosts),
+        (b"assert.active", assert::on_active),
+        (b"assert.bail", assert::on_bail),
+        (b"assert.warning", assert::on_warning),
+        (b"assert.callback", assert::on_callback),
+        (b"assert.exception", assert::on_exception),
+    ]
+}
+
+/// `PHP_RINIT(basic)`'s share here: the startup deprecations of the
+/// `assert.*` entries, which php raises at `module` startup
+/// (`assert::startup`), and the filters, which php registers there and
+/// this engine keeps in the request's filter table (`filters::register`).
 #[allow(clippy::unnecessary_wraps)] // `ExtensionBuilder::rinit`'s signature
 fn rinit(req: &mut Request) -> Result<(), Thrown> {
+    assert::startup(req);
     filters::register(req);
     Ok(())
 }

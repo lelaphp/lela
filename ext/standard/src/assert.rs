@@ -10,9 +10,12 @@
 //! at or below zero (`zend_compile_assert`, `ZEND_ASSERT_CHECK`), so
 //! what reaches here under `zend.assertions <= 0` is a call by another
 //! name, `$f = 'assert'; $f(false)`, which the native answers `true`.
-//! What waits elsewhere: the entries' `OnUpdate*` handlers raise
-//! `assert.* INI setting is deprecated` when a program or a startup ini
-//! changes one, which needs a face the api has not got (#684).
+//! The entries' `OnUpdate*` handlers raise `assert.* INI setting is
+//! deprecated` for a value that turns an assertion's default off, from
+//! `ini_set` and `ini_restore` as their `on_modify`, and for a startup
+//! value at the request's first moment, where this engine has a request
+//! to raise it on (as `date.timezone`'s is); `assert_options` sets them
+//! under php's `ZEND_INI_STAGE_ASSERT_OPTIONS`, which raises nothing.
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
@@ -23,7 +26,7 @@ use php_ext::decl::{
     EnumBacking, FunctionDecl, IniDecl, MethodDecl, Name, Type,
 };
 use php_ext::raising::{
-    Level, Thrown, arg_value_error, deprecated, docref, new_throwable, throw_value,
+    Level, Thrown, arg_value_error, deprecated, docref, new_throwable, raise_at, throw_value,
 };
 use php_ext::request::Request;
 use php_ext::values::{PhpString, Value, ValueRef};
@@ -128,6 +131,112 @@ pub(crate) fn ini() -> Vec<IniDecl> {
         system: true,
     })
     .collect()
+}
+
+/// Whether a value of an entry is one its handler deprecates.
+type Deprecates = fn(&[u8]) -> bool;
+
+/// The five entries with the value of each that php's handler deprecates:
+/// `OnUpdateActiveBool`, `OnUpdateBailBool`, `OnUpdateWarningBool`,
+/// `OnChangeCallback` and `OnUpdateExceptionBool`
+/// (`Z/ext/standard/assert.c:79-118`), in `PHP_INI_BEGIN()`'s order.
+const DEPRECATED: [(&[u8], Deprecates); 5] = [
+    (b"assert.active", |v| !Request::ini_parse_bool(v)),
+    (b"assert.bail", Request::ini_parse_bool),
+    (b"assert.warning", |v| !Request::ini_parse_bool(v)),
+    (b"assert.callback", |v| !v.is_empty()),
+    (b"assert.exception", |v| !Request::ini_parse_bool(v)),
+];
+
+/// Whether the entry being set is `assert_options`'s, php's
+/// `ZEND_INI_STAGE_ASSERT_OPTIONS`, which `php_must_emit_ini_deprecation`
+/// raises nothing under.
+#[derive(Default)]
+pub(crate) struct Stage {
+    assert_options: bool,
+}
+
+/// One entry's handler at `ZEND_INI_STAGE_RUNTIME`, the `on_modify` of
+/// all five: the deprecation for a value that turns an assertion's
+/// default off, and for `assert.callback` the callback `assert_options`
+/// set given up, since php's `ASSERTG(callback)` is the entry's string
+/// from here.
+///
+/// ```php
+/// ini_set('assert.warning', '0'); ini_set('assert.active', '1'); ini_set('assert.callback', 'strlen');
+/// var_dump(assert_options(ASSERT_BAIL, 1), ini_get('assert.bail'));
+/// ```
+/// ```expect
+/// Deprecated: ini_set(): assert.warning INI setting is deprecated in %s on line 2
+///
+/// Deprecated: ini_set(): assert.callback INI setting is deprecated in %s on line 2
+///
+/// Deprecated: Constant ASSERT_BAIL is deprecated since 8.3, as assert_options() is deprecated in %s on line 3
+///
+/// Deprecated: Function assert_options() is deprecated since 8.3 in %s on line 3
+/// int(0)
+/// string(1) "1"
+/// ```
+fn on_modify(req: &mut Request, name: &[u8], value: &[u8]) {
+    if name == b"assert.callback"
+        && let Some(previous) = req.assert_callback().copied()
+    {
+        req.set_assert_callback(None);
+        req.release(previous);
+    }
+    let deprecates = DEPRECATED
+        .iter()
+        .any(|(entry, deprecated)| *entry == name && deprecated(value));
+    if deprecates && !req.state::<crate::State>().assert.assert_options {
+        let text = format!(
+            "{} INI setting is deprecated",
+            String::from_utf8_lossy(name)
+        );
+        docref(req, Level::Deprecated, &text);
+    }
+}
+
+macro_rules! handler {
+    ($name:ident, $entry:literal) => {
+        #[allow(clippy::unnecessary_wraps)] // `ExtensionBuilder::on_modify`'s signature
+        pub(crate) fn $name(req: &mut Request, value: &[u8]) -> Result<bool, Thrown> {
+            on_modify(req, $entry, value);
+            Ok(true)
+        }
+    };
+}
+handler!(on_active, b"assert.active");
+handler!(on_bail, b"assert.bail");
+handler!(on_warning, b"assert.warning");
+handler!(on_callback, b"assert.callback");
+handler!(on_exception, b"assert.exception");
+
+/// The handlers at `ZEND_INI_STAGE_STARTUP`, over the values the
+/// request starts with: php's `PHP Startup:` deprecation for each that
+/// turns an assertion's default off, at `Unknown` line 0, in the
+/// entries' order. The defaults raise nothing; a value given with `-d`
+/// is a startup a witness, served in-process under the recipe, cannot
+/// stand at, and the corpus holds it (`ext/standard/tests/assert`, whose
+/// `--INI--` sections the runner passes as `-d`).
+///
+/// ```php
+/// var_dump(ini_get('assert.active'), ini_get('assert.bail'), ini_get('assert.callback'));
+/// ```
+/// ```expect
+/// string(1) "1"
+/// string(1) "0"
+/// string(0) ""
+/// ```
+pub(crate) fn startup(req: &mut Request) {
+    for (entry, deprecated) in DEPRECATED {
+        if req.ini_get(entry).is_some_and(deprecated) {
+            let text = format!(
+                "PHP Startup: {} INI setting is deprecated",
+                String::from_utf8_lossy(entry)
+            );
+            raise_at(req, Level::Deprecated, &text, b"Unknown", 0);
+        }
+    }
 }
 
 /// `AssertionError`, `register_class_AssertionError(zend_ce_error)`: a
@@ -401,8 +510,11 @@ fn assert_options(req: &mut Request) -> Result<Value, Thrown> {
     let old = flag(req, entry);
     if let Some(value) = value {
         let text = to_string(req, &value)?;
-        req.ini_set(entry, text.as_bytes())?;
+        req.state::<crate::State>().assert.assert_options = true;
+        let set = req.ini_set(entry, text.as_bytes());
+        req.state::<crate::State>().assert.assert_options = false;
         req.release(Value::string(text));
+        set?;
     }
     Ok(Value::int(i64::from(old)))
 }
