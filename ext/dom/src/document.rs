@@ -1649,7 +1649,21 @@ fn normalize_document(req: &mut Request) -> Result<Value, Thrown> {
     Ok(Value::null())
 }
 
-/// `DOMDocument::xinclude(int $options = 0): int|false`.
+/// `DOMDocument::xinclude(int $options = 0): int|false`: an include
+/// that cannot be read is warned of in the words of the parser libxml opened for
+/// it, and its fallback stands in its place.
+///
+/// ```php
+/// $d = new DOMDocument;
+/// $d->loadXML('<r xmlns:xi="http://www.w3.org/2001/XInclude"><xi:include href="nope.xml"><xi:fallback><f/></xi:fallback></xi:include></r>');
+/// var_dump($d->xinclude());
+/// echo $d->saveXML($d->documentElement), "\n";
+/// ```
+/// ```expect
+/// Warning: DOMDocument::xinclude(): I/O warning : failed to load external entity "%s/nope.xml" in %s on line 4
+/// int(1)
+/// <r xmlns:xi="http://www.w3.org/2001/XInclude"><f/></r>
+/// ```
 fn xinclude(req: &mut Request) -> Result<Value, Thrown> {
     arity(req, 0, 1)?;
     let flags = long_arg(req, 1, 0)?;

@@ -220,14 +220,19 @@ impl Parser {
     }
 
     /// `xmlXIncludeProcessFlags(doc, flags | XML_PARSE_NOXINCNODE)`, what it
-    /// includes read through `req`'s streams.
+    /// includes read through `req`'s streams; the parsers libxml opens for
+    /// an include are its own, never configured by php, so their errors
+    /// are printed in libxml's own words.
     pub fn xinclude(
         req: &mut Request,
         doc: Node,
         flags: c_int,
     ) -> (i32, Vec<Raised>, Option<Thrown>) {
         const NOXINCNODE: c_int = 1 << 15;
-        Raised::capture_io(req, None, || {
+        let unconfigured = Routing::Parser {
+            sax: ptr::null_mut(),
+        };
+        Raised::capture_io(req, Some(unconfigured), || {
             // SAFETY: a live document.
             unsafe { sys::xmlXIncludeProcessFlags(doc.raw().cast(), flags | NOXINCNODE) }
         })
