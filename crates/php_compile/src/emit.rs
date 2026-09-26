@@ -131,6 +131,8 @@ mod imports;
 mod list;
 mod magic;
 mod member;
+mod memo;
+mod pipe;
 mod target;
 mod types;
 mod user_call;
@@ -431,6 +433,16 @@ pub(crate) struct Emit<'a> {
     /// The node the next [`Self::expr`] compiles as a link of a chain the
     /// caller ends, php's `ZEND_SHORT_CIRCUITING_INNER`.
     chain_inner: Option<tree::Expr>,
+    /// php's `CG(memoize_mode)` and `CG(memoized_exprs)`, which a `??=`
+    /// opens over its place ([`memo`]).
+    memo: memo::Memo,
+    /// The `ZEND_AST_ZNODE`s standing: a node of the tree and the value
+    /// the compiler already holds for it, which [`Self::expr`] answers
+    /// ([`pipe`]).
+    znodes: Vec<(tree::Expr, Where)>,
+    /// How the constant expression [`Self::const_expr`] builds is
+    /// evaluated, php's `allow_dynamic` ([`Evaluation`]).
+    const_evaluation: Evaluation,
     constants: Vec<Zval>,
     /// [`OpArray::const_exprs`]: the constant expressions a constant of
     /// kind `IS_CONSTANT_AST` indexes, in the order they were added.
@@ -768,12 +780,12 @@ struct DimLink {
     out: u32,
 }
 
-/// `zend_delayed_compile_dim`'s `type`, the two of php's `BP_VAR_*` a
-/// dimension chain is compiled under here. A read is `FETCH_DIM_R` into
-/// a temporary (`zend_adjust_for_fetch_type` under `BP_VAR_R`), where
-/// `[]` is php's compile error `Cannot use [] for reading`; a write is
-/// `FETCH_DIM_W` into a `VAR` carrying `ZEND_FETCH_DIM_DIM`, where `[]`
-/// is the append. `BP_VAR_UNSET` waits on the opcodes that name it.
+/// `zend_delayed_compile_dim`'s `type`, php's `BP_VAR_*` a chain of
+/// dimensions and properties is compiled under. A read is `FETCH_DIM_R`
+/// into a temporary (`zend_adjust_for_fetch_type` under `BP_VAR_R`),
+/// where `[]` is php's compile error `Cannot use [] for reading`; a
+/// write is `FETCH_DIM_W` into a `VAR` carrying `ZEND_FETCH_DIM_DIM`,
+/// where `[]` is the append.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Fetch {
     Read,
@@ -797,6 +809,12 @@ enum Fetch {
     /// what stands under them is compiled as a read's is, with no
     /// `SEPARATE` over a call (`zend_separate_if_call_and_write`).
     FuncArg,
+    /// `BP_VAR_UNSET`, the links under what an `unset` deletes:
+    /// `zend_adjust_for_fetch_type`'s fifth arm, the `_R` opcode plus
+    /// five into a `VAR`, which finds a place and makes none, and `[]`
+    /// php's `Cannot use [] for unsetting`. A call under it is
+    /// `SEPARATE`d as under a write.
+    Unset,
 }
 
 /// `ZEND_FETCH_DIM_WRITE` (`Z/Zend/zend_compile.h:1096`), the bit
@@ -1124,6 +1142,9 @@ pub(crate) fn unit(
         oplines: Vec::new(),
         short_circuits: Vec::new(),
         chain_inner: None,
+        memo: memo::Memo::default(),
+        znodes: Vec::new(),
+        const_evaluation: Evaluation::Once,
         constants: Vec::new(),
         const_exprs: Vec::new(),
         vars: Vec::new(),
@@ -1471,6 +1492,44 @@ impl Emit<'_> {
         }
     }
 
+    /// `zend_eval_const_expr` over one node, what an array's elements, a
+    /// declaration's constant expression and a `static`'s initializer are
+    /// folded by: [`Self::constant_of`] under [`Fold::EvalConstExpr`],
+    /// which folds a conditional, a `??` and a dimension over constants
+    /// and no call.
+    ///
+    /// ```php
+    /// $b = 5;
+    /// var_dump([1 ? 2 : 3, $b], [0 ?: "d"], [null ?? 'n', ['k' => 1]['k']]);
+    /// class C { const X = 1 ? 2 : 3; }
+    /// var_dump(C::X);
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   [0]=>
+    ///   int(2)
+    ///   [1]=>
+    ///   int(5)
+    /// }
+    /// array(1) {
+    ///   [0]=>
+    ///   string(1) "d"
+    /// }
+    /// array(2) {
+    ///   [0]=>
+    ///   string(1) "n"
+    ///   [1]=>
+    ///   int(1)
+    /// }
+    /// int(2)
+    /// ```
+    pub(crate) fn eval_const(&mut self, expr: tree::Expr) -> Result<Option<Zval>, CompileError> {
+        let outer = std::mem::replace(&mut self.fold, Fold::EvalConstExpr);
+        let folded = self.constant_of(expr);
+        self.fold = outer;
+        folded
+    }
+
     /// `zend_compile_stmt` (`Z/Zend/zend_compile.c:11686`) over one
     /// statement node of the tree (design §4.9): the empty statement
     /// is nothing, as php's `statement: ';'` reduces to no node; a
@@ -1734,22 +1793,13 @@ impl Emit<'_> {
             }
             return self.assign_ref(target, Source::Expr(value));
         }
-        if op != Some(SyntaxKind::EQ) {
-            // `zend_ensure_writable_variable`, which `??=` and every
-            // compound operator run first.
-            self.ensure_writable(target)?;
-        }
         if op == Some(SyntaxKind::QUESTION_QUESTION_EQ) {
-            if self.is_by_name(target) {
-                return self.assign_coalesce_by_name(target, value);
-            }
-            let tree::Expr::SimpleVarExpr(var) = target else {
-                return Err(self.unread("a `??=` over what is no variable"));
-            };
-            let SimpleVar::Cv(name) = self.simple_var_of(var, line)? else {
-                return Err(self.unread("a `??=` over what is no variable"));
-            };
-            return self.assign_coalesce(&name, value);
+            return self.assign_coalesce(target, value);
+        }
+        if op != Some(SyntaxKind::EQ) {
+            // `zend_ensure_writable_variable`, which every compound
+            // operator runs first.
+            self.ensure_writable(target)?;
         }
         if op == Some(SyntaxKind::EQ) {
             return self.assign_to(target, Source::Expr(value));
@@ -2281,11 +2331,19 @@ impl Emit<'_> {
 
     /// `zend_is_call` (`Z/Zend/zend_compile.c:2728`): a call by name, a
     /// call through a value, a call on a class or a method call, whose
-    /// `VAR` is separated where it is written to. Each is one
-    /// `ZEND_AST_CALL`, `ZEND_AST_STATIC_CALL` or `ZEND_AST_METHOD_CALL`
-    /// in php and one `CallExpr` here, the callee telling them apart.
+    /// `VAR` is separated where it is written to, and a pipe, which is
+    /// one of them built over its left side ([`Self::pipe`]). Each of the
+    /// first four is one `ZEND_AST_CALL`, `ZEND_AST_STATIC_CALL` or
+    /// `ZEND_AST_METHOD_CALL` in php and one `CallExpr` here, the callee
+    /// telling them apart.
     fn is_call(&self, expr: tree::Expr) -> bool {
-        matches!(self.peel(expr), tree::Expr::CallExpr(_))
+        match self.peel(expr) {
+            tree::Expr::CallExpr(_) => true,
+            tree::Expr::BinaryExpr(id) => {
+                self.parsed.tree[id].op.map(|op| self.kind(op)) == Some(SyntaxKind::PIPE_GT)
+            }
+            _ => false,
+        }
     }
 
     /// The `ZEND_AST_ZVAL` an expression is, or nothing where php's node
@@ -2363,109 +2421,144 @@ impl Emit<'_> {
     }
 
     /// `zend_compile_unset` (`Z/Zend/zend_compile.c:5555`), one operand:
-    /// the fetch php compiles under `BP_VAR_UNSET` with its opcode
-    /// overwritten, which for the three arms this reads is one opline
-    /// leaving no value. A plain variable is `UNSET_CV` over the CV
-    /// (`zend_try_compile_cv`), `$this` php's compile error; an element
-    /// of a variable is `zend_compile_dim` under `BP_VAR_UNSET`, whose
-    /// `FETCH_DIM_UNSET` becomes `UNSET_DIM`, with
-    /// `zend_handle_numeric_dim` over a constant offset and the append
-    /// php's compile error; a property of a variable or of `$this` is
-    /// `zend_compile_prop`, whose `FETCH_OBJ_UNSET` becomes `UNSET_OBJ`,
-    /// with the name as one constant in `op2` and three cache slots in
-    /// `extended_value` (`zend_alloc_cache_slots(3)`). A chain under
-    /// either, `$a[0][1]` and `$a->b->c`, is php's `FETCH_DIM_UNSET` and
-    /// `FETCH_OBJ_UNSET` under the last fetch and is not read; neither
-    /// is a property of a class, `unset(C::$p)`, whose arm is
-    /// `UNSET_STATIC_PROP`, nor `$GLOBALS['k']`. A variable fetched by
-    /// name, `$$x` or an auto-global, is `UNSET_VAR` over its name
-    /// ([`Self::unset_by_name`]), and an element of one `FETCH_UNSET` and
-    /// `UNSET_DIM` ([`Self::unset_dim_by_name`]).
+    /// `zend_ensure_writable_variable`, `$this` php's compile error, and
+    /// then the place decoded once ([`Self::place`]) and compiled under
+    /// `BP_VAR_UNSET` with its last fetch's opcode overwritten, which
+    /// leaves no value. A plain variable is `UNSET_CV` over the CV
+    /// (`zend_try_compile_cv`), and one the program names `UNSET_VAR` over
+    /// the name; an element is the chain under it held back
+    /// ([`Self::delayed_var`] under [`Fetch::Unset`], so `$a[0][1]` is
+    /// `FETCH_DIM_UNSET` under `UNSET_DIM`), the dimension, and the chain
+    /// laid down, the append php's compile error; a property is the object
+    /// the same way (`$a->b->c` is `FETCH_OBJ_UNSET` under `UNSET_OBJ`),
+    /// the name as one constant in `op2` and three cache slots in
+    /// `extended_value` (`zend_alloc_cache_slots(3)`); and a class's
+    /// property is `UNSET_STATIC_PROP`, which the engine refuses in
+    /// php's words.
     ///
     /// The constant offset goes through [`Self::dim_operand`], the one
     /// `zend_handle_numeric_dim` every dimension is held to, so the
     /// string as written stands in the slot after the long and
     /// `UNSET_DIM` hands `offsetUnset` on an `ArrayAccess` what php hands
     /// it (bug #63217).
+    ///
+    /// ```php
+    /// $a = ['x' => ['y' => 1, 'z' => 2]];
+    /// unset($a['x']['y'], $a['q']['r']);
+    /// $o = new stdClass; $o->p = new stdClass; $o->p->q = 1; $o->p->r = [1, 2];
+    /// unset($o->p->q, $o->p->r[0], $n->p, $n[0][1]);
+    /// function f() { global $a; return $a; }
+    /// $n = 'a';
+    /// unset($$n['x']['z']);
+    /// var_dump($a, $o);
+    /// $v = 1; unset($$n, ${'v'});
+    /// var_dump(isset($a), isset($v));
+    /// class C { public static $s = [1, 2]; }
+    /// unset(C::$s[0]);
+    /// var_dump(C::$s);
+    /// try { unset(C::$s); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    ///
+    /// Warning: Undefined variable $n in %s on line 5
+    /// array(1) {
+    ///   ["x"]=>
+    ///   array(0) {
+    ///   }
+    /// }
+    /// object(stdClass)#1 (1) {
+    ///   ["p"]=>
+    ///   object(stdClass)#2 (1) {
+    ///     ["r"]=>
+    ///     array(1) {
+    ///       [1]=>
+    ///       int(2)
+    ///     }
+    ///   }
+    /// }
+    /// bool(false)
+    /// bool(false)
+    /// array(1) {
+    ///   [1]=>
+    ///   int(2)
+    /// }
+    /// Attempt to unset static property C::$s
+    /// ```
+    ///
+    /// A variable fetched by name, an auto-global and `$GLOBALS['k']`
+    /// among them, is `UNSET_VAR`, and the `FETCH_UNSET` under an element
+    /// or a property of one; the object's own `unset_property` answers
+    /// under the last, a hooked property's refusal among what it says:
+    ///
+    /// ```php
+    /// class C { public $p = 1; public $q = 1; public int $h { get => 2; } }
+    /// $_GET = new C;
+    /// $n = 'o';
+    /// $o = new C;
+    /// $k = 'p';
+    /// unset($_GET->p, $$n->$k, $GLOBALS['o']->q, $_POST->p);
+    /// var_dump(isset($_GET->p), isset($o->p), isset($o->q), $_GET->h);
+    /// try { unset($_GET->h); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// $_SERVER['k'] = 1;
+    /// $_SERVER['l'] = 2;
+    /// $g = 1;
+    /// unset($_SERVER['k'], $GLOBALS['g']);
+    /// var_dump(isset($_SERVER['k']), $_SERVER['l'], isset($g));
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// bool(false)
+    /// bool(false)
+    /// int(2)
+    /// Cannot unset hooked property C::$h
+    /// bool(false)
+    /// int(2)
+    /// bool(false)
+    /// ```
+    ///
+    /// ```php
+    /// unset($GLOBALS[]);
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use [] for unsetting in %s on line 2
+    /// ```
     fn unset(&mut self, target: tree::Expr) -> Result<(), CompileError> {
         let line = self.line_of(target);
         self.ensure_writable(target)?;
-        let parsed = self.parsed;
-        let tree = &parsed.tree;
-        if self.is_by_name(target) {
-            return self.unset_by_name(target);
+        if self.is_this(target) {
+            return Err(walk::refused(line, "Cannot unset $this"));
         }
-        match self.peel(target) {
-            tree::Expr::SimpleVarExpr(id) => {
-                let cv = match self.simple_var_of(id, line)? {
-                    SimpleVar::This => {
-                        return Err(walk::refused(line, "Cannot unset $this"));
-                    }
-                    SimpleVar::Cv(name) => self.lookup_cv(&name),
-                    SimpleVar::Auto(_) | SimpleVar::Globals => {
-                        return Err(self.fatal("an auto-global not fetched by name"));
-                    }
+        // `zend_compile_unset`'s own arm over `$GLOBALS[]`.
+        if self.is_globals_append(target) {
+            return Err(walk::refused(line, "Cannot use [] for unsetting"));
+        }
+        match self.place(target)? {
+            Target::Cv(name) => self.unset_cv(&name),
+            Target::Dim(dim) => {
+                let tree::Expr::SubscriptExpr(id) = self.peel(dim) else {
+                    return Err(self.fatal("an `unset` of an element that is no dimension"));
                 };
-                self.push(Opline {
-                    opcode: Opcode::UnsetCv,
-                    op1_type: OperandKind::Cv,
-                    op1: cv,
-                    ..Opline::default()
-                });
-            }
-            tree::Expr::SubscriptExpr(id) if self.is_by_name(tree[id].base) => {
-                let node = &tree[id];
-                let Some(index) = node.index else {
+                let (base, index) = (self.parsed.tree[id].base, self.parsed.tree[id].index);
+                let container = self.delayed_var(base, Fetch::Unset)?;
+                let Some(index) = index else {
                     return Err(walk::refused(line, "Cannot use [] for unsetting"));
                 };
-                return self.unset_dim_by_name(node.base, index);
-            }
-            tree::Expr::SubscriptExpr(id) => {
-                let node = &tree[id];
-                let tree::Expr::SimpleVarExpr(var) = self.peel(node.base) else {
-                    return Err(walk::unread(
-                        line,
-                        "an `unset` over an element of what is no variable",
-                    ));
-                };
-                let SimpleVar::Cv(name) = self.simple_var_of(var, line)? else {
-                    return Err(walk::unread(
-                        line,
-                        "an `unset` over an element of what is no variable",
-                    ));
-                };
-                let Some(index) = node.index else {
-                    return Err(walk::refused(line, "Cannot use [] for unsetting"));
-                };
-                let cv = self.lookup_cv(&name);
                 let dim = self.expr(index)?;
                 let (op2_type, op2) = self.dim_operand(dim);
+                let (op1_type, op1) = self.base_fetch(container, Fetch::Unset, Over::Dim);
                 self.push(Opline {
                     opcode: Opcode::UnsetDim,
-                    op1_type: OperandKind::Cv,
-                    op1: cv,
+                    op1_type,
+                    op1,
                     op2_type,
                     op2,
                     ..Opline::default()
                 });
             }
-            // `unset($_SERVER->p)` and `unset($$x->p)`: the object is the
-            // variable's `FETCH_UNSET`.
-            tree::Expr::MemberAccessExpr(id) if self.is_by_name(tree[id].obj) => {
-                return self.unset_prop_by_name(tree[id].obj, id);
-            }
-            tree::Expr::MemberAccessExpr(id) => {
-                let node = &tree[id];
-                if !matches!(self.peel(node.obj), tree::Expr::SimpleVarExpr(_)) {
-                    return Err(walk::unread(
-                        line,
-                        "an `unset` over a property of what is no variable",
-                    ));
-                }
-                let object = node.obj;
-                let name = self.member_of(id)?;
-                let (op1_type, op1) = self.receiver_of(object)?;
+            Target::Prop { object, name } => {
+                let object = self.delayed_object(object, Fetch::Unset)?;
                 let name = self.prop_name(name)?;
+                let (op1_type, op1) = self.base_fetch(object, Fetch::Unset, Over::Obj);
                 self.push(Opline {
                     opcode: Opcode::UnsetObj,
                     op1_type,
@@ -2476,9 +2569,63 @@ impl Emit<'_> {
                     ..Opline::default()
                 });
             }
-            _ => return Err(walk::unread(line, "an `unset` over what is no variable")),
+            Target::StaticProp { class, name } => {
+                let class = self.class_ref(class, FETCH_CLASS_EXCEPTION)?;
+                let name = self.string(&name)?;
+                let name_at = self.literal(name);
+                let slots = self.cache_slots(3);
+                let (op2_type, op2) = self.class_operand(&class)?;
+                self.push(Opline {
+                    opcode: Opcode::UnsetStaticProp,
+                    op1_type: OperandKind::Const,
+                    op1: name_at,
+                    op2_type,
+                    op2,
+                    extended_value: slots,
+                    ..Opline::default()
+                });
+            }
+            // `zend_compile_simple_var_no_cv` under `BP_VAR_UNSET`, its
+            // `FETCH_UNSET` made `UNSET_VAR`: the name in `op1` and the
+            // table it is deleted from in `extended_value`.
+            Target::ByName(expr) => match self.named(expr)? {
+                Some(by_name::Named::Cv(name)) => self.unset_cv(&name),
+                Some(by_name::Named::This) => {
+                    return Err(walk::refused(line, "Cannot unset $this"));
+                }
+                Some(by_name::Named::Globals) => {
+                    return Err(self.compile_error(
+                        "$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax",
+                    ));
+                }
+                Some(by_name::Named::Fetch { name, table }) => {
+                    let (op1_type, op1) = self.operand(name);
+                    self.push(Opline {
+                        opcode: Opcode::UnsetVar,
+                        op1_type,
+                        op1,
+                        extended_value: table.fetch_type(),
+                        ..Opline::default()
+                    });
+                }
+                None => return Err(self.fatal("an `unset` by a name that is no variable")),
+            },
+            Target::List(_) => {
+                return Err(walk::unread(line, "an `unset` over what is no variable"));
+            }
         }
         Ok(())
+    }
+
+    /// `ZEND_UNSET_CV` over the CV `name` is.
+    fn unset_cv(&mut self, name: &[u8]) {
+        let cv = self.lookup_cv(name);
+        self.push(Opline {
+            opcode: Opcode::UnsetCv,
+            op1_type: OperandKind::Cv,
+            op1: cv,
+            ..Opline::default()
+        });
     }
 
     /// `zend_compile_global_var` (`Z/Zend/zend_compile.c:5441`) over one
@@ -3178,10 +3325,7 @@ impl Emit<'_> {
                 None => Some(Zval::null()),
                 Some(init) => {
                     let mark = self.raised();
-                    self.fold = Fold::EvalConstExpr;
-                    let folded = self.constant_of(init);
-                    self.fold = Fold::Compile;
-                    let folded = folded?;
+                    let folded = self.eval_const(init)?;
                     if folded.is_none() {
                         self.unraise(mark);
                     }
@@ -3958,7 +4102,7 @@ impl Emit<'_> {
                 });
                 let written = parameter
                     .default
-                    .map(|expr| self.const_expr(expr))
+                    .map(|expr| self.dynamic_const_expr(expr))
                     .transpose()?;
                 // `zend_is_valid_default_value` converted an int under
                 // a type with `float` and no `int` where it stood.
@@ -4071,17 +4215,27 @@ impl Emit<'_> {
     ) -> Result<Option<Zval>, CompileError> {
         Ok(match parameter.default {
             Some(expr) if self.names_a_constant(expr) => {
-                let unevaluated = self.const_expr(expr)?;
+                let unevaluated = self.dynamic_const_expr(expr)?;
                 Some(self.unevaluated(unevaluated))
             }
-            Some(expr) => {
-                let Some(folded) = self.constant_of(expr)? else {
-                    return Err(self.fatal("a parameter default this compiler cannot read yet"));
-                };
-                Some(folded)
-            }
+            // `zend_const_expr_to_zval` with `allow_dynamic`: the fold
+            // where `zend_eval_const_expr` folds it, the tree for the
+            // engine to evaluate at the `RECV_INIT` otherwise.
+            Some(expr) => Some(self.const_expr_to_zval(expr)?),
             None => None,
         })
+    }
+
+    /// `zend_const_expr_to_zval` with `allow_dynamic`: the fold where
+    /// `zend_eval_const_expr` folds the expression, and otherwise the
+    /// tree ([`Self::dynamic_const_expr`]) as the `IS_CONSTANT_AST` the
+    /// opline that reads it evaluates.
+    fn const_expr_to_zval(&mut self, expr: tree::Expr) -> Result<Zval, CompileError> {
+        if let Some(folded) = self.eval_const(expr)? {
+            return Ok(folded);
+        }
+        let unevaluated = self.dynamic_const_expr(expr)?;
+        Ok(self.unevaluated(unevaluated))
     }
 
     /// What `zend_compile_params` refuses about a parameter's compiled
@@ -5486,7 +5640,7 @@ impl Emit<'_> {
             };
             arguments.push(AttributeArgument {
                 name: named,
-                value: self.const_expr(expr)?,
+                value: self.dynamic_const_expr(expr)?,
             });
         }
         Ok(Attribute {
@@ -6535,13 +6689,15 @@ impl Emit<'_> {
             // `zend_compile_const_expr_const`: the name resolved through
             // the constant imports, and an unqualified one no import
             // names, in a namespace, left as written for the fallback
-            // the engine's fetch makes.
+            // the engine's fetch makes. It moves `CG(zend_lineno)` to the
+            // name's line, which the opline after the walk is emitted at.
             tree::Expr::NameRef(token) => {
                 if let Some(value) = self.constant_name(token) {
                     return folded_const_expr(value).ok_or_else(|| {
                         self.fatal("a constant expression this compiler cannot read yet")
                     });
                 }
+                self.line = line;
                 let written = self.text(token).to_vec();
                 let (resolved, runtime) = self.constant_resolved(&written);
                 let name = if runtime { written } else { resolved };
@@ -6648,7 +6804,7 @@ impl Emit<'_> {
             // node's own shape after it, each child a constant
             // expression of its own.
             tree::Expr::UnaryExpr(id) => {
-                if let Some(folded) = self.constant_of(expr)? {
+                if let Some(folded) = self.eval_const(expr)? {
                     return folded_const_expr(folded).ok_or_else(|| {
                         self.fatal("a constant expression this compiler cannot read yet")
                     });
@@ -6668,7 +6824,7 @@ impl Emit<'_> {
                 })
             }
             tree::Expr::BinaryExpr(id) => {
-                if let Some(folded) = self.constant_of(expr)? {
+                if let Some(folded) = self.eval_const(expr)? {
                     return folded_const_expr(folded).ok_or_else(|| {
                         self.fatal("a constant expression this compiler cannot read yet")
                     });
@@ -6676,15 +6832,128 @@ impl Emit<'_> {
                 let node = &tree[id];
                 let left = node.lhs;
                 let right = self.required(node.rhs, "a binary operator")?;
-                let Some(op) = node.op.map(|op| self.kind(op)).and_then(binary_op) else {
-                    return Err(self.fatal("a constant expression this compiler cannot read yet"));
+                // `ZEND_AST_AND`, `ZEND_AST_OR` and `ZEND_AST_COALESCE` kept
+                // under the spelling `zend_ast_export` writes them with;
+                // the pipe is none of the nodes php's walk allows.
+                let op: &[u8] = match node.op.map(|op| self.kind(op)) {
+                    Some(SyntaxKind::AMP_AMP | SyntaxKind::AND_KW) => b"&&",
+                    Some(SyntaxKind::PIPE_PIPE | SyntaxKind::OR_KW) => b"||",
+                    Some(SyntaxKind::QUESTION_QUESTION) => b"??",
+                    Some(SyntaxKind::PIPE_GT) => {
+                        return Err(
+                            self.compile_error("Constant expression contains invalid operations")
+                        );
+                    }
+                    Some(kind) => match binary_op(kind) {
+                        Some(op) => op.spelling().as_bytes(),
+                        None => return Err(self.unread("a binary operator")),
+                    },
+                    None => return Err(self.unread("a binary operator")),
                 };
                 Ok(ConstExpr::Binary {
-                    op: Name(op.spelling().as_bytes().into()),
+                    op: Name(op.into()),
                     lhs: Box::new(self.const_expr(left)?),
                     rhs: Box::new(self.const_expr(right)?),
                 })
             }
+            // `ZEND_AST_CONDITIONAL`, folded where
+            // `zend_eval_const_expr` folds it and kept otherwise.
+            tree::Expr::TernaryExpr(id) => {
+                if let Some(folded) = self.eval_const(expr)? {
+                    return folded_const_expr(folded).ok_or_else(|| {
+                        self.fatal("a constant expression this compiler cannot read yet")
+                    });
+                }
+                let node = &tree[id];
+                let (cond, then, otherwise) = (node.cond, node.then, node.else_branch);
+                let otherwise = self.required(otherwise, "a conditional")?;
+                let cond = Box::new(self.const_expr(cond)?);
+                let then = match then {
+                    Some(then) => Some(Box::new(self.const_expr(then)?)),
+                    None => None,
+                };
+                Ok(ConstExpr::Conditional {
+                    cond,
+                    then,
+                    otherwise: Box::new(self.const_expr(otherwise)?),
+                })
+            }
+            // `ZEND_AST_DIM`: `[]` with nothing in it is php's compile
+            // error, and a dimension `zend_eval_const_expr` does not fold
+            // is kept for the engine, which reads it as `FETCH_DIM_R`
+            // reads.
+            tree::Expr::SubscriptExpr(id) => {
+                let node = &tree[id];
+                let (base, index) = (node.base, node.index);
+                let Some(index) = index else {
+                    return Err(self.compile_error("Cannot use [] for reading"));
+                };
+                if let Some(folded) = self.eval_const(expr)? {
+                    return folded_const_expr(folded).ok_or_else(|| {
+                        self.fatal("a constant expression this compiler cannot read yet")
+                    });
+                }
+                Ok(ConstExpr::Dim {
+                    container: Box::new(self.const_expr(base)?),
+                    dim: Box::new(self.const_expr(index)?),
+                })
+            }
+            // `ZEND_AST_PROP` and `ZEND_AST_NULLSAFE_PROP`: the object and
+            // the name, which may be an expression written in braces; a
+            // name read out of a variable is none of the nodes php's walk
+            // allows.
+            tree::Expr::MemberAccessExpr(id) => {
+                let node = &tree[id];
+                let (object, member) = (node.obj, node.member);
+                let nullsafe = self.is_nullsafe(id);
+                let object = Box::new(self.const_expr(object)?);
+                let name = match member {
+                    Some(tree::MemberSelector::MemberName(member)) => {
+                        let Some(name) = self.parsed.tree[member].name else {
+                            return Err(self.unread("a property fetch"));
+                        };
+                        ConstExpr::Str(self.text(name).into())
+                    }
+                    Some(tree::MemberSelector::BracedMember(braced)) => {
+                        let inner = self.required(self.parsed.tree[braced].inner, "a property")?;
+                        self.const_expr(inner)?
+                    }
+                    _ => {
+                        return Err(
+                            self.compile_error("Constant expression contains invalid operations")
+                        );
+                    }
+                };
+                Ok(ConstExpr::Prop {
+                    object,
+                    name: Box::new(name),
+                    nullsafe,
+                })
+            }
+            // `ZEND_AST_CAST`, folded where `zend_eval_const_expr` folds
+            // it; `(object)` is php's compile error where the expression
+            // is evaluated once.
+            tree::Expr::CastExpr(id) => {
+                let node = &tree[id];
+                let (op, operand) = (node.op, node.operand);
+                let to = self.cast_to(op, line)?;
+                if to == CastTo::Object && self.const_evaluation == Evaluation::Once {
+                    return Err(
+                        self.compile_error("Object casts are not supported in this context")
+                    );
+                }
+                if let Some(folded) = self.eval_const(expr)? {
+                    return folded_const_expr(folded).ok_or_else(|| {
+                        self.fatal("a constant expression this compiler cannot read yet")
+                    });
+                }
+                let operand = self.required(operand, "a cast")?;
+                Ok(ConstExpr::Cast {
+                    to: to.ast_code(),
+                    operand: Box::new(self.const_expr(operand)?),
+                })
+            }
+            tree::Expr::NewExpr(id) => self.const_new(id),
             // `zend_is_allowed_in_const_expr` refuses these in php's
             // words: a variable, a call, an assignment, an increment,
             // `@`, `throw`, `include`, `isset` and an interpolated
@@ -6711,24 +6980,121 @@ impl Emit<'_> {
             | tree::Expr::YieldFromExpr(_)
             | tree::Expr::InterpolatedStringExpr(_)
             | tree::Expr::HeredocExpr(_) => self.const_refused(expr),
-            // A property fetch, whose object `zend_eval_const_expr`
-            // evaluates before `zend_compile_const_expr` looks at the
-            // fetch, so what the object refuses is refused first.
-            tree::Expr::MemberAccessExpr(id) => {
-                self.const_expr(tree[id].obj)?;
-                Err(self.fatal("a constant expression this compiler cannot read yet"))
-            }
-            // What php's walk allows and this compiler cannot keep as
-            // the tree it was written as yet: a dimension (8.5), a
-            // `match`, a conditional, a `??`, a `new`, an `instanceof`
-            // and a closure.
-            _ => match self.constant_of(expr)? {
+            // What this compiler cannot keep as the tree it was written
+            // as yet: a closure (8.5), whose body would be a function of
+            // the unit the evaluation has no way to name, and a node php's
+            // walk refuses that folds to nothing.
+            _ => match self.eval_const(expr)? {
                 Some(folded) => folded_const_expr(folded).ok_or_else(|| {
                     self.fatal("a constant expression this compiler cannot read yet")
                 }),
                 None => Err(self.fatal("a constant expression this compiler cannot read yet")),
             },
         }
+    }
+
+    /// [`Self::const_expr`] for an expression evaluated each time it is
+    /// read, php's `allow_dynamic`: a parameter's default, an attribute's
+    /// argument and a `const` statement's value ([`Evaluation`]).
+    fn dynamic_const_expr(&mut self, expr: tree::Expr) -> Result<ConstExpr, CompileError> {
+        let outer = std::mem::replace(&mut self.const_evaluation, Evaluation::EachTime);
+        let built = self.const_expr(expr);
+        self.const_evaluation = outer;
+        built
+    }
+
+    /// `ZEND_AST_NEW` in a constant expression
+    /// (`zend_compile_const_expr_new`, `Z/Zend/zend_compile.c:11470`):
+    /// php's compile error where the expression is evaluated once; then
+    /// the class a name written out, never an anonymous class, a class
+    /// the program computes or `static`, resolved in the namespace, with
+    /// `self` and `parent` kept for the scope that evaluates it; and the
+    /// arguments as `zend_compile_const_expr_args` holds them, `(...)`,
+    /// an unpacked argument and a positional one after a named one each
+    /// php's compile error.
+    ///
+    /// ```php
+    /// class P { function __construct(public $x = 'p') {} }
+    /// class C extends P {
+    ///     function __construct(public $x = 0, public $y = 0) {}
+    ///     static function make($a = new self(1, y: 2), $b = new parent, $c = new stdClass) { return [$a, $b, $c]; }
+    /// }
+    /// var_dump(C::make());
+    /// ```
+    /// ```expect
+    /// array(3) {
+    ///   [0]=>
+    ///   object(C)#1 (2) {
+    ///     ["x"]=>
+    ///     int(1)
+    ///     ["y"]=>
+    ///     int(2)
+    ///   }
+    ///   [1]=>
+    ///   object(P)#2 (1) {
+    ///     ["x"]=>
+    ///     string(1) "p"
+    ///   }
+    ///   [2]=>
+    ///   object(stdClass)#3 (0) {
+    ///   }
+    /// }
+    /// ```
+    fn const_new(&mut self, id: NodeId<tree::NewExpr>) -> Result<ConstExpr, CompileError> {
+        if self.const_evaluation == Evaluation::Once {
+            return Err(self.compile_error("New expressions are not supported in this context"));
+        }
+        let line = self.line;
+        let node = &self.parsed.tree[id];
+        let (anon, ctor, args) = (node.anon, node.ctor, node.args);
+        if anon.is_some() {
+            return Err(self.compile_error("Cannot use anonymous class in constant expression"));
+        }
+        let Some(ctor) = ctor else {
+            return Err(self.unread("a `new`"));
+        };
+        let ClassSpec::Name(token) = self.class_spec(ctor) else {
+            return Err(self.compile_error("Cannot use dynamic class name in constant expression"));
+        };
+        let written = self.text(token).to_vec();
+        if class_fetch_type(&written) == FETCH_CLASS_STATIC {
+            return Err(self.compile_error("\"static\" is not allowed in compile-time constants"));
+        }
+        let class = self.class_name(&written);
+        let mut arguments = Vec::new();
+        if let Some(args) = args {
+            let args::Args::Written { list, .. } = self.arguments(args, line)? else {
+                return Err(self.compile_error("Cannot create Closure for new expression"));
+            };
+            let mut named = false;
+            for argument in list {
+                arguments.push(match argument {
+                    args::Arg::Positional(_) if named => {
+                        return Err(self
+                            .compile_error("Cannot use positional argument after named argument"));
+                    }
+                    args::Arg::Positional(value) => (None, self.const_expr(value)?),
+                    args::Arg::Named(name, value) => {
+                        named = true;
+                        (Some(Name(name)), self.const_expr(value)?)
+                    }
+                    args::Arg::Unpack(_) => {
+                        return Err(self.compile_error(
+                            "Argument unpacking in constant expressions is not supported",
+                        ));
+                    }
+                    args::Arg::Made(..) => {
+                        return Err(
+                            self.fatal("a constant `new` over an argument the compiler made")
+                        );
+                    }
+                });
+            }
+        }
+        Ok(ConstExpr::New {
+            class: Name(class.into_boxed_slice()),
+            arguments,
+        })
     }
 
     /// `zend_is_allowed_in_const_expr`'s refusal, php's
@@ -6894,7 +7260,8 @@ impl Emit<'_> {
         for declarator in &node.const_declarators {
             let (name, value, line) = self.const_declarator(*declarator)?;
             self.line = line;
-            let value = self.constant_expr(value)?;
+            // The fold, or the tree `DECLARE_CONST` evaluates as it runs.
+            let value = self.const_expr_to_zval(value)?;
             if [&b"true"[..], b"false", b"null"]
                 .iter()
                 .any(|special| name.eq_ignore_ascii_case(special))
@@ -7528,6 +7895,59 @@ impl Emit<'_> {
     /// ```expect
     /// string(2) "ok"
     /// ```
+    ///
+    /// A property, a class's property, `$this`, a property under a
+    /// property and a variable the program names are the variable
+    /// fetched by reference too ([`Self::var_by_ref`]); what is no
+    /// variable is `ZEND_RETURNS_VALUE` and a call `ZEND_RETURNS_FUNCTION`,
+    /// each php's notice where no reference comes back:
+    ///
+    /// ```php
+    /// class C {
+    ///     public $p = [1]; public static $s = 2; public $o;
+    ///     function &prop() { return $this->p; }
+    ///     function &elem() { return $this->p[0]; }
+    ///     function &stat() { return self::$s; }
+    ///     function &me() { return $this; }
+    ///     function &deep() { return $this->o->q; }
+    ///     function &byname() { $n = 'x'; $x = 5; return $$n; }
+    ///     function &val() { return 1 + 1; }
+    ///     function &call() { return $this->val(); }
+    /// }
+    /// $c = new C; $c->o = new stdClass;
+    /// $r = &$c->prop(); $r[] = 2; var_dump($c->p);
+    /// $e = &$c->elem(); $e = 9; var_dump($c->p);
+    /// $s = &$c->stat(); $s = 3; var_dump(C::$s);
+    /// $d = &$c->deep(); $d = 'q'; var_dump($c->o);
+    /// var_dump($c->me() === $c, $c->byname(), $c->val(), $c->call());
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   [0]=>
+    ///   int(1)
+    ///   [1]=>
+    ///   int(2)
+    /// }
+    /// array(2) {
+    ///   [0]=>
+    ///   &int(9)
+    ///   [1]=>
+    ///   int(2)
+    /// }
+    /// int(3)
+    /// object(stdClass)#2 (1) {
+    ///   ["q"]=>
+    ///   &string(1) "q"
+    /// }
+    ///
+    /// Notice: Only variable references should be returned by reference in %s on line 10
+    ///
+    /// Notice: Only variable references should be returned by reference in %s on line 10
+    /// bool(true)
+    /// int(5)
+    /// int(2)
+    /// int(2)
+    /// ```
     fn r#return(&mut self, value: Option<tree::Expr>) -> Result<(), CompileError> {
         // For a generator the `&` is its yields', not its return's.
         let generator = self.fn_flags.generator;
@@ -7535,40 +7955,35 @@ impl Emit<'_> {
         let written = value.map(|value| self.peel(value));
         // `zend_assert_not_short_circuited` over a variable returned by
         // reference.
-        if by_ref && written.is_some_and(|expr| self.is_short_circuited(expr)) {
+        // `zend_is_variable`, the `ZEND_AST_VAR` of a name the program
+        // computes among them.
+        let variable = written.is_some_and(|expr| {
+            self.is_variable(expr)
+                || matches!(
+                    expr,
+                    tree::Expr::VarVarExpr(_) | tree::Expr::DynamicVarExpr(_)
+                )
+        });
+        if by_ref && variable && written.is_some_and(|expr| self.is_short_circuited(expr)) {
             return Err(self.compile_error("Cannot take reference of a nullsafe chain"));
         }
-        if by_ref
-            && written.is_some_and(|expr| {
-                matches!(expr, tree::Expr::MemberAccessExpr(_))
-                    || self.is_static_prop(expr)
-                    || self.is_this(expr)
-            })
-        {
-            return Err(self.fatal(
-                "a return by reference of what is no variable this compiler cannot read yet",
-            ));
-        }
+        // `ZEND_RETURNS_FUNCTION` over a call and `ZEND_RETURNS_VALUE`
+        // over what is no variable, the two the handler raises php's
+        // notice for where no reference comes back.
         let extended_value = match written {
             Some(_) if !by_ref => 0,
-            Some(tree::Expr::CallExpr(_)) => RETURNS_FUNCTION,
-            Some(tree::Expr::SimpleVarExpr(_) | tree::Expr::SubscriptExpr(_)) | None => 0,
-            Some(expr) if self.is_by_name(expr) => 0,
-            Some(_) => RETURNS_VALUE,
+            Some(expr) if self.is_call(expr) => RETURNS_FUNCTION,
+            Some(_) if !variable => RETURNS_VALUE,
+            _ => 0,
         };
         // `zend_compile_var(BP_VAR_W, 1)` over a variable returned by
-        // reference: a dimension is fetched for writing, so the cell the
-        // caller is bound to is the array's own slot, and a variable
-        // fetched by name is its `FETCH_W`.
+        // reference ([`Self::var_by_ref`]): the cell the caller is bound
+        // to is the variable's own, an element's or a property's slot.
         let compiled = match written {
-            Some(expr) if by_ref && self.is_by_name(expr) => {
-                let (_, at) = self.var_for_reference(expr)?;
-                Where::Returned(at)
-            }
-            Some(expr @ tree::Expr::SubscriptExpr(_)) if by_ref => {
-                let (_, at) = self.var_for_reference(expr)?;
-                Where::Returned(at)
-            }
+            Some(expr) if by_ref && variable => match self.var_by_ref(expr)? {
+                (OperandKind::Cv, at) => Where::Cv(at),
+                (_, at) => Where::Returned(at),
+            },
             Some(expr) => self.expr(expr)?,
             None => Where::Constant(Zval::null()),
         };
@@ -9180,6 +9595,16 @@ impl Emit<'_> {
     /// `zend_compile_expr` and its `zend_short_circuiting_commit`.
     pub(crate) fn expr(&mut self, expr: tree::Expr) -> Result<Where, CompileError> {
         let node = self.peel(expr);
+        // `ZEND_AST_ZNODE`: the value [`Self::pipe`] holds for the node.
+        if let Some(value) = self.znode(node) {
+            if self.chain_inner == Some(node) {
+                self.chain_inner = None;
+            }
+            return Ok(value);
+        }
+        if self.memo.mode != memo::MemoMode::None {
+            return self.memoized(node);
+        }
         let inner = self.chain_inner.take() == Some(node);
         let checkpoint = self.short_circuits.len();
         let value = self.expr_node(node)?;
@@ -9331,6 +9756,7 @@ impl Emit<'_> {
                         self.short_circuiting(true, left, right)
                     }
                     Some(SyntaxKind::QUESTION_QUESTION) => self.coalesce(left, right),
+                    Some(SyntaxKind::PIPE_GT) => self.pipe(left, right),
                     Some(kind) => match binary_op(kind) {
                         Some(op) => self.binary(op, left, right),
                         None => Err(self.unread("a binary operator")),
@@ -9494,11 +9920,16 @@ impl Emit<'_> {
     /// `zend_compile_isset_or_empty` (`Z/Zend/zend_compile.c:10816`),
     /// whose arms are the variable nodes: a `ZEND_AST_VAR` that
     /// `zend_try_compile_cv` makes a CV is `ISSET_ISEMPTY_CV` over the
-    /// CV into a temporary, and a `ZEND_AST_DIM` is the chain compiled
-    /// under `BP_VAR_IS` with the last link's opcode overwritten,
-    /// `opline->opcode = ZEND_ISSET_ISEMPTY_DIM_OBJ`, so the link that
-    /// would have fetched asks the table instead. `ZEND_ISEMPTY` goes
-    /// into `extended_value` for `empty` and nothing for `isset`.
+    /// CV into a temporary, `$this` is `ISSET_ISEMPTY_THIS`, and a name
+    /// the program computes `ISSET_ISEMPTY_VAR` over the name; a
+    /// dimension, a property and a class's property are the chain
+    /// compiled under `BP_VAR_IS` with the last link's opcode
+    /// overwritten, `ISSET_ISEMPTY_DIM_OBJ`, `ISSET_ISEMPTY_PROP_OBJ` or
+    /// `ISSET_ISEMPTY_STATIC_PROP`, so the link that would have fetched
+    /// asks instead. `ZEND_ISEMPTY` goes into `extended_value` for
+    /// `empty` and nothing for `isset`. What is no variable is `!expr`
+    /// under `empty`, and php's compile error under `isset`; `$GLOBALS`
+    /// itself is set.
     ///
     /// php's handler branches on the answer where a `JMPZ` or a `JMPNZ`
     /// follows (`ZEND_VM_SMART_BRANCH`); the temporary stands and the
@@ -9529,6 +9960,54 @@ impl Emit<'_> {
     /// bool(false)
     /// ```
     ///
+    /// A class's property, `$this`, a name the program computes and a
+    /// property under a property, each asked and none fetched, and
+    /// `empty` over an expression:
+    ///
+    /// ```php
+    /// class C { public static $s = 1; private static $p = 2; public static $n; public $o;
+    ///     function m() { return [isset($this), empty($this), isset($this->o->q), isset(self::$p)]; } }
+    /// $c = new C; $c->o = new stdClass; $c->o->q = [0];
+    /// var_dump(isset(C::$s), isset(C::$n), isset(C::$p), isset(C::$none), empty(C::$s), $c->m());
+    /// $n = 'c'; $m = 'none';
+    /// var_dump(isset($$n), isset($$m), empty($$n), isset($$n->o->q[0]), empty($c->o->q[0]), isset($this));
+    /// var_dump(empty([]), empty([0]), empty(f()));
+    /// function f() { return ''; }
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(false)
+    /// bool(false)
+    /// bool(false)
+    /// bool(false)
+    /// array(4) {
+    ///   [0]=>
+    ///   bool(true)
+    ///   [1]=>
+    ///   bool(false)
+    ///   [2]=>
+    ///   bool(true)
+    ///   [3]=>
+    ///   bool(true)
+    /// }
+    /// bool(true)
+    /// bool(false)
+    /// bool(false)
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// ```
+    ///
+    /// ```php
+    /// isset(1 + 1);
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot use isset() on the result of an expression (you can use "null !== expression" instead) in %s on line 2
+    /// ```
+    ///
     /// A property of a variable fetched by name stands on that variable's
     /// `FETCH_IS`, so a name nothing holds is no warning, and a hooked
     /// property's `get` answers `isset` and `empty` as the object has it:
@@ -9542,6 +10021,9 @@ impl Emit<'_> {
     /// var_dump(isset($_GET->h), empty($_GET->q), isset($$n?->h), isset($$m->p), empty($GLOBALS['o']->h));
     /// unset($_COOKIE);
     /// var_dump(isset($_COOKIE->p), isset($_COOKIE?->p));
+    /// $a = ['o' => $o];
+    /// $o->q = 1;
+    /// var_dump(isset($a['o']->q), isset($a['o']->none), empty($a['x']->q));
     /// ```
     /// ```expect
     /// bool(true)
@@ -9551,123 +10033,112 @@ impl Emit<'_> {
     /// bool(false)
     /// bool(false)
     /// bool(false)
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// ```
+    ///
+    /// A variable fetched by name is asked in its table and never
+    /// fetched, so nothing is warned of:
+    ///
+    /// ```php
+    /// $a = 1; $z = 0;
+    /// $names = ['a', 'z', 'none'];
+    /// foreach ($names as $name) { var_dump(isset($$name), empty(${$name})); }
+    /// var_dump(isset($_SERVER), empty($_FILES), isset($_ENV['nothing']), isset(${'a'}), empty($GLOBALS['z']));
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// bool(true)
     /// ```
     fn isset_or_empty(&mut self, var: tree::Expr, empty: bool) -> Result<Where, CompileError> {
         let extended_value = u32::from(empty);
-        let line = self.line_of(var);
-        let word = if empty { "empty" } else { "isset" };
         let var = self.peel(var);
-        // `zend_compile_simple_var_no_cv` under `BP_VAR_IS` made
-        // `ISSET_ISEMPTY_VAR`: `$$x`, an auto-global and `$GLOBALS['k']`.
-        if self.is_by_name(var) {
-            return self.isset_by_name(var, empty);
+        let by_name = self.is_by_name(var);
+        // `!zend_is_variable(var_ast)`: `empty(expr)` is `!expr`, and
+        // `isset(expr)` php's compile error.
+        if !self.is_variable(var) && !by_name {
+            if empty {
+                return self.bool_not(var);
+            }
+            return Err(self.compile_error(
+                "Cannot use isset() on the result of an expression (you can use \"null !== expression\" instead)",
+            ));
         }
-        // `is_globals_fetch`: `$GLOBALS` is set and not empty, answered
-        // while the file compiles.
+        // `is_globals_fetch`: `$GLOBALS` itself is always set.
         if self.is_globals(var) {
             return Ok(Where::Constant(Zval::bool(!empty)));
         }
-        if let tree::Expr::SimpleVarExpr(id) = var {
-            let SimpleVar::Cv(name) = self.simple_var_of(id, line)? else {
-                return Err(walk::unread(
-                    line,
-                    &format!("an `{word}` over $this, whose opcode is `ISSET_ISEMPTY_THIS`,"),
-                ));
-            };
-            let cv = self.lookup_cv(&name);
-            let out = self.temporary();
-            self.push(Opline {
-                opcode: Opcode::IssetIsemptyCv,
-                op1_type: OperandKind::Cv,
-                op1: cv,
-                out_type: OperandKind::Tmp,
-                out,
-                extended_value,
-                ..Opline::default()
-            });
-            return Ok(Where::Temporary(out));
+        // `is_global_var_fetch`'s own arm over `$GLOBALS[]`.
+        if self.is_globals_append(var) {
+            return Err(self.compile_error("Cannot use [] for reading"));
         }
-        // `zend_compile_prop(result, var_ast, BP_VAR_IS, 0)` with
-        // `opline->opcode = ZEND_ISSET_ISEMPTY_PROP_OBJ` over it: the
-        // fetch that would have read the property asks the object's
-        // `has_property` instead. The three cache slots stand in
-        // `extended_value` where `FETCH_OBJ_IS` left them, with
-        // `ZEND_ISEMPTY` in the bit below them, which is free because a
-        // slot is eight bytes wide.
-        if let tree::Expr::MemberAccessExpr(id) = var {
-            let object = self.peel(self.parsed.tree[id].obj);
-            // Every link under the last is `BP_VAR_IS` too, so a
-            // property or a dimension under this one is a `FETCH_OBJ_IS`
-            // or a `FETCH_DIM_IS` chain, which `zend_delayed_compile_var`
-            // builds and this arm does not; a receiver compiled where it
-            // stands would read where php says nothing.
-            let by_name = self.is_by_name(object);
-            if !by_name && !matches!(object, tree::Expr::SimpleVarExpr(_)) {
-                return Err(self.fatal(
-                    "an `isset` over a property under a property or a dimension, whose links are `FETCH_OBJ_IS`, this compiler cannot read yet",
-                ));
-            }
-            let name = self.member_of(id)?;
-            let nullsafe = self.is_nullsafe(id) && !self.is_this(object);
-            let (op1_type, op1, name) = if by_name {
-                // A variable fetched by name, `$_SERVER` or `$$x`, is its
-                // `FETCH_IS` held back past the name, or laid down before
-                // the `JMP_NULL` a `?->` stands on.
-                let held = self.delayed_var(object, Fetch::Is)?;
-                if nullsafe {
-                    let receiver = self.base_fetch(held, Fetch::Is, Over::Obj);
-                    self.jmp_null(receiver, true);
-                    let name = self.prop_name(name)?;
-                    (receiver.0, receiver.1, name)
-                } else {
-                    let name = self.prop_name(name)?;
-                    let receiver = self.base_fetch(held, Fetch::Is, Over::Obj);
-                    (receiver.0, receiver.1, name)
-                }
-            } else {
-                let (op1_type, op1) = self.receiver(object)?;
-                if nullsafe {
-                    self.jmp_null((op1_type, op1), true);
-                }
-                (op1_type, op1, self.prop_name(name)?)
+        // A `ZEND_AST_VAR`, `$GLOBALS['k']` among them: the CV, `$this`,
+        // or `zend_compile_simple_var_no_cv` under `BP_VAR_IS` made
+        // `ISSET_ISEMPTY_VAR`, the name in `op1` and the table's fetch
+        // type beside `ZEND_ISEMPTY` in `extended_value`, the bucket
+        // asked and never fetched.
+        if by_name || matches!(var, tree::Expr::SimpleVarExpr(_)) {
+            let Some(named) = self.named(var)? else {
+                return Err(self.fatal("an `isset` over a name that is no variable"));
+            };
+            let (opcode, (op1_type, op1), fetch_type) = match named {
+                by_name::Named::Cv(name) => (
+                    Opcode::IssetIsemptyCv,
+                    (OperandKind::Cv, self.lookup_cv(&name)),
+                    0,
+                ),
+                by_name::Named::This => (Opcode::IssetIsemptyThis, (OperandKind::Unused, 0), 0),
+                by_name::Named::Globals => return Ok(Where::Constant(Zval::bool(!empty))),
+                by_name::Named::Fetch { name, table } => (
+                    Opcode::IssetIsemptyVar,
+                    self.operand(name),
+                    table.fetch_type(),
+                ),
             };
             let out = self.temporary();
             self.push(Opline {
-                opcode: Opcode::IssetIsemptyPropObj,
+                opcode,
                 op1_type,
                 op1,
-                op2_type: name.kind,
-                op2: name.at,
                 out_type: OperandKind::Tmp,
                 out,
-                extended_value: name.slots | extended_value,
+                extended_value: fetch_type | extended_value,
                 ..Opline::default()
             });
             return Ok(Where::Temporary(out));
         }
-        if !matches!(var, tree::Expr::SubscriptExpr(_)) {
-            return Err(walk::unread(
-                line,
-                &format!("an `{word}` over what is no variable"),
-            ));
-        }
-        let (container, links) = self.dim_chain(var, Fetch::Is)?;
-        let Some((last, fetches)) = links.split_last() else {
-            return Err(self.fatal("a dimension with no dimension"));
+        // `zend_compile_dim`, `zend_compile_prop` or
+        // `zend_compile_static_prop` under `BP_VAR_IS`, the `??`'s own
+        // chain ([`Self::silent_link`]), with the last fetch's opcode
+        // overwritten: the link that would have read asks instead. The
+        // cache slots of a property stand in `extended_value` where the
+        // fetch left them, `ZEND_ISEMPTY` in the bit below them.
+        let mut delayed = Vec::new();
+        self.silent_link(var, &mut delayed)?;
+        let Some(last) = delayed.last_mut() else {
+            return Err(self.fatal("an `isset` over a chain with no link"));
         };
-        let (op1_type, op1) = self.dim_fetches(container, fetches, Fetch::Is, Over::Dim);
-        self.push(Opline {
-            opcode: Opcode::IssetIsemptyDimObj,
-            op1_type,
-            op1,
-            op2_type: last.kind,
-            op2: last.at,
-            out_type: OperandKind::Tmp,
-            out: last.out,
-            extended_value,
-            ..Opline::default()
-        });
-        Ok(Where::Temporary(last.out))
+        last.opcode = match last.opcode {
+            Opcode::FetchDimIs => Opcode::IssetIsemptyDimObj,
+            Opcode::FetchObjIs => Opcode::IssetIsemptyPropObj,
+            Opcode::FetchStaticPropIs => Opcode::IssetIsemptyStaticProp,
+            _ => return Err(self.fatal("an `isset` over a link that is no fetch")),
+        };
+        last.extended_value |= extended_value;
+        let Some(out) = self.lay_silent(&mut delayed, None) else {
+            return Err(self.fatal("an `isset` over a chain with no link"));
+        };
+        Ok(Where::Temporary(out))
     }
 
     /// `zend_compile_print` (`Z/Zend/zend_compile.c:10700`): the operand,
@@ -10113,76 +10584,6 @@ impl Emit<'_> {
         Ok(Where::Temporary(out))
     }
 
-    /// `zend_compile_assign_coalesce` (`Z/Zend/zend_compile.c:10597`),
-    /// `$a ??= b`: [`Self::coalesce`]'s shape with an assignment where
-    /// its `QM_ASSIGN` stands. The target is compiled under `BP_VAR_IS`
-    /// and its oplines memoized, `COALESCE` over what that read holds
-    /// into a temporary with the jump target learnt after the value,
-    /// then the value, then the target compiled again under `BP_VAR_W`
-    /// and `ASSIGN` into a temporary of its own, and `QM_ASSIGN` of that
-    /// into the coalesce's temporary, which is where the operator leaves
-    /// its value. The target is read once however many oplines the two
-    /// fetches take, which is what the form is for.
-    ///
-    /// A `ZEND_AST_VAR` target is the CV under both fetch types, so the
-    /// memoized table holds nothing and no `FREE` arm stands after the
-    /// jump: php emits that arm only where a link of the chain left a
-    /// temporary to give up, which is the `need_frees` branch a
-    /// dimension and a property reach.
-    ///
-    /// The value is served only where the target holds null, and a
-    /// target nothing wrote raises nothing, since the read is
-    /// `BP_VAR_IS`:
-    ///
-    /// ```php
-    /// function f() { echo "f"; return 2; }
-    /// $a = 1; $n = null;
-    /// var_dump($a ??= f());
-    /// var_dump($n ??= f());
-    /// var_dump($undefined ??= 3, $undefined);
-    /// ```
-    /// ```expect
-    /// int(1)
-    /// fint(2)
-    /// int(3)
-    /// int(3)
-    /// ```
-    fn assign_coalesce(&mut self, var: &[u8], value: tree::Expr) -> Result<Where, CompileError> {
-        let cv = self.lookup_cv(var);
-        let out = self.temporary();
-        let opnum = self.push(Opline {
-            opcode: Opcode::Coalesce,
-            op1_type: OperandKind::Cv,
-            op1: cv,
-            out_type: OperandKind::Tmp,
-            out,
-            ..Opline::default()
-        });
-        let value = self.expr(value)?;
-        let (op2_type, op2) = self.operand(value);
-        let assigned = self.temporary();
-        self.push(Opline {
-            opcode: Opcode::Assign,
-            op1_type: OperandKind::Cv,
-            op1: cv,
-            op2_type,
-            op2,
-            out_type: OperandKind::Tmp,
-            out: assigned,
-            ..Opline::default()
-        });
-        self.push(Opline {
-            opcode: Opcode::QmAssign,
-            op1_type: OperandKind::Tmp,
-            op1: assigned,
-            out_type: OperandKind::Tmp,
-            out,
-            ..Opline::default()
-        });
-        self.update_jump_target_to_next(opnum);
-        Ok(Where::Temporary(out))
-    }
-
     /// `zend_compile_short_circuiting` (`Z/Zend/zend_compile.c:10350`),
     /// `a && b` and `a || b` and their word spellings: the left side
     /// compiled, then `JMPZ_EX` for `&&` or `JMPNZ_EX` for `||` into the
@@ -10619,18 +11020,58 @@ impl Emit<'_> {
         Ok(self.base_fetch(held, Fetch::Write, Over::Ref))
     }
 
+    /// `zend_compile_var(…, BP_VAR_W, 1)`, a variable fetched by
+    /// reference, what the right of a `= &` and a `return` by reference
+    /// compile: a plain variable is its CV; a dimension, a property, a
+    /// `static` property and a variable the program names are the `_W`
+    /// fetch of the whole chain with the `&`'s own bit on its last opline
+    /// ([`Self::var_for_reference`]); `$this` is `FETCH_THIS` into a
+    /// `VAR` (`zend_compile_simple_var`'s `is_this_fetch` arm, whose
+    /// opline writes a `VAR` and not a temporary under `BP_VAR_W`), and
+    /// `$GLOBALS` its `FETCH_GLOBALS` into a `VAR` the same way; a call
+    /// is the `VAR` it returned into; and everything else is
+    /// `zend_compile_var_inner`'s default arm, php's
+    /// `Cannot use temporary expression in write context`.
+    fn var_by_ref(&mut self, node: tree::Expr) -> Result<(OperandKind, u32), CompileError> {
+        let line = self.line;
+        Ok(match self.peel(node) {
+            node if self.is_by_name(node) => self.var_for_reference(node)?,
+            tree::Expr::SimpleVarExpr(id) => match self.simple_var_of(id, line)? {
+                SimpleVar::Cv(name) => (OperandKind::Cv, self.lookup_cv(&name)),
+                SimpleVar::This => {
+                    let this = self.fetch_this(OperandKind::Var);
+                    self.operand(this)
+                }
+                SimpleVar::Globals => {
+                    let globals = self.fetch_globals(OperandKind::Var);
+                    self.operand(globals)
+                }
+                SimpleVar::Auto(_) => return Err(self.fatal("an auto-global not fetched by name")),
+            },
+            node @ (tree::Expr::SubscriptExpr(_)
+            | tree::Expr::MemberAccessExpr(_)
+            | tree::Expr::VarVarExpr(_)
+            | tree::Expr::DynamicVarExpr(_)) => self.var_for_reference(node)?,
+            node @ tree::Expr::ScopedAccessExpr(id)
+                if matches!(self.scoped_of(id, line)?, Scoped::Property { .. }) =>
+            {
+                self.var_for_reference(node)?
+            }
+            node @ tree::Expr::CallExpr(_) => {
+                let returned = self.expr(node)?;
+                self.operand(returned)
+            }
+            _ => {
+                return Err(self.compile_error("Cannot use temporary expression in write context"));
+            }
+        })
+    }
+
     /// `zend_compile_var(&source_node, source_ast, BP_VAR_W, 1)` and the
     /// `MAKE_REF` after it, what stands on the right of a `= &`
-    /// (`zend_compile_assign_ref`, `Z/Zend/zend_compile.c:3568`): a
-    /// plain variable is its CV; a dimension, a property and a `static`
-    /// property are the `_W` fetch of the whole chain with the `&`'s own
-    /// bit on its last opline ([`Self::var_for_reference`]); `$this` is
-    /// `FETCH_THIS` into a `VAR` (`zend_compile_simple_var`'s
-    /// `is_this_fetch` arm, whose opline writes a `VAR` and not a
-    /// temporary under `BP_VAR_W`); a call is the `VAR` it returned
-    /// into; and
-    /// everything else is `zend_compile_var_inner`'s default arm,
-    /// `Cannot use temporary expression in write context`.
+    /// (`zend_compile_assign_ref`, `Z/Zend/zend_compile.c:3568`): the
+    /// variable fetched by reference ([`Self::var_by_ref`]), after
+    /// `zend_assert_not_short_circuited`.
     ///
     /// `MAKE_REF` stands over what that left where the target is not a
     /// plain `$name` and the source is no CV, php's fix for bug #71539:
@@ -10654,41 +11095,12 @@ impl Emit<'_> {
         plain_target: bool,
     ) -> Result<(OperandKind, u32, u32), CompileError> {
         self.check_stack()?;
-        let line = self.line;
         let node = self.peel(source);
         // `zend_assert_not_short_circuited`.
         if self.is_short_circuited(node) {
             return Err(self.compile_error("Cannot take reference of a nullsafe chain"));
         }
-        let (kind, at) = match node {
-            _ if self.is_by_name(node) => self.var_for_reference(node)?,
-            tree::Expr::SimpleVarExpr(id) => match self.simple_var_of(id, line)? {
-                SimpleVar::Cv(name) => (OperandKind::Cv, self.lookup_cv(&name)),
-                SimpleVar::This => {
-                    let this = self.fetch_this(OperandKind::Var);
-                    self.operand(this)
-                }
-                SimpleVar::Auto(_) => return Err(self.fatal("an auto-global not fetched by name")),
-                SimpleVar::Globals => {
-                    return Err(self.compile_error("Cannot acquire reference to $GLOBALS"));
-                }
-            },
-            tree::Expr::SubscriptExpr(_) | tree::Expr::MemberAccessExpr(_) => {
-                self.var_for_reference(node)?
-            }
-            tree::Expr::ScopedAccessExpr(id)
-                if matches!(self.scoped_of(id, line)?, Scoped::Property { .. }) =>
-            {
-                self.var_for_reference(node)?
-            }
-            tree::Expr::CallExpr(_) => {
-                let returned = self.expr(node)?;
-                self.operand(returned)
-            }
-            _ => {
-                return Err(self.compile_error("Cannot use temporary expression in write context"));
-            }
-        };
+        let (kind, at) = self.var_by_ref(node)?;
         // Bug #71539: `zend_emit_op(&source_node, ZEND_MAKE_REF,
         // &source_node, NULL)`, and `source_node` is the `VAR` it wrote
         // from here on, which is the node the arm below reads.
@@ -10960,6 +11372,9 @@ impl Emit<'_> {
                 None if matches!(fetch, Fetch::Read | Fetch::Is) => {
                     return Err(self.compile_error("Cannot use [] for reading"));
                 }
+                None if fetch == Fetch::Unset => {
+                    return Err(self.compile_error("Cannot use [] for unsetting"));
+                }
                 None => (OperandKind::Unused, 0),
             };
             links.push(DimLink {
@@ -11085,8 +11500,11 @@ impl Emit<'_> {
             }
             // `zend_separate_if_call_and_write`: a call under a write
             // is `SEPARATE` over the `VAR` it returned into; a call php
-            // answered in a temporary has no `VAR` to separate.
-            (_, Fetch::Write | Fetch::Rw) if self.is_call(base) => {
+            // answered in a temporary has no `VAR` to separate. A pipe
+            // is `zend_compile_var_inner`'s default arm below.
+            (_, Fetch::Write | Fetch::Rw | Fetch::Unset)
+                if matches!(base, tree::Expr::CallExpr(_)) =>
+            {
                 let returned = self.expr(base)?;
                 let Where::Returned(at) = returned else {
                     return Err(self
@@ -11108,7 +11526,7 @@ impl Emit<'_> {
             // property fetch takes is `zend_delayed_compile_prop`'s own
             // arm and stands above this one
             // ([`Self::delayed_object`]).
-            (_, Fetch::Write | Fetch::Rw) if self.is_this(base) => {
+            (_, Fetch::Write | Fetch::Rw | Fetch::Unset) if self.is_this(base) => {
                 let this = self.fetch_this(OperandKind::Var);
                 Base::Settled(self.operand(this))
             }
@@ -11120,7 +11538,7 @@ impl Emit<'_> {
                 Base::Settled(self.operand(globals))
             }
             // `zend_compile_var`'s default arm under a write.
-            (_, Fetch::Write | Fetch::Rw) => {
+            (_, Fetch::Write | Fetch::Rw | Fetch::Unset) => {
                 return Err(self.compile_error("Cannot use temporary expression in write context"));
             }
         })
@@ -11156,6 +11574,7 @@ impl Emit<'_> {
             Fetch::Rw => (Opcode::FetchDimRw, OperandKind::Var),
             Fetch::Is => (Opcode::FetchDimIs, OperandKind::Tmp),
             Fetch::FuncArg => (Opcode::FetchDimFuncArg, OperandKind::Var),
+            Fetch::Unset => (Opcode::FetchDimUnset, OperandKind::Var),
         };
         let under = if fetches.is_empty() { over } else { Over::Dim };
         let (mut op1_type, mut op1) = self.base_fetch(container, fetch, under);
@@ -11200,7 +11619,10 @@ impl Emit<'_> {
     /// dimension stands over it; under a read it is the `_R` opcode into
     /// a temporary (`zend_adjust_for_fetch_type`).
     fn base_fetch(&mut self, container: Base, fetch: Fetch, over: Over) -> (OperandKind, u32) {
-        let write = matches!(fetch, Fetch::Write | Fetch::Rw | Fetch::FuncArg);
+        let write = matches!(
+            fetch,
+            Fetch::Write | Fetch::Rw | Fetch::FuncArg | Fetch::Unset
+        );
         let out_type = if write {
             OperandKind::Var
         } else {
@@ -11237,6 +11659,7 @@ impl Emit<'_> {
                         Fetch::Rw => Opcode::FetchObjRw,
                         Fetch::Is => Opcode::FetchObjIs,
                         Fetch::FuncArg => Opcode::FetchObjFuncArg,
+                        Fetch::Unset => Opcode::FetchObjUnset,
                     },
                     op1_type,
                     op1,
@@ -11262,6 +11685,7 @@ impl Emit<'_> {
                         Fetch::Rw => Opcode::FetchStaticPropRw,
                         Fetch::Is => Opcode::FetchStaticPropIs,
                         Fetch::FuncArg => Opcode::FetchStaticPropFuncArg,
+                        Fetch::Unset => Opcode::FetchStaticPropUnset,
                     },
                     op1_type: OperandKind::Const,
                     op1: name_at,
@@ -12866,6 +13290,11 @@ impl Emit<'_> {
         // does emit was given.
         let line = expr.line(self.parsed);
         self.check_stack()?;
+        // `zend_eval_const_expr` has no `ZEND_AST_ZNODE` arm: a value the
+        // compiler holds folds nothing.
+        if self.znode(expr).is_some() {
+            return Err(self.fatal("a value the compiler holds is no constant expression"));
+        }
         let tree = &self.parsed.tree;
         match expr {
             tree::Expr::ParenExpr(id) => match tree[id].inner {
@@ -12904,8 +13333,13 @@ impl Emit<'_> {
             // string php's parser folded before the compiler saw it;
             // one with a variable in it is `ZEND_AST_ENCAPS_LIST`, whose
             // oplines no fold replaces.
+            // Its line is the parser's and no compile's, so the compile
+            // that reads it leaves `CG(zend_lineno)` where it stood.
             tree::Expr::InterpolatedStringExpr(_) | tree::Expr::HeredocExpr(_) => {
-                match self.expr(expr)? {
+                let line = self.line;
+                let value = self.expr(expr);
+                self.line = line;
+                match value? {
                     Where::Constant(value) => Ok(value),
                     _ => Err(self.fatal("an interpolated string is no constant expression")),
                 }
@@ -12984,8 +13418,17 @@ impl Emit<'_> {
                         self.short_circuit_fold(true, left, right)
                     }
                     // `zend_compile_coalesce` emits two oplines whatever
-                    // stands on either side, and `zend_eval_const_expr`
-                    // folds neither.
+                    // stands on either side; `zend_eval_const_expr`'s
+                    // `ZEND_AST_COALESCE` arm folds a left side that
+                    // folds, to itself where it is not `null` and to the
+                    // right side's fold where it is.
+                    Some(SyntaxKind::QUESTION_QUESTION) if self.fold == Fold::EvalConstExpr => {
+                        let value = self.constant_expr(left)?;
+                        if value.kind() == ZvalType::Null {
+                            return self.constant_expr(right);
+                        }
+                        Ok(value)
+                    }
                     Some(SyntaxKind::QUESTION_QUESTION) => {
                         Err(self.fatal("a `??` is no constant expression"))
                     }
@@ -13047,15 +13490,21 @@ impl Emit<'_> {
             | tree::Expr::PostfixIncDecExpr(_) => {
                 Err(self.fatal("a variable is no constant expression"))
             }
-            // A property fetch and a dimension are what php's walk
-            // allows in a constant expression on 8.5 and this compiler
-            // does not fold: the refusal is the one the phpt lane counts
-            // as unread and not php's invalid-operations sentence.
+            // `zend_eval_const_expr` folds no property fetch, and
+            // `zend_compile_prop` emits its fetch.
             tree::Expr::MemberAccessExpr(_) => {
-                Err(self.unread("a property fetch in a constant expression"))
+                Err(self.fatal("a property fetch is read as the program serves"))
+            }
+            // `zend_eval_const_expr`'s `ZEND_AST_DIM` arm
+            // ([`Self::dimension_fold`]); `zend_compile_dim` folds
+            // nothing.
+            tree::Expr::SubscriptExpr(id) if self.fold == Fold::EvalConstExpr => {
+                let node = &tree[id];
+                let (base, index) = (node.base, node.index);
+                self.dimension_fold(base, index)
             }
             tree::Expr::SubscriptExpr(_) => {
-                Err(self.unread("a dimension in a constant expression"))
+                Err(self.fatal("a dimension is read as the program serves"))
             }
             // `zend_try_ct_eval_class_const` folds nothing under
             // `ZEND_COMPILE_NO_CONSTANT_SUBSTITUTION`, which opcache
@@ -13088,11 +13537,26 @@ impl Emit<'_> {
             tree::Expr::InstanceofExpr(_) => {
                 Err(self.fatal("an instanceof is no constant expression"))
             }
-            // `zend_compile_conditional` folds nothing either: the arm of
-            // `zend_eval_const_expr` that takes the branch a constant
-            // condition picks is not read yet (#437).
+            // `zend_eval_const_expr`'s `ZEND_AST_CONDITIONAL` arm: the
+            // condition folded, then the branch `zend_is_true` picks
+            // folded in its place, the condition itself for `a ?: b`;
+            // `zend_compile_conditional` folds nothing.
+            tree::Expr::TernaryExpr(id) if self.fold == Fold::EvalConstExpr => {
+                let node = &tree[id];
+                let (cond, then, otherwise) = (node.cond, node.then, node.else_branch);
+                let otherwise = self.required(otherwise, "a conditional")?;
+                let value = self.constant_expr(cond)?;
+                if value.as_double().is_some_and(f64::is_nan) {
+                    self.raise(Level::Warning, "unexpected NAN value was coerced to bool");
+                }
+                match (truth(value), then) {
+                    (true, None) => Ok(value),
+                    (true, Some(then)) => self.constant_expr(then),
+                    (false, _) => self.constant_expr(otherwise),
+                }
+            }
             tree::Expr::TernaryExpr(_) => {
-                Err(self.fatal("a conditional is no constant expression here"))
+                Err(self.fatal("a conditional is folded by no compile of it"))
             }
             // `zend_compile_throw` emits an opline whatever stands
             // around it, so a `throw` folds to nothing, and
@@ -13147,6 +13611,72 @@ impl Emit<'_> {
             return Ok(self.compare_fold(op, left, right));
         }
         fold(op, left, right).ok_or_else(|| self.fatal("arithmetic this compiler cannot fold yet"))
+    }
+
+    /// `zend_eval_const_expr`'s `ZEND_AST_DIM` arm
+    /// (`Z/Zend/zend_compile.c:12225`): `[]` with nothing in it is php's
+    /// compile error; the container and the dimension folded, then an
+    /// array's entry at an integer or a string key (`zend_symtable_find`,
+    /// a decimal string read as the integer) and a string's byte at an
+    /// integer offset inside it, as a one-byte string (`ZVAL_CHAR`). A key
+    /// the array has not, an offset past the string and any other pair
+    /// are left to the request, which raises what php raises for them.
+    ///
+    /// ```php
+    /// class C { const A = ['k' => [1, 2]]['k'][1]; const B = 'abc'[1]; const D = [1][0] ?? 2; }
+    /// var_dump(C::A, C::B, C::D, [[3, 4][1], 'xy'['1']]);
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// string(1) "b"
+    /// int(1)
+    /// array(2) {
+    ///   [0]=>
+    ///   int(4)
+    ///   [1]=>
+    ///   string(1) "y"
+    /// }
+    /// ```
+    fn dimension_fold(
+        &mut self,
+        base: tree::Expr,
+        index: Option<tree::Expr>,
+    ) -> Result<Zval, CompileError> {
+        let Some(index) = index else {
+            return Err(self.compile_error("Cannot use [] for reading"));
+        };
+        let container = self.constant_expr(base)?;
+        let dim = self.constant_expr(index)?;
+        let refused = |emit: &Self| emit.fatal("a dimension this compiler leaves to the request");
+        if let Some(array) = container.as_arr() {
+            let key = match (dim.as_long(), dim.as_str()) {
+                (Some(n), _) => Key::Long(n),
+                (None, Some(s)) => match php_heap::canonical_int(s.bytes()) {
+                    Some(n) => Key::Long(n),
+                    None => Key::Str(s),
+                },
+                (None, None) => return Err(refused(self)),
+            };
+            return array.get(key).ok_or_else(|| refused(self));
+        }
+        if let Some(text) = container.as_str() {
+            let offset = match (dim.as_long(), dim.as_str()) {
+                (Some(n), _) => n,
+                (None, Some(s)) => match numeric_prefix(s.bytes()) {
+                    Some((Number::Long(n), _)) => n,
+                    _ => return Err(refused(self)),
+                },
+                (None, None) => return Err(refused(self)),
+            };
+            let byte = usize::try_from(offset)
+                .ok()
+                .and_then(|at| text.bytes().get(at).copied());
+            return match byte {
+                Some(byte) => self.string(&[byte]),
+                None => Err(refused(self)),
+            };
+        }
+        Err(refused(self))
     }
 
     /// `zend_eval_const_expr`'s `ZEND_AST_AND` and `ZEND_AST_OR` arm:
@@ -13262,7 +13792,7 @@ impl Emit<'_> {
                 Element::Value { key, value } => (key, value),
                 Element::Ref { .. } => return Ok(None),
                 Element::Unpack(value) => {
-                    let Some(value) = self.constant_of(value)? else {
+                    let Some(value) = self.eval_const(value)? else {
                         return Ok(None);
                     };
                     folded.push(Fold::Unpack(value));
@@ -13270,13 +13800,13 @@ impl Emit<'_> {
                 }
             };
             let key = match key {
-                Some(key) => match self.constant_of(key)? {
+                Some(key) => match self.eval_const(key)? {
                     Some(key) => Some(key),
                     None => return Ok(None),
                 },
                 None => None,
             };
-            let Some(value) = self.constant_of(value)? else {
+            let Some(value) = self.eval_const(value)? else {
                 return Ok(None);
             };
             folded.push(Fold::Pair(key, value));
@@ -13596,7 +14126,7 @@ impl Emit<'_> {
     /// `zend_compile_cast` emits. The constant where the node folds,
     /// else the oplines that build it.
     fn walked(&mut self, expr: tree::Expr) -> Result<Where, CompileError> {
-        match self.constant_of(expr)? {
+        match self.eval_const(expr)? {
             Some(value) => Ok(Where::Constant(value)),
             None => self.expr(expr),
         }
@@ -16701,6 +17231,9 @@ mod tests {
             oplines: Vec::new(),
             short_circuits: Vec::new(),
             chain_inner: None,
+            memo: memo::Memo::default(),
+            znodes: Vec::new(),
+            const_evaluation: Evaluation::Once,
             constants: Vec::new(),
             const_exprs: Vec::new(),
             vars: Vec::new(),
@@ -17095,6 +17628,28 @@ impl CastTo {
             CastTo::Bool => 0,
         }
     }
+
+    /// php's type constant as a `ZEND_AST_CAST` carries it in `attr`,
+    /// `_IS_BOOL` for a bool, the constant expression's `to`.
+    fn ast_code(self) -> u32 {
+        match self {
+            CastTo::Bool => 18,
+            other => other.type_code(),
+        }
+    }
+}
+
+/// php's `allow_dynamic` over a constant expression
+/// (`zend_const_expr_to_zval`): whether it may differ each time it is
+/// evaluated. A parameter's default, an attribute's argument and a
+/// `const` statement's value are evaluated each time, and admit `new`
+/// and `(object)`; a class constant, a property's default and an enum
+/// case's value are evaluated once, and refuse both.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum Evaluation {
+    #[default]
+    Once,
+    EachTime,
 }
 
 /// `zend_is_auto_global`: the names `php_startup_auto_globals` and

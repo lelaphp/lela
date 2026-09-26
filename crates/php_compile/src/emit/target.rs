@@ -77,12 +77,21 @@ impl Emit<'_> {
     /// `zend_ensure_writable_variable`'s refusals
     /// ([`Self::ensure_writable`]).
     pub(super) fn target(&mut self, expr: tree::Expr) -> Result<Target, CompileError> {
-        let line = self.line_of(expr);
-        let expr = self.peel(expr);
         if self.is_this(expr) {
             return Err(self.compile_error("Cannot re-assign $this"));
         }
         self.ensure_writable(expr)?;
+        self.place(expr)
+    }
+
+    /// `expr` decoded as a [`Target`] with no check made: what an
+    /// `unset` deletes, which makes `zend_ensure_writable_variable`'s
+    /// checks and its own `$this` refusal before it
+    /// (`zend_compile_unset`), and what [`Self::target`] decodes after
+    /// an assignment's.
+    pub(super) fn place(&mut self, expr: tree::Expr) -> Result<Target, CompileError> {
+        let line = self.line_of(expr);
+        let expr = self.peel(expr);
         let parsed = self.parsed;
         let tree = &parsed.tree;
         Ok(match expr {

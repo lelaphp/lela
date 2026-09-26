@@ -288,6 +288,26 @@ pub(super) fn reflection_attribute_is_repeated(req: &mut Request) -> Result<Valu
 ///   string(73) "as ReflectionFunction can no longer be constructed for disabled functions"
 /// }
 /// ```
+///
+/// An argument over a class constant is evaluated as it is read, its
+/// operators and a conditional among them:
+///
+/// ```php
+/// class K { const A = 1|2; }
+/// #[Attribute]
+/// class At { function __construct(public $v, public $w = null) {} }
+/// #[At(K::A | 4, K::A ?: 0)]
+/// class T {}
+/// var_dump((new ReflectionClass('T'))->getAttributes()[0]->getArguments());
+/// ```
+/// ```expect
+/// array(2) {
+///   [0]=>
+///   int(7)
+///   [1]=>
+///   int(3)
+/// }
+/// ```
 pub(super) fn reflection_attribute_get_arguments(req: &mut Request) -> Result<Value, Thrown> {
     exactly_arguments(req, 0)?;
     let kept = this_attribute(req)?;

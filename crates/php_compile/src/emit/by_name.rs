@@ -32,10 +32,6 @@ use crate::CompileError;
 /// for the fetch after it to read and free.
 const FETCH_GLOBAL_LOCK: u32 = 1 << 3;
 
-/// `ZEND_ISEMPTY` (`Z/Zend/zend_compile.h:1100`), the bit of an
-/// `ISSET_ISEMPTY_*` opline's `extended_value` that says `empty`.
-const ISEMPTY: u32 = 1 << 0;
-
 /// The table a fetch by name reads, what `zend_get_target_symbol_table`
 /// decodes from the opline: `ZEND_FETCH_GLOBAL`, `EG(symbol_table)`, for
 /// an auto-global; `ZEND_FETCH_LOCAL`, the frame's own, for every other
@@ -119,7 +115,7 @@ impl Emit<'_> {
 
     /// `$GLOBALS[]`, the append over `$GLOBALS`, which each construct
     /// refuses in words of its own.
-    fn is_globals_append(&self, expr: tree::Expr) -> bool {
+    pub(super) fn is_globals_append(&self, expr: tree::Expr) -> bool {
         self.global_var_fetch(expr)
             .is_some_and(|id| self.parsed.tree[id].index.is_none())
     }
@@ -320,6 +316,7 @@ impl Emit<'_> {
             Fetch::Rw => (Opcode::FetchRw, OperandKind::Var),
             Fetch::Is => (Opcode::FetchIs, OperandKind::Tmp),
             Fetch::FuncArg => (Opcode::FetchFuncArg, OperandKind::Var),
+            Fetch::Unset => (Opcode::FetchUnset, OperandKind::Var),
         };
         self.push(Opline {
             opcode,
@@ -387,7 +384,7 @@ impl Emit<'_> {
             Some(Named::This) => {
                 let kind = match fetch {
                     Fetch::Read | Fetch::Is => OperandKind::Tmp,
-                    Fetch::Write | Fetch::Rw | Fetch::FuncArg => OperandKind::Var,
+                    Fetch::Write | Fetch::Rw | Fetch::FuncArg | Fetch::Unset => OperandKind::Var,
                 };
                 let this = self.fetch_this(kind);
                 Some(Base::Settled(self.operand(this)))
@@ -522,82 +519,6 @@ impl Emit<'_> {
         Ok(Where::Temporary(out))
     }
 
-    /// `zend_compile_assign_coalesce`'s `ZEND_AST_VAR` arm over a variable
-    /// fetched by name, `$GLOBALS['k'] ??= v` among them (bug #81684):
-    /// `FETCH_IS` by the name into a temporary, `COALESCE` over it with
-    /// the jump learnt after the rest, the value, then `FETCH_W` by the
-    /// same name, the memoized operand php's `ZEND_MEMOIZE_FETCH` hands
-    /// back, `ASSIGN` over it and `QM_ASSIGN` of that into the coalesce's
-    /// temporary. A name computed into a temporary is memoized by a
-    /// `COPY_TMP` and freed on the jump's arm, which this does not
-    /// compile.
-    ///
-    /// ```php
-    /// $GLOBALS['x'] ??= 'x';
-    /// $n = 'y';
-    /// $$n ??= 1;
-    /// $$n ??= 2;
-    /// function f() { echo "f\n"; return 3; }
-    /// $_SERVER ??= f();
-    /// $v = ($GLOBALS['w'] ??= 'w');
-    /// var_dump($GLOBALS['x'], $y, is_array($_SERVER), $v, $w);
-    /// ```
-    /// ```expect
-    /// string(1) "x"
-    /// int(1)
-    /// bool(true)
-    /// string(1) "w"
-    /// string(1) "w"
-    /// ```
-    pub(super) fn assign_coalesce_by_name(
-        &mut self,
-        target: tree::Expr,
-        value: tree::Expr,
-    ) -> Result<Where, CompileError> {
-        let Some(Named::Fetch { name, table }) = self.named(target)? else {
-            return Err(self.fatal("a `??=` by name over what is no fetch by name"));
-        };
-        if !matches!(name, Where::Constant(_) | Where::Cv(_)) {
-            return Err(self.unread("a `??=` over a variable named by a temporary"));
-        }
-        let held = self.held_by_name(name, table);
-        let (op1_type, op1) = self.base_fetch(held, Fetch::Is, Over::Dim);
-        let out = self.temporary();
-        let opnum = self.push(Opline {
-            opcode: Opcode::Coalesce,
-            op1_type,
-            op1,
-            out_type: OperandKind::Tmp,
-            out,
-            ..Opline::default()
-        });
-        let value = self.expr(value)?;
-        let (op2_type, op2) = self.operand(value);
-        let held = self.held_by_name(name, table);
-        let (op1_type, op1) = self.base_fetch(held, Fetch::Write, Over::Dim);
-        let assigned = self.temporary();
-        self.push(Opline {
-            opcode: Opcode::Assign,
-            op1_type,
-            op1,
-            op2_type,
-            op2,
-            out_type: OperandKind::Tmp,
-            out: assigned,
-            ..Opline::default()
-        });
-        self.push(Opline {
-            opcode: Opcode::QmAssign,
-            op1_type: OperandKind::Tmp,
-            op1: assigned,
-            out_type: OperandKind::Tmp,
-            out,
-            ..Opline::default()
-        });
-        self.update_jump_target_to_next(opnum);
-        Ok(Where::Temporary(out))
-    }
-
     /// `zend_compile_global_var`'s second arm (`Z/Zend/zend_compile.c:5441`),
     /// a `global` over a name no CV has, an auto-global or one the
     /// program computes: `FETCH_W (global+lock)` over the name into a
@@ -650,218 +571,5 @@ impl Emit<'_> {
             ..Opline::default()
         });
         self.do_free(Where::Returned(out));
-    }
-
-    /// `zend_compile_isset_or_empty`'s arm over a variable fetched by
-    /// name: `zend_compile_simple_var_no_cv` under `BP_VAR_IS` with its
-    /// opcode made `ISSET_ISEMPTY_VAR`, the name in `op1`, the table's
-    /// fetch type and `ZEND_ISEMPTY` for `empty` in `extended_value`, the
-    /// answer in a temporary. The bucket is asked, never fetched, so
-    /// nothing is warned of.
-    ///
-    /// ```php
-    /// $a = 1; $z = 0;
-    /// $names = ['a', 'z', 'none'];
-    /// foreach ($names as $name) { var_dump(isset($$name), empty(${$name})); }
-    /// var_dump(isset($_SERVER), empty($_FILES), isset($_ENV['nothing']), empty($_GET));
-    /// var_dump(empty($_SERVER), isset($_ENV), empty($_ENV['nothing']));
-    /// ```
-    /// ```expect
-    /// bool(true)
-    /// bool(false)
-    /// bool(true)
-    /// bool(true)
-    /// bool(false)
-    /// bool(true)
-    /// bool(true)
-    /// bool(true)
-    /// bool(false)
-    /// bool(true)
-    /// bool(false)
-    /// bool(true)
-    /// bool(true)
-    /// ```
-    pub(super) fn isset_by_name(
-        &mut self,
-        var: tree::Expr,
-        empty: bool,
-    ) -> Result<Where, CompileError> {
-        // `zend_compile_isset_or_empty`'s own arm over `$GLOBALS[]`.
-        if self.is_globals_append(var) {
-            return Err(self.compile_error("Cannot use [] for reading"));
-        }
-        let Some(Named::Fetch { name, table }) = self.named(var)? else {
-            return Err(self.fatal("an `isset` by name over what is no fetch by name"));
-        };
-        let (op1_type, op1) = self.operand(name);
-        let out = self.temporary();
-        self.push(Opline {
-            opcode: Opcode::IssetIsemptyVar,
-            op1_type,
-            op1,
-            out_type: OperandKind::Tmp,
-            out,
-            extended_value: table.fetch_type() | if empty { ISEMPTY } else { 0 },
-            ..Opline::default()
-        });
-        Ok(Where::Temporary(out))
-    }
-
-    /// `zend_compile_unset`'s `ZEND_AST_VAR` arm past `zend_try_compile_cv`:
-    /// `zend_compile_simple_var_no_cv` under `BP_VAR_UNSET` with its
-    /// opcode made `UNSET_VAR`, the name in `op1` and the table's fetch
-    /// type in `extended_value`, nothing left.
-    ///
-    /// ```php
-    /// $a = 1; $b = 2; $n = 'a';
-    /// unset($$n);
-    /// var_dump(isset($a), $b);
-    /// $_ENV['k'] = 1;
-    /// unset($_ENV);
-    /// var_dump(isset($_ENV));
-    /// ```
-    /// ```expect
-    /// bool(false)
-    /// int(2)
-    /// bool(false)
-    /// ```
-    pub(super) fn unset_by_name(&mut self, var: tree::Expr) -> Result<(), CompileError> {
-        // `zend_compile_unset`'s own arm over `$GLOBALS[]`.
-        if self.is_globals_append(var) {
-            return Err(self.compile_error("Cannot use [] for unsetting"));
-        }
-        let Some(Named::Fetch { name, table }) = self.named(var)? else {
-            return Err(self.fatal("an `unset` by name over what is no fetch by name"));
-        };
-        let (op1_type, op1) = self.operand(name);
-        self.push(Opline {
-            opcode: Opcode::UnsetVar,
-            op1_type,
-            op1,
-            extended_value: table.fetch_type(),
-            ..Opline::default()
-        });
-        Ok(())
-    }
-
-    /// `zend_compile_dim` under `BP_VAR_UNSET` over one dimension of a
-    /// variable fetched by name, its last opline made `UNSET_DIM`: the
-    /// fetch held back (`zend_delayed_compile_var`), the dimension, then
-    /// `FETCH_UNSET` into a `VAR` and `UNSET_DIM` over it.
-    ///
-    /// ```php
-    /// $_SERVER['k'] = 1;
-    /// $_SERVER['l'] = 2;
-    /// unset($_SERVER['k']);
-    /// $n = 'a';
-    /// $a = ['x' => 1, 'y' => 2];
-    /// $m = 'none';
-    /// unset($$n['x'], $$n['nope'], $$m['z']);
-    /// var_dump(isset($_SERVER['k']), $_SERVER['l'], $a);
-    /// ```
-    /// ```expect
-    /// bool(false)
-    /// int(2)
-    /// array(1) {
-    ///   ["y"]=>
-    ///   int(2)
-    /// }
-    /// ```
-    pub(super) fn unset_dim_by_name(
-        &mut self,
-        container: tree::Expr,
-        index: tree::Expr,
-    ) -> Result<(), CompileError> {
-        let held = self.held_unset(container)?;
-        let dim = self.expr(index)?;
-        let (op2_type, op2) = self.dim_operand(dim);
-        let (op1_type, op1) = self.lay_fetch_unset(held);
-        self.push(Opline {
-            opcode: Opcode::UnsetDim,
-            op1_type,
-            op1,
-            op2_type,
-            op2,
-            ..Opline::default()
-        });
-        Ok(())
-    }
-
-    /// `zend_compile_prop` under `BP_VAR_UNSET` over a property of a
-    /// variable fetched by name, its last opline made `UNSET_OBJ`: the
-    /// fetch held back (`zend_delayed_compile_prop`), the property's
-    /// name, then `FETCH_UNSET` into a `VAR` and `UNSET_OBJ` over it, so
-    /// the object's own `unset_property` answers, a hooked property's
-    /// refusal among what it says.
-    ///
-    /// ```php
-    /// class C { public $p = 1; public $q = 1; public int $h { get => 2; } }
-    /// $_GET = new C;
-    /// $n = 'o';
-    /// $o = new C;
-    /// $k = 'p';
-    /// unset($_GET->p, $$n->$k, $GLOBALS['o']->q, $_POST->p);
-    /// var_dump(isset($_GET->p), isset($o->p), isset($o->q), $_GET->h);
-    /// try { unset($_GET->h); } catch (Error $e) { echo $e->getMessage(), "\n"; }
-    /// ```
-    /// ```expect
-    /// bool(false)
-    /// bool(false)
-    /// bool(false)
-    /// int(2)
-    /// Cannot unset hooked property C::$h
-    /// ```
-    pub(super) fn unset_prop_by_name(
-        &mut self,
-        object: tree::Expr,
-        id: NodeId<tree::MemberAccessExpr>,
-    ) -> Result<(), CompileError> {
-        let held = self.held_unset(object)?;
-        let member = self.member_of(id)?;
-        let name = self.prop_name(member)?;
-        let (op1_type, op1) = self.lay_fetch_unset(held);
-        self.push(Opline {
-            opcode: Opcode::UnsetObj,
-            op1_type,
-            op1,
-            op2_type: name.kind,
-            op2: name.at,
-            extended_value: name.slots,
-            ..Opline::default()
-        });
-        Ok(())
-    }
-
-    /// The fetch by name an `unset` over an element or a property of the
-    /// variable stands on, held back as `zend_delayed_compile_var` holds
-    /// it: the name's operand settled and its `VAR` numbered.
-    fn held_unset(
-        &mut self,
-        container: tree::Expr,
-    ) -> Result<((OperandKind, u32), Symbols, u32), CompileError> {
-        let Some(Named::Fetch { name, table }) = self.named(container)? else {
-            return Err(self.fatal("an `unset` by name over what is no fetch by name"));
-        };
-        let name = self.operand(name);
-        let out = self.temporary();
-        Ok((name, table, out))
-    }
-
-    /// `FETCH_UNSET` over what [`Self::held_unset`] held back, into its
-    /// `VAR`.
-    fn lay_fetch_unset(
-        &mut self,
-        ((op1_type, op1), table, out): ((OperandKind, u32), Symbols, u32),
-    ) -> (OperandKind, u32) {
-        self.push(Opline {
-            opcode: Opcode::FetchUnset,
-            op1_type,
-            op1,
-            out_type: OperandKind::Var,
-            out,
-            extended_value: table.fetch_type(),
-            ..Opline::default()
-        });
-        (OperandKind::Var, out)
     }
 }

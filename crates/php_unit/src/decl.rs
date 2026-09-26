@@ -242,6 +242,9 @@ pub enum ConstExpr {
         op: Name,
         operand: Box<ConstExpr>,
     },
+    /// A binary operator by its spelling, `&&`, `||` and `??` among them
+    /// (php's `ZEND_AST_AND`, `ZEND_AST_OR` and `ZEND_AST_COALESCE`),
+    /// whose right side is evaluated only where the left leaves it to.
     Binary {
         op: Name,
         lhs: Box<ConstExpr>,
@@ -252,9 +255,39 @@ pub enum ConstExpr {
     /// of an element with no key, whose array or `Traversable` is
     /// spread into the array being built.
     Unpack(Box<ConstExpr>),
+    /// `container[dim]`, php's `ZEND_AST_DIM`.
+    Dim {
+        container: Box<ConstExpr>,
+        dim: Box<ConstExpr>,
+    },
+    /// `object->name` or, `nullsafe`, `object?->name`, php's
+    /// `ZEND_AST_PROP` and `ZEND_AST_NULLSAFE_PROP`, the name itself an
+    /// expression.
+    Prop {
+        object: Box<ConstExpr>,
+        name: Box<ConstExpr>,
+        nullsafe: bool,
+    },
+    /// `cond ? then : otherwise`, and `cond ?: otherwise` with no
+    /// `then`, php's `ZEND_AST_CONDITIONAL`.
+    Conditional {
+        cond: Box<ConstExpr>,
+        then: Option<Box<ConstExpr>>,
+        otherwise: Box<ConstExpr>,
+    },
+    /// `(type) operand`, php's `ZEND_AST_CAST`, `to` the `IS_*` code
+    /// the `CAST` opline carries in `extended_value`.
+    Cast {
+        to: u32,
+        operand: Box<ConstExpr>,
+    },
+    /// `new class(arguments)`, php's `ZEND_AST_NEW`: the class as
+    /// written, `self` and `parent` resolved in the scope the expression
+    /// is evaluated in, and each argument with its name where it was
+    /// written `name: value`.
     New {
         class: Name,
-        arguments: Vec<ConstExpr>,
+        arguments: Vec<(Option<Name>, ConstExpr)>,
     },
     Closure(u32),
     /// `__CLASS__` in a trait's constant expression, php's

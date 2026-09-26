@@ -117,6 +117,7 @@ pub(crate) fn object_to_string(
     let class = object.class();
     if req.method_named(class, b"__tostring").is_some() {
         let returned = crate::api::call::call_method(req, &object, b"__toString", &[])?;
+        let returned = req.unwrap_reference(returned);
         if let Some(text) = returned.as_php_string() {
             return Ok(*text);
         }
@@ -3521,6 +3522,252 @@ pub(crate) fn add_array_element(
         },
     };
     req.array_update(a, key, value)
+}
+
+/// php's `type` argument to `zend_fetch_dimension_address_read`, of
+/// which the two reads use two values: `BP_VAR_R`, which warns of a key
+/// the table has not got, an offset past the end of a string and a
+/// container that is neither; and `BP_VAR_IS`, which warns of none of
+/// the three and reads `null` instead, since what asks is an `isset` or
+/// a `??` and the answer is the question.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DimRead {
+    Warning,
+    Silent,
+}
+
+/// `zend_fetch_dimension_const` (`Z/Zend/zend_execute.c`), a dimension
+/// of a constant expression read over two values the evaluation holds:
+/// `FETCH_DIM_R`'s arms with no operand to read, [`DimRead::Silent`]
+/// php's `BP_VAR_IS` under a `??`. The value is the caller's, one owner.
+///
+/// ```php
+/// const A = [1][5] ?? "x";
+/// const B = (null)["k"];
+/// const C = "ab"[1];
+/// var_dump(A, B, C);
+/// ```
+/// ```expect
+///
+/// Warning: Trying to access array offset on null in %s on line 3
+/// string(1) "x"
+/// NULL
+/// string(1) "b"
+/// ```
+pub(crate) fn dimension_const(
+    req: &mut Request,
+    container: &Value,
+    dim: &Value,
+    mode: DimRead,
+) -> Result<Value, Thrown> {
+    let container = container.deref();
+    if let Some(array) = container.as_array().copied() {
+        let key = array_offset(req, dim, false)?;
+        return Ok(array_entry(req, array, key, mode));
+    }
+    if let Some(text) = container.as_php_string().copied() {
+        return string_offset(req, text, dim, mode);
+    }
+    if mode == DimRead::Silent {
+        return Ok(Value::null());
+    }
+    let named = value_name(req, &container.undef_as_null());
+    warning(req, &format!("Trying to access array offset on {named}"));
+    Ok(Value::null())
+}
+
+/// `zend_fetch_dimension_address_inner` under `BP_VAR_R`
+/// (`Z/Zend/zend_execute.c:2802`): the entry at `key`, copied with one
+/// more owner and a reference it holds followed (`ZVAL_COPY_DEREF`);
+/// php's `Undefined array key` warning and `null` where the table has
+/// none, the key rendered as `zend_undefined_offset` renders a long and
+/// `zend_undefined_index` a string.
+///
+/// ```php
+/// $a = [1, "k" => 2];
+/// var_dump($a[0], $a["k"], $a[7], $a["n"]);
+/// ```
+/// ```expect
+///
+/// Warning: Undefined array key 7 in %s on line 3
+///
+/// Warning: Undefined array key "n" in %s on line 3
+/// int(1)
+/// int(2)
+/// NULL
+/// NULL
+/// ```
+pub(crate) fn array_entry(
+    req: &mut Request,
+    array: PhpArray,
+    key: php_heap::Key,
+    mode: DimRead,
+) -> Value {
+    if let Some(found) = array.heap().get(key) {
+        let value = Value::of_zval(found).deref();
+        req.addref(&value);
+        return value;
+    }
+    if mode == DimRead::Silent {
+        return Value::null();
+    }
+    let message = match key {
+        php_heap::Key::Long(n) => format!("Undefined array key {n}"),
+        php_heap::Key::Str(s) => format!(
+            "Undefined array key \"{}\"",
+            String::from_utf8_lossy(s.bytes())
+        ),
+    };
+    warning(req, &message);
+    Value::null()
+}
+
+/// `zend_check_string_offset` (`Z/Zend/zend_execute.c`), which
+/// `try_string_offset` runs over the same set: the offset php reads out
+/// of a dimension over a string, for a read and for a write alike.
+///
+/// A long is itself, and a reference is followed once. A string is
+/// `is_numeric_string_ex` with php's errors allowed: an integer is the
+/// offset, with php's warning `Illegal string offset` where anything but
+/// whitespace follows it, and everything else, a written float among
+/// them, is `zend_illegal_string_offset`'s `TypeError`. `null`, a bool, a
+/// float and an unwritten variable warn `String offset cast occurred` and
+/// then convert, the float silently since the warning has been raised
+/// ([`dval_to_lval_silent`]). An array, an object and a resource are the
+/// `TypeError`.
+///
+/// ```php
+/// $s = "abc";
+/// var_dump($s["1x"], $s[true], isset($s["x"]));
+/// ```
+/// ```expect
+///
+/// Warning: Illegal string offset "1x" in %s on line 3
+///
+/// Warning: String offset cast occurred in %s on line 3
+/// string(1) "b"
+/// string(1) "b"
+/// bool(false)
+/// ```
+pub(crate) fn string_dim_offset(
+    req: &mut Request,
+    dim: &Value,
+    mode: DimRead,
+) -> Result<Option<i64>, Thrown> {
+    let dim = dim.deref();
+    let illegal = |req: &mut Request, dim: &Value| {
+        throw(
+            req,
+            "TypeError",
+            &format!("Cannot access offset of type {} on string", dim.type_name()),
+        )
+    };
+    match dim.as_ref() {
+        ValueRef::Int(n) => Ok(Some(n)),
+        ValueRef::Str(s) => match numeric_prefix(s.as_bytes()) {
+            Some((Number::Long(n), trailing)) => {
+                if trailing {
+                    warning(
+                        req,
+                        &format!(
+                            "Illegal string offset \"{}\"",
+                            String::from_utf8_lossy(s.as_bytes())
+                        ),
+                    );
+                }
+                Ok(Some(n))
+            }
+            // `if (type == BP_VAR_IS) { ZVAL_NULL(result); return; }`,
+            // the one arm that stands before `zend_illegal_string_offset`.
+            _ if mode == DimRead::Silent => Ok(None),
+            _ => Err(illegal(req, &dim)),
+        },
+        ValueRef::Undef | ValueRef::Null | ValueRef::Bool(_) | ValueRef::Float(_) => {
+            if mode == DimRead::Warning {
+                warning(req, "String offset cast occurred");
+            }
+            Ok(Some(match dim.as_ref() {
+                ValueRef::Float(f) => dval_to_lval_silent(f),
+                ValueRef::Bool(true) => 1,
+                _ => 0,
+            }))
+        }
+        ValueRef::Array(_)
+        | ValueRef::Object(_)
+        | ValueRef::Resource(_)
+        | ValueRef::Reference(_) => Err(illegal(req, &dim)),
+    }
+}
+
+/// `try_string_offset` and the `ZVAL_CHAR` after it
+/// (`zend_fetch_dimension_address_read`, `Z/Zend/zend_execute.c:3073`):
+/// the offset php reads out of the dimension ([`string_dim_offset`]),
+/// and the one byte at it as a string of one byte.
+///
+/// A negative offset counts from the end. An offset the string is not
+/// long enough for is php's warning `Uninitialized string offset` and
+/// the empty string.
+///
+/// ```php
+/// $s = "abc";
+/// var_dump($s[1], $s[-1], $s["1"], $s[1.7], $s[5], $s["0x1"]);
+/// ```
+/// ```expect
+/// Warning: String offset cast occurred in %s on line 3
+///
+/// Warning: Uninitialized string offset 5 in %s on line 3
+///
+/// Warning: Illegal string offset "0x1" in %s on line 3
+/// string(1) "b"
+/// string(1) "c"
+/// string(1) "b"
+/// string(1) "b"
+/// string(0) ""
+/// string(1) "a"
+/// ```
+///
+/// A dimension that is no offset php reads is its `TypeError`.
+///
+/// ```php
+/// $s = "abc";
+/// var_dump($s["x"]);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: Cannot access offset of type string on string in %s:3
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 3
+/// ```
+pub(crate) fn string_offset(
+    req: &mut Request,
+    text: PhpString,
+    dim: &Value,
+    mode: DimRead,
+) -> Result<Value, Thrown> {
+    let Some(offset) = string_dim_offset(req, dim, mode)? else {
+        return Ok(Value::null());
+    };
+    let len = i64::try_from(text.len()).unwrap_or(i64::MAX);
+    let at = if offset < 0 {
+        len.saturating_add(offset)
+    } else {
+        offset
+    };
+    if at < 0 || at >= len {
+        // `if (type != BP_VAR_IS)`: the warning and the empty string are
+        // the read's, and `null` with nothing raised is the other's.
+        if mode == DimRead::Silent {
+            return Ok(Value::null());
+        }
+        warning(req, &format!("Uninitialized string offset {offset}"));
+        return Ok(Value::string(PhpString::new(req, b"")?));
+    }
+    let byte = text
+        .as_bytes()
+        .get(usize::try_from(at).unwrap_or(0))
+        .copied()
+        .unwrap_or(0);
+    Ok(Value::string(PhpString::new(req, &[byte])?))
 }
 
 /// The key an array offset makes, the `add_again` ladder of

@@ -9,7 +9,7 @@ use php_syntax::tree;
 use php_unit::{Opcode, OperandKind, Opline};
 
 use super::target::{List, ListStyle, Source};
-use super::{Emit, SimpleVar, Where, walk};
+use super::{Emit, SimpleVar, Where};
 use crate::CompileError;
 
 impl Emit<'_> {
@@ -127,45 +127,6 @@ impl Emit<'_> {
         };
         self.line = line;
         Ok(self.list_assign(list, value, true)?.unwrap_or(value))
-    }
-
-    /// `zend_compile_var(…, BP_VAR_W, 1)` over the right side of a list
-    /// taken by reference: a plain variable is its CV, `$this` its
-    /// `FETCH_THIS`, a variable fetched by name its `FETCH_W`, an element
-    /// or a property the `_W` fetch of the whole chain with the
-    /// reference's bit on its last link, and a call the `VAR` it returned
-    /// into.
-    fn var_by_ref(&mut self, expr: tree::Expr) -> Result<(OperandKind, u32), CompileError> {
-        let line = self.line;
-        match expr {
-            _ if self.is_by_name(expr) => self.var_for_reference(expr),
-            tree::Expr::SimpleVarExpr(id) => Ok(match self.simple_var_of(id, line)? {
-                SimpleVar::Cv(name) => (OperandKind::Cv, self.lookup_cv(&name)),
-                SimpleVar::This => {
-                    let this = self.fetch_this(OperandKind::Var);
-                    self.operand(this)
-                }
-                SimpleVar::Auto(_) => return Err(self.fatal("an auto-global not fetched by name")),
-                SimpleVar::Globals => {
-                    let globals = self.fetch_globals(OperandKind::Var);
-                    self.operand(globals)
-                }
-            }),
-            tree::Expr::SubscriptExpr(_) | tree::Expr::MemberAccessExpr(_) => {
-                self.var_for_reference(expr)
-            }
-            tree::Expr::ScopedAccessExpr(_) if self.is_static_prop(expr) => {
-                self.var_for_reference(expr)
-            }
-            tree::Expr::CallExpr(_) => {
-                let returned = self.expr(expr)?;
-                Ok(self.operand(returned))
-            }
-            _ => Err(walk::unread(
-                line,
-                "a list taken by reference from a variable named at run time",
-            )),
-        }
     }
 
     /// `zend_compile_list_assign` (`Z/Zend/zend_compile.c:3298`): each
