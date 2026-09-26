@@ -331,7 +331,16 @@ pub fn extension() -> Extension {
 /// raises nothing while it is built, so the request's `RINIT` raises it
 /// ([`php_ext::raising::startup`]); `filter_default_deprecation.phpt`
 /// holds it, and a witness waits on a regime of the pin that starts the
-/// oracle with `filter.default=int`.
+/// oracle with `filter.default=int`. What a program meets is the refusal:
+///
+/// ```php
+/// var_dump(ini_set('filter.default', 'int'), ini_set('filter.default_flags', '0'), ini_get('filter.default'));
+/// ```
+/// ```expect
+/// bool(false)
+/// bool(false)
+/// string(10) "unsafe_raw"
+/// ```
 #[allow(clippy::unnecessary_wraps)] // `rinit`'s signature, which may throw
 fn startup_default(req: &mut Request) -> Result<(), Thrown> {
     let Some(value) = req.ini_get(b"filter.default").map(<[u8]>::to_vec) else {
