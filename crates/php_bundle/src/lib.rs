@@ -10,6 +10,9 @@
 
 use php_ext::abi::Extension;
 
+#[cfg(doctest)]
+mod refusals;
+
 /// The extensions in startup order, one `extension()` per feature that
 /// is on. `xtask new-ext <name>` appends the line behind its feature,
 /// last; a person moves it when the crate declares an edge, and

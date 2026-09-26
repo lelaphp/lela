@@ -1,0 +1,152 @@
+int(2)
+int(2)
+int(1)
+
+Deprecated: strspn(): Passing null to parameter #3 ($offset) of type int is deprecated in Standard input code on line 3
+int(0)
+ArgumentCountError: strspn() expects at least 2 arguments, 0 given
+ArgumentCountError: strspn() expects at most 4 arguments, 5 given
+TypeError: strspn(): Argument #1 ($string) must be of type string, array given
+TypeError: strspn(): Argument #4 ($length) must be of type ?int, array given
+array(3) {
+  [0]=>
+  string(1) "a"
+  [1]=>
+  string(1) "b"
+  [2]=>
+  string(1) "c"
+}
+array(2) {
+  [0]=>
+  string(1) "x"
+  [1]=>
+  string(1) "y"
+}
+array(2) {
+  [0]=>
+  string(1) "a"
+  [1]=>
+  string(3) "b,c"
+}
+ValueError: explode(): Argument #1 ($separator) must not be empty
+float(3)
+float(-3)
+float(2)
+float(4)
+float(7)
+float(5)
+TypeError: round(): Argument #1 ($num) must be of type int|float, string given
+TypeError: round(): Argument #3 ($mode) must be of type RoundingMode|int, string given
+string(2) "hi"
+string(2) "hi"
+string(1) "a"
+string(2) "12"
+string(6) "bonono"
+int(3)
+string(4) "baaa"
+bool(true)
+bool(false)
+bool(false)
+array(3) {
+  [0]=>
+  string(1) "a"
+  [1]=>
+  string(1) "b"
+  [2]=>
+  string(1) "c"
+}
+array(2) {
+  [0]=>
+  string(1) "a"
+  [1]=>
+  string(1) "c"
+}
+array(1) {
+  [0]=>
+  int(1)
+}
+ArgumentCountError: array_keys(): Argument #2 ($filter_value) must be passed explicitly, because the default value is not known
+int(4)
+array(4) {
+  [0]=>
+  int(1)
+  [1]=>
+  int(2)
+  [2]=>
+  int(3)
+  [3]=>
+  int(4)
+}
+array(2) {
+  [0]=>
+  int(9)
+  [1]=>
+  int(10)
+}
+array(1) {
+  [0]=>
+  int(9)
+}
+TypeError: array_push(): Argument #1 ($array) must be of type array, string given
+TypeError: array_push(): Argument #1 ($array) must be of type array, null given
+bool(false)
+bool(true)
+bool(true)
+enum(ProtoLevel::High)
+int(1)
+int(2)
+NULL
+bool(true)
+ArgumentCountError: array_push() does not accept unknown named parameters
+bool(true)
+enum(Dom\AdjacentPosition::AfterEnd)
+string(10) "afterbegin"
+NULL
+
+Deprecated: Function utf8_encode() is deprecated since 8.2, visit the php.net documentation for various alternatives in Standard input code on line 26
+
+Deprecated: Constant FILE_TEXT is deprecated since 8.1, as the constant has no effect in Standard input code on line 26
+string(1) "x"
+int(0)
+string(10) "at startup"
+bool(true)
+ValueError: proto_raw(): Argument #1 ($n) must not be null here
+TypeError: proto_raw(): Argument #1 ($n) must be of type int, array given
+int(5)
+string(7) "omitted"
+string(11) "given false"
+string(10) "given true"
+string(3) "1-2"
+int(2)
+int(2)
+int(3)
+proto_count(): Argument #1 ($of) must be of type Traversable|array, string given
+string(2) "[]"
+string(6) "[1, 2]"
+ArgumentCountError: proto_manual() expects exactly 0 or 2 arguments
+string(1) "5"
+string(5) "shown"
+bool(false)
+Exception: never returns
+int(10)
+bool(true)
+bool(true)
+string(3) "box"
+int(7)
+array(2) {
+  [0]=>
+  int(1)
+  ["k"]=>
+  string(1) "v"
+}
+int(15)
+int(18)
+string(4) "base"
+bool(true)
+int(7)
+int(10)
+int(3)
+int(0)
+bool(true)
+Error: Cannot instantiate abstract class ProtoBase
+Error: Call to protected method ProtoBox::hidden() from global scope

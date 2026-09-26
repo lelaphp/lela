@@ -79,3 +79,10 @@ php_ext_ctype = { path = "../../ext/ctype", optional = true }
 php_ext_hash = { path = "../../ext/hash", optional = true }
 php_ext_libxml = { path = "../../ext/libxml", optional = true }
 php_ext_lexbor = { path = "../../ext/lexbor", optional = true }
+
+# The native attributes' parity extension, their refusals and their two
+# rustc fixtures (#955) are held here, where the facade and Reflection
+# are already this crate's edges; `php_macros` depends on no workspace
+# crate (ADR-0007).
+[dev-dependencies]
+php_ext = { path = "../php_ext", features = ["test"] }

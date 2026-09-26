@@ -1,0 +1,353 @@
+//! `#[php_function]`, and the signature walk a method shares with it: the
+//! parameters' declaration from their types, the entry's prologue as
+//! php's ZPP (the arity, then each argument left to right), and the
+//! `const` assertions that refuse what php's compiler refuses.
+
+use proc_macro2::{Ident, TokenStream as Tokens, TokenTree};
+use quote::quote;
+use syn::parse::Parser;
+use syn::spanned::Spanned;
+use syn::{FnArg, ItemFn, Pat, ReturnType, Type};
+
+use crate::expr::{self, const_expr};
+use crate::keys::{Form, Keys};
+use crate::{bytes, cfgs, error, php_name, root};
+
+/// One PHP parameter of a native.
+pub(crate) struct Param {
+    pub(crate) ident: Ident,
+    pub(crate) ty: Type,
+    /// The default's `ConstExpr`, and whether it is `null`.
+    default: Option<(Tokens, bool)>,
+    keys: Keys,
+}
+
+/// A native's signature as the attribute reads it.
+pub(crate) struct Signature {
+    /// Whether the body takes `&mut Request` first.
+    pub(crate) request: bool,
+    /// The receiver's type, `This<Self>`, where the native is an instance
+    /// method.
+    pub(crate) this: Option<Type>,
+    pub(crate) params: Vec<Param>,
+    /// The return type, `()` where none is written.
+    pub(crate) output: Type,
+}
+
+const PARAMETER_KEYS: &[(&str, Form)] = &[
+    ("default", Form::Eq),
+    ("sensitive", Form::Flag),
+    ("prefer_ref", Form::Flag),
+    ("attribute", Form::List),
+];
+
+/// Read a native's signature, stripping each parameter's `#[php(..)]`.
+pub(crate) fn read(sig: &mut syn::Signature) -> syn::Result<Signature> {
+    if !sig.generics.params.is_empty() || sig.asyncness.is_some() || sig.variadic.is_some() {
+        return Err(error(
+            sig.span(),
+            "a native is a plain `fn`: no generics, no `async`, no C variadic",
+        ));
+    }
+    let mut out = Signature {
+        request: false,
+        this: None,
+        params: Vec::new(),
+        output: match &sig.output {
+            ReturnType::Type(_, ty) => ty.as_ref().clone(),
+            ReturnType::Default => syn::parse_quote!(()),
+        },
+    };
+    for input in &mut sig.inputs {
+        let FnArg::Typed(typed) = input else {
+            return Err(error(
+                input.span(),
+                "a native takes no Rust `self`; the receiver is `this: This<Self>`",
+            ));
+        };
+        let keys = Keys::take(&mut typed.attrs)?;
+        let Pat::Ident(pat) = typed.pat.as_ref() else {
+            return Err(error(
+                typed.pat.span(),
+                "a parameter is an identifier, its PHP name",
+            ));
+        };
+        if let Type::Reference(reference) = typed.ty.as_ref()
+            && reference.mutability.is_some()
+        {
+            if out.request || out.this.is_some() || !out.params.is_empty() {
+                return Err(error(typed.span(), "`&mut Request` comes first"));
+            }
+            out.request = true;
+            continue;
+        }
+        if pat.ident == "this" || pat.ident == "_this" {
+            if !out.params.is_empty() {
+                return Err(error(typed.span(), "`this` comes first after the request"));
+            }
+            out.this = Some(typed.ty.as_ref().clone());
+            continue;
+        }
+        keys.allow(PARAMETER_KEYS, "a parameter")?;
+        let default = match keys.eq("default") {
+            Some(tokens) => {
+                let null = matches!(tokens.clone().into_iter().collect::<Vec<_>>().as_slice(),
+                    [TokenTree::Ident(word)] if word == "null");
+                Some((const_expr(tokens.clone())?, null))
+            }
+            None => None,
+        };
+        out.params.push(Param {
+            ident: pat.ident.clone(),
+            ty: typed.ty.as_ref().clone(),
+            default,
+            keys,
+        });
+    }
+    Ok(out)
+}
+
+/// `Self` in a type spelled as the class it names, for a check that
+/// stands outside the impl.
+pub(crate) fn unself(ty: &Type, class: Option<&Ident>) -> Tokens {
+    fn walk(tokens: Tokens, class: &Ident) -> Tokens {
+        tokens
+            .into_iter()
+            .map(|tree| match tree {
+                TokenTree::Ident(ident) if ident == "Self" => TokenTree::Ident(class.clone()),
+                TokenTree::Group(group) => {
+                    let mut inner =
+                        proc_macro2::Group::new(group.delimiter(), walk(group.stream(), class));
+                    inner.set_span(group.span());
+                    TokenTree::Group(inner)
+                }
+                other => other,
+            })
+            .collect()
+    }
+    class.map_or_else(|| quote!(#ty), |class| walk(quote!(#ty), class))
+}
+
+/// The parameters' declarations, `vec![..]` of `Parameter`s.
+pub(crate) fn declared_parameters(params: &[Param]) -> syn::Result<Tokens> {
+    let root = root();
+    let mut each = Vec::new();
+    for param in params {
+        let name = bytes(&php_name(&param.ident));
+        let ty = &param.ty;
+        let default = param.default.as_ref().map_or_else(
+            || {
+                quote! {
+                    if <#ty as #root::abi::FromArgument>::PASSED {
+                        #root::decl::ParameterDefault::Unshown
+                    } else {
+                        #root::decl::ParameterDefault::None
+                    }
+                }
+            },
+            |(expr, _)| quote!(#root::decl::ParameterDefault::Expr(#expr)),
+        );
+        let prefer_ref = param.keys.has("prefer_ref");
+        let attributes = expr::attributes(&param.keys)?;
+        each.push(quote! {{
+            let mut parameter = #root::__private::parameter(#name, <#ty as #root::abi::FromArgument>::declared());
+            parameter.by_ref = <#ty as #root::abi::FromArgument>::BY_REF;
+            parameter.prefer_ref = #prefer_ref;
+            parameter.variadic = <#ty as #root::abi::FromArgument>::VARIADIC;
+            parameter.default = #default;
+            parameter.attributes = vec![#(#attributes),*];
+            parameter
+        }});
+    }
+    Ok(quote!(vec![#(#each),*]))
+}
+
+/// The `const` assertions over a signature's types, each evaluated where
+/// the item stands: every type's mask (`?mixed`, `bool|false`, a member
+/// twice), a variadic only last, and `default = null` only on a type that
+/// admits `null`.
+pub(crate) fn checks(signature: &Signature, class: Option<&Ident>) -> Vec<Tokens> {
+    let root = root();
+    let mut out = Vec::new();
+    let last = signature.params.len().saturating_sub(1);
+    for (at, param) in signature.params.iter().enumerate() {
+        let ty = unself(&param.ty, class);
+        out.push(quote!(const _: u32 = <#ty as #root::abi::FromArgument>::MASK;));
+        if at != last {
+            let text = format!("`{}` is variadic and not last", param.ident);
+            out.push(quote!(
+                const _: () = assert!(!<#ty as #root::abi::FromArgument>::VARIADIC, #text);
+            ));
+        }
+        if matches!(param.default, Some((_, true))) {
+            out.push(quote! {
+                const _: fn() = || {
+                    fn admits<T: #root::abi::NullDefault>() {}
+                    admits::<#ty>();
+                };
+            });
+        }
+    }
+    let output = unself(&signature.output, class);
+    out.push(quote!(const _: u32 = <#output as #root::abi::IntoReturn>::MASK;));
+    out
+}
+
+/// The entry's reads: the arity, then each argument held at its position,
+/// its default evaluated where the call gave none. `scope` names the
+/// declaring class for a default that reads `self::`.
+pub(crate) fn prologue(params: &[Param], scope: &Tokens, manual: bool) -> Tokens {
+    let root = root();
+    let arity = if manual {
+        quote!()
+    } else {
+        let steps = params.iter().map(|param| {
+            let ty = &param.ty;
+            let optional = param.default.is_some();
+            quote! {
+                if #optional
+                    || <#ty as #root::abi::FromArgument>::PASSED
+                    || <#ty as #root::abi::FromArgument>::VARIADIC
+                {
+                    break;
+                }
+                required += 1;
+            }
+        });
+        let total = params.len();
+        let unbounded = params.last().map_or(quote!(false), |last| {
+            let ty = &last.ty;
+            quote!(<#ty as #root::abi::FromArgument>::VARIADIC)
+        });
+        quote! {
+            #[allow(clippy::never_loop, unused_mut)]
+            let required = {
+                let mut required = 0usize;
+                #[allow(unreachable_code)]
+                loop {
+                    #(#steps)*
+                    break;
+                }
+                required
+            };
+            #root::__private::arity(__request, required, if #unbounded { None } else { Some(#total) })?;
+        }
+    };
+    let reads = params.iter().enumerate().map(|(at, param)| {
+        let ident = &param.ident;
+        let ty = &param.ty;
+        let position = u32::try_from(at + 1).unwrap_or(u32::MAX);
+        let expr = param
+            .default
+            .as_ref()
+            .map_or_else(|| quote!(#root::decl::ConstExpr::Null), |(expr, _)| expr.clone());
+        quote! {
+            let #ident: #ty = match <#ty as #root::abi::FromArgument>::hold(__request, #position)? {
+                Some(held) => held,
+                None => <#ty as #root::abi::FromArgument>::from_default(__request, &#expr, #scope, #position)?,
+            };
+        }
+    });
+    quote! {
+        #arity
+        #(#reads)*
+    }
+}
+
+const FUNCTION_KEYS: &[(&str, Form)] = &[
+    ("namespace", Form::List),
+    ("aliases", Form::List),
+    ("frameless", Form::List),
+    ("arity", Form::Eq),
+    ("deprecated", Form::FlagOrList),
+    ("no_discard", Form::FlagOrList),
+    ("attribute", Form::List),
+];
+
+/// `arity = manual`: the body counts its own arguments.
+pub(crate) fn manual(keys: &Keys) -> syn::Result<bool> {
+    match keys.eq("arity") {
+        None => Ok(false),
+        Some(tokens) if tokens.to_string() == "manual" => Ok(true),
+        Some(_) => Err(error(keys.span("arity"), "`arity` is `arity = manual`")),
+    }
+}
+
+pub(crate) fn expand(attribute: Tokens, item: Tokens) -> syn::Result<Tokens> {
+    let keys = Keys::parse(attribute)?;
+    if keys.has("tentative") {
+        return Err(error(
+            keys.span("tentative"),
+            "a tentative return is a method's, never a function's (design §4.7)",
+        ));
+    }
+    keys.allow(FUNCTION_KEYS, "`#[php_function]`")?;
+    let mut function: ItemFn = syn::parse2(item)?;
+    let signature = read(&mut function.sig)?;
+    if signature.this.is_some() {
+        return Err(error(function.sig.span(), "a function has no receiver"));
+    }
+    let root = root();
+    let ident = function.sig.ident.clone();
+    let manual = manual(&keys)?;
+    let parameters = declared_parameters(&signature.params)?;
+    let prologue = prologue(&signature.params, &quote!(None), manual);
+    let output = &signature.output;
+    let arguments: Vec<&Ident> = signature.params.iter().map(|param| &param.ident).collect();
+    let request = signature.request.then(|| quote!(__request,));
+    let frameless: Vec<u32> = match keys.list("frameless") {
+        Some(tokens) => {
+            syn::punctuated::Punctuated::<syn::LitInt, syn::Token![,]>::parse_terminated
+                .parse2(tokens.clone())?
+                .iter()
+                .map(syn::LitInt::base10_parse)
+                .collect::<syn::Result<_>>()?
+        }
+        None => Vec::new(),
+    };
+    let attributes = expr::attributes(&keys)?;
+    let cfg = cfgs(&function.attrs);
+    let checks: Vec<Tokens> = checks(&signature, None)
+        .into_iter()
+        .map(|check| quote!(#(#cfg)* #check))
+        .collect();
+    let module = |module: &Ident, php: &str| {
+        let php = bytes(php);
+        quote! {
+            #(#cfg)*
+            #[allow(non_snake_case)]
+            pub(crate) mod #module {
+                #[allow(unused_imports)]
+                use super::*;
+                /// The declaration and its entry, what
+                /// `ExtensionBuilder::functions` takes.
+                pub(crate) fn declared() -> (#root::decl::FunctionDecl, #root::__private::Entry) {
+                    let mut declaration = #root::__private::native_function(#php);
+                    declaration.parameters = #parameters;
+                    declaration.return_type = <#output as #root::abi::IntoReturn>::declared();
+                    declaration.frameless = vec![#(#frameless),*];
+                    declaration.attributes = vec![#(#attributes),*];
+                    (declaration, entry as #root::__private::Entry)
+                }
+                fn entry(__request: &mut #root::request::Request) -> Result<#root::values::Value, #root::raising::Thrown> {
+                    #prologue
+                    #root::abi::IntoReturn::into_return(super::#ident(#request #(#arguments),*), __request)
+                }
+            }
+        }
+    };
+    let mut modules = vec![module(&ident, &expr::qualified(&keys, &ident)?)];
+    if let Some(tokens) = keys.list("aliases") {
+        let aliases = syn::punctuated::Punctuated::<Ident, syn::Token![,]>::parse_terminated
+            .parse2(tokens.clone())?;
+        for alias in aliases {
+            modules.push(module(&alias, &expr::qualified(&keys, &alias)?));
+        }
+    }
+    Ok(quote! {
+        #[allow(non_snake_case, clippy::too_many_arguments, clippy::needless_pass_by_value)]
+        #function
+        #(#checks)*
+        #(#modules)*
+    })
+}

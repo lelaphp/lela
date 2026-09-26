@@ -1,0 +1,268 @@
+== new ReflectionFunction('strspn')
+Function [ <X> function strspn ] {
+Parameter #0 [ <X> string $string ]
+Parameter #1 [ <X> string $characters ]
+Parameter #2 [ <X> int $offset = 0 ]
+Parameter #3 [ <X> ?int $length = null ]
+- Return [ int ]
+== new ReflectionFunction('explode')
+Function [ <X> function explode ] {
+Parameter #0 [ <X> string $separator ]
+Parameter #1 [ <X> string $string ]
+Parameter #2 [ <X> int $limit = PHP_INT_MAX ]
+- Return [ array ]
+== new ReflectionFunction('htmlspecialchars')
+Function [ <X> function htmlspecialchars ] {
+Parameter #0 [ <X> string $string ]
+Parameter #1 [ <X> int $flags = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401 ]
+Parameter #2 [ <X> ?string $encoding = null ]
+Parameter #3 [ <X> bool $double_encode = true ]
+- Return [ string ]
+== new ReflectionFunction('round')
+Function [ <X> function round ] {
+Parameter #0 [ <X> int|float $num ]
+Parameter #1 [ <X> int $precision = 0 ]
+Parameter #2 [ <X> RoundingMode|int $mode = RoundingMode::HalfAwayFromZero ]
+- Return [ float ]
+== new ReflectionFunction('trim')
+Function [ <X> function trim ] {
+Parameter #0 [ <X> string $string ]
+Parameter #1 [ <X> string $characters = " \n\r\t\v\x00" ]
+- Return [ string ]
+== new ReflectionFunction('mkdir')
+Function [ <X> function mkdir ] {
+Parameter #0 [ <X> string $directory ]
+Parameter #1 [ <X> int $permissions = 0777 ]
+Parameter #2 [ <X> bool $recursive = false ]
+Parameter #3 [ <X> $context = null ]
+- Return [ bool ]
+== new ReflectionFunction('str_replace')
+Function [ <X> function str_replace ] {
+Parameter #0 [ <X> array|string $search ]
+Parameter #1 [ <X> array|string $replace ]
+Parameter #2 [ <X> array|string $subject ]
+Parameter #3 [ <X> &$count = null ]
+- Return [ array|string ]
+== new ReflectionFunction('in_array')
+Function [ <X> function in_array ] {
+Parameter #0 [ <X> mixed $needle ]
+Parameter #1 [ <X> array $haystack ]
+Parameter #2 [ <X> bool $strict = false ]
+- Return [ bool ]
+== new ReflectionFunction('array_keys')
+Function [ <X> function array_keys ] {
+Parameter #0 [ <X> array $array ]
+Parameter #1 [ <X> mixed $filter_value = <default> ]
+Parameter #2 [ <X> bool $strict = false ]
+- Return [ array ]
+== new ReflectionFunction('array_push')
+Function [ <X> function array_push ] {
+Parameter #0 [ <X> array &$array ]
+Parameter #1 [ <X> mixed ...$values ]
+- Return [ int ]
+== new ReflectionFunction('sscanf')
+Function [ <X> function sscanf ] {
+Parameter #0 [ <X> string $string ]
+Parameter #1 [ <X> string $format ]
+Parameter #2 [ <X> mixed &...$vars ]
+- Return [ array|int|null ]
+== new ReflectionFunction('array_multisort')
+Function [ <X> function array_multisort ] {
+Parameter #0 [ <X> &$array ]
+Parameter #1 [ <X> &...$rest ]
+- Return [ true ]
+== new ReflectionFunction('preg_match')
+Function [ <X> function preg_match ] {
+Parameter #0 [ <X> string $pattern ]
+Parameter #1 [ <X> string $subject ]
+Parameter #2 [ <X> &$matches = null ]
+Parameter #3 [ <X> int $flags = 0 ]
+Parameter #4 [ <X> int $offset = 0 ]
+- Return [ int|false ]
+== new ReflectionFunction('wordwrap')
+Function [ <X> function wordwrap ] {
+Parameter #0 [ <X> string $string ]
+Parameter #1 [ <X> int $width = 75 ]
+Parameter #2 [ <X> string $break = "\n" ]
+Parameter #3 [ <X> bool $cut_long_words = false ]
+- Return [ string ]
+== new ReflectionFunction('implode')
+Function [ <X> function implode ] {
+Parameter #0 [ <X> array|string $separator ]
+Parameter #1 [ <X> ?array $array = null ]
+- Return [ string ]
+== new ReflectionFunction('join')
+Function [ <X> function join ] {
+Parameter #0 [ <X> array|string $separator ]
+Parameter #1 [ <X> ?array $array = null ]
+- Return [ string ]
+== new ReflectionFunction('utf8_encode')
+Function [ <X, deprecated:X> function utf8_encode ] {
+Parameter #0 [ <X> string $string ]
+- Return [ string ]
+== new ReflectionFunction('password_verify')
+Function [ <X> function password_verify ] {
+Parameter #0 [ <X> string $password ]
+Parameter #1 [ <X> string $hash ]
+- Return [ bool ]
+== new ReflectionClass('RoundingMode')
+Enum [ <X> enum RoundingMode implements UnitEnum ] {
+Method [ <X, prototype UnitEnum> static public method cases ] {
+- Return [ array ]
+Property [ public protected(set) readonly string $name ]
+== new ReflectionClass('php_user_filter')
+Class [ <X> class php_user_filter ] {
+Property [ public string $filtername = '' ]
+Property [ public mixed $params = '' ]
+Property [ public $stream = NULL ]
+Method [ <X> public method filter ] {
+Parameter #0 [ <X> $in ]
+Parameter #1 [ <X> $out ]
+Parameter #2 [ <X> &$consumed ]
+Parameter #3 [ <X> bool $closing ]
+- Tentative return [ int ]
+Method [ <X> public method onCreate ] {
+- Tentative return [ bool ]
+Method [ <X> public method onClose ] {
+- Tentative return [ void ]
+== new ReflectionMethod('SplFileInfo', '__construct')
+Method [ <X, ctor> public method __construct ] {
+Parameter #0 [ <X> string $filename ]
+== new ReflectionMethod('SplFileInfo', 'setFileClass')
+Method [ <X> public method setFileClass ] {
+Parameter #0 [ <X> string $class = SplFileObject::class ]
+- Tentative return [ void ]
+== new ReflectionMethod('SplFileObject', '__construct')
+Method [ <X, overwrites SplFileInfo, ctor> public method __construct ] {
+Parameter #0 [ <X> string $filename ]
+Parameter #1 [ <X> string $mode = "r" ]
+Parameter #2 [ <X> bool $useIncludePath = false ]
+Parameter #3 [ <X> $context = null ]
+== new ReflectionMethod('SplFileObject', 'fgets')
+Method [ <X> public method fgets ] {
+- Tentative return [ string ]
+== new ReflectionMethod('SplFileObject', 'getCurrentLine')
+Method [ <X> public method getCurrentLine ] {
+- Tentative return [ string ]
+== new ReflectionMethod('SplTempFileObject', '__construct')
+Method [ <X, overwrites SplFileObject, ctor> public method __construct ] {
+Parameter #0 [ <X> int $maxMemory = 2 * 1024 * 1024 ]
+== new ReflectionClass('JsonException')
+Class [ <X> class JsonException extends Exception implements Throwable, Stringable ] {
+Property [ protected $message = '' ]
+Property [ protected $code = 0 ]
+Property [ protected string $file = '' ]
+Property [ protected int $line = 0 ]
+Method [ <X, inherits Exception, ctor> public method __construct ] {
+Parameter #0 [ <X> string $message = "" ]
+Parameter #1 [ <X> int $code = 0 ]
+Parameter #2 [ <X> ?Throwable $previous = null ]
+Method [ <X, inherits Exception> public method __wakeup ] {
+- Tentative return [ void ]
+Method [ <X, inherits Exception, prototype Throwable> final public method getMessage ] {
+- Return [ string ]
+Method [ <X, inherits Exception, prototype Throwable> final public method getCode ] {
+Method [ <X, inherits Exception, prototype Throwable> final public method getFile ] {
+- Return [ string ]
+Method [ <X, inherits Exception, prototype Throwable> final public method getLine ] {
+- Return [ int ]
+Method [ <X, inherits Exception, prototype Throwable> final public method getTrace ] {
+- Return [ array ]
+Method [ <X, inherits Exception, prototype Throwable> final public method getPrevious ] {
+- Return [ ?Throwable ]
+Method [ <X, inherits Exception, prototype Throwable> final public method getTraceAsString ] {
+- Return [ string ]
+Method [ <X, inherits Exception, prototype Stringable> public method __toString ] {
+- Return [ string ]
+== new ReflectionProperty('DOMNode', 'nodeName')
+Property [ public virtual string $nodeName ]
+== new ReflectionClass('Dom\AdjacentPosition')
+Enum [ <X> enum Dom\AdjacentPosition: string implements BackedEnum, UnitEnum ] {
+Method [ <X, prototype UnitEnum> static public method cases ] {
+- Return [ array ]
+Method [ <X, prototype BackedEnum> static public method from ] {
+Parameter #0 [ <X> string|int $value ]
+- Return [ static ]
+Method [ <X, prototype BackedEnum> static public method tryFrom ] {
+Parameter #0 [ <X> string|int $value ]
+- Return [ ?static ]
+Property [ public protected(set) readonly string $name ]
+Property [ public protected(set) readonly string $value ]
+== new ReflectionMethod('Dom\Element', 'insertAdjacentText')
+Method [ <X> public method insertAdjacentText ] {
+Parameter #0 [ <X> Dom\AdjacentPosition $where ]
+Parameter #1 [ <X> string $data ]
+- Return [ void ]
+== new ReflectionFunction('proto_seen')
+Function [ <X> function proto_seen ] {
+Parameter #0 [ <X> bool $flag = true ]
+- Return [ string ]
+== new ReflectionFunction('proto_call')
+Function [ <X> function proto_call ] {
+Parameter #0 [ <X> callable $callback ]
+Parameter #1 [ <X> mixed ...$args ]
+- Return [ mixed ]
+== new ReflectionFunction('proto_count')
+Function [ <X> function proto_count ] {
+Parameter #0 [ <X> Traversable|array $of ]
+- Return [ int ]
+== new ReflectionFunction('proto_manual')
+Function [ <X> function proto_manual ] {
+Parameter #0 [ <X> int ...$n ]
+- Return [ string ]
+== new ReflectionFunction('proto_describe')
+Function [ <X> function proto_describe ] {
+Parameter #0 [ <X> mixed $value ]
+- Return [ string ]
+== new ReflectionFunction('proto_never')
+Function [ <X> function proto_never ] {
+- Return [ never ]
+== new ReflectionFunction('proto_false')
+Function [ <X> function proto_false ] {
+- Return [ false ]
+== new ReflectionClass('ProtoCounter')
+Interface [ <X> interface ProtoCounter ] {
+Method [ <X> abstract public method value ] {
+- Return [ int ]
+== new ReflectionClass('ProtoBase')
+Class [ <X> abstract class ProtoBase ] {
+Method [ <X> abstract public method grow ] {
+- Return [ void ]
+Method [ <X> public method kind ] {
+- Return [ string ]
+== new ReflectionClass('ProtoBox')
+Class [ <X> final class ProtoBox extends ProtoBase implements ProtoCounter ] {
+Constant [ public int START ] { 10 }
+Constant [ protected int STEP ] { 5 }
+Constant [ public array|int MIXED ] { 7 }
+Constant [ public array LIST ] { Array }
+Method [ <X> static public method make ] {
+Parameter #0 [ <X> int $n = 0 ]
+- Return [ ProtoBox ]
+Property [ public string $label = 'box' ]
+Property [ protected ?string $tag = NULL ]
+Property [ public array $list = [] ]
+Property [ public protected(set) readonly int $id ]
+Method [ <X, ctor> public method __construct ] {
+Parameter #0 [ <X> int $start = self::START ]
+Method [ <X, prototype ProtoCounter> public method value ] {
+- Return [ int ]
+Method [ <X, overwrites ProtoBase, prototype ProtoBase> public method grow ] {
+- Return [ void ]
+Method [ <X> public method add ] {
+Parameter #0 [ <X> int $n ]
+- Return [ static ]
+Method [ <X> protected method hidden ] {
+- Return [ void ]
+Method [ <X> final public method done ] {
+- Return [ true ]
+Method [ <X, inherits ProtoBase> public method kind ] {
+- Return [ string ]
+== new ReflectionClass('ProtoTally')
+Class [ <X> class ProtoTally ] {
+Method [ <X> public method value ] {
+- Return [ int ]
+== new ReflectionClass('ProtoLaid')
+Class [ <X> class ProtoLaid ] {
+Method [ <X> public method same ] {
+- Return [ bool ]
