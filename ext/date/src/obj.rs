@@ -564,6 +564,10 @@ impl ObjectHandlers for DateHandlers {
         rows_array(req, &own, fields, false).map(Some)
     }
 
+    fn properties_overloaded(&self) -> bool {
+        true
+    }
+
     fn get_properties_for(
         &self,
         req: &mut Request,
@@ -667,6 +671,10 @@ impl ObjectHandlers for TzHandlers {
             None => Vec::new(),
         };
         rows_array(req, &own, fields, false).map(Some)
+    }
+
+    fn properties_overloaded(&self) -> bool {
+        true
     }
 
     fn get_properties_for(
@@ -863,6 +871,10 @@ impl ObjectHandlers for IntervalHandlers {
         let own = std_rows(req, object)?;
         let fields = interval_rows(req, object)?;
         rows_array(req, &own, fields, false).map(Some)
+    }
+
+    fn properties_overloaded(&self) -> bool {
+        true
     }
 
     fn get_properties_for(
@@ -1074,6 +1086,10 @@ impl ObjectHandlers for PeriodHandlers {
             Vec::new()
         };
         rows_array(req, &own, fields, false).map(Some)
+    }
+
+    fn properties_overloaded(&self) -> bool {
+        true
     }
 
     fn get_properties_for(

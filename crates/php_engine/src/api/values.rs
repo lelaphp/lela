@@ -694,6 +694,18 @@ impl PhpObject {
         ClassId(self.0.class())
     }
 
+    /// The object's handler table, php's `Z_OBJ_HT_P`: its class's, or
+    /// [`Std`](crate::api::abi::Std) for a class that declares none, as
+    /// the kernels reach it. What a native asks of another class's
+    /// object, as `spl_array_set_array` asks whether its properties are
+    /// overloaded
+    /// ([`ObjectHandlers::properties_overloaded`](crate::api::abi::ObjectHandlers::properties_overloaded)); the
+    /// witness is that slot's.
+    #[must_use]
+    pub fn handlers(&self, req: &Request) -> &'static dyn crate::api::abi::ObjectHandlers {
+        req.object_handlers(self.0)
+    }
+
     /// `spl_object_id()`: the store's index.
     #[must_use]
     pub fn index(&self) -> u32 {
@@ -802,28 +814,133 @@ impl PhpObject {
         crate::ops::properties_for(req, *self, purpose)
     }
 
-    /// The properties as array entries, mangled names and all, what
-    /// `(array)` produces: [`PhpObject::props_for`] under
-    /// [`PropertyPurpose::ArrayCast`], so the class's
-    /// `get_properties_for` slot is asked and a declared name carries
-    /// the prefix `zend_mangle_property_name` puts before it, `\0*\0p`
-    /// for a protected property and `\0C\0p` for a private one, which
-    /// is how `crate::ops::to_array` keys the same rows. A caller that
-    /// wants the names as declared, `get_object_vars` from inside the
-    /// class, wants [`PhpObject::props`] instead. Views, no owner
-    /// taken; the `Err` is the memory limit refusing the intern of a
-    /// mangled name.
+    /// The object's property table as `get_properties` holds it,
+    /// php's `zobj->properties`: the declared slots that hold a value,
+    /// each keyed by the name `zend_mangle_property_name` makes (`\0*\0p`
+    /// for a protected property, `\0C\0p` for a private one), then the
+    /// dynamic table, a lazy object initialised first as
+    /// `zend_std_get_properties` initialises it. Every row's key is the
+    /// string it stands under; views, no owner taken. The rows
+    /// [`PhpObject::row`], [`PhpObject::set_row`], [`PhpObject::unset_row`]
+    /// address by key; the `Err` is what the
+    /// lazy initializer threw or the memory limit refusing a name.
     ///
-    /// Nothing in the engine or the extensions calls this yet, so the
-    /// mangling it promises is the one `crate::ops::properties_for`
-    /// carries the witness for, `print_r` over a class whose parent
-    /// declares a private property of the same name.
+    /// ```php
+    /// #[AllowDynamicProperties] class P { private $a = 1; protected $b = 2; public $c = 3; }
+    /// $o = new P; $o->d = 4;
+    /// foreach (@new ArrayObject($o) as $k => $v) echo str_replace("\0", '\0', $k), "=$v ";
+    /// echo count(@new ArrayObject($o)), "\n";
+    /// ```
+    /// ```expect
+    /// c=3 d=4 2
+    /// ```
     pub fn entries(&self, req: &mut Request) -> Result<Vec<(Key, Value)>, Thrown> {
-        Ok(self
-            .props_for(req, PropertyPurpose::ArrayCast)?
-            .into_iter()
-            .map(|(name, value)| (Key::from_string(name), value))
-            .collect())
+        req.table_entries(*self)
+    }
+
+    /// One row of the property table by key, `zend_symtable_find_ind`:
+    /// no handler, hook or visibility in the way, a declared property
+    /// under its mangled name, a view; `None` for a key the table has
+    /// not and for a declared slot nothing holds. What `ArrayObject`
+    /// reads its backing object through.
+    ///
+    /// ```php
+    /// class H { public $x = 1; private $p = 's'; public string $u { set { throw new Exception('hook'); } } public function __get($n) { return "get $n"; } }
+    /// $a = @new ArrayObject(new H);
+    /// var_dump($a['x'], isset($a['p']), $a["\0H\0p"], isset($a['u']), @$a['nope']);
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// bool(false)
+    /// string(1) "s"
+    /// bool(false)
+    /// NULL
+    /// ```
+    pub fn row(&self, req: &mut Request, key: &Key) -> Result<Option<Value>, Thrown> {
+        req.table_row(*self, key)
+    }
+
+    /// One row of the property table written by key,
+    /// `zend_symtable_update_ind`: a declared slot under its mangled name
+    /// written raw, its declared type, `readonly` and hooks left
+    /// unconsulted, and any other key a dynamic property laid down with
+    /// no `__set` served and no deprecation raised. `value` is the
+    /// table's from here, and what the row held is released after the
+    /// write.
+    ///
+    /// ```php
+    /// class M { public $a = 1; public int $n = 0; public function __set($k, $v) { echo "__set $k\n"; } }
+    /// $o = new M;
+    /// $ao = @new ArrayObject($o);
+    /// $ao['a'] = 'changed'; $ao['dynamic'] = 'new'; $ao['n'] = 'not an int';
+    /// var_dump($o);
+    /// ```
+    /// ```expect
+    /// object(M)#1 (3) {
+    ///   ["a"]=>
+    ///   string(7) "changed"
+    ///   ["n"]=>
+    ///   string(10) "not an int"
+    ///   ["dynamic"]=>
+    ///   string(3) "new"
+    /// }
+    /// ```
+    pub fn set_row(&self, req: &mut Request, key: &Key, value: Value) -> Result<(), Thrown> {
+        req.table_set_row(*self, key, value)
+    }
+
+    /// One row of the property table removed by key,
+    /// `zend_symtable_del_ind`: a declared slot left uninitialised with
+    /// no `__unset` served, a dynamic property removed, what either
+    /// held released; a key the table has not is nothing.
+    ///
+    /// ```php
+    /// #[AllowDynamicProperties] class U { public $a = 1; public $b = 2; public function __unset($k) { echo "__unset $k\n"; } }
+    /// $o = new U; $o->d = 3;
+    /// $ao = @new ArrayObject($o);
+    /// unset($ao['a'], $ao['d'], $ao['nope']);
+    /// var_dump($o);
+    /// ```
+    /// ```expect
+    /// object(U)#1 (1) {
+    ///   ["b"]=>
+    ///   int(2)
+    /// }
+    /// ```
+    pub fn unset_row(&self, req: &mut Request, key: &Key) -> Result<(), Thrown> {
+        req.table_unset_row(*self, key)
+    }
+
+    /// One row of the property table made a reference in place,
+    /// `ZVAL_MAKE_REF` over what `zend_symtable_find_ind` finds, `null`
+    /// laid down where the table has none: the place a write through an
+    /// `ArrayObject` over an object reaches. The cell is handed back
+    /// with one more owner, the caller's.
+    ///
+    /// ```php
+    /// $o = new stdClass; $o->list = [1];
+    /// $ao = @new ArrayObject($o);
+    /// $ao['list'][] = 2; $ao['fresh']['k'] = 'v';
+    /// var_dump($o);
+    /// ```
+    /// ```expect
+    /// object(stdClass)#1 (2) {
+    ///   ["list"]=>
+    ///   array(2) {
+    ///     [0]=>
+    ///     int(1)
+    ///     [1]=>
+    ///     int(2)
+    ///   }
+    ///   ["fresh"]=>
+    ///   array(1) {
+    ///     ["k"]=>
+    ///     string(1) "v"
+    ///   }
+    /// }
+    /// ```
+    pub fn row_ref(&self, req: &mut Request, key: &Key) -> Result<PhpRef, Thrown> {
+        req.table_row_ref(*self, key)
     }
 
     /// One property by name, without a handler in the way: a view of

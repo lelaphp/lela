@@ -4,8 +4,8 @@
 //! `pdo_stmt_init` installs on it.
 
 use php_ext::abi::{
-    CloneObj, CloneObjWith, ObjectHandlers, PropertyPlace, PropertyPurpose, PropertyRead,
-    PropertyTest, Std,
+    CloneObj, CloneObjWith, DimensionRead, ObjectHandlers, PropertyPlace, PropertyPurpose,
+    PropertyRead, PropertyTest, Std,
 };
 use php_ext::call::{Function, lookup_class, new_object};
 use php_ext::coerce::{numeric_string, to_string, truthy};
@@ -160,12 +160,14 @@ impl ObjectHandlers for Handlers {
         Ok(by_key(req, stmt, name)?.unwrap_or_default())
     }
 
-    /// `row_dim_read`.
+    /// `row_dim_read`: a name is the property of that name, read
+    /// silently under `BP_VAR_IS`.
     fn read_dimension(
         &self,
         req: &mut Request,
         object: PhpObject,
         offset: Option<&Value>,
+        read: DimensionRead,
     ) -> Result<Value, Thrown> {
         let Some(offset) = offset else {
             return Err(throw(req, "Error", "Cannot append to PDORow offset"));
@@ -177,7 +179,12 @@ impl ObjectHandlers for Handlers {
             return Ok(by_number(req, stmt, n)?.unwrap_or_default());
         }
         let name = to_string(req, &offset.deref())?;
-        self.read_property(req, object, name.as_bytes(), PropertyRead::Warning)
+        let how = if read == DimensionRead::Silent {
+            PropertyRead::Silent
+        } else {
+            PropertyRead::Warning
+        };
+        self.read_property(req, object, name.as_bytes(), how)
     }
 
     fn write_property(
@@ -311,6 +318,10 @@ impl ObjectHandlers for Handlers {
             out.set(req, php_ext::values::Key::Str(name), value)?;
         }
         Ok(Some(out))
+    }
+
+    fn properties_overloaded(&self) -> bool {
+        true
     }
 
     /// `row_get_properties_for` under `ZEND_PROP_PURPOSE_DEBUG`: the

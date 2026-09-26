@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use php_ext::abi::{CloneObj, ObjectHandlers, PropertyPurpose, Std};
+use php_ext::abi::{CloneObj, DimensionRead, ObjectHandlers, PropertyPurpose, Std};
 use php_ext::call::{call_method, clone_with};
 use php_ext::coerce::{compare, identical, truthy, value_name};
 use php_ext::raising::{Thrown, throw};
@@ -342,11 +342,15 @@ impl ObjectHandlers for Handlers {
         Some(clone_storage)
     }
 
+    /// `spl_object_storage_read_dimension`: a key no row holds is
+    /// `null` under `BP_VAR_IS`, and every value comes back a copy even
+    /// under a write fetch, so no entry is taken by reference.
     fn read_dimension(
         &self,
         req: &mut Request,
         object: PhpObject,
         offset: Option<&Value>,
+        read: DimensionRead,
     ) -> Result<Value, Thrown> {
         let target = offset.and_then(|o| o.deref().as_object().copied());
         match target {
@@ -358,10 +362,11 @@ impl ObjectHandlers for Handlers {
                 })?;
                 match found {
                     Some(inf) => Ok(crate::copied(req, inf)),
+                    None if read == DimensionRead::Silent => Ok(Value::null()),
                     None => Err(throw(req, "UnexpectedValueException", "Object not found")),
                 }
             }
-            _ => Std.read_dimension(req, object, offset),
+            _ => Std.read_dimension(req, object, offset, read),
         }
     }
 
@@ -874,7 +879,30 @@ fn serialize(req: &mut Request) -> Result<Value, Thrown> {
     crate::string_value(req, &out)
 }
 
-/// `unserialize(string $data): void`; the witness is `serialize`'s.
+/// `unserialize(string $data): void`: the `x:i:count` head, each
+/// `;obj,inf` row attached, then `;m:` with the members, read through
+/// one var hash so a row may name an earlier one by `r:`, as php reads
+/// them; where the data breaks off php's `UnexpectedValueException`
+/// names the offset the reader stopped at.
+///
+/// ```php
+/// $s = new SplObjectStorage;
+/// $s->unserialize('x:i:2;O:8:"stdClass":0:{},s:1:"a";;r:2;,i:5;;m:a:1:{s:1:"p";i:1;}');
+/// var_dump(count($s), $s->p);
+/// foreach ($s as $i => $o) var_dump($s[$o]);
+/// foreach (['x:i:-1;;m:a:0:{}', 'x:i:1;;i:1;;m:a:0:{}', 'y'] as $bad) {
+///     try { (new SplObjectStorage)->unserialize($bad); } catch (UnexpectedValueException $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// Deprecated: Creation of dynamic property SplObjectStorage::$p is deprecated in %s on line 3
+/// int(1)
+/// int(1)
+/// int(5)
+/// Error at offset 6 of 16 bytes
+/// Error at offset 6 of 20 bytes
+/// Error at offset 0 of 1 bytes
+/// ```
 fn unserialize(req: &mut Request) -> Result<Value, Thrown> {
     crate::arity(req, 1, 1)?;
     let this = crate::this(req)?;
@@ -882,58 +910,98 @@ fn unserialize(req: &mut Request) -> Result<Value, Thrown> {
     if data.is_empty() {
         return Ok(Value::null());
     }
-    let refuse = |req: &mut Request, at: usize| {
-        Err(throw(
+    let mut reader = php_ext_standard::Unserializer::new(req, &data);
+    let mut kept = Vec::new();
+    let read = read_storage(req, this, &mut reader, &data, &mut kept);
+    let finished = reader.finish(req);
+    // `var_tmp_var`'s values live until `PHP_VAR_UNSERIALIZE_DESTROY`.
+    for value in kept {
+        req.release(value);
+    }
+    let broke_at = read?;
+    finished?;
+    match broke_at {
+        Some(at) => Err(throw(
             req,
             "UnexpectedValueException",
             &format!("Error at offset {at} of {} bytes", data.len()),
-        ))
-    };
+        )),
+        None => Ok(Value::null()),
+    }
+}
+
+/// The body of `SplObjectStorage::unserialize` over one reader: `None`
+/// once the data is read, or the offset php's `outexcept` reports; each
+/// value read is left in `kept`, php's `var_tmp_var`, for the caller to
+/// give up once the reader is done.
+fn read_storage(
+    req: &mut Request,
+    this: PhpObject,
+    reader: &mut php_ext_standard::Unserializer<'_>,
+    data: &[u8],
+    kept: &mut Vec<Value>,
+) -> Result<Option<usize>, Thrown> {
     if !data.starts_with(b"x:") {
-        return refuse(req, 0);
+        return Ok(Some(0));
     }
-    let Some(end) = crate::serialized_end(&data, 2) else {
-        return refuse(req, 2);
+    reader.set_offset(2);
+    let Some(count) = reader.value(req)? else {
+        return Ok(Some(reader.offset()));
     };
-    let Some(count) = crate::unserialized(req, &data[2..end])?.and_then(|c| c.as_int()) else {
-        return refuse(req, 2);
+    kept.push(count);
+    // `--p` back onto the `;` the count's own value ended with.
+    reader.set_offset(reader.offset().saturating_sub(1));
+    let Some(count) = count.as_int().filter(|n| *n >= 0) else {
+        return Ok(Some(reader.offset()));
     };
-    let mut at = end;
-    for _ in 0..count.max(0) {
-        let Some(object_end) = crate::serialized_end(&data, at) else {
-            return refuse(req, at);
+    for _ in 0..count {
+        if data.get(reader.offset()) != Some(&b';') {
+            return Ok(Some(reader.offset()));
+        }
+        reader.set_offset(reader.offset() + 1);
+        if !matches!(data.get(reader.offset()), Some(b'O' | b'C' | b'r')) {
+            return Ok(Some(reader.offset()));
+        }
+        let Some(entry) = reader.value(req)? else {
+            return Ok(Some(reader.offset()));
         };
-        let Some(object) = crate::unserialized(req, &data[at..object_end])? else {
-            return refuse(req, at);
-        };
-        at = object_end;
+        kept.push(entry);
         let mut inf = Value::null();
-        if data.get(at) == Some(&b',') {
-            let Some(inf_end) = crate::serialized_end(&data, at + 1) else {
-                return refuse(req, at);
+        if data.get(reader.offset()) == Some(&b',') {
+            reader.set_offset(reader.offset() + 1);
+            let Some(read) = reader.value(req)? else {
+                return Ok(Some(reader.offset()));
             };
-            inf = crate::unserialized(req, &data[at + 1..inf_end])?.unwrap_or_default();
-            at = inf_end;
+            inf = read;
         }
-        let Some(target) = object.as_object().copied() else {
-            return refuse(req, at);
+        let Some(target) = entry.as_object().copied() else {
+            req.release(inf);
+            return Ok(Some(reader.offset()));
         };
-        storage_attach(req, this, target, inf)?;
+        let attached = storage_attach(req, this, target, inf);
         req.release(inf);
-        req.release(object);
-        if data.get(at) != Some(&b';') {
-            return refuse(req, at);
-        }
-        at += 1;
+        attached?;
     }
-    if !data[at..].starts_with(b"m:") {
-        return refuse(req, at);
+    if data.get(reader.offset()) != Some(&b';') {
+        return Ok(Some(reader.offset()));
     }
-    if let Some(members) = crate::unserialized(req, &data[at + 2..])? {
-        crate::load_members(req, this, &members)?;
-        req.release(members);
+    let at = reader.offset() + 1;
+    if data.get(at) != Some(&b'm') {
+        return Ok(Some(at));
     }
-    Ok(Value::null())
+    if data.get(at + 1) != Some(&b':') {
+        return Ok(Some(at + 1));
+    }
+    reader.set_offset(at + 2);
+    let Some(members) = reader.value(req)? else {
+        return Ok(Some(reader.offset()));
+    };
+    kept.push(members);
+    if members.as_array().is_none() {
+        return Ok(Some(reader.offset()));
+    }
+    crate::load_members(req, this, &members)?;
+    Ok(None)
 }
 
 /// `offsetGet($object): mixed`: the information, or php's

@@ -996,6 +996,91 @@ pub fn instantiate_named(
     }
 }
 
+/// `ce->unserialize(rval, ce, buf, buf_len, data)` over an object
+/// `object_init_ex` made of the class: the class's unserializer handed
+/// the payload of a `C:` record, `true` once it has read it. The
+/// unserializer is the one php registers on the class entry:
+/// `zend_implement_serializable` gives a class that implements
+/// `Serializable`, and every class that inherits from one, php's
+/// `zend_user_unserialize`, which serves the object's `unserialize()`
+/// with the payload as a string. `false` is the class with none, whose
+/// payload `object_custom` warns of and skips; the `Err` is what
+/// `unserialize()` threw.
+///
+/// ```php
+/// class S implements Serializable {
+///     public $got;
+///     function serialize() { return ''; }
+///     function unserialize($data) { $this->got = $data; }
+///     function __serialize(): array { return []; }
+///     function __unserialize(array $a): void {}
+/// }
+/// var_dump(unserialize('C:1:"S":3:{abc}'), unserialize('C:11:"ArrayObject":21:{x:i:0;a:0:{};m:a:0:{}}'));
+/// var_dump(unserialize('C:8:"stdClass":0:{}'));
+/// ```
+/// ```expect
+/// object(S)#1 (1) {
+///   ["got"]=>
+///   string(3) "abc"
+/// }
+/// object(ArrayObject)#2 (1) {
+///   ["storage":"ArrayObject":private]=>
+///   array(0) {
+///   }
+/// }
+///
+/// Warning: Class stdClass has no unserializer in %s on line 10
+/// object(stdClass)#2 (0) {
+/// }
+/// ```
+pub fn class_unserialize(
+    req: &mut Request,
+    object: PhpObject,
+    data: &[u8],
+) -> Result<bool, Thrown> {
+    let serializable = req
+        .class_named(b"serializable")
+        .is_some_and(|interface| req.instance_of(object.class(), interface));
+    if !serializable {
+        return Ok(false);
+    }
+    let data = Value::string(PhpString::new(req, data)?);
+    let answered = call_method(req, &object, b"unserialize", &[data]);
+    req.release(data);
+    req.release(answered?);
+    Ok(true)
+}
+
+/// `zend_compile_file` and `zend_execute` over the file at `path`, what
+/// `spl_autoload` does with the class file it finds: the path opened
+/// along the `include_path` with nothing raised where nothing opens it
+/// (`php_stream_open_for_zend_ex` without `REPORT_ERRORS`), a file the
+/// request has included already left alone, and any other added to the
+/// included files, compiled as a `require` (a `ParseError` is the `Err`)
+/// and executed to its end on a frame that shares the calling user
+/// frame's variables and has no `$this` and no scope. `true` once the
+/// file ran; the `Err` is what it threw.
+///
+/// ```php
+/// $dir = sys_get_temp_dir() . '/witness_load_file_' . getmypid();
+/// @mkdir($dir);
+/// file_put_contents("$dir/loaded.php", '<?php class Loaded {} $seen = "set by the file";');
+/// set_include_path($dir);
+/// function load() { spl_autoload('Loaded', '.php'); return $seen ?? 'unset'; }
+/// var_dump(load(), class_exists('Loaded', false));
+/// spl_autoload('Loaded', '.php');
+/// var_dump(count(array_filter(get_included_files(), fn ($f) => str_ends_with($f, 'loaded.php'))));
+/// unlink("$dir/loaded.php"); rmdir($dir);
+/// ```
+/// ```expect
+/// string(15) "set by the file"
+/// bool(true)
+/// int(1)
+/// ```
+pub fn load_file(req: &mut Request, path: &[u8]) -> Result<bool, Thrown> {
+    req.load_file(path)
+}
+
 /// `object_init_ex`: an instance with its declared properties' defaults
 /// and no constructor call, a store entry of the request's heap with
 /// one owner, the caller's; an interface, a trait, an enum or an

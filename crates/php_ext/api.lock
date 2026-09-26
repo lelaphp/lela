@@ -8,8 +8,10 @@ abi::Callable
 abi::Callable::with_called_scope
 abi::CloneObj
 abi::CloneObjWith
+abi::CurrentPlace
 abi::Dependency
 abi::DependencyKind
+abi::DimensionRead
 abi::Extension
 abi::ExtensionBuilder
 abi::ExtensionBuilder::build
@@ -40,6 +42,7 @@ abi::ObjectHandlers::clone_obj
 abi::ObjectHandlers::clone_obj_with
 abi::ObjectHandlers::compare
 abi::ObjectHandlers::count_elements
+abi::ObjectHandlers::current_place
 abi::ObjectHandlers::do_operation
 abi::ObjectHandlers::dtor_obj
 abi::ObjectHandlers::free_obj
@@ -56,6 +59,7 @@ abi::ObjectHandlers::has_dimension
 abi::ObjectHandlers::has_property
 abi::ObjectHandlers::iterator_element
 abi::ObjectHandlers::method_receiver
+abi::ObjectHandlers::properties_overloaded
 abi::ObjectHandlers::read_dimension
 abi::ObjectHandlers::read_property
 abi::ObjectHandlers::unset_dimension
@@ -91,6 +95,7 @@ call::call_array
 call::call_method
 call::call_named
 call::class_constant
+call::class_unserialize
 call::clone
 call::clone_with
 call::closure_from_callable
@@ -103,6 +108,7 @@ call::instantiate_named
 call::internal_iterator
 call::iterate
 call::known_method
+call::load_file
 call::lookup_class
 call::lookup_function
 call::mark_lazy_initialized
@@ -532,6 +538,7 @@ values::PhpObject::closure
 values::PhpObject::closure_bound
 values::PhpObject::debug_info
 values::PhpObject::entries
+values::PhpObject::handlers
 values::PhpObject::index
 values::PhpObject::instance_of
 values::PhpObject::is_lazy
@@ -546,11 +553,15 @@ values::PhpObject::prop
 values::PhpObject::props
 values::PhpObject::props_for
 values::PhpObject::protect
+values::PhpObject::row
+values::PhpObject::row_ref
 values::PhpObject::set_prop
+values::PhpObject::set_row
 values::PhpObject::set_slot
 values::PhpObject::slot
 values::PhpObject::unprotect
 values::PhpObject::unserialize_prop
+values::PhpObject::unset_row
 values::PhpRef
 values::PhpRef::as_value
 values::PhpRef::get

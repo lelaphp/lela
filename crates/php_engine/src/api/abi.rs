@@ -20,7 +20,9 @@ use crate::api::call::{Function, Target};
 use crate::api::coerce::BinaryOp;
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
-use crate::api::values::{ClassId, ClosureInfo, PhpArray, PhpObject, PhpString, TypeTag, Value};
+use crate::api::values::{
+    ClassId, ClosureInfo, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value,
+};
 
 /// The startup ini view an extension's engine state is built from: what
 /// the host set before the first request, immutable afterwards.
@@ -656,6 +658,24 @@ pub enum PropertyRead {
     Write,
 }
 
+/// Which fetch `read_dimension` is serving, php's `type` argument to
+/// the slot: `BP_VAR_R`, the read that warns of a key the container has
+/// not; `BP_VAR_IS`, the read an `isset`, an `empty` or a `??` makes,
+/// which warns of nothing; and the three fetches a write through the
+/// element makes, `BP_VAR_W` (`$o[$k][] = v`, `$o[$k]->p = v`, `&$o[$k]`),
+/// `BP_VAR_RW` (`$o[$k][$j] .= v`, `$o[$k]++` over an array element of
+/// it) and `BP_VAR_UNSET` (`unset($o[$k][$j])`), under which a class
+/// whose elements are places hands the element back as a reference,
+/// the place itself, as `spl_array_read_dimension_ex` makes it one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DimensionRead {
+    Warning,
+    Silent,
+    Write,
+    ReadWrite,
+    Unset,
+}
+
 /// What `get_property_ptr_ptr` answers for one name, php's pointer or
 /// its `NULL`: whether a write to the property addresses the standard
 /// place, or goes through the class's `read_property` and
@@ -692,6 +712,10 @@ pub type CloneObj = fn(&mut Request, PhpObject) -> Result<PhpObject, Thrown>;
 /// named property written through `write_property` from `scope`.
 pub type CloneObjWith =
     fn(&mut Request, PhpObject, Option<ClassId>, PhpArray) -> Result<PhpObject, Thrown>;
+/// The `current_place` slot: the element the object's own iterator
+/// stands at made a reference in place, the cell with one more owner,
+/// the caller's; `None` past the last element.
+pub type CurrentPlace = fn(&mut Request, PhpObject) -> Result<Option<PhpRef>, Thrown>;
 
 /// Seam 2 (design §4.3, §5.4): Zend's 25 handler slots in 8.5 order
 /// (`Z/Zend/zend_object_handlers.h:206-235`), one method each, the
@@ -768,14 +792,64 @@ pub trait ObjectHandlers: Send + Sync {
 
     /// `read_dimension`, `zend_std_read_dimension` at `Std`:
     /// `offsetGet` on an `ArrayAccess`, `null` for `$o[]`, and php's
-    /// `Error` for an object of any other class.
+    /// `Error` for an object of any other class; under
+    /// [`DimensionRead::Silent`] `offsetExists` first, and `null` where
+    /// it says no. `read` is php's `type`: under a write fetch a class
+    /// whose elements are places answers the element as a reference,
+    /// which the fetch writes through; any other value is written into
+    /// nothing, with php's `Indirect modification of overloaded
+    /// element` notice where it is no object.
+    ///
+    /// ```php
+    /// class A implements ArrayAccess {
+    ///     public $data = ['k' => []];
+    ///     public function offsetGet($k): mixed { echo "get $k\n"; return $this->data[$k] ?? null; }
+    ///     public function offsetExists($k): bool { echo "exists $k\n"; return isset($this->data[$k]); }
+    ///     public function offsetSet($k, $v): void {}
+    ///     public function offsetUnset($k): void {}
+    /// }
+    /// $a = new A;
+    /// var_dump(isset($a['k']['x']), $a['nope']['x'] ?? 'dflt');
+    /// $a['k']['x'] = 1;
+    /// $o = new ArrayObject(['k' => []]);
+    /// $o['k']['x'] = 1; $o['new'][] = 2; $o['k']['x'] .= 'y';
+    /// var_dump($a->data, $o->getArrayCopy());
+    /// ```
+    /// ```expect
+    /// exists k
+    /// get k
+    /// exists nope
+    /// bool(false)
+    /// string(4) "dflt"
+    /// get k
+    ///
+    /// Notice: Indirect modification of overloaded element of A has no effect in %s on line 11
+    /// array(1) {
+    ///   ["k"]=>
+    ///   array(0) {
+    ///   }
+    /// }
+    /// array(2) {
+    ///   ["k"]=>
+    ///   array(1) {
+    ///     ["x"]=>
+    ///     string(2) "1y"
+    ///   }
+    ///   ["new"]=>
+    ///   array(1) {
+    ///     [0]=>
+    ///     int(2)
+    ///   }
+    /// }
+    /// ```
     fn read_dimension(
         &self,
         req: &mut Request,
         object: PhpObject,
         offset: Option<&Value>,
+        read: DimensionRead,
     ) -> Result<Value, Thrown> {
-        req.read_dimension(object, offset)
+        req.read_dimension(object, offset, read)
     }
 
     /// `write_dimension`, `zend_std_write_dimension` at `Std`:
@@ -1040,6 +1114,35 @@ pub trait ObjectHandlers: Send + Sync {
         Ok(None)
     }
 
+    /// The `get_current_data` of an iterator php's class hands out from
+    /// its own `get_iterator` and walks in C, where that iterator can be
+    /// taken by reference: `spl_array_get_iterator`'s, whose element is
+    /// a place in the storage. A `foreach` by reference over an object
+    /// of such a class whose `Iterator` methods are all its natives
+    /// binds each element through the function this answers, and one
+    /// over any other `Iterator` is php's refusal. `None` at `Std`.
+    ///
+    /// ```php
+    /// $it = new ArrayIterator([1, 2]);
+    /// foreach ($it as &$v) { $v *= 10; }
+    /// unset($v);
+    /// class Over extends ArrayIterator { function current(): mixed { return parent::current(); } }
+    /// try { foreach (new Over([3]) as &$v) {} } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump($it->getArrayCopy());
+    /// ```
+    /// ```expect
+    /// An iterator cannot be used with foreach by reference
+    /// array(2) {
+    ///   [0]=>
+    ///   int(10)
+    ///   [1]=>
+    ///   int(20)
+    /// }
+    /// ```
+    fn current_place(&self) -> Option<CurrentPlace> {
+        None
+    }
+
     /// `get_properties_for`: the rows one purpose reads; `None` at
     /// `Std`, php's null slot, so every purpose reads `get_properties`.
     fn get_properties_for(
@@ -1050,6 +1153,30 @@ pub trait ObjectHandlers: Send + Sync {
     ) -> Result<Option<Vec<(PhpString, Value)>>, Thrown> {
         let _ = (req, object, purpose);
         Ok(None)
+    }
+
+    /// Whether the table's `get_properties` is not
+    /// `zend_std_get_properties` or its `get_properties_for` is set: the
+    /// class answers the reader of its properties itself, so its
+    /// property table is not what a reader sees. What
+    /// `spl_array_set_array` refuses an object as the backing of an
+    /// `ArrayObject` for; `false` at `Std`, and `true` for every table
+    /// that answers [`ObjectHandlers::get_properties_for`] for some
+    /// purpose, and for every table php sets either slot on.
+    ///
+    /// ```php
+    /// foreach ([new DateInterval('P1D'), new SplFixedArray(2), new stdClass] as $o) {
+    ///     try { @new ArrayObject($o); echo get_class($o), " backs\n"; }
+    ///     catch (InvalidArgumentException $e) { echo $e->getMessage(), "\n"; }
+    /// }
+    /// ```
+    /// ```expect
+    /// Overloaded object of type DateInterval is not compatible with ArrayObject
+    /// Overloaded object of type SplFixedArray is not compatible with ArrayObject
+    /// stdClass backs
+    /// ```
+    fn properties_overloaded(&self) -> bool {
+        false
     }
 }
 

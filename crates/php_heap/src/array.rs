@@ -1613,8 +1613,7 @@ impl crate::Heap {
                 .internal_pointer
                 .set(if pointer < used { pointer } else { 0 });
             for i in 0..used {
-                let z = a.read_slot(i);
-                self.addref(z);
+                let z = self.dup_value(a.read_slot(i), Some(a));
                 target.write_slot(i, z);
             }
             self.iterators.dup(a, target);
@@ -1647,7 +1646,10 @@ impl crate::Heap {
                 }
                 continue;
             }
-            self.addref(b.val);
+            let b = Bucket {
+                val: self.dup_value(b.val, Some(a)),
+                ..b
+            };
             if let Some(k) = b.key {
                 k.addref();
             }
@@ -1675,6 +1677,44 @@ impl crate::Heap {
         header.num_used.set(idx);
         header.num_elements.set(idx);
         Ok(target)
+    }
+
+    /// `zend_array_dup_value`'s copy of one element, and `zval_add_ref`
+    /// where `source` is `None`: a reference nothing but this holder
+    /// owns is copied as the value it holds, one more owner of that, so
+    /// the copy does not share a cell the original's last holder left
+    /// behind (`foreach ($a as &$v) {} unset($v);` leaves one); a
+    /// reference to the array being copied itself stays one, and every
+    /// other value is one more owner of itself.
+    ///
+    /// ```php
+    /// $a = [1, 2]; foreach ($a as &$v) {} unset($v);
+    /// $b = $a; $b[1] = 9;
+    /// $o = new stdClass; $o->p = 1; $r = &$o->p; unset($r);
+    /// $c = clone $o; $c->p = 5;
+    /// $k = [1]; $k[] = &$k; $d = $k; $d[0] = 3;
+    /// var_dump($a[1], $o->p, $k[0]);
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// int(1)
+    /// int(1)
+    /// ```
+    pub(crate) fn dup_value(&self, z: Zval, source: Option<Arr>) -> Zval {
+        if let Some(r) = z.as_reference()
+            && r.refcount() == 1
+        {
+            let inner = r.val();
+            let itself = inner
+                .as_arr()
+                .is_some_and(|held| source.is_some_and(|s| held.is_same(s)));
+            if !itself {
+                self.addref(inner);
+                return inner;
+            }
+        }
+        self.addref(z);
+        z
     }
 
     /// `SEPARATE_ARRAY` (`Z/Zend/zend_execute.c`): `a` itself while it

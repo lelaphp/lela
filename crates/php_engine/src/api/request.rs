@@ -27,8 +27,8 @@ use php_unit::decl::{
 use php_unit::{CacheSlot, FramelessEntry, OpArray, Opcode, Unit};
 
 use crate::api::abi::{
-    Callable, Dependency, Extension, IniVerdict, NativeNew, ObjectHandlers, PropertyRead,
-    PropertyTest, Std,
+    Callable, Dependency, DimensionRead, Extension, IniVerdict, NativeNew, ObjectHandlers,
+    PropertyRead, PropertyTest, Std,
 };
 use crate::api::call::{Function, Target};
 use crate::api::raising::{Level, Thrown};
@@ -46,6 +46,8 @@ pub use crate::virtual_cwd::Resolve;
 
 mod hooks;
 mod lazy;
+mod load_file;
+mod table;
 mod variables;
 
 pub(crate) use hooks::parent_hook_trampolines;
@@ -2604,6 +2606,12 @@ impl Request {
             None => self.shared.functions.get(at).map(|(_, entry)| *entry),
             Some(method) => self.shared.methods.get(method).map(|m| m.entry),
         }
+    }
+
+    /// Whether `function` is a native, php's `ZEND_INTERNAL_FUNCTION`:
+    /// numbered below the user functions and methods.
+    pub(crate) fn is_native_function(&self, function: Function) -> bool {
+        self.user_function(function).is_none()
     }
 
     /// The native method `function` is, if it is one: its class and its
@@ -7073,6 +7081,20 @@ impl Request {
             self.assign_declared_slot(o, placed.slot, value);
         } else {
             let key = php_heap::Key::Str(name.heap());
+            // `zend_array_dup` over a table a clone or a cast shares,
+            // before the entry is looked for, so a reference the other
+            // holder's copy owns alone is its value here and not a cell
+            // both write through.
+            if let Some(table) = o.properties().filter(|table| table.refcount() > 1) {
+                match self.array_separate(table) {
+                    Ok(table) => self.heap.object_set_properties(o, table),
+                    Err(thrown) => {
+                        self.release(value);
+                        self.release(Value::string(name));
+                        return Err(thrown);
+                    }
+                }
+            }
             let held = o.properties().is_some_and(|table| table.contains(key));
             // `zend_assign_to_variable` over the entry found: one that
             // holds a reference, what `$o->p = &$x` bound, is written
@@ -9004,38 +9026,30 @@ impl Request {
     }
 
     /// `zend_std_read_dimension`: `offsetGet` on an `ArrayAccess`, the
-    /// offset `null` for `$o[]`.
+    /// offset `null` for `$o[]`; under `BP_VAR_IS` `offsetExists` first,
+    /// `null` where it says no, and `offsetGet` after it where it says
+    /// yes, so a chain under an `isset` calls the two in that order and
+    /// calls neither on a class that is no `ArrayAccess`.
     pub(crate) fn read_dimension(
         &mut self,
         object: PhpObject,
         offset: Option<&Value>,
+        read: DimensionRead,
     ) -> Result<Value, Thrown> {
         self.array_access(object)?;
         let offset = offset.copied().unwrap_or_else(Value::null);
-        crate::api::call::call_method(self, &object, b"offsetGet", &[offset])
-    }
-
-    /// `zend_std_read_dimension` under `BP_VAR_IS`: `offsetExists`
-    /// first, `null` where it says no, and `offsetGet` after it where it
-    /// says yes, so a chain under an `isset` calls the two in that order
-    /// and calls neither on a class that is no `ArrayAccess`.
-    pub(crate) fn read_dimension_is(
-        &mut self,
-        object: PhpObject,
-        offset: Option<&Value>,
-    ) -> Result<Value, Thrown> {
-        self.array_access(object)?;
-        let offset = offset.copied().unwrap_or_else(Value::null);
-        let exists = crate::api::call::call_method(
-            self,
-            &object,
-            b"offsetExists",
-            std::slice::from_ref(&offset),
-        )?;
-        let answer = crate::api::coerce::truthy(self, &exists);
-        self.release(exists);
-        if !answer {
-            return Ok(Value::null());
+        if read == DimensionRead::Silent {
+            let exists = crate::api::call::call_method(
+                self,
+                &object,
+                b"offsetExists",
+                std::slice::from_ref(&offset),
+            )?;
+            let answer = crate::api::coerce::truthy(self, &exists);
+            self.release(exists);
+            if !answer {
+                return Ok(Value::null());
+            }
         }
         crate::api::call::call_method(self, &object, b"offsetGet", &[offset])
     }
