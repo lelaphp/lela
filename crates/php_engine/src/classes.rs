@@ -1727,7 +1727,7 @@ fn declared(name: &[u8], kind: ClassKind, parent: Option<&[u8]>) -> ClassDecl {
         // alike (`zend_exceptions.stub.php`), and a child inherits them;
         // `stdClass` and `Closure` set theirs back to none.
         properties: match (kind, parent) {
-            (ClassKind::Class, None) => throwable_properties(),
+            (ClassKind::Class, None) => throwable_properties(name == b"Error"),
             _ => Vec::new(),
         },
         methods: Vec::new(),
@@ -1741,7 +1741,8 @@ fn declared(name: &[u8], kind: ClassKind, parent: Option<&[u8]>) -> ClassDecl {
 
 /// The properties `Exception` and `Error` declare, as
 /// `zend_exceptions.stub.php` writes them and in its order: `message`,
-/// `string`, `code`, `file`, `line`, `trace`, `previous`. What
+/// `string`, `code`, `file`, `line`, `trace`, `previous`, `Error`'s
+/// `int $line` with no default where `Exception`'s has `0`. What
 /// `zend_default_exception_new` fills at creation, `file`, `line` and
 /// `trace`, the raisers of `api::raising` write by name; the rest hold
 /// the stub's defaults. Their visibility is what `ReflectionClass::
@@ -1750,6 +1751,7 @@ fn declared(name: &[u8], kind: ClassKind, parent: Option<&[u8]>) -> ClassDecl {
 ///
 /// ```php
 /// $r = new ReflectionClass('Exception'); var_dump($r->hasProperty('message'), $r->hasProperty('trace'), (new ReflectionClass('TypeError'))->hasProperty('trace'), $r->getDefaultProperties());
+/// echo new ReflectionProperty('Error', 'line'), new ReflectionProperty('Exception', 'line'), (new Error)->getLine(), "\n";
 /// ```
 /// ```expect
 /// bool(true)
@@ -1772,8 +1774,11 @@ fn declared(name: &[u8], kind: ClassKind, parent: Option<&[u8]>) -> ClassDecl {
 ///   ["previous"]=>
 ///   NULL
 /// }
+/// Property [ protected int $line ]
+/// Property [ protected int $line = 0 ]
+/// 3
 /// ```
-fn throwable_properties() -> Vec<PropertyDecl> {
+fn throwable_properties(error: bool) -> Vec<PropertyDecl> {
     use php_unit::decl::{ConstExpr, Type};
     let property = |name: &[u8], visibility, ty, default| PropertyDecl {
         name: Name(name.into()),
@@ -1804,7 +1809,7 @@ fn throwable_properties() -> Vec<PropertyDecl> {
             b"line",
             Visibility::Protected,
             Some(Type::Int),
-            Some(ConstExpr::Long(0)),
+            (!error).then_some(ConstExpr::Long(0)),
         ),
         property(
             b"trace",

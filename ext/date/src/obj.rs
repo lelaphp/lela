@@ -94,6 +94,9 @@ pub(crate) struct PeriodObj {
     pub include_start_date: bool,
     pub include_end_date: bool,
     pub initialized: bool,
+    /// How many steps past its rewind `current` stands, the index the
+    /// last iterator over the period asked for; none before any walk.
+    pub cursor: Option<usize>,
     rows: Vec<Value>,
 }
 
@@ -128,7 +131,7 @@ pub(super) fn class_name(req: &Request, class: ClassId) -> String {
 }
 
 /// The class's parent, linked.
-fn parent_of(req: &mut Request, class: ClassId) -> Option<ClassId> {
+pub(super) fn parent_of(req: &mut Request, class: ClassId) -> Option<ClassId> {
     let parent = req.class_decl(class)?.parent.clone()?;
     lookup_class(req, &parent.0).ok().flatten()
 }
@@ -574,7 +577,12 @@ impl ObjectHandlers for DateHandlers {
         object: PhpObject,
         purpose: PropertyPurpose,
     ) -> Result<Option<Vec<(PhpString, Value)>>, Thrown> {
-        if purpose == PropertyPurpose::Debug {
+        // `date_object_get_properties_for`'s `default:`, the standard
+        // table, for the debug reader and for `get_object_vars()`.
+        if matches!(
+            purpose,
+            PropertyPurpose::Debug | PropertyPurpose::GetObjectVars
+        ) {
             return Ok(None);
         }
         let time = object.native::<DateObj>(req).and_then(|d| d.time.clone());
@@ -683,7 +691,12 @@ impl ObjectHandlers for TzHandlers {
         object: PhpObject,
         purpose: PropertyPurpose,
     ) -> Result<Option<Vec<(PhpString, Value)>>, Thrown> {
-        if purpose == PropertyPurpose::Debug {
+        // `date_object_get_properties_for`'s `default:`, the standard
+        // table, for the debug reader and for `get_object_vars()`.
+        if matches!(
+            purpose,
+            PropertyPurpose::Debug | PropertyPurpose::GetObjectVars
+        ) {
             return Ok(None);
         }
         let kind = object.native::<TzObj>(req).and_then(|t| t.tz.clone());
@@ -944,8 +957,36 @@ pub(super) const PERIOD_FIELDS: [&[u8]; 7] = [
     b"include_end_date",
 ];
 
+/// `zend_readonly_property_modification_error_ex("DatePeriod", name)`,
+/// what a write to one of the seven fields meets, and a read for a write
+/// (`BP_VAR_W`, `BP_VAR_RW`), whatever the object's class.
+fn readonly(req: &mut Request, name: &[u8]) -> Thrown {
+    let field = String::from_utf8_lossy(name).into_owned();
+    throw(
+        req,
+        "Error",
+        &format!("Cannot modify readonly property DatePeriod::${field}"),
+    )
+}
+
 /// `DatePeriod`'s table: its seven fields read from the period and
 /// refused to writers, as php's virtual properties are.
+///
+/// ```php
+/// $p = new DatePeriod(new DateTime('2000-01-01'), new DateInterval('P1D'), 1);
+/// foreach (['recurrences', 'start', 'interval'] as $f) {
+///     try { $p->$f[] = 1; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+///     try { $r = &$p->$f; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// Cannot modify readonly property DatePeriod::$recurrences
+/// Cannot modify readonly property DatePeriod::$recurrences
+/// Cannot modify readonly property DatePeriod::$start
+/// Cannot modify readonly property DatePeriod::$start
+/// Cannot modify readonly property DatePeriod::$interval
+/// Cannot modify readonly property DatePeriod::$interval
+/// ```
 pub(crate) struct PeriodHandlers;
 
 impl ObjectHandlers for PeriodHandlers {
@@ -978,6 +1019,9 @@ impl ObjectHandlers for PeriodHandlers {
         if !PERIOD_FIELDS.contains(&name) {
             return Std.read_property(req, object, name, read);
         }
+        if read == PropertyRead::Write {
+            return Err(readonly(req, name));
+        }
         let fields = period_fields(req, object)?;
         let mut found = Value::null();
         for (field, value) in fields {
@@ -999,13 +1043,9 @@ impl ObjectHandlers for PeriodHandlers {
     ) -> Result<(), Thrown> {
         if PERIOD_FIELDS.contains(&name.as_bytes()) {
             req.release(value);
-            let field = String::from_utf8_lossy(name.as_bytes()).into_owned();
+            let thrown = readonly(req, name.as_bytes());
             req.release(Value::string(name));
-            return Err(throw(
-                req,
-                "Error",
-                &format!("Cannot modify readonly property DatePeriod::${field}"),
-            ));
+            return Err(thrown);
         }
         Std.write_property(req, object, name, value)
     }
@@ -1092,6 +1132,15 @@ impl ObjectHandlers for PeriodHandlers {
         true
     }
 
+    fn iterator_element(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        index: usize,
+    ) -> Result<Option<(Value, Value)>, Thrown> {
+        crate::period::iterator_element(req, object, index)
+    }
+
     fn get_properties_for(
         &self,
         req: &mut Request,
@@ -1116,26 +1165,43 @@ impl ObjectHandlers for PeriodHandlers {
     }
 }
 
+impl PeriodObj {
+    /// The period's state, copied, without the rows its last property
+    /// read made and with no walk standing on `current`.
+    pub(super) fn copied(&self) -> PeriodObj {
+        PeriodObj {
+            start: self.start.clone(),
+            start_ce: self.start_ce,
+            current: self.current.clone(),
+            end: self.end.clone(),
+            interval: self.interval,
+            recurrences: self.recurrences,
+            include_start_date: self.include_start_date,
+            include_end_date: self.include_end_date,
+            initialized: self.initialized,
+            cursor: None,
+            rows: Vec::new(),
+        }
+    }
+
+    /// `state` put in place of the period's, the rows its readers hold
+    /// kept for `free_obj` to give back.
+    pub(super) fn replace(&mut self, state: PeriodObj) {
+        let rows = std::mem::take(&mut self.rows);
+        *self = state;
+        self.rows = rows;
+    }
+}
+
 /// `date_object_clone_period`.
 fn clone_period(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
     // `date_object_new_*` then `zend_objects_clone_members`: the copy's
     // payload is fresh while `__clone` runs, as php's is, and is filled
     // after it.
     let copy = object.clone_with(req, PeriodObj::default())?;
-    let state = object.native::<PeriodObj>(req).map(|p| PeriodObj {
-        start: p.start.clone(),
-        start_ce: p.start_ce,
-        current: p.current.clone(),
-        end: p.end.clone(),
-        interval: p.interval,
-        recurrences: p.recurrences,
-        include_start_date: p.include_start_date,
-        include_end_date: p.include_end_date,
-        initialized: p.initialized,
-        rows: Vec::new(),
-    });
+    let state = object.native::<PeriodObj>(req).map(PeriodObj::copied);
     if let (Some(state), Some(payload)) = (state, copy.native_mut::<PeriodObj>(req)) {
-        *payload = state;
+        payload.replace(state);
     }
     Ok(copy)
 }

@@ -7,7 +7,8 @@
 use php_ext::abi::ExtensionBuilder;
 use php_ext::decl::{
     Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind, ConstExpr,
-    EnumBacking, MethodDecl, Name, Parameter, ParameterDefault, PropertyDecl, Type, Visibility,
+    EnumBacking, MethodDecl, Name, Parameter, ParameterDefault, PropertyDecl, PropertyHooks, Type,
+    Visibility,
 };
 
 use crate::args::{class, d, method, nullable, p, str_default, union, untyped};
@@ -569,7 +570,8 @@ fn unknown(name: &str) -> Parameter {
 }
 
 /// One of `DatePeriod`'s seven properties, typed and without a default,
-/// which its handlers answer in place of a slot (php's `ZEND_ACC_VIRTUAL`).
+/// which its handlers answer in place of a slot: php's `ZEND_ACC_VIRTUAL`
+/// with no hooks, the stub's `@virtual`.
 fn period_property(name: &str, ty: Type) -> PropertyDecl {
     PropertyDecl {
         name: Name(name.as_bytes().into()),
@@ -583,15 +585,18 @@ fn period_property(name: &str, ty: Type) -> PropertyDecl {
         default: None,
         attributes: Vec::new(),
         doc_comment: None,
-        hooks: None,
+        hooks: Some(Box::new(PropertyHooks {
+            get: None,
+            set: None,
+            is_abstract: false,
+            is_virtual: true,
+        })),
     }
 }
 
-/// `class DatePeriod`. php declares it `implements IteratorAggregate`
-/// with `getIterator()`; the engine declares neither `Traversable` nor
-/// `InternalIterator` yet, so both wait for them (#714).
+/// `class DatePeriod implements IteratorAggregate`.
 fn date_period() -> (ClassDecl, Vec<(MethodDecl, Entry)>) {
-    let mut decl = class_decl("DatePeriod", ClassKind::Class, None, &[]);
+    let mut decl = class_decl("DatePeriod", ClassKind::Class, None, &["IteratorAggregate"]);
     decl.constants = vec![
         constant(
             "EXCLUDE_START_DATE",
@@ -655,6 +660,10 @@ fn date_period() -> (ClassDecl, Vec<(MethodDecl, Entry)>) {
         (unserialize(), period::unserialize),
         (wakeup(), period::wakeup),
         (set_state("DatePeriod"), period::set_state),
+        (
+            real("getIterator", vec![], class("Iterator")),
+            period::get_iterator,
+        ),
     ];
     (decl, methods)
 }

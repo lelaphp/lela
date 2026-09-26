@@ -44,17 +44,18 @@ mod zone;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use php_ext::abi::{Extension, ExtensionBuilder, StartupIni};
+use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::decl::{
     Attribute, AttributeArgument, ConstDecl, ConstExpr, FunctionDecl, IniDecl, Name, Parameter,
     Type,
 };
-use php_ext::raising::{Level, Thrown, raise_at};
+use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::Value;
 
 use crate::args::{class, d, function, nullable, p, str_default, union};
-use crate::ffi::{Errors, Tzdb, Zone};
+use crate::ffi::{Errors, Tzdb};
+pub use crate::ffi::{Offset, Zone};
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
 /// private to this crate (ADR-0005); nothing in it is shared or
@@ -70,27 +71,25 @@ struct State {
     last_errors: Option<Errors>,
 }
 
-/// Engine-scoped and immutable (ADR-0005): the startup value of each of
-/// the extension's ini entries, php's master value, which
-/// `DISPLAY_INI_ENTRIES` prints beside the request's.
-struct Masters(Vec<(Vec<u8>, Vec<u8>)>);
-
-impl Masters {
-    fn of(ini: &StartupIni) -> Masters {
-        Masters(
-            INI.iter()
-                .map(|(name, default)| {
-                    let value = ini
-                        .entries
-                        .iter()
-                        .rev()
-                        .find(|(n, _)| n.as_slice() == name.as_bytes())
-                        .map_or_else(|| default.as_bytes().to_vec(), |(_, v)| v.clone());
-                    (name.as_bytes().to_vec(), value)
-                })
-                .collect(),
-        )
-    }
+/// `get_timezone_info()`, what `php_date.h` declares `PHPAPI` (design
+/// §4.10): the request's default zone, `guess_timezone` parsed through
+/// the request's cache, or php's `DateError` where the database cannot
+/// give it. `ext/standard`'s `gettimeofday` reads its offset.
+///
+/// ```php
+/// date_default_timezone_set('Asia/Kathmandu');
+/// $t = gettimeofday(); var_dump($t['minuteswest'], $t['dsttime']);
+/// ```
+/// ```expect
+/// int(-345)
+/// int(0)
+/// ```
+///
+/// # Errors
+///
+/// The thrown `DateError`.
+pub fn get_timezone_info(req: &mut Request) -> Result<Arc<Zone>, Thrown> {
+    zone::default_zone(req)
 }
 
 /// A native's entry, the shape `ExtensionBuilder::functions` takes.
@@ -110,9 +109,8 @@ pub fn extension() -> Extension {
         .ini(ini())
         .constants(constants())
         .functions(functions())
+        .on_modify(b"date.timezone", zone::on_update_timezone)
         .request_state::<State>()
-        .engine_state(Masters::of)
-        .rinit(startup_timezone)
         .info(date_info)
         .build("date")
 }
@@ -137,29 +135,6 @@ fn ini() -> Vec<IniDecl> {
             system: true,
         })
         .collect()
-}
-
-/// `OnUpdate_date_timezone` over the startup value: php checks
-/// `date.timezone` as its ini entries are registered and prints its
-/// startup warning for a zone the database has not, the empty one
-/// included, then keeps `UTC`. The request's first moment is where this
-/// engine has a request to raise it on. A value `ini_set` gives later is
-/// checked where it is read (`zone::guess_timezone`); refusing it as php
-/// does needs an on-modify handler for an extension's entry, which the
-/// face has not (#721).
-#[allow(clippy::unnecessary_wraps)] // `rinit`'s signature, which may throw
-fn startup_timezone(req: &mut Request) -> Result<(), Thrown> {
-    let Some(value) = req.ini_get(b"date.timezone").map(<[u8]>::to_vec) else {
-        return Ok(());
-    };
-    if !Tzdb::builtin().is_valid(&value) {
-        let message = format!(
-            "PHP Startup: Invalid date.timezone value '{}', using 'UTC' instead",
-            String::from_utf8_lossy(&value)
-        );
-        raise_at(req, Level::Warning, &message, b"Unknown", 0);
-    }
-    Ok(())
 }
 
 /// `PHP_MINFO_FUNCTION(date)`: the extension's table, then its ini
@@ -205,17 +180,19 @@ fn date_info(req: &mut Request) {
             String::from_utf8_lossy(value).into_owned()
         }
     };
-    let masters = req
-        .engine::<Masters>()
-        .map(|m| m.0.clone())
-        .unwrap_or_default();
-    let rows: Vec<[String; 3]> = masters
+    let entries = req.ini_entries();
+    let rows: Vec<[String; 3]> = INI
         .iter()
-        .map(|(name, master)| {
-            let local = req.ini_get(name).unwrap_or(master);
+        .filter_map(|(name, _)| {
+            entries
+                .iter()
+                .find(|entry| entry.decl.name.0.as_ref() == name.as_bytes())
+        })
+        .map(|entry| {
+            let master = entry.original.as_deref().unwrap_or(&entry.value);
             [
-                String::from_utf8_lossy(name).into_owned(),
-                shown(local),
+                String::from_utf8_lossy(&entry.decl.name.0).into_owned(),
+                shown(&entry.value),
                 shown(master),
             ]
         })

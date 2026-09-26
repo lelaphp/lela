@@ -353,7 +353,7 @@ fn modify<const AT: usize>(req: &mut Request, value: &[u8]) -> Result<bool, Thro
     let Some((name, _, _)) = ENTRIES.get(AT) else {
         return Ok(true);
     };
-    let stage = if req.state::<State>().ini_startup {
+    let stage = if req.at_startup() {
         Stage::Startup
     } else {
         Stage::Runtime
@@ -414,34 +414,6 @@ pub(super) fn register(builder: ExtensionBuilder) -> ExtensionBuilder {
         .fold(builder, |builder, ((name, _, _), modify)| {
             builder.on_modify(name.as_bytes(), modify)
         })
-}
-
-/// `zend_register_ini_entries` at `ZEND_INI_STAGE_STARTUP` over the
-/// values the host started the engine with: each entry's rule, in
-/// `PHP_INI_BEGIN()`'s order, over a value that is not php's default,
-/// raised behind `PHP Startup`; one it refuses leaves the entry at its
-/// default, which is set again for the request, the rule meeting it at
-/// the startup stage too. This engine raises
-/// nothing while it is built, so a request's `RINIT` is where the rules
-/// are served, as ext/date's startup check is; a `ZEND_INI_PERDIR` value the
-/// rule refuses cannot be set back from a request, and stays.
-pub(super) fn startup(req: &mut Request) -> Result<(), Thrown> {
-    req.state::<State>().ini_startup = true;
-    let mut restored = Ok(());
-    for (name, default, kind) in ENTRIES {
-        let value = crate::ini(req, name.as_bytes());
-        if value == default.as_bytes() || on_modify(req, name.as_bytes(), &value, Stage::Startup) {
-            continue;
-        }
-        if !matches!(kind, Kind::PerDir | Kind::PerDirBool)
-            && let Err(thrown) = req.ini_set(name.as_bytes(), default.as_bytes())
-        {
-            restored = Err(thrown);
-            break;
-        }
-    }
-    req.state::<State>().ini_startup = false;
-    restored
 }
 
 /// `zend_alter_ini_entry(name, value, PHP_INI_USER,

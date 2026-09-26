@@ -178,8 +178,9 @@ impl Tzdb {
 
 /// A parsed zone, `timelib_tzinfo`: freed with the last `Arc`. Nothing in
 /// timelib writes a zone after `timelib_parse_tzfile` built it, so it is
-/// shared as immutable data.
-pub(crate) struct Zone(NonNull<sys::TzInfo>);
+/// shared as immutable data. `ext/standard` reads the default one
+/// (design §4.10, `php_date.h`).
+pub struct Zone(NonNull<sys::TzInfo>);
 
 // SAFETY: the zone is owned here alone and never written after its
 // parse, so moving it to another thread moves plain data.
@@ -213,10 +214,12 @@ pub(crate) struct Location {
     pub comments: Vec<u8>,
 }
 
-/// `timelib_time_offset`, copied out, with php's field names.
+/// `timelib_time_offset`, copied out, with php's field names: the
+/// offset from UTC in seconds, whether it is daylight saving time, and
+/// the abbreviation.
 #[derive(Debug, Clone)]
 #[allow(clippy::struct_field_names)]
-pub(crate) struct Offset {
+pub struct Offset {
     pub offset: i32,
     pub is_dst: bool,
     pub abbr: Vec<u8>,
@@ -326,8 +329,10 @@ impl Zone {
             .collect()
     }
 
-    /// `timelib_get_time_zone_info(ts, tz)`.
-    pub(crate) fn offset_at(&self, ts: i64) -> Offset {
+    /// `timelib_get_time_zone_info(ts, tz)`: the zone's offset in force
+    /// at the Unix time `ts`.
+    #[must_use]
+    pub fn offset_at(&self, ts: i64) -> Offset {
         // SAFETY: a live zone, read only; the offset answered is ours.
         let raw = unsafe { sys::timelib_get_time_zone_info(ts, self.ptr()) };
         if raw.is_null() {

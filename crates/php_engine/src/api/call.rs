@@ -830,21 +830,23 @@ pub fn property_hook(
 }
 
 /// `ZEND_ACC_VIRTUAL` of the property `name` as `class`'s table holds
-/// it: hooked, and backed by no declaration of it up the chain.
+/// it: backed by no declaration of it up the chain, a hooked one whose
+/// hooks never name it, or an internal class's that its handlers serve.
 ///
 /// ```php
 /// class A { public $v { get => 1; } public $b { get => $this->b; } public $p; }
 /// foreach (['v', 'b', 'p'] as $n) var_dump((new ReflectionProperty('A', $n))->isVirtual());
+/// var_dump((new ReflectionProperty('DatePeriod', 'start'))->isVirtual());
 /// ```
 /// ```expect
 /// bool(true)
 /// bool(false)
 /// bool(false)
+/// bool(true)
 /// ```
 #[must_use]
 pub fn property_is_virtual(req: &Request, class: ClassId, name: &[u8]) -> bool {
-    req.hooked(class, name)
-        .is_some_and(|hooked| hooked.is_virtual)
+    req.property_virtual(class, name)
 }
 
 /// `zend_read_property_ex(prop_info->ce, ...)` over a hooked property,

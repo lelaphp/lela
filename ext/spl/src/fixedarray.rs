@@ -337,7 +337,11 @@ impl ObjectHandlers for Handlers {
         object: PhpObject,
         purpose: PropertyPurpose,
     ) -> Result<Option<Vec<(PhpString, Value)>>, Thrown> {
-        let _ = purpose;
+        // "The array elements are not *real properties*": what
+        // `get_object_vars()` reads is the object's own table alone.
+        if purpose == PropertyPurpose::GetObjectVars {
+            return Ok(None);
+        }
         let elements = with(req, object, |a| a.elements.clone())?;
         let props = Std.get_properties(req, object)?;
         if elements.is_empty() && props.is_empty() {

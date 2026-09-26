@@ -139,10 +139,6 @@ struct State {
     vars: Option<PhpRef>,
     /// `PS(session_started_filename)` and its line.
     started_at: Option<(Vec<u8>, u32)>,
-    /// Whether [`ini::startup`] is running the rules, so the value it
-    /// sets back meets the startup stage's rule, which checks no
-    /// session state or header.
-    ini_startup: bool,
     /// `EG(exception)` as a user handler left it: php goes on after a
     /// handler throws, and the native raises it when it returns.
     thrown: Option<Thrown>,

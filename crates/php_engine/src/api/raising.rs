@@ -167,7 +167,11 @@ pub(crate) fn deprecated_constant(req: &mut Request, key: &[u8]) -> Result<(), T
 /// `Unknown` between them, each with no `()`. The session's write at
 /// request end is the witness, in `ext/session`.
 pub fn docref(req: &mut Request, level: Level, message: &str) {
-    let text = if req.vm_serving_native() {
+    // `php_verror`'s origin while modules start (`Z/main/main.c:1087`):
+    // `PHP Startup`, no function and so no `()`.
+    let text = if req.at_startup() {
+        format!("PHP Startup: {message}")
+    } else if req.vm_serving_native() {
         format!("{}(): {message}", req.active_native())
     } else {
         let origin = match req.phase() {

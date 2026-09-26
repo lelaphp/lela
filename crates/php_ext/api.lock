@@ -243,6 +243,7 @@ request::Request::argument
 request::Request::argument_count
 request::Request::argv
 request::Request::assert_callback
+request::Request::at_startup
 request::Request::autoload_functions
 request::Request::autoload_register
 request::Request::autoload_unregister

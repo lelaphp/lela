@@ -289,11 +289,10 @@ fn rshutdown_globals(req: &mut Request) -> Result<(), Thrown> {
 /// under `session.auto_start`, with no file executing to have started it
 /// from (`zend_get_executed_filename_ex()` is null there), so what names
 /// the start site later says the session started automatically. The
-/// startup rules are served first, over the host's values
-/// ([`crate::ini::startup`]).
+/// startup rules are the engine's to serve, over the host's values, as
+/// the engine starts (`ZEND_INI_STAGE_STARTUP`), before this runs.
 pub(super) fn rinit(req: &mut Request) -> Result<(), Thrown> {
     rinit_globals(req);
-    crate::ini::startup(req)?;
     let module = Module::find(&ini(req, b"session.save_handler"));
     let format = Format::find(&ini(req, b"session.serialize_handler"));
     let state = req.state::<State>();
