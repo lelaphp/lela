@@ -22,7 +22,7 @@ use php_ext::decl::{
     ParameterDefault, Type,
 };
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw};
-use php_ext::request::{Request, Resolve, Stream, Whence, WrapperOp};
+use php_ext::request::{Request, Resolve, Stream, StreamOption, Whence, WrapperOp};
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use std::os::unix::ffi::OsStrExt;
@@ -1570,7 +1570,11 @@ fn file_get_contents(req: &mut Request) -> Result<Value, Thrown> {
         return Ok(Value::bool(false));
     };
     if stream.is_stdio(req) {
-        stream.set_read_buffer(req, false);
+        let unbuffered = StreamOption::ReadBuffer {
+            buffered: false,
+            size: i64::from(libc::BUFSIZ),
+        };
+        stream.set_option(req, unbuffered);
     }
     if offset != 0 {
         let whence = if offset > 0 { Whence::Set } else { Whence::End };

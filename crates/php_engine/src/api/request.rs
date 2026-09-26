@@ -283,6 +283,38 @@ pub enum Cast {
     Fd,
 }
 
+/// One option `php_stream_set_option` sets, with what it is set to: the
+/// ones a native asks for through [`Stream::set_option`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamOption {
+    /// `PHP_STREAM_OPTION_BLOCKING`: `O_NONBLOCK` cleared for `true`.
+    Blocking(bool),
+    /// `PHP_STREAM_OPTION_READ_TIMEOUT`: how long a read waits.
+    ReadTimeout(std::time::Duration),
+    /// `PHP_STREAM_OPTION_READ_BUFFER`: `PHP_STREAM_BUFFER_NONE` for
+    /// `buffered: false`, else `PHP_STREAM_BUFFER_FULL`, with the size a
+    /// user-space stream's `stream_set_option` is handed, the `long` php
+    /// reads through `ptrparam`.
+    ReadBuffer { buffered: bool, size: i64 },
+    /// `PHP_STREAM_OPTION_WRITE_BUFFER`, as the read buffer's.
+    WriteBuffer { buffered: bool, size: i64 },
+    /// `PHP_STREAM_OPTION_SET_CHUNK_SIZE`: how much one read of the kind
+    /// asks for, and one write of a user-space stream hands it.
+    ChunkSize(usize),
+}
+
+/// What `php_stream_set_option` answers: `PHP_STREAM_OPTION_RETURN_OK`,
+/// `_ERR` and `_NOTIMPL`, the last where neither the stream's kind nor
+/// the generic layer takes the option, and the chunk size the stream had
+/// for [`StreamOption::ChunkSize`], which the generic layer answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptionAnswer {
+    Ok,
+    Err,
+    NotImplemented,
+    Previous(usize),
+}
+
 /// What a host fd becomes as a stream, [`Request::stream_from_fd`]:
 /// the three openers php has over one that is already open.
 #[derive(Debug)]
@@ -462,11 +494,14 @@ impl Stream {
             .is_some_and(crate::streams::PhpStream::is_stdio)
     }
 
-    /// `PHP_STREAM_OPTION_READ_BUFFER`: `false` is
-    /// `PHP_STREAM_BUFFER_NONE`, so the kind is read directly, and `true`
-    /// buffers it again.
-    pub fn set_read_buffer(self, req: &mut Request, buffered: bool) {
-        req.stream_op(self, |_, stream| stream.set_read_buffer(buffered));
+    /// `php_stream_set_option` (`Z/main/streams/streams.c:1447`): the
+    /// stream's kind asked first, then, where it does not take the
+    /// option, the generic layer, which takes the chunk size and whether
+    /// the read buffer is used. A stream that is closed answers
+    /// [`OptionAnswer::Err`].
+    pub fn set_option(self, req: &mut Request, option: StreamOption) -> OptionAnswer {
+        req.stream_op(self, |req, stream| stream.set_option(req, option))
+            .unwrap_or(OptionAnswer::Err)
     }
 
     /// What `stream_get_meta_data` answers: `timed_out`, `blocked` and

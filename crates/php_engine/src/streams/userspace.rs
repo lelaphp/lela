@@ -21,7 +21,7 @@
 
 use super::{MetaData, Ops, PhpStream, StatBuf};
 use crate::api::raising::{Level, Thrown, docref};
-use crate::api::request::{Request, Stream, Whence, WrapperOp};
+use crate::api::request::{OptionAnswer, Request, Stream, StreamOption, Whence, WrapperOp};
 use crate::api::values::{ClassId, Key, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
 
 /// `struct php_user_stream_wrapper` less the scheme, which is the row's:
@@ -594,27 +594,56 @@ impl Ops for UserStream {
         MetaData::Generic
     }
 
-    /// `user_stream_set_option`'s `PHP_STREAM_OPTION_BLOCKING`:
-    /// `stream_set_option(STREAM_OPTION_BLOCKING, $blocking, null)`, whose
-    /// truth is the answer, php's warning where the class has none.
-    fn set_blocking(&mut self, req: &mut Request, blocking: bool) -> Option<bool> {
-        let args = [
-            Value::int(1),
-            Value::int(i64::from(blocking)),
-            Value::null(),
-        ];
+    /// `php_userstreamop_set_option` (`Z/main/streams/userspace.c:1024`)
+    /// for the four it hands on, `user_stream_set_option`:
+    /// `stream_set_option` with the option's number and its two values,
+    /// whether to block and `null`, the timeout's seconds and
+    /// microseconds, or `PHP_STREAM_BUFFER_*` and the size; its truth is
+    /// `PHP_STREAM_OPTION_RETURN_OK`, and a class without the method is
+    /// php's warning and `_ERR`. The chunk size is not one it hands on.
+    fn set_option(&mut self, req: &mut Request, option: StreamOption) -> OptionAnswer {
+        const BUFFER_NONE: i64 = 0;
+        const BUFFER_FULL: i64 = 2;
+        let mode = |buffered: bool| Value::int(if buffered { BUFFER_FULL } else { BUFFER_NONE });
+        let args = match option {
+            StreamOption::Blocking(blocking) => [
+                Value::int(1),
+                Value::int(i64::from(blocking)),
+                Value::null(),
+            ],
+            StreamOption::ReadBuffer { buffered, size: n } => {
+                [Value::int(2), mode(buffered), Value::int(n)]
+            }
+            StreamOption::WriteBuffer { buffered, size: n } => {
+                [Value::int(3), mode(buffered), Value::int(n)]
+            }
+            StreamOption::ReadTimeout(timeout) => [
+                Value::int(4),
+                Value::int(i64::try_from(timeout.as_secs()).unwrap_or(i64::MAX)),
+                Value::int(i64::from(timeout.subsec_micros())),
+            ],
+            StreamOption::ChunkSize(_) => return OptionAnswer::NotImplemented,
+        };
         match call(req, self.object, b"stream_set_option", &args) {
             Called::Missing => {
                 not_implemented(req, self.object, "stream_set_option");
-                None
+                OptionAnswer::Err
             }
-            Called::Threw => None,
+            Called::Threw => OptionAnswer::Err,
             Called::Value(value) => {
                 let set = truthy(req, &value);
                 req.release(value);
-                set.then_some(true)
+                if set {
+                    OptionAnswer::Ok
+                } else {
+                    OptionAnswer::Err
+                }
             }
         }
+    }
+
+    fn is_userspace(&self) -> bool {
+        true
     }
 
     /// `php_userstreamop_cast` (`Z/main/streams/userspace.c:1413`) is

@@ -36,7 +36,9 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use php_heap::ResourceType;
 
 use crate::api::raising::{Level, Thrown, raise, throw, warning};
-use crate::api::request::{Cast, FdStream, FilterFlags, Request, Stream, Whence};
+use crate::api::request::{
+    Cast, FdStream, FilterFlags, OptionAnswer, Request, Stream, StreamOption, Whence,
+};
 use crate::api::values::{ClassId, Key, PhpArray, PhpString, Resource, Value};
 
 mod filters;
@@ -151,11 +153,17 @@ pub(crate) trait Ops: Send {
         None
     }
 
-    /// `PHP_STREAM_OPTION_BLOCKING`: whether the kind blocked before, or
-    /// `None` for php's `-1`, a kind with no such option or an fd that
-    /// refused it.
-    fn set_blocking(&mut self, _req: &mut Request, _blocking: bool) -> Option<bool> {
-        None
+    /// `ops->set_option` for the options [`StreamOption`] names: php's
+    /// `PHP_STREAM_OPTION_RETURN_NOTIMPL` for a kind that takes none of
+    /// them, which the generic layer answers next.
+    fn set_option(&mut self, _req: &mut Request, _option: StreamOption) -> OptionAnswer {
+        OptionAnswer::NotImplemented
+    }
+
+    /// `php_stream_is(stream, PHP_STREAM_IS_USERSPACE)`: a user-space
+    /// stream, whose writes are handed to it a chunk at a time.
+    fn is_userspace(&self) -> bool {
+        false
     }
 
     /// Whether the last `ops->seek` found the kind cannot seek after all,
@@ -175,12 +183,6 @@ pub(crate) trait Ops: Send {
     /// stream says it is to be cast as, `None` for every other kind.
     fn user_cast(&mut self, _req: &mut Request, _select: bool) -> Option<Stream> {
         None
-    }
-
-    /// `PHP_STREAM_OPTION_READ_TIMEOUT`: `false` for a kind with no such
-    /// option.
-    fn set_timeout(&mut self, _timeout: std::time::Duration) -> bool {
-        false
     }
 
     /// `PHP_STREAM_OPTION_XPORT_API`: one operation of a `transport`,
@@ -455,11 +457,18 @@ impl PhpStream {
             let Self { ops, position, .. } = self;
             let _ = ops.seek(req, *position, Some(Whence::Set), position);
         }
+        // A user-space stream is handed a chunk at a time, since what it
+        // is handed is a string of the request's (GH-13071).
+        let chunk = if self.ops.is_userspace() {
+            self.chunk_size.max(1)
+        } else {
+            usize::MAX
+        };
         let mut didwrite = 0;
         let mut rest = buf;
         while !rest.is_empty() {
             let Self { ops, .. } = self;
-            match ops.write(req, rest) {
+            match ops.write(req, &rest[..rest.len().min(chunk)]) {
                 Some(justwrote) if justwrote > 0 => {
                     rest = &rest[justwrote..];
                     didwrite += justwrote;
@@ -676,11 +685,31 @@ impl PhpStream {
         self.ops.flock(req, operation).unwrap_or(false)
     }
 
+    /// `_php_stream_set_option` (`Z/main/streams/streams.c:1447`): the
+    /// kind first; what it does not take, the chunk size and whether the
+    /// read buffer is used, the generic layer takes.
+    pub(crate) fn set_option(&mut self, req: &mut Request, option: StreamOption) -> OptionAnswer {
+        let answer = self.ops.set_option(req, option);
+        if answer != OptionAnswer::NotImplemented {
+            return answer;
+        }
+        match option {
+            StreamOption::ChunkSize(size) => {
+                OptionAnswer::Previous(std::mem::replace(&mut self.chunk_size, size))
+            }
+            StreamOption::ReadBuffer { buffered, .. } => {
+                self.set_read_buffer(buffered);
+                OptionAnswer::Ok
+            }
+            _ => answer,
+        }
+    }
+
     /// `PHP_STREAM_OPTION_READ_BUFFER` as `_php_stream_set_option`
     /// answers it for a kind that leaves it to the generic half:
     /// `PHP_STREAM_BUFFER_NONE` sets `NO_BUFFER`, anything else clears
     /// it.
-    pub(crate) const fn set_read_buffer(&mut self, buffered: bool) {
+    const fn set_read_buffer(&mut self, buffered: bool) {
         self.flags.no_buffer = !buffered;
     }
 
@@ -1452,14 +1481,26 @@ impl Ops for Stdio {
         true
     }
 
-    /// `php_stdiop_set_option`'s `PHP_STREAM_OPTION_BLOCKING`
-    /// (`Z/main/streams/plain_wrapper.c:803`): `O_NONBLOCK` set or
-    /// cleared on the fd, and whether it blocked before.
-    fn set_blocking(&mut self, _req: &mut Request, blocking: bool) -> Option<bool> {
-        let file = self.file.as_ref()?;
-        let was = php_heap::set_fd_blocking(file.as_fd(), blocking).ok()?;
-        self.blocking = blocking;
-        Some(was)
+    /// `php_stdiop_set_option` (`Z/main/streams/plain_wrapper.c:803`):
+    /// `PHP_STREAM_OPTION_BLOCKING` is `O_NONBLOCK` set or cleared on the
+    /// fd, and `PHP_STREAM_OPTION_WRITE_BUFFER` `setvbuf` on a `FILE *`,
+    /// which a stream opened over a fd, as every one here is, has not:
+    /// `-1`.
+    fn set_option(&mut self, _req: &mut Request, option: StreamOption) -> OptionAnswer {
+        match option {
+            StreamOption::Blocking(blocking) => {
+                let Some(file) = self.file.as_ref() else {
+                    return OptionAnswer::Err;
+                };
+                if php_heap::set_fd_blocking(file.as_fd(), blocking).is_err() {
+                    return OptionAnswer::Err;
+                }
+                self.blocking = blocking;
+                OptionAnswer::Ok
+            }
+            StreamOption::WriteBuffer { .. } => OptionAnswer::Err,
+            _ => OptionAnswer::NotImplemented,
+        }
     }
 
     /// `php_stdiop_cast` (`Z/main/streams/plain_wrapper.c:645`): the

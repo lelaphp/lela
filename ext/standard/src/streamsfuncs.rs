@@ -22,7 +22,7 @@ use std::os::unix::ffi::OsStrExt;
 use php_ext::coerce::{callable_checked, value_name};
 use php_ext::decl::{Attribute, AttributeArgument, ConstDecl, ConstExpr, FunctionDecl, Name};
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, deprecated, docref, throw};
-use php_ext::request::{Request, Resolve, Stream, Whence};
+use php_ext::request::{OptionAnswer, Request, Resolve, Stream, StreamOption, Whence};
 use php_ext::values::{Key, PhpArray, PhpString, Resource, ResourceType, Value, ValueRef};
 
 use crate::file::stream_argument;
@@ -44,9 +44,6 @@ use crate::{
 pub(crate) struct Contexts {
     kind: Option<ResourceType>,
     default: Option<Resource>,
-    /// `stream->chunk_size` for each stream `stream_set_chunk_size` set,
-    /// by resource number; a stream not here has php's 8192.
-    chunk_sizes: Vec<(i64, i64)>,
 }
 
 /// `php_stream_context`: its options array and its notifier's callback.
@@ -57,9 +54,6 @@ struct Context {
 
 /// `PHP_STREAM_COPY_ALL` as `stream_get_contents` spells it, `-1`.
 const COPY_ALL: i64 = -1;
-
-/// `PHP_SOCK_CHUNK_SIZE`, the default `stream->chunk_size`.
-const CHUNK_SIZE: i64 = 8192;
 
 /// The `STREAM_*` constants of `file.stub.php` the streams natives read
 /// or hand back, in its order, with this host's values where the stub
@@ -1096,28 +1090,61 @@ fn stream_supports_lock(req: &mut Request) -> Result<Value, Thrown> {
 /// `stream_set_write_buffer($stream, int $size): int` and its alias
 /// `set_file_buffer`, `PHP_FUNCTION(stream_set_write_buffer)`
 /// (`Z/ext/standard/streamsfuncs.c:1414`): `PHP_STREAM_OPTION_WRITE_BUFFER`,
-/// which only a stream over a `FILE*` takes; every kind here is over a
-/// `descriptor` or memory, so the answer is `EOF`.
+/// `PHP_STREAM_BUFFER_NONE` for zero and `PHP_STREAM_BUFFER_FULL` with the
+/// size otherwise, and `0` where the stream took it, `EOF` where not. A
+/// plain file's takes it only over a `FILE*`, which none here is over,
+/// memory has no such option, and a user-space stream is asked with
+/// `stream_set_option`, `BUFSIZ` its size where none is given.
 ///
 /// ```php
+/// class W { public $context; function stream_open($p, $m, $o, &$op) { return true; }
+///     function stream_set_option($o, $a, $b) { echo "option: $o, $a, $b\n"; return $o == 3 && $a == 2; } }
+/// stream_wrapper_register('ww', 'W');
 /// var_dump(stream_set_write_buffer(fopen(__FILE__, 'r'), 0), set_file_buffer(fopen('php://memory', 'r'), 100));
+/// $w = fopen('ww://x', 'r');
+/// var_dump(stream_set_write_buffer($w, 50), stream_set_read_buffer($w, 10));
 /// ```
 /// ```expect
 /// int(-1)
 /// int(-1)
+/// option: 3, 2, 50
+/// option: 2, 2, 10
+/// int(0)
+/// int(-1)
 /// ```
 fn stream_set_write_buffer(req: &mut Request) -> Result<Value, Thrown> {
     argument_count_between(req, 2, 2)?;
-    stream_argument(req, 1)?;
-    long_argument(req, 2)?;
-    Ok(Value::int(-1))
+    let stream = stream_argument(req, 1)?;
+    let buff = long_argument(req, 2)?;
+    let option = StreamOption::WriteBuffer {
+        buffered: buff != 0,
+        size: buffer_size(buff),
+    };
+    Ok(Value::int(option_answer(stream.set_option(req, option))))
+}
+
+/// The size a buffer option hands on: the one given, or `BUFSIZ`, what
+/// `user_stream_set_option` hands where `ptrparam` is `NULL`, for zero.
+fn buffer_size(buff: i64) -> i64 {
+    if buff == 0 {
+        i64::from(libc::BUFSIZ)
+    } else {
+        buff
+    }
+}
+
+/// `RETURN_LONG(ret == 0 ? 0 : EOF)`.
+fn option_answer(answer: OptionAnswer) -> i64 {
+    if answer == OptionAnswer::Ok { 0 } else { -1 }
 }
 
 /// `stream_set_read_buffer($stream, int $size): int`,
 /// `PHP_FUNCTION(stream_set_read_buffer)`
-/// (`Z/ext/standard/streamsfuncs.c:1471`): zero reads the kind directly,
-/// any other size buffers it again, and php's generic layer takes either,
-/// so the answer is `0`.
+/// (`Z/ext/standard/streamsfuncs.c:1471`): `PHP_STREAM_OPTION_READ_BUFFER`,
+/// zero reading the kind directly and any other size buffering it again,
+/// which php's generic layer takes for a kind that does not, so a kind
+/// here answers `0`, and a user-space stream what its `stream_set_option`
+/// says.
 ///
 /// ```php
 /// $m = fopen('php://memory', 'r+'); fwrite($m, "abc"); rewind($m);
@@ -1132,51 +1159,72 @@ fn stream_set_write_buffer(req: &mut Request) -> Result<Value, Thrown> {
 fn stream_set_read_buffer(req: &mut Request) -> Result<Value, Thrown> {
     argument_count_between(req, 2, 2)?;
     let stream = stream_argument(req, 1)?;
-    let size = long_argument(req, 2)?;
-    stream.set_read_buffer(req, size != 0);
-    Ok(Value::int(0))
+    let buff = long_argument(req, 2)?;
+    let option = StreamOption::ReadBuffer {
+        buffered: buff != 0,
+        size: buffer_size(buff),
+    };
+    Ok(Value::int(option_answer(stream.set_option(req, option))))
 }
 
 /// `stream_set_blocking($stream, bool $enable): bool` and its alias
 /// `socket_set_blocking`, `PHP_FUNCTION(stream_set_blocking)`
 /// (`Z/ext/standard/streamsfuncs.c:1357`): `PHP_STREAM_OPTION_BLOCKING`,
-/// which fails only as `-1`; a plain file's `O_NONBLOCK` changes nothing
-/// a read of it sees, and memory has no such option, so every kind here
-/// answers `true`.
+/// which fails only as `-1`: `O_NONBLOCK` on a plain file, a pipe or a
+/// socket, `stream_set_option` on a user-space stream, and `true` for
+/// memory, which has no such option. A pipe set not to block answers a
+/// read with nothing where it has nothing.
 ///
 /// ```php
+/// $p = popen('sleep 1', 'r');
+/// var_dump(stream_set_blocking($p, false), fread($p, 10), stream_get_meta_data($p)['blocked']);
 /// var_dump(stream_set_blocking(fopen('php://memory', 'r'), false), socket_set_blocking(fopen(__FILE__, 'r'), true));
+/// pclose($p);
 /// ```
 /// ```expect
+/// bool(true)
+/// string(0) ""
+/// bool(false)
 /// bool(true)
 /// bool(true)
 /// ```
 fn stream_set_blocking(req: &mut Request) -> Result<Value, Thrown> {
     argument_count_between(req, 2, 2)?;
-    stream_argument(req, 1)?;
-    bool_argument(req, 2)?;
-    Ok(Value::bool(true))
+    let stream = stream_argument(req, 1)?;
+    let block = bool_argument(req, 2)?;
+    let answer = stream.set_option(req, StreamOption::Blocking(block));
+    Ok(Value::bool(answer != OptionAnswer::Err))
 }
 
 /// `stream_set_timeout($stream, int $seconds, int $microseconds = 0): bool`
 /// and its alias `socket_set_timeout`, `PHP_FUNCTION(stream_set_timeout)`
 /// (`Z/ext/standard/streamsfuncs.c:1374`): `PHP_STREAM_OPTION_READ_TIMEOUT`,
-/// which only a socket takes, and no kind here is one.
+/// the microseconds carried into the seconds as php carries them, and
+/// `true` only for `PHP_STREAM_OPTION_RETURN_OK`, which a socket and a
+/// user-space stream whose `stream_set_option` says so answer.
 ///
 /// ```php
 /// var_dump(stream_set_timeout(fopen('php://memory', 'r'), 1), socket_set_timeout(fopen(__FILE__, 'r'), 1, 500));
+/// $s = stream_socket_server('tcp://127.0.0.1:0');
+/// var_dump(stream_set_timeout($s, 0, 1500000));
 /// ```
 /// ```expect
 /// Deprecated: Function socket_set_timeout() is deprecated since 8.5, use stream_set_timeout() instead in %s on line 2
 /// bool(false)
 /// bool(false)
+/// bool(true)
 /// ```
 fn stream_set_timeout(req: &mut Request) -> Result<Value, Thrown> {
     argument_count_between(req, 2, 3)?;
-    stream_argument(req, 1)?;
-    long_argument(req, 2)?;
-    optional_long(req, 3, 0)?;
-    Ok(Value::bool(false))
+    let stream = stream_argument(req, 1)?;
+    let seconds = long_argument(req, 2)?;
+    let microseconds = optional_long(req, 3, 0)?;
+    let seconds = seconds.saturating_add(microseconds / 1_000_000);
+    let micros = microseconds % 1_000_000;
+    let timeout = std::time::Duration::from_secs(u64::try_from(seconds).unwrap_or(0))
+        + std::time::Duration::from_micros(u64::try_from(micros).unwrap_or(0));
+    let answer = stream.set_option(req, StreamOption::ReadTimeout(timeout));
+    Ok(Value::bool(answer == OptionAnswer::Ok))
 }
 
 /// `socket_set_timeout`, `ZEND_ACC_DEPRECATED`: `zend_deprecated_function`'s
@@ -1213,16 +1261,16 @@ fn stream_set_chunk_size(req: &mut Request) -> Result<Value, Thrown> {
     if size <= 0 {
         return Err(arg_value_error(req, 2, "be greater than 0"));
     }
-    let id = stream.resource().id();
-    let sizes = &mut req.state::<State>().contexts.chunk_sizes;
-    let old = if let Some(entry) = sizes.iter_mut().find(|(at, _)| *at == id) {
-        std::mem::replace(&mut entry.1, size)
-    } else {
-        sizes.push((id, size));
-        CHUNK_SIZE
+    let size = usize::try_from(size).unwrap_or(usize::MAX);
+    let OptionAnswer::Previous(old) = stream.set_option(req, StreamOption::ChunkSize(size)) else {
+        return Ok(Value::bool(false));
     };
     // `stream->chunk_size > INT_MAX ? INT_MAX : (int)stream->chunk_size`.
-    Ok(Value::int(old.min(i64::from(i32::MAX))))
+    Ok(Value::int(
+        i64::try_from(old)
+            .unwrap_or(i64::MAX)
+            .min(i64::from(i32::MAX)),
+    ))
 }
 
 /// `stream_get_line($stream, int $length, string $ending = ""): string|false`,
