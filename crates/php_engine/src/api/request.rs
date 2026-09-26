@@ -13079,9 +13079,8 @@ impl Request {
     fn ini_modifiable(name: &[u8]) -> (bool, bool, bool) {
         match name {
             b"xmlrpc_errors" | b"sys_temp_dir" | b"sendmail_path" | b"syslog.facility"
-            | b"syslog.ident" | b"disable_functions" | b"enable_dl" | b"extension_dir" => {
-                (false, false, true)
-            }
+            | b"syslog.ident" | b"disable_functions" | b"enable_dl" | b"extension_dir"
+            | b"allow_url_fopen" | b"allow_url_include" => (false, false, true),
             b"short_open_tag"
             | b"mail.add_x_header"
             | b"mail.mixed_lf_and_crlf"
