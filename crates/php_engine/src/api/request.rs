@@ -6526,6 +6526,20 @@ impl Request {
             self.assign_declared_slot(o, placed.slot, value);
         } else {
             let key = php_heap::Key::Str(name.heap());
+            // `zend_array_dup` over a table a clone or a cast shares,
+            // before the entry is looked for, so a reference the other
+            // holder's copy owns alone is its value here and not a cell
+            // both write through.
+            if let Some(table) = o.properties().filter(|table| table.refcount() > 1) {
+                match self.array_separate(table) {
+                    Ok(table) => self.heap.object_set_properties(o, table),
+                    Err(thrown) => {
+                        self.release(value);
+                        self.release(Value::string(name));
+                        return Err(thrown);
+                    }
+                }
+            }
             let held = o.properties().is_some_and(|table| table.contains(key));
             // `zend_assign_to_variable` over the entry found: one that
             // holds a reference, what `$o->p = &$x` bound, is written

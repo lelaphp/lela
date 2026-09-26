@@ -772,12 +772,14 @@ impl Heap {
     }
 
     /// The loop of `zend_objects_clone_members`: each declared slot one
-    /// more owner of the old object's value, and the dynamic table
-    /// shared with one more owner, separated by the first write.
+    /// more owner of the old object's value as `zval_add_ref` takes it,
+    /// a reference nothing else owns copied as the value it holds, and
+    /// the dynamic table shared with one more owner, separated by the
+    /// first write, whose `zend_array_dup` unwraps such a reference the
+    /// same way.
     fn clone_members(&self, new: Obj, old: Obj) {
         for i in 0..old.slots() {
-            let z = old.slot(i);
-            self.addref(z);
+            let z = self.dup_value(old.slot(i), None);
             new.write_slot(i, z);
         }
         if let Some(table) = old.properties() {
