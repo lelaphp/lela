@@ -26,6 +26,7 @@ Arr::table_size
 Arr::unprotect
 Arr::value_ref
 ArrIter
+BUFSIZ
 Block
 Block::bytes
 Block::bytes_mut

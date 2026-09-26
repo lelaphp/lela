@@ -116,3 +116,9 @@ pub fn dup_fd(fd: RawFd) -> std::io::Result<OwnedFd> {
     // else, which the `OwnedFd` closes once.
     Ok(unsafe { OwnedFd::from_raw_fd(copy) })
 }
+
+/// `BUFSIZ` of this host's `<stdio.h>`, the size php hands a user-space
+/// stream's `stream_set_option` for a buffer option given none
+/// (`user_stream_set_option`).
+#[allow(clippy::cast_lossless)] // a `c_uint` on one host and a `c_int` on another
+pub const BUFSIZ: i64 = libc::BUFSIZ as i64;
