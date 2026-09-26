@@ -77,14 +77,17 @@ fn shown(path: &[u8]) -> std::borrow::Cow<'_, str> {
     String::from_utf8_lossy(path)
 }
 
-/// The label `wrapper->wops->label` gives a wrapper, which the natives'
-/// refusals print.
-fn label(wrapper: &Located) -> &'static str {
-    match wrapper {
-        Located::Plain => "plainfile",
-        Located::Php => "PHP",
-        Located::Data => "RFC2397",
-        Located::Ext(_) | Located::Space(_) | Located::Nothing => "user-space",
+impl Request {
+    /// The label `wrapper->wops->label` gives a wrapper, which the
+    /// natives' refusals print.
+    fn wrapper_label(&self, wrapper: &Located) -> &'static str {
+        match wrapper {
+            Located::Plain => "plainfile",
+            Located::Php => "PHP",
+            Located::Data => "RFC2397",
+            Located::Ext(at) => self.wrappers.get(*at).map_or("user-space", |w| w.label),
+            Located::Space(_) | Located::Nothing => "user-space",
+        }
     }
 }
 
@@ -386,7 +389,7 @@ impl Request {
         if let Some(unlink) = unlink {
             return unlink(self, path);
         }
-        let text = format!("{} does not allow unlinking", label(&wrapper));
+        let text = format!("{} does not allow unlinking", self.wrapper_label(&wrapper));
         docref(self, Level::Warning, &text);
         Ok(false)
     }
@@ -425,7 +428,10 @@ impl Request {
             Located::Plain | Located::Space(_) => None,
             Located::Ext(at) => self.wrappers[*at].rename,
             Located::Php | Located::Data => {
-                let text = format!("{} wrapper does not support renaming", label(&wrapper));
+                let text = format!(
+                    "{} wrapper does not support renaming",
+                    self.wrapper_label(&wrapper)
+                );
                 docref(self, Level::Warning, &text);
                 return Ok(false);
             }

@@ -693,11 +693,20 @@ pub trait StreamOps: Send {
 pub struct StreamWrapper {
     /// The protocol, as `php_register_url_stream_wrapper` is given it.
     pub scheme: String,
-    /// `stream_opener`: `None` is the open that failed, which
-    /// `php_stream_display_wrapper_errors` reports as `operation
-    /// failed`.
-    pub open: fn(&mut Request, &[u8], &[u8]) -> Result<Option<Stream>, Thrown>,
-    pub open_dir: Option<fn(&mut Request, &[u8]) -> Result<Option<Stream>, Thrown>>,
+    /// `wops->label`, which `stream_get_meta_data` prints as a stream's
+    /// `wrapper_type` and a directory's `stream_type`, and the refusals
+    /// of `unlink` and `rename` name.
+    pub label: &'static str,
+    /// `stream_opener`, `None` for a wrapper that opens no stream, php's
+    /// `wrapper does not support stream open`; the opener's own `None`
+    /// is the open that failed, which `php_stream_display_wrapper_errors`
+    /// reports as `operation failed`.
+    pub open: Option<fn(&mut Request, &[u8], &[u8]) -> Result<Option<Stream>, Thrown>>,
+    /// `dir_opener`: the directory's entries, in the order `readdir`
+    /// gives them, which the engine serves as a directory stream under
+    /// the wrapper's label (`rewinddir` back to the first); `None` is the
+    /// open that failed.
+    pub open_dir: Option<fn(&mut Request, &[u8]) -> Result<Option<Vec<Vec<u8>>>, Thrown>>,
     pub stat: Option<fn(&mut Request, &[u8]) -> Result<Option<PhpArray>, Thrown>>,
     pub unlink: Option<fn(&mut Request, &[u8]) -> Result<bool, Thrown>>,
     pub rename: Option<fn(&mut Request, &[u8], &[u8]) -> Result<bool, Thrown>>,

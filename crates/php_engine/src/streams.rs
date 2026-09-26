@@ -2833,12 +2833,19 @@ impl Request {
             ),
             Located::Data => ("RFC2397", rfc2397::open(self, &path_to_open, mode)?),
             Located::Ext(at) => {
-                let open = self.wrappers[at].open;
-                (
-                    "user-space",
-                    open(self, &path_to_open, mode)?
-                        .ok_or_else(|| String::from("operation failed")),
-                )
+                let wrapper = &self.wrappers[at];
+                let (label, open) = (wrapper.label, wrapper.open);
+                match open {
+                    Some(open) => (
+                        label,
+                        open(self, &path_to_open, mode)?
+                            .ok_or_else(|| String::from("operation failed")),
+                    ),
+                    None => (
+                        label,
+                        Err(String::from("wrapper does not support stream open")),
+                    ),
+                }
             }
             Located::Space(user) => (
                 "user-space",
@@ -2911,13 +2918,27 @@ impl Request {
             ),
             Located::Php => (PHP_WRAPPER, Err(String::from("not implemented"))),
             Located::Data => ("RFC2397", Err(String::from("not implemented"))),
-            Located::Ext(at) => match self.wrappers[at].open_dir {
-                Some(open_dir) => (
-                    "user-space",
-                    open_dir(self, &path_to_open)?.ok_or_else(|| String::from("operation failed")),
-                ),
-                None => ("user-space", Err(String::from("not implemented"))),
-            },
+            Located::Ext(at) => {
+                let wrapper = &self.wrappers[at];
+                let (label, open_dir) = (wrapper.label, wrapper.open_dir);
+                match open_dir {
+                    Some(open_dir) => match open_dir(self, &path_to_open)? {
+                        Some(entries) => {
+                            let kind = Listing {
+                                label,
+                                entries,
+                                at: 0,
+                            };
+                            (
+                                label,
+                                Ok(self.stream_alloc(PhpStream::new(Box::new(kind), b"r"))?),
+                            )
+                        }
+                        None => (label, Err(String::from("operation failed"))),
+                    },
+                    None => (label, Err(String::from("not implemented"))),
+                }
+            }
             Located::Space(user) => (
                 "user-space",
                 userspace::open_dir(self, &user, &path_to_open)?,
@@ -3256,6 +3277,60 @@ impl Ops for Dir {
         }
         let entry = self.entries.as_mut()?.next()?.ok()?;
         Some(entry.file_name().as_bytes().to_vec())
+    }
+}
+
+/// A directory an extension's wrapper listed, php's own dir stream ops
+/// for such a wrapper (`php_glob_stream_ops` among them): the entries in
+/// order, `readdir` the next and `rewinddir` back to the first, under the
+/// wrapper's label.
+struct Listing {
+    label: &'static str,
+    entries: Vec<Vec<u8>>,
+    at: usize,
+}
+
+impl Ops for Listing {
+    fn label(&self) -> &'static str {
+        self.label
+    }
+
+    fn writable(&self) -> bool {
+        false
+    }
+
+    fn write(&mut self, _req: &mut Request, _buf: &[u8]) -> Option<usize> {
+        None
+    }
+
+    fn read(&mut self, _req: &mut Request, _buf: &mut [u8], _eof: &mut bool) -> Option<usize> {
+        None
+    }
+
+    fn close(&mut self, _req: &mut Request) -> i32 {
+        0
+    }
+
+    /// `php_glob_stream_rewind`: back to the first entry.
+    fn seek(
+        &mut self,
+        _req: &mut Request,
+        _offset: i64,
+        _whence: Option<Whence>,
+        _position: &mut i64,
+    ) -> Option<bool> {
+        self.at = 0;
+        Some(true)
+    }
+
+    fn seekable(&self) -> bool {
+        true
+    }
+
+    fn read_dir(&mut self, _req: &mut Request) -> Option<Vec<u8>> {
+        let entry = self.entries.get(self.at)?.clone();
+        self.at += 1;
+        Some(entry)
     }
 }
 

@@ -33,6 +33,8 @@ use crate::zpp::optional_long;
 use crate::{State, argument_count_between, constant, ffi};
 
 pub(crate) mod glob;
+mod glob_wrapper;
+pub(crate) use glob_wrapper::wrapper as glob_wrapper;
 
 /// `PHP_SCANDIR_SORT_*`, `scandir`'s `$sorting_order`.
 const SCANDIR_SORT_ASCENDING: i64 = 0;

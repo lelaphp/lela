@@ -293,11 +293,13 @@ fn ini_handlers() -> [(&'static [u8], OnModify); 7] {
 
 /// `PHP_RINIT(basic)`'s share here: the startup deprecations of the
 /// `assert.*` entries, which php raises at `module` startup
-/// (`assert::startup`), and the filters, which php registers there and
-/// this engine keeps in the request's filter table (`filters::register`).
+/// (`assert::startup`), the `glob://` wrapper and the filters, which php
+/// registers there and this engine keeps in the request's wrapper and
+/// filter tables (`dir::glob_wrapper`, `filters::register`).
 #[allow(clippy::unnecessary_wraps)] // `ExtensionBuilder::rinit`'s signature
 fn rinit(req: &mut Request) -> Result<(), Thrown> {
     assert::startup(req);
+    req.register_wrapper(dir::glob_wrapper());
     filters::register(req);
     Ok(())
 }

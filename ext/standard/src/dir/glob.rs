@@ -31,7 +31,7 @@ pub(super) const PHP_GLOB_NOESCAPE: i32 = 0x1000;
 /// read past (`glob0_compile`).
 pub(super) const PHP_GLOB_ABORTED: i32 = -2;
 /// `PHP_GLOB_NOMATCH`, `Z/main/php_glob.h:148`: nothing matched.
-pub(super) const PHP_GLOB_NOMATCH: i32 = -3;
+pub(crate) const PHP_GLOB_NOMATCH: i32 = -3;
 /// `PHP_GLOB_BRACE`, `Z/main/php_glob.h:152`: expand `{a,b}` as csh does.
 pub(super) const PHP_GLOB_BRACE: i32 = 0x0080;
 /// `PHP_GLOB_ONLYDIR`, `Z/main/php_glob.h:171`: `glob()` filters for
@@ -583,9 +583,7 @@ impl Glob {
     /// The compile loop of `glob0`, `Z/main/php_glob.c:565`: `[`, `?` and
     /// `*` to their meta `Char`s, everything else to `CHAR(c)`.
     ///
-    /// A set whose last `]` closes a `[:name:]` (`[[:alpha:]`) makes php
-    /// read past the pattern's end (`Z/main/php_glob.c:598`), and the oracle
-    /// dies of SIGBUS; here that read gives `PHP_GLOB_ABORTED`.
+    /// A read beyond the pattern's `EOS` gives `PHP_GLOB_ABORTED`.
     fn glob0_compile(&self, src: &[Char]) -> Result<Vec<Char>, i32> {
         let rd = |i: usize| -> Result<Char, i32> {
             match src.get(i) {
