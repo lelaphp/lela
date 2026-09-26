@@ -81,17 +81,18 @@ mod judge;
 #[cfg(test)]
 mod tests;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use php_bundle::test::Entered;
 
 use crate::divergence::Registry;
 use crate::manifest::{Crate, Manifest, Rule};
-use crate::oracle::{Oracle, Pin, Regime, Runner};
+use crate::oracle::{Oracle, Pin, Regime, Runner, linked};
 use crate::reading::{Reading, Status, Store, listed};
 use crate::sources;
 use crate::tally::{self, Outcome};
@@ -457,9 +458,13 @@ pub(crate) fn extract(root: &Path, krate: &Crate, rule: Option<&Rule>) -> Result
         }
         out.take(found);
     }
-    // A crate whose natives stand on the attributes is counted by them.
-    if let Some(subjects) = anchored.subjects() {
-        out.subjects = subjects;
+    // A crate whose natives stand on the attributes is counted by them,
+    // once the fences have run.
+    if anchored.declares() {
+        out.anchored = Some(anchor::Coverage {
+            package: crate::clippy::package(krate),
+            anchored,
+        });
     }
     Ok(out)
 }
@@ -505,19 +510,54 @@ pub(crate) fn judge(
     }
     let mut wall = Duration::ZERO;
     let captured = Mutex::new(Vec::new());
+    // What each fence's run through the linked engine entered, by its id.
+    let entered: Mutex<HashMap<String, Vec<Entered>>> = Mutex::new(HashMap::new());
     let witnesses = if oracle_absent.is_some() {
+        // Coverage is what a fence ran, and the linked engine needs no
+        // php: where the attributes declare natives it still serves each
+        // fence, for its trace alone, though nothing is judged.
+        if found.anchored.is_some() {
+            for (witness, regime) in &runnable {
+                if let Ok((_, natives)) =
+                    linked::serve_traced(&oracle.pin().recipe, *regime, &witness.snippet)
+                {
+                    entered
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .insert(witness.id(), natives);
+                }
+            }
+        }
         tally::Tally::found(runnable.len())
     } else {
         wall = runnable.iter().filter_map(|(w, _)| w.wall).sum();
         tally::Tally::judge_beside(&runnable, |(witness, regime)| {
             let mut mine = Vec::new();
-            let judged = judge::one(oracle, registry, ask, witness, *regime, &mut mine);
+            let mut natives = Vec::new();
+            let judged = judge::one(
+                oracle,
+                registry,
+                ask,
+                witness,
+                *regime,
+                &mut mine,
+                &mut natives,
+            );
             captured
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .extend(mine);
+            entered
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(witness.id(), natives);
             Ok(judged)
         })?
+    };
+    let entered = entered.into_inner().unwrap_or_else(PoisonError::into_inner);
+    let subjects = match &found.anchored {
+        Some(coverage) => coverage.subjects(&entered),
+        None => found.subjects.clone(),
     };
     // Captured in the order the threads finished; written and printed in
     // the order the fences stand.
@@ -527,9 +567,8 @@ pub(crate) fn judge(
     captured.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
     Ok(Tally {
         witnesses,
-        subjects: found.subjects.len(),
-        missing: found
-            .subjects
+        subjects: subjects.len(),
+        missing: subjects
             .iter()
             .filter(|s| !s.witnessed)
             .map(fence::Subject::at)

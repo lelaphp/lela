@@ -18,6 +18,7 @@
 use std::fmt;
 
 use anyhow::Result;
+use php_bundle::test::Entered;
 
 use super::fence::{Exit, Witness};
 use super::{Ask, Captured, Judged, Judgement, fence};
@@ -42,7 +43,9 @@ fn judged(witness: &Witness, judgement: Judgement, note: impl Into<String>) -> J
 /// block the fence's own `regime=<name>` names, resolved against the pin
 /// by the caller once for both runs, so the oracle is passed the name and
 /// the linked engine the ini it carries and neither is passed another's. What `--accept`
-/// captures goes onto `captured`; the write is the caller's. Every way
+/// captures goes onto `captured`; the write is the caller's. What the
+/// linked engine's run entered goes onto `entered`, which is what the
+/// fence covers (harness §4.5 condition 2, revision 58). Every way
 /// this can go wrong is a judgement the witness carries, the oracle's
 /// trouble and the linked engine's included, so there is nothing here for
 /// an `Err` to say.
@@ -53,6 +56,7 @@ pub(super) fn one(
     witness: &Witness,
     regime: Option<&Regime>,
     captured: &mut Vec<Captured>,
+    entered: &mut Vec<Entered>,
 ) -> Judged {
     let oracle_out = match oracle.run(
         Program::Snippet(&witness.snippet),
@@ -102,8 +106,11 @@ pub(super) fn one(
     // The engine linked into the harness, which needs no binary and is
     // the run of record (design §8; #119, #401). A panic inside is trouble
     // the witness borks on, never the lane's end.
-    let ran = match linked::serve(&oracle.pin().recipe, regime, &witness.snippet) {
-        Ok(out) => out,
+    let ran = match linked::serve_traced(&oracle.pin().recipe, regime, &witness.snippet) {
+        Ok((out, natives)) => {
+            *entered = natives;
+            out
+        }
         Err(trouble) => {
             return judged(
                 witness,

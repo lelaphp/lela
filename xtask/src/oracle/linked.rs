@@ -42,7 +42,7 @@ use std::time::Instant;
 
 use anyhow::{Result, bail};
 
-use php_bundle::test::Capture;
+use php_bundle::test::{Capture, Entered};
 
 use super::{Observation, Program, Recipe, Regime, Scratch};
 
@@ -57,6 +57,26 @@ pub(crate) fn serve(
     regime: Option<&Regime>,
     snippet: &str,
 ) -> Result<Observation> {
+    run(recipe, regime, snippet, false).map(|(observed, _)| observed)
+}
+
+/// [`serve`] with the natives the request entered recorded beside what
+/// it observed, in the order it entered them: what witness coverage
+/// counts (harness §4.5 condition 2, revision 58).
+pub(crate) fn serve_traced(
+    recipe: &Recipe,
+    regime: Option<&Regime>,
+    snippet: &str,
+) -> Result<(Observation, Vec<Entered>)> {
+    run(recipe, regime, snippet, true)
+}
+
+fn run(
+    recipe: &Recipe,
+    regime: Option<&Regime>,
+    snippet: &str,
+    traced: bool,
+) -> Result<(Observation, Vec<Entered>)> {
     let source = format!("{}{snippet}", recipe.preamble);
     let scratch = Scratch::for_program(recipe, Program::Snippet(snippet))?;
     // The recipe's entries first and the regime's after them, so an entry
@@ -72,21 +92,23 @@ pub(crate) fn serve(
     // A fresh engine per snippet, which is the isolation a process gave
     // (design §8).
     let served = panic::catch_unwind(AssertUnwindSafe(|| {
-        php_bundle::test::engine(&ini).serve_capture_in(
-            &scratch.dir,
-            recipe.script_name.as_bytes(),
-            &source,
-            Capture::default(),
-        )
+        let engine = php_bundle::test::engine(&ini);
+        let name = recipe.script_name.as_bytes();
+        if traced {
+            engine.serve_capture_traced_in(&scratch.dir, name, &source, Capture::default())
+        } else {
+            engine.serve_capture_in(&scratch.dir, name, &source, Capture::default())
+        }
     }));
     let wall = started.elapsed();
     let Ok(served) = served else {
         bail!("the linked engine panicked; the panic itself is on the harness's second stream");
     };
-    Ok(Observation {
+    let observed = Observation {
         stdout: scratch.normalise(&recipe.normalise, served.stdout),
         stderr: scratch.normalise(&recipe.normalise, served.stderr),
         exit: Some(served.exit_code),
         wall,
-    })
+    };
+    Ok((observed, served.entered))
 }
