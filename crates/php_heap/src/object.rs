@@ -852,6 +852,11 @@ impl Heap {
         for i in 0..o.slots() {
             let z = o.slot(i);
             o.write_slot(i, Zval::UNDEF);
+            if let Some(r) = z.as_reference()
+                && r.sources() != 0
+            {
+                hooks.slot_source_gone(o, i, r);
+            }
             Heap::release(hooks, z);
         }
         if o.has_native() {

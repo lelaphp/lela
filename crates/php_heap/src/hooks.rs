@@ -70,6 +70,14 @@ pub trait HeapHooks {
     fn free_reference(&mut self, r: Ref) {
         let _ = r;
     }
+    /// `ZEND_REF_DEL_TYPE_SOURCE` in `zend_object_std_dtor`
+    /// (`Z/Zend/zend_objects.c:62`): a slot of an object being freed
+    /// held a cell the engine typed, which the slot's property types no
+    /// longer once the slot gives the cell up. A heap that types no
+    /// reference has nothing to do.
+    fn slot_source_gone(&mut self, obj: Obj, slot: u32, r: Ref) {
+        let _ = (obj, slot, r);
+    }
     /// Whether the object has a destructor to serve, php's
     /// `obj->handlers->dtor_obj != zend_objects_destroy_object ||
     /// obj->ce->destructor`, which the cycle collector asks of its

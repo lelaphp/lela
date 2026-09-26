@@ -6628,6 +6628,21 @@ impl Request {
         cell.set_sources(0);
     }
 
+    /// `ZEND_REF_DEL_TYPE_SOURCE` over the property whose slot `slot`
+    /// of `object` is (`zend_get_property_info_for_slot`): the cell the
+    /// slot held is typed by that property no longer, because the slot
+    /// is unset, reset or freed. A slot of an untyped property typed
+    /// nothing.
+    pub(crate) fn slot_source_gone(&mut self, object: PhpObject, slot: u32, cell: Ref) {
+        let placed = self.placed_properties(object.class());
+        let Some((declaring, p)) = usize::try_from(slot).ok().and_then(|at| placed.get(at)) else {
+            return;
+        };
+        if p.ty.is_some() {
+            self.ref_del_type_source(cell, *declaring, &p.name.0);
+        }
+    }
+
     /// `ZEND_REF_FOREACH_TYPE_SOURCES` as a slice: the properties whose
     /// slots hold this cell, empty for a cell no typed property's slot
     /// holds, which is `ZEND_REF_HAS_TYPE_SOURCES` reading false.
@@ -9413,6 +9428,9 @@ impl Request {
                         ));
                     }
                     if !empty {
+                        if let Some(cell) = o.slot(placed.slot).as_reference() {
+                            self.slot_source_gone(object, placed.slot, cell);
+                        }
                         Heap::object_set_slot(&mut Hooks(self), o, placed.slot, Zval::UNDEF);
                     } else if waits {
                         // `IS_PROP_LAZY`: the object initialised and the
@@ -16002,6 +16020,12 @@ impl HeapHooks for Hooks<'_> {
     fn free_reference(&mut self, r: Ref) {
         let word = r.sources();
         self.0.ref_sources.retain(|(at, _)| *at != word);
+    }
+
+    /// `ZEND_REF_DEL_TYPE_SOURCE` for a slot of an object being freed
+    /// ([`Request::slot_source_gone`]).
+    fn slot_source_gone(&mut self, obj: Obj, slot: u32, r: Ref) {
+        self.0.slot_source_gone(PhpObject::of(obj), slot, r);
     }
 
     /// `zend_weakrefs_notify`: every weak holder of the object cleared

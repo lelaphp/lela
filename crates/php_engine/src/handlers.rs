@@ -6882,7 +6882,22 @@ fn fetch_obj_place(
     let found = property_place(req, frame, code, op, read, &mut name);
     name.release(req, frame, code, op);
     let at = match found? {
-        PropertyFound::At(at, _, _) => at,
+        PropertyFound::At(at, object, name) => {
+            // `BP_VAR_RW` carries no flags; `BP_VAR_W` masks them off
+            // the cache slot.
+            let flags = if read == PropertyRead::Silent {
+                op.extended_value
+            } else {
+                0
+            };
+            if let Some(typed) = req.declared_typed_property(object.class(), &name)
+                && let Err(thrown) = fetch_flags(req, at, typed, &name, flags)
+            {
+                let thrown = freeing_container(req, frame, code, op, thrown);
+                return threw(req, frame, &thrown);
+            }
+            at
+        }
         PropertyFound::Served(object, name) => {
             return fetch_obj_read(req, frame, code, op, object, &name);
         }
@@ -6900,6 +6915,107 @@ fn fetch_obj_place(
     exec::free_container_var(req, frame, code, op);
     Ok(advance(req, frame))
 }
+
+/// `zend_handle_fetch_obj_flags` (`Z/Zend/zend_execute.c:3470`), the
+/// bits a `FETCH_OBJ_W` or `FETCH_STATIC_PROP_W` over a typed property
+/// carries under `ZEND_FETCH_OBJ_FLAGS`. `ZEND_FETCH_DIM_WRITE`, a
+/// dimension written over the place, refuses a place that would become
+/// an array the type does not take. `ZEND_FETCH_REF`, a place bound by
+/// `&`, turns the slot into a cell typed by the property, so every write
+/// through a name bound to it is held to the type
+/// ([`Request::assign_to_reference`]); a slot nothing has written is
+/// `null` in the cell where the type takes `null`, and php's `Error`
+/// where it does not.
+///
+/// ```php
+/// class C { public int $i = 1; public ?int $n; public int $u; public ?string $s = null; }
+/// $o = new C;
+/// $r = &$o->i;
+/// try { $r = "x"; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// $r = "5";
+/// $q = &$o->n;
+/// try { $u = &$o->u; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { $o->s[] = 1; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($o);
+/// ```
+/// ```expect
+/// Cannot assign string to reference held by property C::$i of type int
+/// Cannot access uninitialized non-nullable property C::$u by reference
+/// Cannot auto-initialize an array inside property C::$s of type ?string
+/// object(C)#1 (3) {
+///   ["i"]=>
+///   &int(5)
+///   ["n"]=>
+///   &NULL
+///   ["u"]=>
+///   uninitialized(int)
+///   ["s"]=>
+///   NULL
+/// }
+/// ```
+fn fetch_flags(
+    req: &mut Request,
+    at: php_heap::ZvalRef,
+    typed: crate::api::request::TypedProperty,
+    name: &[u8],
+    flags: u32,
+) -> Result<(), Thrown> {
+    let held = exec::value_of(at.read());
+    let shown = String::from_utf8_lossy(name).into_owned();
+    match flags & (FETCH_REF | FETCH_DIM_WRITE) {
+        FETCH_DIM_WRITE => {
+            let promotes = matches!(
+                held.deref().as_ref(),
+                ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false)
+            );
+            if promotes && typed.ty.mask() & MAY_BE_ARRAY == 0 {
+                let class = req.class_name(typed.declaring);
+                let ty = crate::api::coerce::declared_type_name(&typed.ty);
+                return Err(crate::api::raising::throw(
+                    req,
+                    "TypeError",
+                    &format!(
+                        "Cannot auto-initialize an array inside property {class}::${shown} of type {ty}"
+                    ),
+                ));
+            }
+        }
+        FETCH_REF if held.as_php_ref().is_none() => {
+            if held.tag() == TypeTag::Undef && typed.ty.mask() & MAY_BE_NULL == 0 {
+                let class = req.class_name(typed.declaring);
+                return Err(crate::api::raising::throw(
+                    req,
+                    "Error",
+                    &format!(
+                        "Cannot access uninitialized non-nullable property {class}::${shown} by reference"
+                    ),
+                ));
+            }
+            let cell = req.reference(held.undef_as_null())?;
+            at.write(cell.as_value().to_zval());
+            req.ref_add_type_source(
+                cell.heap(),
+                crate::api::request::RefSource {
+                    declaring: typed.declaring,
+                    name: name.to_vec(),
+                    ty: typed.ty,
+                },
+            );
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// `ZEND_FETCH_REF` and `ZEND_FETCH_DIM_WRITE`
+/// (`Z/Zend/zend_compile.h:1089-1096`), the bits under
+/// `ZEND_FETCH_OBJ_FLAGS` a property fetch for a write carries in its
+/// `extended_value` beside the cache slots.
+const FETCH_REF: u32 = 1;
+const FETCH_DIM_WRITE: u32 = 2;
+/// `MAY_BE_NULL` and `MAY_BE_ARRAY` (`Z/Zend/zend_type_info.h`).
+const MAY_BE_NULL: u32 = 1 << 1;
+const MAY_BE_ARRAY: u32 = 1 << 7;
 
 /// What [`property_place`] found: the property's place, the object and
 /// the name; the object and the name where the class serves the name

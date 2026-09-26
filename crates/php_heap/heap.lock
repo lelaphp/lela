@@ -136,6 +136,7 @@ HeapHooks::gc_weakmap_entries
 HeapHooks::has_destructor
 HeapHooks::heap
 HeapHooks::out_of_memory
+HeapHooks::slot_source_gone
 HeapHooks::weakrefs_notify
 Host
 Host::Transfer
