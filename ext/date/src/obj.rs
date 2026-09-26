@@ -1149,27 +1149,43 @@ impl ObjectHandlers for PeriodHandlers {
     }
 }
 
+impl PeriodObj {
+    /// The period's state, copied, without the rows its last property
+    /// read made and with no walk standing on `current`.
+    pub(super) fn copied(&self) -> PeriodObj {
+        PeriodObj {
+            start: self.start.clone(),
+            start_ce: self.start_ce,
+            current: self.current.clone(),
+            end: self.end.clone(),
+            interval: self.interval,
+            recurrences: self.recurrences,
+            include_start_date: self.include_start_date,
+            include_end_date: self.include_end_date,
+            initialized: self.initialized,
+            cursor: None,
+            rows: Vec::new(),
+        }
+    }
+
+    /// `state` put in place of the period's, the rows its readers hold
+    /// kept for `free_obj` to give back.
+    pub(super) fn replace(&mut self, state: PeriodObj) {
+        let rows = std::mem::take(&mut self.rows);
+        *self = state;
+        self.rows = rows;
+    }
+}
+
 /// `date_object_clone_period`.
 fn clone_period(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
     // `date_object_new_*` then `zend_objects_clone_members`: the copy's
     // payload is fresh while `__clone` runs, as php's is, and is filled
     // after it.
     let copy = object.clone_with(req, PeriodObj::default())?;
-    let state = object.native::<PeriodObj>(req).map(|p| PeriodObj {
-        start: p.start.clone(),
-        start_ce: p.start_ce,
-        current: p.current.clone(),
-        end: p.end.clone(),
-        interval: p.interval,
-        recurrences: p.recurrences,
-        include_start_date: p.include_start_date,
-        include_end_date: p.include_end_date,
-        initialized: p.initialized,
-        cursor: None,
-        rows: Vec::new(),
-    });
+    let state = object.native::<PeriodObj>(req).map(PeriodObj::copied);
     if let (Some(state), Some(payload)) = (state, copy.native_mut::<PeriodObj>(req)) {
-        *payload = state;
+        payload.replace(state);
     }
     Ok(copy)
 }

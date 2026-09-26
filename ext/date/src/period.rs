@@ -113,8 +113,16 @@ fn finish(
 /// The period's payload set.
 fn store(req: &mut Request, object: PhpObject, period: PeriodObj) {
     if let Some(payload) = object.native_mut::<PeriodObj>(req) {
-        *payload = period;
+        payload.replace(period);
     }
+}
+
+/// The period's state as it stands, to be changed and stored back.
+fn copied(req: &Request, object: PhpObject) -> PeriodObj {
+    object
+        .native::<PeriodObj>(req)
+        .map(PeriodObj::copied)
+        .unwrap_or_default()
 }
 
 /// `DatePeriod::createFromISO8601String`, of the called class, over
@@ -642,13 +650,15 @@ pub(crate) fn serialize(req: &mut Request) -> Result<Value, Thrown> {
 }
 
 /// `php_date_period_initialize_from_hash`: every field required, of the
-/// type php holds it to.
-fn from_hash(req: &mut Request, hash: PhpArray) -> Result<Option<PeriodObj>, Thrown> {
+/// type php holds it to, written into `period` in php's order as each is
+/// read, a `null` date leaving the field as it was, and nothing rolled
+/// back where a later one is refused; `false` for the refusal.
+fn from_hash(req: &mut Request, hash: PhpArray, period: &mut PeriodObj) -> Result<bool, Thrown> {
     let find = |req: &mut Request, name: &[u8]| -> Result<Option<Value>, Thrown> {
         let key = Key::Str(PhpString::new(req, name)?);
         Ok(hash.get(&key).map(|v| v.deref()))
     };
-    let mut period = PeriodObj::default();
+    // A date field: `Ok(None)` for `null`, `Err(())` for a refusal.
     let date_of =
         |req: &mut Request, v: &Value| -> Result<Result<Option<(Time, ClassId)>, ()>, Thrown> {
             if matches!(v.as_ref(), ValueRef::Null) {
@@ -664,7 +674,7 @@ fn from_hash(req: &mut Request, hash: PhpArray) -> Result<Option<PeriodObj>, Thr
             }
         };
     let Some(start) = find(req, b"start")? else {
-        return Ok(None);
+        return Ok(false);
     };
     match date_of(req, &start)? {
         Ok(Some((t, class))) => {
@@ -672,29 +682,22 @@ fn from_hash(req: &mut Request, hash: PhpArray) -> Result<Option<PeriodObj>, Thr
             period.start_ce = Some(class);
         }
         Ok(None) => {}
-        Err(()) => return Ok(None),
+        Err(()) => return Ok(false),
     }
     for (name, current) in [(&b"end"[..], false), (b"current", true)] {
         let Some(value) = find(req, name)? else {
-            return Ok(None);
+            return Ok(false);
         };
         match date_of(req, &value)? {
-            Ok(Some((t, _))) => {
-                if period.start_ce.is_none() {
-                    return Ok(None);
-                }
-                if current {
-                    period.current = Some(t);
-                } else {
-                    period.end = Some(t);
-                }
-            }
+            Ok(Some(_)) if period.start_ce.is_none() => return Ok(false),
+            Ok(Some((t, _))) if current => period.current = Some(t),
+            Ok(Some((t, _))) => period.end = Some(t),
             Ok(None) => {}
-            Err(()) => return Ok(None),
+            Err(()) => return Ok(false),
         }
     }
     let Some(interval) = find(req, b"interval")? else {
-        return Ok(None);
+        return Ok(false);
     };
     let interval_class = class_id(req, "DateInterval")?;
     let Some(diff) = interval
@@ -703,26 +706,26 @@ fn from_hash(req: &mut Request, hash: PhpArray) -> Result<Option<PeriodObj>, Thr
         .and_then(|o| o.native::<IntervalObj>(req))
         .and_then(|i| i.diff)
     else {
-        return Ok(None);
+        return Ok(false);
     };
     period.interval = Some(diff);
     let Some(recurrences) = find(req, b"recurrences")?
         .and_then(|v| v.as_int())
         .filter(|n| (0..=i64::from(i32::MAX)).contains(n))
     else {
-        return Ok(None);
+        return Ok(false);
     };
     period.recurrences = recurrences;
     let Some(include_start) = find(req, b"include_start_date")?.and_then(|v| v.as_bool()) else {
-        return Ok(None);
-    };
-    let Some(include_end) = find(req, b"include_end_date")?.and_then(|v| v.as_bool()) else {
-        return Ok(None);
+        return Ok(false);
     };
     period.include_start_date = include_start;
+    let Some(include_end) = find(req, b"include_end_date")?.and_then(|v| v.as_bool()) else {
+        return Ok(false);
+    };
     period.include_end_date = include_end;
     period.initialized = true;
-    Ok(Some(period))
+    Ok(true)
 }
 
 /// `DatePeriod::__set_state(array $array): DatePeriod`.
@@ -742,12 +745,13 @@ pub(crate) fn set_state(req: &mut Request) -> Result<Value, Thrown> {
     let hash = array(req, 1)?;
     let class = class_id(req, "DatePeriod")?;
     let object = new_object(req, class)?;
-    match from_hash(req, hash) {
-        Ok(Some(period)) => {
+    let mut period = PeriodObj::default();
+    match from_hash(req, hash, &mut period) {
+        Ok(true) => {
             store(req, object, period);
             Ok(object.as_value())
         }
-        Ok(None) => {
+        Ok(false) => {
             req.release(object.as_value());
             Err(throw(
                 req,
@@ -781,14 +785,16 @@ pub(crate) fn unserialize(req: &mut Request) -> Result<Value, Thrown> {
     count_between(req, 1, 1)?;
     let hash = array(req, 1)?;
     let object = this(req)?;
-    let Some(period) = from_hash(req, hash)? else {
+    let mut period = copied(req, object);
+    let taken = from_hash(req, hash, &mut period);
+    store(req, object, period);
+    if !taken? {
         return Err(throw(
             req,
             "Error",
             "Invalid serialization data for DatePeriod object",
         ));
-    };
-    store(req, object, period);
+    }
     restore_properties(req, object, hash, &PERIOD_FIELDS)?;
     Ok(Value::null())
 }
@@ -811,15 +817,16 @@ pub(crate) fn wakeup(req: &mut Request) -> Result<Value, Thrown> {
     let object = this(req)?;
     let own = std_rows(req, object)?;
     let hash = rows_array(req, &own, Vec::new(), false)?;
-    let found = from_hash(req, hash);
+    let mut period = copied(req, object);
+    let taken = from_hash(req, hash, &mut period);
     req.release(Value::array(hash));
-    let Some(period) = found? else {
+    store(req, object, period);
+    if !taken? {
         return Err(throw(
             req,
             "Error",
             "Invalid serialization data for DatePeriod object",
         ));
-    };
-    store(req, object, period);
+    }
     Ok(Value::null())
 }
