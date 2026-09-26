@@ -49,31 +49,45 @@ pub(super) enum Arg {
     Made(Option<Box<[u8]>>, Zval),
 }
 
-/// A call site's argument list: the arguments as written, and the
-/// list's own line, php's `zend_ast_get_lineno` over the
-/// `ZEND_AST_ARG_LIST`, which a variable sent to a callee nothing is
-/// known of is sent at.
-pub(super) struct Args {
-    pub(super) list: Vec<Arg>,
-    pub(super) line: u32,
+/// What a call site's argument list is, php's `args_ast->kind`, read
+/// once where the call is: the arguments as written with the list's own
+/// line, php's `zend_ast_get_lineno` over the `ZEND_AST_ARG_LIST`, which
+/// a variable sent to a callee nothing is known of is sent at; or the
+/// `...` of a first-class callable, `ZEND_AST_CALLABLE_CONVERT`, which
+/// sends nothing and makes a closure of the call its `INIT_*` began
+/// (`zend_compile_call_common`).
+pub(super) enum Args {
+    Written { list: Vec<Arg>, line: u32 },
+    CallableConvert,
 }
 
 impl Args {
     /// A list the compiler makes itself, of plain expressions at `line`.
     pub(super) fn of(list: &[tree::Expr], line: u32) -> Args {
-        Args {
+        Args::Written {
             list: list.iter().copied().map(Arg::Positional).collect(),
             line,
+        }
+    }
+
+    /// The arguments as written; none for a first-class callable's.
+    pub(super) fn list(&self) -> &[Arg] {
+        match self {
+            Args::Written { list, .. } => list,
+            Args::CallableConvert => &[],
         }
     }
 
     /// `!zend_args_contain_unpack_or_named`: the arguments as plain
     /// expressions where none is named or unpacked, which is all a
     /// special function, a frameless call and a constant fold read;
-    /// none where one is.
+    /// none where one is, and none for a first-class callable, which
+    /// php keeps out of all three by `is_callable_convert`.
     pub(super) fn positional(&self) -> Option<Vec<tree::Expr>> {
-        self.list
-            .iter()
+        let Args::Written { list, .. } = self else {
+            return None;
+        };
+        list.iter()
             .map(|arg| match arg {
                 Arg::Positional(value) => Some(*value),
                 Arg::Named(..) | Arg::Unpack(_) | Arg::Made(..) => None,
@@ -82,7 +96,7 @@ impl Args {
     }
 
     pub(super) fn len(&self) -> usize {
-        self.list.len()
+        self.list().len()
     }
 }
 
@@ -220,7 +234,7 @@ impl Plan {
         // for a callee nothing is known of.
         let mut callee = callee;
         let mut uses_unpack = false;
-        for argument in &arguments.list {
+        for argument in arguments.list() {
             let (name, value) = match argument {
                 Arg::Unpack(value) => {
                     let placed = if uses_named {
@@ -292,10 +306,11 @@ impl Plan {
 }
 
 impl Emit<'_> {
-    /// The arguments of a call as written; the `...` of a first-class
-    /// callable is refused as not read yet. An unpacked argument after a
-    /// named one is php's compile error, and so is a positional one after
-    /// an unpacked one, each raised where the compiler reaches it:
+    /// The arguments of a call as written, or the `...` of a first-class
+    /// callable, which the parser lets stand only as the whole list. An
+    /// unpacked argument after a named one is php's compile error, and
+    /// so is a positional one after an unpacked one, each raised where
+    /// the compiler reaches it:
     ///
     /// ```php
     /// function f(...$a) {}
@@ -327,12 +342,10 @@ impl Emit<'_> {
                     };
                     list.push(Arg::Unpack(value));
                 }
-                tree::Arg::VariadicPlaceholder(_) => {
-                    return Err(walk::unread(line, "a first-class callable"));
-                }
+                tree::Arg::VariadicPlaceholder(_) => return Ok(Args::CallableConvert),
             }
         }
-        Ok(Args {
+        Ok(Args::Written {
             list,
             line: node.line(),
         })
@@ -383,6 +396,13 @@ impl Emit<'_> {
         arguments: &Args,
         callee: Option<&Callee>,
     ) -> Result<(), CompileError> {
+        // A first-class callable sends nothing.
+        let Args::Written {
+            line: list_line, ..
+        } = *arguments
+        else {
+            return Ok(());
+        };
         for placed in &plan.placed {
             match placed {
                 Placed::Send {
@@ -390,7 +410,7 @@ impl Emit<'_> {
                     at,
                     number,
                 } => {
-                    self.send_arg(*value, at, callee, *number, arguments.line)?;
+                    self.send_arg(*value, at, callee, *number, list_line)?;
                 }
                 Placed::Send {
                     value: Sent::Made(value),

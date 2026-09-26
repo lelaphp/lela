@@ -98,11 +98,8 @@ impl Emit<'_> {
             opcode: Opcode::AssertCheck,
             ..Opline::default()
         });
-        let mut arguments = Args {
-            list: arguments.list.clone(),
-            line: arguments.line,
-        };
-        if let [only] = arguments.list.as_slice() {
+        let mut list = arguments.list().to_vec();
+        if let [only] = list.as_slice() {
             let text = self.assertion_text(only)?;
             let description = self.string(&text)?;
             // "If the original argument was named, add the new argument
@@ -110,8 +107,12 @@ impl Emit<'_> {
             // allowed."
             let named =
                 matches!(only, Arg::Named(..)).then(|| Box::<[u8]>::from(&b"description"[..]));
-            arguments.list.push(Arg::Made(named, description));
+            list.push(Arg::Made(named, description));
         }
+        let arguments = match arguments {
+            Args::Written { line, .. } => Args::Written { list, line: *line },
+            Args::CallableConvert => Args::CallableConvert,
+        };
         let served = if let Some(index) = native {
             let parameters = self
                 .functions

@@ -195,7 +195,7 @@ pub fn to_object(req: &mut Request, value: &Value) -> Result<PhpObject, Thrown> 
 /// `zend_is_callable` with the request's scope.
 #[must_use]
 pub fn is_callable(req: &Request, value: &Value) -> bool {
-    req.callable_of(value).is_some()
+    req.is_callable_value(value)
 }
 
 /// `zend_is_callable_ex` with its `*error` (`Z/Zend/zend_API.c:4250`):
@@ -207,6 +207,23 @@ pub fn is_callable(req: &Request, value: &Value) -> bool {
 /// deprecations for `self`, `parent` and `static` as the class half.
 pub fn callable_checked(req: &mut Request, value: &Value) -> Result<Callable, String> {
     req.callable_checked(value)
+}
+
+/// `zend_get_callable_name` (`Z/Zend/zend_API.c:4075`): the name php
+/// gives a value as a callable, whether or not it is one. A string is
+/// itself, a pair `Class::method`, a closure its function's name, one
+/// `zend_create_fake_closure` made of a method with its scope before
+/// it, any other object `Class::__invoke`, and any other value its
+/// string, as `zval_get_string` makes it.
+pub fn callable_name(req: &mut Request, value: &Value) -> Result<PhpString, Thrown> {
+    let held = value.deref();
+    match held.as_ref() {
+        ValueRef::Str(_) | ValueRef::Array(_) | ValueRef::Object(_) => {
+            let named = req.callable_name(&held);
+            PhpString::new(req, named.as_bytes())
+        }
+        _ => crate::ops::to_string(req, &held),
+    }
 }
 
 /// The callable a value names, or php's `TypeError` for one that is not.
@@ -818,7 +835,7 @@ pub(crate) fn holds(req: &Request, value: &Value, ty: &Type, scopes: Scopes) -> 
             .all(|member| holds(req, &value, member, scopes)),
         Type::Named(name) => is(req.class_named(&name.0)),
         Type::Iterable => value.as_array().is_some() || is(req.class_named(b"Traversable")),
-        Type::Callable => req.callable_of(&value).is_some(),
+        Type::Callable => req.is_callable_value(&value),
         Type::SelfClass => is(scopes.own),
         Type::CalledClass => is(scopes.called),
         Type::ParentClass => is(scopes

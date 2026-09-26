@@ -67,6 +67,19 @@ impl ObjectHandlers for ClosureHandlers {
     /// ```expect
     /// Instantiation of class Closure is not allowed
     /// ```
+    ///
+    /// The refusal is raised before any frame is pushed, so the trace
+    /// names no constructor:
+    ///
+    /// ```php
+    /// new Closure();
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught Error: Instantiation of class Closure is not allowed in %s:2
+    /// Stack trace:
+    /// #0 {main}
+    ///   thrown in %s on line 2
+    /// ```
     fn get_constructor(&self, req: &mut Request, _: PhpObject) -> Result<Option<Function>, Thrown> {
         Err(throw(
             req,
@@ -121,12 +134,27 @@ impl ObjectHandlers for ClosureHandlers {
     }
 
     /// `zend_closure_get_method` (`Z/Zend/zend_closures.c:528`):
-    /// `__invoke` is the trampoline `zend_get_closure_invoke_method`
-    /// makes on the lookup, a function `Closure`'s table has no row
-    /// for, and every other name falls to `zend_std_get_method`. So
-    /// `$f->__invoke()` reaches the same entry `$f()` reaches, and
-    /// nothing that reads the table, a rendering or a reflector, sees
-    /// a seventh method on the class.
+    /// `__invoke` is the function `zend_get_closure_invoke_method`
+    /// makes on the lookup ([`Request::invoke_trampoline`]), which
+    /// `Closure`'s table has no row for and which carries the closure's
+    /// own signature, and every other name falls to
+    /// `zend_std_get_method`. So `$f->__invoke()` reaches the same entry
+    /// `$f()` reaches, sending by reference where the closure takes a
+    /// reference, and nothing that reads the table, a rendering or a
+    /// reflector, sees a seventh method on the class.
+    ///
+    /// ```php
+    /// $inc = function (&$n) { $n++; };
+    /// $n = 1;
+    /// $inc->__INVOKE($n);
+    /// var_dump($n);
+    /// call_user_func([$inc, '__invoke'], $n);
+    /// ```
+    /// ```expect
+    /// int(2)
+    ///
+    /// Warning: Closure::__invoke(): Argument #1 ($n) must be passed by reference, value given in %s on line 6
+    /// ```
     ///
     /// ```php
     /// $f = function ($x) { return $x + 1; };
@@ -154,7 +182,7 @@ impl ObjectHandlers for ClosureHandlers {
     /// ```
     fn get_method(&self, req: &mut Request, object: PhpObject, lowered: &[u8]) -> Option<Function> {
         if lowered.eq_ignore_ascii_case(INVOKE) {
-            return req.trampoline_named(object.class(), INVOKE);
+            return req.invoke_trampoline(object);
         }
         req.method_named(object.class(), lowered)
     }
@@ -333,13 +361,14 @@ impl ObjectHandlers for ClosureHandlers {
         Ok(Some(out))
     }
 
-    /// `zend_closure_compare` (`Z/Zend/zend_closures.c:120`): two fake
-    /// closures are equal when they carry one function, one receiver
-    /// and one scope; any other pair is uncomparable, a closure the
-    /// program declared included, so two of them are equal only where
-    /// `zend_compare` found one object on both sides before the
-    /// handler was reached. A side that is no closure is
-    /// `ZEND_COMPARE_OBJECTS_FALLBACK`, `zend_std_compare_objects`.
+    /// `zend_closure_compare` (`Z/Zend/zend_closures.c:446`): two fake
+    /// closures are equal when they carry one receiver, one called
+    /// scope, and functions of one kind, one scope and one name; any
+    /// other pair is uncomparable, a closure the program declared
+    /// included, so two of them are equal only where `zend_compare`
+    /// found one object on both sides before the handler was reached. A
+    /// side that is no closure is `ZEND_COMPARE_OBJECTS_FALLBACK`,
+    /// `zend_std_compare_objects`.
     ///
     /// ```php
     /// $f = function () { return 1; };
@@ -359,6 +388,22 @@ impl ObjectHandlers for ClosureHandlers {
     /// bool(true)
     /// bool(false)
     /// ```
+    ///
+    /// A method of the class called on two classes differs by its called
+    /// scope, and two closures over one name `__call` answers are equal:
+    ///
+    /// ```php
+    /// class P { static function s() {} function __call($m, $a) {} }
+    /// class C extends P {}
+    /// $p = new P;
+    /// var_dump(P::s(...) == C::s(...), P::s(...) == P::s(...), $p->nope(...) == $p->nope(...), $p->nope(...) == $p->other(...));
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// ```
     fn compare(
         &self,
         req: &mut Request,
@@ -374,7 +419,12 @@ impl ObjectHandlers for ClosureHandlers {
         if !(x.fake && y.fake) {
             return Ok(None);
         }
-        let same = x.function == y.function && x.this == y.this && x.scope == y.scope;
+        let kind = |function| req.user_function(function).is_some();
+        let same = x.this == y.this
+            && x.called_scope == y.called_scope
+            && kind(x.function) == kind(y.function)
+            && req.method_class(x.function) == req.method_class(y.function)
+            && req.function_name(x.function) == req.function_name(y.function);
         Ok(same.then_some(Ordering::Equal))
     }
 }
@@ -938,6 +988,30 @@ fn variadic(name: &[u8]) -> Parameter {
 /// bool(true)
 /// ```
 ///
+/// A pair on an object shows the method's name with its class, the
+/// receiver and the parameters:
+///
+/// ```php
+/// class C { function m($x, $y = 1) { return $x; } }
+/// var_dump(Closure::fromCallable([new C, 'm']));
+/// ```
+/// ```expect
+/// object(Closure)#2 (3) {
+///   ["function"]=>
+///   string(4) "C::m"
+///   ["this"]=>
+///   object(C)#1 (0) {
+///   }
+///   ["parameter"]=>
+///   array(2) {
+///     ["$x"]=>
+///     string(10) "<required>"
+///     ["$y"]=>
+///     string(10) "<optional>"
+///   }
+/// }
+/// ```
+///
 /// ```php
 /// class C { private function p() {} }
 /// try { Closure::fromCallable([new C, 'p']); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
@@ -981,36 +1055,80 @@ fn closure_from_callable(req: &mut Request) -> Result<Value, Thrown> {
     fake_closure(req, &callable).map(|made| made.as_value())
 }
 
-/// `zend_create_fake_closure` over what a callable resolved to
-/// (`zend_closure_from_frame`'s arms): a closure hands back itself, one
-/// more owner, and so does a closure's own `__invoke`; a function is
-/// closed over with no scope, and a method over its class with the
-/// receiver it was taken with, the called scope the receiver's class or
-/// the class the callable named.
+/// `zend_create_closure_from_callable` over what a callable resolved to:
+/// [`closure_from_frame`] over the call frame `zend_is_callable_ex`
+/// filled, a `Closure` as the frame's closure, a function with no scope,
+/// and a method with the receiver it was taken with and the class the
+/// callable named as its called scope.
 pub(crate) fn fake_closure(req: &mut Request, callable: &Callable) -> Result<PhpObject, Thrown> {
-    let (function, this, scope, called_scope) = match callable.target() {
-        Target::Closure(object) => {
-            req.addref(&object.as_value());
-            return Ok(object);
-        }
-        Target::Function(function) => (function, None, None, None),
+    let frame = match callable.target() {
+        Target::Closure(object) => CallFrame::Closure(object),
+        Target::Function(function) => CallFrame::Callee {
+            function,
+            this: None,
+            called_scope: None,
+        },
         Target::Method {
             function,
             this,
-            scope: named,
-        } => {
-            if let Some(this) = this
-                && this.closure(req).is_some()
-                && req
-                    .method_decl(function)
-                    .is_some_and(|decl| decl.function.name.0.eq_ignore_ascii_case(INVOKE))
-            {
-                req.addref(&this.as_value());
-                return Ok(this);
-            }
-            (function, this, req.method_class(function), Some(named))
-        }
+            scope,
+        } => CallFrame::Callee {
+            function,
+            this,
+            called_scope: Some(scope),
+        },
     };
+    closure_from_frame(req, frame)
+}
+
+/// The call frame `zend_closure_from_frame` reads: one made through a
+/// `Closure`, `ZEND_CALL_CLOSURE`, or any other callee with `EX(This)`,
+/// the receiver where `ZEND_CALL_HAS_THIS` is set and the called scope,
+/// which is the receiver's class where there is one. A view; no owner
+/// is taken of any of them.
+#[derive(Clone, Copy)]
+pub(crate) enum CallFrame {
+    Closure(PhpObject),
+    Callee {
+        function: Function,
+        this: Option<PhpObject>,
+        called_scope: Option<ClassId>,
+    },
+}
+
+/// `zend_closure_from_frame` (`Z/Zend/zend_closures.c:878`), the one
+/// closure made of a call frame, by `CALLABLE_CONVERT` and by
+/// `Closure::fromCallable` alike: a call made through a `Closure` is
+/// that closure, one more owner, and so is `__invoke` on one; every
+/// other callee is `zend_create_fake_closure` over it, its scope the
+/// class that declares it, bound to the frame's receiver, and its
+/// called scope the receiver's class where it has one and the frame's
+/// called scope where it has none.
+pub(crate) fn closure_from_frame(req: &mut Request, frame: CallFrame) -> Result<PhpObject, Thrown> {
+    let (function, this, called_scope) = match frame {
+        CallFrame::Closure(closure) => {
+            req.addref(&closure.as_value());
+            return Ok(closure);
+        }
+        CallFrame::Callee {
+            function,
+            this,
+            called_scope,
+        } => (function, this, called_scope),
+    };
+    if let Some(this) = this
+        && this.closure(req).is_some()
+        && req
+            .method_decl(function)
+            .is_some_and(|decl| decl.function.name.0.eq_ignore_ascii_case(INVOKE))
+    {
+        req.addref(&this.as_value());
+        return Ok(this);
+    }
+    // `ZEND_ACC_CALL_VIA_TRAMPOLINE`: `zend_closure_call_magic` in the
+    // trampoline's place, of its name and its scope.
+    let function = crate::trampoline::closure_call(req, function).unwrap_or(function);
+    let scope = req.method_class(function);
     let fake = ClosureInfo {
         function,
         this,
@@ -1028,7 +1146,7 @@ pub(crate) fn fake_closure(req: &mut Request, callable: &Callable) -> Result<Php
 /// as `Z_PARAM_VARIADIC_WITH_NAMED` hands them, on the payload's
 /// receiver where the closure is bound and as a function where it is
 /// not (`zend_call_known_fcc`); what it returns is the call's.
-fn closure_invoke(req: &mut Request) -> Result<Value, Thrown> {
+pub(crate) fn closure_invoke(req: &mut Request) -> Result<Value, Thrown> {
     let Some(this) = req.this() else {
         return Err(throw(
             req,
@@ -1884,6 +2002,50 @@ fn closure_bind_to(req: &mut Request) -> Result<Value, Thrown> {
 /// [`valid_closure_binding`]; then `zend_create_closure` over the
 /// closure's function with the new receiver and scope, a receiver with
 /// no scope taking `Closure` as its dummy scope as php's does.
+///
+/// The four spellings of the scope, through `bind` on a receiver and
+/// `bindTo` on none: `"static"`, the closure's own, which for one
+/// written at the top level is none, so a receiver takes `Closure`;
+/// `null`, none; an object, its class; a name, the class it names. Then
+/// the two refusals, a receiver for a `static` closure and the scope of
+/// an internal class, each spelled through both.
+///
+/// ```php
+/// class A {}
+/// class B extends A {}
+/// $get = function () {
+///     $r = new ReflectionFunction(Closure::getCurrent());
+///     return ($r->getClosureThis() ? 'A' : 'none') . ' in ' . $r->getClosureScopeClass()?->name;
+/// };
+/// foreach (['static', null, new B, 'A'] as $scope) {
+///     var_dump(Closure::bind($get, new A, $scope)(), $get->bindTo(null, $scope)());
+/// }
+/// $static = static function () {};
+/// var_dump(Closure::bind($static, new A), $static->bindTo(new A));
+/// var_dump(Closure::bind($get, null, 'stdClass'), $get->bindTo(new A, new ArrayObject));
+/// ```
+/// ```expect
+/// string(12) "A in Closure"
+/// string(8) "none in "
+/// string(12) "A in Closure"
+/// string(8) "none in "
+/// string(6) "A in B"
+/// string(9) "none in B"
+/// string(6) "A in A"
+/// string(9) "none in A"
+///
+/// Warning: Cannot bind an instance to a static closure, this will be an error in PHP 9 in %s on line 12
+///
+/// Warning: Cannot bind an instance to a static closure, this will be an error in PHP 9 in %s on line 12
+/// NULL
+/// NULL
+///
+/// Warning: Cannot bind closure to scope of internal class stdClass, this will be an error in PHP 9 in %s on line 13
+///
+/// Warning: Cannot bind closure to scope of internal class ArrayObject, this will be an error in PHP 9 in %s on line 13
+/// NULL
+/// NULL
+/// ```
 fn do_closure_bind(
     req: &mut Request,
     closure: PhpObject,
@@ -2047,6 +2209,17 @@ fn valid_closure_binding(
 /// int(21)
 ///
 /// Warning: Cannot bind closure to scope of internal class stdClass, this will be an error in PHP 9 in %s on line 6
+/// NULL
+/// ```
+///
+/// A `static` closure takes no receiver:
+///
+/// ```php
+/// class A {}
+/// var_dump((static function () { return 1; })->call(new A));
+/// ```
+/// ```expect
+/// Warning: Cannot bind an instance to a static closure, this will be an error in PHP 9 in %s on line 3
 /// NULL
 /// ```
 fn closure_call(req: &mut Request) -> Result<Value, Thrown> {

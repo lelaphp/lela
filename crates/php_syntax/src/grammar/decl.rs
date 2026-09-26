@@ -920,7 +920,16 @@ pub(crate) fn arrow_fn_expr(p: &mut Parser<'_>, m: Option<Marker>) -> CompletedM
 // ---------------------------------------------------------------------------
 
 /// A `( … )` argument list: named arguments, spreads, the first-class
-/// callable `(...)` placeholder, plain expressions.
+/// callable `(...)` placeholder, plain expressions. The placeholder is
+/// php's `'(' T_ELLIPSIS ')'`, the whole list, so after an argument the
+/// `...` is a spread whose expression is missing:
+///
+/// ```php
+/// max(1, ...);
+/// ```
+/// ```expect exit=255
+/// Parse error: syntax error, unexpected token ")" in %s on line 2
+/// ```
 pub(crate) fn arg_list(p: &mut Parser<'_>) {
     let m = p.start();
     if !p.eat(K::L_PAREN) {
@@ -944,8 +953,10 @@ pub(crate) fn arg_list(p: &mut Parser<'_>) {
     }
     while !p.at_eof() && !p.peek_at(K::R_PAREN) && !p.peek_at(K::CLOSE_TAG) {
         if p.peek_at(K::DOT_DOT_DOT) {
-            if p.nth(1) == K::R_PAREN {
-                // The first-class callable `f(...)` (8.1).
+            if p.nth(1) == K::R_PAREN && !after_comma {
+                // The first-class callable `f(...)` (8.1), which is the
+                // whole list or nothing: `f($a, ...)` is php's `T_ELLIPSIS
+                // expr` missing its expression, `unexpected token ")"`.
                 let a = p.start();
                 p.bump(K::DOT_DOT_DOT);
                 a.complete(p, K::VARIADIC_PLACEHOLDER);

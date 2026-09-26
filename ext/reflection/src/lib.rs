@@ -4938,7 +4938,7 @@ fn function_string(req: &mut Request, function: Function, indent: &str) -> Strin
         .and_then(|e| req.extension_name(e))
         .map(str::to_owned);
     let mut out = String::new();
-    function_header(&mut out, &decl, module.as_deref(), None, indent);
+    function_header(&mut out, &decl, module.as_deref(), Header::Function, indent);
     let arg_info = ArgInfo::of(&decl);
     function_body(req, &mut out, &decl, false, arg_info, &[], indent);
     out
@@ -4970,6 +4970,29 @@ fn function_string(req: &mut Request, function: Function, indent: &str) -> Strin
 ///   @@ %s 3 - 3
 /// }
 /// ```
+///
+/// A closure made of a named function is a closure too:
+///
+/// ```php
+/// function f(int $a) {}
+/// echo new ReflectionFunction(f(...)), new ReflectionFunction(ucfirst(...));
+/// ```
+/// ```expect
+/// Closure [ <user> function f ] {
+///   @@ %s 2 - 2
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <required> int $a ]
+///   }
+/// }
+/// Closure [ <internal:standard> function ucfirst ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <required> string $string ]
+///   }
+///   - Return [ string ]
+/// }
+/// ```
 fn closure_string(req: &mut Request, closure: PhpObject, indent: &str) -> Result<String, Thrown> {
     let Some(decl) = signature::closure_decl(req, closure) else {
         return Ok(String::new());
@@ -4979,9 +5002,15 @@ fn closure_string(req: &mut Request, closure: PhpObject, indent: &str) -> Result
         .into_iter()
         .map(|(name, _)| name.as_bytes().to_vec())
         .collect();
+    let module = closure
+        .closure(req)
+        .and_then(|info| req.function_extension(info.function))
+        .and_then(|e| req.extension_name(e))
+        .map(str::to_owned);
     let mut out = String::new();
-    function_header(&mut out, &decl, None, None, indent);
-    function_body(req, &mut out, &decl, false, ArgInfo::User, &bound, indent);
+    function_header(&mut out, &decl, module.as_deref(), Header::Closure, indent);
+    let arg_info = ArgInfo::of(&decl);
+    function_body(req, &mut out, &decl, false, arg_info, &bound, indent);
     Ok(out)
 }
 
@@ -5056,7 +5085,7 @@ fn method_string(req: &mut Request, method: &LinkedMethod, ce: ClassId, indent: 
         &mut out,
         &method.decl.function,
         module.as_deref(),
-        Some((&method.decl, &words)),
+        Header::Method(&method.decl, &words),
         indent,
     );
     let arg_info = if method.via_handler {
@@ -5076,6 +5105,17 @@ fn method_string(req: &mut Request, method: &LinkedMethod, ce: ClassId, indent: 
     out
 }
 
+/// What `_function_string` renders, which decides its first word: a
+/// function by name, a closure, `ZEND_ACC_CLOSURE` set, whether the
+/// program wrote it or `zend_create_fake_closure` made it of a named
+/// function, or a method of a class with its inheritance words.
+#[derive(Clone, Copy)]
+enum Header<'a> {
+    Function,
+    Closure,
+    Method(&'a MethodDecl, &'a [String]),
+}
+
 /// The first line of `_function_string`: the doc comment where there
 /// is one, `Function [` or `Method [`, `<internal:module` or `<user`
 /// with `, deprecated` where the attribute is and a method's
@@ -5085,9 +5125,13 @@ fn function_header(
     out: &mut String,
     decl: &FunctionDecl,
     module: Option<&str>,
-    method: Option<(&MethodDecl, &[String])>,
+    header: Header<'_>,
     indent: &str,
 ) {
+    let method = match header {
+        Header::Method(method, words) => Some((method, words)),
+        Header::Function | Header::Closure => None,
+    };
     if let Some(doc) = &decl.doc_comment {
         out.push_str(indent);
         out.push_str(&String::from_utf8_lossy(doc));
@@ -5096,16 +5140,11 @@ fn function_header(
     out.push_str(indent);
     // `fptr->common.fn_flags & ZEND_ACC_CLOSURE ? "Closure [ " :
     // (fptr->common.scope ? "Method [ " : "Function [ ")`
-    // (`Z/ext/reflection/php_reflection.c:905`). The flag is the
-    // declaration's name here: `zend_begin_func_decl` names every
-    // closure `{closure:…}` and no other name php compiles can be
-    // written that way.
-    out.push_str(if method.is_some() {
-        "Method [ "
-    } else if decl.name.0.starts_with(b"{closure:") {
-        "Closure [ "
-    } else {
-        "Function [ "
+    // (`Z/ext/reflection/php_reflection.c:905`).
+    out.push_str(match header {
+        Header::Method(..) => "Method [ ",
+        Header::Closure => "Closure [ ",
+        Header::Function => "Function [ ",
     });
     let internal = decl.file.0.is_empty();
     out.push_str(if internal { "<internal" } else { "<user" });
