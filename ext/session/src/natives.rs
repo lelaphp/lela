@@ -1279,7 +1279,7 @@ fn session_status(req: &mut Request) -> Result<Value, Thrown> {
 fn session_register_shutdown(req: &mut Request) -> Result<Value, Thrown> {
     arguments_between(req, 0, 0)?;
     let callable = named(req, b"session_write_close")?;
-    req.register_shutdown_function(callable, Vec::new());
+    req.register_shutdown_function(callable, Vec::new())?;
     Ok(Value::null())
 }
 
@@ -1482,9 +1482,9 @@ fn session_set_save_handler(req: &mut Request) -> Result<Value, Thrown> {
         // replacing an earlier one, or `remove_user_shutdown_function`.
         if register {
             let callable = named(req, b"session_register_shutdown")?;
-            req.set_shutdown_function(b"session_shutdown", Some((callable, Vec::new())));
+            req.set_shutdown_function(b"session_shutdown", Some((callable, Vec::new())))?;
         } else {
-            req.set_shutdown_function(b"session_shutdown", None);
+            req.set_shutdown_function(b"session_shutdown", None)?;
         }
         let state = req.state::<State>();
         if state.status != Status::Active && state.module != Some(Module::User) {
@@ -1522,7 +1522,7 @@ fn session_set_save_handler(req: &mut Request) -> Result<Value, Thrown> {
         return Ok(Value::bool(false));
     }
     req.state::<State>().class_name = None;
-    req.set_shutdown_function(b"session_shutdown", None);
+    req.set_shutdown_function(b"session_shutdown", None)?;
     if req.state::<State>().module != Some(Module::User) {
         user_ini(req)?;
     }

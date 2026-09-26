@@ -1278,11 +1278,8 @@ pub struct Request {
     /// `EG(user_exception_handlers)`, the same shape without a mask.
     exception_handler: Option<Callable>,
     exception_handlers: Vec<Option<Callable>>,
-    /// `BG(user_shutdown_function_names)`: each entry's callback and
-    /// arguments, under the name `register_user_shutdown_function` gave
-    /// it, or none for one `register_shutdown_function()` appended at the
-    /// next index.
-    shutdown_functions: Vec<(Option<Vec<u8>>, Callable, Vec<Value>)>,
+    /// `BG(user_shutdown_function_names)`.
+    shutdown_functions: ShutdownFunctions,
     tick_functions: Vec<(Callable, Vec<Value>)>,
     autoloaders: Vec<Callable>,
     /// `EG(in_autoload)`: the lowered names an autoloader is loading.
@@ -1741,7 +1738,7 @@ impl Request {
             error_handlers: Vec::new(),
             exception_handler: None,
             exception_handlers: Vec::new(),
-            shutdown_functions: Vec::new(),
+            shutdown_functions: ShutdownFunctions::default(),
             tick_functions: Vec::new(),
             autoloaders: Vec::new(),
             in_autoload: Vec::new(),
@@ -14532,73 +14529,207 @@ impl Request {
     }
 
     /// `register_shutdown_function()`, `append_user_shutdown_function`
-    /// (`Z/ext/standard/basic_functions.c:1726`): one entry appended at
-    /// the end of the list, which is the order
-    /// [`crate::natives::call_shutdown_functions`] serves them in. The
+    /// (`Z/ext/standard/basic_functions.c:1680-1735`): one entry appended
+    /// at the table's next index, which is the order
+    /// [`crate::natives::call_shutdown_functions`] serves them in, out of
+    /// the request's heap as php lays it down ([`ShutdownFunctions`]). The
     /// callback and the arguments are the entry's owners from here,
-    /// given up by [`Request::free_shutdown_functions`].
-    pub fn register_shutdown_function(&mut self, callback: Callable, arguments: Vec<Value>) {
-        self.shutdown_functions.push((None, callback, arguments));
+    /// given up by [`Request::free_shutdown_functions`]; where the memory
+    /// limit refuses the entry they are given up at once and the `Err` is
+    /// that fatal.
+    pub fn register_shutdown_function(
+        &mut self,
+        callback: Callable,
+        arguments: Vec<Value>,
+    ) -> Result<(), Thrown> {
+        let (entry, mut table) = self.shutdown_entry(callback, arguments)?;
+        let index = self.shutdown_functions.slot(entry);
+        if let Err(thrown) = table.append(self, Value::int(index)) {
+            self.drop_shutdown_entry(index);
+            return Err(thrown);
+        }
+        Ok(())
     }
 
     /// `register_user_shutdown_function` and
-    /// `remove_user_shutdown_function` (`Z/ext/standard/basic_functions.c`),
+    /// `remove_user_shutdown_function` (`Z/ext/standard/basic_functions.c:1705-1725`),
     /// the entry an extension keeps under a name of its own: `Some`
     /// replaces the entry of that name where it stands, which
-    /// `zend_hash_str_update_mem` keeps in its place, or appends one;
-    /// `None` removes it. The owners are the list's as
+    /// `zend_hash_str_update_mem` keeps in its place, or adds one; `None`
+    /// removes it. The owners are the table's as
     /// [`Request::register_shutdown_function`]'s, and what an entry held
     /// is given up where it goes. The session's `session_shutdown` is the
     /// witness, in `ext/session`.
-    pub fn set_shutdown_function(&mut self, name: &[u8], entry: Option<(Callable, Vec<Value>)>) {
-        let at = self
+    pub fn set_shutdown_function(
+        &mut self,
+        name: &[u8],
+        entry: Option<(Callable, Vec<Value>)>,
+    ) -> Result<(), Thrown> {
+        // `zend_hash_str_update_mem` keys by the bytes, never numerically.
+        let string = PhpString::new(self, name)?;
+        let key = Key::Str(string);
+        let standing = self
             .shutdown_functions
-            .iter()
-            .position(|(key, _, _)| key.as_deref() == Some(name));
-        let old = match (at, entry) {
-            (Some(at), Some((callback, arguments))) => Some(std::mem::replace(
-                &mut self.shutdown_functions[at],
-                (Some(name.to_vec()), callback, arguments),
-            )),
-            (Some(at), None) => Some(self.shutdown_functions.remove(at)),
-            (None, Some((callback, arguments))) => {
-                self.shutdown_functions
-                    .push((Some(name.to_vec()), callback, arguments));
-                None
-            }
-            (None, None) => None,
+            .table
+            .and_then(|table| table.get(&key))
+            .and_then(|index| index.as_int());
+        let result = if let Some((callback, arguments)) = entry {
+            self.set_named_shutdown_entry(key, callback, arguments)
+        } else {
+            let unset = match self.shutdown_functions.table {
+                Some(mut table) => table.unset(self, &key).map(drop),
+                None => Ok(()),
+            };
+            self.release(Value::string(string));
+            unset
         };
-        if let Some((_, callback, arguments)) = old {
-            callback.release(self);
-            for value in arguments {
-                self.release(value);
-            }
+        if let Some(index) = standing {
+            self.drop_shutdown_entry(index);
         }
+        result
     }
 
-    /// The registered entry at `at`, as `zend_hash_apply` reaches it:
-    /// the callback and its arguments as views, the list keeping its
-    /// owners, so the walk serves what it reads and an entry appended
-    /// while it runs is reached by the same walk. `None` past the end
-    /// is what ends it.
-    pub(crate) fn shutdown_function(&self, at: usize) -> Option<(Callable, Vec<Value>)> {
-        self.shutdown_functions
-            .get(at)
-            .map(|(_, callback, arguments)| (callback.clone(), arguments.clone()))
+    /// `zend_hash_str_update_mem`: the entry made and written under
+    /// `key`, whose owner the table takes, or given up with the key
+    /// where the memory limit refuses it.
+    fn set_named_shutdown_entry(
+        &mut self,
+        key: Key,
+        callback: Callable,
+        arguments: Vec<Value>,
+    ) -> Result<(), Thrown> {
+        let (entry, mut table) = match self.shutdown_entry(callback, arguments) {
+            Ok(made) => made,
+            Err(thrown) => {
+                if let Key::Str(string) = key {
+                    self.release(Value::string(string));
+                }
+                return Err(thrown);
+            }
+        };
+        let index = self.shutdown_functions.slot(entry);
+        let set = table.set(self, key, Value::int(index));
+        if set.is_err() {
+            self.drop_shutdown_entry(index);
+        }
+        set
+    }
+
+    /// The entry at or after the table's position `at`, as
+    /// `zend_hash_apply` reaches it: the position it stands at, and its
+    /// callback and arguments as views, the table keeping its owners, so
+    /// the walk serves what it reads and an entry appended while it runs
+    /// is reached by the same walk. `None` past the end is what ends it.
+    pub(crate) fn shutdown_function(&self, at: u32) -> Option<(u32, Callable, Vec<Value>)> {
+        let mut at = at;
+        loop {
+            let (position, _, index) = self.shutdown_functions.table?.live_from(at)?;
+            if let Some(entry) = self.shutdown_functions.entry(&index) {
+                return Some((position, entry.callback.clone(), entry.arguments.clone()));
+            }
+            at = position + 1;
+        }
     }
 
     /// `php_free_shutdown_functions` (`Z/ext/standard/basic_functions.c:1660`),
     /// step 7 of `php_request_shutdown`, behind step 6 and its
-    /// `php_output_deactivate`: every entry's callback and argument
-    /// released, which is `user_shutdown_function_dtor` over the
-    /// destroyed table.
+    /// `php_output_deactivate`: `zend_hash_destroy` over the table, each
+    /// entry's arguments, callback and record given up in the table's
+    /// order by `user_shutdown_function_dtor`, then the table.
     pub(crate) fn free_shutdown_functions(&mut self) {
-        for (_, callback, arguments) in std::mem::take(&mut self.shutdown_functions) {
-            callback.release(self);
-            for value in arguments {
-                self.release(value);
+        let Some(table) = self.shutdown_functions.table.take() else {
+            return;
+        };
+        for (_, index) in table.snapshot() {
+            if let Some(index) = index.as_int() {
+                self.drop_shutdown_entry(index);
             }
         }
+        self.release(Value::array(table));
+        self.shutdown_functions.entries.clear();
+    }
+
+    /// One `php_shutdown_function_entry` out of the heap in php's order,
+    /// with the table it goes into: the arguments' `params` first,
+    /// `safe_emalloc(param_count, sizeof(zval))` where there are any, in
+    /// `register_shutdown_function`; then the table, laid down at the
+    /// first entry (`ALLOC_HASHTABLE`); then the entry itself, which
+    /// `zend_hash_next_index_insert_mem` and `zend_hash_str_update_mem`
+    /// copy into a block of its size. Where the memory limit refuses one
+    /// of them, what was made for the entry is given up with the
+    /// callback and the arguments.
+    fn shutdown_entry(
+        &mut self,
+        callback: Callable,
+        arguments: Vec<Value>,
+    ) -> Result<(ShutdownEntry, PhpArray), Thrown> {
+        let params = if arguments.is_empty() {
+            Ok(None)
+        } else {
+            let params = self.heap.block(arguments.len() * ZVAL_SIZE);
+            self.fatal_of(params).map(Some)
+        };
+        let made = params.and_then(|params| {
+            let table = self.shutdown_table();
+            let record = table.and_then(|table| {
+                let record = self.heap.block(SHUTDOWN_RECORD);
+                self.fatal_of(record).map(|record| (record, table))
+            });
+            match record {
+                Ok((record, table)) => Ok((record, params, table)),
+                Err(thrown) => {
+                    if let Some(params) = params {
+                        self.heap.free_block(params);
+                    }
+                    Err(thrown)
+                }
+            }
+        });
+        match made {
+            Ok((record, params, table)) => Ok((
+                ShutdownEntry {
+                    callback,
+                    arguments,
+                    record,
+                    params,
+                },
+                table,
+            )),
+            Err(thrown) => {
+                callback.release(self);
+                for value in arguments {
+                    self.release(value);
+                }
+                Err(thrown)
+            }
+        }
+    }
+
+    /// `BG(user_shutdown_function_names)`, laid down at the first entry
+    /// as `ALLOC_HASHTABLE` and `zend_hash_init` lay it down.
+    fn shutdown_table(&mut self) -> Result<PhpArray, Thrown> {
+        if let Some(table) = self.shutdown_functions.table {
+            return Ok(table);
+        }
+        let table = PhpArray::new(self)?;
+        self.shutdown_functions.table = Some(table);
+        Ok(table)
+    }
+
+    /// `user_shutdown_function_dtor`: the entry's arguments released, its
+    /// `params` freed, its callback released and its record freed.
+    fn drop_shutdown_entry(&mut self, index: i64) {
+        let Some(entry) = self.shutdown_functions.take(index) else {
+            return;
+        };
+        for value in entry.arguments {
+            self.release(value);
+        }
+        if let Some(params) = entry.params {
+            self.heap.free_block(params);
+        }
+        entry.callback.release(self);
+        self.heap.free_block(entry.record);
     }
 
     /// `register_tick_function()`: the callable and its arguments held,
@@ -15641,6 +15772,81 @@ enum Display {
 /// `PHP_DISPLAY_ERRORS_STDOUT` and `PHP_DISPLAY_ERRORS_STDERR`
 /// (`Z/main/php_globals.h:36-37`), the two modes of `PG(display_errors)`
 /// beside zero.
+/// `sizeof(zval)`, what `safe_emalloc` asks per argument a shutdown
+/// entry keeps.
+const ZVAL_SIZE: usize = 16;
+
+/// `sizeof(php_shutdown_function_entry)` at 8.5
+/// (`Z/ext/standard/basic_functions.h:125`): the `zend_fcall_info_cache`'s
+/// five pointers, `params` and `param_count`.
+const SHUTDOWN_RECORD: usize = 56;
+
+/// `BG(user_shutdown_function_names)`: the table php keeps the entries
+/// in, one of the request's own arrays, laid down at the first entry,
+/// grown as a packed table grows and turned into a hash by the first
+/// entry registered under a name, so what `memory_get_usage()` counts
+/// and where the memory limit refuses are php's; and the entries its
+/// elements name by index, each with the blocks php allocates for it. An
+/// entry's slot stays empty once its entry is gone, the table having
+/// dropped the element that named it.
+///
+/// The first entry lays the table's header down and its eight packed
+/// slots beside the entry and its one argument; the ninth grows the
+/// slots to sixteen:
+///
+/// ```php
+/// $f = function (...$a) {};
+/// $m = [memory_get_usage()];
+/// register_shutdown_function($f, 'a');
+/// $m[] = memory_get_usage();
+/// register_shutdown_function($f);
+/// $m[] = memory_get_usage();
+/// for ($i = 0; $i < 7; $i++) register_shutdown_function($f);
+/// $m[] = memory_get_usage();
+/// register_shutdown_function($f, 1, 2, 3);
+/// $m[] = memory_get_usage();
+/// for ($i = 1; $i < count($m); $i++) echo $m[$i] - $m[$i - 1], "\n";
+/// ```
+/// ```expect
+/// 504
+/// 56
+/// 552
+/// 104
+/// ```
+#[derive(Default)]
+struct ShutdownFunctions {
+    table: Option<PhpArray>,
+    entries: Vec<Option<ShutdownEntry>>,
+}
+
+/// One `php_shutdown_function_entry`: its callback and arguments, which
+/// it owns, the block the entry is, and the arguments' `params` block.
+struct ShutdownEntry {
+    callback: Callable,
+    arguments: Vec<Value>,
+    record: php_heap::Block,
+    params: Option<php_heap::Block>,
+}
+
+impl ShutdownFunctions {
+    /// The entry kept, and the index the table's element names it by.
+    fn slot(&mut self, entry: ShutdownEntry) -> i64 {
+        self.entries.push(Some(entry));
+        i64::try_from(self.entries.len() - 1).unwrap_or(i64::MAX)
+    }
+
+    /// The entry a table element names.
+    fn entry(&self, index: &Value) -> Option<&ShutdownEntry> {
+        let index = usize::try_from(index.as_int()?).ok()?;
+        self.entries.get(index)?.as_ref()
+    }
+
+    /// The entry at `index`, taken out of its slot.
+    fn take(&mut self, index: i64) -> Option<ShutdownEntry> {
+        self.entries.get_mut(usize::try_from(index).ok()?)?.take()
+    }
+}
+
 const DISPLAY_ERRORS_STDOUT: u8 = 1;
 const DISPLAY_ERRORS_STDERR: u8 = 2;
 

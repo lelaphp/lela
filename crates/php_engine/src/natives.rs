@@ -2425,7 +2425,7 @@ fn register_shutdown_function(req: &mut Request) -> Result<Value, Thrown> {
         req.addref(&value);
         arguments.push(value);
     }
-    req.register_shutdown_function(callback, arguments);
+    req.register_shutdown_function(callback, arguments)?;
     Ok(Value::null())
 }
 
@@ -2485,8 +2485,8 @@ fn register_shutdown_function(req: &mut Request) -> Result<Value, Thrown> {
 /// ```
 pub(crate) fn call_shutdown_functions(req: &mut Request) {
     let mut at = 0;
-    while let Some((callback, arguments)) = req.shutdown_function(at) {
-        at += 1;
+    while let Some((position, callback, arguments)) = req.shutdown_function(at) {
+        at = position + 1;
         match crate::api::call::call(req, &callback, &arguments) {
             Ok(value) => req.release(value),
             Err(thrown) => {
