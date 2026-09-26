@@ -40,6 +40,10 @@ const ETIMEDOUT: i32 = 60;
 /// `ENOTCONN`, what a read of a listening socket meets.
 const ENOTCONN: i32 = 57;
 
+/// `EMSGSIZE`, which `php_sockop_set_option`'s liveness check counts as
+/// transient beside `EAGAIN`, as this host numbers it.
+const EMSGSIZE: i32 = 40;
+
 /// One operation of `PHP_STREAM_OPTION_XPORT_API` past connecting and
 /// binding, which [`Request::xport_create`] does itself.
 pub(crate) enum XportOp<'a> {
@@ -150,13 +154,17 @@ impl Sock {
 
 /// `php_netstream_data_t` under one of `xp_socket.c`'s ops: the socket,
 /// `None` once closed; the ops' label; `is_blocked`; the read timeout,
-/// `None` for php's `tv_sec == -1`; and `timeout_event`.
+/// `None` for php's `tv_sec == -1`; `timeout_event`; and whether the
+/// stream is a server's, `PHP_STREAM_FLAG_NO_IO`, which
+/// `php_stream_xport_create` sets on a stream it bound
+/// (`Z/main/streams/transports.c:175`) and which only this kind reads.
 pub(crate) struct Socket {
     sock: Option<Sock>,
     label: &'static str,
     is_blocked: bool,
     timeout: Option<Duration>,
     timeout_event: bool,
+    no_io: bool,
 }
 
 impl Socket {
@@ -167,6 +175,7 @@ impl Socket {
             is_blocked: true,
             timeout,
             timeout_event: false,
+            no_io: false,
         }
     }
 
@@ -325,7 +334,8 @@ impl Ops for Socket {
             .map_or(CastTarget::Refused, |sock| CastTarget::Fd(sock.fd()))
     }
 
-    /// `php_sockop_set_option` (`Z/main/streams/xp_socket.c:296`):
+    /// `php_sockop_set_option` (`Z/main/streams/xp_socket.c:333`):
+    /// `PHP_STREAM_OPTION_CHECK_LIVENESS` is [`Socket::alive`],
     /// `PHP_STREAM_OPTION_BLOCKING` is `php_set_sock_blocking`, and
     /// `PHP_STREAM_OPTION_READ_TIMEOUT` the timeout a read waits for.
     fn set_option(&mut self, _req: &mut Request, option: StreamOption) -> OptionAnswer {
@@ -344,6 +354,13 @@ impl Ops for Socket {
                 self.timeout = Some(timeout);
                 self.timeout_event = false;
                 OptionAnswer::Ok
+            }
+            StreamOption::Liveness => {
+                if self.alive() {
+                    OptionAnswer::Ok
+                } else {
+                    OptionAnswer::Err
+                }
             }
             _ => OptionAnswer::NotImplemented,
         }
@@ -387,6 +404,74 @@ impl Ops for Socket {
 }
 
 impl Socket {
+    /// `PHP_STREAM_OPTION_CHECK_LIVENESS` as `php_sockop_set_option`
+    /// answers it (`Z/main/streams/xp_socket.c:342-386`) for the `0`
+    /// that `php_stream_eof` and `php_stream_xport_create` ask with: a
+    /// closed socket is dead; a server's stream (`PHP_STREAM_FLAG_NO_IO`)
+    /// is polled for a readable socket without waiting and is alive where
+    /// none is; then one byte is peeked without waiting, `MSG_PEEK |
+    /// MSG_DONTWAIT`, and the peer's orderly close, which leaves none,
+    /// is dead, as a failure other than `EAGAIN` or `EMSGSIZE` is. So
+    /// `feof()` sees a peer that went away before any read finds the end,
+    /// and a listening socket with a connection waiting, whose peek
+    /// fails with `ENOTCONN`.
+    ///
+    /// ```php
+    /// [$a, $b] = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);
+    /// var_dump(feof($b));
+    /// fwrite($a, "x"); fclose($a);
+    /// var_dump(feof($b), fread($b, 10), feof($b));
+    /// [$c, $d] = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);
+    /// stream_set_blocking($d, false);
+    /// fclose($c);
+    /// var_dump(feof($d));
+    /// $s = stream_socket_server('tcp://127.0.0.1:0');
+    /// var_dump(feof($s));
+    /// $client = stream_socket_client(stream_socket_get_name($s, false));
+    /// var_dump(feof($s), feof($client));
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// bool(false)
+    /// string(1) "x"
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// bool(false)
+    /// ```
+    fn alive(&self) -> bool {
+        let Some(sock) = self.sock.as_ref() else {
+            return false;
+        };
+        if self.no_io
+            && !matches!(
+                php_heap::poll_fd(sock.fd(), Readiness::Readable, Some(Duration::ZERO)),
+                Ok(true)
+            )
+        {
+            return true;
+        }
+        let mut byte = [0u8; 1];
+        let peeked = if self.is_blocked {
+            // `MSG_DONTWAIT` on a socket that blocks: made non-blocking
+            // for the one call, as [`Socket::read_now`] makes it.
+            let _ = sock.set_blocking(false);
+            let peeked = php_heap::peek_fd(sock.fd(), &mut byte);
+            let _ = sock.set_blocking(true);
+            peeked
+        } else {
+            php_heap::peek_fd(sock.fd(), &mut byte)
+        };
+        match peeked {
+            Ok(n) => n > 0,
+            Err(error) => {
+                error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.raw_os_error() == Some(EMSGSIZE)
+            }
+        }
+    }
+
     /// `php_tcp_sockop_accept` over `php_network_accept_incoming`
     /// (`Z/main/network.c:772`): the listener waited for up to `timeout`,
     /// `ETIMEDOUT` where it ran out, then `accept(2)`; the client a socket
@@ -719,7 +804,8 @@ impl Request {
             Ok(sock) => sock,
             Err(failed) => return Ok(Err(failed)),
         };
-        let kind = Socket::new(sock, label, default_timeout(self));
+        let mut kind = Socket::new(sock, label, default_timeout(self));
+        kind.no_io = matches!(xport, Xport::Server { .. });
         let mut stream = PhpStream::new(Box::new(kind), b"r+");
         stream.orig_path = Some(name.to_vec());
         stream.flags.no_seek = true;
