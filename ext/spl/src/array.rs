@@ -1468,10 +1468,27 @@ fn serialize(req: &mut Request) -> Result<Value, Thrown> {
     crate::string_value(req, &out)
 }
 
-/// `unserialize(string $data): void`, the inverse of `serialize`: the
-/// `x:i:flags;` head, the storage, and `m:` with the members.
+/// `unserialize(string $data): void`, the inverse of `serialize`, read
+/// through one var hash as php's is: the `x:i:flags;` head, the storage
+/// and its `;`, then `m:` with the members. Where the record breaks off
+/// php's `UnexpectedValueException` names the offset the reader stopped
+/// at; a storage `spl_array_set_array` refuses leaves what it threw
+/// pending while the members are still read, as php's does.
 ///
-/// The witness waits on the ext/standard native it calls (#712).
+/// ```php
+/// $o = unserialize('C:11:"ArrayObject":33:{x:i:2;a:1:{s:1:"k";i:7;};m:a:0:{}}');
+/// var_dump($o->k, $o->getFlags());
+/// foreach (['x:i:0;r:3;;m:a:0:{}', 'y:i:0;', 'x:i:0;a:0:{}m:a:0:{}'] as $bad) {
+///     try { (new ArrayObject)->unserialize($bad); } catch (UnexpectedValueException $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// int(7)
+/// int(2)
+/// Error at offset 10 of 19 bytes
+/// Error at offset 0 of 6 bytes
+/// Error at offset 12 of 20 bytes
+/// ```
 fn unserialize(req: &mut Request) -> Result<Value, Thrown> {
     crate::arity(req, 1, 1)?;
     let this = crate::this(req)?;
@@ -1480,47 +1497,100 @@ fn unserialize(req: &mut Request) -> Result<Value, Thrown> {
         return Ok(Value::null());
     }
     sorting_refused(req, this)?;
-    let refuse = |req: &mut Request, at: usize| {
+    let mut reader = php_ext_standard::Unserializer::new(req, &data);
+    let mut pending = None;
+    let mut kept = Vec::new();
+    let read = read_record(req, this, &mut reader, &data, &mut pending, &mut kept);
+    let finished = reader.finish(req);
+    // `var_tmp_var`'s values live until `PHP_VAR_UNSERIALIZE_DESTROY`,
+    // since a later `R:` of the record may name one.
+    for value in kept {
+        req.release(value);
+    }
+    let broke_at = read?;
+    finished?;
+    if let Some(at) = broke_at {
         let len = data.len();
-        Err(throw(
+        return Err(throw(
             req,
             "UnexpectedValueException",
             &format!("Error at offset {at} of {len} bytes"),
-        ))
-    };
+        ));
+    }
+    match pending {
+        Some(thrown) => Err(thrown),
+        None => Ok(Value::null()),
+    }
+}
+
+/// The body of `ArrayObject::unserialize` over one reader: `None` once
+/// the record is read, or the offset php's `outexcept` reports; a
+/// refusal of the storage is left in `pending`, and each value read is
+/// left in `kept`, php's `var_tmp_var`, for the caller to give up once
+/// the reader is done.
+fn read_record(
+    req: &mut Request,
+    this: PhpObject,
+    reader: &mut php_ext_standard::Unserializer<'_>,
+    data: &[u8],
+    pending: &mut Option<Thrown>,
+    kept: &mut Vec<Value>,
+) -> Result<Option<usize>, Thrown> {
     if !data.starts_with(b"x:") {
-        return refuse(req, 0);
+        return Ok(Some(0));
     }
-    let Some(end) = crate::serialized_end(&data, 2) else {
-        return refuse(req, 2);
+    reader.set_offset(2);
+    let Some(flags) = reader.value(req)? else {
+        return Ok(Some(reader.offset()));
     };
-    let Some(flags) = crate::unserialized(req, &data[2..end])?.and_then(|f| f.as_int()) else {
-        return refuse(req, 2);
+    kept.push(flags);
+    let Some(flags) = flags.as_int() else {
+        return Ok(Some(reader.offset()));
     };
-    let mut at = end;
-    set_flags_and_self(req, this, flags)?;
-    if flags & IS_SELF == 0 {
-        let Some(end) = crate::serialized_end(&data, at) else {
-            return refuse(req, at);
-        };
-        let Some(value) = crate::unserialized(req, &data[at..end])? else {
-            return refuse(req, at);
-        };
-        set_array(req, this, &value, 0, true)?;
-        req.release(value);
-        if data.get(end) != Some(&b';') {
-            return refuse(req, end);
+    // `--p` back onto the `;` the flags' own value ended with.
+    let at = reader.offset().saturating_sub(1);
+    if data.get(at) != Some(&b';') {
+        return Ok(Some(at));
+    }
+    if flags & IS_SELF != 0 {
+        set_flags_and_self(req, this, flags)?;
+    } else {
+        if !matches!(data.get(reader.offset()), Some(b'a' | b'O' | b'C' | b'r')) {
+            return Ok(Some(reader.offset()));
         }
-        at = end + 1;
+        let Some(stored) = reader.value(req)? else {
+            return Ok(Some(reader.offset()));
+        };
+        kept.push(stored);
+        if stored.as_array().is_none() && stored.as_object().is_none() {
+            return Ok(Some(reader.offset()));
+        }
+        set_flags_and_self(req, this, flags)?;
+        if let Err(thrown) = set_array(req, this, &stored, 0, true) {
+            *pending = Some(thrown);
+        }
+        if data.get(reader.offset()) != Some(&b';') {
+            return Ok(Some(reader.offset()));
+        }
+        reader.set_offset(reader.offset() + 1);
     }
-    if !data[at..].starts_with(b"m:") {
-        return refuse(req, at);
+    let at = reader.offset();
+    if data.get(at) != Some(&b'm') {
+        return Ok(Some(at));
     }
-    if let Some(members) = crate::unserialized(req, &data[at + 2..])? {
-        crate::load_members(req, this, &members)?;
-        req.release(members);
+    if data.get(at + 1) != Some(&b':') {
+        return Ok(Some(at + 1));
     }
-    Ok(Value::null())
+    reader.set_offset(at + 2);
+    let Some(members) = reader.value(req)? else {
+        return Ok(Some(reader.offset()));
+    };
+    kept.push(members);
+    if members.as_array().is_none() {
+        return Ok(Some(reader.offset()));
+    }
+    crate::load_members(req, this, &members)?;
+    Ok(None)
 }
 
 /// `__serialize(): array`: the flags, the storage, the members and the

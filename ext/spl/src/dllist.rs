@@ -813,7 +813,27 @@ fn serialize(req: &mut Request) -> Result<Value, Thrown> {
     crate::string_value(req, &out)
 }
 
-/// `unserialize(string $data): void`; the witness is `serialize`'s.
+/// `unserialize(string $data): void`: the list emptied, then the flags
+/// and each `:`-led element read through one var hash, as php reads
+/// them; where the data breaks off php's `UnexpectedValueException`
+/// names the offset the reader stopped at.
+///
+/// ```php
+/// $l = new SplDoublyLinkedList;
+/// $l->unserialize('i:2;:s:1:"a";:O:8:"stdClass":0:{}:r:3;');
+/// var_dump($l->getIteratorMode(), count($l), $l[1] === $l[2]);
+/// foreach (['i:0;:x', 's:1:"a";', 'i:1;;'] as $bad) {
+///     try { $l->unserialize($bad); } catch (UnexpectedValueException $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// int(2)
+/// int(3)
+/// bool(false)
+/// Error at offset 5 of 6 bytes
+/// Error at offset 8 of 8 bytes
+/// Error at offset 4 of 5 bytes
+/// ```
 fn unserialize(req: &mut Request) -> Result<Value, Thrown> {
     crate::arity(req, 1, 1)?;
     let this = this(req)?;
@@ -824,35 +844,55 @@ fn unserialize(req: &mut Request) -> Result<Value, Thrown> {
     while let Some(old) = with(req, this, SplDllist::pop)? {
         req.release(old);
     }
-    let refuse = |req: &mut Request, at: usize| {
-        Err(throw(
+    let mut reader = php_ext_standard::Unserializer::new(req, &data);
+    let mut kept = None;
+    let read = read_list(req, this, &mut reader, &data, &mut kept);
+    let finished = reader.finish(req);
+    if let Some(flags) = kept {
+        req.release(flags);
+    }
+    let broke_at = read?;
+    finished?;
+    match broke_at {
+        Some(at) => Err(throw(
             req,
             "UnexpectedValueException",
             &format!("Error at offset {at} of {} bytes", data.len()),
-        ))
+        )),
+        None => Ok(Value::null()),
+    }
+}
+
+/// The body of `SplDoublyLinkedList::unserialize` over one reader:
+/// `None` once the data is read, or the offset php's `error` label
+/// reports. The flags' value is left in `kept`, php's `var_tmp_var`,
+/// and each element is the list's.
+fn read_list(
+    req: &mut Request,
+    this: PhpObject,
+    reader: &mut php_ext_standard::Unserializer<'_>,
+    data: &[u8],
+    kept: &mut Option<Value>,
+) -> Result<Option<usize>, Thrown> {
+    let Some(flags) = reader.value(req)? else {
+        return Ok(Some(reader.offset()));
     };
-    let Some(end) = crate::serialized_end(&data, 0) else {
-        return refuse(req, 0);
-    };
-    let Some(flags) = crate::unserialized(req, &data[..end])?.and_then(|f| f.as_int()) else {
-        return refuse(req, 0);
+    *kept = Some(flags);
+    let Some(flags) = flags.as_int() else {
+        return Ok(Some(reader.offset()));
     };
     with(req, this, |l| l.flags = flags)?;
-    let mut at = end;
-    while data.get(at) == Some(&b':') {
-        let Some(end) = crate::serialized_end(&data, at + 1) else {
-            return refuse(req, at + 1);
-        };
-        let Some(value) = crate::unserialized(req, &data[at + 1..end])? else {
-            return refuse(req, at + 1);
+    while data.get(reader.offset()) == Some(&b':') {
+        reader.set_offset(reader.offset() + 1);
+        let Some(value) = reader.value(req)? else {
+            return Ok(Some(reader.offset()));
         };
         with(req, this, |l| l.push(value))?;
-        at = end;
     }
-    if at != data.len() {
-        return refuse(req, at);
+    if reader.offset() != data.len() {
+        return Ok(Some(reader.offset()));
     }
-    Ok(Value::null())
+    Ok(None)
 }
 
 /// `__serialize(): array`: the flags, the elements and the members.
