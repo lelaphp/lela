@@ -42,6 +42,7 @@ use crate::api::request::{
 use crate::api::values::{ClassId, Key, PhpArray, PhpString, Resource, Value};
 
 mod filters;
+mod rfc2397;
 mod sockets;
 pub(crate) use filters::FilterCall;
 pub(crate) mod userspace;
@@ -158,6 +159,12 @@ pub(crate) trait Ops: Send {
     /// them, which the generic layer answers next.
     fn set_option(&mut self, _req: &mut Request, _option: StreamOption) -> OptionAnswer {
         OptionAnswer::NotImplemented
+    }
+
+    /// The kind's own meta data under [`MetaData::Own`], the entries
+    /// `stream_get_meta_data` puts first.
+    fn own_meta(&self) -> Vec<(Vec<u8>, MetaValue)> {
+        Vec::new()
     }
 
     /// `php_stream_is(stream, PHP_STREAM_IS_USERSPACE)`: a user-space
@@ -1076,6 +1083,12 @@ const PHP_STREAM_MAX_MEM: usize = 2 * 1024 * 1024;
 struct Temp {
     inner: Option<Stream>,
     smax: usize,
+    /// `stream->ops->label`: `TEMP`, or `RFC2397` for what the `data:`
+    /// wrapper opened, which swaps in `php_stream_rfc2397_ops`.
+    label: &'static str,
+    /// `ts->meta`, what the `data:` wrapper read from its URL, and nothing
+    /// for `php://temp`.
+    meta: Vec<(Vec<u8>, MetaValue)>,
 }
 
 impl Temp {
@@ -1119,7 +1132,7 @@ impl Temp {
 
 impl Ops for Temp {
     fn label(&self) -> &'static str {
-        "TEMP"
+        self.label
     }
 
     fn enclose(&mut self, inner: Stream) {
@@ -1213,6 +1226,20 @@ impl Ops for Temp {
 
     fn meta_data(&self) -> MetaData {
         MetaData::Own
+    }
+
+    fn own_meta(&self) -> Vec<(Vec<u8>, MetaValue)> {
+        self.meta.clone()
+    }
+
+    /// `php_stream_temp_set_option`'s default arm: the inner stream's,
+    /// its generic layer included.
+    fn set_option(&mut self, req: &mut Request, option: StreamOption) -> OptionAnswer {
+        let Some(inner) = self.inner else {
+            return OptionAnswer::NotImplemented;
+        };
+        req.stream_op(inner, |req, inner| inner.set_option(req, option))
+            .unwrap_or(OptionAnswer::NotImplemented)
     }
 }
 
@@ -1934,7 +1961,26 @@ fn strtol(bytes: &[u8]) -> i64 {
 /// temp stream registered first, then the memory stream it encloses, so
 /// the two ids come out in php's order.
 fn temp(req: &mut Request, mode: TempMode, smax: usize) -> Result<Stream, Thrown> {
-    let mut outer = PhpStream::new(Box::new(Temp { inner: None, smax }), mode.as_mode());
+    temp_stream(req, mode, smax, "TEMP", Vec::new())
+}
+
+/// [`temp`] under a label of its own and with the meta data
+/// `stream_get_meta_data` starts with, which is what the `data:` wrapper
+/// makes of one.
+fn temp_stream(
+    req: &mut Request,
+    mode: TempMode,
+    smax: usize,
+    label: &'static str,
+    meta: Vec<(Vec<u8>, MetaValue)>,
+) -> Result<Stream, Thrown> {
+    let kind = Temp {
+        inner: None,
+        smax,
+        label,
+        meta,
+    };
+    let mut outer = PhpStream::new(Box::new(kind), mode.as_mode());
     outer.flags.no_buffer = true;
     let outer = req.stream_alloc(outer)?;
     let inner = req.stream_alloc(memory(mode))?;
@@ -1946,13 +1992,14 @@ fn temp(req: &mut Request, mode: TempMode, smax: usize) -> Result<Stream, Thrown
 
 /// Which wrapper `php_stream_locate_url_wrapper`
 /// (`Z/main/streams/streams.c:2010`) found for a path: the plain files
-/// wrapper, the `php://` wrapper, one an extension registered (its place
-/// in [`Request::wrappers`]), one a program registered with
-/// `stream_wrapper_register`, or none.
+/// wrapper, the `php://` wrapper, the `data:` wrapper, one an extension
+/// registered (its place in [`Request::wrappers`]), one a program
+/// registered with `stream_wrapper_register`, or none.
 #[derive(Clone)]
 pub(crate) enum Located {
     Plain,
     Php,
+    Data,
     Ext(usize),
     Space(userspace::UserWrapper),
     Nothing,
@@ -1966,11 +2013,25 @@ pub(crate) struct Registered {
     pub(crate) wrapper: Located,
 }
 
+impl Located {
+    /// `wrapper->is_url`: the `data:` wrapper, and one a program
+    /// registered with `STREAM_IS_URL`.
+    pub(crate) fn is_url(&self) -> bool {
+        match self {
+            Located::Data => true,
+            Located::Space(user) => user.is_url,
+            Located::Plain | Located::Php | Located::Ext(_) | Located::Nothing => false,
+        }
+    }
+}
+
 /// Whether two rows name the same wrapper, as `zend_hash_find_ptr(...) ==
 /// wrapper` compares them.
 fn same_wrapper(a: &Located, b: &Located) -> bool {
     match (a, b) {
-        (Located::Plain, Located::Plain) | (Located::Php, Located::Php) => true,
+        (Located::Plain, Located::Plain)
+        | (Located::Php, Located::Php)
+        | (Located::Data, Located::Data) => true,
         (Located::Ext(x), Located::Ext(y)) => x == y,
         _ => false,
     }
@@ -1978,7 +2039,8 @@ fn same_wrapper(a: &Located, b: &Located) -> bool {
 
 impl Request {
     /// `url_stream_wrappers_hash`, the wrappers every request starts
-    /// with: `php`, `file`, then those the extensions registered.
+    /// with: `php`, `file` and `data`, the engine's own, then those the
+    /// extensions registered.
     pub(crate) fn global_wrappers(&self) -> Vec<Registered> {
         let mut table = vec![
             Registered {
@@ -1988,6 +2050,10 @@ impl Request {
             Registered {
                 scheme: b"file".to_vec(),
                 wrapper: Located::Plain,
+            },
+            Registered {
+                scheme: b"data".to_vec(),
+                wrapper: Located::Data,
             },
         ];
         for (at, w) in self.wrappers.iter().enumerate() {
@@ -2017,7 +2083,8 @@ impl Request {
 
     /// `php_stream_locate_url_wrapper` (`Z/main/streams/streams.c:2010`):
     /// a scheme is alphanumerics with `+`, `-` and `.`, two bytes or
-    /// more, followed by `://`, looked up as written and then lowered;
+    /// more, followed by `://`, or `data:` alone, RFC 2397's form,
+    /// looked up as written and then lowered;
     /// one nobody registered is php's warning and then the path as
     /// written for the plain files wrapper. `file://` (or any scheme
     /// `strncasecmp` takes for it) with a host that is not `localhost`
@@ -2031,9 +2098,10 @@ impl Request {
             .iter()
             .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
             .count();
-        let mut protocol =
-            (n > 1 && path.get(n) == Some(&b':') && path[n + 1..].starts_with(b"//"))
-                .then(|| path[..n].to_vec());
+        let mut protocol = (n > 1
+            && path.get(n) == Some(&b':')
+            && (path[n + 1..].starts_with(b"//") || (n == 4 && path.starts_with(b"data:"))))
+        .then(|| path[..n].to_vec());
         let table = self.wrapper_table();
         let mut wrapper = None;
         if let Some(scheme) = &protocol {
@@ -2091,8 +2159,7 @@ impl Request {
         let Some(found) = wrapper else {
             return (Located::Plain, path.to_vec());
         };
-        if let Located::Space(user) = &found
-            && user.is_url
+        if found.is_url()
             && !self
                 .ini_get(b"allow_url_fopen")
                 .is_none_or(Request::ini_parse_bool)
@@ -2247,7 +2314,7 @@ impl Request {
             to_open = resolved;
         }
         let (wrapper, path_to_open) = self.locate_wrapper(&to_open);
-        if use_url && !matches!(&wrapper, Located::Space(user) if user.is_url) {
+        if use_url && !wrapper.is_url() {
             let text = format!(
                 "{}(): This function may only be used against URLs",
                 self.active_native()
@@ -2269,6 +2336,7 @@ impl Request {
                 },
             ),
             Located::Php => (PHP_WRAPPER, php_open(self, &path_to_open, mode)?),
+            Located::Data => ("RFC2397", rfc2397::open(self, &path_to_open, mode)?),
             Located::Ext(at) => {
                 let open = self.wrappers[at].open;
                 (
@@ -2345,6 +2413,7 @@ impl Request {
                 },
             ),
             Located::Php => (PHP_WRAPPER, Err(String::from("not implemented"))),
+            Located::Data => ("RFC2397", Err(String::from("not implemented"))),
             Located::Ext(at) => match self.wrappers[at].open_dir {
                 Some(open_dir) => (
                     "user-space",
@@ -2384,6 +2453,7 @@ impl Request {
         let Some(s) = self.stream_ref(stream) else {
             return Ok(out);
         };
+        let own = s.ops.own_meta();
         let head = match s.ops.meta_data() {
             MetaData::Generic => Some((false, true, s.eof())),
             MetaData::Stdio { blocked } => Some((false, blocked, s.eof)),
@@ -2397,27 +2467,30 @@ impl Request {
         let unread = i64::try_from(s.writepos - s.readpos).unwrap_or(i64::MAX);
         let seekable = s.ops.seekable() && !s.flags.no_seek;
         let uri = s.orig_path.clone();
-        let mut entries = Vec::new();
+        let mut entries: Vec<(Vec<u8>, MetaValue)> = own;
         if let Some((timed_out, blocked, eof)) = head {
-            entries.push(("timed_out", MetaValue::Bool(timed_out)));
-            entries.push(("blocked", MetaValue::Bool(blocked)));
-            entries.push(("eof", MetaValue::Bool(eof)));
+            entries.push((b"timed_out".to_vec(), MetaValue::Bool(timed_out)));
+            entries.push((b"blocked".to_vec(), MetaValue::Bool(blocked)));
+            entries.push((b"eof".to_vec(), MetaValue::Bool(eof)));
         }
         if let Some(data) = wrapper_data {
-            entries.push(("wrapper_data", MetaValue::Value(data)));
+            entries.push((b"wrapper_data".to_vec(), MetaValue::Value(data)));
         }
         if !wrapper.is_empty() {
-            entries.push(("wrapper_type", MetaValue::Str(wrapper.as_bytes().to_vec())));
+            entries.push((
+                b"wrapper_type".to_vec(),
+                MetaValue::Str(wrapper.as_bytes().to_vec()),
+            ));
         }
         entries.push((
-            "stream_type",
+            b"stream_type".to_vec(),
             MetaValue::Str(stream_type.as_bytes().to_vec()),
         ));
-        entries.push(("mode", MetaValue::Str(mode)));
-        entries.push(("unread_bytes", MetaValue::Int(unread)));
-        entries.push(("seekable", MetaValue::Bool(seekable)));
+        entries.push((b"mode".to_vec(), MetaValue::Str(mode)));
+        entries.push((b"unread_bytes".to_vec(), MetaValue::Int(unread)));
+        entries.push((b"seekable".to_vec(), MetaValue::Bool(seekable)));
         if let Some(uri) = uri {
-            entries.push(("uri", MetaValue::Str(uri)));
+            entries.push((b"uri".to_vec(), MetaValue::Str(uri)));
         }
         for (key, value) in entries {
             let value = match value {
@@ -2429,7 +2502,7 @@ impl Request {
                     value
                 }
             };
-            let key = Key::Str(PhpString::new(self, key.as_bytes())?);
+            let key = Key::Str(PhpString::new(self, &key)?);
             out.set(self, key, value)?;
         }
         Ok(out)
@@ -2602,7 +2675,8 @@ impl Stream {
 
 /// One entry of what [`Request::stream_meta_data`] puts in the array,
 /// before it is a value of the request's.
-enum MetaValue {
+#[derive(Clone)]
+pub(crate) enum MetaValue {
     Bool(bool),
     Int(i64),
     Str(Vec<u8>),
