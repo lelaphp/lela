@@ -125,7 +125,7 @@ pub use file::{php_fputcsv, php_fstat};
 pub use filestat::{Fs, php_stat};
 pub use scanf::php_sscanf_internal;
 
-use php_ext::abi::{Callable, Dependency, DependencyKind, Extension, ExtensionBuilder};
+use php_ext::abi::{Callable, Dependency, DependencyKind, Extension, ExtensionBuilder, OnModify};
 use php_ext::call::{call, call_array, call_named, fetch_constant};
 use php_ext::coerce::{coerce_param, is_type};
 use php_ext::decl::{ConstDecl, ConstExpr, FunctionDecl, Name, Parameter, ParameterDefault, Type};
@@ -155,6 +155,67 @@ struct State {
     user_filters: user_filters::FilterState,
     /// `BG(url_adapt_output_ex)`, the URL rewriter's state.
     url_rewriter: url_scanner::Rewriter,
+    assert: assert::Stage,
+}
+
+/// The natives this file declares itself: `count` and `sizeof`, `ord`,
+/// `chr`, `str_repeat` and the `is_*` type checks.
+fn core_natives() -> Vec<(FunctionDecl, output::Entry)> {
+    let countable = || Type::Union(vec![Type::Named(Name::from("Countable")), Type::Array]);
+    let normal = ParameterDefault::Expr(ConstExpr::Constant(Name::from("COUNT_NORMAL")));
+    let mode = || Parameter {
+        default: normal.clone(),
+        ..parameter(b"mode", Type::Int)
+    };
+    vec![
+        (
+            declared(
+                b"count",
+                &[parameter(b"value", countable()), mode()],
+                Type::Int,
+            ),
+            count,
+        ),
+        (
+            declared(
+                b"sizeof",
+                &[parameter(b"value", countable()), mode()],
+                Type::Int,
+            ),
+            count,
+        ),
+        (
+            declared(b"ord", &[parameter(b"character", Type::String)], Type::Int),
+            ord,
+        ),
+        (
+            declared(b"chr", &[parameter(b"codepoint", Type::Int)], Type::String),
+            chr,
+        ),
+        (
+            declared(
+                b"str_repeat",
+                &[
+                    parameter(b"string", Type::String),
+                    parameter(b"times", Type::Int),
+                ],
+                Type::String,
+            ),
+            str_repeat,
+        ),
+        (type_check_declared(b"is_null"), is_null),
+        (type_check_declared(b"is_resource"), is_resource),
+        (type_check_declared(b"is_bool"), is_bool),
+        (type_check_declared(b"is_int"), is_int),
+        (type_check_declared(b"is_integer"), is_int),
+        (type_check_declared(b"is_long"), is_int),
+        (type_check_declared(b"is_float"), is_float),
+        (type_check_declared(b"is_double"), is_float),
+        (type_check_declared(b"is_string"), is_string),
+        (type_check_declared(b"is_array"), is_array),
+        (type_check_declared(b"is_object"), is_object),
+        (type_check_declared(b"is_scalar"), is_scalar),
+    ]
 }
 
 /// The extension value (design §7.1): declarations paired with entries,
@@ -174,63 +235,9 @@ struct State {
 /// }
 /// ```
 pub fn extension() -> Extension {
-    let countable = || Type::Union(vec![Type::Named(Name::from("Countable")), Type::Array]);
-    let normal = ParameterDefault::Expr(ConstExpr::Constant(Name::from("COUNT_NORMAL")));
-    let mode = || Parameter {
-        default: normal.clone(),
-        ..parameter(b"mode", Type::Int)
-    };
     let directory = dir::directory_class();
-    ExtensionBuilder::default()
-        .functions(vec![
-            (
-                declared(
-                    b"count",
-                    &[parameter(b"value", countable()), mode()],
-                    Type::Int,
-                ),
-                count,
-            ),
-            (
-                declared(
-                    b"sizeof",
-                    &[parameter(b"value", countable()), mode()],
-                    Type::Int,
-                ),
-                count,
-            ),
-            (
-                declared(b"ord", &[parameter(b"character", Type::String)], Type::Int),
-                ord,
-            ),
-            (
-                declared(b"chr", &[parameter(b"codepoint", Type::Int)], Type::String),
-                chr,
-            ),
-            (
-                declared(
-                    b"str_repeat",
-                    &[
-                        parameter(b"string", Type::String),
-                        parameter(b"times", Type::Int),
-                    ],
-                    Type::String,
-                ),
-                str_repeat,
-            ),
-            (type_check_declared(b"is_null"), is_null),
-            (type_check_declared(b"is_resource"), is_resource),
-            (type_check_declared(b"is_bool"), is_bool),
-            (type_check_declared(b"is_int"), is_int),
-            (type_check_declared(b"is_integer"), is_int),
-            (type_check_declared(b"is_long"), is_int),
-            (type_check_declared(b"is_float"), is_float),
-            (type_check_declared(b"is_double"), is_float),
-            (type_check_declared(b"is_string"), is_string),
-            (type_check_declared(b"is_array"), is_array),
-            (type_check_declared(b"is_object"), is_object),
-            (type_check_declared(b"is_scalar"), is_scalar),
-        ])
+    let builder = ExtensionBuilder::default()
+        .functions(core_natives())
         .functions(string_natives())
         .functions(array::natives())
         .functions(output::natives())
@@ -267,20 +274,40 @@ pub fn extension() -> Extension {
         .classes(vec![assert::assertion_error_class()])
         .ini(assert::ini())
         .ini(browscap::ini())
-        .ini(url_scanner::ini())
-        .on_modify(b"session.trans_sid_tags", url_scanner::on_session_tags)
-        .on_modify(b"session.trans_sid_hosts", url_scanner::on_session_hosts)
+        .ini(url_scanner::ini());
+    ini_handlers()
+        .into_iter()
+        .fold(builder, |b, (name, handler)| b.on_modify(name, handler))
         .request_state::<State>()
         .rshutdown(syslog::close)
         .rinit(rinit)
         .build("standard")
 }
 
-/// `PHP_RINIT(basic)`'s share here: the string filters, which php
-/// registers at `module` startup and this engine keeps in the request's
-/// filter table (`filters::register`).
+/// The `on_modify` of each entry that has one, php's `PHP_INI_MH` at
+/// runtime: the URL rewriter's two over session's entries, and the five
+/// of `assert.c`.
+fn ini_handlers() -> [(&'static [u8], OnModify); 7] {
+    [
+        (b"session.trans_sid_tags", url_scanner::on_session_tags),
+        (b"session.trans_sid_hosts", url_scanner::on_session_hosts),
+        (b"assert.active", assert::on_active),
+        (b"assert.bail", assert::on_bail),
+        (b"assert.warning", assert::on_warning),
+        (b"assert.callback", assert::on_callback),
+        (b"assert.exception", assert::on_exception),
+    ]
+}
+
+/// `PHP_RINIT(basic)`'s share here: the `glob://` wrapper and the
+/// filters, which php registers as the engine starts and this engine keeps
+/// in the request's wrapper and filter tables (`dir::glob_wrapper`,
+/// `filters::register`). The `assert.*` entries' startup deprecations are
+/// their on-modify rules, which the engine serves over the host's values
+/// as it starts.
 #[allow(clippy::unnecessary_wraps)] // `ExtensionBuilder::rinit`'s signature
 fn rinit(req: &mut Request) -> Result<(), Thrown> {
+    req.register_wrapper(dir::glob_wrapper());
     filters::register(req);
     Ok(())
 }

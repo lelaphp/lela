@@ -23,7 +23,7 @@ use std::collections::VecDeque;
 use super::PhpStream;
 use crate::api::raising::{Thrown, warning};
 use crate::api::request::{
-    Brigade, FilterFactory, FilterFlags, FilterStatus, Request, Stream, StreamFilter,
+    Brigade, FilterFactory, FilterFlags, FilterStatus, Request, Stream, StreamFilter, Whence,
 };
 use crate::api::values::{Resource, Value};
 
@@ -52,6 +52,99 @@ enum Chain {
 struct Named {
     stream: Stream,
     chain: Chain,
+}
+
+/// One filter's call on the stream it is attached to. The stream is out
+/// of its resource while the filter runs, so what php's filter reaches
+/// through its `stream` pointer, `php_stream_tell` and
+/// `php_stream_seek` as `consumed` calls them and `php_stream_eof`, is
+/// answered from here: the position and the end as they stood when the
+/// call was made, and a seek the filter asks for, taken on the stream
+/// when the call returns.
+///
+/// ```php
+/// class F extends php_user_filter {
+///     function filter($in, $out, &$consumed, $closing): int {
+///         echo "at ", ftell($this->stream), $closing ? " closing" : "", "\n";
+///         while ($b = stream_bucket_make_writeable($in)) { $consumed += $b->datalen; stream_bucket_append($out, $b); }
+///         if ($closing) fseek($this->stream, 3);
+///         return PSFS_PASS_ON;
+///     }
+/// }
+/// stream_filter_register('f', 'F');
+/// $m = fopen('php://memory', 'w+'); fwrite($m, "abcdef"); rewind($m); fread($m, 1);
+/// $f = stream_filter_append($m, 'f', STREAM_FILTER_READ);
+/// var_dump(fread($m, 2));
+/// stream_filter_remove($f);
+/// var_dump(ftell($m), fread($m, 10));
+/// ```
+/// ```expect
+/// at 1
+/// string(2) "bc"
+/// at 3 closing
+/// int(3)
+/// string(3) "def"
+/// ```
+///
+/// `feof` from inside the call answers what the stream was when the
+/// call was made, at its end for the last read:
+///
+/// ```php
+/// class F extends php_user_filter {
+///     function filter($in, $out, &$consumed, $closing): int {
+///         while ($b = stream_bucket_make_writeable($in)) { $consumed += $b->datalen; stream_bucket_append($out, $b); }
+///         echo "filtered", $closing ? " closing" : "", feof($this->stream) ? " at eof" : "", "\n";
+///         return PSFS_PASS_ON;
+///     }
+/// }
+/// stream_filter_register('f', 'F');
+/// $t = fopen('php://temp', 'r+b'); fwrite($t, str_repeat('a', 8200)); rewind($t);
+/// stream_filter_append($t, 'f', STREAM_FILTER_READ);
+/// var_dump(strlen(stream_get_contents($t)));
+/// ```
+/// ```expect
+/// filtered
+/// filtered closing at eof
+/// int(8200)
+/// ```
+pub(crate) struct FilterCall {
+    stream: Stream,
+    position: i64,
+    /// `php_stream_eof` as it stood when the call was made: nothing in
+    /// the read buffer and the kind at its end.
+    eof: bool,
+    seek: Option<(i64, Option<Whence>)>,
+}
+
+impl FilterCall {
+    /// The position of `stream`, where it is this call's.
+    pub(crate) fn position_of(&self, stream: Stream) -> Option<i64> {
+        let position = match self.seek {
+            Some((offset, Some(Whence::Set))) => offset,
+            _ => self.position,
+        };
+        (stream.resource() == self.stream.resource()).then_some(position)
+    }
+
+    /// Whether `stream`, where it is this call's, was at its end.
+    pub(crate) fn eof_of(&self, stream: Stream) -> Option<bool> {
+        (stream.resource() == self.stream.resource()).then_some(self.eof)
+    }
+
+    /// A seek of `stream` kept for the call's return, `false` where the
+    /// stream is not this call's.
+    pub(crate) fn defer_seek(
+        &mut self,
+        stream: Stream,
+        offset: i64,
+        whence: Option<Whence>,
+    ) -> bool {
+        if stream.resource() != self.stream.resource() {
+            return false;
+        }
+        self.seek = Some((offset, whence));
+        true
+    }
 }
 
 /// A throwable a filter raised, kept for the native that asked, unless
@@ -90,20 +183,36 @@ impl PhpStream {
         let Some(stream) = self.res.map(Stream::of) else {
             return FilterStatus::ErrFatal;
         };
+        let position = self.position;
+        let eof = self.eof && self.writepos == self.readpos;
         let Some(filter) = self.chain_mut(chain).get_mut(at) else {
             return FilterStatus::ErrFatal;
         };
         let (input, output) = io;
-        match filter
+        let call = FilterCall {
+            stream,
+            position,
+            eof,
+            seek: None,
+        };
+        let outer = req.filtering.replace(call);
+        req.held_streams.push(stream.resource());
+        let answered = filter
             .ops
-            .filter(req, stream, input, output, consumed, flags)
-        {
+            .filter(req, stream, input, output, consumed, flags);
+        req.held_streams.pop();
+        let call = std::mem::replace(&mut req.filtering, outer);
+        let status = match answered {
             Ok(status) => status,
             Err(thrown) => {
                 defer(req, thrown);
                 FilterStatus::ErrFatal
             }
+        };
+        if let Some((offset, whence)) = call.and_then(|call| call.seek) {
+            self.seek(req, offset, whence);
         }
+        status
     }
 
     /// `_php_stream_fill_read_buffer`'s filtered arm
@@ -394,17 +503,27 @@ impl Request {
         &mut self,
         name: &[u8],
         params: Option<&Value>,
-    ) -> Result<Option<Box<dyn StreamFilter>>, Thrown> {
+    ) -> Option<Box<dyn StreamFilter>> {
         let lookup = |req: &Request, wanted: &[u8]| -> Option<FilterFactory> {
             req.filters
                 .iter()
                 .find(|(n, _)| n.as_slice() == wanted)
                 .map(|(_, f)| *f)
         };
+        // A factory that threw is php's `create_filter` answering `NULL`
+        // with `EG(exception)` set: refused, and the throwable kept for
+        // the native.
+        let create = |req: &mut Request, found: FilterFactory| match found(req, name, params) {
+            Ok(filter) => filter,
+            Err(thrown) => {
+                defer(req, thrown);
+                None
+            }
+        };
         let mut factory = lookup(self, name);
         let mut filter = None;
         if let Some(found) = factory {
-            filter = found(self, name, params)?;
+            filter = create(self, found);
         } else if name.contains(&b'.') {
             let mut wild = name.to_vec();
             while let Some(period) = wild.iter().rposition(|b| *b == b'.') {
@@ -412,7 +531,7 @@ impl Request {
                 wild.push(b'*');
                 if let Some(found) = lookup(self, &wild) {
                     factory = Some(found);
-                    filter = found(self, name, params)?;
+                    filter = create(self, found);
                     if filter.is_some() {
                         break;
                     }
@@ -433,7 +552,7 @@ impl Request {
             );
             warning(self, &text);
         }
-        Ok(filter)
+        filter
     }
 
     /// `stream_filter_remove`'s work (`Z/ext/standard/streamsfuncs.c:1298`)
@@ -484,6 +603,41 @@ impl Request {
 }
 
 impl Stream {
+    /// `php_stream_apply_filter_list`'s one name
+    /// (`Z/ext/standard/php_fopen_wrapper.c:153`): a filter made by the
+    /// factory `name` finds, with no parameters, appended to the read
+    /// chain and to the write chain as `(read, write)` asks, each with no
+    /// resource of its own; php's `Unable to create filter (%s)` after
+    /// the filter layer's warning for each that cannot be made.
+    pub(crate) fn apply_filter(
+        self,
+        req: &mut Request,
+        name: &[u8],
+        (read, write): (bool, bool),
+    ) -> Result<(), Thrown> {
+        for (wanted, chain) in [(read, Chain::Read), (write, Chain::Write)] {
+            if !wanted {
+                continue;
+            }
+            let Some(ops) = req.filter_create(name, None) else {
+                let text = format!(
+                    "{}(): Unable to create filter ({})",
+                    req.active_native(),
+                    String::from_utf8_lossy(name)
+                );
+                warning(req, &text);
+                continue;
+            };
+            req.stream_op(self, |req, s| {
+                s.attach(req, chain, Attached { ops, res: None }, true)
+            });
+        }
+        match req.stream_thrown.take() {
+            Some(thrown) => Err(thrown),
+            None => Ok(()),
+        }
+    }
+
     /// `apply_filter_to_stream` (`Z/ext/standard/streamsfuncs.c:1208`)
     /// past its parameters: `read_write`, `STREAM_FILTER_READ`,
     /// `STREAM_FILTER_WRITE` or both, or neither for the chains the
@@ -519,8 +673,11 @@ impl Stream {
             if read_write & bit == 0 {
                 continue;
             }
-            let Some(ops) = req.filter_create(name, params)? else {
-                return Ok(None);
+            let Some(ops) = req.filter_create(name, params) else {
+                return match req.stream_thrown.take() {
+                    Some(thrown) => Err(thrown),
+                    None => Ok(None),
+                };
             };
             let attached = req
                 .stream_op(self, |req, s| {

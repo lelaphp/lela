@@ -22,7 +22,7 @@ use php_ext::decl::{
     ParameterDefault, Type,
 };
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw};
-use php_ext::request::{Request, Resolve, Stream, Whence, WrapperOp};
+use php_ext::request::{Request, Resolve, Stream, StreamOption, Whence, WrapperOp};
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use std::os::unix::ffi::OsStrExt;
@@ -539,8 +539,8 @@ fn opendir(req: &mut Request) -> Result<Value, Thrown> {
     argument_count_between(req, 1, 2)?;
     let directory = path_argument(req, 1)?;
     context_argument(req, 2)?;
-    stream_context(req, 2, NullContext::Default)?;
-    let Some(dir) = req.open_dir(directory.as_bytes())? else {
+    let context = stream_context(req, 2, NullContext::Default)?;
+    let Some(dir) = req.with_stream_ctx(context, |req| req.open_dir(directory.as_bytes()))? else {
         return Ok(Value::bool(false));
     };
     set_default_dir(req, Some(dir));
@@ -731,7 +731,9 @@ fn rewind(req: &mut Request) -> Result<Value, Thrown> {
 fn fclose(req: &mut Request) -> Result<Value, Thrown> {
     argument_count_between(req, 1, 1)?;
     let stream = stream_argument(req, 1)?;
-    if stream.is_dir(req) {
+    // `PHP_STREAM_FLAG_NO_FCLOSE`: a directory, and a stream an operation
+    // holds while it serves PHP code on it, which `close` refuses.
+    if stream.is_dir(req) || !stream.close(req) {
         docref(
             req,
             Level::Warning,
@@ -739,7 +741,6 @@ fn fclose(req: &mut Request) -> Result<Value, Thrown> {
         );
         return Ok(Value::bool(false));
     }
-    stream.close(req);
     Ok(Value::bool(true))
 }
 
@@ -1044,8 +1045,10 @@ fn fopen(req: &mut Request) -> Result<Value, Thrown> {
         false
     };
     context_argument(req, 4)?;
-    stream_context(req, 4, NullContext::Default)?;
-    let opened = req.open_stream(filename.as_bytes(), mode.as_bytes(), use_include_path)?;
+    let context = stream_context(req, 4, NullContext::Default)?;
+    let opened = req.with_stream_ctx(context, |req| {
+        req.open_stream(filename.as_bytes(), mode.as_bytes(), use_include_path)
+    })?;
     Ok(opened.map_or_else(|| Value::bool(false), Stream::as_value))
 }
 
@@ -1565,12 +1568,19 @@ fn file_get_contents(req: &mut Request) -> Result<Value, Thrown> {
         Some(len) => Some(usize::try_from(len).unwrap_or(usize::MAX)),
         None => None,
     };
-    stream_context(req, 3, NullContext::Default)?;
-    let Some(stream) = req.open_stream(filename.as_bytes(), b"rb", use_include_path)? else {
+    let context = stream_context(req, 3, NullContext::Default)?;
+    let Some(stream) = req.with_stream_ctx(context, |req| {
+        req.open_stream(filename.as_bytes(), b"rb", use_include_path)
+    })?
+    else {
         return Ok(Value::bool(false));
     };
     if stream.is_stdio(req) {
-        stream.set_read_buffer(req, false);
+        let unbuffered = StreamOption::ReadBuffer {
+            buffered: false,
+            size: i64::from(libc::BUFSIZ),
+        };
+        stream.set_option(req, unbuffered);
     }
     if offset != 0 {
         let whence = if offset > 0 { Whence::Set } else { Whence::End };
@@ -1659,7 +1669,7 @@ fn file_put_contents(req: &mut Request) -> Result<Value, Thrown> {
         0
     };
     context_argument(req, 4)?;
-    stream_context(req, 4, no_default_context(flags))?;
+    let context = stream_context(req, 4, no_default_context(flags))?;
     let source = match data.as_ref() {
         ValueRef::Resource(_) => match Stream::from_value(req, &data) {
             Some(stream) => Some(stream),
@@ -1691,7 +1701,9 @@ fn file_put_contents(req: &mut Request) -> Result<Value, Thrown> {
         b"wb"
     };
     let use_include_path = flags & PHP_FILE_USE_INCLUDE_PATH != 0;
-    let Some(stream) = req.open_stream(name, mode, use_include_path)? else {
+    let Some(stream) =
+        req.with_stream_ctx(context, |req| req.open_stream(name, mode, use_include_path))?
+    else {
         return Ok(Value::bool(false));
     };
     if flags & LOCK_EX != 0 && !stream.flock(req, LOCK_EX) {
@@ -2072,10 +2084,10 @@ fn rmdir(req: &mut Request) -> Result<Value, Thrown> {
     argument_count_between(req, 1, 2)?;
     let dir = path_argument(req, 1)?;
     context_argument(req, 2)?;
-    stream_context(req, 2, NullContext::Default)?;
-    Ok(Value::bool(
-        req.wrapper_op(dir.as_bytes(), WrapperOp::Rmdir)?,
-    ))
+    let context = stream_context(req, 2, NullContext::Default)?;
+    Ok(Value::bool(req.with_stream_ctx(context, |req| {
+        req.wrapper_op(dir.as_bytes(), WrapperOp::Rmdir)
+    })?))
 }
 
 /// `umask(?int $mask = null): int`, `PHP_FUNCTION(umask)`
@@ -2158,9 +2170,11 @@ fn mkdir(req: &mut Request) -> Result<Value, Thrown> {
     };
     let recursive = given >= 3 && bool_argument(req, 3)?;
     context_argument(req, 4)?;
-    stream_context(req, 4, NullContext::Default)?;
+    let context = stream_context(req, 4, NullContext::Default)?;
     let op = WrapperOp::Mkdir { mode, recursive };
-    Ok(Value::bool(req.wrapper_op(dir.as_bytes(), op)?))
+    Ok(Value::bool(req.with_stream_ctx(context, |req| {
+        req.wrapper_op(dir.as_bytes(), op)
+    })?))
 }
 
 /// `rename(string $from, string $to, $context = null): bool`,
@@ -2195,9 +2209,11 @@ fn rename(req: &mut Request) -> Result<Value, Thrown> {
     let from = path_argument(req, 1)?;
     let to = path_argument(req, 2)?;
     context_argument(req, 3)?;
-    stream_context(req, 3, NullContext::Default)?;
+    let context = stream_context(req, 3, NullContext::Default)?;
     let op = WrapperOp::Rename { to: to.as_bytes() };
-    Ok(Value::bool(req.wrapper_op(from.as_bytes(), op)?))
+    Ok(Value::bool(req.with_stream_ctx(context, |req| {
+        req.wrapper_op(from.as_bytes(), op)
+    })?))
 }
 
 /// `php_copy_file_ctx` (`Z/ext/standard/file.c:1447`): the source
@@ -2309,13 +2325,11 @@ fn copy(req: &mut Request) -> Result<Value, Thrown> {
     let source = path_argument(req, 1)?;
     let target = path_argument(req, 2)?;
     context_argument(req, 3)?;
-    stream_context(req, 3, NullContext::Default)?;
+    let context = stream_context(req, 3, NullContext::Default)?;
     let _ = req.plain_path(source.as_bytes());
-    Ok(Value::bool(copy_file(
-        req,
-        source.as_bytes(),
-        target.as_bytes(),
-    )?))
+    Ok(Value::bool(req.with_stream_ctx(context, |req| {
+        copy_file(req, source.as_bytes(), target.as_bytes())
+    })?))
 }
 
 /// `php_basename(s, len, NULL, 0)` (`Z/ext/standard/string.c:1364`)
@@ -2413,10 +2427,10 @@ fn unlink(req: &mut Request) -> Result<Value, Thrown> {
     argument_count_between(req, 1, 2)?;
     let filename = path_argument(req, 1)?;
     context_argument(req, 2)?;
-    stream_context(req, 2, NullContext::Default)?;
-    Ok(Value::bool(
-        req.wrapper_op(filename.as_bytes(), WrapperOp::Unlink)?,
-    ))
+    let context = stream_context(req, 2, NullContext::Default)?;
+    Ok(Value::bool(req.with_stream_ctx(context, |req| {
+        req.wrapper_op(filename.as_bytes(), WrapperOp::Unlink)
+    })?))
 }
 
 /// `FNM_NOESCAPE`, `FNM_PATHNAME`, `FNM_PERIOD` and `FNM_CASEFOLD` as
@@ -2468,11 +2482,14 @@ fn file(req: &mut Request) -> Result<Value, Thrown> {
     if flags & !known != 0 {
         return Err(arg_value_error(req, 2, "be a valid flag value"));
     }
-    stream_context(req, 3, no_default_context(flags))?;
+    let context = stream_context(req, 3, no_default_context(flags))?;
     let include_new_line = flags & PHP_FILE_IGNORE_NEW_LINES == 0;
     let skip_blank_lines = flags & PHP_FILE_SKIP_EMPTY_LINES != 0;
     let use_include_path = flags & PHP_FILE_USE_INCLUDE_PATH != 0;
-    let Some(stream) = req.open_stream(filename.as_bytes(), b"rb", use_include_path)? else {
+    let Some(stream) = req.with_stream_ctx(context, |req| {
+        req.open_stream(filename.as_bytes(), b"rb", use_include_path)
+    })?
+    else {
         return Ok(Value::bool(false));
     };
     let contents = stream.copy_to_mem(req, None)?;
@@ -2997,8 +3014,11 @@ fn readfile(req: &mut Request) -> Result<Value, Thrown> {
     let filename = path_argument(req, 1)?;
     let use_include_path = optional_bool(req, 2, false)?;
     context_argument(req, 3)?;
-    stream_context(req, 3, NullContext::Default)?;
-    let Some(stream) = req.open_stream(filename.as_bytes(), b"rb", use_include_path)? else {
+    let context = stream_context(req, 3, NullContext::Default)?;
+    let Some(stream) = req.with_stream_ctx(context, |req| {
+        req.open_stream(filename.as_bytes(), b"rb", use_include_path)
+    })?
+    else {
         return Ok(Value::bool(false));
     };
     let size = passthru(req, stream)?;

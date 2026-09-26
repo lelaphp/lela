@@ -49,11 +49,22 @@ pub(super) struct FilterState {
     bucket_type: Option<ResourceType>,
 }
 
-/// A brigade as `filter()` holds it, the engine's buckets for the call.
-struct BrigadeCell(Brigade);
+/// A brigade as `filter()` holds it: the engine's buckets for the call,
+/// and beside each the bucket resource it is where a filter put it
+/// there, so a bucket put on a brigade again is moved as php's linked
+/// buckets are.
+struct BrigadeCell(Brigade, std::collections::VecDeque<Option<Resource>>);
 
-/// A bucket out of its brigade, its bytes.
-struct BucketCell(Vec<u8>);
+impl BrigadeCell {
+    /// The engine's buckets, none of them a program's yet.
+    fn of(buckets: Brigade) -> BrigadeCell {
+        let ids = buckets.iter().map(|_| None).collect();
+        BrigadeCell(buckets, ids)
+    }
+}
+
+/// A bucket: its bytes, and the brigade it is on, `bucket->brigade`.
+struct BucketCell(Vec<u8>, Option<Resource>);
 
 /// The constants `user_filters.stub.php` and `file.stub.php` declare
 /// for filters.
@@ -519,8 +530,8 @@ impl StreamFilter for UserFilter {
             write_prop(req, &object, b"stream", value)?;
         }
         let kind = brigade_type(req);
-        let in_res = Resource::new(req, kind, BrigadeCell(std::mem::take(input)))?;
-        let out_res = Resource::new(req, kind, BrigadeCell(std::mem::take(output)))?;
+        let in_res = Resource::new(req, kind, BrigadeCell::of(std::mem::take(input)))?;
+        let out_res = Resource::new(req, kind, BrigadeCell::of(std::mem::take(output)))?;
         let count = match &consumed {
             Some(n) => Value::int(i64::try_from(**n).unwrap_or(i64::MAX)),
             None => Value::null(),
@@ -686,7 +697,7 @@ fn bucket_object(req: &mut Request, bytes: Vec<u8>) -> Result<Value, Thrown> {
     let kind = bucket_type(req);
     let len = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
     let data = Value::string(PhpString::new(req, &bytes)?);
-    let res = Resource::new(req, kind, BucketCell(bytes))?;
+    let res = Resource::new(req, kind, BucketCell(bytes, None))?;
     let object = new_object(req, class)?;
     write_prop(req, &object, b"bucket", res.as_value())?;
     write_prop(req, &object, b"data", data)?;
@@ -728,9 +739,10 @@ fn bucket_object(req: &mut Request, bytes: Vec<u8>) -> Result<Value, Thrown> {
 fn stream_bucket_make_writeable(req: &mut Request) -> Result<Value, Thrown> {
     argument_count_between(req, 1, 1)?;
     let res = brigade_argument(req, "stream_bucket_make_writeable")?;
-    let head = res
-        .native_mut::<BrigadeCell>(req)
-        .and_then(|cell| cell.0.pop_front());
+    let head = res.native_mut::<BrigadeCell>(req).and_then(|cell| {
+        cell.1.pop_front();
+        cell.0.pop_front()
+    });
     match head {
         Some(bytes) => bucket_object(req, bytes),
         None => Ok(Value::null()),
@@ -785,12 +797,27 @@ fn bucket_attach(req: &mut Request, native: &str, append: bool) -> Result<Value,
         .native::<BucketCell>(req)
         .map(|cell| cell.0.clone())
         .unwrap_or_default();
+    // "If the bucket is already on a brigade we have to unlink it first":
+    // the bucket moves, and one already at the tail stays where it is.
+    let on = res.native::<BucketCell>(req).and_then(|cell| cell.1);
+    if let Some(from) = on
+        && let Some(cell) = from.native_mut::<BrigadeCell>(req)
+        && let Some(at) = cell.1.iter().position(|id| *id == Some(res))
+    {
+        cell.0.remove(at);
+        cell.1.remove(at);
+    }
     if let Some(cell) = brigade.native_mut::<BrigadeCell>(req) {
         if append {
             cell.0.push_back(bytes);
+            cell.1.push_back(Some(res));
         } else {
             cell.0.push_front(bytes);
+            cell.1.push_front(Some(res));
         }
+    }
+    if let Some(cell) = res.native_mut::<BucketCell>(req) {
+        cell.1 = Some(brigade);
     }
     Ok(Value::null())
 }
@@ -827,7 +854,10 @@ fn stream_bucket_prepend(req: &mut Request) -> Result<Value, Thrown> {
 }
 
 /// `stream_bucket_append($brigade, StreamBucket $bucket): void`: the
-/// bucket put at the brigade's tail, what a filter hands on.
+/// bucket put at the brigade's tail, what a filter hands on. A bucket
+/// already on a brigade is taken off it first, as
+/// `php_stream_bucket_attach` unlinks it, so putting one bucket on twice
+/// (or a clone of its object, which holds the same bucket) moves it.
 ///
 /// ```php
 /// class same extends php_user_filter {
@@ -835,6 +865,8 @@ fn stream_bucket_prepend(req: &mut Request) -> Result<Value, Thrown> {
 ///         while ($bucket = stream_bucket_make_writeable($in)) {
 ///             $bucket->data = "[$bucket->data]";
 ///             stream_bucket_append($out, $bucket);
+///             stream_bucket_append($out, $bucket);
+///             stream_bucket_prepend($out, clone $bucket);
 ///         }
 ///         return PSFS_PASS_ON;
 ///     }

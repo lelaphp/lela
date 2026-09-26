@@ -77,13 +77,17 @@ fn shown(path: &[u8]) -> std::borrow::Cow<'_, str> {
     String::from_utf8_lossy(path)
 }
 
-/// The label `wrapper->wops->label` gives a wrapper, which the natives'
-/// refusals print.
-fn label(wrapper: &Located) -> &'static str {
-    match wrapper {
-        Located::Plain => "plainfile",
-        Located::Php => "PHP",
-        Located::Ext(_) | Located::Space(_) | Located::Nothing => "user-space",
+impl Request {
+    /// The label `wrapper->wops->label` gives a wrapper, which the
+    /// natives' refusals print.
+    fn wrapper_label(&self, wrapper: &Located) -> &'static str {
+        match wrapper {
+            Located::Plain => "plainfile",
+            Located::Php => "PHP",
+            Located::Data => "RFC2397",
+            Located::Ext(at) => self.wrappers.get(*at).map_or("user-space", |w| w.label),
+            Located::Space(_) | Located::Nothing => "user-space",
+        }
     }
 }
 
@@ -91,7 +95,9 @@ fn label(wrapper: &Located) -> &'static str {
 /// php_stream_locate_url_wrapper(new_name, NULL, 0)` in `rename`.
 fn same(a: &Located, b: &Located) -> bool {
     match (a, b) {
-        (Located::Plain, Located::Plain) | (Located::Php, Located::Php) => true,
+        (Located::Plain, Located::Plain)
+        | (Located::Php, Located::Php)
+        | (Located::Data, Located::Data) => true,
         (Located::Ext(x), Located::Ext(y)) => x == y,
         (Located::Space(x), Located::Space(y)) => x.same(y),
         _ => false,
@@ -261,7 +267,11 @@ impl Request {
     /// (`Z/ext/libxml/libxml.c:487`): no warning, no stat cache, and a
     /// wrapper without a `url_stat` told apart from one whose stat failed.
     pub(crate) fn stat_url_quiet(&mut self, path: &[u8]) -> Result<UrlStat, Thrown> {
-        let (wrapper, local) = self.locate_wrapper_as(path, false);
+        let quiet = crate::streams::OpenOptions {
+            report: false,
+            ..crate::streams::OpenOptions::REPORT
+        };
+        let (wrapper, local) = self.locate_for(path, quiet);
         self.wrapper_stat(wrapper, &local, false, false, true)
     }
 
@@ -331,7 +341,7 @@ impl Request {
                 },
                 None => UrlStat::Unsupported,
             },
-            Located::Php | Located::Nothing => UrlStat::Unsupported,
+            Located::Php | Located::Data | Located::Nothing => UrlStat::Unsupported,
         })
     }
 
@@ -367,7 +377,7 @@ impl Request {
                     Located::Space(user) => {
                         crate::streams::userspace::path_op(self, &user, path, op)
                     }
-                    Located::Php | Located::Nothing => Ok(false),
+                    Located::Php | Located::Data | Located::Nothing => Ok(false),
                 }
             }
             WrapperOp::Rmdir => {
@@ -382,7 +392,7 @@ impl Request {
                     Located::Space(user) => {
                         crate::streams::userspace::path_op(self, &user, path, op)
                     }
-                    Located::Php | Located::Nothing => Ok(false),
+                    Located::Php | Located::Data | Located::Nothing => Ok(false),
                 }
             }
             WrapperOp::Touch(_)
@@ -410,12 +420,12 @@ impl Request {
                 return crate::streams::userspace::path_op(self, user, path, WrapperOp::Unlink);
             }
             Located::Ext(at) => self.wrappers[*at].unlink,
-            Located::Php => None,
+            Located::Php | Located::Data => None,
         };
         if let Some(unlink) = unlink {
             return unlink(self, path);
         }
-        let text = format!("{} does not allow unlinking", label(&wrapper));
+        let text = format!("{} does not allow unlinking", self.wrapper_label(&wrapper));
         docref(self, Level::Warning, &text);
         Ok(false)
     }
@@ -453,12 +463,12 @@ impl Request {
             }
             Located::Plain | Located::Space(_) => None,
             Located::Ext(at) => self.wrappers[*at].rename,
-            Located::Php => {
-                docref(
-                    self,
-                    Level::Warning,
-                    "PHP wrapper does not support renaming",
+            Located::Php | Located::Data => {
+                let text = format!(
+                    "{} wrapper does not support renaming",
+                    self.wrapper_label(&wrapper)
                 );
+                docref(self, Level::Warning, &text);
                 return Ok(false);
             }
         };
@@ -708,7 +718,7 @@ impl Request {
             Located::Space(user) => {
                 return crate::streams::userspace::path_op(self, &user, path, op);
             }
-            Located::Php | Located::Nothing => {}
+            Located::Php | Located::Data | Located::Nothing => {}
         }
         let name = match op {
             WrapperOp::Touch(None) => {

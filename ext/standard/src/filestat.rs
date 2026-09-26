@@ -371,6 +371,28 @@ pub(super) fn strerror(error: &std::io::Error) -> String {
 /// A path as the C library is handed it: against the request's working
 /// directory, and the empty path left empty, which every call answers
 /// `ENOENT` to.
+/// `php_is_stream_path` (`Z/main/php_streams.h`): letters, digits, `+`,
+/// `-` and `.`, at least one, then `://`.
+fn is_stream_path(path: &[u8]) -> bool {
+    let n = path
+        .iter()
+        .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+        .count();
+    n > 0 && path[n..].starts_with(b"://")
+}
+
+/// The path an access check asks `access(2)` of: "if the wrapper is not
+/// found, we need to expand path to match open behavior", so a path that
+/// still reads as a scheme's is `expand_filepath`'s, `.` and `..` taken
+/// out as the open's resolution takes them, and any other as it is.
+fn access_path(req: &mut Request, local: Vec<u8>) -> Vec<u8> {
+    if !is_stream_path(&local) {
+        return local;
+    }
+    let cwd = req.cwd().0.as_os_str().as_encoded_bytes().to_vec();
+    crate::virtual_cwd::expand_filepath(req, &local, &cwd).unwrap_or(local)
+}
+
 fn host(req: &Request, path: &[u8]) -> PathBuf {
     if path.is_empty() {
         PathBuf::new()
@@ -440,18 +462,26 @@ fn has_file_scheme(filename: &[u8]) -> bool {
 /// where it is not. An access check of another wrapper's file reads the
 /// owner's, group's or other's permission bits by whose the file is.
 /// `PHPAPI` in `php_filestat.h`: what `SplFileInfo`'s `isWritable()`,
-/// `isReadable()` and `isExecutable()` call directly.
+/// `isReadable()` and `isExecutable()` call directly. A path whose
+/// scheme no wrapper serves is the plain files wrapper's as written, and
+/// its access check `expand_filepath`'s, `.` and `..` taken out, as the
+/// open of it resolves it.
 ///
 /// ```php
 /// $p = __DIR__ . '/spl-stat.txt'; touch($p); chmod($p, 0644);
 /// $i = new SplFileInfo($p);
 /// var_dump($i->isReadable(), $i->isWritable(), $i->isExecutable(), (new SplFileInfo(__DIR__ . '/nope'))->isReadable());
+/// chdir(__DIR__);
+/// var_dump(file_exists('nowrapper://host/../../spl-stat.txt'));
 /// ```
 /// ```expect
 /// bool(true)
 /// bool(true)
 /// bool(false)
 /// bool(false)
+///
+/// Warning: file_exists(): Unable to find the wrapper "nowrapper" - did you forget to enable it when you configured PHP? in %s on line 6
+/// bool(true)
 /// ```
 pub fn php_stat(req: &mut Request, filename: &[u8], ty: Fs) -> Result<Value, Thrown> {
     let bad = filename.is_empty() || filename.contains(&0);
@@ -466,7 +496,8 @@ pub fn php_stat(req: &mut Request, filename: &[u8], ty: Fs) -> Result<Value, Thr
                 Fs::IsX => ffi::X_OK,
                 _ => ffi::F_OK,
             };
-            return Ok(Value::bool(ffi::access(&host(req, &local), mode)));
+            let check = access_path(req, local);
+            return Ok(Value::bool(ffi::access(&host(req, &check), mode)));
         }
     }
     if bad {

@@ -232,6 +232,7 @@ request::IniEntry
 request::Interrupt
 request::Interrupt::raise
 request::Interrupt::raised
+request::OptionAnswer
 request::OutputOp
 request::PHP_VERSION
 request::PathIntent
@@ -379,6 +380,7 @@ request::Request::url_stat
 request::Request::url_stat_quiet
 request::Request::variadic_arguments
 request::Request::virtual_file_ex
+request::Request::with_stream_ctx
 request::Request::wrapper_op
 request::Request::wrapper_register
 request::Request::wrapper_restore
@@ -404,6 +406,7 @@ request::Stream::flock
 request::Stream::flush
 request::Stream::from_value
 request::Stream::get_line
+request::Stream::get_record
 request::Stream::is_dir
 request::Stream::is_stdio
 request::Stream::meta_data
@@ -414,9 +417,7 @@ request::Stream::recvfrom
 request::Stream::resource
 request::Stream::seek
 request::Stream::sendto
-request::Stream::set_blocking
-request::Stream::set_read_buffer
-request::Stream::set_timeout
+request::Stream::set_option
 request::Stream::shutdown
 request::Stream::socket_name
 request::Stream::stat
@@ -435,6 +436,7 @@ request::StreamOps::seek
 request::StreamOps::seekable
 request::StreamOps::size
 request::StreamOps::write
+request::StreamOption
 request::StreamWrapper
 request::UrlStat
 request::Whence

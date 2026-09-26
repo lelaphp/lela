@@ -22,7 +22,7 @@ use std::os::unix::ffi::OsStrExt;
 use php_ext::coerce::{callable_checked, value_name};
 use php_ext::decl::{Attribute, AttributeArgument, ConstDecl, ConstExpr, FunctionDecl, Name};
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, deprecated, docref, throw};
-use php_ext::request::{Request, Resolve, Stream, Whence};
+use php_ext::request::{OptionAnswer, Request, Resolve, Stream, StreamOption, Whence};
 use php_ext::values::{Key, PhpArray, PhpString, Resource, ResourceType, Value, ValueRef};
 
 use crate::file::stream_argument;
@@ -44,9 +44,6 @@ use crate::{
 pub(crate) struct Contexts {
     kind: Option<ResourceType>,
     default: Option<Resource>,
-    /// `stream->chunk_size` for each stream `stream_set_chunk_size` set,
-    /// by resource number; a stream not here has php's 8192.
-    chunk_sizes: Vec<(i64, i64)>,
 }
 
 /// `php_stream_context`: its options array and its notifier's callback.
@@ -57,9 +54,6 @@ struct Context {
 
 /// `PHP_STREAM_COPY_ALL` as `stream_get_contents` spells it, `-1`.
 const COPY_ALL: i64 = -1;
-
-/// `PHP_SOCK_CHUNK_SIZE`, the default `stream->chunk_size`.
-const CHUNK_SIZE: i64 = 8192;
 
 /// The `STREAM_*` constants of `file.stub.php` the streams natives read
 /// or hand back, in its order, with this host's values where the stub
@@ -411,33 +405,47 @@ pub(crate) enum NullContext {
 
 /// `php_stream_context_from_zval(zcontext, nocontext)`
 /// (`Z/main/streams/php_stream_context.h:36`) over the `$context` at
-/// `position`, which `Z_PARAM_RESOURCE_OR_NULL` has taken: the one given, or
-/// for `null` `FG(default_context)`, made on the first use and a
-/// resource of the request's from then, unless `nocontext` says none.
-/// The first open of a request that is handed no `$context` makes it,
-/// so under the CLI it is resource 4, after the three standard streams,
-/// and the stream is 5.
+/// `position`, which `Z_PARAM_RESOURCE_OR_NULL` has taken: the one given,
+/// which must be a `stream-context` (`zend_fetch_resource_ex`'s
+/// `supplied resource is not a valid Stream-Context resource`), or for
+/// `null` `FG(default_context)`, made on the first use and a resource of
+/// the request's from then, unless `nocontext` says none. The first open
+/// of a request that is handed no `$context` makes it, so under the CLI
+/// it is resource 4, after the three standard streams, and the stream is
+/// 5. What it answers is the `php_stream_context` the native's stream
+/// operations are handed ([`Request::with_stream_ctx`]).
 ///
 /// ```php
 /// var_dump(fopen('php://memory', 'r'), stream_context_get_default(), fopen('php://memory', 'r'));
+/// try { file_get_contents(__FILE__, false, STDIN); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
 /// ```
 /// ```expect
 /// resource(5) of type (stream)
 /// resource(4) of type (stream-context)
 /// resource(6) of type (stream)
+/// file_get_contents(): supplied resource is not a valid Stream-Context resource
 /// ```
 pub(crate) fn stream_context(
     req: &mut Request,
     position: u32,
     nocontext: NullContext,
-) -> Result<(), Thrown> {
+) -> Result<Option<Resource>, Thrown> {
     let given = req.argument(position).unwrap_or_default().deref();
-    if nocontext == NullContext::Default
-        && matches!(given.as_ref(), ValueRef::Null | ValueRef::Undef)
-    {
-        default_context(req)?;
+    if let Some(res) = given.as_resource().copied() {
+        let kind = context_type(req);
+        if res.is_closed() || res.kind() != Some(kind) {
+            let text = format!(
+                "{}(): supplied resource is not a valid Stream-Context resource",
+                req.active_function_name()
+            );
+            return Err(throw(req, "TypeError", &text));
+        }
+        return Ok(Some(res));
     }
-    Ok(())
+    if nocontext == NullContext::Default {
+        return Ok(Some(default_context(req)?));
+    }
+    Ok(None)
 }
 
 /// `Z_PARAM_RESOURCE` then `decode_context_param`
@@ -1096,28 +1104,61 @@ fn stream_supports_lock(req: &mut Request) -> Result<Value, Thrown> {
 /// `stream_set_write_buffer($stream, int $size): int` and its alias
 /// `set_file_buffer`, `PHP_FUNCTION(stream_set_write_buffer)`
 /// (`Z/ext/standard/streamsfuncs.c:1414`): `PHP_STREAM_OPTION_WRITE_BUFFER`,
-/// which only a stream over a `FILE*` takes; every kind here is over a
-/// `descriptor` or memory, so the answer is `EOF`.
+/// `PHP_STREAM_BUFFER_NONE` for zero and `PHP_STREAM_BUFFER_FULL` with the
+/// size otherwise, and `0` where the stream took it, `EOF` where not. A
+/// plain file's takes it only over a `FILE*`, which none here is over,
+/// memory has no such option, and a user-space stream is asked with
+/// `stream_set_option`, `BUFSIZ` its size where none is given.
 ///
 /// ```php
+/// class W { public $context; function stream_open($p, $m, $o, &$op) { return true; }
+///     function stream_set_option($o, $a, $b) { echo "option: $o, $a, $b\n"; return $o == 3 && $a == 2; } }
+/// stream_wrapper_register('ww', 'W');
 /// var_dump(stream_set_write_buffer(fopen(__FILE__, 'r'), 0), set_file_buffer(fopen('php://memory', 'r'), 100));
+/// $w = fopen('ww://x', 'r');
+/// var_dump(stream_set_write_buffer($w, 50), stream_set_read_buffer($w, 10));
 /// ```
 /// ```expect
 /// int(-1)
 /// int(-1)
+/// option: 3, 2, 50
+/// option: 2, 2, 10
+/// int(0)
+/// int(-1)
 /// ```
 fn stream_set_write_buffer(req: &mut Request) -> Result<Value, Thrown> {
     argument_count_between(req, 2, 2)?;
-    stream_argument(req, 1)?;
-    long_argument(req, 2)?;
-    Ok(Value::int(-1))
+    let stream = stream_argument(req, 1)?;
+    let buff = long_argument(req, 2)?;
+    let option = StreamOption::WriteBuffer {
+        buffered: buff != 0,
+        size: buffer_size(buff),
+    };
+    Ok(Value::int(option_answer(stream.set_option(req, option))))
+}
+
+/// The size a buffer option hands on: the one given, or `BUFSIZ`, what
+/// `user_stream_set_option` hands where `ptrparam` is `NULL`, for zero.
+fn buffer_size(buff: i64) -> i64 {
+    if buff == 0 {
+        i64::from(libc::BUFSIZ)
+    } else {
+        buff
+    }
+}
+
+/// `RETURN_LONG(ret == 0 ? 0 : EOF)`.
+fn option_answer(answer: OptionAnswer) -> i64 {
+    if answer == OptionAnswer::Ok { 0 } else { -1 }
 }
 
 /// `stream_set_read_buffer($stream, int $size): int`,
 /// `PHP_FUNCTION(stream_set_read_buffer)`
-/// (`Z/ext/standard/streamsfuncs.c:1471`): zero reads the kind directly,
-/// any other size buffers it again, and php's generic layer takes either,
-/// so the answer is `0`.
+/// (`Z/ext/standard/streamsfuncs.c:1471`): `PHP_STREAM_OPTION_READ_BUFFER`,
+/// zero reading the kind directly and any other size buffering it again,
+/// which php's generic layer takes for a kind that does not, so a kind
+/// here answers `0`, and a user-space stream what its `stream_set_option`
+/// says.
 ///
 /// ```php
 /// $m = fopen('php://memory', 'r+'); fwrite($m, "abc"); rewind($m);
@@ -1132,51 +1173,72 @@ fn stream_set_write_buffer(req: &mut Request) -> Result<Value, Thrown> {
 fn stream_set_read_buffer(req: &mut Request) -> Result<Value, Thrown> {
     argument_count_between(req, 2, 2)?;
     let stream = stream_argument(req, 1)?;
-    let size = long_argument(req, 2)?;
-    stream.set_read_buffer(req, size != 0);
-    Ok(Value::int(0))
+    let buff = long_argument(req, 2)?;
+    let option = StreamOption::ReadBuffer {
+        buffered: buff != 0,
+        size: buffer_size(buff),
+    };
+    Ok(Value::int(option_answer(stream.set_option(req, option))))
 }
 
 /// `stream_set_blocking($stream, bool $enable): bool` and its alias
 /// `socket_set_blocking`, `PHP_FUNCTION(stream_set_blocking)`
 /// (`Z/ext/standard/streamsfuncs.c:1357`): `PHP_STREAM_OPTION_BLOCKING`,
-/// which fails only as `-1`; a plain file's `O_NONBLOCK` changes nothing
-/// a read of it sees, and memory has no such option, so every kind here
-/// answers `true`.
+/// which fails only as `-1`: `O_NONBLOCK` on a plain file, a pipe or a
+/// socket, `stream_set_option` on a user-space stream, and `true` for
+/// memory, which has no such option. A pipe set not to block answers a
+/// read with nothing where it has nothing.
 ///
 /// ```php
+/// $p = popen('sleep 1', 'r');
+/// var_dump(stream_set_blocking($p, false), fread($p, 10), stream_get_meta_data($p)['blocked']);
 /// var_dump(stream_set_blocking(fopen('php://memory', 'r'), false), socket_set_blocking(fopen(__FILE__, 'r'), true));
+/// pclose($p);
 /// ```
 /// ```expect
+/// bool(true)
+/// string(0) ""
+/// bool(false)
 /// bool(true)
 /// bool(true)
 /// ```
 fn stream_set_blocking(req: &mut Request) -> Result<Value, Thrown> {
     argument_count_between(req, 2, 2)?;
-    stream_argument(req, 1)?;
-    bool_argument(req, 2)?;
-    Ok(Value::bool(true))
+    let stream = stream_argument(req, 1)?;
+    let block = bool_argument(req, 2)?;
+    let answer = stream.set_option(req, StreamOption::Blocking(block));
+    Ok(Value::bool(answer != OptionAnswer::Err))
 }
 
 /// `stream_set_timeout($stream, int $seconds, int $microseconds = 0): bool`
 /// and its alias `socket_set_timeout`, `PHP_FUNCTION(stream_set_timeout)`
 /// (`Z/ext/standard/streamsfuncs.c:1374`): `PHP_STREAM_OPTION_READ_TIMEOUT`,
-/// which only a socket takes, and no kind here is one.
+/// the microseconds carried into the seconds as php carries them, and
+/// `true` only for `PHP_STREAM_OPTION_RETURN_OK`, which a socket and a
+/// user-space stream whose `stream_set_option` says so answer.
 ///
 /// ```php
 /// var_dump(stream_set_timeout(fopen('php://memory', 'r'), 1), socket_set_timeout(fopen(__FILE__, 'r'), 1, 500));
+/// $s = stream_socket_server('tcp://127.0.0.1:0');
+/// var_dump(stream_set_timeout($s, 0, 1500000));
 /// ```
 /// ```expect
 /// Deprecated: Function socket_set_timeout() is deprecated since 8.5, use stream_set_timeout() instead in %s on line 2
 /// bool(false)
 /// bool(false)
+/// bool(true)
 /// ```
 fn stream_set_timeout(req: &mut Request) -> Result<Value, Thrown> {
     argument_count_between(req, 2, 3)?;
-    stream_argument(req, 1)?;
-    long_argument(req, 2)?;
-    optional_long(req, 3, 0)?;
-    Ok(Value::bool(false))
+    let stream = stream_argument(req, 1)?;
+    let seconds = long_argument(req, 2)?;
+    let microseconds = optional_long(req, 3, 0)?;
+    let seconds = seconds.saturating_add(microseconds / 1_000_000);
+    let micros = microseconds % 1_000_000;
+    let timeout = std::time::Duration::from_secs(u64::try_from(seconds).unwrap_or(0))
+        + std::time::Duration::from_micros(u64::try_from(micros).unwrap_or(0));
+    let answer = stream.set_option(req, StreamOption::ReadTimeout(timeout));
+    Ok(Value::bool(answer == OptionAnswer::Ok))
 }
 
 /// `socket_set_timeout`, `ZEND_ACC_DEPRECATED`: the call raises
@@ -1210,16 +1272,16 @@ fn stream_set_chunk_size(req: &mut Request) -> Result<Value, Thrown> {
     if size <= 0 {
         return Err(arg_value_error(req, 2, "be greater than 0"));
     }
-    let id = stream.resource().id();
-    let sizes = &mut req.state::<State>().contexts.chunk_sizes;
-    let old = if let Some(entry) = sizes.iter_mut().find(|(at, _)| *at == id) {
-        std::mem::replace(&mut entry.1, size)
-    } else {
-        sizes.push((id, size));
-        CHUNK_SIZE
+    let size = usize::try_from(size).unwrap_or(usize::MAX);
+    let OptionAnswer::Previous(old) = stream.set_option(req, StreamOption::ChunkSize(size)) else {
+        return Ok(Value::bool(false));
     };
     // `stream->chunk_size > INT_MAX ? INT_MAX : (int)stream->chunk_size`.
-    Ok(Value::int(old.min(i64::from(i32::MAX))))
+    Ok(Value::int(
+        i64::try_from(old)
+            .unwrap_or(i64::MAX)
+            .min(i64::from(i32::MAX)),
+    ))
 }
 
 /// `stream_get_line($stream, int $length, string $ending = ""): string|false`,
@@ -1229,8 +1291,24 @@ fn stream_set_chunk_size(req: &mut Request) -> Result<Value, Thrown> {
 /// with one, the bytes before the first ending found within that many,
 /// the ending consumed and not returned, or that many bytes where none
 /// is; what is left at the end of the stream, and `false` where nothing
-/// is. The stream is read a byte at a time, which consumes what php's
-/// look into the read buffer consumes.
+/// is, or where a stream that does not block has nothing more yet. The
+/// stream's read buffer is filled a chunk at a time, for every kind, so
+/// a filter appended after it sees the bytes it holds.
+///
+/// ```php
+/// $m = fopen('php://memory', 'wb+'); fwrite($m, ".\r\n==="); rewind($m);
+/// var_dump(stream_get_line($m, 8192, "\r\n"), stream_get_meta_data($m)['unread_bytes']);
+/// var_dump(stream_filter_append($m, 'convert.base64-decode'));
+/// ```
+/// ```expect
+/// string(1) "."
+/// int(3)
+///
+/// Warning: stream_filter_append(): Stream filter (convert.base64-decode): invalid byte sequence in %s on line 4
+///
+/// Warning: stream_filter_append(): Filter failed to process pre-buffered data in %s on line 4
+/// bool(false)
+/// ```
 ///
 /// ```php
 /// $m = fopen('php://memory', 'r+'); fwrite($m, "a||b||c"); rewind($m);
@@ -1264,21 +1342,10 @@ fn stream_get_line(req: &mut Request) -> Result<Value, Thrown> {
     } else {
         usize::try_from(length).unwrap_or(usize::MAX)
     };
-    let mut record: Vec<u8> = Vec::new();
-    while record.len() < maxlen {
-        match stream.read(req, 1)? {
-            Some(byte) if !byte.is_empty() => record.extend_from_slice(byte.as_bytes()),
-            _ => break,
-        }
-        if !ending.is_empty() && record.ends_with(&ending) {
-            record.truncate(record.len() - ending.len());
-            return Ok(Value::string(PhpString::new(req, &record)?));
-        }
+    match stream.get_record(req, maxlen, &ending)? {
+        Some(record) => Ok(Value::string(record)),
+        None => Ok(Value::bool(false)),
     }
-    if record.is_empty() {
-        return Ok(Value::bool(false));
-    }
-    Ok(Value::string(PhpString::new(req, &record)?))
 }
 
 /// `stream_resolve_include_path(string $filename): string|false`,
@@ -1353,29 +1420,32 @@ fn stream_resolve_include_path(req: &mut Request) -> Result<Value, Thrown> {
     }
 }
 
-/// The engine's own wrappers, `php` and then `file`, in the order php
-/// registers them, and then those the program registered.
-pub(super) fn builtin_and_registered(req: &Request) -> Vec<String> {
-    let mut schemes = vec![String::from("php"), String::from("file")];
-    schemes.extend(req.stream_wrappers());
-    schemes
-}
-
 /// `stream_get_wrappers(): array`, `PHP_FUNCTION(stream_get_wrappers)`
 /// (`Z/ext/standard/streamsfuncs.c:583`): the schemes of the wrappers
-/// the request has, in the order they were registered.
+/// the request has, in the order they were registered, with what a
+/// program registered and without what it unregistered.
 ///
 /// ```php
 /// foreach (stream_get_wrappers() as $w) { if ($w === 'php' || $w === 'file') echo $w, "\n"; }
+/// class Foo {}
+/// stream_wrapper_register('foo', 'Foo');
+/// var_dump(in_array('foo', stream_get_wrappers()));
+/// stream_wrapper_unregister('file');
+/// var_dump(in_array('file', stream_get_wrappers()));
+/// stream_wrapper_restore('file');
+/// var_dump(in_array('file', stream_get_wrappers()));
 /// ```
 /// ```expect
 /// php
 /// file
+/// bool(true)
+/// bool(false)
+/// bool(true)
 /// ```
 fn stream_get_wrappers(req: &mut Request) -> Result<Value, Thrown> {
     argument_count_between(req, 0, 0)?;
     let mut array = PhpArray::new(req)?;
-    for scheme in builtin_and_registered(req) {
+    for scheme in req.stream_wrappers() {
         let scheme = Value::string(PhpString::new(req, scheme.as_bytes())?);
         array.append(req, scheme)?;
     }
@@ -1423,7 +1493,8 @@ fn stream_is_local(req: &mut Request) -> Result<Value, Thrown> {
         return Ok(Value::bool(true));
     }
     let scheme = &path[..n];
-    let known = builtin_and_registered(req)
+    let known = req
+        .stream_wrappers()
         .iter()
         .any(|w| w.as_bytes().eq_ignore_ascii_case(scheme));
     if !known {

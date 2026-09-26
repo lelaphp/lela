@@ -19,9 +19,9 @@
 //! copied from the built-in one at the first change and dropped with
 //! the request (ADR-0005).
 
-use super::{MetaData, Ops, PhpStream, StatBuf};
+use super::{CastTarget, MetaData, Ops, PhpStream, StatBuf};
 use crate::api::raising::{Level, Thrown, docref};
-use crate::api::request::{Request, Stream, Whence, WrapperOp};
+use crate::api::request::{OptionAnswer, Request, Stream, StreamOption, Whence, WrapperOp};
 use crate::api::values::{ClassId, Key, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
 
 /// `struct php_user_stream_wrapper` less the scheme, which is the row's:
@@ -71,7 +71,7 @@ fn defer(req: &mut Request, thrown: Thrown) {
 /// the object, or the object's `__call` with the name and the arguments
 /// as an array where the class has no such method.
 fn call(req: &mut Request, object: PhpObject, name: &[u8], args: &[Value]) -> Called {
-    if req.stream_thrown.is_some() {
+    if req.stream_thrown.is_some() || req.is_pending() {
         return Called::Threw;
     }
     let class = object.class();
@@ -101,6 +101,12 @@ fn call(req: &mut Request, object: PhpObject, name: &[u8], args: &[Value]) -> Ca
         return Called::Missing;
     };
     match served {
+        // A method that ended the request, `exit` or a fatal error, is
+        // php's bailout: nothing after it is served.
+        Ok(value) if req.is_pending() => {
+            req.release(value);
+            Called::Threw
+        }
         Ok(value) => Called::Value(value),
         Err(thrown) => {
             defer(req, thrown);
@@ -121,8 +127,9 @@ fn truthy(req: &mut Request, value: &Value) -> bool {
 
 /// `user_stream_create_object` (`Z/main/streams/userspace.c:242`): an
 /// instance of the class, `None` for one that cannot be instantiated;
-/// its `context` set to `null`, since no stream here has a `context`, and
-/// its constructor called with nothing.
+/// its `$context` set to the `php_stream_context` the operation was
+/// handed, one owner more of it, or to `null` for none, and its
+/// constructor called with nothing.
 fn create_object(req: &mut Request, user: &UserWrapper) -> Result<Option<PhpObject>, Thrown> {
     if req.instantiable(user.class).is_err() {
         if let Some(pending) = req.take_pending() {
@@ -132,7 +139,15 @@ fn create_object(req: &mut Request, user: &UserWrapper) -> Result<Option<PhpObje
     }
     let object = req.new_object(user.class)?;
     let name = PhpString::new(req, b"context")?;
-    if let Err(thrown) = object.set_prop(req, name, Value::null()) {
+    let context = match req.stream_ctx {
+        Some(context) => {
+            let value = context.as_value();
+            req.addref(&value);
+            value
+        }
+        None => Value::null(),
+    };
+    if let Err(thrown) = object.set_prop(req, name, context) {
         req.release(object.as_value());
         return Err(thrown);
     }
@@ -176,10 +191,26 @@ pub(crate) fn open(
         return Ok(Err(String::from("infinite recursion prevented")));
     }
     let outer = req.user_stream_current.replace(path.to_vec());
+    // A wrapper that is no URL wrapper, opening for an include under
+    // `allow_url_include=0`, holds the opens it makes to
+    // `allow_url_include` as an include's are (`PG(in_user_include)`).
+    let in_user_include = req.in_user_include;
+    if !user.is_url
+        && options & STREAM_OPEN_FOR_INCLUDE != 0
+        && !req
+            .ini_get(b"allow_url_include")
+            .is_none_or(Request::ini_parse_bool)
+    {
+        req.in_user_include = true;
+    }
     let opened = open_with(req, user, path, mode, options);
+    req.in_user_include = in_user_include;
     req.user_stream_current = outer;
     opened
 }
+
+/// `STREAM_OPEN_FOR_INCLUDE`.
+const STREAM_OPEN_FOR_INCLUDE: i64 = 128;
 
 /// `REPORT_ERRORS`, which `mkdir` and `rmdir` hand their methods.
 const REPORT_ERRORS: i64 = 8;
@@ -234,6 +265,7 @@ fn open_with(
     let kind = UserStream {
         object,
         no_seek: false,
+        own: None,
     };
     let stream = req.stream_alloc(PhpStream::new(Box::new(kind), mode))?;
     Ok(Ok(stream))
@@ -305,34 +337,31 @@ fn open_dir_with(
 struct UserStream {
     object: PhpObject,
     no_seek: bool,
+    /// The stream the kind is under, which its methods hold against
+    /// `fclose`.
+    own: Option<Stream>,
 }
 
-/// `statbuf_from_array` (`Z/main/streams/userspace.c:799`): each of the
-/// thirteen fields read by its name, zero where it is not there.
-fn statbuf_from_array(req: &mut Request, array: PhpArray) -> Result<StatBuf, Thrown> {
-    const NAMES: [&[u8]; 13] = [
-        b"dev", b"ino", b"mode", b"nlink", b"uid", b"gid", b"rdev", b"size", b"atime", b"mtime",
-        b"ctime", b"blksize", b"blocks",
-    ];
-    let mut sb = [0; 13];
-    for (field, name) in sb.iter_mut().zip(NAMES) {
-        let key = Key::Str(PhpString::new(req, name)?);
-        if let Some(value) = array.get(&key) {
-            *field = crate::api::coerce::to_long(req, &value.deref())?;
+impl UserStream {
+    /// `f` with the stream held against `fclose`, php's
+    /// `PHP_STREAM_FLAG_NO_FCLOSE` around `stream_read`, `stream_eof`,
+    /// `stream_write`, `stream_seek` and `stream_cast`.
+    fn held<R>(&mut self, req: &mut Request, f: impl FnOnce(&mut Self, &mut Request) -> R) -> R {
+        let own = self.own.map(Stream::resource);
+        if let Some(res) = own {
+            req.held_streams.push(res);
         }
-    }
-    Ok(sb)
-}
-
-impl Ops for UserStream {
-    fn label(&self) -> &'static str {
-        "user-space"
+        let answer = f(self, req);
+        if own.is_some() {
+            req.held_streams.pop();
+        }
+        answer
     }
 
     /// `php_userstreamop_write` (`Z/main/streams/userspace.c:562`):
     /// `stream_write` with the bytes; `false` is `-1`, anything else an
     /// int, one past what was handed php's warning and cut to it.
-    fn write(&mut self, req: &mut Request, buf: &[u8]) -> Option<usize> {
+    fn write_held(&mut self, req: &mut Request, buf: &[u8]) -> Option<usize> {
         let data = string_arg(req, buf).ok()?;
         let called = call(req, self.object, b"stream_write", &[data]);
         req.release(data);
@@ -366,7 +395,21 @@ impl Ops for UserStream {
     /// `stream_read` with the count, its string taken, one past the count
     /// php's warning and cut; then `stream_eof`, which is how the stream
     /// learns it is at eof, and whose absence is php's warning and eof.
-    fn read(&mut self, req: &mut Request, buf: &mut [u8], eof: &mut bool) -> Option<usize> {
+    /// An answer that cannot be a string is `try_convert_to_string`'s
+    /// `Error`, thrown from the native that read.
+    ///
+    /// ```php
+    /// class M { public $context;
+    ///     function stream_open($p, $m, $o, &$op) { return true; }
+    ///     function stream_stat() { return false; }
+    ///     function stream_read($n) { return new stdClass; } }
+    /// stream_wrapper_register('mm', 'M');
+    /// try { var_dump(file_get_contents('mm://')); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Object of class stdClass could not be converted to string
+    /// ```
+    fn read_held(&mut self, req: &mut Request, buf: &mut [u8], eof: &mut bool) -> Option<usize> {
         let count = i64::try_from(buf.len()).unwrap_or(i64::MAX);
         let value = match call(req, self.object, b"stream_read", &[Value::int(count)]) {
             Called::Missing | Called::Threw => return None,
@@ -375,9 +418,15 @@ impl Ops for UserStream {
         if matches!(value.as_ref(), ValueRef::Bool(false)) {
             return None;
         }
-        let Ok(text) = crate::api::coerce::to_string(req, &value) else {
-            req.release(value);
-            return None;
+        // `try_convert_to_string`: what cannot be a string throws, and the
+        // read fails with it pending.
+        let text = match crate::api::coerce::to_string(req, &value) {
+            Ok(text) => text,
+            Err(thrown) => {
+                req.release(value);
+                defer(req, thrown);
+                return None;
+            }
         };
         req.release(value);
         let mut didread = text.len();
@@ -391,6 +440,7 @@ impl Ops for UserStream {
             didread = buf.len();
         }
         buf[..didread].copy_from_slice(&text.as_bytes()[..didread]);
+        req.release(Value::string(text));
         match call(req, self.object, b"stream_eof", &[]) {
             Called::Missing => {
                 let text = format!(
@@ -415,33 +465,12 @@ impl Ops for UserStream {
         Some(didread)
     }
 
-    /// `php_userstreamop_close` (`Z/main/streams/userspace.c:699`):
-    /// `stream_close` where it is there, then the instance given up.
-    fn close(&mut self, req: &mut Request) -> i32 {
-        if let Called::Value(value) = call(req, self.object, b"stream_close", &[]) {
-            req.release(value);
-        }
-        req.release(self.object.as_value());
-        0
-    }
-
-    /// `php_userstreamop_flush`: `stream_flush`, `true` its answer.
-    fn flush(&mut self, req: &mut Request) -> bool {
-        match call(req, self.object, b"stream_flush", &[]) {
-            Called::Value(value) => {
-                let flushed = truthy(req, &value);
-                req.release(value);
-                flushed
-            }
-            Called::Missing | Called::Threw => false,
-        }
-    }
-
     /// `php_userstreamop_seek` (`Z/main/streams/userspace.c:741`):
     /// `stream_seek` with the offset and the whence; a class with none
     /// makes the stream one that cannot seek; a true answer is followed
     /// by `stream_tell`, whose int is the position.
-    fn seek(
+    #[allow(clippy::unnecessary_wraps)] // `Ops::seek`'s answer, which it is
+    fn seek_held(
         &mut self,
         req: &mut Request,
         offset: i64,
@@ -491,6 +520,157 @@ impl Ops for UserStream {
                 Some(false)
             }
             Called::Threw => Some(false),
+        }
+    }
+
+    /// `php_userstreamop_cast` (`Z/main/streams/userspace.c:1413`):
+    /// `stream_cast` with `STREAM_CAST_FOR_SELECT` or
+    /// `STREAM_CAST_AS_STREAM`, and the stream it answers cast in this
+    /// one's place; a class without it, an answer that is no stream and
+    /// the stream itself are php's warnings, and a false answer is
+    /// refused in silence.
+    fn cast_target_held(
+        &mut self,
+        req: &mut Request,
+        select: bool,
+        own: Option<Stream>,
+    ) -> Option<Stream> {
+        let castas = if select { 3 } else { 0 };
+        let value = match call(req, self.object, b"stream_cast", &[Value::int(castas)]) {
+            Called::Missing => {
+                not_implemented(req, self.object, "stream_cast");
+                return None;
+            }
+            Called::Threw => return None,
+            Called::Value(value) => value,
+        };
+        if !truthy(req, &value) {
+            req.release(value);
+            return None;
+        }
+        let inner = Stream::from_value(req, &value.deref());
+        req.release(value);
+        let complaint = match inner {
+            None => "must return a stream resource",
+            Some(inner) if own.is_some_and(|own| own.resource() == inner.resource()) => {
+                "must not return itself"
+            }
+            Some(inner) => return Some(inner),
+        };
+        let text = format!("{}::stream_cast {complaint}", class_name(req, self.object));
+        docref(req, Level::Warning, &text);
+        None
+    }
+
+    /// `user_stream_set_check_liveliness` (`Z/main/streams/userspace.c:952`):
+    /// `stream_eof`, `true` the stream's end and `false` its life; a class
+    /// without it, and an answer that is no bool, are php's warnings and
+    /// the end.
+    fn check_liveness(&mut self, req: &mut Request) -> OptionAnswer {
+        let value = match call(req, self.object, b"stream_eof", &[]) {
+            Called::Missing => {
+                let text = format!(
+                    "{}::stream_eof is not implemented! Assuming EOF",
+                    class_name(req, self.object)
+                );
+                docref(req, Level::Warning, &text);
+                return OptionAnswer::Err;
+            }
+            Called::Threw => return OptionAnswer::Err,
+            Called::Value(value) => value,
+        };
+        match value.as_ref() {
+            ValueRef::Bool(true) => OptionAnswer::Err,
+            ValueRef::Bool(false) => OptionAnswer::Ok,
+            _ => {
+                let name = crate::api::coerce::value_name(req, &value);
+                let text = format!(
+                    "{}::stream_eof value must be of type bool, {name} given",
+                    class_name(req, self.object)
+                );
+                docref(req, Level::Warning, &text);
+                req.release(value);
+                OptionAnswer::Err
+            }
+        }
+    }
+}
+
+/// `statbuf_from_array` (`Z/main/streams/userspace.c:799`): each of the
+/// thirteen fields read by its name, zero where it is not there.
+fn statbuf_from_array(req: &mut Request, array: PhpArray) -> Result<StatBuf, Thrown> {
+    const NAMES: [&[u8]; 13] = [
+        b"dev", b"ino", b"mode", b"nlink", b"uid", b"gid", b"rdev", b"size", b"atime", b"mtime",
+        b"ctime", b"blksize", b"blocks",
+    ];
+    let mut sb = [0; 13];
+    for (field, name) in sb.iter_mut().zip(NAMES) {
+        let key = Key::Str(PhpString::new(req, name)?);
+        if let Some(value) = array.get(&key) {
+            *field = crate::api::coerce::to_long(req, &value.deref())?;
+        }
+    }
+    Ok(sb)
+}
+
+impl Ops for UserStream {
+    fn write(&mut self, req: &mut Request, buf: &[u8]) -> Option<usize> {
+        self.held(req, |this, req| this.write_held(req, buf))
+    }
+
+    fn read(&mut self, req: &mut Request, buf: &mut [u8], eof: &mut bool) -> Option<usize> {
+        self.held(req, |this, req| this.read_held(req, buf, eof))
+    }
+
+    fn seek(
+        &mut self,
+        req: &mut Request,
+        offset: i64,
+        whence: Option<Whence>,
+        position: &mut i64,
+    ) -> Option<bool> {
+        self.held(req, |this, req| {
+            this.seek_held(req, offset, whence, position)
+        })
+    }
+
+    fn cast_target(
+        &mut self,
+        req: &mut Request,
+        select: bool,
+        own: Option<Stream>,
+    ) -> CastTarget<'_> {
+        self.held(req, |this, req| this.cast_target_held(req, select, own))
+            .map_or(CastTarget::Refused, CastTarget::Stream)
+    }
+
+    fn adopt(&mut self, own: Stream) {
+        self.own = Some(own);
+    }
+
+    fn label(&self) -> &'static str {
+        "user-space"
+    }
+
+    /// `php_userstreamop_close` (`Z/main/streams/userspace.c:699`):
+    /// `stream_close` where it is there, then the instance given up.
+    fn close(&mut self, req: &mut Request) -> i32 {
+        if let Called::Value(value) = call(req, self.object, b"stream_close", &[]) {
+            req.release(value);
+        }
+        req.release(self.object.as_value());
+        0
+    }
+
+    /// `php_userstreamop_flush`: `stream_flush`, `true` its answer.
+    fn flush(&mut self, req: &mut Request) -> bool {
+        match call(req, self.object, b"stream_flush", &[]) {
+            Called::Value(value) => {
+                let flushed = truthy(req, &value);
+                req.release(value);
+                flushed
+            }
+            Called::Missing | Called::Threw => false,
         }
     }
 
@@ -594,56 +774,57 @@ impl Ops for UserStream {
         MetaData::Generic
     }
 
-    /// `user_stream_set_option`'s `PHP_STREAM_OPTION_BLOCKING`:
-    /// `stream_set_option(STREAM_OPTION_BLOCKING, $blocking, null)`, whose
-    /// truth is the answer, php's warning where the class has none.
-    fn set_blocking(&mut self, req: &mut Request, blocking: bool) -> Option<bool> {
-        let args = [
-            Value::int(1),
-            Value::int(i64::from(blocking)),
-            Value::null(),
-        ];
+    /// `php_userstreamop_set_option` (`Z/main/streams/userspace.c:1024`)
+    /// for the four it hands on, `user_stream_set_option`:
+    /// `stream_set_option` with the option's number and its two values,
+    /// whether to block and `null`, the timeout's seconds and
+    /// microseconds, or `PHP_STREAM_BUFFER_*` and the size; its truth is
+    /// `PHP_STREAM_OPTION_RETURN_OK`, and a class without the method is
+    /// php's warning and `_ERR`. The chunk size is not one it hands on.
+    fn set_option(&mut self, req: &mut Request, option: StreamOption) -> OptionAnswer {
+        const BUFFER_NONE: i64 = 0;
+        const BUFFER_FULL: i64 = 2;
+        let mode = |buffered: bool| Value::int(if buffered { BUFFER_FULL } else { BUFFER_NONE });
+        let args = match option {
+            StreamOption::Blocking(blocking) => [
+                Value::int(1),
+                Value::int(i64::from(blocking)),
+                Value::null(),
+            ],
+            StreamOption::ReadBuffer { buffered, size: n } => {
+                [Value::int(2), mode(buffered), Value::int(n)]
+            }
+            StreamOption::WriteBuffer { buffered, size: n } => {
+                [Value::int(3), mode(buffered), Value::int(n)]
+            }
+            StreamOption::ReadTimeout(timeout) => [
+                Value::int(4),
+                Value::int(i64::try_from(timeout.as_secs()).unwrap_or(i64::MAX)),
+                Value::int(i64::from(timeout.subsec_micros())),
+            ],
+            StreamOption::ChunkSize(_) => return OptionAnswer::NotImplemented,
+            StreamOption::Liveness => return self.check_liveness(req),
+        };
         match call(req, self.object, b"stream_set_option", &args) {
             Called::Missing => {
                 not_implemented(req, self.object, "stream_set_option");
-                None
+                OptionAnswer::Err
             }
-            Called::Threw => None,
+            Called::Threw => OptionAnswer::Err,
             Called::Value(value) => {
                 let set = truthy(req, &value);
                 req.release(value);
-                set.then_some(true)
+                if set {
+                    OptionAnswer::Ok
+                } else {
+                    OptionAnswer::Err
+                }
             }
         }
     }
 
-    /// `php_userstreamop_cast` (`Z/main/streams/userspace.c:1413`) is
-    /// `stream_cast`, which answers a stream the cast is made of; here the
-    /// kind has no fd of its own.
-    fn user_cast(&mut self, req: &mut Request, select: bool) -> Option<Stream> {
-        let castas = if select { 3 } else { 0 };
-        let value = match call(req, self.object, b"stream_cast", &[Value::int(castas)]) {
-            Called::Missing => {
-                not_implemented(req, self.object, "stream_cast");
-                return None;
-            }
-            Called::Threw => return None,
-            Called::Value(value) => value,
-        };
-        if !truthy(req, &value) {
-            req.release(value);
-            return None;
-        }
-        let inner = Stream::from_value(req, &value.deref());
-        req.release(value);
-        if inner.is_none() {
-            let text = format!(
-                "{}::stream_cast must return a stream resource",
-                class_name(req, self.object)
-            );
-            docref(req, Level::Warning, &text);
-        }
-        inner
+    fn is_userspace(&self) -> bool {
+        true
     }
 }
 
@@ -656,6 +837,11 @@ struct UserDir {
 impl Ops for UserDir {
     fn label(&self) -> &'static str {
         "user-space-dir"
+    }
+
+    /// `php_stream_userspace_dir_ops` has no `write`.
+    fn writable(&self) -> bool {
+        false
     }
 
     fn write(&mut self, _req: &mut Request, _buf: &[u8]) -> Option<usize> {

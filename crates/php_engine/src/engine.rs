@@ -740,7 +740,7 @@ impl Shared {
 /// string(0) ""
 /// string(10) "ISO-8859-1"
 /// ```
-const CORE_INI: [(&str, &str); 56] = [
+const CORE_INI: [(&str, &str); 58] = [
     ("short_open_tag", "1"),
     ("fatal_error_backtraces", "1"),
     ("precision", "14"),
@@ -765,6 +765,11 @@ const CORE_INI: [(&str, &str); 56] = [
     // `PHP_INCLUDE_PATH`, the pinned build's `.:${PEAR_INSTALLDIR}`,
     // which `DEFAULT_INCLUDE_PATH` says too.
     ("include_path", crate::constants::PHP_INCLUDE_PATH),
+    // `allow_url_fopen` and `allow_url_include`, `PHP_INI_SYSTEM`
+    // (`Z/main/main.c:876-877`): whether a URL wrapper opens, and opens
+    // for an include (`php_stream_locate_url_wrapper`).
+    ("allow_url_fopen", "1"),
+    ("allow_url_include", "0"),
     ("zend.exception_ignore_args", "0"),
     ("zend.exception_string_param_max_len", "15"),
     ("zend.max_allowed_stack_size", "0"),
@@ -1085,6 +1090,45 @@ const BEFORE_OPTIMIZER: i64 = 0x1_0000;
 /// compatibility no entry of this engine raises yet.
 fn ini_quantity(value: &[u8]) -> i64 {
     crate::ini_quantity::parse(value).0
+}
+
+/// The end of `php_module_startup`'s check for deprecated directives
+/// (`Z/main/main.c:2393`), raised at the request's first moment where
+/// this engine has a request to raise it on: `allow_url_include` set to
+/// a number other than zero is `Directive 'allow_url_include' is
+/// deprecated` at `Unknown` line 0, `cfg_get_long` reading the value as
+/// `ZEND_STRTOL` does, so `On` is zero.
+///
+/// ```php
+/// var_dump(ini_get('allow_url_fopen'), ini_get('allow_url_include'), ini_set('allow_url_include', '1'));
+/// ```
+/// ```expect
+/// string(1) "1"
+/// string(1) "0"
+/// bool(false)
+/// ```
+fn deprecated_directives(req: &mut Request) {
+    let set = req.ini_get(b"allow_url_include").is_some_and(|value| {
+        let digits = value.trim_ascii_start();
+        let digits = digits
+            .strip_prefix(b"-")
+            .or_else(|| digits.strip_prefix(b"+"))
+            .unwrap_or(digits);
+        digits.first().is_some_and(u8::is_ascii_digit)
+            && digits
+                .iter()
+                .take_while(|b| b.is_ascii_digit())
+                .any(|b| *b != b'0')
+    });
+    if set {
+        crate::api::raising::raise_at(
+            req,
+            crate::api::raising::Level::Deprecated,
+            "Directive 'allow_url_include' is deprecated",
+            b"Unknown",
+            0,
+        );
+    }
 }
 
 /// `zend_disable_functions` (`Z/Zend/zend_API.c:3668-3710`): the names
@@ -1619,6 +1663,7 @@ impl Engine {
                 let _ = rinit(&mut req);
             }
         }
+        deprecated_directives(&mut req);
         // What `do_cli` does once `php_request_startup` has run, before
         // the program is compiled: `$_SERVER` named, which makes it
         // (`Z/sapi/cli/php_cli.c:941`), and the standard handles

@@ -23,9 +23,9 @@ use std::time::Duration;
 
 use php_heap::Readiness;
 
-use super::{MetaData, Ops, PhpStream, StatBuf, stat_buf, strerror};
+use super::{CastTarget, MetaData, Ops, PhpStream, StatBuf, stat_buf, strerror};
 use crate::api::raising::{Level, Thrown, raise, warning};
-use crate::api::request::{Request, Stream, Xport, XportFailure};
+use crate::api::request::{OptionAnswer, Request, Stream, StreamOption, Xport, XportFailure};
 use crate::api::values::PhpString;
 
 /// `STREAM_OOB` and `STREAM_PEEK`, the bits of `stream_socket_sendto`'s
@@ -314,24 +314,39 @@ impl Ops for Socket {
     }
 
     /// `php_sockop_cast`: the socket, for either cast.
-    fn fd(&self) -> Option<BorrowedFd<'_>> {
-        self.sock.as_ref().map(Sock::fd)
+    fn cast_target(
+        &mut self,
+        _req: &mut Request,
+        _select: bool,
+        _own: Option<Stream>,
+    ) -> CastTarget<'_> {
+        self.sock
+            .as_ref()
+            .map_or(CastTarget::Refused, |sock| CastTarget::Fd(sock.fd()))
     }
 
-    /// `PHP_STREAM_OPTION_BLOCKING`: `php_set_sock_blocking`, and the
-    /// old `is_blocked`.
-    fn set_blocking(&mut self, _req: &mut Request, blocking: bool) -> Option<bool> {
-        let old = self.is_blocked;
-        self.sock.as_ref()?.set_blocking(blocking).ok()?;
-        self.is_blocked = blocking;
-        Some(old)
-    }
-
-    /// `PHP_STREAM_OPTION_READ_TIMEOUT`.
-    fn set_timeout(&mut self, timeout: Duration) -> bool {
-        self.timeout = Some(timeout);
-        self.timeout_event = false;
-        true
+    /// `php_sockop_set_option` (`Z/main/streams/xp_socket.c:296`):
+    /// `PHP_STREAM_OPTION_BLOCKING` is `php_set_sock_blocking`, and
+    /// `PHP_STREAM_OPTION_READ_TIMEOUT` the timeout a read waits for.
+    fn set_option(&mut self, _req: &mut Request, option: StreamOption) -> OptionAnswer {
+        match option {
+            StreamOption::Blocking(blocking) => {
+                let Some(sock) = self.sock.as_ref() else {
+                    return OptionAnswer::Err;
+                };
+                if sock.set_blocking(blocking).is_err() {
+                    return OptionAnswer::Err;
+                }
+                self.is_blocked = blocking;
+                OptionAnswer::Ok
+            }
+            StreamOption::ReadTimeout(timeout) => {
+                self.timeout = Some(timeout);
+                self.timeout_event = false;
+                OptionAnswer::Ok
+            }
+            _ => OptionAnswer::NotImplemented,
+        }
     }
 
     fn xport(&mut self, req: &mut Request, op: XportOp<'_>) -> Option<Xported> {
@@ -896,22 +911,5 @@ impl Stream {
                 .flatten(),
             Some(Xported::Shut(true))
         )
-    }
-
-    /// `PHP_STREAM_OPTION_BLOCKING`, what `stream_set_blocking` asks:
-    /// `O_NONBLOCK` set or cleared on a socket or a pipe, and `false` for
-    /// php's `-1`, a kind with no such option.
-    pub fn set_blocking(self, req: &mut Request, blocking: bool) -> bool {
-        req.stream_op(self, |req, stream| stream.ops.set_blocking(req, blocking))
-            .flatten()
-            .is_some()
-    }
-
-    /// `PHP_STREAM_OPTION_READ_TIMEOUT`, what `stream_set_timeout` asks:
-    /// the socket's read timeout, and `false` for a kind that is no
-    /// socket.
-    pub fn set_timeout(self, req: &mut Request, timeout: Duration) -> bool {
-        req.stream_op(self, |_, stream| stream.ops.set_timeout(timeout))
-            .unwrap_or(false)
     }
 }
