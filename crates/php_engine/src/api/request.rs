@@ -13054,12 +13054,6 @@ impl Request {
             .map(|(_, a)| a)
     }
 
-    /// Replace a superglobal, what the GPC seeding and `session_start` do.
-    pub fn set_superglobal(&mut self, name: &[u8], value: PhpArray) {
-        self.superglobals.retain(|(n, _)| n.as_slice() != name);
-        self.superglobals.push((name.to_vec(), value));
-    }
-
     /// `php_sapi_name()`: `sapi_module.name`.
     #[must_use]
     pub fn sapi_name(&self) -> &str {

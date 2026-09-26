@@ -331,9 +331,9 @@ request::Request::set_cwd
 request::Request::set_env
 request::Request::set_error_handler
 request::Request::set_exception_handler
+request::Request::set_global
 request::Request::set_header_callback
 request::Request::set_response_code
-request::Request::set_superglobal
 request::Request::set_time_limit
 request::Request::set_umask
 request::Request::state

@@ -14,7 +14,7 @@ use crate::user::{Slot, method_of, store};
 use crate::{
     Entry, Module, State, Status, answer, arguments_between, bool_argument, coerced, declared,
     given, headers_sent, ini, ini_bool, ini_long, parameter, pending, sent_error, session,
-    session_array, started_error, string_argument, string_value,
+    started_error, string_argument, string_value,
 };
 
 /// The natives in `session.stub.php`'s order, `session_commit` the alias
@@ -825,9 +825,7 @@ fn session_start(req: &mut Request) -> Result<Value, Thrown> {
     }
     session::start(req)?;
     if req.state::<State>().status != Status::Active {
-        if let Some(array) = session_array(req) {
-            clean(req, array)?;
-        }
+        clean(req)?;
         return answer(req, Value::bool(false));
     }
     if read_and_close {
@@ -836,12 +834,15 @@ fn session_start(req: &mut Request) -> Result<Value, Thrown> {
     answer(req, Value::bool(true))
 }
 
-/// `zend_hash_clean` over the session's array, in place.
-fn clean(req: &mut Request, mut array: PhpArray) -> Result<(), Thrown> {
+/// `zend_hash_clean` over the session's array, separated first, where
+/// there is one.
+fn clean(req: &mut Request) -> Result<(), Thrown> {
+    let Some(mut array) = crate::session_array_mut(req)? else {
+        return Ok(());
+    };
     for (key, _) in array.snapshot_refs() {
         array.unset(req, &key)?;
     }
-    req.set_superglobal(b"_SESSION", array);
     Ok(())
 }
 
@@ -904,9 +905,7 @@ fn session_unset(req: &mut Request) -> Result<Value, Thrown> {
     if req.state::<State>().status != Status::Active {
         return Ok(Value::bool(false));
     }
-    if let Some(array) = session_array(req) {
-        clean(req, array)?;
-    }
+    clean(req)?;
     Ok(Value::bool(true))
 }
 

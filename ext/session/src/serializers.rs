@@ -9,7 +9,7 @@ use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 use php_ext_standard::{Serializer, Unserializer};
 
-use crate::{Format, bind_array, session_array, shown};
+use crate::{Format, bind_array, session_array, session_array_mut, shown};
 
 /// `PS_ENCODE_LOOP`: each variable under a string key, a numeric one
 /// skipped with php's warning, over a copy of the array so the loop
@@ -140,14 +140,12 @@ pub(super) fn decode(req: &mut Request, format: Format, data: &[u8]) -> Result<b
             Some(array) => array,
             None => PhpArray::new(req)?,
         };
-        bind_array(req, array);
+        bind_array(req, array)?;
         return Ok(ok || data.is_empty());
     }
-    let Some(mut array) = session_array(req) else {
+    let Some(array) = session_array_mut(req)? else {
         return Ok(true);
     };
-    array.separate(req)?;
-    req.set_superglobal(b"_SESSION", array);
     let mut reader = Unserializer::new(req, &data);
     let mut ok = true;
     let mut p = 0;

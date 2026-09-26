@@ -174,11 +174,51 @@ pub(super) fn create_id(req: &mut Request) -> Option<Vec<u8>> {
 
 // ------------------------------------------------------------ vars
 
-/// `php_session_track_init`: `$_SESSION` a new empty array.
+/// `php_session_track_init`: `$_SESSION` deleted from `EG(symbol_table)`
+/// whatever it held, then bound to a new empty array.
+///
+/// ```php
+/// ob_start(); session_save_path(__DIR__); session_id("track1");
+/// session_start(["use_cookies" => 0, "cache_limiter" => ""]); $_SESSION['a'] = 1; $_SESSION['b'] = [2];
+/// session_write_close(); var_dump(file_get_contents(__DIR__ . "/sess_track1"), $_SESSION);
+/// $_SESSION = []; session_start(); var_dump($_SESSION);
+/// unset($_SESSION['a']); function f() { $_SESSION['c'] = 3; } f(); session_write_close();
+/// session_start(); var_dump(session_encode()); $_SESSION = ['d' => 4]; session_write_close();
+/// session_start(); unset($_SESSION); var_dump(isset($_SESSION), session_encode()); session_write_close();
+/// session_start(); var_dump($_SESSION); session_destroy(); ob_end_flush();
+/// ```
+/// ```expect
+/// string(22) "a|i:1;b|a:1:{i:0;i:2;}"
+/// array(2) {
+///   ["a"]=>
+///   int(1)
+///   ["b"]=>
+///   array(1) {
+///     [0]=>
+///     int(2)
+///   }
+/// }
+/// array(2) {
+///   ["a"]=>
+///   int(1)
+///   ["b"]=>
+///   array(1) {
+///     [0]=>
+///     int(2)
+///   }
+/// }
+/// string(22) "b|a:1:{i:0;i:2;}c|i:3;"
+/// bool(false)
+/// string(6) "d|i:4;"
+/// array(1) {
+///   ["d"]=>
+///   int(4)
+/// }
+/// ```
 pub(super) fn track_init(req: &mut Request) -> Result<(), Thrown> {
+    req.set_global(b"_SESSION", None);
     let array = PhpArray::new(req)?;
-    bind_array(req, array);
-    Ok(())
+    bind_array(req, array)
 }
 
 /// `php_session_encode`: the session's variables through the serializer,
@@ -225,13 +265,13 @@ fn rinit_globals(req: &mut Request) {
     state.parent_open = false;
     state.define_sid = true;
     state.session_vars = None;
-    state.tracked = false;
+    state.vars = None;
 }
 
 /// `php_rshutdown_session_globals`: the handler closed, the id, the
 /// read data and the start site forgotten.
 fn rshutdown_globals(req: &mut Request) -> Result<(), Thrown> {
-    req.state::<State>().tracked = false;
+    crate::unbind(req);
     let closed = close(req);
     absorb(req, closed)?;
     let state = req.state::<State>();

@@ -69,10 +69,12 @@ pub struct Unit {
 
 /// An auto-global that makes a variable: one of the names
 /// `php_startup_auto_globals` registers (`Z/main/php_variables.c:975`),
-/// which no CV holds and the compiler fetches by name from
-/// `EG(symbol_table)` (`ZEND_FETCH_GLOBAL`). `$GLOBALS` is registered too
-/// (`Z/Zend/zend.c:1060`) and makes no variable; the compiler reads it by
-/// oplines of its own.
+/// or `$_SESSION`, which `PHP_MINIT_FUNCTION(session)` registers with no
+/// callback to make it (`Z/ext/session/session.c:2966`) and the session
+/// binds when it starts; no CV holds one, and the compiler fetches it by
+/// name from `EG(symbol_table)` (`ZEND_FETCH_GLOBAL`). `$GLOBALS` is
+/// registered too (`Z/Zend/zend.c:1060`) and makes no variable; the
+/// compiler reads it by oplines of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AutoGlobal {
     Get,
@@ -82,6 +84,7 @@ pub enum AutoGlobal {
     Env,
     Request,
     Files,
+    Session,
 }
 
 impl AutoGlobal {
@@ -97,6 +100,7 @@ impl AutoGlobal {
             b"_ENV" => AutoGlobal::Env,
             b"_REQUEST" => AutoGlobal::Request,
             b"_FILES" => AutoGlobal::Files,
+            b"_SESSION" => AutoGlobal::Session,
             _ => return None,
         })
     }
@@ -112,6 +116,7 @@ impl AutoGlobal {
             AutoGlobal::Env => b"_ENV",
             AutoGlobal::Request => b"_REQUEST",
             AutoGlobal::Files => b"_FILES",
+            AutoGlobal::Session => b"_SESSION",
         }
     }
 }
