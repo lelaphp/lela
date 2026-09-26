@@ -198,6 +198,11 @@ name = "ext/lexbor"
 budget = 500      # #731: php-src's vendored lexbor compiled by build.rs, and its binding in src/ffi/, the bindings pool's
 # The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
 porting = true
+[[crate]]
+name = "ext/zlib"
+budget = 4000     # #924: zlib.c, its filter and its compress.zlib:// wrapper; a pure-Rust deflate first, libz-sys where its bytes cannot match (design revision 34)
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
 
 # ---------------------------------------------------------------- seams
 # The six locked seams (design §4.5). `effects.lock` is retired; its content is
