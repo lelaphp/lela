@@ -27,7 +27,7 @@ use php_unit::{FramelessEntry, Unit, frameless_table};
 
 use crate::api::abi::{Cache, Entry, Extension, NativeNew, ObjectHandlers, OnModify, StartupIni};
 use crate::api::raising::Level;
-use crate::api::request::{Aside, Ending, ExtensionId, Request};
+use crate::api::request::{Ending, ExtensionId, Request, Sink};
 use crate::api::values::{ClassId, Value};
 use crate::exec;
 use crate::ini_syntax::{IniEvent, IniScanner, IniValue};
@@ -132,6 +132,18 @@ pub trait OutputSink {
     /// diagnostic is logged and displayed in that order on one stream
     /// and in no order across two (#216).
     fn write_stderr(&mut self, bytes: &[u8]);
+    /// The sink the request holds while it runs, where the host has one
+    /// that may leave its hands: each call above then reaches the host as
+    /// the request makes it, the body as it leaves the `php_output` layer,
+    /// the header block at the commit, the error stream and the log as
+    /// written, php's `sapi_module` timing, which a child process writing
+    /// to the host's stdout is ordered against (#741). `None`, the
+    /// default, has the request keep its calls and hand them to this sink
+    /// when it ends: the log and the error stream in the order written,
+    /// then the header block, then the body.
+    fn held(&mut self) -> Option<Box<dyn OutputSink + Send>> {
+        None
+    }
 }
 
 /// What `serve` reports of one request.
@@ -1652,6 +1664,9 @@ impl Engine {
             .unwrap_or_else(|| b"Standard input code".to_vec());
         let web = description.is_web;
         let mut req = Request::new(Arc::clone(&self.shared), description);
+        if let Some(held) = sink.held() {
+            req.hold(held);
+        }
         // `php_request_startup` hashes the environment before the
         // extensions' `RINIT` (`Z/main/main.c:1942`); what can fail is the
         // memory limit, which the first allocation after it meets again.
@@ -1777,17 +1792,16 @@ impl Engine {
             _ => None,
         };
         let exit_code = req.exit_status();
-        let headers = req.header_block();
-        let body = req.take_body();
-        for aside in req.take_aside() {
-            match aside {
-                Aside::Log(entry) => sink.log(&entry),
-                Aside::Stderr(bytes) => sink.write_stderr(&bytes),
-            }
+        // The block reached the sink at the commit, which the output
+        // layer's deactivation makes if nothing had; one it refused, for
+        // the memory limit, is handed over now.
+        if !req.output().headers_sent() {
+            req.send_header_block();
         }
-        sink.send_headers(&headers);
-        sink.write(&body);
-        sink.flush();
+        match req.release_sink() {
+            Sink::Held(mut held) => held.flush(),
+            Sink::Kept(kept) => kept.hand_to(sink),
+        }
         Observables {
             exit_code,
             headers_sent: true,

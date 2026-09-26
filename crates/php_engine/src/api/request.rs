@@ -37,7 +37,7 @@ use crate::api::values::{
     ValueRef,
 };
 use crate::engine::{
-    Configured, ConfiguredKey, MethodAt, NativeMethod, RequestDescription, Shared,
+    Configured, ConfiguredKey, MethodAt, NativeMethod, OutputSink, RequestDescription, Shared,
 };
 use crate::exec::{self, CallStage, CallState, IncludeKind, TableId, Vm};
 use crate::output::Output;
@@ -1040,6 +1040,73 @@ pub(crate) enum Aside {
     Stderr(Vec<u8>),
 }
 
+/// Where what leaves a request goes while it runs, decided once when
+/// `serve` starts it: the host's sink, held, where the host hands one
+/// over ([`OutputSink::held`]), and otherwise the calls kept for the sink
+/// the host lent `serve`.
+pub(crate) enum Sink {
+    Held(Box<dyn OutputSink + Send>),
+    Kept(Kept),
+}
+
+impl Sink {
+    /// The one sink every call of the request goes to.
+    fn get(&mut self) -> &mut dyn OutputSink {
+        match self {
+            Sink::Held(held) => held.as_mut(),
+            Sink::Kept(kept) => kept,
+        }
+    }
+}
+
+/// A request's calls kept until it ends, for a host whose sink stays in
+/// its hands: the log's entries and the error stream's bytes in the
+/// order written, the header block once committed, and the body.
+#[derive(Default)]
+pub(crate) struct Kept {
+    aside: Vec<Aside>,
+    headers: Option<Vec<u8>>,
+    body: Vec<u8>,
+}
+
+impl Kept {
+    /// Every call handed to `sink`, one each: the log and the error
+    /// stream in the order written, then the header block, then the body.
+    pub(crate) fn hand_to(self, sink: &mut dyn OutputSink) {
+        for aside in self.aside {
+            match aside {
+                Aside::Log(entry) => sink.log(&entry),
+                Aside::Stderr(bytes) => sink.write_stderr(&bytes),
+            }
+        }
+        if let Some(headers) = self.headers {
+            sink.send_headers(&headers);
+        }
+        sink.write(&self.body);
+        sink.flush();
+    }
+}
+
+impl OutputSink for Kept {
+    fn write(&mut self, bytes: &[u8]) {
+        self.body.extend_from_slice(bytes);
+    }
+
+    fn flush(&mut self) {}
+
+    fn send_headers(&mut self, block: &[u8]) {
+        self.headers = Some(block.to_vec());
+    }
+
+    fn log(&mut self, entry: &[u8]) {
+        self.aside.push(Aside::Log(entry.to_vec()));
+    }
+
+    fn write_stderr(&mut self, bytes: &[u8]) {
+        self.aside.push(Aside::Stderr(bytes.to_vec()));
+    }
+}
+
 /// A write a debug build stopped: the opline whose `TMP` it was, the
 /// opcode serving it, the temporary's number and what the slot held.
 #[cfg(debug_assertions)]
@@ -1077,20 +1144,14 @@ pub struct Request {
     /// entry, which is why `ini_get('error_reporting')` under a `@` reads
     /// the level the `@` masked.
     error_reporting: i64,
-    /// What passed the `php_output` layer, php's `sapi_module.ub_write`: the
-    /// bytes the host will be handed, kept until `serve` hands them.
-    body: Vec<u8>,
+    /// Where what passed the `php_output` layer goes, php's
+    /// `sapi_module.ub_write`, and the header block, the log and the
+    /// error stream beside it: the host's sink, or the calls kept for it.
+    sink: Sink,
     /// The `php_output` layer, `main/output.c`'s `OG` and the header state
     /// `sapi_send_headers` keeps beside it (`crate::output`).
     output: Output,
     header_callback: Option<Callable>,
-    /// The host's log as `php_log_err` was given it, one entry per call,
-    /// a diagnostic whole however many lines its backtrace adds, and no
-    /// terminator, since that is the host's (`sapi_cli_log_message`
-    /// writes `"%s\n"`, a file log stamps `[date] ` and `PHP_EOL`); and
-    /// the error stream's bytes as `fputs(stderr)` was given them; the
-    /// two in the order they were written.
-    aside: Vec<Aside>,
     last_error: Option<(Level, String, Vec<u8>, u32)>,
     /// The diagnostics raised while the engine registers its extensions'
     /// ini entries (`php_during_module_startup()`), held in the order
@@ -1702,10 +1763,9 @@ impl Request {
             states: Vec::new(),
             ini: Vec::new(),
             error_reporting: 0,
-            body: Vec::new(),
+            sink: Sink::Kept(Kept::default()),
             output: Output::activate(web),
             header_callback: None,
-            aside: Vec::new(),
             last_error: None,
             startup: None,
             last_fatal_error_backtrace: None,
@@ -4519,19 +4579,49 @@ impl Request {
         }
     }
 
-    pub(crate) fn take_body(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.body)
+    /// The host's sink, held from here to the request's end, so each
+    /// call reaches the host as the request makes it.
+    pub(crate) fn hold(&mut self, held: Box<dyn OutputSink + Send>) {
+        self.sink = Sink::Held(held);
     }
 
-    /// The log's entries and the error stream's bytes, in the order the
-    /// request wrote them, for `serve` to hand the sink one call each.
+    /// The sink the request wrote to, given back at its end: the held
+    /// one to flush, or the calls kept for the host's.
+    pub(crate) fn release_sink(&mut self) -> Sink {
+        std::mem::replace(&mut self.sink, Sink::Kept(Kept::default()))
+    }
+
+    /// The body the request's own sink kept, for a test that serves no
+    /// host.
+    #[cfg(test)]
+    pub(crate) fn take_body(&mut self) -> Vec<u8> {
+        match &mut self.sink {
+            Sink::Kept(kept) => std::mem::take(&mut kept.body),
+            Sink::Held(_) => Vec::new(),
+        }
+    }
+
+    /// The log's entries and the error stream's bytes the request's own
+    /// sink kept, in the order written, for a test that serves no host.
+    #[cfg(test)]
     pub(crate) fn take_aside(&mut self) -> Vec<Aside> {
-        std::mem::take(&mut self.aside)
+        match &mut self.sink {
+            Sink::Kept(kept) => std::mem::take(&mut kept.aside),
+            Sink::Held(_) => Vec::new(),
+        }
     }
 
     /// `php_log_err`: one entry for the host's log, whole.
     fn log_err(&mut self, entry: &[u8]) {
-        self.aside.push(Aside::Log(entry.to_vec()));
+        self.sink.get().log(entry);
+    }
+
+    /// `sapi_module.send_headers`: the header block handed to the sink,
+    /// once, at the commit `sapi_send_headers` makes, or when the request
+    /// ends where nothing committed it.
+    pub(crate) fn send_header_block(&mut self) {
+        let block = self.header_block();
+        self.sink.get().send_headers(&block);
     }
 
     /// The header block as the sink is handed it: `SG(sapi_headers).headers`
@@ -11974,9 +12064,10 @@ impl Request {
         crate::output::write(self, bytes);
     }
 
-    /// `sapi_module.ub_write`: bytes past the `php_output` layer, the host's.
+    /// `sapi_module.ub_write`: bytes past the `php_output` layer, the
+    /// host's, handed to the sink as they come.
     pub(crate) fn ub_write(&mut self, bytes: &[u8]) {
-        self.body.extend_from_slice(bytes);
+        self.sink.get().write(bytes);
     }
 
     /// The `php_output` layer, and the heap it lays its handlers down in.
@@ -12005,13 +12096,14 @@ impl Request {
     /// [`Request::error_log`]'s; whether the host puts the two on one fd
     /// is the host's, as it is php's CLI's (#216).
     pub fn write_stderr(&mut self, bytes: &[u8]) {
-        self.aside.push(Aside::Stderr(bytes.to_vec()));
+        self.sink.get().write_stderr(bytes);
     }
 
-    /// `flush()`, `sapi_flush`: the host may push what it has. The host
-    /// is handed the body by `serve`, once, so there is nothing to push
-    /// before then; the handler stack is `ob_flush`'s, not this.
-    pub fn flush(&mut self) {}
+    /// `flush()`, `sapi_flush`: the host may push what it has; the
+    /// handler stack is `ob_flush`'s, not this.
+    pub fn flush(&mut self) {
+        self.sink.get().flush();
+    }
 
     /// One `ob_*` operation on the handler stack, the `PHP_FUNCTION`
     /// bodies of `Z/main/output.c:1373-1591` over the layer in
