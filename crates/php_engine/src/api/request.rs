@@ -2431,6 +2431,12 @@ impl Request {
         }
     }
 
+    /// Whether `function` is a native, php's `ZEND_INTERNAL_FUNCTION`:
+    /// numbered below the user functions and methods.
+    pub(crate) fn is_native_function(&self, function: Function) -> bool {
+        self.user_function(function).is_none()
+    }
+
     /// The native method `function` is, if it is one: its class and its
     /// index among the class's declared methods.
     fn native_method(&self, function: Function) -> Option<&NativeMethod> {

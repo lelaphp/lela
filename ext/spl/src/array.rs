@@ -19,8 +19,8 @@
 use std::cmp::Ordering;
 
 use php_ext::abi::{
-    Callable, CloneObj, DimensionRead, ObjectHandlers, PropertyPlace, PropertyPurpose,
-    PropertyRead, PropertyTest, Std,
+    Callable, CloneObj, CurrentPlace, DimensionRead, ObjectHandlers, PropertyPlace,
+    PropertyPurpose, PropertyRead, PropertyTest, Std,
 };
 use php_ext::call::{call, call_method, clone_with, instantiate, lookup_class};
 use php_ext::coerce::{callable_checked, compare, to_long, truthy};
@@ -393,6 +393,32 @@ impl Table {
         }
     }
 
+    /// The element at `key` made a reference in place, `found` what the
+    /// table holds there, `null` laid down where it holds nothing; the
+    /// cell handed back with one more owner.
+    fn element_ref(
+        self,
+        req: &mut Request,
+        key: Key,
+        found: Option<Value>,
+    ) -> Result<PhpRef, Thrown> {
+        match self {
+            Table::Array(owner, mut array) => {
+                if let Some(cell) = found.and_then(|v| v.as_php_ref().copied()) {
+                    req.addref(&cell.as_value());
+                    return Ok(cell);
+                }
+                let held = found.map_or_else(Value::null, |v| crate::copied(req, v));
+                let cell = PhpRef::new(req, held)?;
+                req.addref(&cell.as_value());
+                array.set(req, key, cell.as_value())?;
+                store(req, owner, array)?;
+                Ok(cell)
+            }
+            Table::Props(backing) => backing.row_ref(req, &key),
+        }
+    }
+
     /// The first element at or past the bucket `pos`, with the bucket it
     /// stands at.
     fn at(self, req: &mut Request, pos: u32) -> Result<Option<(u32, Key, Value)>, Thrown> {
@@ -508,21 +534,19 @@ fn place(
             _ => {}
         }
     }
-    match table {
-        Table::Array(owner, mut array) => {
-            if let Some(cell) = found.and_then(|v| v.as_php_ref().copied()) {
-                req.addref(&cell.as_value());
-                return Ok(Some(cell));
-            }
-            let held = found.map_or_else(Value::null, |v| crate::copied(req, v));
-            let cell = PhpRef::new(req, held)?;
-            req.addref(&cell.as_value());
-            array.set(req, key, cell.as_value())?;
-            store(req, owner, array)?;
-            Ok(Some(cell))
-        }
-        Table::Props(backing) => backing.row_ref(req, &key).map(Some),
-    }
+    table.element_ref(req, key, found).map(Some)
+}
+
+/// `spl_array_it_get_current_data` under `by_ref`, the `current_place`
+/// slot: the element the object stands at made a reference in place
+/// (`FE_FETCH_RW`'s `ZVAL_MAKE_REF` over the zval php's function points
+/// at), `None` past the last element.
+fn current_place(req: &mut Request, object: PhpObject) -> Result<Option<PhpRef>, Thrown> {
+    let Some((_, key, value)) = here(req, object)? else {
+        return Ok(None);
+    };
+    let table = table(req, object)?;
+    table.element_ref(req, key, Some(value)).map(Some)
 }
 
 /// A key as php's `Undefined array key` warning shows it, a string
@@ -660,6 +684,10 @@ impl ObjectHandlers for Handlers {
 
     fn clone_obj(&self) -> Option<CloneObj> {
         Some(clone_array)
+    }
+
+    fn current_place(&self) -> Option<CurrentPlace> {
+        Some(current_place)
     }
 
     /// `spl_array_read_dimension_ex`: an overriding `offsetGet` served,

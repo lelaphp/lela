@@ -20,7 +20,9 @@ use crate::api::call::{Function, Target};
 use crate::api::coerce::BinaryOp;
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
-use crate::api::values::{ClassId, ClosureInfo, PhpArray, PhpObject, PhpString, TypeTag, Value};
+use crate::api::values::{
+    ClassId, ClosureInfo, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value,
+};
 
 /// The startup ini view an extension's engine state is built from: what
 /// the host set before the first request, immutable afterwards.
@@ -673,6 +675,10 @@ pub type CloneObj = fn(&mut Request, PhpObject) -> Result<PhpObject, Thrown>;
 /// named property written through `write_property` from `scope`.
 pub type CloneObjWith =
     fn(&mut Request, PhpObject, Option<ClassId>, PhpArray) -> Result<PhpObject, Thrown>;
+/// The `current_place` slot: the element the object's own iterator
+/// stands at made a reference in place, the cell with one more owner,
+/// the caller's; `None` past the last element.
+pub type CurrentPlace = fn(&mut Request, PhpObject) -> Result<Option<PhpRef>, Thrown>;
 
 /// Seam 2 (design §4.3, §5.4): Zend's 25 handler slots in 8.5 order
 /// (`Z/Zend/zend_object_handlers.h:206-235`), one method each, the
@@ -1069,6 +1075,35 @@ pub trait ObjectHandlers: Send + Sync {
     ) -> Result<Option<(Value, Value)>, Thrown> {
         let _ = (req, object, index);
         Ok(None)
+    }
+
+    /// The `get_current_data` of an iterator php's class hands out from
+    /// its own `get_iterator` and walks in C, where that iterator can be
+    /// taken by reference: `spl_array_get_iterator`'s, whose element is
+    /// a place in the storage. A `foreach` by reference over an object
+    /// of such a class whose `Iterator` methods are all its natives
+    /// binds each element through the function this answers, and one
+    /// over any other `Iterator` is php's refusal. `None` at `Std`.
+    ///
+    /// ```php
+    /// $it = new ArrayIterator([1, 2]);
+    /// foreach ($it as &$v) { $v *= 10; }
+    /// unset($v);
+    /// class Over extends ArrayIterator { function current(): mixed { return parent::current(); } }
+    /// try { foreach (new Over([3]) as &$v) {} } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump($it->getArrayCopy());
+    /// ```
+    /// ```expect
+    /// An iterator cannot be used with foreach by reference
+    /// array(2) {
+    ///   [0]=>
+    ///   int(10)
+    ///   [1]=>
+    ///   int(20)
+    /// }
+    /// ```
+    fn current_place(&self) -> Option<CurrentPlace> {
+        None
     }
 
     /// `get_properties_for`: the rows one purpose reads; `None` at

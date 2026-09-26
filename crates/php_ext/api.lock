@@ -7,6 +7,7 @@ abi::Cache::new
 abi::Callable
 abi::CloneObj
 abi::CloneObjWith
+abi::CurrentPlace
 abi::Dependency
 abi::DependencyKind
 abi::DimensionRead
@@ -40,6 +41,7 @@ abi::ObjectHandlers::clone_obj
 abi::ObjectHandlers::clone_obj_with
 abi::ObjectHandlers::compare
 abi::ObjectHandlers::count_elements
+abi::ObjectHandlers::current_place
 abi::ObjectHandlers::do_operation
 abi::ObjectHandlers::dtor_obj
 abi::ObjectHandlers::free_obj

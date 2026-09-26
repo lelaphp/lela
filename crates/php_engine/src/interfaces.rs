@@ -25,7 +25,7 @@ use php_unit::decl::{
     ParameterDefault, Type, Visibility,
 };
 
-use crate::api::abi::{Entry, NativeClassDecl, ObjectHandlers};
+use crate::api::abi::{CurrentPlace, Entry, NativeClassDecl, ObjectHandlers};
 use crate::api::raising::{Thrown, throw};
 use crate::api::request::Request;
 use crate::api::values::{ClassId, PhpObject, Value};
@@ -207,7 +207,7 @@ pub(crate) const ITERATOR_WRAPPER: &[u8] = b"\0__iterator_wrapper";
 /// Which `zend_object_iterator_funcs` serve an [`ObjectIterator`], php's
 /// `iter->funcs`: the table the class's `get_iterator` chose, read at
 /// every step and never again chosen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 enum Funcs {
     /// `zend_interface_iterator_funcs_iterator`, the `zend_user_it_*`
     /// functions: each step one method of the `Iterator` served.
@@ -218,6 +218,12 @@ enum Funcs {
     /// tree followed to the generator whose body runs
     /// ([`crate::generator`]).
     Generator,
+    /// An iterator a native class walks in C and hands out by
+    /// reference, `spl_array_it_funcs`: each step the class's native
+    /// method, which is what php's function does over the same state,
+    /// and the element under a by-reference fetch the place the class's
+    /// [`CurrentPlace`] answers.
+    Places(CurrentPlace),
 }
 
 impl Funcs {
@@ -226,7 +232,7 @@ impl Funcs {
     /// first `yield` and refuses a generator already past it.
     fn rewind(self, req: &mut Request, data: PhpObject) -> Result<(), Thrown> {
         match self {
-            Funcs::User => {
+            Funcs::User | Funcs::Places(_) => {
                 let answered = crate::api::call::call_method(req, &data, b"rewind", &[])?;
                 req.release(answered);
                 Ok(())
@@ -240,7 +246,7 @@ impl Funcs {
     /// generator still has its frame.
     fn valid(self, req: &mut Request, data: PhpObject) -> Result<bool, Thrown> {
         match self {
-            Funcs::User => {
+            Funcs::User | Funcs::Places(_) => {
                 let answered = crate::api::call::call_method(req, &data, b"valid", &[])?;
                 let valid = crate::api::coerce::truthy(req, &answered);
                 req.release(answered);
@@ -253,7 +259,7 @@ impl Funcs {
     /// `funcs->move_forward`: `next()` served, or the generator resumed.
     fn move_forward(self, req: &mut Request, data: PhpObject) -> Result<(), Thrown> {
         match self {
-            Funcs::User => {
+            Funcs::User | Funcs::Places(_) => {
                 let answered = crate::api::call::call_method(req, &data, b"next", &[])?;
                 req.release(answered);
                 Ok(())
@@ -271,7 +277,12 @@ impl Funcs {
     /// handed out as it is for the fetch to wrap.
     fn current(self, req: &mut Request, data: PhpObject, by_ref: bool) -> Result<Value, Thrown> {
         match self {
-            Funcs::User => crate::api::call::call_method(req, &data, b"current", &[]),
+            Funcs::Places(place) if by_ref => {
+                Ok(place(req, data)?.map_or_else(Value::null, |cell| cell.as_value()))
+            }
+            Funcs::User | Funcs::Places(_) => {
+                crate::api::call::call_method(req, &data, b"current", &[])
+            }
             Funcs::Generator if by_ref => {
                 crate::generator::iterator_current_ref(req, data).map(|cell| cell.as_value())
             }
@@ -290,7 +301,7 @@ impl Funcs {
     /// unwrapped, or the generator's key, `null` where it has none.
     fn key(self, req: &mut Request, data: PhpObject) -> Result<Value, Thrown> {
         match self {
-            Funcs::User => {
+            Funcs::User | Funcs::Places(_) => {
                 let answered = crate::api::call::call_method(req, &data, b"key", &[])?;
                 let bare = answered.deref();
                 req.addref(&bare);
@@ -463,15 +474,19 @@ fn iterated(
         .class_named(b"iterator")
         .is_some_and(|iterator| req.instance_of(object.class(), iterator))
     {
-        if by_ref {
-            return Err(throw(
-                req,
-                "Error",
-                "An iterator cannot be used with foreach by reference",
-            ));
-        }
+        let funcs = match by_ref_places(req, object) {
+            Some(place) => Funcs::Places(place),
+            None if by_ref => {
+                return Err(throw(
+                    req,
+                    "Error",
+                    "An iterator cannot be used with foreach by reference",
+                ));
+            }
+            None => Funcs::User,
+        };
         req.addref(&object.as_value());
-        return Ok((Funcs::User, object));
+        return Ok((funcs, object));
     }
     let answered = crate::api::call::call_method(req, &object, b"getIterator", &[])?;
     match answered.deref().as_object().copied() {
@@ -492,6 +507,23 @@ fn iterated(
             ))
         }
     }
+}
+
+/// The places an `Iterator` object's own iterator hands out, where its
+/// class walks it in C (`ce->get_iterator` a native's): the table's
+/// [`ObjectHandlers::current_place`], kept only while none of the five
+/// `Iterator` methods is a user's, since `zend_implement_iterator` puts
+/// `zend_user_it_get_iterator` in place of the native one on a class
+/// that overrides any of them.
+fn by_ref_places(req: &Request, object: PhpObject) -> Option<CurrentPlace> {
+    let place = req.object_handlers(object.heap()).current_place()?;
+    let natives = [b"rewind".as_slice(), b"valid", b"key", b"current", b"next"]
+        .iter()
+        .all(|name| {
+            req.method_named(object.class(), name)
+                .is_some_and(|function| req.is_native_function(function))
+        });
+    natives.then_some(place)
 }
 
 /// `zend_fe_reset_iterator` (`Z/Zend/zend_execute.c:5368`) over a
