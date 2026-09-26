@@ -280,13 +280,13 @@ fn exec(req: &mut Request) -> Result<Value, Thrown> {
             _ => PhpArray::new(req)?,
         };
         let done = php_exec(req, Mode::Gather, &command, Some(&mut array));
-        assign_ref(req, 2, Value::array(array));
+        assign_ref(req, 2, Value::array(array))?;
         done?
     } else {
         php_exec(req, Mode::Last, &command, None)?
     };
     if given(req, 3).is_some() {
-        assign_ref(req, 3, Value::int(status));
+        assign_ref(req, 3, Value::int(status))?;
     }
     Ok(answer)
 }
@@ -312,7 +312,7 @@ fn system(req: &mut Request) -> Result<Value, Thrown> {
     let command = command_argument(req)?;
     let (answer, status) = php_exec(req, Mode::Print, &command, None)?;
     if given(req, 2).is_some() {
-        assign_ref(req, 2, Value::int(status));
+        assign_ref(req, 2, Value::int(status))?;
     }
     Ok(answer)
 }
@@ -333,7 +333,7 @@ fn passthru(req: &mut Request) -> Result<Value, Thrown> {
     let command = command_argument(req)?;
     let (answer, status) = php_exec(req, Mode::Raw, &command, None)?;
     if given(req, 2).is_some() {
-        assign_ref(req, 2, Value::int(status));
+        assign_ref(req, 2, Value::int(status))?;
     }
     Ok(answer)
 }

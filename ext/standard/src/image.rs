@@ -1752,7 +1752,7 @@ fn answer(
                 info.set(req, key, value)?;
             }
         }
-        assign_ref(req, 2, php::Value::array(info));
+        assign_ref(req, 2, php::Value::array(info))?;
     }
     let Some(data) = found.data else {
         return Ok(php::Value::bool(false));
@@ -1779,7 +1779,7 @@ fn clear_info(req: &mut Request) -> Result<bool, Thrown> {
         return Ok(false);
     }
     let empty = php::PhpArray::new(req)?;
-    assign_ref(req, 2, php::Value::array(empty));
+    assign_ref(req, 2, php::Value::array(empty))?;
     Ok(true)
 }
 

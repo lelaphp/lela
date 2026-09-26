@@ -434,11 +434,14 @@ fn user_sort(req: &mut Request, by_key: bool) -> Result<Value, Thrown> {
             user_compare(req, &callback, &mut deprecated, a, b)
         }
     });
-    match given.as_ref() {
-        ValueRef::Reference(reference) => reference.set(req, copy.to_value()),
-        _ => req.release(copy.to_value()),
-    }
+    let written = if let ValueRef::Reference(reference) = given.as_ref() {
+        reference.set(req, copy.to_value())
+    } else {
+        req.release(copy.to_value());
+        Ok(())
+    };
     sorted?;
+    written?;
     Ok(Value::bool(true))
 }
 
@@ -840,7 +843,7 @@ fn array_multisort(req: &mut Request) -> Result<Value, Thrown> {
         }
         rebuilt.set_next_free(req, count)?;
         match cell {
-            Some(cell) => cell.set(req, rebuilt.to_value()),
+            Some(cell) => cell.set(req, rebuilt.to_value())?,
             None => req.release(rebuilt.to_value()),
         }
     }

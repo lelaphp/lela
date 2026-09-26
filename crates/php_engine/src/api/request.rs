@@ -6465,9 +6465,9 @@ impl Request {
             return;
         };
         if let Some(ValueRef::Reference(cell)) = self.statics.get(at).map(|(_, v)| v.as_ref()) {
-            // `PhpRef::set` gives up what the cell held, after the write.
-            let cell = *cell;
-            cell.set(self, value);
+            // What the cell held is given up after the write.
+            let cell = cell.heap();
+            self.reference_set(cell, value);
             return;
         }
         let previous = self

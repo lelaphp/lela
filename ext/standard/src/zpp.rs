@@ -183,12 +183,14 @@ pub(super) fn long_of(n: usize) -> Value {
 }
 
 /// `ZEND_TRY_ASSIGN_REF_*` on the argument at `position`: `value`
-/// written through the reference the argument is, and given up where
-/// it is not one.
-pub(super) fn assign_ref(req: &mut Request, position: u32, value: Value) {
+/// written through the reference the argument is, held to the types of
+/// the properties that reference is typed by, and given up where it is
+/// not one.
+pub(super) fn assign_ref(req: &mut Request, position: u32, value: Value) -> Result<(), Thrown> {
     let given = req.argument(position).unwrap_or_default();
-    match given.as_ref() {
-        ValueRef::Reference(reference) => reference.set(req, value),
-        _ => req.release(value),
+    if let ValueRef::Reference(reference) = given.as_ref() {
+        return reference.set(req, value);
     }
+    req.release(value);
+    Ok(())
 }

@@ -344,7 +344,7 @@ fn assign_ref(
     };
     let reference = *reference;
     let value = value(req)?;
-    reference.set(req, value);
+    reference.set(req, value)?;
     Ok(())
 }
 

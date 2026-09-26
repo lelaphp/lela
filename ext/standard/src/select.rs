@@ -120,7 +120,7 @@ fn from_fd_set(
             keep(req, &mut out, &key, element)?;
         }
     }
-    crate::zpp::assign_ref(req, position, Value::array(out));
+    crate::zpp::assign_ref(req, position, Value::array(out))?;
     Ok(())
 }
 
@@ -152,7 +152,7 @@ fn emulate_read_fd_set(req: &mut Request, array: PhpArray) -> Result<usize, Thro
         }
     }
     if ret > 0 {
-        crate::zpp::assign_ref(req, 1, Value::array(out));
+        crate::zpp::assign_ref(req, 1, Value::array(out))?;
     } else {
         req.release(Value::array(out));
     }
@@ -275,11 +275,11 @@ fn stream_select(req: &mut Request) -> Result<Value, Thrown> {
         if ready > 0 {
             if w_array.is_some() {
                 let empty = PhpArray::new(req)?;
-                crate::zpp::assign_ref(req, 2, Value::array(empty));
+                crate::zpp::assign_ref(req, 2, Value::array(empty))?;
             }
             if e_array.is_some() {
                 let empty = PhpArray::new(req)?;
-                crate::zpp::assign_ref(req, 3, Value::array(empty));
+                crate::zpp::assign_ref(req, 3, Value::array(empty))?;
             }
             return Ok(crate::zpp::long_of(ready));
         }

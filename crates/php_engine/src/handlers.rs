@@ -17426,7 +17426,7 @@ fn incdec(
             // variable's from here, and what stood there is released,
             // which is what the in-place step does.
             if let Some(cell) = cell {
-                cell.set(req, stepped);
+                req.reference_set(cell.heap(), stepped);
             } else if let Some(place) = place {
                 let previous = exec::value_of(place.read());
                 place.write(stepped.into_zval());

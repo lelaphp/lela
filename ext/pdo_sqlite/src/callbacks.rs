@@ -152,8 +152,7 @@ pub(super) fn step(
     let returned = call(req, &handler.callable, &values);
     release_all(req, extra);
     let returned = returned?;
-    context.set(req, returned);
-    Ok(())
+    context.set(req, returned)
 }
 
 /// `do_callback` for an aggregate's final: the aggregate's reference and

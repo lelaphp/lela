@@ -92,7 +92,7 @@ pub(super) fn parse_str(req: &mut Request) -> Result<Value, Thrown> {
     let result = *result;
     let array = PhpArray::new(req)?;
     treat_data(req, string.as_bytes(), array)?;
-    result.set(req, Value::array(array));
+    result.set(req, Value::array(array))?;
     Ok(Value::null())
 }
 

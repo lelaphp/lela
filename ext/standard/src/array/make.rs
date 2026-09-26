@@ -957,7 +957,7 @@ fn shuffle(req: &mut Request) -> Result<Value, Thrown> {
         req.addref(&value);
         shuffled.append(req, value)?;
     }
-    cell.set(req, shuffled.to_value());
+    cell.set(req, shuffled.to_value())?;
     if owned {
         req.release(cell.as_value());
     }

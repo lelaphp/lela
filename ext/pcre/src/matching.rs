@@ -671,11 +671,11 @@ fn do_match(req: &mut Request, global: bool) -> Result<Value, Thrown> {
     // `zend_try_array_init`: `$matches` is `[]` before anything else.
     if wants {
         let empty = PhpArray::new(req)?;
-        crate::assign_ref(req, 3, empty.to_value());
+        crate::assign_ref(req, 3, empty.to_value())?;
     }
     let (value, matches) = match_impl(req, &pattern, subject, wants, global, flags, offset)?;
     if let Some(matches) = matches {
-        crate::assign_ref(req, 3, matches.to_value());
+        crate::assign_ref(req, 3, matches.to_value())?;
     }
     Ok(value)
 }

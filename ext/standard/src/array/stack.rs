@@ -175,10 +175,12 @@ impl Stack {
         })
     }
 
-    /// The rebuilt table written into the cell, the old one given up.
-    fn replace(&mut self, req: &mut Request, rebuilt: PhpArray) {
-        self.cell.set(req, rebuilt.to_value());
+    /// The rebuilt table written into the cell, the old one given up,
+    /// as an assignment through the cell is held to its type sources.
+    fn replace(&mut self, req: &mut Request, rebuilt: PhpArray) -> Result<(), Thrown> {
+        self.cell.set(req, rebuilt.to_value())?;
         self.array = rebuilt;
+        Ok(())
     }
 
     fn finish(self, req: &mut Request) {
@@ -353,7 +355,7 @@ fn array_shift(req: &mut Request) -> Result<Value, Thrown> {
     if rebuilt.next_free() == i64::MIN {
         rebuilt.set_next_free(req, 0)?;
     }
-    stack.replace(req, rebuilt);
+    stack.replace(req, rebuilt)?;
     stack.finish(req);
     Ok(value)
 }
@@ -403,7 +405,7 @@ fn array_unshift(req: &mut Request) -> Result<Value, Thrown> {
         }
     }
     let count = i64::try_from(rebuilt.len()).unwrap_or(i64::MAX);
-    stack.replace(req, rebuilt);
+    stack.replace(req, rebuilt)?;
     stack.finish(req);
     Ok(Value::int(count))
 }
@@ -542,7 +544,7 @@ fn array_splice(req: &mut Request) -> Result<Value, Thrown> {
     if rebuilt.next_free() == i64::MIN {
         rebuilt.set_next_free(req, 0)?;
     }
-    stack.replace(req, rebuilt);
+    stack.replace(req, rebuilt)?;
     stack.finish(req);
     Ok(Value::array(removed))
 }

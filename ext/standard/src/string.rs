@@ -1435,7 +1435,7 @@ fn similar_text(req: &mut Request) -> Result<Value, Thrown> {
     let (a, b) = (t1.as_bytes(), t2.as_bytes());
     if a.len() + b.len() == 0 {
         if percent {
-            crate::zpp::assign_ref(req, 3, Value::float(0.0));
+            crate::zpp::assign_ref(req, 3, Value::float(0.0))?;
         }
         return Ok(Value::int(0));
     }
@@ -1444,7 +1444,7 @@ fn similar_text(req: &mut Request) -> Result<Value, Thrown> {
         // `sim * 200.0 / (len1 + len2)`, both sides as C's doubles.
         let as_double = |n: usize| f64::from(u32::try_from(n).unwrap_or(u32::MAX));
         let p = as_double(sim) * 200.0 / as_double(a.len() + b.len());
-        crate::zpp::assign_ref(req, 3, Value::float(p));
+        crate::zpp::assign_ref(req, 3, Value::float(p))?;
     }
     Ok(long_of(sim))
 }

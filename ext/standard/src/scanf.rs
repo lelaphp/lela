@@ -816,7 +816,7 @@ fn put(
             }
             let position = *first + u32::try_from(*index).unwrap_or(0);
             *index += 1;
-            assign_ref(req, position, value);
+            assign_ref(req, position, value)?;
             Ok(())
         }
         Target::Array(array) => {

@@ -423,7 +423,7 @@ fn getopt(req: &mut Request) -> Result<Value, Thrown> {
     };
     let rest_index = given(req, 3).is_some();
     if rest_index {
-        assign_ref(req, 3, Value::int(1));
+        assign_ref(req, 3, Value::int(1))?;
     }
     // `$_SERVER['argv']` as `php_build_argv` wrote it, each argument a C
     // string; the one place `getopt` reads the host's `argv`.
@@ -492,7 +492,7 @@ fn getopt(req: &mut Request) -> Result<Value, Thrown> {
             req,
             3,
             Value::int(i64::try_from(optind).unwrap_or(i64::MAX)),
-        );
+        )?;
     }
     Ok(Value::array(result))
 }

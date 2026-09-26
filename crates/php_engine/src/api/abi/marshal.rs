@@ -641,10 +641,10 @@ impl<T: IntoReturn> Ref<T> {
     /// the argument is absent.
     pub fn set(&self, req: &mut Request, value: T) -> Result<(), Thrown> {
         let value = value.into_return(req)?;
-        match self.cell {
-            Some(cell) => cell.set(req, value),
-            None => req.release(value),
+        if let Some(cell) = self.cell {
+            return cell.set(req, value);
         }
+        req.release(value);
         Ok(())
     }
 }

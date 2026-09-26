@@ -537,7 +537,7 @@ fn replace_common(req: &mut Request, filter: bool) -> Result<Value, Thrown> {
         )?,
     };
     if req.argument_count() >= 5 {
-        assign_ref(req, 5, Value::int(i64::try_from(count).unwrap_or(i64::MAX)));
+        assign_ref(req, 5, Value::int(i64::try_from(count).unwrap_or(i64::MAX)))?;
     }
     Ok(result)
 }
@@ -637,7 +637,7 @@ pub(crate) fn preg_replace_callback(req: &mut Request) -> Result<Value, Thrown> 
     let flags = long_argument(req, 6, 0)?;
     let (value, count) = func_impl(req, regex, &callback, subject, limit, flags)?;
     if req.argument_count() >= 5 {
-        assign_ref(req, 5, Value::int(i64::try_from(count).unwrap_or(i64::MAX)));
+        assign_ref(req, 5, Value::int(i64::try_from(count).unwrap_or(i64::MAX)))?;
     }
     Ok(value)
 }
@@ -715,7 +715,7 @@ pub(crate) fn preg_replace_callback_array(req: &mut Request) -> Result<Value, Th
         }
     }
     if req.argument_count() >= 4 {
-        assign_ref(req, 4, Value::int(i64::try_from(total).unwrap_or(i64::MAX)));
+        assign_ref(req, 4, Value::int(i64::try_from(total).unwrap_or(i64::MAX)))?;
     }
     Ok(match current {
         Either::Str(s) => Value::string(s),
