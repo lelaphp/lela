@@ -108,12 +108,14 @@ pub struct RealpathEntry {
 
 /// Who a row the request added to `EG(zend_constants)` belongs to,
 /// php's `ZEND_CONSTANT_MODULE_NUMBER` beside `zend_constant.filename`:
-/// an extension that registers it at request start, or the program,
+/// the host, which registers under `Core` at request start; an
+/// extension that registers one while the request runs; or the program,
 /// `PHP_USER_CONSTANT`, with the file `zend_register_constant` read off
 /// `zend_get_executed_filename_ex` where one was executing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ConstantOwner {
-    Module(&'static str),
+    Core,
+    Extension(ExtensionId),
     User(Option<Box<[u8]>>),
 }
 
@@ -157,14 +159,18 @@ impl ConstantRow {
     }
 }
 
-impl ConstantOwner {
-    /// The extension's name, none for the program's.
-    fn module(&self) -> Option<&'static str> {
-        match self {
-            ConstantOwner::Module(name) => Some(name),
-            ConstantOwner::User(_) => None,
-        }
-    }
+/// Where a request stands, as `php_verror` reads it to name the origin
+/// of a diagnostic raised while no function is active
+/// (`Z/main/main.c:1086-1129`): `PG(during_request_startup)`, set by
+/// `php_request_startup` and cleared by the CLI before it compiles the
+/// file (`Z/sapi/cli/php_cli.c:943`), so the extensions' `RINIT` are
+/// served inside it; the main op array; and `EG_FLAGS_IN_SHUTDOWN`, which
+/// `php_request_shutdown` sets first (`Z/main/main.c:1960`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Phase {
+    Startup,
+    Running,
+    Shutdown,
 }
 
 /// What a native intends to do at a path, for the `open_basedir` guard.
@@ -1077,7 +1083,11 @@ pub struct Request {
     /// `EG(user_exception_handlers)`, the same shape without a mask.
     exception_handler: Option<Callable>,
     exception_handlers: Vec<Option<Callable>>,
-    shutdown_functions: Vec<(Callable, Vec<Value>)>,
+    /// `BG(user_shutdown_function_names)`: each entry's callback and
+    /// arguments, under the name `register_user_shutdown_function` gave
+    /// it, or none for one `register_shutdown_function()` appended at the
+    /// next index.
+    shutdown_functions: Vec<(Option<Vec<u8>>, Callable, Vec<Value>)>,
     tick_functions: Vec<(Callable, Vec<Value>)>,
     autoloaders: Vec<Callable>,
     /// `EG(in_autoload)`: the lowered names an autoloader is loading.
@@ -1108,6 +1118,14 @@ pub struct Request {
     /// outermost serving's end releases it, as `zend_exception_error`
     /// does.
     unwind_exit: bool,
+    /// Whether a diagnostic is displayed past the `php_output` layer,
+    /// `php_output_direct`, as php displays what it raises while the
+    /// engine starts ([`crate::api::raising::startup`]).
+    display_direct: bool,
+    /// Where the request stands in `php_request_startup`,
+    /// `php_execute_script` and `php_request_shutdown`, what `php_verror`
+    /// names a diagnostic's origin by when no function is active.
+    phase: Phase,
     /// `zend_objects_store_mark_destructed`: every object behind the
     /// request, set where `shutdown_destructors` catches the
     /// `zend_bailout` a destructor's raise ends the walk with
@@ -1457,6 +1475,7 @@ fn user_function_decl(user: &UserFunction) -> Option<&FunctionDecl> {
 }
 
 impl Request {
+    #[allow(clippy::too_many_lines)] // one line per field of the request
     pub(crate) fn new(shared: Arc<Shared>, description: RequestDescription) -> Request {
         let cwd = description.cwd.clone();
         let web = description.is_web;
@@ -1533,6 +1552,8 @@ impl Request {
             fibers: crate::fiber::Fibers::default(),
             pending: None,
             unwind_exit: false,
+            display_direct: false,
+            phase: Phase::Startup,
             marked_destructed: false,
             returned: Value::null(),
             interrupt: Interrupt::default(),
@@ -3302,6 +3323,29 @@ impl Request {
         Err(fatal)
     }
 
+    /// The tail of `zend_call_function` where the callee left something
+    /// pending and no frame stands to take it
+    /// (`Z/Zend/zend_execute_API.c:1069`), as in an extension's
+    /// `RSHUTDOWN` or a shutdown function: `zend_throw_exception_internal`
+    /// with no frame hands a throwable to the handler `set_exception_handler` set,
+    /// and the call is done where the handler took it; otherwise it is
+    /// rendered as the uncaught fatal, and the unwind exit is dropped,
+    /// and either leaves by `zend_bailout`, which is the `Thrown` with
+    /// no throwable handed back. The session's write at request end is
+    /// the witness, in `ext/session`.
+    pub(crate) fn thrown_without_frame(&mut self, thrown: &Thrown) -> Result<Value, Thrown> {
+        let threw = thrown.exception().is_some();
+        self.leave_pending(thrown);
+        match self.uncaught() {
+            Err(fatal) => {
+                self.end_in(&fatal);
+                Err(Thrown::of(None))
+            }
+            Ok(()) if threw => Ok(Value::null()),
+            Ok(()) => Err(Thrown::of(None)),
+        }
+    }
+
     /// The declared name of a throwable's class, `Error` for one the
     /// tables do not know.
     fn class_name_of(&self, throwable: PhpObject) -> String {
@@ -4563,7 +4607,7 @@ impl Request {
                 "<?xml version=\"1.0\"?><methodResponse><fault><value><struct><member><name>faultCode</name><value><int>{}</int></value></member><member><name>faultString</name><value><string>{name}:{message} in {named} on line {line}{trace}</string></value></member></struct></value></fault></methodResponse>",
                 self.xmlrpc_error_number()
             );
-            self.write(text.as_bytes());
+            self.display(text.as_bytes());
         } else if self.html_errors() {
             // php's two html formats: the message of an `E_ERROR` or an
             // `E_PARSE` escaped and no trace after it, and every other
@@ -4580,7 +4624,7 @@ impl Request {
                     "{prepend}<br />\n<b>{name}</b>:  {message} in <b>{named}</b> on line <b>{line}</b><br />{trace}\n{append}"
                 ),
             };
-            self.write(text.as_bytes());
+            self.display(text.as_bytes());
         } else if display == Display::Stderr {
             // php's stderr form stands inside the same `else` as the
             // plain one, so `html_errors` takes a CLI diagnostic off the
@@ -4594,8 +4638,27 @@ impl Request {
                 self.ini_text(b"error_prepend_string"),
                 self.ini_text(b"error_append_string"),
             );
-            self.write(text.as_bytes());
+            self.display(text.as_bytes());
         }
+    }
+
+    /// A diagnostic's display on the body: through the `php_output`
+    /// layer, or past it where it is raised as the engine starts.
+    fn display(&mut self, text: &[u8]) {
+        if self.display_direct {
+            self.ub_write(text);
+        } else {
+            self.write(text);
+        }
+    }
+
+    /// A diagnostic raised as the engine starts, at `Unknown` on line
+    /// zero and displayed past the `php_output` layer
+    /// ([`crate::api::raising::startup`]).
+    pub(crate) fn note_startup_error(&mut self, level: Level, message: &str) {
+        self.display_direct = true;
+        self.note_error_in(level, message, b"Unknown", 0);
+        self.display_direct = false;
     }
 
     /// What `php_error_cb` writes after `on line N` for the fatal's trace:
@@ -4864,6 +4927,28 @@ impl Request {
     /// left.
     pub(crate) fn unwind_exit(&self) -> bool {
         self.unwind_exit
+    }
+
+    /// `zend_is_unwind_exit(EG(exception))` for a native: whether a
+    /// [`Thrown`] that carries no throwable is the `exit` a callback
+    /// unwinds, which php's C code goes on past with the unwind exit
+    /// pending, rather than a fatal, which `zend_bailout` leaves the
+    /// native by. The session's save handler reads it after a user
+    /// handler returns (`ps_call_handler`).
+    #[must_use]
+    pub fn is_unwind_exit(&self) -> bool {
+        self.unwind_exit
+    }
+
+    /// The request's [`Phase`].
+    pub(crate) fn phase(&self) -> Phase {
+        self.phase
+    }
+
+    /// The request moved to `phase`, as `serve` crosses php's startup
+    /// and shutdown.
+    pub(crate) fn enter_phase(&mut self, phase: Phase) {
+        self.phase = phase;
     }
 
     pub(crate) fn end_in(&mut self, fatal: &Fatal) {
@@ -8014,7 +8099,7 @@ impl Request {
     /// `EG(current_execute_data)`: whether a frame or a native's call
     /// stands, which is every release inside a serving and none of the
     /// releases `php_request_shutdown` makes after the main frame popped.
-    fn executing(&self) -> bool {
+    pub(crate) fn executing(&self) -> bool {
         self.fibers.active().is_some()
             || self.vm.innermost().is_some()
             || self.vm.serving_call().is_some()
@@ -9377,6 +9462,10 @@ impl Request {
     /// `get_active_function_name`: the declared name of the native being
     /// served, `func->common.function_name`, whatever case the call
     /// spelled it in.
+    pub(crate) fn vm_serving_native(&self) -> bool {
+        self.active_native_function().is_some()
+    }
+
     pub(crate) fn active_native(&self) -> String {
         self.active_native_function().map_or_else(
             || String::from("native"),
@@ -12842,11 +12931,14 @@ impl Request {
                     .chain(value.map(|value| (Some(module), decl.name.0.to_vec(), value)))
             })
             .collect();
-        rows.extend(
-            self.constants
-                .iter()
-                .map(|row| (row.owner.module(), row.name.clone(), row.value)),
-        );
+        rows.extend(self.constants.iter().map(|row| {
+            let module = match &row.owner {
+                ConstantOwner::Core => Some("Core"),
+                ConstantOwner::Extension(extension) => self.extension_name(*extension),
+                ConstantOwner::User(_) => None,
+            };
+            (module, row.name.clone(), row.value)
+        }));
         rows
     }
 
@@ -12940,7 +13032,7 @@ impl Request {
             .find(|row| row.name == name)
             .and_then(|row| match &row.owner {
                 ConstantOwner::User(file) => file.as_deref(),
-                ConstantOwner::Module(_) => None,
+                ConstantOwner::Core | ConstantOwner::Extension(_) => None,
             })
     }
 
@@ -12951,11 +13043,46 @@ impl Request {
     /// `Core`'s group and before what the program defines. The value's
     /// one owner is the table's.
     pub(crate) fn register_host_constant(&mut self, name: &'static [u8], value: Value) {
-        self.constants.push(ConstantRow::new(
-            ConstantOwner::Module("Core"),
-            name.to_vec(),
+        self.constants
+            .push(ConstantRow::new(ConstantOwner::Core, name.to_vec(), value));
+    }
+
+    /// `REGISTER_STRINGL_CONSTANT` and its kin while a request runs:
+    /// `name` registered under `extension`, php's `module_number`,
+    /// carrying `attributes` as `zend_add_attribute` puts them on the
+    /// constant, a `#[\Deprecated]` among them php's `CONST_DEPRECATED`,
+    /// which a read raises. Where the request has registered the name
+    /// already, by an extension or by `define()`, the row keeps its
+    /// owner and attributes and takes `value`, the old value released,
+    /// which is what an extension writes through the `zval` that
+    /// `zend_get_constant_str` finds. `value` is the row's from here;
+    /// `false`, and `value` still the caller's, for a name the engine or
+    /// an extension declared as it started, which no request writes.
+    /// The session's `SID` is the witness, in `ext/session`.
+    pub fn register_constant(
+        &mut self,
+        extension: ExtensionId,
+        name: &[u8],
+        value: Value,
+        attributes: Vec<Attribute>,
+    ) -> bool {
+        if let Some(row) = self.constants.iter_mut().find(|row| row.name == name) {
+            let old = std::mem::replace(&mut row.value, value);
+            self.release(old);
+            return true;
+        }
+        if name == b"PHP_SAPI" || self.shared.constant(name).is_some() {
+            return false;
+        }
+        let deprecated = crate::attributes::Flags::of(&attributes).deprecated;
+        self.constants.push(ConstantRow {
+            owner: ConstantOwner::Extension(extension),
+            name: name.to_vec(),
             value,
-        ));
+            attributes,
+            deprecated,
+        });
+        true
     }
 
     /// The fd the host handed under one of its standard streams
@@ -12974,8 +13101,10 @@ impl Request {
 
     /// `zend_constant::attributes`: the attributes the declaration of
     /// the global constant `name` carries, what an extension declared or
-    /// a program's `DECLARE_ATTRIBUTED_CONST` hung on it, and the empty
-    /// list for a name no table has. The key is the one
+    /// a program's `DECLARE_ATTRIBUTED_CONST` hung on it, or an extension
+    /// registered it with while the request runs
+    /// ([`Request::register_constant`]), and the empty list for a name no
+    /// table has. The key is the one
     /// `zend_register_constant` writes, the namespace lowered. What
     /// `ReflectionConstant::getAttributes()` reads, and what the
     /// deprecation a read raises is worded from
@@ -13936,12 +14065,6 @@ impl Request {
             .map(|(_, a)| a)
     }
 
-    /// Replace a superglobal, what the GPC seeding and `session_start` do.
-    pub fn set_superglobal(&mut self, name: &[u8], value: PhpArray) {
-        self.superglobals.retain(|(n, _)| n.as_slice() != name);
-        self.superglobals.push((name.to_vec(), value));
-    }
-
     /// `php_sapi_name()`: `sapi_module.name`.
     #[must_use]
     pub fn sapi_name(&self) -> &str {
@@ -14017,10 +14140,17 @@ impl Request {
         std::mem::replace(&mut self.umask, mask)
     }
 
-    /// `strerror` text for an OS error code, as php's `%s` of it.
+    /// `strerror` text for an OS error code, as php's `%s` of it: the
+    /// system's sentence alone, without the ` (os error N)` Rust's
+    /// rendering of an OS error puts after it.
     #[must_use]
     pub fn os_error_text(&self, code: i32) -> String {
-        std::io::Error::from_raw_os_error(code).to_string()
+        let text = std::io::Error::from_raw_os_error(code).to_string();
+        let suffix = format!(" (os error {code})");
+        match text.strip_suffix(&suffix) {
+            Some(sentence) => sentence.to_owned(),
+            None => text,
+        }
     }
 
     /// `parse_str()`: a query string as an array, its strings the
@@ -14054,7 +14184,42 @@ impl Request {
     /// callback and the arguments are the entry's owners from here,
     /// given up by [`Request::free_shutdown_functions`].
     pub fn register_shutdown_function(&mut self, callback: Callable, arguments: Vec<Value>) {
-        self.shutdown_functions.push((callback, arguments));
+        self.shutdown_functions.push((None, callback, arguments));
+    }
+
+    /// `register_user_shutdown_function` and
+    /// `remove_user_shutdown_function` (`Z/ext/standard/basic_functions.c`),
+    /// the entry an extension keeps under a name of its own: `Some`
+    /// replaces the entry of that name where it stands, which
+    /// `zend_hash_str_update_mem` keeps in its place, or appends one;
+    /// `None` removes it. The owners are the list's as
+    /// [`Request::register_shutdown_function`]'s, and what an entry held
+    /// is given up where it goes. The session's `session_shutdown` is the
+    /// witness, in `ext/session`.
+    pub fn set_shutdown_function(&mut self, name: &[u8], entry: Option<(Callable, Vec<Value>)>) {
+        let at = self
+            .shutdown_functions
+            .iter()
+            .position(|(key, _, _)| key.as_deref() == Some(name));
+        let old = match (at, entry) {
+            (Some(at), Some((callback, arguments))) => Some(std::mem::replace(
+                &mut self.shutdown_functions[at],
+                (Some(name.to_vec()), callback, arguments),
+            )),
+            (Some(at), None) => Some(self.shutdown_functions.remove(at)),
+            (None, Some((callback, arguments))) => {
+                self.shutdown_functions
+                    .push((Some(name.to_vec()), callback, arguments));
+                None
+            }
+            (None, None) => None,
+        };
+        if let Some((_, callback, arguments)) = old {
+            callback.release(self);
+            for value in arguments {
+                self.release(value);
+            }
+        }
     }
 
     /// The registered entry at `at`, as `zend_hash_apply` reaches it:
@@ -14063,7 +14228,9 @@ impl Request {
     /// while it runs is reached by the same walk. `None` past the end
     /// is what ends it.
     pub(crate) fn shutdown_function(&self, at: usize) -> Option<(Callable, Vec<Value>)> {
-        self.shutdown_functions.get(at).cloned()
+        self.shutdown_functions
+            .get(at)
+            .map(|(_, callback, arguments)| (callback.clone(), arguments.clone()))
     }
 
     /// `php_free_shutdown_functions` (`Z/ext/standard/basic_functions.c:1660`),
@@ -14072,7 +14239,7 @@ impl Request {
     /// released, which is `user_shutdown_function_dtor` over the
     /// destroyed table.
     pub(crate) fn free_shutdown_functions(&mut self) {
-        for (callback, arguments) in std::mem::take(&mut self.shutdown_functions) {
+        for (_, callback, arguments) in std::mem::take(&mut self.shutdown_functions) {
             callback.release(self);
             for value in arguments {
                 self.release(value);
@@ -15293,6 +15460,18 @@ mod tests {
 
         assert_eq!(String::from_utf8_lossy(&served.stdout), "d\nafter\n");
         assert_eq!(served.fatal, None);
+    }
+
+    /// `strerror(ENOENT)` is the sentence alone, which php prints inside
+    /// `open(%s, O_RDWR) failed: %s (%d)` and every message like it.
+    #[test]
+    fn os_error_text_is_strerror() {
+        let engine = Engine::builder().build();
+        let req = Request::new(
+            std::sync::Arc::clone(&engine.shared),
+            RequestDescription::default(),
+        );
+        assert_eq!(req.os_error_text(2), "No such file or directory");
     }
 
     /// An extension entry's `on_modify` (`PHP_INI_MH` at

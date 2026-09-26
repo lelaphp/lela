@@ -47,10 +47,6 @@ pub(crate) enum Slot {
 }
 
 impl Handlers {
-    pub(crate) const fn is_set(&self) -> bool {
-        self.open.is_some()
-    }
-
     pub(crate) const fn slot(&mut self, slot: Slot) -> &mut Option<Value> {
         match slot {
             Slot::Open => &mut self.open,
@@ -101,7 +97,20 @@ pub(super) fn store(req: &mut Request, slot: Slot, value: Option<Value>) {
 /// `ps_call_handler`: the callable called with `arguments`, which it
 /// gives up after; `None` is php's `UNDEF`, for a call that threw, a
 /// recursive call refused with php's warning, and a throwable already
-/// pending, as `zend_call_function` refuses to call then.
+/// pending, as `zend_call_function` refuses to call then. An `exit` in
+/// a handler is pending the same way, so the flush it stands in goes on
+/// with every later call refused and the session no longer active, and
+/// the request's end has nothing left to write:
+///
+/// ```php
+/// class H implements SessionHandlerInterface { function open($p, $n): bool { return true; } function close(): bool { die("close\n"); }
+///   function read($id): string|false { return ""; } function write($id, $d): bool { die("write\n"); }
+///   function destroy($id): bool { return true; } function gc($l): int|false { return 0; } }
+/// session_set_save_handler(new H); session_id("rs2"); session_start(["use_cookies" => 0, "cache_limiter" => ""]); session_write_close(); echo "after\n";
+/// ```
+/// ```expect
+/// write
+/// ```
 fn call_handler(
     req: &mut Request,
     slot: Slot,
@@ -122,7 +131,14 @@ fn call_handler(
     {
         req.state::<State>().in_save_handler = true;
         let answered = call(req, &callable, arguments);
-        req.state::<State>().in_save_handler = false;
+        // `zend_bailout` leaves `ps_call_handler` before it clears
+        // `PS(in_save_handler)`, so the next call is refused as a
+        // recursive one; an `exit` unwinds as a throwable does, and the
+        // flag is cleared behind it.
+        let bailed = matches!(&answered, Err(thrown) if thrown.exception().is_none() && !req.is_unwind_exit());
+        if !bailed {
+            req.state::<State>().in_save_handler = false;
+        }
         absorb(req, answered)
     } else {
         Ok(None)
@@ -464,8 +480,19 @@ fn handler_open(req: &mut Request) -> Result<Value, Thrown> {
     answer(req, Value::bool(opened))
 }
 
-/// `SessionHandler::close(): bool`.
+/// `SessionHandler::close(): bool`, which takes no argument
+/// (`ZEND_PARSE_PARAMETERS_NONE`).
+///
+/// ```php
+/// class H extends SessionHandler { function close(): bool { return parent::close(false); } }
+/// ob_start(); session_set_save_handler(new H); session_save_path(__DIR__); session_start(["use_cookies" => 0, "cache_limiter" => ""]);
+/// try { session_write_close(); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// SessionHandler::close() expects exactly 0 arguments, 1 given
+/// ```
 fn handler_close(req: &mut Request) -> Result<Value, Thrown> {
+    arguments_between(req, 0, 0)?;
     let Some(module) = sanity(req, true)? else {
         return Ok(Value::bool(false));
     };
@@ -536,7 +563,7 @@ fn handler_destroy(req: &mut Request) -> Result<Value, Thrown> {
 ///
 /// ```php
 /// ob_start(); $h = new SessionHandler; session_set_save_handler($h); session_save_path(__DIR__); touch(__DIR__ . "/sess_stale", 1000);
-/// session_start(["use_cookies" => 0, "cache_limiter" => ""]); var_dump($h->gc(1440), file_exists(__DIR__ . "/sess_stale"));
+/// session_start(["use_cookies" => 0, "cache_limiter" => "", "gc_probability" => 0]); var_dump($h->gc(1440), file_exists(__DIR__ . "/sess_stale"));
 /// session_write_close(); ob_end_flush();
 /// ```
 /// ```expect

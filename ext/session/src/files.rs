@@ -1,15 +1,18 @@
 //! `mod_files.c`, the `files` save handler: one file `sess_<id>` per
 //! session under `session.save_path`, `N;MODE;DIR` splitting it into `N`
-//! levels of one-character directories, opened create-and-read-write,
-//! held under `flock(LOCK_EX)` from the read to the close, read and
-//! written from offset zero, and collected by modification time. The
-//! file is opened through the streams facet's plain wrapper, so the
-//! request's working directory and `open_basedir` are the engine's;
-//! php's `O_NOFOLLOW` and its owner check are the plain wrapper's to
-//! offer (#746).
+//! levels of one-character directories, opened create-and-read-write
+//! under `O_NOFOLLOW` with the path's permissions, held under `flock(LOCK_EX)`
+//! from the read to the close, read and written from offset zero with
+//! `pread` and `pwrite`, and collected by modification time. The file is
+//! php's raw fd, not a stream, so it takes no resource id; its
+//! path is read against the request's working directory, as
+//! `VCWD_OPEN_MODE` reads it.
+
+use std::fs::{File, OpenOptions, Permissions};
+use std::os::unix::fs::{FileExt, OpenOptionsExt, PermissionsExt};
 
 use php_ext::raising::{Level, Thrown, docref, raise};
-use php_ext::request::{Request, Stream, WrapperOp};
+use php_ext::request::{Request, WrapperOp};
 
 use crate::{State, session};
 
@@ -22,8 +25,29 @@ const MAXPATHLEN: usize = 1024;
 #[cfg(not(target_os = "macos"))]
 const MAXPATHLEN: usize = 4096;
 
-/// `LOCK_EX`.
-const LOCK_EX: i64 = 2;
+/// `O_NOFOLLOW`, which the standard library names on no platform: the
+/// BSDs' and macOS's bit, and Linux's, which the architectures number
+/// two ways.
+#[cfg(not(target_os = "linux"))]
+const O_NOFOLLOW: i32 = 0x0100;
+#[cfg(all(
+    target_os = "linux",
+    any(
+        target_arch = "aarch64",
+        target_arch = "arm",
+        target_arch = "powerpc64"
+    )
+))]
+const O_NOFOLLOW: i32 = 0o100_000;
+#[cfg(all(
+    target_os = "linux",
+    not(any(
+        target_arch = "aarch64",
+        target_arch = "arm",
+        target_arch = "powerpc64"
+    ))
+))]
+const O_NOFOLLOW: i32 = 0o400_000;
 
 /// `ps_files`: what `PS_OPEN_FUNC(files)` sets up, the file it holds
 /// open and the key it was opened for.
@@ -33,7 +57,7 @@ pub(crate) struct Files {
     dirdepth: usize,
     st_size: i64,
     filemode: i64,
-    fd: Option<Stream>,
+    fd: Option<File>,
 }
 
 /// `ps_files_path_create`: `basedir/a/b/sess_ab...` for a depth of two,
@@ -61,10 +85,15 @@ fn data(req: &mut Request) -> Option<&mut Files> {
 
 /// `ps_files_close`: the file given up, its `flock` with it.
 fn close_fd(req: &mut Request) {
-    if let Some(stream) = data(req).and_then(|d| d.fd.take()) {
-        stream.close(req);
-        req.release(stream.as_value());
+    if let Some(files) = data(req) {
+        files.fd = None;
     }
+}
+
+/// php's `%s (%d)` of an `errno`, `strerror` and the number.
+fn errno_text(req: &Request, error: &std::io::Error) -> String {
+    let errno = error.raw_os_error().unwrap_or(0);
+    format!("{} ({errno})", req.os_error_text(errno))
 }
 
 /// Whether `path` names something, `stat(2)` without the cache.
@@ -75,12 +104,43 @@ fn exists(req: &mut Request, path: &[u8]) -> Result<Option<[i64; 13]>, Thrown> {
 /// `ps_files_open`: the file for `key` opened and locked, unless it is
 /// the one open already; a key php refuses, a path it cannot build and
 /// an open that fails each warn and leave no file open.
-fn open_key(req: &mut Request, key: &[u8]) -> Result<(), Thrown> {
+/// `VCWD_OPEN_MODE(buf, O_CREAT | O_RDWR | O_NOFOLLOW, filemode)` makes
+/// a new file with the permissions `session.save_path` names, less the umask,
+/// and refuses a symbolic link where the file would be; the fd
+/// takes no resource id, so the stream opened after it has the id it
+/// would have had. php's check that
+/// the file is its own uid's is not made: nothing the standard library
+/// has reads the process's uid, and only a file another uid wrote in the
+/// directory meets it.
+///
+/// ```php
+/// ob_start(); umask(0); session_save_path("0;0640;" . __DIR__); session_id("mode1"); session_start(["use_cookies" => 0, "cache_limiter" => ""]);
+/// session_write_close(); printf("%o\n", fileperms(__DIR__ . "/sess_mode1") & 0777);
+/// symlink(__DIR__ . "/elsewhere", __DIR__ . "/sess_link1"); session_id("link1"); var_dump(session_start(), file_exists(__DIR__ . "/elsewhere"));
+/// session_save_path(__DIR__ . "/nope"); session_id("gone1"); var_dump(session_start());
+/// $f = fopen(__FILE__, "r"); var_dump($f);
+/// ```
+/// ```expect
+/// 640
+///
+/// Warning: session_start(): open(%s/sess_link1, O_RDWR) failed: %s (%d) in %s on line 4
+///
+/// Warning: session_start(): Failed to read session data: files (path: 0;0640;%s) in %s on line 4
+/// bool(false)
+/// bool(false)
+///
+/// Warning: session_start(): open(%s/nope/sess_gone1, O_RDWR) failed: No such file or directory (2) in %s on line 5
+///
+/// Warning: session_start(): Failed to read session data: files (path: %s/nope) in %s on line 5
+/// bool(false)
+/// resource(%d) of type (stream)
+/// ```
+fn open_key(req: &mut Request, key: &[u8]) {
     let Some(files) = data(req) else {
-        return Ok(());
+        return;
     };
     if files.fd.is_some() && files.last_key.as_deref() == Some(key) {
-        return Ok(());
+        return;
     }
     files.last_key = None;
     close_fd(req);
@@ -90,7 +150,7 @@ fn open_key(req: &mut Request, key: &[u8]) -> Result<(), Thrown> {
             Level::Warning,
             "Session ID is too long or contains illegal characters. Only the A-Z, a-z, 0-9, \"-\", and \",\" characters are allowed",
         );
-        return Ok(());
+        return;
     }
     let Some(path) = data(req).and_then(|d| path_create(d, key)) else {
         docref(
@@ -100,71 +160,73 @@ fn open_key(req: &mut Request, key: &[u8]) -> Result<(), Thrown> {
                 "Failed to create session data file path. Too short session ID, invalid save_path or path length exceeds {MAXPATHLEN} characters"
             ),
         );
-        return Ok(());
+        return;
     };
     if let Some(files) = data(req) {
         files.last_key = Some(key.to_vec());
     }
-    let dir = parent(&path);
-    if exists(req, dir)?.is_none() {
-        docref(
-            req,
-            Level::Warning,
-            &format!(
-                "open({}, O_RDWR) failed: {} (2)",
-                String::from_utf8_lossy(&path),
-                req.os_error_text(2)
-            ),
-        );
-        return Ok(());
-    }
-    let created = exists(req, &path)?.is_none();
-    let Some(stream) = req.open_stream(&path, b"c+b", false)? else {
-        return Ok(());
+    let host = req.absolutize(&path).0;
+    let existed = std::fs::symlink_metadata(&host).is_ok();
+    let filemode = data(req).map_or(0o600, |d| d.filemode);
+    let mode = u32::try_from(filemode & 0o7777).unwrap_or(0o600);
+    let opened = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(mode)
+        .custom_flags(O_NOFOLLOW)
+        .open(&host);
+    let file = match opened {
+        Ok(file) => file,
+        Err(error) => {
+            let text = errno_text(req, &error);
+            docref(
+                req,
+                Level::Warning,
+                &format!(
+                    "open({}, O_RDWR) failed: {text}",
+                    String::from_utf8_lossy(&path)
+                ),
+            );
+            return;
+        }
     };
-    if created {
-        let mode = data(req).map_or(0o600, |d| d.filemode) & !i64::from(req.umask());
-        req.wrapper_op(&path, WrapperOp::Chmod(mode))?;
+    // The mode as php's process has it: `open(2)` takes the process's own
+    // umask off, and `umask()` sets the request's.
+    if !existed {
+        let _ = file.set_permissions(Permissions::from_mode(mode & !req.umask()));
     }
-    stream.flock(req, LOCK_EX);
+    let _ = file.lock();
     if let Some(files) = data(req) {
-        files.fd = Some(stream);
-    }
-    Ok(())
-}
-
-/// The directory part of a path, what `open(2)` needs to exist.
-fn parent(path: &[u8]) -> &[u8] {
-    match path.iter().rposition(|&b| b == b'/') {
-        Some(0) => b"/",
-        Some(at) => &path[..at],
-        None => b".",
+        files.fd = Some(file);
     }
 }
 
 /// `ps_files_write`: the file for `key` reopened where the id changed,
 /// cut to nothing where the data is shorter than what was read, and
 /// written from offset zero.
+#[allow(clippy::unnecessary_wraps)] // a save handler operation's shape, which `user`'s fills
 fn write_key(req: &mut Request, key: &[u8], val: &[u8]) -> Result<bool, Thrown> {
-    open_key(req, key)?;
-    let Some((stream, st_size)) = data(req).and_then(|d| d.fd.map(|fd| (fd, d.st_size))) else {
+    open_key(req, key);
+    let Some(files) = data(req) else {
         return Ok(false);
     };
-    if i64::try_from(val.len()).unwrap_or(i64::MAX) < st_size {
-        stream.truncate(req, 0);
+    let Some(file) = files.fd.as_ref() else {
+        return Ok(false);
+    };
+    if i64::try_from(val.len()).unwrap_or(i64::MAX) < files.st_size {
+        let _ = file.set_len(0);
     }
-    stream.seek(req, 0, None);
-    match stream.write(req, val) {
-        Some(n) if n == val.len() => {
-            stream.flush(req);
-            Ok(true)
-        }
-        Some(_) => {
+    let written = file.write_at(val, 0);
+    match written {
+        Ok(n) if n == val.len() => Ok(true),
+        Ok(_) => {
             docref(req, Level::Warning, "Write wrote less bytes than requested");
             Ok(false)
         }
-        None => {
-            docref(req, Level::Warning, "Write failed: Input/output error (5)");
+        Err(error) => {
+            let text = errno_text(req, &error);
+            docref(req, Level::Warning, &format!("Write failed: {text}"));
             Ok(false)
         }
     }
@@ -281,38 +343,57 @@ pub(super) fn close(req: &mut Request) {
 /// bool(false)
 /// bool(true)
 /// ```
+#[allow(clippy::unnecessary_wraps)] // a save handler operation's shape, which `user`'s fills
 pub(super) fn read(req: &mut Request, key: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
-    open_key(req, key)?;
-    let Some(stream) = data(req).and_then(|d| d.fd) else {
+    open_key(req, key);
+    let Some(files) = data(req) else {
         return Ok(None);
     };
-    let Some(stat) = stream.stat(req) else {
+    let Some(file) = files.fd.as_ref() else {
         return Ok(None);
     };
-    let size = stat[7];
-    if let Some(files) = data(req) {
-        files.st_size = size;
-    }
+    let Ok(stat) = file.metadata() else {
+        return Ok(None);
+    };
+    let size = stat.len();
+    files.st_size = i64::try_from(size).unwrap_or(i64::MAX);
     if size == 0 {
         return Ok(Some(Vec::new()));
     }
-    stream.seek(req, 0, None);
-    let wanted = usize::try_from(size).unwrap_or(usize::MAX);
-    let got = stream.copy_to_mem(req, Some(wanted))?;
-    let bytes = got.as_bytes().to_vec();
-    req.release(php_ext::values::Value::string(got));
-    if bytes.len() != wanted {
-        docref(
-            req,
-            Level::Warning,
-            "Read returned less bytes than requested",
-        );
-        return Ok(None);
+    let mut bytes = vec![0u8; usize::try_from(size).unwrap_or(0)];
+    match file.read_at(&mut bytes, 0) {
+        Ok(n) if n == bytes.len() => Ok(Some(bytes)),
+        Ok(_) => {
+            docref(
+                req,
+                Level::Warning,
+                "Read returned less bytes than requested",
+            );
+            Ok(None)
+        }
+        Err(error) => {
+            let text = errno_text(req, &error);
+            docref(req, Level::Warning, &format!("Read failed: {text}"));
+            Ok(None)
+        }
     }
-    Ok(Some(bytes))
 }
 
-/// `PS_WRITE_FUNC(files)`.
+/// `PS_WRITE_FUNC(files)`: the data written from offset zero, `lseek(fd,
+/// 0, SEEK_SET)` after the read left the file at its end, over a file cut
+/// to nothing first where the data is shorter than what was read.
+///
+/// ```php
+/// ob_start(); session_save_path(__DIR__); session_id("seek1"); session_start(["use_cookies" => 0, "cache_limiter" => ""]);
+/// session_decode('a|i:1;b|i:22;'); session_write_close();
+/// session_start(); session_decode('b|i:33;'); session_write_close(); var_dump(file_get_contents(__DIR__ . "/sess_seek1"));
+/// session_start(); session_decode('b|i:4;'); session_write_close(); var_dump(file_get_contents(__DIR__ . "/sess_seek1"));
+/// ob_end_flush();
+/// ```
+/// ```expect
+/// string(13) "a|i:1;b|i:33;"
+/// string(12) "a|i:1;b|i:4;"
+/// ```
 pub(super) fn write(req: &mut Request, key: &[u8], val: &[u8]) -> Result<bool, Thrown> {
     write_key(req, key, val)
 }
@@ -349,7 +430,7 @@ pub(super) fn destroy(req: &mut Request, key: &[u8]) -> Result<bool, Thrown> {
 /// their count; `-1` for a split directory, which php leaves to cron.
 ///
 /// ```php
-/// ob_start(); ini_set("session.save_path", __DIR__); ini_set("session.use_cookies", 0);
+/// ob_start(); ini_set("session.save_path", __DIR__); ini_set("session.use_cookies", 0); ini_set("session.gc_probability", 0);
 /// touch(__DIR__ . "/sess_old", 1000); touch(__DIR__ . "/sess_new"); touch(__DIR__ . "/other", 1000);
 /// session_start(); var_dump(session_gc(), file_exists(__DIR__ . "/sess_old"), file_exists(__DIR__ . "/sess_new"), file_exists(__DIR__ . "/other"));
 /// session_write_close(); var_dump(session_gc()); ob_end_flush();
@@ -382,16 +463,15 @@ pub(super) fn gc(req: &mut Request, maxlifetime: i64) -> Result<i64, Thrown> {
         );
         return Ok(-1);
     }
-    let Some(listing) = req.open_dir(&dir)? else {
+    let Ok(listing) = std::fs::read_dir(req.absolutize(&dir).0) else {
         return Ok(-1);
     };
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
     let mut deleted = 0;
-    while let Some(entry) = listing.read_dir(req)? {
-        let name = entry.as_bytes().to_vec();
-        req.release(php_ext::values::Value::string(entry));
+    for entry in listing.flatten() {
+        let name = entry.file_name().into_encoded_bytes();
         if !name.starts_with(PREFIX) || name.len() + dir.len() + 2 >= MAXPATHLEN {
             continue;
         }
@@ -405,8 +485,6 @@ pub(super) fn gc(req: &mut Request, maxlifetime: i64) -> Result<i64, Thrown> {
             deleted += 1;
         }
     }
-    listing.close(req);
-    req.release(listing.as_value());
     Ok(deleted)
 }
 

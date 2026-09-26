@@ -55,6 +55,21 @@ pub fn raise_at(req: &mut Request, level: Level, message: &str, file: &[u8], lin
     req.note_error_in(level, message, file, line);
 }
 
+/// `zend_error` while php starts, before any request (`zend_startup`,
+/// `php_module_startup`, the `ZEND_INI_STAGE_STARTUP` rules of the ini
+/// entries): the message as given, at `Unknown` on line 0, and displayed
+/// past the `php_output` layer, which is not active yet and writes
+/// straight to the host (`php_output_direct`), so it sends no header and
+/// no buffer takes it. An extension's startup rule over the host's ini
+/// values raises through this from the request's `RINIT`, since this
+/// engine raises nothing while it is built; `php_error_docref`'s own
+/// origin there, `PHP Startup: `, is the caller's to write. The session's
+/// `session.use_only_cookies=0` at startup is the witness, in
+/// `ext/session`.
+pub fn startup(req: &mut Request, level: Level, message: &str) {
+    req.note_startup_error(level, message);
+}
+
 /// `E_WARNING`.
 pub fn warning(req: &mut Request, message: &str) {
     raise(req, Level::Warning, message);
@@ -145,8 +160,23 @@ pub(crate) fn deprecated_constant(req: &mut Request, key: &[u8]) -> Result<(), T
 /// (`chr(): Providing a value not in-between 0 and 255 is deprecated,
 /// ...`). The docref itself, php's link into the manual, is off in the
 /// CLI's ini and is not rendered here.
+///
+/// Where no native is active, `php_verror` names the request's phase
+/// instead (`Z/main/main.c:1086-1129`): `PHP Request Startup` in an
+/// extension's `RINIT`, `PHP Request Shutdown` in its `RSHUTDOWN`, and
+/// `Unknown` between them, each with no `()`. The session's write at
+/// request end is the witness, in `ext/session`.
 pub fn docref(req: &mut Request, level: Level, message: &str) {
-    let text = format!("{}(): {message}", req.active_native());
+    let text = if req.vm_serving_native() {
+        format!("{}(): {message}", req.active_native())
+    } else {
+        let origin = match req.phase() {
+            crate::api::request::Phase::Startup => "PHP Request Startup",
+            crate::api::request::Phase::Running => "Unknown",
+            crate::api::request::Phase::Shutdown => "PHP Request Shutdown",
+        };
+        format!("{origin}: {message}")
+    };
     raise(req, level, &text);
 }
 

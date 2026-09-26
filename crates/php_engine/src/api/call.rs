@@ -146,7 +146,7 @@ fn serve(
     arguments: &[Value],
     extra_named: &[(PhpString, Value)],
 ) -> Result<Value, Thrown> {
-    match target {
+    let served = match target {
         Target::Function(function) => req.serve_function(function, arguments, extra_named),
         Target::Method {
             function,
@@ -154,6 +154,10 @@ fn serve(
             this,
         } => req.serve_method(function, this, scope, arguments, extra_named),
         Target::Closure(object) => req.serve_closure(object, arguments, extra_named),
+    };
+    match served {
+        Err(thrown) if !req.executing() => req.thrown_without_frame(&thrown),
+        served => served,
     }
 }
 

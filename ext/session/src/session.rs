@@ -7,6 +7,7 @@
 
 use std::io::Read;
 
+use php_ext::decl::{Attribute, AttributeArgument, ConstExpr, Name};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::PhpArray;
@@ -174,11 +175,51 @@ pub(super) fn create_id(req: &mut Request) -> Option<Vec<u8>> {
 
 // ------------------------------------------------------------ vars
 
-/// `php_session_track_init`: `$_SESSION` a new empty array.
+/// `php_session_track_init`: `$_SESSION` deleted from `EG(symbol_table)`
+/// whatever it held, then bound to a new empty array.
+///
+/// ```php
+/// ob_start(); session_save_path(__DIR__); session_id("track1");
+/// session_start(["use_cookies" => 0, "cache_limiter" => ""]); $_SESSION['a'] = 1; $_SESSION['b'] = [2];
+/// session_write_close(); var_dump(file_get_contents(__DIR__ . "/sess_track1"), $_SESSION);
+/// $_SESSION = []; session_start(); var_dump($_SESSION);
+/// unset($_SESSION['a']); function f() { $_SESSION['c'] = 3; } f(); session_write_close();
+/// session_start(); var_dump(session_encode()); $_SESSION = ['d' => 4]; session_write_close();
+/// session_start(); unset($_SESSION); var_dump(isset($_SESSION), session_encode()); session_write_close();
+/// session_start(); var_dump($_SESSION); session_destroy(); ob_end_flush();
+/// ```
+/// ```expect
+/// string(22) "a|i:1;b|a:1:{i:0;i:2;}"
+/// array(2) {
+///   ["a"]=>
+///   int(1)
+///   ["b"]=>
+///   array(1) {
+///     [0]=>
+///     int(2)
+///   }
+/// }
+/// array(2) {
+///   ["a"]=>
+///   int(1)
+///   ["b"]=>
+///   array(1) {
+///     [0]=>
+///     int(2)
+///   }
+/// }
+/// string(22) "b|a:1:{i:0;i:2;}c|i:3;"
+/// bool(false)
+/// string(6) "d|i:4;"
+/// array(1) {
+///   ["d"]=>
+///   int(4)
+/// }
+/// ```
 pub(super) fn track_init(req: &mut Request) -> Result<(), Thrown> {
+    req.set_global(b"_SESSION", None);
     let array = PhpArray::new(req)?;
-    bind_array(req, array);
-    Ok(())
+    bind_array(req, array)
 }
 
 /// `php_session_encode`: the session's variables through the serializer,
@@ -225,13 +266,13 @@ fn rinit_globals(req: &mut Request) {
     state.parent_open = false;
     state.define_sid = true;
     state.session_vars = None;
-    state.tracked = false;
+    state.vars = None;
 }
 
 /// `php_rshutdown_session_globals`: the handler closed, the id, the
 /// read data and the start site forgotten.
 fn rshutdown_globals(req: &mut Request) -> Result<(), Thrown> {
-    req.state::<State>().tracked = false;
+    crate::unbind(req);
     let closed = close(req);
     absorb(req, closed)?;
     let state = req.state::<State>();
@@ -243,34 +284,16 @@ fn rshutdown_globals(req: &mut Request) -> Result<(), Thrown> {
     Ok(())
 }
 
-/// The save handler and the serializer the ini entries name, taken where the
-/// request set a valid one without the on-modify function (#744) and no
-/// session is active.
-pub(super) fn sync(req: &mut Request) {
-    let format = Format::find(&ini(req, b"session.serialize_handler"));
-    let module = Module::find(&ini(req, b"session.save_handler"));
-    let state = req.state::<State>();
-    if state.status == Status::Active {
-        return;
-    }
-    if let Some(format) = format {
-        state.format = Some(format);
-    }
-    if let Some(module) = module
-        && state.module != Some(module)
-        && (module == Module::Files || state.handlers.is_set())
-        && state.module.is_some()
-    {
-        state.default_module = state.module;
-        state.module = Some(module);
-    }
-}
-
 /// `PHP_RINIT_FUNCTION(session)`: the save handler and the serializer the ini
 /// names, the session disabled where either is unknown, and started
-/// under `session.auto_start`.
+/// under `session.auto_start`, with no file executing to have started it
+/// from (`zend_get_executed_filename_ex()` is null there), so what names
+/// the start site later says the session started automatically. The
+/// startup rules are served first, over the host's values
+/// ([`crate::ini::startup`]).
 pub(super) fn rinit(req: &mut Request) -> Result<(), Thrown> {
     rinit_globals(req);
+    crate::ini::startup(req)?;
     let module = Module::find(&ini(req, b"session.save_handler"));
     let format = Format::find(&ini(req, b"session.serialize_handler"));
     let state = req.state::<State>();
@@ -282,6 +305,7 @@ pub(super) fn rinit(req: &mut Request) -> Result<(), Thrown> {
     }
     if ini_bool(req, b"session.auto_start") {
         start(req)?;
+        req.state::<State>().started_at = None;
         if let Some(thrown) = req.state::<State>().thrown.take() {
             return Err(thrown);
         }
@@ -290,7 +314,39 @@ pub(super) fn rinit(req: &mut Request) -> Result<(), Thrown> {
 }
 
 /// `PHP_RSHUTDOWN_FUNCTION(session)`: an active session written and
-/// closed, the handler's callables given up.
+/// closed, the handler's callables given up. The flush stands in a
+/// `zend_try`: a user handler that throws here has no frame to throw to,
+/// so the throwable is the uncaught fatal where it was thrown and the
+/// flush leaves by `zend_bailout`, `PS(in_save_handler)` still set; the
+/// close after it is then refused as a recursive call, and what the
+/// session raises here names `PHP Request Shutdown` as its origin.
+///
+/// ```php
+/// class H implements SessionHandlerInterface { function open($p, $n): bool { return true; } function close(): bool { echo "close\n"; return true; }
+///   function read($id): string|false { return ""; } function write($id, $d): bool { echo "write\n"; throw new Exception("w"); }
+///   function destroy($id): bool { return true; } function gc($l): int|false { return 0; } }
+/// ob_start(); session_set_save_handler(new H, false); session_id("rs1"); session_start(["use_cookies" => 0, "cache_limiter" => ""]); $_SESSION["k"] = 1;
+/// ```
+/// ```expect exit=255
+/// write
+///
+/// Fatal error: Uncaught Exception: w in %s:3
+/// Stack trace:
+/// #0 [internal function]: H->write('rs1', 'k|i:1;')
+/// #1 {main}
+///   thrown in %s on line 3
+///
+/// Warning: PHP Request Shutdown: Cannot call session save handler in a recursive manner in Unknown on line 0
+/// ```
+///
+/// A warning of the write itself is the request's shutdown's too:
+///
+/// ```php
+/// session_save_path(__DIR__); session_id("rs3"); session_start(["use_cookies" => 0, "cache_limiter" => ""]); $_SESSION['a|b'] = 1;
+/// ```
+/// ```expect
+/// Warning: PHP Request Shutdown: Failed to write session data. Data contains invalid key "a|b" in Unknown on line 0
+/// ```
 pub(super) fn rshutdown(req: &mut Request) {
     if req.state::<State>().status == Status::Active {
         let _ = flush(req, true);
@@ -304,7 +360,6 @@ pub(super) fn rshutdown(req: &mut Request) {
 /// `php_session_start`.
 #[allow(clippy::too_many_lines)] // php's function, arm for arm
 pub(super) fn start(req: &mut Request) -> Result<bool, Thrown> {
-    sync(req);
     match req.state::<State>().status {
         Status::Active => {
             started_error(
@@ -651,7 +706,40 @@ pub(super) fn destroy(req: &mut Request) -> Result<bool, Thrown> {
 
 // ------------------------------------------------------------ the id's cookie
 
-/// `php_session_reset_id`: the cookie sent where it is due, and `SID`.
+/// `php_session_reset_id`: the cookie sent where it is due, and `SID`,
+/// registered under the session with php's `#[\Deprecated]` the first
+/// time and its value replaced every time after, `session_regenerate_id`
+/// among them, as the `zval` `zend_get_constant_str` finds is written.
+///
+/// ```php
+/// ob_start(); ini_set("session.use_only_cookies", "0"); session_save_path(__DIR__); session_id("sid1"); session_start(["use_cookies" => 0, "cache_limiter" => ""]);
+/// echo SID, "\n"; session_regenerate_id(true); var_dump(SID === "PHPSESSID=" . session_id(), SID !== "PHPSESSID=sid1");
+/// $c = get_defined_constants(true); var_dump(isset($c['session']['SID']), (new ReflectionConstant('SID'))->isDeprecated()); session_destroy();
+/// ```
+/// ```expect
+///
+/// Deprecated: ini_set(): Disabling session.use_only_cookies INI setting is deprecated in %s on line 2
+///
+/// Deprecated: Constant SID is deprecated since 8.4, as GET/POST sessions were deprecated in %s on line 3
+/// PHPSESSID=sid1
+///
+/// Deprecated: Constant SID is deprecated since 8.4, as GET/POST sessions were deprecated in %s on line 3
+///
+/// Deprecated: Constant SID is deprecated since 8.4, as GET/POST sessions were deprecated in %s on line 3
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// ```
+///
+/// A `SID` the program defined first is written the same way:
+///
+/// ```php
+/// define('SID', [0xdeadbeef]); ob_start(); session_save_path(__DIR__); session_start(["use_cookies" => 0, "cache_limiter" => ""]); var_dump(SID); session_destroy();
+/// ```
+/// ```expect
+/// string(0) ""
+/// ```
 pub(super) fn reset_id(req: &mut Request) -> Result<bool, Thrown> {
     let Some(id) = req.state::<State>().id.clone() else {
         docref(
@@ -676,10 +764,31 @@ pub(super) fn reset_id(req: &mut Request) -> Result<bool, Thrown> {
         Vec::new()
     };
     let sid = crate::string_value(req, &sid)?;
-    if !req.define_constant(b"SID", sid)? {
+    let registered = match req.extension_named(b"session") {
+        Some(session) => req.register_constant(session, b"SID", sid, sid_attributes()),
+        None => false,
+    };
+    if !registered {
         req.release(sid);
     }
     Ok(true)
+}
+
+/// What `php_session_reset_id` puts on a `SID` it registers:
+/// `#[\Deprecated(since: "8.4", message: "as GET/POST sessions were
+/// deprecated")]`, so a read of `SID` is php's deprecation.
+fn sid_attributes() -> Vec<Attribute> {
+    let argument = |name: &[u8], value: &[u8]| AttributeArgument {
+        name: Some(Name(name.into())),
+        value: ConstExpr::Str(value.into()),
+    };
+    vec![Attribute {
+        name: Name(b"Deprecated".as_slice().into()),
+        arguments: vec![
+            argument(b"since", b"8.4"),
+            argument(b"message", b"as GET/POST sessions were deprecated"),
+        ],
+    }]
 }
 
 /// `php_url_encode`.

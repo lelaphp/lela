@@ -201,6 +201,7 @@ raising::new_throwable
 raising::notice
 raising::raise
 raising::raise_at
+raising::startup
 raising::throw
 raising::throw_at
 raising::throw_value
@@ -300,6 +301,7 @@ request::Request::ini_parse_bytes
 request::Request::ini_parse_quantity
 request::Request::ini_set
 request::Request::interrupt
+request::Request::is_unwind_exit
 request::Request::is_uploaded_file
 request::Request::last_error
 request::Request::loaded_extensions
@@ -318,6 +320,7 @@ request::Request::plain_path
 request::Request::realpath
 request::Request::realpath_cache
 request::Request::realpath_cache_clear
+request::Request::register_constant
 request::Request::register_filter
 request::Request::register_shutdown_function
 request::Request::register_tick_function
@@ -342,9 +345,10 @@ request::Request::set_cwd
 request::Request::set_env
 request::Request::set_error_handler
 request::Request::set_exception_handler
+request::Request::set_global
 request::Request::set_header_callback
 request::Request::set_response_code
-request::Request::set_superglobal
+request::Request::set_shutdown_function
 request::Request::set_time_limit
 request::Request::set_umask
 request::Request::state
