@@ -269,6 +269,8 @@ call_stack_default_size
 canonical_int
 compare
 double_to_string
+dup_fd
+fd_table_size
 identical
 numeric_prefix
 peek_fd
