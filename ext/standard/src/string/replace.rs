@@ -6,7 +6,7 @@ use php_ext::abi::{Raw, Ref, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::{coerce_param, to_long, to_string};
 use php_ext::decl::Type;
-use php_ext::raising::{Level, Thrown, arg_type_error, docref, throw};
+use php_ext::raising::{Level, Thrown, arg_type_error, arity, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 
@@ -295,7 +295,7 @@ pub(super) fn strtr(
     // arguments, `(string, string, string)` for three.
     let given = req.argument_count();
     if given <= 2 {
-        crate::arity(req, 2, Some(2))?;
+        arity(req, 2, Some(2))?;
         let string = string.hold(req)?;
         let from = coerce_param(req, &from.value(), &Type::Array, 2)?;
         let Some(from) = from.as_array().copied() else {
@@ -306,7 +306,7 @@ pub(super) fn strtr(
         }
         return strtr_array(req, string, from);
     }
-    crate::arity(req, 3, Some(3))?;
+    arity(req, 3, Some(3))?;
     let string = string.hold(req)?;
     let from = coerce_param(req, &from.value(), &Type::String, 2)?;
     // `Z_PARAM_STRING`: a `null` is the deprecation, which names the

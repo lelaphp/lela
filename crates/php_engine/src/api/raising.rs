@@ -340,6 +340,60 @@ pub fn arg_count_error(req: &mut Request, tail: &str) -> Thrown {
     throw(req, "ArgumentCountError", &message)
 }
 
+/// `zend_wrong_parameters_count_error` (`Z/Zend/zend_API.c:231`): the
+/// call's argument count held to `min..=max`, `max` of `None` unbounded
+/// as a `"+"` spec is, and outside it php's `ArgumentCountError` in its
+/// three sentences, `exactly`, `at least` or `at most` by where the
+/// count fell. A declared native's count is checked before its body; an
+/// `arity = manual` native checks its own here, after the step php
+/// takes first: `assert`'s active check, the `"+f"` set natives' split
+/// of their trailing callbacks, `strtr`'s parse chosen by the count,
+/// `stream_context_set_option`'s deprecation, the form
+/// `session_set_save_handler` tells apart by the count, and the SPL
+/// outer iterators' `spl_dual_it_construct`.
+///
+/// ```php
+/// foreach ([fn () => assert(), fn () => array_udiff([1]), fn () => array_uintersect_uassoc([1], 'strcmp'), fn () => strtr("abc", "a", "b", "c"), fn () => stream_context_set_option()] as $f) {
+///     try { $f(); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// assert() expects at least 1 argument, 0 given
+/// array_udiff() expects at least 2 arguments, 1 given
+/// array_uintersect_uassoc() expects at least 3 arguments, 2 given
+/// strtr() expects exactly 3 arguments, 4 given
+/// stream_context_set_option() expects at least 2 arguments, 0 given
+/// ```
+///
+/// ```php
+/// foreach ([fn () => new IteratorIterator(), fn () => new LimitIterator(new ArrayIterator([]), 0, 1, 2), fn () => session_set_save_handler(), fn () => @session_set_save_handler(1, 2, 3)] as $f) {
+///     try { $f(); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// IteratorIterator::__construct() expects at least 1 argument, 0 given
+/// LimitIterator::__construct() expects at most 3 arguments, 4 given
+/// session_set_save_handler() expects at least 1 argument, 0 given
+/// session_set_save_handler() expects at least 6 arguments, 3 given
+/// ```
+pub fn arity(req: &mut Request, min: usize, max: Option<usize>) -> Result<(), Thrown> {
+    let given = req.argument_count();
+    if given >= min && max.is_none_or(|max| given <= max) {
+        return Ok(());
+    }
+    let (word, bound) = match max {
+        Some(max) if max == min => ("exactly", min),
+        _ if given < min => ("at least", min),
+        Some(max) => ("at most", max),
+        None => ("at least", min),
+    };
+    let plural = if bound == 1 { "" } else { "s" };
+    Err(arg_count_error(
+        req,
+        &format!("{word} {bound} argument{plural}, {given} given"),
+    ))
+}
+
 /// `ArgumentCountError` for a call with fewer arguments than the
 /// declaration requires, `zend_wrong_parameters_count_error`.
 pub fn too_few_arguments(req: &mut Request, expected: u32, given: u32) -> Thrown {

@@ -22,9 +22,7 @@ use php_ext::attr::php_class;
 use php_ext::call::{call, call_method, instantiate, lookup_class, read_prop};
 use php_ext::coerce::{coerce_param, to_string, truthy};
 use php_ext::decl::Type;
-use php_ext::raising::{
-    Thrown, arg_count_error, arg_type_error, arg_value_error, throw, throwing_warnings,
-};
+use php_ext::raising::{Thrown, arg_type_error, arg_value_error, arity, throw, throwing_warnings};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
 use php_ext_pcre::Regex;
@@ -510,7 +508,7 @@ impl IteratorIterator {
     ) -> Result<(), Thrown> {
         let this = this.object();
         unconstructed(req, this, "IteratorIterator")?;
-        arity(req, 1, 2)?;
+        arity(req, 1, Some(2))?;
         let given = iterator.hold(req)?.object();
         let mut cast = given.class();
         if !crate::is_a(req, cast, b"Iterator")
@@ -944,7 +942,7 @@ impl LimitIterator {
     ) -> Result<(), Thrown> {
         let this = this.object();
         unconstructed(req, this, "LimitIterator")?;
-        arity(req, 1, 3)?;
+        arity(req, 1, Some(3))?;
         let inner = iterator.hold(req)?.object();
         let offset = offset.hold(req)?;
         let count = limit.hold(req)?;
@@ -1434,7 +1432,7 @@ impl AppendIterator {
     fn __construct(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let this = this.object();
         unconstructed(req, this, "AppendIterator")?;
-        arity(req, 0, 0)?;
+        arity(req, 0, Some(0))?;
         let Some(class) = lookup_class(req, b"ArrayIterator")? else {
             return Err(php_ext::raising::fatal(
                 req,
@@ -2336,29 +2334,6 @@ fn checked(req: &mut Request, this: PhpObject) -> Result<PhpObject, Thrown> {
     Ok(this)
 }
 
-/// `zend_wrong_parameters_count_error` for the `arity = manual`
-/// constructors, whose ZPP runs after `spl_dual_it_construct`'s own
-/// check: the count `min..=max` held, php's `ArgumentCountError` worded
-/// as it words it.
-fn arity(req: &mut Request, min: usize, max: usize) -> Result<(), Thrown> {
-    let given = req.argument_count();
-    if (min..=max).contains(&given) {
-        return Ok(());
-    }
-    let (how, n) = if min == max {
-        ("exactly", min)
-    } else if given < min {
-        ("at least", min)
-    } else {
-        ("at most", max)
-    };
-    let word = if n == 1 { "argument" } else { "arguments" };
-    Err(arg_count_error(
-        req,
-        &format!("{how} {n} {word}, {given} given"),
-    ))
-}
-
 /// `spl_dual_it_construct`'s first check, before php's ZPP: a second
 /// constructor call is `BadMethodCallException`, named for `base`.
 fn unconstructed(req: &mut Request, this: PhpObject, base: &str) -> Result<(), Thrown> {
@@ -2382,7 +2357,7 @@ fn construct_inner<C: Class>(
     kind: Kind,
 ) -> Result<(), Thrown> {
     unconstructed(req, this, base)?;
-    arity(req, 1, 1)?;
+    arity(req, 1, Some(1))?;
     let inner = iterator.hold(req)?.object();
     dual_set(req, this, kind, inner)
 }
@@ -2398,7 +2373,7 @@ fn construct_callback<C: Class>(
     kind: Kind,
 ) -> Result<(), Thrown> {
     unconstructed(req, this, base)?;
-    arity(req, 2, 2)?;
+    arity(req, 2, Some(2))?;
     let inner = iterator.hold(req)?.object();
     let given = callback.value();
     let callback = callback.hold(req)?;
@@ -2423,7 +2398,7 @@ fn construct_caching(
     kind: Kind,
 ) -> Result<(), Thrown> {
     unconstructed(req, this, base)?;
-    arity(req, 1, 2)?;
+    arity(req, 1, Some(2))?;
     let inner = inner(req)?;
     let flags = flags.hold(req)?;
     if !caching_flags_ok(flags) {
@@ -2449,7 +2424,7 @@ fn construct_regex<C: Class>(
     kind: Kind,
 ) -> Result<(), Thrown> {
     unconstructed(req, this, base)?;
-    arity(req, 2, 5)?;
+    arity(req, 2, Some(5))?;
     let inner = iterator.hold(req)?.object();
     let source = pattern.hold(req)?;
     let mode = mode.hold(req)?;

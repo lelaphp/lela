@@ -949,6 +949,44 @@ impl PhpObject {
         req.table_row_ref(*self, key)
     }
 
+    /// [`PhpObject::row_ref`], with the typed property whose slot the row
+    /// is added as a type source of the cell it makes
+    /// (`ZEND_REF_ADD_TYPE_SOURCE`), so a write through any name bound to
+    /// the cell is held to the property's type, as `php_array_walk` and
+    /// `spl_array_it_get_current_data` make an object's row a reference.
+    /// A slot holding a cell already keeps the sources it has; a dynamic
+    /// row and an untyped slot are `row_ref`'s. Nothing is raised for a
+    /// `readonly` property: a caller that refuses one asks first. A typed
+    /// slot nothing has written is refused where the type takes no
+    /// `null`, as `$r = &$o->p` refuses it.
+    ///
+    /// ```php
+    /// class P { public int $i = 1; public $u = 2; public ?string $s = null; }
+    /// $p = new P;
+    /// array_walk($p, function (&$v, $k) {
+    ///     try { $v = []; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// });
+    /// $keep = &$p->s;
+    /// array_walk($p, function (&$v) { $v = is_array($v) ? $v : "5"; });
+    /// var_dump($p);
+    /// ```
+    /// ```expect
+    /// Cannot assign array to reference held by property P::$i of type int
+    /// Cannot assign array to reference held by property P::$s of type ?string
+    /// object(P)#1 (3) {
+    ///   ["i"]=>
+    ///   int(5)
+    ///   ["u"]=>
+    ///   array(0) {
+    ///   }
+    ///   ["s"]=>
+    ///   &string(1) "5"
+    /// }
+    /// ```
+    pub fn typed_row_ref(&self, req: &mut Request, key: &Key) -> Result<PhpRef, Thrown> {
+        req.table_typed_row_ref(*self, key)
+    }
+
     /// One property by name, without a handler in the way: a view of
     /// it, and `None` for a property that is not there or a declared
     /// one nothing has written.

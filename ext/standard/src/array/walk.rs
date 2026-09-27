@@ -14,7 +14,7 @@ use php_ext::call::call;
 use php_ext::coerce::{truthy, value_name};
 use php_ext::raising::{Thrown, arg_type_error, throw};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpRef, Value, ValueRef};
+use php_ext::values::{Key, PhpArray, PhpObject, PhpRef, Value, ValueRef};
 
 use super::constants::{ARRAY_FILTER_USE_BOTH, ARRAY_FILTER_USE_KEY};
 use super::pointer::ArrayOrObject;
@@ -221,7 +221,7 @@ fn walk_holder(
 ) -> Result<(), Thrown> {
     let start = holder.get();
     if let Some(object) = start.as_object().copied() {
-        return walk_object(req, object.as_value(), callback, userdata);
+        return walk_object(req, object, callback, userdata, recursive);
     }
     let Some(array) = holder.separate_array(req)? else {
         return Ok(());
@@ -262,30 +262,7 @@ fn walk_holder(
                 array.set(req, written, reference.as_value())?;
                 reference
             };
-            if recursive && reference.get().as_array().is_some() {
-                let Some(nested) = reference.separate_array(req)? else {
-                    continue;
-                };
-                if nested.is_recursive() {
-                    return Err(throw(req, "Error", "Recursion detected"));
-                }
-                req.addref(&reference.as_value());
-                nested.protect();
-                let walked = walk_holder(req, reference, callback, userdata, true);
-                if reference.get().as_array() == Some(&nested) {
-                    nested.unprotect();
-                }
-                req.release(reference.as_value());
-                walked?;
-                continue;
-            }
-            let key_arg = key_value(&key);
-            let mut arguments = vec![reference.as_value(), key_arg];
-            if let Some(userdata) = userdata {
-                arguments.push(userdata);
-            }
-            let answer = call(req, callback, &arguments)?;
-            req.release(answer);
+            visit(req, reference, &key, callback, userdata, recursive)?;
         }
         // What the callbacks appended is visited after, as php's position
         // walks on into it.
@@ -305,26 +282,117 @@ fn walk_holder(
     }
 }
 
-/// The walk over an object: its properties as the `(array)` cast has
-/// them, each handed to the callback by value, since the face has no
-/// reference into a property slot.
-fn walk_object(
+/// One element of `php_array_walk`, made a reference in place: under
+/// `recursive` an array it holds separated and walked in its turn,
+/// guarded against an array that holds itself, and otherwise the cell
+/// handed to the callback with its key, and `$arg` third where it was
+/// given.
+fn visit(
     req: &mut Request,
-    object: Value,
+    reference: PhpRef,
+    key: &Key,
     callback: &Callable,
     userdata: Option<Value>,
+    recursive: bool,
 ) -> Result<(), Thrown> {
-    let table = php_ext::coerce::to_array(req, &object)?;
-    for (key, value) in table.snapshot_refs() {
-        let mut arguments = vec![value, key_value(&key)];
-        if let Some(userdata) = userdata {
-            arguments.push(userdata);
+    if recursive && reference.get().as_array().is_some() {
+        let Some(nested) = reference.separate_array(req)? else {
+            return Ok(());
+        };
+        if nested.is_recursive() {
+            return Err(throw(req, "Error", "Recursion detected"));
         }
-        let answer = call(req, callback, &arguments)?;
-        req.release(answer);
+        req.addref(&reference.as_value());
+        nested.protect();
+        let walked = walk_holder(req, reference, callback, userdata, true);
+        if reference.get().as_array() == Some(&nested) {
+            nested.unprotect();
+        }
+        req.release(reference.as_value());
+        return walked;
     }
-    req.release(table.to_value());
+    let mut arguments = vec![reference.as_value(), key_value(key)];
+    if let Some(userdata) = userdata {
+        arguments.push(userdata);
+    }
+    let answer = call(req, callback, &arguments)?;
+    req.release(answer);
     Ok(())
+}
+
+/// `php_array_walk` over an object: `HASH_OF` is the property table, a
+/// lazy object initialised first, and each row a slot or a dynamic
+/// property holds is made a reference in place, a typed property's slot
+/// typed by it (`ZEND_REF_ADD_TYPE_SOURCE`,
+/// [`PhpObject::typed_row_ref`]), so a write through the callback's
+/// `&$value` reaches the object and is held to the property's type. A
+/// declared slot nothing has written is no row and is not visited; the
+/// rows are read again after every call, as an array's are, so a row
+/// the callback removed is not visited and one it added is.
+///
+/// ```php
+/// #[AllowDynamicProperties] class T { public int $n = 1; public array $list = [1, [2]]; protected $p = 3; }
+/// $t = new T; $t->dyn = 4;
+/// array_walk($t, function (&$v, $k) {
+///     echo strtr($k, "\0", "*"), ";";
+///     if ($k === "n") { try { $v = "x"; } catch (TypeError $e) { echo $e->getMessage(), ";"; } $v = "7"; }
+///     if ($k === "dyn") { $v++; }
+/// });
+/// echo "\n";
+/// array_walk_recursive($t, function (&$v) { if (is_int($v)) { $v *= 10; } });
+/// var_dump($t);
+/// ```
+/// ```expect
+/// n;Cannot assign string to reference held by property T::$n of type int;list;***p;dyn;
+/// object(T)#1 (4) {
+///   ["n"]=>
+///   int(70)
+///   ["list"]=>
+///   array(2) {
+///     [0]=>
+///     int(10)
+///     [1]=>
+///     array(1) {
+///       [0]=>
+///       int(20)
+///     }
+///   }
+///   ["p":protected]=>
+///   int(30)
+///   ["dyn"]=>
+///   int(50)
+/// }
+/// ```
+fn walk_object(
+    req: &mut Request,
+    object: PhpObject,
+    callback: &Callable,
+    userdata: Option<Value>,
+    recursive: bool,
+) -> Result<(), Thrown> {
+    let mut visited: HashSet<Key> = HashSet::new();
+    loop {
+        let pending: Vec<Key> = object
+            .entries(req)?
+            .into_iter()
+            .map(|(key, _)| key)
+            .filter(|key| !visited.contains(key))
+            .collect();
+        if pending.is_empty() {
+            return Ok(());
+        }
+        for key in pending {
+            visited.insert(key.clone());
+            // A row an earlier callback removed is not visited.
+            if object.row(req, &key)?.is_none() {
+                continue;
+            }
+            let cell = object.typed_row_ref(req, &key)?;
+            let visited_row = visit(req, cell, &key, callback, userdata, recursive);
+            req.release(cell.as_value());
+            visited_row?;
+        }
+    }
 }
 
 /// `array_reduce(array $array, callable $callback, mixed $initial = null):

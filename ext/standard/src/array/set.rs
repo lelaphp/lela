@@ -19,7 +19,7 @@ use php_ext::attr::php_function;
 use php_ext::call::call;
 use php_ext::coerce::{to_long, to_string};
 use php_ext::decl::Type;
-use php_ext::raising::{Thrown, fatal};
+use php_ext::raising::{Thrown, arity, fatal};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, Value, ValueRef, zend_sort};
 
@@ -67,7 +67,7 @@ struct Parsed {
 /// the arrays held as they came, the body checking each where php does,
 /// and the trailing callbacks resolved where they stand.
 fn parse(req: &mut Request, values: &[Value], callbacks: usize) -> Result<Parsed, Thrown> {
-    crate::arity(req, callbacks + 1, None)?;
+    arity(req, callbacks + 1, None)?;
     let split = req.argument_count() - callbacks;
     let mut found = Vec::with_capacity(callbacks);
     for offset in 0..values.len() - split {

@@ -1426,13 +1426,94 @@ fn place(
 /// `spl_array_it_get_current_data` under `by_ref`, the `current_place`
 /// slot: the element the object stands at made a reference in place
 /// (`FE_FETCH_RW`'s `ZVAL_MAKE_REF` over the zval php's function points
-/// at), `None` past the last element.
+/// at), `None` past the last element. Over an object the iterator holds
+/// itself, neither its own table (`SPL_ARRAY_IS_SELF`) nor another
+/// iterator's (`SPL_ARRAY_USE_OTHER`), a row that is no reference yet
+/// is a property's: a typed one's cell is typed by it
+/// ([`PhpObject::typed_row_ref`]), and a typed `readonly` one is
+/// refused before anything is made, since the reference would let the
+/// loop write it.
+///
+/// ```php
+/// class A { public int $n = 1; public $u = "u"; public function __construct(public readonly string $r = "r") {} }
+/// $a = new A;
+/// try {
+///     foreach (@new ArrayIterator($a) as $k => &$v) {
+///         echo "$k\n";
+///         if ($k === "n") { try { $v = "x"; } catch (TypeError $e) { echo $e->getMessage(), "\n"; } $v = "2"; }
+///         if ($k === "u") { $v = []; }
+///     }
+/// } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// unset($v);
+/// var_dump($a);
+/// ```
+/// ```expect
+/// n
+/// Cannot assign string to reference held by property A::$n of type int
+/// u
+/// Cannot acquire reference to readonly property A::$r
+/// object(A)#1 (3) {
+///   ["n"]=>
+///   int(2)
+///   ["u"]=>
+///   array(0) {
+///   }
+///   ["r"]=>
+///   string(1) "r"
+/// }
+/// ```
 fn current_place(req: &mut Request, object: PhpObject) -> Result<Option<PhpRef>, Thrown> {
     let Some((_, key, value)) = here(req, object)? else {
         return Ok(None);
     };
+    if let Storage::Object(backing) = payload(req, object)?.storage {
+        let unbound = backing
+            .row(req, &key)?
+            .is_none_or(|row| row.as_php_ref().is_none());
+        if unbound {
+            refuse_readonly(req, backing, &key)?;
+        }
+        return backing.typed_row_ref(req, &key).map(Some);
+    }
     let table = table(req, object)?;
     table.element_ref(req, &key, Some(value)).map(Some)
+}
+
+/// `spl_array_it_get_current_data`'s refusal: the property a row of
+/// `backing` is (`zend_get_property_info` over its class, the first
+/// declaration of the name up the chain, the row's key being a public
+/// property's or a dynamic one's), typed and `readonly`, is refused with
+/// php's `Error`, named by the class that declared it.
+fn refuse_readonly(req: &mut Request, backing: PhpObject, key: &Key) -> Result<(), Thrown> {
+    let Key::Str(name) = key else {
+        return Ok(());
+    };
+    let name = name.as_bytes().to_vec();
+    let mut at = Some(backing.class());
+    for _ in 0..64 {
+        let Some(class) = at else {
+            return Ok(());
+        };
+        let declared = req.class_decl(class).and_then(|decl| {
+            decl.properties
+                .iter()
+                .find(|p| p.is_instance && *p.name.0 == *name)
+                .map(|p| (p.ty.is_some() && p.is_readonly, decl.name.0.clone()))
+        });
+        if let Some((refused, declaring)) = declared {
+            if !refused {
+                return Ok(());
+            }
+            let message = format!(
+                "Cannot acquire reference to readonly property {}::${}",
+                String::from_utf8_lossy(&declaring),
+                String::from_utf8_lossy(&name)
+            );
+            return Err(throw(req, "Error", &message));
+        }
+        at = crate::parent_of(req, class);
+    }
+    Ok(())
 }
 
 /// A key as php's `Undefined array key` warning shows it, a string

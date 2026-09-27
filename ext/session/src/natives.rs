@@ -6,9 +6,7 @@ use php_ext::abi::{Callable, OrFalse, Passed, Path, Raw, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::call::lookup_class;
 use php_ext::coerce::{callable_checked, is_callable, to_string, truthy, value_name};
-use php_ext::raising::{
-    Level, Thrown, arg_count_error, arg_type_error, arg_value_error, docref, throw,
-};
+use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, arity, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
@@ -1183,28 +1181,6 @@ fn implements(
     Ok(lookup_class(req, interface)?.is_some_and(|class| object.instance_of(req, class)))
 }
 
-/// `ZEND_PARSE_PARAMETERS_START(min, max)`'s count check, which
-/// `session_set_save_handler` makes for each of its two forms after it
-/// has told them apart by the count.
-fn arguments_between(req: &mut Request, min: usize, max: usize) -> Result<(), Thrown> {
-    let given = req.argument_count();
-    if (min..=max).contains(&given) {
-        return Ok(());
-    }
-    let (word, bound) = if min == max {
-        ("exactly", min)
-    } else if given < min {
-        ("at least", min)
-    } else {
-        ("at most", max)
-    };
-    let plural = if bound == 1 { "" } else { "s" };
-    Err(arg_count_error(
-        req,
-        &format!("{word} {bound} argument{plural}, {given} given"),
-    ))
-}
-
 /// A `Passed` argument of the callbacks form as the call gave it.
 fn passed<T: php_ext::abi::FromArgument>(argument: Passed<Raw<T>>) -> Option<Value> {
     match argument {
@@ -1293,7 +1269,7 @@ fn session_set_save_handler(
 ) -> Result<bool, Thrown> {
     let count = req.argument_count();
     if count <= 2 {
-        arguments_between(req, 1, 2)?;
+        arity(req, 1, Some(2))?;
         let first = open.value();
         let is_handler = match first.as_object() {
             Some(object) => implements(req, *object, b"SessionHandlerInterface")?,
@@ -1370,7 +1346,7 @@ fn session_set_save_handler(
         Level::Deprecated,
         "Providing individual callbacks instead of an object implementing SessionHandlerInterface is deprecated",
     );
-    arguments_between(req, 6, 9)?;
+    arity(req, 6, Some(9))?;
     let given = [
         Some(open.value()),
         passed(close),

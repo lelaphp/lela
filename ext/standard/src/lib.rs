@@ -106,7 +106,7 @@ pub use filestat::{Fs, php_stat};
 pub use scanf::php_sscanf_internal;
 
 use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, OnModify};
-use php_ext::raising::{Thrown, arg_count_error, arg_value_error};
+use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::Request;
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
@@ -785,43 +785,4 @@ fn dependencies() -> Vec<Dependency> {
             version: None,
         },
     ]
-}
-
-/// `zend_wrong_parameters_count_error` (`Z/Zend/zend_API.c:232`) for a
-/// native that counts its own arguments, `arity = manual`, where php
-/// reads the count after a step of its own: nothing where `min..=max`
-/// holds the count, else `exactly`, `at least` or `at most` by where it
-/// fell, `max` of `None` unbounded as a `"+"` spec is. The four such
-/// natives' counts are `assert`'s after its active check, the `"+f"`
-/// set natives' over their trailing callbacks, `strtr`'s by the parse
-/// it chooses and `stream_context_set_option`'s after its deprecation.
-///
-/// ```php
-/// foreach ([fn () => assert(), fn () => array_udiff([1]), fn () => array_uintersect_uassoc([1], 'strcmp'), fn () => strtr("abc", "a", "b", "c"), fn () => stream_context_set_option()] as $f) {
-///     try { $f(); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
-/// }
-/// ```
-/// ```expect
-/// assert() expects at least 1 argument, 0 given
-/// array_udiff() expects at least 2 arguments, 1 given
-/// array_uintersect_uassoc() expects at least 3 arguments, 2 given
-/// strtr() expects exactly 3 arguments, 4 given
-/// stream_context_set_option() expects at least 2 arguments, 0 given
-/// ```
-fn arity(req: &mut Request, min: usize, max: Option<usize>) -> Result<(), Thrown> {
-    let given = req.argument_count();
-    if given >= min && max.is_none_or(|max| given <= max) {
-        return Ok(());
-    }
-    let (word, bound) = match max {
-        Some(max) if max == min => ("exactly", min),
-        _ if given < min => ("at least", min),
-        Some(max) => ("at most", max),
-        None => ("at least", min),
-    };
-    let plural = if bound == 1 { "" } else { "s" };
-    Err(arg_count_error(
-        req,
-        &format!("{word} {bound} argument{plural}, {given} given"),
-    ))
 }
