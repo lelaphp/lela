@@ -3829,13 +3829,25 @@ fn return_type_error(
 ) -> Thrown {
     let function = req.vm().at(frame).and_then(|state| state.function);
     let name = function.map_or_else(String::new, |function| req.qualified_name_of(function));
-    let declared = crate::api::coerce::declared_type_name(ty);
+    let declared = resolved_type_name(req, frame, ty);
     let given = match returned {
         Some(returned) => crate::ops::value_name(req, &returned.undef_as_null()),
         None => String::from("none"),
     };
     let message = format!("{name}(): Return value must be of type {declared}, {given} returned");
     crate::api::raising::throw(req, "TypeError", &message)
+}
+
+/// `zend_verify_type_error_common`'s `need_msg`: the type resolved
+/// against the frame's scope and called scope
+/// ([`crate::api::coerce::resolved_type_name`]), up to the NUL `%s`
+/// stops at.
+fn resolved_type_name(req: &Request, frame: FrameRef, ty: &php_unit::decl::Type) -> String {
+    let mut named = crate::api::coerce::resolved_type_name(req, req.frame_scopes(frame), ty);
+    if let Some(end) = named.find('\0') {
+        named.truncate(end);
+    }
+    named
 }
 
 /// `ZEND_VERIFY_NEVER_TYPE` (`Z/Zend/zend_vm_def.h:4501`), the opline
@@ -4038,7 +4050,12 @@ fn arg_type_error(
     argument: &Value,
 ) -> Thrown {
     let function = req.vm().at(frame).and_then(|state| state.function);
-    let name = function.map_or_else(String::new, |function| req.qualified_name_of(function));
+    // `get_active_function_or_method_name`, which `%s` prints up to the
+    // NUL an anonymous class's name holds: its class alone.
+    let name = function.map_or_else(String::new, |function| match req.method_class(function) {
+        Some(class) if req.class_name_bytes(class).contains(&0) => req.class_name(class),
+        _ => req.qualified_name_of(function),
+    });
     // `get_function_arg_name`: php has a name for an argument up to the
     // declared count alone, which excludes the variadic, so the error
     // over an argument a variadic collected is `Argument #2` bare.
@@ -4051,7 +4068,7 @@ fn arg_type_error(
         .and_then(|decl| decl.parameters.get(at).cloned())
         .map(|parameter| format!(" (${})", String::from_utf8_lossy(&parameter.name.0)))
         .unwrap_or_default();
-    let declared = crate::api::coerce::declared_type_name(ty);
+    let declared = resolved_type_name(req, frame, ty);
     let given = crate::ops::value_name(req, &argument.undef_as_null());
     let caller = call_site(req, frame);
     let message = match caller {
