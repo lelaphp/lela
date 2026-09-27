@@ -693,3 +693,57 @@ pub(crate) fn open_executed(
     let actual = archive::expand_filepath(req, &fname).unwrap_or_else(|| fname.clone());
     Ok(open_from_fp(req, bytes, &actual, alias)?.map(|_| ()))
 }
+
+/// `phar_compile_file`, phar's `zend_compile_file`: a file whose name
+/// says `.phar`, and no `://`, opened as an archive; a tar or zip one
+/// compiles from its `.phar/stub.php`, a whole-file compressed one from
+/// its decompressed bytes, under the file's own name, and any other
+/// file as it stands. The witness includes a tar-based archive built by
+/// hand, which the recipe's `phar.readonly` forbids `Phar` to write.
+///
+/// ```php
+/// function member($name, $data) {
+///     $h = pack('a100a8a8a8a12a12a8a1a100a6a2a247', $name, '0000644', '', '', sprintf('%011o', strlen($data)), '00000000000', '        ', '0', '', 'ustar', '00', '');
+///     $h = substr_replace($h, sprintf('%06o', array_sum(array_map('ord', str_split($h)))) . "\0 ", 148, 8);
+///     return $h . str_pad($data, (strlen($data) + 511) & ~511, "\0");
+/// }
+/// $t = __DIR__ . '/compile-witness.phar.tar';
+/// $tar = member('.phar/stub.php', '<?php echo "tar stub in ", basename(__FILE__), "\n"; __HALT_COMPILER();');
+/// $tar .= member('.phar/signature.bin', pack('VV', 2, 20) . sha1($tar, true)) . str_repeat("\0", 1024);
+/// file_put_contents($t, $tar);
+/// include $t;
+/// unlink($t);
+/// ```
+/// ```expect
+/// tar stub in compile-witness.phar.tar
+/// ```
+pub(crate) fn compile_file(req: &mut Request, path: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
+    if path::find(path, b".phar").is_none() || path::find(path, b"://").is_some() {
+        return Ok(None);
+    }
+    let Ok(id) = open_from_filename(req, path, None, false)? else {
+        return Ok(None);
+    };
+    let Some(a) = archives(req).get(id) else {
+        return Ok(None);
+    };
+    if a.is_tar() || a.is_zip() {
+        let url = [b"phar://".as_slice(), path, b"/.phar/stub.php"].concat();
+        let opening = php_ext::request::Opening {
+            use_path: true,
+            warn: true,
+            for_include: true,
+        };
+        let Some(stream) = req.open_stream_with(&url, b"rb", opening)? else {
+            return Ok(None);
+        };
+        let source = archive::copy_all(req, stream);
+        stream.close(req);
+        req.release(stream.as_value());
+        return Ok(Some(source?));
+    }
+    if a.flags & FILE_COMPRESSION_MASK != 0 {
+        return Ok(a.fp.as_deref().cloned());
+    }
+    Ok(None)
+}

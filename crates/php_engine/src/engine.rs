@@ -1785,7 +1785,19 @@ impl Engine {
             )
         } else {
             req.note_primary_file(&script);
-            self.shared.cached(&script, &cwd, req.stack_limit())
+            match req.compile_file_source(&script) {
+                Ok(Some(source)) => {
+                    Some(
+                        self.shared
+                            .compile_for(&mut req, &source, &script, SourceKind::File),
+                    )
+                }
+                Ok(None) => self.shared.cached(&script, &cwd, req.stack_limit()),
+                Err(thrown) => {
+                    req.leave_pending(&thrown);
+                    None
+                }
+            }
         };
         match compiled {
             Some(Ok(unit)) if work == Work::Serve => {

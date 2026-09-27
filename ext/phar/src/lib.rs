@@ -131,6 +131,7 @@ pub fn extension() -> Extension {
         .request_state::<State>()
         .rinit(rinit)
         .rshutdown(rshutdown)
+        .compile_file(open::compile_file)
         .info(info)
         .build("Phar")
 }

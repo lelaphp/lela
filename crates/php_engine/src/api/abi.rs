@@ -131,6 +131,9 @@ pub(crate) type EngineStateBuilder =
 pub(crate) type Rinit = fn(&mut Request) -> Result<(), Thrown>;
 /// The interrupt hook, php's `zend_interrupt_function`.
 pub(crate) type InterruptHook = fn(&mut Request) -> Result<(), Thrown>;
+/// The compile hook, php's `zend_compile_file` as an extension overrides
+/// it: the source a file compiles from, where the extension replaces it.
+pub(crate) type CompileFileHook = fn(&mut Request, &[u8]) -> Result<Option<Vec<u8>>, Thrown>;
 
 /// An ini entry's `on_modify`, php's `PHP_INI_MH`: served by `ini_set()`
 /// with the new value before the entry takes it
@@ -205,6 +208,7 @@ pub struct Extension {
     pub(crate) rinit: Option<Rinit>,
     pub(crate) rshutdown: Option<fn(&mut Request)>,
     pub(crate) interrupt: Option<InterruptHook>,
+    pub(crate) compile_file: Option<CompileFileHook>,
     pub(crate) info: Option<Info>,
     /// What [`ExtensionBuilder::register`] was handed, in its order.
     pub(crate) registered: Vec<Arc<dyn Any + Send + Sync>>,
@@ -243,6 +247,7 @@ pub struct ExtensionBuilder {
     rinit: Option<Rinit>,
     rshutdown: Option<fn(&mut Request)>,
     interrupt: Option<InterruptHook>,
+    compile_file: Option<CompileFileHook>,
     info: Option<Info>,
     registered: Vec<Arc<dyn Any + Send + Sync>>,
     constants_link: Option<ConstantsLink>,
@@ -444,6 +449,20 @@ impl ExtensionBuilder {
         self
     }
 
+    /// `zend_compile_file` overridden, as phar's `MINIT` overrides it
+    /// with `phar_compile_file`: before a file is compiled, by an
+    /// include, `spl_autoload` or as the primary file, `hook` is handed
+    /// its path and may answer the source to compile under that path in
+    /// place of the file's own, which the engine compiles as the
+    /// request's own unit and publishes nowhere; `None` leaves the file
+    /// to the unit cache. Hooks are asked in bundle order and the first
+    /// source answered is compiled.
+    #[must_use]
+    pub fn compile_file(mut self, hook: CompileFileHook) -> ExtensionBuilder {
+        self.compile_file = Some(hook);
+        self
+    }
+
     /// A value this extension hands at startup to the extension
     /// that reads every value of its type, php's `php_pdo_register_driver`
     /// into `pdo_driver_hash` from `pdo_sqlite`'s `MINIT`: immutable once the
@@ -532,6 +551,7 @@ impl ExtensionBuilder {
             rinit: self.rinit,
             rshutdown: self.rshutdown,
             interrupt: self.interrupt,
+            compile_file: self.compile_file,
             info: self.info,
             registered: self.registered,
             constants_link: self.constants_link,

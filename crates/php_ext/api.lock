@@ -41,6 +41,7 @@ abi::ExtensionBuilder::class_constants
 abi::ExtensionBuilder::class_payload
 abi::ExtensionBuilder::class_with
 abi::ExtensionBuilder::classes
+abi::ExtensionBuilder::compile_file
 abi::ExtensionBuilder::constants
 abi::ExtensionBuilder::constants_with
 abi::ExtensionBuilder::dependencies

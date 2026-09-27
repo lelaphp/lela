@@ -14238,6 +14238,21 @@ impl Request {
 
     // -------------------------------------------------- include
 
+    /// The source an extension's `zend_compile_file` answers for `path`
+    /// ([`crate::api::abi::ExtensionBuilder::compile_file`]), the first
+    /// hook to answer in bundle order; `None` where none replaces it.
+    pub(crate) fn compile_file_source(&mut self, path: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
+        let shared = Arc::clone(&self.shared);
+        for extension in &shared.extensions {
+            if let Some(hook) = extension.compile_file
+                && let Some(source) = hook(self, path)?
+            {
+                return Ok(Some(source));
+            }
+        }
+        Ok(None)
+    }
+
     /// `php_execute_script_ex` (`Z/main/main.c:2617`): the primary file
     /// into `EG(included_files)` under its expanded path before it runs,
     /// so a once form over the file being served answers `true`. A source
@@ -14308,6 +14323,17 @@ impl Request {
         };
         if kind.once() {
             self.included_files.push(path.clone());
+        }
+        if let Some(source) = self.compile_file_source(&path)? {
+            let shared = Arc::clone(&self.shared);
+            let unit = match shared.compile_for(self, &source, &path, SourceKind::File) {
+                Ok(unit) => unit,
+                Err(refused) => return Err(self.refused_include(&refused, &path)),
+            };
+            if !self.included_files.contains(&path) {
+                self.included_files.push(path);
+            }
+            return Ok(Opened::Unit(unit));
         }
         let cwd = self.cwd.clone();
         let stack = self.stack_limit();
