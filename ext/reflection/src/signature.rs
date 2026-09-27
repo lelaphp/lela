@@ -1589,6 +1589,18 @@ impl ReflectionUnionType {
     /// (X&Y)|null ReflectionUnionType true: ReflectionIntersectionType(X&Y) ReflectionNamedType(null)
     /// X&Y ReflectionIntersectionType false: ReflectionNamedType(X) ReflectionNamedType(Y)
     /// ```
+    ///
+    /// `iterable` in a union was compiled to `Traversable|array`, so those
+    /// are its members:
+    ///
+    /// ```php
+    /// class X {}
+    /// function f(X|iterable|bool $a) {}
+    /// foreach ((new ReflectionFunction('f'))->getParameters()[0]->getType()->getTypes() as $m) { echo $m, ' '; }
+    /// ```
+    /// ```expect
+    /// X Traversable array bool
+    /// ```
     fn getTypes(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
         let reference = this_type(req, this.object())?;
         let parts = parts(&reference.ty);

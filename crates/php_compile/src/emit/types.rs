@@ -214,6 +214,22 @@ impl Emit<'_> {
     /// int(1)
     /// f(): Argument #1 ($x) must be of type (A&B)|null, stdClass given, called in %s on line 5
     /// ```
+    ///
+    /// `iterable` among a union's members is `Traversable|array`, and
+    /// standing alone, nullable or not, keeps its name:
+    ///
+    /// ```php
+    /// class X {}
+    /// function f(X|iterable|bool $a, iterable|null $b, ?iterable $c) {}
+    /// foreach ((new ReflectionFunction('f'))->getParameters() as $p) { echo $p->getType(), "\n"; }
+    /// try { f(new stdClass, [], []); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// X|Traversable|array|bool
+    /// Traversable|array|null
+    /// ?iterable
+    /// f(): Argument #1 ($a) must be of type X|Traversable|array|bool, stdClass given, called in %s on line 5
+    /// ```
     fn union_type(&mut self, members: &[TypeExpr]) -> Result<Type, CompileError> {
         let mut mask = 0;
         let mut out: Vec<Type> = Vec::with_capacity(members.len());
@@ -286,7 +302,26 @@ impl Emit<'_> {
                 type_to_string(&ty)
             )));
         }
-        Ok(ty)
+        // `zend_compile_single_typename` makes `iterable` the class
+        // `Traversable` over `MAY_BE_ARRAY`, with `_ZEND_TYPE_ITERABLE_BIT`
+        // to name it by; the union arm clears that bit with the member's
+        // flags, so inside a union it is the two it stands for and names
+        // itself so, in the type's text and in Reflection alike.
+        let Type::Union(members) = ty else {
+            return Ok(ty);
+        };
+        Ok(Type::Union(
+            members
+                .into_iter()
+                .flat_map(|member| match member {
+                    Type::Iterable => vec![
+                        Type::Named(Name(b"Traversable".as_slice().into())),
+                        Type::Array,
+                    ],
+                    member => vec![member],
+                })
+                .collect(),
+        ))
     }
 
     /// The intersection arm of `zend_compile_typename_ex`: class names
