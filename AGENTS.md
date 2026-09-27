@@ -103,15 +103,15 @@ third-engine-design.md
 
 | seam | lock | items | ceiling | reading |
 |---|---|---|---|---|
-| heap | heap.lock | 293 |  | pass |
+| heap | heap.lock | 298 |  | pass |
 | unit | unit.lock | 99 |  | pass |
 | ops | ops.lock | 209 |  | pass |
-| api | api.lock | 706 | 800 | pass |
+| api | api.lock | 712 | 800 | pass |
 | sapi | sapi.lock | 7 |  | pass |
 | tier | tier.lock |  |  | skip |
 | harness | xtask.lock | 334 |  | pass |
 
-<!-- /computed in=3ade7381ba94c156c82134498cb5cde9778b2afbde4d38f6930d49ab816e3c5b out=e10dafca512fe930029fb8615d924ec377ded4cecde13c7ed262db9f0913fb0f -->
+<!-- /computed in=387577b5d355d35af757cc92464075c1de5daf6b921eb13c176645022a56ed06 out=f6c7c1112c1fbbd3576f0333ecc764ae8cabf0ca7c6109a0ad773a92f1f1e090 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
@@ -212,10 +212,12 @@ Options:
 ├── libxml
 ├── mbstring
 ├── openssl
+├── pcntl
 ├── pcre
 ├── pdo
 ├── pdo_mysql
 ├── pdo_sqlite
+├── posix
 ├── random
 ├── reflection
 ├── session
@@ -224,4 +226,4 @@ Options:
 ├── tokenizer
 └── zlib
 ```
-<!-- /computed in=dc0b2dd949b50254ee438e2c9f55e09697f095fec7ad469dc8f8f82a8059d18b out=a078689a5efb0ebd084ed5553add57163e372afb107a5c34418eff22ea3c9b09 -->
+<!-- /computed in=d8243d1ed8b1eb9f3d10ca49f6309571198414720a8f24fe445cac3b7cc591c2 out=71d370766281fd207a4f588b75419d30788baf0d2436ee6b42fe23f340cdaac5 -->

@@ -48,6 +48,7 @@ abi::ExtensionBuilder::engine_state
 abi::ExtensionBuilder::functions
 abi::ExtensionBuilder::info
 abi::ExtensionBuilder::ini
+abi::ExtensionBuilder::interrupt
 abi::ExtensionBuilder::on_modify
 abi::ExtensionBuilder::register
 abi::ExtensionBuilder::request_state
@@ -313,12 +314,15 @@ request::IniEntry
 request::Interrupt
 request::Interrupt::raise
 request::Interrupt::raised
+request::Interrupt::receive_signals
 request::Opening
 request::OptionAnswer
 request::OutputOp
 request::PHP_VERSION
 request::PathIntent
+request::Posted
 request::RealpathEntry
+request::Receiving
 request::Request
 request::Request::absolutize
 request::Request::active_function_name
@@ -534,6 +538,8 @@ request::Whence::from_int
 request::WrapperOp
 request::Xport
 request::XportFailure
+request::signal_handler
+request::take_signals
 syntax::Diagnostic
 syntax::Diagnostic::new
 syntax::Diagnostic::of

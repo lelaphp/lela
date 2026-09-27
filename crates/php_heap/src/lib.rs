@@ -48,6 +48,7 @@ mod object;
 mod payload;
 mod reference;
 mod resource;
+pub mod signal;
 mod sort;
 mod stack;
 mod string;

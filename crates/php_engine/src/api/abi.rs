@@ -129,6 +129,8 @@ pub(crate) type EngineStateBuilder =
     Arc<dyn Fn(&StartupIni) -> Box<dyn Any + Send + Sync> + Send + Sync>;
 /// The `RINIT` function.
 pub(crate) type Rinit = fn(&mut Request) -> Result<(), Thrown>;
+/// The interrupt hook, php's `zend_interrupt_function`.
+pub(crate) type InterruptHook = fn(&mut Request) -> Result<(), Thrown>;
 
 /// An ini entry's `on_modify`, php's `PHP_INI_MH`: served by `ini_set()`
 /// with the new value before the entry takes it
@@ -202,6 +204,7 @@ pub struct Extension {
     pub(crate) engine_state: Option<EngineStateBuilder>,
     pub(crate) rinit: Option<Rinit>,
     pub(crate) rshutdown: Option<fn(&mut Request)>,
+    pub(crate) interrupt: Option<InterruptHook>,
     pub(crate) info: Option<Info>,
     /// What [`ExtensionBuilder::register`] was handed, in its order.
     pub(crate) registered: Vec<Arc<dyn Any + Send + Sync>>,
@@ -239,6 +242,7 @@ pub struct ExtensionBuilder {
     engine_state: Option<EngineStateBuilder>,
     rinit: Option<Rinit>,
     rshutdown: Option<fn(&mut Request)>,
+    interrupt: Option<InterruptHook>,
     info: Option<Info>,
     registered: Vec<Arc<dyn Any + Send + Sync>>,
     constants_link: Option<ConstantsLink>,
@@ -427,6 +431,19 @@ impl ExtensionBuilder {
         self
     }
 
+    /// The interrupt hook, php's `zend_interrupt_function` as pcntl's
+    /// `MINIT` sets it: served by the loop's interrupt check when the
+    /// request's [`Interrupt`](crate::api::request::Interrupt) was raised
+    /// by something other than the execution timer (design §5.8). What
+    /// it throws is left pending where the loop stands, as
+    /// `zend_interrupt_helper`
+    /// leaves `EG(exception)`.
+    #[must_use]
+    pub fn interrupt(mut self, hook: InterruptHook) -> ExtensionBuilder {
+        self.interrupt = Some(hook);
+        self
+    }
+
     /// A value this extension hands at startup to the extension
     /// that reads every value of its type, php's `php_pdo_register_driver`
     /// into `pdo_driver_hash` from `pdo_sqlite`'s `MINIT`: immutable once the
@@ -514,6 +531,7 @@ impl ExtensionBuilder {
             engine_state: self.engine_state,
             rinit: self.rinit,
             rshutdown: self.rshutdown,
+            interrupt: self.interrupt,
             info: self.info,
             registered: self.registered,
             constants_link: self.constants_link,

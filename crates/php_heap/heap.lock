@@ -290,5 +290,10 @@ reset_lc_ctype_locale
 set_fd_blocking
 shift_left
 shift_right
+signal::Posted
+signal::Receiving
+signal::post
+signal::receive
+signal::take
 suspend
 zend_sort
