@@ -68,10 +68,20 @@ impl Storage {
     }
 
     fn here(&self) -> Option<(PhpObject, Value)> {
+        self.row_at(self.pos).map(|(_, object, inf)| (object, inf))
+    }
+
+    /// The first live row at or after `from` and where it stands, views:
+    /// one step of a walk that reads the table again at every row, as
+    /// `SPL_SAFE_HASH_FOREACH_PTR` and `zend_hash_get_current_data_ptr_ex`
+    /// read it, so a row the user code an earlier row reached detached
+    /// is not visited and one it attached is.
+    fn row_at(&self, from: usize) -> Option<(usize, PhpObject, Value)> {
+        let at = self.valid_from(from);
         self.rows
-            .get(self.valid_from(self.pos))
-            .and_then(|row| row.as_ref())
-            .map(|(_, object, inf)| (*object, *inf))
+            .get(at)
+            .and_then(Option::as_ref)
+            .map(|(_, object, inf)| (at, *object, *inf))
     }
 
     fn forward(&mut self) {
@@ -109,6 +119,36 @@ impl Storage {
             .get_mut(at)
             .and_then(Option::take)
             .map(|(_, object, inf)| (object, inf))
+    }
+}
+
+/// One more owner of a row's object or information across a call that
+/// can reach PHP code: php's `GC_ADDREF(obj)` or `ZVAL_COPY(&zv,
+/// &element->inf)` before the call and its `OBJ_RELEASE` or
+/// `zval_ptr_dtor` after. The call may detach the row and give up every
+/// other owner; what is held stands until [`Held::let_go`]. Neither
+/// `Copy` nor `Clone`, so one taken is one given back.
+#[must_use = "a held value is an owner, given back through Held::let_go"]
+struct Held(Value);
+
+impl Held {
+    fn take(req: &Request, value: Value) -> Held {
+        req.addref(&value);
+        Held(value)
+    }
+
+    /// What is held; the copy owns nothing of its own.
+    fn value(&self) -> Value {
+        self.0
+    }
+
+    /// The owner given back, `OBJ_RELEASE` or `zval_ptr_dtor`: at the
+    /// last one the value is freed, its destructor served.
+    // Taking the hold is the point: one given back cannot be given back
+    // again.
+    #[allow(clippy::needless_pass_by_value)]
+    fn let_go(self, req: &mut Request) {
+        req.release(self.0);
     }
 }
 
@@ -305,6 +345,45 @@ impl SplObjectStorage {
     /// int(1)
     /// int(0)
     /// ```
+    ///
+    /// The source is walked live and each row held across its attach, so
+    /// a `getHash` that detaches the row, and the one after it, from the
+    /// source frees nothing the walk still reads; `key()` is reset
+    /// whether the walk finished or threw.
+    ///
+    /// ```php
+    /// class Evil extends SplObjectStorage {
+    ///     public $throw = false;
+    ///     public function getHash($o): string {
+    ///         global $src;
+    ///         if ($this->throw) throw new Exception("no hash for {$o->n}");
+    ///         echo "getHash {$o->n}\n";
+    ///         unset($src[$o]);
+    ///         if ($o->n == 1) foreach ($src as $p) { unset($src[$p]); break; }
+    ///         return spl_object_hash($o);
+    ///     }
+    /// }
+    /// $src = new SplObjectStorage;
+    /// foreach ([1, 2, 3] as $n) { $o = new stdClass; $o->n = $n; $src[$o] = "i$n"; }
+    /// unset($o);
+    /// $e = new Evil;
+    /// var_dump($e->addAll($src), count($src));
+    /// foreach ($e as $i => $o) echo $i, $o->n, $e->getInfo(), "\n";
+    /// $src[$o] = 'again'; $e->next(); $e->throw = true;
+    /// try { $e->addAll($src); } catch (Exception $x) { echo $x->getMessage(), "\n"; }
+    /// var_dump(count($e), $e->key());
+    /// ```
+    /// ```expect
+    /// getHash 1
+    /// getHash 3
+    /// int(2)
+    /// int(0)
+    /// 01i1
+    /// 13i3
+    /// no hash for 3
+    /// int(2)
+    /// int(0)
+    /// ```
     #[php(tentative)]
     fn addAll(
         req: &mut Request,
@@ -312,14 +391,8 @@ impl SplObjectStorage {
         storage: Instance<SplObjectStorage>,
     ) -> Result<i64, Thrown> {
         let this = this.object();
-        let rows = with(req, storage.object(), |s| s.live())?;
-        for (object, inf) in rows {
-            storage_attach(req, this, object, inf)?;
-        }
-        let n = with(req, this, |s| {
-            s.index = 0;
-            s.len()
-        })?;
+        add_all(req, this, storage.object())?;
+        let n = with(req, this, |s| s.len())?;
         Ok(i64::try_from(n).unwrap_or(i64::MAX))
     }
 
@@ -1037,6 +1110,37 @@ fn row_key(req: &mut Request, this: PhpObject, object: PhpObject) -> Result<RowK
     ))
 }
 
+/// `spl_object_storage_addall`: every row of `other` attached to `this`,
+/// `other` walked live as `SPL_SAFE_HASH_FOREACH_PTR` walks it, each
+/// row's object and a copy of its information held across the attach,
+/// whose `getHash` may detach the row from `other`; then `intern->index`
+/// reset, whether the walk finished or a `getHash` threw. php goes on
+/// past a failed attach, but with a throwable pending every later
+/// `getHash` call is skipped and attaches nothing, so the walk stops
+/// there.
+fn add_all(req: &mut Request, this: PhpObject, other: PhpObject) -> Result<(), Thrown> {
+    let mut from = 0;
+    let walked = loop {
+        let row = match with(req, other, |s| s.row_at(from)) {
+            Ok(Some(row)) => row,
+            Ok(None) => break Ok(()),
+            Err(thrown) => break Err(thrown),
+        };
+        let (at, object, inf) = row;
+        from = at + 1;
+        let held_object = Held::take(req, object.as_value());
+        let inf = Held::take(req, inf);
+        let attached = storage_attach(req, this, object, inf.value());
+        inf.let_go(req);
+        held_object.let_go(req);
+        if let Err(thrown) = attached {
+            break Err(thrown);
+        }
+    };
+    with(req, this, |s| s.index = 0)?;
+    walked
+}
+
 /// `spl_object_storage_attach`: the information of a row replaced, or a
 /// row appended holding one more owner of the object.
 fn storage_attach(
@@ -1340,14 +1444,7 @@ fn serialize_rows(
 ) -> Result<(), Thrown> {
     let mut from = 0;
     loop {
-        let row = with(req, this, |s| {
-            let at = s.valid_from(from);
-            s.rows
-                .get(at)
-                .and_then(Option::as_ref)
-                .map(|(_, object, inf)| (at, *object, *inf))
-        })?;
-        let Some((at, object, inf)) = row else {
+        let Some((at, object, inf)) = with(req, this, |s| s.row_at(from))? else {
             return Ok(());
         };
         req.addref(&object.as_value());
