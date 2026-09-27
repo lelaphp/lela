@@ -68,7 +68,7 @@ use std::fmt::Write as _;
 
 use php_ext::abi::{
     CloneObj, DependencyKind, Extension, ExtensionBuilder, FromArgument, Instance, ObjectHandlers,
-    OrFalse, Raw, This, Union,
+    OrFalse, PropertyPlace, Raw, Std, This, Union,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{
@@ -4494,8 +4494,9 @@ pub(crate) struct Reflected {
 /// (`Z/ext/reflection/php_reflection.c:7976-7981`): `free_obj` gives
 /// back the object the reflector kept, `clone_obj` is php's null slot,
 /// which is why `clone $reflector` is php's uncloneable `Error`, and
-/// `get_gc` hands the collector what the payload holds. php's `offset`
-/// and `write_property` are its own bookkeeping and the engine's here.
+/// `get_gc` hands the collector what the payload holds, and
+/// `write_property` refuses a write to the `$name` and `$class` the class
+/// declares. php's `offset` is its own bookkeeping.
 pub(crate) struct ReflectorHandlers;
 
 /// The handlers every reflector with a [`Reflected`] payload carries.
@@ -4519,6 +4520,70 @@ impl ObjectHandlers for ReflectorHandlers {
         None
     }
 
+    /// `_reflection_write_property`: `$name` and `$class` where the
+    /// object's class declares them are php's `ReflectionException`, and
+    /// every other write is `zend_std_write_property`'s.
+    ///
+    /// ```php
+    /// #[AllowDynamicProperties]
+    /// class M extends ReflectionMethod { public $foo = 'x'; }
+    /// $r = new M('M', 'getName');
+    /// foreach (['class', 'name', 'foo', 'bar'] as $p) {
+    ///     try { $r->$p = 'set'; echo $p, ': ', $r->$p, "\n"; } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+    /// }
+    /// $c = new ReflectionClass('stdClass');
+    /// try { $c->name = 'x'; } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+    /// try { $c->class = 'x'; } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Cannot set read-only property M::$class
+    /// Cannot set read-only property M::$name
+    /// foo: set
+    /// bar: set
+    /// Cannot set read-only property ReflectionClass::$name
+    ///
+    /// Deprecated: Creation of dynamic property ReflectionClass::$class is deprecated in %s on line 10
+    /// ```
+    fn write_property(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        name: PhpString,
+        value: Value,
+    ) -> Result<(), Thrown> {
+        let held = name.as_bytes().to_vec();
+        if read_only(req, object, &held) {
+            req.release(value);
+            req.release(Value::string(name));
+            let class = class_name_of(req, object.class());
+            return Err(throw(
+                req,
+                "ReflectionException",
+                &format!(
+                    "Cannot set read-only property {}::${}",
+                    String::from_utf8_lossy(&class),
+                    String::from_utf8_lossy(&held)
+                ),
+            ));
+        }
+        Std.write_property(req, object, name, value)
+    }
+
+    /// php's `NULL` for the two names [`Self::write_property`] refuses,
+    /// so a write to either reaches it.
+    fn get_property_ptr_ptr(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        name: &[u8],
+    ) -> PropertyPlace {
+        if read_only(req, object, name) {
+            PropertyPlace::Handlers
+        } else {
+            Std.get_property_ptr_ptr(req, object, name)
+        }
+    }
+
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
         let Some(reflected) = object.native::<Reflected>(req) else {
             return;
@@ -4530,6 +4595,13 @@ impl ObjectHandlers for ReflectorHandlers {
             visit(reference.as_value());
         }
     }
+}
+
+/// `$name` and `$class` where the object's class declares them, the
+/// two properties `_reflection_write_property` keeps a program from
+/// writing.
+fn read_only(req: &mut Request, object: PhpObject, name: &[u8]) -> bool {
+    (name == b"name" || name == b"class") && property_named(req, object.class(), name).is_some()
 }
 
 /// `intern->ce` and `intern->obj` written as php's constructors write
@@ -4771,6 +4843,10 @@ fn set_name(req: &mut Request, this: PhpObject, name: &[u8]) -> Result<(), Throw
     set_string_prop(req, this, b"name", name)
 }
 
+/// A reflector's own property written as php's constructors write
+/// `reflection_prop_name` and `reflection_prop_class`, into the slot
+/// past [`ReflectorHandlers::write_property`], which refuses a program
+/// the same write.
 fn set_string_prop(
     req: &mut Request,
     this: PhpObject,
@@ -4779,7 +4855,7 @@ fn set_string_prop(
 ) -> Result<(), Thrown> {
     let key = PhpString::new(req, prop)?;
     let value = PhpString::new(req, value)?;
-    this.set_prop(req, key, Value::string(value))
+    Std.write_property(req, this, key, Value::string(value))
 }
 
 /// A string of the request's as a native's return.
