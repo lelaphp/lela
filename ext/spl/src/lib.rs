@@ -92,9 +92,7 @@ pub fn extension() -> Extension {
     for (decl, methods) in dllist::classes() {
         builder = builder.class_payload::<dllist::SplDllist>(decl, methods, &dllist::HANDLERS);
     }
-    for (decl, methods) in heap::classes() {
-        builder = builder.class_payload::<heap::SplHeap>(decl, methods, &heap::HANDLERS);
-    }
+    builder = heap::register(builder);
     for (decl, methods) in fixedarray::classes() {
         builder = builder.class_payload::<fixedarray::SplFixedArray>(
             decl,
@@ -117,6 +115,14 @@ pub fn extension() -> Extension {
 /// Core's `Exception`.
 #[php_class(extern)]
 pub(crate) struct Exception;
+
+/// Core's `Iterator`.
+#[php_class(extern)]
+pub(crate) struct Iterator;
+
+/// Core's `Countable`.
+#[php_class(extern)]
+pub(crate) struct Countable;
 
 /// `PHP_MINFO_FUNCTION(spl)`: `SPL support => enabled`.
 fn spl_info(req: &mut Request) {
