@@ -1430,7 +1430,8 @@ impl ReflectionParameter {
         let scope = match reference.function {
             FunctionRef::Method(scope, _) => Some(scope),
             FunctionRef::Invoke(_) => lookup_class(req, b"Closure").ok().flatten(),
-            FunctionRef::Global(_) | FunctionRef::Closure(_) => None,
+            FunctionRef::Closure(closure) => closure.closure(req).and_then(|info| info.scope),
+            FunctionRef::Global(_) => None,
         };
         let attributes = parameter.attributes.clone();
         super::attr::reflect_attributes(
