@@ -51,7 +51,7 @@ name = "php_compile"
 budget = 22000
 [[crate]]
 name = "php_engine"
-budget = 48000
+budget = 52000
 lock = ["api.lock", "sapi.lock", "tier.lock"]
 lock_from = { "api.lock" = "php_ext" }
 [[crate]]
@@ -202,6 +202,18 @@ porting = true
 [[crate]]
 name = "ext/zlib"
 budget = 4000     # #924: zlib.c, its filter and its compress.zlib:// wrapper; a pure-Rust deflate first, libz-sys where its bytes cannot match (design revision 34)
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
+[[crate]]
+name = "ext/pcntl"
+budget = 2500     # pcntl.c: fork, wait, signals through Request::interrupt, alarm, exec, priority; the CLI binary alone, as php builds pcntl for cli (Mitchell, 2026-09-27)
+feature = "pcntl"
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
+[[crate]]
+name = "ext/posix"
+budget = 2000     # posix.c: ids, the user and group databases, rlimits, ttys, mkfifo, uname, times; the CLI binary alone (Mitchell, 2026-09-27)
+feature = "posix"
 # The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
 porting = true
 
