@@ -35,3 +35,23 @@ fn a_startup_deprecation_sends_no_header() {
         "\nDeprecated: PHP Startup: Enabling session.use_trans_sid INI setting is deprecated in Unknown on line 0\nstring(0) \"\"\nstring(4) \"/tmp\"\n"
     );
 }
+
+/// `zend_register_ini_entries_ex` meets the host's values in the order
+/// session.c's `PHP_INI_BEGIN()` declares the entries, not the order the
+/// host set them: `use_only_cookies` before `use_trans_sid` before
+/// `sid_length`, as the oracle raises them under the same three `-d`
+/// given the other way round.
+#[test]
+fn the_startup_rules_meet_the_values_in_declaration_order() {
+    let engine = Engine::builder()
+        .extensions(&[php_ext_session::extension()])
+        .ini("session.sid_length", "40")
+        .ini("session.use_trans_sid", "1")
+        .ini("session.use_only_cookies", "0")
+        .build();
+    let served = engine.serve_capture("<?php echo \"ok\\n\";", Capture::default());
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "\nDeprecated: PHP Startup: Disabling session.use_only_cookies INI setting is deprecated in Unknown on line 0\n\nDeprecated: PHP Startup: Enabling session.use_trans_sid INI setting is deprecated in Unknown on line 0\n\nDeprecated: PHP Startup: session.sid_length INI setting is deprecated in Unknown on line 0\nok\n"
+    );
+}

@@ -175,6 +175,22 @@ impl Stage {
 /// `PG(modules_activated)` is not yet set, so an unknown save handler or
 /// serializer is taken without a word there, and the session is disabled
 /// when a request starts under it (`PHP_RINIT_FUNCTION(session)`).
+///
+/// What a rule raises at startup is displayed before any request, in the
+/// order the entries are declared, and sends no header, so the session
+/// natives still take their values:
+///
+/// ```php
+/// var_dump(headers_sent(), session_save_path("/tmp"), session_save_path());
+/// ```
+/// ```expect regime=session-startup
+/// Deprecated: PHP Startup: Disabling session.use_only_cookies INI setting is deprecated in Unknown on line 0
+///
+/// Deprecated: PHP Startup: Enabling session.use_trans_sid INI setting is deprecated in Unknown on line 0
+/// bool(false)
+/// string(0) ""
+/// string(4) "/tmp"
+/// ```
 #[allow(clippy::too_many_lines)] // one arm per `PHP_INI_MH` of session.c
 fn on_modify(req: &mut Request, name: &[u8], value: &[u8], stage: Stage) -> bool {
     let kind = ENTRIES
