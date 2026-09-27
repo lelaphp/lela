@@ -1790,6 +1790,21 @@ impl ObjectHandlers for Handlers {
         Std.get_property_ptr_ptr(req, object, name)
     }
 
+    /// `spl_array_has_property`: under `ARRAY_AS_PROPS` a name the
+    /// object has no property of is an element, asked as `isset`,
+    /// `empty` or `property_exists()` asks, the last answered by the
+    /// key alone.
+    ///
+    /// ```php
+    /// $o = new ArrayObject(['n' => null, 'z' => 0], ArrayObject::ARRAY_AS_PROPS);
+    /// var_dump(property_exists($o, 'n'), isset($o->n), empty($o->z), property_exists($o, 'x'));
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// bool(false)
+    /// ```
     fn has_property(
         &self,
         req: &mut Request,
@@ -1799,7 +1814,14 @@ impl ObjectHandlers for Handlers {
     ) -> Result<bool, Thrown> {
         if as_props(req, object, name)? {
             let member = crate::string_value(req, name)?;
-            let how = u8::from(test == PropertyTest::NotEmpty);
+            // `has_set_exists`: `ZEND_PROPERTY_ISSET`, `ZEND_PROPERTY_NOT_EMPTY`
+            // and `ZEND_PROPERTY_EXISTS`, which `property_exists()` asks
+            // and which a `null` element answers.
+            let how = match test {
+                PropertyTest::Isset => 0,
+                PropertyTest::NotEmpty => 1,
+                PropertyTest::Exists => 2,
+            };
             let answer = has(req, object, &member, how, true);
             req.release(member);
             return answer;
