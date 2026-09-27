@@ -76,6 +76,41 @@ pub struct Entered {
     pub name: &'static str,
 }
 
+#[cfg(feature = "witness-trace")]
+impl Entered {
+    /// The line a traced engine appends for it to the file a host named
+    /// ([`EngineBuilder::trace_natives_to`](crate::EngineBuilder::trace_natives_to)):
+    /// the crate, the owning type or nothing, and the identifier, a tab
+    /// between each and a newline after. The names are Rust identifiers,
+    /// so neither character is in one.
+    #[must_use]
+    pub(crate) fn line(&self) -> String {
+        format!(
+            "{}\t{}\t{}\n",
+            self.krate,
+            self.owner.unwrap_or_default(),
+            self.name
+        )
+    }
+}
+
+/// `trace` appended to `path` in one write, so a forked child's request
+/// and its parent's land whole beside each other. A file that cannot be
+/// written loses the lines, and the harness that reads it reports the
+/// natives as not entered.
+#[cfg(feature = "witness-trace")]
+pub(crate) fn append_trace(path: &Path, trace: &[Entered]) {
+    use std::io::Write;
+    let lines: String = trace.iter().map(Entered::line).collect();
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = file.write_all(lines.as_bytes());
+    }
+}
+
 impl Engine {
     /// Serve `source` as a CLI request into `sink` and hand back what it
     /// wrote, the shape every extension's capture test reads. The request

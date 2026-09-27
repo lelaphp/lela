@@ -22,7 +22,18 @@
 //! `phpt`'s, `compile-identity`'s and `crosscheck`'s, and they keep it.
 //! What it gives up: a witness never crosses the process boundary, so a
 //! defect that appears only through the binary's startup is not a
-//! witness's to catch. `phpt` has no second adapter and keeps its own rung
+//! witness's to catch.
+//!
+//! **The one fence it does not serve: one marked `process`.** A snippet that forks,
+//! sends or takes a signal, or sets the process's ids, session or limits
+//! is served by the `php` binary in a process of its own, built with
+//! `witness-trace` as `php-witness` ([`process`]; harness §8, revision
+//! 61; #1062): pcntl's fences, posix's that change the process, and the
+//! engine's that send one a signal. So no witness forks this process, and
+//! the linked engine does not carry pcntl at all, so a fence that would
+//! fork here and is not marked fails on the undefined function rather
+//! than forking the harness. Coverage is observed the same way: the
+//! binary appends what each request entered to a file the lane names. `phpt` has no second adapter and keeps its own rung
 //! in `done`, since nothing stands in for a corpus (#132). The oracle runs
 //! beside the linked engine and is held to the fences by the same rule,
 //! because what a fence pins is the oracle's bytes: a fence the oracle
@@ -84,6 +95,7 @@
 mod anchor;
 pub(crate) mod fence;
 mod judge;
+mod process;
 #[cfg(test)]
 mod tests;
 mod watch;
@@ -95,15 +107,16 @@ use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use php_bundle::test::Entered;
 
 use crate::divergence::Registry;
 use crate::manifest::{Crate, Manifest, Rule};
-use crate::oracle::{Oracle, Pin, Regime, Runner, linked};
+use crate::oracle::{Oracle, Pin, Regime, Runner};
 use crate::reading::{Reading, Status, Store, listed};
 use crate::sources;
 use crate::tally::{self, Outcome};
+use anchor::Entry;
 use fence::Extracted;
+use process::Binary;
 use watch::{Journal, Watch};
 
 /// The instrument's name, the reading's `instrument` field.
@@ -381,6 +394,8 @@ fn run_in(
     // One oracle for the run: the digest is asserted before the first
     // snippet and never per witness or per crate (harness §4.3).
     let oracle = manifest.pin.oracle();
+    // One binary for the fences marked `process`, built at the first.
+    let binary = Binary::of(root);
     let mut readings = Vec::new();
     for krate in &manifest.crates {
         if !crates.is_empty() && !crates.iter().any(|n| n == &krate.name) {
@@ -419,7 +434,7 @@ fn run_in(
             println!("bork {}", problem.at_line());
         }
         let watch = journal.map(|j| j.over(&krate.name));
-        let tally = judge(&oracle, registry, ask, &found, watch)?;
+        let tally = judge(&oracle, &binary, registry, ask, &found, watch)?;
         for missing in &tally.missing {
             println!("missing {missing}");
         }
@@ -505,6 +520,7 @@ fn covered(rule: Option<&Rule>, path: &Path) -> bool {
 /// without one.
 pub(crate) fn judge(
     oracle: &Oracle<'_>,
+    binary: &Binary,
     registry: &Registry,
     ask: &Ask,
     found: &Extracted,
@@ -537,16 +553,15 @@ pub(crate) fn judge(
     let mut wall = Duration::ZERO;
     let captured = Mutex::new(Vec::new());
     // What each fence's run through the linked engine entered, by its id.
-    let entered: Mutex<HashMap<String, Vec<Entered>>> = Mutex::new(HashMap::new());
+    let entered: Mutex<HashMap<String, Vec<Entry>>> = Mutex::new(HashMap::new());
     let witnesses = if oracle_absent.is_some() {
-        // Coverage is what a fence ran, and the linked engine needs no
-        // php: where the attributes declare natives it still serves each
-        // fence, for its trace alone, though nothing is judged.
+        // Coverage is what a fence ran, and neither the linked engine nor
+        // the binary needs php: where the attributes declare natives each
+        // fence is still served, for its trace alone, though nothing is
+        // judged.
         if found.anchored.is_some() {
             for (witness, regime) in &runnable {
-                if let Ok((_, natives)) =
-                    linked::serve_traced(&oracle.pin().recipe, *regime, &witness.snippet)
-                {
+                if let Ok((_, natives)) = judge::serve(oracle, binary, witness, *regime) {
                     entered
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
@@ -561,25 +576,16 @@ pub(crate) fn judge(
             if let Some(watch) = watch {
                 watch.serving(witness)?;
             }
-            let mut mine = Vec::new();
-            let mut natives = Vec::new();
-            let judged = judge::one(
-                oracle,
-                registry,
-                ask,
-                witness,
-                *regime,
-                &mut mine,
-                &mut natives,
-            );
+            let mut kept = judge::Kept::default();
+            let judged = judge::one(oracle, registry, ask, witness, *regime, binary, &mut kept);
             captured
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .extend(mine);
+                .extend(kept.captured);
             entered
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .insert(witness.id(), natives);
+                .insert(witness.id(), kept.entered);
             if let Some(watch) = watch {
                 watch.served(witness)?;
             }

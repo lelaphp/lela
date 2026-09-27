@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use super::fence;
 use super::judge::{Run, held};
+use super::process::Binary;
 use super::{Ask, Judgement, Tally, capture, judge};
 use crate::divergence::Registry;
 use crate::manifest::Manifest;
@@ -48,6 +49,12 @@ fn source(name: &str, text: &str) -> (Tree, PathBuf) {
     (dir, file)
 }
 
+/// The workspace's `php-witness`, for a fence marked `process`; built by
+/// the first test that serves one.
+fn binary() -> Binary {
+    Binary::of(&workspace())
+}
+
 fn registry(text: &str) -> Registry {
     Registry::parse(text).unwrap()
 }
@@ -69,7 +76,15 @@ fn judged(file: &Path, text: &str, registry: &Registry, accept: bool) -> Tally {
         staged: false,
     };
     let manifest = manifest();
-    let tally = judge(&manifest.pin.oracle(), registry, &ask, &found, None).unwrap();
+    let tally = judge(
+        &manifest.pin.oracle(),
+        &binary(),
+        registry,
+        &ask,
+        &found,
+        None,
+    )
+    .unwrap();
     if accept {
         capture(&workspace(), &tally.captured).unwrap();
     }
@@ -109,7 +124,15 @@ fn the_digest_is_asserted_once_over_a_run_of_three_witnesses() {
     let manifest = manifest();
     assert_eq!(manifest.pin.digests_asserted(), 0);
     let oracle = manifest.pin.oracle();
-    let tally = judge(&oracle, &registry(""), &Ask::default(), &found, None).unwrap();
+    let tally = judge(
+        &oracle,
+        &binary(),
+        &registry(""),
+        &Ask::default(),
+        &found,
+        None,
+    )
+    .unwrap();
     assert_eq!(tally.witnesses.judged.len(), 3, "{tally:#?}");
     assert!(
         tally
@@ -138,7 +161,15 @@ fn an_absent_oracle_leaves_the_coverage_half_judged_and_the_witness_unrun() {
     let mut manifest = manifest();
     manifest.pin.oracle.path = PathBuf::from("/no-php-here");
     let oracle = manifest.pin.oracle();
-    let tally = judge(&oracle, &registry(""), &Ask::default(), &found, None).unwrap();
+    let tally = judge(
+        &oracle,
+        &binary(),
+        &registry(""),
+        &Ask::default(),
+        &found,
+        None,
+    )
+    .unwrap();
     assert!(tally.failed(), "{tally:#?}");
     assert_eq!(tally.missing.len(), 1, "{tally:#?}");
     assert!(tally.witnesses.judged.is_empty(), "{tally:#?}");
@@ -171,6 +202,7 @@ fn a_digest_mismatch_refuses_the_run_and_is_not_a_bork_per_witness() {
     manifest.pin.oracle.md5 = "0".repeat(32);
     let err = judge(
         &manifest.pin.oracle(),
+        &binary(),
         &registry(""),
         &Ask::default(),
         &found,
@@ -286,6 +318,7 @@ fn a_fence_naming_a_regime_the_pin_does_not_carry_is_a_block_the_lane_cannot_run
         }
         let tally = judge(
             &manifest.pin.oracle(),
+            &binary(),
             &registry(""),
             &Ask::default(),
             &found,
@@ -396,6 +429,7 @@ fn the_fixture_whose_fence_the_oracle_does_not_meet_fails_naming_the_oracle() {
     let found = super::extract(&root, &fixture.crates[0], None).unwrap();
     let tally = judge(
         &fixture.pin.oracle(),
+        &binary(),
         &registry(""),
         &Ask::default(),
         &found,
@@ -511,6 +545,7 @@ fn a_block_the_grammar_cannot_read_fails_the_crate_where_it_stands() {
     );
     let tally = judge(
         &manifest().pin.oracle(),
+        &binary(),
         &Registry::default(),
         &Ask::default(),
         &found,
@@ -523,4 +558,44 @@ fn a_block_the_grammar_cannot_read_fails_the_crate_where_it_stands() {
         tally.problems[0].contains("ext/fixture/src/lib.rs:1"),
         "{tally:#?}"
     );
+}
+
+/// A fence marked `process` is served by the `php` binary in a process
+/// of its own and covered by what that process entered, a forked child's
+/// request beside its parent's; the same snippet unmarked is served by the
+/// linked engine, which carries no pcntl, so it fails on the undefined
+/// function and forks nothing here (harness §8, revision 61; #1062).
+#[test]
+fn a_process_fence_forks_in_the_binary_and_never_in_the_harness() {
+    if oracle().is_none() {
+        return;
+    }
+    let snippet = "/// ```php\n/// $child = pcntl_fork(); if ($child === 0) { exit(3); }\n/// pcntl_waitpid($child, $status); var_dump(pcntl_wexitstatus($status));\n/// ```\n";
+    let marked =
+        format!("{snippet}/// ```expect process\n/// int(3)\n/// ```\npub fn native() {{}}\n");
+    let found = fence::extract(Path::new("ext/fixture/src/lib.rs"), &marked);
+    let witness = &found.witnesses[0];
+    let manifest = manifest();
+    let oracle = manifest.pin.oracle();
+    let (ran, entered) = super::judge::serve(&oracle, &binary(), witness, None).unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&ran.stdout).trim_end(),
+        "int(3)",
+        "{ran:#?}"
+    );
+    let forks = entered
+        .iter()
+        .filter(|e| e.krate == "php_ext_pcntl" && e.name == "pcntl_fork")
+        .count();
+    assert_eq!(
+        forks, 2,
+        "the parent's request and the child's: {entered:#?}"
+    );
+    let (judgement, _) = only(&judge_text(&marked, &registry("")));
+    assert_eq!(judgement, Judgement::Pass);
+
+    let unmarked = marked.replace("expect process", "expect");
+    let (judgement, note) = only(&judge_text(&unmarked, &registry("")));
+    assert_eq!(judgement, Judgement::Fail, "{note}");
+    assert!(note.contains("pcntl_fork"), "{note}");
 }

@@ -23,7 +23,7 @@ use std::process::ExitCode;
 use php_sapi::Engine;
 use php_sapi::cli::{Ask, Options};
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
     let options = match Options::parse(&argv) {
         Ok(options) => options,
@@ -107,6 +107,10 @@ fn engine(options: &Options) -> Engine {
     let mut builder = Engine::builder()
         .extensions(&extensions)
         .tier::<php_bundle::Tier>();
+    #[cfg(feature = "witness-trace")]
+    if let Some(path) = std::env::var_os(TRACE) {
+        builder = builder.trace_natives_to(path.into());
+    }
     for (name, value) in &options.ini {
         builder = builder.ini(name, value);
     }
@@ -116,6 +120,12 @@ fn engine(options: &Options) -> Engine {
         .write_all(engine.startup_errors().as_bytes());
     engine
 }
+
+/// The variable naming the file a `witness-trace` build appends the
+/// natives each request entered to; the witness lane sets it for a fence
+/// it serves through the binary (harness §8, revision 61).
+#[cfg(feature = "witness-trace")]
+const TRACE: &str = "PHP_WITNESS_TRACE";
 
 /// php's exit status as the process's: `exit()` takes the low byte.
 fn code(status: i32) -> ExitCode {

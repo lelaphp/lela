@@ -2907,7 +2907,7 @@ impl Request {
     /// fclose($w);
     /// pcntl_waitpid($pid, $status);
     /// ```
-    /// ```expect
+    /// ```expect process
     /// thrown by the handler
     /// ```
     fn checked_after_call(&mut self, served: Result<Value, Thrown>) -> Result<Value, Thrown> {

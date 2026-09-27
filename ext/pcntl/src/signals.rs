@@ -70,7 +70,7 @@ enum Delivery {
 /// var_dump(pcntl_get_last_error());
 /// pcntl_signal(SIGKILL, SIG_IGN);
 /// ```
-/// ```expect exit=255
+/// ```expect exit=255 process
 /// bool(true)
 /// bool(true)
 /// pcntl_signal(): Argument #1 ($signal) must be greater than or equal to 1
@@ -154,7 +154,7 @@ pub(crate) fn pcntl_signal(
 /// var_dump(pcntl_signal_get_handler(SIGURG));
 /// try { pcntl_signal_get_handler(32); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
 /// ```
-/// ```expect
+/// ```expect process
 /// int(0)
 /// int(1)
 /// string(6) "strlen"
@@ -207,7 +207,7 @@ pub(crate) fn pcntl_signal_get_handler(
 /// while (true) { $dispatched = pcntl_signal_dispatch(); if ($handled) break; usleep(1000); }
 /// var_dump($dispatched, pcntl_signal_dispatch());
 /// ```
-/// ```expect
+/// ```expect process
 /// waited
 /// handled SIGUSR1 from the child
 /// bool(true)
@@ -346,7 +346,7 @@ fn put(req: &mut Request, array: &mut PhpArray, key: &[u8], value: Value) -> Res
 /// try { pcntl_sigprocmask(SIG_BLOCK, [0]); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
 /// try { pcntl_sigprocmask(SIG_BLOCK, [[]]); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
 /// ```
-/// ```expect
+/// ```expect process
 /// bool(true)
 /// bool(true)
 /// bool(true)
@@ -480,7 +480,7 @@ fn try_long(value: &Value) -> Option<i64> {
 /// echo "waited\n";
 /// var_dump(pcntl_async_signals(false), pcntl_async_signals());
 /// ```
-/// ```expect
+/// ```expect process
 /// bool(false)
 /// bool(false)
 /// bool(true)

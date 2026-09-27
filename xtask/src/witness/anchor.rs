@@ -32,6 +32,44 @@ use php_bundle::test::Entered;
 use super::fence::{Subject, Witness};
 use crate::rust;
 
+/// One native a fence's run entered, as the linked engine hands it back
+/// ([`Entered`]) or as the binary appended it to the file the lane named
+/// (`Entered::line`, harness §8, revision 61): the crate's package, the
+/// `#[php_class]` type or none, the identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct Entry {
+    pub(crate) krate: String,
+    pub(crate) owner: Option<String>,
+    pub(crate) name: String,
+}
+
+impl From<Entered> for Entry {
+    fn from(entered: Entered) -> Entry {
+        Entry {
+            krate: entered.krate.to_owned(),
+            owner: entered.owner.map(str::to_owned),
+            name: entered.name.to_owned(),
+        }
+    }
+}
+
+impl Entry {
+    /// One line as `Entered::line` writes it: three fields a tab apart,
+    /// the owner empty for a function. `None` for a line of another shape.
+    pub(crate) fn parse(line: &str) -> Option<Entry> {
+        let mut fields = line.split('\t');
+        let (krate, owner, name) = (fields.next()?, fields.next()?, fields.next()?);
+        if fields.next().is_some() || krate.is_empty() || name.is_empty() {
+            return None;
+        }
+        Some(Entry {
+            krate: krate.to_owned(),
+            owner: (!owner.is_empty()).then(|| owner.to_owned()),
+            name: name.to_owned(),
+        })
+    }
+}
+
 /// The attribute on the item below it, as far as coverage reads it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Anchor {
@@ -67,11 +105,11 @@ impl Declared {
     /// Whether a traced entry is this native: the expansion names a
     /// function with no owner and a method by its impl's type, each by
     /// its identifier with `r#` stripped.
-    fn is(&self, entered: &Entered) -> bool {
+    fn is(&self, entered: &Entry) -> bool {
         match self {
-            Declared::Function { name } => entered.owner.is_none() && entered.name == name,
+            Declared::Function { name } => entered.owner.is_none() && entered.name == *name,
             Declared::Method { class, name } => {
-                entered.owner == Some(class.as_str()) && entered.name == name
+                entered.owner.as_deref() == Some(class.as_str()) && entered.name == *name
             }
         }
     }
@@ -105,7 +143,7 @@ pub(crate) struct Coverage {
 impl Coverage {
     /// The subjects, each witnessed where a fence it may be covered by
     /// entered it, by what each fence's run entered keyed by its id.
-    pub(super) fn subjects(&self, entered: &HashMap<String, Vec<Entered>>) -> Vec<Subject> {
+    pub(super) fn subjects(&self, entered: &HashMap<String, Vec<Entry>>) -> Vec<Subject> {
         self.anchored.subjects(&Traced {
             package: &self.package,
             entered,
@@ -117,7 +155,7 @@ impl Coverage {
 /// fence's id, for the crate whose package is `package`.
 pub(super) struct Traced<'a> {
     pub(super) package: &'a str,
-    pub(super) entered: &'a HashMap<String, Vec<Entered>>,
+    pub(super) entered: &'a HashMap<String, Vec<Entry>>,
 }
 
 impl Traced<'_> {
@@ -465,14 +503,14 @@ mod tests {
         if !anchored.declares() {
             return None;
         }
-        let entered: HashMap<String, Vec<Entered>> = found
+        let entered: HashMap<String, Vec<Entry>> = found
             .witnesses
             .iter()
             .map(|w| {
                 let natives = trace
                     .iter()
                     .filter(|(marker, _)| w.snippet.contains(marker))
-                    .flat_map(|(_, natives)| natives.iter().copied())
+                    .flat_map(|(_, natives)| natives.iter().copied().map(Entry::from))
                     .collect();
                 (w.id(), natives)
             })
@@ -489,6 +527,20 @@ mod tests {
             .iter()
             .map(|s| (s.name.as_str(), s.witnessed))
             .collect()
+    }
+
+    /// The line the binary appends reads back as the entry the linked
+    /// engine hands over, and a line of another shape reads as none.
+    #[test]
+    fn a_line_the_binary_appended_is_the_entry_it_names() {
+        let method = native(Some("C"), "count");
+        let line = format!("{}\t{}\t{}", method.krate, "C", method.name);
+        assert_eq!(Entry::parse(&line), Some(Entry::from(method)));
+        assert_eq!(
+            Entry::parse("php_ext_fixture\t\tnative"),
+            Some(Entry::from(native(None, "native")))
+        );
+        assert_eq!(Entry::parse("php_ext_fixture\tnative"), None);
     }
 
     const WITNESS: &str = "/// ```php\n/// echo 1;\n/// ```\n/// ```expect\n/// 1\n/// ```\n";

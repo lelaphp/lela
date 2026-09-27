@@ -28,6 +28,12 @@
 //! which stays taken. The `php` binary serves its one request on its one
 //! thread, so neither arises there, which is why the extension is built
 //! for it and no server host.
+//!
+//! **Its witnesses** are served by that binary for the same reason: every
+//! fence here is marked `process`, and `xtask witness` runs it in
+//! `php-witness`, the binary built with `witness-trace`, in a process of
+//! its own, never in the engine linked into the harness, which carries no
+//! pcntl (harness-design.md §8, revision 61).
 #![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -68,7 +74,7 @@ struct State {
 /// ```php
 /// var_dump(extension_loaded('pcntl'));
 /// ```
-/// ```expect
+/// ```expect process
 /// bool(true)
 /// ```
 pub fn extension() -> Extension {
@@ -118,7 +124,7 @@ pub fn extension() -> Extension {
 /// ```php
 /// (new ReflectionExtension('pcntl'))->info();
 /// ```
-/// ```expect
+/// ```expect process
 /// pcntl
 ///
 /// pcntl support => enabled

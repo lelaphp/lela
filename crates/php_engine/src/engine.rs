@@ -249,6 +249,11 @@ pub(crate) struct Shared {
     /// entry read it, which `get_cfg_var()` answers from
     /// ([`Request::cfg_entry`]).
     configuration: Vec<(Vec<u8>, Configured)>,
+    /// Where every request of this engine appends the natives it
+    /// entered, one line each, where a host asked for it
+    /// ([`EngineBuilder::trace_natives_to`]).
+    #[cfg(feature = "witness-trace")]
+    trace_to: Option<std::path::PathBuf>,
     entry: Loop,
     /// The same loop for a serving inside a serving, `zend_call_function`
     /// over a user function: what [`Request::serve_user`] enters a
@@ -1205,9 +1210,26 @@ pub struct EngineBuilder {
     reenter: Loop,
     resume: Loop,
     tier_extension: Option<Extension>,
+    #[cfg(feature = "witness-trace")]
+    trace_to: Option<std::path::PathBuf>,
 }
 
 impl EngineBuilder {
+    /// Every request of the engine records the natives it enters and
+    /// appends them to `path` as it ends, one line each,
+    /// [`Entered::line`](crate::test::Entered::line): what the `php`
+    /// binary built for the witness lane does where the harness names a
+    /// file, so a fence served by the binary is covered by what it
+    /// entered as one served by the linked engine is (harness §4.5
+    /// condition 2, revisions 58 and 61). A forked child's request
+    /// appends its own.
+    #[cfg(feature = "witness-trace")]
+    #[must_use]
+    pub fn trace_natives_to(mut self, path: std::path::PathBuf) -> EngineBuilder {
+        self.trace_to = Some(path);
+        self
+    }
+
     /// The extensions in `MINIT` order, the bundle's `enabled()`.
     #[must_use]
     pub fn extensions(mut self, extensions: &[Extension]) -> EngineBuilder {
@@ -1316,26 +1338,8 @@ impl EngineBuilder {
             .into_iter()
             .chain(extensions.iter().flat_map(|e| e.constants.iter().cloned()))
             .collect();
-        // `zend_register_constant` at `MINIT`: a string constant's value
-        // is interned into the engine's table once, before any request,
-        // so reading it later is a pointer and no allocation.
         let mut strings = Strings::new();
-        let mut constant_values = Vec::new();
-        for decl in &constants {
-            let value = match &decl.value {
-                ConstExpr::Null => Zval::null(),
-                ConstExpr::Bool(b) => Zval::bool(*b),
-                ConstExpr::Long { value: n, .. } => Zval::long(*n),
-                ConstExpr::Double(f) => Zval::double(*f),
-                ConstExpr::Str(s) => match strings.intern(s) {
-                    Ok(interned) => Zval::string(interned),
-                    Err(_) => continue,
-                },
-                _ => continue,
-            };
-            let flags = crate::attributes::Flags::of(&decl.attributes);
-            constant_values.push((decl.name.0.clone(), value, flags));
-        }
+        let constant_values = constant_values(&constants, &mut strings);
         let sapi_names = crate::constants::host_names(&mut strings);
         let mut engine = Engine {
             shared: Arc::new(Shared {
@@ -1357,6 +1361,8 @@ impl EngineBuilder {
                 startup_errors: configuration.stderr,
                 startup_raised: Vec::new(),
                 configuration: configuration.table,
+                #[cfg(feature = "witness-trace")]
+                trace_to: self.trace_to,
                 entry: self.entry,
                 reenter: self.reenter,
                 resume: self.resume,
@@ -1368,6 +1374,33 @@ impl EngineBuilder {
         engine.register_ini(held);
         engine
     }
+}
+
+/// `zend_register_constant` at `MINIT`: each constant's value, a string
+/// constant's interned into the engine's table once, before any request,
+/// so reading it later is a pointer and no allocation. A constant whose
+/// value is an expression, or a string the table refuses, has none.
+fn constant_values(
+    constants: &[ConstDecl],
+    strings: &mut Strings,
+) -> Vec<(Box<[u8]>, Zval, crate::attributes::Flags)> {
+    let mut values = Vec::new();
+    for decl in constants {
+        let value = match &decl.value {
+            ConstExpr::Null => Zval::null(),
+            ConstExpr::Bool(b) => Zval::bool(*b),
+            ConstExpr::Long { value: n, .. } => Zval::long(*n),
+            ConstExpr::Double(f) => Zval::double(*f),
+            ConstExpr::Str(s) => match strings.intern(s) {
+                Ok(interned) => Zval::string(interned),
+                Err(_) => continue,
+            },
+            _ => continue,
+        };
+        let flags = crate::attributes::Flags::of(&decl.attributes);
+        values.push((decl.name.0.clone(), value, flags));
+    }
+    values
 }
 
 /// The `on_modify` an extension of `extensions` gave the entry `name`.
@@ -1398,6 +1431,8 @@ impl Engine {
             reenter: reenter::<Nop>,
             resume: resume::<Nop>,
             tier_extension: Nop::extension(),
+            #[cfg(feature = "witness-trace")]
+            trace_to: None,
         }
     }
 
@@ -1690,7 +1725,7 @@ impl Engine {
         let web = description.is_web;
         let mut req = Request::new(Arc::clone(&self.shared), description);
         #[cfg(feature = "witness-trace")]
-        if traced {
+        if traced || self.shared.trace_to.is_some() {
             req.trace_natives();
         }
         #[cfg(not(feature = "witness-trace"))]
@@ -1843,6 +1878,10 @@ impl Engine {
         // shutdown function served above is in it.
         #[cfg(feature = "witness-trace")]
         let trace = req.take_trace();
+        #[cfg(feature = "witness-trace")]
+        if let Some(path) = &self.shared.trace_to {
+            crate::test::append_trace(path, &trace);
+        }
         #[cfg(not(feature = "witness-trace"))]
         let trace = ();
         (

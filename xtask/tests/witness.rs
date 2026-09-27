@@ -657,10 +657,12 @@ fn with_no_binary_built_the_linked_engine_carries_each_feature_extension() {
 /// What makes the two above true, held where it is written: `xtask`'s
 /// `Cargo.toml` links `php_bundle` with every extension feature the bundle
 /// declares, so the linked engine is the twenty extensions the oracle has
-/// and not the default sixteen (harness §7, revision 43). A feature the
-/// bundle gains and xtask does not name is this test red.
+/// and not the default sixteen (harness §7, revision 43), save `pcntl`,
+/// whose fences the `php` binary serves so that nothing forks the harness
+/// (revision 61). A feature the bundle gains and xtask does not name is
+/// this test red, and so is `pcntl` named.
 #[test]
-fn xtask_links_the_bundle_with_every_extension_feature() {
+fn xtask_links_the_bundle_with_every_extension_feature_but_pcntl() {
     let bundle: toml::Value = toml::from_str(
         &fs::read_to_string(workspace().join("crates/php_bundle/Cargo.toml")).unwrap(),
     )
@@ -686,12 +688,16 @@ fn xtask_links_the_bundle_with_every_extension_feature() {
         .iter()
         .map(|f| f.as_str().unwrap())
         .collect();
-    for feature in &declared {
+    for feature in declared.iter().filter(|f| **f != "pcntl") {
         assert!(
             linked.contains(feature),
             "xtask/Cargo.toml does not name {feature}: {linked:?}"
         );
     }
+    assert!(
+        declared.contains(&"pcntl") && !linked.contains(&"pcntl"),
+        "the harness links pcntl, so a fence could fork it: {linked:?}"
+    );
     assert!(linked.contains(&"test"), "{linked:?}");
 }
 

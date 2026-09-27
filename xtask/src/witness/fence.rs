@@ -33,6 +33,14 @@
 //! own is an attribute this grammar has no meaning for and the block is
 //! refused.
 //!
+//! A `process` says the snippet changes the process it runs in: it forks,
+//! sends or takes a signal, or sets the process's ids, session or limits.
+//! Such a fence is served by the `php` binary in a process of its own, a
+//! single-threaded one as design revision 35 requires of pcntl, and never
+//! by the engine linked into the harness, whose process runs the lane on
+//! threads (harness-design.md §8, revision 61; #1062). What the oracle
+//! does is not moved by it, so it is no part of the divergence key.
+//!
 //! The scan is textual, as `vocab`'s is, not a parse. A doc line is one
 //! beginning `///` or `//!` with one leading space dropped from its body; a
 //! block ends at the first item line, which is a line at indentation zero
@@ -76,6 +84,18 @@ impl Exit {
     }
 }
 
+/// What serves a witness's snippet beside the oracle.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Served {
+    /// The engine linked into the harness, in this process (harness §7,
+    /// revision 48).
+    #[default]
+    Linked,
+    /// The `php` binary built with `witness-trace`, in a process of its
+    /// own: the fence carries `process` (harness §8, revision 61).
+    Binary,
+}
+
 /// One witness: the program, what it prints, and where it stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Witness {
@@ -103,6 +123,8 @@ pub struct Witness {
     pub regime: Option<String>,
     /// The declared duration, disclosure only; the instrument sums them.
     pub wall: Option<Duration>,
+    /// What serves the snippet beside the oracle.
+    pub served: Served,
 }
 
 impl Witness {
@@ -265,7 +287,7 @@ fn block_at(file: &Path, lines: &[&str], start: usize) -> Result<(Witness, usize
             file,
             opened,
             format!(
-                "`{unknown}` on an expect fence; the attributes are `exit`, `exit=<status>`, `wall=<duration>` and `regime=<name>`, and the ini a regime carries is the pin's"
+                "`{unknown}` on an expect fence; the attributes are `exit`, `exit=<status>`, `wall=<duration>`, `regime=<name>` and `process`, and the ini a regime carries is the pin's"
             ),
         ));
     }
@@ -294,6 +316,7 @@ fn block_at(file: &Path, lines: &[&str], start: usize) -> Result<(Witness, usize
             exit: attributes.exit,
             wall: attributes.wall,
             regime: attributes.regime,
+            served: attributes.served,
         },
         after,
     ))
@@ -364,6 +387,8 @@ struct Attributes {
     wall: Option<Duration>,
     /// The name of the pin's regime the run stands under.
     regime: Option<String>,
+    /// `process`: served by the binary.
+    served: Served,
     /// Attributes this grammar has no meaning for, in the order written.
     unknown: Vec<String>,
 }
@@ -376,6 +401,8 @@ impl Attributes {
         for word in info.split_whitespace().skip(1) {
             if word == "exit" {
                 out.exit = Exit::Bare;
+            } else if word == "process" {
+                out.served = Served::Binary;
             } else if let Some(status) = word.strip_prefix("exit=") {
                 match status.parse() {
                     Ok(status) => out.exit = Exit::Pinned(status),
@@ -631,6 +658,21 @@ mod tests {
         };
         assert_eq!(witness.regime.as_deref(), Some("short-tags"));
         assert_eq!(witness.exit, Exit::Pinned(0));
+    }
+
+    #[test]
+    fn a_process_fence_is_served_by_the_binary_under_the_same_key() {
+        let marked =
+            php("/// ```php\n/// echo 1;\n/// ```\n/// ```expect exit=0 process\n/// 1\n/// ```\n");
+        let plain = php("/// ```php\n/// echo 1;\n/// ```\n/// ```expect exit=0\n/// 1\n/// ```\n");
+        assert!(marked.problems.is_empty());
+        assert_eq!(marked.witnesses[0].served, Served::Binary);
+        assert_eq!(plain.witnesses[0].served, Served::Linked);
+        assert_eq!(marked.witnesses[0].id(), plain.witnesses[0].id());
+        assert_eq!(
+            pinned("/// ```expect exit process", 255),
+            "/// ```expect exit=255 process"
+        );
     }
 
     #[test]

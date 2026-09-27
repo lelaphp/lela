@@ -361,7 +361,7 @@ fn posix_getuid() -> i64 {
 /// ```php
 /// var_dump(posix_setuid(posix_getuid()), posix_getuid() === 0 || !posix_setuid(0), posix_getuid() === 0 || posix_get_last_error() === 1);
 /// ```
-/// ```expect
+/// ```expect process
 /// bool(true)
 /// bool(true)
 /// bool(true)
@@ -392,7 +392,7 @@ fn posix_geteuid() -> i64 {
 /// ```php
 /// var_dump(posix_seteuid(posix_geteuid()), posix_geteuid() === 0 || !posix_seteuid(0));
 /// ```
-/// ```expect
+/// ```expect process
 /// bool(true)
 /// bool(true)
 /// ```
@@ -422,7 +422,7 @@ fn posix_getgid() -> i64 {
 /// ```php
 /// var_dump(posix_setgid(posix_getgid()), posix_getuid() === 0 || !posix_setgid(0));
 /// ```
-/// ```expect
+/// ```expect process
 /// bool(true)
 /// bool(true)
 /// ```
@@ -452,7 +452,7 @@ fn posix_getegid() -> i64 {
 /// ```php
 /// var_dump(posix_setegid(posix_getegid()));
 /// ```
-/// ```expect
+/// ```expect process
 /// bool(true)
 /// ```
 #[php_function]
@@ -530,7 +530,7 @@ fn posix_getpgrp() -> i64 {
 /// var_dump(pcntl_wexitstatus($status));
 /// try { posix_setsid(1); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
 /// ```
-/// ```expect
+/// ```expect process
 /// int(7)
 /// posix_setsid() expects exactly 0 arguments, 1 given
 /// ```
@@ -1324,7 +1324,7 @@ fn posix_strerror(req: &mut Request, error_code: i64) -> Result<PhpString, Throw
 /// ```php
 /// var_dump(posix_initgroups('', 0), posix_getuid() === 0 || !posix_initgroups('nobody', 0));
 /// ```
-/// ```expect
+/// ```expect process
 /// bool(false)
 /// bool(true)
 /// ```
