@@ -216,6 +216,17 @@ budget = 2000     # posix.c: ids, the user and group databases, rlimits, ttys, m
 feature = "posix"
 # The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
 porting = true
+[[crate]]
+name = "ext/sockets"
+budget = 5000     # sockets.c, conversions.c, multicast.c; nix with libc for what it lacks, as posix and pcntl (Mitchell, 2026-09-27, #1078)
+feature = "sockets"
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
+[[crate]]
+name = "ext/phar"
+budget = 14000    # phar.c, phar_object.c, util.c, tar.c, zip.c, stream.c, dirstream.c, func_interceptors.c (Mitchell, 2026-09-27, #1086)
+# The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
+porting = true
 
 # ---------------------------------------------------------------- seams
 # The six locked seams (design §4.5). `effects.lock` is retired; its content is

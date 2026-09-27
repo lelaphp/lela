@@ -144,6 +144,12 @@ ini = ["opcache.enable_cli=1", "opcache.opt_debug_level=0x10000"]
 # (#864, for #705).
 ini = ["zend.assertions=-1"]
 
+[regime.small-stack]
+# `zend.max_allowed_stack_size` is `PHP_INI_SYSTEM`, so no snippet can lower it;
+# a witness of the engine's stack-limit paths (var_dump's `nesting level too
+# deep` first, #1080) names this regime to reach them with a small input.
+ini = ["zend.max_allowed_stack_size=256K"]
+
 [regime.filter-default]
 # `filter.default` is PHP_INI_SYSTEM|PHP_INI_PERDIR, and setting it raises
 # php's startup deprecation, which no snippet can reach from inside (#901, for
