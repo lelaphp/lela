@@ -7,6 +7,7 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use php_ext::abi::Passed;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref};
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpString, Value};
@@ -21,15 +22,28 @@ pub(super) const NO_ESCAPE: Option<u8> = None;
 /// byte, `None` for the empty string, the 8.4 deprecation and `\` when
 /// the call gave none, and the `ValueError` for more than one byte.
 pub(super) fn escape_argument(req: &mut Request, position: u32) -> Result<Option<u8>, Thrown> {
-    if given(req, position).is_none() {
+    let escape = match given(req, position) {
+        Some(_) => Passed::Given(string_argument(req, position)?),
+        None => Passed::Omitted,
+    };
+    handle_escape(req, escape, position)
+}
+
+/// [`escape_argument`] over the `$escape` a declaration held, the
+/// `Passed` telling the omitted argument from the given one.
+pub(super) fn handle_escape(
+    req: &mut Request,
+    escape: Passed<PhpString>,
+    position: u32,
+) -> Result<Option<u8>, Thrown> {
+    let Passed::Given(escape) = escape else {
         docref(
             req,
             Level::Deprecated,
             "the $escape parameter must be provided as its default value will change",
         );
         return Ok(Some(b'\\'));
-    }
-    let escape = string_argument(req, position)?;
+    };
     match escape.as_bytes() {
         [] => Ok(NO_ESCAPE),
         [c] => Ok(Some(*c)),

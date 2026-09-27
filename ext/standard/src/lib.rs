@@ -259,7 +259,7 @@ pub fn extension() -> Extension {
             constant(b"STR_PAD_BOTH", STR_PAD_BOTH),
         ])
         .constants(array::constants())
-        .constants(file::constants())
+        .constants(file::constants::declared())
         .constants(file_constants())
         .constants(math::constants())
         .constants_with::<ImageHandler>(image::link_constants)

@@ -307,8 +307,8 @@ pub(crate) enum NullContext {
 }
 
 /// `php_stream_context_from_zval(zcontext, nocontext)`
-/// (`Z/main/streams/php_stream_context.h:36`) over the `$context` at
-/// `position`, which `Z_PARAM_RESOURCE_OR_NULL` has taken: the one given,
+/// (`Z/main/streams/php_stream_context.h:36`) over the `$context` a
+/// native's declaration held as `Z_PARAM_RESOURCE_OR_NULL`: the one given,
 /// which must be a `stream-context` (`zend_fetch_resource_ex`'s
 /// `supplied resource is not a valid Stream-Context resource`), or for
 /// `null` `FG(default_context)`, made on the first use and a resource of
@@ -328,17 +328,6 @@ pub(crate) enum NullContext {
 /// resource(6) of type (stream)
 /// file_get_contents(): supplied resource is not a valid Stream-Context resource
 /// ```
-pub(crate) fn stream_context(
-    req: &mut Request,
-    position: u32,
-    nocontext: NullContext,
-) -> Result<Option<Resource>, Thrown> {
-    let given = req.argument(position).unwrap_or_default().deref();
-    context_of(req, given.as_resource().copied(), nocontext)
-}
-
-/// [`stream_context`] over the `$context` a native's declaration held as
-/// `Z_PARAM_RESOURCE_OR_NULL`, `None` for `null` or none given.
 pub(crate) fn context_of(
     req: &mut Request,
     given: Option<Resource>,

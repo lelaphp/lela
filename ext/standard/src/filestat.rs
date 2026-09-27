@@ -20,8 +20,7 @@ use std::path::PathBuf;
 
 use php_ext::abi::{OrFalse, Passed, Path, Union};
 use php_ext::attr::php_function;
-use php_ext::coerce::coerce_param;
-use php_ext::decl::{FunctionDecl, Type};
+use php_ext::decl::FunctionDecl;
 use php_ext::raising::{Level, Thrown, docref, throw};
 use php_ext::request::{PathIntent, Request, WrapperOp};
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
@@ -350,19 +349,6 @@ fn apply_umask(req: &Request, path: &std::path::Path) {
                 std::fs::Permissions::from_mode((have & 0o7000) | want),
             );
         }
-    }
-}
-
-/// `Z_PARAM_LONG_OR_NULL`: the argument at `position`, `None` where it
-/// is `null` or not passed, else coerced as an int parameter.
-pub(super) fn nullable_long(req: &mut Request, position: u32) -> Result<Option<i64>, Thrown> {
-    match req.argument(position) {
-        Some(given) if !matches!(given.deref().as_ref(), ValueRef::Null | ValueRef::Undef) => {
-            let coerced =
-                coerce_param(req, &given, &Type::Nullable(Box::new(Type::Int)), position)?;
-            Ok(coerced.as_int())
-        }
-        _ => Ok(None),
     }
 }
 
