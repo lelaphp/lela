@@ -9,16 +9,18 @@
 
 use std::os::fd::RawFd;
 
+use php_ext::abi::{OrFalse, Ref};
+use php_ext::attr::php_function;
 use php_ext::decl::FunctionDecl;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
 use php_ext::request::{Cast, Request, Stream};
 use php_ext::values::{Key, PhpArray, Value, ValueRef};
 
-use crate::argument_count_between;
-use crate::file::stream_argument;
 use crate::output::Entry;
-use crate::stub::stub;
-use crate::zpp::{given, nullable_long};
+
+/// `?array &$read` and its two siblings: the caller's array, or `null`,
+/// by reference.
+type StreamArray = Ref<Option<PhpArray>>;
 
 /// The two natives, as `basic_functions.stub.php` declares them.
 ///
@@ -46,15 +48,7 @@ use crate::zpp::{given, nullable_long};
 /// }
 /// ```
 pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        (
-            stub(
-                "stream_select(?array &$read, ?array &$write, ?array &$except, ?int $seconds, ?int $microseconds = null): int|false",
-            ),
-            stream_select as Entry,
-        ),
-        (stub("stream_isatty($stream): bool"), stream_isatty),
-    ]
+    vec![stream_select::declared(), stream_isatty::declared()]
 }
 
 /// `php_stream_from_zval_no_verify` (`Z/main/php_streams.h:319`) over
@@ -81,10 +75,6 @@ pub(super) fn fetch_stream(
 
 /// `Z_PARAM_ARRAY_EX2(arr, 1, 1, 0)`: an array, `null` or no argument
 /// for `None`, and php's `TypeError` for anything else.
-fn stream_array(req: &mut Request, position: u32) -> Result<Option<PhpArray>, Thrown> {
-    crate::zpp::nullable_array(req, position)
-}
-
 /// The fds of one array's streams, `stream_array_to_fd_set`
 /// (`Z/ext/standard/streamsfuncs.c:601`): each element fetched as a
 /// stream and cast for `select(2)`, php's warning for a kind with no
@@ -107,7 +97,7 @@ fn to_fd_set(req: &mut Request, array: PhpArray) -> Result<Vec<RawFd>, Thrown> {
 /// under its key, written over the argument.
 fn from_fd_set(
     req: &mut Request,
-    position: u32,
+    target: &StreamArray,
     array: PhpArray,
     set: &[RawFd],
 ) -> Result<(), Thrown> {
@@ -120,8 +110,7 @@ fn from_fd_set(
             keep(req, &mut out, &key, element)?;
         }
     }
-    crate::zpp::assign_ref(req, position, Value::array(out))?;
-    Ok(())
+    target.set(req, Some(out))
 }
 
 /// One element copied into the array written back, key and value one
@@ -141,7 +130,11 @@ fn keep(req: &mut Request, out: &mut PhpArray, key: &Key, element: Value) -> Res
 /// `stream_array_emulate_read_fd_set` (`Z/ext/standard/streamsfuncs.c:682`):
 /// the streams of the read array that hold bytes in their read buffer,
 /// written over the argument where there is one; how many there were.
-fn emulate_read_fd_set(req: &mut Request, array: PhpArray) -> Result<usize, Thrown> {
+fn emulate_read_fd_set(
+    req: &mut Request,
+    target: &StreamArray,
+    array: PhpArray,
+) -> Result<usize, Thrown> {
     let mut out = PhpArray::new(req)?;
     let mut ret = 0;
     for (key, element) in array.snapshot() {
@@ -152,7 +145,7 @@ fn emulate_read_fd_set(req: &mut Request, array: PhpArray) -> Result<usize, Thro
         }
     }
     if ret > 0 {
-        crate::zpp::assign_ref(req, 1, Value::array(out))?;
+        target.set(req, Some(out))?;
     } else {
         req.release(Value::array(out));
     }
@@ -221,16 +214,18 @@ fn emulate_read_fd_set(req: &mut Request, array: PhpArray) -> Result<usize, Thro
 /// stream_select(): Argument #5 ($microseconds) must be null when argument #4 ($seconds) is null
 /// stream_select() expects at most 5 arguments, 6 given
 /// ```
-fn stream_select(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 4, 5)?;
-    let r_array = stream_array(req, 1)?;
-    let w_array = stream_array(req, 2)?;
-    let e_array = stream_array(req, 3)?;
-    let sec = nullable_long(req, 4)?;
-    let usec = match given(req, 5) {
-        Some(value) if !matches!(value.deref().as_ref(), ValueRef::Null) => nullable_long(req, 5)?,
-        _ => None,
-    };
+#[php_function]
+fn stream_select(
+    req: &mut Request,
+    read: StreamArray,
+    write: StreamArray,
+    except: StreamArray,
+    seconds: Option<i64>,
+    #[php(default = null)] microseconds: Option<i64>,
+) -> Result<OrFalse<i64>, Thrown> {
+    let [r_array, w_array, e_array] =
+        [&read, &write, &except].map(|each| each.get().copied().flatten());
+    let (sec, usec) = (seconds, microseconds);
     let mut sets: [Vec<RawFd>; 3] = [Vec::new(), Vec::new(), Vec::new()];
     for (set, array) in sets.iter_mut().zip([r_array, w_array, e_array]) {
         if let Some(array) = array {
@@ -248,7 +243,7 @@ fn stream_select(req: &mut Request) -> Result<Value, Thrown> {
             (max_fd + 1024) & !1023
         );
         docref(req, Level::Warning, &text);
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     }
     if sec.is_none() && usec.is_some_and(|usec| usec != 0) {
         return Err(arg_value_error(
@@ -271,21 +266,21 @@ fn stream_select(req: &mut Request) -> Result<Value, Thrown> {
         None => None,
     };
     if let Some(array) = r_array {
-        let ready = emulate_read_fd_set(req, array)?;
+        let ready = emulate_read_fd_set(req, &read, array)?;
         if ready > 0 {
             if w_array.is_some() {
                 let empty = PhpArray::new(req)?;
-                crate::zpp::assign_ref(req, 2, Value::array(empty))?;
+                write.set(req, Some(empty))?;
             }
             if e_array.is_some() {
                 let empty = PhpArray::new(req)?;
-                crate::zpp::assign_ref(req, 3, Value::array(empty))?;
+                except.set(req, Some(empty))?;
             }
-            return Ok(crate::zpp::long_of(ready));
+            return Ok(OrFalse::Value(i64::try_from(ready).unwrap_or(i64::MAX)));
         }
     }
-    let [read, write, except] = &sets;
-    let (retval, ready) = match crate::ffi::select([read, write, except], timeout) {
+    let [read_set, write_set, except_set] = &sets;
+    let (retval, ready) = match crate::ffi::select([read_set, write_set, except_set], timeout) {
         Ok(answered) => answered,
         Err(error) => {
             let text = format!(
@@ -294,20 +289,19 @@ fn stream_select(req: &mut Request) -> Result<Value, Thrown> {
                 req.os_error_text(error.raw_os_error().unwrap_or(0))
             );
             docref(req, Level::Warning, &text);
-            return Ok(Value::bool(false));
+            return Ok(OrFalse::False);
         }
     };
-    for (position, (array, set)) in [r_array, w_array, e_array]
+    for ((target, array), set) in [&read, &write, &except]
         .into_iter()
+        .zip([r_array, w_array, e_array])
         .zip(&ready)
-        .enumerate()
     {
         if let Some(array) = array {
-            let position = u32::try_from(position).unwrap_or(0) + 1;
-            from_fd_set(req, position, array, set)?;
+            from_fd_set(req, target, array, set)?;
         }
     }
-    Ok(Value::int(i64::from(retval)))
+    Ok(OrFalse::Value(i64::from(retval)))
 }
 
 /// `stream_isatty($stream): bool`, `PHP_FUNCTION(stream_isatty)`
@@ -327,11 +321,10 @@ fn stream_select(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// stream_isatty(): Argument #1 ($stream) must be of type resource, int given
 /// ```
-fn stream_isatty(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let stream = stream_argument(req, 1)?;
+#[php_function]
+fn stream_isatty(req: &mut Request, stream: Stream) -> bool {
     let fd = stream
         .cast(req, Cast::Select, false)
         .or_else(|| stream.cast(req, Cast::Internal, false));
-    Ok(Value::bool(fd.is_some_and(crate::ffi::isatty)))
+    fd.is_some_and(crate::ffi::isatty)
 }

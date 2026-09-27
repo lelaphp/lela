@@ -383,7 +383,7 @@ fn file_constants() -> Vec<ConstDecl> {
         info::constants(),
         sockets::constants(),
         user_filters::constants(),
-        userspace::constants(),
+        userspace::constants::declared(),
     ]
     .into_iter()
     .flatten()
