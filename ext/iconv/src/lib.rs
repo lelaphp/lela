@@ -29,14 +29,12 @@ mod filter;
 mod mime;
 
 use ffi::{Cd, Errno};
-use php_ext::abi::{Extension, ExtensionBuilder};
-use php_ext::coerce::coerce_param;
-use php_ext::decl::{
-    ConstDecl, ConstExpr, FunctionDecl, IniDecl, Name, Parameter, ParameterDefault, Type,
-};
-use php_ext::raising::{Level, Thrown, arg_count_error, arg_value_error, docref};
+use php_ext::abi::{Extension, ExtensionBuilder, OrFalse, Union};
+use php_ext::attr::{php_const, php_function};
+use php_ext::decl::{IniDecl, Name};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref};
 use php_ext::request::{BufferHandler, ContentType, HandlerCall, HandlerStatus, Request};
-use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Key, PhpArray, PhpString, Value};
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
 /// private to this crate (ADR-0005); nothing in it is shared or synchronised.
@@ -47,7 +45,15 @@ struct State {}
 /// which `php_module_startup` runs.
 struct Startup;
 
-type Entry = fn(&mut Request) -> Result<Value, Thrown>;
+/// `iconv.stub.php`'s four constants, `ICONV_IMPL` and `ICONV_VERSION`
+/// as php's build against libiconv answers them.
+#[php_const]
+mod constants {
+    pub(crate) const ICONV_IMPL: &str = "libiconv";
+    pub(crate) const ICONV_VERSION: &str = "1.11";
+    pub(crate) const ICONV_MIME_DECODE_STRICT: i64 = 1;
+    pub(crate) const ICONV_MIME_DECODE_CONTINUE_ON_ERROR: i64 = 2;
+}
 
 /// `GENERIC_SUPERSET_NAME`, four bytes a character.
 const UCS4: &[u8] = b"UCS-4LE";
@@ -83,8 +89,9 @@ impl Kind {
     }
 }
 
-/// The extension value (design §7.1): declarations paired with entries,
-/// and the state declared on it.
+/// The extension value (design §7.1): the natives in the stub's order,
+/// each declared by `#[php_function]`, the constants, and the state
+/// declared on it.
 ///
 /// ```php
 /// var_dump(extension_loaded('iconv'), ICONV_IMPL, ICONV_VERSION, ICONV_MIME_DECODE_STRICT, ICONV_MIME_DECODE_CONTINUE_ON_ERROR, ini_get('iconv.internal_encoding'));
@@ -97,12 +104,32 @@ impl Kind {
 /// int(2)
 /// string(0) ""
 /// ```
+///
+/// Each declaration is the stub's, as reflection reads it.
+///
+/// ```php
+/// echo new ReflectionFunction('iconv_substr'), new ReflectionFunction('iconv_get_encoding');
+/// ```
+/// ```expect
+/// Function [ <internal:iconv> function iconv_substr ] {
+///
+///   - Parameters [4] {
+///     Parameter #0 [ <required> string $string ]
+///     Parameter #1 [ <required> int $offset ]
+///     Parameter #2 [ <optional> ?int $length = null ]
+///     Parameter #3 [ <optional> ?string $encoding = null ]
+///   }
+///   - Return [ string|false ]
+/// }
+/// Function [ <internal:iconv> function iconv_get_encoding ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <optional> string $type = "all" ]
+///   }
+///   - Return [ array|string|false ]
+/// }
+/// ```
 pub fn extension() -> Extension {
-    let constant = |name: &str, value| ConstDecl {
-        name: Name(name.as_bytes().into()),
-        value,
-        attributes: Vec::new(),
-    };
     let ini = |kind: Kind| IniDecl {
         name: Name(kind.entry().into_bytes().into()),
         default: Box::new([]),
@@ -111,13 +138,19 @@ pub fn extension() -> Extension {
         system: true,
     };
     ExtensionBuilder::default()
-        .functions(natives())
-        .constants(vec![
-            constant("ICONV_IMPL", ConstExpr::Str(b"libiconv".as_slice().into())),
-            constant("ICONV_VERSION", ConstExpr::Str(b"1.11".as_slice().into())),
-            constant("ICONV_MIME_DECODE_STRICT", ConstExpr::long(1)),
-            constant("ICONV_MIME_DECODE_CONTINUE_ON_ERROR", ConstExpr::long(2)),
+        .functions(vec![
+            iconv_strlen::declared(),
+            iconv_substr::declared(),
+            iconv_strpos::declared(),
+            iconv_strrpos::declared(),
+            mime::iconv_mime_encode::declared(),
+            mime::iconv_mime_decode::declared(),
+            mime::iconv_mime_decode_headers::declared(),
+            iconv::declared(),
+            iconv_set_encoding::declared(),
+            iconv_get_encoding::declared(),
         ])
+        .constants(constants::declared())
         .ini(Kind::ALL.map(ini).to_vec())
         .register(BufferHandler {
             name: "ob_iconv_handler",
@@ -172,152 +205,6 @@ fn info(req: &mut Request) {
     req.info_ini_entries(&names.each_ref().map(String::as_bytes));
 }
 
-/// One declared type: `?T`, or `A|B`.
-fn ty(text: &str) -> Type {
-    if let Some(inner) = text.strip_prefix('?') {
-        return Type::Nullable(Box::new(ty(inner)));
-    }
-    let mut members: Vec<Type> = text
-        .split('|')
-        .map(|word| match word {
-            "string" => Type::String,
-            "int" => Type::Int,
-            "bool" => Type::Bool,
-            "false" => Type::False,
-            _ => Type::Array,
-        })
-        .collect();
-    if members.len() == 1 {
-        members.remove(0)
-    } else {
-        Type::Union(members)
-    }
-}
-
-/// A declaration off `iconv.stub.php`, its parameters `(name, type,
-/// default)`.
-fn declared(
-    name: &str,
-    parameters: &[(&str, &str, Option<ConstExpr>)],
-    returns: &str,
-) -> FunctionDecl {
-    FunctionDecl {
-        name: Name(name.as_bytes().into()),
-        parameters: parameters
-            .iter()
-            .map(|(name, t, default)| Parameter {
-                name: Name(name.as_bytes().into()),
-                ty: Some(ty(t)),
-                by_ref: false,
-                prefer_ref: false,
-                promoted: false,
-                variadic: false,
-                default: (default.clone()).map_or(ParameterDefault::None, ParameterDefault::Expr),
-                attributes: Vec::new(),
-            })
-            .collect(),
-        return_type: Some(ty(returns)),
-        returns_by_ref: false,
-        is_generator: false,
-        attributes: Vec::new(),
-        doc_comment: None,
-        file: Name(Box::new([])),
-        line: 0,
-        end_line: 0,
-        frameless: Vec::new(),
-    }
-}
-
-/// The natives in the stub's order.
-///
-/// ```php
-/// echo new ReflectionFunction('iconv_substr'), new ReflectionFunction('iconv_get_encoding');
-/// ```
-/// ```expect
-/// Function [ <internal:iconv> function iconv_substr ] {
-///
-///   - Parameters [4] {
-///     Parameter #0 [ <required> string $string ]
-///     Parameter #1 [ <required> int $offset ]
-///     Parameter #2 [ <optional> ?int $length = null ]
-///     Parameter #3 [ <optional> ?string $encoding = null ]
-///   }
-///   - Return [ string|false ]
-/// }
-/// Function [ <internal:iconv> function iconv_get_encoding ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <optional> string $type = "all" ]
-///   }
-///   - Return [ array|string|false ]
-/// }
-/// ```
-#[rustfmt::skip]
-fn natives() -> Vec<(FunctionDecl, Entry)> {
-    let null = || Some(ConstExpr::Null);
-    let enc = || ("encoding", "?string", Some(ConstExpr::Null));
-    vec![
-        (declared("iconv_strlen", &[("string", "string", None), enc()], "int|false"), iconv_strlen as Entry),
-        (declared("iconv_substr", &[("string", "string", None), ("offset", "int", None), ("length", "?int", null()), enc()], "string|false"), iconv_substr),
-        (declared("iconv_strpos", &[("haystack", "string", None), ("needle", "string", None), ("offset", "int", Some(ConstExpr::long(0))), enc()], "int|false"), iconv_strpos),
-        (declared("iconv_strrpos", &[("haystack", "string", None), ("needle", "string", None), enc()], "int|false"), iconv_strrpos),
-        (declared("iconv_mime_encode", &[("field_name", "string", None), ("field_value", "string", None), ("options", "array", Some(ConstExpr::Array(Vec::new())))], "string|false"), mime::iconv_mime_encode),
-        (declared("iconv_mime_decode", &[("string", "string", None), ("mode", "int", Some(ConstExpr::long(0))), enc()], "string|false"), mime::iconv_mime_decode),
-        (declared("iconv_mime_decode_headers", &[("headers", "string", None), ("mode", "int", Some(ConstExpr::long(0))), enc()], "array|false"), mime::iconv_mime_decode_headers),
-        (declared("iconv", &[("from_encoding", "string", None), ("to_encoding", "string", None), ("string", "string", None)], "string|false"), iconv),
-        (declared("iconv_set_encoding", &[("type", "string", None), ("encoding", "string", None)], "bool"), iconv_set_encoding),
-        (declared("iconv_get_encoding", &[("type", "string", Some(ConstExpr::Str(b"all".as_slice().into())))], "array|string|false"), iconv_get_encoding),
-    ]
-}
-
-/// `ZEND_PARSE_PARAMETERS`' count check.
-fn count(req: &mut Request, min: usize, max: usize) -> Result<(), Thrown> {
-    let given = req.argument_count();
-    if (min..=max).contains(&given) {
-        return Ok(());
-    }
-    let (word, bound) = if min == max {
-        ("exactly", min)
-    } else if given < min {
-        ("at least", min)
-    } else {
-        ("at most", max)
-    };
-    let plural = if bound == 1 { "" } else { "s" };
-    let tail = format!("{word} {bound} argument{plural}, {given} given");
-    Err(arg_count_error(req, &tail))
-}
-
-/// The argument at `position` coerced to `ty`; `None` past the count
-/// and for a `null` the type took.
-fn argument(req: &mut Request, position: u32, ty: &Type) -> Result<Option<Value>, Thrown> {
-    match req.argument(position) {
-        Some(value) if !matches!(value.as_ref(), ValueRef::Undef) => {
-            let value = coerce_param(req, &value, ty, position)?;
-            Ok((!matches!(value.as_ref(), ValueRef::Null)).then_some(value))
-        }
-        _ => Ok(None),
-    }
-}
-
-/// `ty`, or with `nullable` its `?ty`.
-#[rustfmt::skip]
-fn or_null(ty: Type, nullable: bool) -> Type {
-    if nullable { Type::Nullable(Box::new(ty)) } else { ty }
-}
-
-/// `Z_PARAM_STR`, and with `nullable` its `_OR_NULL`.
-fn string(req: &mut Request, position: u32, nullable: bool) -> Result<Option<Vec<u8>>, Thrown> {
-    let value = argument(req, position, &or_null(Type::String, nullable))?;
-    let bytes = value.and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec));
-    Ok(bytes.or((!nullable).then(Vec::new)))
-}
-
-/// `Z_PARAM_LONG`, and with `nullable` its `_OR_NULL`.
-fn long(req: &mut Request, position: u32, nullable: bool) -> Result<Option<i64>, Thrown> {
-    Ok(argument(req, position, &or_null(Type::Int, nullable))?.and_then(|v| v.as_int()))
-}
-
 /// `get_input_encoding`, `get_output_encoding` and
 /// `get_internal_encoding`: the `iconv.*` entry, then php's own, then
 /// `default_charset`, then `UTF-8`.
@@ -333,16 +220,16 @@ fn encoding(req: &Request, kind: Kind) -> Vec<u8> {
         .unwrap_or_else(|| b"UTF-8".to_vec())
 }
 
-/// The `?string $encoding` slot: the internal encoding for `null`, and
-/// `None` after php's warning for a name of 64 bytes or more.
-fn charset(req: &mut Request, position: u32) -> Result<Option<Vec<u8>>, Thrown> {
-    match string(req, position, true)? {
-        None => Ok(Some(encoding(req, Kind::Internal))),
+/// The `?string $encoding` argument: the internal encoding for `null`,
+/// and `None` after php's warning for a name of 64 bytes or more.
+fn charset(req: &mut Request, given: Option<PhpString>) -> Option<Vec<u8>> {
+    match given {
+        None => Some(encoding(req, Kind::Internal)),
         Some(name) if name.len() >= MAX_NAME => {
             too_long(req);
-            Ok(None)
+            None
         }
-        Some(name) => Ok(Some(name)),
+        Some(name) => Some(name.as_bytes().to_vec()),
     }
 }
 
@@ -397,7 +284,7 @@ fn by_errno(errno: Option<Errno>, strict: bool) -> Result<(), Error> {
 
 /// `_php_iconv_show_error`, and `false`.
 #[rustfmt::skip]
-fn failed(req: &mut Request, error: Error, to: &[u8], from: &[u8]) -> Result<Value, Thrown> {
+fn failed<T>(req: &mut Request, error: Error, to: &[u8], from: &[u8]) -> Result<OrFalse<T>, Thrown> {
     let (from, to) = (String::from_utf8_lossy(from), String::from_utf8_lossy(to));
     let (notice, text) = match error {
         Error::OutOfBounds => return Err(arg_value_error(req, 3, "be contained in argument #1 ($haystack)")),
@@ -410,7 +297,7 @@ fn failed(req: &mut Request, error: Error, to: &[u8], from: &[u8]) -> Result<Val
         Error::Unknown(errno) => (true, format!("Unknown error ({})", errno.code())),
     };
     docref(req, if notice { Level::Notice } else { Level::Warning }, &text);
-    Ok(Value::bool(false))
+    Ok(OrFalse::False)
 }
 
 /// `php_iconv_string`: the bytes, which every caller here drops on an
@@ -454,14 +341,17 @@ fn strlen(input: &[u8], charset: &[u8]) -> Result<usize, Error> {
 /// bool(false)
 /// bool(false)
 /// ```
-fn iconv_strlen(req: &mut Request) -> Result<Value, Thrown> {
-    count(req, 1, 2)?;
-    let input = string(req, 1, false)?.unwrap_or_default();
-    let Some(charset) = charset(req, 2)? else {
-        return Ok(Value::bool(false));
+#[php_function]
+fn iconv_strlen(
+    req: &mut Request,
+    string: PhpString,
+    #[php(default = null)] encoding: Option<PhpString>,
+) -> Result<OrFalse<i64>, Thrown> {
+    let Some(charset) = charset(req, encoding) else {
+        return Ok(OrFalse::False);
     };
-    match strlen(&input, &charset) {
-        Ok(n) => Ok(Value::int(i64::try_from(n).unwrap_or(0))),
+    match strlen(string.as_bytes(), &charset) {
+        Ok(n) => Ok(OrFalse::Value(i64::try_from(n).unwrap_or(0))),
         Err(error) => failed(req, error, UCS4, &charset),
     }
 }
@@ -537,17 +427,21 @@ fn substr(input: &[u8], offset: i64, len: i64, charset: &[u8]) -> Result<Vec<u8>
 /// bool(false)
 /// string(4) "e96c"
 /// ```
-fn iconv_substr(req: &mut Request) -> Result<Value, Thrown> {
-    count(req, 2, 4)?;
-    let input = string(req, 1, false)?.unwrap_or_default();
-    let offset = long(req, 2, false)?.unwrap_or(0);
-    let len = long(req, 3, true)?;
-    let Some(charset) = charset(req, 4)? else {
-        return Ok(Value::bool(false));
+#[php_function]
+fn iconv_substr(
+    req: &mut Request,
+    string: PhpString,
+    offset: i64,
+    #[php(default = null)] length: Option<i64>,
+    #[php(default = null)] encoding: Option<PhpString>,
+) -> Result<OrFalse<PhpString>, Thrown> {
+    let Some(charset) = charset(req, encoding) else {
+        return Ok(OrFalse::False);
     };
-    let len = len.unwrap_or_else(|| i64::try_from(input.len()).unwrap_or(i64::MAX));
-    match substr(&input, offset, len, &charset) {
-        Ok(bytes) => Ok(Value::string(PhpString::new(req, &bytes)?)),
+    let input = string.as_bytes();
+    let len = length.unwrap_or_else(|| i64::try_from(input.len()).unwrap_or(i64::MAX));
+    match substr(input, offset, len, &charset) {
+        Ok(bytes) => Ok(OrFalse::Value(PhpString::new(req, &bytes)?)),
         Err(error) => failed(req, error, UCS4, &charset),
     }
 }
@@ -610,10 +504,10 @@ fn position(
     req: &mut Request,
     found: Result<Option<usize>, Error>,
     charset: &[u8],
-) -> Result<Value, Thrown> {
+) -> Result<OrFalse<i64>, Thrown> {
     match found {
-        Ok(Some(at)) => Ok(Value::int(i64::try_from(at).unwrap_or(0))),
-        Ok(None) => Ok(Value::bool(false)),
+        Ok(Some(at)) => Ok(OrFalse::Value(i64::try_from(at).unwrap_or(0))),
+        Ok(None) => Ok(OrFalse::False),
         Err(error) => failed(req, error, UCS4, charset),
     }
 }
@@ -634,16 +528,20 @@ fn position(
 /// iconv_strpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)
 /// iconv_strpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)
 /// ```
-fn iconv_strpos(req: &mut Request) -> Result<Value, Thrown> {
-    count(req, 2, 4)?;
-    let haystack = string(req, 1, false)?.unwrap_or_default();
-    let needle = string(req, 2, false)?.unwrap_or_default();
-    let mut offset = long(req, 3, false)?.unwrap_or(0);
-    let Some(charset) = charset(req, 4)? else {
-        return Ok(Value::bool(false));
+#[php_function]
+fn iconv_strpos(
+    req: &mut Request,
+    haystack: PhpString,
+    needle: PhpString,
+    #[php(default = 0)] mut offset: i64,
+    #[php(default = null)] encoding: Option<PhpString>,
+) -> Result<OrFalse<i64>, Thrown> {
+    let Some(charset) = charset(req, encoding) else {
+        return Ok(OrFalse::False);
     };
+    let (haystack, needle) = (haystack.as_bytes(), needle.as_bytes());
     if offset < 0 {
-        match strlen(&haystack, &charset) {
+        match strlen(haystack, &charset) {
             Ok(n) => offset += i64::try_from(n).unwrap_or(0),
             Err(error) => return failed(req, error, UCS4, &charset),
         }
@@ -653,10 +551,10 @@ fn iconv_strpos(req: &mut Request) -> Result<Value, Thrown> {
         }
     }
     if needle.is_empty() {
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     }
     let offset = usize::try_from(offset).unwrap_or(0);
-    let found = strpos(&haystack, &needle, offset, &charset, false);
+    let found = strpos(haystack, needle, offset, &charset, false);
     position(req, found, &charset)
 }
 
@@ -671,17 +569,20 @@ fn iconv_strpos(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(false)
 /// ```
-fn iconv_strrpos(req: &mut Request) -> Result<Value, Thrown> {
-    count(req, 2, 3)?;
-    let haystack = string(req, 1, false)?.unwrap_or_default();
-    let needle = string(req, 2, false)?.unwrap_or_default();
+#[php_function]
+fn iconv_strrpos(
+    req: &mut Request,
+    haystack: PhpString,
+    needle: PhpString,
+    #[php(default = null)] encoding: Option<PhpString>,
+) -> Result<OrFalse<i64>, Thrown> {
     if needle.is_empty() {
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     }
-    let Some(charset) = charset(req, 3)? else {
-        return Ok(Value::bool(false));
+    let Some(charset) = charset(req, encoding) else {
+        return Ok(OrFalse::False);
     };
-    let found = strpos(&haystack, &needle, 0, &charset, true);
+    let found = strpos(haystack.as_bytes(), needle.as_bytes(), 0, &charset, true);
     position(req, found, &charset)
 }
 
@@ -710,18 +611,21 @@ fn iconv_strrpos(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(false)
 /// ```
-fn iconv(req: &mut Request) -> Result<Value, Thrown> {
-    count(req, 3, 3)?;
-    let from = string(req, 1, false)?.unwrap_or_default();
-    let to = string(req, 2, false)?.unwrap_or_default();
-    let input = string(req, 3, false)?.unwrap_or_default();
+#[php_function]
+fn iconv(
+    req: &mut Request,
+    from_encoding: PhpString,
+    to_encoding: PhpString,
+    string: PhpString,
+) -> Result<OrFalse<PhpString>, Thrown> {
+    let (from, to) = (from_encoding.as_bytes(), to_encoding.as_bytes());
     if from.len() >= MAX_NAME || to.len() >= MAX_NAME {
         too_long(req);
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     }
-    match convert(&input, &to, &from) {
-        Ok(out) => Ok(Value::string(PhpString::new(req, &out)?)),
-        Err(error) => failed(req, error, &to, &from),
+    match convert(string.as_bytes(), to, from) {
+        Ok(out) => Ok(OrFalse::Value(PhpString::new(req, &out)?)),
+        Err(error) => failed(req, error, to, from),
     }
 }
 
@@ -821,7 +725,7 @@ fn ob_iconv_handler(
             Err(error) => (Vec::new(), Some(error)),
         };
         if let Some(error) = error {
-            let _ = failed(req, error, &to, &from)?;
+            let _ = failed::<()>(req, error, &to, &from)?;
         }
         call.out = out;
     }
@@ -843,16 +747,18 @@ fn ob_iconv_handler(
 /// bool(false)
 /// bool(false)
 /// ```
-fn iconv_set_encoding(req: &mut Request) -> Result<Value, Thrown> {
-    count(req, 2, 2)?;
-    let kind = string(req, 1, false)?.unwrap_or_default();
-    let charset = string(req, 2, false)?.unwrap_or_default();
-    if charset.len() >= MAX_NAME {
+#[php_function]
+fn iconv_set_encoding(
+    req: &mut Request,
+    r#type: PhpString,
+    encoding: PhpString,
+) -> Result<bool, Thrown> {
+    if encoding.len() >= MAX_NAME {
         too_long(req);
-        return Ok(Value::bool(false));
+        return Ok(false);
     }
-    let Some(kind) = Kind::parse(&kind) else {
-        return Ok(Value::bool(false));
+    let Some(kind) = Kind::parse(r#type.as_bytes()) else {
+        return Ok(false);
     };
     let name = kind.entry();
     // `OnUpdateInternalEncoding` and its kin, at the runtime stage.
@@ -861,9 +767,7 @@ fn iconv_set_encoding(req: &mut Request) -> Result<Value, Thrown> {
         Level::Deprecated,
         &format!("Use of {name} is deprecated"),
     );
-    Ok(Value::bool(
-        req.ini_set(name.as_bytes(), &charset)?.is_some(),
-    ))
+    Ok(req.ini_set(name.as_bytes(), encoding.as_bytes())?.is_some())
 }
 
 /// `iconv_get_encoding(string $type = "all"): array|string|false`.
@@ -885,9 +789,12 @@ fn iconv_set_encoding(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// string(10) "ISO-8859-1"
 /// ```
-fn iconv_get_encoding(req: &mut Request) -> Result<Value, Thrown> {
-    count(req, 0, 1)?;
-    let kind = string(req, 1, true)?.unwrap_or_else(|| b"all".to_vec());
+#[php_function]
+fn iconv_get_encoding(
+    req: &mut Request,
+    #[php(default = "all")] r#type: PhpString,
+) -> Result<OrFalse<Union<PhpArray, PhpString>>, Thrown> {
+    let kind = r#type.as_bytes();
     if kind.eq_ignore_ascii_case(b"all") {
         let mut out = PhpArray::new(req)?;
         for kind in Kind::ALL {
@@ -896,13 +803,13 @@ fn iconv_get_encoding(req: &mut Request) -> Result<Value, Thrown> {
             let value = PhpString::new(req, &charset)?;
             out.set(req, Key::Str(key), Value::string(value))?;
         }
-        return Ok(Value::array(out));
+        return Ok(OrFalse::Value(Union::A(out)));
     }
-    match Kind::parse(&kind) {
+    match Kind::parse(kind) {
         Some(kind) => {
             let charset = encoding(req, kind);
-            Ok(Value::string(PhpString::new(req, &charset)?))
+            Ok(OrFalse::Value(Union::B(PhpString::new(req, &charset)?)))
         }
-        None => Ok(Value::bool(false)),
+        None => Ok(OrFalse::False),
     }
 }

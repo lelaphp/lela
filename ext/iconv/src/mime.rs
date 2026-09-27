@@ -8,18 +8,16 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use php_ext::abi::OrFalse;
+use php_ext::attr::php_function;
 use php_ext::coerce::{to_long, to_string};
-use php_ext::decl::Type;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 use php_ext_standard::{base64, quot_print};
 
 use super::ffi::{self, Cd, Errno};
-use super::{
-    Error, Kind, MAX_NAME, argument, charset, count, encoding, failed, long, opened, string,
-    too_long,
-};
+use super::{Error, Kind, MAX_NAME, charset, encoding, failed, opened, too_long};
 
 /// `ICONV_ASCII_ENCODING`.
 const ASCII: &[u8] = b"ASCII";
@@ -646,45 +644,45 @@ fn preference(req: &mut Request, prefs: PhpArray, name: &[u8]) -> Result<Option<
 /// Warning: iconv_mime_encode(): Encoding parameter exceeds the maximum allowed length of 64 characters in %s on line 6
 /// bool(false)
 /// ```
-pub(super) fn iconv_mime_encode(req: &mut Request) -> Result<Value, Thrown> {
-    count(req, 2, 3)?;
-    let name = string(req, 1, false)?.unwrap_or_default();
-    let value = string(req, 2, false)?.unwrap_or_default();
-    let prefs = argument(req, 3, &Type::Array)?.and_then(|v| v.as_array().copied());
+#[php_function]
+fn iconv_mime_encode(
+    req: &mut Request,
+    field_name: PhpString,
+    field_value: PhpString,
+    #[php(default = [])] options: PhpArray,
+) -> Result<OrFalse<PhpString>, Thrown> {
     let mut in_charset = encoding(req, Kind::Internal);
     let mut out_charset = in_charset.clone();
     let (mut max, mut lf, mut scheme) = (76i64, b"\r\n".to_vec(), Scheme::Base64);
-    if let Some(prefs) = prefs {
-        if let Some(given) = preference(req, prefs, b"scheme")?
-            && let Some(&letter) = given.as_str_bytes().and_then(<[u8]>::first)
-        {
-            match letter {
-                b'B' | b'b' => scheme = Scheme::Base64,
-                b'Q' | b'q' => scheme = Scheme::Qprint,
-                _ => {}
+    if let Some(given) = preference(req, options, b"scheme")?
+        && let Some(&letter) = given.as_str_bytes().and_then(<[u8]>::first)
+    {
+        match letter {
+            b'B' | b'b' => scheme = Scheme::Base64,
+            b'Q' | b'q' => scheme = Scheme::Qprint,
+            _ => {}
+        }
+    }
+    for (key, slot) in [
+        (&b"input-charset"[..], &mut in_charset),
+        (b"output-charset", &mut out_charset),
+    ] {
+        let given = preference(req, options, key)?;
+        if let Some(bytes) = given.as_ref().and_then(Value::as_str_bytes) {
+            if bytes.len() >= MAX_NAME {
+                too_long(req);
+                return Ok(OrFalse::False);
+            }
+            if !bytes.is_empty() {
+                *slot = bytes.to_vec();
             }
         }
-        for (key, slot) in [
-            (&b"input-charset"[..], &mut in_charset),
-            (b"output-charset", &mut out_charset),
-        ] {
-            let given = preference(req, prefs, key)?;
-            if let Some(bytes) = given.as_ref().and_then(Value::as_str_bytes) {
-                if bytes.len() >= MAX_NAME {
-                    too_long(req);
-                    return Ok(Value::bool(false));
-                }
-                if !bytes.is_empty() {
-                    *slot = bytes.to_vec();
-                }
-            }
-        }
-        if let Some(given) = preference(req, prefs, b"line-length")? {
-            max = to_long(req, &given)?;
-        }
-        if let Some(given) = preference(req, prefs, b"line-break-chars")? {
-            lf = to_string(req, &given)?.as_bytes().to_vec();
-        }
+    }
+    if let Some(given) = preference(req, options, b"line-length")? {
+        max = to_long(req, &given)?;
+    }
+    if let Some(given) = preference(req, options, b"line-break-chars")? {
+        lf = to_string(req, &given)?.as_bytes().to_vec();
     }
     // `(size_t) line_len`.
     let max = usize::try_from(max.cast_unsigned()).unwrap_or(usize::MAX);
@@ -694,15 +692,15 @@ pub(super) fn iconv_mime_encode(req: &mut Request) -> Result<Value, Thrown> {
     req.release(Value::string(charge));
     let (out_charset, in_charset) = (c_str(&out_charset).to_vec(), c_str(&in_charset).to_vec());
     match encode(
-        &name,
-        &value,
+        field_name.as_bytes(),
+        field_value.as_bytes(),
         max,
         c_str(&lf),
         scheme,
         &out_charset,
         &in_charset,
     ) {
-        Ok(out) => Ok(Value::string(PhpString::new(req, &out)?)),
+        Ok(out) => Ok(OrFalse::Value(PhpString::new(req, &out)?)),
         Err(error) => failed(req, error, &out_charset, &in_charset),
     }
 }
@@ -732,15 +730,19 @@ pub(super) fn iconv_mime_encode(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(false)
 /// ```
-pub(super) fn iconv_mime_decode(req: &mut Request) -> Result<Value, Thrown> {
-    count(req, 1, 3)?;
-    let input = string(req, 1, false)?.unwrap_or_default();
-    let mode = Mode::of(long(req, 2, false)?.unwrap_or(0));
-    let Some(charset) = charset(req, 3)? else {
-        return Ok(Value::bool(false));
+#[php_function]
+fn iconv_mime_decode(
+    req: &mut Request,
+    string: PhpString,
+    #[php(default = 0)] mode: i64,
+    #[php(default = null)] encoding: Option<PhpString>,
+) -> Result<OrFalse<PhpString>, Thrown> {
+    let mode = Mode::of(mode);
+    let Some(charset) = charset(req, encoding) else {
+        return Ok(OrFalse::False);
     };
-    match decode(&input, c_str(&charset), mode) {
-        Ok((header, _)) => Ok(Value::string(PhpString::new(
+    match decode(string.as_bytes(), c_str(&charset), mode) {
+        Ok((header, _)) => Ok(OrFalse::Value(PhpString::new(
             req,
             &header.unwrap_or_default(),
         )?)),
@@ -775,15 +777,19 @@ pub(super) fn iconv_mime_decode(req: &mut Request) -> Result<Value, Thrown> {
 /// array(0) {
 /// }
 /// ```
-pub(super) fn iconv_mime_decode_headers(req: &mut Request) -> Result<Value, Thrown> {
-    count(req, 1, 3)?;
-    let input = string(req, 1, false)?.unwrap_or_default();
-    let mode = Mode::of(long(req, 2, false)?.unwrap_or(0));
-    let Some(charset) = charset(req, 3)? else {
-        return Ok(Value::bool(false));
+#[php_function]
+fn iconv_mime_decode_headers(
+    req: &mut Request,
+    headers: PhpString,
+    #[php(default = 0)] mode: i64,
+    #[php(default = null)] encoding: Option<PhpString>,
+) -> Result<OrFalse<PhpArray>, Thrown> {
+    let mode = Mode::of(mode);
+    let Some(charset) = charset(req, encoding) else {
+        return Ok(OrFalse::False);
     };
     let mut fields: Vec<(Vec<u8>, Field)> = Vec::new();
-    let mut rest = &input[..];
+    let mut rest = headers.as_bytes();
     while !rest.is_empty() {
         let (header, next) = match decode(rest, c_str(&charset), mode) {
             Ok((Some(header), next)) => (header, next),
@@ -819,7 +825,7 @@ pub(super) fn iconv_mime_decode_headers(req: &mut Request) -> Result<Value, Thro
         };
         out.set(req, key, value)?;
     }
-    Ok(Value::array(out))
+    Ok(OrFalse::Value(out))
 }
 
 /// One name's values in `iconv_mime_decode_headers`' answer: a string,
