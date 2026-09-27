@@ -205,25 +205,77 @@ fn try_from(req: &mut Request) -> Result<Value, Thrown> {
     by_value(req, true)
 }
 
+/// The key `zend_enum_from_base` parses the argument into, one owner
+/// the caller's: `Z_PARAM_LONG` for an int enum; for a string enum
+/// `Z_PARAM_STR` under `strict_types` and otherwise
+/// `Z_PARAM_STR_OR_LONG`, whose weak arm reads a long first, so a float
+/// or a bool is the long it truncates to and that long's decimal, made
+/// here and never written over the argument (`zend_long_to_str`), and
+/// only what is neither is read as a string.
+fn backing_key(req: &mut Request, given: &Value, backing: EnumBacking) -> Result<Value, Thrown> {
+    use crate::api::coerce::coerce_param;
+    use crate::api::values::{PhpString, ValueRef};
+    if backing == EnumBacking::Int {
+        return coerce_param(req, given, &Type::Int, 1);
+    }
+    if req.strict_types() {
+        let key = coerce_param(req, given, &Type::String, 1)?;
+        req.addref(&key);
+        return Ok(key);
+    }
+    let long = match given.as_ref() {
+        ValueRef::Str(_) => None,
+        ValueRef::Int(n) => Some(n),
+        ValueRef::Float(_) | ValueRef::Bool(_) | ValueRef::Null | ValueRef::Undef => {
+            coerce_param(req, given, &Type::Int, 1)?.as_int()
+        }
+        _ => {
+            let either = Type::Union(vec![Type::String, Type::Int]);
+            let key = coerce_param(req, given, &either, 1)?;
+            req.addref(&key);
+            return Ok(key);
+        }
+    };
+    if let Some(n) = long {
+        return Ok(Value::string(PhpString::new(
+            req,
+            n.to_string().as_bytes(),
+        )?));
+    }
+    req.addref(given);
+    Ok(*given)
+}
+
 /// `zend_enum_from_base` and `zend_enum_get_case_by_value`: the
 /// constants updated first, which is where a case of the wrong type or
-/// a duplicate is refused, then the case the value names.
+/// a duplicate is refused, then the case the value names. An int given
+/// to a string enum is compared as its decimal and stays an int in the
+/// frame, so the trace shows it as given:
+///
+/// ```php
+/// enum S: string { case A = "42"; }
+/// var_dump(S::from(42), S::tryFrom(43));
+/// try { S::from(7); } catch (ValueError $e) { echo $e->getMessage(), "\n", $e->getTraceAsString(), "\n"; }
+/// ```
+/// ```expect
+/// enum(S::A)
+/// NULL
+/// "7" is not a valid backing value for enum S
+/// #0 %s(4): S::from(7)
+/// #1 {main}
+/// ```
 fn by_value(req: &mut Request, try_from: bool) -> Result<Value, Thrown> {
     exactly(req, 1)?;
     let class = called_enum(req)?;
     let backing = req
         .class_decl(class)
         .map_or(EnumBacking::Pure, |decl| decl.backing);
-    let ty = match backing {
-        EnumBacking::Int => Type::Int,
-        EnumBacking::String => Type::String,
-        EnumBacking::Pure => {
-            let name = req.class_name(class);
-            return Err(throw(req, "Error", &format!("Enum {name} is not backed")));
-        }
-    };
+    if backing == EnumBacking::Pure {
+        let name = req.class_name(class);
+        return Err(throw(req, "Error", &format!("Enum {name} is not backed")));
+    }
     let given = req.argument(1).unwrap_or_default().deref();
-    let wanted = crate::api::coerce::coerce_param(req, &given, &ty, 1)?;
+    let wanted = backing_key(req, &given, backing)?;
     if let Err(thrown) = req.update_enum_constants(class) {
         req.release(wanted);
         return Err(thrown);
