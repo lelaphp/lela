@@ -224,6 +224,33 @@ pub(crate) fn context_of(
     Ok(None)
 }
 
+/// `php_stream_context_get_option` (`Z/main/streams/streams.c:2440`): the
+/// value under `option` of the `wrapper`'s options of a `context`, a view
+/// with no owner, dereferenced; `None` where either level is missing.
+pub(crate) fn context_option(
+    req: &mut Request,
+    context: Resource,
+    wrapper: &[u8],
+    option: &[u8],
+) -> Result<Option<Value>, Thrown> {
+    let Some(options) = context
+        .native::<Context>(req)
+        .and_then(|context| context.options)
+    else {
+        return Ok(None);
+    };
+    let key = PhpString::new(req, wrapper)?;
+    let found = options.get(&Key::Str(key)).map(|v| v.deref());
+    req.release(Value::string(key));
+    let Some(level) = found.as_ref().and_then(Value::as_array).copied() else {
+        return Ok(None);
+    };
+    let key = PhpString::new(req, option)?;
+    let found = level.get(&Key::Str(key)).map(|v| v.deref());
+    req.release(Value::string(key));
+    Ok(found)
+}
+
 /// `Z_PARAM_RESOURCE` then `decode_context_param`
 /// (`Z/ext/standard/streamsfuncs.c:937`): a `context`, or a stream's,
 /// which here is the default one; anything else is php's

@@ -295,6 +295,7 @@ raising::throw_value
 raising::throwing_warnings
 raising::too_few_arguments
 raising::warning
+request::BindTo
 request::Brigade
 request::BufferHandler
 request::Cast
@@ -479,6 +480,7 @@ request::Resolve
 request::ResourceDtor
 request::Resources
 request::Resources::register_type
+request::SocketOptions
 request::StartHandler
 request::Stream
 request::Stream::accept

@@ -411,15 +411,52 @@ pub enum UrlStat {
 
 /// What `php_stream_xport_create` is asked to make of a `transport`'s
 /// name: a client connected within `timeout`, `None` to wait for ever,
-/// or a server bound to the name, listening where `listen` says.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// or a server bound to the name, listening where `listen` says; each
+/// with the `socket` options of the `context` the native resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Xport {
     Client {
         timeout: Option<std::time::Duration>,
+        socket: SocketOptions,
     },
     Server {
         listen: bool,
+        socket: SocketOptions,
     },
+}
+
+/// The `socket` options of a `php_stream_context`, as `xp_socket.c` and
+/// `transports.c` read them off `PHP_STREAM_CONTEXT(stream)`: each is
+/// `php_stream_context_get_option(context, "socket", name)` read the way
+/// its reader reads it, and the default is the value of none, which a
+/// stream opened with no `context` has.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // php's options, one flag per name
+pub struct SocketOptions {
+    /// `bindto`, where a client binds before it connects.
+    pub bindto: Option<BindTo>,
+    /// `backlog`, `zval_get_long`: the queue a server's `listen(2)` is
+    /// given; `32` where it is absent.
+    pub listen_queue: Option<i64>,
+    /// `tcp_nodelay`, `zend_is_true`: `TCP_NODELAY` on a TCP client and
+    /// on each client a server accepts.
+    pub tcp_nodelay: bool,
+    /// `so_reuseport`, `zend_is_true`: `SO_REUSEPORT` on a server.
+    pub so_reuseport: bool,
+    /// `so_broadcast`, `zend_is_true`: `SO_BROADCAST` on a UDP socket.
+    pub so_broadcast: bool,
+    /// `ipv6_v6only` where it is not `null`, `zend_is_true`: the
+    /// `IPV6_V6ONLY` a server's socket is given.
+    pub ipv6_v6only: Option<bool>,
+}
+
+/// The `bindto` option as `php_tcp_sockop_connect` reads it: the address
+/// written, or a value that is no string, which refuses the connect with
+/// `local_addr context option is not a string.`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BindTo {
+    Address(Vec<u8>),
+    NotAString,
 }
 
 /// Why `php_stream_xport_create` made no stream: the `errno` the natives
