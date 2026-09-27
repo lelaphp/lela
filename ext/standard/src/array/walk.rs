@@ -281,7 +281,7 @@ fn walk_holder(
             // walked from their start; anything else is php's TypeError.
             let now = holder.get();
             if let Some(now) = now.as_array().copied() {
-                if !now.is_same(&table) {
+                if !now.is_same(table) {
                     let Some(separated) = holder.separate_array(req)? else {
                         return Ok(());
                     };

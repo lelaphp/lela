@@ -528,12 +528,11 @@ impl PhpArray {
         Value::array(self)
     }
 
-    /// Whether this is the one table `other` is, php's
-    /// `Z_ARRVAL_P(a) == Z_ARRVAL_P(b)`: what a walk that calls back into
-    /// the program compares to learn the variable it walks now holds
-    /// another array, as `zend_hash_iterator_pos_ex` does.
+    /// Whether `other` names the one table this does, php's
+    /// `Z_ARR_P(a) == Z_ARR_P(b)`: the identity, where `==` reads the
+    /// elements.
     #[must_use]
-    pub fn is_same(&self, other: &PhpArray) -> bool {
+    pub fn is_same(&self, other: PhpArray) -> bool {
         self.0.is_same(other.0)
     }
 

@@ -996,7 +996,7 @@ fn multisort(
             reference
                 .get()
                 .as_array()
-                .is_some_and(|now| now.is_same(array))
+                .is_some_and(|now| now.is_same(*array))
         });
         if !holds {
             continue;
