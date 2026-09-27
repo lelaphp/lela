@@ -6197,7 +6197,7 @@ pub(crate) fn fetch_static_prop_r<T: Tier>(
 /// `ZEND_FETCH_STATIC_PROP_W` (`Z/Zend/zend_vm_def.h:1857`), the base
 /// of a dimension written over a `static` property: the slot addressed
 /// as a place (`zend_fetch_static_property_address` under `BP_VAR_W`,
-/// [`Request::static_property_place`]) and an `IS_INDIRECT` naming it
+/// [`Request::bind_static_place`]) and an `IS_INDIRECT` naming it
 /// written into the opline's `VAR`, which is what the `ASSIGN_DIM` over
 /// it writes through. The compiler marks the opline
 /// `ZEND_FETCH_DIM_WRITE` where a dimension stands over it, which is
@@ -6294,8 +6294,12 @@ fn static_prop_place(
             Err(thrown) => return threw(req, frame, &thrown),
         }
     }
-    let place = match req.static_property_place(class, &name, scope) {
-        Ok(Some(place)) => place,
+    // The slot found and filled first, raising what access raises; then
+    // `zend_handle_fetch_obj_flags`'s refusals over the slot as it stands,
+    // before the binding lays `null` in a slot nothing has written; then
+    // the place.
+    let (declaring, _) = match req.static_slot(class, &name, scope, PropertyRead::Warning) {
+        Ok(Some(slot)) => slot,
         Ok(None) => {
             return Err(Fatal::Error(format!(
                 "InternalError: ZEND_FETCH_STATIC_PROP_W placed ${} and the table holds no slot for it",
@@ -6304,9 +6308,43 @@ fn static_prop_place(
         }
         Err(thrown) => return threw(req, frame, &thrown),
     };
+    let flag = if rw {
+        None
+    } else {
+        FetchFlag::of(op.extended_value)
+    };
+    let typed = flag.and_then(|_| req.declared_typed_static(class, &name));
+    if let (Some(flag), Some(typed)) = (flag, &typed) {
+        let held = req.held_static(declaring, &name);
+        if let Err(thrown) = refuse_fetch(req, &held, typed, &name, flag) {
+            return threw(req, frame, &thrown);
+        }
+    }
+    let place = match req.bind_static_place(declaring, &name) {
+        Ok(place) => place,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    if flag == Some(FetchFlag::Ref)
+        && let Some(typed) = &typed
+    {
+        static_type_source(req, typed, &name);
+    }
     let out = exec::temporary_slot(code, op.out);
     let previous = req.take_slot(frame, out);
     req.release(previous);
+    // Under `ZEND_FETCH_REF` php's slot becomes the reference the `&`
+    // binds to. The slot here is the cell its place was bound to, so the
+    // `VAR` is that cell, with an owner, and the bind shares it rather
+    // than making a second cell inside it.
+    let bound = (flag == Some(FetchFlag::Ref))
+        .then(|| req.static_slot_cell(declaring, &name))
+        .flatten();
+    if let Some(cell) = bound {
+        req.addref(&cell.as_value());
+        let previous = req.set_slot(frame, out, cell.as_value());
+        req.release(previous);
+        return Ok(advance(req, frame));
+    }
     let Some(var) = req.slot_ptr(frame, out) else {
         return Err(Fatal::Error(String::from(
             "InternalError: ZEND_FETCH_STATIC_PROP_W writes a VAR the frame does not have",
@@ -6885,13 +6923,13 @@ fn fetch_obj_place(
         PropertyFound::At(at, object, name) => {
             // `BP_VAR_RW` carries no flags; `BP_VAR_W` masks them off
             // the cache slot.
-            let flags = if read == PropertyRead::Silent {
-                op.extended_value
+            let flag = if read == PropertyRead::Silent {
+                FetchFlag::of(op.extended_value)
             } else {
-                0
+                None
             };
             if let Some(typed) = req.declared_typed_property(object.class(), &name)
-                && let Err(thrown) = fetch_flags(req, at, typed, &name, flags)
+                && let Err(thrown) = fetch_flags(req, at, &typed, &name, flag)
             {
                 let thrown = freeing_container(req, frame, code, op, thrown);
                 return threw(req, frame, &thrown);
@@ -6956,14 +6994,122 @@ fn fetch_obj_place(
 fn fetch_flags(
     req: &mut Request,
     at: php_heap::ZvalRef,
-    typed: crate::api::request::TypedProperty,
+    typed: &crate::api::request::TypedProperty,
     name: &[u8],
-    flags: u32,
+    flag: Option<FetchFlag>,
 ) -> Result<(), Thrown> {
+    let Some(flag) = flag else {
+        return Ok(());
+    };
     let held = exec::value_of(at.read());
+    refuse_fetch(req, &held, typed, name, flag)?;
+    if flag == FetchFlag::Ref && held.as_php_ref().is_none() {
+        let cell = req.reference(held.undef_as_null())?;
+        at.write(cell.as_value().to_zval());
+        req.ref_add_type_source(cell.heap(), type_source(typed, name));
+    }
+    Ok(())
+}
+
+/// `zend_handle_fetch_obj_flags` under `ZEND_FETCH_REF` over a `static`
+/// property's slot, once [`refuse_fetch`] has passed it: the slot is a
+/// cell already, bound when its place was taken
+/// ([`Request::bind_static_place`]), and it gains the property as a
+/// type source where it does not carry it yet, so every write through a
+/// name bound to it is held to the type.
+///
+/// ```php
+/// class T { public static int $x = 0; public static ?string $s; public static int $u; }
+/// $x = &T::$x;
+/// try { $x = "foo"; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// $x = "5";
+/// try { T::$s["k"][] = 1; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { $u = &T::$u; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// $s = &T::$s;
+/// var_dump(T::$x, $s);
+/// ```
+/// ```expect
+/// Cannot assign string to reference held by property T::$x of type int
+/// Cannot auto-initialize an array inside property T::$s of type ?string
+/// Cannot access uninitialized non-nullable property T::$u by reference
+/// int(5)
+/// NULL
+/// ```
+fn static_type_source(req: &mut Request, typed: &crate::api::request::TypedProperty, name: &[u8]) {
+    if let Some(cell) = req.static_slot_cell(typed.declaring, name)
+        && !req
+            .ref_type_sources(cell.heap())
+            .iter()
+            .any(|source| source.declaring == typed.declaring && source.name == name)
+    {
+        req.ref_add_type_source(cell.heap(), type_source(typed, name));
+    }
+}
+
+/// `zend_verify_ref_array_assignable` (`Z/Zend/zend_execute.c:3458`): a
+/// dimension written through a reference that holds nothing an array
+/// could be written into yet is refused where a property the reference is
+/// typed by takes no array, the first such property named in php's
+/// `TypeError` (`zend_throw_auto_init_in_ref_error`).
+///
+/// ```php
+/// class C { public ?string $s = null; public ?array $a = null; }
+/// $c = new C; $s = &$c->s; $a = &$c->a;
+/// try { $s[] = 1; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// $a["k"] = 1;
+/// var_dump($c);
+/// ```
+/// ```expect
+/// Cannot auto-initialize an array inside a reference held by property C::$s of type ?string
+/// object(C)#1 (2) {
+///   ["s"]=>
+///   &NULL
+///   ["a"]=>
+///   &array(1) {
+///     ["k"]=>
+///     int(1)
+///   }
+/// }
+/// ```
+fn verify_ref_array_assignable(req: &mut Request, cell: PhpRef) -> Result<(), Thrown> {
+    let refused = req
+        .ref_type_sources(cell.heap())
+        .iter()
+        .find(|source| source.ty.mask() & MAY_BE_ARRAY == 0)
+        .map(|source| {
+            (
+                source.declaring,
+                crate::api::coerce::declared_type_name(&source.ty),
+                String::from_utf8_lossy(&source.name).into_owned(),
+            )
+        });
+    let Some((declaring, ty, shown)) = refused else {
+        return Ok(());
+    };
+    let class = req.class_name(declaring);
+    Err(crate::api::raising::throw(
+        req,
+        "TypeError",
+        &format!(
+            "Cannot auto-initialize an array inside a reference held by property {class}::${shown} of type {ty}"
+        ),
+    ))
+}
+
+/// The refusals `zend_handle_fetch_obj_flags` makes before it touches the
+/// place: a dimension written over a place php would auto-initialize to an
+/// array the type does not take, and a place bound by `&` that nothing has
+/// written where the type does not take `null`.
+fn refuse_fetch(
+    req: &mut Request,
+    held: &Value,
+    typed: &crate::api::request::TypedProperty,
+    name: &[u8],
+    flag: FetchFlag,
+) -> Result<(), Thrown> {
     let shown = String::from_utf8_lossy(name).into_owned();
-    match flags & (FETCH_REF | FETCH_DIM_WRITE) {
-        FETCH_DIM_WRITE => {
+    match flag {
+        FetchFlag::DimWrite => {
             let promotes = matches!(
                 held.deref().as_ref(),
                 ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false)
@@ -6980,7 +7126,7 @@ fn fetch_flags(
                 ));
             }
         }
-        FETCH_REF if held.as_php_ref().is_none() => {
+        FetchFlag::Ref => {
             if held.tag() == TypeTag::Undef && typed.ty.mask() & MAY_BE_NULL == 0 {
                 let class = req.class_name(typed.declaring);
                 return Err(crate::api::raising::throw(
@@ -6991,26 +7137,47 @@ fn fetch_flags(
                     ),
                 ));
             }
-            let cell = req.reference(held.undef_as_null())?;
-            at.write(cell.as_value().to_zval());
-            req.ref_add_type_source(
-                cell.heap(),
-                crate::api::request::RefSource {
-                    declaring: typed.declaring,
-                    name: name.to_vec(),
-                    ty: typed.ty,
-                },
-            );
         }
-        _ => {}
     }
     Ok(())
 }
 
+/// The property as a cell's type source, `ZEND_REF_ADD_TYPE_SOURCE`'s
+/// `prop_info`.
+fn type_source(
+    typed: &crate::api::request::TypedProperty,
+    name: &[u8],
+) -> crate::api::request::RefSource {
+    crate::api::request::RefSource {
+        declaring: typed.declaring,
+        name: name.to_vec(),
+        ty: typed.ty.clone(),
+    }
+}
+
+/// The bit under `ZEND_FETCH_OBJ_FLAGS` (`Z/Zend/zend_compile.h:1089-1096`)
+/// a property fetch for a write carries in its `extended_value`, decoded
+/// once: `ZEND_FETCH_REF`, a place bound by `&`, or `ZEND_FETCH_DIM_WRITE`,
+/// a dimension written over it. php sets at most one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FetchFlag {
+    Ref,
+    DimWrite,
+}
+
+impl FetchFlag {
+    /// The bit an opline's `extended_value` carries, if any.
+    fn of(extended_value: u32) -> Option<FetchFlag> {
+        match extended_value & (FETCH_REF | FETCH_DIM_WRITE) {
+            FETCH_REF => Some(FetchFlag::Ref),
+            FETCH_DIM_WRITE => Some(FetchFlag::DimWrite),
+            _ => None,
+        }
+    }
+}
+
 /// `ZEND_FETCH_REF` and `ZEND_FETCH_DIM_WRITE`
-/// (`Z/Zend/zend_compile.h:1089-1096`), the bits under
-/// `ZEND_FETCH_OBJ_FLAGS` a property fetch for a write carries in its
-/// `extended_value` beside the cache slots.
+/// (`Z/Zend/zend_compile.h:1089-1096`).
 const FETCH_REF: u32 = 1;
 const FETCH_DIM_WRITE: u32 = 2;
 /// `MAY_BE_NULL` and `MAY_BE_ARRAY` (`Z/Zend/zend_type_info.h`).
@@ -7758,6 +7925,10 @@ fn separated_array(
 /// ladder, since php gives it one of its own
 /// (`Z/Zend/zend_vm_def.h:6812`): it makes no array out of what is none.
 fn write_container(req: &mut Request, place: php_heap::ZvalRef) -> Result<Container, Thrown> {
+    let typed_ref = exec::value_of(place.read())
+        .as_php_ref()
+        .copied()
+        .filter(|cell| cell.heap().sources() != 0);
     let (at, array) = separated_array(req, place)?;
     if let Some(array) = array {
         return Ok(Container::Array(array));
@@ -7767,6 +7938,9 @@ fn write_container(req: &mut Request, place: php_heap::ZvalRef) -> Result<Contai
         held.as_ref(),
         ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false)
     ) {
+        if let Some(cell) = typed_ref {
+            verify_ref_array_assignable(req, cell)?;
+        }
         if held.as_bool() == Some(false) {
             crate::api::raising::deprecated(
                 req,

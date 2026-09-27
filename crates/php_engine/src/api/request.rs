@@ -6269,12 +6269,11 @@ impl Request {
     /// `static` property `name` on the class that declared it holds,
     /// nobody's to release, and `IS_UNDEF` where the slot stands
     /// unwritten or the table has none.
-    fn held_static(&self, declaring: ClassId, name: &[u8]) -> Value {
+    pub(crate) fn held_static(&self, declaring: ClassId, name: &[u8]) -> Value {
         self.statics
             .iter()
             .find(|((at, under), _)| *at == declaring && under == name)
-            .map(|(_, value)| *value)
-            .unwrap_or_default()
+            .map_or_else(Value::undef, |(_, value)| *value)
     }
 
     /// `zend_read_static_property_ex` (`Z/Zend/zend_API.c`): the value
@@ -6426,6 +6425,14 @@ impl Request {
                 }
             }
         }
+        // `zend_assign_to_variable` over a slot bound by reference: the
+        // cell is held to every property it is typed by, which may be
+        // another `static` than this one (`Test::$x =& Test::$y`).
+        if let Some(cell) = self.static_slot_cell(declaring, name)
+            && cell.heap().sources() != 0
+        {
+            return self.assign_to_reference(cell.heap(), value, strict);
+        }
         self.store_static_property(declaring, name, value);
         Ok(())
     }
@@ -6482,8 +6489,10 @@ impl Request {
     /// (`Z/Zend/zend_execute.c:3084`): the `static` property's slot as a
     /// place, which is what `FETCH_STATIC_PROP_W` hands its `VAR` as an
     /// `IS_INDIRECT` and the `ASSIGN_DIM` over it writes through.
-    /// `None` is [`Request::static_slot`]'s own, a name the chain does
-    /// not declare under a read that did not raise.
+    /// The slot is one [`Request::static_slot`] has already found and
+    /// filled, which is where access is refused and a default laid down,
+    /// so a handler can read the slot as it stands before this binding
+    /// lays `null` in an unwritten one.
     ///
     /// php's slot is one zval of `CE_STATIC_MEMBERS(ce)`, a table whose
     /// address is stable for the life of the request. The slots here
@@ -6495,18 +6504,13 @@ impl Request {
     /// reads and [`Request::store_static_property`] writes through what
     /// the slot holds), so the binding is a place to write through and
     /// nothing a program can see.
-    pub(crate) fn static_property_place(
+    pub(crate) fn bind_static_place(
         &mut self,
-        class: ClassId,
+        declaring: ClassId,
         name: &[u8],
-        scope: Option<ClassId>,
-    ) -> Result<Option<php_heap::ZvalRef>, Thrown> {
-        let Some((declaring, _)) = self.static_slot(class, name, scope, PropertyRead::Warning)?
-        else {
-            return Ok(None);
-        };
+    ) -> Result<php_heap::ZvalRef, Thrown> {
         if let Some(cell) = self.static_slot_cell(declaring, name) {
-            return Ok(Some(cell.heap().val_ref()));
+            return Ok(cell.heap().val_ref());
         }
         let held = self.held_static(declaring, name);
         let held = if held.tag() == TypeTag::Undef {
@@ -6522,12 +6526,12 @@ impl Request {
             .iter()
             .position(|((held, under), _)| *held == declaring && under == name);
         let Some(at) = at else {
-            return Ok(Some(cell.heap().val_ref()));
+            return Ok(cell.heap().val_ref());
         };
         if let Some((_, slot)) = self.statics.get_mut(at) {
             *slot = Value::reference(cell);
         }
-        Ok(Some(cell.heap().val_ref()))
+        Ok(cell.heap().val_ref())
     }
 
     /// The cell the `static` property's slot holds, for the handler that
@@ -7155,6 +7159,26 @@ impl Request {
         let (declaring, p) = placed.get(at)?;
         p.ty.clone().map(|ty| TypedProperty {
             declaring: *declaring,
+            ty,
+            readonly: p.is_readonly,
+        })
+    }
+
+    /// [`Request::declared_typed_property`] for a `static` property: the
+    /// `zend_property_info` `zend_fetch_static_property_address` hands on,
+    /// its type and the class that declared it, where the property is
+    /// typed.
+    pub(crate) fn declared_typed_static(
+        &self,
+        class: ClassId,
+        name: &[u8],
+    ) -> Option<TypedProperty> {
+        let (declaring, p) = self.property_info_of(class, name)?;
+        if p.is_instance {
+            return None;
+        }
+        p.ty.map(|ty| TypedProperty {
+            declaring,
             ty,
             readonly: p.is_readonly,
         })
