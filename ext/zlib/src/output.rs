@@ -45,7 +45,7 @@ const CONFLICTS: &[&str] = &[
 pub(crate) const OB_GZHANDLER: BufferHandler = BufferHandler {
     name: "ob_gzhandler",
     conflicts: CONFLICTS,
-    handler,
+    handler: alias_handler,
 };
 
 /// The handler `php_zlib_output_compression_start` starts.
@@ -229,11 +229,6 @@ fn handler(req: &mut Request, call: &mut HandlerCall<'_>) -> Result<HandlerStatu
         }
         return Ok(HandlerStatus::Failure);
     }
-    if op.start && globals(req).compression == 0 {
-        // `php_zlib_output_handler_init`, which php serves before the
-        // handler's first call: a chunk size where there was none.
-        globals(req).compression = DEFAULT_SIZE;
-    }
     let level = level(req);
     let mut ctx = std::mem::take(&mut globals(req).handler);
     let handed = handle(&mut ctx, op, call.input, level, coding);
@@ -254,6 +249,19 @@ fn handler(req: &mut Request, call: &mut HandlerCall<'_>) -> Result<HandlerStatu
     }
     call.out = handed.unwrap_or_default();
     Ok(HandlerStatus::Success)
+}
+
+/// `ob_gzhandler` as `ob_start()` starts it through its alias, whose
+/// `php_zlib_output_handler_init` php serves at the start and this
+/// engine before the handler's first call: a chunk size where there was
+/// none. The handler `zlib.output_compression` starts had its chunk size
+/// before it started, so a zero on its first call is the ini switched
+/// off since, and [`handler`] passes what it is handed through unchanged.
+fn alias_handler(req: &mut Request, call: &mut HandlerCall<'_>) -> Result<HandlerStatus, Thrown> {
+    if call.op.start && globals(req).compression == 0 {
+        globals(req).compression = DEFAULT_SIZE;
+    }
+    handler(req, call)
 }
 
 /// Whether a handler of `name` is on the stack,

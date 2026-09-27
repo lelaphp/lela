@@ -195,7 +195,7 @@ struct Settings {
 }
 
 impl Settings {
-    fn read(req: &Request, context: Context) -> Settings {
+    fn read(req: &mut Request, context: Context) -> Settings {
         let (tags_entry, hosts_entry) = context.entries();
         let ini = |name: &[u8]| req.ini_get(name).unwrap_or_default().to_vec();
         // `php_strtok_r(tmp, ",")`, whose empty pieces are skipped.
@@ -222,19 +222,22 @@ impl Settings {
             .map(|host| host.to_ascii_lowercase())
             .collect();
         let separator = separator(req);
-        let http_host = req.superglobal(b"_SERVER").and_then(|server| {
-            let host = server
-                .snapshot()
-                .into_iter()
-                .find_map(|(key, value)| match key {
-                    Key::Str(name) if name.as_bytes() == b"HTTP_HOST" => {
-                        value.as_php_string().map(|host| host.as_bytes().to_vec())
-                    }
-                    _ => None,
-                })?;
-            let end = host.iter().position(|c| *c == b':').unwrap_or(host.len());
-            Some(host[..end].to_vec())
-        });
+        // `check_http_host`: `EG(symbol_table)`'s `$_SERVER`, the
+        // program's, not armed where the program has not made it.
+        let http_host =
+            req.global(b"_SERVER").and_then(|server| {
+                let host =
+                    server.as_array()?.snapshot().into_iter().find_map(
+                        |(key, value)| match key {
+                            Key::Str(name) if name.as_bytes() == b"HTTP_HOST" => {
+                                value.as_php_string().map(|host| host.as_bytes().to_vec())
+                            }
+                            _ => None,
+                        },
+                    )?;
+                let end = host.iter().position(|c| *c == b':').unwrap_or(host.len());
+                Some(host[..end].to_vec())
+            });
         Settings {
             tags,
             hosts,
