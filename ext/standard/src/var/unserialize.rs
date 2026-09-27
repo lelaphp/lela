@@ -36,6 +36,10 @@ enum Slot {
     Taken,
     Element(PhpArray, Key),
     Property(PhpObject, PhpString),
+    /// A place a repeated key wrote again: the slot numbered here, which
+    /// holds what the place holds now, as php's pointer to the bucket
+    /// reads it.
+    Same(usize),
 }
 
 /// One entry of php's dtor list, which `var_destroy` walks in order: a
@@ -907,8 +911,9 @@ impl State<'_> {
                 }
             }
             // Nothing names a taken root's place any more; the `R:`
-            // arm shares its value instead of writing here.
-            Slot::Taken => {
+            // arm shares its value instead of writing here, and reads a
+            // repeated place through the slot it follows.
+            Slot::Taken | Slot::Same(_) => {
                 req.release(value);
                 return Ok(());
             }
@@ -962,12 +967,15 @@ impl State<'_> {
                 }
                 self.p = end + 1;
                 let id = self.parse_uiv(start + 2);
-                let Some(Some((held_slot, held))) = id
-                    .checked_sub(1)
-                    .and_then(|i| self.hash.slots.get(i))
-                    .cloned()
-                else {
+                let Some(mut at) = id.checked_sub(1) else {
                     return Ok(false);
+                };
+                let (held_slot, held) = loop {
+                    match self.hash.slots.get(at).cloned() {
+                        Some(Some((Slot::Same(next), _))) if next > at => at = next,
+                        Some(Some((Slot::Same(_), _)) | None) | None => return Ok(false),
+                        Some(Some(entry)) => break entry,
+                    }
                 };
                 if c0 == b'R' && matches!(held_slot, Slot::Taken) {
                     // php makes the `var_tmp_var` its caller holds a
@@ -988,7 +996,6 @@ impl State<'_> {
                     } else {
                         req.addref(&held);
                         let cell = PhpRef::new(req, held)?;
-                        let at = id - 1;
                         self.write(req, &held_slot, Some(at), cell.as_value())?;
                         // `ref_props`: a typed property whose value was read
                         // becomes a source of the cell it now holds.
@@ -1211,6 +1218,48 @@ impl State<'_> {
         true
     }
 
+    /// A key the string repeats: the slots that named its place name the
+    /// slot the value about to be read is numbered, which is where php's
+    /// pointer to the bucket finds it; an `R:` value numbers none, and
+    /// leaves them as they stand.
+    ///
+    /// ```php
+    /// var_dump(unserialize('a:3:{i:0;i:1;i:0;a:1:{i:0;R:2;}i:1;R:2;}'));
+    /// var_dump(unserialize('O:8:"stdClass":2:{s:1:"a";i:1;s:1:"a";O:8:"stdClass":1:{s:1:"b";R:2;}}'));
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   [0]=>
+    ///   &array(1) {
+    ///     [0]=>
+    ///     *RECURSION*
+    ///   }
+    ///   [1]=>
+    ///   &array(1) {
+    ///     [0]=>
+    ///     *RECURSION*
+    ///   }
+    /// }
+    /// object(stdClass)#1 (1) {
+    ///   ["a"]=>
+    ///   &object(stdClass)#2 (1) {
+    ///     ["b"]=>
+    ///     *RECURSION*
+    ///   }
+    /// }
+    /// ```
+    fn repeat_place(&mut self, place: &Slot) {
+        if self.at(self.p) == b'R' {
+            return;
+        }
+        let next = self.hash.slots.len();
+        for (slot, _) in self.hash.slots.iter_mut().flatten() {
+            if slots_equal(slot, place) {
+                *slot = Slot::Same(next);
+            }
+        }
+    }
+
     /// The depth check `process_nested_*_data` opens with.
     fn deeper(&mut self, req: &mut Request) -> bool {
         if self.hash.max_depth > 0 && self.hash.depth >= self.hash.max_depth {
@@ -1294,6 +1343,7 @@ impl State<'_> {
             if let Some(old) = array.get(&key) {
                 req.addref(&old);
                 self.hash.dtors.push(Dtor::Kept(old));
+                self.repeat_place(&Slot::Element(array, key.clone()));
             }
             if let Key::Str(s) = &key {
                 req.addref(&Value::string(*s));
@@ -1634,6 +1684,7 @@ impl State<'_> {
             if let Some(old) = object.prop(req, &key) {
                 req.addref(&old);
                 self.hash.dtors.push(Dtor::Kept(old));
+                self.repeat_place(&Slot::Property(object, name));
             }
             req.addref(&Value::string(name));
             // A key naming a virtual property fails the whole object,
@@ -1745,7 +1796,9 @@ fn slots_equal(left: &Slot, right: &Slot) -> bool {
         (Slot::Root(one), Slot::Root(other)) => one == other,
         (Slot::Taken, Slot::Taken) => true,
         (Slot::Element(one, key), Slot::Element(other, key2)) => one == other && key == key2,
-        (Slot::Property(one, name), Slot::Property(other, name2)) => one == other && name == name2,
+        (Slot::Property(one, name), Slot::Property(other, name2)) => {
+            one == other && name.as_bytes() == name2.as_bytes()
+        }
         _ => false,
     }
 }
