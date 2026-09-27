@@ -1071,6 +1071,14 @@ impl PhpObject {
         self.0.unprotect();
     }
 
+    /// `GC_ADD_FLAGS(obj, IS_OBJ_DESTRUCTOR_CALLED)`: the object is
+    /// taken as destructed, so its `__destruct()` never runs, which is
+    /// what `unserialize()` does to an object whose `__wakeup()` or
+    /// `__unserialize()` failed or was never made.
+    pub fn mark_destructor_called(&self) {
+        self.0.set_destructor_called(true);
+    }
+
     /// The native payload, as `T`, borrowed for as long as the request
     /// is: `None` for an object of another payload or of none.
     #[must_use]

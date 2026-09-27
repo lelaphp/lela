@@ -638,6 +638,7 @@ values::PhpObject::is_recursive
 values::PhpObject::laziness
 values::PhpObject::lazy_initializer
 values::PhpObject::lazy_real
+values::PhpObject::mark_destructor_called
 values::PhpObject::native
 values::PhpObject::native_mut
 values::PhpObject::native_mut_or_fatal

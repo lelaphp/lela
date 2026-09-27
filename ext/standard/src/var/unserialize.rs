@@ -92,9 +92,30 @@ impl VarHash {
     }
 
     /// `var_destroy`: the dtor list walked in order, each delayed call
-    /// made with `BG(serialize_lock)` held until one of them throws;
-    /// every owner given up after its entry. The `Err` is what the call
-    /// threw.
+    /// made with `BG(serialize_lock)` held until one of them throws, and
+    /// the object of that call and of every call after it marked as
+    /// destructed, so its destructor never runs; every owner given up
+    /// after its entry. The `Err` is what the call threw.
+    ///
+    /// ```php
+    /// class W { function __wakeup() { throw new Exception("no"); } function __destruct() { echo "dtor W\n"; } }
+    /// class V { function __wakeup() { echo "wakeup V\n"; } function __destruct() { echo "dtor V\n"; } }
+    /// class U { function __unserialize(array $a): void { echo "unserialize U\n"; } function __destruct() { echo "dtor U\n"; } }
+    /// try { unserialize('a:3:{i:0;O:1:"U":0:{}i:1;O:1:"W":0:{}i:2;O:1:"V":0:{}}'); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump(unserialize('a:2:{i:0;O:1:"V":0:{}i:1;O:1:"V":1:{'));
+    /// echo "end\n";
+    /// ```
+    /// ```expect
+    /// unserialize U
+    /// dtor U
+    /// no
+    ///
+    /// Warning: unserialize(): Error at offset 36 of 36 bytes in %s on line 6
+    /// wakeup V
+    /// dtor V
+    /// bool(false)
+    /// end
+    /// ```
     fn destroy(self, req: &mut Request) -> Result<(), Thrown> {
         let mut failed: Option<Thrown> = None;
         for dtor in self.dtors {
@@ -115,6 +136,9 @@ impl VarHash {
                     Ok(answer) => req.release(answer),
                     Err(thrown) => failed = Some(thrown),
                 }
+            }
+            if failed.is_some() {
+                object.mark_destructor_called();
             }
             req.release(object.as_value());
             if let Some(array) = argument {
@@ -1381,6 +1405,7 @@ impl State<'_> {
             }
             let array = PhpArray::new(req)?;
             if !self.array_elements(req, array, elements)? {
+                object.mark_destructor_called();
                 req.release(array.to_value());
                 return Ok(false);
             }
@@ -1390,6 +1415,9 @@ impl State<'_> {
         }
         let has_wakeup = !incomplete && has_method(req, class, b"__wakeup");
         if !self.object_properties(req, object, elements)? {
+            if has_wakeup {
+                object.mark_destructor_called();
+            }
             return Ok(false);
         }
         if has_wakeup {
