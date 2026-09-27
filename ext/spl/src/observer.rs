@@ -173,7 +173,9 @@ impl SplSubject {
 
 /// `class SplObjectStorage implements Countable, SeekableIterator,
 /// Serializable, ArrayAccess`; `offsetExists`, `offsetSet` and
-/// `offsetUnset` are php's aliases of `contains`, `attach` and `detach`.
+/// `offsetUnset` are php's aliases of `contains`, `attach` and `detach`,
+/// each a body of its own here since the three declare `$object`
+/// untyped where the three they alias declare `object`.
 ///
 /// ```php
 /// $s = new SplObjectStorage; $a = new stdClass; $b = new stdClass;
@@ -219,7 +221,7 @@ pub(crate) struct SplObjectStorage;
 #[php_class]
 impl SplObjectStorage {
     /// `attach(object $object, mixed $info = null): void`, deprecated in
-    /// 8.5 for `offsetSet`, which is the same entry.
+    /// 8.5 for `offsetSet`.
     ///
     /// ```php
     /// $s = new SplObjectStorage; $a = new stdClass; $b = new stdClass;
@@ -272,12 +274,7 @@ impl SplObjectStorage {
         )
     )]
     fn detach(req: &mut Request, this: This<Self>, object: PhpObject) -> Result<(), Thrown> {
-        let this = this.object();
-        storage_detach(req, this, object)?;
-        with(req, this, |s| {
-            s.reset();
-            s.index = 0;
-        })
+        detach_row(req, this.object(), object)
     }
 
     /// `contains(object $object): bool`, `offsetExists`; the witness is the
@@ -604,8 +601,17 @@ impl SplObjectStorage {
         PhpString::new(req, &out)
     }
 
-    #[php(tentative, implementation = SplObjectStorage::contains)]
-    fn offsetExists(this: This<Self>, object: Untyped<Value>) -> bool;
+    /// `offsetExists($object): bool`, php's alias of `contains()`, its
+    /// `$object` untyped and held as `Z_PARAM_OBJ` holds it; the witness
+    /// is the class's.
+    #[php(tentative)]
+    fn offsetExists(
+        req: &mut Request,
+        this: This<Self>,
+        object: Untyped<PhpObject>,
+    ) -> Result<bool, Thrown> {
+        storage_contains(req, this.object(), object.0)
+    }
 
     /// `offsetGet($object): mixed`: the information, or php's
     /// `UnexpectedValueException` for an object the storage has not.
@@ -628,10 +634,28 @@ impl SplObjectStorage {
         }
     }
 
-    #[php(tentative, implementation = SplObjectStorage::attach)]
-    fn offsetSet(this: This<Self>, object: Untyped<Value>, #[php(default = null)] info: Value);
-    #[php(tentative, implementation = SplObjectStorage::detach)]
-    fn offsetUnset(this: This<Self>, object: Untyped<Value>);
+    /// `offsetSet($object, mixed $info = null): void`, php's alias of
+    /// `attach()`; the witness is the class's.
+    #[php(tentative)]
+    fn offsetSet(
+        req: &mut Request,
+        this: This<Self>,
+        object: Untyped<PhpObject>,
+        #[php(default = null)] info: Value,
+    ) -> Result<(), Thrown> {
+        storage_attach(req, this.object(), object.0, info)
+    }
+
+    /// `offsetUnset($object): void`, php's alias of `detach()`; the
+    /// witness is the class's.
+    #[php(tentative)]
+    fn offsetUnset(
+        req: &mut Request,
+        this: This<Self>,
+        object: Untyped<PhpObject>,
+    ) -> Result<(), Thrown> {
+        detach_row(req, this.object(), object.0)
+    }
 
     /// `getHash(object $object): string`, `spl_object_hash`'s string; a
     /// class overriding it keys the storage by what it answers.
@@ -1041,6 +1065,16 @@ fn storage_detach(req: &mut Request, this: PhpObject, object: PhpObject) -> Resu
         }
         None => Ok(false),
     }
+}
+
+/// `SplObjectStorage::detach`'s body: the row gone and the position
+/// reset.
+fn detach_row(req: &mut Request, this: PhpObject, object: PhpObject) -> Result<(), Thrown> {
+    storage_detach(req, this, object)?;
+    with(req, this, |s| {
+        s.reset();
+        s.index = 0;
+    })
 }
 
 /// `spl_object_storage_contains`.
