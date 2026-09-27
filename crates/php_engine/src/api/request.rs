@@ -15882,7 +15882,7 @@ impl Request {
 
     /// `spl_autoload_functions()`: each loader as its
     /// `autoload_func_info` lists it, one owner each, the caller's: a
-    /// closure itself; a method as the pair of its receiver, or of the
+    /// closure or an invokable object itself; a method as the pair of its receiver, or of the
     /// class the callable resolved to where it has none (`alfi->ce`), so
     /// `['self', 'load']` lists the class `self` named where it was
     /// registered, and the method's declared name; a function by its
@@ -15894,6 +15894,7 @@ impl Request {
     /// spl_autoload_register('first::load');
     /// spl_autoload_register('Strlen');
     /// $f = fn ($c) => null; spl_autoload_register($f);
+    /// class Inv { function __invoke($c) {} } spl_autoload_register(new Inv);
     /// foreach (spl_autoload_functions() as $l) echo is_array($l) ? implode('::', $l) : (is_string($l) ? $l : get_class($l)), "\n";
     /// ```
     /// ```expect
@@ -15901,12 +15902,17 @@ impl Request {
     /// First::load
     /// strlen
     /// Closure
+    /// Inv
     /// ```
     pub fn autoload_functions(&mut self) -> Result<Vec<Value>, Thrown> {
-        let targets: Vec<Target> = self.autoloaders.iter().map(Callable::target).collect();
-        let mut out = Vec::with_capacity(targets.len());
-        for target in targets {
-            match self.autoload_listed(target) {
+        let loaders: Vec<(Target, Value)> = self
+            .autoloaders
+            .iter()
+            .map(|loader| (loader.target(), loader.value()))
+            .collect();
+        let mut out = Vec::with_capacity(loaders.len());
+        for (target, value) in loaders {
+            match self.autoload_listed(target, &value) {
                 Ok(listed) => out.push(listed),
                 Err(thrown) => {
                     for listed in out {
@@ -15919,8 +15925,14 @@ impl Request {
         Ok(out)
     }
 
-    /// One loader as [`Request::autoload_functions`] lists it.
-    fn autoload_listed(&mut self, target: Target) -> Result<Value, Thrown> {
+    /// One loader as [`Request::autoload_functions`] lists it: one
+    /// registered as an object, a closure or an invokable one, is that
+    /// object (`alfi->closure`).
+    fn autoload_listed(&mut self, target: Target, value: &Value) -> Result<Value, Thrown> {
+        if let Some(object) = value.deref().as_object().copied() {
+            self.addref(&object.as_value());
+            return Ok(object.as_value());
+        }
         match target {
             Target::Closure(object) => {
                 self.addref(&object.as_value());
