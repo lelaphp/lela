@@ -43,11 +43,18 @@
 //!
 //! **What one run is.** One process per test, on a pool of threads the
 //! size of the machine's cores or of `--jobs`, and the tests held apart as
-//! upstream's parallel runner holds them: two naming one key in their
-//! `--CONFLICTS--`, or in their directory's `CONFLICTS` file, never run at
-//! once, and one naming `all` runs with nothing beside it
-//! (run-tests.php:1341-1372). A test past the recipe's limit holds up only
-//! the tests it conflicts with. The verdicts are printed and kept in the
+//! upstream's parallel runner holds them. Its workers are handed batches
+//! of neighbours in the tests' order and run each batch one test after
+//! another (run-tests.php:1537-1546, 1742-1744), so the tests of a batch
+//! here are judged in sequence and the batches beside each other: two
+//! neighbours that make one path relative to php-src's root, where every
+//! program runs, do not meet (#1091). A batch is neighbours and not a
+//! directory, as upstream's is, so its length is upstream's too, from the
+//! pool's size. Two tests naming one key in their `--CONFLICTS--`, or in
+//! their directory's `CONFLICTS` file, never run at once, and one naming
+//! `all` runs with nothing beside it (run-tests.php:1341-1372). A test
+//! past the recipe's limit holds up only its batch and the tests it
+//! conflicts with. The verdicts are printed and kept in the
 //! tests' order whatever order they finish in, so the lines, the reading
 //! and the kept run are the ones a pool of one writes (#938).
 //!
@@ -745,12 +752,14 @@ pub(crate) fn run_subset(
     oracle.asserted()?;
     let adapter = Adapter::new(oracle, registry, binary, lane);
     let mut dirs = BTreeMap::new();
-    Tally::judge_apart(
-        &tests,
-        jobs,
-        |test| adapter::apart(test, &mut dirs),
-        |test| adapter.judge(subset, test),
-    )
+    let apart: Vec<_> = tests
+        .iter()
+        .map(|test| adapter::apart(test, &mut dirs))
+        .collect();
+    let batch = adapter::batch(&apart, jobs);
+    Tally::judge_apart(&tests, jobs, batch, &apart, |test| {
+        adapter.judge(subset, test)
+    })
 }
 
 #[cfg(test)]

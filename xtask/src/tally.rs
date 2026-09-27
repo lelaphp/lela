@@ -179,35 +179,39 @@ impl<J: Judgement> Tally<J> {
     where
         J: Send,
     {
-        Tally::judge_apart(items, cores(), |_| Apart::Keys(Vec::new()), judge)
+        let apart = vec![Apart::Keys(Vec::new()); items.len()];
+        Tally::judge_apart(items, cores(), NonZeroUsize::MIN, &apart, judge)
     }
 
     /// [`Tally::judge`] on a pool of `threads`, each item held apart from
-    /// the items `apart` says it may not run beside, as [`Queue::take`]
+    /// the items `apart[n]` says it may not run beside, as [`Queue::take`]
     /// holds them within this run and [`Apart::hold`] across every run.
-    /// The verdicts are printed and kept in the items' order all the same,
-    /// each once every one before it is in, so the run reads as the
-    /// one-at-a-time run does, and a pool of one is that run.
+    /// The items are cut into batches of `batch` neighbours in their
+    /// order, and a batch's items are judged one after another, as one of
+    /// upstream's workers runs the batch it is handed
+    /// (run-tests.php:1742-1744, 1279-1325); the batches run beside each
+    /// other, and a batch of one holds nothing. An item alone is in no
+    /// batch and is not counted in one. The verdicts are printed and kept
+    /// in the items' order all the same, each once every one before it is
+    /// in, so the run reads as the one-at-a-time run does, and a pool of
+    /// one is that run.
     pub fn judge_apart<I: Sync>(
         items: &[I],
         threads: NonZeroUsize,
-        apart: impl FnMut(&I) -> Apart,
+        batch: NonZeroUsize,
+        apart: &[Apart],
         judge: impl Fn(&I) -> Result<Judged<J>> + Sync,
     ) -> Result<Tally<J>>
     where
         J: Send,
     {
-        let apart: Vec<Apart> = items.iter().map(apart).collect();
-        let queue = Mutex::new(Queue {
-            waiting: (0..items.len()).collect(),
-            ..Queue::default()
-        });
+        let queue = Mutex::new(Queue::new(apart, batch));
         let freed = Condvar::new();
         let (sent, received) = mpsc::channel();
         thread::scope(|scope| {
             for _ in 0..threads.get().min(items.len()) {
                 let (sent, queue, freed) = (sent.clone(), &queue, &freed);
-                let (apart, judge) = (&apart, &judge);
+                let judge = &judge;
                 scope.spawn(move || {
                     let lock = || queue.lock().unwrap_or_else(PoisonError::into_inner);
                     loop {
@@ -233,7 +237,7 @@ impl<J: Judgement> Tally<J> {
                             drop(held);
                             judged
                         });
-                        lock().done(&apart[at]);
+                        lock().done(at, &apart[at]);
                         freed.notify_all();
                         // A send that fails is the receiver gone, a verdict
                         // before this one having ended the run: nothing
@@ -472,50 +476,86 @@ pub fn cores() -> NonZeroUsize {
 struct Queue {
     /// The items not yet started, in their order.
     waiting: Vec<usize>,
+    /// The batch of each item, by its place; none for an item alone.
+    batch: Vec<Option<usize>>,
     /// The keys the running items hold.
     held: BTreeSet<String>,
+    /// The batches an item of which is running.
+    busy: BTreeSet<usize>,
     running: usize,
     /// Whether the item running is one that runs alone.
     alone: bool,
 }
 
 impl Queue {
-    /// The next item that may start now: the first waiting whose keys
-    /// neither a running item nor an earlier waiting item holds, so the
-    /// items sharing a key start in their order, which upstream keeps for
-    /// them (run-tests.php:1374-1378). An item alone starts when it is
-    /// first in line and nothing runs, and nothing after it starts first:
-    /// the items before it are done before it and the ones after it wait
-    /// for it, as a run of one would have it. Upstream runs those last
-    /// instead, which no verdict can tell from this.
+    /// Every item waiting, each item not alone in the batch its place
+    /// among those items falls in.
+    fn new(apart: &[Apart], batch: NonZeroUsize) -> Queue {
+        let mut placed = 0;
+        let batch = apart
+            .iter()
+            .map(|apart| match apart {
+                Apart::Alone(_) => None,
+                Apart::Keys(_) => {
+                    placed += 1;
+                    Some((placed - 1) / batch)
+                }
+            })
+            .collect();
+        Queue {
+            waiting: (0..apart.len()).collect(),
+            batch,
+            ..Queue::default()
+        }
+    }
+
+    /// The next item that may start now: the first waiting whose batch
+    /// has no item running and whose keys neither a running item nor an
+    /// earlier waiting item holds, so a batch's items and the items
+    /// sharing a key start in their order, which upstream keeps for them
+    /// (run-tests.php:1374-1380). An item a key holds back lets the rest
+    /// of its batch go on without it, as upstream sets it aside out of
+    /// the batch it was taking (run-tests.php:1541-1546). An item alone
+    /// starts when it is first in line and nothing runs, and nothing
+    /// after it starts first: the items before it are done before it and
+    /// the ones after it wait for it, as a run of one would have it.
+    /// Upstream runs those last instead, which no verdict can tell from
+    /// this.
     fn take(&mut self, apart: &[Apart]) -> Option<usize> {
         if self.alone {
             return None;
         }
         let mut passed: Vec<&str> = Vec::new();
         for (n, &at) in self.waiting.iter().enumerate() {
+            let batch = self.batch[at];
             match &apart[at] {
                 Apart::Alone(_) if n == 0 && self.running == 0 => self.alone = true,
                 Apart::Alone(_) => return None,
                 Apart::Keys(keys)
-                    if keys
-                        .iter()
-                        .any(|key| self.held.contains(key) || passed.contains(&key.as_str())) =>
+                    if batch.is_some_and(|batch| self.busy.contains(&batch))
+                        || keys.iter().any(|key| {
+                            self.held.contains(key) || passed.contains(&key.as_str())
+                        }) =>
                 {
                     passed.extend(keys.iter().map(String::as_str));
                     continue;
                 }
                 Apart::Keys(keys) => self.held.extend(keys.iter().cloned()),
             }
+            self.busy.extend(batch);
             self.running += 1;
             return Some(self.waiting.remove(n));
         }
         None
     }
 
-    /// An item done: what it held given back.
-    fn done(&mut self, apart: &Apart) {
+    /// The item at `at` done: what it held given back, its batch's among
+    /// it.
+    fn done(&mut self, at: usize, apart: &Apart) {
         self.running -= 1;
+        if let Some(batch) = self.batch[at] {
+            self.busy.remove(&batch);
+        }
         match apart {
             Apart::Alone(_) => self.alone = false,
             Apart::Keys(keys) => {
@@ -725,12 +765,13 @@ mod tests {
         assert_eq!(ids, want);
     }
 
-    /// Items judged on a pool of eight, each holding what `apart` gives
-    /// it: what ran at once, as spans of an instant counted up across the
+    /// Items judged on a pool of `threads` in batches of `batch`, each
+    /// holding what `apart` gives it: what ran at once, as spans of an instant counted up across the
     /// run, one per item in the items' order, and the order items started.
     fn spans(
         apart: &[Apart],
         threads: usize,
+        batch: usize,
         took: impl Fn(usize) -> u64 + Sync,
     ) -> (Vec<(u64, u64)>, Vec<usize>) {
         let clock = std::time::Instant::now();
@@ -743,7 +784,8 @@ mod tests {
         let tally = Tally::judge_apart(
             &items,
             NonZeroUsize::new(threads).unwrap(),
-            |n| apart[*n].clone(),
+            NonZeroUsize::new(batch).unwrap(),
+            apart,
             |n| {
                 started.lock().unwrap().push(*n);
                 let start = at();
@@ -779,7 +821,7 @@ mod tests {
             keys(&[]),
             keys(&["net"]),
         ];
-        let (spans, started) = spans(&apart, 8, |_| 60);
+        let (spans, started) = spans(&apart, 8, 1, |_| 60);
         assert!(!overlap(spans[0], spans[2]), "{spans:?}");
         assert!(!overlap(spans[2], spans[4]), "{spans:?}");
         assert!(
@@ -803,7 +845,7 @@ mod tests {
             keys(&[]),
             keys(&[]),
         ];
-        let (spans, _) = spans(&apart, 8, |_| 40);
+        let (spans, _) = spans(&apart, 8, 1, |_| 40);
         for (n, span) in spans.iter().enumerate().filter(|(n, _)| *n != 2) {
             assert!(!overlap(spans[2], *span), "{n}: {spans:?}");
         }
@@ -816,9 +858,63 @@ mod tests {
     #[test]
     fn a_pool_of_one_runs_the_items_one_at_a_time_in_order() {
         let apart = [keys(&["a"]), keys(&[]), Apart::Alone(Vec::new()), keys(&[])];
-        let (spans, started) = spans(&apart, 1, |_| 5);
+        let (spans, started) = spans(&apart, 1, 1, |_| 5);
         assert_eq!(started, [0, 1, 2, 3]);
         assert!(spans.windows(2).all(|w| w[0].1 <= w[1].0), "{spans:?}");
+    }
+
+    /// The items of one batch run one after another and in their order,
+    /// as one of upstream's workers runs the batch it is handed; the
+    /// batches run beside each other, which is the control that shows the
+    /// pool runs anything at once at all.
+    #[test]
+    fn a_batchs_items_run_one_after_another_and_the_batches_beside_each_other() {
+        let apart = vec![keys(&[]); 6];
+        let (spans, started) = spans(&apart, 8, 3, |_| 40);
+        for batch in [&spans[0..3], &spans[3..6]] {
+            assert!(batch.windows(2).all(|w| w[0].1 <= w[1].0), "{spans:?}");
+        }
+        let order = |n| started.iter().position(|s| *s == n).unwrap();
+        assert!(order(0) < order(1) && order(1) < order(2), "{started:?}");
+        assert!(overlap(spans[0], spans[3]), "the control: {spans:?}");
+    }
+
+    /// An item alone is in no batch and is not counted in one, as upstream
+    /// takes it out of the list it cuts its batches from
+    /// (run-tests.php:1365-1370).
+    #[test]
+    fn an_item_alone_is_in_no_batch_and_the_batches_count_past_it() {
+        let apart = [
+            keys(&[]),
+            keys(&[]),
+            Apart::Alone(Vec::new()),
+            keys(&[]),
+            keys(&[]),
+            keys(&[]),
+        ];
+        let queue = Queue::new(&apart, NonZeroUsize::new(2).unwrap());
+        assert_eq!(
+            queue.batch,
+            [Some(0), Some(0), None, Some(1), Some(1), Some(2)]
+        );
+    }
+
+    /// An item a key holds back lets the rest of its batch go on without
+    /// it, and runs once both the key and its batch are free.
+    #[test]
+    fn an_item_a_key_holds_back_lets_its_batch_go_on() {
+        // Batch 0 is items 0 and 1, batch 1 is items 2 and 3; items 0 and
+        // 2 share a key.
+        let apart = [keys(&["k"]), keys(&[]), keys(&["k"]), keys(&[])];
+        let mut queue = Queue::new(&apart, NonZeroUsize::new(2).unwrap());
+        assert_eq!(queue.take(&apart), Some(0));
+        assert_eq!(queue.take(&apart), Some(3), "2 held back, 3 goes on");
+        assert_eq!(queue.take(&apart), None, "1 waits for its batch");
+        queue.done(0, &apart[0]);
+        assert_eq!(queue.take(&apart), Some(1));
+        assert_eq!(queue.take(&apart), None, "2 waits for its batch");
+        queue.done(3, &apart[3]);
+        assert_eq!(queue.take(&apart), Some(2));
     }
 
     /// An item that takes long holds up only the items it conflicts with:
@@ -832,7 +928,7 @@ mod tests {
             keys(&["slow"]),
             keys(&[]),
         ];
-        let (spans, _) = spans(&apart, 2, |n| if n == 0 { 400 } else { 20 });
+        let (spans, _) = spans(&apart, 2, 1, |n| if n == 0 { 400 } else { 20 });
         for n in [1, 2, 4] {
             assert!(spans[n].1 < spans[0].1, "{n}: {spans:?}");
         }
