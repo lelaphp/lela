@@ -5,9 +5,9 @@
 //! declaration the reflector's `$name`, and a method's `$class`, look
 //! up again, through [`super::signature::this_function`].
 //!
-//! What still shares the entry of the methods not yet served
-//! ([`ReflectionFiber`]'s `getExecutingLine`): `ReflectionGenerator`'s
-//! and `ReflectionFiber`'s methods.
+//! `ReflectionGenerator` and `ReflectionFiber` read the execution the
+//! object they keep stands at ([`Request::execution`]), one view for
+//! both.
 
 use php_ext::abi::{Callable, Instance, NamedVariadic, OrFalse, Raw, Static, This, Union};
 use php_ext::attr::php_class;
@@ -17,16 +17,16 @@ use php_ext::call::{
 use php_ext::coerce::{is_callable, to_callable};
 use php_ext::decl::{FunctionDecl, MethodDecl, Name, Visibility};
 use php_ext::raising::{Thrown, arg_count_error, deprecated, fatal, throw};
-use php_ext::request::Request;
+use php_ext::request::{Execution, Request};
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value};
 
 use super::signature::{FunctionRef, parameter_factory, this_function, type_factory};
 use super::{
     at_most_arguments, class_name_of, class_named, closure_string, exactly_arguments,
-    function_string, is_constructor, keep, keep_closure, kept_class, kept_closure, linked_methods,
-    method_or_invoke, method_string, namespace_end, new_object, reflection_class_factory,
-    required_parameters, set_name, set_string_prop, signature, string_value, table_method,
-    this_name, unbuilt,
+    function_string, is_constructor, keep, keep_closure, kept_class, kept_closure, kept_object,
+    linked_methods, method_or_invoke, method_string, namespace_end, new_object,
+    reflection_class_factory, required_parameters, set_name, set_string_prop, signature,
+    string_value, table_method, this_name,
 };
 
 /// `ZEND_ACC_PUBLIC`, `ZEND_ACC_PROTECTED` and `ZEND_ACC_PRIVATE`, the
@@ -1492,38 +1492,329 @@ fn fake_closure(
     closure_from_callable(req, &callable).map(Instance::of)
 }
 
+/// The object a `ReflectionGenerator` or a `ReflectionFiber` keeps,
+/// `intern->obj`, and its execution where it stands.
+fn kept_execution(req: &mut Request, this: PhpObject) -> Result<(PhpObject, Execution), Thrown> {
+    let execution = kept_object(req, this).and_then(|kept| Some((kept, req.execution(kept)?)));
+    execution.ok_or_else(|| {
+        throw(
+            req,
+            "Error",
+            "Internal error: Failed to retrieve the reflection object",
+        )
+    })
+}
+
+/// `REFLECTION_CHECK_VALID_GENERATOR`: the execution of a generator
+/// that has a frame, and php's `ReflectionException` for a closed one.
+fn standing_generator(
+    req: &mut Request,
+    this: PhpObject,
+) -> Result<(PhpObject, Execution), Thrown> {
+    let (kept, execution) = kept_execution(req, this)?;
+    if execution.executing.is_none() {
+        return Err(throw(
+            req,
+            "ReflectionException",
+            "Cannot fetch information from a closed Generator",
+        ));
+    }
+    Ok((kept, execution))
+}
+
+/// `REFLECTION_CHECK_VALID_FIBER`: the execution of a fiber that is
+/// running or suspended, and php's `Error` for one not started or dead.
+fn standing_fiber(req: &mut Request, this: PhpObject) -> Result<(PhpObject, Execution), Thrown> {
+    let (kept, execution) = kept_execution(req, this)?;
+    if execution.executing.is_none() {
+        return Err(throw(
+            req,
+            "Error",
+            "Cannot fetch information from a fiber that has not been started or is terminated",
+        ));
+    }
+    Ok((kept, execution))
+}
+
+/// `zend_fetch_debug_backtrace` over the execution of `kept`, which
+/// stands, alone.
+fn trace_of(req: &mut Request, kept: PhpObject, options: i64) -> Result<PhpArray, Thrown> {
+    match req.execution_trace(kept, options)? {
+        Some(trace) => Ok(trace),
+        None => Err(fatal(
+            req,
+            "InternalError: an execution with a frame and no trace",
+        )),
+    }
+}
+
+/// An object the reflector hands back, one more owner of it.
+fn handed(req: &mut Request, object: PhpObject) -> PhpObject {
+    req.addref(&object.as_value());
+    object
+}
+
 /// `ReflectionGenerator` as the stub declares it.
-#[php_class(final, not_serializable)]
+#[php_class(final, not_serializable, payload = crate::Reflected, handlers = crate::HANDLERS)]
 pub(crate) struct ReflectionGenerator;
 
 #[php_class]
 impl ReflectionGenerator {
-    #[php(implementation = ReflectionFiber::getExecutingLine)]
-    fn __construct(this: This<Self>, generator: Instance<crate::Generator>);
+    /// `ReflectionGenerator::__construct(Generator $generator)`: the
+    /// generator kept, closed or not.
+    ///
+    /// ```php
+    /// function g() { yield 1; }
+    /// $g = g(); $g->next();
+    /// var_dump(new ReflectionGenerator($g));
+    /// try { new ReflectionGenerator(new stdClass); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// object(ReflectionGenerator)#2 (0) {
+    /// }
+    /// ReflectionGenerator::__construct(): Argument #1 ($generator) must be of type Generator, stdClass given
+    /// ```
+    fn __construct(req: &mut Request, this: This<Self>, generator: Instance<crate::Generator>) {
+        let object = generator.object();
+        keep(req, this.object(), object.class(), Some(object));
+    }
 
-    #[php(implementation = ReflectionFiber::getExecutingLine)]
-    fn getExecutingLine(this: This<Self>) -> i64;
+    /// `ReflectionGenerator::getExecutingLine()`: the line of the
+    /// opline the generator's frame stands at, the `yield` it waits at
+    /// or the `GENERATOR_CREATE` of a generator not started.
+    ///
+    /// ```php
+    /// function g() {
+    ///     yield 1;
+    ///     yield 2;
+    /// }
+    /// $g = g(); $r = new ReflectionGenerator($g);
+    /// var_dump($r->getExecutingLine()); $g->current();
+    /// var_dump($r->getExecutingLine()); $g->next();
+    /// var_dump($r->getExecutingLine()); $g->next();
+    /// try { $r->getExecutingLine(); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// int(3)
+    /// int(4)
+    /// Cannot fetch information from a closed Generator
+    /// ```
+    fn getExecutingLine(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
+        let (_, execution) = standing_generator(req, this.object())?;
+        Ok(execution.site.map_or(0, |(_, line)| i64::from(line)))
+    }
 
-    #[php(implementation = ReflectionFiber::getExecutingLine)]
-    fn getExecutingFile(this: This<Self>) -> PhpString;
+    /// `ReflectionGenerator::getExecutingFile()`: the file of the
+    /// generator's frame.
+    ///
+    /// ```php
+    /// function g() { yield 1; }
+    /// $g = g();
+    /// var_dump(basename((new ReflectionGenerator($g))->getExecutingFile()));
+    /// ```
+    /// ```expect
+    /// string(11) "witness.php"
+    /// ```
+    fn getExecutingFile(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let (_, execution) = standing_generator(req, this.object())?;
+        let file = execution.site.map(|(file, _)| file).unwrap_or_default();
+        PhpString::new(req, &file)
+    }
 
-    #[php(implementation = ReflectionFiber::getExecutingLine)]
+    /// `ReflectionGenerator::getTrace(int $options =
+    /// DEBUG_BACKTRACE_PROVIDE_OBJECT)`: the frames of the delegation, the
+    /// generator whose body runs first, down to this one, whose row names
+    /// no file.
+    ///
+    /// ```php
+    /// class C { function inner($x) { yield $x; } function outer() { yield from $this->inner(7); } }
+    /// $g = (new C)->outer(); $g->current();
+    /// $r = new ReflectionGenerator($g);
+    /// var_dump($r->getTrace(), $r->getTrace(DEBUG_BACKTRACE_IGNORE_ARGS));
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   [0]=>
+    ///   array(7) {
+    ///     ["file"]=>
+    ///     string(%d) "%s"
+    ///     ["line"]=>
+    ///     int(2)
+    ///     ["function"]=>
+    ///     string(5) "inner"
+    ///     ["class"]=>
+    ///     string(1) "C"
+    ///     ["object"]=>
+    ///     object(C)#1 (0) {
+    ///     }
+    ///     ["type"]=>
+    ///     string(2) "->"
+    ///     ["args"]=>
+    ///     array(1) {
+    ///       [0]=>
+    ///       int(7)
+    ///     }
+    ///   }
+    ///   [1]=>
+    ///   array(5) {
+    ///     ["function"]=>
+    ///     string(5) "outer"
+    ///     ["class"]=>
+    ///     string(1) "C"
+    ///     ["object"]=>
+    ///     object(C)#1 (0) {
+    ///     }
+    ///     ["type"]=>
+    ///     string(2) "->"
+    ///     ["args"]=>
+    ///     array(0) {
+    ///     }
+    ///   }
+    /// }
+    /// array(2) {
+    ///   [0]=>
+    ///   array(5) {
+    ///     ["file"]=>
+    ///     string(%d) "%s"
+    ///     ["line"]=>
+    ///     int(2)
+    ///     ["function"]=>
+    ///     string(5) "inner"
+    ///     ["class"]=>
+    ///     string(1) "C"
+    ///     ["type"]=>
+    ///     string(2) "->"
+    ///   }
+    ///   [1]=>
+    ///   array(3) {
+    ///     ["function"]=>
+    ///     string(5) "outer"
+    ///     ["class"]=>
+    ///     string(1) "C"
+    ///     ["type"]=>
+    ///     string(2) "->"
+    ///   }
+    /// }
+    /// ```
     fn getTrace(
+        req: &mut Request,
         this: This<Self>,
         #[php(default = DEBUG_BACKTRACE_PROVIDE_OBJECT)] options: i64,
-    ) -> PhpArray;
+    ) -> Result<PhpArray, Thrown> {
+        let (kept, _) = standing_generator(req, this.object())?;
+        trace_of(req, kept, options)
+    }
 
-    #[php(implementation = ReflectionFiber::getExecutingLine)]
-    fn getFunction(this: This<Self>) -> Instance<ReflectionFunctionAbstract>;
+    /// `ReflectionGenerator::getFunction()`: `generator->func`, readable
+    /// after the generator closed: a closure's reflected over the closure
+    /// as a `ReflectionFunction`, a method's as a `ReflectionMethod` of its
+    /// class, and a function's by its name.
+    ///
+    /// ```php
+    /// class C { function m() { yield; } }
+    /// function f() { yield; }
+    /// foreach ([(new C)->m(), f(), (function () { yield; })->bindTo(new C, C::class)()] as $g) {
+    ///     foreach ($g as $_);
+    ///     $fn = (new ReflectionGenerator($g))->getFunction();
+    ///     echo get_class($fn), ' ', $fn->name, ' ', $fn instanceof ReflectionMethod ? $fn->class : '-', "\n";
+    /// }
+    /// ```
+    /// ```expect
+    /// ReflectionMethod m C
+    /// ReflectionFunction f -
+    /// ReflectionFunction {closure:%s:4} -
+    /// ```
+    fn getFunction(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Instance<ReflectionFunctionAbstract>, Thrown> {
+        let (_, execution) = kept_execution(req, this.object())?;
+        let Some(function) = execution.function else {
+            return Err(fatal(req, "InternalError: a generator with no function"));
+        };
+        let name = req
+            .function_decl(function)
+            .map(|decl| decl.name.0.to_vec())
+            .unwrap_or_default();
+        let object = match (execution.closure, execution.scope) {
+            (Some(closure), _) => {
+                let class = class_named(req, b"ReflectionFunction")?;
+                let object = new_object(req, class)?;
+                set_name(req, object, &name)?;
+                keep_closure(req, object, closure);
+                object
+            }
+            (None, Some(scope)) => crate::class::method_factory(req, &name, scope, scope)?,
+            (None, None) => {
+                let class = class_named(req, b"ReflectionFunction")?;
+                let object = new_object(req, class)?;
+                set_name(req, object, &name)?;
+                object
+            }
+        };
+        Ok(Instance::of(object))
+    }
 
-    #[php(implementation = ReflectionFiber::getExecutingLine)]
-    fn getThis(this: This<Self>) -> Option<PhpObject>;
+    /// `ReflectionGenerator::getThis()`: `$this` of the generator's
+    /// frame, `null` for one outside an object.
+    ///
+    /// ```php
+    /// class C { function m() { yield; } }
+    /// function f() { yield; }
+    /// var_dump((new ReflectionGenerator((new C)->m()))->getThis(), (new ReflectionGenerator(f()))->getThis());
+    /// ```
+    /// ```expect
+    /// object(C)#2 (0) {
+    /// }
+    /// NULL
+    /// ```
+    fn getThis(req: &mut Request, this: This<Self>) -> Result<Option<PhpObject>, Thrown> {
+        let (_, execution) = standing_generator(req, this.object())?;
+        Ok(execution.this.map(|object| handed(req, object)))
+    }
 
-    #[php(implementation = ReflectionFiber::getExecutingLine)]
-    fn getExecutingGenerator(this: This<Self>) -> Instance<crate::Generator>;
+    /// `ReflectionGenerator::getExecutingGenerator()`: the generator
+    /// whose body a resumption runs, the innermost one a `yield from`
+    /// delegates to (`zend_generator_get_current`).
+    ///
+    /// ```php
+    /// function inner() { yield 1; }
+    /// function outer() { yield from inner(); }
+    /// $g = outer(); $g->current();
+    /// var_dump((new ReflectionGenerator($g))->getExecutingGenerator());
+    /// ```
+    /// ```expect
+    /// object(Generator)#2 (1) {
+    ///   ["function"]=>
+    ///   string(5) "inner"
+    /// }
+    /// ```
+    fn getExecutingGenerator(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Instance<crate::Generator>, Thrown> {
+        let (kept, execution) = standing_generator(req, this.object())?;
+        let executing = execution.executing.unwrap_or(kept);
+        Ok(Instance::of(handed(req, executing)))
+    }
 
-    #[php(implementation = ReflectionFiber::getExecutingLine)]
-    fn isClosed(this: This<Self>) -> bool;
+    /// `ReflectionGenerator::isClosed()`: `execute_data == NULL`, the
+    /// generator returned, threw, or was never going to yield.
+    ///
+    /// ```php
+    /// function g() { yield 1; }
+    /// $g = g(); $r = new ReflectionGenerator($g);
+    /// var_dump($r->isClosed()); foreach ($g as $_); var_dump($r->isClosed());
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// bool(true)
+    /// ```
+    fn isClosed(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, execution) = kept_execution(req, this.object())?;
+        Ok(execution.executing.is_none())
+    }
 }
 
 /// `ReflectionMethod` as the stub declares it.
@@ -2269,44 +2560,198 @@ impl ReflectionMethod {
 }
 
 /// `ReflectionFiber` as the stub declares it.
-#[php_class(final, not_serializable)]
+#[php_class(final, not_serializable, payload = crate::Reflected, handlers = crate::HANDLERS)]
 pub(crate) struct ReflectionFiber;
 
 #[php_class]
 impl ReflectionFiber {
-    #[php(implementation = ReflectionFiber::getExecutingLine)]
-    fn __construct(this: This<Self>, fiber: Instance<crate::Fiber>);
+    /// `ReflectionFiber::__construct(Fiber $fiber)`: the fiber kept,
+    /// whatever its state.
+    ///
+    /// ```php
+    /// var_dump(new ReflectionFiber(new Fiber(fn () => 1)));
+    /// try { new ReflectionFiber(new stdClass); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// object(ReflectionFiber)#1 (0) {
+    /// }
+    /// ReflectionFiber::__construct(): Argument #1 ($fiber) must be of type Fiber, stdClass given
+    /// ```
+    fn __construct(req: &mut Request, this: This<Self>, fiber: Instance<crate::Fiber>) {
+        let object = fiber.object();
+        keep(req, this.object(), object.class(), Some(object));
+    }
 
-    #[php(implementation = ReflectionFiber::getExecutingLine)]
-    fn getFiber(this: This<Self>) -> Instance<crate::Fiber>;
-
-    #[php(implementation = ReflectionFiber::getExecutingLine)]
-    fn getExecutingFile(this: This<Self>) -> Option<PhpString>;
-
-    /// The entry every method not yet served shares: php's `Error`, as a
-    /// native that cannot do what it was asked raises one, whatever the
-    /// call gave (`arity = manual`). php refuses a fiber not yet started
-    /// with an `Error` of its own, so the class of the refusal is what the
-    /// two agree on.
+    /// `ReflectionFiber::getFiber()`: the fiber kept.
     ///
     /// ```php
     /// $f = new Fiber(fn () => 1);
-    /// try { (new ReflectionFiber($f))->getExecutingLine(); } catch (Error $e) { echo get_class($e), "\n"; }
+    /// var_dump((new ReflectionFiber($f))->getFiber() === $f);
     /// ```
     /// ```expect
-    /// Error
+    /// bool(true)
     /// ```
-    #[php(arity = manual)]
-    fn getExecutingLine(req: &mut Request, _: This<Self>) -> Result<Raw<Option<i64>>, Thrown> {
-        Err(unbuilt(req))
+    fn getFiber(req: &mut Request, this: This<Self>) -> Result<Instance<crate::Fiber>, Thrown> {
+        let (kept, _) = kept_execution(req, this.object())?;
+        Ok(Instance::of(handed(req, kept)))
     }
 
-    #[php(implementation = ReflectionFiber::getExecutingLine)]
-    fn getCallable(this: This<Self>) -> Callable;
+    /// `ReflectionFiber::getExecutingFile()`: the file of the innermost
+    /// frame of user code on the fiber's stack, the caller's own while
+    /// the fiber runs, and `null` where the stack holds only natives.
+    ///
+    /// ```php
+    /// $f = new Fiber(function () { echo basename((new ReflectionFiber(Fiber::getCurrent()))->getExecutingFile()), "\n"; Fiber::suspend(); });
+    /// try { (new ReflectionFiber($f))->getExecutingFile(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// $f->start();
+    /// var_dump(basename((new ReflectionFiber($f))->getExecutingFile()));
+    /// $g = new Fiber(Fiber::suspend(...)); $g->start();
+    /// var_dump((new ReflectionFiber($g))->getExecutingFile());
+    /// ```
+    /// ```expect
+    /// Cannot fetch information from a fiber that has not been started or is terminated
+    /// witness.php
+    /// string(11) "witness.php"
+    /// NULL
+    /// ```
+    fn getExecutingFile(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
+        let (_, execution) = standing_fiber(req, this.object())?;
+        match execution.site {
+            Some((file, _)) => PhpString::new(req, &file).map(Some),
+            None => Ok(None),
+        }
+    }
 
-    #[php(implementation = ReflectionFiber::getExecutingLine)]
+    /// `ReflectionFiber::getExecutingLine()`: the line of that frame,
+    /// `null` where there is none.
+    ///
+    /// ```php
+    /// function park() {
+    ///     Fiber::suspend();
+    /// }
+    /// $f = new Fiber(function () {
+    ///     var_dump((new ReflectionFiber(Fiber::getCurrent()))->getExecutingLine());
+    ///     park();
+    /// });
+    /// $r = new ReflectionFiber($f);
+    /// try { $r->getExecutingLine(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// $f->start();
+    /// var_dump($r->getExecutingLine());
+    /// $f->resume();
+    /// try { $r->getExecutingLine(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// $g = new Fiber(Fiber::suspend(...)); $g->start();
+    /// var_dump((new ReflectionFiber($g))->getExecutingLine());
+    /// ```
+    /// ```expect
+    /// Cannot fetch information from a fiber that has not been started or is terminated
+    /// int(6)
+    /// int(3)
+    /// Cannot fetch information from a fiber that has not been started or is terminated
+    /// NULL
+    /// ```
+    fn getExecutingLine(req: &mut Request, this: This<Self>) -> Result<Option<i64>, Thrown> {
+        let (_, execution) = standing_fiber(req, this.object())?;
+        Ok(execution.site.map(|(_, line)| i64::from(line)))
+    }
+
+    /// `ReflectionFiber::getCallable()`: the callable the fiber was made
+    /// with, as it was given, until the fiber is dead.
+    ///
+    /// ```php
+    /// $c = fn () => Fiber::suspend();
+    /// $f = new Fiber($c); $r = new ReflectionFiber($f);
+    /// var_dump($r->getCallable() === $c); $f->start(); var_dump($r->getCallable() === $c);
+    /// $f->resume();
+    /// try { $r->getCallable(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump((new ReflectionFiber(new Fiber('strlen')))->getCallable());
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// Cannot fetch the callable from a fiber that has terminated
+    /// string(6) "strlen"
+    /// ```
+    fn getCallable(req: &mut Request, this: This<Self>) -> Result<Callable, Thrown> {
+        let (_, execution) = kept_execution(req, this.object())?;
+        execution.callable.ok_or_else(|| {
+            throw(
+                req,
+                "Error",
+                "Cannot fetch the callable from a fiber that has terminated",
+            )
+        })
+    }
+
+    /// `ReflectionFiber::getTrace(int $options =
+    /// DEBUG_BACKTRACE_PROVIDE_OBJECT)`: every link on the fiber's stack,
+    /// innermost first, the bottom one naming no file.
+    ///
+    /// ```php
+    /// class T { function __invoke($a) { self::park($a); } static function park($a) { Fiber::suspend(); } }
+    /// $f = new Fiber(new T); $f->start('x');
+    /// var_dump((new ReflectionFiber($f))->getTrace());
+    /// ```
+    /// ```expect
+    /// array(3) {
+    ///   [0]=>
+    ///   array(6) {
+    ///     ["file"]=>
+    ///     string(%d) "%s"
+    ///     ["line"]=>
+    ///     int(2)
+    ///     ["function"]=>
+    ///     string(7) "suspend"
+    ///     ["class"]=>
+    ///     string(5) "Fiber"
+    ///     ["type"]=>
+    ///     string(2) "::"
+    ///     ["args"]=>
+    ///     array(0) {
+    ///     }
+    ///   }
+    ///   [1]=>
+    ///   array(6) {
+    ///     ["file"]=>
+    ///     string(%d) "%s"
+    ///     ["line"]=>
+    ///     int(2)
+    ///     ["function"]=>
+    ///     string(4) "park"
+    ///     ["class"]=>
+    ///     string(1) "T"
+    ///     ["type"]=>
+    ///     string(2) "::"
+    ///     ["args"]=>
+    ///     array(1) {
+    ///       [0]=>
+    ///       string(1) "x"
+    ///     }
+    ///   }
+    ///   [2]=>
+    ///   array(5) {
+    ///     ["function"]=>
+    ///     string(8) "__invoke"
+    ///     ["class"]=>
+    ///     string(1) "T"
+    ///     ["object"]=>
+    ///     object(T)#2 (0) {
+    ///     }
+    ///     ["type"]=>
+    ///     string(2) "->"
+    ///     ["args"]=>
+    ///     array(1) {
+    ///       [0]=>
+    ///       string(1) "x"
+    ///     }
+    ///   }
+    /// }
+    /// ```
     fn getTrace(
+        req: &mut Request,
         this: This<Self>,
         #[php(default = DEBUG_BACKTRACE_PROVIDE_OBJECT)] options: i64,
-    ) -> PhpArray;
+    ) -> Result<PhpArray, Thrown> {
+        let (kept, _) = standing_fiber(req, this.object())?;
+        trace_of(req, kept, options)
+    }
 }

@@ -43,8 +43,10 @@ use crate::exec::{self, CallStage, CallState, IncludeKind, TableId, Vm};
 use crate::output::Output;
 use crate::virtual_cwd::RealpathCache;
 pub use crate::virtual_cwd::Resolve;
+pub use execution::Execution;
 
 mod class_data;
+mod execution;
 mod hold;
 pub(crate) use hold::Hold;
 mod hooks;
@@ -1543,6 +1545,47 @@ pub(crate) enum Opened {
     Unit(Arc<Unit>),
 }
 
+/// The links of one stack, innermost first: the frames `frames` numbers
+/// and the calls `calls` numbers that are being served, each frame's
+/// `calls_below` saying where among the calls it was pushed.
+fn links_of<'a>(
+    stack: &'a VmStack,
+    vm: &'a Vm,
+    frames: std::ops::Range<usize>,
+    calls: std::ops::Range<usize>,
+) -> Vec<Link<'a>> {
+    let states = vm.frames();
+    let served = vm.calls();
+    let end = calls.end.min(served.len());
+    let mut links: Vec<Link> = Vec::new();
+    let mut taken = calls.start;
+    let mut take_below = |below: usize, links: &mut Vec<Link<'a>>| {
+        while taken < below {
+            if let Some(call) = served.get(taken)
+                && call.stage == exec::CallStage::Serving
+            {
+                links.push(Link::Call(call));
+            }
+            taken += 1;
+        }
+    };
+    for at in frames {
+        let Some(state) = states.get(at) else {
+            break;
+        };
+        let below = usize::try_from(state.calls_below)
+            .unwrap_or(usize::MAX)
+            .min(end);
+        take_below(below, &mut links);
+        if !state.leaving {
+            links.push(Link::Frame(stack, at, state));
+        }
+    }
+    take_below(end, &mut links);
+    links.reverse();
+    links
+}
+
 /// One row of a backtrace before it is an array: the callee, its
 /// receiver, the scope it was called in where the callee is a closure,
 /// its arguments, the extra named arguments the callee collected, and
@@ -2231,12 +2274,14 @@ impl Request {
             }
         }
         self.free_rebuilt_table(frame);
+        // A generator's frame leaves its closure to the generator
+        // (`ZendGenerator::closure`), which keeps it until it is freed.
         let held = self.vm.at_mut(frame).map(|state| {
             (
                 std::mem::take(&mut state.extra_named),
                 std::mem::take(&mut state.extra_args),
                 state.this.take(),
-                state.closure.take(),
+                state.closure.take().filter(|_| state.generator.is_none()),
             )
         });
         if let Some((named, extra_args, this, closure)) = held {
@@ -4053,9 +4098,8 @@ impl Request {
         options: i64,
         limit: i64,
     ) -> Result<PhpArray, Thrown> {
-        let ignore_arguments = options & DEBUG_BACKTRACE_IGNORE_ARGS != 0;
-        let provide_object = options & DEBUG_BACKTRACE_PROVIDE_OBJECT != 0;
-        let mut links = self.trace_chain();
+        let chain: Vec<Link> = self.chain().collect();
+        let mut links = self.trace_rows(&chain);
         if skip_last && !links.is_empty() {
             links.remove(0);
         }
@@ -4064,6 +4108,16 @@ impl Request {
         {
             links.truncate(limit);
         }
+        self.render_trace(links, options)
+    }
+
+    /// The rows of a trace as `zend_fetch_debug_backtrace` builds each
+    /// array: `options`, `DEBUG_BACKTRACE_PROVIDE_OBJECT` for an
+    /// `object` row of a method's receiver between `class` and `type`,
+    /// and `DEBUG_BACKTRACE_IGNORE_ARGS` for no `args`.
+    fn render_trace(&mut self, links: Vec<TraceRow>, options: i64) -> Result<PhpArray, Thrown> {
+        let ignore_arguments = options & DEBUG_BACKTRACE_IGNORE_ARGS != 0;
+        let provide_object = options & DEBUG_BACKTRACE_PROVIDE_OBJECT != 0;
         let mut trace = PhpArray::new(self)?;
         for (traced, this, scope, mut arguments, named, site) in links {
             let mut row = PhpArray::new(self)?;
@@ -4231,37 +4285,19 @@ impl Request {
     fn chain(&self) -> impl Iterator<Item = Link<'_>> {
         let mut chain: Vec<Link> = Vec::new();
         for (stack, vm) in self.executions() {
-            let frames = vm.frames();
-            let calls = vm.calls();
-            let mut links: Vec<Link> = Vec::new();
-            let mut taken = 0usize;
-            for (at, state) in frames.iter().enumerate() {
-                let below = usize::try_from(state.calls_below)
-                    .unwrap_or(usize::MAX)
-                    .min(calls.len());
-                while taken < below {
-                    if calls[taken].stage == exec::CallStage::Serving {
-                        links.push(Link::Call(&calls[taken]));
-                    }
-                    taken += 1;
-                }
-                if !state.leaving {
-                    links.push(Link::Frame(stack, at, state));
-                }
-            }
-            while taken < calls.len() {
-                if calls[taken].stage == exec::CallStage::Serving {
-                    links.push(Link::Call(&calls[taken]));
-                }
-                taken += 1;
-            }
-            chain.extend(links.into_iter().rev());
+            chain.extend(links_of(
+                stack,
+                vm,
+                0..vm.frames().len(),
+                0..vm.calls().len(),
+            ));
         }
         chain.into_iter()
     }
 
-    /// `EG(current_execute_data)` and its `prev_execute_data` chain,
-    /// innermost first: one row per link, the function it serves, its
+    /// The rows of `chain`, `EG(current_execute_data)` and its
+    /// `prev_execute_data` chain or a stretch of it, innermost first: one
+    /// row per link, the function it serves, its
     /// receiver, its arguments, and the site of the link below it. The
     /// main op array's frame is the link that serves no function and
     /// makes no row of its own, since `zend_trace_to_string` closes
@@ -4284,8 +4320,7 @@ impl Request {
     /// them; a native's are the call's, as they were placed. A call
     /// still being built is not on the chain, as php's is a chain of
     /// activations.
-    fn trace_chain(&self) -> Vec<TraceRow> {
-        let chain: Vec<Link> = self.chain().collect();
+    fn trace_rows(&self, chain: &[Link<'_>]) -> Vec<TraceRow> {
         let mut rows = Vec::new();
         for at in 0..chain.len() {
             let site = match chain.get(at.saturating_add(1)) {

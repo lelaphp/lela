@@ -291,6 +291,43 @@ pub(crate) fn serves_destructor(table: &'static dyn ObjectHandlers) -> bool {
     std::ptr::addr_eq(table, &raw const FIBER)
 }
 
+/// Where a fiber's execution stands, php's `fiber->execute_data`, for
+/// a view of it ([`crate::api::request::Execution`]).
+pub(crate) enum Standing<'a> {
+    /// The fiber runs innermost, `EG(active_fiber)`: the stack the
+    /// request runs on is its.
+    Active,
+    /// The fiber is suspended, or runs below a fiber it resumed: the
+    /// execution it left, which the fiber holds, or that resume.
+    Held(&'a Execution),
+}
+
+/// A fiber as a view of it reads it: its callable, php's `fci`, from its
+/// construction until it is dead, and where its execution stands, none
+/// before it starts and once it is dead. None for an object that is no
+/// fiber.
+pub(crate) fn view(
+    req: &Request,
+    object: PhpObject,
+) -> Option<(Option<Callable>, Option<Standing<'_>>)> {
+    let fiber = object.native::<ZendFiber>(req)?;
+    let standing = match fiber.status {
+        Status::Init | Status::Dead => None,
+        Status::Suspended => fiber.execution.as_ref().map(Standing::Held),
+        Status::Running => {
+            let running = &req.fibers().running;
+            running
+                .iter()
+                .position(|running| running.fiber.index() == object.index())
+                .map(|at| match running.get(at.saturating_add(1)) {
+                    Some(above) => Standing::Held(&above.below),
+                    None => Standing::Active,
+                })
+        }
+    };
+    Some((fiber.callable.clone(), standing))
+}
+
 /// The payload of `object`, which a `Fiber`'s object always carries.
 fn payload(req: &mut Request, object: PhpObject) -> Result<&mut ZendFiber, Thrown> {
     if object.native::<ZendFiber>(req).is_none() {
