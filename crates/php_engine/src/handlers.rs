@@ -4862,7 +4862,7 @@ pub(crate) fn init_parent_property_hook_call<T: Tier>(
     } else {
         php_unit::decl::HookKind::Set
     };
-    let hook = req.hooked(parent, &name).and_then(|hooked| match kind {
+    let hook = req.row_hooked(parent, &name).and_then(|hooked| match kind {
         php_unit::decl::HookKind::Get => hooked.get,
         php_unit::decl::HookKind::Set => hooked.set,
     });

@@ -12,7 +12,7 @@
 use php_unit::decl::{
     ClassDecl, FunctionDecl, HookKind, MethodDecl, Name, Parameter, ParameterDefault, Visibility,
 };
-use php_unit::link::{Held, ResolvedHook, resolve_property};
+use php_unit::link::{Held, Resolved, ResolvedHook, resolve_property};
 
 use super::{Link, Member, MemberAt, Request};
 use crate::api::abi::{Entry, PropertyPlace, PropertyRead, PropertyTest};
@@ -94,11 +94,20 @@ impl Request {
     }
 
     /// `zend_get_property_offset`'s `property_info->hooks` arm: the
-    /// hooked instance property `name` of `class`, none for a property
-    /// with no hooks, one declared `static`, and a name no class of the chain
-    /// declares.
+    /// hooked instance property `name` of `class` as the executed scope
+    /// finds it ([`Request::scoped_property`]), none for a property
+    /// with no hooks, one declared `static`, and a name no class of the
+    /// chain declares.
     pub(crate) fn hooked(&self, class: ClassId, name: &[u8]) -> Option<Hooked> {
-        let decl = self.class_decl(class)?;
+        let (class, resolved) = self.scoped_property(class, name)?;
+        self.hooked_of(class, &resolved)
+    }
+
+    /// `prop_info->hooks` of the entry `class`'s own table holds for
+    /// `name`, whatever scope is executing: what a walk over the table's
+    /// rows reads each row by, as php holds the row's `prop_info` in
+    /// hand, and what `parent::$p::get()` names on the parent.
+    pub(crate) fn row_hooked(&self, class: ClassId, name: &[u8]) -> Option<Hooked> {
         let lookup = |wanted: &[u8]| {
             self.class_named(wanted)
                 .and_then(|id| self.class_decl(id))
@@ -108,7 +117,12 @@ impl Request {
                     linked: true,
                 })
         };
-        let resolved = resolve_property(decl, name, &lookup)?;
+        let resolved = resolve_property(self.class_decl(class)?, name, &lookup)?;
+        self.hooked_of(class, &resolved)
+    }
+
+    /// The [`Hooked`] a resolution in `class`'s table makes.
+    fn hooked_of(&self, class: ClassId, resolved: &Resolved<'_>) -> Option<Hooked> {
         if !resolved.is_hooked() || !resolved.property.is_instance {
             return None;
         }
@@ -121,6 +135,95 @@ impl Request {
             is_virtual: resolved.is_virtual,
             root: self.class_of_decl(class, resolved.root)?,
         })
+    }
+
+    /// `ce->properties_info[name]` as `zend_get_property_offset` finds it
+    /// under the executed scope, beside the class it is resolved in: the
+    /// class's own table, or, where the entry redeclares a private
+    /// property of the scope's and the scope is a parent of `class`
+    /// (`ZEND_ACC_CHANGED`, `zend_get_parent_private_property`), the
+    /// scope's own declaration; and none where the entry is a parent's
+    /// private property the scope is not, which php reads as a dynamic
+    /// property, or where no class of the chain declares `name` as an
+    /// instance property. [`Request::declared_slot`] places a slot by
+    /// the same rule.
+    fn scoped_property(&self, class: ClassId, name: &[u8]) -> Option<(ClassId, Resolved<'_>)> {
+        let lookup = |wanted: &[u8]| {
+            self.class_named(wanted)
+                .and_then(|id| self.class_decl(id))
+                .map(|decl| Held {
+                    decl,
+                    bodies: None,
+                    linked: true,
+                })
+        };
+        let resolved = resolve_property(self.class_decl(class)?, name, &lookup)?;
+        let declaring = self.class_of_decl(class, resolved.class)?;
+        if self.property_scope() != Some(declaring) {
+            if let Some(own) = self.parent_private(class, name) {
+                let resolved = resolve_property(self.class_decl(own)?, name, &lookup)?;
+                return resolved.property.is_instance.then_some((own, resolved));
+            }
+            if resolved.property.visibility == Visibility::Private && declaring != class {
+                return None;
+            }
+        }
+        resolved.property.is_instance.then_some((class, resolved))
+    }
+
+    /// `zend_check_property_access`, what a `foreach` over an object and
+    /// `get_object_vars()` hold each row of the table to: a declared row,
+    /// of the property `name` that `declaring` declares, is walked where
+    /// the executed scope finds that declaration and reaches it; a
+    /// dynamic row, `declaring` none, where the scope finds no
+    /// declaration of the name or a public one.
+    ///
+    /// ```php
+    /// class A { private $changed { get => 'A'; } protected $promoted { get => 'A'; } private $shadowed = 'A';
+    ///     function test() { foreach ($this as $k => $v) { echo "$k => $v\n"; } } }
+    /// #[AllowDynamicProperties]
+    /// class B extends A { public $changed { get => 'B'; } public $promoted { get => 'B'; } }
+    /// $b = new B;
+    /// $b->shadowed = 'Global';
+    /// $b->test();
+    /// foreach ($b as $k => $v) { echo "$k => $v\n"; }
+    /// ```
+    /// ```expect
+    /// changed => A
+    /// promoted => B
+    /// shadowed => A
+    /// promoted => B
+    /// changed => B
+    /// shadowed => Global
+    /// ```
+    pub(crate) fn property_row_visible(
+        &self,
+        class: ClassId,
+        name: &[u8],
+        declaring: Option<ClassId>,
+    ) -> bool {
+        let Some((at, resolved)) = self.scoped_property(class, name) else {
+            return declaring.is_none();
+        };
+        let Some(found) = self.class_of_decl(at, resolved.class) else {
+            return false;
+        };
+        let visibility = resolved.property.visibility;
+        match declaring {
+            None => visibility == Visibility::Public,
+            Some(declaring) if declaring != found => false,
+            Some(_) => {
+                let scope = self.property_scope();
+                match visibility {
+                    Visibility::Public => true,
+                    _ if scope == Some(found) => true,
+                    Visibility::Private => false,
+                    Visibility::Protected => self
+                        .class_of_decl(at, resolved.root)
+                        .is_some_and(|root| self.check_protected(root, scope)),
+                }
+            }
+        }
     }
 
     /// `zend_get_property_offset`'s access rule over a hooked property:
@@ -206,7 +309,7 @@ impl Request {
             return self.trampoline_property().is_some_and(|(property, scope)| {
                 property == name
                     && scope
-                        .and_then(|scope| self.hooked(scope, name))
+                        .and_then(|scope| self.row_hooked(scope, name))
                         .is_none_or(|parent| parent.root == hooked.root)
             });
         }
@@ -925,9 +1028,12 @@ impl Request {
         let class = object.class();
         let keys = self.hooked_object_keys(class);
         let placed = self.placed_properties(class);
-        while let Some((name, declaring, visibility)) = keys.get(*lead).cloned() {
+        while let Some((name, declaring, _)) = keys.get(*lead).cloned() {
             *lead += 1;
-            if let Some(hooked) = self.hooked(declaring, &name) {
+            if !self.property_row_visible(class, &name, Some(declaring)) {
+                continue;
+            }
+            if let Some(hooked) = self.row_hooked(declaring, &name) {
                 if !self.hooked_accessible(&hooked) || (hooked.is_virtual && hooked.get.is_none()) {
                     continue;
                 }
@@ -957,9 +1063,6 @@ impl Request {
                 let value = self.read_hooked(object, &name, hooked, PropertyRead::Silent)?;
                 let key = self.interned(&name)?;
                 return Ok(Some((key, super::Walked::Hooked(value))));
-            }
-            if !self.may_access(declaring, visibility) {
-                continue;
             }
             let Some(slot) = placed
                 .iter()
@@ -1057,7 +1160,7 @@ impl Request {
         let mut rows = Vec::with_capacity(keys.len());
         for (name, declaring, visibility) in keys {
             let interned = self.interned(&name)?;
-            if let Some(hooked) = self.hooked(declaring, &name) {
+            if let Some(hooked) = self.row_hooked(declaring, &name) {
                 if hooked.is_virtual && hooked.get.is_none() {
                     continue;
                 }
@@ -1184,7 +1287,7 @@ impl Request {
         name: &[u8],
         kind: HookKind,
     ) -> Option<Function> {
-        let hooked = self.hooked(class, name)?;
+        let hooked = self.row_hooked(class, name)?;
         match kind {
             HookKind::Get => hooked.get,
             HookKind::Set => hooked.set,
@@ -1193,7 +1296,7 @@ impl Request {
 
     /// [`crate::api::call::read_raw_property`].
     pub(crate) fn read_raw(&mut self, object: PhpObject, name: &[u8]) -> Result<Value, Thrown> {
-        match self.hooked(object.class(), name) {
+        match self.row_hooked(object.class(), name) {
             Some(hooked) if hooked.is_virtual => Err(self.hooked_error(
                 object,
                 name,
@@ -1210,7 +1313,7 @@ impl Request {
         name: PhpString,
         value: Value,
     ) -> Result<(), Thrown> {
-        let Some(hooked) = self.hooked(object.class(), name.as_bytes()) else {
+        let Some(hooked) = self.row_hooked(object.class(), name.as_bytes()) else {
             return self.write_property(object, name, value);
         };
         if hooked.is_virtual {
@@ -1240,7 +1343,7 @@ impl Request {
         object: PhpObject,
         name: &[u8],
     ) -> Result<Value, Thrown> {
-        if let Some(hooked) = self.hooked(object.class(), name) {
+        if let Some(hooked) = self.row_hooked(object.class(), name) {
             return self.read_hooked(object, name, hooked, PropertyRead::Warning);
         }
         let table = self.object_handlers(object.heap());
@@ -1254,7 +1357,7 @@ impl Request {
         name: PhpString,
         value: Value,
     ) -> Result<(), Thrown> {
-        let Some(hooked) = self.hooked(object.class(), name.as_bytes()) else {
+        let Some(hooked) = self.row_hooked(object.class(), name.as_bytes()) else {
             let table = self.object_handlers(object.heap());
             return table.write_property(self, object, name, value);
         };

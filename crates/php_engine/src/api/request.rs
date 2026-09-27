@@ -1640,6 +1640,11 @@ struct DeclaredSlot {
     typed: bool,
     /// `ZEND_ACC_READONLY`, which the set visibility's refusal names.
     readonly: bool,
+    /// `property_info->prototype->ce`: the class that first declared the
+    /// property up the chain, through every redeclaration that was not
+    /// over a private one, which a protected property's access is
+    /// measured against (`is_protected_compatible_scope`).
+    root: ClassId,
 }
 
 /// What a write to a typed declared slot reads off its
@@ -5856,6 +5861,15 @@ impl Request {
             .and_then(|i| u32::try_from(i).ok())
     }
 
+    /// The dynamic table's entry for `name`, a view; none where the
+    /// object has no table or the table no such key.
+    pub(crate) fn dynamic_prop(o: Obj, name: &[u8]) -> Option<Value> {
+        o.properties()?
+            .iter()
+            .find(|(k, _)| matches!(k, php_heap::Key::Str(s) if s.bytes() == name))
+            .map(|(_, z)| Value::of_zval(z))
+    }
+
     /// A property read, `zend_std_read_property` without the handler
     /// in the way: the declared slot, `None` while nothing wrote it, or
     /// the dynamic table's entry. A view, no owner taken.
@@ -5874,19 +5888,137 @@ impl Request {
     /// the slot `name` sits in, the class that declared what stands
     /// there, its visibility, its set visibility and whether it is
     /// typed; none for a name no class of the chain declares, which is
-    /// a dynamic property.
+    /// a dynamic property. The row is the one the executed scope finds
+    /// ([`Request::placed_row`]).
     fn declared_slot(&self, class: ClassId, name: &[u8]) -> Option<DeclaredSlot> {
-        let placed = self.placed_properties(class);
-        let at = placed.iter().rposition(|(_, p)| &*p.name.0 == name)?;
-        let (declaring, p) = placed.get(at)?;
+        let (at, declaring, p) = self.placed_row(class, name)?;
+        let root = if p.visibility == Visibility::Protected {
+            self.property_root(declaring, name)
+        } else {
+            declaring
+        };
         Some(DeclaredSlot {
             slot: u32::try_from(at).unwrap_or(u32::MAX),
-            declaring: *declaring,
+            declaring,
             visibility: p.visibility,
             set_visibility: p.set_visibility,
             typed: p.ty.is_some(),
             readonly: p.is_readonly,
+            root,
         })
+    }
+
+    /// `property_info->prototype->ce` for the instance property `name`
+    /// that `declaring` declares: `do_inherit_property` hands a child
+    /// the parent's prototype where the parent's declaration is not
+    /// private, so the walk goes up the parents while each one that
+    /// declares the name declares it so.
+    fn property_root(&self, declaring: ClassId, name: &[u8]) -> ClassId {
+        let mut root = declaring;
+        let mut at = self.class_parent(declaring);
+        for _ in 0..64 {
+            let Some(here) = at else { break };
+            let own = self.class_decl(here).and_then(|decl| {
+                decl.properties
+                    .iter()
+                    .find(|p| p.is_instance && &*p.name.0 == name)
+                    .map(|p| p.visibility)
+            });
+            match own {
+                Some(Visibility::Private) => break,
+                Some(_) => root = here,
+                None => {}
+            }
+            at = self.class_parent(here);
+        }
+        root
+    }
+
+    /// `zend_get_property_offset`'s access rule over the row
+    /// [`Request::declared_slot`] placed: public, the scope the declaring
+    /// class, or, for a protected property, a scope related to its
+    /// prototype's class (`is_protected_compatible_scope`), so two
+    /// classes that each redeclare a parent's property reach each other's.
+    ///
+    /// ```php
+    /// abstract class P { abstract protected $foo { get; } }
+    /// class C1 extends P { protected $foo = 1; }
+    /// class C2 extends P { protected $foo = 2; static function foo($c) { return $c->foo; } }
+    /// var_dump(C2::foo(new C2), C2::foo(new C1));
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// int(1)
+    /// ```
+    fn reaches(&self, placed: &DeclaredSlot) -> bool {
+        let scope = self.property_scope();
+        match placed.visibility {
+            Visibility::Public => true,
+            _ if scope == Some(placed.declaring) => true,
+            Visibility::Private => false,
+            Visibility::Protected => self.check_protected(placed.root, scope),
+        }
+    }
+
+    /// `zend_get_property_offset`'s choice of `property_info` for `name`
+    /// on an object of `class` under the executed scope, as the placed
+    /// row it names: the row `ce->properties_info` holds, the class's
+    /// own declaration over a parent's private one; under
+    /// `ZEND_ACC_CHANGED` the scope's own private property where the
+    /// scope is a parent of `class` that declares one
+    /// (`zend_get_parent_private_property`); and none where the row is
+    /// a parent's private property the scope is not, which php reads as
+    /// a dynamic property (`goto dynamic`).
+    ///
+    /// ```php
+    /// class A { private $shadowed = 'A'; private $p = 'A::p';
+    ///     function test() { foreach ($this as $k => $v) { echo "$k => $v\n"; } var_dump($this->p); } }
+    /// #[AllowDynamicProperties]
+    /// class B extends A { public $p = 'B::p'; }
+    /// $b = new B;
+    /// $b->shadowed = 'Global';
+    /// $b->test();
+    /// var_dump($b->p);
+    /// ```
+    /// ```expect
+    /// shadowed => A
+    /// p => A::p
+    /// string(4) "A::p"
+    /// string(4) "B::p"
+    /// ```
+    /// `zend_get_parent_private_property`: the executed scope, where it
+    /// is a parent of `class` that declares `name` as a private instance
+    /// property of its own.
+    pub(crate) fn parent_private(&self, class: ClassId, name: &[u8]) -> Option<ClassId> {
+        self.property_scope().filter(|&scope| {
+            scope != class
+                && self.instance_of(class, scope)
+                && self.class_decl(scope).is_some_and(|decl| {
+                    decl.properties.iter().any(|p| {
+                        p.is_instance && p.visibility == Visibility::Private && &*p.name.0 == name
+                    })
+                })
+        })
+    }
+
+    fn placed_row(&self, class: ClassId, name: &[u8]) -> Option<(usize, ClassId, PropertyDecl)> {
+        let placed = self.placed_properties(class);
+        let mut at = placed.iter().rposition(|(_, p)| &*p.name.0 == name)?;
+        let (declaring, p) = placed.get(at)?;
+        if self.property_scope() != Some(*declaring) {
+            if let Some(own) = self.parent_private(class, name) {
+                if let Some(i) = placed
+                    .iter()
+                    .position(|(d, p)| *d == own && &*p.name.0 == name)
+                {
+                    at = i;
+                }
+            } else if p.visibility == Visibility::Private && *declaring != class {
+                return None;
+            }
+        }
+        let (declaring, p) = placed.get(at)?;
+        Some((at, *declaring, p.clone()))
     }
 
     /// `zend_asymmetric_property_has_set_access`
@@ -7101,7 +7233,7 @@ impl Request {
         match self.declared_slot(class, name) {
             // A property the scope may not reach is placed silently where
             // the class has a `__get`, which answers for it.
-            Some(placed) if !self.may_access(placed.declaring, placed.visibility) => true,
+            Some(placed) if !self.reaches(&placed) => true,
             Some(placed) => {
                 o.slot(placed.slot).is_undef()
                     && !o.slot_uninit(placed.slot)
@@ -7224,7 +7356,7 @@ impl Request {
     ) -> Result<Value, Thrown> {
         let Some(placed) = self
             .declared_slot(class, name)
-            .filter(|p| p.typed && self.may_access(p.declaring, p.visibility))
+            .filter(|p| p.typed && self.reaches(p))
         else {
             return Ok(got);
         };
@@ -7430,7 +7562,7 @@ impl Request {
     /// scope may not reach, or for a name that starts with a NUL byte.
     fn wrong_offset(&mut self, class: ClassId, name: &[u8]) -> Option<Thrown> {
         if let Some(placed) = self.declared_slot(class, name) {
-            return (!self.may_access(placed.declaring, placed.visibility))
+            return (!self.reaches(&placed))
                 .then(|| self.inaccessible_property(class, placed.visibility, name));
         }
         Self::bad_property_name(name).then(|| self.bad_property_name_error())
@@ -7678,7 +7810,7 @@ impl Request {
         // without a lookup.
         let mut wrong = false;
         if let Some(placed) = self.declared_slot(class, name) {
-            if self.may_access(placed.declaring, placed.visibility) {
+            if self.reaches(&placed) {
                 let z = o.slot(placed.slot);
                 if !z.is_undef() {
                     let value = Value::of_zval(z).deref();
@@ -7867,7 +7999,7 @@ impl Request {
             }
             return Ok(None);
         };
-        if !self.may_access(placed.declaring, placed.visibility) {
+        if !self.reaches(&placed) {
             if silent {
                 return Ok(None);
             }
@@ -7939,7 +8071,7 @@ impl Request {
         let Some(placed) = self.declared_slot(class, name) else {
             return Ok(());
         };
-        if !self.may_access(placed.declaring, placed.visibility)
+        if !self.reaches(&placed)
             || !o.slot(placed.slot).is_undef()
             || self.lazy_slot(o, placed.slot)
         {
@@ -7987,7 +8119,7 @@ impl Request {
                 .is_some_and(|set| !self.has_set_access(placed.declaring, set));
         let held = object.heap().slot(placed.slot);
         barred
-            && self.may_access(placed.declaring, placed.visibility)
+            && self.reaches(&placed)
             && (Value::of_zval(held).deref().as_object().is_some() || (unset && held.is_undef()))
     }
 
@@ -8003,11 +8135,9 @@ impl Request {
         class: ClassId,
         name: &[u8],
     ) -> Option<TypedProperty> {
-        let placed = self.placed_properties(class);
-        let at = placed.iter().rposition(|(_, p)| &*p.name.0 == name)?;
-        let (declaring, p) = placed.get(at)?;
-        p.ty.clone().map(|ty| TypedProperty {
-            declaring: *declaring,
+        let (_, declaring, p) = self.placed_row(class, name)?;
+        p.ty.map(|ty| TypedProperty {
+            declaring,
             ty,
             readonly: p.is_readonly,
         })
@@ -8236,7 +8366,7 @@ impl Request {
         }
         let placed = self.declared_slot(class, name.as_bytes());
         if let Some(p) = placed.as_ref()
-            && self.may_access(p.declaring, p.visibility)
+            && self.reaches(p)
         {
             if !o.slot(p.slot).is_undef() {
                 return self.write_std_property(object, name, value);
@@ -8280,10 +8410,7 @@ impl Request {
             return self.write_std_property(object, name, value);
         };
         let bytes = name.as_bytes().to_vec();
-        let wrong = bad_name
-            || placed
-                .as_ref()
-                .is_some_and(|p| !self.may_access(p.declaring, p.visibility));
+        let wrong = bad_name || placed.as_ref().is_some_and(|p| !self.reaches(p));
         if self.guard_word(object, &bytes) & IN_SET == 0 {
             let served = self.call_accessor(object, setter, IN_SET, &bytes, &[value]);
             self.release(value);
@@ -8738,15 +8865,17 @@ impl Request {
                 return Ok(Some((php_heap::Key::Str(key.heap()), walked)));
             }
         } else {
-            let declared: Vec<(Box<[u8]>, ClassId, Visibility)> = self
+            let declared: Vec<(Box<[u8]>, ClassId)> = self
                 .placed_properties(class)
                 .into_iter()
-                .map(|(declaring, p)| (p.name.0, declaring, p.visibility))
+                .map(|(declaring, p)| (p.name.0, declaring))
                 .collect();
             let mut at = self.heap.iterator_lead(idx) as usize;
-            while let Some((name, declaring, visibility)) = declared.get(at) {
+            while let Some((name, declaring)) = declared.get(at) {
                 let slot = u32::try_from(at).unwrap_or(u32::MAX);
-                if !o.slot(slot).is_undef() && self.may_access(*declaring, *visibility) {
+                if !o.slot(slot).is_undef()
+                    && self.property_row_visible(class, name, Some(*declaring))
+                {
                     let interned = self.heap.intern(name);
                     let key = self.fatal_of(interned).map(php_heap::Key::Str)?;
                     self.heap.iterator_set_lead(idx, slot.saturating_add(1));
@@ -8760,12 +8889,23 @@ impl Request {
         let Some(table) = o.properties() else {
             return Ok(None);
         };
-        let pos = self.heap.iterator_pos(idx, table);
-        let Some((found, key, _)) = table.live_from(pos) else {
-            return Ok(None);
-        };
-        self.heap.iterator_set_pos(idx, found.saturating_add(1));
-        Ok(Some((key, Walked::Dynamic(key))))
+        // A dynamic row whose name the scope finds declared, and not
+        // public, is stepped over (`zend_check_property_access`).
+        let mut pos = self.heap.iterator_pos(idx, table);
+        loop {
+            let Some((found, key, _)) = table.live_from(pos) else {
+                return Ok(None);
+            };
+            pos = found.saturating_add(1);
+            self.heap.iterator_set_pos(idx, pos);
+            let visible = match key {
+                php_heap::Key::Str(name) => self.property_row_visible(class, name.bytes(), None),
+                php_heap::Key::Long(_) => true,
+            };
+            if visible {
+                return Ok(Some((key, Walked::Dynamic(key))));
+            }
+        }
     }
 
     /// What [`Request::object_walk`] found at a place: the value, a view
@@ -10245,7 +10385,7 @@ impl Request {
         let mut placed_slot = None;
         let value = match self.declared_slot(class, name) {
             Some(placed) => {
-                if self.may_access(placed.declaring, placed.visibility) {
+                if self.reaches(&placed) {
                     placed_slot = Some(placed.slot);
                     let z = o.slot(placed.slot);
                     (!z.is_undef()).then(|| Value::of_zval(z))
@@ -10253,8 +10393,11 @@ impl Request {
                     None
                 }
             }
+            // A name the scope finds no declaration of is the dynamic
+            // table's alone, a parent's private slot of the same name
+            // being none of its business.
             None if Self::bad_property_name(name) => None,
-            None => self.object_prop(o, name),
+            None => Self::dynamic_prop(o, name),
         };
         if let Some(value) = value {
             let value = value.deref();
@@ -10489,7 +10632,7 @@ impl Request {
         let unsetter = self.magic_accessor(class, b"__unset");
         let mut wrong = false;
         if let Some(placed) = self.declared_slot(class, name) {
-            if self.may_access(placed.declaring, placed.visibility) {
+            if self.reaches(&placed) {
                 let empty = o.slot(placed.slot).is_undef();
                 // `error = Z_TYPE_P(slot) != IS_UNDEF || (Z_PROP_FLAG_P(slot)
                 // & IS_PROP_UNINIT) || !zobj->ce->__unset`: a slot that

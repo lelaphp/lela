@@ -485,11 +485,11 @@ impl Request {
             return Ok(object);
         }
         let initialises = match self.declared_slot(object.class(), name) {
-            Some(placed) if self.may_access(placed.declaring, placed.visibility) => {
+            Some(placed) if self.reaches(&placed) => {
                 o.slot(placed.slot).is_undef() && self.lazy_slot(o, placed.slot)
             }
             Some(_) => false,
-            None => self.object_prop(o, name).is_none() && !self.overloaded_place(object, name),
+            None => Self::dynamic_prop(o, name).is_none() && !self.overloaded_place(object, name),
         };
         if initialises {
             return self.lazy_init(object);
