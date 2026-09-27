@@ -35,8 +35,9 @@
 //! by the same rules over the declarations (`linked_methods`,
 //! `linked_interfaces`, `linked_constants`, `linked_properties`), so
 //! the words `inherits`, `overwrites`, `prototype` and `ctor` are php's.
-//! Reflection's own twenty-six classes are declared in [`stub`] with
-//! every method the stub has, so `php --re reflection` renders whole.
+//! Reflection's own twenty-six classes are declared by `#[php_class]`
+//! beside the bodies that serve them, every method the stub has, so
+//! `php --re reflection` renders whole.
 //! A reflector keeps php's `intern->ce` and `intern->obj` in the native
 //! payload [`Reflected`], which its class's `create_object` lays down
 //! (design §5.4), so the class it was asked about and the object it was
@@ -61,21 +62,23 @@ mod func;
 mod lazy;
 mod member;
 mod signature;
-mod stub;
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
-use php_ext::abi::{CloneObj, DependencyKind, Extension, ExtensionBuilder, ObjectHandlers};
+use php_ext::abi::{
+    CloneObj, DependencyKind, Extension, ExtensionBuilder, FromArgument, Instance, ObjectHandlers,
+    OrFalse, Raw, This, Union,
+};
+use php_ext::attr::php_class;
 use php_ext::call::{
     Function, constant, eval_const_expr, lookup_class, lookup_function, new_object,
-    read_class_prop_silent, read_static_prop, write_static_prop,
 };
 use php_ext::decl::{
     ClassConstDecl, ClassDecl, ClassKind, ConstExpr, EnumBacking, FunctionDecl, HookKind,
     MethodDecl, Name, Parameter, ParameterDefault, PropertyDecl, Type, Visibility,
 };
-use php_ext::raising::{Thrown, arg_count_error, arg_type_error, deprecated, throw};
+use php_ext::raising::{Thrown, arg_count_error, throw};
 use php_ext::request::{ExtensionId, PHP_VERSION, Request};
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
 
@@ -95,8 +98,10 @@ struct State {
     reference_key: std::hash::RandomState,
 }
 
-/// The extension value (design §7.1): declarations paired with entries,
-/// and the state declared on it.
+/// The extension value (design §7.1): the twenty-six classes in the
+/// order `PHP_MINIT_FUNCTION(reflection)` registers them, which is
+/// `EG(class_table)`'s and what `php --re` walks; the stub writes
+/// `PropertyHookType` earlier and registers it last.
 ///
 /// ```php
 /// var_dump(extension_loaded('reflection'));
@@ -104,16 +109,4345 @@ struct State {
 /// ```expect
 /// bool(true)
 /// ```
+///
+/// ```php
+/// echo new ReflectionExtension('reflection');
+/// ```
+/// ```expect
+/// Extension [ <persistent> extension #%N% Reflection version 8.5.9 ] {
+///
+///   - Classes [26] {
+///     Class [ <internal:Reflection> class ReflectionException extends Exception implements Throwable, Stringable ] {
+///
+///       - Constants [0] {
+///       }
+///
+///       - Static properties [0] {
+///       }
+///
+///       - Static methods [0] {
+///       }
+///
+///       - Properties [4] {
+///         Property [ protected $message = '' ]
+///         Property [ protected $code = 0 ]
+///         Property [ protected string $file = '' ]
+///         Property [ protected int $line = 0 ]
+///       }
+///
+///       - Methods [10] {
+///         Method [ <internal:Core, inherits Exception, ctor> public method __construct ] {
+///
+///           - Parameters [3] {
+///             Parameter #0 [ <optional> string $message = "" ]
+///             Parameter #1 [ <optional> int $code = 0 ]
+///             Parameter #2 [ <optional> ?Throwable $previous = null ]
+///           }
+///         }
+///
+///         Method [ <internal:Core, inherits Exception> public method __wakeup ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ void ]
+///         }
+///
+///         Method [ <internal:Core, inherits Exception, prototype Throwable> final public method getMessage ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ string ]
+///         }
+///
+///         Method [ <internal:Core, inherits Exception, prototype Throwable> final public method getCode ] {
+///
+///           - Parameters [0] {
+///           }
+///         }
+///
+///         Method [ <internal:Core, inherits Exception, prototype Throwable> final public method getFile ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ string ]
+///         }
+///
+///         Method [ <internal:Core, inherits Exception, prototype Throwable> final public method getLine ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ int ]
+///         }
+///
+///         Method [ <internal:Core, inherits Exception, prototype Throwable> final public method getTrace ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ array ]
+///         }
+///
+///         Method [ <internal:Core, inherits Exception, prototype Throwable> final public method getPrevious ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ ?Throwable ]
+///         }
+///
+///         Method [ <internal:Core, inherits Exception, prototype Throwable> final public method getTraceAsString ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ string ]
+///         }
+///
+///         Method [ <internal:Core, inherits Exception, prototype Stringable> public method __toString ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ string ]
+///         }
+///       }
+///     }
+///
+///     Class [ <internal:Reflection> class Reflection ] {
+///
+///       - Constants [0] {
+///       }
+///
+///       - Static properties [0] {
+///       }
+///
+///       - Static methods [1] {
+///         Method [ <internal:Reflection> static public method getModifierNames ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> int $modifiers ]
+///           }
+///           - Tentative return [ array ]
+///         }
+///       }
+///
+///       - Properties [0] {
+///       }
+///
+///       - Methods [0] {
+///       }
+///     }
+///
+///     Interface [ <internal:Reflection> interface Reflector extends Stringable ] {
+///
+///       - Constants [0] {
+///       }
+///
+///       - Static properties [0] {
+///       }
+///
+///       - Static methods [0] {
+///       }
+///
+///       - Properties [0] {
+///       }
+///
+///       - Methods [1] {
+///         Method [ <internal:Core, inherits Stringable> abstract public method __toString ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ string ]
+///         }
+///       }
+///     }
+///
+///     Class [ <internal:Reflection> abstract class ReflectionFunctionAbstract implements Reflector, Stringable ] {
+///
+///       - Constants [0] {
+///       }
+///
+///       - Static properties [0] {
+///       }
+///
+///       - Static methods [0] {
+///       }
+///
+///       - Properties [1] {
+///         Property [ public string $name ]
+///       }
+///
+///       - Methods [33] {
+///         Method [ <internal:Reflection> private method __clone ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ void ]
+///         }
+///
+///         Method [ <internal:Reflection> public method inNamespace ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isClosure ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isDeprecated ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isInternal ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isUserDefined ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isGenerator ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isVariadic ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isStatic ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getClosureThis ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ ?object ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getClosureScopeClass ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ ?ReflectionClass ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getClosureCalledClass ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ ?ReflectionClass ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getClosureUsedVariables ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getDocComment ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string|false ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getEndLine ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ int|false ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getExtension ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ ?ReflectionExtension ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getExtensionName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string|false ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getFileName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string|false ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getNamespaceName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getNumberOfParameters ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ int ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getNumberOfRequiredParameters ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ int ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getParameters ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getShortName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getStartLine ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ int|false ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getStaticVariables ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection> public method returnsReference ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method hasReturnType ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getReturnType ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ ?ReflectionType ]
+///         }
+///
+///         Method [ <internal:Reflection> public method hasTentativeReturnType ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getTentativeReturnType ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ ?ReflectionType ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getAttributes ] {
+///
+///           - Parameters [2] {
+///             Parameter #0 [ <optional> ?string $name = null ]
+///             Parameter #1 [ <optional> int $flags = 0 ]
+///           }
+///           - Return [ array ]
+///         }
+///
+///         Method [ <internal:Core, inherits Stringable> abstract public method __toString ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ string ]
+///         }
+///       }
+///     }
+///
+///     Class [ <internal:Reflection> class ReflectionFunction extends ReflectionFunctionAbstract implements Stringable, Reflector ] {
+///
+///       - Constants [1] {
+///         Constant [ public int IS_DEPRECATED ] { 2048 }
+///       }
+///
+///       - Static properties [0] {
+///       }
+///
+///       - Static methods [0] {
+///       }
+///
+///       - Properties [1] {
+///         Property [ public string $name ]
+///       }
+///
+///       - Methods [38] {
+///         Method [ <internal:Reflection, ctor> public method __construct ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> Closure|string $function ]
+///           }
+///         }
+///
+///         Method [ <internal:Reflection, overwrites Stringable, prototype Stringable> public method __toString ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isAnonymous ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal, deprecated:Reflection> public method isDisabled ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method invoke ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <optional> mixed ...$args ]
+///           }
+///           - Tentative return [ mixed ]
+///         }
+///
+///         Method [ <internal:Reflection> public method invokeArgs ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> array $args ]
+///           }
+///           - Tentative return [ mixed ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getClosure ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ Closure ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method inNamespace ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method isClosure ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method isDeprecated ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method isInternal ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method isUserDefined ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method isGenerator ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method isVariadic ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method isStatic ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getClosureThis ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ ?object ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getClosureScopeClass ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ ?ReflectionClass ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getClosureCalledClass ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ ?ReflectionClass ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getClosureUsedVariables ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getDocComment ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string|false ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getEndLine ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ int|false ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getExtension ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ ?ReflectionExtension ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getExtensionName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string|false ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getFileName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string|false ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getNamespaceName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getNumberOfParameters ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ int ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getNumberOfRequiredParameters ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ int ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getParameters ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getShortName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getStartLine ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ int|false ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getStaticVariables ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method returnsReference ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method hasReturnType ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getReturnType ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ ?ReflectionType ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method hasTentativeReturnType ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getTentativeReturnType ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ ?ReflectionType ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getAttributes ] {
+///
+///           - Parameters [2] {
+///             Parameter #0 [ <optional> ?string $name = null ]
+///             Parameter #1 [ <optional> int $flags = 0 ]
+///           }
+///           - Return [ array ]
+///         }
+///       }
+///     }
+///
+///     Class [ <internal:Reflection> final class ReflectionGenerator ] {
+///
+///       - Constants [0] {
+///       }
+///
+///       - Static properties [0] {
+///       }
+///
+///       - Static methods [0] {
+///       }
+///
+///       - Properties [0] {
+///       }
+///
+///       - Methods [8] {
+///         Method [ <internal:Reflection, ctor> public method __construct ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> Generator $generator ]
+///           }
+///         }
+///
+///         Method [ <internal:Reflection> public method getExecutingLine ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ int ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getExecutingFile ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getTrace ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <optional> int $options = DEBUG_BACKTRACE_PROVIDE_OBJECT ]
+///           }
+///           - Return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getFunction ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ ReflectionFunctionAbstract ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getThis ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ ?object ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getExecutingGenerator ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ Generator ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isClosed ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///       }
+///     }
+///
+///     Class [ <internal:Reflection> class ReflectionParameter implements Stringable, Reflector ] {
+///
+///       - Constants [0] {
+///       }
+///
+///       - Static properties [0] {
+///       }
+///
+///       - Static methods [0] {
+///       }
+///
+///       - Properties [1] {
+///         Property [ public string $name ]
+///       }
+///
+///       - Methods [23] {
+///         Method [ <internal:Reflection> private method __clone ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ void ]
+///         }
+///
+///         Method [ <internal:Reflection, ctor> public method __construct ] {
+///
+///           - Parameters [2] {
+///             Parameter #0 [ <required> $function ]
+///             Parameter #1 [ <required> string|int $param ]
+///           }
+///         }
+///
+///         Method [ <internal:Reflection, prototype Stringable> public method __toString ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isPassedByReference ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method canBePassedByValue ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getDeclaringFunction ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ ReflectionFunctionAbstract ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getDeclaringClass ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ ?ReflectionClass ]
+///         }
+///
+///         Method [ <internal, deprecated:Reflection> public method getClass ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ ?ReflectionClass ]
+///         }
+///
+///         Method [ <internal:Reflection> public method hasType ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getType ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ ?ReflectionType ]
+///         }
+///
+///         Method [ <internal, deprecated:Reflection> public method isArray ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal, deprecated:Reflection> public method isCallable ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method allowsNull ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getPosition ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ int ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isOptional ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isDefaultValueAvailable ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getDefaultValue ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ mixed ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isDefaultValueConstant ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getDefaultValueConstantName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ ?string ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isVariadic ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isPromoted ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getAttributes ] {
+///
+///           - Parameters [2] {
+///             Parameter #0 [ <optional> ?string $name = null ]
+///             Parameter #1 [ <optional> int $flags = 0 ]
+///           }
+///           - Return [ array ]
+///         }
+///       }
+///     }
+///
+///     Class [ <internal:Reflection> abstract class ReflectionType implements Stringable ] {
+///
+///       - Constants [0] {
+///       }
+///
+///       - Static properties [0] {
+///       }
+///
+///       - Static methods [0] {
+///       }
+///
+///       - Properties [0] {
+///       }
+///
+///       - Methods [3] {
+///         Method [ <internal:Reflection> private method __clone ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ void ]
+///         }
+///
+///         Method [ <internal:Reflection> public method allowsNull ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, prototype Stringable> public method __toString ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ string ]
+///         }
+///       }
+///     }
+///
+///     Class [ <internal:Reflection> class ReflectionNamedType extends ReflectionType implements Stringable ] {
+///
+///       - Constants [0] {
+///       }
+///
+///       - Static properties [0] {
+///       }
+///
+///       - Static methods [0] {
+///       }
+///
+///       - Properties [0] {
+///       }
+///
+///       - Methods [4] {
+///         Method [ <internal:Reflection> public method getName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isBuiltin ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionType> public method allowsNull ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionType, prototype Stringable> public method __toString ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ string ]
+///         }
+///       }
+///     }
+///
+///     Class [ <internal:Reflection> class ReflectionUnionType extends ReflectionType implements Stringable ] {
+///
+///       - Constants [0] {
+///       }
+///
+///       - Static properties [0] {
+///       }
+///
+///       - Static methods [0] {
+///       }
+///
+///       - Properties [0] {
+///       }
+///
+///       - Methods [3] {
+///         Method [ <internal:Reflection> public method getTypes ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionType> public method allowsNull ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionType, prototype Stringable> public method __toString ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ string ]
+///         }
+///       }
+///     }
+///
+///     Class [ <internal:Reflection> class ReflectionIntersectionType extends ReflectionType implements Stringable ] {
+///
+///       - Constants [0] {
+///       }
+///
+///       - Static properties [0] {
+///       }
+///
+///       - Static methods [0] {
+///       }
+///
+///       - Properties [0] {
+///       }
+///
+///       - Methods [3] {
+///         Method [ <internal:Reflection> public method getTypes ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionType> public method allowsNull ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionType, prototype Stringable> public method __toString ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ string ]
+///         }
+///       }
+///     }
+///
+///     Class [ <internal:Reflection> class ReflectionMethod extends ReflectionFunctionAbstract implements Stringable, Reflector ] {
+///
+///       - Constants [6] {
+///         Constant [ public int IS_STATIC ] { 16 }
+///         Constant [ public int IS_PUBLIC ] { 1 }
+///         Constant [ public int IS_PROTECTED ] { 2 }
+///         Constant [ public int IS_PRIVATE ] { 4 }
+///         Constant [ public int IS_ABSTRACT ] { 64 }
+///         Constant [ public int IS_FINAL ] { 32 }
+///       }
+///
+///       - Static properties [0] {
+///       }
+///
+///       - Static methods [1] {
+///         Method [ <internal:Reflection> static public method createFromMethodName ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> string $method ]
+///           }
+///           - Return [ static ]
+///         }
+///       }
+///
+///       - Properties [2] {
+///         Property [ public string $name ]
+///         Property [ public string $class ]
+///       }
+///
+///       - Methods [48] {
+///         Method [ <internal:Reflection, ctor> public method __construct ] {
+///
+///           - Parameters [2] {
+///             Parameter #0 [ <required> object|string $objectOrMethod ]
+///             Parameter #1 [ <optional> ?string $method = null ]
+///           }
+///         }
+///
+///         Method [ <internal:Reflection, overwrites Stringable, prototype Stringable> public method __toString ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isPublic ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isPrivate ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isProtected ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isAbstract ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isFinal ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isConstructor ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isDestructor ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getClosure ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <optional> ?object $object = null ]
+///           }
+///           - Tentative return [ Closure ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getModifiers ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ int ]
+///         }
+///
+///         Method [ <internal:Reflection> public method invoke ] {
+///
+///           - Parameters [2] {
+///             Parameter #0 [ <required> ?object $object ]
+///             Parameter #1 [ <optional> mixed ...$args ]
+///           }
+///           - Tentative return [ mixed ]
+///         }
+///
+///         Method [ <internal:Reflection> public method invokeArgs ] {
+///
+///           - Parameters [2] {
+///             Parameter #0 [ <required> ?object $object ]
+///             Parameter #1 [ <required> array $args ]
+///           }
+///           - Tentative return [ mixed ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getDeclaringClass ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ ReflectionClass ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getPrototype ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ ReflectionMethod ]
+///         }
+///
+///         Method [ <internal:Reflection> public method hasPrototype ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal, deprecated:Reflection> public method setAccessible ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> bool $accessible ]
+///           }
+///           - Tentative return [ void ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method inNamespace ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method isClosure ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method isDeprecated ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method isInternal ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method isUserDefined ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method isGenerator ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method isVariadic ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method isStatic ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getClosureThis ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ ?object ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getClosureScopeClass ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ ?ReflectionClass ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getClosureCalledClass ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ ?ReflectionClass ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getClosureUsedVariables ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getDocComment ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string|false ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getEndLine ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ int|false ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getExtension ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ ?ReflectionExtension ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getExtensionName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string|false ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getFileName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string|false ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getNamespaceName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getNumberOfParameters ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ int ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getNumberOfRequiredParameters ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ int ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getParameters ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getShortName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getStartLine ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ int|false ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getStaticVariables ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method returnsReference ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method hasReturnType ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getReturnType ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ ?ReflectionType ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method hasTentativeReturnType ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getTentativeReturnType ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ ?ReflectionType ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionFunctionAbstract> public method getAttributes ] {
+///
+///           - Parameters [2] {
+///             Parameter #0 [ <optional> ?string $name = null ]
+///             Parameter #1 [ <optional> int $flags = 0 ]
+///           }
+///           - Return [ array ]
+///         }
+///       }
+///     }
+///
+///     Class [ <internal:Reflection> class ReflectionClass implements Stringable, Reflector ] {
+///
+///       - Constants [6] {
+///         Constant [ public int IS_IMPLICIT_ABSTRACT ] { 16 }
+///         Constant [ public int IS_EXPLICIT_ABSTRACT ] { 64 }
+///         Constant [ public int IS_FINAL ] { 32 }
+///         Constant [ public int IS_READONLY ] { 65536 }
+///         Constant [ public int SKIP_INITIALIZATION_ON_SERIALIZE ] { 8 }
+///         Constant [ public int SKIP_DESTRUCTOR ] { 16 }
+///       }
+///
+///       - Static properties [0] {
+///       }
+///
+///       - Static methods [0] {
+///       }
+///
+///       - Properties [1] {
+///         Property [ public string $name ]
+///       }
+///
+///       - Methods [64] {
+///         Method [ <internal:Reflection> private method __clone ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ void ]
+///         }
+///
+///         Method [ <internal:Reflection, ctor> public method __construct ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> object|string $objectOrClass ]
+///           }
+///         }
+///
+///         Method [ <internal:Reflection, prototype Stringable> public method __toString ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isInternal ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isUserDefined ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isAnonymous ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isInstantiable ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isCloneable ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getFileName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string|false ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getStartLine ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ int|false ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getEndLine ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ int|false ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getDocComment ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string|false ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getConstructor ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ ?ReflectionMethod ]
+///         }
+///
+///         Method [ <internal:Reflection> public method hasMethod ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> string $name ]
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getMethod ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> string $name ]
+///           }
+///           - Tentative return [ ReflectionMethod ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getMethods ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <optional> ?int $filter = null ]
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection> public method hasProperty ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> string $name ]
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getProperty ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> string $name ]
+///           }
+///           - Tentative return [ ReflectionProperty ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getProperties ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <optional> ?int $filter = null ]
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection> public method hasConstant ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> string $name ]
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getConstants ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <optional> ?int $filter = null ]
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getReflectionConstants ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <optional> ?int $filter = null ]
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getConstant ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> string $name ]
+///           }
+///           - Tentative return [ mixed ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getReflectionConstant ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> string $name ]
+///           }
+///           - Tentative return [ ReflectionClassConstant|false ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getInterfaces ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getInterfaceNames ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isInterface ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getTraits ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getTraitNames ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getTraitAliases ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isTrait ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isEnum ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isAbstract ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isFinal ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isReadOnly ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getModifiers ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ int ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isInstance ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> object $object ]
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method newInstance ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <optional> mixed ...$args ]
+///           }
+///           - Tentative return [ object ]
+///         }
+///
+///         Method [ <internal:Reflection> public method newInstanceWithoutConstructor ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ object ]
+///         }
+///
+///         Method [ <internal:Reflection> public method newInstanceArgs ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <optional> array $args = [] ]
+///           }
+///           - Tentative return [ ?object ]
+///         }
+///
+///         Method [ <internal:Reflection> public method newLazyGhost ] {
+///
+///           - Parameters [2] {
+///             Parameter #0 [ <required> callable $initializer ]
+///             Parameter #1 [ <optional> int $options = 0 ]
+///           }
+///           - Return [ object ]
+///         }
+///
+///         Method [ <internal:Reflection> public method newLazyProxy ] {
+///
+///           - Parameters [2] {
+///             Parameter #0 [ <required> callable $factory ]
+///             Parameter #1 [ <optional> int $options = 0 ]
+///           }
+///           - Return [ object ]
+///         }
+///
+///         Method [ <internal:Reflection> public method resetAsLazyGhost ] {
+///
+///           - Parameters [3] {
+///             Parameter #0 [ <required> object $object ]
+///             Parameter #1 [ <required> callable $initializer ]
+///             Parameter #2 [ <optional> int $options = 0 ]
+///           }
+///           - Return [ void ]
+///         }
+///
+///         Method [ <internal:Reflection> public method resetAsLazyProxy ] {
+///
+///           - Parameters [3] {
+///             Parameter #0 [ <required> object $object ]
+///             Parameter #1 [ <required> callable $factory ]
+///             Parameter #2 [ <optional> int $options = 0 ]
+///           }
+///           - Return [ void ]
+///         }
+///
+///         Method [ <internal:Reflection> public method initializeLazyObject ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> object $object ]
+///           }
+///           - Return [ object ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isUninitializedLazyObject ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> object $object ]
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method markLazyObjectAsInitialized ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> object $object ]
+///           }
+///           - Return [ object ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getLazyInitializer ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> object $object ]
+///           }
+///           - Return [ ?callable ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getParentClass ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ ReflectionClass|false ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isSubclassOf ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> ReflectionClass|string $class ]
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getStaticProperties ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getStaticPropertyValue ] {
+///
+///           - Parameters [2] {
+///             Parameter #0 [ <required> string $name ]
+///             Parameter #1 [ <optional> mixed $default = <default> ]
+///           }
+///           - Tentative return [ mixed ]
+///         }
+///
+///         Method [ <internal:Reflection> public method setStaticPropertyValue ] {
+///
+///           - Parameters [2] {
+///             Parameter #0 [ <required> string $name ]
+///             Parameter #1 [ <required> mixed $value ]
+///           }
+///           - Tentative return [ void ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getDefaultProperties ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isIterable ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isIterateable ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method implementsInterface ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> ReflectionClass|string $interface ]
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getExtension ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ ?ReflectionExtension ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getExtensionName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string|false ]
+///         }
+///
+///         Method [ <internal:Reflection> public method inNamespace ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getNamespaceName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getShortName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getAttributes ] {
+///
+///           - Parameters [2] {
+///             Parameter #0 [ <optional> ?string $name = null ]
+///             Parameter #1 [ <optional> int $flags = 0 ]
+///           }
+///           - Return [ array ]
+///         }
+///       }
+///     }
+///
+///     Class [ <internal:Reflection> class ReflectionObject extends ReflectionClass implements Reflector, Stringable ] {
+///
+///       - Constants [6] {
+///         Constant [ public int IS_IMPLICIT_ABSTRACT ] { 16 }
+///         Constant [ public int IS_EXPLICIT_ABSTRACT ] { 64 }
+///         Constant [ public int IS_FINAL ] { 32 }
+///         Constant [ public int IS_READONLY ] { 65536 }
+///         Constant [ public int SKIP_INITIALIZATION_ON_SERIALIZE ] { 8 }
+///         Constant [ public int SKIP_DESTRUCTOR ] { 16 }
+///       }
+///
+///       - Static properties [0] {
+///       }
+///
+///       - Static methods [0] {
+///       }
+///
+///       - Properties [1] {
+///         Property [ public string $name ]
+///       }
+///
+///       - Methods [63] {
+///         Method [ <internal:Reflection, overwrites ReflectionClass, ctor> public method __construct ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> object $object ]
+///           }
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass, prototype Stringable> public method __toString ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method isInternal ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method isUserDefined ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method isAnonymous ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method isInstantiable ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method isCloneable ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getFileName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string|false ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getStartLine ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ int|false ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getEndLine ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ int|false ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getDocComment ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string|false ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getConstructor ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ ?ReflectionMethod ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method hasMethod ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> string $name ]
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getMethod ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> string $name ]
+///           }
+///           - Tentative return [ ReflectionMethod ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getMethods ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <optional> ?int $filter = null ]
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method hasProperty ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> string $name ]
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getProperty ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> string $name ]
+///           }
+///           - Tentative return [ ReflectionProperty ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getProperties ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <optional> ?int $filter = null ]
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method hasConstant ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> string $name ]
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getConstants ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <optional> ?int $filter = null ]
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getReflectionConstants ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <optional> ?int $filter = null ]
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getConstant ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> string $name ]
+///           }
+///           - Tentative return [ mixed ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getReflectionConstant ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> string $name ]
+///           }
+///           - Tentative return [ ReflectionClassConstant|false ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getInterfaces ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getInterfaceNames ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method isInterface ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getTraits ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getTraitNames ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getTraitAliases ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method isTrait ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method isEnum ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method isAbstract ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method isFinal ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method isReadOnly ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getModifiers ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ int ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method isInstance ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> object $object ]
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method newInstance ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <optional> mixed ...$args ]
+///           }
+///           - Tentative return [ object ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method newInstanceWithoutConstructor ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ object ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method newInstanceArgs ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <optional> array $args = [] ]
+///           }
+///           - Tentative return [ ?object ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method newLazyGhost ] {
+///
+///           - Parameters [2] {
+///             Parameter #0 [ <required> callable $initializer ]
+///             Parameter #1 [ <optional> int $options = 0 ]
+///           }
+///           - Return [ object ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method newLazyProxy ] {
+///
+///           - Parameters [2] {
+///             Parameter #0 [ <required> callable $factory ]
+///             Parameter #1 [ <optional> int $options = 0 ]
+///           }
+///           - Return [ object ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method resetAsLazyGhost ] {
+///
+///           - Parameters [3] {
+///             Parameter #0 [ <required> object $object ]
+///             Parameter #1 [ <required> callable $initializer ]
+///             Parameter #2 [ <optional> int $options = 0 ]
+///           }
+///           - Return [ void ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method resetAsLazyProxy ] {
+///
+///           - Parameters [3] {
+///             Parameter #0 [ <required> object $object ]
+///             Parameter #1 [ <required> callable $factory ]
+///             Parameter #2 [ <optional> int $options = 0 ]
+///           }
+///           - Return [ void ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method initializeLazyObject ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> object $object ]
+///           }
+///           - Return [ object ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method isUninitializedLazyObject ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> object $object ]
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method markLazyObjectAsInitialized ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> object $object ]
+///           }
+///           - Return [ object ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getLazyInitializer ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> object $object ]
+///           }
+///           - Return [ ?callable ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getParentClass ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ ReflectionClass|false ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method isSubclassOf ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> ReflectionClass|string $class ]
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getStaticProperties ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getStaticPropertyValue ] {
+///
+///           - Parameters [2] {
+///             Parameter #0 [ <required> string $name ]
+///             Parameter #1 [ <optional> mixed $default = <default> ]
+///           }
+///           - Tentative return [ mixed ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method setStaticPropertyValue ] {
+///
+///           - Parameters [2] {
+///             Parameter #0 [ <required> string $name ]
+///             Parameter #1 [ <required> mixed $value ]
+///           }
+///           - Tentative return [ void ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getDefaultProperties ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method isIterable ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method isIterateable ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method implementsInterface ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> ReflectionClass|string $interface ]
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getExtension ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ ?ReflectionExtension ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getExtensionName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string|false ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method inNamespace ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getNamespaceName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getShortName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getAttributes ] {
+///
+///           - Parameters [2] {
+///             Parameter #0 [ <optional> ?string $name = null ]
+///             Parameter #1 [ <optional> int $flags = 0 ]
+///           }
+///           - Return [ array ]
+///         }
+///       }
+///     }
+///
+///     Class [ <internal:Reflection> class ReflectionProperty implements Stringable, Reflector ] {
+///
+///       - Constants [10] {
+///         Constant [ public int IS_STATIC ] { 16 }
+///         Constant [ public int IS_READONLY ] { 128 }
+///         Constant [ public int IS_PUBLIC ] { 1 }
+///         Constant [ public int IS_PROTECTED ] { 2 }
+///         Constant [ public int IS_PRIVATE ] { 4 }
+///         Constant [ public int IS_ABSTRACT ] { 64 }
+///         Constant [ public int IS_PROTECTED_SET ] { 2048 }
+///         Constant [ public int IS_PRIVATE_SET ] { 4096 }
+///         Constant [ public int IS_VIRTUAL ] { 512 }
+///         Constant [ public int IS_FINAL ] { 32 }
+///       }
+///
+///       - Static properties [0] {
+///       }
+///
+///       - Static methods [0] {
+///       }
+///
+///       - Properties [2] {
+///         Property [ public string $name ]
+///         Property [ public string $class ]
+///       }
+///
+///       - Methods [40] {
+///         Method [ <internal:Reflection> private method __clone ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ void ]
+///         }
+///
+///         Method [ <internal:Reflection, ctor> public method __construct ] {
+///
+///           - Parameters [2] {
+///             Parameter #0 [ <required> object|string $class ]
+///             Parameter #1 [ <required> string $property ]
+///           }
+///         }
+///
+///         Method [ <internal:Reflection, prototype Stringable> public method __toString ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getMangledName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getValue ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <optional> ?object $object = null ]
+///           }
+///           - Tentative return [ mixed ]
+///         }
+///
+///         Method [ <internal:Reflection> public method setValue ] {
+///
+///           - Parameters [2] {
+///             Parameter #0 [ <required> mixed $objectOrValue ]
+///             Parameter #1 [ <optional> mixed $value = <default> ]
+///           }
+///           - Tentative return [ void ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getRawValue ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> object $object ]
+///           }
+///           - Return [ mixed ]
+///         }
+///
+///         Method [ <internal:Reflection> public method setRawValue ] {
+///
+///           - Parameters [2] {
+///             Parameter #0 [ <required> object $object ]
+///             Parameter #1 [ <required> mixed $value ]
+///           }
+///           - Return [ void ]
+///         }
+///
+///         Method [ <internal:Reflection> public method setRawValueWithoutLazyInitialization ] {
+///
+///           - Parameters [2] {
+///             Parameter #0 [ <required> object $object ]
+///             Parameter #1 [ <required> mixed $value ]
+///           }
+///           - Return [ void ]
+///         }
+///
+///         Method [ <internal:Reflection> public method skipLazyInitialization ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> object $object ]
+///           }
+///           - Return [ void ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isLazy ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> object $object ]
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isInitialized ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <optional> ?object $object = null ]
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isPublic ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isPrivate ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isProtected ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isPrivateSet ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isProtectedSet ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isStatic ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isReadOnly ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isDefault ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isDynamic ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isAbstract ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isVirtual ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isPromoted ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getModifiers ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ int ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getDeclaringClass ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ ReflectionClass ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getDocComment ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string|false ]
+///         }
+///
+///         Method [ <internal, deprecated:Reflection> public method setAccessible ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> bool $accessible ]
+///           }
+///           - Tentative return [ void ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getType ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ ?ReflectionType ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getSettableType ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ ?ReflectionType ]
+///         }
+///
+///         Method [ <internal:Reflection> public method hasType ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method hasDefaultValue ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getDefaultValue ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ mixed ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getAttributes ] {
+///
+///           - Parameters [2] {
+///             Parameter #0 [ <optional> ?string $name = null ]
+///             Parameter #1 [ <optional> int $flags = 0 ]
+///           }
+///           - Return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection> public method hasHooks ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getHooks ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection> public method hasHook ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> PropertyHookType $type ]
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getHook ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> PropertyHookType $type ]
+///           }
+///           - Return [ ?ReflectionMethod ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isFinal ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///       }
+///     }
+///
+///     Class [ <internal:Reflection> class ReflectionClassConstant implements Stringable, Reflector ] {
+///
+///       - Constants [4] {
+///         Constant [ public int IS_PUBLIC ] { 1 }
+///         Constant [ public int IS_PROTECTED ] { 2 }
+///         Constant [ public int IS_PRIVATE ] { 4 }
+///         Constant [ public int IS_FINAL ] { 32 }
+///       }
+///
+///       - Static properties [0] {
+///       }
+///
+///       - Static methods [0] {
+///       }
+///
+///       - Properties [2] {
+///         Property [ public string $name ]
+///         Property [ public string $class ]
+///       }
+///
+///       - Methods [17] {
+///         Method [ <internal:Reflection> private method __clone ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ void ]
+///         }
+///
+///         Method [ <internal:Reflection, ctor> public method __construct ] {
+///
+///           - Parameters [2] {
+///             Parameter #0 [ <required> object|string $class ]
+///             Parameter #1 [ <required> string $constant ]
+///           }
+///         }
+///
+///         Method [ <internal:Reflection, prototype Stringable> public method __toString ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getValue ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ mixed ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isPublic ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isPrivate ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isProtected ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isFinal ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getModifiers ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ int ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getDeclaringClass ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ ReflectionClass ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getDocComment ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string|false ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getAttributes ] {
+///
+///           - Parameters [2] {
+///             Parameter #0 [ <optional> ?string $name = null ]
+///             Parameter #1 [ <optional> int $flags = 0 ]
+///           }
+///           - Return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isEnumCase ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isDeprecated ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method hasType ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getType ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ ?ReflectionType ]
+///         }
+///       }
+///     }
+///
+///     Class [ <internal:Reflection> class ReflectionExtension implements Stringable, Reflector ] {
+///
+///       - Constants [0] {
+///       }
+///
+///       - Static properties [0] {
+///       }
+///
+///       - Static methods [0] {
+///       }
+///
+///       - Properties [1] {
+///         Property [ public string $name ]
+///       }
+///
+///       - Methods [14] {
+///         Method [ <internal:Reflection> private method __clone ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ void ]
+///         }
+///
+///         Method [ <internal:Reflection, ctor> public method __construct ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> string $name ]
+///           }
+///         }
+///
+///         Method [ <internal:Reflection, prototype Stringable> public method __toString ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getVersion ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ ?string ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getFunctions ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getConstants ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getINIEntries ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getClasses ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getClassNames ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getDependencies ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection> public method info ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ void ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isPersistent ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isTemporary ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///       }
+///     }
+///
+///     Class [ <internal:Reflection> class ReflectionZendExtension implements Stringable, Reflector ] {
+///
+///       - Constants [0] {
+///       }
+///
+///       - Static properties [0] {
+///       }
+///
+///       - Static methods [0] {
+///       }
+///
+///       - Properties [1] {
+///         Property [ public string $name ]
+///       }
+///
+///       - Methods [8] {
+///         Method [ <internal:Reflection> private method __clone ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ void ]
+///         }
+///
+///         Method [ <internal:Reflection, ctor> public method __construct ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> string $name ]
+///           }
+///         }
+///
+///         Method [ <internal:Reflection, prototype Stringable> public method __toString ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getVersion ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getAuthor ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getURL ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getCopyright ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string ]
+///         }
+///       }
+///     }
+///
+///     Class [ <internal:Reflection> final class ReflectionReference ] {
+///
+///       - Constants [0] {
+///       }
+///
+///       - Static properties [0] {
+///       }
+///
+///       - Static methods [1] {
+///         Method [ <internal:Reflection> static public method fromArrayElement ] {
+///
+///           - Parameters [2] {
+///             Parameter #0 [ <required> array $array ]
+///             Parameter #1 [ <required> string|int $key ]
+///           }
+///           - Return [ ?ReflectionReference ]
+///         }
+///       }
+///
+///       - Properties [0] {
+///       }
+///
+///       - Methods [3] {
+///         Method [ <internal:Reflection> public method getId ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection> private method __clone ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ void ]
+///         }
+///
+///         Method [ <internal:Reflection, ctor> private method __construct ] {
+///
+///           - Parameters [0] {
+///           }
+///         }
+///       }
+///     }
+///
+///     Class [ <internal:Reflection> class ReflectionAttribute implements Stringable, Reflector ] {
+///
+///       - Constants [1] {
+///         Constant [ public int IS_INSTANCEOF ] { 2 }
+///       }
+///
+///       - Static properties [0] {
+///       }
+///
+///       - Static methods [0] {
+///       }
+///
+///       - Properties [1] {
+///         Property [ public string $name ]
+///       }
+///
+///       - Methods [8] {
+///         Method [ <internal:Reflection> public method getName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getTarget ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ int ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isRepeated ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getArguments ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection> public method newInstance ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ object ]
+///         }
+///
+///         Method [ <internal:Reflection, prototype Stringable> public method __toString ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection> private method __clone ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ void ]
+///         }
+///
+///         Method [ <internal:Reflection, ctor> private method __construct ] {
+///
+///           - Parameters [0] {
+///           }
+///         }
+///       }
+///     }
+///
+///     Class [ <internal:Reflection> class ReflectionEnum extends ReflectionClass implements Reflector, Stringable ] {
+///
+///       - Constants [6] {
+///         Constant [ public int IS_IMPLICIT_ABSTRACT ] { 16 }
+///         Constant [ public int IS_EXPLICIT_ABSTRACT ] { 64 }
+///         Constant [ public int IS_FINAL ] { 32 }
+///         Constant [ public int IS_READONLY ] { 65536 }
+///         Constant [ public int SKIP_INITIALIZATION_ON_SERIALIZE ] { 8 }
+///         Constant [ public int SKIP_DESTRUCTOR ] { 16 }
+///       }
+///
+///       - Static properties [0] {
+///       }
+///
+///       - Static methods [0] {
+///       }
+///
+///       - Properties [1] {
+///         Property [ public string $name ]
+///       }
+///
+///       - Methods [68] {
+///         Method [ <internal:Reflection, overwrites ReflectionClass, ctor> public method __construct ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> object|string $objectOrClass ]
+///           }
+///         }
+///
+///         Method [ <internal:Reflection> public method hasCase ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> string $name ]
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getCase ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> string $name ]
+///           }
+///           - Return [ ReflectionEnumUnitCase ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getCases ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isBacked ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getBackingType ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ ?ReflectionNamedType ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass, prototype Stringable> public method __toString ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method isInternal ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method isUserDefined ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method isAnonymous ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method isInstantiable ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method isCloneable ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getFileName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string|false ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getStartLine ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ int|false ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getEndLine ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ int|false ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getDocComment ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string|false ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getConstructor ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ ?ReflectionMethod ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method hasMethod ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> string $name ]
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getMethod ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> string $name ]
+///           }
+///           - Tentative return [ ReflectionMethod ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getMethods ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <optional> ?int $filter = null ]
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method hasProperty ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> string $name ]
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getProperty ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> string $name ]
+///           }
+///           - Tentative return [ ReflectionProperty ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getProperties ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <optional> ?int $filter = null ]
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method hasConstant ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> string $name ]
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getConstants ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <optional> ?int $filter = null ]
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getReflectionConstants ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <optional> ?int $filter = null ]
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getConstant ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> string $name ]
+///           }
+///           - Tentative return [ mixed ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getReflectionConstant ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> string $name ]
+///           }
+///           - Tentative return [ ReflectionClassConstant|false ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getInterfaces ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getInterfaceNames ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method isInterface ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getTraits ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getTraitNames ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getTraitAliases ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method isTrait ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method isEnum ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method isAbstract ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method isFinal ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method isReadOnly ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getModifiers ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ int ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method isInstance ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> object $object ]
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method newInstance ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <optional> mixed ...$args ]
+///           }
+///           - Tentative return [ object ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method newInstanceWithoutConstructor ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ object ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method newInstanceArgs ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <optional> array $args = [] ]
+///           }
+///           - Tentative return [ ?object ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method newLazyGhost ] {
+///
+///           - Parameters [2] {
+///             Parameter #0 [ <required> callable $initializer ]
+///             Parameter #1 [ <optional> int $options = 0 ]
+///           }
+///           - Return [ object ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method newLazyProxy ] {
+///
+///           - Parameters [2] {
+///             Parameter #0 [ <required> callable $factory ]
+///             Parameter #1 [ <optional> int $options = 0 ]
+///           }
+///           - Return [ object ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method resetAsLazyGhost ] {
+///
+///           - Parameters [3] {
+///             Parameter #0 [ <required> object $object ]
+///             Parameter #1 [ <required> callable $initializer ]
+///             Parameter #2 [ <optional> int $options = 0 ]
+///           }
+///           - Return [ void ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method resetAsLazyProxy ] {
+///
+///           - Parameters [3] {
+///             Parameter #0 [ <required> object $object ]
+///             Parameter #1 [ <required> callable $factory ]
+///             Parameter #2 [ <optional> int $options = 0 ]
+///           }
+///           - Return [ void ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method initializeLazyObject ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> object $object ]
+///           }
+///           - Return [ object ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method isUninitializedLazyObject ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> object $object ]
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method markLazyObjectAsInitialized ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> object $object ]
+///           }
+///           - Return [ object ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getLazyInitializer ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> object $object ]
+///           }
+///           - Return [ ?callable ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getParentClass ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ ReflectionClass|false ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method isSubclassOf ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> ReflectionClass|string $class ]
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getStaticProperties ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getStaticPropertyValue ] {
+///
+///           - Parameters [2] {
+///             Parameter #0 [ <required> string $name ]
+///             Parameter #1 [ <optional> mixed $default = <default> ]
+///           }
+///           - Tentative return [ mixed ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method setStaticPropertyValue ] {
+///
+///           - Parameters [2] {
+///             Parameter #0 [ <required> string $name ]
+///             Parameter #1 [ <required> mixed $value ]
+///           }
+///           - Tentative return [ void ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getDefaultProperties ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method isIterable ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method isIterateable ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method implementsInterface ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> ReflectionClass|string $interface ]
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getExtension ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ ?ReflectionExtension ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getExtensionName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string|false ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method inNamespace ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getNamespaceName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getShortName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClass> public method getAttributes ] {
+///
+///           - Parameters [2] {
+///             Parameter #0 [ <optional> ?string $name = null ]
+///             Parameter #1 [ <optional> int $flags = 0 ]
+///           }
+///           - Return [ array ]
+///         }
+///       }
+///     }
+///
+///     Class [ <internal:Reflection> class ReflectionEnumUnitCase extends ReflectionClassConstant implements Reflector, Stringable ] {
+///
+///       - Constants [4] {
+///         Constant [ public int IS_PUBLIC ] { 1 }
+///         Constant [ public int IS_PROTECTED ] { 2 }
+///         Constant [ public int IS_PRIVATE ] { 4 }
+///         Constant [ public int IS_FINAL ] { 32 }
+///       }
+///
+///       - Static properties [0] {
+///       }
+///
+///       - Static methods [0] {
+///       }
+///
+///       - Properties [2] {
+///         Property [ public string $name ]
+///         Property [ public string $class ]
+///       }
+///
+///       - Methods [17] {
+///         Method [ <internal:Reflection, overwrites ReflectionClassConstant, ctor> public method __construct ] {
+///
+///           - Parameters [2] {
+///             Parameter #0 [ <required> object|string $class ]
+///             Parameter #1 [ <required> string $constant ]
+///           }
+///         }
+///
+///         Method [ <internal:Reflection> public method getEnum ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ ReflectionEnum ]
+///         }
+///
+///         Method [ <internal:Reflection, overwrites ReflectionClassConstant, prototype ReflectionClassConstant> public method getValue ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ UnitEnum ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClassConstant, prototype Stringable> public method __toString ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClassConstant> public method getName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClassConstant> public method isPublic ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClassConstant> public method isPrivate ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClassConstant> public method isProtected ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClassConstant> public method isFinal ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClassConstant> public method getModifiers ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ int ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClassConstant> public method getDeclaringClass ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ ReflectionClass ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClassConstant> public method getDocComment ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string|false ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClassConstant> public method getAttributes ] {
+///
+///           - Parameters [2] {
+///             Parameter #0 [ <optional> ?string $name = null ]
+///             Parameter #1 [ <optional> int $flags = 0 ]
+///           }
+///           - Return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClassConstant> public method isEnumCase ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClassConstant> public method isDeprecated ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClassConstant> public method hasType ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClassConstant> public method getType ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ ?ReflectionType ]
+///         }
+///       }
+///     }
+///
+///     Class [ <internal:Reflection> class ReflectionEnumBackedCase extends ReflectionEnumUnitCase implements Stringable, Reflector ] {
+///
+///       - Constants [4] {
+///         Constant [ public int IS_PUBLIC ] { 1 }
+///         Constant [ public int IS_PROTECTED ] { 2 }
+///         Constant [ public int IS_PRIVATE ] { 4 }
+///         Constant [ public int IS_FINAL ] { 32 }
+///       }
+///
+///       - Static properties [0] {
+///       }
+///
+///       - Static methods [0] {
+///       }
+///
+///       - Properties [2] {
+///         Property [ public string $name ]
+///         Property [ public string $class ]
+///       }
+///
+///       - Methods [18] {
+///         Method [ <internal:Reflection, overwrites ReflectionEnumUnitCase, ctor> public method __construct ] {
+///
+///           - Parameters [2] {
+///             Parameter #0 [ <required> object|string $class ]
+///             Parameter #1 [ <required> string $constant ]
+///           }
+///         }
+///
+///         Method [ <internal:Reflection> public method getBackingValue ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ string|int ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionEnumUnitCase> public method getEnum ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ ReflectionEnum ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionEnumUnitCase, prototype ReflectionClassConstant> public method getValue ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ UnitEnum ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClassConstant, prototype Stringable> public method __toString ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClassConstant> public method getName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClassConstant> public method isPublic ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClassConstant> public method isPrivate ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClassConstant> public method isProtected ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClassConstant> public method isFinal ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClassConstant> public method getModifiers ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ int ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClassConstant> public method getDeclaringClass ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ ReflectionClass ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClassConstant> public method getDocComment ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Tentative return [ string|false ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClassConstant> public method getAttributes ] {
+///
+///           - Parameters [2] {
+///             Parameter #0 [ <optional> ?string $name = null ]
+///             Parameter #1 [ <optional> int $flags = 0 ]
+///           }
+///           - Return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClassConstant> public method isEnumCase ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClassConstant> public method isDeprecated ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClassConstant> public method hasType ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection, inherits ReflectionClassConstant> public method getType ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ ?ReflectionType ]
+///         }
+///       }
+///     }
+///
+///     Class [ <internal:Reflection> final class ReflectionFiber ] {
+///
+///       - Constants [0] {
+///       }
+///
+///       - Static properties [0] {
+///       }
+///
+///       - Static methods [0] {
+///       }
+///
+///       - Properties [0] {
+///       }
+///
+///       - Methods [6] {
+///         Method [ <internal:Reflection, ctor> public method __construct ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> Fiber $fiber ]
+///           }
+///         }
+///
+///         Method [ <internal:Reflection> public method getFiber ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ Fiber ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getExecutingFile ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ ?string ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getExecutingLine ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ ?int ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getCallable ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ callable ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getTrace ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <optional> int $options = DEBUG_BACKTRACE_PROVIDE_OBJECT ]
+///           }
+///           - Return [ array ]
+///         }
+///       }
+///     }
+///
+///     Class [ <internal:Reflection> class ReflectionConstant implements Stringable, Reflector ] {
+///
+///       - Constants [0] {
+///       }
+///
+///       - Static properties [0] {
+///       }
+///
+///       - Static methods [0] {
+///       }
+///
+///       - Properties [1] {
+///         Property [ public string $name ]
+///       }
+///
+///       - Methods [11] {
+///         Method [ <internal:Reflection, ctor> public method __construct ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> string $name ]
+///           }
+///         }
+///
+///         Method [ <internal:Reflection> public method getName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getNamespaceName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getShortName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getValue ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ mixed ]
+///         }
+///
+///         Method [ <internal:Reflection> public method isDeprecated ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ bool ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getFileName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ string|false ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getExtension ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ ?ReflectionExtension ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getExtensionName ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ string|false ]
+///         }
+///
+///         Method [ <internal:Reflection, prototype Stringable> public method __toString ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ string ]
+///         }
+///
+///         Method [ <internal:Reflection> public method getAttributes ] {
+///
+///           - Parameters [2] {
+///             Parameter #0 [ <optional> ?string $name = null ]
+///             Parameter #1 [ <optional> int $flags = 0 ]
+///           }
+///           - Return [ array ]
+///         }
+///       }
+///     }
+///
+///     Enum [ <internal:Reflection> enum PropertyHookType: string implements BackedEnum, UnitEnum ] {
+///
+///       - Enum cases [2] {
+///         Case Get = get
+///         Case Set = set
+///       }
+///
+///       - Constants [0] {
+///       }
+///
+///       - Static properties [0] {
+///       }
+///
+///       - Static methods [3] {
+///         Method [ <internal:Reflection, prototype UnitEnum> static public method cases ] {
+///
+///           - Parameters [0] {
+///           }
+///           - Return [ array ]
+///         }
+///
+///         Method [ <internal:Reflection, prototype BackedEnum> static public method from ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> string|int $value ]
+///           }
+///           - Return [ static ]
+///         }
+///
+///         Method [ <internal:Reflection, prototype BackedEnum> static public method tryFrom ] {
+///
+///           - Parameters [1] {
+///             Parameter #0 [ <required> string|int $value ]
+///           }
+///           - Return [ ?static ]
+///         }
+///       }
+///
+///       - Properties [2] {
+///         Property [ public protected(set) readonly string $name ]
+///         Property [ public protected(set) readonly string $value ]
+///       }
+///
+///       - Methods [0] {
+///       }
+///     }
+///   }
+/// }
+/// ```
 pub fn extension() -> Extension {
-    let mut builder = ExtensionBuilder::default();
-    for (decl, methods) in stub::classes() {
-        builder = if REFLECTORS.iter().any(|name| *name == decl.name.0.as_ref()) {
-            builder.class_payload::<Reflected>(decl, methods, &Reflector)
-        } else {
-            builder.classes(vec![(decl, methods)])
-        };
-    }
-    builder
+    ExtensionBuilder::default()
+        .class::<ReflectionException>()
+        .class::<member::Reflection>()
+        .class::<Reflector>()
+        .class::<func::ReflectionFunctionAbstract>()
+        .class::<func::ReflectionFunction>()
+        .class::<func::ReflectionGenerator>()
+        .class::<signature::ReflectionParameter>()
+        .class::<signature::ReflectionType>()
+        .class::<signature::ReflectionNamedType>()
+        .class::<signature::ReflectionUnionType>()
+        .class::<signature::ReflectionIntersectionType>()
+        .class::<func::ReflectionMethod>()
+        .class::<class::ReflectionClass>()
+        .class::<class::ReflectionObject>()
+        .class::<member::ReflectionProperty>()
+        .class::<member::ReflectionClassConstant>()
+        .class::<ReflectionExtension>()
+        .class::<ReflectionZendExtension>()
+        .class::<ReflectionReference>()
+        .class::<attr::ReflectionAttribute>()
+        .class::<enums::ReflectionEnum>()
+        .class::<enums::ReflectionEnumUnitCase>()
+        .class::<enums::ReflectionEnumBackedCase>()
+        .class::<func::ReflectionFiber>()
+        .class::<member::ReflectionConstant>()
+        .class::<member::PropertyHookType>()
         .request_state::<State>()
         .info(reflection_info)
         // `zend_module_entry.name` is `Reflection`, the spelling
@@ -128,26 +4462,6 @@ fn reflection_info(req: &mut Request) {
     req.info_table(&[&["Reflection", "enabled"]]);
 }
 
-/// The classes php gives `reflection_objects_new` as their
-/// `create_object` (`Z/ext/reflection/php_reflection.c:7990-8080`), of
-/// the ones this crate's reflectors read a payload off: the class
-/// reflector, the object reflector php keeps the instance on, and the
-/// two member reflectors whose scope is the class they were asked
-/// about. A subclass takes the payload from its parent, as php inherits
-/// `create_object`, so `ReflectionEnum` and a user class extending
-/// `ReflectionClass` carry it without a row here. The reflectors php
-/// gives it that keep nothing yet stay `Std` until they do.
-const REFLECTORS: &[&[u8]] = &[
-    b"ReflectionAttribute",
-    b"ReflectionClass",
-    b"ReflectionObject",
-    b"ReflectionMethod",
-    b"ReflectionProperty",
-    b"ReflectionFunction",
-    b"ReflectionParameter",
-    b"ReflectionReference",
-];
-
 /// php's `reflection_object` beside the `name` and `class` properties
 /// the stub declares (`Z/ext/reflection/php_reflection.c:180-188`):
 /// `intern->ce`, the class the reflector was asked about, which is not
@@ -159,7 +4473,7 @@ const REFLECTORS: &[&[u8]] = &[
 /// The slot is laid down by `new` as the class's `create_object`
 /// (design §5.4) and written by the constructor.
 #[derive(Default)]
-struct Reflected {
+pub(crate) struct Reflected {
     ce: Option<ClassId>,
     object: Option<PhpObject>,
     /// php's `attribute_reference`, which `ReflectionAttribute` keeps
@@ -181,9 +4495,12 @@ struct Reflected {
 /// which is why `clone $reflector` is php's uncloneable `Error`, and
 /// `get_gc` hands the collector what the payload holds. php's `offset`
 /// and `write_property` are its own bookkeeping and the engine's here.
-struct Reflector;
+pub(crate) struct ReflectorHandlers;
 
-impl ObjectHandlers for Reflector {
+/// The handlers every reflector with a [`Reflected`] payload carries.
+pub(crate) static HANDLERS: ReflectorHandlers = ReflectorHandlers;
+
+impl ObjectHandlers for ReflectorHandlers {
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         let Some(reflected) = object.native_mut::<Reflected>(req) else {
             return;
@@ -308,15 +4625,44 @@ fn kept_object(req: &Request, this: PhpObject) -> Option<PhpObject> {
     this.native::<Reflected>(req).and_then(|kept| kept.object)
 }
 
-/// A native's entry, the shape `ExtensionBuilder::classes` takes beside
-/// each method.
-type Entry = fn(&mut Request) -> Result<Value, Thrown>;
+/// Core's classes and interfaces the reflectors extend, implement and
+/// hand out, named for `extends`, `implements` and the types that hold
+/// them.
+#[php_class(extern)]
+pub(crate) struct Exception;
 
-/// `ZEND_PARSE_PARAMETERS_START(1, 1)` with one `string`: the count
-/// held to exactly one and the argument read as [`string_argument`].
-fn one_string_argument(req: &mut Request) -> Result<Vec<u8>, Thrown> {
-    exactly_arguments(req, 1)?;
-    string_argument(req, 1)
+#[php_class(extern)]
+pub(crate) struct Stringable;
+
+#[php_class(extern)]
+pub(crate) struct UnitEnum;
+
+#[php_class(extern)]
+pub(crate) struct Closure;
+
+#[php_class(extern)]
+pub(crate) struct Generator;
+
+#[php_class(extern)]
+pub(crate) struct Fiber;
+
+/// A body's value answered under its method's declared type, as php
+/// hands back what the native wrote into `return_value`.
+fn answer<T: FromArgument>(
+    value: Result<Value, Thrown>,
+    req: &mut Request,
+) -> Result<Raw<T>, Thrown> {
+    value.and_then(|value| Raw::from_value(req, value))
+}
+
+/// What a method declared and not yet served throws: php's `Error`, as
+/// a native that cannot do what it was asked raises one.
+fn unbuilt(req: &mut Request) -> Thrown {
+    throw(
+        req,
+        "Error",
+        "This Reflection method is declared and not yet served by this engine",
+    )
 }
 
 /// `ZEND_PARSE_PARAMETERS_START(n, n)`'s count check: php's
@@ -356,37 +4702,19 @@ fn at_most_arguments(req: &mut Request, most: usize) -> Result<(), Thrown> {
     ))
 }
 
-/// `Z_PARAM_STR` at `position`: a scalar is coerced as a string
-/// parameter is, `null` the 8.1 deprecation naming the declared type
-/// and the empty string written back as the argument, both
-/// `coerce_param`'s; the argument's bytes are copied out of the frame.
-fn string_argument(req: &mut Request, position: u32) -> Result<Vec<u8>, Thrown> {
-    let Some(given) = req.argument(position) else {
-        return Ok(Vec::new());
-    };
-    let coerced = php_ext::coerce::coerce_param(req, &given, &Type::String, position)?;
-    Ok(coerced.as_str_bytes().unwrap_or_default().to_vec())
-}
-
-/// `Z_PARAM_OBJ_OR_STR` at `position` and the lookup both reflection
+/// `Z_PARAM_OBJ_OR_STR`'s value and the lookup both reflection
 /// constructors do with it: an object is its class, kept beside it; a
 /// string is `zend_lookup_class`, a leading `\` dropped, or php's
 /// `ReflectionException` `Class "X" does not exist` with the name as
-/// given; the refusal is `coerce_param`'s over `object|string`.
-fn class_argument(
+/// given.
+fn class_of(
     req: &mut Request,
-    position: u32,
+    given: Union<PhpObject, PhpString>,
 ) -> Result<(ClassId, Option<PhpObject>), Thrown> {
-    let Some(given) = req.argument(position) else {
-        return Ok((class_named(req, b"")?, None));
-    };
-    let ty = Type::Union(vec![Type::Object, Type::String]);
-    let held = php_ext::coerce::coerce_param(req, &given, &ty, position)?;
-    if let Some(object) = held.as_object() {
-        return Ok((object.class(), Some(*object)));
+    match given {
+        Union::A(object) => Ok((object.class(), Some(object))),
+        Union::B(name) => Ok((class_named(req, name.as_bytes())?, None)),
     }
-    let name = held.as_str_bytes().unwrap_or_default().to_vec();
-    Ok((class_named(req, &name)?, None))
 }
 
 /// `zend_lookup_class` or the `ReflectionException` every reflector
@@ -446,416 +4774,6 @@ fn string_value(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
     Ok(Value::string(PhpString::new(req, bytes)?))
 }
 
-/// `ReflectionExtension::__construct(string $name)`: the extension
-/// under the lowered name in `module_registry`, its declared name kept
-/// as `$name`; a name the bundle has not is php's `ReflectionException`,
-/// the name as given.
-///
-/// ```php
-/// $e = new ReflectionExtension('CTYPE'); $f = new ReflectionFunction('CTYPE_ALPHA'); echo $e->name, '|', $f->name, '|'; var_dump($e instanceof Reflector);
-/// ```
-/// ```expect
-/// ctype|ctype_alpha|bool(true)
-/// ```
-///
-/// ```php
-/// new ReflectionExtension('nope');
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ReflectionException: Extension "nope" does not exist in %s:2
-/// Stack trace:
-/// #0 %s(2): ReflectionExtension->__construct('nope')
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-///
-/// ```php
-/// new ReflectionExtension();
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ArgumentCountError: ReflectionExtension::__construct() expects exactly 1 argument, 0 given in %s:2
-/// Stack trace:
-/// #0 %s(2): ReflectionExtension->__construct()
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-fn reflection_extension_construct(req: &mut Request) -> Result<Value, Thrown> {
-    let name = one_string_argument(req)?;
-    let Some(extension) = req.extension_named(&name) else {
-        return Err(throw(
-            req,
-            "ReflectionException",
-            &format!(
-                "Extension \"{}\" does not exist",
-                String::from_utf8_lossy(&name)
-            ),
-        ));
-    };
-    let declared = req
-        .extension_name(extension)
-        .map(str::to_owned)
-        .unwrap_or_default();
-    if let Some(this) = req.this() {
-        set_name(req, this, declared.as_bytes())?;
-    }
-    Ok(Value::null())
-}
-
-/// `ReflectionExtension::__toString()`: `_extension_string` over the
-/// extension `$name` names, indent empty. The load number in the first
-/// line is the oracle's build order there and the bundle's here, `#10`
-/// against `#15` for ctype, a difference that is nobody's defect; the
-/// pin's `[recipe.normalise] extension_number_token` (#317) replaces
-/// the digits after `extension #` in both streams, so the fence below
-/// holds every byte the oracle prints and the token stands where the
-/// number was.
-///
-/// ```php
-/// echo new ReflectionExtension('ctype');
-/// ```
-/// ```expect
-/// Extension [ <persistent> extension #%N% ctype version 8.5.9 ] {
-///
-///   - Functions {
-///     Function [ <internal:ctype> function ctype_alnum ] {
-///
-///       - Parameters [1] {
-///         Parameter #0 [ <required> mixed $text ]
-///       }
-///       - Return [ bool ]
-///     }
-///     Function [ <internal:ctype> function ctype_alpha ] {
-///
-///       - Parameters [1] {
-///         Parameter #0 [ <required> mixed $text ]
-///       }
-///       - Return [ bool ]
-///     }
-///     Function [ <internal:ctype> function ctype_cntrl ] {
-///
-///       - Parameters [1] {
-///         Parameter #0 [ <required> mixed $text ]
-///       }
-///       - Return [ bool ]
-///     }
-///     Function [ <internal:ctype> function ctype_digit ] {
-///
-///       - Parameters [1] {
-///         Parameter #0 [ <required> mixed $text ]
-///       }
-///       - Return [ bool ]
-///     }
-///     Function [ <internal:ctype> function ctype_lower ] {
-///
-///       - Parameters [1] {
-///         Parameter #0 [ <required> mixed $text ]
-///       }
-///       - Return [ bool ]
-///     }
-///     Function [ <internal:ctype> function ctype_graph ] {
-///
-///       - Parameters [1] {
-///         Parameter #0 [ <required> mixed $text ]
-///       }
-///       - Return [ bool ]
-///     }
-///     Function [ <internal:ctype> function ctype_print ] {
-///
-///       - Parameters [1] {
-///         Parameter #0 [ <required> mixed $text ]
-///       }
-///       - Return [ bool ]
-///     }
-///     Function [ <internal:ctype> function ctype_punct ] {
-///
-///       - Parameters [1] {
-///         Parameter #0 [ <required> mixed $text ]
-///       }
-///       - Return [ bool ]
-///     }
-///     Function [ <internal:ctype> function ctype_space ] {
-///
-///       - Parameters [1] {
-///         Parameter #0 [ <required> mixed $text ]
-///       }
-///       - Return [ bool ]
-///     }
-///     Function [ <internal:ctype> function ctype_upper ] {
-///
-///       - Parameters [1] {
-///         Parameter #0 [ <required> mixed $text ]
-///       }
-///       - Return [ bool ]
-///     }
-///     Function [ <internal:ctype> function ctype_xdigit ] {
-///
-///       - Parameters [1] {
-///         Parameter #0 [ <required> mixed $text ]
-///       }
-///       - Return [ bool ]
-///     }
-///   }
-/// }
-/// ```
-///
-/// ```php
-/// echo new ReflectionExtension('tokenizer');
-/// ```
-/// ```expect
-/// Extension [ <persistent> extension #%N% tokenizer version 8.5.9 ] {
-///
-///   - Constants [154] {
-///     Constant [ <persistent> int T_LNUMBER ] { 260 }
-///     Constant [ <persistent> int T_DNUMBER ] { 261 }
-///     Constant [ <persistent> int T_STRING ] { 262 }
-///     Constant [ <persistent> int T_NAME_FULLY_QUALIFIED ] { 263 }
-///     Constant [ <persistent> int T_NAME_RELATIVE ] { 264 }
-///     Constant [ <persistent> int T_NAME_QUALIFIED ] { 265 }
-///     Constant [ <persistent> int T_VARIABLE ] { 266 }
-///     Constant [ <persistent> int T_INLINE_HTML ] { 267 }
-///     Constant [ <persistent> int T_ENCAPSED_AND_WHITESPACE ] { 268 }
-///     Constant [ <persistent> int T_CONSTANT_ENCAPSED_STRING ] { 269 }
-///     Constant [ <persistent> int T_STRING_VARNAME ] { 270 }
-///     Constant [ <persistent> int T_NUM_STRING ] { 271 }
-///     Constant [ <persistent> int T_INCLUDE ] { 272 }
-///     Constant [ <persistent> int T_INCLUDE_ONCE ] { 273 }
-///     Constant [ <persistent> int T_EVAL ] { 274 }
-///     Constant [ <persistent> int T_REQUIRE ] { 275 }
-///     Constant [ <persistent> int T_REQUIRE_ONCE ] { 276 }
-///     Constant [ <persistent> int T_LOGICAL_OR ] { 277 }
-///     Constant [ <persistent> int T_LOGICAL_XOR ] { 278 }
-///     Constant [ <persistent> int T_LOGICAL_AND ] { 279 }
-///     Constant [ <persistent> int T_PRINT ] { 280 }
-///     Constant [ <persistent> int T_YIELD ] { 281 }
-///     Constant [ <persistent> int T_YIELD_FROM ] { 282 }
-///     Constant [ <persistent> int T_INSTANCEOF ] { 283 }
-///     Constant [ <persistent> int T_NEW ] { 284 }
-///     Constant [ <persistent> int T_CLONE ] { 285 }
-///     Constant [ <persistent> int T_EXIT ] { 286 }
-///     Constant [ <persistent> int T_IF ] { 287 }
-///     Constant [ <persistent> int T_ELSEIF ] { 288 }
-///     Constant [ <persistent> int T_ELSE ] { 289 }
-///     Constant [ <persistent> int T_ENDIF ] { 290 }
-///     Constant [ <persistent> int T_ECHO ] { 291 }
-///     Constant [ <persistent> int T_DO ] { 292 }
-///     Constant [ <persistent> int T_WHILE ] { 293 }
-///     Constant [ <persistent> int T_ENDWHILE ] { 294 }
-///     Constant [ <persistent> int T_FOR ] { 295 }
-///     Constant [ <persistent> int T_ENDFOR ] { 296 }
-///     Constant [ <persistent> int T_FOREACH ] { 297 }
-///     Constant [ <persistent> int T_ENDFOREACH ] { 298 }
-///     Constant [ <persistent> int T_DECLARE ] { 299 }
-///     Constant [ <persistent> int T_ENDDECLARE ] { 300 }
-///     Constant [ <persistent> int T_AS ] { 301 }
-///     Constant [ <persistent> int T_SWITCH ] { 302 }
-///     Constant [ <persistent> int T_ENDSWITCH ] { 303 }
-///     Constant [ <persistent> int T_CASE ] { 304 }
-///     Constant [ <persistent> int T_DEFAULT ] { 305 }
-///     Constant [ <persistent> int T_MATCH ] { 306 }
-///     Constant [ <persistent> int T_BREAK ] { 307 }
-///     Constant [ <persistent> int T_CONTINUE ] { 308 }
-///     Constant [ <persistent> int T_GOTO ] { 309 }
-///     Constant [ <persistent> int T_FUNCTION ] { 310 }
-///     Constant [ <persistent> int T_FN ] { 311 }
-///     Constant [ <persistent> int T_CONST ] { 312 }
-///     Constant [ <persistent> int T_RETURN ] { 313 }
-///     Constant [ <persistent> int T_TRY ] { 314 }
-///     Constant [ <persistent> int T_CATCH ] { 315 }
-///     Constant [ <persistent> int T_FINALLY ] { 316 }
-///     Constant [ <persistent> int T_THROW ] { 317 }
-///     Constant [ <persistent> int T_USE ] { 318 }
-///     Constant [ <persistent> int T_INSTEADOF ] { 319 }
-///     Constant [ <persistent> int T_GLOBAL ] { 320 }
-///     Constant [ <persistent> int T_STATIC ] { 321 }
-///     Constant [ <persistent> int T_ABSTRACT ] { 322 }
-///     Constant [ <persistent> int T_FINAL ] { 323 }
-///     Constant [ <persistent> int T_PRIVATE ] { 324 }
-///     Constant [ <persistent> int T_PROTECTED ] { 325 }
-///     Constant [ <persistent> int T_PUBLIC ] { 326 }
-///     Constant [ <persistent> int T_PRIVATE_SET ] { 327 }
-///     Constant [ <persistent> int T_PROTECTED_SET ] { 328 }
-///     Constant [ <persistent> int T_PUBLIC_SET ] { 329 }
-///     Constant [ <persistent> int T_READONLY ] { 330 }
-///     Constant [ <persistent> int T_VAR ] { 331 }
-///     Constant [ <persistent> int T_UNSET ] { 332 }
-///     Constant [ <persistent> int T_ISSET ] { 333 }
-///     Constant [ <persistent> int T_EMPTY ] { 334 }
-///     Constant [ <persistent> int T_HALT_COMPILER ] { 335 }
-///     Constant [ <persistent> int T_CLASS ] { 336 }
-///     Constant [ <persistent> int T_TRAIT ] { 337 }
-///     Constant [ <persistent> int T_INTERFACE ] { 338 }
-///     Constant [ <persistent> int T_ENUM ] { 339 }
-///     Constant [ <persistent> int T_EXTENDS ] { 340 }
-///     Constant [ <persistent> int T_IMPLEMENTS ] { 341 }
-///     Constant [ <persistent> int T_NAMESPACE ] { 342 }
-///     Constant [ <persistent> int T_LIST ] { 343 }
-///     Constant [ <persistent> int T_ARRAY ] { 344 }
-///     Constant [ <persistent> int T_CALLABLE ] { 345 }
-///     Constant [ <persistent> int T_LINE ] { 346 }
-///     Constant [ <persistent> int T_FILE ] { 347 }
-///     Constant [ <persistent> int T_DIR ] { 348 }
-///     Constant [ <persistent> int T_CLASS_C ] { 349 }
-///     Constant [ <persistent> int T_TRAIT_C ] { 350 }
-///     Constant [ <persistent> int T_METHOD_C ] { 351 }
-///     Constant [ <persistent> int T_FUNC_C ] { 352 }
-///     Constant [ <persistent> int T_PROPERTY_C ] { 353 }
-///     Constant [ <persistent> int T_NS_C ] { 354 }
-///     Constant [ <persistent> int T_ATTRIBUTE ] { 355 }
-///     Constant [ <persistent> int T_PLUS_EQUAL ] { 356 }
-///     Constant [ <persistent> int T_MINUS_EQUAL ] { 357 }
-///     Constant [ <persistent> int T_MUL_EQUAL ] { 358 }
-///     Constant [ <persistent> int T_DIV_EQUAL ] { 359 }
-///     Constant [ <persistent> int T_CONCAT_EQUAL ] { 360 }
-///     Constant [ <persistent> int T_MOD_EQUAL ] { 361 }
-///     Constant [ <persistent> int T_AND_EQUAL ] { 362 }
-///     Constant [ <persistent> int T_OR_EQUAL ] { 363 }
-///     Constant [ <persistent> int T_XOR_EQUAL ] { 364 }
-///     Constant [ <persistent> int T_SL_EQUAL ] { 365 }
-///     Constant [ <persistent> int T_SR_EQUAL ] { 366 }
-///     Constant [ <persistent> int T_COALESCE_EQUAL ] { 367 }
-///     Constant [ <persistent> int T_BOOLEAN_OR ] { 368 }
-///     Constant [ <persistent> int T_BOOLEAN_AND ] { 369 }
-///     Constant [ <persistent> int T_IS_EQUAL ] { 370 }
-///     Constant [ <persistent> int T_IS_NOT_EQUAL ] { 371 }
-///     Constant [ <persistent> int T_IS_IDENTICAL ] { 372 }
-///     Constant [ <persistent> int T_IS_NOT_IDENTICAL ] { 373 }
-///     Constant [ <persistent> int T_IS_SMALLER_OR_EQUAL ] { 374 }
-///     Constant [ <persistent> int T_IS_GREATER_OR_EQUAL ] { 375 }
-///     Constant [ <persistent> int T_SPACESHIP ] { 376 }
-///     Constant [ <persistent> int T_SL ] { 377 }
-///     Constant [ <persistent> int T_SR ] { 378 }
-///     Constant [ <persistent> int T_INC ] { 379 }
-///     Constant [ <persistent> int T_DEC ] { 380 }
-///     Constant [ <persistent> int T_INT_CAST ] { 381 }
-///     Constant [ <persistent> int T_DOUBLE_CAST ] { 382 }
-///     Constant [ <persistent> int T_STRING_CAST ] { 383 }
-///     Constant [ <persistent> int T_ARRAY_CAST ] { 384 }
-///     Constant [ <persistent> int T_OBJECT_CAST ] { 385 }
-///     Constant [ <persistent> int T_BOOL_CAST ] { 386 }
-///     Constant [ <persistent> int T_UNSET_CAST ] { 387 }
-///     Constant [ <persistent> int T_VOID_CAST ] { 388 }
-///     Constant [ <persistent> int T_OBJECT_OPERATOR ] { 389 }
-///     Constant [ <persistent> int T_NULLSAFE_OBJECT_OPERATOR ] { 390 }
-///     Constant [ <persistent> int T_DOUBLE_ARROW ] { 391 }
-///     Constant [ <persistent> int T_COMMENT ] { 392 }
-///     Constant [ <persistent> int T_DOC_COMMENT ] { 393 }
-///     Constant [ <persistent> int T_OPEN_TAG ] { 394 }
-///     Constant [ <persistent> int T_OPEN_TAG_WITH_ECHO ] { 395 }
-///     Constant [ <persistent> int T_CLOSE_TAG ] { 396 }
-///     Constant [ <persistent> int T_WHITESPACE ] { 397 }
-///     Constant [ <persistent> int T_START_HEREDOC ] { 398 }
-///     Constant [ <persistent> int T_END_HEREDOC ] { 399 }
-///     Constant [ <persistent> int T_DOLLAR_OPEN_CURLY_BRACES ] { 400 }
-///     Constant [ <persistent> int T_CURLY_OPEN ] { 401 }
-///     Constant [ <persistent> int T_PAAMAYIM_NEKUDOTAYIM ] { 402 }
-///     Constant [ <persistent> int T_NS_SEPARATOR ] { 403 }
-///     Constant [ <persistent> int T_ELLIPSIS ] { 404 }
-///     Constant [ <persistent> int T_COALESCE ] { 405 }
-///     Constant [ <persistent> int T_POW ] { 406 }
-///     Constant [ <persistent> int T_POW_EQUAL ] { 407 }
-///     Constant [ <persistent> int T_PIPE ] { 408 }
-///     Constant [ <persistent> int T_AMPERSAND_FOLLOWED_BY_VAR_OR_VARARG ] { 409 }
-///     Constant [ <persistent> int T_AMPERSAND_NOT_FOLLOWED_BY_VAR_OR_VARARG ] { 410 }
-///     Constant [ <persistent> int T_BAD_CHARACTER ] { 411 }
-///     Constant [ <persistent> int T_DOUBLE_COLON ] { 402 }
-///     Constant [ <persistent> int TOKEN_PARSE ] { 1 }
-///   }
-///
-///   - Functions {
-///     Function [ <internal:tokenizer> function token_get_all ] {
-///
-///       - Parameters [2] {
-///         Parameter #0 [ <required> string $code ]
-///         Parameter #1 [ <optional> int $flags = 0 ]
-///       }
-///       - Return [ array ]
-///     }
-///     Function [ <internal:tokenizer> function token_name ] {
-///
-///       - Parameters [1] {
-///         Parameter #0 [ <required> int $id ]
-///       }
-///       - Return [ string ]
-///     }
-///   }
-///
-///   - Classes [1] {
-///     Class [ <internal:tokenizer> class PhpToken implements Stringable ] {
-///
-///       - Constants [0] {
-///       }
-///
-///       - Static properties [0] {
-///       }
-///
-///       - Static methods [1] {
-///         Method [ <internal:tokenizer> static public method tokenize ] {
-///
-///           - Parameters [2] {
-///             Parameter #0 [ <required> string $code ]
-///             Parameter #1 [ <optional> int $flags = 0 ]
-///           }
-///           - Return [ array ]
-///         }
-///       }
-///
-///       - Properties [4] {
-///         Property [ public int $id ]
-///         Property [ public string $text ]
-///         Property [ public int $line ]
-///         Property [ public int $pos ]
-///       }
-///
-///       - Methods [5] {
-///         Method [ <internal:tokenizer, ctor> final public method __construct ] {
-///
-///           - Parameters [4] {
-///             Parameter #0 [ <required> int $id ]
-///             Parameter #1 [ <required> string $text ]
-///             Parameter #2 [ <optional> int $line = -1 ]
-///             Parameter #3 [ <optional> int $pos = -1 ]
-///           }
-///         }
-///
-///         Method [ <internal:tokenizer> public method is ] {
-///
-///           - Parameters [1] {
-///             Parameter #0 [ <required> $kind ]
-///           }
-///           - Return [ bool ]
-///         }
-///
-///         Method [ <internal:tokenizer> public method isIgnorable ] {
-///
-///           - Parameters [0] {
-///           }
-///           - Return [ bool ]
-///         }
-///
-///         Method [ <internal:tokenizer> public method getTokenName ] {
-///
-///           - Parameters [0] {
-///           }
-///           - Return [ ?string ]
-///         }
-///
-///         Method [ <internal:tokenizer, prototype Stringable> public method __toString ] {
-///
-///           - Parameters [0] {
-///           }
-///           - Return [ string ]
-///         }
-///       }
-///     }
-///   }
-/// }
-/// ```
-fn reflection_extension_to_string(req: &mut Request) -> Result<Value, Thrown> {
-    let extension = this_extension(req)?;
-    let text = extension_string(req, extension, "")?;
-    string_value(req, text.as_bytes())
-}
-
 /// `GET_REFLECTION_OBJECT_PTR(module)` for a `ReflectionExtension`: the
 /// extension `$name` names, looked up again as the constructor found
 /// it; a name the bundle has not is the constructor's
@@ -873,72 +4791,6 @@ fn this_extension(req: &mut Request) -> Result<ExtensionId, Thrown> {
             ),
         )),
     }
-}
-
-/// `ReflectionExtension::getName()`: `module->name`, the spelling the
-/// `zend_module_entry` carries whatever the constructor was given.
-///
-/// ```php
-/// var_dump((new ReflectionExtension('CTYPE'))->getName());
-/// ```
-/// ```expect
-/// string(5) "ctype"
-/// ```
-fn reflection_extension_get_name(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let extension = this_extension(req)?;
-    let name = req
-        .extension_name(extension)
-        .map(str::to_owned)
-        .unwrap_or_default();
-    string_value(req, name.as_bytes())
-}
-
-/// `ReflectionExtension::getClasses()`: over `EG(class_table)` in its
-/// order, every class whose `ce->info.internal.module` is this
-/// extension, keyed by its name and holding the `ReflectionClass`
-/// `zend_reflection_class_factory` makes, `object_init_ex` and the name
-/// written with no constructor served, a `ReflectionEnum` for an enum.
-/// The alias key php takes for an aliased class has no case here until
-/// `class_alias` links one. `ctype` declares no class, so the fence
-/// pins the empty walk; the walk over `Reflection`'s classes is
-/// `ReflectionExtension_getClasses_basic.phpt`'s, which names php's
-/// twenty-six where this crate declares a subset, and a fence over one
-/// of them waits on the compiler reading a dimension fetch.
-///
-/// ```php
-/// $e = new ReflectionExtension('ctype'); var_dump($e->getClasses(), $e->getClassNames());
-/// ```
-/// ```expect
-/// array(0) {
-/// }
-/// array(0) {
-/// }
-/// ```
-fn reflection_extension_get_classes(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let extension = this_extension(req)?;
-    let mut classes = PhpArray::new(req)?;
-    for (class, name) in extension_classes(req, extension) {
-        let reflector = reflection_class_factory(req, class)?;
-        let key = Key::Str(PhpString::new(req, &name)?);
-        classes.set(req, key, Value::object(reflector))?;
-    }
-    Ok(Value::array(classes))
-}
-
-/// `ReflectionExtension::getClassNames()`: the same walk as
-/// `getClasses`, the names appended in order. The witness is
-/// `getClasses`'s.
-fn reflection_extension_get_class_names(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let extension = this_extension(req)?;
-    let mut names = PhpArray::new(req)?;
-    for (_, name) in extension_classes(req, extension) {
-        let name = Value::string(PhpString::new(req, &name)?);
-        names.append(req, name)?;
-    }
-    Ok(Value::array(names))
 }
 
 /// `add_extension_class`'s test over the linked table: each class the
@@ -971,133 +4823,6 @@ fn reflection_class_factory(req: &mut Request, class: ClassId) -> Result<PhpObje
     let name = class_name_of(req, class);
     set_name(req, object, &name)?;
     Ok(object)
-}
-
-/// `ReflectionExtension::getVersion()`: `module->version`, and `null`
-/// for `NO_VERSION_YET`. Every extension compiled in here carries
-/// `PHP_VERSION`, as `PHP_CTYPE_VERSION` and its kin do, which is what
-/// `_extension_string`'s header prints.
-///
-/// ```php
-/// var_dump((new ReflectionExtension('json'))->getVersion());
-/// ```
-/// ```expect
-/// string(5) "8.5.9"
-/// ```
-fn reflection_extension_get_version(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    this_extension(req)?;
-    string_value(req, PHP_VERSION.as_bytes())
-}
-
-/// `ReflectionExtension::getFunctions()`: one `ReflectionFunction` per
-/// native the extension declared, keyed by
-/// `fptr->common.function_name`, which for a native is the lowered
-/// name php registered it under.
-///
-/// ```php
-/// var_dump((new ReflectionExtension('json'))->getFunctions());
-/// ```
-/// ```expect
-/// array(5) {
-///   ["json_encode"]=>
-///   object(ReflectionFunction)#2 (1) {
-///     ["name"]=>
-///     string(11) "json_encode"
-///   }
-///   ["json_decode"]=>
-///   object(ReflectionFunction)#3 (1) {
-///     ["name"]=>
-///     string(11) "json_decode"
-///   }
-///   ["json_validate"]=>
-///   object(ReflectionFunction)#4 (1) {
-///     ["name"]=>
-///     string(13) "json_validate"
-///   }
-///   ["json_last_error"]=>
-///   object(ReflectionFunction)#5 (1) {
-///     ["name"]=>
-///     string(15) "json_last_error"
-///   }
-///   ["json_last_error_msg"]=>
-///   object(ReflectionFunction)#6 (1) {
-///     ["name"]=>
-///     string(19) "json_last_error_msg"
-///   }
-/// }
-/// ```
-fn reflection_extension_get_functions(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let extension = this_extension(req)?;
-    let reflector = class_named(req, b"ReflectionFunction")?;
-    let mut functions = PhpArray::new(req)?;
-    for function in req.extension_functions(extension) {
-        let Some(name) = req.function_decl(function).map(|decl| decl.name.0.to_vec()) else {
-            continue;
-        };
-        let object = new_object(req, reflector)?;
-        set_name(req, object, &name)?;
-        let key = Key::Str(PhpString::new(req, &name)?);
-        functions.set(req, key, object.as_value())?;
-    }
-    Ok(Value::array(functions))
-}
-
-/// `ReflectionExtension::getConstants()`: the constants the extension
-/// declared, keyed by name, each value the constant's.
-///
-/// ```php
-/// var_dump((new ReflectionExtension('ctype'))->getConstants());
-/// ```
-/// ```expect
-/// array(0) {
-/// }
-/// ```
-fn reflection_extension_get_constants(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let extension = this_extension(req)?;
-    let mut constants = PhpArray::new(req)?;
-    for declared in req.extension_constants(extension) {
-        let name = declared.0.to_vec();
-        let value = constant(req, &name)?.unwrap_or_default();
-        let key = Key::Str(PhpString::new(req, &name)?);
-        constants.set(req, key, value)?;
-    }
-    Ok(Value::array(constants))
-}
-
-/// `ReflectionExtension::getINIEntries()`: `_addinientry` over the
-/// extension's entries, each name keyed to the value in force.
-///
-/// ```php
-/// ini_set('date.default_latitude', '1');
-/// var_dump((new ReflectionExtension('date'))->getINIEntries());
-/// ```
-/// ```expect
-/// array(5) {
-///   ["date.timezone"]=>
-///   string(3) "UTC"
-///   ["date.default_latitude"]=>
-///   string(1) "1"
-///   ["date.default_longitude"]=>
-///   string(7) "35.2333"
-///   ["date.sunset_zenith"]=>
-///   string(9) "90.833333"
-///   ["date.sunrise_zenith"]=>
-///   string(9) "90.833333"
-/// }
-/// ```
-fn reflection_extension_get_ini_entries(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let extension = this_extension(req)?;
-    let mut entries = PhpArray::new(req)?;
-    for entry in req.extension_ini(extension) {
-        let key = Key::Str(PhpString::new(req, &entry.decl.name.0)?);
-        let value = Value::string(PhpString::new(req, &entry.value)?);
-        entries.set(req, key, value)?;
-    }
-    Ok(Value::array(entries))
 }
 
 /// `_extension_ini_string` over each of the extension's entries: the
@@ -1172,460 +4897,9 @@ fn extension_ini_string(req: &Request, extension: ExtensionId, indent: &str) -> 
     out
 }
 
-/// `ReflectionExtension::getDependencies()`: `module->deps` walked into
-/// an array keyed by the other extension's name, each value the kind,
-/// `Required`, `Conflicts` or `Optional`, then the row's `rel` and
-/// `version` each after one space where set; the empty array where the
-/// pointer is null, as it is for `ctype`.
-///
-/// ```php
-/// var_dump((new ReflectionExtension('ctype'))->getDependencies());
-/// ```
-/// ```expect
-/// array(0) {
-/// }
-/// ```
-fn reflection_extension_get_dependencies(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let extension = this_extension(req)?;
-    let mut dependencies = PhpArray::new(req)?;
-    for dependency in req.extension_dependencies(extension) {
-        let mut relation = String::from(match dependency.kind {
-            DependencyKind::Required => "Required",
-            DependencyKind::Conflicts => "Conflicts",
-            DependencyKind::Optional => "Optional",
-        });
-        for part in [&dependency.rel, &dependency.version].into_iter().flatten() {
-            relation.push(' ');
-            relation.push_str(part);
-        }
-        let key = Key::Str(PhpString::new(req, dependency.name.as_bytes())?);
-        let value = Value::string(PhpString::new(req, relation.as_bytes())?);
-        dependencies.set(req, key, value)?;
-    }
-    Ok(Value::array(dependencies))
-}
-
-/// `ReflectionExtension::info()`: `php_info_print_module` over the
-/// extension, the name then its `MINFO` table, written to the body as
-/// the CLI prints it; `null` returned, as a `void` method is.
-///
-/// ```php
-/// (new ReflectionExtension('ctype'))->info();
-/// ```
-/// ```expect
-/// ctype
-///
-/// ctype functions => enabled
-/// ```
-fn reflection_extension_info(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let extension = this_extension(req)?;
-    req.extension_info(extension);
-    Ok(Value::null())
-}
-
-/// `ReflectionExtension::isPersistent()`:
-/// `module->type == MODULE_PERSISTENT`, which every extension compiled
-/// into the binary is; `MODULE_TEMPORARY` is `dl()`'s, which this
-/// engine has none of.
-///
-/// ```php
-/// $e = new ReflectionExtension('ctype'); var_dump($e->isPersistent(), $e->isTemporary());
-/// ```
-/// ```expect
-/// bool(true)
-/// bool(false)
-/// ```
-fn reflection_extension_is_persistent(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    this_extension(req)?;
-    Ok(Value::bool(true))
-}
-
-/// `ReflectionExtension::isTemporary()`:
-/// `module->type == MODULE_TEMPORARY`, the complement of
-/// `isPersistent`, whose witness this shares.
-fn reflection_extension_is_temporary(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    this_extension(req)?;
-    Ok(Value::bool(false))
-}
-
 // -------------------------------------------------- ReflectionReference
 
-/// `ReflectionReference::fromArrayElement(array $array, int|string
-/// $key)`: a reflector over the element at `key` where it is a
-/// reference, `null` where it is a plain value or a reference only the
-/// array holds (`is_ignorable_reference`, a directly self-referential
-/// array excepted), and php's `ReflectionException` for a key the array
-/// has not. The key is looked up as given, `zend_hash_find` for a
-/// string and `zend_hash_index_find` for an int.
-///
-/// ```php
-/// $a = [0, 1, 2]; $r = &$a[1]; $one = &$a[2]; unset($one);
-/// var_dump(ReflectionReference::fromArrayElement($a, 0), ReflectionReference::fromArrayElement($a, 1), ReflectionReference::fromArrayElement($a, 2));
-/// try { ReflectionReference::fromArrayElement($a, 3); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
-/// try { ReflectionReference::fromArrayElement($a, []); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
-/// $s = []; $s[0] = &$s; $t = [$s]; unset($s);
-/// var_dump(ReflectionReference::fromArrayElement($t[0], 0) instanceof ReflectionReference);
-/// ```
-/// ```expect
-/// NULL
-/// object(ReflectionReference)#1 (0) {
-/// }
-/// NULL
-/// Array key not found
-/// ReflectionReference::fromArrayElement(): Argument #2 ($key) must be of type string|int, array given
-/// bool(true)
-/// ```
-fn reflection_reference_from_array_element(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 2)?;
-    let given = req.argument(1).unwrap_or_default();
-    let array = php_ext::coerce::coerce_param(req, &given, &Type::Array, 1)?;
-    let given = req.argument(2).unwrap_or_default();
-    let key =
-        php_ext::coerce::coerce_param(req, &given, &Type::Union(vec![Type::String, Type::Int]), 2)?;
-    let Some(array) = array.as_array().copied() else {
-        return Ok(Value::null());
-    };
-    let key = match key.as_ref() {
-        ValueRef::Int(n) => Key::Int(n),
-        _ => Key::Str(PhpString::new(req, key.as_str_bytes().unwrap_or_default())?),
-    };
-    let Some(item) = array.get(&key) else {
-        return Err(throw(req, "ReflectionException", "Array key not found"));
-    };
-    let Some(reference) = item.as_php_ref().copied() else {
-        return Ok(Value::null());
-    };
-    // `is_ignorable_reference`: one owner, the array's, and no directly
-    // self-referential array, which `zend_array_dup` keeps as a
-    // reference despite the one owner.
-    let self_referential = reference
-        .get()
-        .as_array()
-        .and_then(|held| held.get(&key))
-        .and_then(|element| element.as_php_ref().copied())
-        == Some(reference);
-    if item.refcount() == 1 && !self_referential {
-        return Ok(Value::null());
-    }
-    let class = class_named(req, b"ReflectionReference")?;
-    let object = new_object(req, class)?;
-    req.addref(&reference.as_value());
-    if let Some(reflected) = object.native_mut::<Reflected>(req) {
-        reflected.reference = Some(reference);
-    } else {
-        req.release(reference.as_value());
-    }
-    Ok(object.as_value())
-}
-
-/// `ReflectionReference::getId()`: a string that is the same for two
-/// reflectors over one reference and differs between two references,
-/// twenty bytes as php's `SHA1(ref || key)` is, here the reference's
-/// identity hashed under the request's secret, so no address is shown;
-/// php's `Corrupted ReflectionReference object` for a reflector that
-/// holds none.
-///
-/// ```php
-/// $a = [1, 2]; $x = &$a[0]; $y = &$a[1]; $b = []; $b[0] = &$a[0];
-/// $r0 = ReflectionReference::fromArrayElement($a, 0); $r1 = ReflectionReference::fromArrayElement($a, 1); $rb = ReflectionReference::fromArrayElement($b, 0);
-/// var_dump($r0->getId() === $rb->getId(), $r0->getId() !== $r1->getId(), strlen($r0->getId()));
-/// ```
-/// ```expect
-/// bool(true)
-/// bool(true)
-/// int(20)
-/// ```
-fn reflection_reference_get_id(req: &mut Request) -> Result<Value, Thrown> {
-    use std::hash::BuildHasher as _;
-    exactly_arguments(req, 0)?;
-    let reference = req
-        .this()
-        .and_then(|this| this.native::<Reflected>(req))
-        .and_then(|reflected| reflected.reference);
-    let Some(reference) = reference else {
-        return Err(throw(
-            req,
-            "ReflectionException",
-            "Corrupted ReflectionReference object",
-        ));
-    };
-    let key = &req.state::<State>().reference_key;
-    let digest: Vec<u8> = (0u8..3)
-        .flat_map(|round| key.hash_one((reference, round)).to_le_bytes())
-        .take(20)
-        .collect();
-    string_value(req, &digest)
-}
-
-/// `ReflectionReference::__construct()`: private, and php's refusal
-/// when reached anyway, since a reflector is made by
-/// `fromArrayElement`.
-///
-/// ```php
-/// try { new ReflectionReference(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// Call to private ReflectionReference::__construct() from global scope
-/// ```
-fn reflection_reference_construct(req: &mut Request) -> Result<Value, Thrown> {
-    Err(throw(
-        req,
-        "ReflectionException",
-        "Cannot directly instantiate ReflectionReference. Use ReflectionReference::fromArrayElement() instead",
-    ))
-}
-
 // -------------------------------------------------- ReflectionZendExtension
-
-/// `ReflectionZendExtension::__construct(string $name)`:
-/// `zend_get_extension(name)` or php's `ReflectionException`. The
-/// engine loads no Zend extension, `zend_extensions` being empty, so
-/// every name is refused and no reflector of this class ever holds one.
-///
-/// ```php
-/// try { new ReflectionZendExtension('zend_opcache'); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
-/// try { new ReflectionZendExtension([]); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// Zend Extension "zend_opcache" does not exist
-/// ReflectionZendExtension::__construct(): Argument #1 ($name) must be of type string, array given
-/// ```
-fn reflection_zend_extension_construct(req: &mut Request) -> Result<Value, Thrown> {
-    let name = one_string_argument(req)?;
-    Err(throw(
-        req,
-        "ReflectionException",
-        &format!(
-            "Zend Extension \"{}\" does not exist",
-            String::from_utf8_lossy(&name)
-        ),
-    ))
-}
-
-/// `ReflectionZendExtension`'s six readers, `__toString`, `getName`,
-/// `getVersion`, `getAuthor`, `getURL` and `getCopyright`: each reads
-/// `intern->ptr`, which only the constructor writes and which it never
-/// writes here ([`reflection_zend_extension_construct`]), so each is
-/// `GET_REFLECTION_OBJECT_PTR`'s `Error` after its count check.
-///
-/// ```php
-/// $r = (new ReflectionClass('ReflectionZendExtension'))->newInstanceWithoutConstructor();
-/// foreach (['getName', 'getVersion', 'getAuthor', 'getURL', 'getCopyright', '__toString'] as $m) {
-///     try { call_user_func([$r, $m]); } catch (Error $e) { echo $e->getMessage(), "\n"; }
-/// }
-/// try { $r->getName(1); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// Internal error: Failed to retrieve the reflection object
-/// Internal error: Failed to retrieve the reflection object
-/// Internal error: Failed to retrieve the reflection object
-/// Internal error: Failed to retrieve the reflection object
-/// Internal error: Failed to retrieve the reflection object
-/// Internal error: Failed to retrieve the reflection object
-/// ReflectionZendExtension::getName() expects exactly 0 arguments, 1 given
-/// ```
-fn reflection_zend_extension_reader(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    Err(throw(
-        req,
-        "Error",
-        "Internal error: Failed to retrieve the reflection object",
-    ))
-}
-
-/// `ReflectionFunctionAbstract::isDeprecated()`:
-/// `_function_check_flag(ZEND_ACC_DEPRECATED)`, the bit the
-/// `#[\Deprecated]` attribute sets on a native's or a user function's
-/// declaration, read from the attribute as `_function_string` reads it
-/// for `, deprecated`. `ctype` deprecates none of its eleven.
-///
-/// ```php
-/// var_dump((new ReflectionFunction('ctype_alpha'))->isDeprecated());
-/// ```
-/// ```expect
-/// bool(false)
-/// ```
-fn reflection_function_is_deprecated(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let (_, name) = this_name(req, "ReflectionFunction")?;
-    let Some(function) = lookup_function(req, &name) else {
-        return Err(throw(
-            req,
-            "ReflectionException",
-            &format!(
-                "Function {}() does not exist",
-                String::from_utf8_lossy(&name)
-            ),
-        ));
-    };
-    let deprecated = req.function_decl(function).is_some_and(|decl| {
-        decl.attributes
-            .iter()
-            .any(|a| a.name.0.eq_ignore_ascii_case(b"Deprecated"))
-    });
-    Ok(Value::bool(deprecated))
-}
-
-/// `ReflectionFunction::__construct(Closure|string $function)`: the
-/// function under the lowered name, a leading `\` dropped, its declared
-/// name kept as `$name`; a name the tables have not is php's
-/// `ReflectionException`, the name as given. A `Closure` is
-/// `zend_get_closure_method_def` over the object, which the reflector
-/// keeps as php keeps `intern->obj`, and `$name` is the
-/// `{closure:file:line}` the compiler built for it; an object of any
-/// other class is the type error.
-///
-/// ```php
-/// $r = new ReflectionFunction(function ($a, $b = 1) {});
-/// var_dump($r->isClosure(), $r->getNumberOfParameters(), $r->getNumberOfRequiredParameters(), $r->isUserDefined());
-/// echo $r, "\n";
-/// ```
-/// ```expect
-/// bool(true)
-/// int(2)
-/// int(1)
-/// bool(true)
-/// Closure [ <user> function {closure:%s:2} ] {
-///   @@ %s 2 - 2
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> $a ]
-///     Parameter #1 [ <optional> $b = 1 ]
-///   }
-/// }
-/// ```
-///
-/// ```php
-/// new ReflectionFunction(new stdClass);
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught TypeError: ReflectionFunction::__construct(): Argument #1 ($function) must be of type Closure|string, stdClass given in %s:2
-/// Stack trace:
-/// #0 %s(2): ReflectionFunction->__construct(Object(stdClass))
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-///
-/// ```php
-/// new ReflectionFunction('nope');
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ReflectionException: Function nope() does not exist in %s:2
-/// Stack trace:
-/// #0 %s(2): ReflectionFunction->__construct('nope')
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-///
-/// `null` is `coerce_param`'s over `Closure|string`: the deprecation
-/// naming the union and the empty string written over the argument,
-/// which is what the trace of the miss prints, and under
-/// `strict_types` the `TypeError`.
-///
-/// ```php
-/// new ReflectionFunction(null);
-/// ```
-/// ```expect exit=255
-/// Deprecated: ReflectionFunction::__construct(): Passing null to parameter #1 ($function) of type Closure|string is deprecated in %s on line 2
-///
-/// Fatal error: Uncaught ReflectionException: Function () does not exist in %s:2
-/// Stack trace:
-/// #0 %s(2): ReflectionFunction->__construct('')
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-///
-/// ```php
-/// declare(strict_types=1);
-/// try { new ReflectionFunction(null); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// ReflectionFunction::__construct(): Argument #1 ($function) must be of type Closure|string, null given
-/// ```
-fn reflection_function_construct(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 1)?;
-    let given = req.argument(1).unwrap_or_default();
-    let ty = Type::Union(vec![
-        Type::Named(Name(b"Closure".as_slice().into())),
-        Type::String,
-    ]);
-    let held = php_ext::coerce::coerce_param(req, &given, &ty, 1)?;
-    if let Some(object) = held.as_object().copied() {
-        // php's `IS_OBJECT` arm: `zend_get_closure_method_def` and
-        // `intern->obj` holding the closure, `$name` the declaration's
-        // own, which is the `{closure:…}` the compiler built.
-        let Some(decl) = signature::closure_decl(req, object) else {
-            return Err(php_ext::raising::fatal(
-                req,
-                "InternalError: a Closure with no declaration behind it",
-            ));
-        };
-        if let Some(this) = req.this() {
-            set_name(req, this, &decl.name.0)?;
-            keep_closure(req, this, object);
-        }
-        return Ok(Value::null());
-    }
-    let name = held.as_str_bytes().unwrap_or_default().to_vec();
-    let bare = name.strip_prefix(b"\\").unwrap_or(&name);
-    let Some(function) = lookup_function(req, bare) else {
-        return Err(throw(
-            req,
-            "ReflectionException",
-            &format!(
-                "Function {}() does not exist",
-                String::from_utf8_lossy(&name)
-            ),
-        ));
-    };
-    let declared = req
-        .function_decl(function)
-        .map(|decl| decl.name.0.to_vec())
-        .unwrap_or_default();
-    if let Some(this) = req.this() {
-        set_name(req, this, &declared)?;
-    }
-    Ok(Value::null())
-}
-
-/// `ReflectionFunction::__toString()`: `_function_string` over the
-/// function `$name` names, no scope, indent empty.
-///
-/// ```php
-/// echo new ReflectionFunction('ctype_alpha');
-/// ```
-/// ```expect
-/// Function [ <internal:ctype> function ctype_alpha ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> mixed $text ]
-///   }
-///   - Return [ bool ]
-/// }
-/// ```
-fn reflection_function_to_string(req: &mut Request) -> Result<Value, Thrown> {
-    let (this, name) = this_name(req, "ReflectionFunction")?;
-    if let Some(closure) = kept_closure(req, this) {
-        let text = closure_string(req, closure, "")?;
-        return Ok(Value::string(PhpString::new(req, text.as_bytes())?));
-    }
-    let Some(function) = lookup_function(req, &name) else {
-        return Err(throw(
-            req,
-            "ReflectionException",
-            &format!(
-                "Function {}() does not exist",
-                String::from_utf8_lossy(&name)
-            ),
-        ));
-    };
-    let text = function_string(req, function, "");
-    Ok(Value::string(PhpString::new(req, text.as_bytes())?))
-}
 
 // -------------------------------------------------- ReflectionClass
 
@@ -1711,331 +4985,20 @@ fn constant_key(name: &[u8]) -> Vec<u8> {
     key
 }
 
-/// `reflection_class_object_ctor` with `is_object` off,
-/// `ReflectionClass::__construct(object|string $objectOrClass)`: an
-/// object's class or the class named, its declared name kept as
-/// `$name`.
-///
-/// ```php
-/// $r = new ReflectionClass('reflectionexception'); var_dump($r, (new ReflectionClass(new ReflectionException))->name);
-/// ```
-/// ```expect
-/// object(ReflectionClass)#1 (1) {
-///   ["name"]=>
-///   string(19) "ReflectionException"
-/// }
-/// string(19) "ReflectionException"
-/// ```
-///
-/// ```php
-/// new ReflectionClass('Nope');
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ReflectionException: Class "Nope" does not exist in %s:2
-/// Stack trace:
-/// #0 %s(2): ReflectionClass->__construct('Nope')
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-///
-/// The `TypeError` for an array, `must be of type object|string, array
-/// given`, has no fence until the compiler reads an array expression.
-///
-/// ```php
-/// new ReflectionClass(null);
-/// ```
-/// ```expect exit=255
-/// Deprecated: ReflectionClass::__construct(): Passing null to parameter #1 ($objectOrClass) of type object|string is deprecated in %s on line 2
-///
-/// Fatal error: Uncaught ReflectionException: Class "" does not exist in %s:2
-/// Stack trace:
-/// #0 %s(2): ReflectionClass->__construct('')
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-///
-/// ```php
-/// new ReflectionClass();
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ArgumentCountError: ReflectionClass::__construct() expects exactly 1 argument, 0 given in %s:2
-/// Stack trace:
-/// #0 %s(2): ReflectionClass->__construct()
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-fn reflection_class_construct(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 1)?;
-    let (class, _) = class_argument(req, 1)?;
-    let name = class_name_of(req, class);
-    if let Some(this) = req.this() {
-        set_name(req, this, &name)?;
-    }
-    Ok(Value::null())
-}
-
-/// `reflection_class_object_ctor` with `is_object` on,
-/// `ReflectionObject::__construct(object $object)`: the object's class
-/// as `$name`, and the object itself as `intern->obj`, one more owner,
-/// which the `Dynamic properties` block of `__toString` reads and
-/// `free_obj` gives back.
-///
-/// ```php
-/// $t = new stdClass; $t->b = 2;
-/// echo new ReflectionObject($t);
-/// ```
-/// ```expect
-/// Object of class [ <internal:Core> class stdClass ] {
-///
-///   - Constants [0] {
-///   }
-///
-///   - Static properties [0] {
-///   }
-///
-///   - Static methods [0] {
-///   }
-///
-///   - Properties [0] {
-///   }
-///
-///   - Dynamic properties [1] {
-///     Property [ <dynamic> public $b ]
-///   }
-///
-///   - Methods [0] {
-///   }
-/// }
-/// ```
-///
-/// ```php
-/// var_dump(new ReflectionObject(new ReflectionException));
-/// ```
-/// ```expect
-/// object(ReflectionObject)#1 (1) {
-///   ["name"]=>
-///   string(19) "ReflectionException"
-/// }
-/// ```
-///
-/// ```php
-/// new ReflectionObject('x');
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught TypeError: ReflectionObject::__construct(): Argument #1 ($object) must be of type object, string given in %s:2
-/// Stack trace:
-/// #0 %s(2): ReflectionObject->__construct('x')
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-fn reflection_object_construct(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 1)?;
-    let given = req.argument(1).unwrap_or_default();
-    let given = php_ext::coerce::coerce_param(req, &given, &Type::Object, 1)?;
-    let Some(object) = given.as_object().copied() else {
-        return Ok(Value::null());
-    };
-    let name = class_name_of(req, object.class());
-    if let Some(this) = req.this() {
-        set_name(req, this, &name)?;
-        keep(req, this, object.class(), Some(object));
-    }
-    Ok(Value::null())
-}
-
-/// `ReflectionClass::getName()`: `ce->name`. `ReflectionObject` has no
-/// `getName` of its own and answers with this one, as php's inherited
-/// function table does.
-///
-/// ```php
-/// class C {} var_dump((new ReflectionClass('c'))->getName(), (new ReflectionObject(new C))->getName());
-/// ```
-/// ```expect
-/// string(1) "C"
-/// string(1) "C"
-/// ```
-///
-/// ```php
-/// ReflectionObject::getName();
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught Error: Non-static method ReflectionClass::getName() cannot be called statically in %s:2
-/// Stack trace:
-/// #0 {main}
-///   thrown in %s on line 2
-/// ```
-///
-/// ```php
-/// $r = new ReflectionClass('ReflectionException'); var_dump($r->getName(1));
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ArgumentCountError: ReflectionClass::getName() expects exactly 0 arguments, 1 given in %s:2
-/// Stack trace:
-/// #0 %s(2): ReflectionClass->getName(1)
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-fn reflection_class_get_name(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let class = this_class(req)?;
-    let name = class_name_of(req, class);
-    string_value(req, &name)
-}
-
-/// `ReflectionClass::isInternal()`: `ce->type == ZEND_INTERNAL_CLASS`,
-/// which for the declaration model is a class with no file.
-///
-/// ```php
-/// class C {} var_dump((new ReflectionClass('C'))->isInternal(), (new ReflectionClass('ReflectionClass'))->isInternal(), (new ReflectionClass('C'))->isUserDefined(), (new ReflectionObject(new ReflectionProperty('Exception', 'message')))->isUserDefined());
-/// ```
-/// ```expect
-/// bool(false)
-/// bool(true)
-/// bool(true)
-/// bool(false)
-/// ```
-fn reflection_class_is_internal(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let class = this_class(req)?;
-    Ok(Value::bool(is_internal(req, class)))
-}
-
-/// `ReflectionClass::isUserDefined()`: `ce->type == ZEND_USER_CLASS`.
-/// The witness is `isInternal`'s above.
-fn reflection_class_is_user_defined(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let class = this_class(req)?;
-    Ok(Value::bool(!is_internal(req, class)))
-}
-
 fn is_internal(req: &Request, class: ClassId) -> bool {
     req.class_decl(class)
         .is_none_or(|decl| decl.file.0.is_empty())
 }
 
-/// `ReflectionClass::getFileName()`: `ce->info.user.filename` for a
-/// user class, `false` for an internal one. The three site accessors
-/// share this witness; the name is the file's as the runner names
-/// it, a path under the oracle and `witness.php` here.
-///
-/// ```php
-/// $r = new ReflectionClass('C'); var_dump($r->getFileName(), $r->getStartLine(), $r->getEndLine()); $r = new ReflectionClass('Exception'); var_dump($r->getFileName(), $r->getStartLine(), $r->getEndLine()); class C { public $a; }
-/// ```
-/// ```expect
-/// string(%d) "%s.php"
-/// int(2)
-/// int(2)
-/// bool(false)
-/// bool(false)
-/// bool(false)
-/// ```
-fn reflection_class_get_file_name(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let class = this_class(req)?;
-    let file = req
-        .class_decl(class)
-        .filter(|decl| !decl.file.0.is_empty())
-        .map(|decl| decl.file.0.to_vec());
-    match file {
-        Some(file) => string_value(req, &file),
-        None => Ok(Value::bool(false)),
-    }
-}
-
-/// `ReflectionClass::getStartLine()`: `ce->info.user.line_start`, or
-/// `false` for an internal class. The witness is `getFileName`'s.
-fn reflection_class_get_start_line(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let class = this_class(req)?;
-    Ok(user_line(req, class, |decl| decl.line))
-}
-
-/// `ReflectionClass::getEndLine()`: `ce->info.user.line_end`, the line
-/// of the closing brace, or `false` for an internal class. The witness
-/// is `getFileName`'s.
-fn reflection_class_get_end_line(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let class = this_class(req)?;
-    Ok(user_line(req, class, |decl| decl.end_line))
-}
-
-fn user_line(req: &Request, class: ClassId, line: fn(&ClassDecl) -> u32) -> Value {
+fn user_line(req: &Request, class: ClassId, line: fn(&ClassDecl) -> u32) -> OrFalse<i64> {
     req.class_decl(class)
         .filter(|decl| !decl.file.0.is_empty())
-        .map_or(Value::bool(false), |decl| Value::int(i64::from(line(decl))))
-}
-
-/// `ReflectionClass::getExtension()`: `ce->info.internal.module` as a
-/// `ReflectionExtension`, made as `reflection_extension_factory` makes
-/// it, `object_init_ex` and the name written, no constructor served;
-/// `null` for a user class. A class Zend declares itself is php's
-/// `Core` `zend_module_entry`, which this engine has no `Extension` value for yet
-/// (#379), so `Exception` answers `null` here and `Core` there; the
-/// fence stays off that class until the bundle names it.
-///
-/// ```php
-/// class C {} var_dump((new ReflectionClass('ReflectionException'))->getExtension(), (new ReflectionClass('ReflectionException'))->getExtensionName(), (new ReflectionClass('C'))->getExtension(), (new ReflectionClass('C'))->getExtensionName());
-/// ```
-/// ```expect
-/// object(ReflectionExtension)#2 (1) {
-///   ["name"]=>
-///   string(10) "Reflection"
-/// }
-/// string(10) "Reflection"
-/// NULL
-/// bool(false)
-/// ```
-fn reflection_class_get_extension(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let class = this_class(req)?;
-    let Some(name) = class_extension_name(req, class) else {
-        return Ok(Value::null());
-    };
-    let Some(reflector) = lookup_class(req, b"ReflectionExtension")? else {
-        return Ok(Value::null());
-    };
-    let object = new_object(req, reflector)?;
-    set_name(req, object, name.as_bytes())?;
-    Ok(Value::object(object))
-}
-
-/// `ReflectionClass::getExtensionName()`: the extension's name, or `false`
-/// for a user class. The witness is `getExtension`'s.
-fn reflection_class_get_extension_name(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let class = this_class(req)?;
-    match class_extension_name(req, class) {
-        Some(name) => string_value(req, name.as_bytes()),
-        None => Ok(Value::bool(false)),
-    }
+        .map_or(OrFalse::False, |decl| OrFalse::Value(i64::from(line(decl))))
 }
 
 fn class_extension_name(req: &Request, class: ClassId) -> Option<String> {
     let extension = req.class_extension(class)?;
     req.extension_name(extension).map(str::to_owned)
-}
-
-/// `ReflectionClass::hasConstant(string $name)`:
-/// `zend_hash_exists(&ce->constants_table, name)`, the table php fills
-/// with the class's own constants and every parent's but the private
-/// ones (`do_inherit_class_constant`). A scalar is the string it
-/// coerces to, so `hasConstant(1)` asks for `"1"`.
-///
-/// ```php
-/// class Foo { const c1 = 1; } $r = new ReflectionClass('Foo'); var_dump($r->hasConstant('c1'), $r->hasConstant('c2'), $r->hasConstant(1), (new ReflectionClass('ReflectionClass'))->hasConstant('IS_FINAL'));
-/// ```
-/// ```expect
-/// bool(true)
-/// bool(false)
-/// bool(false)
-/// bool(true)
-/// ```
-fn reflection_class_has_constant(req: &mut Request) -> Result<Value, Thrown> {
-    let name = one_string_argument(req)?;
-    let class = this_class(req)?;
-    Ok(Value::bool(
-        class_constant_named(req, class, &name).is_some(),
-    ))
 }
 
 /// The constant `name` names in `ce->constants_table`: the class's own or
@@ -2087,55 +5050,6 @@ fn constant_value(
     eval_const_expr(req, &constant.value, Some(scope))
 }
 
-fn reflection_class_get_constant(req: &mut Request) -> Result<Value, Thrown> {
-    let name = one_string_argument(req)?;
-    let class = this_class(req)?;
-    if let Some((declaring, constant)) = class_constant_named(req, class, &name) {
-        return constant_value(req, &constant, declaring);
-    }
-    deprecated(
-        req,
-        "ReflectionClass::getConstant() for a non-existent constant is deprecated, use ReflectionClass::hasConstant() to check if the constant exists",
-    );
-    Ok(Value::bool(false))
-}
-
-/// `ReflectionClass::hasProperty(string $name)`: the name in
-/// `ce->properties_info`, the class's own properties and every
-/// parent's, a parent's private one excluded as php's
-/// `property_info->ce == ce` test excludes it. php then asks a
-/// `ReflectionObject`'s instance for a dynamic property of that name;
-/// the reflector here keeps no instance, so that branch is `false`
-/// until it does.
-///
-/// ```php
-/// class C { public $a; protected $b; private $c; public static $d; } $r = new ReflectionClass('C'); $e = new ReflectionClass('ReflectionException'); var_dump($r->hasProperty('a'), $r->hasProperty('b'), $r->hasProperty('c'), $r->hasProperty('d'), $r->hasProperty('e'), $r->hasProperty(1.5), $e->hasProperty('message'), $e->hasProperty('string'));
-/// ```
-/// ```expect
-/// bool(true)
-/// bool(true)
-/// bool(true)
-/// bool(true)
-/// bool(false)
-/// bool(false)
-/// bool(true)
-/// bool(false)
-/// ```
-fn reflection_class_has_property(req: &mut Request) -> Result<Value, Thrown> {
-    let name = one_string_argument(req)?;
-    let class = this_class(req)?;
-    if property_named(req, class, &name).is_some() {
-        return Ok(Value::bool(true));
-    }
-    // `has_property(obj, name, ZEND_PROPERTY_EXISTS)` on the object a
-    // `ReflectionObject` kept: its dynamic properties.
-    let dynamic = match req.this().and_then(|this| kept_object(req, this)) {
-        Some(object) => dynamic_properties(req, class, object).contains(&name),
-        None => false,
-    };
-    Ok(Value::bool(dynamic))
-}
-
 /// The property `name` names in the class's info table: the class's
 /// own or a parent's non-private one, with the class that declares it.
 fn property_named(
@@ -2155,783 +5069,11 @@ fn property_named(
     None
 }
 
-/// `ReflectionClass::getDefaultProperties()`: `add_class_vars` twice,
-/// the `static` properties then the instance ones, each in
-/// `properties_info` order, the class's own before the inherited, a
-/// parent's private ones skipped, and a typed property with no
-/// default skipped as its `UNDEF` slot is; each default is the
-/// expression it was written as, evaluated in the declaring class.
-///
-/// ```php
-/// class Foo { protected static $s = 'foo'; protected $i = 'foo'; public $n; } var_dump((new ReflectionClass('Foo'))->getDefaultProperties(), (new ReflectionClass('ReflectionException'))->getDefaultProperties());
-/// ```
-/// ```expect
-/// array(3) {
-///   ["s"]=>
-///   string(3) "foo"
-///   ["i"]=>
-///   string(3) "foo"
-///   ["n"]=>
-///   NULL
-/// }
-/// array(4) {
-///   ["message"]=>
-///   string(0) ""
-///   ["code"]=>
-///   int(0)
-///   ["file"]=>
-///   string(0) ""
-///   ["line"]=>
-///   int(0)
-/// }
-/// ```
-fn reflection_class_get_default_properties(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let class = this_class(req)?;
-    let mut defaults = PhpArray::new(req)?;
-    let table = linked_properties(req, class);
-    for statics in [true, false] {
-        for (property, at) in &table {
-            if property.is_instance == statics
-                || (*at != class && property.visibility == Visibility::Private)
-            {
-                continue;
-            }
-            let value = match &property.default {
-                Some(expr) => eval_const_expr(req, expr, Some(*at))?,
-                None if property.ty.is_some() => continue,
-                None => Value::null(),
-            };
-            let key = Key::Str(PhpString::new(req, &property.name.0)?);
-            defaults.set(req, key, value)?;
-        }
-    }
-    Ok(Value::array(defaults))
-}
-
-/// `ReflectionClass::isSubclassOf(ReflectionClass|string $class)`:
-/// `ce != class_ce && instanceof_function(ce, class_ce)`, so a class
-/// is not a subclass of itself and is one of every parent and every
-/// interface up the chain. A `ReflectionClass` argument is the class
-/// it reflects; a string is looked up, a miss php's `ReflectionException`.
-///
-/// ```php
-/// class A {} $a = new ReflectionClass('A'); $e = new ReflectionClass('ReflectionException'); var_dump($a->isSubclassOf($a), $e->isSubclassOf('exception'), $e->isSubclassOf(new ReflectionClass('Throwable')), $e->isSubclassOf('Stringable'), $e->isSubclassOf('ReflectionException'), $a->isSubclassOf('ReflectionException'));
-/// ```
-/// ```expect
-/// bool(false)
-/// bool(true)
-/// bool(true)
-/// bool(true)
-/// bool(false)
-/// bool(false)
-/// ```
-///
-/// ```php
-/// class A {} (new ReflectionClass('A'))->isSubclassOf('X');
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ReflectionException: Class "X" does not exist in %s:2
-/// Stack trace:
-/// #0 %s(2): ReflectionClass->isSubclassOf('X')
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-/// The `TypeError` for an array has no fence until the compiler reads
-/// an array expression.
-fn reflection_class_is_subclass_of(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 1)?;
-    let class = this_class(req)?;
-    let given = req.argument(1).unwrap_or_default();
-    let ty = Type::Union(vec![
-        Type::Named(Name(b"ReflectionClass".as_slice().into())),
-        Type::String,
-    ]);
-    let given = php_ext::coerce::coerce_param(req, &given, &ty, 1)?;
-    let of = if let ValueRef::Object(object) = given.as_ref() {
-        let Some(name) = object
-            .prop(req, b"name")
-            .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
-        else {
-            return Err(throw(
-                req,
-                "Error",
-                "Internal error: Failed to retrieve the argument's reflection object",
-            ));
-        };
-        class_named(req, &name)?
-    } else {
-        let name = given.as_str_bytes().unwrap_or_default().to_vec();
-        class_named(req, &name)?
-    };
-    Ok(Value::bool(class != of && class_is(req, class, of, 0)))
-}
-
-/// `ReflectionClass::inNamespace()`: whether `ce->name` has a `\`.
-///
-/// ```php
-/// $r = new ReflectionClass('ReflectionException'); var_dump($r->inNamespace(), $r->getNamespaceName(), $r->getShortName());
-/// ```
-/// ```expect
-/// bool(false)
-/// string(0) ""
-/// string(19) "ReflectionException"
-/// ```
-fn reflection_class_in_namespace(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let class = this_class(req)?;
-    let name = class_name_of(req, class);
-    Ok(Value::bool(namespace_end(&name).is_some()))
-}
-
-/// `ReflectionClass::getNamespaceName()`: the name up to its last `\`,
-/// empty without one. The witness is `inNamespace`'s.
-fn reflection_class_get_namespace_name(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let class = this_class(req)?;
-    let name = class_name_of(req, class);
-    let end = namespace_end(&name).unwrap_or(0);
-    string_value(req, &name[..end])
-}
-
-/// `ReflectionClass::getShortName()`: the name after its last `\`, the
-/// whole name without one. The witness is `inNamespace`'s.
-fn reflection_class_get_short_name(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let class = this_class(req)?;
-    let name = class_name_of(req, class);
-    let start = namespace_end(&name).map_or(0, |end| end + 1);
-    string_value(req, &name[start..])
-}
-
-/// `ReflectionClass::getAttributes(?string $name = null, int $flags =
-/// 0)`: `reflect_attributes` over `ce->attributes` with
-/// `ZEND_ATTRIBUTE_TARGET_CLASS`, an empty array for a class with none.
-///
-/// ```php
-/// class C {} var_dump((new ReflectionClass('C'))->getAttributes(), (new ReflectionClass('ReflectionClass'))->getAttributes());
-/// try { (new ReflectionClass('C'))->getAttributes(null, 4); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
-/// try { (new ReflectionClass('C'))->getAttributes('Nope', ReflectionAttribute::IS_INSTANCEOF); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// array(0) {
-/// }
-/// array(0) {
-/// }
-/// ValueError: ReflectionClass::getAttributes(): Argument #2 ($flags) must be a valid attribute filter flag
-/// Error: Class "Nope" not found
-/// ```
-///
-/// ```php
-/// (new ReflectionClass('ReflectionException'))->getAttributes(1, 2, 3);
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ArgumentCountError: ReflectionClass::getAttributes() expects at most 2 arguments, 3 given in %s:2
-/// Stack trace:
-/// #0 %s(2): ReflectionClass->getAttributes(1, 2, 3)
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-fn reflection_class_get_attributes(req: &mut Request) -> Result<Value, Thrown> {
-    let class = this_class(req)?;
-    let attributes = req
-        .class_decl(class)
-        .map_or_else(Vec::new, |decl| decl.attributes.clone());
-    attr::reflect_attributes(req, &attributes, Some(class), attr::TARGET_CLASS)
-}
-
 // -------------------------------------------------- ReflectionClass::__toString
-
-/// `ReflectionClass::__toString()`: `_class_string` over the class
-/// `$name` names, no object, indent empty. `JsonException` is the
-/// first class of the bundle with inherited members: `Exception`'s
-/// four protected properties, its three private ones shadowed and
-/// skipped, and ten of its eleven methods, the private `__clone`
-/// skipped, each `inherits Exception` with the prototype the interface
-/// gave it and `ctor` on the constructor.
-///
-/// ```php
-/// echo new ReflectionClass('JsonException');
-/// ```
-/// ```expect
-/// Class [ <internal:json> class JsonException extends Exception implements Throwable, Stringable ] {
-///
-///   - Constants [0] {
-///   }
-///
-///   - Static properties [0] {
-///   }
-///
-///   - Static methods [0] {
-///   }
-///
-///   - Properties [4] {
-///     Property [ protected $message = '' ]
-///     Property [ protected $code = 0 ]
-///     Property [ protected string $file = '' ]
-///     Property [ protected int $line = 0 ]
-///   }
-///
-///   - Methods [10] {
-///     Method [ <internal:Core, inherits Exception, ctor> public method __construct ] {
-///
-///       - Parameters [3] {
-///         Parameter #0 [ <optional> string $message = "" ]
-///         Parameter #1 [ <optional> int $code = 0 ]
-///         Parameter #2 [ <optional> ?Throwable $previous = null ]
-///       }
-///     }
-///
-///     Method [ <internal:Core, inherits Exception> public method __wakeup ] {
-///
-///       - Parameters [0] {
-///       }
-///       - Tentative return [ void ]
-///     }
-///
-///     Method [ <internal:Core, inherits Exception, prototype Throwable> final public method getMessage ] {
-///
-///       - Parameters [0] {
-///       }
-///       - Return [ string ]
-///     }
-///
-///     Method [ <internal:Core, inherits Exception, prototype Throwable> final public method getCode ] {
-///
-///       - Parameters [0] {
-///       }
-///     }
-///
-///     Method [ <internal:Core, inherits Exception, prototype Throwable> final public method getFile ] {
-///
-///       - Parameters [0] {
-///       }
-///       - Return [ string ]
-///     }
-///
-///     Method [ <internal:Core, inherits Exception, prototype Throwable> final public method getLine ] {
-///
-///       - Parameters [0] {
-///       }
-///       - Return [ int ]
-///     }
-///
-///     Method [ <internal:Core, inherits Exception, prototype Throwable> final public method getTrace ] {
-///
-///       - Parameters [0] {
-///       }
-///       - Return [ array ]
-///     }
-///
-///     Method [ <internal:Core, inherits Exception, prototype Throwable> final public method getPrevious ] {
-///
-///       - Parameters [0] {
-///       }
-///       - Return [ ?Throwable ]
-///     }
-///
-///     Method [ <internal:Core, inherits Exception, prototype Throwable> final public method getTraceAsString ] {
-///
-///       - Parameters [0] {
-///       }
-///       - Return [ string ]
-///     }
-///
-///     Method [ <internal:Core, inherits Exception, prototype Stringable> public method __toString ] {
-///
-///       - Parameters [0] {
-///       }
-///       - Return [ string ]
-///     }
-///   }
-/// }
-/// ```
-///
-/// ```php
-/// echo new ReflectionClass('Throwable');
-/// ```
-/// ```expect
-/// Interface [ <internal:Core> interface Throwable extends Stringable ] {
-///
-///   - Constants [0] {
-///   }
-///
-///   - Static properties [0] {
-///   }
-///
-///   - Static methods [0] {
-///   }
-///
-///   - Properties [0] {
-///   }
-///
-///   - Methods [8] {
-///     Method [ <internal:Core> abstract public method getMessage ] {
-///
-///       - Parameters [0] {
-///       }
-///       - Return [ string ]
-///     }
-///
-///     Method [ <internal:Core> abstract public method getCode ] {
-///
-///       - Parameters [0] {
-///       }
-///     }
-///
-///     Method [ <internal:Core> abstract public method getFile ] {
-///
-///       - Parameters [0] {
-///       }
-///       - Return [ string ]
-///     }
-///
-///     Method [ <internal:Core> abstract public method getLine ] {
-///
-///       - Parameters [0] {
-///       }
-///       - Return [ int ]
-///     }
-///
-///     Method [ <internal:Core> abstract public method getTrace ] {
-///
-///       - Parameters [0] {
-///       }
-///       - Return [ array ]
-///     }
-///
-///     Method [ <internal:Core> abstract public method getPrevious ] {
-///
-///       - Parameters [0] {
-///       }
-///       - Return [ ?Throwable ]
-///     }
-///
-///     Method [ <internal:Core> abstract public method getTraceAsString ] {
-///
-///       - Parameters [0] {
-///       }
-///       - Return [ string ]
-///     }
-///
-///     Method [ <internal:Core, inherits Stringable> abstract public method __toString ] {
-///
-///       - Parameters [0] {
-///       }
-///       - Return [ string ]
-///     }
-///   }
-/// }
-/// ```
-///
-/// A user class with a parent and an interface renders the same way,
-/// with no `getParentClass()` asked for it (#388): the header carries
-/// `extends P implements I`, the class's own constants and properties
-/// come before the ones it inherits, and an interface's constant is in
-/// the table too.
-///
-/// ```php
-/// interface I { const J = 3; }
-/// class P { const A = 1; public $x = 1; }
-/// class C extends P implements I { const B = 2; public $y = 2; }
-/// echo new ReflectionClass('C');
-/// ```
-/// ```expect
-/// Class [ <user> class C extends P implements I ] {
-///   @@ %s 4-4
-///
-///   - Constants [3] {
-///     Constant [ public int B ] { 2 }
-///     Constant [ public int A ] { 1 }
-///     Constant [ public int J ] { 3 }
-///   }
-///
-///   - Static properties [0] {
-///   }
-///
-///   - Static methods [0] {
-///   }
-///
-///   - Properties [2] {
-///     Property [ public $y = 2 ]
-///     Property [ public $x = 1 ]
-///   }
-///
-///   - Methods [0] {
-///   }
-/// }
-/// ```
-fn reflection_class_to_string(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let class = this_class(req)?;
-    // `_class_string(&str, ce, &intern->obj, "")`: the object reflector
-    // hands the instance it kept, and the class reflector php's null
-    // zval, which is what puts `Object of class` and the `Dynamic
-    // properties` block on the one and not the other.
-    let object = req.this().and_then(|this| kept_object(req, this));
-    let text = class_string(req, class, object, "")?;
-    string_value(req, text.as_bytes())
-}
 
 // -------------------------------------------------- ReflectionMethod
 
-/// `instantiate_reflection_method` as the constructor,
-/// `ReflectionMethod::__construct(object|string $objectOrMethod,
-/// ?string $method = null)`: an object and a name, a class name and a
-/// name, or one `Class::method` string, which 8.5 deprecates in favour
-/// of `createFromMethodName`; the class is `zend_lookup_class` or the
-/// `ReflectionException` every reflector throws, the method is the
-/// linked table's entry under the lowered name or `Method C::m() does
-/// not exist`. `$name` is the method's declared spelling and `$class`
-/// its scope's name, `Exception` for a method `JsonException` inherits,
-/// as `mptr->common.scope->name` is. php keeps the class it was asked
-/// about too, `intern->ce`, which `__toString` renders against; the
-/// reflector here keeps the two properties alone until a native
-/// payload can hold it (#360), so it renders against the declaring
-/// class.
-///
-/// ```php
-/// $m = new ReflectionMethod('JsonException', 'getcode'); $n = new ReflectionMethod(new JsonException, 'getMessage'); var_dump($m->name, $m->class, $n->name, $n->class);
-/// ```
-/// ```expect
-/// string(7) "getCode"
-/// string(9) "Exception"
-/// string(10) "getMessage"
-/// string(9) "Exception"
-/// ```
-///
-/// ```php
-/// new ReflectionMethod('Exception::nope');
-/// ```
-/// ```expect exit=255
-/// Deprecated: Calling ReflectionMethod::__construct() with 1 argument is deprecated, use ReflectionMethod::createFromMethodName() instead in %s on line 2
-///
-/// Fatal error: Uncaught ReflectionException: Method Exception::nope() does not exist in %s:2
-/// Stack trace:
-/// #0 %s(2): ReflectionMethod->__construct('Exception::nope')
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-///
-/// ```php
-/// new ReflectionMethod('nocolons');
-/// ```
-/// ```expect exit=255
-/// Deprecated: Calling ReflectionMethod::__construct() with 1 argument is deprecated, use ReflectionMethod::createFromMethodName() instead in %s on line 2
-///
-/// Fatal error: Uncaught ReflectionException: ReflectionMethod::__construct(): Argument #1 ($objectOrMethod) must be a valid method name in %s:2
-/// Stack trace:
-/// #0 %s(2): ReflectionMethod->__construct('nocolons')
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-///
-/// ```php
-/// new ReflectionMethod(new Exception);
-/// ```
-/// ```expect exit=255
-/// Deprecated: Calling ReflectionMethod::__construct() with 1 argument is deprecated, use ReflectionMethod::createFromMethodName() instead in %s on line 2
-///
-/// Fatal error: Uncaught ValueError: ReflectionMethod::__construct(): Argument #2 ($method) cannot be null when argument #1 ($objectOrMethod) is an object in %s:2
-/// Stack trace:
-/// #0 %s(2): ReflectionMethod->__construct(Object(Exception))
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-///
-/// ```php
-/// try { new ReflectionMethod('Exception', []); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// ReflectionMethod::__construct(): Argument #2 ($method) must be of type ?string, array given
-/// ```
-///
-/// ```php
-/// new ReflectionMethod();
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ArgumentCountError: ReflectionMethod::__construct() expects at least 1 argument, 0 given in %s:2
-/// Stack trace:
-/// #0 %s(2): ReflectionMethod->__construct()
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-fn reflection_method_construct(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count == 0 {
-        return Err(arg_count_error(req, "at least 1 argument, 0 given"));
-    }
-    at_most_arguments(req, 2)?;
-    if count == 1 {
-        deprecated(
-            req,
-            "Calling ReflectionMethod::__construct() with 1 argument is deprecated, use ReflectionMethod::createFromMethodName() instead",
-        );
-    }
-    // `Z_PARAM_OBJ_OR_STR` then `Z_PARAM_STR_OR_NULL`, both parsed
-    // before either is looked at.
-    let first = req.argument(1).unwrap_or_default();
-    let ty = Type::Union(vec![Type::Object, Type::String]);
-    let first = php_ext::coerce::coerce_param(req, &first, &ty, 1)?;
-    let second = match req.argument(2) {
-        Some(given) => {
-            let ty = Type::Nullable(Box::new(Type::String));
-            let held = php_ext::coerce::coerce_param(req, &given, &ty, 2)?;
-            held.as_str_bytes().map(<[u8]>::to_vec)
-        }
-        None => None,
-    };
-    let (class, method_name) = match (first.as_ref(), second) {
-        (ValueRef::Object(object), Some(name)) => (object.class(), name),
-        (ValueRef::Object(_), None) => {
-            // `zend_argument_value_error` with no `must`.
-            return Err(throw(
-                req,
-                "ValueError",
-                "ReflectionMethod::__construct(): Argument #2 ($method) cannot be null when argument #1 ($objectOrMethod) is an object",
-            ));
-        }
-        (_, Some(name)) => {
-            let class = first.as_str_bytes().unwrap_or_default().to_vec();
-            (class_named(req, &class)?, name)
-        }
-        (_, None) => {
-            let given = first.as_str_bytes().unwrap_or_default().to_vec();
-            let Some(at) = given.windows(2).position(|pair| pair == b"::") else {
-                return Err(throw(
-                    req,
-                    "ReflectionException",
-                    "ReflectionMethod::__construct(): Argument #1 ($objectOrMethod) must be a valid method name",
-                ));
-            };
-            let class = class_named(req, &given[..at])?;
-            (class, given[at + 2..].to_vec())
-        }
-    };
-    // `zend_get_closure_invoke_method(orig_obj)` for a closure's
-    // `__invoke`, which php reaches only with the closure in hand.
-    let closure = first
-        .as_object()
-        .copied()
-        .filter(|o| o.closure(req).is_some());
-    let found = if let Some(closure) = closure {
-        method_or_invoke(req, class, &method_name, Some(closure))
-    } else {
-        table_method(req, class, &method_name)
-    };
-    let Some(found) = found else {
-        let class = class_name_of(req, class);
-        return Err(throw(
-            req,
-            "ReflectionException",
-            &format!(
-                "Method {}::{}() does not exist",
-                String::from_utf8_lossy(&class),
-                String::from_utf8_lossy(&method_name)
-            ),
-        ));
-    };
-    let scope = class_name_of(req, found.scope);
-    if let Some(this) = req.this() {
-        set_name(req, this, &found.decl.function.name.0)?;
-        set_string_prop(req, this, b"class", &scope)?;
-        // `intern->ce = ce`: the class the reflector was asked about,
-        // which `_function_string` takes as the method's scope, where
-        // `$class` is the class that declared the method; and for a
-        // closure's `__invoke`, the closure the method was made over.
-        let kept = closure.filter(|_| found.via_handler);
-        keep(req, this, class, kept);
-    }
-    Ok(Value::null())
-}
-
-/// `ReflectionMethod::__toString()`: `_function_string` over the
-/// method with `intern->ce`, the class the reflector was asked about,
-/// as its scope, indent empty. The
-/// tentative bit renders as `Tentative return`, a declared return
-/// type as `Return`, and a method with neither has no row.
-///
-/// ```php
-/// echo new ReflectionMethod('JsonException', 'getMessage');
-/// ```
-/// ```expect
-/// Method [ <internal:Core, inherits Exception, prototype Throwable> final public method getMessage ] {
-///
-///   - Parameters [0] {
-///   }
-///   - Return [ string ]
-/// }
-/// ```
-///
-/// ```php
-/// echo new ReflectionMethod('JsonSerializable::jsonSerialize');
-/// ```
-/// ```expect
-/// Deprecated: Calling ReflectionMethod::__construct() with 1 argument is deprecated, use ReflectionMethod::createFromMethodName() instead in %s on line 2
-/// Method [ <internal:json> abstract public method jsonSerialize ] {
-///
-///   - Parameters [0] {
-///   }
-///   - Tentative return [ mixed ]
-/// }
-/// ```
-///
-/// ```php
-/// echo new ReflectionMethod('Exception', 'getMessage'), new ReflectionMethod('Exception', 'getCode'), new ReflectionMethod('Exception', '__construct');
-/// ```
-/// ```expect
-/// Method [ <internal:Core, prototype Throwable> final public method getMessage ] {
-///
-///   - Parameters [0] {
-///   }
-///   - Return [ string ]
-/// }
-/// Method [ <internal:Core, prototype Throwable> final public method getCode ] {
-///
-///   - Parameters [0] {
-///   }
-/// }
-/// Method [ <internal:Core, ctor> public method __construct ] {
-///
-///   - Parameters [3] {
-///     Parameter #0 [ <optional> string $message = "" ]
-///     Parameter #1 [ <optional> int $code = 0 ]
-///     Parameter #2 [ <optional> ?Throwable $previous = null ]
-///   }
-/// }
-/// ```
-fn reflection_method_to_string(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let (this, name) = this_name(req, "ReflectionMethod")?;
-    let Some(class) = this
-        .prop(req, b"class")
-        .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
-    else {
-        return Err(throw(
-            req,
-            "Error",
-            "Typed property ReflectionMethod::$class must not be accessed before initialization",
-        ));
-    };
-    let class = class_named(req, &class)?;
-    let kept = kept_closure(req, this);
-    let Some(found) = method_or_invoke(req, class, &name, kept) else {
-        let class = class_name_of(req, class);
-        return Err(throw(
-            req,
-            "ReflectionException",
-            &format!(
-                "Method {}::{}() does not exist",
-                String::from_utf8_lossy(&class),
-                String::from_utf8_lossy(&name)
-            ),
-        ));
-    };
-    // `_function_string(&str, mptr, intern->ce, "")`: the scope is the
-    // class the reflector was asked about, so a method the class
-    // inherited carries `inherits` and the declaring class's own
-    // carries `overwrites`.
-    let scope = kept_class(req, this).unwrap_or(class);
-    let text = method_string(req, &found, scope, "");
-    string_value(req, text.as_bytes())
-}
-
 // -------------------------------------------------- ReflectionProperty
-
-/// `ReflectionProperty::__construct(object|string $class, string
-/// $property)`: the property in the class's info table, or a dynamic
-/// one on the object given, else php's `ReflectionException`; `$name` is the name
-/// and `$class` the declaring class, `property_info->ce->name`.
-///
-/// ```php
-/// var_dump(new ReflectionProperty('ReflectionException', 'message'));
-/// ```
-/// ```expect
-/// object(ReflectionProperty)#1 (2) {
-///   ["name"]=>
-///   string(7) "message"
-///   ["class"]=>
-///   string(9) "Exception"
-/// }
-/// ```
-///
-/// ```php
-/// new ReflectionProperty('ReflectionException', 'string');
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ReflectionException: Property ReflectionException::$string does not exist in %s:2
-/// Stack trace:
-/// #0 %s(2): ReflectionProperty->__construct('ReflectionExcep...', 'string')
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-///
-/// ```php
-/// new ReflectionProperty('Nope', 'x');
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ReflectionException: Class "Nope" does not exist in %s:2
-/// Stack trace:
-/// #0 %s(2): ReflectionProperty->__construct('Nope', 'x')
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-///
-/// ```php
-/// new ReflectionProperty('ReflectionException');
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ArgumentCountError: ReflectionProperty::__construct() expects exactly 2 arguments, 1 given in %s:2
-/// Stack trace:
-/// #0 %s(2): ReflectionProperty->__construct('ReflectionExcep...')
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-///
-/// A parent's private property is not the child's, from a class or from
-/// an object:
-///
-/// ```php
-/// class P { private $p = 1; } class C extends P {}
-/// foreach (['C', new C] as $from) { try { new ReflectionProperty($from, 'p'); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; } }
-/// ```
-/// ```expect
-/// Property C::$p does not exist
-/// Property C::$p does not exist
-/// ```
-fn reflection_property_construct(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 2)?;
-    let (class, object) = class_argument(req, 1)?;
-    let name = string_argument(req, 2)?;
-    let declaring = match property_named(req, class, &name) {
-        Some((declaring, _)) => declaring,
-        // The dynamic arm: a name in the object's table the class does
-        // not declare, and never a parent's private property, which the
-        // table holds under its mangled key.
-        None if object.is_some_and(|o| dynamic_properties(req, class, o).contains(&name)) => class,
-        None => {
-            let class = class_name_of(req, class);
-            return Err(throw(
-                req,
-                "ReflectionException",
-                &format!(
-                    "Property {}::${} does not exist",
-                    String::from_utf8_lossy(&class),
-                    String::from_utf8_lossy(&name)
-                ),
-            ));
-        }
-    };
-    let declaring = class_name_of(req, declaring);
-    if let Some(this) = req.this() {
-        set_name(req, this, &name)?;
-        set_string_prop(req, this, b"class", &declaring)?;
-        // `intern->ce = ce`: the class asked about, which `getValue`
-        // holds its argument to, where `$class` is the declaring one.
-        keep(req, this, class, None);
-    }
-    Ok(Value::null())
-}
 
 /// The property a `ReflectionProperty` reflects: its declaring class
 /// (`$class`), its name, and its declaration where the class has one,
@@ -2951,118 +5093,6 @@ fn this_property(req: &mut Request) -> Result<(ClassId, Vec<u8>, Option<Property
     let class = class_named(req, &class)?;
     let declared = property_named(req, class, &name).map(|(_, decl)| decl);
     Ok((class, name, declared))
-}
-
-/// `ReflectionProperty::getValue(?object $object = null)`: an instance
-/// property read off the object given, which must be of the declaring
-/// class; the read is the slot or the dynamic table by name, php's
-/// `read_property` under `fake_scope`, so visibility is no bar. A
-/// slot holds the declared default, which `object_properties_init` put
-/// there when the object was made, an inherited property's included
-/// (#419); a typed property with no default holds nothing and is php's
-/// `Error` for a read before initialization. A `static` property is
-/// `zend_read_static_property_ex` over the class the reflector was
-/// asked about (`intern->ce`), whose fake scope is that class, and the
-/// argument is neither read nor required; php parses the argument
-/// before it looks at the property, so what is no object is a
-/// `TypeError` either way.
-///
-/// ```php
-/// class P { public static $s = 1; } class C extends P {}
-/// $r = new ReflectionProperty('C', 's');
-/// var_dump($r->class, $r->getValue(), $r->getValue(null));
-/// ```
-/// ```expect
-/// string(1) "P"
-/// int(1)
-/// int(1)
-/// ```
-///
-/// ```php
-/// class T { protected $p = 2; } $o = new T; var_dump((new ReflectionProperty($o, 'p'))->getValue($o), (new ReflectionProperty('Exception', 'message'))->getValue(new ReflectionException), (new ReflectionProperty('Exception', 'code'))->getValue(new Exception));
-/// ```
-/// ```expect
-/// int(2)
-/// string(0) ""
-/// int(0)
-/// ```
-///
-/// ```php
-/// (new ReflectionProperty('Exception', 'message'))->getValue();
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught TypeError: ReflectionProperty::getValue(): Argument #1 ($object) must be provided for instance properties in %s:2
-/// Stack trace:
-/// #0 %s(2): ReflectionProperty->getValue()
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-///
-/// ```php
-/// class T { protected $p = 2; } (new ReflectionProperty('Exception', 'message'))->getValue(new T);
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ReflectionException: Given object is not an instance of the class this property was declared in in %s:2
-/// Stack trace:
-/// #0 %s(2): ReflectionProperty->getValue(Object(T))
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-///
-/// ```php
-/// (new ReflectionProperty('Exception', 'message'))->getValue(1);
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught TypeError: ReflectionProperty::getValue(): Argument #1 ($object) must be of type ?object, int given in %s:2
-/// Stack trace:
-/// #0 %s(2): ReflectionProperty->getValue(1)
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-///
-/// An object of the declaring class is read through a reflector asked
-/// about a subclass, and a missing dynamic property is php's warning:
-///
-/// ```php
-/// class A { public $p = 'p'; } class B extends A {}
-/// $b = new A; $b->d = 1;
-/// var_dump((new ReflectionProperty('B', 'p'))->getValue(new A), (new ReflectionProperty($b, 'd'))->getValue(new A));
-/// ```
-/// ```expect
-/// Deprecated: Creation of dynamic property A::$d is deprecated in %s on line 3
-///
-/// Warning: Undefined property: A::$d in %s on line 4
-/// string(1) "p"
-/// NULL
-/// ```
-fn reflection_property_get_value(req: &mut Request) -> Result<Value, Thrown> {
-    at_most_arguments(req, 1)?;
-    let given = req.argument(1).unwrap_or_default();
-    let given =
-        php_ext::coerce::coerce_param(req, &given, &Type::Nullable(Box::new(Type::Object)), 1)?;
-    let (class, name, declared) = this_property(req)?;
-    // A `static` property is read through `intern->ce`, the class the
-    // reflector was asked about.
-    let asked = asked_class(req, class);
-    if declared.as_ref().is_some_and(|decl| !decl.is_instance) {
-        return read_static_prop(req, asked, &name);
-    }
-    let ValueRef::Object(object) = given.as_ref() else {
-        return Err(arg_type_error(
-            req,
-            1,
-            "be provided for instance properties",
-        ));
-    };
-    // `ref->prop ? ref->prop->ce : intern->ce`: a declared property's
-    // object is held to the class that declared it, a dynamic one's to
-    // the class the reflector was asked about.
-    let holder = if declared.is_some() { class } else { asked };
-    held_to(req, *object, holder)?;
-    if hooked(req, object.class(), &name) {
-        return php_ext::call::read_hooked_property(req, object, &name);
-    }
-    read_instance_property(req, *object, class, &name, declared.as_ref())
 }
 
 /// Whether the property `name` of `class` carries a hook, php's
@@ -3157,420 +5187,7 @@ fn effective_class(
     }
 }
 
-/// `ReflectionProperty::getRawValue(object $object)`: the value as
-/// stored, past the `get` hook of the property the object's class holds
-/// ([`php_ext::call::read_raw_property`], which a virtual property
-/// refuses); with no such hook, `getValue`'s instance arm, the object
-/// held to `intern->ce`; a `static` property is php's
-/// `ReflectionException`.
-///
-/// ```php
-/// class C { public $p = 1; private int $q = 2; public static $s; } $o = new C;
-/// var_dump((new ReflectionProperty('C', 'p'))->getRawValue($o), (new ReflectionProperty('C', 'q'))->getRawValue($o));
-/// try { (new ReflectionProperty('C', 's'))->getRawValue($o); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
-/// try { (new ReflectionProperty('C', 'p'))->getRawValue(new stdClass); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
-/// class H { public $b = 3 { get => $this->b * 100; } public $v { get => 1; } }
-/// var_dump((new ReflectionProperty('H', 'b'))->getRawValue(new H));
-/// try { (new ReflectionProperty('H', 'v'))->getRawValue(new H); } catch (Error $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// int(1)
-/// int(2)
-/// May not use getRawValue on static properties
-/// Given object is not an instance of the class this property was declared in
-/// int(3)
-/// Must not read from virtual property H::$v
-/// ```
-fn reflection_property_get_raw_value(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 1)?;
-    let given = req.argument(1).unwrap_or_default();
-    let given = php_ext::coerce::coerce_param(req, &given, &Type::Object, 1)?;
-    let (class, name, declared) = this_property(req)?;
-    let asked = asked_class(req, class);
-    let Some(object) = given.as_object().copied() else {
-        return Ok(Value::null());
-    };
-    held_to(req, object, asked)?;
-    if declared.as_ref().is_some_and(|decl| !decl.is_instance) {
-        return Err(throw(
-            req,
-            "ReflectionException",
-            "May not use getRawValue on static properties",
-        ));
-    }
-    let effective = effective_class(asked, object, declared.as_ref(), class);
-    if php_ext::call::property_hook(req, effective, &name, HookKind::Get).is_some() {
-        return php_ext::call::read_raw_property(req, &object, &name);
-    }
-    read_instance_property(req, object, class, &name, declared.as_ref())
-}
-
-/// `ReflectionProperty::setRawValue(object $object, mixed $value)`: the
-/// value stored past the `set` hook of the property the object's class
-/// holds ([`php_ext::call::write_raw_property`], which a virtual
-/// property refuses); with no such hook, `write_property` under
-/// `fake_scope`, `setValue`'s instance arm; a `static` property is
-/// php's `ReflectionException`.
-///
-/// ```php
-/// class C { public $p = 1; public static $s; } $o = new C;
-/// (new ReflectionProperty('C', 'p'))->setRawValue($o, 5); var_dump($o->p);
-/// try { (new ReflectionProperty('C', 's'))->setRawValue($o, 1); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
-/// class H { public $b { get => $this->b; set => $value * 2; } }
-/// $h = new H;
-/// (new ReflectionProperty('H', 'b'))->setRawValue($h, 7);
-/// var_dump($h->b);
-/// ```
-/// ```expect
-/// int(5)
-/// May not use setRawValue on static properties
-/// int(7)
-/// ```
-fn reflection_property_set_raw_value(req: &mut Request) -> Result<Value, Thrown> {
-    let (class, name, declared) = this_property(req)?;
-    exactly_arguments(req, 2)?;
-    let given = req.argument(1).unwrap_or_default();
-    let given = php_ext::coerce::coerce_param(req, &given, &Type::Object, 1)?;
-    let Some(object) = given.as_object().copied() else {
-        return Ok(Value::null());
-    };
-    if declared.as_ref().is_some_and(|decl| !decl.is_instance) {
-        return Err(throw(
-            req,
-            "ReflectionException",
-            "May not use setRawValue on static properties",
-        ));
-    }
-    let value = req.argument(2).unwrap_or_default().deref();
-    req.addref(&value);
-    let key = PhpString::new(req, &name)?;
-    let asked = asked_class(req, class);
-    let effective = effective_class(asked, object, declared.as_ref(), class);
-    if php_ext::call::property_hook(req, effective, &name, HookKind::Set).is_some() {
-        php_ext::call::write_raw_property(req, &object, key, value)?;
-        return Ok(Value::null());
-    }
-    object.set_prop(req, key, value)?;
-    Ok(Value::null())
-}
-
-/// `ReflectionProperty::isInitialized(?object $object = null)`: for a
-/// `static` property, whether its slot holds a value, read silently
-/// through `intern->ce`; for an instance one, whether the object's slot
-/// or dynamic table holds one, `has_property(ZEND_PROPERTY_EXISTS)`
-/// under `fake_scope`, which asks no `__isset`. The object is held to
-/// the declaring class, php's `ref->prop->ce`, or to `intern->ce` for a
-/// dynamic property.
-///
-/// ```php
-/// class A { public static ?int $s; public static $t; public ?int $i; public $n; private int $p; }
-/// $a = new A;
-/// var_dump((new ReflectionProperty('A', 's'))->isInitialized(), (new ReflectionProperty('A', 't'))->isInitialized());
-/// var_dump((new ReflectionProperty('A', 'i'))->isInitialized($a), (new ReflectionProperty('A', 'n'))->isInitialized($a), (new ReflectionProperty('A', 'p'))->isInitialized($a));
-/// unset($a->n); var_dump((new ReflectionProperty('A', 'n'))->isInitialized($a));
-/// try { (new ReflectionProperty('A', 'n'))->isInitialized(); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
-/// try { (new ReflectionProperty('A', 'n'))->isInitialized(new stdClass); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// bool(false)
-/// bool(true)
-/// bool(false)
-/// bool(true)
-/// bool(false)
-/// bool(false)
-/// ReflectionProperty::isInitialized(): Argument #1 ($object) must be provided for instance properties
-/// Given object is not an instance of the class this property was declared in
-/// ```
-fn reflection_property_is_initialized(req: &mut Request) -> Result<Value, Thrown> {
-    at_most_arguments(req, 1)?;
-    let given = req.argument(1).unwrap_or_default();
-    let given =
-        php_ext::coerce::coerce_param(req, &given, &Type::Nullable(Box::new(Type::Object)), 1)?;
-    let (class, name, declared) = this_property(req)?;
-    let asked = asked_class(req, class);
-    if declared.as_ref().is_some_and(|decl| !decl.is_instance) {
-        let Some(value) = read_class_prop_silent(req, asked, &name)? else {
-            return Ok(Value::bool(false));
-        };
-        let held = !matches!(value.as_ref(), ValueRef::Undef);
-        req.release(value);
-        return Ok(Value::bool(held));
-    }
-    let ValueRef::Object(object) = given.as_ref() else {
-        return Err(arg_type_error(
-            req,
-            1,
-            "be provided for instance properties",
-        ));
-    };
-    let holder = if declared.is_some() { class } else { asked };
-    held_to(req, *object, holder)?;
-    // `has_property(ZEND_PROPERTY_EXISTS)` finds a virtual property
-    // whatever it holds, having no slot to hold nothing in.
-    if php_ext::call::property_is_virtual(req, object.class(), &name) {
-        return Ok(Value::bool(true));
-    }
-    Ok(Value::bool(object.prop(req, &name).is_some()))
-}
-
-/// `ReflectionProperty::setValue(mixed $objectOrValue, mixed $value)`:
-/// an instance property written on the object given through
-/// `write_property` under `fake_scope`, one more owner of the value
-/// taken for the slot. A `static` property takes php's two 8.3
-/// deprecations, the one for a single argument and the one for a first
-/// argument that is neither `null` nor an object, and is then
-/// `zend_update_static_property_ex` over the class the reflector was
-/// asked about; the value is the last argument either way.
-///
-/// ```php
-/// class T { public static $s = 1; } $r = new ReflectionProperty('T', 's'); var_dump($r->getValue()); $r->setValue(null, 2); var_dump($r->getValue());
-/// ```
-/// ```expect
-/// int(1)
-/// int(2)
-/// ```
-///
-/// The single-argument form, php's 8.3 deprecation, whose value is the
-/// one argument:
-///
-/// ```php
-/// class T { public static $s = 1; }
-/// $r = new ReflectionProperty('T', 's');
-/// $r->setValue(3);
-/// var_dump(T::$s);
-/// ```
-/// ```expect
-/// Deprecated: Calling ReflectionProperty::setValue() with a single argument is deprecated in %s on line 4
-/// int(3)
-/// ```
-///
-/// ```php
-/// class T { public $p = 1; } $o = new T; $r = new ReflectionProperty($o, 'p'); $r->setValue($o, 'two'); var_dump($r->getValue($o), $o->p);
-/// ```
-/// ```expect
-/// string(3) "two"
-/// string(3) "two"
-/// ```
-///
-/// ```php
-/// class T { public $p = 1; } (new ReflectionProperty('T', 'p'))->setValue(new T);
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ArgumentCountError: ReflectionProperty::setValue() expects exactly 2 arguments, 1 given in %s:2
-/// Stack trace:
-/// #0 %s(2): ReflectionProperty->setValue(Object(T))
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-///
-/// A write into a `static` property with a declared type is held to it,
-/// `zend_update_static_property_ex` verifying the value and coercing it
-/// by the weak rule (`ops::verify_property_type`), so what Reflection
-/// puts in the slot is what the type accepts and never a value of
-/// another type.
-///
-/// ```php
-/// class T { public static int $n = 1; }
-/// $r = new ReflectionProperty('T', 'n');
-/// $r->setValue(null, "7"); var_dump($r->getValue());
-/// $r->setValue(null, [1]);
-/// ```
-/// ```expect exit=255
-/// int(7)
-///
-/// Fatal error: Uncaught TypeError: Cannot assign array to property T::$n of type int in %s:5
-/// Stack trace:
-/// #0 %s(5): ReflectionProperty->setValue(NULL, Array)
-/// #1 {main}
-///   thrown in %s on line 5
-/// ```
-///
-/// ```php
-/// (new ReflectionProperty('Exception', 'message'))->setValue(1, 2);
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught TypeError: ReflectionProperty::setValue(): Argument #1 ($objectOrValue) must be of type object, int given in %s:2
-/// Stack trace:
-/// #0 %s(2): ReflectionProperty->setValue(1, 2)
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-fn reflection_property_set_value(req: &mut Request) -> Result<Value, Thrown> {
-    let (class, name, declared) = this_property(req)?;
-    if declared.as_ref().is_some_and(|decl| !decl.is_instance) {
-        let count = req.argument_count();
-        let at = if count == 1 {
-            deprecated(
-                req,
-                "Calling ReflectionProperty::setValue() with a single argument is deprecated",
-            );
-            1
-        } else {
-            exactly_arguments(req, 2)?;
-            let first = req.argument(1).unwrap_or_default().deref();
-            if !matches!(first.as_ref(), ValueRef::Null | ValueRef::Object(_)) {
-                deprecated(
-                    req,
-                    "Calling ReflectionProperty::setValue() with a 1st argument which is not null or an object is deprecated",
-                );
-            }
-            2
-        };
-        let asked = req
-            .this()
-            .and_then(|this| kept_class(req, this))
-            .unwrap_or(class);
-        let value = req.argument(at).unwrap_or_default().deref();
-        req.addref(&value);
-        write_static_prop(req, asked, &name, value)?;
-        return Ok(Value::null());
-    }
-    exactly_arguments(req, 2)?;
-    let given = req.argument(1).unwrap_or_default();
-    let given = php_ext::coerce::coerce_param(req, &given, &Type::Object, 1)?;
-    let Some(object) = given.as_object() else {
-        return Ok(Value::null());
-    };
-    let value = req.argument(2).unwrap_or_default().deref();
-    req.addref(&value);
-    let key = PhpString::new(req, &name)?;
-    if hooked(req, object.class(), &name) {
-        php_ext::call::write_hooked_property(req, object, key, value)?;
-        return Ok(Value::null());
-    }
-    object.set_prop(req, key, value)?;
-    Ok(Value::null())
-}
-
-/// `ReflectionProperty::getDocComment()`: `prop->doc_comment`, or
-/// `false` where the declaration carries none and where there is no
-/// declaration at all, php's `ref->prop && ref->prop->doc_comment`, a
-/// dynamic property being the second case. A declarator takes the
-/// comment that stands before the declaration only when it is the
-/// first, `backup_doc_comment` reducing at each `property:`, so
-/// `/** P */ public $x, $y;` gives it to `$x` alone.
-///
-/// ```php
-/// class M { /** P */ public $x, $y; } var_dump((new ReflectionProperty('M', 'x'))->getDocComment(), (new ReflectionProperty('M', 'y'))->getDocComment(), (new ReflectionProperty('Exception', 'message'))->getDocComment());
-/// ```
-/// ```expect
-/// string(8) "/** P */"
-/// bool(false)
-/// bool(false)
-/// ```
-///
-/// ```php
-/// class M { public $x; } (new ReflectionProperty('M', 'x'))->getDocComment(1);
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ArgumentCountError: ReflectionProperty::getDocComment() expects exactly 0 arguments, 1 given in %s:2
-/// Stack trace:
-/// #0 %s(2): ReflectionProperty->getDocComment(1)
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-fn reflection_property_get_doc_comment(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let (_, _, declared) = this_property(req)?;
-    match declared.and_then(|decl| decl.doc_comment) {
-        Some(doc) => string_value(req, &doc),
-        None => Ok(Value::bool(false)),
-    }
-}
-
 // -------------------------------------------------- ReflectionClassConstant
-
-/// `ReflectionClassConstant::__construct(object|string $class, string
-/// $constant)`: the constant `zend_hash_find_ptr(CE_CONSTANTS_TABLE(ce),
-/// constname)` finds, else php's `ReflectionException`; `$name` is the
-/// name as given and `$class` is `constant->ce->name`, the class that
-/// declared it, which for an inherited constant is the parent. A
-/// parent's private constant is not in the table and so is a miss.
-///
-/// ```php
-/// class M { /** K */ const A = 1, B = 2; } var_dump(new ReflectionClassConstant('M', 'A'), (new ReflectionClassConstant('ReflectionProperty', 'IS_PUBLIC'))->class);
-/// ```
-/// ```expect
-/// object(ReflectionClassConstant)#1 (2) {
-///   ["name"]=>
-///   string(1) "A"
-///   ["class"]=>
-///   string(1) "M"
-/// }
-/// string(18) "ReflectionProperty"
-/// ```
-///
-/// A parent's private constant is not in the child's table, so the
-/// child is not where it is found (#257, #388):
-///
-/// ```php
-/// class P { private const R = 2; }
-/// class C extends P {}
-/// new ReflectionClassConstant('C', 'R');
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ReflectionException: Constant C::R does not exist in %s:4
-/// Stack trace:
-/// #0 %s(4): ReflectionClassConstant->__construct('C', 'R')
-/// #1 {main}
-///   thrown in %s on line 4
-/// ```
-///
-/// ```php
-/// class M { const A = 1; } new ReflectionClassConstant('M', 'Z');
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ReflectionException: Constant M::Z does not exist in %s:2
-/// Stack trace:
-/// #0 %s(2): ReflectionClassConstant->__construct('M', 'Z')
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-///
-/// ```php
-/// new ReflectionClassConstant('Nope', 'A');
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ReflectionException: Class "Nope" does not exist in %s:2
-/// Stack trace:
-/// #0 %s(2): ReflectionClassConstant->__construct('Nope', 'A')
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-///
-/// ```php
-/// new ReflectionClassConstant('Exception');
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ArgumentCountError: ReflectionClassConstant::__construct() expects exactly 2 arguments, 1 given in %s:2
-/// Stack trace:
-/// #0 %s(2): ReflectionClassConstant->__construct('Exception')
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-fn reflection_class_constant_construct(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 2)?;
-    let (class, _) = class_argument(req, 1)?;
-    let name = string_argument(req, 2)?;
-    let Some((declaring, _)) = class_constant_named(req, class, &name) else {
-        let class = class_name_of(req, class);
-        return Err(throw(
-            req,
-            "ReflectionException",
-            &format!(
-                "Constant {}::{} does not exist",
-                String::from_utf8_lossy(&class),
-                String::from_utf8_lossy(&name)
-            ),
-        ));
-    };
-    let declaring = class_name_of(req, declaring);
-    if let Some(this) = req.this() {
-        set_name(req, this, &name)?;
-        set_string_prop(req, this, b"class", &declaring)?;
-    }
-    Ok(Value::null())
-}
 
 /// The constant a `ReflectionClassConstant` reflects, looked up again
 /// in the class `$class` names as php's `intern->ptr` points at the
@@ -3591,151 +5208,7 @@ fn this_class_constant(req: &mut Request) -> Result<Option<ClassConstDecl>, Thro
     Ok(class_constant_named(req, class, &name).map(|(_, decl)| decl))
 }
 
-/// `ReflectionClassConstant::getDocComment()`: `ref->doc_comment`, or
-/// `false` where the declaration carries none. The constant
-/// declarators take the comment as the property declarators do, the
-/// first alone.
-///
-/// ```php
-/// class M { /** K */ const A = 1, B = 2; } var_dump((new ReflectionClassConstant('M', 'A'))->getDocComment(), (new ReflectionClassConstant('M', 'B'))->getDocComment(), (new ReflectionClassConstant('ReflectionProperty', 'IS_PUBLIC'))->getDocComment());
-/// ```
-/// ```expect
-/// string(8) "/** K */"
-/// bool(false)
-/// bool(false)
-/// ```
-///
-/// ```php
-/// var_dump((new ReflectionClassConstant('ReflectionObject', 'IS_FINAL'))->class, (new ReflectionClassConstant('ReflectionObject', 'IS_FINAL'))->getDocComment());
-/// ```
-/// ```expect
-/// string(15) "ReflectionClass"
-/// bool(false)
-/// ```
-///
-/// An inherited constant is the parent's declaration, so the comment is
-/// the parent's and `$class` is the parent (#257, #388):
-///
-/// ```php
-/// class P { /** R */ protected const R = 2; }
-/// class C extends P {}
-/// $r = new ReflectionClassConstant('C', 'R');
-/// var_dump($r->class, $r->getDocComment());
-/// ```
-/// ```expect
-/// string(1) "P"
-/// string(8) "/** R */"
-/// ```
-fn reflection_class_constant_get_doc_comment(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    match this_class_constant(req)?.and_then(|decl| decl.doc_comment) {
-        Some(doc) => string_value(req, &doc),
-        None => Ok(Value::bool(false)),
-    }
-}
-
 // -------------------------------------------------- ReflectionConstant
-
-/// `ReflectionConstant::__construct(string $name)`: the constant under
-/// the name with its namespace lowered and a leading `\` dropped,
-/// `zend_get_constant_ptr`; a miss is php's `ReflectionException` with the name as
-/// given, and `$name` keeps the spelling given too.
-///
-/// ```php
-/// var_dump(new ReflectionConstant('\PHP_VERSION'), (new ReflectionConstant('PHP_EOL'))->name);
-/// ```
-/// ```expect
-/// object(ReflectionConstant)#1 (1) {
-///   ["name"]=>
-///   string(12) "\PHP_VERSION"
-/// }
-/// string(7) "PHP_EOL"
-/// ```
-///
-/// ```php
-/// new ReflectionConstant('NOPE');
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ReflectionException: Constant "NOPE" does not exist in %s:2
-/// Stack trace:
-/// #0 %s(2): ReflectionConstant->__construct('NOPE')
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-///
-/// ```php
-/// new ReflectionConstant();
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ArgumentCountError: ReflectionConstant::__construct() expects exactly 1 argument, 0 given in %s:2
-/// Stack trace:
-/// #0 %s(2): ReflectionConstant->__construct()
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-fn reflection_constant_construct(req: &mut Request) -> Result<Value, Thrown> {
-    let name = one_string_argument(req)?;
-    let lowered = constant_key(&name);
-    if constant(req, &lowered)?.is_none() {
-        return Err(throw(
-            req,
-            "ReflectionException",
-            &format!(
-                "Constant \"{}\" does not exist",
-                String::from_utf8_lossy(&name)
-            ),
-        ));
-    }
-    if let Some(this) = req.this() {
-        set_name(req, this, &name)?;
-    }
-    Ok(Value::null())
-}
-
-/// `ReflectionConstant::getAttributes(?string $name = null, int $flags
-/// = 0)`: `reflect_attributes` over `const_->attributes`, the
-/// declaration's own, at `ZEND_ATTRIBUTE_TARGET_CONST` and in no
-/// scope, since a global constant's arguments are evaluated outside
-/// every class. `E_STRICT` is the one constant carrying an attribute
-/// here, as it is the one carrying one in php; a constant a program
-/// defined carries none until the compiler reads the `#[...]` written
-/// on a `const` (#465).
-///
-/// ```php
-/// var_dump((new ReflectionConstant('E_STRICT'))->getAttributes());
-/// ```
-/// ```expect
-/// array(1) {
-///   [0]=>
-///   object(ReflectionAttribute)#2 (1) {
-///     ["name"]=>
-///     string(10) "Deprecated"
-///   }
-/// }
-/// ```
-///
-/// ```php
-/// var_dump((new ReflectionConstant('E_STRICT'))->getAttributes()[0]->getArguments());
-/// var_dump((new ReflectionConstant('PHP_EOL'))->getAttributes());
-/// var_dump(count((new ReflectionConstant('E_STRICT'))->getAttributes('Deprecated')), count((new ReflectionConstant('E_STRICT'))->getAttributes('Other')));
-/// ```
-/// ```expect
-/// array(2) {
-///   ["since"]=>
-///   string(3) "8.4"
-///   ["message"]=>
-///   string(27) "the error level was removed"
-/// }
-/// array(0) {
-/// }
-/// int(1)
-/// int(0)
-/// ```
-fn reflection_constant_get_attributes(req: &mut Request) -> Result<Value, Thrown> {
-    let (_, name) = this_name(req, "ReflectionConstant")?;
-    let attributes = req.constant_attributes(&constant_key(&name)).to_vec();
-    attr::reflect_attributes(req, &attributes, None, attr::TARGET_CONST)
-}
 
 /// `_extension_string`: the header with the extension's number and
 /// version, then the blocks it has something for: `Dependencies`, one
@@ -5607,4 +7080,953 @@ fn type_to_string(ty: &Type) -> String {
         parts.push(String::from("null"));
     }
     parts.join("|")
+}
+
+/// `ReflectionException` as the stub declares it.
+#[php_class(extends(crate::Exception))]
+pub(crate) struct ReflectionException;
+
+#[php_class]
+impl ReflectionException {}
+
+/// `interface Reflector extends Stringable` as the stub declares it.
+#[php_class(interface, extends(crate::Stringable))]
+pub(crate) struct Reflector;
+
+#[php_class]
+impl Reflector {}
+
+/// `ReflectionExtension` as the stub declares it.
+#[php_class(implements(Reflector), not_serializable)]
+pub(crate) struct ReflectionExtension;
+
+#[php_class]
+impl ReflectionExtension {
+    #[php(property)]
+    const name: PhpString;
+
+    #[php(private, implementation = crate::func::ReflectionFunctionAbstract::__clone)]
+    fn __clone(_this: This<Self>);
+
+    /// `ReflectionExtension::__construct(string $name)`: the extension
+    /// under the lowered name in `module_registry`, its declared name kept
+    /// as `$name`; a name the bundle has not is php's `ReflectionException`,
+    /// the name as given.
+    ///
+    /// ```php
+    /// $e = new ReflectionExtension('CTYPE'); $f = new ReflectionFunction('CTYPE_ALPHA'); echo $e->name, '|', $f->name, '|'; var_dump($e instanceof Reflector);
+    /// ```
+    /// ```expect
+    /// ctype|ctype_alpha|bool(true)
+    /// ```
+    ///
+    /// ```php
+    /// new ReflectionExtension('nope');
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught ReflectionException: Extension "nope" does not exist in %s:2
+    /// Stack trace:
+    /// #0 %s(2): ReflectionExtension->__construct('nope')
+    /// #1 {main}
+    ///   thrown in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// new ReflectionExtension();
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught ArgumentCountError: ReflectionExtension::__construct() expects exactly 1 argument, 0 given in %s:2
+    /// Stack trace:
+    /// #0 %s(2): ReflectionExtension->__construct()
+    /// #1 {main}
+    ///   thrown in %s on line 2
+    /// ```
+    fn __construct(req: &mut Request, _this: This<Self>, name: PhpString) -> Result<(), Thrown> {
+        let name = name.as_bytes().to_vec();
+        let Some(extension) = req.extension_named(&name) else {
+            return Err(throw(
+                req,
+                "ReflectionException",
+                &format!(
+                    "Extension \"{}\" does not exist",
+                    String::from_utf8_lossy(&name)
+                ),
+            ));
+        };
+        let declared = req
+            .extension_name(extension)
+            .map(str::to_owned)
+            .unwrap_or_default();
+        if let Some(this) = req.this() {
+            set_name(req, this, declared.as_bytes())?;
+        }
+        Ok(())
+    }
+
+    /// `ReflectionExtension::__toString()`: `_extension_string` over the
+    /// extension `$name` names, indent empty. The load number in the first
+    /// line is the oracle's build order there and the bundle's here, `#10`
+    /// against `#15` for ctype, a difference that is nobody's defect; the
+    /// pin's `[recipe.normalise] extension_number_token` (#317) replaces
+    /// the digits after `extension #` in both streams, so the fence below
+    /// holds every byte the oracle prints and the token stands where the
+    /// number was.
+    ///
+    /// ```php
+    /// echo new ReflectionExtension('ctype');
+    /// ```
+    /// ```expect
+    /// Extension [ <persistent> extension #%N% ctype version 8.5.9 ] {
+    ///
+    ///   - Functions {
+    ///     Function [ <internal:ctype> function ctype_alnum ] {
+    ///
+    ///       - Parameters [1] {
+    ///         Parameter #0 [ <required> mixed $text ]
+    ///       }
+    ///       - Return [ bool ]
+    ///     }
+    ///     Function [ <internal:ctype> function ctype_alpha ] {
+    ///
+    ///       - Parameters [1] {
+    ///         Parameter #0 [ <required> mixed $text ]
+    ///       }
+    ///       - Return [ bool ]
+    ///     }
+    ///     Function [ <internal:ctype> function ctype_cntrl ] {
+    ///
+    ///       - Parameters [1] {
+    ///         Parameter #0 [ <required> mixed $text ]
+    ///       }
+    ///       - Return [ bool ]
+    ///     }
+    ///     Function [ <internal:ctype> function ctype_digit ] {
+    ///
+    ///       - Parameters [1] {
+    ///         Parameter #0 [ <required> mixed $text ]
+    ///       }
+    ///       - Return [ bool ]
+    ///     }
+    ///     Function [ <internal:ctype> function ctype_lower ] {
+    ///
+    ///       - Parameters [1] {
+    ///         Parameter #0 [ <required> mixed $text ]
+    ///       }
+    ///       - Return [ bool ]
+    ///     }
+    ///     Function [ <internal:ctype> function ctype_graph ] {
+    ///
+    ///       - Parameters [1] {
+    ///         Parameter #0 [ <required> mixed $text ]
+    ///       }
+    ///       - Return [ bool ]
+    ///     }
+    ///     Function [ <internal:ctype> function ctype_print ] {
+    ///
+    ///       - Parameters [1] {
+    ///         Parameter #0 [ <required> mixed $text ]
+    ///       }
+    ///       - Return [ bool ]
+    ///     }
+    ///     Function [ <internal:ctype> function ctype_punct ] {
+    ///
+    ///       - Parameters [1] {
+    ///         Parameter #0 [ <required> mixed $text ]
+    ///       }
+    ///       - Return [ bool ]
+    ///     }
+    ///     Function [ <internal:ctype> function ctype_space ] {
+    ///
+    ///       - Parameters [1] {
+    ///         Parameter #0 [ <required> mixed $text ]
+    ///       }
+    ///       - Return [ bool ]
+    ///     }
+    ///     Function [ <internal:ctype> function ctype_upper ] {
+    ///
+    ///       - Parameters [1] {
+    ///         Parameter #0 [ <required> mixed $text ]
+    ///       }
+    ///       - Return [ bool ]
+    ///     }
+    ///     Function [ <internal:ctype> function ctype_xdigit ] {
+    ///
+    ///       - Parameters [1] {
+    ///         Parameter #0 [ <required> mixed $text ]
+    ///       }
+    ///       - Return [ bool ]
+    ///     }
+    ///   }
+    /// }
+    /// ```
+    ///
+    /// ```php
+    /// echo new ReflectionExtension('tokenizer');
+    /// ```
+    /// ```expect
+    /// Extension [ <persistent> extension #%N% tokenizer version 8.5.9 ] {
+    ///
+    ///   - Constants [154] {
+    ///     Constant [ <persistent> int T_LNUMBER ] { 260 }
+    ///     Constant [ <persistent> int T_DNUMBER ] { 261 }
+    ///     Constant [ <persistent> int T_STRING ] { 262 }
+    ///     Constant [ <persistent> int T_NAME_FULLY_QUALIFIED ] { 263 }
+    ///     Constant [ <persistent> int T_NAME_RELATIVE ] { 264 }
+    ///     Constant [ <persistent> int T_NAME_QUALIFIED ] { 265 }
+    ///     Constant [ <persistent> int T_VARIABLE ] { 266 }
+    ///     Constant [ <persistent> int T_INLINE_HTML ] { 267 }
+    ///     Constant [ <persistent> int T_ENCAPSED_AND_WHITESPACE ] { 268 }
+    ///     Constant [ <persistent> int T_CONSTANT_ENCAPSED_STRING ] { 269 }
+    ///     Constant [ <persistent> int T_STRING_VARNAME ] { 270 }
+    ///     Constant [ <persistent> int T_NUM_STRING ] { 271 }
+    ///     Constant [ <persistent> int T_INCLUDE ] { 272 }
+    ///     Constant [ <persistent> int T_INCLUDE_ONCE ] { 273 }
+    ///     Constant [ <persistent> int T_EVAL ] { 274 }
+    ///     Constant [ <persistent> int T_REQUIRE ] { 275 }
+    ///     Constant [ <persistent> int T_REQUIRE_ONCE ] { 276 }
+    ///     Constant [ <persistent> int T_LOGICAL_OR ] { 277 }
+    ///     Constant [ <persistent> int T_LOGICAL_XOR ] { 278 }
+    ///     Constant [ <persistent> int T_LOGICAL_AND ] { 279 }
+    ///     Constant [ <persistent> int T_PRINT ] { 280 }
+    ///     Constant [ <persistent> int T_YIELD ] { 281 }
+    ///     Constant [ <persistent> int T_YIELD_FROM ] { 282 }
+    ///     Constant [ <persistent> int T_INSTANCEOF ] { 283 }
+    ///     Constant [ <persistent> int T_NEW ] { 284 }
+    ///     Constant [ <persistent> int T_CLONE ] { 285 }
+    ///     Constant [ <persistent> int T_EXIT ] { 286 }
+    ///     Constant [ <persistent> int T_IF ] { 287 }
+    ///     Constant [ <persistent> int T_ELSEIF ] { 288 }
+    ///     Constant [ <persistent> int T_ELSE ] { 289 }
+    ///     Constant [ <persistent> int T_ENDIF ] { 290 }
+    ///     Constant [ <persistent> int T_ECHO ] { 291 }
+    ///     Constant [ <persistent> int T_DO ] { 292 }
+    ///     Constant [ <persistent> int T_WHILE ] { 293 }
+    ///     Constant [ <persistent> int T_ENDWHILE ] { 294 }
+    ///     Constant [ <persistent> int T_FOR ] { 295 }
+    ///     Constant [ <persistent> int T_ENDFOR ] { 296 }
+    ///     Constant [ <persistent> int T_FOREACH ] { 297 }
+    ///     Constant [ <persistent> int T_ENDFOREACH ] { 298 }
+    ///     Constant [ <persistent> int T_DECLARE ] { 299 }
+    ///     Constant [ <persistent> int T_ENDDECLARE ] { 300 }
+    ///     Constant [ <persistent> int T_AS ] { 301 }
+    ///     Constant [ <persistent> int T_SWITCH ] { 302 }
+    ///     Constant [ <persistent> int T_ENDSWITCH ] { 303 }
+    ///     Constant [ <persistent> int T_CASE ] { 304 }
+    ///     Constant [ <persistent> int T_DEFAULT ] { 305 }
+    ///     Constant [ <persistent> int T_MATCH ] { 306 }
+    ///     Constant [ <persistent> int T_BREAK ] { 307 }
+    ///     Constant [ <persistent> int T_CONTINUE ] { 308 }
+    ///     Constant [ <persistent> int T_GOTO ] { 309 }
+    ///     Constant [ <persistent> int T_FUNCTION ] { 310 }
+    ///     Constant [ <persistent> int T_FN ] { 311 }
+    ///     Constant [ <persistent> int T_CONST ] { 312 }
+    ///     Constant [ <persistent> int T_RETURN ] { 313 }
+    ///     Constant [ <persistent> int T_TRY ] { 314 }
+    ///     Constant [ <persistent> int T_CATCH ] { 315 }
+    ///     Constant [ <persistent> int T_FINALLY ] { 316 }
+    ///     Constant [ <persistent> int T_THROW ] { 317 }
+    ///     Constant [ <persistent> int T_USE ] { 318 }
+    ///     Constant [ <persistent> int T_INSTEADOF ] { 319 }
+    ///     Constant [ <persistent> int T_GLOBAL ] { 320 }
+    ///     Constant [ <persistent> int T_STATIC ] { 321 }
+    ///     Constant [ <persistent> int T_ABSTRACT ] { 322 }
+    ///     Constant [ <persistent> int T_FINAL ] { 323 }
+    ///     Constant [ <persistent> int T_PRIVATE ] { 324 }
+    ///     Constant [ <persistent> int T_PROTECTED ] { 325 }
+    ///     Constant [ <persistent> int T_PUBLIC ] { 326 }
+    ///     Constant [ <persistent> int T_PRIVATE_SET ] { 327 }
+    ///     Constant [ <persistent> int T_PROTECTED_SET ] { 328 }
+    ///     Constant [ <persistent> int T_PUBLIC_SET ] { 329 }
+    ///     Constant [ <persistent> int T_READONLY ] { 330 }
+    ///     Constant [ <persistent> int T_VAR ] { 331 }
+    ///     Constant [ <persistent> int T_UNSET ] { 332 }
+    ///     Constant [ <persistent> int T_ISSET ] { 333 }
+    ///     Constant [ <persistent> int T_EMPTY ] { 334 }
+    ///     Constant [ <persistent> int T_HALT_COMPILER ] { 335 }
+    ///     Constant [ <persistent> int T_CLASS ] { 336 }
+    ///     Constant [ <persistent> int T_TRAIT ] { 337 }
+    ///     Constant [ <persistent> int T_INTERFACE ] { 338 }
+    ///     Constant [ <persistent> int T_ENUM ] { 339 }
+    ///     Constant [ <persistent> int T_EXTENDS ] { 340 }
+    ///     Constant [ <persistent> int T_IMPLEMENTS ] { 341 }
+    ///     Constant [ <persistent> int T_NAMESPACE ] { 342 }
+    ///     Constant [ <persistent> int T_LIST ] { 343 }
+    ///     Constant [ <persistent> int T_ARRAY ] { 344 }
+    ///     Constant [ <persistent> int T_CALLABLE ] { 345 }
+    ///     Constant [ <persistent> int T_LINE ] { 346 }
+    ///     Constant [ <persistent> int T_FILE ] { 347 }
+    ///     Constant [ <persistent> int T_DIR ] { 348 }
+    ///     Constant [ <persistent> int T_CLASS_C ] { 349 }
+    ///     Constant [ <persistent> int T_TRAIT_C ] { 350 }
+    ///     Constant [ <persistent> int T_METHOD_C ] { 351 }
+    ///     Constant [ <persistent> int T_FUNC_C ] { 352 }
+    ///     Constant [ <persistent> int T_PROPERTY_C ] { 353 }
+    ///     Constant [ <persistent> int T_NS_C ] { 354 }
+    ///     Constant [ <persistent> int T_ATTRIBUTE ] { 355 }
+    ///     Constant [ <persistent> int T_PLUS_EQUAL ] { 356 }
+    ///     Constant [ <persistent> int T_MINUS_EQUAL ] { 357 }
+    ///     Constant [ <persistent> int T_MUL_EQUAL ] { 358 }
+    ///     Constant [ <persistent> int T_DIV_EQUAL ] { 359 }
+    ///     Constant [ <persistent> int T_CONCAT_EQUAL ] { 360 }
+    ///     Constant [ <persistent> int T_MOD_EQUAL ] { 361 }
+    ///     Constant [ <persistent> int T_AND_EQUAL ] { 362 }
+    ///     Constant [ <persistent> int T_OR_EQUAL ] { 363 }
+    ///     Constant [ <persistent> int T_XOR_EQUAL ] { 364 }
+    ///     Constant [ <persistent> int T_SL_EQUAL ] { 365 }
+    ///     Constant [ <persistent> int T_SR_EQUAL ] { 366 }
+    ///     Constant [ <persistent> int T_COALESCE_EQUAL ] { 367 }
+    ///     Constant [ <persistent> int T_BOOLEAN_OR ] { 368 }
+    ///     Constant [ <persistent> int T_BOOLEAN_AND ] { 369 }
+    ///     Constant [ <persistent> int T_IS_EQUAL ] { 370 }
+    ///     Constant [ <persistent> int T_IS_NOT_EQUAL ] { 371 }
+    ///     Constant [ <persistent> int T_IS_IDENTICAL ] { 372 }
+    ///     Constant [ <persistent> int T_IS_NOT_IDENTICAL ] { 373 }
+    ///     Constant [ <persistent> int T_IS_SMALLER_OR_EQUAL ] { 374 }
+    ///     Constant [ <persistent> int T_IS_GREATER_OR_EQUAL ] { 375 }
+    ///     Constant [ <persistent> int T_SPACESHIP ] { 376 }
+    ///     Constant [ <persistent> int T_SL ] { 377 }
+    ///     Constant [ <persistent> int T_SR ] { 378 }
+    ///     Constant [ <persistent> int T_INC ] { 379 }
+    ///     Constant [ <persistent> int T_DEC ] { 380 }
+    ///     Constant [ <persistent> int T_INT_CAST ] { 381 }
+    ///     Constant [ <persistent> int T_DOUBLE_CAST ] { 382 }
+    ///     Constant [ <persistent> int T_STRING_CAST ] { 383 }
+    ///     Constant [ <persistent> int T_ARRAY_CAST ] { 384 }
+    ///     Constant [ <persistent> int T_OBJECT_CAST ] { 385 }
+    ///     Constant [ <persistent> int T_BOOL_CAST ] { 386 }
+    ///     Constant [ <persistent> int T_UNSET_CAST ] { 387 }
+    ///     Constant [ <persistent> int T_VOID_CAST ] { 388 }
+    ///     Constant [ <persistent> int T_OBJECT_OPERATOR ] { 389 }
+    ///     Constant [ <persistent> int T_NULLSAFE_OBJECT_OPERATOR ] { 390 }
+    ///     Constant [ <persistent> int T_DOUBLE_ARROW ] { 391 }
+    ///     Constant [ <persistent> int T_COMMENT ] { 392 }
+    ///     Constant [ <persistent> int T_DOC_COMMENT ] { 393 }
+    ///     Constant [ <persistent> int T_OPEN_TAG ] { 394 }
+    ///     Constant [ <persistent> int T_OPEN_TAG_WITH_ECHO ] { 395 }
+    ///     Constant [ <persistent> int T_CLOSE_TAG ] { 396 }
+    ///     Constant [ <persistent> int T_WHITESPACE ] { 397 }
+    ///     Constant [ <persistent> int T_START_HEREDOC ] { 398 }
+    ///     Constant [ <persistent> int T_END_HEREDOC ] { 399 }
+    ///     Constant [ <persistent> int T_DOLLAR_OPEN_CURLY_BRACES ] { 400 }
+    ///     Constant [ <persistent> int T_CURLY_OPEN ] { 401 }
+    ///     Constant [ <persistent> int T_PAAMAYIM_NEKUDOTAYIM ] { 402 }
+    ///     Constant [ <persistent> int T_NS_SEPARATOR ] { 403 }
+    ///     Constant [ <persistent> int T_ELLIPSIS ] { 404 }
+    ///     Constant [ <persistent> int T_COALESCE ] { 405 }
+    ///     Constant [ <persistent> int T_POW ] { 406 }
+    ///     Constant [ <persistent> int T_POW_EQUAL ] { 407 }
+    ///     Constant [ <persistent> int T_PIPE ] { 408 }
+    ///     Constant [ <persistent> int T_AMPERSAND_FOLLOWED_BY_VAR_OR_VARARG ] { 409 }
+    ///     Constant [ <persistent> int T_AMPERSAND_NOT_FOLLOWED_BY_VAR_OR_VARARG ] { 410 }
+    ///     Constant [ <persistent> int T_BAD_CHARACTER ] { 411 }
+    ///     Constant [ <persistent> int T_DOUBLE_COLON ] { 402 }
+    ///     Constant [ <persistent> int TOKEN_PARSE ] { 1 }
+    ///   }
+    ///
+    ///   - Functions {
+    ///     Function [ <internal:tokenizer> function token_get_all ] {
+    ///
+    ///       - Parameters [2] {
+    ///         Parameter #0 [ <required> string $code ]
+    ///         Parameter #1 [ <optional> int $flags = 0 ]
+    ///       }
+    ///       - Return [ array ]
+    ///     }
+    ///     Function [ <internal:tokenizer> function token_name ] {
+    ///
+    ///       - Parameters [1] {
+    ///         Parameter #0 [ <required> int $id ]
+    ///       }
+    ///       - Return [ string ]
+    ///     }
+    ///   }
+    ///
+    ///   - Classes [1] {
+    ///     Class [ <internal:tokenizer> class PhpToken implements Stringable ] {
+    ///
+    ///       - Constants [0] {
+    ///       }
+    ///
+    ///       - Static properties [0] {
+    ///       }
+    ///
+    ///       - Static methods [1] {
+    ///         Method [ <internal:tokenizer> static public method tokenize ] {
+    ///
+    ///           - Parameters [2] {
+    ///             Parameter #0 [ <required> string $code ]
+    ///             Parameter #1 [ <optional> int $flags = 0 ]
+    ///           }
+    ///           - Return [ array ]
+    ///         }
+    ///       }
+    ///
+    ///       - Properties [4] {
+    ///         Property [ public int $id ]
+    ///         Property [ public string $text ]
+    ///         Property [ public int $line ]
+    ///         Property [ public int $pos ]
+    ///       }
+    ///
+    ///       - Methods [5] {
+    ///         Method [ <internal:tokenizer, ctor> final public method __construct ] {
+    ///
+    ///           - Parameters [4] {
+    ///             Parameter #0 [ <required> int $id ]
+    ///             Parameter #1 [ <required> string $text ]
+    ///             Parameter #2 [ <optional> int $line = -1 ]
+    ///             Parameter #3 [ <optional> int $pos = -1 ]
+    ///           }
+    ///         }
+    ///
+    ///         Method [ <internal:tokenizer> public method is ] {
+    ///
+    ///           - Parameters [1] {
+    ///             Parameter #0 [ <required> $kind ]
+    ///           }
+    ///           - Return [ bool ]
+    ///         }
+    ///
+    ///         Method [ <internal:tokenizer> public method isIgnorable ] {
+    ///
+    ///           - Parameters [0] {
+    ///           }
+    ///           - Return [ bool ]
+    ///         }
+    ///
+    ///         Method [ <internal:tokenizer> public method getTokenName ] {
+    ///
+    ///           - Parameters [0] {
+    ///           }
+    ///           - Return [ ?string ]
+    ///         }
+    ///
+    ///         Method [ <internal:tokenizer, prototype Stringable> public method __toString ] {
+    ///
+    ///           - Parameters [0] {
+    ///           }
+    ///           - Return [ string ]
+    ///         }
+    ///       }
+    ///     }
+    ///   }
+    /// }
+    /// ```
+    fn __toString(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
+        let extension = this_extension(req)?;
+        let text = extension_string(req, extension, "")?;
+        PhpString::new(req, text.as_bytes())
+    }
+
+    /// `ReflectionExtension::getName()`: `module->name`, the spelling the
+    /// `zend_module_entry` carries whatever the constructor was given.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionExtension('CTYPE'))->getName());
+    /// ```
+    /// ```expect
+    /// string(5) "ctype"
+    /// ```
+    #[php(tentative)]
+    fn getName(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
+        let extension = this_extension(req)?;
+        let name = req
+            .extension_name(extension)
+            .map(str::to_owned)
+            .unwrap_or_default();
+        PhpString::new(req, name.as_bytes())
+    }
+
+    /// `ReflectionExtension::getVersion()`: `module->version`, and `null`
+    /// for `NO_VERSION_YET`. Every extension compiled in here carries
+    /// `PHP_VERSION`, as `PHP_CTYPE_VERSION` and its kin do, which is what
+    /// `_extension_string`'s header prints.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionExtension('json'))->getVersion());
+    /// ```
+    /// ```expect
+    /// string(5) "8.5.9"
+    /// ```
+    #[php(tentative)]
+    fn getVersion(req: &mut Request, _this: This<Self>) -> Result<Option<PhpString>, Thrown> {
+        this_extension(req)?;
+        PhpString::new(req, PHP_VERSION.as_bytes()).map(Some)
+    }
+
+    /// `ReflectionExtension::getFunctions()`: one `ReflectionFunction` per
+    /// native the extension declared, keyed by
+    /// `fptr->common.function_name`, which for a native is the lowered
+    /// name php registered it under.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionExtension('json'))->getFunctions());
+    /// ```
+    /// ```expect
+    /// array(5) {
+    ///   ["json_encode"]=>
+    ///   object(ReflectionFunction)#2 (1) {
+    ///     ["name"]=>
+    ///     string(11) "json_encode"
+    ///   }
+    ///   ["json_decode"]=>
+    ///   object(ReflectionFunction)#3 (1) {
+    ///     ["name"]=>
+    ///     string(11) "json_decode"
+    ///   }
+    ///   ["json_validate"]=>
+    ///   object(ReflectionFunction)#4 (1) {
+    ///     ["name"]=>
+    ///     string(13) "json_validate"
+    ///   }
+    ///   ["json_last_error"]=>
+    ///   object(ReflectionFunction)#5 (1) {
+    ///     ["name"]=>
+    ///     string(15) "json_last_error"
+    ///   }
+    ///   ["json_last_error_msg"]=>
+    ///   object(ReflectionFunction)#6 (1) {
+    ///     ["name"]=>
+    ///     string(19) "json_last_error_msg"
+    ///   }
+    /// }
+    /// ```
+    #[php(tentative)]
+    fn getFunctions(req: &mut Request, _this: This<Self>) -> Result<PhpArray, Thrown> {
+        let extension = this_extension(req)?;
+        let reflector = class_named(req, b"ReflectionFunction")?;
+        let mut functions = PhpArray::new(req)?;
+        for function in req.extension_functions(extension) {
+            let Some(name) = req.function_decl(function).map(|decl| decl.name.0.to_vec()) else {
+                continue;
+            };
+            let object = new_object(req, reflector)?;
+            set_name(req, object, &name)?;
+            let key = Key::Str(PhpString::new(req, &name)?);
+            functions.set(req, key, object.as_value())?;
+        }
+        Ok(functions)
+    }
+
+    /// `ReflectionExtension::getConstants()`: the constants the extension
+    /// declared, keyed by name, each value the constant's.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionExtension('ctype'))->getConstants());
+    /// ```
+    /// ```expect
+    /// array(0) {
+    /// }
+    /// ```
+    #[php(tentative)]
+    fn getConstants(req: &mut Request, _this: This<Self>) -> Result<PhpArray, Thrown> {
+        let extension = this_extension(req)?;
+        let mut constants = PhpArray::new(req)?;
+        for declared in req.extension_constants(extension) {
+            let name = declared.0.to_vec();
+            let value = constant(req, &name)?.unwrap_or_default();
+            let key = Key::Str(PhpString::new(req, &name)?);
+            constants.set(req, key, value)?;
+        }
+        Ok(constants)
+    }
+
+    /// `ReflectionExtension::getINIEntries()`: `_addinientry` over the
+    /// extension's entries, each name keyed to the value in force.
+    ///
+    /// ```php
+    /// ini_set('date.default_latitude', '1');
+    /// var_dump((new ReflectionExtension('date'))->getINIEntries());
+    /// ```
+    /// ```expect
+    /// array(5) {
+    ///   ["date.timezone"]=>
+    ///   string(3) "UTC"
+    ///   ["date.default_latitude"]=>
+    ///   string(1) "1"
+    ///   ["date.default_longitude"]=>
+    ///   string(7) "35.2333"
+    ///   ["date.sunset_zenith"]=>
+    ///   string(9) "90.833333"
+    ///   ["date.sunrise_zenith"]=>
+    ///   string(9) "90.833333"
+    /// }
+    /// ```
+    #[php(tentative)]
+    fn getINIEntries(req: &mut Request, _this: This<Self>) -> Result<PhpArray, Thrown> {
+        let extension = this_extension(req)?;
+        let mut entries = PhpArray::new(req)?;
+        for entry in req.extension_ini(extension) {
+            let key = Key::Str(PhpString::new(req, &entry.decl.name.0)?);
+            let value = Value::string(PhpString::new(req, &entry.value)?);
+            entries.set(req, key, value)?;
+        }
+        Ok(entries)
+    }
+
+    /// `ReflectionExtension::getClasses()`: over `EG(class_table)` in its
+    /// order, every class whose `ce->info.internal.module` is this
+    /// extension, keyed by its name and holding the `ReflectionClass`
+    /// `zend_reflection_class_factory` makes, `object_init_ex` and the name
+    /// written with no constructor served, a `ReflectionEnum` for an enum.
+    /// The alias key php takes for an aliased class has no case here until
+    /// `class_alias` links one. `ctype` declares no class, so the fence
+    /// pins the empty walk; the walk over `Reflection`'s classes is
+    /// `ReflectionExtension_getClasses_basic.phpt`'s, which names php's
+    /// twenty-six where this crate declares a subset, and a fence over one
+    /// of them waits on the compiler reading a dimension fetch.
+    ///
+    /// ```php
+    /// $e = new ReflectionExtension('ctype'); var_dump($e->getClasses(), $e->getClassNames());
+    /// ```
+    /// ```expect
+    /// array(0) {
+    /// }
+    /// array(0) {
+    /// }
+    /// ```
+    #[php(tentative)]
+    fn getClasses(req: &mut Request, _this: This<Self>) -> Result<PhpArray, Thrown> {
+        let extension = this_extension(req)?;
+        let mut classes = PhpArray::new(req)?;
+        for (class, name) in extension_classes(req, extension) {
+            let reflector = reflection_class_factory(req, class)?;
+            let key = Key::Str(PhpString::new(req, &name)?);
+            classes.set(req, key, Value::object(reflector))?;
+        }
+        Ok(classes)
+    }
+
+    /// `ReflectionExtension::getClassNames()`: the same walk as
+    /// `getClasses`, the names appended in order.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionExtension('json'))->getClassNames());
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   [0]=>
+    ///   string(16) "JsonSerializable"
+    ///   [1]=>
+    ///   string(13) "JsonException"
+    /// }
+    /// ```
+    #[php(tentative)]
+    fn getClassNames(req: &mut Request, _this: This<Self>) -> Result<PhpArray, Thrown> {
+        let extension = this_extension(req)?;
+        let mut names = PhpArray::new(req)?;
+        for (_, name) in extension_classes(req, extension) {
+            let name = Value::string(PhpString::new(req, &name)?);
+            names.append(req, name)?;
+        }
+        Ok(names)
+    }
+
+    /// `ReflectionExtension::getDependencies()`: `module->deps` walked into
+    /// an array keyed by the other extension's name, each value the kind,
+    /// `Required`, `Conflicts` or `Optional`, then the row's `rel` and
+    /// `version` each after one space where set; the empty array where the
+    /// pointer is null, as it is for `ctype`.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionExtension('ctype'))->getDependencies());
+    /// ```
+    /// ```expect
+    /// array(0) {
+    /// }
+    /// ```
+    #[php(tentative)]
+    fn getDependencies(req: &mut Request, _this: This<Self>) -> Result<PhpArray, Thrown> {
+        let extension = this_extension(req)?;
+        let mut dependencies = PhpArray::new(req)?;
+        for dependency in req.extension_dependencies(extension) {
+            let mut relation = String::from(match dependency.kind {
+                DependencyKind::Required => "Required",
+                DependencyKind::Conflicts => "Conflicts",
+                DependencyKind::Optional => "Optional",
+            });
+            for part in [&dependency.rel, &dependency.version].into_iter().flatten() {
+                relation.push(' ');
+                relation.push_str(part);
+            }
+            let key = Key::Str(PhpString::new(req, dependency.name.as_bytes())?);
+            let value = Value::string(PhpString::new(req, relation.as_bytes())?);
+            dependencies.set(req, key, value)?;
+        }
+        Ok(dependencies)
+    }
+
+    /// `ReflectionExtension::info()`: `php_info_print_module` over the
+    /// extension, the name then its `MINFO` table, written to the body as
+    /// the CLI prints it; `null` returned, as a `void` method is.
+    ///
+    /// ```php
+    /// (new ReflectionExtension('ctype'))->info();
+    /// ```
+    /// ```expect
+    /// ctype
+    ///
+    /// ctype functions => enabled
+    /// ```
+    #[php(tentative)]
+    fn info(req: &mut Request, _this: This<Self>) -> Result<(), Thrown> {
+        let extension = this_extension(req)?;
+        req.extension_info(extension);
+        Ok(())
+    }
+
+    /// `ReflectionExtension::isPersistent()`:
+    /// `module->type == MODULE_PERSISTENT`, which every extension compiled
+    /// into the binary is; `MODULE_TEMPORARY` is `dl()`'s, which this
+    /// engine has none of.
+    ///
+    /// ```php
+    /// $e = new ReflectionExtension('ctype'); var_dump($e->isPersistent(), $e->isTemporary());
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(false)
+    /// ```
+    #[php(tentative)]
+    fn isPersistent(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
+        this_extension(req)?;
+        Ok(true)
+    }
+
+    /// `ReflectionExtension::isTemporary()`:
+    /// `module->type == MODULE_TEMPORARY`, the complement of
+    /// `isPersistent`.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionExtension('json'))->isTemporary());
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// ```
+    #[php(tentative)]
+    fn isTemporary(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
+        this_extension(req)?;
+        Ok(false)
+    }
+}
+
+/// `ReflectionZendExtension` as the stub declares it.
+#[php_class(implements(Reflector), not_serializable)]
+pub(crate) struct ReflectionZendExtension;
+
+#[php_class]
+impl ReflectionZendExtension {
+    #[php(property)]
+    const name: PhpString;
+
+    #[php(private, implementation = crate::func::ReflectionFunctionAbstract::__clone)]
+    fn __clone(_this: This<Self>);
+
+    /// `ReflectionZendExtension::__construct(string $name)`:
+    /// `zend_get_extension(name)` or php's `ReflectionException`. The
+    /// engine loads no Zend extension, `zend_extensions` being empty, so
+    /// every name is refused and no reflector of this class ever holds one.
+    ///
+    /// ```php
+    /// try { new ReflectionZendExtension('zend_opcache'); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+    /// try { new ReflectionZendExtension([]); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Zend Extension "zend_opcache" does not exist
+    /// ReflectionZendExtension::__construct(): Argument #1 ($name) must be of type string, array given
+    /// ```
+    fn __construct(req: &mut Request, _this: This<Self>, name: PhpString) -> Result<(), Thrown> {
+        let name = name.as_bytes().to_vec();
+        Err(throw(
+            req,
+            "ReflectionException",
+            &format!(
+                "Zend Extension \"{}\" does not exist",
+                String::from_utf8_lossy(&name)
+            ),
+        ))
+    }
+
+    /// `ReflectionZendExtension`'s six readers, `__toString`, `getName`,
+    /// `getVersion`, `getAuthor`, `getURL` and `getCopyright`: each reads
+    /// `intern->ptr`, which only the constructor writes and which it never
+    /// writes here ([`reflection_zend_extension_construct`]), so each is
+    /// `GET_REFLECTION_OBJECT_PTR`'s `Error` after its count check.
+    ///
+    /// ```php
+    /// $r = (new ReflectionClass('ReflectionZendExtension'))->newInstanceWithoutConstructor();
+    /// foreach (['getName', 'getVersion', 'getAuthor', 'getURL', 'getCopyright', '__toString'] as $m) {
+    ///     try { call_user_func([$r, $m]); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// }
+    /// try { $r->getName(1); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Internal error: Failed to retrieve the reflection object
+    /// Internal error: Failed to retrieve the reflection object
+    /// Internal error: Failed to retrieve the reflection object
+    /// Internal error: Failed to retrieve the reflection object
+    /// Internal error: Failed to retrieve the reflection object
+    /// Internal error: Failed to retrieve the reflection object
+    /// ReflectionZendExtension::getName() expects exactly 0 arguments, 1 given
+    /// ```
+    fn __toString(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
+        Err(throw(
+            req,
+            "Error",
+            "Internal error: Failed to retrieve the reflection object",
+        ))
+    }
+
+    #[php(tentative, implementation = ReflectionZendExtension::__toString)]
+    fn getName(_this: This<Self>) -> PhpString;
+
+    #[php(tentative, implementation = ReflectionZendExtension::__toString)]
+    fn getVersion(_this: This<Self>) -> PhpString;
+
+    #[php(tentative, implementation = ReflectionZendExtension::__toString)]
+    fn getAuthor(_this: This<Self>) -> PhpString;
+
+    #[php(tentative, implementation = ReflectionZendExtension::__toString)]
+    fn getURL(_this: This<Self>) -> PhpString;
+
+    #[php(tentative, implementation = ReflectionZendExtension::__toString)]
+    fn getCopyright(_this: This<Self>) -> PhpString;
+}
+
+/// `ReflectionReference` as the stub declares it.
+#[php_class(final, not_serializable, payload = crate::Reflected, handlers = crate::HANDLERS)]
+pub(crate) struct ReflectionReference;
+
+#[php_class]
+impl ReflectionReference {
+    /// `ReflectionReference::fromArrayElement(array $array, int|string
+    /// $key)`: a reflector over the element at `key` where it is a
+    /// reference, `null` where it is a plain value or a reference only the
+    /// array holds (`is_ignorable_reference`, a directly self-referential
+    /// array excepted), and php's `ReflectionException` for a key the array
+    /// has not. The key is looked up as given, `zend_hash_find` for a
+    /// string and `zend_hash_index_find` for an int.
+    ///
+    /// ```php
+    /// $a = [0, 1, 2]; $r = &$a[1]; $one = &$a[2]; unset($one);
+    /// var_dump(ReflectionReference::fromArrayElement($a, 0), ReflectionReference::fromArrayElement($a, 1), ReflectionReference::fromArrayElement($a, 2));
+    /// try { ReflectionReference::fromArrayElement($a, 3); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+    /// try { ReflectionReference::fromArrayElement($a, []); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// $s = []; $s[0] = &$s; $t = [$s]; unset($s);
+    /// var_dump(ReflectionReference::fromArrayElement($t[0], 0) instanceof ReflectionReference);
+    /// ```
+    /// ```expect
+    /// NULL
+    /// object(ReflectionReference)#1 (0) {
+    /// }
+    /// NULL
+    /// Array key not found
+    /// ReflectionReference::fromArrayElement(): Argument #2 ($key) must be of type string|int, array given
+    /// bool(true)
+    /// ```
+    fn fromArrayElement(
+        req: &mut Request,
+        array: PhpArray,
+        key: Union<i64, PhpString>,
+    ) -> Result<Option<Instance<ReflectionReference>>, Thrown> {
+        let key = match key {
+            Union::A(n) => Key::Int(n),
+            Union::B(name) => Key::Str(PhpString::new(req, name.as_bytes())?),
+        };
+        let Some(item) = array.get(&key) else {
+            return Err(throw(req, "ReflectionException", "Array key not found"));
+        };
+        let Some(reference) = item.as_php_ref().copied() else {
+            return Ok(None);
+        };
+        // `is_ignorable_reference`: one owner, the array's, and no directly
+        // self-referential array, which `zend_array_dup` keeps as a
+        // reference despite the one owner.
+        let self_referential = reference
+            .get()
+            .as_array()
+            .and_then(|held| held.get(&key))
+            .and_then(|element| element.as_php_ref().copied())
+            == Some(reference);
+        if item.refcount() == 1 && !self_referential {
+            return Ok(None);
+        }
+        let class = class_named(req, b"ReflectionReference")?;
+        let object = new_object(req, class)?;
+        req.addref(&reference.as_value());
+        if let Some(reflected) = object.native_mut::<Reflected>(req) {
+            reflected.reference = Some(reference);
+        } else {
+            req.release(reference.as_value());
+        }
+        Ok(Some(Instance::of(object)))
+    }
+
+    /// `ReflectionReference::getId()`: a string that is the same for two
+    /// reflectors over one reference and differs between two references,
+    /// twenty bytes as php's `SHA1(ref || key)` is, here the reference's
+    /// identity hashed under the request's secret, so no address is shown;
+    /// php's `Corrupted ReflectionReference object` for a reflector that
+    /// holds none.
+    ///
+    /// ```php
+    /// $a = [1, 2]; $x = &$a[0]; $y = &$a[1]; $b = []; $b[0] = &$a[0];
+    /// $r0 = ReflectionReference::fromArrayElement($a, 0); $r1 = ReflectionReference::fromArrayElement($a, 1); $rb = ReflectionReference::fromArrayElement($b, 0);
+    /// var_dump($r0->getId() === $rb->getId(), $r0->getId() !== $r1->getId(), strlen($r0->getId()));
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// int(20)
+    /// ```
+    fn getId(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
+        use std::hash::BuildHasher as _;
+        let reference = req
+            .this()
+            .and_then(|this| this.native::<Reflected>(req))
+            .and_then(|reflected| reflected.reference);
+        let Some(reference) = reference else {
+            return Err(throw(
+                req,
+                "ReflectionException",
+                "Corrupted ReflectionReference object",
+            ));
+        };
+        let key = &req.state::<State>().reference_key;
+        let digest: Vec<u8> = (0u8..3)
+            .flat_map(|round| key.hash_one((reference, round)).to_le_bytes())
+            .take(20)
+            .collect();
+        PhpString::new(req, &digest)
+    }
+
+    #[php(private, implementation = crate::func::ReflectionFunctionAbstract::__clone)]
+    fn __clone(_this: This<Self>);
+
+    /// `ReflectionReference::__construct()`: private, and php's refusal
+    /// when reached anyway, since a reflector is made by
+    /// `fromArrayElement`.
+    ///
+    /// ```php
+    /// try { new ReflectionReference(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Call to private ReflectionReference::__construct() from global scope
+    /// ```
+    ///
+    /// ```php
+    /// $r = ReflectionReference::fromArrayElement([&$x], 0);
+    /// try { (new ReflectionMethod('ReflectionReference', '__construct'))->invoke($r); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Cannot directly instantiate ReflectionReference. Use ReflectionReference::fromArrayElement() instead
+    /// ```
+    #[php(private, arity = manual)]
+    fn __construct(req: &mut Request, _this: This<Self>) -> Result<(), Thrown> {
+        Err(throw(
+            req,
+            "ReflectionException",
+            "Cannot directly instantiate ReflectionReference. Use ReflectionReference::fromArrayElement() instead",
+        ))
+    }
 }

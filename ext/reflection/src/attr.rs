@@ -16,17 +16,18 @@
 
 use std::fmt::Write as _;
 
+use php_ext::abi::This;
+use php_ext::attr::php_class;
 use php_ext::call::{eval_const_expr, instantiate_named, lookup_class};
-use php_ext::coerce::{to_long, value_name};
+use php_ext::coerce::value_name;
 use php_ext::decl::{Attribute, class_attribute_refusal};
 use php_ext::raising::{Thrown, arg_value_error, throw};
 use php_ext::request::Request;
-use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value};
 
 use super::{
-    at_most_arguments, class_is, class_name_of, class_named, default_value_string,
-    exactly_arguments, is_internal, keep_attribute, new_object, set_name, string_argument,
-    string_value, this_attribute,
+    class_is, class_name_of, class_named, default_value_string, is_internal, keep_attribute,
+    new_object, set_name, this_attribute,
 };
 
 /// `ZEND_ATTRIBUTE_TARGET_*` (`Z/Zend/zend_attributes.h:26-33`), the
@@ -114,18 +115,10 @@ pub(super) fn reflect_attributes(
     attributes: &[Attribute],
     scope: Option<ClassId>,
     target: i64,
-) -> Result<Value, Thrown> {
-    at_most_arguments(req, 2)?;
-    let wanted = match req.argument(1).map(|given| given.deref()) {
-        Some(given) if !matches!(given.as_ref(), ValueRef::Null | ValueRef::Undef) => {
-            Some(string_argument(req, 1)?)
-        }
-        _ => None,
-    };
-    let flags = match req.argument(2).map(|given| given.deref()) {
-        Some(given) => to_long(req, &given)?,
-        None => 0,
-    };
+    name: Option<PhpString>,
+    flags: i64,
+) -> Result<PhpArray, Thrown> {
+    let wanted = name.as_ref().map(|name| name.as_bytes().to_vec());
     if flags & !IS_INSTANCEOF != 0 {
         return Err(arg_value_error(req, 2, "be a valid attribute filter flag"));
     }
@@ -166,7 +159,7 @@ pub(super) fn reflect_attributes(
         let object = attribute_factory(req, &kept)?;
         out.append(req, object.as_value())?;
     }
-    Ok(Value::array(out))
+    Ok(out)
 }
 
 /// `read_attributes`'s two filters: the name as written, or the class
@@ -206,288 +199,6 @@ fn attribute_factory(req: &mut Request, kept: &AttributeRef) -> Result<PhpObject
     set_name(req, object, &name)?;
     keep_attribute(req, object, kept.clone());
     Ok(object)
-}
-
-/// `ReflectionAttribute::__construct()`: private in the stub and
-/// reachable through reflection, where php refuses it.
-pub(super) fn reflection_attribute_construct(req: &mut Request) -> Result<Value, Thrown> {
-    Err(throw(
-        req,
-        "ReflectionException",
-        "Cannot directly instantiate ReflectionAttribute",
-    ))
-}
-
-/// `ReflectionAttribute::getName()`: `attr->data->name`, the attribute
-/// as it was written.
-///
-/// A native's attribute, the one the stub's `deprecated` puts on
-/// `ReflectionFunction::isDisabled`, is read as a program's is:
-///
-/// ```php
-/// $a = (new ReflectionMethod('ReflectionFunction', 'isDisabled'))->getAttributes();
-/// var_dump($a[0]->getName());
-/// ```
-/// ```expect
-/// string(10) "Deprecated"
-/// ```
-pub(super) fn reflection_attribute_get_name(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let kept = this_attribute(req)?;
-    let name = kept.attribute.name.0.to_vec();
-    string_value(req, &name)
-}
-
-/// `ReflectionAttribute::getTarget()`: `attr->target`, the one
-/// `Attribute::TARGET_*` bit of the subject the attribute sits on.
-///
-/// ```php
-/// $a = (new ReflectionMethod('ReflectionFunction', 'isDisabled'))->getAttributes();
-/// var_dump($a[0]->getTarget());
-/// ```
-/// ```expect
-/// int(4)
-/// ```
-pub(super) fn reflection_attribute_get_target(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let kept = this_attribute(req)?;
-    Ok(Value::int(kept.target))
-}
-
-/// `ReflectionAttribute::isRepeated()`:
-/// `zend_is_attribute_repeated`, whether the subject carries another
-/// attribute of the same name at the same offset.
-///
-/// ```php
-/// $a = (new ReflectionMethod('ReflectionFunction', 'isDisabled'))->getAttributes();
-/// var_dump($a[0]->isRepeated());
-/// ```
-/// ```expect
-/// bool(false)
-/// ```
-pub(super) fn reflection_attribute_is_repeated(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let kept = this_attribute(req)?;
-    Ok(Value::bool(kept.repeated))
-}
-
-/// `ReflectionAttribute::getArguments()`: each argument's constant
-/// expression evaluated in the attribute's scope, the positional ones
-/// appended and the named ones at their name, as
-/// `zend_get_attribute_value` and `zend_hash_add_new` place them.
-///
-/// ```php
-/// $a = (new ReflectionMethod('ReflectionFunction', 'isDisabled'))->getAttributes();
-/// var_dump($a[0]->getArguments());
-/// ```
-/// ```expect
-/// array(2) {
-///   ["since"]=>
-///   string(3) "8.0"
-///   ["message"]=>
-///   string(73) "as ReflectionFunction can no longer be constructed for disabled functions"
-/// }
-/// ```
-///
-/// An argument over a class constant is evaluated as it is read, its
-/// operators and a conditional among them:
-///
-/// ```php
-/// class K { const A = 1|2; }
-/// #[Attribute]
-/// class At { function __construct(public $v, public $w = null) {} }
-/// #[At(K::A | 4, K::A ?: 0)]
-/// class T {}
-/// var_dump((new ReflectionClass('T'))->getAttributes()[0]->getArguments());
-/// ```
-/// ```expect
-/// array(2) {
-///   [0]=>
-///   int(7)
-///   [1]=>
-///   int(3)
-/// }
-/// ```
-pub(super) fn reflection_attribute_get_arguments(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let kept = this_attribute(req)?;
-    let mut out = PhpArray::new(req)?;
-    for argument in &kept.attribute.arguments {
-        let value = eval_const_expr(req, &argument.value, kept.scope)?;
-        match &argument.name {
-            Some(name) => {
-                let key = PhpString::new(req, &name.0)?;
-                out.set(req, Key::Str(key), value)?;
-            }
-            None => out.append(req, value)?,
-        }
-    }
-    Ok(Value::array(out))
-}
-
-/// `ReflectionAttribute::__toString()`: `Attribute [ name ]` alone for
-/// one with no argument, and the arguments block for one with some,
-/// each argument as `format_default_value` writes it, which is the
-/// expression as written and not its value.
-///
-/// ```php
-/// $a = (new ReflectionMethod('ReflectionFunction', 'isDisabled'))->getAttributes();
-/// echo $a[0];
-/// ```
-/// ```expect
-/// Attribute [ Deprecated ] {
-///   - Arguments [2] {
-///     Argument #0 [ since = '8.0' ]
-///     Argument #1 [ message = 'as ReflectionFunction can no longer be constructed for disabled functions' ]
-///   }
-/// }
-/// ```
-pub(super) fn reflection_attribute_to_string(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let kept = this_attribute(req)?;
-    let mut out = format!(
-        "Attribute [ {} ]",
-        String::from_utf8_lossy(&kept.attribute.name.0)
-    );
-    if kept.attribute.arguments.is_empty() {
-        out.push('\n');
-        return string_value(req, out.as_bytes());
-    }
-    out.push_str(" {\n");
-    let _ = writeln!(out, "  - Arguments [{}] {{", kept.attribute.arguments.len());
-    for (at, argument) in kept.attribute.arguments.iter().enumerate() {
-        let _ = write!(out, "    Argument #{at} [ ");
-        if let Some(name) = &argument.name {
-            out.push_str(&String::from_utf8_lossy(&name.0));
-            out.push_str(" = ");
-        }
-        let written = default_value_string(req, &argument.value);
-        out.push_str(&written);
-        out.push_str(" ]\n");
-    }
-    out.push_str("  }\n}\n");
-    string_value(req, out.as_bytes())
-}
-
-/// `ReflectionAttribute::newInstance()`: the attribute's class
-/// instantiated with the arguments, php's four refusals before it —
-/// the class no table has, a class carrying no `#[Attribute]` marker,
-/// a marker whose flags do not name this target, and a user attribute
-/// repeated where its marker did not allow it.
-///
-/// An internal attribute is made from the class
-/// `zend_register_attribute_ce` registered, its marker's targets read
-/// as a user attribute's are:
-///
-/// ```php
-/// $a = (new ReflectionMethod('ReflectionFunction', 'isDisabled'))->getAttributes();
-/// var_dump($a[0]->newInstance());
-/// ```
-/// ```expect
-/// object(Deprecated)#1 (2) {
-///   ["message"]=>
-///   string(73) "as ReflectionFunction can no longer be constructed for disabled functions"
-///   ["since"]=>
-///   string(3) "8.0"
-/// }
-/// ```
-///
-/// A user attribute's own `#[Attribute(Attribute::TARGET_*)]` is held
-/// to the target it stands on, and to the repetition it allows:
-///
-/// ```php
-/// #[Attribute(Attribute::TARGET_METHOD)] class B {}
-/// class C { #[B] function m() {} #[B] public $p; }
-/// echo get_class((new ReflectionMethod('C', 'm'))->getAttributes()[0]->newInstance()), "\n";
-/// try { (new ReflectionProperty('C', 'p'))->getAttributes()[0]->newInstance(); }
-/// catch (Error $e) { echo $e->getMessage(), "\n"; }
-/// #[Attribute] class D {}
-/// #[D] #[D] function f() {}
-/// try { (new ReflectionFunction('f'))->getAttributes()[0]->newInstance(); }
-/// catch (Error $e) { echo $e->getMessage(), "\n"; }
-/// #[Attribute(Attribute::TARGET_ALL | Attribute::IS_REPEATABLE)] class E {}
-/// #[E] #[E] function g() {}
-/// echo get_class((new ReflectionFunction('g'))->getAttributes()[1]->newInstance()), "\n";
-/// #[Attribute(1024)] class G {}
-/// #[G] function i() {}
-/// try { (new ReflectionFunction('i'))->getAttributes()[0]->newInstance(); }
-/// catch (Error $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// B
-/// Attribute "B" cannot target property (allowed targets: method)
-/// Attribute "D" must not be repeated
-/// E
-/// Invalid attribute flags specified
-/// ```
-///
-/// A validator's refusal `#[\DelayedTargetValidation]` deferred is
-/// thrown here, php's `validation_error`:
-///
-/// ```php
-/// #[DelayedTargetValidation]
-/// #[Attribute]
-/// trait T {}
-/// #[DelayedTargetValidation]
-/// #[AllowDynamicProperties]
-/// readonly class R {}
-/// foreach (['T', 'R'] as $c) {
-///     try { (new ReflectionClass($c))->getAttributes()[1]->newInstance(); }
-///     catch (Error $e) { echo $e->getMessage(), "\n"; }
-/// }
-/// ```
-/// ```expect
-/// Cannot apply #[\Attribute] to trait T
-/// Cannot apply #[\AllowDynamicProperties] to readonly class R
-/// ```
-pub(super) fn reflection_attribute_new_instance(req: &mut Request) -> Result<Value, Thrown> {
-    exactly_arguments(req, 0)?;
-    let kept = this_attribute(req)?;
-    let written = String::from_utf8_lossy(&kept.attribute.name.0).into_owned();
-    let looked_up = bare_name(&kept.attribute.name.0).to_vec();
-    let Some(class) = lookup_class(req, &looked_up)? else {
-        return Err(throw(
-            req,
-            "Error",
-            &format!("Attribute class \"{written}\" not found"),
-        ));
-    };
-    let flags = marker_flags(req, class, &written)?;
-    if kept.target & flags == 0 {
-        return Err(throw(
-            req,
-            "Error",
-            &format!(
-                "Attribute \"{written}\" cannot target {} (allowed targets: {})",
-                target_names(kept.target),
-                target_names(flags & TARGET_ALL)
-            ),
-        ));
-    }
-    // `zend_attribute.validation_error`: the refusal of an internal
-    // attribute's validator `#[\DelayedTargetValidation]` deferred,
-    // thrown where the object would be made.
-    if kept.target == TARGET_CLASS
-        && let Some(subject) = kept.scope
-        && let Some(decl) = req.class_decl(subject)
-        && let Some(refused) = class_attribute_refusal(
-            &looked_up,
-            decl.kind,
-            &decl.flags,
-            &String::from_utf8_lossy(&class_name_of(req, subject)),
-        )
-    {
-        return Err(throw(req, "Error", &refused));
-    }
-    if !is_internal(req, class) && flags & IS_REPEATABLE == 0 && kept.repeated {
-        return Err(throw(
-            req,
-            "Error",
-            &format!("Attribute \"{written}\" must not be repeated"),
-        ));
-    }
-    let object = construct(req, class, &kept)?;
-    Ok(object.as_value())
 }
 
 /// `zend_attribute_attribute_get_flags`: the first argument of the
@@ -554,4 +265,305 @@ fn construct(req: &mut Request, class: ClassId, kept: &AttributeRef) -> Result<P
         req.release(value);
     }
     made
+}
+
+/// `ReflectionAttribute` as the stub declares it.
+#[php_class(implements(crate::Reflector), not_serializable, payload = crate::Reflected, handlers = crate::HANDLERS)]
+pub(crate) struct ReflectionAttribute;
+
+#[php_class]
+impl ReflectionAttribute {
+    const IS_INSTANCEOF: i64 = 2;
+    #[php(property)]
+    const name: PhpString;
+
+    /// `ReflectionAttribute::getName()`: `attr->data->name`, the attribute
+    /// as it was written.
+    ///
+    /// A native's attribute, the one the stub's `deprecated` puts on
+    /// `ReflectionFunction::isDisabled`, is read as a program's is:
+    ///
+    /// ```php
+    /// $a = (new ReflectionMethod('ReflectionFunction', 'isDisabled'))->getAttributes();
+    /// var_dump($a[0]->getName());
+    /// ```
+    /// ```expect
+    /// string(10) "Deprecated"
+    /// ```
+    fn getName(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
+        let kept = this_attribute(req)?;
+        let name = kept.attribute.name.0.to_vec();
+        PhpString::new(req, &name)
+    }
+
+    /// `ReflectionAttribute::getTarget()`: `attr->target`, the one
+    /// `Attribute::TARGET_*` bit of the subject the attribute sits on.
+    ///
+    /// ```php
+    /// $a = (new ReflectionMethod('ReflectionFunction', 'isDisabled'))->getAttributes();
+    /// var_dump($a[0]->getTarget());
+    /// ```
+    /// ```expect
+    /// int(4)
+    /// ```
+    fn getTarget(req: &mut Request, _this: This<Self>) -> Result<i64, Thrown> {
+        let kept = this_attribute(req)?;
+        Ok(kept.target)
+    }
+
+    /// `ReflectionAttribute::isRepeated()`:
+    /// `zend_is_attribute_repeated`, whether the subject carries another
+    /// attribute of the same name at the same offset.
+    ///
+    /// ```php
+    /// $a = (new ReflectionMethod('ReflectionFunction', 'isDisabled'))->getAttributes();
+    /// var_dump($a[0]->isRepeated());
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// ```
+    fn isRepeated(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
+        let kept = this_attribute(req)?;
+        Ok(kept.repeated)
+    }
+
+    /// `ReflectionAttribute::getArguments()`: each argument's constant
+    /// expression evaluated in the attribute's scope, the positional ones
+    /// appended and the named ones at their name, as
+    /// `zend_get_attribute_value` and `zend_hash_add_new` place them.
+    ///
+    /// ```php
+    /// $a = (new ReflectionMethod('ReflectionFunction', 'isDisabled'))->getAttributes();
+    /// var_dump($a[0]->getArguments());
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   ["since"]=>
+    ///   string(3) "8.0"
+    ///   ["message"]=>
+    ///   string(73) "as ReflectionFunction can no longer be constructed for disabled functions"
+    /// }
+    /// ```
+    ///
+    /// An argument over a class constant is evaluated as it is read, its
+    /// operators and a conditional among them:
+    ///
+    /// ```php
+    /// class K { const A = 1|2; }
+    /// #[Attribute]
+    /// class At { function __construct(public $v, public $w = null) {} }
+    /// #[At(K::A | 4, K::A ?: 0)]
+    /// class T {}
+    /// var_dump((new ReflectionClass('T'))->getAttributes()[0]->getArguments());
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   [0]=>
+    ///   int(7)
+    ///   [1]=>
+    ///   int(3)
+    /// }
+    /// ```
+    fn getArguments(req: &mut Request, _this: This<Self>) -> Result<PhpArray, Thrown> {
+        let kept = this_attribute(req)?;
+        let mut out = PhpArray::new(req)?;
+        for argument in &kept.attribute.arguments {
+            let value = eval_const_expr(req, &argument.value, kept.scope)?;
+            match &argument.name {
+                Some(name) => {
+                    let key = PhpString::new(req, &name.0)?;
+                    out.set(req, Key::Str(key), value)?;
+                }
+                None => out.append(req, value)?,
+            }
+        }
+        Ok(out)
+    }
+
+    /// `ReflectionAttribute::newInstance()`: the attribute's class
+    /// instantiated with the arguments, php's four refusals before it —
+    /// the class no table has, a class carrying no `#[Attribute]` marker,
+    /// a marker whose flags do not name this target, and a user attribute
+    /// repeated where its marker did not allow it.
+    ///
+    /// An internal attribute is made from the class
+    /// `zend_register_attribute_ce` registered, its marker's targets read
+    /// as a user attribute's are:
+    ///
+    /// ```php
+    /// $a = (new ReflectionMethod('ReflectionFunction', 'isDisabled'))->getAttributes();
+    /// var_dump($a[0]->newInstance());
+    /// ```
+    /// ```expect
+    /// object(Deprecated)#1 (2) {
+    ///   ["message"]=>
+    ///   string(73) "as ReflectionFunction can no longer be constructed for disabled functions"
+    ///   ["since"]=>
+    ///   string(3) "8.0"
+    /// }
+    /// ```
+    ///
+    /// A user attribute's own `#[Attribute(Attribute::TARGET_*)]` is held
+    /// to the target it stands on, and to the repetition it allows:
+    ///
+    /// ```php
+    /// #[Attribute(Attribute::TARGET_METHOD)] class B {}
+    /// class C { #[B] function m() {} #[B] public $p; }
+    /// echo get_class((new ReflectionMethod('C', 'm'))->getAttributes()[0]->newInstance()), "\n";
+    /// try { (new ReflectionProperty('C', 'p'))->getAttributes()[0]->newInstance(); }
+    /// catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// #[Attribute] class D {}
+    /// #[D] #[D] function f() {}
+    /// try { (new ReflectionFunction('f'))->getAttributes()[0]->newInstance(); }
+    /// catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// #[Attribute(Attribute::TARGET_ALL | Attribute::IS_REPEATABLE)] class E {}
+    /// #[E] #[E] function g() {}
+    /// echo get_class((new ReflectionFunction('g'))->getAttributes()[1]->newInstance()), "\n";
+    /// #[Attribute(1024)] class G {}
+    /// #[G] function i() {}
+    /// try { (new ReflectionFunction('i'))->getAttributes()[0]->newInstance(); }
+    /// catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// B
+    /// Attribute "B" cannot target property (allowed targets: method)
+    /// Attribute "D" must not be repeated
+    /// E
+    /// Invalid attribute flags specified
+    /// ```
+    ///
+    /// A validator's refusal `#[\DelayedTargetValidation]` deferred is
+    /// thrown here, php's `validation_error`:
+    ///
+    /// ```php
+    /// #[DelayedTargetValidation]
+    /// #[Attribute]
+    /// trait T {}
+    /// #[DelayedTargetValidation]
+    /// #[AllowDynamicProperties]
+    /// readonly class R {}
+    /// foreach (['T', 'R'] as $c) {
+    ///     try { (new ReflectionClass($c))->getAttributes()[1]->newInstance(); }
+    ///     catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// }
+    /// ```
+    /// ```expect
+    /// Cannot apply #[\Attribute] to trait T
+    /// Cannot apply #[\AllowDynamicProperties] to readonly class R
+    /// ```
+    fn newInstance(req: &mut Request, _this: This<Self>) -> Result<PhpObject, Thrown> {
+        let kept = this_attribute(req)?;
+        let written = String::from_utf8_lossy(&kept.attribute.name.0).into_owned();
+        let looked_up = bare_name(&kept.attribute.name.0).to_vec();
+        let Some(class) = lookup_class(req, &looked_up)? else {
+            return Err(throw(
+                req,
+                "Error",
+                &format!("Attribute class \"{written}\" not found"),
+            ));
+        };
+        let flags = marker_flags(req, class, &written)?;
+        if kept.target & flags == 0 {
+            return Err(throw(
+                req,
+                "Error",
+                &format!(
+                    "Attribute \"{written}\" cannot target {} (allowed targets: {})",
+                    target_names(kept.target),
+                    target_names(flags & TARGET_ALL)
+                ),
+            ));
+        }
+        // `zend_attribute.validation_error`: the refusal of an internal
+        // attribute's validator `#[\DelayedTargetValidation]` deferred,
+        // thrown where the object would be made.
+        if kept.target == TARGET_CLASS
+            && let Some(subject) = kept.scope
+            && let Some(decl) = req.class_decl(subject)
+            && let Some(refused) = class_attribute_refusal(
+                &looked_up,
+                decl.kind,
+                &decl.flags,
+                &String::from_utf8_lossy(&class_name_of(req, subject)),
+            )
+        {
+            return Err(throw(req, "Error", &refused));
+        }
+        if !is_internal(req, class) && flags & IS_REPEATABLE == 0 && kept.repeated {
+            return Err(throw(
+                req,
+                "Error",
+                &format!("Attribute \"{written}\" must not be repeated"),
+            ));
+        }
+        let object = construct(req, class, &kept)?;
+        Ok(object)
+    }
+
+    /// `ReflectionAttribute::__toString()`: `Attribute [ name ]` alone for
+    /// one with no argument, and the arguments block for one with some,
+    /// each argument as `format_default_value` writes it, which is the
+    /// expression as written and not its value.
+    ///
+    /// ```php
+    /// $a = (new ReflectionMethod('ReflectionFunction', 'isDisabled'))->getAttributes();
+    /// echo $a[0];
+    /// ```
+    /// ```expect
+    /// Attribute [ Deprecated ] {
+    ///   - Arguments [2] {
+    ///     Argument #0 [ since = '8.0' ]
+    ///     Argument #1 [ message = 'as ReflectionFunction can no longer be constructed for disabled functions' ]
+    ///   }
+    /// }
+    /// ```
+    fn __toString(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
+        let kept = this_attribute(req)?;
+        let mut out = format!(
+            "Attribute [ {} ]",
+            String::from_utf8_lossy(&kept.attribute.name.0)
+        );
+        if kept.attribute.arguments.is_empty() {
+            out.push('\n');
+            return PhpString::new(req, out.as_bytes());
+        }
+        out.push_str(" {\n");
+        let _ = writeln!(out, "  - Arguments [{}] {{", kept.attribute.arguments.len());
+        for (at, argument) in kept.attribute.arguments.iter().enumerate() {
+            let _ = write!(out, "    Argument #{at} [ ");
+            if let Some(name) = &argument.name {
+                out.push_str(&String::from_utf8_lossy(&name.0));
+                out.push_str(" = ");
+            }
+            let written = default_value_string(req, &argument.value);
+            out.push_str(&written);
+            out.push_str(" ]\n");
+        }
+        out.push_str("  }\n}\n");
+        PhpString::new(req, out.as_bytes())
+    }
+
+    #[php(private, implementation = crate::func::ReflectionFunctionAbstract::__clone)]
+    fn __clone(_this: This<Self>);
+
+    /// `ReflectionAttribute::__construct()`: private in the stub and
+    /// reachable through reflection, where php refuses it.
+    ///
+    /// ```php
+    /// #[Attribute] class A {}
+    /// #[A] class C {}
+    /// $a = (new ReflectionClass('C'))->getAttributes()[0];
+    /// try { (new ReflectionMethod('ReflectionAttribute', '__construct'))->invoke($a); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Cannot directly instantiate ReflectionAttribute
+    /// ```
+    #[php(private, arity = manual)]
+    fn __construct(req: &mut Request, _this: This<Self>) -> Result<(), Thrown> {
+        Err(throw(
+            req,
+            "ReflectionException",
+            "Cannot directly instantiate ReflectionAttribute",
+        ))
+    }
 }
