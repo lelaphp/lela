@@ -1684,8 +1684,11 @@ impl Engine {
         // extensions' `RINIT` (`Z/main/main.c:1942`); what can fail is the
         // memory limit, which the first allocation after it meets again.
         let _ = req.hash_environment();
+        // Displayed past the `php_output` layer, as php displays what
+        // `MINIT` raised before `php_output_activate`, so no header is
+        // sent by it and a session may still start.
         for (level, message) in &self.shared.startup_raised {
-            req.note_error_in(*level, message, b"Unknown", 0);
+            req.note_startup_error(*level, message);
         }
         for extension in &self.shared.extensions {
             if let Some(rinit) = extension.rinit {
