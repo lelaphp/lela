@@ -24,7 +24,7 @@ use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::call;
 use php_ext::coerce::{to_callable, to_string, truthy};
 use php_ext::decl::{IniDecl, Name};
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, new_throwable, throw_value};
+use php_ext::raising::{Level, Thrown, arg_value_error, arity, docref, new_throwable, throw_value};
 use php_ext::request::Request;
 use php_ext::values::{PhpString, Value, ValueRef};
 
@@ -282,7 +282,7 @@ fn assert(
     }
     // `ZEND_PARSE_PARAMETERS_START(1, 2)` after the active check, as php
     // reads them.
-    crate::arity(req, 1, Some(2))?;
+    arity(req, 1, Some(2))?;
     let assertion = assertion.value();
     let description = description.hold(req)?;
     if truthy(req, &assertion) {

@@ -10,7 +10,7 @@ use php_unit::decl::{
 };
 
 use crate::api::abi::{Cases, Class, ClassRef, ExtensionBuilder, ObjectHandlers};
-use crate::api::raising::{Thrown, arg_count_error, fatal};
+use crate::api::raising::{Thrown, fatal};
 use crate::api::request::Request;
 use crate::api::values::{ClassId, Value};
 
@@ -115,9 +115,12 @@ pub fn attribute(name: &[u8], arguments: Vec<(Option<&[u8]>, ConstExpr)>) -> Att
     }
 }
 
-/// `zend_wrong_parameters_count_error` (`Z/Zend/zend_API.c:231`): the
-/// `ArgumentCountError` of a call given fewer than `min` or more than
-/// `max` arguments, in php's three sentences.
+/// The count check a declared native's entry makes before its body,
+/// `ZEND_PARSE_PARAMETERS_START(min, max)`'s: [`raising::arity`], the
+/// one place the sentence is written, which an `arity = manual` native
+/// calls from its body after its own first step.
+///
+/// [`raising::arity`]: crate::api::raising::arity
 ///
 /// ```php
 /// foreach ([fn () => strlen(), fn () => str_repeat('a'), fn () => array_key_first([], 1), fn () => min(), fn () => mt_srand(1, 2, 3)] as $f) {
@@ -132,21 +135,7 @@ pub fn attribute(name: &[u8], arguments: Vec<(Option<&[u8]>, ConstExpr)>) -> Att
 /// mt_srand() expects at most 2 arguments, 3 given
 /// ```
 pub fn arity(req: &mut Request, min: usize, max: Option<usize>) -> Result<(), Thrown> {
-    let given = req.argument_count();
-    if given >= min && max.is_none_or(|max| given <= max) {
-        return Ok(());
-    }
-    let (word, bound) = match max {
-        Some(max) if max == min => ("exactly", min),
-        _ if given < min => ("at least", min),
-        Some(max) => ("at most", max),
-        None => ("at least", min),
-    };
-    let plural = if bound == 1 { "" } else { "s" };
-    Err(arg_count_error(
-        req,
-        &format!("{word} {bound} argument{plural}, {given} given"),
-    ))
+    crate::api::raising::arity(req, min, max)
 }
 
 /// The entry of an abstract or interface method, which the engine never

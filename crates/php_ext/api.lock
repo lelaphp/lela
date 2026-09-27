@@ -273,6 +273,7 @@ raising::arg_null_deprecated
 raising::arg_type_error
 raising::arg_value_error
 raising::argument_error
+raising::arity
 raising::clear
 raising::deprecated
 raising::docref
