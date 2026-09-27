@@ -9,7 +9,7 @@
 
 use php_ext::abi::Passed;
 use php_ext::attr::php_function;
-use php_ext::call::{call, call_method, class_constant, lookup_class, new_object};
+use php_ext::call::{autoload, call, call_method, class_constant, lookup_class, new_object};
 use php_ext::coerce::{callable_checked, value_name};
 use php_ext::raising::{Level, Thrown, deprecated, docref, throw, warning};
 use php_ext::request::Request;
@@ -1337,7 +1337,7 @@ impl State<'_> {
             // The class loader and the callback run with
             // `BG(serialize_lock)` held, so what they unserialize is read
             // through a var hash of its own.
-            if let Some(class) = locked(req, |req| lookup_class(req, &name))? {
+            if let Some(class) = locked(req, |req| autoload(req, &name))? {
                 Some(class)
             } else {
                 if !valid_class_name(&name) {
@@ -1447,6 +1447,22 @@ impl State<'_> {
     /// bool(true)
     /// Invalid callback Nonexistent, function "Nonexistent" not found or invalid function name
     /// ```
+    ///
+    /// The class is looked for through the autoloaders before the
+    /// function is called and after, as `zend_lookup_class` looks.
+    ///
+    /// ```php
+    /// spl_autoload_register(function ($c) { echo "autoload($c)\n"; });
+    /// ini_set('unserialize_callback_func', 'cb');
+    /// function cb($c) { echo "cb($c)\n"; }
+    /// echo get_class(@unserialize('O:3:"Foo":0:{}')), "\n";
+    /// ```
+    /// ```expect
+    /// autoload(Foo)
+    /// cb(Foo)
+    /// autoload(Foo)
+    /// __PHP_Incomplete_Class
+    /// ```
     fn callback(req: &mut Request, name: &[u8]) -> Result<bool, Thrown> {
         let Some(function) = req
             .ini_get(b"unserialize_callback_func")
@@ -1473,7 +1489,7 @@ impl State<'_> {
         let answer = call(req, &callable, &[argument]);
         req.release(argument);
         req.release(answer?);
-        if lookup_class(req, name)?.is_some() {
+        if autoload(req, name)?.is_some() {
             return Ok(true);
         }
         docref(
