@@ -82,6 +82,13 @@ struct Parts {
 
 fn parts(ty: &Type) -> Parts {
     match ty {
+        // `X&Y $p = null`: an intersection made nullable is the DNF
+        // union `(X&Y)|null`, a list with the intersection as a member.
+        Type::Nullable(inner) if matches!(**inner, Type::Intersection(_)) => Parts {
+            members: vec![(**inner).clone()],
+            nullable: true,
+            intersection: false,
+        },
         Type::Nullable(inner) => {
             let mut parts = parts(inner);
             parts.nullable = true;
@@ -114,13 +121,21 @@ fn parts(ty: &Type) -> Parts {
     }
 }
 
-/// `get_type_kind`: a list is its list's kind; `iterable` and `mixed`
-/// are named for backwards compatibility however wide their mask is;
-/// anything else with more than one member without `null` is a union.
+/// `get_type_kind`: a list is its list's kind, a union where an
+/// intersection is among its members; `iterable` and `mixed` are named
+/// for backwards compatibility however wide their mask is; anything else
+/// with more than one member without `null` is a union.
 fn kind_of(ty: &Type) -> Kind {
     let parts = parts(ty);
     if parts.intersection {
         return Kind::Intersection;
+    }
+    if parts
+        .members
+        .iter()
+        .any(|member| matches!(member, Type::Intersection(_)))
+    {
+        return Kind::Union;
     }
     if matches!(ty, Type::Mixed) || parts.members.first() == Some(&Type::Iterable) {
         return Kind::Named;
@@ -1552,6 +1567,26 @@ impl ReflectionUnionType {
     ///   object(ReflectionNamedType)#3 (0) {
     ///   }
     /// }
+    /// ```
+    ///
+    /// An intersection among a union's members makes a DNF union, and so
+    /// does an intersection made nullable by a `null` default:
+    ///
+    /// ```php
+    /// interface X {} interface Y {}
+    /// function f((X&Y)|null $a, X&Y $b = null, X&Y $c) {}
+    /// foreach ((new ReflectionFunction('f'))->getParameters() as $p) {
+    ///     $t = $p->getType();
+    ///     echo $t, ' ', get_class($t), ' ', json_encode($t->allowsNull()), ':';
+    ///     foreach ($t->getTypes() as $m) { echo ' ', get_class($m), '(', $m, ')'; }
+    ///     echo "\n";
+    /// }
+    /// ```
+    /// ```expect
+    /// Deprecated: f(): Implicitly marking parameter $b as nullable is deprecated, the explicit nullable type must be used instead in %s on line 3
+    /// (X&Y)|null ReflectionUnionType true: ReflectionIntersectionType(X&Y) ReflectionNamedType(null)
+    /// (X&Y)|null ReflectionUnionType true: ReflectionIntersectionType(X&Y) ReflectionNamedType(null)
+    /// X&Y ReflectionIntersectionType false: ReflectionNamedType(X) ReflectionNamedType(Y)
     /// ```
     fn getTypes(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
         let reference = this_type(req, this.object())?;
