@@ -9656,8 +9656,10 @@ impl Request {
             });
         }
         // `IS_PROP_UNINIT`: "Skip __isset() for uninitialized typed
-        // properties", which answer no whatever the test.
-        if placed_slot.is_some_and(|slot| o.slot_uninit(slot)) {
+        // properties", which answer no whatever the test; a slot that
+        // waits on a lazy initializer is `IS_PROP_LAZY` first, which
+        // initialises the object below.
+        if placed_slot.is_some_and(|slot| o.slot_uninit(slot) && !self.lazy_slot(o, slot)) {
             return Ok(false);
         }
         // `lazy_init:`, which a slot that waits reaches past `__isset`
