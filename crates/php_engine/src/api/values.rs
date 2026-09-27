@@ -958,15 +958,17 @@ impl PhpObject {
     }
 
     /// Write one property by name through the class's `write_property`
-    /// (design §5.4). The value is the object's from here, and so is the name, which is
+    /// (design §5.4), in the scope of the class that declares it, as
+    /// `zend_update_property_ex(ce, ...)` writes one
+    /// ([`Request::write_property_as_declared`]). The value is the
+    /// object's from here, and so is the name, which is
     /// given up once the slot or the table has taken its own, as
     /// `zend_hash_update` takes a key's. What the property held is
     /// released last, after the write, which is where a destructor is
     /// served (`zend_assign_to_variable`). The `Err` is the memory
     /// limit refusing the dynamic table.
     pub fn set_prop(&self, req: &mut Request, name: PhpString, value: Value) -> Result<(), Thrown> {
-        let table = req.object_handlers(self.0);
-        table.write_property(req, *self, name, value)
+        req.write_property_as_declared(*self, name, value)
     }
 
     /// One property written as `unserialize()` writes it,

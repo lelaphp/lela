@@ -829,7 +829,9 @@ impl Request {
             Some(value) => {
                 self.lazy_set_waiting(o, slot, false);
                 let key = PhpString::new(self, name)?;
-                let written = self.write_std_property(object, key, value);
+                let written = self.in_declared_scope(object.class(), name, |req| {
+                    req.write_std_property(object, key, value)
+                });
                 if written.is_err()
                     && was_lazy
                     && o.slot(slot).is_undef()

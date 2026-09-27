@@ -1235,6 +1235,11 @@ pub struct Request {
     /// method and name, two function numbers each
     /// ([`crate::trampoline`]).
     trampolines: Vec<crate::trampoline::CallTrampoline>,
+    /// `EG(fake_scope)`: the class a write that names its own scope
+    /// stands in while it lasts, as `zend_update_property_ex(scope, ...)`
+    /// sets it, which the property placement reads ahead of the executed
+    /// scope (`get_fake_or_executed_scope`).
+    fake_scope: Option<ClassId>,
     /// `CONST_IS_RECURSIVE` over the constants a deprecation is being
     /// worded for, so an attribute naming the constant it marks reads it
     /// without raising again (GH-18463): the declaring class and the
@@ -1797,6 +1802,7 @@ impl Request {
             enums_updated: Vec::new(),
             enum_functions: Vec::new(),
             trampolines: Vec::new(),
+            fake_scope: None,
             deprecating: Vec::new(),
             statics: Vec::new(),
             defaults: Vec::new(),
@@ -2628,6 +2634,32 @@ impl Request {
         arguments: &[Value],
         extra_named: &[(PhpString, Value)],
     ) -> Result<Value, Thrown> {
+        // `EG(fake_scope) = NULL` for the call and put back after it: a
+        // destructor or a `__toString` a scoped write serves stands in its
+        // own scope.
+        let fake = self.fake_scope.take();
+        let served = self.serve_call_body(
+            function,
+            this,
+            called_scope,
+            closure,
+            arguments,
+            extra_named,
+        );
+        self.fake_scope = fake;
+        served
+    }
+
+    /// [`Request::serve_call`] with no scope a write named standing.
+    fn serve_call_body(
+        &mut self,
+        function: Function,
+        this: Option<PhpObject>,
+        called_scope: Option<ClassId>,
+        closure: Option<PhpObject>,
+        arguments: &[Value],
+        extra_named: &[(PhpString, Value)],
+    ) -> Result<Value, Thrown> {
         // `zend_call_function`: the deprecation before the arguments
         // are placed, and no call where a handler threw.
         if self.function_flags(function).deprecated {
@@ -3352,6 +3384,64 @@ impl Request {
     /// A native with no scope, `constant()` or `get_class()` called
     /// from a method, is walked past, so the scope a native reads is
     /// its caller's; a native method's is its own class.
+    /// `get_fake_or_executed_scope`: the scope a property is placed and
+    /// its visibility measured from, the scope a write named for itself
+    /// ([`Request::write_property_as_declared`]) or the executed one.
+    pub(crate) fn property_scope(&self) -> Option<ClassId> {
+        self.fake_scope.or_else(|| self.executed_scope())
+    }
+
+    /// `zend_update_property_ex(prop_info->ce, ...)`, what an engine or a
+    /// native write names a property by: the write made in the scope of
+    /// the class whose declaration the object's table holds for `name`,
+    /// so a private property of a parent class, `Exception::$trace` on a
+    /// `TypeError`, is its slot and not a dynamic property; a name no
+    /// class declared is written as the executed scope writes it.
+    ///
+    /// ```php
+    /// class C { public $p { get { return intdiv(1, 0); } } }
+    /// try { (new C)->p; } catch (DivisionByZeroError $e) { var_dump(count($e->getTrace()), array_key_exists("\0Error\0trace", (array) $e)); }
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// bool(true)
+    /// ```
+    pub(crate) fn write_property_as_declared(
+        &mut self,
+        object: PhpObject,
+        name: PhpString,
+        value: Value,
+    ) -> Result<(), Thrown> {
+        let table = self.object_handlers(object.heap());
+        let bytes = name.as_bytes().to_vec();
+        self.in_declared_scope(object.class(), &bytes, |req| {
+            table.write_property(req, object, name, value)
+        })
+    }
+
+    /// `f` called with `EG(fake_scope)` the class whose declaration
+    /// `class`'s table holds for `name`, as `zend_update_property_ex(ce,
+    /// ...)` makes a write, and put back after it; a name no class
+    /// declared leaves the scope as it stands.
+    pub(crate) fn in_declared_scope<R>(
+        &mut self,
+        class: ClassId,
+        name: &[u8],
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let declaring = self
+            .placed_properties(class)
+            .iter()
+            .rev()
+            .find(|(_, p)| &*p.name.0 == name)
+            .map(|(declaring, _)| *declaring);
+        let saved = self.fake_scope;
+        self.fake_scope = declaring.or(saved);
+        let done = f(self);
+        self.fake_scope = saved;
+        done
+    }
+
     pub(crate) fn executed_scope(&self) -> Option<ClassId> {
         for link in self.chain() {
             let (function, closure, carried) = match link {
@@ -5808,7 +5898,7 @@ impl Request {
     /// visibility the read visibility already equals and refuses one
     /// weaker than it.
     fn has_set_access(&self, class: ClassId, set: Visibility) -> bool {
-        let scope = self.executed_scope();
+        let scope = self.property_scope();
         scope == Some(class) || (set == Visibility::Protected && self.check_protected(class, scope))
     }
 

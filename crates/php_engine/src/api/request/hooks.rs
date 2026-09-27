@@ -140,7 +140,7 @@ impl Request {
     /// int(3)
     /// ```
     pub(crate) fn hooked_accessible(&self, hooked: &Hooked) -> bool {
-        let scope = self.executed_scope();
+        let scope = self.property_scope();
         match hooked.visibility {
             Visibility::Public => true,
             _ if scope == Some(hooked.declaring) => true,
@@ -153,7 +153,7 @@ impl Request {
     /// the declaring class writes it, and a `protected(set)` one a scope
     /// related to its prototype's class.
     fn hooked_settable(&self, hooked: &Hooked, set: Visibility) -> bool {
-        let scope = self.executed_scope();
+        let scope = self.property_scope();
         scope == Some(hooked.declaring)
             || (set == Visibility::Protected && self.check_protected(hooked.root, scope))
     }
