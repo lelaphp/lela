@@ -3,6 +3,7 @@
 //! `implementation`, `URL`, the encoding names, and `body`, `head` and
 //! `title` as the HTML standard defines them over the tree.
 
+use php_ext::attr::php_class;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::{PhpObject, Value};
@@ -337,3 +338,8 @@ fn set_character_set(req: &mut Request, object: PhpObject, value: &Value) -> Res
         )),
     }
 }
+
+/// `Dom\HTMLDocument`, named for the types that hold it until its header
+/// is declared here.
+#[php_class(extern, namespace(Dom))]
+pub(crate) struct HTMLDocument;

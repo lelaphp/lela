@@ -980,7 +980,30 @@ pub(crate) const METHODS: &[(&str, Entry)] = &[
 #[php_class(extern, namespace(Dom))]
 pub(crate) struct Document;
 
-/// `Dom\Attr`, named for the types that hold it until its header is
-/// declared here.
-#[php_class(extern, namespace(Dom))]
+/// `class Dom\Attr extends Dom\Node`: an attribute, its seven properties
+/// `@virtual`; `isId` is `DOMAttr`'s and `rename` `Dom\Element`'s
+/// (`@implementation-alias`).
+#[php_class(namespace(Dom), extends(Node))]
 pub(crate) struct Attr;
+
+#[php_class]
+impl Attr {
+    #[php(property, virtual)]
+    const namespaceURI: Option<PhpString>;
+    #[php(property, virtual)]
+    const prefix: Option<PhpString>;
+    #[php(property, virtual)]
+    const localName: PhpString;
+    #[php(property, virtual)]
+    const name: PhpString;
+    #[php(property, virtual)]
+    const value: PhpString;
+    #[php(property, virtual)]
+    const ownerElement: Option<Instance<crate::element::Element>>;
+    #[php(property, virtual)]
+    const specified: bool;
+    #[php(implementation = crate::classes::DOMAttr::isId)]
+    fn isId(this: This<Self>) -> bool;
+    #[php(implementation = crate::element::Element::rename)]
+    fn rename(this: This<Self>, namespaceURI: Option<PhpString>, qualifiedName: PhpString);
+}

@@ -2046,3 +2046,6 @@ pub(crate) const METHODS: &[(&str, Entry)] = &[
 /// declared here.
 #[php_class(extern)]
 pub(crate) struct DOMDocument;
+
+#[php_class(extern, namespace(Dom))]
+pub(crate) struct XMLDocument;

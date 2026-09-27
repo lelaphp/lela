@@ -84,46 +84,6 @@ final class DOMException extends Exception
      */
     public $code = 0;
 }
-class DOMImplementation
-{
-    /** @tentative-return-type */
-    public function hasFeature(string $feature, string $version): bool {}
-
-    /** @return DOMDocumentType|false */
-    public function createDocumentType(string $qualifiedName, string $publicId = "", string $systemId = "") {}
-
-    /** @tentative-return-type */
-    public function createDocument(?string $namespace = null, string $qualifiedName = "", ?DOMDocumentType $doctype = null): DOMDocument {}
-}
-class DOMDocumentFragment extends DOMNode implements DOMParentNode
-{
-    public ?DOMElement $firstElementChild;
-    public ?DOMElement $lastElementChild;
-    public int $childElementCount;
-
-    public function __construct() {}
-
-    /** @tentative-return-type */
-    public function appendXML(string $data): bool {}
-
-    /**
-     * @param DOMNode|string $nodes
-     * @implementation-alias DOMElement::append
-     */
-    public function append(...$nodes): void {}
-
-    /**
-     * @param DOMNode|string $nodes
-     * @implementation-alias DOMElement::prepend
-     */
-    public function prepend(...$nodes): void {}
-
-    /**
-     * @param DOMNode|string $nodes
-     * @implementation-alias DOMDocument::replaceChildren
-     */
-    public function replaceChildren(...$nodes): void {}
-}
 class DOMDocument extends DOMNode implements DOMParentNode
 {
     public ?DOMDocumentType $doctype;
@@ -307,140 +267,6 @@ class DOMNamedNodeMap implements IteratorAggregate, Countable
 
     public function getIterator(): Iterator {}
 }
-class DOMCharacterData extends DOMNode implements DOMChildNode
-{
-    public string $data;
-    public int $length;
-    public ?DOMElement $previousElementSibling;
-    public ?DOMElement $nextElementSibling;
-
-    /** @tentative-return-type */
-    public function appendData(string $data): true {}
-
-    /** @return string|false */
-    public function substringData(int $offset, int $count) {}
-
-    /** @tentative-return-type */
-    public function insertData(int $offset, string $data): bool {}
-
-    /** @tentative-return-type */
-    public function deleteData(int $offset, int $count): bool {}
-
-    /** @tentative-return-type */
-    public function replaceData(int $offset, int $count, string $data): bool {}
-
-    /**
-     * @param DOMNode|string $nodes
-     * @implementation-alias DOMElement::replaceWith
-     */
-    public function replaceWith(...$nodes): void {}
-
-    /** @implementation-alias DOMElement::remove */
-    public function remove(): void {}
-
-    /**
-     * @param DOMNode|string $nodes
-     * @implementation-alias DOMElement::before
-     */
-    public function before(... $nodes): void {}
-
-    /**
-     * @param DOMNode|string $nodes
-     * @implementation-alias DOMElement::after
-     */
-    public function after(...$nodes): void {}
-}
-class DOMAttr extends DOMNode
-{
-    public string $name;
-    public bool $specified;
-    public string $value;
-    public ?DOMElement $ownerElement;
-    public mixed $schemaTypeInfo;
-
-    public function __construct(string $name, string $value = "") {}
-
-    /** @tentative-return-type */
-    public function isId(): bool {}
-}
-class DOMText extends DOMCharacterData
-{
-    public string $wholeText;
-
-    public function __construct(string $data = "") {}
-
-    /** @tentative-return-type */
-    public function isWhitespaceInElementContent(): bool {}
-
-    /**
-     * @tentative-return-type
-     * @alias DOMText::isWhitespaceInElementContent
-     */
-    public function isElementContentWhitespace(): bool {}
-
-    /** @return DOMText|false */
-    public function splitText(int $offset) {}
-}
-class DOMComment extends DOMCharacterData
-{
-    public function __construct(string $data = "") {}
-}
-class DOMCdataSection extends DOMText
-{
-    public function __construct(string $data) {}
-}
-class DOMDocumentType extends DOMNode
-{
-    public string $name;
-    public DOMNamedNodeMap $entities;
-    public DOMNamedNodeMap $notations;
-    public string $publicId;
-    public string $systemId;
-    public ?string $internalSubset;
-}
-class DOMNotation extends DOMNode
-{
-    public string $publicId;
-    public string $systemId;
-}
-class DOMEntity extends DOMNode
-{
-    public ?string $publicId;
-    public ?string $systemId;
-    public ?string $notationName;
-
-    /**
-     * @readonly
-     * @deprecated
-     * @virtual
-     */
-    public ?string $actualEncoding;
-
-    /**
-     * @readonly
-     * @deprecated
-     * @virtual
-     */
-    public ?string $encoding;
-
-    /**
-     * @readonly
-     * @deprecated
-     * @virtual
-     */
-    public ?string $version;
-}
-class DOMEntityReference extends DOMNode
-{
-    public function __construct(string $name) {}
-}
-class DOMProcessingInstruction extends DOMNode
-{
-    public string $target;
-    public string $data;
-
-    public function __construct(string $name, string $value = "") {}
-}
 /** @not-serializable */
 class DOMXPath
 {
@@ -472,16 +298,6 @@ class DOMXPath
 const MODERN_STUB: &str = r#"
 namespace Dom
 {
-/**
- * @strict-properties
- * @not-serializable
- */
-class Implementation
-{
-    public function createDocumentType(string $qualifiedName, string $publicId, string $systemId): DocumentType {}
-    public function createDocument(?string $namespace, string $qualifiedName, ?DocumentType $doctype = null): XMLDocument {}
-    public function createHTMLDocument(?string $title = null): HTMLDocument {}
-}
 class NodeList implements \IteratorAggregate, \Countable
 {
     public int $length;
@@ -530,103 +346,6 @@ class HTMLCollection implements \IteratorAggregate, \Countable
     public function count(): int {}
     /** @implementation-alias DOMNodeList::getIterator */
     public function getIterator(): \Iterator {}
-}
-class Attr extends Node
-{
-    public ?string $namespaceURI;
-    public ?string $prefix;
-    public string $localName;
-    public string $name;
-    public string $value;
-    public ?Element $ownerElement;
-    public bool $specified;
-    /** @implementation-alias DOMAttr::isId */
-    public function isId(): bool {}
-    /** @implementation-alias Dom\Element::rename */
-    public function rename(?string $namespaceURI, string $qualifiedName): void {}
-}
-class CharacterData extends Node implements ChildNode
-{
-    public ?Element $previousElementSibling;
-    public ?Element $nextElementSibling;
-    public string $data;
-    public int $length;
-    /** @implementation-alias DOMCharacterData::substringData */
-    public function substringData(int $offset, int $count): string {}
-    public function appendData(string $data): void {}
-    public function insertData(int $offset, string $data): void {}
-    public function deleteData(int $offset, int $count): void {}
-    public function replaceData(int $offset, int $count, string $data): void {}
-    /** @implementation-alias DOMElement::remove */
-    public function remove(): void {}
-    /** @implementation-alias DOMElement::before */
-    public function before(Node|string ...$nodes): void {}
-    /** @implementation-alias DOMElement::after */
-    public function after(Node|string ...$nodes): void {}
-    /** @implementation-alias DOMElement::replaceWith */
-    public function replaceWith(Node|string ...$nodes): void {}
-}
-class Text extends CharacterData
-{
-    /** @implementation-alias DOMText::splitText */
-    public function splitText(int $offset): Text {}
-    public string $wholeText;
-}
-class CDATASection extends Text {}
-class ProcessingInstruction extends CharacterData
-{
-    public string $target;
-}
-class Comment extends CharacterData
-{
-}
-class DocumentType extends Node implements ChildNode
-{
-    public string $name;
-    public DtdNamedNodeMap $entities;
-    public DtdNamedNodeMap $notations;
-    public string $publicId;
-    public string $systemId;
-    public ?string $internalSubset;
-    /** @implementation-alias DOMElement::remove */
-    public function remove(): void {}
-    /** @implementation-alias DOMElement::before */
-    public function before(Node|string ...$nodes): void {}
-    /** @implementation-alias DOMElement::after */
-    public function after(Node|string ...$nodes): void {}
-    /** @implementation-alias DOMElement::replaceWith */
-    public function replaceWith(Node|string ...$nodes): void {}
-}
-class DocumentFragment extends Node implements ParentNode
-{
-    public HTMLCollection $children;
-    public ?Element $firstElementChild;
-    public ?Element $lastElementChild;
-    public int $childElementCount;
-    /** @implementation-alias DOMDocumentFragment::appendXML */
-    public function appendXml(string $data): bool {}
-    /** @implementation-alias DOMElement::append */
-    public function append(Node|string ...$nodes): void {}
-    /** @implementation-alias DOMElement::prepend */
-    public function prepend(Node|string ...$nodes): void {}
-    /** @implementation-alias DOMElement::replaceChildren */
-    public function replaceChildren(Node|string ...$nodes): void {}
-    /** @implementation-alias Dom\Element::querySelector */
-    public function querySelector(string $selectors): ?Element {}
-    /** @implementation-alias Dom\Element::querySelectorAll */
-    public function querySelectorAll(string $selectors): NodeList {}
-}
-class Entity extends Node
-{
-    public ?string $publicId;
-    public ?string $systemId;
-    public ?string $notationName;
-}
-class EntityReference extends Node {}
-class Notation extends Node
-{
-    public string $publicId;
-    public string $systemId;
 }
 abstract class Document extends Node implements ParentNode
 {
@@ -868,6 +587,30 @@ pub fn extension() -> Extension {
             "DOMElement" => builder.class::<element::DOMElement>(),
             "Dom\\Element" => builder.class::<element::Element>(),
             "Dom\\HTMLElement" => builder.class::<element::HTMLElement>(),
+            "DOMImplementation" => builder.class::<classes::DOMImplementation>(),
+            "Dom\\Implementation" => builder.class::<classes::Implementation>(),
+            "DOMDocumentFragment" => builder.class::<classes::DOMDocumentFragment>(),
+            "Dom\\DocumentFragment" => builder.class::<classes::DocumentFragment>(),
+            "DOMCharacterData" => builder.class::<classes::DOMCharacterData>(),
+            "Dom\\CharacterData" => builder.class::<classes::CharacterData>(),
+            "DOMAttr" => builder.class::<classes::DOMAttr>(),
+            "Dom\\Attr" => builder.class::<modern::Attr>(),
+            "DOMText" => builder.class::<classes::DOMText>(),
+            "Dom\\Text" => builder.class::<classes::Text>(),
+            "DOMComment" => builder.class::<classes::DOMComment>(),
+            "Dom\\Comment" => builder.class::<classes::Comment>(),
+            "DOMCdataSection" => builder.class::<classes::DOMCdataSection>(),
+            "Dom\\CDATASection" => builder.class::<classes::CDATASection>(),
+            "DOMDocumentType" => builder.class::<classes::DOMDocumentType>(),
+            "Dom\\DocumentType" => builder.class::<classes::DocumentType>(),
+            "DOMNotation" => builder.class::<classes::DOMNotation>(),
+            "Dom\\Notation" => builder.class::<classes::Notation>(),
+            "DOMEntity" => builder.class::<classes::DOMEntity>(),
+            "Dom\\Entity" => builder.class::<classes::Entity>(),
+            "DOMEntityReference" => builder.class::<classes::DOMEntityReference>(),
+            "Dom\\EntityReference" => builder.class::<classes::EntityReference>(),
+            "DOMProcessingInstruction" => builder.class::<classes::DOMProcessingInstruction>(),
+            "Dom\\ProcessingInstruction" => builder.class::<classes::ProcessingInstruction>(),
             _ => builder,
         };
         let Some(at) = declared
@@ -916,7 +659,6 @@ fn entries() -> Vec<(&'static str, Entry)> {
     [
         token_list::METHODS,
         document::METHODS,
-        classes::METHODS,
         map::METHODS,
         xpath::METHODS,
         modern::METHODS,
