@@ -795,7 +795,7 @@ fn identical(a: Option<&ConstExpr>, b: Option<&ConstExpr>) -> bool {
 fn same_value(a: &ConstExpr, b: &ConstExpr) -> bool {
     match (a, b) {
         (ConstExpr::Double(x), ConstExpr::Double(y)) => x == y,
-        (ConstExpr::Array(x), ConstExpr::Array(y)) => {
+        (ConstExpr::Array { elements: x, .. }, ConstExpr::Array { elements: y, .. }) => {
             x.len() == y.len()
                 && x.iter().zip(y).all(|((kx, vx), (ky, vy))| {
                     let keys = match (kx, ky) {
@@ -806,8 +806,81 @@ fn same_value(a: &ConstExpr, b: &ConstExpr) -> bool {
                     keys && same_value(vx, vy)
                 })
         }
-        _ => a == b,
+        _ => unlined(a) == unlined(b),
     }
+}
+
+/// An expression as written with every line cleared, since a node's
+/// line says where it stands and never what it is: two expressions
+/// written alike on two lines are written the same.
+fn unlined(expr: &ConstExpr) -> ConstExpr {
+    fn clear(expr: &mut ConstExpr) {
+        use ConstExpr as E;
+        match expr {
+            E::Constant { line, .. } | E::ClassConstant { line, .. } | E::EnumCase { line, .. } => {
+                *line = 0;
+            }
+            E::Unary { operand, line, .. } | E::Cast { operand, line, .. } => {
+                *line = 0;
+                clear(operand);
+            }
+            E::Binary { lhs, rhs, line, .. }
+            | E::Dim {
+                container: lhs,
+                dim: rhs,
+                line,
+            }
+            | E::Prop {
+                object: lhs,
+                name: rhs,
+                line,
+                ..
+            } => {
+                *line = 0;
+                clear(lhs);
+                clear(rhs);
+            }
+            E::Array { elements, line } => {
+                *line = 0;
+                for (key, value) in elements {
+                    if let Some(key) = key {
+                        clear(key);
+                    }
+                    clear(value);
+                }
+            }
+            E::New {
+                arguments, line, ..
+            } => {
+                *line = 0;
+                for (_, value) in arguments {
+                    clear(value);
+                }
+            }
+            E::Unpack(inner) => clear(inner),
+            E::Conditional {
+                cond,
+                then,
+                otherwise,
+            } => {
+                clear(cond);
+                if let Some(then) = then {
+                    clear(then);
+                }
+                clear(otherwise);
+            }
+            E::Null
+            | E::Bool(_)
+            | E::Long { .. }
+            | E::Double(_)
+            | E::Str(_)
+            | E::Closure(_)
+            | E::ScopeClass => {}
+        }
+    }
+    let mut unlined = expr.clone();
+    clear(&mut unlined);
+    unlined
 }
 
 #[cfg(test)]

@@ -51,6 +51,7 @@ mod hooks;
 mod lazy;
 mod linking;
 mod load_file;
+mod site_override;
 mod table;
 mod variables;
 
@@ -1243,6 +1244,10 @@ pub struct Request {
     /// name of a class constant, a program's alone, or the name of a
     /// global one.
     deprecating: Vec<(Option<ClassId>, Box<[u8]>)>,
+    /// `EG(filename_override)` and `EG(lineno_override)`, set while a
+    /// constant expression with a class for its scope is evaluated
+    /// ([`site_override`]).
+    site_override: Option<site_override::SiteOverride>,
     /// `CE_STATIC_MEMBERS(ce)` (`Z/Zend/zend_object_handlers.c:2094`):
     /// one slot per declared `static` property, keyed by the class that
     /// declared it and by the property's name. php gives every class a
@@ -1806,6 +1811,7 @@ impl Request {
             enum_functions: Vec::new(),
             trampolines: Vec::new(),
             deprecating: Vec::new(),
+            site_override: None,
             statics: Vec::new(),
             class_data: std::collections::HashMap::new(),
             defaults: Vec::new(),
@@ -3853,6 +3859,7 @@ impl Request {
             links.truncate(limit);
         }
         let mut trace = PhpArray::new(self)?;
+        self.constant_expression_row(&mut trace)?;
         for (traced, this, scope, mut arguments, named, site) in links {
             let mut row = PhpArray::new(self)?;
             let is_function = matches!(traced, Traced::Function(_));
@@ -3929,6 +3936,33 @@ impl Request {
             trace.append(self, Value::array(row))?;
         }
         Ok(trace)
+    }
+
+    /// `zend_fetch_debug_backtrace`'s first row while a constant
+    /// expression is evaluated (`Z/Zend/zend_builtin_functions.c:1930`):
+    /// the site actually executing, `file`, `line` and the function
+    /// `[constant expression]`, where it is not the site the override
+    /// stands at, so the trace keeps where execution was.
+    fn constant_expression_row(&mut self, trace: &mut PhpArray) -> Result<(), Thrown> {
+        let Some((file, line)) = self.overridden_site() else {
+            return Ok(());
+        };
+        let Some((executing, at)) = self.innermost_frame().and_then(|state| {
+            exec::body_of(&state.unit, state.body)
+                .map(|code| (code.filename.0.clone(), exec::line_of(state)))
+        }) else {
+            return Ok(());
+        };
+        if *executing == *file && at == line {
+            return Ok(());
+        }
+        let mut row = PhpArray::new(self)?;
+        let file = Value::string(PhpString::new(self, &executing)?);
+        self.set_string_key(&mut row, b"file", file)?;
+        self.set_string_key(&mut row, b"line", Value::int(i64::from(at)))?;
+        let name = Value::string(PhpString::new(self, b"[constant expression]")?);
+        self.set_string_key(&mut row, b"function", name)?;
+        trace.append(self, Value::array(row))
     }
 
     /// Which arguments of a call to `function` a trace shows redacted,
@@ -13797,9 +13831,13 @@ impl Request {
     }
 
     /// The file of the frame that called the native,
-    /// `zend_get_executed_filename`.
+    /// `zend_get_executed_filename`: the scope's file while a constant
+    /// expression is evaluated ([`site_override`]).
     #[must_use]
     pub fn current_file(&self) -> Option<&[u8]> {
+        if let Some((file, _)) = self.overridden_site() {
+            return Some(file);
+        }
         self.innermost_frame()
             .and_then(|state| exec::body_of(&state.unit, state.body))
             .map(|code| code.filename.0.as_ref())
@@ -13812,8 +13850,12 @@ impl Request {
     ///
     /// The line of the opline the innermost frame stands at, zero while
     /// no frame is being served; inside a fiber whose callable is a
-    /// native, the resumer's frame's.
+    /// native, the resumer's frame's; and the node's own while a
+    /// constant expression is evaluated ([`site_override`]).
     pub fn current_line(&self) -> u32 {
+        if let Some((_, line)) = self.overridden_site() {
+            return line;
+        }
         self.innermost_frame().map_or(0, exec::line_of)
     }
 

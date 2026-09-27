@@ -39,6 +39,7 @@ decl::ClassFlags
 decl::ClassKind
 decl::ConstDecl
 decl::ConstExpr
+decl::ConstExpr::line
 decl::ConstExpr::long
 decl::DynamicProperties
 decl::EnumBacking

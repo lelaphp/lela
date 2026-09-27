@@ -311,7 +311,7 @@ fn cases(
             (Backing::Int, None) => quote!(#root::decl::ConstExpr::long(#ident::#v as i64)),
             (Backing::Pure, None) => {
                 let (class, case) = (name(php), name(&php_name(&variant.ident)));
-                quote!(#root::decl::ConstExpr::EnumCase { class: #class, case: #case })
+                quote!(#root::decl::ConstExpr::EnumCase { class: #class, case: #case, line: 0 })
             }
             (_, Some(_)) => {
                 return Err(error(

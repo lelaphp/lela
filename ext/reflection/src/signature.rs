@@ -1336,7 +1336,7 @@ impl ReflectionParameter {
         };
         Ok(matches!(
             expr,
-            ConstExpr::Constant(_) | ConstExpr::ClassConstant { .. }
+            ConstExpr::Constant { .. } | ConstExpr::ClassConstant { .. }
         ))
     }
 
@@ -1360,8 +1360,8 @@ impl ReflectionParameter {
             return Err(no_default(req));
         };
         match expr {
-            ConstExpr::Constant(name) => PhpString::new(req, &name.0).map(Some),
-            ConstExpr::ClassConstant { class, name } => {
+            ConstExpr::Constant { name, .. } => PhpString::new(req, &name.0).map(Some),
+            ConstExpr::ClassConstant { class, name, .. } => {
                 let text = format!(
                     "{}::{}",
                     String::from_utf8_lossy(&class.0),

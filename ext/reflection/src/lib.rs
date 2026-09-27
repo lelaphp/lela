@@ -5975,7 +5975,7 @@ fn default_value_string(req: &mut Request, expr: &ConstExpr) -> String {
             |s| String::from_utf8_lossy(s.as_bytes()).into_owned(),
         ),
         ConstExpr::Str(s) => format!("'{}'", escaped(s)),
-        ConstExpr::Array(elements) => {
+        ConstExpr::Array { elements, .. } => {
             let is_list = elements.iter().all(|(key, _)| key.is_none());
             let mut out = String::from("[");
             for (i, (key, value)) in elements.iter().enumerate() {
@@ -5997,8 +5997,8 @@ fn default_value_string(req: &mut Request, expr: &ConstExpr) -> String {
             out.push(']');
             out
         }
-        ConstExpr::Constant(name) => String::from_utf8_lossy(&name.0).into_owned(),
-        ConstExpr::ClassConstant { class, name } => format!(
+        ConstExpr::Constant { name, .. } => String::from_utf8_lossy(&name.0).into_owned(),
+        ConstExpr::ClassConstant { class, name, .. } => format!(
             "{}::{}",
             String::from_utf8_lossy(&class.0),
             String::from_utf8_lossy(&name.0)
@@ -6084,11 +6084,11 @@ fn property_name(req: &mut Request, name: &ConstExpr) -> String {
 /// ```
 fn ast_export(req: &mut Request, expr: &ConstExpr, priority: u32) -> String {
     let (text, own) = match expr {
-        ConstExpr::Unary { op, operand } => {
+        ConstExpr::Unary { op, operand, .. } => {
             let operand = ast_export(req, operand, 241);
             (format!("{}{operand}", String::from_utf8_lossy(&op.0)), 240)
         }
-        ConstExpr::Binary { op, lhs, rhs } => {
+        ConstExpr::Binary { op, lhs, rhs, .. } => {
             let (own, left, right) = match op.0.as_ref() {
                 b"**" => (250, 251, 250),
                 b"*" | b"/" | b"%" => (210, 210, 211),
@@ -6125,7 +6125,7 @@ fn ast_export(req: &mut Request, expr: &ConstExpr, priority: u32) -> String {
             let otherwise = ast_export(req, otherwise, 101);
             (format!("{cond}{middle}{otherwise}"), 100)
         }
-        ConstExpr::Cast { to, operand } => {
+        ConstExpr::Cast { to, operand, .. } => {
             let written = match to {
                 18 => "(bool)",
                 4 => "(int)",
@@ -6138,7 +6138,7 @@ fn ast_export(req: &mut Request, expr: &ConstExpr, priority: u32) -> String {
             (format!("{written}{operand}"), 240)
         }
         // The primary expressions, which no priority wraps.
-        ConstExpr::Dim { container, dim } => {
+        ConstExpr::Dim { container, dim, .. } => {
             let container = ast_export(req, container, 260);
             let dim = ast_export(req, dim, 0);
             return format!("{container}[{dim}]");
@@ -6147,13 +6147,16 @@ fn ast_export(req: &mut Request, expr: &ConstExpr, priority: u32) -> String {
             object,
             name,
             nullsafe,
+            ..
         } => {
             let object = ast_export(req, object, 0);
             let arrow = if *nullsafe { "?->" } else { "->" };
             let name = property_name(req, name);
             return format!("{object}{arrow}{name}");
         }
-        ConstExpr::New { class, arguments } => {
+        ConstExpr::New {
+            class, arguments, ..
+        } => {
             let mut text = format!("new {}(", new_class_name(&class.0));
             for (at, (name, value)) in arguments.iter().enumerate() {
                 if at > 0 {
@@ -7072,17 +7075,17 @@ fn const_expr_string(expr: &php_ext::decl::ConstExpr) -> String {
         ConstExpr::Long { value, radix } => radix.written(*value),
         ConstExpr::Double(f) => f.to_string(),
         ConstExpr::Str(s) => format!("\"{}\"", stub_escaped(s)),
-        ConstExpr::Constant(name) => String::from_utf8_lossy(&name.0).into_owned(),
+        ConstExpr::Constant { name, .. } => String::from_utf8_lossy(&name.0).into_owned(),
         // `DateTimeZone::ALL`, as `timezone_identifiers_list`'s stub writes it.
-        ConstExpr::ClassConstant { class, name } => format!(
+        ConstExpr::ClassConstant { class, name, .. } => format!(
             "{}::{}",
             String::from_utf8_lossy(&class.0),
             String::from_utf8_lossy(&name.0)
         ),
-        ConstExpr::Array(elements) if elements.is_empty() => String::from("[]"),
+        ConstExpr::Array { elements, .. } if elements.is_empty() => String::from("[]"),
         // `ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401`: the stub's
         // operands with the operator between, as it wrote them.
-        ConstExpr::Binary { op, lhs, rhs } => format!(
+        ConstExpr::Binary { op, lhs, rhs, .. } => format!(
             "{} {} {}",
             const_expr_string(lhs),
             String::from_utf8_lossy(&op.0),

@@ -246,6 +246,16 @@ impl Type {
 /// expressions, evaluated by the engine on first use and kept as written
 /// for Reflection. A closure or a first-class callable is an index into
 /// the owning unit's function table.
+///
+/// `line` is `zend_ast_get_lineno` of a node whose evaluation can raise,
+/// the line of its first child as `zend_ast_create` gives it one: where
+/// an expression with a class for its scope is evaluated,
+/// `zend_ast_evaluate_ex` stands `EG(lineno_override)` at each node's
+/// line and `EG(filename_override)` at the scope's file, so what the
+/// node raises names that file and line and a backtrace taken there
+/// carries php's `[constant expression]` row (`Z/Zend/zend_ast.c:569`).
+/// A value written out raises nothing and carries none; a native's expression,
+/// which no file holds, carries zero.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConstExpr {
     Null,
@@ -260,18 +270,24 @@ pub enum ConstExpr {
     },
     Double(f64),
     Str(Box<[u8]>),
-    Constant(Name),
+    Constant {
+        name: Name,
+        line: u32,
+    },
     ClassConstant {
         class: Name,
         name: Name,
+        line: u32,
     },
     EnumCase {
         class: Name,
         case: Name,
+        line: u32,
     },
     Unary {
         op: Name,
         operand: Box<ConstExpr>,
+        line: u32,
     },
     /// A binary operator by its spelling, `&&`, `||` and `??` among them
     /// (php's `ZEND_AST_AND`, `ZEND_AST_OR` and `ZEND_AST_COALESCE`),
@@ -280,16 +296,23 @@ pub enum ConstExpr {
         op: Name,
         lhs: Box<ConstExpr>,
         rhs: Box<ConstExpr>,
+        line: u32,
     },
-    Array(Vec<(Option<ConstExpr>, ConstExpr)>),
+    /// `[key => value, ...]`, php's `ZEND_AST_ARRAY`, whose line is its
+    /// first element's (`zend_ast_create_list`).
+    Array {
+        elements: Vec<(Option<ConstExpr>, ConstExpr)>,
+        line: u32,
+    },
     /// `...value` inside an array, php's `ZEND_AST_UNPACK`: the value
     /// of an element with no key, whose array or `Traversable` is
-    /// spread into the array being built.
+    /// spread into the array being built, under the array's line.
     Unpack(Box<ConstExpr>),
     /// `container[dim]`, php's `ZEND_AST_DIM`.
     Dim {
         container: Box<ConstExpr>,
         dim: Box<ConstExpr>,
+        line: u32,
     },
     /// `object->name` or, `nullsafe`, `object?->name`, php's
     /// `ZEND_AST_PROP` and `ZEND_AST_NULLSAFE_PROP`, the name itself an
@@ -298,9 +321,11 @@ pub enum ConstExpr {
         object: Box<ConstExpr>,
         name: Box<ConstExpr>,
         nullsafe: bool,
+        line: u32,
     },
     /// `cond ? then : otherwise`, and `cond ?: otherwise` with no
-    /// `then`, php's `ZEND_AST_CONDITIONAL`.
+    /// `then`, php's `ZEND_AST_CONDITIONAL`, which raises nothing of its
+    /// own.
     Conditional {
         cond: Box<ConstExpr>,
         then: Option<Box<ConstExpr>>,
@@ -311,6 +336,7 @@ pub enum ConstExpr {
     Cast {
         to: u32,
         operand: Box<ConstExpr>,
+        line: u32,
     },
     /// `new class(arguments)`, php's `ZEND_AST_NEW`: the class as
     /// written, `self` and `parent` resolved in the scope the expression
@@ -319,6 +345,7 @@ pub enum ConstExpr {
     New {
         class: Name,
         arguments: Vec<(Option<Name>, ConstExpr)>,
+        line: u32,
     },
     Closure(u32),
     /// `__CLASS__` in a trait's constant expression, php's
@@ -336,6 +363,33 @@ impl ConstExpr {
         ConstExpr::Long {
             value,
             radix: Radix::Decimal,
+        }
+    }
+
+    /// The node's own line, `zend_ast_get_lineno`, where its evaluation
+    /// can raise; none on a node that raises nothing of its own.
+    #[must_use]
+    pub const fn line(&self) -> Option<u32> {
+        match self {
+            ConstExpr::Constant { line, .. }
+            | ConstExpr::ClassConstant { line, .. }
+            | ConstExpr::EnumCase { line, .. }
+            | ConstExpr::Unary { line, .. }
+            | ConstExpr::Binary { line, .. }
+            | ConstExpr::Array { line, .. }
+            | ConstExpr::Dim { line, .. }
+            | ConstExpr::Prop { line, .. }
+            | ConstExpr::Cast { line, .. }
+            | ConstExpr::New { line, .. } => Some(*line),
+            ConstExpr::Null
+            | ConstExpr::Bool(_)
+            | ConstExpr::Long { .. }
+            | ConstExpr::Double(_)
+            | ConstExpr::Str(_)
+            | ConstExpr::Unpack(_)
+            | ConstExpr::Conditional { .. }
+            | ConstExpr::Closure(_)
+            | ConstExpr::ScopeClass => None,
         }
     }
 }

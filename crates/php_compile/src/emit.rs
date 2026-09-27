@@ -997,7 +997,7 @@ fn valid_default(ty: &Type, default: &mut ConstExpr) -> Result<(), ZvalType> {
         ConstExpr::Long { .. } => ZvalType::Long,
         ConstExpr::Double(_) => ZvalType::Double,
         ConstExpr::Str(_) => ZvalType::String,
-        ConstExpr::Array(elements)
+        ConstExpr::Array { elements, .. }
             if elements
                 .iter()
                 .all(|(key, value)| key.as_ref().is_none_or(is_literal) && is_literal(value)) =>
@@ -1034,8 +1034,9 @@ fn zval_type_name(kind: ZvalType) -> &'static str {
 /// the written form `zend_eval_const_expr` left it; `None` for a value
 /// no constant expression of the unit format holds. An array is the
 /// keys and values it folded to, each key written out, since a
-/// `ConstExpr` carries no zval and `(array)` folds to one.
-fn folded_const_expr(folded: Zval) -> Option<ConstExpr> {
+/// `ConstExpr` carries no zval and `(array)` folds to one, at the `line`
+/// of the expression that folded.
+fn folded_const_expr(folded: Zval, line: u32) -> Option<ConstExpr> {
     if let Some(array) = folded.as_arr() {
         let mut items = Vec::with_capacity(array.len());
         for (key, held) in &array {
@@ -1043,9 +1044,12 @@ fn folded_const_expr(folded: Zval) -> Option<ConstExpr> {
                 Key::Long(n) => ConstExpr::long(n),
                 Key::Str(s) => ConstExpr::Str(s.bytes().into()),
             };
-            items.push((Some(key), folded_const_expr(held)?));
+            items.push((Some(key), folded_const_expr(held, line)?));
         }
-        return Some(ConstExpr::Array(items));
+        return Some(ConstExpr::Array {
+            elements: items,
+            line,
+        });
     }
     Some(match folded.kind() {
         ZvalType::Null => ConstExpr::Null,
@@ -1068,7 +1072,7 @@ fn is_literal(expr: &ConstExpr) -> bool {
         | ConstExpr::Long { .. }
         | ConstExpr::Double(_)
         | ConstExpr::Str(_) => true,
-        ConstExpr::Array(elements) => elements
+        ConstExpr::Array { elements, .. } => elements
             .iter()
             .all(|(key, value)| key.as_ref().is_none_or(is_literal) && is_literal(value)),
         _ => false,
@@ -6726,15 +6730,16 @@ impl Emit<'_> {
             // name's line, which the opline after the walk is emitted at.
             tree::Expr::NameRef(token) => {
                 if let Some(value) = self.constant_name(token) {
-                    return folded_const_expr(value).ok_or_else(|| {
-                        self.fatal("a constant expression this compiler cannot read yet")
-                    });
+                    return self.folded(value, line);
                 }
                 self.line = line;
                 let written = self.text(token).to_vec();
                 let (resolved, runtime) = self.constant_resolved(&written);
                 let name = if runtime { written } else { resolved };
-                Ok(ConstExpr::Constant(Name(name.into_boxed_slice())))
+                Ok(ConstExpr::Constant {
+                    name: Name(name.into_boxed_slice()),
+                    line,
+                })
             }
             // `zend_compile_const_expr_magic_const`: `__CLASS__` in a
             // trait is the one magic constant the fold leaves, kept as
@@ -6744,9 +6749,8 @@ impl Emit<'_> {
                 if matches!(self.magic_const(which, line), Folded::UsingClass) {
                     return Ok(ConstExpr::ScopeClass);
                 }
-                folded_const_expr(self.magic_node(id)?).ok_or_else(|| {
-                    self.fatal("a constant expression this compiler cannot read yet")
-                })
+                let folded = self.magic_node(id)?;
+                self.folded(folded, line)
             }
             // `zend_compile_const_expr_class_const`: the class named as
             // written, resolved in the namespace, and the constant's
@@ -6772,6 +6776,7 @@ impl Emit<'_> {
                     Ok(ConstExpr::ClassConstant {
                         class: Name(class.into_boxed_slice()),
                         name: Name(name.into_boxed_slice()),
+                        line,
                     })
                 }
                 Scoped::Property { .. } => {
@@ -6786,9 +6791,7 @@ impl Emit<'_> {
                 // on a constant expression that keeps the fetch type.
                 Scoped::ClassName { class } => {
                     if let Some(folded) = self.resolved_class_name(class)? {
-                        return folded_const_expr(folded).ok_or_else(|| {
-                            self.fatal("a constant expression this compiler cannot read yet")
-                        });
+                        return self.folded(folded, line);
                     }
                     let ClassSpec::Name(token) = class else {
                         return Err(self.compile_error(
@@ -6809,6 +6812,14 @@ impl Emit<'_> {
             // `zend_is_allowed_in_const_expr` refuses.
             tree::Expr::ArrayExpr(id) => {
                 let elements = self.elements_of(&tree[id].array_elements.clone())?;
+                // `zend_ast_create_list`: the list's line is its first
+                // element's, whose `ZEND_AST_ARRAY_ELEM` is its value's.
+                let line = match elements.first() {
+                    Some(Element::Value { value, .. } | Element::Unpack(value)) => {
+                        self.line_of(*value)
+                    }
+                    _ => line,
+                };
                 let mut items = Vec::with_capacity(elements.len());
                 for element in elements {
                     items.push(match element {
@@ -6828,7 +6839,10 @@ impl Emit<'_> {
                         }
                     });
                 }
-                Ok(ConstExpr::Array(items))
+                Ok(ConstExpr::Array {
+                    elements: items,
+                    line,
+                })
             }
             // The operators `zend_eval_const_expr` folds where it can
             // and leaves as the tree they were written as where it
@@ -6838,9 +6852,7 @@ impl Emit<'_> {
             // expression of its own.
             tree::Expr::UnaryExpr(id) => {
                 if let Some(folded) = self.eval_const(expr)? {
-                    return folded_const_expr(folded).ok_or_else(|| {
-                        self.fatal("a constant expression this compiler cannot read yet")
-                    });
+                    return self.folded(folded, line);
                 }
                 let node = &tree[id];
                 let operand = self.required(node.operand, "a unary operator")?;
@@ -6851,16 +6863,16 @@ impl Emit<'_> {
                     Some(SyntaxKind::TILDE) => b"~",
                     _ => return Err(self.unread("a unary operator")),
                 };
+                // `zend_ast_create` gives the node its operand's line.
                 Ok(ConstExpr::Unary {
                     op: Name(op.into()),
                     operand: Box::new(self.const_expr(operand)?),
+                    line: self.line_of(operand),
                 })
             }
             tree::Expr::BinaryExpr(id) => {
                 if let Some(folded) = self.eval_const(expr)? {
-                    return folded_const_expr(folded).ok_or_else(|| {
-                        self.fatal("a constant expression this compiler cannot read yet")
-                    });
+                    return self.folded(folded, line);
                 }
                 let node = &tree[id];
                 let left = node.lhs;
@@ -6887,15 +6899,14 @@ impl Emit<'_> {
                     op: Name(op.into()),
                     lhs: Box::new(self.const_expr(left)?),
                     rhs: Box::new(self.const_expr(right)?),
+                    line,
                 })
             }
             // `ZEND_AST_CONDITIONAL`, folded where
             // `zend_eval_const_expr` folds it and kept otherwise.
             tree::Expr::TernaryExpr(id) => {
                 if let Some(folded) = self.eval_const(expr)? {
-                    return folded_const_expr(folded).ok_or_else(|| {
-                        self.fatal("a constant expression this compiler cannot read yet")
-                    });
+                    return self.folded(folded, line);
                 }
                 let node = &tree[id];
                 let (cond, then, otherwise) = (node.cond, node.then, node.else_branch);
@@ -6922,13 +6933,12 @@ impl Emit<'_> {
                     return Err(self.compile_error("Cannot use [] for reading"));
                 };
                 if let Some(folded) = self.eval_const(expr)? {
-                    return folded_const_expr(folded).ok_or_else(|| {
-                        self.fatal("a constant expression this compiler cannot read yet")
-                    });
+                    return self.folded(folded, line);
                 }
                 Ok(ConstExpr::Dim {
                     container: Box::new(self.const_expr(base)?),
                     dim: Box::new(self.const_expr(index)?),
+                    line,
                 })
             }
             // `ZEND_AST_PROP` and `ZEND_AST_NULLSAFE_PROP`: the object and
@@ -6961,6 +6971,7 @@ impl Emit<'_> {
                     object,
                     name: Box::new(name),
                     nullsafe,
+                    line,
                 })
             }
             // `ZEND_AST_CAST`, folded where `zend_eval_const_expr` folds
@@ -6976,14 +6987,13 @@ impl Emit<'_> {
                     );
                 }
                 if let Some(folded) = self.eval_const(expr)? {
-                    return folded_const_expr(folded).ok_or_else(|| {
-                        self.fatal("a constant expression this compiler cannot read yet")
-                    });
+                    return self.folded(folded, line);
                 }
                 let operand = self.required(operand, "a cast")?;
                 Ok(ConstExpr::Cast {
                     to: to.ast_code(),
                     operand: Box::new(self.const_expr(operand)?),
+                    line: self.line_of(operand),
                 })
             }
             tree::Expr::NewExpr(id) => self.const_new(id),
@@ -7018,12 +7028,17 @@ impl Emit<'_> {
             // the unit the evaluation has no way to name, and a node php's
             // walk refuses that folds to nothing.
             _ => match self.eval_const(expr)? {
-                Some(folded) => folded_const_expr(folded).ok_or_else(|| {
-                    self.fatal("a constant expression this compiler cannot read yet")
-                }),
+                Some(folded) => self.folded(folded, line),
                 None => Err(self.fatal("a constant expression this compiler cannot read yet")),
             },
         }
+    }
+
+    /// A value `zend_eval_const_expr` folded, as the constant expression
+    /// a declaration keeps, at the `line` of the expression that folded.
+    fn folded(&self, folded: Zval, line: u32) -> Result<ConstExpr, CompileError> {
+        folded_const_expr(folded, line)
+            .ok_or_else(|| self.fatal("a constant expression this compiler cannot read yet"))
     }
 
     /// [`Self::const_expr`] for an expression evaluated each time it is
@@ -7089,6 +7104,7 @@ impl Emit<'_> {
         let ClassSpec::Name(token) = self.class_spec(ctor) else {
             return Err(self.compile_error("Cannot use dynamic class name in constant expression"));
         };
+        let class_line = self.line_of(ctor);
         let written = self.text(token).to_vec();
         if class_fetch_type(&written) == FETCH_CLASS_STATIC {
             return Err(self.compile_error("\"static\" is not allowed in compile-time constants"));
@@ -7127,6 +7143,7 @@ impl Emit<'_> {
         Ok(ConstExpr::New {
             class: Name(class.into_boxed_slice()),
             arguments,
+            line: class_line,
         })
     }
 
@@ -7138,8 +7155,7 @@ impl Emit<'_> {
     /// which its walk allows and this does not read.
     fn const_refused(&mut self, expr: tree::Expr) -> Result<ConstExpr, CompileError> {
         match self.constant_expr(expr) {
-            Ok(folded) => folded_const_expr(folded)
-                .ok_or_else(|| self.fatal("a constant expression this compiler cannot read yet")),
+            Ok(folded) => self.folded(folded, expr.line(self.parsed)),
             Err(refused) if unread(&refused) => Err(refused),
             Err(refused) if refused.level == Level::CompileError => Err(refused),
             Err(_) => Err(self.compile_error("Constant expression contains invalid operations")),
@@ -7334,7 +7350,7 @@ impl Emit<'_> {
         }
         let written = self.walk_attributes(&node.attrs)?;
         let attributes = self.member_attributes(&written, attributes::TARGET_CONST, 0, first)?;
-        let Some(value) = folded_const_expr(value) else {
+        let Some(value) = folded_const_expr(value, first) else {
             return Err(
                 self.fatal("InternalError: an attributed `const` whose value folded to no scalar")
             );

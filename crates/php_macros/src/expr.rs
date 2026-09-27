@@ -3,7 +3,8 @@
 //! constants and enum cases, the operators, arrays and `new`. An integer
 //! is read as php's lexer reads it, so `0777` is octal 511 and not Rust's
 //! decimal 777. Nothing here evaluates: the engine does, in the declaring
-//! class's scope, when an argument is absent.
+//! class's scope, when an argument is absent. Every node's line is zero:
+//! no file holds a native's expression, so none names one.
 //!
 //! Also the php attributes the keys spell: `deprecated(..)`,
 //! `no_discard(..)`, `sensitive` and the generic `attribute(Path(..))`.
@@ -77,7 +78,7 @@ fn binary(input: ParseStream<'_>, min: u8) -> syn::Result<Tokens> {
         }
         let rhs = binary(input, precedence + 1)?;
         let op = name(op);
-        lhs = quote!(#root::decl::ConstExpr::Binary { op: #op, lhs: Box::new(#lhs), rhs: Box::new(#rhs) });
+        lhs = quote!(#root::decl::ConstExpr::Binary { op: #op, lhs: Box::new(#lhs), rhs: Box::new(#rhs), line: 0 });
     }
     Ok(lhs)
 }
@@ -143,7 +144,7 @@ fn unary(input: ParseStream<'_>) -> syn::Result<Tokens> {
     }
     let operand = unary(input)?;
     let op = name(op);
-    Ok(quote!(#root::decl::ConstExpr::Unary { op: #op, operand: Box::new(#operand) }))
+    Ok(quote!(#root::decl::ConstExpr::Unary { op: #op, operand: Box::new(#operand), line: 0 }))
 }
 
 fn primary(input: ParseStream<'_>) -> syn::Result<Tokens> {
@@ -187,7 +188,7 @@ fn primary(input: ParseStream<'_>) -> syn::Result<Tokens> {
         let inner;
         syn::parenthesized!(inner in input);
         let constant = name(&path(&inner)?.join("\\"));
-        return Ok(quote!(#root::decl::ConstExpr::Constant(#constant)));
+        return Ok(quote!(#root::decl::ConstExpr::Constant { name: #constant, line: 0 }));
     }
     let first = Ident::parse_any(input)?;
     if first == "null" {
@@ -206,7 +207,7 @@ fn primary(input: ParseStream<'_>) -> syn::Result<Tokens> {
             }
         }
         return Ok(
-            quote!(#root::decl::ConstExpr::New { class: #class, arguments: vec![#(#arguments),*] }),
+            quote!(#root::decl::ConstExpr::New { class: #class, arguments: vec![#(#arguments),*], line: 0 }),
         );
     }
     let mut segments = vec![php_name(&first)];
@@ -216,13 +217,13 @@ fn primary(input: ParseStream<'_>) -> syn::Result<Tokens> {
     }
     let Some((member, class)) = segments.split_last().filter(|(_, class)| !class.is_empty()) else {
         let constant = name(&segments.join("\\"));
-        return Ok(quote!(#root::decl::ConstExpr::Constant(#constant)));
+        return Ok(quote!(#root::decl::ConstExpr::Constant { name: #constant, line: 0 }));
     };
     // The last `::` is member access and the segments before it are the
     // class, `\`-joined. An enum case is a class constant here: the engine
     // fetches the case object for it (`zend_enum_get_case`).
     let (class, member) = (name(&class.join("\\")), name(member));
-    Ok(quote!(#root::decl::ConstExpr::ClassConstant { class: #class, name: #member }))
+    Ok(quote!(#root::decl::ConstExpr::ClassConstant { class: #class, name: #member, line: 0 }))
 }
 
 fn array(input: ParseStream<'_>) -> syn::Result<Tokens> {
@@ -241,7 +242,7 @@ fn array(input: ParseStream<'_>) -> syn::Result<Tokens> {
             input.parse::<Token![,]>()?;
         }
     }
-    Ok(quote!(#root::decl::ConstExpr::Array(vec![#(#elements),*])))
+    Ok(quote!(#root::decl::ConstExpr::Array { elements: vec![#(#elements),*], line: 0 }))
 }
 
 /// `A::B::C` as its php names.
