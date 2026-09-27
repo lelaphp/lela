@@ -13,7 +13,9 @@ use php_ext::raising::{Level, Thrown, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
 
-use super::{INCOMPLETE_CLASS, MAGIC_MEMBER, class_name, has_method, is_enum, not_serializable};
+use super::{
+    INCOMPLETE_CLASS, MAGIC_MEMBER, class_name, has_method, is_enum, locked, not_serializable,
+};
 
 /// What the var hash keys an entry by: the object's identity, or the
 /// reference's.
@@ -23,49 +25,24 @@ enum Held {
     Reference(PhpRef),
 }
 
-/// `php_serialize_data`: `n`, the count of values written, and the
-/// number each object and reference was first written at, `-1` for an
-/// object whose serialization failed.
-struct VarHash {
+/// `php_serialize_data`: `n`, the count of values written, the number
+/// each object and reference was first written at, `-1` for an object
+/// whose serialization failed, and an owner of each, which php's
+/// `Z_ADDREF_P` takes so a value a `__serialize()` frees cannot have its
+/// place reused by a later one while the walk goes on.
+#[derive(Default)]
+pub(crate) struct VarHash {
     n: i64,
     seen: Vec<(Held, i64)>,
+    owners: Vec<Value>,
 }
 
 impl VarHash {
-    /// `php_add_var_hash`: the number an earlier sight gave `value`, or
-    /// zero after recording this one; a scalar and an array are never
-    /// recorded, and a reference to an object is the object.
-    fn add(&mut self, value: &Value) -> i64 {
-        self.n += 1;
-        let held = match value.as_ref() {
-            ValueRef::Reference(cell) => match cell.get().as_object() {
-                Some(object) => Some((Held::Object(object.index()), true)),
-                None => Some((Held::Reference(*cell), true)),
-            },
-            ValueRef::Object(object) => Some((Held::Object(object.index()), false)),
-            _ => None,
-        };
-        let Some((held, is_ref)) = held else {
-            return 0;
-        };
-        if let Some((_, number)) = self.seen.iter().find(|(h, _)| *h == held) {
-            // References are counted once; undo the increment above.
-            if is_ref && *number != -1 {
-                self.n -= 1;
-            }
-            return *number;
-        }
-        self.seen.push((held, self.n));
-        0
-    }
-
-    fn fail(&mut self, object: PhpObject) {
-        if let Some((_, number)) = self
-            .seen
-            .iter_mut()
-            .find(|(h, _)| *h == Held::Object(object.index()))
-        {
-            *number = -1;
+    /// `PHP_VAR_SERIALIZE_DESTROY`'s `zend_hash_destroy`: the owners given
+    /// up.
+    fn destroy(self, req: &mut Request) {
+        for owner in self.owners {
+            req.release(owner);
         }
     }
 }
@@ -141,12 +118,11 @@ impl VarHash {
 /// ```
 #[php_function]
 fn serialize(req: &mut Request, value: Value) -> Result<PhpString, Thrown> {
-    let mut hash = VarHash {
-        n: 0,
-        seen: Vec::new(),
-    };
+    let mut serializer = Serializer::new(req);
     let mut out = Vec::new();
-    write(req, &mut out, &value, &mut hash, false, true)?;
+    let written = serializer.write(req, &mut out, &value);
+    serializer.finish(req);
+    written?;
     PhpString::new(req, &out)
 }
 
@@ -166,20 +142,23 @@ fn serialize(req: &mut Request, value: Value) -> Result<PhpString, Thrown> {
 /// ```
 pub struct Serializer {
     hash: VarHash,
-}
-
-impl Default for Serializer {
-    fn default() -> Serializer {
-        Serializer {
-            hash: VarHash {
-                n: 0,
-                seen: Vec::new(),
-            },
-        }
-    }
+    /// Whether the var hash is `BG(serialize)`'s, the one every
+    /// serializer opened while it is open shares.
+    shared: bool,
 }
 
 impl Serializer {
+    /// `PHP_VAR_SERIALIZE_INIT`: the var hash a serializer already open
+    /// shares, where one is and `BG(serialize_lock)` is not held, so what
+    /// a `Serializable::serialize()` writes of its parts is numbered in
+    /// the string around it; a fresh one otherwise.
+    #[must_use]
+    pub fn new(req: &mut Request) -> Serializer {
+        let lock = req.state::<crate::State>().var.lock;
+        let (hash, shared) = req.state::<crate::State>().var.serialize.open(lock);
+        Serializer { hash, shared }
+    }
+
     /// `php_var_serialize(buf, struc, &var_hash)`: `value` appended to
     /// `out` as a root.
     pub fn write(
@@ -188,7 +167,97 @@ impl Serializer {
         out: &mut Vec<u8>,
         value: &Value,
     ) -> Result<(), Thrown> {
-        write(req, out, value, &mut self.hash, false, true)
+        write(req, out, value, self, false, true)
+    }
+
+    /// `PHP_VAR_SERIALIZE_DESTROY`: the var hash handed back to the
+    /// serializer it is shared with, or destroyed where this was its last
+    /// holder, the owners it took given up.
+    pub fn finish(self, req: &mut Request) {
+        let Serializer { hash, shared } = self;
+        if let Some(hash) = req
+            .state::<crate::State>()
+            .var
+            .serialize
+            .close(hash, shared)
+        {
+            hash.destroy(req);
+        }
+    }
+
+    /// `php_add_var_hash`: the number an earlier sight gave `value`, or
+    /// zero after recording this one with an owner of it. A scalar and an
+    /// array are never recorded, a reference to an object is the object,
+    /// and an object nothing else holds, in no array more than one holds
+    /// and of a class with neither `__serialize()` nor `__sleep()`, is
+    /// counted without being recorded, since nothing can show it again.
+    /// The owner keeps an object a `__serialize()` made and let go alive
+    /// until the serializer is done, so the next one it makes is another
+    /// object and not an `r:` to the first; one nothing records is freed
+    /// as soon as what held it is.
+    ///
+    /// ```php
+    /// class P { function __serialize(): array { return []; } function __destruct() { echo "P gone\n"; } }
+    /// class Q { function __serialize(): array { return [new P]; } }
+    /// class D { function __destruct() { echo "D gone\n"; } }
+    /// class R { function __serialize(): array { echo "R\n"; return [new D]; } }
+    /// echo serialize([new Q, new Q]), "\n";
+    /// echo serialize([new R, new R]), "\n";
+    /// ```
+    /// ```expect
+    /// P gone
+    /// P gone
+    /// a:2:{i:0;O:1:"Q":1:{i:0;O:1:"P":0:{}}i:1;O:1:"Q":1:{i:0;O:1:"P":0:{}}}
+    /// R
+    /// D gone
+    /// R
+    /// D gone
+    /// a:2:{i:0;O:1:"R":1:{i:0;O:1:"D":0:{}}i:1;O:1:"R":1:{i:0;O:1:"D":0:{}}}
+    /// ```
+    fn add(&mut self, req: &mut Request, value: &Value, in_rcn_array: bool) -> i64 {
+        self.hash.n += 1;
+        let (held, is_ref, recorded) = match value.as_ref() {
+            ValueRef::Reference(cell) => match cell.get().as_object() {
+                Some(object) => (Held::Object(object.index()), true, cell.get()),
+                None => (Held::Reference(*cell), true, *value),
+            },
+            ValueRef::Object(object) => {
+                let object = *object;
+                if !in_rcn_array
+                    && value.refcount() == 1
+                    && !has_method(req, object.class(), b"__serialize")
+                    && !has_method(req, object.class(), b"__sleep")
+                {
+                    return 0;
+                }
+                (Held::Object(object.index()), false, *value)
+            }
+            _ => return 0,
+        };
+        if let Some((_, number)) = self.hash.seen.iter().find(|(h, _)| *h == held) {
+            // References are counted once; undo the increment above.
+            if is_ref && *number != -1 {
+                self.hash.n -= 1;
+            }
+            return *number;
+        }
+        self.hash.seen.push((held, self.hash.n));
+        req.addref(&recorded);
+        self.hash.owners.push(recorded);
+        0
+    }
+
+    /// The entry of an object whose serialization failed marked `-1`, so
+    /// a later sight of it is written `N;`.
+    fn fail(&mut self, object: PhpObject) {
+        if let Some((_, number)) = self
+            .hash
+            .seen
+            .iter_mut()
+            .find(|(h, _)| *h == Held::Object(object.index()))
+        {
+            *number = -1;
+        }
     }
 }
 
@@ -231,11 +300,11 @@ fn write(
     req: &mut Request,
     out: &mut Vec<u8>,
     value: &Value,
-    hash: &mut VarHash,
+    hash: &mut Serializer,
     in_rcn_array: bool,
     is_root: bool,
 ) -> Result<(), Thrown> {
-    let already = hash.add(value);
+    let already = hash.add(req, value, in_rcn_array);
     if already != 0 {
         if already == -1 {
             out.extend_from_slice(b"N;");
@@ -282,7 +351,7 @@ fn nested(
     out: &mut Vec<u8>,
     outer: &Value,
     table: PhpArray,
-    hash: &mut VarHash,
+    hash: &mut Serializer,
     in_rcn_array: bool,
     incomplete: bool,
 ) -> Result<(), Thrown> {
@@ -307,7 +376,7 @@ fn nested(
         if let (Some(inner), Some(outer_array)) = (data.as_array(), outer.as_array())
             && inner == outer_array
         {
-            hash.add(outer);
+            hash.add(req, outer, in_rcn_array);
             out.extend_from_slice(b"N;");
             continue;
         }
@@ -326,7 +395,7 @@ fn object_value(
     req: &mut Request,
     out: &mut Vec<u8>,
     object: PhpObject,
-    hash: &mut VarHash,
+    hash: &mut Serializer,
 ) -> Result<(), Thrown> {
     if let Some(shown) = not_serializable(req, object.class()) {
         return Err(throw(
@@ -351,7 +420,7 @@ fn object_value(
         return Ok(());
     }
     if has_method(req, object.class(), b"__serialize") {
-        let data = call_method(req, &object, b"__serialize", &[])?;
+        let data = locked(req, |req| call_method(req, &object, b"__serialize", &[]))?;
         let Some(array) = data.as_array().copied() else {
             req.release(data);
             let shown = String::from_utf8_lossy(&name).into_owned();
@@ -386,7 +455,7 @@ fn object_value(
         return written;
     }
     if name != INCOMPLETE_CLASS && has_method(req, object.class(), b"__sleep") {
-        let names = call_method(req, &object, b"__sleep", &[])?;
+        let names = locked(req, |req| call_method(req, &object, b"__sleep", &[]))?;
         let Some(list) = names.as_array().copied() else {
             req.release(names);
             let shown = String::from_utf8_lossy(&name).into_owned();

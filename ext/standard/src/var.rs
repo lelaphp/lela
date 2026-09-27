@@ -24,6 +24,87 @@ pub(crate) mod unserialize;
 pub use serialize::Serializer;
 pub use unserialize::Unserializer;
 
+/// `BG(serialize_lock)`, `BG(serialize)` and `BG(unserialize)`
+/// (`Z/ext/standard/basic_functions.h`): the var hash every serializer
+/// and every unserializer opened while one is open shares, so a
+/// `Serializable::serialize()` that serializes its parts numbers them
+/// in the string around it, and an `R:` after a `C:` record names a value
+/// read inside it; and `BG(serialize_lock)`, taken around the magic
+/// methods, under which each opens a var hash of its own.
+#[derive(Default)]
+pub(crate) struct Nesting {
+    /// `BG(serialize_lock)`: how many `__serialize()`, `__sleep()`,
+    /// `__unserialize()` and `__wakeup()` calls are under way.
+    lock: u32,
+    serialize: Shared<serialize::VarHash>,
+}
+
+/// One of `BG(serialize)` and `BG(unserialize)`: how many holders share
+/// the var hash, `level`, and the var hash itself while its holder has
+/// set it down for a call that may open another holder.
+struct Shared<T> {
+    level: u32,
+    parked: Option<T>,
+}
+
+impl<T> Default for Shared<T> {
+    fn default() -> Shared<T> {
+        Shared {
+            level: 0,
+            parked: None,
+        }
+    }
+}
+
+impl<T: Default> Shared<T> {
+    /// `PHP_VAR_SERIALIZE_INIT` and its twin: a var hash of its own while
+    /// `BG(serialize_lock)` is held, a fresh one that from here is the shared one where none
+    /// is open, and the open one otherwise; whether it is shared.
+    fn open(&mut self, lock: u32) -> (T, bool) {
+        if lock > 0 {
+            return (T::default(), false);
+        }
+        if self.level == 0 {
+            self.level = 1;
+            return (T::default(), true);
+        }
+        match self.parked.take() {
+            Some(hash) => {
+                self.level += 1;
+                (hash, true)
+            }
+            // A holder that did not set its var hash down: this one keeps
+            // a var hash of its own, as under the lock.
+            None => (T::default(), false),
+        }
+    }
+
+    /// `PHP_VAR_SERIALIZE_DESTROY` and its twin: the var hash to destroy
+    /// where this was its only or its last holder, `None` where it goes
+    /// back to the holder that set it down.
+    fn close(&mut self, hash: T, shared: bool) -> Option<T> {
+        if !shared {
+            return Some(hash);
+        }
+        self.level = self.level.saturating_sub(1);
+        if self.level == 0 {
+            return Some(hash);
+        }
+        self.parked = Some(hash);
+        None
+    }
+}
+
+/// `f` with `BG(serialize_lock)` held, as php holds it around the magic
+/// methods a serializer or an unserializer calls.
+fn locked<R>(req: &mut Request, f: impl FnOnce(&mut Request) -> R) -> R {
+    req.state::<crate::State>().var.lock += 1;
+    let answered = f(req);
+    let nesting = &mut req.state::<crate::State>().var;
+    nesting.lock = nesting.lock.saturating_sub(1);
+    answered
+}
+
 /// `PHP_IC_ENTRY`'s name, the class an object of a class `unserialize()`
 /// could not load becomes.
 pub(crate) const INCOMPLETE_CLASS: &[u8] = b"__PHP_Incomplete_Class";

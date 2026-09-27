@@ -54,8 +54,21 @@ pub(super) fn encode(req: &mut Request, format: Format) -> Result<Option<Vec<u8>
     let Some(array) = session_array(req) else {
         return Ok(None);
     };
+    let mut hash = Serializer::new(req);
+    let encoded = encode_through(req, format, array, &mut hash);
+    hash.finish(req);
+    encoded
+}
+
+/// [`encode`]'s body through one var hash, `PHP_VAR_SERIALIZE_INIT` to
+/// `PHP_VAR_SERIALIZE_DESTROY` being the caller's.
+fn encode_through(
+    req: &mut Request,
+    format: Format,
+    array: PhpArray,
+    hash: &mut Serializer,
+) -> Result<Option<Vec<u8>>, Thrown> {
     let mut buf = Vec::new();
-    let mut hash = Serializer::default();
     if format == Format::PhpSerialize {
         hash.write(req, &mut buf, &array.to_value())?;
         return Ok(Some(buf));

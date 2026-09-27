@@ -45,6 +45,7 @@ use php_ext::decl::{ClassKind, Name};
 use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value};
+use php_ext_standard::Serializer;
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
 /// private to this crate (ADR-0005); nothing in it is shared or synchronised.
@@ -475,13 +476,41 @@ fn overridden(req: &mut Request, object: PhpObject, lowered: &[u8]) -> bool {
         .is_some_and(|decl| !decl.file.0.is_empty())
 }
 
-/// One value through `ext/standard`'s `php_var_serialize`, called
-/// directly as `spl_array.c`, `spl_dllist.c` and `spl_observer.c` call
-/// it, never `serialize()` through the function table.
-fn serialized(req: &mut Request, value: Value) -> Result<Vec<u8>, Thrown> {
+/// A string of parts `write` lays down through one of `ext/standard`'s
+/// var hashes, `PHP_VAR_SERIALIZE_INIT` to `PHP_VAR_SERIALIZE_DESTROY`,
+/// each part through `php_var_serialize`, called directly as
+/// `spl_array.c`, `spl_dllist.c` and `spl_observer.c` call it, never
+/// `serialize()` through the function table. One var hash numbers every
+/// part, so an object a later part shows again is its `r:n;`, and inside
+/// a `serialize()` the var hash is the one that serializer has open.
+///
+/// ```php
+/// $s = new SplObjectStorage; $x = new stdClass; $a = new stdClass;
+/// $s[$a] = $x; $s[$x] = $a;
+/// echo $s->serialize(), "\n";
+/// $o = new ArrayObject([$x]); $o->p = $x;
+/// echo $o->serialize(), "\n";
+/// $l = new SplDoublyLinkedList; $l->push($x); $l->push($x);
+/// echo $l->serialize(), "\n", serialize([$x, $s]), "\n";
+/// ```
+/// ```expect
+/// x:i:2;O:8:"stdClass":0:{},O:8:"stdClass":0:{};r:3;,r:2;;m:a:0:{}
+///
+/// Deprecated: Creation of dynamic property ArrayObject::$p is deprecated in %s on line 5
+/// x:i:0;a:1:{i:0;O:8:"stdClass":0:{}};m:a:1:{s:1:"p";r:3;}
+/// i:0;:O:8:"stdClass":0:{}:r:2;
+/// a:2:{i:0;O:8:"stdClass":0:{}i:1;O:16:"SplObjectStorage":2:{i:0;a:4:{i:0;O:8:"stdClass":0:{}i:1;r:2;i:2;r:2;i:3;r:5;}i:1;a:0:{}}}
+/// ```
+fn serialized_parts(
+    req: &mut Request,
+    write: impl FnOnce(&mut Request, &mut Serializer, &mut Vec<u8>) -> Result<(), Thrown>,
+) -> Result<PhpString, Thrown> {
+    let mut serializer = Serializer::new(req);
     let mut out = Vec::new();
-    php_ext_standard::Serializer::default().write(req, &mut out, &value)?;
-    Ok(out)
+    let written = write(req, &mut serializer, &mut out);
+    serializer.finish(req);
+    written?;
+    PhpString::new(req, &out)
 }
 
 /// `zend_std_get_properties`: the object's own table, the declared

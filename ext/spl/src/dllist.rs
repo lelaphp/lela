@@ -608,12 +608,14 @@ impl SplDoublyLinkedList {
     #[php(tentative)]
     fn serialize(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
         let (flags, values) = with(req, this.object(), |l| (l.flags, l.values()))?;
-        let mut out = crate::serialized(req, Value::int(flags))?;
-        for value in values {
-            out.push(b':');
-            out.extend(crate::serialized(req, value)?);
-        }
-        PhpString::new(req, &out)
+        crate::serialized_parts(req, |req, serializer, out| {
+            serializer.write(req, out, &Value::int(flags))?;
+            for value in values {
+                out.push(b':');
+                serializer.write(req, out, &value)?;
+            }
+            Ok(())
+        })
     }
 
     /// `__serialize(): array`: the flags, the elements and the members.

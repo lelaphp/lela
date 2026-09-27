@@ -560,21 +560,22 @@ impl ArrayObject {
     fn serialize(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
         let this = this.object();
         let flags = ar_flags(req, this)? & CLONE_MASK;
-        let mut out = b"x:".to_vec();
-        out.extend(crate::serialized(req, Value::int(flags))?);
-        if flags & IS_SELF == 0 {
-            let stored = storage(req, this)?;
-            let bytes = crate::serialized(req, stored);
-            req.release(stored);
-            out.extend(bytes?);
-            out.push(b';');
-        }
-        out.extend_from_slice(b"m:");
-        let members = crate::members(req, this)?;
-        let bytes = crate::serialized(req, Value::array(members));
-        req.release(Value::array(members));
-        out.extend(bytes?);
-        PhpString::new(req, &out)
+        crate::serialized_parts(req, |req, serializer, out| {
+            out.extend_from_slice(b"x:");
+            serializer.write(req, out, &Value::int(flags))?;
+            if flags & IS_SELF == 0 {
+                let stored = storage(req, this)?;
+                let written = serializer.write(req, out, &stored);
+                req.release(stored);
+                written?;
+                out.push(b';');
+            }
+            out.extend_from_slice(b"m:");
+            let members = crate::members(req, this)?;
+            let written = serializer.write(req, out, &Value::array(members));
+            req.release(Value::array(members));
+            written
+        })
     }
 
     /// `__serialize(): array`: the flags, the storage, the members and the
