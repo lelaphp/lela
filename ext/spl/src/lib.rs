@@ -82,9 +82,7 @@ pub fn extension() -> Extension {
             iterators::Payload::None => builder.classes(vec![(decl, methods)]),
         };
     }
-    for (decl, methods) in array::classes() {
-        builder = builder.class_payload::<array::SplArray>(decl, methods, &array::HANDLERS);
-    }
+    builder = array::register(builder);
     for (decl, methods) in directory::classes() {
         let handlers = directory::handlers(&decl);
         builder = builder.class_payload::<directory::Fs>(decl, methods, handlers);
@@ -127,6 +125,10 @@ pub(crate) struct Serializable;
 /// `SeekableIterator`, which `iterators` declares from its stub text.
 #[php_class(extern)]
 pub(crate) struct SeekableIterator;
+
+/// `RecursiveIterator`, which `iterators` declares from its stub text.
+#[php_class(extern)]
+pub(crate) struct RecursiveIterator;
 
 /// ext/json's `JsonSerializable`.
 #[php_class(extern)]
