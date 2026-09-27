@@ -18,8 +18,8 @@ name = "php"
 path = "src/main.rs"
 
 [dependencies]
-# The bundle's default set and the two extensions the binary alone turns
-# on: `pcntl` and `posix`, which php builds for the CLI and which no server
-# host carries (design §7.2, revision 35).
-php_bundle = { path = "../php_bundle", features = ["pcntl", "posix"] }
+# The bundle's default set and three it turns on: `pcntl` and `posix`,
+# which php builds for the CLI and which no server host carries (design
+# §7.2, revision 35), and `sockets`, php's `--enable-sockets` (revision 36).
+php_bundle = { path = "../php_bundle", features = ["pcntl", "posix", "sockets"] }
 php_sapi = { path = "../php_sapi" }
