@@ -126,6 +126,7 @@ pub use filestat::{Fs, php_stat};
 pub use scanf::php_sscanf_internal;
 
 use php_ext::abi::{Callable, Dependency, DependencyKind, Extension, ExtensionBuilder, OnModify};
+use php_ext::attr::php_function;
 use php_ext::coerce::coerce_param;
 use php_ext::decl::{ConstDecl, ConstExpr, FunctionDecl, Name, Parameter, ParameterDefault, Type};
 use php_ext::raising::{Level, Thrown, arg_count_error, arg_value_error, docref};
@@ -155,45 +156,6 @@ struct State {
     assert: assert::Stage,
 }
 
-/// The natives this file declares itself, `ord`, `chr` and
-/// `str_repeat`, then the `is_*` type checks `type.rs` declares, at the
-/// place they have always been registered.
-fn core_natives() -> Vec<(FunctionDecl, output::Entry)> {
-    vec![
-        (
-            declared(b"ord", &[parameter(b"character", Type::String)], Type::Int),
-            ord,
-        ),
-        (
-            declared(b"chr", &[parameter(b"codepoint", Type::Int)], Type::String),
-            chr,
-        ),
-        (
-            declared(
-                b"str_repeat",
-                &[
-                    parameter(b"string", Type::String),
-                    parameter(b"times", Type::Int),
-                ],
-                Type::String,
-            ),
-            str_repeat,
-        ),
-        r#type::is_null::declared(),
-        r#type::is_resource::declared(),
-        r#type::is_bool::declared(),
-        r#type::is_int::declared(),
-        r#type::is_integer::declared(),
-        r#type::is_long::declared(),
-        r#type::is_float::declared(),
-        r#type::is_double::declared(),
-        r#type::is_string::declared(),
-        r#type::is_array::declared(),
-        r#type::is_object::declared(),
-        r#type::is_scalar::declared(),
-    ]
-}
-
 /// The extension value (design §7.1): declarations paired with entries,
 /// the state declared on it, and the `deps` table, which is what
 /// `ReflectionExtension::getDependencies` reads.
@@ -214,7 +176,25 @@ fn core_natives() -> Vec<(FunctionDecl, output::Entry)> {
 pub fn extension() -> Extension {
     let directory = dir::directory_class();
     let builder = ExtensionBuilder::default()
-        .functions(core_natives())
+        // `string.c`'s three this file declares, then `type.c`'s checks,
+        // where they have always been registered.
+        .functions(vec![
+            ord::declared(),
+            chr::declared(),
+            str_repeat::declared(),
+            r#type::is_null::declared(),
+            r#type::is_resource::declared(),
+            r#type::is_bool::declared(),
+            r#type::is_int::declared(),
+            r#type::is_integer::declared(),
+            r#type::is_long::declared(),
+            r#type::is_float::declared(),
+            r#type::is_double::declared(),
+            r#type::is_string::declared(),
+            r#type::is_array::declared(),
+            r#type::is_object::declared(),
+            r#type::is_scalar::declared(),
+        ])
         .functions(string_natives())
         // `array.c`, in the stub's order.
         .functions(vec![
@@ -756,12 +736,9 @@ fn string_natives() -> Vec<(FunctionDecl, output::Entry)> {
 /// int(54)
 /// int(97)
 /// ```
-fn ord(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count != 1 {
-        return Err(wrong_argument_count(req, 1, count));
-    }
-    let string = string_argument(req, 1)?;
+#[php_function]
+fn ord(req: &mut Request, character: PhpString) -> i64 {
+    let string = character;
     let bytes = string.as_bytes();
     if bytes.len() != 1 {
         let what = if bytes.is_empty() {
@@ -771,7 +748,7 @@ fn ord(req: &mut Request) -> Result<Value, Thrown> {
         };
         docref_deprecated(req, what);
     }
-    Ok(Value::int(i64::from(bytes.first().copied().unwrap_or(0))))
+    i64::from(bytes.first().copied().unwrap_or(0))
 }
 
 /// `chr(int $codepoint): string`, php's `PHP_FUNCTION(chr)`
@@ -797,12 +774,8 @@ fn ord(req: &mut Request) -> Result<Value, Thrown> {
 /// string(1) "A"
 /// int(0)
 /// ```
-fn chr(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count != 1 {
-        return Err(wrong_argument_count(req, 1, count));
-    }
-    let codepoint = long_argument(req, 1)?;
+#[php_function]
+fn chr(req: &mut Request, codepoint: i64) -> Result<PhpString, Thrown> {
     if !(0..=255).contains(&codepoint) {
         docref_deprecated(
             req,
@@ -811,7 +784,7 @@ fn chr(req: &mut Request) -> Result<Value, Thrown> {
     }
     // `c &= 0xff`, then `RETURN_CHAR(c)`.
     let byte = (codepoint & 0xff).to_le_bytes()[0];
-    Ok(Value::string(PhpString::new(req, &[byte])?))
+    PhpString::new(req, &[byte])
 }
 
 /// One `Z_PARAM_FUNC` of a native, php's `"F"`: the argument at
@@ -969,18 +942,13 @@ fn constant(name: &[u8], value: i64) -> ConstDecl {
 /// ```expect exit=255
 /// Fatal error: Allowed memory size of 134217728 bytes exhausted (tried to allocate 200000032 bytes) in %s on line 2
 /// ```
-fn str_repeat(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count != 2 {
-        return Err(wrong_argument_count(req, 2, count));
-    }
-    let string = string_argument(req, 1)?;
-    let times = long_argument(req, 2)?;
+#[php_function]
+fn str_repeat(req: &mut Request, string: PhpString, times: i64) -> Result<PhpString, Thrown> {
     if times < 0 {
         return Err(arg_value_error(req, 2, "be greater than or equal to 0"));
     }
     if string.is_empty() || times == 0 {
-        return Ok(Value::string(PhpString::new(req, b"")?));
+        return PhpString::new(req, b"");
     }
     let times = usize::try_from(times).unwrap_or(usize::MAX);
     let pattern = string.as_bytes();
@@ -1001,7 +969,7 @@ fn str_repeat(req: &mut Request) -> Result<Value, Thrown> {
             laid += step;
         }
     })?;
-    Ok(Value::string(repeated))
+    Ok(repeated)
 }
 
 /// `strtoupper(string $string): string`, php's `PHP_FUNCTION(strtoupper)`
