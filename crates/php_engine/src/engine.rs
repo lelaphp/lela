@@ -298,11 +298,10 @@ pub(crate) fn assign_map_ptrs(unit: &mut Unit, map_ptr_last: &AtomicU32) {
 }
 
 /// One native method's entry, `zend_internal_function` on a class:
-/// which class, where its declaration stands, and the function served
-/// for it.
+/// where its declaration stands, the class with it where one holds it,
+/// and the function served for it.
 #[derive(Clone, Copy)]
 pub(crate) struct NativeMethod {
-    pub(crate) class: ClassId,
     pub(crate) at: MethodAt,
     pub(crate) entry: Entry,
     /// Its `ZEND_ACC_DEPRECATED` and `ZEND_ACC_NODISCARD`, decoded from
@@ -310,7 +309,7 @@ pub(crate) struct NativeMethod {
     pub(crate) flags: crate::attributes::Flags,
 }
 
-/// Where a native method's declaration stands: among the class's own,
+/// Where a native method's declaration stands: among its class's own,
 /// php's `ce->function_table`, which is what a lookup by name walks and
 /// a rendering lists; or among the engine's trampolines, a method the
 /// class's `get_method` answers that no table carries
@@ -318,16 +317,28 @@ pub(crate) struct NativeMethod {
 /// makes one for `Closure::__invoke`, which the stub declares nowhere.
 #[derive(Clone, Copy)]
 pub(crate) enum MethodAt {
-    /// The index among `ce->function_table`'s own declarations.
-    Declared(u32),
-    /// The index among [`Shared::trampolines`].
-    Trampoline(u32),
+    /// The index among `class`'s `ce->function_table` own declarations.
+    Declared { class: ClassId, at: u32 },
+    /// A trampoline `class`'s `get_method` answers, the index among
+    /// [`Shared::trampolines`].
+    Trampoline { class: ClassId, at: u32 },
     /// `zend_get_property_hook_trampoline`'s function of `kind`, what
     /// `parent::$name::get()` calls where the parent's property has no
     /// hook of that kind: no class holds it, its scope is the property's
     /// class, carried on the call, and its declaration is the index
     /// among [`Shared::trampolines`].
     ParentHook { kind: HookKind, at: u32 },
+}
+
+impl MethodAt {
+    /// The class that holds the method, `func->common.scope`; none for a
+    /// parent hook's trampoline, whose scope its call carries.
+    pub(crate) fn class(self) -> Option<ClassId> {
+        match self {
+            MethodAt::Declared { class, .. } | MethodAt::Trampoline { class, .. } => Some(class),
+            MethodAt::ParentHook { .. } => None,
+        }
+    }
 }
 
 /// `zend_register_internal_enum`'s `zend_register_functions` over the
@@ -346,8 +357,7 @@ fn link_enum_methods(decl: &mut ClassDecl, class: ClassId, methods: &mut Vec<Nat
         let index = u32::try_from(decl.methods.len()).unwrap_or(u32::MAX);
         decl.methods.push(method);
         methods.push(NativeMethod {
-            class,
-            at: MethodAt::Declared(index),
+            at: MethodAt::Declared { class, at: index },
             entry: served.entry(),
             flags: crate::attributes::Flags::default(),
         });
@@ -388,8 +398,7 @@ fn link_classes(core: &Extension, extensions: &[Extension]) -> LinkedClasses {
             let index = u32::try_from(decl.methods.len()).unwrap_or(u32::MAX);
             decl.methods.push(method.clone());
             methods.push(NativeMethod {
-                class,
-                at: MethodAt::Declared(index),
+                at: MethodAt::Declared { class, at: index },
                 entry: *entry,
                 flags: crate::attributes::Flags::of(&method.function.attributes),
             });
@@ -451,19 +460,19 @@ fn link_trampolines(
         };
         let index = u32::try_from(trampolines.len()).unwrap_or(u32::MAX);
         methods.push(NativeMethod {
-            class: ClassId(u32::try_from(at).unwrap_or(u32::MAX)),
-            at: MethodAt::Trampoline(index),
+            at: MethodAt::Trampoline {
+                class: ClassId(u32::try_from(at).unwrap_or(u32::MAX)),
+                at: index,
+            },
             entry,
             flags: crate::attributes::Flags::of(&method.function.attributes),
         });
         trampolines.push(method);
     }
-    // `zend_get_property_hook_trampoline`'s two, which no class's table
-    // carries; the class a row names is never read for them.
+    // `zend_get_property_hook_trampoline`'s two, which no class holds.
     for (kind, method, entry) in crate::api::request::parent_hook_trampolines() {
         let index = u32::try_from(trampolines.len()).unwrap_or(u32::MAX);
         methods.push(NativeMethod {
-            class: ClassId(0),
             at: MethodAt::ParentHook { kind, at: index },
             entry,
             flags: crate::attributes::Flags::of(&method.function.attributes),
