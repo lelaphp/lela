@@ -89,9 +89,7 @@ pub fn extension() -> Extension {
         let handlers = directory::handlers(&decl);
         builder = builder.class_payload::<directory::Fs>(decl, methods, handlers);
     }
-    for (decl, methods) in dllist::classes() {
-        builder = builder.class_payload::<dllist::SplDllist>(decl, methods, &dllist::HANDLERS);
-    }
+    builder = dllist::register(builder);
     builder = heap::register(builder);
     builder = builder.class::<fixedarray::SplFixedArray>();
     for (decl, methods) in observer::classes() {
@@ -125,6 +123,10 @@ pub(crate) struct IteratorAggregate;
 /// Core's `ArrayAccess`.
 #[php_class(extern)]
 pub(crate) struct ArrayAccess;
+
+/// Core's `Serializable`.
+#[php_class(extern)]
+pub(crate) struct Serializable;
 
 /// ext/json's `JsonSerializable`.
 #[php_class(extern)]
@@ -319,14 +321,6 @@ fn long_or(req: &mut Request, position: u32, default: i64) -> Result<i64, Thrown
         return Ok(default);
     }
     long(req, position)
-}
-
-/// `Z_PARAM_LONG_OR_NULL`.
-fn nullable_long(req: &mut Request, position: u32) -> Result<Option<i64>, Thrown> {
-    match given(req, position) {
-        Some(v) if !matches!(v.deref().as_ref(), ValueRef::Null) => long(req, position).map(Some),
-        _ => Ok(None),
-    }
 }
 
 /// `$this` of the method being served.
