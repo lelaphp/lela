@@ -5,10 +5,6 @@
 //! reflector's `$name` looks up again, the same walk
 //! `_class_string` renders (`linked_methods`, `linked_interfaces`,
 //! `linked_constants`, `linked_properties`).
-//!
-//! What still shares the entry of the methods not yet served:
-//! `getTraitAliases`, whose `use ... as ...` list the declaration model
-//! does not carry.
 
 use php_ext::abi::{Callable, Instance, NamedVariadic, OrFalse, Passed, Raw, This, Union};
 use php_ext::attr::php_class;
@@ -16,7 +12,7 @@ use php_ext::call::{
     eval_const_expr, initialize_lazy, instantiate, instantiate_named, mark_lazy_initialized,
     read_class_prop_silent, write_static_prop,
 };
-use php_ext::decl::{ClassKind, MethodDecl, Visibility};
+use php_ext::decl::{ClassKind, MethodDecl, Name, TraitAdaptation, Visibility};
 use php_ext::raising::{Thrown, deprecated, throw};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
@@ -28,8 +24,24 @@ use super::{
     is_closure_invoke, is_constructor, is_internal, keep, kept_closure, kept_object,
     linked_constants, linked_interfaces, linked_methods, linked_properties, looked_up,
     lookup_class, method_or_invoke, namespace_end, new_object, property_named,
-    reflection_class_factory, set_name, set_string_prop, string_value, this_class, user_line,
+    reflection_class_factory, set_name, set_string_prop, string_value, table_method, this_class,
+    user_line,
 };
+
+/// The name of the first of `traits` whose function table has `method`,
+/// which `getTraitAliases` names for an alias that wrote no trait; the
+/// link has refused a class where none does, so empty is unreachable.
+fn trait_with(req: &mut Request, traits: &[Name], method: &[u8]) -> Result<Vec<u8>, Thrown> {
+    for used in traits {
+        let Some(at) = lookup_class(req, &used.0)? else {
+            continue;
+        };
+        if table_method(req, at, method).is_some() {
+            return Ok(class_name_of(req, at));
+        }
+    }
+    Ok(Vec::new())
+}
 
 /// `ZEND_ACC_INTERFACE`, `ZEND_ACC_TRAIT` and `ZEND_ACC_ENUM`.
 fn kind_of(req: &mut Request, class: ClassId) -> ClassKind {
@@ -1492,8 +1504,62 @@ impl ReflectionClass {
         Ok(names)
     }
 
-    #[php(tentative, implementation = crate::func::ReflectionFiber::getExecutingLine)]
-    fn getTraitAliases(this: This<Self>) -> PhpArray;
+    /// `ReflectionClass::getTraitAliases()`: each `[T::]f as alias` the
+    /// class's `use` lists wrote, in the order written, keyed by the
+    /// alias, the value `T::f` with the trait as written, or for an `f`
+    /// alone the first used trait whose table has it, and `f` as written.
+    /// An `as` that only changes visibility names no alias and is left
+    /// out, as is every `insteadof`.
+    ///
+    /// ```php
+    /// namespace N;
+    /// trait T1 { function m1() {} function m2() {} }
+    /// trait T2 { function m3() {} }
+    /// class C { use T1, T2 { T1::m1 as a1; M2 as protected a2; m3 as private; t2::M3 as a3; } }
+    /// var_dump((new \ReflectionClass(C::class))->getTraitAliases(), (new \ReflectionClass('Exception'))->getTraitAliases());
+    /// ```
+    /// ```expect
+    /// array(3) {
+    ///   ["a1"]=>
+    ///   string(8) "N\T1::m1"
+    ///   ["a2"]=>
+    ///   string(8) "N\T1::M2"
+    ///   ["a3"]=>
+    ///   string(8) "N\t2::M3"
+    /// }
+    /// array(0) {
+    /// }
+    /// ```
+    #[php(tentative)]
+    fn getTraitAliases(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        let class = this_class(req, this.object())?;
+        let (traits, adaptations) = req
+            .class_decl(class)
+            .map(|decl| (decl.traits.clone(), decl.adaptations.clone()))
+            .unwrap_or_default();
+        let mut aliases = PhpArray::new(req)?;
+        for adaptation in adaptations {
+            let TraitAdaptation::As {
+                method,
+                alias: Some(alias),
+                ..
+            } = adaptation
+            else {
+                continue;
+            };
+            let mut named = if let Some(written) = method.trait_name {
+                written.0.to_vec()
+            } else {
+                trait_with(req, &traits, &method.method.0)?
+            };
+            named.extend_from_slice(b"::");
+            named.extend_from_slice(&method.method.0);
+            let value = string_value(req, &named)?;
+            let key = PhpString::new(req, &alias.0)?;
+            aliases.set(req, Key::Str(key), value)?;
+        }
+        Ok(aliases)
+    }
 
     /// `ReflectionClass::isTrait()`: `ZEND_ACC_TRAIT`.
     ///
