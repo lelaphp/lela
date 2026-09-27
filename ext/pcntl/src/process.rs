@@ -33,7 +33,7 @@ use crate::{State, failed, ffi};
 /// if ($pid === 0) { exit(3); }
 /// var_dump($pid > 0, pcntl_waitpid($pid, $status) === $pid, pcntl_wexitstatus($status));
 /// ```
-/// ```expect
+/// ```expect process
 /// bool(true)
 /// bool(true)
 /// int(3)
@@ -74,7 +74,7 @@ pub(crate) fn pcntl_fork(req: &mut Request) -> i64 {
 /// echo implode(',', array_keys($usage)), "\n";
 /// var_dump(pcntl_waitpid(1, $status), pcntl_get_last_error() === PCNTL_ECHILD);
 /// ```
-/// ```expect
+/// ```expect process
 /// bool(true)
 /// int(5)
 /// ru_oublock,ru_inblock,ru_msgsnd,ru_msgrcv,ru_maxrss,ru_ixrss,ru_idrss,ru_minflt,ru_majflt,ru_nsignals,ru_nvcsw,ru_nivcsw,ru_nswap,ru_utime.tv_usec,ru_utime.tv_sec,ru_stime.tv_usec,ru_stime.tv_sec
@@ -110,7 +110,7 @@ pub(crate) fn pcntl_waitpid(
 /// var_dump(pcntl_wexitstatus($status));
 /// try { pcntl_wait(); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
 /// ```
-/// ```expect
+/// ```expect process
 /// int(14)
 /// pcntl_wait() expects at least 1 argument, 0 given
 /// ```
@@ -229,7 +229,7 @@ fn usage_into(req: &mut Request, array: &mut PhpArray, usage: &ffi::Usage) -> Re
 /// var_dump($info['signo'] === SIGCHLD, $info['status'], $info['pid'] === $pid, array_keys($info));
 /// var_dump(pcntl_waitid(P_PID, 1, $info, WEXITED), pcntl_get_last_error() === PCNTL_ECHILD);
 /// ```
-/// ```expect
+/// ```expect process
 /// bool(true)
 /// bool(true)
 /// int(6)
@@ -289,7 +289,7 @@ fn word(status: i64) -> i32 {
 /// ```php
 /// var_dump(pcntl_wifexited(0x300), pcntl_wifexited(9), pcntl_wifexited(0x137f));
 /// ```
-/// ```expect
+/// ```expect process
 /// bool(true)
 /// bool(false)
 /// bool(false)
@@ -304,7 +304,7 @@ pub(crate) fn pcntl_wifexited(status: i64) -> bool {
 /// ```php
 /// var_dump(pcntl_wifstopped(0x117f), pcntl_wifstopped(0x300));
 /// ```
-/// ```expect
+/// ```expect process
 /// bool(true)
 /// bool(false)
 /// ```
@@ -319,7 +319,7 @@ pub(crate) fn pcntl_wifstopped(status: i64) -> bool {
 /// ```php
 /// var_dump(pcntl_wifcontinued(0x137f), pcntl_wifcontinued(0x117f), pcntl_wifcontinued(0));
 /// ```
-/// ```expect
+/// ```expect process
 /// bool(true)
 /// bool(false)
 /// bool(false)
@@ -334,7 +334,7 @@ pub(crate) fn pcntl_wifcontinued(status: i64) -> bool {
 /// ```php
 /// var_dump(pcntl_wifsignaled(9), pcntl_wifsignaled(0x300), pcntl_wifsignaled(0x137f));
 /// ```
-/// ```expect
+/// ```expect process
 /// bool(true)
 /// bool(false)
 /// bool(false)
@@ -349,7 +349,7 @@ pub(crate) fn pcntl_wifsignaled(status: i64) -> bool {
 /// ```php
 /// var_dump(pcntl_wexitstatus(0x300), pcntl_wexitstatus(0xff00), pcntl_wexitstatus(9));
 /// ```
-/// ```expect
+/// ```expect process
 /// int(3)
 /// int(255)
 /// int(0)
@@ -364,7 +364,7 @@ pub(crate) fn pcntl_wexitstatus(status: i64) -> OrFalse<i64> {
 /// ```php
 /// var_dump(pcntl_wtermsig(9), pcntl_wtermsig(0x8f), pcntl_wtermsig(0x300));
 /// ```
-/// ```expect
+/// ```expect process
 /// int(9)
 /// int(15)
 /// int(0)
@@ -379,7 +379,7 @@ pub(crate) fn pcntl_wtermsig(status: i64) -> OrFalse<i64> {
 /// ```php
 /// var_dump(pcntl_wstopsig(0x117f), pcntl_wstopsig(0x137f));
 /// ```
-/// ```expect
+/// ```expect process
 /// int(17)
 /// int(19)
 /// ```
@@ -404,7 +404,7 @@ pub(crate) fn pcntl_wstopsig(status: i64) -> OrFalse<i64> {
 /// try { pcntl_exec('/bin/sh', [], ["A\0" => 'b']); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
 /// try { pcntl_exec('/bin/sh', [], ['A' => "b\0"]); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
 /// ```
-/// ```expect
+/// ```expect process
 /// int(7)
 ///
 /// Warning: pcntl_exec(): Error has occurred: (errno 2) No such file or directory in %s on line 6
@@ -498,7 +498,7 @@ pub(crate) fn pcntl_exec(
 /// pcntl_waitpid($pid, $status);
 /// var_dump(pcntl_wifsignaled($status), pcntl_wtermsig($status) === SIGALRM);
 /// ```
-/// ```expect wall=1s
+/// ```expect wall=1s process
 /// int(0)
 /// bool(true)
 /// bool(true)
@@ -523,7 +523,7 @@ pub(crate) fn pcntl_alarm(seconds: i64) -> i64 {
 /// pcntl_waitpid(1, $status);
 /// var_dump(pcntl_get_last_error() === PCNTL_ECHILD, pcntl_errno() === PCNTL_ECHILD);
 /// ```
-/// ```expect
+/// ```expect process
 /// int(0)
 /// int(0)
 /// bool(true)
@@ -544,7 +544,7 @@ pub(crate) fn pcntl_get_last_error(req: &mut Request) -> i64 {
 /// try { pcntl_getpriority(null, 42); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
 /// try { pcntl_getpriority(1, PRIO_DARWIN_THREAD); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
 /// ```
-/// ```expect
+/// ```expect process
 /// bool(true)
 /// bool(true)
 ///
@@ -593,7 +593,7 @@ pub(crate) fn pcntl_getpriority(
 /// var_dump(pcntl_setpriority(0, 99999999));
 /// try { pcntl_setpriority(0, null, 42); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
 /// ```
-/// ```expect
+/// ```expect process
 /// bool(true)
 ///
 /// Warning: pcntl_setpriority(): Error 3: No process was located using the given parameters in %s on line 3
@@ -697,7 +697,7 @@ fn priority_refused(
 /// ```php
 /// var_dump(pcntl_strerror(PCNTL_ECHILD), pcntl_strerror(0), pcntl_strerror(12345));
 /// ```
-/// ```expect
+/// ```expect process
 /// string(18) "No child processes"
 /// string(18) "Undefined error: 0"
 /// string(20) "Unknown error: 12345"
@@ -724,7 +724,7 @@ fn strerror(errno: i32) -> String {
 /// ```php
 /// var_dump(Pcntl\QosClass::cases()[0], count(Pcntl\QosClass::cases()));
 /// ```
-/// ```expect
+/// ```expect process
 /// enum(Pcntl\QosClass::UserInteractive)
 /// int(5)
 /// ```
@@ -748,7 +748,7 @@ impl QosClass {}
 /// ```php
 /// var_dump(pcntl_getqos_class() instanceof Pcntl\QosClass);
 /// ```
-/// ```expect
+/// ```expect process
 /// bool(true)
 /// ```
 #[cfg(target_vendor = "apple")]
@@ -781,7 +781,7 @@ pub(crate) fn pcntl_getqos_class(req: &mut Request) -> Result<QosClass, Thrown> 
 /// var_dump(pcntl_getqos_class());
 /// try { pcntl_setqos_class(); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
 /// ```
-/// ```expect
+/// ```expect process
 /// enum(Pcntl\QosClass::UserInitiated)
 /// enum(Pcntl\QosClass::Default)
 /// pcntl_setqos_class() expects exactly 1 argument, 0 given

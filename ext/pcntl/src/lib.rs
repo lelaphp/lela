@@ -10,9 +10,10 @@
 //! the priorities, the errors and Apple's `QoS` classes) and the signals
 //! ([`signals`]: the handler table, the dispatch, the mask and
 //! asynchronous delivery). A signal reaches PHP code through the engine
-//! alone (design §5.8): the handler this crate installs is the engine's
-//! signal post, which records the signal and raises the interrupt of a
-//! request that turned asynchronous delivery on, and nothing else; the
+//! alone (design §5.8): the handler this crate installs, in [`ffi`],
+//! decodes the kernel's `siginfo_t` into the engine's signal record,
+//! which keeps the signal and raises the interrupt of a request that
+//! turned asynchronous delivery on, and does nothing else; the
 //! PHP callback runs in [`signals::dispatch`], which the loop's interrupt
 //! check serves as php's `zend_interrupt_function`, and which
 //! `pcntl_signal_dispatch()` serves where asked.
@@ -27,6 +28,12 @@
 //! which stays taken. The `php` binary serves its one request on its one
 //! thread, so neither arises there, which is why the extension is built
 //! for it and no server host.
+//!
+//! **Its witnesses** are served by that binary for the same reason: every
+//! fence here is marked `process`, and `xtask witness` runs it in
+//! `php-witness`, the binary built with `witness-trace`, in a process of
+//! its own, never in the engine linked into the harness, which carries no
+//! pcntl (harness-design.md §8, revision 61).
 #![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -51,7 +58,7 @@ use php_ext::request::Request;
 /// Request-scoped: built at request start, dropped after `rshutdown`,
 /// private to this crate (ADR-0005); nothing in it is shared or
 /// synchronised. php's `pcntl_globals`, the queue aside, which is the
-/// engine's signal post.
+/// engine's signal record.
 #[derive(Default)]
 struct State {
     /// `PCNTL_G(php_signal_table)` and how signals are delivered.
@@ -67,7 +74,7 @@ struct State {
 /// ```php
 /// var_dump(extension_loaded('pcntl'));
 /// ```
-/// ```expect
+/// ```expect process
 /// bool(true)
 /// ```
 pub fn extension() -> Extension {
@@ -117,7 +124,7 @@ pub fn extension() -> Extension {
 /// ```php
 /// (new ReflectionExtension('pcntl'))->info();
 /// ```
-/// ```expect
+/// ```expect process
 /// pcntl
 ///
 /// pcntl support => enabled

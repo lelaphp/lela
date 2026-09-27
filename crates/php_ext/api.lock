@@ -322,7 +322,6 @@ request::OptionAnswer
 request::OutputOp
 request::PHP_VERSION
 request::PathIntent
-request::Posted
 request::RealpathEntry
 request::Receiving
 request::Request
@@ -488,6 +487,8 @@ request::Resolve
 request::ResourceDtor
 request::Resources
 request::Resources::register_type
+request::SIGNAL_POST
+request::Siginfo
 request::SocketOptions
 request::StartHandler
 request::Stream
@@ -543,7 +544,6 @@ request::Whence::from_int
 request::WrapperOp
 request::Xport
 request::XportFailure
-request::signal_handler
 request::take_signals
 syntax::Diagnostic
 syntax::Diagnostic::new

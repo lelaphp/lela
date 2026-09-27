@@ -1056,8 +1056,9 @@ impl Resources {
 /// the thread that raises it sees it: `Send` and `Sync`, and cloned so
 /// that the engine's execution timer and the thread serving the request
 /// share one. Raising is all a setter does; acting on it is the loop's,
-/// at a back-edge, at a frame's activation and after every
-/// `Flow::Resume`, and nothing else touches it.
+/// at a back-edge, at a frame's activation, after every `Flow::Resume`
+/// and after an internal call returns (design §5.8), and nothing else
+/// touches it.
 #[derive(Debug, Clone, Default)]
 pub struct Interrupt(Arc<State>);
 
@@ -1069,8 +1070,8 @@ impl Interrupt {
         self.0.raised.store(true, Ordering::Release);
     }
 
-    /// Whether it is raised: what the loop tests at its three safepoints
-    /// and what compiled code tests once per loop iteration through the
+    /// Whether it is raised: what the loop tests at its four sites and
+    /// what compiled code tests once per loop iteration through the
     /// tier's `ExitCtx` (`jit-design.md` §4.3).
     #[must_use]
     pub fn raised(&self) -> &AtomicBool {
@@ -1097,6 +1098,16 @@ impl Interrupt {
         self.0.timed_out.store(false, Ordering::Relaxed);
     }
 
+    /// Hand this interrupt to the process's signal record, which raises
+    /// it at every signal the process takes until the [`Receiving`] is
+    /// dropped: php's `pcntl_signal_handler` storing `EG(vm_interrupt)`
+    /// under `pcntl_async_signals(true)` (design §5.8). `None` when the
+    /// record holds as many interrupts as it can.
+    #[must_use]
+    pub fn receive_signals(&self) -> Option<Receiving> {
+        crate::signal::receive(Arc::clone(&self.0))
+    }
+
     /// What a check that found it raised reads: it is cleared, and the
     /// seconds come back when the execution timer was what raised it,
     /// both as php clears them (`Z/Zend/zend_vm_def.h:10526`, `:10537`).
@@ -1104,16 +1115,6 @@ impl Interrupt {
     /// text names are the ones the timer was armed with; the loop's own
     /// test stays a relaxed load, because this is where the two threads
     /// meet.
-    /// Hand this interrupt to the process's signal post, which raises it
-    /// at every signal the process takes until the [`Receiving`] is
-    /// dropped: php's `pcntl_signal_handler` storing `EG(vm_interrupt)`
-    /// under `pcntl_async_signals(true)` (design §5.8). `None` when the
-    /// post holds as many interrupts as it can.
-    #[must_use]
-    pub fn receive_signals(&self) -> Option<Receiving> {
-        php_heap::signal::receive(Arc::clone(&self.0))
-    }
-
     pub(crate) fn taken(&self) -> Option<i64> {
         self.0.raised.swap(false, Ordering::Acquire);
         self.0
@@ -1136,20 +1137,20 @@ struct State {
 }
 
 impl AsRef<AtomicBool> for State {
-    /// The word the signal post raises: the one the loop tests.
+    /// The word a posted signal raises: the one the loop tests.
     fn as_ref(&self) -> &AtomicBool {
         &self.raised
     }
 }
 
-/// The process's signal post (design §5.8, §7.2 revision 35), for the
-/// extension that installs signal handlers: [`signal_handler`] is the
-/// handler it hands `sigaction` with `SA_SIGINFO`, [`take_signals`] what
+/// The process's signal record (design §5.8, revision 38), for the
+/// extension that installs signal handlers: [`SIGNAL_POST`] is what its
+/// `src/ffi/` handler posts a [`Siginfo`] through, [`take_signals`] what
 /// its dispatch takes, and [`Interrupt::receive_signals`] how its
-/// asynchronous delivery raises this request's interrupt. The post is
+/// asynchronous delivery raises this request's interrupt. The record is
 /// the engine's, since signal dispositions are the process's and an
 /// extension holds no atomic (ADR-0005).
-pub use php_heap::signal::{Posted, Receiving, post as signal_handler, take as take_signals};
+pub use crate::signal::{Receiving, SIGNAL_POST, Siginfo, take_signals};
 
 /// The fatal the request is ending in, when it is one: `E_ERROR` and
 /// its kin, or a source that did not compile. An `exit` is not one:
@@ -2990,7 +2991,7 @@ impl Request {
     /// fclose($w);
     /// pcntl_waitpid($pid, $status);
     /// ```
-    /// ```expect
+    /// ```expect process
     /// thrown by the handler
     /// ```
     fn checked_after_call(&mut self, served: Result<Value, Thrown>) -> Result<Value, Thrown> {
@@ -16274,8 +16275,8 @@ impl Request {
     }
 
     /// This request's interrupt (design §5.8): what the loop tests at a
-    /// back-edge, at a frame's activation and after every
-    /// `Flow::Resume`, and what the engine's execution timer and signal
+    /// back-edge, at a frame's activation, after every `Flow::Resume` and
+    /// after an internal call returns, and what the engine's execution timer and signal
     /// delivery raise. A `tier.lock` item, because compiled code tests
     /// the same atomic once per loop iteration through the tier's
     /// `ExitCtx` (`jit-design.md` §4.3).

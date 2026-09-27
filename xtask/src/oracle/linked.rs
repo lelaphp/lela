@@ -33,6 +33,11 @@
 //! a `stderr` fence is held to what the engine wrote and a witness with
 //! no such fence asserts the engine wrote nothing there (#248).
 //!
+//! **Nothing here forks.** The bundle this harness links carries no
+//! pcntl, and a fence whose snippet forks, signals or changes the process
+//! is marked `process` and served by the `php` binary instead
+//! (`witness::process`; harness-design.md §8, revision 61).
+//!
 //! **A panic is a failure, not the harness's end** (design §8): the serve
 //! is caught, and a panic comes back as the trouble that makes the witness
 //! bork, naming the crate of the engine rather than ending the lane.
@@ -89,7 +94,6 @@ fn run(
         .filter_map(|entry| entry.split_once('='))
         .collect();
     let started = Instant::now();
-    let this_process = std::process::id();
     // A fresh engine per snippet, which is the isolation a process gave
     // (design §8).
     let served = panic::catch_unwind(AssertUnwindSafe(|| {
@@ -102,14 +106,6 @@ fn run(
         }
     }));
     let wall = started.elapsed();
-    // A snippet that forked (`pcntl_fork`) comes back here twice. The
-    // child is a copy of this process with this thread alone in it, and
-    // it ends here with the status its request ended with, as php's
-    // child process ends, never going back into the lane its parent runs.
-    if std::process::id() != this_process {
-        let status = served.as_ref().map_or(255, |served| served.exit_code);
-        std::process::exit(status);
-    }
     let Ok(served) = served else {
         bail!("the linked engine panicked; the panic itself is on the harness's second stream");
     };

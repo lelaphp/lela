@@ -3,6 +3,8 @@
 //! one home of this crate's `unsafe`:
 //!
 //! - [`fork`] and [`install`], whose `nix` wrappers are `unsafe fn`;
+//! - the `extern "C"` handler [`install`] hands `sigaction`, which
+//!   decodes the kernel's `siginfo_t` into the engine's record;
 //! - [`wait`] and [`waitid`], because php hands the program the status
 //!   word and the `siginfo_t` as the kernel wrote them, which `nix`
 //!   decodes into its own `WaitStatus` and does not give back;
@@ -20,7 +22,9 @@
 use nix::errno::Errno;
 use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal};
 use nix::unistd::ForkResult;
-use php_ext::request::{Posted, signal_handler};
+use std::ffi::{c_int, c_void};
+
+use php_ext::request::{SIGNAL_POST, Siginfo};
 
 /// `fork(2)`. The child is a copy of the process with the calling thread
 /// alone in it, as php's is: what the engine's other threads held (an
@@ -37,7 +41,8 @@ pub(crate) fn fork() -> nix::Result<ForkResult> {
 }
 
 /// What a signal's disposition becomes: php's `SIG_DFL`, `SIG_IGN`, or
-/// the engine's signal post, which records it for the dispatch.
+/// [`handler`], which records it in the engine's signal record for the
+/// dispatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Disposition {
     Default,
@@ -59,7 +64,7 @@ pub(crate) fn install(
     let handler = match disposition {
         Disposition::Default => SigHandler::SigDfl,
         Disposition::Ignore => SigHandler::SigIgn,
-        Disposition::Post => SigHandler::SigAction(signal_handler),
+        Disposition::Post => SigHandler::SigAction(handler),
     };
     let mut flags = SaFlags::SA_ONSTACK | SaFlags::SA_SIGINFO;
     if restart {
@@ -73,9 +78,31 @@ pub(crate) fn install(
     let action = SigAction::new(handler, flags, mask);
     // SAFETY: `nix::sys::signal::sigaction` is `unsafe` because the
     // handler installed runs asynchronously; the only handler installed
-    // here is the engine's signal post, which performs atomic operations
-    // on static storage and nothing else, so it is async-signal-safe.
+    // here is `handler`, which is async-signal-safe as its own docs say.
     unsafe { nix::sys::signal::sigaction(signal, &action) }.map(|_| ())
+}
+
+/// `pcntl_signal_handler` (`ext/pcntl/pcntl.c:1333`), installed with
+/// `SA_SIGINFO`: the signal and what the kernel's `siginfo_t` said of it
+/// posted to the engine's signal record, which raises the interrupt of
+/// every request that asked for asynchronous delivery.
+///
+/// What runs in the signal handler is this function, [`decode`] and the
+/// post and wake of `php_heap::post` that [`SIGNAL_POST`] is, and nothing
+/// of `php_engine`: the post claims a free slot by a compare-and-swap,
+/// the decoder copies integers out of the kernel's structure, and the
+/// wake stores to atomics, so nothing here allocates, locks or calls a
+/// function that is not async-signal-safe (design §5.8, revision 38).
+extern "C" fn handler(number: c_int, info: *mut libc::siginfo_t, _context: *mut c_void) {
+    SIGNAL_POST.post(|record| {
+        if !info.is_null() {
+            // SAFETY: the kernel hands an `SA_SIGINFO` handler a
+            // `siginfo_t` that is valid for the handler's duration, and
+            // the pointer is not null.
+            decode(unsafe { &*info }, record);
+        }
+        record.number = number;
+    });
 }
 
 /// A child's resource usage, as `wait4(2)` reports it.
@@ -101,8 +128,8 @@ pub(crate) fn wait(
 }
 
 /// `waitid(2)`: what the kernel wrote into `siginfo_t`, in the shape
-/// the engine's signal post hands a dispatch.
-pub(crate) fn waitid(idtype: i64, id: i64, options: i32) -> Result<Posted, Errno> {
+/// the engine's signal record hands a dispatch.
+pub(crate) fn waitid(idtype: i64, id: i64, options: i32) -> Result<Siginfo, Errno> {
     // SAFETY: `siginfo_t` is plain integers and pointers, for which all
     // zeroes is a value; php `memset`s it the same way.
     let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
@@ -113,44 +140,39 @@ pub(crate) fn waitid(idtype: i64, id: i64, options: i32) -> Result<Posted, Errno
     if status == -1 {
         return Err(Errno::last());
     }
-    Ok(read_siginfo(&info))
+    let mut record = Siginfo::default();
+    decode(&info, &mut record);
+    Ok(record)
 }
 
-/// The fields php reads out of a `siginfo_t`.
+/// The fields php reads out of a `siginfo_t` (`pcntl_siginfo_to_zval`),
+/// written into `record`: plain copies of integers, async-signal-safe.
 #[cfg(target_vendor = "apple")]
-fn read_siginfo(info: &libc::siginfo_t) -> Posted {
-    Posted {
-        number: info.si_signo,
-        errno: info.si_errno,
-        code: info.si_code,
-        pid: info.si_pid,
-        uid: info.si_uid,
-        status: info.si_status,
-        addr: info.si_addr as usize,
-    }
+fn decode(info: &libc::siginfo_t, record: &mut Siginfo) {
+    record.number = info.si_signo;
+    record.errno = info.si_errno;
+    record.code = info.si_code;
+    record.pid = info.si_pid;
+    record.uid = info.si_uid;
+    record.status = info.si_status;
+    record.addr = info.si_addr as usize;
 }
 
 /// The fields php reads out of a `siginfo_t`, through the accessors
-/// `libc` gives Linux's union.
+/// `libc` gives Linux's union, written into `record`.
 #[cfg(not(target_vendor = "apple"))]
-fn read_siginfo(info: &libc::siginfo_t) -> Posted {
+fn decode(info: &libc::siginfo_t, record: &mut Siginfo) {
+    record.number = info.si_signo;
+    record.errno = info.si_errno;
+    record.code = info.si_code;
     // SAFETY: the union is integers the kernel filled or zeroes.
-    let pid = unsafe { info.si_pid() };
+    record.pid = unsafe { info.si_pid() };
     // SAFETY: as above.
-    let uid = unsafe { info.si_uid() };
+    record.uid = unsafe { info.si_uid() };
     // SAFETY: as above.
-    let status = unsafe { info.si_status() };
+    record.status = unsafe { info.si_status() };
     // SAFETY: as above.
-    let addr = unsafe { info.si_addr() } as usize;
-    Posted {
-        number: info.si_signo,
-        errno: info.si_errno,
-        code: info.si_code,
-        pid,
-        uid,
-        status,
-        addr,
-    }
+    record.addr = unsafe { info.si_addr() } as usize;
 }
 
 /// `getpriority(2)`, whose `-1` is a priority as well as the failure, so

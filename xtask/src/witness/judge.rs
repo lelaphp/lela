@@ -10,6 +10,10 @@
 //! and a fence typed by hand that the oracle does not print fails however
 //! the engine ran (#783).
 //!
+//! A fence marked `process` is run of record by the `php` binary in a
+//! process of its own instead ([`super::process`]; harness §8, revision
+//! 61), held by the same rule.
+//!
 //! Both runs stand under the recipe, and under the `[regime.<name>]` the
 //! fence names where it names one, its ini after the recipe's in each
 //! (harness §8, ledger 55). The name is resolved against the pin before
@@ -17,14 +21,14 @@
 
 use std::fmt;
 
-use anyhow::Result;
-use php_bundle::test::Entered;
-
-use super::fence::{Exit, Witness};
+use super::anchor::Entry;
+use super::fence::{Exit, Served, Witness};
+use super::process::Binary;
 use super::{Ask, Captured, Judged, Judgement, fence};
 use crate::divergence::Registry;
 use crate::oracle::expect::Expectation;
 use crate::oracle::{self, Observation, Oracle, Pin, Program, Regime, Verdict as Compared, linked};
+use anyhow::Result;
 
 /// A verdict on one witness, placed where it stands and at the item it
 /// documents, which is what the printed line says after the id.
@@ -38,14 +42,22 @@ fn judged(witness: &Witness, judgement: Judgement, note: impl Into<String>) -> J
     judged
 }
 
+/// What judging one witness leaves beside its verdict: the fence line
+/// `--accept` captures, whose write is the caller's, and what the run of
+/// record entered, which is what the fence covers (harness §4.5
+/// condition 2, revision 58).
+#[derive(Debug, Default)]
+pub(super) struct Kept {
+    pub(super) captured: Vec<Captured>,
+    pub(super) entered: Vec<Entry>,
+}
+
 /// One witness, end to end: the oracle's run, the status `--accept` may
 /// capture from it, the run of record, and the verdict. `regime` is the
 /// block the fence's own `regime=<name>` names, resolved against the pin
 /// by the caller once for both runs, so the oracle is passed the name and
-/// the linked engine the ini it carries and neither is passed another's. What `--accept`
-/// captures goes onto `captured`; the write is the caller's. What the
-/// linked engine's run entered goes onto `entered`, which is what the
-/// fence covers (harness §4.5 condition 2, revision 58). Every way
+/// the linked engine the ini it carries and neither is passed another's.
+/// What the run leaves beside its verdict goes onto `kept`. Every way
 /// this can go wrong is a judgement the witness carries, the oracle's
 /// trouble and the linked engine's included, so there is nothing here for
 /// an `Err` to say.
@@ -55,8 +67,8 @@ pub(super) fn one(
     ask: &Ask,
     witness: &Witness,
     regime: Option<&Regime>,
-    captured: &mut Vec<Captured>,
-    entered: &mut Vec<Entered>,
+    binary: &Binary,
+    kept: &mut Kept,
 ) -> Judged {
     let oracle_out = match oracle.run(
         Program::Snippet(&witness.snippet),
@@ -85,7 +97,7 @@ pub(super) fn one(
     // (design §8, the paragraph on witnesses in rustdoc).
     let mut exit = witness.exit;
     if ask.accept && exit == Exit::Bare {
-        captured.push(Captured {
+        kept.captured.push(Captured {
             file: witness.file.clone(),
             line: witness.fence,
             was: witness.fence_line.clone(),
@@ -103,21 +115,12 @@ pub(super) fn one(
         );
     }
 
-    // The engine linked into the harness, which needs no binary and is
-    // the run of record (design §8; #119, #401). A panic inside is trouble
-    // the witness borks on, never the lane's end.
-    let ran = match linked::serve_traced(&oracle.pin().recipe, regime, &witness.snippet) {
+    let ran = match serve(oracle, binary, witness, regime) {
         Ok((out, natives)) => {
-            *entered = natives;
+            kept.entered = natives;
             out
         }
-        Err(trouble) => {
-            return judged(
-                witness,
-                Judgement::Bork,
-                format!("the linked engine did not serve it: {trouble:#}"),
-            );
-        }
+        Err(trouble) => return judged(witness, Judgement::Bork, trouble),
     };
     held(
         oracle.pin(),
@@ -126,6 +129,28 @@ pub(super) fn one(
         exit,
         [(Run::Oracle, &oracle_out), (Run::Engine, &ran)],
     )
+}
+
+/// The run of record, and what it entered: the engine linked into the
+/// harness, which needs no binary (design §8; #119, #401), or for a fence
+/// marked `process` the `php` binary in a process of its own (harness
+/// §8, revision 61). A panic in the linked engine is trouble the witness
+/// borks on, never the lane's end; the trouble is the sentence it borks
+/// with.
+pub(super) fn serve(
+    oracle: &Oracle<'_>,
+    binary: &Binary,
+    witness: &Witness,
+    regime: Option<&Regime>,
+) -> Result<(Observation, Vec<Entry>), String> {
+    match witness.served {
+        Served::Linked => linked::serve_traced(&oracle.pin().recipe, regime, &witness.snippet)
+            .map(|(out, natives)| (out, natives.into_iter().map(Entry::from).collect()))
+            .map_err(|trouble| format!("the linked engine did not serve it: {trouble:#}")),
+        Served::Binary => binary
+            .serve(oracle, &witness.snippet, witness.regime.as_deref())
+            .map_err(|trouble| format!("the php binary did not serve it: {trouble:#}")),
+    }
 }
 
 /// The two runs a witness stands on, which is what a miss names.
