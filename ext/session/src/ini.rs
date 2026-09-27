@@ -83,6 +83,19 @@ pub(crate) const ENTRIES: [(&str, &str, Kind); 31] = [
 /// string(7) "nocache"
 /// string(2) "1%"
 /// ```
+///
+/// Where each may be changed, `ZEND_INI_PERDIR` alone for `auto_start`
+/// and the upload progress entries and `PHP_INI_ALL` for the rest:
+///
+/// ```php
+/// $all = ini_get_all('session');
+/// var_dump($all['session.auto_start']['access'], $all['session.upload_progress.freq']['access'], $all['session.name']['access']);
+/// ```
+/// ```expect
+/// int(2)
+/// int(2)
+/// int(7)
+/// ```
 pub(super) fn declared() -> Vec<IniDecl> {
     ENTRIES
         .iter()
@@ -93,7 +106,9 @@ pub(super) fn declared() -> Vec<IniDecl> {
                 default: default.as_bytes().into(),
                 user: !per_dir,
                 per_dir: true,
-                system: true,
+                // `ZEND_INI_PERDIR` alone, which `php --re` shows as
+                // `<PERDIR>`; every other entry is `PHP_INI_ALL`.
+                system: !per_dir,
             }
         })
         .collect()
