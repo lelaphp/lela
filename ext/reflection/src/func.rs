@@ -411,25 +411,31 @@ impl ReflectionFunctionAbstract {
     /// ```expect
     /// bool(false)
     /// ```
+    ///
+    /// A method's and a closure's bit are their own declaration's, so an
+    /// interface's deprecated method is deprecated and its implementation
+    /// is not:
+    ///
+    /// ```php
+    /// interface I { #[\Deprecated] function t(); }
+    /// class C implements I { function t() {} #[\Deprecated] static function s() {} }
+    /// var_dump((new ReflectionMethod('I', 't'))->isDeprecated(), (new ReflectionMethod('C', 't'))->isDeprecated(), (new ReflectionMethod('C', 's'))->isDeprecated());
+    /// var_dump((new ReflectionFunction(#[\Deprecated] function () {}))->isDeprecated(), (new ReflectionFunction(fn () => 1))->isDeprecated());
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// ```
     #[php(tentative)]
     fn isDeprecated(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
-        let name = this_name(req, this.object(), "ReflectionFunction")?;
-        let Some(function) = lookup_function(req, &name) else {
-            return Err(throw(
-                req,
-                "ReflectionException",
-                &format!(
-                    "Function {}() does not exist",
-                    String::from_utf8_lossy(&name)
-                ),
-            ));
-        };
-        let deprecated = req.function_decl(function).is_some_and(|decl| {
-            decl.attributes
-                .iter()
-                .any(|a| a.name.0.eq_ignore_ascii_case(b"Deprecated"))
-        });
-        Ok(deprecated)
+        let (_, decl) = this_function(req, this.object())?;
+        Ok(decl
+            .attributes
+            .iter()
+            .any(|a| a.name.0.eq_ignore_ascii_case(b"Deprecated")))
     }
 
     /// `ReflectionFunctionAbstract::isInternal()`: whether `fptr->type` is
