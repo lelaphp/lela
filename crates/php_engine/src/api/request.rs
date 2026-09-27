@@ -5676,6 +5676,12 @@ impl Request {
     /// fatal where the request stands, on the streams the two ini entries
     /// say, and the request ends in it. It is rendered once, here, and
     /// `serve` writes nothing of its own.
+    /// Whether a `zend_bailout` is under way, which leaves every step
+    /// it passes through at once.
+    pub(crate) fn bailing_out(&self) -> bool {
+        self.bailout
+    }
+
     pub(crate) fn end_in_fatal(&mut self, message: &str) {
         // One raised while a bailout is under way is not rendered: php
         // left what raised it at the first. One raised after the bailout

@@ -657,6 +657,13 @@ fn handler_op(req: &mut Request, at: usize, context: &mut Context) -> Status {
             Ok(status) => status,
             Err(thrown) => {
                 req.leave_pending(&thrown);
+                // A handler that bailed out, a fatal or a throwable no
+                // frame took at shutdown, leaves the operation there:
+                // nothing settles and nothing it held is passed on.
+                if req.bailing_out() {
+                    req.output_mut().running = None;
+                    return Status::Failure;
+                }
                 Status::Failure
             }
         };
@@ -1346,8 +1353,21 @@ fn clean(req: &mut Request) -> bool {
 /// ```expect
 /// abc
 /// ```
+///
+/// A handler that throws here has no frame to take it: the uncaught
+/// fatal is rendered into the buffer being handled and `zend_bailout`
+/// leaves the walk, so neither is written.
+///
+/// ```php
+/// echo "start\n";
+/// ob_start(function ($b) { throw new Exception("x"); });
+/// echo "hmm\n";
+/// ```
+/// ```expect exit=255
+/// start
+/// ```
 pub(crate) fn end_all(req: &mut Request) {
-    while req.output().level() > 0 && stack_pop(req, POP_FORCE) {}
+    while req.output().level() > 0 && !req.bailing_out() && stack_pop(req, POP_FORCE) {}
 }
 
 /// `php_output_deactivate` (`Z/main/output.c:176`): the header block
