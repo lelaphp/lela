@@ -2002,11 +2002,15 @@ impl ObjectHandlers for Handlers {
             .native_mut::<Fs>(req)
             .map(|it| (it.dir.take(), it.stream.take(), it.csv.take()));
         if let Some((dir, stream, csv)) = held {
+            // `php_stream_close`, which takes the resource out of the
+            // list as it closes it.
             if let Some(dir) = dir {
                 dir.close(req);
+                req.release(dir.as_value());
             }
             if let Some(stream) = stream {
                 stream.close(req);
+                req.release(stream.as_value());
             }
             if let Some(csv) = csv {
                 req.release(csv);
