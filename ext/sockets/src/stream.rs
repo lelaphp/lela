@@ -9,7 +9,7 @@ use std::os::fd::AsRawFd;
 
 use php_ext::abi::{Instance, OrFalse, Untyped};
 use php_ext::attr::php_function;
-use php_ext::raising::Thrown;
+use php_ext::raising::{Thrown, throw};
 use php_ext::request::{Cast, FdStream, Request, Stream, StreamOption};
 use php_ext::values::{Resource, Value};
 
@@ -19,7 +19,8 @@ use crate::socket::{Handle, Sock, Socket, made, sock, socket_error, valid};
 /// `socket_import_stream($stream): Socket|false`: the stream's socket
 /// as a `Socket` of the family its name has, sharing the fd
 /// with the stream, whose read buffer is turned off; php's warning for
-/// a stream of a kind that is no socket.
+/// a stream of a kind that is no socket, and `php_stream_from_zval`'s
+/// `TypeError` for a resource that is no open stream.
 ///
 /// ```php
 /// $srv = stream_socket_server('tcp://127.0.0.1:0');
@@ -29,6 +30,8 @@ use crate::socket::{Handle, Sock, Socket, made, sock, socket_error, valid};
 /// var_dump(socket_import_stream(fopen('php://memory', 'r')));
 /// unset($srv);
 /// var_dump(socket_getsockname($s, $a));
+/// $f = fopen(__FILE__, 'r'); fclose($f);
+/// try { socket_import_stream($f); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
 /// ```
 /// ```expect
 /// bool(true)
@@ -42,12 +45,20 @@ use crate::socket::{Handle, Sock, Socket, made, sock, socket_error, valid};
 /// Warning: socket_import_stream(): Cannot represent a stream of type MEMORY as a Socket Descriptor in %s on line 6
 /// bool(false)
 /// bool(true)
+/// socket_import_stream(): supplied resource is not a valid stream resource
 /// ```
 #[php_function]
 fn socket_import_stream(
     req: &mut Request,
-    stream: Stream,
+    stream: Resource,
 ) -> Result<OrFalse<Instance<Socket>>, Thrown> {
+    let Some(stream) = Stream::from_value(req, &Value::resource(stream)) else {
+        return Err(throw(
+            req,
+            "TypeError",
+            "socket_import_stream(): supplied resource is not a valid stream resource",
+        ));
+    };
     let Some(fd) = stream.cast(req, Cast::Socket, true) else {
         return Ok(OrFalse::False);
     };
