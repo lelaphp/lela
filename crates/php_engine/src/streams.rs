@@ -1216,11 +1216,23 @@ impl Ops for OfExtension {
         buf[7] = size;
         Some(buf)
     }
+
+    fn flush(&mut self, req: &mut Request) -> bool {
+        self.0.flush(req)
+    }
+
+    fn flock(&mut self, req: &mut Request, operation: i64) -> Option<bool> {
+        self.0.flock(req, operation)
+    }
 }
 
-/// `_php_stream_alloc` over a kind an extension implements.
+/// `_php_stream_alloc` over a kind an extension implements, with
+/// `PHP_STREAM_FLAG_NO_BUFFER` where the kind keeps no read buffer.
 pub(crate) fn of_extension(ops: Box<dyn crate::api::request::StreamOps>, mode: &[u8]) -> PhpStream {
-    PhpStream::new(Box::new(OfExtension(ops)), mode)
+    let buffered = ops.buffered();
+    let mut stream = PhpStream::new(Box::new(OfExtension(ops)), mode);
+    stream.flags.no_buffer = !buffered;
+    stream
 }
 
 /// `_php_stream_memory_create` (`Z/main/streams/memory.c:271`): empty,

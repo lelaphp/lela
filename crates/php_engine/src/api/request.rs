@@ -777,6 +777,30 @@ pub trait StreamOps: Send {
     fn size(&self) -> Option<i64> {
         None
     }
+
+    /// `ops->flush`: `true` for php's `0`, which a kind with nothing of
+    /// its own to flush answers.
+    fn flush(&mut self, req: &mut Request) -> bool {
+        let _ = req;
+        true
+    }
+
+    /// `PHP_STREAM_OPTION_LOCKING` with `flock(2)`'s operation, as
+    /// [`Stream::flock`] asks it: `None` where the kind has no
+    /// `flock(2)`, else whether `flock(2)` took it, which a kind over
+    /// another stream answers by asking that one, as
+    /// `php_gziop_set_option` does.
+    fn flock(&mut self, req: &mut Request, operation: i64) -> Option<bool> {
+        let _ = (req, operation);
+        None
+    }
+
+    /// Whether the generic half keeps a read buffer before the kind:
+    /// `false` is `PHP_STREAM_FLAG_NO_BUFFER`, set on the stream as
+    /// `php_stream_gzopen` sets it, so every read reaches the kind.
+    fn buffered(&self) -> bool {
+        true
+    }
 }
 
 /// A stream wrapper's operations, Zend's `php_stream_wrapper_ops` as a
@@ -17411,6 +17435,16 @@ impl Request {
         let answer = f(self);
         self.stream_ctx = outer;
         answer
+    }
+
+    /// The `php_stream_context *context` a wrapper's opener is handed:
+    /// what [`Request::with_stream_ctx`] set around the operation being
+    /// served, `None` outside one and where the native resolved its
+    /// `$context` to none. An extension's wrapper reads its options off
+    /// it, as `php_stream_gzopen` reads `zlib`'s `level`.
+    #[must_use]
+    pub fn stream_ctx(&self) -> Option<Resource> {
+        self.stream_ctx
     }
 
     /// `php_stream_fopen_tmpfile`, what `tmpfile()` is: a new file in the
