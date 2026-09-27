@@ -45,6 +45,7 @@ use crate::virtual_cwd::RealpathCache;
 pub use crate::virtual_cwd::Resolve;
 
 mod hold;
+pub(crate) use hold::Hold;
 mod hooks;
 mod lazy;
 mod linking;
@@ -1422,6 +1423,9 @@ pub struct Request {
     /// ([`Request::take_sensed`]).
     #[cfg(debug_assertions)]
     dirty: Option<DirtyTemporary>,
+    /// The table the last `FETCH_DIM_W` laid its `IS_INDIRECT` into,
+    /// for the `ASSIGN_DIM` after it to hold ([`Request::hold_walk`]).
+    walk: Option<hold::Walk>,
     /// The classes the units this request served declared, each the
     /// unit that holds it and the index of its declaration, in the
     /// order declared: php's `EG(class_table)` past what the engine
@@ -1854,6 +1858,7 @@ impl Request {
             static_vars: HashMap::new(),
             #[cfg(debug_assertions)]
             dirty: None,
+            walk: None,
         };
         req.activate();
         req
@@ -2953,10 +2958,7 @@ impl Request {
         if let Some(method) = self.native_method(function) {
             // A parent hook's trampoline has the property's class as its
             // scope, which its call carries and no row of the table does.
-            if matches!(method.at, MethodAt::ParentHook { .. }) {
-                return None;
-            }
-            return Some(method.class);
+            return method.at.class();
         }
         if let Some((class, _)) = self.enum_method_of(function) {
             return Some(class);
@@ -3112,9 +3114,8 @@ impl Request {
             return self.member_function(member);
         }
         self.native_method_id(|m| {
-            m.class == class
-                && matches!(m.at, MethodAt::Declared(index)
-                    if decl
+            matches!(m.at, MethodAt::Declared { class: held, at: index }
+                    if held == class && decl
                         .methods
                         .get(usize::try_from(index).unwrap_or(usize::MAX))
                         .is_some_and(|method| method.function.name.0.eq_ignore_ascii_case(lowered)))
@@ -3148,9 +3149,8 @@ impl Request {
     /// the engine makes, `Closure::__invoke`.
     pub(crate) fn trampoline_named(&self, class: ClassId, lowered: &[u8]) -> Option<Function> {
         self.native_method_id(|m| {
-            m.class == class
-                && matches!(m.at, MethodAt::Trampoline(index)
-                    if self
+            matches!(m.at, MethodAt::Trampoline { class: held, at: index }
+                    if held == class && self
                         .shared
                         .trampolines
                         .get(usize::try_from(index).unwrap_or(usize::MAX))
@@ -3185,11 +3185,11 @@ impl Request {
         }
         if let Some(method) = self.native_method(function) {
             return match method.at {
-                MethodAt::Declared(index) => self
-                    .class_decl(method.class)?
+                MethodAt::Declared { class, at } => self
+                    .class_decl(class)?
                     .methods
-                    .get(usize::try_from(index).ok()?),
-                MethodAt::Trampoline(index) | MethodAt::ParentHook { at: index, .. } => {
+                    .get(usize::try_from(at).ok()?),
+                MethodAt::Trampoline { at: index, .. } | MethodAt::ParentHook { at: index, .. } => {
                     self.shared.trampolines.get(usize::try_from(index).ok()?)
                 }
             };
@@ -11178,7 +11178,7 @@ impl Request {
                 fcc.calling = Some(object.class());
                 fcc.object = Some(object);
             } else if let Some(class) = first.as_str_bytes() {
-                strict = self.callable_class(class, frame.scope, &frame, &mut fcc, raised)?;
+                (_, strict) = self.callable_class(class, frame.scope, &frame, &mut fcc, raised)?;
             }
             method.to_vec()
         } else if let Some(name) = held.as_str_bytes() {
@@ -11213,11 +11213,13 @@ impl Request {
                 });
             }
         };
-        let target = match scope {
-            None if fcc.object.is_none() => Target::Function(function),
-            scope => Target::Method {
+        // A receiver is always scoped: `fcc->called_scope` is the
+        // object's class where nothing named one (`Z/Zend/zend_API.c:3802`).
+        let target = match scope.or(fcc.object.map(|this| this.class())) {
+            None => Target::Function(function),
+            Some(scope) => Target::Method {
                 function,
-                scope: scope.unwrap_or(ClassId(0)),
+                scope,
                 this: fcc.object,
             },
         };
@@ -11254,8 +11256,9 @@ impl Request {
     /// the frame with their deprecation and their refusals where the
     /// frame has no class to give, any other name looked up. A class
     /// named on the frame's scope, or one the scope extends, binds the
-    /// frame's `$this` where it is an instance of the scope. The `bool`
-    /// is php's `*strict_class`.
+    /// frame's `$this` where it is an instance of the scope. What it
+    /// answers is the class it resolved, the `fcc->calling_scope` it
+    /// leaves in `fcc`, and php's `*strict_class`.
     fn callable_class(
         &self,
         name: &[u8],
@@ -11263,7 +11266,7 @@ impl Request {
         frame: &CallFrame,
         fcc: &mut Fcc,
         raised: &mut Option<Vec<String>>,
-    ) -> Result<bool, String> {
+    ) -> Result<(ClassId, bool), String> {
         let lowered = name.to_ascii_lowercase();
         let mut deprecate = |word: &str| {
             if let Some(raised) = raised.as_mut() {
@@ -11284,7 +11287,7 @@ impl Request {
                 fcc.called = fcc.called.or(Some(scope));
                 fcc.calling = Some(scope);
                 fcc.object = fcc.object.or(frame.this);
-                Ok(false)
+                Ok((scope, false))
             }
             b"parent" => {
                 let Some(scope) = scope else {
@@ -11304,7 +11307,7 @@ impl Request {
                 fcc.called = fcc.called.or(Some(parent));
                 fcc.calling = Some(parent);
                 fcc.object = fcc.object.or(frame.this);
-                Ok(true)
+                Ok((parent, true))
             }
             b"static" => {
                 let Some(called) = frame.called else {
@@ -11316,7 +11319,7 @@ impl Request {
                 fcc.called = Some(called);
                 fcc.calling = Some(called);
                 fcc.object = fcc.object.or(frame.this);
-                Ok(true)
+                Ok((called, true))
             }
             _ => {
                 let Some(class) = self.class_named(name.strip_prefix(b"\\").unwrap_or(name)) else {
@@ -11342,7 +11345,7 @@ impl Request {
                 } else {
                     fcc.called = Some(fcc.object.map_or(class, |object| object.class()));
                 }
-                Ok(true)
+                Ok((class, true))
             }
         }
     }
@@ -11383,14 +11386,14 @@ impl Request {
                 let class = &callable[..at];
                 let quiet = raised.is_none() || ce_org.is_some();
                 let mut none = None;
-                strict = self.callable_class(
+                let calling;
+                (calling, strict) = self.callable_class(
                     class,
                     scope,
                     frame,
                     fcc,
                     if quiet { &mut none } else { raised },
                 )?;
-                let calling = fcc.calling.unwrap_or(ClassId(0));
                 if let Some(org) = ce_org {
                     if !self.instance_of(org, calling) {
                         return Err(format!(
