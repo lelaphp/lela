@@ -2176,9 +2176,25 @@ impl Request {
     /// them while the frame still stands on both stacks, as php's
     /// `vm_stack_top` is only put back after them, so a destructor one
     /// of them serves pushes its frames above it; then
-    /// `zend_vm_stack_free_call_frame`.
+    /// `zend_vm_stack_free_call_frame`. The frame is off the chain a
+    /// backtrace reads from the first release on, as php's
+    /// `EG(current_execute_data)` is the caller's by then, so a
+    /// destructor served from here is called from the caller's line:
+    ///
+    /// ```php
+    /// class D { function __destruct() { debug_print_backtrace(); } }
+    /// function f($x) { $d = new D; }
+    /// f(new D);
+    /// ```
+    /// ```expect
+    /// #0 %s(4): D->__destruct()
+    /// #0 %s(4): D->__destruct()
+    /// ```
     pub(crate) fn pop_frame(&mut self) {
         let frame = self.stack.current();
+        if let Some(state) = self.vm.at_mut(frame) {
+            state.leaving = true;
+        }
         let slots = self.stack.frame(frame).map_or(0, php_heap::Frame::len);
         let cvs = self
             .vm
@@ -4068,7 +4084,9 @@ impl Request {
                     }
                     taken += 1;
                 }
-                links.push(Link::Frame(stack, at, state));
+                if !state.leaving {
+                    links.push(Link::Frame(stack, at, state));
+                }
             }
             while taken < calls.len() {
                 if calls[taken].stage == exec::CallStage::Serving {

@@ -206,6 +206,12 @@ pub(crate) struct FrameState {
     /// a frame a native re-entered the loop on counts the native that
     /// entered it too, and so stands above it.
     pub(crate) calls_below: u32,
+    /// The frame is being popped: `zend_leave_helper` has written
+    /// `EG(current_execute_data) = EX(prev_execute_data)` ahead of
+    /// `i_free_compiled_variables`, so a destructor what it gives up
+    /// serves is called from the caller's activation, and this one is
+    /// on no chain a backtrace reads.
+    pub(crate) leaving: bool,
     /// The `Generator` whose frame this is, php's `EX(return_value)`
     /// under `ZEND_CALL_GENERATOR` (`zend_get_running_generator`): set
     /// by `GENERATOR_CREATE` when it moves the frame into the object,
@@ -551,6 +557,7 @@ impl Vm {
             extra_args: Vec::new(),
             extra_named: Vec::new(),
             calls_below,
+            leaving: false,
             generator: None,
             fast_calls: Vec::new(),
             runtime_cache,
