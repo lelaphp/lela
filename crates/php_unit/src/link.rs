@@ -2795,6 +2795,7 @@ impl<'a> Linker<'a> {
         for &(declaring, method) in &tables.methods {
             match methods.iter().find(|(_, m)| same_method(m, method)) {
                 Some((None, own)) => {
+                    let (declaring, method) = self.prototype(declaring, method);
                     let (fe_side, proto_side) = Self::own_over(child, declaring);
                     if let Some(linked) =
                         self.method_refused(child, own, fe_side, method, proto_side, Check::Parent)
@@ -2807,6 +2808,56 @@ impl<'a> Linker<'a> {
             }
         }
         None
+    }
+
+    /// `parent->common.prototype` where the parent's method is a
+    /// constructor that is not abstract: the abstract constructor it
+    /// was held to, an interface's or one up the chain, which is what a
+    /// child's constructor is held to in its place
+    /// (`do_inheritance_check_on_method`); the method itself otherwise.
+    ///
+    /// ```php
+    /// abstract class A { abstract function __construct(int $x); }
+    /// class B extends A { function __construct(int|string $x) {} }
+    /// class C extends B { function __construct(string $x) {} }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Declaration of C::__construct(string $x) must be compatible with A::__construct(int $x) in %s on line 4
+    /// ```
+    fn prototype(
+        &self,
+        declaring: &'a ClassDecl,
+        method: &'a MethodDecl,
+    ) -> (&'a ClassDecl, &'a MethodDecl) {
+        let ctor = |class: &'a ClassDecl| {
+            class
+                .methods
+                .iter()
+                .find(|m| m.function.name.0.eq_ignore_ascii_case(b"__construct"))
+        };
+        if method.is_abstract || !method.function.name.0.eq_ignore_ascii_case(b"__construct") {
+            return (declaring, method);
+        }
+        let mut at = declaring;
+        for _ in 0..64 {
+            let mut interfaces = Vec::new();
+            self.interfaces_of(&at.interfaces, &mut interfaces, 0);
+            if let Some(found) = interfaces
+                .into_iter()
+                .rev()
+                .find_map(|i| ctor(i).map(|m| (i, m)))
+            {
+                return found;
+            }
+            let Some(parent) = self.class_parent(at) else {
+                break;
+            };
+            match ctor(parent) {
+                Some(m) if m.is_abstract => return (parent, m),
+                _ => at = parent,
+            }
+        }
+        (declaring, method)
     }
 
     /// `zend_do_implement_interfaces`: each interface the class names,
