@@ -3,15 +3,14 @@
 //! `php_random_status_state_pcgoneseq128xslrr64` holds it, and the
 //! `Random\Engine\PcgOneseq128XslRr64` class over it.
 
+use php_ext::abi::{This, Union};
+use php_ext::attr::php_class;
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, Value};
+use php_ext::values::{PhpArray, PhpString};
 
-use php_ext::decl::{MethodDecl, Type};
-
-use crate::arginfo::{method, param, wide_seed};
-use crate::engine_mt19937::{generate_method, serial_methods};
-use crate::{Algo, Entry, Failure, Field, Generated, Serial, csprng, zpp};
+use crate::engine_mt19937::Mt19937;
+use crate::{Algo, Failure, Field, Generated, Serial, csprng};
 
 /// The LCG's multiplier, `php_random_uint128_constant(2549297995355413924,
 /// 4865540595714422341)`.
@@ -47,11 +46,11 @@ impl Uint128 {
 /// `php_random_status_state_pcgoneseq128xslrr64`: the one 128-bit state.
 /// `Default` is php's zeroed allocation.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct PcgOneseq128XslRr64 {
+pub(crate) struct StatePcgOneseq128XslRr64 {
     pub(crate) state: Uint128,
 }
 
-impl PcgOneseq128XslRr64 {
+impl StatePcgOneseq128XslRr64 {
     /// `step`: one turn of the LCG.
     fn step(&mut self) {
         self.state = Uint128::of(
@@ -92,7 +91,7 @@ impl PcgOneseq128XslRr64 {
     }
 }
 
-impl Algo for PcgOneseq128XslRr64 {
+impl Algo for StatePcgOneseq128XslRr64 {
     fn generate(&mut self) -> Result<Generated, Failure> {
         self.step();
         // `php_random_pcgoneseq128xslrr64_rotr64`: the halves xored,
@@ -107,7 +106,7 @@ impl Algo for PcgOneseq128XslRr64 {
     }
 }
 
-impl Serial for PcgOneseq128XslRr64 {
+impl Serial for StatePcgOneseq128XslRr64 {
     /// The high half, then the low one, each little-endian hex.
     fn serialize(&self) -> Vec<Field> {
         let Uint128 { hi, lo } = self.state;
@@ -137,100 +136,103 @@ impl Serial for PcgOneseq128XslRr64 {
     }
 }
 
-/// `Random\Engine\PcgOneseq128XslRr64::__construct(string|int|null $seed
-/// = null)`: sixteen bytes read as two little-endian halves, high first,
-/// an int as the low half, and sixteen CSPRNG bytes where none is given.
-///
-/// ```php
-/// echo bin2hex((new Random\Engine\PcgOneseq128XslRr64(1234))->generate()), "\n";
-/// echo bin2hex((new Random\Engine\PcgOneseq128XslRr64("0123456789abcdef"))->generate()), "\n";
-/// echo strlen((new Random\Engine\PcgOneseq128XslRr64())->generate()), "\n";
-/// try { new Random\Engine\PcgOneseq128XslRr64("short"); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// ecfbe5990a319380
-/// 33ab451afc58b814
-/// 8
-/// Random\Engine\PcgOneseq128XslRr64::__construct(): Argument #1 ($seed) must be a 16 byte (128 bit) string
-/// ```
-pub(crate) fn construct(req: &mut Request) -> Result<Value, Thrown> {
-    zpp::arity(req, 0, 1)?;
-    let this = zpp::this(req)?;
-    let seed = zpp::given(req, 1)?;
-    let mut state = PcgOneseq128XslRr64::default();
-    match seed {
-        None => {
-            let mut bytes = [0; 16];
-            csprng::fill(&mut bytes).map_err(|failure| failure.seed_failure(req))?;
-            state.seed128(u128::from_ne_bytes(bytes));
-        }
-        Some(seed) => {
-            if let Some(bytes) = seed.as_str_bytes() {
-                let Ok(bytes) = <[u8; 16]>::try_from(bytes) else {
-                    return Err(arg_value_error(req, 1, "be a 16 byte (128 bit) string"));
-                };
-                let half = |at: usize| {
-                    let mut word = [0; 8];
-                    word.copy_from_slice(bytes.get(at..at + 8).unwrap_or(&[0; 8]));
-                    u128::from(u64::from_le_bytes(word))
-                };
-                state.seed128((half(0) << 64) | half(8));
-            } else if let Some(n) = seed.as_int() {
-                state.seed128(u128::from(n.cast_unsigned()));
-            } else {
+/// `final class Random\Engine\PcgOneseq128XslRr64 implements \Random\Engine`,
+/// `@strict-properties`, over [`StatePcgOneseq128XslRr64`]: `generate` and the serial
+/// three are `Mt19937`'s entries (`@implementation-alias`).
+#[php_class(
+    final,
+    namespace(Random::Engine),
+    implements(crate::Engine),
+    dynamic_properties = forbidden,
+    payload = StatePcgOneseq128XslRr64,
+    handlers = crate::PCG
+)]
+pub(crate) struct PcgOneseq128XslRr64;
+
+#[php_class]
+impl PcgOneseq128XslRr64 {
+    /// `Random\Engine\PcgOneseq128XslRr64::__construct(string|int|null $seed
+    /// = null)`: sixteen bytes read as two little-endian halves, high first,
+    /// an int as the low half, and sixteen CSPRNG bytes where none is given.
+    ///
+    /// ```php
+    /// echo bin2hex((new Random\Engine\PcgOneseq128XslRr64(1234))->generate()), "\n";
+    /// echo bin2hex((new Random\Engine\PcgOneseq128XslRr64("0123456789abcdef"))->generate()), "\n";
+    /// echo strlen((new Random\Engine\PcgOneseq128XslRr64())->generate()), "\n";
+    /// try { new Random\Engine\PcgOneseq128XslRr64("short"); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// ecfbe5990a319380
+    /// 33ab451afc58b814
+    /// 8
+    /// Random\Engine\PcgOneseq128XslRr64::__construct(): Argument #1 ($seed) must be a 16 byte (128 bit) string
+    /// ```
+    fn __construct(
+        req: &mut Request,
+        this: This<Self>,
+        #[php(default = null)] seed: Option<Union<PhpString, i64>>,
+    ) -> Result<(), Thrown> {
+        let this = this.object();
+        let mut state = StatePcgOneseq128XslRr64::default();
+        match seed {
+            None => {
                 let mut bytes = [0; 16];
                 csprng::fill(&mut bytes).map_err(|failure| failure.seed_failure(req))?;
                 state.seed128(u128::from_ne_bytes(bytes));
             }
+            Some(seed) => {
+                if let Union::A(bytes) = seed {
+                    let Ok(bytes) = <[u8; 16]>::try_from(bytes.as_bytes()) else {
+                        return Err(arg_value_error(req, 1, "be a 16 byte (128 bit) string"));
+                    };
+                    let half = |at: usize| {
+                        let mut word = [0; 8];
+                        word.copy_from_slice(bytes.get(at..at + 8).unwrap_or(&[0; 8]));
+                        u128::from(u64::from_le_bytes(word))
+                    };
+                    state.seed128((half(0) << 64) | half(8));
+                } else if let Union::B(n) = seed {
+                    state.seed128(u128::from(n.cast_unsigned()));
+                }
+            }
         }
+        if let Some(slot) = this.native_mut::<StatePcgOneseq128XslRr64>(req) {
+            *slot = state;
+        }
+        Ok(())
     }
-    if let Some(slot) = this.native_mut::<PcgOneseq128XslRr64>(req) {
-        *slot = state;
-    }
-    Ok(Value::null())
-}
 
-/// `Random\Engine\PcgOneseq128XslRr64::jump(int $advance): void`: the
-/// state `advance` steps on, a negative count php's `ValueError`.
-///
-/// ```php
-/// $a = new Random\Engine\PcgOneseq128XslRr64(1); $b = clone $a;
-/// for ($i = 0; $i < 1000; $i++) $a->generate();
-/// $b->jump(1000); var_dump($a->generate() === $b->generate());
-/// try { $b->jump(-1); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// bool(true)
-/// Random\Engine\PcgOneseq128XslRr64::jump(): Argument #1 ($advance) must be greater than or equal to 0
-/// ```
-pub(crate) fn jump(req: &mut Request) -> Result<Value, Thrown> {
-    zpp::arity(req, 1, 1)?;
-    let this = zpp::this(req)?;
-    let advance = zpp::long(req, 1)?;
-    if advance < 0 {
-        return Err(arg_value_error(req, 1, "be greater than or equal to 0"));
-    }
-    if let Some(state) = this.native_mut::<PcgOneseq128XslRr64>(req) {
-        state.advance(advance.cast_unsigned());
-    }
-    Ok(Value::null())
-}
+    #[php(implementation = Mt19937::generate)]
+    fn generate(this: This<Self>) -> PhpString;
 
-/// `Random\Engine\PcgOneseq128XslRr64`'s methods, `generate` and the
-/// serial three aliases of `Mt19937`'s.
-pub(super) fn methods() -> Vec<(MethodDecl, Entry)> {
-    let mut methods = vec![
-        (method("__construct", wide_seed(), None), construct as Entry),
-        generate_method(),
-        (
-            method(
-                "jump",
-                vec![param("advance", Type::Int, None)],
-                Some(Type::Void),
-            ),
-            jump,
-        ),
-    ];
-    methods.extend(serial_methods());
-    methods
+    /// `Random\Engine\PcgOneseq128XslRr64::jump(int $advance): void`: the
+    /// state `advance` steps on, a negative count php's `ValueError`.
+    ///
+    /// ```php
+    /// $a = new Random\Engine\PcgOneseq128XslRr64(1); $b = clone $a;
+    /// for ($i = 0; $i < 1000; $i++) $a->generate();
+    /// $b->jump(1000); var_dump($a->generate() === $b->generate());
+    /// try { $b->jump(-1); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// Random\Engine\PcgOneseq128XslRr64::jump(): Argument #1 ($advance) must be greater than or equal to 0
+    /// ```
+    fn jump(req: &mut Request, this: This<Self>, advance: i64) -> Result<(), Thrown> {
+        let this = this.object();
+        if advance < 0 {
+            return Err(arg_value_error(req, 1, "be greater than or equal to 0"));
+        }
+        if let Some(state) = this.native_mut::<StatePcgOneseq128XslRr64>(req) {
+            state.advance(advance.cast_unsigned());
+        }
+        Ok(())
+    }
+
+    #[php(implementation = Mt19937::__serialize)]
+    fn __serialize(this: This<Self>) -> PhpArray;
+    #[php(implementation = Mt19937::__unserialize)]
+    fn __unserialize(this: This<Self>, data: PhpArray);
+    #[php(implementation = Mt19937::__debugInfo)]
+    fn __debugInfo(this: This<Self>) -> PhpArray;
 }
