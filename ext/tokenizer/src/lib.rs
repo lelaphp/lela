@@ -10,9 +10,9 @@
 //! `tokenize()` stops; the names the lexer's kinds carry come from
 //! `php_names` and are not repeated here. Under `TOKEN_PARSE` the one
 //! parser runs over the same stream and what it took as a name is read
-//! off the tree in [`feedback`]. `PhpToken` is the one native class,
-//! declared through `ExtensionBuilder::classes` with its methods'
-//! entries beside it (design §7.1): `tokenize` over the same two paths,
+//! off the tree in [`feedback`]. The natives, `PhpToken` and the
+//! constants are declared by the attributes (design §7.1). `PhpToken` is
+//! the one native class: `tokenize` over the same two paths,
 //! its objects filled as `add_token` fills them, and the instance
 //! methods over the four typed properties.
 #![forbid(unsafe_code)]
@@ -34,30 +34,23 @@ mod tokens;
 
 use std::collections::HashMap;
 
-use php_ext::abi::{Extension, ExtensionBuilder};
+use php_ext::abi::{Extension, ExtensionBuilder, This, Untyped};
+use php_ext::attr::{php_class, php_function};
 use php_ext::call::new_object;
-use php_ext::coerce::coerce_param;
-use php_ext::decl::{
-    ClassDecl, ClassFlags, ClassKind, ConstDecl, ConstExpr, EnumBacking, FunctionDecl, MethodDecl,
-    Name, Parameter, ParameterDefault, PropertyDecl, Type, Visibility,
-};
-use php_ext::raising::{
-    Level, Thrown, arg_count_error, arg_type_error, raise, raise_at, throw, throw_at,
-};
+use php_ext::raising::{Level, Thrown, arg_type_error, raise, raise_at, throw, throw_at};
 use php_ext::request::Request;
 use php_ext::syntax::{self, FileId, LexOptions};
 use php_ext::values::{PhpArray, PhpObject, PhpString, Value, ValueRef};
 
-/// The one bit of `$flags` that `token_get_all` reads.
-const TOKEN_PARSE: i64 = 1;
+use names::constants::{self, TOKEN_PARSE};
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
 /// private to this crate (ADR-0005); nothing in it is shared or synchronised.
 #[derive(Default)]
 struct State {}
 
-/// The extension value (design §7.1): declarations paired with entries,
-/// the `T_*` constants and `TOKEN_PARSE`, and the state declared on it.
+/// The extension value (design §7.1): the two natives, `PhpToken`, the
+/// `T_*` constants and `TOKEN_PARSE`, and the state declared on it.
 ///
 /// ```php
 /// var_dump(extension_loaded('tokenizer'), TOKEN_PARSE, T_LNUMBER, T_DOUBLE_COLON, T_PAAMAYIM_NEKUDOTAYIM, T_BAD_CHARACTER);
@@ -71,43 +64,10 @@ struct State {}
 /// int(411)
 /// ```
 pub fn extension() -> Extension {
-    // `tokenizer_data.stub.php`'s order, which `php --re tokenizer`
-    // prints: the `T_*` by number with `T_PAAMAYIM_NEKUDOTAYIM` at 402's
-    // place and `T_DOUBLE_COLON` last, then `TOKEN_PARSE` from
-    // `tokenizer.stub.php`, registered after them.
-    let mut constants = Vec::new();
-    for (name, id) in names::TOKENS {
-        constants.push(constant(name.as_bytes(), id));
-        if name == "T_CURLY_OPEN"
-            && let Some(id) = names::id_of("T_DOUBLE_COLON")
-        {
-            constants.push(constant(b"T_PAAMAYIM_NEKUDOTAYIM", id));
-        }
-    }
-    constants.push(constant(b"TOKEN_PARSE", TOKEN_PARSE));
     ExtensionBuilder::default()
-        .functions(vec![
-            (
-                declared(
-                    b"token_get_all",
-                    &[
-                        parameter(b"code", Type::String),
-                        Parameter {
-                            default: ParameterDefault::Expr(ConstExpr::long(0)),
-                            ..parameter(b"flags", Type::Int)
-                        },
-                    ],
-                    Type::Array,
-                ),
-                token_get_all,
-            ),
-            (
-                declared(b"token_name", &[parameter(b"id", Type::Int)], Type::String),
-                token_name,
-            ),
-        ])
-        .classes(vec![php_token_class()])
-        .constants(constants)
+        .functions(vec![token_get_all::declared(), token_name::declared()])
+        .class::<PhpToken>()
+        .constants(constants::declared())
         .request_state::<State>()
         .info(tokenizer_info)
         .build("tokenizer")
@@ -129,300 +89,430 @@ fn tokenizer_info(req: &mut Request) {
     req.info_table(&[&["Tokenizer Support", "enabled"]]);
 }
 
+/// Core's `Stringable`, named for `implements`.
+#[php_class(extern)]
+pub(crate) struct Stringable;
+
 /// `PhpToken` as `register_class_PhpToken` declares it from
 /// `tokenizer.stub.php`: a class implementing `Stringable`, the four
 /// public typed properties `id`, `text`, `line` and `pos` with no
 /// default, in that order, since the methods read them by slot as
-/// `OBJ_PROP_NUM` reads them, and the six methods, each declaration
-/// beside its entry. `tokenize` is the one called on the class;
-/// `__construct` is final.
-fn php_token_class() -> (ClassDecl, Vec<(MethodDecl, Entry)>) {
-    let property = |name: &[u8], ty: Type| PropertyDecl {
-        name: Name(name.into()),
-        visibility: Visibility::Public,
-        set_visibility: None,
-        is_instance: true,
-        is_readonly: false,
-        is_final: false,
-        is_promoted: false,
-        is_virtual: false,
-        ty: Some(ty),
-        default: None,
-        attributes: Vec::new(),
-        doc_comment: None,
-        hooks: None,
-    };
-    let decl = ClassDecl {
-        name: Name(b"PhpToken".as_slice().into()),
-        kind: ClassKind::Class,
-        flags: ClassFlags::default(),
-        parent: None,
-        interfaces: vec![Name(b"Stringable".as_slice().into())],
-        traits: Vec::new(),
-        adaptations: Vec::new(),
-        backing: EnumBacking::Pure,
-        constants: Vec::new(),
-        properties: vec![
-            property(b"id", Type::Int),
-            property(b"text", Type::String),
-            property(b"line", Type::Int),
-            property(b"pos", Type::Int),
-        ],
-        methods: Vec::new(),
-        attributes: Vec::new(),
-        doc_comment: None,
-        file: Name(Box::new([])),
-        line: 0,
-        end_line: 0,
-    };
-    (decl, php_token_methods())
-}
+/// `OBJ_PROP_NUM` reads them, and the six methods. `tokenize` is the one
+/// called on the class; `__construct` is final.
+#[php_class(implements(Stringable))]
+pub(crate) struct PhpToken;
 
-/// The six methods of `PhpToken`, each declaration beside its entry.
-fn php_token_methods() -> Vec<(MethodDecl, Entry)> {
-    let minus_one = |name: &[u8]| Parameter {
-        default: ParameterDefault::Expr(ConstExpr::long(-1)),
-        ..parameter(name, Type::Int)
-    };
-    vec![
-        (
-            method(
-                declared(
-                    b"tokenize",
-                    &[
-                        parameter(b"code", Type::String),
-                        Parameter {
-                            default: ParameterDefault::Expr(ConstExpr::long(0)),
-                            ..parameter(b"flags", Type::Int)
-                        },
-                    ],
-                    Type::Array,
-                ),
-                false,
-                false,
-            ),
-            token_tokenize as Entry,
-        ),
-        (
-            method(
-                FunctionDecl {
-                    return_type: None,
-                    ..declared(
-                        b"__construct",
-                        &[
-                            parameter(b"id", Type::Int),
-                            parameter(b"text", Type::String),
-                            minus_one(b"line"),
-                            minus_one(b"pos"),
-                        ],
-                        Type::Void,
-                    )
-                },
-                true,
-                true,
-            ),
-            token_construct as Entry,
-        ),
-        (
-            method(
-                declared(
-                    b"is",
-                    &[Parameter {
-                        ty: None,
-                        ..parameter(b"kind", Type::Int)
-                    }],
-                    Type::Bool,
-                ),
-                true,
-                false,
-            ),
-            token_is as Entry,
-        ),
-        (
-            method(declared(b"isIgnorable", &[], Type::Bool), true, false),
-            token_is_ignorable as Entry,
-        ),
-        (
-            method(
-                declared(b"getTokenName", &[], Type::Nullable(Box::new(Type::String))),
-                true,
-                false,
-            ),
-            token_get_token_name as Entry,
-        ),
-        (
-            method(declared(b"__toString", &[], Type::String), true, false),
-            token_to_string as Entry,
-        ),
-    ]
-}
+#[php_class]
+impl PhpToken {
+    #[php(property)]
+    const id: i64;
+    #[php(property)]
+    const text: PhpString;
+    #[php(property)]
+    const line: i64;
+    #[php(property)]
+    const pos: i64;
 
-/// The entry an extension pairs with a declaration, as `functions`
-/// takes it.
-type Entry = fn(&mut Request) -> Result<Value, Thrown>;
-
-/// One public method's declaration over a function's.
-fn method(function: FunctionDecl, is_instance: bool, is_final: bool) -> MethodDecl {
-    MethodDecl {
-        function,
-        visibility: Visibility::Public,
-        is_instance,
-        is_abstract: false,
-        is_final,
-        tentative_return: false,
-    }
-}
-
-/// `PhpToken::tokenize(string $code, int $flags = 0): array`, php's
-/// `PHP_METHOD(PhpToken, tokenize)` (`Z/ext/tokenizer/tokenizer.c:90`):
-/// `tokenize_common` with the called class as `token_class`, so
-/// `add_token` lays each token down as an object of it, `id`, `text`,
-/// `line` and `pos` written by slot, `pos` the byte the token starts at
-/// (`text - LANG_SCNG(yy_start)`); a single character is its own byte
-/// as `id`. The two paths are [`token_get_all`]'s.
-///
-/// ```php
-/// var_dump(PhpToken::tokenize('<?php echo 1;'));
-/// ```
-/// ```expect
-/// array(5) {
-///   [0]=>
-///   object(PhpToken)#1 (4) {
-///     ["id"]=>
-///     int(394)
-///     ["text"]=>
-///     string(6) "<?php "
-///     ["line"]=>
-///     int(1)
-///     ["pos"]=>
-///     int(0)
-///   }
-///   [1]=>
-///   object(PhpToken)#2 (4) {
-///     ["id"]=>
-///     int(291)
-///     ["text"]=>
-///     string(4) "echo"
-///     ["line"]=>
-///     int(1)
-///     ["pos"]=>
-///     int(6)
-///   }
-///   [2]=>
-///   object(PhpToken)#3 (4) {
-///     ["id"]=>
-///     int(397)
-///     ["text"]=>
-///     string(1) " "
-///     ["line"]=>
-///     int(1)
-///     ["pos"]=>
-///     int(10)
-///   }
-///   [3]=>
-///   object(PhpToken)#4 (4) {
-///     ["id"]=>
-///     int(260)
-///     ["text"]=>
-///     string(1) "1"
-///     ["line"]=>
-///     int(1)
-///     ["pos"]=>
-///     int(11)
-///   }
-///   [4]=>
-///   object(PhpToken)#5 (4) {
-///     ["id"]=>
-///     int(59)
-///     ["text"]=>
-///     string(1) ";"
-///     ["line"]=>
-///     int(1)
-///     ["pos"]=>
-///     int(12)
-///   }
-/// }
-/// ```
-///
-/// The objects of one call given up are the store's free list, taken
-/// last freed first (`zend_objects_store_put`), so the next call's
-/// first token is the id the last of them had; and `TOKEN_PARSE` runs
-/// the parser, as it does under `token_get_all`.
-///
-/// ```php
-/// var_dump(count(PhpToken::tokenize("<?php \$x->class;", TOKEN_PARSE)), PhpToken::tokenize("<?php ", 0));
-/// ```
-/// ```expect
-/// int(5)
-/// array(1) {
-///   [0]=>
-///   object(PhpToken)#5 (4) {
-///     ["id"]=>
-///     int(394)
-///     ["text"]=>
-///     string(6) "<?php "
-///     ["line"]=>
-///     int(1)
-///     ["pos"]=>
-///     int(0)
-///   }
-/// }
-/// ```
-///
-/// The texts are `make_str`'s here as under `token_get_all` ([`Texts`]):
-/// the second `echo` and the second `1;` are one more owner each of the
-/// first's string, and no string of their own.
-///
-/// ```php
-/// $b = memory_get_usage();
-/// $t = PhpToken::tokenize('<?php echo 1; echo 2;'); $held = memory_get_usage() - $b;
-/// $t = 1; var_dump($held, memory_get_usage() - $b);
-/// ```
-/// ```expect
-/// int(1560)
-/// int(0)
-/// ```
-fn token_tokenize(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if !(1..=2).contains(&count) {
-        return Err(wrong_argument_count(req, 1, 2, count));
-    }
-    let code = string_argument(req, 1)?;
-    let flags = if count == 2 {
-        long_argument(req, 2)?
-    } else {
-        0
-    };
-    let Some(token_class) = req.called_scope() else {
-        return Err(throw(
-            req,
-            "Error",
-            "PhpToken::tokenize() called with no class",
-        ));
-    };
-    let short_open_tag = req
-        .ini_get(b"short_open_tag")
-        .is_none_or(Request::ini_parse_bool);
-    let tokens = if flags & TOKEN_PARSE == 0 {
-        tokenize(req, code.as_bytes(), short_open_tag)
-    } else {
-        tokenize_parse(req, code.as_bytes(), short_open_tag)?
-    };
-    let mut texts = Texts::for_flags(flags);
-    let mut rows = PhpArray::new(req)?;
-    for token in tokens {
-        let text = code.as_bytes().get(token.start..token.end).unwrap_or(&[]);
-        let id = match token.name.and_then(names::id_of) {
-            Some(id) => id,
-            None => i64::from(text.first().copied().unwrap_or(0)),
+    /// `PhpToken::tokenize(string $code, int $flags = 0): array`, php's
+    /// `PHP_METHOD(PhpToken, tokenize)` (`Z/ext/tokenizer/tokenizer.c:90`):
+    /// `tokenize_common` with the called class as `token_class`, so
+    /// `add_token` lays each token down as an object of it, `id`, `text`,
+    /// `line` and `pos` written by slot, `pos` the byte the token starts at
+    /// (`text - LANG_SCNG(yy_start)`); a single character is its own byte
+    /// as `id`. The two paths are [`token_get_all`]'s.
+    ///
+    /// ```php
+    /// var_dump(PhpToken::tokenize('<?php echo 1;'));
+    /// ```
+    /// ```expect
+    /// array(5) {
+    ///   [0]=>
+    ///   object(PhpToken)#1 (4) {
+    ///     ["id"]=>
+    ///     int(394)
+    ///     ["text"]=>
+    ///     string(6) "<?php "
+    ///     ["line"]=>
+    ///     int(1)
+    ///     ["pos"]=>
+    ///     int(0)
+    ///   }
+    ///   [1]=>
+    ///   object(PhpToken)#2 (4) {
+    ///     ["id"]=>
+    ///     int(291)
+    ///     ["text"]=>
+    ///     string(4) "echo"
+    ///     ["line"]=>
+    ///     int(1)
+    ///     ["pos"]=>
+    ///     int(6)
+    ///   }
+    ///   [2]=>
+    ///   object(PhpToken)#3 (4) {
+    ///     ["id"]=>
+    ///     int(397)
+    ///     ["text"]=>
+    ///     string(1) " "
+    ///     ["line"]=>
+    ///     int(1)
+    ///     ["pos"]=>
+    ///     int(10)
+    ///   }
+    ///   [3]=>
+    ///   object(PhpToken)#4 (4) {
+    ///     ["id"]=>
+    ///     int(260)
+    ///     ["text"]=>
+    ///     string(1) "1"
+    ///     ["line"]=>
+    ///     int(1)
+    ///     ["pos"]=>
+    ///     int(11)
+    ///   }
+    ///   [4]=>
+    ///   object(PhpToken)#5 (4) {
+    ///     ["id"]=>
+    ///     int(59)
+    ///     ["text"]=>
+    ///     string(1) ";"
+    ///     ["line"]=>
+    ///     int(1)
+    ///     ["pos"]=>
+    ///     int(12)
+    ///   }
+    /// }
+    /// ```
+    ///
+    /// The objects of one call given up are the store's free list, taken
+    /// last freed first (`zend_objects_store_put`), so the next call's
+    /// first token is the id the last of them had; and `TOKEN_PARSE` runs
+    /// the parser, as it does under `token_get_all`.
+    ///
+    /// ```php
+    /// var_dump(count(PhpToken::tokenize("<?php \$x->class;", TOKEN_PARSE)), PhpToken::tokenize("<?php ", 0));
+    /// ```
+    /// ```expect
+    /// int(5)
+    /// array(1) {
+    ///   [0]=>
+    ///   object(PhpToken)#5 (4) {
+    ///     ["id"]=>
+    ///     int(394)
+    ///     ["text"]=>
+    ///     string(6) "<?php "
+    ///     ["line"]=>
+    ///     int(1)
+    ///     ["pos"]=>
+    ///     int(0)
+    ///   }
+    /// }
+    /// ```
+    ///
+    /// The texts are `make_str`'s here as under `token_get_all` ([`Texts`]):
+    /// the second `echo` and the second `1;` are one more owner each of the
+    /// first's string, and no string of their own.
+    ///
+    /// ```php
+    /// $b = memory_get_usage();
+    /// $t = PhpToken::tokenize('<?php echo 1; echo 2;'); $held = memory_get_usage() - $b;
+    /// $t = 1; var_dump($held, memory_get_usage() - $b);
+    /// ```
+    /// ```expect
+    /// int(1560)
+    /// int(0)
+    /// ```
+    fn tokenize(
+        req: &mut Request,
+        code: PhpString,
+        #[php(default = 0)] flags: i64,
+    ) -> Result<PhpArray, Thrown> {
+        let Some(token_class) = req.called_scope() else {
+            return Err(throw(
+                req,
+                "Error",
+                "PhpToken::tokenize() called with no class",
+            ));
         };
-        let object = new_object(req, token_class)?;
-        let text = texts.make_str(req, text)?;
-        let pos = i64::try_from(token.start).unwrap_or(i64::MAX);
-        fill_token(req, object, id, text, i64::from(token.line), pos)?;
-        rows.append(req, Value::object(object))?;
+        let short_open_tag = req
+            .ini_get(b"short_open_tag")
+            .is_none_or(Request::ini_parse_bool);
+        let tokens = if flags & TOKEN_PARSE == 0 {
+            tokenize(req, code.as_bytes(), short_open_tag)
+        } else {
+            tokenize_parse(req, code.as_bytes(), short_open_tag)?
+        };
+        let mut texts = Texts::for_flags(flags);
+        let mut rows = PhpArray::new(req)?;
+        for token in tokens {
+            let text = code.as_bytes().get(token.start..token.end).unwrap_or(&[]);
+            let id = match token.name.and_then(names::id_of) {
+                Some(id) => id,
+                None => i64::from(text.first().copied().unwrap_or(0)),
+            };
+            let object = new_object(req, token_class)?;
+            let text = texts.make_str(req, text)?;
+            let pos = i64::try_from(token.start).unwrap_or(i64::MAX);
+            fill_token(req, object, id, text, i64::from(token.line), pos)?;
+            rows.append(req, Value::object(object))?;
+        }
+        Ok(rows)
     }
-    Ok(Value::array(rows))
+
+    /// `PhpToken::__construct(int $id, string $text, int $line = -1, int $pos = -1)`,
+    /// php's `PHP_METHOD(PhpToken, __construct)` (`Z/ext/tokenizer/tokenizer.c:118`):
+    /// the four properties written by slot, the two without an argument
+    /// `-1`.
+    ///
+    /// ```php
+    /// var_dump(new PhpToken(T_ECHO, "echo"), new PhpToken(59, ";", 3, 7));
+    /// ```
+    /// ```expect
+    /// object(PhpToken)#1 (4) {
+    ///   ["id"]=>
+    ///   int(291)
+    ///   ["text"]=>
+    ///   string(4) "echo"
+    ///   ["line"]=>
+    ///   int(-1)
+    ///   ["pos"]=>
+    ///   int(-1)
+    /// }
+    /// object(PhpToken)#2 (4) {
+    ///   ["id"]=>
+    ///   int(59)
+    ///   ["text"]=>
+    ///   string(1) ";"
+    ///   ["line"]=>
+    ///   int(3)
+    ///   ["pos"]=>
+    ///   int(7)
+    /// }
+    /// ```
+    ///
+    /// `ZEND_PARSE_PARAMETERS_START(2, 4)`: a call outside that arity is
+    /// php's `ArgumentCountError` under the method's qualified name, and
+    /// the trace names the constructor on its receiver.
+    ///
+    /// ```php
+    /// new PhpToken("a");
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught ArgumentCountError: PhpToken::__construct() expects at least 2 arguments, 1 given in %s:2
+    /// Stack trace:
+    /// #0 %s(2): PhpToken->__construct('a')
+    /// #1 {main}
+    ///   thrown in %s on line 2
+    /// ```
+    #[php(final)]
+    fn __construct(
+        req: &mut Request,
+        this: This<Self>,
+        id: i64,
+        text: PhpString,
+        #[php(default = -1)] line: i64,
+        #[php(default = -1)] pos: i64,
+    ) -> Result<(), Thrown> {
+        let text = Value::string(text);
+        // `ZVAL_STR_COPY`: the argument keeps its owner and the property
+        // takes one of its own, once every argument has been read.
+        req.addref(&text);
+        fill_token(req, this.object(), id, text, line, pos)
+    }
+
+    /// `PhpToken::is(int|string|array $kind): bool`, php's
+    /// `PHP_METHOD(PhpToken, is)` (`Z/ext/tokenizer/tokenizer.c:141`): an
+    /// `int` against `id`, a string against `text`, an array against each
+    /// of its elements in turn, `true` at the first that matches, and
+    /// php's `TypeError` for anything else, or for an element that is
+    /// neither.
+    ///
+    /// ```php
+    /// $t = new PhpToken(T_ECHO, "echo"); var_dump($t->is(T_ECHO), $t->is("echo"), $t->is(1), $t->is("x"));
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// bool(false)
+    /// ```
+    ///
+    /// ```php
+    /// $t = new PhpToken(1, "x");
+    /// $t->is(1.5);
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught TypeError: PhpToken::is(): Argument #1 ($kind) must be of type string|int|array, float given in %s:3
+    /// Stack trace:
+    /// #0 %s(3): PhpToken->is(1.5)
+    /// #1 {main}
+    ///   thrown in %s on line 3
+    /// ```
+    fn is(req: &mut Request, this: This<Self>, kind: Untyped<Value>) -> Result<bool, Thrown> {
+        let this = this.object();
+        let Untyped(kind) = kind;
+        let answer = match kind.as_ref() {
+            ValueRef::Int(n) => token_id(req, this)? == n,
+            ValueRef::Str(s) => token_text(req, this)?.as_bytes() == s.as_bytes(),
+            ValueRef::Array(kinds) => {
+                let mut id = None;
+                let mut text = None;
+                let mut found = false;
+                for (_, entry) in kinds.snapshot() {
+                    let entry = entry.deref();
+                    match entry.as_ref() {
+                        ValueRef::Int(n) => {
+                            let id = match id {
+                                Some(id) => id,
+                                None => *id.insert(token_id(req, this)?),
+                            };
+                            if id == n {
+                                found = true;
+                                break;
+                            }
+                        }
+                        ValueRef::Str(s) => {
+                            let text = match text {
+                                Some(text) => text,
+                                None => *text.insert(token_text(req, this)?),
+                            };
+                            if text.as_bytes() == s.as_bytes() {
+                                found = true;
+                                break;
+                            }
+                        }
+                        _ => {
+                            return Err(arg_type_error(
+                                req,
+                                1,
+                                &format!(
+                                    "only have elements of type string|int, {} given",
+                                    value_name(req, &entry)
+                                ),
+                            ));
+                        }
+                    }
+                }
+                found
+            }
+            _ => {
+                return Err(arg_type_error(
+                    req,
+                    1,
+                    &format!(
+                        "be of type string|int|array, {} given",
+                        value_name(req, &kind)
+                    ),
+                ));
+            }
+        };
+        Ok(answer)
+    }
+
+    /// `PhpToken::isIgnorable(): bool`, php's `PHP_METHOD(PhpToken, isIgnorable)`
+    /// (`Z/ext/tokenizer/tokenizer.c:200`): whether `id` is `T_WHITESPACE`,
+    /// `T_COMMENT`, `T_DOC_COMMENT` or `T_OPEN_TAG`.
+    ///
+    /// ```php
+    /// var_dump((new PhpToken(T_WHITESPACE, " "))->isIgnorable(), (new PhpToken(T_DOC_COMMENT, "/** */"))->isIgnorable(), (new PhpToken(T_ECHO, "echo"))->isIgnorable());
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// ```
+    fn isIgnorable(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let id = token_id(req, this.object())?;
+        let ignorable = ["T_WHITESPACE", "T_COMMENT", "T_DOC_COMMENT", "T_OPEN_TAG"]
+            .iter()
+            .filter_map(|name| names::id_of(name))
+            .any(|ignorable| ignorable == id);
+        Ok(ignorable)
+    }
+
+    /// `PhpToken::getTokenName(): ?string`, php's
+    /// `PHP_METHOD(PhpToken, getTokenName)` (`Z/ext/tokenizer/tokenizer.c:213`):
+    /// an `id` below 256 is the one-byte string of that byte (`RETURN_CHAR`),
+    /// a token's number its `T_*` name, and a number no token has `null`.
+    ///
+    /// ```php
+    /// $t = new PhpToken(T_ECHO, "echo"); $u = new PhpToken(59, ";", 3, 7);
+    /// var_dump($t->getTokenName(), $u->getTokenName(), (new PhpToken(9999, "x"))->getTokenName());
+    /// ```
+    /// ```expect
+    /// string(6) "T_ECHO"
+    /// string(1) ";"
+    /// NULL
+    /// ```
+    ///
+    /// `ZEND_PARSE_PARAMETERS_NONE()`: an argument is php's
+    /// `ArgumentCountError`, and the trace names the method on its receiver.
+    ///
+    /// ```php
+    /// $t = new PhpToken(T_ECHO, "echo");
+    /// $t->getTokenName(1);
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught ArgumentCountError: PhpToken::getTokenName() expects exactly 0 arguments, 1 given in %s:3
+    /// Stack trace:
+    /// #0 %s(3): PhpToken->getTokenName(1)
+    /// #1 {main}
+    ///   thrown in %s on line 3
+    /// ```
+    ///
+    /// An instance method called on the class is `zend_non_static_method_call`.
+    ///
+    /// ```php
+    /// PhpToken::getTokenName();
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught Error: Non-static method PhpToken::getTokenName() cannot be called statically in %s:2
+    /// Stack trace:
+    /// #0 {main}
+    ///   thrown in %s on line 2
+    /// ```
+    fn getTokenName(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
+        let id = token_id(req, this.object())?;
+        if id < 256 {
+            let byte = u8::try_from(id.rem_euclid(256)).unwrap_or(0);
+            return Ok(Some(PhpString::new(req, &[byte])?));
+        }
+        match names::name_of(id) {
+            Some(name) => Ok(Some(PhpString::new(req, name.as_bytes())?)),
+            None => Ok(None),
+        }
+    }
+
+    /// `PhpToken::__toString(): string`, php's `PHP_METHOD(PhpToken, __toString)`
+    /// (`Z/ext/tokenizer/tokenizer.c:234`): `text`, with an owner of its own,
+    /// `RETURN_STR_COPY`, since the property keeps the one it has.
+    ///
+    /// ```php
+    /// var_dump((new PhpToken(T_ECHO, "echo"))->__toString());
+    /// ```
+    /// ```expect
+    /// string(4) "echo"
+    /// ```
+    ///
+    /// So the text outlives every call that returned it: two calls give
+    /// two owners up, and the property's string is still the token's.
+    ///
+    /// ```php
+    /// $t = new PhpToken(T_ECHO, str_repeat("echo", 8));
+    /// var_dump($t->__toString(), $t->__toString());
+    /// $pad = str_repeat("-", 32);
+    /// var_dump($t->text);
+    /// ```
+    /// ```expect
+    /// string(32) "echoechoechoechoechoechoechoecho"
+    /// string(32) "echoechoechoechoechoechoechoecho"
+    /// string(32) "echoechoechoechoechoechoechoecho"
+    /// ```
+    fn __toString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let text = token_text(req, this.object())?;
+        req.addref(&Value::string(text));
+        Ok(text)
+    }
 }
 
 /// `ZVAL_LONG(OBJ_PROP_NUM(obj, 0), ...)` and the three after it: the
@@ -452,295 +542,6 @@ fn fill_token(
     object.set_slot(req, 1, text)?;
     object.set_slot(req, 2, Value::int(line))?;
     object.set_slot(req, 3, Value::int(pos))
-}
-
-/// `PhpToken::__construct(int $id, string $text, int $line = -1, int $pos = -1)`,
-/// php's `PHP_METHOD(PhpToken, __construct)` (`Z/ext/tokenizer/tokenizer.c:118`):
-/// the four properties written by slot, the two without an argument
-/// `-1`.
-///
-/// ```php
-/// var_dump(new PhpToken(T_ECHO, "echo"), new PhpToken(59, ";", 3, 7));
-/// ```
-/// ```expect
-/// object(PhpToken)#1 (4) {
-///   ["id"]=>
-///   int(291)
-///   ["text"]=>
-///   string(4) "echo"
-///   ["line"]=>
-///   int(-1)
-///   ["pos"]=>
-///   int(-1)
-/// }
-/// object(PhpToken)#2 (4) {
-///   ["id"]=>
-///   int(59)
-///   ["text"]=>
-///   string(1) ";"
-///   ["line"]=>
-///   int(3)
-///   ["pos"]=>
-///   int(7)
-/// }
-/// ```
-///
-/// `ZEND_PARSE_PARAMETERS_START(2, 4)`: a call outside that arity is
-/// php's `ArgumentCountError` under the method's qualified name, and
-/// the trace names the constructor on its receiver.
-///
-/// ```php
-/// new PhpToken("a");
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ArgumentCountError: PhpToken::__construct() expects at least 2 arguments, 1 given in %s:2
-/// Stack trace:
-/// #0 %s(2): PhpToken->__construct('a')
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-fn token_construct(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if !(2..=4).contains(&count) {
-        return Err(wrong_argument_count(req, 2, 4, count));
-    }
-    let this = receiver(req)?;
-    let id = long_argument(req, 1)?;
-    let text = Value::string(string_argument(req, 2)?);
-    let line = if count >= 3 {
-        long_argument(req, 3)?
-    } else {
-        -1
-    };
-    let pos = if count == 4 {
-        long_argument(req, 4)?
-    } else {
-        -1
-    };
-    // `ZVAL_STR_COPY`: the argument keeps its owner and the property
-    // takes one of its own, once every argument has been read.
-    req.addref(&text);
-    fill_token(req, this, id, text, line, pos)?;
-    Ok(Value::null())
-}
-
-/// `PhpToken::is(int|string|array $kind): bool`, php's
-/// `PHP_METHOD(PhpToken, is)` (`Z/ext/tokenizer/tokenizer.c:141`): an
-/// `int` against `id`, a string against `text`, an array against each
-/// of its elements in turn, `true` at the first that matches, and
-/// php's `TypeError` for anything else, or for an element that is
-/// neither.
-///
-/// ```php
-/// $t = new PhpToken(T_ECHO, "echo"); var_dump($t->is(T_ECHO), $t->is("echo"), $t->is(1), $t->is("x"));
-/// ```
-/// ```expect
-/// bool(true)
-/// bool(true)
-/// bool(false)
-/// bool(false)
-/// ```
-///
-/// ```php
-/// $t = new PhpToken(1, "x");
-/// $t->is(1.5);
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught TypeError: PhpToken::is(): Argument #1 ($kind) must be of type string|int|array, float given in %s:3
-/// Stack trace:
-/// #0 %s(3): PhpToken->is(1.5)
-/// #1 {main}
-///   thrown in %s on line 3
-/// ```
-fn token_is(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count != 1 {
-        return Err(wrong_argument_count(req, 1, 1, count));
-    }
-    let this = receiver(req)?;
-    let kind = req.argument(1).unwrap_or_default().deref();
-    let answer = match kind.as_ref() {
-        ValueRef::Int(n) => token_id(req, this)? == n,
-        ValueRef::Str(s) => token_text(req, this)?.as_bytes() == s.as_bytes(),
-        ValueRef::Array(kinds) => {
-            let mut id = None;
-            let mut text = None;
-            let mut found = false;
-            for (_, entry) in kinds.snapshot() {
-                let entry = entry.deref();
-                match entry.as_ref() {
-                    ValueRef::Int(n) => {
-                        let id = match id {
-                            Some(id) => id,
-                            None => *id.insert(token_id(req, this)?),
-                        };
-                        if id == n {
-                            found = true;
-                            break;
-                        }
-                    }
-                    ValueRef::Str(s) => {
-                        let text = match text {
-                            Some(text) => text,
-                            None => *text.insert(token_text(req, this)?),
-                        };
-                        if text.as_bytes() == s.as_bytes() {
-                            found = true;
-                            break;
-                        }
-                    }
-                    _ => {
-                        return Err(arg_type_error(
-                            req,
-                            1,
-                            &format!(
-                                "only have elements of type string|int, {} given",
-                                value_name(req, &entry)
-                            ),
-                        ));
-                    }
-                }
-            }
-            found
-        }
-        _ => {
-            return Err(arg_type_error(
-                req,
-                1,
-                &format!(
-                    "be of type string|int|array, {} given",
-                    value_name(req, &kind)
-                ),
-            ));
-        }
-    };
-    Ok(Value::bool(answer))
-}
-
-/// `PhpToken::isIgnorable(): bool`, php's `PHP_METHOD(PhpToken, isIgnorable)`
-/// (`Z/ext/tokenizer/tokenizer.c:200`): whether `id` is `T_WHITESPACE`,
-/// `T_COMMENT`, `T_DOC_COMMENT` or `T_OPEN_TAG`.
-///
-/// ```php
-/// var_dump((new PhpToken(T_WHITESPACE, " "))->isIgnorable(), (new PhpToken(T_DOC_COMMENT, "/** */"))->isIgnorable(), (new PhpToken(T_ECHO, "echo"))->isIgnorable());
-/// ```
-/// ```expect
-/// bool(true)
-/// bool(true)
-/// bool(false)
-/// ```
-fn token_is_ignorable(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count != 0 {
-        return Err(wrong_argument_count(req, 0, 0, count));
-    }
-    let this = receiver(req)?;
-    let id = token_id(req, this)?;
-    let ignorable = ["T_WHITESPACE", "T_COMMENT", "T_DOC_COMMENT", "T_OPEN_TAG"]
-        .iter()
-        .filter_map(|name| names::id_of(name))
-        .any(|ignorable| ignorable == id);
-    Ok(Value::bool(ignorable))
-}
-
-/// `PhpToken::getTokenName(): ?string`, php's
-/// `PHP_METHOD(PhpToken, getTokenName)` (`Z/ext/tokenizer/tokenizer.c:213`):
-/// an `id` below 256 is the one-byte string of that byte (`RETURN_CHAR`),
-/// a token's number its `T_*` name, and a number no token has `null`.
-///
-/// ```php
-/// $t = new PhpToken(T_ECHO, "echo"); $u = new PhpToken(59, ";", 3, 7);
-/// var_dump($t->getTokenName(), $u->getTokenName(), (new PhpToken(9999, "x"))->getTokenName());
-/// ```
-/// ```expect
-/// string(6) "T_ECHO"
-/// string(1) ";"
-/// NULL
-/// ```
-///
-/// `ZEND_PARSE_PARAMETERS_NONE()`: an argument is php's
-/// `ArgumentCountError`, and the trace names the method on its receiver.
-///
-/// ```php
-/// $t = new PhpToken(T_ECHO, "echo");
-/// $t->getTokenName(1);
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught ArgumentCountError: PhpToken::getTokenName() expects exactly 0 arguments, 1 given in %s:3
-/// Stack trace:
-/// #0 %s(3): PhpToken->getTokenName(1)
-/// #1 {main}
-///   thrown in %s on line 3
-/// ```
-///
-/// An instance method called on the class is `zend_non_static_method_call`.
-///
-/// ```php
-/// PhpToken::getTokenName();
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught Error: Non-static method PhpToken::getTokenName() cannot be called statically in %s:2
-/// Stack trace:
-/// #0 {main}
-///   thrown in %s on line 2
-/// ```
-fn token_get_token_name(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count != 0 {
-        return Err(wrong_argument_count(req, 0, 0, count));
-    }
-    let this = receiver(req)?;
-    let id = token_id(req, this)?;
-    if id < 256 {
-        let byte = u8::try_from(id.rem_euclid(256)).unwrap_or(0);
-        return Ok(Value::string(PhpString::new(req, &[byte])?));
-    }
-    match names::name_of(id) {
-        Some(name) => Ok(Value::string(PhpString::new(req, name.as_bytes())?)),
-        None => Ok(Value::null()),
-    }
-}
-
-/// `PhpToken::__toString(): string`, php's `PHP_METHOD(PhpToken, __toString)`
-/// (`Z/ext/tokenizer/tokenizer.c:234`): `text`, with an owner of its own,
-/// `RETURN_STR_COPY`, since the property keeps the one it has.
-///
-/// ```php
-/// var_dump((new PhpToken(T_ECHO, "echo"))->__toString());
-/// ```
-/// ```expect
-/// string(4) "echo"
-/// ```
-///
-/// So the text outlives every call that returned it: two calls give
-/// two owners up, and the property's string is still the token's.
-///
-/// ```php
-/// $t = new PhpToken(T_ECHO, str_repeat("echo", 8));
-/// var_dump($t->__toString(), $t->__toString());
-/// $pad = str_repeat("-", 32);
-/// var_dump($t->text);
-/// ```
-/// ```expect
-/// string(32) "echoechoechoechoechoechoechoecho"
-/// string(32) "echoechoechoechoechoechoechoecho"
-/// string(32) "echoechoechoechoechoechoechoecho"
-/// ```
-fn token_to_string(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count != 0 {
-        return Err(wrong_argument_count(req, 0, 0, count));
-    }
-    let this = receiver(req)?;
-    let text = Value::string(token_text(req, this)?);
-    req.addref(&text);
-    Ok(text)
-}
-
-/// `ZEND_THIS` of a method being served.
-fn receiver(req: &mut Request) -> Result<PhpObject, Thrown> {
-    req.this()
-        .ok_or_else(|| throw(req, "Error", "PhpToken method called with no receiver"))
 }
 
 /// `php_token_get_id`: `id` off the receiver, and php's `Error` for a
@@ -1158,17 +959,35 @@ fn value_name(req: &Request, value: &Value) -> String {
 ///   }
 /// }
 /// ```
-fn token_get_all(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if !(1..=2).contains(&count) {
-        return Err(wrong_argument_count(req, 1, 2, count));
-    }
-    let code = string_argument(req, 1)?;
-    let flags = if count == 2 {
-        long_argument(req, 2)?
-    } else {
-        0
-    };
+///
+/// `$code` is a `string` parameter: `null` is the 8.1 deprecation and
+/// then the empty string under the weak rule, and the `TypeError` under
+/// `strict_types`, as `$flags`' is under `int`.
+///
+/// ```php
+/// var_dump(token_get_all(null));
+/// ```
+/// ```expect
+/// Deprecated: token_get_all(): Passing null to parameter #1 ($code) of type string is deprecated in %s on line 2
+/// array(0) {
+/// }
+/// ```
+///
+/// ```php
+/// declare(strict_types=1);
+/// try { token_get_all(null); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { token_get_all('<?php 1;', null); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// token_get_all(): Argument #1 ($code) must be of type string, null given
+/// token_get_all(): Argument #2 ($flags) must be of type int, null given
+/// ```
+#[php_function]
+fn token_get_all(
+    req: &mut Request,
+    code: PhpString,
+    #[php(default = 0)] flags: i64,
+) -> Result<PhpArray, Thrown> {
     let short_open_tag = req
         .ini_get(b"short_open_tag")
         .is_none_or(Request::ini_parse_bool);
@@ -1193,7 +1012,7 @@ fn token_get_all(req: &mut Request) -> Result<Value, Thrown> {
             None => rows.append(req, text)?,
         }
     }
-    Ok(Value::array(rows))
+    Ok(rows)
 }
 
 /// php's `make_str` (`Z/ext/tokenizer/tokenizer.c:266`) and the
@@ -1648,110 +1467,8 @@ fn tokenize_parse(
 /// string(7) "UNKNOWN"
 /// string(10) "T_VARIABLE"
 /// ```
-fn token_name(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count != 1 {
-        return Err(wrong_argument_count(req, 1, 1, count));
-    }
-    let id = long_argument(req, 1)?;
+#[php_function]
+fn token_name(req: &mut Request, id: i64) -> Result<PhpString, Thrown> {
     let name = names::name_of(id).unwrap_or("UNKNOWN");
-    Ok(Value::string(PhpString::new(req, name.as_bytes())?))
-}
-
-/// `zend_wrong_parameters_count_error` for a call outside a native's
-/// arity: `exactly` where the maximum is also the minimum, else `at
-/// least` under it and `at most` over it, the bound the call missed, and
-/// that bound's own plural.
-fn wrong_argument_count(req: &mut Request, least: usize, most: usize, given: usize) -> Thrown {
-    let how = if least == most {
-        "exactly"
-    } else if given < least {
-        "at least"
-    } else {
-        "at most"
-    };
-    let bound = if given < least { least } else { most };
-    let word = if bound == 1 { "argument" } else { "arguments" };
-    arg_count_error(req, &format!("{how} {bound} {word}, {given} given"))
-}
-
-/// One `Z_PARAM_STR` of a native, the argument at `position` read off
-/// the call frame, `coerce_param` over `string`: `null` is the 8.1
-/// deprecation and then the empty string under the weak rule, and the
-/// `TypeError` under `strict_types`.
-///
-/// ```php
-/// var_dump(token_get_all(null));
-/// ```
-/// ```expect
-/// Deprecated: token_get_all(): Passing null to parameter #1 ($code) of type string is deprecated in %s on line 2
-/// array(0) {
-/// }
-/// ```
-///
-/// ```php
-/// declare(strict_types=1);
-/// try { token_get_all(null); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
-/// try { token_get_all('<?php 1;', null); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// token_get_all(): Argument #1 ($code) must be of type string, null given
-/// token_get_all(): Argument #2 ($flags) must be of type int, null given
-/// ```
-fn string_argument(req: &mut Request, position: u32) -> Result<PhpString, Thrown> {
-    let given = req.argument(position).unwrap_or_default();
-    let coerced = coerce_param(req, &given, &Type::String, position)?;
-    match coerced.as_php_string() {
-        Some(s) => Ok(*s),
-        None => PhpString::new(req, b""),
-    }
-}
-
-/// One `Z_PARAM_LONG` of a native, the argument at `position` read off
-/// the call frame, `coerce_param` over `int`.
-fn long_argument(req: &mut Request, position: u32) -> Result<i64, Thrown> {
-    let given = req.argument(position).unwrap_or_default();
-    let coerced = coerce_param(req, &given, &Type::Int, position)?;
-    Ok(coerced.as_int().unwrap_or(0))
-}
-
-/// One declared parameter, by value, with no default.
-fn parameter(name: &[u8], ty: Type) -> Parameter {
-    Parameter {
-        name: Name(name.into()),
-        ty: Some(ty),
-        by_ref: false,
-        prefer_ref: false,
-        promoted: false,
-        variadic: false,
-        default: ParameterDefault::None,
-        attributes: Vec::new(),
-    }
-}
-
-/// One native's declaration, as the attributes will derive it from the
-/// Rust signature.
-fn declared(name: &[u8], parameters: &[Parameter], returns: Type) -> FunctionDecl {
-    FunctionDecl {
-        name: Name(name.into()),
-        parameters: parameters.to_vec(),
-        return_type: Some(returns),
-        returns_by_ref: false,
-        is_generator: false,
-        attributes: Vec::new(),
-        doc_comment: None,
-        file: Name(Box::new([])),
-        line: 0,
-        end_line: 0,
-        frameless: Vec::new(),
-    }
-}
-
-/// One `REGISTER_LONG_CONSTANT`.
-fn constant(name: &[u8], value: i64) -> ConstDecl {
-    ConstDecl {
-        name: Name(name.into()),
-        value: ConstExpr::long(value),
-        attributes: Vec::new(),
-    }
+    PhpString::new(req, name.as_bytes())
 }
