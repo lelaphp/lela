@@ -1,0 +1,303 @@
+//! A `Generator`'s or a `Fiber`'s execution read from outside it, what
+//! `ReflectionGenerator` and `ReflectionFiber` answer from
+//! (`Z/ext/reflection/php_reflection.c` at 8.5.9): php's
+//! `generator->execute_data` and `fiber->execute_data`, and the trace
+//! `zend_fetch_debug_backtrace` makes over that execution alone.
+
+use php_heap::VmStack;
+
+use super::{Link, Request, links_of};
+use crate::api::abi::Callable;
+use crate::api::call::Function;
+use crate::api::raising::Thrown;
+use crate::api::values::{ClassId, PhpArray, PhpObject};
+use crate::exec::{self, FrameState, Vm};
+use crate::fiber::Standing;
+use crate::generator;
+
+/// A generator's or a fiber's execution where it stands, one view for
+/// both: what the object was made to serve, and the frame it stands at.
+/// A view: it takes no owner of anything it names.
+#[derive(Debug, Clone)]
+pub struct Execution {
+    /// `generator->func`, which outlives the generator's frame; none for
+    /// a fiber, which serves `callable`.
+    pub function: Option<Function>,
+    /// The class `function` is a method of, `func->op_array.scope`.
+    pub scope: Option<ClassId>,
+    /// The closure `function` is, `ZEND_CLOSURE_OBJECT(func)`, which the
+    /// generator keeps until it is freed.
+    pub closure: Option<PhpObject>,
+    /// A fiber's `fci.function_name`, from its construction until it is
+    /// dead; none for a generator.
+    pub callable: Option<Callable>,
+    /// The object whose frame runs when the execution goes on: for a
+    /// generator the root of its delegation, `zend_generator_get_current`,
+    /// and for a fiber the fiber. None where there is no frame: a
+    /// generator closed, a fiber not started or dead.
+    pub executing: Option<PhpObject>,
+    /// The file and line of the frame the execution stands at: a
+    /// generator's own, and on a fiber's stack the innermost frame of
+    /// user code, which a fiber whose stack holds only natives has not.
+    pub site: Option<(Vec<u8>, u32)>,
+    /// `$this` of that frame.
+    pub this: Option<PhpObject>,
+}
+
+impl Execution {
+    /// What a view says of one frame's engine half.
+    fn stand(&mut self, state: &FrameState) {
+        self.site = exec::body_of(&state.unit, state.body)
+            .map(|code| (code.filename.0.to_vec(), exec::line_of(state)));
+        self.this = state.this;
+    }
+}
+
+impl Request {
+    /// The execution of `object` where it stands, for a `Generator` or a
+    /// `Fiber`; none for any other object.
+    ///
+    /// ```php
+    /// function g() { yield 1; yield 2; }
+    /// $g = g();
+    /// $r = new ReflectionGenerator($g);
+    /// var_dump($r->getExecutingLine(), $r->isClosed());
+    /// $g->next();
+    /// var_dump($r->getExecutingLine(), $r->getFunction()->name);
+    /// $g->next(); $g->next();
+    /// var_dump($r->isClosed(), $r->getFunction()->name);
+    /// $f = new Fiber(function () { Fiber::suspend(); });
+    /// $rf = new ReflectionFiber($f);
+    /// $f->start();
+    /// var_dump($rf->getExecutingLine());
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// bool(false)
+    /// int(2)
+    /// string(1) "g"
+    /// bool(true)
+    /// string(1) "g"
+    /// int(10)
+    /// ```
+    pub fn execution(&mut self, object: PhpObject) -> Option<Execution> {
+        if generator::is_generator(self, object) {
+            return Some(self.generator_execution(object));
+        }
+        let (callable, standing) = crate::fiber::view(self, object)?;
+        let mut execution = Execution {
+            function: None,
+            scope: None,
+            closure: None,
+            callable,
+            executing: standing.is_some().then_some(object),
+            site: None,
+            this: None,
+        };
+        let (_, vm) = match standing {
+            None => return Some(execution),
+            Some(standing) => self.stack_of(&standing),
+        };
+        if let Some(state) = vm.innermost() {
+            execution.stand(state);
+        }
+        Some(execution)
+    }
+
+    /// `zend_fetch_debug_backtrace` over the execution of `object` alone
+    /// (`ReflectionGenerator::getTrace`, `ReflectionFiber::getTrace`):
+    /// for a generator, the frame of the generator its delegation runs
+    /// on top, down to its own, and for a fiber every link on the
+    /// fiber's stack, `options` as `debug_backtrace()` reads them. None
+    /// where there is no frame, and for an object that is neither.
+    ///
+    /// ```php
+    /// function inner() { yield 1; }
+    /// function outer() { yield from inner(); }
+    /// $g = outer(); $g->current();
+    /// var_dump(count((new ReflectionGenerator($g))->getTrace()));
+    /// $f = new Fiber(function ($x) { Fiber::suspend(); });
+    /// $f->start(1);
+    /// var_dump((new ReflectionFiber($f))->getTrace(DEBUG_BACKTRACE_IGNORE_ARGS));
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// array(2) {
+    ///   [0]=>
+    ///   array(5) {
+    ///     ["file"]=>
+    ///     string(%d) "%s"
+    ///     ["line"]=>
+    ///     int(6)
+    ///     ["function"]=>
+    ///     string(7) "suspend"
+    ///     ["class"]=>
+    ///     string(5) "Fiber"
+    ///     ["type"]=>
+    ///     string(2) "::"
+    ///   }
+    ///   [1]=>
+    ///   array(1) {
+    ///     ["function"]=>
+    ///     string(%d) "{closure:%s:6}"
+    ///   }
+    /// }
+    /// ```
+    ///
+    /// A generator running on the stack of a fiber that is suspended is
+    /// read where it stands there:
+    ///
+    /// ```php
+    /// function g() { Fiber::suspend(); yield 1; }
+    /// $g = g();
+    /// $f = new Fiber(function () use ($g) { $g->current(); });
+    /// $f->start();
+    /// $r = new ReflectionGenerator($g);
+    /// var_dump($r->getExecutingLine(), $r->getTrace());
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// array(1) {
+    ///   [0]=>
+    ///   array(2) {
+    ///     ["function"]=>
+    ///     string(1) "g"
+    ///     ["args"]=>
+    ///     array(0) {
+    ///     }
+    ///   }
+    /// }
+    /// ```
+    pub fn execution_trace(
+        &mut self,
+        object: PhpObject,
+        options: i64,
+    ) -> Result<Option<PhpArray>, Thrown> {
+        if generator::is_generator(self, object) {
+            return self.generator_trace(object, options);
+        }
+        let rows = {
+            let Some((_, Some(standing))) = crate::fiber::view(self, object) else {
+                return Ok(None);
+            };
+            let (stack, vm) = self.stack_of(&standing);
+            let links = links_of(stack, vm, 0..vm.frames().len(), 0..vm.calls().len());
+            self.trace_rows(&links)
+        };
+        self.render_trace(rows, options).map(Some)
+    }
+
+    /// The stack a fiber's execution stands on.
+    fn stack_of<'a>(&'a self, standing: &Standing<'a>) -> (&'a VmStack, &'a Vm) {
+        match standing {
+            Standing::Active => (&self.stack, &self.vm),
+            Standing::Held(held) => (&held.stack, &held.vm),
+        }
+    }
+
+    fn generator_execution(&mut self, object: PhpObject) -> Execution {
+        let (function, closure) = generator::served(self, object);
+        let mut execution = Execution {
+            function,
+            scope: function.and_then(|function| self.method_class(function)),
+            closure,
+            callable: None,
+            executing: None,
+            site: None,
+            this: None,
+        };
+        if !generator::has_frame(self, object) {
+            return execution;
+        }
+        execution.executing = Some(generator::current(self, object));
+        let state = match generator::suspended_state(self, object) {
+            Some(state) => Some(state),
+            None => self
+                .running_frame(object)
+                .and_then(|(_, vm, at)| vm.frames().get(at)),
+        };
+        if let Some(state) = state {
+            execution.stand(state);
+        }
+        execution
+    }
+
+    /// `ReflectionGenerator::getTrace`'s chain: the root's frame, then
+    /// each generator's below it down to `object`'s, its site the frame
+    /// below it and the last one with none, as php cuts
+    /// `prev_execute_data` under `object`'s frame.
+    fn generator_trace(
+        &mut self,
+        object: PhpObject,
+        options: i64,
+    ) -> Result<Option<PhpArray>, Thrown> {
+        if !generator::has_frame(self, object) {
+            return Ok(None);
+        }
+        let root = generator::current(self, object);
+        if generator::is_running(self, object) {
+            let rows = match self.running_frame(object) {
+                Some((stack, vm, at)) => {
+                    let top = self
+                        .running_frame(root)
+                        .filter(|(on, _, top)| std::ptr::eq(*on, stack) && *top >= at)
+                        .map_or(at, |(_, _, top)| top);
+                    let links = frames_between(stack, vm, at, top);
+                    self.trace_rows(&links)
+                }
+                None => Vec::new(),
+            };
+            return self.render_trace(rows, options).map(Some);
+        }
+        generator::with_frames(self, object, |req, floor| {
+            let top = req.vm.frames().len().saturating_sub(1);
+            let rows = if top < floor {
+                Vec::new()
+            } else {
+                let links = frames_between(&req.stack, &req.vm, floor, top);
+                req.trace_rows(&links)
+            };
+            req.render_trace(rows, options)
+        })
+        .map(Some)
+    }
+
+    /// Where the frame of a running `generator` stands: the stack, its
+    /// frames' engine half and the frame's place, on the stack the
+    /// request runs on, on one below it, or on the stack of the
+    /// suspended fiber the resumption runs on.
+    fn running_frame(&self, generator: PhpObject) -> Option<(&VmStack, &Vm, usize)> {
+        let place = |vm: &Vm| {
+            vm.frames().iter().rposition(|state| {
+                state
+                    .generator
+                    .is_some_and(|running| running.index() == generator.index())
+            })
+        };
+        if let Some(found) = self
+            .executions()
+            .find_map(|(stack, vm)| place(vm).map(|at| (stack, vm, at)))
+        {
+            return Some(found);
+        }
+        let fiber = generator::in_fiber(self, generator)?;
+        let Some((_, Some(Standing::Held(held)))) = crate::fiber::view(self, fiber) else {
+            return None;
+        };
+        place(&held.vm).map(|at| (&held.stack, &held.vm, at))
+    }
+}
+
+/// The links of the frames `from` to `to` of one stack and of the calls
+/// served between them: a trace that starts at a frame names no native
+/// that frame is calling.
+fn frames_between<'a>(stack: &'a VmStack, vm: &'a Vm, from: usize, to: usize) -> Vec<Link<'a>> {
+    let frames = vm.frames();
+    let calls_below = |at: usize| {
+        frames.get(at).map_or(vm.calls().len(), |state| {
+            usize::try_from(state.calls_below).unwrap_or(usize::MAX)
+        })
+    };
+    let calls = calls_below(from)..calls_below(to);
+    links_of(stack, vm, from..to.saturating_add(1), calls)
+}

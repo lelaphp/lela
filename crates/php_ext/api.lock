@@ -261,6 +261,7 @@ decl::PropertyHooks
 decl::PropertyHooks::of
 decl::Radix
 decl::Radix::written
+decl::TraitAdaptation
 decl::Type
 decl::Type::MAY_BE_ANY
 decl::Type::contains_code
@@ -297,6 +298,7 @@ request::Brigade
 request::BufferHandler
 request::Cast
 request::ContentType
+request::Execution
 request::ExtensionId
 request::FdStream
 request::FilterFactory
@@ -356,6 +358,8 @@ request::Request::env
 request::Request::env_pairs
 request::Request::error_log
 request::Request::error_reporting
+request::Request::execution
+request::Request::execution_trace
 request::Request::extension_constants
 request::Request::extension_dependencies
 request::Request::extension_functions

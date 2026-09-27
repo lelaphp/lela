@@ -4736,16 +4736,6 @@ fn answer<T: FromArgument>(
     value.and_then(|value| Raw::from_value(req, value))
 }
 
-/// What a method declared and not yet served throws: php's `Error`, as
-/// a native that cannot do what it was asked raises one.
-fn unbuilt(req: &mut Request) -> Thrown {
-    throw(
-        req,
-        "Error",
-        "This Reflection method is declared and not yet served by this engine",
-    )
-}
-
 /// `ZEND_PARSE_PARAMETERS_START(n, n)`'s count check: php's
 /// `ArgumentCountError`, `expects exactly N argument(s), M given`.
 fn exactly_arguments(req: &mut Request, expected: usize) -> Result<(), Thrown> {

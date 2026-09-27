@@ -87,6 +87,12 @@ pub(crate) struct ZendGenerator {
     /// `generator->func`: what `__debugInfo` and `ReflectionGenerator`
     /// name.
     function: Option<Function>,
+    /// `ZEND_CLOSURE_OBJECT(generator->func)` where the function is a
+    /// closure's: one owner, the one the call's frame took, which the
+    /// frame never gives up and the generator keeps until it is freed,
+    /// as `zend_generator_free_storage` releases it, so the function
+    /// stays readable after the frame closed.
+    closure: Option<PhpObject>,
     value: Value,
     key: Value,
     /// `UNDEF` until the body returned.
@@ -108,8 +114,9 @@ pub(crate) struct ZendGenerator {
     /// `ZEND_GENERATOR_IN_FIBER`: a resumption made while a fiber runs
     /// is under way, on the resumed generator and on the one that runs,
     /// so a destruction while the fiber is suspended leaves the
-    /// generators on the fiber's stack to the fiber's teardown.
-    in_fiber: bool,
+    /// generators on the fiber's stack to the fiber's teardown. The
+    /// fiber is the one whose stack the frames stand on, no owner.
+    in_fiber: Option<PhpObject>,
     /// `IS_OBJ_DESTRUCTOR_CALLED` while [`dtor_storage`] runs, which
     /// `zend_generator_update_current` reads off the object.
     destroying: bool,
@@ -122,6 +129,7 @@ impl Default for ZendGenerator {
         ZendGenerator {
             execution: Execution::Closed,
             function: None,
+            closure: None,
             value: Value::undef(),
             key: Value::undef(),
             retval: Value::undef(),
@@ -134,7 +142,7 @@ impl Default for ZendGenerator {
             forced_close: false,
             at_first_yield: false,
             do_init: false,
-            in_fiber: false,
+            in_fiber: None,
             destroying: false,
         }
     }
@@ -150,13 +158,17 @@ impl ObjectHandlers for GeneratorHandlers {
         dtor_storage(req, object);
     }
 
-    /// `zend_generator_free_storage`: the frame closed, and the value,
-    /// the key and what the body returned given up.
+    /// `zend_generator_free_storage`: the frame closed, and the
+    /// closure, the value, the key and what the body returned given up.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         close(req, object, false);
         let held = with(req, object, |generator| {
             let values = std::mem::take(&mut generator.values);
             [
+                generator
+                    .closure
+                    .take()
+                    .map_or(Value::undef(), |closure| closure.as_value()),
                 std::mem::replace(&mut generator.value, Value::undef()),
                 std::mem::replace(&mut generator.key, Value::undef()),
                 std::mem::replace(&mut generator.retval, Value::undef()),
@@ -186,7 +198,8 @@ impl ObjectHandlers for GeneratorHandlers {
     }
 
     /// `zend_generator_get_gc`: the value, the key, what the body
-    /// returned, the delegated values and the generator delegated to.
+    /// returned, a closed generator's closure, the delegated values and
+    /// the generator delegated to.
     /// A suspended frame's slots are not walked yet (#687's neighbour),
     /// which keeps what they hold alive through a collection and frees
     /// nothing early.
@@ -197,6 +210,11 @@ impl ObjectHandlers for GeneratorHandlers {
         visit(generator.value);
         visit(generator.key);
         visit(generator.retval);
+        // The closure of a closed generator; a frame's own closure is
+        // among what its slots hold, which are not walked yet.
+        if let (Some(closure), Execution::Closed) = (generator.closure, &generator.execution) {
+            visit(closure.as_value());
+        }
         match &generator.values {
             Delegated::Nothing => {}
             Delegated::Array { array, .. } => visit(*array),
@@ -231,7 +249,7 @@ fn read<R>(req: &Request, object: PhpObject, f: impl FnOnce(&ZendGenerator) -> R
 
 /// `ZEND_GENERATOR_CURRENTLY_RUNNING`: a resumption holds the frame on
 /// a stack.
-fn is_running(req: &Request, object: PhpObject) -> bool {
+pub(crate) fn is_running(req: &Request, object: PhpObject) -> bool {
     read(req, object, |generator| {
         matches!(generator.execution, Execution::Running)
     })
@@ -239,11 +257,35 @@ fn is_running(req: &Request, object: PhpObject) -> bool {
 }
 
 /// `generator->execute_data != NULL`: suspended or running.
-fn has_frame(req: &Request, object: PhpObject) -> bool {
+pub(crate) fn has_frame(req: &Request, object: PhpObject) -> bool {
     read(req, object, |generator| {
         !matches!(generator.execution, Execution::Closed)
     })
     .unwrap_or(false)
+}
+
+/// `generator->func` and the closure it is, which outlive the frame.
+pub(crate) fn served(req: &Request, object: PhpObject) -> (Option<Function>, Option<PhpObject>) {
+    read(req, object, |generator| {
+        (generator.function, generator.closure)
+    })
+    .unwrap_or((None, None))
+}
+
+/// The fiber whose stack a resumption of `object` runs on, while one
+/// is under way.
+pub(crate) fn in_fiber(req: &Request, object: PhpObject) -> Option<PhpObject> {
+    read(req, object, |generator| generator.in_fiber).flatten()
+}
+
+/// The engine half of a frame off the stack, where the generator's is.
+pub(crate) fn suspended_state(req: &Request, object: PhpObject) -> Option<&FrameState> {
+    object
+        .native::<ZendGenerator>(req)
+        .and_then(|generator| match &generator.execution {
+            Execution::Suspended(suspended) => Some(&suspended.state),
+            Execution::Running | Execution::Closed => None,
+        })
 }
 
 fn parent(req: &Request, object: PhpObject) -> Option<PhpObject> {
@@ -539,6 +581,33 @@ fn in_context<R>(
     Some(out)
 }
 
+/// `f` with the frames of a suspended `generator` and of the generators
+/// it delegates to on the stack, the root's on top, as a resumption
+/// stands them ([`resume`]), and the stack's height below them; each is
+/// suspended again after it. php's `ReflectionGenerator::getTrace`
+/// links the same frames into one `prev_execute_data` chain for as
+/// long as it reads it. A root a resumption is running is left where
+/// it stands, and the frames below it are pushed alone.
+pub(crate) fn with_frames<R>(
+    req: &mut Request,
+    generator: PhpObject,
+    f: impl FnOnce(&mut Request, usize) -> R,
+) -> R {
+    let root = current(req, generator);
+    let floor = req.vm().frames().len();
+    let chain = delegation_chain(req, generator, root);
+    for link in &chain {
+        let _ = push(req, *link);
+    }
+    let root_pushed = push(req, root).is_some();
+    let out = f(req, floor);
+    if root_pushed {
+        let _ = suspend(req, root);
+    }
+    unwind_chain(req, &chain);
+    out
+}
+
 /// `GENERATOR_CREATE` (`Z/Zend/zend_vm_def.h:4652`): the frame that is
 /// running, `frame`, moved into a new `Generator` and the object handed
 /// to the caller as what the call returned; the caller goes on after its
@@ -578,12 +647,18 @@ pub(crate) fn create(req: &mut Request, frame: FrameRef) -> Result<crate::tier::
             return Ok(crate::tier::Stepped::Threw(frame));
         }
     };
-    let function = req.vm().at(frame).and_then(|state| state.function);
+    let (function, closure) = req
+        .vm()
+        .at(frame)
+        .map_or((None, None), |state| (state.function, state.closure));
     if let Some(state) = req.vm_mut().at_mut(frame) {
         state.generator = Some(object);
         state.returns_to = None;
     }
-    with(req, object, |g| g.function = function);
+    with(req, object, |g| {
+        g.function = function;
+        g.closure = closure;
+    });
     suspend(req, object)?;
     if entry {
         req.set_returned(object.as_value());
@@ -864,9 +939,9 @@ pub(crate) fn resume(req: &mut Request, orig: PhpObject) -> Result<(), Fatal> {
             with(req, orig, |g| g.do_init = false);
             return Ok(());
         }
-        if req.fibers().active().is_some() {
-            with(req, orig, |g| g.in_fiber = true);
-            with(req, generator, |g| g.in_fiber = true);
+        if let Some(fiber) = req.fibers().active() {
+            with(req, orig, |g| g.in_fiber = Some(fiber));
+            with(req, generator, |g| g.in_fiber = Some(fiber));
         }
         with(req, orig, |g| g.at_first_yield = false);
         // The generators between the one resumed and the one that runs
@@ -889,9 +964,9 @@ pub(crate) fn resume(req: &mut Request, orig: PhpObject) -> Result<(), Fatal> {
             unwind_chain(req, &chain);
             with(req, orig, |g| {
                 g.do_init = false;
-                g.in_fiber = false;
+                g.in_fiber = None;
             });
-            with(req, generator, |g| g.in_fiber = false);
+            with(req, generator, |g| g.in_fiber = None);
             return Ok(());
         }
         if !req.is_pending() {
@@ -909,7 +984,7 @@ pub(crate) fn resume(req: &mut Request, orig: PhpObject) -> Result<(), Fatal> {
             }
             finish_on_stack(req, generator, true);
         }
-        with(req, generator, |g| g.in_fiber = false);
+        with(req, generator, |g| g.in_fiber = None);
         unwind_chain(req, &chain);
         served?;
         if req.is_pending() {
@@ -931,7 +1006,7 @@ pub(crate) fn resume(req: &mut Request, orig: PhpObject) -> Result<(), Fatal> {
         }
         with(req, orig, |g| {
             g.do_init = false;
-            g.in_fiber = false;
+            g.in_fiber = None;
         });
         return Ok(());
     }
@@ -964,8 +1039,9 @@ pub(crate) fn resume(req: &mut Request, orig: PhpObject) -> Result<(), Fatal> {
 /// done
 /// ```
 fn running_in_fiber(req: &Request, generator: PhpObject) -> bool {
-    let Some((in_fiber, children)) = read(req, generator, |g| (g.in_fiber, g.children.clone()))
-    else {
+    let Some((in_fiber, children)) = read(req, generator, |g| {
+        (g.in_fiber.is_some(), g.children.clone())
+    }) else {
         return false;
     };
     in_fiber
@@ -1129,7 +1205,8 @@ pub(crate) fn close_unwound(req: &mut Request, generator: PhpObject) {
 /// order: the CVs, the extra named arguments, the receiver, the extra
 /// arguments, then for an unfinished frame the calls it was building and
 /// the temporaries live where it stood, and last whatever else a slot
-/// still holds and the closure it ran.
+/// still holds. The closure it ran is the generator's to give up
+/// ([`ZendGenerator::closure`]).
 fn release_frame(req: &mut Request, suspended: Suspended, finished: bool) {
     let Suspended {
         mut slots,
@@ -1196,9 +1273,6 @@ fn release_frame(req: &mut Request, suspended: Suspended, finished: bool) {
         let value = take(&mut slots, at);
         req.release(value);
     }
-    if let Some(closure) = state.closure {
-        req.release(closure.as_value());
-    }
 }
 
 /// `zend_generator_dtor_storage` (`Z/Zend/zend_generators.c:249`): a
@@ -1237,7 +1311,7 @@ fn dtor_storage(req: &mut Request, object: PhpObject) {
     // suspended fiber: its frames are the fiber's to give up when the
     // fiber is torn down, and a `finally` this one runs then may not
     // yield.
-    if read(req, root, |g| g.in_fiber).unwrap_or(false) && running_in_fiber(req, object) {
+    if read(req, root, |g| g.in_fiber.is_some()).unwrap_or(false) && running_in_fiber(req, object) {
         with(req, object, |g| g.forced_close = true);
         return;
     }
