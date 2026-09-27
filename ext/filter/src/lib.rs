@@ -540,9 +540,9 @@ fn failure(flags: i64) -> Value {
     }
 }
 
-/// `php_zval_filter_recursive`: an array filtered element by element,
-/// into a new array with the same keys; one already being walked left as
-/// it is.
+/// `php_zval_filter_recursive` over what `filter_var` and
+/// `php_filter_array_handler` hand it, `value` owned: a scalar through
+/// the filter, and an array as php walks its `ZVAL_DUP`, [`filtered_copy`].
 fn zval_filter_recursive(
     req: &mut Request,
     value: Value,
@@ -552,52 +552,132 @@ fn zval_filter_recursive(
     let Some(array) = value.deref().as_array().copied() else {
         return zval_filter(req, value, filter, run);
     };
-    let built = filter_array(req, array, filter, run);
+    let copied = filtered_copy(req, array, filter, run);
     req.release(value);
-    built.map(PhpArray::to_value)
+    copied.map(PhpArray::to_value)
 }
 
-/// `php_zval_filter_recursive` over an array, the caller's own: a new
-/// array, or one already being walked handed back as it is, owned.
-fn filter_array(
+/// `ZVAL_DUP` and then `php_zval_filter_recursive` over the copy: the
+/// copy keeps a reference its elements share as that reference, so a
+/// value behind one is filtered where it stands and the variable it
+/// names reads what the filter made of it, as php's walk writes through
+/// `ZVAL_DEREF`. An array reached again through a reference while it is
+/// walked is walked once. The copy owned; `array` a view.
+///
+/// ```php
+/// $inner = ["1", "x"];
+/// $outer = [&$inner, "2", ["3"]];
+/// var_dump(filter_var_array($outer, FILTER_VALIDATE_INT), $inner);
+/// $n = "7";
+/// var_dump(filter_var([&$n], FILTER_VALIDATE_INT, FILTER_REQUIRE_ARRAY), $n);
+/// $a = ["5"];
+/// $a[] = &$a;
+/// var_dump(filter_var($a, FILTER_VALIDATE_INT, FILTER_REQUIRE_ARRAY));
+/// ```
+/// ```expect
+/// array(3) {
+///   [0]=>
+///   &array(2) {
+///     [0]=>
+///     int(1)
+///     [1]=>
+///     bool(false)
+///   }
+///   [1]=>
+///   int(2)
+///   [2]=>
+///   array(1) {
+///     [0]=>
+///     int(3)
+///   }
+/// }
+/// array(2) {
+///   [0]=>
+///   int(1)
+///   [1]=>
+///   bool(false)
+/// }
+/// array(1) {
+///   [0]=>
+///   &int(7)
+/// }
+/// int(7)
+/// array(2) {
+///   [0]=>
+///   int(5)
+///   [1]=>
+///   &array(2) {
+///     [0]=>
+///     int(5)
+///     [1]=>
+///     *RECURSION*
+///   }
+/// }
+/// ```
+fn filtered_copy(
     req: &mut Request,
     array: PhpArray,
     filter: i64,
     run: &Run,
 ) -> Result<PhpArray, Thrown> {
-    if array.is_recursive() {
-        req.addref(&array.to_value());
-        return Ok(array);
-    }
-    array.protect();
-    let built = filter_elements(req, array, filter, run);
-    array.unprotect();
-    built
-}
-
-fn filter_elements(
-    req: &mut Request,
-    array: PhpArray,
-    filter: i64,
-    run: &Run,
-) -> Result<PhpArray, Thrown> {
-    let mut out = PhpArray::new(req)?;
-    for (key, element) in array.snapshot() {
-        req.addref(&element);
-        match zval_filter_recursive(req, element, filter, run) {
-            Ok(filtered) => {
-                if let Key::Str(s) = &key {
-                    req.addref(&Value::string(*s));
-                }
-                out.set(req, key, filtered)?;
-            }
-            Err(thrown) => {
-                req.release(out.to_value());
-                return Err(thrown);
-            }
+    let mut copied = array.copy(req)?;
+    match filter_in_place(req, &mut copied, filter, run) {
+        Ok(()) => Ok(copied),
+        Err(thrown) => {
+            req.release(copied.to_value());
+            Err(thrown)
         }
     }
-    Ok(out)
+}
+
+/// `php_zval_filter_recursive` over an array with one owner, each
+/// element filtered where it stands; one already being walked, reached
+/// again through a reference, is left as it is.
+fn filter_in_place(
+    req: &mut Request,
+    array: &mut PhpArray,
+    filter: i64,
+    run: &Run,
+) -> Result<(), Thrown> {
+    if array.is_recursive() {
+        return Ok(());
+    }
+    array.protect();
+    let walked = filter_elements(req, array, filter, run);
+    array.unprotect();
+    walked
+}
+
+/// The walk's body. Behind a reference, `ZVAL_DEREF`: an array
+/// separated in the cell (`SEPARATE_ARRAY`) and walked there, and a
+/// scalar filtered and written back into the cell. A plain element is
+/// filtered and put back in its slot, a nested array as a filtered copy,
+/// which is what `SEPARATE_ARRAY` makes of an element the dup gave a
+/// second owner.
+fn filter_elements(
+    req: &mut Request,
+    array: &mut PhpArray,
+    filter: i64,
+    run: &Run,
+) -> Result<(), Thrown> {
+    for (key, element) in array.snapshot_refs() {
+        if let ValueRef::Reference(cell) = element.as_ref() {
+            let cell = *cell;
+            if let Some(mut held) = cell.separate_array(req)? {
+                filter_in_place(req, &mut held, filter, run)?;
+            } else {
+                let held = cell.get();
+                req.addref(&held);
+                let filtered = zval_filter(req, held, filter, run)?;
+                cell.convert(req, filtered);
+            }
+            continue;
+        }
+        req.addref(&element);
+        let filtered = zval_filter_recursive(req, element, filter, run)?;
+        array.replace(req, &key, filtered)?;
+    }
+    Ok(())
 }
 
 /// `php_filter_call`: `value` owned, what it became owned, and
@@ -703,7 +783,7 @@ fn array_handler(
                 options: None,
                 native,
             };
-            return filter_array(req, input, filter, &run);
+            return filtered_copy(req, input, filter, &run);
         }
     };
     let mut out = PhpArray::new(req)?;
