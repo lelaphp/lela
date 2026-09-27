@@ -10,16 +10,10 @@
 //! reused only after its object is freed, and every reflector of
 //! these classes is born through a factory here, so a row is either
 //! this object's or gone.
-//!
-//! `getClass`, `isArray` and `isCallable` still share the entry of the
-//! methods not yet served: the stub marks all three `#[\Deprecated]` and php prints the
-//! deprecation on every call, which the engine does not raise yet
-//! (#412), so a witness beside a body here would pin a line the engine
-//! never prints.
 
 use php_ext::abi::{Instance, This, Union, Untyped};
 use php_ext::attr::php_class;
-use php_ext::call::{eval_const_expr, lookup_class};
+use php_ext::call::{autoload, eval_const_expr, lookup_class};
 use php_ext::coerce::value_name;
 use php_ext::decl::{ConstExpr, FunctionDecl, Parameter, Type};
 use php_ext::raising::{Thrown, throw};
@@ -27,7 +21,7 @@ use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use super::{
-    State, class_name_of, class_named, linked_methods, lookup_function, new_object,
+    State, class_chain, class_name_of, class_named, linked_methods, lookup_function, new_object,
     parameter_string, reflection_class_factory, required_parameters, set_name, set_string_prop,
     this_name, type_to_string,
 };
@@ -240,6 +234,44 @@ fn scope_of(req: &mut Request, function: &FunctionRef) -> Option<ClassId> {
         // parameter's `declaringClass` reads is the closure's own.
         FunctionRef::Closure(object) => object.closure(req)?.scope,
         FunctionRef::Invoke(_) => lookup_class(req, b"Closure").ok().flatten(),
+    }
+}
+
+/// The one class a type names, `ZEND_TYPE_HAS_NAME`: a name alone,
+/// nullable or beside `MAY_BE_*` bits, as php stores it in `arg_info` beside
+/// the mask; none for a type of bits alone, an intersection, or
+/// two names, which php stores as a list.
+fn one_name(ty: &Type) -> Option<&Type> {
+    let is_name =
+        |member: &&Type| matches!(member, Type::Named(_) | Type::SelfClass | Type::ParentClass);
+    match ty {
+        Type::Nullable(inner) => one_name(inner),
+        Type::Union(members) => {
+            let mut found = members.iter().filter(is_name);
+            let first = found.next();
+            if found.next().is_some() {
+                return None;
+            }
+            first
+        }
+        Type::Named(_) | Type::SelfClass | Type::ParentClass => Some(ty),
+        _ => None,
+    }
+}
+
+/// `ZEND_TYPE_PURE_MASK_WITHOUT_NULL`: the `MAY_BE_*` bits of the type,
+/// `null`'s aside.
+fn mask_without_null(ty: &Type) -> u32 {
+    ty.mask() & !Type::Null.mask()
+}
+
+/// `ZEND_TYPE_IS_ITERABLE_FALLBACK`: `iterable` written in the type.
+fn has_iterable(ty: &Type) -> bool {
+    match ty {
+        Type::Iterable => true,
+        Type::Nullable(inner) => has_iterable(inner),
+        Type::Union(members) => members.iter().any(has_iterable),
+        _ => false,
     }
 }
 
@@ -973,8 +1005,75 @@ impl ReflectionParameter {
         Ok(Some(Instance::of(object)))
     }
 
-    #[php(tentative, deprecated(since = "8.0", message = "use ReflectionParameter::getType() instead"), implementation = crate::func::ReflectionFiber::getExecutingLine)]
-    fn getClass(this: This<Self>) -> Option<Instance<crate::class::ReflectionClass>>;
+    /// `ReflectionParameter::getClass()`: where the declared type names
+    /// one class (`ZEND_TYPE_HAS_NAME`: alone, nullable, or beside
+    /// `MAY_BE_*` bits), that class, `self` and `parent` read off the function's
+    /// scope and any other name looked up with the autoloader; `null`
+    /// for a type with no name or with several.
+    ///
+    /// ```php
+    /// class P {} class C extends P { function f(self $a, ?parent $b, int|ArrayObject $c, P|C $d, int $e, $f) {} }
+    /// foreach ((new ReflectionMethod('C', 'f'))->getParameters() as $p) { $c = @$p->getClass(); echo $c ? $c->name : 'null', "\n"; }
+    /// $f = function (Missing $m) {};
+    /// try { @(new ReflectionFunction($f))->getParameters()[0]->getClass(); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+    /// $f = function (self $s) {};
+    /// try { (new ReflectionFunction($f))->getParameters()[0]->getClass(); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+    /// $f = (function (parent $s) {})->bindTo(null, P::class);
+    /// try { @(new ReflectionFunction($f))->getParameters()[0]->getClass(); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// C
+    /// P
+    /// ArrayObject
+    /// null
+    /// null
+    /// null
+    /// Class "Missing" does not exist
+    ///
+    /// Deprecated: Method ReflectionParameter::getClass() is deprecated since 8.0, use ReflectionParameter::getType() instead in %s on line 7
+    /// Parameter uses "self" as type but function is not a class member
+    /// Parameter uses "parent" as type although class does not have a parent
+    /// ```
+    #[php(
+        tentative,
+        deprecated(since = "8.0", message = "use ReflectionParameter::getType() instead")
+    )]
+    fn getClass(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Option<Instance<crate::class::ReflectionClass>>, Thrown> {
+        let (reference, _, parameter) = this_parameter(req, this.object())?;
+        let Some(name) = parameter.ty.as_ref().and_then(one_name) else {
+            return Ok(None);
+        };
+        let scope = scope_of(req, &reference.function);
+        let class = match name {
+            Type::SelfClass => scope.ok_or_else(|| {
+                "Parameter uses \"self\" as type but function is not a class member".to_owned()
+            }),
+            Type::ParentClass => match scope {
+                None => Err(
+                    "Parameter uses \"parent\" as type but function is not a class member"
+                        .to_owned(),
+                ),
+                Some(scope) => class_chain(req, scope).get(1).copied().ok_or_else(|| {
+                    "Parameter uses \"parent\" as type although class does not have a parent"
+                        .to_owned()
+                }),
+            },
+            Type::Named(name) => autoload(req, &name.0)?.ok_or_else(|| {
+                format!(
+                    "Class \"{}\" does not exist",
+                    String::from_utf8_lossy(&name.0)
+                )
+            }),
+            _ => return Ok(None),
+        };
+        match class {
+            Ok(class) => Ok(Some(Instance::of(reflection_class_factory(req, class)?))),
+            Err(message) => Err(throw(req, "ReflectionException", &message)),
+        }
+    }
 
     /// `ReflectionParameter::hasType()`: `ZEND_TYPE_IS_SET`.
     ///
@@ -1017,11 +1116,67 @@ impl ReflectionParameter {
         Ok(Some(Instance::of(object)))
     }
 
-    #[php(tentative, deprecated(since = "8.0", message = "use ReflectionParameter::getType() instead"), implementation = crate::func::ReflectionFiber::getExecutingLine)]
-    fn isArray(this: This<Self>) -> bool;
+    /// `ReflectionParameter::isArray()`: the `MAY_BE_*` mask, `null` aside,
+    /// is `array` alone, and `false` for `iterable`, which php 8.2 compiles
+    /// to `Traversable|array` and marks for this answer.
+    ///
+    /// ```php
+    /// function f(array $a, ?array $b, iterable $c, array|string $d, array|ArrayObject $e, $f) {}
+    /// foreach ((new ReflectionFunction('f'))->getParameters() as $p) { var_dump(@$p->isArray()); }
+    /// var_dump((new ReflectionParameter('f', 0))->isArray());
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// bool(false)
+    /// bool(true)
+    /// bool(false)
+    ///
+    /// Deprecated: Method ReflectionParameter::isArray() is deprecated since 8.0, use ReflectionParameter::getType() instead in %s on line 4
+    /// bool(true)
+    /// ```
+    #[php(
+        tentative,
+        deprecated(since = "8.0", message = "use ReflectionParameter::getType() instead")
+    )]
+    fn isArray(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, _, parameter) = this_parameter(req, this.object())?;
+        Ok(parameter
+            .ty
+            .as_ref()
+            .is_some_and(|ty| !has_iterable(ty) && mask_without_null(ty) == Type::Array.mask()))
+    }
 
-    #[php(tentative, deprecated(since = "8.0", message = "use ReflectionParameter::getType() instead"), implementation = crate::func::ReflectionFiber::getExecutingLine)]
-    fn isCallable(this: This<Self>) -> bool;
+    /// `ReflectionParameter::isCallable()`: the `MAY_BE_*` mask, `null`
+    /// aside, is `callable` alone.
+    ///
+    /// ```php
+    /// function f(callable $a, ?callable $b, callable|string $c, Closure $d, $e) {}
+    /// foreach ((new ReflectionFunction('f'))->getParameters() as $p) { var_dump(@$p->isCallable()); }
+    /// var_dump((new ReflectionParameter('f', 0))->isCallable());
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// bool(false)
+    /// bool(false)
+    ///
+    /// Deprecated: Method ReflectionParameter::isCallable() is deprecated since 8.0, use ReflectionParameter::getType() instead in %s on line 4
+    /// bool(true)
+    /// ```
+    #[php(
+        tentative,
+        deprecated(since = "8.0", message = "use ReflectionParameter::getType() instead")
+    )]
+    fn isCallable(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, _, parameter) = this_parameter(req, this.object())?;
+        Ok(parameter
+            .ty
+            .as_ref()
+            .is_some_and(|ty| mask_without_null(ty) == Type::Callable.mask()))
+    }
 
     /// `ReflectionParameter::allowsNull()`: no declared type, or a mask
     /// with `null` in it.

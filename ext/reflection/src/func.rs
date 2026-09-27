@@ -6,10 +6,8 @@
 //! up again, through [`super::signature::this_function`].
 //!
 //! What still shares the entry of the methods not yet served
-//! ([`ReflectionFiber`]'s `getExecutingLine`): `setAccessible`
-//! and `ReflectionFunction`'s `isDisabled`, which the stub marks
-//! `#[\Deprecated]` and the engine does not raise the deprecation of
-//! yet (#412).
+//! ([`ReflectionFiber`]'s `getExecutingLine`): `ReflectionGenerator`'s
+//! and `ReflectionFiber`'s methods.
 
 use php_ext::abi::{Callable, Instance, NamedVariadic, OrFalse, Raw, Static, This, Union};
 use php_ext::attr::php_class;
@@ -1362,8 +1360,27 @@ impl ReflectionFunction {
         Ok(matches!(function, FunctionRef::Closure(_)))
     }
 
-    #[php(tentative, deprecated(since = "8.0", message = "as ReflectionFunction can no longer be constructed for disabled functions"), implementation = ReflectionFiber::getExecutingLine)]
-    fn isDisabled(this: This<Self>) -> bool;
+    /// `ReflectionFunction::isDisabled()`: `false`, since a disabled
+    /// function cannot be reflected at all, after the deprecation its
+    /// declaration raises.
+    ///
+    /// ```php
+    /// var_dump((new ReflectionFunction('strlen'))->isDisabled());
+    /// ```
+    /// ```expect
+    /// Deprecated: Method ReflectionFunction::isDisabled() is deprecated since 8.0, as ReflectionFunction can no longer be constructed for disabled functions in %s on line 2
+    /// bool(false)
+    /// ```
+    #[php(
+        tentative,
+        deprecated(
+            since = "8.0",
+            message = "as ReflectionFunction can no longer be constructed for disabled functions"
+        )
+    )]
+    fn isDisabled(_: This<Self>) -> bool {
+        false
+    }
 
     /// `ReflectionFunction::invoke(mixed ...$args): mixed`,
     /// `ZEND_METHOD(ReflectionFunction, invoke)`: the function the
@@ -2211,8 +2228,31 @@ impl ReflectionMethod {
         Ok(prototype_of(req, &name)?.is_some())
     }
 
-    #[php(tentative, deprecated(since = "8.5", message = "as it has no effect since PHP 8.1"), implementation = ReflectionFiber::getExecutingLine)]
-    fn setAccessible(this: This<Self>, accessible: bool);
+    /// `ReflectionMethod::setAccessible(bool $accessible)`: the argument
+    /// parsed and nothing done, every method being invocable through
+    /// Reflection since 8.1. `ReflectionProperty::setAccessible` shares
+    /// the body.
+    ///
+    /// ```php
+    /// class A { private function f() { return 'f'; } private $p = 'p'; }
+    /// $m = new ReflectionMethod('A', 'f'); var_dump($m->setAccessible(false), $m->invoke(new A));
+    /// $p = new ReflectionProperty('A', 'p'); $p->setAccessible(false); var_dump($p->getValue(new A));
+    /// ```
+    /// ```expect
+    /// Deprecated: Method ReflectionMethod::setAccessible() is deprecated since 8.5, as it has no effect since PHP 8.1 in %s on line 3
+    /// NULL
+    /// string(1) "f"
+    ///
+    /// Deprecated: Method ReflectionProperty::setAccessible() is deprecated since 8.5, as it has no effect since PHP 8.1 in %s on line 4
+    /// string(1) "p"
+    /// ```
+    #[php(
+        tentative,
+        deprecated(since = "8.5", message = "as it has no effect since PHP 8.1")
+    )]
+    fn setAccessible(_: This<Self>, accessible: bool) {
+        let _ = accessible;
+    }
 }
 
 /// `ReflectionFiber` as the stub declares it.

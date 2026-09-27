@@ -7,9 +7,6 @@
 //! `ce->properties_info` holds them once linked, which the engine
 //! resolves ([`php_ext::call::property_hook`]); a hook is reflected as a
 //! `ReflectionMethod` named `$name::get` or `$name::set` (#427).
-//!
-//! What still shares the entry of the methods not yet served:
-//! `setAccessible`, which the stub marks `#[\\Deprecated]` (#412).
 
 use php_ext::abi::{Instance, OrFalse, Passed, This, Union};
 use php_ext::attr::php_class;
@@ -1331,7 +1328,7 @@ impl ReflectionProperty {
         }
     }
 
-    #[php(tentative, deprecated(since = "8.5", message = "as it has no effect since PHP 8.1"), implementation = crate::func::ReflectionFiber::getExecutingLine)]
+    #[php(tentative, deprecated(since = "8.5", message = "as it has no effect since PHP 8.1"), implementation = crate::func::ReflectionMethod::setAccessible)]
     fn setAccessible(this: This<Self>, accessible: bool);
 
     /// `ReflectionProperty::getType()`: `reflection_type_factory` over
