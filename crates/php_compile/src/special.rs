@@ -35,7 +35,7 @@ use php_heap::{Key, Zval, ZvalType, numeric_prefix};
 use php_unit::Opcode;
 
 use crate::CompileError;
-use crate::emit::{Emit, Where, truth};
+use crate::emit::{CastTo, Emit, Where, truth};
 use php_syntax::tree;
 
 /// What php's compiler makes of one name in the table.
@@ -80,11 +80,16 @@ pub(crate) enum Special {
     /// which is what `clone $o` and `clone($o)` both are; two arguments
     /// or none is the call to php 8.5's `clone()` function.
     Clone,
+    /// `zend_compile_func_sprintf`: a constant format under 256 bytes of
+    /// `%s`, `%d` and `%%` alone, with one argument for each placeholder,
+    /// is a rope of its pieces, a `%d` cast to `int` first; anything else
+    /// is the call.
+    Sprintf,
     /// A shape that is an opcode of its own (`ZEND_BOOL`, `ZEND_CAST`,
     /// `ZEND_GET_CLASS`,
     /// `ZEND_GET_CALLED_CLASS`, `ZEND_GET_TYPE`, `ZEND_FUNC_NUM_ARGS`,
-    /// `ZEND_FUNC_GET_ARGS`, `ZEND_ARRAY_KEY_EXISTS`, the ropes of
-    /// `sprintf`) and has no kernel here yet: the ordinary call.
+    /// `ZEND_FUNC_GET_ARGS`, `ZEND_ARRAY_KEY_EXISTS`) and has no kernel
+    /// here yet: the ordinary call.
     Opcode,
 }
 
@@ -144,7 +149,7 @@ pub(crate) const TABLE: &[(&[u8], Special)] = &[
     (b"func_get_args", Special::Opcode),
     (b"array_slice", Special::Opcode),
     (b"array_key_exists", Special::Opcode),
-    (b"sprintf", Special::Opcode),
+    (b"sprintf", Special::Sprintf),
     (b"clone", Special::Clone),
 ];
 
@@ -209,6 +214,7 @@ impl Emit<'_> {
             Some(Special::InArray) => self.in_array(arguments),
             Some(Special::CallUserFuncArray) => self.call_user_func_array(arguments),
             Some(Special::CallUserFunc) => self.call_user_func(arguments),
+            Some(Special::Sprintf) => self.sprintf(arguments),
             Some(Special::Opcode) | None => Ok(None),
         }
     }
@@ -238,6 +244,7 @@ impl Emit<'_> {
                 | Special::InArray
                 | Special::CallUserFuncArray
                 | Special::CallUserFunc
+                | Special::Sprintf
                 | Special::Opcode,
             )
             | None => Ok(None),
@@ -258,6 +265,91 @@ impl Emit<'_> {
             return Ok(Some(Where::Constant(length(s.len()))));
         }
         Ok(Some(self.emit_unary(Opcode::Strlen, value, 0)))
+    }
+
+    /// `zend_compile_func_sprintf` (`Z/Zend/zend_compile.c:4859`): the
+    /// format folded (`zend_eval_const_expr`) to a string under 256
+    /// bytes whose every `%` opens `%s`, `%d` or `%%`, with as many
+    /// arguments after it as it has placeholders; else the call, so an
+    /// argument count that does not match is sprintf's own
+    /// `ArgumentCountError`. The empty format is the empty string. The
+    /// arguments are compiled first, as a call's would be, and then each
+    /// piece is one element of a rope in order: the text between
+    /// placeholders a constant, the first `%` of a `%%` kept in it; a
+    /// `%s` the argument, a constant converted to its string here and an
+    /// array cast as the request serves it; a `%d` the argument cast to `int` just
+    /// before its element. So a value that will not convert is raised
+    /// where the call stands, with no frame of sprintf's.
+    ///
+    /// ```php
+    /// $n = "7"; var_dump(sprintf("%s-%d-100%%", "a", $n), sprintf(""), sprintf("%s", 1.5));
+    /// try { sprintf("%s/%s", "x", new stdClass); } catch (Error $e) { echo $e->getMessage(), " at ", count($e->getTrace()), "\n"; }
+    /// try { sprintf("%s/%s", "x"); } catch (ArgumentCountError $e) { echo $e->getMessage(), " at ", count($e->getTrace()), "\n"; }
+    /// ```
+    /// ```expect
+    /// string(8) "a-7-100%"
+    /// string(0) ""
+    /// string(3) "1.5"
+    /// Object of class stdClass could not be converted to string at 0
+    /// 3 arguments are required, 2 given at 1
+    /// ```
+    fn sprintf(&mut self, arguments: &[tree::Expr]) -> Result<Option<Where>, CompileError> {
+        let Some((format, values)) = arguments.split_first() else {
+            return Ok(None);
+        };
+        let Some(format) = self.eval_const(*format)? else {
+            return Ok(None);
+        };
+        let Some(format) = format.as_str().map(|s| s.bytes().to_vec()) else {
+            return Ok(None);
+        };
+        if format.len() >= 256 {
+            return Ok(None);
+        }
+        let Some(pieces) = sprintf_pieces(&format) else {
+            return Ok(None);
+        };
+        let placeholders = pieces
+            .iter()
+            .filter(|piece| !matches!(piece, Piece::Text(..)))
+            .count();
+        if placeholders != values.len() {
+            return Ok(None);
+        }
+        if format.is_empty() {
+            return Ok(Some(Where::Constant(self.string(b"")?)));
+        }
+        let mut compiled = Vec::with_capacity(values.len());
+        for value in values {
+            compiled.push(self.expr(*value)?);
+        }
+        // The counts matched above, so every placeholder has its value.
+        let mut compiled = compiled.into_iter();
+        let (mut count, mut init_at) = (0u32, 0usize);
+        for piece in pieces {
+            let element = match piece {
+                Piece::Text(from, to) => Where::Constant(self.string(&format[from..to])?),
+                Piece::Str | Piece::Long => {
+                    let Some(value) = compiled.next() else {
+                        break;
+                    };
+                    match (piece, value) {
+                        (Piece::Long, value) => self.emit_cast(value, CastTo::Long),
+                        (_, Where::Constant(constant)) => match self.stringified(constant)? {
+                            Some(text) => Where::Constant(text),
+                            None => self.emit_cast(Where::Constant(constant), CastTo::Str),
+                        },
+                        (_, value) => value,
+                    }
+                }
+            };
+            let at = self.rope_add(count, element);
+            if count == 0 {
+                init_at = at;
+            }
+            count += 1;
+        }
+        Ok(Some(self.rope_finalize(count, init_at)))
     }
 
     /// [`Self::strlen`]'s constant arm alone: the length of a constant
@@ -548,4 +640,45 @@ fn is_numeric(bytes: &[u8]) -> bool {
 /// it is written as.
 fn length(len: usize) -> Zval {
     Zval::long(i64::try_from(len).unwrap_or(i64::MAX))
+}
+
+/// One piece of a format `zend_compile_func_sprintf` takes: text between
+/// placeholders, as a range of the format, or a placeholder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Piece {
+    Text(usize, usize),
+    Str,
+    Long,
+}
+
+/// `zend_compile_func_sprintf`'s two walks over the format: none where a
+/// `%` ends it or opens anything but `s`, `d` or `%`; else the pieces in
+/// order, a `%%`'s first `%` kept in the text before it and its second
+/// dropped, and no empty text.
+fn sprintf_pieces(format: &[u8]) -> Option<Vec<Piece>> {
+    let mut pieces = Vec::new();
+    let (mut p, mut offset) = (0usize, 0usize);
+    while let Some(found) = format[p..].iter().position(|&b| b == b'%') {
+        let at = p + found;
+        let q = at + 1;
+        let placeholder = match format.get(q)? {
+            b's' => Some(Piece::Str),
+            b'd' => Some(Piece::Long),
+            b'%' => None,
+            _ => return None,
+        };
+        let text_end = if placeholder.is_none() { q } else { at };
+        if text_end != offset {
+            pieces.push(Piece::Text(offset, text_end));
+        }
+        if let Some(placeholder) = placeholder {
+            pieces.push(placeholder);
+        }
+        p = q + 1;
+        offset = p;
+    }
+    if offset != format.len() {
+        pieces.push(Piece::Text(offset, format.len()));
+    }
+    Some(pieces)
 }
