@@ -44,6 +44,7 @@ use crate::output::Output;
 use crate::virtual_cwd::RealpathCache;
 pub use crate::virtual_cwd::Resolve;
 
+mod hold;
 mod hooks;
 mod lazy;
 mod linking;

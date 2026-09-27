@@ -4047,12 +4047,9 @@ pub(crate) fn unset_dim(
             // after it: a handler that unset the container took the last
             // owner, and the table is destroyed here rather than
             // deleted from.
-            let held = array.to_value();
-            req.addref(&held);
+            let held = req.take_hold(array.to_value());
             let n = double_to_long(req, f);
-            let alone = a.refcount() <= 1;
-            req.release(held);
-            if alone || req.is_pending() {
+            if req.let_go(held).freed() || req.is_pending() {
                 return Ok(());
             }
             php_heap::Key::Long(n)
