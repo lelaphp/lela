@@ -27,18 +27,17 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 use php_heap::{Fatal, FrameRef};
-use php_unit::decl::{
-    ClassDecl, ClassFlags, ClassKind, DynamicProperties, EnumBacking, FunctionDecl, MethodDecl,
-    Name, Parameter, ParameterDefault, Type, Visibility,
-};
+use php_macros::php_class;
 use php_unit::{OpArray, Opcode};
 
-use crate::api::abi::{CloneObj, Entry, NativeClassDecl, ObjectHandlers};
+use crate::api::abi::{CloneObj, Instance, ObjectHandlers, This};
 use crate::api::call::Function;
-use crate::api::raising::{Thrown, arg_count_error, arg_type_error, throw};
+use crate::api::raising::{Thrown, throw};
 use crate::api::request::Request;
 use crate::api::values::{Key, PhpArray, PhpObject, PhpString, TypeTag, Value};
+use crate::classes::{Exception, Throwable};
 use crate::exec::{self, CallState, FrameState};
+use crate::interfaces::Iterator;
 
 /// Where a generator's frame is: php's `execute_data`, and
 /// `ZEND_GENERATOR_CURRENTLY_RUNNING` as the one state its frame is on
@@ -83,7 +82,7 @@ enum Delegated {
 /// `zend_generator`'s payload: the frame, the current value and key,
 /// what the body returned, where `send()` writes, the auto-key, the
 /// delegated values, the delegation tree's links and the flags.
-pub(crate) struct Generator {
+pub(crate) struct ZendGenerator {
     execution: Execution,
     /// `generator->func`: what `__debugInfo` and `ReflectionGenerator`
     /// name.
@@ -116,11 +115,11 @@ pub(crate) struct Generator {
     destroying: bool,
 }
 
-impl Default for Generator {
+impl Default for ZendGenerator {
     /// `zend_generator_create`: the key "will be incremented on first
     /// use, so it'll start at 0", and `retval` and `values` undefined.
-    fn default() -> Generator {
-        Generator {
+    fn default() -> ZendGenerator {
+        ZendGenerator {
             execution: Execution::Closed,
             function: None,
             value: Value::undef(),
@@ -192,7 +191,7 @@ impl ObjectHandlers for GeneratorHandlers {
     /// which keeps what they hold alive through a collection and frees
     /// nothing early.
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
-        let Some(generator) = object.native::<Generator>(req) else {
+        let Some(generator) = object.native::<ZendGenerator>(req) else {
             return;
         };
         visit(generator.value);
@@ -216,168 +215,18 @@ pub(crate) fn is_generator(req: &Request, object: PhpObject) -> bool {
     std::ptr::addr_eq(req.handlers_of(object.class()), &raw const GENERATOR)
 }
 
-fn new_generator(
-    heap: &mut php_heap::Heap,
-    class: u32,
-    slots: u32,
-) -> Result<php_heap::Obj, Fatal> {
-    heap.object_with(class, slots, Generator::default())
-}
-
-/// `final class Generator implements Iterator` and
-/// `class ClosedGeneratorException extends Exception`, in the stub's
-/// order; the second is what a generator waiting on one that was torn
-/// down raises.
-///
-/// ```php
-/// function g() { yield 1; }
-/// $g = g();
-/// var_dump($g instanceof Iterator, $g instanceof Traversable, get_class($g));
-/// try { clone $g; } catch (Error $e) { echo $e->getMessage(), "\n"; }
-/// var_dump(new ClosedGeneratorException("x") instanceof Exception);
-/// ```
-/// ```expect
-/// bool(true)
-/// bool(true)
-/// string(9) "Generator"
-/// Trying to clone an uncloneable object of class Generator
-/// bool(true)
-/// ```
-pub(crate) fn classes() -> Vec<NativeClassDecl> {
-    vec![
-        (
-            generator_class(),
-            generator_methods(),
-            Some(&GENERATOR),
-            Some(new_generator as crate::api::abi::NativeNew),
-        ),
-        (
-            ClassDecl {
-                parent: Some(Name::from("Exception")),
-                ..class(b"ClosedGeneratorException")
-            },
-            Vec::new(),
-            None,
-            None,
-        ),
-    ]
-}
-
-fn class(name: &[u8]) -> ClassDecl {
-    ClassDecl {
-        name: Name(name.into()),
-        kind: ClassKind::Class,
-        flags: ClassFlags::default(),
-        parent: None,
-        interfaces: Vec::new(),
-        traits: Vec::new(),
-        adaptations: Vec::new(),
-        backing: EnumBacking::Pure,
-        constants: Vec::new(),
-        properties: Vec::new(),
-        methods: Vec::new(),
-        attributes: Vec::new(),
-        doc_comment: None,
-        file: Name(Box::new([])),
-        line: 0,
-        end_line: 0,
-    }
-}
-
-/// `@strict-properties` is `ZEND_ACC_NO_DYNAMIC_PROPERTIES`.
-fn generator_class() -> ClassDecl {
-    ClassDecl {
-        flags: ClassFlags {
-            is_final: true,
-            not_serializable: true,
-            dynamic_properties: DynamicProperties::Forbidden,
-            ..ClassFlags::default()
-        },
-        interfaces: vec![Name::from("Iterator")],
-        ..class(b"Generator")
-    }
-}
-
-fn generator_methods() -> Vec<(MethodDecl, Entry)> {
-    vec![
-        (method(b"rewind", Vec::new(), Type::Void), rewind as Entry),
-        (method(b"valid", Vec::new(), Type::Bool), valid as Entry),
-        (
-            method(b"current", Vec::new(), Type::Mixed),
-            current_value as Entry,
-        ),
-        (method(b"key", Vec::new(), Type::Mixed), key as Entry),
-        (method(b"next", Vec::new(), Type::Void), next as Entry),
-        (
-            method(b"send", vec![parameter(b"value", Type::Mixed)], Type::Mixed),
-            send as Entry,
-        ),
-        (
-            method(
-                b"throw",
-                vec![parameter(
-                    b"exception",
-                    Type::Named(Name::from("Throwable")),
-                )],
-                Type::Mixed,
-            ),
-            throw_into as Entry,
-        ),
-        (
-            method(b"getReturn", Vec::new(), Type::Mixed),
-            get_return as Entry,
-        ),
-        (
-            method(b"__debugInfo", Vec::new(), Type::Array),
-            debug_info as Entry,
-        ),
-    ]
-}
-
-fn method(name: &[u8], parameters: Vec<Parameter>, returns: Type) -> MethodDecl {
-    MethodDecl {
-        function: FunctionDecl {
-            name: Name(name.into()),
-            parameters,
-            return_type: Some(returns),
-            returns_by_ref: false,
-            is_generator: false,
-            attributes: Vec::new(),
-            doc_comment: None,
-            file: Name(Box::new([])),
-            line: 0,
-            end_line: 0,
-            frameless: Vec::new(),
-        },
-        visibility: Visibility::Public,
-        is_instance: true,
-        is_abstract: false,
-        is_final: false,
-        tentative_return: false,
-    }
-}
-
-fn parameter(name: &[u8], ty: Type) -> Parameter {
-    Parameter {
-        name: Name(name.into()),
-        ty: Some(ty),
-        by_ref: false,
-        prefer_ref: false,
-        promoted: false,
-        variadic: false,
-        default: ParameterDefault::None,
-        attributes: Vec::new(),
-    }
-}
-
 /// `f` over the payload of `object`; none for an object that has none.
-fn with<R>(req: &mut Request, object: PhpObject, f: impl FnOnce(&mut Generator) -> R) -> Option<R> {
-    object.native_mut::<Generator>(req).map(f)
+fn with<R>(
+    req: &mut Request,
+    object: PhpObject,
+    f: impl FnOnce(&mut ZendGenerator) -> R,
+) -> Option<R> {
+    object.native_mut::<ZendGenerator>(req).map(f)
 }
 
 /// A read of the payload.
-fn read<R>(req: &Request, object: PhpObject, f: impl FnOnce(&Generator) -> R) -> Option<R> {
-    object.native::<Generator>(req).map(f)
+fn read<R>(req: &Request, object: PhpObject, f: impl FnOnce(&ZendGenerator) -> R) -> Option<R> {
+    object.native::<ZendGenerator>(req).map(f)
 }
 
 /// `ZEND_GENERATOR_CURRENTLY_RUNNING`: a resumption holds the frame on
@@ -1618,29 +1467,6 @@ pub(crate) fn iterator_rewind(req: &mut Request, generator: PhpObject) -> Result
 
 // ----- the methods -----
 
-fn this_generator(req: &mut Request) -> Result<PhpObject, Thrown> {
-    req.this()
-        .filter(|this| this.native::<Generator>(req).is_some())
-        .ok_or_else(|| {
-            throw(
-                req,
-                "Error",
-                "Generator method called with no generator receiver",
-            )
-        })
-}
-
-fn no_arguments(req: &mut Request) -> Result<(), Thrown> {
-    let count = req.argument_count();
-    if count == 0 {
-        return Ok(());
-    }
-    Err(arg_count_error(
-        req,
-        &format!("exactly 0 arguments, {count} given"),
-    ))
-}
-
 /// `RETURN_COPY_DEREF` of `value` where it is set, `null` where it is
 /// not.
 fn copy_deref(req: &mut Request, value: Value) -> Value {
@@ -1652,277 +1478,296 @@ fn copy_deref(req: &mut Request, value: Value) -> Value {
     value
 }
 
-/// `Generator::rewind()`.
-fn rewind(req: &mut Request) -> Result<Value, Thrown> {
-    no_arguments(req)?;
-    let this = this_generator(req)?;
-    iterator_rewind(req, this)?;
-    Ok(Value::null())
-}
-
-/// `Generator::valid()`: whether the generator has not finished.
-fn valid(req: &mut Request) -> Result<Value, Thrown> {
-    no_arguments(req)?;
-    let this = this_generator(req)?;
-    ensure_initialized(req, this)?;
-    let _ = current(req, this);
-    Ok(Value::bool(has_frame(req, this)))
-}
-
-/// `Generator::current()`: the value the innermost generator it
-/// delegates to yielded last, `null` once it has finished.
-fn current_value(req: &mut Request) -> Result<Value, Thrown> {
-    no_arguments(req)?;
-    let this = this_generator(req)?;
-    ensure_initialized(req, this)?;
+/// The receiver's value past `root`'s: `null` once the generator has
+/// finished, and otherwise what `pick` reads off the innermost generator
+/// it delegates to, `RETURN_COPY_DEREF` where it is set.
+fn yielded_now(req: &mut Request, this: PhpObject, pick: fn(&ZendGenerator) -> Value) -> Value {
     let root = current(req, this);
     if !has_frame(req, this) {
-        return Ok(Value::null());
+        return Value::null();
     }
-    let value = read(req, root, |g| g.value).unwrap_or_else(Value::undef);
-    Ok(copy_deref(req, value))
+    let value = read(req, root, pick).unwrap_or_else(Value::undef);
+    copy_deref(req, value)
 }
 
-/// `Generator::key()`: the key beside [`current_value`]'s value; an
-/// integer counted up from zero where the `yield` wrote none, past the
-/// largest integer key written.
+/// `final class Generator implements Iterator`, `@strict-properties`
+/// and `@not-serializable`, its methods in the stub's order over the
+/// [`ZendGenerator`] its objects carry and [`GeneratorHandlers`].
 ///
 /// ```php
-/// function g() { yield 'a'; yield 5 => 'b'; yield 'c'; yield 'k' => 'd'; yield 'e'; }
-/// foreach (g() as $k => $v) echo "$k=$v ";
-/// ```
-/// ```expect
-/// 0=a 5=b 6=c k=d 7=e
-/// ```
-fn key(req: &mut Request) -> Result<Value, Thrown> {
-    no_arguments(req)?;
-    let this = this_generator(req)?;
-    ensure_initialized(req, this)?;
-    let root = current(req, this);
-    if !has_frame(req, this) {
-        return Ok(Value::null());
-    }
-    let key = read(req, root, |g| g.key).unwrap_or_else(Value::undef);
-    Ok(copy_deref(req, key))
-}
-
-/// `Generator::next()`.
-fn next(req: &mut Request) -> Result<Value, Thrown> {
-    no_arguments(req)?;
-    let this = this_generator(req)?;
-    ensure_initialized(req, this)?;
-    resumed(req, this)?;
-    Ok(Value::null())
-}
-
-/// `Generator::send()`: a generator never resumed runs to its first
-/// `yield` first, which is then the `yield` the value is sent into;
-/// what comes back is the value yielded next.
-///
-/// ```php
-/// function g() { echo "start\n"; while (true) { $x = yield; if ($x === null) return; echo "got $x\n"; } }
+/// function g() { yield 1; }
 /// $g = g();
-/// $g->send('a');
-/// $g->send('b');
-/// var_dump($g->send(null), $g->valid());
+/// var_dump($g instanceof Iterator, $g instanceof Traversable, get_class($g));
+/// try { clone $g; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(new ClosedGeneratorException("x") instanceof Exception);
 /// ```
 /// ```expect
-/// start
-/// got a
-/// got b
-/// NULL
-/// bool(false)
+/// bool(true)
+/// bool(true)
+/// string(9) "Generator"
+/// Trying to clone an uncloneable object of class Generator
+/// bool(true)
 /// ```
-fn send(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count != 1 {
-        return Err(arg_count_error(
-            req,
-            &format!("exactly 1 argument, {count} given"),
-        ));
+///
+/// Its methods walk it by hand as `foreach` walks it through its
+/// iterator functions:
+///
+/// ```php
+/// function g() { yield 'a' => 1; yield 'b' => 2; }
+/// $g = g();
+/// $g->rewind();
+/// var_dump($g->valid(), $g->key(), $g->current());
+/// $g->next();
+/// var_dump($g->key(), $g->current());
+/// $g->next();
+/// var_dump($g->valid(), $g->current(), $g->key());
+/// ```
+/// ```expect
+/// bool(true)
+/// string(1) "a"
+/// int(1)
+/// string(1) "b"
+/// int(2)
+/// bool(false)
+/// NULL
+/// NULL
+/// ```
+#[php_class(
+    final,
+    not_serializable,
+    dynamic_properties = forbidden,
+    implements(Iterator),
+    payload = ZendGenerator,
+    handlers = GENERATOR
+)]
+pub(crate) struct Generator;
+
+#[php_class]
+impl Generator {
+    /// `Generator::rewind()`.
+    fn rewind(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
+        iterator_rewind(req, this.object())
     }
-    let value = req.argument(1).unwrap_or_default();
-    let this = this_generator(req)?;
-    ensure_initialized(req, this)?;
-    if !has_frame(req, this) {
-        return Ok(Value::null());
+
+    /// `Generator::valid()`: whether the generator has not finished.
+    fn valid(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let this = this.object();
+        ensure_initialized(req, this)?;
+        let _ = current(req, this);
+        Ok(has_frame(req, this))
     }
-    let root = current(req, this);
-    let target = read(req, root, |g| match g.execution {
-        Execution::Running => None,
-        _ => g.send_target,
-    })
-    .flatten();
-    if let Some(slot) = target {
-        let sent = value.deref();
-        req.addref(&sent);
-        let old = with(req, root, |g| match &mut g.execution {
-            Execution::Suspended(suspended) => {
-                let old = suspended.slots.slot(php_heap::Slot(slot));
-                suspended.slots.set(php_heap::Slot(slot), sent.to_zval());
-                Some(Value::of_zval(old))
-            }
-            _ => None,
+
+    /// `Generator::current()`: the value the innermost generator it
+    /// delegates to yielded last, `null` once it has finished.
+    fn current(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+        let this = this.object();
+        ensure_initialized(req, this)?;
+        Ok(yielded_now(req, this, |g| g.value))
+    }
+
+    /// `Generator::key()`: the key beside [`Generator::current`]'s value; an
+    /// integer counted up from zero where the `yield` wrote none, past the
+    /// largest integer key written.
+    ///
+    /// ```php
+    /// function g() { yield 'a'; yield 5 => 'b'; yield 'c'; yield 'k' => 'd'; yield 'e'; }
+    /// foreach (g() as $k => $v) echo "$k=$v ";
+    /// ```
+    /// ```expect
+    /// 0=a 5=b 6=c k=d 7=e
+    /// ```
+    fn key(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+        let this = this.object();
+        ensure_initialized(req, this)?;
+        Ok(yielded_now(req, this, |g| g.key))
+    }
+
+    /// `Generator::next()`.
+    fn next(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
+        let this = this.object();
+        ensure_initialized(req, this)?;
+        resumed(req, this)
+    }
+
+    /// `Generator::send()`: a generator never resumed runs to its first
+    /// `yield` first, which is then the `yield` the value is sent into;
+    /// what comes back is the value yielded next.
+    ///
+    /// ```php
+    /// function g() { echo "start\n"; while (true) { $x = yield; if ($x === null) return; echo "got $x\n"; } }
+    /// $g = g();
+    /// $g->send('a');
+    /// $g->send('b');
+    /// var_dump($g->send(null), $g->valid());
+    /// ```
+    /// ```expect
+    /// start
+    /// got a
+    /// got b
+    /// NULL
+    /// bool(false)
+    /// ```
+    fn send(req: &mut Request, this: This<Self>, value: Value) -> Result<Value, Thrown> {
+        let this = this.object();
+        ensure_initialized(req, this)?;
+        if !has_frame(req, this) {
+            return Ok(Value::null());
+        }
+        let root = current(req, this);
+        let target = read(req, root, |g| match g.execution {
+            Execution::Running => None,
+            _ => g.send_target,
         })
         .flatten();
-        match old {
-            Some(old) => req.release(old),
-            None => req.release(sent),
-        }
-    }
-    resumed(req, this)?;
-    let root = current(req, this);
-    if !has_frame(req, this) {
-        return Ok(Value::null());
-    }
-    let value = read(req, root, |g| g.value).unwrap_or_else(Value::undef);
-    Ok(copy_deref(req, value))
-}
-
-/// `Generator::throw()`: the throwable raised at the `yield` the
-/// innermost generator stands at, and the value yielded next handed
-/// back; over a closed generator it is raised where the call stands.
-///
-/// ```php
-/// function g() { try { yield 1; } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; yield 2; } }
-/// $g = g();
-/// var_dump($g->current(), $g->throw(new Exception("e")));
-/// function h() { yield 1; }
-/// try { h()->throw(new Exception("x")); } catch (Exception $e) { echo "out ", $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// caught e
-/// int(1)
-/// int(2)
-/// out x
-/// ```
-fn throw_into(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count != 1 {
-        return Err(arg_count_error(
-            req,
-            &format!("exactly 1 argument, {count} given"),
-        ));
-    }
-    let given = req.argument(1).unwrap_or_default().deref();
-    let throwable = given.as_object().copied().filter(|object| {
-        req.class_named(b"Throwable")
-            .is_some_and(|throwable| req.instance_of(object.class(), throwable))
-    });
-    let Some(throwable) = throwable else {
-        let named = given.as_object().map_or_else(
-            || String::from(given.type_name()),
-            |object| req.class_name(object.class()),
-        );
-        return Err(arg_type_error(
-            req,
-            1,
-            &format!("be of type Throwable, {named} given"),
-        ));
-    };
-    req.addref(&throwable.as_value());
-    let this = this_generator(req)?;
-    if let Err(thrown) = ensure_initialized(req, this) {
-        req.release(throwable.as_value());
-        return Err(thrown);
-    }
-    if !has_frame(req, this) {
-        return Err(Thrown::of(Some(throwable)));
-    }
-    let root = current(req, this);
-    if is_running(req, root) {
-        req.release(throwable.as_value());
-        return Err(throw(
-            req,
-            "Error",
-            "Cannot resume an already running generator",
-        ));
-    }
-    req.leave_pending(&Thrown::of(Some(throwable)));
-    throw_into_generator(req, root);
-    resumed(req, this)?;
-    let root = current(req, this);
-    if !has_frame(req, this) {
-        return Ok(Value::null());
-    }
-    let value = read(req, root, |g| g.value).unwrap_or_else(Value::undef);
-    Ok(copy_deref(req, value))
-}
-
-/// `Generator::getReturn()`.
-///
-/// ```php
-/// function g() { yield 1; return 3; }
-/// $g = g();
-/// foreach ($g as $v) {}
-/// var_dump($g->getReturn());
-/// try { g()->getReturn(); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// int(3)
-/// Cannot get return value of a generator that hasn't returned
-/// ```
-fn get_return(req: &mut Request) -> Result<Value, Thrown> {
-    no_arguments(req)?;
-    let this = this_generator(req)?;
-    ensure_initialized(req, this)?;
-    let retval = read(req, this, |g| g.retval).unwrap_or_else(Value::undef);
-    if retval.tag() == TypeTag::Undef {
-        return Err(throw(
-            req,
-            "Exception",
-            "Cannot get return value of a generator that hasn't returned",
-        ));
-    }
-    req.addref(&retval);
-    Ok(retval)
-}
-
-/// `Generator::__debugInfo()`: the function the generator runs, as
-/// `Class::method` for a method.
-///
-/// ```php
-/// function g() { yield; }
-/// class C { function m() { yield; } }
-/// var_dump(g(), (new C)->m());
-/// ```
-/// ```expect
-/// object(Generator)#1 (1) {
-///   ["function"]=>
-///   string(1) "g"
-/// }
-/// object(Generator)#3 (1) {
-///   ["function"]=>
-///   string(4) "C::m"
-/// }
-/// ```
-fn debug_info(req: &mut Request) -> Result<Value, Thrown> {
-    no_arguments(req)?;
-    let this = this_generator(req)?;
-    let mut out = PhpArray::new(req)?;
-    let function = read(req, this, |g| g.function).flatten();
-    let name = function.map(|function| {
-        let name = req
-            .function_decl(function)
-            .map(|decl| decl.name.0.to_vec())
-            .unwrap_or_default();
-        match req.method_class(function) {
-            Some(class) => {
-                let mut full = req.class_name_bytes(class);
-                full.extend_from_slice(b"::");
-                full.extend_from_slice(&name);
-                full
+        if let Some(slot) = target {
+            let sent = value;
+            req.addref(&sent);
+            let old = with(req, root, |g| match &mut g.execution {
+                Execution::Suspended(suspended) => {
+                    let old = suspended.slots.slot(php_heap::Slot(slot));
+                    suspended.slots.set(php_heap::Slot(slot), sent.to_zval());
+                    Some(Value::of_zval(old))
+                }
+                _ => None,
+            })
+            .flatten();
+            match old {
+                Some(old) => req.release(old),
+                None => req.release(sent),
             }
-            None => name,
         }
-    });
-    if let Some(name) = name {
-        let key = Key::from_string(PhpString::new(req, b"function")?);
-        let value = Value::string(PhpString::new(req, &name)?);
-        out.set(req, key, value)?;
+        resumed(req, this)?;
+        Ok(yielded_now(req, this, |g| g.value))
     }
-    Ok(Value::array(out))
+
+    /// `Generator::throw()`: the throwable raised at the `yield` the
+    /// innermost generator stands at, and the value yielded next handed
+    /// back; over a closed generator it is raised where the call stands.
+    ///
+    /// ```php
+    /// function g() { try { yield 1; } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; yield 2; } }
+    /// $g = g();
+    /// var_dump($g->current(), $g->throw(new Exception("e")));
+    /// function h() { yield 1; }
+    /// try { h()->throw(new Exception("x")); } catch (Exception $e) { echo "out ", $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// caught e
+    /// int(1)
+    /// int(2)
+    /// out x
+    /// ```
+    fn throw(
+        req: &mut Request,
+        this: This<Self>,
+        exception: Instance<Throwable>,
+    ) -> Result<Value, Thrown> {
+        let throwable = exception.object();
+        req.addref(&throwable.as_value());
+        let this = this.object();
+        if let Err(thrown) = ensure_initialized(req, this) {
+            req.release(throwable.as_value());
+            return Err(thrown);
+        }
+        if !has_frame(req, this) {
+            return Err(Thrown::of(Some(throwable)));
+        }
+        let root = current(req, this);
+        if is_running(req, root) {
+            req.release(throwable.as_value());
+            return Err(throw(
+                req,
+                "Error",
+                "Cannot resume an already running generator",
+            ));
+        }
+        req.leave_pending(&Thrown::of(Some(throwable)));
+        throw_into_generator(req, root);
+        resumed(req, this)?;
+        Ok(yielded_now(req, this, |g| g.value))
+    }
+
+    /// `Generator::getReturn()`.
+    ///
+    /// ```php
+    /// function g() { yield 1; return 3; }
+    /// $g = g();
+    /// foreach ($g as $v) {}
+    /// var_dump($g->getReturn());
+    /// try { g()->getReturn(); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// int(3)
+    /// Cannot get return value of a generator that hasn't returned
+    /// ```
+    fn getReturn(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+        let this = this.object();
+        ensure_initialized(req, this)?;
+        let retval = read(req, this, |g| g.retval).unwrap_or_else(Value::undef);
+        if retval.tag() == TypeTag::Undef {
+            return Err(throw(
+                req,
+                "Exception",
+                "Cannot get return value of a generator that hasn't returned",
+            ));
+        }
+        req.addref(&retval);
+        Ok(retval)
+    }
+
+    /// `Generator::__debugInfo()`: the function the generator runs, as
+    /// `Class::method` for a method.
+    ///
+    /// ```php
+    /// function g() { yield; }
+    /// class C { function m() { yield; } }
+    /// var_dump(g(), (new C)->m());
+    /// ```
+    /// ```expect
+    /// object(Generator)#1 (1) {
+    ///   ["function"]=>
+    ///   string(1) "g"
+    /// }
+    /// object(Generator)#3 (1) {
+    ///   ["function"]=>
+    ///   string(4) "C::m"
+    /// }
+    /// ```
+    fn __debugInfo(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        let this = this.object();
+        let mut out = PhpArray::new(req)?;
+        let function = read(req, this, |g| g.function).flatten();
+        let name = function.map(|function| {
+            let name = req
+                .function_decl(function)
+                .map(|decl| decl.name.0.to_vec())
+                .unwrap_or_default();
+            match req.method_class(function) {
+                Some(class) => {
+                    let mut full = req.class_name_bytes(class);
+                    full.extend_from_slice(b"::");
+                    full.extend_from_slice(&name);
+                    full
+                }
+                None => name,
+            }
+        });
+        if let Some(name) = name {
+            let key = Key::from_string(PhpString::new(req, b"function")?);
+            let value = Value::string(PhpString::new(req, &name)?);
+            out.set(req, key, value)?;
+        }
+        Ok(out)
+    }
 }
+
+/// `class ClosedGeneratorException extends Exception`, what a generator
+/// waiting on one that was torn down raises.
+#[php_class(extends(Exception))]
+pub(crate) struct ClosedGeneratorException;
+
+#[php_class]
+impl ClosedGeneratorException {}
 
 /// Whether `op` is a `YIELD` or a `YIELD_FROM` of a by-reference
 /// generator's op array: what the handler reads off the frame's

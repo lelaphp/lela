@@ -373,7 +373,14 @@ fn link_classes(extensions: &[Extension]) -> LinkedClasses {
     // and each method's entry is numbered in the order it is met.
     let mut zend = crate::interfaces::classes();
     zend.extend(crate::classes::zend_classes());
-    zend.extend(crate::fiber::classes());
+    // `zend_register_fiber_ce` after the classes Zend declares before it.
+    zend.extend(
+        crate::api::abi::ExtensionBuilder::default()
+            .class::<crate::fiber::Fiber>()
+            .class::<crate::fiber::FiberError>()
+            .build("Core")
+            .classes,
+    );
     let mut classes: Vec<ClassDecl> = Vec::new();
     let mut handlers = Vec::new();
     let mut natives = Vec::new();

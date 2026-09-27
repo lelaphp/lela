@@ -488,24 +488,15 @@ pub(crate) fn zend_classes() -> Vec<NativeClassDecl> {
         .class::<CompileError>()
         .class::<ParseError>()
         .class::<RequestParseBodyException>()
+        .class::<Closure>()
+        // `zend_register_generator_ce` after `zend_register_closure_ce`.
+        .class::<crate::generator::Generator>()
+        .class::<crate::generator::ClosedGeneratorException>()
+        .class::<stdClass>()
+        .class::<UnitEnum>()
+        .class::<BackedEnum>()
         .build("Core")
         .classes;
-    classes.extend(
-        ExtensionBuilder::default()
-            .class::<Closure>()
-            .build("Core")
-            .classes,
-    );
-    // `zend_register_generator_ce` after `zend_register_closure_ce`.
-    classes.extend(crate::generator::classes());
-    classes.extend(
-        ExtensionBuilder::default()
-            .class::<stdClass>()
-            .class::<UnitEnum>()
-            .class::<BackedEnum>()
-            .build("Core")
-            .classes,
-    );
     classes.extend(crate::weakrefs::weakref_classes());
     // `zend_register_attribute_ce` after `zend_register_weakref_ce`.
     classes.extend(crate::attributes::classes());
