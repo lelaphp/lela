@@ -722,6 +722,20 @@ impl SplObjectStorage {
     /// string(47) "x:i:2;O:1:"C":0:{},O:8:"stdClass":0:{};m:a:0:{}"
     /// int(0)
     /// ```
+    ///
+    /// A row whose `__serialize` detaches that row moves the walk past
+    /// the row after it, as `zend_hash_move_forward_ex` steps.
+    ///
+    /// ```php
+    /// class C { function __construct(public $n) {} function __serialize(): array { global $s; if ($this->n == 1) unset($s[$this]); return ['n' => $this->n]; } }
+    /// $s = new SplObjectStorage; $keep = [];
+    /// foreach ([1, 2, 3] as $n) { $keep[] = $o = new C($n); $s[$o] = $n; }
+    /// echo $s->serialize(), "\n", count($s), "\n";
+    /// ```
+    /// ```expect
+    /// x:i:3;O:1:"C":1:{s:1:"n";i:1;},i:1;;O:1:"C":1:{s:1:"n";i:3;},i:3;;m:a:0:{}
+    /// 2
+    /// ```
     #[php(tentative)]
     fn serialize(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
         let this = this.object();
@@ -1639,11 +1653,13 @@ fn clone_storage(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thro
     clone_with(req, &object, copy)
 }
 
-/// `SplObjectStorage::serialize`'s walk over the storage, live by
-/// position as `zend_hash_move_forward_ex` walks it, so a row an
-/// earlier row's `__serialize` detached is not written and one it
-/// attached is. Each row's information is held across its write, php's
-/// `inf_copy`, and each object from its row on, in `held`, which the
+/// `SplObjectStorage::serialize`'s walk over the storage, live by a
+/// position of its own as `zend_hash_move_forward_ex` walks it, so a row
+/// an earlier row's `__serialize` detached is not written and one it
+/// attached is, and where a row's `__serialize` detached that row the
+/// step passes the row after it too. Each row's information is held
+/// across its write, php's `inf_copy`, given back after the step as php
+/// gives it back, and each object from its row on, in `held`, which the
 /// caller gives up once the walk is done.
 fn serialize_rows(
     req: &mut Request,
@@ -1651,24 +1667,23 @@ fn serialize_rows(
     out: &mut Vec<u8>,
     held: &mut Vec<PhpObject>,
 ) -> Result<(), Thrown> {
-    let mut from = 0;
-    loop {
-        let Some((at, object, inf)) = with(req, this, |s| s.row_at(from))? else {
-            return Ok(());
-        };
+    let mut pos = 0;
+    while let Some((_, object, inf)) = with(req, this, |s| s.row_at(pos))? {
         req.addref(&object.as_value());
         held.push(object);
-        req.addref(&inf);
+        let inf = Held::take(req, inf);
         let written = crate::serialized(req, object.as_value()).and_then(|object| {
             out.extend(object);
             out.push(b',');
-            crate::serialized(req, inf)
+            crate::serialized(req, inf.value())
         });
-        req.release(inf);
+        let next = with(req, this, |s| s.forward_from(pos));
+        inf.let_go(req);
         out.extend(written?);
         out.push(b';');
-        from = at + 1;
+        pos = next?;
     }
+    Ok(())
 }
 
 /// The body of `SplObjectStorage::unserialize` over one reader: `None`
