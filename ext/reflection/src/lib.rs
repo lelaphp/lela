@@ -74,6 +74,7 @@ use php_ext::attr::php_class;
 use php_ext::call::{
     Function, autoload, constant, eval_const_expr, lookup_class, lookup_function, new_object,
 };
+use php_ext::coerce::{Exponent, float_format};
 use php_ext::decl::{
     ClassConstDecl, ClassDecl, ClassKind, ConstExpr, EnumBacking, FunctionDecl, HookKind,
     MethodDecl, Name, Parameter, ParameterDefault, PropertyDecl, Type, Visibility,
@@ -4624,6 +4625,15 @@ fn kept_object(req: &Request, this: PhpObject) -> Option<PhpObject> {
     this.native::<Reflected>(req).and_then(|kept| kept.object)
 }
 
+/// `EG(precision)`, the `precision` ini entry, 14 where it does not read
+/// as a number.
+fn precision(req: &Request) -> i32 {
+    req.ini_get(b"precision")
+        .and_then(|text| std::str::from_utf8(text).ok())
+        .and_then(|text| text.trim().parse().ok())
+        .unwrap_or(14)
+}
+
 /// Core's classes and interfaces the reflectors extend, implement and
 /// hand out, named for `extends`, `implements` and the types that hold
 /// them.
@@ -5353,13 +5363,33 @@ fn constant_is_deprecated(req: &Request, name: &[u8]) -> bool {
         .any(|one| one.name.0.eq_ignore_ascii_case(b"Deprecated"))
 }
 
-/// `zval_get_string` for a constant's value as `_const_string` and
-/// `_class_const_string` print it: `Array` for an array, `Object` for
-/// an object, and the string a scalar casts to.
+/// A constant's value as `_const_string` and `_class_const_string`
+/// print it: `Array` for an array, `Object` for an object, a float
+/// through `smart_str_append_double` at `precision`, which raises
+/// nothing for `NAN` where a cast to string warns since 8.5, and
+/// `zval_get_string` for the rest.
+///
+/// ```php
+/// echo new ReflectionConstant('NAN'), new ReflectionConstant('M_PI'), new ReflectionConstant('PHP_FLOAT_MAX');
+/// class C { const F = NAN; const G = -INF; const H = 0.1 + 0.2; const I = 1e25; }
+/// echo new ReflectionClassConstant('C', 'F'), new ReflectionClassConstant('C', 'G'), new ReflectionClassConstant('C', 'H'), new ReflectionClassConstant('C', 'I');
+/// ini_set('precision', 3); echo new ReflectionConstant('M_PI');
+/// ```
+/// ```expect
+/// Constant [ <persistent> float NAN ] { NAN }
+/// Constant [ <persistent> float M_PI ] { 3.1415926535898 }
+/// Constant [ <persistent> float PHP_FLOAT_MAX ] { 1.7976931348623E+308 }
+/// Constant [ public float F ] { NAN }
+/// Constant [ public float G ] { -INF }
+/// Constant [ public float H ] { 0.3 }
+/// Constant [ public float I ] { 1.0E+25 }
+/// Constant [ <persistent> float M_PI ] { 3.14 }
+/// ```
 fn value_string(req: &mut Request, value: &Value) -> String {
     match value.deref().as_ref() {
         ValueRef::Array(_) => String::from("Array"),
         ValueRef::Object(_) => String::from("Object"),
+        ValueRef::Float(number) => float_format(number, precision(req), Exponent::Upper),
         _ => php_ext::coerce::to_string(req, value).map_or_else(
             |_| String::new(),
             |s| String::from_utf8_lossy(s.as_bytes()).into_owned(),
