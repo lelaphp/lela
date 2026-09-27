@@ -1229,6 +1229,7 @@ fn default_text(default: &ConstExpr) -> String {
         ConstExpr::ClassConstant { class, name, .. } => {
             format!("{}::{}", text(&class.0), text(&name.0))
         }
+        ConstExpr::ClassName { class, .. } => format!("{}::class", text(&class.0)),
         ConstExpr::EnumCase { class, case, .. } => format!("{}::{}", text(&class.0), text(&case.0)),
         ConstExpr::ScopeClass => String::from("__CLASS__"),
         _ => String::from("<expression>"),

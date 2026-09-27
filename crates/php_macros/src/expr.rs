@@ -222,7 +222,12 @@ fn primary(input: ParseStream<'_>) -> syn::Result<Tokens> {
     // The last `::` is member access and the segments before it are the
     // class, `\`-joined. An enum case is a class constant here: the engine
     // fetches the case object for it (`zend_enum_get_case`).
-    let (class, member) = (name(&class.join("\\")), name(member));
+    let class = name(&class.join("\\"));
+    // `C::class`, which names the class and no constant of it.
+    if member.eq_ignore_ascii_case("class") {
+        return Ok(quote!(#root::decl::ConstExpr::ClassName { class: #class, line: 0 }));
+    }
+    let member = name(member);
     Ok(quote!(#root::decl::ConstExpr::ClassConstant { class: #class, name: #member, line: 0 }))
 }
 

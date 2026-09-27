@@ -6001,6 +6001,9 @@ fn default_value_string(req: &mut Request, expr: &ConstExpr) -> String {
             String::from_utf8_lossy(&class.0),
             String::from_utf8_lossy(&name.0)
         ),
+        ConstExpr::ClassName { class, .. } => {
+            format!("{}::class", String::from_utf8_lossy(&class.0))
+        }
         ConstExpr::Unary { .. }
         | ConstExpr::Binary { .. }
         | ConstExpr::Dim { .. }
@@ -7080,6 +7083,10 @@ fn const_expr_string(expr: &php_ext::decl::ConstExpr) -> String {
             String::from_utf8_lossy(&class.0),
             String::from_utf8_lossy(&name.0)
         ),
+        // `SplFileObject::class`, as `setFileClass`'s stub writes it.
+        ConstExpr::ClassName { class, .. } => {
+            format!("{}::class", String::from_utf8_lossy(&class.0))
+        }
         ConstExpr::Array { elements, .. } if elements.is_empty() => String::from("[]"),
         // `ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401`: the stub's
         // operands with the operator between, as it wrote them.

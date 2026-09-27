@@ -284,6 +284,16 @@ pub enum ConstExpr {
         case: Name,
         line: u32,
     },
+    /// `class::class`, php's `ZEND_AST_CLASS_NAME`: the name of the class
+    /// as written, `self` and `parent` the scope the expression is
+    /// evaluated in and its parent's. A program's names fold to the
+    /// string where the scope is known, so what stays is `self` or
+    /// `parent` in a trait, a closure or code outside any function, and a
+    /// native's default written `SplFileObject::class`.
+    ClassName {
+        class: Name,
+        line: u32,
+    },
     Unary {
         op: Name,
         operand: Box<ConstExpr>,
@@ -374,6 +384,7 @@ impl ConstExpr {
             ConstExpr::Constant { line, .. }
             | ConstExpr::ClassConstant { line, .. }
             | ConstExpr::EnumCase { line, .. }
+            | ConstExpr::ClassName { line, .. }
             | ConstExpr::Unary { line, .. }
             | ConstExpr::Binary { line, .. }
             | ConstExpr::Array { line, .. }

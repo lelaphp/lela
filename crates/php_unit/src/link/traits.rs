@@ -817,7 +817,10 @@ fn unlined(expr: &ConstExpr) -> ConstExpr {
     fn clear(expr: &mut ConstExpr) {
         use ConstExpr as E;
         match expr {
-            E::Constant { line, .. } | E::ClassConstant { line, .. } | E::EnumCase { line, .. } => {
+            E::Constant { line, .. }
+            | E::ClassConstant { line, .. }
+            | E::EnumCase { line, .. }
+            | E::ClassName { line, .. } => {
                 *line = 0;
             }
             E::Unary { operand, line, .. } | E::Cast { operand, line, .. } => {

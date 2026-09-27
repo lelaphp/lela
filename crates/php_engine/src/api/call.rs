@@ -1540,6 +1540,7 @@ fn evaluate_node(
             let id = const_class(req, &class.0, scope)?;
             req.class_constant(id, &case.0)
         }
+        ConstExpr::ClassName { class, .. } => class_name_node(req, &class.0, scope),
         // `zend_ast_evaluate`'s `ZEND_AST_CONSTANT_CLASS` arm.
         ConstExpr::ScopeClass => {
             let name = scope
@@ -1635,6 +1636,68 @@ fn array_node(
         crate::ops::add_array_element(req, array, offset, value)?;
     }
     Ok(Value::array(array))
+}
+
+/// `zend_ast_evaluate`'s `ZEND_AST_CLASS_NAME` arm: `self` the scope's
+/// name and `parent` its parent's, php's `Error` where there is none,
+/// which names `self` whichever was written where no scope is; and a
+/// name written out the name itself, as
+/// `zend_get_default_from_internal_arg_info` folds a native's
+/// `SplFileObject::class`, with no class looked up.
+///
+/// ```php
+/// trait T { public $p = [self::class, parent::class]; }
+/// class P {}
+/// class C extends P { use T; }
+/// var_dump((new C)->p);
+/// $p = (new ReflectionMethod('SplFileInfo', 'setFileClass'))->getParameters()[0];
+/// var_dump($p->getDefaultValue(), $p->isDefaultValueConstant());
+/// echo $p, "\n";
+/// class D { use T; }
+/// try { new D; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// array(2) {
+///   [0]=>
+///   string(1) "C"
+///   [1]=>
+///   string(1) "P"
+/// }
+/// string(13) "SplFileObject"
+/// bool(false)
+/// Parameter #0 [ <optional> string $class = SplFileObject::class ]
+/// Cannot use "parent" when current class scope has no parent
+/// ```
+fn class_name_node(
+    req: &mut Request,
+    class: &[u8],
+    scope: Option<ClassId>,
+) -> Result<Value, Thrown> {
+    let parent = class.eq_ignore_ascii_case(b"parent");
+    let name = if parent || class.eq_ignore_ascii_case(b"self") {
+        let Some(scope) = scope else {
+            return Err(throw(
+                req,
+                "Error",
+                "Cannot use \"self\" when no class scope is active",
+            ));
+        };
+        let named = if parent {
+            req.class_parent(scope).ok_or_else(|| {
+                throw(
+                    req,
+                    "Error",
+                    "Cannot use \"parent\" when current class scope has no parent",
+                )
+            })?
+        } else {
+            scope
+        };
+        req.class_name_bytes(named)
+    } else {
+        class.to_vec()
+    };
+    Ok(Value::string(PhpString::new(req, &name)?))
 }
 
 /// `_IS_BOOL`, the type code a `(bool)` cast carries.

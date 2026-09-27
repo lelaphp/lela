@@ -6701,6 +6701,25 @@ impl Emit<'_> {
     /// string(1) "C"
     /// ```
     ///
+    /// `self::class` and `parent::class` where the scope is not known, a
+    /// closure's or a trait's, stay `ZEND_AST_CLASS_NAME` for the scope
+    /// that evaluates them:
+    ///
+    /// ```php
+    /// $f = function ($x = self::class, $y = PARENT::class) {};
+    /// foreach ((new ReflectionFunction($f))->getParameters() as $p) { echo $p, "\n"; }
+    /// try { $f(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// trait T { public $p = self::class; }
+    /// class C { use T; }
+    /// var_dump((new C)->p);
+    /// ```
+    /// ```expect
+    /// Parameter #0 [ <optional> $x = self::class ]
+    /// Parameter #1 [ <optional> $y = parent::class ]
+    /// Cannot use "self" when no class scope is active
+    /// string(1) "C"
+    /// ```
+    ///
     /// A property fetch's object is evaluated before the fetch is looked
     /// at, as `zend_eval_const_expr` walks it, so what the object
     /// refuses is refused first, and an attribute's argument is compiled
@@ -6787,8 +6806,9 @@ impl Emit<'_> {
                 // `zend_try_compile_const_expr_resolve_class_name` answers
                 // for: a class the program computes and `static` are
                 // php's compile-time fatals, and `self` or `parent`
-                // outside a class, whose scope is the includer's, waits
-                // on a constant expression that keeps the fetch type.
+                // where the scope is not known, in a trait, a closure or
+                // code outside any function, is kept for the scope that evaluates
+                // it (`zend_compile_const_expr_class_name`).
                 Scoped::ClassName { class } => {
                     if let Some(folded) = self.resolved_class_name(class)? {
                         return self.folded(folded, line);
@@ -6798,12 +6818,25 @@ impl Emit<'_> {
                             "(expression)::class cannot be used in constant expressions",
                         ));
                     };
-                    if class_fetch_type(self.text(token)) == FETCH_CLASS_STATIC {
-                        return Err(self.compile_error(
-                            "static::class cannot be used for compile-time class name resolution",
-                        ));
-                    }
-                    Err(self.unread("a `self::class` or `parent::class` outside a class"))
+                    // `self` or `parent` where the scope is not known
+                    // keeps `ZEND_AST_CLASS_NAME` with the fetch type in
+                    // place of the name, for the scope that evaluates it.
+                    let class: &[u8] = match class_fetch_type(self.text(token)) {
+                        FETCH_CLASS_STATIC => {
+                            return Err(self.compile_error(
+                                "static::class cannot be used for compile-time class name resolution",
+                            ));
+                        }
+                        FETCH_CLASS_SELF => b"self",
+                        FETCH_CLASS_PARENT => b"parent",
+                        _ => {
+                            return Err(self.fatal("InternalError: a class name that did not fold"));
+                        }
+                    };
+                    Ok(ConstExpr::ClassName {
+                        class: Name(class.into()),
+                        line,
+                    })
                 }
             },
             // `ZEND_AST_ARRAY` in a constant expression stays the tree
