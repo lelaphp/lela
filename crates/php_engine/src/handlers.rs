@@ -18567,6 +18567,22 @@ fn thrown_value(req: &mut Request, value: &Value) -> Thrown {
 /// ```expect exit=3
 /// a
 /// ```
+///
+/// The variable the clause names is written as an assignment writes
+/// it, strictly: bound to a typed property's cell, a throwable the type
+/// refuses is php's `TypeError`, raised from the clause.
+///
+/// ```php
+/// class T { public int $i = 42; }
+/// $t = new T; $ref = &$t->i;
+/// try { try { throw new Exception("ex"); } catch (Exception $ref) { echo "no\n"; } }
+/// catch (TypeError $e) { echo $e->getMessage(), " on line ", $e->getLine(), "\n"; }
+/// var_dump($t->i);
+/// ```
+/// ```expect
+/// Cannot assign Exception to reference held by property T::$i of type int on line 4
+/// int(42)
+/// ```
 pub(crate) fn catch<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -18595,7 +18611,13 @@ pub(crate) fn catch<T: Tier>(
     if op.out_type == OperandKind::Cv {
         let value = caught.as_value();
         if let Some(cell) = req.slot(frame, op.out).as_php_ref() {
-            req.reference_set(cell.heap(), value);
+            // `zend_assign_to_variable(ex, &tmp, IS_TMP_VAR, /* strict */
+            // 1)`: a cell a typed property is a source of takes the
+            // throwable only where every type holds it, with no
+            // coercion, and refuses it with php's `TypeError` otherwise.
+            if let Err(thrown) = req.assign_to_reference(cell.heap(), value, true) {
+                return threw(req, frame, &thrown);
+            }
         } else {
             let garbage = req.set_slot(frame, op.out, value);
             req.release(garbage);
