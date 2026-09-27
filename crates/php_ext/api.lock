@@ -623,6 +623,7 @@ values::PhpArray::get
 values::PhpArray::is_empty
 values::PhpArray::is_list
 values::PhpArray::is_recursive
+values::PhpArray::is_same
 values::PhpArray::iter
 values::PhpArray::len
 values::PhpArray::live_from
