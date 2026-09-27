@@ -858,16 +858,56 @@ pub(crate) fn verify_property_type(
     strict: bool,
 ) -> Result<Option<Value>, Thrown> {
     let held = value.deref();
-    match type_assignable(req, &held, ty, declaring, strict) {
-        Assignable::Yes => Ok(None),
+    match property_type_admits(req, &held, ty, declaring, strict)? {
+        Admitted::As => Ok(None),
+        Admitted::Converted(coerced) => Ok(Some(coerced)),
+        Admitted::Refused => Err(property_type_error(req, &held, ty, declaring, name)),
+    }
+}
+
+/// What a declared property type makes of a value, `i_zend_check_property_type`
+/// without the raise: the value as it is, the weak rule's conversion, or a
+/// refusal the caller words, since php words it by where the value came from.
+pub(crate) enum Admitted {
+    As,
+    Converted(Value),
+    Refused,
+}
+
+/// [`verify_property_type`]'s test alone, over a dereferenced value; the
+/// `Err` is only what a conversion itself threw.
+///
+/// Every typed property write reads it: a value the type holds as it is,
+/// one the weak rule converts, and one it refuses.
+///
+/// ```php
+/// class C { public int $i = 0; public ?string $s = null; }
+/// $c = new C; $c->i = 7; $c->s = 5;
+/// try { $c->i = "x"; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($c->i, $c->s);
+/// ```
+/// ```expect
+/// Cannot assign string to property C::$i of type int
+/// int(7)
+/// string(1) "5"
+/// ```
+pub(crate) fn property_type_admits(
+    req: &mut Request,
+    held: &Value,
+    ty: &php_unit::decl::Type,
+    declaring: crate::api::values::ClassId,
+    strict: bool,
+) -> Result<Admitted, Thrown> {
+    Ok(match type_assignable(req, held, ty, declaring, strict) {
+        Assignable::Yes => Admitted::As,
         Assignable::Coerce => {
-            match crate::api::coerce::scalar_type_hint(req, &held, ty.mask(), strict)? {
-                Some(coerced) => Ok(Some(coerced)),
-                None => Err(property_type_error(req, &held, ty, declaring, name)),
+            match crate::api::coerce::scalar_type_hint(req, held, ty.mask(), strict)? {
+                Some(coerced) => Admitted::Converted(coerced),
+                None => Admitted::Refused,
             }
         }
-        Assignable::No => Err(property_type_error(req, &held, ty, declaring, name)),
-    }
+        Assignable::No => Admitted::Refused,
+    })
 }
 
 /// What `i_zend_verify_type_assignable_zval`

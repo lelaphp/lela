@@ -369,7 +369,7 @@ fn settype(req: &mut Request) -> Result<Value, Thrown> {
         _ => return Err(arg_value_error(req, 2, "be a valid type")),
     };
     match given.as_ref() {
-        ValueRef::Reference(reference) => reference.set(req, converted),
+        ValueRef::Reference(reference) => reference.set(req, converted)?,
         _ => req.release(converted),
     }
     Ok(Value::bool(true))
@@ -684,7 +684,7 @@ fn is_callable(req: &mut Request) -> Result<Value, Thrown> {
     {
         let cell = *cell;
         let name = Value::string(callable_name(req, &value)?);
-        cell.set(req, name);
+        cell.set(req, name)?;
     }
     Ok(Value::bool(answer))
 }

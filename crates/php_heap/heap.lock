@@ -136,6 +136,7 @@ HeapHooks::gc_weakmap_entries
 HeapHooks::has_destructor
 HeapHooks::heap
 HeapHooks::out_of_memory
+HeapHooks::slot_source_gone
 HeapHooks::weakrefs_notify
 Host
 Host::Transfer
@@ -170,12 +171,16 @@ Obj::protect
 Obj::refcount
 Obj::set_destructor_called
 Obj::set_laziness
+Obj::set_slot_bit
 Obj::set_weakly_referenced
 Obj::slot
+Obj::slot_bit
 Obj::slot_ref
+Obj::slot_uninit
 Obj::slots
 Obj::unprotect
 ObjectId
+PropBit
 Readiness
 Ref
 Ref::addref
@@ -257,6 +262,7 @@ Zval::kind
 Zval::long
 Zval::null
 Zval::object
+Zval::prop_bit
 Zval::ptr
 Zval::reference
 Zval::resource
@@ -265,6 +271,7 @@ Zval::string
 ZvalRef
 ZvalRef::read
 ZvalRef::set_fe_pos
+ZvalRef::set_prop_bit
 ZvalRef::write
 ZvalType
 call_stack_bounds

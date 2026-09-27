@@ -333,7 +333,7 @@ fn empty_refs(req: &mut Request, positions: &[u32]) -> Result<(), Thrown> {
     for &position in positions {
         if given(req, position).is_some() {
             let empty = PhpArray::new(req)?;
-            assign_ref(req, position, Value::array(empty));
+            assign_ref(req, position, Value::array(empty))?;
         }
     }
     Ok(())
@@ -377,11 +377,11 @@ fn php_dns_get_record(req: &mut Request) -> Result<Value, Thrown> {
     }
     if authns {
         let v = records_array(req, found.authns)?;
-        assign_ref(req, 3, v);
+        assign_ref(req, 3, v)?;
     }
     if addtl {
         let v = records_array(req, found.addtl)?;
-        assign_ref(req, 4, v);
+        assign_ref(req, 4, v)?;
     }
     match found.records {
         Some(records) => records_array(req, records),
@@ -416,13 +416,13 @@ fn php_dns_get_mx(req: &mut Request) -> Result<Value, Thrown> {
         let v = text(req, &host)?;
         hosts.append(req, v)?;
     }
-    assign_ref(req, 2, Value::array(hosts));
+    assign_ref(req, 2, Value::array(hosts))?;
     if weights {
         let mut list = PhpArray::new(req)?;
         for weight in found.weights {
             list.append(req, Value::int(weight))?;
         }
-        assign_ref(req, 3, Value::array(list));
+        assign_ref(req, 3, Value::array(list))?;
     }
     Ok(Value::bool(found.found))
 }

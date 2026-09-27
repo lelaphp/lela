@@ -6197,7 +6197,7 @@ pub(crate) fn fetch_static_prop_r<T: Tier>(
 /// `ZEND_FETCH_STATIC_PROP_W` (`Z/Zend/zend_vm_def.h:1857`), the base
 /// of a dimension written over a `static` property: the slot addressed
 /// as a place (`zend_fetch_static_property_address` under `BP_VAR_W`,
-/// [`Request::static_property_place`]) and an `IS_INDIRECT` naming it
+/// [`Request::bind_static_place`]) and an `IS_INDIRECT` naming it
 /// written into the opline's `VAR`, which is what the `ASSIGN_DIM` over
 /// it writes through. The compiler marks the opline
 /// `ZEND_FETCH_DIM_WRITE` where a dimension stands over it, which is
@@ -6294,8 +6294,12 @@ fn static_prop_place(
             Err(thrown) => return threw(req, frame, &thrown),
         }
     }
-    let place = match req.static_property_place(class, &name, scope) {
-        Ok(Some(place)) => place,
+    // The slot found and filled first, raising what access raises; then
+    // `zend_handle_fetch_obj_flags`'s refusals over the slot as it stands,
+    // before the binding lays `null` in a slot nothing has written; then
+    // the place.
+    let (declaring, _) = match req.static_slot(class, &name, scope, PropertyRead::Warning) {
+        Ok(Some(slot)) => slot,
         Ok(None) => {
             return Err(Fatal::Error(format!(
                 "InternalError: ZEND_FETCH_STATIC_PROP_W placed ${} and the table holds no slot for it",
@@ -6304,9 +6308,43 @@ fn static_prop_place(
         }
         Err(thrown) => return threw(req, frame, &thrown),
     };
+    let flag = if rw {
+        None
+    } else {
+        FetchFlag::of(op.extended_value)
+    };
+    let typed = flag.and_then(|_| req.declared_typed_static(class, &name));
+    if let (Some(flag), Some(typed)) = (flag, &typed) {
+        let held = req.held_static(declaring, &name);
+        if let Err(thrown) = refuse_fetch(req, &held, typed, &name, flag) {
+            return threw(req, frame, &thrown);
+        }
+    }
+    let place = match req.bind_static_place(declaring, &name) {
+        Ok(place) => place,
+        Err(thrown) => return threw(req, frame, &thrown),
+    };
+    if flag == Some(FetchFlag::Ref)
+        && let Some(typed) = &typed
+    {
+        static_type_source(req, typed, &name);
+    }
     let out = exec::temporary_slot(code, op.out);
     let previous = req.take_slot(frame, out);
     req.release(previous);
+    // Under `ZEND_FETCH_REF` php's slot becomes the reference the `&`
+    // binds to. The slot here is the cell its place was bound to, so the
+    // `VAR` is that cell, with an owner, and the bind shares it rather
+    // than making a second cell inside it.
+    let bound = (flag == Some(FetchFlag::Ref))
+        .then(|| req.static_slot_cell(declaring, &name))
+        .flatten();
+    if let Some(cell) = bound {
+        req.addref(&cell.as_value());
+        let previous = req.set_slot(frame, out, cell.as_value());
+        req.release(previous);
+        return Ok(advance(req, frame));
+    }
     let Some(var) = req.slot_ptr(frame, out) else {
         return Err(Fatal::Error(String::from(
             "InternalError: ZEND_FETCH_STATIC_PROP_W writes a VAR the frame does not have",
@@ -6513,7 +6551,7 @@ fn fetch_obj(
     // wrote; the `BP_VAR_IS` reader takes the same slot as the `UNDEF`
     // it is and says nothing.
     let container = match fetch {
-        PropertyRead::Warning | PropertyRead::Write => {
+        PropertyRead::Warning | PropertyRead::Write | PropertyRead::Unset => {
             exec::operand(req, frame, code, op.op1_type, op.op1)
         }
         PropertyRead::Silent => exec::operand_undef(req, frame, code, op.op1_type, op.op1),
@@ -6882,7 +6920,22 @@ fn fetch_obj_place(
     let found = property_place(req, frame, code, op, read, &mut name);
     name.release(req, frame, code, op);
     let at = match found? {
-        PropertyFound::At(at, _, _) => at,
+        PropertyFound::At(at, object, name) => {
+            // `BP_VAR_RW` carries no flags; `BP_VAR_W` masks them off
+            // the cache slot.
+            let flag = if read == PropertyRead::Silent {
+                FetchFlag::of(op.extended_value)
+            } else {
+                None
+            };
+            if let Some(typed) = req.declared_typed_property(object.class(), &name)
+                && let Err(thrown) = fetch_flags(req, at, &typed, &name, flag)
+            {
+                let thrown = freeing_container(req, frame, code, op, thrown);
+                return threw(req, frame, &thrown);
+            }
+            at
+        }
         PropertyFound::Served(object, name) => {
             return fetch_obj_read(req, frame, code, op, object, &name);
         }
@@ -6900,6 +6953,237 @@ fn fetch_obj_place(
     exec::free_container_var(req, frame, code, op);
     Ok(advance(req, frame))
 }
+
+/// `zend_handle_fetch_obj_flags` (`Z/Zend/zend_execute.c:3470`), the
+/// bits a `FETCH_OBJ_W` or `FETCH_STATIC_PROP_W` over a typed property
+/// carries under `ZEND_FETCH_OBJ_FLAGS`. `ZEND_FETCH_DIM_WRITE`, a
+/// dimension written over the place, refuses a place that would become
+/// an array the type does not take. `ZEND_FETCH_REF`, a place bound by
+/// `&`, turns the slot into a cell typed by the property, so every write
+/// through a name bound to it is held to the type
+/// ([`Request::assign_to_reference`]); a slot nothing has written is
+/// `null` in the cell where the type takes `null`, and php's `Error`
+/// where it does not.
+///
+/// ```php
+/// class C { public int $i = 1; public ?int $n; public int $u; public ?string $s = null; }
+/// $o = new C;
+/// $r = &$o->i;
+/// try { $r = "x"; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// $r = "5";
+/// $q = &$o->n;
+/// try { $u = &$o->u; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { $o->s[] = 1; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($o);
+/// ```
+/// ```expect
+/// Cannot assign string to reference held by property C::$i of type int
+/// Cannot access uninitialized non-nullable property C::$u by reference
+/// Cannot auto-initialize an array inside property C::$s of type ?string
+/// object(C)#1 (3) {
+///   ["i"]=>
+///   &int(5)
+///   ["n"]=>
+///   &NULL
+///   ["u"]=>
+///   uninitialized(int)
+///   ["s"]=>
+///   NULL
+/// }
+/// ```
+fn fetch_flags(
+    req: &mut Request,
+    at: php_heap::ZvalRef,
+    typed: &crate::api::request::TypedProperty,
+    name: &[u8],
+    flag: Option<FetchFlag>,
+) -> Result<(), Thrown> {
+    let Some(flag) = flag else {
+        return Ok(());
+    };
+    let held = exec::value_of(at.read());
+    refuse_fetch(req, &held, typed, name, flag)?;
+    if flag == FetchFlag::Ref && held.as_php_ref().is_none() {
+        let cell = req.reference(held.undef_as_null())?;
+        at.write(cell.as_value().to_zval());
+        req.ref_add_type_source(cell.heap(), type_source(typed, name));
+    }
+    Ok(())
+}
+
+/// `zend_handle_fetch_obj_flags` under `ZEND_FETCH_REF` over a `static`
+/// property's slot, once [`refuse_fetch`] has passed it: the slot is a
+/// cell already, bound when its place was taken
+/// ([`Request::bind_static_place`]), and it gains the property as a
+/// type source where it does not carry it yet, so every write through a
+/// name bound to it is held to the type.
+///
+/// ```php
+/// class T { public static int $x = 0; public static ?string $s; public static int $u; }
+/// $x = &T::$x;
+/// try { $x = "foo"; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// $x = "5";
+/// try { T::$s["k"][] = 1; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { $u = &T::$u; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// $s = &T::$s;
+/// var_dump(T::$x, $s);
+/// ```
+/// ```expect
+/// Cannot assign string to reference held by property T::$x of type int
+/// Cannot auto-initialize an array inside property T::$s of type ?string
+/// Cannot access uninitialized non-nullable property T::$u by reference
+/// int(5)
+/// NULL
+/// ```
+fn static_type_source(req: &mut Request, typed: &crate::api::request::TypedProperty, name: &[u8]) {
+    if let Some(cell) = req.static_slot_cell(typed.declaring, name)
+        && !req
+            .ref_type_sources(cell.heap())
+            .iter()
+            .any(|source| source.declaring == typed.declaring && source.name == name)
+    {
+        req.ref_add_type_source(cell.heap(), type_source(typed, name));
+    }
+}
+
+/// `zend_verify_ref_array_assignable` (`Z/Zend/zend_execute.c:3458`): a
+/// dimension written through a reference that holds nothing an array
+/// could be written into yet is refused where a property the reference is
+/// typed by takes no array, the first such property named in php's
+/// `TypeError` (`zend_throw_auto_init_in_ref_error`).
+///
+/// ```php
+/// class C { public ?string $s = null; public ?array $a = null; }
+/// $c = new C; $s = &$c->s; $a = &$c->a;
+/// try { $s[] = 1; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// $a["k"] = 1;
+/// var_dump($c);
+/// ```
+/// ```expect
+/// Cannot auto-initialize an array inside a reference held by property C::$s of type ?string
+/// object(C)#1 (2) {
+///   ["s"]=>
+///   &NULL
+///   ["a"]=>
+///   &array(1) {
+///     ["k"]=>
+///     int(1)
+///   }
+/// }
+/// ```
+fn verify_ref_array_assignable(req: &mut Request, cell: PhpRef) -> Result<(), Thrown> {
+    let refused = req
+        .ref_type_sources(cell.heap())
+        .iter()
+        .find(|source| source.ty.mask() & MAY_BE_ARRAY == 0)
+        .map(|source| {
+            (
+                source.declaring,
+                crate::api::coerce::declared_type_name(&source.ty),
+                String::from_utf8_lossy(&source.name).into_owned(),
+            )
+        });
+    let Some((declaring, ty, shown)) = refused else {
+        return Ok(());
+    };
+    let class = req.class_name(declaring);
+    Err(crate::api::raising::throw(
+        req,
+        "TypeError",
+        &format!(
+            "Cannot auto-initialize an array inside a reference held by property {class}::${shown} of type {ty}"
+        ),
+    ))
+}
+
+/// The refusals `zend_handle_fetch_obj_flags` makes before it touches the
+/// place: a dimension written over a place php would auto-initialize to an
+/// array the type does not take, and a place bound by `&` that nothing has
+/// written where the type does not take `null`.
+fn refuse_fetch(
+    req: &mut Request,
+    held: &Value,
+    typed: &crate::api::request::TypedProperty,
+    name: &[u8],
+    flag: FetchFlag,
+) -> Result<(), Thrown> {
+    let shown = String::from_utf8_lossy(name).into_owned();
+    match flag {
+        FetchFlag::DimWrite => {
+            let promotes = matches!(
+                held.deref().as_ref(),
+                ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false)
+            );
+            if promotes && typed.ty.mask() & MAY_BE_ARRAY == 0 {
+                let class = req.class_name(typed.declaring);
+                let ty = crate::api::coerce::declared_type_name(&typed.ty);
+                return Err(crate::api::raising::throw(
+                    req,
+                    "TypeError",
+                    &format!(
+                        "Cannot auto-initialize an array inside property {class}::${shown} of type {ty}"
+                    ),
+                ));
+            }
+        }
+        FetchFlag::Ref => {
+            if held.tag() == TypeTag::Undef && typed.ty.mask() & MAY_BE_NULL == 0 {
+                let class = req.class_name(typed.declaring);
+                return Err(crate::api::raising::throw(
+                    req,
+                    "Error",
+                    &format!(
+                        "Cannot access uninitialized non-nullable property {class}::${shown} by reference"
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The property as a cell's type source, `ZEND_REF_ADD_TYPE_SOURCE`'s
+/// `prop_info`.
+fn type_source(
+    typed: &crate::api::request::TypedProperty,
+    name: &[u8],
+) -> crate::api::request::RefSource {
+    crate::api::request::RefSource {
+        declaring: typed.declaring,
+        name: name.to_vec(),
+        ty: typed.ty.clone(),
+    }
+}
+
+/// The bit under `ZEND_FETCH_OBJ_FLAGS` (`Z/Zend/zend_compile.h:1089-1096`)
+/// a property fetch for a write carries in its `extended_value`, decoded
+/// once: `ZEND_FETCH_REF`, a place bound by `&`, or `ZEND_FETCH_DIM_WRITE`,
+/// a dimension written over it. php sets at most one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FetchFlag {
+    Ref,
+    DimWrite,
+}
+
+impl FetchFlag {
+    /// The bit an opline's `extended_value` carries, if any.
+    fn of(extended_value: u32) -> Option<FetchFlag> {
+        match extended_value & (FETCH_REF | FETCH_DIM_WRITE) {
+            FETCH_REF => Some(FetchFlag::Ref),
+            FETCH_DIM_WRITE => Some(FetchFlag::DimWrite),
+            _ => None,
+        }
+    }
+}
+
+/// `ZEND_FETCH_REF` and `ZEND_FETCH_DIM_WRITE`
+/// (`Z/Zend/zend_compile.h:1089-1096`).
+const FETCH_REF: u32 = 1;
+const FETCH_DIM_WRITE: u32 = 2;
+/// `MAY_BE_NULL` and `MAY_BE_ARRAY` (`Z/Zend/zend_type_info.h`).
+const MAY_BE_NULL: u32 = 1 << 1;
+const MAY_BE_DOUBLE: u32 = 1 << 5;
+const MAY_BE_ARRAY: u32 = 1 << 7;
 
 /// What [`property_place`] found: the property's place, the object and
 /// the name; the object and the name where the class serves the name
@@ -6961,24 +7245,39 @@ fn property_place(
         // a name the class serves is read, not placed.
         PropertyPlace::Handlers => return Ok(PropertyFound::Served(object, name)),
         // php places the name here with `zend_std_get_property_ptr_ptr`,
-        // whose silence is `ce->__get != NULL`; the overloaded arm a
-        // class with a `__get` takes, php's `Indirect modification of
-        // overloaded property` notice, is not served yet (#513), so the
-        // placement is loud and a property the scope may not reach is
-        // the `Error`.
+        // whose silence is `ce->__get != NULL`, and a property the scope
+        // may not reach is the `Error`; the arms below are the names it
+        // answers no place for.
+        // A readonly or set-restricted property holding an object is
+        // read, as php's `read_property` returns it under `BP_VAR_W`: the
+        // write goes through the object and the property is untouched.
+        PropertyPlace::Std
+            if req.write_fetch_reads_object(object, &name, op.opcode == Opcode::FetchObjUnset) =>
+        {
+            return Ok(PropertyFound::Served(object, name));
+        }
+        // `zend_std_get_property_ptr_ptr`'s `NULL` for a name the class's
+        // `__get` answers: the fetch falls back to `read_property` (#513).
+        PropertyPlace::Std if req.overloaded_fetch(object, &name) => {
+            return Ok(PropertyFound::Served(object, name));
+        }
+        // `BP_VAR_RW` reads the slot before anything is placed, so an
+        // unwritten one is the read's diagnostic ahead of the set
+        // visibility's refusal.
+        PropertyPlace::Std
+            if read == PropertyRead::Warning
+                && let Err(thrown) = req.read_before_write(object, &name) =>
+        {
+            return Ok(PropertyFound::Threw(freeing_container(
+                req, frame, code, op, thrown,
+            )));
+        }
         PropertyPlace::Std => {
             req.declared_slot_for_write(object, &name, "indirectly modify", false)
         }
     };
     let at = match placed {
-        Ok(Some((slot, typed))) => {
-            if read == PropertyRead::Warning
-                && let Err(thrown) = unwritten_slot_read(req, object, slot, typed, &name)
-            {
-                return Ok(PropertyFound::Threw(freeing_container(
-                    req, frame, code, op, thrown,
-                )));
-            }
+        Ok(Some((slot, _))) => {
             let Some(at) = object.heap().slot_ref(slot) else {
                 return Err(Fatal::Error(format!(
                     "InternalError: ZEND_FETCH_OBJ_W placed ${} in slot {slot}, which the object does not have",
@@ -7022,33 +7321,6 @@ fn property_place(
     Ok(PropertyFound::At(at, object, name))
 }
 
-/// `if (UNEXPECTED(Z_TYPE_P(retval) == IS_UNDEF))` in
-/// `zend_std_get_property_ptr_ptr` under `BP_VAR_RW`: a slot nothing has
-/// written raises the read's own diagnostic, the typed property's
-/// `Error` or the warning, and php then leaves it holding `null`.
-fn unwritten_slot_read(
-    req: &mut Request,
-    object: PhpObject,
-    slot: u32,
-    typed: bool,
-    name: &[u8],
-) -> Result<(), Thrown> {
-    if !object.heap().slot(slot).is_undef() {
-        return Ok(());
-    }
-    let shown = String::from_utf8_lossy(name).into_owned();
-    let class = req.class_name(object.class());
-    if typed {
-        return Err(crate::api::raising::throw(
-            req,
-            "Error",
-            &format!("Typed property {class}::${shown} must not be accessed before initialization"),
-        ));
-    }
-    crate::api::raising::warning(req, &format!("Undefined property: {class}::${shown}"));
-    req.write_declared_slot(object.heap(), slot, Value::null())
-}
-
 /// `zend_fetch_property_address`'s fallback where the class's
 /// `get_property_ptr_ptr` answers `NULL` ([`PropertyPlace::Handlers`]):
 /// the class's `read_property` under the fetch's own type, which
@@ -7065,7 +7337,14 @@ fn fetch_obj_read(
     name: &[u8],
 ) -> Edge {
     let table = req.object_handlers(object.heap());
-    let read = table.read_property(req, object, name, PropertyRead::Write);
+    // `BP_VAR_UNSET` reads what is not there as `null`, quietly; every
+    // other write fetch reads as a write.
+    let mode = if op.opcode == Opcode::FetchObjUnset {
+        PropertyRead::Unset
+    } else {
+        PropertyRead::Write
+    };
+    let read = table.read_property(req, object, name, mode);
     let value = match read {
         Ok(value) => value,
         Err(thrown) => {
@@ -7642,6 +7921,10 @@ fn separated_array(
 /// ladder, since php gives it one of its own
 /// (`Z/Zend/zend_vm_def.h:6812`): it makes no array out of what is none.
 fn write_container(req: &mut Request, place: php_heap::ZvalRef) -> Result<Container, Thrown> {
+    let typed_ref = exec::value_of(place.read())
+        .as_php_ref()
+        .copied()
+        .filter(|cell| cell.heap().sources() != 0);
     let (at, array) = separated_array(req, place)?;
     if let Some(array) = array {
         return Ok(Container::Array(array));
@@ -7651,6 +7934,9 @@ fn write_container(req: &mut Request, place: php_heap::ZvalRef) -> Result<Contai
         held.as_ref(),
         ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false)
     ) {
+        if let Some(cell) = typed_ref {
+            verify_ref_array_assignable(req, cell)?;
+        }
         if held.as_bool() == Some(false) {
             crate::api::raising::deprecated(
                 req,
@@ -10058,7 +10344,8 @@ fn assign_property(
             // stands under the same `Z_TYPE_P(variable_ptr) != IS_UNDEF`
             // (`Z/Zend/zend_object_handlers.c:1089`), so what the bit
             // refuses is the second write and never the initialisation.
-            if typed.readonly && !object.heap().slot(slot).is_undef() {
+            let reinitable = object.heap().slot_bit(slot, php_heap::PropBit::Reinitable);
+            if typed.readonly && !reinitable && !object.heap().slot(slot).is_undef() {
                 req.release(value);
                 let class = req.class_name(typed.declaring);
                 return Ok(Err(crate::api::raising::throw(
@@ -10074,6 +10361,11 @@ fn assign_property(
             };
             write_out(req, frame, code, op, &value);
             req.assign_declared_slot(object.heap(), slot, value);
+            // `Z_PROP_FLAG_P(property_val) &= ~IS_PROP_REINITABLE`: a
+            // readonly property `__clone` wrote is locked again.
+            object
+                .heap()
+                .set_slot_bit(slot, php_heap::PropBit::Reinitable, false);
             Ok(Ok(()))
         }
         Some((slot, false)) => {
@@ -12034,7 +12326,11 @@ fn step_property(
         // overloaded arm over it instead.
         PropertyPlace::Std => {
             let silent = req.serves_accessor(object.class(), b"__get");
-            match req.declared_slot_for_write(object, &bytes, "modify", silent) {
+            // `BP_VAR_RW` reads an unwritten slot before the placement.
+            let placed = req
+                .read_before_write(object, &bytes)
+                .and_then(|()| req.declared_slot_for_write(object, &bytes, "modify", silent));
+            match placed {
                 Ok(placed) => placed,
                 Err(thrown) => {
                     exec::free_operand(req, frame, code, data.op1_type, data.op1);
@@ -12599,7 +12895,11 @@ fn incdec_property(
         }
         PropertyPlace::Std => {
             let silent = req.serves_accessor(object.class(), b"__get");
-            match req.declared_slot_for_write(object, &bytes, "modify", silent) {
+            // `BP_VAR_RW` reads an unwritten slot before the placement.
+            let placed = req
+                .read_before_write(object, &bytes)
+                .and_then(|()| req.declared_slot_for_write(object, &bytes, "modify", silent));
+            match placed {
                 Ok(placed) => placed,
                 Err(thrown) => {
                     write_out(req, frame, code, op, &Value::null());
@@ -12619,29 +12919,13 @@ fn incdec_property(
         }
         return Ok(overloaded_incdec(req, frame, code, op, step, object, key));
     };
-    if object.heap().slot(slot).is_undef() {
-        let shown = String::from_utf8_lossy(&bytes).into_owned();
-        if typed {
-            let class = req.class_name(object.class());
-            let thrown = crate::api::raising::throw(
-                req,
-                "Error",
-                &format!(
-                    "Typed property {class}::${shown} must not be accessed before initialization"
-                ),
-            );
-            write_out(req, frame, code, op, &Value::null());
-            return Ok(Err(thrown));
-        }
-        if req.overloaded_place(object, &bytes) {
-            return Ok(overloaded_incdec(req, frame, code, op, step, object, key));
-        }
-        let class = req.class_name(object.class());
-        crate::api::raising::warning(req, &format!("Undefined property: {class}::${shown}"));
+    // [`Request::read_before_write`] raised what an unwritten slot raises
+    // before the placement; one it let by is a `__get`'s to answer.
+    if object.heap().slot(slot).is_undef() && req.overloaded_place(object, &bytes) {
+        return Ok(overloaded_incdec(req, frame, code, op, step, object, key));
     }
-    let held = exec::value_of(object.heap().slot(slot))
-        .deref()
-        .undef_as_null();
+    let named = exec::value_of(object.heap().slot(slot));
+    let held = named.deref().undef_as_null();
     req.addref(&held);
     let stepped = match step.kernel()(req, &held) {
         Ok(stepped) => stepped,
@@ -12651,6 +12935,18 @@ fn incdec_property(
             return Ok(Err(thrown));
         }
     };
+    // `zend_pre_incdec_property_zval`: a slot bound to a reference other
+    // properties type is `zend_incdec_typed_ref`, not the property's own
+    // step.
+    if let Some(cell) = named
+        .as_php_ref()
+        .copied()
+        .filter(|cell| cell.heap().sources() != 0)
+    {
+        return Ok(step_property_ref(
+            req, frame, code, op, step, cell, held, stepped,
+        ));
+    }
     let landed = if typed {
         match typed_step(req, frame, object, slot, &bytes, step, (held, stepped))? {
             Ok(landed) => landed,
@@ -12672,6 +12968,45 @@ fn incdec_property(
     req.release(held);
     req.assign_declared_slot(object.heap(), slot, landed);
     Ok(Ok(()))
+}
+
+/// The property step over a slot bound to a reference other properties
+/// type: [`step_through_typed_ref`] over what the cell held, the
+/// temporary written with the value before or after it, and the cell
+/// written unless the properties refused the step. `held` and `stepped`
+/// are given up or landed here.
+#[allow(clippy::too_many_arguments)]
+fn step_property_ref(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    step: IncDec,
+    cell: PhpRef,
+    held: Value,
+    stepped: Value,
+) -> Result<(), Thrown> {
+    let strict = req.frame_strict_types(frame);
+    let (stored, raised) =
+        match step_through_typed_ref(req, cell, &held, stepped, step.increment, strict) {
+            RefStep::Landed(stored) => (stored, None),
+            RefStep::Clamped(stored, thrown) => (stored, Some(thrown)),
+            RefStep::Refused(thrown) => {
+                req.release(held);
+                write_out(req, frame, code, op, &Value::null());
+                return Err(thrown);
+            }
+        };
+    write_out(
+        req,
+        frame,
+        code,
+        op,
+        if step.post { &held } else { &stored },
+    );
+    req.release(held);
+    req.reference_set(cell.heap(), stored);
+    raised.map_or(Ok(()), Err)
 }
 
 /// `zend_incdec_typed_prop` (`Z/Zend/zend_execute.c:2262`) over a
@@ -17254,6 +17589,149 @@ fn unary(
     }
 }
 
+/// `zend_incdec_typed_ref` (`Z/Zend/zend_execute.c:2230`): the step over
+/// a variable bound to a reference that typed properties hold. An `int`
+/// the step carried past its range into a `float` is php's `TypeError`
+/// where a property the reference is typed by takes no `float`, and the
+/// cell holds the range's end; anything else the step makes is held to
+/// the properties as an assignment through the reference is, the value
+/// it held standing where they refuse it.
+///
+/// ```php
+/// class T { public int $i = PHP_INT_MAX; public int|float $f = PHP_INT_MAX; public int|bool $b = 1; }
+/// $t = new T; $i = &$t->i; $f = &$t->f; $b = &$t->b;
+/// try { $i++; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// $f++; $b--;
+/// var_dump($t->i, $t->f, $t->b);
+/// ```
+/// ```expect
+/// Cannot increment a reference held by property T::$i of type int past its maximal value
+/// int(9223372036854775807)
+/// float(9.223372036854776E+18)
+/// int(0)
+/// ```
+#[allow(clippy::too_many_arguments)]
+fn incdec_typed_ref(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    post: bool,
+    kernel: fn(&mut Request, &Value) -> Result<Value, Thrown>,
+    cell: PhpRef,
+    held: Value,
+) -> Edge {
+    let stepped = match kernel(req, &held) {
+        Ok(stepped) => stepped,
+        Err(thrown) => {
+            req.leave_pending(&thrown);
+            return Ok(Stepped::Threw(frame));
+        }
+    };
+    let increment = matches!(op.opcode, Opcode::PreInc | Opcode::PostInc);
+    let strict = req.frame_strict_types(frame);
+    let (stored, raised) =
+        match step_through_typed_ref(req, cell, &held, stepped, increment, strict) {
+            RefStep::Landed(stored) => (stored, None),
+            RefStep::Clamped(stored, thrown) => (stored, Some(thrown)),
+            RefStep::Refused(thrown) => {
+                if op.out_type != OperandKind::Unused {
+                    let out = exec::temporary_slot(code, op.out);
+                    let previous = req.set_slot(frame, out, Value::null());
+                    req.release(previous);
+                }
+                exec::free_operand(req, frame, code, op.op1_type, op.op1);
+                req.leave_pending(&thrown);
+                return Ok(Stepped::Threw(frame));
+            }
+        };
+    if op.out_type != OperandKind::Unused {
+        let out = exec::temporary_slot(code, op.out);
+        let value = if post { held } else { stored };
+        req.addref(&value);
+        let previous = req.set_slot(frame, out, value);
+        req.release(previous);
+    }
+    req.reference_set(cell.heap(), stored);
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    if let Some(thrown) = raised {
+        req.leave_pending(&thrown);
+        return Ok(Stepped::Threw(frame));
+    }
+    Ok(advance(req, frame))
+}
+
+/// What a step through a reference typed properties hold comes to
+/// ([`step_through_typed_ref`]).
+enum RefStep {
+    /// The value to store in the cell: the step, or the conversion the
+    /// properties agree on.
+    Landed(Value),
+    /// The range's end to store, beside php's `TypeError` for an `int`
+    /// stepped into a `float` a property takes no `float` for.
+    Clamped(Value, Thrown),
+    /// The properties refuse the step; the cell keeps what it held.
+    Refused(Thrown),
+}
+
+/// The heart of `zend_incdec_typed_ref`, over the value `held` and what
+/// the step made of it, `stepped`, whose owner it takes: an `int` carried
+/// past its range into a `float` a property the reference is typed by
+/// takes no `float` for is [`RefStep::Clamped`] at the range's end, and
+/// anything else is held to the properties as an assignment through the
+/// reference is (`zend_verify_ref_assignable_zval`).
+fn step_through_typed_ref(
+    req: &mut Request,
+    cell: PhpRef,
+    held: &Value,
+    stepped: Value,
+    increment: bool,
+    strict: bool,
+) -> RefStep {
+    if stepped.as_float().is_some() && held.as_int().is_some() {
+        let refusing = req
+            .ref_type_sources(cell.heap())
+            .iter()
+            .find(|source| source.ty.mask() & MAY_BE_DOUBLE == 0)
+            .map(|source| {
+                (
+                    source.declaring,
+                    crate::api::coerce::declared_type_name(&source.ty),
+                    String::from_utf8_lossy(&source.name).into_owned(),
+                )
+            });
+        let Some((declaring, ty, name)) = refusing else {
+            return RefStep::Landed(stepped);
+        };
+        req.release(stepped);
+        let class = req.class_name(declaring);
+        let (word, end, bound) = if increment {
+            ("increment", "maximal", i64::MAX)
+        } else {
+            ("decrement", "minimal", i64::MIN)
+        };
+        let thrown = crate::api::raising::throw(
+            req,
+            "TypeError",
+            &format!(
+                "Cannot {word} a reference held by property {class}::${name} of type {ty} past its {end} value"
+            ),
+        );
+        return RefStep::Clamped(Value::int(bound), thrown);
+    }
+    match crate::ops::verify_ref_assignable(req, cell.heap(), &stepped, strict) {
+        Ok(None) => RefStep::Landed(stepped),
+        Ok(Some(coerced)) => {
+            req.release(stepped);
+            RefStep::Landed(coerced)
+        }
+        Err(thrown) => {
+            req.release(stepped);
+            RefStep::Refused(thrown)
+        }
+    }
+}
+
 /// The body `PRE_INC`, `POST_INC`, `PRE_DEC` and `POST_DEC` share: the
 /// variable's slot, a CV or a `VAR`, read as
 /// `GET_OP1_ZVAL_PTR_PTR_UNDEF(BP_VAR_RW)` reads it; the kernel, the
@@ -17294,6 +17772,10 @@ fn incdec(
     // `if (Z_TYPE_P(var_ptr) == IS_REFERENCE) { var_ptr = Z_REFVAL_P(var_ptr); }`.
     let cell = named.as_php_ref().copied();
     let held = named.deref();
+    // `ZEND_REF_HAS_TYPE_SOURCES(ref)`: `zend_incdec_typed_ref`.
+    if let Some(cell) = cell.filter(|cell| cell.heap().sources() != 0) {
+        return incdec_typed_ref(req, frame, code, op, post, kernel, cell, held);
+    }
     match kernel(req, &held) {
         Ok(stepped) => {
             if op.out_type != OperandKind::Unused {
@@ -17310,7 +17792,7 @@ fn incdec(
             // variable's from here, and what stood there is released,
             // which is what the in-place step does.
             if let Some(cell) = cell {
-                cell.set(req, stepped);
+                req.reference_set(cell.heap(), stepped);
             } else if let Some(place) = place {
                 let previous = exec::value_of(place.read());
                 place.write(stepped.into_zval());

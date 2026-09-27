@@ -118,7 +118,7 @@ fn replace_common(req: &mut Request, case_sensitive: bool) -> Result<Value, Thro
         }
     };
     if given(req, 4).is_some() {
-        assign_ref(req, 4, Value::int(count));
+        assign_ref(req, 4, Value::int(count))?;
     }
     Ok(result)
 }

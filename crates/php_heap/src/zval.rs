@@ -49,6 +49,30 @@ pub enum ZvalType {
     Ptr = 13,
 }
 
+/// A bit of `Z_PROP_FLAG_P` (`Z/Zend/zend_types.h:1600-1604`), the flags a
+/// declared property slot carries in its `u2` word, which no copy of the
+/// slot's value takes along.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PropBit {
+    /// `IS_PROP_UNINIT`: nothing has written the slot since the object was
+    /// made, so a read, a write, `isset` and `unset` pass the magic
+    /// methods by; an `unset` clears it.
+    Uninit,
+    /// `IS_PROP_REINITABLE`: a readonly slot a clone's `__clone`, or a
+    /// `clone with`, may write once more; set on each slot of the clone
+    /// before the method runs and cleared after it, and by a write.
+    Reinitable,
+}
+
+impl PropBit {
+    const fn bit(self) -> u32 {
+        match self {
+            PropBit::Uninit => 1,
+            PropBit::Reinitable => 1 << 1,
+        }
+    }
+}
+
 /// A zval in place, php's `zval *` at the sites a handler keeps one from
 /// one opline to the next: a frame slot ([`crate::Frame::slot_ptr`]) or a
 /// declared property slot ([`Obj::slot_ref`]). `Copy`, owning nothing,
@@ -126,6 +150,19 @@ impl ZvalRef {
     pub fn set_fe_pos(self, pos: u32) {
         let mut z = self.read();
         z.set_fe_pos(pos);
+        // SAFETY: as `read`.
+        unsafe { self.0.as_ptr().write(z) };
+    }
+
+    /// One of `Z_PROP_FLAG_P(slot)`'s bits set or cleared on a declared
+    /// property slot, its `u2` word alone, the value it holds untouched.
+    pub fn set_prop_bit(self, flag: PropBit, on: bool) {
+        let mut z = self.read();
+        if on {
+            z.u2 |= flag.bit();
+        } else {
+            z.u2 &= !flag.bit();
+        }
         // SAFETY: as `read`.
         unsafe { self.0.as_ptr().write(z) };
     }
@@ -372,6 +409,13 @@ impl Zval {
     /// Write `Z_FE_POS`.
     pub const fn set_fe_pos(&mut self, pos: u32) {
         self.u2 = pos;
+    }
+
+    /// Whether one of `Z_PROP_FLAG_P(z)`'s bits is set on a declared
+    /// property slot ([`ZvalRef::set_prop_bit`]).
+    #[must_use]
+    pub const fn prop_bit(self, flag: PropBit) -> bool {
+        self.u2 & flag.bit() != 0
     }
 
     /// The payload of a `Long`, else `None`.

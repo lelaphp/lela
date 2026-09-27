@@ -801,6 +801,7 @@ impl ObjectHandlers for Handlers {
                 PropertyRead::Warning => DimensionRead::Warning,
                 PropertyRead::Silent => DimensionRead::Silent,
                 PropertyRead::Write => DimensionRead::Write,
+                PropertyRead::Unset => DimensionRead::Unset,
             };
             let read = self.read_dimension(req, object, Some(&member), fetch);
             req.release(member);

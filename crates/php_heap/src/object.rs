@@ -47,7 +47,7 @@ use crate::gc::{self, Refcounted};
 use crate::hooks::{Fatal, HeapHooks};
 use crate::mm::Mm;
 use crate::payload::{Payload, payload_of};
-use crate::{Heap, Zval, ZvalRef, ZvalType};
+use crate::{Heap, PropBit, Zval, ZvalRef, ZvalType};
 
 /// The identity of an object in the store (design §5.4): the index php
 /// reports as `spl_object_id()`, and what weak references, `WeakMap`
@@ -383,6 +383,31 @@ impl Obj {
         // SAFETY: the slot is inside the allocation, and every slot was
         // written by `init`.
         unsafe { self.slot_ptr(i).read() }
+    }
+
+    /// `IS_PROP_UNINIT` over declared slot `i`: undefined, and nothing has
+    /// written it since the object was made, so a read is the
+    /// uninitialised-property error and a write, `isset` and `unset` pass
+    /// the magic methods by, where a slot an `unset` emptied reaches them.
+    #[must_use]
+    pub fn slot_uninit(&self, i: u32) -> bool {
+        let z = self.slot(i);
+        z.is_undef() && z.prop_bit(PropBit::Uninit)
+    }
+
+    /// Whether declared slot `i` carries `flag`; a slot the class did not
+    /// lay down carries none.
+    #[must_use]
+    pub fn slot_bit(&self, i: u32, flag: PropBit) -> bool {
+        self.slot(i).prop_bit(flag)
+    }
+
+    /// Set or clear `flag` on declared slot `i`, the value it holds
+    /// untouched; nothing for a slot the class did not lay down.
+    pub fn set_slot_bit(&self, i: u32, flag: PropBit, on: bool) {
+        if let Some(slot) = self.slot_ref(i) {
+            slot.set_prop_bit(flag, on);
+        }
     }
 
     /// `OBJ_PROP_NUM` in place: the declared slot as a name a handler
@@ -852,6 +877,11 @@ impl Heap {
         for i in 0..o.slots() {
             let z = o.slot(i);
             o.write_slot(i, Zval::UNDEF);
+            if let Some(r) = z.as_reference()
+                && r.sources() != 0
+            {
+                hooks.slot_source_gone(o, i, r);
+            }
             Heap::release(hooks, z);
         }
         if o.has_native() {

@@ -468,17 +468,17 @@ fn callable_argument(req: &mut Request, position: u32) -> Result<Callable, Throw
 }
 
 /// `ZEND_TRY_ASSIGN_REF_*` on the argument at `position`: the value
-/// written through the reference the argument is, and given up where it
-/// is not one.
-fn assign_ref(req: &mut Request, position: u32, value: Value) {
+/// written through the reference the argument is, held to the types it
+/// is typed by, and given up where it is not one.
+fn assign_ref(req: &mut Request, position: u32, value: Value) -> Result<(), Thrown> {
     if let Some(given) = req.argument(position)
         && let ValueRef::Reference(reference) = given.as_ref()
     {
         let reference = *reference;
-        reference.set(req, value);
-        return;
+        return reference.set(req, value);
     }
     req.release(value);
+    Ok(())
 }
 
 /// An ini entry of the extension read as `OnUpdateLong` reads it.

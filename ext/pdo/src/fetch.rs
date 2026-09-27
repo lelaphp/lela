@@ -376,7 +376,7 @@ fn common(
             continue;
         };
         let fetched = value(req, object, position, Some(ty))?;
-        cell.set(req, fetched);
+        cell.set(req, fetched)?;
     }
     Ok(true)
 }

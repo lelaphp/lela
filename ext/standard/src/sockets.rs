@@ -407,13 +407,13 @@ fn assign_error(
     text: Option<&[u8]>,
 ) -> Result<(), Thrown> {
     if req.argument_count() >= at.0 as usize {
-        assign_ref(req, at.0, Value::int(code));
+        assign_ref(req, at.0, Value::int(code))?;
     }
     if let Some(text) = text
         && req.argument_count() >= at.1 as usize
     {
         let value = string_value(req, text)?;
-        assign_ref(req, at.1, value);
+        assign_ref(req, at.1, value)?;
     }
     Ok(())
 }
@@ -692,7 +692,7 @@ fn stream_socket_accept(req: &mut Request) -> Result<Value, Thrown> {
     match stream.accept(req, timeval(timeout), want_peer)? {
         Ok((client, peer)) => {
             if let Some(peer) = peer {
-                assign_ref(req, 3, Value::string(peer));
+                assign_ref(req, 3, Value::string(peer))?;
             }
             Ok(client.as_value())
         }
@@ -765,7 +765,7 @@ fn stream_socket_recvfrom(req: &mut Request) -> Result<Value, Thrown> {
     let flags = optional_long(req, 3, 0)?;
     let want_addr = req.argument_count() >= 4;
     if want_addr {
-        assign_ref(req, 4, Value::null());
+        assign_ref(req, 4, Value::null())?;
     }
     let Ok(len) = usize::try_from(to_read) else {
         return Err(arg_value_error(req, 2, "be greater than 0"));
@@ -776,7 +776,7 @@ fn stream_socket_recvfrom(req: &mut Request) -> Result<Value, Thrown> {
     match stream.recvfrom(req, len, flags, want_addr)? {
         Some((bytes, from)) => {
             if let Some(from) = from {
-                assign_ref(req, 4, Value::string(from));
+                assign_ref(req, 4, Value::string(from))?;
             }
             Ok(Value::string(bytes))
         }

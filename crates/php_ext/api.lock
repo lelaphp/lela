@@ -645,6 +645,7 @@ values::PhpObject::unserialize_prop
 values::PhpObject::unset_row
 values::PhpRef
 values::PhpRef::as_value
+values::PhpRef::convert
 values::PhpRef::get
 values::PhpRef::new
 values::PhpRef::separate_array

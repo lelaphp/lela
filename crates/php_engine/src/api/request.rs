@@ -5482,10 +5482,15 @@ impl Request {
     /// from here; a typed property with none stays uninitialised.
     fn init_properties(&mut self, object: PhpObject, defaults: Vec<Option<Value>>) {
         for (i, value) in defaults.into_iter().enumerate() {
+            let slot = u32::try_from(i).unwrap_or(u32::MAX);
+            // A typed slot with no default is `IS_UNDEF` and
+            // `IS_PROP_UNINIT`, as `object_properties_init` copies it.
             let Some(value) = value else {
+                object
+                    .heap()
+                    .set_slot_bit(slot, php_heap::PropBit::Uninit, true);
                 continue;
             };
-            let slot = u32::try_from(i).unwrap_or(u32::MAX);
             Heap::object_set_slot(&mut Hooks(self), object.heap(), slot, value.into_zval());
         }
     }
@@ -6269,12 +6274,11 @@ impl Request {
     /// `static` property `name` on the class that declared it holds,
     /// nobody's to release, and `IS_UNDEF` where the slot stands
     /// unwritten or the table has none.
-    fn held_static(&self, declaring: ClassId, name: &[u8]) -> Value {
+    pub(crate) fn held_static(&self, declaring: ClassId, name: &[u8]) -> Value {
         self.statics
             .iter()
             .find(|((at, under), _)| *at == declaring && under == name)
-            .map(|(_, value)| *value)
-            .unwrap_or_default()
+            .map_or_else(Value::undef, |(_, value)| *value)
     }
 
     /// `zend_read_static_property_ex` (`Z/Zend/zend_API.c`): the value
@@ -6426,6 +6430,14 @@ impl Request {
                 }
             }
         }
+        // `zend_assign_to_variable` over a slot bound by reference: the
+        // cell is held to every property it is typed by, which may be
+        // another `static` than this one (`Test::$x =& Test::$y`).
+        if let Some(cell) = self.static_slot_cell(declaring, name)
+            && cell.heap().sources() != 0
+        {
+            return self.assign_to_reference(cell.heap(), value, strict);
+        }
         self.store_static_property(declaring, name, value);
         Ok(())
     }
@@ -6465,9 +6477,9 @@ impl Request {
             return;
         };
         if let Some(ValueRef::Reference(cell)) = self.statics.get(at).map(|(_, v)| v.as_ref()) {
-            // `PhpRef::set` gives up what the cell held, after the write.
-            let cell = *cell;
-            cell.set(self, value);
+            // What the cell held is given up after the write.
+            let cell = cell.heap();
+            self.reference_set(cell, value);
             return;
         }
         let previous = self
@@ -6482,8 +6494,10 @@ impl Request {
     /// (`Z/Zend/zend_execute.c:3084`): the `static` property's slot as a
     /// place, which is what `FETCH_STATIC_PROP_W` hands its `VAR` as an
     /// `IS_INDIRECT` and the `ASSIGN_DIM` over it writes through.
-    /// `None` is [`Request::static_slot`]'s own, a name the chain does
-    /// not declare under a read that did not raise.
+    /// The slot is one [`Request::static_slot`] has already found and
+    /// filled, which is where access is refused and a default laid down,
+    /// so a handler can read the slot as it stands before this binding
+    /// lays `null` in an unwritten one.
     ///
     /// php's slot is one zval of `CE_STATIC_MEMBERS(ce)`, a table whose
     /// address is stable for the life of the request. The slots here
@@ -6495,18 +6509,13 @@ impl Request {
     /// reads and [`Request::store_static_property`] writes through what
     /// the slot holds), so the binding is a place to write through and
     /// nothing a program can see.
-    pub(crate) fn static_property_place(
+    pub(crate) fn bind_static_place(
         &mut self,
-        class: ClassId,
+        declaring: ClassId,
         name: &[u8],
-        scope: Option<ClassId>,
-    ) -> Result<Option<php_heap::ZvalRef>, Thrown> {
-        let Some((declaring, _)) = self.static_slot(class, name, scope, PropertyRead::Warning)?
-        else {
-            return Ok(None);
-        };
+    ) -> Result<php_heap::ZvalRef, Thrown> {
         if let Some(cell) = self.static_slot_cell(declaring, name) {
-            return Ok(Some(cell.heap().val_ref()));
+            return Ok(cell.heap().val_ref());
         }
         let held = self.held_static(declaring, name);
         let held = if held.tag() == TypeTag::Undef {
@@ -6522,12 +6531,12 @@ impl Request {
             .iter()
             .position(|((held, under), _)| *held == declaring && under == name);
         let Some(at) = at else {
-            return Ok(Some(cell.heap().val_ref()));
+            return Ok(cell.heap().val_ref());
         };
         if let Some((_, slot)) = self.statics.get_mut(at) {
             *slot = Value::reference(cell);
         }
-        Ok(Some(cell.heap().val_ref()))
+        Ok(cell.heap().val_ref())
     }
 
     /// The cell the `static` property's slot holds, for the handler that
@@ -6628,6 +6637,21 @@ impl Request {
         cell.set_sources(0);
     }
 
+    /// `ZEND_REF_DEL_TYPE_SOURCE` over the property whose slot `slot`
+    /// of `object` is (`zend_get_property_info_for_slot`): the cell the
+    /// slot held is typed by that property no longer, because the slot
+    /// is unset, reset or freed. A slot of an untyped property typed
+    /// nothing.
+    pub(crate) fn slot_source_gone(&mut self, object: PhpObject, slot: u32, cell: Ref) {
+        let placed = self.placed_properties(object.class());
+        let Some((declaring, p)) = usize::try_from(slot).ok().and_then(|at| placed.get(at)) else {
+            return;
+        };
+        if p.ty.is_some() {
+            self.ref_del_type_source(cell, *declaring, &p.name.0);
+        }
+    }
+
     /// `ZEND_REF_FOREACH_TYPE_SOURCES` as a slice: the properties whose
     /// slots hold this cell, empty for a cell no typed property's slot
     /// holds, which is `ZEND_REF_HAS_TYPE_SOURCES` reading false.
@@ -6672,6 +6696,263 @@ impl Request {
             }
         }
         Ok(())
+    }
+
+    /// php's notice where a write fetch fell back to `__get` and what it
+    /// answered is neither an object nor a reference: a write through the
+    /// copy has no effect on anything (`zend_std_read_property`, `Indirect
+    /// modification of overloaded property`), naming the object's class.
+    ///
+    /// A private property the scope may not reach is `__get`'s too (#513):
+    /// an int it answers is the notice, and an object is written through.
+    ///
+    /// ```php
+    /// class C { private $p = 1; private $q;
+    ///     function __construct() { $this->q = new stdClass; }
+    ///     function __get($n) { return $this->$n; } }
+    /// $c = new C;
+    /// try { $c->p->x = 2; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// $c->q->x = 3;
+    /// var_dump($c);
+    /// ```
+    /// ```expect
+    ///
+    /// Notice: Indirect modification of overloaded property C::$p has no effect in %s on line 6
+    /// Attempt to assign property "x" on int
+    /// object(C)#1 (2) {
+    ///   ["p":"C":private]=>
+    ///   int(1)
+    ///   ["q":"C":private]=>
+    ///   object(stdClass)#2 (1) {
+    ///     ["x"]=>
+    ///     int(3)
+    ///   }
+    /// }
+    /// ```
+    fn overloaded_write_notice(
+        &mut self,
+        class: ClassId,
+        name: &[u8],
+        read: PropertyRead,
+        got: &Value,
+    ) {
+        if matches!(read, PropertyRead::Write | PropertyRead::Unset)
+            && got.as_php_ref().is_none()
+            && got.as_object().is_none()
+        {
+            let class = self.class_name(class);
+            let shown = String::from_utf8_lossy(name).into_owned();
+            crate::api::raising::notice(
+                self,
+                &format!(
+                    "Indirect modification of overloaded property {class}::${shown} has no effect"
+                ),
+            );
+        }
+    }
+
+    /// Whether a write fetch over `name` falls back to `read_property`
+    /// for the class's `__get` to answer, where php's
+    /// `zend_std_get_property_ptr_ptr` answers `NULL` for it: a declared
+    /// property the scope may not reach, a declared slot it reaches that
+    /// an `unset` emptied, or a name the
+    /// object holds no dynamic property for, on a class with a `__get`
+    /// not already serving the name. A slot that is `IS_PROP_UNINIT` or
+    /// waits on a lazy initializer is the placement's.
+    ///
+    /// ```php
+    /// class M { private $data = ['a' => [1], 'o' => null];
+    ///     function __construct() { $this->data['o'] = new stdClass; }
+    ///     function __get($n) { echo "__get $n\n"; return $this->data[$n]; } }
+    /// $m = new M;
+    /// $m->a[] = 2;
+    /// $m->o->x = 3;
+    /// var_dump($m->a, $m->o);
+    /// ```
+    /// ```expect
+    /// __get a
+    ///
+    /// Notice: Indirect modification of overloaded property M::$a has no effect in %s on line 6
+    /// __get o
+    /// __get a
+    /// __get o
+    /// array(1) {
+    ///   [0]=>
+    ///   int(1)
+    /// }
+    /// object(stdClass)#2 (1) {
+    ///   ["x"]=>
+    ///   int(3)
+    /// }
+    /// ```
+    pub(crate) fn overloaded_fetch(&self, object: PhpObject, name: &[u8]) -> bool {
+        let class = object.class();
+        if !self.serves_accessor(class, b"__get") || self.guard_word(object, name) & IN_GET != 0 {
+            return false;
+        }
+        let o = object.heap();
+        match self.declared_slot(class, name) {
+            // A property the scope may not reach is placed silently where
+            // the class has a `__get`, which answers for it.
+            Some(placed) if !self.may_access(placed.declaring, placed.visibility) => true,
+            Some(placed) => {
+                o.slot(placed.slot).is_undef()
+                    && !o.slot_uninit(placed.slot)
+                    && !self.lazy_slot(o, placed.slot)
+            }
+            None => !o.properties().is_some_and(|table| {
+                table
+                    .iter()
+                    .any(|(k, _)| matches!(k, php_heap::Key::Str(s) if s.bytes() == name))
+            }),
+        }
+    }
+
+    /// `fn_flags & ZEND_ACC_STRICT_TYPES` over a user function: whether the
+    /// file it was declared in is `strict_types`. A native carries no such
+    /// bit.
+    pub(crate) fn function_strict_types(&self, function: Function) -> bool {
+        self.user_function(function).is_some_and(|user| {
+            crate::exec::body_of(&user.unit, user.body).is_some_and(|code| code.strict_types)
+        })
+    }
+
+    /// `zend_verify_prop_assignable_by_ref_ex` under
+    /// `ZEND_VERIFY_PROP_ASSIGNABLE_BY_REF_CONTEXT_MAGIC_GET`: what `__get`
+    /// answered for a typed property an `unset` emptied, held to the
+    /// property's type under `__get`'s own `strict_types`, converted by the
+    /// weak rule where it can be, and php's `TypeError` naming `__get`
+    /// where not. A name that is no typed declared property the scope
+    /// reaches is the answer as it is.
+    ///
+    /// ```php
+    /// class T { public int $i = 1; public int $u;
+    ///     function __get($n) { echo "__get $n\n"; return $n === 'i' ? "42" : "x"; }
+    ///     function __isset($n) { echo "__isset $n\n"; return true; } }
+    /// $t = new T; unset($t->i);
+    /// var_dump($t->i, isset($t->u));
+    /// unset($t->u);
+    /// try { var_dump($t->u); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// __get i
+    /// int(42)
+    /// bool(false)
+    /// __get u
+    /// Value of type string returned from T::__get() must be compatible with unset property T::$u of type int
+    /// ```
+    fn hold_magic_get(
+        &mut self,
+        class: ClassId,
+        name: &[u8],
+        getter: Function,
+        got: Value,
+    ) -> Result<Value, Thrown> {
+        let Some(placed) = self
+            .declared_slot(class, name)
+            .filter(|p| p.typed && self.may_access(p.declaring, p.visibility))
+        else {
+            return Ok(got);
+        };
+        let Some(typed) = self.declared_typed_property(class, name) else {
+            return Ok(got);
+        };
+        let strict = self.function_strict_types(getter);
+        let held = got.deref();
+        let admitted = match crate::ops::property_type_admits(
+            self,
+            &held,
+            &typed.ty,
+            placed.declaring,
+            strict,
+        ) {
+            Ok(admitted) => admitted,
+            Err(thrown) => {
+                self.release(got);
+                return Err(thrown);
+            }
+        };
+        match admitted {
+            crate::ops::Admitted::As => Ok(got),
+            crate::ops::Admitted::Converted(coerced) => {
+                self.release(got);
+                Ok(coerced)
+            }
+            crate::ops::Admitted::Refused => {
+                let given = crate::ops::type_name(self, &held);
+                self.release(got);
+                let class = self.class_name(placed.declaring);
+                let ty = crate::api::coerce::declared_type_name(&typed.ty);
+                let shown = String::from_utf8_lossy(name).into_owned();
+                Err(crate::api::raising::throw(
+                    self,
+                    "TypeError",
+                    &format!(
+                        "Value of type {given} returned from {class}::__get() must be compatible with unset property {class}::${shown} of type {ty}"
+                    ),
+                ))
+            }
+        }
+    }
+
+    /// `zend_readonly_property_modification_error` (`Cannot modify
+    /// readonly property C::$p`) and
+    /// `zend_readonly_property_indirect_modification_error` (`Cannot
+    /// indirectly modify ...`), by `operation`, naming the class that
+    /// declared the property.
+    ///
+    /// Refused from the class's own scope as from any other, the unwritten
+    /// property included where the write is indirect; `__clone` writes it
+    /// once more, never indirectly:
+    ///
+    /// ```php
+    /// class T {
+    ///     public readonly int $i; public readonly array $a;
+    ///     function __construct() { $this->i = 1; }
+    ///     function bump() { try { $this->i++; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    ///         try { $this->i += 2; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    ///         try { $this->a[] = 1; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    ///         try { unset($this->i); } catch (Error $e) { echo $e->getMessage(), "\n"; } }
+    ///     function __clone() { $this->i = 5;
+    ///         try { $this->i = 6; } catch (Error $e) { echo $e->getMessage(), "\n"; } }
+    /// }
+    /// $t = new T; $t->bump();
+    /// var_dump((clone $t)->i);
+    /// ```
+    /// ```expect
+    /// Cannot modify readonly property T::$i
+    /// Cannot modify readonly property T::$i
+    /// Cannot indirectly modify readonly property T::$a
+    /// Cannot unset readonly property T::$i
+    /// Cannot modify readonly property T::$i
+    /// int(5)
+    /// ```
+    fn readonly_modification(
+        &mut self,
+        declaring: ClassId,
+        name: &[u8],
+        operation: &str,
+    ) -> Thrown {
+        let class = self.class_name(declaring);
+        let shown = String::from_utf8_lossy(name).into_owned();
+        crate::api::raising::throw(
+            self,
+            "Error",
+            &format!("Cannot {operation} readonly property {class}::${shown}"),
+        )
+    }
+
+    /// php's `Error` for a typed property read before anything wrote it
+    /// (`zend_throw_error` under `uninit_error`), naming the class that
+    /// declared it, `prop_info->ce`.
+    fn uninitialized_property(&mut self, declaring: ClassId, name: &[u8]) -> Thrown {
+        let class = self.class_name(declaring);
+        let shown = String::from_utf8_lossy(name).into_owned();
+        crate::api::raising::throw(
+            self,
+            "Error",
+            &format!("Typed property {class}::${shown} must not be accessed before initialization"),
+        )
     }
 
     /// `zend_bad_property_access`: php's `Error` for a property the
@@ -6899,6 +7180,9 @@ impl Request {
         read: PropertyRead,
     ) -> Result<Value, Thrown> {
         let silent = read == PropertyRead::Silent;
+        // What nothing holds is `null`, quietly, under `BP_VAR_IS` and
+        // `BP_VAR_UNSET`; only the first asks `__isset`.
+        let quiet = matches!(read, PropertyRead::Silent | PropertyRead::Unset);
         let o = object.heap();
         let class = object.class();
         let shown = String::from_utf8_lossy(name).into_owned();
@@ -6928,19 +7212,17 @@ impl Request {
                     return self.read_property(instance, name, read);
                 }
                 // `IS_PROP_UNINIT`: a typed slot nothing has written
-                // skips `__get` and is the uninitialised-access error.
-                if placed.typed {
-                    if silent {
+                // skips `__get` and is the uninitialised-access error; one
+                // an `unset` emptied is the magic methods' where the class
+                // has one that answers, and the same error where not
+                // (`uninit_error` with `prop_info` set).
+                let magic = self.serves_accessor(class, b"__get")
+                    || (silent && self.serves_accessor(class, b"__isset"));
+                if placed.typed && (o.slot_uninit(placed.slot) || !magic) {
+                    if quiet {
                         return Ok(Value::null());
                     }
-                    let class = self.class_name(class);
-                    return Err(crate::api::raising::throw(
-                        self,
-                        "Error",
-                        &format!(
-                            "Typed property {class}::${shown} must not be accessed before initialization"
-                        ),
-                    ));
+                    return Err(self.uninitialized_property(placed.declaring, name));
                 }
             } else {
                 if !silent && !self.serves_accessor(class, b"__get") {
@@ -6989,11 +7271,15 @@ impl Request {
             if let Some(getter) = getter
                 && self.guard_word(object, name) & IN_GET == 0
             {
-                return self.call_accessor(object, getter, IN_GET, name, &[]);
+                let got = self.call_accessor(object, getter, IN_GET, name, &[])?;
+                self.overloaded_write_notice(class, name, read, &got);
+                return self.hold_magic_get(class, name, getter, got);
             }
         } else if let Some(getter) = getter {
             if self.guard_word(object, name) & IN_GET == 0 {
-                return self.call_accessor(object, getter, IN_GET, name, &[]);
+                let got = self.call_accessor(object, getter, IN_GET, name, &[])?;
+                self.overloaded_write_notice(class, name, read, &got);
+                return self.hold_magic_get(class, name, getter, got);
             }
             // `zend_wrong_offset`: the guard stands and the placement
             // was one the scope may not reach, so it is made again,
@@ -7016,7 +7302,7 @@ impl Request {
             }
             return self.read_property(instance, name, read);
         }
-        if !silent {
+        if !quiet {
             let class = self.class_name(class);
             crate::api::raising::warning(self, &format!("Undefined property: {class}::${shown}"));
         }
@@ -7104,16 +7390,45 @@ impl Request {
             }
             return Err(self.inaccessible_property(class, placed.visibility, name));
         }
+        // A slot an `unset` emptied, on a class with a `__set`, is the
+        // setter's: `zend_std_write_property` reaches the magic method
+        // before the set visibility, which `write_std_property` holds the
+        // write to after it.
+        let o = object.heap();
+        if o.slot(placed.slot).is_undef()
+            && !o.slot_uninit(placed.slot)
+            && !self.lazy_slot(o, placed.slot)
+            && self.serves_accessor(class, b"__set")
+        {
+            return Ok(None);
+        }
+        // `zend_readonly_property_modification_error` and its indirect
+        // twin, ahead of the set visibility: an initialised readonly
+        // property is modified from no scope, save once more under
+        // `IS_PROP_REINITABLE` inside `__clone`, and an unwritten one is
+        // no place for an indirect modification either, which would
+        // initialise it by a write the property never sees.
+        let initialized = !o.slot(placed.slot).is_undef();
+        // `IS_PROP_REINITABLE` lets `__clone` write the property again,
+        // never modify it indirectly (`zend_std_read_property` under
+        // `BP_VAR_W` does not read the bit).
+        let indirect = operation == "indirectly modify";
+        if placed.readonly
+            && (indirect
+                || (initialized && !o.slot_bit(placed.slot, php_heap::PropBit::Reinitable)))
+        {
+            return Err(self.readonly_modification(placed.declaring, name, operation));
+        }
         // An initialised readonly property is refused as readonly, the
         // caller's, ahead of its set visibility
         // (`zend_std_write_property`).
-        let readonly_first = placed.readonly && !object.heap().slot(placed.slot).is_undef();
+        let readonly_first = placed.readonly && initialized;
         if let Some(set) = placed.set_visibility
             && !readonly_first
             && !self.has_set_access(placed.declaring, set)
         {
             return Err(self.set_inaccessible_property(
-                class,
+                placed.declaring,
                 set,
                 placed.readonly,
                 name,
@@ -7121,6 +7436,76 @@ impl Request {
             ));
         }
         Ok(Some((placed.slot, placed.typed)))
+    }
+
+    /// `if (UNEXPECTED(Z_TYPE_P(retval) == IS_UNDEF))` in
+    /// `zend_std_get_property_ptr_ptr` under `BP_VAR_RW`, ahead of any
+    /// placement: a declared slot the scope reaches that nothing holds,
+    /// where no `__get` answers for it or it is `IS_PROP_UNINIT`, raises
+    /// the read's own diagnostic, the typed property's `Error` naming the
+    /// class that declared it or the warning, an untyped one laid to
+    /// `null` before the warning as php lays it. Anything else is the
+    /// placement's.
+    pub(crate) fn read_before_write(
+        &mut self,
+        object: PhpObject,
+        name: &[u8],
+    ) -> Result<(), Thrown> {
+        let class = object.class();
+        let o = object.heap();
+        let Some(placed) = self.declared_slot(class, name) else {
+            return Ok(());
+        };
+        if !self.may_access(placed.declaring, placed.visibility)
+            || !o.slot(placed.slot).is_undef()
+            || self.lazy_slot(o, placed.slot)
+        {
+            return Ok(());
+        }
+        let magic =
+            self.serves_accessor(class, b"__get") && self.guard_word(object, name) & IN_GET == 0;
+        if magic && !o.slot_uninit(placed.slot) {
+            return Ok(());
+        }
+        if placed.typed {
+            return Err(self.uninitialized_property(placed.declaring, name));
+        }
+        // `ZVAL_NULL(retval)` before the warning, so what an error handler
+        // writes into the slot is what the fetch then reads.
+        self.write_declared_slot(o, placed.slot, Value::null())?;
+        let class = self.class_name(class);
+        let shown = String::from_utf8_lossy(name).into_owned();
+        crate::api::raising::warning(self, &format!("Undefined property: {class}::${shown}"));
+        Ok(())
+    }
+
+    /// Whether a write fetch over `name` reads the property rather than
+    /// placing it: a declared slot the scope reaches whose readonly or
+    /// set visibility bars this scope from writing it, holding an object.
+    /// php's `zend_std_get_property_ptr_ptr` hands such a slot to
+    /// `read_property`, which under `BP_VAR_W` returns the object as a
+    /// copy (`zend_std_read_property`), so a write through the object
+    /// changes the object and never the property.
+    ///
+    /// Under an `unset` fetch the same slot holding nothing is read too,
+    /// as `null` and quietly: there is nothing to modify.
+    pub(crate) fn write_fetch_reads_object(
+        &self,
+        object: PhpObject,
+        name: &[u8],
+        unset: bool,
+    ) -> bool {
+        let Some(placed) = self.declared_slot(object.class(), name) else {
+            return false;
+        };
+        let barred = placed.readonly
+            || placed
+                .set_visibility
+                .is_some_and(|set| !self.has_set_access(placed.declaring, set));
+        let held = object.heap().slot(placed.slot);
+        barred
+            && self.may_access(placed.declaring, placed.visibility)
+            && (Value::of_zval(held).deref().as_object().is_some() || (unset && held.is_undef()))
     }
 
     /// The `zend_property_info` beside a typed slot, what
@@ -7140,6 +7525,26 @@ impl Request {
         let (declaring, p) = placed.get(at)?;
         p.ty.clone().map(|ty| TypedProperty {
             declaring: *declaring,
+            ty,
+            readonly: p.is_readonly,
+        })
+    }
+
+    /// [`Request::declared_typed_property`] for a `static` property: the
+    /// `zend_property_info` `zend_fetch_static_property_address` hands on,
+    /// its type and the class that declared it, where the property is
+    /// typed.
+    pub(crate) fn declared_typed_static(
+        &self,
+        class: ClassId,
+        name: &[u8],
+    ) -> Option<TypedProperty> {
+        let (declaring, p) = self.property_info_of(class, name)?;
+        if p.is_instance {
+            return None;
+        }
+        p.ty.map(|ty| TypedProperty {
+            declaring,
             ty,
             readonly: p.is_readonly,
         })
@@ -7303,7 +7708,9 @@ impl Request {
             if self.lazy_slot(o, p.slot) {
                 return self.lazy_write(object, name, value, false);
             }
-            if p.typed {
+            // `IS_PROP_UNINIT`: a slot nothing has written passes `__set`
+            // by; one an `unset` emptied is the setter's.
+            if o.slot_uninit(p.slot) {
                 return self.write_std_property(object, name, value);
             }
         }
@@ -7349,6 +7756,19 @@ impl Request {
         }
         if lazy {
             return self.lazy_write(object, name, value, true);
+        }
+        // `write_std_property`'s set-visibility arm, which the write a
+        // `__set` makes on its own property, under the guard, meets.
+        if let Some(placed) = self.declared_slot(class, &bytes)
+            && !placed.readonly
+            && let Some(set) = placed.set_visibility
+            && !self.has_set_access(placed.declaring, set)
+        {
+            let thrown =
+                self.set_inaccessible_property(placed.declaring, set, false, &bytes, "modify");
+            self.release(value);
+            self.release(Value::string(name));
+            return Err(thrown);
         }
         self.write_std_property(object, name, value)
     }
@@ -8007,13 +8427,37 @@ impl Request {
             ))));
         };
         let new = PhpObject::of(new);
-        if self.method_named(object.class(), b"__clone").is_some()
-            && let Err(thrown) = crate::api::call::call_method(self, &new, b"__clone", &[])
-        {
+        if let Err(thrown) = self.serve_clone_method(new) {
             self.release(new.as_value());
             return Err(thrown);
         }
         Ok(new)
+    }
+
+    /// The tail of `zend_objects_clone_members`: the class's `__clone`
+    /// served on the copy, with every declared slot of it
+    /// `IS_PROP_REINITABLE` for the call, so the method may write a
+    /// readonly property once more, and none after it, whatever the method
+    /// threw. A class with no `__clone` is nothing to serve.
+    pub(crate) fn serve_clone_method(&mut self, copy: PhpObject) -> Result<(), Thrown> {
+        if self.method_named(copy.class(), b"__clone").is_none() {
+            return Ok(());
+        }
+        Self::mark_reinitable(copy, true);
+        let served = crate::api::call::call_method(self, &copy, b"__clone", &[]);
+        Self::mark_reinitable(copy, false);
+        served.map(|answered| self.release(answered))
+    }
+
+    /// `IS_PROP_REINITABLE` set or cleared on every declared slot of
+    /// `object`, as `zend_objects_clone_members` and
+    /// `zend_objects_clone_obj_with` do around `__clone` and a `clone
+    /// with`'s writes.
+    fn mark_reinitable(object: PhpObject, on: bool) {
+        let o = object.heap();
+        for slot in 0..o.slots() {
+            o.set_slot_bit(slot, php_heap::PropBit::Reinitable, on);
+        }
     }
 
     /// [`PhpObject::clone_with`]: the members copied beside `payload`,
@@ -8025,9 +8469,7 @@ impl Request {
     ) -> Result<PhpObject, Thrown> {
         let cloned = self.heap.object_clone_with(object.heap(), payload);
         let new = PhpObject::of(self.fatal_of(cloned)?);
-        if self.method_named(object.class(), b"__clone").is_some()
-            && let Err(thrown) = crate::api::call::call_method(self, &new, b"__clone", &[])
-        {
+        if let Err(thrown) = self.serve_clone_method(new) {
             self.release(new.as_value());
             return Err(thrown);
         }
@@ -8053,10 +8495,29 @@ impl Request {
             return Err(self.uncloneable(object));
         };
         let new = clone_obj(self, object)?;
+        // "Unlock readonly properties once more" for the writes, and lock
+        // them again after, whatever a write threw.
+        Self::mark_reinitable(new, true);
+        let written = self.clone_with_writes(new, table, properties);
+        Self::mark_reinitable(new, false);
+        if let Err(thrown) = written {
+            self.release(new.as_value());
+            return Err(thrown);
+        }
+        Ok(new)
+    }
+
+    /// The writes of [`Request::clone_members_with`] over the copy, each
+    /// through the class's `write_property`.
+    fn clone_with_writes(
+        &mut self,
+        new: PhpObject,
+        table: &'static dyn crate::api::abi::ObjectHandlers,
+        properties: PhpArray,
+    ) -> Result<(), Thrown> {
         for (key, value) in properties.snapshot() {
             let value = match value.as_php_ref() {
                 Some(r) if r.as_value().refcount() > 1 => {
-                    self.release(new.as_value());
                     return Err(crate::api::raising::throw(
                         self,
                         "Error",
@@ -8066,20 +8527,11 @@ impl Request {
                 Some(_) => value.deref(),
                 None => value,
             };
-            let name = match key.to_prop_name(self) {
-                Ok(name) => name,
-                Err(thrown) => {
-                    self.release(new.as_value());
-                    return Err(thrown);
-                }
-            };
+            let name = key.to_prop_name(self)?;
             self.addref(&value);
-            if let Err(thrown) = table.write_property(self, new, name, value) {
-                self.release(new.as_value());
-                return Err(thrown);
-            }
+            table.write_property(self, new, name, value)?;
         }
-        Ok(new)
+        Ok(())
     }
 
     /// php's `Error` for a class whose `clone_obj` slot is null.
@@ -9203,6 +9655,13 @@ impl Request {
                 PropertyTest::NotEmpty => crate::api::coerce::truthy(self, &value),
             });
         }
+        // `IS_PROP_UNINIT`: "Skip __isset() for uninitialized typed
+        // properties", which answer no whatever the test; a slot that
+        // waits on a lazy initializer is `IS_PROP_LAZY` first, which
+        // initialises the object below.
+        if placed_slot.is_some_and(|slot| o.slot_uninit(slot) && !self.lazy_slot(o, slot)) {
+            return Ok(false);
+        }
         // `lazy_init:`, which a slot that waits reaches past `__isset`
         // and a name the placement found no slot for reaches where no
         // accessor answers it.
@@ -9361,6 +9820,36 @@ impl Request {
     /// }
     /// unset w
     /// ```
+    ///
+    /// `IS_PROP_UNINIT` tells a typed slot nothing has written, which
+    /// passes the magic methods by, from one an `unset` emptied, which
+    /// reaches them; the set visibility is checked where php checks it,
+    /// inside the accessor, and names the class that declared the
+    /// property:
+    ///
+    /// ```php
+    /// class C { public private(set) int $a = 1; public int $u;
+    ///     function __construct() { unset($this->a); } }
+    /// class D extends C {
+    ///     function __unset($n) { echo "__unset $n\n"; unset($this->a); }
+    ///     function __get($n) { echo "__get $n\n"; return 7; }
+    /// }
+    /// $d = new D;
+    /// try { unset($d->a); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump($d->a);
+    /// try { var_dump($d->u); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// unset($d->u);
+    /// var_dump($d->u);
+    /// ```
+    /// ```expect
+    /// __unset a
+    /// Cannot unset private(set) property C::$a from scope D
+    /// __get a
+    /// int(7)
+    /// Typed property C::$u must not be accessed before initialization
+    /// __get u
+    /// int(7)
+    /// ```
     pub(crate) fn unset_property(&mut self, object: PhpObject, name: &[u8]) -> Result<(), Thrown> {
         let class = object.class();
         let o = object.heap();
@@ -9380,18 +9869,17 @@ impl Request {
                 // are held to the set visibility here; an untyped slot
                 // an `unset` emptied is the `__unset`'s.
                 let waits = self.lazy_slot(o, placed.slot);
-                if !empty || placed.typed || waits {
+                let uninit = o.slot_uninit(placed.slot);
+                let in_unset = unsetter.is_some() && self.guard_word(object, name) & IN_UNSET != 0;
+                if !empty || uninit || unsetter.is_none() || in_unset || waits {
                     // `zend_readonly_property_unset_error`, ahead of the
-                    // set visibility. php raises it in the class's own
-                    // scope too, save in `__clone`, where the slot is
-                    // `IS_PROP_REINITABLE`, which this engine does not
-                    // keep; so it is raised here where the set visibility
-                    // would refuse the unset anyway.
+                    // set visibility: an initialised readonly property is
+                    // unset from no scope, the class's own included, save
+                    // inside `__clone`, where the slot is
+                    // `IS_PROP_REINITABLE`.
                     if placed.readonly
                         && !empty
-                        && placed
-                            .set_visibility
-                            .is_some_and(|set| !self.has_set_access(placed.declaring, set))
+                        && !o.slot_bit(placed.slot, php_heap::PropBit::Reinitable)
                     {
                         let declaring = self.class_name(placed.declaring);
                         let shown = String::from_utf8_lossy(name).into_owned();
@@ -9405,7 +9893,7 @@ impl Request {
                         && !self.has_set_access(placed.declaring, set)
                     {
                         return Err(self.set_inaccessible_property(
-                            class,
+                            placed.declaring,
                             set,
                             placed.readonly,
                             name,
@@ -9413,7 +9901,17 @@ impl Request {
                         ));
                     }
                     if !empty {
+                        if let Some(cell) = o.slot(placed.slot).as_reference() {
+                            self.slot_source_gone(object, placed.slot, cell);
+                        }
                         Heap::object_set_slot(&mut Hooks(self), o, placed.slot, Zval::UNDEF);
+                        // An emptied slot is no longer `IS_PROP_UNINIT`,
+                        // whatever it was made with.
+                        o.set_slot_bit(placed.slot, php_heap::PropBit::Uninit, false);
+                    } else if uninit && !waits {
+                        // `Z_PROP_FLAG_P(slot) = 0`: the bit reset and
+                        // `__unset` passed by.
+                        o.set_slot_bit(placed.slot, php_heap::PropBit::Uninit, false);
                     } else if waits {
                         // `IS_PROP_LAZY`: the object initialised and the
                         // property unset on what that answers.
@@ -16002,6 +16500,12 @@ impl HeapHooks for Hooks<'_> {
     fn free_reference(&mut self, r: Ref) {
         let word = r.sources();
         self.0.ref_sources.retain(|(at, _)| *at != word);
+    }
+
+    /// `ZEND_REF_DEL_TYPE_SOURCE` for a slot of an object being freed
+    /// ([`Request::slot_source_gone`]).
+    fn slot_source_gone(&mut self, obj: Obj, slot: u32, r: Ref) {
+        self.0.slot_source_gone(PhpObject::of(obj), slot, r);
     }
 
     /// `zend_weakrefs_notify`: every weak holder of the object cleared

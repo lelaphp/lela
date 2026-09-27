@@ -145,17 +145,19 @@ fn prefixed(prefix: &[u8], name: &[u8]) -> Vec<u8> {
 }
 
 /// `ZEND_TRY_ASSIGN_COPY_EX` into the variable, or a new one: through a
-/// reference the variable holds, else in its place.
-fn assign(req: &mut Request, name: &[u8], value: Value) {
+/// reference the variable holds, held to the types it is typed by, else
+/// in its place.
+fn assign(req: &mut Request, name: &[u8], value: Value) -> Result<(), Thrown> {
     let value = value.deref();
     req.addref(&value);
-    match req
+    if let Some(cell) = req
         .caller_var(name)
         .and_then(|held| held.as_php_ref().copied())
     {
-        Some(cell) => cell.set(req, value),
-        None => req.set_caller_var(name, value),
+        return cell.set(req, value);
     }
+    req.set_caller_var(name, value);
+    Ok(())
 }
 
 /// The element made a reference in place (`ZVAL_MAKE_REF_EX`), and the
@@ -400,7 +402,7 @@ fn extract(req: &mut Request) -> Result<Value, Thrown> {
         if refs {
             assign_ref(req, &mut array, &key, entry, &target)?;
         } else {
-            assign(req, &target, entry);
+            assign(req, &target, entry)?;
         }
         count += 1;
     }

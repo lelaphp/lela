@@ -400,7 +400,7 @@ impl Stmt {
 /// parameter holds one, as php's `convert_to_*` writes.
 fn replace(req: &mut Request, value: &mut Value, new: Value) {
     if let Some(cell) = value.as_php_ref().copied() {
-        cell.set(req, new);
+        cell.convert(req, new);
     } else {
         let old = std::mem::replace(value, new);
         req.release(old);

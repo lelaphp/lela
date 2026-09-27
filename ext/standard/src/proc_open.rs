@@ -931,7 +931,7 @@ fn proc_open(req: &mut Request) -> Result<Value, Thrown> {
             held.push(stream.resource());
         }
     }
-    assign_ref(req, 3, Value::array(pipes));
+    assign_ref(req, 3, Value::array(pipes))?;
     let kind = process_type(req);
     let process = Process {
         child: pid,

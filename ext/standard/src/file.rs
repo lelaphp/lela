@@ -2700,7 +2700,7 @@ fn flock(req: &mut Request) -> Result<Value, Thrown> {
     }
     let would_block = req.argument_count() >= 3;
     if would_block {
-        assign_ref(req, 3, Value::int(0));
+        assign_ref(req, 3, Value::int(0))?;
     }
     // `flock_values[act - 1]`: `LOCK_SH`, `LOCK_EX` and `LOCK_UN` are
     // `flock(2)`'s 1, 2 and 8, and `LOCK_NB` its 4.
@@ -2711,7 +2711,7 @@ fn flock(req: &mut Request) -> Result<Value, Thrown> {
         return Ok(Value::bool(true));
     }
     if would_block && non_blocking && stream.is_stdio(req) {
-        assign_ref(req, 3, Value::int(1));
+        assign_ref(req, 3, Value::int(1))?;
     }
     Ok(Value::bool(false))
 }

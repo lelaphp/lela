@@ -1142,11 +1142,46 @@ impl PhpRef {
         Value::of_zval(self.0.val())
     }
 
-    /// Replace the value held, the reference's half of
-    /// `zend_assign_to_variable`: `value` is the cell's from here, and
-    /// what the cell held is released last, after the write, which is
-    /// where a destructor is served.
-    pub fn set(&self, req: &mut Request, value: Value) {
+    /// Assign through the reference, `ZEND_TRY_ASSIGN_REF`
+    /// (`Z/Zend/zend_API.h`): a cell a typed property's slot holds is held
+    /// to every type its sources declare, under the calling code's
+    /// `strict_types`, as `zend_try_assign_typed_ref` holds it, and
+    /// coerced to what they agree on; any other cell takes the value as it
+    /// is. `value` is the cell's from here and what the cell held is
+    /// released last, where a destructor is served; on the `TypeError`
+    /// the value is given up and the cell keeps what it held.
+    ///
+    /// ```php
+    /// class T { public int $i = 0; public ?string $s = null; }
+    /// $t = new T; $r = &$t->i;
+    /// try { settype($r, "array"); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// $q = &$t->s;
+    /// try { preg_match('/(a)/', 'a', $q); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// settype($r, "string"); extract(['r' => '7']);
+    /// var_dump($t);
+    /// ```
+    /// ```expect
+    /// Cannot assign array to reference held by property T::$i of type int
+    /// Cannot assign array to reference held by property T::$s of type ?string
+    /// object(T)#1 (2) {
+    ///   ["i"]=>
+    ///   &int(7)
+    ///   ["s"]=>
+    ///   &NULL
+    /// }
+    /// ```
+    pub fn set(&self, req: &mut Request, value: Value) -> Result<(), Thrown> {
+        let strict = req.strict_types();
+        req.assign_to_reference(self.0, value, strict)
+    }
+
+    /// The value held replaced by what php's `convert_to_*` makes of it
+    /// in place (`ZVAL_DEREF` and then the conversion,
+    /// `Z/Zend/zend_operators.c`): no type source is consulted, since php's
+    /// conversion writes the zval where it stands. What binding a PDO
+    /// parameter by reference does; an assignment through the cell is
+    /// [`PhpRef::set`]. What the cell held is released after the write.
+    pub fn convert(&self, req: &mut Request, value: Value) {
         req.reference_set(self.0, value);
     }
 
@@ -1831,7 +1866,9 @@ mod tests {
         let Ok(text) = PhpString::new(&mut req, b"held through the reference") else {
             return;
         };
-        r.set(&mut req, Value::string(text));
+        let Ok(()) = r.set(&mut req, Value::string(text)) else {
+            return;
+        };
         assert_eq!(
             v.deref().as_str_bytes().map(<[u8]>::to_vec),
             Some(b"held through the reference".to_vec())
