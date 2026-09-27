@@ -224,6 +224,9 @@ into_const!(&str, Type::String, |s| ConstExpr::Str(s.as_bytes().into()));
 into_const!(String, Type::String, |s| ConstExpr::Str(
     s.as_bytes().into()
 ));
+into_const!(Vec<u8>, Type::String, |bytes| ConstExpr::Str(
+    bytes.as_slice().into()
+));
 into_const!(ConstArray, Type::Array, |array| array.expr());
 
 /// A plain value with no declared type, for a constant php declares by
