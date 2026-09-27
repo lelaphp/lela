@@ -7,53 +7,13 @@
 //! handler is `zend_error_impl`'s branch in [`Request::note_error_in`],
 //! and what hands it an uncaught throwable is [`Request::uncaught`].
 
+use php_macros::php_function;
 use php_unit::Level;
 
-use super::stub::stub;
-use super::{long_argument, string_argument, wrong_argument_count};
-use crate::api::abi::{Callable, Entry};
+use crate::api::abi::{Callable, FromArgument, Raw, True, Untyped};
 use crate::api::raising::{Thrown, arg_value_error, deprecated};
 use crate::api::request::Request;
-use crate::api::values::Value;
-use php_unit::decl::FunctionDecl;
-
-/// The eight, in the stub's order.
-pub(super) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        (
-            stub("trigger_error(string $message, int $error_level = E_USER_NOTICE): true"),
-            trigger_error as Entry,
-        ),
-        (
-            stub("user_error(string $message, int $error_level = E_USER_NOTICE): true"),
-            trigger_error as Entry,
-        ),
-        (
-            stub("set_error_handler(?callable $callback, int $error_levels = E_ALL)"),
-            set_error_handler as Entry,
-        ),
-        (
-            stub("restore_error_handler(): true"),
-            restore_error_handler as Entry,
-        ),
-        (
-            stub("get_error_handler(): ?callable"),
-            get_error_handler as Entry,
-        ),
-        (
-            stub("set_exception_handler(?callable $callback)"),
-            set_exception_handler as Entry,
-        ),
-        (
-            stub("restore_exception_handler(): true"),
-            restore_exception_handler as Entry,
-        ),
-        (
-            stub("get_exception_handler(): ?callable"),
-            get_exception_handler as Entry,
-        ),
-    ]
-}
+use crate::api::values::{PhpString, Value};
 
 /// `trigger_error(string $message, int $error_level = E_USER_NOTICE):
 /// true`, php's `ZEND_FUNCTION(trigger_error)`
@@ -98,18 +58,13 @@ pub(super) fn natives() -> Vec<(FunctionDecl, Entry)> {
 /// Fatal error: boom in %s on line 4
 /// shutdown
 /// ```
-fn trigger_error(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if !(1..=2).contains(&count) {
-        return Err(wrong_argument_count(req, 1, 2, count));
-    }
-    let message = string_argument(req, 1)?;
-    let level = if count == 2 {
-        long_argument(req, 2)?
-    } else {
-        Level::UserNotice.bit()
-    };
-    let level = match level {
+#[php_function(aliases(user_error))]
+fn trigger_error(
+    req: &mut Request,
+    message: PhpString,
+    #[php(default = E_USER_NOTICE)] error_level: i64,
+) -> Result<True, Thrown> {
+    let level = match error_level {
         256 => {
             deprecated(
                 req,
@@ -137,14 +92,7 @@ fn trigger_error(req: &mut Request) -> Result<Value, Thrown> {
         req.bail_out(level, &message);
         return Err(Thrown::of(None));
     }
-    Ok(Value::bool(true))
-}
-
-/// One `Z_PARAM_FUNC_OR_NULL` of a native, php's `"F!"`: `null` is no
-/// callable, and anything else is resolved where it is taken, the
-/// `TypeError` worded as `zend_parse_arg_func` words a miss.
-fn callable_or_null(req: &mut Request, position: u32) -> Result<Option<Callable>, Thrown> {
-    crate::api::coerce::callable_argument(req, position)
+    Ok(True)
 }
 
 /// A handler's value as `RETURN_COPY` hands it back, one more owner,
@@ -237,19 +185,14 @@ fn copied(req: &mut Request, handler: Option<Value>) -> Value {
 /// #1 {main}
 ///   thrown in %s on line 2
 /// ```
-fn set_error_handler(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if !(1..=2).contains(&count) {
-        return Err(wrong_argument_count(req, 1, 2, count));
-    }
-    let handler = callable_or_null(req, 1)?;
-    let levels = if count == 2 {
-        long_argument(req, 2)?
-    } else {
-        crate::api::request::E_ALL
-    };
-    let previous = req.set_error_handler(handler, levels);
-    Ok(copied(req, previous))
+#[php_function]
+fn set_error_handler(
+    req: &mut Request,
+    callback: Option<Callable>,
+    #[php(default = E_ALL)] error_levels: i64,
+) -> Untyped<Value> {
+    let previous = req.set_error_handler(callback, error_levels);
+    Untyped(copied(req, previous))
 }
 
 /// `restore_error_handler(): true`, php's
@@ -270,12 +213,10 @@ fn set_error_handler(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// NULL
 /// ```
-fn restore_error_handler(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count != 0 {
-        return Err(wrong_argument_count(req, 0, 0, count));
-    }
-    Ok(Value::bool(req.restore_error_handler()))
+#[php_function]
+fn restore_error_handler(req: &mut Request) -> True {
+    req.restore_error_handler();
+    True
 }
 
 /// `get_error_handler(): ?callable`, php 8.5's
@@ -291,13 +232,11 @@ fn restore_error_handler(req: &mut Request) -> Result<Value, Thrown> {
 /// NULL
 /// bool(true)
 /// ```
-fn get_error_handler(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count != 0 {
-        return Err(wrong_argument_count(req, 0, 0, count));
-    }
+#[php_function]
+fn get_error_handler(req: &mut Request) -> Result<Raw<Option<Callable>>, Thrown> {
     let handler = req.error_handler();
-    Ok(copied(req, handler))
+    let handler = copied(req, handler);
+    Raw::from_value(req, handler)
 }
 
 /// `set_exception_handler(?callable $callback)`, php's
@@ -350,14 +289,10 @@ fn get_error_handler(req: &mut Request) -> Result<Value, Thrown> {
 /// end
 /// h late
 /// ```
-fn set_exception_handler(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count != 1 {
-        return Err(wrong_argument_count(req, 1, 1, count));
-    }
-    let handler = callable_or_null(req, 1)?;
-    let previous = req.set_exception_handler(handler);
-    Ok(copied(req, previous))
+#[php_function]
+fn set_exception_handler(req: &mut Request, callback: Option<Callable>) -> Untyped<Value> {
+    let previous = req.set_exception_handler(callback);
+    Untyped(copied(req, previous))
 }
 
 /// `restore_exception_handler(): true`, php's
@@ -378,12 +313,10 @@ fn set_exception_handler(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// NULL
 /// ```
-fn restore_exception_handler(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count != 0 {
-        return Err(wrong_argument_count(req, 0, 0, count));
-    }
-    Ok(Value::bool(req.restore_exception_handler()))
+#[php_function]
+fn restore_exception_handler(req: &mut Request) -> True {
+    req.restore_exception_handler();
+    True
 }
 
 /// `get_exception_handler(): ?callable`, php 8.5's
@@ -397,11 +330,9 @@ fn restore_exception_handler(req: &mut Request) -> Result<Value, Thrown> {
 /// NULL
 /// string(6) "strlen"
 /// ```
-fn get_exception_handler(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count != 0 {
-        return Err(wrong_argument_count(req, 0, 0, count));
-    }
+#[php_function]
+fn get_exception_handler(req: &mut Request) -> Result<Raw<Option<Callable>>, Thrown> {
     let handler = req.exception_handler();
-    Ok(copied(req, handler))
+    let handler = copied(req, handler);
+    Raw::from_value(req, handler)
 }

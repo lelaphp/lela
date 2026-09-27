@@ -399,6 +399,7 @@ version = "0.0.0"
 dependencies = [
  "php_compile",
  "php_heap",
+ "php_macros",
  "php_unit",
  "toml",
 ]

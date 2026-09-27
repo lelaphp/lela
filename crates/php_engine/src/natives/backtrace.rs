@@ -4,50 +4,11 @@
 //! with the native's own link left out and php's options and limit, and
 //! the rendering its trace string is made by.
 
-use php_unit::decl::FunctionDecl;
+use php_macros::php_function;
 
-use super::stub::stub;
-use super::{long_argument, wrong_argument_count};
-use crate::api::abi::Entry;
 use crate::api::raising::Thrown;
-use crate::api::request::{DEBUG_BACKTRACE_PROVIDE_OBJECT, Request};
-use crate::api::values::Value;
-
-/// The two, in the stub's order.
-pub(super) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        (
-            stub(
-                "debug_backtrace(int $options = DEBUG_BACKTRACE_PROVIDE_OBJECT, int $limit = 0): array",
-            ),
-            debug_backtrace as Entry,
-        ),
-        (
-            stub("debug_print_backtrace(int $options = 0, int $limit = 0): void"),
-            debug_print_backtrace as Entry,
-        ),
-    ]
-}
-
-/// The `|ll` both read, `$options` and `$limit`, the first defaulting to
-/// `default`.
-fn options_and_limit(req: &mut Request, default: i64) -> Result<(i64, i64), Thrown> {
-    let count = req.argument_count();
-    if count > 2 {
-        return Err(wrong_argument_count(req, 0, 2, count));
-    }
-    let options = if count >= 1 {
-        long_argument(req, 1)?
-    } else {
-        default
-    };
-    let limit = if count == 2 {
-        long_argument(req, 2)?
-    } else {
-        0
-    };
-    Ok((options, limit))
-}
+use crate::api::request::Request;
+use crate::api::values::{PhpArray, Value};
 
 /// `debug_backtrace(int $options = DEBUG_BACKTRACE_PROVIDE_OBJECT, int
 /// $limit = 0): array`, php's `ZEND_FUNCTION(debug_backtrace)`
@@ -149,11 +110,13 @@ fn options_and_limit(req: &mut Request, default: i64) -> Result<(i64, i64), Thro
 /// array(0) {
 /// }
 /// ```
-fn debug_backtrace(req: &mut Request) -> Result<Value, Thrown> {
-    let (options, limit) = options_and_limit(req, DEBUG_BACKTRACE_PROVIDE_OBJECT)?;
-    Ok(Value::array(
-        req.fetch_debug_backtrace(true, options, limit)?,
-    ))
+#[php_function]
+fn debug_backtrace(
+    req: &mut Request,
+    #[php(default = DEBUG_BACKTRACE_PROVIDE_OBJECT)] options: i64,
+    #[php(default = 0)] limit: i64,
+) -> Result<PhpArray, Thrown> {
+    req.fetch_debug_backtrace(true, options, limit)
 }
 
 /// `debug_print_backtrace(int $options = 0, int $limit = 0): void`,
@@ -174,11 +137,15 @@ fn debug_backtrace(req: &mut Request) -> Result<Value, Thrown> {
 /// #1 %s(3): h('a')
 /// |
 /// ```
-fn debug_print_backtrace(req: &mut Request) -> Result<Value, Thrown> {
-    let (options, limit) = options_and_limit(req, 0)?;
+#[php_function]
+fn debug_print_backtrace(
+    req: &mut Request,
+    #[php(default = 0)] options: i64,
+    #[php(default = 0)] limit: i64,
+) -> Result<(), Thrown> {
     let trace = req.fetch_debug_backtrace(true, options, limit)?;
     let text = req.trace_to_string(trace, false);
     req.release(Value::array(trace));
     req.write(text.as_bytes());
-    Ok(Value::null())
+    Ok(())
 }

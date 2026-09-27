@@ -4,106 +4,15 @@
 //! frame is `EX(prev_execute_data)`, which [`Request::native_caller`]
 //! reads off the one chain a backtrace walks.
 
-use php_unit::decl::{FunctionDecl, Type};
+use php_macros::php_function;
 
-use super::stub::stub;
-use super::{CORE, long_argument, string_argument, wrong_argument_count};
-use crate::api::abi::Entry;
-use crate::api::coerce::coerce_param;
-use crate::api::raising::{Thrown, arg_type_error, arg_value_error, deprecated, throw};
+use crate::api::abi::{OrFalse, Passed};
+use crate::api::raising::{Thrown, arg_value_error, deprecated, throw};
 use crate::api::request::{NativeCaller, Request};
-use crate::api::values::{Key, PhpArray, PhpString, Resource, TypeTag, Value, ValueRef};
-
-/// The nineteen, in the stub's order.
-pub(super) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        (stub("zend_version(): string"), zend_version as Entry),
-        (stub("func_num_args(): int"), func_num_args as Entry),
-        (
-            stub("func_get_arg(int $position): mixed"),
-            func_get_arg as Entry,
-        ),
-        (stub("func_get_args(): array"), func_get_args as Entry),
-        (
-            stub("strcmp(string $string1, string $string2): int"),
-            strcmp as Entry,
-        ),
-        (
-            stub("strncmp(string $string1, string $string2, int $length): int"),
-            strncmp as Entry,
-        ),
-        (
-            stub("strcasecmp(string $string1, string $string2): int"),
-            strcasecmp as Entry,
-        ),
-        (
-            stub("strncasecmp(string $string1, string $string2, int $length): int"),
-            strncasecmp as Entry,
-        ),
-        (
-            stub("function_exists(string $function): bool"),
-            function_exists as Entry,
-        ),
-        (
-            stub("get_included_files(): array"),
-            get_included_files as Entry,
-        ),
-        (
-            stub("get_required_files(): array"),
-            get_included_files as Entry,
-        ),
-        (
-            stub("get_defined_functions(bool $exclude_disabled = true): array"),
-            get_defined_functions as Entry,
-        ),
-        (stub("get_defined_vars(): array"), get_defined_vars as Entry),
-        (
-            stub("get_resource_type($resource): string"),
-            get_resource_type as Entry,
-        ),
-        (
-            stub("get_resource_id($resource): int"),
-            get_resource_id as Entry,
-        ),
-        (
-            stub("get_resources(?string $type = null): array"),
-            get_resources as Entry,
-        ),
-        (
-            stub("get_loaded_extensions(bool $zend_extensions = false): array"),
-            get_loaded_extensions as Entry,
-        ),
-        (
-            stub("get_defined_constants(bool $categorize = false): array"),
-            get_defined_constants as Entry,
-        ),
-        (
-            stub("get_extension_funcs(string $extension): array|false"),
-            get_extension_funcs as Entry,
-        ),
-    ]
-}
+use crate::api::values::{Key, PhpArray, PhpString, Resource, TypeTag, Value};
 
 /// `ZEND_VERSION` at the pin (`Z/Zend/zend.h:23`).
 const ZEND_VERSION: &str = "4.5.9";
-
-/// `ZEND_PARSE_PARAMETERS_NONE()`.
-fn no_arguments(req: &mut Request) -> Result<(), Thrown> {
-    let count = req.argument_count();
-    if count == 0 {
-        return Ok(());
-    }
-    Err(wrong_argument_count(req, 0, 0, count))
-}
-
-/// One `Z_PARAM_BOOL` of a native, coerced as php coerces a bool
-/// parameter.
-fn bool_argument(req: &mut Request, position: u32) -> Result<bool, Thrown> {
-    let given = req.argument(position).unwrap_or_default();
-    Ok(coerce_param(req, &given, &Type::Bool, position)?
-        .as_bool()
-        .unwrap_or(false))
-}
 
 /// `zend_version(): string`, php's `ZEND_FUNCTION(zend_version)`
 /// (`Z/Zend/zend_builtin_functions.c:146`).
@@ -114,9 +23,9 @@ fn bool_argument(req: &mut Request, position: u32) -> Result<bool, Thrown> {
 /// ```expect
 /// string(5) "4.5.9"
 /// ```
-fn zend_version(req: &mut Request) -> Result<Value, Thrown> {
-    no_arguments(req)?;
-    Ok(Value::string(PhpString::new(req, ZEND_VERSION.as_bytes())?))
+#[php_function]
+fn zend_version(req: &mut Request) -> Result<PhpString, Thrown> {
+    PhpString::new(req, ZEND_VERSION.as_bytes())
 }
 
 /// The calling function's arguments, or php's `Error` for a caller that
@@ -155,16 +64,14 @@ fn caller_arguments(req: &mut Request, name: &str, what: &str) -> Result<Vec<Val
 /// #1 {main}
 ///   thrown in %s on line 4
 /// ```
-fn func_num_args(req: &mut Request) -> Result<Value, Thrown> {
-    no_arguments(req)?;
+#[php_function]
+fn func_num_args(req: &mut Request) -> Result<i64, Thrown> {
     let arguments = caller_arguments(
         req,
         "func_num_args",
         "must be called from a function context",
     )?;
-    Ok(Value::int(
-        i64::try_from(arguments.len()).unwrap_or(i64::MAX),
-    ))
+    Ok(i64::try_from(arguments.len()).unwrap_or(i64::MAX))
 }
 
 /// `func_get_arg(int $position): mixed`, php's
@@ -195,12 +102,8 @@ fn func_num_args(req: &mut Request) -> Result<Value, Thrown> {
 /// #2 {main}
 ///   thrown in %s on line 4
 /// ```
-fn func_get_arg(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count != 1 {
-        return Err(wrong_argument_count(req, 1, 1, count));
-    }
-    let position = long_argument(req, 1)?;
+#[php_function]
+fn func_get_arg(req: &mut Request, position: i64) -> Result<Value, Thrown> {
     if position < 0 {
         return Err(arg_value_error(req, 1, "be greater than or equal to 0"));
     }
@@ -259,8 +162,8 @@ fn func_get_arg(req: &mut Request) -> Result<Value, Thrown> {
 /// #1 {main}
 ///   thrown in %s on line 4
 /// ```
-fn func_get_args(req: &mut Request) -> Result<Value, Thrown> {
-    no_arguments(req)?;
+#[php_function]
+fn func_get_args(req: &mut Request) -> Result<PhpArray, Thrown> {
     let arguments = caller_arguments(
         req,
         "func_get_args",
@@ -277,7 +180,7 @@ fn func_get_args(req: &mut Request) -> Result<Value, Thrown> {
         };
         array.append(req, value)?;
     }
-    Ok(Value::array(array))
+    Ok(array)
 }
 
 /// `memcmp`'s answer on this host, which php hands back as it is:
@@ -326,22 +229,8 @@ fn binary_strncasecmp(a: &[u8], b: &[u8], length: usize) -> i64 {
 
 /// The two strings and, where `with_length`, the length a comparison
 /// reads, which is php's `ValueError` below zero.
-fn compared(req: &mut Request, with_length: bool) -> Result<(Vec<u8>, Vec<u8>, usize), Thrown> {
-    let want = if with_length { 3 } else { 2 };
-    let count = req.argument_count();
-    if count != want {
-        return Err(wrong_argument_count(req, want, want, count));
-    }
-    let a = string_argument(req, 1)?.as_bytes().to_vec();
-    let b = string_argument(req, 2)?.as_bytes().to_vec();
-    if !with_length {
-        return Ok((a, b, usize::MAX));
-    }
-    let length = long_argument(req, 3)?;
-    let Ok(length) = usize::try_from(length) else {
-        return Err(arg_value_error(req, 3, "be greater than or equal to 0"));
-    };
-    Ok((a, b, length))
+fn compared(req: &mut Request, length: i64) -> Result<usize, Thrown> {
+    usize::try_from(length).map_err(|_| arg_value_error(req, 3, "be greater than or equal to 0"))
 }
 
 /// `strcmp(string $string1, string $string2): int`, php's
@@ -361,9 +250,9 @@ fn compared(req: &mut Request, with_length: bool) -> Result<(Vec<u8>, Vec<u8>, u
 /// int(0)
 /// int(-1)
 /// ```
-fn strcmp(req: &mut Request) -> Result<Value, Thrown> {
-    let (a, b, length) = compared(req, false)?;
-    Ok(Value::int(binary_strncmp(&a, &b, length)))
+#[php_function]
+fn strcmp(string1: PhpString, string2: PhpString) -> i64 {
+    binary_strncmp(string1.as_bytes(), string2.as_bytes(), usize::MAX)
 }
 
 /// `strncmp(string $string1, string $string2, int $length): int`, php's
@@ -386,9 +275,19 @@ fn strcmp(req: &mut Request) -> Result<Value, Thrown> {
 /// #1 {main}
 ///   thrown in %s on line 3
 /// ```
-fn strncmp(req: &mut Request) -> Result<Value, Thrown> {
-    let (a, b, length) = compared(req, true)?;
-    Ok(Value::int(binary_strncmp(&a, &b, length)))
+#[php_function]
+fn strncmp(
+    req: &mut Request,
+    string1: PhpString,
+    string2: PhpString,
+    length: i64,
+) -> Result<i64, Thrown> {
+    let length = compared(req, length)?;
+    Ok(binary_strncmp(
+        string1.as_bytes(),
+        string2.as_bytes(),
+        length,
+    ))
 }
 
 /// `strcasecmp(string $string1, string $string2): int`, php's
@@ -404,9 +303,9 @@ fn strncmp(req: &mut Request) -> Result<Value, Thrown> {
 /// int(1)
 /// int(-32)
 /// ```
-fn strcasecmp(req: &mut Request) -> Result<Value, Thrown> {
-    let (a, b, length) = compared(req, false)?;
-    Ok(Value::int(binary_strncasecmp(&a, &b, length)))
+#[php_function]
+fn strcasecmp(string1: PhpString, string2: PhpString) -> i64 {
+    binary_strncasecmp(string1.as_bytes(), string2.as_bytes(), usize::MAX)
 }
 
 /// `strncasecmp(string $string1, string $string2, int $length): int`,
@@ -427,9 +326,19 @@ fn strcasecmp(req: &mut Request) -> Result<Value, Thrown> {
 /// #1 {main}
 ///   thrown in %s on line 3
 /// ```
-fn strncasecmp(req: &mut Request) -> Result<Value, Thrown> {
-    let (a, b, length) = compared(req, true)?;
-    Ok(Value::int(binary_strncasecmp(&a, &b, length)))
+#[php_function]
+fn strncasecmp(
+    req: &mut Request,
+    string1: PhpString,
+    string2: PhpString,
+    length: i64,
+) -> Result<i64, Thrown> {
+    let length = compared(req, length)?;
+    Ok(binary_strncasecmp(
+        string1.as_bytes(),
+        string2.as_bytes(),
+        length,
+    ))
 }
 
 /// `function_exists(string $function): bool`, php's
@@ -453,15 +362,11 @@ fn strncasecmp(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(true)
 /// ```
-fn function_exists(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count != 1 {
-        return Err(wrong_argument_count(req, 1, 1, count));
-    }
-    let name = string_argument(req, 1)?;
-    let bytes = name.as_bytes();
+#[php_function]
+fn function_exists(req: &mut Request, function: PhpString) -> bool {
+    let bytes = function.as_bytes();
     let bytes = bytes.strip_prefix(b"\\").unwrap_or(bytes);
-    Ok(Value::bool(req.function_named(bytes).is_some()))
+    req.function_named(bytes).is_some()
 }
 
 /// `get_included_files(): array`, php's
@@ -478,14 +383,14 @@ fn function_exists(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(true)
 /// ```
-fn get_included_files(req: &mut Request) -> Result<Value, Thrown> {
-    no_arguments(req)?;
+#[php_function(aliases(get_required_files))]
+fn get_included_files(req: &mut Request) -> Result<PhpArray, Thrown> {
     let mut array = PhpArray::new(req)?;
     for path in req.included_files() {
         let path = Value::string(PhpString::new(req, &path)?);
         array.append(req, path)?;
     }
-    Ok(Value::array(array))
+    Ok(array)
 }
 
 /// `get_defined_functions(bool $exclude_disabled = true): array`, php's
@@ -508,19 +413,18 @@ fn get_included_files(req: &mut Request) -> Result<Value, Thrown> {
 /// }
 /// int(2)
 /// ```
-fn get_defined_functions(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count > 1 {
-        return Err(wrong_argument_count(req, 0, 1, count));
-    }
-    if count == 1 {
-        bool_argument(req, 1)?;
+#[php_function]
+fn get_defined_functions(
+    req: &mut Request,
+    #[php(default = true)] exclude_disabled: Passed<bool>,
+) -> Result<PhpArray, Thrown> {
+    if let Passed::Given(_) = exclude_disabled {
         deprecated(
             req,
             "get_defined_functions(): The $exclude_disabled parameter has no effect since PHP 8.0",
         );
     }
-    Ok(Value::array(req.defined_functions()?))
+    req.defined_functions()
 }
 
 /// `get_defined_vars(): array`, php's `ZEND_FUNCTION(get_defined_vars)`
@@ -545,8 +449,8 @@ fn get_defined_functions(req: &mut Request) -> Result<Value, Thrown> {
 ///   &int(1)
 /// }
 /// ```
-fn get_defined_vars(req: &mut Request) -> Result<Value, Thrown> {
-    no_arguments(req)?;
+#[php_function]
+fn get_defined_vars(req: &mut Request) -> Result<PhpArray, Thrown> {
     let frame = match req.native_caller() {
         NativeCaller::Function(frame, _) | NativeCaller::Code(frame) => frame,
         NativeCaller::Native => {
@@ -557,20 +461,7 @@ fn get_defined_vars(req: &mut Request) -> Result<Value, Thrown> {
             ));
         }
     };
-    Ok(Value::array(req.defined_vars(frame)?))
-}
-
-/// One `Z_PARAM_RESOURCE` of a native, the resource or php's `TypeError`.
-fn resource_argument(req: &mut Request, position: u32) -> Result<Resource, Thrown> {
-    let given = req.argument(position).unwrap_or_default().deref();
-    if let Some(resource) = given.as_resource() {
-        return Ok(*resource);
-    }
-    let tail = format!(
-        "be of type resource, {} given",
-        crate::ops::value_name(req, &given)
-    );
-    Err(arg_type_error(req, position, &tail))
+    req.defined_vars(frame)
 }
 
 /// `get_resource_type($resource): string`, php's
@@ -591,16 +482,12 @@ fn resource_argument(req: &mut Request, position: u32) -> Result<Resource, Throw
 /// #1 {main}
 ///   thrown in %s on line 3
 /// ```
-fn get_resource_type(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count != 1 {
-        return Err(wrong_argument_count(req, 1, 1, count));
-    }
-    let resource = resource_argument(req, 1)?;
+#[php_function]
+fn get_resource_type(req: &mut Request, resource: Resource) -> Result<PhpString, Thrown> {
     let name = resource
         .type_name(req)
         .map_or_else(|| b"Unknown".to_vec(), <[u8]>::to_vec);
-    Ok(Value::string(PhpString::new(req, &name)?))
+    PhpString::new(req, &name)
 }
 
 /// `get_resource_id($resource): int`, php's
@@ -613,13 +500,9 @@ fn get_resource_type(req: &mut Request) -> Result<Value, Thrown> {
 /// ```expect
 /// bool(true)
 /// ```
-fn get_resource_id(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count != 1 {
-        return Err(wrong_argument_count(req, 1, 1, count));
-    }
-    let resource = resource_argument(req, 1)?;
-    Ok(Value::int(resource.id()))
+#[php_function]
+fn get_resource_id(resource: Resource) -> i64 {
+    resource.id()
 }
 
 /// `get_resources(?string $type = null): array`, php's
@@ -646,17 +529,12 @@ fn get_resource_id(req: &mut Request) -> Result<Value, Thrown> {
 /// #1 {main}
 ///   thrown in %s on line 5
 /// ```
-fn get_resources(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count > 1 {
-        return Err(wrong_argument_count(req, 0, 1, count));
-    }
-    let given = req.argument(1).unwrap_or_default().deref();
-    let wanted = if count == 1 && !matches!(given.as_ref(), ValueRef::Null) {
-        Some(string_argument(req, 1)?.as_bytes().to_vec())
-    } else {
-        None
-    };
+#[php_function]
+fn get_resources(
+    req: &mut Request,
+    #[php(default = null)] r#type: Option<PhpString>,
+) -> Result<PhpArray, Thrown> {
+    let wanted = r#type.map(|name| name.as_bytes().to_vec());
     let kind = match wanted.as_deref() {
         None => None,
         Some(b"Unknown") => Some(None),
@@ -674,7 +552,7 @@ fn get_resources(req: &mut Request) -> Result<Value, Thrown> {
         req.addref(&value);
         array.set(req, Key::Int(resource.id()), value)?;
     }
-    Ok(Value::array(array))
+    Ok(array)
 }
 
 /// `get_loaded_extensions(bool $zend_extensions = false): array`, php's
@@ -693,12 +571,11 @@ fn get_resources(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(false)
 /// ```
-fn get_loaded_extensions(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count > 1 {
-        return Err(wrong_argument_count(req, 0, 1, count));
-    }
-    let zend_extensions = count == 1 && bool_argument(req, 1)?;
+#[php_function]
+fn get_loaded_extensions(
+    req: &mut Request,
+    #[php(default = false)] zend_extensions: bool,
+) -> Result<PhpArray, Thrown> {
     let names = if zend_extensions {
         Vec::new()
     } else {
@@ -709,7 +586,7 @@ fn get_loaded_extensions(req: &mut Request) -> Result<Value, Thrown> {
         let name = Value::string(PhpString::new(req, name.as_bytes())?);
         array.append(req, name)?;
     }
-    Ok(Value::array(array))
+    Ok(array)
 }
 
 /// `get_defined_constants(bool $categorize = false): array`, php's
@@ -740,12 +617,11 @@ fn get_loaded_extensions(req: &mut Request) -> Result<Value, Thrown> {
 /// }
 /// int(1)
 /// ```
-fn get_defined_constants(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count > 1 {
-        return Err(wrong_argument_count(req, 0, 1, count));
-    }
-    let categorize = count == 1 && bool_argument(req, 1)?;
+#[php_function]
+fn get_defined_constants(
+    req: &mut Request,
+    #[php(default = false)] categorize: bool,
+) -> Result<PhpArray, Thrown> {
     let rows: Vec<(Option<String>, Vec<u8>, Value)> = req
         .constant_table()
         .into_iter()
@@ -758,7 +634,7 @@ fn get_defined_constants(req: &mut Request) -> Result<Value, Thrown> {
             let key = Key::Str(PhpString::new(req, &name)?);
             array.set(req, key, value)?;
         }
-        return Ok(Value::array(array));
+        return Ok(array);
     }
     let mut groups: Vec<(String, Vec<Named>)> = Vec::new();
     for (module, name, value) in rows {
@@ -778,7 +654,7 @@ fn get_defined_constants(req: &mut Request) -> Result<Value, Thrown> {
         let key = Key::Str(PhpString::new(req, module.as_bytes())?);
         array.set(req, key, Value::array(group))?;
     }
-    Ok(Value::array(array))
+    Ok(array)
 }
 
 /// One constant of a group, its name and its value.
@@ -801,21 +677,22 @@ type Named = (Vec<u8>, Value);
 /// string(11) "json_encode"
 /// bool(false)
 /// ```
-fn get_extension_funcs(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count != 1 {
-        return Err(wrong_argument_count(req, 1, 1, count));
-    }
-    let name = string_argument(req, 1)?.as_bytes().to_vec();
+#[php_function]
+fn get_extension_funcs(
+    req: &mut Request,
+    extension: PhpString,
+) -> Result<OrFalse<PhpArray>, Thrown> {
+    let name = extension.as_bytes().to_vec();
     let names: Vec<Vec<u8>> =
         if name.eq_ignore_ascii_case(b"zend") || name.eq_ignore_ascii_case(b"core") {
-            CORE.iter()
-                .map(|name| name.as_bytes().to_vec())
+            super::core()
+                .into_iter()
+                .map(|(decl, _)| decl.name.0.to_vec())
                 .filter(|name| req.function_named(name).is_some())
                 .collect()
         } else {
             let Some(extension) = req.extension_named(&name) else {
-                return Ok(Value::bool(false));
+                return Ok(OrFalse::False);
             };
             req.extension_functions(extension)
                 .into_iter()
@@ -824,12 +701,12 @@ fn get_extension_funcs(req: &mut Request) -> Result<Value, Thrown> {
                 .collect()
         };
     if names.is_empty() {
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     }
     let mut array = PhpArray::new(req)?;
     for name in names {
         let name = Value::string(PhpString::new(req, &name)?);
         array.append(req, name)?;
     }
-    Ok(Value::array(array))
+    Ok(OrFalse::Value(array))
 }
