@@ -235,6 +235,7 @@ fn open_url(
         let Some(data) = write::open_for_write(req, &host, &internal, mode)? else {
             return Ok(None);
         };
+        opened_path(req, &data);
         let stream = req.new_stream(Box::new(EntryStream { data: Some(data) }), mode)?;
         return Ok(Some(stream));
     }
@@ -247,7 +248,14 @@ fn open_url(
             return Ok(None);
         };
         match stub_data(req, id)? {
-            Ok(data) => data,
+            Ok(data) => {
+                let fname = archives(req)
+                    .get(id)
+                    .map(|a| a.fname.clone())
+                    .unwrap_or_default();
+                req.set_opened_path(&fname);
+                data
+            }
             Err(error) => {
                 req.wrapper_log_error(&error);
                 return Ok(None);
@@ -270,6 +278,7 @@ fn open_url(
                     }
                 }
                 include_cwd(req, &data, opening);
+                opened_path(req, &data);
                 data
             }
             Ok(None) | Err(None) => {
@@ -288,6 +297,25 @@ fn open_url(
     };
     let stream = req.new_stream(Box::new(EntryStream { data: Some(data) }), mode)?;
     Ok(Some(stream))
+}
+
+/// `*opened_path = "phar://<archive>/<entry>"`, the name an entry's
+/// stream stands for.
+fn opened_path(req: &mut Request, data: &EntryData) {
+    let named = archives(req).get(data.archive).map(|a| {
+        let entry = match &data.target {
+            Target::Slot(slot) => a
+                .manifest
+                .key_at(*slot)
+                .map(<[u8]>::to_vec)
+                .unwrap_or_default(),
+            Target::Temp(entry) => entry.filename.clone(),
+        };
+        [b"phar://".as_slice(), &a.fname, b"/", &entry].concat()
+    });
+    if let Some(named) = named {
+        req.set_opened_path(&named);
+    }
 }
 
 /// The stub an include of the bare archive runs: a tar or zip archive's
