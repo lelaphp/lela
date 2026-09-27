@@ -12,18 +12,19 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-mod find;
-mod locale;
-mod parse_str;
+pub(super) mod find;
+pub(super) mod locale;
+pub(super) mod parse_str;
 pub(super) mod path;
-mod replace;
-mod slashes;
-mod strip_tags;
+pub(super) mod replace;
+pub(super) mod slashes;
+pub(super) mod strip_tags;
 
 pub use strip_tags::strip_tags_ex;
 
+use php_ext::abi::{OrFalse, Passed, Ref, Union, Untyped};
+use php_ext::attr::{php_const, php_function};
 use php_ext::coerce::to_string;
-use php_ext::decl::FunctionDecl;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value};
@@ -37,8 +38,10 @@ pub(super) struct State {
     locale: locale::Locale,
 }
 
-/// The constants the natives of `string.c` read: the locale's, then
-/// `pathinfo`'s flags.
+/// The constants the natives of `string.c` read, in the stub's order:
+/// `CHAR_MAX`, the `LC_*` categories and the `nl_langinfo` items, which
+/// are the pinned build's `<langinfo.h>` values in order, then
+/// `PHP_PATHINFO_*`, the bits of `pathinfo`'s `$flags`.
 ///
 /// ```php
 /// var_dump(CHAR_MAX, LC_CTYPE, LC_NUMERIC, LC_TIME, LC_COLLATE, LC_MONETARY, LC_ALL, LC_MESSAGES, CODESET, ABDAY_1, MON_1, CRNCYSTR, PATHINFO_DIRNAME, PATHINFO_BASENAME, PATHINFO_EXTENSION, PATHINFO_FILENAME, PATHINFO_ALL);
@@ -62,30 +65,128 @@ pub(super) struct State {
 /// int(8)
 /// int(15)
 /// ```
-pub(crate) fn constants() -> Vec<php_ext::decl::ConstDecl> {
-    let mut out = locale::constants();
-    for (name, value) in [
-        (&b"PATHINFO_DIRNAME"[..], path::PATHINFO_DIRNAME),
-        (b"PATHINFO_BASENAME", path::PATHINFO_BASENAME),
-        (b"PATHINFO_EXTENSION", path::PATHINFO_EXTENSION),
-        (b"PATHINFO_FILENAME", path::PATHINFO_FILENAME),
-        (b"PATHINFO_ALL", path::PATHINFO_ALL),
-    ] {
-        out.push(crate::constant(name, value));
-    }
-    out
+#[php_const]
+pub(crate) mod constants {
+    pub(crate) const CHAR_MAX: i64 = 127;
+    pub(crate) const LC_CTYPE: i64 = 2;
+    pub(crate) const LC_NUMERIC: i64 = 4;
+    pub(crate) const LC_TIME: i64 = 5;
+    pub(crate) const LC_COLLATE: i64 = 1;
+    pub(crate) const LC_MONETARY: i64 = 3;
+    pub(crate) const LC_ALL: i64 = 0;
+    pub(crate) const LC_MESSAGES: i64 = 6;
+    pub(crate) const CODESET: i64 = 0;
+    pub(crate) const D_T_FMT: i64 = 1;
+    pub(crate) const D_FMT: i64 = 2;
+    pub(crate) const T_FMT: i64 = 3;
+    pub(crate) const T_FMT_AMPM: i64 = 4;
+    pub(crate) const AM_STR: i64 = 5;
+    pub(crate) const PM_STR: i64 = 6;
+    pub(crate) const DAY_1: i64 = 7;
+    pub(crate) const DAY_2: i64 = 8;
+    pub(crate) const DAY_3: i64 = 9;
+    pub(crate) const DAY_4: i64 = 10;
+    pub(crate) const DAY_5: i64 = 11;
+    pub(crate) const DAY_6: i64 = 12;
+    pub(crate) const DAY_7: i64 = 13;
+    pub(crate) const ABDAY_1: i64 = 14;
+    pub(crate) const ABDAY_2: i64 = 15;
+    pub(crate) const ABDAY_3: i64 = 16;
+    pub(crate) const ABDAY_4: i64 = 17;
+    pub(crate) const ABDAY_5: i64 = 18;
+    pub(crate) const ABDAY_6: i64 = 19;
+    pub(crate) const ABDAY_7: i64 = 20;
+    pub(crate) const MON_1: i64 = 21;
+    pub(crate) const MON_2: i64 = 22;
+    pub(crate) const MON_3: i64 = 23;
+    pub(crate) const MON_4: i64 = 24;
+    pub(crate) const MON_5: i64 = 25;
+    pub(crate) const MON_6: i64 = 26;
+    pub(crate) const MON_7: i64 = 27;
+    pub(crate) const MON_8: i64 = 28;
+    pub(crate) const MON_9: i64 = 29;
+    pub(crate) const MON_10: i64 = 30;
+    pub(crate) const MON_11: i64 = 31;
+    pub(crate) const MON_12: i64 = 32;
+    pub(crate) const ABMON_1: i64 = 33;
+    pub(crate) const ABMON_2: i64 = 34;
+    pub(crate) const ABMON_3: i64 = 35;
+    pub(crate) const ABMON_4: i64 = 36;
+    pub(crate) const ABMON_5: i64 = 37;
+    pub(crate) const ABMON_6: i64 = 38;
+    pub(crate) const ABMON_7: i64 = 39;
+    pub(crate) const ABMON_8: i64 = 40;
+    pub(crate) const ABMON_9: i64 = 41;
+    pub(crate) const ABMON_10: i64 = 42;
+    pub(crate) const ABMON_11: i64 = 43;
+    pub(crate) const ABMON_12: i64 = 44;
+    pub(crate) const ERA: i64 = 45;
+    pub(crate) const ERA_D_FMT: i64 = 46;
+    pub(crate) const ERA_D_T_FMT: i64 = 47;
+    pub(crate) const ERA_T_FMT: i64 = 48;
+    pub(crate) const ALT_DIGITS: i64 = 49;
+    pub(crate) const RADIXCHAR: i64 = 50;
+    pub(crate) const THOUSEP: i64 = 51;
+    pub(crate) const YESEXPR: i64 = 52;
+    pub(crate) const NOEXPR: i64 = 53;
+    pub(crate) const YESSTR: i64 = 54;
+    pub(crate) const NOSTR: i64 = 55;
+    pub(crate) const CRNCYSTR: i64 = 56;
+    pub(crate) const PATHINFO_DIRNAME: i64 = 1;
+    pub(crate) const PATHINFO_BASENAME: i64 = 2;
+    pub(crate) const PATHINFO_EXTENSION: i64 = 4;
+    pub(crate) const PATHINFO_FILENAME: i64 = 8;
+    pub(crate) const PATHINFO_ALL: i64 = 15;
 }
 
-use crate::output::Entry;
-use crate::stub::{deprecated_since, stub};
-use crate::zpp::{
-    ArrayOr, array_or_string, long_of, nullable_array, nullable_long, nullable_string,
-    optional_bool, optional_long, optional_string, same, string_value,
-};
-use crate::{argument_count_between, charmask, long_argument, string_argument};
+use crate::charmask;
 
-/// The declarations, in the stub's order, less the crate root's.
-#[allow(clippy::too_many_lines)]
+/// `RETURN_STR_COPY(str)`: the argument's own string handed back, one
+/// more reference to it.
+pub(crate) fn str_copy(req: &mut Request, string: PhpString) -> PhpString {
+    req.addref(&Value::string(string));
+    string
+}
+
+/// `zend_tolower_ascii`.
+const fn lower(byte: u8) -> u8 {
+    byte.to_ascii_lowercase()
+}
+
+/// `zend_memnstr`: the first offset of `needle` in `haystack` at or
+/// after `from`, the empty needle found where the search starts.
+fn memnstr(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    let rest = haystack.get(from..)?;
+    if needle.is_empty() {
+        return Some(from);
+    }
+    if needle.len() > rest.len() {
+        return None;
+    }
+    rest.windows(needle.len())
+        .position(|window| window == needle)
+        .map(|at| at + from)
+}
+
+/// The `zend_long` php returns for a length or an offset.
+fn long(n: usize) -> i64 {
+    i64::try_from(n).unwrap_or(i64::MAX)
+}
+
+/// `bin2hex(string $string): string`, `php_bin2hex`: each byte as two
+/// lowercase hex digits.
+///
+/// ```php
+/// var_dump(bin2hex(""), bin2hex("abc"), bin2hex("\x00\xff\x10"), bin2hex(123));
+/// ```
+/// ```expect
+/// string(0) ""
+/// string(6) "616263"
+/// string(6) "00ff10"
+/// string(6) "313233"
+/// ```
+///
+/// The declarations as Reflection renders them.
 ///
 /// ```php
 /// foreach (['bin2hex', 'strspn', 'implode', 'strtok', 'dirname', 'strrchr', 'substr_replace', 'similar_text', 'str_replace', 'setlocale', 'sscanf', 'substr_compare', 'utf8_encode'] as $f) echo new ReflectionFunction($f);
@@ -207,327 +308,16 @@ use crate::{argument_count_between, charmask, long_argument, string_argument};
 ///   - Return [ string ]
 /// }
 /// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    let trim_default = " \\n\\r\\t\\v\\0";
-    vec![
-        (stub("bin2hex(string $string): string"), bin2hex as Entry),
-        (stub("hex2bin(string $string): string|false"), hex2bin),
-        (
-            stub(
-                "strspn(string $string, string $characters, int $offset = 0, ?int $length = null): int",
-            ),
-            strspn,
-        ),
-        (
-            stub(
-                "strcspn(string $string, string $characters, int $offset = 0, ?int $length = null): int",
-            ),
-            strcspn,
-        ),
-        (
-            stub("nl_langinfo(int $item): string|false"),
-            locale::nl_langinfo,
-        ),
-        (
-            stub("strcoll(string $string1, string $string2): int"),
-            locale::strcoll,
-        ),
-        (
-            stub(&format!(
-                "rtrim(string $string, string $characters = \"{trim_default}\"): string"
-            )),
-            rtrim,
-        ),
-        (
-            stub(&format!(
-                "chop(string $string, string $characters = \"{trim_default}\"): string"
-            )),
-            rtrim,
-        ),
-        (
-            stub(&format!(
-                "ltrim(string $string, string $characters = \"{trim_default}\"): string"
-            )),
-            ltrim,
-        ),
-        (
-            stub(
-                "wordwrap(string $string, int $width = 75, string $break = \"\\n\", bool $cut_long_words = false): string",
-            ),
-            wordwrap,
-        ),
-        (
-            stub("explode(string $separator, string $string, int $limit = PHP_INT_MAX): array"),
-            explode,
-        ),
-        (
-            stub("implode(array|string $separator, ?array $array = null): string"),
-            implode,
-        ),
-        (
-            stub("join(array|string $separator, ?array $array = null): string"),
-            join,
-        ),
-        (
-            stub("strtok(string $string, ?string $token = null): string|false"),
-            strtok,
-        ),
-        (stub("str_increment(string $string): string"), str_increment),
-        (stub("str_decrement(string $string): string"), str_decrement),
-        (
-            stub("basename(string $path, string $suffix = \"\"): string"),
-            path::basename,
-        ),
-        (
-            stub("dirname(string $path, int $levels = 1): string"),
-            path::dirname,
-        ),
-        (
-            stub("pathinfo(string $path, int $flags = PATHINFO_ALL): array|string"),
-            path::pathinfo,
-        ),
-        (
-            stub(
-                "stristr(string $haystack, string $needle, bool $before_needle = false): string|false",
-            ),
-            find::stristr,
-        ),
-        (
-            stub(
-                "strstr(string $haystack, string $needle, bool $before_needle = false): string|false",
-            ),
-            find::strstr,
-        ),
-        (
-            stub(
-                "strchr(string $haystack, string $needle, bool $before_needle = false): string|false",
-            ),
-            find::strstr,
-        ),
-        (
-            stub("strpos(string $haystack, string $needle, int $offset = 0): int|false"),
-            find::strpos,
-        ),
-        (
-            stub("stripos(string $haystack, string $needle, int $offset = 0): int|false"),
-            find::stripos,
-        ),
-        (
-            stub("strrpos(string $haystack, string $needle, int $offset = 0): int|false"),
-            find::strrpos,
-        ),
-        (
-            stub("strripos(string $haystack, string $needle, int $offset = 0): int|false"),
-            find::strripos,
-        ),
-        (
-            stub(
-                "strrchr(string $haystack, string $needle, bool $before_needle = false): string|false",
-            ),
-            find::strrchr,
-        ),
-        (
-            stub("str_starts_with(string $haystack, string $needle): bool"),
-            find::str_starts_with,
-        ),
-        (
-            stub("str_ends_with(string $haystack, string $needle): bool"),
-            find::str_ends_with,
-        ),
-        (
-            stub(
-                "chunk_split(string $string, int $length = 76, string $separator = \"\\r\\n\"): string",
-            ),
-            chunk_split,
-        ),
-        (
-            stub(
-                "substr_replace(array|string $string, array|string $replace, array|int $offset, array|int|null $length = null): array|string",
-            ),
-            replace::substr_replace,
-        ),
-        (stub("quotemeta(string $string): string"), quotemeta),
-        (stub("ucfirst(string $string): string"), ucfirst),
-        (stub("lcfirst(string $string): string"), lcfirst),
-        (
-            stub("ucwords(string $string, string $separators = \" \\t\\r\\n\\f\\v\"): string"),
-            ucwords,
-        ),
-        (
-            stub("strtr(string $string, array|string $from, ?string $to = null): string"),
-            replace::strtr,
-        ),
-        (stub("strrev(string $string): string"), strrev),
-        (
-            stub("similar_text(string $string1, string $string2, &$percent = null): int"),
-            similar_text,
-        ),
-        (
-            stub("addcslashes(string $string, string $characters): string"),
-            slashes::addcslashes,
-        ),
-        (
-            stub("addslashes(string $string): string"),
-            slashes::addslashes,
-        ),
-        (
-            stub("stripcslashes(string $string): string"),
-            slashes::stripcslashes,
-        ),
-        (
-            stub("stripslashes(string $string): string"),
-            slashes::stripslashes,
-        ),
-        (
-            stub(
-                "str_replace(array|string $search, array|string $replace, array|string $subject, &$count = null): array|string",
-            ),
-            replace::str_replace,
-        ),
-        (
-            stub(
-                "str_ireplace(array|string $search, array|string $replace, array|string $subject, &$count = null): array|string",
-            ),
-            replace::str_ireplace,
-        ),
-        (
-            stub("hebrev(string $string, int $max_chars_per_line = 0): string"),
-            hebrev,
-        ),
-        (
-            stub("nl2br(string $string, bool $use_xhtml = true): string"),
-            nl2br,
-        ),
-        (
-            stub("strip_tags(string $string, array|string|null $allowed_tags = null): string"),
-            strip_tags::strip_tags,
-        ),
-        (
-            stub("setlocale(int $category, $locales, ...$rest): string|false"),
-            locale::setlocale,
-        ),
-        (
-            stub("parse_str(string $string, &$result): void"),
-            parse_str::parse_str,
-        ),
-        (
-            stub(
-                "str_getcsv(string $string, string $separator = \",\", string $enclosure = \"\\\"\", string $escape = \"\\\\\"): array",
-            ),
-            crate::csv::str_getcsv,
-        ),
-        (
-            stub("count_chars(string $string, int $mode = 0): array|string"),
-            count_chars,
-        ),
-        (
-            stub("strnatcmp(string $string1, string $string2): int"),
-            crate::strnatcmp::strnatcmp,
-        ),
-        (stub("localeconv(): array"), locale::localeconv),
-        (
-            stub("strnatcasecmp(string $string1, string $string2): int"),
-            crate::strnatcmp::strnatcasecmp,
-        ),
-        (
-            stub(
-                "substr_count(string $haystack, string $needle, int $offset = 0, ?int $length = null): int",
-            ),
-            substr_count,
-        ),
-        (
-            stub("sscanf(string $string, string $format, mixed &...$vars): array|int|null"),
-            crate::scanf::sscanf,
-        ),
-        (stub("str_rot13(string $string): string"), str_rot13),
-        (stub("str_shuffle(string $string): string"), str_shuffle),
-        (
-            stub(
-                "str_word_count(string $string, int $format = 0, ?string $characters = null): array|int",
-            ),
-            str_word_count,
-        ),
-        (
-            stub("str_split(string $string, int $length = 1): array"),
-            str_split,
-        ),
-        (
-            stub("strpbrk(string $string, string $characters): string|false"),
-            strpbrk,
-        ),
-        (
-            stub(
-                "substr_compare(string $haystack, string $needle, int $offset, ?int $length = null, bool $case_insensitive = false): int",
-            ),
-            substr_compare,
-        ),
-        (
-            deprecated_since(stub("utf8_encode(string $string): string"), "8.2"),
-            utf8_encode,
-        ),
-        (
-            deprecated_since(stub("utf8_decode(string $string): string"), "8.2"),
-            utf8_decode,
-        ),
-    ]
-}
-
-/// `RETURN_STR_COPY(str)`: the argument's own string handed back, one
-/// more reference to it.
-pub(crate) fn str_copy(req: &mut Request, string: PhpString) -> PhpString {
-    req.addref(&Value::string(string));
-    string
-}
-
-/// `zend_tolower_ascii`.
-const fn lower(byte: u8) -> u8 {
-    byte.to_ascii_lowercase()
-}
-
-/// `zend_memnstr`: the first offset of `needle` in `haystack` at or
-/// after `from`, the empty needle found where the search starts.
-fn memnstr(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
-    let rest = haystack.get(from..)?;
-    if needle.is_empty() {
-        return Some(from);
-    }
-    if needle.len() > rest.len() {
-        return None;
-    }
-    rest.windows(needle.len())
-        .position(|window| window == needle)
-        .map(|at| at + from)
-}
-
-/// The `zend_long` php returns for a length or an offset.
-fn long(n: usize) -> i64 {
-    i64::try_from(n).unwrap_or(i64::MAX)
-}
-
-/// `bin2hex(string $string): string`, `php_bin2hex`: each byte as two
-/// lowercase hex digits.
-///
-/// ```php
-/// var_dump(bin2hex(""), bin2hex("abc"), bin2hex("\x00\xff\x10"), bin2hex(123));
-/// ```
-/// ```expect
-/// string(0) ""
-/// string(6) "616263"
-/// string(6) "00ff10"
-/// string(6) "313233"
-/// ```
-fn bin2hex(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let data = string_argument(req, 1)?;
-    let input = data.as_bytes();
-    let hex = PhpString::product(req, input.len(), 2, 0, |out| {
+#[php_function]
+fn bin2hex(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
+    let input = string.as_bytes();
+    PhpString::product(req, input.len(), 2, 0, |out| {
         const DIGITS: &[u8; 16] = b"0123456789abcdef";
         for (i, byte) in input.iter().enumerate() {
             out[2 * i] = DIGITS[usize::from(byte >> 4)];
             out[2 * i + 1] = DIGITS[usize::from(byte & 15)];
         }
-    })?;
-    Ok(Value::string(hex))
+    })
 }
 
 /// `hex2bin(string $string): string|false`, `php_hex2bin`: pairs of hex
@@ -547,17 +337,16 @@ fn bin2hex(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(false)
 /// ```
-fn hex2bin(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let data = string_argument(req, 1)?;
-    let input = data.as_bytes();
-    if input.len() % 2 != 0 {
+#[php_function]
+fn hex2bin(req: &mut Request, string: PhpString) -> Result<OrFalse<PhpString>, Thrown> {
+    let input = string.as_bytes();
+    if !input.len().is_multiple_of(2) {
         docref(
             req,
             Level::Warning,
             "Hexadecimal input string must have an even length",
         );
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     }
     let digit = |c: u8| (c as char).to_digit(16).and_then(|d| u8::try_from(d).ok());
     let mut out = Vec::with_capacity(input.len() / 2);
@@ -568,11 +357,11 @@ fn hex2bin(req: &mut Request) -> Result<Value, Thrown> {
                 Level::Warning,
                 "Input string must be hexadecimal string",
             );
-            return Ok(Value::bool(false));
+            return Ok(OrFalse::False);
         };
         out.push((high << 4) | low);
     }
-    string_value(req, &out)
+    PhpString::new(req, &out).map(OrFalse::Value)
 }
 
 /// `strspn(string $string, string $characters, int $offset = 0, ?int
@@ -600,8 +389,14 @@ fn hex2bin(req: &mut Request) -> Result<Value, Thrown> {
 /// int(3)
 /// int(2)
 /// ```
-fn strspn(req: &mut Request) -> Result<Value, Thrown> {
-    spn(req, true)
+#[php_function]
+fn strspn(
+    string: PhpString,
+    characters: PhpString,
+    #[php(default = 0)] offset: i64,
+    #[php(default = null)] length: Option<i64>,
+) -> i64 {
+    spn((string, characters, offset, length), true)
 }
 
 /// `strcspn(...)`: the length of the leading span of the window whose
@@ -619,17 +414,21 @@ fn strspn(req: &mut Request) -> Result<Value, Thrown> {
 /// int(2)
 /// int(0)
 /// ```
-fn strcspn(req: &mut Request) -> Result<Value, Thrown> {
-    spn(req, false)
+#[php_function]
+fn strcspn(
+    string: PhpString,
+    characters: PhpString,
+    #[php(default = 0)] offset: i64,
+    #[php(default = null)] length: Option<i64>,
+) -> i64 {
+    spn((string, characters, offset, length), false)
 }
 
 /// `php_spn_common_handler(..., is_strspn)`.
-fn spn(req: &mut Request, must_match: bool) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 4)?;
-    let string = string_argument(req, 1)?;
-    let characters = string_argument(req, 2)?;
-    let mut start = optional_long(req, 3, 0)?;
-    let length = nullable_long(req, 4)?;
+fn spn(
+    (string, characters, mut start, length): (PhpString, PhpString, i64, Option<i64>),
+    must_match: bool,
+) -> i64 {
     let bytes = string.as_bytes();
     let remain = long(bytes.len());
     if start < 0 {
@@ -644,7 +443,7 @@ fn spn(req: &mut Request, must_match: bool) -> Result<Value, Thrown> {
         None => remain,
     };
     if len == 0 {
-        return Ok(Value::int(0));
+        return 0;
     }
     let from = usize::try_from(start).unwrap_or(0);
     let to = from + usize::try_from(len).unwrap_or(0);
@@ -656,26 +455,30 @@ fn spn(req: &mut Request, must_match: bool) -> Result<Value, Thrown> {
         .iter()
         .take_while(|c| table[usize::from(**c)] == must_match)
         .count();
-    Ok(long_of(run))
+    long(run)
 }
 
 /// `php_do_trim(..., mode)` for `rtrim` and `ltrim`: `trim`'s masks,
 /// one side taken.
-fn trim_side(req: &mut Request, left: bool) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let string = string_argument(req, 1)?;
-    let what = optional_string(req, 2)?;
+fn trim_side(
+    req: &mut Request,
+    string: PhpString,
+    what: Passed<PhpString>,
+    left: bool,
+) -> Result<PhpString, Thrown> {
     let bytes = string.as_bytes();
     let strip: Box<dyn Fn(u8) -> bool> = match what {
-        Some(what) if what.len() == 1 => {
+        Passed::Given(what) if what.len() == 1 => {
             let p = what.as_bytes()[0];
             Box::new(move |c| c == p)
         }
-        Some(what) => {
+        Passed::Given(what) => {
             let mask = charmask(req, what.as_bytes());
             Box::new(move |c| mask[usize::from(c)])
         }
-        None => Box::new(|c| c <= b' ' && matches!(c, b' ' | b'\n' | b'\r' | b'\t' | 0x0B | 0)),
+        Passed::Omitted => {
+            Box::new(|c| c <= b' ' && matches!(c, b' ' | b'\n' | b'\r' | b'\t' | 0x0B | 0))
+        }
     };
     let (start, end) = if left {
         let start = bytes.iter().take_while(|c| strip(**c)).count();
@@ -685,9 +488,9 @@ fn trim_side(req: &mut Request, left: bool) -> Result<Value, Thrown> {
         (0, kept)
     };
     if end - start == bytes.len() {
-        return Ok(same(req, string));
+        return Ok(str_copy(req, string));
     }
-    string_value(req, &bytes[start..end])
+    PhpString::new(req, &bytes[start..end])
 }
 
 /// `rtrim(string $string, string $characters = " \n\r\t\v\0"): string`
@@ -709,8 +512,13 @@ fn trim_side(req: &mut Request, left: bool) -> Result<Value, Thrown> {
 /// string(1) "2"
 /// string(2) "bc"
 /// ```
-fn rtrim(req: &mut Request) -> Result<Value, Thrown> {
-    trim_side(req, false)
+#[php_function(aliases(chop))]
+fn rtrim(
+    req: &mut Request,
+    string: PhpString,
+    #[php(default = " \n\r\t\x0B\0")] characters: Passed<PhpString>,
+) -> Result<PhpString, Thrown> {
+    trim_side(req, string, characters, false)
 }
 
 /// `ltrim(...)`: `php_trim_int` with its first bit, the start.
@@ -726,8 +534,13 @@ fn rtrim(req: &mut Request) -> Result<Value, Thrown> {
 /// string(1) "a"
 /// string(2) "bc"
 /// ```
-fn ltrim(req: &mut Request) -> Result<Value, Thrown> {
-    trim_side(req, true)
+#[php_function]
+fn ltrim(
+    req: &mut Request,
+    string: PhpString,
+    #[php(default = " \n\r\t\x0B\0")] characters: Passed<PhpString>,
+) -> Result<PhpString, Thrown> {
+    trim_side(req, string, characters, true)
 }
 
 /// `wordwrap(string $string, int $width = 75, string $break = "\n",
@@ -762,17 +575,20 @@ fn ltrim(req: &mut Request) -> Result<Value, Thrown> {
 /// wordwrap(): Argument #3 ($break) must not be empty
 /// wordwrap(): Argument #4 ($cut_long_words) cannot be true when argument #2 ($width) is 0
 /// ```
-fn wordwrap(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 4)?;
-    let text = string_argument(req, 1)?;
-    let linelength = optional_long(req, 2, 75)?;
-    let breakchar = optional_string(req, 3)?;
-    let docut = optional_bool(req, 4, false)?;
-    let text = text.as_bytes();
+#[php_function]
+fn wordwrap(
+    req: &mut Request,
+    string: PhpString,
+    #[php(default = 75)] width: i64,
+    #[php(default = "\n")] r#break: PhpString,
+    #[php(default = false)] cut_long_words: bool,
+) -> Result<PhpString, Thrown> {
+    let (linelength, docut) = (width, cut_long_words);
+    let text = string.as_bytes();
     if text.is_empty() {
-        return string_value(req, b"");
+        return PhpString::new(req, b"");
     }
-    let brk: &[u8] = breakchar.as_ref().map_or(b"\n", |b| b.as_bytes());
+    let brk: &[u8] = r#break.as_bytes();
     if brk.is_empty() {
         return Err(arg_value_error(req, 3, "not be empty"));
     }
@@ -803,7 +619,7 @@ fn wordwrap(req: &mut Request) -> Result<Value, Thrown> {
                 laststart = lastspace + 1;
             }
         }
-        return string_value(req, &out);
+        return PhpString::new(req, &out);
     }
     let mut out: Vec<u8> = Vec::with_capacity(text.len() + brk.len());
     let (mut laststart, mut lastspace) = (0usize, 0usize);
@@ -838,7 +654,7 @@ fn wordwrap(req: &mut Request) -> Result<Value, Thrown> {
     if laststart != current {
         out.extend_from_slice(&text[laststart.min(current)..current]);
     }
-    string_value(req, &out)
+    PhpString::new(req, &out)
 }
 
 /// `explode(string $separator, string $string, int $limit =
@@ -895,11 +711,14 @@ fn wordwrap(req: &mut Request) -> Result<Value, Thrown> {
 /// }
 /// explode(): Argument #1 ($separator) must not be empty
 /// ```
-fn explode(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 3)?;
-    let delim = string_argument(req, 1)?;
-    let string = string_argument(req, 2)?;
-    let limit = optional_long(req, 3, i64::MAX)?;
+#[php_function]
+fn explode(
+    req: &mut Request,
+    separator: PhpString,
+    string: PhpString,
+    #[php(default = PHP_INT_MAX)] limit: i64,
+) -> Result<PhpArray, Thrown> {
+    let delim = separator;
     if delim.is_empty() {
         return Err(arg_value_error(req, 1, "not be empty"));
     }
@@ -907,10 +726,10 @@ fn explode(req: &mut Request) -> Result<Value, Thrown> {
     let (d, s) = (delim.as_bytes(), string.as_bytes());
     if s.is_empty() {
         if limit >= 0 {
-            let empty = string_value(req, b"")?;
+            let empty = Value::string(PhpString::new(req, b"")?);
             array.append(req, empty)?;
         }
-        return Ok(Value::array(array));
+        return Ok(array);
     }
     let mut starts = vec![0usize];
     let mut at = 0;
@@ -941,15 +760,15 @@ fn explode(req: &mut Request) -> Result<Value, Thrown> {
         1
     };
     if limit == 0 || limit == 1 {
-        let whole = same(req, string);
+        let whole = Value::string(str_copy(req, string));
         array.append(req, whole)?;
-        return Ok(Value::array(array));
+        return Ok(array);
     }
     for i in 0..take {
-        let value = string_value(req, piece(i))?;
+        let value = Value::string(PhpString::new(req, piece(i))?);
         array.append(req, value)?;
     }
-    Ok(Value::array(array))
+    Ok(array)
 }
 
 /// `implode(array|string $separator, ?array $array = null): string`,
@@ -979,10 +798,7 @@ fn explode(req: &mut Request) -> Result<Value, Thrown> {
 /// Warning: Array to string conversion in %s on line 6
 /// string(5) "Array"
 /// ```
-fn implode(req: &mut Request) -> Result<Value, Thrown> {
-    imploded(req, "implode")
-}
-
+///
 /// `join(...)`, `implode`'s alias.
 ///
 /// ```php
@@ -994,18 +810,25 @@ fn implode(req: &mut Request) -> Result<Value, Thrown> {
 /// string(2) "xy"
 /// join(): If argument #1 ($separator) is of type string, argument #2 ($array) must be of type array, null given
 /// ```
-fn join(req: &mut Request) -> Result<Value, Thrown> {
-    imploded(req, "join")
+#[php_function(aliases(join))]
+fn implode(
+    req: &mut Request,
+    separator: Union<PhpArray, PhpString>,
+    #[php(default = null)] array: Option<PhpArray>,
+) -> Result<PhpString, Thrown> {
+    imploded(req, separator, array)
 }
 
 /// `PHP_FUNCTION(implode)` under the name it was called by, which
 /// php's `get_active_function_name()` puts in the first `TypeError`.
-fn imploded(req: &mut Request, name: &str) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let first = array_or_string(req, 1, false)?;
-    let pieces = nullable_array(req, 2)?;
-    let (glue, pieces) = match (first, pieces) {
-        (Some(ArrayOr::Array(array)), None) => (PhpString::new(req, b"")?, array),
+fn imploded(
+    req: &mut Request,
+    separator: Union<PhpArray, PhpString>,
+    array: Option<PhpArray>,
+) -> Result<PhpString, Thrown> {
+    let name = req.active_function_name();
+    let (glue, pieces) = match (separator, array) {
+        (Union::A(array), None) => (PhpString::new(req, b"")?, array),
         (_, None) => {
             return Err(throw(
                 req,
@@ -1015,7 +838,7 @@ fn imploded(req: &mut Request, name: &str) -> Result<Value, Thrown> {
                 ),
             ));
         }
-        (Some(ArrayOr::Other(glue)), Some(pieces)) => (glue, pieces),
+        (Union::B(glue), Some(pieces)) => (glue, pieces),
         (_, Some(_)) => {
             return Err(php_ext::raising::arg_type_error(
                 req,
@@ -1024,17 +847,16 @@ fn imploded(req: &mut Request, name: &str) -> Result<Value, Thrown> {
             ));
         }
     };
-    let joined = implode_array(req, glue.as_bytes(), pieces)?;
-    Ok(joined)
+    implode_array(req, glue.as_bytes(), pieces)
 }
 
 /// `php_implode(glue, pieces)`.
-fn implode_array(req: &mut Request, glue: &[u8], pieces: PhpArray) -> Result<Value, Thrown> {
+fn implode_array(req: &mut Request, glue: &[u8], pieces: PhpArray) -> Result<PhpString, Thrown> {
     let elements: Vec<Value> = pieces.iter().map(|(_, value)| value).collect();
     if elements.len() == 1
         && let Some(s) = elements[0].deref().as_php_string()
     {
-        return Ok(same(req, *s));
+        return Ok(str_copy(req, *s));
     }
     let mut out = Vec::new();
     for (i, element) in elements.iter().enumerate() {
@@ -1051,7 +873,7 @@ fn implode_array(req: &mut Request, glue: &[u8], pieces: PhpArray) -> Result<Val
             out.extend_from_slice(s.as_bytes());
         }
     }
-    string_value(req, &out)
+    PhpString::new(req, &out)
 }
 
 /// `strtok(string $string, ?string $token = null): string|false`, over
@@ -1080,10 +902,12 @@ fn implode_array(req: &mut Request, glue: &[u8], pieces: PhpArray) -> Result<Val
 /// bool(false)
 /// bool(false)
 /// ```
-fn strtok(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let string = string_argument(req, 1)?;
-    let token = nullable_string(req, 2)?;
+#[php_function]
+fn strtok(
+    req: &mut Request,
+    string: PhpString,
+    #[php(default = null)] token: Option<PhpString>,
+) -> Result<OrFalse<PhpString>, Thrown> {
     let tok: Vec<u8> = match token {
         None => string.as_bytes().to_vec(),
         Some(token) => {
@@ -1098,13 +922,13 @@ fn strtok(req: &mut Request) -> Result<Value, Thrown> {
             Level::Warning,
             "Both arguments must be provided when starting tokenization",
         );
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     };
     let end = subject.len();
     if last >= end {
         // Past the end: `false`, and the string kept, as php keeps it.
         req.state::<crate::State>().string.strtok = Some((subject, last));
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     }
     let mut table = [false; 256];
     for c in &tok {
@@ -1114,7 +938,7 @@ fn strtok(req: &mut Request) -> Result<Value, Thrown> {
     while table[usize::from(subject[p])] {
         p += 1;
         if p >= end {
-            return Ok(Value::bool(false));
+            return Ok(OrFalse::False);
         }
     }
     let skipped = p - last;
@@ -1122,9 +946,9 @@ fn strtok(req: &mut Request) -> Result<Value, Thrown> {
     while p < end && !table[usize::from(subject[p])] {
         p += 1;
     }
-    let token = string_value(req, &subject[last + skipped..p])?;
+    let token = PhpString::new(req, &subject[last + skipped..p])?;
     req.state::<crate::State>().string.strtok = Some((subject, p + 1));
-    Ok(token)
+    Ok(OrFalse::Value(token))
 }
 
 /// `str_increment(string $string): string`: the string's alphanumeric
@@ -1147,9 +971,8 @@ fn strtok(req: &mut Request) -> Result<Value, Thrown> {
 /// str_increment(): Argument #1 ($string) must be composed only of alphanumeric ASCII characters
 /// str_increment(): Argument #1 ($string) must be composed only of alphanumeric ASCII characters
 /// ```
-fn str_increment(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let string = string_argument(req, 1)?;
+#[php_function]
+fn str_increment(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
     let mut bytes = alphanumeric_argument(req, string)?;
     let mut carry = true;
     for c in bytes.iter_mut().rev() {
@@ -1167,7 +990,7 @@ fn str_increment(req: &mut Request) -> Result<Value, Thrown> {
         let first = if bytes[0] == b'0' { b'1' } else { bytes[0] };
         bytes.insert(0, first);
     }
-    string_value(req, &bytes)
+    PhpString::new(req, &bytes)
 }
 
 /// `str_decrement(string $string): string`: the predecessor, the borrow
@@ -1192,22 +1015,21 @@ fn str_increment(req: &mut Request) -> Result<Value, Thrown> {
 /// str_decrement(): Argument #1 ($string) "a" is out of decrement range
 /// str_decrement(): Argument #1 ($string) "0ab" is out of decrement range
 /// ```
-fn str_decrement(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let string = string_argument(req, 1)?;
+#[php_function]
+fn str_decrement(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
     let mut bytes = alphanumeric_argument(req, string)?;
     // `zend_argument_value_error(1, "\"%s\" is out of decrement
     // range", ...)`: a sentence without the `must` the face writes.
     let out_of_range = |req: &mut Request| {
         let text = String::from_utf8_lossy(string.as_bytes()).into_owned();
-        Err(throw(
+        throw(
             req,
             "ValueError",
             &format!("str_decrement(): Argument #1 ($string) \"{text}\" is out of decrement range"),
-        ))
+        )
     };
     if bytes[0] == b'0' {
-        return out_of_range(req).map(|()| Value::null());
+        return Err(out_of_range(req));
     }
     let mut carry = true;
     for c in bytes.iter_mut().rev() {
@@ -1223,11 +1045,11 @@ fn str_decrement(req: &mut Request) -> Result<Value, Thrown> {
     }
     if carry || (bytes[0] == b'0' && bytes.len() > 1) {
         if bytes.len() == 1 {
-            return out_of_range(req).map(|()| Value::null());
+            return Err(out_of_range(req));
         }
         bytes.remove(0);
     }
-    string_value(req, &bytes)
+    PhpString::new(req, &bytes)
 }
 
 /// The shared refusals of `str_increment` and `str_decrement`: the
@@ -1264,12 +1086,15 @@ fn alphanumeric_argument(req: &mut Request, string: PhpString) -> Result<Vec<u8>
 /// string(2) "ab"
 /// chunk_split(): Argument #2 ($length) must be greater than 0
 /// ```
-fn chunk_split(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 3)?;
-    let string = string_argument(req, 1)?;
-    let chunklen = optional_long(req, 2, 76)?;
-    let end = optional_string(req, 3)?;
-    let sep: &[u8] = end.as_ref().map_or(b"\r\n", |e| e.as_bytes());
+#[php_function]
+fn chunk_split(
+    req: &mut Request,
+    string: PhpString,
+    #[php(default = 76)] length: i64,
+    #[php(default = "\r\n")] separator: PhpString,
+) -> Result<PhpString, Thrown> {
+    let chunklen = length;
+    let sep: &[u8] = separator.as_bytes();
     if chunklen <= 0 {
         return Err(arg_value_error(req, 2, "be greater than 0"));
     }
@@ -1278,17 +1103,17 @@ fn chunk_split(req: &mut Request) -> Result<Value, Thrown> {
     if chunk > bytes.len() {
         let mut out = bytes.to_vec();
         out.extend_from_slice(sep);
-        return string_value(req, &out);
+        return PhpString::new(req, &out);
     }
     if bytes.is_empty() {
-        return string_value(req, b"");
+        return PhpString::new(req, b"");
     }
     let mut out = Vec::with_capacity(bytes.len() + (bytes.len() / chunk + 1) * sep.len());
     for piece in bytes.chunks(chunk) {
         out.extend_from_slice(piece);
         out.extend_from_slice(sep);
     }
-    string_value(req, &out)
+    PhpString::new(req, &out)
 }
 
 /// `quotemeta(string $string): string`: a backslash before each of
@@ -1302,9 +1127,8 @@ fn chunk_split(req: &mut Request) -> Result<Value, Thrown> {
 /// string(21) "\[a\]\(b\)\^c\$\.\\\*"
 /// string(0) ""
 /// ```
-fn quotemeta(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let string = string_argument(req, 1)?;
+#[php_function]
+fn quotemeta(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
     let mut out = Vec::with_capacity(string.len() * 2);
     for &c in string.as_bytes() {
         if matches!(
@@ -1315,7 +1139,7 @@ fn quotemeta(req: &mut Request) -> Result<Value, Thrown> {
         }
         out.push(c);
     }
-    string_value(req, &out)
+    PhpString::new(req, &out)
 }
 
 /// `ucfirst(string $string): string`: the first byte through
@@ -1331,8 +1155,9 @@ fn quotemeta(req: &mut Request) -> Result<Value, Thrown> {
 /// string(6) "e974e9"
 /// string(2) "1a"
 /// ```
-fn ucfirst(req: &mut Request) -> Result<Value, Thrown> {
-    first_cased(req, u8::to_ascii_uppercase)
+#[php_function]
+fn ucfirst(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
+    first_cased(req, string, u8::to_ascii_uppercase)
 }
 
 /// `lcfirst(string $string): string`.
@@ -1346,24 +1171,27 @@ fn ucfirst(req: &mut Request) -> Result<Value, Thrown> {
 /// string(0) ""
 /// string(2) "1A"
 /// ```
-fn lcfirst(req: &mut Request) -> Result<Value, Thrown> {
-    first_cased(req, u8::to_ascii_lowercase)
+#[php_function]
+fn lcfirst(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
+    first_cased(req, string, u8::to_ascii_lowercase)
 }
 
 /// `php_ucfirst` and `php_lcfirst`.
-fn first_cased(req: &mut Request, map: fn(&u8) -> u8) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let string = string_argument(req, 1)?;
+fn first_cased(
+    req: &mut Request,
+    string: PhpString,
+    map: fn(&u8) -> u8,
+) -> Result<PhpString, Thrown> {
     let bytes = string.as_bytes();
     let Some(first) = bytes.first() else {
-        return string_value(req, b"");
+        return PhpString::new(req, b"");
     };
     if map(first) == *first {
-        return Ok(same(req, string));
+        return Ok(str_copy(req, string));
     }
     let mut out = bytes.to_vec();
     out[0] = map(first);
-    string_value(req, &out)
+    PhpString::new(req, &out)
 }
 
 /// `ucwords(string $string, string $separators = " \t\r\n\f\v"):
@@ -1380,14 +1208,16 @@ fn first_cased(req: &mut Request, map: fn(&u8) -> u8) -> Result<Value, Thrown> {
 /// string(0) ""
 /// string(3) "AbC"
 /// ```
-fn ucwords(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let string = string_argument(req, 1)?;
-    let delims = optional_string(req, 2)?;
+#[php_function]
+fn ucwords(
+    req: &mut Request,
+    string: PhpString,
+    #[php(default = " \t\r\n\x0C\x0B")] separators: PhpString,
+) -> Result<PhpString, Thrown> {
     if string.is_empty() {
-        return string_value(req, b"");
+        return PhpString::new(req, b"");
     }
-    let set: &[u8] = delims.as_ref().map_or(b" \t\r\n\x0c\x0b", |d| d.as_bytes());
+    let set: &[u8] = separators.as_bytes();
     let mask = charmask(req, set);
     let mut out = string.as_bytes().to_vec();
     out[0] = out[0].to_ascii_uppercase();
@@ -1396,7 +1226,7 @@ fn ucwords(req: &mut Request) -> Result<Value, Thrown> {
             out[i] = out[i].to_ascii_uppercase();
         }
     }
-    string_value(req, &out)
+    PhpString::new(req, &out)
 }
 
 /// `strrev(string $string): string`: the bytes in reverse.
@@ -1409,11 +1239,10 @@ fn ucwords(req: &mut Request) -> Result<Value, Thrown> {
 /// string(0) ""
 /// bool(true)
 /// ```
-fn strrev(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let string = string_argument(req, 1)?;
+#[php_function]
+fn strrev(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
     let out: Vec<u8> = string.as_bytes().iter().rev().copied().collect();
-    string_value(req, &out)
+    PhpString::new(req, &out)
 }
 
 /// `similar_text(string $string1, string $string2, &$percent = null):
@@ -1434,26 +1263,27 @@ fn strrev(req: &mut Request) -> Result<Value, Thrown> {
 /// int(5)
 /// float(71.42857142857143)
 /// ```
-fn similar_text(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 3)?;
-    let t1 = string_argument(req, 1)?;
-    let t2 = string_argument(req, 2)?;
-    let percent = req.argument_count() >= 3;
+#[php_function]
+fn similar_text(
+    req: &mut Request,
+    string1: PhpString,
+    string2: PhpString,
+    #[php(default = null)] percent: Ref<Untyped<Value>>,
+) -> Result<i64, Thrown> {
+    let (t1, t2) = (string1, string2);
     let (a, b) = (t1.as_bytes(), t2.as_bytes());
     if a.len() + b.len() == 0 {
-        if percent {
-            crate::zpp::assign_ref(req, 3, Value::float(0.0))?;
-        }
-        return Ok(Value::int(0));
+        percent.set(req, Untyped(Value::float(0.0)))?;
+        return Ok(0);
     }
     let sim = similar_char(a, b);
-    if percent {
+    if percent.is_given() {
         // `sim * 200.0 / (len1 + len2)`, both sides as C's doubles.
         let as_double = |n: usize| f64::from(u32::try_from(n).unwrap_or(u32::MAX));
         let p = as_double(sim) * 200.0 / as_double(a.len() + b.len());
-        crate::zpp::assign_ref(req, 3, Value::float(p))?;
+        percent.set(req, Untyped(Value::float(p)))?;
     }
-    Ok(long_of(sim))
+    Ok(long(sim))
 }
 
 /// `php_similar_str` and `php_similar_char`.
@@ -1504,16 +1334,19 @@ fn similar_char(a: &[u8], b: &[u8]) -> usize {
 /// b"
 /// string(32) "61620a2ce1e00a63640ae3e20a5b785d"
 /// ```
-fn hebrev(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let string = string_argument(req, 1)?;
-    let max_chars = optional_long(req, 2, 0)?;
+#[php_function]
+fn hebrev(
+    req: &mut Request,
+    string: PhpString,
+    #[php(default = 0)] max_chars_per_line: i64,
+) -> Result<PhpString, Thrown> {
+    let max_chars = max_chars_per_line;
     let s = string.as_bytes();
     if s.is_empty() {
-        return string_value(req, b"");
+        return PhpString::new(req, b"");
     }
     let out = hebrev_bytes(s, max_chars);
-    string_value(req, &out)
+    PhpString::new(req, &out)
 }
 
 /// php's two loops of `hebrev`, a line-for-line copy.
@@ -1655,13 +1488,16 @@ fn hebrev_bytes(s: &[u8], max_chars: i64) -> Vec<u8> {
 /// string(4) "none"
 /// string(28) "3c6272202f3e0a3c6272202f3e0a"
 /// ```
-fn nl2br(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let string = string_argument(req, 1)?;
-    let xhtml = optional_bool(req, 2, true)?;
+#[php_function]
+fn nl2br(
+    req: &mut Request,
+    string: PhpString,
+    #[php(default = true)] use_xhtml: bool,
+) -> Result<PhpString, Thrown> {
+    let xhtml = use_xhtml;
     let s = string.as_bytes();
     if !s.iter().any(|c| *c == b'\r' || *c == b'\n') {
-        return Ok(same(req, string));
+        return Ok(str_copy(req, string));
     }
     let tag: &[u8] = if xhtml { b"<br />" } else { b"<br>" };
     let mut out = Vec::with_capacity(s.len() * 2);
@@ -1679,7 +1515,7 @@ fn nl2br(req: &mut Request) -> Result<Value, Thrown> {
         out.push(s[i]);
         i += 1;
     }
-    string_value(req, &out)
+    PhpString::new(req, &out)
 }
 
 /// `count_chars(string $string, int $mode = 0): array|string`: the
@@ -1705,10 +1541,13 @@ fn nl2br(req: &mut Request) -> Result<Value, Thrown> {
 /// int(255)
 /// count_chars(): Argument #2 ($mode) must be between 0 and 4 (inclusive)
 /// ```
-fn count_chars(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let input = string_argument(req, 1)?;
-    let mode = optional_long(req, 2, 0)?;
+#[php_function]
+fn count_chars(
+    req: &mut Request,
+    string: PhpString,
+    #[php(default = 0)] mode: i64,
+) -> Result<Union<PhpArray, PhpString>, Thrown> {
+    let input = string;
     if !(0..=4).contains(&mode) {
         return Err(arg_value_error(req, 2, "be between 0 and 4 (inclusive)"));
     }
@@ -1720,7 +1559,7 @@ fn count_chars(req: &mut Request) -> Result<Value, Thrown> {
         let bytes: Vec<u8> = (0..=255u8)
             .filter(|c| (chars[usize::from(*c)] != 0) == (mode == 3))
             .collect();
-        return string_value(req, &bytes);
+        return PhpString::new(req, &bytes).map(Union::B);
     }
     let mut array = PhpArray::new(req)?;
     for (inx, count) in chars.iter().enumerate() {
@@ -1730,10 +1569,10 @@ fn count_chars(req: &mut Request) -> Result<Value, Thrown> {
             _ => *count == 0,
         };
         if keep {
-            array.set(req, Key::Int(long(inx)), long_of(*count))?;
+            array.set(req, Key::Int(long(inx)), Value::int(long(*count)))?;
         }
     }
-    Ok(Value::array(array))
+    Ok(Union::A(array))
 }
 
 /// `substr_count(string $haystack, string $needle, int $offset = 0,
@@ -1755,12 +1594,14 @@ fn count_chars(req: &mut Request) -> Result<Value, Thrown> {
 /// substr_count(): Argument #3 ($offset) must be contained in argument #1 ($haystack)
 /// substr_count(): Argument #4 ($length) must be contained in argument #1 ($haystack)
 /// ```
-fn substr_count(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 4)?;
-    let haystack = string_argument(req, 1)?;
-    let needle = string_argument(req, 2)?;
-    let mut offset = optional_long(req, 3, 0)?;
-    let length = nullable_long(req, 4)?;
+#[php_function]
+fn substr_count(
+    req: &mut Request,
+    haystack: PhpString,
+    needle: PhpString,
+    #[php(default = 0)] mut offset: i64,
+    #[php(default = null)] length: Option<i64>,
+) -> Result<i64, Thrown> {
     if needle.is_empty() {
         return Err(arg_value_error(req, 2, "not be empty"));
     }
@@ -1803,7 +1644,7 @@ fn substr_count(req: &mut Request) -> Result<Value, Thrown> {
         count += 1;
         at = found + n.len();
     }
-    Ok(long_of(count))
+    Ok(long(count))
 }
 
 /// `str_rot13(string $string): string`: each ASCII letter moved
@@ -1816,9 +1657,8 @@ fn substr_count(req: &mut Request) -> Result<Value, Thrown> {
 /// string(17) "Uryyb, Jbeyq! klm"
 /// string(0) ""
 /// ```
-fn str_rot13(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let string = string_argument(req, 1)?;
+#[php_function]
+fn str_rot13(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
     let out: Vec<u8> = string
         .as_bytes()
         .iter()
@@ -1828,7 +1668,7 @@ fn str_rot13(req: &mut Request) -> Result<Value, Thrown> {
             _ => c,
         })
         .collect();
-    string_value(req, &out)
+    PhpString::new(req, &out)
 }
 
 /// `str_shuffle(string $string): string`, `php_binary_string_shuffle`
@@ -1850,12 +1690,11 @@ fn str_rot13(req: &mut Request) -> Result<Value, Thrown> {
 /// string(10) "bdjhgaiefc"
 /// string(10) "9825107643"
 /// ```
-fn str_shuffle(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let string = string_argument(req, 1)?;
+#[php_function]
+fn str_shuffle(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
     let mut bytes = string.as_bytes().to_vec();
     Rng::default_engine().shuffle(req, &mut bytes)?;
-    string_value(req, &bytes)
+    PhpString::new(req, &bytes)
 }
 
 /// `str_word_count(string $string, int $format = 0, ?string $characters
@@ -1912,23 +1751,26 @@ fn str_shuffle(req: &mut Request) -> Result<Value, Thrown> {
 /// }
 /// str_word_count(): Argument #2 ($format) must be a valid format value
 /// ```
-fn str_word_count(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 3)?;
-    let string = string_argument(req, 1)?;
-    let format = optional_long(req, 2, 0)?;
-    let list = nullable_string(req, 3)?;
+#[php_function]
+fn str_word_count(
+    req: &mut Request,
+    string: PhpString,
+    #[php(default = 0)] format: i64,
+    #[php(default = null)] characters: Option<PhpString>,
+) -> Result<Union<PhpArray, i64>, Thrown> {
+    let list = characters;
     let s = string.as_bytes();
     let mut array = match format {
         1 | 2 => {
             let array = PhpArray::new(req)?;
             if s.is_empty() {
-                return Ok(Value::array(array));
+                return Ok(Union::A(array));
             }
             Some(array)
         }
         0 => {
             if s.is_empty() {
-                return Ok(Value::int(0));
+                return Ok(Union::B(0));
             }
             None
         }
@@ -1953,11 +1795,11 @@ fn str_word_count(req: &mut Request) -> Result<Value, Thrown> {
         if p > start {
             match (&mut array, format) {
                 (Some(array), 1) => {
-                    let word = string_value(req, &s[start..p])?;
+                    let word = Value::string(PhpString::new(req, &s[start..p])?);
                     array.append(req, word)?;
                 }
                 (Some(array), _) => {
-                    let word = string_value(req, &s[start..p])?;
+                    let word = Value::string(PhpString::new(req, &s[start..p])?);
                     array.set(req, Key::Int(long(start)), word)?;
                 }
                 (None, _) => count += 1,
@@ -1966,8 +1808,8 @@ fn str_word_count(req: &mut Request) -> Result<Value, Thrown> {
         p += 1;
     }
     Ok(match array {
-        Some(array) => Value::array(array),
-        None => long_of(count),
+        Some(array) => Union::A(array),
+        None => Union::B(long(count)),
     })
 }
 
@@ -1996,20 +1838,22 @@ fn str_word_count(req: &mut Request) -> Result<Value, Thrown> {
 /// }
 /// str_split(): Argument #2 ($length) must be greater than 0
 /// ```
-fn str_split(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let string = string_argument(req, 1)?;
-    let length = optional_long(req, 2, 1)?;
+#[php_function]
+fn str_split(
+    req: &mut Request,
+    string: PhpString,
+    #[php(default = 1)] length: i64,
+) -> Result<PhpArray, Thrown> {
     if length <= 0 {
         return Err(arg_value_error(req, 2, "be greater than 0"));
     }
     let mut array = PhpArray::new(req)?;
     let chunk = usize::try_from(length).unwrap_or(usize::MAX);
     for piece in string.as_bytes().chunks(chunk) {
-        let value = string_value(req, piece)?;
+        let value = Value::string(PhpString::new(req, piece)?);
         array.append(req, value)?;
     }
-    Ok(Value::array(array))
+    Ok(array)
 }
 
 /// `strpbrk(string $string, string $characters): string|false`: the
@@ -2024,18 +1868,21 @@ fn str_split(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// strpbrk(): Argument #2 ($characters) must be a non-empty string
 /// ```
-fn strpbrk(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let haystack = string_argument(req, 1)?;
-    let list = string_argument(req, 2)?;
+#[php_function]
+fn strpbrk(
+    req: &mut Request,
+    string: PhpString,
+    characters: PhpString,
+) -> Result<OrFalse<PhpString>, Thrown> {
+    let (haystack, list) = (string, characters);
     if list.is_empty() {
         return Err(arg_value_error(req, 2, "be a non-empty string"));
     }
     let set = list.as_bytes();
     let bytes = haystack.as_bytes();
     match bytes.iter().position(|c| set.contains(c)) {
-        Some(at) => string_value(req, &bytes[at..]),
-        None => Ok(Value::bool(false)),
+        Some(at) => PhpString::new(req, &bytes[at..]).map(OrFalse::Value),
+        None => Ok(OrFalse::False),
     }
 }
 
@@ -2063,18 +1910,21 @@ fn strpbrk(req: &mut Request) -> Result<Value, Thrown> {
 /// substr_compare(): Argument #3 ($offset) must be contained in argument #1 ($haystack)
 /// substr_compare(): Argument #4 ($length) must be greater than or equal to 0
 /// ```
-fn substr_compare(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 3, 5)?;
-    let s1 = string_argument(req, 1)?;
-    let s2 = string_argument(req, 2)?;
-    let mut offset = long_argument(req, 3)?;
-    let length = nullable_long(req, 4)?;
-    let case_insensitive = optional_bool(req, 5, false)?;
+#[php_function]
+fn substr_compare(
+    req: &mut Request,
+    haystack: PhpString,
+    needle: PhpString,
+    mut offset: i64,
+    #[php(default = null)] length: Option<i64>,
+    #[php(default = false)] case_insensitive: bool,
+) -> Result<i64, Thrown> {
+    let (s1, s2) = (haystack, needle);
     if let Some(len) = length
         && len <= 0
     {
         if len == 0 {
-            return Ok(Value::int(0));
+            return Ok(0);
         }
         return Err(arg_value_error(req, 4, "be greater than or equal to 0"));
     }
@@ -2095,7 +1945,7 @@ fn substr_compare(req: &mut Request) -> Result<Value, Thrown> {
         Some(len) => usize::try_from(len).unwrap_or(usize::MAX),
         None => b.len().max(a.len()),
     };
-    Ok(Value::int(binary_strncmp(a, b, cmp_len, case_insensitive)))
+    Ok(binary_strncmp(a, b, cmp_len, case_insensitive))
 }
 
 /// `zend_binary_strncmp` and `zend_binary_strncasecmp_l`: the first
@@ -2136,9 +1986,11 @@ fn binary_strncmp(left: &[u8], right: &[u8], length: usize, fold: bool) -> i64 {
 /// string(10) "61c3a9c3bf"
 /// string(8) "61e93f3f"
 /// ```
-fn utf8_encode(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let string = string_argument(req, 1)?;
+#[php_function(deprecated(
+    since = "8.2",
+    message = "visit the php.net documentation for various alternatives"
+))]
+fn utf8_encode(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
     let mut out = Vec::with_capacity(string.len() * 2);
     for &c in string.as_bytes() {
         if c < 0x80 {
@@ -2148,7 +2000,7 @@ fn utf8_encode(req: &mut Request) -> Result<Value, Thrown> {
             out.push(0x80 | (c & 0x3f));
         }
     }
-    string_value(req, &out)
+    PhpString::new(req, &out)
 }
 
 /// `utf8_decode(string $string): string`, deprecated since 8.2: each
@@ -2165,9 +2017,11 @@ fn utf8_encode(req: &mut Request) -> Result<Value, Thrown> {
 /// string(10) "61e93f3f3f"
 /// string(0) ""
 /// ```
-fn utf8_decode(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let string = string_argument(req, 1)?;
+#[php_function(deprecated(
+    since = "8.2",
+    message = "visit the php.net documentation for various alternatives"
+))]
+fn utf8_decode(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
     let s = string.as_bytes();
     let mut out = Vec::with_capacity(s.len());
     let mut pos = 0;
@@ -2179,7 +2033,7 @@ fn utf8_decode(req: &mut Request) -> Result<Value, Thrown> {
             _ => b'?',
         });
     }
-    string_value(req, &out)
+    PhpString::new(req, &out)
 }
 
 /// `get_next_char(cs_utf_8, ...)` (`Z/ext/standard/html.c:89`), what

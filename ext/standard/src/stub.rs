@@ -8,9 +8,7 @@
 //! attributes that derive a declaration from the Rust signature replace
 //! this once their expansion lands.
 
-use php_ext::decl::{
-    Attribute, AttributeArgument, ConstExpr, FunctionDecl, Name, Parameter, ParameterDefault, Type,
-};
+use php_ext::decl::{ConstExpr, FunctionDecl, Name, Parameter, ParameterDefault, Type};
 
 /// The declaration a stub line writes, with no frameless entries.
 ///
@@ -50,31 +48,6 @@ pub(super) fn stub(line: &str) -> FunctionDecl {
         line: 0,
         end_line: 0,
         frameless: Vec::new(),
-    }
-}
-
-/// The declaration under php's `#[\Deprecated(since: ...)]`, as the
-/// stub marks `utf8_encode` and its kin.
-pub(super) fn deprecated_since(decl: FunctionDecl, since: &str) -> FunctionDecl {
-    FunctionDecl {
-        attributes: vec![Attribute {
-            name: Name(b"Deprecated".as_slice().into()),
-            arguments: vec![
-                AttributeArgument {
-                    name: Some(Name(b"since".as_slice().into())),
-                    value: ConstExpr::Str(since.as_bytes().into()),
-                },
-                AttributeArgument {
-                    name: Some(Name(b"message".as_slice().into())),
-                    value: ConstExpr::Str(
-                        b"visit the php.net documentation for various alternatives"
-                            .as_slice()
-                            .into(),
-                    ),
-                },
-            ],
-        }],
-        ..decl
     }
 }
 

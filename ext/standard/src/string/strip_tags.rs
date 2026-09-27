@@ -5,13 +5,12 @@
 //! the tag buffer an allowed-tags set is matched against by
 //! `php_tag_find`.
 
+use php_ext::abi::Union;
+use php_ext::attr::php_function;
 use php_ext::coerce::to_string;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::Value;
-
-use crate::zpp::{ArrayOr, array_or_string, string_value};
-use crate::{argument_count_between, string_argument};
+use php_ext::values::{PhpArray, PhpString};
 
 /// `strip_tags(string $string, array|string|null $allowed_tags = null):
 /// string`: the allowed set as the string, or each array element
@@ -35,18 +34,17 @@ use crate::{argument_count_between, string_argument};
 /// string(1) "x"
 /// string(2) "ab"
 /// ```
-pub(super) fn strip_tags(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let string = string_argument(req, 1)?;
-    let allow = if req.argument_count() >= 2 {
-        array_or_string(req, 2, true)?
-    } else {
-        None
-    };
+#[php_function]
+pub(super) fn strip_tags(
+    req: &mut Request,
+    string: PhpString,
+    #[php(default = null)] allowed_tags: Option<Union<PhpArray, PhpString>>,
+) -> Result<PhpString, Thrown> {
+    let allow = allowed_tags;
     let allowed: Option<Vec<u8>> = match allow {
         None => None,
-        Some(ArrayOr::Other(s)) => Some(s.as_bytes().to_vec()),
-        Some(ArrayOr::Array(array)) => {
+        Some(Union::B(s)) => Some(s.as_bytes().to_vec()),
+        Some(Union::A(array)) => {
             let mut set = Vec::new();
             for (_, value) in array.snapshot() {
                 let tag = to_string(req, &value.deref())?;
@@ -58,7 +56,7 @@ pub(super) fn strip_tags(req: &mut Request) -> Result<Value, Thrown> {
         }
     };
     let out = strip_tags_ex(string.as_bytes(), allowed.as_deref(), false);
-    string_value(req, &out)
+    PhpString::new(req, &out)
 }
 
 /// C's `isspace` under the C locale.

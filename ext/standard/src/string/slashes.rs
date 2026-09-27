@@ -1,12 +1,13 @@
 //! The escapes of `string.c`: `addslashes` and `stripslashes`, and the
 //! C-style pair `addcslashes` and `stripcslashes`.
 
+use php_ext::attr::php_function;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::Value;
+use php_ext::values::PhpString;
 
-use crate::zpp::{same, string_value};
-use crate::{argument_count_between, charmask, string_argument};
+use super::str_copy;
+use crate::charmask;
 
 /// `addslashes(string $string): string`, `php_addslashes`: a backslash
 /// before `'`, `"` and `\`, and a NUL as `\0`.
@@ -25,12 +26,11 @@ use crate::{argument_count_between, charmask, string_argument};
 /// string(3) "end"
 /// string(1) "\"
 /// ```
-pub(super) fn addslashes(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let string = string_argument(req, 1)?;
+#[php_function]
+pub(super) fn addslashes(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
     let s = string.as_bytes();
     if !s.iter().any(|c| matches!(c, 0 | b'\'' | b'"' | b'\\')) {
-        return Ok(same(req, string));
+        return Ok(str_copy(req, string));
     }
     let mut out = Vec::with_capacity(s.len() * 2);
     for &c in s {
@@ -43,7 +43,7 @@ pub(super) fn addslashes(req: &mut Request) -> Result<Value, Thrown> {
             _ => out.push(c),
         }
     }
-    string_value(req, &out)
+    PhpString::new(req, &out)
 }
 
 /// `stripslashes(string $string): string`, `php_stripslashes`: each
@@ -60,9 +60,8 @@ pub(super) fn addslashes(req: &mut Request) -> Result<Value, Thrown> {
 /// string(1) "\"
 /// string(0) ""
 /// ```
-pub(super) fn stripslashes(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let string = string_argument(req, 1)?;
+#[php_function]
+pub(super) fn stripslashes(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
     let s = string.as_bytes();
     let mut out = Vec::with_capacity(s.len());
     let mut i = 0;
@@ -78,7 +77,7 @@ pub(super) fn stripslashes(req: &mut Request) -> Result<Value, Thrown> {
             i += 1;
         }
     }
-    string_value(req, &out)
+    PhpString::new(req, &out)
 }
 
 /// `addcslashes(string $string, string $characters): string`,
@@ -103,15 +102,18 @@ pub(super) fn stripslashes(req: &mut Request) -> Result<Value, Thrown> {
 /// string(1) "\"
 /// string(14) "07080c0b090d00"
 /// ```
-pub(super) fn addcslashes(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let string = string_argument(req, 1)?;
-    let what = string_argument(req, 2)?;
+#[php_function]
+pub(super) fn addcslashes(
+    req: &mut Request,
+    string: PhpString,
+    characters: PhpString,
+) -> Result<PhpString, Thrown> {
+    let what = characters;
     if string.is_empty() {
-        return string_value(req, b"");
+        return PhpString::new(req, b"");
     }
     if what.is_empty() {
-        return Ok(same(req, string));
+        return Ok(str_copy(req, string));
     }
     let flags = charmask(req, what.as_bytes());
     let mut out = Vec::with_capacity(string.len() * 4);
@@ -135,7 +137,7 @@ pub(super) fn addcslashes(req: &mut Request) -> Result<Value, Thrown> {
         }
         out.push(c);
     }
-    string_value(req, &out)
+    PhpString::new(req, &out)
 }
 
 /// `stripcslashes(string $string): string`, `php_stripcslashes`: the C
@@ -152,9 +154,8 @@ pub(super) fn addcslashes(req: &mut Request) -> Result<Value, Thrown> {
 /// string(1) "\"
 /// string(14) "07080c0b0d0000"
 /// ```
-pub(super) fn stripcslashes(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let string = string_argument(req, 1)?;
+#[php_function]
+pub(super) fn stripcslashes(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
     let s = string.as_bytes();
     let mut out = Vec::with_capacity(s.len());
     let mut i = 0;
@@ -208,5 +209,5 @@ pub(super) fn stripcslashes(req: &mut Request) -> Result<Value, Thrown> {
             i += 1;
         }
     }
-    string_value(req, &out)
+    PhpString::new(req, &out)
 }

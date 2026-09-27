@@ -4,13 +4,13 @@
 //! each name and value `php_url_decode`d, and each name mangled and
 //! walked into nested arrays by its brackets, as `$_GET` is built.
 
+use php_ext::abi::{Ref, Untyped};
+use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Key, PhpArray, PhpString, Value};
 
 use crate::url::php_url_decode;
-use crate::zpp::string_value;
-use crate::{argument_count_between, string_argument};
 
 /// `parse_str(string $string, &$result): void`: the variables of the
 /// query string as an array written through `$result`.
@@ -82,18 +82,15 @@ use crate::{argument_count_between, string_argument};
 /// }
 /// parse_str() expects exactly 2 arguments, 1 given
 /// ```
-pub(super) fn parse_str(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let string = string_argument(req, 1)?;
-    let target = req.argument(2).unwrap_or_default();
-    let ValueRef::Reference(result) = target.as_ref() else {
-        return Ok(Value::null());
-    };
-    let result = *result;
+#[php_function]
+pub(super) fn parse_str(
+    req: &mut Request,
+    string: PhpString,
+    result: Ref<Untyped<Value>>,
+) -> Result<(), Thrown> {
     let array = PhpArray::new(req)?;
     treat_data(req, string.as_bytes(), array)?;
-    result.set(req, Value::array(array))?;
-    Ok(Value::null())
+    result.set(req, Untyped(Value::array(array)))
 }
 
 /// `php_default_treat_data` for `PARSE_STRING`.
@@ -127,7 +124,7 @@ fn treat_data(req: &mut Request, query: &[u8], array: PhpArray) -> Result<(), Th
             None => (var, Vec::new()),
         };
         let name = php_url_decode(name);
-        let value = string_value(req, &value)?;
+        let value = Value::string(PhpString::new(req, &value)?);
         register_variable(req, &name, value, array)?;
     }
     Ok(())

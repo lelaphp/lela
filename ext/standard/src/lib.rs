@@ -328,7 +328,7 @@ fn rinit(req: &mut Request) -> Result<(), Thrown> {
 /// environment and ini natives.
 fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
     [
-        string::natives(),
+        string_c(),
         vec![
             url::parse_url::declared(),
             url::urlencode::declared(),
@@ -400,10 +400,84 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
     .collect()
 }
 
+/// The natives of `string.c` in the order `basic_functions.stub.php`
+/// declares them, less the ones [`string_natives`] and
+/// [`core_natives`] declare first: `string`'s, its children's, and
+/// `str_getcsv`, `strnatcmp`, `strnatcasecmp` and `sscanf`, whose bodies
+/// live beside the code they share.
+fn string_c() -> Vec<(FunctionDecl, output::Entry)> {
+    vec![
+        string::bin2hex::declared(),
+        string::hex2bin::declared(),
+        string::strspn::declared(),
+        string::strcspn::declared(),
+        string::locale::nl_langinfo::declared(),
+        string::locale::strcoll::declared(),
+        string::rtrim::declared(),
+        string::chop::declared(),
+        string::ltrim::declared(),
+        string::wordwrap::declared(),
+        string::explode::declared(),
+        string::implode::declared(),
+        string::join::declared(),
+        string::strtok::declared(),
+        string::str_increment::declared(),
+        string::str_decrement::declared(),
+        string::path::basename::declared(),
+        string::path::dirname::declared(),
+        string::path::pathinfo::declared(),
+        string::find::stristr::declared(),
+        string::find::strstr::declared(),
+        string::find::strchr::declared(),
+        string::find::strpos::declared(),
+        string::find::stripos::declared(),
+        string::find::strrpos::declared(),
+        string::find::strripos::declared(),
+        string::find::strrchr::declared(),
+        string::find::str_starts_with::declared(),
+        string::find::str_ends_with::declared(),
+        string::chunk_split::declared(),
+        string::replace::substr_replace::declared(),
+        string::quotemeta::declared(),
+        string::ucfirst::declared(),
+        string::lcfirst::declared(),
+        string::ucwords::declared(),
+        string::replace::strtr::declared(),
+        string::strrev::declared(),
+        string::similar_text::declared(),
+        string::slashes::addcslashes::declared(),
+        string::slashes::addslashes::declared(),
+        string::slashes::stripcslashes::declared(),
+        string::slashes::stripslashes::declared(),
+        string::replace::str_replace::declared(),
+        string::replace::str_ireplace::declared(),
+        string::hebrev::declared(),
+        string::nl2br::declared(),
+        string::strip_tags::strip_tags::declared(),
+        string::locale::setlocale::declared(),
+        string::parse_str::parse_str::declared(),
+        csv::str_getcsv::declared(),
+        string::count_chars::declared(),
+        strnatcmp::strnatcmp::declared(),
+        string::locale::localeconv::declared(),
+        strnatcmp::strnatcasecmp::declared(),
+        string::substr_count::declared(),
+        scanf::sscanf::declared(),
+        string::str_rot13::declared(),
+        string::str_shuffle::declared(),
+        string::str_word_count::declared(),
+        string::str_split::declared(),
+        string::strpbrk::declared(),
+        string::substr_compare::declared(),
+        string::utf8_encode::declared(),
+        string::utf8_decode::declared(),
+    ]
+}
+
 /// Their constants.
 fn file_constants() -> Vec<ConstDecl> {
     [
-        string::constants(),
+        string::constants::declared(),
         url::constants::declared(),
         html::constants::declared(),
         basic_functions::constants(),
