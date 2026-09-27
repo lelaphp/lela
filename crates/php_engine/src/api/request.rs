@@ -7143,6 +7143,80 @@ impl Request {
         }
     }
 
+    /// `zend_handle_fetch_obj_flags` under `ZEND_FETCH_REF`
+    /// (`Z/Zend/zend_execute.c:3470`) over a typed property's slot `at`:
+    /// a slot nothing has written refused where the type takes no `null`
+    /// ([`Request::refuse_unwritten_ref`]), and a slot holding no cell yet
+    /// made one, `null` where nothing was written, with the property as
+    /// its type source, so every write through a name bound to it is held
+    /// to the type ([`Request::assign_to_reference`]). `FETCH_OBJ_W`'s
+    /// handler takes the place so for `&$o->p`, and
+    /// [`PhpObject::typed_row_ref`] for a row of the property table.
+    pub(crate) fn fetch_typed_slot_ref(
+        &mut self,
+        at: php_heap::ZvalRef,
+        typed: &TypedProperty,
+        name: &[u8],
+    ) -> Result<(), Thrown> {
+        let held = Value::of_zval(at.read());
+        self.refuse_unwritten_ref(&held, typed, name)?;
+        if held.as_php_ref().is_none() {
+            let cell = self.reference(held.undef_as_null())?;
+            at.write(cell.as_value().to_zval());
+            let source = RefSource {
+                declaring: typed.declaring,
+                name: name.to_vec(),
+                ty: typed.ty.clone(),
+            };
+            self.ref_add_type_source(cell.heap(), source);
+        }
+        Ok(())
+    }
+
+    /// `ZEND_FETCH_REF`'s refusal (`zend_handle_fetch_obj_flags`): a
+    /// typed property nothing has written, `held` its slot, bound by `&`
+    /// where its type takes no `null`, which php's `Error` names.
+    pub(crate) fn refuse_unwritten_ref(
+        &mut self,
+        held: &Value,
+        typed: &TypedProperty,
+        name: &[u8],
+    ) -> Result<(), Thrown> {
+        if held.tag() != TypeTag::Undef || typed.ty.mask() & php_unit::decl::Type::Null.mask() != 0
+        {
+            return Ok(());
+        }
+        let class = self.class_name(typed.declaring);
+        let shown = String::from_utf8_lossy(name);
+        Err(crate::api::raising::throw(
+            self,
+            "Error",
+            &format!(
+                "Cannot access uninitialized non-nullable property {class}::${shown} by reference"
+            ),
+        ))
+    }
+
+    /// `zend_get_typed_property_info_for_slot`: the typed property whose
+    /// slot `slot` of an object of `class` is, beside its unmangled name;
+    /// none for an untyped one.
+    pub(crate) fn slot_typed_property(
+        &self,
+        class: ClassId,
+        slot: u32,
+    ) -> Option<(TypedProperty, Vec<u8>)> {
+        let placed = self.placed_properties(class);
+        let at = usize::try_from(slot).ok()?;
+        let (declaring, p) = placed.into_iter().nth(at)?;
+        let name = p.name.0.to_vec();
+        let typed = TypedProperty {
+            declaring,
+            ty: p.ty?,
+            readonly: p.is_readonly,
+        };
+        Some((typed, name))
+    }
+
     /// `ZEND_REF_ADD_TYPE_SOURCE` over the property whose slot `slot` of
     /// `object` is (`zend_get_property_info_for_slot`): the cell the slot
     /// holds is typed by that property too, one more source beside the

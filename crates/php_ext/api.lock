@@ -644,6 +644,7 @@ values::PhpObject::set_prop
 values::PhpObject::set_row
 values::PhpObject::set_slot
 values::PhpObject::slot
+values::PhpObject::typed_row_ref
 values::PhpObject::unprotect
 values::PhpObject::unserialize_prop
 values::PhpObject::unset_row

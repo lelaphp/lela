@@ -180,6 +180,29 @@ impl Request {
         Ok(cell)
     }
 
+    /// [`PhpObject::typed_row_ref`]: [`Request::table_row_ref`] over a
+    /// row whose slot a typed property owns taken as `ZEND_FETCH_REF`
+    /// takes it first ([`Request::fetch_typed_slot_ref`]): a slot that holds
+    /// no cell yet made one the property is a type source of
+    /// (`ZEND_REF_ADD_TYPE_SOURCE` over
+    /// `zend_get_typed_property_info_for_slot`), and a slot nothing has
+    /// written refused where the type takes no `null`. A dynamic row, an
+    /// untyped slot and a slot holding a cell already are `row_ref`'s.
+    pub(crate) fn table_typed_row_ref(
+        &mut self,
+        object: PhpObject,
+        key: &Key,
+    ) -> Result<PhpRef, Thrown> {
+        let object = self.table_owner(object)?;
+        if let Row::Slot(i) = self.table_row_of(object.class(), key)?
+            && let Some((typed, name)) = self.slot_typed_property(object.class(), i)
+            && let Some(at) = object.heap().slot_ref(i)
+        {
+            self.fetch_typed_slot_ref(at, &typed, &name)?;
+        }
+        self.table_row_ref(object, key)
+    }
+
     /// [`PhpObject::entries`]: the rows in the table's order, the slots
     /// that hold a value by their mangled names and then the dynamic
     /// table, each key as it stands; views, no owner taken.

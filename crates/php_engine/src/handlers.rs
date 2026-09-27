@@ -7174,17 +7174,11 @@ fn fetch_flags(
     name: &[u8],
     flag: Option<FetchFlag>,
 ) -> Result<(), Thrown> {
-    let Some(flag) = flag else {
-        return Ok(());
-    };
-    let held = exec::value_of(at.read());
-    refuse_fetch(req, &held, typed, name, flag)?;
-    if flag == FetchFlag::Ref && held.as_php_ref().is_none() {
-        let cell = req.reference(held.undef_as_null())?;
-        at.write(cell.as_value().to_zval());
-        req.ref_add_type_source(cell.heap(), type_source(typed, name));
+    match flag {
+        None => Ok(()),
+        Some(FetchFlag::Ref) => req.fetch_typed_slot_ref(at, typed, name),
+        Some(flag) => refuse_fetch(req, &exec::value_of(at.read()), typed, name, flag),
     }
-    Ok(())
 }
 
 /// `zend_handle_fetch_obj_flags` under `ZEND_FETCH_REF` over a `static`
@@ -7302,18 +7296,7 @@ fn refuse_fetch(
                 ));
             }
         }
-        FetchFlag::Ref => {
-            if held.tag() == TypeTag::Undef && typed.ty.mask() & MAY_BE_NULL == 0 {
-                let class = req.class_name(typed.declaring);
-                return Err(crate::api::raising::throw(
-                    req,
-                    "Error",
-                    &format!(
-                        "Cannot access uninitialized non-nullable property {class}::${shown} by reference"
-                    ),
-                ));
-            }
-        }
+        FetchFlag::Ref => req.refuse_unwritten_ref(held, typed, name)?,
     }
     Ok(())
 }
@@ -7356,8 +7339,7 @@ impl FetchFlag {
 /// (`Z/Zend/zend_compile.h:1089-1096`).
 const FETCH_REF: u32 = 1;
 const FETCH_DIM_WRITE: u32 = 2;
-/// `MAY_BE_NULL` and `MAY_BE_ARRAY` (`Z/Zend/zend_type_info.h`).
-const MAY_BE_NULL: u32 = 1 << 1;
+/// `MAY_BE_DOUBLE` and `MAY_BE_ARRAY` (`Z/Zend/zend_type_info.h`).
 const MAY_BE_DOUBLE: u32 = 1 << 5;
 const MAY_BE_ARRAY: u32 = 1 << 7;
 
