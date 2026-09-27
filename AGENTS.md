@@ -221,9 +221,10 @@ Options:
 ├── random
 ├── reflection
 ├── session
+├── sockets
 ├── spl
 ├── standard
 ├── tokenizer
 └── zlib
 ```
-<!-- /computed in=d8243d1ed8b1eb9f3d10ca49f6309571198414720a8f24fe445cac3b7cc591c2 out=71d370766281fd207a4f588b75419d30788baf0d2436ee6b42fe23f340cdaac5 -->
+<!-- /computed in=7ab086c6ea403d70d1a1e4681833c84fe6486732e27c67e4e6c429b843c038b6 out=09b5b17a110dab7a5b34c3d74d38594fd26963166dca7d968957dd87d4a5d9f4 -->

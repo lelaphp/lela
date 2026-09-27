@@ -330,12 +330,14 @@ pub enum Whence {
 /// ask and which neither flushes nor seeks; `PHP_STREAM_AS_FD` with it;
 /// and `PHP_STREAM_AS_FD` alone, which `proc_open` asks of a stream it
 /// hands a child and which warns of buffered bytes the child will not
-/// see.
+/// see; and `PHP_STREAM_AS_SOCKETD`, which `socket_import_stream` asks,
+/// which only a socket's kind answers and which warns as `Fd` does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cast {
     Select,
     Internal,
     Fd,
+    Socket,
 }
 
 /// One option `php_stream_set_option` sets, with what it is set to: the
@@ -395,6 +397,14 @@ pub enum FdStream<'a> {
     /// `default_socket_timeout` as its read timeout; what
     /// `stream_socket_pair` and `proc_open`'s `socket` hand back.
     Socket,
+    /// A socket `socket_export_stream` hands a stream: the kind of the
+    /// registered xport `name` names, `php_stream_xport_create` with no
+    /// address and the socket laid in afterwards, `generic_socket` for
+    /// none; `r+`, with `blocking` as the stream's `is_blocked`.
+    Xport {
+        name: Option<&'a str>,
+        blocking: bool,
+    },
 }
 
 /// What a path's wrapper answers to its own `url_stat`, asked as

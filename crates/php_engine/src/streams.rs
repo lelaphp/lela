@@ -145,15 +145,15 @@ pub(crate) trait Ops: Send {
         false
     }
 
-    /// `ops->cast` to `PHP_STREAM_AS_FD` or `PHP_STREAM_AS_FD_FOR_SELECT`
-    /// (`select`), what the kind is to a cast, [`CastTarget`]; `own` is
-    /// the stream the kind is under, which a user-space stream's
-    /// `stream_cast` must not answer. [`CastTarget::Refused`] for a kind
-    /// with no fd, php's `FAILURE`.
+    /// `ops->cast` to a fd, `cast` naming which of php's casts, what the
+    /// kind is to it, [`CastTarget`]; `own` is the stream the kind is
+    /// under, which a user-space stream's `stream_cast` must not answer.
+    /// [`CastTarget::Refused`] for a kind with no fd, or none of the
+    /// kind `cast` asks for, php's `FAILURE`.
     fn cast_target(
         &mut self,
         _req: &mut Request,
-        _select: bool,
+        _cast: Cast,
         _own: Option<Stream>,
     ) -> CastTarget<'_> {
         CastTarget::Refused
@@ -998,7 +998,7 @@ impl PhpStream {
             return None;
         }
         let own = self.res.map(Stream::of);
-        let fd = match self.ops.cast_target(req, cast == Cast::Select, own) {
+        let fd = match self.ops.cast_target(req, cast, own) {
             CastTarget::Fd(fd) => Some(fd.as_raw_fd()),
             CastTarget::Host(standard) => req.host_fd(standard).map(|fd| fd.as_raw_fd()),
             // `php_stream_cast(intstream, castas, retptr, 1)`: the stream
@@ -1011,10 +1011,10 @@ impl PhpStream {
         };
         let Some(fd) = fd else {
             if warn {
-                let target = if cast == Cast::Select {
-                    "select()able descriptor"
-                } else {
-                    "File Descriptor"
+                let target = match cast {
+                    Cast::Select => "select()able descriptor",
+                    Cast::Socket => "Socket Descriptor",
+                    Cast::Internal | Cast::Fd => "File Descriptor",
                 };
                 let text = format!(
                     "{}(): Cannot represent a stream of type {} as a {target}",
@@ -1026,7 +1026,7 @@ impl PhpStream {
             return None;
         };
         let held = self.writepos - self.readpos;
-        if held > 0 && cast == Cast::Fd {
+        if held > 0 && matches!(cast, Cast::Fd | Cast::Socket) {
             let text = format!(
                 "{}(): {held} bytes of buffered data lost during stream conversion!",
                 req.active_native()
@@ -1568,7 +1568,7 @@ impl Ops for Temp {
     fn cast_target(
         &mut self,
         req: &mut Request,
-        _select: bool,
+        _cast: Cast,
         _own: Option<Stream>,
     ) -> CastTarget<'_> {
         let Some(inner) = self.inner else {
@@ -1900,13 +1900,17 @@ impl Ops for Stdio {
     }
 
     /// `php_stdiop_cast` (`Z/main/streams/plain_wrapper.c:645`): the
-    /// file's fd, for either cast.
+    /// file's fd, for any cast but `PHP_STREAM_AS_SOCKETD`, which it
+    /// refuses.
     fn cast_target(
         &mut self,
         _req: &mut Request,
-        _select: bool,
+        cast: Cast,
         _own: Option<Stream>,
     ) -> CastTarget<'_> {
+        if cast == Cast::Socket {
+            return CastTarget::Refused;
+        }
         self.file
             .as_ref()
             .map_or(CastTarget::Refused, |file| CastTarget::Fd(file.as_fd()))
@@ -2141,13 +2145,17 @@ impl Ops for HostFd {
     }
 
     /// `php_stdiop_cast` over fd 0, 1 or 2: the host's own, which the
-    /// cast answers where the host handed its fds.
+    /// cast answers where the host handed its fds, and refuses as a
+    /// socket.
     fn cast_target(
         &mut self,
         _req: &mut Request,
-        _select: bool,
+        cast: Cast,
         _own: Option<Stream>,
     ) -> CastTarget<'_> {
+        if cast == Cast::Socket {
+            return CastTarget::Refused;
+        }
         CastTarget::Host(self.standard())
     }
 }
@@ -3378,6 +3386,7 @@ impl Request {
             FdStream::File { mode } => (mode, None),
             FdStream::Process { mode, child } => (mode, Some(child)),
             FdStream::Socket => return self.socket_stream(fd),
+            FdStream::Xport { name, blocking } => return self.xport_stream(fd, name, blocking),
         };
         let mut file = std::fs::File::from(fd);
         let is_seekable = process.is_none()
@@ -3421,7 +3430,8 @@ impl Stream {
     }
 
     /// `php_stream_cast` to a fd, `PHP_STREAM_AS_FD_FOR_SELECT`
-    /// for [`Cast::Select`] and `PHP_STREAM_AS_FD` otherwise: the host
+    /// for [`Cast::Select`], `PHP_STREAM_AS_SOCKETD` for
+    /// [`Cast::Socket`] and `PHP_STREAM_AS_FD` otherwise: the host
     /// fd the stream's kind reads and writes, or `None` for a
     /// kind with none, php's `Cannot represent a stream of type %s as a
     /// %s` warning under `warn`. Short of [`Cast::Select`] the stream
