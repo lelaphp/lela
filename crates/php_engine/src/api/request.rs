@@ -5678,6 +5678,63 @@ impl Request {
         scope == Some(class) || (set == Visibility::Protected && self.check_protected(class, scope))
     }
 
+    /// Whether `property`, which `declaring` declares, has a set
+    /// visibility the executed scope lacks.
+    pub(crate) fn lacks_set_access(&self, declaring: ClassId, property: &PropertyDecl) -> bool {
+        property
+            .set_visibility
+            .is_some_and(|set| !self.has_set_access(declaring, set))
+    }
+
+    /// `prop_info->flags & ZEND_ACC_PPP_SET_MASK &&
+    /// !zend_asymmetric_property_has_set_access(prop_info)`, the test the
+    /// opcodes over a `static` property make of it once it is fetched,
+    /// with php's `Error` for `operation`: `modify` for
+    /// `ASSIGN_STATIC_PROP` and `indirectly modify` for the fetches and
+    /// the read-modify-write opcodes.
+    ///
+    /// ```php
+    /// class C { public private(set) static int $p = 1; public private(set) static array $a = [];
+    ///     static function set() { self::$p = 5; self::$a[] = 1; } }
+    /// try { C::$p = 2; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { C::$p++; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { C::$p .= "1"; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { C::$a[] = 1; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { $r = &C::$p; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// C::set();
+    /// var_dump(C::$p, C::$a);
+    /// ```
+    /// ```expect
+    /// Cannot modify private(set) property C::$p from global scope
+    /// Cannot indirectly modify private(set) property C::$p from global scope
+    /// Cannot indirectly modify private(set) property C::$p from global scope
+    /// Cannot indirectly modify private(set) property C::$a from global scope
+    /// Cannot indirectly modify private(set) property C::$p from global scope
+    /// int(5)
+    /// array(1) {
+    ///   [0]=>
+    ///   int(1)
+    /// }
+    /// ```
+    pub(crate) fn set_refused(
+        &mut self,
+        declaring: ClassId,
+        property: &PropertyDecl,
+        operation: &str,
+    ) -> Option<Thrown> {
+        let set = property.set_visibility?;
+        if !self.lacks_set_access(declaring, property) {
+            return None;
+        }
+        Some(self.set_inaccessible_property(
+            declaring,
+            set,
+            property.is_readonly,
+            &property.name.0,
+            operation,
+        ))
+    }
+
     /// `zend_asymmetric_visibility_property_modification_error`
     /// (`Z/Zend/zend_execute.c:931`): php's `Error` for a write the set
     /// visibility refuses, `operation` the word the site does

@@ -6282,7 +6282,7 @@ pub(crate) fn fetch_static_prop_w<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    static_prop_place(req, frame, code, op, false)
+    static_prop_place(req, frame, code, op, StaticFetch::Write)
 }
 
 /// `ZEND_FETCH_STATIC_PROP_RW` (`Z/Zend/zend_vm_def.h:1906`), the base
@@ -6315,18 +6315,34 @@ pub(crate) fn fetch_static_prop_rw<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    static_prop_place(req, frame, code, op, true)
+    static_prop_place(req, frame, code, op, StaticFetch::ReadWrite)
 }
 
-/// The body `FETCH_STATIC_PROP_W` and `FETCH_STATIC_PROP_RW` share:
-/// the slot as a place, an `IS_INDIRECT` naming it in the `VAR`.
+/// Which of `zend_fetch_static_prop_helper`'s write modes a fetch is:
+/// `BP_VAR_W`, `BP_VAR_RW` or `BP_VAR_UNSET`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StaticFetch {
+    Write,
+    ReadWrite,
+    Unset,
+}
+
+/// The body `FETCH_STATIC_PROP_W`, `FETCH_STATIC_PROP_RW` and
+/// `FETCH_STATIC_PROP_UNSET` share: the slot as a place, an
+/// `IS_INDIRECT` naming it in the `VAR`. A property whose set
+/// visibility the scope lacks is no place: an object it holds is copied
+/// into the `VAR`, since writing into the object modifies no property,
+/// an unset over an unwritten one is nothing, and anything else is
+/// php's `Cannot indirectly modify`
+/// (`Z/Zend/zend_vm_def.h:1873`).
 fn static_prop_place(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
-    rw: bool,
+    mode: StaticFetch,
 ) -> Edge {
+    let rw = mode == StaticFetch::ReadWrite;
     if op.op1_type != OperandKind::Const {
         return Err(Fatal::Error(String::from(
             "InternalError: ZEND_FETCH_STATIC_PROP_W over a property named at run time",
@@ -6349,7 +6365,7 @@ fn static_prop_place(
     // `zend_handle_fetch_obj_flags`'s refusals over the slot as it stands,
     // before the binding lays `null` in a slot nothing has written; then
     // the place.
-    let (declaring, _) = match req.static_slot(class, &name, scope, PropertyRead::Warning) {
+    let (declaring, property) = match req.static_slot(class, &name, scope, PropertyRead::Warning) {
         Ok(Some(slot)) => slot,
         Ok(None) => {
             return Err(Fatal::Error(format!(
@@ -6368,6 +6384,20 @@ fn static_prop_place(
     if let (Some(flag), Some(typed)) = (flag, &typed) {
         let held = req.held_static(declaring, &name);
         if let Err(thrown) = refuse_fetch(req, &held, typed, &name, flag) {
+            return threw(req, frame, &thrown);
+        }
+    }
+    if req.lacks_set_access(declaring, &property) {
+        let held = req.held_static(declaring, &name).deref();
+        let unwritten = matches!(held.as_ref(), ValueRef::Undef);
+        if held.as_object().is_some() || (mode == StaticFetch::Unset && unwritten) {
+            let copied = held.undef_as_null();
+            req.addref(&copied);
+            let previous = req.set_slot(frame, exec::temporary_slot(code, op.out), copied);
+            req.release(previous);
+            return Ok(advance(req, frame));
+        }
+        if let Some(thrown) = req.set_refused(declaring, &property, "indirectly modify") {
             return threw(req, frame, &thrown);
         }
     }
@@ -10940,6 +10970,12 @@ pub(crate) fn assign_static_prop<T: Tier>(
         return Ok(Stepped::Same(frame));
     };
     let value = exec::take_operand(req, frame, code, data_type, data_at);
+    // `zend_assign_to_typed_prop`'s set-visibility arm, after the value
+    // is read.
+    if let Some(thrown) = req.set_refused(declaring, &property, "modify") {
+        req.release(value);
+        return threw(req, frame, &thrown);
+    }
     write_out(req, frame, code, op, &value);
     // `zend_assign_to_typed_prop` under this frame's
     // `EX_USES_STRICT_TYPES()`, which the write itself serves
@@ -10976,13 +11012,18 @@ fn static_place(
     let scope = req.executed_scope();
     let class = class_operand(req, frame, code, op.op2_type, op.op2, None)?;
     match req.static_slot(class, &name, scope, PropertyRead::Warning)? {
-        Some((declaring, property)) => Ok(Some(Placed {
-            class,
-            declaring,
-            name,
-            scope,
-            ty: property.ty.clone(),
-        })),
+        Some((declaring, property)) => {
+            if let Some(thrown) = req.set_refused(declaring, &property, "indirectly modify") {
+                return Err(thrown);
+            }
+            Ok(Some(Placed {
+                class,
+                declaring,
+                name,
+                scope,
+                ty: property.ty.clone(),
+            }))
+        }
         None => Ok(None),
     }
 }
@@ -13826,7 +13867,7 @@ pub(crate) fn fetch_static_prop_unset<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    static_prop_place(req, frame, code, op, false)
+    static_prop_place(req, frame, code, op, StaticFetch::Unset)
 }
 
 /// `ZEND_UNSET_STATIC_PROP` (`Z/Zend/zend_vm_def.h`, handler 179),
