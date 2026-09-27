@@ -492,12 +492,39 @@ fn std_properties(req: &mut Request, object: PhpObject) -> Result<Vec<(Key, Valu
     object.entries(req)
 }
 
-/// The members, `zend_std_get_properties` as an array of its own.
+/// The members, `zend_std_get_properties` as an array of its own, a
+/// protected or a private property under its mangled name, which
+/// [`load_members`] places back in its slot.
+///
+/// ```php
+/// class A extends ArrayObject { public $a = 1; protected $b = 2; private $c = 3; }
+/// class H extends SplMinHeap { protected $b = 2; private $c = 3; }
+/// echo str_replace("\0", '~', (new A([1]))->serialize()), "\n", str_replace("\0", '~', serialize(new H)), "\n";
+/// $h = unserialize('O:1:"H":2:{i:0;a:2:{s:4:"' . "\0*\0" . 'b";i:5;s:4:"' . "\0H\0" . 'c";i:6;}i:1;a:2:{s:5:"flags";i:0;s:13:"heap_elements";a:0:{}}}');
+/// var_dump($h);
+/// ```
+/// ```expect
+/// x:i:0;a:1:{i:0;i:1;};m:a:3:{s:1:"a";i:1;s:4:"~*~b";i:2;s:4:"~A~c";i:3;}
+/// O:1:"H":2:{i:0;a:2:{s:4:"~*~b";i:2;s:4:"~H~c";i:3;}i:1;a:2:{s:5:"flags";i:0;s:13:"heap_elements";a:0:{}}}
+/// object(H)#1 (5) {
+///   ["b":protected]=>
+///   int(5)
+///   ["c":"H":private]=>
+///   int(6)
+///   ["flags":"SplHeap":private]=>
+///   int(0)
+///   ["isCorrupted":"SplHeap":private]=>
+///   bool(false)
+///   ["heap":"SplHeap":private]=>
+///   array(0) {
+///   }
+/// }
+/// ```
 fn members(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thrown> {
     let mut out = PhpArray::new(req)?;
-    for (name, value) in Std.get_properties(req, object)? {
+    for (key, value) in std_properties(req, object)? {
         req.addref(&value);
-        let key = owned_key(req, &Key::from_string(name));
+        let key = owned_key(req, &key);
         out.set(req, key, value)?;
     }
     Ok(out)
@@ -525,13 +552,14 @@ pub(crate) fn owned_key(req: &Request, key: &Key) -> Key {
     key.clone()
 }
 
-/// `object_properties_load`: each member written onto the object.
+/// `object_properties_load`: each member written onto the object, a
+/// mangled name placing a protected or a private property in its slot.
 fn load_members(req: &mut Request, object: PhpObject, members: &Value) -> Result<(), Thrown> {
     if let Some(members) = members.as_array() {
         for (key, value) in members.snapshot() {
             let name = key.to_prop_name(req)?;
             req.addref(&value);
-            Std.write_property(req, object, name, value)?;
+            object.unserialize_prop(req, name, value)?;
         }
     }
     Ok(())

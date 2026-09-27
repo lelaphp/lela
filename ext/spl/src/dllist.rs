@@ -8,9 +8,7 @@
 //! each element off as the walk passes it, and `SplQueue` and
 //! `SplStack` freeze the direction (`SPL_DLLIST_IT_FIX`).
 
-use php_ext::abi::{
-    CloneObj, ExtensionBuilder, ObjectHandlers, PropertyPurpose, Std, This, Untyped,
-};
+use php_ext::abi::{CloneObj, ExtensionBuilder, ObjectHandlers, PropertyPurpose, This, Untyped};
 use php_ext::attr::php_class;
 use php_ext::call::{call_method, clone_with};
 use php_ext::coerce::to_long;
@@ -679,12 +677,7 @@ impl SplDoublyLinkedList {
             let value = crate::copied(req, value);
             with(req, this, |l| l.push(value))?;
         }
-        for (key, value) in members.snapshot() {
-            let name = key.to_prop_name(req)?;
-            req.addref(&value);
-            Std.write_property(req, this, name, value)?;
-        }
-        Ok(())
+        crate::load_members(req, this, &Value::array(members))
     }
 }
 

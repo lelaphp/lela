@@ -159,9 +159,10 @@ impl SplFixedArray {
         for value in elements {
             out.append(req, crate::copied(req, value))?;
         }
-        for (name, value) in Std.get_properties(req, this)? {
+        for (key, value) in crate::std_properties(req, this)? {
             req.addref(&value);
-            out.set(req, Key::Str(name), value)?;
+            let key = crate::owned_key(req, &key);
+            out.set(req, key, value)?;
         }
         Ok(out)
     }
@@ -173,17 +174,21 @@ impl SplFixedArray {
             return Ok(());
         }
         let mut elements = Vec::new();
+        let mut members = PhpArray::new(req)?;
         for (key, value) in data.snapshot() {
             match key {
                 Key::Int(_) => elements.push(crate::copied(req, value)),
-                Key::Str(name) => {
+                Key::Str(_) => {
                     req.addref(&value);
-                    req.addref(&Value::string(name));
-                    Std.write_property(req, this, name, value)?;
+                    let key = crate::owned_key(req, &key);
+                    members.set(req, key, value)?;
                 }
             }
         }
-        with(req, this, |a| a.elements = elements)
+        with(req, this, |a| a.elements = elements)?;
+        let loaded = crate::load_members(req, this, &Value::array(members));
+        req.release(Value::array(members));
+        loaded
     }
 
     /// `count(): int`, and `getSize(): int`.

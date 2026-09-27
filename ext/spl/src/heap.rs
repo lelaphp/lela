@@ -904,11 +904,7 @@ fn serialize(req: &mut Request, this: PhpObject) -> Result<PhpArray, Thrown> {
     consistent(req, this, false)?;
     let (queue, flags, elements) = read(req, this, |h| (h.queue, h.flags, h.elements.clone()))?;
     let mut out = PhpArray::new(req)?;
-    let mut props = PhpArray::new(req)?;
-    for (name, value) in Std.get_properties(req, this)? {
-        req.addref(&value);
-        props.set(req, Key::from_string(name), value)?;
-    }
+    let props = crate::members(req, this)?;
     out.append(req, Value::array(props))?;
     let mut state = PhpArray::new(req)?;
     let key = PhpString::new(req, b"flags")?;
@@ -953,11 +949,7 @@ fn unserialize(req: &mut Request, this: PhpObject, data: PhpArray) -> Result<(),
     if data.len() != 2 {
         return invalid(req);
     }
-    for (key, value) in props.snapshot() {
-        let name = key.to_prop_name(req)?;
-        req.addref(&value);
-        Std.write_property(req, this, name, value)?;
-    }
+    crate::load_members(req, this, &Value::array(props))?;
     let flags_key = PhpString::new(req, b"flags")?;
     let elements_key = PhpString::new(req, b"heap_elements")?;
     let flags = state
