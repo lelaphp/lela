@@ -46,6 +46,7 @@ pub use crate::virtual_cwd::Resolve;
 
 mod hooks;
 mod lazy;
+mod linking;
 mod load_file;
 mod table;
 mod variables;
@@ -1437,6 +1438,9 @@ pub struct Request {
     /// under its name. A load that bound nothing leaves nothing here, so
     /// the opline of a file loaded again declares, and is refused.
     bound_at_load: Vec<(Arc<Unit>, u32)>,
+    /// The classes whose link is under way and what their links left
+    /// for later ([`linking::Links`]).
+    links: linking::Links,
     /// `CG(rtd_key_counter)` over the units this request compiled for
     /// itself: the runtime definition keys and anonymous class names
     /// they made, which the next one counts on from
@@ -1841,6 +1845,7 @@ impl Request {
             stack_limit: StackLimit::UNCHECKED,
             declared: Vec::new(),
             bound_at_load: Vec::new(),
+            links: linking::Links::default(),
             keys_made: 0,
             aliases: Vec::new(),
             sapi_constant: Value::null(),
@@ -11729,19 +11734,10 @@ impl Request {
     /// Fatal error: Cannot redeclare class stdClass in %s on line 2
     /// ```
     fn redeclaration(&self, existing: ClassId) -> String {
-        let Some(earlier) = self.class_decl(existing) else {
-            return String::from("InternalError: a class redeclared over none");
-        };
-        let what = php_unit::link::object_type(earlier.kind);
-        let name = String::from_utf8_lossy(&earlier.name.0);
-        if earlier.file.0.is_empty() {
-            return format!("Cannot redeclare {what} {name}");
+        match self.class_decl(existing) {
+            Some(earlier) => redeclaration(earlier),
+            None => String::from("InternalError: a class redeclared over none"),
         }
-        format!(
-            "Cannot redeclare {what} {name} (previously declared in {}:{})",
-            String::from_utf8_lossy(&earlier.file.0),
-            earlier.line
-        )
     }
 
     /// The class at `at` of `unit` into the request's table, with its
@@ -12242,30 +12238,55 @@ impl Request {
         // `zend_bind_class_in_slot`'s failed `zend_hash_set_bucket_key`,
         // or `do_bind_class` finding its key gone because the opline ran
         // before: `E_COMPILE_ERROR` at the site that runs it either way.
-        if let Some(existing) = self.class_named(&decl.name.0) {
-            let message = self.redeclaration(existing);
+        let existing = self
+            .class_named(&decl.name.0)
+            .and_then(|existing| self.class_decl(existing))
+            .or_else(|| self.unlinked_decl(&decl.name.0));
+        if let Some(existing) = existing {
+            let message = redeclaration(existing);
             let file = self.current_file().map(<[u8]>::to_vec).unwrap_or_default();
             let line = self.current_line();
             self.end_in_compile_time(Level::CompileError, &message, &file, line);
             return Err(Thrown::of(None));
         }
-        if let Some(parent) = &decl.parent {
-            self.fetch_to_link(parent, "Class")?;
+        let Ok(slot) = u32::try_from(at) else {
+            return Err(crate::api::raising::fatal(
+                self,
+                "InternalError: a unit declares more classes than can be numbered",
+            ));
+        };
+        self.link_begun(unit, slot);
+        let name = &decl.name.0;
+        if let Some(parent) = &decl.parent
+            && !self.nearly_linked(&parent.0)
+            && let Err(thrown) = self.fetch_to_link(parent, "Class")
+        {
+            return Err(self.link_abandoned(name, thrown, true));
         }
         for used in &decl.traits {
-            let found = self.fetch_to_link(used, "Trait")?;
+            let found = match self.fetch_to_link(used, "Trait") {
+                Ok(found) => found,
+                Err(thrown) => return Err(self.link_abandoned(name, thrown, false)),
+            };
             if self.class_decl(found).map(|t| t.kind) != Some(ClassKind::Trait) {
                 let message = format!(
                     "{} cannot use {} - it is not a trait",
-                    String::from_utf8_lossy(&decl.name.0),
+                    String::from_utf8_lossy(name),
                     self.class_name(found)
                 );
-                return Err(crate::api::raising::throw(self, "Error", &message));
+                let thrown = crate::api::raising::throw(self, "Error", &message);
+                return Err(self.link_abandoned(name, thrown, false));
             }
-            self.deprecated_trait(found, &decl.name.0)?;
+            if let Err(thrown) = self.deprecated_trait(found, name) {
+                return Err(self.link_abandoned(name, thrown, false));
+            }
         }
         for interface in &decl.interfaces {
-            self.fetch_to_link(interface, "Interface")?;
+            if !self.nearly_linked(&interface.0)
+                && let Err(thrown) = self.fetch_to_link(interface, "Interface")
+            {
+                return Err(self.link_abandoned(name, thrown, true));
+            }
         }
         self.link_declared(unit, at, &decl, false).map(|_| ())
     }
@@ -12324,36 +12345,9 @@ impl Request {
         decl: &ClassDecl,
         early: bool,
     ) -> Result<bool, Thrown> {
-        let lookup = |name: &[u8]| self.held_class(name);
-        let linking = php_unit::link::link(decl, &lookup);
-        if early && matches!(linking.outcome, php_unit::link::Linked::Unresolved(_)) {
+        let linking = self.link_against_table(decl);
+        if early && !linking.obligations.is_empty() {
             return Ok(false);
-        }
-        for raised in &linking.raised {
-            crate::api::raising::raise_at(
-                self,
-                raised.level(),
-                &raised.to_string(),
-                &raised.site().file.0,
-                raised.site().line,
-            );
-        }
-        if let php_unit::link::Linked::Refused(refused)
-        | php_unit::link::Linked::Unresolved(refused) = linking.outcome
-        {
-            let message = refused.refusal.to_string();
-            match refused.refusal.level() {
-                Level::CoreError => self.end_in_core_error(&message),
-                level => {
-                    self.end_in_compile_time(
-                        level,
-                        &message,
-                        &refused.site.file.0,
-                        refused.site.line,
-                    );
-                }
-            }
-            return Err(Thrown::of(None));
         }
         let Ok(at) = u32::try_from(at) else {
             return Err(crate::api::raising::fatal(
@@ -12361,7 +12355,7 @@ impl Request {
                 "InternalError: a unit declares more classes than can be numbered",
             ));
         };
-        self.bind_declared(unit, at, linking.composed);
+        self.link_settled(unit, at, linking)?;
         Ok(true)
     }
 
@@ -12420,7 +12414,11 @@ impl Request {
             .and_then(|at| self.declared.get(at))
             .and_then(|declared| declared.composed.as_ref())
             .map(|composed| composed.bodies.as_slice());
-        Some(php_unit::link::Held { decl, bodies })
+        Some(php_unit::link::Held {
+            decl,
+            bodies,
+            linked: true,
+        })
     }
 
     /// `zend_fetch_class_by_name` under `ZEND_FETCH_CLASS_EXCEPTION`, as
@@ -16810,6 +16808,22 @@ impl Request {
         assert_eq!(pushed.as_ref().err(), None, "a test's frame is pushed");
         pushed.unwrap_or(FrameRef(0))
     }
+}
+
+/// `zend_class_redeclaration_error`'s two wordings over the earlier
+/// declaration: what it is and its own name, and its site when it was a
+/// user class.
+fn redeclaration(earlier: &ClassDecl) -> String {
+    let what = php_unit::link::object_type(earlier.kind);
+    let name = String::from_utf8_lossy(&earlier.name.0);
+    if earlier.file.0.is_empty() {
+        return format!("Cannot redeclare {what} {name}");
+    }
+    format!(
+        "Cannot redeclare {what} {name} (previously declared in {}:{})",
+        String::from_utf8_lossy(&earlier.file.0),
+        earlier.line
+    )
 }
 
 #[cfg(test)]

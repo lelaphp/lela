@@ -945,14 +945,17 @@ pub struct Body {
     pub method: u32,
 }
 
-/// A class as a table holds it for the link: its declaration, and where
+/// A class as a table holds it for the link: its declaration, where
 /// its methods' bodies are when composition put another class's there,
-/// one [`Body`] per method in order; none for a class whose every
-/// method is its own.
+/// one [`Body`] per method in order, none for a class whose every
+/// method is its own; and whether it is `ZEND_ACC_LINKED`, which a
+/// class the table holds while its own link is under way is not
+/// (`ZEND_FETCH_CLASS_ALLOW_UNLINKED`).
 #[derive(Debug, Clone, Copy)]
 pub struct Held<'a> {
     pub decl: &'a ClassDecl,
     pub bodies: Option<&'a [Body]>,
+    pub linked: bool,
 }
 
 impl Held<'_> {
@@ -982,25 +985,53 @@ pub struct Composed {
 /// What linking one class came to, `zend_do_link_class`'s outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Linked {
-    /// The class links: every check held.
+    /// The class links: every check held, or left an obligation.
     Linked,
     /// A check failed, php's `E_COMPILE_ERROR` at the site named.
     Refused(Refused),
-    /// A check needed a class no table holds yet, `INHERITANCE_UNRESOLVED`:
-    /// the early bind leaves the class to be declared as the program
-    /// serves, and a bind as the program serves refuses it in php's
-    /// words for an obligation it could not discharge.
+}
+
+/// A variance obligation, what `zend_do_link_class` leaves on a class
+/// it cannot finish linking yet (`variance_obligation`), in the order
+/// the checks left them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Obligation {
+    /// `OBLIGATION_DEPENDENCY`: the parent or an interface, named, is
+    /// not linked yet, and its own obligations are settled first.
+    Dependency(Name),
+    /// A check that came to `INHERITANCE_UNRESOLVED`, a class it names
+    /// held by no table, with the refusal php raises if it still does
+    /// when the obligation is checked: `Could not check compatibility`
+    /// for a method, and the check's own sentence for a property, a
+    /// hook or a constant.
     Unresolved(Refused),
 }
 
-/// [`link`]'s answer: the outcome, what the checks raised before it in
-/// the order raised, and, for a class that uses traits and links, the
-/// class composed with them.
+/// [`link`]'s answer: the outcome; what the checks raised before it in
+/// the order raised; for a class that uses traits and links, the class
+/// composed with them; the obligations left, which a bind at load
+/// reads as `zend_can_early_bind`'s `INHERITANCE_UNRESOLVED`, and each
+/// class a check could not find, in the order
+/// `register_unresolved_classes` puts them in `CG(delayed_autoloads)`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Linking {
     pub outcome: Linked,
     pub raised: Vec<Raised>,
     pub composed: Option<Composed>,
+    pub obligations: Vec<Obligation>,
+    pub autoloads: Vec<Vec<u8>>,
+}
+
+/// What the checks left for later, `CG(delayed_autoloads)`'s names and
+/// the class's obligations in the order left. A check reads the table
+/// and leaves these, so they are held apart from what it reads.
+#[derive(Default)]
+struct Deferred {
+    autoloads: Vec<Vec<u8>>,
+    obligations: Vec<Obligation>,
+    /// The classes the method check under way registered, the first of
+    /// which its `Could not check compatibility` names.
+    missing: Vec<Vec<u8>>,
 }
 
 /// `inheritance_status`.
@@ -1280,11 +1311,12 @@ struct Tables<'a> {
     constants: Vec<(&'a ClassDecl, &'a ClassConstDecl)>,
 }
 
-/// The class being linked, the table it is linked against, and what
-/// was raised so far.
+/// The class being linked, the table it is linked against, what was
+/// raised so far and what the checks left for later.
 struct Linker<'a> {
     lookup: &'a dyn Fn(&[u8]) -> Option<Held<'a>>,
     raised: Vec<Raised>,
+    deferred: std::cell::RefCell<Deferred>,
 }
 
 /// `zend_do_link_class`'s checks of `child` against the classes
@@ -1294,15 +1326,15 @@ struct Linker<'a> {
 /// the first in php's order.
 pub fn link<'a>(child: &'a ClassDecl, lookup: &'a dyn Fn(&[u8]) -> Option<Held<'a>>) -> Linking {
     if child.traits.is_empty() {
-        let mut linker = Linker {
-            lookup,
-            raised: Vec::new(),
-        };
+        let mut linker = Linker::over(lookup, Vec::new());
         let settled = linker.link_refused(child, &[]);
+        let deferred = linker.deferred.into_inner();
         return Linking {
             outcome: settled.outcome,
             raised: linker.raised,
             composed: None,
+            obligations: deferred.obligations,
+            autoloads: deferred.autoloads,
         };
     }
     let composition = match traits::compose(child, lookup) {
@@ -1313,6 +1345,8 @@ pub fn link<'a>(child: &'a ClassDecl, lookup: &'a dyn Fn(&[u8]) -> Option<Held<'
                 outcome: Linked::Refused(refused),
                 raised,
                 composed: None,
+                obligations: Vec::new(),
+                autoloads: Vec::new(),
             };
         }
     };
@@ -1322,7 +1356,8 @@ pub fn link<'a>(child: &'a ClassDecl, lookup: &'a dyn Fn(&[u8]) -> Option<Held<'
         abstracts,
         raised,
     } = composition;
-    let (settled, raised) = link_composed(&|name| lookup(name), &decl, &abstracts, raised);
+    let (settled, raised, deferred) =
+        link_composed(&|name| lookup(name), &decl, &abstracts, raised);
     for at in settled.added {
         if let Some(copy) = abstracts.get(at) {
             decl.methods.push(copy.method.clone());
@@ -1337,6 +1372,8 @@ pub fn link<'a>(child: &'a ClassDecl, lookup: &'a dyn Fn(&[u8]) -> Option<Held<'
         outcome: settled.outcome,
         raised,
         composed,
+        obligations: deferred.obligations,
+        autoloads: deferred.autoloads,
     }
 }
 
@@ -1347,10 +1384,10 @@ fn link_composed<'b>(
     decl: &'b ClassDecl,
     abstracts: &'b [traits::Copy],
     raised: Vec<Raised>,
-) -> (Settled, Vec<Raised>) {
-    let mut linker = Linker { lookup, raised };
+) -> (Settled, Vec<Raised>, Deferred) {
+    let mut linker = Linker::over(lookup, raised);
     let settled = linker.link_refused(decl, abstracts);
-    (settled, linker.raised)
+    (settled, linker.raised, linker.deferred.into_inner())
 }
 
 /// What [`Linker::link_refused`] settled: the outcome, which of a
@@ -1374,6 +1411,57 @@ impl Settled {
 }
 
 impl<'a> Linker<'a> {
+    fn over(lookup: &'a dyn Fn(&[u8]) -> Option<Held<'a>>, raised: Vec<Raised>) -> Linker<'a> {
+        Linker {
+            lookup,
+            raised,
+            deferred: std::cell::RefCell::default(),
+        }
+    }
+
+    /// `add_compatibility_obligation` and its siblings: a check that
+    /// came to `INHERITANCE_UNRESOLVED` left on the class with the
+    /// refusal it raises if it still does when checked, and the link
+    /// goes on.
+    fn defer(&self, refused: Refused) -> Option<Linked> {
+        self.deferred
+            .borrow_mut()
+            .obligations
+            .push(Obligation::Unresolved(refused));
+        None
+    }
+
+    /// `add_dependency_obligation` where the class `name` names is held
+    /// but not linked yet.
+    fn depend(&self, name: &Name) {
+        if (self.lookup)(&name.0).is_some_and(|held| !held.linked) {
+            self.deferred
+                .borrow_mut()
+                .obligations
+                .push(Obligation::Dependency(name.clone()));
+        }
+    }
+
+    /// `register_unresolved_classes`: each class `ty` names in `scope`
+    /// that no table holds, into `CG(delayed_autoloads)` once.
+    fn register(&self, child: &'a ClassDecl, ty: &Type, scope: &Scope<'a>) {
+        let mut members = Vec::new();
+        names_into(ty, scope, &mut members);
+        for name in members.into_iter().flat_map(|m| match m {
+            Member::Name(name) => vec![name],
+            Member::Intersection(names) => names,
+        }) {
+            if self.lookup(child, &name).is_some() {
+                continue;
+            }
+            let mut deferred = self.deferred.borrow_mut();
+            if !deferred.autoloads.contains(&name) {
+                deferred.autoloads.push(name.clone());
+            }
+            deferred.missing.push(name);
+        }
+    }
+
     fn class_named(&self, name: &[u8]) -> Option<&'a ClassDecl> {
         (self.lookup)(name).map(|held| held.decl)
     }
@@ -1482,7 +1570,7 @@ impl<'a> Linker<'a> {
         match (a, b) {
             (Cls::Linking, Cls::Linking) => true,
             (Cls::Linked(x), Cls::Linked(y)) => self.instance_of(x, y),
-            (Cls::Linked(_), Cls::Linking) => false,
+            (Cls::Linked(x), Cls::Linking) => self.instance_of(x, child),
             (Cls::Linking, Cls::Linked(y)) => child
                 .parent
                 .iter()
@@ -1674,8 +1762,25 @@ impl<'a> Linker<'a> {
     }
 
     /// `zend_perform_covariant_type_check`: whether `fe` in `fe_scope`
-    /// is a subtype of `proto` in `proto_scope`.
+    /// is a subtype of `proto` in `proto_scope`, each class either
+    /// names that no table holds registered where it cannot say.
     fn covariant(
+        &self,
+        child: &'a ClassDecl,
+        fe_scope: &Scope<'a>,
+        fe: &Type,
+        proto_scope: &Scope<'a>,
+        proto: &Type,
+    ) -> Status {
+        let status = self.covariant_status(child, fe_scope, fe, proto_scope, proto);
+        if status == Status::Unresolved {
+            self.register(child, fe, fe_scope);
+            self.register(child, proto, proto_scope);
+        }
+        status
+    }
+
+    fn covariant_status(
         &self,
         child: &'a ClassDecl,
         fe_scope: &Scope<'a>,
@@ -1828,20 +1933,6 @@ impl<'a> Linker<'a> {
         status
     }
 
-    /// The first class a type names that no table holds, which
-    /// `register_unresolved_classes` puts first in `CG(delayed_autoloads)`.
-    fn unresolved_in(&self, child: &'a ClassDecl, ty: &Type, scope: &Scope<'a>) -> Option<Vec<u8>> {
-        let mut members = Vec::new();
-        names_into(ty, scope, &mut members);
-        members
-            .into_iter()
-            .flat_map(|m| match m {
-                Member::Name(name) => vec![name],
-                Member::Intersection(names) => names,
-            })
-            .find(|name| self.lookup(child, name).is_none())
-    }
-
     /// The two sides of a check of the child's own method against one a
     /// parent or an interface declared.
     fn own_over(child: &'a ClassDecl, proto_class: &'a ClassDecl) -> (Side<'a>, Side<'a>) {
@@ -1938,6 +2029,7 @@ impl<'a> Linker<'a> {
                 parent,
             });
         }
+        self.deferred.borrow_mut().missing.clear();
         let status = self.implementation(child, fe, &fe_scope, proto, &proto_scope);
         let child_text = declaration(&fe.function, &fe_side);
         let parent_text = declaration(&proto.function, &proto_side);
@@ -1963,43 +2055,21 @@ impl<'a> Linker<'a> {
                 parent: parent_text,
             }),
             Status::Unresolved => {
-                let missing = self
-                    .unresolved_of(child, &fe.function, &fe_scope)
-                    .or_else(|| self.unresolved_of(child, &proto.function, &proto_scope));
-                Some(match missing {
-                    Some(missing) => Linked::Unresolved(Refused {
-                        refusal: Refusal::Unavailable {
-                            child: child_text,
-                            parent: parent_text,
-                            missing: text(&missing),
-                        },
-                        site,
-                    }),
-                    None => Linked::Refused(Refused {
-                        refusal: Refusal::Incompatible {
-                            child: child_text,
-                            parent: parent_text,
-                        },
-                        site,
-                    }),
-                })
+                let missing = self.deferred.borrow().missing.first().cloned();
+                let refusal = match missing {
+                    Some(missing) => Refusal::Unavailable {
+                        child: child_text,
+                        parent: parent_text,
+                        missing: text(&missing),
+                    },
+                    None => Refusal::Incompatible {
+                        child: child_text,
+                        parent: parent_text,
+                    },
+                };
+                self.defer(Refused { refusal, site })
             }
         }
-    }
-
-    /// The first class a function's types name that no table holds.
-    fn unresolved_of(
-        &self,
-        child: &'a ClassDecl,
-        function: &FunctionDecl,
-        scope: &Scope<'a>,
-    ) -> Option<Vec<u8>> {
-        function
-            .parameters
-            .iter()
-            .filter_map(|p| p.ty.as_ref())
-            .chain(function.return_type.iter())
-            .find_map(|ty| self.unresolved_in(child, ty, scope))
     }
 
     /// `do_inherit_property` for a property the child redeclares, in
@@ -2025,14 +2095,6 @@ impl<'a> Linker<'a> {
         parent_class: &'a ClassDecl,
         check: Check,
     ) -> Option<Linked> {
-        let settled = |(refusal, status): (Refusal, Status)| {
-            let refused = at_class(child, refusal);
-            if status == Status::Unresolved {
-                Linked::Unresolved(refused)
-            } else {
-                Linked::Refused(refused)
-            }
-        };
         if let Some(refusal) = Self::property_refused(child, own, parent, parent_class) {
             return Some(Linked::Refused(at_class(child, refusal)));
         }
@@ -2042,8 +2104,12 @@ impl<'a> Linker<'a> {
         if let Some(linked) = self.hooks_refused(child, own, parent, parent_class, check) {
             return Some(linked);
         }
-        self.hooked_type_refused(child, own, parent, parent_class)
-            .map(settled)
+        let (refusal, status) = self.hooked_type_refused(child, own, parent, parent_class)?;
+        let refused = at_class(child, refusal);
+        if status == Status::Unresolved {
+            return self.defer(refused);
+        }
+        Some(Linked::Refused(refused))
     }
 
     /// The flags half of `do_inherit_property` for a property the child
@@ -2167,7 +2233,7 @@ impl<'a> Linker<'a> {
         );
         match status {
             Status::Error => Some(Linked::Refused(refused)),
-            Status::Unresolved => Some(Linked::Unresolved(refused)),
+            Status::Unresolved => self.defer(refused),
             Status::Success | Status::Warning => None,
         }
     }
@@ -2300,9 +2366,11 @@ impl<'a> Linker<'a> {
         }
         if let Some(parent_name) = &child.parent
             && let Some(parent) = self.class_named(&parent_name.0)
-            && let Some(linked) = self.inherit(child, parent, &mut constants, &mut methods)
         {
-            return Settled::of(linked);
+            self.depend(parent_name);
+            if let Some(linked) = self.inherit(child, parent, &mut constants, &mut methods) {
+                return Settled::of(linked);
+            }
         }
         let added = match self.trait_abstracts(child, abstracts, &mut methods) {
             Ok(added) => added,
@@ -2752,11 +2820,11 @@ impl<'a> Linker<'a> {
         methods: &mut Table<'a, MethodDecl>,
     ) -> Option<Linked> {
         let mut named: Vec<&ClassDecl> = Vec::new();
-        for interface in child
-            .interfaces
-            .iter()
-            .filter_map(|n| self.class_named(&n.0))
-        {
+        for name in &child.interfaces {
+            let Some(interface) = self.class_named(&name.0) else {
+                continue;
+            };
+            self.depend(name);
             if interface.kind != ClassKind::Interface {
                 return Some(Linked::Refused(at_class(
                     child,

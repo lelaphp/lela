@@ -75,6 +75,7 @@ link::Composed
 link::Held
 link::Linked
 link::Linking
+link::Obligation
 link::Raised
 link::Raised::level
 link::Raised::site

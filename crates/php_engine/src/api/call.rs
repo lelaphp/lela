@@ -1167,7 +1167,8 @@ pub fn bound_variables(
 /// table miss (`Z/Zend/zend_execute_API.c:1228`) over
 /// `spl_perform_autoload` (`Z/ext/spl/php_spl.c:414`): a name that is
 /// no valid class name, or one an autoloader is already loading
-/// (`EG(in_autoload)`), loads nothing; otherwise each callable of the
+/// (`EG(in_autoload)`), loads nothing, and nor does one the table holds
+/// for a class whose link is under way; otherwise each callable of the
 /// stack `spl_autoload_register` built is served with the name as it
 /// was written, a leading `\` dropped, until the table has the class,
 /// one throws, or none is left. The stack is read afresh at each
@@ -1212,6 +1213,9 @@ pub fn autoload(req: &mut Request, name: &[u8]) -> Result<Option<ClassId>, Throw
     }
     if let Some(class) = req.class_named(bare) {
         return Ok(Some(class));
+    }
+    if req.link_under_way(bare) {
+        return Ok(None);
     }
     let lowered = bare.to_ascii_lowercase();
     if !req.autoload_enter(&lowered) {
