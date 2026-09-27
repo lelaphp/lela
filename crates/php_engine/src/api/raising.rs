@@ -221,6 +221,21 @@ pub fn docref(req: &mut Request, level: Level, message: &str) {
 /// ```expect
 /// Maximum call stack size of N bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?
 /// ```
+///
+/// Under the small-stack regime the size is the ini's, 256K less
+/// `zend.reserved_stack_size`, whose least is the platform's
+/// (`php_compile::StackLimit`), so the number is masked; the chain is
+/// a quarter of the one above, which 256K refuses in both engines.
+///
+/// ```php
+/// $o = $first = new stdClass;
+/// for ($i = 0; $i < 25000; $i++) { $o->next = new stdClass; $o = $o->next; }
+/// try { serialize($first); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// while ($next = $first->next ?? null) { $first->next = $next->next ?? null; }
+/// ```
+/// ```expect regime=small-stack
+/// Maximum call stack size of %d bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?
+/// ```
 pub fn call_stack_limit(req: &mut Request) -> Result<(), Thrown> {
     let stack = req.stack_limit();
     if !stack.overflowed() {
