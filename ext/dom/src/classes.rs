@@ -5,6 +5,7 @@
 //! `Dom\CharacterData` and `Dom\Implementation` (`domimplementation.c`)
 //! do apart from them.
 
+use php_ext::attr::php_class;
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::Request;
 use php_ext::values::{PhpObject, Value};
@@ -851,10 +852,6 @@ pub(crate) const METHODS: &[(&str, Entry)] = &[
     ("DOMCharacterData::insertData", insert_data),
     ("DOMCharacterData::deleteData", delete_data),
     ("DOMCharacterData::replaceData", replace_data),
-    ("DOMCharacterData::replaceWith", crate::parent::REPLACE_WITH),
-    ("DOMCharacterData::remove", crate::parent::REMOVE),
-    ("DOMCharacterData::before", crate::parent::BEFORE),
-    ("DOMCharacterData::after", crate::parent::AFTER),
     ("DOMText::__construct", text_construct),
     ("DOMText::isWhitespaceInElementContent", is_whitespace),
     ("DOMText::isElementContentWhitespace", is_whitespace),
@@ -866,12 +863,6 @@ pub(crate) const METHODS: &[(&str, Entry)] = &[
     ("DOMAttr::isId", is_id),
     ("DOMDocumentFragment::__construct", fragment_construct),
     ("DOMDocumentFragment::appendXML", append_xml),
-    ("DOMDocumentFragment::append", crate::parent::APPEND),
-    ("DOMDocumentFragment::prepend", crate::parent::PREPEND),
-    (
-        "DOMDocumentFragment::replaceChildren",
-        crate::parent::REPLACE_CHILDREN,
-    ),
     (
         "DOMEntityReference::__construct",
         entity_reference_construct,
@@ -899,3 +890,8 @@ pub(crate) const METHODS: &[(&str, Entry)] = &[
         modern_create_html_document,
     ),
 ];
+
+/// `DOMAttr`, named for the types that hold it until its header is
+/// declared here.
+#[php_class(extern)]
+pub(crate) struct DOMAttr;

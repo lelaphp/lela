@@ -7,6 +7,7 @@
 use php_ext::abi::{
     CloneObj, DimensionRead, ObjectHandlers, PropertyPlace, PropertyRead, PropertyTest,
 };
+use php_ext::attr::php_class;
 use php_ext::coerce::{to_long, truthy};
 use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
@@ -667,3 +668,8 @@ impl ObjectHandlers for TokenListHandlers {
         }
     }
 }
+
+/// `Dom\TokenList`, named for the types that hold it until its header is
+/// declared here.
+#[php_class(extern, namespace(Dom))]
+pub(crate) struct TokenList;

@@ -979,3 +979,8 @@ pub(crate) const METHODS: &[(&str, Entry)] = &[
 /// declared here.
 #[php_class(extern, namespace(Dom))]
 pub(crate) struct Document;
+
+/// `Dom\Attr`, named for the types that hold it until its header is
+/// declared here.
+#[php_class(extern, namespace(Dom))]
+pub(crate) struct Attr;

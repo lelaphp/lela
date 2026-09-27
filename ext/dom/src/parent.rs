@@ -5,16 +5,18 @@
 //! latter held to the DOM standard's document rules where the document
 //! follows it.
 
+use php_ext::abi::{Instance, Union, Untyped, Variadic};
+use php_ext::attr::php_class;
 use php_ext::raising::{Thrown, arg_type_error, arg_value_error};
 use php_ext::request::Request;
-use php_ext::values::{PhpObject, Value, ValueRef};
+use php_ext::values::{PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::{Kind, Node};
 
 use crate::modern::follows_spec;
 use crate::object::Code;
 use crate::{
-    Entry, class_name, dom_error, dom_error_message, dom_throw, fetch, hierarchy_ok, instance_of,
-    invalidate, node_of, strict, this_intern,
+    class_name, dom_error, dom_error_message, dom_throw, fetch, hierarchy_ok, instance_of, intern,
+    invalidate, node_of, strict,
 };
 
 /// One argument of the list, checked: a node's object, or the bytes of a
@@ -26,17 +28,20 @@ enum Piece {
 
 /// `dom_sanity_check_node_list_types` over the call's arguments, the node
 /// class the one the receiver's document hands out.
-fn pieces(req: &mut Request, this: PhpObject) -> Result<Vec<Piece>, Thrown> {
+fn pieces(
+    req: &mut Request,
+    this: PhpObject,
+    nodes: &[Untyped<Value>],
+) -> Result<Vec<Piece>, Thrown> {
     let class = if follows_spec(req, this) {
         "Dom\\Node"
     } else {
         "DOMNode"
     };
-    let values = req.variadic_arguments(1)?;
-    let mut out = Vec::with_capacity(values.len());
-    for (i, value) in values.iter().enumerate() {
+    let mut out = Vec::with_capacity(nodes.len());
+    for (i, value) in nodes.iter().enumerate() {
         let position = u32::try_from(i + 1).unwrap_or(u32::MAX);
-        let v = value.deref();
+        let v = value.0.deref();
         match v.as_ref() {
             ValueRef::Object(o) if instance_of(req, *o, class) => out.push(Piece::Node(*o)),
             ValueRef::Str(s) if i32::try_from(s.len()).is_err() => {
@@ -597,64 +602,53 @@ pub(crate) fn pre_insert(
     }
 }
 
-/// `DOMElement::append(DOMNode|string ...$nodes): void`, shared with the
-/// document and the fragment.
-///
-/// ```php
-/// $d = new DOMDocument;
-/// $d->loadXML('<r><m/></r>');
-/// $r = $d->documentElement;
-/// $r->append('a', $d->createElement('b'));
-/// $r->prepend('p');
-/// $r->firstChild->nextSibling->before('x');
-/// $r->firstChild->nextSibling->nextSibling->after('y');
-/// echo $d->saveXML($r), "\n";
-/// $r->lastChild->replaceWith('z');
-/// $d->getElementsByTagName('m')->item(0)->remove();
-/// echo $d->saveXML($r), "\n";
-/// $r->replaceChildren('only');
-/// echo $d->saveXML($r), "\n";
-/// try { $r->append(1); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// <r>px<m/>ya<b/></r>
-/// <r>pxyaz</r>
-/// <r>only</r>
-/// DOMElement::append(): Argument #1 must be of type DOMNode|string, int given
-/// ```
-fn append(req: &mut Request) -> Result<Value, Thrown> {
-    let this = this_intern(req)?;
-    let list = pieces(req, this)?;
+/// `append(DOMNode|string ...$nodes): void`, `DOMElement`'s and the
+/// classes' that alias it.
+pub(crate) fn append(
+    req: &mut Request,
+    this: PhpObject,
+    nodes: &[Untyped<Value>],
+) -> Result<(), Thrown> {
+    let this = intern(req, this)?;
+    let list = pieces(req, this, nodes)?;
     let parent = fetch(req, this)?;
     invalidate(req, this);
     if let Some(node) = single_node(req, this, parent, &list)? {
         pre_insert(req, this, node, parent, None)?;
     }
-    Ok(Value::null())
+    Ok(())
 }
 
 /// `prepend(DOMNode|string ...$nodes): void`.
-fn prepend(req: &mut Request) -> Result<Value, Thrown> {
-    let this = this_intern(req)?;
+pub(crate) fn prepend(
+    req: &mut Request,
+    this: PhpObject,
+    nodes: &[Untyped<Value>],
+) -> Result<(), Thrown> {
+    let this = intern(req, this)?;
     let parent = fetch(req, this)?;
     let Some(first) = parent.children() else {
-        return append(req);
+        return append(req, this, nodes);
     };
-    let list = pieces(req, this)?;
+    let list = pieces(req, this, nodes)?;
     invalidate(req, this);
     if let Some(node) = single_node(req, this, parent, &list)? {
         pre_insert(req, this, node, parent, Some(first))?;
     }
-    Ok(Value::null())
+    Ok(())
 }
 
 /// `after(DOMNode|string ...$nodes): void`.
-fn after(req: &mut Request) -> Result<Value, Thrown> {
-    let this = this_intern(req)?;
-    let list = pieces(req, this)?;
+pub(crate) fn after(
+    req: &mut Request,
+    this: PhpObject,
+    nodes: &[Untyped<Value>],
+) -> Result<(), Thrown> {
+    let this = intern(req, this)?;
+    let list = pieces(req, this, nodes)?;
     let node = fetch(req, this)?;
     let Some(parent) = node.parent() else {
-        return Ok(Value::null());
+        return Ok(());
     };
     let mut next = node.next();
     while let Some(n) = next.filter(|n| in_list(req, &list, *n)) {
@@ -664,16 +658,20 @@ fn after(req: &mut Request) -> Result<Value, Thrown> {
     if let Some(fragment) = single_node(req, this, parent, &list)? {
         pre_insert(req, this, fragment, parent, next)?;
     }
-    Ok(Value::null())
+    Ok(())
 }
 
 /// `before(DOMNode|string ...$nodes): void`.
-fn before(req: &mut Request) -> Result<Value, Thrown> {
-    let this = this_intern(req)?;
-    let list = pieces(req, this)?;
+pub(crate) fn before(
+    req: &mut Request,
+    this: PhpObject,
+    nodes: &[Untyped<Value>],
+) -> Result<(), Thrown> {
+    let this = intern(req, this)?;
+    let list = pieces(req, this, nodes)?;
     let node = fetch(req, this)?;
     let Some(parent) = node.parent() else {
-        return Ok(Value::null());
+        return Ok(());
     };
     let mut prev = node.prev();
     while let Some(p) = prev.filter(|p| in_list(req, &list, *p)) {
@@ -688,7 +686,7 @@ fn before(req: &mut Request) -> Result<Value, Thrown> {
     if let Some(fragment) = fragment {
         pre_insert(req, this, fragment, parent, point)?;
     }
-    Ok(Value::null())
+    Ok(())
 }
 
 /// `dom_child_removal_preconditions`.
@@ -711,35 +709,38 @@ fn removable(req: &mut Request, this: PhpObject, child: Node) -> Result<bool, Th
 }
 
 /// `remove(): void`.
-fn remove(req: &mut Request) -> Result<Value, Thrown> {
-    crate::arity(req, 0, 0)?;
-    let this = this_intern(req)?;
+pub(crate) fn remove(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
+    let this = intern(req, this)?;
     let child = fetch(req, this)?;
     if removable(req, this, child)? {
         invalidate(req, this);
         child.unlink();
     }
-    Ok(Value::null())
+    Ok(())
 }
 
 /// `replaceWith(DOMNode|string ...$nodes): void`.
-fn replace_with(req: &mut Request) -> Result<Value, Thrown> {
-    let this = this_intern(req)?;
-    let list = pieces(req, this)?;
+pub(crate) fn replace_with(
+    req: &mut Request,
+    this: PhpObject,
+    nodes: &[Untyped<Value>],
+) -> Result<(), Thrown> {
+    let this = intern(req, this)?;
+    let list = pieces(req, this, nodes)?;
     let child = fetch(req, this)?;
     let Some(parent) = child.parent() else {
-        return Ok(Value::null());
+        return Ok(());
     };
     let mut next = child.next();
     while let Some(n) = next.filter(|n| in_list(req, &list, *n)) {
         next = n.next();
     }
     if !removable(req, this, child)? {
-        return Ok(Value::null());
+        return Ok(());
     }
     invalidate(req, this);
     let Some(node) = single_node(req, this, parent, &list)? else {
-        return Ok(Value::null());
+        return Ok(());
     };
     if pre_insert_valid(req, this, parent, node, next, parent.doc())? {
         if child.parent() != Some(node) {
@@ -750,17 +751,21 @@ fn replace_with(req: &mut Request) -> Result<Value, Thrown> {
     } else {
         cleanup(node);
     }
-    Ok(Value::null())
+    Ok(())
 }
 
 /// `replaceChildren(DOMNode|string ...$nodes): void`.
-fn replace_children(req: &mut Request) -> Result<Value, Thrown> {
-    let this = this_intern(req)?;
-    let list = pieces(req, this)?;
+pub(crate) fn replace_children(
+    req: &mut Request,
+    this: PhpObject,
+    nodes: &[Untyped<Value>],
+) -> Result<(), Thrown> {
+    let this = intern(req, this)?;
+    let list = pieces(req, this, nodes)?;
     let parent = fetch(req, this)?;
     invalidate(req, this);
     let Some(node) = single_node(req, this, parent, &list)? else {
-        return Ok(Value::null());
+        return Ok(());
     };
     if pre_insert_valid(req, this, parent, node, None, parent.doc())? {
         crate::remove_all_children(parent);
@@ -768,14 +773,64 @@ fn replace_children(req: &mut Request) -> Result<Value, Thrown> {
     } else {
         cleanup(node);
     }
-    Ok(Value::null())
+    Ok(())
 }
 
-/// The natives each class that is a parent or a child lists.
-pub(crate) const APPEND: Entry = append;
-pub(crate) const PREPEND: Entry = prepend;
-pub(crate) const AFTER: Entry = after;
-pub(crate) const BEFORE: Entry = before;
-pub(crate) const REMOVE: Entry = remove;
-pub(crate) const REPLACE_WITH: Entry = replace_with;
-pub(crate) const REPLACE_CHILDREN: Entry = replace_children;
+/// `interface DOMParentNode`: what a document, a fragment and an element
+/// take children through.
+#[php_class(interface)]
+pub(crate) struct DOMParentNode;
+
+#[php_class]
+impl DOMParentNode {
+    fn append(this: This<Self>, nodes: Variadic<Untyped<Value>>);
+    fn prepend(this: This<Self>, nodes: Variadic<Untyped<Value>>);
+    fn replaceChildren(this: This<Self>, nodes: Variadic<Untyped<Value>>);
+}
+
+/// `interface DOMChildNode`: what an element and character data leave or
+/// take siblings through.
+#[php_class(interface)]
+pub(crate) struct DOMChildNode;
+
+#[php_class]
+impl DOMChildNode {
+    fn remove(this: This<Self>);
+    fn before(this: This<Self>, nodes: Variadic<Untyped<Value>>);
+    fn after(this: This<Self>, nodes: Variadic<Untyped<Value>>);
+    fn replaceWith(this: This<Self>, nodes: Variadic<Untyped<Value>>);
+}
+
+/// `interface Dom\ParentNode`, which adds the selectors.
+#[php_class(namespace(Dom), interface)]
+pub(crate) struct ParentNode;
+
+#[php_class]
+impl ParentNode {
+    fn append(this: This<Self>, nodes: Variadic<Union<Instance<crate::modern::Node>, PhpString>>);
+    fn prepend(this: This<Self>, nodes: Variadic<Union<Instance<crate::modern::Node>, PhpString>>);
+    fn replaceChildren(
+        this: This<Self>,
+        nodes: Variadic<Union<Instance<crate::modern::Node>, PhpString>>,
+    );
+    fn querySelector(
+        this: This<Self>,
+        selectors: PhpString,
+    ) -> Option<Instance<crate::element::Element>>;
+    fn querySelectorAll(this: This<Self>, selectors: PhpString) -> Instance<crate::map::NodeList>;
+}
+
+/// `interface Dom\ChildNode`.
+#[php_class(namespace(Dom), interface)]
+pub(crate) struct ChildNode;
+
+#[php_class]
+impl ChildNode {
+    fn remove(this: This<Self>);
+    fn before(this: This<Self>, nodes: Variadic<Union<Instance<crate::modern::Node>, PhpString>>);
+    fn after(this: This<Self>, nodes: Variadic<Union<Instance<crate::modern::Node>, PhpString>>);
+    fn replaceWith(
+        this: This<Self>,
+        nodes: Variadic<Union<Instance<crate::modern::Node>, PhpString>>,
+    );
+}

@@ -84,30 +84,6 @@ final class DOMException extends Exception
      */
     public $code = 0;
 }
-interface DOMParentNode
-{
-    /** @param DOMNode|string $nodes */
-    public function append(...$nodes): void;
-
-    /** @param DOMNode|string $nodes */
-    public function prepend(...$nodes): void;
-
-    /** @param DOMNode|string $nodes */
-    public function replaceChildren(...$nodes): void;
-}
-interface DOMChildNode
-{
-    public function remove(): void;
-
-    /** @param DOMNode|string $nodes */
-    public function before(... $nodes): void;
-
-    /** @param DOMNode|string $nodes */
-    public function after(...$nodes): void;
-
-    /** @param DOMNode|string $nodes */
-    public function replaceWith(...$nodes): void;
-}
 class DOMImplementation
 {
     /** @tentative-return-type */
@@ -387,102 +363,6 @@ class DOMAttr extends DOMNode
     /** @tentative-return-type */
     public function isId(): bool {}
 }
-class DOMElement extends DOMNode implements \DOMParentNode, \DOMChildNode
-{
-    public string $tagName;
-    public string $className;
-    public string $id;
-    public mixed $schemaTypeInfo;
-    public ?DOMElement $firstElementChild;
-    public ?DOMElement $lastElementChild;
-    public int $childElementCount;
-    public ?DOMElement $previousElementSibling;
-    public ?DOMElement $nextElementSibling;
-
-    public function __construct(string $qualifiedName, ?string $value = null, string $namespace = "") {}
-
-    /** @tentative-return-type */
-    public function getAttribute(string $qualifiedName): string {}
-
-    public function getAttributeNames(): array {}
-
-    /** @tentative-return-type */
-    public function getAttributeNS(?string $namespace, string $localName): string {}
-
-    /** @return DOMAttr|DOMNameSpaceNode|false */
-    public function getAttributeNode(string $qualifiedName) {}
-
-    /** @return DOMAttr|DOMNameSpaceNode|null */
-    public function getAttributeNodeNS(?string $namespace, string $localName) {}
-
-    /** @tentative-return-type */
-    public function getElementsByTagName(string $qualifiedName): DOMNodeList {}
-
-    /** @tentative-return-type */
-    public function getElementsByTagNameNS(?string $namespace, string $localName): DOMNodeList {}
-
-    /** @tentative-return-type */
-    public function hasAttribute(string $qualifiedName): bool {}
-
-    /** @tentative-return-type */
-    public function hasAttributeNS(?string $namespace, string $localName): bool {}
-
-    /** @tentative-return-type */
-    public function removeAttribute(string $qualifiedName): bool {}
-
-    /** @tentative-return-type */
-    public function removeAttributeNS(?string $namespace, string $localName): void {}
-
-    /** @return DOMAttr|false */
-    public function removeAttributeNode(DOMAttr $attr) {}
-
-    /** @return DOMAttr|bool */
-    public function setAttribute(string $qualifiedName, string $value) {}
-
-    /** @tentative-return-type */
-    public function setAttributeNS(?string $namespace, string $qualifiedName, string $value): void {}
-
-    /** @return DOMAttr|null|false */
-    public function setAttributeNode(DOMAttr $attr) {}
-
-    /** @return DOMAttr|null|false */
-    public function setAttributeNodeNS(DOMAttr $attr) {}
-
-    /** @tentative-return-type */
-    public function setIdAttribute(string $qualifiedName, bool $isId): void {}
-
-    /** @tentative-return-type */
-    public function setIdAttributeNS(string $namespace, string $qualifiedName, bool $isId): void {}
-
-    /** @tentative-return-type */
-    public function setIdAttributeNode(DOMAttr $attr, bool $isId): void {}
-
-    public function toggleAttribute(string $qualifiedName, ?bool $force = null): bool {}
-
-    public function remove(): void {}
-
-    /** @param DOMNode|string $nodes */
-    public function before(... $nodes): void {}
-
-    /** @param DOMNode|string $nodes */
-    public function after(...$nodes): void {}
-
-    /** @param DOMNode|string $nodes */
-    public function replaceWith(...$nodes): void {}
-
-    /** @param DOMNode|string $nodes */
-    public function append(...$nodes): void {}
-
-    /** @param DOMNode|string $nodes */
-    public function prepend(...$nodes): void {}
-
-    /** @param DOMNode|string $nodes */
-    public function replaceChildren(...$nodes): void {}
-
-    public function insertAdjacentElement(string $where, DOMElement $element): ?DOMElement {}
-
-    public function insertAdjacentText(string $where, string $data): void {}
-}
 class DOMText extends DOMCharacterData
 {
     public string $wholeText;
@@ -592,21 +472,6 @@ class DOMXPath
 const MODERN_STUB: &str = r#"
 namespace Dom
 {
-interface ParentNode
-{
-    public function append(Node|string ...$nodes): void;
-    public function prepend(Node|string ...$nodes): void;
-    public function replaceChildren(Node|string ...$nodes): void;
-    public function querySelector(string $selectors): ?Element;
-    public function querySelectorAll(string $selectors): NodeList;
-}
-interface ChildNode
-{
-    public function remove(): void;
-    public function before(Node|string ...$nodes): void;
-    public function after(Node|string ...$nodes): void;
-    public function replaceWith(Node|string ...$nodes): void;
-}
 /**
  * @strict-properties
  * @not-serializable
@@ -665,97 +530,6 @@ class HTMLCollection implements \IteratorAggregate, \Countable
     public function count(): int {}
     /** @implementation-alias DOMNodeList::getIterator */
     public function getIterator(): \Iterator {}
-}
-enum AdjacentPosition : string
-{
-    case BeforeBegin = "beforebegin";
-    case AfterBegin = "afterbegin";
-    case BeforeEnd = "beforeend";
-    case AfterEnd = "afterend";
-}
-class Element extends Node implements ParentNode, ChildNode
-{
-    public ?string $namespaceURI;
-    public ?string $prefix;
-    public string $localName;
-    public string $tagName;
-    public HTMLCollection $children;
-    public ?Element $firstElementChild;
-    public ?Element $lastElementChild;
-    public int $childElementCount;
-    public ?Element $previousElementSibling;
-    public ?Element $nextElementSibling;
-    public string $id;
-    public string $className;
-    public TokenList $classList;
-    /** @implementation-alias DOMNode::hasAttributes */
-    public function hasAttributes(): bool {}
-    public NamedNodeMap $attributes;
-    /** @implementation-alias DOMElement::getAttributeNames */
-    public function getAttributeNames(): array {}
-    /** @implementation-alias DOMElement::getAttribute */
-    public function getAttribute(string $qualifiedName): ?string {}
-    /** @implementation-alias DOMElement::getAttributeNS */
-    public function getAttributeNS(?string $namespace, string $localName): ?string {}
-    /** @implementation-alias DOMElement::setAttribute */
-    public function setAttribute(string $qualifiedName, string $value): void {}
-    /** @implementation-alias DOMElement::setAttributeNS */
-    public function setAttributeNS(?string $namespace, string $qualifiedName, string $value): void {}
-    public function removeAttribute(string $qualifiedName): void {}
-    /** @implementation-alias DOMElement::removeAttributeNS */
-    public function removeAttributeNS(?string $namespace, string $localName): void {}
-    /** @implementation-alias DOMElement::toggleAttribute */
-    public function toggleAttribute(string $qualifiedName, ?bool $force = null): bool {}
-    /** @implementation-alias DOMElement::hasAttribute */
-    public function hasAttribute(string $qualifiedName): bool {}
-    /** @implementation-alias DOMElement::hasAttributeNS */
-    public function hasAttributeNS(?string $namespace, string $localName): bool {}
-    /** @implementation-alias DOMElement::getAttributeNode */
-    public function getAttributeNode(string $qualifiedName): ?Attr {}
-    /** @implementation-alias DOMElement::getAttributeNodeNS */
-    public function getAttributeNodeNS(?string $namespace, string $localName): ?Attr {}
-    /** @implementation-alias Dom\Element::setAttributeNodeNS */
-    public function setAttributeNode(Attr $attr) : ?Attr {}
-    public function setAttributeNodeNS(Attr $attr) : ?Attr {}
-    public function removeAttributeNode(Attr $attr) : Attr {}
-    public function getElementsByTagName(string $qualifiedName): HTMLCollection {}
-    public function getElementsByTagNameNS(?string $namespace, string $localName): HTMLCollection {}
-    public function getElementsByClassName(string $classNames): HTMLCollection {}
-    public function insertAdjacentElement(AdjacentPosition $where, Element $element): ?Element {}
-    public function insertAdjacentText(AdjacentPosition $where, string $data): void {}
-    public function insertAdjacentHTML(AdjacentPosition $where, string $string): void {}
-    /** @implementation-alias DOMElement::setIdAttribute */
-    public function setIdAttribute(string $qualifiedName, bool $isId): void {}
-    /** @implementation-alias DOMElement::setIdAttributeNS */
-    public function setIdAttributeNS(?string $namespace, string $qualifiedName, bool $isId): void {}
-    public function setIdAttributeNode(Attr $attr, bool $isId): void {}
-    /** @implementation-alias DOMElement::remove */
-    public function remove(): void {}
-    /** @implementation-alias DOMElement::before */
-    public function before(Node|string ...$nodes): void {}
-    /** @implementation-alias DOMElement::after */
-    public function after(Node|string ...$nodes): void {}
-    /** @implementation-alias DOMElement::replaceWith */
-    public function replaceWith(Node|string ...$nodes): void {}
-    /** @implementation-alias DOMElement::append */
-    public function append(Node|string ...$nodes): void {}
-    /** @implementation-alias DOMElement::prepend */
-    public function prepend(Node|string ...$nodes): void {}
-    /** @implementation-alias DOMElement::replaceChildren */
-    public function replaceChildren(Node|string ...$nodes): void {}
-    public function querySelector(string $selectors): ?Element {}
-    public function querySelectorAll(string $selectors): NodeList {}
-    public function closest(string $selectors): ?Element {}
-    public function matches(string $selectors): bool {}
-    public string $innerHTML;
-    public string $outerHTML;
-    public string $substitutedNodeValue;
-    public function getInScopeNamespaces(): array {}
-    public function getDescendantNamespaces(): array {}
-    public function rename(?string $namespaceURI, string $qualifiedName): void {}
-}
-class HTMLElement extends Element
-{
 }
 class Attr extends Node
 {
@@ -1060,33 +834,7 @@ const MINIT_ORDER: [&str; 50] = [
 /// )
 /// ```
 pub fn extension() -> Extension {
-    let entries: Vec<(&str, Entry)> = [
-        token_list::METHODS,
-        document::METHODS,
-        element::METHODS,
-        classes::METHODS,
-        map::METHODS,
-        xpath::METHODS,
-        modern::METHODS,
-        xml_serializer::METHODS,
-        html5_serializer::METHODS,
-        inner_html::METHODS,
-        html5_parser::METHODS,
-        css::METHODS,
-    ]
-    .iter()
-    .flat_map(|m| m.iter().copied())
-    .chain([
-        (
-            "DOMNode::hasAttributes",
-            node::DOMNode::__php_entry_hasAttributes as Entry,
-        ),
-        (
-            "Dom\\Node::__construct",
-            modern::Node::__php_entry___construct as Entry,
-        ),
-    ])
-    .collect();
+    let entries = entries();
     let mut builder = ExtensionBuilder::default()
         .functions(vec![
             (
@@ -1112,6 +860,14 @@ pub fn extension() -> Extension {
             "DOMNameSpaceNode" => builder.class::<node::DOMNameSpaceNode>(),
             "Dom\\Node" => builder.class::<modern::Node>(),
             "Dom\\NamespaceInfo" => builder.class::<modern::NamespaceInfo>(),
+            "DOMParentNode" => builder.class::<parent::DOMParentNode>(),
+            "Dom\\ParentNode" => builder.class::<parent::ParentNode>(),
+            "DOMChildNode" => builder.class::<parent::DOMChildNode>(),
+            "Dom\\ChildNode" => builder.class::<parent::ChildNode>(),
+            "Dom\\AdjacentPosition" => builder.class::<element::AdjacentPosition>(),
+            "DOMElement" => builder.class::<element::DOMElement>(),
+            "Dom\\Element" => builder.class::<element::Element>(),
+            "Dom\\HTMLElement" => builder.class::<element::HTMLElement>(),
             _ => builder,
         };
         let Some(at) = declared
@@ -1152,6 +908,99 @@ pub fn extension() -> Extension {
         .rinit(register_alias)
         .info(dom_info)
         .build("dom")
+}
+
+/// The entries the stub reader's classes name, `Class::method` to entry,
+/// until each class is declared by the attributes.
+fn entries() -> Vec<(&'static str, Entry)> {
+    [
+        token_list::METHODS,
+        document::METHODS,
+        classes::METHODS,
+        map::METHODS,
+        xpath::METHODS,
+        modern::METHODS,
+        xml_serializer::METHODS,
+        html5_serializer::METHODS,
+        html5_parser::METHODS,
+    ]
+    .iter()
+    .flat_map(|m| m.iter().copied())
+    .chain([
+        (
+            "DOMNode::hasAttributes",
+            node::DOMNode::__php_entry_hasAttributes as Entry,
+        ),
+        (
+            "Dom\\Node::__construct",
+            modern::Node::__php_entry___construct as Entry,
+        ),
+        (
+            "DOMElement::append",
+            element::DOMElement::__php_entry_append as Entry,
+        ),
+        (
+            "DOMElement::prepend",
+            element::DOMElement::__php_entry_prepend as Entry,
+        ),
+        (
+            "DOMElement::replaceChildren",
+            element::DOMElement::__php_entry_replaceChildren as Entry,
+        ),
+        (
+            "DOMDocument::replaceChildren",
+            element::DOMElement::__php_entry_replaceChildren as Entry,
+        ),
+        (
+            "DOMElement::remove",
+            element::DOMElement::__php_entry_remove as Entry,
+        ),
+        (
+            "DOMElement::before",
+            element::DOMElement::__php_entry_before as Entry,
+        ),
+        (
+            "DOMElement::after",
+            element::DOMElement::__php_entry_after as Entry,
+        ),
+        (
+            "DOMElement::replaceWith",
+            element::DOMElement::__php_entry_replaceWith as Entry,
+        ),
+        (
+            "DOMElement::getElementsByTagName",
+            element::DOMElement::__php_entry_getElementsByTagName as Entry,
+        ),
+        (
+            "DOMElement::getElementsByTagNameNS",
+            element::DOMElement::__php_entry_getElementsByTagNameNS as Entry,
+        ),
+        (
+            "Dom\\Element::getElementsByTagName",
+            element::Element::__php_entry_getElementsByTagName as Entry,
+        ),
+        (
+            "Dom\\Element::getElementsByTagNameNS",
+            element::Element::__php_entry_getElementsByTagNameNS as Entry,
+        ),
+        (
+            "Dom\\Element::getElementsByClassName",
+            element::Element::__php_entry_getElementsByClassName as Entry,
+        ),
+        (
+            "Dom\\Element::querySelector",
+            element::Element::__php_entry_querySelector as Entry,
+        ),
+        (
+            "Dom\\Element::querySelectorAll",
+            element::Element::__php_entry_querySelectorAll as Entry,
+        ),
+        (
+            "Dom\\Element::rename",
+            element::Element::__php_entry_rename as Entry,
+        ),
+    ])
+    .collect()
 }
 
 /// `zend_register_class_alias("Dom\\DOMException", ...)` of
@@ -1521,6 +1370,12 @@ fn this_node(req: &mut Request) -> Result<(PhpObject, Node), Thrown> {
 /// payload stands for nothing.
 fn this_intern(req: &mut Request) -> Result<PhpObject, Thrown> {
     let this = this(req)?;
+    intern(req, this)
+}
+
+/// `DOM_GET_INTERN` of the receiver: php's "Couldn't fetch" where its
+/// payload stands for nothing.
+fn intern(req: &mut Request, this: PhpObject) -> Result<PhpObject, Thrown> {
     let bound = dom(req, this).is_some_and(|d| d.obj.is_bound() || !matches!(d.extra, Extra::None));
     if bound {
         return Ok(this);

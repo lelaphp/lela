@@ -2,6 +2,7 @@
 //! switches, the node factories, loading and saving through libxml2, and
 //! validation.
 
+use php_ext::abi::Path;
 use php_ext::attr::php_class;
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw};
 use php_ext::request::Request;
@@ -1295,42 +1296,6 @@ fn legacy_attribute_ns(
     Ok(node)
 }
 
-/// `DOMDocument::getElementsByTagName(string $qualifiedName): DOMNodeList`,
-/// shared with `DOMElement`.
-///
-/// ```php
-/// $d = new DOMDocument;
-/// $d->loadXML('<r xmlns:p="urn:p"><a/><p:a/><b><a/></b></r>');
-/// var_dump($d->getElementsByTagName('a')->length, $d->getElementsByTagName('*')->length, $d->getElementsByTagNameNS('urn:p', '*')->length, $d->getElementsByTagNameNS(null, 'a')->length, $d->documentElement->getElementsByTagName('a')->item(2)->parentNode->nodeName);
-/// ```
-/// ```expect
-/// int(3)
-/// int(5)
-/// int(1)
-/// int(2)
-/// string(1) "b"
-/// ```
-fn get_elements_by_tag_name(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 1, 1)?;
-    let name = path_arg(req, 1)?;
-    let this = crate::this_intern(req)?;
-    crate::create(
-        req,
-        this,
-        "DOMNodeList",
-        MapKind::ByTagName {
-            local: name,
-            ns: None,
-            qname: false,
-        },
-    )
-}
-
-/// `getElementsByTagNameNS(?string $namespace, string $localName): DOMNodeList`.
-fn get_elements_by_tag_name_ns(req: &mut Request) -> Result<Value, Thrown> {
-    elements_by_tag_name_ns(req, "DOMNodeList")
-}
-
 /// `dom_element_get_elements_by_tag_name_ns`: a list of `class` over the
 /// elements of one namespace and local name, `null` for no namespace.
 ///
@@ -1351,21 +1316,23 @@ fn get_elements_by_tag_name_ns(req: &mut Request) -> Result<Value, Thrown> {
 /// int(2)
 /// DOMDocument::getElementsByTagNameNS(): Argument #1 ($namespace) must not contain any null bytes
 /// ```
-pub(crate) fn elements_by_tag_name_ns(req: &mut Request, class: &str) -> Result<Value, Thrown> {
-    arity(req, 2, 2)?;
-    // `Z_PARAM_PATH_OR_NULL`, then `Z_PARAM_PATH`.
-    let ns = nullable_bytes_arg(req, 1)?.unwrap_or_default();
-    if ns.contains(&0) {
-        return Err(arg_value_error(req, 1, "not contain any null bytes"));
-    }
-    let name = path_arg(req, 2)?;
-    let this = crate::this_intern(req)?;
+pub(crate) fn elements_by_tag_name_ns(
+    req: &mut Request,
+    this: PhpObject,
+    namespace: Option<Path>,
+    local_name: Path,
+    class: &str,
+) -> Result<Value, Thrown> {
+    let ns = namespace
+        .map(|n| n.0.as_bytes().to_vec())
+        .unwrap_or_default();
+    let this = crate::intern(req, this)?;
     crate::create(
         req,
         this,
         class,
         MapKind::ByTagName {
-            local: name,
+            local: local_name.0.as_bytes().to_vec(),
             ns: Some(ns),
             qname: false,
         },
@@ -2038,14 +2005,6 @@ pub(crate) const METHODS: &[(&str, Entry)] = &[
     ),
     ("DOMDocument::createTextNode", create_text_node),
     ("DOMDocument::getElementById", get_element_by_id),
-    (
-        "DOMDocument::getElementsByTagName",
-        GET_ELEMENTS_BY_TAG_NAME,
-    ),
-    (
-        "DOMDocument::getElementsByTagNameNS",
-        GET_ELEMENTS_BY_TAG_NAME_NS,
-    ),
     ("DOMDocument::importNode", import_node),
     ("DOMDocument::load", load),
     ("DOMDocument::loadXML", load_xml),
@@ -2067,12 +2026,6 @@ pub(crate) const METHODS: &[(&str, Entry)] = &[
     ("DOMDocument::validate", validate),
     ("DOMDocument::xinclude", xinclude),
     ("DOMDocument::adoptNode", adopt_node),
-    ("DOMDocument::append", crate::parent::APPEND),
-    ("DOMDocument::prepend", crate::parent::PREPEND),
-    (
-        "DOMDocument::replaceChildren",
-        crate::parent::REPLACE_CHILDREN,
-    ),
     ("Dom\\Document::createElement", create_element_modern),
     ("Dom\\Document::createElementNS", create_element_ns_modern),
     (
@@ -2088,11 +2041,6 @@ pub(crate) const METHODS: &[(&str, Entry)] = &[
     ),
     ("Dom\\XMLDocument::xinclude", xinclude_modern),
 ];
-
-/// `getElementsByTagName`, which `DOMElement` lists too.
-pub(crate) const GET_ELEMENTS_BY_TAG_NAME: Entry = get_elements_by_tag_name;
-/// `getElementsByTagNameNS`, which `DOMElement` lists too.
-pub(crate) const GET_ELEMENTS_BY_TAG_NAME_NS: Entry = get_elements_by_tag_name_ns;
 
 /// `DOMDocument`, named for the types that hold it until its header is
 /// declared here.

@@ -913,3 +913,9 @@ pub(crate) struct DOMNamedNodeMap;
 
 #[php_class(extern, namespace(Dom))]
 pub(crate) struct NodeList;
+
+#[php_class(extern, namespace(Dom))]
+pub(crate) struct NamedNodeMap;
+
+#[php_class(extern, namespace(Dom))]
+pub(crate) struct HTMLCollection;
