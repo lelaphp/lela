@@ -20,15 +20,15 @@
 //! `zend_user_it_*` fallback serves it, so the order of the calls a
 //! program sees is the same.
 
-use php_unit::decl::{
-    ClassDecl, ClassFlags, ClassKind, EnumBacking, FunctionDecl, MethodDecl, Name, Parameter,
-    ParameterDefault, Type, Visibility,
-};
+use php_macros::php_class;
+use php_unit::decl::{ClassDecl, ClassFlags, ClassKind, EnumBacking, Name};
 
-use crate::api::abi::{CurrentPlace, Entry, NativeClassDecl, ObjectHandlers};
+use crate::api::abi::{
+    CurrentPlace, ExtensionBuilder, Instance, NativeClassDecl, ObjectHandlers, This, Untyped,
+};
 use crate::api::raising::{Thrown, throw};
 use crate::api::request::Request;
-use crate::api::values::{ClassId, PhpObject, Value};
+use crate::api::values::{ClassId, PhpObject, PhpString, Value};
 
 /// The five interfaces in `zend_register_interfaces`' order.
 ///
@@ -88,105 +88,75 @@ use crate::api::values::{ClassId, PhpObject, Value};
 /// bool(true)
 /// ```
 pub(crate) fn classes() -> Vec<NativeClassDecl> {
-    let tentative = |name: &[u8], parameters: Vec<Parameter>, returns: Option<Type>| MethodDecl {
-        tentative_return: returns.is_some(),
-        ..abstract_method(name, parameters, returns)
-    };
-    let data = Parameter {
-        name: Name(b"data".as_slice().into()),
-        ty: Some(Type::String),
-        by_ref: false,
-        prefer_ref: false,
-        promoted: false,
-        variadic: false,
-        default: ParameterDefault::None,
-        attributes: Vec::new(),
-    };
-    [
-        interface(b"Traversable", &[], Vec::new()),
-        interface(
-            b"IteratorAggregate",
-            &[b"Traversable"],
-            vec![tentative(
-                b"getIterator",
-                Vec::new(),
-                Some(Type::Named(Name(b"Traversable".as_slice().into()))),
-            )],
-        ),
-        interface(
-            b"Iterator",
-            &[b"Traversable"],
-            vec![
-                tentative(b"current", Vec::new(), Some(Type::Mixed)),
-                tentative(b"next", Vec::new(), Some(Type::Void)),
-                tentative(b"key", Vec::new(), Some(Type::Mixed)),
-                tentative(b"valid", Vec::new(), Some(Type::Bool)),
-                tentative(b"rewind", Vec::new(), Some(Type::Void)),
-            ],
-        ),
-        interface(
-            b"Serializable",
-            &[],
-            vec![
-                abstract_method(b"serialize", Vec::new(), None),
-                abstract_method(b"unserialize", vec![data], None),
-            ],
-        ),
-        interface(
-            b"Countable",
-            &[],
-            vec![tentative(b"count", Vec::new(), Some(Type::Int))],
-        ),
-    ]
-    .into_iter()
-    .map(|decl| (decl, Vec::new(), None, None))
-    .chain(std::iter::once(internal_iterator_class()))
-    .chain(std::iter::once(iterator_wrapper_class()))
-    .collect()
+    let mut classes = ExtensionBuilder::default()
+        .class::<Traversable>()
+        .class::<IteratorAggregate>()
+        .class::<Iterator>()
+        .class::<Serializable>()
+        .class::<Countable>()
+        .class::<InternalIterator>()
+        .build("Core")
+        .classes;
+    classes.push(iterator_wrapper_class());
+    classes
 }
 
-fn interface(name: &[u8], extends: &[&[u8]], methods: Vec<MethodDecl>) -> ClassDecl {
-    ClassDecl {
-        name: Name(name.into()),
-        kind: ClassKind::Interface,
-        flags: ClassFlags::default(),
-        parent: None,
-        interfaces: extends.iter().map(|i| Name((*i).into())).collect(),
-        traits: Vec::new(),
-        adaptations: Vec::new(),
-        backing: EnumBacking::Pure,
-        constants: Vec::new(),
-        properties: Vec::new(),
-        methods,
-        attributes: Vec::new(),
-        doc_comment: None,
-        file: Name(Box::new([])),
-        line: 0,
-        end_line: 0,
-    }
+/// `interface Traversable`, which a user class cannot implement alone.
+#[php_class(interface)]
+pub(crate) struct Traversable;
+
+#[php_class]
+impl Traversable {}
+
+/// `interface IteratorAggregate extends Traversable`, its one method's
+/// return tentative (`@tentative-return-type`), as every method of the
+/// stub's interfaces here is where it declares a type.
+#[php_class(interface, extends(Traversable))]
+pub(crate) struct IteratorAggregate;
+
+#[php_class]
+impl IteratorAggregate {
+    #[php(tentative)]
+    fn getIterator(this: This<Self>) -> Instance<Traversable>;
 }
 
-fn abstract_method(name: &[u8], parameters: Vec<Parameter>, returns: Option<Type>) -> MethodDecl {
-    MethodDecl {
-        function: FunctionDecl {
-            name: Name(name.into()),
-            parameters,
-            return_type: returns,
-            returns_by_ref: false,
-            is_generator: false,
-            attributes: Vec::new(),
-            doc_comment: None,
-            file: Name(Box::new([])),
-            line: 0,
-            end_line: 0,
-            frameless: Vec::new(),
-        },
-        visibility: Visibility::Public,
-        is_instance: true,
-        is_abstract: true,
-        is_final: false,
-        tentative_return: false,
-    }
+/// `interface Iterator extends Traversable`, its five methods in the
+/// stub's order.
+#[php_class(interface, extends(Traversable))]
+pub(crate) struct Iterator;
+
+#[php_class]
+impl Iterator {
+    #[php(tentative)]
+    fn current(this: This<Self>) -> Value;
+    #[php(tentative)]
+    fn next(this: This<Self>);
+    #[php(tentative)]
+    fn key(this: This<Self>) -> Value;
+    #[php(tentative)]
+    fn valid(this: This<Self>) -> bool;
+    #[php(tentative)]
+    fn rewind(this: This<Self>);
+}
+
+/// `interface Serializable`, whose two methods the stub leaves untyped.
+#[php_class(interface)]
+pub(crate) struct Serializable;
+
+#[php_class]
+impl Serializable {
+    fn serialize(this: This<Self>) -> Untyped<Value>;
+    fn unserialize(this: This<Self>, data: PhpString) -> Untyped<Value>;
+}
+
+/// `interface Countable`.
+#[php_class(interface)]
+pub(crate) struct Countable;
+
+#[php_class]
+impl Countable {
+    #[php(tentative)]
+    fn count(this: This<Self>) -> i64;
 }
 
 /// Whether `class` is `Traversable`, php's `ce->get_iterator` being set:
@@ -469,9 +439,27 @@ impl ObjectHandlers for WrapperHandlers {
 /// `zend_register_iterator_wrapper`'s class: final, of no member, its
 /// objects carrying an [`ObjectIterator`].
 fn iterator_wrapper_class() -> NativeClassDecl {
-    let mut decl = interface(ITERATOR_WRAPPER, &[], Vec::new());
-    decl.kind = ClassKind::Class;
-    decl.flags.is_final = true;
+    let decl = ClassDecl {
+        name: Name(ITERATOR_WRAPPER.into()),
+        kind: ClassKind::Class,
+        flags: ClassFlags {
+            is_final: true,
+            ..ClassFlags::default()
+        },
+        parent: None,
+        interfaces: Vec::new(),
+        traits: Vec::new(),
+        adaptations: Vec::new(),
+        backing: EnumBacking::Pure,
+        constants: Vec::new(),
+        properties: Vec::new(),
+        methods: Vec::new(),
+        attributes: Vec::new(),
+        doc_comment: None,
+        file: Name(Box::new([])),
+        line: 0,
+        end_line: 0,
+    };
     (
         decl,
         Vec::new(),
@@ -761,7 +749,7 @@ pub(crate) fn rewind(req: &mut Request, wrapper: PhpObject) -> Result<(), Thrown
 /// rewind the walk stands, and whether it was rewound, php's
 /// `rewind_called`.
 #[derive(Default)]
-struct Internal {
+pub(crate) struct Internal {
     object: Option<PhpObject>,
     index: usize,
 }
@@ -794,7 +782,8 @@ impl ObjectHandlers for InternalHandlers {
 }
 
 /// `final class InternalIterator implements Iterator` as
-/// `zend_interfaces.stub.php` declares it, its constructor private.
+/// `zend_interfaces.stub.php` declares it, `@not-serializable`, its
+/// constructor private, its objects carrying an [`Internal`].
 ///
 /// ```php
 /// $f = SplFixedArray::fromArray(['a', 'b']);
@@ -812,36 +801,76 @@ impl ObjectHandlers for InternalHandlers {
 /// bool(true)
 /// bool(false)
 /// ```
-fn internal_iterator_class() -> NativeClassDecl {
-    let method = |name: &[u8], returns: Option<Type>| MethodDecl {
-        is_abstract: false,
-        ..abstract_method(name, Vec::new(), returns)
-    };
-    let mut decl = interface(b"InternalIterator", &[], Vec::new());
-    decl.kind = ClassKind::Class;
-    decl.flags.is_final = true;
-    decl.flags.not_serializable = true;
-    decl.interfaces = vec![Name(b"Iterator".as_slice().into())];
-    let methods: Vec<(MethodDecl, Entry)> = vec![
-        (
-            MethodDecl {
-                visibility: Visibility::Private,
-                ..method(b"__construct", None)
-            },
-            internal_construct as Entry,
-        ),
-        (method(b"current", Some(Type::Mixed)), internal_current),
-        (method(b"key", Some(Type::Mixed)), internal_key),
-        (method(b"next", Some(Type::Void)), internal_next),
-        (method(b"valid", Some(Type::Bool)), internal_valid),
-        (method(b"rewind", Some(Type::Void)), internal_rewind),
-    ];
-    (
-        decl,
-        methods,
-        Some(&INTERNAL),
-        Some(crate::api::abi::new_payload::<Internal>()),
-    )
+#[php_class(final, not_serializable, implements(Iterator), payload = Internal, handlers = INTERNAL)]
+pub(crate) struct InternalIterator;
+
+#[php_class]
+impl InternalIterator {
+    /// `InternalIterator::__construct`: php's `Error`.
+    ///
+    /// ```php
+    /// try { (new ReflectionMethod('InternalIterator', '__construct'))->invoke(SplFixedArray::fromArray([1])->getIterator()); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Cannot manually construct InternalIterator
+    /// ```
+    #[php(private)]
+    fn __construct(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
+        let _ = this;
+        Err(throw(
+            req,
+            "Error",
+            "Cannot manually construct InternalIterator",
+        ))
+    }
+
+    /// `InternalIterator::current(): mixed`.
+    fn current(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+        Ok(match internal_element(req, this.object())? {
+            Some((key, value)) => {
+                req.release(key);
+                value
+            }
+            None => Value::null(),
+        })
+    }
+
+    /// `InternalIterator::key(): mixed`.
+    fn key(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+        Ok(match internal_element(req, this.object())? {
+            Some((key, value)) => {
+                req.release(value);
+                key
+            }
+            None => Value::null(),
+        })
+    }
+
+    /// `InternalIterator::next(): void`.
+    fn next(req: &mut Request, this: This<Self>) {
+        if let Some(it) = this.object().native_mut::<Internal>(req) {
+            it.index += 1;
+        }
+    }
+
+    /// `InternalIterator::valid(): bool`.
+    fn valid(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        Ok(match internal_element(req, this.object())? {
+            Some((key, value)) => {
+                req.release(key);
+                req.release(value);
+                true
+            }
+            None => false,
+        })
+    }
+
+    /// `InternalIterator::rewind(): void`.
+    fn rewind(req: &mut Request, this: This<Self>) {
+        if let Some(it) = this.object().native_mut::<Internal>(req) {
+            it.index = 0;
+        }
+    }
 }
 
 /// The object an `InternalIterator` walks, none for any other object.
@@ -865,21 +894,9 @@ pub(crate) fn internal_iterator(req: &mut Request, object: PhpObject) -> Result<
     Ok(iterator)
 }
 
-/// `InternalIterator::__construct`: php's `Error`.
-fn internal_construct(req: &mut Request) -> Result<Value, Thrown> {
-    Err(throw(
-        req,
-        "Error",
-        "Cannot manually construct InternalIterator",
-    ))
-}
-
 /// The element the iterator stands at, through the walked object's
 /// class's `iterator_element`.
-fn internal_element(req: &mut Request) -> Result<Option<(Value, Value)>, Thrown> {
-    let Some(this) = req.this() else {
-        return Ok(None);
-    };
+fn internal_element(req: &mut Request, this: PhpObject) -> Result<Option<(Value, Value)>, Thrown> {
     let Some((object, index)) = this
         .native::<Internal>(req)
         .and_then(|it| it.object.map(|o| (o, it.index)))
@@ -892,62 +909,4 @@ fn internal_element(req: &mut Request) -> Result<Option<(Value, Value)>, Thrown>
     };
     let table = req.object_handlers(object.heap());
     table.iterator_element(req, object, index)
-}
-
-/// `InternalIterator::current(): mixed`.
-fn internal_current(req: &mut Request) -> Result<Value, Thrown> {
-    Ok(match internal_element(req)? {
-        Some((key, value)) => {
-            req.release(key);
-            value
-        }
-        None => Value::null(),
-    })
-}
-
-/// `InternalIterator::key(): mixed`.
-fn internal_key(req: &mut Request) -> Result<Value, Thrown> {
-    Ok(match internal_element(req)? {
-        Some((key, value)) => {
-            req.release(value);
-            key
-        }
-        None => Value::null(),
-    })
-}
-
-/// `InternalIterator::next(): void`.
-// An entry's shape, which cannot fail here.
-#[allow(clippy::unnecessary_wraps)]
-fn internal_next(req: &mut Request) -> Result<Value, Thrown> {
-    if let Some(this) = req.this()
-        && let Some(it) = this.native_mut::<Internal>(req)
-    {
-        it.index += 1;
-    }
-    Ok(Value::null())
-}
-
-/// `InternalIterator::valid(): bool`.
-fn internal_valid(req: &mut Request) -> Result<Value, Thrown> {
-    Ok(Value::bool(match internal_element(req)? {
-        Some((key, value)) => {
-            req.release(key);
-            req.release(value);
-            true
-        }
-        None => false,
-    }))
-}
-
-/// `InternalIterator::rewind(): void`.
-// An entry's shape, which cannot fail here.
-#[allow(clippy::unnecessary_wraps)]
-fn internal_rewind(req: &mut Request) -> Result<Value, Thrown> {
-    if let Some(this) = req.this()
-        && let Some(it) = this.native_mut::<Internal>(req)
-    {
-        it.index = 0;
-    }
-    Ok(Value::null())
 }
