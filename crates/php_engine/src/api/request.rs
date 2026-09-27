@@ -3471,16 +3471,60 @@ impl Request {
     /// `zend_check_protected` relates to it. A function that is no
     /// method, and one the tables have no declaration for, is anyone's.
     pub(crate) fn method_accessible(&self, function: Function) -> bool {
-        let Some(class) = self.method_class(function) else {
-            return true;
-        };
-        let scope = self.executed_scope();
-        match self.method_visibility(function) {
-            Visibility::Public => true,
-            _ if scope == Some(class) => true,
-            Visibility::Private => false,
-            Visibility::Protected => self.check_protected(class, scope),
+        self.method_accessible_from(function, self.executed_scope())
+    }
+
+    /// `zend_get_function_root_class`: the class of the method's
+    /// `common.prototype` where it has one, the method's own class
+    /// otherwise, which is what a protected method is reached through. A
+    /// method overriding one a parent declares public or protected, or
+    /// abstract, has the parent's for its prototype, or the one that
+    /// method has (`do_inheritance_check_on_method`); a constructor has
+    /// one only where the prototype it would take is abstract.
+    ///
+    /// ```php
+    /// abstract class Base { abstract protected function __clone(); abstract protected function m(); }
+    /// class Boy extends Base { protected function __clone() { echo "Boy::__clone\n"; } protected function m() { echo "Boy::m\n"; } }
+    /// class Kid extends Base {
+    ///     public function __construct() { $b = new Boy; $b = clone $b; $b->m(); }
+    ///     public function __clone() {} protected function m() {}
+    /// }
+    /// new Kid;
+    /// ```
+    /// ```expect
+    /// Boy::__clone
+    /// Boy::m
+    /// ```
+    fn function_root_class(&self, function: Function) -> Option<ClassId> {
+        let class = self.method_class(function)?;
+        let lowered = self.declared_name(function).to_ascii_lowercase();
+        let mut root = class;
+        let mut root_abstract = self.method_decl(function).is_some_and(|m| m.is_abstract);
+        for _ in 0..64 {
+            let Some(overridden) = self
+                .class_parent(root)
+                .and_then(|parent| self.method_named(parent, lowered.as_bytes()))
+            else {
+                break;
+            };
+            let Some(decl) = self.method_decl(overridden) else {
+                break;
+            };
+            // "The parent method is private and not an abstract": no
+            // prototype.
+            if decl.visibility == Visibility::Private && !decl.is_abstract {
+                break;
+            }
+            let Some(declaring) = self.method_class(overridden) else {
+                break;
+            };
+            root = declaring;
+            root_abstract = decl.is_abstract;
         }
+        if lowered == "__construct" && !root_abstract {
+            return Some(class);
+        }
+        Some(root)
     }
 
     /// `fn_flags & (ZEND_ACC_PUBLIC|ZEND_ACC_PROTECTED|ZEND_ACC_PRIVATE)`:
@@ -11757,8 +11801,11 @@ impl Request {
         };
         match self.method_visibility(function) {
             Visibility::Public => true,
-            Visibility::Private => scope == Some(class),
-            Visibility::Protected => self.check_protected(class, scope),
+            _ if scope == Some(class) => true,
+            Visibility::Private => false,
+            Visibility::Protected => {
+                self.check_protected(self.function_root_class(function).unwrap_or(class), scope)
+            }
         }
     }
 
