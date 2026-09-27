@@ -610,6 +610,7 @@ values::ClosureInfo
 values::Key
 values::Key::from_string
 values::Key::to_prop_name
+values::Layout
 values::Laziness
 values::PhpArray
 values::PhpArray::append

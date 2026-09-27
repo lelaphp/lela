@@ -17,7 +17,7 @@ use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, deprecated, docref, throw, warning,
 };
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Layout, PhpArray, PhpString, Value, ValueRef};
 
 use super::sort::key_value;
 use super::{copied, key_copy, returned};
@@ -603,12 +603,12 @@ fn array_fill(
     }
     // `array_init_size`: packed from zero for a start inside the count,
     // `start + count` slots, and a hash of `count` otherwise.
-    let size = if (0..count).contains(&start) {
-        start + count
+    let (size, layout) = if (0..count).contains(&start) {
+        (start + count, Layout::Packed)
     } else {
-        count
+        (count, Layout::Hash)
     };
-    let mut out = PhpArray::sized(req, u32::try_from(size).unwrap_or(u32::MAX))?;
+    let mut out = PhpArray::sized(req, u32::try_from(size).unwrap_or(u32::MAX), layout)?;
     for at in 0..count {
         req.addref(&value);
         out.set(req, Key::Int(start + at), value)?;
