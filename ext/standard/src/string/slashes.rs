@@ -6,8 +6,8 @@ use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::PhpString;
 
+use super::charmask;
 use super::str_copy;
-use crate::charmask;
 
 /// `addslashes(string $string): string`, `php_addslashes`: a backslash
 /// before `'`, `"` and `\`, and a NUL as `\0`.

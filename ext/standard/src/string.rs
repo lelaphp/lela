@@ -1,9 +1,10 @@
-//! `Z/ext/standard/string.c`: the string natives the crate root does
-//! not already declare, in the order `basic_functions.stub.php` gives
-//! them, each over php's own algorithm. The crate root keeps the eight
-//! it declared first (`trim`, `str_contains`, `substr`, `strtoupper`,
-//! `strtolower`, `str_pad`, `str_repeat`, `ord` and `chr`); the rest of
-//! the file is here and in its children: the searches in `find`, the
+//! `Z/ext/standard/string.c`: its natives, each declared by
+//! `#[php_function]` over php's own algorithm, the nine the crate root
+//! registers first (`ord`, `chr`, `str_repeat`, then `trim`,
+//! `str_contains`, `substr` with their frameless entries, `strtoupper`,
+//! `strtolower` and `str_pad`) and the rest in the order
+//! `basic_functions.stub.php` gives them. They are here and in this
+//! file's children: the searches in `find`, the
 //! path natives in `path`, the replacements in `replace`, the escapes in
 //! `slashes`, `strip_tags`'s state machine in `strip_tags`, the locale
 //! natives in `locale` and `parse_str` in `parse_str`. The C locale is
@@ -139,14 +140,745 @@ pub(crate) mod constants {
     pub(crate) const PATHINFO_ALL: i64 = 15;
 }
 
-use crate::charmask;
-
 /// `RETURN_STR_COPY(str)`: the argument's own string handed back, one
 /// more reference to it.
 pub(crate) fn str_copy(req: &mut Request, string: PhpString) -> PhpString {
     req.addref(&Value::string(string));
     string
 }
+
+/// `ord(string $character): int`, php's `PHP_FUNCTION(ord)`
+/// (`Z/ext/standard/string.c:2650`): the first byte of the string, with
+/// the 8.5 deprecation for a string that is not one byte long, and the
+/// terminator's zero for the empty string behind its own. A one-byte
+/// string written as such never reaches here, since the compiler folds
+/// it (`zend_compile_func_ord`); what does is any other argument, read
+/// as `Z_PARAM_STR` reads it.
+///
+/// ```php
+/// var_dump(ord("ab"), ord(""), ord(65), ord("a" . extension_loaded('Core')));
+/// ```
+/// ```expect
+/// Deprecated: ord(): Providing a string that is not one byte long is deprecated. Use ord($str[0]) instead in %s on line 2
+///
+/// Deprecated: ord(): Providing an empty string is deprecated in %s on line 2
+///
+/// Deprecated: ord(): Providing a string that is not one byte long is deprecated. Use ord($str[0]) instead in %s on line 2
+///
+/// Deprecated: ord(): Providing a string that is not one byte long is deprecated. Use ord($str[0]) instead in %s on line 2
+/// int(97)
+/// int(0)
+/// int(54)
+/// int(97)
+/// ```
+#[php_function]
+fn ord(req: &mut Request, character: PhpString) -> i64 {
+    let string = character;
+    let bytes = string.as_bytes();
+    if bytes.len() != 1 {
+        let what = if bytes.is_empty() {
+            "Providing an empty string is deprecated"
+        } else {
+            "Providing a string that is not one byte long is deprecated. Use ord($str[0]) instead"
+        };
+        docref(req, Level::Deprecated, what);
+    }
+    i64::from(bytes.first().copied().unwrap_or(0))
+}
+
+/// `chr(int $codepoint): string`, php's `PHP_FUNCTION(chr)`
+/// (`Z/ext/standard/string.c:2673`): the one-byte string of the long's
+/// low byte, with the 8.5 deprecation for a value outside 0 to 255. A
+/// long in that range written as such never reaches here, since the
+/// compiler folds it (`zend_compile_func_chr`); what does is any other
+/// argument, read as `Z_PARAM_LONG` reads it. The byte of `chr(null)` is
+/// read back through `ord`, since a NUL is no byte a fence pins.
+///
+/// ```php
+/// var_dump(chr(256 + 65), chr(-191), chr(1 + 64), chr("65"), ord(chr(null)));
+/// ```
+/// ```expect
+/// Deprecated: chr(): Providing a value not in-between 0 and 255 is deprecated, this is because a byte value must be in the [0, 255] interval. The value used will be constrained using % 256 in %s on line 2
+///
+/// Deprecated: chr(): Providing a value not in-between 0 and 255 is deprecated, this is because a byte value must be in the [0, 255] interval. The value used will be constrained using % 256 in %s on line 2
+///
+/// Deprecated: chr(): Passing null to parameter #1 ($codepoint) of type int is deprecated in %s on line 2
+/// string(1) "A"
+/// string(1) "A"
+/// string(1) "A"
+/// string(1) "A"
+/// int(0)
+/// ```
+#[php_function]
+fn chr(req: &mut Request, codepoint: i64) -> Result<PhpString, Thrown> {
+    if !(0..=255).contains(&codepoint) {
+        docref(
+            req,
+            Level::Deprecated,
+            "Providing a value not in-between 0 and 255 is deprecated, this is because a byte value must be in the [0, 255] interval. The value used will be constrained using % 256",
+        );
+    }
+    // `c &= 0xff`, then `RETURN_CHAR(c)`.
+    let byte = (codepoint & 0xff).to_le_bytes()[0];
+    PhpString::new(req, &[byte])
+}
+
+/// `str_repeat(string $string, int $times): string`, php's
+/// `PHP_FUNCTION(str_repeat)` (`Z/ext/standard/string.c:5489`): the
+/// string laid end to end `$times` times, and the empty string for an
+/// empty string or no times, before anything is allocated. The
+/// arguments are read as `Z_PARAM_STR` and `Z_PARAM_LONG` read them, so
+/// `12` and `true` are strings and `'2'` is a count.
+///
+/// ```php
+/// var_dump(str_repeat("ab", 3), str_repeat("", 5), str_repeat("x", 0), str_repeat("x", 1), str_repeat(12, 2), str_repeat("x", "2"), str_repeat(true, 2));
+/// ```
+/// ```expect
+/// string(6) "ababab"
+/// string(0) ""
+/// string(0) ""
+/// string(1) "x"
+/// string(4) "1212"
+/// string(2) "xx"
+/// string(2) "11"
+/// ```
+///
+/// A count with a fraction, as a float or as a float-string, is read as
+/// `zend_parse_arg_long_weak` reads it: truncated behind the 8.1
+/// deprecation, so `1.5` and `'1.5'` are one repeat each; a float that
+/// is NAN or past the long's range is the `TypeError` the parser refuses
+/// it with (#253).
+///
+/// ```php
+/// var_dump(str_repeat('x', 1.5), str_repeat('x', '1.5'));
+/// str_repeat('x', 1e19);
+/// ```
+/// ```expect exit=255
+/// Deprecated: Implicit conversion from float 1.5 to int loses precision in %s on line 2
+///
+/// Deprecated: Implicit conversion from float-string "1.5" to int loses precision in %s on line 2
+/// string(1) "x"
+/// string(1) "x"
+///
+/// Fatal error: Uncaught TypeError: str_repeat(): Argument #2 ($times) must be of type int, float given in %s:3
+/// Stack trace:
+/// #0 %s(3): str_repeat('x', 1.0E+19)
+/// #1 {main}
+///   thrown in %s on line 3
+/// ```
+///
+/// ```php
+/// str_repeat('x', NAN);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: str_repeat(): Argument #2 ($times) must be of type int, float given in %s:2
+/// Stack trace:
+/// #0 %s(2): str_repeat('x', NAN)
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// A count below zero is php's `ValueError`, `Argument #2 ($times) must
+/// be greater than or equal to 0`, thrown with both arguments in hand,
+/// which the trace prints as php prints them: the string in `'`, cut at
+/// `zend.exception_string_param_max_len` with `...` after it, and the
+/// count as its digits. A call outside the arity of two is its
+/// `ArgumentCountError`; `the_count_below_zero_and_the_arity_are_php_s`
+/// in `tests/capture.rs` holds that without the oracle.
+///
+/// A `null` string is `zend_parse_arg_str_weak`'s: the 8.1 deprecation
+/// and the empty string written back into the frame, which the trace
+/// then prints; under `strict_types` it is the `TypeError`, and the
+/// trace prints what was passed.
+///
+/// ```php
+/// str_repeat(null, -1);
+/// ```
+/// ```expect exit=255
+/// Deprecated: str_repeat(): Passing null to parameter #1 ($string) of type string is deprecated in %s on line 2
+///
+/// Fatal error: Uncaught ValueError: str_repeat(): Argument #2 ($times) must be greater than or equal to 0 in %s:2
+/// Stack trace:
+/// #0 %s(2): str_repeat('', -1)
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// ```php
+/// declare(strict_types=1);
+/// str_repeat(null, 1);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: str_repeat(): Argument #1 ($string) must be of type string, null given in %s:3
+/// Stack trace:
+/// #0 %s(3): str_repeat(NULL, 1)
+/// #1 {main}
+///   thrown in %s on line 3
+/// ```
+///
+/// ```php
+/// str_repeat('a longer string than fifteen', -1);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ValueError: str_repeat(): Argument #2 ($times) must be greater than or equal to 0 in %s:2
+/// Stack trace:
+/// #0 %s(2): str_repeat('a longer string...', -1)
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// The return's bytes are `zend_string_safe_alloc(len, times, 0)`, and
+/// so is what they cost: the product plus the aligned header, so
+/// `str_repeat("ab", 3)` moves `memory_get_usage()` by the 40-byte bin
+/// and not the 32 a six-byte string takes, as php's does. A product that
+/// overflows is php's `Possible integer overflow in memory allocation
+/// (len * times + 32)` fatal, raised before a byte is asked for, and one
+/// the request's `memory_limit` refuses is the allocator's own fatal,
+/// raised where the allocation is asked for and not by this native.
+///
+/// ```php
+/// $b = memory_get_usage(); $s = str_repeat("ab", 3); var_dump(memory_get_usage() - $b);
+/// ```
+/// ```expect
+/// int(40)
+/// ```
+///
+/// ```php
+/// $s = str_repeat("x", 200000000);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Allowed memory size of 134217728 bytes exhausted (tried to allocate 200000032 bytes) in %s on line 2
+/// ```
+#[php_function]
+fn str_repeat(req: &mut Request, string: PhpString, times: i64) -> Result<PhpString, Thrown> {
+    if times < 0 {
+        return Err(arg_value_error(req, 2, "be greater than or equal to 0"));
+    }
+    if string.is_empty() || times == 0 {
+        return PhpString::new(req, b"");
+    }
+    let times = usize::try_from(times).unwrap_or(usize::MAX);
+    let pattern = string.as_bytes();
+    // `zend_string_safe_alloc(ZSTR_LEN(input_str), mult, 0, 0)`, then
+    // php's two fills: one byte `memset`, else `memcpy` of the pattern
+    // and then of the result onto itself, doubling what is laid down.
+    PhpString::product(req, pattern.len(), times, 0, |result| {
+        if pattern.len() == 1 {
+            result.fill(pattern[0]);
+            return;
+        }
+        result[..pattern.len()].copy_from_slice(pattern);
+        let mut laid = pattern.len();
+        while laid < result.len() {
+            let step = laid.min(result.len() - laid);
+            let (done, rest) = result.split_at_mut(laid);
+            rest[..step].copy_from_slice(&done[..step]);
+            laid += step;
+        }
+    })
+}
+
+/// `strtoupper(string $string): string`, php's `PHP_FUNCTION(strtoupper)`
+/// (`Z/ext/standard/string.c:1207`) over `zend_string_toupper`
+/// (`Z/Zend/zend_operators.c:3194`): ASCII only since 8.2, the bytes
+/// walked to the first that `toupper` would change, and the string
+/// handed back as it is, one more owner (`zend_string_copy`), when no
+/// byte would; otherwise one new string of the request's, the bytes
+/// before that one copied and the rest mapped. A byte past ASCII is
+/// left as it is.
+///
+/// ```php
+/// $s = str_repeat("AB1", 20); $b = memory_get_usage(); $t = strtoupper($s); var_dump($t === $s, memory_get_usage() - $b, strtoupper("abc Z1"), strtoupper("\xe9") === "\xe9", strtoupper(12), strtoupper(""));
+/// ```
+/// ```expect
+/// bool(true)
+/// int(0)
+/// string(6) "ABC Z1"
+/// bool(true)
+/// string(2) "12"
+/// string(0) ""
+/// ```
+///
+/// A string with a byte to change is a copy, `zend_string_alloc` of the
+/// same length, and the request's heap reads the copy after the call.
+///
+/// ```php
+/// $s = str_repeat("ab1", 20); $b = memory_get_usage(); $t = strtoupper($s); var_dump(memory_get_usage() - $b, $t);
+/// ```
+/// ```expect
+/// int(96)
+/// string(60) "AB1AB1AB1AB1AB1AB1AB1AB1AB1AB1AB1AB1AB1AB1AB1AB1AB1AB1AB1AB1"
+/// ```
+///
+/// Declared, the name is one `ob_start()` accepts as a handler and
+/// `ob_get_status()` reports under `name`. What php then does with it
+/// is call it with the buffer and the `PHP_OUTPUT_HANDLER_*` bits, two
+/// arguments to a native of one, so the oracle ends in `ArgumentCountError` at the first
+/// handler call with the buffer lost; the `ob_*` layer's call of a
+/// native handler is #288's, and the witness for it stands there.
+#[php_function]
+fn strtoupper(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
+    cased(req, string, u8::to_ascii_uppercase)
+}
+
+/// `strtolower(string $string): string`, php's `PHP_FUNCTION(strtolower)`
+/// (`Z/ext/standard/string.c:1220`) over `zend_string_tolower`
+/// (`Z/Zend/zend_operators.c:3162`), `strtoupper`'s mirror: the string
+/// itself with one more owner when no byte is an ASCII capital, a copy
+/// with each one lowered otherwise.
+///
+/// ```php
+/// $s = str_repeat("ab1", 20); $b = memory_get_usage(); $t = strtolower($s); var_dump($t === $s, memory_get_usage() - $b, strtolower("ABC z1"), strtolower("\xc9") === "\xc9", strtolower(true), strtolower(""));
+/// ```
+/// ```expect
+/// bool(true)
+/// int(0)
+/// string(6) "abc z1"
+/// bool(true)
+/// string(1) "1"
+/// string(0) ""
+/// ```
+///
+/// ```php
+/// $s = str_repeat("AB1", 20); $b = memory_get_usage(); $t = strtolower($s); var_dump(memory_get_usage() - $b, $t);
+/// ```
+/// ```expect
+/// int(96)
+/// string(60) "ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1ab1"
+/// ```
+#[php_function]
+fn strtolower(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
+    cased(req, string, u8::to_ascii_lowercase)
+}
+
+/// `str_pad(string $string, int $length, string $pad_string = " ", int
+/// $pad_type = STR_PAD_RIGHT): string`, php's `PHP_FUNCTION(str_pad)`
+/// (`Z/ext/standard/string.c:5760`): the string handed back as it is,
+/// one more owner, where `$length` is negative or no more than its
+/// length, before either later parameter is looked at; then the empty
+/// pad string's `ValueError` and the unknown type's; then the padding
+/// laid down as the pad string repeated byte by byte, `pad_str[i %
+/// pad_str_len]`, all of it on the right, all of it on the left, or the
+/// floor of half on the left and the rest on the right.
+///
+/// ```php
+/// var_dump(str_pad("abc", 6), str_pad("abc", 6, "-="), str_pad("abc", 6, "-=", STR_PAD_LEFT), str_pad("abc", 8, "-=", STR_PAD_BOTH), str_pad("abc", 7, "xy", STR_PAD_BOTH), str_pad("abc", 2), str_pad("abc", -1), str_pad("abc", 3), str_pad(12, 4, 0, STR_PAD_LEFT), str_pad("", 2, "ab"));
+/// foreach ([fn() => str_pad("abc", 6, ""), fn() => str_pad("abc", 6, " ", 3), fn() => str_pad("abc", 6, " ", -1), fn() => str_pad("abc", 2, "")] as $f) { try { var_dump($f()); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; } }
+/// var_dump(STR_PAD_LEFT, STR_PAD_RIGHT, STR_PAD_BOTH);
+/// ```
+/// ```expect
+/// string(6) "abc   "
+/// string(6) "abc-=-"
+/// string(6) "-=-abc"
+/// string(8) "-=abc-=-"
+/// string(7) "xyabcxy"
+/// string(3) "abc"
+/// string(3) "abc"
+/// string(3) "abc"
+/// string(4) "0012"
+/// string(2) "ab"
+/// ValueError: str_pad(): Argument #3 ($pad_string) must not be empty
+/// ValueError: str_pad(): Argument #4 ($pad_type) must be STR_PAD_LEFT, STR_PAD_RIGHT, or STR_PAD_BOTH
+/// ValueError: str_pad(): Argument #4 ($pad_type) must be STR_PAD_LEFT, STR_PAD_RIGHT, or STR_PAD_BOTH
+/// string(3) "abc"
+/// int(0)
+/// int(1)
+/// int(2)
+/// ```
+///
+/// The declaration, as `basic_functions.stub.php` has it, which is what
+/// a named argument is placed against.
+///
+/// ```php
+/// echo new ReflectionFunction('str_pad');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function str_pad ] {
+///
+///   - Parameters [4] {
+///     Parameter #0 [ <required> string $string ]
+///     Parameter #1 [ <required> int $length ]
+///     Parameter #2 [ <optional> string $pad_string = " " ]
+///     Parameter #3 [ <optional> int $pad_type = STR_PAD_RIGHT ]
+///   }
+///   - Return [ string ]
+/// }
+/// ```
+///
+/// ```php
+/// str_pad("abc", "x");
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: str_pad(): Argument #2 ($length) must be of type int, string given in %s:2
+/// Stack trace:
+/// #0 %s(2): str_pad('abc', 'x')
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// ```php
+/// str_pad("abc");
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArgumentCountError: str_pad() expects at least 2 arguments, 1 given in %s:2
+/// Stack trace:
+/// #0 %s(2): str_pad('abc')
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+#[php_function]
+fn str_pad(
+    req: &mut Request,
+    string: PhpString,
+    length: i64,
+    #[php(default = " ")] pad_string: PhpString,
+    #[php(default = STR_PAD_RIGHT)] pad_type: i64,
+) -> Result<PhpString, Thrown> {
+    let (input, pad) = (string, pad_string.as_bytes());
+    let bytes = input.as_bytes();
+    if length < 0 || usize::try_from(length).is_ok_and(|length| length <= bytes.len()) {
+        return Ok(str_copy(req, input));
+    }
+    if pad.is_empty() {
+        return Err(arg_value_error(req, 3, "not be empty"));
+    }
+    let num_pad_chars = usize::try_from(length)
+        .unwrap_or(usize::MAX)
+        .saturating_sub(bytes.len());
+    let (left_pad, right_pad) = match pad_type {
+        STR_PAD_RIGHT => (0, num_pad_chars),
+        STR_PAD_LEFT => (num_pad_chars, 0),
+        STR_PAD_BOTH => (num_pad_chars / 2, num_pad_chars - num_pad_chars / 2),
+        _ => {
+            return Err(arg_value_error(
+                req,
+                4,
+                "be STR_PAD_LEFT, STR_PAD_RIGHT, or STR_PAD_BOTH",
+            ));
+        }
+    };
+    // `zend_string_safe_alloc(1, ZSTR_LEN(input), num_pad_chars, 0)`,
+    // then the three fills in place.
+    PhpString::product(req, 1, bytes.len(), num_pad_chars, |result| {
+        let mut at = 0;
+        for i in 0..left_pad {
+            result[at] = pad[i % pad.len()];
+            at += 1;
+        }
+        result[at..at + bytes.len()].copy_from_slice(bytes);
+        at += bytes.len();
+        for i in 0..right_pad {
+            result[at] = pad[i % pad.len()];
+            at += 1;
+        }
+    })
+}
+
+/// `zend_string_toupper_ex` and `zend_string_tolower_ex`'s one shape
+/// over `map`: the argument with one more owner when `map` changes no
+/// byte, else a new string of the request's with the bytes before the
+/// first changed one copied and every byte from it mapped.
+fn cased(req: &mut Request, string: PhpString, map: fn(&u8) -> u8) -> Result<PhpString, Thrown> {
+    let bytes = string.as_bytes();
+    let Some(first) = bytes.iter().position(|b| map(b) != *b) else {
+        return Ok(str_copy(req, string));
+    };
+    PhpString::filled(req, bytes.len(), |out| {
+        out[..first].copy_from_slice(&bytes[..first]);
+        for (o, b) in out[first..].iter_mut().zip(&bytes[first..]) {
+            *o = map(b);
+        }
+    })
+}
+
+/// `trim(string $string, string $characters = " \n\r\t\v\x00"): string`,
+/// php's `PHP_FUNCTION(trim)` over `php_do_trim` with both sides
+/// (`Z/ext/standard/string.c:641`, its third way, both ends): the string with every byte
+/// of the set stripped from each end. The set is `php_charmask`'s: a
+/// byte each, with `a..z` a range, and its four warnings for a `..`
+/// with nothing before it, nothing after it, or a lesser byte after,
+/// which strip what the rest of the set says. The string comes back as
+/// it is, one more owner (`zend_string_copy`), when nothing was
+/// stripped; empty, the interned empty string, when everything was;
+/// and a new string of the request's otherwise (`zend_string_init`).
+/// Declared frameless for one argument and for two
+/// (`frameless_function_infos_trim`), so a call of either arity is a
+/// `FRAMELESS_ICALL_1` or `_2` over this body, whose witnesses are the
+/// kernels'.
+///
+/// ```php
+/// var_dump(trim(" \t\n\r\0\x0B a \x0B\0\r\n\t "), trim("xxaxx", "x"), trim("abcxcba", "a..c"), trim("  "), trim("abc", ""));
+/// ```
+/// ```expect
+/// string(1) "a"
+/// string(1) "a"
+/// string(1) "x"
+/// string(0) ""
+/// string(3) "abc"
+/// ```
+///
+/// ```php
+/// var_dump(trim("..a..", ".."), trim("za", "z.."), trim("bab", "..b"), trim("cac", "c..a"), trim("dad", "a..d..e"));
+/// ```
+/// ```expect
+/// Warning: trim(): Invalid '..'-range, no character to the left of '..' in %s on line 2
+///
+/// Warning: trim(): Invalid '..'-range, no character to the right of '..' in %s on line 2
+///
+/// Warning: trim(): Invalid '..'-range, no character to the left of '..' in %s on line 2
+///
+/// Warning: trim(): Invalid '..'-range, '..'-range needs to be incrementing in %s on line 2
+///
+/// Warning: trim(): Invalid '..'-range in %s on line 2
+/// string(1) "a"
+/// string(1) "a"
+/// string(1) "a"
+/// string(0) ""
+/// string(0) ""
+/// ```
+///
+/// A string nothing was stripped from is the argument's own, so the
+/// heap reads the same after the call as before it.
+///
+/// ```php
+/// $s = str_repeat("ab", 50); $b = memory_get_usage(); $t = trim($s); var_dump($t === $s, memory_get_usage() - $b);
+/// ```
+/// ```expect
+/// bool(true)
+/// int(0)
+/// ```
+///
+/// ```php
+/// trim("a", "b", "c");
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArgumentCountError: trim() expects at most 2 arguments, 3 given in %s:2
+/// Stack trace:
+/// #0 %s(2): trim('a', 'b', 'c')
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+#[php_function(frameless(1, 2))]
+fn trim(
+    req: &mut Request,
+    string: PhpString,
+    #[php(default = " \n\r\t\x0B\0")] characters: Passed<PhpString>,
+) -> Result<PhpString, Thrown> {
+    let bytes = string.as_bytes();
+    let (start, end) = match characters {
+        Passed::Given(what) if what.len() == 1 => {
+            let p = what.as_bytes()[0];
+            trimmed(bytes, |c| c == p)
+        }
+        Passed::Given(what) => {
+            let mask = charmask(req, what.as_bytes());
+            trimmed(bytes, |c| mask[c as usize])
+        }
+        Passed::Omitted => trimmed(bytes, |c| {
+            c <= b' ' && matches!(c, b' ' | b'\n' | b'\r' | b'\t' | 0x0B | 0)
+        }),
+    };
+    if end - start == bytes.len() {
+        return Ok(str_copy(req, string));
+    }
+    PhpString::new(req, &bytes[start..end])
+}
+
+/// The span of `bytes` left once every byte `strip` names is taken off
+/// both ends, `php_trim_int`'s two loops for `trim` itself.
+fn trimmed(bytes: &[u8], strip: impl Fn(u8) -> bool) -> (usize, usize) {
+    let mut start = 0;
+    let mut end = bytes.len();
+    while start != end && strip(bytes[start]) {
+        start += 1;
+    }
+    while start != end && strip(bytes[end - 1]) {
+        end -= 1;
+    }
+    (start, end)
+}
+
+/// `php_charmask` (`Z/ext/standard/string.c:475`): the 256-entry mask of
+/// a character set, `a..z` a range from the byte before the `..` to the
+/// byte after when the second is not the lesser, and php's four
+/// warnings for a `..` that is no range, each leaving the mask as the
+/// rest of the set builds it.
+pub(crate) fn charmask(req: &mut Request, input: &[u8]) -> [bool; 256] {
+    let mut mask = [false; 256];
+    let mut at = 0;
+    while at < input.len() {
+        let c = input[at];
+        if at + 3 < input.len()
+            && input[at + 1] == b'.'
+            && input[at + 2] == b'.'
+            && input[at + 3] >= c
+        {
+            for byte in c..=input[at + 3] {
+                mask[byte as usize] = true;
+            }
+            at += 4;
+            continue;
+        }
+        if at + 1 < input.len() && input[at] == b'.' && input[at + 1] == b'.' {
+            let message = if at == 0 {
+                "Invalid '..'-range, no character to the left of '..'"
+            } else if at + 2 >= input.len() {
+                "Invalid '..'-range, no character to the right of '..'"
+            } else if input[at - 1] > input[at + 2] {
+                "Invalid '..'-range, '..'-range needs to be incrementing"
+            } else {
+                "Invalid '..'-range"
+            };
+            docref(req, Level::Warning, message);
+            at += 1;
+            continue;
+        }
+        mask[c as usize] = true;
+        at += 1;
+    }
+    mask
+}
+
+/// `str_contains(string $haystack, string $needle): bool`, php's
+/// `PHP_FUNCTION(str_contains)` (`Z/ext/standard/string.c:1815`):
+/// whether the needle's bytes stand anywhere in the haystack's,
+/// `php_memnstr`, which is `true` for the empty needle. Declared
+/// frameless for its two arguments (`frameless_function_infos_str_contains`),
+/// so every call of two is a `FRAMELESS_ICALL_2` over this body, whose
+/// witnesses are the kernel's; what reaches the frame is a call of
+/// another count, or one by name.
+///
+/// ```php
+/// var_dump(str_contains("abc", "bc"), str_contains("abc", "cb"), str_contains("", ""), str_contains("abc", "abcd"), str_contains(true, "1"));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// ```
+///
+/// ```php
+/// str_contains("a");
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArgumentCountError: str_contains() expects exactly 2 arguments, 1 given in %s:2
+/// Stack trace:
+/// #0 %s(2): str_contains('a')
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+#[php_function(frameless(2))]
+fn str_contains(haystack: PhpString, needle: PhpString) -> bool {
+    memnstr(haystack.as_bytes(), needle.as_bytes(), 0).is_some()
+}
+
+/// `substr(string $string, int $offset, ?int $length = null): string`,
+/// php's `PHP_FUNCTION(substr)` over `_zend_substr`
+/// (`Z/ext/standard/string.c:2266`): the bytes from `offset`, counted
+/// from the end when negative and clamped to the start when past it,
+/// and the empty string for an offset past the end; of `length` bytes,
+/// or to the end for a null length, with a negative length stopping
+/// that many bytes short of the end and a length past the end clamped.
+/// The whole string comes back as it is, one more owner
+/// (`RETURN_STR_COPY`), and any other span as `ZVAL_STRINGL_FAST` makes
+/// it: the interned empty string, the interned one-byte string, or a
+/// new string of the request's. Declared frameless for two arguments
+/// and for three (`frameless_function_infos_substr`), so those calls
+/// are a `FRAMELESS_ICALL_2` or `_3` over this body, whose witnesses
+/// are the kernels'.
+///
+/// ```php
+/// $s = "abcdef";
+/// var_dump(substr($s, 0), substr($s, 6), substr($s, 7), substr($s, -6), substr($s, -7), substr($s, 1, -5), substr($s, 1, -6), substr($s, 2, 10), substr("", 0), substr($s, 0, -9223372036854775807 - 1), substr($s, -9223372036854775807 - 1));
+/// ```
+/// ```expect
+/// string(6) "abcdef"
+/// string(0) ""
+/// string(0) ""
+/// string(6) "abcdef"
+/// string(6) "abcdef"
+/// string(0) ""
+/// string(0) ""
+/// string(4) "cdef"
+/// string(0) ""
+/// string(0) ""
+/// string(6) "abcdef"
+/// ```
+///
+/// A span that is the whole string is the argument's own, and the heap
+/// reads the same after the call as before it.
+///
+/// ```php
+/// $s = str_repeat("ab", 50); $b = memory_get_usage(); $t = substr($s, 0, 100); var_dump($t === $s, memory_get_usage() - $b, substr($s, "1", "2.0"));
+/// ```
+/// ```expect
+/// bool(true)
+/// int(0)
+/// string(2) "ba"
+/// ```
+///
+/// ```php
+/// substr("a", 1, 2, 3);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught ArgumentCountError: substr() expects at most 3 arguments, 4 given in %s:2
+/// Stack trace:
+/// #0 %s(2): substr('a', 1, 2, 3)
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+#[php_function(frameless(2, 3))]
+fn substr(
+    req: &mut Request,
+    string: PhpString,
+    offset: i64,
+    #[php(default = null)] length: Option<i64>,
+) -> Result<PhpString, Thrown> {
+    let mut from = offset;
+    let len = i64::try_from(string.len()).unwrap_or(i64::MAX);
+    if from < 0 {
+        // `-(size_t)f > ZSTR_LEN(str)`: a negative offset further back
+        // than the string is long starts at its first byte.
+        from = if from.unsigned_abs() > u64::try_from(string.len()).unwrap_or(u64::MAX) {
+            0
+        } else {
+            len + from
+        };
+    } else if from > len {
+        return PhpString::new(req, b"");
+    }
+    let rest = len - from;
+    let taken = match length {
+        Some(l) if l < 0 => {
+            if l.unsigned_abs() > u64::try_from(rest).unwrap_or(0) {
+                0
+            } else {
+                rest + l
+            }
+        }
+        Some(l) if l > rest => rest,
+        Some(l) => l,
+        None => rest,
+    };
+    if taken == len {
+        return Ok(str_copy(req, string));
+    }
+    let start = usize::try_from(from).unwrap_or(0);
+    let end = start + usize::try_from(taken).unwrap_or(0);
+    PhpString::new(req, &string.as_bytes()[start..end])
+}
+
+/// `PHP_STR_PAD_LEFT`, `PHP_STR_PAD_RIGHT` and `PHP_STR_PAD_BOTH`
+/// (`Z/ext/standard/php_string.h`), what `str_pad`'s `$pad_type` is one
+/// of.
+#[php_const]
+pub(crate) const STR_PAD_LEFT: i64 = 0;
+#[php_const]
+pub(crate) const STR_PAD_RIGHT: i64 = 1;
+#[php_const]
+pub(crate) const STR_PAD_BOTH: i64 = 2;
 
 /// `zend_tolower_ascii`.
 const fn lower(byte: u8) -> u8 {
