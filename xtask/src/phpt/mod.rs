@@ -57,7 +57,11 @@
 //! files would stand at one path never run at once; and each file is
 //! named in a scratch tree's lock while it stands, so a run killed with
 //! several tests going leaves them for the next run's sweep and not for a
-//! bork (#860).
+//! bork (#860). The keys are held across processes as well as within the
+//! run, so two runs over one subset from two checkouts wait on each other
+//! test by test and never stand in one path at once (#990); the paths are
+//! where upstream writes, so `__FILE__`, `__DIR__` and a relative include
+//! are run-tests.php's.
 //!
 //! **Which subsets a lane runs.** The `[[crate]]` row, and nothing here:
 //! a crate owns the directories of the corpus its row names, an extension

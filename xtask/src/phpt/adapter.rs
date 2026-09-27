@@ -237,19 +237,26 @@ fn beside(test: &Path, kind: Option<&str>) -> PathBuf {
     test.with_extension(kind.map_or_else(|| "php".to_owned(), |kind| format!("{kind}.php")))
 }
 
-/// What a test may not run beside: alone where its conflict keys name
-/// `all`, as upstream has it (run-tests.php:1365-1370), and otherwise its
-/// keys and the three files its run writes beside it, so no two tests
-/// whose files would stand at one path run at once.
+/// What a test may not run beside: its conflict keys and the three files
+/// its run writes beside it, so no two tests whose files would stand at
+/// one path run at once, in this run or another; and alone in its run
+/// where its conflict keys name `all`, as upstream has it
+/// (run-tests.php:1365-1370). The files are keyed by their canonical path,
+/// so two runs that spell the tree two ways hold one key for one file.
 pub(super) fn apart(test: &Path, dirs: &mut BTreeMap<PathBuf, Vec<String>>) -> Apart {
     let mut keys = file::conflicts(test, dirs);
-    if keys.iter().any(|key| key == "all") {
-        return Apart::Alone;
-    }
+    let alone = keys.iter().any(|key| key == "all");
+    keys.retain(|key| key != "all");
+    let canonical = fs::canonicalize(test).unwrap_or_else(|_| test.to_path_buf());
     keys.extend(
-        [None, Some("skip"), Some("clean")].map(|kind| beside(test, kind).display().to_string()),
+        [None, Some("skip"), Some("clean")]
+            .map(|kind| beside(&canonical, kind).display().to_string()),
     );
-    Apart::Keys(keys)
+    if alone {
+        Apart::Alone(keys)
+    } else {
+        Apart::Keys(keys)
+    }
 }
 
 /// The extensions a binary loads under the recipe, as upstream asks for

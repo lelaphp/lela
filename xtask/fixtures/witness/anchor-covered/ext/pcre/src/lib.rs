@@ -12,13 +12,13 @@ use php_ext::attr::{php_class, php_function};
 /// A function with its own witness.
 ///
 /// ```php
-/// var_dump(preg_quote('.'));
+/// var_dump(fixture_quote('.'));
 /// ```
 /// ```expect
 /// string(2) "\."
 /// ```
 #[php_function]
-pub fn preg_quote(text: String) -> String {
+pub fn fixture_quote(text: String) -> String {
     text
 }
 

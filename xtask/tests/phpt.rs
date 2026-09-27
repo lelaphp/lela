@@ -883,3 +883,109 @@ fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {
         }
     }
 }
+
+/// Two runs over one subset at once, from two checkouts, each a process of
+/// its own over the one tree the variable names (#990): each reads every
+/// test as a lone run does, and keeps the lone run's bytes. Each test
+/// writes a file named for its `__FILE__` beside itself, sleeps, and reads
+/// it back, so a run whose test stood beside the other's same test would
+/// read `theirs`, or bork on the other's program still standing; and each
+/// prints `__FILE__` and `__DIR__` by name and a sibling included by
+/// `__DIR__` and by the include path, which are run-tests.php's. The lone
+/// run first is the control the two are held to.
+#[test]
+fn two_runs_over_one_subset_at_once_each_read_as_a_lone_run_does() {
+    if oracle().is_none() {
+        return;
+    }
+    let corpus = Tree::new("phpt-apart-corpus").unwrap();
+    let dir = corpus.join("Zend/tests");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("sibling.inc"), "<?php return 'sibling';\n").unwrap();
+    for n in 1..=4 {
+        fs::write(
+            dir.join(format!("t{n}.phpt")),
+            format!(
+                "--TEST--\nt{n}\n--FILE--\n<?php\n$mark = __FILE__ . '.mark';\n\
+                 file_put_contents($mark, getmypid());\nusleep(400000);\n\
+                 $by_dir = include __DIR__ . '/sibling.inc';\n$by_path = include 'sibling.inc';\n\
+                 $whose = file_get_contents($mark) == getmypid() ? 'mine' : 'theirs';\n\
+                 unlink($mark);\n\
+                 echo basename(__FILE__), ' ', basename(__DIR__), ' ', $by_dir, ' ', $by_path, ' ', $whose, \"\\n\";\n\
+                 --EXPECT--\nt{n}.php tests sibling sibling mine\n"
+            ),
+        )
+        .unwrap();
+    }
+    let engine = Tree::new("phpt-apart-engine").unwrap();
+    let engine = engine.join("php");
+    fs::write(
+        &engine,
+        format!(
+            "#!/bin/sh\nexec \"{}\" \"$@\"\n",
+            oracle().unwrap().display()
+        ),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    written_at(&engine, SystemTime::now() + Duration::from_mins(1));
+    let checkout = |name: &str| {
+        let root = Tree::new(&format!("phpt-apart-{name}")).unwrap();
+        scratch_workspace(workspace(), &root).unwrap();
+        commit_all(&root, name);
+        root
+    };
+    let run = |root: &Tree| {
+        Command::new(env!("CARGO_BIN_EXE_xtask"))
+            .arg("--root")
+            .arg(root.path())
+            .args(["phpt", "--subset", "Zend/tests", "--jobs", "2", "--engine"])
+            .arg(&engine)
+            .env(xtask::oracle::TREE_VARIABLE, corpus.path())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    // The kept run with its commit taken out, the one field two checkouts
+    // of one tree tell apart.
+    let kept = |root: &Tree, child: std::process::Child| {
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let mut runs = Vec::new();
+        files_under(&root.join("target/phpt-runs"), &mut runs);
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        let mut run: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&runs[0]).unwrap()).unwrap();
+        run.as_object_mut().unwrap().remove("commit").unwrap();
+        run
+    };
+    let lone = checkout("lone");
+    let alone = kept(&lone, run(&lone));
+    let verdicts = alone["verdicts"].as_object().unwrap();
+    assert!(
+        verdicts.len() == 4 && verdicts.values().all(|v| v == "pass"),
+        "the lone run passes all four: {alone}"
+    );
+    let (one, two) = (checkout("one"), checkout("two"));
+    let (first, second) = (run(&one), run(&two));
+    assert_eq!(kept(&one, first), alone);
+    assert_eq!(kept(&two, second), alone);
+    let mut left = Vec::new();
+    files_under(&dir, &mut left);
+    left.sort();
+    assert_eq!(
+        left,
+        [
+            dir.join("sibling.inc"),
+            dir.join("t1.phpt"),
+            dir.join("t2.phpt"),
+            dir.join("t3.phpt"),
+            dir.join("t4.phpt")
+        ],
+        "nothing is left beside the tests"
+    );
+}

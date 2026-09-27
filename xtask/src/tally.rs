@@ -36,14 +36,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::fs;
+use std::fs::{self, File};
 use std::num::NonZeroUsize;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex, PoisonError, mpsc};
 use std::thread;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 
 use crate::oracle::Runner;
 use crate::reading::{Reading, Status, listed};
@@ -184,9 +184,10 @@ impl<J: Judgement> Tally<J> {
 
     /// [`Tally::judge`] on a pool of `threads`, each item held apart from
     /// the items `apart` says it may not run beside, as [`Queue::take`]
-    /// holds them. The verdicts are printed and kept in the items' order
-    /// all the same, each once every one before it is in, so the run reads
-    /// as the one-at-a-time run does, and a pool of one is that run.
+    /// holds them within this run and [`Apart::hold`] across every run.
+    /// The verdicts are printed and kept in the items' order all the same,
+    /// each once every one before it is in, so the run reads as the
+    /// one-at-a-time run does, and a pool of one is that run.
     pub fn judge_apart<I: Sync>(
         items: &[I],
         threads: NonZeroUsize,
@@ -222,9 +223,16 @@ impl<J: Judgement> Tally<J> {
                         };
                         drop(waiting);
                         // A judge that panics gives its keys back all the
-                        // same, so no thread waits on them for ever.
-                        let judged = panic::catch_unwind(AssertUnwindSafe(|| judge(&items[at])))
-                            .unwrap_or_else(|_| Err(anyhow!("judging item {at} panicked")));
+                        // same, so no thread waits on them for ever; and
+                        // the keys are held across processes for as long
+                        // as the judge runs.
+                        let judged = apart[at].hold().and_then(|held| {
+                            let judged =
+                                panic::catch_unwind(AssertUnwindSafe(|| judge(&items[at])))
+                                    .unwrap_or_else(|_| Err(anyhow!("judging item {at} panicked")));
+                            drop(held);
+                            judged
+                        });
                         lock().done(&apart[at]);
                         freed.notify_all();
                         // A send that fails is the receiver gone, a verdict
@@ -369,13 +377,87 @@ impl<J: Judgement> Tally<J> {
 
 /// What one item may not run beside: upstream's conflict keys
 /// (run-tests.php:1341-1372). No two items holding one key run at once,
-/// and an item alone runs with nothing beside it; an item holding no key
-/// runs beside anything but an item alone.
+/// and an item alone runs with nothing of its run beside it; an item
+/// holding no key runs beside anything but an item alone. A key holds
+/// across every run on the machine and not only within one (#990):
+/// [`Queue::take`] keeps one run's items apart and [`Apart::hold`] keeps
+/// them apart from every other process's, since two checkouts run their
+/// tests in one pinned tree. Alone is the run's word, as upstream's `all`
+/// is its invocation's: another run's items are not held off by it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Apart {
     Keys(Vec<String>),
-    /// Upstream's `all`.
-    Alone,
+    /// Upstream's `all`, with the keys it still holds against other runs.
+    Alone(Vec<String>),
+}
+
+/// Where [`Apart::hold`] takes its locks: one directory under the
+/// temporary directory, the one every run of the harness on this machine
+/// shares, as the scratch trees' sweep shares it.
+const HELD: &str = "xtask-held";
+
+/// The keys one item holds against every other process: a file per key,
+/// locked, and removed again when the value drops. The operating system
+/// releases a lock however the process ends, so a killed run leaves a
+/// file and never a key held.
+pub(crate) struct Held {
+    locks: Vec<(PathBuf, File)>,
+}
+
+impl Apart {
+    /// This item's keys, held against every other process on the machine
+    /// until the value is dropped: each key the file named by its SHA-1,
+    /// locked whole, taken in the order of those names so no two holders
+    /// wait on each other in a cycle. An item holding no key, as every
+    /// witness does, holds nothing and waits on nothing.
+    ///
+    /// A holder removes its file before it lets go, so a lock taken on a
+    /// file that is no longer the one at its path is on a file nobody else
+    /// will find; it is let go and the path opened again.
+    pub(crate) fn hold(&self) -> Result<Held> {
+        use std::os::unix::fs::MetadataExt;
+        let (Apart::Keys(keys) | Apart::Alone(keys)) = self;
+        let mut held = Held { locks: Vec::new() };
+        if keys.is_empty() {
+            return Ok(held);
+        }
+        let dir = std::env::temp_dir().join(HELD);
+        fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        let names: BTreeSet<String> = keys
+            .iter()
+            .map(|key| sha1_smol::Sha1::from(key).digest().to_string())
+            .collect();
+        for name in names {
+            let path = dir.join(name);
+            let file = loop {
+                let file = File::options()
+                    .write(true)
+                    .create(true)
+                    .truncate(false)
+                    .open(&path)
+                    .with_context(|| format!("opening {}", path.display()))?;
+                file.lock()
+                    .with_context(|| format!("holding {}", path.display()))?;
+                let at = fs::metadata(&path).ok();
+                let this = file.metadata()?;
+                if at.is_some_and(|at| (at.dev(), at.ino()) == (this.dev(), this.ino())) {
+                    break file;
+                }
+            };
+            held.locks.push((path, file));
+        }
+        Ok(held)
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        // Each file goes while its lock is still held, and the lock with
+        // the file's closing, after this body.
+        for (path, _) in &self.locks {
+            let _ = fs::remove_file(path);
+        }
+    }
 }
 
 /// The pool a lane runs on unless it is told otherwise: as many threads
@@ -413,8 +495,8 @@ impl Queue {
         let mut passed: Vec<&str> = Vec::new();
         for (n, &at) in self.waiting.iter().enumerate() {
             match &apart[at] {
-                Apart::Alone if n == 0 && self.running == 0 => self.alone = true,
-                Apart::Alone => return None,
+                Apart::Alone(_) if n == 0 && self.running == 0 => self.alone = true,
+                Apart::Alone(_) => return None,
                 Apart::Keys(keys)
                     if keys
                         .iter()
@@ -435,7 +517,7 @@ impl Queue {
     fn done(&mut self, apart: &Apart) {
         self.running -= 1;
         match apart {
-            Apart::Alone => self.alone = false,
+            Apart::Alone(_) => self.alone = false,
             Apart::Keys(keys) => {
                 for key in keys {
                     self.held.remove(key);
@@ -714,7 +796,13 @@ mod tests {
     /// done when it starts, and nothing after it starts until it is done.
     #[test]
     fn an_item_alone_runs_with_nothing_beside_it() {
-        let apart = [keys(&[]), keys(&[]), Apart::Alone, keys(&[]), keys(&[])];
+        let apart = [
+            keys(&[]),
+            keys(&[]),
+            Apart::Alone(Vec::new()),
+            keys(&[]),
+            keys(&[]),
+        ];
         let (spans, _) = spans(&apart, 8, |_| 40);
         for (n, span) in spans.iter().enumerate().filter(|(n, _)| *n != 2) {
             assert!(!overlap(spans[2], *span), "{n}: {spans:?}");
@@ -727,7 +815,7 @@ mod tests {
     /// one before it is done, in the items' order.
     #[test]
     fn a_pool_of_one_runs_the_items_one_at_a_time_in_order() {
-        let apart = [keys(&["a"]), keys(&[]), Apart::Alone, keys(&[])];
+        let apart = [keys(&["a"]), keys(&[]), Apart::Alone(Vec::new()), keys(&[])];
         let (spans, started) = spans(&apart, 1, |_| 5);
         assert_eq!(started, [0, 1, 2, 3]);
         assert!(spans.windows(2).all(|w| w[0].1 <= w[1].0), "{spans:?}");
