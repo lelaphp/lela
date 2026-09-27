@@ -85,8 +85,14 @@ impl Storage {
     }
 
     fn forward(&mut self) {
-        let at = self.valid_from(self.pos);
-        self.pos = self.valid_from(at + 1);
+        self.pos = self.forward_from(self.pos);
+    }
+
+    /// `zend_hash_move_forward_ex` over a position: past the live row at
+    /// or after `pos`, as the table stands now, so where user code
+    /// detached the row at `pos` the step passes the row after it.
+    fn forward_from(&self, pos: usize) -> usize {
+        self.valid_from(self.valid_from(pos) + 1)
     }
 
     fn backward(&mut self) {
@@ -396,7 +402,51 @@ impl SplObjectStorage {
         Ok(i64::try_from(n).unwrap_or(i64::MAX))
     }
 
-    /// `removeAll(SplObjectStorage $storage): int`; the witness is `addAll`'s.
+    /// `removeAll(SplObjectStorage $storage): int`.
+    ///
+    /// The source is walked live by its own position, so a row detached
+    /// here is asked for once more before the walk moves on, and a row a
+    /// `getHash` detached from the source is never asked for.
+    ///
+    /// ```php
+    /// class Seen extends SplObjectStorage {
+    ///     public $src;
+    ///     public function getHash($o): string {
+    ///         echo "getHash {$o->n}\n";
+    ///         if ($this->src && $o->n == 1) foreach ($this->src as $p) if ($p->n == 2) { unset($this->src[$p]); break; }
+    ///         return spl_object_hash($o);
+    ///     }
+    /// }
+    /// $s = new Seen; $src = new SplObjectStorage;
+    /// foreach ([1, 2, 3, 4] as $n) { $o = new stdClass; $o->n = $n; $src[$o] = $n; if ($n != 2) $s[$o] = $n; }
+    /// unset($o, $p);
+    /// echo "--\n";
+    /// $s->src = $src;
+    /// var_dump($s->removeAll($src), count($src));
+    /// $s->src = null; foreach ([5, 6] as $n) { $o = new stdClass; $o->n = $n; $s[$o] = $n; }
+    /// echo "--\n";
+    /// var_dump($s->removeAll($s));
+    /// ```
+    /// ```expect
+    /// getHash 1
+    /// getHash 3
+    /// getHash 4
+    /// --
+    /// getHash 1
+    /// getHash 1
+    /// getHash 3
+    /// getHash 3
+    /// getHash 4
+    /// getHash 4
+    /// int(0)
+    /// int(3)
+    /// getHash 5
+    /// getHash 6
+    /// --
+    /// getHash 5
+    /// getHash 6
+    /// int(0)
+    /// ```
     #[php(tentative)]
     fn removeAll(
         req: &mut Request,
@@ -404,15 +454,13 @@ impl SplObjectStorage {
         storage: Instance<SplObjectStorage>,
     ) -> Result<i64, Thrown> {
         let this = this.object();
-        let rows = with(req, storage.object(), |s| s.live())?;
-        for (object, _) in rows {
-            storage_detach(req, this, object)?;
-        }
+        let walked = remove_all(req, this, storage.object());
         let n = with(req, this, |s| {
             s.reset();
             s.index = 0;
             s.len()
         })?;
+        walked?;
         Ok(i64::try_from(n).unwrap_or(i64::MAX))
     }
 
@@ -1139,6 +1187,26 @@ fn add_all(req: &mut Request, this: PhpObject, other: PhpObject) -> Result<(), T
     };
     with(req, this, |s| s.index = 0)?;
     walked
+}
+
+/// `SplObjectStorage::removeAll`'s walk: each row of `other` detached from
+/// `this`, `other` walked by a position of its own, php's
+/// `nInternalPointer` read through `zend_hash_get_current_data_ptr`.
+/// The position moves on, `zend_hash_move_forward`, only where the
+/// detach found no row, so a row detached here is asked for once more,
+/// and read again it is the row after it where `this` is `other`. php
+/// holds nothing here and neither does the walk: the row's object is
+/// handed to `getHash` alone, whose frame owns it for the call, and the
+/// row is read again after. A throwing `getHash` stops the walk, as in
+/// [`add_all`].
+fn remove_all(req: &mut Request, this: PhpObject, other: PhpObject) -> Result<(), Thrown> {
+    let mut pos = 0;
+    while let Some((_, object, _)) = with(req, other, |s| s.row_at(pos))? {
+        if !storage_detach(req, this, object)? {
+            pos = with(req, other, |s| s.forward_from(pos))?;
+        }
+    }
+    Ok(())
 }
 
 /// `spl_object_storage_attach`: the information of a row replaced, or a
