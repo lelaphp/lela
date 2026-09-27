@@ -14,7 +14,7 @@
 use php_ext::abi::{Instance, This, Union, Untyped};
 use php_ext::attr::php_class;
 use php_ext::call::{autoload, eval_const_expr, lookup_class};
-use php_ext::coerce::value_name;
+use php_ext::coerce::{to_string, value_name};
 use php_ext::decl::{ConstExpr, FunctionDecl, Parameter, Type};
 use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
@@ -237,6 +237,15 @@ fn scope_of(req: &mut Request, function: &FunctionRef) -> Option<ClassId> {
     }
 }
 
+/// `zval_try_get_string` as bytes: the string a value casts to, the
+/// cast's own owner given back.
+fn string_bytes(req: &mut Request, value: &Value) -> Result<Vec<u8>, Thrown> {
+    let string = to_string(req, value)?;
+    let bytes = string.as_bytes().to_vec();
+    req.release(Value::string(string));
+    Ok(bytes)
+}
+
 /// The one class a type names, `ZEND_TYPE_HAS_NAME`: a name alone,
 /// nullable or beside `MAY_BE_*` bits, as php stores it in `arg_info` beside
 /// the mask; none for a type of bits alone, an intersection, or
@@ -445,13 +454,15 @@ fn construct_function(req: &mut Request, first: Value) -> Result<FunctionRef, Th
                     "Expected array($object, $method) or array($classname, $method)",
                 ));
             };
+            // `zval_try_get_string` over a class that is no object and
+            // over the method, so a `Stringable` names either.
             let (class, object) = if let ValueRef::Object(object) = class.deref().as_ref() {
                 (object.class(), Some(*object))
             } else {
-                let name = class.as_str_bytes().unwrap_or_default().to_vec();
+                let name = string_bytes(req, &class)?;
                 (class_named(req, &name)?, None)
             };
-            let method = method.as_str_bytes().unwrap_or_default().to_vec();
+            let method = string_bytes(req, &method)?;
             // An object's class is looked up with the closure it is, so
             // `[$closure, '__invoke']` reaches the method php makes.
             let found = if let Some(object) = object {
@@ -745,6 +756,20 @@ impl ReflectionParameter {
     /// The parameter specified by its name could not be found
     /// ReflectionParameter::__construct(): Argument #2 ($param) must be greater than or equal to 0
     /// ReflectionParameter::__construct(): Argument #2 ($param) must be of type string|int, array given
+    /// ```
+    ///
+    /// An array's class and method are cast to string as php's
+    /// `zval_try_get_string` casts them, a `Stringable` among them:
+    ///
+    /// ```php
+    /// class A { function m($p) {} }
+    /// $s = new class { public function __toString() { return 'm'; } };
+    /// echo new ReflectionParameter([A::class, $s], 'p'), "\n";
+    /// try { new ReflectionParameter([A::class, new class { public function __toString() { return 'nope'; } }], 'p'); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Parameter #0 [ <required> $p ]
+    /// Method A::nope() does not exist
     /// ```
     fn __construct(
         req: &mut Request,
