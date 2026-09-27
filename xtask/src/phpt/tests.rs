@@ -885,12 +885,15 @@ fn overlap(a: (f64, f64), b: (f64, f64)) -> bool {
 }
 
 /// The fixture at `xtask/fixtures/phpt/conflicts` (#938), on a pool of
-/// eight: the two tests naming `shared` never run at once, the one naming
-/// `all` runs beside nothing, the directory's `CONFLICTS` file holds its
-/// two tests apart, and a test's own section stands in place of that file.
-/// The negative controls are the tests naming no key, which run at once,
-/// and `own.phpt`, which runs beside the directory's two. The verdicts, in
-/// order and word for word, are the ones a pool of one reaches.
+/// eight, which cuts its seven tests that do not run alone into batches of
+/// two neighbours: the two tests naming `shared` never run at once, the one
+/// naming `all` runs beside nothing, the directory's `CONFLICTS` file holds
+/// its two tests apart, and a test's own section stands in place of that
+/// file. The pairs held apart stand in two batches each, so what holds them
+/// is the key. The negative controls are the tests naming no key, which
+/// run at once, and `own.phpt`, which runs beside the directory's second.
+/// The verdicts, in order and word for word, are the ones a pool of one
+/// reaches.
 #[test]
 fn tests_that_conflict_never_run_at_once_and_the_verdicts_are_the_serial_runs() {
     if oracle().is_none() {
@@ -900,9 +903,9 @@ fn tests_that_conflict_never_run_at_once_and_the_verdicts_are_the_serial_runs() 
     let tally = run_on(&subset, 8, 30);
     let tests = [
         "a-keyed/free1.phpt",
-        "a-keyed/free2.phpt",
         "a-keyed/one.phpt",
         "a-keyed/two.phpt",
+        "a-keyed/z-free.phpt",
         "b-alone/all.phpt",
         "c-directory/one.phpt",
         "c-directory/own.phpt",
@@ -915,7 +918,7 @@ fn tests_that_conflict_never_run_at_once_and_the_verdicts_are_the_serial_runs() 
         "{tally:#?}"
     );
     let span = spans(&tree, &tests);
-    assert!(!overlap(span[2], span[3]), "shared: {span:?}");
+    assert!(!overlap(span[1], span[2]), "shared: {span:?}");
     for n in (0..tests.len()).filter(|n| *n != 4) {
         assert!(
             !overlap(span[4], span[n]),
@@ -924,9 +927,8 @@ fn tests_that_conflict_never_run_at_once_and_the_verdicts_are_the_serial_runs() 
         );
     }
     assert!(!overlap(span[5], span[7]), "directory: {span:?}");
-    assert!(overlap(span[0], span[1]), "the control, no key: {span:?}");
-    assert!(overlap(span[0], span[2]), "the control, no key: {span:?}");
-    assert!(overlap(span[5], span[6]), "the control, own: {span:?}");
+    assert!(overlap(span[0], span[3]), "the control, no key: {span:?}");
+    assert!(overlap(span[6], span[7]), "the control, own: {span:?}");
 
     let serial = run_on(&subset, 1, 30);
     assert_eq!(serial.judged, tally.judged);
@@ -938,15 +940,47 @@ fn tests_that_conflict_never_run_at_once_and_the_verdicts_are_the_serial_runs() 
     );
 }
 
+/// The fixture at `xtask/fixtures/phpt/relative` (#1091): two neighbours
+/// that each make and remove one directory relative to the root every
+/// program runs from, which met on `mkdir(): File exists` when the pool
+/// judged them at once. On a pool of eight the three tests are cut into
+/// batches of two, as run-tests.php cuts them (run-tests.php:1537-1541),
+/// so the pair is judged one after the other and both pass, run after run;
+/// the third, in a batch of its own, runs beside the pair's first, the
+/// negative control that shows the pool runs anything at once at all.
+#[test]
+fn neighbours_that_make_one_relative_path_are_one_batch_and_never_meet() {
+    if oracle().is_none() {
+        return;
+    }
+    let tests = ["a-temp.phpt", "b-temp.phpt", "c-free.phpt"];
+    let (tree, subset) = fixture_subset("relative");
+    for run in 0..20 {
+        let tally = run_on(&subset, 8, 30);
+        assert!(
+            tally.judged.iter().all(|j| j.judgement == Judgement::Pass),
+            "run {run}: {tally:#?}"
+        );
+        let span = spans(&tree, &tests);
+        assert!(span[0].1 <= span[1].0, "run {run}, the batch: {span:?}");
+        assert!(
+            overlap(span[0], span[2]),
+            "run {run}, the control: {span:?}"
+        );
+    }
+}
+
 /// The fixture at `xtask/fixtures/phpt/past-limit` (#938): a test that
 /// never ends first, and two after it that conflict with nothing. On a
-/// pool of three, both are done before the first is past its limit; on a
-/// pool of one, the negative control, both start after it. The limit runs
-/// from the spawn and the span from the program's first line, so the line
-/// between the two is drawn half a second early. The verdicts are the same
-/// either way: the first fails naming the limit.
+/// pool of three the batches are two neighbours (run-tests.php:1537-1541,
+/// #1091), so the second waits for the first, its batch's, and the third,
+/// in a batch of its own, is done before the first is past its limit; on
+/// a pool of one, the negative control, the third starts after it too.
+/// The limit runs from the spawn and the span from the program's first
+/// line, so the line between the two is drawn half a second early. The
+/// verdicts are the same either way: the first fails naming the limit.
 #[test]
-fn a_test_past_the_limit_holds_up_none_of_the_tests_it_does_not_conflict_with() {
+fn a_test_past_the_limit_holds_up_only_its_batch_and_what_it_conflicts_with() {
     const LIMIT: u64 = 3;
     if oracle().is_none() {
         return;
@@ -958,7 +992,7 @@ fn a_test_past_the_limit_holds_up_none_of_the_tests_it_does_not_conflict_with() 
     let pooled = run_on(&subset, 3, LIMIT);
     let span = spans(&tree, &tests);
     assert!(
-        span[1].1 < past(&span) && span[2].1 < past(&span),
+        span[1].0 >= past(&span) && span[2].1 < past(&span),
         "{span:?}"
     );
 

@@ -12,6 +12,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -273,6 +274,26 @@ pub(super) fn apart(test: &Path, dirs: &mut BTreeMap<PathBuf, Vec<String>>) -> A
     } else {
         Apart::Keys(keys)
     }
+}
+
+/// How many neighbours one thread judges in sequence: upstream's batch,
+/// the tests a worker is handed when it is ready
+/// (run-tests.php:1537-1541). The batch is `min(32, ceil(tests /
+/// workers))` and the loop that fills it takes one more, since it tests
+/// the count before it adds; the tests are those left once the ones
+/// alone are taken out (run-tests.php:1365-1370, 1399), and the workers
+/// no more than those tests (run-tests.php:1383). Neighbours in the sort
+/// share a worker this way, not a directory: a directory larger than a
+/// batch runs over several at once, and a boundary may fall between two
+/// tests that make one path relative to the root (#1091).
+pub(super) fn batch(apart: &[Apart], jobs: NonZeroUsize) -> NonZeroUsize {
+    const MOST: usize = 32;
+    let tests = apart
+        .iter()
+        .filter(|apart| matches!(apart, Apart::Keys(_)))
+        .count();
+    let workers = jobs.get().min(tests).max(1);
+    NonZeroUsize::MIN.saturating_add(tests.div_ceil(workers).clamp(1, MOST))
 }
 
 /// The extensions a binary loads under the recipe, as upstream asks for
