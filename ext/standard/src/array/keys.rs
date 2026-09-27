@@ -22,9 +22,6 @@ use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 use super::sort::key_value;
 use super::{copied, key_copy, returned};
 
-/// `HT_MAX_SIZE` on a 64-bit build (`Z/Zend/zend_types.h`).
-const HT_MAX_SIZE: i64 = 0x4000_0000;
-
 /// The comparison a search makes: `fast_is_identical_function` under
 /// `$strict`, `fast_equal_check_function` otherwise, the element's
 /// reference followed.
@@ -692,7 +689,8 @@ fn array_pad(
     value: Value,
 ) -> Result<PhpArray, Thrown> {
     let (input, size, pad) = (array, length, value);
-    if !(-HT_MAX_SIZE..=HT_MAX_SIZE).contains(&size) {
+    let max = super::HT_MAX_SIZE.cast_signed();
+    if !(-max..=max).contains(&size) {
         return Err(arg_value_error(
             req,
             2,

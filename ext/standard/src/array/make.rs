@@ -13,7 +13,7 @@ use php_ext_random::Rng;
 
 use super::sort::key_value;
 use super::stack::Stack;
-use super::{copied, key_copy, returned};
+use super::{HT_MAX_SIZE, copied, key_copy, returned};
 use crate::math::math_round;
 
 /// `string|int|float`, a bound of `range`.
@@ -21,9 +21,6 @@ type RangeBound = Union<PhpString, Union<i64, f64>>;
 
 /// `int|string|array`, what `array_rand` answers: one key, or a list.
 type Picked = Raw<Union<i64, Union<PhpString, PhpArray>>>;
-
-/// `HT_MAX_SIZE` on a 64-bit build.
-const HT_MAX_SIZE: u64 = 0x4000_0000;
 
 /// `array_merge_recursive(array ...$arrays): array`, php's
 /// `php_array_merge_wrapper` with `php_array_merge_recursive`
@@ -133,6 +130,7 @@ fn array_merge_recursive(
     let Some((first, rest)) = arrays.split_first() else {
         return PhpArray::new(req);
     };
+    super::merge_total(req, &arrays)?;
     let mut dest = PhpArray::new(req)?;
     for (key, value) in first.snapshot_refs() {
         let value = match value.as_ref() {
