@@ -55,3 +55,30 @@ fn the_startup_rules_meet_the_values_in_declaration_order() {
         "\nDeprecated: PHP Startup: Disabling session.use_only_cookies INI setting is deprecated in Unknown on line 0\n\nDeprecated: PHP Startup: Enabling session.use_trans_sid INI setting is deprecated in Unknown on line 0\n\nDeprecated: PHP Startup: session.sid_length INI setting is deprecated in Unknown on line 0\nok\n"
     );
 }
+
+/// `OnUpdateRfc1867Freq` over a `ZEND_INI_PERDIR` entry's startup value:
+/// php's `PHP Startup` warning and the default kept, as the oracle
+/// answers under `-d session.upload_progress.freq=-1` and `=200%`. No
+/// regime of the pin sets it, so the fence cannot hold this.
+#[test]
+fn a_startup_upload_progress_freq_out_of_range_keeps_the_default() {
+    for (value, bound) in [
+        ("-1", "greater than or equal to 0"),
+        ("200%", "less than or equal to 100%"),
+    ] {
+        let engine = Engine::builder()
+            .extensions(&[php_ext_session::extension()])
+            .ini("session.upload_progress.freq", value)
+            .build();
+        let served = engine.serve_capture(
+            "<?php var_dump(ini_get(\"session.upload_progress.freq\"));",
+            Capture::default(),
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&served.stdout),
+            format!(
+                "\nWarning: PHP Startup: session.upload_progress.freq must be {bound} in Unknown on line 0\nstring(2) \"1%\"\n"
+            )
+        );
+    }
+}

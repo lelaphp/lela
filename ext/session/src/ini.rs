@@ -3,7 +3,7 @@
 //! runs, `SESSION_CHECK_ACTIVE_STATE` and `SESSION_CHECK_OUTPUT_STATE`
 //! first. Each rule is the entry's `on_modify` on the face, so
 //! `ini_set()` and the natives, which call [`alter`] where php calls
-//! `zend_alter_ini_entry`, meet the same rule; [`startup`] runs them
+//! `zend_alter_ini_entry`, meet the same rule; the engine runs them
 //! over the values the host started the engine with (#744).
 
 use php_ext::abi::{ExtensionBuilder, OnModify};
@@ -401,7 +401,8 @@ const MODIFIERS: [OnModify; 31] =
 
 /// Every entry's rule on the extension, as `PHP_INI_BEGIN()` pairs each
 /// with its `PHP_INI_MH`. The `ZEND_INI_PERDIR` ones are refused before
-/// any rule by `ini_set()`, and their rules are met only at [`startup`].
+/// any rule by `ini_set()`, and their rules are met only as the engine
+/// starts, over the host's values.
 ///
 /// ```php
 /// ob_start(); var_dump(ini_set('session.name', '123'), ini_set('session.gc_divisor', '0'), ini_get('session.gc_divisor'), ini_set('session.save_handler', 'user'));
@@ -441,7 +442,6 @@ pub(super) fn register(builder: ExtensionBuilder) -> ExtensionBuilder {
     ENTRIES
         .iter()
         .zip(MODIFIERS)
-        .filter(|((_, _, kind), _)| !matches!(kind, Kind::PerDir | Kind::PerDirBool))
         .fold(builder, |builder, ((name, _, _), modify)| {
             builder.on_modify(name.as_bytes(), modify)
         })
