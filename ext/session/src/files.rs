@@ -108,10 +108,8 @@ fn exists(req: &mut Request, path: &[u8]) -> Result<Option<[i64; 13]>, Thrown> {
 /// a new file with the permissions `session.save_path` names, less the umask,
 /// and refuses a symbolic link where the file would be; the fd
 /// takes no resource id, so the stream opened after it has the id it
-/// would have had. php's check that
-/// the file is its own uid's is not made: nothing the standard library
-/// has reads the process's uid, and only a file another uid wrote in the
-/// directory meets it.
+/// would have had. A file another uid owns is refused, closed, with
+/// php's warning, unless the process runs as root ([`foreign`]).
 ///
 /// ```php
 /// ob_start(); umask(0); session_save_path("0;0640;" . __DIR__); session_id("mode1"); session_start(["use_cookies" => 0, "cache_limiter" => ""]);
@@ -191,6 +189,20 @@ fn open_key(req: &mut Request, key: &[u8]) {
             return;
         }
     };
+    // `zend_fstat` over the fd: a file neither root's nor the process's
+    // is another web application's, and is not taken.
+    let owner = file
+        .metadata()
+        .map(|meta| std::os::unix::fs::MetadataExt::uid(&meta));
+    if owner.is_err() || owner.is_ok_and(|owner| foreign(owner, crate::ffi::uids())) {
+        drop(file);
+        docref(
+            req,
+            Level::Warning,
+            "Session data file is not created by your uid",
+        );
+        return;
+    }
     // The mode as php's process has it: `open(2)` takes the process's own
     // umask off, and `umask()` sets the request's.
     if !existed {
@@ -200,6 +212,14 @@ fn open_key(req: &mut Request, key: &[u8]) {
     if let Some(files) = data(req) {
         files.fd = Some(file);
     }
+}
+
+/// `ps_files_open`'s ownership rule: a session file whose owner is
+/// neither root nor the process's real or effective uid belongs to
+/// another uid, unless the process's real uid is root, which reads every
+/// session.
+fn foreign(owner: u32, uids: crate::ffi::Uids) -> bool {
+    owner != 0 && owner != uids.real && owner != uids.effective && uids.real != 0
 }
 
 /// `ps_files_write`: the file for `key` reopened where the id changed,
@@ -513,4 +533,45 @@ pub(super) fn create_sid(req: &mut Request) -> Result<Option<Vec<u8>>, Thrown> {
 /// `PS_VALIDATE_SID_FUNC(files)`: whether the id's file exists.
 pub(super) fn validate_sid(req: &mut Request, key: &[u8]) -> Result<bool, Thrown> {
     key_exists(req, key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::foreign;
+    use crate::ffi::{Uids, uids};
+    use std::os::unix::fs::MetadataExt;
+
+    /// `ps_files_open`'s rule over the owners it tells apart: root's, the
+    /// real uid's and the effective uid's taken, another's refused, and
+    /// every owner taken by a process whose real uid is root.
+    #[test]
+    fn a_file_another_uid_owns_is_refused_unless_root_reads_it() {
+        let user = Uids {
+            real: 501,
+            effective: 502,
+        };
+        assert!(!foreign(0, user));
+        assert!(!foreign(501, user));
+        assert!(!foreign(502, user));
+        assert!(foreign(503, user));
+        let root = Uids {
+            real: 0,
+            effective: 0,
+        };
+        assert!(!foreign(503, root));
+    }
+
+    /// A file this process creates is its own. A file another uid owns
+    /// cannot be built from here: a process that is not root cannot give
+    /// one away, and one that is root reads every session, so the rule
+    /// above holds the refusal.
+    #[test]
+    fn the_process_owns_what_it_creates() -> std::io::Result<()> {
+        let path = std::env::temp_dir().join(format!("sess-uid-{}", std::process::id()));
+        std::fs::write(&path, b"")?;
+        let owner = std::fs::metadata(&path)?.uid();
+        std::fs::remove_file(&path)?;
+        assert!(!foreign(owner, uids()));
+        Ok(())
+    }
 }
