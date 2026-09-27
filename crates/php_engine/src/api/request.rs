@@ -5646,18 +5646,63 @@ impl Request {
             .map(|(_, z)| Value::of_zval(z))
     }
 
+    /// The declared instance property `name` of `class` the executed
+    /// scope reaches, as `zend_get_property_offset` picks it: its slot,
+    /// the class that declared it and the declaration. The last
+    /// declaration of the name in slot order stands, save that one
+    /// shadowing a parent's private property of the name
+    /// (`ZEND_ACC_CHANGED`) is, from that parent's scope, the parent's
+    /// own private slot (`zend_get_parent_private_property`).
+    fn placed_property(&self, class: ClassId, name: &[u8]) -> Option<(u32, ClassId, PropertyDecl)> {
+        let mut placed = self.placed_properties(class);
+        let mut at = placed.iter().rposition(|(_, p)| &*p.name.0 == name)?;
+        if let Some(scope) = self.executed_scope()
+            && placed
+                .get(at)
+                .is_some_and(|(declaring, _)| *declaring != scope)
+            && let Some(own) = placed.iter().position(|(declaring, p)| {
+                *declaring == scope && p.visibility == Visibility::Private && &*p.name.0 == name
+            })
+        {
+            at = own;
+        }
+        let slot = u32::try_from(at).ok()?;
+        if at >= placed.len() {
+            return None;
+        }
+        let (declaring, property) = placed.swap_remove(at);
+        Some((slot, declaring, property))
+    }
+
     /// `zend_get_property_offset` over the placed instance properties:
     /// the slot `name` sits in, the class that declared what stands
     /// there, its visibility, its set visibility and whether it is
     /// typed; none for a name no class of the chain declares, which is
-    /// a dynamic property.
+    /// a dynamic property. A declaration that shadows a parent's
+    /// private property of the name (`ZEND_ACC_CHANGED`) is, from that
+    /// parent's scope, the parent's own private slot
+    /// (`zend_get_parent_private_property`).
+    ///
+    /// ```php
+    /// class A { private int $prop = 42;
+    ///     function r() { return $this->prop; }
+    ///     function op() { $this->prop += 1; return $this->prop; }
+    ///     function ref() { $x =& $this->prop; unset($this->prop); $x = "foo"; var_dump($x); } }
+    /// class B extends A { private $prop = "b"; }
+    /// $b = new B;
+    /// var_dump($b->r(), $b->op());
+    /// $b->ref();
+    /// ```
+    /// ```expect
+    /// int(42)
+    /// int(43)
+    /// string(3) "foo"
+    /// ```
     fn declared_slot(&self, class: ClassId, name: &[u8]) -> Option<DeclaredSlot> {
-        let placed = self.placed_properties(class);
-        let at = placed.iter().rposition(|(_, p)| &*p.name.0 == name)?;
-        let (declaring, p) = placed.get(at)?;
+        let (at, declaring, p) = self.placed_property(class, name)?;
         Some(DeclaredSlot {
-            slot: u32::try_from(at).unwrap_or(u32::MAX),
-            declaring: *declaring,
+            slot: at,
+            declaring,
             visibility: p.visibility,
             set_visibility: p.set_visibility,
             typed: p.ty.is_some(),
@@ -7656,11 +7701,9 @@ impl Request {
         class: ClassId,
         name: &[u8],
     ) -> Option<TypedProperty> {
-        let placed = self.placed_properties(class);
-        let at = placed.iter().rposition(|(_, p)| &*p.name.0 == name)?;
-        let (declaring, p) = placed.get(at)?;
-        p.ty.clone().map(|ty| TypedProperty {
-            declaring: *declaring,
+        let (_, declaring, p) = self.placed_property(class, name)?;
+        p.ty.map(|ty| TypedProperty {
+            declaring,
             ty,
             readonly: p.is_readonly,
         })
