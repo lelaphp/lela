@@ -15860,14 +15860,76 @@ impl Request {
         self.in_autoload.retain(|name| name != lowered);
     }
 
-    /// `spl_autoload_functions()`.
-    #[must_use]
-    pub fn autoload_functions(&self) -> Vec<Value> {
-        self.autoloaders
-            .iter()
-            .cloned()
-            .map(Callable::into_value)
-            .collect()
+    /// `spl_autoload_functions()`: each loader as its
+    /// `autoload_func_info` lists it, one owner each, the caller's: a
+    /// closure itself; a method as the pair of its receiver, or of the
+    /// class the callable resolved to where it has none (`alfi->ce`), so
+    /// `['self', 'load']` lists the class `self` named where it was
+    /// registered, and the method's declared name; a function by its
+    /// declared name.
+    ///
+    /// ```php
+    /// class First { static function init() { spl_autoload_register(['self', 'LOAD']); } static function load($c) {} }
+    /// First::init();
+    /// spl_autoload_register('first::load');
+    /// spl_autoload_register('Strlen');
+    /// $f = fn ($c) => null; spl_autoload_register($f);
+    /// foreach (spl_autoload_functions() as $l) echo is_array($l) ? implode('::', $l) : (is_string($l) ? $l : get_class($l)), "\n";
+    /// ```
+    /// ```expect
+    /// Deprecated: Use of "self" in callables is deprecated in %s on line 2
+    /// First::load
+    /// strlen
+    /// Closure
+    /// ```
+    pub fn autoload_functions(&mut self) -> Result<Vec<Value>, Thrown> {
+        let targets: Vec<Target> = self.autoloaders.iter().map(Callable::target).collect();
+        let mut out = Vec::with_capacity(targets.len());
+        for target in targets {
+            match self.autoload_listed(target) {
+                Ok(listed) => out.push(listed),
+                Err(thrown) => {
+                    for listed in out {
+                        self.release(listed);
+                    }
+                    return Err(thrown);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// One loader as [`Request::autoload_functions`] lists it.
+    fn autoload_listed(&mut self, target: Target) -> Result<Value, Thrown> {
+        match target {
+            Target::Closure(object) => {
+                self.addref(&object.as_value());
+                Ok(object.as_value())
+            }
+            Target::Function(function) => {
+                let name = self.function_name(function);
+                Ok(Value::string(PhpString::new(self, name.as_bytes())?))
+            }
+            Target::Method {
+                function,
+                scope,
+                this,
+            } => {
+                let first = if let Some(object) = this {
+                    self.addref(&object.as_value());
+                    object.as_value()
+                } else {
+                    let class = self.class_name(scope);
+                    Value::string(PhpString::new(self, class.as_bytes())?)
+                };
+                let name = self.function_name(function);
+                let mut pair = PhpArray::new(self)?;
+                pair.append(self, first)?;
+                let name = Value::string(PhpString::new(self, name.as_bytes())?);
+                pair.append(self, name)?;
+                Ok(Value::array(pair))
+            }
+        }
     }
 
     /// `get_included_files()`: the paths, as `EG(included_files)` holds
