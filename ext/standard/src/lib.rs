@@ -257,7 +257,15 @@ pub fn extension() -> Extension {
             output::ob_get_status::declared(),
             output::ob_implicit_flush::declared(),
         ])
-        .functions(head::natives())
+        .functions(vec![
+            head::header::declared(),
+            head::header_remove::declared(),
+            head::http_response_code::declared(),
+            head::headers_sent::declared(),
+            head::headers_list::declared(),
+            head::setcookie::declared(),
+            head::setrawcookie::declared(),
+        ])
         .functions(var::natives())
         .functions(formatted_print::natives())
         .functions(base64::natives())
