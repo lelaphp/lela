@@ -539,6 +539,12 @@ impl Emit<'_> {
         Ok(())
     }
 
+    /// `zend_is_not_imported`: whether no class import takes the
+    /// unqualified `name` as its alias, whatever its case.
+    pub(super) fn not_imported(&self, name: &[u8]) -> bool {
+        self.imports.class(name).is_none()
+    }
+
     /// `zend_resolve_class_name` for a name written without `self`,
     /// `parent` or `static`: a fully qualified name is itself, a
     /// relative one the current namespace's, and any other has its
