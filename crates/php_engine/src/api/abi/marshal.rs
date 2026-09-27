@@ -630,7 +630,11 @@ impl<T: FromArgument> FromArgument for Passed<T> {
 /// `Raw<T>`: declares `T` and holds nothing, for php's
 /// `Z_PARAM_ZVAL`-then-convert natives, whose body raises before the
 /// coercion; the body holds the argument with [`Raw::hold`] when it
-/// chooses.
+/// chooses. Its mask admits every value, so a referent under
+/// [`Ref`] and a default are taken as they are too: `Ref<Raw<T>>` is a
+/// by-reference parameter declared `T` whose refusal is the body's, as
+/// `end()`'s `array|object &$array` refuses a string with "must be of
+/// type array".
 pub struct Raw<T> {
     value: Value,
     position: u32,
@@ -665,7 +669,7 @@ impl<T: FromArgument> Raw<T> {
 }
 
 impl<T: FromArgument> FromArgument for Raw<T> {
-    const MASK: u32 = T::MASK;
+    const MASK: u32 = bits::ANY;
     fn declared() -> Option<Type> {
         T::declared()
     }
