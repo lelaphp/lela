@@ -44,6 +44,7 @@ use crate::output::Output;
 use crate::virtual_cwd::RealpathCache;
 pub use crate::virtual_cwd::Resolve;
 
+mod hold;
 mod hooks;
 mod lazy;
 mod linking;
@@ -6822,6 +6823,55 @@ impl Request {
         })
     }
 
+    /// `zend_std_read_property`'s `/* magic isset */` arm under
+    /// `BP_VAR_IS`: the `__isset` asked where its guard is down, `null`
+    /// where it said no, and the `__get` served after a yes where its
+    /// guard is down, what it answered held to the property's type
+    /// ([`Request::hold_magic_get`]). `None` is neither accessor
+    /// answering, and the read goes on to the warning's arm. The caller
+    /// holds the object across the two.
+    ///
+    /// ```php
+    /// class Test {
+    ///     public function __isset($x) { $GLOBALS["obj"] = 24; return true; }
+    ///     public function __get($x) { var_dump($this); return 42; }
+    /// }
+    /// $obj = new Test;
+    /// $name = "foo";
+    /// var_dump($obj->$name ?? 12);
+    /// var_dump($obj);
+    /// ```
+    /// ```expect
+    /// object(Test)#1 (0) {
+    /// }
+    /// int(42)
+    /// int(24)
+    /// ```
+    fn isset_then_get(
+        &mut self,
+        object: PhpObject,
+        name: &[u8],
+        read: PropertyRead,
+        issetter: Function,
+        getter: Option<Function>,
+    ) -> Result<Option<Value>, Thrown> {
+        if self.guard_word(object, name) & IN_ISSET == 0 {
+            let answered = self.call_accessor(object, issetter, IN_ISSET, name, &[])?;
+            let truthy = crate::api::coerce::truthy(self, &answered);
+            self.release(answered);
+            if !truthy {
+                return Ok(Some(Value::null()));
+            }
+        }
+        let Some(getter) = getter.filter(|_| self.guard_word(object, name) & IN_GET == 0) else {
+            return Ok(None);
+        };
+        let class = object.class();
+        let got = self.call_accessor(object, getter, IN_GET, name, &[])?;
+        self.overloaded_write_notice(class, name, read, &got);
+        self.hold_magic_get(class, name, getter, got).map(Some)
+    }
+
     /// `zend_verify_prop_assignable_by_ref_ex` under
     /// `ZEND_VERIFY_PROP_ASSIGNABLE_BY_REF_CONTEXT_MAGIC_GET`: what `__get`
     /// answered for a typed property an `unset` emptied, held to the
@@ -7085,9 +7135,9 @@ impl Request {
         let mut sent = Vec::with_capacity(arguments.len().saturating_add(1));
         sent.push(Value::string(interned));
         sent.extend_from_slice(arguments);
-        self.addref(&object.as_value());
+        let held = self.take_hold(object.as_value());
         let served = self.serve_method(accessor, Some(object), object.class(), &sent, &[]);
-        self.release(object.as_value());
+        self.release_hold(held);
         served
     }
 
@@ -7263,22 +7313,16 @@ impl Request {
         }
         // `/* magic isset */`: under `BP_VAR_IS` a class with a
         // `__isset` is asked first, and the `__get` after it only where
-        // it said yes.
+        // it said yes, the object held across both (`GC_ADDREF(zobj)`
+        // before the `__isset`, `OBJ_RELEASE` after the `__get`), so
+        // an `__isset` that gives up every other owner does not free
+        // the object the `__get` is served on.
         if let Some(issetter) = issetter {
-            if self.guard_word(object, name) & IN_ISSET == 0 {
-                let answered = self.call_accessor(object, issetter, IN_ISSET, name, &[])?;
-                let truthy = crate::api::coerce::truthy(self, &answered);
-                self.release(answered);
-                if !truthy {
-                    return Ok(Value::null());
-                }
-            }
-            if let Some(getter) = getter
-                && self.guard_word(object, name) & IN_GET == 0
-            {
-                let got = self.call_accessor(object, getter, IN_GET, name, &[])?;
-                self.overloaded_write_notice(class, name, read, &got);
-                return self.hold_magic_get(class, name, getter, got);
+            let held = self.take_hold(object.as_value());
+            let served = self.isset_then_get(object, name, read, issetter, getter);
+            self.release_hold(held);
+            if let Some(served) = served? {
+                return Ok(served);
             }
         } else if let Some(getter) = getter {
             if self.guard_word(object, name) & IN_GET == 0 {
@@ -9702,44 +9746,63 @@ impl Request {
         }
         // php holds `IN_ISSET` across both calls, so the `__get` the
         // `empty` arm asks for runs with the `__isset`'s guard still
-        // standing.
+        // standing, and the object across both (`GC_ADDREF(zobj)`,
+        // `OBJ_RELEASE` after the guard is down), so an `__isset` that
+        // gives up every other owner does not free the object the
+        // `__get` is served on.
         self.guard_take(object, name, IN_ISSET);
-        let answered = self.serve_accessor(object, issetter, name, &[]);
-        let mut held = match answered {
-            Ok(answered) => {
-                let truthy = crate::api::coerce::truthy(self, &answered);
-                self.release(answered);
-                truthy
-            }
-            Err(thrown) => {
-                self.guard_drop(object, name, IN_ISSET);
-                return Err(thrown);
-            }
-        };
-        // `if (has_set_exists == ZEND_PROPERTY_NOT_EMPTY && result)`:
-        // `empty` asks the `__get` after the `__isset` and reads the
-        // truth of what it answered; a class with no `__get` is
-        // `result = false`, php's own `else`.
-        if test == PropertyTest::NotEmpty && held {
-            held = false;
-            if let Some(getter) = self.magic_accessor(class, b"__get")
-                && self.guard_word(object, name) & IN_GET == 0
-            {
-                let answered = self.call_accessor(object, getter, IN_GET, name, &[]);
-                match answered {
-                    Ok(answered) => {
-                        held = crate::api::coerce::truthy(self, &answered);
-                        self.release(answered);
-                    }
-                    Err(thrown) => {
-                        self.guard_drop(object, name, IN_ISSET);
-                        return Err(thrown);
-                    }
-                }
-            }
-        }
+        let held = self.take_hold(object.as_value());
+        let answered = self.isset_then_truth(object, name, test, issetter);
         self.guard_drop(object, name, IN_ISSET);
-        Ok(held)
+        self.release_hold(held);
+        answered
+    }
+
+    /// `zend_std_has_property`'s `/* have issetter - try with it! */`
+    /// arm, under the guard and the hold its caller takes: the truth of
+    /// what the `__isset` answered, and under `empty` the truth of what
+    /// the `__get` answers after a yes; a class with no `__get`, or one
+    /// whose guard is up, is `result = false`, php's own `else`.
+    ///
+    /// ```php
+    /// class Test {
+    ///     public function __isset($x) { $GLOBALS["obj"] = 24; return true; }
+    ///     public function __get($x) { var_dump($this); return 42; }
+    /// }
+    /// $obj = new Test;
+    /// $name = "foo";
+    /// var_dump(empty($obj->$name));
+    /// var_dump($obj);
+    /// ```
+    /// ```expect
+    /// object(Test)#1 (0) {
+    /// }
+    /// bool(false)
+    /// int(24)
+    /// ```
+    fn isset_then_truth(
+        &mut self,
+        object: PhpObject,
+        name: &[u8],
+        test: PropertyTest,
+        issetter: Function,
+    ) -> Result<bool, Thrown> {
+        let answered = self.serve_accessor(object, issetter, name, &[])?;
+        let truthy = crate::api::coerce::truthy(self, &answered);
+        self.release(answered);
+        if test != PropertyTest::NotEmpty || !truthy {
+            return Ok(truthy);
+        }
+        let Some(getter) = self
+            .magic_accessor(object.class(), b"__get")
+            .filter(|_| self.guard_word(object, name) & IN_GET == 0)
+        else {
+            return Ok(false);
+        };
+        let answered = self.call_accessor(object, getter, IN_GET, name, &[])?;
+        let truthy = crate::api::coerce::truthy(self, &answered);
+        self.release(answered);
+        Ok(truthy)
     }
 
     /// `zend_std_has_property`'s `lazy_init:` arm: the object
@@ -9993,11 +10056,51 @@ impl Request {
         ))
     }
 
+    /// What the four `zend_std_*_dimension` handlers do around the
+    /// `ArrayAccess` methods they call: the offset copied, dereferenced
+    /// (`ZVAL_COPY_DEREF(&tmp_offset, offset)`), and the object held
+    /// (`GC_ADDREF(object)`) for the span of `calls`, both given back
+    /// after it (`OBJ_RELEASE`, `zval_ptr_dtor(&tmp_offset)`), so a
+    /// method that gives up every other owner of either does not free
+    /// what the next call is served on or handed.
+    fn with_array_access<T>(
+        &mut self,
+        object: PhpObject,
+        offset: Value,
+        calls: impl FnOnce(&mut Request, Value) -> Result<T, Thrown>,
+    ) -> Result<T, Thrown> {
+        let offset = self.take_hold(offset.deref());
+        let held = self.take_hold(object.as_value());
+        let called = calls(self, offset.value());
+        self.release_hold(held);
+        self.release_hold(offset);
+        called
+    }
+
     /// `zend_std_read_dimension`: `offsetGet` on an `ArrayAccess`, the
     /// offset `null` for `$o[]`; under `BP_VAR_IS` `offsetExists` first,
     /// `null` where it says no, and `offsetGet` after it where it says
     /// yes, so a chain under an `isset` calls the two in that order and
-    /// calls neither on a class that is no `ArrayAccess`.
+    /// calls neither on a class that is no `ArrayAccess`. The object and
+    /// the offset are held across the two ([`Request::with_array_access`]).
+    ///
+    /// ```php
+    /// class Test implements ArrayAccess {
+    ///     public function offsetExists($x): bool { $GLOBALS["obj"] = 24; return true; }
+    ///     public function offsetGet($x): mixed { var_dump($x); return 42; }
+    ///     public function offsetSet($x, $y): void { }
+    ///     public function offsetUnset($x): void { }
+    /// }
+    /// $obj = new Test;
+    /// $name = "foo";
+    /// var_dump($obj[$name] ?? 12);
+    /// var_dump($obj);
+    /// ```
+    /// ```expect
+    /// string(3) "foo"
+    /// int(42)
+    /// int(24)
+    /// ```
     pub(crate) fn read_dimension(
         &mut self,
         object: PhpObject,
@@ -10006,20 +10109,22 @@ impl Request {
     ) -> Result<Value, Thrown> {
         self.array_access(object)?;
         let offset = offset.copied().unwrap_or_else(Value::null);
-        if read == DimensionRead::Silent {
-            let exists = crate::api::call::call_method(
-                self,
-                &object,
-                b"offsetExists",
-                std::slice::from_ref(&offset),
-            )?;
-            let answer = crate::api::coerce::truthy(self, &exists);
-            self.release(exists);
-            if !answer {
-                return Ok(Value::null());
+        self.with_array_access(object, offset, |req, offset| {
+            if read == DimensionRead::Silent {
+                let exists = crate::api::call::call_method(
+                    req,
+                    &object,
+                    b"offsetExists",
+                    std::slice::from_ref(&offset),
+                )?;
+                let answer = crate::api::coerce::truthy(req, &exists);
+                req.release(exists);
+                if !answer {
+                    return Ok(Value::null());
+                }
             }
-        }
-        crate::api::call::call_method(self, &object, b"offsetGet", &[offset])
+            crate::api::call::call_method(req, &object, b"offsetGet", &[offset])
+        })
     }
 
     /// `zend_std_write_dimension`: `offsetSet` on an `ArrayAccess`, the
@@ -10035,14 +10140,35 @@ impl Request {
             return Err(thrown);
         }
         let offset = offset.copied().unwrap_or_else(Value::null);
-        let served = crate::api::call::call_method(self, &object, b"offsetSet", &[offset, value]);
+        let served = self.with_array_access(object, offset, |req, offset| {
+            crate::api::call::call_method(req, &object, b"offsetSet", &[offset, value])
+        });
         self.release(value);
         self.release(served?);
         Ok(())
     }
 
     /// `zend_std_has_dimension`: `offsetExists` on an `ArrayAccess`,
-    /// and under `not_empty` the truth of `offsetGet` after it.
+    /// and under `not_empty` the truth of `offsetGet` after it where
+    /// nothing was thrown, the object and the offset held across the two.
+    ///
+    /// ```php
+    /// class Test implements ArrayAccess {
+    ///     public function offsetExists($x): bool { $GLOBALS["obj"] = 24; return true; }
+    ///     public function offsetGet($x): mixed { var_dump($x); return 42; }
+    ///     public function offsetSet($x, $y): void { }
+    ///     public function offsetUnset($x): void { }
+    /// }
+    /// $obj = new Test;
+    /// $name = "foo";
+    /// var_dump(empty($obj[$name]));
+    /// var_dump($obj);
+    /// ```
+    /// ```expect
+    /// string(3) "foo"
+    /// bool(false)
+    /// int(24)
+    /// ```
     pub(crate) fn has_dimension(
         &mut self,
         object: PhpObject,
@@ -10050,40 +10176,46 @@ impl Request {
         not_empty: bool,
     ) -> Result<bool, Thrown> {
         self.array_access(object)?;
-        let exists = crate::api::call::call_method(
-            self,
-            &object,
-            b"offsetExists",
-            std::slice::from_ref(offset),
-        )?;
-        let mut answer = crate::api::coerce::truthy(self, &exists);
-        self.release(exists);
-        if answer && not_empty {
+        self.with_array_access(object, *offset, |req, offset| {
+            let exists = crate::api::call::call_method(
+                req,
+                &object,
+                b"offsetExists",
+                std::slice::from_ref(&offset),
+            )?;
+            let answer = crate::api::coerce::truthy(req, &exists);
+            req.release(exists);
+            if !answer || !not_empty {
+                return Ok(answer);
+            }
             let value = crate::api::call::call_method(
-                self,
+                req,
                 &object,
                 b"offsetGet",
-                std::slice::from_ref(offset),
+                std::slice::from_ref(&offset),
             )?;
-            answer = crate::api::coerce::truthy(self, &value);
-            self.release(value);
-        }
-        Ok(answer)
+            let answer = crate::api::coerce::truthy(req, &value);
+            req.release(value);
+            Ok(answer)
+        })
     }
 
-    /// `zend_std_unset_dimension`: `offsetUnset` on an `ArrayAccess`.
+    /// `zend_std_unset_dimension`: `offsetUnset` on an `ArrayAccess`,
+    /// the object and the offset held across it.
     pub(crate) fn unset_dimension(
         &mut self,
         object: PhpObject,
         offset: &Value,
     ) -> Result<(), Thrown> {
         self.array_access(object)?;
-        let served = crate::api::call::call_method(
-            self,
-            &object,
-            b"offsetUnset",
-            std::slice::from_ref(offset),
-        )?;
+        let served = self.with_array_access(object, *offset, |req, offset| {
+            crate::api::call::call_method(
+                req,
+                &object,
+                b"offsetUnset",
+                std::slice::from_ref(&offset),
+            )
+        })?;
         self.release(served);
         Ok(())
     }
