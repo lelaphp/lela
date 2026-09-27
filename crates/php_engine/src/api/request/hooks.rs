@@ -355,6 +355,57 @@ impl Request {
         self.refuse_indirect(object, name, value, read)
     }
 
+    /// `zend_assign_to_property_reference` over a hooked property whose
+    /// `get` hook the read under `BP_VAR_W` calls: the hook's answer is
+    /// what the read hands back (`retval = rv`), so `zend_fetch_property_address`
+    /// hands that back even where `Indirect modification` was raised
+    /// after it, and the site's `Cannot assign by reference to
+    /// overloaded object` is thrown over it, the first its previous. A
+    /// hook that threw answered nothing, and its throwable is the one
+    /// raised. `None` where no such hook serves the read.
+    ///
+    /// ```php
+    /// class T { public $v { get { return $this->v; } set { $this->v = $value; } } }
+    /// $t = new T; $t->v = [];
+    /// try { $t->v = &$r; } catch (Error $e) { echo $e->getMessage(), " / ", $e->getPrevious()->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Cannot assign by reference to overloaded object / Indirect modification of T::$v is not allowed
+    /// ```
+    pub(crate) fn hooked_reference_refusal(
+        &mut self,
+        object: PhpObject,
+        name: &[u8],
+    ) -> Option<Thrown> {
+        let hooked = self
+            .hooked(object.class(), name)
+            .filter(|hooked| self.hooked_accessible(hooked))?;
+        let get = hooked
+            .get
+            .filter(|_| self.should_call_hook(&hooked, name, object))?;
+        let answered = match self.call_hook(object, get, &[]) {
+            Ok(answered) => answered,
+            Err(thrown) => return Some(thrown),
+        };
+        let refused = self.refuse_indirect(object, name, answered, PropertyRead::Write);
+        let thrown = crate::api::raising::throw(
+            self,
+            "Error",
+            "Cannot assign by reference to overloaded object",
+        );
+        match refused {
+            Ok(value) => self.release(value),
+            Err(previous) => {
+                if let (Some(&throwable), Some(&previous)) =
+                    (thrown.exception(), previous.exception())
+                {
+                    self.set_previous(throwable, previous);
+                }
+            }
+        }
+        Some(thrown)
+    }
+
     /// `Indirect modification of %s::$%s is not allowed`: a write
     /// fetch's read of a hooked property that answered what no write
     /// through it can reach, anything but an object or a reference.

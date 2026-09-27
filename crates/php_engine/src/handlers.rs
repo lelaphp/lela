@@ -10222,10 +10222,15 @@ pub(crate) fn assign_ref<T: Tier>(
 /// `zend_assign_to_property_reference` over a name the class serves
 /// itself ([`PropertyFound::Served`]): what `read_property` answered is
 /// given up and the throw is `Cannot assign by reference to overloaded
-/// object`, or the throw the read raised (`Z_ISERROR_P`).
+/// object`, or the throw the read raised (`Z_ISERROR_P`). The read is
+/// `zend_fetch_property_address`'s `BP_VAR_W`, so a value `__get`
+/// answered is php's notice that the modification has no effect first.
 fn overloaded_reference(req: &mut Request, object: PhpObject, name: &[u8]) -> Thrown {
+    if let Some(thrown) = req.hooked_reference_refusal(object, name) {
+        return thrown;
+    }
     let table = req.object_handlers(object.heap());
-    match table.read_property(req, object, name, PropertyRead::Warning) {
+    match table.read_property(req, object, name, PropertyRead::Write) {
         Ok(value) => {
             req.release(value);
             crate::api::raising::throw(
@@ -10262,6 +10267,19 @@ fn overloaded_reference(req: &mut Request, object: PhpObject, name: &[u8]) -> Th
 /// ```expect
 /// Cannot assign by reference to overloaded object
 /// string(1) "a"
+/// ```
+///
+/// A name the class's `__get` answers is read under `BP_VAR_W`, php's
+/// notice ahead of the `Error`:
+///
+/// ```php
+/// class A { public $q = 3; function __get($n) { return $this->q; } }
+/// $a = new A; $b = 1;
+/// try { $a->w = &$b; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Notice: Indirect modification of overloaded property A::$w has no effect in %s on line 4
+/// Cannot assign by reference to overloaded object
 /// ```
 ///
 /// ```php
