@@ -10,7 +10,7 @@ use php_ext::attr::php_function;
 use php_ext::call::{call_method, lookup_class};
 use php_ext::coerce::{Exponent, float_format, to_string};
 use php_ext::decl::Visibility;
-use php_ext::raising::{Level, Thrown, docref, throw};
+use php_ext::raising::{Level, Thrown, call_stack_limit, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
 
@@ -314,6 +314,8 @@ fn write(
     in_rcn_array: bool,
     is_root: bool,
 ) -> Result<(), Thrown> {
+    // `php_serialize_check_stack_limit`.
+    call_stack_limit(req)?;
     let already = hash.add(req, value, in_rcn_array);
     if already != 0 {
         if already == -1 {

@@ -168,7 +168,7 @@ impl StackLimit {
         if !self.overflowed() {
             return Ok(());
         }
-        let max_stack_size = self.base.saturating_sub(self.limit);
+        let max_stack_size = self.max_stack_size();
         Err(CompileError {
             level: Level::CompileError,
             message: format!(
@@ -191,6 +191,14 @@ impl StackLimit {
     #[must_use]
     pub fn overflowed(&self) -> bool {
         position() <= self.limit
+    }
+
+    /// The size `zend_call_stack_size_error` names, the stack's base less
+    /// its limit: `zend.max_allowed_stack_size` less
+    /// `zend.reserved_stack_size`.
+    #[must_use]
+    pub fn max_stack_size(&self) -> usize {
+        self.base.saturating_sub(self.limit)
     }
 }
 

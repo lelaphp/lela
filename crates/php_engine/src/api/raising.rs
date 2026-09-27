@@ -206,6 +206,36 @@ pub fn docref(req: &mut Request, level: Level, message: &str) {
     raise(req, level, &text);
 }
 
+/// `zend_call_stack_overflowed(EG(stack_limit))` with
+/// `zend_call_stack_size_error`: php's `Error` where the thread has come
+/// down to its stack limit, what a native that recurses over a value
+/// asks at each level, as `php_var_serialize_intern` does, so a value
+/// nested past what the stack holds is refused and not a crash.
+///
+/// ```php
+/// $o = $first = new stdClass;
+/// for ($i = 0; $i < 100000; $i++) { $o->next = new stdClass; $o = $o->next; }
+/// try { serialize($first); } catch (Error $e) { echo preg_replace('/\d+ bytes/', 'N bytes', $e->getMessage()), "\n"; }
+/// while ($next = $first->next ?? null) { $first->next = $next->next ?? null; }
+/// ```
+/// ```expect
+/// Maximum call stack size of N bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?
+/// ```
+pub fn call_stack_limit(req: &mut Request) -> Result<(), Thrown> {
+    let stack = req.stack_limit();
+    if !stack.overflowed() {
+        return Ok(());
+    }
+    let size = stack.max_stack_size();
+    Err(throw(
+        req,
+        "Error",
+        &format!(
+            "Maximum call stack size of {size} bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?"
+        ),
+    ))
+}
+
 /// `E_ERROR`: `php_error_cb` renders it where the request stands and the
 /// request ends after this; the `Thrown` says so.
 pub fn fatal(req: &mut Request, message: &str) -> Thrown {
