@@ -4,37 +4,10 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_ext::decl::FunctionDecl;
+use php_ext::attr::php_function;
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::Request;
-use php_ext::values::Value;
-
-use crate::output::Entry;
-use crate::stub::stub;
-use crate::zpp::{optional_long, string_value};
-use crate::{argument_count_between, string_argument};
-
-/// The one.
-///
-/// ```php
-/// echo new ReflectionFunction('metaphone');
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function metaphone ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> string $string ]
-///     Parameter #1 [ <optional> int $max_phonemes = 0 ]
-///   }
-///   - Return [ string ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![(
-        stub("metaphone(string $string, int $max_phonemes = 0): string"),
-        metaphone as Entry,
-    )]
-}
+use php_ext::values::PhpString;
 
 /// `_codes`, the letter classes: 1 a vowel, 2 unchanged, 4 affects a
 /// following H, 8 softens C and G, 16 stops GH becoming F.
@@ -239,10 +212,29 @@ fn phonize(word: &[u8], max: usize) -> Vec<u8> {
 /// string(5) "SXSXX"
 /// metaphone(): Argument #2 ($max_phonemes) must be greater than or equal to 0
 /// ```
-fn metaphone(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let string = string_argument(req, 1)?;
-    let phones = optional_long(req, 2, 0)?;
+///
+/// The declarations as Reflection renders them.
+///
+/// ```php
+/// echo new ReflectionFunction('metaphone');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function metaphone ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> string $string ]
+///     Parameter #1 [ <optional> int $max_phonemes = 0 ]
+///   }
+///   - Return [ string ]
+/// }
+/// ```
+#[php_function]
+fn metaphone(
+    req: &mut Request,
+    string: PhpString,
+    #[php(default = 0)] max_phonemes: i64,
+) -> Result<PhpString, Thrown> {
+    let phones = max_phonemes;
     if phones < 0 {
         return Err(arg_value_error(req, 2, "be greater than or equal to 0"));
     }
@@ -250,5 +242,5 @@ fn metaphone(req: &mut Request) -> Result<Value, Thrown> {
         string.as_bytes(),
         usize::try_from(phones).unwrap_or(usize::MAX),
     );
-    string_value(req, &out)
+    PhpString::new(req, &out)
 }

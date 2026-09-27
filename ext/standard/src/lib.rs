@@ -244,7 +244,10 @@ pub fn extension() -> Extension {
         .functions(head::natives())
         .functions(var::natives())
         .functions(formatted_print::natives())
-        .functions(base64::natives())
+        .functions(vec![
+            base64::base64_encode::declared(),
+            base64::base64_decode::declared(),
+        ])
         .functions(exec::natives())
         .functions(file::natives())
         .functions(filestat::natives())
@@ -321,27 +324,39 @@ fn file_natives() -> Vec<(FunctionDecl, output::Entry)> {
         string::natives(),
         url::natives(),
         html::natives(),
-        md5::natives(),
-        sha1::natives(),
-        crc32::natives(),
+        vec![md5::md5::declared(), md5::md5_file::declared()],
+        vec![sha1::sha1::declared(), sha1::sha1_file::declared()],
+        vec![crc32::crc32::declared()],
         pack::natives(),
         http::natives(),
-        quot_print::natives(),
-        uuencode::natives(),
-        metaphone::natives(),
-        soundex::natives(),
-        levenshtein::natives(),
-        uniqid::natives(),
+        vec![
+            quot_print::quoted_printable_decode::declared(),
+            quot_print::quoted_printable_encode::declared(),
+        ],
+        vec![
+            uuencode::convert_uuencode::declared(),
+            uuencode::convert_uudecode::declared(),
+        ],
+        vec![metaphone::metaphone::declared()],
+        vec![soundex::soundex::declared()],
+        vec![levenshtein::levenshtein::declared()],
+        vec![uniqid::uniqid::declared()],
         microtime::natives(),
         hrtime::natives(),
-        versioning::natives(),
+        vec![versioning::version_compare::declared()],
         basic_functions::natives(),
         dir::natives(),
         link::natives(),
         dl::natives(),
         streamsfuncs::natives(),
-        crypt::natives(),
-        password::natives(),
+        vec![crypt::crypt::declared()],
+        vec![
+            password::password_get_info::declared(),
+            password::password_hash::declared(),
+            password::password_needs_rehash::declared(),
+            password::password_verify::declared(),
+            password::password_algos::declared(),
+        ],
         assert::natives(),
         pageinfo::natives(),
         syslog::natives(),
@@ -374,8 +389,8 @@ fn file_constants() -> Vec<ConstDecl> {
         basic_functions::constants(),
         dir::constants(),
         streamsfuncs::constants(),
-        crypt::constants(),
-        password::constants(),
+        crypt::constants::declared(),
+        password::constants::declared(),
         assert::constants(),
         syslog::constants(),
         image::constants(),

@@ -7,62 +7,11 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_ext::decl::{ConstExpr, FunctionDecl, Parameter, ParameterDefault, Type};
+use php_ext::abi::OrFalse;
+use php_ext::attr::php_function;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{PhpString, Value};
-
-use crate::output::Entry;
-use crate::{argument_count_between, bool_argument, declared, parameter, string_argument};
-
-/// The two, in the stub's order.
-///
-/// ```php
-/// echo new ReflectionFunction('base64_encode'), new ReflectionFunction('base64_decode');
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function base64_encode ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> string $string ]
-///   }
-///   - Return [ string ]
-/// }
-/// Function [ <internal:standard> function base64_decode ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> string $string ]
-///     Parameter #1 [ <optional> bool $strict = false ]
-///   }
-///   - Return [ string|false ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        (
-            declared(
-                b"base64_encode",
-                &[parameter(b"string", Type::String)],
-                Type::String,
-            ),
-            base64_encode as Entry,
-        ),
-        (
-            declared(
-                b"base64_decode",
-                &[
-                    parameter(b"string", Type::String),
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Bool(false)),
-                        ..parameter(b"strict", Type::Bool)
-                    },
-                ],
-                Type::Union(vec![Type::String, Type::False]),
-            ),
-            base64_decode as Entry,
-        ),
-    ]
-}
+use php_ext::values::PhpString;
 
 /// `base64_table`: the sixty-four digits, in order.
 const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -102,14 +51,35 @@ const PAD: u8 = b'=';
 /// base64_encode() expects exactly 1 argument, 0 given
 /// base64_encode(): Argument #1 ($string) must be of type string, array given
 /// ```
-fn base64_encode(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let string = string_argument(req, 1)?;
+///
+/// The two declarations, in the stub's order.
+///
+/// ```php
+/// echo new ReflectionFunction('base64_encode'), new ReflectionFunction('base64_decode');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function base64_encode ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <required> string $string ]
+///   }
+///   - Return [ string ]
+/// }
+/// Function [ <internal:standard> function base64_decode ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> string $string ]
+///     Parameter #1 [ <optional> bool $strict = false ]
+///   }
+///   - Return [ string|false ]
+/// }
+/// ```
+#[php_function]
+fn base64_encode(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
     let input = string.as_bytes();
-    let encoded = PhpString::product(req, input.len().div_ceil(3), 4, 0, |out| {
+    PhpString::product(req, input.len().div_ceil(3), 4, 0, |out| {
         encode_into(input, out);
-    })?;
-    Ok(Value::string(encoded))
+    })
 }
 
 /// `php_base64_encode`, for the extensions that include `base64.h`: the
@@ -244,17 +214,15 @@ fn digit(byte: u8) -> Digit {
 /// string(0) ""
 /// base64_decode() expects at most 2 arguments, 3 given
 /// ```
-fn base64_decode(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let string = string_argument(req, 1)?;
-    let strict = if req.argument_count() == 2 {
-        bool_argument(req, 2)?
-    } else {
-        false
-    };
+#[php_function]
+fn base64_decode(
+    req: &mut Request,
+    string: PhpString,
+    #[php(default = false)] strict: bool,
+) -> Result<OrFalse<PhpString>, Thrown> {
     match decode(string.as_bytes(), strict) {
-        Some(decoded) => Ok(Value::string(PhpString::new(req, &decoded)?)),
-        None => Ok(Value::bool(false)),
+        Some(decoded) => PhpString::new(req, &decoded).map(OrFalse::Value),
+        None => Ok(OrFalse::False),
     }
 }
 

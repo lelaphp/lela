@@ -4,32 +4,8 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_ext::decl::FunctionDecl;
-use php_ext::raising::Thrown;
-use php_ext::request::Request;
-use php_ext::values::Value;
-
-use crate::output::Entry;
-use crate::stub::stub;
-use crate::{argument_count_between, string_argument};
-
-/// The one.
-///
-/// ```php
-/// echo new ReflectionFunction('crc32');
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function crc32 ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> string $string ]
-///   }
-///   - Return [ int ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![(stub("crc32(string $string): int"), crc32 as Entry)]
-}
+use php_ext::attr::php_function;
+use php_ext::values::PhpString;
 
 /// `crc32tab`: the reflected table of `0xEDB88320`.
 const fn table() -> [u32; 256] {
@@ -93,8 +69,22 @@ pub fn update(mut crc: u32, data: &[u8]) -> u32 {
 /// int(64128641)
 /// string(9) "907060870"
 /// ```
-fn crc32(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let string = string_argument(req, 1)?;
-    Ok(Value::int(i64::from(crc(string.as_bytes()))))
+///
+/// The declarations as Reflection renders them.
+///
+/// ```php
+/// echo new ReflectionFunction('crc32');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function crc32 ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <required> string $string ]
+///   }
+///   - Return [ int ]
+/// }
+/// ```
+#[php_function]
+fn crc32(string: PhpString) -> i64 {
+    i64::from(crc(string.as_bytes()))
 }

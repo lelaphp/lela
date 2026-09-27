@@ -5,49 +5,11 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_ext::decl::FunctionDecl;
+use php_ext::abi::OrFalse;
+use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::Value;
-
-use crate::output::Entry;
-use crate::stub::stub;
-use crate::zpp::string_value;
-use crate::{argument_count_between, string_argument};
-
-/// The two, in the stub's order.
-///
-/// ```php
-/// echo new ReflectionFunction('convert_uuencode'), new ReflectionFunction('convert_uudecode');
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function convert_uuencode ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> string $string ]
-///   }
-///   - Return [ string ]
-/// }
-/// Function [ <internal:standard> function convert_uudecode ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> string $string ]
-///   }
-///   - Return [ string|false ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        (
-            stub("convert_uuencode(string $string): string"),
-            convert_uuencode as Entry,
-        ),
-        (
-            stub("convert_uudecode(string $string): string|false"),
-            convert_uudecode,
-        ),
-    ]
-}
+use php_ext::values::PhpString;
 
 /// `PHP_UU_ENC(c)`.
 const fn enc(c: u8) -> u8 {
@@ -184,11 +146,32 @@ fn uudecode(src: &[u8]) -> Option<Vec<u8>> {
 /// `
 /// "
 /// ```
-fn convert_uuencode(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let string = string_argument(req, 1)?;
+///
+/// The declarations as Reflection renders them.
+///
+/// ```php
+/// echo new ReflectionFunction('convert_uuencode'), new ReflectionFunction('convert_uudecode');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function convert_uuencode ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <required> string $string ]
+///   }
+///   - Return [ string ]
+/// }
+/// Function [ <internal:standard> function convert_uudecode ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <required> string $string ]
+///   }
+///   - Return [ string|false ]
+/// }
+/// ```
+#[php_function]
+fn convert_uuencode(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
     let out = uuencode(string.as_bytes());
-    string_value(req, &out)
+    PhpString::new(req, &out)
 }
 
 /// `convert_uudecode(string $string): string|false`, and php's warning
@@ -208,16 +191,15 @@ fn convert_uuencode(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(false)
 /// ```
-fn convert_uudecode(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let string = string_argument(req, 1)?;
+#[php_function]
+fn convert_uudecode(req: &mut Request, string: PhpString) -> Result<OrFalse<PhpString>, Thrown> {
     let Some(out) = uudecode(string.as_bytes()) else {
         docref(
             req,
             Level::Warning,
             "Argument #1 ($data) is not a valid uuencoded string",
         );
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     };
-    string_value(req, &out)
+    PhpString::new(req, &out).map(OrFalse::Value)
 }

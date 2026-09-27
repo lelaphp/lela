@@ -5,51 +5,11 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_ext::decl::FunctionDecl;
+use php_ext::abi::{OrFalse, Raw};
+use php_ext::attr::php_function;
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::Request;
-use php_ext::values::{PhpString, Value};
-
-use crate::output::Entry;
-use crate::stub::stub;
-use crate::zpp::{optional_bool, string_value};
-use crate::{argument_count_between, string_argument};
-
-/// The two, in the stub's order.
-///
-/// ```php
-/// echo new ReflectionFunction('md5'), new ReflectionFunction('md5_file');
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function md5 ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> string $string ]
-///     Parameter #1 [ <optional> bool $binary = false ]
-///   }
-///   - Return [ string ]
-/// }
-/// Function [ <internal:standard> function md5_file ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> string $filename ]
-///     Parameter #1 [ <optional> bool $binary = false ]
-///   }
-///   - Return [ string|false ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        (
-            stub("md5(string $string, bool $binary = false): string"),
-            md5 as Entry,
-        ),
-        (
-            stub("md5_file(string $filename, bool $binary = false): string|false"),
-            md5_file,
-        ),
-    ]
-}
+use php_ext::values::PhpString;
 
 /// `PHP_MD5_CTX` in php's own layout, `lo, hi, a, b, c, d`, the block
 /// not yet full and the last block's words, which ext/hash's
@@ -274,11 +234,11 @@ pub(super) fn digest_value(
     req: &mut Request,
     digest: &[u8],
     binary: bool,
-) -> Result<Value, Thrown> {
+) -> Result<PhpString, Thrown> {
     if binary {
-        string_value(req, digest)
+        PhpString::new(req, digest)
     } else {
-        string_value(req, &hex_digest(digest))
+        PhpString::new(req, &hex_digest(digest))
     }
 }
 
@@ -295,27 +255,65 @@ pub(super) fn digest_value(
 /// string(32) "900150983cd24fb0d6963f7d28e17f72"
 /// string(32) "202cb962ac59075b964b07152d234b70"
 /// ```
-fn md5(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let string = string_argument(req, 1)?;
-    let binary = optional_bool(req, 2, false)?;
+///
+/// The declarations as Reflection renders them.
+///
+/// ```php
+/// echo new ReflectionFunction('md5'), new ReflectionFunction('md5_file');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function md5 ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> string $string ]
+///     Parameter #1 [ <optional> bool $binary = false ]
+///   }
+///   - Return [ string ]
+/// }
+/// Function [ <internal:standard> function md5_file ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> string $filename ]
+///     Parameter #1 [ <optional> bool $binary = false ]
+///   }
+///   - Return [ string|false ]
+/// }
+/// ```
+#[php_function]
+fn md5(
+    req: &mut Request,
+    string: PhpString,
+    #[php(default = false)] binary: bool,
+) -> Result<PhpString, Thrown> {
     let mut context = Md5::new();
     context.update(string.as_bytes());
     let digest = context.finish();
     digest_value(req, &digest, binary)
 }
 
-/// `Z_PARAM_PATH`: a string with no null byte in it. What
+/// `Z_PARAM_PATH`'s check over the string held at `position`: none
+/// with a null byte in it. `md5_file` and `sha1_file` hold `$binary`
+/// raw and after this, where php's ZPP reaches it. What
 /// `php_stream_open_wrapper(arg, "rb", REPORT_ERRORS, NULL)` and the
-/// read loop `md5_file` and `sha1_file` share then read is every byte
-/// of the file, or `None` after the warning the open left or a read
-/// that stopped short of the end.
-pub(super) fn path_argument(req: &mut Request, position: u32) -> Result<PhpString, Thrown> {
-    let filename = string_argument(req, position)?;
+/// read loop the two share then read is every byte of the file, or
+/// `None` after the warning the open left or a read that stopped short
+/// of the end.
+pub(super) fn path_checked(
+    req: &mut Request,
+    filename: PhpString,
+    position: u32,
+) -> Result<PhpString, Thrown> {
     if filename.as_bytes().contains(&0) {
         return Err(arg_value_error(req, position, "not contain any null bytes"));
     }
     Ok(filename)
+}
+
+/// `Z_PARAM_PATH` at `position`, read by hand, for the natives outside
+/// this file that still do.
+pub(super) fn path_argument(req: &mut Request, position: u32) -> Result<PhpString, Thrown> {
+    let filename = crate::string_argument(req, position)?;
+    path_checked(req, filename, position)
 }
 
 /// The file's bytes, read as `md5_file`'s loop reads them.
@@ -352,15 +350,28 @@ pub(super) fn file_bytes(
 /// bool(false)
 /// md5_file(): Argument #1 ($filename) must not contain any null bytes
 /// ```
-fn md5_file(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let filename = path_argument(req, 1)?;
-    let binary = optional_bool(req, 2, false)?;
+///
+/// ```php
+/// try { md5_file("a\0b", []); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// try { md5_file("a", []); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// md5_file(): Argument #1 ($filename) must not contain any null bytes
+/// md5_file(): Argument #2 ($binary) must be of type bool, array given
+/// ```
+#[php_function]
+fn md5_file(
+    req: &mut Request,
+    filename: PhpString,
+    #[php(default = false)] binary: Raw<bool>,
+) -> Result<OrFalse<PhpString>, Thrown> {
+    let filename = path_checked(req, filename, 1)?;
+    let binary = binary.hold(req)?;
     let Some(bytes) = file_bytes(req, filename)? else {
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     };
     let mut context = Md5::new();
     context.update(&bytes);
     let digest = context.finish();
-    digest_value(req, &digest, binary)
+    digest_value(req, &digest, binary).map(OrFalse::Value)
 }

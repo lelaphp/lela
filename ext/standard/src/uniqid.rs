@@ -7,42 +7,15 @@
 use std::hash::{BuildHasher, Hasher};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use php_ext::decl::FunctionDecl;
+use php_ext::attr::php_function;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::Value;
-
-use crate::argument_count_between;
-use crate::output::Entry;
-use crate::stub::stub;
-use crate::zpp::{optional_bool, optional_string, string_value};
+use php_ext::values::PhpString;
 
 /// The request state: `prev_tv`, the last time a call answered with.
 #[derive(Default)]
 pub(super) struct State {
     prev: Option<(u64, u32)>,
-}
-
-/// The one.
-///
-/// ```php
-/// echo new ReflectionFunction('uniqid');
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function uniqid ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <optional> string $prefix = "" ]
-///     Parameter #1 [ <optional> bool $more_entropy = false ]
-///   }
-///   - Return [ string ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![(
-        stub("uniqid(string $prefix = \"\", bool $more_entropy = false): string"),
-        uniqid as Entry,
-    )]
 }
 
 /// `gettimeofday()`: the seconds and microseconds since the epoch.
@@ -85,10 +58,28 @@ fn random_u32() -> u32 {
 /// bool(true)
 /// bool(true)
 /// ```
-fn uniqid(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 2)?;
-    let prefix = optional_string(req, 1)?;
-    let more_entropy = optional_bool(req, 2, false)?;
+///
+/// The declarations as Reflection renders them.
+///
+/// ```php
+/// echo new ReflectionFunction('uniqid');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function uniqid ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <optional> string $prefix = "" ]
+///     Parameter #1 [ <optional> bool $more_entropy = false ]
+///   }
+///   - Return [ string ]
+/// }
+/// ```
+#[php_function]
+fn uniqid(
+    req: &mut Request,
+    #[php(default = "")] prefix: PhpString,
+    #[php(default = false)] more_entropy: bool,
+) -> Result<PhpString, Thrown> {
     let previous = req.state::<crate::State>().uniqid.prev;
     let mut tv = now();
     while Some(tv) == previous {
@@ -98,11 +89,11 @@ fn uniqid(req: &mut Request) -> Result<Value, Thrown> {
     // `sec = (int) tv.tv_sec`, `usec = (int) (tv.tv_usec % 0x100000)`.
     let sec = u32::try_from(tv.0 & u64::from(u32::MAX)).unwrap_or(0);
     let usec = tv.1 % 0x0010_0000;
-    let mut out = prefix.map(|p| p.as_bytes().to_vec()).unwrap_or_default();
+    let mut out = prefix.as_bytes().to_vec();
     out.extend_from_slice(format!("{sec:08x}{usec:05x}").as_bytes());
     if more_entropy {
         let seed = f64::from(random_u32()) / f64::from(u32::MAX) * 10.0;
         out.extend_from_slice(format!("{seed:.8}").as_bytes());
     }
-    string_value(req, &out)
+    PhpString::new(req, &out)
 }

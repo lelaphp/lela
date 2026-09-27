@@ -3,42 +3,8 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_ext::decl::FunctionDecl;
-use php_ext::raising::Thrown;
-use php_ext::request::Request;
-use php_ext::values::Value;
-
-use crate::output::Entry;
-use crate::stub::stub;
-use crate::zpp::optional_long;
-use crate::{argument_count_between, string_argument};
-
-/// The one.
-///
-/// ```php
-/// echo new ReflectionFunction('levenshtein');
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function levenshtein ] {
-///
-///   - Parameters [5] {
-///     Parameter #0 [ <required> string $string1 ]
-///     Parameter #1 [ <required> string $string2 ]
-///     Parameter #2 [ <optional> int $insertion_cost = 1 ]
-///     Parameter #3 [ <optional> int $replacement_cost = 1 ]
-///     Parameter #4 [ <optional> int $deletion_cost = 1 ]
-///   }
-///   - Return [ int ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![(
-        stub(
-            "levenshtein(string $string1, string $string2, int $insertion_cost = 1, int $replacement_cost = 1, int $deletion_cost = 1): int",
-        ),
-        levenshtein as Entry,
-    )]
-}
+use php_ext::attr::php_function;
+use php_ext::values::PhpString;
 
 /// `reference_levdist(string1, string2, cost_ins, cost_rep, cost_del)`.
 fn levdist<'a>(mut a: &'a [u8], mut b: &'a [u8], ins: i64, rep: i64, del: i64) -> i64 {
@@ -89,18 +55,38 @@ fn levdist<'a>(mut a: &'a [u8], mut b: &'a [u8], ins: i64, rep: i64, del: i64) -
 /// int(4)
 /// int(300)
 /// ```
-fn levenshtein(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 5)?;
-    let a = string_argument(req, 1)?;
-    let b = string_argument(req, 2)?;
-    let ins = optional_long(req, 3, 1)?;
-    let rep = optional_long(req, 4, 1)?;
-    let del = optional_long(req, 5, 1)?;
-    Ok(Value::int(levdist(
-        a.as_bytes(),
-        b.as_bytes(),
-        ins,
-        rep,
-        del,
-    )))
+///
+/// The declarations as Reflection renders them.
+///
+/// ```php
+/// echo new ReflectionFunction('levenshtein');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function levenshtein ] {
+///
+///   - Parameters [5] {
+///     Parameter #0 [ <required> string $string1 ]
+///     Parameter #1 [ <required> string $string2 ]
+///     Parameter #2 [ <optional> int $insertion_cost = 1 ]
+///     Parameter #3 [ <optional> int $replacement_cost = 1 ]
+///     Parameter #4 [ <optional> int $deletion_cost = 1 ]
+///   }
+///   - Return [ int ]
+/// }
+/// ```
+#[php_function]
+fn levenshtein(
+    string1: PhpString,
+    string2: PhpString,
+    #[php(default = 1)] insertion_cost: i64,
+    #[php(default = 1)] replacement_cost: i64,
+    #[php(default = 1)] deletion_cost: i64,
+) -> i64 {
+    levdist(
+        string1.as_bytes(),
+        string2.as_bytes(),
+        insertion_cost,
+        replacement_cost,
+        deletion_cost,
+    )
 }

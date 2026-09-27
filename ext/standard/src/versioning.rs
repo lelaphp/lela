@@ -7,40 +7,11 @@
 
 use std::cmp::Ordering;
 
-use php_ext::decl::FunctionDecl;
+use php_ext::abi::Union;
+use php_ext::attr::php_function;
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::Request;
-use php_ext::values::Value;
-
-use crate::output::Entry;
-use crate::stub::stub;
-use crate::zpp::nullable_string;
-use crate::{argument_count_between, string_argument};
-
-/// The one.
-///
-/// ```php
-/// echo new ReflectionFunction('version_compare');
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function version_compare ] {
-///
-///   - Parameters [3] {
-///     Parameter #0 [ <required> string $version1 ]
-///     Parameter #1 [ <required> string $version2 ]
-///     Parameter #2 [ <optional> ?string $operator = null ]
-///   }
-///   - Return [ int|bool ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![(
-        stub(
-            "version_compare(string $version1, string $version2, ?string $operator = null): int|bool",
-        ),
-        version_compare as Entry,
-    )]
-}
+use php_ext::values::PhpString;
 
 /// `php_canonicalize_version(version)`: `-`, `_` and `+` as `.`, a `.`
 /// between a digit and a letter either way, any other non-alphanumeric
@@ -223,16 +194,35 @@ fn version_cmp(v1: &[u8], v2: &[u8]) -> i64 {
 /// bool(false)
 /// version_compare(): Argument #3 ($operator) must be a valid comparison operator
 /// ```
-fn version_compare(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 3)?;
-    let v1 = string_argument(req, 1)?;
-    let v2 = string_argument(req, 2)?;
-    let op = nullable_string(req, 3)?;
+///
+/// The declarations as Reflection renders them.
+///
+/// ```php
+/// echo new ReflectionFunction('version_compare');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function version_compare ] {
+///
+///   - Parameters [3] {
+///     Parameter #0 [ <required> string $version1 ]
+///     Parameter #1 [ <required> string $version2 ]
+///     Parameter #2 [ <optional> ?string $operator = null ]
+///   }
+///   - Return [ int|bool ]
+/// }
+/// ```
+#[php_function]
+fn version_compare(
+    req: &mut Request,
+    version1: PhpString,
+    version2: PhpString,
+    #[php(default = null)] operator: Option<PhpString>,
+) -> Result<Union<i64, bool>, Thrown> {
     // Both are C strings to php: each ends at its first NUL.
     let c_str = |s: &[u8]| s.split(|c| *c == 0).next().unwrap_or(&[]).to_vec();
-    let compare = version_cmp(&c_str(v1.as_bytes()), &c_str(v2.as_bytes()));
-    let Some(op) = op else {
-        return Ok(Value::int(compare));
+    let compare = version_cmp(&c_str(version1.as_bytes()), &c_str(version2.as_bytes()));
+    let Some(op) = operator else {
+        return Ok(Union::A(compare));
     };
     let holds = match op.as_bytes() {
         b"<" | b"lt" => compare == -1,
@@ -243,5 +233,5 @@ fn version_compare(req: &mut Request) -> Result<Value, Thrown> {
         b"!=" | b"<>" | b"ne" => compare != 0,
         _ => return Err(arg_value_error(req, 3, "be a valid comparison operator")),
     };
-    Ok(Value::bool(holds))
+    Ok(Union::B(holds))
 }
