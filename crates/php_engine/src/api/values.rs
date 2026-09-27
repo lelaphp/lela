@@ -1026,6 +1026,53 @@ impl PhpObject {
         req.unserialize_property(*self, key, value)
     }
 
+    /// What `unserialize()` holds a declared typed property to once the
+    /// value under `key`, mangled as [`PhpObject::unserialize_prop`]
+    /// takes it, is read into it: the type under strict rules, and a
+    /// reference to every type its other properties hold it to, which
+    /// from here include this one. The `Err` is php's `TypeError`, and
+    /// the slot is left uninitialized; an untyped or undeclared key holds
+    /// to nothing.
+    ///
+    /// ```php
+    /// class C { public int $a; public string $b; }
+    /// class D { public int $a; public float $b; }
+    /// var_dump(unserialize('O:1:"C":2:{s:1:"a";i:1;s:1:"b";s:1:"x";}'));
+    /// foreach (['O:1:"C":1:{s:1:"a";N;}', 'O:1:"C":2:{s:1:"a";i:1;s:1:"b";R:2;}', 'O:1:"D":2:{s:1:"a";i:1;s:1:"b";R:2;}'] as $s) {
+    ///     try { unserialize($s); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// }
+    /// ```
+    /// ```expect
+    /// object(C)#1 (2) {
+    ///   ["a"]=>
+    ///   int(1)
+    ///   ["b"]=>
+    ///   string(1) "x"
+    /// }
+    /// Cannot assign null to property C::$a of type int
+    /// Cannot assign int to property C::$b of type string
+    /// Reference with value of type int held by property D::$a of type int is not compatible with property D::$b of type float
+    /// ```
+    ///
+    /// A readonly property is held to its type and to nothing more: what
+    /// the string writes into it, twice or not, stands.
+    ///
+    /// ```php
+    /// class R { public function __construct(public readonly int $p = 1) {} }
+    /// var_dump(unserialize('O:1:"R":2:{s:1:"p";i:2;s:1:"p";i:3;}'));
+    /// try { unserialize('O:1:"R":1:{s:1:"p";s:1:"x";}'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// object(R)#1 (1) {
+    ///   ["p"]=>
+    ///   int(3)
+    /// }
+    /// Cannot assign string to property R::$p of type int
+    /// ```
+    pub fn unserialize_verify(&self, req: &mut Request, key: &[u8]) -> Result<(), Thrown> {
+        req.unserialize_verify(*self, key)
+    }
+
     /// One declared property by slot, `OBJ_PROP_NUM(obj, index)` by
     /// index among the class's declared instance properties, in
     /// declaration order: a view, no owner taken, and `None` for an

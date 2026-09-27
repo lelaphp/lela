@@ -60,6 +60,10 @@ pub(crate) struct VarHash {
     allowed: Allowed,
     max_depth: i64,
     depth: i64,
+    /// `ref_props`: the slots of typed properties whose value was read
+    /// and held to the type, which an `R:` naming them later makes a
+    /// source of the cell it puts there.
+    ref_props: Vec<usize>,
 }
 
 /// `allowed_classes`: every class, php's null table, or those of the
@@ -981,6 +985,13 @@ impl State<'_> {
                         let cell = PhpRef::new(req, held)?;
                         let at = id - 1;
                         self.write(req, &held_slot, Some(at), cell.as_value())?;
+                        // `ref_props`: a typed property whose value was read
+                        // becomes a source of the cell it now holds.
+                        if let Slot::Property(object, name) = &held_slot
+                            && self.hash.ref_props.contains(&at)
+                        {
+                            object.unserialize_verify(req, name.as_bytes())?;
+                        }
                         cell
                     };
                     req.addref(&cell.as_value());
@@ -1626,8 +1637,15 @@ impl State<'_> {
                 req.release(Value::string(name));
                 return Ok(false);
             }
+            let at = self.hash.slots.len();
             if !self.value(req, Some(Slot::Property(object, name)))? {
                 return Ok(false);
+            }
+            object.unserialize_verify(req, &key)?;
+            // An `R:` value numbered no slot of its own.
+            if matches!(self.hash.slots.get(at), Some(Some((Slot::Property(of, _), _))) if *of == object)
+            {
+                self.hash.ref_props.push(at);
             }
             if elements > 0 && !matches!(self.at(self.p - 1), b';' | b'}') {
                 self.p -= 1;

@@ -655,6 +655,7 @@ values::PhpObject::slot
 values::PhpObject::typed_row_ref
 values::PhpObject::unprotect
 values::PhpObject::unserialize_prop
+values::PhpObject::unserialize_verify
 values::PhpObject::unset_row
 values::PhpRef
 values::PhpRef::as_value
