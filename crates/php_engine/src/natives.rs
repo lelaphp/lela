@@ -1510,14 +1510,10 @@ fn dump_members(
             MemberRow::Dynamic { .. } => true,
         })
         .count();
-    let class_name = req.class_name(class);
-    out.extend_from_slice(
-        format!(
-            "{common}object({class_name})#{} ({count}) {{\n",
-            object.index()
-        )
-        .as_bytes(),
-    );
+    // The name as its bytes stand, as php's `%s` prints `ZSTR_VAL`.
+    out.extend_from_slice(format!("{common}object(").as_bytes());
+    out.extend_from_slice(php_unit::decl::shown_bytes(&req.class_name_bytes(class)));
+    out.extend_from_slice(format!(")#{} ({count}) {{\n", object.index()).as_bytes());
     for row in rows {
         match row {
             // `IS_INDIRECT`: the slot is read as the row prints, so one a
@@ -1655,15 +1651,11 @@ fn dump_rows(
     rows: PhpArray,
     level: usize,
 ) {
-    let class_name = req.class_name(object.class());
-    out.extend_from_slice(
-        format!(
-            "{common}object({class_name})#{} ({}) {{\n",
-            object.index(),
-            rows.len()
-        )
-        .as_bytes(),
-    );
+    out.extend_from_slice(format!("{common}object(").as_bytes());
+    out.extend_from_slice(php_unit::decl::shown_bytes(
+        &req.class_name_bytes(object.class()),
+    ));
+    out.extend_from_slice(format!(")#{} ({}) {{\n", object.index(), rows.len()).as_bytes());
     for (key, value) in rows.snapshot() {
         match &key {
             Key::Int(at) => {
