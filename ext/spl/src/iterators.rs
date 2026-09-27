@@ -15,11 +15,11 @@
 //! compiled once, by ext/pcre, whichever extension asked.
 
 use php_ext::abi::{
-    Callable, Class, CloneObj, ExtensionBuilder, False, FromArgument, Instance, Never,
-    ObjectHandlers, OrFalse, Raw, This, Union, Untyped,
+    Callable, Class, ClassIterator, CloneObj, ExtensionBuilder, False, FromArgument, Instance,
+    Never, ObjectHandlers, OrFalse, Raw, Std, This, Union, Untyped,
 };
 use php_ext::attr::php_class;
-use php_ext::call::{call, call_method, instantiate, lookup_class, read_prop};
+use php_ext::call::{Function, call, call_method, instantiate, lookup_class, read_prop};
 use php_ext::coerce::{coerce_param, to_string, truthy};
 use php_ext::decl::Type;
 use php_ext::raising::{Thrown, arg_type_error, arg_value_error, arity, throw, throwing_warnings};
@@ -322,11 +322,7 @@ impl RecursiveIteratorIterator {
     #[php(tentative)]
     fn key(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
         let this = rec_checked(req, this.object())?;
-        let Some(level) = top(req, this)? else {
-            return Ok(Value::null());
-        };
-        let key = crate::method(req, level.iterator, b"key")?;
-        Ok(crate::owned(req, key))
+        rec_key(req, this)
     }
 
     /// `current(): mixed`, the sub-iterator's.
@@ -2879,6 +2875,15 @@ fn rec_checked(req: &mut Request, this: PhpObject) -> Result<PhpObject, Thrown> 
     Ok(this)
 }
 
+/// The sub-iterator's `key()`.
+fn rec_key(req: &mut Request, this: PhpObject) -> Result<Value, Thrown> {
+    let Some(level) = top(req, this)? else {
+        return Ok(Value::null());
+    };
+    let key = crate::method(req, level.iterator, b"key")?;
+    Ok(crate::owned(req, key))
+}
+
 /// The sub-iterator's `current()`, what `RecursiveIteratorIterator` and a
 /// `BYPASS_CURRENT` tree answer.
 fn rec_current(req: &mut Request, this: PhpObject) -> Result<Value, Thrown> {
@@ -2944,12 +2949,18 @@ fn rec_forward(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
         let Some(level) = top(req, this)? else {
             return Ok(());
         };
-        let iterator = level.iterator;
+        let mut iterator = level.iterator;
         let mut state = level.state;
         if state == State::Next {
             if let Err(thrown) = crate::effect(req, iterator, b"next") {
                 caught(req, this, thrown)?;
             }
+            // `next()` may have rewound the walk, which cuts the stack
+            // back to the root: the step goes on at the level it left.
+            let Some(level) = top(req, this)? else {
+                return Ok(());
+            };
+            iterator = level.iterator;
             state = State::Start;
         }
         let mut ended = false;
@@ -3095,6 +3106,9 @@ fn rec_forward(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
         })?;
         if let Some(level) = popped {
             req.release(level.iterator.as_value());
+            // `while (!EG(exception))`: a sub-iterator's destructor that
+            // throws ends the step.
+            php_ext::raising::pending(req)?;
         }
     }
 }
@@ -3137,14 +3151,42 @@ fn rec_valid(req: &mut Request, this: PhpObject) -> Result<bool, Thrown> {
 }
 
 impl ObjectHandlers for RecHandlers {
+    /// `spl_RecursiveIteratorIterator_free_storage`: what the
+    /// destructor left, the deepest level first.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        let levels = object
-            .native_mut::<RecIt>(req)
-            .map(|it| std::mem::take(&mut it.levels))
-            .unwrap_or_default();
-        for level in levels {
-            req.release(level.iterator.as_value());
-        }
+        release_levels(req, object);
+    }
+
+    /// `spl_RecursiveIteratorIterator_dtor`: the class's `__destruct`,
+    /// then every level given up, the deepest first, so a sub-iterator's
+    /// own destructor runs before its parent's.
+    ///
+    /// A loop's end cuts the walk back to its root first
+    /// (`spl_recursive_it_dtor`).
+    ///
+    /// ```php
+    /// class D extends RecursiveArrayIterator { function __destruct() { echo "dtor ", count($this), "\n"; } }
+    /// class R extends RecursiveIteratorIterator { function __destruct() { echo "rii\n"; } }
+    /// $it = new R(new D([[1, 2]]));
+    /// $it->rewind(); echo $it->current(), "\n";
+    /// unset($it);
+    /// foreach (new R(new D([[3], 4])) as $v) { echo $v, "\n"; break; }
+    /// echo "end\n";
+    /// ```
+    /// ```expect
+    /// 1
+    /// rii
+    /// dtor 2
+    /// dtor 1
+    /// 3
+    /// dtor 1
+    /// rii
+    /// dtor 2
+    /// end
+    /// ```
+    fn dtor_obj(&self, req: &mut Request, object: PhpObject) {
+        Std.dtor_obj(req, object);
+        release_levels(req, object);
     }
 
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
@@ -3157,6 +3199,82 @@ impl ObjectHandlers for RecHandlers {
 
     fn clone_obj(&self) -> Option<CloneObj> {
         None
+    }
+
+    /// `spl_recursive_it_get_iterator`: the walk the methods make,
+    /// served in no frame of its own, so a hook that throws is called
+    /// from the loop; php's `Error` over an object whose constructor
+    /// never ran. `RecursiveTreeIterator` declares `key()` and
+    /// `current()` itself, so `zend_implement_iterator` gives it
+    /// `zend_user_it_get_iterator` and its walk serves its methods.
+    ///
+    /// ```php
+    /// class Deep extends RecursiveIteratorIterator { function __construct() {} function endChildren(): void { throw new Exception("out"); } }
+    /// try { foreach (new Deep as $v) {} } catch (Error $e) { echo count($e->getTrace()), " ", $e->getMessage(), "\n"; }
+    /// class Out extends RecursiveIteratorIterator { function endChildren(): void { throw new Exception("out"); } }
+    /// try { foreach (new Out(new RecursiveArrayIterator([[1]])) as $v) echo $v, "\n"; } catch (Exception $e) { echo $e->getTrace()[0]['function'], " ", count($e->getTrace()), "\n"; }
+    /// foreach (new RecursiveTreeIterator(new RecursiveArrayIterator([1, [2]])) as $v) echo $v, "\n";
+    /// ```
+    /// ```expect
+    /// 0 Object is not initialized
+    /// 1
+    /// endChildren 1
+    /// |-1
+    /// \-Array
+    ///   \-2
+    /// ```
+    fn get_iterator(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        by_ref: bool,
+    ) -> Result<Option<Box<dyn ClassIterator>>, Thrown> {
+        if crate::is_a(req, object.class(), b"RecursiveTreeIterator") {
+            return Ok(None);
+        }
+        if by_ref {
+            return Err(throw(
+                req,
+                "Error",
+                "An iterator cannot be used with foreach by reference",
+            ));
+        }
+        if rec(req, object, |it| it.levels.is_empty())? {
+            return Err(throw(req, "Error", "Object is not initialized"));
+        }
+        Ok(Some(Box::new(RecWalk)))
+    }
+
+    /// `spl_recursive_it_get_method`'s refusal: any method called on an
+    /// object whose constructor never ran is php's `Error` naming its
+    /// class, before the class's own table is asked.
+    ///
+    /// ```php
+    /// class Lazy extends RecursiveIteratorIterator { function __construct() {} function bar() { return 1; } }
+    /// $it = new Lazy;
+    /// try { $it->bar(); } catch (Error $e) { echo count($e->getTrace()), " ", $e->getMessage(), "\n"; }
+    /// try { $it->valid(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// 0 The Lazy instance wasn't initialized properly
+    /// The Lazy instance wasn't initialized properly
+    /// ```
+    fn get_method(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        lowered: &[u8],
+    ) -> Result<Option<Function>, Thrown> {
+        if rec(req, object, |it| it.levels.is_empty())? {
+            let name =
+                String::from_utf8_lossy(&crate::class_name(req, object.class())).into_owned();
+            return Err(throw(
+                req,
+                "Error",
+                &format!("The {name} instance wasn't initialized properly"),
+            ));
+        }
+        Std.get_method(req, object, lowered)
     }
 
     /// `spl_recursive_it_get_method`: the iterator of the level the
@@ -3176,6 +3294,56 @@ impl ObjectHandlers for RecHandlers {
         object
             .native::<RecIt>(req)
             .and_then(|it| it.levels.last().map(|level| level.iterator))
+    }
+}
+
+/// Every level of a recursive iterator given up, the deepest first.
+fn release_levels(req: &mut Request, object: PhpObject) {
+    let levels = object
+        .native_mut::<RecIt>(req)
+        .map(|it| std::mem::take(&mut it.levels))
+        .unwrap_or_default();
+    for level in levels.into_iter().rev() {
+        req.release(level.iterator.as_value());
+    }
+}
+
+/// `spl_recursive_it_iterator`, whose functions are the methods' own
+/// walk over the object's levels (`spl_recursive_it_*_ex`); it keeps no
+/// state of its own.
+struct RecWalk;
+
+impl ClassIterator for RecWalk {
+    fn rewind(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
+        rec_rewind(req, object)
+    }
+
+    fn valid(&mut self, req: &mut Request, object: PhpObject) -> Result<bool, Thrown> {
+        rec_valid(req, object)
+    }
+
+    fn current(&mut self, req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
+        rec_current(req, object)
+    }
+
+    fn key(&mut self, req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
+        rec_key(req, object)
+    }
+
+    fn move_forward(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
+        rec_forward(req, object)
+    }
+
+    /// `spl_recursive_it_dtor`: every level but the root given up, the
+    /// deepest first.
+    fn release(&mut self, req: &mut Request, object: PhpObject) {
+        let levels = object
+            .native_mut::<RecIt>(req)
+            .map(|it| it.levels.split_off(it.levels.len().min(1)))
+            .unwrap_or_default();
+        for level in levels.into_iter().rev() {
+            req.release(level.iterator.as_value());
+        }
     }
 }
 

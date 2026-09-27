@@ -15450,6 +15450,18 @@ pub(crate) fn fe_reset_r<T: Tier>(
 /// ```expect
 /// [start]a=1 b=2 [empty]
 /// ```
+///
+/// What the reset threw stands pending while the operand and the
+/// iterator are given up, so a destructor that throws there chains it.
+///
+/// ```php
+/// class D extends RecursiveArrayIterator { function __destruct() { throw new Exception("dtor"); } }
+/// class R extends RecursiveIteratorIterator { function beginIteration(): void { throw new Exception("rewind"); } }
+/// try { foreach (new R(new D([1])) as $v) {} } catch (Exception $e) { echo $e->getMessage(), " ", $e->getPrevious()?->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// dtor rewind
+/// ```
 fn fe_reset_iterator(
     req: &mut Request,
     frame: FrameRef,
@@ -15465,14 +15477,23 @@ fn fe_reset_iterator(
     };
     let previous = req.set_slot(frame, exec::temporary_slot(code, op.out), held);
     req.release(previous);
-    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    let free = |req: &mut Request| exec::free_operand(req, frame, code, op.op1_type, op.op1);
     match reset {
-        Ok((_, false)) => Ok(advance(req, frame)),
-        Ok((_, true)) => {
-            req.vm_mut().jump(frame, op.op2);
-            Ok(Stepped::Same(frame))
+        Ok((_, empty)) => {
+            free(req);
+            if empty {
+                req.vm_mut().jump(frame, op.op2);
+                Ok(Stepped::Same(frame))
+            } else {
+                Ok(advance(req, frame))
+            }
         }
-        Err(thrown) => threw(req, frame, &thrown),
+        // `FREE_OP1()` with `EG(exception)` set, so a destructor it
+        // serves chains what the reset threw.
+        Err(thrown) => {
+            let thrown = req.free_pending(thrown, free);
+            threw(req, frame, &thrown)
+        }
     }
 }
 

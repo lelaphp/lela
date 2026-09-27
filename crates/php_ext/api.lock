@@ -295,6 +295,7 @@ raising::exit
 raising::fatal
 raising::new_throwable
 raising::notice
+raising::pending
 raising::raise
 raising::raise_at
 raising::startup

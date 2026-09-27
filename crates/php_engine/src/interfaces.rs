@@ -699,10 +699,7 @@ pub(crate) fn reset(
     let valid = funcs.rewind(req, it).and_then(|()| funcs.valid(req, it));
     match valid {
         Ok(valid) => Ok((wrapper, !valid)),
-        Err(thrown) => {
-            req.release(wrapper.as_value());
-            Err(thrown)
-        }
+        Err(thrown) => Err(req.free_pending(thrown, |req| req.release(wrapper.as_value()))),
     }
 }
 

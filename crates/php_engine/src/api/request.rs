@@ -4029,6 +4029,22 @@ impl Request {
         }
     }
 
+    /// A release php makes with `EG(exception)` set, `OBJ_RELEASE` or
+    /// `FREE_OP1` on a handler's way out: `free` served while `thrown`
+    /// stands pending, so a destructor it serves sees the throwable
+    /// pending and chains it as its own's `previous`, as
+    /// `zend_objects_destroy_object` does, and what is pending after it
+    /// is handed on. A fatal or an `exit` is freed past.
+    pub(crate) fn free_pending(&mut self, thrown: Thrown, free: impl FnOnce(&mut Self)) -> Thrown {
+        if thrown.exception().is_none() {
+            free(self);
+            return thrown;
+        }
+        self.leave_pending(&thrown);
+        free(self);
+        Thrown::of(self.take_pending())
+    }
+
     /// The pending throwable at the end of a serving, php's
     /// `zend_exception_error` (design §5.9): the throwable's own
     /// `__toString` behind `Uncaught `, with `\n  thrown` after it, given

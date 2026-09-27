@@ -547,6 +547,30 @@ pub fn clear(req: &mut Request, thrown: Thrown) -> Result<(), Thrown> {
     Ok(())
 }
 
+/// `if (EG(exception))` after a step that may call PHP code and answers
+/// nothing, such as a release whose destructor threw: what the step
+/// left pending, taken off the request as the `Err`, as a call hands
+/// back what its callee threw, and an `exit` unwinding as the `Err` too.
+///
+/// ```php
+/// class D extends RecursiveArrayIterator { function __destruct() { throw new Exception("dtor " . count($this)); } }
+/// try {
+///     foreach (new RecursiveIteratorIterator(new D([[1]])) as $v) echo $v, "\n";
+/// } catch (Exception $e) { do { echo $e->getMessage(), "\n"; } while ($e = $e->getPrevious()); }
+/// ```
+/// ```expect
+/// 1
+/// dtor 1
+/// dtor 1
+/// ```
+pub fn pending(req: &mut Request) -> Result<(), Thrown> {
+    match req.take_pending() {
+        Some(pending) => Err(Thrown::of(Some(pending))),
+        None if req.unwinding() => Err(Thrown::of(None)),
+        None => Ok(()),
+    }
+}
+
 /// `zend_replace_error_handling(EH_THROW, class)` around `f`: a warning
 /// raised meanwhile is thrown as `class` with the warning's message and
 /// shown nowhere, the first one only, and the handling `f` found is
