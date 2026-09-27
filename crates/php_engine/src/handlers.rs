@@ -7772,23 +7772,21 @@ fn read_dimension(
         return Ok(string_offset(req, text, &dim, mode));
     }
     if let Some(object) = container.as_object().copied() {
-        let dim = object_dim(req, frame, code, op);
         // `read_dimension(obj, dim, type, rv)` through the class's own
         // handler: under `BP_VAR_IS` an `ArrayAccess` is
         // `zend_std_read_dimension`'s `offsetExists` then `offsetGet`, a
         // class with no handler is the same `Cannot use object` refusal,
         // and a class php reads in C (dom's maps and lists) is the
         // handler that reads the element whatever the type.
-        return Ok(match mode {
-            DimRead::Warning => {
-                let table = req.object_handlers(object.heap());
-                table.read_dimension(req, object, dim.as_ref(), DimensionRead::Warning)
-            }
-            DimRead::Silent => {
-                let table = req.object_handlers(object.heap());
-                table.read_dimension(req, object, dim.as_ref(), DimensionRead::Silent)
-            }
-        });
+        return Ok(object_held(req, object, |req| {
+            let dim = object_dim(req, frame, code, op);
+            let table = req.object_handlers(object.heap());
+            let fetch = match mode {
+                DimRead::Warning => DimensionRead::Warning,
+                DimRead::Silent => DimensionRead::Silent,
+            };
+            table.read_dimension(req, object, dim.as_ref(), fetch)
+        }));
     }
     if mode == DimRead::Silent {
         // `if (type != BP_VAR_IS && Z_TYPE_P(container) == IS_UNDEF)`:
@@ -7804,6 +7802,62 @@ fn read_dimension(
     let _dim = exec::operand(req, frame, code, op.op2_type, op.op2);
     crate::api::raising::warning(req, &format!("Trying to access array offset on {named}"));
     Ok(Ok(Value::null()))
+}
+
+/// An object a dimension opline works on, held across `step`: php's
+/// `GC_ADDREF(obj)` in `zend_fetch_dimension_address_read`,
+/// `zend_fetch_dimension_address`, `ZEND_ASSIGN_DIM` and
+/// `zend_binary_assign_op_obj_dim`, taken before the dimension is read,
+/// since its `Undefined variable` warning may reach a handler that
+/// overwrites the variable the object is in, and given back after the
+/// class's handlers answered, `GC_DELREF(obj) == 0` and
+/// `zend_objects_store_del` at the last.
+///
+/// ```php
+/// class A implements ArrayAccess {
+///     public function &offsetGet($n): mixed { echo "get\n"; return $this->v; }
+///     public function offsetSet($n, $v): void { echo "set\n"; }
+///     public function offsetUnset($n): void {}
+///     public function offsetExists($n): bool { return false; }
+///     public function __destruct() { echo "destructed\n"; }
+///     public $v = [];
+/// }
+/// set_error_handler(function ($no, $message) {
+///     echo $message, "\n";
+///     $GLOBALS['a'] = null;
+/// });
+/// $a = new A;
+/// $a[$c];
+/// $a = new A;
+/// $a[$c] = 1;
+/// $a = new A;
+/// $a[$c] .= 'x';
+/// $a = new A;
+/// $a[$c][] = 1;
+/// echo "done\n";
+/// ```
+/// ```expect
+/// Undefined variable $c
+/// get
+/// destructed
+/// Undefined variable $c
+/// set
+/// destructed
+/// Undefined variable $c
+/// get
+/// Array to string conversion
+/// set
+/// destructed
+/// Undefined variable $c
+/// get
+/// destructed
+/// done
+/// ```
+fn object_held<T>(req: &mut Request, object: PhpObject, step: impl FnOnce(&mut Request) -> T) -> T {
+    let held = req.take_hold(object.as_value());
+    let stepped = step(req);
+    req.let_go(held);
+    stepped
 }
 
 /// The dimension a handler over an object reads, php's `if (OP2_TYPE ==
@@ -8491,7 +8545,9 @@ fn fetch_dim_place(
                 DimRead::Warning => DimensionRead::ReadWrite,
                 DimRead::Silent => DimensionRead::Write,
             };
-            object_place(req, frame, code, op, object, fetch)
+            object_held(req, object, |req| {
+                object_place(req, frame, code, op, object, fetch)
+            })
         }
         Ok(Container::Text(_)) => Err(text_dim_place(req, frame, code, op, false)),
         Err(thrown) => Err(thrown),
@@ -11798,7 +11854,9 @@ pub(crate) fn assign_dim<T: Tier>(
                 Err(thrown) => Err(thrown),
             }
         }
-        Ok(Container::Object(object)) => assign_object_dim(req, frame, code, op, data, object),
+        Ok(Container::Object(object)) => object_held(req, object, |req| {
+            assign_object_dim(req, frame, code, op, data, object)
+        }),
         Ok(Container::Text(place)) => assign_text_dim(req, frame, code, op, data, place),
         Err(thrown) => Err(thrown),
     };
@@ -12176,7 +12234,9 @@ pub(crate) fn assign_dim_op<T: Tier>(
                 Err(thrown) => Err(thrown),
             }
         }
-        Ok(Container::Object(object)) => binary_assign_op_obj_dim(req, frame, code, step, object),
+        Ok(Container::Object(object)) => object_held(req, object, |req| {
+            binary_assign_op_obj_dim(req, frame, code, step, object)
+        }),
         Ok(Container::Text(_)) => Err(crate::api::raising::throw(
             req,
             "Error",

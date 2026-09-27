@@ -7137,7 +7137,7 @@ impl Request {
         sent.extend_from_slice(arguments);
         let held = self.take_hold(object.as_value());
         let served = self.serve_method(accessor, Some(object), object.class(), &sent, &[]);
-        self.let_go(held);
+        self.release_hold(held);
         served
     }
 
@@ -7320,7 +7320,7 @@ impl Request {
         if let Some(issetter) = issetter {
             let held = self.take_hold(object.as_value());
             let served = self.isset_then_get(object, name, read, issetter, getter);
-            self.let_go(held);
+            self.release_hold(held);
             if let Some(served) = served? {
                 return Ok(served);
             }
@@ -9754,7 +9754,7 @@ impl Request {
         let held = self.take_hold(object.as_value());
         let answered = self.isset_then_truth(object, name, test, issetter);
         self.guard_drop(object, name, IN_ISSET);
-        self.let_go(held);
+        self.release_hold(held);
         answered
     }
 
@@ -10056,11 +10056,51 @@ impl Request {
         ))
     }
 
+    /// What the four `zend_std_*_dimension` handlers do around the
+    /// `ArrayAccess` methods they call: the offset copied, dereferenced
+    /// (`ZVAL_COPY_DEREF(&tmp_offset, offset)`), and the object held
+    /// (`GC_ADDREF(object)`) for the span of `calls`, both given back
+    /// after it (`OBJ_RELEASE`, `zval_ptr_dtor(&tmp_offset)`), so a
+    /// method that gives up every other owner of either does not free
+    /// what the next call is served on or handed.
+    fn with_array_access<T>(
+        &mut self,
+        object: PhpObject,
+        offset: Value,
+        calls: impl FnOnce(&mut Request, Value) -> Result<T, Thrown>,
+    ) -> Result<T, Thrown> {
+        let offset = self.take_hold(offset.deref());
+        let held = self.take_hold(object.as_value());
+        let called = calls(self, offset.value());
+        self.release_hold(held);
+        self.release_hold(offset);
+        called
+    }
+
     /// `zend_std_read_dimension`: `offsetGet` on an `ArrayAccess`, the
     /// offset `null` for `$o[]`; under `BP_VAR_IS` `offsetExists` first,
     /// `null` where it says no, and `offsetGet` after it where it says
     /// yes, so a chain under an `isset` calls the two in that order and
-    /// calls neither on a class that is no `ArrayAccess`.
+    /// calls neither on a class that is no `ArrayAccess`. The object and
+    /// the offset are held across the two ([`Request::with_array_access`]).
+    ///
+    /// ```php
+    /// class Test implements ArrayAccess {
+    ///     public function offsetExists($x): bool { $GLOBALS["obj"] = 24; return true; }
+    ///     public function offsetGet($x): mixed { var_dump($x); return 42; }
+    ///     public function offsetSet($x, $y): void { }
+    ///     public function offsetUnset($x): void { }
+    /// }
+    /// $obj = new Test;
+    /// $name = "foo";
+    /// var_dump($obj[$name] ?? 12);
+    /// var_dump($obj);
+    /// ```
+    /// ```expect
+    /// string(3) "foo"
+    /// int(42)
+    /// int(24)
+    /// ```
     pub(crate) fn read_dimension(
         &mut self,
         object: PhpObject,
@@ -10069,20 +10109,22 @@ impl Request {
     ) -> Result<Value, Thrown> {
         self.array_access(object)?;
         let offset = offset.copied().unwrap_or_else(Value::null);
-        if read == DimensionRead::Silent {
-            let exists = crate::api::call::call_method(
-                self,
-                &object,
-                b"offsetExists",
-                std::slice::from_ref(&offset),
-            )?;
-            let answer = crate::api::coerce::truthy(self, &exists);
-            self.release(exists);
-            if !answer {
-                return Ok(Value::null());
+        self.with_array_access(object, offset, |req, offset| {
+            if read == DimensionRead::Silent {
+                let exists = crate::api::call::call_method(
+                    req,
+                    &object,
+                    b"offsetExists",
+                    std::slice::from_ref(&offset),
+                )?;
+                let answer = crate::api::coerce::truthy(req, &exists);
+                req.release(exists);
+                if !answer {
+                    return Ok(Value::null());
+                }
             }
-        }
-        crate::api::call::call_method(self, &object, b"offsetGet", &[offset])
+            crate::api::call::call_method(req, &object, b"offsetGet", &[offset])
+        })
     }
 
     /// `zend_std_write_dimension`: `offsetSet` on an `ArrayAccess`, the
@@ -10098,14 +10140,35 @@ impl Request {
             return Err(thrown);
         }
         let offset = offset.copied().unwrap_or_else(Value::null);
-        let served = crate::api::call::call_method(self, &object, b"offsetSet", &[offset, value]);
+        let served = self.with_array_access(object, offset, |req, offset| {
+            crate::api::call::call_method(req, &object, b"offsetSet", &[offset, value])
+        });
         self.release(value);
         self.release(served?);
         Ok(())
     }
 
     /// `zend_std_has_dimension`: `offsetExists` on an `ArrayAccess`,
-    /// and under `not_empty` the truth of `offsetGet` after it.
+    /// and under `not_empty` the truth of `offsetGet` after it where
+    /// nothing was thrown, the object and the offset held across the two.
+    ///
+    /// ```php
+    /// class Test implements ArrayAccess {
+    ///     public function offsetExists($x): bool { $GLOBALS["obj"] = 24; return true; }
+    ///     public function offsetGet($x): mixed { var_dump($x); return 42; }
+    ///     public function offsetSet($x, $y): void { }
+    ///     public function offsetUnset($x): void { }
+    /// }
+    /// $obj = new Test;
+    /// $name = "foo";
+    /// var_dump(empty($obj[$name]));
+    /// var_dump($obj);
+    /// ```
+    /// ```expect
+    /// string(3) "foo"
+    /// bool(false)
+    /// int(24)
+    /// ```
     pub(crate) fn has_dimension(
         &mut self,
         object: PhpObject,
@@ -10113,40 +10176,46 @@ impl Request {
         not_empty: bool,
     ) -> Result<bool, Thrown> {
         self.array_access(object)?;
-        let exists = crate::api::call::call_method(
-            self,
-            &object,
-            b"offsetExists",
-            std::slice::from_ref(offset),
-        )?;
-        let mut answer = crate::api::coerce::truthy(self, &exists);
-        self.release(exists);
-        if answer && not_empty {
+        self.with_array_access(object, *offset, |req, offset| {
+            let exists = crate::api::call::call_method(
+                req,
+                &object,
+                b"offsetExists",
+                std::slice::from_ref(&offset),
+            )?;
+            let answer = crate::api::coerce::truthy(req, &exists);
+            req.release(exists);
+            if !answer || !not_empty {
+                return Ok(answer);
+            }
             let value = crate::api::call::call_method(
-                self,
+                req,
                 &object,
                 b"offsetGet",
-                std::slice::from_ref(offset),
+                std::slice::from_ref(&offset),
             )?;
-            answer = crate::api::coerce::truthy(self, &value);
-            self.release(value);
-        }
-        Ok(answer)
+            let answer = crate::api::coerce::truthy(req, &value);
+            req.release(value);
+            Ok(answer)
+        })
     }
 
-    /// `zend_std_unset_dimension`: `offsetUnset` on an `ArrayAccess`.
+    /// `zend_std_unset_dimension`: `offsetUnset` on an `ArrayAccess`,
+    /// the object and the offset held across it.
     pub(crate) fn unset_dimension(
         &mut self,
         object: PhpObject,
         offset: &Value,
     ) -> Result<(), Thrown> {
         self.array_access(object)?;
-        let served = crate::api::call::call_method(
-            self,
-            &object,
-            b"offsetUnset",
-            std::slice::from_ref(offset),
-        )?;
+        let served = self.with_array_access(object, *offset, |req, offset| {
+            crate::api::call::call_method(
+                req,
+                &object,
+                b"offsetUnset",
+                std::slice::from_ref(&offset),
+            )
+        })?;
         self.release(served);
         Ok(())
     }

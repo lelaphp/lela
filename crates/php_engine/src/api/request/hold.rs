@@ -9,10 +9,11 @@
 //! an owner of its own, which is the test php's handler makes after the
 //! call.
 //!
-//! The owner is a type and not a pair of calls: [`Request::take_hold`] is the
-//! one place a hold is taken and [`Request::let_go`] the one place it is
-//! given up, and a `Hold` is neither `Copy` nor `Clone`, so one taken is
-//! one given back.
+//! The owner is a type and not a pair of calls: [`Request::take_hold`]
+//! is the one place a hold is taken, and [`Request::let_go`] and
+//! [`Request::release_hold`] the two ways it is given back, php's
+//! `GC_DELREF` and its `OBJ_RELEASE`. A `Hold` is neither `Copy` nor
+//! `Clone`, so one taken is one given back.
 
 use php_heap::Heap;
 
@@ -23,6 +24,13 @@ use crate::api::values::Value;
 #[must_use = "a hold is an owner of the value, given back through Request::let_go"]
 #[derive(Debug)]
 pub(crate) struct Hold(Value);
+
+impl Hold {
+    /// What the hold names; the copy owns nothing of its own.
+    pub(crate) fn value(&self) -> Value {
+        self.0
+    }
+}
 
 /// What is left of a held value once the hold is given back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,29 +60,44 @@ impl Left {
 }
 
 impl Request {
-    /// One more owner of `value` until [`Request::let_go`]:
+    /// One more owner of `value` until it is given back:
     /// `GC_ADDREF`, or `GC_TRY_ADDREF` over what may be immutable.
     pub(crate) fn take_hold(&self, value: Value) -> Hold {
         self.addref(&value);
         Hold(value)
     }
 
-    /// The hold given back and what is left of the value. An object is
-    /// `OBJ_RELEASE`, its destructor served at the last owner and a
-    /// possible root of the cycle collector where owners are left; a
-    /// string, an array or a reference is `GC_DELREF` with the value
-    /// destroyed at the last, and no root (design §5.12).
+    /// The hold given back as `GC_DELREF` gives it, and what is left of
+    /// the value: at the last owner the value is destroyed,
+    /// `zend_array_destroy`, `zend_string_efree` or
+    /// `zend_objects_store_del` with its destructor served, and where
+    /// owners are left nothing else happens, no possible root of the
+    /// cycle collector (design §5.12). What php's handlers do after a
+    /// diagnostic.
+    pub(crate) fn let_go(&mut self, hold: Hold) -> Left {
+        self.give_back(hold, false)
+    }
+
+    /// The hold given back as `OBJ_RELEASE` and `zval_ptr_dtor` give an
+    /// owner back: [`Request::let_go`], and where owners are left the
+    /// value a possible root (`gc_check_possible_root`). What php's
+    /// standard object handlers do after an accessor or an
+    /// `ArrayAccess` method.
+    pub(crate) fn release_hold(&mut self, hold: Hold) -> Left {
+        self.give_back(hold, true)
+    }
+
     // Taking the hold is the point: it is the owner given up here, and
     // one given back cannot be given back again.
     #[allow(clippy::needless_pass_by_value)]
-    pub(crate) fn let_go(&mut self, hold: Hold) -> Left {
+    fn give_back(&mut self, hold: Hold, root: bool) -> Left {
         let Hold(value) = hold;
         let zval = value.to_zval();
         if !zval.is_refcounted() {
             return Left::Uncounted;
         }
         let owners = value.refcount().saturating_sub(1);
-        if value.as_object().is_some() {
+        if root {
             Heap::release(&mut Hooks(self), zval);
         } else {
             Heap::release_nogc(&mut Hooks(self), zval);
