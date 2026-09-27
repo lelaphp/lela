@@ -11660,6 +11660,19 @@ impl Request {
         )
     }
 
+    /// `get_active_function_name` over the innermost user frame, with
+    /// the class `get_active_class_name` puts before a method's: `main`
+    /// for a file's own code, none while no frame is served. What
+    /// `php_verror` names a docref by when no native raises it, as an
+    /// object's handlers do from the code that reached them.
+    pub(crate) fn active_user_function(&self) -> Option<String> {
+        let frame = self.innermost_frame()?;
+        Some(frame.function.map_or_else(
+            || String::from("main"),
+            |function| self.qualified_name(function, None),
+        ))
+    }
+
     /// `get_active_function_or_method_name`: the native being served as
     /// a message names it, `Class::method` for a method, which is what
     /// a native writes before `(): ` in a sentence of its own that no

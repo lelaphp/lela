@@ -161,11 +161,29 @@ pub(crate) fn deprecated_constant(req: &mut Request, key: &[u8]) -> Result<(), T
 /// ...`). The docref itself, php's link into the manual, is off in the
 /// CLI's ini and is not rendered here.
 ///
-/// Where no native is active, `php_verror` names the request's phase
-/// instead (`Z/main/main.c:1086-1129`): `PHP Request Startup` in an
-/// extension's `RINIT`, `PHP Request Shutdown` in its `RSHUTDOWN`, and
-/// `Unknown` between them, each with no `()`. The session's write at
-/// request end is the witness, in `ext/session`.
+/// Where no native is active, `php_verror` names the code being served,
+/// as `get_active_function_name` and `get_active_class_name` name it,
+/// `main` for a file's own code, which is where an object's handler
+/// raises from; and where none is served either, the request's phase
+/// (`Z/main/main.c:1086-1129`): `PHP Request Startup` in an extension's
+/// `RINIT`, `PHP Request Shutdown` in its `RSHUTDOWN`, and `Unknown`
+/// between them, each with no `()`. The session's write at request end
+/// is the witness of the phase, in `ext/session`.
+///
+/// ```php
+/// $o = unserialize('O:1:"X":0:{}');
+/// function f($o) { return $o->a; }
+/// class C { function m($o) { return isset($o->a); } }
+/// f($o); (new C)->m($o); $o->a;
+/// ```
+/// ```expect
+///
+/// Warning: f(): The script tried to access a property on an incomplete object. Please ensure that the class definition "X" of the object you are trying to operate on was loaded _before_ unserialize() gets called or provide an autoloader to load the class definition in %s on line 3
+///
+/// Warning: C::m(): The script tried to access a property on an incomplete object. Please ensure that the class definition "X" of the object you are trying to operate on was loaded _before_ unserialize() gets called or provide an autoloader to load the class definition in %s on line 4
+///
+/// Warning: main(): The script tried to access a property on an incomplete object. Please ensure that the class definition "X" of the object you are trying to operate on was loaded _before_ unserialize() gets called or provide an autoloader to load the class definition in %s on line 5
+/// ```
 pub fn docref(req: &mut Request, level: Level, message: &str) {
     // `php_verror`'s origin while modules start (`Z/main/main.c:1087`):
     // `PHP Startup`, no function and so no `()`.
@@ -175,9 +193,13 @@ pub fn docref(req: &mut Request, level: Level, message: &str) {
         format!("{}(): {message}", req.active_native())
     } else {
         let origin = match req.phase() {
-            crate::api::request::Phase::Startup => "PHP Request Startup",
-            crate::api::request::Phase::Running => "Unknown",
-            crate::api::request::Phase::Shutdown => "PHP Request Shutdown",
+            crate::api::request::Phase::Startup => String::from("PHP Request Startup"),
+            // The code being served names it, as
+            // `get_active_function_name` does when a handler raises it.
+            crate::api::request::Phase::Running => req
+                .active_user_function()
+                .map_or_else(|| String::from("Unknown"), |name| format!("{name}()")),
+            crate::api::request::Phase::Shutdown => String::from("PHP Request Shutdown"),
         };
         format!("{origin}: {message}")
     };
