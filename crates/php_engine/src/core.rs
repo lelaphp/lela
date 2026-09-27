@@ -12,8 +12,8 @@ use crate::attributes::{
 };
 use crate::classes::{
     ArgumentCountError, ArithmeticError, ArrayAccess, BackedEnum, Closure, CompileError,
-    DivisionByZeroError, Error, Exception, ParseError, RequestParseBodyException, Stringable,
-    Throwable, TypeError, UnhandledMatchError, UnitEnum, ValueError, stdClass,
+    DivisionByZeroError, Error, ErrorException, Exception, ParseError, RequestParseBodyException,
+    Stringable, Throwable, TypeError, UnhandledMatchError, UnitEnum, ValueError, stdClass,
 };
 use crate::fiber::{Fiber, FiberError};
 use crate::generator::{ClosedGeneratorException, Generator};
@@ -42,6 +42,7 @@ pub(crate) fn extension() -> Extension {
         .class::<Throwable>()
         .class::<ArrayAccess>()
         .class::<Exception>()
+        .class::<ErrorException>()
         .class::<Error>()
         .class::<TypeError>()
         .class::<ValueError>()
