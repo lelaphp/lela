@@ -7,7 +7,7 @@
 
 use php_ext::abi::PropertyPurpose;
 use php_ext::attr::php_function;
-use php_ext::call::call_method;
+use php_ext::call::{call_method, lookup_class};
 use php_ext::coerce::{Exponent, float_format, to_string};
 use php_ext::raising::{Level, Thrown, docref, throw};
 use php_ext::request::Request;
@@ -183,6 +183,25 @@ impl Serializer {
         {
             hash.destroy(req);
         }
+    }
+
+    /// `f`, a call that may open another serializer, with the var hash
+    /// set down where that one finds it.
+    fn out<R>(&mut self, req: &mut Request, f: impl FnOnce(&mut Request) -> R) -> R {
+        if !self.shared {
+            return f(req);
+        }
+        let hash = std::mem::take(&mut self.hash);
+        req.state::<crate::State>().var.serialize.parked = Some(hash);
+        let answered = f(req);
+        self.hash = req
+            .state::<crate::State>()
+            .var
+            .serialize
+            .parked
+            .take()
+            .unwrap_or_default();
+        answered
     }
 
     /// `php_add_var_hash`: the number an earlier sight gave `value`, or
@@ -454,6 +473,9 @@ fn object_value(
         req.release(data);
         return written;
     }
+    if is_serializable(req, object) {
+        return custom(req, out, object, &name, hash);
+    }
     if name != INCOMPLETE_CLASS && has_method(req, object.class(), b"__sleep") {
         let names = locked(req, |req| call_method(req, &object, b"__sleep", &[]))?;
         let Some(list) = names.as_array().copied() else {
@@ -490,6 +512,87 @@ fn object_value(
         hash.fail(object);
     }
     written
+}
+
+/// Whether the class is `Serializable`, php's `ce->serialize` being set:
+/// `zend_implement_serializable` gives it to every class that implements
+/// the interface, and to every class that extends one.
+fn is_serializable(req: &mut Request, object: PhpObject) -> bool {
+    lookup_class(req, b"Serializable")
+        .ok()
+        .flatten()
+        .is_some_and(|interface| object.instance_of(req, interface))
+}
+
+/// The `ce->serialize` arm, `zend_user_serialize`: the object's
+/// `serialize()` called outside `BG(serialize_lock)`, so what it
+/// serializes shares this var hash, and its string written as `C:len:"class":len:{string}`.
+/// `null` fails the object, which is written `N;` here and wherever it is
+/// seen again; anything else fails it and throws php's `Exception`.
+///
+/// ```php
+/// class S implements Serializable {
+///     public $d = 1;
+///     function serialize() { return serialize([$this->d, $GLOBALS['x']]); }
+///     function unserialize($s) { [$this->d] = unserialize($s); }
+/// }
+/// class N implements Serializable { function serialize() { return null; } function unserialize($s) {} }
+/// class Bad implements Serializable { function serialize() { return 1; } function unserialize($s) {} }
+/// $x = new stdClass;
+/// echo serialize([$x, new S]), "\n", serialize([$n = new N, $n]), "\n";
+/// try { serialize(new Bad); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Deprecated: S implements the Serializable interface, which is deprecated. Implement __serialize() and __unserialize() instead (or in addition, if support for old PHP versions is necessary) in %s on line 2
+///
+/// Deprecated: N implements the Serializable interface, which is deprecated. Implement __serialize() and __unserialize() instead (or in addition, if support for old PHP versions is necessary) in %s on line 7
+///
+/// Deprecated: Bad implements the Serializable interface, which is deprecated. Implement __serialize() and __unserialize() instead (or in addition, if support for old PHP versions is necessary) in %s on line 8
+/// a:2:{i:0;O:8:"stdClass":0:{}i:1;C:1:"S":22:{a:2:{i:0;i:1;i:1;r:2;}}}
+/// a:2:{i:0;N;i:1;N;}
+/// Bad::serialize() must return a string or NULL
+/// ```
+fn custom(
+    req: &mut Request,
+    out: &mut Vec<u8>,
+    object: PhpObject,
+    name: &[u8],
+    hash: &mut Serializer,
+) -> Result<(), Thrown> {
+    let answered = hash.out(req, |req| call_method(req, &object, b"serialize", &[]));
+    let answered = match answered {
+        Ok(answered) => answered,
+        Err(thrown) => {
+            hash.fail(object);
+            return Err(thrown);
+        }
+    };
+    if let Some(payload) = answered.as_str_bytes().map(<[u8]>::to_vec) {
+        req.release(answered);
+        out.extend_from_slice(b"C:");
+        out.extend_from_slice(name.len().to_string().as_bytes());
+        out.extend_from_slice(b":\"");
+        out.extend_from_slice(name);
+        out.extend_from_slice(b"\":");
+        out.extend_from_slice(payload.len().to_string().as_bytes());
+        out.extend_from_slice(b":{");
+        out.extend_from_slice(&payload);
+        out.push(b'}');
+        return Ok(());
+    }
+    let null = matches!(answered.as_ref(), ValueRef::Null);
+    req.release(answered);
+    hash.fail(object);
+    out.extend_from_slice(b"N;");
+    if null {
+        return Ok(());
+    }
+    let shown = String::from_utf8_lossy(name).into_owned();
+    Err(throw(
+        req,
+        "Exception",
+        &format!("{shown}::serialize() must return a string or NULL"),
+    ))
 }
 
 /// `php_var_serialize_get_sleep_props`: each name `__sleep()` returned,
