@@ -166,9 +166,13 @@ attr::php_const
 attr::php_function
 call::Function
 call::Iter
+call::Iter::as_value
+call::Iter::current
+call::Iter::invalidate
 call::Iter::key
 call::Iter::next
-call::Iter::value
+call::Iter::rewind
+call::Iter::valid
 call::autoload
 call::bound_variables
 call::call

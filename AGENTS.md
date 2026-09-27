@@ -106,12 +106,12 @@ third-engine-design.md
 | heap | heap.lock | 311 |  | pass |
 | unit | unit.lock | 99 |  | pass |
 | ops | ops.lock | 209 |  | pass |
-| api | api.lock | 728 | 800 | pass |
+| api | api.lock | 732 | 800 | pass |
 | sapi | sapi.lock | 7 |  | pass |
 | tier | tier.lock |  |  | skip |
 | harness | xtask.lock | 334 |  | pass |
 
-<!-- /computed in=d05c3d9d8135f7ac07f90c2191685208f4c14c9454959526e35a9dfbe4cacac2 out=750822b9de66e328fb6c99ae773cacf600a66452de71241c92b892a853a3fd87 -->
+<!-- /computed in=c61bb9b1eb34098d0fcd2f0a1a562cc41920db381d8766ed5a264ee7c88b649f out=d006f4ce508cfa5f60f6e3c1cb1f5006aa0ce74544b1ff400c3e1690b0a531aa -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |

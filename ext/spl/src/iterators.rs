@@ -19,7 +19,9 @@ use php_ext::abi::{
     Never, ObjectHandlers, OrFalse, Raw, Std, This, Union, Untyped,
 };
 use php_ext::attr::php_class;
-use php_ext::call::{Function, call, call_method, instantiate, lookup_class, read_prop};
+use php_ext::call::{
+    Function, Iter, call, call_method, instantiate, iterate, lookup_class, read_prop,
+};
 use php_ext::coerce::{coerce_param, to_string, truthy};
 use php_ext::decl::Type;
 use php_ext::raising::{Thrown, arg_type_error, arg_value_error, arity, throw, throwing_warnings};
@@ -60,6 +62,9 @@ enum Kind {
 pub(crate) struct DualIt {
     kind: Kind,
     inner: Option<PhpObject>,
+    /// `inner.iterator`: the iterator the inner object's `get_iterator`
+    /// handed out, which every step walks, one owner.
+    iter: Option<Iter>,
     data: Option<Value>,
     key: Option<Value>,
     pos: i64,
@@ -540,10 +545,11 @@ impl IteratorIterator {
                     ),
                 ));
             };
-            return dual(req, this, |it| {
+            dual(req, this, |it| {
                 it.kind = Kind::IteratorIterator;
                 it.inner = Some(iterator);
-            });
+            })?;
+            return inner_iterate(req, this, iterator);
         }
         dual_set(req, this, Kind::IteratorIterator, given)
     }
@@ -1379,24 +1385,49 @@ impl NoRewindIterator {
         dual_valid(req, this)
     }
 
-    /// `NoRewindIterator::key(): mixed`.
+    /// `NoRewindIterator::key(): mixed`, the inner iterator's
+    /// `get_current_key`.
     #[php(tentative)]
     fn key(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
-        no_rewind_forward(req, this.object(), b"key")
+        match no_rewind_iter(req, this.object())? {
+            Some(iter) => iter.key(req),
+            None => Ok(Value::null()),
+        }
     }
 
-    /// `NoRewindIterator::current(): mixed`.
+    /// `NoRewindIterator::current(): mixed`, the inner iterator's
+    /// `get_current_data`, which a user's `Iterator` keeps until the walk
+    /// moves, so `current()` is served once per element.
+    ///
+    /// ```php
+    /// class It extends ArrayIterator { function current(): mixed { echo "current;"; return parent::current(); } }
+    /// $n = new NoRewindIterator(new It([1, 2]));
+    /// echo $n->current(), $n->current(), "\n";
+    /// $n->next(); echo $n->current(), "\n";
+    /// ```
+    /// ```expect
+    /// current;11
+    /// current;2
+    /// ```
     #[php(tentative)]
     fn current(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
-        no_rewind_forward(req, this.object(), b"current")
+        match no_rewind_iter(req, this.object())? {
+            Some(iter) => {
+                let data = iter.current(req)?;
+                Ok(crate::owned(req, data))
+            }
+            None => Ok(Value::null()),
+        }
     }
 
-    /// `NoRewindIterator::next(): void`.
+    /// `NoRewindIterator::next(): void`, the inner iterator's
+    /// `move_forward`.
     #[php(tentative)]
     fn next(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
-        let answered = no_rewind_forward(req, this.object(), b"next")?;
-        req.release(answered);
-        Ok(())
+        match no_rewind_iter(req, this.object())? {
+            Some(iter) => iter.next(req),
+            None => Ok(()),
+        }
     }
 }
 
@@ -2231,9 +2262,13 @@ fn inner(req: &mut Request, this: PhpObject) -> Result<Option<PhpObject>, Thrown
     dual(req, this, |it| it.inner)
 }
 
-/// `spl_dual_it_free`: the fetched element and key given up, and a
-/// caching iterator's string and children.
+/// `spl_dual_it_free`: the inner iterator's kept `current()` given up,
+/// the fetched element and key, and a caching iterator's string and
+/// children.
 fn dual_free(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
+    if let Some(iter) = inner_iter(req, this)? {
+        iter.invalidate(req);
+    }
     let held = dual(req, this, |it| {
         let children = if matches!(it.kind, Kind::Caching | Kind::RecursiveCaching) {
             it.children.take()
@@ -2251,20 +2286,36 @@ fn dual_free(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
     Ok(())
 }
 
+/// The inner object's iterator, `intern->inner.iterator`.
+fn inner_iter(req: &mut Request, this: PhpObject) -> Result<Option<Iter>, Thrown> {
+    dual(req, this, |it| it.iter)
+}
+
+/// `intern->inner.iterator = ce->get_iterator(ce, zobject, 0)`: the
+/// iterator of the inner object just set, which a finished generator
+/// refuses.
+fn inner_iterate(req: &mut Request, this: PhpObject, inner: PhpObject) -> Result<(), Thrown> {
+    let iter = iterate(req, &inner)?;
+    if let Some(old) = dual(req, this, |it| it.iter.replace(iter))? {
+        req.release(old.as_value());
+    }
+    Ok(())
+}
+
 /// `spl_dual_it_rewind`.
 fn dual_rewind(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
     dual_free(req, this)?;
     dual(req, this, |it| it.pos = 0)?;
-    if let Some(inner) = inner(req, this)? {
-        crate::effect(req, inner, b"rewind")?;
+    if let Some(iter) = inner_iter(req, this)? {
+        iter.rewind(req)?;
     }
     Ok(())
 }
 
 /// `spl_dual_it_valid`.
 fn dual_valid(req: &mut Request, this: PhpObject) -> Result<bool, Thrown> {
-    match inner(req, this)? {
-        Some(inner) => crate::valid(req, inner),
+    match inner_iter(req, this)? {
+        Some(iter) => iter.valid(req),
         None => Ok(false),
     }
 }
@@ -2276,13 +2327,13 @@ fn dual_fetch(req: &mut Request, this: PhpObject, check_more: bool) -> Result<bo
     if check_more && !dual_valid(req, this)? {
         return Ok(false);
     }
-    let Some(inner) = inner(req, this)? else {
+    let Some(iter) = inner_iter(req, this)? else {
         return Ok(false);
     };
-    let data = crate::method(req, inner, b"current")?;
+    let data = iter.current(req)?;
     let data = crate::owned(req, data);
     dual(req, this, |it| it.data = Some(data))?;
-    let key = crate::method(req, inner, b"key")?;
+    let key = iter.key(req)?;
     let key = crate::owned(req, key);
     dual(req, this, |it| it.key = Some(key))?;
     Ok(true)
@@ -2293,14 +2344,14 @@ fn dual_next(req: &mut Request, this: PhpObject, free: bool) -> Result<(), Throw
     if free {
         dual_free(req, this)?;
     }
-    let Some(inner) = inner(req, this)? else {
+    let Some(iter) = inner_iter(req, this)? else {
         return Err(throw(
             req,
             "Error",
             "The inner constructor wasn't initialized with an iterator instance",
         ));
     };
-    crate::effect(req, inner, b"next")?;
+    iter.next(req)?;
     dual(req, this, |it| it.pos += 1)?;
     Ok(())
 }
@@ -2315,7 +2366,8 @@ fn dual_set(
     dual(req, this, |it| {
         it.kind = kind;
         it.inner = Some(inner);
-    })
+    })?;
+    inner_iterate(req, this, inner)
 }
 
 /// `SPL_FETCH_AND_CHECK_DUAL_IT`: the receiver, its constructor served.
@@ -2460,11 +2512,15 @@ impl ObjectHandlers for DualHandlers {
                 [it.inner.take(), it.children.take(), it.appended.take()],
                 it.cache.take(),
                 it.callback.take(),
+                it.iter.take(),
             )
         });
-        if let Some((values, objects, cache, callback)) = held {
+        if let Some((values, objects, cache, callback, iter)) = held {
             for value in values.into_iter().flatten() {
                 req.release(value);
+            }
+            if let Some(iter) = iter {
+                req.release(iter.as_value());
             }
             for object in objects.into_iter().flatten() {
                 req.release(object.as_value());
@@ -2483,6 +2539,9 @@ impl ObjectHandlers for DualHandlers {
             }
             for object in [it.inner, it.children, it.appended].into_iter().flatten() {
                 visit(object.as_value());
+            }
+            if let Some(iter) = it.iter {
+                visit(iter.as_value());
             }
             if let Some(cache) = it.cache {
                 visit(Value::array(cache));
@@ -2526,8 +2585,8 @@ fn filter_fetch(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
         if accepted {
             return Ok(());
         }
-        if let Some(inner) = inner(req, this)? {
-            crate::effect(req, inner, b"next")?;
+        if let Some(iter) = inner_iter(req, this)? {
+            iter.next(req)?;
         }
     }
     dual_free(req, this)
@@ -2672,17 +2731,11 @@ fn full_cache(req: &mut Request, this: PhpObject) -> Result<PhpArray, Thrown> {
     }
 }
 
-/// A `NoRewindIterator` method handed to the inner iterator, its answer
-/// handed back.
-fn no_rewind_forward(req: &mut Request, this: PhpObject, method: &[u8]) -> Result<Value, Thrown> {
+/// The iterator a `NoRewindIterator` method steps, its receiver's
+/// constructor served.
+fn no_rewind_iter(req: &mut Request, this: PhpObject) -> Result<Option<Iter>, Thrown> {
     let this = checked(req, this)?;
-    match inner(req, this)? {
-        Some(inner) => {
-            let answered = crate::method(req, inner, method)?;
-            Ok(crate::owned(req, answered))
-        }
-        None => Ok(Value::null()),
-    }
+    inner_iter(req, this)
 }
 
 fn appended(req: &mut Request, this: PhpObject) -> Result<PhpObject, Thrown> {
@@ -2700,7 +2753,11 @@ fn appended(req: &mut Request, this: PhpObject) -> Result<PhpObject, Thrown> {
 /// next one the list stands at taken and rewound.
 fn append_next_iterator(req: &mut Request, this: PhpObject) -> Result<bool, Thrown> {
     dual_free(req, this)?;
-    if let Some(old) = dual(req, this, |it| it.inner.take())? {
+    let (old, old_iter) = dual(req, this, |it| (it.inner.take(), it.iter.take()))?;
+    if let Some(old_iter) = old_iter {
+        req.release(old_iter.as_value());
+    }
+    if let Some(old) = old {
         req.release(old.as_value());
     }
     let list = appended(req, this)?;
@@ -2713,6 +2770,7 @@ fn append_next_iterator(req: &mut Request, this: PhpObject) -> Result<bool, Thro
         return Ok(false);
     };
     dual(req, this, |it| it.inner = Some(next))?;
+    inner_iterate(req, this, next)?;
     dual_rewind(req, this)?;
     Ok(true)
 }

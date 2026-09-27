@@ -784,9 +784,9 @@ fn iterator_to_array(
     };
     let mut out = PhpArray::new(req)?;
     let walked = crate::apply(req, object, |req, iterator| {
-        let current = crate::method(req, iterator, b"current")?;
+        let current = iterator.current(req)?;
         if keys {
-            let key = match crate::method(req, iterator, b"key") {
+            let key = match iterator.key(req) {
                 Ok(key) => key,
                 Err(thrown) => {
                     req.release(current);
