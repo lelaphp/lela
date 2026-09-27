@@ -319,8 +319,3 @@ pub(crate) mod startup {
             .unwrap_or_default()
     }
 }
-
-/// Core's constants in php's order, [`startup`]'s.
-pub(crate) fn core_constants() -> Vec<php_unit::decl::ConstDecl> {
-    startup::declared()
-}

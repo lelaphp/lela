@@ -25,8 +25,8 @@ use php_unit::decl::{
 use php_macros::php_class;
 
 use crate::api::abi::{
-    Callable, CloneObj, ConstArray, Entry, ExtensionBuilder, FromArgument, Instance, NamedVariadic,
-    NativeClassDecl, ObjectHandlers, Passed, Raw, Static, This, Union, Untyped,
+    Callable, CloneObj, ConstArray, Entry, FromArgument, Instance, NamedVariadic, ObjectHandlers,
+    Passed, Raw, Static, This, Union, Untyped,
 };
 use crate::api::call::{Function, Target};
 use crate::api::raising::{Thrown, throw, warning};
@@ -465,43 +465,6 @@ fn closure_clone(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thro
         req.addref(bound);
     }
     req.clone_with_payload(object, closure)
-}
-
-/// Zend's own classes past the interfaces, in the order
-/// `zend_register_default_classes` registers them: `Stringable`,
-/// `Throwable` and `ArrayAccess`, the throwables parents first,
-/// `Closure`, `Generator`, `stdClass`, the enum interfaces, the weak
-/// references and the attributes.
-pub(crate) fn zend_classes() -> Vec<NativeClassDecl> {
-    let mut classes = ExtensionBuilder::default()
-        .class::<Stringable>()
-        .class::<Throwable>()
-        .class::<ArrayAccess>()
-        .class::<Exception>()
-        .class::<Error>()
-        .class::<TypeError>()
-        .class::<ValueError>()
-        .class::<ArithmeticError>()
-        .class::<DivisionByZeroError>()
-        .class::<ArgumentCountError>()
-        .class::<UnhandledMatchError>()
-        .class::<CompileError>()
-        .class::<ParseError>()
-        .class::<RequestParseBodyException>()
-        .class::<Closure>()
-        // `zend_register_generator_ce` after `zend_register_closure_ce`.
-        .class::<crate::generator::Generator>()
-        .class::<crate::generator::ClosedGeneratorException>()
-        .class::<stdClass>()
-        .class::<UnitEnum>()
-        .class::<BackedEnum>()
-        .class::<crate::weakrefs::WeakReference>()
-        .class::<crate::weakrefs::WeakMap>()
-        .build("Core")
-        .classes;
-    // `zend_register_attribute_ce` after `zend_register_weakref_ce`.
-    classes.extend(crate::attributes::classes());
-    classes
 }
 
 /// `interface UnitEnum` as `zend_enum.stub.php` declares it and

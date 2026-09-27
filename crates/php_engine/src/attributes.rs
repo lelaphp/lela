@@ -16,7 +16,7 @@ use php_unit::decl::Attribute as AttributeDecl;
 
 use php_unit::Level;
 
-use crate::api::abi::{ExtensionBuilder, NativeClassDecl, ObjectHandlers, PropertyPurpose, This};
+use crate::api::abi::{ObjectHandlers, PropertyPurpose, This};
 use crate::api::call::{Function, eval_const_expr, instantiate_named};
 use crate::api::raising::{Thrown, raise, throw};
 use crate::api::request::Request;
@@ -417,8 +417,11 @@ impl ObjectHandlers for SensitiveValueHandlers {
 
 static SENSITIVE_VALUE: SensitiveValueHandlers = SensitiveValueHandlers;
 
-/// The nine classes, in the order `zend_register_attribute_ce`
-/// registers them.
+/// `final class Attribute`, itself `#[Attribute(Attribute::TARGET_CLASS)]`,
+/// its constants `ZEND_ATTRIBUTE_TARGET_*` and `ZEND_ATTRIBUTE_IS_REPEATABLE`
+/// (`Z/Zend/zend_attributes.h:26-35`) under the names the stub gives
+/// them, its `$flags` and its constructor. The nine classes are
+/// registered in the order `zend_register_attribute_ce` registers them.
 ///
 /// ```php
 /// foreach (['Attribute', 'ReturnTypeWillChange', 'AllowDynamicProperties',
@@ -508,25 +511,6 @@ static SENSITIVE_VALUE: SensitiveValueHandlers = SensitiveValueHandlers;
 ///
 /// Deprecated: Creation of dynamic property AllowDynamicProperties::$x is deprecated in %s on line 7
 /// ```
-pub(crate) fn classes() -> Vec<NativeClassDecl> {
-    ExtensionBuilder::default()
-        .class::<Attribute>()
-        .class::<ReturnTypeWillChange>()
-        .class::<AllowDynamicProperties>()
-        .class::<SensitiveParameter>()
-        .class::<SensitiveParameterValue>()
-        .class::<Override>()
-        .class::<Deprecated>()
-        .class::<NoDiscard>()
-        .class::<DelayedTargetValidation>()
-        .build("Core")
-        .classes
-}
-
-/// `final class Attribute`, itself `#[Attribute(Attribute::TARGET_CLASS)]`,
-/// its constants `ZEND_ATTRIBUTE_TARGET_*` and `ZEND_ATTRIBUTE_IS_REPEATABLE`
-/// (`Z/Zend/zend_attributes.h:26-35`) under the names the stub gives
-/// them, its `$flags` and its constructor.
 #[php_class(final, attribute_class(Attribute::TARGET_CLASS))]
 pub(crate) struct Attribute;
 

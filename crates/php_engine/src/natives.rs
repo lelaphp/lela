@@ -40,12 +40,11 @@ mod classes;
 mod errors;
 mod functions;
 
-/// The engine's own natives, each declaration beside its entry: Core's
-/// first, [`core`], and then the ones php keeps in `ext/standard` and
-/// this engine here, in the order they were declared.
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    let mut natives = core();
-    natives.extend([
+/// The natives php keeps in `ext/standard` and this engine here, in
+/// the order they were declared, which follow Core's
+/// ([`crate::core::extension`]) in the function table.
+pub(crate) fn standard() -> Vec<(FunctionDecl, Entry)> {
+    vec![
         var_dump::declared(),
         memory_get_usage::declared(),
         memory_get_peak_usage::declared(),
@@ -55,8 +54,7 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
         ini_alter::declared(),
         set_time_limit::declared(),
         register_shutdown_function::declared(),
-    ]);
-    natives
+    ]
 }
 
 /// Core's natives, `zend_builtin_functions.stub.php`'s functions in its

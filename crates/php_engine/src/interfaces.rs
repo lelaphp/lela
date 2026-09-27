@@ -23,14 +23,37 @@
 use php_macros::php_class;
 use php_unit::decl::{ClassDecl, ClassFlags, ClassKind, EnumBacking, Name};
 
-use crate::api::abi::{
-    CurrentPlace, ExtensionBuilder, Instance, NativeClassDecl, ObjectHandlers, This, Untyped,
-};
+use crate::api::abi::{CurrentPlace, ExtensionBuilder, Instance, ObjectHandlers, This, Untyped};
 use crate::api::raising::{Thrown, throw};
 use crate::api::request::Request;
 use crate::api::values::{ClassId, PhpObject, PhpString, Value};
 
-/// The five interfaces in `zend_register_interfaces`' order.
+/// `interface Traversable`, which a user class cannot implement alone.
+#[php_class(interface)]
+pub(crate) struct Traversable;
+
+#[php_class]
+impl Traversable {}
+
+/// `interface IteratorAggregate extends Traversable`, its one method's
+/// return tentative (`@tentative-return-type`), as every method of the
+/// stub's interfaces here is where it declares a type.
+#[php_class(interface, extends(Traversable))]
+pub(crate) struct IteratorAggregate;
+
+#[php_class]
+impl IteratorAggregate {
+    #[php(tentative)]
+    fn getIterator(this: This<Self>) -> Instance<Traversable>;
+}
+
+/// `interface Iterator extends Traversable`, its five methods in the
+/// stub's order. A `foreach` over an object of a class implementing it
+/// walks it through those methods, and over an `IteratorAggregate` asks
+/// for the iterator once per loop and asks again of what it answers
+/// until that is an `Iterator`; `Countable` is what `count()` asks of an
+/// object whose class has no `count_elements`, and what `WeakMap`
+/// implements.
 ///
 /// ```php
 /// class It implements Iterator {
@@ -87,41 +110,6 @@ use crate::api::values::{ClassId, PhpObject, PhpString, Value};
 /// int(3)
 /// bool(true)
 /// ```
-pub(crate) fn classes() -> Vec<NativeClassDecl> {
-    let mut classes = ExtensionBuilder::default()
-        .class::<Traversable>()
-        .class::<IteratorAggregate>()
-        .class::<Iterator>()
-        .class::<Serializable>()
-        .class::<Countable>()
-        .class::<InternalIterator>()
-        .build("Core")
-        .classes;
-    classes.push(iterator_wrapper_class());
-    classes
-}
-
-/// `interface Traversable`, which a user class cannot implement alone.
-#[php_class(interface)]
-pub(crate) struct Traversable;
-
-#[php_class]
-impl Traversable {}
-
-/// `interface IteratorAggregate extends Traversable`, its one method's
-/// return tentative (`@tentative-return-type`), as every method of the
-/// stub's interfaces here is where it declares a type.
-#[php_class(interface, extends(Traversable))]
-pub(crate) struct IteratorAggregate;
-
-#[php_class]
-impl IteratorAggregate {
-    #[php(tentative)]
-    fn getIterator(this: This<Self>) -> Instance<Traversable>;
-}
-
-/// `interface Iterator extends Traversable`, its five methods in the
-/// stub's order.
 #[php_class(interface, extends(Traversable))]
 pub(crate) struct Iterator;
 
@@ -436,9 +424,11 @@ impl ObjectHandlers for WrapperHandlers {
     }
 }
 
-/// `zend_register_iterator_wrapper`'s class: final, of no member, its
-/// objects carrying an [`ObjectIterator`].
-fn iterator_wrapper_class() -> NativeClassDecl {
+/// `zend_register_iterator_wrapper`'s class onto `builder`: final, of no
+/// member, its objects carrying an [`ObjectIterator`]. php keeps it out
+/// of `EG(class_table)` and no stub declares it, so it is the one class of
+/// Core's a header does not name.
+pub(crate) fn iterator_wrapper(builder: ExtensionBuilder) -> ExtensionBuilder {
     let decl = ClassDecl {
         name: Name(ITERATOR_WRAPPER.into()),
         kind: ClassKind::Class,
@@ -460,11 +450,11 @@ fn iterator_wrapper_class() -> NativeClassDecl {
         line: 0,
         end_line: 0,
     };
-    (
+    builder.class_created(
         decl,
         Vec::new(),
-        Some(&WRAPPER),
-        Some(crate::api::abi::new_payload::<ObjectIterator>()),
+        &WRAPPER,
+        crate::api::abi::new_payload::<ObjectIterator>(),
     )
 }
 
