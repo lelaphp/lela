@@ -19,19 +19,17 @@
 use std::cmp::Ordering;
 
 use php_unit::decl::{
-    ClassDecl, ClassFlags, ClassKind, ConstExpr, DynamicProperties, FunctionDecl, MethodDecl, Name,
-    Parameter, ParameterDefault, Type, Visibility,
+    FunctionDecl, MethodDecl, Name, Parameter, ParameterDefault, Type, Visibility,
 };
 
 use php_macros::php_class;
 
 use crate::api::abi::{
-    Callable, CloneObj, ConstArray, Entry, ExtensionBuilder, FromArgument, Instance,
+    Callable, CloneObj, ConstArray, Entry, ExtensionBuilder, FromArgument, Instance, NamedVariadic,
     NativeClassDecl, ObjectHandlers, Passed, Raw, Static, This, Union, Untyped,
 };
 use crate::api::call::{Function, Target};
-use crate::api::coerce::coerce_param;
-use crate::api::raising::{Thrown, arg_count_error, throw, warning};
+use crate::api::raising::{Thrown, throw, warning};
 use crate::api::request::Request;
 use crate::api::values::{ClassId, ClosureInfo, Key, PhpArray, PhpObject, PhpString, Value};
 
@@ -492,7 +490,12 @@ pub(crate) fn zend_classes() -> Vec<NativeClassDecl> {
         .class::<RequestParseBodyException>()
         .build("Core")
         .classes;
-    classes.push((closure_class(), closure_methods(), Some(&CLOSURE), None));
+    classes.extend(
+        ExtensionBuilder::default()
+            .class::<Closure>()
+            .build("Core")
+            .classes,
+    );
     // `zend_register_generator_ce` after `zend_register_closure_ce`.
     classes.extend(crate::generator::classes());
     classes.extend(
@@ -649,100 +652,327 @@ pub(crate) struct stdClass;
 impl stdClass {}
 
 /// `final class Closure` as `zend_register_closure_ce` declares it,
-/// `ZEND_ACC_FINAL | ZEND_ACC_NO_DYNAMIC_PROPERTIES`, with the six
-/// methods `class_Closure_methods` carries and no seventh:
-/// [`ClosureHandlers::get_method`] answers `__invoke` as
-/// `zend_closure_get_method` does, off the table.
-///
-/// `__construct` is the first row of the stub's table and stands here
-/// with the declaration, with no entry to pair, as an interface's
-/// methods do: php reaches its body through no lookup, since
-/// `zend_closure_get_constructor` ([`ClosureHandlers::get_constructor`])
-/// raises `Instantiation of class Closure is not allowed` before `new`
-/// can find it.
-fn closure_class() -> ClassDecl {
-    ClassDecl {
-        flags: ClassFlags {
-            is_final: true,
-            not_serializable: true,
-            dynamic_properties: DynamicProperties::Forbidden,
-            ..ClassFlags::default()
-        },
-        interfaces: Vec::new(),
-        properties: Vec::new(),
-        methods: vec![MethodDecl {
-            visibility: Visibility::Private,
-            ..closure_method(b"__construct", Vec::new(), None, true)
-        }],
-        ..crate::api::__private::class(b"Closure", ClassKind::Class)
-    }
-}
-
-/// `class_Closure_methods` (`Z/Zend/zend_closures_arginfo.h:37`) past
-/// its first row, the five the stub declares after `__construct`, in
-/// its order, each with the entry that serves it; the linker places
-/// them after the declaration's own, so the linked table reads as the
-/// stub writes it. `__invoke` is no row of this table in php and is
-/// none here: it is [`ClosureHandlers::get_method`]'s answer, the
+/// `ZEND_ACC_FINAL | ZEND_ACC_NO_DYNAMIC_PROPERTIES` and
+/// `@not-serializable`, with the six methods `class_Closure_methods`
+/// carries and no seventh: [`ClosureHandlers::get_method`] answers
+/// `__invoke` as `zend_closure_get_method` does, off the table, the
 /// trampoline [`trampolines`] lays down.
-fn closure_methods() -> Vec<(MethodDecl, Entry)> {
-    let closure = || Type::Named(Name(b"Closure".as_slice().into()));
-    let scope = || Parameter {
-        default: ParameterDefault::Expr(ConstExpr::Str(b"static".as_slice().into())),
-        ..parameter(
-            b"newScope",
-            Type::Union(vec![Type::Object, Type::String, Type::Null]),
-        )
-    };
-    vec![
-        (
-            closure_method(
-                b"bind",
-                vec![
-                    parameter(b"closure", closure()),
-                    parameter(b"newThis", Type::Nullable(Box::new(Type::Object))),
-                    scope(),
-                ],
-                Some(Type::Nullable(Box::new(closure()))),
-                false,
-            ),
-            closure_bind as Entry,
-        ),
-        (
-            closure_method(
-                b"bindTo",
-                vec![
-                    parameter(b"newThis", Type::Nullable(Box::new(Type::Object))),
-                    scope(),
-                ],
-                Some(Type::Nullable(Box::new(closure()))),
-                true,
-            ),
-            closure_bind_to as Entry,
-        ),
-        (
-            closure_method(
-                b"call",
-                vec![parameter(b"newThis", Type::Object), variadic(b"args")],
-                Some(Type::Mixed),
-                true,
-            ),
-            closure_call as Entry,
-        ),
-        (
-            closure_method(
-                b"fromCallable",
-                vec![parameter(b"callback", Type::Callable)],
-                Some(closure()),
-                false,
-            ),
-            closure_from_callable as Entry,
-        ),
-        (
-            closure_method(b"getCurrent", Vec::new(), Some(closure()), false),
-            closure_get_current as Entry,
-        ),
-    ]
+///
+/// `__construct` is the first row of the stub's table. php reaches its
+/// body through no lookup, since `zend_closure_get_constructor`
+/// ([`ClosureHandlers::get_constructor`]) raises `Instantiation of class
+/// Closure is not allowed` before `new` can find it; reflection reaches
+/// it, and it raises the same.
+///
+/// ```php
+/// try { (new ReflectionMethod('Closure', '__construct'))->invoke(fn () => 1); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Instantiation of class Closure is not allowed
+/// ```
+#[php_class(final, not_serializable, dynamic_properties = forbidden, handlers = CLOSURE)]
+pub(crate) struct Closure;
+
+#[php_class]
+impl Closure {
+    /// `ZEND_METHOD(Closure, __construct)`: php's `Error`.
+    #[php(private)]
+    fn __construct(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
+        let _ = this;
+        Err(throw(
+            req,
+            "Error",
+            "Instantiation of class Closure is not allowed",
+        ))
+    }
+
+    /// `Closure::bind(Closure $closure, ?object $newThis, object|string|null $newScope = "static"): ?Closure`,
+    /// `ZEND_METHOD(Closure, bind)`
+    /// (`Z/Zend/zend_closures.c:354`): [`do_closure_bind`] over the closure
+    /// handed in.
+    ///
+    /// ```php
+    /// class A { private $x = 1; }
+    /// class B extends A {}
+    /// $get = function () { return $this->x; };
+    /// $bound = Closure::bind($get, new A, 'A');
+    /// var_dump($bound());
+    /// $fromB = Closure::bind($get, new B, 'A');
+    /// var_dump($fromB());
+    /// try { Closure::bind($get, new A)(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump(Closure::bind($get, null, 'Nope'));
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// int(1)
+    /// Cannot access private property A::$x
+    ///
+    /// Warning: Class "Nope" not found in %s on line 10
+    /// NULL
+    /// ```
+    fn bind(
+        req: &mut Request,
+        closure: Instance<Closure>,
+        newThis: Option<PhpObject>,
+        #[php(default = "static")] newScope: Option<Union<PhpObject, PhpString>>,
+    ) -> Result<Option<Instance<Closure>>, Thrown> {
+        do_closure_bind(req, closure.object(), newThis, NewScope::of(newScope))
+    }
+
+    /// `Closure::bindTo(?object $newThis, object|string|null $newScope = "static"): ?Closure`,
+    /// `ZEND_METHOD(Closure, bindTo)`
+    /// (`Z/Zend/zend_closures.c:371`): [`do_closure_bind`] over the
+    /// receiver. A copy is made each time, of the function, the variables
+    /// it bound and a new receiver and scope, and the original is left as
+    /// it was.
+    ///
+    /// ```php
+    /// class C { public $v = 'c'; function get() { return function () { return $this->v; }; } }
+    /// class D { public $v = 'd'; }
+    /// $n = 5;
+    /// $f = (new C)->get();
+    /// $g = $f->bindTo(new D);
+    /// $h = function () use ($n) { return $n; };
+    /// var_dump($f(), $g(), $h->bindTo(null)(), $f === $g);
+    /// ```
+    /// ```expect
+    /// string(1) "c"
+    /// string(1) "d"
+    /// int(5)
+    /// bool(false)
+    /// ```
+    ///
+    /// Each of `zend_valid_closure_binding`'s refusals is a warning and
+    /// `null`, the closure left unbound.
+    ///
+    /// ```php
+    /// class C { function m() {} static function s() {} }
+    /// $static = static function () {};
+    /// var_dump($static->bindTo(new C));
+    /// $uses = (function () { return $this; })->bindTo(new C);
+    /// var_dump($uses->bindTo(null));
+    /// var_dump((function () {})->bindTo(null, 'Exception'));
+    /// $method = Closure::fromCallable([new C, 'm']);
+    /// var_dump($method->bindTo(new stdClass));
+    /// var_dump($method->bindTo(null));
+    /// var_dump(Closure::fromCallable('strlen')->bindTo(null, 'C'));
+    /// var_dump(Closure::fromCallable('C::s')->bindTo(null, 'stdClass'));
+    /// ```
+    /// ```expect
+    /// Warning: Cannot bind an instance to a static closure, this will be an error in PHP 9 in %s on line 4
+    /// NULL
+    ///
+    /// Warning: Cannot unbind $this of closure using $this, this will be an error in PHP 9 in %s on line 6
+    /// NULL
+    ///
+    /// Warning: Cannot bind closure to scope of internal class Exception, this will be an error in PHP 9 in %s on line 7
+    /// NULL
+    ///
+    /// Warning: Cannot bind method C::m() to object of class stdClass, this will be an error in PHP 9 in %s on line 9
+    /// NULL
+    ///
+    /// Warning: Cannot unbind $this of method, this will be an error in PHP 9 in %s on line 10
+    /// NULL
+    ///
+    /// Warning: Cannot rebind scope of closure created from function, this will be an error in PHP 9 in %s on line 11
+    /// NULL
+    ///
+    /// Warning: Cannot bind closure to scope of internal class stdClass, this will be an error in PHP 9 in %s on line 12
+    /// NULL
+    /// ```
+    fn bindTo(
+        req: &mut Request,
+        this: This<Self>,
+        newThis: Option<PhpObject>,
+        #[php(default = "static")] newScope: Option<Union<PhpObject, PhpString>>,
+    ) -> Result<Option<Instance<Closure>>, Thrown> {
+        do_closure_bind(req, this.object(), newThis, NewScope::of(newScope))
+    }
+
+    /// `Closure::call(object $newThis, mixed ...$args): mixed`,
+    /// `ZEND_METHOD(Closure, call)` (`Z/Zend/zend_closures.c:138`): the
+    /// closure's function served once on `$newThis`, in the scope of its
+    /// class, with the rest of the arguments, the closure itself left bound
+    /// as it was; a binding [`valid_closure_binding`] refuses is its
+    /// warning and `null`. What the call returns by reference is unwrapped.
+    ///
+    /// ```php
+    /// class Foo { private $x = 3; }
+    /// $get = function ($m) { return $this->x * $m; };
+    /// var_dump($get->call(new Foo, 7));
+    /// $o = new stdClass; $o->x = 7;
+    /// var_dump((function () { return $this->x; })->call($o));
+    /// ```
+    /// ```expect
+    /// int(21)
+    ///
+    /// Warning: Cannot bind closure to scope of internal class stdClass, this will be an error in PHP 9 in %s on line 6
+    /// NULL
+    /// ```
+    ///
+    /// A `static` closure takes no receiver:
+    ///
+    /// ```php
+    /// class A {}
+    /// var_dump((static function () { return 1; })->call(new A));
+    /// ```
+    /// ```expect
+    /// Warning: Cannot bind an instance to a static closure, this will be an error in PHP 9 in %s on line 3
+    /// NULL
+    /// ```
+    fn call(
+        req: &mut Request,
+        this: This<Self>,
+        newThis: PhpObject,
+        args: NamedVariadic<Value>,
+    ) -> Result<Value, Thrown> {
+        let closure = this.object();
+        let Some(info) = closure.closure(req).cloned() else {
+            return Ok(Value::null());
+        };
+        let class = newThis.class();
+        if !valid_closure_binding(req, &info, Some(newThis), Some(class)) {
+            return Ok(Value::null());
+        }
+        let named = args.named().to_vec();
+        let returned = req.serve_closure_as(closure, newThis, class, &args.positional, &named)?;
+        Ok(returned.deref())
+    }
+
+    /// `Closure::fromCallable(callable $callback): Closure`,
+    /// `ZEND_METHOD(Closure, fromCallable)` (`Z/Zend/zend_closures.c:396`):
+    /// a closure handed in is handed back with one more owner; anything
+    /// else is resolved by [`Request::callable_checked`], php's
+    /// `zend_is_callable_ex` with its deprecations, and made a closure by
+    /// `zend_create_closure_from_callable`: `[$closure, '__invoke']` is the
+    /// closure itself, and every other callee a fake closure
+    /// (`zend_create_fake_closure`) over the function, the method's class
+    /// as its scope and the resolved receiver as its `$this`. What the
+    /// resolver refuses is php's `TypeError` with its reason.
+    ///
+    /// ```php
+    /// $f = Closure::fromCallable('strlen'); $g = clone($f);
+    /// var_dump($g->__invoke('abcd'), $f === $g, $g instanceof Closure, $f->__invoke('xy'), Closure::fromCallable($f) === $f);
+    /// ```
+    /// ```expect
+    /// int(4)
+    /// bool(false)
+    /// bool(true)
+    /// int(2)
+    /// bool(true)
+    /// ```
+    ///
+    /// Every shape the resolver reads makes one: a pair on an object keeps
+    /// the object as the closure's `$this`, a `static` method's closure has
+    /// none, a private method is reached from its own class's scope, and
+    /// `[$closure, '__invoke']` is the closure it names.
+    ///
+    /// ```php
+    /// class C {
+    ///     private $v = 'v';
+    ///     function m($x) { return "m$x$this->v"; }
+    ///     static function s($x) { return "s$x"; }
+    ///     private function p() { return 'p'; }
+    ///     function viaPrivate() { return Closure::fromCallable([$this, 'p']); }
+    /// }
+    /// $c = new C;
+    /// $m = Closure::fromCallable([$c, 'm']);
+    /// $s = Closure::fromCallable('C::s');
+    /// $inner = function () { return 'inner'; };
+    /// var_dump($m(1), $s(2), $c->viaPrivate()(), Closure::fromCallable([$inner, '__invoke']) === $inner, $m == Closure::fromCallable([$c, 'm']));
+    /// ```
+    /// ```expect
+    /// string(3) "m1v"
+    /// string(2) "s2"
+    /// string(1) "p"
+    /// bool(true)
+    /// bool(true)
+    /// ```
+    ///
+    /// A pair on an object shows the method's name with its class, the
+    /// receiver and the parameters:
+    ///
+    /// ```php
+    /// class C { function m($x, $y = 1) { return $x; } }
+    /// var_dump(Closure::fromCallable([new C, 'm']));
+    /// ```
+    /// ```expect
+    /// object(Closure)#2 (3) {
+    ///   ["function"]=>
+    ///   string(4) "C::m"
+    ///   ["this"]=>
+    ///   object(C)#1 (0) {
+    ///   }
+    ///   ["parameter"]=>
+    ///   array(2) {
+    ///     ["$x"]=>
+    ///     string(10) "<required>"
+    ///     ["$y"]=>
+    ///     string(10) "<optional>"
+    ///   }
+    /// }
+    /// ```
+    ///
+    /// ```php
+    /// class C { private function p() {} }
+    /// try { Closure::fromCallable([new C, 'p']); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// Closure::fromCallable('nope');
+    /// ```
+    /// ```expect exit=255
+    /// Failed to create closure from callable: cannot access private method C::p()
+    ///
+    /// Fatal error: Uncaught TypeError: Failed to create closure from callable: function "nope" not found or invalid function name in %s:4
+    /// Stack trace:
+    /// #0 %s(4): Closure::fromCallable('nope')
+    /// #1 {main}
+    ///   thrown in %s on line 4
+    /// ```
+    fn fromCallable(
+        req: &mut Request,
+        callback: Raw<Callable>,
+    ) -> Result<Instance<Closure>, Thrown> {
+        let given = callback.value();
+        if let Some(object) = given.as_object().copied()
+            && object.closure(req).is_some()
+        {
+            req.addref(&given);
+            return Ok(Instance::of(object));
+        }
+        let callable = match req.callable_checked(&given) {
+            Ok(callable) => callable,
+            Err(_) if req.is_pending() => return Err(Thrown::of(req.take_pending())),
+            Err(reason) => {
+                return Err(throw(
+                    req,
+                    "TypeError",
+                    &format!("Failed to create closure from callable: {reason}"),
+                ));
+            }
+        };
+        fake_closure(req, &callable).map(Instance::of)
+    }
+
+    /// `Closure::getCurrent(): Closure` (8.5), `ZEND_METHOD(Closure,
+    /// getCurrent)` (`Z/Zend/zend_closures.c:421`): the closure whose body
+    /// called it, one more owner, and php's `Error` where the caller is no
+    /// closure, a closure made of a named function included.
+    ///
+    /// ```php
+    /// $fact = function ($n) { return $n <= 1 ? 1 : $n * Closure::getCurrent()($n - 1); };
+    /// var_dump($fact(5));
+    /// try { Closure::getCurrent(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// int(120)
+    /// Current function is not a closure
+    /// ```
+    fn getCurrent(req: &mut Request) -> Result<Instance<Closure>, Thrown> {
+        let Some(closure) = req.calling_closure() else {
+            return Err(throw(req, "Error", "Current function is not a closure"));
+        };
+        req.addref(&closure.as_value());
+        Ok(Instance::of(closure))
+    }
 }
 
 /// `__invoke`, the one name a table here answers off the table.
@@ -818,123 +1048,6 @@ fn variadic(name: &[u8]) -> Parameter {
         variadic: true,
         ..parameter(name, Type::Mixed)
     }
-}
-
-/// `Closure::fromCallable(callable $callback): Closure`,
-/// `ZEND_METHOD(Closure, fromCallable)` (`Z/Zend/zend_closures.c:396`):
-/// a closure handed in is handed back with one more owner; anything
-/// else is resolved by [`Request::callable_checked`], php's
-/// `zend_is_callable_ex` with its deprecations, and made a closure by
-/// `zend_create_closure_from_callable`: `[$closure, '__invoke']` is the
-/// closure itself, and every other callee a fake closure
-/// (`zend_create_fake_closure`) over the function, the method's class
-/// as its scope and the resolved receiver as its `$this`. What the
-/// resolver refuses is php's `TypeError` with its reason.
-///
-/// ```php
-/// $f = Closure::fromCallable('strlen'); $g = clone($f);
-/// var_dump($g->__invoke('abcd'), $f === $g, $g instanceof Closure, $f->__invoke('xy'), Closure::fromCallable($f) === $f);
-/// ```
-/// ```expect
-/// int(4)
-/// bool(false)
-/// bool(true)
-/// int(2)
-/// bool(true)
-/// ```
-///
-/// Every shape the resolver reads makes one: a pair on an object keeps
-/// the object as the closure's `$this`, a `static` method's closure has
-/// none, a private method is reached from its own class's scope, and
-/// `[$closure, '__invoke']` is the closure it names.
-///
-/// ```php
-/// class C {
-///     private $v = 'v';
-///     function m($x) { return "m$x$this->v"; }
-///     static function s($x) { return "s$x"; }
-///     private function p() { return 'p'; }
-///     function viaPrivate() { return Closure::fromCallable([$this, 'p']); }
-/// }
-/// $c = new C;
-/// $m = Closure::fromCallable([$c, 'm']);
-/// $s = Closure::fromCallable('C::s');
-/// $inner = function () { return 'inner'; };
-/// var_dump($m(1), $s(2), $c->viaPrivate()(), Closure::fromCallable([$inner, '__invoke']) === $inner, $m == Closure::fromCallable([$c, 'm']));
-/// ```
-/// ```expect
-/// string(3) "m1v"
-/// string(2) "s2"
-/// string(1) "p"
-/// bool(true)
-/// bool(true)
-/// ```
-///
-/// A pair on an object shows the method's name with its class, the
-/// receiver and the parameters:
-///
-/// ```php
-/// class C { function m($x, $y = 1) { return $x; } }
-/// var_dump(Closure::fromCallable([new C, 'm']));
-/// ```
-/// ```expect
-/// object(Closure)#2 (3) {
-///   ["function"]=>
-///   string(4) "C::m"
-///   ["this"]=>
-///   object(C)#1 (0) {
-///   }
-///   ["parameter"]=>
-///   array(2) {
-///     ["$x"]=>
-///     string(10) "<required>"
-///     ["$y"]=>
-///     string(10) "<optional>"
-///   }
-/// }
-/// ```
-///
-/// ```php
-/// class C { private function p() {} }
-/// try { Closure::fromCallable([new C, 'p']); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
-/// Closure::fromCallable('nope');
-/// ```
-/// ```expect exit=255
-/// Failed to create closure from callable: cannot access private method C::p()
-///
-/// Fatal error: Uncaught TypeError: Failed to create closure from callable: function "nope" not found or invalid function name in %s:4
-/// Stack trace:
-/// #0 %s(4): Closure::fromCallable('nope')
-/// #1 {main}
-///   thrown in %s on line 4
-/// ```
-fn closure_from_callable(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count != 1 {
-        return Err(arg_count_error(
-            req,
-            &format!("exactly 1 argument, {count} given"),
-        ));
-    }
-    let given = req.argument(1).unwrap_or_default().deref();
-    if let Some(object) = given.as_object().copied()
-        && object.closure(req).is_some()
-    {
-        req.addref(&given);
-        return Ok(given);
-    }
-    let callable = match req.callable_checked(&given) {
-        Ok(callable) => callable,
-        Err(_) if req.is_pending() => return Err(Thrown::of(req.take_pending())),
-        Err(reason) => {
-            return Err(throw(
-                req,
-                "TypeError",
-                &format!("Failed to create closure from callable: {reason}"),
-            ));
-        }
-    };
-    fake_closure(req, &callable).map(|made| made.as_value())
 }
 
 /// `zend_create_closure_from_callable` over what a callable resolved to:
@@ -1618,170 +1731,14 @@ enum NewScope {
     Null,
 }
 
-/// The receiver and scope arguments of `bind` from `first` on, and of
-/// `bindTo` from one: `?object $newThis` then the scope, read as the
-/// stub's types read them.
-fn binding_arguments(
-    req: &mut Request,
-    first: u32,
-) -> Result<(Option<PhpObject>, NewScope), Thrown> {
-    let this = req.argument(first).unwrap_or_default();
-    let this = coerce_param(req, &this, &Type::Nullable(Box::new(Type::Object)), first)?;
-    let this = this.deref().as_object().copied();
-    let count = u32::try_from(req.argument_count()).unwrap_or(u32::MAX);
-    if count <= first {
-        return Ok((this, NewScope::Named(b"static".to_vec())));
+impl NewScope {
+    fn of(scope: Option<Union<PhpObject, PhpString>>) -> NewScope {
+        match scope {
+            Some(Union::A(object)) => NewScope::Object(object),
+            Some(Union::B(name)) => NewScope::Named(name.as_bytes().to_vec()),
+            None => NewScope::Null,
+        }
     }
-    let scope = req.argument(first + 1).unwrap_or_default();
-    let scope = coerce_param(
-        req,
-        &scope,
-        &Type::Union(vec![Type::Object, Type::String, Type::Null]),
-        first + 1,
-    )?;
-    let scope = scope.deref();
-    let scope = if let Some(object) = scope.as_object().copied() {
-        NewScope::Object(object)
-    } else if let Some(name) = scope.as_str_bytes() {
-        NewScope::Named(name.to_vec())
-    } else {
-        NewScope::Null
-    };
-    Ok((this, scope))
-}
-
-/// `Closure::bind(Closure $closure, ?object $newThis, object|string|null $newScope = "static"): ?Closure`,
-/// `ZEND_METHOD(Closure, bind)`
-/// (`Z/Zend/zend_closures.c:354`): [`do_closure_bind`] over the closure
-/// handed in.
-///
-/// ```php
-/// class A { private $x = 1; }
-/// class B extends A {}
-/// $get = function () { return $this->x; };
-/// $bound = Closure::bind($get, new A, 'A');
-/// var_dump($bound());
-/// $fromB = Closure::bind($get, new B, 'A');
-/// var_dump($fromB());
-/// try { Closure::bind($get, new A)(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
-/// var_dump(Closure::bind($get, null, 'Nope'));
-/// ```
-/// ```expect
-/// int(1)
-/// int(1)
-/// Cannot access private property A::$x
-///
-/// Warning: Class "Nope" not found in %s on line 10
-/// NULL
-/// ```
-fn closure_bind(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count < 2 {
-        return Err(arg_count_error(
-            req,
-            &format!("at least 2 arguments, {count} given"),
-        ));
-    }
-    if count > 3 {
-        return Err(arg_count_error(
-            req,
-            &format!("at most 3 arguments, {count} given"),
-        ));
-    }
-    let closure = req.argument(1).unwrap_or_default();
-    let closure = coerce_param(
-        req,
-        &closure,
-        &Type::Named(Name(b"Closure".as_slice().into())),
-        1,
-    )?;
-    let Some(closure) = closure.deref().as_object().copied() else {
-        return Ok(Value::null());
-    };
-    let (this, scope) = binding_arguments(req, 2)?;
-    do_closure_bind(req, closure, this, scope)
-}
-
-/// `Closure::bindTo(?object $newThis, object|string|null $newScope = "static"): ?Closure`,
-/// `ZEND_METHOD(Closure, bindTo)`
-/// (`Z/Zend/zend_closures.c:371`): [`do_closure_bind`] over the
-/// receiver. A copy is made each time, of the function, the variables
-/// it bound and a new receiver and scope, and the original is left as
-/// it was.
-///
-/// ```php
-/// class C { public $v = 'c'; function get() { return function () { return $this->v; }; } }
-/// class D { public $v = 'd'; }
-/// $n = 5;
-/// $f = (new C)->get();
-/// $g = $f->bindTo(new D);
-/// $h = function () use ($n) { return $n; };
-/// var_dump($f(), $g(), $h->bindTo(null)(), $f === $g);
-/// ```
-/// ```expect
-/// string(1) "c"
-/// string(1) "d"
-/// int(5)
-/// bool(false)
-/// ```
-///
-/// Each of `zend_valid_closure_binding`'s refusals is a warning and
-/// `null`, the closure left unbound.
-///
-/// ```php
-/// class C { function m() {} static function s() {} }
-/// $static = static function () {};
-/// var_dump($static->bindTo(new C));
-/// $uses = (function () { return $this; })->bindTo(new C);
-/// var_dump($uses->bindTo(null));
-/// var_dump((function () {})->bindTo(null, 'Exception'));
-/// $method = Closure::fromCallable([new C, 'm']);
-/// var_dump($method->bindTo(new stdClass));
-/// var_dump($method->bindTo(null));
-/// var_dump(Closure::fromCallable('strlen')->bindTo(null, 'C'));
-/// var_dump(Closure::fromCallable('C::s')->bindTo(null, 'stdClass'));
-/// ```
-/// ```expect
-/// Warning: Cannot bind an instance to a static closure, this will be an error in PHP 9 in %s on line 4
-/// NULL
-///
-/// Warning: Cannot unbind $this of closure using $this, this will be an error in PHP 9 in %s on line 6
-/// NULL
-///
-/// Warning: Cannot bind closure to scope of internal class Exception, this will be an error in PHP 9 in %s on line 7
-/// NULL
-///
-/// Warning: Cannot bind method C::m() to object of class stdClass, this will be an error in PHP 9 in %s on line 9
-/// NULL
-///
-/// Warning: Cannot unbind $this of method, this will be an error in PHP 9 in %s on line 10
-/// NULL
-///
-/// Warning: Cannot rebind scope of closure created from function, this will be an error in PHP 9 in %s on line 11
-/// NULL
-///
-/// Warning: Cannot bind closure to scope of internal class stdClass, this will be an error in PHP 9 in %s on line 12
-/// NULL
-/// ```
-fn closure_bind_to(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count < 1 {
-        return Err(arg_count_error(
-            req,
-            &format!("at least 1 argument, {count} given"),
-        ));
-    }
-    if count > 2 {
-        return Err(arg_count_error(
-            req,
-            &format!("at most 2 arguments, {count} given"),
-        ));
-    }
-    let Some(closure) = req.this() else {
-        return Ok(Value::null());
-    };
-    let (this, scope) = binding_arguments(req, 1)?;
-    do_closure_bind(req, closure, this, scope)
 }
 
 /// `do_closure_bind` (`Z/Zend/zend_closures.c:323`): the scope the
@@ -1840,9 +1797,9 @@ fn do_closure_bind(
     closure: PhpObject,
     this: Option<PhpObject>,
     scope: NewScope,
-) -> Result<Value, Thrown> {
+) -> Result<Option<Instance<Closure>>, Thrown> {
     let Some(info) = closure.closure(req).cloned() else {
-        return Ok(Value::null());
+        return Ok(None);
     };
     let scope = match scope {
         NewScope::Object(object) => Some(object.class()),
@@ -1853,20 +1810,20 @@ fn do_closure_bind(
                     req,
                     &format!("Class \"{}\" not found", String::from_utf8_lossy(&name)),
                 );
-                return Ok(Value::null());
+                return Ok(None);
             };
             Some(class)
         }
         NewScope::Null => None,
     };
     if !valid_closure_binding(req, &info, this, scope) {
-        return Ok(Value::null());
+        return Ok(None);
     }
     // `called_scope = newthis ? Z_OBJCE_P(newthis) : ce`, the new scope
     // before a receiver with none takes `Closure` as its dummy one.
     let called_scope = scope;
     let scope = scope.or_else(|| this.and_then(|_| req.class_named(b"Closure")));
-    create_closure(req, &info, scope, called_scope, this).map(|made| made.as_value())
+    create_closure(req, &info, scope, called_scope, this).map(|made| Some(Instance::of(made)))
 }
 
 /// `zend_create_closure` (`Z/Zend/zend_closures.c:855`) over the
@@ -1978,102 +1935,4 @@ fn valid_closure_binding(
         return false;
     }
     true
-}
-
-/// `Closure::call(object $newThis, mixed ...$args): mixed`,
-/// `ZEND_METHOD(Closure, call)` (`Z/Zend/zend_closures.c:138`): the
-/// closure's function served once on `$newThis`, in the scope of its
-/// class, with the rest of the arguments, the closure itself left bound
-/// as it was; a binding [`valid_closure_binding`] refuses is its
-/// warning and `null`. What the call returns by reference is unwrapped.
-///
-/// ```php
-/// class Foo { private $x = 3; }
-/// $get = function ($m) { return $this->x * $m; };
-/// var_dump($get->call(new Foo, 7));
-/// $o = new stdClass; $o->x = 7;
-/// var_dump((function () { return $this->x; })->call($o));
-/// ```
-/// ```expect
-/// int(21)
-///
-/// Warning: Cannot bind closure to scope of internal class stdClass, this will be an error in PHP 9 in %s on line 6
-/// NULL
-/// ```
-///
-/// A `static` closure takes no receiver:
-///
-/// ```php
-/// class A {}
-/// var_dump((static function () { return 1; })->call(new A));
-/// ```
-/// ```expect
-/// Warning: Cannot bind an instance to a static closure, this will be an error in PHP 9 in %s on line 3
-/// NULL
-/// ```
-fn closure_call(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count < 1 {
-        return Err(arg_count_error(
-            req,
-            &format!("at least 1 argument, {count} given"),
-        ));
-    }
-    let Some(closure) = req.this() else {
-        return Ok(Value::null());
-    };
-    let this = req.argument(1).unwrap_or_default();
-    let this = coerce_param(req, &this, &Type::Object, 1)?;
-    let Some(this) = this.deref().as_object().copied() else {
-        return Ok(Value::null());
-    };
-    let Some(info) = closure.closure(req).cloned() else {
-        return Ok(Value::null());
-    };
-    let class = this.class();
-    if !valid_closure_binding(req, &info, Some(this), Some(class)) {
-        return Ok(Value::null());
-    }
-    let arguments: Vec<Value> = (2..=u32::try_from(count).unwrap_or(u32::MAX))
-        .filter_map(|position| req.argument(position))
-        .collect();
-    let named = req.named_arguments();
-    let returned = req.serve_closure_as(closure, this, class, &arguments, &named)?;
-    Ok(returned.deref())
-}
-
-/// `ZEND_PARSE_PARAMETERS_NONE()`: php's `ArgumentCountError`,
-/// `expects exactly 0 arguments, N given`.
-fn no_arguments(req: &mut Request) -> Result<(), Thrown> {
-    let count = req.argument_count();
-    if count == 0 {
-        return Ok(());
-    }
-    Err(arg_count_error(
-        req,
-        &format!("exactly 0 arguments, {count} given"),
-    ))
-}
-
-/// `Closure::getCurrent(): Closure` (8.5), `ZEND_METHOD(Closure,
-/// getCurrent)` (`Z/Zend/zend_closures.c:421`): the closure whose body
-/// called it, one more owner, and php's `Error` where the caller is no
-/// closure, a closure made of a named function included.
-///
-/// ```php
-/// $fact = function ($n) { return $n <= 1 ? 1 : $n * Closure::getCurrent()($n - 1); };
-/// var_dump($fact(5));
-/// try { Closure::getCurrent(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// int(120)
-/// Current function is not a closure
-/// ```
-fn closure_get_current(req: &mut Request) -> Result<Value, Thrown> {
-    no_arguments(req)?;
-    let Some(closure) = req.calling_closure() else {
-        return Err(throw(req, "Error", "Current function is not a closure"));
-    };
-    req.addref(&closure.as_value());
-    Ok(closure.as_value())
 }
