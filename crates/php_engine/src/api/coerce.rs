@@ -234,10 +234,14 @@ pub fn to_callable(req: &mut Request, value: &Value) -> Result<Callable, Thrown>
     }
 }
 
-/// The array key a value makes, php's offset rules: `null` is `""`, a
-/// `bool` and a `float` are an `int`, an `array` or an `object` is the
-/// `TypeError` "Illegal offset type". A string key is the caller's, one
-/// owner, as [`PhpArray::set`] takes it, and `value` keeps its own.
+/// The array key a value makes, `array_set_zval_key`'s offset rules
+/// (`Z/Zend/zend_API.c:2256`), which are the write kernel's
+/// ([`crate::ops::array_offset`]): `null` is `""` behind its deprecation,
+/// a `bool` an `int`, a `float` an `int` behind the deprecation for a
+/// fraction, a resource its id behind its warning, and an `array` or an
+/// `object` the `TypeError` "Cannot access offset of type T on array". A
+/// string key is the caller's, one owner, as [`PhpArray::set`] takes it,
+/// and `value` keeps its own.
 ///
 /// ```php
 /// class It implements Iterator {
@@ -262,25 +266,33 @@ pub fn to_callable(req: &mut Request, value: &Value) -> Result<Callable, Thrown>
 ///   string(2) "cc"
 /// }
 /// ```
+///
+/// ```php
+/// var_dump(array_column([["k" => 1.5, "v" => 1], ["k" => null, "v" => 2], ["k" => true, "v" => 3]], "v", "k"));
+/// try { array_column([["k" => new stdClass, "v" => 1]], "v", "k"); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+///
+/// Deprecated: Implicit conversion from float 1.5 to int loses precision in %s on line 2
+///
+/// Deprecated: Using null as an array offset is deprecated, use an empty string instead in %s on line 2
+/// array(2) {
+///   [1]=>
+///   int(3)
+///   [""]=>
+///   int(2)
+/// }
+/// Cannot access offset of type stdClass on array
+/// ```
 pub fn key_of(req: &mut Request, value: &Value) -> Result<Key, Thrown> {
-    match value.as_ref() {
-        ValueRef::Undef | ValueRef::Null => Ok(Key::Str(PhpString::new(req, b"")?)),
-        ValueRef::Bool(b) => Ok(Key::Int(i64::from(b))),
-        ValueRef::Int(n) => Ok(Key::Int(n)),
-        ValueRef::Float(f) => Ok(Key::Int(float_to_long(f))),
-        ValueRef::Str(s) => {
-            let key = Key::from_string(*s);
-            if let Key::Str(_) = key {
-                req.addref(&Value::string(*s));
-            }
-            Ok(key)
-        }
-        ValueRef::Resource(r) => Ok(Key::Int(r.id())),
-        ValueRef::Reference(r) => key_of(req, &r.get()),
-        ValueRef::Array(_) | ValueRef::Object(_) => {
-            Err(throw(req, "TypeError", "Illegal offset type"))
-        }
+    let value = value.deref();
+    let key = Key::of(crate::ops::array_offset(req, &value, false)?);
+    // The kernel names a string offset's own string; a `null`'s `""` it
+    // made is the caller's already.
+    if let (Key::Str(s), ValueRef::Str(_)) = (&key, value.as_ref()) {
+        req.addref(&Value::string(*s));
     }
+    Ok(key)
 }
 
 /// `count()` of a countable value, the kernel [`crate::ops::count`]
