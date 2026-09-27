@@ -325,6 +325,15 @@ impl PhpArray {
         self.0.is_empty()
     }
 
+    /// `HT_IS_PACKED`: whether the table is php's packed list, its slots
+    /// the integer keys from zero with holes where elements were
+    /// removed, and not a hash, which is what `debug_zval_dump` prints
+    /// `packed` for; a list of keys `0..len` can be either.
+    #[must_use]
+    pub fn is_packed(&self) -> bool {
+        self.0.is_packed()
+    }
+
     /// Whether the keys are `0..len` in order, `array_is_list()`.
     #[must_use]
     pub fn is_list(&self) -> bool {
