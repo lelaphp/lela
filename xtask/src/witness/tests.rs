@@ -17,6 +17,7 @@ use super::fence;
 use super::judge::{Run, held};
 use super::process::Binary;
 use super::{Ask, Judgement, Tally, capture, judge};
+use crate::cfg::Target;
 use crate::divergence::Registry;
 use crate::manifest::Manifest;
 use crate::oracle::{Observation, Promise};
@@ -426,7 +427,7 @@ fn the_fixture_whose_fence_the_oracle_does_not_meet_fails_naming_the_oracle() {
     }
     let root = workspace().join("xtask/fixtures/witness/oracle-unmet");
     let fixture = Manifest::load(&root).unwrap();
-    let found = super::extract(&root, &fixture.crates[0], None).unwrap();
+    let found = super::extract(&root, &fixture.crates[0], None, Target::built()).unwrap();
     let tally = judge(
         &fixture.pin.oracle(),
         &binary(),
@@ -598,4 +599,52 @@ fn a_process_fence_forks_in_the_binary_and_never_in_the_harness() {
     let (judgement, note) = only(&judge_text(&unmarked, &registry("")));
     assert_eq!(judgement, Judgement::Fail, "{note}");
     assert!(note.contains("pcntl_fork"), "{note}");
+}
+
+/// The set rustc prints for `--print cfg` over `triple`, which it prints
+/// without the target's standard library installed.
+fn printed(triple: &str) -> Target {
+    let out = std::process::Command::new("rustc")
+        .args(["--print", "cfg", "--target", triple])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    Target::parse(&String::from_utf8(out.stdout).unwrap())
+}
+
+/// The fixture of `a_native_under_a_cfg_the_target_denies_is_no_subject`
+/// read as a Linux build and as a Darwin one would read it (#1068): the
+/// lane on CI is the first and the oracle's host the second, so each
+/// counts the native its own `#[cfg]` has and neither counts the other's.
+#[test]
+fn a_linux_build_and_a_darwin_one_each_count_their_own_natives() {
+    let root = workspace().join("xtask/fixtures/witness/anchor-cfg");
+    let fixture = Manifest::load(&root).unwrap();
+    let rule = super::coverage_rule(&fixture);
+    for (triple, own) in [
+        ("x86_64-unknown-linux-gnu", "fn fixture_linux"),
+        ("aarch64-apple-darwin", "fn fixture_apple"),
+    ] {
+        let found = super::extract(&root, &fixture.crates[0], rule, &printed(triple)).unwrap();
+        let coverage = found.anchored.expect("the attributes declare natives");
+        let names: Vec<String> = coverage
+            .subjects(&std::collections::HashMap::new())
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "fn fixture_everywhere",
+                "fn fixture_unix",
+                own,
+                "fn fixture_feature"
+            ],
+            "{triple}"
+        );
+    }
 }

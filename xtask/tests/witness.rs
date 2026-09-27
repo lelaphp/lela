@@ -402,6 +402,61 @@ fn the_attributes_declare_the_natives_and_a_fence_covers_only_what_it_ran() {
     );
 }
 
+/// A native the build that links the engine compiled out is no subject
+/// (#1068): the `#[cfg]` on the `fn`, on its impl, on its inline `mod`,
+/// on the `mod name;` of its file or as the file's own `#![cfg]` is read
+/// against the target this harness was built for. The fixture's natives
+/// are linked into no engine, so every subject reads missing, and the
+/// ones a `windows` cfg takes out are never named; the Darwin-only and the
+/// Linux-only one are a subject each on its own host.
+#[test]
+fn a_native_under_a_cfg_the_target_denies_is_no_subject() {
+    let root = fixture_at("witness", "anchor-cfg");
+    let mut manifest = Manifest::load(&root).unwrap();
+    manifest.pin.oracle.path = root.join("no-php-here");
+    let readings = witness::run(
+        &root,
+        &manifest,
+        &Registry::default(),
+        &Ask {
+            crates: vec!["ext/pcre".to_owned()],
+            accept: false,
+            staged: false,
+        },
+    )
+    .unwrap();
+    let [reading] = readings.as_slice() else {
+        panic!("{readings:#?}")
+    };
+    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+    let mut named = vec!["fixture_everywhere", "fixture_unix", "fixture_feature"];
+    let (here, elsewhere) = if cfg!(target_vendor = "apple") {
+        ("fixture_apple", "fixture_linux")
+    } else {
+        ("fixture_linux", "fixture_apple")
+    };
+    named.push(here);
+    assert_eq!(count(reading, "subjects"), 4, "{reading:#?}");
+    assert_eq!(count(reading, "missing"), 4, "{reading:#?}");
+    for name in named {
+        assert!(reading.message.contains(name), "{}", reading.message);
+    }
+    for name in [
+        elsewhere,
+        "fixture_windows",
+        "Pattern::replace",
+        "fixture_inline",
+        "fixture_platform",
+        "fixture_elsewhere",
+    ] {
+        assert!(
+            !reading.message.contains(name),
+            "{name}: {}",
+            reading.message
+        );
+    }
+}
+
 /// The negative control of the regime a fence may name (harness §4.1, §8,
 /// ledger 55): a workspace whose one fence names a regime `oracle.toml`
 /// does not carry, which the instrument must fail on. The name is read off

@@ -2,7 +2,9 @@
 //! the digest of `seams.toml`, the rules, and of the `.rs` files under
 //! `xtask/src`, the code that reads them, as they stood when this binary was
 //! built, handed to the crate as `XTASK_MANIFEST_DIGEST` and
-//! `XTASK_SOURCES_DIGEST`. `permit` compares
+//! `XTASK_SOURCES_DIGEST`; and the cfg set of the target it builds for, in
+//! `target.cfg` under `OUT_DIR`, which witness coverage reads (#1068).
+//! `permit` compares
 //! them with the tree and refuses to judge when either differs, so a build
 //! older than what it judges by is the loud kind of stale rather than the
 //! quiet kind that exits 0 and judges by rules, or with code, that have
@@ -49,4 +51,27 @@ fn main() {
     let code = sources_digest(&root).unwrap_or_default();
     println!("cargo::rustc-env=XTASK_MANIFEST_DIGEST={manifest}");
     println!("cargo::rustc-env=XTASK_SOURCES_DIGEST={code}");
+    print_target_cfg();
+}
+
+/// The cfg set of the target this build is for, as rustc prints it under
+/// the build's own flags, which is how cargo takes it: `src/cfg.rs` reads
+/// the lines, so witness coverage holds a native to the `#[cfg]` of the
+/// build that links it (#1068).
+fn print_target_cfg() {
+    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    let target = std::env::var("TARGET").expect("cargo names the target");
+    let mut command = std::process::Command::new(rustc);
+    command.args(["--print", "cfg", "--target", &target]);
+    if let Ok(flags) = std::env::var("CARGO_ENCODED_RUSTFLAGS") {
+        command.args(flags.split('\x1f').filter(|f| !f.is_empty()));
+    }
+    let printed = command.output().expect("running rustc --print cfg");
+    assert!(
+        printed.status.success(),
+        "rustc --print cfg --target {target}: {}",
+        String::from_utf8_lossy(&printed.stderr)
+    );
+    let out = std::env::var_os("OUT_DIR").expect("cargo sets OUT_DIR");
+    std::fs::write(Path::new(&out).join("target.cfg"), printed.stdout).expect("writing target.cfg");
 }

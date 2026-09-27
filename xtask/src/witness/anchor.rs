@@ -23,13 +23,24 @@
 //! blanked ([`rust::without_comments_or_literals`]), which keeps offsets
 //! and lines; the attribute's path is read as written, its last segment
 //! naming it (`#[php_function]`, `#[php_ext::attr::php_function]`).
+//!
+//! **What the build compiled out is no native** (#1068). A `#[cfg(..)]`
+//! the target's set decides against ([`cfg::Target`]), on the `fn`, on
+//! the impl or the inline `mod` around it, as `#![cfg(..)]` over the file
+//! or the block, or on the `mod name;` whose file holds it, takes the item
+//! out of the build that links the engine, so no fence can enter it and
+//! coverage asks none of it. A `mod name;` is followed to its file by
+//! Rust's own layout, `name.rs` or `name/mod.rs` beside the file that
+//! declares it and everything under `name/`; a `#[path]` is not read.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::ops::Range;
+use std::path::{Path, PathBuf};
 
 use php_bundle::test::Entered;
 
 use super::fence::{Subject, Witness};
+use crate::cfg;
 use crate::rust;
 
 /// One native a fence's run entered, as the linked engine hands it back
@@ -102,6 +113,14 @@ enum Declared {
 }
 
 impl Declared {
+    /// How a subject names it: `fn name`, or `fn Class::name`.
+    fn shown(&self) -> String {
+        match self {
+            Declared::Function { name } => format!("fn {name}"),
+            Declared::Method { class, name } => format!("fn {class}::{name}"),
+        }
+    }
+
     /// Whether a traced entry is this native: the expansion names a
     /// function with no owner and a method by its impl's type, each by
     /// its identifier with `r#` stripped.
@@ -121,6 +140,34 @@ struct Native {
     subject: Subject,
     declared: Declared,
     own: Vec<String>,
+    /// Whether the build that links the engine has it: false under a
+    /// `#[cfg]` the target's set denies, which makes it no subject.
+    compiled: bool,
+}
+
+impl Native {
+    /// The native `declared` at the 0-based `line` of `file`, not yet
+    /// witnessed.
+    fn at(
+        file: &Path,
+        line: usize,
+        declared: Declared,
+        own: Vec<String>,
+        compiled: bool,
+    ) -> Native {
+        let subject = Subject {
+            file: file.to_path_buf(),
+            line: line + 1,
+            name: declared.shown(),
+            witnessed: false,
+        };
+        Native {
+            subject,
+            declared,
+            own,
+            compiled,
+        }
+    }
 }
 
 /// What the attributes of one crate's covered sources declare.
@@ -130,6 +177,9 @@ pub(super) struct Anchored {
     /// The id of each fence on a `#[php_class]` header or member impl,
     /// beside its class's name.
     class_fences: Vec<(String, String)>,
+    /// The path each `mod name;` a `#[cfg]` compiled out would take its
+    /// file from, without `.rs`: `name.rs`, and every file under `name/`.
+    compiled_out: Vec<PathBuf>,
 }
 
 /// A crate whose natives stand on the attributes: what they declare, and
@@ -174,20 +224,38 @@ impl Anchored {
     pub(super) fn take(&mut self, other: Anchored) {
         self.natives.extend(other.natives);
         self.class_fences.extend(other.class_fences);
+        self.compiled_out.extend(other.compiled_out);
+    }
+
+    /// Take the natives of every file a compiled-out `mod name;` would
+    /// take out of the build, once every file of the crate has been taken.
+    pub(super) fn settle(&mut self) {
+        for native in &mut self.natives {
+            let file = &native.subject.file;
+            if self
+                .compiled_out
+                .iter()
+                .any(|module| file.starts_with(module) || *file == module.with_extension("rs"))
+            {
+                native.compiled = false;
+            }
+        }
     }
 
     /// Whether any native stands on the attributes, so the anchor and not
-    /// the older count is what coverage reads.
+    /// the older count is what coverage reads; one the build compiled out
+    /// stands on them as much as one it has.
     pub(super) fn declares(&self) -> bool {
         !self.natives.is_empty()
     }
 
-    /// The subjects coverage counts, one per native, each witnessed where
-    /// a fence of its own, or for a method one of its class's, entered it
-    /// when the linked engine ran the fence.
+    /// The subjects coverage counts, one per native the build has, each
+    /// witnessed where a fence of its own, or for a method one of its
+    /// class's, entered it when the linked engine ran the fence.
     pub(super) fn subjects(&self, traced: &Traced<'_>) -> Vec<Subject> {
         self.natives
             .iter()
+            .filter(|native| native.compiled)
             .map(|native| {
                 let mut subject = native.subject.clone();
                 let class = match &native.declared {
@@ -209,10 +277,15 @@ impl Anchored {
     }
 }
 
-/// Every native the attributes in one file declare, and every fence on a
-/// class; `witnesses` are the file's own, as [`super::fence::extract`]
-/// read them.
-pub(super) fn scan(file: &Path, text: &str, witnesses: &[Witness]) -> Anchored {
+/// Every native the attributes in one file declare for `target`, and
+/// every fence on a class; `witnesses` are the file's own, as
+/// [`super::fence::extract`] read them.
+pub(super) fn scan(
+    file: &Path,
+    text: &str,
+    witnesses: &[Witness],
+    target: &cfg::Target,
+) -> Anchored {
     let code = rust::without_comments_or_literals(text);
     let source: Vec<&str> = text.lines().collect();
     // The witnesses on an item, by the `php` fence's 0-based line; a `//!`
@@ -234,23 +307,34 @@ pub(super) fn scan(file: &Path, text: &str, witnesses: &[Witness]) -> Anchored {
     let mut pending: Option<Anchor> = None;
     // The member depth and the name of each `#[php_class]` impl open here.
     let mut classes: Vec<(usize, String)> = Vec::new();
+    let mut build = Build::default();
     let mut depth = 0usize;
     while let Some(token) = scanner.next() {
         match token {
-            Token::Attribute(text) => pending = Anchor::of(text).or(pending),
+            Token::Attribute { at, inner } => {
+                let blanked = build.attribute(target, (text, &code), at, inner, depth);
+                if !inner {
+                    pending = Anchor::of(blanked).or(pending);
+                }
+            }
             Token::Punct(c) => {
                 since = Some(scanner.line);
                 pending = None;
                 match c {
-                    '{' => depth += 1,
+                    '{' => {
+                        depth += 1;
+                        build.open(depth);
+                    }
                     '}' => {
                         depth = depth.saturating_sub(1);
                         classes.retain(|(members, _)| *members <= depth);
+                        build.close(depth);
                     }
-                    _ => {}
+                    _ => out.compiled_out.extend(build.end(file)),
                 }
             }
             Token::Word(word) => {
+                let compiled = build.has();
                 let line = scanner.line;
                 let own = || {
                     on_an_item
@@ -260,34 +344,21 @@ pub(super) fn scan(file: &Path, text: &str, witnesses: &[Witness]) -> Anchored {
                 };
                 match word {
                     "fn" => {
-                        let name = scanner.identifier().unwrap_or_default().to_owned();
+                        let name = scanner.identifier().unwrap_or_default();
+                        let name = name.strip_prefix("r#").unwrap_or(name).to_owned();
                         let member = classes.last().filter(|(members, _)| *members == depth);
-                        let name = name.strip_prefix("r#").unwrap_or(&name).to_owned();
                         let declared = match (pending, member) {
-                            (Some(Anchor::Function), _) => {
-                                Some(Declared::Function { name: name.clone() })
-                            }
+                            (Some(Anchor::Function), _) => Some(Declared::Function { name }),
                             (_, Some((_, class))) if scanner.has_body() => Some(Declared::Method {
                                 class: class.clone(),
-                                name: name.clone(),
+                                name,
                             }),
                             _ => None,
                         };
                         if let Some(declared) = declared {
-                            let shown = match &declared {
-                                Declared::Function { .. } => format!("fn {name}"),
-                                Declared::Method { class, .. } => format!("fn {class}::{name}"),
-                            };
-                            out.natives.push(Native {
-                                subject: Subject {
-                                    file: file.to_path_buf(),
-                                    line: line + 1,
-                                    name: shown,
-                                    witnessed: false,
-                                },
-                                declared,
-                                own: own().map(Witness::id).collect(),
-                            });
+                            let own = own().map(Witness::id).collect();
+                            out.natives
+                                .push(Native::at(file, line, declared, own, compiled));
                         }
                         pending = None;
                     }
@@ -297,15 +368,21 @@ pub(super) fn scan(file: &Path, text: &str, witnesses: &[Witness]) -> Anchored {
                         } else {
                             scanner.identifier().unwrap_or_default().to_owned()
                         };
-                        out.class_fences
-                            .extend(own().map(|w| (class.clone(), w.id())));
+                        if compiled {
+                            out.class_fences
+                                .extend(own().map(|w| (class.clone(), w.id())));
+                        }
                         if word == "impl" {
                             classes.push((depth + 1, class));
                         }
                         pending = None;
                     }
-                    "impl" | "struct" | "enum" | "union" | "trait" | "type" | "mod" | "static"
-                    | "use" | "macro_rules" => pending = None,
+                    "mod" => {
+                        build.module = scanner.identifier().map(str::to_owned);
+                        pending = None;
+                    }
+                    "impl" | "struct" | "enum" | "union" | "trait" | "type" | "static" | "use"
+                    | "macro_rules" => pending = None,
                     _ => {}
                 }
             }
@@ -314,10 +391,111 @@ pub(super) fn scan(file: &Path, text: &str, witnesses: &[Witness]) -> Anchored {
     out
 }
 
+/// What of a file the build has, as [`scan`] walks it (#1068).
+#[derive(Debug, Default)]
+struct Build {
+    /// The member depth and the name of each inline `mod` open here.
+    mods: Vec<(usize, String)>,
+    /// The `mod` whose name was read and whose `{` or `;` is to come.
+    module: Option<String>,
+    /// Whether a `#[cfg]` since the last `{`, `}` or `;` is false for the
+    /// target, which takes the item it stands on out of the build.
+    denied: bool,
+    /// The depth from which the build has none of what stands here: a
+    /// block whose item a `#[cfg]` denied, or one an inner `#![cfg]` did.
+    out_from: Option<usize>,
+}
+
+impl Build {
+    /// The attribute `at` spans in the blanked source of `(text, code)`,
+    /// at `depth`, which `target` admits or not: a denied outer one takes
+    /// the item below it out of the build, an inner one the block or the
+    /// file it stands in. Only a `cfg` is read with its literals, from the
+    /// source. The blanked text is what it answers.
+    fn attribute<'c>(
+        &mut self,
+        target: &cfg::Target,
+        (text, code): (&str, &'c str),
+        at: Range<usize>,
+        inner: bool,
+        depth: usize,
+    ) -> &'c str {
+        let blanked = code.get(at.clone()).unwrap_or_default().trim();
+        if !blanked.starts_with("cfg") || target.admits(unblanked(text, code, at).trim()) {
+            return blanked;
+        }
+        if inner {
+            self.out_from = Some(self.out_from.map_or(depth, |d| d.min(depth)));
+        } else {
+            self.denied = true;
+        }
+        blanked
+    }
+
+    /// A `{` that took the depth to `depth`.
+    fn open(&mut self, depth: usize) {
+        if self.denied && self.out_from.is_none() {
+            self.out_from = Some(depth);
+        }
+        if let Some(name) = self.module.take() {
+            self.mods.push((depth, name));
+        }
+        self.denied = false;
+    }
+
+    /// A `}` that took the depth back to `depth`.
+    fn close(&mut self, depth: usize) {
+        self.mods.retain(|(members, _)| *members <= depth);
+        if self.out_from.is_some_and(|d| depth < d) {
+            self.out_from = None;
+        }
+        self.denied = false;
+    }
+
+    /// A `;`: where it ends a `mod name;` the build does not take, the
+    /// path of `file`'s that the module's file would stand at.
+    fn end(&mut self, file: &Path) -> Option<PathBuf> {
+        let name = self.module.take();
+        let out = self.denied || self.out_from.is_some();
+        self.denied = false;
+        let name = name.filter(|_| out)?;
+        let mut path = module_dir(file);
+        path.extend(self.mods.iter().map(|(_, m)| m.as_str()));
+        path.push(name);
+        Some(path)
+    }
+
+    /// Whether the build has what stands at the cursor.
+    fn has(&self) -> bool {
+        !self.denied && self.out_from.is_none()
+    }
+}
+
+/// The stretch of `text` that `at` spans in `code`, its blanked copy: the
+/// blanker keeps each character's place and not its width, so the offsets
+/// are carried over by characters.
+fn unblanked<'a>(text: &'a str, code: &str, at: Range<usize>) -> &'a str {
+    let chars = |offset: usize| code.get(..offset).map_or(0, |c| c.chars().count());
+    let byte = |n: usize| text.char_indices().nth(n).map_or(text.len(), |(b, _)| b);
+    let (start, end) = (byte(chars(at.start)), byte(chars(at.end)));
+    text.get(start..end).unwrap_or_default()
+}
+
+/// The directory a file's `mod name;` takes `name` from: the file's own
+/// for a crate root or a `mod.rs`, and `stem/` beside it for any other.
+fn module_dir(file: &Path) -> PathBuf {
+    let parent = file.parent().unwrap_or(Path::new("")).to_path_buf();
+    match file.file_stem().and_then(|s| s.to_str()) {
+        Some("lib" | "main" | "mod") | None => parent,
+        Some(stem) => parent.join(stem),
+    }
+}
+
 /// What the scanner reads off the blanked source.
 enum Token<'a> {
-    /// An outer attribute's text between `#[` and its `]`.
-    Attribute(&'a str),
+    /// An attribute's text between `#[` (or `#![`) and its `]`, by its
+    /// offsets in the blanked source.
+    Attribute { at: Range<usize>, inner: bool },
     /// `{`, `}` or `;`.
     Punct(char),
     /// An identifier or a keyword.
@@ -458,13 +636,10 @@ impl<'a> Iterator for Scanner<'a> {
             if rest.starts_with("#[") || rest.starts_with("#![") {
                 let open = rest.find('[').unwrap_or_default();
                 let end = Self::closing(rest, open);
-                let inner = rest.starts_with("#[");
+                let inner = rest.starts_with("#!");
+                let at = self.at + open + 1..self.at + end.saturating_sub(1).max(open + 1);
                 self.advance(end);
-                if inner {
-                    let text = rest[open + 1..end.saturating_sub(1).max(open + 1)].trim();
-                    return Some(Token::Attribute(text));
-                }
-                continue;
+                return Some(Token::Attribute { at, inner });
             }
             if matches!(c, '{' | '}' | ';') {
                 self.advance(1);
@@ -499,7 +674,7 @@ mod tests {
     fn subjects(text: &str, trace: &[(&str, Vec<Entered>)]) -> Option<Vec<Subject>> {
         let file = Path::new("ext/fixture/src/lib.rs");
         let found = fence::extract(file, text);
-        let anchored = scan(file, text, &found.witnesses);
+        let anchored = scan(file, text, &found.witnesses, cfg::Target::built());
         if !anchored.declares() {
             return None;
         }

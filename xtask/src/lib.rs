@@ -24,6 +24,7 @@ pub mod bench;
 pub mod budget;
 mod built;
 mod census_weight;
+mod cfg;
 pub mod cli;
 pub mod clippy;
 pub mod compile_identity;
