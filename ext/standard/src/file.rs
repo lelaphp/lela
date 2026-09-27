@@ -15,6 +15,7 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use php_ext::attr::php_function;
 use php_ext::call::lookup_class;
 use php_ext::coerce::{coerce_param, to_string, value_name};
 use php_ext::decl::{
@@ -410,10 +411,7 @@ fn contents_natives() -> Vec<(FunctionDecl, Entry)> {
             ),
             file_put_contents,
         ),
-        (
-            declared(b"stream_get_meta_data", &[stream_parameter()], Type::Array),
-            stream_get_meta_data,
-        ),
+        stream_get_meta_data::declared(),
     ]
 }
 
@@ -1963,10 +1961,9 @@ fn has_to_string(req: &mut Request, object: PhpObject) -> Result<bool, Thrown> {
 ///   string(12) "php://output"
 /// }
 /// ```
-pub(super) fn stream_get_meta_data(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let stream = stream_argument(req, 1)?;
-    Ok(Value::array(stream.meta_data(req)?))
+#[php_function(aliases(socket_get_status))]
+fn stream_get_meta_data(req: &mut Request, stream: Stream) -> Result<PhpArray, Thrown> {
+    stream.meta_data(req)
 }
 
 /// The natives of `file.c` over the wrapper operations past opening, in
