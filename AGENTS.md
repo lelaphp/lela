@@ -217,6 +217,7 @@ Options:
 ├── pdo
 ├── pdo_mysql
 ├── pdo_sqlite
+├── phar
 ├── posix
 ├── random
 ├── reflection
@@ -226,4 +227,4 @@ Options:
 ├── tokenizer
 └── zlib
 ```
-<!-- /computed in=d8243d1ed8b1eb9f3d10ca49f6309571198414720a8f24fe445cac3b7cc591c2 out=71d370766281fd207a4f588b75419d30788baf0d2436ee6b42fe23f340cdaac5 -->
+<!-- /computed in=1b949c1d94e7e2a1fba1060226bcd4e57738ddc9046c8e3aad6264866d383b75 out=ea77634fbc983eef764bf6a1152ee2023a82bbc848a4be2f78eca93fad1054fc -->

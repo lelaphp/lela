@@ -65,6 +65,15 @@ pub struct Unit {
     /// and arms each again on a hit. The engine arms each where it raises
     /// [`Unit::diagnostics`].
     pub arms: Vec<AutoGlobal>,
+    /// Where the file's data begins, the byte after the `;` of the
+    /// `__halt_compiler();` it stops at, for a file that stops at one:
+    /// what `zend_compile_halt_compiler` registers as
+    /// `__COMPILER_HALT_OFFSET__` under the file's name
+    /// (`Z/Zend/zend_compile.c:9804`), and what opcache keeps beside a
+    /// cached file as `compiler_halt_offset` and registers again on a
+    /// hit (`Z/ext/opcache/zend_accelerator_util_funcs.c:380`). The
+    /// engine registers it where it raises [`Unit::diagnostics`].
+    pub halt_offset: Option<i64>,
 }
 
 /// An auto-global that makes a variable: one of the names

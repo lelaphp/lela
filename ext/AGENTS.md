@@ -28,6 +28,7 @@ One crate per extension under `ext/` (ADR-0004), laid down by `xtask new-ext <na
 ├── pdo
 ├── pdo_mysql
 ├── pdo_sqlite
+├── phar
 ├── posix
 ├── random
 ├── reflection
@@ -37,7 +38,7 @@ One crate per extension under `ext/` (ADR-0004), laid down by `xtask new-ext <na
 ├── tokenizer
 └── zlib
 ```
-<!-- /computed in=5291ec8bb981a305672f5335e63fa1959e5610233bd94b624ace06f957f19b74 out=cb14a5d5f955ffd39fb186a2af27cf66014759dd2dec3fa214eb592837b68f26 -->
+<!-- /computed in=8239f84bb1d879c2fd5ebd081112909e647128b0769ab47af64af7553209c099 out=ba0584b28a903c147f4ee85ea2eefa0e719417ca4f327ba61104f5937c297bb0 -->
 
 <!-- computed exec cmd="cargo xtask status --section bundle" inputs=../seams.toml name=bundle-order | do not edit; run computed -->
 

@@ -87,6 +87,21 @@ pub struct HostPath(pub PathBuf);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ExtensionId(pub(crate) u32);
 
+/// The name `__halt_compiler()` registers its file's offset under.
+const HALT_OFFSET: &[u8] = b"__COMPILER_HALT_OFFSET__";
+
+/// `zend_mangle_property_name("__COMPILER_HALT_OFFSET__", file)`: a NUL,
+/// the name, a NUL and the file's, the key one file's halt offset is
+/// registered under.
+pub(crate) fn halt_offset_key(file: &[u8]) -> Vec<u8> {
+    let mut key = Vec::with_capacity(HALT_OFFSET.len() + 2 + file.len());
+    key.push(0);
+    key.extend_from_slice(HALT_OFFSET);
+    key.push(0);
+    key.extend_from_slice(file);
+    key
+}
+
 /// One ini entry as this request sees it, php's `zend_ini_entry` read
 /// by `_extension_ini_string`, `ReflectionExtension::getINIEntries` and
 /// `ini_get_all`: the declaration with its `modifiable` bits, the
@@ -14015,6 +14030,18 @@ impl Request {
             });
         }
         true
+    }
+
+    /// `zend_get_constant_str_impl` (`Z/Zend/zend_constants.c:262`), what
+    /// `constant()` and a constant expression look a name up by: the
+    /// table, then `__COMPILER_HALT_OFFSET__` as the executing file
+    /// registered it (`zend_get_halt_offset_constant`), which the
+    /// `FETCH_CONSTANT` handler never looks for.
+    pub(crate) fn constant_str(&self, name: &[u8]) -> Option<Value> {
+        self.constant_named(name).or_else(|| {
+            let file = self.current_file().filter(|_| name == HALT_OFFSET)?;
+            self.constant_named(&halt_offset_key(file))
+        })
     }
 
     pub(crate) fn constant_named(&self, name: &[u8]) -> Option<Value> {

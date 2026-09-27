@@ -2045,6 +2045,15 @@ fn compile(
 /// in `EG(symbol_table)` before the unit's first line, where the file
 /// names it and whether or not the line that names it is reached.
 pub(crate) fn note_compiled(req: &mut Request, unit: &Arc<Unit>) {
+    // `zend_compile_halt_compiler`'s constant, and opcache's again on a
+    // hit, under the file's mangled name, where the file has not
+    // registered it already.
+    if let Some(offset) = unit.halt_offset {
+        let key = crate::api::request::halt_offset_key(&unit.main.filename.0);
+        if req.constant_named(&key).is_none() {
+            let _ = req.define_constant(&key, Value::int(offset));
+        }
+    }
     for global in &unit.arms {
         // What a callback can raise is the memory limit, which the
         // loop meets again at its first allocation.
