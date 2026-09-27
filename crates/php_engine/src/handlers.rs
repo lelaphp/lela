@@ -6551,7 +6551,7 @@ fn fetch_obj(
     // wrote; the `BP_VAR_IS` reader takes the same slot as the `UNDEF`
     // it is and says nothing.
     let container = match fetch {
-        PropertyRead::Warning | PropertyRead::Write => {
+        PropertyRead::Warning | PropertyRead::Write | PropertyRead::Unset => {
             exec::operand(req, frame, code, op.op1_type, op.op1)
         }
         PropertyRead::Silent => exec::operand_undef(req, frame, code, op.op1_type, op.op1),
@@ -7245,17 +7245,20 @@ fn property_place(
         // a name the class serves is read, not placed.
         PropertyPlace::Handlers => return Ok(PropertyFound::Served(object, name)),
         // php places the name here with `zend_std_get_property_ptr_ptr`,
-        // whose silence is `ce->__get != NULL`; the overloaded arm a
-        // class with a `__get` takes, php's `Indirect modification of
-        // overloaded property` notice, is not served yet (#513), so the
-        // placement is loud and a property the scope may not reach is
-        // the `Error`.
+        // whose silence is `ce->__get != NULL`, and a property the scope
+        // may not reach is the `Error`; the arms below are the names it
+        // answers no place for.
         // A readonly or set-restricted property holding an object is
         // read, as php's `read_property` returns it under `BP_VAR_W`: the
         // write goes through the object and the property is untouched.
         PropertyPlace::Std
             if req.write_fetch_reads_object(object, &name, op.opcode == Opcode::FetchObjUnset) =>
         {
+            return Ok(PropertyFound::Served(object, name));
+        }
+        // `zend_std_get_property_ptr_ptr`'s `NULL` for a name the class's
+        // `__get` answers: the fetch falls back to `read_property` (#513).
+        PropertyPlace::Std if req.overloaded_fetch(object, &name) => {
             return Ok(PropertyFound::Served(object, name));
         }
         // `BP_VAR_RW` reads the slot before anything is placed, so an
@@ -7337,7 +7340,7 @@ fn fetch_obj_read(
     // `BP_VAR_UNSET` reads what is not there as `null`, quietly; every
     // other write fetch reads as a write.
     let mode = if op.opcode == Opcode::FetchObjUnset {
-        PropertyRead::Silent
+        PropertyRead::Unset
     } else {
         PropertyRead::Write
     };

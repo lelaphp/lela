@@ -645,12 +645,17 @@ pub enum PropertyTest {
 /// and answers `null`; and `BP_VAR_W`, the read a write fetch falls
 /// back to where `get_property_ptr_ptr` answered no place, which reads
 /// as `BP_VAR_R` does and refuses a hooked property's value that no
-/// write through it could reach back into.
+/// write through it could reach back into; and `BP_VAR_UNSET`, the read
+/// an `unset` through the property falls back to, which answers `null`
+/// for what nothing holds and asks no `__isset`. Under `BP_VAR_W` and
+/// `BP_VAR_UNSET` a value `__get` answers that is neither an object nor a
+/// reference is php's notice that the modification has no effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PropertyRead {
     Warning,
     Silent,
     Write,
+    Unset,
 }
 
 /// Which fetch `read_dimension` is serving, php's `type` argument to

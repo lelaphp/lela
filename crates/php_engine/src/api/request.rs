@@ -6698,6 +6698,86 @@ impl Request {
         Ok(())
     }
 
+    /// php's notice where a write fetch fell back to `__get` and what it
+    /// answered is neither an object nor a reference: a write through the
+    /// copy has no effect on anything (`zend_std_read_property`, `Indirect
+    /// modification of overloaded property`), naming the object's class.
+    fn overloaded_write_notice(
+        &mut self,
+        class: ClassId,
+        name: &[u8],
+        read: PropertyRead,
+        got: &Value,
+    ) {
+        if matches!(read, PropertyRead::Write | PropertyRead::Unset)
+            && got.as_php_ref().is_none()
+            && got.as_object().is_none()
+        {
+            let class = self.class_name(class);
+            let shown = String::from_utf8_lossy(name).into_owned();
+            crate::api::raising::notice(
+                self,
+                &format!(
+                    "Indirect modification of overloaded property {class}::${shown} has no effect"
+                ),
+            );
+        }
+    }
+
+    /// Whether a write fetch over `name` falls back to `read_property`
+    /// for the class's `__get` to answer, where php's
+    /// `zend_std_get_property_ptr_ptr` answers `NULL` for it: a declared
+    /// slot the scope reaches that an `unset` emptied, or a name the
+    /// object holds no dynamic property for, on a class with a `__get`
+    /// not already serving the name. A slot that is `IS_PROP_UNINIT` or
+    /// waits on a lazy initializer is the placement's.
+    ///
+    /// ```php
+    /// class M { private $data = ['a' => [1], 'o' => null];
+    ///     function __construct() { $this->data['o'] = new stdClass; }
+    ///     function __get($n) { echo "__get $n\n"; return $this->data[$n]; } }
+    /// $m = new M;
+    /// $m->a[] = 2;
+    /// $m->o->x = 3;
+    /// var_dump($m->a, $m->o);
+    /// ```
+    /// ```expect
+    /// __get a
+    ///
+    /// Notice: Indirect modification of overloaded property M::$a has no effect in %s on line 6
+    /// __get o
+    /// __get a
+    /// __get o
+    /// array(1) {
+    ///   [0]=>
+    ///   int(1)
+    /// }
+    /// object(stdClass)#2 (1) {
+    ///   ["x"]=>
+    ///   int(3)
+    /// }
+    /// ```
+    pub(crate) fn overloaded_fetch(&self, object: PhpObject, name: &[u8]) -> bool {
+        let class = object.class();
+        if !self.serves_accessor(class, b"__get") || self.guard_word(object, name) & IN_GET != 0 {
+            return false;
+        }
+        let o = object.heap();
+        match self.declared_slot(class, name) {
+            Some(placed) => {
+                self.may_access(placed.declaring, placed.visibility)
+                    && o.slot(placed.slot).is_undef()
+                    && !o.slot_uninit(placed.slot)
+                    && !self.lazy_slot(o, placed.slot)
+            }
+            None => !o.properties().is_some_and(|table| {
+                table
+                    .iter()
+                    .any(|(k, _)| matches!(k, php_heap::Key::Str(s) if s.bytes() == name))
+            }),
+        }
+    }
+
     /// `fn_flags & ZEND_ACC_STRICT_TYPES` over a user function: whether the
     /// file it was declared in is `strict_types`. A native carries no such
     /// bit.
@@ -7070,6 +7150,9 @@ impl Request {
         read: PropertyRead,
     ) -> Result<Value, Thrown> {
         let silent = read == PropertyRead::Silent;
+        // What nothing holds is `null`, quietly, under `BP_VAR_IS` and
+        // `BP_VAR_UNSET`; only the first asks `__isset`.
+        let quiet = matches!(read, PropertyRead::Silent | PropertyRead::Unset);
         let o = object.heap();
         let class = object.class();
         let shown = String::from_utf8_lossy(name).into_owned();
@@ -7106,7 +7189,7 @@ impl Request {
                 let magic = self.serves_accessor(class, b"__get")
                     || (silent && self.serves_accessor(class, b"__isset"));
                 if placed.typed && (o.slot_uninit(placed.slot) || !magic) {
-                    if silent {
+                    if quiet {
                         return Ok(Value::null());
                     }
                     return Err(self.uninitialized_property(placed.declaring, name));
@@ -7159,11 +7242,13 @@ impl Request {
                 && self.guard_word(object, name) & IN_GET == 0
             {
                 let got = self.call_accessor(object, getter, IN_GET, name, &[])?;
+                self.overloaded_write_notice(class, name, read, &got);
                 return self.hold_magic_get(class, name, getter, got);
             }
         } else if let Some(getter) = getter {
             if self.guard_word(object, name) & IN_GET == 0 {
                 let got = self.call_accessor(object, getter, IN_GET, name, &[])?;
+                self.overloaded_write_notice(class, name, read, &got);
                 return self.hold_magic_get(class, name, getter, got);
             }
             // `zend_wrong_offset`: the guard stands and the placement
@@ -7187,7 +7272,7 @@ impl Request {
             }
             return self.read_property(instance, name, read);
         }
-        if !silent {
+        if !quiet {
             let class = self.class_name(class);
             crate::api::raising::warning(self, &format!("Undefined property: {class}::${shown}"));
         }
