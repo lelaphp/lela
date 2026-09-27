@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"grep -n commit xtask/src/permit/rules.rs","description":"Grep for the word with line numbers"}}

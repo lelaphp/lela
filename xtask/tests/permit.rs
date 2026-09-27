@@ -234,6 +234,64 @@ fn bash(line: &str) -> Call {
     .unwrap()
 }
 
+/// The `git.no-verify` row #1001 proposes: `with` names git's `commit` and
+/// not the word, and the global option that points the hooks elsewhere is
+/// denied beside `-n` and `--no-verify`.
+const PROPOSED_NO_VERIFY: [&str; 4] = [
+    "--no-verify",
+    "-n",
+    "-c core.hooksPath",
+    "--config-env core.hooksPath",
+];
+
+/// `git.no-verify` reads git commit's own argv (#1001): every `deny*.json`
+/// under its fixtures is denied and every `allow*.json` let through, under
+/// the row as tracked and under the row as proposed. A grep for the word
+/// with line numbers, a `sed -n` over it, a heredoc body naming the bypass
+/// and `git log -n 3` are allowed; `-n`, `--no-verify`, `-anm` and a commit
+/// after a `cd` are denied. `deny-hooks-path.json` is the proposed row's
+/// alone until a person lands it, the tracked row naming no hooks path.
+#[test]
+fn git_no_verify_reads_git_commit_s_own_argv() {
+    let tracked = Manifest::load(workspace()).unwrap();
+    let mut proposed = tracked.clone();
+    let row = proposed
+        .rules
+        .iter_mut()
+        .find(|r| r.id == "git.no-verify")
+        .unwrap();
+    row.predicate.with = OneOrMany::One("git commit".to_owned());
+    row.predicate.deny_argv = Some(PROPOSED_NO_VERIFY.map(str::to_owned).to_vec());
+    let tracked_reads_hooks_path = tracked
+        .rule("git.no-verify")
+        .and_then(|r| r.predicate.deny_argv.as_ref())
+        .is_some_and(|d| d.iter().any(|e| e == "-c core.hooksPath"));
+    let dir = fixtures().join("rules/git.no-verify");
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert!(names.len() >= 10, "{names:?}");
+    let denied = |manifest: &Manifest, name: &str| {
+        judge(manifest, workspace(), &call(&dir.join(name)))
+            .unwrap()
+            .findings
+            .iter()
+            .any(|f| f.rule == "git.no-verify")
+    };
+    for name in &names {
+        let expect = name.starts_with("deny");
+        assert_eq!(denied(&proposed, name), expect, "proposed row: {name}");
+        let tracked_expect = expect && (name != "deny-hooks-path.json" || tracked_reads_hooks_path);
+        assert_eq!(
+            denied(&tracked, name),
+            tracked_expect,
+            "tracked row: {name}"
+        );
+    }
+}
+
 #[test]
 fn a_rule_without_a_fixture_fails() {
     let manifest = Manifest::load(workspace()).unwrap();

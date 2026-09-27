@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"cat > /tmp/body.md <<'EOF'\nA session that runs git commit -n skips the hook.\n  git commit --no-verify -m x\nEOF\ngh issue create --title x --body-file /tmp/body.md","description":"Write a ticket body naming the bypass"}}

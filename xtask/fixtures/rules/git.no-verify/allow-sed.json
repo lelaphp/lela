@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"sed -n '/commit/p' xtask/src/permit/rules.rs | head -n 5","description":"Print the lines naming the word"}}

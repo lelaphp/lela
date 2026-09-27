@@ -1,0 +1,820 @@
+//! A shell line read as the argv of each program it runs, and the
+//! manifest's `with`, `deny_argv` and `require_argv` read over one argv
+//! (#1001). One place for the idea: every rule that names a command's
+//! words is judged here, and nowhere else.
+//!
+//! The line is split into simple commands at `;`, `&`, `&&`, `|`, `||`,
+//! newlines and the parentheses of a subshell, and each command's words
+//! are what the shell hands the program: quotes removed and never split
+//! on, a redirection and its target dropped, a heredoc's body skipped as
+//! text, the words of a `$(…)` or a backquote, and of what a shell runs
+//! with `-c` or `eval` runs, read as commands of their own. Leading
+//! assignments, reserved words (`if`, `{`, `!`) and a few programs that
+//! run the rest of their words (`env`, `command`, `nohup`) are peeled, so
+//! the argv is the program's that runs. What a shell can hide beyond that
+//! (a variable holding the program's name, an alias, a function) is not
+//! read; pre-push and CI run `done` behind it.
+
+use crate::manifest::OneOrMany;
+
+/// One simple command's words as the program that runs receives them,
+/// its name first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Argv(Vec<String>);
+
+/// Every simple command the line runs, in the order the lexer closes them.
+pub(super) fn commands(line: &str) -> Vec<Argv> {
+    let mut lexer = Lexer::new(line);
+    lexer.list(None);
+    lexer.commands
+}
+
+/// A heredoc whose body starts at the next newline.
+struct Heredoc {
+    delimiter: String,
+    strip_tabs: bool,
+    /// An unquoted delimiter leaves `$(…)` in the body running.
+    expands: bool,
+}
+
+/// What the next word of a command is for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Next {
+    Argument,
+    /// The file a redirection names, which is no word of the argv.
+    Target,
+    Delimiter {
+        strip_tabs: bool,
+    },
+}
+
+/// A word being read: its text and whether any of it was quoted.
+struct Word {
+    text: String,
+    quoted: bool,
+}
+
+/// The command being read.
+struct Command {
+    words: Vec<String>,
+    word: Option<Word>,
+    next: Next,
+}
+
+impl Command {
+    fn new() -> Command {
+        Command {
+            words: Vec::new(),
+            word: None,
+            next: Next::Argument,
+        }
+    }
+
+    fn push(&mut self, c: char) {
+        self.word
+            .get_or_insert_with(|| Word {
+                text: String::new(),
+                quoted: false,
+            })
+            .text
+            .push(c);
+    }
+
+    /// A quote or a substitution opens a word even when it adds no text.
+    fn open(&mut self, quoted: bool) {
+        let word = self.word.get_or_insert_with(|| Word {
+            text: String::new(),
+            quoted,
+        });
+        word.quoted |= quoted;
+    }
+}
+
+struct Lexer {
+    chars: Vec<char>,
+    at: usize,
+    commands: Vec<Argv>,
+    heredocs: Vec<Heredoc>,
+}
+
+impl Lexer {
+    fn new(line: &str) -> Lexer {
+        Lexer {
+            chars: line.chars().collect(),
+            at: 0,
+            commands: Vec::new(),
+            heredocs: Vec::new(),
+        }
+    }
+
+    fn bump(&mut self) -> Option<char> {
+        let c = self.chars.get(self.at).copied();
+        self.at += 1;
+        c
+    }
+
+    fn eat(&mut self, c: char) -> bool {
+        let here = self.chars.get(self.at) == Some(&c);
+        self.at += usize::from(here);
+        here
+    }
+
+    /// Commands until `close`, the `)` of a subshell or a `$(`, or the end.
+    fn list(&mut self, close: Option<char>) {
+        let mut command = Command::new();
+        while let Some(c) = self.bump() {
+            match c {
+                c if Some(c) == close => break,
+                '\\' => match self.bump() {
+                    Some('\n') | None => {}
+                    Some(c) => {
+                        command.open(true);
+                        command.push(c);
+                    }
+                },
+                '\'' => {
+                    command.open(true);
+                    while let Some(c) = self.bump().filter(|c| *c != '\'') {
+                        command.push(c);
+                    }
+                }
+                '"' => {
+                    command.open(true);
+                    self.expand(&mut command, Some('"'));
+                }
+                '`' => {
+                    command.open(false);
+                    self.backquote();
+                }
+                '$' if self.eat('(') => {
+                    command.open(false);
+                    self.list(Some(')'));
+                }
+                '#' if command.word.is_none() => {
+                    while self.chars.get(self.at).is_some_and(|c| *c != '\n') {
+                        self.at += 1;
+                    }
+                }
+                '<' | '>' => self.redirection(&mut command, c),
+                '&' if self.eat('>') => {
+                    self.end_word(&mut command);
+                    self.eat('>');
+                    command.next = Next::Target;
+                }
+                '(' => {
+                    self.end(&mut command);
+                    self.list(Some(')'));
+                }
+                ';' | '&' | '|' | ')' | '\n' => {
+                    self.end(&mut command);
+                    if c == '\n' {
+                        self.skip_heredoc_bodies();
+                    }
+                }
+                c if c.is_whitespace() => self.end_word(&mut command),
+                c => command.push(c),
+            }
+        }
+        self.end(&mut command);
+    }
+
+    /// The text of a double-quoted word up to `close`, or of a heredoc
+    /// body line to its end: `\` escapes only what it escapes there, and a
+    /// substitution's commands are read.
+    fn expand(&mut self, command: &mut Command, close: Option<char>) {
+        while let Some(c) = self.bump() {
+            match c {
+                c if Some(c) == close => return,
+                '\\' => match self.bump() {
+                    Some('\n') | None => {}
+                    Some(c @ ('"' | '\\' | '$' | '`')) => command.push(c),
+                    Some(c) => {
+                        command.push('\\');
+                        command.push(c);
+                    }
+                },
+                '`' => self.backquote(),
+                '$' if self.eat('(') => self.list(Some(')')),
+                c => command.push(c),
+            }
+        }
+    }
+
+    /// A backquoted substitution: its text with the backquote's escapes
+    /// removed, read as a line of its own.
+    fn backquote(&mut self) {
+        let mut inner = String::new();
+        while let Some(c) = self.bump().filter(|c| *c != '`') {
+            match c {
+                '\\' => match self.bump() {
+                    Some(c @ ('`' | '\\' | '$')) => inner.push(c),
+                    Some(c) => {
+                        inner.push('\\');
+                        inner.push(c);
+                    }
+                    None => {}
+                },
+                c => inner.push(c),
+            }
+        }
+        self.commands.extend(commands(&inner));
+    }
+
+    /// `<`, `>`, `>>`, `>&`, `>|`, `<&`, `<>`, `<<<`, `<<` and `<<-`, with
+    /// the file-descriptor number standing against one dropped as well.
+    fn redirection(&mut self, command: &mut Command, c: char) {
+        if command
+            .word
+            .as_ref()
+            .is_some_and(|w| !w.quoted && w.text.bytes().all(|b| b.is_ascii_digit()))
+        {
+            command.word = None;
+        }
+        self.end_word(command);
+        command.next = Next::Target;
+        if c == '<' && self.eat('<') {
+            if !self.eat('<') {
+                command.next = Next::Delimiter {
+                    strip_tabs: self.eat('-'),
+                };
+            }
+        } else {
+            let _ = self.eat('>') || self.eat('&') || self.eat('|');
+        }
+    }
+
+    fn end_word(&mut self, command: &mut Command) {
+        let Some(word) = command.word.take() else {
+            return;
+        };
+        match std::mem::replace(&mut command.next, Next::Argument) {
+            Next::Argument => command.words.push(word.text),
+            Next::Target => {}
+            Next::Delimiter { strip_tabs } => self.heredocs.push(Heredoc {
+                delimiter: word.text,
+                strip_tabs,
+                expands: !word.quoted,
+            }),
+        }
+    }
+
+    fn end(&mut self, command: &mut Command) {
+        self.end_word(command);
+        command.next = Next::Argument;
+        let words = std::mem::take(&mut command.words);
+        if let Some(argv) = Argv::running(words) {
+            let nested = argv.nested_line();
+            self.commands.push(argv);
+            if let Some(line) = nested {
+                self.commands.extend(commands(&line));
+            }
+        }
+    }
+
+    /// The bodies of the heredocs the line just ended opened, skipped as
+    /// text; a body under an unquoted delimiter still runs its `$(…)`.
+    fn skip_heredoc_bodies(&mut self) {
+        for heredoc in std::mem::take(&mut self.heredocs) {
+            while self.at < self.chars.len() {
+                let start = self.at;
+                let end = self.chars[start..]
+                    .iter()
+                    .position(|c| *c == '\n')
+                    .map_or(self.chars.len(), |n| start + n);
+                self.at = end + 1;
+                let line: String = self.chars[start..end].iter().collect();
+                let text = if heredoc.strip_tabs {
+                    line.trim_start_matches('\t')
+                } else {
+                    &line
+                };
+                if text == heredoc.delimiter {
+                    break;
+                }
+                if heredoc.expands {
+                    let mut body = Lexer::new(&line);
+                    body.expand(&mut Command::new(), None);
+                    self.commands.append(&mut body.commands);
+                }
+            }
+        }
+    }
+}
+
+/// Words a command starts with that are the shell's and not the program's.
+const RESERVED: [&str; 10] = [
+    "!", "{", "}", "if", "then", "elif", "else", "do", "while", "until",
+];
+
+/// Programs that run the rest of their words as a command, with the
+/// options each reads a value after.
+const WRAPPERS: [(&str, &[&str]); 7] = [
+    ("command", &[]),
+    ("builtin", &[]),
+    ("exec", &["-a"]),
+    ("nohup", &[]),
+    ("time", &[]),
+    ("env", &["-u", "-C", "-S"]),
+    ("nice", &["-n"]),
+];
+
+/// A program's name without its directory: `/usr/bin/git` is `git`.
+fn basename(word: &str) -> &str {
+    word.rsplit('/').next().unwrap_or(word)
+}
+
+fn is_assignment(word: &str) -> bool {
+    word.split_once('=').is_some_and(|(name, _)| {
+        name.chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
+impl Argv {
+    /// The argv of the program a command's words run, past its leading
+    /// assignments, reserved words and wrappers; `None` when they run none.
+    fn running(mut words: Vec<String>) -> Option<Argv> {
+        let mut at = 0;
+        loop {
+            let word = words.get(at)?;
+            if RESERVED.contains(&word.as_str()) || is_assignment(word) {
+                at += 1;
+                continue;
+            }
+            let Some((_, valued)) = WRAPPERS.iter().find(|(w, _)| *w == basename(word)) else {
+                break;
+            };
+            at += 1;
+            while let Some(option) = words.get(at).filter(|w| w.starts_with('-')) {
+                at += if valued.contains(&option.as_str()) {
+                    2
+                } else {
+                    1
+                };
+            }
+        }
+        words.drain(..at);
+        Some(Argv(words))
+    }
+
+    /// The line this command runs in turn: a shell's `-c` argument, or the
+    /// words `eval` joins.
+    fn nested_line(&self) -> Option<String> {
+        let (program, args) = self.0.split_first()?;
+        match basename(program) {
+            "sh" | "bash" | "zsh" | "dash" | "ksh" => args
+                .iter()
+                .position(|a| is_short_cluster(a) && a.contains('c'))
+                .and_then(|at| args.get(at + 1))
+                .cloned(),
+            "eval" => Some(args.join(" ")),
+            _ => None,
+        }
+    }
+
+    /// The words, program first.
+    pub(super) fn words(&self) -> &[String] {
+        &self.0
+    }
+
+    /// Whether one of the phrases names this command; none names every one.
+    pub(super) fn invokes(&self, with: &OneOrMany) -> bool {
+        self.invocations(with).next().is_some()
+    }
+
+    /// `deny_argv` with `with`: one of the phrases names this command and
+    /// one of the denied elements stands in it (see [`Element`]).
+    pub(super) fn denies(&self, denied: &[String], with: &OneOrMany) -> bool {
+        self.invocations(with).any(|invocation| {
+            denied
+                .iter()
+                .filter_map(|d| Element::parse(d))
+                .any(|element| invocation.carries(&element))
+        })
+    }
+
+    /// `require_argv` with `with`: one of the phrases names this command
+    /// and its own words hold no `separator`, or nothing after it, or
+    /// after it a name for the tree rather than for files (`.`, `:/`, a
+    /// `*` the shell left unexpanded). The separator is `--` for git, after
+    /// which every word is a path, so `git add -A -- src` is bounded to
+    /// `src` and passes.
+    pub(super) fn unbounded(&self, separator: &str, with: &OneOrMany) -> bool {
+        self.invocations(with).any(|invocation| {
+            let own = invocation.own();
+            match own.iter().position(|t| t == separator) {
+                None => true,
+                Some(at) => {
+                    let paths = &own[at + 1..];
+                    paths.is_empty() || paths.iter().any(|p| names_the_tree(p))
+                }
+            }
+        })
+    }
+
+    /// Where each phrase that names this command stands in it.
+    fn invocations<'a>(&'a self, with: &'a OneOrMany) -> impl Iterator<Item = Invocation<'a>> {
+        let every = with.is_empty().then_some(1);
+        let named = with.iter().filter_map(|phrase| self.phrase_end(phrase));
+        every.into_iter().chain(named).map(|own| Invocation {
+            words: &self.0,
+            own,
+        })
+    }
+
+    /// Where a phrase's last word stands, plus one. A phrase is the program
+    /// and the subcommands it names, `git commit`; a phrase of one word is
+    /// the program, or a subcommand under whatever program stands before
+    /// it, `commit`. The words stand in order with only options and their
+    /// values between them, so `git -C dir commit` is `git commit` and
+    /// `git log --grep commit` is not, `log` being neither.
+    fn phrase_end(&self, phrase: &str) -> Option<usize> {
+        let words: Vec<&str> = phrase.split_whitespace().collect();
+        let program = basename(self.0.first()?);
+        match words.as_slice() {
+            [first, rest @ ..] if *first == program => follows(&self.0, rest),
+            [subcommand] => follows(&self.0, &[subcommand]),
+            _ => None,
+        }
+    }
+}
+
+/// Where the words stand after `tokens[0]` in order, with only an option
+/// (`-x`, `--x`) or the token after one between two of them: the index
+/// after the last, or `None`.
+fn follows(tokens: &[String], words: &[&str]) -> Option<usize> {
+    let mut at = 1;
+    for word in words {
+        loop {
+            let token = tokens.get(at)?;
+            if token == word {
+                at += 1;
+                break;
+            }
+            let option = |i: usize| tokens.get(i).is_some_and(|t| t.starts_with('-'));
+            if !option(at) && !option(at - 1) {
+                return None;
+            }
+            at += 1;
+        }
+    }
+    Some(at)
+}
+
+/// One matched phrase: the argv, and where the command's own words start.
+struct Invocation<'a> {
+    words: &'a [String],
+    own: usize,
+}
+
+impl Invocation<'_> {
+    /// The words after the phrase: the command's own options and operands.
+    fn own(&self) -> &[String] {
+        &self.words[self.own..]
+    }
+
+    fn carries(&self, element: &Element) -> bool {
+        let options = |words: &[String]| -> Vec<String> {
+            words.iter().take_while(|w| *w != "--").cloned().collect()
+        };
+        match *element {
+            Element::Option(option) => options(self.own())
+                .iter()
+                .any(|word| option_matches(option, word)),
+            Element::Valued { option, name } => {
+                let words = options(&self.words[1..]);
+                words.iter().enumerate().any(|(at, word)| {
+                    let value = if word == option {
+                        words.get(at + 1).map(String::as_str)
+                    } else {
+                        word.strip_prefix(option)
+                            .filter(|_| option.starts_with("--"))
+                            .and_then(|rest| rest.strip_prefix('='))
+                    };
+                    value.is_some_and(|value| {
+                        let set = value.split_once('=').map_or(value, |(set, _)| set);
+                        set.eq_ignore_ascii_case(name)
+                    })
+                })
+            }
+            Element::Subcommand(word) => follows(&self.words[self.own - 1..], &[word]).is_some(),
+        }
+    }
+}
+
+/// One `deny_argv` element, by its shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Element<'a> {
+    /// `-n`, `--no-verify`: an option among the command's own words, as a
+    /// word, as a letter in a cluster of short options (`-anm`) or as
+    /// `--name=value`.
+    Option(&'a str),
+    /// `-c core.hooksPath`: an option and the name its value sets
+    /// (`-c core.hooksPath=/dev/null`, `--config-env=core.hooksPath=X`),
+    /// wherever the program or the phrase reads options; the name compares
+    /// without ASCII case, as git reads the key.
+    Valued { option: &'a str, name: &'a str },
+    /// `close`: the subcommand standing after the phrase, `gh issue close`.
+    Subcommand(&'a str),
+}
+
+impl<'a> Element<'a> {
+    /// The element a `deny_argv` string writes; `None` for a shape that is
+    /// none of the three, which the manifest refuses.
+    pub(crate) fn parse(text: &'a str) -> Option<Element<'a>> {
+        let mut words = text.split_whitespace();
+        match (words.next()?, words.next(), words.next()) {
+            (option, None, None) if option.starts_with('-') => Some(Element::Option(option)),
+            (word, None, None) => Some(Element::Subcommand(word)),
+            (option, Some(name), None) if option.starts_with('-') && !name.starts_with('-') => {
+                Some(Element::Valued { option, name })
+            }
+            _ => None,
+        }
+    }
+}
+
+/// `-anm`: one `-` and letters only.
+fn is_short_cluster(word: &str) -> bool {
+    word.strip_prefix('-')
+        .is_some_and(|c| !c.is_empty() && c.chars().all(|c| c.is_ascii_alphabetic()))
+}
+
+fn option_matches(option: &str, word: &str) -> bool {
+    if word == option {
+        return true;
+    }
+    if option.starts_with("--") {
+        return word
+            .strip_prefix(option)
+            .is_some_and(|rest| rest.starts_with('='));
+    }
+    let mut letters = option.chars().skip(1);
+    match (letters.next(), letters.next()) {
+        (Some(letter), None) => is_short_cluster(word) && word[1..].contains(letter),
+        _ => false,
+    }
+}
+
+/// `.`, `..`, `./`, `../`, a `:` pathspec magic (`:/`) or a glob the
+/// shell left unexpanded (`'*'`, `'./*'`): a name for the tree, or for
+/// whatever is in it, rather than for files the agent wrote.
+fn names_the_tree(path: &str) -> bool {
+    let path = path.trim_end_matches('/');
+    let path = path.strip_prefix("./").unwrap_or(path);
+    path.is_empty() || path == "." || path == ".." || path.starts_with(':') || path.contains('*')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn words(line: &str) -> Vec<Vec<String>> {
+        commands(line).into_iter().map(|argv| argv.0).collect()
+    }
+
+    #[test]
+    fn a_line_splits_into_simple_commands_with_quotes_removed_and_never_split_on() {
+        assert_eq!(
+            words("git add -A && git commit -m \"fix -n handling\"; echo 'a b' | cat"),
+            vec![
+                vec!["git", "add", "-A"],
+                vec!["git", "commit", "-m", "fix -n handling"],
+                vec!["echo", "a b"],
+                vec!["cat"],
+            ]
+        );
+        assert_eq!(
+            words("git commit -m ''"),
+            vec![vec!["git", "commit", "-m", ""]]
+        );
+        assert_eq!(
+            words("echo \"a;b|c\" x\\ y"),
+            vec![vec!["echo", "a;b|c", "x y"]]
+        );
+        assert_eq!(
+            words("(cd x && git status) || true"),
+            vec![vec!["cd", "x"], vec!["git", "status"], vec!["true"],]
+        );
+    }
+
+    #[test]
+    fn a_redirection_and_its_target_are_no_words_of_the_argv() {
+        assert_eq!(
+            words("cargo test 2>&1 >/tmp/out &>> log < in | tail -n 5"),
+            vec![vec!["cargo", "test"], vec!["tail", "-n", "5"]]
+        );
+        assert_eq!(words("echo a>b"), vec![vec!["echo", "a"]]);
+    }
+
+    #[test]
+    fn a_heredoc_body_is_text_and_what_follows_it_is_read() {
+        let line = "cat > /tmp/m <<'EOF'\ngit commit -n\n$(git commit -n)\nEOF\ngit status";
+        assert_eq!(words(line), vec![vec!["cat"], vec!["git", "status"]]);
+        let tabs = "cat <<-END; echo after\n\tgit commit -n\n\tEND\ngit log";
+        assert_eq!(
+            words(tabs),
+            vec![vec!["cat"], vec!["echo", "after"], vec!["git", "log"]]
+        );
+        // Under an unquoted delimiter a substitution in the body still runs.
+        let unquoted = "cat <<EOF\ntext $(git commit -n) text\nEOF";
+        assert_eq!(
+            words(unquoted),
+            vec![vec!["cat"], vec!["git", "commit", "-n"]]
+        );
+        assert_eq!(words("cat <<< 'git commit -n'"), vec![vec!["cat"]]);
+    }
+
+    #[test]
+    fn a_substitution_and_a_nested_line_are_commands_of_their_own() {
+        let inner = |line: &str| {
+            words(line)
+                .into_iter()
+                .any(|w| w == ["git", "commit", "-n"])
+        };
+        assert!(inner("echo $(git commit -n)"));
+        assert!(inner("echo \"$(git commit -n)\""));
+        assert!(inner("echo `git commit -n`"));
+        assert!(inner("bash -c 'git commit -n'"));
+        assert!(inner("sh -lc \"cd x && git commit -n\""));
+        assert!(inner("eval git commit -n"));
+        assert!(!inner("echo '$(git commit -n)'"));
+    }
+
+    #[test]
+    fn assignments_reserved_words_and_wrappers_are_peeled_off_the_program() {
+        assert_eq!(
+            words("GIT_EDITOR=true git commit"),
+            vec![vec!["git", "commit"]]
+        );
+        assert_eq!(
+            words("env -u X A=1 nohup git commit"),
+            vec![vec!["git", "commit"]]
+        );
+        assert_eq!(
+            words("if git diff; then git commit; fi"),
+            vec![vec!["git", "diff"], vec!["git", "commit"], vec!["fi"],]
+        );
+        assert_eq!(words("{ git commit; }"), vec![vec!["git", "commit"]]);
+        assert_eq!(words("A=1"), Vec::<Vec<String>>::new());
+    }
+
+    fn denies(line: &str, denied: &[&str], with: &str) -> bool {
+        let denied: Vec<String> = denied.iter().map(|d| (*d).to_owned()).collect();
+        let with = if with.is_empty() {
+            OneOrMany::None
+        } else {
+            OneOrMany::One(with.to_owned())
+        };
+        commands(line)
+            .iter()
+            .any(|argv| argv.denies(&denied, &with))
+    }
+
+    #[test]
+    fn a_denied_option_is_one_of_the_commands_own_words_after_the_phrase() {
+        let denied = ["--no-verify", "-n"];
+        for with in ["commit", "git commit"] {
+            assert!(denies("git commit -n -m x", &denied, with));
+            assert!(denies("git commit -anm x", &denied, with));
+            assert!(denies(
+                "git -C /tmp/x --no-pager commit --no-verify",
+                &denied,
+                with
+            ));
+            assert!(denies("cd x && /usr/bin/git commit -n", &denied, with));
+            assert!(denies("(cd x; git commit -n)", &denied, with));
+            // A quoted word is the word the program receives.
+            assert!(denies("git commit '--no-verify'", &denied, with));
+            assert!(!denies("git log -n 3", &denied, with));
+            assert!(!denies("grep -n commit file", &denied, with));
+            assert!(!denies("sed -n '/commit/p' file", &denied, with));
+            assert!(!denies("git commit -m 'no -n here'", &denied, with));
+            assert!(!denies("git commit --no-verify-x", &denied, with));
+            assert!(!denies("git commit -m x -- -n", &denied, with));
+            assert!(!denies("echo git commit -n", &denied, "git commit"));
+        }
+        assert!(denies("git commit -n", &denied, ""));
+    }
+
+    #[test]
+    fn a_valued_element_is_an_option_and_the_name_its_value_sets() {
+        let denied = ["-c core.hooksPath", "--config-env core.hooksPath"];
+        assert!(denies(
+            "git -c core.hooksPath=/dev/null commit",
+            &denied,
+            "git commit"
+        ));
+        assert!(denies(
+            "git -c core.hookspath=x commit -m y",
+            &denied,
+            "git commit"
+        ));
+        assert!(denies(
+            "git --config-env=core.hooksPath=H commit",
+            &denied,
+            "git commit"
+        ));
+        assert!(denies(
+            "git --config-env core.hooksPath=H commit",
+            &denied,
+            "git commit"
+        ));
+        assert!(!denies("git -c user.name=x commit", &denied, "git commit"));
+        assert!(!denies(
+            "git -c core.hooksPath=/dev/null log",
+            &denied,
+            "git commit"
+        ));
+    }
+
+    #[test]
+    fn a_denied_word_is_the_subcommand_standing_after_the_phrase() {
+        let denied = ["close", "reopen"];
+        assert!(denies(
+            "gh issue close 28 --comment done",
+            &denied,
+            "gh issue"
+        ));
+        assert!(denies(
+            "gh -R o/r issue --repo o/r reopen 28",
+            &denied,
+            "gh issue"
+        ));
+        assert!(!denies(
+            "gh issue edit 28 --title close",
+            &denied,
+            "gh issue"
+        ));
+        assert!(!denies("gh issue list --state closed", &denied, "gh issue"));
+        assert!(!denies("cargo xtask ticket close 28", &denied, "gh issue"));
+        assert!(!denies("gh pr close 3", &denied, "gh issue"));
+    }
+
+    #[test]
+    fn an_element_is_an_option_a_valued_option_or_a_subcommand() {
+        assert_eq!(Element::parse("-n"), Some(Element::Option("-n")));
+        assert_eq!(Element::parse("close"), Some(Element::Subcommand("close")));
+        assert_eq!(
+            Element::parse("-c core.hooksPath"),
+            Some(Element::Valued {
+                option: "-c",
+                name: "core.hooksPath"
+            })
+        );
+        assert_eq!(Element::parse("git commit"), None);
+        assert_eq!(Element::parse("-c -n"), None);
+        assert_eq!(Element::parse("-c a b"), None);
+        assert_eq!(Element::parse(" "), None);
+    }
+
+    #[test]
+    fn a_phrase_is_its_words_in_order_with_only_options_between_them() {
+        let git_add = OneOrMany::Many(vec!["git add".to_owned(), "git commit".to_owned()]);
+        let carries = |line: &str| commands(line)[0].invokes(&git_add);
+        assert!(carries("git add -- src"));
+        assert!(carries("git -C /tmp/x add -- src"));
+        assert!(carries("git --no-pager -c user.name=x commit -- src"));
+        assert!(!carries("git log --grep add"));
+        assert!(!carries("git worktree add -b x dir"));
+        assert!(!carries("cargo add serde"));
+        assert!(carries("git commit -m x"));
+    }
+
+    #[test]
+    fn the_separator_is_required_and_what_follows_it_names_files() {
+        let with = OneOrMany::Many(vec!["git add".to_owned(), "git commit".to_owned()]);
+        let missing = |line: &str| commands(line).iter().any(|a| a.unbounded("--", &with));
+        for line in [
+            "git add -A",
+            "git add .",
+            "git add -u",
+            "git add -- .",
+            "git add -- ':/'",
+            "git add -- ./",
+            "git add -- ../",
+            "git add -- './*'",
+            "git add -- 'xtask/*'",
+            "git add --",
+            "git commit -m x",
+            "git commit --amend --no-edit",
+            "git commit -am x",
+            "cargo fmt && git add -A && git commit -m x",
+        ] {
+            assert!(missing(line), "{line}");
+        }
+        for line in [
+            "git add -- xtask/src/permit/rules.rs",
+            "git add -A -- xtask/src",
+            "git commit -F /tmp/msg -- xtask/src AGENTS.md",
+            "git commit --amend -F /tmp/msg -- xtask/src",
+            "git commit -m 'add -- nothing' -- AGENTS.md",
+            "git status && git diff --cached -- xtask",
+            "git log --grep add",
+        ] {
+            assert!(!missing(line), "{line}");
+        }
+    }
+}

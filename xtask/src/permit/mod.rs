@@ -15,15 +15,16 @@
 //! `allow` and `on`. The other four predicates (`check`, `deny_lints`,
 //! `avoid_from`, `generated`) are sensors that read the tree after the write
 //! and have no meaning for one call; their twins run on save and per commit
-//! (§6). Bash arguments are split conservatively on unquoted whitespace and
-//! `;`, `&&`, `|`; pre-commit remains the sensor of record for what a shell
-//! can hide.
+//! (§6). A Bash line is read as the argv of each simple command it runs,
+//! quotes removed and heredoc bodies skipped, in [`argv`] (#1001); what a
+//! shell can hide beyond that is `done`'s to find at pre-push and in CI.
 //!
 //! The interface is three things: [`judge`], one call against the manifest;
 //! [`run`], the command each adapter is over; and [`judge_files`], the diff
 //! judge that `done` and pre-commit's `--diff` read one verdict from. Each
 //! is one file under this one, with the call and its path resolution in
-//! [`call`], the rules in [`rules`], the region-body rule in [`region`],
+//! [`call`], the rules in [`rules`], a shell line's argv in [`argv`], the
+//! region-body rule in [`region`],
 //! the `unless` qualifier's sensor in [`unless`], the `exempt_label`
 //! qualifier's in [`label`], the adapters and the
 //! recording in [`adapters`], the diff judge in [`diff`] and the bench of
@@ -32,6 +33,7 @@
 //! the fixture test and the `permits` section read them.
 
 mod adapters;
+mod argv;
 mod bench;
 mod call;
 mod diff;
@@ -41,6 +43,7 @@ mod rules;
 mod unless;
 
 pub use adapters::{Adapter, run};
+pub(crate) use argv::Element;
 pub(crate) use bench::{BAR_MS, run_bench, scratch_workspace};
 pub use call::{Arguments, Call};
 pub(crate) use diff::judge_files;

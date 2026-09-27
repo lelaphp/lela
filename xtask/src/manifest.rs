@@ -756,6 +756,18 @@ impl Manifest {
                     rule.id
                 );
             }
+            if let Some(element) = rule
+                .predicate
+                .deny_argv
+                .iter()
+                .flatten()
+                .find(|d| crate::permit::Element::parse(d).is_none())
+            {
+                bail!(
+                    "rule \"{}\" has the `deny_argv` element {element:?}; an element is an option (`-n`), an option and the name its value sets (`-c core.hooksPath`), or a subcommand (`close`)",
+                    rule.id
+                );
+            }
             if !rule.exempt_label.is_empty() && !rule.predicate.describes_a_call() {
                 bail!(
                     "rule \"{}\" has `exempt_label` beside `{}`; a label is read off the issue a command names, so `exempt_label` qualifies a rule permit judges at the call",

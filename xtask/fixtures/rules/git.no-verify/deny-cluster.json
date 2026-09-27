@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"git commit -anm msg","description":"Commit with -n in a cluster of short options"}}

@@ -1,8 +1,8 @@
 //! The rules: one call against the manifest's `[[rule]]` rows in order,
 //! after the region-body rule, and the judgement that comes out, with the
-//! hook's JSON it renders to. The deep part of the judge: the conservative
-//! shell split, the flag clusters, the type mentions, the `unsafe` homes
-//! and the `pub` count all live here and nowhere else.
+//! hook's JSON it renders to. The deep part of the judge: the type
+//! mentions, the `unsafe` homes and the `pub` count live here, and a shell
+//! line's argv in [`super::argv`].
 
 use std::fs;
 use std::path::Path;
@@ -11,11 +11,12 @@ use anyhow::{Context, Result};
 use regex_lite::Regex;
 use serde_json::{Value, json};
 
+use super::argv::commands;
 use super::call::Call;
 use super::label;
 use super::region::region_body;
 use super::unless;
-use crate::manifest::{Manifest, OneOrMany, Rule, scope_matches};
+use crate::manifest::{Manifest, Rule, scope_matches};
 use crate::rust;
 
 /// The hook event the shipped adapter wires (§6).
@@ -165,12 +166,12 @@ fn evaluate(
     let source = path.is_some_and(is_rust_source);
     let fired = if !p.describes_a_call() {
         return Ok(None);
-    } else if let Some(argv) = &p.deny_argv {
+    } else if let Some(denied) = &p.deny_argv {
         call.command()
-            .is_some_and(|c| argv_denied(c, argv, &p.with))
+            .is_some_and(|c| commands(c).iter().any(|a| a.denies(denied, &p.with)))
     } else if let Some(separator) = &p.require_argv {
         call.command()
-            .is_some_and(|c| argv_missing(c, separator, &p.with))
+            .is_some_and(|c| commands(c).iter().any(|a| a.unbounded(separator, &p.with)))
     } else if let Some(pattern) = &p.deny_pattern {
         let regex = Regex::new(pattern)
             .with_context(|| format!("rule \"{}\": deny_pattern is not a regex", rule.id))?;
@@ -243,157 +244,6 @@ pub(super) fn adds(regex: &Regex, after: &str, before: &str) -> bool {
             None => true,
         },
     )
-}
-
-/// The tokens of each simple command in a shell line, split on unquoted
-/// whitespace and on `;`, `&&`, `||`, `|`, `&` and newlines, with quotes
-/// stripped. Conservative: what a shell can hide is pre-commit's to find.
-pub(super) fn commands(line: &str) -> Vec<Vec<String>> {
-    let mut commands = vec![Vec::new()];
-    let mut token = String::new();
-    let mut quoted = false;
-    let mut quote = '\0';
-    let mut escaped = false;
-    let end_token = |token: &mut String, commands: &mut Vec<Vec<String>>, quoted: &mut bool| {
-        if let Some(command) = commands.last_mut().filter(|_| !token.is_empty() || *quoted) {
-            command.push(std::mem::take(token));
-        }
-        *quoted = false;
-    };
-    for c in line.chars() {
-        if escaped {
-            token.push(c);
-            escaped = false;
-        } else if quote != '\0' {
-            if c == quote {
-                quote = '\0';
-            } else if c == '\\' && quote == '"' {
-                escaped = true;
-            } else {
-                token.push(c);
-            }
-        } else {
-            match c {
-                '\\' => escaped = true,
-                '\'' | '"' => {
-                    quote = c;
-                    quoted = true;
-                }
-                ';' | '|' | '&' | '\n' => {
-                    end_token(&mut token, &mut commands, &mut quoted);
-                    if commands.last().is_some_and(|c| !c.is_empty()) {
-                        commands.push(Vec::new());
-                    }
-                }
-                c if c.is_whitespace() => end_token(&mut token, &mut commands, &mut quoted),
-                c => token.push(c),
-            }
-        }
-    }
-    end_token(&mut token, &mut commands, &mut quoted);
-    commands.retain(|c| !c.is_empty());
-    commands
-}
-
-/// `deny_argv` with `with`: a command that carries one of the `with`
-/// phrases and one of the denied flags, as a token or as a letter in a
-/// cluster of short flags (`-anm` carries `-n`).
-fn argv_denied(line: &str, denied: &[String], with: &OneOrMany) -> bool {
-    commands(line).iter().any(|tokens| {
-        carries_a_phrase(tokens, with)
-            && tokens
-                .iter()
-                .any(|t| denied.iter().any(|d| flag_matches(d, t)))
-    })
-}
-
-/// `require_argv` with `with`: a command that carries one of the `with`
-/// phrases and not the separator, or the separator and nothing after it,
-/// or after it a name for the tree rather than for files: `.`, `..`, a
-/// `:` pathspec magic (`:/`) or a `*` the shell left unexpanded. The
-/// separator is `--` for git, after which every token is a path; what
-/// stands before it is the command's own and not read, so `git add -A --
-/// src` is bounded to `src` and passes.
-fn argv_missing(line: &str, separator: &str, with: &OneOrMany) -> bool {
-    commands(line).iter().any(|tokens| {
-        carries_a_phrase(tokens, with)
-            && match tokens.iter().position(|t| t == separator) {
-                None => true,
-                Some(at) => {
-                    let paths = &tokens[at + 1..];
-                    paths.is_empty() || paths.iter().any(|p| names_the_tree(p))
-                }
-            }
-    })
-}
-
-/// `.`, `..`, `./`, `../`, a `:` pathspec magic (`:/`) or a glob the
-/// shell left unexpanded (`'*'`, `'./*'`): a name for the tree, or for
-/// whatever is in it, rather than for files the agent wrote.
-fn names_the_tree(path: &str) -> bool {
-    let path = path.trim_end_matches('/');
-    let path = path.strip_prefix("./").unwrap_or(path);
-    path.is_empty() || path == "." || path == ".." || path.starts_with(':') || path.contains('*')
-}
-
-/// Whether the tokens carry one of the phrases; none is every command.
-/// A phrase's words stand in order with only options and their values
-/// between them: `git add` is `git -C dir add` and `git --no-pager add`,
-/// and is not `git log --grep add`, whose `log` is neither an option nor
-/// the value of one. One word is that word wherever it stands.
-pub(super) fn carries_a_phrase(tokens: &[String], with: &OneOrMany) -> bool {
-    with.is_empty()
-        || with.iter().any(|phrase| {
-            let words: Vec<&str> = phrase.split_whitespace().collect();
-            let Some((first, rest)) = words.split_first() else {
-                return false;
-            };
-            tokens
-                .iter()
-                .enumerate()
-                .filter(|(_, t)| t == first)
-                .any(|(at, _)| follows(&tokens[at..], rest))
-        })
-}
-
-/// Whether the words follow `tokens[0]` in order, with only an option
-/// (`-x`, `--x`) or the token after one between two of them.
-fn follows(tokens: &[String], words: &[&str]) -> bool {
-    let mut at = 1;
-    for word in words {
-        loop {
-            let Some(token) = tokens.get(at) else {
-                return false;
-            };
-            if token == word {
-                at += 1;
-                break;
-            }
-            let option = |i: usize| tokens.get(i).is_some_and(|t| t.starts_with('-'));
-            if !option(at) && !option(at - 1) {
-                return false;
-            }
-            at += 1;
-        }
-    }
-    true
-}
-
-pub(super) fn flag_matches(denied: &str, token: &str) -> bool {
-    if token == denied {
-        return true;
-    }
-    let mut letters = denied.chars();
-    if letters.next() == Some('-')
-        && let (Some(letter), None) = (letters.next(), letters.next())
-    {
-        let cluster = token.strip_prefix('-').unwrap_or_default();
-        return cluster.len() > 1
-            && !cluster.starts_with('-')
-            && cluster.contains(letter)
-            && cluster.chars().all(char::is_alphabetic);
-    }
-    false
 }
 
 /// A `deny_types` entry in the text: the full path, or its last segment as
@@ -469,79 +319,6 @@ fn adds_a_pub_item(root: &Path, call: &Call, path: Option<&Path>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_shell_line_splits_on_separators_and_keeps_quoted_words_whole() {
-        let split = commands("git add -A && git commit -m \"fix -n handling\"; echo 'a b' | cat");
-        assert_eq!(
-            split,
-            vec![
-                vec!["git", "add", "-A"],
-                vec!["git", "commit", "-m", "fix -n handling"],
-                vec!["echo", "a b"],
-                vec!["cat"],
-            ]
-        );
-        assert_eq!(
-            commands("git commit -m ''"),
-            vec![vec!["git", "commit", "-m", ""]]
-        );
-    }
-
-    #[test]
-    fn a_denied_flag_is_a_token_or_a_letter_in_a_cluster_beside_the_with_word() {
-        let denied = ["--no-verify".to_owned(), "-n".to_owned()];
-        let commit = OneOrMany::One("commit".to_owned());
-        assert!(argv_denied("git commit -n -m x", &denied, &commit));
-        assert!(argv_denied("git commit -anm x", &denied, &commit));
-        assert!(argv_denied("git commit --no-verify", &denied, &commit));
-        assert!(!argv_denied("git log -n 3", &denied, &commit));
-        // A quoted flag is still the flag; conservative is the design's word.
-        assert!(argv_denied("git commit -m '-n'", &denied, &commit));
-        assert!(!argv_denied("git commit -m 'no -n here'", &denied, &commit));
-        assert!(!argv_denied("git commit --no-verify-x", &denied, &commit));
-        assert!(argv_denied("git commit -n", &denied, &OneOrMany::None));
-    }
-
-    #[test]
-    fn a_phrase_is_its_words_in_order_with_only_options_between_them() {
-        let git_add = OneOrMany::Many(vec!["git add".to_owned(), "git commit".to_owned()]);
-        let carries = |line: &str| carries_a_phrase(&commands(line)[0], &git_add);
-        assert!(carries("git add -- src"));
-        assert!(carries("git -C /tmp/x add -- src"));
-        assert!(carries("git --no-pager -c user.name=x commit -- src"));
-        assert!(!carries("git log --grep add"));
-        assert!(!carries("git worktree add -b x dir"));
-        assert!(!carries("cargo add serde"));
-        assert!(carries("git commit -m x"));
-    }
-
-    #[test]
-    fn the_separator_is_required_and_what_follows_it_names_files() {
-        let with = OneOrMany::Many(vec!["git add".to_owned(), "git commit".to_owned()]);
-        let missing = |line: &str| argv_missing(line, "--", &with);
-        assert!(missing("git add -A"));
-        assert!(missing("git add ."));
-        assert!(missing("git add -u"));
-        assert!(missing("git add -- ."));
-        assert!(missing("git add -- ':/'"));
-        assert!(missing("git add -- ./"));
-        assert!(missing("git add -- ../"));
-        assert!(missing("git add -- './*'"));
-        assert!(missing("git add -- 'xtask/*'"));
-        assert!(missing("git add --"));
-        assert!(missing("git commit -m x"));
-        assert!(missing("git commit --amend --no-edit"));
-        assert!(missing("git commit -am x"));
-        assert!(missing("cargo fmt && git add -A && git commit -m x"));
-        assert!(!missing("git add -- xtask/src/permit/rules.rs"));
-        assert!(!missing("git add -A -- xtask/src"));
-        assert!(!missing("git commit -F /tmp/msg -- xtask/src AGENTS.md"));
-        assert!(!missing("git commit --amend -F /tmp/msg -- xtask/src"));
-        assert!(!missing("git commit -m 'add -- nothing' -- AGENTS.md"));
-        assert!(!missing("git status && git diff --cached -- xtask"));
-        assert!(!missing("git log --grep add"));
-    }
 
     #[test]
     fn scopes_match_files_at_or_under_them() {
