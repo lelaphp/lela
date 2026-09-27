@@ -7060,6 +7060,24 @@ impl Request {
     /// __get u
     /// Value of type string returned from T::__get() must be compatible with unset property T::$u of type int
     /// ```
+    ///
+    /// A reference `&__get` answers is converted in its cell, so the
+    /// property it names reads the conversion too, and a write fetch
+    /// binds to that cell:
+    ///
+    /// ```php
+    /// class Test { public $prop = "42"; public int $val;
+    ///     public function &__get($name) { return $this->prop; } }
+    /// $test = new Test; unset($test->val);
+    /// $val = &$test->val;
+    /// var_dump($test->prop);
+    /// $test->prop = "x";
+    /// var_dump($val);
+    /// ```
+    /// ```expect
+    /// int(42)
+    /// string(1) "x"
+    /// ```
     fn hold_magic_get(
         &mut self,
         class: ClassId,
@@ -7078,6 +7096,30 @@ impl Request {
         };
         let strict = self.function_strict_types(getter);
         let held = got.deref();
+        let cell = got.as_php_ref().copied();
+        // A cell some typed property is already a source of converts
+        // nothing: it holds the type as it is, or it is refused.
+        if let Some(bound) = cell.filter(|cell| cell.heap().sources() != 0) {
+            let holds = crate::ops::typed_ref_holds(
+                self,
+                bound.heap(),
+                &typed.ty,
+                placed.declaring,
+                name,
+                strict,
+            );
+            return match holds {
+                Ok(true) => Ok(got),
+                Ok(false) => {
+                    self.release(got);
+                    Err(self.magic_get_refused(placed.declaring, name, &typed.ty, &held))
+                }
+                Err(thrown) => {
+                    self.release(got);
+                    Err(thrown)
+                }
+            };
+        }
         let admitted = match crate::ops::property_type_admits(
             self,
             &held,
@@ -7093,25 +7135,46 @@ impl Request {
         };
         match admitted {
             crate::ops::Admitted::As => Ok(got),
+            // `i_zend_check_property_type` converts the value where it
+            // stands, which for a reference `__get` answered is in the
+            // cell, so every name bound to it reads the conversion.
             crate::ops::Admitted::Converted(coerced) => {
-                self.release(got);
-                Ok(coerced)
+                if let Some(cell) = cell {
+                    self.reference_set(cell.heap(), coerced);
+                    Ok(got)
+                } else {
+                    self.release(got);
+                    Ok(coerced)
+                }
             }
             crate::ops::Admitted::Refused => {
-                let given = crate::ops::type_name(self, &held);
                 self.release(got);
-                let class = self.class_name(placed.declaring);
-                let ty = crate::api::coerce::declared_type_name(&typed.ty);
-                let shown = String::from_utf8_lossy(name).into_owned();
-                Err(crate::api::raising::throw(
-                    self,
-                    "TypeError",
-                    &format!(
-                        "Value of type {given} returned from {class}::__get() must be compatible with unset property {class}::${shown} of type {ty}"
-                    ),
-                ))
+                Err(self.magic_get_refused(placed.declaring, name, &typed.ty, &held))
             }
         }
+    }
+
+    /// `zend_magic_get_property_type_inconsistency_error`: php's
+    /// `TypeError` for what `__get` answered for an unset typed property
+    /// whose type holds it in no form.
+    fn magic_get_refused(
+        &mut self,
+        declaring: ClassId,
+        name: &[u8],
+        ty: &php_unit::decl::Type,
+        held: &Value,
+    ) -> Thrown {
+        let given = crate::ops::type_name(self, held);
+        let class = self.class_name(declaring);
+        let ty = crate::api::coerce::declared_type_name(ty);
+        let shown = String::from_utf8_lossy(name).into_owned();
+        crate::api::raising::throw(
+            self,
+            "TypeError",
+            &format!(
+                "Value of type {given} returned from {class}::__get() must be compatible with unset property {class}::${shown} of type {ty}"
+            ),
+        )
     }
 
     /// `zend_readonly_property_modification_error` (`Cannot modify

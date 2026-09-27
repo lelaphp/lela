@@ -1094,19 +1094,54 @@ pub(crate) fn verify_prop_assignable_by_ref(
     strict: bool,
 ) -> Result<Option<Value>, Thrown> {
     let held = crate::api::values::PhpRef::of(cell).get().deref();
+    if req.ref_type_sources(cell).is_empty() {
+        return verify_property_type(req, &held, ty, declaring, name, strict);
+    }
+    if typed_ref_holds(req, cell, ty, declaring, name, strict)? {
+        return Ok(None);
+    }
+    Err(property_type_error(req, &held, ty, declaring, name))
+}
+
+/// `zend_verify_prop_assignable_by_ref_ex`'s arm over a cell some typed
+/// property is already a source of, which converts nothing, since a
+/// conversion would be one name's value changing under the other:
+/// `true` where the type holds the value as it is, `false` where it
+/// holds it in no form, the caller's own error, and php's `TypeError`
+/// naming both properties where it would hold it only converted
+/// (`zend_throw_ref_type_error_type`).
+///
+/// ```php
+/// class C { public static int $n = 1; public static float $f = 0.5; public static ?int $m = null; }
+/// $y = 1; C::$n = &$y;
+/// try { C::$f = &$y; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// C::$m = &$y;
+/// $y = 2;
+/// var_dump(C::$m);
+/// ```
+/// ```expect
+/// Reference with value of type int held by property C::$n of type int is not compatible with property C::$f of type float
+/// int(2)
+/// ```
+pub(crate) fn typed_ref_holds(
+    req: &mut Request,
+    cell: php_heap::Ref,
+    ty: &php_unit::decl::Type,
+    declaring: crate::api::values::ClassId,
+    name: &[u8],
+    strict: bool,
+) -> Result<bool, Thrown> {
+    let held = crate::api::values::PhpRef::of(cell).get().deref();
     let first = req
         .ref_type_sources(cell)
         .first()
         .map(|s| (s.declaring, s.name.clone(), s.ty.clone()));
     let Some((first_at, first_name, first_ty)) = first else {
-        return verify_property_type(req, &held, ty, declaring, name, strict);
+        return Ok(false);
     };
     match type_assignable(req, &held, ty, declaring, strict) {
-        Assignable::Yes => return Ok(None),
+        Assignable::Yes => return Ok(true),
         Assignable::Coerce => {
-            // The value would convert, so what refuses the bind is the
-            // conversion itself: one name's value cannot change because
-            // the other was bound.
             if let Some(made) = crate::api::coerce::scalar_type_hint(req, &held, ty.mask(), strict)?
             {
                 req.release(made);
@@ -1128,7 +1163,7 @@ pub(crate) fn verify_prop_assignable_by_ref(
         }
         Assignable::No => {}
     }
-    Err(property_type_error(req, &held, ty, declaring, name))
+    Ok(false)
 }
 
 /// `zend_throw_incdec_prop_error` (`Z/Zend/zend_execute.c:2211`): the
