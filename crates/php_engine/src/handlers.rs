@@ -12458,7 +12458,9 @@ fn stepped_entry(
     };
     exec::free_operand(req, frame, code, data.op1_type, data.op1);
     let stepped = computed?;
-    let strict = req.caller_strict_types(frame);
+    // `EX_USES_STRICT_TYPES()`: the regime of the frame the opline
+    // stands in.
+    let strict = req.frame_strict_types(frame);
     let (landed, garbage) = assign_to_place(req, entry, stepped, strict)?;
     write_out(req, frame, code, op, &landed);
     req.release(garbage);
@@ -12572,6 +12574,26 @@ fn binary_assign_op_obj_dim(
 /// ```expect
 /// string(2) "ab"
 /// <r>ab</r>
+/// ```
+///
+/// A typed property and a typed reference hold what the operation made
+/// under the regime of the file the opline stands in
+/// (`EX_USES_STRICT_TYPES()`), and a strict file's keep what they held:
+///
+/// ```php
+/// declare(strict_types=1);
+/// class A { public string $foo = "100"; public int $n = 1; }
+/// $o = new A;
+/// try { $o->foo += 5; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// $a = ["k" => &$o->n];
+/// try { $a["k"] .= "5"; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($o->foo, $o->n);
+/// ```
+/// ```expect
+/// Cannot assign int to property A::$foo of type string
+/// Cannot assign string to reference held by property A::$n of type int
+/// string(3) "100"
+/// int(1)
 /// ```
 pub(crate) fn assign_obj_op<T: Tier>(
     req: &mut Request,
@@ -12756,7 +12778,7 @@ fn step_property(
             "InternalError: ZEND_ASSIGN_OBJ_OP placed the typed property ${shown}, whose declared type the class does not carry"
         )));
     };
-    let strict = req.caller_strict_types(frame);
+    let strict = req.frame_strict_types(frame);
     let landed = match req.hold_to_property_type(&typed, &bytes, stepped, strict) {
         Ok(landed) => landed,
         Err(thrown) => {
