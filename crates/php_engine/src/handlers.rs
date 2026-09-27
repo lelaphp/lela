@@ -1820,20 +1820,10 @@ fn bound_at(req: &mut Request, at: php_heap::ZvalRef) -> Result<Value, Thrown> {
 /// (`ZEND_SEND_PREFER_REF`), the variadic's for every argument past the
 /// declared ones.
 fn send_mode(req: &Request, number: u32) -> (bool, bool) {
-    let Some(function) = req.vm().building_call_function() else {
-        return (false, false);
-    };
-    let Some(decl) = req.function_decl(function) else {
-        return (false, false);
-    };
-    let at = usize::try_from(number.saturating_sub(1)).unwrap_or(usize::MAX);
-    let variadic = decl.parameters.last().filter(|last| last.variadic);
-    decl.parameters
-        .get(at)
-        .filter(|parameter| !parameter.variadic)
-        .or(variadic)
-        .map_or((false, false), |parameter| {
-            (parameter.by_ref, parameter.by_ref && parameter.prefer_ref)
+    req.vm()
+        .building_call_function()
+        .map_or((false, false), |function| {
+            req.arg_send_mode(function, number)
         })
 }
 
@@ -2528,6 +2518,23 @@ pub(crate) fn send_user<T: Tier>(
 /// call_user_func_array(): Argument #2 ($args) must be of type array, string given
 /// array_slice(): Argument #3 ($length) must be of type ?int, array given
 /// ```
+///
+/// A reference among the elements reaches a `__call` as the reference
+/// it is ("don't separate references for __call"), and any other
+/// callee's by-value parameter as its value:
+///
+/// ```php
+/// function inc(&$x) { $x++; }
+/// class P { function __call($n, $a) { call_user_func_array('inc', $a); } }
+/// function v($x) { $x = 5; }
+/// $arg = 1;
+/// call_user_func_array([new P, 'bar'], [&$arg]);
+/// call_user_func_array('v', [&$arg]);
+/// var_dump($arg);
+/// ```
+/// ```expect
+/// int(2)
+/// ```
 pub(crate) fn send_array<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -2688,7 +2695,17 @@ fn send_array_element(
             element
         }
     } else {
-        let value = element.deref();
+        // "don't separate references for __call": a trampoline takes
+        // the reference as it is, every other callee its value.
+        let value = if req
+            .vm()
+            .building_call_function()
+            .is_some_and(|function| req.via_trampoline(function))
+        {
+            element
+        } else {
+            element.deref()
+        };
         req.addref(&value);
         value
     };

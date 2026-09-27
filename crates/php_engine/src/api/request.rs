@@ -2605,8 +2605,20 @@ impl Request {
         let wrapped = self.values_for_references(function, arguments)?;
         let name = self.declared_name(function);
         let name = self.interned(name.as_bytes())?;
+        let via_trampoline = self.via_trampoline(function);
         let mut sent = arguments.to_vec();
         for (at, argument) in sent.iter_mut().enumerate() {
+            // A reference handed to a parameter taking a value is
+            // followed, "don't separate references for __call" but for a
+            // trampoline, which takes it as it is.
+            if !via_trampoline
+                && argument.as_php_ref().is_some()
+                && !self
+                    .arg_send_mode(function, u32::try_from(at + 1).unwrap_or(u32::MAX))
+                    .0
+            {
+                *argument = argument.deref();
+            }
             self.addref(argument);
             if wrapped.contains(&at) {
                 // `Z_TRY_ADDREF_P(arg); ZVAL_NEW_REF(param, arg)`: the
@@ -2728,6 +2740,34 @@ impl Request {
             }
         }
         Ok(wrapped)
+    }
+
+    /// `ZEND_ARG_SEND_MODE` (`Z/Zend/zend_compile.h:1141`) over
+    /// `function`: whether the parameter numbered `number` takes its
+    /// argument by reference, and whether only where it can
+    /// (`ZEND_SEND_PREFER_REF`), the variadic's for every argument past
+    /// the declared ones.
+    pub(crate) fn arg_send_mode(&self, function: Function, number: u32) -> (bool, bool) {
+        let Some(decl) = self.function_decl(function) else {
+            return (false, false);
+        };
+        let at = usize::try_from(number.saturating_sub(1)).unwrap_or(usize::MAX);
+        let variadic = decl.parameters.last().filter(|last| last.variadic);
+        decl.parameters
+            .get(at)
+            .filter(|parameter| !parameter.variadic)
+            .or(variadic)
+            .map_or((false, false), |parameter| {
+                (parameter.by_ref, parameter.by_ref && parameter.prefer_ref)
+            })
+    }
+
+    /// `fn_flags & ZEND_ACC_CALL_VIA_TRAMPOLINE`: `function` is the
+    /// trampoline a call to a name the class serves through `__call` or
+    /// `__callStatic` resolved to.
+    pub(crate) fn via_trampoline(&self, function: Function) -> bool {
+        self.trampoline_of(function)
+            .is_some_and(|(_, served)| served == crate::trampoline::Served::Trampoline)
     }
 
     /// `zend_param_must_be_ref` (`Z/Zend/zend_execute.c`): the warning
