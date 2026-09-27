@@ -291,7 +291,21 @@ impl Query<'_> {
 
     /// `php_url_encode_hash_ex` over `rows`, an array's entries or an
     /// object's visible properties, under the numeric and the key
-    /// prefix.
+    /// prefix. Each level opens with `php_url_check_stack_limit`
+    /// (`Z/ext/standard/http.c:86-114`): where the machine stack has
+    /// come down to `zend.max_allowed_stack_size`, php's `Error`
+    /// `Maximum call stack size reached.` and nothing more of the level.
+    ///
+    /// Under the small-stack regime a nest 50,000 deep reaches the ini's
+    /// 256K in both engines:
+    ///
+    /// ```php
+    /// $q = []; $c = &$q; for ($i = 0; $i < 50000; $i++) { $c['a'] = []; $c = &$c['a']; } unset($c);
+    /// try { var_dump(strlen(http_build_query($q))); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect regime=small-stack
+    /// Maximum call stack size reached.
+    /// ```
     fn hash(
         &mut self,
         req: &mut Request,
@@ -299,6 +313,9 @@ impl Query<'_> {
         num_prefix: &[u8],
         key_prefix: Option<&[u8]>,
     ) -> Result<(), Thrown> {
+        if req.stack_overflowed() {
+            return Err(throw(req, "Error", "Maximum call stack size reached."));
+        }
         for (key, value) in rows {
             let value = value.deref();
             let nested = match value.as_ref() {

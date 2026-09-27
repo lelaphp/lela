@@ -508,6 +508,14 @@ impl PhpArray {
         Value::array(self)
     }
 
+    /// Whether `other` names the one table this does, php's
+    /// `Z_ARR_P(a) == Z_ARR_P(b)`: the identity, where `==` reads the
+    /// elements.
+    #[must_use]
+    pub fn is_same(&self, other: PhpArray) -> bool {
+        self.0.is_same(other.0)
+    }
+
     /// `GC_IS_RECURSIVE`: a walk that guards itself with
     /// [`PhpArray::protect`] is inside this array already, which is how
     /// `count()`, `var_dump()` and `serialize()` see an array that holds

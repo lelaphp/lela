@@ -376,7 +376,22 @@ fn write(
 }
 
 /// `php_var_serialize_nested_data`: `count:{`, each key and value, `}`;
-/// a reference with one owner is written as what it holds.
+/// a reference with one owner is written as what it holds. An element
+/// that is the table being written, `Z_ARR_P(data) == Z_ARR_P(struc)`,
+/// is `N;`: php compares the pointers, so a nest of distinct tables is
+/// never read twice, and the stack limit at the top of [`write`] is
+/// what refuses one too deep. Under the small-stack regime a plain nest
+/// a few thousand deep reaches the ini's 256K in both engines:
+///
+/// ```php
+/// $a = [];
+/// for ($i = 0; $i < 3000; $i++) { $a = [$a]; }
+/// try { serialize($a); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// while ($a) { $a = $a[0]; }
+/// ```
+/// ```expect regime=small-stack
+/// Maximum call stack size of %d bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?
+/// ```
 fn nested(
     req: &mut Request,
     out: &mut Vec<u8>,
@@ -405,7 +420,7 @@ fn nested(
             _ => data,
         };
         if let (Some(inner), Some(outer_array)) = (data.as_array(), outer.as_array())
-            && inner == outer_array
+            && inner.is_same(*outer_array)
         {
             hash.add(req, outer, in_rcn_array);
             out.extend_from_slice(b"N;");

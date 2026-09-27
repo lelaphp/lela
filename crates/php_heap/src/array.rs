@@ -42,9 +42,10 @@ use crate::gc::{self, Refcounted};
 use crate::hooks::{Fatal, HeapHooks};
 use crate::iterators::Iterators;
 use crate::mm::Mm;
+use crate::reference::Ref;
 use crate::sort::zend_sort;
 use crate::string::Str;
-use crate::{Heap, Zval, ZvalRef, ZvalType};
+use crate::{GivenUp, Heap, Last, Zval, ZvalRef, ZvalType};
 
 /// Where an array's header and data come from: the request's heap for
 /// every array a request builds, which is what `memory_get_usage()`
@@ -1857,26 +1858,150 @@ impl crate::Heap {
         Ok(())
     }
 
-    /// `zend_array_destroy` (`Z/Zend/zend_hash.c:1815`): nothing for a
-    /// table the cycle collector is already destroying, whose type it
-    /// turned to `IS_NULL` (`rc_dtor_func`'s `zend_empty_destroy`);
-    /// otherwise the table taken out of the root buffer and turned to
-    /// `IS_NULL` itself, every element released through `hooks`, in
-    /// order, with the table standing around each, every string key
-    /// given up, then the data and the header back to the heap.
+    /// `zend_array_destroy` (`Z/Zend/zend_hash.c:1815`) over a table
+    /// its last owner has let go of, through [`Heap::destroy`].
     pub(crate) fn array_destroy(hooks: &mut dyn HeapHooks, a: Arr) {
-        if a.gc().kind() == ZvalType::Null as u32 {
-            return;
+        Heap::destroy(hooks, Last::Table(a));
+    }
+
+    /// `rc_dtor_func` over a table or a reference cell no owner is left
+    /// of, and over every one its contents were the last owner of, in
+    /// php's order and without recursing on the machine stack.
+    ///
+    /// php's `zend_array_destroy` releases each element with
+    /// `i_zval_ptr_dtor`, which calls `rc_dtor_func` again for an
+    /// element that was the last owner of a table or a cell, so a nest
+    /// is freed depth first: an element's own contents, destructors and
+    /// all, are given up before the next element is read, and a table's
+    /// string key after its value. The walk here is that recursion with
+    /// its frames on a list: one entry per table being emptied, at the
+    /// element it has reached and holding the key it has yet to give
+    /// up, and one per cell whose value is being given up and whose
+    /// bytes go back after it. So a nest php frees in its small frames is
+    /// freed here at any depth.
+    ///
+    /// A table is `zend_array_destroy`: nothing for one the cycle
+    /// collector is already destroying, whose type it turned to
+    /// `IS_NULL` (`rc_dtor_func`'s `zend_empty_destroy`); otherwise the
+    /// table taken out of the root buffer and turned to `IS_NULL`
+    /// itself, every element released through `hooks`, in order, with
+    /// the table standing around each, every string key given up, then
+    /// the iterators unregistered and the data and the header back to
+    /// the heap. A cell is `zend_reference_destroy`: the typed-property
+    /// sources given up first, as `zend_free_source_list` does, then the
+    /// value held released and the cell's bytes given back after it.
+    ///
+    /// The order is php's, destructors and all:
+    ///
+    /// ```php
+    /// class D { function __construct(public $n) {} function __destruct() { echo $this->n; } }
+    /// $r = [new D(3)];
+    /// $a = [[new D(1), [new D(2)], &$r], 'k' => [new D(4)], new D(5)];
+    /// unset($r);
+    /// $a = null;
+    /// echo "\n";
+    /// ```
+    /// ```expect
+    /// 12345
+    /// ```
+    ///
+    /// A nest built through references and a plain one, each 25,000
+    /// deep, which the witness lane's 2 MiB threads ran out on while
+    /// the walk recursed:
+    ///
+    /// ```php
+    /// $a = []; $c = &$a;
+    /// for ($i = 0; $i < 25000; $i++) { $c[] = []; $c = &$c[0]; }
+    /// unset($c);
+    /// $a = null;
+    /// $b = [];
+    /// for ($i = 0; $i < 25000; $i++) { $b = [$b]; }
+    /// $b = null;
+    /// echo "released\n";
+    /// ```
+    /// ```expect
+    /// released
+    /// ```
+    pub(crate) fn destroy(hooks: &mut dyn HeapHooks, first: Last) {
+        let mut walk: Vec<Emptying> = Vec::new();
+        let mut next = Some(first);
+        loop {
+            match next.take() {
+                // A table the cycle collector is destroying already.
+                Some(Last::Table(a)) if a.gc().kind() == ZvalType::Null as u32 => {}
+                Some(Last::Table(a)) => {
+                    hooks
+                        .heap()
+                        .gc
+                        .remove_from_buffer(crate::collector::Node::Arr(a));
+                    a.gc().set_kind_null();
+                    walk.push(Emptying::Table {
+                        a,
+                        at: 0,
+                        key: None,
+                    });
+                }
+                Some(Last::Cell(r)) => {
+                    if r.sources() != 0 {
+                        hooks.free_reference(r);
+                        r.set_sources(0);
+                    }
+                    let held = r.val();
+                    r.write_val(Zval::UNDEF);
+                    walk.push(Emptying::Cell(r));
+                    next = Heap::release_within(hooks, held);
+                    continue;
+                }
+                None => {}
+            }
+            let Some(top) = walk.last_mut() else {
+                return;
+            };
+            match top {
+                Emptying::Cell(r) => {
+                    let r = *r;
+                    walk.pop();
+                    // SAFETY: the reference came from `reference`, its
+                    // last owner has given it up and what it held is
+                    // released, so nothing names it.
+                    unsafe { hooks.heap().mm.free(r.address()) };
+                }
+                Emptying::Table { a, at, key } => {
+                    if let Some(k) = key.take() {
+                        hooks.heap().release_string(k);
+                    }
+                    let a = *a;
+                    let Some((val, k)) = a.element_from(at) else {
+                        walk.pop();
+                        Heap::array_free_data(hooks.heap(), a);
+                        // SAFETY: the header came from `array_sized`, its
+                        // last owner has given it up and its contents are
+                        // freed.
+                        unsafe { hooks.heap().mm.free(a.address()) };
+                        continue;
+                    };
+                    next = Heap::release_within(hooks, val);
+                    match (next.is_some(), k) {
+                        (true, Some(k)) => *key = Some(k),
+                        (false, Some(k)) => hooks.heap().release_string(k),
+                        (_, None) => {}
+                    }
+                }
+            }
         }
-        hooks
-            .heap()
-            .gc
-            .remove_from_buffer(crate::collector::Node::Arr(a));
-        a.gc().set_kind_null();
-        Heap::array_free_contents(hooks, a);
-        // SAFETY: the header came from `array_sized`, its last owner has
-        // given it up and its contents are freed.
-        unsafe { hooks.heap().mm.free(a.address()) };
+    }
+
+    /// [`Heap::release`] of one element inside [`Heap::destroy`]: what it
+    /// would destroy is handed back for the walk to take next.
+    fn release_within(hooks: &mut dyn HeapHooks, z: Zval) -> Option<Last> {
+        match Heap::give_up(hooks, z) {
+            GivenUp::Owned => {
+                Heap::gc_check_possible_root(hooks, z);
+                None
+            }
+            GivenUp::Freed => None,
+            GivenUp::Last(last) => Some(last),
+        }
     }
 
     /// `zend_hash_destroy`: every element released through `hooks`, in
@@ -1885,30 +2010,64 @@ impl crate::Heap {
     /// is what the cycle collector's free phase does to a garbage table
     /// before it frees the headers in a second pass.
     pub(crate) fn array_free_contents(hooks: &mut dyn HeapHooks, a: Arr) {
-        let used = a.num_used();
-        if a.is_packed() {
-            for i in 0..used {
-                Heap::release(hooks, a.read_slot(i));
-            }
-        } else if !a.is_uninitialized() {
-            for i in 0..used {
-                let b = a.read_bucket(i);
-                if b.val.is_undef() {
-                    continue;
-                }
-                Heap::release(hooks, b.val);
-                if let Some(k) = b.key {
-                    hooks.heap().release_string(k);
-                }
+        let mut at = 0;
+        while let Some((val, key)) = a.element_from(&mut at) {
+            Heap::release(hooks, val);
+            if let Some(k) = key {
+                hooks.heap().release_string(k);
             }
         }
-        let heap = hooks.heap();
+        Heap::array_free_data(hooks.heap(), a);
+    }
+
+    /// The end of `zend_array_destroy` and `zend_hash_destroy` once
+    /// every element is released: the iterators unregistered and the
+    /// data back to the heap.
+    fn array_free_data(heap: &mut Heap, a: Arr) {
         heap.iterators.remove(a);
         if let Some(data) = a.data_addr() {
             // SAFETY: the data was this heap's and every element in it is
             // released.
             unsafe { heap.mm.free(data) };
         }
+    }
+}
+
+/// One frame of [`Heap::destroy`]'s walk: a table being emptied, at the
+/// position of the next element to release and holding the key of the
+/// element whose value is being given up, or a reference cell whose
+/// value is being given up.
+enum Emptying {
+    Table { a: Arr, at: u32, key: Option<Str> },
+    Cell(Ref),
+}
+
+impl Arr {
+    /// The next element of a table being destroyed at or past `*at`,
+    /// its value and its string key, and `*at` moved past it: a packed
+    /// table's slots, a hash's buckets less the tombstones, and nothing
+    /// of an uninitialised table.
+    fn element_from(self, at: &mut u32) -> Option<(Zval, Option<Str>)> {
+        let used = self.num_used();
+        if self.is_packed() {
+            if *at >= used {
+                return None;
+            }
+            let val = self.read_slot(*at);
+            *at += 1;
+            return Some((val, None));
+        }
+        if self.is_uninitialized() {
+            return None;
+        }
+        while *at < used {
+            let b = self.read_bucket(*at);
+            *at += 1;
+            if !b.val.is_undef() {
+                return Some((b.val, b.key));
+            }
+        }
+        None
     }
 }
 
