@@ -83,7 +83,11 @@ impl Request {
         let lookup = |wanted: &[u8]| {
             self.class_named(wanted)
                 .and_then(|id| self.class_decl(id))
-                .map(|decl| Held { decl, bodies: None })
+                .map(|decl| Held {
+                    decl,
+                    bodies: None,
+                    linked: true,
+                })
         };
         resolve_property(decl, name, &lookup)
             .is_some_and(|resolved| resolved.property.is_instance && resolved.is_virtual)
@@ -98,7 +102,11 @@ impl Request {
         let lookup = |wanted: &[u8]| {
             self.class_named(wanted)
                 .and_then(|id| self.class_decl(id))
-                .map(|decl| Held { decl, bodies: None })
+                .map(|decl| Held {
+                    decl,
+                    bodies: None,
+                    linked: true,
+                })
         };
         let resolved = resolve_property(decl, name, &lookup)?;
         if !resolved.is_hooked() || !resolved.property.is_instance {
@@ -1106,7 +1114,11 @@ impl Request {
         let lookup = |wanted: &[u8]| {
             self.class_named(wanted)
                 .and_then(|id| self.class_decl(id))
-                .map(|decl| Held { decl, bodies: None })
+                .map(|decl| Held {
+                    decl,
+                    bodies: None,
+                    linked: true,
+                })
         };
         let resolved = resolve_property(decl, name, &lookup)?;
         let hook = resolved.hook(kind)?;

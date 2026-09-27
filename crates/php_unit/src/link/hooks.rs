@@ -449,11 +449,11 @@ impl<'a> Linker<'a> {
                     property: text(&property.name.0),
                 },
             );
-            return Some(if status == Status::Unresolved {
-                Linked::Unresolved(refused)
-            } else {
-                Linked::Refused(refused)
-            });
+            if status == Status::Unresolved {
+                self.defer(refused);
+                continue;
+            }
+            return Some(Linked::Refused(refused));
         }
         None
     }

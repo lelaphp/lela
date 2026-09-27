@@ -6494,10 +6494,18 @@ impl Emit<'_> {
             return Ok(false);
         };
         let lookup = |name: &[u8]| {
-            self.bound_class(name)
-                .map(|decl| php_unit::link::Held { decl, bodies: None })
+            self.bound_class(name).map(|decl| php_unit::link::Held {
+                decl,
+                bodies: None,
+                linked: true,
+            })
         };
         let linking = php_unit::link::link(child, &lookup);
+        // `zend_can_early_bind`'s `INHERITANCE_UNRESOLVED`, silent: the
+        // class is left to its opline.
+        if !linking.obligations.is_empty() {
+            return Ok(false);
+        }
         for raised in linking.raised {
             self.diagnostics.push(Diagnostic {
                 level: raised.level(),
@@ -6507,7 +6515,6 @@ impl Emit<'_> {
         }
         match linking.outcome {
             php_unit::link::Linked::Linked => Ok(true),
-            php_unit::link::Linked::Unresolved(_) => Ok(false),
             php_unit::link::Linked::Refused(refused) => Err(CompileError {
                 level: refused.refusal.level(),
                 message: refused.refusal.to_string(),
