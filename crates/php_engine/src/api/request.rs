@@ -11655,6 +11655,16 @@ impl Request {
     /// the same place, before either side is even read as an object. It
     /// ends a walk no recursion guard can: a chain of objects deep
     /// enough to exhaust the C stack without ever reaching one twice.
+    ///
+    /// ```php
+    /// $o = $l = new stdClass; $p = $r = new stdClass;
+    /// for ($i = 0; $i < 25000; $i++) { $o->n = new stdClass; $o = $o->n; $p->n = new stdClass; $p = $p->n; }
+    /// try { var_dump($l == $r); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// foreach ([$l, $r] as $h) { while ($next = $h->n ?? null) { $h->n = $next->n ?? null; } }
+    /// ```
+    /// ```expect regime=small-stack
+    /// Maximum call stack size reached during object comparison
+    /// ```
     pub(crate) fn compare_objects(
         &mut self,
         left: &Value,

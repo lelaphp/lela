@@ -1571,6 +1571,25 @@ fn dump_members(
 /// deep` after its indent, with no newline, in place of its name and
 /// value, so a chain deeper than the stack ends there and not in a
 /// crash.
+///
+/// gh20840's shape under the small-stack regime, where 256K is passed
+/// well inside the chain in both engines: the dump goes to an
+/// `ob_start` callback that answers only whether the refusal was in it, so the
+/// depth each engine reached, which its own frames decide, is not what
+/// is pinned. The chain is taken apart a link at a time after, so its
+/// release is no deeper than the stack either.
+///
+/// ```php
+/// $o = $first = new stdClass;
+/// for ($i = 0; $i < 50000; $i++) { $o->next = new stdClass; $o = $o->next; }
+/// ob_start(fn ($chunk) => str_contains($chunk, 'nesting level too deep') ? "nesting level too deep\n" : "the whole chain\n");
+/// var_dump($first);
+/// ob_end_flush();
+/// while ($next = $first->next ?? null) { $first->next = $next->next ?? null; }
+/// ```
+/// ```expect regime=small-stack
+/// nesting level too deep
+/// ```
 fn too_deep(req: &Request, out: &mut Vec<u8>, level: usize) -> bool {
     if !req.stack_limit().overflowed() {
         return false;

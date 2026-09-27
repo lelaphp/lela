@@ -305,7 +305,26 @@ fn write_class_name(req: &mut Request, out: &mut Vec<u8>, object: PhpObject) -> 
     incomplete
 }
 
-/// `php_var_serialize_intern`.
+/// `php_var_serialize_intern`, which opens with
+/// `php_serialize_check_stack_limit` (`Z/ext/standard/var.c:1058`): a
+/// value nested past `zend.max_allowed_stack_size` is php's `Error` at
+/// the level the stack ran out, before anything of it is written. Under
+/// the small-stack regime php's own frames use up 256K within a few
+/// hundred levels of an object holding the next in an array, so five
+/// thousand are refused in both engines; the size is 256K less the
+/// platform's least reserve, so the number is masked. The chain is taken
+/// apart a link at a time after, so its release is no deeper than the
+/// stack either.
+///
+/// ```php
+/// $o = $first = new stdClass;
+/// for ($i = 0; $i < 5000; $i++) { $o->next = [new stdClass]; $o = $o->next[0]; }
+/// try { serialize([$first]); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// while ($next = $first->next[0] ?? null) { $first->next = $next->next ?? null; }
+/// ```
+/// ```expect regime=small-stack
+/// Maximum call stack size of %d bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?
+/// ```
 fn write(
     req: &mut Request,
     out: &mut Vec<u8>,

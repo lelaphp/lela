@@ -164,6 +164,20 @@ impl StackLimit {
     /// ```expect exit=255
     /// Fatal error: Maximum call stack size of %d bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached during compilation. Try splitting expression in %s on line 2
     /// ```
+    ///
+    /// Under the small-stack regime the stack is the ini's 256K, which a
+    /// chain a quarter of the size above passes in both engines, built
+    /// at runtime and compiled by `eval`; the number is still masked,
+    /// since the least `zend.reserved_stack_size` it is taken from is the
+    /// platform's ([`RESERVED_MIN`]).
+    ///
+    /// ```php
+    /// eval('$y = 1' . str_repeat('+1', 50000) . ';');
+    /// echo 'never';
+    /// ```
+    /// ```expect regime=small-stack exit=255
+    /// Fatal error: Maximum call stack size of %d bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached during compilation. Try splitting expression in %s(2) : eval()'d code on line 1
+    /// ```
     pub(crate) fn check(&self, line: u32) -> Result<(), CompileError> {
         if !self.overflowed() {
             return Ok(());
