@@ -1146,6 +1146,26 @@ pub fn internal_iterator(req: &mut Request, object: &PhpObject) -> Result<PhpObj
     crate::interfaces::internal_iterator(req, *object)
 }
 
+/// `PHAR_G(orig_fopen)(INTERNAL_FUNCTION_PARAM_PASSTHRU)`: the entry an
+/// interception replaced for the native being served
+/// ([`crate::api::abi::ExtensionBuilder::intercept`]), served on the same
+/// call, its arguments and its return the caller's, the first argument
+/// replaced by `first` where one is given, as phar's interceptors open
+/// the `phar://` name they made of a relative path; `null` where the
+/// native is not intercepted.
+pub fn passthrough(req: &mut Request, first: Option<Value>) -> Result<Value, Thrown> {
+    let Some(entry) = req.replaced_entry() else {
+        if let Some(first) = first {
+            req.release(first);
+        }
+        return Ok(Value::null());
+    };
+    if let Some(first) = first {
+        req.replace_first_argument(first);
+    }
+    entry(req)
+}
+
 /// `zend_lookup_class`: the linked class named, autoloading if needed.
 pub fn lookup_class(req: &mut Request, name: &[u8]) -> Result<Option<ClassId>, Thrown> {
     Ok(req.class_named(name))

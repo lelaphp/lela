@@ -188,6 +188,10 @@ pub(crate) struct Shared {
     /// extension's in bundle order, less what the startup ini's
     /// `disable_functions` took out of it ([`function_table`]).
     pub(crate) functions: Vec<(FunctionDecl, Entry)>,
+    /// The entry an extension's interception replaced, one row per row
+    /// of `functions`, none where nothing intercepts the native
+    /// ([`crate::api::abi::ExtensionBuilder::intercept`]).
+    pub(crate) replaced: Vec<Option<Entry>>,
     /// Each native's `internal_function.module`, one row per row of
     /// `functions`: the extension that declared it, or none for one the
     /// engine declares itself.
@@ -1202,6 +1206,27 @@ fn function_table(
         .unzip()
 }
 
+/// `phar_intercept_functions_init` for every extension, in bundle order:
+/// each native an extension intercepts has its entry replaced, the one
+/// it replaced kept in its row of what this answers.
+fn intercept(
+    functions: &mut [(FunctionDecl, Entry)],
+    extensions: &[Extension],
+) -> Vec<Option<Entry>> {
+    let mut replaced = vec![None; functions.len()];
+    for (name, entry) in extensions.iter().flat_map(|e| e.intercepts.iter()) {
+        let found = functions
+            .iter()
+            .position(|(decl, _)| decl.name.0.eq_ignore_ascii_case(&name.0));
+        if let Some(at) = found
+            && let Some(row) = functions.get_mut(at)
+        {
+            replaced[at] = Some(std::mem::replace(&mut row.1, *entry));
+        }
+    }
+    replaced
+}
+
 /// Builds an [`Engine`]: the bundle, the tier and the startup ini.
 pub struct EngineBuilder {
     extensions: Vec<Extension>,
@@ -1319,7 +1344,8 @@ impl EngineBuilder {
             ini.retain(|(n, _)| *n != name);
             ini.push((name, value));
         }
-        let (function_modules, functions) = function_table(&core, &extensions, &ini);
+        let (function_modules, mut functions) = function_table(&core, &extensions, &ini);
+        let replaced = intercept(&mut functions, &extensions);
         let function_flags = functions
             .iter()
             .map(|(decl, _)| crate::attributes::Flags::of(&decl.attributes))
@@ -1345,6 +1371,7 @@ impl EngineBuilder {
             shared: Arc::new(Shared {
                 extensions,
                 functions,
+                replaced,
                 function_modules,
                 function_flags,
                 frameless,

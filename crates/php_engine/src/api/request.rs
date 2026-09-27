@@ -3283,6 +3283,28 @@ impl Request {
         }
     }
 
+    /// The entry an interception replaced for the native being served,
+    /// none where the native serving is not intercepted.
+    pub(crate) fn replaced_entry(&self) -> Option<crate::api::abi::Entry> {
+        let function = self.vm.serving_call()?.function;
+        let at = usize::try_from(function.0).ok()?;
+        self.shared.replaced.get(at).copied().flatten()
+    }
+
+    /// The first argument of the call being served replaced by `value`,
+    /// the one it held given up.
+    pub(crate) fn replace_first_argument(&mut self, value: Value) {
+        let old = match self
+            .vm
+            .serving_call_mut()
+            .and_then(|call| call.arguments.first_mut())
+        {
+            Some(slot) => std::mem::replace(slot, value),
+            None => value,
+        };
+        self.release(old);
+    }
+
     /// The entry a `Function` names: one of the natives, or a native
     /// method numbered past them; none for a number nothing is linked
     /// under.

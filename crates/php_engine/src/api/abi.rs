@@ -209,6 +209,9 @@ pub struct Extension {
     pub(crate) rshutdown: Option<fn(&mut Request)>,
     pub(crate) interrupt: Option<InterruptHook>,
     pub(crate) compile_file: Option<CompileFileHook>,
+    /// What [`ExtensionBuilder::intercept`] was handed: each native of
+    /// another extension this one replaces, by name, with its entry.
+    pub(crate) intercepts: Vec<(Name, Entry)>,
     pub(crate) info: Option<Info>,
     /// What [`ExtensionBuilder::register`] was handed, in its order.
     pub(crate) registered: Vec<Arc<dyn Any + Send + Sync>>,
@@ -248,6 +251,7 @@ pub struct ExtensionBuilder {
     rshutdown: Option<fn(&mut Request)>,
     interrupt: Option<InterruptHook>,
     compile_file: Option<CompileFileHook>,
+    intercepts: Vec<(Name, Entry)>,
     info: Option<Info>,
     registered: Vec<Arc<dyn Any + Send + Sync>>,
     constants_link: Option<ConstantsLink>,
@@ -463,6 +467,24 @@ impl ExtensionBuilder {
         self
     }
 
+    /// A native another extension declares, its entry replaced by `entry`
+    /// as the engine is built, as phar's `MINIT` replaces `fopen`,
+    /// `file_get_contents`, `stat` and their kin in the function table
+    /// (`phar_intercept_functions_init`): the declaration stays the
+    /// native's, what a call serves is `entry`, and the entry it
+    /// replaced is kept for [`crate::api::call::passthrough`]. A name no
+    /// extension declares, or one `disable_functions` took out, is
+    /// intercepted by nothing.
+    #[must_use]
+    pub fn intercept(
+        mut self,
+        name: &[u8],
+        entry: fn(&mut Request) -> Result<Value, Thrown>,
+    ) -> ExtensionBuilder {
+        self.intercepts.push((Name(name.into()), entry));
+        self
+    }
+
     /// A value this extension hands at startup to the extension
     /// that reads every value of its type, php's `php_pdo_register_driver`
     /// into `pdo_driver_hash` from `pdo_sqlite`'s `MINIT`: immutable once the
@@ -552,6 +574,7 @@ impl ExtensionBuilder {
             rshutdown: self.rshutdown,
             interrupt: self.interrupt,
             compile_file: self.compile_file,
+            intercepts: self.intercepts,
             info: self.info,
             registered: self.registered,
             constants_link: self.constants_link,

@@ -49,6 +49,7 @@ abi::ExtensionBuilder::engine_state
 abi::ExtensionBuilder::functions
 abi::ExtensionBuilder::info
 abi::ExtensionBuilder::ini
+abi::ExtensionBuilder::intercept
 abi::ExtensionBuilder::interrupt
 abi::ExtensionBuilder::on_modify
 abi::ExtensionBuilder::register
@@ -189,6 +190,7 @@ call::mark_lazy_initialized
 call::new_lazy_ghost
 call::new_lazy_proxy
 call::new_object
+call::passthrough
 call::property_hook
 call::property_is_virtual
 call::read_class_prop_silent

@@ -107,7 +107,7 @@ pub fn extension() -> Extension {
         rel: None,
         version: None,
     };
-    ExtensionBuilder::default()
+    let builder = ExtensionBuilder::default()
         .dependencies(vec![
             dep("apc", DependencyKind::Optional),
             dep("bz2", DependencyKind::Optional),
@@ -132,8 +132,8 @@ pub fn extension() -> Extension {
         .rinit(rinit)
         .rshutdown(rshutdown)
         .compile_file(open::compile_file)
-        .info(info)
-        .build("Phar")
+        .info(info);
+    intercept::install(builder).build("Phar")
 }
 
 /// The entry's startup value, php's `readonly_orig` and
