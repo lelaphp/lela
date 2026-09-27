@@ -182,6 +182,7 @@ call::call_named
 call::class_constant
 call::class_unserialize
 call::clone
+call::clone_members
 call::clone_with
 call::closure_from_callable
 call::constant

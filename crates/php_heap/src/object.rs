@@ -784,6 +784,20 @@ impl Heap {
         Ok(Some(new))
     }
 
+    /// `zend_objects_clone_members` (`Z/Zend/zend_objects.c:197`) onto
+    /// `new`, an object of the old one's class that a class's
+    /// `clone_obj` made itself before it copies the members
+    /// (`spl_object_storage_clone`), with no dynamic table yet: each slot
+    /// one more owner of the old object's value and the dynamic table
+    /// shared, as [`Heap::object_clone`] copies them, and what `new`'s
+    /// slots held handed back, the caller's to give up
+    /// (`i_zval_ptr_dtor(dst)`).
+    pub fn object_clone_members_into(&mut self, new: Obj, old: Obj) -> Vec<Zval> {
+        let displaced = (0..new.slots()).map(|i| new.slot(i)).collect();
+        self.clone_members(new, old);
+        displaced
+    }
+
     /// A class's `clone_obj` over an object with a native payload
     /// (design §5.4), `zend_closure_clone` and its kin: the members
     /// copied as [`Heap::object_clone`] copies them, beside `payload`,

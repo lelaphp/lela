@@ -92,6 +92,7 @@ Heap::native_mut
 Heap::new
 Heap::object
 Heap::object_clone
+Heap::object_clone_members_into
 Heap::object_clone_with
 Heap::object_properties
 Heap::object_set_properties

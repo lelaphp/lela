@@ -14,7 +14,7 @@ use php_ext::abi::{
     This, Union, Untyped,
 };
 use php_ext::attr::php_class;
-use php_ext::call::{call_method, clone_with};
+use php_ext::call::{call_method, clone_members, new_object};
 use php_ext::coerce::{compare, identical, truthy, value_name};
 use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
@@ -1667,24 +1667,53 @@ fn overridden_bits(req: &mut Request, object: PhpObject) -> Result<i64, Thrown> 
     Ok(bits)
 }
 
-/// `spl_object_storage_clone`: every row attached anew to the copy.
+/// `spl_object_storage_clone`: `spl_object_storage_new_ex(ce, orig)`, a
+/// fresh object of the class whose rows are the original's attached
+/// through [`add_all`], each keyed by the copy's own `getHash` while the
+/// copy's members are its class's defaults, then the members copied and
+/// `__clone` served (`zend_objects_clone_members`). `MultipleIterator`'s
+/// flags are the constructor's and a copy starts without them, as php's
+/// does.
+///
+/// ```php
+/// class H extends SplObjectStorage {
+///     public $tag = 'default';
+///     public $b;
+///     public function getHash($o): string { global $orig; echo "getHash {$o->n} {$this->tag}\n"; if ($o->n == 'a' && $orig->b) { $orig->offsetUnset($orig->b); } return spl_object_hash($o); }
+///     public function __clone() { echo "__clone ", count($this), " {$this->tag}\n"; }
+/// }
+/// $orig = new H; $orig->tag = 'orig';
+/// $a = new stdClass; $a->n = 'a'; $b = new stdClass; $b->n = 'b';
+/// $orig[$a] = 1; $orig[$b] = 2;
+/// echo "clone\n"; $k = clone $orig;
+/// $orig->b = $b;
+/// echo "clone\n"; $j = clone $orig;
+/// $m = new MultipleIterator(MultipleIterator::MIT_KEYS_ASSOC | MultipleIterator::MIT_NEED_ANY);
+/// var_dump(count($orig), count($j), (clone $m)->getFlags());
+/// ```
+/// ```expect
+/// getHash a orig
+/// getHash b orig
+/// clone
+/// getHash a default
+/// getHash b default
+/// __clone 2 orig
+/// clone
+/// getHash a default
+/// getHash b orig
+/// __clone 1 orig
+/// int(1)
+/// int(1)
+/// int(0)
+/// ```
 fn clone_storage(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
-    let (rows, flags) = with(req, object, |s| {
-        (
-            s.rows.iter().flatten().cloned().collect::<Vec<_>>(),
-            s.flags,
-        )
-    })?;
-    let mut copy = Storage {
-        flags,
-        ..Storage::default()
-    };
-    for (key, row_object, inf) in rows {
-        req.addref(&row_object.as_value());
-        req.addref(&inf);
-        let _ = copy.attach(key, row_object, inf);
+    let copy = new_object(req, object.class())?;
+    let filled = add_all(req, copy, object).and_then(|()| clone_members(req, &copy, &object));
+    if let Err(thrown) = filled {
+        req.release(copy.as_value());
+        return Err(thrown);
     }
-    clone_with(req, &object, copy)
+    Ok(copy)
 }
 
 /// `SplObjectStorage::serialize`'s walk over the storage, live by a

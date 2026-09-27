@@ -9788,6 +9788,26 @@ impl Request {
         }
     }
 
+    /// `zend_objects_clone_members(new, old)` over an object a class's
+    /// `clone_obj` made itself: a dynamic table `new` has given up, the
+    /// members of `old` copied onto it, what its slots held given up,
+    /// and `__clone` served on it.
+    pub(crate) fn clone_members_into(
+        &mut self,
+        new: PhpObject,
+        old: PhpObject,
+    ) -> Result<(), Thrown> {
+        if let Some(table) = self.heap.object_take_properties(new.heap()) {
+            self.release(Value::of_zval(Zval::array(table)));
+        }
+        let displaced = self.heap.object_clone_members_into(new.heap(), old.heap());
+        for held in displaced {
+            self.release(Value::of_zval(held));
+        }
+        self.clone_slot_sources(new);
+        self.serve_clone_method(new)
+    }
+
     /// [`PhpObject::clone_with`]: the members copied beside `payload`,
     /// and `__clone` served on the copy.
     pub(crate) fn clone_members_payload<T: Any + Send>(

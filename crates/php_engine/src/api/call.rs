@@ -1161,6 +1161,31 @@ pub fn clone_with<T: std::any::Any + Send>(
     Ok(copy)
 }
 
+/// `zend_objects_clone_members(new, old)`, what a class's `clone_obj`
+/// that makes its copy itself calls once the copy holds what the class
+/// keeps (`spl_object_storage_clone`, after `addall`): the members of
+/// `old` copied onto `new`, a fresh object of its class, and `__clone`
+/// served on `new`. Until then `new`'s members are its class's
+/// defaults.
+///
+/// ```php
+/// class H extends SplObjectStorage {
+///     public $tag = 'default';
+///     public function getHash($o): string { echo "getHash {$this->tag}\n"; return spl_object_hash($o); }
+///     public function __clone() { echo "__clone {$this->tag}\n"; }
+/// }
+/// $h = new H; $h->tag = 'set'; $h[new stdClass] = 1;
+/// $k = clone $h;
+/// ```
+/// ```expect
+/// getHash set
+/// getHash default
+/// __clone set
+/// ```
+pub fn clone_members(req: &mut Request, new: &PhpObject, old: &PhpObject) -> Result<(), Thrown> {
+    req.clone_members_into(*new, *old)
+}
+
 /// `zend_create_internal_iterator_zval`: an `InternalIterator` over
 /// `object`, walking the elements its class's
 /// [`crate::api::abi::ObjectHandlers::iterator_element`] answers, which
