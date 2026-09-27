@@ -417,6 +417,41 @@ fn array_unshift(
 ///   int(1)
 /// }
 /// ```
+///
+/// A removed element is released as it is deleted where the call's
+/// value is not read (`USED_RET()`), with the splice holding the table;
+/// a destructor that writes the array then separates it, and the splice
+/// finds itself its table's only holder and throws, the array left as
+/// the destructor wrote it. Where the value is read, the removed
+/// elements live in it and nothing runs mid-splice (GH-16649).
+///
+/// ```php
+/// class C { function __destruct() { global $a; echo "dtor ", count($a), "\n"; $a[] = 9; } }
+/// $a = [1, new C, 2]; try { array_splice($a, 1, 1); } catch (Error $e) { echo $e->getMessage(), "\n"; } var_dump($a);
+/// $a = [1, new C, 2]; $r = array_splice($a, 1, 1); echo "kept\n"; unset($r); var_dump($a);
+/// ```
+/// ```expect
+/// dtor 2
+/// Array was modified during array_splice operation
+/// array(3) {
+///   [0]=>
+///   int(1)
+///   [2]=>
+///   int(2)
+///   [3]=>
+///   int(9)
+/// }
+/// kept
+/// dtor 2
+/// array(3) {
+///   [0]=>
+///   int(1)
+///   [1]=>
+///   int(2)
+///   [2]=>
+///   int(9)
+/// }
+/// ```
 #[php_function]
 fn array_splice(
     req: &mut Request,
@@ -440,8 +475,15 @@ fn array_splice(
     let num_in = i64::try_from(rows.len()).unwrap_or(i64::MAX);
     let length = length.unwrap_or(num_in);
     let (start, taken) = clamp_splice(num_in, offset, length);
-    let mut removed = PhpArray::new(req)?;
+    // `USED_RET()`: the removed elements are gathered only where the
+    // caller reads them; otherwise each is released as it is deleted.
+    let mut removed = if req.return_value_used() {
+        Some(PhpArray::new(req)?)
+    } else {
+        None
+    };
     let mut rebuilt = PhpArray::new(req)?;
+    let mut holder = Holder::Shared;
     for (at, (key, element)) in rows.into_iter().enumerate() {
         let at = i64::try_from(at).unwrap_or(i64::MAX);
         if at == start
@@ -453,8 +495,26 @@ fn array_splice(
             }
         }
         if at >= start && at < start + taken {
+            // `zend_hash_packed_del_val` and `zend_hash_del_bucket` with
+            // `ZVAL_PTR_DTOR`, under the owner `GC_ADDREF(in_hash)` took:
+            // a destructor served here that writes the array separates it.
             req.addref(&element);
-            removed.append(req, element)?;
+            stack.array.unset(req, &key)?;
+            let table = stack.array.to_value();
+            if holder == Holder::Shared {
+                req.addref(&table);
+            }
+            match removed.as_mut() {
+                Some(removed) => removed.append(req, element)?,
+                None => req.release(element),
+            }
+            if holder == Holder::Shared {
+                if table.refcount() == 1 {
+                    holder = Holder::Alone;
+                } else {
+                    req.release(table);
+                }
+            }
             continue;
         }
         req.addref(&element);
@@ -477,12 +537,40 @@ fn array_splice(
     if let Some(replacement) = replacement {
         req.release(replacement.to_value());
     }
+    if holder == Holder::Alone {
+        // `GC_DELREF(in_hash) == 0`: nothing but the splice holds the
+        // table any more, so what the reference holds now stands.
+        req.release(stack.array.to_value());
+        req.release(rebuilt.to_value());
+        if let Some(removed) = removed {
+            req.release(removed.to_value());
+        }
+        stack.finish(req);
+        return Err(throw(
+            req,
+            "Error",
+            "Array was modified during array_splice operation",
+        ));
+    }
     if rebuilt.next_free() == i64::MIN {
         rebuilt.set_next_free(req, 0)?;
     }
     stack.replace(req, rebuilt)?;
     stack.finish(req);
-    Ok(removed)
+    match removed {
+        Some(removed) => Ok(removed),
+        None => PhpArray::new(req),
+    }
+}
+
+/// Who holds the table `php_splice` deletes from while it serves a
+/// destructor: the reference and the splice, or, once the program
+/// wrote the reference over or separated it, the splice alone
+/// (`GC_DELREF(in_hash) == 0`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Holder {
+    Shared,
+    Alone,
 }
 
 /// `php_splice`'s clamps: the offset into `0..=num_in`, from the end

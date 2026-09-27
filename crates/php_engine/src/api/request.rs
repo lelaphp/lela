@@ -2940,6 +2940,7 @@ impl Request {
             extra_named: extra_named.to_vec(),
             stage: CallStage::Serving,
             frameless: false,
+            return_value: exec::ReturnValue::Used,
             dynamic: false,
             coerced: Vec::new(),
             send_arg_by_ref: false,
@@ -14984,6 +14985,19 @@ impl Request {
     #[must_use]
     pub fn frameless(&self) -> bool {
         self.vm.serving_call().is_some_and(|call| call.frameless)
+    }
+
+    /// `USED_RET()` (`Z/Zend/zend_API.h`): whether the caller reads what
+    /// the native returns, false only for a call written as a statement,
+    /// whose `DO_*CALL` writes its return to an `UNUSED` operand; a call
+    /// made by a native, `call_user_func`'s, reads it. `array_splice`
+    /// builds the array of what it removed only where it is read, which
+    /// decides when the removed elements' destructors are served.
+    #[must_use]
+    pub fn return_value_used(&self) -> bool {
+        self.vm
+            .serving_call()
+            .is_none_or(|call| call.return_value == exec::ReturnValue::Used)
     }
 
     /// `zend_hash_find_ind(zend_rebuild_symbol_table(), name)`: the
