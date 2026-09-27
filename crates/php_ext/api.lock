@@ -340,6 +340,7 @@ request::Request::backtrace
 request::Request::buffer_handler
 request::Request::called_scope
 request::Request::caller_var
+request::Request::captured
 request::Request::cfg_entry
 request::Request::class_alias
 request::Request::class_decl

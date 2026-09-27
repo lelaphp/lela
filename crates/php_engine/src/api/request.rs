@@ -14113,6 +14113,30 @@ impl Request {
         crate::output::buffer_op(self, op)
     }
 
+    /// `php_output_start_default`, what `body` writes through the stack,
+    /// then `php_output_get_contents` and `php_output_discard`: what the
+    /// body printed, as a string, for a native that hands back what it
+    /// would have printed. The default handler starts as `ob_start()`'s
+    /// does, so inside a running handler it is `php_output_lock_error`'s
+    /// fatal; `None` where it did not start, which such a native answers
+    /// with its `Error`.
+    ///
+    /// ```php
+    /// var_dump(highlight_string("x", true));
+    /// ob_start(function ($s) { return strlen(highlight_string("x", true)) . "\n"; }); echo "y"; ob_end_flush();
+    /// ```
+    /// ```expect exit=255
+    /// string(48) "<pre><code style="color: #000000">x</code></pre>"
+    ///
+    /// Fatal error: highlight_string(): Cannot use output buffering in output buffering display handlers in %s on line 3
+    /// ```
+    pub fn captured(
+        &mut self,
+        body: impl FnOnce(&mut Request),
+    ) -> Result<Option<PhpString>, Thrown> {
+        crate::output::captured(self, body)
+    }
+
     /// Where the first byte reached the host, `php_output_get_start_filename`
     /// and `_lineno`, once one has.
     #[must_use]
