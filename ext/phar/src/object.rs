@@ -1808,11 +1808,11 @@ fn zpp_name_and_value(
         return Err(arg_type_error(
             req,
             1,
-            &format!("must be of type string, {given} given"),
+            &format!("be of type string, {given} given"),
         ));
     };
     if n.contains(&0) {
-        return Err(arg_value_error(req, 1, "must not contain any null bytes"));
+        return Err(arg_value_error(req, 1, "not contain any null bytes"));
     }
     let bytes = match value.as_ref() {
         ValueRef::Str(s) => s.as_bytes().to_vec(),
@@ -1824,7 +1824,7 @@ fn zpp_name_and_value(
             return Err(arg_type_error(
                 req,
                 2,
-                &format!("must be of type string, {given} given"),
+                &format!("be of type string, {given} given"),
             ));
         }
     };

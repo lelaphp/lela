@@ -242,6 +242,7 @@ pub(crate) fn copy(req: &mut Request, id: ArchiveId, old: &[u8], new: &[u8]) -> 
     if let Some(bytes) = own {
         copy.content = Content::Mod(bytes);
         copy.offset = 0;
+        copy.is_modified = true;
     }
     let refused = a.manifest.add(new, copy).err();
     a.is_modified = true;
@@ -451,7 +452,7 @@ pub(crate) fn set_default_stub(
         return Err(php_ext::raising::arg_value_error(
             req,
             at,
-            "must be null for a tar- or zip-based phar stub, string given",
+            "be null for a tar- or zip-based phar stub, string given",
         ));
     }
     if readonly(req) {
@@ -528,7 +529,7 @@ pub(crate) fn set_stub(
             return Err(php_ext::raising::arg_type_error(
                 req,
                 1,
-                &format!("must be of type string, {given} given"),
+                &format!("be of type string, {given} given"),
             ));
         }
     };

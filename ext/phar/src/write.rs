@@ -296,6 +296,9 @@ pub(crate) fn flush_ex(
     if padding {
         newfile.push((meta_len & 0xFF) as u8);
     }
+    // `offset += entry->compressed_filesize`: where each entry is said to
+    // stand, whatever a short read left of it, as php counts it.
+    let mut running = i64::try_from(newfile.len()).unwrap_or(i64::MAX);
     for &slot in &slots {
         let Some(e) = archives(req).get(id).and_then(|a| a.manifest.at(slot)) else {
             continue;
@@ -316,12 +319,8 @@ pub(crate) fn flush_ex(
                 }
             },
         };
-        if bytes.len() != csize {
-            return Ok(Some(format!(
-                "unable to write contents of file \"{entry_name}\" to new phar \"{name}\""
-            )));
-        }
-        let at = i64::try_from(newfile.len()).unwrap_or(i64::MAX);
+        let at = running;
+        running = running.saturating_add(i64::try_from(csize).unwrap_or(i64::MAX));
         newfile.extend_from_slice(&bytes);
         let Some(e) = archives(req)
             .get_mut(id)

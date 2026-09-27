@@ -16,18 +16,24 @@ use crate::archive::{
 use crate::entry::{self, Target};
 use crate::path;
 
-/// A path as the file system takes it.
-fn os(path: &[u8]) -> &std::path::Path {
-    std::path::Path::new(std::ffi::OsStr::from_bytes(path))
+/// A path as the file system takes it, a relative one against the
+/// request's working directory, as `VCWD_*` resolves it.
+fn os(req: &Request, path: &[u8]) -> std::path::PathBuf {
+    let path = std::path::Path::new(std::ffi::OsStr::from_bytes(path));
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        req.cwd().0.join(path)
+    }
 }
 
 /// `php_stream_mkdir(path, mode, PHP_STREAM_MKDIR_RECURSIVE)` on a plain
 /// path.
-fn mkdir_all(path: &[u8], mode: u32) -> bool {
+fn mkdir_all(req: &Request, path: &[u8], mode: u32) -> bool {
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(mode)
-        .create(os(path))
+        .create(os(req, path))
         .is_ok()
 }
 
@@ -95,7 +101,7 @@ fn extract_file(
     let dir = &fullpath[..dir_end];
     if req.url_stat(dir, false, false)?.is_none() {
         let mode = if is_dir { flags & ENT_PERM_MASK } else { 0o777 };
-        if !mkdir_all(dir, mode) {
+        if !mkdir_all(req, dir, mode) {
             return Ok(Err(format!(
                 "Cannot extract \"{shown}\", could not create directory \"{}\"",
                 lossy(dir)
@@ -136,7 +142,8 @@ fn extract_file(
         )));
     }
     let mode = flags & ENT_PERM_MASK;
-    if std::fs::set_permissions(os(&fullpath), std::fs::Permissions::from_mode(mode)).is_err() {
+    if std::fs::set_permissions(os(req, &fullpath), std::fs::Permissions::from_mode(mode)).is_err()
+    {
         return Ok(Err(format!(
             "Cannot extract \"{shown}\" to \"{full}\", setting file permissions failed"
         )));
@@ -223,7 +230,7 @@ pub(crate) fn extract_to(
     }
     match req.url_stat(dest, false, false)? {
         None => {
-            if !mkdir_all(dest, 0o777) {
+            if !mkdir_all(req, dest, 0o777) {
                 return Err(throw(
                     req,
                     "RuntimeException",
