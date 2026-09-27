@@ -7,8 +7,9 @@
 
 use php_ext::abi::PropertyPurpose;
 use php_ext::attr::php_function;
-use php_ext::call::call_method;
+use php_ext::call::{call_method, lookup_class};
 use php_ext::coerce::{Exponent, float_format, to_string};
+use php_ext::decl::Visibility;
 use php_ext::raising::{Level, Thrown, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
@@ -504,6 +505,53 @@ fn object_value(
     written
 }
 
+/// `php_var_serialize_try_add_sleep_prop`'s `IS_UNDEF` arm: the name,
+/// mangled as the table would hold it, is a declared typed instance
+/// property of the object's class, which the table leaves out while
+/// nothing has written it.
+///
+/// ```php
+/// class T { public int $x; protected int $y; private int $z; public $w;
+///     function __sleep() { return ['x', 'y', 'z', 'w', 'nope']; } }
+/// echo serialize(new T), "\n";
+/// ```
+/// ```expect
+/// Warning: serialize(): "nope" returned as member variable from __sleep() but does not exist in %s on line 4
+/// O:1:"T":1:{s:1:"w";N;}
+/// ```
+fn uninitialized_typed(req: &mut Request, object: PhpObject, candidate: &[u8]) -> bool {
+    let (scope, name) = match candidate.strip_prefix(b"\0") {
+        Some(rest) => match rest.iter().position(|b| *b == 0) {
+            Some(end) => (Some(&rest[..end]), &rest[end + 1..]),
+            None => return false,
+        },
+        None => (None, candidate),
+    };
+    let mut at = Some(object.class());
+    for _ in 0..64 {
+        let Some(here) = at else { return false };
+        let Some(decl) = req.class_decl(here) else {
+            return false;
+        };
+        let declared = decl.properties.iter().any(|p| {
+            p.is_instance
+                && p.ty.is_some()
+                && *p.name.0 == *name
+                && match (scope, p.visibility) {
+                    (None, Visibility::Public) | (Some(b"*"), Visibility::Protected) => true,
+                    (Some(class), Visibility::Private) => *decl.name.0 == *class,
+                    _ => false,
+                }
+        });
+        if declared {
+            return true;
+        }
+        let parent = decl.parent.as_ref().map(|p| p.0.to_vec());
+        at = parent.and_then(|parent| lookup_class(req, &parent).ok().flatten());
+    }
+    false
+}
+
 /// The `ce->serialize` arm, `zend_user_serialize`: the object's
 /// `serialize()` called outside `BG(serialize_lock)`, so what it
 /// serializes shares this var hash, and its string written as `C:len:"class":len:{string}`.
@@ -605,15 +653,22 @@ fn sleep_props(
         private.extend_from_slice(&text);
         let mut protected = b"\0*\0".to_vec();
         protected.extend_from_slice(&text);
-        let found = [text.clone(), private, protected]
-            .into_iter()
-            .find_map(|candidate| {
-                props
-                    .iter()
-                    .find(|(prop, _)| prop.as_bytes() == candidate.as_slice())
-                    .map(|(prop, value)| (*prop, *value))
-            });
+        let candidates = [text.clone(), private, protected];
+        let found = candidates.iter().find_map(|candidate| {
+            props
+                .iter()
+                .find(|(prop, _)| prop.as_bytes() == candidate.as_slice())
+                .map(|(prop, value)| (*prop, *value))
+        });
         let shown = String::from_utf8_lossy(&text).into_owned();
+        // A typed property nothing has written yet is left out quietly.
+        if found.is_none()
+            && candidates
+                .iter()
+                .any(|candidate| uninitialized_typed(req, object, candidate))
+        {
+            continue;
+        }
         let Some((prop, value)) = found else {
             docref(
                 req,
