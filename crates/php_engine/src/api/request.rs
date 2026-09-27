@@ -44,6 +44,7 @@ use crate::output::Output;
 use crate::virtual_cwd::RealpathCache;
 pub use crate::virtual_cwd::Resolve;
 
+mod class_data;
 mod hold;
 mod hooks;
 mod lazy;
@@ -1252,6 +1253,9 @@ pub struct Request {
     /// is laid down `IS_UNDEF`. php's table hangs off a map pointer and
     /// is the request's; so is this one.
     statics: Vec<((ClassId, Vec<u8>), Value)>,
+    /// `zend_class_mutable_data` of each class the request updated or
+    /// read a constant of ([`class_data`]).
+    class_data: std::collections::HashMap<ClassId, class_data::ClassData>,
     /// The evaluated defaults of natives' absent arguments, each kept by
     /// the request under its native and position (design §4.7).
     defaults: Vec<((Function, u32), Value)>,
@@ -1799,6 +1803,7 @@ impl Request {
             trampolines: Vec::new(),
             deprecating: Vec::new(),
             statics: Vec::new(),
+            class_data: std::collections::HashMap::new(),
             defaults: Vec::new(),
             guards: Vec::new(),
             ref_sources: Vec::new(),
@@ -5453,27 +5458,7 @@ impl Request {
     /// }
     /// ```
     fn property_defaults(&mut self, class: ClassId) -> Result<Vec<Option<Value>>, Thrown> {
-        let defaults: Vec<(ClassId, bool, Option<php_unit::decl::ConstExpr>)> = self
-            .placed_properties(class)
-            .into_iter()
-            .map(|(declaring, p)| (declaring, p.ty.is_some(), p.default))
-            .collect();
-        let mut out = Vec::with_capacity(defaults.len());
-        for (declaring, typed, default) in defaults {
-            out.push(match default {
-                Some(expr) => match crate::api::call::eval_const_expr(self, &expr, Some(declaring))
-                {
-                    Ok(value) => Some(value),
-                    Err(thrown) => {
-                        self.release_defaults(out);
-                        return Err(thrown);
-                    }
-                },
-                None if typed => None,
-                None => Some(Value::null()),
-            });
-        }
-        Ok(out)
+        self.default_properties(class)
     }
 
     /// Defaults [`Request::property_defaults`] evaluated for an object
@@ -5884,7 +5869,6 @@ impl Request {
             ));
         };
         let visibility = constant.visibility;
-        let value = constant.value.clone();
         let asked = class;
         let class = declaring;
         if !self.may_access_from(class, visibility, scope) {
@@ -5923,13 +5907,7 @@ impl Request {
         if constant.is_case {
             return self.enum_case(class, name).map(|case| case.as_value());
         }
-        let evaluated = crate::api::call::eval_const_expr(self, &value, Some(class))?;
-        match &constant.ty {
-            Some(ty) if ty.mask() != php_unit::decl::Type::MAY_BE_ANY => {
-                crate::ops::verify_class_constant_type(self, evaluated, ty, class, name)
-            }
-            _ => Ok(evaluated),
-        }
+        self.evaluated_class_constant(class, name, &constant)
     }
 
     /// `zend_get_class_constant_ex` under `ZEND_FETCH_CLASS_SILENT`, as
@@ -6242,21 +6220,8 @@ impl Request {
                 ),
             ));
         };
-        if !self
-            .statics
-            .iter()
-            .any(|((held, under), _)| *held == declaring && under == name)
-        {
-            let value = match property.default.as_ref() {
-                Some(expr) => {
-                    let expr = expr.clone();
-                    crate::api::call::eval_const_expr(self, &expr, Some(declaring))?
-                }
-                None if property.ty.is_some() => Value::undef(),
-                None => Value::null(),
-            };
-            self.statics.push(((declaring, name.to_vec()), value));
-        }
+        self.update_class_constants(class)?;
+        self.lay_down_static(declaring, name)?;
         if self
             .class_decl(class)
             .is_some_and(|decl| decl.kind == ClassKind::Trait)
@@ -6274,6 +6239,37 @@ impl Request {
             );
         }
         Ok(Some((declaring, property)))
+    }
+
+    /// `zend_class_init_statics` and `zend_update_class_constants` over
+    /// the `static` property `name` that `declaring` declares: its slot
+    /// laid down where it has none, from its default evaluated in the
+    /// declaring scope and held to its type under the strict rule, and
+    /// `IS_UNDEF` for a typed one with no default.
+    fn lay_down_static(&mut self, declaring: ClassId, name: &[u8]) -> Result<(), Thrown> {
+        if self
+            .statics
+            .iter()
+            .any(|((held, under), _)| *held == declaring && under == name)
+        {
+            return Ok(());
+        }
+        let Some(property) = self
+            .class_decl(declaring)
+            .and_then(|decl| decl.properties.iter().find(|p| *p.name.0 == *name).cloned())
+        else {
+            return Ok(());
+        };
+        let value = match property.default.as_ref() {
+            Some(expr) => {
+                let value = crate::api::call::eval_const_expr(self, expr, Some(declaring))?;
+                self.strictly_held(value, &property, declaring)?
+            }
+            None if property.ty.is_some() => Value::undef(),
+            None => Value::null(),
+        };
+        self.statics.push(((declaring, name.to_vec()), value));
+        Ok(())
     }
 
     /// `CE_STATIC_MEMBERS(ce)[prop_info->offset]`: what the slot of the
