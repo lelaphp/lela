@@ -242,7 +242,21 @@ pub fn extension() -> Extension {
         .functions(core_natives())
         .functions(string_natives())
         .functions(array::natives())
-        .functions(output::natives())
+        .functions(vec![
+            output::ob_start::declared(),
+            output::ob_flush::declared(),
+            output::ob_clean::declared(),
+            output::ob_end_flush::declared(),
+            output::ob_end_clean::declared(),
+            output::ob_get_flush::declared(),
+            output::ob_get_clean::declared(),
+            output::ob_get_contents::declared(),
+            output::ob_get_level::declared(),
+            output::ob_get_length::declared(),
+            output::ob_list_handlers::declared(),
+            output::ob_get_status::declared(),
+            output::ob_implicit_flush::declared(),
+        ])
         .functions(head::natives())
         .functions(var::natives())
         .functions(formatted_print::natives())
