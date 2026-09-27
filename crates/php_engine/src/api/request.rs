@@ -87,6 +87,21 @@ pub struct HostPath(pub PathBuf);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ExtensionId(pub(crate) u32);
 
+/// The name `__halt_compiler()` registers its file's offset under.
+const HALT_OFFSET: &[u8] = b"__COMPILER_HALT_OFFSET__";
+
+/// `zend_mangle_property_name("__COMPILER_HALT_OFFSET__", file)`: a NUL,
+/// the name, a NUL and the file's, the key one file's halt offset is
+/// registered under.
+pub(crate) fn halt_offset_key(file: &[u8]) -> Vec<u8> {
+    let mut key = Vec::with_capacity(HALT_OFFSET.len() + 2 + file.len());
+    key.push(0);
+    key.extend_from_slice(HALT_OFFSET);
+    key.push(0);
+    key.extend_from_slice(file);
+    key
+}
+
 /// One ini entry as this request sees it, php's `zend_ini_entry` read
 /// by `_extension_ini_string`, `ReflectionExtension::getINIEntries` and
 /// `ini_get_all`: the declaration with its `modifiable` bits, the
@@ -843,6 +858,18 @@ pub trait StreamOps: Send {
         None
     }
 
+    /// `ops->stat` whole, the thirteen fields `fstat()` prints in their
+    /// order, as phar's `phar_stream_stat` fills them from the entry;
+    /// by default the one [`StreamOps::size`] fills, `None` where the
+    /// kind has no stat.
+    fn stat(&mut self, req: &mut Request) -> Option<[i64; 13]> {
+        let _ = req;
+        let size = self.size()?;
+        let mut buf = [0; 13];
+        buf[7] = size;
+        Some(buf)
+    }
+
     /// `ops->flush`: `true` for php's `0`, which a kind with nothing of
     /// its own to flush answers.
     fn flush(&mut self, req: &mut Request) -> bool {
@@ -904,14 +931,17 @@ pub struct StreamWrapper {
 
 /// The `options` of `php_stream_open_wrapper_ex` a wrapper's opener
 /// reads and hands on to an open of its own, [`Request::open_stream_with`]:
-/// `USE_PATH`, the path looked for along `include_path` first, and
-/// `REPORT_ERRORS`, a refusal a warning. The engine clears `warn` before
-/// it asks an opener, as php does, so what fails inside one is the
-/// generic `operation failed` alone unless the opener warns of it.
+/// `USE_PATH`, the path looked for along `include_path` first;
+/// `REPORT_ERRORS`, a refusal a warning; and `STREAM_OPEN_FOR_INCLUDE`,
+/// the open an `include` makes. The engine clears `warn` before it asks
+/// an opener, as php does, so what fails inside one is what the opener
+/// logged ([`Request::wrapper_log_error`]), or the generic `operation
+/// failed`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Opening {
     pub use_path: bool,
     pub warn: bool,
+    pub for_include: bool,
 }
 
 /// A wrapper whose kinds the engine keeps, which the extension that
@@ -1494,6 +1524,14 @@ pub struct Request {
     /// The streams an operation holds while it serves PHP code on them,
     /// php's `PHP_STREAM_FLAG_NO_FCLOSE`, which `fclose` refuses.
     pub(crate) held_streams: Vec<Resource>,
+    /// `FG(wrapper_errors)` of the extension wrapper whose opener is
+    /// running: what [`Request::wrapper_log_error`] logged, which
+    /// `php_stream_display_wrapper_errors` prints where the open fails.
+    pub(crate) wrapper_errors: Vec<String>,
+    /// The `*opened_path` an extension wrapper's opener set for the open
+    /// being served ([`Request::set_opened_path`]), which an include
+    /// compiles the file under.
+    pub(crate) opened_path: Option<Vec<u8>>,
     /// The filter call in progress, whose stream is out of its resource
     /// while the filter runs.
     pub(crate) filtering: Option<crate::streams::FilterCall>,
@@ -2047,6 +2085,8 @@ impl Request {
             stream_thrown: None,
             filtering: None,
             held_streams: Vec::new(),
+            wrapper_errors: Vec::new(),
+            opened_path: None,
             filter_type,
             error_handler: None,
             error_handler_levels: 0,
@@ -3263,6 +3303,28 @@ impl Request {
             None if self.unwinding() => Err(Thrown::of(None)),
             None => Ok(std::mem::replace(&mut self.returned, Value::null())),
         }
+    }
+
+    /// The entry an interception replaced for the native being served,
+    /// none where the native serving is not intercepted.
+    pub(crate) fn replaced_entry(&self) -> Option<crate::api::abi::Entry> {
+        let function = self.vm.serving_call()?.function;
+        let at = usize::try_from(function.0).ok()?;
+        self.shared.replaced.get(at).copied().flatten()
+    }
+
+    /// The first argument of the call being served replaced by `value`,
+    /// the one it held given up.
+    pub(crate) fn replace_first_argument(&mut self, value: Value) {
+        let old = match self
+            .vm
+            .serving_call_mut()
+            .and_then(|call| call.arguments.first_mut())
+        {
+            Some(slot) => std::mem::replace(slot, value),
+            None => value,
+        };
+        self.release(old);
     }
 
     /// The entry a `Function` names: one of the natives, or a native
@@ -14049,6 +14111,18 @@ impl Request {
         true
     }
 
+    /// `zend_get_constant_str_impl` (`Z/Zend/zend_constants.c:262`), what
+    /// `constant()` and a constant expression look a name up by: the
+    /// table, then `__COMPILER_HALT_OFFSET__` as the executing file
+    /// registered it (`zend_get_halt_offset_constant`), which the
+    /// `FETCH_CONSTANT` handler never looks for.
+    pub(crate) fn constant_str(&self, name: &[u8]) -> Option<Value> {
+        self.constant_named(name).or_else(|| {
+            let file = self.current_file().filter(|_| name == HALT_OFFSET)?;
+            self.constant_named(&halt_offset_key(file))
+        })
+    }
+
     pub(crate) fn constant_named(&self, name: &[u8]) -> Option<Value> {
         if name == b"PHP_SAPI" {
             return Some(self.sapi_constant);
@@ -14230,6 +14304,21 @@ impl Request {
 
     // -------------------------------------------------- include
 
+    /// The source an extension's `zend_compile_file` answers for `path`
+    /// ([`crate::api::abi::ExtensionBuilder::compile_file`]), the first
+    /// hook to answer in bundle order; `None` where none replaces it.
+    pub(crate) fn compile_file_source(&mut self, path: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
+        let shared = Arc::clone(&self.shared);
+        for extension in &shared.extensions {
+            if let Some(hook) = extension.compile_file
+                && let Some(source) = hook(self, path)?
+            {
+                return Ok(Some(source));
+            }
+        }
+        Ok(None)
+    }
+
     /// `php_execute_script_ex` (`Z/main/main.c:2617`): the primary file
     /// into `EG(included_files)` under its expanded path before it runs,
     /// so a once form over the file being served answers `true`. A source
@@ -14300,6 +14389,20 @@ impl Request {
         };
         if kind.once() {
             self.included_files.push(path.clone());
+        }
+        let outer = self.including.replace((kind, self.vm.call_depth()));
+        let replaced = self.compile_file_source(&path);
+        self.including = outer;
+        if let Some(source) = replaced? {
+            let shared = Arc::clone(&self.shared);
+            let unit = match shared.compile_for(self, &source, &path, SourceKind::File) {
+                Ok(unit) => unit,
+                Err(refused) => return Err(self.refused_include(&refused, &path)),
+            };
+            if !self.included_files.contains(&path) {
+                self.included_files.push(path);
+            }
+            return Ok(Opened::Unit(unit));
         }
         let cwd = self.cwd.clone();
         let stack = self.stack_limit();
@@ -14375,7 +14478,9 @@ impl Request {
             ..crate::streams::OpenOptions::REPORT
         };
         let outer = self.including.replace((kind, self.vm.call_depth()));
+        self.opened_path = None;
         let opened = self.open_wrapper_ex(path, b"rb", options);
+        let opened_path = self.opened_path.take();
         let source = match &opened {
             Ok(Some(stream)) => {
                 // "Disable buffering to avoid double buffering between PHP
@@ -14401,6 +14506,7 @@ impl Request {
         if let Some(thrown) = self.stream_thrown.take() {
             return Err(thrown);
         }
+        let path = opened_path.as_deref().unwrap_or(path);
         let shared = Arc::clone(&self.shared);
         let unit = match shared.compile_for(self, &source, path, SourceKind::File) {
             Ok(unit) => unit,
@@ -17766,6 +17872,57 @@ impl Request {
     #[must_use]
     pub fn stream_ctx(&self) -> Option<Resource> {
         self.stream_ctx
+    }
+
+    /// `php_stream_wrapper_log_error` from a wrapper's opener, which php's
+    /// streams layer hands `options` without `REPORT_ERRORS`: `message`
+    /// kept for `php_stream_display_wrapper_errors`, which prints what
+    /// the opener logged, one message a line, after `Failed to open
+    /// stream: ` or `Failed to open directory: ` where it opened nothing,
+    /// and drops it where it opened something. An operation php hands
+    /// `REPORT_ERRORS`, as `unlink` and `mkdir` do, warns instead.
+    ///
+    /// ```php
+    /// var_dump(@fopen('phar://nope.phar/a', 'r'), error_get_last()['message']);
+    /// var_dump(@opendir('phar://nope'), error_get_last()['message']);
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// string(%d) "fopen(phar://nope.phar/a): Failed to open stream: phar error: invalid url or non-existent phar "phar://nope.phar/a""
+    /// bool(false)
+    /// string(%d) "opendir(phar://nope): Failed to open directory: phar error: no directory in "phar://nope", must have at least phar://nope/ for root directory (always use full path to a new phar)
+    /// phar url "phar://nope" is unknown"
+    /// ```
+    pub fn wrapper_log_error(&mut self, message: &str) {
+        self.wrapper_errors.push(message.to_string());
+    }
+
+    /// `*opened_path = ...` from a wrapper's opener: the name the stream
+    /// it opens stands for, which an `include` of it compiles the file
+    /// under and lists in `get_included_files()`, as `zend_compile_file`
+    /// takes `file_handle->opened_path` over the path as written. phar's
+    /// opener names an entry `phar://<archive>/<entry>` and the stub of
+    /// a bare archive the archive itself.
+    ///
+    /// ```php
+    /// $p = __DIR__ . '/opened-path.phar';
+    /// $c = '<?php return __FILE__;';
+    /// $m = pack('V', 5) . 'a.php' . pack('VVVVVV', strlen($c), 0, strlen($c), crc32($c), 0x1b6, 0);
+    /// $m = pack('VnVV', 1, 0x1110, 0x10000, 0) . pack('V', 0) . $m;
+    /// $data = '<?php return __FILE__; __HALT_COMPILER(); ?>' . "\r\n" . pack('V', strlen($m)) . $m . $c;
+    /// file_put_contents($p, $data . sha1($data, true) . pack('V', 2) . 'GBMB');
+    /// echo str_replace(__DIR__, 'D', implode("\n", [include "phar://$p/./a.php", include "phar://$p"])), "\n";
+    /// echo str_replace(__DIR__, 'D', implode("\n", array_filter(get_included_files(), fn($f) => str_contains($f, 'opened-path')))), "\n";
+    /// unlink($p);
+    /// ```
+    /// ```expect
+    /// phar://D/opened-path.phar/a.php
+    /// D/opened-path.phar
+    /// phar://D/opened-path.phar/a.php
+    /// D/opened-path.phar
+    /// ```
+    pub fn set_opened_path(&mut self, path: &[u8]) {
+        self.opened_path = Some(path.to_vec());
     }
 
     /// `php_stream_fopen_tmpfile`, what `tmpfile()` is: a new file in the

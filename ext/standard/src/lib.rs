@@ -94,7 +94,7 @@ mod virtual_cwd;
 /// and ext/spl's serializers (ADR-0004; design §4.10).
 pub use html::escape as escape_html_entities;
 pub use string::strip_tags_ex;
-pub use var::{Serializer, Unserializer};
+pub use var::{Serializer, Unserializer, php_unserialize_with_options};
 
 /// What `file.h`, `php_filestat.h`, `scanf.h` and `main/php_glob.h`
 /// declare `PHPAPI` for `spl_directory.c`, which calls them directly

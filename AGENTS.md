@@ -87,7 +87,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=96b3370b8c26a583d566af0b35a8a40f439c77602457f15b24aff7d0ea6ef20b out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=5f18d8368e0a3666b8ca7bf0224dbcbda89af7bddbb13b7256df4235cdfddb60 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -106,12 +106,12 @@ third-engine-design.md
 | heap | heap.lock | 311 |  | pass |
 | unit | unit.lock | 99 |  | pass |
 | ops | ops.lock | 209 |  | pass |
-| api | api.lock | 719 | 800 | pass |
+| api | api.lock | 725 | 800 | pass |
 | sapi | sapi.lock | 7 |  | pass |
 | tier | tier.lock |  |  | skip |
 | harness | xtask.lock | 334 |  | pass |
 
-<!-- /computed in=af34449e502fc6828231d42cda76e59a3814b82b21f98bd45578ad63e524dfbd out=89ac2405bafdbec69043582ce4046dceeba4910bd53d0763c418104742cf0879 -->
+<!-- /computed in=0a739f585b53f4573414469b21aee9f8b22e547661e1d8d3f6b67af8b5701e33 out=f1d0dfa02cf9e62520b92c60f380d2d1743056cb51f2e01a5bfe189df2abeccf -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
@@ -217,6 +217,7 @@ Options:
 ├── pdo
 ├── pdo_mysql
 ├── pdo_sqlite
+├── phar
 ├── posix
 ├── random
 ├── reflection
@@ -227,4 +228,4 @@ Options:
 ├── tokenizer
 └── zlib
 ```
-<!-- /computed in=7ab086c6ea403d70d1a1e4681833c84fe6486732e27c67e4e6c429b843c038b6 out=09b5b17a110dab7a5b34c3d74d38594fd26963166dca7d968957dd87d4a5d9f4 -->
+<!-- /computed in=9241627a342129783bb05a98a8080e129953c8b26ea26aa0b119ca2da1ae60dc out=9324e8cb9df51c2075a1642ab2e419236ede0faa363c3a7117470be8bea33430 -->

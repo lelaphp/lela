@@ -1146,6 +1146,26 @@ pub fn internal_iterator(req: &mut Request, object: &PhpObject) -> Result<PhpObj
     crate::interfaces::internal_iterator(req, *object)
 }
 
+/// `PHAR_G(orig_fopen)(INTERNAL_FUNCTION_PARAM_PASSTHRU)`: the entry an
+/// interception replaced for the native being served
+/// ([`crate::api::abi::ExtensionBuilder::intercept`]), served on the same
+/// call, its arguments and its return the caller's, the first argument
+/// replaced by `first` where one is given, as phar's interceptors open
+/// the `phar://` name they made of a relative path; `null` where the
+/// native is not intercepted.
+pub fn passthrough(req: &mut Request, first: Option<Value>) -> Result<Value, Thrown> {
+    let Some(entry) = req.replaced_entry() else {
+        if let Some(first) = first {
+            req.release(first);
+        }
+        return Ok(Value::null());
+    };
+    if let Some(first) = first {
+        req.replace_first_argument(first);
+    }
+    entry(req)
+}
+
 /// `zend_lookup_class`: the linked class named, autoloading if needed.
 pub fn lookup_class(req: &mut Request, name: &[u8]) -> Result<Option<ClassId>, Thrown> {
     Ok(req.class_named(name))
@@ -1258,7 +1278,7 @@ pub fn autoload(req: &mut Request, name: &[u8]) -> Result<Option<ClassId>, Throw
 /// A constant by the key the table holds it under, `zend_get_constant`:
 /// `None` when undefined, nothing raised, no owner taken.
 pub fn constant(req: &mut Request, name: &[u8]) -> Result<Option<Value>, Thrown> {
-    Ok(req.constant_named(name))
+    Ok(req.constant_str(name))
 }
 
 /// `zend_get_constant_ex` under `ZEND_FETCH_CLASS_EXCEPTION`
@@ -1297,7 +1317,7 @@ pub fn fetch_constant(req: &mut Request, name: &[u8]) -> Result<Value, Thrown> {
         lowered.extend_from_slice(constant_name);
         req.constant_named(&lowered).map(|value| (lowered, value))
     } else {
-        req.constant_named(name)
+        req.constant_str(name)
             .map(|value| (name.to_vec(), value))
             .or_else(|| special_constant(name).map(|value| (name.to_vec(), value)))
     };
@@ -1531,7 +1551,7 @@ fn evaluate_node(
         ConstExpr::Str(s) => Ok(Value::string(PhpString::new(req, s)?)),
         // `zend_get_constant_ex`, which words a `CONST_DEPRECATED`
         // constant's deprecation after it found it.
-        ConstExpr::Constant { name, .. } => match req.constant_named(&name.0) {
+        ConstExpr::Constant { name, .. } => match req.constant_str(&name.0) {
             Some(value) => {
                 crate::api::raising::deprecated_constant(req, &name.0)?;
                 req.addref(&value);

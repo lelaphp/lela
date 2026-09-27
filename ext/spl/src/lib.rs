@@ -26,7 +26,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 mod array;
-mod directory;
+pub mod directory;
 mod dllist;
 mod exceptions;
 mod fixedarray;
@@ -403,6 +403,16 @@ fn iterator_of(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown
             }
         }
     }
+}
+
+/// `spl_iterator_apply`, exported to ext/phar for `phar_build` (design
+/// §4.10, the `spl` → `phar` row): [`apply`].
+pub fn iterator_apply(
+    req: &mut Request,
+    object: PhpObject,
+    each: impl FnMut(&mut Request, PhpObject) -> Result<bool, Thrown>,
+) -> Result<(), Thrown> {
+    apply(req, object, each)
 }
 
 /// `spl_iterator_apply`: `each` served per element with the iterator,

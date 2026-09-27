@@ -282,6 +282,7 @@ fn open_plain(
     let opening = Opening {
         use_path: use_include_path,
         warn: true,
+        for_include: false,
     };
     req.with_stream_ctx(context, |req| open(req, filename, mode, opening))
 }

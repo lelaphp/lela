@@ -44,6 +44,8 @@ mod whirlpool;
 mod xxhash;
 
 use php_ext::abi::{Extension, ExtensionBuilder};
+use php_ext::raising::Thrown;
+use php_ext::request::Request;
 
 use crate::natives::{
     HashContext, hash, hash_algos, hash_copy, hash_equals, hash_file, hash_final, hash_hkdf,
@@ -51,6 +53,60 @@ use crate::natives::{
     hash_update_file, hash_update_stream, mhash, mhash_count, mhash_get_block_size,
     mhash_get_hash_name, mhash_keygen_s2k,
 };
+
+/// One algorithm's running state, what `php_hash.h` hands an extension
+/// that hashes through ext/hash (design §4.10, the `hash` → `phar` row):
+/// [`Digest::fetch`] is `php_hash_fetch_ops` with the ops' `hash_init`,
+/// [`Digest::update`] and [`Digest::finish`] its `hash_update` and
+/// `hash_final`, as `phar_verify_signature` and `phar_create_signature`
+/// hash an archive with `PHP_SHA256Init` and its kin.
+///
+/// ```php
+/// $m = pack('VnVVV', 1, 0x1000, 0x10000, 0, 0) . pack('V', 1) . 'a' . pack('VVVVVV', 1, 0, 1, crc32('x'), 0x1b6, 0);
+/// $data = "<?php __HALT_COMPILER(); ?>\r\n" . pack('V', strlen($m)) . $m . 'x';
+/// foreach ([3 => 'sha256', 4 => 'sha512', 2 => 'sha1', 1 => 'md5'] as $flag => $algo) {
+///     $p = __DIR__ . "/hash-digest-$algo.phar";
+///     file_put_contents($p, $data . hash($algo, 'other', true) . pack('V', $flag) . 'GBMB');
+///     echo str_replace($p, 'P', @file_get_contents("phar://$p/a") === false ? error_get_last()['message'] : ''), "\n";
+///     $q = __DIR__ . "/hash-digest-$algo-ok.phar";
+///     file_put_contents($q, $data . hash($algo, $data, true) . pack('V', $flag) . 'GBMB');
+///     var_dump(file_get_contents("phar://$q/a"));
+///     unlink($p); unlink($q);
+/// }
+/// ```
+/// ```expect
+/// file_get_contents(phar://P/a): Failed to open stream: phar "P" SHA256 signature could not be verified: broken signature
+/// string(1) "x"
+/// file_get_contents(phar://P/a): Failed to open stream: phar "P" SHA512 signature could not be verified: broken signature
+/// string(1) "x"
+/// file_get_contents(phar://P/a): Failed to open stream: phar "P" SHA1 signature could not be verified: broken signature
+/// string(1) "x"
+/// file_get_contents(phar://P/a): Failed to open stream: phar "P" MD5 signature could not be verified: broken signature
+/// string(1) "x"
+/// ```
+pub struct Digest(Box<dyn algos::State>);
+
+impl Digest {
+    /// `php_hash_fetch_ops(algo)` and its `hash_init` with no options:
+    /// `None` for a name the table has not.
+    pub fn fetch(req: &mut Request, algo: &[u8]) -> Result<Option<Digest>, Thrown> {
+        let Some(found) = algos::fetch(algo) else {
+            return Ok(None);
+        };
+        Ok(Some(Digest((found.init)(req, algos::Options::default())?)))
+    }
+
+    /// `hash_update`.
+    pub fn update(&mut self, data: &[u8]) {
+        self.0.update(data);
+    }
+
+    /// `hash_final`: the digest's bytes.
+    #[must_use]
+    pub fn finish(mut self) -> Vec<u8> {
+        self.0.finish()
+    }
+}
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
 /// private to this crate (ADR-0005); nothing in it is shared or synchronised.

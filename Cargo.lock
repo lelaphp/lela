@@ -423,6 +423,7 @@ dependencies = [
  "php_ext_pdo",
  "php_ext_pdo_mysql",
  "php_ext_pdo_sqlite",
+ "php_ext_phar",
  "php_ext_posix",
  "php_ext_random",
  "php_ext_reflection",
@@ -598,6 +599,16 @@ dependencies = [
  "libsqlite3-sys",
  "php_ext",
  "php_ext_pdo",
+]
+
+[[package]]
+name = "php_ext_phar"
+version = "0.0.0"
+dependencies = [
+ "php_ext",
+ "php_ext_hash",
+ "php_ext_spl",
+ "php_ext_standard",
 ]
 
 [[package]]

@@ -41,6 +41,7 @@ abi::ExtensionBuilder::class_constants
 abi::ExtensionBuilder::class_payload
 abi::ExtensionBuilder::class_with
 abi::ExtensionBuilder::classes
+abi::ExtensionBuilder::compile_file
 abi::ExtensionBuilder::constants
 abi::ExtensionBuilder::constants_with
 abi::ExtensionBuilder::dependencies
@@ -48,6 +49,7 @@ abi::ExtensionBuilder::engine_state
 abi::ExtensionBuilder::functions
 abi::ExtensionBuilder::info
 abi::ExtensionBuilder::ini
+abi::ExtensionBuilder::intercept
 abi::ExtensionBuilder::interrupt
 abi::ExtensionBuilder::on_modify
 abi::ExtensionBuilder::register
@@ -188,6 +190,7 @@ call::mark_lazy_initialized
 call::new_lazy_ghost
 call::new_lazy_proxy
 call::new_object
+call::passthrough
 call::property_hook
 call::property_is_virtual
 call::read_class_prop_silent
@@ -449,6 +452,7 @@ request::Request::set_error_handler
 request::Request::set_exception_handler
 request::Request::set_global
 request::Request::set_header_callback
+request::Request::set_opened_path
 request::Request::set_response_code
 request::Request::set_shutdown_function
 request::Request::set_time_limit
@@ -476,6 +480,7 @@ request::Request::url_stat_quiet
 request::Request::variadic_arguments
 request::Request::virtual_file_ex
 request::Request::with_stream_ctx
+request::Request::wrapper_log_error
 request::Request::wrapper_op
 request::Request::wrapper_register
 request::Request::wrapper_restore
@@ -536,6 +541,7 @@ request::StreamOps::read
 request::StreamOps::seek
 request::StreamOps::seekable
 request::StreamOps::size
+request::StreamOps::stat
 request::StreamOps::write
 request::StreamOption
 request::StreamWrapper

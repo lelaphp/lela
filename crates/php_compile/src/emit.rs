@@ -551,6 +551,13 @@ pub(crate) struct Emit<'a> {
     /// Each auto-global the file names, in the order it was first met
     /// ([`Unit::arms`]).
     arms: Vec<AutoGlobal>,
+    /// The offset of the `__halt_compiler();` the file's top statements
+    /// end with, which `__COMPILER_HALT_OFFSET__` compiles to anywhere
+    /// in the file (`zend_compile_const`), found before the walk as php
+    /// finds it in `CG(ast)`; and the one the walk met, which the unit
+    /// carries.
+    halt: Option<i64>,
+    halted: Option<i64>,
 }
 
 /// Which of php's two folds is running: `zend_compile_expr`'s, which
@@ -1114,6 +1121,7 @@ fn dirname(path: &[u8]) -> Vec<u8> {
 /// The unit of one source file: its main op array, the statements and
 /// then php's implicit final `RETURN 1` (`zend_emit_final_return`, with
 /// `extended_value` at -1), and the diagnostics raised on the way.
+#[allow(clippy::too_many_lines)] // the emitter laid down a field a line, and the unit taken off it
 pub(crate) fn unit(
     parsed: &Parsed,
     options: &Options,
@@ -1186,6 +1194,8 @@ pub(crate) fn unit(
         try_catch_offset: None,
         generators: walk::generators(&parsed.tree),
         arms: Vec::new(),
+        halt: walk::halt_offset(parsed),
+        halted: None,
     };
     // A fatal leaves the file with what `zend_error` had raised before
     // it already rendered, so those travel with it.
@@ -1220,6 +1230,7 @@ pub(crate) fn unit(
         arms: emit.arms,
         runtime_keys: emit.runtime_keys,
         constants: emit.attributed_constants,
+        halt_offset: emit.halted,
     })
 }
 
@@ -1646,7 +1657,13 @@ impl Emit<'_> {
             }
             Stmt::StaticVarStmt(id) => self.static_var(id)?,
             Stmt::UseStmt(id) => self.use_stmt(id)?,
-            Stmt::HaltCompilerStmt(_) => return Err(self.unread("a `__halt_compiler`")),
+            // `inner_statement`'s `T_HALT_COMPILER` arm: the parser's
+            // `CompileError`, a top statement being walked by
+            // `top_statements`.
+            Stmt::HaltCompilerStmt(_) => {
+                return Err(self
+                    .compile_error("__HALT_COMPILER() can only be used from the outermost scope"));
+            }
         }
         Ok(())
     }
@@ -15825,6 +15842,9 @@ impl Emit<'_> {
     /// int(1)
     /// ```
     fn const_fetch(&mut self, name: &[u8]) -> Result<Where, CompileError> {
+        if let Some(offset) = self.halt.filter(|_| self.names_halt_offset(name)) {
+            return Ok(Where::Constant(Zval::long(offset)));
+        }
         if let Some(value) = self.const_name(name)? {
             return Ok(Where::Constant(value));
         }
@@ -15847,6 +15867,44 @@ impl Emit<'_> {
             ..Opline::default()
         });
         Ok(Where::Temporary(out))
+    }
+
+    /// `zend_compile_const`'s first test (`Z/Zend/zend_compile.c:11024`):
+    /// the name resolves to `__COMPILER_HALT_OFFSET__`, or is written so
+    /// with no `namespace\` before it.
+    fn names_halt_offset(&self, name: &[u8]) -> bool {
+        const HALT: &[u8] = b"__COMPILER_HALT_OFFSET__";
+        let (resolved, _) = self.constant_resolved(name);
+        resolved == HALT || (!name.starts_with(b"namespace\\") && name == HALT)
+    }
+
+    /// `zend_compile_halt_compiler` (`Z/Zend/zend_compile.c:9804`): no
+    /// opline, the file's offset kept for the unit, which the engine
+    /// registers as the file's `__COMPILER_HALT_OFFSET__`; refused inside
+    /// a bracketed namespace.
+    ///
+    /// ```php
+    /// function offset() { return __COMPILER_HALT_OFFSET__; }
+    /// echo __COMPILER_HALT_OFFSET__, ' ', offset(), ' ', constant('__COMPILER_HALT_OFFSET__'), "\n";
+    /// echo strlen(file_get_contents(__FILE__, false, null, __COMPILER_HALT_OFFSET__)), "\n";
+    /// __halt_compiler(); ?>
+    /// data after the halt
+    /// ```
+    /// ```expect
+    /// 261 261 261
+    /// 23
+    /// ```
+    pub(super) fn halt_compiler(
+        &mut self,
+        id: NodeId<tree::HaltCompilerStmt>,
+    ) -> Result<(), CompileError> {
+        if matches!(self.namespacing, Namespacing::Bracketed { open: true }) {
+            return Err(
+                self.compile_error("__HALT_COMPILER() can only be used from the outermost scope")
+            );
+        }
+        self.halted = Some(walk::halt_end(self.parsed, id));
+        Ok(())
     }
 
     /// `zend_add_const_name_literal` (`Z/Zend/zend_compile.c:664`): the
@@ -17389,6 +17447,8 @@ mod tests {
             try_catch_offset: None,
             generators: Vec::new(),
             arms: Vec::new(),
+            halt: None,
+            halted: None,
         }
     }
 

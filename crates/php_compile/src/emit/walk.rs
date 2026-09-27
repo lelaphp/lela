@@ -23,7 +23,7 @@
 use php_syntax::tree::{
     Block, ClassBody, ClassMember, Modifier, Node, NodeId, ParamList, Stmt, TokenId, TypeExpr,
 };
-use php_syntax::{SyntaxKind, TextRange, tree};
+use php_syntax::{Parsed, SyntaxKind, TextRange, tree};
 use php_unit::Level;
 use php_unit::decl::{ClassKind, Visibility};
 
@@ -236,7 +236,10 @@ impl Emit<'_> {
                 continue;
             }
             self.line = stmt.line(self.parsed);
-            self.statement(*stmt)?;
+            match stmt {
+                Stmt::HaltCompilerStmt(id) => self.halt_compiler(*id)?,
+                _ => self.statement(*stmt)?,
+            }
             match stmt {
                 Stmt::NamespaceDef(_) | Stmt::HaltCompilerStmt(_) => continue,
                 Stmt::FunctionDecl(_)
@@ -1647,4 +1650,28 @@ pub(super) struct Constant {
     pub(super) attributes: Vec<Attr>,
     pub(super) doc_comment: Option<Vec<u8>>,
     pub(super) line: u32,
+}
+
+/// The offset `__COMPILER_HALT_OFFSET__` compiles to in a file whose top
+/// statements end with `__halt_compiler();`, as `zend_compile_const`
+/// finds that statement at the end of `CG(ast)`; none in any other.
+pub(super) fn halt_offset(parsed: &Parsed) -> Option<i64> {
+    let file = parsed.tree.root()?.id::<tree::SourceFile>()?;
+    match parsed.tree[file].stmts.last()? {
+        Stmt::HaltCompilerStmt(id) => Some(halt_end(parsed, *id)),
+        _ => None,
+    }
+}
+
+/// `zend_get_scanned_file_offset()` as the parser reduces
+/// `T_HALT_COMPILER '(' ')' ';'`: the byte after the `;`, or after the
+/// `?>` that stands for it and the newline it swallowed, which is where
+/// the lexer's `HALT_DATA` trailer begins, and the end of the source
+/// where there is none.
+pub(super) fn halt_end(parsed: &Parsed, id: NodeId<tree::HaltCompilerStmt>) -> i64 {
+    let data = parsed.tree[id]
+        .data
+        .and_then(|t| parsed.tokens.get(usize::try_from(t.0).ok()?))
+        .map(|t| i64::from(t.offset));
+    data.unwrap_or_else(|| i64::try_from(parsed.source.len()).unwrap_or(i64::MAX))
 }

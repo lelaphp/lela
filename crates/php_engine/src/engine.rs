@@ -188,6 +188,10 @@ pub(crate) struct Shared {
     /// extension's in bundle order, less what the startup ini's
     /// `disable_functions` took out of it ([`function_table`]).
     pub(crate) functions: Vec<(FunctionDecl, Entry)>,
+    /// The entry an extension's interception replaced, one row per row
+    /// of `functions`, none where nothing intercepts the native
+    /// ([`crate::api::abi::ExtensionBuilder::intercept`]).
+    pub(crate) replaced: Vec<Option<Entry>>,
     /// Each native's `internal_function.module`, one row per row of
     /// `functions`: the extension that declared it, or none for one the
     /// engine declares itself.
@@ -1202,6 +1206,27 @@ fn function_table(
         .unzip()
 }
 
+/// `phar_intercept_functions_init` for every extension, in bundle order:
+/// each native an extension intercepts has its entry replaced, the one
+/// it replaced kept in its row of what this answers.
+fn intercept(
+    functions: &mut [(FunctionDecl, Entry)],
+    extensions: &[Extension],
+) -> Vec<Option<Entry>> {
+    let mut replaced = vec![None; functions.len()];
+    for (name, entry) in extensions.iter().flat_map(|e| e.intercepts.iter()) {
+        let found = functions
+            .iter()
+            .position(|(decl, _)| decl.name.0.eq_ignore_ascii_case(&name.0));
+        if let Some(at) = found
+            && let Some(row) = functions.get_mut(at)
+        {
+            replaced[at] = Some(std::mem::replace(&mut row.1, *entry));
+        }
+    }
+    replaced
+}
+
 /// Builds an [`Engine`]: the bundle, the tier and the startup ini.
 pub struct EngineBuilder {
     extensions: Vec<Extension>,
@@ -1319,7 +1344,8 @@ impl EngineBuilder {
             ini.retain(|(n, _)| *n != name);
             ini.push((name, value));
         }
-        let (function_modules, functions) = function_table(&core, &extensions, &ini);
+        let (function_modules, mut functions) = function_table(&core, &extensions, &ini);
+        let replaced = intercept(&mut functions, &extensions);
         let function_flags = functions
             .iter()
             .map(|(decl, _)| crate::attributes::Flags::of(&decl.attributes))
@@ -1345,6 +1371,7 @@ impl EngineBuilder {
             shared: Arc::new(Shared {
                 extensions,
                 functions,
+                replaced,
                 function_modules,
                 function_flags,
                 frameless,
@@ -1785,7 +1812,19 @@ impl Engine {
             )
         } else {
             req.note_primary_file(&script);
-            self.shared.cached(&script, &cwd, req.stack_limit())
+            match req.compile_file_source(&script) {
+                Ok(Some(source)) => {
+                    Some(
+                        self.shared
+                            .compile_for(&mut req, &source, &script, SourceKind::File),
+                    )
+                }
+                Ok(None) => self.shared.cached(&script, &cwd, req.stack_limit()),
+                Err(thrown) => {
+                    req.leave_pending(&thrown);
+                    None
+                }
+            }
         };
         match compiled {
             Some(Ok(unit)) if work == Work::Serve => {
@@ -2045,6 +2084,15 @@ fn compile(
 /// in `EG(symbol_table)` before the unit's first line, where the file
 /// names it and whether or not the line that names it is reached.
 pub(crate) fn note_compiled(req: &mut Request, unit: &Arc<Unit>) {
+    // `zend_compile_halt_compiler`'s constant, and opcache's again on a
+    // hit, under the file's mangled name, where the file has not
+    // registered it already.
+    if let Some(offset) = unit.halt_offset {
+        let key = crate::api::request::halt_offset_key(&unit.main.filename.0);
+        if req.constant_named(&key).is_none() {
+            let _ = req.define_constant(&key, Value::int(offset));
+        }
+    }
     for global in &unit.arms {
         // What a callback can raise is the memory limit, which the
         // loop meets again at its first allocation.
