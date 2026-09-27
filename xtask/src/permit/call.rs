@@ -161,21 +161,27 @@ impl Call {
     }
 
     /// The workspace of its own the call lands in, `None` for a call
-    /// judged by `root`'s manifest. The file places the call; a call
-    /// without one is placed by its `cwd` in a checkout alone, the nearest
+    /// judged by `root`'s manifest. The file places the call, wherever it
+    /// is: a file in `root` is `root`'s whatever directory the shell stands
+    /// in, since a worktree's build handed a call in its own tree would
+    /// otherwise place it by the session's directory in the checkout that
+    /// handed it over (#1047). A call without one is placed by its `cwd`
+    /// in a checkout alone, the nearest
     /// ancestor with a manifest that also has a `.git`: a `Bash` call whose
     /// shell stands in a fixture directory is the checkout's, whose
     /// manifest carries the shell rules, since a fixture's manifest
     /// describes the fixture's sources and not what a shell may run.
     pub(super) fn nested(&self, root: &Path) -> Option<PathBuf> {
         let root = canonical(root);
-        let file = self.tool_input.file_path.as_deref();
-        let cwd = self.cwd.as_deref();
-        file.and_then(|f| nearest(&root, &canonical(&root.join(f)), &[manifest::FILE]))
-            .or_else(|| {
-                let cwd = canonical(&root.join(cwd?));
-                nearest(&root, &cwd, &[manifest::FILE, ".git"])
-            })
+        match (self.tool_input.file_path.as_deref(), self.cwd.as_deref()) {
+            (Some(file), _) => nearest(&root, &canonical(&root.join(file)), &[manifest::FILE]),
+            (None, Some(cwd)) => nearest(
+                &root,
+                &canonical(&root.join(cwd)),
+                &[manifest::FILE, ".git"],
+            ),
+            (None, None) => None,
+        }
     }
 
     /// The checkout the call's workspace is in: the nearest ancestor of it

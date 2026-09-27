@@ -599,6 +599,24 @@ fn a_file_in_a_worktree_beside_the_checkout_is_judged_against_that_worktree() {
     )
     .unwrap();
     assert_eq!(shell.workspace(&root), beside);
+    // And a file places a call by itself, wherever the shell stands: an
+    // edit in the checkout from a session in the worktree is the
+    // checkout's, and one in the worktree asked of the worktree is the
+    // worktree's own (#1047).
+    let across = Call::parse(
+        &serde_json::json!({"tool_name": "Edit", "cwd": beside.to_str().unwrap(),
+            "tool_input": {"file_path": root.join("oracle.toml").to_str().unwrap(),
+                "old_string": "a", "new_string": "b"}})
+        .to_string(),
+    )
+    .unwrap();
+    assert_eq!(across.workspace(&root), root.canonicalize().unwrap());
+    let within = edit(&beside.join("oracle.toml"));
+    assert_eq!(
+        within.workspace(&beside),
+        beside.canonicalize().unwrap(),
+        "not the checkout the session stands in"
+    );
 
     // A clone beside is another repository: its files are no workspace's.
     let clone = tree.join("repo-t-y");
