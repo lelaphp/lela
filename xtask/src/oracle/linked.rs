@@ -89,6 +89,7 @@ fn run(
         .filter_map(|entry| entry.split_once('='))
         .collect();
     let started = Instant::now();
+    let this_process = std::process::id();
     // A fresh engine per snippet, which is the isolation a process gave
     // (design §8).
     let served = panic::catch_unwind(AssertUnwindSafe(|| {
@@ -101,6 +102,14 @@ fn run(
         }
     }));
     let wall = started.elapsed();
+    // A snippet that forked (`pcntl_fork`) comes back here twice. The
+    // child is a copy of this process with this thread alone in it, and
+    // it ends here with the status its request ended with, as php's
+    // child process ends, never going back into the lane its parent runs.
+    if std::process::id() != this_process {
+        let status = served.as_ref().map_or(255, |served| served.exit_code);
+        std::process::exit(status);
+    }
     let Ok(served) = served else {
         bail!("the linked engine panicked; the panic itself is on the harness's second stream");
     };
