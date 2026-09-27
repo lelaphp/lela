@@ -18,10 +18,11 @@ use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
 
-use crate::{
-    BIGINT_AS_STRING, ERROR_CTRL_CHAR, ERROR_DEPTH, ERROR_INVALID_PROPERTY_NAME, ERROR_NONE,
-    ERROR_STATE_MISMATCH, ERROR_SYNTAX, ERROR_UTF8, ERROR_UTF16, INVALID_UTF8_IGNORE,
-    INVALID_UTF8_SUBSTITUTE, OBJECT_AS_ARRAY,
+use crate::constants::{
+    JSON_BIGINT_AS_STRING, JSON_ERROR_CTRL_CHAR, JSON_ERROR_DEPTH,
+    JSON_ERROR_INVALID_PROPERTY_NAME, JSON_ERROR_NONE, JSON_ERROR_STATE_MISMATCH,
+    JSON_ERROR_SYNTAX, JSON_ERROR_UTF8, JSON_ERROR_UTF16, JSON_INVALID_UTF8_IGNORE,
+    JSON_INVALID_UTF8_SUBSTITUTE, JSON_OBJECT_AS_ARRAY,
 };
 
 /// `LONG_MIN_DIGITS`: the digits of `-9223372036854775808`, what the
@@ -123,7 +124,7 @@ impl Scanner<'_> {
             return if self.cursor > self.input.len() {
                 Token::Eoi
             } else {
-                self.refuse(ERROR_CTRL_CHAR)
+                self.refuse(JSON_ERROR_CTRL_CHAR)
             };
         }
         if self.keyword(b"null") {
@@ -139,16 +140,16 @@ impl Scanner<'_> {
             return token;
         }
         if c <= 0x1f {
-            return self.refuse(ERROR_CTRL_CHAR);
+            return self.refuse(JSON_ERROR_CTRL_CHAR);
         }
         // `<JS>UTF8` is a syntax error and `<JS>ANY`, the byte no UTF-8
         // sequence begins, is the malformed one.
         if utf8_length(self.input, start).is_some() {
             self.cursor += 1;
-            return self.refuse(ERROR_SYNTAX);
+            return self.refuse(JSON_ERROR_SYNTAX);
         }
         self.cursor += 1;
-        self.refuse(ERROR_UTF8)
+        self.refuse(JSON_ERROR_UTF8)
     }
 
     /// `<JS>INT` and `<JS>FLOAT|EXP`, longest match: the integer alone,
@@ -225,7 +226,7 @@ impl Scanner<'_> {
                     .unwrap_or(0),
             );
         }
-        if self.options & BIGINT_AS_STRING != 0 {
+        if self.options & JSON_BIGINT_AS_STRING != 0 {
             return Token::Str(text.to_vec());
         }
         Token::Double(strtod(text))
@@ -246,7 +247,7 @@ impl Scanner<'_> {
             if c <= 0x1f {
                 // `<STR_P1>CTRL`, the NUL terminator of an unterminated
                 // string among them.
-                return self.refuse(ERROR_CTRL_CHAR);
+                return self.refuse(JSON_ERROR_CTRL_CHAR);
             }
             if c == b'\\' {
                 if let Some(code) = self.scan_escape(&mut out) {
@@ -262,10 +263,10 @@ impl Scanner<'_> {
             let Some(len) = utf8_length(self.input, self.cursor) else {
                 // `<STR_P1>ANY`: one byte, ignored or replaced by U+FFFD
                 // where the options say so.
-                if self.options & INVALID_UTF8_SUBSTITUTE != 0 {
+                if self.options & JSON_INVALID_UTF8_SUBSTITUTE != 0 {
                     out.extend_from_slice("\u{fffd}".as_bytes());
-                } else if self.options & INVALID_UTF8_IGNORE == 0 {
-                    return self.refuse(ERROR_UTF8);
+                } else if self.options & JSON_INVALID_UTF8_IGNORE == 0 {
+                    return self.refuse(JSON_ERROR_UTF8);
                 }
                 self.cursor += 1;
                 continue;
@@ -291,7 +292,7 @@ impl Scanner<'_> {
             if (0xd800..=0xdfff).contains(&code) {
                 // `<STR_P1>UCS2`, everything `UTF16_1..3` left: one half
                 // of a surrogate pair and nothing to pair it with.
-                return Some(ERROR_UTF16);
+                return Some(JSON_ERROR_UTF16);
             }
             push_utf8(out, code);
             self.cursor += 6;
@@ -305,7 +306,7 @@ impl Scanner<'_> {
             b't' => b'\t',
             c @ (b'\\' | b'/' | b'"') => c,
             // `<STR_P1>ESCPREF`: a backslash before anything else.
-            _ => return Some(ERROR_SYNTAX),
+            _ => return Some(JSON_ERROR_SYNTAX),
         };
         out.push(escaped);
         self.cursor += 2;
@@ -406,8 +407,8 @@ impl Parser<'_> {
     /// `php_json_yyerror`: the code a syntax error leaves, which stands
     /// only where the scanner left none.
     fn syntax(&mut self) {
-        if self.scanner.errcode == ERROR_NONE {
-            self.scanner.errcode = ERROR_SYNTAX;
+        if self.scanner.errcode == JSON_ERROR_NONE {
+            self.scanner.errcode = JSON_ERROR_SYNTAX;
         }
     }
 
@@ -443,7 +444,7 @@ impl Parser<'_> {
     /// `PHP_JSON_DEPTH_INC`: one level deeper, or the depth refusal.
     fn deeper(&mut self) -> bool {
         if self.max_depth != 0 && self.depth >= self.max_depth {
-            self.scanner.errcode = ERROR_DEPTH;
+            self.scanner.errcode = JSON_ERROR_DEPTH;
             return false;
         }
         self.depth += 1;
@@ -486,7 +487,7 @@ impl Parser<'_> {
         match self.token {
             Token::ArrayClose => self.advance(),
             Token::ObjectClose => {
-                self.scanner.errcode = ERROR_STATE_MISMATCH;
+                self.scanner.errcode = JSON_ERROR_STATE_MISMATCH;
                 give_up(req, array);
                 return Ok(None);
             }
@@ -529,7 +530,7 @@ impl Parser<'_> {
         match self.token {
             Token::ObjectClose => self.advance(),
             Token::ArrayClose => {
-                self.scanner.errcode = ERROR_STATE_MISMATCH;
+                self.scanner.errcode = JSON_ERROR_STATE_MISMATCH;
                 holder.give_up(req);
                 return Ok(None);
             }
@@ -550,7 +551,7 @@ impl Parser<'_> {
         if self.validating {
             return Ok(Holder::Nothing);
         }
-        if self.scanner.options & OBJECT_AS_ARRAY != 0 {
+        if self.scanner.options & JSON_OBJECT_AS_ARRAY != 0 {
             return Ok(Holder::Array(PhpArray::new(req)?));
         }
         let Some(class) = call::lookup_class(req, b"stdClass")? else {
@@ -587,7 +588,7 @@ impl Parser<'_> {
                 if key.first() == Some(&0) {
                     // A name php mangles a private or protected property
                     // into; `zend_std_write_property` may not be handed one.
-                    self.scanner.errcode = ERROR_INVALID_PROPERTY_NAME;
+                    self.scanner.errcode = JSON_ERROR_INVALID_PROPERTY_NAME;
                     req.release(value);
                     return Ok(None);
                 }
@@ -635,7 +636,7 @@ fn parse(
             input: text,
             cursor: 0,
             options,
-            errcode: ERROR_NONE,
+            errcode: JSON_ERROR_NONE,
         },
         token: Token::Eoi,
         depth: 1,
