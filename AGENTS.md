@@ -87,7 +87,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=50d3b5fc2c389b24785e3e51149aca4beecc9c741a2f8a1d5dafa74ab0c6999e out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=517c54b45e681cd74c3ac7d762326df0bddf9c3e2d06c334844a9c42ba22850f out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -111,7 +111,7 @@ third-engine-design.md
 | tier | tier.lock |  |  | skip |
 | harness | xtask.lock | 334 |  | pass |
 
-<!-- /computed in=66ef3ba51e6e1c16d0cd0b812f8d5eca67e6175c9fce798319841b7ffb6536b9 out=6214ec4bdd817dc18e0e840f1a168faf48798366f70e58cd0628d37a0a5941fd -->
+<!-- /computed in=74443943093d052e4108b1c9fc28a10586030bd260a601601d30ce910c343c6d out=6214ec4bdd817dc18e0e840f1a168faf48798366f70e58cd0628d37a0a5941fd -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
@@ -140,7 +140,7 @@ third-engine-design.md
 | harness.self |  | deny | fail | Harness configuration, the oracle pin and the divergence registry are edited by a person. |
 | divergence.reason |  | check | pass | A divergence row with status accepted has a reason a person wrote; done fails while an open row touches the scope (harness §4.3). |
 
-<!-- /computed in=fa43056f490acf79c66539d0e1f10abf83da00af25ce8679c58215542e8cc1b4 out=ddfef8b93ba59a129a33781c16652c1a0ea197181e1057749cf7b92bc62078af -->
+<!-- /computed in=14a7a230dc66cb9eacb2d38b6ffe439a918cd7a95eb842e771c749d55b84ab6f out=ddfef8b93ba59a129a33781c16652c1a0ea197181e1057749cf7b92bc62078af -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
