@@ -9,21 +9,17 @@
 //! over four spaces of indent per level, a property's visibility in its
 //! name rather than beside it, and no type or length anywhere.
 
-use php_ext::abi::PropertyPurpose;
+use php_ext::abi::{PropertyPurpose, True, Union};
+use php_ext::attr::{php_class, php_function};
 use php_ext::coerce::{Exponent, float_format, to_string};
-use php_ext::decl::{
-    ClassKind, ConstExpr, EnumBacking, FunctionDecl, Parameter, ParameterDefault, Type,
-};
+use php_ext::decl::{ClassKind, EnumBacking};
 use php_ext::raising::{Thrown, warning};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpString, Value};
 
-use crate::output::Entry;
-use crate::{argument_count_between, bool_argument, declared, parameter};
-
-mod debug;
-mod serialize;
-mod unserialize;
+pub(crate) mod debug;
+pub(crate) mod serialize;
+pub(crate) mod unserialize;
 
 pub use serialize::Serializer;
 pub use unserialize::Unserializer;
@@ -133,37 +129,11 @@ fn is_enum_class(req: &Request, class: php_ext::values::ClassId) -> bool {
 /// string(22) "__PHP_Incomplete_Class"
 /// string(26) "O:3:"Foo":1:{s:1:"a";i:1;}"
 /// ```
-pub(crate) fn classes() -> Vec<(
-    php_ext::decl::ClassDecl,
-    Vec<(php_ext::decl::MethodDecl, Entry)>,
-)> {
-    use php_ext::decl::{ClassDecl, ClassFlags, DynamicProperties, EnumBacking, Name};
-    vec![(
-        ClassDecl {
-            name: Name(INCOMPLETE_CLASS.into()),
-            kind: ClassKind::Class,
-            flags: ClassFlags {
-                is_final: true,
-                dynamic_properties: DynamicProperties::Allowed,
-                ..ClassFlags::default()
-            },
-            parent: None,
-            interfaces: Vec::new(),
-            traits: Vec::new(),
-            adaptations: Vec::new(),
-            backing: EnumBacking::Pure,
-            constants: Vec::new(),
-            properties: Vec::new(),
-            methods: Vec::new(),
-            attributes: Vec::new(),
-            doc_comment: None,
-            file: Name(Box::new([])),
-            line: 0,
-            end_line: 0,
-        },
-        Vec::new(),
-    )]
-}
+#[php_class(final, dynamic_properties = allowed)]
+pub(crate) struct __PHP_Incomplete_Class;
+
+#[php_class]
+impl __PHP_Incomplete_Class {}
 
 /// The ini entries the unserializer reads, `basic_functions.c`'s
 /// `unserialize_callback_func` and `unserialize_max_depth`.
@@ -193,100 +163,6 @@ pub(crate) fn ini() -> Vec<php_ext::decl::IniDecl> {
 /// the rendering steps in by, taken twice between a key and the array
 /// its value opens.
 const INDENT: usize = 4;
-
-/// The natives declared here, paired with their entries, with php's
-/// arity and parameter names, so `ReflectionFunction::__toString`
-/// renders them as the oracle does.
-///
-/// ```php
-/// echo new ReflectionFunction('print_r'), new ReflectionFunction('var_export');
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function print_r ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> mixed $value ]
-///     Parameter #1 [ <optional> bool $return = false ]
-///   }
-///   - Return [ string|true ]
-/// }
-/// Function [ <internal:standard> function var_export ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> mixed $value ]
-///     Parameter #1 [ <optional> bool $return = false ]
-///   }
-///   - Return [ ?string ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        (
-            declared(
-                b"print_r",
-                &[
-                    parameter(b"value", Type::Mixed),
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Bool(false)),
-                        ..parameter(b"return", Type::Bool)
-                    },
-                ],
-                Type::Union(vec![Type::String, Type::True]),
-            ),
-            print_r,
-        ),
-        (
-            declared(
-                b"var_export",
-                &[
-                    parameter(b"value", Type::Mixed),
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Bool(false)),
-                        ..parameter(b"return", Type::Bool)
-                    },
-                ],
-                Type::Nullable(Box::new(Type::String)),
-            ),
-            var_export,
-        ),
-        (
-            declared(
-                b"debug_zval_dump",
-                &[
-                    parameter(b"value", Type::Mixed),
-                    Parameter {
-                        variadic: true,
-                        ..parameter(b"values", Type::Mixed)
-                    },
-                ],
-                Type::Void,
-            ),
-            debug::debug_zval_dump,
-        ),
-        (
-            declared(
-                b"serialize",
-                &[parameter(b"value", Type::Mixed)],
-                Type::String,
-            ),
-            serialize::serialize,
-        ),
-        (
-            declared(
-                b"unserialize",
-                &[
-                    parameter(b"data", Type::String),
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Array(Vec::new())),
-                        ..parameter(b"options", Type::Array)
-                    },
-                ],
-                Type::Mixed,
-            ),
-            unserialize::unserialize,
-        ),
-    ]
-}
 
 /// `print_r(mixed $value, bool $return = false): string|true`, php's
 /// `PHP_FUNCTION(print_r)`: the rendering written where `echo` writes it
@@ -455,21 +331,34 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
 /// #1 {main}
 ///   thrown in %s on line 2
 /// ```
-fn print_r(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let value = req.argument(1).unwrap_or_default();
-    let returned = if req.argument_count() == 2 {
-        bool_argument(req, 2)?
-    } else {
-        false
-    };
+///
+/// ```php
+/// echo new ReflectionFunction('print_r');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function print_r ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> mixed $value ]
+///     Parameter #1 [ <optional> bool $return = false ]
+///   }
+///   - Return [ string|true ]
+/// }
+/// ```
+#[php_function]
+fn print_r(
+    req: &mut Request,
+    value: Value,
+    #[php(default = false)] r#return: bool,
+) -> Result<Union<PhpString, True>, Thrown> {
+    let returned = r#return;
     let mut out = Vec::new();
     render(req, &mut out, &value, 0)?;
     if returned {
-        return Ok(Value::string(PhpString::new(req, &out)?));
+        return PhpString::new(req, &out).map(Union::A);
     }
     req.write(&out);
-    Ok(Value::bool(true))
+    Ok(Union::B(True))
 }
 
 /// One value as `zend_print_zval_r_to_buf(buf, expr, indent)` renders
@@ -723,21 +612,34 @@ fn unmangled(out: &mut Vec<u8>, key: &[u8]) {
 /// )"
 /// string(1) "1"
 /// ```
-fn var_export(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let value = req.argument(1).unwrap_or_default();
-    let returned = if req.argument_count() == 2 {
-        bool_argument(req, 2)?
-    } else {
-        false
-    };
+///
+/// ```php
+/// echo new ReflectionFunction('var_export');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function var_export ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> mixed $value ]
+///     Parameter #1 [ <optional> bool $return = false ]
+///   }
+///   - Return [ ?string ]
+/// }
+/// ```
+#[php_function]
+fn var_export(
+    req: &mut Request,
+    value: Value,
+    #[php(default = false)] r#return: bool,
+) -> Result<Option<PhpString>, Thrown> {
+    let returned = r#return;
     let mut out = Vec::new();
     export(req, &mut out, &value, 1)?;
     if returned {
-        return Ok(Value::string(PhpString::new(req, &out)?));
+        return PhpString::new(req, &out).map(Some);
     }
     req.write(&out);
-    Ok(Value::null())
+    Ok(None)
 }
 
 /// One value as `php_var_export_ex(struc, level, buf)` writes it, and a

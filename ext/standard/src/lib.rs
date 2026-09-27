@@ -263,7 +263,13 @@ pub fn extension() -> Extension {
             head::setcookie::declared(),
             head::setrawcookie::declared(),
         ])
-        .functions(var::natives())
+        .functions(vec![
+            var::print_r::declared(),
+            var::var_export::declared(),
+            var::debug::debug_zval_dump::declared(),
+            var::serialize::serialize::declared(),
+            var::unserialize::unserialize::declared(),
+        ])
         .functions(formatted_print::natives())
         .functions(base64::natives())
         .functions(exec::natives())
@@ -351,7 +357,7 @@ pub fn extension() -> Extension {
         .constants(math::constants::declared())
         .constants_with::<ImageHandler>(image::link_constants)
         .class::<math::RoundingMode>()
-        .classes(var::classes())
+        .class::<var::__PHP_Incomplete_Class>()
         .classes(user_filters::classes())
         .ini(var::ini())
         .ini(sockets::ini())
