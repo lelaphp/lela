@@ -345,6 +345,14 @@ impl<'s> Subject<'s> {
     }
 }
 
+/// What the library is handed for an empty subject: a live byte. An
+/// empty slice's pointer dangles, and the vector search in a pattern's
+/// machine code aligns the subject's pointer down to 16 bytes and loads
+/// from there (`ffcs_mask`, `pcre2_jit_neon_inc.h`), which stays on the
+/// subject's page for a live pointer and falls on page zero for a
+/// dangling one; php's subject is a `zend_string`'s `val`, always live.
+static EMPTY: u8 = 0;
+
 /// One `pcre2_match` or `pcre2_jit_match` of `code` over `subject` from
 /// `start`, with `options` among `PCRE2_NOTEMPTY_ATSTART` and
 /// `PCRE2_ANCHORED`: the library's return, the pair count or a negative
@@ -371,15 +379,21 @@ pub(super) fn run(
     } else {
         options
     };
+    let at = if bytes.is_empty() {
+        &raw const EMPTY
+    } else {
+        bytes.as_ptr()
+    };
     let rc = if jit && code.jitted && trusted {
         // SAFETY: the pattern has machine code; the subject is `bytes`,
-        // alive for the call, with `start` within it and, under UTF, known
-        // valid (a check by the library, or the string's own record of
-        // one) with `start` at a character's start; data and `mctx` live.
+        // alive for the call and at a live address even when empty, with
+        // `start` within it and, under UTF, known valid (a check by the
+        // library, or the string's own record of one) with `start` at a
+        // character's start; data and `mctx` live.
         unsafe {
             sys::pcre2_jit_match_8(
                 code.raw.as_ptr(),
-                bytes.as_ptr(),
+                at,
                 bytes.len(),
                 start,
                 options,
@@ -392,7 +406,7 @@ pub(super) fn run(
         unsafe {
             sys::pcre2_match_8(
                 code.raw.as_ptr(),
-                bytes.as_ptr(),
+                at,
                 bytes.len(),
                 start,
                 options,
@@ -451,4 +465,32 @@ pub(super) fn jit_supported() -> bool {
     // SAFETY: CONFIG_JIT writes a `uint32_t` into the live local.
     let rc = unsafe { sys::pcre2_config_8(sys::PCRE2_CONFIG_JIT, (&raw mut flag).cast()) };
     rc == 0 && flag != 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Code, Context, MatchData, PCRE2_CASELESS, PCRE2_ERROR_NOMATCH, Subject, run};
+
+    /// `/b/i`'s machine code searches forward for `b` or `B` with vector
+    /// loads, which read around the subject's pointer; an empty slice's
+    /// pointer dangles, where php's `val` is always live.
+    #[test]
+    fn an_empty_subject_whose_slice_dangles_is_matched_as_a_live_one() -> Result<(), &'static str> {
+        let mut code = Code::compile(b"b", PCRE2_CASELESS, 0).map_err(|_| "`b` compiles")?;
+        let jitted = code.jit().map_err(|_| "`b` compiles to machine code")?;
+        let mut data = MatchData::with_pairs(1).ok_or("match data is allocated")?;
+        let context = Context::new().ok_or("a match context is allocated")?;
+        let empty: &[u8] = &[];
+        let rc = run(
+            &code,
+            &mut Subject::new(empty),
+            0,
+            0,
+            &mut data,
+            &context,
+            jitted,
+        );
+        assert_eq!(rc, PCRE2_ERROR_NOMATCH);
+        Ok(())
+    }
 }
