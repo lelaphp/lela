@@ -18,5 +18,8 @@ name = "php"
 path = "src/main.rs"
 
 [dependencies]
-php_bundle = { path = "../php_bundle" }
+# The bundle's default set and the two extensions the binary alone turns
+# on: `pcntl` and `posix`, which php builds for the CLI and which no server
+# host carries (design §7.2, revision 35).
+php_bundle = { path = "../php_bundle", features = ["pcntl", "posix"] }
 php_sapi = { path = "../php_sapi" }

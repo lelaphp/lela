@@ -64,6 +64,10 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_ctype::extension,
         #[cfg(feature = "hash")]
         php_ext_hash::extension,
+        #[cfg(feature = "pcntl")]
+        php_ext_pcntl::extension,
+        #[cfg(feature = "posix")]
+        php_ext_posix::extension,
     ]
 }
 

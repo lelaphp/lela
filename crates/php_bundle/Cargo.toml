@@ -3,13 +3,16 @@
 # each an optional dependency. `default` is php-src's default `./configure`
 # set at the tag `oracle.toml` pins, which is the sixteen below: `mbstring`,
 # `pdo_mysql`, `openssl` and `curl` are each an `--enable` or `--with` whose
-# `config.m4` gives no default, are the four rows `seams.toml` marks
-# `feature =`, and are named on the command line to turn on. So this file and
-# the manifest name one default build and neither is read over the other
-# (harness §7). `xtask new-ext <name>` appends the dependency and the feature
-# and lists the crate in `default`; a person removes a non-default extension
-# from `default` when porting it. `api-check` holds `enabled()` to the crate
-# graph.
+# `config.m4` gives no default, are four of the rows `seams.toml` marks
+# `feature =`, and are named on the command line to turn on. `pcntl` and
+# `posix` are the other two, which the `php` binary turns on and no server
+# host does, as php builds pcntl for the CLI and a `fork()` in a process
+# that serves requests on threads keeps one thread (design §7.2, revision
+# 35). So this file and the manifest name one default build and neither is
+# read over the other (harness §7). `xtask new-ext <name>` appends the
+# dependency and the feature and lists the crate in `default`; a person
+# removes a non-default extension from `default` when porting it.
+# `api-check` holds `enabled()` to the crate graph.
 [package]
 name = "php_bundle"
 version = "0.0.0"
@@ -56,6 +59,8 @@ ctype = ["dep:php_ext_ctype"]
 hash = ["dep:php_ext_hash"]
 libxml = ["dep:php_ext_libxml"]
 lexbor = ["dep:php_ext_lexbor"]
+pcntl = ["dep:php_ext_pcntl"] # the `php` binary and the phpt lane alone (design §7.2, revision 35)
+posix = ["dep:php_ext_posix"] # the `php` binary and the phpt lane alone (design §7.2, revision 35)
 
 # The facade for `Extension` and `Nop`; the extensions as `new-ext` adds them.
 [dependencies]
@@ -82,6 +87,8 @@ php_ext_ctype = { path = "../../ext/ctype", optional = true }
 php_ext_hash = { path = "../../ext/hash", optional = true }
 php_ext_libxml = { path = "../../ext/libxml", optional = true }
 php_ext_lexbor = { path = "../../ext/lexbor", optional = true }
+php_ext_pcntl = { path = "../../ext/pcntl", optional = true }
+php_ext_posix = { path = "../../ext/posix", optional = true }
 
 # The native attributes' parity extension, their refusals and their two
 # rustc fixtures (#955) are held here, where the facade and Reflection

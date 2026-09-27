@@ -4,7 +4,7 @@
 # only `api.lock` today.
 [workspace]
 resolver = "3"
-members = ["crates/*", "xtask", "ext/standard", "ext/spl", "ext/date", "ext/reflection", "ext/pcre", "ext/mbstring", "ext/session", "ext/pdo", "ext/dom", "ext/random", "ext/pdo_mysql", "ext/filter", "ext/tokenizer", "ext/json", "ext/openssl", "ext/curl", "ext/iconv", "ext/pdo_sqlite", "ext/ctype", "ext/hash", "ext/libxml", "ext/lexbor"]
+members = ["crates/*", "xtask", "ext/standard", "ext/spl", "ext/date", "ext/reflection", "ext/pcre", "ext/mbstring", "ext/session", "ext/pdo", "ext/dom", "ext/random", "ext/pdo_mysql", "ext/filter", "ext/tokenizer", "ext/json", "ext/openssl", "ext/curl", "ext/iconv", "ext/pdo_sqlite", "ext/ctype", "ext/hash", "ext/libxml", "ext/lexbor", "ext/pcntl", "ext/posix"]
 
 # On macOS the dev profile's default, `split-debuginfo = "unpacked"`, keeps
 # every codegen unit's object in target/debug/deps for its debuginfo, under a
@@ -45,6 +45,7 @@ quote = "1"                         # php_macros: the expansion as tokens (ADR-0
 proc-macro2 = "1"                   # php_macros: tokens outside a macro invocation, for its own tests; already in the lock under syn
 md5 = "0.8"
 libc = "0.2"                        # the platform's headers, for `php_heap`'s probe of the thread's bounds (design §4.1)
+nix = { version = "0.31", default-features = false }  # ext/posix and ext/pcntl: the process, its credentials, its signals and the user database (design §7.2, revision 35)
 corosensei = "0.3"                  # a fiber's machine stack and the switch onto it, in `php_heap` (design §4.1, §5.11)
 cc = "1"                            # ext/date's build.rs compiles the vendored timelib (design §7.2, §12)
 expect-test = "1.5"                 # the parser's snapshot fixtures, regenerated once per file (record §4.9)

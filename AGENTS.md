@@ -212,10 +212,12 @@ Options:
 ├── libxml
 ├── mbstring
 ├── openssl
+├── pcntl
 ├── pcre
 ├── pdo
 ├── pdo_mysql
 ├── pdo_sqlite
+├── posix
 ├── random
 ├── reflection
 ├── session
@@ -223,4 +225,4 @@ Options:
 ├── standard
 └── tokenizer
 ```
-<!-- /computed in=642fe889e09075cd5c7439d397949d45b24bc8a087bc7567916e0b3e3a6aafa8 out=3ddad93dff769cb9fe450994a02fd5688a9fed64139fad260b105e969ed1566d -->
+<!-- /computed in=c540d247d3e63dfdb0697d67cc0b078e38c45dfa783a920c34b0738d7a805fbb out=156c842d34db95591ad7c654432bd216b6c8e154ce8d88f59cf07f4e192a1544 -->
