@@ -2,10 +2,10 @@
 //! laid into `EG(symbol_table)` as `php_hash_environment` lays it at
 //! request start, or just in time, where a unit that names it is
 //! compiled (`zend_is_auto_global`). The bucket of each
-//! name is where the program's `$_SERVER` lives; php keeps the host's
-//! arrays a second time as `PG(http_globals)` for `filter_input` and
-//! `get_browser`, which read what the host registered through filters of
-//! their own and are not built on this table.
+//! name is where the program's `$_SERVER` lives; the same array is kept
+//! a second time in `PG(http_globals)` ([`HttpGlobals`]), which is what
+//! an extension reads ([`Request::superglobal`]). `filter_input` reads
+//! neither: it keeps what the host registered through its filter.
 
 use php_unit::AutoGlobal;
 
@@ -71,6 +71,16 @@ impl Request {
         Ok(())
     }
 
+    /// A variable of `EG(symbol_table)` read, `zend_hash_find` there
+    /// with an attached name followed to its frame's variable: what the
+    /// program's `$GLOBALS[$name]` is now, a view, no owner taken.
+    /// `phpinfo()` and the URL rewriter read `$_SERVER` so, and see the
+    /// program's writes to it, where [`Request::superglobal`] does not.
+    pub fn global(&mut self, name: &[u8]) -> Option<Value> {
+        let table = self.global_table();
+        self.symbol_value(table, name)
+    }
+
     /// A variable of `EG(symbol_table)` written or deleted, what an
     /// extension that binds a global does: `Some` is
     /// `zend_hash_update_ind`, `value` the table's from here, into the CV
@@ -114,9 +124,67 @@ impl Request {
         self.make(global)
     }
 
+    /// php's reader of an auto-global, `zend_is_auto_global` and then
+    /// `PG(http_globals)[TRACK_VARS_*]`, as `php_zlib_output_encoding`
+    /// and `get_browser` read `$_SERVER`: one armed to be made just in
+    /// time is made first, and the answer is the array the host made,
+    /// the one the program sees as `$_SERVER` until the program writes
+    /// to its own. `None` for a name that is no auto-global and for
+    /// `$_REQUEST` and `$_SESSION`, which php keeps no track of, and
+    /// for one whose making met the memory limit, which the program
+    /// meets again at its next allocation.
+    ///
+    /// `filter_input_array(INPUT_ENV)` reads `$_ENV` so, which a
+    /// program that never names it has not made: the read makes it.
+    ///
+    /// ```php
+    /// var_dump(is_array(filter_input_array(INPUT_ENV)));
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// ```
+    ///
+    /// The program's write separates its array from the track, and the
+    /// extension reads what the host described, `$_SERVER` as
+    /// `zlib_get_coding_type()` reads it and `$_ENV` alike:
+    ///
+    /// ```php
+    /// $_SERVER['HTTP_ACCEPT_ENCODING'] = 'gzip';
+    /// ini_set('zlib.output_compression', 'On');
+    /// $coding = zlib_get_coding_type();
+    /// ini_set('zlib.output_compression', 'Off');
+    /// $_ENV['WITNESS'] = 'written';
+    /// var_dump($coding, filter_has_var(INPUT_ENV, 'WITNESS'), $_ENV['WITNESS']);
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// bool(false)
+    /// string(7) "written"
+    /// ```
+    pub fn superglobal(&mut self, name: &[u8]) -> Option<PhpArray> {
+        let global = AutoGlobal::of(name)?;
+        let _ = self.arm(global);
+        self.http_globals.track(global).and_then(|track| *track)
+    }
+
+    /// Step 8 of `php_request_shutdown` (`Z/main/main.c:2011`): each
+    /// track of `PG(http_globals)` given up, `TRACK_VARS_POST` first,
+    /// after the shutdown functions are freed and before
+    /// `zend_deactivate` destroys `EG(symbol_table)`.
+    pub(crate) fn destroy_http_globals(&mut self) {
+        for global in HttpGlobals::TRACKED {
+            if let Some(array) = self.http_globals.track(global).and_then(Option::take) {
+                self.release(Value::array(array));
+            }
+        }
+    }
+
     /// The auto-global's callback (`php_auto_globals_create_*`): the
     /// array built and bound into `EG(symbol_table)` under the name
-    /// (`zend_hash_update`), the table its one owner.
+    /// (`zend_hash_update`), and kept a second time in its track of
+    /// `PG(http_globals)` where it has one (`Z_ADDREF`), the same array
+    /// with two owners, so a write to it from PHP code separates the
+    /// program's and leaves the track's as the host made it.
     ///
     /// `$_GET`, `$_POST` and `$_COOKIE` are empty: no host this engine
     /// has yet describes a query string, a form body or a cookie header,
@@ -134,7 +202,15 @@ impl Request {
             AutoGlobal::Env if order.contains(&b'E') => self.environment()?,
             _ => PhpArray::new(self)?,
         };
-        self.symbol_update(TableId::GLOBAL, global.name().to_vec(), Value::array(array));
+        let value = Value::array(array);
+        if let Some(track) = self.http_globals.track(global) {
+            let kept = track.replace(array);
+            self.addref(&value);
+            if let Some(kept) = kept {
+                self.release(Value::array(kept));
+            }
+        }
+        self.symbol_update(TableId::GLOBAL, global.name().to_vec(), value);
         Ok(())
     }
 
@@ -244,5 +320,46 @@ impl Request {
             array.set(self, Key::from_string(name), Value::string(value))?;
         }
         Ok(array)
+    }
+}
+
+/// php's `PG(http_globals)`: the array each auto-global with a
+/// `TRACK_VARS_*` of its own was made as, one owner of it beside
+/// `EG(symbol_table)`'s, from its making to step 8 of
+/// `php_request_shutdown`. `$_REQUEST` and `$_SESSION` have no track.
+#[derive(Default)]
+pub(crate) struct HttpGlobals {
+    post: Option<PhpArray>,
+    get: Option<PhpArray>,
+    cookie: Option<PhpArray>,
+    server: Option<PhpArray>,
+    env: Option<PhpArray>,
+    files: Option<PhpArray>,
+}
+
+impl HttpGlobals {
+    /// Each tracked auto-global, in `TRACK_VARS_*` order
+    /// (`Z/main/php_globals.h:40`).
+    const TRACKED: [AutoGlobal; 6] = [
+        AutoGlobal::Post,
+        AutoGlobal::Get,
+        AutoGlobal::Cookie,
+        AutoGlobal::Server,
+        AutoGlobal::Env,
+        AutoGlobal::Files,
+    ];
+
+    /// The track an auto-global's array is kept in, `None` for one
+    /// php keeps none of.
+    fn track(&mut self, global: AutoGlobal) -> Option<&mut Option<PhpArray>> {
+        match global {
+            AutoGlobal::Post => Some(&mut self.post),
+            AutoGlobal::Get => Some(&mut self.get),
+            AutoGlobal::Cookie => Some(&mut self.cookie),
+            AutoGlobal::Server => Some(&mut self.server),
+            AutoGlobal::Env => Some(&mut self.env),
+            AutoGlobal::Files => Some(&mut self.files),
+            AutoGlobal::Request | AutoGlobal::Session => None,
+        }
     }
 }

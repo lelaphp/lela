@@ -385,6 +385,7 @@ request::Request::gc_collect
 request::Request::gc_enable
 request::Request::gc_enabled
 request::Request::gc_status
+request::Request::global
 request::Request::header_add
 request::Request::header_remove
 request::Request::headers_list

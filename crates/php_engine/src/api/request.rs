@@ -1246,7 +1246,9 @@ pub struct Request {
     /// wrote last.
     exit_status: i32,
     resources: Resources,
-    superglobals: Vec<(Vec<u8>, PhpArray)>,
+    /// php's `PG(http_globals)`: a second owner of each auto-global's
+    /// array that has a track of its own ([`variables::HttpGlobals`]).
+    http_globals: variables::HttpGlobals,
     /// Each auto-global made just in time and not made yet, php's
     /// `armed` on each of `CG(auto_globals)`: the first
     /// `zend_is_auto_global` of one lays it into `EG(symbol_table)`
@@ -1917,7 +1919,7 @@ impl Request {
             ending: None,
             exit_status: 0,
             resources,
-            superglobals: Vec::new(),
+            http_globals: variables::HttpGlobals::default(),
             armed: Vec::new(),
             tables: vec![SymbolTable::default()],
             included_files: Vec::new(),
@@ -16550,15 +16552,6 @@ impl Request {
             self.description.env.push((name.to_vec(), value.to_vec()));
         }
         true
-    }
-
-    /// The superglobal named, `$_SERVER` and its kin.
-    #[must_use]
-    pub fn superglobal(&self, name: &[u8]) -> Option<&PhpArray> {
-        self.superglobals
-            .iter()
-            .find(|(n, _)| n.as_slice() == name)
-            .map(|(_, a)| a)
     }
 
     /// `php_sapi_name()`: `sapi_module.name`.

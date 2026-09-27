@@ -439,7 +439,7 @@ fn prime(req: &mut Request) {
 fn find_id(req: &mut Request) {
     let name = ini(req, b"session.name");
     let lookup = |req: &mut Request, global: &[u8]| -> Option<Option<Vec<u8>>> {
-        let array = req.superglobal(global).copied()?;
+        let array = req.superglobal(global)?;
         let found = array
             .snapshot()
             .into_iter()

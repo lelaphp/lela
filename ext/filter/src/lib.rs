@@ -841,24 +841,32 @@ fn array_handler(
 /// `php_filter_get_storage`: the input array a type names, `None` where
 /// the host never initialised it, and php's `ValueError` for a type that
 /// is not one. The array is the caller's, one owner.
+///
+/// `INPUT_GET`, `INPUT_POST`, `INPUT_COOKIE` and `INPUT_SERVER` are
+/// `IF_G`'s raw arrays, what the host registered through
+/// `php_sapi_filter` and not an auto-global's array: no host describes a query
+/// string, a form body or a cookie header, so the first three were never
+/// initialised. `INPUT_ENV` is `$_ENV` as the host made it, armed first,
+/// since php imports the environment past the filter
+/// (`PG(http_globals)[TRACK_VARS_ENV]`), so `variables_order` decides it:
+///
+/// ```php
+/// var_dump(filter_input_array(INPUT_GET), is_array(filter_input_array(INPUT_ENV)));
+/// ```
+/// ```expect
+/// NULL
+/// bool(true)
+/// ```
 fn storage(req: &mut Request, input: i64) -> Result<Option<PhpArray>, Thrown> {
     let pairs: Vec<(Vec<u8>, Vec<u8>)> = match input {
-        INPUT_GET | INPUT_POST | INPUT_COOKIE => {
-            let name: &[u8] = match input {
-                INPUT_GET => b"_GET",
-                INPUT_POST => b"_POST",
-                _ => b"_COOKIE",
-            };
-            return match req.superglobal(name).copied() {
+        INPUT_GET | INPUT_POST | INPUT_COOKIE => return Ok(None),
+        INPUT_ENV => {
+            return match req.superglobal(b"_ENV") {
                 Some(array) => Ok(Some(array.copy(req)?)),
                 None => Ok(None),
             };
         }
-        INPUT_ENV => req.env_pairs().to_vec(),
         INPUT_SERVER => {
-            if let Some(array) = req.superglobal(b"_SERVER").copied() {
-                return Ok(Some(array.copy(req)?));
-            }
             // `cli_register_variables`: what php registers off the
             // script, each through `php_sapi_filter` into the raw array.
             let script = req.script_name().map(<[u8]>::to_vec).unwrap_or_default();

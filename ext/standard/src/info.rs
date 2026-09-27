@@ -231,9 +231,16 @@ fn modules(req: &mut Request) {
 }
 
 /// `php_print_gpcse_array` as text: `$name['key'] => value` per row,
-/// an array as `print_r` renders it, anything else as its string.
+/// an array as `print_r` renders it, anything else as its string. The
+/// auto-global is made first where it is armed (`zend_is_auto_global`),
+/// and what is printed is the program's, `EG(symbol_table)`'s, with its
+/// writes.
 fn gpcse(req: &mut Request, name: &str) -> Result<(), Thrown> {
-    let Some(array) = req.superglobal(name.as_bytes()).copied() else {
+    let _ = req.superglobal(name.as_bytes());
+    let Some(array) = req
+        .global(name.as_bytes())
+        .and_then(|value| value.deref().as_array().copied())
+    else {
         return Ok(());
     };
     for (key, value) in array.snapshot() {

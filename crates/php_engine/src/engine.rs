@@ -1785,7 +1785,8 @@ impl Engine {
         // `rshutdown`, in reverse bundle order; the output layer
         // deactivated after them, with the header block committed if
         // nothing had, and the shutdown entries freed behind it
-        // (`php_free_shutdown_functions`); then `shutdown_executor`,
+        // (`php_free_shutdown_functions`); then `PG(http_globals)` given
+        // up; then `shutdown_executor`,
         // which closes the open resources first, destroys the symbol
         // table after them (`zend_shutdown_executor_values`) and frees
         // the object storage last. The globals stand through all of it,
@@ -1812,6 +1813,7 @@ impl Engine {
         crate::output::deactivate(&mut req);
         req.catch_bailout();
         req.free_shutdown_functions();
+        req.destroy_http_globals();
         req.close_resources();
         req.free_user_handlers();
         req.destroy_symbol_table();
