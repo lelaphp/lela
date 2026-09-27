@@ -321,6 +321,40 @@ fn throwable_at(
     Ok(object)
 }
 
+/// `zend_throw_exception` with `EG(exception)` set: a new throwable of
+/// `class` with `message`, the one `previous` holds chained as its
+/// `previous` (`zend_throw_exception_internal`), as
+/// `spl_multiple_iterator_get_all` wraps what a sub-iterator threw. A
+/// fatal or an `exit` is handed on as it is.
+///
+/// ```php
+/// class It extends ArrayIterator { function current(): mixed { throw new Exception("inner"); } }
+/// $m = new MultipleIterator; $m->attachIterator(new It([1]));
+/// try { $m->current(); } catch (Throwable $e) { echo get_class($e), ": ", $e->getMessage(), " / ", $e->getPrevious()?->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// RuntimeException: Failed to call sub iterator method / inner
+/// ```
+pub fn throw_chained(req: &mut Request, previous: Thrown, class: &str, message: &str) -> Thrown {
+    let Some(earlier) = previous.exception().copied() else {
+        return previous;
+    };
+    match new_throwable(req, class, message) {
+        Ok(throwable) => {
+            if let Some(object) = throwable.as_object().copied() {
+                req.set_previous(object, earlier);
+            }
+            let thrown = throw_value(req, &throwable);
+            req.release(throwable);
+            thrown
+        }
+        Err(refused) => {
+            req.release(earlier.as_value());
+            refused
+        }
+    }
+}
+
 /// Make a throwable pending, `zend_throw_exception_object`: one more
 /// owner of the object, the pending slot's, as `ZEND_THROW` takes one
 /// before it frees its operand; the caller keeps its own. A value that

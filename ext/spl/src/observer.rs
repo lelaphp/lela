@@ -1208,6 +1208,27 @@ impl MultipleIterator {
     /// gone a
     /// gone d
     /// ```
+    ///
+    /// A sub-iterator's `current()` or `key()` that throws is php's
+    /// `RuntimeException` with what it threw as its previous; a `valid()`
+    /// that throws reads as not valid, what it threw handed on, or
+    /// chained under the `MIT_NEED_ALL` refusal.
+    ///
+    /// ```php
+    /// class It extends ArrayIterator { function current(): mixed { throw new Exception("inner"); } }
+    /// $m = new MultipleIterator; $m->attachIterator(new It([1]));
+    /// try { $m->current(); } catch (Throwable $e) { echo get_class($e), ": ", $e->getMessage(), " / ", $e->getPrevious()?->getMessage(), "\n"; }
+    /// class V extends ArrayIterator { function valid(): bool { throw new Exception("valid"); } }
+    /// $n = new MultipleIterator(MultipleIterator::MIT_NEED_ANY); $n->attachIterator(new V([1])); $n->attachIterator(new ArrayIterator([2]));
+    /// try { var_dump($n->current()); } catch (Throwable $e) { echo get_class($e), ": ", $e->getMessage(), " / ", $e->getPrevious()?->getMessage() ?? '-', "\n"; }
+    /// $n = new MultipleIterator(MultipleIterator::MIT_NEED_ALL); $n->attachIterator(new V([1]));
+    /// try { var_dump($n->key()); } catch (Throwable $e) { echo get_class($e), ": ", $e->getMessage(), " / ", $e->getPrevious()?->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// RuntimeException: Failed to call sub iterator method / inner
+    /// Exception: valid / -
+    /// RuntimeException: Called key() with non valid sub iterator / valid
+    /// ```
     #[php(tentative)]
     fn current(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
         get_all(req, this.object(), "current")
@@ -1851,17 +1872,36 @@ fn get_one(
     method: &str,
     out: &mut PhpArray,
 ) -> Result<(), Thrown> {
-    let answered = crate::method(req, iterator, b"valid")?;
-    let valid = answered.as_bool() == Some(true);
-    req.release(answered);
+    // A `valid()` that throws is read as not valid, with what it threw
+    // pending: the walk stops after this row, and a `MIT_NEED_ALL`
+    // refusal chains it.
+    let (valid, pending) = match crate::method(req, iterator, b"valid") {
+        Ok(answered) => {
+            let valid = answered.as_bool() == Some(true);
+            req.release(answered);
+            (valid, None)
+        }
+        Err(thrown) => (false, Some(thrown)),
+    };
     let value = if valid {
-        crate::method(req, iterator, method.as_bytes())?
+        crate::method(req, iterator, method.as_bytes()).map_err(|thrown| {
+            php_ext::raising::throw_chained(
+                req,
+                thrown,
+                "RuntimeException",
+                "Failed to call sub iterator method",
+            )
+        })?
     } else if with(req, this, |s| s.flags)? & MultipleIterator::MIT_NEED_ALL != 0 {
-        return Err(throw(
-            req,
-            "RuntimeException",
-            &format!("Called {method}() with non valid sub iterator"),
-        ));
+        let message = format!("Called {method}() with non valid sub iterator");
+        return Err(match pending {
+            Some(thrown) => {
+                php_ext::raising::throw_chained(req, thrown, "RuntimeException", &message)
+            }
+            None => throw(req, "RuntimeException", &message),
+        });
+    } else if let Some(thrown) = pending {
+        return Err(thrown);
     } else {
         Value::null()
     };
