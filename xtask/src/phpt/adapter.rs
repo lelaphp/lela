@@ -26,7 +26,7 @@ use crate::oracle::{
     self, Invocation, Observation, Oracle, PastLimit, Pin, Program, Verdict as Compared,
 };
 use crate::scratch::Tree;
-use crate::tally::Apart;
+use crate::tally::{Apart, Within};
 
 /// The fresh-process adapter of design §8's `ScriptExec` seam, bound to
 /// one run: the oracle and the registry, the binary it runs, the tier lane
@@ -256,23 +256,29 @@ fn beside(test: &Path, kind: Option<&str>) -> PathBuf {
 
 /// What a test may not run beside: its conflict keys and the three files
 /// its run writes beside it, so no two tests whose files would stand at
-/// one path run at once, in this run or another; and alone in its run
-/// where its conflict keys name `all`, as upstream has it
-/// (run-tests.php:1365-1370). The files are keyed by their canonical path,
-/// so two runs that spell the tree two ways hold one key for one file.
+/// one path run at once, in this run or another; alone in its run where
+/// its conflict keys name `all`, as upstream has it
+/// (run-tests.php:1365-1370); and its directory, which no other run has a
+/// test going in while it goes (#1097). The files and the directory are
+/// keyed by their canonical path, so two runs that spell the tree two ways
+/// hold one key for one file and one directory.
 pub(super) fn apart(test: &Path, dirs: &mut BTreeMap<PathBuf, Vec<String>>) -> Apart {
     let mut keys = file::conflicts(test, dirs);
-    let alone = keys.iter().any(|key| key == "all");
+    let within = if keys.iter().any(|key| key == "all") {
+        Within::Alone
+    } else {
+        Within::Batch
+    };
     keys.retain(|key| key != "all");
     let canonical = fs::canonicalize(test).unwrap_or_else(|_| test.to_path_buf());
     keys.extend(
         [None, Some("skip"), Some("clean")]
             .map(|kind| beside(&canonical, kind).display().to_string()),
     );
-    if alone {
-        Apart::Alone(keys)
-    } else {
-        Apart::Keys(keys)
+    Apart {
+        within,
+        keys,
+        directory: canonical.parent().map(Path::to_path_buf),
     }
 }
 
@@ -290,7 +296,7 @@ pub(super) fn batch(apart: &[Apart], jobs: NonZeroUsize) -> NonZeroUsize {
     const MOST: usize = 32;
     let tests = apart
         .iter()
-        .filter(|apart| matches!(apart, Apart::Keys(_)))
+        .filter(|apart| apart.within == Within::Batch)
         .count();
     let workers = jobs.get().min(tests).max(1);
     NonZeroUsize::MIN.saturating_add(tests.div_ceil(workers).clamp(1, MOST))

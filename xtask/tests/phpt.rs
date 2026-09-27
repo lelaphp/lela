@@ -884,6 +884,79 @@ fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// One tree standing where the pinned php-src would, a stand-in engine
+/// over the pinned oracle, and the checkouts that run `xtask phpt` over
+/// the tree as processes of their own, as two builders' lanes do: what the
+/// tests of runs held apart across processes share (#990, #1097).
+struct OneTree {
+    corpus: Tree,
+    engine: PathBuf,
+    _bin: Tree,
+}
+
+impl OneTree {
+    fn new(name: &str) -> OneTree {
+        let corpus = Tree::new(&format!("phpt-{name}-corpus")).unwrap();
+        let bin = Tree::new(&format!("phpt-{name}-engine")).unwrap();
+        let engine = bin.join("php");
+        fs::write(
+            &engine,
+            format!(
+                "#!/bin/sh\nexec \"{}\" \"$@\"\n",
+                oracle().unwrap().display()
+            ),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        written_at(&engine, SystemTime::now() + Duration::from_mins(1));
+        OneTree {
+            corpus,
+            engine,
+            _bin: bin,
+        }
+    }
+
+    /// A checkout of its own, committed, as a builder's worktree is.
+    fn checkout(name: &str) -> Tree {
+        let root = Tree::new(&format!("phpt-apart-{name}")).unwrap();
+        scratch_workspace(workspace(), &root).unwrap();
+        commit_all(&root, name);
+        root
+    }
+
+    /// `xtask phpt` over `subset` of the tree from the checkout at `root`,
+    /// a process of its own on a pool of two.
+    fn run(&self, root: &Tree, subset: &str) -> std::process::Child {
+        Command::new(env!("CARGO_BIN_EXE_xtask"))
+            .arg("--root")
+            .arg(root.path())
+            .args(["phpt", "--subset", subset, "--jobs", "2", "--engine"])
+            .arg(&self.engine)
+            .env(xtask::oracle::TREE_VARIABLE, self.corpus.path())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap()
+    }
+}
+
+/// The run the checkout at `root` kept once `child` is done, with its
+/// commit taken out, the one field two checkouts of one tree tell apart.
+fn kept(root: &Tree, child: std::process::Child) -> serde_json::Value {
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let mut runs = Vec::new();
+    files_under(&root.join("target/phpt-runs"), &mut runs);
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    let mut run: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&runs[0]).unwrap()).unwrap();
+    run.as_object_mut().unwrap().remove("commit").unwrap();
+    run
+}
+
 /// Two runs over one subset at once, from two checkouts, each a process of
 /// its own over the one tree the variable names (#990): each reads every
 /// test as a lone run does, and keeps the lone run's bytes. Each test
@@ -898,8 +971,8 @@ fn two_runs_over_one_subset_at_once_each_read_as_a_lone_run_does() {
     if oracle().is_none() {
         return;
     }
-    let corpus = Tree::new("phpt-apart-corpus").unwrap();
-    let dir = corpus.join("Zend/tests");
+    let tree = OneTree::new("apart");
+    let dir = tree.corpus.join("Zend/tests");
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("sibling.inc"), "<?php return 'sibling';\n").unwrap();
     for n in 1..=4 {
@@ -917,61 +990,15 @@ fn two_runs_over_one_subset_at_once_each_read_as_a_lone_run_does() {
         )
         .unwrap();
     }
-    let engine = Tree::new("phpt-apart-engine").unwrap();
-    let engine = engine.join("php");
-    fs::write(
-        &engine,
-        format!(
-            "#!/bin/sh\nexec \"{}\" \"$@\"\n",
-            oracle().unwrap().display()
-        ),
-    )
-    .unwrap();
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    written_at(&engine, SystemTime::now() + Duration::from_mins(1));
-    let checkout = |name: &str| {
-        let root = Tree::new(&format!("phpt-apart-{name}")).unwrap();
-        scratch_workspace(workspace(), &root).unwrap();
-        commit_all(&root, name);
-        root
-    };
-    let run = |root: &Tree| {
-        Command::new(env!("CARGO_BIN_EXE_xtask"))
-            .arg("--root")
-            .arg(root.path())
-            .args(["phpt", "--subset", "Zend/tests", "--jobs", "2", "--engine"])
-            .arg(&engine)
-            .env(xtask::oracle::TREE_VARIABLE, corpus.path())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap()
-    };
-    // The kept run with its commit taken out, the one field two checkouts
-    // of one tree tell apart.
-    let kept = |root: &Tree, child: std::process::Child| {
-        let out = child.wait_with_output().unwrap();
-        assert!(out.status.success(), "{out:?}");
-        let mut runs = Vec::new();
-        files_under(&root.join("target/phpt-runs"), &mut runs);
-        assert_eq!(runs.len(), 1, "{runs:?}");
-        let mut run: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&runs[0]).unwrap()).unwrap();
-        run.as_object_mut().unwrap().remove("commit").unwrap();
-        run
-    };
-    let lone = checkout("lone");
-    let alone = kept(&lone, run(&lone));
+    let lone = OneTree::checkout("lone");
+    let alone = kept(&lone, tree.run(&lone, "Zend/tests"));
     let verdicts = alone["verdicts"].as_object().unwrap();
     assert!(
         verdicts.len() == 4 && verdicts.values().all(|v| v == "pass"),
         "the lone run passes all four: {alone}"
     );
-    let (one, two) = (checkout("one"), checkout("two"));
-    let (first, second) = (run(&one), run(&two));
+    let (one, two) = (OneTree::checkout("one"), OneTree::checkout("two"));
+    let (first, second) = (tree.run(&one, "Zend/tests"), tree.run(&two, "Zend/tests"));
     assert_eq!(kept(&one, first), alone);
     assert_eq!(kept(&two, second), alone);
     let mut left = Vec::new();
@@ -988,4 +1015,132 @@ fn two_runs_over_one_subset_at_once_each_read_as_a_lone_run_does() {
         ],
         "nothing is left beside the tests"
     );
+}
+
+/// Two runs over one directory at once, from two checkouts, each a process
+/// of its own over one tree (#1097). The directory's two tests each make
+/// and remove `relative_temp` relative to the tree's root, where every
+/// program runs, as ext/zlib's `readgzfile_basic.phpt` and
+/// `readgzfile_basic2.phpt` make `readgzfile_temp` (#1091): a run judges the
+/// two in one batch, one after the other, and #990's keys hold each test
+/// apart from the other run's same test, but not the one run's first from
+/// the other's second, which met on `mkdir(): File exists`. The directory
+/// is held against every other run while any of a run's batches has a
+/// test going in it, so both keep the lone run's verdicts, on twenty runs
+/// of twenty. The lone run first is the control they are held to.
+#[test]
+fn two_runs_over_one_directory_at_once_never_meet_in_it() {
+    if oracle().is_none() {
+        return;
+    }
+    let tree = OneTree::new("directory");
+    let dir = tree.corpus.join("Zend/tests");
+    fs::create_dir_all(&dir).unwrap();
+    for name in ["a-temp", "b-temp"] {
+        fs::write(
+            dir.join(format!("{name}.phpt")),
+            format!(
+                "--TEST--\n{name}\n--FILE--\n<?php\nvar_dump(mkdir('relative_temp'));\n\
+                 usleep(200000);\nvar_dump(rmdir('relative_temp'));\n\
+                 --EXPECT--\nbool(true)\nbool(true)\n"
+            ),
+        )
+        .unwrap();
+    }
+    let lone = OneTree::checkout("directory-lone");
+    let alone = kept(&lone, tree.run(&lone, "Zend/tests"));
+    let verdicts = alone["verdicts"].as_object().unwrap();
+    assert!(
+        verdicts.len() == 2 && verdicts.values().all(|v| v == "pass"),
+        "the lone run passes both: {alone}"
+    );
+    let (one, two) = (
+        OneTree::checkout("directory-one"),
+        OneTree::checkout("directory-two"),
+    );
+    for run in 0..20 {
+        let (first, second) = (tree.run(&one, "Zend/tests"), tree.run(&two, "Zend/tests"));
+        assert_eq!(kept(&one, first), alone, "run {run}, the first");
+        assert_eq!(kept(&two, second), alone, "run {run}, the second");
+    }
+}
+
+/// A run killed while it holds a directory holds nothing (#1097): the
+/// operating system lets its lock go with the process. The first run's
+/// one test stands in the directory until it is killed; once it has
+/// started, its file goes and another comes, so the second run over the
+/// directory has a test of its own and no key of #990's in common with
+/// the first. The second waits on the directory while the first holds it,
+/// so its test starts only after the first is killed, and then reads as a
+/// lone run does.
+#[test]
+fn a_run_killed_holding_a_directory_holds_nothing() {
+    const PATIENCE: Duration = Duration::from_mins(2);
+    if oracle().is_none() {
+        return;
+    }
+    let tree = OneTree::new("killed");
+    let dir = tree.corpus.join("Zend/tests");
+    fs::create_dir_all(&dir).unwrap();
+    let (held, started) = (dir.join("held"), dir.join("started"));
+    fs::write(
+        dir.join("a-held.phpt"),
+        "--TEST--\nheld\n--FILE--\n<?php\nfile_put_contents(__DIR__ . '/held', getmypid());\n\
+         sleep(60);\n--EXPECT--\n",
+    )
+    .unwrap();
+    let (one, two) = (
+        OneTree::checkout("killed-one"),
+        OneTree::checkout("killed-two"),
+    );
+    let mut first = tree.run(&one, "Zend/tests");
+    let since = std::time::Instant::now();
+    while !held.exists() {
+        assert!(
+            since.elapsed() < PATIENCE,
+            "the first run's test never started"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    fs::remove_file(dir.join("a-held.phpt")).unwrap();
+    fs::write(
+        dir.join("b-quick.phpt"),
+        "--TEST--\nquick\n--FILE--\n<?php\nfile_put_contents(__DIR__ . '/started', microtime(true));\n\
+         echo \"ok\\n\";\n--EXPECT--\nok\n",
+    )
+    .unwrap();
+    let mut second = tree.run(&two, "Zend/tests");
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(
+        !started.exists(),
+        "the second run's test started beside the first's"
+    );
+    let killed = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
+    first.kill().unwrap();
+    first.wait().unwrap();
+    let pid = fs::read_to_string(&held).unwrap();
+    let _ = Command::new("kill").args(["-9", pid.trim()]).status();
+    let since = std::time::Instant::now();
+    while second.try_wait().unwrap().is_none() {
+        assert!(
+            since.elapsed() < PATIENCE,
+            "the second run still waits on the killed one"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let run = kept(&two, second);
+    assert_eq!(
+        run["verdicts"]
+            .as_object()
+            .unwrap()
+            .values()
+            .collect::<Vec<_>>(),
+        ["pass"],
+        "{run}"
+    );
+    let start: f64 = fs::read_to_string(&started).unwrap().parse().unwrap();
+    assert!(start >= killed, "{start} started before {killed}");
 }
