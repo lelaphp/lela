@@ -7354,6 +7354,40 @@ impl Request {
         Ok(Value::null())
     }
 
+    /// Whether `zend_std_get_property_ptr_ptr`
+    /// (`Z/Zend/zend_object_handlers.c:1485`) hands out no place for the
+    /// declared property `name` the scope reaches, so that a compound
+    /// assignment is `read_property`, the operation and `write_property`:
+    /// a readonly property, and one whose set visibility the scope lacks.
+    /// What the operation throws then comes before what the write
+    /// refuses.
+    ///
+    /// ```php
+    /// class Test { public readonly object $prop; public private(set) int $n = 1;
+    ///     function __construct() { $this->prop = new stdClass; } }
+    /// $t = new Test;
+    /// try { $t->prop += 1; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { $t->prop .= "x"; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { $t->n += 1; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Unsupported operand types: stdClass + int
+    /// Object of class stdClass could not be converted to string
+    /// Cannot modify private(set) property Test::$n from global scope
+    /// ```
+    pub(crate) fn place_withheld(&self, object: PhpObject, name: &[u8]) -> bool {
+        let Some(placed) = self.declared_slot(object.class(), name) else {
+            return false;
+        };
+        if !self.may_access(placed.declaring, placed.visibility) {
+            return false;
+        }
+        placed.readonly
+            || placed
+                .set_visibility
+                .is_some_and(|set| !self.has_set_access(placed.declaring, set))
+    }
+
     /// `zend_get_property_offset` at a write site, what `FETCH_OBJ_W`
     /// and `ASSIGN_OBJ` place the name by: the declared slot `name` sits
     /// in and whether it is typed, where the executed scope may reach

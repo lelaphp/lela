@@ -12652,6 +12652,38 @@ pub(crate) fn assign_obj_op<T: Tier>(
     Ok(Stepped::Same(frame))
 }
 
+/// The operation of a compound assignment over a declared property
+/// that hands out no place, readonly or set-restricted
+/// ([`Request::place_withheld`]): what `read_property` answers and the
+/// `OP_DATA` value through the kernel, the value operand given up
+/// either way, as `zend_assign_op_overloaded_property` does before its
+/// `write_property`.
+fn withheld_step(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    step: Compound<'_>,
+    object: PhpObject,
+    name: &[u8],
+) -> Result<Value, Thrown> {
+    let Compound { op, data, kernel } = step;
+    let value = exec::operand(req, frame, code, data.op1_type, data.op1);
+    let table = req.object_handlers(object.heap());
+    let computed = match table.read_property(req, object, name, PropertyRead::Warning) {
+        Ok(held) => {
+            let computed = kernel(req, &held, &value);
+            req.release(held);
+            computed
+        }
+        Err(thrown) => Err(thrown),
+    };
+    exec::free_operand(req, frame, code, data.op1_type, data.op1);
+    if computed.is_err() {
+        write_out(req, frame, code, op, &Value::null());
+    }
+    computed
+}
+
 /// `ASSIGN_OBJ_OP`'s body over an object: a property the class declared
 /// is the slot in place, the kernel over what it holds and the value,
 /// and the write back through [`Request::assign_declared_slot`], held
@@ -12681,6 +12713,7 @@ fn step_property(
             return Ok(Err(thrown));
         }
     };
+    let mut precomputed: Option<Value> = None;
     let placed = match place_of(req, object, &bytes) {
         // php's `NULL` from the class's own slot: the class serves the
         // name, so the pair of handlers takes the site.
@@ -12696,13 +12729,27 @@ fn step_property(
         PropertyPlace::Std => {
             let silent = req.serves_accessor(object.class(), b"__get");
             // `BP_VAR_RW` reads an unwritten slot before the placement.
-            let placed = req
-                .read_before_write(object, &bytes)
-                .and_then(|()| req.declared_slot_for_write(object, &bytes, "modify", silent));
+            let read = req.read_before_write(object, &bytes);
+            // A readonly or set-restricted property gets no place, so
+            // the operation is made over what `read_property` answers
+            // and what it throws comes before what the write refuses
+            // (`zend_assign_op_overloaded_property`).
+            if read.is_ok() && req.place_withheld(object, &bytes) {
+                match withheld_step(req, frame, code, step, object, &bytes) {
+                    Ok(stepped) => precomputed = Some(stepped),
+                    Err(thrown) => return Ok(Err(thrown)),
+                }
+            }
+            let placed =
+                read.and_then(|()| req.declared_slot_for_write(object, &bytes, "modify", silent));
             match placed {
                 Ok(placed) => placed,
                 Err(thrown) => {
-                    exec::free_operand(req, frame, code, data.op1_type, data.op1);
+                    if let Some(stepped) = precomputed {
+                        req.release(stepped);
+                    } else {
+                        exec::free_operand(req, frame, code, data.op1_type, data.op1);
+                    }
                     write_out(req, frame, code, op, &Value::null());
                     return Ok(Err(thrown));
                 }
@@ -12753,9 +12800,43 @@ fn step_property(
         let class = req.class_name(object.class());
         crate::api::raising::warning(req, &format!("Undefined property: {class}::${shown}"));
     }
-    let value = exec::operand(req, frame, code, data.op1_type, data.op1);
-    let computed = slot_step(req, step, object, (slot, typed), &value);
-    exec::free_operand(req, frame, code, data.op1_type, data.op1);
+    step_slot(
+        req,
+        frame,
+        code,
+        step,
+        (object, slot, typed),
+        &bytes,
+        precomputed,
+    )
+}
+
+/// `ASSIGN_OBJ_OP` over the declared slot it placed: the kernel over
+/// what the slot holds and the `OP_DATA` value, unless the operation was
+/// made already over what `read_property` answered, and what it made
+/// written back, as it is into an untyped slot and into a typed one
+/// held to the declared type under the frame's own regime
+/// (`zend_binary_assign_op_typed_prop`), what landed being what the
+/// temporary takes.
+fn step_slot(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    step: Compound<'_>,
+    (object, slot, typed): (PhpObject, u32, bool),
+    bytes: &[u8],
+    precomputed: Option<Value>,
+) -> Result<Result<(), Thrown>, Fatal> {
+    let Compound { op, data, .. } = step;
+    let computed = precomputed.map_or_else(
+        || {
+            let value = exec::operand(req, frame, code, data.op1_type, data.op1);
+            let computed = slot_step(req, step, object, (slot, typed), &value);
+            exec::free_operand(req, frame, code, data.op1_type, data.op1);
+            computed
+        },
+        Ok,
+    );
     let stepped = match computed {
         Ok(stepped) => stepped,
         Err(thrown) => {
@@ -12768,18 +12849,15 @@ fn step_property(
         req.assign_declared_slot(object.heap(), slot, stepped);
         return Ok(Ok(()));
     }
-    // `zend_binary_assign_op_typed_prop`: what the kernel made is held
-    // to the declared type under this frame's own regime, and what
-    // landed is what the temporary takes.
-    let Some(typed) = req.declared_typed_property(object.class(), &bytes) else {
+    let Some(typed) = req.declared_typed_property(object.class(), bytes) else {
         req.release(stepped);
-        let shown = String::from_utf8_lossy(&bytes);
+        let shown = String::from_utf8_lossy(bytes);
         return Err(Fatal::Error(format!(
             "InternalError: ZEND_ASSIGN_OBJ_OP placed the typed property ${shown}, whose declared type the class does not carry"
         )));
     };
     let strict = req.frame_strict_types(frame);
-    let landed = match req.hold_to_property_type(&typed, &bytes, stepped, strict) {
+    let landed = match req.hold_to_property_type(&typed, bytes, stepped, strict) {
         Ok(landed) => landed,
         Err(thrown) => {
             write_out(req, frame, code, op, &Value::null());
