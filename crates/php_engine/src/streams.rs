@@ -1690,7 +1690,25 @@ impl Ops for Stdio {
     /// `php_stdiop_seek` (`Z/main/streams/plain_wrapper.c:616`): php's
     /// warning on a stream that cannot seek, else `lseek(2)` and the
     /// offset it answered, and `EINVAL`'s `-1` for a `whence` it does
-    /// not know.
+    /// not know and for a position before the start, the position left
+    /// where it was.
+    ///
+    /// ```php
+    /// $h = fopen(__DIR__ . '/seek.tmp', 'wb+');
+    /// fwrite($h, '123456789');
+    /// var_dump(fseek($h, -4, SEEK_SET), ftell($h), fseek($h, -1, SEEK_CUR), fread($h, 1));
+    /// var_dump(fseek($h, -20, SEEK_CUR), ftell($h), fread($h, 1));
+    /// fclose($h); unlink(__DIR__ . '/seek.tmp');
+    /// ```
+    /// ```expect
+    /// int(-1)
+    /// int(9)
+    /// int(0)
+    /// string(1) "9"
+    /// int(-1)
+    /// int(9)
+    /// string(0) ""
+    /// ```
     fn seek(
         &mut self,
         req: &mut Request,
@@ -1704,7 +1722,10 @@ impl Ops for Stdio {
             return Some(false);
         }
         let from = match whence {
-            Some(Whence::Set) => SeekFrom::Start(u64::try_from(offset).unwrap_or(0)),
+            Some(Whence::Set) => match u64::try_from(offset) {
+                Ok(offset) => SeekFrom::Start(offset),
+                Err(_) => return Some(false),
+            },
             Some(Whence::Cur) => SeekFrom::Current(offset),
             Some(Whence::End) => SeekFrom::End(offset),
             None => return Some(false),
