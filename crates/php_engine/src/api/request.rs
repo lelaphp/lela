@@ -6524,7 +6524,7 @@ impl Request {
                 }
             };
         self.set_static_slot(declaring, &property, name, value, strict)
-            .map(|_| ())
+            .map(|(_, garbage)| self.release(garbage))
     }
 
     /// [`Request::set_static_property`] over a slot already addressed,
@@ -6533,7 +6533,10 @@ impl Request {
     /// in and `property` its declaration. What the slot holds after the
     /// write comes back, a view: the value `zend_assign_to_typed_prop`
     /// answers, coerced where the weak rule coerced it, which is what
-    /// `RETURN_VALUE_USED` copies.
+    /// `RETURN_VALUE_USED` copies. Beside it comes what the slot held,
+    /// one owner, for the caller to give up after that copy, php's
+    /// `garbage`: a destructor it serves that writes the property again
+    /// does not change what the assignment answers.
     ///
     /// ```php
     /// class Foo { public static int $i; public static string $s = "x"; }
@@ -6551,7 +6554,7 @@ impl Request {
         name: &[u8],
         mut value: Value,
         strict: bool,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<(Value, Value), Thrown> {
         // `zend_verify_property_type`: the value held to the declared
         // type and coerced by the weak rule where the writer's regime is
         // not strict, and php's `TypeError` where it neither satisfies
@@ -6572,18 +6575,25 @@ impl Request {
         // `zend_assign_to_variable` over a slot bound by reference: the
         // cell is held to every property it is typed by, which may be
         // another `static` than this one (`Test::$x =& Test::$y`).
+        let held = |req: &Request| {
+            req.statics
+                .iter()
+                .find(|((at, under), _)| *at == declaring && under == name)
+                .map_or(Value::null(), |(_, held)| held.deref())
+        };
+        let garbage = held(self);
+        self.addref(&garbage);
         if let Some(cell) = self.static_slot_cell(declaring, name)
             && cell.heap().sources() != 0
         {
-            self.assign_to_reference(cell.heap(), value, strict)?;
+            if let Err(thrown) = self.assign_to_reference(cell.heap(), value, strict) {
+                self.release(garbage);
+                return Err(thrown);
+            }
         } else {
             self.store_static_property(declaring, name, value);
         }
-        Ok(self
-            .statics
-            .iter()
-            .find(|((at, under), _)| *at == declaring && under == name)
-            .map_or(Value::null(), |(_, held)| held.deref()))
+        Ok((held(self), garbage))
     }
 
     /// The write half of [`Request::set_static_property`], php's
@@ -7942,7 +7952,11 @@ impl Request {
     /// `zend_assign_to_typed_ref`, held to each of their types under
     /// `strict` ([`Request::assign_to_reference`]), whatever the slot's
     /// own property declares. What landed comes back, a view: the
-    /// coercion where the cell's types made one.
+    /// coercion where the cell's types made one. Beside it comes what the
+    /// slot held, one owner, for the caller to release after it has
+    /// copied what landed into `result`, as php's `garbage` is given up
+    /// last: a destructor that writes the property again does not change
+    /// the value the assignment answers.
     ///
     /// ```php
     /// class C { public int $foo = 1; public $_; }
@@ -7955,23 +7969,47 @@ impl Request {
     /// int(5)
     /// int(5)
     /// ```
+    ///
+    /// What the slot held is given up after the assignment's value is
+    /// copied, so a destructor it serves that writes the property again
+    /// changes the property and not the value:
+    ///
+    /// ```php
+    /// class Box { public ?Test $value; public static ?Test $s; }
+    /// class Test { function __destruct() { global $box; $box->value = null; Box::$s = null; } }
+    /// $box = new Box; $box->value = new Test; Box::$s = new Test;
+    /// var_dump($box->value = new Test, Box::$s = new Test, $box->value, Box::$s);
+    /// ```
+    /// ```expect
+    /// object(Test)#4 (0) {
+    /// }
+    /// object(Test)#2 (0) {
+    /// }
+    /// NULL
+    /// object(Test)#2 (0) {
+    /// }
+    /// ```
     pub(crate) fn assign_declared_slot(
         &mut self,
         o: Obj,
         i: u32,
         value: Value,
         strict: bool,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<(Value, Value), Thrown> {
         if let Some(r) = o.slot(i).as_reference() {
-            if r.sources() != 0 {
-                self.assign_to_reference(r, value, strict)?;
-            } else {
-                self.reference_set(r, value);
+            let cell = PhpRef::of(r);
+            let garbage = cell.get();
+            self.addref(&garbage);
+            if let Err(thrown) = self.assign_to_reference(r, value, strict) {
+                self.release(garbage);
+                return Err(thrown);
             }
-            return Ok(PhpRef::of(r).get());
+            return Ok((cell.get(), garbage));
         }
+        let garbage = Value::of_zval(o.slot(i));
+        self.addref(&garbage);
         Heap::object_set_slot(&mut Hooks(self), o, i, value.into_zval());
-        Ok(Value::of_zval(o.slot(i)))
+        Ok((value, garbage))
     }
 
     /// `OBJ_PROP_NUM(obj, i)` written with no name in hand, what a
@@ -8268,11 +8306,12 @@ impl Request {
             } else {
                 value
             };
-            if let Err(thrown) =
-                self.assign_declared_slot(o, placed.slot, value, self.property_strict_types())
-            {
-                self.release(Value::string(name));
-                return Err(thrown);
+            match self.assign_declared_slot(o, placed.slot, value, self.property_strict_types()) {
+                Ok((_, garbage)) => self.release(garbage),
+                Err(thrown) => {
+                    self.release(Value::string(name));
+                    return Err(thrown);
+                }
             }
         } else {
             let key = php_heap::Key::Str(name.heap());

@@ -10810,7 +10810,7 @@ fn assign_property(
                 Err(thrown) => return Ok(Err(thrown)),
             };
             match req.assign_declared_slot(object.heap(), slot, value, strict) {
-                Ok(landed) => write_out(req, frame, code, op, &landed),
+                Ok(pair) => landed_out(req, frame, code, op, pair),
                 Err(thrown) => return Ok(Err(thrown)),
             }
             // `Z_PROP_FLAG_P(property_val) &= ~IS_PROP_REINITABLE`: a
@@ -10824,7 +10824,7 @@ fn assign_property(
             let strict = req.frame_strict_types(frame);
             Ok(req
                 .assign_declared_slot(object.heap(), slot, value, strict)
-                .map(|landed| write_out(req, frame, code, op, &landed)))
+                .map(|pair| landed_out(req, frame, code, op, pair)))
         }
         None => {
             let Some(key) = name.as_php_string().copied() else {
@@ -11045,7 +11045,7 @@ pub(crate) fn assign_static_prop<T: Tier>(
     // nor coerces. `RETURN_VALUE_USED` copies what landed, after it.
     let strict = req.frame_strict_types(frame);
     match req.set_static_slot(declaring, &property, &name, value, strict) {
-        Ok(landed) => write_out(req, frame, code, op, &landed),
+        Ok(pair) => landed_out(req, frame, code, op, pair),
         Err(thrown) => return threw(req, frame, &thrown),
     }
     req.vm_mut().jump(frame, at.saturating_add(2));
@@ -12911,7 +12911,7 @@ fn land_step(
     if !typed || bound {
         return Ok(req
             .assign_declared_slot(object.heap(), slot, stepped, strict)
-            .map(|landed| write_out(req, frame, code, op, &landed)));
+            .map(|pair| landed_out(req, frame, code, op, pair)));
     }
     let Some(typed) = req.declared_typed_property(object.class(), bytes) else {
         req.release(stepped);
@@ -12929,7 +12929,21 @@ fn land_step(
     };
     Ok(req
         .assign_declared_slot(object.heap(), slot, landed, strict)
-        .map(|landed| write_out(req, frame, code, op, &landed)))
+        .map(|pair| landed_out(req, frame, code, op, pair)))
+}
+
+/// What a write answered written into the temporary `out` names, then
+/// what the place held given up, php's `GC_DTOR(garbage)` after the
+/// `ZVAL_COPY` into `result`.
+fn landed_out(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    (landed, garbage): (Value, Value),
+) {
+    write_out(req, frame, code, op, &landed);
+    req.release(garbage);
 }
 
 /// `ZEND_ASSIGN_OBJ_OP` over the place `zend_std_get_property_ptr_ptr`
@@ -13479,7 +13493,7 @@ fn incdec_property(
     let strict = req.frame_strict_types(frame);
     Ok(req
         .assign_declared_slot(object.heap(), slot, landed, strict)
-        .map(|_| ()))
+        .map(|(_, garbage)| req.release(garbage)))
 }
 
 /// The property step over a slot bound to a reference other properties
@@ -13560,7 +13574,9 @@ fn typed_step(
         // the property's own.
         let strict = req.frame_strict_types(frame);
         let stored = req.assign_declared_slot(object.heap(), slot, limit, strict);
-        return Ok(stored.and(Err(thrown)));
+        return Ok(stored
+            .map(|(_, garbage)| req.release(garbage))
+            .and(Err(thrown)));
     }
     // A refusal is `ZVAL_COPY_VALUE(var_ptr, copy)`: the slot keeps
     // what it held.
