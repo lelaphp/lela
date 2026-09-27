@@ -208,6 +208,7 @@ macro_rules! into_const {
     };
 }
 into_const!(i64, Type::Int, |n| ConstExpr::long(*n));
+into_const!(i32, Type::Int, |n| ConstExpr::long(i64::from(*n)));
 into_const!(f64, Type::Float, |f| ConstExpr::Double(*f));
 into_const!(bool, Type::Bool, |b| ConstExpr::Bool(*b));
 into_const!(&str, Type::String, |s| ConstExpr::Str(s.as_bytes().into()));

@@ -581,9 +581,16 @@ impl<T: FromArgument> Raw<T> {
         self.value
     }
 
-    /// The declared coercion, with the text the entry would raise.
+    /// The declared coercion, with the text the entry would raise: the
+    /// argument held off its own slot as the entry holds one, so a type
+    /// only a slot can serve (`callable`, which `zend_is_callable`
+    /// resolves where the argument stands) holds here too; the value as
+    /// passed where the slot holds none.
     pub fn hold(&self, req: &mut Request) -> Result<T, Thrown> {
-        held_as(req, self.value, self.position)
+        match T::hold(req, self.position)? {
+            Some(held) => Ok(held),
+            None => held_as(req, self.value, self.position),
+        }
     }
 }
 
@@ -919,6 +926,20 @@ impl IntoReturn for Resource {
     }
     fn into_return(self, _: &mut Request) -> Result<Value, Thrown> {
         Ok(Value::resource(self))
+    }
+}
+
+/// `callable` as a return, `RETURN_COPY` of the value the callable came
+/// from: the callable holds it as a view, so the return takes an owner.
+impl IntoReturn for Callable {
+    const MASK: u32 = bits::CALLABLE;
+    fn declared() -> Option<Type> {
+        Some(Type::Callable)
+    }
+    fn into_return(self, req: &mut Request) -> Result<Value, Thrown> {
+        let value = self.value();
+        req.addref(&value);
+        Ok(value)
     }
 }
 
