@@ -219,6 +219,11 @@ pub(crate) fn reenter<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<(),
 /// throwable it did not catch pending for the resumer to read.
 pub(crate) fn resume<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<(), Fatal> {
     let guard = req.stack_mut().push_entry(frame);
+    if refused_at_entry(req) {
+        let outcome = unhandled_at_entry(req, Unhandled::Pending);
+        req.stack_mut().pop_entry(guard);
+        return outcome;
+    }
     let first = if req.is_pending() {
         Stepped::Threw(frame)
     } else {
@@ -242,8 +247,59 @@ fn serving<T: Tier>(req: &mut Request, frame: FrameRef, unhandled: Unhandled) ->
 /// its own entry frame whatever the caller is, where php installs its
 /// own site (design §4.3 seam 8).
 fn serve<T: Tier>(req: &mut Request, entry: FrameRef, unhandled: Unhandled) -> Result<(), Fatal> {
-    let first = activated::<T>(req, entry)?;
+    if interrupt::check(req)? {
+        return serve_from::<T>(req, unhandled, Stepped::Threw(entry));
+    }
+    if refused_at_entry(req) {
+        return unhandled_at_entry(req, unhandled);
+    }
+    let flow = T::safepoint(req, entry, Site::Entry);
+    let first = answered(req, flow, entry)?;
     serve_from::<T>(req, unhandled, first)
+}
+
+/// `execute_ex`'s own check (`Z/Zend/zend_vm_execute.h:116244`), after
+/// the interrupt check and before the first opline: where the machine
+/// stack has come down to `zend.max_allowed_stack_size`, php's
+/// `zend_call_stack_size_error` is left pending, and whether it was.
+/// php enters `execute_ex` again for every call a native makes back
+/// into PHP and for every generator it resumes, never for a user
+/// function a user function calls, so this is where a recursion through
+/// a callback is refused before it ends the process.
+///
+/// Under the small-stack regime a recursion through `array_map` reaches
+/// the ini's 256K in both engines; the number is the ini's less the
+/// platform's least reserve, so it is masked.
+///
+/// ```php
+/// function f($n) { return $n ? array_map('f', [$n - 1])[0] : 0; }
+/// try { var_dump(f(50000)); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect regime=small-stack
+/// Maximum call stack size of %d bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?
+/// ```
+fn refused_at_entry(req: &mut Request) -> bool {
+    match crate::api::raising::call_stack_limit(req) {
+        Ok(()) => false,
+        Err(thrown) => {
+            req.leave_pending(&thrown);
+            true
+        }
+    }
+}
+
+/// A throwable raised before any opline of the entry frame ran, where
+/// php clears `EG(opline_before_exception)` so that
+/// `ZEND_HANDLE_EXCEPTION` looks for no `try` element and frees nothing
+/// the frame's opline would have written: the serving is over with the
+/// throwable pending, as the unwinder leaves an entry frame it caught
+/// nothing in.
+fn unhandled_at_entry(req: &mut Request, unhandled: Unhandled) -> Result<(), Fatal> {
+    match unhandled {
+        Unhandled::Render if req.has_exception_handler() => Ok(()),
+        Unhandled::Render => req.uncaught(),
+        Unhandled::Pending => Ok(()),
+    }
 }
 
 /// The loop from the edge its first step took.
@@ -269,11 +325,7 @@ fn serve_from<T: Tier>(
                     // frame is left, as `zend_execute_scripts` serves it
                     // after `zend_execute` returns, so the throwable
                     // stays pending for `serve` to hand it over.
-                    return match unhandled {
-                        Unhandled::Render if req.has_exception_handler() => Ok(()),
-                        Unhandled::Render => req.uncaught(),
-                        Unhandled::Pending => Ok(()),
-                    };
+                    return unhandled_at_entry(req, unhandled);
                 }
                 stepped = unwound;
                 continue;
