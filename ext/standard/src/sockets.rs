@@ -14,6 +14,114 @@
 //! persistent sockets, which a request-scoped engine has no store for,
 //! so `pfsockopen` and `STREAM_CLIENT_PERSISTENT` open a socket of the
 //! request's own; and crypto, which is `ext/openssl`'s.
+//!
+//! The natives, as `basic_functions.stub.php` declares them.
+//!
+//! ```php
+//! foreach (['fsockopen', 'stream_socket_client', 'stream_socket_server', 'stream_socket_accept', 'stream_socket_get_name', 'stream_socket_recvfrom', 'stream_socket_sendto', 'stream_socket_enable_crypto', 'stream_socket_shutdown', 'stream_socket_pair', 'stream_get_transports'] as $f) echo new ReflectionFunction($f);
+//! ```
+//! ```expect
+//! Function [ <internal:standard> function fsockopen ] {
+//!
+//!   - Parameters [5] {
+//!     Parameter #0 [ <required> string $hostname ]
+//!     Parameter #1 [ <optional> int $port = -1 ]
+//!     Parameter #2 [ <optional> &$error_code = null ]
+//!     Parameter #3 [ <optional> &$error_message = null ]
+//!     Parameter #4 [ <optional> ?float $timeout = null ]
+//!   }
+//! }
+//! Function [ <internal:standard> function stream_socket_client ] {
+//!
+//!   - Parameters [6] {
+//!     Parameter #0 [ <required> string $address ]
+//!     Parameter #1 [ <optional> &$error_code = null ]
+//!     Parameter #2 [ <optional> &$error_message = null ]
+//!     Parameter #3 [ <optional> ?float $timeout = null ]
+//!     Parameter #4 [ <optional> int $flags = STREAM_CLIENT_CONNECT ]
+//!     Parameter #5 [ <optional> $context = null ]
+//!   }
+//! }
+//! Function [ <internal:standard> function stream_socket_server ] {
+//!
+//!   - Parameters [5] {
+//!     Parameter #0 [ <required> string $address ]
+//!     Parameter #1 [ <optional> &$error_code = null ]
+//!     Parameter #2 [ <optional> &$error_message = null ]
+//!     Parameter #3 [ <optional> int $flags = STREAM_SERVER_BIND | STREAM_SERVER_LISTEN ]
+//!     Parameter #4 [ <optional> $context = null ]
+//!   }
+//! }
+//! Function [ <internal:standard> function stream_socket_accept ] {
+//!
+//!   - Parameters [3] {
+//!     Parameter #0 [ <required> $socket ]
+//!     Parameter #1 [ <optional> ?float $timeout = null ]
+//!     Parameter #2 [ <optional> &$peer_name = null ]
+//!   }
+//! }
+//! Function [ <internal:standard> function stream_socket_get_name ] {
+//!
+//!   - Parameters [2] {
+//!     Parameter #0 [ <required> $socket ]
+//!     Parameter #1 [ <required> bool $remote ]
+//!   }
+//!   - Return [ string|false ]
+//! }
+//! Function [ <internal:standard> function stream_socket_recvfrom ] {
+//!
+//!   - Parameters [4] {
+//!     Parameter #0 [ <required> $socket ]
+//!     Parameter #1 [ <required> int $length ]
+//!     Parameter #2 [ <optional> int $flags = 0 ]
+//!     Parameter #3 [ <optional> &$address = null ]
+//!   }
+//!   - Return [ string|false ]
+//! }
+//! Function [ <internal:standard> function stream_socket_sendto ] {
+//!
+//!   - Parameters [4] {
+//!     Parameter #0 [ <required> $socket ]
+//!     Parameter #1 [ <required> string $data ]
+//!     Parameter #2 [ <optional> int $flags = 0 ]
+//!     Parameter #3 [ <optional> string $address = "" ]
+//!   }
+//!   - Return [ int|false ]
+//! }
+//! Function [ <internal:standard> function stream_socket_enable_crypto ] {
+//!
+//!   - Parameters [4] {
+//!     Parameter #0 [ <required> $stream ]
+//!     Parameter #1 [ <required> bool $enable ]
+//!     Parameter #2 [ <optional> ?int $crypto_method = null ]
+//!     Parameter #3 [ <optional> $session_stream = null ]
+//!   }
+//!   - Return [ int|bool ]
+//! }
+//! Function [ <internal:standard> function stream_socket_shutdown ] {
+//!
+//!   - Parameters [2] {
+//!     Parameter #0 [ <required> $stream ]
+//!     Parameter #1 [ <required> int $mode ]
+//!   }
+//!   - Return [ bool ]
+//! }
+//! Function [ <internal:standard> function stream_socket_pair ] {
+//!
+//!   - Parameters [3] {
+//!     Parameter #0 [ <required> int $domain ]
+//!     Parameter #1 [ <required> int $type ]
+//!     Parameter #2 [ <required> int $protocol ]
+//!   }
+//!   - Return [ array|false ]
+//! }
+//! Function [ <internal:standard> function stream_get_transports ] {
+//!
+//!   - Parameters [0] {
+//!   }
+//!   - Return [ array ]
+//! }
+//! ```
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
@@ -22,12 +130,10 @@ use std::time::Duration;
 
 use php_ext::abi::{OrFalse, Ref, Union, Untyped};
 use php_ext::attr::php_function;
-use php_ext::decl::{FunctionDecl, IniDecl, Name};
+use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
 use php_ext::request::{FdStream, Request, Stream, Xport, XportFailure};
 use php_ext::values::{PhpArray, PhpString, Resource, Value};
-
-use crate::output::Entry;
 
 use crate::file::constants::{
     STREAM_SERVER_LISTEN, STREAM_SHUT_RD, STREAM_SHUT_RDWR, STREAM_SHUT_WR,
@@ -60,130 +166,6 @@ pub(crate) fn ini() -> Vec<IniDecl> {
         per_dir: true,
         system: true,
     }]
-}
-
-/// The natives, as `basic_functions.stub.php` declares them.
-///
-/// ```php
-/// foreach (['fsockopen', 'stream_socket_client', 'stream_socket_server', 'stream_socket_accept', 'stream_socket_get_name', 'stream_socket_recvfrom', 'stream_socket_sendto', 'stream_socket_enable_crypto', 'stream_socket_shutdown', 'stream_socket_pair', 'stream_get_transports'] as $f) echo new ReflectionFunction($f);
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function fsockopen ] {
-///
-///   - Parameters [5] {
-///     Parameter #0 [ <required> string $hostname ]
-///     Parameter #1 [ <optional> int $port = -1 ]
-///     Parameter #2 [ <optional> &$error_code = null ]
-///     Parameter #3 [ <optional> &$error_message = null ]
-///     Parameter #4 [ <optional> ?float $timeout = null ]
-///   }
-/// }
-/// Function [ <internal:standard> function stream_socket_client ] {
-///
-///   - Parameters [6] {
-///     Parameter #0 [ <required> string $address ]
-///     Parameter #1 [ <optional> &$error_code = null ]
-///     Parameter #2 [ <optional> &$error_message = null ]
-///     Parameter #3 [ <optional> ?float $timeout = null ]
-///     Parameter #4 [ <optional> int $flags = STREAM_CLIENT_CONNECT ]
-///     Parameter #5 [ <optional> $context = null ]
-///   }
-/// }
-/// Function [ <internal:standard> function stream_socket_server ] {
-///
-///   - Parameters [5] {
-///     Parameter #0 [ <required> string $address ]
-///     Parameter #1 [ <optional> &$error_code = null ]
-///     Parameter #2 [ <optional> &$error_message = null ]
-///     Parameter #3 [ <optional> int $flags = STREAM_SERVER_BIND | STREAM_SERVER_LISTEN ]
-///     Parameter #4 [ <optional> $context = null ]
-///   }
-/// }
-/// Function [ <internal:standard> function stream_socket_accept ] {
-///
-///   - Parameters [3] {
-///     Parameter #0 [ <required> $socket ]
-///     Parameter #1 [ <optional> ?float $timeout = null ]
-///     Parameter #2 [ <optional> &$peer_name = null ]
-///   }
-/// }
-/// Function [ <internal:standard> function stream_socket_get_name ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> $socket ]
-///     Parameter #1 [ <required> bool $remote ]
-///   }
-///   - Return [ string|false ]
-/// }
-/// Function [ <internal:standard> function stream_socket_recvfrom ] {
-///
-///   - Parameters [4] {
-///     Parameter #0 [ <required> $socket ]
-///     Parameter #1 [ <required> int $length ]
-///     Parameter #2 [ <optional> int $flags = 0 ]
-///     Parameter #3 [ <optional> &$address = null ]
-///   }
-///   - Return [ string|false ]
-/// }
-/// Function [ <internal:standard> function stream_socket_sendto ] {
-///
-///   - Parameters [4] {
-///     Parameter #0 [ <required> $socket ]
-///     Parameter #1 [ <required> string $data ]
-///     Parameter #2 [ <optional> int $flags = 0 ]
-///     Parameter #3 [ <optional> string $address = "" ]
-///   }
-///   - Return [ int|false ]
-/// }
-/// Function [ <internal:standard> function stream_socket_enable_crypto ] {
-///
-///   - Parameters [4] {
-///     Parameter #0 [ <required> $stream ]
-///     Parameter #1 [ <required> bool $enable ]
-///     Parameter #2 [ <optional> ?int $crypto_method = null ]
-///     Parameter #3 [ <optional> $session_stream = null ]
-///   }
-///   - Return [ int|bool ]
-/// }
-/// Function [ <internal:standard> function stream_socket_shutdown ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> $stream ]
-///     Parameter #1 [ <required> int $mode ]
-///   }
-///   - Return [ bool ]
-/// }
-/// Function [ <internal:standard> function stream_socket_pair ] {
-///
-///   - Parameters [3] {
-///     Parameter #0 [ <required> int $domain ]
-///     Parameter #1 [ <required> int $type ]
-///     Parameter #2 [ <required> int $protocol ]
-///   }
-///   - Return [ array|false ]
-/// }
-/// Function [ <internal:standard> function stream_get_transports ] {
-///
-///   - Parameters [0] {
-///   }
-///   - Return [ array ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        fsockopen::declared(),
-        pfsockopen::declared(),
-        stream_socket_client::declared(),
-        stream_socket_server::declared(),
-        stream_socket_accept::declared(),
-        stream_socket_get_name::declared(),
-        stream_socket_recvfrom::declared(),
-        stream_socket_sendto::declared(),
-        stream_socket_enable_crypto::declared(),
-        stream_socket_shutdown::declared(),
-        stream_socket_pair::declared(),
-        stream_get_transports::declared(),
-    ]
 }
 
 /// A `?float $timeout` given as `null` or not at all: `FG(default_socket_timeout)`.

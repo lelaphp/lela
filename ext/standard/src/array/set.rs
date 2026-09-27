@@ -14,12 +14,12 @@
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
-use php_ext::abi::{Callable, Raw, Untyped, Variadic};
+use php_ext::abi::{Callable, FromArgument, Raw, Untyped, Variadic};
 use php_ext::attr::php_function;
 use php_ext::call::call;
 use php_ext::coerce::{to_long, to_string};
 use php_ext::decl::Type;
-use php_ext::raising::{Thrown, arg_count_error};
+use php_ext::raising::{Thrown, fatal};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, Value, ValueRef, zend_sort};
 
@@ -67,20 +67,20 @@ struct Parsed {
 /// the arrays held as they came, the body checking each where php does,
 /// and the trailing callbacks resolved where they stand.
 fn parse(req: &mut Request, values: &[Value], callbacks: usize) -> Result<Parsed, Thrown> {
-    let given = req.argument_count();
-    let least = callbacks + 1;
-    if given < least {
-        let plural = if least == 1 { "" } else { "s" };
-        return Err(arg_count_error(
-            req,
-            &format!("at least {least} argument{plural}, {given} given"),
-        ));
-    }
-    let split = given - callbacks;
+    crate::arity(req, callbacks + 1, None)?;
+    let split = req.argument_count() - callbacks;
     let mut found = Vec::with_capacity(callbacks);
     for offset in 0..values.len() - split {
         let position = u32::try_from(split + offset + 1).unwrap_or(u32::MAX);
-        found.push(crate::callable_argument(req, position)?);
+        match Callable::hold(req, position)? {
+            Some(callable) => found.push(callable),
+            None => {
+                return Err(fatal(
+                    req,
+                    "InternalError: a counted callback was not given",
+                ));
+            }
+        }
     }
     Ok(Parsed {
         arrays: values[..split].to_vec(),

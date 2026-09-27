@@ -7,6 +7,52 @@
 //! and `chdir` answers as the host's `chdir(2)` would, which is what the
 //! CLI's `VCWD_CHDIR` is. `chroot` is not declared: the oracle's CLI is
 //! built without `ENABLE_CHROOT_FUNC`.
+//!
+//! The natives, as the stub declares them.
+//!
+//! ```php
+//! echo new ReflectionFunction('dir'), new ReflectionFunction('chdir'), new ReflectionFunction('getcwd'), new ReflectionFunction('scandir'), new ReflectionFunction('glob');
+//! ```
+//! ```expect
+//! Function [ <internal:standard> function dir ] {
+//!
+//!   - Parameters [2] {
+//!     Parameter #0 [ <required> string $directory ]
+//!     Parameter #1 [ <optional> $context = null ]
+//!   }
+//!   - Return [ Directory|false ]
+//! }
+//! Function [ <internal:standard> function chdir ] {
+//!
+//!   - Parameters [1] {
+//!     Parameter #0 [ <required> string $directory ]
+//!   }
+//!   - Return [ bool ]
+//! }
+//! Function [ <internal:standard> function getcwd ] {
+//!
+//!   - Parameters [0] {
+//!   }
+//!   - Return [ string|false ]
+//! }
+//! Function [ <internal:standard> function scandir ] {
+//!
+//!   - Parameters [3] {
+//!     Parameter #0 [ <required> string $directory ]
+//!     Parameter #1 [ <optional> int $sorting_order = SCANDIR_SORT_ASCENDING ]
+//!     Parameter #2 [ <optional> $context = null ]
+//!   }
+//!   - Return [ array|false ]
+//! }
+//! Function [ <internal:standard> function glob ] {
+//!
+//!   - Parameters [2] {
+//!     Parameter #0 [ <required> string $pattern ]
+//!     Parameter #1 [ <optional> int $flags = 0 ]
+//!   }
+//!   - Return [ array|false ]
+//! }
+//! ```
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
@@ -17,13 +63,11 @@ use std::path::{Path, PathBuf};
 use php_ext::abi::{CloneObj, Instance, ObjectHandlers, OrFalse, Path as PathArg, This};
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::{lookup_class, new_object};
-use php_ext::decl::FunctionDecl;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
 use php_ext::request::{HostPath, Request, Resolve, Stream, Whence};
 use php_ext::values::{PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
 
 use crate::file::set_default_dir;
-use crate::output::Entry;
 use crate::streamsfuncs::{NullContext, context_of};
 use crate::{State, ffi};
 
@@ -71,61 +115,6 @@ pub(crate) mod constants {
     pub(crate) const SCANDIR_SORT_ASCENDING: i64 = 0;
     pub(crate) const SCANDIR_SORT_DESCENDING: i64 = 1;
     pub(crate) const SCANDIR_SORT_NONE: i64 = 2;
-}
-
-/// The natives, as the stub declares them.
-///
-/// ```php
-/// echo new ReflectionFunction('dir'), new ReflectionFunction('chdir'), new ReflectionFunction('getcwd'), new ReflectionFunction('scandir'), new ReflectionFunction('glob');
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function dir ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> string $directory ]
-///     Parameter #1 [ <optional> $context = null ]
-///   }
-///   - Return [ Directory|false ]
-/// }
-/// Function [ <internal:standard> function chdir ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> string $directory ]
-///   }
-///   - Return [ bool ]
-/// }
-/// Function [ <internal:standard> function getcwd ] {
-///
-///   - Parameters [0] {
-///   }
-///   - Return [ string|false ]
-/// }
-/// Function [ <internal:standard> function scandir ] {
-///
-///   - Parameters [3] {
-///     Parameter #0 [ <required> string $directory ]
-///     Parameter #1 [ <optional> int $sorting_order = SCANDIR_SORT_ASCENDING ]
-///     Parameter #2 [ <optional> $context = null ]
-///   }
-///   - Return [ array|false ]
-/// }
-/// Function [ <internal:standard> function glob ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> string $pattern ]
-///     Parameter #1 [ <optional> int $flags = 0 ]
-///   }
-///   - Return [ array|false ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        dir::declared(),
-        chdir::declared(),
-        getcwd::declared(),
-        scandir::declared(),
-        glob::declared(),
-    ]
 }
 
 /// `Directory` as `register_class_Directory` declares it: final, no

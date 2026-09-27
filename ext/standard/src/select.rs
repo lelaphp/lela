@@ -4,6 +4,32 @@
 //! reads (`PHP_STREAM_AS_FD_FOR_SELECT`) and hands the sets to
 //! `select(2)`, and `stream_isatty`. The casting is the engine's streams
 //! facet; the two C calls are `src/ffi/`'s.
+//!
+//! The two natives, as `basic_functions.stub.php` declares them.
+//!
+//! ```php
+//! echo new ReflectionFunction('stream_select'), new ReflectionFunction('stream_isatty');
+//! ```
+//! ```expect
+//! Function [ <internal:standard> function stream_select ] {
+//!
+//!   - Parameters [5] {
+//!     Parameter #0 [ <required> ?array &$read ]
+//!     Parameter #1 [ <required> ?array &$write ]
+//!     Parameter #2 [ <required> ?array &$except ]
+//!     Parameter #3 [ <required> ?int $seconds ]
+//!     Parameter #4 [ <optional> ?int $microseconds = null ]
+//!   }
+//!   - Return [ int|false ]
+//! }
+//! Function [ <internal:standard> function stream_isatty ] {
+//!
+//!   - Parameters [1] {
+//!     Parameter #0 [ <required> $stream ]
+//!   }
+//!   - Return [ bool ]
+//! }
+//! ```
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
@@ -11,45 +37,13 @@ use std::os::fd::RawFd;
 
 use php_ext::abi::{OrFalse, Ref};
 use php_ext::attr::php_function;
-use php_ext::decl::FunctionDecl;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
 use php_ext::request::{Cast, Request, Stream};
 use php_ext::values::{Key, PhpArray, Value, ValueRef};
 
-use crate::output::Entry;
-
 /// `?array &$read` and its two siblings: the caller's array, or `null`,
 /// by reference.
 type StreamArray = Ref<Option<PhpArray>>;
-
-/// The two natives, as `basic_functions.stub.php` declares them.
-///
-/// ```php
-/// echo new ReflectionFunction('stream_select'), new ReflectionFunction('stream_isatty');
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function stream_select ] {
-///
-///   - Parameters [5] {
-///     Parameter #0 [ <required> ?array &$read ]
-///     Parameter #1 [ <required> ?array &$write ]
-///     Parameter #2 [ <required> ?array &$except ]
-///     Parameter #3 [ <required> ?int $seconds ]
-///     Parameter #4 [ <optional> ?int $microseconds = null ]
-///   }
-///   - Return [ int|false ]
-/// }
-/// Function [ <internal:standard> function stream_isatty ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> $stream ]
-///   }
-///   - Return [ bool ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![stream_select::declared(), stream_isatty::declared()]
-}
 
 /// `php_stream_from_zval_no_verify` (`Z/main/php_streams.h:319`) over
 /// `zend_fetch_resource2_ex`: the stream a value names, and php's

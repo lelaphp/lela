@@ -11,6 +11,39 @@
 //! `realpath_cache_size` over the engine's realpath cache. In the stub's order
 //! (`basic_functions.stub.php`). `access(2)` and the rest `std` has no
 //! answer for are `ffi`'s.
+//!
+//! The natives declared here, in the stub's order.
+//!
+//! ```php
+//! echo new ReflectionFunction('touch'), new ReflectionFunction('chown'), new ReflectionFunction('clearstatcache');
+//! ```
+//! ```expect
+//! Function [ <internal:standard> function touch ] {
+//!
+//!   - Parameters [3] {
+//!     Parameter #0 [ <required> string $filename ]
+//!     Parameter #1 [ <optional> ?int $mtime = null ]
+//!     Parameter #2 [ <optional> ?int $atime = null ]
+//!   }
+//!   - Return [ bool ]
+//! }
+//! Function [ <internal:standard> function chown ] {
+//!
+//!   - Parameters [2] {
+//!     Parameter #0 [ <required> string $filename ]
+//!     Parameter #1 [ <required> string|int $user ]
+//!   }
+//!   - Return [ bool ]
+//! }
+//! Function [ <internal:standard> function clearstatcache ] {
+//!
+//!   - Parameters [2] {
+//!     Parameter #0 [ <optional> bool $clear_realpath_cache = false ]
+//!     Parameter #1 [ <optional> string $filename = "" ]
+//!   }
+//!   - Return [ void ]
+//! }
+//! ```
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
@@ -20,13 +53,11 @@ use std::path::PathBuf;
 
 use php_ext::abi::{OrFalse, Passed, Path, Union};
 use php_ext::attr::php_function;
-use php_ext::decl::FunctionDecl;
 use php_ext::raising::{Level, Thrown, docref, throw};
 use php_ext::request::{PathIntent, Request, WrapperOp};
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
 use crate::ffi;
-use crate::output::Entry;
 
 /// `S_IFMT` and the file types `filetype` names, with `S_IFLNK`, which
 /// `php_stat` tests before the rest.
@@ -93,74 +124,6 @@ impl Fs {
     fn is_access_check(self) -> bool {
         self.is_able_check() || self == Fs::Exists
     }
-}
-
-/// The natives declared here, in the stub's order.
-///
-/// ```php
-/// echo new ReflectionFunction('touch'), new ReflectionFunction('chown'), new ReflectionFunction('clearstatcache');
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function touch ] {
-///
-///   - Parameters [3] {
-///     Parameter #0 [ <required> string $filename ]
-///     Parameter #1 [ <optional> ?int $mtime = null ]
-///     Parameter #2 [ <optional> ?int $atime = null ]
-///   }
-///   - Return [ bool ]
-/// }
-/// Function [ <internal:standard> function chown ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> string $filename ]
-///     Parameter #1 [ <required> string|int $user ]
-///   }
-///   - Return [ bool ]
-/// }
-/// Function [ <internal:standard> function clearstatcache ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <optional> bool $clear_realpath_cache = false ]
-///     Parameter #1 [ <optional> string $filename = "" ]
-///   }
-///   - Return [ void ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        fileatime::declared(),
-        filectime::declared(),
-        filegroup::declared(),
-        fileinode::declared(),
-        filemtime::declared(),
-        fileowner::declared(),
-        fileperms::declared(),
-        filesize::declared(),
-        filetype::declared(),
-        file_exists::declared(),
-        is_writable::declared(),
-        is_writeable::declared(),
-        is_readable::declared(),
-        is_executable::declared(),
-        is_file::declared(),
-        is_dir::declared(),
-        is_link::declared(),
-        stat::declared(),
-        lstat::declared(),
-        chown::declared(),
-        chgrp::declared(),
-        lchown::declared(),
-        lchgrp::declared(),
-        chmod::declared(),
-        touch::declared(),
-        clearstatcache::declared(),
-        disk_total_space::declared(),
-        disk_free_space::declared(),
-        diskfreespace::declared(),
-        realpath_cache_get::declared(),
-        realpath_cache_size::declared(),
-    ]
 }
 
 /// `realpath_cache_get(): array`, php's `PHP_FUNCTION(realpath_cache_get)`:
