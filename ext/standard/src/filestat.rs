@@ -18,16 +18,16 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
+use php_ext::abi::{OrFalse, Passed, Path, Union};
+use php_ext::attr::php_function;
 use php_ext::coerce::coerce_param;
-use php_ext::decl::{ConstExpr, FunctionDecl, Parameter, ParameterDefault, Type};
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
+use php_ext::decl::{FunctionDecl, Type};
+use php_ext::raising::{Level, Thrown, docref, throw};
 use php_ext::request::{PathIntent, Request, WrapperOp};
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
 use crate::ffi;
 use crate::output::Entry;
-use crate::stub::stub;
-use crate::{argument_count_between, bool_argument, declared, long_argument, parameter};
 
 /// `S_IFMT` and the file types `filetype` names, with `S_IFLNK`, which
 /// `php_stat` tests before the rest.
@@ -129,103 +129,38 @@ impl Fs {
 /// }
 /// ```
 pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    let int_or_false = || Type::Union(vec![Type::Int, Type::False]);
-    let filename = || parameter(b"filename", Type::String);
-    let stat_one = |name: &[u8], returns: Type| declared(name, &[filename()], returns);
-    let owner = |name: &[u8], who: &[u8]| {
-        declared(
-            name,
-            &[
-                filename(),
-                parameter(who, Type::Union(vec![Type::String, Type::Int])),
-            ],
-            Type::Bool,
-        )
-    };
-    let nullable_int = |name: &[u8]| Parameter {
-        default: ParameterDefault::Expr(ConstExpr::Null),
-        ..parameter(name, Type::Nullable(Box::new(Type::Int)))
-    };
     vec![
-        (stat_one(b"fileatime", int_or_false()), fileatime as Entry),
-        (stat_one(b"filectime", int_or_false()), filectime),
-        (stat_one(b"filegroup", int_or_false()), filegroup),
-        (stat_one(b"fileinode", int_or_false()), fileinode),
-        (stat_one(b"filemtime", int_or_false()), filemtime),
-        (stat_one(b"fileowner", int_or_false()), fileowner),
-        (stat_one(b"fileperms", int_or_false()), fileperms),
-        (stat_one(b"filesize", int_or_false()), filesize),
-        (
-            stat_one(b"filetype", Type::Union(vec![Type::String, Type::False])),
-            filetype,
-        ),
-        (stat_one(b"file_exists", Type::Bool), file_exists),
-        (stat_one(b"is_writable", Type::Bool), is_writable),
-        (stat_one(b"is_writeable", Type::Bool), is_writable),
-        (stat_one(b"is_readable", Type::Bool), is_readable),
-        (stat_one(b"is_executable", Type::Bool), is_executable),
-        (stat_one(b"is_file", Type::Bool), is_file),
-        (stat_one(b"is_dir", Type::Bool), is_dir),
-        (stat_one(b"is_link", Type::Bool), is_link),
-        (
-            stat_one(b"stat", Type::Union(vec![Type::Array, Type::False])),
-            stat,
-        ),
-        (
-            stat_one(b"lstat", Type::Union(vec![Type::Array, Type::False])),
-            lstat,
-        ),
-        (owner(b"chown", b"user"), chown),
-        (owner(b"chgrp", b"group"), chgrp),
-        (owner(b"lchown", b"user"), lchown),
-        (owner(b"lchgrp", b"group"), lchgrp),
-        (
-            declared(
-                b"chmod",
-                &[filename(), parameter(b"permissions", Type::Int)],
-                Type::Bool,
-            ),
-            chmod,
-        ),
-        (
-            declared(
-                b"touch",
-                &[filename(), nullable_int(b"mtime"), nullable_int(b"atime")],
-                Type::Bool,
-            ),
-            touch,
-        ),
-        (
-            declared(
-                b"clearstatcache",
-                &[
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Bool(false)),
-                        ..parameter(b"clear_realpath_cache", Type::Bool)
-                    },
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Str(Box::new([]))),
-                        ..parameter(b"filename", Type::String)
-                    },
-                ],
-                Type::Void,
-            ),
-            clearstatcache,
-        ),
-        (
-            stub("disk_total_space(string $directory): float|false"),
-            disk_total_space,
-        ),
-        (
-            stub("disk_free_space(string $directory): float|false"),
-            disk_free_space,
-        ),
-        (
-            stub("diskfreespace(string $directory): float|false"),
-            disk_free_space,
-        ),
-        (stub("realpath_cache_get(): array"), realpath_cache_get),
-        (stub("realpath_cache_size(): int"), realpath_cache_size),
+        fileatime::declared(),
+        filectime::declared(),
+        filegroup::declared(),
+        fileinode::declared(),
+        filemtime::declared(),
+        fileowner::declared(),
+        fileperms::declared(),
+        filesize::declared(),
+        filetype::declared(),
+        file_exists::declared(),
+        is_writable::declared(),
+        is_writeable::declared(),
+        is_readable::declared(),
+        is_executable::declared(),
+        is_file::declared(),
+        is_dir::declared(),
+        is_link::declared(),
+        stat::declared(),
+        lstat::declared(),
+        chown::declared(),
+        chgrp::declared(),
+        lchown::declared(),
+        lchgrp::declared(),
+        chmod::declared(),
+        touch::declared(),
+        clearstatcache::declared(),
+        disk_total_space::declared(),
+        disk_free_space::declared(),
+        diskfreespace::declared(),
+        realpath_cache_get::declared(),
+        realpath_cache_size::declared(),
     ]
 }
 
@@ -256,8 +191,8 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
 /// bool(true)
 /// bool(true)
 /// ```
-fn realpath_cache_get(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 0)?;
+#[php_function]
+fn realpath_cache_get(req: &mut Request) -> Result<PhpArray, Thrown> {
     let mut all = PhpArray::new(req)?;
     for entry in req.realpath_cache() {
         let key = match i64::try_from(entry.key) {
@@ -281,7 +216,7 @@ fn realpath_cache_get(req: &mut Request) -> Result<Value, Thrown> {
         let path = Key::Str(PhpString::new(req, &entry.path)?);
         all.set(req, path, Value::array(row))?;
     }
-    Ok(Value::array(all))
+    Ok(all)
 }
 
 /// `realpath_cache_size(): int`: the bytes the realpath cache's buckets
@@ -296,11 +231,9 @@ fn realpath_cache_get(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// int(0)
 /// ```
-fn realpath_cache_size(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 0)?;
-    Ok(Value::int(
-        req.realpath_cache().iter().map(|entry| entry.size).sum(),
-    ))
+#[php_function]
+fn realpath_cache_size(req: &mut Request) -> i64 {
+    req.realpath_cache().iter().map(|entry| entry.size).sum()
 }
 
 /// `disk_total_space(string $directory): float|false`: the size of the
@@ -321,8 +254,9 @@ fn realpath_cache_size(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// disk_total_space(): Argument #1 ($directory) must not contain any null bytes
 /// ```
-fn disk_total_space(req: &mut Request) -> Result<Value, Thrown> {
-    disk_space(req, |space| space.total)
+#[php_function]
+fn disk_total_space(req: &mut Request, directory: Path) -> Result<OrFalse<f64>, Thrown> {
+    disk_space(req, directory, |space| space.total)
 }
 
 /// `disk_free_space(string $directory): float|false`, and its alias
@@ -339,23 +273,26 @@ fn disk_total_space(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(false)
 /// ```
-fn disk_free_space(req: &mut Request) -> Result<Value, Thrown> {
-    disk_space(req, |space| space.available)
+#[php_function(aliases(diskfreespace))]
+fn disk_free_space(req: &mut Request, directory: Path) -> Result<OrFalse<f64>, Thrown> {
+    disk_space(req, directory, |space| space.available)
 }
 
 /// The two natives' one body: `Z_PARAM_PATH`, `expand_filepath`, the
 /// `open_basedir` check and `statvfs`, the answer read off it.
-fn disk_space(req: &mut Request, read: fn(&ffi::Space) -> f64) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let path = path_argument(req, 1)?;
-    let full = req.absolutize(path.as_bytes());
+fn disk_space(
+    req: &mut Request,
+    directory: Path,
+    read: fn(&ffi::Space) -> f64,
+) -> Result<OrFalse<f64>, Thrown> {
+    let full = req.absolutize(directory.0.as_bytes());
     req.fs_guard(&full, PathIntent::Stat)?;
     match ffi::statvfs(full.0.as_os_str().as_bytes()) {
-        Ok(space) => Ok(Value::float(read(&space))),
+        Ok(space) => Ok(OrFalse::Value(read(&space))),
         Err(errno) => {
             let text = strerror(&std::io::Error::from_raw_os_error(errno));
             docref(req, Level::Warning, &text);
-            Ok(Value::bool(false))
+            Ok(OrFalse::False)
         }
     }
 }
@@ -427,16 +364,6 @@ pub(super) fn nullable_long(req: &mut Request, position: u32) -> Result<Option<i
         }
         _ => Ok(None),
     }
-}
-
-/// `Z_PARAM_PATH`: the string argument at `position`, with php's
-/// `ValueError` for a null byte in it.
-fn path_argument(req: &mut Request, position: u32) -> Result<PhpString, Thrown> {
-    let path = crate::string_argument(req, position)?;
-    if path.as_bytes().contains(&0) {
-        return Err(arg_value_error(req, position, "not contain any null bytes"));
-    }
-    Ok(path)
 }
 
 /// Whether `touch`, `chmod`, `chown` and `chgrp` call the C library
@@ -582,12 +509,26 @@ pub fn php_stat(req: &mut Request, filename: &[u8], ty: Fs) -> Result<Value, Thr
     })
 }
 
-/// `FileFunction(name, funcnum)` (`Z/ext/standard/filestat.c:1016`): one
-/// `Z_PARAM_STR` and `php_stat` over it.
-fn file_function(req: &mut Request, ty: Fs) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let filename = crate::string_argument(req, 1)?;
-    php_stat(req, filename.as_bytes(), ty)
+/// `FileFunction(name, funcnum)` (`Z/ext/standard/filestat.c:1016`), one
+/// `Z_PARAM_STR` and `php_stat` over it, of an integer field: `int|false`.
+fn stat_int(req: &mut Request, filename: PhpString, ty: Fs) -> Result<OrFalse<i64>, Thrown> {
+    let answer = php_stat(req, filename.as_bytes(), ty)?;
+    Ok(answer.as_int().map_or(OrFalse::False, OrFalse::Value))
+}
+
+/// `bool`: the `php_stat` answer of a check.
+fn stat_bool(req: &mut Request, filename: PhpString, ty: Fs) -> Result<bool, Thrown> {
+    let answer = php_stat(req, filename.as_bytes(), ty)?;
+    Ok(matches!(answer.as_ref(), ValueRef::Bool(true)))
+}
+
+/// `array|false`: the `php_stat` answer of `stat` and `lstat`.
+fn stat_array(req: &mut Request, filename: PhpString, ty: Fs) -> Result<OrFalse<PhpArray>, Thrown> {
+    let answer = php_stat(req, filename.as_bytes(), ty)?;
+    Ok(answer
+        .as_array()
+        .copied()
+        .map_or(OrFalse::False, OrFalse::Value))
 }
 
 /// `fileatime(string $filename): int|false`: `st_atime`, or `false` after
@@ -602,8 +543,9 @@ fn file_function(req: &mut Request, ty: Fs) -> Result<Value, Thrown> {
 /// int(2000)
 /// bool(false)
 /// ```
-fn fileatime(req: &mut Request) -> Result<Value, Thrown> {
-    file_function(req, Fs::Atime)
+#[php_function]
+fn fileatime(req: &mut Request, filename: PhpString) -> Result<OrFalse<i64>, Thrown> {
+    stat_int(req, filename, Fs::Atime)
 }
 
 /// `filectime(string $filename): int|false`: `st_ctime`; a wrapper with
@@ -620,8 +562,9 @@ fn fileatime(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(false)
 /// ```
-fn filectime(req: &mut Request) -> Result<Value, Thrown> {
-    file_function(req, Fs::Ctime)
+#[php_function]
+fn filectime(req: &mut Request, filename: PhpString) -> Result<OrFalse<i64>, Thrown> {
+    stat_int(req, filename, Fs::Ctime)
 }
 
 /// `filegroup(string $filename): int|false`: `st_gid`.
@@ -633,8 +576,9 @@ fn filectime(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(false)
 /// ```
-fn filegroup(req: &mut Request) -> Result<Value, Thrown> {
-    file_function(req, Fs::Group)
+#[php_function]
+fn filegroup(req: &mut Request, filename: PhpString) -> Result<OrFalse<i64>, Thrown> {
+    stat_int(req, filename, Fs::Group)
 }
 
 /// `fileinode(string $filename): int|false`: `st_ino`.
@@ -646,8 +590,9 @@ fn filegroup(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(true)
 /// ```
-fn fileinode(req: &mut Request) -> Result<Value, Thrown> {
-    file_function(req, Fs::Inode)
+#[php_function]
+fn fileinode(req: &mut Request, filename: PhpString) -> Result<OrFalse<i64>, Thrown> {
+    stat_int(req, filename, Fs::Inode)
 }
 
 /// `filemtime(string $filename): int|false`: `st_mtime`, from the stat
@@ -661,8 +606,9 @@ fn fileinode(req: &mut Request) -> Result<Value, Thrown> {
 /// int(1000)
 /// int(5000)
 /// ```
-fn filemtime(req: &mut Request) -> Result<Value, Thrown> {
-    file_function(req, Fs::Mtime)
+#[php_function]
+fn filemtime(req: &mut Request, filename: PhpString) -> Result<OrFalse<i64>, Thrown> {
+    stat_int(req, filename, Fs::Mtime)
 }
 
 /// `fileowner(string $filename): int|false`: `st_uid`.
@@ -675,8 +621,9 @@ fn filemtime(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(false)
 /// ```
-fn fileowner(req: &mut Request) -> Result<Value, Thrown> {
-    file_function(req, Fs::Owner)
+#[php_function]
+fn fileowner(req: &mut Request, filename: PhpString) -> Result<OrFalse<i64>, Thrown> {
+    stat_int(req, filename, Fs::Owner)
 }
 
 /// `fileperms(string $filename): int|false`: `st_mode`, the file type
@@ -689,8 +636,9 @@ fn fileowner(req: &mut Request) -> Result<Value, Thrown> {
 /// ```expect
 /// 100640 40000
 /// ```
-fn fileperms(req: &mut Request) -> Result<Value, Thrown> {
-    file_function(req, Fs::Perms)
+#[php_function]
+fn fileperms(req: &mut Request, filename: PhpString) -> Result<OrFalse<i64>, Thrown> {
+    stat_int(req, filename, Fs::Perms)
 }
 
 /// `filesize(string $filename): int|false`: `st_size`. A write to the
@@ -709,8 +657,9 @@ fn fileperms(req: &mut Request) -> Result<Value, Thrown> {
 /// Warning: filesize(): stat failed for %s/nope in %s on line 4
 /// bool(false)
 /// ```
-fn filesize(req: &mut Request) -> Result<Value, Thrown> {
-    file_function(req, Fs::Size)
+#[php_function]
+fn filesize(req: &mut Request, filename: PhpString) -> Result<OrFalse<i64>, Thrown> {
+    stat_int(req, filename, Fs::Size)
 }
 
 /// `filetype(string $filename): string|false`: the type `lstat(2)`
@@ -728,8 +677,13 @@ fn filesize(req: &mut Request) -> Result<Value, Thrown> {
 /// string(4) "link"
 /// bool(false)
 /// ```
-fn filetype(req: &mut Request) -> Result<Value, Thrown> {
-    file_function(req, Fs::Type)
+#[php_function]
+fn filetype(req: &mut Request, filename: PhpString) -> Result<OrFalse<PhpString>, Thrown> {
+    let answer = php_stat(req, filename.as_bytes(), Fs::Type)?;
+    Ok(answer
+        .as_php_string()
+        .copied()
+        .map_or(OrFalse::False, OrFalse::Value))
 }
 
 /// `file_exists(string $filename): bool`: `access(F_OK)` for a plain
@@ -746,8 +700,9 @@ fn filetype(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(false)
 /// ```
-fn file_exists(req: &mut Request) -> Result<Value, Thrown> {
-    file_function(req, Fs::Exists)
+#[php_function]
+fn file_exists(req: &mut Request, filename: PhpString) -> Result<bool, Thrown> {
+    stat_bool(req, filename, Fs::Exists)
 }
 
 /// `is_writable(string $filename): bool` and its alias `is_writeable`:
@@ -763,8 +718,9 @@ fn file_exists(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(false)
 /// ```
-fn is_writable(req: &mut Request) -> Result<Value, Thrown> {
-    file_function(req, Fs::IsW)
+#[php_function(aliases(is_writeable))]
+fn is_writable(req: &mut Request, filename: PhpString) -> Result<bool, Thrown> {
+    stat_bool(req, filename, Fs::IsW)
 }
 
 /// `is_readable(string $filename): bool`: `access(R_OK)` for a plain
@@ -779,8 +735,9 @@ fn is_writable(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(false)
 /// ```
-fn is_readable(req: &mut Request) -> Result<Value, Thrown> {
-    file_function(req, Fs::IsR)
+#[php_function]
+fn is_readable(req: &mut Request, filename: PhpString) -> Result<bool, Thrown> {
+    stat_bool(req, filename, Fs::IsR)
 }
 
 /// `is_executable(string $filename): bool`: `access(X_OK)` for a plain
@@ -795,8 +752,9 @@ fn is_readable(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(true)
 /// ```
-fn is_executable(req: &mut Request) -> Result<Value, Thrown> {
-    file_function(req, Fs::IsX)
+#[php_function]
+fn is_executable(req: &mut Request, filename: PhpString) -> Result<bool, Thrown> {
+    stat_bool(req, filename, Fs::IsX)
 }
 
 /// `is_file(string $filename): bool`: a regular file, by `stat(2)`.
@@ -810,8 +768,9 @@ fn is_executable(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(true)
 /// ```
-fn is_file(req: &mut Request) -> Result<Value, Thrown> {
-    file_function(req, Fs::IsFile)
+#[php_function]
+fn is_file(req: &mut Request, filename: PhpString) -> Result<bool, Thrown> {
+    stat_bool(req, filename, Fs::IsFile)
 }
 
 /// `is_dir(string $filename): bool`: a directory, by `stat(2)`.
@@ -826,8 +785,9 @@ fn is_file(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(true)
 /// ```
-fn is_dir(req: &mut Request) -> Result<Value, Thrown> {
-    file_function(req, Fs::IsDir)
+#[php_function]
+fn is_dir(req: &mut Request, filename: PhpString) -> Result<bool, Thrown> {
+    stat_bool(req, filename, Fs::IsDir)
 }
 
 /// `is_link(string $filename): bool`: a symbolic link, by `lstat(2)`.
@@ -841,8 +801,9 @@ fn is_dir(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(false)
 /// ```
-fn is_link(req: &mut Request) -> Result<Value, Thrown> {
-    file_function(req, Fs::IsLink)
+#[php_function]
+fn is_link(req: &mut Request, filename: PhpString) -> Result<bool, Thrown> {
+    stat_bool(req, filename, Fs::IsLink)
 }
 
 /// `stat(string $filename): array|false`: the thirteen fields under
@@ -863,8 +824,9 @@ fn is_link(req: &mut Request) -> Result<Value, Thrown> {
 /// int(32768)
 /// bool(false)
 /// ```
-fn stat(req: &mut Request) -> Result<Value, Thrown> {
-    file_function(req, Fs::Stat)
+#[php_function]
+fn stat(req: &mut Request, filename: PhpString) -> Result<OrFalse<PhpArray>, Thrown> {
+    stat_array(req, filename, Fs::Stat)
 }
 
 /// `lstat(string $filename): array|false`: `stat`'s fields of the link
@@ -881,34 +843,13 @@ fn stat(req: &mut Request) -> Result<Value, Thrown> {
 /// int(6)
 /// bool(false)
 /// ```
-fn lstat(req: &mut Request) -> Result<Value, Thrown> {
-    file_function(req, Fs::Lstat)
+#[php_function]
+fn lstat(req: &mut Request, filename: PhpString) -> Result<OrFalse<PhpArray>, Thrown> {
+    stat_array(req, filename, Fs::Lstat)
 }
 
-/// A user or a group as `Z_PARAM_STR_OR_LONG` reads one.
-enum Who {
-    Name(PhpString),
-    Id(i64),
-}
-
-/// `Z_PARAM_STR_OR_LONG` at `position`: an int or a string as it is,
-/// anything else coerced to `string|int` as a parameter of that type.
-fn who_argument(req: &mut Request, position: u32) -> Result<Who, Thrown> {
-    let given = req.argument(position).unwrap_or_default();
-    let value = match given.deref().as_ref() {
-        ValueRef::Int(_) | ValueRef::Str(_) => given.deref(),
-        _ => coerce_param(
-            req,
-            &given,
-            &Type::Union(vec![Type::String, Type::Int]),
-            position,
-        )?,
-    };
-    Ok(match value.as_ref() {
-        ValueRef::Str(s) => Who::Name(*s),
-        _ => Who::Id(value.as_int().unwrap_or(0)),
-    })
-}
+/// A user or a group as `Z_PARAM_STR_OR_LONG` holds one, a name or an id.
+type Who = Union<PhpString, i64>;
 
 /// `php_do_chown` and `php_do_chgrp` (`Z/ext/standard/filestat.c:459`,
 /// `:318`): a path that is not a plain one, or is written `file://`, is
@@ -917,11 +858,14 @@ fn who_argument(req: &mut Request, position: u32) -> Result<Who, Thrown> {
 /// find uid for %s` or `gid` where there is none, then `chown(2)` or
 /// `lchown(2)` with the other id left alone, php's warning with
 /// `strerror(errno)` where it failed, and the stat cache cleared.
-fn owner_change(req: &mut Request, group: bool, link: bool) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let filename = path_argument(req, 1)?;
+fn owner_change(
+    req: &mut Request,
+    (filename, who): (Path, Who),
+    group: bool,
+    link: bool,
+) -> Result<bool, Thrown> {
+    let Path(filename) = filename;
     let filename = filename.as_bytes();
-    let who = who_argument(req, 2)?;
     let kind = if group { "gid" } else { "uid" };
     let lookup = |name: &[u8]| {
         if group {
@@ -933,8 +877,8 @@ fn owner_change(req: &mut Request, group: bool, link: bool) -> Result<Value, Thr
     let plain = req.plain_path(filename).is_some();
     if !plain || has_file_scheme(filename) {
         let id = match who {
-            Who::Id(id) => id,
-            Who::Name(name) if !plain => {
+            Union::B(id) => id,
+            Union::A(name) if !plain => {
                 // `php_do_chown` hands another wrapper the name as it was
                 // given, `PHP_STREAM_META_OWNER_NAME`.
                 let op = if group {
@@ -942,9 +886,9 @@ fn owner_change(req: &mut Request, group: bool, link: bool) -> Result<Value, Thr
                 } else {
                     WrapperOp::OwnerName(name.as_bytes())
                 };
-                return Ok(Value::bool(req.wrapper_op(filename, op)?));
+                return req.wrapper_op(filename, op);
             }
-            Who::Name(name) => {
+            Union::A(name) => {
                 // The plain files wrapper's `php_plain_files_metadata`
                 // looks the name up, and says so by the path it was
                 // handed, `file://` taken off.
@@ -961,7 +905,7 @@ fn owner_change(req: &mut Request, group: bool, link: bool) -> Result<Value, Thr
                         String::from_utf8_lossy(name.as_bytes())
                     );
                     php_ext::raising::warning(req, &text);
-                    return Ok(Value::bool(false));
+                    return Ok(false);
                 };
                 i64::from(id)
             }
@@ -971,18 +915,18 @@ fn owner_change(req: &mut Request, group: bool, link: bool) -> Result<Value, Thr
         } else {
             WrapperOp::Owner(id)
         };
-        return Ok(Value::bool(req.wrapper_op(filename, op)?));
+        return req.wrapper_op(filename, op);
     }
     let id = match who {
-        Who::Id(id) => u32::try_from(id & 0xFFFF_FFFF).unwrap_or(u32::MAX),
-        Who::Name(name) => {
+        Union::B(id) => u32::try_from(id & 0xFFFF_FFFF).unwrap_or(u32::MAX),
+        Union::A(name) => {
             let Some(id) = lookup(name.as_bytes()) else {
                 let text = format!(
                     "Unable to find {kind} for {}",
                     String::from_utf8_lossy(name.as_bytes())
                 );
                 docref(req, Level::Warning, &text);
-                return Ok(Value::bool(false));
+                return Ok(false);
             };
             id
         }
@@ -1000,10 +944,10 @@ fn owner_change(req: &mut Request, group: bool, link: bool) -> Result<Value, Thr
     };
     if let Err(error) = done {
         docref(req, Level::Warning, &strerror(&error));
-        return Ok(Value::bool(false));
+        return Ok(false);
     }
     req.clear_stat_cache();
-    Ok(Value::bool(true))
+    Ok(true)
 }
 
 /// `chown(string $filename, string|int $user): bool`,
@@ -1045,8 +989,9 @@ fn owner_change(req: &mut Request, group: bool, link: bool) -> Result<Value, Thr
 /// bool(false)
 /// bool(true)
 /// ```
-fn chown(req: &mut Request) -> Result<Value, Thrown> {
-    owner_change(req, false, false)
+#[php_function]
+fn chown(req: &mut Request, filename: Path, user: Union<PhpString, i64>) -> Result<bool, Thrown> {
+    owner_change(req, (filename, user), false, false)
 }
 
 /// `chgrp(string $filename, string|int $group): bool`,
@@ -1068,8 +1013,9 @@ fn chown(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(false)
 /// ```
-fn chgrp(req: &mut Request) -> Result<Value, Thrown> {
-    owner_change(req, true, false)
+#[php_function]
+fn chgrp(req: &mut Request, filename: Path, group: Union<PhpString, i64>) -> Result<bool, Thrown> {
+    owner_change(req, (filename, group), true, false)
 }
 
 /// `lchown(string $filename, string|int $user): bool`: `chown` of a
@@ -1084,8 +1030,9 @@ fn chgrp(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(false)
 /// ```
-fn lchown(req: &mut Request) -> Result<Value, Thrown> {
-    owner_change(req, false, true)
+#[php_function]
+fn lchown(req: &mut Request, filename: Path, user: Union<PhpString, i64>) -> Result<bool, Thrown> {
+    owner_change(req, (filename, user), false, true)
 }
 
 /// `lchgrp(string $filename, string|int $group): bool`: `chgrp` of a
@@ -1100,8 +1047,9 @@ fn lchown(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(false)
 /// ```
-fn lchgrp(req: &mut Request) -> Result<Value, Thrown> {
-    owner_change(req, true, true)
+#[php_function]
+fn lchgrp(req: &mut Request, filename: Path, group: Union<PhpString, i64>) -> Result<bool, Thrown> {
+    owner_change(req, (filename, group), true, true)
 }
 
 /// `chmod(string $filename, int $permissions): bool`,
@@ -1131,25 +1079,23 @@ fn lchgrp(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(false)
 /// ```
-fn chmod(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let filename = path_argument(req, 1)?;
+#[php_function]
+fn chmod(req: &mut Request, filename: Path, permissions: i64) -> Result<bool, Thrown> {
+    let Path(filename) = filename;
     let filename = filename.as_bytes();
-    let mode = long_argument(req, 2)?;
+    let mode = permissions;
     if !is_plain_direct(req, filename) {
-        return Ok(Value::bool(
-            req.wrapper_op(filename, WrapperOp::Chmod(mode))?,
-        ));
+        return req.wrapper_op(filename, WrapperOp::Chmod(mode));
     }
     let bits = u32::try_from(mode & 0o7777).unwrap_or(0);
     if let Err(error) =
         std::fs::set_permissions(host(req, filename), std::fs::Permissions::from_mode(bits))
     {
         docref(req, Level::Warning, &strerror(&error));
-        return Ok(Value::bool(false));
+        return Ok(false);
     }
     req.clear_stat_cache();
-    Ok(Value::bool(true))
+    Ok(true)
 }
 
 /// `touch(string $filename, ?int $mtime = null, ?int $atime = null): bool`,
@@ -1188,14 +1134,17 @@ fn chmod(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// touch(): Argument #2 ($mtime) cannot be null when argument #3 ($atime) is an integer
 /// ```
-fn touch(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 3)?;
-    let filename = path_argument(req, 1)?;
+#[php_function]
+fn touch(
+    req: &mut Request,
+    filename: Path,
+    #[php(default = null)] mtime: Option<i64>,
+    #[php(default = null)] atime: Option<i64>,
+) -> Result<bool, Thrown> {
+    let Path(filename) = filename;
     let filename = filename.as_bytes();
-    let mtime = nullable_long(req, 2)?;
-    let atime = nullable_long(req, 3)?;
     if filename.is_empty() {
-        return Ok(Value::bool(false));
+        return Ok(false);
     }
     let times = match (mtime, atime) {
         (None, None) => None,
@@ -1212,9 +1161,7 @@ fn touch(req: &mut Request) -> Result<Value, Thrown> {
         (Some(mtime), Some(atime)) => Some((mtime, atime)),
     };
     if !is_plain_direct(req, filename) {
-        return Ok(Value::bool(
-            req.wrapper_op(filename, WrapperOp::Touch(times))?,
-        ));
+        return req.wrapper_op(filename, WrapperOp::Touch(times));
     }
     let path = host(req, filename);
     if !ffi::access(&path, ffi::F_OK) {
@@ -1230,17 +1177,17 @@ fn touch(req: &mut Request) -> Result<Value, Thrown> {
                 strerror(&error)
             );
             docref(req, Level::Warning, &text);
-            return Ok(Value::bool(false));
+            return Ok(false);
         }
         apply_umask(req, &path);
     }
     if let Err(error) = ffi::utime(&path, times) {
         let text = format!("Utime failed: {}", strerror(&error));
         docref(req, Level::Warning, &text);
-        return Ok(Value::bool(false));
+        return Ok(false);
     }
     req.clear_stat_cache();
-    Ok(Value::bool(true))
+    Ok(true)
 }
 
 /// `clearstatcache(bool $clear_realpath_cache = false, string $filename = ""): void`,
@@ -1260,17 +1207,18 @@ fn touch(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// clearstatcache(): Argument #2 ($filename) must not contain any null bytes
 /// ```
-fn clearstatcache(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 2)?;
-    let clear_realpath_cache = req.argument_count() >= 1 && bool_argument(req, 1)?;
-    let filename = if req.argument_count() >= 2 {
-        Some(path_argument(req, 2)?)
-    } else {
-        None
+#[php_function]
+fn clearstatcache(
+    req: &mut Request,
+    #[php(default = false)] clear_realpath_cache: bool,
+    #[php(default = "")] filename: Passed<Path>,
+) {
+    let filename = match filename {
+        Passed::Given(Path(filename)) => Some(filename),
+        Passed::Omitted => None,
     };
     req.clear_stat_cache();
     if clear_realpath_cache {
         req.realpath_cache_clear(filename.as_ref().map(PhpString::as_bytes));
     }
-    Ok(Value::null())
 }
