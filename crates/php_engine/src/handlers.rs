@@ -7182,6 +7182,7 @@ const FETCH_REF: u32 = 1;
 const FETCH_DIM_WRITE: u32 = 2;
 /// `MAY_BE_NULL` and `MAY_BE_ARRAY` (`Z/Zend/zend_type_info.h`).
 const MAY_BE_NULL: u32 = 1 << 1;
+const MAY_BE_DOUBLE: u32 = 1 << 5;
 const MAY_BE_ARRAY: u32 = 1 << 7;
 
 /// What [`property_place`] found: the property's place, the object and
@@ -12915,29 +12916,13 @@ fn incdec_property(
         }
         return Ok(overloaded_incdec(req, frame, code, op, step, object, key));
     };
-    if object.heap().slot(slot).is_undef() {
-        let shown = String::from_utf8_lossy(&bytes).into_owned();
-        if typed {
-            let class = req.class_name(object.class());
-            let thrown = crate::api::raising::throw(
-                req,
-                "Error",
-                &format!(
-                    "Typed property {class}::${shown} must not be accessed before initialization"
-                ),
-            );
-            write_out(req, frame, code, op, &Value::null());
-            return Ok(Err(thrown));
-        }
-        if req.overloaded_place(object, &bytes) {
-            return Ok(overloaded_incdec(req, frame, code, op, step, object, key));
-        }
-        let class = req.class_name(object.class());
-        crate::api::raising::warning(req, &format!("Undefined property: {class}::${shown}"));
+    // [`Request::read_before_write`] raised what an unwritten slot raises
+    // before the placement; one it let by is a `__get`'s to answer.
+    if object.heap().slot(slot).is_undef() && req.overloaded_place(object, &bytes) {
+        return Ok(overloaded_incdec(req, frame, code, op, step, object, key));
     }
-    let held = exec::value_of(object.heap().slot(slot))
-        .deref()
-        .undef_as_null();
+    let named = exec::value_of(object.heap().slot(slot));
+    let held = named.deref().undef_as_null();
     req.addref(&held);
     let stepped = match step.kernel()(req, &held) {
         Ok(stepped) => stepped,
@@ -12947,6 +12932,18 @@ fn incdec_property(
             return Ok(Err(thrown));
         }
     };
+    // `zend_pre_incdec_property_zval`: a slot bound to a reference other
+    // properties type is `zend_incdec_typed_ref`, not the property's own
+    // step.
+    if let Some(cell) = named
+        .as_php_ref()
+        .copied()
+        .filter(|cell| cell.heap().sources() != 0)
+    {
+        return Ok(step_property_ref(
+            req, frame, code, op, step, cell, held, stepped,
+        ));
+    }
     let landed = if typed {
         match typed_step(req, frame, object, slot, &bytes, step, (held, stepped))? {
             Ok(landed) => landed,
@@ -12968,6 +12965,45 @@ fn incdec_property(
     req.release(held);
     req.assign_declared_slot(object.heap(), slot, landed);
     Ok(Ok(()))
+}
+
+/// The property step over a slot bound to a reference other properties
+/// type: [`step_through_typed_ref`] over what the cell held, the
+/// temporary written with the value before or after it, and the cell
+/// written unless the properties refused the step. `held` and `stepped`
+/// are given up or landed here.
+#[allow(clippy::too_many_arguments)]
+fn step_property_ref(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    step: IncDec,
+    cell: PhpRef,
+    held: Value,
+    stepped: Value,
+) -> Result<(), Thrown> {
+    let strict = req.frame_strict_types(frame);
+    let (stored, raised) =
+        match step_through_typed_ref(req, cell, &held, stepped, step.increment, strict) {
+            RefStep::Landed(stored) => (stored, None),
+            RefStep::Clamped(stored, thrown) => (stored, Some(thrown)),
+            RefStep::Refused(thrown) => {
+                req.release(held);
+                write_out(req, frame, code, op, &Value::null());
+                return Err(thrown);
+            }
+        };
+    write_out(
+        req,
+        frame,
+        code,
+        op,
+        if step.post { &held } else { &stored },
+    );
+    req.release(held);
+    req.reference_set(cell.heap(), stored);
+    raised.map_or(Ok(()), Err)
 }
 
 /// `zend_incdec_typed_prop` (`Z/Zend/zend_execute.c:2262`) over a
@@ -17550,6 +17586,149 @@ fn unary(
     }
 }
 
+/// `zend_incdec_typed_ref` (`Z/Zend/zend_execute.c:2230`): the step over
+/// a variable bound to a reference that typed properties hold. An `int`
+/// the step carried past its range into a `float` is php's `TypeError`
+/// where a property the reference is typed by takes no `float`, and the
+/// cell holds the range's end; anything else the step makes is held to
+/// the properties as an assignment through the reference is, the value
+/// it held standing where they refuse it.
+///
+/// ```php
+/// class T { public int $i = PHP_INT_MAX; public int|float $f = PHP_INT_MAX; public int|bool $b = 1; }
+/// $t = new T; $i = &$t->i; $f = &$t->f; $b = &$t->b;
+/// try { $i++; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// $f++; $b--;
+/// var_dump($t->i, $t->f, $t->b);
+/// ```
+/// ```expect
+/// Cannot increment a reference held by property T::$i of type int past its maximal value
+/// int(9223372036854775807)
+/// float(9.223372036854776E+18)
+/// int(0)
+/// ```
+#[allow(clippy::too_many_arguments)]
+fn incdec_typed_ref(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    post: bool,
+    kernel: fn(&mut Request, &Value) -> Result<Value, Thrown>,
+    cell: PhpRef,
+    held: Value,
+) -> Edge {
+    let stepped = match kernel(req, &held) {
+        Ok(stepped) => stepped,
+        Err(thrown) => {
+            req.leave_pending(&thrown);
+            return Ok(Stepped::Threw(frame));
+        }
+    };
+    let increment = matches!(op.opcode, Opcode::PreInc | Opcode::PostInc);
+    let strict = req.frame_strict_types(frame);
+    let (stored, raised) =
+        match step_through_typed_ref(req, cell, &held, stepped, increment, strict) {
+            RefStep::Landed(stored) => (stored, None),
+            RefStep::Clamped(stored, thrown) => (stored, Some(thrown)),
+            RefStep::Refused(thrown) => {
+                if op.out_type != OperandKind::Unused {
+                    let out = exec::temporary_slot(code, op.out);
+                    let previous = req.set_slot(frame, out, Value::null());
+                    req.release(previous);
+                }
+                exec::free_operand(req, frame, code, op.op1_type, op.op1);
+                req.leave_pending(&thrown);
+                return Ok(Stepped::Threw(frame));
+            }
+        };
+    if op.out_type != OperandKind::Unused {
+        let out = exec::temporary_slot(code, op.out);
+        let value = if post { held } else { stored };
+        req.addref(&value);
+        let previous = req.set_slot(frame, out, value);
+        req.release(previous);
+    }
+    req.reference_set(cell.heap(), stored);
+    exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    if let Some(thrown) = raised {
+        req.leave_pending(&thrown);
+        return Ok(Stepped::Threw(frame));
+    }
+    Ok(advance(req, frame))
+}
+
+/// What a step through a reference typed properties hold comes to
+/// ([`step_through_typed_ref`]).
+enum RefStep {
+    /// The value to store in the cell: the step, or the conversion the
+    /// properties agree on.
+    Landed(Value),
+    /// The range's end to store, beside php's `TypeError` for an `int`
+    /// stepped into a `float` a property takes no `float` for.
+    Clamped(Value, Thrown),
+    /// The properties refuse the step; the cell keeps what it held.
+    Refused(Thrown),
+}
+
+/// The heart of `zend_incdec_typed_ref`, over the value `held` and what
+/// the step made of it, `stepped`, whose owner it takes: an `int` carried
+/// past its range into a `float` a property the reference is typed by
+/// takes no `float` for is [`RefStep::Clamped`] at the range's end, and
+/// anything else is held to the properties as an assignment through the
+/// reference is (`zend_verify_ref_assignable_zval`).
+fn step_through_typed_ref(
+    req: &mut Request,
+    cell: PhpRef,
+    held: &Value,
+    stepped: Value,
+    increment: bool,
+    strict: bool,
+) -> RefStep {
+    if stepped.as_float().is_some() && held.as_int().is_some() {
+        let refusing = req
+            .ref_type_sources(cell.heap())
+            .iter()
+            .find(|source| source.ty.mask() & MAY_BE_DOUBLE == 0)
+            .map(|source| {
+                (
+                    source.declaring,
+                    crate::api::coerce::declared_type_name(&source.ty),
+                    String::from_utf8_lossy(&source.name).into_owned(),
+                )
+            });
+        let Some((declaring, ty, name)) = refusing else {
+            return RefStep::Landed(stepped);
+        };
+        req.release(stepped);
+        let class = req.class_name(declaring);
+        let (word, end, bound) = if increment {
+            ("increment", "maximal", i64::MAX)
+        } else {
+            ("decrement", "minimal", i64::MIN)
+        };
+        let thrown = crate::api::raising::throw(
+            req,
+            "TypeError",
+            &format!(
+                "Cannot {word} a reference held by property {class}::${name} of type {ty} past its {end} value"
+            ),
+        );
+        return RefStep::Clamped(Value::int(bound), thrown);
+    }
+    match crate::ops::verify_ref_assignable(req, cell.heap(), &stepped, strict) {
+        Ok(None) => RefStep::Landed(stepped),
+        Ok(Some(coerced)) => {
+            req.release(stepped);
+            RefStep::Landed(coerced)
+        }
+        Err(thrown) => {
+            req.release(stepped);
+            RefStep::Refused(thrown)
+        }
+    }
+}
+
 /// The body `PRE_INC`, `POST_INC`, `PRE_DEC` and `POST_DEC` share: the
 /// variable's slot, a CV or a `VAR`, read as
 /// `GET_OP1_ZVAL_PTR_PTR_UNDEF(BP_VAR_RW)` reads it; the kernel, the
@@ -17590,6 +17769,10 @@ fn incdec(
     // `if (Z_TYPE_P(var_ptr) == IS_REFERENCE) { var_ptr = Z_REFVAL_P(var_ptr); }`.
     let cell = named.as_php_ref().copied();
     let held = named.deref();
+    // `ZEND_REF_HAS_TYPE_SOURCES(ref)`: `zend_incdec_typed_ref`.
+    if let Some(cell) = cell.filter(|cell| cell.heap().sources() != 0) {
+        return incdec_typed_ref(req, frame, code, op, post, kernel, cell, held);
+    }
     match kernel(req, &held) {
         Ok(stepped) => {
             if op.out_type != OperandKind::Unused {
