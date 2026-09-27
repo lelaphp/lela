@@ -19,11 +19,13 @@ use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpObject, Value, ValueRef};
 
-use crate::{
-    ERROR_INF_OR_NAN, ERROR_NON_BACKED_ENUM, ERROR_NONE, ERROR_RECURSION, ERROR_UNSUPPORTED_TYPE,
-    ERROR_UTF8, FORCE_OBJECT, HEX_AMP, HEX_APOS, HEX_QUOT, HEX_TAG, INVALID_UTF8_IGNORE,
-    INVALID_UTF8_SUBSTITUTE, NUMERIC_CHECK, PARTIAL_OUTPUT_ON_ERROR, PRESERVE_ZERO_FRACTION,
-    PRETTY_PRINT, UNESCAPED_LINE_TERMINATORS, UNESCAPED_SLASHES, UNESCAPED_UNICODE,
+use crate::constants::{
+    JSON_ERROR_DEPTH, JSON_ERROR_INF_OR_NAN, JSON_ERROR_NON_BACKED_ENUM, JSON_ERROR_NONE,
+    JSON_ERROR_RECURSION, JSON_ERROR_UNSUPPORTED_TYPE, JSON_ERROR_UTF8, JSON_FORCE_OBJECT,
+    JSON_HEX_AMP, JSON_HEX_APOS, JSON_HEX_QUOT, JSON_HEX_TAG, JSON_INVALID_UTF8_IGNORE,
+    JSON_INVALID_UTF8_SUBSTITUTE, JSON_NUMERIC_CHECK, JSON_PARTIAL_OUTPUT_ON_ERROR,
+    JSON_PRESERVE_ZERO_FRACTION, JSON_PRETTY_PRINT, JSON_UNESCAPED_LINE_TERMINATORS,
+    JSON_UNESCAPED_SLASHES, JSON_UNESCAPED_UNICODE,
 };
 
 /// `php_json_encoder` beside the two recursion guards php keeps on the
@@ -53,7 +55,7 @@ impl Encoder {
         Ok(Encoder {
             depth: 0,
             max_depth,
-            error_code: ERROR_NONE,
+            error_code: JSON_ERROR_NONE,
             precision: serialize_precision(req),
             inside: Vec::new(),
             serializing: Vec::new(),
@@ -94,7 +96,7 @@ pub(super) fn encode(
             if f.is_finite() {
                 encode_double(buf, f, options, enc.precision);
             } else {
-                enc.error_code = ERROR_INF_OR_NAN;
+                enc.error_code = JSON_ERROR_INF_OR_NAN;
                 buf.push(b'0');
             }
         }
@@ -116,8 +118,8 @@ pub(super) fn encode(
         }
         ValueRef::Array(_) => return held(req, buf, &value, options, enc),
         ValueRef::Resource(_) | ValueRef::Reference(_) => {
-            enc.error_code = ERROR_UNSUPPORTED_TYPE;
-            if options & PARTIAL_OUTPUT_ON_ERROR != 0 {
+            enc.error_code = JSON_ERROR_UNSUPPORTED_TYPE;
+            if options & JSON_PARTIAL_OUTPUT_ON_ERROR != 0 {
                 buf.extend_from_slice(b"null");
             }
             return Ok(false);
@@ -149,7 +151,7 @@ fn encode_double(buf: &mut Vec<u8>, value: f64, options: i64, precision: i32) {
     let text = float_format(value, precision, Exponent::Lower);
     let bare = !text.contains('.');
     buf.extend_from_slice(text.as_bytes());
-    if options & PRESERVE_ZERO_FRACTION != 0 && bare {
+    if options & JSON_PRESERVE_ZERO_FRACTION != 0 && bare {
         buf.extend_from_slice(b".0");
     }
 }
@@ -161,7 +163,7 @@ fn escape_string(buf: &mut Vec<u8>, s: &[u8], options: i64, enc: &mut Encoder) -
         buf.extend_from_slice(b"\"\"");
         return true;
     }
-    if options & NUMERIC_CHECK != 0
+    if options & JSON_NUMERIC_CHECK != 0
         && let Some(number) = numeric_string(s)
     {
         if let Some(n) = number.as_int() {
@@ -188,8 +190,8 @@ fn escape_string(buf: &mut Vec<u8>, s: &[u8], options: i64, enc: &mut Encoder) -
         if byte >= 0x80 {
             let Some(next) = escape_utf8(buf, s, at, options) else {
                 buf.truncate(checkpoint);
-                enc.error_code = ERROR_UTF8;
-                if options & PARTIAL_OUTPUT_ON_ERROR != 0 {
+                enc.error_code = JSON_ERROR_UTF8;
+                if options & JSON_PARTIAL_OUTPUT_ON_ERROR != 0 {
                     buf.extend_from_slice(b"null");
                 }
                 return false;
@@ -226,22 +228,22 @@ fn escape_ascii(buf: &mut Vec<u8>, byte: u8, options: i64) {
         }
     };
     match byte {
-        b'"' => buf.extend_from_slice(if options & HEX_QUOT != 0 {
+        b'"' => buf.extend_from_slice(if options & JSON_HEX_QUOT != 0 {
             &b"\\u0022"[..]
         } else {
             &b"\\\""[..]
         }),
         b'\\' => buf.extend_from_slice(b"\\\\"),
-        b'/' => one_of(buf, options & UNESCAPED_SLASHES == 0, b"\\/", b'/'),
+        b'/' => one_of(buf, options & JSON_UNESCAPED_SLASHES == 0, b"\\/", b'/'),
         0x08 => buf.extend_from_slice(b"\\b"),
         0x0c => buf.extend_from_slice(b"\\f"),
         b'\n' => buf.extend_from_slice(b"\\n"),
         b'\r' => buf.extend_from_slice(b"\\r"),
         b'\t' => buf.extend_from_slice(b"\\t"),
-        b'<' => one_of(buf, options & HEX_TAG != 0, b"\\u003C", b'<'),
-        b'>' => one_of(buf, options & HEX_TAG != 0, b"\\u003E", b'>'),
-        b'&' => one_of(buf, options & HEX_AMP != 0, b"\\u0026", b'&'),
-        b'\'' => one_of(buf, options & HEX_APOS != 0, b"\\u0027", b'\''),
+        b'<' => one_of(buf, options & JSON_HEX_TAG != 0, b"\\u003C", b'<'),
+        b'>' => one_of(buf, options & JSON_HEX_TAG != 0, b"\\u003E", b'>'),
+        b'&' => one_of(buf, options & JSON_HEX_AMP != 0, b"\\u0026", b'&'),
+        b'\'' => one_of(buf, options & JSON_HEX_APOS != 0, b"\\u0027", b'\''),
         _ => push_hex(buf, u32::from(byte)),
     }
 }
@@ -253,11 +255,11 @@ fn escape_ascii(buf: &mut Vec<u8>, byte: u8, options: i64) {
 fn escape_utf8(buf: &mut Vec<u8>, s: &[u8], at: usize, options: i64) -> Option<usize> {
     let (code, next, ok) = next_utf8_char(s, at);
     if !ok {
-        if options & INVALID_UTF8_IGNORE != 0 {
+        if options & JSON_INVALID_UTF8_IGNORE != 0 {
             return Some(next);
         }
-        if options & INVALID_UTF8_SUBSTITUTE != 0 {
-            if options & UNESCAPED_UNICODE != 0 {
+        if options & JSON_INVALID_UTF8_SUBSTITUTE != 0 {
+            if options & JSON_UNESCAPED_UNICODE != 0 {
                 buf.extend_from_slice("\u{fffd}".as_bytes());
             } else {
                 buf.extend_from_slice(b"\\ufffd");
@@ -266,8 +268,8 @@ fn escape_utf8(buf: &mut Vec<u8>, s: &[u8], at: usize, options: i64) -> Option<u
         }
         return None;
     }
-    let bare = options & UNESCAPED_UNICODE != 0
-        && (options & UNESCAPED_LINE_TERMINATORS != 0 || !(0x2028..=0x2029).contains(&code));
+    let bare = options & JSON_UNESCAPED_UNICODE != 0
+        && (options & JSON_UNESCAPED_LINE_TERMINATORS != 0 || !(0x2028..=0x2029).contains(&code));
     if bare {
         buf.extend_from_slice(s.get(at..next).unwrap_or_default());
         return Some(next);
@@ -358,8 +360,8 @@ fn serializable(
 ) -> Wrote {
     let index = object.index();
     if enc.serializing.contains(&index) {
-        enc.error_code = ERROR_RECURSION;
-        if options & PARTIAL_OUTPUT_ON_ERROR != 0 {
+        enc.error_code = JSON_ERROR_RECURSION;
+        if options & JSON_PARTIAL_OUTPUT_ON_ERROR != 0 {
             buf.extend_from_slice(b"null");
         }
         return Ok(false);
@@ -370,7 +372,7 @@ fn serializable(
         Ok(answer) => answer,
         Err(thrown) => {
             enc.serializing.pop();
-            if options & PARTIAL_OUTPUT_ON_ERROR != 0 {
+            if options & JSON_PARTIAL_OUTPUT_ON_ERROR != 0 {
                 buf.extend_from_slice(b"null");
             }
             return Err(thrown);
@@ -404,7 +406,7 @@ fn enum_case(
         .class_decl(object.class())
         .is_some_and(|decl| decl.backing != EnumBacking::Pure);
     if !backed {
-        enc.error_code = ERROR_NON_BACKED_ENUM;
+        enc.error_code = JSON_ERROR_NON_BACKED_ENUM;
         buf.push(b'0');
         return Ok(false);
     }
@@ -462,11 +464,11 @@ fn encode_array(
 ) -> Wrote {
     let array = value.as_array().copied();
     let object = value.as_object().copied();
-    let mut as_object = options & FORCE_OBJECT != 0;
+    let mut as_object = options & JSON_FORCE_OBJECT != 0;
     if let Some(array) = array {
         as_object = as_object || !array.is_list();
         if array.is_recursive() {
-            enc.error_code = ERROR_RECURSION;
+            enc.error_code = JSON_ERROR_RECURSION;
             buf.extend_from_slice(b"null");
             return Ok(false);
         }
@@ -475,7 +477,7 @@ fn encode_array(
     if let Some(object) = object {
         as_object = true;
         if enc.inside.contains(&object.index()) {
-            enc.error_code = ERROR_RECURSION;
+            enc.error_code = JSON_ERROR_RECURSION;
             buf.extend_from_slice(b"null");
             return Ok(false);
         }
@@ -512,17 +514,18 @@ fn write_rows(
         if as_object {
             write_key(buf, &key, options, enc);
             buf.push(b':');
-            if options & PRETTY_PRINT != 0 {
+            if options & JSON_PRETTY_PRINT != 0 {
                 buf.push(b' ');
             }
         }
-        if !encode(req, buf, &element, options, enc)? && options & PARTIAL_OUTPUT_ON_ERROR == 0 {
+        if !encode(req, buf, &element, options, enc)? && options & JSON_PARTIAL_OUTPUT_ON_ERROR == 0
+        {
             return Ok(false);
         }
     }
     if enc.depth > enc.max_depth {
-        enc.error_code = crate::ERROR_DEPTH;
-        if options & PARTIAL_OUTPUT_ON_ERROR == 0 {
+        enc.error_code = JSON_ERROR_DEPTH;
+        if options & JSON_PARTIAL_OUTPUT_ON_ERROR == 0 {
             return Ok(false);
         }
     }
@@ -541,8 +544,8 @@ fn write_key(buf: &mut Vec<u8>, key: &Key, options: i64, enc: &mut Encoder) {
     match key {
         Key::Str(name) => {
             let at = buf.len();
-            let wrote = escape_string(buf, name.as_bytes(), options & !NUMERIC_CHECK, enc);
-            if !wrote && options & PARTIAL_OUTPUT_ON_ERROR != 0 {
+            let wrote = escape_string(buf, name.as_bytes(), options & !JSON_NUMERIC_CHECK, enc);
+            if !wrote && options & JSON_PARTIAL_OUTPUT_ON_ERROR != 0 {
                 buf.truncate(at);
                 buf.extend_from_slice(b"\"\"");
             }
@@ -558,7 +561,7 @@ fn write_key(buf: &mut Vec<u8>, key: &Key, options: i64, enc: &mut Encoder) {
 /// `php_json_pretty_print_char` and `php_json_pretty_print_indent`: the
 /// newline and the four spaces a level, and nothing without the option.
 fn pretty_break(buf: &mut Vec<u8>, options: i64, enc: &Encoder) {
-    if options & PRETTY_PRINT == 0 {
+    if options & JSON_PRETTY_PRINT == 0 {
         return;
     }
     buf.push(b'\n');
