@@ -23,6 +23,65 @@ use crate::{ArrayAccess, Countable, Iterator, IteratorAggregate, JsonSerializabl
 #[derive(Default)]
 pub(crate) struct Row {
     elements: Vec<Value>,
+    /// `cached_resize`: the size a resize under way was last asked for,
+    /// by itself or by a destructor it served; `None` while none is
+    /// under way.
+    resizing: Option<usize>,
+}
+
+/// `spl_fixedarray_resize`: the row cut or grown to `size`. The
+/// elements cut are given up after the row has its new size, from the
+/// first cut to the last (`spl_fixedarray_dtor_range`), or from the
+/// last to the first where the row is emptied (`spl_fixedarray_dtor`);
+/// a destructor they serve that resizes the row again is remembered and
+/// served once the cut is done, the last size it asked for winning.
+///
+/// ```php
+/// class Again { function __construct(public $a, public $n) {} function __destruct() { echo "dtor {$this->n}\n"; $this->a->setSize($this->n); } }
+/// class Log { function __construct(public $n) {} function __destruct() { echo "log {$this->n}\n"; } }
+/// $a = new SplFixedArray(4);
+/// $a[1] = new Log(1); $a[2] = new Again($a, 3); $a[3] = new Log(3);
+/// $a->setSize(1);
+/// var_dump($a->getSize());
+/// $a->setSize(0);
+/// ```
+/// ```expect
+/// log 1
+/// dtor 3
+/// log 3
+/// int(3)
+/// ```
+fn resize(req: &mut Request, object: PhpObject, size: usize) -> Result<(), Thrown> {
+    let (len, under_way) = with(req, object, |a| (a.elements.len(), a.resizing.is_some()))?;
+    if size == len {
+        return Ok(());
+    }
+    if under_way {
+        return with(req, object, |a| a.resizing = Some(size));
+    }
+    let cut = with(req, object, |a| {
+        a.resizing = Some(size);
+        if size < a.elements.len() {
+            a.elements.split_off(size)
+        } else {
+            a.elements.resize(size, Value::null());
+            Vec::new()
+        }
+    })?;
+    if size == 0 {
+        for value in cut.into_iter().rev() {
+            req.release(value);
+        }
+    } else {
+        for value in cut {
+            req.release(value);
+        }
+    }
+    let asked = with(req, object, |a| a.resizing.take())?.unwrap_or(size);
+    if asked != size {
+        return resize(req, object, asked);
+    }
+    Ok(())
 }
 
 /// `spl_handler_SplFixedArray`.
@@ -339,17 +398,7 @@ impl SplFixedArray {
         }
         let size = usize::try_from(size).unwrap_or(usize::MAX);
         reserve(req, size)?;
-        let cut = with(req, this.object(), |a| {
-            if size < a.elements.len() {
-                a.elements.split_off(size)
-            } else {
-                a.elements.resize(size, Value::null());
-                Vec::new()
-            }
-        })?;
-        for value in cut.into_iter().rev() {
-            req.release(value);
-        }
+        resize(req, this.object(), size)?;
         Ok(True)
     }
 
@@ -775,5 +824,12 @@ fn clone_array(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown
     for value in &elements {
         req.addref(value);
     }
-    clone_with(req, &object, Row { elements })
+    clone_with(
+        req,
+        &object,
+        Row {
+            elements,
+            resizing: None,
+        },
+    )
 }
