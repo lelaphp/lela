@@ -3,34 +3,11 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_ext::decl::FunctionDecl;
+use php_ext::abi::OrFalse;
+use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, raise};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value};
-
-use crate::argument_count_between;
-use crate::output::Entry;
-use crate::stub::stub;
-
-/// The one native.
-///
-/// ```php
-/// echo new ReflectionFunction('net_get_interfaces');
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function net_get_interfaces ] {
-///
-///   - Parameters [0] {
-///   }
-///   - Return [ array|false ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![(
-        stub("net_get_interfaces(): array|false"),
-        net_get_interfaces as Entry,
-    )]
-}
 
 /// A string key of the request's.
 fn key(req: &mut Request, name: &[u8]) -> Result<Key, Thrown> {
@@ -64,8 +41,20 @@ fn key(req: &mut Request, name: &[u8]) -> Result<Key, Thrown> {
 ///   string(9) "255.0.0.0"
 /// }
 /// ```
-fn net_get_interfaces(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 0)?;
+///
+/// ```php
+/// echo new ReflectionFunction('net_get_interfaces');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function net_get_interfaces ] {
+///
+///   - Parameters [0] {
+///   }
+///   - Return [ array|false ]
+/// }
+/// ```
+#[php_function]
+fn net_get_interfaces(req: &mut Request) -> Result<OrFalse<PhpArray>, Thrown> {
     let found = match crate::ffi::interfaces() {
         Ok(found) => found,
         Err(error) => {
@@ -75,7 +64,7 @@ fn net_get_interfaces(req: &mut Request) -> Result<Value, Thrown> {
                 crate::filestat::strerror(&error)
             );
             raise(req, Level::Warning, &text);
-            return Ok(Value::bool(false));
+            return Ok(OrFalse::False);
         }
     };
     let mut names: Vec<(Vec<u8>, bool, PhpArray)> = Vec::new();
@@ -119,7 +108,7 @@ fn net_get_interfaces(req: &mut Request) -> Result<Value, Thrown> {
         let k = key(req, &name)?;
         array.set(req, k, Value::array(iface))?;
     }
-    Ok(Value::array(array))
+    Ok(OrFalse::Value(array))
 }
 
 /// `IFF_UP`, `<net/if.h>`'s.

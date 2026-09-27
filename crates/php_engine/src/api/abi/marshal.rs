@@ -630,7 +630,11 @@ impl<T: FromArgument> FromArgument for Passed<T> {
 /// `Raw<T>`: declares `T` and holds nothing, for php's
 /// `Z_PARAM_ZVAL`-then-convert natives, whose body raises before the
 /// coercion; the body holds the argument with [`Raw::hold`] when it
-/// chooses.
+/// chooses. Its mask admits every value, so a referent under
+/// [`Ref`] and a default are taken as they are too: `Ref<Raw<T>>` is a
+/// by-reference parameter declared `T` whose refusal is the body's, as
+/// `end()`'s `array|object &$array` refuses a string with "must be of
+/// type array".
 pub struct Raw<T> {
     value: Value,
     position: u32,
@@ -665,7 +669,7 @@ impl<T: FromArgument> Raw<T> {
 }
 
 impl<T: FromArgument> FromArgument for Raw<T> {
-    const MASK: u32 = T::MASK;
+    const MASK: u32 = bits::ANY;
     fn declared() -> Option<Type> {
         T::declared()
     }
@@ -727,6 +731,16 @@ impl<T> Ref<T> {
     pub fn get(&self) -> Option<&T> {
         self.held.as_ref()
     }
+
+    /// The caller's reference itself, for a body that reads the variable
+    /// again after calling back into the program, as `array_walk` reloads
+    /// the array its callback may have replaced ("Reload array and
+    /// position -- both may have changed"); none where the argument is
+    /// absent or came as a value.
+    #[must_use]
+    pub fn reference(&self) -> Option<PhpRef> {
+        self.cell
+    }
 }
 
 impl<T: IntoReturn> Ref<T> {
@@ -742,10 +756,13 @@ impl<T: IntoReturn> Ref<T> {
     }
 }
 
-impl Ref<PhpArray> {
+impl<T> Ref<T> {
     /// `Z_PARAM_ARRAY_EX(.., 0, 1)`: the caller's array separated in
     /// place ([`PhpRef::separate_array`]), so the body changes it with no
-    /// copy; none where the argument is absent.
+    /// copy; none where the argument is absent or its referent is no
+    /// array. Over an untyped or union referent it is the array arm's
+    /// `SEPARATE_ARRAY`, as `array_multisort`'s arguments and
+    /// `array_walk`'s `array|object` take it.
     pub fn separated(&self, req: &mut Request) -> Result<Option<PhpArray>, Thrown> {
         match self.cell {
             Some(cell) => cell.separate_array(req),

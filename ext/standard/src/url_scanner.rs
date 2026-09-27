@@ -17,50 +17,15 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_ext::decl::{FunctionDecl, IniDecl, Name};
+use php_ext::attr::php_function;
+use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{
     BufferHandler, HandlerCall, HandlerStatus, OutputOp, Request, StartHandler,
 };
-use php_ext::values::{Key, Value};
+use php_ext::values::{Key, PhpString};
 
-use crate::output::Entry;
-use crate::stub::stub;
-use crate::{State, argument_count_between, string_argument};
-
-/// The two natives, in the stub's order.
-///
-/// ```php
-/// echo new ReflectionFunction('output_reset_rewrite_vars'), new ReflectionFunction('output_add_rewrite_var');
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function output_reset_rewrite_vars ] {
-///
-///   - Parameters [0] {
-///   }
-///   - Return [ bool ]
-/// }
-/// Function [ <internal:standard> function output_add_rewrite_var ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> string $name ]
-///     Parameter #1 [ <required> string $value ]
-///   }
-///   - Return [ bool ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        (
-            stub("output_reset_rewrite_vars(): bool"),
-            output_reset_rewrite_vars as Entry,
-        ),
-        (
-            stub("output_add_rewrite_var(string $name, string $value): bool"),
-            output_add_rewrite_var,
-        ),
-    ]
-}
+use crate::State;
 
 /// The four entries `url_scanner_ex.re` registers, `PHP_INI_ALL` each.
 ///
@@ -682,10 +647,26 @@ const REWRITER: BufferHandler = BufferHandler {
 ///     [0] => URL-Rewriter
 /// )
 /// ```
-fn output_add_rewrite_var(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let name = string_argument(req, 1)?;
-    let value = string_argument(req, 2)?;
+///
+/// ```php
+/// echo new ReflectionFunction('output_add_rewrite_var');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function output_add_rewrite_var ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> string $name ]
+///     Parameter #1 [ <required> string $value ]
+///   }
+///   - Return [ bool ]
+/// }
+/// ```
+#[php_function]
+fn output_add_rewrite_var(
+    req: &mut Request,
+    name: PhpString,
+    value: PhpString,
+) -> Result<bool, Thrown> {
     let separator = Settings::read(req).separator;
     let entity = |req: &mut Request, text: &[u8]| {
         crate::html::escape(
@@ -727,7 +708,7 @@ fn output_add_rewrite_var(req: &mut Request) -> Result<Value, Thrown> {
             flags: 0x70,
         })?;
     }
-    Ok(Value::bool(true))
+    Ok(true)
 }
 
 /// `output_reset_rewrite_vars(): bool`: the pairs and the inputs
@@ -742,10 +723,22 @@ fn output_add_rewrite_var(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// <form action="x.php"></form>
 /// ```
-fn output_reset_rewrite_vars(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 0)?;
+///
+/// ```php
+/// echo new ReflectionFunction('output_reset_rewrite_vars');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function output_reset_rewrite_vars ] {
+///
+///   - Parameters [0] {
+///   }
+///   - Return [ bool ]
+/// }
+/// ```
+#[php_function]
+fn output_reset_rewrite_vars(req: &mut Request) -> bool {
     let ctx = &mut req.state::<State>().url_rewriter;
     ctx.form_app.clear();
     ctx.url_app.clear();
-    Ok(Value::bool(true))
+    true
 }

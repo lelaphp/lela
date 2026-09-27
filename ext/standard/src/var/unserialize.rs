@@ -7,6 +7,8 @@
 //! order their objects were finished once the whole string is read; and
 //! php's warnings, with the byte offset where the scanner stood.
 
+use php_ext::abi::Passed;
+use php_ext::attr::php_function;
 use php_ext::call::{call, call_method, class_constant, lookup_class, new_object};
 use php_ext::coerce::{callable_checked, value_name};
 use php_ext::raising::{Level, Thrown, deprecated, docref, throw, warning};
@@ -14,7 +16,6 @@ use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
 
 use super::{INCOMPLETE_CLASS, MAGIC_MEMBER, has_method, is_enum_class, not_serializable};
-use crate::argument_count_between;
 
 /// `HT_MAX_SIZE` on a 64-bit build.
 const HT_MAX_SIZE: i64 = 0x4000_0000;
@@ -208,10 +209,14 @@ struct State<'a> {
 /// bool(false)
 /// bool(false)
 /// ```
-pub(super) fn unserialize(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let data = crate::string_argument(req, 1)?.as_bytes().to_vec();
-    let (allowed, max_depth) = options(req)?;
+#[php_function]
+fn unserialize(
+    req: &mut Request,
+    data: PhpString,
+    #[php(default = [])] options: Passed<PhpArray>,
+) -> Result<Value, Thrown> {
+    let data = data.as_bytes().to_vec();
+    let (allowed, max_depth) = self::options(req, options)?;
     if data.is_empty() {
         return Ok(Value::bool(false));
     }
@@ -395,17 +400,12 @@ type Options = (Option<Vec<Vec<u8>>>, i64);
 
 /// The `allowed_classes` and `max_depth` options, held to their types
 /// as php holds them; the default depth is `unserialize_max_depth`.
-fn options(req: &mut Request) -> Result<Options, Thrown> {
+fn options(req: &mut Request, given: Passed<PhpArray>) -> Result<Options, Thrown> {
     let default_depth = req
         .ini_get(b"unserialize_max_depth")
         .and_then(|v| std::str::from_utf8(v).ok()?.trim().parse::<i64>().ok())
         .unwrap_or(4096);
-    if req.argument_count() < 2 {
-        return Ok((None, default_depth));
-    }
-    let given = req.argument(2).unwrap_or_default();
-    let coerced = php_ext::coerce::coerce_param(req, &given, &php_ext::decl::Type::Array, 2)?;
-    let Some(options) = coerced.deref().as_array().copied() else {
+    let Passed::Given(options) = given else {
         return Ok((None, default_depth));
     };
     let mut allowed = None;

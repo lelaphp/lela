@@ -9,14 +9,12 @@
 
 use std::ffi::CString;
 
-use php_ext::decl::{ConstDecl, FunctionDecl};
-use php_ext::raising::Thrown;
+use php_ext::abi::True;
+use php_ext::attr::{php_const, php_function};
 use php_ext::request::Request;
-use php_ext::values::Value;
+use php_ext::values::PhpString;
 
-use crate::output::Entry;
-use crate::stub::stub;
-use crate::{State, argument_count_between, constant, long_argument, string_argument};
+use crate::State;
 
 /// `BG(syslog_device)` and `PG(have_called_openlog)`.
 #[derive(Default)]
@@ -46,86 +44,41 @@ pub(crate) struct Log {
 /// int(16)
 /// int(32)
 /// ```
-pub(crate) fn constants() -> Vec<ConstDecl> {
-    [
-        ("LOG_EMERG", 0),
-        ("LOG_ALERT", 1),
-        ("LOG_CRIT", 2),
-        ("LOG_ERR", 3),
-        ("LOG_WARNING", 4),
-        ("LOG_NOTICE", 5),
-        ("LOG_INFO", 6),
-        ("LOG_DEBUG", 7),
-        ("LOG_KERN", 0),
-        ("LOG_USER", 8),
-        ("LOG_MAIL", 16),
-        ("LOG_DAEMON", 24),
-        ("LOG_AUTH", 32),
-        ("LOG_SYSLOG", 40),
-        ("LOG_LPR", 48),
-        ("LOG_NEWS", 56),
-        ("LOG_UUCP", 64),
-        ("LOG_CRON", 72),
-        ("LOG_AUTHPRIV", 80),
-        ("LOG_LOCAL0", 128),
-        ("LOG_LOCAL1", 136),
-        ("LOG_LOCAL2", 144),
-        ("LOG_LOCAL3", 152),
-        ("LOG_LOCAL4", 160),
-        ("LOG_LOCAL5", 168),
-        ("LOG_LOCAL6", 176),
-        ("LOG_LOCAL7", 184),
-        ("LOG_PID", 1),
-        ("LOG_CONS", 2),
-        ("LOG_ODELAY", 4),
-        ("LOG_NDELAY", 8),
-        ("LOG_NOWAIT", 16),
-        ("LOG_PERROR", 32),
-    ]
-    .into_iter()
-    .map(|(name, value)| constant(name.as_bytes(), value))
-    .collect()
-}
-
-/// The three natives.
-///
-/// ```php
-/// echo new ReflectionFunction('openlog'), new ReflectionFunction('closelog'), new ReflectionFunction('syslog');
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function openlog ] {
-///
-///   - Parameters [3] {
-///     Parameter #0 [ <required> string $prefix ]
-///     Parameter #1 [ <required> int $flags ]
-///     Parameter #2 [ <required> int $facility ]
-///   }
-///   - Return [ true ]
-/// }
-/// Function [ <internal:standard> function closelog ] {
-///
-///   - Parameters [0] {
-///   }
-///   - Return [ true ]
-/// }
-/// Function [ <internal:standard> function syslog ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> int $priority ]
-///     Parameter #1 [ <required> string $message ]
-///   }
-///   - Return [ true ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        (
-            stub("openlog(string $prefix, int $flags, int $facility): true"),
-            openlog as Entry,
-        ),
-        (stub("closelog(): true"), closelog),
-        (stub("syslog(int $priority, string $message): true"), syslog),
-    ]
+#[php_const]
+pub(crate) mod constants {
+    pub(crate) const LOG_EMERG: i64 = 0;
+    pub(crate) const LOG_ALERT: i64 = 1;
+    pub(crate) const LOG_CRIT: i64 = 2;
+    pub(crate) const LOG_ERR: i64 = 3;
+    pub(crate) const LOG_WARNING: i64 = 4;
+    pub(crate) const LOG_NOTICE: i64 = 5;
+    pub(crate) const LOG_INFO: i64 = 6;
+    pub(crate) const LOG_DEBUG: i64 = 7;
+    pub(crate) const LOG_KERN: i64 = 0;
+    pub(crate) const LOG_USER: i64 = 8;
+    pub(crate) const LOG_MAIL: i64 = 16;
+    pub(crate) const LOG_DAEMON: i64 = 24;
+    pub(crate) const LOG_AUTH: i64 = 32;
+    pub(crate) const LOG_SYSLOG: i64 = 40;
+    pub(crate) const LOG_LPR: i64 = 48;
+    pub(crate) const LOG_NEWS: i64 = 56;
+    pub(crate) const LOG_UUCP: i64 = 64;
+    pub(crate) const LOG_CRON: i64 = 72;
+    pub(crate) const LOG_AUTHPRIV: i64 = 80;
+    pub(crate) const LOG_LOCAL0: i64 = 128;
+    pub(crate) const LOG_LOCAL1: i64 = 136;
+    pub(crate) const LOG_LOCAL2: i64 = 144;
+    pub(crate) const LOG_LOCAL3: i64 = 152;
+    pub(crate) const LOG_LOCAL4: i64 = 160;
+    pub(crate) const LOG_LOCAL5: i64 = 168;
+    pub(crate) const LOG_LOCAL6: i64 = 176;
+    pub(crate) const LOG_LOCAL7: i64 = 184;
+    pub(crate) const LOG_PID: i64 = 1;
+    pub(crate) const LOG_CONS: i64 = 2;
+    pub(crate) const LOG_ODELAY: i64 = 4;
+    pub(crate) const LOG_NDELAY: i64 = 8;
+    pub(crate) const LOG_NOWAIT: i64 = 16;
+    pub(crate) const LOG_PERROR: i64 = 32;
 }
 
 /// The low 32 bits of a `zend_long`, as C's conversion to `int` keeps
@@ -154,15 +107,27 @@ fn php_openlog(req: &mut Request, ident: CString, option: i32, facility: i32) {
 /// bool(true)
 /// bool(true)
 /// ```
-fn openlog(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 3, 3)?;
-    let ident = string_argument(req, 1)?;
-    let option = long_argument(req, 2)?;
-    let facility = long_argument(req, 3)?;
-    let bytes = ident.as_bytes();
+///
+/// ```php
+/// echo new ReflectionFunction('openlog');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function openlog ] {
+///
+///   - Parameters [3] {
+///     Parameter #0 [ <required> string $prefix ]
+///     Parameter #1 [ <required> int $flags ]
+///     Parameter #2 [ <required> int $facility ]
+///   }
+///   - Return [ true ]
+/// }
+/// ```
+#[php_function]
+fn openlog(req: &mut Request, prefix: PhpString, flags: i64, facility: i64) -> True {
+    let bytes = prefix.as_bytes();
     let ident = CString::new(bytes.split(|c| *c == 0).next().unwrap_or(&[])).unwrap_or_default();
-    php_openlog(req, ident, int(option), int(facility));
-    Ok(Value::bool(true))
+    php_openlog(req, ident, int(flags), int(facility));
+    True
 }
 
 /// `php_closelog`, and `BG(syslog_device)` given up; what
@@ -183,10 +148,22 @@ pub(super) fn close(req: &mut Request) {
 /// ```expect
 /// bool(true)
 /// ```
-fn closelog(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 0)?;
+///
+/// ```php
+/// echo new ReflectionFunction('closelog');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function closelog ] {
+///
+///   - Parameters [0] {
+///   }
+///   - Return [ true ]
+/// }
+/// ```
+#[php_function]
+fn closelog(req: &mut Request) -> True {
     close(req);
-    Ok(Value::bool(true))
+    True
 }
 
 /// `syslog.facility` as `OnSetFacility` (`Z/main/main.c:590`) reads its
@@ -267,10 +244,22 @@ fn syslog_str(req: &Request, priority: i32, message: &[u8]) {
 /// ```expect
 /// bool(true)
 /// ```
-fn syslog(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let priority = long_argument(req, 1)?;
-    let message = string_argument(req, 2)?;
+///
+/// ```php
+/// echo new ReflectionFunction('syslog');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function syslog ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> int $priority ]
+///     Parameter #1 [ <required> string $message ]
+///   }
+///   - Return [ true ]
+/// }
+/// ```
+#[php_function]
+fn syslog(req: &mut Request, priority: i64, message: PhpString) -> True {
     syslog_str(req, int(priority), message.as_bytes());
-    Ok(Value::bool(true))
+    True
 }

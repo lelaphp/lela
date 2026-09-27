@@ -10,109 +10,12 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_ext::coerce::{coerce_param, to_long, to_string, truthy};
-use php_ext::decl::{ConstExpr, FunctionDecl, Parameter, ParameterDefault, Type};
+use php_ext::abi::{Ref, Union, Untyped};
+use php_ext::attr::php_function;
+use php_ext::coerce::{to_long, to_string, truthy};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
-
-use crate::output::Entry;
-use crate::stub::stub;
-use crate::zpp::{ArrayOr, array_or_long, given, optional_string};
-use crate::{argument_count_between, declared, long_argument, parameter, string_argument};
-
-/// The seven, in the stub's order but the two cookie natives last.
-///
-/// ```php
-/// header("X-A: 1"); var_dump(headers_list(), headers_sent(), http_response_code());
-/// ```
-/// ```expect
-/// array(0) {
-/// }
-/// bool(false)
-/// bool(false)
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    let by_ref = |name: &[u8]| Parameter {
-        ty: None,
-        by_ref: true,
-        default: ParameterDefault::Expr(ConstExpr::Null),
-        ..parameter(name, Type::Mixed)
-    };
-    vec![
-        (
-            declared(
-                b"header",
-                &[
-                    parameter(b"header", Type::String),
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Bool(true)),
-                        ..parameter(b"replace", Type::Bool)
-                    },
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::long(0)),
-                        ..parameter(b"response_code", Type::Int)
-                    },
-                ],
-                Type::Void,
-            ),
-            header as Entry,
-        ),
-        (
-            declared(
-                b"header_remove",
-                &[Parameter {
-                    default: ParameterDefault::Expr(ConstExpr::Null),
-                    ..parameter(b"name", Type::Nullable(Box::new(Type::String)))
-                }],
-                Type::Void,
-            ),
-            header_remove as Entry,
-        ),
-        (
-            declared(
-                b"http_response_code",
-                &[Parameter {
-                    default: ParameterDefault::Expr(ConstExpr::long(0)),
-                    ..parameter(b"response_code", Type::Int)
-                }],
-                Type::Union(vec![Type::Int, Type::Bool]),
-            ),
-            http_response_code as Entry,
-        ),
-        (
-            declared(
-                b"headers_sent",
-                &[by_ref(b"filename"), by_ref(b"line")],
-                Type::Bool,
-            ),
-            headers_sent as Entry,
-        ),
-        (
-            declared(b"headers_list", &[], Type::Array),
-            headers_list as Entry,
-        ),
-        (
-            stub(
-                "setcookie(string $name, string $value = \"\", array|int $expires_or_options = 0, string $path = \"\", string $domain = \"\", bool $secure = false, bool $httponly = false): bool",
-            ),
-            setcookie as Entry,
-        ),
-        (
-            stub(
-                "setrawcookie(string $name, string $value = \"\", array|int $expires_or_options = 0, string $path = \"\", string $domain = \"\", bool $secure = false, bool $httponly = false): bool",
-            ),
-            setrawcookie as Entry,
-        ),
-    ]
-}
-
-/// `Z_PARAM_BOOL` at `position`.
-fn bool_argument(req: &mut Request, position: u32) -> Result<bool, Thrown> {
-    let given = req.argument(position).unwrap_or_default();
-    let coerced = coerce_param(req, &given, &Type::Bool, position)?;
-    Ok(coerced.as_bool().unwrap_or(false))
-}
+use php_ext::values::{Key, PhpArray, PhpString, Value};
 
 /// `header(string $header, bool $replace = true, int $response_code = 0): void`
 /// (`Z/ext/standard/head.c:32`): `sapi_header_op` under `REPLACE` or
@@ -155,22 +58,24 @@ fn bool_argument(req: &mut Request, position: u32) -> Result<bool, Thrown> {
 /// int(48)
 /// int(32)
 /// ```
-fn header(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 3)?;
-    let given = req.argument_count();
-    let line = string_argument(req, 1)?;
-    let replace = if given >= 2 {
-        bool_argument(req, 2)?
-    } else {
-        true
-    };
-    let response_code = if given >= 3 {
-        long_argument(req, 3)?
-    } else {
-        0
-    };
-    req.header_add(line.as_bytes(), replace, response_code);
-    Ok(Value::null())
+///
+/// ```php
+/// header("X-A: 1"); var_dump(headers_list(), headers_sent(), http_response_code());
+/// ```
+/// ```expect
+/// array(0) {
+/// }
+/// bool(false)
+/// bool(false)
+/// ```
+#[php_function]
+fn header(
+    req: &mut Request,
+    header: PhpString,
+    #[php(default = true)] replace: bool,
+    #[php(default = 0)] response_code: i64,
+) {
+    req.header_add(header.as_bytes(), replace, response_code);
 }
 
 /// `header_remove(?string $name = null): void` (`Z/ext/standard/head.c:53`):
@@ -189,21 +94,9 @@ fn header(req: &mut Request) -> Result<Value, Thrown> {
 ///
 /// Warning: Cannot modify header information - headers already sent by (output started at %s:2) in %s on line 3
 /// ```
-fn header_remove(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 1)?;
-    let name = if req.argument_count() == 1 {
-        let given = req.argument(1).unwrap_or_default();
-        if matches!(given.deref().as_ref(), ValueRef::Null | ValueRef::Undef) {
-            None
-        } else {
-            let coerced = coerce_param(req, &given, &Type::Nullable(Box::new(Type::String)), 1)?;
-            Some(coerced.as_str_bytes().unwrap_or_default().to_vec())
-        }
-    } else {
-        None
-    };
-    req.header_remove(name.as_deref());
-    Ok(Value::null())
+#[php_function]
+fn header_remove(req: &mut Request, #[php(default = null)] name: Option<PhpString>) {
+    req.header_remove(name.as_ref().map(PhpString::as_bytes));
 }
 
 /// `http_response_code(int $response_code = 0): int|bool`
@@ -231,13 +124,12 @@ fn header_remove(req: &mut Request) -> Result<Value, Thrown> {
 /// Warning: http_response_code(): Cannot set response code - headers already sent (output started at %s:2) in %s on line 3
 /// bool(false)
 /// ```
-fn http_response_code(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 1)?;
-    let code = if req.argument_count() == 1 {
-        long_argument(req, 1)?
-    } else {
-        0
-    };
+#[php_function]
+fn http_response_code(
+    req: &mut Request,
+    #[php(default = 0)] response_code: i64,
+) -> Union<i64, bool> {
+    let code = response_code;
     if code != 0 {
         if req.headers_sent().is_some() {
             let message = match req.output_started_at() {
@@ -248,7 +140,7 @@ fn http_response_code(req: &mut Request) -> Result<Value, Thrown> {
                 None => String::from("Cannot set response code - headers already sent"),
             };
             docref(req, Level::Warning, &message);
-            return Ok(Value::bool(false));
+            return Union::B(false);
         }
         if req.status_line().is_some() {
             docref(
@@ -259,18 +151,18 @@ fn http_response_code(req: &mut Request) -> Result<Value, Thrown> {
         }
         let before = req.response_code();
         req.set_response_code(code);
-        return Ok(if before != 0 {
-            Value::int(before)
+        return if before != 0 {
+            Union::A(before)
         } else {
-            Value::bool(true)
-        });
+            Union::B(true)
+        };
     }
     let current = req.response_code();
-    Ok(if current == 0 {
-        Value::bool(false)
+    if current == 0 {
+        Union::B(false)
     } else {
-        Value::int(current)
-    })
+        Union::A(current)
+    }
 }
 
 /// `headers_sent(&$filename = null, &$line = null): bool`
@@ -314,38 +206,20 @@ fn http_response_code(req: &mut Request) -> Result<Value, Thrown> {
 /// #0 {main}
 ///   thrown in %s on line 2
 /// ```
-fn headers_sent(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 2)?;
-    let given = req.argument_count();
-    let sent = req.headers_sent();
-    let (file, line) = sent.clone().unwrap_or_default();
-    if given >= 2 {
-        assign_ref(req, 2, |_| Ok(Value::int(i64::from(line))))?;
-    }
-    if given >= 1 {
-        assign_ref(req, 1, |req| Ok(Value::string(PhpString::new(req, &file)?)))?;
-    }
-    Ok(Value::bool(sent.is_some()))
-}
-
-/// `ZEND_TRY_ASSIGN_REF_*` on the argument at `position`: `value` built
-/// and written through the reference the argument is, and nothing built
-/// where it is not one.
-fn assign_ref(
+#[php_function]
+fn headers_sent(
     req: &mut Request,
-    position: u32,
-    value: impl FnOnce(&mut Request) -> Result<Value, Thrown>,
-) -> Result<(), Thrown> {
-    let Some(given) = req.argument(position) else {
-        return Ok(());
-    };
-    let ValueRef::Reference(reference) = given.as_ref() else {
-        return Ok(());
-    };
-    let reference = *reference;
-    let value = value(req)?;
-    reference.set(req, value)?;
-    Ok(())
+    #[php(default = null)] filename: Ref<Untyped<Value>>,
+    #[php(default = null)] line: Ref<Untyped<Value>>,
+) -> Result<bool, Thrown> {
+    let sent = req.headers_sent();
+    let (file, at) = sent.clone().unwrap_or_default();
+    line.set(req, Untyped(Value::int(i64::from(at))))?;
+    if filename.is_given() {
+        let file = Value::string(PhpString::new(req, &file)?);
+        filename.set(req, Untyped(file))?;
+    }
+    Ok(sent.is_some())
 }
 
 /// `headers_list(): array` (`Z/ext/standard/head.c:360`): the list, one
@@ -361,14 +235,14 @@ fn assign_ref(
 /// array(0) {
 /// }
 /// ```
-fn headers_list(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 0)?;
+#[php_function]
+fn headers_list(req: &mut Request) -> Result<PhpArray, Thrown> {
     let mut array = PhpArray::new(req)?;
     for line in req.headers_list() {
         let value = Value::string(PhpString::new(req, &line)?);
         array.append(req, value)?;
     }
-    Ok(Value::array(array))
+    Ok(array)
 }
 
 /// `ILLEGAL_COOKIE_CHARACTER` (`Z/ext/standard/head.c:81`), the list the
@@ -570,28 +444,35 @@ fn cookie_options(
 /// `php_setcookie_common` (`Z/ext/standard/head.c:246`): the name, the
 /// value, then either the expiry and the four after it or, alone, an
 /// array of options.
-fn setcookie_common(req: &mut Request, raw: bool) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 7)?;
+/// `setcookie` and `setrawcookie`'s seven parameters as they were held.
+#[derive(Clone, Copy)]
+struct CookieArguments {
+    name: PhpString,
+    value: PhpString,
+    expires_or_options: Union<PhpArray, i64>,
+    path: PhpString,
+    domain: PhpString,
+    secure: bool,
+    httponly: bool,
+}
+
+fn setcookie_common(
+    req: &mut Request,
+    arguments: CookieArguments,
+    raw: bool,
+) -> Result<bool, Thrown> {
     let function = if raw { "setrawcookie" } else { "setcookie" };
-    let name = string_argument(req, 1)?.as_bytes().to_vec();
-    let value = optional_string(req, 2)?.map(|v| v.as_bytes().to_vec());
-    let mut cookie = Cookie::default();
-    let options = match given(req, 3) {
-        Some(_) => array_or_long(req, 3, false)?,
-        None => None,
+    let name = arguments.name.as_bytes().to_vec();
+    let value = Some(arguments.value.as_bytes().to_vec());
+    let mut cookie = Cookie {
+        path: Some(arguments.path.as_bytes().to_vec()),
+        domain: Some(arguments.domain.as_bytes().to_vec()),
+        secure: arguments.secure,
+        httponly: arguments.httponly,
+        ..Cookie::default()
     };
-    let path = optional_string(req, 4)?.map(|v| v.as_bytes().to_vec());
-    let domain = optional_string(req, 5)?.map(|v| v.as_bytes().to_vec());
-    cookie.path = path;
-    cookie.domain = domain;
-    if given(req, 6).is_some() {
-        cookie.secure = bool_argument(req, 6)?;
-    }
-    if given(req, 7).is_some() {
-        cookie.httponly = bool_argument(req, 7)?;
-    }
-    match options {
-        Some(ArrayOr::Array(options)) => {
+    match arguments.expires_or_options {
+        Union::A(options) => {
             if req.argument_count() > 3 {
                 let text = format!(
                     "{function}(): Expects exactly 3 arguments when argument #3 ($expires_or_options) is an array"
@@ -600,11 +481,9 @@ fn setcookie_common(req: &mut Request, raw: bool) -> Result<Value, Thrown> {
             }
             cookie_options(req, options, &mut cookie, function)?;
         }
-        Some(ArrayOr::Other(expires)) => cookie.expires = expires,
-        None => {}
+        Union::B(expires) => cookie.expires = expires,
     }
-    let sent = php_setcookie(req, &name, value.as_deref(), &cookie, !raw)?;
-    Ok(Value::bool(sent))
+    php_setcookie(req, &name, value.as_deref(), &cookie, !raw)
 }
 
 /// `setcookie(string $name, string $value = "", array|int $expires_or_options = 0, string $path = "", string $domain = "", bool $secure = false, bool $httponly = false): bool`,
@@ -632,8 +511,27 @@ fn setcookie_common(req: &mut Request, raw: bool) -> Result<Value, Thrown> {
 /// setcookie(): option array cannot have numeric keys
 /// setcookie(): Expects exactly 3 arguments when argument #3 ($expires_or_options) is an array
 /// ```
-fn setcookie(req: &mut Request) -> Result<Value, Thrown> {
-    setcookie_common(req, false)
+#[php_function]
+fn setcookie(
+    req: &mut Request,
+    name: PhpString,
+    #[php(default = "")] value: PhpString,
+    #[php(default = 0)] expires_or_options: Union<PhpArray, i64>,
+    #[php(default = "")] path: PhpString,
+    #[php(default = "")] domain: PhpString,
+    #[php(default = false)] secure: bool,
+    #[php(default = false)] httponly: bool,
+) -> Result<bool, Thrown> {
+    let arguments = CookieArguments {
+        name,
+        value,
+        expires_or_options,
+        path,
+        domain,
+        secure,
+        httponly,
+    };
+    setcookie_common(req, arguments, false)
 }
 
 /// `setrawcookie(...)`, `PHP_FUNCTION(setrawcookie)`
@@ -648,6 +546,25 @@ fn setcookie(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// setrawcookie(): Argument #2 ($value) cannot contain ",", ";", " ", "\t", "\r", "\n", "\013", or "\014"
 /// ```
-fn setrawcookie(req: &mut Request) -> Result<Value, Thrown> {
-    setcookie_common(req, true)
+#[php_function]
+fn setrawcookie(
+    req: &mut Request,
+    name: PhpString,
+    #[php(default = "")] value: PhpString,
+    #[php(default = 0)] expires_or_options: Union<PhpArray, i64>,
+    #[php(default = "")] path: PhpString,
+    #[php(default = "")] domain: PhpString,
+    #[php(default = false)] secure: bool,
+    #[php(default = false)] httponly: bool,
+) -> Result<bool, Thrown> {
+    let arguments = CookieArguments {
+        name,
+        value,
+        expires_or_options,
+        path,
+        domain,
+        secure,
+        httponly,
+    };
+    setcookie_common(req, arguments, true)
 }

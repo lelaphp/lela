@@ -6,6 +6,7 @@
 //! `serialize_precision` through `zend_gcvt`.
 
 use php_ext::abi::PropertyPurpose;
+use php_ext::attr::php_function;
 use php_ext::call::call_method;
 use php_ext::coerce::{Exponent, float_format, to_string};
 use php_ext::raising::{Level, Thrown, docref, throw};
@@ -13,7 +14,6 @@ use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
 
 use super::{INCOMPLETE_CLASS, MAGIC_MEMBER, class_name, has_method, is_enum, not_serializable};
-use crate::argument_count_between;
 
 /// What the var hash keys an entry by: the object's identity, or the
 /// reference's.
@@ -139,16 +139,15 @@ impl VarHash {
 /// Exception: Serialization of 'Closure' is not allowed
 /// E:21:"RoundingMode:HalfEven";
 /// ```
-pub(super) fn serialize(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let value = req.argument(1).unwrap_or_default();
+#[php_function]
+fn serialize(req: &mut Request, value: Value) -> Result<PhpString, Thrown> {
     let mut hash = VarHash {
         n: 0,
         seen: Vec::new(),
     };
     let mut out = Vec::new();
     write(req, &mut out, &value, &mut hash, false, true)?;
-    Ok(Value::string(PhpString::new(req, &out)?))
+    PhpString::new(req, &out)
 }
 
 /// `php_serialize_data_t` with `php_var_serialize`, `PHPAPI` in

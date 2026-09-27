@@ -8,14 +8,11 @@
 
 use std::os::unix::fs::MetadataExt;
 
-use php_ext::decl::FunctionDecl;
-use php_ext::raising::Thrown;
+use php_ext::abi::OrFalse;
+use php_ext::attr::php_function;
 use php_ext::request::Request;
-use php_ext::values::Value;
 
-use crate::output::Entry;
-use crate::stub::stub;
-use crate::{State, argument_count_between};
+use crate::State;
 
 /// `BG(page_uid)`, `BG(page_gid)`, `BG(page_inode)` and `BG(page_mtime)`
 /// once `php_statpage` has set them; `-1` is php's unset.
@@ -64,59 +61,12 @@ pub(super) fn getuid(req: &mut Request) -> i64 {
 }
 
 /// A number, or `false` for one below zero, as each native here answers.
-fn long_or_false(n: i64) -> Value {
+fn long_or_false(n: i64) -> OrFalse<i64> {
     if n < 0 {
-        Value::bool(false)
+        OrFalse::False
     } else {
-        Value::int(n)
+        OrFalse::Value(n)
     }
-}
-
-/// The five, as the stub declares them.
-///
-/// ```php
-/// foreach (['getmyuid', 'getmygid', 'getmypid', 'getmyinode', 'getlastmod'] as $f) echo new ReflectionFunction($f);
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function getmyuid ] {
-///
-///   - Parameters [0] {
-///   }
-///   - Return [ int|false ]
-/// }
-/// Function [ <internal:standard> function getmygid ] {
-///
-///   - Parameters [0] {
-///   }
-///   - Return [ int|false ]
-/// }
-/// Function [ <internal:standard> function getmypid ] {
-///
-///   - Parameters [0] {
-///   }
-///   - Return [ int|false ]
-/// }
-/// Function [ <internal:standard> function getmyinode ] {
-///
-///   - Parameters [0] {
-///   }
-///   - Return [ int|false ]
-/// }
-/// Function [ <internal:standard> function getlastmod ] {
-///
-///   - Parameters [0] {
-///   }
-///   - Return [ int|false ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        (stub("getmyuid(): int|false"), getmyuid as Entry),
-        (stub("getmygid(): int|false"), getmygid),
-        (stub("getmypid(): int|false"), getmypid),
-        (stub("getmyinode(): int|false"), getmyinode),
-        (stub("getlastmod(): int|false"), getlastmod),
-    ]
 }
 
 /// `getmyuid(): int|false`, `PHP_FUNCTION(getmyuid)`
@@ -130,9 +80,21 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
 /// bool(true)
 /// bool(true)
 /// ```
-fn getmyuid(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 0)?;
-    Ok(long_or_false(statpage(req).uid))
+///
+/// ```php
+/// echo new ReflectionFunction('getmyuid');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function getmyuid ] {
+///
+///   - Parameters [0] {
+///   }
+///   - Return [ int|false ]
+/// }
+/// ```
+#[php_function]
+fn getmyuid(req: &mut Request) -> OrFalse<i64> {
+    long_or_false(statpage(req).uid)
 }
 
 /// `getmygid(): int|false`, `PHP_FUNCTION(getmygid)`
@@ -144,9 +106,21 @@ fn getmyuid(req: &mut Request) -> Result<Value, Thrown> {
 /// ```expect
 /// bool(true)
 /// ```
-fn getmygid(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 0)?;
-    Ok(long_or_false(statpage(req).gid))
+///
+/// ```php
+/// echo new ReflectionFunction('getmygid');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function getmygid ] {
+///
+///   - Parameters [0] {
+///   }
+///   - Return [ int|false ]
+/// }
+/// ```
+#[php_function]
+fn getmygid(req: &mut Request) -> OrFalse<i64> {
+    long_or_false(statpage(req).gid)
 }
 
 /// `getmypid(): int|false`, `PHP_FUNCTION(getmypid)`
@@ -160,9 +134,21 @@ fn getmygid(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(true)
 /// ```
-fn getmypid(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 0)?;
-    Ok(Value::int(i64::from(std::process::id())))
+///
+/// ```php
+/// echo new ReflectionFunction('getmypid');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function getmypid ] {
+///
+///   - Parameters [0] {
+///   }
+///   - Return [ int|false ]
+/// }
+/// ```
+#[php_function]
+fn getmypid() -> OrFalse<i64> {
+    OrFalse::Value(i64::from(std::process::id()))
 }
 
 /// `getmyinode(): int|false`, `PHP_FUNCTION(getmyinode)`
@@ -174,9 +160,21 @@ fn getmypid(req: &mut Request) -> Result<Value, Thrown> {
 /// ```expect
 /// bool(true)
 /// ```
-fn getmyinode(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 0)?;
-    Ok(long_or_false(statpage(req).inode))
+///
+/// ```php
+/// echo new ReflectionFunction('getmyinode');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function getmyinode ] {
+///
+///   - Parameters [0] {
+///   }
+///   - Return [ int|false ]
+/// }
+/// ```
+#[php_function]
+fn getmyinode(req: &mut Request) -> OrFalse<i64> {
+    long_or_false(statpage(req).inode)
 }
 
 /// `getlastmod(): int|false`, `PHP_FUNCTION(getlastmod)`
@@ -191,7 +189,19 @@ fn getmyinode(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(true)
 /// ```
-fn getlastmod(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 0)?;
-    Ok(long_or_false(statpage(req).mtime))
+///
+/// ```php
+/// echo new ReflectionFunction('getlastmod');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function getlastmod ] {
+///
+///   - Parameters [0] {
+///   }
+///   - Return [ int|false ]
+/// }
+/// ```
+#[php_function]
+fn getlastmod(req: &mut Request) -> OrFalse<i64> {
+    long_or_false(statpage(req).mtime)
 }

@@ -7,7 +7,7 @@
 
 use php_ext::abi::{OrFalse, Path};
 use php_ext::attr::php_function;
-use php_ext::raising::{Thrown, arg_value_error};
+use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::PhpString;
 
@@ -289,16 +289,6 @@ fn md5(
     context.update(string.as_bytes());
     let digest = context.finish();
     digest_value(req, &digest, binary)
-}
-
-/// `Z_PARAM_PATH` at `position`, read by hand, for the natives outside
-/// this file that still do.
-pub(super) fn path_argument(req: &mut Request, position: u32) -> Result<PhpString, Thrown> {
-    let filename = crate::string_argument(req, position)?;
-    if filename.as_bytes().contains(&0) {
-        return Err(arg_value_error(req, position, "not contain any null bytes"));
-    }
-    Ok(filename)
 }
 
 /// The file's bytes, read as `md5_file`'s loop reads them: what

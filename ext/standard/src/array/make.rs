@@ -3,25 +3,74 @@
 //! `array_replace_recursive` beside `array_merge`, `range`, and the two
 //! that draw from the random engine, `shuffle` and `array_rand`.
 
+use php_ext::abi::{Passed, Raw, Ref, True, Union, Variadic};
+use php_ext::attr::php_function;
 use php_ext::coerce::{numeric_string, to_array};
-use php_ext::decl::{ConstExpr, FunctionDecl, Parameter, ParameterDefault, Type};
 use php_ext::raising::{Level, Thrown, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 use php_ext_random::Rng;
 
 use super::sort::key_value;
-use super::stack::cell_array;
-use super::walk::array_argument;
-use super::{copied, key_copy};
+use super::stack::Stack;
+use super::{copied, key_copy, returned};
 use crate::math::math_round;
-use crate::output::Entry;
-use crate::{argument_count_between, declared, long_argument, parameter};
+
+/// `string|int|float`, a bound of `range`.
+type RangeBound = Union<PhpString, Union<i64, f64>>;
+
+/// `int|string|array`, what `array_rand` answers: one key, or a list.
+type Picked = Raw<Union<i64, Union<PhpString, PhpArray>>>;
 
 /// `HT_MAX_SIZE` on a 64-bit build.
 const HT_MAX_SIZE: u64 = 0x4000_0000;
 
-/// The declarations, as `basic_functions.stub.php` has them.
+/// `array_merge_recursive(array ...$arrays): array`, php's
+/// `php_array_merge_wrapper` with `php_array_merge_recursive`
+/// (`Z/ext/standard/array.c:4036`): `array_merge`, except that a string
+/// key both arrays have is merged, the two values made arrays and the
+/// second's elements appended to the first's, recursively where both
+/// are arrays.
+///
+/// ```php
+/// var_dump(array_merge_recursive(["a" => 1, "b" => ["x"]], ["a" => 2, "b" => ["y"], 5 => "n"], ["a" => [3]]), array_merge_recursive(["a" => null], ["a" => 1]), array_merge_recursive());
+/// $a = [1]; $a[] = &$a; try { array_merge_recursive($a, $a); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// array(3) {
+///   ["a"]=>
+///   array(3) {
+///     [0]=>
+///     int(1)
+///     [1]=>
+///     int(2)
+///     [2]=>
+///     int(3)
+///   }
+///   ["b"]=>
+///   array(2) {
+///     [0]=>
+///     string(1) "x"
+///     [1]=>
+///     string(1) "y"
+///   }
+///   [0]=>
+///   string(1) "n"
+/// }
+/// array(1) {
+///   ["a"]=>
+///   array(2) {
+///     [0]=>
+///     NULL
+///     [1]=>
+///     int(1)
+///   }
+/// }
+/// array(0) {
+/// }
+/// ```
+///
+/// The declarations of the array builders.
 ///
 /// ```php
 /// foreach (['array_merge_recursive', 'array_replace', 'array_replace_recursive', 'range', 'shuffle', 'array_rand'] as $f) echo new ReflectionFunction($f);
@@ -75,145 +124,14 @@ const HT_MAX_SIZE: u64 = 0x4000_0000;
 ///   - Return [ array|string|int ]
 /// }
 /// ```
-pub(super) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    let replacements = || Parameter {
-        variadic: true,
-        ..parameter(b"replacements", Type::Array)
-    };
-    let number_or_string = || Type::Union(vec![Type::String, Type::Int, Type::Float]);
-    vec![
-        (
-            declared(
-                b"array_merge_recursive",
-                &[Parameter {
-                    variadic: true,
-                    ..parameter(b"arrays", Type::Array)
-                }],
-                Type::Array,
-            ),
-            array_merge_recursive,
-        ),
-        (
-            declared(
-                b"array_replace",
-                &[parameter(b"array", Type::Array), replacements()],
-                Type::Array,
-            ),
-            array_replace,
-        ),
-        (
-            declared(
-                b"array_replace_recursive",
-                &[parameter(b"array", Type::Array), replacements()],
-                Type::Array,
-            ),
-            array_replace_recursive,
-        ),
-        (
-            declared(
-                b"range",
-                &[
-                    parameter(b"start", number_or_string()),
-                    parameter(b"end", number_or_string()),
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::long(1)),
-                        ..parameter(b"step", Type::Union(vec![Type::Int, Type::Float]))
-                    },
-                ],
-                Type::Array,
-            ),
-            range,
-        ),
-        (
-            declared(
-                b"shuffle",
-                &[Parameter {
-                    by_ref: true,
-                    ..parameter(b"array", Type::Array)
-                }],
-                Type::True,
-            ),
-            shuffle,
-        ),
-        (
-            declared(
-                b"array_rand",
-                &[
-                    parameter(b"array", Type::Array),
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::long(1)),
-                        ..parameter(b"num", Type::Int)
-                    },
-                ],
-                Type::Union(vec![Type::Int, Type::String, Type::Array]),
-            ),
-            array_rand,
-        ),
-    ]
-}
-
-/// The arguments of a variadic of arrays, each held to being one.
-fn arrays_of(req: &mut Request, from: u32) -> Result<Vec<PhpArray>, Thrown> {
-    let values = req.variadic_arguments(from)?;
-    let mut arrays = Vec::with_capacity(values.len());
-    for (at, value) in values.iter().enumerate() {
-        let position = u32::try_from(at).unwrap_or(u32::MAX).saturating_add(from);
-        let held = php_ext::coerce::coerce_param(req, value, &Type::Array, position)?;
-        if let Some(array) = held.as_array().copied() {
-            arrays.push(array);
-        }
-    }
-    Ok(arrays)
-}
-
-/// `array_merge_recursive(array ...$arrays): array`, php's
-/// `php_array_merge_wrapper` with `php_array_merge_recursive`
-/// (`Z/ext/standard/array.c:4036`): `array_merge`, except that a string
-/// key both arrays have is merged, the two values made arrays and the
-/// second's elements appended to the first's, recursively where both
-/// are arrays.
-///
-/// ```php
-/// var_dump(array_merge_recursive(["a" => 1, "b" => ["x"]], ["a" => 2, "b" => ["y"], 5 => "n"], ["a" => [3]]), array_merge_recursive(["a" => null], ["a" => 1]), array_merge_recursive());
-/// $a = [1]; $a[] = &$a; try { array_merge_recursive($a, $a); } catch (Error $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// array(3) {
-///   ["a"]=>
-///   array(3) {
-///     [0]=>
-///     int(1)
-///     [1]=>
-///     int(2)
-///     [2]=>
-///     int(3)
-///   }
-///   ["b"]=>
-///   array(2) {
-///     [0]=>
-///     string(1) "x"
-///     [1]=>
-///     string(1) "y"
-///   }
-///   [0]=>
-///   string(1) "n"
-/// }
-/// array(1) {
-///   ["a"]=>
-///   array(2) {
-///     [0]=>
-///     NULL
-///     [1]=>
-///     int(1)
-///   }
-/// }
-/// array(0) {
-/// }
-/// ```
-fn array_merge_recursive(req: &mut Request) -> Result<Value, Thrown> {
-    let arrays = arrays_of(req, 1)?;
+#[php_function]
+fn array_merge_recursive(
+    req: &mut Request,
+    arrays: Variadic<PhpArray>,
+) -> Result<PhpArray, Thrown> {
+    let arrays = arrays.0;
     let Some((first, rest)) = arrays.split_first() else {
-        return Ok(Value::array(PhpArray::new(req)?));
+        return PhpArray::new(req);
     };
     let mut dest = PhpArray::new(req)?;
     for (key, value) in first.snapshot_refs() {
@@ -236,7 +154,7 @@ fn array_merge_recursive(req: &mut Request) -> Result<Value, Thrown> {
             return Err(thrown);
         }
     }
-    Ok(Value::array(dest))
+    Ok(dest)
 }
 
 /// `php_array_merge_recursive`: `src`'s elements into `dest`.
@@ -330,8 +248,13 @@ fn merge_recursive(req: &mut Request, dest: &mut PhpArray, src: PhpArray) -> Res
 /// }
 /// array_replace(): Argument #2 must be of type array, int given
 /// ```
-fn array_replace(req: &mut Request) -> Result<Value, Thrown> {
-    replace(req, false)
+#[php_function]
+fn array_replace(
+    req: &mut Request,
+    array: PhpArray,
+    replacements: Variadic<PhpArray>,
+) -> Result<PhpArray, Thrown> {
+    replace(req, array, &replacements.0, false)
 }
 
 /// `array_replace_recursive(array $array, array ...$replacements):
@@ -361,17 +284,23 @@ fn array_replace(req: &mut Request) -> Result<Value, Thrown> {
 ///   int(5)
 /// }
 /// ```
-fn array_replace_recursive(req: &mut Request) -> Result<Value, Thrown> {
-    replace(req, true)
+#[php_function]
+fn array_replace_recursive(
+    req: &mut Request,
+    array: PhpArray,
+    replacements: Variadic<PhpArray>,
+) -> Result<PhpArray, Thrown> {
+    replace(req, array, &replacements.0, true)
 }
 
-fn replace(req: &mut Request, recursive: bool) -> Result<Value, Thrown> {
-    if req.argument_count() < 1 {
-        return Err(php_ext::raising::too_few_arguments(req, 1, 0));
-    }
-    let arrays = arrays_of(req, 1)?;
-    let mut dest = arrays[0].copy(req)?;
-    for src in &arrays[1..] {
+fn replace(
+    req: &mut Request,
+    array: PhpArray,
+    replacements: &[PhpArray],
+    recursive: bool,
+) -> Result<PhpArray, Thrown> {
+    let mut dest = array.copy(req)?;
+    for src in replacements {
         let replaced = if recursive {
             replace_recursive(req, &mut dest, *src)
         } else {
@@ -382,7 +311,7 @@ fn replace(req: &mut Request, recursive: bool) -> Result<Value, Thrown> {
             return Err(thrown);
         }
     }
-    Ok(Value::array(dest))
+    Ok(dest)
 }
 
 /// `zend_hash_merge(dest, src, zval_add_ref, 1)`.
@@ -464,18 +393,16 @@ impl Bound {
 /// `php_range_process_input` (`Z/ext/standard/array.c:2883`): one bound
 /// read, with php's warnings for an empty string and for one of more than
 /// a byte, and its `ValueError` for a non-finite float.
-fn range_input(req: &mut Request, position: u32, name: &str) -> Result<(Bound, u8), Thrown> {
-    let given = req.argument(position).unwrap_or_default().deref();
-    let coerced = php_ext::coerce::coerce_param(
-        req,
-        &given,
-        &Type::Union(vec![Type::String, Type::Int, Type::Float]),
-        position,
-    )?;
-    match coerced.as_ref() {
-        ValueRef::Int(n) => Ok((Bound::Long(n), 0)),
-        ValueRef::Float(d) => finite(req, position, name, d).map(|d| (Bound::Double(d), 0)),
-        ValueRef::Str(s) => {
+fn range_input(
+    req: &mut Request,
+    given: RangeBound,
+    position: u32,
+    name: &str,
+) -> Result<(Bound, u8), Thrown> {
+    match given {
+        Union::B(Union::A(n)) => Ok((Bound::Long(n), 0)),
+        Union::B(Union::B(d)) => finite(req, position, name, d).map(|d| (Bound::Double(d), 0)),
+        Union::A(s) => {
             let bytes = s.as_bytes();
             if bytes.is_empty() {
                 docref(
@@ -512,7 +439,6 @@ fn range_input(req: &mut Request, position: u32, name: &str) -> Result<(Bound, u
                 }
             }
         }
-        _ => Ok((Bound::Long(0), 0)),
     }
 }
 
@@ -616,22 +542,21 @@ fn value_error_named(req: &mut Request, position: u32, name: &str, tail: &str) -
 /// ```
 // php's body is one function with its gotos; the arms stay together.
 #[allow(clippy::too_many_lines)]
-fn range(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 3)?;
+#[php_function]
+fn range(
+    req: &mut Request,
+    start: RangeBound,
+    end: RangeBound,
+    #[php(default = 1)] step: Passed<Union<i64, f64>>,
+) -> Result<PhpArray, Thrown> {
+    let (user_start, user_end, user_step) = (start, end, step);
     let mut step_double = 1.0f64;
     let mut step: i64 = 1;
     let mut step_is_double = false;
     let mut negative = false;
-    if req.argument_count() == 3 {
-        let given = req.argument(3).unwrap_or_default().deref();
-        let coerced = php_ext::coerce::coerce_param(
-            req,
-            &given,
-            &Type::Union(vec![Type::Int, Type::Float]),
-            3,
-        )?;
-        match coerced.as_ref() {
-            ValueRef::Float(d) => {
+    if let Passed::Given(given) = user_step {
+        match given {
+            Union::B(d) => {
                 if d.is_infinite() {
                     return Err(value_error_named(
                         req,
@@ -659,7 +584,7 @@ fn range(req: &mut Request) -> Result<Value, Thrown> {
                     step_is_double = true;
                 }
             }
-            ValueRef::Int(n) => {
+            Union::A(n) => {
                 step = n;
                 if step < 0 {
                     if step == i64::MIN {
@@ -678,15 +603,14 @@ fn range(req: &mut Request) -> Result<Value, Thrown> {
                     step_double = step as f64;
                 }
             }
-            _ => {}
         }
         #[allow(clippy::float_cmp)]
         if step_double == 0.0 {
             return Err(value_error_named(req, 3, "step", "cannot be 0"));
         }
     }
-    let (mut start, low) = range_input(req, 1, "start")?;
-    let (mut end, high) = range_input(req, 2, "end")?;
+    let (mut start, low) = range_input(req, user_start, 1, "start")?;
+    let (mut end, high) = range_input(req, user_end, 2, "end")?;
     if start.stringy() || end.stringy() {
         let mut numeric = false;
         if !start.stringy() {
@@ -757,7 +681,7 @@ fn character_range(
     high: u8,
     step: i64,
     negative: bool,
-) -> Result<Value, Thrown> {
+) -> Result<PhpArray, Thrown> {
     let mut out = PhpArray::new(req)?;
     let step_wide = i64::from(u8::MAX).min(step);
     if low > high {
@@ -795,7 +719,7 @@ fn character_range(
         let text = PhpString::new(req, &[low])?;
         out.append(req, Value::string(text))?;
     }
-    Ok(Value::array(out))
+    Ok(out)
 }
 
 /// `RANGE_CHECK_DOUBLE_INIT_ARRAY` and the fill: the size rounded half
@@ -807,7 +731,7 @@ fn double_range(
     end: f64,
     step: f64,
     negative: bool,
-) -> Result<Value, Thrown> {
+) -> Result<PhpArray, Thrown> {
     let mut out = PhpArray::new(req)?;
     #[allow(clippy::cast_precision_loss)]
     let limit = HT_MAX_SIZE as f64;
@@ -856,7 +780,7 @@ fn double_range(
     } else {
         out.append(req, Value::float(start))?;
     }
-    Ok(Value::array(out))
+    Ok(out)
 }
 
 /// `RANGE_CHECK_LONG_INIT_ARRAY` and the fill, over unsigned
@@ -868,7 +792,7 @@ fn long_range(
     end: i64,
     step: u64,
     negative: bool,
-) -> Result<Value, Thrown> {
+) -> Result<PhpArray, Thrown> {
     let mut out = PhpArray::new(req)?;
     let size = |req: &mut Request, high: i64, low: i64| -> Result<u64, Thrown> {
         let calc = high.wrapping_sub(low).cast_unsigned() / step;
@@ -912,7 +836,7 @@ fn long_range(
     } else {
         out.append(req, Value::int(start))?;
     }
-    Ok(Value::array(out))
+    Ok(out)
 }
 
 /// `shuffle(array &$array): true`, php's `php_array_data_shuffle`
@@ -947,9 +871,10 @@ fn long_range(
 /// Deprecated: The MT_RAND_PHP variant of Mt19937 is deprecated in %s on line 5
 /// 3,4,2,9,10,1,8,5,6,7
 /// ```
-fn shuffle(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let (cell, array, owned) = cell_array(req, 1)?;
+#[php_function]
+fn shuffle(req: &mut Request, array: Ref<PhpArray>) -> Result<True, Thrown> {
+    let mut stack = Stack::of(req, array)?;
+    let array = stack.array;
     let mut values: Vec<Value> = array.snapshot_refs().into_iter().map(|(_, v)| v).collect();
     Rng::default_engine().shuffle(req, &mut values)?;
     let mut shuffled = PhpArray::new(req)?;
@@ -957,11 +882,9 @@ fn shuffle(req: &mut Request) -> Result<Value, Thrown> {
         req.addref(&value);
         shuffled.append(req, value)?;
     }
-    cell.set(req, shuffled.to_value())?;
-    if owned {
-        req.release(cell.as_value());
-    }
-    Ok(Value::bool(true))
+    stack.replace(req, shuffled)?;
+    stack.finish(req);
+    Ok(True)
 }
 
 /// `array_rand(array $array, int $num = 1): int|string|array`, php's
@@ -991,19 +914,18 @@ fn shuffle(req: &mut Request) -> Result<Value, Thrown> {
 /// array_rand(): Argument #2 ($num) must be between 1 and the number of elements in argument #1 ($array)
 /// 2 4,5,6,7 80 x
 /// ```
-fn array_rand(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let array = array_argument(req, 1)?;
-    let want = if req.argument_count() == 2 {
-        long_argument(req, 2)?
-    } else {
-        1
-    };
+#[php_function]
+fn array_rand(
+    req: &mut Request,
+    array: PhpArray,
+    #[php(default = 1)] num: i64,
+) -> Result<Picked, Thrown> {
+    let want = num;
     let keys = Rng::default_engine().pick_keys(req, array, want)?;
     if want == 1 {
         let value = keys.first().map_or(Value::int(0), key_value);
         req.addref(&value);
-        return Ok(value);
+        return returned(req, value);
     }
     let mut out = PhpArray::new(req)?;
     for key in &keys {
@@ -1011,5 +933,5 @@ fn array_rand(req: &mut Request) -> Result<Value, Thrown> {
         req.addref(&value);
         out.append(req, value)?;
     }
-    Ok(Value::array(out))
+    returned(req, Value::array(out))
 }

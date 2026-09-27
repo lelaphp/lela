@@ -8,15 +8,11 @@
 
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use php_ext::decl::FunctionDecl;
+use php_ext::abi::{OrFalse, Union};
+use php_ext::attr::php_function;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, Value};
-
-use crate::argument_count_between;
-use crate::output::Entry;
-use crate::stub::stub;
-use crate::zpp::optional_bool;
 
 /// `ZEND_NANO_IN_SEC`.
 const NANO_IN_SEC: u64 = 1_000_000_000;
@@ -26,27 +22,6 @@ const NANO_IN_SEC: u64 = 1_000_000_000;
 #[derive(Default)]
 pub(super) struct State {
     anchor: Option<(Instant, u64)>,
-}
-
-/// The one.
-///
-/// ```php
-/// echo new ReflectionFunction('hrtime');
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function hrtime ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <optional> bool $as_number = false ]
-///   }
-///   - Return [ array|int|float|false ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![(
-        stub("hrtime(bool $as_number = false): array|int|float|false"),
-        hrtime as Entry,
-    )]
 }
 
 /// `zend_hrtime()`: nanoseconds from the anchor.
@@ -79,16 +54,31 @@ fn nanoseconds(req: &mut Request) -> u64 {
 /// bool(true)
 /// bool(true)
 /// ```
-fn hrtime(req: &mut Request) -> Result<Value, Thrown> {
+///
+/// ```php
+/// echo new ReflectionFunction('hrtime');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function hrtime ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <optional> bool $as_number = false ]
+///   }
+///   - Return [ array|int|float|false ]
+/// }
+/// ```
+#[php_function]
+fn hrtime(
+    req: &mut Request,
+    #[php(default = false)] as_number: bool,
+) -> Result<Union<PhpArray, Union<i64, OrFalse<f64>>>, Thrown> {
     let t = nanoseconds(req);
-    argument_count_between(req, 0, 1)?;
-    let number = optional_bool(req, 1, false)?;
     let long = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
-    if number {
-        return Ok(Value::int(long(t)));
+    if as_number {
+        return Ok(Union::B(Union::A(long(t))));
     }
     let mut pair = PhpArray::new(req)?;
     pair.append(req, Value::int(long(t / NANO_IN_SEC)))?;
     pair.append(req, Value::int(long(t % NANO_IN_SEC)))?;
-    Ok(Value::array(pair))
+    Ok(Union::A(pair))
 }

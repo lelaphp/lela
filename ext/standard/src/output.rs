@@ -5,158 +5,37 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_ext::coerce::{callable_checked, coerce_param};
-use php_ext::decl::{ConstExpr, FunctionDecl, Name, Parameter, ParameterDefault, Type};
-use php_ext::raising::{Level, Thrown, arg_count_error, docref};
+use php_ext::abi::{OrFalse, Untyped};
+use php_ext::attr::php_function;
+use php_ext::coerce::callable_checked;
+use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{OutputOp, Request, StartHandler};
-use php_ext::values::{Value, ValueRef};
+use php_ext::values::{PhpArray, PhpString, Value, ValueRef};
 
-use crate::{declared, parameter};
-
-/// A native's entry, as the builder takes it.
+/// A native's entry, the shape `ExtensionBuilder::functions` takes, which
+/// the natives not yet declared by the attributes are written as.
 pub(crate) type Entry = fn(&mut Request) -> Result<Value, Thrown>;
 
-/// The thirteen, in the stub's order.
-///
-/// ```php
-/// var_dump(ob_get_level(), ob_start(), ob_get_level(), ob_end_flush(), ob_get_level());
-/// ```
-/// ```expect
-/// int(0)
-/// bool(true)
-/// int(1)
-/// bool(true)
-/// int(0)
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    let string_or_false = || Type::Union(vec![Type::String, Type::False]);
-    vec![
-        (
-            declared(
-                b"ob_start",
-                &[
-                    Parameter {
-                        ty: None,
-                        default: ParameterDefault::Expr(ConstExpr::Null),
-                        ..parameter(b"callback", Type::Mixed)
-                    },
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::long(0)),
-                        ..parameter(b"chunk_size", Type::Int)
-                    },
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Constant(Name(
-                            b"PHP_OUTPUT_HANDLER_STDFLAGS".as_slice().into(),
-                        ))),
-                        ..parameter(b"flags", Type::Int)
-                    },
-                ],
-                Type::Bool,
-            ),
-            ob_start as Entry,
-        ),
-        (declared(b"ob_flush", &[], Type::Bool), ob_flush as Entry),
-        (declared(b"ob_clean", &[], Type::Bool), ob_clean as Entry),
-        (
-            declared(b"ob_end_flush", &[], Type::Bool),
-            ob_end_flush as Entry,
-        ),
-        (
-            declared(b"ob_end_clean", &[], Type::Bool),
-            ob_end_clean as Entry,
-        ),
-        (
-            declared(b"ob_get_flush", &[], string_or_false()),
-            ob_get_flush as Entry,
-        ),
-        (
-            declared(b"ob_get_clean", &[], string_or_false()),
-            ob_get_clean as Entry,
-        ),
-        (
-            declared(b"ob_get_contents", &[], string_or_false()),
-            ob_get_contents as Entry,
-        ),
-        (
-            declared(b"ob_get_level", &[], Type::Int),
-            ob_get_level as Entry,
-        ),
-        (
-            declared(
-                b"ob_get_length",
-                &[],
-                Type::Union(vec![Type::Int, Type::False]),
-            ),
-            ob_get_length as Entry,
-        ),
-        (
-            declared(b"ob_list_handlers", &[], Type::Array),
-            ob_list_handlers as Entry,
-        ),
-        (
-            declared(
-                b"ob_get_status",
-                &[Parameter {
-                    default: ParameterDefault::Expr(ConstExpr::Bool(false)),
-                    ..parameter(b"full_status", Type::Bool)
-                }],
-                Type::Array,
-            ),
-            ob_get_status as Entry,
-        ),
-        (
-            declared(
-                b"ob_implicit_flush",
-                &[Parameter {
-                    default: ParameterDefault::Expr(ConstExpr::Bool(true)),
-                    ..parameter(b"enable", Type::Bool)
-                }],
-                Type::Void,
-            ),
-            ob_implicit_flush as Entry,
-        ),
-    ]
+/// What an op that answers `true` or `false` answered.
+fn op_bool(req: &mut Request, op: &OutputOp) -> Result<bool, Thrown> {
+    Ok(req.output_buffer_op(op)?.as_bool().unwrap_or(false))
 }
 
-/// `zend_parse_parameters_none`.
-fn no_arguments(req: &mut Request) -> Result<(), Thrown> {
-    let given = req.argument_count();
-    if given == 0 {
-        Ok(())
-    } else {
-        Err(arg_count_error(
-            req,
-            &format!("exactly 0 arguments, {given} given"),
-        ))
+/// What an op that answers the buffer or `false` answered, the string's
+/// owner handed on.
+fn op_string(req: &mut Request, op: &OutputOp) -> Result<OrFalse<PhpString>, Thrown> {
+    Ok(match req.output_buffer_op(op)?.as_ref() {
+        ValueRef::Str(string) => OrFalse::Value(*string),
+        _ => OrFalse::False,
+    })
+}
+
+/// What an op that answers an array answered, its owner handed on.
+fn op_array(req: &mut Request, op: &OutputOp) -> Result<PhpArray, Thrown> {
+    match req.output_buffer_op(op)?.as_array() {
+        Some(array) => Ok(*array),
+        None => PhpArray::new(req),
     }
-}
-
-/// `zend_parse_parameters` for a native of optional parameters alone:
-/// more than `most` is the count error.
-fn at_most(req: &mut Request, most: usize) -> Result<usize, Thrown> {
-    let given = req.argument_count();
-    if given > most {
-        let word = if most == 1 { "argument" } else { "arguments" };
-        return Err(arg_count_error(
-            req,
-            &format!("at most {most} {word}, {given} given"),
-        ));
-    }
-    Ok(given)
-}
-
-/// `Z_PARAM_LONG` at `position`, coerced as php coerces an int.
-fn long_at(req: &mut Request, position: u32) -> Result<i64, Thrown> {
-    let given = req.argument(position).unwrap_or_default();
-    let coerced = coerce_param(req, &given, &Type::Int, position)?;
-    Ok(coerced.as_int().unwrap_or(0))
-}
-
-/// `Z_PARAM_BOOL` at `position`.
-fn bool_at(req: &mut Request, position: u32) -> Result<bool, Thrown> {
-    let given = req.argument(position).unwrap_or_default();
-    let coerced = coerce_param(req, &given, &Type::Bool, position)?;
-    Ok(coerced.as_bool().unwrap_or(false))
 }
 
 /// `ob_start($callback = null, int $chunk_size = 0, int $flags = PHP_OUTPUT_HANDLER_STDFLAGS): bool`
@@ -261,11 +140,25 @@ fn bool_at(req: &mut Request, position: u32) -> Result<bool, Thrown> {
 /// HI|
 /// int(0)
 /// ```
-fn ob_start(req: &mut Request) -> Result<Value, Thrown> {
-    let given = at_most(req, 3)?;
-    let callback = req.argument(1).unwrap_or_default();
-    let chunk_size = if given >= 2 { long_at(req, 2)? } else { 0 };
-    let flags = if given >= 3 { long_at(req, 3)? } else { 0x70 };
+///
+/// ```php
+/// var_dump(ob_get_level(), ob_start(), ob_get_level(), ob_end_flush(), ob_get_level());
+/// ```
+/// ```expect
+/// int(0)
+/// bool(true)
+/// int(1)
+/// bool(true)
+/// int(0)
+/// ```
+#[php_function]
+fn ob_start(
+    req: &mut Request,
+    #[php(default = null)] callback: Untyped<Value>,
+    #[php(default = 0)] chunk_size: i64,
+    #[php(default = PHP_OUTPUT_HANDLER_STDFLAGS)] flags: i64,
+) -> Result<bool, Thrown> {
+    let callback = callback.0;
     let registered = match callback.deref().as_ref() {
         ValueRef::Str(name) if !name.is_empty() => req.buffer_handler(name.as_bytes()),
         _ => None,
@@ -280,15 +173,18 @@ fn ob_start(req: &mut Request) -> Result<Value, Thrown> {
             Err(error) => {
                 docref(req, Level::Warning, &error);
                 docref(req, Level::Notice, "Failed to create buffer");
-                return Ok(Value::bool(false));
+                return Ok(false);
             }
         },
     };
-    req.output_buffer_op(&OutputOp::Start {
-        handler,
-        chunk_size: chunk_size.max(0),
-        flags,
-    })
+    op_bool(
+        req,
+        &OutputOp::Start {
+            handler,
+            chunk_size: chunk_size.max(0),
+            flags,
+        },
+    )
 }
 
 /// `ob_flush(): bool` (`Z/main/output.c:1395`): the buffer sent on
@@ -302,9 +198,9 @@ fn ob_start(req: &mut Request) -> Result<Value, Thrown> {
 /// string(0) ""
 /// string(2) "ab"
 /// ```
-fn ob_flush(req: &mut Request) -> Result<Value, Thrown> {
-    no_arguments(req)?;
-    req.output_buffer_op(&OutputOp::Flush)
+#[php_function]
+fn ob_flush(req: &mut Request) -> Result<bool, Thrown> {
+    op_bool(req, &OutputOp::Flush)
 }
 
 /// `ob_clean(): bool` (`Z/main/output.c:1415`): the buffer emptied,
@@ -319,9 +215,9 @@ fn ob_flush(req: &mut Request) -> Result<Value, Thrown> {
 /// string(0) ""
 /// bool(false)
 /// ```
-fn ob_clean(req: &mut Request) -> Result<Value, Thrown> {
-    no_arguments(req)?;
-    req.output_buffer_op(&OutputOp::Clean)
+#[php_function]
+fn ob_clean(req: &mut Request) -> Result<bool, Thrown> {
+    op_bool(req, &OutputOp::Clean)
 }
 
 /// `ob_end_flush(): bool` (`Z/main/output.c:1437`): the buffer sent on
@@ -337,9 +233,9 @@ fn ob_clean(req: &mut Request) -> Result<Value, Thrown> {
 /// Notice: ob_end_flush(): Failed to delete and flush buffer. No buffer to delete or flush in %s on line 2
 /// bool(false)
 /// ```
-fn ob_end_flush(req: &mut Request) -> Result<Value, Thrown> {
-    no_arguments(req)?;
-    req.output_buffer_op(&OutputOp::EndFlush)
+#[php_function]
+fn ob_end_flush(req: &mut Request) -> Result<bool, Thrown> {
+    op_bool(req, &OutputOp::EndFlush)
 }
 
 /// `ob_end_clean(): bool` (`Z/main/output.c:1452`): the buffer
@@ -354,9 +250,9 @@ fn ob_end_flush(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// int(1)
 /// ```
-fn ob_end_clean(req: &mut Request) -> Result<Value, Thrown> {
-    no_arguments(req)?;
-    req.output_buffer_op(&OutputOp::EndClean)
+#[php_function]
+fn ob_end_clean(req: &mut Request) -> Result<bool, Thrown> {
+    op_bool(req, &OutputOp::EndClean)
 }
 
 /// `ob_get_flush(): string|false` (`Z/main/output.c:1467`): the
@@ -371,9 +267,9 @@ fn ob_end_clean(req: &mut Request) -> Result<Value, Thrown> {
 /// Notice: ob_get_flush(): Failed to delete and flush buffer. No buffer to delete or flush in %s on line 2
 /// bool(false)
 /// ```
-fn ob_get_flush(req: &mut Request) -> Result<Value, Thrown> {
-    no_arguments(req)?;
-    req.output_buffer_op(&OutputOp::GetFlush)
+#[php_function]
+fn ob_get_flush(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown> {
+    op_string(req, &OutputOp::GetFlush)
 }
 
 /// `ob_get_clean(): string|false` (`Z/main/output.c:1485`): the
@@ -387,9 +283,9 @@ fn ob_get_flush(req: &mut Request) -> Result<Value, Thrown> {
 /// string(5) "taken"
 /// bool(false)
 /// ```
-fn ob_get_clean(req: &mut Request) -> Result<Value, Thrown> {
-    no_arguments(req)?;
-    req.output_buffer_op(&OutputOp::GetClean)
+#[php_function]
+fn ob_get_clean(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown> {
+    op_string(req, &OutputOp::GetClean)
 }
 
 /// `ob_get_contents(): string|false` (`Z/main/output.c:1508`).
@@ -401,9 +297,9 @@ fn ob_get_clean(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// string(6) "so far"
 /// ```
-fn ob_get_contents(req: &mut Request) -> Result<Value, Thrown> {
-    no_arguments(req)?;
-    req.output_buffer_op(&OutputOp::GetContents)
+#[php_function]
+fn ob_get_contents(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown> {
+    op_string(req, &OutputOp::GetContents)
 }
 
 /// `ob_get_level(): int` (`Z/main/output.c:1520`).
@@ -415,9 +311,12 @@ fn ob_get_contents(req: &mut Request) -> Result<Value, Thrown> {
 /// int(0)
 /// int(2)
 /// ```
-fn ob_get_level(req: &mut Request) -> Result<Value, Thrown> {
-    no_arguments(req)?;
-    req.output_buffer_op(&OutputOp::GetLevel)
+#[php_function]
+fn ob_get_level(req: &mut Request) -> Result<i64, Thrown> {
+    Ok(req
+        .output_buffer_op(&OutputOp::GetLevel)?
+        .as_int()
+        .unwrap_or(0))
 }
 
 /// `ob_get_length(): int|false` (`Z/main/output.c:1531`).
@@ -429,9 +328,12 @@ fn ob_get_level(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// int(4)
 /// ```
-fn ob_get_length(req: &mut Request) -> Result<Value, Thrown> {
-    no_arguments(req)?;
-    req.output_buffer_op(&OutputOp::GetLength)
+#[php_function]
+fn ob_get_length(req: &mut Request) -> Result<OrFalse<i64>, Thrown> {
+    Ok(match req.output_buffer_op(&OutputOp::GetLength)?.as_int() {
+        Some(length) => OrFalse::Value(length),
+        None => OrFalse::False,
+    })
 }
 
 /// `ob_list_handlers(): array` (`Z/main/output.c:1544`): the names,
@@ -450,9 +352,9 @@ fn ob_get_length(req: &mut Request) -> Result<Value, Thrown> {
 /// array(0) {
 /// }
 /// ```
-fn ob_list_handlers(req: &mut Request) -> Result<Value, Thrown> {
-    no_arguments(req)?;
-    req.output_buffer_op(&OutputOp::ListHandlers)
+#[php_function]
+fn ob_list_handlers(req: &mut Request) -> Result<PhpArray, Thrown> {
+    op_array(req, &OutputOp::ListHandlers)
 }
 
 /// `ob_get_status(bool $full_status = false): array`
@@ -502,10 +404,12 @@ fn ob_list_handlers(req: &mut Request) -> Result<Value, Thrown> {
 /// array(0) {
 /// }
 /// ```
-fn ob_get_status(req: &mut Request) -> Result<Value, Thrown> {
-    let given = at_most(req, 1)?;
-    let full = given == 1 && bool_at(req, 1)?;
-    req.output_buffer_op(&OutputOp::GetStatus { full })
+#[php_function]
+fn ob_get_status(
+    req: &mut Request,
+    #[php(default = false)] full_status: bool,
+) -> Result<PhpArray, Thrown> {
+    op_array(req, &OutputOp::GetStatus { full: full_status })
 }
 
 /// `ob_implicit_flush(bool $enable = true): void`
@@ -519,8 +423,9 @@ fn ob_get_status(req: &mut Request) -> Result<Value, Thrown> {
 /// NULL
 /// NULL
 /// ```
-fn ob_implicit_flush(req: &mut Request) -> Result<Value, Thrown> {
-    let given = at_most(req, 1)?;
-    let enable = if given == 1 { bool_at(req, 1)? } else { true };
-    req.output_buffer_op(&OutputOp::ImplicitFlush(enable))
+#[php_function]
+fn ob_implicit_flush(req: &mut Request, #[php(default = true)] enable: bool) -> Result<(), Thrown> {
+    let done = req.output_buffer_op(&OutputOp::ImplicitFlush(enable))?;
+    req.release(done);
+    Ok(())
 }

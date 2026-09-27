@@ -9,20 +9,379 @@
 
 use std::cmp::Ordering;
 
-use php_ext::coerce::{coerce_param, compare};
-use php_ext::decl::{ConstExpr, FunctionDecl, Name, Parameter, ParameterDefault, Type};
+use php_ext::abi::{Callable, Ref, True, Untyped, Variadic};
+use php_ext::attr::php_function;
+use php_ext::coerce::compare;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{Key, Value, ValueRef};
+use php_ext::values::{Key, PhpArray, Value};
 
-use super::{
-    SORT_FLAG_CASE, SORT_LOCALE_STRING, SORT_NATURAL, SORT_NUMERIC, SORT_REGULAR, SORT_STRING,
-    array_by_reference, compared, strnatcmp, user_compare,
+use super::constants::{
+    SORT_ASC, SORT_DESC, SORT_FLAG_CASE, SORT_LOCALE_STRING, SORT_NATURAL, SORT_NUMERIC,
+    SORT_REGULAR, SORT_STRING,
 };
-use crate::output::Entry;
-use crate::{argument_count_between, callable_argument, declared, long_argument, parameter};
+use super::{array_by_reference, compared, strnatcmp, user_compare};
 
-/// The declarations, as `basic_functions.stub.php` has them.
+/// `sort(array &$array, int $flags = SORT_REGULAR): true`, php's
+/// `PHP_FUNCTION(sort)` (`Z/ext/standard/array.c:780`): the array the
+/// reference holds, separated in the cell, sorted in place by the
+/// comparison `$flags` names with the bucket-order fallback
+/// (`php_get_data_compare_func`) and renumbered, `zend_hash_sort` with
+/// `renumber`. Under `SORT_REGULAR` the comparison is `zend_compare`,
+/// which over mixed types is not transitive, and the order it leaves is
+/// `zend_sort`'s walk over those answers, php's to the element.
+///
+/// ```php
+/// $a = [1, "1", 2, 2.0, "a", "A", null, "", false, true]; var_dump(sort($a), $a);
+/// ```
+/// ```expect
+/// bool(true)
+/// array(10) {
+///   [0]=>
+///   NULL
+///   [1]=>
+///   string(0) ""
+///   [2]=>
+///   bool(false)
+///   [3]=>
+///   int(1)
+///   [4]=>
+///   string(1) "1"
+///   [5]=>
+///   int(2)
+///   [6]=>
+///   float(2)
+///   [7]=>
+///   string(1) "A"
+///   [8]=>
+///   string(1) "a"
+///   [9]=>
+///   bool(true)
+/// }
+/// ```
+///
+/// The other comparisons `$flags` names, and `SORT_FLAG_CASE` read off
+/// them.
+///
+/// ```php
+/// $a = [3, "10", 9, "9a", 1.5]; $b = $a; sort($a, SORT_STRING); sort($b, SORT_NUMERIC); $c = ["img12", "img10", "IMG2"]; sort($c, SORT_NATURAL | SORT_FLAG_CASE); echo json_encode($a), json_encode($b), json_encode($c), "\n";
+/// ```
+/// ```expect
+/// [1.5,"10",3,9,"9a"][1.5,3,9,"9a","10"]["IMG2","img10","img12"]
+/// ```
+///
+/// A shared array is copied into the variable before it is sorted, so
+/// the other holder keeps its order, `SEPARATE_ZVAL_NOREF`; anything
+/// but an array in the variable is php's `TypeError`, and an array
+/// written in the call cannot be passed by reference at all.
+///
+/// ```php
+/// $a = [3, 1, 2]; $shared = $a; sort($a); $s = "x"; try { sort($s); } catch (TypeError $e) { echo $e->getMessage(), "\n"; } echo json_encode($shared), json_encode($a), "\n";
+/// ```
+/// ```expect
+/// sort(): Argument #1 ($array) must be of type array, string given
+/// [3,1,2][1,2,3]
+/// ```
+///
+/// ```php
+/// sort([2, 1]);
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught Error: sort(): Argument #1 ($array) could not be passed by reference in %s:2
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// ```php
+/// echo new ReflectionFunction('sort');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function sort ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> array &$array ]
+///     Parameter #1 [ <optional> int $flags = SORT_REGULAR ]
+///   }
+///   - Return [ true ]
+/// }
+/// ```
+#[php_function]
+fn sort(
+    req: &mut Request,
+    array: Ref<PhpArray>,
+    #[php(default = SORT_REGULAR)] flags: i64,
+) -> Result<True, Thrown> {
+    let mut target = array_by_reference(req, &array)?;
+    let sorted = target
+        .array
+        .sort_by(req, true, |req, (_, a), (_, b)| compared(req, flags, a, b));
+    target.finish(req);
+    sorted?;
+    Ok(True)
+}
+
+/// `usort(array &$array, callable $callback): true`, php's
+/// `PHP_FUNCTION(usort)` over `php_usort` (`Z/ext/standard/array.c:878`):
+/// the array copied first, `zend_array_dup`, so the callback sees the
+/// caller's array unchanged while the copy is sorted with
+/// `php_array_user_compare`, and the copy written into the caller's
+/// variable after, whatever the sort raised. An empty array is left
+/// alone, not copied. The callback's answer is read as `php_get_long`
+/// reads it and normalised to a sign, so a constant answer of `1` or
+/// `-1` never falls back to the bucket order and what is left is
+/// `zend_sort`'s walk alone; `0` falls back every time and leaves the
+/// array as it was.
+///
+/// ```php
+/// $seven = [1, 2, 3, 4, 5, 6, 7]; usort($seven, fn($a, $b) => 1);
+/// $twenty = []; for ($i = 1; $i <= 20; $i++) $twenty[] = $i; $less = $twenty; usort($twenty, fn($a, $b) => 1); usort($less, fn($a, $b) => -1);
+/// $zero = [3, 1, 2]; usort($zero, fn($a, $b) => 0);
+/// echo json_encode($seven), "\n", json_encode($twenty), "\n", json_encode($less), "\n", json_encode($zero), "\n";
+/// ```
+/// ```expect
+/// [6,7,5,4,3,2,1]
+/// [16,14,15,12,13,19,2,8,9,6,7,5,4,3,17,10,18,11,20,1]
+/// [1,12,19,18,17,16,15,14,13,11,2,10,9,8,7,6,5,4,3,20]
+/// [3,1,2]
+/// ```
+///
+/// A bool answer is the 8.0 deprecation, once per call, and `false` is
+/// asked again with the operands swapped; a string answer is read as a
+/// long.
+///
+/// ```php
+/// $a = [3, 1, 2]; usort($a, fn($x, $y) => $x > $y); $b = [3, 1, 2]; usort($b, fn($x, $y) => $x < $y); $c = [3, 1, 2]; var_dump(usort($c, fn($x, $y) => "2abc")); echo json_encode($a), json_encode($b), json_encode($c), "\n";
+/// ```
+/// ```expect
+///
+/// Deprecated: usort(): Returning bool from comparison function is deprecated, return an integer less than, equal to, or greater than zero in %s on line 2
+///
+/// Deprecated: usort(): Returning bool from comparison function is deprecated, return an integer less than, equal to, or greater than zero in %s on line 2
+/// bool(true)
+/// [1,2,3][3,2,1][1,2,3]
+/// ```
+///
+/// A callback that throws ends the calls but not the sort: every
+/// comparison after it answers by bucket order, the copy is written
+/// into the variable as it stands, and what was thrown is raised from the
+/// native.
+///
+/// ```php
+/// $a = [3, 1, 2, 5, 4]; $seen = 0; try { usort($a, function ($x, $y) use (&$seen) { if (++$seen == 3) throw new Exception("stop"); return $x <=> $y; }); } catch (Exception $e) { echo $e->getMessage(), "\n"; } echo json_encode($a), " ", $seen, "\n";
+/// ```
+/// ```expect
+/// stop
+/// [1,3,2,5,4] 3
+/// ```
+///
+/// ```php
+/// $a = [1]; usort($a, "no_such_function");
+/// ```
+/// ```expect exit=255
+/// Fatal error: Uncaught TypeError: usort(): Argument #2 ($callback) must be a valid callback, function "no_such_function" not found or invalid function name in %s:2
+/// Stack trace:
+/// #0 %s(2): usort(Array, 'no_such_functio...')
+/// #1 {main}
+///   thrown in %s on line 2
+/// ```
+///
+/// ```php
+/// echo new ReflectionFunction('usort');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function usort ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> array &$array ]
+///     Parameter #1 [ <required> callable $callback ]
+///   }
+///   - Return [ true ]
+/// }
+/// ```
+#[php_function]
+fn usort(req: &mut Request, array: Ref<PhpArray>, callback: Callable) -> Result<True, Thrown> {
+    let Some(held) = array.get().copied() else {
+        return Ok(True);
+    };
+    if held.is_empty() {
+        return Ok(True);
+    }
+    let mut copy = held.copy(req)?;
+    let mut deprecated = false;
+    let sorted = copy.sort_by(req, true, |req, (_, a), (_, b)| {
+        user_compare(req, &callback, &mut deprecated, a, b)
+    });
+    let written = array.set(req, copy);
+    sorted?;
+    written?;
+    Ok(True)
+}
+
+/// `rsort(array &$array, int $flags = SORT_REGULAR): true`, php's
+/// `PHP_FUNCTION(rsort)` (`Z/ext/standard/array.c:801`): `sort` with
+/// the reversed comparison, the keys dropped. Two elements that compare
+/// equal keep the order they had, since the fallback is not reversed.
+///
+/// ```php
+/// $a = [3 => "c", 1 => "a", 2 => "b"]; var_dump(rsort($a), $a);
+/// $b = [1, "1", 2, 2.0, "10", 9]; rsort($b); var_dump($b);
+/// $c = ["b10", "B2", "a"]; rsort($c, SORT_STRING | SORT_FLAG_CASE); echo json_encode($c), "\n";
+/// ```
+/// ```expect
+/// bool(true)
+/// array(3) {
+///   [0]=>
+///   string(1) "c"
+///   [1]=>
+///   string(1) "b"
+///   [2]=>
+///   string(1) "a"
+/// }
+/// array(6) {
+///   [0]=>
+///   string(2) "10"
+///   [1]=>
+///   int(9)
+///   [2]=>
+///   int(2)
+///   [3]=>
+///   float(2)
+///   [4]=>
+///   int(1)
+///   [5]=>
+///   string(1) "1"
+/// }
+/// ["B2","b10","a"]
+/// ```
+#[php_function]
+fn rsort(
+    req: &mut Request,
+    array: Ref<PhpArray>,
+    #[php(default = SORT_REGULAR)] flags: i64,
+) -> Result<True, Thrown> {
+    data_sort(req, &array, flags, true, true)
+}
+
+/// `asort(array &$array, int $flags = SORT_REGULAR): true`, php's
+/// `PHP_FUNCTION(asort)` (`Z/ext/standard/array.c:738`): the values
+/// ordered by the comparison `$flags` names, each under the key it had,
+/// equal values in the order they stood.
+///
+/// ```php
+/// $g = ["x" => 3, "y" => 1, "z" => 2, "w" => 1]; var_dump(asort($g)); echo json_encode($g), "\n";
+/// $n = ["a" => "10", "b" => "9", "c" => "9a"]; asort($n, SORT_NUMERIC); echo json_encode($n), "\n"; asort($n, SORT_STRING); echo json_encode($n), "\n";
+/// ```
+/// ```expect
+/// bool(true)
+/// {"y":1,"w":1,"z":2,"x":3}
+/// {"b":"9","c":"9a","a":"10"}
+/// {"a":"10","b":"9","c":"9a"}
+/// ```
+#[php_function]
+fn asort(
+    req: &mut Request,
+    array: Ref<PhpArray>,
+    #[php(default = SORT_REGULAR)] flags: i64,
+) -> Result<True, Thrown> {
+    data_sort(req, &array, flags, false, false)
+}
+
+/// `arsort(array &$array, int $flags = SORT_REGULAR): true`, php's
+/// `PHP_FUNCTION(arsort)` (`Z/ext/standard/array.c:759`): `asort`
+/// reversed, equal values still in the order they stood.
+///
+/// ```php
+/// $g = ["x" => 3, "y" => 1, "z" => 2, "w" => 1]; var_dump(arsort($g)); echo json_encode($g), "\n";
+/// $s = "x"; try { arsort($s); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// bool(true)
+/// {"x":3,"z":2,"y":1,"w":1}
+/// arsort(): Argument #1 ($array) must be of type array, string given
+/// ```
+#[php_function]
+fn arsort(
+    req: &mut Request,
+    array: Ref<PhpArray>,
+    #[php(default = SORT_REGULAR)] flags: i64,
+) -> Result<True, Thrown> {
+    data_sort(req, &array, flags, true, false)
+}
+
+/// `php_get_data_compare_func` applied through `zend_hash_sort`: the
+/// array the reference holds, separated, sorted by the comparison
+/// `$flags` names, reversed where `reverse` says, and renumbered where
+/// `renumber` does.
+fn data_sort(
+    req: &mut Request,
+    array: &Ref<PhpArray>,
+    flags: i64,
+    reverse: bool,
+    renumber: bool,
+) -> Result<True, Thrown> {
+    let mut target = array_by_reference(req, array)?;
+    let sorted = target.array.sort_by(req, renumber, |req, (_, a), (_, b)| {
+        compared(req, flags, a, b).map(|o| if reverse { o.reverse() } else { o })
+    });
+    target.finish(req);
+    sorted?;
+    Ok(True)
+}
+
+/// `ksort(array &$array, int $flags = SORT_REGULAR): true`, php's
+/// `PHP_FUNCTION(ksort)` (`Z/ext/standard/array.c:589`): the elements
+/// ordered by key with `php_get_key_compare_func`. Under `SORT_REGULAR`
+/// two integer keys compare as integers, two string keys as
+/// `zendi_smart_strcmp` compares them, numerically where both are
+/// numeric, and an integer beside a string as `zend_compare` does, so
+/// `"a"` sorts after `10` as 8.0 compares a number with a non-numeric
+/// string.
+///
+/// ```php
+/// $a = ["b" => 2, "a" => 1, 10 => "x", "9" => "y", "c" => 3, "1e1" => "z"]; var_dump(ksort($a), $a);
+/// ```
+/// ```expect
+/// bool(true)
+/// array(6) {
+///   [9]=>
+///   string(1) "y"
+///   [10]=>
+///   string(1) "x"
+///   ["1e1"]=>
+///   string(1) "z"
+///   ["a"]=>
+///   int(1)
+///   ["b"]=>
+///   int(2)
+///   ["c"]=>
+///   int(3)
+/// }
+/// ```
+///
+/// Under `SORT_NUMERIC` a string key is read by `zend_strtod`, the
+/// longest prefix that is a decimal number after leading whitespace
+/// and zero where there is none, so `"0x1A"` and `"inf"` are both zero;
+/// `SORT_STRING` compares the keys' bytes, an integer key printed in
+/// decimal, and `SORT_FLAG_CASE` lowers ASCII first; `SORT_NATURAL`
+/// is `strnatcmp_ex` over the same text.
+///
+/// ```php
+/// $c = ["10" => 1, "9a" => 2, "1e1" => 3, "x" => 4, 5 => 5, "0x1A" => 6, " 7" => 7, "inf" => 8]; ksort($c, SORT_NUMERIC); echo json_encode($c), "\n";
+/// $d = ["b" => 1, "B" => 2, "a" => 3, 10 => 4, 9 => 5]; ksort($d, SORT_STRING); echo json_encode($d), "\n"; ksort($d, SORT_STRING | SORT_FLAG_CASE); echo json_encode($d), "\n";
+/// $e = ["img12" => 1, "img10" => 2, "IMG2" => 3]; ksort($e, SORT_NATURAL); echo json_encode($e), "\n"; ksort($e, SORT_NATURAL | SORT_FLAG_CASE); echo json_encode($e), "\n";
+/// $l = ["b" => 1, "a\0z" => 2, "a" => 3]; ksort($l, SORT_LOCALE_STRING); foreach ($l as $v) echo $v; echo "\n";
+/// ```
+/// ```expect
+/// {"x":4,"0x1A":6,"inf":8,"5":5," 7":7,"9a":2,"10":1,"1e1":3}
+/// {"10":4,"9":5,"B":2,"a":3,"b":1}
+/// {"10":4,"9":5,"a":3,"B":2,"b":1}
+/// {"IMG2":3,"img10":2,"img12":1}
+/// {"IMG2":3,"img10":2,"img12":1}
+/// 231
+/// ```
+///
+/// The declarations of the sort family.
 ///
 /// ```php
 /// foreach (['rsort', 'asort', 'arsort', 'ksort', 'krsort', 'natsort', 'natcasesort', 'uasort', 'uksort'] as $f) echo new ReflectionFunction($f);
@@ -99,198 +458,13 @@ use crate::{argument_count_between, callable_argument, declared, long_argument, 
 ///   - Return [ true ]
 /// }
 /// ```
-pub(super) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    let by_ref_array = || Parameter {
-        by_ref: true,
-        ..parameter(b"array", Type::Array)
-    };
-    let flags = || Parameter {
-        default: ParameterDefault::Expr(ConstExpr::Constant(Name(
-            b"SORT_REGULAR".as_slice().into(),
-        ))),
-        ..parameter(b"flags", Type::Int)
-    };
-    let flagged = |name: &[u8], entry: Entry| {
-        (
-            declared(name, &[by_ref_array(), flags()], Type::True),
-            entry,
-        )
-    };
-    let user = |name: &[u8], entry: Entry| {
-        (
-            declared(
-                name,
-                &[by_ref_array(), parameter(b"callback", Type::Callable)],
-                Type::True,
-            ),
-            entry,
-        )
-    };
-    vec![
-        flagged(b"krsort", krsort),
-        flagged(b"ksort", ksort),
-        (declared(b"natsort", &[by_ref_array()], Type::True), natsort),
-        (
-            declared(b"natcasesort", &[by_ref_array()], Type::True),
-            natcasesort,
-        ),
-        flagged(b"asort", asort),
-        flagged(b"arsort", arsort),
-        flagged(b"rsort", rsort),
-        user(b"uasort", uasort),
-        user(b"uksort", uksort),
-    ]
-}
-
-/// `rsort(array &$array, int $flags = SORT_REGULAR): true`, php's
-/// `PHP_FUNCTION(rsort)` (`Z/ext/standard/array.c:801`): `sort` with
-/// the reversed comparison, the keys dropped. Two elements that compare
-/// equal keep the order they had, since the fallback is not reversed.
-///
-/// ```php
-/// $a = [3 => "c", 1 => "a", 2 => "b"]; var_dump(rsort($a), $a);
-/// $b = [1, "1", 2, 2.0, "10", 9]; rsort($b); var_dump($b);
-/// $c = ["b10", "B2", "a"]; rsort($c, SORT_STRING | SORT_FLAG_CASE); echo json_encode($c), "\n";
-/// ```
-/// ```expect
-/// bool(true)
-/// array(3) {
-///   [0]=>
-///   string(1) "c"
-///   [1]=>
-///   string(1) "b"
-///   [2]=>
-///   string(1) "a"
-/// }
-/// array(6) {
-///   [0]=>
-///   string(2) "10"
-///   [1]=>
-///   int(9)
-///   [2]=>
-///   int(2)
-///   [3]=>
-///   float(2)
-///   [4]=>
-///   int(1)
-///   [5]=>
-///   string(1) "1"
-/// }
-/// ["B2","b10","a"]
-/// ```
-fn rsort(req: &mut Request) -> Result<Value, Thrown> {
-    data_sort(req, true, true)
-}
-
-/// `asort(array &$array, int $flags = SORT_REGULAR): true`, php's
-/// `PHP_FUNCTION(asort)` (`Z/ext/standard/array.c:738`): the values
-/// ordered by the comparison `$flags` names, each under the key it had,
-/// equal values in the order they stood.
-///
-/// ```php
-/// $g = ["x" => 3, "y" => 1, "z" => 2, "w" => 1]; var_dump(asort($g)); echo json_encode($g), "\n";
-/// $n = ["a" => "10", "b" => "9", "c" => "9a"]; asort($n, SORT_NUMERIC); echo json_encode($n), "\n"; asort($n, SORT_STRING); echo json_encode($n), "\n";
-/// ```
-/// ```expect
-/// bool(true)
-/// {"y":1,"w":1,"z":2,"x":3}
-/// {"b":"9","c":"9a","a":"10"}
-/// {"a":"10","b":"9","c":"9a"}
-/// ```
-fn asort(req: &mut Request) -> Result<Value, Thrown> {
-    data_sort(req, false, false)
-}
-
-/// `arsort(array &$array, int $flags = SORT_REGULAR): true`, php's
-/// `PHP_FUNCTION(arsort)` (`Z/ext/standard/array.c:759`): `asort`
-/// reversed, equal values still in the order they stood.
-///
-/// ```php
-/// $g = ["x" => 3, "y" => 1, "z" => 2, "w" => 1]; var_dump(arsort($g)); echo json_encode($g), "\n";
-/// $s = "x"; try { arsort($s); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// bool(true)
-/// {"x":3,"z":2,"y":1,"w":1}
-/// arsort(): Argument #1 ($array) must be of type array, string given
-/// ```
-fn arsort(req: &mut Request) -> Result<Value, Thrown> {
-    data_sort(req, true, false)
-}
-
-/// `php_get_data_compare_func` applied through `zend_hash_sort`: the
-/// array the reference holds, separated, sorted by the comparison
-/// `$flags` names, reversed where `reverse` says, and renumbered where
-/// `renumber` does.
-fn data_sort(req: &mut Request, reverse: bool, renumber: bool) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let mut target = array_by_reference(req, 1)?;
-    let flags = if req.argument_count() == 2 {
-        long_argument(req, 2)?
-    } else {
-        SORT_REGULAR
-    };
-    let sorted = target.array.sort_by(req, renumber, |req, (_, a), (_, b)| {
-        compared(req, flags, a, b).map(|o| if reverse { o.reverse() } else { o })
-    });
-    target.finish(req);
-    sorted?;
-    Ok(Value::bool(true))
-}
-
-/// `ksort(array &$array, int $flags = SORT_REGULAR): true`, php's
-/// `PHP_FUNCTION(ksort)` (`Z/ext/standard/array.c:589`): the elements
-/// ordered by key with `php_get_key_compare_func`. Under `SORT_REGULAR`
-/// two integer keys compare as integers, two string keys as
-/// `zendi_smart_strcmp` compares them, numerically where both are
-/// numeric, and an integer beside a string as `zend_compare` does, so
-/// `"a"` sorts after `10` as 8.0 compares a number with a non-numeric
-/// string.
-///
-/// ```php
-/// $a = ["b" => 2, "a" => 1, 10 => "x", "9" => "y", "c" => 3, "1e1" => "z"]; var_dump(ksort($a), $a);
-/// ```
-/// ```expect
-/// bool(true)
-/// array(6) {
-///   [9]=>
-///   string(1) "y"
-///   [10]=>
-///   string(1) "x"
-///   ["1e1"]=>
-///   string(1) "z"
-///   ["a"]=>
-///   int(1)
-///   ["b"]=>
-///   int(2)
-///   ["c"]=>
-///   int(3)
-/// }
-/// ```
-///
-/// Under `SORT_NUMERIC` a string key is read by `zend_strtod`, the
-/// longest prefix that is a decimal number after leading whitespace
-/// and zero where there is none, so `"0x1A"` and `"inf"` are both zero;
-/// `SORT_STRING` compares the keys' bytes, an integer key printed in
-/// decimal, and `SORT_FLAG_CASE` lowers ASCII first; `SORT_NATURAL`
-/// is `strnatcmp_ex` over the same text.
-///
-/// ```php
-/// $c = ["10" => 1, "9a" => 2, "1e1" => 3, "x" => 4, 5 => 5, "0x1A" => 6, " 7" => 7, "inf" => 8]; ksort($c, SORT_NUMERIC); echo json_encode($c), "\n";
-/// $d = ["b" => 1, "B" => 2, "a" => 3, 10 => 4, 9 => 5]; ksort($d, SORT_STRING); echo json_encode($d), "\n"; ksort($d, SORT_STRING | SORT_FLAG_CASE); echo json_encode($d), "\n";
-/// $e = ["img12" => 1, "img10" => 2, "IMG2" => 3]; ksort($e, SORT_NATURAL); echo json_encode($e), "\n"; ksort($e, SORT_NATURAL | SORT_FLAG_CASE); echo json_encode($e), "\n";
-/// $l = ["b" => 1, "a\0z" => 2, "a" => 3]; ksort($l, SORT_LOCALE_STRING); foreach ($l as $v) echo $v; echo "\n";
-/// ```
-/// ```expect
-/// {"x":4,"0x1A":6,"inf":8,"5":5," 7":7,"9a":2,"10":1,"1e1":3}
-/// {"10":4,"9":5,"B":2,"a":3,"b":1}
-/// {"10":4,"9":5,"a":3,"B":2,"b":1}
-/// {"IMG2":3,"img10":2,"img12":1}
-/// {"IMG2":3,"img10":2,"img12":1}
-/// 231
-/// ```
-fn ksort(req: &mut Request) -> Result<Value, Thrown> {
-    key_sort(req, false)
+#[php_function]
+fn ksort(
+    req: &mut Request,
+    array: Ref<PhpArray>,
+    #[php(default = SORT_REGULAR)] flags: i64,
+) -> Result<True, Thrown> {
+    key_sort(req, &array, flags, false)
 }
 
 /// `krsort(array &$array, int $flags = SORT_REGULAR): true`, php's
@@ -306,25 +480,29 @@ fn ksort(req: &mut Request) -> Result<Value, Thrown> {
 /// {"c":3,"b":2,"a":1,"10":"x","9":"y"}
 /// {"img12":1,"img10":2,"IMG2":3}
 /// ```
-fn krsort(req: &mut Request) -> Result<Value, Thrown> {
-    key_sort(req, true)
+#[php_function]
+fn krsort(
+    req: &mut Request,
+    array: Ref<PhpArray>,
+    #[php(default = SORT_REGULAR)] flags: i64,
+) -> Result<True, Thrown> {
+    key_sort(req, &array, flags, true)
 }
 
 /// `php_get_key_compare_func` through `zend_hash_sort`, the keys kept.
-fn key_sort(req: &mut Request, reverse: bool) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let mut target = array_by_reference(req, 1)?;
-    let flags = if req.argument_count() == 2 {
-        long_argument(req, 2)?
-    } else {
-        SORT_REGULAR
-    };
+fn key_sort(
+    req: &mut Request,
+    array: &Ref<PhpArray>,
+    flags: i64,
+    reverse: bool,
+) -> Result<True, Thrown> {
+    let mut target = array_by_reference(req, array)?;
     let sorted = target.array.sort_by(req, false, |req, (a, _), (b, _)| {
         key_compare(req, flags, a, b, reverse)
     });
     target.finish(req);
     sorted?;
-    Ok(Value::bool(true))
+    Ok(True)
 }
 
 /// `natsort(array &$array): true`, php's `php_natsort`
@@ -338,8 +516,9 @@ fn key_sort(req: &mut Request, reverse: bool) -> Result<Value, Thrown> {
 /// bool(true)
 /// {"4":3,"5":"03","2":"IMG2.png","3":"img1.png","1":"img10.png","0":"img12.png","6":"x 1","7":"x  1"}
 /// ```
-fn natsort(req: &mut Request) -> Result<Value, Thrown> {
-    natural_sort(req, false)
+#[php_function]
+fn natsort(req: &mut Request, array: Ref<PhpArray>) -> Result<True, Thrown> {
+    natural_sort(req, &array, false)
 }
 
 /// `natcasesort(array &$array): true`, php's `php_natsort` with
@@ -352,20 +531,20 @@ fn natsort(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// {"3":"img1.png","2":"IMG2.png","1":"img10.png","0":"img12.png"}
 /// ```
-fn natcasesort(req: &mut Request) -> Result<Value, Thrown> {
-    natural_sort(req, true)
+#[php_function]
+fn natcasesort(req: &mut Request, array: Ref<PhpArray>) -> Result<True, Thrown> {
+    natural_sort(req, &array, true)
 }
 
-fn natural_sort(req: &mut Request, fold: bool) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let mut target = array_by_reference(req, 1)?;
+fn natural_sort(req: &mut Request, array: &Ref<PhpArray>, fold: bool) -> Result<True, Thrown> {
+    let mut target = array_by_reference(req, array)?;
     let flags = SORT_NATURAL | if fold { SORT_FLAG_CASE } else { 0 };
     let sorted = target
         .array
         .sort_by(req, false, |req, (_, a), (_, b)| compared(req, flags, a, b));
     target.finish(req);
     sorted?;
-    Ok(Value::bool(true))
+    Ok(True)
 }
 
 /// `uasort(array &$array, callable $callback): true`, php's `php_usort`
@@ -383,8 +562,9 @@ fn natural_sort(req: &mut Request, fold: bool) -> Result<Value, Thrown> {
 /// Deprecated: uasort(): Returning bool from comparison function is deprecated, return an integer less than, equal to, or greater than zero in %s on line 3
 /// {"c":0,"a":1,"b":1}
 /// ```
-fn uasort(req: &mut Request) -> Result<Value, Thrown> {
-    user_sort(req, false)
+#[php_function]
+fn uasort(req: &mut Request, array: Ref<PhpArray>, callback: Callable) -> Result<True, Thrown> {
+    user_sort(req, &array, &callback, false)
 }
 
 /// `uksort(array &$array, callable $callback): true`, php's `php_usort`
@@ -404,45 +584,42 @@ fn uasort(req: &mut Request) -> Result<Value, Thrown> {
 /// Deprecated: uksort(): Returning bool from comparison function is deprecated, return an integer less than, equal to, or greater than zero in %s on line 3
 /// {"1":"b","2":"a"}
 /// ```
-fn uksort(req: &mut Request) -> Result<Value, Thrown> {
-    user_sort(req, true)
+#[php_function]
+fn uksort(req: &mut Request, array: Ref<PhpArray>, callback: Callable) -> Result<True, Thrown> {
+    user_sort(req, &array, &callback, true)
 }
 
 /// `php_usort` keeping keys: the array copied, `zend_array_dup`, so the
 /// callback sees the caller's array unchanged, the copy sorted and
 /// written into the caller's variable after, whatever the sort raised.
-fn user_sort(req: &mut Request, by_key: bool) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let given = req.argument(1).unwrap_or_default();
-    let coerced = coerce_param(req, &given, &Type::Array, 1)?;
-    let callback = callable_argument(req, 2)?;
-    let Some(array) = coerced.deref().as_array().copied() else {
-        return Ok(Value::bool(true));
+fn user_sort(
+    req: &mut Request,
+    array: &Ref<PhpArray>,
+    callback: &Callable,
+    by_key: bool,
+) -> Result<True, Thrown> {
+    let Some(held) = array.get().copied() else {
+        return Ok(True);
     };
-    if array.is_empty() {
-        return Ok(Value::bool(true));
+    if held.is_empty() {
+        return Ok(True);
     }
-    let mut copy = array.copy(req)?;
+    let mut copy = held.copy(req)?;
     let mut deprecated = false;
     let sorted = copy.sort_by(req, false, |req, (ka, a), (kb, b)| {
         if by_key {
             let (x, y) = (key_value(ka), key_value(kb));
             // `php_array_user_key_compare_unstable`: the keys, read
             // back as the value comparison reads its answer.
-            user_compare(req, &callback, &mut deprecated, &x, &y)
+            user_compare(req, callback, &mut deprecated, &x, &y)
         } else {
-            user_compare(req, &callback, &mut deprecated, a, b)
+            user_compare(req, callback, &mut deprecated, a, b)
         }
     });
-    let written = if let ValueRef::Reference(reference) = given.as_ref() {
-        reference.set(req, copy.to_value())
-    } else {
-        req.release(copy.to_value());
-        Ok(())
-    };
+    let written = array.set(req, copy);
     sorted?;
     written?;
-    Ok(Value::bool(true))
+    Ok(True)
 }
 
 /// A key as the value php hands a callback or `zend_compare`:
@@ -610,56 +787,6 @@ pub(super) fn strtod(bytes: &[u8]) -> f64 {
         .unwrap_or(0.0)
 }
 
-/// The declaration of `array_multisort`, both parameters taken by
-/// reference where a variable is given and by value otherwise, php's
-/// `@prefer-ref`.
-///
-/// ```php
-/// echo new ReflectionFunction('array_multisort');
-/// var_dump((new ReflectionParameter('array_multisort', 1))->canBePassedByValue());
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function array_multisort ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> &$array ]
-///     Parameter #1 [ <optional> &...$rest ]
-///   }
-///   - Return [ true ]
-/// }
-/// bool(true)
-/// ```
-pub(super) fn multisort_native() -> (FunctionDecl, Entry) {
-    (
-        declared(
-            b"array_multisort",
-            &[
-                Parameter {
-                    by_ref: true,
-                    prefer_ref: true,
-                    promoted: false,
-                    ty: None,
-                    ..parameter(b"array", Type::Mixed)
-                },
-                Parameter {
-                    by_ref: true,
-                    prefer_ref: true,
-                    promoted: false,
-                    variadic: true,
-                    ty: None,
-                    ..parameter(b"rest", Type::Mixed)
-                },
-            ],
-            Type::True,
-        ),
-        array_multisort,
-    )
-}
-
-/// `SORT_ASC` and `SORT_DESC`, the orders `array_multisort` reads.
-const SORT_ASC: i64 = 4;
-const SORT_DESC: i64 = 3;
-
 /// `array_multisort(&$array, &...$rest): true`, php's
 /// `PHP_FUNCTION(array_multisort)` (`Z/ext/standard/array.c:6058`): the
 /// arrays sorted together as SQL's `ORDER BY` sorts columns, the first
@@ -713,36 +840,32 @@ const SORT_DESC: i64 = 3;
 /// ```
 // php's body is one function: the parse, the sort and the rewrite.
 #[allow(clippy::too_many_lines)]
-fn array_multisort(req: &mut Request) -> Result<Value, Thrown> {
+#[php_function]
+fn array_multisort(
+    req: &mut Request,
+    #[php(prefer_ref)] array: Ref<Untyped<Value>>,
+    #[php(prefer_ref)] rest: Variadic<Ref<Untyped<Value>>>,
+) -> Result<True, Thrown> {
     use php_ext::raising::{arg_type_error, throw};
-    use php_ext::values::{PhpArray, PhpRef, zend_sort};
-    if req.argument_count() < 1 {
-        return Err(php_ext::raising::too_few_arguments(req, 1, 0));
-    }
-    let given = req.variadic_arguments(1)?;
+    use php_ext::values::zend_sort;
+    let given: Vec<Ref<Untyped<Value>>> = std::iter::once(array).chain(rest.0).collect();
     // Each array with the cell it came in, and the comparison each array
     // is sorted by, `(flags, descending)`.
-    let mut arrays: Vec<(PhpArray, Option<PhpRef>)> = Vec::new();
+    let mut arrays: Vec<(PhpArray, Ref<Untyped<Value>>)> = Vec::new();
     let mut sorts: Vec<(i64, bool)> = Vec::new();
     let (mut order, mut kind) = (SORT_ASC, SORT_REGULAR);
     let (mut order_allowed, mut kind_allowed) = (false, false);
     for (at, argument) in given.iter().enumerate() {
         let position = u32::try_from(at + 1).unwrap_or(u32::MAX);
-        let value = argument.deref();
+        let value = argument.get().map_or_else(Value::null, |held| held.0);
         if let Some(array) = value.as_array() {
             if at > 0 {
                 sorts.push((kind, order != SORT_ASC));
                 order = SORT_ASC;
                 kind = SORT_REGULAR;
             }
-            let entry = match argument.as_php_ref() {
-                Some(cell) => match cell.separate_array(req)? {
-                    Some(array) => (array, Some(*cell)),
-                    None => (*array, None),
-                },
-                None => (*array, None),
-            };
-            arrays.push(entry);
+            let separated = argument.separated(req)?.unwrap_or(*array);
+            arrays.push((separated, *argument));
             order_allowed = true;
             kind_allowed = true;
         } else if let Some(flag) = value.as_int() {
@@ -786,14 +909,14 @@ fn array_multisort(req: &mut Request) -> Result<Value, Thrown> {
         }
     }
     let Some((first, _)) = arrays.first() else {
-        return Ok(Value::bool(true));
+        return Ok(True);
     };
     let size = first.len();
     if arrays.iter().any(|(array, _)| array.len() != size) {
         return Err(throw(req, "ValueError", "Array sizes are inconsistent"));
     }
     if size < 1 {
-        return Ok(Value::bool(true));
+        return Ok(True);
     }
     sorts.push((kind, order != SORT_ASC));
     let columns: Vec<Vec<(Key, Value)>> = arrays
@@ -842,10 +965,7 @@ fn array_multisort(req: &mut Request) -> Result<Value, Thrown> {
             }
         }
         rebuilt.set_next_free(req, count)?;
-        match cell {
-            Some(cell) => cell.set(req, rebuilt.to_value())?,
-            None => req.release(rebuilt.to_value()),
-        }
+        cell.set(req, Untyped(rebuilt.to_value()))?;
     }
-    Ok(Value::bool(true))
+    Ok(True)
 }

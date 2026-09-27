@@ -8,10 +8,11 @@
 
 use std::cmp::Ordering;
 
+use php_ext::abi::{OrFalse, Passed, Raw, Union, Untyped};
+use php_ext::attr::php_function;
 use php_ext::coerce::{
     BinaryOp, binary_op, float_to_long, identical, loose_eq, numeric_string, to_string, value_name,
 };
-use php_ext::decl::{ConstExpr, FunctionDecl, Name, Parameter, ParameterDefault, Type};
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, deprecated, docref, throw, warning,
 };
@@ -19,37 +20,60 @@ use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
 use super::sort::key_value;
-use super::walk::array_argument;
-use super::{copied, key_copy};
-use crate::output::Entry;
-use crate::{
-    argument_count_between, bool_argument, constant, declared, frameless, long_argument, parameter,
-};
-
-/// `CASE_LOWER` and `CASE_UPPER`, what `array_change_key_case` reads.
-const CASE_LOWER: i64 = 0;
-const CASE_UPPER: i64 = 1;
+use super::{copied, key_copy, returned};
 
 /// `HT_MAX_SIZE` on a 64-bit build (`Z/Zend/zend_types.h`).
 const HT_MAX_SIZE: i64 = 0x4000_0000;
 
-/// The two case constants, in the stub's order.
-///
-/// ```php
-/// var_dump(CASE_LOWER, CASE_UPPER);
-/// ```
-/// ```expect
-/// int(0)
-/// int(1)
-/// ```
-pub(super) fn constants() -> Vec<php_ext::decl::ConstDecl> {
-    vec![
-        constant(b"CASE_LOWER", CASE_LOWER),
-        constant(b"CASE_UPPER", CASE_UPPER),
-    ]
+/// The comparison a search makes: `fast_is_identical_function` under
+/// `$strict`, `fast_equal_check_function` otherwise, the element's
+/// reference followed.
+fn matches(
+    req: &mut Request,
+    needle: &Value,
+    element: &Value,
+    strict: bool,
+) -> Result<bool, Thrown> {
+    let element = element.deref();
+    if strict {
+        return Ok(identical(needle, &element));
+    }
+    loose_eq(req, needle, &element)
 }
 
-/// The declarations, as `basic_functions.stub.php` has them.
+/// `_php_search_array`: the key of the first element that matches.
+fn search(
+    req: &mut Request,
+    needle: &Value,
+    haystack: PhpArray,
+    strict: bool,
+) -> Result<Option<Key>, Thrown> {
+    for (key, element) in &haystack {
+        if matches(req, needle, &element, strict)? {
+            return Ok(Some(key));
+        }
+    }
+    Ok(None)
+}
+
+/// `in_array(mixed $needle, array $haystack, bool $strict = false): bool`,
+/// php's `PHP_FUNCTION(in_array)` (`Z/ext/standard/array.c:1726`) and its
+/// frameless arities 2 and 3: whether an element equals the needle, `==`
+/// or under `$strict` `===`.
+///
+/// ```php
+/// var_dump(in_array("1e1", ["10"]), in_array("1e1", ["10"], true), in_array(0, ["a"]), in_array(null, [0]), in_array("abc", [0]), in_array([1], [[1]], true));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// ```
+///
+/// The declarations Reflection is asked for most.
 ///
 /// ```php
 /// foreach (['in_array', 'array_search', 'array_keys', 'array_key_exists', 'key_exists', 'array_column', 'array_pad', 'array_fill'] as $f) echo new ReflectionFunction($f);
@@ -126,233 +150,14 @@ pub(super) fn constants() -> Vec<php_ext::decl::ConstDecl> {
 ///   - Return [ array ]
 /// }
 /// ```
-// One row per native, in the stub's order: the table is the declaration.
-#[allow(clippy::too_many_lines)]
-pub(super) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    let array = || parameter(b"array", Type::Array);
-    let strict = || Parameter {
-        default: ParameterDefault::Expr(ConstExpr::Bool(false)),
-        ..parameter(b"strict", Type::Bool)
-    };
-    let preserve = || Parameter {
-        default: ParameterDefault::Expr(ConstExpr::Bool(false)),
-        ..parameter(b"preserve_keys", Type::Bool)
-    };
-    let one =
-        |name: &[u8], returns: Type, entry: Entry| (declared(name, &[array()], returns), entry);
-    let key_or_null = || Type::Union(vec![Type::String, Type::Int, Type::Null]);
-    let search = |name: &[u8], returns: Type, entry: Entry| {
-        (
-            declared(
-                name,
-                &[
-                    parameter(b"needle", Type::Mixed),
-                    parameter(b"haystack", Type::Array),
-                    strict(),
-                ],
-                returns,
-            ),
-            entry,
-        )
-    };
-    let untyped_key = || Parameter {
-        ty: None,
-        ..parameter(b"key", Type::Mixed)
-    };
-    vec![
-        (
-            frameless(search(b"in_array", Type::Bool, in_array).0, &[2, 3]),
-            in_array as Entry,
-        ),
-        search(
-            b"array_search",
-            Type::Union(vec![Type::String, Type::Int, Type::False]),
-            array_search,
-        ),
-        (
-            declared(
-                b"array_fill",
-                &[
-                    parameter(b"start_index", Type::Int),
-                    parameter(b"count", Type::Int),
-                    parameter(b"value", Type::Mixed),
-                ],
-                Type::Array,
-            ),
-            array_fill,
-        ),
-        (
-            declared(
-                b"array_fill_keys",
-                &[
-                    parameter(b"keys", Type::Array),
-                    parameter(b"value", Type::Mixed),
-                ],
-                Type::Array,
-            ),
-            array_fill_keys,
-        ),
-        (
-            declared(
-                b"array_keys",
-                &[
-                    array(),
-                    Parameter {
-                        default: ParameterDefault::Unshown,
-                        ..parameter(b"filter_value", Type::Mixed)
-                    },
-                    strict(),
-                ],
-                Type::Array,
-            ),
-            array_keys,
-        ),
-        one(b"array_key_first", key_or_null(), array_key_first),
-        one(b"array_key_last", key_or_null(), array_key_last),
-        one(b"array_first", Type::Mixed, array_first),
-        one(b"array_last", Type::Mixed, array_last),
-        one(b"array_values", Type::Array, array_values),
-        one(b"array_count_values", Type::Array, array_count_values),
-        (
-            declared(
-                b"array_column",
-                &[
-                    array(),
-                    parameter(b"column_key", key_or_null()),
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Null),
-                        ..parameter(b"index_key", key_or_null())
-                    },
-                ],
-                Type::Array,
-            ),
-            array_column,
-        ),
-        (
-            declared(b"array_reverse", &[array(), preserve()], Type::Array),
-            array_reverse,
-        ),
-        (
-            declared(
-                b"array_pad",
-                &[
-                    array(),
-                    parameter(b"length", Type::Int),
-                    parameter(b"value", Type::Mixed),
-                ],
-                Type::Array,
-            ),
-            array_pad,
-        ),
-        one(b"array_flip", Type::Array, array_flip),
-        (
-            declared(
-                b"array_change_key_case",
-                &[
-                    array(),
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Constant(Name(
-                            b"CASE_LOWER".as_slice().into(),
-                        ))),
-                        ..parameter(b"case", Type::Int)
-                    },
-                ],
-                Type::Array,
-            ),
-            array_change_key_case,
-        ),
-        one(
-            b"array_sum",
-            Type::Union(vec![Type::Int, Type::Float]),
-            array_sum,
-        ),
-        one(
-            b"array_product",
-            Type::Union(vec![Type::Int, Type::Float]),
-            array_product,
-        ),
-        (
-            declared(b"array_key_exists", &[untyped_key(), array()], Type::Bool),
-            array_key_exists,
-        ),
-        (
-            declared(b"key_exists", &[untyped_key(), array()], Type::Bool),
-            key_exists,
-        ),
-        (
-            declared(
-                b"array_chunk",
-                &[array(), parameter(b"length", Type::Int), preserve()],
-                Type::Array,
-            ),
-            array_chunk,
-        ),
-        (
-            declared(
-                b"array_combine",
-                &[
-                    parameter(b"keys", Type::Array),
-                    parameter(b"values", Type::Array),
-                ],
-                Type::Array,
-            ),
-            array_combine,
-        ),
-    ]
-}
-
-/// The comparison a search makes: `fast_is_identical_function` under
-/// `$strict`, `fast_equal_check_function` otherwise, the element's
-/// reference followed.
-fn matches(
+#[php_function(frameless(2, 3))]
+fn in_array(
     req: &mut Request,
-    needle: &Value,
-    element: &Value,
-    strict: bool,
+    needle: Value,
+    haystack: PhpArray,
+    #[php(default = false)] strict: bool,
 ) -> Result<bool, Thrown> {
-    let element = element.deref();
-    if strict {
-        return Ok(identical(needle, &element));
-    }
-    loose_eq(req, needle, &element)
-}
-
-/// `_php_search_array`: the key of the first element that matches.
-fn search(req: &mut Request) -> Result<Option<Key>, Thrown> {
-    argument_count_between(req, 2, 3)?;
-    let needle = req.argument(1).unwrap_or_default().deref();
-    let haystack = array_argument(req, 2)?;
-    let strict = if req.argument_count() == 3 {
-        bool_argument(req, 3)?
-    } else {
-        false
-    };
-    for (key, element) in &haystack {
-        if matches(req, &needle, &element, strict)? {
-            return Ok(Some(key));
-        }
-    }
-    Ok(None)
-}
-
-/// `in_array(mixed $needle, array $haystack, bool $strict = false): bool`,
-/// php's `PHP_FUNCTION(in_array)` (`Z/ext/standard/array.c:1726`) and its
-/// frameless arities 2 and 3: whether an element equals the needle, `==`
-/// or under `$strict` `===`.
-///
-/// ```php
-/// var_dump(in_array("1e1", ["10"]), in_array("1e1", ["10"], true), in_array(0, ["a"]), in_array(null, [0]), in_array("abc", [0]), in_array([1], [[1]], true));
-/// ```
-/// ```expect
-/// bool(true)
-/// bool(false)
-/// bool(false)
-/// bool(true)
-/// bool(false)
-/// bool(true)
-/// ```
-fn in_array(req: &mut Request) -> Result<Value, Thrown> {
-    Ok(Value::bool(search(req)?.is_some()))
+    Ok(search(req, &needle, haystack, strict)?.is_some())
 }
 
 /// `array_search(mixed $needle, array $haystack, bool $strict = false):
@@ -370,14 +175,16 @@ fn in_array(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// array_search(): Argument #2 ($haystack) must be of type array, string given
 /// ```
-fn array_search(req: &mut Request) -> Result<Value, Thrown> {
-    match search(req)? {
-        Some(key) => {
-            let value = key_value(&key);
-            req.addref(&value);
-            Ok(value)
-        }
-        None => Ok(Value::bool(false)),
+#[php_function]
+fn array_search(
+    req: &mut Request,
+    needle: Value,
+    haystack: PhpArray,
+    #[php(default = false)] strict: bool,
+) -> Result<OrFalse<Union<PhpString, i64>>, Thrown> {
+    match search(req, &needle, haystack, strict)? {
+        Some(key) => Ok(OrFalse::Value(key_return(req, &key))),
+        None => Ok(OrFalse::False),
     }
 }
 
@@ -411,23 +218,20 @@ fn array_search(req: &mut Request) -> Result<Value, Thrown> {
 /// array(0) {
 /// }
 /// ```
-fn array_keys(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 3)?;
-    let array = array_argument(req, 1)?;
-    let filter = if req.argument_count() >= 2 {
-        Some(req.argument(2).unwrap_or_default().deref())
-    } else {
-        None
-    };
-    let strict = if req.argument_count() == 3 {
-        bool_argument(req, 3)?
-    } else {
-        false
+#[php_function]
+fn array_keys(
+    req: &mut Request,
+    array: PhpArray,
+    filter_value: Passed<Value>,
+    #[php(default = false)] strict: bool,
+) -> Result<PhpArray, Thrown> {
+    let filter = match filter_value {
+        Passed::Given(filter) => Some(filter),
+        Passed::Omitted => None,
     };
     if array.is_empty() {
-        let value = Value::array(array);
-        req.addref(&value);
-        return Ok(value);
+        req.addref(&Value::array(array));
+        return Ok(array);
     }
     let mut out = PhpArray::new(req)?;
     for (key, element) in &array {
@@ -440,7 +244,7 @@ fn array_keys(req: &mut Request) -> Result<Value, Thrown> {
         req.addref(&value);
         out.append(req, value)?;
     }
-    Ok(Value::array(out))
+    Ok(out)
 }
 
 /// `array_key_first(array $array): int|string|null`, php's
@@ -455,11 +259,10 @@ fn array_keys(req: &mut Request) -> Result<Value, Thrown> {
 /// string(1) "x"
 /// NULL
 /// ```
-fn array_key_first(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let array = array_argument(req, 1)?;
+#[php_function]
+fn array_key_first(req: &mut Request, array: PhpArray) -> Option<Union<PhpString, i64>> {
     let first = array.iter().next();
-    Ok(key_or_null(req, first.map(|(key, _)| key)))
+    key_or_null(req, first.map(|(key, _)| key))
 }
 
 /// `array_key_last(array $array): int|string|null`, php's
@@ -473,21 +276,24 @@ fn array_key_first(req: &mut Request) -> Result<Value, Thrown> {
 /// int(3)
 /// NULL
 /// ```
-fn array_key_last(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let array = array_argument(req, 1)?;
+#[php_function]
+fn array_key_last(req: &mut Request, array: PhpArray) -> Option<Union<PhpString, i64>> {
     let last = array.snapshot_refs().pop();
-    Ok(key_or_null(req, last.map(|(key, _)| key)))
+    key_or_null(req, last.map(|(key, _)| key))
 }
 
-fn key_or_null(req: &mut Request, key: Option<Key>) -> Value {
+fn key_or_null(req: &mut Request, key: Option<Key>) -> Option<Union<PhpString, i64>> {
+    key.map(|key| key_return(req, &key))
+}
+
+/// A key as the return, `string|int`, a string one more owner.
+pub(super) fn key_return(req: &mut Request, key: &Key) -> Union<PhpString, i64> {
     match key {
-        Some(key) => {
-            let value = key_value(&key);
-            req.addref(&value);
-            value
+        Key::Str(s) => {
+            req.addref(&Value::string(*s));
+            Union::A(*s)
         }
-        None => Value::null(),
+        Key::Int(n) => Union::B(*n),
     }
 }
 
@@ -502,11 +308,10 @@ fn key_or_null(req: &mut Request, key: Option<Key>) -> Value {
 /// int(1)
 /// NULL
 /// ```
-fn array_first(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let array = array_argument(req, 1)?;
+#[php_function]
+fn array_first(req: &mut Request, array: PhpArray) -> Value {
     let first = array.iter().next();
-    Ok(value_or_null(req, first.map(|(_, value)| value)))
+    value_or_null(req, first.map(|(_, value)| value))
 }
 
 /// `array_last(array $array): mixed`, php's `PHP_FUNCTION(array_last)`
@@ -523,11 +328,10 @@ fn array_first(req: &mut Request) -> Result<Value, Thrown> {
 /// }
 /// NULL
 /// ```
-fn array_last(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let array = array_argument(req, 1)?;
+#[php_function]
+fn array_last(req: &mut Request, array: PhpArray) -> Value {
     let last = array.snapshot_refs().pop();
-    Ok(value_or_null(req, last.map(|(_, value)| value)))
+    value_or_null(req, last.map(|(_, value)| value))
 }
 
 fn value_or_null(req: &mut Request, value: Option<Value>) -> Value {
@@ -565,23 +369,21 @@ fn value_or_null(req: &mut Request, value: Option<Value>) -> Value {
 ///   int(2)
 /// }
 /// ```
-fn array_values(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let array = array_argument(req, 1)?;
+#[php_function]
+fn array_values(req: &mut Request, array: PhpArray) -> Result<PhpArray, Thrown> {
     if array.is_empty() {
-        return Ok(Value::array(PhpArray::new(req)?));
+        return PhpArray::new(req);
     }
     if array.is_list() && array.next_free() == i64::try_from(array.len()).unwrap_or(i64::MAX) {
-        let value = Value::array(array);
-        req.addref(&value);
-        return Ok(value);
+        req.addref(&Value::array(array));
+        return Ok(array);
     }
     let mut out = PhpArray::new(req)?;
     for (_, element) in array.snapshot_refs() {
         let value = copied(req, element);
         out.append(req, value)?;
     }
-    Ok(Value::array(out))
+    Ok(out)
 }
 
 /// `array_count_values(array $array): array`, php's
@@ -606,9 +408,8 @@ fn array_values(req: &mut Request) -> Result<Value, Thrown> {
 ///   int(1)
 /// }
 /// ```
-fn array_count_values(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let array = array_argument(req, 1)?;
+#[php_function]
+fn array_count_values(req: &mut Request, array: PhpArray) -> Result<PhpArray, Thrown> {
     let mut out = PhpArray::new(req)?;
     for (_, element) in array.snapshot_refs() {
         let element = element.deref();
@@ -630,7 +431,7 @@ fn array_count_values(req: &mut Request) -> Result<Value, Thrown> {
         let count = out.get(&key).and_then(|v| v.as_int()).unwrap_or(0);
         out.set(req, key, Value::int(count + 1))?;
     }
-    Ok(Value::array(out))
+    Ok(out)
 }
 
 /// The key a value makes where php writes it with
@@ -666,9 +467,8 @@ fn symtable_key(req: &mut Request, value: &Value) -> Result<Key, Thrown> {
 ///   int(5)
 /// }
 /// ```
-fn array_flip(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let array = array_argument(req, 1)?;
+#[php_function]
+fn array_flip(req: &mut Request, array: PhpArray) -> Result<PhpArray, Thrown> {
     let mut out = PhpArray::new(req)?;
     for (key, element) in array.snapshot_refs() {
         let element = element.deref();
@@ -685,7 +485,7 @@ fn array_flip(req: &mut Request) -> Result<Value, Thrown> {
         let new_key = symtable_key(req, &element)?;
         out.set(req, new_key, data)?;
     }
-    Ok(Value::array(out))
+    Ok(out)
 }
 
 /// `array_change_key_case(array $array, int $case = CASE_LOWER): array`,
@@ -713,14 +513,13 @@ fn array_flip(req: &mut Request) -> Result<Value, Thrown> {
 ///   int(2)
 /// }
 /// ```
-fn array_change_key_case(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let array = array_argument(req, 1)?;
-    let upper = if req.argument_count() == 2 {
-        long_argument(req, 2)? != 0
-    } else {
-        false
-    };
+#[php_function]
+fn array_change_key_case(
+    req: &mut Request,
+    array: PhpArray,
+    #[php(default = CASE_LOWER)] case: i64,
+) -> Result<PhpArray, Thrown> {
+    let upper = case != 0;
     let mut out = PhpArray::new(req)?;
     for (key, element) in array.snapshot_refs() {
         let key = match key {
@@ -743,7 +542,7 @@ fn array_change_key_case(req: &mut Request) -> Result<Value, Thrown> {
         let value = copied(req, element);
         out.set(req, key, value)?;
     }
-    Ok(Value::array(out))
+    Ok(out)
 }
 
 /// `array_fill(int $start_index, int $count, mixed $value): array`, php's
@@ -777,16 +576,19 @@ fn array_change_key_case(req: &mut Request) -> Result<Value, Thrown> {
 /// array_fill(): Argument #2 ($count) is too large
 /// Cannot add element to the array as the next element is already occupied
 /// ```
-fn array_fill(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 3, 3)?;
-    let start = long_argument(req, 1)?;
-    let count = long_argument(req, 2)?;
-    let value = req.argument(3).unwrap_or_default().deref();
+#[php_function]
+fn array_fill(
+    req: &mut Request,
+    start_index: i64,
+    count: i64,
+    value: Value,
+) -> Result<PhpArray, Thrown> {
+    let start = start_index;
     if count < 0 {
         return Err(arg_value_error(req, 2, "be greater than or equal to 0"));
     }
     if count == 0 {
-        return Ok(Value::array(PhpArray::new(req)?));
+        return PhpArray::new(req);
     }
     if count > i64::from(i32::MAX) {
         return Err(throw(
@@ -807,7 +609,7 @@ fn array_fill(req: &mut Request) -> Result<Value, Thrown> {
         req.addref(&value);
         out.set(req, Key::Int(start + at), value)?;
     }
-    Ok(Value::array(out))
+    Ok(out)
 }
 
 /// `array_fill_keys(array $keys, mixed $value): array`, php's
@@ -832,10 +634,8 @@ fn array_fill(req: &mut Request) -> Result<Value, Thrown> {
 ///   int(0)
 /// }
 /// ```
-fn array_fill_keys(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let keys = array_argument(req, 1)?;
-    let value = req.argument(2).unwrap_or_default().deref();
+#[php_function]
+fn array_fill_keys(req: &mut Request, keys: PhpArray, value: Value) -> Result<PhpArray, Thrown> {
     let mut out = PhpArray::new(req)?;
     for (_, element) in keys.snapshot_refs() {
         let element = element.deref();
@@ -843,7 +643,7 @@ fn array_fill_keys(req: &mut Request) -> Result<Value, Thrown> {
         req.addref(&value);
         out.set(req, key, value)?;
     }
-    Ok(Value::array(out))
+    Ok(out)
 }
 
 /// `array_pad(array $array, int $length, mixed $value): array`, php's
@@ -884,11 +684,14 @@ fn array_fill_keys(req: &mut Request) -> Result<Value, Thrown> {
 /// }
 /// array_pad(): Argument #2 ($length) must not exceed the maximum allowed array size
 /// ```
-fn array_pad(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 3, 3)?;
-    let input = array_argument(req, 1)?;
-    let size = long_argument(req, 2)?;
-    let pad = req.argument(3).unwrap_or_default().deref();
+#[php_function]
+fn array_pad(
+    req: &mut Request,
+    array: PhpArray,
+    length: i64,
+    value: Value,
+) -> Result<PhpArray, Thrown> {
+    let (input, size, pad) = (array, length, value);
     if !(-HT_MAX_SIZE..=HT_MAX_SIZE).contains(&size) {
         return Err(arg_value_error(
             req,
@@ -898,9 +701,8 @@ fn array_pad(req: &mut Request) -> Result<Value, Thrown> {
     }
     let have = i64::try_from(input.len()).unwrap_or(i64::MAX);
     if have >= size.abs() {
-        let value = Value::array(input);
-        req.addref(&value);
-        return Ok(value);
+        req.addref(&Value::array(input));
+        return Ok(input);
     }
     let pads = size.abs() - have;
     let mut out = PhpArray::new(req)?;
@@ -927,7 +729,7 @@ fn array_pad(req: &mut Request) -> Result<Value, Thrown> {
     if size > 0 {
         fill(req, &mut out)?;
     }
-    Ok(Value::array(out))
+    Ok(out)
 }
 
 /// `array_reverse(array $array, bool $preserve_keys = false): array`,
@@ -959,14 +761,13 @@ fn array_pad(req: &mut Request) -> Result<Value, Thrown> {
 ///   string(1) "a"
 /// }
 /// ```
-fn array_reverse(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let input = array_argument(req, 1)?;
-    let preserve = if req.argument_count() == 2 {
-        bool_argument(req, 2)?
-    } else {
-        false
-    };
+#[php_function]
+fn array_reverse(
+    req: &mut Request,
+    array: PhpArray,
+    #[php(default = false)] preserve_keys: bool,
+) -> Result<PhpArray, Thrown> {
+    let (input, preserve) = (array, preserve_keys);
     let mut out = PhpArray::new(req)?;
     for (key, element) in input.snapshot_refs().into_iter().rev() {
         let value = copied(req, element);
@@ -978,7 +779,7 @@ fn array_reverse(req: &mut Request) -> Result<Value, Thrown> {
             }
         }
     }
-    Ok(Value::array(out))
+    Ok(out)
 }
 
 /// `array_chunk(array $array, int $length, bool $preserve_keys = false):
@@ -1018,15 +819,14 @@ fn array_reverse(req: &mut Request) -> Result<Value, Thrown> {
 /// }
 /// array_chunk(): Argument #2 ($length) must be greater than 0
 /// ```
-fn array_chunk(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 3)?;
-    let input = array_argument(req, 1)?;
-    let size = long_argument(req, 2)?;
-    let preserve = if req.argument_count() == 3 {
-        bool_argument(req, 3)?
-    } else {
-        false
-    };
+#[php_function]
+fn array_chunk(
+    req: &mut Request,
+    array: PhpArray,
+    length: i64,
+    #[php(default = false)] preserve_keys: bool,
+) -> Result<PhpArray, Thrown> {
+    let (input, size, preserve) = (array, length, preserve_keys);
     if size < 1 {
         return Err(arg_value_error(req, 2, "be greater than 0"));
     }
@@ -1058,7 +858,7 @@ fn array_chunk(req: &mut Request) -> Result<Value, Thrown> {
     if let Some(open) = chunk {
         out.append(req, Value::array(open))?;
     }
-    Ok(Value::array(out))
+    Ok(out)
 }
 
 /// `array_combine(array $keys, array $values): array`, php's
@@ -1083,10 +883,8 @@ fn array_chunk(req: &mut Request) -> Result<Value, Thrown> {
 /// }
 /// array_combine(): Argument #1 ($keys) and argument #2 ($values) must have the same number of elements
 /// ```
-fn array_combine(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let keys = array_argument(req, 1)?;
-    let values = array_argument(req, 2)?;
+#[php_function]
+fn array_combine(req: &mut Request, keys: PhpArray, values: PhpArray) -> Result<PhpArray, Thrown> {
     if keys.len() != values.len() {
         return Err(throw(
             req,
@@ -1100,7 +898,7 @@ fn array_combine(req: &mut Request) -> Result<Value, Thrown> {
         let value = copied(req, value);
         out.set(req, key, value)?;
     }
-    Ok(Value::array(out))
+    Ok(out)
 }
 
 /// `array_key_exists($key, array $array): bool`, what php serves a call
@@ -1133,8 +931,13 @@ fn array_combine(req: &mut Request) -> Result<Value, Thrown> {
 /// Cannot access offset of type array on array
 /// array_key_exists(): Argument #2 ($array) must be of type array, string given
 /// ```
-fn array_key_exists(req: &mut Request) -> Result<Value, Thrown> {
-    key_exists_as(req, true)
+#[php_function]
+fn array_key_exists(
+    req: &mut Request,
+    key: Untyped<Value>,
+    array: PhpArray,
+) -> Result<bool, Thrown> {
+    key_exists_as(req, key.0, array, true)
 }
 
 /// `key_exists($key, array $array): bool`, the alias, which php serves
@@ -1151,14 +954,17 @@ fn array_key_exists(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// key_exists(): Argument #1 ($key) must be a valid array offset type
 /// ```
-fn key_exists(req: &mut Request) -> Result<Value, Thrown> {
-    key_exists_as(req, false)
+#[php_function]
+fn key_exists(req: &mut Request, key: Untyped<Value>, array: PhpArray) -> Result<bool, Thrown> {
+    key_exists_as(req, key.0, array, false)
 }
 
-fn key_exists_as(req: &mut Request, opcode: bool) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let key = req.argument(1).unwrap_or_default().deref();
-    let array = array_argument(req, 2)?;
+fn key_exists_as(
+    req: &mut Request,
+    key: Value,
+    array: PhpArray,
+    opcode: bool,
+) -> Result<bool, Thrown> {
     let key = match key.as_ref() {
         ValueRef::Str(s) => Key::from_string(*s),
         ValueRef::Int(n) => Key::Int(n),
@@ -1191,7 +997,7 @@ fn key_exists_as(req: &mut Request, opcode: bool) -> Result<Value, Thrown> {
             return Err(arg_type_error(req, 1, "be a valid array offset type"));
         }
     };
-    Ok(Value::bool(array.contains(&key)))
+    Ok(array.contains(&key))
 }
 
 /// `zend_dval_to_lval_safe`: the float as a key, and the 8.1
@@ -1267,15 +1073,16 @@ fn lval_safe(req: &mut Request, f: f64) -> i64 {
 /// array(0) {
 /// }
 /// ```
-fn array_column(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 3)?;
-    let input = array_argument(req, 1)?;
-    let column = column_key(req, 2)?;
-    let index = if req.argument_count() == 3 {
-        column_key(req, 3)?
-    } else {
-        None
-    };
+#[php_function]
+fn array_column(
+    req: &mut Request,
+    array: PhpArray,
+    column_key: Option<Union<PhpString, i64>>,
+    #[php(default = null)] index_key: Option<Union<PhpString, i64>>,
+) -> Result<PhpArray, Thrown> {
+    let input = array;
+    let column = column_key.map(column_of);
+    let index = index_key.map(column_of);
     let mut out = PhpArray::new(req)?;
     for (_, row) in input.snapshot_refs() {
         let row = row.deref();
@@ -1310,29 +1117,21 @@ fn array_column(req: &mut Request) -> Result<Value, Thrown> {
             None => out.append(req, value)?,
         }
     }
-    Ok(Value::array(out))
-}
-
-/// `Z_PARAM_STR_OR_LONG_OR_NULL` at `position`, as the key it names.
-fn column_key(req: &mut Request, position: u32) -> Result<Option<Key>, Thrown> {
-    let given = req.argument(position).unwrap_or_default();
-    let coerced = php_ext::coerce::coerce_param(
-        req,
-        &given,
-        &Type::Union(vec![Type::String, Type::Int, Type::Null]),
-        position,
-    )?;
-    Ok(match coerced.as_ref() {
-        ValueRef::Int(n) => Some(Key::Int(n)),
-        ValueRef::Str(s) => Some(Key::Str(*s)),
-        _ => None,
-    })
+    Ok(out)
 }
 
 /// `array_column_fetch_prop`: the value `name` names in a row, one more
 /// owner, a reference followed; an array row read by key
 /// (`zend_symtable_find`), an object row read where its property is
 /// public, and anything else nothing.
+/// A `string|int` column or index as the key it reads.
+fn column_of(key: Union<PhpString, i64>) -> Key {
+    match key {
+        Union::A(s) => Key::Str(s),
+        Union::B(n) => Key::Int(n),
+    }
+}
+
 fn fetch(req: &mut Request, row: &Value, name: &Key) -> Result<Option<Value>, Thrown> {
     if let Some(array) = row.as_array() {
         let key = match name {
@@ -1388,8 +1187,10 @@ fn fetch(req: &mut Request, row: &Value, name: &Key) -> Result<Option<Value>, Th
 /// Warning: array_sum(): Addition is not supported on type stdClass in %s on line 3
 /// int(5)
 /// ```
-fn array_sum(req: &mut Request) -> Result<Value, Thrown> {
-    binop(req, BinaryOp::Add, "Addition", 0)
+#[php_function]
+fn array_sum(req: &mut Request, array: PhpArray) -> Result<Raw<Union<i64, f64>>, Thrown> {
+    let total = binop(req, array, BinaryOp::Add, "Addition", 0)?;
+    returned(req, total)
 }
 
 /// `array_product(array $array): int|float`, php's `php_array_binop` over
@@ -1405,13 +1206,19 @@ fn array_sum(req: &mut Request) -> Result<Value, Thrown> {
 /// int(1)
 /// int(0)
 /// ```
-fn array_product(req: &mut Request) -> Result<Value, Thrown> {
-    binop(req, BinaryOp::Mul, "Multiplication", 1)
+#[php_function]
+fn array_product(req: &mut Request, array: PhpArray) -> Result<Raw<Union<i64, f64>>, Thrown> {
+    let total = binop(req, array, BinaryOp::Mul, "Multiplication", 1)?;
+    returned(req, total)
 }
 
-fn binop(req: &mut Request, op: BinaryOp, name: &str, initial: i64) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let input = array_argument(req, 1)?;
+fn binop(
+    req: &mut Request,
+    input: PhpArray,
+    op: BinaryOp,
+    name: &str,
+    initial: i64,
+) -> Result<Value, Thrown> {
     let mut total = Value::int(initial);
     for (_, element) in input.snapshot_refs() {
         let element = element.deref();

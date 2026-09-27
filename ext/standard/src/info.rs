@@ -8,35 +8,21 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_ext::decl::{ConstDecl, FunctionDecl};
+use php_ext::abi::{OrFalse, True};
+use php_ext::attr::{php_const, php_function};
 use php_ext::raising::Thrown;
 use php_ext::request::{PHP_VERSION, Request};
-use php_ext::values::{Key, PhpString, Value};
+use php_ext::values::{Key, PhpString};
 
-use crate::output::Entry;
-use crate::stub::stub;
-use crate::zpp::{nullable_string, optional_long, optional_string};
-use crate::{arg_value_error, argument_count_between, constant};
+use crate::arg_value_error;
+use constants::{
+    CREDITS_ALL, CREDITS_DOCS, CREDITS_FULLPAGE, CREDITS_GENERAL, CREDITS_GROUP, CREDITS_MODULES,
+    CREDITS_QA, CREDITS_SAPI, INFO_CONFIGURATION, INFO_CREDITS, INFO_ENVIRONMENT, INFO_GENERAL,
+    INFO_LICENSE, INFO_MODULES, INFO_VARIABLES,
+};
 
-/// `PHP_INFO_*`, `Z/ext/standard/info.h:26`.
-const INFO_GENERAL: i64 = 1;
-const INFO_CREDITS: i64 = 1 << 1;
-const INFO_CONFIGURATION: i64 = 1 << 2;
-const INFO_MODULES: i64 = 1 << 3;
-const INFO_ENVIRONMENT: i64 = 1 << 4;
-const INFO_VARIABLES: i64 = 1 << 5;
-const INFO_LICENSE: i64 = 1 << 6;
-/// `PHP_INFO_ALL`, `0xFFFFFFFF`, and `PHP_CREDITS_ALL`, the same.
-const ALL: i64 = 0xFFFF_FFFF;
-
-/// `PHP_CREDITS_*`, `Z/ext/standard/credits.h:24`.
-const CREDITS_GROUP: i64 = 1;
-const CREDITS_GENERAL: i64 = 1 << 1;
-const CREDITS_SAPI: i64 = 1 << 2;
-const CREDITS_MODULES: i64 = 1 << 3;
-const CREDITS_DOCS: i64 = 1 << 4;
-const CREDITS_FULLPAGE: i64 = 1 << 5;
-const CREDITS_QA: i64 = 1 << 6;
+/// `PHP_CREDITS_WEB`, `Z/ext/standard/credits.h:32`, which the stub does
+/// not declare.
 const CREDITS_WEB: i64 = 1 << 7;
 
 /// The constants, in the stub's order.
@@ -63,108 +49,26 @@ const CREDITS_WEB: i64 = 1 << 7;
 /// int(64)
 /// int(4294967295)
 /// ```
-pub(crate) fn constants() -> Vec<ConstDecl> {
-    [
-        ("INFO_GENERAL", INFO_GENERAL),
-        ("INFO_CREDITS", INFO_CREDITS),
-        ("INFO_CONFIGURATION", INFO_CONFIGURATION),
-        ("INFO_MODULES", INFO_MODULES),
-        ("INFO_ENVIRONMENT", INFO_ENVIRONMENT),
-        ("INFO_VARIABLES", INFO_VARIABLES),
-        ("INFO_LICENSE", INFO_LICENSE),
-        ("INFO_ALL", ALL),
-        ("CREDITS_GROUP", CREDITS_GROUP),
-        ("CREDITS_GENERAL", CREDITS_GENERAL),
-        ("CREDITS_SAPI", CREDITS_SAPI),
-        ("CREDITS_MODULES", CREDITS_MODULES),
-        ("CREDITS_DOCS", CREDITS_DOCS),
-        ("CREDITS_FULLPAGE", CREDITS_FULLPAGE),
-        ("CREDITS_QA", CREDITS_QA),
-        ("CREDITS_ALL", ALL),
-    ]
-    .into_iter()
-    .map(|(name, value)| constant(name.as_bytes(), value))
-    .collect()
-}
-
-/// The natives, as the stub declares them.
-///
-/// ```php
-/// foreach (['phpinfo', 'phpversion', 'phpcredits', 'php_sapi_name', 'php_uname', 'php_ini_scanned_files', 'php_ini_loaded_file'] as $f) echo new ReflectionFunction($f);
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function phpinfo ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <optional> int $flags = INFO_ALL ]
-///   }
-///   - Return [ true ]
-/// }
-/// Function [ <internal:standard> function phpversion ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <optional> ?string $extension = null ]
-///   }
-///   - Return [ string|false ]
-/// }
-/// Function [ <internal:standard> function phpcredits ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <optional> int $flags = CREDITS_ALL ]
-///   }
-///   - Return [ true ]
-/// }
-/// Function [ <internal:standard> function php_sapi_name ] {
-///
-///   - Parameters [0] {
-///   }
-///   - Return [ string|false ]
-/// }
-/// Function [ <internal:standard> function php_uname ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <optional> string $mode = "a" ]
-///   }
-///   - Return [ string ]
-/// }
-/// Function [ <internal:standard> function php_ini_scanned_files ] {
-///
-///   - Parameters [0] {
-///   }
-///   - Return [ string|false ]
-/// }
-/// Function [ <internal:standard> function php_ini_loaded_file ] {
-///
-///   - Parameters [0] {
-///   }
-///   - Return [ string|false ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        (
-            stub("phpinfo(int $flags = INFO_ALL): true"),
-            phpinfo as Entry,
-        ),
-        (
-            stub("phpversion(?string $extension = null): string|false"),
-            phpversion,
-        ),
-        (
-            stub("phpcredits(int $flags = CREDITS_ALL): true"),
-            phpcredits,
-        ),
-        (stub("php_sapi_name(): string|false"), php_sapi_name),
-        (stub("php_uname(string $mode = \"a\"): string"), php_uname),
-        (
-            stub("php_ini_scanned_files(): string|false"),
-            php_ini_scanned_files,
-        ),
-        (
-            stub("php_ini_loaded_file(): string|false"),
-            php_ini_loaded_file,
-        ),
-    ]
+#[php_const]
+pub(crate) mod constants {
+    /// `PHP_INFO_*`, `Z/ext/standard/info.h:26`.
+    pub(crate) const INFO_GENERAL: i64 = 1;
+    pub(crate) const INFO_CREDITS: i64 = 1 << 1;
+    pub(crate) const INFO_CONFIGURATION: i64 = 1 << 2;
+    pub(crate) const INFO_MODULES: i64 = 1 << 3;
+    pub(crate) const INFO_ENVIRONMENT: i64 = 1 << 4;
+    pub(crate) const INFO_VARIABLES: i64 = 1 << 5;
+    pub(crate) const INFO_LICENSE: i64 = 1 << 6;
+    pub(crate) const INFO_ALL: i64 = 0xFFFF_FFFF;
+    /// `PHP_CREDITS_*`, `Z/ext/standard/credits.h:24`.
+    pub(crate) const CREDITS_GROUP: i64 = 1;
+    pub(crate) const CREDITS_GENERAL: i64 = 1 << 1;
+    pub(crate) const CREDITS_SAPI: i64 = 1 << 2;
+    pub(crate) const CREDITS_MODULES: i64 = 1 << 3;
+    pub(crate) const CREDITS_DOCS: i64 = 1 << 4;
+    pub(crate) const CREDITS_FULLPAGE: i64 = 1 << 5;
+    pub(crate) const CREDITS_QA: i64 = 1 << 6;
+    pub(crate) const CREDITS_ALL: i64 = 0xFFFF_FFFF;
 }
 
 /// `php_info_print`: the text as it is.
@@ -397,7 +301,7 @@ fn print_info(req: &mut Request, flag: i64) -> Result<(), Thrown> {
     }
     if flag & INFO_CREDITS != 0 {
         hr(req);
-        print_credits(req, ALL & !CREDITS_FULLPAGE);
+        print_credits(req, CREDITS_ALL & !CREDITS_FULLPAGE);
     }
     if flag & INFO_LICENSE != 0 {
         print(req, LICENSE);
@@ -435,11 +339,65 @@ fn print_info(req: &mut Request, flag: i64) -> Result<(), Thrown> {
 /// bool(true)
 /// bool(true)
 /// ```
-fn phpinfo(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 1)?;
-    let flag = optional_long(req, 1, ALL)?;
+///
+/// The declarations of `info.c`.
+///
+/// ```php
+/// foreach (['phpinfo', 'phpversion', 'phpcredits', 'php_sapi_name', 'php_uname', 'php_ini_scanned_files', 'php_ini_loaded_file'] as $f) echo new ReflectionFunction($f);
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function phpinfo ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <optional> int $flags = INFO_ALL ]
+///   }
+///   - Return [ true ]
+/// }
+/// Function [ <internal:standard> function phpversion ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <optional> ?string $extension = null ]
+///   }
+///   - Return [ string|false ]
+/// }
+/// Function [ <internal:standard> function phpcredits ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <optional> int $flags = CREDITS_ALL ]
+///   }
+///   - Return [ true ]
+/// }
+/// Function [ <internal:standard> function php_sapi_name ] {
+///
+///   - Parameters [0] {
+///   }
+///   - Return [ string|false ]
+/// }
+/// Function [ <internal:standard> function php_uname ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <optional> string $mode = "a" ]
+///   }
+///   - Return [ string ]
+/// }
+/// Function [ <internal:standard> function php_ini_scanned_files ] {
+///
+///   - Parameters [0] {
+///   }
+///   - Return [ string|false ]
+/// }
+/// Function [ <internal:standard> function php_ini_loaded_file ] {
+///
+///   - Parameters [0] {
+///   }
+///   - Return [ string|false ]
+/// }
+/// ```
+#[php_function]
+fn phpinfo(req: &mut Request, #[php(default = INFO_ALL)] flags: i64) -> Result<True, Thrown> {
+    let flag = flags;
     print_info(req, i64::from(int(flag)))?;
-    Ok(Value::bool(true))
+    Ok(True)
 }
 
 /// The low 32 bits of a `zend_long`, as the `(int)flag` cast keeps them.
@@ -464,17 +422,20 @@ fn int(n: i64) -> i32 {
 /// bool(false)
 /// bool(true)
 /// ```
-fn phpversion(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 1)?;
-    let Some(name) = nullable_string(req, 1)? else {
-        return Ok(Value::string(PhpString::new(req, PHP_VERSION.as_bytes())?));
+#[php_function]
+fn phpversion(
+    req: &mut Request,
+    #[php(default = null)] extension: Option<PhpString>,
+) -> Result<OrFalse<PhpString>, Thrown> {
+    let Some(name) = extension else {
+        return PhpString::new(req, PHP_VERSION.as_bytes()).map(OrFalse::Value);
     };
     let name = name.as_bytes().to_vec();
     let found = name.eq_ignore_ascii_case(b"core") || req.extension_named(&name).is_some();
     if found {
-        Ok(Value::string(PhpString::new(req, PHP_VERSION.as_bytes())?))
+        PhpString::new(req, PHP_VERSION.as_bytes()).map(OrFalse::Value)
     } else {
-        Ok(Value::bool(false))
+        Ok(OrFalse::False)
     }
 }
 
@@ -550,11 +511,11 @@ fn print_credits(req: &mut Request, flag: i64) {
 /// bool(true)
 /// bool(true)
 /// ```
-fn phpcredits(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 1)?;
-    let flag = optional_long(req, 1, ALL)?;
+#[php_function]
+fn phpcredits(req: &mut Request, #[php(default = CREDITS_ALL)] flags: i64) -> True {
+    let flag = flags;
     print_credits(req, i64::from(int(flag)));
-    Ok(Value::bool(true))
+    True
 }
 
 /// `php_sapi_name(): string|false`, `PHP_FUNCTION(php_sapi_name)`
@@ -566,10 +527,10 @@ fn phpcredits(req: &mut Request) -> Result<Value, Thrown> {
 /// ```expect
 /// string(3) "cli"
 /// ```
-fn php_sapi_name(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 0)?;
+#[php_function]
+fn php_sapi_name(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown> {
     let name = req.sapi_name().to_owned();
-    Ok(Value::string(PhpString::new(req, name.as_bytes())?))
+    PhpString::new(req, name.as_bytes()).map(OrFalse::Value)
 }
 
 /// `php_uname(string $mode = "a"): string`, `PHP_FUNCTION(php_uname)`
@@ -588,11 +549,12 @@ fn php_sapi_name(req: &mut Request) -> Result<Value, Thrown> {
 /// php_uname(): Argument #1 ($mode) must be a single character
 /// php_uname(): Argument #1 ($mode) must be one of "a", "m", "n", "r", "s", or "v"
 /// ```
-fn php_uname(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 1)?;
-    let mode = optional_string(req, 1)?;
-    let mode = mode.as_ref().map_or(&b"a"[..], PhpString::as_bytes);
-    let [mode] = mode else {
+#[php_function]
+fn php_uname(
+    req: &mut Request,
+    #[php(default = "a")] mode: PhpString,
+) -> Result<PhpString, Thrown> {
+    let [mode] = mode.as_bytes() else {
         return Err(arg_value_error(req, 1, "be a single character"));
     };
     let mode = *mode;
@@ -603,7 +565,7 @@ fn php_uname(req: &mut Request) -> Result<Value, Thrown> {
             "be one of \"a\", \"m\", \"n\", \"r\", \"s\", or \"v\"",
         ));
     }
-    Ok(Value::string(PhpString::new(req, &get_uname(mode))?))
+    PhpString::new(req, &get_uname(mode))
 }
 
 /// `php_ini_scanned_files(): string|false`,
@@ -616,9 +578,9 @@ fn php_uname(req: &mut Request) -> Result<Value, Thrown> {
 /// ```expect
 /// bool(false)
 /// ```
-fn php_ini_scanned_files(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 0)?;
-    Ok(Value::bool(false))
+#[php_function]
+fn php_ini_scanned_files() -> OrFalse<PhpString> {
+    OrFalse::False
 }
 
 /// `php_ini_loaded_file(): string|false`,
@@ -631,9 +593,9 @@ fn php_ini_scanned_files(req: &mut Request) -> Result<Value, Thrown> {
 /// ```expect
 /// bool(false)
 /// ```
-fn php_ini_loaded_file(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 0)?;
-    Ok(Value::bool(false))
+#[php_function]
+fn php_ini_loaded_file() -> OrFalse<PhpString> {
+    OrFalse::False
 }
 
 /// The PHP Group row, `Z/ext/standard/credits.c:41`.

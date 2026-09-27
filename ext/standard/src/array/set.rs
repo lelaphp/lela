@@ -14,105 +14,17 @@
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
-use php_ext::abi::Callable;
+use php_ext::abi::{Callable, Raw, Untyped, Variadic};
+use php_ext::attr::php_function;
 use php_ext::call::call;
 use php_ext::coerce::{to_long, to_string};
-use php_ext::decl::{FunctionDecl, Parameter, Type};
+use php_ext::decl::Type;
 use php_ext::raising::{Thrown, arg_count_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, Value, ValueRef, zend_sort};
 
 use super::sort::key_value;
 use super::{copied, key_copy, user_compare};
-use crate::output::Entry;
-use crate::{declared, parameter};
-
-/// The declarations, as `basic_functions.stub.php` has them: the ones
-/// that take callbacks declare one untyped variadic after `$array`,
-/// since the callbacks ride at its end.
-///
-/// ```php
-/// foreach (['array_diff', 'array_udiff_uassoc', 'array_intersect_key'] as $f) echo new ReflectionFunction($f);
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function array_diff ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> array $array ]
-///     Parameter #1 [ <optional> array ...$arrays ]
-///   }
-///   - Return [ array ]
-/// }
-/// Function [ <internal:standard> function array_udiff_uassoc ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> array $array ]
-///     Parameter #1 [ <optional> ...$rest ]
-///   }
-///   - Return [ array ]
-/// }
-/// Function [ <internal:standard> function array_intersect_key ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <required> array $array ]
-///     Parameter #1 [ <optional> array ...$arrays ]
-///   }
-///   - Return [ array ]
-/// }
-/// ```
-pub(super) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    let arrays = |name: &[u8], entry: Entry| {
-        (
-            declared(
-                name,
-                &[
-                    parameter(b"array", Type::Array),
-                    Parameter {
-                        variadic: true,
-                        ..parameter(b"arrays", Type::Array)
-                    },
-                ],
-                Type::Array,
-            ),
-            entry,
-        )
-    };
-    let rest = |name: &[u8], entry: Entry| {
-        (
-            declared(
-                name,
-                &[
-                    parameter(b"array", Type::Array),
-                    Parameter {
-                        variadic: true,
-                        ty: None,
-                        ..parameter(b"rest", Type::Mixed)
-                    },
-                ],
-                Type::Array,
-            ),
-            entry,
-        )
-    };
-    vec![
-        arrays(b"array_intersect_key", array_intersect_key),
-        rest(b"array_intersect_ukey", array_intersect_ukey),
-        arrays(b"array_intersect", array_intersect),
-        rest(b"array_uintersect", array_uintersect),
-        arrays(b"array_intersect_assoc", array_intersect_assoc),
-        rest(b"array_uintersect_assoc", array_uintersect_assoc),
-        rest(b"array_intersect_uassoc", array_intersect_uassoc),
-        rest(b"array_uintersect_uassoc", array_uintersect_uassoc),
-        arrays(b"array_diff_key", array_diff_key),
-        rest(b"array_diff_ukey", array_diff_ukey),
-        arrays(b"array_diff", array_diff),
-        rest(b"array_udiff", array_udiff),
-        arrays(b"array_diff_assoc", array_diff_assoc),
-        rest(b"array_diff_uassoc", array_diff_uassoc),
-        rest(b"array_udiff_assoc", array_udiff_assoc),
-        rest(b"array_udiff_uassoc", array_udiff_uassoc),
-    ]
-}
 
 /// What a diff or an intersection compares values with.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -151,7 +63,10 @@ struct Parsed {
     callbacks: Vec<Callable>,
 }
 
-fn parse(req: &mut Request, callbacks: usize) -> Result<Parsed, Thrown> {
+/// `Z_PARAM_VARIADIC('+', ..)` and `f` after it, as `"+f"` reads them:
+/// the arrays held as they came, the body checking each where php does,
+/// and the trailing callbacks resolved where they stand.
+fn parse(req: &mut Request, values: &[Value], callbacks: usize) -> Result<Parsed, Thrown> {
     let given = req.argument_count();
     let least = callbacks + 1;
     if given < least {
@@ -161,10 +76,6 @@ fn parse(req: &mut Request, callbacks: usize) -> Result<Parsed, Thrown> {
             &format!("at least {least} argument{plural}, {given} given"),
         ));
     }
-    let values: Vec<Value> = (1..=given)
-        .filter_map(|at| u32::try_from(at).ok())
-        .map(|at| req.argument(at).unwrap_or_default().deref())
-        .collect();
     let split = given - callbacks;
     let mut found = Vec::with_capacity(callbacks);
     for offset in 0..values.len() - split {
@@ -324,8 +235,23 @@ fn plain_user(
 /// every one of them; for a diff, none of them) with an equal value where
 /// values are compared, in the first array's order, a reference with one
 /// owner followed.
-fn by_key(req: &mut Request, data: Data, diff: bool) -> Result<Value, Thrown> {
-    let parsed = parse(req, usize::from(data == Data::User))?;
+/// The arrays of an `array $array, array ...$arrays` native as they came.
+fn listed(array: Raw<PhpArray>, arrays: &Variadic<Raw<PhpArray>>) -> Vec<Value> {
+    std::iter::once(array.value())
+        .chain(arrays.0.iter().map(Raw::value))
+        .collect()
+}
+
+/// The arguments of an `array $array, ...$rest` native as they came,
+/// `$rest` ending in its callbacks.
+fn rested(array: Raw<PhpArray>, rest: Variadic<Untyped<Value>>) -> Vec<Value> {
+    std::iter::once(array.value())
+        .chain(rest.0.into_iter().map(|value| value.0))
+        .collect()
+}
+
+fn by_key(req: &mut Request, values: &[Value], data: Data, diff: bool) -> Result<PhpArray, Thrown> {
+    let parsed = parse(req, values, usize::from(data == Data::User))?;
     let arrays = arrays_of(req, &parsed.arrays)?;
     let callback = parsed.callbacks.into_iter().next();
     let mut out = PhpArray::new(req)?;
@@ -364,7 +290,7 @@ fn by_key(req: &mut Request, data: Data, diff: bool) -> Result<Value, Thrown> {
             out.set(req, key, value)?;
         }
     }
-    Ok(Value::array(out))
+    Ok(out)
 }
 
 // ---------------------------------------------------------- the sorted shape
@@ -409,9 +335,15 @@ type Sorted = (Vec<PhpArray>, Compare, Vec<Vec<Bucket>>);
 /// What the sorted shape starts from: the arguments parsed and held to
 /// being arrays, the comparisons, the slot set as php sets it before
 /// the lists are sorted, and the sorted lists.
-fn sorted(req: &mut Request, behavior: Behavior, data: Data, keys: Keys) -> Result<Sorted, Thrown> {
+fn sorted(
+    req: &mut Request,
+    values: &[Value],
+    behavior: Behavior,
+    data: Data,
+    keys: Keys,
+) -> Result<Sorted, Thrown> {
     let callbacks = usize::from(data == Data::User) + usize::from(keys == Keys::User);
-    let parsed = parse(req, callbacks)?;
+    let parsed = parse(req, values, callbacks)?;
     let arrays = arrays_of(req, &parsed.arrays)?;
     let mut compare = Compare::new(data, keys, parsed.callbacks);
     if behavior == Behavior::Normal && data == Data::User {
@@ -429,11 +361,12 @@ fn sorted(req: &mut Request, behavior: Behavior, data: Data, keys: Keys) -> Resu
 /// of the first.
 fn intersect_sorted(
     req: &mut Request,
+    values: &[Value],
     behavior: Behavior,
     data: Data,
     keys: Keys,
-) -> Result<Value, Thrown> {
-    let (arrays, mut compare, lists) = sorted(req, behavior, data, keys)?;
+) -> Result<PhpArray, Thrown> {
+    let (arrays, mut compare, lists) = sorted(req, values, behavior, data, keys)?;
     let mut out = arrays[0].copy(req)?;
     let deleted = intersect_walk(req, behavior, &mut compare, &lists);
     for key in deleted {
@@ -443,7 +376,7 @@ fn intersect_sorted(
         req.release(out.to_value());
         return Err(thrown);
     }
-    Ok(Value::array(out))
+    Ok(out)
 }
 
 /// The keys `php_array_intersect`'s walk deletes, in the order it
@@ -547,11 +480,12 @@ fn intersect_walk(
 /// first.
 fn diff_sorted(
     req: &mut Request,
+    values: &[Value],
     behavior: Behavior,
     data: Data,
     keys: Keys,
-) -> Result<Value, Thrown> {
-    let (arrays, mut compare, lists) = sorted(req, behavior, data, keys)?;
+) -> Result<PhpArray, Thrown> {
+    let (arrays, mut compare, lists) = sorted(req, values, behavior, data, keys)?;
     let mut out = arrays[0].copy(req)?;
     let deleted = diff_walk(req, behavior, &mut compare, &lists);
     for key in deleted {
@@ -561,7 +495,7 @@ fn diff_sorted(
         req.release(out.to_value());
         return Err(thrown);
     }
-    Ok(Value::array(out))
+    Ok(out)
 }
 
 /// The keys `php_array_diff`'s walk deletes, in the order it deletes
@@ -687,8 +621,45 @@ fn diff_walk(
 /// array_diff(): Argument #3 must be of type array, int given
 /// array_diff(): Argument #1 ($array) must be of type array, int given
 /// ```
-fn array_diff(req: &mut Request) -> Result<Value, Thrown> {
-    let parsed = parse(req, 0)?;
+///
+/// The declarations of the diff and intersect families.
+///
+/// ```php
+/// foreach (['array_diff', 'array_udiff_uassoc', 'array_intersect_key'] as $f) echo new ReflectionFunction($f);
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function array_diff ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> array $array ]
+///     Parameter #1 [ <optional> array ...$arrays ]
+///   }
+///   - Return [ array ]
+/// }
+/// Function [ <internal:standard> function array_udiff_uassoc ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> array $array ]
+///     Parameter #1 [ <optional> ...$rest ]
+///   }
+///   - Return [ array ]
+/// }
+/// Function [ <internal:standard> function array_intersect_key ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <required> array $array ]
+///     Parameter #1 [ <optional> array ...$arrays ]
+///   }
+///   - Return [ array ]
+/// }
+/// ```
+#[php_function]
+fn array_diff(
+    req: &mut Request,
+    array: Raw<PhpArray>,
+    arrays: Variadic<Raw<PhpArray>>,
+) -> Result<PhpArray, Thrown> {
+    let parsed = parse(req, &listed(array, &arrays), 0)?;
     let values = parsed.arrays;
     let first = array_at(req, 1, &values[0])?;
     let check_rest = |req: &mut Request| -> Result<Vec<PhpArray>, Thrown> {
@@ -701,7 +672,7 @@ fn array_diff(req: &mut Request) -> Result<Value, Thrown> {
     };
     if first.is_empty() {
         check_rest(req)?;
-        return Ok(Value::array(PhpArray::new(req)?));
+        return PhpArray::new(req);
     }
     if first.len() == 1 {
         let (_, value) = first.snapshot_refs()[0].clone();
@@ -721,17 +692,15 @@ fn array_diff(req: &mut Request) -> Result<Value, Thrown> {
             }
         }
         if found {
-            return Ok(Value::array(PhpArray::new(req)?));
+            return PhpArray::new(req);
         }
-        let value = Value::array(first);
-        req.addref(&value);
-        return Ok(value);
+        req.addref(&Value::array(first));
+        return Ok(first);
     }
     let rest = check_rest(req)?;
     if rest.iter().all(PhpArray::is_empty) {
-        let value = Value::array(first);
-        req.addref(&value);
-        return Ok(value);
+        req.addref(&Value::array(first));
+        return Ok(first);
     }
     let mut exclude: HashSet<Vec<u8>> = HashSet::new();
     for other in &rest {
@@ -749,7 +718,7 @@ fn array_diff(req: &mut Request) -> Result<Value, Thrown> {
         let key = key_copy(req, &key);
         out.set(req, key, value)?;
     }
-    Ok(Value::array(out))
+    Ok(out)
 }
 
 /// `array_diff_key(array $array, array ...$arrays): array`, php's
@@ -770,8 +739,13 @@ fn array_diff(req: &mut Request) -> Result<Value, Thrown> {
 ///   int(5)
 /// }
 /// ```
-fn array_diff_key(req: &mut Request) -> Result<Value, Thrown> {
-    by_key(req, Data::None, true)
+#[php_function]
+fn array_diff_key(
+    req: &mut Request,
+    array: Raw<PhpArray>,
+    arrays: Variadic<Raw<PhpArray>>,
+) -> Result<PhpArray, Thrown> {
+    by_key(req, &listed(array, &arrays), Data::None, true)
 }
 
 /// `array_diff_assoc(array $array, array ...$arrays): array`, php's
@@ -798,8 +772,13 @@ fn array_diff_key(req: &mut Request) -> Result<Value, Thrown> {
 ///   int(1)
 /// }
 /// ```
-fn array_diff_assoc(req: &mut Request) -> Result<Value, Thrown> {
-    by_key(req, Data::Internal, true)
+#[php_function]
+fn array_diff_assoc(
+    req: &mut Request,
+    array: Raw<PhpArray>,
+    arrays: Variadic<Raw<PhpArray>>,
+) -> Result<PhpArray, Thrown> {
+    by_key(req, &listed(array, &arrays), Data::Internal, true)
 }
 
 /// `array_udiff_assoc(array $array, ...$rest): array`, php's
@@ -822,8 +801,13 @@ fn array_diff_assoc(req: &mut Request) -> Result<Value, Thrown> {
 /// array(0) {
 /// }
 /// ```
-fn array_udiff_assoc(req: &mut Request) -> Result<Value, Thrown> {
-    by_key(req, Data::User, true)
+#[php_function(arity = manual)]
+fn array_udiff_assoc(
+    req: &mut Request,
+    array: Raw<PhpArray>,
+    rest: Variadic<Untyped<Value>>,
+) -> Result<PhpArray, Thrown> {
+    by_key(req, &rested(array, rest), Data::User, true)
 }
 
 /// `array_intersect_key(array $array, array ...$arrays): array`, php's
@@ -854,8 +838,13 @@ fn array_udiff_assoc(req: &mut Request) -> Result<Value, Thrown> {
 /// array_intersect_key(): Argument #2 must be of type array, int given
 /// array_intersect_key() expects at least 1 argument, 0 given
 /// ```
-fn array_intersect_key(req: &mut Request) -> Result<Value, Thrown> {
-    by_key(req, Data::None, false)
+#[php_function]
+fn array_intersect_key(
+    req: &mut Request,
+    array: Raw<PhpArray>,
+    arrays: Variadic<Raw<PhpArray>>,
+) -> Result<PhpArray, Thrown> {
+    by_key(req, &listed(array, &arrays), Data::None, false)
 }
 
 /// `array_intersect_assoc(array $array, array ...$arrays): array`, php's
@@ -871,8 +860,13 @@ fn array_intersect_key(req: &mut Request) -> Result<Value, Thrown> {
 ///   string(5) "green"
 /// }
 /// ```
-fn array_intersect_assoc(req: &mut Request) -> Result<Value, Thrown> {
-    by_key(req, Data::Internal, false)
+#[php_function]
+fn array_intersect_assoc(
+    req: &mut Request,
+    array: Raw<PhpArray>,
+    arrays: Variadic<Raw<PhpArray>>,
+) -> Result<PhpArray, Thrown> {
+    by_key(req, &listed(array, &arrays), Data::Internal, false)
 }
 
 /// `array_uintersect_assoc(array $array, ...$rest): array`, php's
@@ -888,8 +882,13 @@ fn array_intersect_assoc(req: &mut Request) -> Result<Value, Thrown> {
 ///   string(5) "green"
 /// }
 /// ```
-fn array_uintersect_assoc(req: &mut Request) -> Result<Value, Thrown> {
-    by_key(req, Data::User, false)
+#[php_function(arity = manual)]
+fn array_uintersect_assoc(
+    req: &mut Request,
+    array: Raw<PhpArray>,
+    rest: Variadic<Untyped<Value>>,
+) -> Result<PhpArray, Thrown> {
+    by_key(req, &rested(array, rest), Data::User, false)
 }
 
 /// `array_udiff(array $array, ...$rest): array`, php's `php_array_diff`
@@ -923,8 +922,19 @@ fn array_uintersect_assoc(req: &mut Request) -> Result<Value, Thrown> {
 /// TypeError: array_udiff(): Argument #3 must be a valid callback, function "nope" not found or invalid function name
 /// TypeError: array_udiff(): Argument #2 must be of type array, int given
 /// ```
-fn array_udiff(req: &mut Request) -> Result<Value, Thrown> {
-    diff_sorted(req, Behavior::Normal, Data::User, Keys::Internal)
+#[php_function(arity = manual)]
+fn array_udiff(
+    req: &mut Request,
+    array: Raw<PhpArray>,
+    rest: Variadic<Untyped<Value>>,
+) -> Result<PhpArray, Thrown> {
+    diff_sorted(
+        req,
+        &rested(array, rest),
+        Behavior::Normal,
+        Data::User,
+        Keys::Internal,
+    )
 }
 
 /// `array_diff_ukey(array $array, ...$rest): array`, php's
@@ -942,8 +952,19 @@ fn array_udiff(req: &mut Request) -> Result<Value, Thrown> {
 ///   int(3)
 /// }
 /// ```
-fn array_diff_ukey(req: &mut Request) -> Result<Value, Thrown> {
-    diff_sorted(req, Behavior::Key, Data::Internal, Keys::User)
+#[php_function(arity = manual)]
+fn array_diff_ukey(
+    req: &mut Request,
+    array: Raw<PhpArray>,
+    rest: Variadic<Untyped<Value>>,
+) -> Result<PhpArray, Thrown> {
+    diff_sorted(
+        req,
+        &rested(array, rest),
+        Behavior::Key,
+        Data::Internal,
+        Keys::User,
+    )
 }
 
 /// `array_diff_uassoc(array $array, ...$rest): array`, php's
@@ -963,8 +984,19 @@ fn array_diff_ukey(req: &mut Request) -> Result<Value, Thrown> {
 ///   string(3) "red"
 /// }
 /// ```
-fn array_diff_uassoc(req: &mut Request) -> Result<Value, Thrown> {
-    diff_sorted(req, Behavior::Assoc, Data::Internal, Keys::User)
+#[php_function(arity = manual)]
+fn array_diff_uassoc(
+    req: &mut Request,
+    array: Raw<PhpArray>,
+    rest: Variadic<Untyped<Value>>,
+) -> Result<PhpArray, Thrown> {
+    diff_sorted(
+        req,
+        &rested(array, rest),
+        Behavior::Assoc,
+        Data::Internal,
+        Keys::User,
+    )
 }
 
 /// `array_udiff_uassoc(array $array, ...$rest): array`, php's
@@ -982,8 +1014,19 @@ fn array_diff_uassoc(req: &mut Request) -> Result<Value, Thrown> {
 ///   string(3) "red"
 /// }
 /// ```
-fn array_udiff_uassoc(req: &mut Request) -> Result<Value, Thrown> {
-    diff_sorted(req, Behavior::Assoc, Data::User, Keys::User)
+#[php_function(arity = manual)]
+fn array_udiff_uassoc(
+    req: &mut Request,
+    array: Raw<PhpArray>,
+    rest: Variadic<Untyped<Value>>,
+) -> Result<PhpArray, Thrown> {
+    diff_sorted(
+        req,
+        &rested(array, rest),
+        Behavior::Assoc,
+        Data::User,
+        Keys::User,
+    )
 }
 
 /// `array_intersect(array $array, array ...$arrays): array`, php's
@@ -1012,8 +1055,19 @@ fn array_udiff_uassoc(req: &mut Request) -> Result<Value, Thrown> {
 /// }
 /// array_intersect(): Argument #1 ($array) must be of type array, int given
 /// ```
-fn array_intersect(req: &mut Request) -> Result<Value, Thrown> {
-    intersect_sorted(req, Behavior::Normal, Data::Internal, Keys::Internal)
+#[php_function]
+fn array_intersect(
+    req: &mut Request,
+    array: Raw<PhpArray>,
+    arrays: Variadic<Raw<PhpArray>>,
+) -> Result<PhpArray, Thrown> {
+    intersect_sorted(
+        req,
+        &listed(array, &arrays),
+        Behavior::Normal,
+        Data::Internal,
+        Keys::Internal,
+    )
 }
 
 /// `array_uintersect(array $array, ...$rest): array`, php's
@@ -1031,8 +1085,19 @@ fn array_intersect(req: &mut Request) -> Result<Value, Thrown> {
 ///   int(3)
 /// }
 /// ```
-fn array_uintersect(req: &mut Request) -> Result<Value, Thrown> {
-    intersect_sorted(req, Behavior::Normal, Data::User, Keys::Internal)
+#[php_function(arity = manual)]
+fn array_uintersect(
+    req: &mut Request,
+    array: Raw<PhpArray>,
+    rest: Variadic<Untyped<Value>>,
+) -> Result<PhpArray, Thrown> {
+    intersect_sorted(
+        req,
+        &rested(array, rest),
+        Behavior::Normal,
+        Data::User,
+        Keys::Internal,
+    )
 }
 
 /// `array_intersect_ukey(array $array, ...$rest): array`, php's
@@ -1050,8 +1115,19 @@ fn array_uintersect(req: &mut Request) -> Result<Value, Thrown> {
 ///   int(3)
 /// }
 /// ```
-fn array_intersect_ukey(req: &mut Request) -> Result<Value, Thrown> {
-    intersect_sorted(req, Behavior::Key, Data::Internal, Keys::User)
+#[php_function(arity = manual)]
+fn array_intersect_ukey(
+    req: &mut Request,
+    array: Raw<PhpArray>,
+    rest: Variadic<Untyped<Value>>,
+) -> Result<PhpArray, Thrown> {
+    intersect_sorted(
+        req,
+        &rested(array, rest),
+        Behavior::Key,
+        Data::Internal,
+        Keys::User,
+    )
 }
 
 /// `array_intersect_uassoc(array $array, ...$rest): array`, php's
@@ -1067,8 +1143,19 @@ fn array_intersect_ukey(req: &mut Request) -> Result<Value, Thrown> {
 ///   string(5) "brown"
 /// }
 /// ```
-fn array_intersect_uassoc(req: &mut Request) -> Result<Value, Thrown> {
-    intersect_sorted(req, Behavior::Assoc, Data::Internal, Keys::User)
+#[php_function(arity = manual)]
+fn array_intersect_uassoc(
+    req: &mut Request,
+    array: Raw<PhpArray>,
+    rest: Variadic<Untyped<Value>>,
+) -> Result<PhpArray, Thrown> {
+    intersect_sorted(
+        req,
+        &rested(array, rest),
+        Behavior::Assoc,
+        Data::Internal,
+        Keys::User,
+    )
 }
 
 /// `array_uintersect_uassoc(array $array, ...$rest): array`, php's
@@ -1096,6 +1183,17 @@ fn array_intersect_uassoc(req: &mut Request) -> Result<Value, Thrown> {
 ///   int(2)
 /// }
 /// ```
-fn array_uintersect_uassoc(req: &mut Request) -> Result<Value, Thrown> {
-    intersect_sorted(req, Behavior::Assoc, Data::User, Keys::User)
+#[php_function(arity = manual)]
+fn array_uintersect_uassoc(
+    req: &mut Request,
+    array: Raw<PhpArray>,
+    rest: Variadic<Untyped<Value>>,
+) -> Result<PhpArray, Thrown> {
+    intersect_sorted(
+        req,
+        &rested(array, rest),
+        Behavior::Assoc,
+        Data::User,
+        Keys::User,
+    )
 }

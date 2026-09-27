@@ -136,6 +136,7 @@ abi::Raw::value
 abi::Ref
 abi::Ref::get
 abi::Ref::is_given
+abi::Ref::reference
 abi::Ref::separated
 abi::Ref::set
 abi::StartupIni

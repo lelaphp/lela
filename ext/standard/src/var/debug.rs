@@ -4,7 +4,8 @@
 //! and a list
 //! `packed`.
 
-use php_ext::abi::PropertyPurpose;
+use php_ext::abi::{PropertyPurpose, Variadic};
+use php_ext::attr::php_function;
 use php_ext::coerce::{Exponent, float_format};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
@@ -31,17 +32,15 @@ use super::class_name;
 /// bool(true)
 /// bool(false)
 /// ```
-pub(super) fn debug_zval_dump(req: &mut Request) -> Result<Value, Thrown> {
-    if req.argument_count() < 1 {
-        return Err(php_ext::raising::too_few_arguments(req, 1, 0));
-    }
-    let values = req.variadic_arguments(1)?;
+#[php_function]
+fn debug_zval_dump(req: &mut Request, value: Value, values: Variadic<Value>) -> Result<(), Thrown> {
+    let values = std::iter::once(value).chain(values.0);
     let mut out = Vec::new();
     for value in values {
         dump(req, &mut out, &value, 1)?;
     }
     req.write(&out);
-    Ok(Value::null())
+    Ok(())
 }
 
 fn pad(out: &mut Vec<u8>, level: usize) {
