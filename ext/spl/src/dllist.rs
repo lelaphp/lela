@@ -647,15 +647,44 @@ impl SplDoublyLinkedList {
     }
 
     /// `serialize(): string`: the flags, then `:` and each element, each
-    /// through `serialize()`; the witness is the class's.
+    /// through `serialize()`, walking the nodes as they stand: the next
+    /// node is read before an element is written, and the walk ends at
+    /// one an element's `__serialize()` took out of the list
+    /// (`SPL_LLIST_CHECK_DELREF_EX(next, break;)`).
+    ///
+    /// ```php
+    /// class C { function __serialize(): array { global $list; $list->pop(); return []; } }
+    /// $list = new SplDoublyLinkedList;
+    /// $list->push(new C); $list->push(1); $list->push(2);
+    /// var_dump($list->serialize(), count($list));
+    /// ```
+    /// ```expect
+    /// string(22) "i:0;:O:1:"C":0:{}:i:1;"
+    /// int(2)
+    /// ```
     #[php(tentative)]
     fn serialize(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
-        let (flags, values) = with(req, this.object(), |l| (l.flags, l.values()))?;
+        let this = this.object();
+        let (flags, head) = with(req, this, |l| (l.flags, l.head))?;
         crate::serialized_parts(req, |req, serializer, out| {
             serializer.write(req, out, &Value::int(flags))?;
-            for value in values {
+            let mut current = head;
+            while let Some(at) = current {
                 out.push(b':');
-                serializer.write(req, out, &value)?;
+                let (data, next) = with(req, this, |l| (l.nodes[at].data, l.nodes[at].next))?;
+                let data = data.unwrap_or_default();
+                req.addref(&data);
+                let written = serializer.write(req, out, &data);
+                req.release(data);
+                written?;
+                let taken = match next {
+                    Some(next) => with(req, this, |l| l.nodes[next].data.is_none())?,
+                    None => false,
+                };
+                if taken {
+                    break;
+                }
+                current = next;
             }
             Ok(())
         })
