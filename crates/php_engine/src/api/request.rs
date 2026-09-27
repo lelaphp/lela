@@ -2879,17 +2879,30 @@ impl Request {
     /// interrupt raised during it is taken. The timer's is the fatal;
     /// otherwise the extensions' hooks, and what they throw is what the
     /// call hands back. A native that threw leaves the interrupt for the
-    /// next site, as the loop's own check after a call does. The signal
-    /// here is sent by a forked child while `call_user_func_array` has
-    /// `pcntl_waitpid` waiting for it.
+    /// next site, as the loop's own check after a call does.
+    ///
+    /// The signal here is sent by a forked child, and its ordering is
+    /// fixed by construction: the child sends it only once it has read a
+    /// byte that `fwrite`, called by `iterator_apply`, wrote, so the
+    /// signal cannot arrive before the parent is inside the outer
+    /// native; and `iterator_apply` goes on calling `fwrite` over an
+    /// endless iterator until a check after one of those calls takes
+    /// the interrupt, so it cannot be missed whichever thread of the
+    /// process runs the signal's handler, or how late. Nothing but a
+    /// check after a native a native called ends the loop.
     ///
     /// ```php
     /// pcntl_async_signals(true);
     /// pcntl_signal(SIGVTALRM, function () { throw new Exception("thrown by the handler"); });
+    /// [$r, $w] = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
     /// $pid = pcntl_fork();
-    /// if ($pid === 0) { posix_kill(posix_getppid(), SIGVTALRM); exit(0); }
-    /// try { call_user_func_array('pcntl_waitpid', [$pid, &$status]); echo "unreached\n"; }
+    /// if ($pid === 0) { fclose($w); fread($r, 1); posix_kill(posix_getppid(), SIGVTALRM); stream_get_contents($r); exit(0); }
+    /// fclose($r);
+    /// $endless = new InfiniteIterator(new ArrayIterator([0]));
+    /// try { iterator_apply($endless, 'fwrite', [$w, 'x']); echo "unreached\n"; }
     /// catch (Exception $e) { echo $e->getMessage(), "\n"; }
+    /// fclose($w);
+    /// pcntl_waitpid($pid, $status);
     /// ```
     /// ```expect
     /// thrown by the handler
