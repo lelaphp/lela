@@ -822,9 +822,29 @@ impl Request {
 /// `zend_get_property_hook_trampoline`'s two functions, each with the
 /// declaration the engine numbers it under: named `$::get` and `$::set`
 /// where php names the one it makes after the property, since the
-/// call carries the property's own name ([`Request::trampoline_property`]),
-/// and taking what they are sent as a variadic, since each holds its
-/// own count as php's does with its `zpp`.
+/// call carries the property's own name ([`Request::trampoline_property`]).
+/// Their parameters are php's `arg_info`: none for `get`, and `$value`
+/// for `set`, so a named argument is placed by that name and any other
+/// is php's `Error` for an unknown one; each entry holds the count it
+/// was sent to its own, as php's does with its `zpp`.
+///
+/// ```php
+/// class A { public mixed $prop1; public mixed $prop2 { set(mixed $custom) => $custom; } }
+/// class B extends A {
+///     public mixed $prop1 { set { parent::$prop1::set(value: 42); parent::$prop1::set(unknown: 43); } }
+///     public mixed $prop2 { set { parent::$prop2::set(custom: 42); parent::$prop2::set(value: 43); } }
+/// }
+/// $b = new B();
+/// try { $b->prop1 = 0; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { $b->prop2 = 0; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($b->prop1, $b->prop2);
+/// ```
+/// ```expect
+/// Unknown named parameter $unknown
+/// Unknown named parameter $value
+/// int(42)
+/// int(42)
+/// ```
 pub(crate) fn parent_hook_trampolines() -> Vec<(HookKind, MethodDecl, Entry)> {
     HookKind::ALL
         .into_iter()
@@ -840,16 +860,19 @@ pub(crate) fn parent_hook_trampolines() -> Vec<(HookKind, MethodDecl, Entry)> {
                             .into_bytes()
                             .into_boxed_slice(),
                     ),
-                    parameters: vec![Parameter {
-                        name: Name(b"args".as_slice().into()),
-                        ty: None,
-                        by_ref: false,
-                        prefer_ref: false,
-                        promoted: false,
-                        variadic: true,
-                        default: ParameterDefault::None,
-                        attributes: Vec::new(),
-                    }],
+                    parameters: match kind {
+                        HookKind::Get => Vec::new(),
+                        HookKind::Set => vec![Parameter {
+                            name: Name(b"value".as_slice().into()),
+                            ty: None,
+                            by_ref: false,
+                            prefer_ref: false,
+                            promoted: false,
+                            variadic: false,
+                            default: ParameterDefault::None,
+                            attributes: Vec::new(),
+                        }],
+                    },
                     return_type: None,
                     returns_by_ref: false,
                     is_generator: false,
