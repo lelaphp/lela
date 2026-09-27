@@ -1,9 +1,10 @@
 //! Type expressions: nullable, union, intersection and the DNF parens. The
 //! shape rules php's parser holds (`(A&B)` only inside a union, `&` and
-//! `?` never before a group, only `&` inside one) are parse errors here
-//! with php's text; what php's compiler holds (a nested union, `?` on a
-//! compound) is the compiler's guard (design §6.1), and the grammar
-//! parses that superset.
+//! `?` never before a group, only `&` inside one, `?` over one name and
+//! nothing compound, `static` only where [`TypeSite::WithStatic`]) are
+//! parse errors here with php's text; what php's compiler holds (a
+//! nested union, a redundant member) is the compiler's guard (design
+//! §6.1).
 
 use crate::SyntaxKind as K;
 use crate::parser::Parser;
@@ -49,43 +50,82 @@ pub(crate) fn at_type_start(p: &mut Parser<'_>) -> bool {
     }
 }
 
+/// Which of php's two type rules a position takes: `type_expr`, where
+/// `static` is a type (a return type, a class constant's type, an enum's
+/// backing), or `type_expr_without_static` (a parameter's and a
+/// property's), where it is no name and so the unexpected token
+/// (`public ?static $x;`, `function f(int|static $x)`, probed 8.5.9).
+///
+/// ```php
+/// class Test { public ?static $foo; }
+/// ```
+/// ```expect exit=255
+/// Parse error: syntax error, unexpected token "static" in %s on line 2
+/// ```
+///
+/// ```php
+/// class Test { function f(): static|array { return $this; } }
+/// var_dump((new Test)->f());
+/// ```
+/// ```expect
+/// object(Test)#1 (0) {
+/// }
+/// ```
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum TypeSite {
+    WithStatic,
+    WithoutStatic,
+}
+
 /// One type expression: `int`, `?T`, `A|B`, `A&B`, `(A&B)|C`.
-pub(crate) fn type_expr(p: &mut Parser<'_>) {
+///
+/// ```php
+/// function foo(): ?Countable&Iterator {}
+/// ```
+/// ```expect exit=255
+/// Parse error: syntax error, unexpected token "&", expecting "{" in %s on line 2
+/// ```
+///
+/// ```php
+/// class T { public ?int|string $x; }
+/// ```
+/// ```expect exit=255
+/// Parse error: syntax error, unexpected token "|", expecting variable in %s on line 2
+/// ```
+pub(crate) fn type_expr(p: &mut Parser<'_>, site: TypeSite) {
     if !p.enter_depth() {
         super::absorb_balanced(p);
         return;
     }
-    type_expr_inner(p);
+    type_expr_inner(p, site);
     p.exit_depth();
 }
 
-fn type_expr_inner(p: &mut Parser<'_>) {
+fn type_expr_inner(p: &mut Parser<'_>, site: TypeSite) {
     if p.peek_at(K::QUESTION) {
         let m = p.start();
         p.bump(K::QUESTION);
-        // `?` wraps one plain type in php: a group after it is the
-        // unexpected token (`?(A&B)`, probed 8.5.9); a compound under
-        // `?` is parsed and the compiler rejects it.
-        if p.peek_at(K::L_PAREN) {
-            p.error_unexpected();
-        }
-        union_type(p);
+        // `'?' type`: one name, never a group (`?(A&B)`) and never a
+        // compound, whose `|` or `&` is then what the position after
+        // the type finds unexpected (`?A&B $x` is `unexpected token
+        // "&", expecting variable`, probed 8.5.9).
+        named_type(p, site);
         m.complete(p, K::NULLABLE_TYPE);
         return;
     }
-    union_type(p);
+    union_type(p, site);
 }
 
 /// `intersection ('|' intersection)*`: a flat `UnionType` when `|` appears.
 /// A DNF group stands only inside a union, so after one that no `|`
 /// precedes or follows php wants the `|` (`(A&B) $x` is `unexpected
 /// variable "$x", expecting "|"`, probed 8.5.9).
-fn union_type(p: &mut Parser<'_>) {
+fn union_type(p: &mut Parser<'_>, site: TypeSite) {
     let m = p.start();
-    let grouped = intersection_type(p);
+    let grouped = intersection_type(p, site);
     if p.peek_at(K::PIPE) {
         while p.eat(K::PIPE) {
-            intersection_type(p);
+            intersection_type(p, site);
         }
         m.complete(p, K::UNION_TYPE);
     } else {
@@ -102,10 +142,10 @@ fn union_type(p: &mut Parser<'_>) {
 /// variadic marker, never an intersection: php 8.1's token split, read
 /// here as lookahead. A group after `&` is the unexpected token
 /// (`A&(B&C)`, probed 8.5.9). Whether what was parsed is one DNF group.
-fn intersection_type(p: &mut Parser<'_>) -> bool {
+fn intersection_type(p: &mut Parser<'_>, site: TypeSite) -> bool {
     let m = p.start();
     let grouped = p.peek_at(K::L_PAREN);
-    atomic_type(p);
+    atomic_type(p, site);
     if grouped && p.peek_at(K::AMP) {
         // A group joins a union alone (`(A&B)&C` is `unexpected token
         // "&", expecting "|"`, probed 8.5.9).
@@ -118,7 +158,7 @@ fn intersection_type(p: &mut Parser<'_>) -> bool {
             if p.peek_at(K::L_PAREN) {
                 p.error_unexpected();
             }
-            atomic_type(p);
+            atomic_type(p, site);
         }
         m.complete(p, K::INTERSECTION_TYPE);
         return false;
@@ -136,7 +176,7 @@ fn intersection_type(p: &mut Parser<'_>) -> bool {
 /// is `token "&"` after one member and `token "&" or ")"` after more
 /// (probed 8.5.9). The group's own `(` and `)` are on the parser's
 /// delimiter stack, so the balance text stands where it applies.
-fn atomic_type(p: &mut Parser<'_>) {
+fn atomic_type(p: &mut Parser<'_>, site: TypeSite) {
     if p.peek_at(K::L_PAREN) {
         let m = p.start();
         p.bump(K::L_PAREN);
@@ -144,6 +184,7 @@ fn atomic_type(p: &mut Parser<'_>) {
         let mut members = 0;
         loop {
             let nm = p.start();
+            refuse_static(p, site);
             if name_ref(p) {
                 nm.complete(p, K::NAMED_TYPE);
                 members += 1;
@@ -184,11 +225,25 @@ fn atomic_type(p: &mut Parser<'_>) {
         m.complete(p, K::PAREN_TYPE);
         return;
     }
+    named_type(p, site);
+}
+
+/// One name as a type, `static` among them where the site takes it.
+fn named_type(p: &mut Parser<'_>, site: TypeSite) {
     let m = p.start();
+    refuse_static(p, site);
     if name_ref(p) {
         m.complete(p, K::NAMED_TYPE);
     } else {
         p.error_unexpected();
         m.abandon(p);
+    }
+}
+
+/// `static` where the rule is `type_without_static`: the unexpected
+/// token, left for [`name_ref`] to take so the tree keeps its shape.
+fn refuse_static(p: &mut Parser<'_>, site: TypeSite) {
+    if site == TypeSite::WithoutStatic && p.peek_at(K::STATIC_KW) {
+        p.error_unexpected();
     }
 }
