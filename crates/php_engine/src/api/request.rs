@@ -2832,7 +2832,49 @@ impl Request {
         }
         let served = self.serve_native(function);
         self.pop_call();
-        served
+        self.checked_after_call(served)
+    }
+
+    /// `zend_call_function`'s check after a native returns
+    /// (`Z/Zend/zend_execute_API.c:1051-1059`): php tests the interrupt
+    /// while running user code but not inside a native, so a native a
+    /// native called (`array_map('time_nanosleep', ..)`) is where an
+    /// interrupt raised during it is taken. The timer's is the fatal;
+    /// otherwise the extensions' hooks, and what they throw is what the
+    /// call hands back. A native that threw leaves the interrupt for the
+    /// next site, as the loop's own check after a call does. The signal
+    /// here is sent by a forked child while `call_user_func_array` has
+    /// `pcntl_waitpid` waiting for it.
+    ///
+    /// ```php
+    /// pcntl_async_signals(true);
+    /// pcntl_signal(SIGVTALRM, function () { throw new Exception("thrown by the handler"); });
+    /// $pid = pcntl_fork();
+    /// if ($pid === 0) { posix_kill(posix_getppid(), SIGVTALRM); exit(0); }
+    /// try { call_user_func_array('pcntl_waitpid', [$pid, &$status]); echo "unreached\n"; }
+    /// catch (Exception $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// thrown by the handler
+    /// ```
+    fn checked_after_call(&mut self, served: Result<Value, Thrown>) -> Result<Value, Thrown> {
+        let Ok(value) = served else {
+            return served;
+        };
+        if !self.interrupt.raised().load(Ordering::Relaxed) {
+            return Ok(value);
+        }
+        match crate::interrupt::interrupted(self) {
+            Ok(false) => Ok(value),
+            Ok(true) => {
+                self.release(value);
+                Err(Thrown::of(self.take_pending()))
+            }
+            Err(fatal) => {
+                self.release(value);
+                self.fatal_of(Err(fatal))
+            }
+        }
     }
 
     /// `zend_call_function`'s walk of `fci->params`
