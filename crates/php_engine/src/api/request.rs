@@ -6806,6 +6806,43 @@ impl Request {
         }
     }
 
+    /// `zend_object_dtor_property` then `ZVAL_UNDEF`: what the slot held
+    /// given up, a cell it held typed by the slot's property no longer
+    /// ([`Request::slot_source_gone`]), and the slot left empty. What a
+    /// lazy object does to its slots goes through here: a reset, the
+    /// proxy's slots once its instance stands, and an initializer's
+    /// revert, which types the cell it puts back again.
+    ///
+    /// ```php
+    /// class C { public ?C $a; public $c; public function __construct() { $this->a = null; } }
+    /// $r = new ReflectionClass(C::class);
+    /// $objs = ['ghost' => $r->newLazyGhost(function ($o) { $o->__construct(); }),
+    ///     'proxy' => $r->newLazyProxy(fn () => new C),
+    ///     'failed' => $r->newLazyGhost(function ($o) { throw new Exception('no'); })];
+    /// foreach ($objs as $k => $obj) {
+    ///     $r->getProperty('a')->setRawValueWithoutLazyInitialization($obj, null);
+    ///     $ref = &$obj->a;
+    ///     try { $obj->c; } catch (Exception $e) { echo "$k: ", $e->getMessage(), "\n"; }
+    ///     try { $ref = 1; echo "$k: bound to nothing typed\n"; } catch (TypeError $e) { echo "$k: ", $e->getMessage(), "\n"; }
+    ///     unset($ref);
+    /// }
+    /// ```
+    /// ```expect
+    /// ghost: Cannot assign int to reference held by property C::$a of type ?C
+    /// proxy: bound to nothing typed
+    /// failed: no
+    /// failed: Cannot assign int to reference held by property C::$a of type ?C
+    /// ```
+    pub(crate) fn dtor_property(&mut self, object: PhpObject, slot: u32) {
+        let o = object.heap();
+        if let Some(cell) = o.slot(slot).as_reference() {
+            self.slot_source_gone(object, slot, cell);
+        }
+        if !o.slot(slot).is_undef() {
+            Heap::object_set_slot(&mut Hooks(self), o, slot, Zval::UNDEF);
+        }
+    }
+
     /// `ZEND_REF_ADD_TYPE_SOURCE` over the property whose slot `slot` of
     /// `object` is (`zend_get_property_info_for_slot`): the cell the slot
     /// holds is typed by that property too, one more source beside the

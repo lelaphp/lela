@@ -393,7 +393,7 @@ impl Request {
                 if decl.is_readonly && (final_class || decl.is_final) {
                     continue;
                 }
-                Heap::object_set_slot(&mut Hooks(self), o, slot, php_heap::Zval::UNDEF);
+                self.dtor_property(object, slot);
             }
             o.set_slot_bit(slot, php_heap::PropBit::Uninit, true);
             if let Some(at) = lazy.get_mut(i) {
@@ -591,8 +591,15 @@ impl Request {
     /// snapshot holds and the dynamic table back to the one the object
     /// had, what the initializer left released; the object a ghost again.
     fn lazy_revert(&mut self, o: Obj, snapshot: Vec<php_heap::Zval>, table: Option<php_heap::Arr>) {
+        let object = PhpObject::of(o);
         for (i, held) in (0..o.slots()).zip(snapshot) {
+            self.dtor_property(object, i);
             Heap::object_set_slot(&mut Hooks(self), o, i, held);
+            // `ZEND_REF_ADD_TYPE_SOURCE` over a cell the snapshot put
+            // back: the property types it again.
+            if let Some(cell) = held.as_reference() {
+                self.slot_source_added(object, i, cell);
+            }
         }
         let now = self.heap.object_take_properties(o);
         match (table, now) {
@@ -689,8 +696,12 @@ impl Request {
         if let Some(table) = self.heap.object_take_properties(o) {
             self.release(Value::array(PhpArray::of(table)));
         }
+        // "unset() properties of the proxy", each as
+        // `zend_object_dtor_property` gives one up, so a cell bound to a
+        // slot of the proxy is typed by it no longer: the instance's
+        // slots are the ones that stand now.
         for i in 0..instance.heap().slots().min(o.slots()) {
-            Heap::object_set_slot(&mut Hooks(self), o, i, php_heap::Zval::UNDEF);
+            self.dtor_property(object, i);
         }
         Ok(instance)
     }
