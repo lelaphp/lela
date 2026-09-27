@@ -16,8 +16,8 @@ use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
 
 use super::{
-    Holder, INCOMPLETE_CLASS, MAGIC_MEMBER, Shared, has_method, is_enum_class, locked,
-    not_serializable,
+    Holder, INCOMPLETE_CLASS, MAGIC_MEMBER, Shared, has_method, is_enum_class, is_serializable,
+    locked, not_serializable,
 };
 
 /// `HT_MAX_SIZE` on a 64-bit build.
@@ -1392,6 +1392,21 @@ impl State<'_> {
         }
         self.p += 2;
         let has_unserialize = !incomplete && has_method(req, class, b"__unserialize");
+        // A `Serializable` class reads a `C:` record; an `O:` one it has no
+        // `__unserialize()` for is not what its serializer wrote.
+        if !has_unserialize && is_serializable(req, class) {
+            let shown = String::from_utf8_lossy(
+                &req.class_decl(class)
+                    .map(|d| d.name.0.to_vec())
+                    .unwrap_or_default(),
+            )
+            .into_owned();
+            warning(
+                req,
+                &format!("Erroneous data format for unserializing '{shown}'"),
+            );
+            return Ok(false);
+        }
         let object = new_object(req, class)?;
         self.write(req, slot, entry, object.as_value())?;
         if incomplete {

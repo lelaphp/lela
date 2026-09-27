@@ -182,6 +182,56 @@ fn has_method(req: &mut Request, class: php_ext::values::ClassId, method: &[u8])
     false
 }
 
+/// Whether the class is `Serializable`, php's `ce->serialize` and
+/// `ce->unserialize` being set: `zend_implement_serializable` gives them
+/// to every class that implements the interface, through an interface
+/// that extends it or a class it extends. `unserialize()` refuses an
+/// `O:` record of such a class that has no `__unserialize()`.
+///
+/// ```php
+/// class N implements Serializable { function serialize() { return ""; } function unserialize($s) {} }
+/// class B extends N { function __serialize(): array { return []; } function __unserialize(array $a): void { echo "both\n"; } }
+/// var_dump(unserialize('O:1:"N":0:{}'), unserialize('O:1:"B":0:{}') instanceof B);
+/// ```
+/// ```expect
+/// Deprecated: N implements the Serializable interface, which is deprecated. Implement __serialize() and __unserialize() instead (or in addition, if support for old PHP versions is necessary) in %s on line 2
+///
+/// Warning: Erroneous data format for unserializing 'N' in %s on line 4
+///
+/// Warning: unserialize(): Error at offset 11 of 12 bytes in %s on line 4
+/// both
+/// bool(false)
+/// bool(true)
+/// ```
+fn is_serializable(req: &mut Request, class: php_ext::values::ClassId) -> bool {
+    let mut pending = vec![class];
+    let mut seen = 0;
+    while let Some(here) = pending.pop() {
+        seen += 1;
+        if seen > 256 {
+            return false;
+        }
+        let Some(decl) = req.class_decl(here) else {
+            continue;
+        };
+        if decl.name.0.eq_ignore_ascii_case(b"Serializable") {
+            return true;
+        }
+        let names: Vec<Vec<u8>> = decl
+            .parent
+            .iter()
+            .chain(decl.interfaces.iter())
+            .map(|name| name.0.to_vec())
+            .collect();
+        for name in names {
+            if let Ok(Some(up)) = php_ext::call::lookup_class(req, &name) {
+                pending.push(up);
+            }
+        }
+    }
+    false
+}
+
 /// `ce->ce_flags & ZEND_ACC_NOT_SERIALIZABLE`, the refusal
 /// `php_var_serialize_intern` and `object_common` raise before anything
 /// else of an object: the class, or a class it extends, declares

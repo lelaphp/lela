@@ -7,15 +7,15 @@
 
 use php_ext::abi::PropertyPurpose;
 use php_ext::attr::php_function;
-use php_ext::call::{call_method, lookup_class};
+use php_ext::call::call_method;
 use php_ext::coerce::{Exponent, float_format, to_string};
 use php_ext::raising::{Level, Thrown, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
 
 use super::{
-    Holder, INCOMPLETE_CLASS, MAGIC_MEMBER, Shared, class_name, has_method, is_enum, locked,
-    not_serializable,
+    Holder, INCOMPLETE_CLASS, MAGIC_MEMBER, Shared, class_name, has_method, is_enum,
+    is_serializable, locked, not_serializable,
 };
 
 /// What the var hash keys an entry by: the object's identity, or the
@@ -463,7 +463,7 @@ fn object_value(
         req.release(data);
         return written;
     }
-    if is_serializable(req, object) {
+    if is_serializable(req, object.class()) {
         return custom(req, out, object, &name, hash);
     }
     if name != INCOMPLETE_CLASS && has_method(req, object.class(), b"__sleep") {
@@ -502,16 +502,6 @@ fn object_value(
         hash.fail(object);
     }
     written
-}
-
-/// Whether the class is `Serializable`, php's `ce->serialize` being set:
-/// `zend_implement_serializable` gives it to every class that implements
-/// the interface, and to every class that extends one.
-fn is_serializable(req: &mut Request, object: PhpObject) -> bool {
-    lookup_class(req, b"Serializable")
-        .ok()
-        .flatten()
-        .is_some_and(|interface| object.instance_of(req, interface))
 }
 
 /// The `ce->serialize` arm, `zend_user_serialize`: the object's
