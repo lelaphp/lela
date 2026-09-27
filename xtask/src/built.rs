@@ -29,6 +29,14 @@
 //! the code it was built from, and one binary cannot run another
 //! checkout's.
 //!
+//! One manifest is not held that way: a worktree's. A call in another
+//! checkout of the repository than the one this build was asked about is
+//! judged by that checkout's rules, and a worktree laid before a
+//! `seams.toml` change carries rules no build of the checkout is compiled
+//! against. No rebuild of the checkout repairs that, so the answer is not
+//! a refusal but [`Judge::Checkout`]: the worktree's own build judges the
+//! call, and `permit` hands it over (#1047).
+//!
 //! A refusal says which of the two it is, since only one of them is a
 //! judgement the harness is missing. A build apart from the tree is passed
 //! over by one that rebuilds from it, so the call is judged and the
@@ -38,7 +46,7 @@
 //! second as a failure (#118).
 
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, anyhow};
 
@@ -67,6 +75,26 @@ pub enum Refusal {
     /// reads the same bytes and refuses the same way, so the call reaches
     /// the end of the walk unjudged.
     Unreadable(anyhow::Error),
+    /// The build of the checkout the call is in, which [`Judge::Checkout`]
+    /// named, did not judge it: none of its candidates exited 0. Every
+    /// candidate of this walk hands the call to that same build, so the
+    /// call reaches the end of the walk unjudged, never allowed (#1047).
+    HandOff(anyhow::Error),
+}
+
+/// Which build judges one call, where [`judges`] does not refuse.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Judge {
+    /// This one: the manifest in front of it and its own sources are what
+    /// it was compiled against.
+    This,
+    /// The build of this checkout, another checkout of the repository than
+    /// the one this build was asked about, whose manifest is not the one
+    /// this build was compiled against (#1047). Each tree is judged by the
+    /// rules it carries, so that build judges the call, against its own
+    /// tree, where the checkout it is asked about is its root and it never
+    /// hands the call on again.
+    Checkout(PathBuf),
 }
 
 impl Refusal {
@@ -79,7 +107,7 @@ impl Refusal {
     /// Why the build refused, in the words the exit carries.
     pub fn why(&self) -> &anyhow::Error {
         match self {
-            Refusal::Stale(why) | Refusal::Unreadable(why) => why,
+            Refusal::Stale(why) | Refusal::Unreadable(why) | Refusal::HandOff(why) => why,
         }
     }
 }
@@ -93,7 +121,7 @@ impl fmt::Display for Refusal {
 impl From<Refusal> for anyhow::Error {
     fn from(refusal: Refusal) -> anyhow::Error {
         match refusal {
-            Refusal::Stale(why) | Refusal::Unreadable(why) => why,
+            Refusal::Stale(why) | Refusal::Unreadable(why) | Refusal::HandOff(why) => why,
         }
     }
 }
@@ -101,8 +129,11 @@ impl From<Refusal> for anyhow::Error {
 /// This build against what it judges by: the manifest of `checkout`, the
 /// one the call belongs to, and its own sources in `built_root`, the
 /// workspace it was compiled in.
-/// `Ok` when both are what it was compiled against, and a [`Refusal`]
-/// naming the one that is not when either has moved. The caller refuses to
+/// [`Judge::This`] when both are what it was compiled against, and a
+/// [`Refusal`] naming the one that is not when either has moved; except
+/// that a manifest apart in a `checkout` that is not `root`, the checkout
+/// this build was asked about, is [`Judge::Checkout`], since that
+/// checkout's own build is compiled against it (#1047). The caller refuses to
 /// judge on that rather than deciding by rules or with code it was not
 /// built from, whichever way the decision would fall: a stale build that
 /// happens to agree is still a build whose agreement means nothing.
@@ -115,7 +146,7 @@ impl From<Refusal> for anyhow::Error {
 /// [`Refusal::Stale`] and hands the call on, while a digest that cannot be
 /// taken at all is [`Refusal::Unreadable`]: no rebuild repairs a manifest
 /// that is not there.
-pub fn judges(checkout: &Path, built_root: &Path) -> Result<(), Refusal> {
+pub fn judges(checkout: &Path, root: &Path, built_root: &Path) -> Result<Judge, Refusal> {
     let manifest = manifest_digest(checkout)
         .with_context(|| {
             format!(
@@ -138,6 +169,9 @@ pub fn judges(checkout: &Path, built_root: &Path) -> Result<(), Refusal> {
              seams.toml or xtask/src beside it and cannot say what its rules are. {REBUILD}"
         )));
     }
+    if manifest != MANIFEST && !same_directory(checkout, root) {
+        return Ok(Judge::Checkout(checkout.to_path_buf()));
+    }
     if manifest != MANIFEST {
         return Err(Refusal::Stale(anyhow!(
             "this build was compiled against seams.toml {MANIFEST} and {} is {manifest}: it \
@@ -152,7 +186,16 @@ pub fn judges(checkout: &Path, built_root: &Path) -> Result<(), Refusal> {
             built_root.join(crate::inputs::SOURCES_DIR).display()
         )));
     }
-    Ok(())
+    Ok(Judge::This)
+}
+
+/// Whether two paths name one directory, however each is spelled: `root`
+/// is as the command line gave it and `checkout` as the call resolved it.
+fn same_directory(one: &Path, other: &Path) -> bool {
+    match (one.canonicalize(), other.canonicalize()) {
+        (Ok(one), Ok(other)) => one == other,
+        _ => one == other,
+    }
 }
 
 /// What a person or an agent does about it; the hook does it by walking to
@@ -163,7 +206,7 @@ const REBUILD: &str = "Rebuild it: `cargo build -p xtask`, or run it through `ca
 mod tests {
     use std::path::Path;
 
-    use super::{MANIFEST, Refusal, SOURCES, judges};
+    use super::{Judge, MANIFEST, Refusal, SOURCES, judges};
     use crate::built_root;
     use crate::inputs::{SOURCES_DIR, manifest_digest, source_files, sources_digest};
     use crate::scratch::Tree;
@@ -203,7 +246,10 @@ mod tests {
             sources_digest(&workspace).unwrap(),
             "and one of the harness's own sources"
         );
-        judges(&workspace, &workspace).unwrap();
+        assert_eq!(
+            judges(&workspace, &workspace, &workspace).unwrap(),
+            Judge::This
+        );
     }
 
     /// A build stale in its own code judges by a matcher that has since
@@ -220,7 +266,7 @@ mod tests {
             "// a matcher of an earlier revision\n",
         )
         .unwrap();
-        let refusal = judges(&workspace, &root).unwrap_err();
+        let refusal = judges(&workspace, &workspace, &root).unwrap_err();
         assert!(
             refusal.hands_the_call_on(),
             "a rebuild judges the call: {refusal}"
@@ -230,7 +276,10 @@ mod tests {
         assert!(err.contains(SOURCES), "the digest compiled in: {err}");
         assert!(err.contains("cargo build -p xtask"), "the repair: {err}");
         // The manifest is the workspace's, and it is not what moved.
-        judges(&workspace, &workspace).unwrap();
+        assert_eq!(
+            judges(&workspace, &workspace, &workspace).unwrap(),
+            Judge::This
+        );
     }
 
     /// The digest is of the files the crate is compiled from, `*.rs` under
@@ -264,7 +313,7 @@ mod tests {
             before,
             "which build.rs does not watch either"
         );
-        judges(&workspace, &root).unwrap();
+        assert_eq!(judges(&workspace, &workspace, &root).unwrap(), Judge::This);
 
         std::fs::write(
             src.join("phpt/notes.rs"),
@@ -282,7 +331,7 @@ mod tests {
                 .contains(&src.join("phpt/notes.rs")),
             "and is in the list build.rs watches"
         );
-        judges(&workspace, &root).unwrap_err();
+        judges(&workspace, &workspace, &root).unwrap_err();
     }
 
     /// The two refusals are told apart by whether a rebuild repairs them
@@ -296,17 +345,45 @@ mod tests {
         let workspace = built_root();
         let root = scratch("refusal-kinds");
         std::fs::write(root.join("seams.toml"), "[oracle]\npin = \"oracle.toml\"\n").unwrap();
-        let apart = judges(&root, &workspace).unwrap_err();
+        let apart = judges(&root, &root, &workspace).unwrap_err();
         assert!(matches!(apart, Refusal::Stale(_)), "{apart}");
         assert!(apart.hands_the_call_on(), "{apart}");
 
         let empty = scratch("refusal-no-manifest");
-        let absent = judges(&empty, &workspace).unwrap_err();
+        let absent = judges(&empty, &empty, &workspace).unwrap_err();
         assert!(matches!(absent, Refusal::Unreadable(_)), "{absent}");
         assert!(
             !absent.hands_the_call_on(),
             "no rebuild writes the manifest: {absent}"
         );
         assert!(absent.to_string().contains("seams.toml"), "{absent}");
+    }
+
+    /// A manifest apart in another checkout than the one this build was
+    /// asked about is no refusal (#1047): that checkout's own build is
+    /// compiled against it, so the answer names the checkout whose build
+    /// judges the call. The same manifest in the checkout asked about is
+    /// the refusal it was, since there the build that rebuilds is this
+    /// checkout's and judges by it.
+    #[test]
+    fn a_manifest_apart_in_another_checkout_names_that_checkouts_build() {
+        let workspace = built_root();
+        let other = scratch("another-checkout");
+        std::fs::write(
+            other.join("seams.toml"),
+            "[oracle]\npin = \"oracle.toml\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            judges(&other, &workspace, &workspace).unwrap(),
+            Judge::Checkout(other.to_path_buf())
+        );
+        let asked = judges(&other, &other, &workspace).unwrap_err();
+        assert!(matches!(asked, Refusal::Stale(_)), "{asked}");
+
+        // The manifest this build was compiled against, in another
+        // checkout, is judged here as it was.
+        std::fs::copy(workspace.join("seams.toml"), other.join("seams.toml")).unwrap();
+        assert_eq!(judges(&other, &workspace, &workspace).unwrap(), Judge::This);
     }
 }

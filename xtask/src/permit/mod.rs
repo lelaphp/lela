@@ -6,7 +6,9 @@
 //! the notes, or nothing. Exit 0 whatever it decides, since the decision is
 //! in the JSON; the one non-zero exit is the refusal to decide at all, a
 //! build meeting a manifest it was not compiled against (`built`, #16),
-//! which is what each adapter walks its next candidate on. Every denial,
+//! which is what each adapter walks its next candidate on. A worktree's
+//! manifest is not met that way: a call there is handed to the worktree's
+//! own build, whose decision is this one's (#1047). Every denial,
 //! every note and every refusal is a reading with `instrument = "permit"`,
 //! and a refusal that hands the call on is a skip, since the candidate
 //! that rebuilds judges it (#118).
@@ -27,7 +29,8 @@
 //! region-body rule in [`region`],
 //! the `unless` qualifier's sensor in [`unless`], the `exempt_label`
 //! qualifier's in [`label`], the adapters and the
-//! recording in [`adapters`], the diff judge in [`diff`] and the bench of
+//! recording in [`adapters`], the call handed to a worktree's own build in
+//! [`hand_off`], the diff judge in [`diff`] and the bench of
 //! §4.4's cost bar in [`bench`]. The ids a reading
 //! carries and the predicate `status` renders the rules by are here, since
 //! the fixture test and the `permits` section read them.
@@ -37,6 +40,7 @@ mod argv;
 mod bench;
 mod call;
 mod diff;
+mod hand_off;
 mod label;
 mod region;
 mod rules;

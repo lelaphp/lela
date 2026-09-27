@@ -223,6 +223,7 @@ scratch::Tree
 scratch::Tree::new
 scratch::Tree::path
 scratch::cargo
+scratch::repository
 status::render
 status::session
 steer::STEERABLE

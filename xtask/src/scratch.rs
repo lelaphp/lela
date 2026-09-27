@@ -48,6 +48,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 
+use crate::git::git;
+
 /// Set to anything non-empty and a scratch tree is made, named on stderr
 /// and left standing: what a session debugging a failure sets, so the tree
 /// the failure ran in is still there to read afterwards.
@@ -206,6 +208,59 @@ pub fn cargo(dir: &Path, xtask: &Path) -> Result<std::ffi::OsString> {
         &std::env::var_os("PATH").unwrap_or_default(),
     ));
     std::env::join_paths(paths).context("joining the stand-in's directory onto PATH")
+}
+
+/// A scratch repository at `to` holding `workspace`'s files, tracked or
+/// not yet but not ignored, as the one commit on `main`, with the hooks
+/// path the clone's own is set to and that commit made unsigned and
+/// unhooked: a person's `commit.gpgsign` is not the scratch repository's,
+/// and the real pre-commit measuring the scratch's files is not what a
+/// test holds. The harness a build there compiles is this working tree's,
+/// uncommitted changes and all, so a test that builds `xtask` in a
+/// worktree of it builds the harness under test.
+pub fn repository(workspace: &Path, to: &Path) -> Result<()> {
+    std::fs::create_dir_all(to).with_context(|| format!("creating {}", to.display()))?;
+    let listed = git(
+        workspace,
+        &[
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ],
+        None,
+    )?;
+    for file in listed.split('\0').filter(|f| !f.is_empty()) {
+        let target = to.join(file);
+        if let Some(dir) = target.parent() {
+            std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        }
+        std::fs::copy(workspace.join(file), &target)
+            .with_context(|| format!("copying {file} into {}", to.display()))?;
+    }
+    git(to, &["init", "-q", "-b", "main"], None)?;
+    git(to, &["config", "core.hooksPath", "scripts/hooks"], None)?;
+    git(to, &["add", "-A"], None)?;
+    git(
+        to,
+        &[
+            "-c",
+            "user.name=xtask",
+            "-c",
+            "user.email=xtask@scratch",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/var/empty",
+            "commit",
+            "-q",
+            "-m",
+            "scratch",
+        ],
+        None,
+    )?;
+    Ok(())
 }
 
 /// The lock beside `tree`, opened and taken.
