@@ -486,7 +486,10 @@ pub(crate) fn pcntl_exec(
 /// `pcntl_alarm(int $seconds): int`: `alarm(2)` with the seconds read as
 /// its `unsigned int`, answering the seconds left of the one it
 /// replaced; zero cancels. The alarm here fires in a forked child, which
-/// `SIGALRM` ends.
+/// `SIGALRM` ends. Its ordering is fixed by construction: the alarm is
+/// the child's own, in a process of one thread that sleeps past it, and
+/// the parent reads the status only once `pcntl_waitpid` has the child
+/// ended.
 ///
 /// ```php
 /// var_dump(pcntl_alarm(0));

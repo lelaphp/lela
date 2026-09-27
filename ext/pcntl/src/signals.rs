@@ -186,19 +186,26 @@ pub(crate) fn pcntl_signal_get_handler(
 
 /// `pcntl_signal_dispatch(): bool`: the handlers of every signal the
 /// process took since the last dispatch, called in the order the signals
-/// arrived. The signal here is sent by a child the witness then waits
-/// for, so it has arrived whichever thread of the process took it.
+/// arrived.
+///
+/// The signal here is sent by a forked child, and its ordering is fixed
+/// by construction: nothing but a dispatch calls the handler, and the
+/// witness dispatches until the handler has been called, so a signal the
+/// kernel hands to another thread of the process, and whose handler
+/// posts it late, is taken by a later dispatch rather than missed.
 ///
 /// ```php
+/// $handled = false;
 /// pcntl_signal(SIGUSR1, function ($signo, $info) {
 ///     echo "handled ", $signo === SIGUSR1 ? 'SIGUSR1' : $signo, " from ", $info['pid'] === $GLOBALS['child'] ? 'the child' : 'elsewhere', "\n";
+///     $GLOBALS['handled'] = true;
 /// });
 /// $child = pcntl_fork();
 /// if ($child === 0) { posix_kill(posix_getppid(), SIGUSR1); exit(0); }
 /// pcntl_waitpid($child, $status);
 /// echo "waited\n";
-/// var_dump(pcntl_signal_dispatch());
-/// var_dump(pcntl_signal_dispatch());
+/// while (true) { $dispatched = pcntl_signal_dispatch(); if ($handled) break; usleep(1000); }
+/// var_dump($dispatched, pcntl_signal_dispatch());
 /// ```
 /// ```expect
 /// waited
@@ -447,17 +454,25 @@ fn try_long(value: &Value) -> Option<i64> {
 /// `pcntl_async_signals(?bool $enable = null): bool`: whether signals
 /// are delivered at the loop's next interrupt check as well as at
 /// `pcntl_signal_dispatch()`, and, where `$enable` is given, the answer
-/// before it was set. A signal sent by a child the witness waits for
-/// runs its handler as `pcntl_waitpid` returns, which is php's check
-/// after a native call (`ZEND_VM_FCALL_INTERRUPT_CHECK`), before the
-/// next statement.
+/// before it was set. An asynchronous signal runs its handler at the
+/// next check after a native call (`ZEND_VM_FCALL_INTERRUPT_CHECK`)
+/// with no dispatch called.
+///
+/// The signal here is sent by a forked child, and its ordering is fixed
+/// by construction: the witness calls no dispatch and waits, calling
+/// `usleep`, until the handler has been called, so whether it is called
+/// as `pcntl_fork` or `pcntl_waitpid` returns, or after a later `usleep`
+/// because another thread of the process took the signal late, it is
+/// called before "waited" is written.
 ///
 /// ```php
 /// var_dump(pcntl_async_signals(), pcntl_async_signals(true), pcntl_async_signals());
-/// pcntl_signal(SIGUSR2, function ($signo) { echo "handled\n"; });
+/// $handled = false;
+/// pcntl_signal(SIGUSR2, function ($signo) { echo "handled\n"; $GLOBALS['handled'] = true; });
 /// $child = pcntl_fork();
 /// if ($child === 0) { posix_kill(posix_getppid(), SIGUSR2); exit(0); }
 /// pcntl_waitpid($child, $status);
+/// while (!$handled) { usleep(1000); }
 /// echo "waited\n";
 /// var_dump(pcntl_async_signals(false), pcntl_async_signals());
 /// ```
