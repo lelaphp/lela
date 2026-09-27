@@ -21,7 +21,7 @@ use php_ext::raising::{Thrown, deprecated, throw};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
-use super::lazy::{Strategy, new_lazy, object_of};
+use super::lazy::{Strategy, new_lazy, object_of, reset_as_lazy};
 use super::{
     answer, attr, class_chain, class_constant_named, class_extension_name, class_is, class_name_of,
     class_named, class_of, class_string, closure_invoke, constant_value, dynamic_properties,
@@ -217,7 +217,11 @@ fn method_bits(decl: &MethodDecl) -> i64 {
 ///   int(2)
 /// }
 /// ```
-fn new_instance(req: &mut Request, class: ClassId, arguments: &[Value]) -> Result<Value, Thrown> {
+fn new_instance(
+    req: &mut Request,
+    class: ClassId,
+    arguments: &[Value],
+) -> Result<PhpObject, Thrown> {
     instantiable(req, class)?;
     let refusal = match constructor_of(req, class) {
         Some((decl, _)) if decl.visibility != Visibility::Public => {
@@ -233,8 +237,7 @@ fn new_instance(req: &mut Request, class: ClassId, arguments: &[Value]) -> Resul
         let message = refusal.replace("{}", &String::from_utf8_lossy(&name));
         return Err(throw(req, "ReflectionException", &message));
     }
-    let object = instantiate(req, class, arguments)?;
-    Ok(object.as_value())
+    instantiate(req, class, arguments)
 }
 
 fn instantiable(req: &mut Request, class: ClassId) -> Result<(), Thrown> {
@@ -271,7 +274,7 @@ impl ReflectionClass {
     const name: PhpString;
 
     #[php(private, implementation = crate::func::ReflectionFunctionAbstract::__clone)]
-    fn __clone(_this: This<Self>);
+    fn __clone(this: This<Self>);
 
     /// `reflection_class_object_ctor` with `is_object` off,
     /// `ReflectionClass::__construct(object|string $objectOrClass)`: an
@@ -328,14 +331,13 @@ impl ReflectionClass {
     /// ```
     fn __construct(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         objectOrClass: Union<PhpObject, PhpString>,
     ) -> Result<(), Thrown> {
         let (class, _) = class_of(req, objectOrClass)?;
         let name = class_name_of(req, class);
-        if let Some(this) = req.this() {
-            set_name(req, this, &name)?;
-        }
+        let this = this.object();
+        set_name(req, this, &name)?;
         Ok(())
     }
 
@@ -558,13 +560,13 @@ impl ReflectionClass {
     ///   }
     /// }
     /// ```
-    fn __toString(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
-        let class = this_class(req)?;
+    fn __toString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let class = this_class(req, this.object())?;
         // `_class_string(&str, ce, &intern->obj, "")`: the object reflector
         // hands the instance it kept, and the class reflector php's null
         // zval, which is what puts `Object of class` and the `Dynamic
         // properties` block on the one and not the other.
-        let object = req.this().and_then(|this| kept_object(req, this));
+        let object = kept_object(req, this.object());
         let text = class_string(req, class, object, "")?;
         PhpString::new(req, text.as_bytes())
     }
@@ -602,8 +604,8 @@ impl ReflectionClass {
     ///   thrown in %s on line 2
     /// ```
     #[php(tentative)]
-    fn getName(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
-        let class = this_class(req)?;
+    fn getName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let class = this_class(req, this.object())?;
         let name = class_name_of(req, class);
         PhpString::new(req, &name)
     }
@@ -621,8 +623,8 @@ impl ReflectionClass {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn isInternal(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let class = this_class(req)?;
+    fn isInternal(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let class = this_class(req, this.object())?;
         Ok(is_internal(req, class))
     }
 
@@ -637,8 +639,8 @@ impl ReflectionClass {
     /// bool(true)
     /// ```
     #[php(tentative)]
-    fn isUserDefined(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let class = this_class(req)?;
+    fn isUserDefined(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let class = this_class(req, this.object())?;
         Ok(!is_internal(req, class))
     }
 
@@ -659,8 +661,8 @@ impl ReflectionClass {
     /// string(15) "Named@anonymous"
     /// ```
     #[php(tentative)]
-    fn isAnonymous(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let class = this_class(req)?;
+    fn isAnonymous(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let class = this_class(req, this.object())?;
         let anonymous = req
             .class_decl(class)
             .is_some_and(|decl| decl.flags.is_anonymous);
@@ -680,8 +682,8 @@ impl ReflectionClass {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn isInstantiable(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let class = this_class(req)?;
+    fn isInstantiable(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let class = this_class(req, this.object())?;
         if cannot_instantiate(req, class) {
             return Ok(false);
         }
@@ -704,8 +706,8 @@ impl ReflectionClass {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn isCloneable(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let class = this_class(req)?;
+    fn isCloneable(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let class = this_class(req, this.object())?;
         if cannot_instantiate(req, class) {
             return Ok(false);
         }
@@ -732,8 +734,8 @@ impl ReflectionClass {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn getFileName(req: &mut Request, _this: This<Self>) -> Result<OrFalse<PhpString>, Thrown> {
-        let class = this_class(req)?;
+    fn getFileName(req: &mut Request, this: This<Self>) -> Result<OrFalse<PhpString>, Thrown> {
+        let class = this_class(req, this.object())?;
         let file = req
             .class_decl(class)
             .filter(|decl| !decl.file.0.is_empty())
@@ -760,8 +762,8 @@ impl ReflectionClass {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn getStartLine(req: &mut Request, _this: This<Self>) -> Result<OrFalse<i64>, Thrown> {
-        let class = this_class(req)?;
+    fn getStartLine(req: &mut Request, this: This<Self>) -> Result<OrFalse<i64>, Thrown> {
+        let class = this_class(req, this.object())?;
         Ok(user_line(req, class, |decl| decl.line))
     }
 
@@ -779,8 +781,8 @@ impl ReflectionClass {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn getEndLine(req: &mut Request, _this: This<Self>) -> Result<OrFalse<i64>, Thrown> {
-        let class = this_class(req)?;
+    fn getEndLine(req: &mut Request, this: This<Self>) -> Result<OrFalse<i64>, Thrown> {
+        let class = this_class(req, this.object())?;
         Ok(user_line(req, class, |decl| decl.end_line))
     }
 
@@ -794,8 +796,8 @@ impl ReflectionClass {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn getDocComment(req: &mut Request, _this: This<Self>) -> Result<OrFalse<PhpString>, Thrown> {
-        let class = this_class(req)?;
+    fn getDocComment(req: &mut Request, this: This<Self>) -> Result<OrFalse<PhpString>, Thrown> {
+        let class = this_class(req, this.object())?;
         let Some(doc) = req.class_decl(class).and_then(|d| d.doc_comment.clone()) else {
             return Ok(OrFalse::False);
         };
@@ -817,9 +819,9 @@ impl ReflectionClass {
     #[php(tentative)]
     fn getConstructor(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
     ) -> Result<Option<Instance<crate::func::ReflectionMethod>>, Thrown> {
-        let class = this_class(req)?;
+        let class = this_class(req, this.object())?;
         let Some((decl, scope)) = constructor_of(req, class) else {
             return Ok(None);
         };
@@ -839,9 +841,9 @@ impl ReflectionClass {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn hasMethod(req: &mut Request, _this: This<Self>, name: PhpString) -> Result<bool, Thrown> {
+    fn hasMethod(req: &mut Request, this: This<Self>, name: PhpString) -> Result<bool, Thrown> {
         let name = name.as_bytes().to_vec();
-        let class = this_class(req)?;
+        let class = this_class(req, this.object())?;
         let lowered = name.to_ascii_lowercase();
         let found = linked_methods(req, class)
             .into_iter()
@@ -873,12 +875,12 @@ impl ReflectionClass {
     #[php(tentative)]
     fn getMethod(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         name: PhpString,
     ) -> Result<Instance<crate::func::ReflectionMethod>, Thrown> {
         let name = name.as_bytes().to_vec();
-        let class = this_class(req)?;
-        let kept = req.this().and_then(|this| kept_closure(req, this));
+        let class = this_class(req, this.object())?;
+        let kept = kept_closure(req, this.object());
         let Some(found) = method_or_invoke(req, class, &name, kept) else {
             let named = class_name_of(req, class);
             return Err(throw(
@@ -915,11 +917,11 @@ impl ReflectionClass {
     #[php(tentative)]
     fn getMethods(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         #[php(default = null)] filter: Option<i64>,
     ) -> Result<PhpArray, Thrown> {
         let filter = filter.unwrap_or(1 | 2 | 4 | 16 | 32 | 64);
-        let class = this_class(req)?;
+        let class = this_class(req, this.object())?;
         let mut methods = PhpArray::new(req)?;
         for found in linked_methods(req, class) {
             if found.decl.visibility == Visibility::Private && found.scope != class {
@@ -934,7 +936,7 @@ impl ReflectionClass {
         // `zend_get_closure_invoke_method` over the kept closure, or a fresh
         // one, appended where the filter keeps a public instance method.
         let is_closure = lookup_class(req, b"Closure")?.is_some_and(|c| c == class);
-        let kept = req.this().and_then(|this| kept_closure(req, this));
+        let kept = kept_closure(req, this.object());
         if is_closure
             && filter & 1 != 0
             && let Some(invoke) = closure_invoke(req, kept)
@@ -970,15 +972,15 @@ impl ReflectionClass {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn hasProperty(req: &mut Request, _this: This<Self>, name: PhpString) -> Result<bool, Thrown> {
+    fn hasProperty(req: &mut Request, this: This<Self>, name: PhpString) -> Result<bool, Thrown> {
         let name = name.as_bytes().to_vec();
-        let class = this_class(req)?;
+        let class = this_class(req, this.object())?;
         if property_named(req, class, &name).is_some() {
             return Ok(true);
         }
         // `has_property(obj, name, ZEND_PROPERTY_EXISTS)` on the object a
         // `ReflectionObject` kept: its dynamic properties.
-        let dynamic = match req.this().and_then(|this| kept_object(req, this)) {
+        let dynamic = match kept_object(req, this.object()) {
             Some(object) => dynamic_properties(req, class, object).contains(&name),
             None => false,
         };
@@ -1031,24 +1033,18 @@ impl ReflectionClass {
     #[php(tentative)]
     fn getProperty(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         name: PhpString,
-    ) -> Result<Raw<Instance<crate::member::ReflectionProperty>>, Thrown> {
+    ) -> Result<Instance<crate::member::ReflectionProperty>, Thrown> {
         let name = name.as_bytes().to_vec();
-        let class = this_class(req)?;
+        let class = this_class(req, this.object())?;
         if let Some((scope, _)) = property_named(req, class, &name) {
-            return answer(
-                Ok(property_factory(req, &name, scope, class)?.as_value()),
-                req,
-            );
+            return property_factory(req, &name, scope, class).map(Instance::of);
         }
-        if let Some(object) = req.this().and_then(|this| kept_object(req, this))
+        if let Some(object) = kept_object(req, this.object())
             && dynamic_properties(req, class, object).contains(&name)
         {
-            return answer(
-                Ok(property_factory(req, &name, class, class)?.as_value()),
-                req,
-            );
+            return property_factory(req, &name, class, class).map(Instance::of);
         }
         // `Base::name`: the property of a class the reflected one is, or
         // the exception below naming the part after the colons.
@@ -1071,10 +1067,7 @@ impl ReflectionClass {
             }
             ce = base;
             if let Some((scope, _)) = property_named(req, ce, &short) {
-                return answer(
-                    Ok(property_factory(req, &short, scope, ce)?.as_value()),
-                    req,
-                );
+                return property_factory(req, &short, scope, ce).map(Instance::of);
             }
         }
         let named = class_name_of(req, ce);
@@ -1103,11 +1096,11 @@ impl ReflectionClass {
     #[php(tentative)]
     fn getProperties(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         #[php(default = null)] filter: Option<i64>,
     ) -> Result<PhpArray, Thrown> {
         let filter = filter.unwrap_or(1 | 2 | 4 | 16);
-        let class = this_class(req)?;
+        let class = this_class(req, this.object())?;
         let mut properties = PhpArray::new(req)?;
         for (decl, scope) in linked_properties(req, class) {
             if decl.visibility == Visibility::Private && scope != class {
@@ -1123,7 +1116,7 @@ impl ReflectionClass {
         // `_adddynproperty` over the kept object's table, where the filter
         // keeps public ones: a dynamic property is public.
         if filter & 1 != 0
-            && let Some(object) = req.this().and_then(|this| kept_object(req, this))
+            && let Some(object) = kept_object(req, this.object())
         {
             for name in dynamic_properties(req, class, object) {
                 let object = property_factory(req, &name, class, class)?;
@@ -1149,9 +1142,9 @@ impl ReflectionClass {
     /// bool(true)
     /// ```
     #[php(tentative)]
-    fn hasConstant(req: &mut Request, _this: This<Self>, name: PhpString) -> Result<bool, Thrown> {
+    fn hasConstant(req: &mut Request, this: This<Self>, name: PhpString) -> Result<bool, Thrown> {
         let name = name.as_bytes().to_vec();
-        let class = this_class(req)?;
+        let class = this_class(req, this.object())?;
         Ok(class_constant_named(req, class, &name).is_some())
     }
 
@@ -1171,11 +1164,11 @@ impl ReflectionClass {
     #[php(tentative)]
     fn getConstants(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         #[php(default = null)] filter: Option<i64>,
     ) -> Result<PhpArray, Thrown> {
         let filter = filter.unwrap_or(1 | 2 | 4);
-        let class = this_class(req)?;
+        let class = this_class(req, this.object())?;
         let mut constants = PhpArray::new(req)?;
         for (decl, scope) in linked_constants(req, class) {
             let bits = match decl.visibility {
@@ -1205,11 +1198,11 @@ impl ReflectionClass {
     #[php(tentative)]
     fn getReflectionConstants(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         #[php(default = null)] filter: Option<i64>,
     ) -> Result<PhpArray, Thrown> {
         let filter = filter.unwrap_or(1 | 2 | 4);
-        let class = this_class(req)?;
+        let class = this_class(req, this.object())?;
         let mut constants = PhpArray::new(req)?;
         for (decl, scope) in linked_constants(req, class) {
             let bits = match decl.visibility {
@@ -1240,9 +1233,9 @@ impl ReflectionClass {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn getConstant(req: &mut Request, _this: This<Self>, name: PhpString) -> Result<Value, Thrown> {
+    fn getConstant(req: &mut Request, this: This<Self>, name: PhpString) -> Result<Value, Thrown> {
         let name = name.as_bytes().to_vec();
-        let class = this_class(req)?;
+        let class = this_class(req, this.object())?;
         if let Some((declaring, constant)) = class_constant_named(req, class, &name) {
             return constant_value(req, &constant, declaring);
         }
@@ -1273,11 +1266,11 @@ impl ReflectionClass {
     #[php(tentative)]
     fn getReflectionConstant(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         name: PhpString,
     ) -> Result<OrFalse<Instance<crate::member::ReflectionClassConstant>>, Thrown> {
         let name = name.as_bytes().to_vec();
-        let class = this_class(req)?;
+        let class = this_class(req, this.object())?;
         let Some((scope, decl)) = class_constant_named(req, class, &name) else {
             return Ok(OrFalse::False);
         };
@@ -1306,8 +1299,8 @@ impl ReflectionClass {
     /// }
     /// ```
     #[php(tentative)]
-    fn getInterfaces(req: &mut Request, _this: This<Self>) -> Result<PhpArray, Thrown> {
-        let class = this_class(req)?;
+    fn getInterfaces(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        let class = this_class(req, this.object())?;
         let mut interfaces = PhpArray::new(req)?;
         for interface in linked_interfaces(req, class) {
             let name = class_name_of(req, interface);
@@ -1333,8 +1326,8 @@ impl ReflectionClass {
     /// }
     /// ```
     #[php(tentative)]
-    fn getInterfaceNames(req: &mut Request, _this: This<Self>) -> Result<PhpArray, Thrown> {
-        let class = this_class(req)?;
+    fn getInterfaceNames(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        let class = this_class(req, this.object())?;
         let mut names = PhpArray::new(req)?;
         for interface in linked_interfaces(req, class) {
             let name = class_name_of(req, interface);
@@ -1355,8 +1348,8 @@ impl ReflectionClass {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn isInterface(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let class = this_class(req)?;
+    fn isInterface(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let class = this_class(req, this.object())?;
         Ok(kind_of(req, class) == ClassKind::Interface)
     }
 
@@ -1371,8 +1364,8 @@ impl ReflectionClass {
     /// }
     /// ```
     #[php(tentative)]
-    fn getTraits(req: &mut Request, _this: This<Self>) -> Result<PhpArray, Thrown> {
-        let class = this_class(req)?;
+    fn getTraits(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        let class = this_class(req, this.object())?;
         let traits = req
             .class_decl(class)
             .map(|decl| decl.traits.clone())
@@ -1401,8 +1394,8 @@ impl ReflectionClass {
     /// }
     /// ```
     #[php(tentative)]
-    fn getTraitNames(req: &mut Request, _this: This<Self>) -> Result<PhpArray, Thrown> {
-        let class = this_class(req)?;
+    fn getTraitNames(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        let class = this_class(req, this.object())?;
         let traits = req
             .class_decl(class)
             .map(|decl| decl.traits.clone())
@@ -1418,7 +1411,7 @@ impl ReflectionClass {
     }
 
     #[php(tentative, implementation = crate::func::ReflectionFiber::getExecutingLine)]
-    fn getTraitAliases(_this: This<Self>) -> PhpArray;
+    fn getTraitAliases(this: This<Self>) -> PhpArray;
 
     /// `ReflectionClass::isTrait()`: `ZEND_ACC_TRAIT`.
     ///
@@ -1429,8 +1422,8 @@ impl ReflectionClass {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn isTrait(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let class = this_class(req)?;
+    fn isTrait(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let class = this_class(req, this.object())?;
         Ok(kind_of(req, class) == ClassKind::Trait)
     }
 
@@ -1444,8 +1437,8 @@ impl ReflectionClass {
     /// bool(true)
     /// bool(false)
     /// ```
-    fn isEnum(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let class = this_class(req)?;
+    fn isEnum(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let class = this_class(req, this.object())?;
         Ok(kind_of(req, class) == ClassKind::Enum)
     }
 
@@ -1462,8 +1455,8 @@ impl ReflectionClass {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn isAbstract(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let class = super::this_class(req)?;
+    fn isAbstract(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let class = super::this_class(req, this.object())?;
         Ok(super::class::class_is_abstract(req, class))
     }
 
@@ -1478,8 +1471,8 @@ impl ReflectionClass {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn isFinal(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let class = this_class(req)?;
+    fn isFinal(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let class = this_class(req, this.object())?;
         let final_ = req
             .class_decl(class)
             .is_some_and(|decl| decl.flags.is_final);
@@ -1494,8 +1487,8 @@ impl ReflectionClass {
     /// ```expect
     /// bool(false)
     /// ```
-    fn isReadOnly(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let class = this_class(req)?;
+    fn isReadOnly(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let class = this_class(req, this.object())?;
         let readonly = req
             .class_decl(class)
             .is_some_and(|decl| decl.flags.is_readonly);
@@ -1515,8 +1508,8 @@ impl ReflectionClass {
     /// int(64)
     /// ```
     #[php(tentative)]
-    fn getModifiers(req: &mut Request, _this: This<Self>) -> Result<i64, Thrown> {
-        let class = this_class(req)?;
+    fn getModifiers(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
+        let class = this_class(req, this.object())?;
         let Some(flags) = req.class_decl(class).map(|decl| decl.flags) else {
             return Ok(0);
         };
@@ -1545,9 +1538,9 @@ impl ReflectionClass {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn isInstance(req: &mut Request, _this: This<Self>, object: PhpObject) -> Result<bool, Thrown> {
+    fn isInstance(req: &mut Request, this: This<Self>, object: PhpObject) -> Result<bool, Thrown> {
         let of = object.class();
-        let class = this_class(req)?;
+        let class = this_class(req, this.object())?;
         Ok(class_is(req, of, class, 0))
     }
 
@@ -1564,11 +1557,11 @@ impl ReflectionClass {
     #[php(tentative)]
     fn newInstance(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         args: NamedVariadic<Value>,
-    ) -> Result<Raw<PhpObject>, Thrown> {
-        let class = this_class(req)?;
-        answer(new_instance(req, class, &args.positional), req)
+    ) -> Result<PhpObject, Thrown> {
+        let class = this_class(req, this.object())?;
+        new_instance(req, class, &args.positional)
     }
 
     /// `ReflectionClass::newInstanceWithoutConstructor()`:
@@ -1589,9 +1582,9 @@ impl ReflectionClass {
     #[php(tentative)]
     fn newInstanceWithoutConstructor(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
     ) -> Result<PhpObject, Thrown> {
-        let class = this_class(req)?;
+        let class = this_class(req, this.object())?;
         // `object_init_ex`, whose own refusal of what cannot be instantiated
         // is the `Error` `new` raises, not a `ReflectionException`.
         let object = new_object(req, class)?;
@@ -1625,10 +1618,10 @@ impl ReflectionClass {
     #[php(tentative)]
     fn newInstanceArgs(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         #[php(default = [])] args: PhpArray,
-    ) -> Result<Raw<Option<PhpObject>>, Thrown> {
-        let class = this_class(req)?;
+    ) -> Result<Option<PhpObject>, Thrown> {
+        let class = this_class(req, this.object())?;
         let mut arguments = Vec::new();
         let mut cursor = args.iter();
         while cursor.advance() {
@@ -1636,7 +1629,7 @@ impl ReflectionClass {
                 arguments.push(*value);
             }
         }
-        answer(new_instance(req, class, &arguments), req)
+        new_instance(req, class, &arguments).map(Some)
     }
 
     /// `ReflectionClass::newLazyGhost(callable $initializer, int $options = 0): object`:
@@ -1666,14 +1659,11 @@ impl ReflectionClass {
     /// ```
     fn newLazyGhost(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         initializer: Callable,
         #[php(default = 0)] options: i64,
-    ) -> Result<Raw<PhpObject>, Thrown> {
-        answer(
-            new_lazy(req, Strategy::Ghost, None, &initializer, options),
-            req,
-        )
+    ) -> Result<PhpObject, Thrown> {
+        new_lazy(req, this.object(), Strategy::Ghost, &initializer, options)
     }
 
     /// `ReflectionClass::newLazyProxy(callable $factory, int $options = 0): object`:
@@ -1706,11 +1696,11 @@ impl ReflectionClass {
     /// ```
     fn newLazyProxy(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         factory: Callable,
         #[php(default = 0)] options: i64,
-    ) -> Result<Raw<PhpObject>, Thrown> {
-        answer(new_lazy(req, Strategy::Proxy, None, &factory, options), req)
+    ) -> Result<PhpObject, Thrown> {
+        new_lazy(req, this.object(), Strategy::Proxy, &factory, options)
     }
 
     /// `ReflectionClass::resetAsLazyGhost(object $object, callable $initializer, int $options = 0): void`:
@@ -1738,12 +1728,19 @@ impl ReflectionClass {
     /// ```
     fn resetAsLazyGhost(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         object: PhpObject,
         initializer: Callable,
         #[php(default = 0)] options: i64,
     ) -> Result<(), Thrown> {
-        new_lazy(req, Strategy::Ghost, Some(object), &initializer, options).map(drop)
+        reset_as_lazy(
+            req,
+            this.object(),
+            Strategy::Ghost,
+            object,
+            &initializer,
+            options,
+        )
     }
 
     /// `ReflectionClass::resetAsLazyProxy(object $object, callable $factory, int $options = 0): void`:
@@ -1772,12 +1769,19 @@ impl ReflectionClass {
     /// ```
     fn resetAsLazyProxy(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         object: PhpObject,
         factory: Callable,
         #[php(default = 0)] options: i64,
     ) -> Result<(), Thrown> {
-        new_lazy(req, Strategy::Proxy, Some(object), &factory, options).map(drop)
+        reset_as_lazy(
+            req,
+            this.object(),
+            Strategy::Proxy,
+            object,
+            &factory,
+            options,
+        )
     }
 
     /// `ReflectionClass::initializeLazyObject(object $object): object`: a
@@ -1803,10 +1807,10 @@ impl ReflectionClass {
     /// ```
     fn initializeLazyObject(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         object: PhpObject,
     ) -> Result<PhpObject, Thrown> {
-        let class = this_class(req)?;
+        let class = this_class(req, this.object())?;
         let object = object_of(req, object, class, 1)?;
         let instance = initialize_lazy(req, &object)?;
         req.addref(&instance.as_value());
@@ -1832,10 +1836,10 @@ impl ReflectionClass {
     /// ```
     fn isUninitializedLazyObject(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         object: PhpObject,
     ) -> Result<bool, Thrown> {
-        let class = this_class(req)?;
+        let class = this_class(req, this.object())?;
         let object = object_of(req, object, class, 1)?;
         Ok(object.is_lazy())
     }
@@ -1864,10 +1868,10 @@ impl ReflectionClass {
     /// ```
     fn markLazyObjectAsInitialized(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         object: PhpObject,
     ) -> Result<PhpObject, Thrown> {
-        let class = this_class(req)?;
+        let class = this_class(req, this.object())?;
         let object = object_of(req, object, class, 1)?;
         let instance = mark_lazy_initialized(req, &object)?;
         req.addref(&instance.as_value());
@@ -1894,14 +1898,17 @@ impl ReflectionClass {
     /// ```
     fn getLazyInitializer(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         object: PhpObject,
     ) -> Result<Raw<Option<Callable>>, Thrown> {
-        let class = this_class(req)?;
+        let class = this_class(req, this.object())?;
         let object = object_of(req, object, class, 1)?;
         let Some(initializer) = object.lazy_initializer(req) else {
             return answer(Ok(Value::null()), req);
         };
+        // php's `RETURN_COPY` of the zval it stored: the initializer is
+        // held as the value it was given, which `Callable` would resolve
+        // again rather than hand back.
         req.addref(&initializer);
         answer(Ok(initializer), req)
     }
@@ -1921,9 +1928,9 @@ impl ReflectionClass {
     #[php(tentative)]
     fn getParentClass(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
     ) -> Result<OrFalse<Instance<ReflectionClass>>, Thrown> {
-        let class = this_class(req)?;
+        let class = this_class(req, this.object())?;
         let Some(parent) = class_chain(req, class).get(1).copied() else {
             return Ok(OrFalse::False);
         };
@@ -1964,10 +1971,10 @@ impl ReflectionClass {
     #[php(tentative)]
     fn isSubclassOf(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         class: Union<Instance<ReflectionClass>, PhpString>,
     ) -> Result<bool, Thrown> {
-        let this = this_class(req)?;
+        let this = this_class(req, this.object())?;
         let of = reflector_class(req, class, "Class")?;
         Ok(this != of && class_is(req, this, of, 0))
     }
@@ -2016,8 +2023,8 @@ impl ReflectionClass {
     ///   thrown in %s on line 2
     /// ```
     #[php(tentative)]
-    fn getStaticProperties(req: &mut Request, _this: This<Self>) -> Result<PhpArray, Thrown> {
-        let class = this_class(req)?;
+    fn getStaticProperties(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        let class = this_class(req, this.object())?;
         let mut properties = PhpArray::new(req)?;
         for (property, declaring) in linked_properties(req, class) {
             if property.is_instance
@@ -2111,12 +2118,12 @@ impl ReflectionClass {
     #[php(tentative)]
     fn getStaticPropertyValue(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         name: PhpString,
         default: Passed<Value>,
     ) -> Result<Value, Thrown> {
         let name = name.as_bytes().to_vec();
-        let class = this_class(req)?;
+        let class = this_class(req, this.object())?;
         let held = read_class_prop_silent(req, class, &name)?;
         if let Some(value) = held
             && !matches!(value.as_ref(), ValueRef::Undef)
@@ -2229,12 +2236,12 @@ impl ReflectionClass {
     #[php(tentative)]
     fn setStaticPropertyValue(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         name: PhpString,
         value: Value,
     ) -> Result<(), Thrown> {
         let name = name.as_bytes().to_vec();
-        let class = this_class(req)?;
+        let class = this_class(req, this.object())?;
         let held = read_class_prop_silent(req, class, &name)?;
         let Some(held) = held else {
             let shown = class_name_of(req, class);
@@ -2285,8 +2292,8 @@ impl ReflectionClass {
     /// }
     /// ```
     #[php(tentative)]
-    fn getDefaultProperties(req: &mut Request, _this: This<Self>) -> Result<PhpArray, Thrown> {
-        let class = this_class(req)?;
+    fn getDefaultProperties(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        let class = this_class(req, this.object())?;
         let mut defaults = PhpArray::new(req)?;
         let table = linked_properties(req, class);
         for statics in [true, false] {
@@ -2321,8 +2328,8 @@ impl ReflectionClass {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn isIterable(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let class = this_class(req)?;
+    fn isIterable(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let class = this_class(req, this.object())?;
         if cannot_instantiate(req, class) {
             return Ok(false);
         }
@@ -2333,7 +2340,7 @@ impl ReflectionClass {
     }
 
     #[php(tentative, implementation = ReflectionClass::isIterable)]
-    fn isIterateable(_this: This<Self>) -> bool;
+    fn isIterateable(this: This<Self>) -> bool;
 
     /// `ReflectionClass::implementsInterface(string|ReflectionClass
     /// $interface)`: `instanceof_function` again, with php's `ReflectionException` for
@@ -2359,7 +2366,7 @@ impl ReflectionClass {
     #[php(tentative)]
     fn implementsInterface(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         interface: Union<Instance<ReflectionClass>, PhpString>,
     ) -> Result<bool, Thrown> {
         let interface = reflector_class(req, interface, "Interface")?;
@@ -2371,7 +2378,7 @@ impl ReflectionClass {
                 &format!("{} is not an interface", String::from_utf8_lossy(&name)),
             ));
         }
-        let class = this_class(req)?;
+        let class = this_class(req, this.object())?;
         Ok(class_is(req, class, interface, 0))
     }
 
@@ -2398,9 +2405,9 @@ impl ReflectionClass {
     #[php(tentative)]
     fn getExtension(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
     ) -> Result<Option<Instance<crate::ReflectionExtension>>, Thrown> {
-        let class = this_class(req)?;
+        let class = this_class(req, this.object())?;
         let Some(name) = class_extension_name(req, class) else {
             return Ok(None);
         };
@@ -2424,11 +2431,8 @@ impl ReflectionClass {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn getExtensionName(
-        req: &mut Request,
-        _this: This<Self>,
-    ) -> Result<OrFalse<PhpString>, Thrown> {
-        let class = this_class(req)?;
+    fn getExtensionName(req: &mut Request, this: This<Self>) -> Result<OrFalse<PhpString>, Thrown> {
+        let class = this_class(req, this.object())?;
         match class_extension_name(req, class) {
             Some(name) => PhpString::new(req, name.as_bytes()).map(OrFalse::Value),
             None => Ok(OrFalse::False),
@@ -2446,8 +2450,8 @@ impl ReflectionClass {
     /// string(19) "ReflectionException"
     /// ```
     #[php(tentative)]
-    fn inNamespace(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let class = this_class(req)?;
+    fn inNamespace(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let class = this_class(req, this.object())?;
         let name = class_name_of(req, class);
         Ok(namespace_end(&name).is_some())
     }
@@ -2465,8 +2469,8 @@ impl ReflectionClass {
     /// string(0) ""
     /// ```
     #[php(tentative)]
-    fn getNamespaceName(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
-        let class = this_class(req)?;
+    fn getNamespaceName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let class = this_class(req, this.object())?;
         let name = class_name_of(req, class);
         let end = namespace_end(&name).unwrap_or(0);
         PhpString::new(req, &name[..end])
@@ -2484,8 +2488,8 @@ impl ReflectionClass {
     /// string(8) "stdClass"
     /// ```
     #[php(tentative)]
-    fn getShortName(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
-        let class = this_class(req)?;
+    fn getShortName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let class = this_class(req, this.object())?;
         let name = class_name_of(req, class);
         let start = namespace_end(&name).map_or(0, |end| end + 1);
         PhpString::new(req, &name[start..])
@@ -2521,11 +2525,11 @@ impl ReflectionClass {
     /// ```
     fn getAttributes(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         #[php(default = null)] name: Option<PhpString>,
         #[php(default = 0)] flags: i64,
     ) -> Result<PhpArray, Thrown> {
-        let class = this_class(req)?;
+        let class = this_class(req, this.object())?;
         let attributes = req
             .class_decl(class)
             .map_or_else(Vec::new, |decl| decl.attributes.clone());
@@ -2600,12 +2604,11 @@ impl ReflectionObject {
     /// #1 {main}
     ///   thrown in %s on line 2
     /// ```
-    fn __construct(req: &mut Request, _this: This<Self>, object: PhpObject) -> Result<(), Thrown> {
+    fn __construct(req: &mut Request, this: This<Self>, object: PhpObject) -> Result<(), Thrown> {
         let name = class_name_of(req, object.class());
-        if let Some(this) = req.this() {
-            set_name(req, this, &name)?;
-            keep(req, this, object.class(), Some(object));
-        }
+        let this = this.object();
+        set_name(req, this, &name)?;
+        keep(req, this, object.class(), Some(object));
         Ok(())
     }
 }

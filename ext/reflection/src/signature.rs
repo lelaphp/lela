@@ -167,10 +167,8 @@ pub(super) fn type_factory(
 }
 
 /// `GET_REFLECTION_OBJECT_PTR` for a type reflector.
-fn this_type(req: &mut Request) -> Result<TypeRef, Thrown> {
-    let found = req
-        .this()
-        .and_then(|this| req.state::<State>().types.get(&this.index()).cloned());
+fn this_type(req: &mut Request, this: PhpObject) -> Result<TypeRef, Thrown> {
+    let found = req.state::<State>().types.get(&this.index()).cloned();
     match found {
         Some(reference) => Ok(reference),
         None => Err(throw(
@@ -283,10 +281,11 @@ pub(super) fn parameter_factory(
 
 /// `GET_REFLECTION_OBJECT_PTR` for a parameter reflector, with the
 /// declaration and the one parameter it points at.
-fn this_parameter(req: &mut Request) -> Result<(ParameterRef, FunctionDecl, Parameter), Thrown> {
-    let found = req
-        .this()
-        .and_then(|this| req.state::<State>().parameters.get(&this.index()).cloned());
+fn this_parameter(
+    req: &mut Request,
+    this: PhpObject,
+) -> Result<(ParameterRef, FunctionDecl, Parameter), Thrown> {
+    let found = req.state::<State>().parameters.get(&this.index()).cloned();
     let Some(reference) = found else {
         return Err(throw(
             req,
@@ -605,8 +604,11 @@ fn no_default(req: &mut Request) -> Thrown {
 /// string(1) "C"
 /// bool(false)
 /// ```
-pub(super) fn this_function(req: &mut Request) -> Result<(FunctionRef, FunctionDecl), Thrown> {
-    let (this, name) = this_name(req, "ReflectionFunctionAbstract")?;
+pub(super) fn this_function(
+    req: &mut Request,
+    this: PhpObject,
+) -> Result<(FunctionRef, FunctionDecl), Thrown> {
+    let name = this_name(req, this, "ReflectionFunctionAbstract")?;
     let scope = this
         .prop(req, b"class")
         .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec));
@@ -690,7 +692,7 @@ impl ReflectionParameter {
     const name: PhpString;
 
     #[php(private, implementation = crate::func::ReflectionFunctionAbstract::__clone)]
-    fn __clone(_this: This<Self>);
+    fn __clone(this: This<Self>);
 
     /// `ReflectionParameter::__construct($function, int|string $param)`:
     /// the function [`construct_function`] reads off the first argument,
@@ -714,7 +716,7 @@ impl ReflectionParameter {
     /// ```
     fn __construct(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         function: Untyped<Value>,
         param: Union<i64, PhpString>,
     ) -> Result<(), Thrown> {
@@ -737,20 +739,19 @@ impl ReflectionParameter {
             offset,
             required: offset < required_parameters(&decl),
         };
-        if let Some(this) = req.this() {
-            set_name(req, this, &name)?;
-            // `intern->obj`: a parameter of a closure keeps the closure, as
-            // php's does, so the row's `FunctionRef::Closure` names an
-            // object that stands for as long as the reflector does.
-            if let FunctionRef::Closure(closure) | FunctionRef::Invoke(Some(closure)) =
-                reference.function
-            {
-                super::keep_closure(req, this, closure);
-            }
-            req.state::<State>()
-                .parameters
-                .insert(this.index(), reference);
+        let this = this.object();
+        set_name(req, this, &name)?;
+        // `intern->obj`: a parameter of a closure keeps the closure, as
+        // php's does, so the row's `FunctionRef::Closure` names an
+        // object that stands for as long as the reflector does.
+        if let FunctionRef::Closure(closure) | FunctionRef::Invoke(Some(closure)) =
+            reference.function
+        {
+            super::keep_closure(req, this, closure);
         }
+        req.state::<State>()
+            .parameters
+            .insert(this.index(), reference);
         Ok(())
     }
 
@@ -789,8 +790,8 @@ impl ReflectionParameter {
     /// bool(true)
     /// bool(false)
     /// ```
-    fn __toString(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
-        let (reference, decl, parameter) = this_parameter(req)?;
+    fn __toString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let (reference, decl, parameter) = this_parameter(req, this.object())?;
         let internal = decl.file.0.is_empty();
         let text = parameter_string(
             req,
@@ -811,8 +812,8 @@ impl ReflectionParameter {
     /// string(6) "string"
     /// ```
     #[php(tentative)]
-    fn getName(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
-        let (_, _, parameter) = this_parameter(req)?;
+    fn getName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let (_, _, parameter) = this_parameter(req, this.object())?;
         let name = parameter.name.0.to_vec();
         PhpString::new(req, &name)
     }
@@ -830,8 +831,8 @@ impl ReflectionParameter {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn isPassedByReference(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, _, parameter) = this_parameter(req)?;
+    fn isPassedByReference(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, _, parameter) = this_parameter(req, this.object())?;
         Ok(parameter.by_ref)
     }
 
@@ -849,8 +850,8 @@ impl ReflectionParameter {
     /// bool(true)
     /// ```
     #[php(tentative)]
-    fn canBePassedByValue(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, _, parameter) = this_parameter(req)?;
+    fn canBePassedByValue(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, _, parameter) = this_parameter(req, this.object())?;
         Ok(!parameter.by_ref || parameter.prefer_ref)
     }
 
@@ -885,9 +886,9 @@ impl ReflectionParameter {
     #[php(tentative)]
     fn getDeclaringFunction(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
     ) -> Result<Instance<crate::func::ReflectionFunctionAbstract>, Thrown> {
-        let (reference, decl, _) = this_parameter(req)?;
+        let (reference, decl, _) = this_parameter(req, this.object())?;
         let object = match &reference.function {
             FunctionRef::Global(_) => {
                 let class = class_named(req, b"ReflectionFunction")?;
@@ -962,9 +963,9 @@ impl ReflectionParameter {
     #[php(tentative)]
     fn getDeclaringClass(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
     ) -> Result<Option<Instance<crate::class::ReflectionClass>>, Thrown> {
-        let (reference, _, _) = this_parameter(req)?;
+        let (reference, _, _) = this_parameter(req, this.object())?;
         let Some(scope) = scope_of(req, &reference.function) else {
             return Ok(None);
         };
@@ -973,7 +974,7 @@ impl ReflectionParameter {
     }
 
     #[php(tentative, deprecated(since = "8.0", message = "use ReflectionParameter::getType() instead"), implementation = crate::func::ReflectionFiber::getExecutingLine)]
-    fn getClass(_this: This<Self>) -> Option<Instance<crate::class::ReflectionClass>>;
+    fn getClass(this: This<Self>) -> Option<Instance<crate::class::ReflectionClass>>;
 
     /// `ReflectionParameter::hasType()`: `ZEND_TYPE_IS_SET`.
     ///
@@ -986,8 +987,8 @@ impl ReflectionParameter {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn hasType(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, _, parameter) = this_parameter(req)?;
+    fn hasType(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, _, parameter) = this_parameter(req, this.object())?;
         Ok(parameter.ty.is_some())
     }
 
@@ -1006,9 +1007,9 @@ impl ReflectionParameter {
     #[php(tentative)]
     fn getType(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
     ) -> Result<Option<Instance<ReflectionType>>, Thrown> {
-        let (_, _, parameter) = this_parameter(req)?;
+        let (_, _, parameter) = this_parameter(req, this.object())?;
         let Some(ty) = parameter.ty else {
             return Ok(None);
         };
@@ -1017,10 +1018,10 @@ impl ReflectionParameter {
     }
 
     #[php(tentative, deprecated(since = "8.0", message = "use ReflectionParameter::getType() instead"), implementation = crate::func::ReflectionFiber::getExecutingLine)]
-    fn isArray(_this: This<Self>) -> bool;
+    fn isArray(this: This<Self>) -> bool;
 
     #[php(tentative, deprecated(since = "8.0", message = "use ReflectionParameter::getType() instead"), implementation = crate::func::ReflectionFiber::getExecutingLine)]
-    fn isCallable(_this: This<Self>) -> bool;
+    fn isCallable(this: This<Self>) -> bool;
 
     /// `ReflectionParameter::allowsNull()`: no declared type, or a mask
     /// with `null` in it.
@@ -1034,8 +1035,8 @@ impl ReflectionParameter {
     /// bool(true)
     /// ```
     #[php(tentative)]
-    fn allowsNull(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, _, parameter) = this_parameter(req)?;
+    fn allowsNull(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, _, parameter) = this_parameter(req, this.object())?;
         let allows = match &parameter.ty {
             None | Some(Type::Mixed) => true,
             Some(ty) => parts(ty).nullable,
@@ -1052,8 +1053,8 @@ impl ReflectionParameter {
     /// int(1)
     /// ```
     #[php(tentative)]
-    fn getPosition(req: &mut Request, _this: This<Self>) -> Result<i64, Thrown> {
-        let (reference, _, _) = this_parameter(req)?;
+    fn getPosition(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
+        let (reference, _, _) = this_parameter(req, this.object())?;
         Ok(i64::try_from(reference.offset).unwrap_or(0))
     }
 
@@ -1068,8 +1069,8 @@ impl ReflectionParameter {
     /// bool(true)
     /// ```
     #[php(tentative)]
-    fn isOptional(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (reference, _, _) = this_parameter(req)?;
+    fn isOptional(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (reference, _, _) = this_parameter(req, this.object())?;
         Ok(!reference.required)
     }
 
@@ -1087,8 +1088,8 @@ impl ReflectionParameter {
     /// bool(true)
     /// ```
     #[php(tentative)]
-    fn isDefaultValueAvailable(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, _, parameter) = this_parameter(req)?;
+    fn isDefaultValueAvailable(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, _, parameter) = this_parameter(req, this.object())?;
         Ok(parameter_default(&parameter).is_some())
     }
 
@@ -1113,8 +1114,8 @@ impl ReflectionParameter {
     ///   thrown in %s on line 2
     /// ```
     #[php(tentative)]
-    fn getDefaultValue(req: &mut Request, _this: This<Self>) -> Result<Value, Thrown> {
-        let (reference, _, parameter) = this_parameter(req)?;
+    fn getDefaultValue(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+        let (reference, _, parameter) = this_parameter(req, this.object())?;
         let Some(expr) = parameter_default(&parameter).cloned() else {
             return Err(no_default(req));
         };
@@ -1133,8 +1134,8 @@ impl ReflectionParameter {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn isDefaultValueConstant(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, _, parameter) = this_parameter(req)?;
+    fn isDefaultValueConstant(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, _, parameter) = this_parameter(req, this.object())?;
         let Some(expr) = parameter_default(&parameter) else {
             return Err(no_default(req));
         };
@@ -1157,9 +1158,9 @@ impl ReflectionParameter {
     #[php(tentative)]
     fn getDefaultValueConstantName(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
     ) -> Result<Option<PhpString>, Thrown> {
-        let (_, _, parameter) = this_parameter(req)?;
+        let (_, _, parameter) = this_parameter(req, this.object())?;
         let Some(expr) = parameter_default(&parameter).cloned() else {
             return Err(no_default(req));
         };
@@ -1188,8 +1189,8 @@ impl ReflectionParameter {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn isVariadic(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, _, parameter) = this_parameter(req)?;
+    fn isVariadic(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, _, parameter) = this_parameter(req, this.object())?;
         Ok(parameter.variadic)
     }
 
@@ -1205,8 +1206,8 @@ impl ReflectionParameter {
     /// bool(false)
     /// bool(false)
     /// ```
-    fn isPromoted(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let (_, _, parameter) = this_parameter(req)?;
+    fn isPromoted(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let (_, _, parameter) = this_parameter(req, this.object())?;
         Ok(parameter.promoted)
     }
 
@@ -1226,11 +1227,11 @@ impl ReflectionParameter {
     /// ```
     fn getAttributes(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         #[php(default = null)] name: Option<PhpString>,
         #[php(default = 0)] flags: i64,
     ) -> Result<PhpArray, Thrown> {
-        let (reference, _, parameter) = this_parameter(req)?;
+        let (reference, _, parameter) = this_parameter(req, this.object())?;
         let scope = match reference.function {
             FunctionRef::Method(scope, _) => Some(scope),
             FunctionRef::Invoke(_) => lookup_class(req, b"Closure").ok().flatten(),
@@ -1255,7 +1256,7 @@ pub(crate) struct ReflectionType;
 #[php_class]
 impl ReflectionType {
     #[php(private, implementation = crate::func::ReflectionFunctionAbstract::__clone)]
-    fn __clone(_this: This<Self>);
+    fn __clone(this: This<Self>);
 
     /// `ReflectionType::allowsNull()`: `ZEND_TYPE_ALLOW_NULL`, the `null`
     /// bit of the mask, which `?bool` carries and `string` does not.
@@ -1269,8 +1270,8 @@ impl ReflectionType {
     /// bool(true)
     /// ```
     #[php(tentative)]
-    fn allowsNull(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let reference = this_type(req)?;
+    fn allowsNull(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let reference = this_type(req, this.object())?;
         let allows = matches!(reference.ty, Type::Mixed) || parts(&reference.ty).nullable;
         Ok(allows)
     }
@@ -1285,8 +1286,8 @@ impl ReflectionType {
     /// ```expect
     /// ?bool
     /// ```
-    fn __toString(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
-        let reference = this_type(req)?;
+    fn __toString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let reference = this_type(req, this.object())?;
         let text = type_text(&reference.ty);
         PhpString::new(req, text.as_bytes())
     }
@@ -1311,8 +1312,8 @@ impl ReflectionNamedType {
     /// ?bool
     /// ```
     #[php(tentative)]
-    fn getName(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
-        let reference = this_type(req)?;
+    fn getName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let reference = this_type(req, this.object())?;
         let text = if reference.legacy {
             type_text_without_null(&reference.ty)
         } else {
@@ -1334,8 +1335,8 @@ impl ReflectionNamedType {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn isBuiltin(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let reference = this_type(req)?;
+    fn isBuiltin(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let reference = this_type(req, this.object())?;
         let named = parts(&reference.ty).members.iter().any(|member| {
             matches!(
                 member,
@@ -1372,8 +1373,8 @@ impl ReflectionUnionType {
     ///   }
     /// }
     /// ```
-    fn getTypes(req: &mut Request, _this: This<Self>) -> Result<PhpArray, Thrown> {
-        let reference = this_type(req)?;
+    fn getTypes(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        let reference = this_type(req, this.object())?;
         let parts = parts(&reference.ty);
         let mut members: Vec<Type> = Vec::new();
         for member in &parts.members {
@@ -1420,5 +1421,5 @@ pub(crate) struct ReflectionIntersectionType;
 #[php_class]
 impl ReflectionIntersectionType {
     #[php(implementation = ReflectionUnionType::getTypes)]
-    fn getTypes(_this: This<Self>) -> PhpArray;
+    fn getTypes(this: This<Self>) -> PhpArray;
 }

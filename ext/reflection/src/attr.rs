@@ -290,8 +290,8 @@ impl ReflectionAttribute {
     /// ```expect
     /// string(10) "Deprecated"
     /// ```
-    fn getName(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
-        let kept = this_attribute(req)?;
+    fn getName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let kept = this_attribute(req, this.object())?;
         let name = kept.attribute.name.0.to_vec();
         PhpString::new(req, &name)
     }
@@ -306,8 +306,8 @@ impl ReflectionAttribute {
     /// ```expect
     /// int(4)
     /// ```
-    fn getTarget(req: &mut Request, _this: This<Self>) -> Result<i64, Thrown> {
-        let kept = this_attribute(req)?;
+    fn getTarget(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
+        let kept = this_attribute(req, this.object())?;
         Ok(kept.target)
     }
 
@@ -322,8 +322,8 @@ impl ReflectionAttribute {
     /// ```expect
     /// bool(false)
     /// ```
-    fn isRepeated(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let kept = this_attribute(req)?;
+    fn isRepeated(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let kept = this_attribute(req, this.object())?;
         Ok(kept.repeated)
     }
 
@@ -364,8 +364,8 @@ impl ReflectionAttribute {
     ///   int(3)
     /// }
     /// ```
-    fn getArguments(req: &mut Request, _this: This<Self>) -> Result<PhpArray, Thrown> {
-        let kept = this_attribute(req)?;
+    fn getArguments(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        let kept = this_attribute(req, this.object())?;
         let mut out = PhpArray::new(req)?;
         for argument in &kept.attribute.arguments {
             let value = eval_const_expr(req, &argument.value, kept.scope)?;
@@ -451,8 +451,8 @@ impl ReflectionAttribute {
     /// Cannot apply #[\Attribute] to trait T
     /// Cannot apply #[\AllowDynamicProperties] to readonly class R
     /// ```
-    fn newInstance(req: &mut Request, _this: This<Self>) -> Result<PhpObject, Thrown> {
-        let kept = this_attribute(req)?;
+    fn newInstance(req: &mut Request, this: This<Self>) -> Result<PhpObject, Thrown> {
+        let kept = this_attribute(req, this.object())?;
         let written = String::from_utf8_lossy(&kept.attribute.name.0).into_owned();
         let looked_up = bare_name(&kept.attribute.name.0).to_vec();
         let Some(class) = lookup_class(req, &looked_up)? else {
@@ -517,8 +517,8 @@ impl ReflectionAttribute {
     ///   }
     /// }
     /// ```
-    fn __toString(req: &mut Request, _this: This<Self>) -> Result<PhpString, Thrown> {
-        let kept = this_attribute(req)?;
+    fn __toString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        let kept = this_attribute(req, this.object())?;
         let mut out = format!(
             "Attribute [ {} ]",
             String::from_utf8_lossy(&kept.attribute.name.0)
@@ -544,7 +544,7 @@ impl ReflectionAttribute {
     }
 
     #[php(private, implementation = crate::func::ReflectionFunctionAbstract::__clone)]
-    fn __clone(_this: This<Self>);
+    fn __clone(this: This<Self>);
 
     /// `ReflectionAttribute::__construct()`: private in the stub and
     /// reachable through reflection, where php refuses it.
@@ -559,7 +559,7 @@ impl ReflectionAttribute {
     /// Cannot directly instantiate ReflectionAttribute
     /// ```
     #[php(private, arity = manual)]
-    fn __construct(req: &mut Request, _this: This<Self>) -> Result<(), Thrown> {
+    fn __construct(req: &mut Request, _: This<Self>) -> Result<(), Thrown> {
         Err(throw(
             req,
             "ReflectionException",

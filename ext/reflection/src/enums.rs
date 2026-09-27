@@ -7,17 +7,17 @@
 //! gives every enum, `cases`, `from` and `tryFrom`, are the engine's,
 //! which links them onto every enum, a native's and a program's alike.
 
-use php_ext::abi::{Instance, Raw, This, Union};
+use php_ext::abi::{Instance, This, Union};
 use php_ext::attr::php_class;
 use php_ext::call::class_constant;
 use php_ext::decl::{ClassKind, EnumBacking, Type};
-use php_ext::raising::{Thrown, throw};
+use php_ext::raising::{Thrown, fatal, throw};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, PhpArray, PhpObject, PhpString};
 
 use super::signature::type_factory;
 use super::{
-    answer, class_constant_named, class_name_of, class_named, class_of, new_object, set_name,
+    class_constant_named, class_name_of, class_named, class_of, new_object, set_name,
     set_string_prop, this_name,
 };
 
@@ -33,8 +33,8 @@ fn backing_of(req: &Request, class: ClassId) -> Option<Type> {
 
 /// `ZEND_ACC_ENUM` on the class a `ReflectionEnum` names, or php's
 /// `ReflectionException` for one that is no enum.
-fn this_enum(req: &mut Request) -> Result<ClassId, Thrown> {
-    let (_, name) = this_name(req, "ReflectionEnum")?;
+fn this_enum(req: &mut Request, this: PhpObject) -> Result<ClassId, Thrown> {
+    let name = this_name(req, this, "ReflectionEnum")?;
     let class = class_named(req, &name)?;
     held_to_enum(req, class)?;
     Ok(class)
@@ -91,8 +91,8 @@ fn case_factory(req: &mut Request, class: ClassId, name: &[u8]) -> Result<PhpObj
 
 /// The enum and the case a `ReflectionEnumUnitCase` names, php's
 /// `GET_REFLECTION_OBJECT_PTR(ref)` over `intern->ptr`.
-fn this_case(req: &mut Request) -> Result<(ClassId, Vec<u8>), Thrown> {
-    let (this, name) = this_name(req, "ReflectionEnumUnitCase")?;
+fn this_case(req: &mut Request, this: PhpObject) -> Result<(ClassId, Vec<u8>), Thrown> {
+    let name = this_name(req, this, "ReflectionEnumUnitCase")?;
     let Some(class) = this
         .prop(req, b"class")
         .and_then(|value| value.as_str_bytes().map(<[u8]>::to_vec))
@@ -106,6 +106,17 @@ fn this_case(req: &mut Request) -> Result<(ClassId, Vec<u8>), Thrown> {
     let class = class_named(req, &class)?;
     held_to_enum(req, class)?;
     Ok((class, name))
+}
+
+/// The one instance the engine keeps for a case, `zend_enum_get_case`,
+/// one more owner of it.
+fn case_object(req: &mut Request, class: ClassId, name: &[u8]) -> Result<PhpObject, Thrown> {
+    let case = class_constant(req, class, name)?;
+    if let Some(&object) = case.as_object() {
+        return Ok(object);
+    }
+    req.release(case);
+    Err(fatal(req, "InternalError: an enum case that is no object"))
 }
 
 /// `ReflectionEnum` as the stub declares it.
@@ -131,15 +142,14 @@ impl ReflectionEnum {
     /// ```
     fn __construct(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         objectOrClass: Union<PhpObject, PhpString>,
     ) -> Result<(), Thrown> {
         let (class, _) = class_of(req, objectOrClass)?;
         held_to_enum(req, class)?;
         let name = class_name_of(req, class);
-        if let Some(this) = req.this() {
-            set_name(req, this, &name)?;
-        }
+        let this = this.object();
+        set_name(req, this, &name)?;
         Ok(())
     }
 
@@ -154,9 +164,9 @@ impl ReflectionEnum {
     /// bool(true)
     /// bool(false)
     /// ```
-    fn hasCase(req: &mut Request, _this: This<Self>, name: PhpString) -> Result<bool, Thrown> {
+    fn hasCase(req: &mut Request, this: This<Self>, name: PhpString) -> Result<bool, Thrown> {
         let name = name.as_bytes().to_vec();
-        let class = this_enum(req)?;
+        let class = this_enum(req, this.object())?;
         Ok(case_names(req, class).contains(&name))
     }
 
@@ -183,11 +193,11 @@ impl ReflectionEnum {
     /// ```
     fn getCase(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         name: PhpString,
     ) -> Result<Instance<ReflectionEnumUnitCase>, Thrown> {
         let name = name.as_bytes().to_vec();
-        let class = this_enum(req)?;
+        let class = this_enum(req, this.object())?;
         if !case_names(req, class).contains(&name) {
             let held = class_name_of(req, class);
             // A constant of that name that is no case is php's second
@@ -238,8 +248,8 @@ impl ReflectionEnum {
     /// string(22) "ReflectionEnumUnitCase"
     /// enum(Pure::A)
     /// ```
-    fn getCases(req: &mut Request, _this: This<Self>) -> Result<PhpArray, Thrown> {
-        let class = this_enum(req)?;
+    fn getCases(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        let class = this_enum(req, this.object())?;
         let mut out = PhpArray::new(req)?;
         for name in case_names(req, class) {
             let object = case_factory(req, class, &name)?;
@@ -256,8 +266,8 @@ impl ReflectionEnum {
     /// ```expect
     /// bool(true)
     /// ```
-    fn isBacked(req: &mut Request, _this: This<Self>) -> Result<bool, Thrown> {
-        let class = this_enum(req)?;
+    fn isBacked(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        let class = this_enum(req, this.object())?;
         Ok(backing_of(req, class).is_some())
     }
 
@@ -272,9 +282,9 @@ impl ReflectionEnum {
     /// ```
     fn getBackingType(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
     ) -> Result<Option<Instance<crate::signature::ReflectionNamedType>>, Thrown> {
-        let class = this_enum(req)?;
+        let class = this_enum(req, this.object())?;
         match backing_of(req, class) {
             Some(backing) => Ok(Some(Instance::of(type_factory(req, &backing, false)?))),
             None => Ok(None),
@@ -322,7 +332,7 @@ impl ReflectionEnumUnitCase {
     /// ```
     fn __construct(
         req: &mut Request,
-        _this: This<Self>,
+        this: This<Self>,
         class: Union<PhpObject, PhpString>,
         constant: PhpString,
     ) -> Result<(), Thrown> {
@@ -344,10 +354,9 @@ impl ReflectionEnumUnitCase {
             ));
         }
         let held = class_name_of(req, class);
-        if let Some(this) = req.this() {
-            set_name(req, this, &name)?;
-            set_string_prop(req, this, b"class", &held)?;
-        }
+        let this = this.object();
+        set_name(req, this, &name)?;
+        set_string_prop(req, this, b"class", &held)?;
         let shown = format!(
             "{}::{}",
             String::from_utf8_lossy(&held),
@@ -361,9 +370,8 @@ impl ReflectionEnumUnitCase {
             ));
         }
         // `ReflectionEnumBackedCase::__construct` after the unit case's.
-        let backed_reflector = req.this().is_some_and(|this| {
-            class_name_of(req, this.class()).eq_ignore_ascii_case(b"ReflectionEnumBackedCase")
-        });
+        let backed_reflector =
+            class_name_of(req, this.class()).eq_ignore_ascii_case(b"ReflectionEnumBackedCase");
         if backed_reflector && backing_of(req, class).is_none() {
             return Err(throw(
                 req,
@@ -387,8 +395,8 @@ impl ReflectionEnumUnitCase {
     ///   string(16) "PropertyHookType"
     /// }
     /// ```
-    fn getEnum(req: &mut Request, _this: This<Self>) -> Result<Instance<ReflectionEnum>, Thrown> {
-        let (class, _) = this_case(req)?;
+    fn getEnum(req: &mut Request, this: This<Self>) -> Result<Instance<ReflectionEnum>, Thrown> {
+        let (class, _) = this_case(req, this.object())?;
         let reflector = class_named(req, b"ReflectionEnum")?;
         let object = new_object(req, reflector)?;
         let name = class_name_of(req, class);
@@ -407,12 +415,9 @@ impl ReflectionEnumUnitCase {
     /// enum(PropertyHookType::Get)
     /// bool(true)
     /// ```
-    fn getValue(
-        req: &mut Request,
-        _this: This<Self>,
-    ) -> Result<Raw<Instance<crate::UnitEnum>>, Thrown> {
-        let (class, name) = this_case(req)?;
-        answer(class_constant(req, class, &name), req)
+    fn getValue(req: &mut Request, this: This<Self>) -> Result<Instance<crate::UnitEnum>, Thrown> {
+        let (class, name) = this_case(req, this.object())?;
+        case_object(req, class, &name).map(Instance::of)
     }
 }
 
@@ -423,7 +428,7 @@ pub(crate) struct ReflectionEnumBackedCase;
 #[php_class]
 impl ReflectionEnumBackedCase {
     #[php(implementation = ReflectionEnumUnitCase::__construct)]
-    fn __construct(_this: This<Self>, class: Union<PhpObject, PhpString>, constant: PhpString);
+    fn __construct(this: This<Self>, class: Union<PhpObject, PhpString>, constant: PhpString);
 
     /// `ReflectionEnumBackedCase::getBackingValue(): int|string`: the
     /// case's `value`, `zend_enum_fetch_case_value`.
@@ -437,16 +442,25 @@ impl ReflectionEnumBackedCase {
     /// ```
     fn getBackingValue(
         req: &mut Request,
-        _this: This<Self>,
-    ) -> Result<Raw<Union<i64, PhpString>>, Thrown> {
-        let (class, name) = this_case(req)?;
-        let case = class_constant(req, class, &name)?;
-        let value = case
-            .as_object()
-            .and_then(|object| object.prop(req, b"value"))
-            .unwrap_or_default();
-        req.addref(&value);
-        req.release(case);
-        answer(Ok(value), req)
+        this: This<Self>,
+    ) -> Result<Union<i64, PhpString>, Thrown> {
+        let (class, name) = this_case(req, this.object())?;
+        let case = case_object(req, class, &name)?;
+        let value = case.prop(req, b"value").unwrap_or_default();
+        let backing = match (value.as_int(), value.as_php_string()) {
+            (Some(int), _) => Some(Union::A(int)),
+            (None, Some(&string)) => {
+                req.addref(&value);
+                Some(Union::B(string))
+            }
+            (None, None) => None,
+        };
+        req.release(case.as_value());
+        backing.ok_or_else(|| {
+            fatal(
+                req,
+                "InternalError: a backed enum case whose value is neither int nor string",
+            )
+        })
     }
 }
