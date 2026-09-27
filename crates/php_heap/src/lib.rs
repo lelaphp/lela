@@ -412,8 +412,10 @@ impl Heap {
     /// grown it.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn release(hooks: &mut dyn HeapHooks, z: Zval) {
-        if Heap::release_nogc(hooks, z) {
-            Heap::gc_check_possible_root(hooks, z);
+        match Heap::give_up(hooks, z) {
+            GivenUp::Owned => Heap::gc_check_possible_root(hooks, z),
+            GivenUp::Freed => {}
+            GivenUp::Last(last) => Heap::destroy(hooks, last),
         }
     }
 
@@ -424,43 +426,75 @@ impl Heap {
     /// Whether owners are left.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn release_nogc(hooks: &mut dyn HeapHooks, z: Zval) -> bool {
+        match Heap::give_up(hooks, z) {
+            GivenUp::Owned => true,
+            GivenUp::Freed => false,
+            GivenUp::Last(last) => {
+                Heap::destroy(hooks, last);
+                false
+            }
+        }
+    }
+
+    /// `i_zval_ptr_dtor` up to `rc_dtor_func`: the refcount decrement,
+    /// and at zero a string, an object or a resource freed here, while a
+    /// table or a reference cell is handed back undestroyed, since what
+    /// it holds may be the last owner of another and [`Heap::destroy`]
+    /// takes them apart without recursing.
+    #[cfg_attr(debug_assertions, track_caller)]
+    fn give_up(hooks: &mut dyn HeapHooks, z: Zval) -> GivenUp {
         if !z.is_refcounted() {
-            return false;
+            return GivenUp::Freed;
         }
         #[cfg(debug_assertions)]
         if hooks
             .heap()
             .refuses(z, RefOp::Release, std::panic::Location::caller())
         {
-            return false;
+            return GivenUp::Freed;
         }
         if let Some(s) = z.as_str() {
             hooks.heap().release_string(s);
-            return false;
+            return GivenUp::Freed;
         }
         if let Some(a) = z.as_arr() {
             if a.delref() == 0 {
-                Heap::array_destroy(hooks, a);
-                return false;
+                return GivenUp::Last(Last::Table(a));
             }
         } else if let Some(o) = z.as_obj() {
             if o.delref() == 0 {
                 Heap::store_del(hooks, o);
-                return false;
+                return GivenUp::Freed;
             }
         } else if let Some(r) = z.as_resource() {
             if r.delref() == 0 {
                 Heap::resource_free(hooks, r);
             }
-            return false;
+            return GivenUp::Freed;
         } else if let Some(r) = z.as_reference()
             && r.delref() == 0
         {
-            Heap::reference_destroy(hooks, r);
-            return false;
+            return GivenUp::Last(Last::Cell(r));
         }
-        true
+        GivenUp::Owned
     }
+}
+
+/// What one owner fewer left: owners still, nothing to free or freed
+/// already, or a table or a reference cell whose last owner it was.
+enum GivenUp {
+    Owned,
+    Freed,
+    Last(Last),
+}
+
+/// A table or a reference cell no owner is left of, whose contents are
+/// still to be given up: what php's `rc_dtor_func` recurses into
+/// (`zend_array_destroy`, `zend_reference_destroy`).
+#[derive(Clone, Copy)]
+pub(crate) enum Last {
+    Table(Arr),
+    Cell(Ref),
 }
 
 impl Intern for Heap {

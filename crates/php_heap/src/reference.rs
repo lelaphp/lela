@@ -8,9 +8,10 @@
 //! A [`Ref`] is the pointer php's `zend_reference *` is, `Copy`, no
 //! `Drop`, its owners counted by [`crate::Heap::addref`] and
 //! [`crate::Heap::release`]; the release that reaches zero is
-//! `zend_reference_destroy` (`Z/Zend/zend_variables.c:71`), the value
-//! held released first, through the hooks since it may be an object,
-//! and the cell given back after it. A write through a reference is
+//! `zend_reference_destroy` (`Z/Zend/zend_variables.c:71`), one step of
+//! [`crate::Heap`]'s `destroy`: the value held released first, through
+//! the hooks since it may be an object, and the cell given back after
+//! it. A write through a reference is
 //! [`crate::Heap::reference_set`], the middle of `zend_assign_to_variable`
 //! (`Z/Zend/zend_execute.h:171-183`): the value held is replaced first
 //! and what it held released last, which is where a destructor is
@@ -226,24 +227,6 @@ impl Heap {
         let old = r.val();
         r.write_val(z);
         Heap::release(hooks, old);
-    }
-
-    /// `zend_reference_destroy` (`Z/Zend/zend_variables.c:71`): the
-    /// typed-property sources given up first, as php's
-    /// `zend_free_source_list` does; then the value held released,
-    /// through the hooks since it may be the last owner of an object,
-    /// and the cell's bytes given back after it.
-    pub(crate) fn reference_destroy(hooks: &mut dyn HeapHooks, r: Ref) {
-        if r.sources() != 0 {
-            hooks.free_reference(r);
-            r.set_sources(0);
-        }
-        let held = r.val();
-        r.write_val(Zval::UNDEF);
-        Heap::release(hooks, held);
-        // SAFETY: the reference came from `reference`, its last owner has
-        // given it up and what it held is released, so nothing names it.
-        unsafe { hooks.heap().mm.free(r.address()) };
     }
 }
 
