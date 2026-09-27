@@ -7,6 +7,7 @@ use php_ext::abi::{
     CloneObj, CloneObjWith, DimensionRead, ObjectHandlers, PropertyPlace, PropertyPurpose,
     PropertyRead, PropertyTest, Std,
 };
+use php_ext::attr::php_class;
 use php_ext::call::{Function, lookup_class, new_object};
 use php_ext::coerce::{numeric_string, to_string, truthy};
 use php_ext::raising::{Thrown, throw};
@@ -19,6 +20,20 @@ use crate::stmt;
 #[derive(Default)]
 pub(crate) struct Row {
     stmt: Option<PhpObject>,
+}
+
+/// `@not-serializable final class PDORow`, as `pdo_stmt.stub.php`
+/// declares it, over the statement it reads and
+/// `pdo_row_object_handlers`.
+#[php_class(final, not_serializable, payload = Row, handlers = HANDLERS)]
+pub(crate) struct PDORow;
+
+/// `public string $queryString`, which the handlers answer from the
+/// statement.
+#[php_class]
+impl PDORow {
+    #[php(property)]
+    const queryString: PhpString;
 }
 
 /// `pdo_row_object_handlers`.

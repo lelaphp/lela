@@ -4,19 +4,21 @@
 
 use std::sync::Arc;
 
+use php_ext::abi::{Instance, OrFalse, Path, This};
+use php_ext::attr::{php_class, php_function};
 use php_ext::call::new_object;
 use php_ext::raising::{Level, Thrown, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
 
-use crate::args::{
-    array, count_between, object_of, optional_long, set_str, set_string, string_value,
-};
+use crate::classes::DateTimeInterface;
 use crate::datetime::restore_properties;
 use crate::ffi::{Time, ZONETYPE_ABBR, ZONETYPE_ID, ZONETYPE_OFFSET};
 use crate::format::format_timestamp;
-use crate::obj::{TzKind, TzObj, class_id, rows_array, std_rows, this, time_of, tz_fields, tz_of};
-use crate::parse::path_string;
+use crate::obj::{
+    TIMEZONE, TzKind, TzObj, class_id, new_timezone, rows_array, set_str, set_string, std_rows,
+    time_of, tz_fields, tz_of,
+};
 
 /// `timezone_initialize(tzobj, tz, &warning)`: an identifier, an
 /// abbreviation or an offset, as `timelib_parse_zone` reads it, or the
@@ -91,86 +93,25 @@ fn set_zone(req: &mut Request, object: PhpObject, kind: TzKind) {
 ///   string(6) "+99:00"
 /// }
 /// ```
-pub(crate) fn timezone_open(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 1, 1)?;
-    let text = path_string(req, 1)?.as_bytes().to_vec();
-    match initialize(&text) {
-        Ok(kind) => crate::obj::new_timezone(req, kind),
+#[php_function]
+fn timezone_open(
+    req: &mut Request,
+    timezone: Path,
+) -> Result<OrFalse<Instance<DateTimeZone>>, Thrown> {
+    match initialize(timezone.0.as_bytes()) {
+        Ok(kind) => new_timezone(req, kind).map(OrFalse::Value),
         Err(message) => {
             docref(req, Level::Warning, &message);
-            Ok(Value::bool(false))
+            Ok(OrFalse::False)
         }
     }
 }
 
-/// `DateTimeZone::__construct(string $timezone)`: the message thrown as
-/// `DateInvalidTimeZoneException`.
-///
-/// ```php
-/// var_dump(new DateTimeZone('America/Argentina/Buenos_Aires'), new DateTimeZone('-03:30'), new DateTimeZone('UTC'));
-/// try { new DateTimeZone('Nowhere/Special'); } catch (DateInvalidTimeZoneException $e) { echo $e->getMessage(), "\n"; }
-/// try { new DateTimeZone("UTC\0x"); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// object(DateTimeZone)#1 (2) {
-///   ["timezone_type"]=>
-///   int(3)
-///   ["timezone"]=>
-///   string(30) "America/Argentina/Buenos_Aires"
-/// }
-/// object(DateTimeZone)#2 (2) {
-///   ["timezone_type"]=>
-///   int(1)
-///   ["timezone"]=>
-///   string(6) "-03:30"
-/// }
-/// object(DateTimeZone)#3 (2) {
-///   ["timezone_type"]=>
-///   int(3)
-///   ["timezone"]=>
-///   string(3) "UTC"
-/// }
-/// DateTimeZone::__construct(): Unknown or bad timezone (Nowhere/Special)
-/// DateTimeZone::__construct(): Argument #1 ($timezone) must not contain any null bytes
-/// ```
-///
-/// A subclass's `__debugInfo` is what `var_dump` shows.
-///
-/// ```php
-/// class U extends DateTimeZone { public function __debugInfo(): array { return ['value' => 'zzz']; } }
-/// var_dump(new U('Europe/Kyiv'));
-/// ```
-/// ```expect
-/// object(U)#1 (1) {
-///   ["value"]=>
-///   string(3) "zzz"
-/// }
-/// ```
-pub(crate) fn construct(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 1, 1)?;
-    let text = path_string(req, 1)?.as_bytes().to_vec();
-    let object = this(req)?;
-    match initialize(&text) {
-        Ok(kind) => {
-            set_zone(req, object, kind);
-            Ok(Value::null())
-        }
-        Err(message) => Err(throw(
-            req,
-            "DateInvalidTimeZoneException",
-            &format!("DateTimeZone::__construct(): {message}"),
-        )),
-    }
-}
-
-/// The zone a body works on: `$this` for a method, argument 1 for a
-/// function, and the position its first own argument stands at.
-fn receiver(req: &mut Request) -> Result<(PhpObject, u32, usize), Thrown> {
-    if req.this().is_some() {
-        Ok((this(req)?, 1, 0))
-    } else {
-        Ok((object_of(req, 1, "DateTimeZone")?, 2, 1))
-    }
+/// `timezone_name_get` and `DateTimeZone::getName`: the name the zone
+/// was made with.
+fn name_of(req: &mut Request, object: PhpObject) -> Result<PhpString, Thrown> {
+    let kind = tz_of(req, object)?;
+    PhpString::new(req, &kind.name())
 }
 
 /// `timezone_name_get(DateTimeZone $object): string`, and
@@ -185,11 +126,26 @@ fn receiver(req: &mut Request) -> Result<(PhpObject, u32, usize), Thrown> {
 /// string(3) "EST"
 /// string(9) "+01:30:45"
 /// ```
-pub(crate) fn timezone_name_get(req: &mut Request) -> Result<Value, Thrown> {
-    let (object, _, shift) = receiver(req)?;
-    count_between(req, shift, shift)?;
+#[php_function]
+fn timezone_name_get(
+    req: &mut Request,
+    object: Instance<DateTimeZone>,
+) -> Result<PhpString, Thrown> {
+    name_of(req, object.object())
+}
+
+/// `timezone_offset_get` and `DateTimeZone::getOffset`: the zone's
+/// offset from UTC at the date's instant.
+fn offset_of(req: &mut Request, object: PhpObject, date: PhpObject) -> Result<i64, Thrown> {
     let kind = tz_of(req, object)?;
-    string_value(req, &kind.name())
+    let time = time_of(req, date)?;
+    Ok(match kind {
+        TzKind::Id(zone) => i64::from(zone.offset_at(time.sse).offset),
+        TzKind::Offset(offset) => offset,
+        TzKind::Abbr {
+            utc_offset, dst, ..
+        } => utc_offset + i64::from(dst) * 3600,
+    })
 }
 
 /// `timezone_offset_get(DateTimeZone $object, DateTimeInterface
@@ -208,19 +164,13 @@ pub(crate) fn timezone_name_get(req: &mut Request) -> Result<Value, Thrown> {
 /// timezone_offset_get(): Argument #1 ($object) must be of type DateTimeZone, stdClass given
 /// timezone_offset_get(): Argument #2 ($datetime) must be of type DateTimeInterface, DateTimeZone given
 /// ```
-pub(crate) fn timezone_offset_get(req: &mut Request) -> Result<Value, Thrown> {
-    let (object, at, shift) = receiver(req)?;
-    count_between(req, 1 + shift, 1 + shift)?;
-    let date = object_of(req, at, "DateTimeInterface")?;
-    let kind = tz_of(req, object)?;
-    let time = time_of(req, date)?;
-    Ok(Value::int(match kind {
-        TzKind::Id(zone) => i64::from(zone.offset_at(time.sse).offset),
-        TzKind::Offset(offset) => offset,
-        TzKind::Abbr {
-            utc_offset, dst, ..
-        } => utc_offset + i64::from(dst) * 3600,
-    }))
+#[php_function]
+fn timezone_offset_get(
+    req: &mut Request,
+    object: Instance<DateTimeZone>,
+    datetime: Instance<DateTimeInterface>,
+) -> Result<i64, Thrown> {
+    offset_of(req, object.object(), datetime.object())
 }
 
 /// One row of `getTransitions`.
@@ -240,6 +190,111 @@ fn transition(
     set_str(req, &mut row, b"isdst", Value::bool(is_dst))?;
     set_string(req, &mut row, b"abbr", abbr)?;
     out.append(req, Value::array(row))
+}
+
+/// `timezone_transitions_get` and `DateTimeZone::getTransitions`.
+#[allow(clippy::too_many_lines)]
+fn transitions_of(
+    req: &mut Request,
+    object: PhpObject,
+    begin_ts: i64,
+    end_ts: i64,
+) -> Result<OrFalse<PhpArray>, Thrown> {
+    let kind = tz_of(req, object)?;
+    let TzKind::Id(zone) = kind else {
+        return Ok(OrFalse::False);
+    };
+    let types = zone.types();
+    let trans = zone.transitions();
+    let ty = |i: usize| types.get(i).cloned();
+    let mut out = PhpArray::new(req)?;
+    let nominal = |req: &mut Request, out: &mut PhpArray, ts: i64| -> Result<(), Thrown> {
+        match ty(0) {
+            Some(t) => transition(req, out, ts, i64::from(t.offset), t.is_dst, &t.abbr),
+            None => Ok(()),
+        }
+    };
+    let (mut begin, found) = if begin_ts == i64::MIN {
+        nominal(req, &mut out, begin_ts)?;
+        (0, true)
+    } else {
+        let mut found = false;
+        let mut at = 0;
+        while at < trans.len() {
+            if trans[at].0 > begin_ts {
+                if at > 0 {
+                    if let Some(t) = ty(trans[at - 1].1) {
+                        transition(
+                            req,
+                            &mut out,
+                            begin_ts,
+                            i64::from(t.offset),
+                            t.is_dst,
+                            &t.abbr,
+                        )?;
+                    }
+                } else {
+                    nominal(req, &mut out, begin_ts)?;
+                }
+                found = true;
+                break;
+            }
+            at += 1;
+        }
+        (at, found)
+    };
+    let posix = zone.has_posix();
+    if found {
+        while begin < trans.len() {
+            let (ts, i) = trans[begin];
+            if ts >= end_ts {
+                return Ok(OrFalse::Value(out));
+            }
+            if let Some(t) = ty(i) {
+                transition(req, &mut out, ts, i64::from(t.offset), t.is_dst, &t.abbr)?;
+            }
+            begin += 1;
+        }
+    } else if trans.is_empty() {
+        nominal(req, &mut out, begin_ts)?;
+    } else if posix {
+        let o = zone.offset_at(begin_ts);
+        transition(
+            req,
+            &mut out,
+            begin_ts,
+            i64::from(o.offset),
+            o.is_dst,
+            &o.abbr,
+        )?;
+    } else if let Some(t) = trans.last().and_then(|(_, i)| ty(*i)) {
+        transition(
+            req,
+            &mut out,
+            begin_ts,
+            i64::from(t.offset),
+            t.is_dst,
+            &t.abbr,
+        )?;
+    }
+    if posix && let Some(&(last, _)) = trans.last() {
+        let (start_y, _, _) = year_of(last);
+        let (end_y, _, _) = year_of(end_ts);
+        for year in start_y..=end_y {
+            for (ts, i) in zone.posix_transitions(year) {
+                if ts <= last || ts < begin_ts {
+                    continue;
+                }
+                if ts > end_ts {
+                    return Ok(OrFalse::Value(out));
+                }
+                if let Some(t) = ty(i) {
+                    transition(req, &mut out, ts, i64::from(t.offset), t.is_dst, &t.abbr)?;
+                }
+            }
+        }
+    }
+    Ok(OrFalse::Value(out))
 }
 
 /// `timezone_transitions_get(DateTimeZone $object, int $timestampBegin =
@@ -313,107 +368,14 @@ fn transition(
 /// }
 /// bool(false)
 /// ```
-#[allow(clippy::too_many_lines)]
-pub(crate) fn timezone_transitions_get(req: &mut Request) -> Result<Value, Thrown> {
-    let (object, at, shift) = receiver(req)?;
-    count_between(req, shift, 2 + shift)?;
-    let begin_ts = optional_long(req, at, i64::MIN)?;
-    let end_ts = optional_long(req, at + 1, i64::from(i32::MAX))?;
-    let kind = tz_of(req, object)?;
-    let TzKind::Id(zone) = kind else {
-        return Ok(Value::bool(false));
-    };
-    let types = zone.types();
-    let trans = zone.transitions();
-    let ty = |i: usize| types.get(i).cloned();
-    let mut out = PhpArray::new(req)?;
-    let nominal = |req: &mut Request, out: &mut PhpArray, ts: i64| -> Result<(), Thrown> {
-        match ty(0) {
-            Some(t) => transition(req, out, ts, i64::from(t.offset), t.is_dst, &t.abbr),
-            None => Ok(()),
-        }
-    };
-    let (mut begin, found) = if begin_ts == i64::MIN {
-        nominal(req, &mut out, begin_ts)?;
-        (0, true)
-    } else {
-        let mut found = false;
-        let mut at = 0;
-        while at < trans.len() {
-            if trans[at].0 > begin_ts {
-                if at > 0 {
-                    if let Some(t) = ty(trans[at - 1].1) {
-                        transition(
-                            req,
-                            &mut out,
-                            begin_ts,
-                            i64::from(t.offset),
-                            t.is_dst,
-                            &t.abbr,
-                        )?;
-                    }
-                } else {
-                    nominal(req, &mut out, begin_ts)?;
-                }
-                found = true;
-                break;
-            }
-            at += 1;
-        }
-        (at, found)
-    };
-    let posix = zone.has_posix();
-    if found {
-        while begin < trans.len() {
-            let (ts, i) = trans[begin];
-            if ts >= end_ts {
-                return Ok(Value::array(out));
-            }
-            if let Some(t) = ty(i) {
-                transition(req, &mut out, ts, i64::from(t.offset), t.is_dst, &t.abbr)?;
-            }
-            begin += 1;
-        }
-    } else if trans.is_empty() {
-        nominal(req, &mut out, begin_ts)?;
-    } else if posix {
-        let o = zone.offset_at(begin_ts);
-        transition(
-            req,
-            &mut out,
-            begin_ts,
-            i64::from(o.offset),
-            o.is_dst,
-            &o.abbr,
-        )?;
-    } else if let Some(t) = trans.last().and_then(|(_, i)| ty(*i)) {
-        transition(
-            req,
-            &mut out,
-            begin_ts,
-            i64::from(t.offset),
-            t.is_dst,
-            &t.abbr,
-        )?;
-    }
-    if posix && let Some(&(last, _)) = trans.last() {
-        let (start_y, _, _) = year_of(last);
-        let (end_y, _, _) = year_of(end_ts);
-        for year in start_y..=end_y {
-            for (ts, i) in zone.posix_transitions(year) {
-                if ts <= last || ts < begin_ts {
-                    continue;
-                }
-                if ts > end_ts {
-                    return Ok(Value::array(out));
-                }
-                if let Some(t) = ty(i) {
-                    transition(req, &mut out, ts, i64::from(t.offset), t.is_dst, &t.abbr)?;
-                }
-            }
-        }
-    }
-    Ok(Value::array(out))
+#[php_function]
+fn timezone_transitions_get(
+    req: &mut Request,
+    object: Instance<DateTimeZone>,
+    #[php(default = PHP_INT_MIN)] timestampBegin: i64,
+    #[php(default = 2147483647)] timestampEnd: i64,
+) -> Result<OrFalse<PhpArray>, Thrown> {
+    transitions_of(req, object.object(), timestampBegin, timestampEnd)
 }
 
 /// `timelib_unixtime2date(ts, &y, &m, &d)`.
@@ -421,6 +383,21 @@ fn year_of(ts: i64) -> (i64, i64, i64) {
     let mut t = Time::new();
     t.unixtime2gmt(ts);
     (t.y, t.m, t.d)
+}
+
+/// `timezone_location_get` and `DateTimeZone::getLocation`.
+fn location_of(req: &mut Request, object: PhpObject) -> Result<OrFalse<PhpArray>, Thrown> {
+    let kind = tz_of(req, object)?;
+    let TzKind::Id(zone) = kind else {
+        return Ok(OrFalse::False);
+    };
+    let loc = zone.location();
+    let mut out = PhpArray::new(req)?;
+    set_string(req, &mut out, b"country_code", &loc.country_code)?;
+    set_str(req, &mut out, b"latitude", Value::float(loc.latitude))?;
+    set_str(req, &mut out, b"longitude", Value::float(loc.longitude))?;
+    set_string(req, &mut out, b"comments", &loc.comments)?;
+    Ok(OrFalse::Value(out))
 }
 
 /// `timezone_location_get(DateTimeZone $object): array|false`, and
@@ -452,57 +429,12 @@ fn year_of(ts: i64) -> (i64, i64, i64) {
 /// }
 /// bool(false)
 /// ```
-pub(crate) fn timezone_location_get(req: &mut Request) -> Result<Value, Thrown> {
-    let (object, _, shift) = receiver(req)?;
-    count_between(req, shift, shift)?;
-    let kind = tz_of(req, object)?;
-    let TzKind::Id(zone) = kind else {
-        return Ok(Value::bool(false));
-    };
-    let loc = zone.location();
-    let mut out = PhpArray::new(req)?;
-    set_string(req, &mut out, b"country_code", &loc.country_code)?;
-    set_str(req, &mut out, b"latitude", Value::float(loc.latitude))?;
-    set_str(req, &mut out, b"longitude", Value::float(loc.longitude))?;
-    set_string(req, &mut out, b"comments", &loc.comments)?;
-    Ok(Value::array(out))
-}
-
-/// `DateTimeZone::listAbbreviations(): array`.
-///
-/// ```php
-/// var_dump(DateTimeZone::listAbbreviations()['acst'][0]);
-/// ```
-/// ```expect
-/// array(3) {
-///   ["dst"]=>
-///   bool(false)
-///   ["offset"]=>
-///   int(34200)
-///   ["timezone_id"]=>
-///   string(18) "Australia/Adelaide"
-/// }
-/// ```
-pub(crate) fn list_abbreviations(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 0, 0)?;
-    crate::tzdb::abbreviations(req)
-}
-
-/// `DateTimeZone::listIdentifiers(int $timezoneGroup = DateTimeZone::ALL,
-/// ?string $countryCode = null): array`.
-///
-/// ```php
-/// var_dump(DateTimeZone::listIdentifiers(DateTimeZone::PER_COUNTRY, 'BE'), count(DateTimeZone::listIdentifiers(DateTimeZone::EUROPE)) > 50);
-/// ```
-/// ```expect
-/// array(1) {
-///   [0]=>
-///   string(15) "Europe/Brussels"
-/// }
-/// bool(true)
-/// ```
-pub(crate) fn list_identifiers(req: &mut Request) -> Result<Value, Thrown> {
-    crate::tzdb::timezone_identifiers_list(req)
+#[php_function]
+fn timezone_location_get(
+    req: &mut Request,
+    object: Instance<DateTimeZone>,
+) -> Result<OrFalse<PhpArray>, Thrown> {
+    location_of(req, object.object())
 }
 
 /// `php_date_timezone_initialize_from_hash`.
@@ -532,137 +464,321 @@ fn from_hash(req: &mut Request, hash: PhpArray) -> Result<Option<TzKind>, Thrown
     Ok(initialize(text).ok())
 }
 
-/// `DateTimeZone::__set_state(array $array): DateTimeZone`.
+/// `class DateTimeZone`: its fourteen groups, the values of
+/// `PHP_DATE_TIMEZONE_GROUP_*` and `PHP_DATE_TIMEZONE_PER_COUNTRY`, and
+/// its eleven methods, over a `php_timezone_obj` payload.
 ///
 /// ```php
-/// var_dump(DateTimeZone::__set_state(['timezone_type' => 3, 'timezone' => 'Africa/Cairo']), DateTimeZone::__set_state(['timezone_type' => 1, 'timezone' => '+05:00'])->getName());
-/// try { DateTimeZone::__set_state(['timezone_type' => 9, 'timezone' => 'UTC']); } catch (Error $e) { echo $e->getMessage(), "\n"; }
-/// var_export(new DateTimeZone('Europe/Kyiv'));
+/// var_dump(DateTimeZone::AFRICA, DateTimeZone::UTC, DateTimeZone::ALL, DateTimeZone::ALL_WITH_BC, DateTimeZone::PER_COUNTRY);
 /// ```
 /// ```expect
-/// object(DateTimeZone)#1 (2) {
-///   ["timezone_type"]=>
-///   int(3)
-///   ["timezone"]=>
-///   string(12) "Africa/Cairo"
-/// }
-/// string(6) "+05:00"
-/// Invalid serialization data for DateTimeZone object
-/// \DateTimeZone::__set_state(array(
-///    'timezone_type' => 3,
-///    'timezone' => 'Europe/Kyiv',
-/// ))
+/// int(1)
+/// int(1024)
+/// int(2047)
+/// int(4095)
+/// int(4096)
 /// ```
-pub(crate) fn set_state(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 1, 1)?;
-    let hash = array(req, 1)?;
-    let class = class_id(req, "DateTimeZone")?;
-    let object = new_object(req, class)?;
-    match from_hash(req, hash) {
-        Ok(Some(kind)) => {
-            set_zone(req, object, kind);
-            Ok(object.as_value())
+#[php_class(payload = TzObj, handlers = TIMEZONE)]
+pub(crate) struct DateTimeZone;
+
+/// The methods the procedural natives alias, called as methods.
+///
+/// ```php
+/// $tz = new DateTimeZone('Europe/Amsterdam');
+/// var_dump($tz->getName(), $tz->getOffset(new DateTime('2020-07-01 UTC')), count($tz->getTransitions(1700000000, 1735689600)), $tz->getLocation()['country_code']);
+/// ```
+/// ```expect
+/// string(16) "Europe/Amsterdam"
+/// int(7200)
+/// int(3)
+/// string(2) "NL"
+/// ```
+#[php_class]
+impl DateTimeZone {
+    const AFRICA: i64 = 0x0001;
+    const AMERICA: i64 = 0x0002;
+    const ANTARCTICA: i64 = 0x0004;
+    const ARCTIC: i64 = 0x0008;
+    const ASIA: i64 = 0x0010;
+    const ATLANTIC: i64 = 0x0020;
+    const AUSTRALIA: i64 = 0x0040;
+    const EUROPE: i64 = 0x0080;
+    const INDIAN: i64 = 0x0100;
+    const PACIFIC: i64 = 0x0200;
+    const UTC: i64 = 0x0400;
+    const ALL: i64 = 0x07FF;
+    pub(crate) const ALL_WITH_BC: i64 = 0x0FFF;
+    pub(crate) const PER_COUNTRY: i64 = 0x1000;
+
+    /// `DateTimeZone::__construct(string $timezone)`: the message thrown as
+    /// `DateInvalidTimeZoneException`.
+    ///
+    /// ```php
+    /// var_dump(new DateTimeZone('America/Argentina/Buenos_Aires'), new DateTimeZone('-03:30'), new DateTimeZone('UTC'));
+    /// try { new DateTimeZone('Nowhere/Special'); } catch (DateInvalidTimeZoneException $e) { echo $e->getMessage(), "\n"; }
+    /// try { new DateTimeZone("UTC\0x"); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// object(DateTimeZone)#1 (2) {
+    ///   ["timezone_type"]=>
+    ///   int(3)
+    ///   ["timezone"]=>
+    ///   string(30) "America/Argentina/Buenos_Aires"
+    /// }
+    /// object(DateTimeZone)#2 (2) {
+    ///   ["timezone_type"]=>
+    ///   int(1)
+    ///   ["timezone"]=>
+    ///   string(6) "-03:30"
+    /// }
+    /// object(DateTimeZone)#3 (2) {
+    ///   ["timezone_type"]=>
+    ///   int(3)
+    ///   ["timezone"]=>
+    ///   string(3) "UTC"
+    /// }
+    /// DateTimeZone::__construct(): Unknown or bad timezone (Nowhere/Special)
+    /// DateTimeZone::__construct(): Argument #1 ($timezone) must not contain any null bytes
+    /// ```
+    ///
+    /// A subclass's `__debugInfo` is what `var_dump` shows.
+    ///
+    /// ```php
+    /// class U extends DateTimeZone { public function __debugInfo(): array { return ['value' => 'zzz']; } }
+    /// var_dump(new U('Europe/Kyiv'));
+    /// ```
+    /// ```expect
+    /// object(U)#1 (1) {
+    ///   ["value"]=>
+    ///   string(3) "zzz"
+    /// }
+    /// ```
+    fn __construct(req: &mut Request, this: This<Self>, timezone: Path) -> Result<(), Thrown> {
+        match initialize(timezone.0.as_bytes()) {
+            Ok(kind) => {
+                set_zone(req, this.object(), kind);
+                Ok(())
+            }
+            Err(message) => Err(throw(
+                req,
+                "DateInvalidTimeZoneException",
+                &format!("DateTimeZone::__construct(): {message}"),
+            )),
         }
-        Ok(None) => {
-            req.release(object.as_value());
-            Err(throw(
+    }
+
+    /// `DateTimeZone::getName(): string`, `timezone_name_get`'s body.
+    #[php(tentative)]
+    fn getName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        name_of(req, this.object())
+    }
+
+    /// `DateTimeZone::getOffset(DateTimeInterface $datetime): int`,
+    /// `timezone_offset_get`'s body.
+    #[php(tentative)]
+    fn getOffset(
+        req: &mut Request,
+        this: This<Self>,
+        datetime: Instance<DateTimeInterface>,
+    ) -> Result<i64, Thrown> {
+        offset_of(req, this.object(), datetime.object())
+    }
+
+    /// `DateTimeZone::getTransitions(...)`, `timezone_transitions_get`'s
+    /// body.
+    #[php(tentative)]
+    fn getTransitions(
+        req: &mut Request,
+        this: This<Self>,
+        #[php(default = PHP_INT_MIN)] timestampBegin: i64,
+        #[php(default = 2147483647)] timestampEnd: i64,
+    ) -> Result<OrFalse<PhpArray>, Thrown> {
+        transitions_of(req, this.object(), timestampBegin, timestampEnd)
+    }
+
+    /// `DateTimeZone::getLocation(): array|false`,
+    /// `timezone_location_get`'s body.
+    #[php(tentative)]
+    fn getLocation(req: &mut Request, this: This<Self>) -> Result<OrFalse<PhpArray>, Thrown> {
+        location_of(req, this.object())
+    }
+
+    /// `DateTimeZone::listAbbreviations(): array`.
+    ///
+    /// ```php
+    /// var_dump(DateTimeZone::listAbbreviations()['acst'][0]);
+    /// ```
+    /// ```expect
+    /// array(3) {
+    ///   ["dst"]=>
+    ///   bool(false)
+    ///   ["offset"]=>
+    ///   int(34200)
+    ///   ["timezone_id"]=>
+    ///   string(18) "Australia/Adelaide"
+    /// }
+    /// ```
+    #[php(tentative)]
+    fn listAbbreviations(req: &mut Request) -> Result<PhpArray, Thrown> {
+        crate::tzdb::abbreviations(req)
+    }
+
+    /// `DateTimeZone::listIdentifiers(int $timezoneGroup = DateTimeZone::ALL,
+    /// ?string $countryCode = null): array`.
+    ///
+    /// ```php
+    /// var_dump(DateTimeZone::listIdentifiers(DateTimeZone::PER_COUNTRY, 'BE'), count(DateTimeZone::listIdentifiers(DateTimeZone::EUROPE)) > 50);
+    /// ```
+    /// ```expect
+    /// array(1) {
+    ///   [0]=>
+    ///   string(15) "Europe/Brussels"
+    /// }
+    /// bool(true)
+    /// ```
+    #[php(tentative)]
+    fn listIdentifiers(
+        req: &mut Request,
+        #[php(default = DateTimeZone::ALL)] timezoneGroup: i64,
+        #[php(default = null)] countryCode: Option<PhpString>,
+    ) -> Result<PhpArray, Thrown> {
+        crate::tzdb::identifiers(req, timezoneGroup, countryCode)
+    }
+
+    /// `DateTimeZone::__serialize(): array`.
+    ///
+    /// ```php
+    /// var_dump((new DateTimeZone('Asia/Singapore'))->__serialize(), (new DateTimeZone('-01:00'))->__serialize());
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   ["timezone_type"]=>
+    ///   int(3)
+    ///   ["timezone"]=>
+    ///   string(14) "Asia/Singapore"
+    /// }
+    /// array(2) {
+    ///   ["timezone_type"]=>
+    ///   int(1)
+    ///   ["timezone"]=>
+    ///   string(6) "-01:00"
+    /// }
+    /// ```
+    fn __serialize(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        let object = this.object();
+        let kind = tz_of(req, object)?;
+        let fields = tz_fields(req, &kind)?;
+        let own = std_rows(req, object)?;
+        rows_array(req, &own, fields, true)
+    }
+
+    /// `DateTimeZone::__unserialize(array $data): void`.
+    ///
+    /// ```php
+    /// $tz = new DateTimeZone('UTC');
+    /// $tz->__unserialize(['timezone_type' => 3, 'timezone' => 'America/Denver']);
+    /// var_dump($tz->getName());
+    /// try { $tz->__unserialize(['timezone_type' => 3]); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// string(14) "America/Denver"
+    /// Invalid serialization data for DateTimeZone object
+    /// ```
+    fn __unserialize(req: &mut Request, this: This<Self>, data: PhpArray) -> Result<(), Thrown> {
+        let (object, hash) = (this.object(), data);
+        let Some(kind) = from_hash(req, hash)? else {
+            return Err(throw(
                 req,
                 "Error",
                 "Invalid serialization data for DateTimeZone object",
-            ))
+            ));
+        };
+        set_zone(req, object, kind);
+        restore_properties(req, object, hash, &[b"timezone_type", b"timezone"])
+    }
+
+    /// `DateTimeZone::__wakeup(): void`, deprecated since 8.5.
+    ///
+    /// ```php
+    /// $tz = new DateTimeZone('UTC');
+    /// try { $tz->__wakeup(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Deprecated: Method DateTimeZone::__wakeup() is deprecated since 8.5, this method is obsolete, as serialization hooks are provided by __unserialize() and __serialize() in %s on line 3
+    /// Invalid serialization data for DateTimeZone object
+    /// ```
+    #[php(
+        tentative,
+        deprecated(
+            since = "8.5",
+            message = "this method is obsolete, as serialization hooks are provided by __unserialize() and __serialize()"
+        )
+    )]
+    fn __wakeup(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
+        let object = this.object();
+        let mut hash = PhpArray::new(req)?;
+        for (name, value) in object.props(req)? {
+            req.addref(&value);
+            hash.set(req, Key::Str(name), value)?;
         }
-        Err(thrown) => {
-            req.release(object.as_value());
-            Err(thrown)
+        let kind = from_hash(req, hash);
+        req.release(Value::array(hash));
+        match kind? {
+            Some(kind) => {
+                set_zone(req, object, kind);
+                Ok(())
+            }
+            None => Err(throw(
+                req,
+                "Error",
+                "Invalid serialization data for DateTimeZone object",
+            )),
         }
     }
-}
 
-/// `DateTimeZone::__serialize(): array`.
-///
-/// ```php
-/// var_dump((new DateTimeZone('Asia/Singapore'))->__serialize(), (new DateTimeZone('-01:00'))->__serialize());
-/// ```
-/// ```expect
-/// array(2) {
-///   ["timezone_type"]=>
-///   int(3)
-///   ["timezone"]=>
-///   string(14) "Asia/Singapore"
-/// }
-/// array(2) {
-///   ["timezone_type"]=>
-///   int(1)
-///   ["timezone"]=>
-///   string(6) "-01:00"
-/// }
-/// ```
-pub(crate) fn serialize(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 0, 0)?;
-    let object = this(req)?;
-    let kind = tz_of(req, object)?;
-    let fields = tz_fields(req, &kind)?;
-    let own = std_rows(req, object)?;
-    Ok(Value::array(rows_array(req, &own, fields, true)?))
-}
-
-/// `DateTimeZone::__unserialize(array $data): void`.
-///
-/// ```php
-/// $tz = new DateTimeZone('UTC');
-/// $tz->__unserialize(['timezone_type' => 3, 'timezone' => 'America/Denver']);
-/// var_dump($tz->getName());
-/// try { $tz->__unserialize(['timezone_type' => 3]); } catch (Error $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// string(14) "America/Denver"
-/// Invalid serialization data for DateTimeZone object
-/// ```
-pub(crate) fn unserialize(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 1, 1)?;
-    let hash = array(req, 1)?;
-    let object = this(req)?;
-    let Some(kind) = from_hash(req, hash)? else {
-        return Err(throw(
-            req,
-            "Error",
-            "Invalid serialization data for DateTimeZone object",
-        ));
-    };
-    set_zone(req, object, kind);
-    restore_properties(req, object, hash, &[b"timezone_type", b"timezone"])?;
-    Ok(Value::null())
-}
-
-/// `DateTimeZone::__wakeup(): void`, deprecated since 8.5.
-///
-/// ```php
-/// $tz = new DateTimeZone('UTC');
-/// try { $tz->__wakeup(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// Deprecated: Method DateTimeZone::__wakeup() is deprecated since 8.5, this method is obsolete, as serialization hooks are provided by __unserialize() and __serialize() in %s on line 3
-/// Invalid serialization data for DateTimeZone object
-/// ```
-pub(crate) fn wakeup(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 0, 0)?;
-    let object = this(req)?;
-    let mut hash = PhpArray::new(req)?;
-    for (name, value) in object.props(req)? {
-        req.addref(&value);
-        hash.set(req, Key::Str(name), value)?;
-    }
-    let kind = from_hash(req, hash);
-    req.release(Value::array(hash));
-    match kind? {
-        Some(kind) => {
-            set_zone(req, object, kind);
-            Ok(Value::null())
+    /// `DateTimeZone::__set_state(array $array): DateTimeZone`.
+    ///
+    /// ```php
+    /// var_dump(DateTimeZone::__set_state(['timezone_type' => 3, 'timezone' => 'Africa/Cairo']), DateTimeZone::__set_state(['timezone_type' => 1, 'timezone' => '+05:00'])->getName());
+    /// try { DateTimeZone::__set_state(['timezone_type' => 9, 'timezone' => 'UTC']); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// var_export(new DateTimeZone('Europe/Kyiv'));
+    /// ```
+    /// ```expect
+    /// object(DateTimeZone)#1 (2) {
+    ///   ["timezone_type"]=>
+    ///   int(3)
+    ///   ["timezone"]=>
+    ///   string(12) "Africa/Cairo"
+    /// }
+    /// string(6) "+05:00"
+    /// Invalid serialization data for DateTimeZone object
+    /// \DateTimeZone::__set_state(array(
+    ///    'timezone_type' => 3,
+    ///    'timezone' => 'Europe/Kyiv',
+    /// ))
+    /// ```
+    #[php(tentative)]
+    fn __set_state(req: &mut Request, array: PhpArray) -> Result<Instance<DateTimeZone>, Thrown> {
+        let hash = array;
+        let class = class_id(req, "DateTimeZone")?;
+        let object = new_object(req, class)?;
+        match from_hash(req, hash) {
+            Ok(Some(kind)) => {
+                set_zone(req, object, kind);
+                Ok(Instance::of(object))
+            }
+            Ok(None) => {
+                req.release(object.as_value());
+                Err(throw(
+                    req,
+                    "Error",
+                    "Invalid serialization data for DateTimeZone object",
+                ))
+            }
+            Err(thrown) => {
+                req.release(object.as_value());
+                Err(thrown)
+            }
         }
-        None => Err(throw(
-            req,
-            "Error",
-            "Invalid serialization data for DateTimeZone object",
-        )),
     }
 }

@@ -36,23 +36,41 @@ mod serializers;
 mod session;
 mod user;
 
-use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder};
-use php_ext::coerce::coerce_param;
-use php_ext::decl::{
-    ClassDecl, ClassFlags, ClassKind, ConstDecl, ConstExpr, EnumBacking, FunctionDecl, MethodDecl,
-    Name, Parameter, ParameterDefault, Type, Visibility,
-};
-use php_ext::raising::{Level, Thrown, arg_count_error, docref, throw};
+use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, IntoReturn};
+use php_ext::attr::php_const;
+use php_ext::raising::{Level, Thrown, docref, throw};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpRef, PhpString, Value, ValueRef};
+use php_ext::values::{PhpArray, PhpRef, PhpString, Value};
 
-/// `php_session_status`: the three values `session_status()` answers.
+use crate::natives::{
+    session_abort, session_cache_expire, session_cache_limiter, session_commit, session_create_id,
+    session_decode, session_destroy, session_encode, session_gc, session_get_cookie_params,
+    session_id, session_module_name, session_name, session_regenerate_id,
+    session_register_shutdown, session_reset, session_save_path, session_set_cookie_params,
+    session_set_save_handler, session_start, session_status, session_unset, session_write_close,
+};
+use crate::user::{
+    SessionHandler, SessionHandlerInterface, SessionIdInterface,
+    SessionUpdateTimestampHandlerInterface,
+};
+
+/// `php_session_status`: the three values `session_status()` answers,
+/// each the `PHP_SESSION_*` constant of its name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(i64)]
 enum Status {
-    Disabled = 0,
+    Disabled = constants::PHP_SESSION_DISABLED,
     #[default]
-    None = 1,
-    Active = 2,
+    None = constants::PHP_SESSION_NONE,
+    Active = constants::PHP_SESSION_ACTIVE,
+}
+
+/// The stub's three constants.
+#[php_const]
+mod constants {
+    pub(crate) const PHP_SESSION_DISABLED: i64 = 0;
+    pub(crate) const PHP_SESSION_NONE: i64 = 1;
+    pub(crate) const PHP_SESSION_ACTIVE: i64 = 2;
 }
 
 /// A save handler, `ps_module`: the two `ps_modules` registers.
@@ -180,28 +198,44 @@ struct State {
 /// }
 /// ```
 pub fn extension() -> Extension {
-    let status = |name: &[u8], value: Status| ConstDecl {
-        name: Name(name.into()),
-        value: ConstExpr::long(value as i64),
-        attributes: Vec::new(),
-    };
-    let mut builder = ExtensionBuilder::default()
-        .constants(vec![
-            status(b"PHP_SESSION_DISABLED", Status::Disabled),
-            status(b"PHP_SESSION_NONE", Status::None),
-            status(b"PHP_SESSION_ACTIVE", Status::Active),
+    let builder = ExtensionBuilder::default()
+        .constants(constants::declared())
+        .functions(vec![
+            session_name::declared(),
+            session_module_name::declared(),
+            session_save_path::declared(),
+            session_id::declared(),
+            session_create_id::declared(),
+            session_regenerate_id::declared(),
+            session_decode::declared(),
+            session_encode::declared(),
+            session_destroy::declared(),
+            session_unset::declared(),
+            session_gc::declared(),
+            session_get_cookie_params::declared(),
+            session_write_close::declared(),
+            session_abort::declared(),
+            session_reset::declared(),
+            session_status::declared(),
+            session_register_shutdown::declared(),
+            session_commit::declared(),
+            session_set_save_handler::declared(),
+            session_cache_limiter::declared(),
+            session_cache_expire::declared(),
+            session_set_cookie_params::declared(),
+            session_start::declared(),
         ])
-        .functions(natives::table())
         .ini(ini::declared())
         .dependencies(vec![Dependency {
             name: String::from("spl"),
             kind: DependencyKind::Optional,
             rel: None,
             version: None,
-        }]);
-    for (class, methods) in user::classes() {
-        builder = builder.classes(vec![(class, methods)]);
-    }
+        }])
+        .class::<SessionHandlerInterface>()
+        .class::<SessionIdInterface>()
+        .class::<SessionUpdateTimestampHandlerInterface>()
+        .class::<SessionHandler>();
     ini::register(builder)
         .request_state::<State>()
         .rinit(session::rinit)
@@ -293,9 +327,6 @@ fn session_info(req: &mut Request) {
 
 // ------------------------------------------------------------ helpers
 
-/// A native's entry, the shape `ExtensionBuilder::functions` takes.
-type Entry = fn(&mut Request) -> Result<Value, Thrown>;
-
 /// The bytes up to the first NUL, as C reads a `char *`.
 fn c_str(bytes: &[u8]) -> &[u8] {
     bytes.split(|&b| b == 0).next().unwrap_or(&[])
@@ -304,151 +335,6 @@ fn c_str(bytes: &[u8]) -> &[u8] {
 /// The bytes as C's `%s` prints them.
 fn shown(bytes: &[u8]) -> String {
     String::from_utf8_lossy(c_str(bytes)).into_owned()
-}
-
-/// One function or method as `session.stub.php` declares it.
-fn declared(name: &[u8], parameters: Vec<Parameter>, returns: Type) -> FunctionDecl {
-    FunctionDecl {
-        name: Name(name.into()),
-        parameters,
-        return_type: Some(returns),
-        returns_by_ref: false,
-        is_generator: false,
-        attributes: Vec::new(),
-        doc_comment: None,
-        file: Name(Box::new([])),
-        line: 0,
-        end_line: 0,
-        frameless: Vec::new(),
-    }
-}
-
-fn parameter(name: &[u8], ty: Option<Type>, default: ParameterDefault) -> Parameter {
-    Parameter {
-        name: Name(name.into()),
-        ty,
-        by_ref: false,
-        prefer_ref: false,
-        promoted: false,
-        variadic: false,
-        default,
-        attributes: Vec::new(),
-    }
-}
-
-/// A public method of an interface or a class, its return tentative
-/// as the stub's `@tentative-return-type` marks every one.
-fn method(function: FunctionDecl, is_abstract: bool) -> MethodDecl {
-    MethodDecl {
-        function,
-        visibility: Visibility::Public,
-        is_instance: true,
-        is_abstract,
-        is_final: false,
-        tentative_return: true,
-    }
-}
-
-fn class(
-    name: &[u8],
-    kind: ClassKind,
-    interfaces: &[&[u8]],
-    methods: Vec<MethodDecl>,
-) -> ClassDecl {
-    ClassDecl {
-        name: Name(name.into()),
-        kind,
-        flags: ClassFlags::default(),
-        parent: None,
-        interfaces: interfaces.iter().map(|i| Name((*i).into())).collect(),
-        traits: Vec::new(),
-        adaptations: Vec::new(),
-        backing: EnumBacking::Pure,
-        constants: Vec::new(),
-        properties: Vec::new(),
-        methods,
-        attributes: Vec::new(),
-        doc_comment: None,
-        file: Name(Box::new([])),
-        line: 0,
-        end_line: 0,
-    }
-}
-
-/// `ZEND_PARSE_PARAMETERS_START(min, max)`'s count check.
-fn arguments_between(req: &mut Request, min: usize, max: usize) -> Result<(), Thrown> {
-    let given = req.argument_count();
-    if (min..=max).contains(&given) {
-        return Ok(());
-    }
-    let (word, bound) = if min == max {
-        ("exactly", min)
-    } else if given < min {
-        ("at least", min)
-    } else {
-        ("at most", max)
-    };
-    let plural = if bound == 1 { "" } else { "s" };
-    Err(arg_count_error(
-        req,
-        &format!("{word} {bound} argument{plural}, {given} given"),
-    ))
-}
-
-/// The argument at `position` when the call gave one that is not
-/// `null`, for the `!` forms, and any one given for the rest.
-fn given(req: &Request, position: u32, nullable: bool) -> Option<Value> {
-    req.argument(position).filter(|value| {
-        let value = value.deref();
-        !(matches!(value.as_ref(), ValueRef::Undef)
-            || (nullable && matches!(value.as_ref(), ValueRef::Null)))
-    })
-}
-
-/// A parameter read as `coerce_param` reads its declared type.
-fn coerced(req: &mut Request, position: u32, ty: &Type) -> Result<Value, Thrown> {
-    let value = req.argument(position).unwrap_or_default();
-    Ok(coerce_param(req, &value, ty, position)?.deref())
-}
-
-/// `Z_PARAM_STR` (or `P`, where php refuses a NUL byte, with `path`),
-/// optional with `nullable` for `S!` and `P!`.
-fn string_argument(
-    req: &mut Request,
-    position: u32,
-    nullable: bool,
-    path: bool,
-) -> Result<Option<Vec<u8>>, Thrown> {
-    if given(req, position, nullable).is_none() {
-        return Ok(None);
-    }
-    let ty = if nullable {
-        Type::Nullable(Box::new(Type::String))
-    } else {
-        Type::String
-    };
-    let bytes = coerced(req, position, &ty)?
-        .as_str_bytes()
-        .unwrap_or_default()
-        .to_vec();
-    if path && bytes.contains(&0) {
-        return Err(php_ext::raising::arg_value_error(
-            req,
-            position,
-            "not contain any null bytes",
-        ));
-    }
-    Ok(Some(bytes))
-}
-
-/// `Z_PARAM_BOOL`, `absent` where the call gave none.
-fn bool_argument(req: &mut Request, position: u32, absent: bool) -> Result<bool, Thrown> {
-    if given(req, position, false).is_none() {
-        return Ok(absent);
-    }
-    Ok(coerced(req, position, &Type::Bool)?
-        .as_bool()
-        .unwrap_or(false))
 }
 
 /// A new string of the request's as a value.
@@ -596,10 +482,12 @@ fn pending(req: &mut Request) -> bool {
 
 /// A native's return: `value`, or the throwable a handler left pending,
 /// `value` given up.
-fn answer(req: &mut Request, value: Value) -> Result<Value, Thrown> {
+fn answer<T: IntoReturn>(req: &mut Request, value: T) -> Result<T, Thrown> {
     match req.state::<State>().thrown.take() {
         Some(thrown) => {
-            req.release(value);
+            if let Ok(value) = value.into_return(req) {
+                req.release(value);
+            }
             Err(thrown)
         }
         None => Ok(value),

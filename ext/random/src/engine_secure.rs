@@ -1,13 +1,38 @@
 //! `engine_secure.c`: the host's CSPRNG as an engine, with no state
 //! (`state_size` zero) and no serialisation, its range `php_random_int`.
 
+use php_ext::attr::php_class;
+use php_ext::values::PhpString;
+
+use crate::engine_mt19937::Mt19937;
 use crate::{Algo, Failure, Generated, csprng};
+
+/// `final class Random\Engine\Secure implements \Random\CryptoSafeEngine`,
+/// `@strict-properties` and `@not-serializable`, uncloneable: its one
+/// method is `Mt19937`'s `generate` (`@implementation-alias`), over
+/// [`StateSecure`].
+#[php_class(
+    final,
+    not_serializable,
+    namespace(Random::Engine),
+    implements(crate::CryptoSafeEngine),
+    dynamic_properties = forbidden,
+    payload = StateSecure,
+    handlers = crate::UNCLONEABLE
+)]
+pub(crate) struct Secure;
+
+#[php_class]
+impl Secure {
+    #[php(implementation = Mt19937::generate)]
+    fn generate(this: This<Self>) -> PhpString;
+}
 
 /// The state of `Random\Engine\Secure`: none.
 #[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct Secure;
+pub(crate) struct StateSecure;
 
-impl Algo for Secure {
+impl Algo for StateSecure {
     /// Eight CSPRNG bytes, a `zend_ulong` in memory order.
     ///
     /// ```php

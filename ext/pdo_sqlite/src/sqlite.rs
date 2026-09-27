@@ -13,6 +13,7 @@ use php_ext_pdo::connector::{
     long_attribute, option_long,
 };
 
+use crate::Sqlite;
 use crate::callbacks::Handler;
 use crate::ffi::{self, Db, Registration};
 
@@ -22,18 +23,19 @@ const ATTR_CURSOR: i64 = 10;
 /// `PDO_ATTR_CLIENT_VERSION` and `PDO_ATTR_SERVER_VERSION`.
 const ATTR_SERVER_VERSION: i64 = 4;
 const ATTR_CLIENT_VERSION: i64 = 5;
-/// The connector's own attributes, from `PDO_ATTR_DRIVER_SPECIFIC`.
-pub(crate) const ATTR_OPEN_FLAGS: i64 = 1000;
-pub(crate) const ATTR_READONLY_STATEMENT: i64 = 1001;
-pub(crate) const ATTR_EXTENDED_RESULT_CODES: i64 = 1002;
-pub(crate) const ATTR_BUSY_STATEMENT: i64 = 1003;
-pub(crate) const ATTR_EXPLAIN_STATEMENT: i64 = 1004;
-pub(crate) const ATTR_TRANSACTION_MODE: i64 = 1005;
+/// The connector's own attributes, from `PDO_ATTR_DRIVER_SPECIFIC`,
+/// `Pdo\Sqlite`'s constants.
+const ATTR_OPEN_FLAGS: i64 = Sqlite::ATTR_OPEN_FLAGS;
+const ATTR_READONLY_STATEMENT: i64 = Sqlite::ATTR_READONLY_STATEMENT;
+const ATTR_EXTENDED_RESULT_CODES: i64 = Sqlite::ATTR_EXTENDED_RESULT_CODES;
+const ATTR_BUSY_STATEMENT: i64 = Sqlite::ATTR_BUSY_STATEMENT;
+const ATTR_EXPLAIN_STATEMENT: i64 = Sqlite::ATTR_EXPLAIN_STATEMENT;
+const ATTR_TRANSACTION_MODE: i64 = Sqlite::ATTR_TRANSACTION_MODE;
 
 /// `pdo_sqlite_driver`.
-pub(crate) struct Sqlite;
+pub(crate) struct Driver;
 
-pub(crate) static SQLITE: Sqlite = Sqlite;
+pub(crate) static SQLITE: Driver = Driver;
 
 /// The names of the three methods `get_driver_methods` lays on `PDO`.
 const METHODS: [&[u8]; 3] = [
@@ -81,7 +83,7 @@ fn failed(db: &Db, thrown: Option<Thrown>) -> Failure {
     }
 }
 
-impl Connector for Sqlite {
+impl Connector for Driver {
     fn name(&self) -> &'static str {
         "sqlite"
     }

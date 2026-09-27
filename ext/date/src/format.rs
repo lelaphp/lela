@@ -6,14 +6,14 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use php_ext::abi::OrFalse;
+use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, Value};
+use php_ext::values::{Key, PhpArray, PhpString, Value};
 
-use crate::args::{
-    count_between, long, nullable_long, optional_bool, set_str, set_string, string, string_value,
-};
 use crate::ffi::{self, Offset, Time, ZONETYPE_ABBR, ZONETYPE_ID, ZONETYPE_OFFSET};
+use crate::obj::{set_str, set_string};
 use crate::zone::default_zone;
 
 pub(crate) const MON_FULL: [&str; 12] = [
@@ -334,12 +334,15 @@ pub(super) fn format_timestamp(
 }
 
 /// `php_date(INTERNAL_FUNCTION_PARAM_PASSTHRU, localtime)`.
-fn php_date(req: &mut Request, localtime: bool) -> Result<Value, Thrown> {
-    count_between(req, 1, 2)?;
-    let format = string(req, 1)?.as_bytes().to_vec();
-    let ts = nullable_long(req, 2)?.unwrap_or_else(now);
-    let text = format_timestamp(req, &format, ts, localtime)?;
-    string_value(req, &text)
+fn php_date(
+    req: &mut Request,
+    format: PhpString,
+    timestamp: Option<i64>,
+    localtime: bool,
+) -> Result<PhpString, Thrown> {
+    let ts = timestamp.unwrap_or_else(now);
+    let text = format_timestamp(req, format.as_bytes(), ts, localtime)?;
+    PhpString::new(req, &text)
 }
 
 /// `date(string $format, ?int $timestamp = null): string`, in the
@@ -363,8 +366,13 @@ fn php_date(req: &mut Request, localtime: bool) -> Result<Value, Thrown> {
 /// string(2) "00"
 /// string(6) "706d00"
 /// ```
-pub(crate) fn date(req: &mut Request) -> Result<Value, Thrown> {
-    php_date(req, true)
+#[php_function]
+fn date(
+    req: &mut Request,
+    format: PhpString,
+    #[php(default = null)] timestamp: Option<i64>,
+) -> Result<PhpString, Thrown> {
+    php_date(req, format, timestamp, true)
 }
 
 /// `gmdate(string $format, ?int $timestamp = null): string`, in UTC.
@@ -380,8 +388,13 @@ pub(crate) fn date(req: &mut Request) -> Result<Value, Thrown> {
 /// Wed, 01 Jan 1969 00:00:00 +0000
 /// 0000-01-01 10000 +10000 +10000
 /// ```
-pub(crate) fn gmdate(req: &mut Request) -> Result<Value, Thrown> {
-    php_date(req, false)
+#[php_function]
+fn gmdate(
+    req: &mut Request,
+    format: PhpString,
+    #[php(default = null)] timestamp: Option<i64>,
+) -> Result<PhpString, Thrown> {
+    php_date(req, format, timestamp, false)
 }
 
 /// `php_idate(format, ts, localtime)`: one field of the local time as a
@@ -439,33 +452,36 @@ fn php_idate(req: &mut Request, format: u8, ts: i64) -> Result<i64, Thrown> {
 /// bool(false)
 /// bool(false)
 /// ```
-pub(crate) fn idate(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 1, 2)?;
-    let format = string(req, 1)?.as_bytes().to_vec();
-    let ts = nullable_long(req, 2)?;
+#[php_function]
+fn idate(
+    req: &mut Request,
+    format: PhpString,
+    #[php(default = null)] timestamp: Option<i64>,
+) -> Result<OrFalse<i64>, Thrown> {
+    let format = format.as_bytes();
+    let ts = timestamp;
     if format.len() != 1 {
         docref(req, Level::Warning, "idate format is one char");
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     }
     let ts = ts.unwrap_or_else(now);
     let n = php_idate(req, format[0], ts)?;
     if n == -1 {
         docref(req, Level::Warning, "Unrecognized date format token");
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     }
-    Ok(Value::int(n))
+    Ok(OrFalse::Value(n))
 }
 
 /// `php_mktime(INTERNAL_FUNCTION_PARAM_PASSTHRU, gmt)`: the current time
 /// with each given field written over it, a two-digit year widened as
 /// php widens it.
-fn php_mktime(req: &mut Request, gmt: bool) -> Result<Value, Thrown> {
-    count_between(req, 1, 6)?;
-    let hour = long(req, 1)?;
-    let mut fields = [None; 5];
-    for (at, field) in (2..).zip(fields.iter_mut()) {
-        *field = nullable_long(req, at)?;
-    }
+fn php_mktime(
+    req: &mut Request,
+    hour: i64,
+    fields: [Option<i64>; 5],
+    gmt: bool,
+) -> Result<OrFalse<i64>, Thrown> {
     let mut now_t = Time::new();
     let zone = if gmt {
         now_t.unixtime2gmt(now());
@@ -501,9 +517,9 @@ fn php_mktime(req: &mut Request, gmt: bool) -> Result<Value, Thrown> {
     now_t.update_ts(zone.as_ref());
     let Some(ts) = now_t.date_to_int() else {
         docref(req, Level::Warning, "Epoch doesn't fit in a PHP integer");
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     };
-    Ok(Value::int(ts))
+    Ok(OrFalse::Value(ts))
 }
 
 /// `mktime(int $hour, ?int $minute = null, ?int $second = null, ?int
@@ -524,8 +540,17 @@ fn php_mktime(req: &mut Request, gmt: bool) -> Result<Value, Thrown> {
 /// int(1679794200)
 /// int(-62198793141)
 /// ```
-pub(crate) fn mktime(req: &mut Request) -> Result<Value, Thrown> {
-    php_mktime(req, false)
+#[php_function]
+fn mktime(
+    req: &mut Request,
+    hour: i64,
+    #[php(default = null)] minute: Option<i64>,
+    #[php(default = null)] second: Option<i64>,
+    #[php(default = null)] month: Option<i64>,
+    #[php(default = null)] day: Option<i64>,
+    #[php(default = null)] year: Option<i64>,
+) -> Result<OrFalse<i64>, Thrown> {
+    php_mktime(req, hour, [minute, second, month, day, year], false)
 }
 
 /// `gmmktime(...)`: `mktime` in UTC.
@@ -540,8 +565,17 @@ pub(crate) fn mktime(req: &mut Request) -> Result<Value, Thrown> {
 /// int(946684800)
 /// int(-3600)
 /// ```
-pub(crate) fn gmmktime(req: &mut Request) -> Result<Value, Thrown> {
-    php_mktime(req, true)
+#[php_function]
+fn gmmktime(
+    req: &mut Request,
+    hour: i64,
+    #[php(default = null)] minute: Option<i64>,
+    #[php(default = null)] second: Option<i64>,
+    #[php(default = null)] month: Option<i64>,
+    #[php(default = null)] day: Option<i64>,
+    #[php(default = null)] year: Option<i64>,
+) -> Result<OrFalse<i64>, Thrown> {
+    php_mktime(req, hour, [minute, second, month, day, year], true)
 }
 
 /// `checkdate(int $month, int $day, int $year): bool`.
@@ -558,14 +592,9 @@ pub(crate) fn gmmktime(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(false)
 /// ```
-pub(crate) fn checkdate(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 3, 3)?;
-    let m = long(req, 1)?;
-    let d = long(req, 2)?;
-    let y = long(req, 3)?;
-    Ok(Value::bool(
-        (1..=32767).contains(&y) && ffi::valid_date(y, m, d),
-    ))
+#[php_function]
+fn checkdate(month: i64, day: i64, year: i64) -> bool {
+    (1..=32767).contains(&year) && ffi::valid_date(year, month, day)
 }
 
 /// `time(): int`.
@@ -578,9 +607,9 @@ pub(crate) fn checkdate(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(true)
 /// ```
-pub(crate) fn time(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 0, 0)?;
-    Ok(Value::int(now()))
+#[php_function]
+fn time() -> i64 {
+    now()
 }
 
 /// The local time of `ts` in the default zone, what `localtime` and
@@ -626,10 +655,13 @@ fn local_time(req: &mut Request, ts: i64) -> Result<Time, Thrown> {
 ///     [tm_isdst] => 0
 /// )
 /// ```
-pub(crate) fn localtime(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 0, 2)?;
-    let ts = nullable_long(req, 1)?.unwrap_or_else(now);
-    let associative = optional_bool(req, 2, false)?;
+#[php_function]
+fn localtime(
+    req: &mut Request,
+    #[php(default = null)] timestamp: Option<i64>,
+    #[php(default = false)] associative: bool,
+) -> Result<PhpArray, Thrown> {
+    let ts = timestamp.unwrap_or_else(now);
     let t = local_time(req, ts)?;
     let rows: [(&[u8], i64); 9] = [
         (b"tm_sec", t.s),
@@ -650,7 +682,7 @@ pub(crate) fn localtime(req: &mut Request) -> Result<Value, Thrown> {
             array.append(req, Value::int(value))?;
         }
     }
-    Ok(Value::array(array))
+    Ok(array)
 }
 
 /// `getdate(?int $timestamp = null): array`.
@@ -675,9 +707,12 @@ pub(crate) fn localtime(req: &mut Request) -> Result<Value, Thrown> {
 ///     [0] => 1700000000
 /// )
 /// ```
-pub(crate) fn getdate(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 0, 1)?;
-    let ts = nullable_long(req, 1)?.unwrap_or_else(now);
+#[php_function]
+fn getdate(
+    req: &mut Request,
+    #[php(default = null)] timestamp: Option<i64>,
+) -> Result<PhpArray, Thrown> {
+    let ts = timestamp.unwrap_or_else(now);
     let t = local_time(req, ts)?;
     let mut array = PhpArray::new(req)?;
     let rows: [(&[u8], i64); 8] = [
@@ -701,18 +736,22 @@ pub(crate) fn getdate(req: &mut Request) -> Result<Value, Thrown> {
     )?;
     set_string(req, &mut array, b"month", full_month(t.m).as_bytes())?;
     array.set(req, Key::Int(0), Value::int(ts))?;
-    Ok(Value::array(array))
+    Ok(array)
 }
 
 /// `php_strftime(INTERNAL_FUNCTION_PARAM_PASSTHRU, gmt)` in the C
 /// locale: C's `strftime(3)` over the `struct tm` php fills, which is
 /// the locale-independent part #640 leaves here.
-fn php_strftime(req: &mut Request, gmt: bool) -> Result<Value, Thrown> {
-    count_between(req, 1, 2)?;
-    let format = string(req, 1)?.as_bytes().to_vec();
-    let ts = nullable_long(req, 2)?;
+fn php_strftime(
+    req: &mut Request,
+    format: PhpString,
+    timestamp: Option<i64>,
+    gmt: bool,
+) -> Result<OrFalse<PhpString>, Thrown> {
+    let format = format.as_bytes();
+    let ts = timestamp;
     if format.is_empty() {
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     }
     let ts = ts.unwrap_or_else(now);
     let mut t = Time::new();
@@ -729,11 +768,11 @@ fn php_strftime(req: &mut Request, gmt: bool) -> Result<Value, Thrown> {
         t.unixtime2local(ts);
         zone.offset_at(ts)
     };
-    let text = strftime_c(&format, &t, &offset);
+    let text = strftime_c(format, &t, &offset);
     if text.is_empty() {
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     }
-    string_value(req, &text)
+    PhpString::new(req, &text).map(OrFalse::Value)
 }
 
 /// C's `strftime` under the C locale for the conversions POSIX names.
@@ -847,8 +886,13 @@ fn strftime_c(format: &[u8], t: &Time, offset: &Offset) -> Vec<u8> {
 /// Deprecated: Function strftime() is deprecated since 8.1, use IntlDateFormatter::format() instead in %s on line 4
 /// bool(false)
 /// ```
-pub(crate) fn strftime(req: &mut Request) -> Result<Value, Thrown> {
-    php_strftime(req, false)
+#[php_function(deprecated(since = "8.1", message = "use IntlDateFormatter::format() instead"))]
+fn strftime(
+    req: &mut Request,
+    format: PhpString,
+    #[php(default = null)] timestamp: Option<i64>,
+) -> Result<OrFalse<PhpString>, Thrown> {
+    php_strftime(req, format, timestamp, false)
 }
 
 /// `gmstrftime(string $format, ?int $timestamp = null): string|false`,
@@ -862,6 +906,11 @@ pub(crate) fn strftime(req: &mut Request) -> Result<Value, Thrown> {
 /// Deprecated: Function gmstrftime() is deprecated since 8.1, use IntlDateFormatter::format() instead in %s on line 3
 /// string(54) "2023-11-14 22:13:20 GMT +0000 Tue Nov 14 22:13:20 2023"
 /// ```
-pub(crate) fn gmstrftime(req: &mut Request) -> Result<Value, Thrown> {
-    php_strftime(req, true)
+#[php_function(deprecated(since = "8.1", message = "use IntlDateFormatter::format() instead"))]
+fn gmstrftime(
+    req: &mut Request,
+    format: PhpString,
+    #[php(default = null)] timestamp: Option<i64>,
+) -> Result<OrFalse<PhpString>, Thrown> {
+    php_strftime(req, format, timestamp, true)
 }

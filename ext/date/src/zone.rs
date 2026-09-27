@@ -4,12 +4,12 @@
 
 use std::sync::Arc;
 
+use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref, throw};
 use php_ext::request::Request;
-use php_ext::values::Value;
+use php_ext::values::PhpString;
 
 use crate::State;
-use crate::args::{count_between, string, string_value};
 use crate::ffi::{Tzdb, Zone};
 
 /// `php_date_parse_tzfile(name, tzdb)`: the zone out of the request's
@@ -108,9 +108,9 @@ pub(super) fn default_zone(req: &mut Request) -> Result<Arc<Zone>, Thrown> {
 /// bool(true)
 /// string(3) "utc"
 /// ```
-pub(crate) fn date_default_timezone_set(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 1, 1)?;
-    let zone = string(req, 1)?.as_bytes().to_vec();
+#[php_function]
+fn date_default_timezone_set(req: &mut Request, timezoneId: PhpString) -> bool {
+    let zone = timezoneId.as_bytes().to_vec();
     if !Tzdb::builtin().is_valid(&zone) {
         let shown = zone.split(|b| *b == 0).next().unwrap_or_default();
         let message = format!(
@@ -118,10 +118,10 @@ pub(crate) fn date_default_timezone_set(req: &mut Request) -> Result<Value, Thro
             String::from_utf8_lossy(shown)
         );
         docref(req, Level::Notice, &message);
-        return Ok(Value::bool(false));
+        return false;
     }
     req.state::<State>().timezone = Some(zone);
-    Ok(Value::bool(true))
+    true
 }
 
 /// `date_default_timezone_get(): string`: the name of the zone the
@@ -139,8 +139,8 @@ pub(crate) fn date_default_timezone_set(req: &mut Request) -> Result<Value, Thro
 /// string(16) "America/New_York"
 /// string(10) "Asia/Tokyo"
 /// ```
-pub(crate) fn date_default_timezone_get(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 0, 0)?;
+#[php_function]
+fn date_default_timezone_get(req: &mut Request) -> Result<PhpString, Thrown> {
     let zone = default_zone(req)?;
-    string_value(req, zone.name())
+    PhpString::new(req, zone.name())
 }

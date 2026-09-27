@@ -2,10 +2,10 @@
 //! one row opened as a stream, read, written in place within its size,
 //! and sought, as `pdo_sqlite.c` serves it.
 
-use php_ext::coerce::argument;
-use php_ext::raising::{Level, Thrown, arg_null_deprecated, docref, warning};
+use php_ext::abi::Raw;
+use php_ext::raising::{Level, Thrown, arg_count_error, arg_null_deprecated, docref, warning};
 use php_ext::request::{Request, StreamOps, Whence};
-use php_ext::values::{Value, ValueRef};
+use php_ext::values::{PhpObject, PhpString, Value, ValueRef};
 
 use crate::ffi::{self, Blob};
 use crate::sqlite::Handle;
@@ -118,49 +118,40 @@ impl StreamOps for BlobStream {
     }
 }
 
-/// `Pdo\Sqlite::openBlob(string $table, string $column, int $rowid, ?string $dbname = "main", int $flags = Pdo\Sqlite::OPEN_READONLY)`:
-/// the blob as a stream, read only unless the bits ask to write, php's
-/// warning and `false` where the library cannot open it.
-///
-/// ```php
-/// $db = new Pdo\Sqlite('sqlite::memory:');
-/// $db->exec("CREATE TABLE t (b BLOB); INSERT INTO t VALUES ('hello')");
-/// $s = $db->openBlob('t', 'b', 1);
-/// var_dump(stream_get_contents($s), fwrite($s, 'x'));
-/// $w = $db->openBlob('t', 'b', 1, 'main', Pdo\Sqlite::OPEN_READWRITE);
-/// var_dump(fwrite($w, 'J'), fwrite($w, 'too long'));
-/// fclose($w);
-/// var_dump($db->query('SELECT b FROM t')->fetchColumn(), $db->openBlob('t', 'b', 9));
-/// ```
-/// ```expect
-/// Warning: fwrite(): Can't write to blob stream: is open as read only in %s on line 5
-/// string(5) "hello"
-/// bool(false)
-///
-/// Warning: fwrite(): It is not possible to increase the size of a BLOB in %s on line 7
-/// int(1)
-/// bool(false)
-///
-/// Warning: Unable to open blob: no such rowid: 9 in %s on line 9
-/// string(5) "Jello"
-/// bool(false)
-/// ```
-pub(super) fn open_blob(req: &mut Request) -> Result<Value, Thrown> {
-    let this = crate::this(req)?;
+/// `Pdo\Sqlite::openBlob()`'s body: the blob as a stream, read only
+/// unless the bits ask to write, php's warning and `false` where the
+/// library cannot open it. `PDO_CONSTRUCT_CHECK` first, then
+/// `zend_parse_parameters(.., "ppl|pl", ..)`.
+pub(super) fn open_blob(
+    req: &mut Request,
+    this: PhpObject,
+    [table, column]: [Raw<PhpString>; 2],
+    rowid: Raw<i64>,
+    dbname: Raw<Option<PhpString>>,
+    flags: Raw<i64>,
+) -> Result<Value, Thrown> {
     php_ext_pdo::connector::with_connection(req, this, |req, conn| {
-        crate::arity(req, 3, 5)?;
-        let table = crate::bytes_arg(req, 1)?;
-        let column = crate::bytes_arg(req, 2)?;
-        let row = crate::long_arg(req, 3, 0)?;
-        let dbname = match argument(req, 4)? {
-            Some(value) if matches!(value.as_ref(), ValueRef::Null) => {
-                arg_null_deprecated(req, 4, "string");
-                Vec::new()
-            }
-            Some(value) => value.as_str_bytes().map(<[u8]>::to_vec).unwrap_or_default(),
-            None => b"main".to_vec(),
+        let given = req.argument_count();
+        if !(3..=5).contains(&given) {
+            let bound = if given < 3 { "at least 3" } else { "at most 5" };
+            return Err(arg_count_error(
+                req,
+                &format!("{bound} arguments, {given} given"),
+            ));
+        }
+        let table = table.hold(req)?.as_bytes().to_vec();
+        let column = column.hold(req)?.as_bytes().to_vec();
+        let row = rowid.hold(req)?;
+        let dbname = if matches!(dbname.value().deref().as_ref(), ValueRef::Null) {
+            arg_null_deprecated(req, 4, "string");
+            Vec::new()
+        } else {
+            dbname
+                .hold(req)?
+                .map(|name| name.as_bytes().to_vec())
+                .unwrap_or_default()
         };
-        let flags = crate::long_arg(req, 5, i64::from(ffi::SQLITE_OPEN_READONLY))?;
+        let flags = flags.hold(req)?;
         let writable = flags & i64::from(ffi::SQLITE_OPEN_READWRITE) != 0;
         let Some(handle) = (conn as &mut dyn std::any::Any).downcast_mut::<Handle>() else {
             return Ok(Value::bool(false));

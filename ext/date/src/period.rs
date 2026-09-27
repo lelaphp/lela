@@ -2,22 +2,21 @@
 //! recurrences, read from objects or from an ISO 8601 string, with its
 //! getters and its serialised form.
 
+use php_ext::abi::{Instance, Passed, Raw, Static, This, Untyped};
+use php_ext::attr::php_class;
 use php_ext::call::{internal_iterator, new_object};
 use php_ext::raising::{Thrown, deprecated, throw};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
-use crate::args::{array, count_between, long, optional_long, string};
+use crate::classes::{DateTimeInterface, Iterator, IteratorAggregate};
 use crate::datetime::restore_properties;
 use crate::ffi::{self, RelTime, Time};
+use crate::interval::DateInterval;
 use crate::obj::{
-    DateObj, IntervalObj, PERIOD_FIELDS, PeriodObj, class_id, new_date, new_interval, parent_of,
-    period_fields, rows_array, std_rows, this, uninitialized,
+    DateObj, IntervalObj, PERIOD, PERIOD_FIELDS, PeriodObj, class_id, new_date, new_interval,
+    parent_of, period_fields, rows_array, std_rows, uninitialized,
 };
-
-/// `PHP_DATE_PERIOD_EXCLUDE_START_DATE` and `PHP_DATE_PERIOD_INCLUDE_END_DATE`.
-pub(super) const EXCLUDE_START_DATE: i64 = 0x0001;
-pub(super) const INCLUDE_END_DATE: i64 = 0x0002;
 
 /// `INT_MAX - 8`, the most recurrences a period may have.
 const MAX_RECURRENCES: i64 = 2_147_483_647 - 8;
@@ -91,8 +90,8 @@ fn finish(
             ),
         ));
     }
-    period.include_start_date = options & EXCLUDE_START_DATE == 0;
-    period.include_end_date = options & INCLUDE_END_DATE != 0;
+    period.include_start_date = options & DatePeriod::EXCLUDE_START_DATE == 0;
+    period.include_end_date = options & DatePeriod::INCLUDE_END_DATE != 0;
     let total =
         recurrences + i64::from(period.include_start_date) + i64::from(period.include_end_date);
     if total > MAX_RECURRENCES {
@@ -125,62 +124,6 @@ fn copied(req: &Request, object: PhpObject) -> PeriodObj {
         .unwrap_or_default()
 }
 
-/// `DatePeriod::createFromISO8601String`, of the called class, over
-/// `string $specification` and `int $options = 0`: its dates are
-/// `DateTimeImmutable`s.
-///
-/// ```php
-/// $p = DatePeriod::createFromISO8601String('R4/2012-07-01T00:00:00Z/P7D');
-/// var_dump($p->getStartDate(), $p->getRecurrences(), $p->getEndDate(), $p->include_start_date);
-/// try { DatePeriod::createFromISO8601String('R4/P7D'); } catch (DateMalformedPeriodStringException $e) { echo $e->getMessage(), "\n"; }
-/// try { DatePeriod::createFromISO8601String('2012-07-01T00:00:00Z/P7D'); } catch (DateMalformedPeriodStringException $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// object(DateTimeImmutable)#2 (3) {
-///   ["date"]=>
-///   string(26) "2012-07-01 00:00:00.000000"
-///   ["timezone_type"]=>
-///   int(1)
-///   ["timezone"]=>
-///   string(6) "+00:00"
-/// }
-/// int(4)
-/// NULL
-/// bool(true)
-/// DatePeriod::createFromISO8601String(): ISO interval must contain a start date, "R4/P7D" given
-/// DatePeriod::createFromISO8601String(): ISO interval must contain an end date or a recurrence count, "2012-07-01T00:00:00Z/P7D" given
-/// ```
-pub(crate) fn create_from_iso8601_string(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 1, 2)?;
-    let text = string(req, 1)?.as_bytes().to_vec();
-    let options = optional_long(req, 2, 0)?;
-    let class = match req.called_scope() {
-        Some(class) => class,
-        None => class_id(req, "DatePeriod")?,
-    };
-    let object = new_object(req, class)?;
-    let built = (|| {
-        let func = "DatePeriod::createFromISO8601String";
-        let iso = from_iso(req, func, &text)?;
-        let base = class_id(req, "DateTimeImmutable")?;
-        let mut period = PeriodObj::default();
-        period.start = iso.start;
-        period.start_ce = Some(base);
-        period.end = iso.end;
-        period.interval = iso.interval;
-        finish(req, func, &mut period, options, iso.recurrences)?;
-        store(req, object, period);
-        Ok(())
-    })();
-    match built {
-        Ok(()) => Ok(object.as_value()),
-        Err(thrown) => {
-            req.release(object.as_value());
-            Err(thrown)
-        }
-    }
-}
-
 /// Whether `value` is an object of the class named.
 fn is_a(req: &mut Request, value: &Value, class: &str) -> Result<Option<PhpObject>, Thrown> {
     let Some(object) = value.deref().as_object().copied() else {
@@ -203,93 +146,6 @@ fn is_long(value: &Value) -> bool {
         || value.deref().as_str_bytes().is_some_and(|s| {
             !s.is_empty() && std::str::from_utf8(s).is_ok_and(|t| t.trim().parse::<i64>().is_ok())
         })
-}
-
-/// `DatePeriod::__construct($start, $interval = UNKNOWN, $end = UNKNOWN,
-/// $options = UNKNOWN)`: its three signatures tried in php's order, the
-/// ISO string one deprecated since 8.3.
-///
-/// ```php
-/// $s = new DateTime('2012-07-01 UTC'); $i = new DateInterval('P7D');
-/// $p = new DatePeriod($s, $i, 4, DatePeriod::EXCLUDE_START_DATE);
-/// var_dump($p->getRecurrences(), $p->recurrences, $p->include_start_date, get_class($p->getStartDate()));
-/// $q = new DatePeriod($s, $i, new DateTime('2012-08-01 UTC'), DatePeriod::INCLUDE_END_DATE);
-/// var_dump($q->getEndDate()->format('c'), $q->include_end_date, $q->getRecurrences());
-/// $r = new DatePeriod('R2/2012-07-01T00:00:00Z/P1D');
-/// var_dump(get_class($r->getStartDate()));
-/// try { new DatePeriod([], 2); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
-/// echo (new ReflectionMethod('DatePeriod', '__construct'))->getNumberOfRequiredParameters(), "\n";
-/// try { new DatePeriod($s, $i, 0); } catch (Exception $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// int(4)
-/// int(4)
-/// bool(false)
-/// string(8) "DateTime"
-/// string(25) "2012-08-01T00:00:00+00:00"
-/// bool(true)
-/// NULL
-///
-/// Deprecated: Calling DatePeriod::__construct(string $isostr, int $options = 0) is deprecated, use DatePeriod::createFromISO8601String() instead in %s on line 7
-/// string(8) "DateTime"
-/// DatePeriod::__construct() accepts (DateTimeInterface, DateInterval, int [, int]), or (DateTimeInterface, DateInterval, DateTime [, int]), or (string [, int]) as arguments
-/// 1
-/// DateMalformedPeriodStringException: DatePeriod::__construct(): Recurrence count must be greater or equal to 1 and lower than 2147483640
-/// ```
-pub(crate) fn construct(req: &mut Request) -> Result<Value, Thrown> {
-    let func = "DatePeriod::__construct";
-    let count = req.argument_count();
-    let arg = |req: &Request, at: u32| req.argument(at).unwrap_or_default();
-    let (a, b, c, d) = (arg(req, 1), arg(req, 2), arg(req, 3), arg(req, 4));
-    let start = is_a(req, &a, "DateTimeInterface")?;
-    let interval = is_a(req, &b, "DateInterval")?;
-    let end = is_a(req, &c, "DateTimeInterface")?;
-    let options_ok = count < 4 || is_long(&d);
-    let object = this(req)?;
-    let mut period = PeriodObj::default();
-    let (options, recurrences) = if let (Some(start), Some(interval), true, true, true) = (
-        start,
-        interval,
-        (3..=4).contains(&count),
-        options_ok,
-        end.is_none() && is_long(&c),
-    ) {
-        let recurrences = long(req, 3)?;
-        let options = optional_long(req, 4, 0)?;
-        from_objects(req, &mut period, start, interval, None)?;
-        (options, recurrences)
-    } else if let (Some(start), Some(interval), Some(end), true, true) =
-        (start, interval, end, (3..=4).contains(&count), options_ok)
-    {
-        let options = optional_long(req, 4, 0)?;
-        from_objects(req, &mut period, start, interval, Some(end))?;
-        (options, 0)
-    } else if (1..=2).contains(&count)
-        && (count < 2 || is_long(&b))
-        && !matches!(a.deref().as_ref(), ValueRef::Object(_) | ValueRef::Array(_))
-    {
-        let text = string(req, 1)?.as_bytes().to_vec();
-        let options = optional_long(req, 2, 0)?;
-        deprecated(
-            req,
-            "Calling DatePeriod::__construct(string $isostr, int $options = 0) is deprecated, use DatePeriod::createFromISO8601String() instead",
-        );
-        let iso = from_iso(req, func, &text)?;
-        period.start = iso.start;
-        period.end = iso.end;
-        period.interval = iso.interval;
-        period.start_ce = Some(class_id(req, "DateTime")?);
-        (options, iso.recurrences)
-    } else {
-        return Err(throw(
-            req,
-            "TypeError",
-            "DatePeriod::__construct() accepts (DateTimeInterface, DateInterval, int [, int]), or (DateTimeInterface, DateInterval, DateTime [, int]), or (string [, int]) as arguments",
-        ));
-    };
-    finish(req, func, &mut period, options, recurrences)?;
-    store(req, object, period);
-    Ok(Value::null())
 }
 
 /// The start, interval and end of the objects form: copies of each.
@@ -317,147 +173,6 @@ fn from_objects(
     period.interval = interval.native::<IntervalObj>(req).and_then(|i| i.diff);
     period.end = end_time;
     Ok(())
-}
-
-/// `DatePeriod::getStartDate(): DateTimeInterface`.
-///
-/// ```php
-/// $p = new DatePeriod(new DateTimeImmutable('2000-01-01 Europe/Oslo'), new DateInterval('P1D'), 2);
-/// var_dump($p->getStartDate());
-/// ```
-/// ```expect
-/// object(DateTimeImmutable)#3 (3) {
-///   ["date"]=>
-///   string(26) "2000-01-01 00:00:00.000000"
-///   ["timezone_type"]=>
-///   int(3)
-///   ["timezone"]=>
-///   string(11) "Europe/Oslo"
-/// }
-/// ```
-pub(crate) fn get_start_date(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 0, 0)?;
-    let object = this(req)?;
-    let state = object
-        .native::<PeriodObj>(req)
-        .and_then(|p| p.start.clone().zip(p.start_ce));
-    let Some((start, class)) = state else {
-        return Err(uninitialized(req, object.class()));
-    };
-    Ok(new_date(req, class, start)?.as_value())
-}
-
-/// `DatePeriod::getEndDate(): ?DateTimeInterface`.
-///
-/// ```php
-/// $s = new DateTime('2000-01-01 UTC'); $i = new DateInterval('P1D');
-/// var_dump((new DatePeriod($s, $i, 2))->getEndDate(), (new DatePeriod($s, $i, new DateTime('2000-01-05 UTC')))->getEndDate()->format('Y-m-d'));
-/// ```
-/// ```expect
-/// NULL
-/// string(10) "2000-01-05"
-/// ```
-pub(crate) fn get_end_date(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 0, 0)?;
-    let object = this(req)?;
-    let state = object
-        .native::<PeriodObj>(req)
-        .and_then(|p| p.end.clone().zip(p.start_ce));
-    match state {
-        Some((end, class)) => Ok(new_date(req, class, end)?.as_value()),
-        None => Ok(Value::null()),
-    }
-}
-
-/// `DatePeriod::getDateInterval(): DateInterval`.
-///
-/// ```php
-/// var_dump((new DatePeriod(new DateTime('2000-01-01 UTC'), new DateInterval('PT12H'), 2))->getDateInterval());
-/// ```
-/// ```expect
-/// object(DateInterval)#3 (10) {
-///   ["y"]=>
-///   int(0)
-///   ["m"]=>
-///   int(0)
-///   ["d"]=>
-///   int(0)
-///   ["h"]=>
-///   int(12)
-///   ["i"]=>
-///   int(0)
-///   ["s"]=>
-///   int(0)
-///   ["f"]=>
-///   float(0)
-///   ["invert"]=>
-///   int(0)
-///   ["days"]=>
-///   bool(false)
-///   ["from_string"]=>
-///   bool(false)
-/// }
-/// ```
-pub(crate) fn get_date_interval(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 0, 0)?;
-    let object = this(req)?;
-    let diff = object.native::<PeriodObj>(req).and_then(|p| p.interval);
-    match diff {
-        Some(diff) => new_interval(req, diff, 0, None),
-        None => Err(uninitialized(req, object.class())),
-    }
-}
-
-/// `DatePeriod::getRecurrences(): ?int`: the count given, `null` for a
-/// period bounded by its end.
-///
-/// ```php
-/// $s = new DateTime('2000-01-01 UTC'); $i = new DateInterval('P1D');
-/// var_dump((new DatePeriod($s, $i, 5))->getRecurrences(), (new DatePeriod($s, $i, 5, DatePeriod::EXCLUDE_START_DATE | DatePeriod::INCLUDE_END_DATE))->getRecurrences(), (new DatePeriod($s, $i, new DateTime('2000-02-01 UTC')))->getRecurrences());
-/// ```
-/// ```expect
-/// int(5)
-/// int(5)
-/// NULL
-/// ```
-pub(crate) fn get_recurrences(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 0, 0)?;
-    let object = this(req)?;
-    let n = object.native::<PeriodObj>(req).map_or(0, |p| {
-        p.recurrences - i64::from(p.include_start_date) - i64::from(p.include_end_date)
-    });
-    Ok(if n == 0 { Value::null() } else { Value::int(n) })
-}
-
-/// `DatePeriod::getIterator(): Iterator`, php's
-/// `zend_create_internal_iterator_zval` over the period: an
-/// `InternalIterator` walking it by `date_period_it`'s rules
-/// ([`iterator_element`]), which `foreach` reaches through the same
-/// method, so a subclass that overrides it is walked by its own.
-///
-/// ```php
-/// $p = DatePeriod::createFromISO8601String('R2/2012-07-01T00:00:00Z/P7D');
-/// $it = $p->getIterator();
-/// var_dump(get_class($it));
-/// for (; $it->valid(); $it->next()) echo $it->key(), ': ', $it->current()->format('Y-m-d'), "\n";
-/// $it->rewind(); echo $it->current()->format('Y-m-d'), "\n";
-/// class P extends DatePeriod { function getIterator(): Iterator { return new ArrayIterator([7]); } }
-/// foreach (new P(new DateTime('2000-01-01'), new DateInterval('P1D'), 1) as $k => $v) echo "$k=$v\n";
-/// try { foreach ($p as &$d) {} } catch (Error $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// string(16) "InternalIterator"
-/// 0: 2012-07-01
-/// 1: 2012-07-08
-/// 2: 2012-07-15
-/// 2012-07-01
-/// 0=7
-/// An iterator cannot be used with foreach by reference
-/// ```
-pub(crate) fn get_iterator(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 0, 0)?;
-    let object = this(req)?;
-    Ok(internal_iterator(req, &object)?.as_value())
 }
 
 /// `date_period_advance`: the interval added to the time as its relative
@@ -584,71 +299,6 @@ pub(super) fn iterator_element(
     Ok(Some((key, date.as_value())))
 }
 
-/// `DatePeriod::__serialize(): array`.
-///
-/// ```php
-/// var_dump((new DatePeriod(new DateTime('2000-01-01 UTC'), new DateInterval('P1D'), 1))->__serialize());
-/// ```
-/// ```expect
-/// array(7) {
-///   ["start"]=>
-///   object(DateTime)#3 (3) {
-///     ["date"]=>
-///     string(26) "2000-01-01 00:00:00.000000"
-///     ["timezone_type"]=>
-///     int(3)
-///     ["timezone"]=>
-///     string(3) "UTC"
-///   }
-///   ["current"]=>
-///   NULL
-///   ["end"]=>
-///   NULL
-///   ["interval"]=>
-///   object(DateInterval)#2 (10) {
-///     ["y"]=>
-///     int(0)
-///     ["m"]=>
-///     int(0)
-///     ["d"]=>
-///     int(1)
-///     ["h"]=>
-///     int(0)
-///     ["i"]=>
-///     int(0)
-///     ["s"]=>
-///     int(0)
-///     ["f"]=>
-///     float(0)
-///     ["invert"]=>
-///     int(0)
-///     ["days"]=>
-///     bool(false)
-///     ["from_string"]=>
-///     bool(false)
-///   }
-///   ["recurrences"]=>
-///   int(2)
-///   ["include_start_date"]=>
-///   bool(true)
-///   ["include_end_date"]=>
-///   bool(false)
-/// }
-/// ```
-pub(crate) fn serialize(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 0, 0)?;
-    let object = this(req)?;
-    if object
-        .native::<PeriodObj>(req)
-        .is_none_or(|p| p.start.is_none())
-    {
-        return Err(uninitialized(req, object.class()));
-    }
-    let fields = period_fields(req, object)?;
-    let own = std_rows(req, object)?;
-    Ok(Value::array(rows_array(req, &own, fields, true)?))
-}
-
 /// `php_date_period_initialize_from_hash`: every field required, of the
 /// type php holds it to, written into `period` in php's order as each is
 /// read, a `null` date leaving the field as it was, and nothing rolled
@@ -728,101 +378,503 @@ fn from_hash(req: &mut Request, hash: PhpArray, period: &mut PeriodObj) -> Resul
     Ok(true)
 }
 
-/// `DatePeriod::__set_state(array $array): DatePeriod`.
-///
-/// ```php
-/// $p = DatePeriod::__set_state(['start' => new DateTime('2000-01-01 UTC'), 'current' => null, 'end' => null, 'interval' => new DateInterval('P1D'), 'recurrences' => 3, 'include_start_date' => true, 'include_end_date' => false]);
-/// var_dump($p->getRecurrences(), $p->getStartDate()->format('c'));
-/// try { DatePeriod::__set_state([]); } catch (Error $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// int(2)
-/// string(25) "2000-01-01T00:00:00+00:00"
-/// Invalid serialization data for DatePeriod object
-/// ```
-pub(crate) fn set_state(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 1, 1)?;
-    let hash = array(req, 1)?;
-    let class = class_id(req, "DatePeriod")?;
-    let object = new_object(req, class)?;
-    let mut period = PeriodObj::default();
-    match from_hash(req, hash, &mut period) {
-        Ok(true) => {
+/// php's refusal of a hash that is no period.
+fn invalid(req: &mut Request) -> Thrown {
+    throw(
+        req,
+        "Error",
+        "Invalid serialization data for DatePeriod object",
+    )
+}
+
+/// `class DatePeriod implements IteratorAggregate`, over [`PeriodObj`]:
+/// its seven properties are `@virtual`, answered by its table in place
+/// of a slot.
+#[php_class(implements(IteratorAggregate), payload = PeriodObj, handlers = PERIOD)]
+pub(crate) struct DatePeriod;
+
+#[php_class]
+impl DatePeriod {
+    const EXCLUDE_START_DATE: i64 = 0x0001;
+    const INCLUDE_END_DATE: i64 = 0x0002;
+
+    #[php(property, virtual)]
+    const start: Option<Instance<DateTimeInterface>>;
+    #[php(property, virtual)]
+    const current: Option<Instance<DateTimeInterface>>;
+    #[php(property, virtual)]
+    const end: Option<Instance<DateTimeInterface>>;
+    #[php(property, virtual)]
+    const interval: Option<Instance<DateInterval>>;
+    #[php(property, virtual)]
+    const recurrences: i64;
+    #[php(property, virtual)]
+    const include_start_date: bool;
+    #[php(property, virtual)]
+    const include_end_date: bool;
+
+    /// `DatePeriod::createFromISO8601String`, of the called class, over
+    /// `string $specification` and `int $options = 0`: its dates are
+    /// `DateTimeImmutable`s.
+    ///
+    /// ```php
+    /// $p = DatePeriod::createFromISO8601String('R4/2012-07-01T00:00:00Z/P7D');
+    /// var_dump($p->getStartDate(), $p->getRecurrences(), $p->getEndDate(), $p->include_start_date);
+    /// try { DatePeriod::createFromISO8601String('R4/P7D'); } catch (DateMalformedPeriodStringException $e) { echo $e->getMessage(), "\n"; }
+    /// try { DatePeriod::createFromISO8601String('2012-07-01T00:00:00Z/P7D'); } catch (DateMalformedPeriodStringException $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// object(DateTimeImmutable)#2 (3) {
+    ///   ["date"]=>
+    ///   string(26) "2012-07-01 00:00:00.000000"
+    ///   ["timezone_type"]=>
+    ///   int(1)
+    ///   ["timezone"]=>
+    ///   string(6) "+00:00"
+    /// }
+    /// int(4)
+    /// NULL
+    /// bool(true)
+    /// DatePeriod::createFromISO8601String(): ISO interval must contain a start date, "R4/P7D" given
+    /// DatePeriod::createFromISO8601String(): ISO interval must contain an end date or a recurrence count, "2012-07-01T00:00:00Z/P7D" given
+    /// ```
+    fn createFromISO8601String(
+        req: &mut Request,
+        specification: PhpString,
+        #[php(default = 0)] options: i64,
+    ) -> Result<Static, Thrown> {
+        let class = match req.called_scope() {
+            Some(class) => class,
+            None => class_id(req, "DatePeriod")?,
+        };
+        let object = new_object(req, class)?;
+        let built = (|| {
+            let func = "DatePeriod::createFromISO8601String";
+            let iso = from_iso(req, func, specification.as_bytes())?;
+            let base = class_id(req, "DateTimeImmutable")?;
+            let mut period = PeriodObj::default();
+            period.start = iso.start;
+            period.start_ce = Some(base);
+            period.end = iso.end;
+            period.interval = iso.interval;
+            finish(req, func, &mut period, options, iso.recurrences)?;
             store(req, object, period);
-            Ok(object.as_value())
+            Ok(())
+        })();
+        match built {
+            Ok(()) => Ok(Static(object)),
+            Err(thrown) => {
+                req.release(object.as_value());
+                Err(thrown)
+            }
         }
-        Ok(false) => {
-            req.release(object.as_value());
-            Err(throw(
+    }
+
+    /// `DatePeriod::__construct($start, $interval = UNKNOWN, $end = UNKNOWN,
+    /// $options = UNKNOWN)`: its three signatures tried in php's order, the
+    /// ISO string one deprecated since 8.3.
+    ///
+    /// ```php
+    /// $s = new DateTime('2012-07-01 UTC'); $i = new DateInterval('P7D');
+    /// $p = new DatePeriod($s, $i, 4, DatePeriod::EXCLUDE_START_DATE);
+    /// var_dump($p->getRecurrences(), $p->recurrences, $p->include_start_date, get_class($p->getStartDate()));
+    /// $q = new DatePeriod($s, $i, new DateTime('2012-08-01 UTC'), DatePeriod::INCLUDE_END_DATE);
+    /// var_dump($q->getEndDate()->format('c'), $q->include_end_date, $q->getRecurrences());
+    /// $r = new DatePeriod('R2/2012-07-01T00:00:00Z/P1D');
+    /// var_dump(get_class($r->getStartDate()));
+    /// try { new DatePeriod([], 2); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// echo (new ReflectionMethod('DatePeriod', '__construct'))->getNumberOfRequiredParameters(), "\n";
+    /// try { new DatePeriod($s, $i, 0); } catch (Exception $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// int(4)
+    /// int(4)
+    /// bool(false)
+    /// string(8) "DateTime"
+    /// string(25) "2012-08-01T00:00:00+00:00"
+    /// bool(true)
+    /// NULL
+    ///
+    /// Deprecated: Calling DatePeriod::__construct(string $isostr, int $options = 0) is deprecated, use DatePeriod::createFromISO8601String() instead in %s on line 7
+    /// string(8) "DateTime"
+    /// DatePeriod::__construct() accepts (DateTimeInterface, DateInterval, int [, int]), or (DateTimeInterface, DateInterval, DateTime [, int]), or (string [, int]) as arguments
+    /// 1
+    /// DateMalformedPeriodStringException: DatePeriod::__construct(): Recurrence count must be greater or equal to 1 and lower than 2147483640
+    /// ```
+    #[php(arity = manual)]
+    fn __construct(
+        req: &mut Request,
+        this: This<Self>,
+        start: Raw<Untyped<PhpString>>,
+        interval: Passed<Raw<Untyped<i64>>>,
+        end: Passed<Raw<Untyped<i64>>>,
+        options: Passed<Raw<Untyped<i64>>>,
+    ) -> Result<(), Thrown> {
+        let func = "DatePeriod::__construct";
+        let count = req.argument_count();
+        let value = |given: Passed<Raw<Untyped<i64>>>| match given {
+            Passed::Given(raw) => raw.value(),
+            Passed::Omitted => Value::null(),
+        };
+        // `l` after the `|`: the argument held as an int, `0` where the
+        // call gave none.
+        let long = |req: &mut Request, given: Passed<Raw<Untyped<i64>>>| match given {
+            Passed::Given(raw) => raw.hold(req).map(|held| held.0),
+            Passed::Omitted => Ok(0),
+        };
+        let (a, b, c, d) = (start.value(), value(interval), value(end), value(options));
+        let start_object = is_a(req, &a, "DateTimeInterface")?;
+        let interval_object = is_a(req, &b, "DateInterval")?;
+        let end_object = is_a(req, &c, "DateTimeInterface")?;
+        let options_ok = count < 4 || is_long(&d);
+        let object = this.object();
+        let mut period = PeriodObj::default();
+        let (options, recurrences) = if let (Some(start), Some(interval), true, true, true) = (
+            start_object,
+            interval_object,
+            (3..=4).contains(&count),
+            options_ok,
+            end_object.is_none() && is_long(&c),
+        ) {
+            let recurrences = long(req, end)?;
+            let options = long(req, options)?;
+            from_objects(req, &mut period, start, interval, None)?;
+            (options, recurrences)
+        } else if let (Some(start), Some(interval), Some(end), true, true) = (
+            start_object,
+            interval_object,
+            end_object,
+            (3..=4).contains(&count),
+            options_ok,
+        ) {
+            let options = long(req, options)?;
+            from_objects(req, &mut period, start, interval, Some(end))?;
+            (options, 0)
+        } else if (1..=2).contains(&count)
+            && (count < 2 || is_long(&b))
+            && !matches!(a.deref().as_ref(), ValueRef::Object(_) | ValueRef::Array(_))
+        {
+            let text = start.hold(req)?.0;
+            let options = long(req, interval)?;
+            deprecated(
                 req,
-                "Error",
-                "Invalid serialization data for DatePeriod object",
-            ))
-        }
-        Err(thrown) => {
-            req.release(object.as_value());
-            Err(thrown)
-        }
+                "Calling DatePeriod::__construct(string $isostr, int $options = 0) is deprecated, use DatePeriod::createFromISO8601String() instead",
+            );
+            let iso = from_iso(req, func, text.as_bytes())?;
+            period.start = iso.start;
+            period.end = iso.end;
+            period.interval = iso.interval;
+            period.start_ce = Some(class_id(req, "DateTime")?);
+            (options, iso.recurrences)
+        } else {
+            return Err(throw(
+                req,
+                "TypeError",
+                "DatePeriod::__construct() accepts (DateTimeInterface, DateInterval, int [, int]), or (DateTimeInterface, DateInterval, DateTime [, int]), or (string [, int]) as arguments",
+            ));
+        };
+        finish(req, func, &mut period, options, recurrences)?;
+        store(req, object, period);
+        Ok(())
     }
-}
 
-/// `DatePeriod::__unserialize(array $data): void`.
-///
-/// ```php
-/// $p = new DatePeriod(new DateTime('2000-01-01 UTC'), new DateInterval('P1D'), 1);
-/// $data = $p->__serialize(); $data['recurrences'] = 9; $data['extra'] = true;
-/// $p->__unserialize($data);
-/// var_dump($p->getRecurrences(), $p->extra);
-/// try { $p->__unserialize(['start' => 1]); } catch (Error $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// Deprecated: Creation of dynamic property DatePeriod::$extra is deprecated in %s on line 4
-/// int(8)
-/// bool(true)
-/// Invalid serialization data for DatePeriod object
-/// ```
-pub(crate) fn unserialize(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 1, 1)?;
-    let hash = array(req, 1)?;
-    let object = this(req)?;
-    let mut period = copied(req, object);
-    let taken = from_hash(req, hash, &mut period);
-    store(req, object, period);
-    if !taken? {
-        return Err(throw(
-            req,
-            "Error",
-            "Invalid serialization data for DatePeriod object",
-        ));
+    /// `DatePeriod::getStartDate(): DateTimeInterface`.
+    ///
+    /// ```php
+    /// $p = new DatePeriod(new DateTimeImmutable('2000-01-01 Europe/Oslo'), new DateInterval('P1D'), 2);
+    /// var_dump($p->getStartDate());
+    /// ```
+    /// ```expect
+    /// object(DateTimeImmutable)#3 (3) {
+    ///   ["date"]=>
+    ///   string(26) "2000-01-01 00:00:00.000000"
+    ///   ["timezone_type"]=>
+    ///   int(3)
+    ///   ["timezone"]=>
+    ///   string(11) "Europe/Oslo"
+    /// }
+    /// ```
+    #[php(tentative)]
+    fn getStartDate(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Instance<DateTimeInterface>, Thrown> {
+        let object = this.object();
+        let state = object
+            .native::<PeriodObj>(req)
+            .and_then(|p| p.start.clone().zip(p.start_ce));
+        let Some((start, class)) = state else {
+            return Err(uninitialized(req, object.class()));
+        };
+        new_date(req, class, start).map(Instance::of)
     }
-    restore_properties(req, object, hash, &PERIOD_FIELDS)?;
-    Ok(Value::null())
-}
 
-/// `DatePeriod::__wakeup(): void`, deprecated since 8.5.
-///
-/// ```php
-/// $p = new DatePeriod(new DateTime('2000-01-01 UTC'), new DateInterval('P1D'), 1);
-/// try { @$p->__wakeup(); echo "ok\n"; } catch (Error $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// Invalid serialization data for DatePeriod object
-/// ```
-pub(crate) fn wakeup(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 0, 0)?;
-    let object = this(req)?;
-    let own = std_rows(req, object)?;
-    let hash = rows_array(req, &own, Vec::new(), false)?;
-    let mut period = copied(req, object);
-    let taken = from_hash(req, hash, &mut period);
-    req.release(Value::array(hash));
-    store(req, object, period);
-    if !taken? {
-        return Err(throw(
-            req,
-            "Error",
-            "Invalid serialization data for DatePeriod object",
-        ));
+    /// `DatePeriod::getEndDate(): ?DateTimeInterface`.
+    ///
+    /// ```php
+    /// $s = new DateTime('2000-01-01 UTC'); $i = new DateInterval('P1D');
+    /// var_dump((new DatePeriod($s, $i, 2))->getEndDate(), (new DatePeriod($s, $i, new DateTime('2000-01-05 UTC')))->getEndDate()->format('Y-m-d'));
+    /// ```
+    /// ```expect
+    /// NULL
+    /// string(10) "2000-01-05"
+    /// ```
+    #[php(tentative)]
+    fn getEndDate(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Option<Instance<DateTimeInterface>>, Thrown> {
+        let state = this
+            .object()
+            .native::<PeriodObj>(req)
+            .and_then(|p| p.end.clone().zip(p.start_ce));
+        match state {
+            Some((end, class)) => new_date(req, class, end).map(|date| Some(Instance::of(date))),
+            None => Ok(None),
+        }
     }
-    Ok(Value::null())
+
+    /// `DatePeriod::getDateInterval(): DateInterval`.
+    ///
+    /// ```php
+    /// var_dump((new DatePeriod(new DateTime('2000-01-01 UTC'), new DateInterval('PT12H'), 2))->getDateInterval());
+    /// ```
+    /// ```expect
+    /// object(DateInterval)#3 (10) {
+    ///   ["y"]=>
+    ///   int(0)
+    ///   ["m"]=>
+    ///   int(0)
+    ///   ["d"]=>
+    ///   int(0)
+    ///   ["h"]=>
+    ///   int(12)
+    ///   ["i"]=>
+    ///   int(0)
+    ///   ["s"]=>
+    ///   int(0)
+    ///   ["f"]=>
+    ///   float(0)
+    ///   ["invert"]=>
+    ///   int(0)
+    ///   ["days"]=>
+    ///   bool(false)
+    ///   ["from_string"]=>
+    ///   bool(false)
+    /// }
+    /// ```
+    #[php(tentative)]
+    fn getDateInterval(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Instance<DateInterval>, Thrown> {
+        let object = this.object();
+        let diff = object.native::<PeriodObj>(req).and_then(|p| p.interval);
+        match diff {
+            Some(diff) => new_interval(req, diff, 0, None),
+            None => Err(uninitialized(req, object.class())),
+        }
+    }
+
+    /// `DatePeriod::getRecurrences(): ?int`: the count given, `null` for a
+    /// period bounded by its end.
+    ///
+    /// ```php
+    /// $s = new DateTime('2000-01-01 UTC'); $i = new DateInterval('P1D');
+    /// var_dump((new DatePeriod($s, $i, 5))->getRecurrences(), (new DatePeriod($s, $i, 5, DatePeriod::EXCLUDE_START_DATE | DatePeriod::INCLUDE_END_DATE))->getRecurrences(), (new DatePeriod($s, $i, new DateTime('2000-02-01 UTC')))->getRecurrences());
+    /// ```
+    /// ```expect
+    /// int(5)
+    /// int(5)
+    /// NULL
+    /// ```
+    #[php(tentative)]
+    fn getRecurrences(req: &mut Request, this: This<Self>) -> Option<i64> {
+        let n = this.object().native::<PeriodObj>(req).map_or(0, |p| {
+            p.recurrences - i64::from(p.include_start_date) - i64::from(p.include_end_date)
+        });
+        (n != 0).then_some(n)
+    }
+
+    /// `DatePeriod::__serialize(): array`.
+    ///
+    /// ```php
+    /// var_dump((new DatePeriod(new DateTime('2000-01-01 UTC'), new DateInterval('P1D'), 1))->__serialize());
+    /// ```
+    /// ```expect
+    /// array(7) {
+    ///   ["start"]=>
+    ///   object(DateTime)#3 (3) {
+    ///     ["date"]=>
+    ///     string(26) "2000-01-01 00:00:00.000000"
+    ///     ["timezone_type"]=>
+    ///     int(3)
+    ///     ["timezone"]=>
+    ///     string(3) "UTC"
+    ///   }
+    ///   ["current"]=>
+    ///   NULL
+    ///   ["end"]=>
+    ///   NULL
+    ///   ["interval"]=>
+    ///   object(DateInterval)#2 (10) {
+    ///     ["y"]=>
+    ///     int(0)
+    ///     ["m"]=>
+    ///     int(0)
+    ///     ["d"]=>
+    ///     int(1)
+    ///     ["h"]=>
+    ///     int(0)
+    ///     ["i"]=>
+    ///     int(0)
+    ///     ["s"]=>
+    ///     int(0)
+    ///     ["f"]=>
+    ///     float(0)
+    ///     ["invert"]=>
+    ///     int(0)
+    ///     ["days"]=>
+    ///     bool(false)
+    ///     ["from_string"]=>
+    ///     bool(false)
+    ///   }
+    ///   ["recurrences"]=>
+    ///   int(2)
+    ///   ["include_start_date"]=>
+    ///   bool(true)
+    ///   ["include_end_date"]=>
+    ///   bool(false)
+    /// }
+    /// ```
+    fn __serialize(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+        let object = this.object();
+        if object
+            .native::<PeriodObj>(req)
+            .is_none_or(|p| p.start.is_none())
+        {
+            return Err(uninitialized(req, object.class()));
+        }
+        let fields = period_fields(req, object)?;
+        let own = std_rows(req, object)?;
+        rows_array(req, &own, fields, true)
+    }
+
+    /// `DatePeriod::__unserialize(array $data): void`.
+    ///
+    /// ```php
+    /// $p = new DatePeriod(new DateTime('2000-01-01 UTC'), new DateInterval('P1D'), 1);
+    /// $data = $p->__serialize(); $data['recurrences'] = 9; $data['extra'] = true;
+    /// $p->__unserialize($data);
+    /// var_dump($p->getRecurrences(), $p->extra);
+    /// try { $p->__unserialize(['start' => 1]); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Deprecated: Creation of dynamic property DatePeriod::$extra is deprecated in %s on line 4
+    /// int(8)
+    /// bool(true)
+    /// Invalid serialization data for DatePeriod object
+    /// ```
+    fn __unserialize(req: &mut Request, this: This<Self>, data: PhpArray) -> Result<(), Thrown> {
+        let object = this.object();
+        let mut period = copied(req, object);
+        let taken = from_hash(req, data, &mut period);
+        store(req, object, period);
+        if !taken? {
+            return Err(invalid(req));
+        }
+        restore_properties(req, object, data, &PERIOD_FIELDS)
+    }
+
+    /// `DatePeriod::__wakeup(): void`, deprecated since 8.5.
+    ///
+    /// ```php
+    /// $p = new DatePeriod(new DateTime('2000-01-01 UTC'), new DateInterval('P1D'), 1);
+    /// try { @$p->__wakeup(); echo "ok\n"; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Invalid serialization data for DatePeriod object
+    /// ```
+    #[php(
+        tentative,
+        deprecated(
+            since = "8.5",
+            message = "this method is obsolete, as serialization hooks are provided by __unserialize() and __serialize()"
+        )
+    )]
+    fn __wakeup(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
+        let object = this.object();
+        let own = std_rows(req, object)?;
+        let hash = rows_array(req, &own, Vec::new(), false)?;
+        let mut period = copied(req, object);
+        let taken = from_hash(req, hash, &mut period);
+        req.release(Value::array(hash));
+        store(req, object, period);
+        if !taken? {
+            return Err(invalid(req));
+        }
+        Ok(())
+    }
+
+    /// `DatePeriod::__set_state(array $array): DatePeriod`.
+    ///
+    /// ```php
+    /// $p = DatePeriod::__set_state(['start' => new DateTime('2000-01-01 UTC'), 'current' => null, 'end' => null, 'interval' => new DateInterval('P1D'), 'recurrences' => 3, 'include_start_date' => true, 'include_end_date' => false]);
+    /// var_dump($p->getRecurrences(), $p->getStartDate()->format('c'));
+    /// try { DatePeriod::__set_state([]); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// string(25) "2000-01-01T00:00:00+00:00"
+    /// Invalid serialization data for DatePeriod object
+    /// ```
+    #[php(tentative)]
+    fn __set_state(req: &mut Request, array: PhpArray) -> Result<Instance<DatePeriod>, Thrown> {
+        let class = class_id(req, "DatePeriod")?;
+        let object = new_object(req, class)?;
+        let mut period = PeriodObj::default();
+        match from_hash(req, array, &mut period) {
+            Ok(true) => {
+                store(req, object, period);
+                Ok(Instance::of(object))
+            }
+            Ok(false) => {
+                req.release(object.as_value());
+                Err(invalid(req))
+            }
+            Err(thrown) => {
+                req.release(object.as_value());
+                Err(thrown)
+            }
+        }
+    }
+
+    /// `DatePeriod::getIterator(): Iterator`, php's
+    /// `zend_create_internal_iterator_zval` over the period: an
+    /// `InternalIterator` walking it by `date_period_it`'s rules
+    /// ([`iterator_element`]), which `foreach` reaches through the same
+    /// method, so a subclass that overrides it is walked by its own.
+    ///
+    /// ```php
+    /// $p = DatePeriod::createFromISO8601String('R2/2012-07-01T00:00:00Z/P7D');
+    /// $it = $p->getIterator();
+    /// var_dump(get_class($it));
+    /// for (; $it->valid(); $it->next()) echo $it->key(), ': ', $it->current()->format('Y-m-d'), "\n";
+    /// $it->rewind(); echo $it->current()->format('Y-m-d'), "\n";
+    /// class P extends DatePeriod { function getIterator(): Iterator { return new ArrayIterator([7]); } }
+    /// foreach (new P(new DateTime('2000-01-01'), new DateInterval('P1D'), 1) as $k => $v) echo "$k=$v\n";
+    /// try { foreach ($p as &$d) {} } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// string(16) "InternalIterator"
+    /// 0: 2012-07-01
+    /// 1: 2012-07-08
+    /// 2: 2012-07-15
+    /// 2012-07-01
+    /// 0=7
+    /// An iterator cannot be used with foreach by reference
+    /// ```
+    fn getIterator(req: &mut Request, this: This<Self>) -> Result<Instance<Iterator>, Thrown> {
+        internal_iterator(req, &this.object()).map(Instance::of)
+    }
 }

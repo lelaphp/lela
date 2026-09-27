@@ -39,12 +39,18 @@ mod murmur;
 mod natives;
 mod sha;
 mod snefru;
-mod stub;
 mod tiger;
 mod whirlpool;
 mod xxhash;
 
 use php_ext::abi::{Extension, ExtensionBuilder};
+
+use crate::natives::{
+    HashContext, hash, hash_algos, hash_copy, hash_equals, hash_file, hash_final, hash_hkdf,
+    hash_hmac, hash_hmac_algos, hash_hmac_file, hash_init, hash_pbkdf2, hash_update,
+    hash_update_file, hash_update_stream, mhash, mhash_count, mhash_get_block_size,
+    mhash_get_hash_name, mhash_keygen_s2k,
+};
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
 /// private to this crate (ADR-0005); nothing in it is shared or synchronised.
@@ -65,9 +71,30 @@ struct State {}
 /// ```
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
-        .functions(natives::natives())
-        .class_payload::<natives::Context>(natives::class(), natives::methods(), &natives::HANDLERS)
-        .constants(natives::constants())
+        .functions(vec![
+            hash::declared(),
+            hash_file::declared(),
+            hash_hmac::declared(),
+            hash_hmac_file::declared(),
+            hash_init::declared(),
+            hash_update::declared(),
+            hash_update_stream::declared(),
+            hash_update_file::declared(),
+            hash_final::declared(),
+            hash_copy::declared(),
+            hash_algos::declared(),
+            hash_hmac_algos::declared(),
+            hash_pbkdf2::declared(),
+            hash_equals::declared(),
+            hash_hkdf::declared(),
+            mhash_get_block_size::declared(),
+            mhash_get_hash_name::declared(),
+            mhash_keygen_s2k::declared(),
+            mhash_count::declared(),
+            mhash::declared(),
+        ])
+        .class::<HashContext>()
+        .constants(natives::constants::declared())
         .info(natives::info)
         .request_state::<State>()
         .build("hash")

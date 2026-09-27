@@ -24,7 +24,6 @@
 // The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-mod arginfo;
 mod csprng;
 mod engine_mt19937;
 mod engine_pcgoneseq128xslrr64;
@@ -34,29 +33,28 @@ mod engine_xoshiro256starstar;
 mod gammasection;
 mod randomizer;
 mod rng;
-mod zpp;
 
 use std::any::Any;
 use std::marker::PhantomData;
 
-use php_ext::abi::{CloneObj, CloneObjWith, Extension, ExtensionBuilder, ObjectHandlers};
+use php_ext::abi::{
+    CloneObj, CloneObjWith, Extension, ExtensionBuilder, ObjectHandlers, Passed, Raw,
+};
+use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::{clone_with, instantiate, lookup_class};
 use php_ext::raising::{
-    Thrown, arg_value_error, clear, deprecated, new_throwable, throw, throw_value,
+    Thrown, arg_count_error, arg_value_error, clear, deprecated, new_throwable, throw, throw_value,
 };
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
 
 pub use rng::Rng;
 
-use engine_mt19937::{Mode, Mt19937};
-use engine_pcgoneseq128xslrr64::PcgOneseq128XslRr64;
-use engine_secure::Secure;
-use engine_xoshiro256starstar::Xoshiro256StarStar;
-use randomizer::Randomizer;
-
-/// A native's entry, the shape `ExtensionBuilder::functions` takes.
-pub(crate) type Entry = fn(&mut Request) -> Result<Value, Thrown>;
+use engine_mt19937::{Mode, Mt19937, StateMt19937};
+use engine_pcgoneseq128xslrr64::{PcgOneseq128XslRr64, StatePcgOneseq128XslRr64};
+use engine_secure::{Secure, StateSecure};
+use engine_xoshiro256starstar::{StateXoshiro256StarStar, Xoshiro256StarStar};
+use randomizer::{IntervalBoundary, Randomizer};
 
 /// `PHP_MT_RAND_MAX`, `(1 << 31) - 1`.
 pub(crate) const MT_RAND_MAX: i64 = 0x7FFF_FFFF;
@@ -133,7 +131,7 @@ pub(crate) trait Algo {
     /// The state when the engine is `Mt19937`, which
     /// `Randomizer::getInt` asks as php compares `algo->range` against
     /// `php_random_algo_mt19937.range`.
-    fn as_mt19937(&mut self) -> Option<&mut Mt19937> {
+    fn as_mt19937(&mut self) -> Option<&mut StateMt19937> {
         None
     }
 }
@@ -307,16 +305,16 @@ fn fallback_seed() -> u64 {
 #[derive(Default)]
 struct Globals {
     combined_lcg: Option<[i32; 2]>,
-    mt19937: Option<Mt19937>,
+    mt19937: Option<StateMt19937>,
 }
 
 /// `php_random_default_status()`'s state, seeded as php seeds it on the
 /// first draw of a request, and `f` over it.
-fn with_default<R>(req: &mut Request, f: impl FnOnce(&mut Mt19937) -> R) -> R {
+fn with_default<R>(req: &mut Request, f: impl FnOnce(&mut StateMt19937) -> R) -> R {
     let state = req
         .state::<Globals>()
         .mt19937
-        .get_or_insert_with(Mt19937::seeded_by_default);
+        .get_or_insert_with(StateMt19937::seeded_by_default);
     f(state)
 }
 
@@ -328,16 +326,16 @@ fn with_engine<R, F: FnOnce(&mut dyn Algo) -> R>(
     object: PhpObject,
     f: F,
 ) -> Result<R, F> {
-    if let Some(state) = object.native_mut::<Mt19937>(req) {
+    if let Some(state) = object.native_mut::<StateMt19937>(req) {
         return Ok(f(state));
     }
-    if let Some(state) = object.native_mut::<PcgOneseq128XslRr64>(req) {
+    if let Some(state) = object.native_mut::<StatePcgOneseq128XslRr64>(req) {
         return Ok(f(state));
     }
-    if let Some(state) = object.native_mut::<Xoshiro256StarStar>(req) {
+    if let Some(state) = object.native_mut::<StateXoshiro256StarStar>(req) {
         return Ok(f(state));
     }
-    if let Some(state) = object.native_mut::<Secure>(req) {
+    if let Some(state) = object.native_mut::<StateSecure>(req) {
         return Ok(f(state));
     }
     Err(f)
@@ -349,13 +347,13 @@ fn with_serial<R>(
     object: PhpObject,
     f: impl FnOnce(&mut dyn Serial) -> R,
 ) -> Option<R> {
-    if let Some(state) = object.native_mut::<Mt19937>(req) {
+    if let Some(state) = object.native_mut::<StateMt19937>(req) {
         return Some(f(state));
     }
-    if let Some(state) = object.native_mut::<PcgOneseq128XslRr64>(req) {
+    if let Some(state) = object.native_mut::<StatePcgOneseq128XslRr64>(req) {
         return Some(f(state));
     }
-    if let Some(state) = object.native_mut::<Xoshiro256StarStar>(req) {
+    if let Some(state) = object.native_mut::<StateXoshiro256StarStar>(req) {
         return Some(f(state));
     }
     None
@@ -522,7 +520,7 @@ fn exception_with_previous(
 
 /// The handlers of a seedable engine: `php_random_engine_common_clone_object`,
 /// the state copied into the clone.
-struct Copying<T>(PhantomData<fn() -> T>);
+pub(crate) struct Copying<T>(PhantomData<fn() -> T>);
 
 impl<T: Algo + Clone + Default + Any + Send> ObjectHandlers for Copying<T> {
     fn clone_obj(&self) -> Option<CloneObj> {
@@ -538,13 +536,13 @@ fn clone_engine<T: Clone + Default + Any + Send>(
     clone_with(req, &object, state)
 }
 
-static MT19937: Copying<Mt19937> = Copying(PhantomData);
-static PCG: Copying<PcgOneseq128XslRr64> = Copying(PhantomData);
-static XOSHIRO: Copying<Xoshiro256StarStar> = Copying(PhantomData);
+pub(crate) static MT19937: Copying<StateMt19937> = Copying(PhantomData);
+pub(crate) static PCG: Copying<StatePcgOneseq128XslRr64> = Copying(PhantomData);
+pub(crate) static XOSHIRO: Copying<StateXoshiro256StarStar> = Copying(PhantomData);
 
 /// The handlers of `Secure` and `Randomizer`, whose `clone_obj` php
 /// leaves null: an uncloneable object.
-struct Uncloneable;
+pub(crate) struct Uncloneable;
 
 impl ObjectHandlers for Uncloneable {
     fn clone_obj(&self) -> Option<CloneObj> {
@@ -556,46 +554,97 @@ impl ObjectHandlers for Uncloneable {
     }
 }
 
-static UNCLONEABLE: Uncloneable = Uncloneable;
+pub(crate) static UNCLONEABLE: Uncloneable = Uncloneable;
 
-/// The classes in `MINIT`'s order, each engine's state its payload.
-fn classes(builder: ExtensionBuilder) -> ExtensionBuilder {
-    use arginfo::class;
-    use php_ext::decl::ClassKind;
-    let engine = |text: &str, interface: &str| class(text, ClassKind::Class, None, &[interface]);
-    let mut builder = builder;
-    for decl in arginfo::interfaces()
-        .into_iter()
-        .chain(arginfo::throwables())
-    {
-        builder = builder.classes(vec![(decl, Vec::new())]);
-    }
-    let mut randomizer = class("Random\\Randomizer", ClassKind::Class, None, &[]);
-    randomizer.properties.push(arginfo::engine_property());
-    builder
-        .class_payload::<Mt19937>(
-            engine("Random\\Engine\\Mt19937", "Random\\Engine"),
-            engine_mt19937::methods(),
-            &MT19937,
-        )
-        .class_payload::<PcgOneseq128XslRr64>(
-            engine("Random\\Engine\\PcgOneseq128XslRr64", "Random\\Engine"),
-            engine_pcgoneseq128xslrr64::methods(),
-            &PCG,
-        )
-        .class_payload::<Xoshiro256StarStar>(
-            engine("Random\\Engine\\Xoshiro256StarStar", "Random\\Engine"),
-            engine_xoshiro256starstar::methods(),
-            &XOSHIRO,
-        )
-        .class_payload::<Secure>(
-            engine("Random\\Engine\\Secure", "Random\\CryptoSafeEngine"),
-            vec![engine_mt19937::generate_method()],
-            &UNCLONEABLE,
-        )
-        .class_payload::<Randomizer>(randomizer, randomizer::methods(), &UNCLONEABLE)
-        .classes(vec![(arginfo::interval_boundary(), Vec::new())])
+/// `MT_RAND_MT19937` and the deprecated `MT_RAND_PHP`, the two modes of
+/// `mt_srand` and `Mt19937`, which [`Mode`] is.
+#[php_const]
+mod constants {
+    pub(crate) const MT_RAND_MT19937: i64 = 0;
+    #[php(deprecated(
+        since = "8.3",
+        message = "as it uses a biased non-standard variant of Mt19937"
+    ))]
+    pub(crate) const MT_RAND_PHP: i64 = 1;
 }
+
+/// `interface Random\Engine`, what a Randomizer draws from: one
+/// `generate(): string`.
+///
+/// ```php
+/// class E implements Random\Engine { function generate(): string { return "\x2a"; } }
+/// var_dump((new Random\Randomizer(new E))->getInt(0, 255), (new ReflectionMethod('Random\Engine', 'generate'))->isAbstract());
+/// ```
+/// ```expect
+/// int(42)
+/// bool(true)
+/// ```
+#[php_class(interface, namespace(Random))]
+pub(crate) struct Engine;
+
+#[php_class]
+impl Engine {
+    fn generate(this: This<Self>) -> PhpString;
+}
+
+/// `interface Random\CryptoSafeEngine extends Engine {}`, the mark of
+/// an engine fit for secrets, `Secure`'s.
+///
+/// ```php
+/// var_dump(new Random\Engine\Secure instanceof Random\CryptoSafeEngine, class_implements('Random\CryptoSafeEngine'));
+/// ```
+/// ```expect
+/// bool(true)
+/// array(1) {
+///   ["Random\Engine"]=>
+///   string(13) "Random\Engine"
+/// }
+/// ```
+#[php_class(interface, namespace(Random), extends(Engine))]
+pub(crate) struct CryptoSafeEngine;
+
+#[php_class]
+impl CryptoSafeEngine {}
+
+/// Core's `Error`, `Random\RandomError`'s parent.
+#[php_class(extern)]
+pub(crate) struct Error;
+
+/// Core's `Exception`, `Random\RandomException`'s parent.
+#[php_class(extern)]
+pub(crate) struct Exception;
+
+/// `class Random\RandomError extends \Error`, `@strict-properties`.
+///
+/// ```php
+/// var_dump(get_parent_class('Random\RandomError'), get_parent_class('Random\BrokenRandomEngineError'), get_parent_class('Random\RandomException'));
+/// ```
+/// ```expect
+/// string(5) "Error"
+/// string(18) "Random\RandomError"
+/// string(9) "Exception"
+/// ```
+#[php_class(namespace(Random), extends(Error), dynamic_properties = forbidden)]
+pub(crate) struct RandomError;
+
+#[php_class]
+impl RandomError {}
+
+/// `class Random\BrokenRandomEngineError extends RandomError`,
+/// `@strict-properties`.
+#[php_class(namespace(Random), extends(RandomError), dynamic_properties = forbidden)]
+pub(crate) struct BrokenRandomEngineError;
+
+#[php_class]
+impl BrokenRandomEngineError {}
+
+/// `class Random\RandomException extends \Exception`,
+/// `@strict-properties`.
+#[php_class(namespace(Random), extends(Exception), dynamic_properties = forbidden)]
+pub(crate) struct RandomException;
+
+#[php_class]
+impl RandomException {}
 
 /// The extension value (design §7.1): declarations paired with entries,
 /// and the state declared on it.
@@ -610,17 +659,30 @@ fn classes(builder: ExtensionBuilder) -> ExtensionBuilder {
 /// int(2147483647)
 /// ```
 pub fn extension() -> Extension {
-    classes(ExtensionBuilder::default())
-        .constants(arginfo::constants())
-        .functions(arginfo::functions(&arginfo::Natives {
-            lcg_value,
-            mt_srand,
-            rand,
-            mt_rand,
-            mt_getrandmax,
-            random_bytes,
-            random_int,
-        }))
+    ExtensionBuilder::default()
+        .class::<Engine>()
+        .class::<CryptoSafeEngine>()
+        .class::<RandomError>()
+        .class::<BrokenRandomEngineError>()
+        .class::<RandomException>()
+        .class::<Mt19937>()
+        .class::<PcgOneseq128XslRr64>()
+        .class::<Xoshiro256StarStar>()
+        .class::<Secure>()
+        .class::<Randomizer>()
+        .class::<IntervalBoundary>()
+        .constants(constants::declared())
+        .functions(vec![
+            lcg_value::declared(),
+            mt_srand::declared(),
+            srand::declared(),
+            rand::declared(),
+            mt_rand::declared(),
+            mt_getrandmax::declared(),
+            getrandmax::declared(),
+            random_bytes::declared(),
+            random_int::declared(),
+        ])
         .request_state::<Globals>()
         .build("random")
 }
@@ -637,8 +699,11 @@ pub fn extension() -> Extension {
 /// Deprecated: Function lcg_value() is deprecated since 8.4, use \Random\Randomizer::getFloat() instead in %s on line 2
 /// bool(true)
 /// ```
-fn lcg_value(req: &mut Request) -> Result<Value, Thrown> {
-    zpp::arity(req, 0, 0)?;
+#[php_function(deprecated(
+    since = "8.4",
+    message = "use \\Random\\Randomizer::getFloat() instead"
+))]
+fn lcg_value(req: &mut Request) -> f64 {
     let globals = req.state::<Globals>();
     let state = globals.combined_lcg.get_or_insert_with(|| {
         let seed = csprng::word().unwrap_or_else(|_| fallback_seed());
@@ -664,7 +729,7 @@ fn lcg_value(req: &mut Request) -> Result<Value, Thrown> {
     }
     #[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
     let answer = (i64::from(z) as u64) as f64 * 4.656_613e-10;
-    Ok(Value::float(answer))
+    answer
 }
 
 /// `mt_srand(?int $seed = null, int $mode = MT_RAND_MT19937): void` and
@@ -688,15 +753,13 @@ fn lcg_value(req: &mut Request) -> Result<Value, Thrown> {
 /// Deprecated: The MT_RAND_PHP variant of Mt19937 is deprecated in %s on line 5
 /// 1354439493 80
 /// ```
-fn mt_srand(req: &mut Request) -> Result<Value, Thrown> {
-    zpp::arity(req, 0, 2)?;
-    let seed = zpp::nullable_long(req, 1)?;
-    let mode = if req.argument_count() >= 2 {
-        zpp::long(req, 2)?
-    } else {
-        0
-    };
-    let mode = if mode == 1 {
+#[php_function(aliases(srand))]
+fn mt_srand(
+    req: &mut Request,
+    #[php(default = null)] seed: Option<i64>,
+    #[php(default = MT_RAND_MT19937)] mode: i64,
+) {
+    let mode = if mode == constants::MT_RAND_PHP {
         deprecated(req, "The MT_RAND_PHP variant of Mt19937 is deprecated");
         Mode::Php
     } else {
@@ -706,9 +769,34 @@ fn mt_srand(req: &mut Request) -> Result<Value, Thrown> {
     let seed = seed.map_or_else(engine_mt19937::default_seed, |seed| {
         seed.cast_unsigned() as u32
     });
-    let state = Mt19937::seeded(seed, mode);
+    let state = StateMt19937::seeded(seed, mode);
     req.state::<Globals>().mt19937 = Some(state);
-    Ok(Value::null())
+}
+
+/// `ZEND_PARSE_PARAMETERS_START(2, 2)` after the zero-argument form of
+/// `mt_rand` and `rand`, which php takes before it: `None` for no
+/// argument, and otherwise both held as `Z_PARAM_LONG` holds them.
+fn min_max(
+    req: &mut Request,
+    min: Passed<Raw<i64>>,
+    max: Passed<Raw<i64>>,
+) -> Result<Option<(i64, i64)>, Thrown> {
+    let given = req.argument_count();
+    if given == 0 {
+        return Ok(None);
+    }
+    if given != 2 {
+        return Err(arg_count_error(
+            req,
+            &format!("exactly 2 arguments, {given} given"),
+        ));
+    }
+    let mut held = |passed: Passed<Raw<i64>>| match passed {
+        Passed::Given(raw) => raw.hold(req),
+        Passed::Omitted => Ok(0),
+    };
+    let min = held(min)?;
+    Ok(Some((min, held(max)?)))
 }
 
 /// `php_mt_rand_common`: the engine's range in the reference variant, and
@@ -737,14 +825,12 @@ fn mt_rand_common(req: &mut Request, min: i64, max: i64) -> Result<i64, Thrown> 
 /// mt_rand(): Argument #2 ($max) must be greater than or equal to argument #1 ($min)
 /// mt_rand() expects exactly 2 arguments, 1 given
 /// ```
-fn mt_rand(req: &mut Request) -> Result<Value, Thrown> {
-    if req.argument_count() == 0 {
-        let word = with_default(req, Mt19937::next);
-        return Ok(Value::int(i64::from(word >> 1)));
-    }
-    zpp::arity(req, 2, 2)?;
-    let min = zpp::long(req, 1)?;
-    let max = zpp::long(req, 2)?;
+#[php_function(arity = manual)]
+fn mt_rand(req: &mut Request, min: Passed<Raw<i64>>, max: Passed<Raw<i64>>) -> Result<i64, Thrown> {
+    let Some((min, max)) = min_max(req, min, max)? else {
+        let word = with_default(req, StateMt19937::next);
+        return Ok(i64::from(word >> 1));
+    };
     if max < min {
         return Err(arg_value_error(
             req,
@@ -752,7 +838,7 @@ fn mt_rand(req: &mut Request) -> Result<Value, Thrown> {
             "be greater than or equal to argument #1 ($min)",
         ));
     }
-    mt_rand_common(req, min, max).map(Value::int)
+    mt_rand_common(req, min, max)
 }
 
 /// `rand(int $min = UNKNOWN, int $max = UNKNOWN): int`: `mt_rand`, with
@@ -765,20 +851,17 @@ fn mt_rand(req: &mut Request) -> Result<Value, Thrown> {
 /// int(1182829493)
 /// int(18)
 /// ```
-fn rand(req: &mut Request) -> Result<Value, Thrown> {
-    if req.argument_count() == 0 {
-        let word = with_default(req, Mt19937::next);
-        return Ok(Value::int(i64::from(word >> 1)));
-    }
-    zpp::arity(req, 2, 2)?;
-    let min = zpp::long(req, 1)?;
-    let max = zpp::long(req, 2)?;
-    let answer = if max < min {
-        mt_rand_common(req, max, min)?
-    } else {
-        mt_rand_common(req, min, max)?
+#[php_function(arity = manual)]
+fn rand(req: &mut Request, min: Passed<Raw<i64>>, max: Passed<Raw<i64>>) -> Result<i64, Thrown> {
+    let Some((min, max)) = min_max(req, min, max)? else {
+        let word = with_default(req, StateMt19937::next);
+        return Ok(i64::from(word >> 1));
     };
-    Ok(Value::int(answer))
+    if max < min {
+        mt_rand_common(req, max, min)
+    } else {
+        mt_rand_common(req, min, max)
+    }
 }
 
 /// `mt_getrandmax(): int` and its alias `getrandmax`:
@@ -790,9 +873,9 @@ fn rand(req: &mut Request) -> Result<Value, Thrown> {
 /// ```expect
 /// int(2147483647)
 /// ```
-fn mt_getrandmax(req: &mut Request) -> Result<Value, Thrown> {
-    zpp::arity(req, 0, 0)?;
-    Ok(Value::int(MT_RAND_MAX))
+#[php_function(aliases(getrandmax))]
+fn mt_getrandmax() -> i64 {
+    MT_RAND_MAX
 }
 
 /// `random_bytes(int $length): string`: `length` bytes of the host's
@@ -809,9 +892,9 @@ fn mt_getrandmax(req: &mut Request) -> Result<Value, Thrown> {
 /// random_bytes(): Argument #1 ($length) must be greater than 0
 /// random_bytes() expects exactly 1 argument, 0 given
 /// ```
-fn random_bytes(req: &mut Request) -> Result<Value, Thrown> {
-    zpp::arity(req, 1, 1)?;
-    let size = zpp::long(req, 1)?;
+#[php_function]
+fn random_bytes(req: &mut Request, length: i64) -> Result<PhpString, Thrown> {
+    let size = length;
     if size < 1 {
         return Err(arg_value_error(req, 1, "be greater than 0"));
     }
@@ -822,7 +905,7 @@ fn random_bytes(req: &mut Request) -> Result<Value, Thrown> {
         req.release(Value::string(bytes));
         return Err(failure.raise(req));
     }
-    Ok(Value::string(bytes))
+    Ok(bytes)
 }
 
 /// `random_int(int $min, int $max): int`: `php_random_int` over the
@@ -839,10 +922,8 @@ fn random_bytes(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// random_int(): Argument #1 ($min) must be less than or equal to argument #2 ($max)
 /// ```
-fn random_int(req: &mut Request) -> Result<Value, Thrown> {
-    zpp::arity(req, 2, 2)?;
-    let min = zpp::long(req, 1)?;
-    let max = zpp::long(req, 2)?;
+#[php_function]
+fn random_int(req: &mut Request, min: i64, max: i64) -> Result<i64, Thrown> {
     if min > max {
         return Err(arg_value_error(
             req,
@@ -850,7 +931,5 @@ fn random_int(req: &mut Request) -> Result<Value, Thrown> {
             "be less than or equal to argument #2 ($max)",
         ));
     }
-    csprng::int(min, max)
-        .map(Value::int)
-        .map_err(|failure| failure.raise(req))
+    csprng::int(min, max).map_err(|failure| failure.raise(req))
 }

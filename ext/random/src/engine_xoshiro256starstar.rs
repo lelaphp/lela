@@ -2,15 +2,14 @@
 //! `php_random_status_state_xoshiro256starstar` holds it, and the
 //! `Random\Engine\Xoshiro256StarStar` class over it.
 
+use php_ext::abi::{This, Union};
+use php_ext::attr::php_class;
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, Value};
+use php_ext::values::{PhpArray, PhpObject, PhpString};
 
-use php_ext::decl::{MethodDecl, Type};
-
-use crate::arginfo::{method, wide_seed};
-use crate::engine_mt19937::{generate_method, serial_methods};
-use crate::{Algo, Entry, Failure, Field, Generated, Serial, csprng, zpp};
+use crate::engine_mt19937::Mt19937;
+use crate::{Algo, Failure, Field, Generated, Serial, csprng};
 
 /// The polynomial `jump()` advances by, 2^128 draws.
 const JUMP: [u64; 4] = [
@@ -30,7 +29,7 @@ const JUMP_LONG: [u64; 4] = [
 /// `php_random_status_state_xoshiro256starstar`: the four words.
 /// `Default` is php's zeroed allocation.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct Xoshiro256StarStar {
+pub(crate) struct StateXoshiro256StarStar {
     pub(crate) state: [u64; 4],
 }
 
@@ -43,7 +42,7 @@ fn splitmix64(seed: &mut u64) -> u64 {
     r ^ (r >> 31)
 }
 
-impl Xoshiro256StarStar {
+impl StateXoshiro256StarStar {
     /// `generate_state`: the scrambled word of the state as it stands,
     /// and the state one step on.
     fn step(&mut self) -> u64 {
@@ -60,7 +59,7 @@ impl Xoshiro256StarStar {
     }
 
     /// `php_random_xoshiro256starstar_seed64`: four words of splitmix64.
-    fn seed64(seed: u64) -> Xoshiro256StarStar {
+    fn seed64(seed: u64) -> StateXoshiro256StarStar {
         let mut seed = seed;
         let state = [
             splitmix64(&mut seed),
@@ -68,7 +67,7 @@ impl Xoshiro256StarStar {
             splitmix64(&mut seed),
             splitmix64(&mut seed),
         ];
-        Xoshiro256StarStar { state }
+        StateXoshiro256StarStar { state }
     }
 
     /// `jump`: the state the polynomial's bits select, xored as the
@@ -89,7 +88,7 @@ impl Xoshiro256StarStar {
     }
 }
 
-impl Algo for Xoshiro256StarStar {
+impl Algo for StateXoshiro256StarStar {
     fn generate(&mut self) -> Result<Generated, Failure> {
         Ok(Generated {
             result: self.step(),
@@ -98,7 +97,7 @@ impl Algo for Xoshiro256StarStar {
     }
 }
 
-impl Serial for Xoshiro256StarStar {
+impl Serial for StateXoshiro256StarStar {
     /// The four words, each little-endian hex.
     fn serialize(&self) -> Vec<Field> {
         self.state
@@ -134,105 +133,112 @@ fn words(bytes: &[u8; 32]) -> [u64; 4] {
     out
 }
 
-/// `Random\Engine\Xoshiro256StarStar::__construct(string|int|null $seed =
-/// null)`: 32 bytes read as four little-endian words, an int through
-/// splitmix64, and 32 CSPRNG bytes, redrawn while all zero, where none
-/// is given.
-///
-/// ```php
-/// echo bin2hex((new Random\Engine\Xoshiro256StarStar(1234))->generate()), "\n";
-/// echo bin2hex((new Random\Engine\Xoshiro256StarStar(str_repeat("\x01", 32)))->generate()), "\n";
-/// echo strlen((new Random\Engine\Xoshiro256StarStar())->generate()), "\n";
-/// try { new Random\Engine\Xoshiro256StarStar("short"); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
-/// try { new Random\Engine\Xoshiro256StarStar(str_repeat("\0", 32)); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// 53aee3a0d945ab0b
-/// 9296969696969696
-/// 8
-/// Random\Engine\Xoshiro256StarStar::__construct(): Argument #1 ($seed) must be a 32 byte (256 bit) string
-/// Random\Engine\Xoshiro256StarStar::__construct(): Argument #1 ($seed) must not consist entirely of NUL bytes
-/// ```
-pub(crate) fn construct(req: &mut Request) -> Result<Value, Thrown> {
-    zpp::arity(req, 0, 1)?;
-    let this = zpp::this(req)?;
-    let seed = zpp::given(req, 1)?;
-    let state = match seed
-        .as_ref()
-        .and_then(|s| s.as_str_bytes().map(<[u8]>::to_vec))
-    {
-        Some(bytes) => {
-            let Ok(bytes) = <[u8; 32]>::try_from(bytes.as_slice()) else {
-                return Err(arg_value_error(req, 1, "be a 32 byte (256 bit) string"));
-            };
-            let state = words(&bytes);
-            if state == [0; 4] {
-                return Err(arg_value_error(req, 1, "not consist entirely of NUL bytes"));
+/// The state `polynomial` on, what `jump` and `jumpLong` share.
+fn jump_by(req: &mut Request, this: PhpObject, polynomial: &[u64; 4]) {
+    if let Some(state) = this.native_mut::<StateXoshiro256StarStar>(req) {
+        state.jump(polynomial);
+    }
+}
+
+/// `final class Random\Engine\Xoshiro256StarStar implements \Random\Engine`,
+/// `@strict-properties`, over [`StateXoshiro256StarStar`]: `generate` and the serial
+/// three are `Mt19937`'s entries (`@implementation-alias`).
+#[php_class(
+    final,
+    namespace(Random::Engine),
+    implements(crate::Engine),
+    dynamic_properties = forbidden,
+    payload = StateXoshiro256StarStar,
+    handlers = crate::XOSHIRO
+)]
+pub(crate) struct Xoshiro256StarStar;
+
+#[php_class]
+impl Xoshiro256StarStar {
+    /// `Random\Engine\Xoshiro256StarStar::__construct(string|int|null $seed =
+    /// null)`: 32 bytes read as four little-endian words, an int through
+    /// splitmix64, and 32 CSPRNG bytes, redrawn while all zero, where none
+    /// is given.
+    ///
+    /// ```php
+    /// echo bin2hex((new Random\Engine\Xoshiro256StarStar(1234))->generate()), "\n";
+    /// echo bin2hex((new Random\Engine\Xoshiro256StarStar(str_repeat("\x01", 32)))->generate()), "\n";
+    /// echo strlen((new Random\Engine\Xoshiro256StarStar())->generate()), "\n";
+    /// try { new Random\Engine\Xoshiro256StarStar("short"); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+    /// try { new Random\Engine\Xoshiro256StarStar(str_repeat("\0", 32)); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// 53aee3a0d945ab0b
+    /// 9296969696969696
+    /// 8
+    /// Random\Engine\Xoshiro256StarStar::__construct(): Argument #1 ($seed) must be a 32 byte (256 bit) string
+    /// Random\Engine\Xoshiro256StarStar::__construct(): Argument #1 ($seed) must not consist entirely of NUL bytes
+    /// ```
+    fn __construct(
+        req: &mut Request,
+        this: This<Self>,
+        #[php(default = null)] seed: Option<Union<PhpString, i64>>,
+    ) -> Result<(), Thrown> {
+        let this = this.object();
+        let state = match seed {
+            Some(Union::A(bytes)) => {
+                let Ok(bytes) = <[u8; 32]>::try_from(bytes.as_bytes()) else {
+                    return Err(arg_value_error(req, 1, "be a 32 byte (256 bit) string"));
+                };
+                let state = words(&bytes);
+                if state == [0; 4] {
+                    return Err(arg_value_error(req, 1, "not consist entirely of NUL bytes"));
+                }
+                StateXoshiro256StarStar { state }
             }
-            Xoshiro256StarStar { state }
-        }
-        None => {
-            if let Some(n) = seed.and_then(|s| s.as_int()) {
-                Xoshiro256StarStar::seed64(n.cast_unsigned())
-            } else {
+            Some(Union::B(n)) => StateXoshiro256StarStar::seed64(n.cast_unsigned()),
+            None => {
                 let mut state = [0; 4];
                 while state == [0; 4] {
                     let mut bytes = [0; 32];
                     csprng::fill(&mut bytes).map_err(|failure| failure.seed_failure(req))?;
                     state = words(&bytes);
                 }
-                Xoshiro256StarStar { state }
+                StateXoshiro256StarStar { state }
             }
+        };
+        if let Some(slot) = this.native_mut::<StateXoshiro256StarStar>(req) {
+            *slot = state;
         }
-    };
-    if let Some(slot) = this.native_mut::<Xoshiro256StarStar>(req) {
-        *slot = state;
+        Ok(())
     }
-    Ok(Value::null())
-}
 
-/// `Random\Engine\Xoshiro256StarStar::jump(): void`: 2^128 draws on.
-///
-/// ```php
-/// $e = new Random\Engine\Xoshiro256StarStar(1); $e->jump(); echo bin2hex($e->generate()), "\n";
-/// ```
-/// ```expect
-/// d0e9aa1ef8022833
-/// ```
-pub(crate) fn jump(req: &mut Request) -> Result<Value, Thrown> {
-    jump_by(req, &JUMP)
-}
+    #[php(implementation = Mt19937::generate)]
+    fn generate(this: This<Self>) -> PhpString;
 
-/// `Random\Engine\Xoshiro256StarStar::jumpLong(): void`: 2^192 draws on.
-///
-/// ```php
-/// $e = new Random\Engine\Xoshiro256StarStar(1); $e->jumpLong(); echo bin2hex($e->generate()), "\n";
-/// ```
-/// ```expect
-/// 0782204a459ef439
-/// ```
-pub(crate) fn jump_long(req: &mut Request) -> Result<Value, Thrown> {
-    jump_by(req, &JUMP_LONG)
-}
-
-fn jump_by(req: &mut Request, polynomial: &[u64; 4]) -> Result<Value, Thrown> {
-    zpp::arity(req, 0, 0)?;
-    let this = zpp::this(req)?;
-    if let Some(state) = this.native_mut::<Xoshiro256StarStar>(req) {
-        state.jump(polynomial);
+    /// `Random\Engine\Xoshiro256StarStar::jump(): void`: 2^128 draws on.
+    ///
+    /// ```php
+    /// $e = new Random\Engine\Xoshiro256StarStar(1); $e->jump(); echo bin2hex($e->generate()), "\n";
+    /// ```
+    /// ```expect
+    /// d0e9aa1ef8022833
+    /// ```
+    fn jump(req: &mut Request, this: This<Self>) {
+        jump_by(req, this.object(), &JUMP);
     }
-    Ok(Value::null())
-}
 
-/// `Random\Engine\Xoshiro256StarStar`'s methods, `generate` and the
-/// serial three aliases of `Mt19937`'s.
-pub(super) fn methods() -> Vec<(MethodDecl, Entry)> {
-    let mut methods = vec![
-        (method("__construct", wide_seed(), None), construct as Entry),
-        generate_method(),
-        (method("jump", Vec::new(), Some(Type::Void)), jump),
-        (method("jumpLong", Vec::new(), Some(Type::Void)), jump_long),
-    ];
-    methods.extend(serial_methods());
-    methods
+    /// `Random\Engine\Xoshiro256StarStar::jumpLong(): void`: 2^192 draws on.
+    ///
+    /// ```php
+    /// $e = new Random\Engine\Xoshiro256StarStar(1); $e->jumpLong(); echo bin2hex($e->generate()), "\n";
+    /// ```
+    /// ```expect
+    /// 0782204a459ef439
+    /// ```
+    fn jumpLong(req: &mut Request, this: This<Self>) {
+        jump_by(req, this.object(), &JUMP_LONG);
+    }
+
+    #[php(implementation = Mt19937::__serialize)]
+    fn __serialize(this: This<Self>) -> PhpArray;
+    #[php(implementation = Mt19937::__unserialize)]
+    fn __unserialize(this: This<Self>, data: PhpArray);
+    #[php(implementation = Mt19937::__debugInfo)]
+    fn __debugInfo(this: This<Self>) -> PhpArray;
 }

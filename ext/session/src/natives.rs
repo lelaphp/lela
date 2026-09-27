@@ -2,192 +2,21 @@
 //! `session.c` each: its parameters, its refusals and warnings, and the
 //! state machine in `session` behind it.
 
-use php_ext::abi::Callable;
+use php_ext::abi::{Callable, OrFalse, Passed, Path, Raw, Union, Untyped};
+use php_ext::attr::php_function;
 use php_ext::call::lookup_class;
 use php_ext::coerce::{callable_checked, is_callable, to_string, truthy, value_name};
-use php_ext::decl::{ConstExpr, FunctionDecl, ParameterDefault, Type};
-use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw};
+use php_ext::raising::{
+    Level, Thrown, arg_count_error, arg_type_error, arg_value_error, docref, throw,
+};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, Value, ValueRef};
+use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
 use crate::user::{Slot, method_of, store};
 use crate::{
-    Entry, Module, State, Status, answer, arguments_between, bool_argument, coerced, declared,
-    given, headers_sent, ini, ini_bool, ini_long, parameter, pending, sent_error, session,
-    started_error, string_argument, string_value,
+    Module, State, Status, answer, headers_sent, ini, ini_bool, ini_long, pending, sent_error,
+    session, started_error, string_value,
 };
-
-/// The natives in `session.stub.php`'s order, `session_commit` the alias
-/// of `session_write_close`.
-#[allow(clippy::too_many_lines)] // one row per native of the stub
-pub(super) fn table() -> Vec<(FunctionDecl, Entry)> {
-    let null = || ParameterDefault::Expr(ConstExpr::Null);
-    let nullable = |ty: Type| Some(Type::Nullable(Box::new(ty)));
-    let string_or_false = || Type::Union(vec![Type::String, Type::False]);
-    let optional_string = |name: &[u8]| parameter(name, nullable(Type::String), null());
-    let unknown = || ParameterDefault::Unshown;
-    let callable = |name: &[u8]| parameter(name, Some(Type::Callable), unknown());
-    let nullable_callable = |name: &[u8]| parameter(name, nullable(Type::Callable), null());
-    let none =
-        |name: &[u8], returns: Type, entry: Entry| (declared(name, Vec::new(), returns), entry);
-    vec![
-        (
-            declared(
-                b"session_name",
-                vec![optional_string(b"name")],
-                string_or_false(),
-            ),
-            session_name,
-        ),
-        (
-            declared(
-                b"session_module_name",
-                vec![optional_string(b"module")],
-                string_or_false(),
-            ),
-            session_module_name,
-        ),
-        (
-            declared(
-                b"session_save_path",
-                vec![optional_string(b"path")],
-                string_or_false(),
-            ),
-            session_save_path,
-        ),
-        (
-            declared(
-                b"session_id",
-                vec![optional_string(b"id")],
-                string_or_false(),
-            ),
-            session_id,
-        ),
-        (
-            declared(
-                b"session_create_id",
-                vec![parameter(
-                    b"prefix",
-                    Some(Type::String),
-                    ParameterDefault::Expr(ConstExpr::Str(Box::new([]))),
-                )],
-                string_or_false(),
-            ),
-            session_create_id,
-        ),
-        (
-            declared(
-                b"session_regenerate_id",
-                vec![parameter(
-                    b"delete_old_session",
-                    Some(Type::Bool),
-                    ParameterDefault::Expr(ConstExpr::Bool(false)),
-                )],
-                Type::Bool,
-            ),
-            session_regenerate_id,
-        ),
-        (
-            declared(
-                b"session_decode",
-                vec![parameter(
-                    b"data",
-                    Some(Type::String),
-                    ParameterDefault::None,
-                )],
-                Type::Bool,
-            ),
-            session_decode,
-        ),
-        none(b"session_encode", string_or_false(), session_encode),
-        none(b"session_destroy", Type::Bool, session_destroy),
-        none(b"session_unset", Type::Bool, session_unset),
-        none(
-            b"session_gc",
-            Type::Union(vec![Type::Int, Type::False]),
-            session_gc,
-        ),
-        none(
-            b"session_get_cookie_params",
-            Type::Array,
-            session_get_cookie_params,
-        ),
-        none(b"session_write_close", Type::Bool, session_write_close),
-        none(b"session_abort", Type::Bool, session_abort),
-        none(b"session_reset", Type::Bool, session_reset),
-        none(b"session_status", Type::Int, session_status),
-        none(
-            b"session_register_shutdown",
-            Type::Void,
-            session_register_shutdown,
-        ),
-        none(b"session_commit", Type::Bool, session_write_close),
-        (
-            declared(
-                b"session_set_save_handler",
-                vec![
-                    parameter(b"open", None, ParameterDefault::None),
-                    parameter(b"close", None, unknown()),
-                    callable(b"read"),
-                    callable(b"write"),
-                    callable(b"destroy"),
-                    callable(b"gc"),
-                    nullable_callable(b"create_sid"),
-                    nullable_callable(b"validate_sid"),
-                    nullable_callable(b"update_timestamp"),
-                ],
-                Type::Bool,
-            ),
-            session_set_save_handler,
-        ),
-        (
-            declared(
-                b"session_cache_limiter",
-                vec![optional_string(b"value")],
-                string_or_false(),
-            ),
-            session_cache_limiter,
-        ),
-        (
-            declared(
-                b"session_cache_expire",
-                vec![parameter(b"value", nullable(Type::Int), null())],
-                Type::Union(vec![Type::Int, Type::False]),
-            ),
-            session_cache_expire,
-        ),
-        (
-            declared(
-                b"session_set_cookie_params",
-                vec![
-                    parameter(
-                        b"lifetime_or_options",
-                        Some(Type::Union(vec![Type::Array, Type::Int])),
-                        ParameterDefault::None,
-                    ),
-                    optional_string(b"path"),
-                    optional_string(b"domain"),
-                    parameter(b"secure", nullable(Type::Bool), null()),
-                    parameter(b"httponly", nullable(Type::Bool), null()),
-                ],
-                Type::Bool,
-            ),
-            session_set_cookie_params,
-        ),
-        (
-            declared(
-                b"session_start",
-                vec![parameter(
-                    b"options",
-                    Some(Type::Array),
-                    ParameterDefault::Expr(ConstExpr::Array(Vec::new())),
-                )],
-                Type::Bool,
-            ),
-            session_start,
-        ),
-    ]
-}
 
 /// `php_can_change_session_setting`: `false` after php's warning while a
 /// session is active, or once the headers are sent (for the id, only
@@ -224,18 +53,20 @@ fn can_change(req: &mut Request, setting: &str, check_cookies: bool) -> bool {
 /// string(5) "other"
 /// session_name(): Argument #1 ($name) must not contain any null bytes
 /// ```
-fn session_name(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 0, 1)?;
-    let name = string_argument(req, 1, true, true)?;
+#[php_function]
+fn session_name(
+    req: &mut Request,
+    #[php(default = null)] name: Option<Path>,
+) -> Result<OrFalse<PhpString>, Thrown> {
     if name.is_some() && !can_change(req, "name", false) {
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     }
     let current = ini(req, b"session.name");
-    let current = string_value(req, &current)?;
+    let current = PhpString::new(req, &current)?;
     if let Some(name) = name {
-        crate::ini::alter(req, b"session.name", &name)?;
+        crate::ini::alter(req, b"session.name", name.0.as_bytes())?;
     }
-    Ok(current)
+    Ok(OrFalse::Value(current))
 }
 
 /// `session_module_name(?string $module = null): string|false`: the
@@ -253,19 +84,22 @@ fn session_name(req: &mut Request) -> Result<Value, Thrown> {
 ///
 /// Warning: session_module_name(): Session save handler module cannot be changed after headers have already been sent (sent from %s on line 2) in %s on line 3
 /// ```
-fn session_module_name(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 0, 1)?;
-    let name = string_argument(req, 1, true, false)?;
+#[php_function]
+fn session_module_name(
+    req: &mut Request,
+    #[php(default = null)] module: Option<PhpString>,
+) -> Result<OrFalse<PhpString>, Thrown> {
+    let name = module.map(|module| module.as_bytes().to_vec());
     if name.is_some() && !can_change(req, "save handler module", false) {
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     }
     let current = req.state::<State>().module.map_or("", Module::name);
-    let current = string_value(req, current.as_bytes())?;
+    let current = PhpString::new(req, current.as_bytes())?;
     let Some(name) = name else {
-        return Ok(current);
+        return Ok(OrFalse::Value(current));
     };
     if crate::c_str(&name).eq_ignore_ascii_case(b"user") {
-        req.release(current);
+        req.release(Value::string(current));
         return Err(throw(
             req,
             "ValueError",
@@ -273,7 +107,7 @@ fn session_module_name(req: &mut Request) -> Result<Value, Thrown> {
         ));
     }
     if Module::find(&name).is_none() {
-        req.release(current);
+        req.release(Value::string(current));
         docref(
             req,
             Level::Warning,
@@ -282,12 +116,12 @@ fn session_module_name(req: &mut Request) -> Result<Value, Thrown> {
                 crate::shown(&name)
             ),
         );
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     }
     session::close(req)?;
     req.state::<State>().files = None;
     crate::ini::alter(req, b"session.save_handler", &name)?;
-    answer(req, current)
+    answer(req, OrFalse::Value(current))
 }
 
 /// `session_save_path(?string $path = null): string|false`.
@@ -300,18 +134,20 @@ fn session_module_name(req: &mut Request) -> Result<Value, Thrown> {
 /// string(0) ""
 /// string(6) "/tmp/x"
 /// ```
-fn session_save_path(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 0, 1)?;
-    let path = string_argument(req, 1, true, true)?;
+#[php_function]
+fn session_save_path(
+    req: &mut Request,
+    #[php(default = null)] path: Option<Path>,
+) -> Result<OrFalse<PhpString>, Thrown> {
     if path.is_some() && !can_change(req, "save path", false) {
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     }
     let current = ini(req, b"session.save_path");
-    let current = string_value(req, &current)?;
+    let current = PhpString::new(req, &current)?;
     if let Some(path) = path {
-        crate::ini::alter(req, b"session.save_path", &path)?;
+        crate::ini::alter(req, b"session.save_path", path.0.as_bytes())?;
     }
-    Ok(current)
+    Ok(OrFalse::Value(current))
 }
 
 /// `session_id(?string $id = null): string|false`: the id up to its
@@ -327,18 +163,20 @@ fn session_save_path(req: &mut Request) -> Result<Value, Thrown> {
 /// string(3) "abc"
 /// string(1) "x"
 /// ```
-fn session_id(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 0, 1)?;
-    let id = string_argument(req, 1, true, false)?;
+#[php_function]
+fn session_id(
+    req: &mut Request,
+    #[php(default = null)] id: Option<PhpString>,
+) -> Result<OrFalse<PhpString>, Thrown> {
     if id.is_some() && !can_change(req, "ID", true) {
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     }
     let current = req.state::<State>().id.clone().unwrap_or_default();
-    let current = string_value(req, crate::c_str(&current))?;
+    let current = PhpString::new(req, crate::c_str(&current))?;
     if let Some(id) = id {
-        req.state::<State>().id = Some(id);
+        req.state::<State>().id = Some(id.as_bytes().to_vec());
     }
-    Ok(current)
+    Ok(OrFalse::Value(current))
 }
 
 /// `session_regenerate_id(bool $delete_old_session = false): bool`: the
@@ -362,26 +200,28 @@ fn session_id(req: &mut Request) -> Result<Value, Thrown> {
 /// Warning: session_regenerate_id(): Session ID cannot be regenerated when there is no active session (started from %s on line 2) in %s on line 5
 /// bool(false)
 /// ```
-fn session_regenerate_id(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 0, 1)?;
-    let delete = bool_argument(req, 1, false)?;
+#[php_function]
+fn session_regenerate_id(
+    req: &mut Request,
+    #[php(default = false)] delete_old_session: bool,
+) -> Result<bool, Thrown> {
     if req.state::<State>().status != Status::Active {
         started_error(
             req,
             Level::Warning,
             "Session ID cannot be regenerated when there is no active session",
         );
-        return Ok(Value::bool(false));
+        return Ok(false);
     }
     if headers_sent(req) {
         sent_error(
             req,
             "Session ID cannot be regenerated after headers have already been sent",
         );
-        return Ok(Value::bool(false));
+        return Ok(false);
     }
-    let done = regenerate(req, delete)?;
-    answer(req, Value::bool(done))
+    let done = regenerate(req, delete_old_session)?;
+    answer(req, done)
 }
 
 /// The body of `session_regenerate_id` past its checks.
@@ -520,9 +360,12 @@ fn regenerate(req: &mut Request, delete: bool) -> Result<bool, Thrown> {
 /// bool(false)
 /// session_create_id(): Argument #1 ($prefix) cannot be longer than 256 characters
 /// ```
-fn session_create_id(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 0, 1)?;
-    let prefix = string_argument(req, 1, false, true)?.unwrap_or_default();
+#[php_function]
+fn session_create_id(
+    req: &mut Request,
+    #[php(default = "")] prefix: Path,
+) -> Result<OrFalse<PhpString>, Thrown> {
+    let prefix = prefix.0.as_bytes().to_vec();
     if !prefix.is_empty() {
         if prefix.len() > 256 {
             return Err(throw(
@@ -537,7 +380,7 @@ fn session_create_id(req: &mut Request) -> Result<Value, Thrown> {
                 Level::Warning,
                 "Prefix cannot contain special characters. Only the A-Z, a-z, 0-9, \"-\", and \",\" characters are allowed",
             );
-            return Ok(Value::bool(false));
+            return Ok(OrFalse::False);
         }
     }
     let state = req.state::<State>();
@@ -565,12 +408,12 @@ fn session_create_id(req: &mut Request) -> Result<Value, Thrown> {
     }
     let Some(new_id) = new_id else {
         docref(req, Level::Warning, "Failed to create new ID");
-        return answer(req, Value::bool(false));
+        return answer(req, OrFalse::False);
     };
     let mut id = prefix;
     id.extend_from_slice(&new_id);
-    let id = string_value(req, &id)?;
-    answer(req, id)
+    let id = PhpString::new(req, &id)?;
+    answer(req, OrFalse::Value(id))
 }
 
 /// `session_cache_limiter(?string $value = null): string|false`.
@@ -583,30 +426,32 @@ fn session_create_id(req: &mut Request) -> Result<Value, Thrown> {
 /// string(7) "nocache"
 /// string(6) "public"
 /// ```
-fn session_cache_limiter(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 0, 1)?;
-    let limiter = string_argument(req, 1, true, false)?;
-    if limiter.is_some() && req.state::<State>().status == Status::Active {
+#[php_function]
+fn session_cache_limiter(
+    req: &mut Request,
+    #[php(default = null)] value: Option<PhpString>,
+) -> Result<OrFalse<PhpString>, Thrown> {
+    if value.is_some() && req.state::<State>().status == Status::Active {
         started_error(
             req,
             Level::Warning,
             "Session cache limiter cannot be changed when a session is active",
         );
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     }
-    if limiter.is_some() && headers_sent(req) {
+    if value.is_some() && headers_sent(req) {
         sent_error(
             req,
             "Session cache limiter cannot be changed after headers have already been sent",
         );
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     }
     let current = ini(req, b"session.cache_limiter");
-    let current = string_value(req, &current)?;
-    if let Some(limiter) = limiter {
-        crate::ini::alter(req, b"session.cache_limiter", &limiter)?;
+    let current = PhpString::new(req, &current)?;
+    if let Some(limiter) = value {
+        crate::ini::alter(req, b"session.cache_limiter", limiter.as_bytes())?;
     }
-    Ok(current)
+    Ok(OrFalse::Value(current))
 }
 
 /// `session_cache_expire(?int $value = null): int|false`.
@@ -619,12 +464,12 @@ fn session_cache_limiter(req: &mut Request) -> Result<Value, Thrown> {
 /// int(180)
 /// int(30)
 /// ```
-fn session_cache_expire(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 0, 1)?;
-    let expires = match given(req, 1, true) {
-        Some(_) => coerced(req, 1, &Type::Nullable(Box::new(Type::Int)))?.as_int(),
-        None => None,
-    };
+#[php_function]
+fn session_cache_expire(
+    req: &mut Request,
+    #[php(default = null)] value: Option<i64>,
+) -> Result<OrFalse<i64>, Thrown> {
+    let expires = value;
     let current = ini_long(req, b"session.cache_expire");
     if expires.is_some() && req.state::<State>().status == Status::Active {
         started_error(
@@ -632,19 +477,19 @@ fn session_cache_expire(req: &mut Request) -> Result<Value, Thrown> {
             Level::Warning,
             "Session cache expiration cannot be changed when a session is active",
         );
-        return Ok(Value::int(current));
+        return Ok(OrFalse::Value(current));
     }
     if expires.is_some() && headers_sent(req) {
         sent_error(
             req,
             "Session cache expiration cannot be changed after headers have already been sent",
         );
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     }
     if let Some(expires) = expires {
         crate::ini::alter(req, b"session.cache_expire", expires.to_string().as_bytes())?;
     }
-    Ok(Value::int(current))
+    Ok(OrFalse::Value(current))
 }
 
 /// `session_encode(): string|false`: the session's variables as the
@@ -671,12 +516,12 @@ fn session_cache_expire(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(false)
 /// ```
-fn session_encode(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 0, 0)?;
+#[php_function]
+fn session_encode(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown> {
     let encoded = session::encode(req)?;
     let value = match encoded {
-        Some(bytes) => string_value(req, &bytes)?,
-        None => Value::bool(false),
+        Some(bytes) => OrFalse::Value(PhpString::new(req, &bytes)?),
+        None => OrFalse::False,
     };
     answer(req, value)
 }
@@ -691,19 +536,19 @@ fn session_encode(req: &mut Request) -> Result<Value, Thrown> {
 /// Warning: session_decode(): Session data cannot be decoded when there is no active session in %s on line 2
 /// bool(false)
 /// ```
-fn session_decode(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 1, 1)?;
-    let data = string_argument(req, 1, false, false)?.unwrap_or_default();
+#[php_function]
+fn session_decode(req: &mut Request, data: PhpString) -> Result<bool, Thrown> {
+    let data = data.as_bytes().to_vec();
     if req.state::<State>().status != Status::Active {
         docref(
             req,
             Level::Warning,
             "Session data cannot be decoded when there is no active session",
         );
-        return Ok(Value::bool(false));
+        return Ok(false);
     }
     let ok = session::decode(req, &data)?;
-    answer(req, Value::bool(ok))
+    answer(req, ok)
 }
 
 /// `session_start(array $options = []): bool`: each option set as its
@@ -732,29 +577,28 @@ fn session_decode(req: &mut Request) -> Result<Value, Thrown> {
 /// session_start(): Option "name" must be of type string|int|bool, array given
 /// session_start(): Option "read_and_close" value must be of type compatible with int, "x" given
 /// ```
-fn session_start(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 0, 1)?;
-    let options = match given(req, 1, false) {
-        Some(_) => coerced(req, 1, &Type::Array)?.as_array().copied(),
-        None => None,
-    };
+#[php_function]
+fn session_start(
+    req: &mut Request,
+    #[php(default = [])] options: PhpArray,
+) -> Result<bool, Thrown> {
     if req.state::<State>().status == Status::Active {
         started_error(
             req,
             Level::Notice,
             "Ignoring session_start() because a session is already active",
         );
-        return Ok(Value::bool(true));
+        return Ok(true);
     }
     if ini_bool(req, b"session.use_cookies") && headers_sent(req) {
         sent_error(
             req,
             "Session cannot be started after headers have already been sent",
         );
-        return Ok(Value::bool(false));
+        return Ok(false);
     }
     let mut read_and_close = false;
-    for (key, value) in options.map(|o| o.snapshot()).unwrap_or_default() {
+    for (key, value) in options.snapshot() {
         let Key::Str(name) = key else {
             return Err(arg_value_error(
                 req,
@@ -818,12 +662,12 @@ fn session_start(req: &mut Request) -> Result<Value, Thrown> {
     session::start(req)?;
     if req.state::<State>().status != Status::Active {
         clean(req)?;
-        return answer(req, Value::bool(false));
+        return answer(req, false);
     }
     if read_and_close {
         session::flush(req, false)?;
     }
-    answer(req, Value::bool(true))
+    answer(req, true)
 }
 
 /// `zend_hash_clean` over the session's array, separated first, where
@@ -868,10 +712,10 @@ fn clean(req: &mut Request) -> Result<(), Thrown> {
 /// string(0) ""
 /// bool(false)
 /// ```
-fn session_destroy(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 0, 0)?;
+#[php_function]
+fn session_destroy(req: &mut Request) -> Result<bool, Thrown> {
     let ok = session::destroy(req)?;
-    answer(req, Value::bool(ok))
+    answer(req, ok)
 }
 
 /// `session_unset(): bool`: the active session's variables removed.
@@ -892,13 +736,13 @@ fn session_destroy(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(false)
 /// ```
-fn session_unset(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 0, 0)?;
+#[php_function]
+fn session_unset(req: &mut Request) -> Result<bool, Thrown> {
     if req.state::<State>().status != Status::Active {
-        return Ok(Value::bool(false));
+        return Ok(false);
     }
     clean(req)?;
-    Ok(Value::bool(true))
+    Ok(true)
 }
 
 /// `session_gc(): int|false`: the handler's collection forced.
@@ -910,23 +754,23 @@ fn session_unset(req: &mut Request) -> Result<Value, Thrown> {
 /// Warning: session_gc(): Session cannot be garbage collected when there is no active session in %s on line 2
 /// bool(false)
 /// ```
-fn session_gc(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 0, 0)?;
+#[php_function]
+fn session_gc(req: &mut Request) -> Result<OrFalse<i64>, Thrown> {
     if req.state::<State>().status != Status::Active {
         docref(
             req,
             Level::Warning,
             "Session cannot be garbage collected when there is no active session",
         );
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     }
     let n = session::gc(req, true)?;
     answer(
         req,
         if n < 0 {
-            Value::bool(false)
+            OrFalse::False
         } else {
-            Value::int(n)
+            OrFalse::Value(n)
         },
     )
 }
@@ -954,8 +798,8 @@ fn session_gc(req: &mut Request) -> Result<Value, Thrown> {
 ///   string(0) ""
 /// }
 /// ```
-fn session_get_cookie_params(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 0, 0)?;
+#[php_function]
+fn session_get_cookie_params(req: &mut Request) -> Result<PhpArray, Thrown> {
     let mut array = PhpArray::new(req)?;
     let rows: [(&[u8], &[u8], u8); 7] = [
         (b"lifetime", b"session.cookie_lifetime", 0),
@@ -975,10 +819,10 @@ fn session_get_cookie_params(req: &mut Request) -> Result<Value, Thrown> {
             }
             _ => Value::bool(ini_bool(req, entry)),
         };
-        let key = php_ext::values::PhpString::new(req, key)?;
+        let key = PhpString::new(req, key)?;
         array.set(req, Key::Str(key), value)?;
     }
-    Ok(array.to_value())
+    Ok(array)
 }
 
 /// `session_set_cookie_params(array|int $lifetime_or_options, ?string
@@ -1009,44 +853,29 @@ fn session_get_cookie_params(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// ```
 #[allow(clippy::too_many_lines)] // php's function
-fn session_set_cookie_params(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 1, 5)?;
-    let first = req.argument(1).unwrap_or_default().deref();
-    let options = if let Some(array) = first.as_array() {
-        Some(*array)
-    } else {
-        if matches!(first.as_ref(), ValueRef::Object(_) | ValueRef::Resource(_)) {
-            let name = value_name(req, &first);
-            return Err(arg_type_error(
-                req,
-                1,
-                &format!("be of type array|int, {name} given"),
-            ));
-        }
-        None
+#[php_function]
+fn session_set_cookie_params(
+    req: &mut Request,
+    lifetime_or_options: Union<PhpArray, i64>,
+    #[php(default = null)] path: Option<PhpString>,
+    #[php(default = null)] domain: Option<PhpString>,
+    #[php(default = null)] secure: Option<bool>,
+    #[php(default = null)] httponly: Option<bool>,
+) -> Result<bool, Thrown> {
+    let (options, lifetime_long) = match lifetime_or_options {
+        Union::A(array) => (Some(array), 0),
+        Union::B(lifetime) => (None, lifetime),
     };
-    let lifetime_long = if options.is_none() {
-        coerced(req, 1, &Type::Int)?.as_int().unwrap_or(0)
-    } else {
-        0
-    };
-    let mut path = string_argument(req, 2, true, false)?;
-    let mut domain = string_argument(req, 3, true, false)?;
-    let bool_or_null = |req: &mut Request, at: u32| -> Result<Option<bool>, Thrown> {
-        match given(req, at, true) {
-            Some(_) => Ok(coerced(req, at, &Type::Nullable(Box::new(Type::Bool)))?.as_bool()),
-            None => Ok(None),
-        }
-    };
-    let mut secure = bool_or_null(req, 4)?;
-    let mut httponly = bool_or_null(req, 5)?;
+    let mut path = path.map(|path| path.as_bytes().to_vec());
+    let mut domain = domain.map(|domain| domain.as_bytes().to_vec());
+    let (mut secure, mut httponly) = (secure, httponly);
     if !ini_bool(req, b"session.use_cookies") {
         docref(
             req,
             Level::Warning,
             "Session cookies cannot be used when session.use_cookies is disabled",
         );
-        return Ok(Value::bool(false));
+        return Ok(false);
     }
     if req.state::<State>().status == Status::Active {
         started_error(
@@ -1054,14 +883,14 @@ fn session_set_cookie_params(req: &mut Request) -> Result<Value, Thrown> {
             Level::Warning,
             "Session cookie parameters cannot be changed when a session is active",
         );
-        return Ok(Value::bool(false));
+        return Ok(false);
     }
     if headers_sent(req) {
         sent_error(
             req,
             "Session cookie parameters cannot be changed after headers have already been sent",
         );
-        return Ok(Value::bool(false));
+        return Ok(false);
     }
     let mut lifetime = None;
     let mut partitioned = None;
@@ -1137,10 +966,10 @@ fn session_set_cookie_params(req: &mut Request) -> Result<Value, Thrown> {
         if let Some(value) = value
             && !crate::ini::alter(req, entry, &value)?
         {
-            return Ok(Value::bool(false));
+            return Ok(false);
         }
     }
-    Ok(Value::bool(true))
+    Ok(true)
 }
 
 /// `session_write_close(): bool` and its alias `session_commit()`: the
@@ -1171,13 +1000,13 @@ fn session_set_cookie_params(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(false)
 /// ```
-fn session_write_close(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 0, 0)?;
+#[php_function(aliases(session_commit))]
+fn session_write_close(req: &mut Request) -> Result<bool, Thrown> {
     if req.state::<State>().status != Status::Active {
-        return Ok(Value::bool(false));
+        return Ok(false);
     }
     session::flush(req, true)?;
-    answer(req, Value::bool(true))
+    answer(req, true)
 }
 
 /// `session_abort(): bool`: the session closed, nothing written.
@@ -1204,13 +1033,13 @@ fn session_write_close(req: &mut Request) -> Result<Value, Thrown> {
 /// int(1)
 /// bool(false)
 /// ```
-fn session_abort(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 0, 0)?;
+#[php_function]
+fn session_abort(req: &mut Request) -> Result<bool, Thrown> {
     if req.state::<State>().status != Status::Active {
-        return Ok(Value::bool(false));
+        return Ok(false);
     }
     session::abort(req)?;
-    answer(req, Value::bool(true))
+    answer(req, true)
 }
 
 /// `session_reset(): bool`: the variables read back from the handler.
@@ -1243,13 +1072,13 @@ fn session_abort(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(false)
 /// ```
-fn session_reset(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 0, 0)?;
+#[php_function]
+fn session_reset(req: &mut Request) -> Result<bool, Thrown> {
     if req.state::<State>().status != Status::Active {
-        return Ok(Value::bool(false));
+        return Ok(false);
     }
     session::reset(req)?;
-    answer(req, Value::bool(true))
+    answer(req, true)
 }
 
 /// `session_status(): int`.
@@ -1260,9 +1089,9 @@ fn session_reset(req: &mut Request) -> Result<Value, Thrown> {
 /// ```expect
 /// bool(true)
 /// ```
-fn session_status(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 0, 0)?;
-    Ok(Value::int(req.state::<State>().status as i64))
+#[php_function]
+fn session_status(req: &mut Request) -> i64 {
+    req.state::<State>().status as i64
 }
 
 /// `session_register_shutdown(): void`: `session_write_close` registered
@@ -1276,11 +1105,10 @@ fn session_status(req: &mut Request) -> Result<Value, Thrown> {
 /// ```expect
 /// int(1)
 /// ```
-fn session_register_shutdown(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 0, 0)?;
+#[php_function]
+fn session_register_shutdown(req: &mut Request) -> Result<(), Thrown> {
     let callable = named(req, b"session_write_close")?;
-    req.register_shutdown_function(callable, Vec::new())?;
-    Ok(Value::null())
+    req.register_shutdown_function(callable, Vec::new())
 }
 
 /// The callable a native's name is.
@@ -1355,6 +1183,36 @@ fn implements(
     Ok(lookup_class(req, interface)?.is_some_and(|class| object.instance_of(req, class)))
 }
 
+/// `ZEND_PARSE_PARAMETERS_START(min, max)`'s count check, which
+/// `session_set_save_handler` makes for each of its two forms after it
+/// has told them apart by the count.
+fn arguments_between(req: &mut Request, min: usize, max: usize) -> Result<(), Thrown> {
+    let given = req.argument_count();
+    if (min..=max).contains(&given) {
+        return Ok(());
+    }
+    let (word, bound) = if min == max {
+        ("exactly", min)
+    } else if given < min {
+        ("at least", min)
+    } else {
+        ("at most", max)
+    };
+    let plural = if bound == 1 { "" } else { "s" };
+    Err(arg_count_error(
+        req,
+        &format!("{word} {bound} argument{plural}, {given} given"),
+    ))
+}
+
+/// A `Passed` argument of the callbacks form as the call gave it.
+fn passed<T: php_ext::abi::FromArgument>(argument: Passed<Raw<T>>) -> Option<Value> {
+    match argument {
+        Passed::Given(raw) => Some(raw.value()),
+        Passed::Omitted => None,
+    }
+}
+
 /// `session_set_save_handler(...)`: an object of `SessionHandlerInterface`
 /// with `$register_shutdown`, its methods the callables; or, deprecated,
 /// six to nine callables.
@@ -1419,12 +1277,24 @@ fn implements(
 /// destruct
 /// write
 /// ```
-#[allow(clippy::too_many_lines)] // php's function, both arms
-fn session_set_save_handler(req: &mut Request) -> Result<Value, Thrown> {
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)] // php's function, both arms
+#[php_function(arity = manual)]
+fn session_set_save_handler(
+    req: &mut Request,
+    open: Raw<Untyped<Value>>,
+    close: Passed<Raw<Untyped<bool>>>,
+    read: Passed<Raw<Callable>>,
+    write: Passed<Raw<Callable>>,
+    destroy: Passed<Raw<Callable>>,
+    gc: Passed<Raw<Callable>>,
+    #[php(default = null)] create_sid: Raw<Option<Callable>>,
+    #[php(default = null)] validate_sid: Raw<Option<Callable>>,
+    #[php(default = null)] update_timestamp: Raw<Option<Callable>>,
+) -> Result<bool, Thrown> {
     let count = req.argument_count();
     if count <= 2 {
         arguments_between(req, 1, 2)?;
-        let first = req.argument(1).unwrap_or_default().deref();
+        let first = open.value();
         let is_handler = match first.as_object() {
             Some(object) => implements(req, *object, b"SessionHandlerInterface")?,
             None => false,
@@ -1437,9 +1307,12 @@ fn session_set_save_handler(req: &mut Request) -> Result<Value, Thrown> {
                 &format!("be of type SessionHandlerInterface, {name} given"),
             ));
         };
-        let register = bool_argument(req, 2, true)?;
+        let register = match close {
+            Passed::Given(register) => register.hold(req)?.0,
+            Passed::Omitted => true,
+        };
         if !handler_changeable(req) {
-            return Ok(Value::bool(false));
+            return Ok(false);
         }
         let class_name = req.class_decl(object.class()).map(|d| d.name.0.to_vec());
         req.state::<State>().class_name = class_name;
@@ -1490,7 +1363,7 @@ fn session_set_save_handler(req: &mut Request) -> Result<Value, Thrown> {
         if state.status != Status::Active && state.module != Some(Module::User) {
             user_ini(req)?;
         }
-        return Ok(Value::bool(true));
+        return Ok(true);
     }
     docref(
         req,
@@ -1498,9 +1371,19 @@ fn session_set_save_handler(req: &mut Request) -> Result<Value, Thrown> {
         "Providing individual callbacks instead of an object implementing SessionHandlerInterface is deprecated",
     );
     arguments_between(req, 6, 9)?;
+    let given = [
+        Some(open.value()),
+        passed(close),
+        passed(read),
+        passed(write),
+        passed(destroy),
+        passed(gc),
+        Some(create_sid.value()),
+        Some(validate_sid.value()),
+        Some(update_timestamp.value()),
+    ];
     let mut callables = Vec::new();
-    for at in 1..=9u32 {
-        let value = req.argument(at).map(|v| v.deref());
+    for (at, value) in (1..=9u32).zip(given) {
         let value = match value {
             Some(v) if at > 6 && matches!(v.as_ref(), ValueRef::Null) => None,
             Some(v) => Some(v),
@@ -1519,7 +1402,7 @@ fn session_set_save_handler(req: &mut Request) -> Result<Value, Thrown> {
         callables.push(value);
     }
     if !handler_changeable(req) {
-        return Ok(Value::bool(false));
+        return Ok(false);
     }
     req.state::<State>().class_name = None;
     req.set_shutdown_function(b"session_shutdown", None)?;
@@ -1542,5 +1425,5 @@ fn session_set_save_handler(req: &mut Request) -> Result<Value, Thrown> {
             store(req, slot, value);
         }
     }
-    Ok(Value::bool(true))
+    Ok(true)
 }

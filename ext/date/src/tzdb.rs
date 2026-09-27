@@ -4,34 +4,15 @@
 
 use std::collections::HashMap;
 
+use php_ext::abi::OrFalse;
+use php_ext::attr::php_function;
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 
-use crate::args::{count_between, nullable_string, optional_long, set_str, string, string_value};
 use crate::ffi::{self, Tzdb};
-
-/// `PHP_DATE_TIMEZONE_GROUP_*` and `PHP_DATE_TIMEZONE_PER_COUNTRY`, the
-/// values of `DateTimeZone`'s constants.
-pub(super) const GROUPS: [(&str, i64); 14] = [
-    ("AFRICA", 0x0001),
-    ("AMERICA", 0x0002),
-    ("ANTARCTICA", 0x0004),
-    ("ARCTIC", 0x0008),
-    ("ASIA", 0x0010),
-    ("ATLANTIC", 0x0020),
-    ("AUSTRALIA", 0x0040),
-    ("EUROPE", 0x0080),
-    ("INDIAN", 0x0100),
-    ("PACIFIC", 0x0200),
-    ("UTC", 0x0400),
-    ("ALL", 0x07FF),
-    ("ALL_WITH_BC", 0x0FFF),
-    ("PER_COUNTRY", 0x1000),
-];
-const ALL: i64 = 0x07FF;
-const ALL_WITH_BC: i64 = 0x0FFF;
-const PER_COUNTRY: i64 = 0x1000;
+use crate::obj::set_str;
+use crate::timezone::DateTimeZone;
 
 /// `check_id_allowed(id, what)`: the area prefixes, case-insensitively.
 fn allowed(id: &[u8], what: i64) -> bool {
@@ -112,21 +93,23 @@ fn allowed(id: &[u8], what: i64) -> bool {
 /// }
 /// string(17) "DateTimeZone::ALL"
 /// ```
-pub(crate) fn timezone_identifiers_list(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 0, 2)?;
-    let what = optional_long(req, 1, ALL)?;
-    let option = nullable_string(req, 2)?.map(|s| s.as_bytes().to_vec());
-    identifiers(req, what, option)
+#[php_function]
+fn timezone_identifiers_list(
+    req: &mut Request,
+    #[php(default = DateTimeZone::ALL)] timezoneGroup: i64,
+    #[php(default = null)] countryCode: Option<PhpString>,
+) -> Result<PhpArray, Thrown> {
+    identifiers(req, timezoneGroup, countryCode)
 }
 
 /// The body both entries share.
 pub(super) fn identifiers(
     req: &mut Request,
     what: i64,
-    option: Option<Vec<u8>>,
-) -> Result<Value, Thrown> {
-    let code = option.unwrap_or_default();
-    if what == PER_COUNTRY && code.len() != 2 {
+    option: Option<PhpString>,
+) -> Result<PhpArray, Thrown> {
+    let code = option.map(|s| s.as_bytes().to_vec()).unwrap_or_default();
+    if what == DateTimeZone::PER_COUNTRY && code.len() != 2 {
         return Err(arg_value_error(
             req,
             2,
@@ -136,17 +119,18 @@ pub(super) fn identifiers(
     let db = Tzdb::builtin();
     let mut array = PhpArray::new(req)?;
     for entry in db.identifiers() {
-        let keep = if what == PER_COUNTRY {
+        let keep = if what == DateTimeZone::PER_COUNTRY {
             db.data_byte(entry.pos + 5) == code[0] && db.data_byte(entry.pos + 6) == code[1]
         } else {
-            what == ALL_WITH_BC || (allowed(entry.id, what) && db.data_byte(entry.pos + 4) == 1)
+            what == DateTimeZone::ALL_WITH_BC
+                || (allowed(entry.id, what) && db.data_byte(entry.pos + 4) == 1)
         };
         if keep {
-            let id = string_value(req, entry.id)?;
-            array.append(req, id)?;
+            let id = PhpString::new(req, entry.id)?;
+            array.append(req, Value::string(id))?;
         }
     }
-    Ok(Value::array(array))
+    Ok(array)
 }
 
 /// `timezone_abbreviations_list(): array`,
@@ -217,13 +201,13 @@ pub(super) fn identifiers(
 /// }
 /// string(4) "acdt"
 /// ```
-pub(crate) fn timezone_abbreviations_list(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 0, 0)?;
+#[php_function]
+fn timezone_abbreviations_list(req: &mut Request) -> Result<PhpArray, Thrown> {
     abbreviations(req)
 }
 
 /// The body both entries share.
-pub(super) fn abbreviations(req: &mut Request) -> Result<Value, Thrown> {
+pub(super) fn abbreviations(req: &mut Request) -> Result<PhpArray, Thrown> {
     // The rows grouped under their abbreviation in the order each first
     // appears, which is the order php's `zend_hash_str_find` then
     // `add_assoc_zval` leaves the keys in.
@@ -247,7 +231,7 @@ pub(super) fn abbreviations(req: &mut Request) -> Result<Value, Thrown> {
             let offset = row.gmtoffset as i64;
             set_str(req, &mut element, b"offset", Value::int(offset))?;
             let id = match row.full_tz_name {
-                Some(id) => string_value(req, id)?,
+                Some(id) => Value::string(PhpString::new(req, id)?),
                 None => Value::null(),
             };
             set_str(req, &mut element, b"timezone_id", id)?;
@@ -256,7 +240,7 @@ pub(super) fn abbreviations(req: &mut Request) -> Result<Value, Thrown> {
         let key = Key::Str(PhpString::new(req, name)?);
         array.set(req, key, Value::array(list))?;
     }
-    Ok(Value::array(array))
+    Ok(array)
 }
 
 /// `timezone_name_from_abbr(string $abbr, int $utcOffset = -1, int
@@ -272,16 +256,18 @@ pub(super) fn abbreviations(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(false)
 /// ```
-pub(crate) fn timezone_name_from_abbr(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 1, 3)?;
-    let abbr = string(req, 1)?.as_bytes().to_vec();
-    let offset = optional_long(req, 2, -1)?;
-    let dst = optional_long(req, 3, -1)?;
+#[php_function]
+fn timezone_name_from_abbr(
+    req: &mut Request,
+    abbr: PhpString,
+    #[php(default = -1)] utcOffset: i64,
+    #[php(default = -1)] isDST: i64,
+) -> Result<OrFalse<PhpString>, Thrown> {
     #[allow(clippy::cast_possible_truncation)]
-    let dst = dst as i32;
-    match ffi::timezone_id_from_abbr(&abbr, offset, dst) {
-        Some(id) => string_value(req, id),
-        None => Ok(Value::bool(false)),
+    let dst = isDST as i32;
+    match ffi::timezone_id_from_abbr(abbr.as_bytes(), utcOffset, dst) {
+        Some(id) => PhpString::new(req, id).map(OrFalse::Value),
+        None => Ok(OrFalse::False),
     }
 }
 
@@ -293,7 +279,7 @@ pub(crate) fn timezone_name_from_abbr(req: &mut Request) -> Result<Value, Thrown
 /// ```expect
 /// string(6) "2026.3"
 /// ```
-pub(crate) fn timezone_version_get(req: &mut Request) -> Result<Value, Thrown> {
-    count_between(req, 0, 0)?;
-    string_value(req, Tzdb::builtin().version())
+#[php_function]
+fn timezone_version_get(req: &mut Request) -> Result<PhpString, Thrown> {
+    PhpString::new(req, Tzdb::builtin().version())
 }
