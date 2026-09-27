@@ -879,6 +879,16 @@ impl FiberError {
     /// #1 {main}
     ///   thrown in %s on line 2
     /// ```
+    ///
+    /// Its body parses no parameter, so what it is handed changes nothing:
+    ///
+    /// ```php
+    /// try { new FiberError(1, 2); } catch (Error $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Error: The "FiberError" class is reserved for internal use and cannot be manually instantiated
+    /// ```
+    #[php(arity = manual)]
     fn __construct(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let name = req.class_name(this.object().class());
         Err(throw(

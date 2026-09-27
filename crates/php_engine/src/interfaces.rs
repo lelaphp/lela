@@ -806,15 +806,16 @@ pub(crate) struct InternalIterator;
 
 #[php_class]
 impl InternalIterator {
-    /// `InternalIterator::__construct`: php's `Error`.
+    /// `InternalIterator::__construct`: php's `Error`, whatever it was
+    /// handed, since php's body parses no parameter.
     ///
     /// ```php
-    /// try { (new ReflectionMethod('InternalIterator', '__construct'))->invoke(SplFixedArray::fromArray([1])->getIterator()); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// try { (new ReflectionMethod('InternalIterator', '__construct'))->invoke(SplFixedArray::fromArray([1])->getIterator(), 'extra'); } catch (Error $e) { echo $e->getMessage(), "\n"; }
     /// ```
     /// ```expect
     /// Cannot manually construct InternalIterator
     /// ```
-    #[php(private)]
+    #[php(private, arity = manual)]
     fn __construct(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let _ = this;
         Err(throw(

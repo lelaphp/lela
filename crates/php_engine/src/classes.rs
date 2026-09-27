@@ -656,7 +656,7 @@ impl stdClass {}
 /// it, and it raises the same.
 ///
 /// ```php
-/// try { (new ReflectionMethod('Closure', '__construct'))->invoke(fn () => 1); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// try { (new ReflectionMethod('Closure', '__construct'))->invoke(fn () => 1, 'extra'); } catch (Error $e) { echo $e->getMessage(), "\n"; }
 /// ```
 /// ```expect
 /// Instantiation of class Closure is not allowed
@@ -666,8 +666,9 @@ pub(crate) struct Closure;
 
 #[php_class]
 impl Closure {
-    /// `ZEND_METHOD(Closure, __construct)`: php's `Error`.
-    #[php(private)]
+    /// `ZEND_METHOD(Closure, __construct)`: php's `Error`, whatever it was
+    /// handed, since php's body parses no parameter.
+    #[php(private, arity = manual)]
     fn __construct(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let _ = this;
         Err(throw(
@@ -1208,7 +1209,7 @@ impl ArrayAccess {
 /// var_dump($e->getMessage(), $e->getCode(), $e->getFile() === __FILE__, $e->getLine(), $e->getTrace(), $e->getPrevious()->getMessage(), $e->getTraceAsString());
 /// var_dump($e->__wakeup());
 /// echo $e, "\n";
-/// try { (new ReflectionMethod('Exception', '__clone'))->invoke($e); } catch (Exception $c) { echo $c->getMessage(), "\n"; }
+/// try { (new ReflectionMethod('Exception', '__clone'))->invoke($e, 'extra'); } catch (Exception $c) { echo $c->getMessage(), "\n"; }
 /// ```
 /// ```expect
 /// string(1) "m"
@@ -1251,8 +1252,9 @@ impl Exception {
 
     /// `ZEND_METHOD(Exception, __clone)`: private, so a call from outside
     /// the class never reaches it; what reflection reaches is php's
-    /// `Exception` saying an object is not cloned this way.
-    #[php(private)]
+    /// `Exception` saying an object is not cloned this way, whatever it was
+    /// handed, since php's body parses no parameter.
+    #[php(private, arity = manual)]
     fn __clone(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let _ = this;
         Err(throw(
