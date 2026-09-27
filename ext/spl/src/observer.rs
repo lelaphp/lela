@@ -682,6 +682,25 @@ impl SplObjectStorage {
     /// Error at offset 6 of 20 bytes
     /// Error at offset 0 of 1 bytes
     /// ```
+    ///
+    /// A row read again replaces its information, and the old
+    /// information and the object are held until the reader is done, as
+    /// `var_push_dtor` holds them, so what they free comes back to the
+    /// store in php's order.
+    ///
+    /// ```php
+    /// foreach (['x:i:3;O:8:"stdClass":0:{},O:8:"stdClass":0:{};R:2;,i:1;;O:8:"stdClass":0:{},r:2;;m:a:0:{}', 'x:i:3;O:8:"stdClass":0:{},O:8:"stdClass":0:{};r:2;,i:1;;O:8:"stdClass":0:{},r:2;;m:a:0:{}'] as $blob) {
+    ///     try {
+    ///         $so = new SplObjectStorage; $so->unserialize($blob);
+    ///         $ids = []; foreach ($so as $i => $o) $ids[] = spl_object_id($o) . ":" . (is_object($so[$o]) ? spl_object_id($so[$o]) : $so[$o]);
+    ///         echo implode(" ", $ids), "\n";
+    ///     } catch (UnexpectedValueException $e) { echo $e->getMessage(), "\n"; }
+    /// }
+    /// ```
+    /// ```expect
+    /// Error at offset 46 of 89 bytes
+    /// 1:1 2:1
+    /// ```
     #[php(tentative)]
     fn unserialize(req: &mut Request, this: This<Self>, data: PhpString) -> Result<(), Thrown> {
         let this = this.object();
@@ -690,8 +709,12 @@ impl SplObjectStorage {
             return Ok(());
         }
         let mut reader = php_ext_standard::Unserializer::new(req, &data);
-        let read = read_storage(req, this, &mut reader, &data);
+        let mut replaced = Vec::new();
+        let read = read_storage(req, this, &mut reader, &data, &mut replaced);
         let finished = reader.finish(req);
+        for held in replaced {
+            req.release(held);
+        }
         let broke_at = read?;
         finished?;
         match broke_at {
@@ -1759,6 +1782,7 @@ fn read_storage(
     this: PhpObject,
     reader: &mut php_ext_standard::Unserializer<'_>,
     data: &[u8],
+    replaced: &mut Vec<Value>,
 ) -> Result<Option<usize>, Thrown> {
     if !data.starts_with(b"x:") {
         return Ok(Some(0));
@@ -1797,6 +1821,28 @@ fn read_storage(
             req.release(inf);
             return Ok(Some(reader.offset()));
         };
+        // A row read again keeps its information and its object until
+        // the var hash is destroyed (`var_push_dtor`), so the attach that
+        // replaces the information frees nothing meanwhile.
+        let key = match row_key(req, this, target) {
+            Ok(key) => key,
+            Err(thrown) => {
+                req.release(entry);
+                req.release(inf);
+                return Err(thrown);
+            }
+        };
+        let found = with(req, this, |s| {
+            s.places
+                .get(&key)
+                .and_then(|at| s.rows[*at].as_ref().map(|row| (row.1, row.2)))
+        })?;
+        if let Some((object, old)) = found {
+            req.addref(&old);
+            replaced.push(old);
+            req.addref(&object.as_value());
+            replaced.push(object.as_value());
+        }
         let attached = storage_attach(req, this, target, inf);
         req.release(entry);
         req.release(inf);
