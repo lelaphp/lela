@@ -6851,7 +6851,13 @@ impl Request {
     /// ```
     pub(crate) fn overloaded_fetch(&self, object: PhpObject, name: &[u8]) -> bool {
         let class = object.class();
-        if !self.serves_accessor(class, b"__get") || self.guard_word(object, name) & IN_GET != 0 {
+        if !self.serves_accessor(class, b"__get") {
+            return false;
+        }
+        if self.wrong_name(class, name) {
+            return true;
+        }
+        if self.guard_word(object, name) & IN_GET != 0 {
             return false;
         }
         let o = object.heap();
@@ -7066,6 +7072,68 @@ impl Request {
             "Error",
             &format!("Typed property {class}::${shown} must not be accessed before initialization"),
         )
+    }
+
+    /// `zend_get_property_offset`'s other wrong offset: a name no class
+    /// declared that starts with a NUL byte, which is how a mangled
+    /// private or protected name reads, is no property PHP code may
+    /// reach, and is no dynamic one.
+    pub(crate) fn bad_property_name(name: &[u8]) -> bool {
+        name.first() == Some(&0)
+    }
+
+    /// [`Request::bad_property_name`] over a name `class` did not
+    /// declare, which is the wrong offset `zend_get_property_offset`
+    /// answers: a `__get` is asked for it whatever its guard says, and
+    /// the guard standing is [`Request::wrong_offset`]'s `Error`.
+    fn wrong_name(&self, class: ClassId, name: &[u8]) -> bool {
+        Self::bad_property_name(name) && self.declared_slot(class, name).is_none()
+    }
+
+    /// `zend_bad_property_name`: php's `Error` for a name
+    /// [`Request::bad_property_name`] refuses.
+    ///
+    /// ```php
+    /// class A { function __unset($p) { unset($this->$p); }
+    ///     function __set($p, $v) { $this->$p = $v; }
+    ///     function __get($p) { return $this->$p; } }
+    /// $a = new A; $p = "\0x"; $o = new stdClass;
+    /// foreach ([fn() => $a->$p, fn() => $a->$p = 1, function () use ($a, $p) { unset($a->$p); },
+    ///           fn() => $o->$p, fn() => $o->$p = 1, fn() => $o->$p[] = 1, fn() => $o->$p++] as $f) {
+    ///     try { $f(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// }
+    /// var_dump(isset($o->$p), isset($a->$p), property_exists($o, $p));
+    /// ```
+    /// ```expect
+    /// Cannot access property starting with "\0"
+    /// Cannot access property starting with "\0"
+    /// Cannot access property starting with "\0"
+    /// Cannot access property starting with "\0"
+    /// Cannot access property starting with "\0"
+    /// Cannot access property starting with "\0"
+    /// Cannot access property starting with "\0"
+    /// bool(false)
+    /// bool(false)
+    /// bool(false)
+    /// ```
+    pub(crate) fn bad_property_name_error(&mut self) -> Thrown {
+        crate::api::raising::throw(
+            self,
+            "Error",
+            "Cannot access property starting with \"\\0\"",
+        )
+    }
+
+    /// `zend_wrong_offset`: the placement a magic accessor's guard
+    /// kept silent made again, loudly, where the guard stands and the
+    /// accessor cannot answer: the `Error` for a declared property the
+    /// scope may not reach, or for a name that starts with a NUL byte.
+    fn wrong_offset(&mut self, class: ClassId, name: &[u8]) -> Option<Thrown> {
+        if let Some(placed) = self.declared_slot(class, name) {
+            return (!self.may_access(placed.declaring, placed.visibility))
+                .then(|| self.inaccessible_property(class, placed.visibility, name));
+        }
+        Self::bad_property_name(name).then(|| self.bad_property_name_error())
     }
 
     /// `zend_bad_property_access`: php's `Error` for a property the
@@ -7343,6 +7411,11 @@ impl Request {
                 }
                 wrong = true;
             }
+        } else if Self::bad_property_name(name) {
+            if !silent && !self.serves_accessor(class, b"__get") {
+                return Err(self.bad_property_name_error());
+            }
+            wrong = true;
         } else {
             let dynamic = o
                 .properties()
@@ -7389,10 +7462,10 @@ impl Request {
                 return self.hold_magic_get(class, name, getter, got);
             }
             // `zend_wrong_offset`: the guard stands and the placement
-            // was one the scope may not reach, so it is made again,
-            // loudly, and the `Error` it raises is the answer.
-            if wrong && let Some(placed) = self.declared_slot(class, name) {
-                return Err(self.inaccessible_property(class, placed.visibility, name));
+            // was a wrong offset, so it is made again, loudly, and the
+            // `Error` it raises is the answer.
+            if wrong && let Some(thrown) = self.wrong_offset(class, name) {
+                return Err(thrown);
             }
         }
         // `uninit_error` over a lazy object: a name nothing holds
@@ -7489,6 +7562,9 @@ impl Request {
     ) -> Result<Option<(u32, bool)>, Thrown> {
         let class = object.class();
         let Some(placed) = self.declared_slot(class, name) else {
+            if !silent && Self::bad_property_name(name) {
+                return Err(self.bad_property_name_error());
+            }
             return Ok(None);
         };
         if !self.may_access(placed.declaring, placed.visibility) {
@@ -7821,7 +7897,15 @@ impl Request {
                 return self.write_std_property(object, name, value);
             }
         }
+        let bad_name = placed.is_none() && Self::bad_property_name(name.as_bytes());
+        if bad_name && !self.serves_accessor(class, b"__set") {
+            let thrown = self.bad_property_name_error();
+            self.release(value);
+            self.release(Value::string(name));
+            return Err(thrown);
+        }
         let held = placed.is_none()
+            && !bad_name
             && o.properties()
                 .is_some_and(|table| table.contains(php_heap::Key::Str(name.heap())));
         if held {
@@ -7841,9 +7925,10 @@ impl Request {
             return self.write_std_property(object, name, value);
         };
         let bytes = name.as_bytes().to_vec();
-        let wrong = placed
-            .as_ref()
-            .is_some_and(|p| !self.may_access(p.declaring, p.visibility));
+        let wrong = bad_name
+            || placed
+                .as_ref()
+                .is_some_and(|p| !self.may_access(p.declaring, p.visibility));
         if self.guard_word(object, &bytes) & IN_SET == 0 {
             let served = self.call_accessor(object, setter, IN_SET, &bytes, &[value]);
             self.release(value);
@@ -7853,10 +7938,8 @@ impl Request {
             return Ok(());
         }
         // `zend_wrong_offset`: the guard stands, so the placement is
-        // made again and the `Error` it raises for a property the scope
-        // may not reach is the answer.
-        if wrong && let Some(placed) = self.declared_slot(class, &bytes) {
-            let thrown = self.inaccessible_property(class, placed.visibility, &bytes);
+        // made again and the `Error` it raises is the answer.
+        if wrong && let Some(thrown) = self.wrong_offset(class, &bytes) {
             self.release(value);
             self.release(Value::string(name));
             return Err(thrown);
@@ -8145,6 +8228,31 @@ impl Request {
         self.array_update(table, table_key, value)?;
         self.release(Value::string(key));
         Ok(true)
+    }
+
+    /// `object_and_properties_init` over `zend_symtable_to_proptable`,
+    /// the `(object)` cast of an array: each element laid into the new
+    /// object's dynamic table under its key as a property name, one
+    /// owner of it taken and a reference kept as the reference, with no
+    /// handler in the way, so a key a handler would refuse, a mangled
+    /// one that opens with a NUL byte, is laid down as it is.
+    pub(crate) fn properties_from_array(
+        &mut self,
+        object: PhpObject,
+        array: PhpArray,
+    ) -> Result<(), Thrown> {
+        for (key, entry) in array.snapshot_refs() {
+            let name = key.to_prop_name(self)?;
+            self.addref(&entry);
+            let o = object.heap();
+            let table = self.heap.object_properties(o);
+            let table = self.fatal_of(table)?;
+            let table = self.array_separate(table)?;
+            self.heap.object_set_properties(o, table);
+            self.array_update(table, php_heap::Key::Str(name.heap()), entry)?;
+            self.release(Value::string(name));
+        }
+        Ok(())
     }
 
     /// The two arms php takes before it lays a name the class did not
@@ -8450,7 +8558,8 @@ impl Request {
     /// guard is not already holding.
     pub(crate) fn overloaded_place(&self, object: PhpObject, name: &[u8]) -> bool {
         self.serves_accessor(object.class(), b"__get")
-            && self.guard_word(object, name) & IN_GET == 0
+            && (self.guard_word(object, name) & IN_GET == 0
+                || self.wrong_name(object.class(), name))
     }
 
     /// The properties in order, the declared slots that hold a value
@@ -9752,6 +9861,7 @@ impl Request {
                     None
                 }
             }
+            None if Self::bad_property_name(name) => None,
             None => self.object_prop(o, name),
         };
         if let Some(value) = value {
@@ -10052,6 +10162,11 @@ impl Request {
                 }
                 wrong = true;
             }
+        } else if Self::bad_property_name(name) {
+            if unsetter.is_none() {
+                return Err(self.bad_property_name_error());
+            }
+            wrong = true;
         } else if let Some(table) = o.properties() {
             let key = self.interned(name)?;
             let key = php_heap::Key::Str(key.heap());
@@ -10075,8 +10190,8 @@ impl Request {
                 self.release(answered);
                 return Ok(());
             }
-            if wrong && let Some(placed) = self.declared_slot(class, name) {
-                return Err(self.inaccessible_property(class, placed.visibility, name));
+            if wrong && let Some(thrown) = self.wrong_offset(class, name) {
+                return Err(thrown);
             }
         }
         // A lazy object with nothing that answered the name is

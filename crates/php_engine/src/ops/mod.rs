@@ -1469,13 +1469,7 @@ pub(crate) fn to_object(req: &mut Request, value: &Value) -> Result<PhpObject, T
     let object = req.new_object_of("stdClass")?;
     match value.as_ref() {
         ValueRef::Undef | ValueRef::Null => {}
-        ValueRef::Array(a) => {
-            for (key, entry) in a.snapshot_refs() {
-                let name = key.to_prop_name(req)?;
-                req.addref(&entry);
-                object.set_prop(req, name, entry)?;
-            }
-        }
+        ValueRef::Array(a) => req.properties_from_array(object, *a)?,
         _ => {
             if value.as_float().is_some_and(f64::is_nan) {
                 warning(req, "unexpected NAN value was coerced to object");
