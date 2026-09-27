@@ -8051,23 +8051,30 @@ fn write_container(req: &mut Request, place: php_heap::ZvalRef) -> Result<Contai
     ))
 }
 
-/// `zend_assign_to_string_offset` (`Z/Zend/zend_execute.c`), `$s[k] = v`
-/// over a string: the offset read as [`string_dim_offset`] reads it,
-/// php's warning `Illegal string offset` and `null` for one further from
-/// the end than the string is long, and a negative one counted from the
-/// end. The value is the first byte of what it reads as a string, php's
-/// `Error` `Cannot assign an empty string to a string offset` where it
-/// has none and the warning `Only the first byte will be assigned to the
-/// string offset` where it has more; what is written is that one byte,
-/// and what the opline's temporary is handed is that byte as a string of
-/// one byte (`ZVAL_CHAR`).
+/// `zend_assign_to_string_offset` (`Z/Zend/zend_execute.c:2038`),
+/// `$s[k] = v` over a string: the offset read as [`string_dim_offset`]
+/// reads it, php's warning `Illegal string offset` and `null` for one
+/// further from the end than the string is long, and a negative one
+/// counted from the end. The value is the first byte of what it reads as
+/// a string, php's `Error` `Cannot assign an empty string to a string
+/// offset` where it has none and the warning `Only the first byte will
+/// be assigned to the string offset` where it has more; what is written
+/// is that one byte, and [`TextWrite::Byte`] is what the opline's
+/// temporary is handed, that byte as a string of one byte (`ZVAL_CHAR`).
 ///
-/// The string is php's `SEPARATE_STRING` first: one the request owns
-/// alone and long enough is written where it stands
-/// ([`php_heap::Str::put_byte`]) and allocates nothing, and every other
-/// one is laid down anew, which is the copy php makes for a shared or an
-/// interned string and the `zend_string_extend` it makes for an offset
-/// past the end, the bytes between padded with spaces.
+/// The string is php's `SEPARATE_STRING` first ([`separate_string`]),
+/// a copy laid into the place for a shared or an interned one, so the string written is the
+/// place's alone before anything can raise. Then the dimension that is
+/// no long, the value that is no string and the value longer than a
+/// byte each raise with the string held ([`Request::take_hold`]), php's
+/// `GC_ADDREF(s)`, since a handler the diagnostic reaches may overwrite
+/// the variable the string hangs from; where the hold was the string's
+/// last owner the write lands nowhere and the temporary is `null`
+/// ([`TextWrite::Gone`], `GC_DELREF(s) == 0` and `zend_string_efree`).
+/// A string still the place's alone and long enough is written where it
+/// stands ([`php_heap::Str::put_byte`]) and allocates nothing, and any
+/// other is laid down anew, the `zend_string_extend` php makes for an
+/// offset past the end, the bytes between padded with spaces.
 ///
 /// ```php
 /// $s = "abc";
@@ -8092,6 +8099,52 @@ fn write_container(req: &mut Request, place: php_heap::ZvalRef) -> Result<Contai
 ///
 /// Warning: Illegal string offset -9 in %s on line 11
 /// string(6) "hXc  Q"
+/// ```
+///
+/// A handler that overwrites the array the string sits in frees the
+/// string under the write, at the dimension's diagnostics, at the
+/// value's and at the warning over a value longer than a byte; the
+/// dimension raises before the value does.
+///
+/// ```php
+/// set_error_handler(function ($no, $message) {
+///     echo $message, "\n";
+///     $GLOBALS['a'] = '';
+/// });
+/// $a = ['a'];
+/// var_dump($a[0][$d] = 'b');
+/// var_dump($a);
+/// $a = ['abc'];
+/// var_dump($a[0][0] = 7.5);
+/// var_dump($a);
+/// $a = ['abc'];
+/// var_dump($a[0][0] = $v);
+/// var_dump($a);
+/// $a = ['abc'];
+/// var_dump($a[0][0] = 'long');
+/// var_dump($a);
+/// set_error_handler(function ($no, $message) { echo $message, "\n"; });
+/// $s = 'abc';
+/// var_dump($s[$d] = 5, $s);
+/// ```
+/// ```expect
+/// Undefined variable $d
+/// String offset cast occurred
+/// NULL
+/// string(0) ""
+/// Only the first byte will be assigned to the string offset
+/// NULL
+/// string(0) ""
+/// Undefined variable $v
+/// NULL
+/// string(0) ""
+/// Only the first byte will be assigned to the string offset
+/// NULL
+/// string(0) ""
+/// Undefined variable $d
+/// String offset cast occurred
+/// string(1) "5"
+/// string(3) "5bc"
 /// ```
 ///
 /// A value with no byte at all is php's `Error`.
@@ -8121,34 +8174,46 @@ fn write_container(req: &mut Request, place: php_heap::ZvalRef) -> Result<Contai
 /// ```
 fn assign_string_offset(
     req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    data: Opline,
     at: php_heap::ZvalRef,
-    dim: &Value,
-    value: &Value,
-) -> Result<Value, Thrown> {
-    let held = exec::value_of(at.read());
-    let Some(text) = held.as_php_string().copied() else {
-        return Ok(Value::null());
+) -> Result<TextWrite, Thrown> {
+    let Some(text) = separate_string(req, at)? else {
+        return Ok(TextWrite::Gone);
     };
+    let string = Value::string(text);
     // A write is `BP_VAR_W`, which `zend_check_string_offset` runs
     // through the read's ladder with php's errors on, so no arm of it
-    // answers `null` here.
-    let Some(offset) = string_dim_offset(req, dim, DimRead::Warning)? else {
-        return Ok(Value::null());
+    // answers `None` here.
+    let dim = exec::operand_undef(req, frame, code, op.op2_type, op.op2);
+    let offset = if let ValueRef::Int(n) = dim.as_ref() {
+        n
+    } else {
+        let offset = string_held(req, string, |req| {
+            // `ZVAL_UNDEFINED_OP2()` and the cast warning after it.
+            let dim = exec::operand(req, frame, code, op.op2_type, op.op2);
+            string_dim_offset(req, &dim, DimRead::Warning)
+        })?;
+        match offset {
+            Some(Some(offset)) => offset,
+            Some(None) | None => return Ok(TextWrite::Gone),
+        }
     };
     let len = i64::try_from(text.len()).unwrap_or(i64::MAX);
     if offset < -len {
         crate::api::raising::warning(req, &format!("Illegal string offset {offset}"));
-        return Ok(Value::null());
+        return Ok(TextWrite::Gone);
     }
     let offset = if offset < 0 {
         offset.saturating_add(len)
     } else {
         offset
     };
-    let written = crate::ops::to_string(req, value)?;
-    let count = written.len();
-    let byte = written.as_bytes().first().copied().unwrap_or(0);
-    req.release(Value::string(written));
+    let Some((count, byte)) = offset_byte(req, frame, code, data, string)? else {
+        return Ok(TextWrite::Gone);
+    };
     if count == 0 {
         return Err(crate::api::raising::throw(
             req,
@@ -8156,19 +8221,24 @@ fn assign_string_offset(
             "Cannot assign an empty string to a string offset",
         ));
     }
-    if count != 1 {
-        crate::api::raising::warning(
-            req,
-            "Only the first byte will be assigned to the string offset",
-        );
+    if count != 1
+        && string_held(req, string, |req| {
+            crate::api::raising::warning(
+                req,
+                "Only the first byte will be assigned to the string offset",
+            );
+            Ok(())
+        })?
+        .is_none()
+    {
+        return Ok(TextWrite::Gone);
     }
     let index = usize::try_from(offset).unwrap_or(usize::MAX);
-    let need = index.saturating_add(1).max(text.len());
     let s = text.heap();
-    let alone = !s.is_interned() && !s.is_persistent() && s.refcount() == 1;
-    if alone && need == text.len() {
+    if s.refcount() == 1 && index < text.len() {
         s.put_byte(index, byte);
     } else {
+        let need = index.saturating_add(1).max(text.len());
         let fresh = PhpString::filled(req, need, |bytes| {
             let old = text.as_bytes();
             let copied = old.len().min(bytes.len());
@@ -8183,9 +8253,91 @@ fn assign_string_offset(
             }
         })?;
         at.write(php_heap::Zval::string(fresh.heap()));
-        req.release(held);
+        req.release(string);
     }
-    Ok(Value::string(PhpString::new(req, &[byte])?))
+    Ok(TextWrite::Byte(byte))
+}
+
+/// php's `SEPARATE_STRING` over the string at `at`: the string itself
+/// where the place is its one owner, and otherwise a copy of it laid
+/// into the place, the one the place had given up (`GC_DELREF`).
+fn separate_string(req: &mut Request, at: php_heap::ZvalRef) -> Result<Option<PhpString>, Thrown> {
+    let held = exec::value_of(at.read());
+    let Some(text) = held.as_php_string().copied() else {
+        return Ok(None);
+    };
+    let s = text.heap();
+    if !s.is_interned() && !s.is_persistent() && s.refcount() == 1 {
+        return Ok(Some(text));
+    }
+    let fresh = PhpString::filled(req, text.len(), |bytes| {
+        for (slot, byte) in bytes.iter_mut().zip(text.as_bytes()) {
+            *slot = *byte;
+        }
+    })?;
+    at.write(php_heap::Zval::string(fresh.heap()));
+    // Another owner stands, or none was ever counted.
+    req.release(held);
+    Ok(Some(fresh))
+}
+
+/// The value of a write over a string offset read for the byte it
+/// writes: its length and its first byte. A string is read as it
+/// stands; anything else is read as a string with `string` held, php's
+/// `zval_undefined_cv()` for an unwritten variable and
+/// `zval_try_get_string_func()` after it, and `None` where the hold was
+/// the string's last owner.
+fn offset_byte(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    data: Opline,
+    string: Value,
+) -> Result<Option<(usize, u8)>, Thrown> {
+    let first = |bytes: &[u8]| (bytes.len(), bytes.first().copied().unwrap_or(0));
+    if let Some(value) = exec::operand_undef(req, frame, code, data.op1_type, data.op1)
+        .deref()
+        .as_php_string()
+    {
+        return Ok(Some(first(value.as_bytes())));
+    }
+    string_held(req, string, |req| {
+        let value = exec::take_operand(req, frame, code, data.op1_type, data.op1);
+        let written = crate::ops::to_string(req, &value);
+        req.release(value);
+        let written = written?;
+        let read = first(written.as_bytes());
+        req.release(Value::string(written));
+        Ok(read)
+    })
+}
+
+/// What a write over a string offset handed the opline's temporary: the
+/// byte written, or `null` where the write landed nowhere.
+enum TextWrite {
+    Byte(u8),
+    Gone,
+}
+
+/// `step` with the string a write is landing in held across it, php's
+/// `GC_ADDREF(s)` before a diagnostic or a conversion and `GC_DELREF(s)
+/// == 0` after it: what `step` answered where the string stands, `None`
+/// where the hold was its last owner and it is freed, and the throw
+/// where one is pending (`EG(exception)`), which the handler after
+/// the write raises whether the string stands or not.
+fn string_held<T>(
+    req: &mut Request,
+    string: Value,
+    step: impl FnOnce(&mut Request) -> Result<T, Thrown>,
+) -> Result<Option<T>, Thrown> {
+    let held = req.take_hold(string);
+    let stepped = step(req);
+    let left = req.let_go(held);
+    let stepped = stepped?;
+    if req.is_pending() {
+        return Err(Thrown::of(None));
+    }
+    Ok((!left.freed()).then_some(stepped))
 }
 
 /// Where a dimension write over an array lands, before the table is
@@ -11623,8 +11775,9 @@ fn assign_object_dim(
 
 /// The arm `ZEND_ASSIGN_DIM` takes over a string: `$s[] = v` is php's
 /// `zend_use_new_element_for_string`, read before the value is, and a
-/// dimension is [`assign_string_offset`], whose byte is what the
-/// temporary `out` names under `RETURN_VALUE_USED`.
+/// dimension is [`assign_string_offset`], whose byte, or `null` where
+/// the write landed nowhere, is what the temporary `out` names under
+/// `RETURN_VALUE_USED`.
 fn assign_text_dim(
     req: &mut Request,
     frame: FrameRef,
@@ -11640,11 +11793,13 @@ fn assign_text_dim(
             "[] operator not supported for strings",
         ));
     }
-    let dim = exec::operand(req, frame, code, op.op2_type, op.op2);
-    let value = exec::take_operand(req, frame, code, data.op1_type, data.op1);
-    let byte = assign_string_offset(req, place, &dim, &value);
-    req.release(value);
-    let byte = byte?;
+    let written = assign_string_offset(req, frame, code, op, data, place);
+    // `FREE_OP_DATA`, where the write landed before the value was read.
+    exec::free_operand(req, frame, code, data.op1_type, data.op1);
+    let byte = match written? {
+        TextWrite::Byte(byte) => Value::string(PhpString::new(req, &[byte])?),
+        TextWrite::Gone => Value::null(),
+    };
     write_out(req, frame, code, op, &byte);
     req.release(byte);
     Ok(())
