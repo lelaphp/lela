@@ -7443,8 +7443,9 @@ impl Request {
     /// placement: a declared slot the scope reaches that nothing holds,
     /// where no `__get` answers for it or it is `IS_PROP_UNINIT`, raises
     /// the read's own diagnostic, the typed property's `Error` naming the
-    /// class that declared it or the warning, and php then leaves an
-    /// untyped one holding `null`. Anything else is the placement's.
+    /// class that declared it or the warning, an untyped one laid to
+    /// `null` before the warning as php lays it. Anything else is the
+    /// placement's.
     pub(crate) fn read_before_write(
         &mut self,
         object: PhpObject,
@@ -7469,10 +7470,13 @@ impl Request {
         if placed.typed {
             return Err(self.uninitialized_property(placed.declaring, name));
         }
+        // `ZVAL_NULL(retval)` before the warning, so what an error handler
+        // writes into the slot is what the fetch then reads.
+        self.write_declared_slot(o, placed.slot, Value::null())?;
         let class = self.class_name(class);
         let shown = String::from_utf8_lossy(name).into_owned();
         crate::api::raising::warning(self, &format!("Undefined property: {class}::${shown}"));
-        self.write_declared_slot(o, placed.slot, Value::null())
+        Ok(())
     }
 
     /// Whether a write fetch over `name` reads the property rather than
@@ -7753,6 +7757,19 @@ impl Request {
         if lazy {
             return self.lazy_write(object, name, value, true);
         }
+        // `write_std_property`'s set-visibility arm, which the write a
+        // `__set` makes on its own property, under the guard, meets.
+        if let Some(placed) = self.declared_slot(class, &bytes)
+            && !placed.readonly
+            && let Some(set) = placed.set_visibility
+            && !self.has_set_access(placed.declaring, set)
+        {
+            let thrown =
+                self.set_inaccessible_property(placed.declaring, set, false, &bytes, "modify");
+            self.release(value);
+            self.release(Value::string(name));
+            return Err(thrown);
+        }
         self.write_std_property(object, name, value)
     }
 
@@ -7851,23 +7868,6 @@ impl Request {
     ) -> Result<(), Thrown> {
         let o = object.heap();
         if let Some(placed) = self.declared_slot(object.class(), name.as_bytes()) {
-            // `write_std_property`'s own set-visibility arm, which a write
-            // the magic setter passed on, or made from inside it, meets.
-            if !placed.readonly
-                && let Some(set) = placed.set_visibility
-                && !self.has_set_access(placed.declaring, set)
-            {
-                self.release(value);
-                self.release(Value::string(name));
-                let thrown = self.set_inaccessible_property(
-                    placed.declaring,
-                    set,
-                    false,
-                    name.as_bytes(),
-                    "modify",
-                );
-                return Err(thrown);
-            }
             let value = if placed.typed {
                 let Some(typed) = self.declared_typed_property(object.class(), name.as_bytes())
                 else {

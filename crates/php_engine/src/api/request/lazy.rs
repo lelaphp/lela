@@ -302,8 +302,11 @@ impl Request {
             None => {
                 let object = crate::api::call::new_object(self, class)?;
                 let o = object.heap();
+                // `Z_PROP_FLAG_P(p) = IS_PROP_UNINIT | IS_PROP_LAZY` over
+                // every slot, as `zend_object_make_lazy` lays them.
                 for i in 0..o.slots() {
                     Heap::object_set_slot(&mut Hooks(self), o, i, php_heap::Zval::UNDEF);
+                    o.set_slot_bit(i, php_heap::PropBit::Uninit, true);
                 }
                 (object, vec![true; o.slots() as usize])
             }
@@ -392,6 +395,7 @@ impl Request {
                 }
                 Heap::object_set_slot(&mut Hooks(self), o, slot, php_heap::Zval::UNDEF);
             }
+            o.set_slot_bit(slot, php_heap::PropBit::Uninit, true);
             if let Some(at) = lazy.get_mut(i) {
                 *at = true;
             }
@@ -908,6 +912,7 @@ impl Request {
         let p = proxy.heap();
         for i in 0..p.slots() {
             Heap::object_set_slot(&mut Hooks(self), p, i, php_heap::Zval::UNDEF);
+            p.set_slot_bit(i, php_heap::PropBit::Uninit, true);
         }
         let table = self.object_handlers(instance.heap());
         let copy = match table.clone_obj() {
