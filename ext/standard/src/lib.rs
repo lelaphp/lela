@@ -112,7 +112,7 @@ pub use url_scanner::{php_url_scanner_add_session_var, php_url_scanner_reset_ses
 
 use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, OnModify};
 use php_ext::raising::{Thrown, arg_value_error};
-use php_ext::request::Request;
+use php_ext::request::{EngineWrapper, Request};
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
 /// private to this crate (ADR-0005); nothing in it is shared or synchronised.
@@ -762,15 +762,21 @@ fn ini_handlers() -> [(&'static [u8], OnModify); 7] {
     ]
 }
 
-/// `PHP_RINIT(basic)`'s share here: the `glob://` wrapper and the
-/// filters, which php registers as the engine starts and this engine keeps
-/// in the request's wrapper and filter tables (`dir::glob_wrapper`,
-/// `filters::register`). The `assert.*` entries' startup deprecations are
-/// their on-modify rules, which the engine serves over the host's values
-/// as it starts.
+/// `PHP_RINIT(basic)`'s share here: the wrappers and the filters, which
+/// php registers as the engine starts and this engine keeps in the
+/// request's wrapper and filter tables (`filters::register`). The
+/// wrappers go in as `PHP_MINIT(basic)` registers them
+/// (`Z/ext/standard/basic_functions.c:341-346`): `php`, `file`, `glob`,
+/// `data`, the engine keeping the kinds of all but `glob`; `http` and
+/// `ftp` follow when they land. The `assert.*` entries' startup
+/// deprecations are their on-modify rules, which the engine serves over
+/// the host's values as it starts.
 #[allow(clippy::unnecessary_wraps)] // `ExtensionBuilder::rinit`'s signature
 fn rinit(req: &mut Request) -> Result<(), Thrown> {
+    req.register_engine_wrapper(EngineWrapper::Php);
+    req.register_engine_wrapper(EngineWrapper::Plain);
     req.register_wrapper(dir::glob_wrapper());
+    req.register_engine_wrapper(EngineWrapper::Data);
     filters::register(req);
     Ok(())
 }

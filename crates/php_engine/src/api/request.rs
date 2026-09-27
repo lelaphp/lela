@@ -812,6 +812,21 @@ pub struct StreamWrapper {
     pub set_stat: Option<fn(&mut Request, &[u8], WrapperOp<'_>) -> Result<bool, Thrown>>,
 }
 
+/// A wrapper whose kinds the engine keeps, which the extension that
+/// registers it in php, `standard`, registers here by name at its place
+/// in `PHP_MINIT(basic)`'s order (`Z/ext/standard/basic_functions.c:341`),
+/// so `url_stream_wrappers_hash` has one order for the engine's wrappers
+/// and every extension's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineWrapper {
+    /// `php://`, `php_stream_php_wrapper`.
+    Php,
+    /// `file://`, `php_plain_files_wrapper`.
+    Plain,
+    /// `data:`, `php_stream_rfc2397_wrapper`.
+    Data,
+}
+
 /// One wrapper operation past opening, php's `php_stream_wrapper_ops`
 /// from `unlink` on, as [`Request::wrapper_op`] hands it to the wrapper
 /// of a path: `stream_metadata`'s options are the last four, with an
@@ -1304,7 +1319,14 @@ pub struct Request {
     /// reused, so a cell freed and a cell laid down at its address are
     /// never one row.
     next_ref_source: usize,
+    /// The operations of each wrapper an extension registered, which a
+    /// [`crate::streams::Located::Ext`] row names by its place.
     pub(crate) wrappers: Vec<StreamWrapper>,
+    /// `url_stream_wrappers_hash`: the table every request starts with,
+    /// the engine's wrappers and the extensions' in the order they were
+    /// registered, the engine's three standing first until the extension
+    /// that registers them places them.
+    pub(crate) url_stream_wrappers: Vec<crate::streams::Registered>,
     /// `FG(stream_wrappers)`: the request's own wrapper table once a
     /// program changed it, `None` while it has the built-in one.
     pub(crate) url_wrappers: Option<Vec<crate::streams::Registered>>,
@@ -1875,6 +1897,13 @@ impl Request {
             lazy: lazy::Table::default(),
             next_ref_source: 1,
             wrappers: Vec::new(),
+            url_stream_wrappers: [
+                EngineWrapper::Php,
+                EngineWrapper::Plain,
+                EngineWrapper::Data,
+            ]
+            .map(crate::streams::Registered::engine)
+            .into(),
             url_wrappers: None,
             user_stream_current: None,
             in_user_include: false,
@@ -17509,13 +17538,48 @@ impl Request {
         crate::streams::temporary_file(self, None, b"php")
     }
 
-    /// `stream_wrapper_register()`: `false` when the scheme is taken.
+    /// `php_register_url_stream_wrapper`: the wrapper at the end of the
+    /// table every request starts with; `false` when the scheme is taken.
     pub fn register_wrapper(&mut self, wrapper: StreamWrapper) -> bool {
-        if self.wrappers.iter().any(|w| w.scheme == wrapper.scheme) {
+        let row = crate::streams::Registered {
+            scheme: wrapper.scheme.as_bytes().to_vec(),
+            wrapper: crate::streams::Located::Ext(self.wrappers.len()),
+        };
+        if !self.add_url_wrapper(row) {
             return false;
         }
         self.wrappers.push(wrapper);
         true
+    }
+
+    /// `php_register_url_stream_wrapper` of a wrapper the engine keeps,
+    /// under the scheme php registers it by, `php`, `file` or `data`: its
+    /// row moved to the end of the table, where
+    /// [`Request::register_wrapper`] puts one. The engine's table has the
+    /// three from the start, so a bundle without the extension that
+    /// registers them still opens `php://stdin`; the registration is what
+    /// gives each its place among the extensions' wrappers.
+    /// A wrapper restored goes back at the end, after one a program
+    /// registered meanwhile, as php's `stream_wrapper_restore` deletes
+    /// and adds it.
+    ///
+    /// ```php
+    /// class W { public $context; }
+    /// $ours = ['php', 'file', 'glob', 'data', 'mine'];
+    /// echo implode(',', array_values(array_intersect(stream_get_wrappers(), $ours))), "\n";
+    /// stream_wrapper_unregister('data');
+    /// stream_wrapper_register('mine', 'W');
+    /// stream_wrapper_restore('data');
+    /// echo implode(',', array_values(array_intersect(stream_get_wrappers(), $ours))), "\n";
+    /// ```
+    /// ```expect
+    /// php,file,glob,data
+    /// php,file,glob,mine,data
+    /// ```
+    pub fn register_engine_wrapper(&mut self, which: EngineWrapper) {
+        let row = crate::streams::Registered::engine(which);
+        self.url_stream_wrappers.retain(|r| r.scheme != row.scheme);
+        self.url_stream_wrappers.push(row);
     }
 
     /// `stream_get_wrappers()`: the schemes of

@@ -36,7 +36,7 @@ use php_heap::ResourceType;
 
 use crate::api::raising::{Level, Thrown, raise, throw, warning};
 use crate::api::request::{
-    Cast, FdStream, FilterFlags, OptionAnswer, Request, Stream, StreamOption, Whence,
+    Cast, EngineWrapper, FdStream, FilterFlags, OptionAnswer, Request, Stream, StreamOption, Whence,
 };
 use crate::api::values::{ClassId, Key, PhpArray, PhpString, Resource, Value};
 
@@ -2561,6 +2561,21 @@ pub(crate) struct Registered {
     pub(crate) wrapper: Located,
 }
 
+impl Registered {
+    /// The row of a wrapper the engine keeps, under php's scheme for it.
+    pub(crate) fn engine(which: EngineWrapper) -> Registered {
+        let (scheme, wrapper) = match which {
+            EngineWrapper::Php => (&b"php"[..], Located::Php),
+            EngineWrapper::Plain => (&b"file"[..], Located::Plain),
+            EngineWrapper::Data => (&b"data"[..], Located::Data),
+        };
+        Registered {
+            scheme: scheme.to_vec(),
+            wrapper,
+        }
+    }
+}
+
 impl Located {
     /// `wrapper->is_url`: the `data:` wrapper, and one a program
     /// registered with `STREAM_IS_URL`.
@@ -2587,30 +2602,24 @@ fn same_wrapper(a: &Located, b: &Located) -> bool {
 
 impl Request {
     /// `url_stream_wrappers_hash`, the wrappers every request starts
-    /// with: `php`, `file` and `data`, the engine's own, then those the
-    /// extensions registered.
+    /// with, in the order they were registered: the engine's own where
+    /// `standard` places them, among the extensions' (#920).
     pub(crate) fn global_wrappers(&self) -> Vec<Registered> {
-        let mut table = vec![
-            Registered {
-                scheme: b"php".to_vec(),
-                wrapper: Located::Php,
-            },
-            Registered {
-                scheme: b"file".to_vec(),
-                wrapper: Located::Plain,
-            },
-            Registered {
-                scheme: b"data".to_vec(),
-                wrapper: Located::Data,
-            },
-        ];
-        for (at, w) in self.wrappers.iter().enumerate() {
-            table.push(Registered {
-                scheme: w.scheme.as_bytes().to_vec(),
-                wrapper: Located::Ext(at),
-            });
+        self.url_stream_wrappers.clone()
+    }
+
+    /// `php_register_url_stream_wrapper`'s insert: the row at the end of
+    /// the global table, `false` where its scheme is taken.
+    pub(crate) fn add_url_wrapper(&mut self, row: Registered) -> bool {
+        if self
+            .url_stream_wrappers
+            .iter()
+            .any(|r| r.scheme == row.scheme)
+        {
+            return false;
         }
-        table
+        self.url_stream_wrappers.push(row);
+        true
     }
 
     /// `php_stream_get_url_stream_wrappers_hash`: the request's own table
