@@ -4,49 +4,27 @@
 //! (`Z/ext/standard/math.c:62-252`), which `round`, `number_format` and
 //! `range` round with.
 
+use php_ext::abi::{Passed, Raw, Union};
+use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::coerce::{coerce_param, numeric_string};
-use php_ext::decl::{
-    ClassConstDecl, ClassDecl, ClassFlags, ClassKind, ConstDecl, ConstExpr, EnumBacking,
-    FunctionDecl, MethodDecl, Name, Parameter, ParameterDefault, PropertyDecl, Type, Visibility,
-};
+use php_ext::decl::Type;
 use php_ext::raising::{Level, Thrown, arg_value_error, deprecated, docref, throw};
 use php_ext::request::Request;
-use php_ext::values::{PhpString, Value, ValueRef};
+use php_ext::values::{PhpObject, PhpString, Value, ValueRef};
 
-use crate::output::Entry;
-use crate::zpp::double_argument;
-use crate::{argument_count_between, constant, declared, frameless, long_argument, parameter};
+pub(crate) use constants::{
+    PHP_ROUND_HALF_DOWN, PHP_ROUND_HALF_EVEN, PHP_ROUND_HALF_ODD, PHP_ROUND_HALF_UP,
+};
 
-/// `PHP_ROUND_HALF_UP` and the modes beside it (`Z/ext/standard/php_math_modes.h`).
-pub(crate) const PHP_ROUND_HALF_UP: i32 = 0x01;
-pub(crate) const PHP_ROUND_HALF_DOWN: i32 = 0x02;
-pub(crate) const PHP_ROUND_HALF_EVEN: i32 = 0x03;
-pub(crate) const PHP_ROUND_HALF_ODD: i32 = 0x04;
+/// An int or a float, `Z_PARAM_NUMBER`'s two.
+type Number = Union<i64, f64>;
+
+/// The modes of `Z/ext/standard/php_math_modes.h` beside the four the
+/// stub declares as `PHP_ROUND_*`.
 pub(crate) const PHP_ROUND_CEILING: i32 = 0x05;
 pub(crate) const PHP_ROUND_FLOOR: i32 = 0x06;
 pub(crate) const PHP_ROUND_TOWARD_ZERO: i32 = 0x07;
 pub(crate) const PHP_ROUND_AWAY_FROM_ZERO: i32 = 0x08;
-
-/// The cases of `enum RoundingMode`, in the stub's order, each with the
-/// rounding `php_math_round_mode_from_enum` reads it as.
-const ROUNDING_MODES: [(&[u8], i32); 8] = [
-    (b"HalfAwayFromZero", PHP_ROUND_HALF_UP),
-    (b"HalfTowardsZero", PHP_ROUND_HALF_DOWN),
-    (b"HalfEven", PHP_ROUND_HALF_EVEN),
-    (b"HalfOdd", PHP_ROUND_HALF_ODD),
-    (b"TowardsZero", PHP_ROUND_TOWARD_ZERO),
-    (b"AwayFromZero", PHP_ROUND_AWAY_FROM_ZERO),
-    (b"NegativeInfinity", PHP_ROUND_FLOOR),
-    (b"PositiveInfinity", PHP_ROUND_CEILING),
-];
-
-fn float_constant(name: &[u8], value: f64) -> ConstDecl {
-    ConstDecl {
-        name: Name(name.into()),
-        value: ConstExpr::Double(value),
-        attributes: Vec::new(),
-    }
-}
 
 /// The constants of `math.c`'s part of the stub: the seventeen `M_*`
 /// and the four `PHP_ROUND_*` modes.
@@ -79,32 +57,31 @@ fn float_constant(name: &[u8], value: f64) -> ConstDecl {
 /// int(3)
 /// int(4)
 /// ```
-pub(crate) fn constants() -> Vec<ConstDecl> {
-    vec![
-        float_constant(b"M_E", std::f64::consts::E),
-        float_constant(b"M_LOG2E", std::f64::consts::LOG2_E),
-        float_constant(b"M_LOG10E", std::f64::consts::LOG10_E),
-        float_constant(b"M_LN2", std::f64::consts::LN_2),
-        float_constant(b"M_LN10", std::f64::consts::LN_10),
-        float_constant(b"M_PI", std::f64::consts::PI),
-        float_constant(b"M_PI_2", std::f64::consts::FRAC_PI_2),
-        float_constant(b"M_PI_4", std::f64::consts::FRAC_PI_4),
-        float_constant(b"M_1_PI", std::f64::consts::FRAC_1_PI),
-        float_constant(b"M_2_PI", std::f64::consts::FRAC_2_PI),
-        float_constant(b"M_SQRTPI", 1.772_453_850_905_516_f64),
-        float_constant(b"M_2_SQRTPI", std::f64::consts::FRAC_2_SQRT_PI),
-        float_constant(b"M_LNPI", 1.144_729_885_849_400_2_f64),
-        float_constant(b"M_EULER", 0.577_215_664_901_532_9_f64),
-        float_constant(b"M_SQRT2", std::f64::consts::SQRT_2),
-        float_constant(b"M_SQRT1_2", std::f64::consts::FRAC_1_SQRT_2),
-        float_constant(b"M_SQRT3", 1.732_050_807_568_877_2_f64),
-        float_constant(b"INF", f64::INFINITY),
-        float_constant(b"NAN", f64::NAN),
-        constant(b"PHP_ROUND_HALF_UP", i64::from(PHP_ROUND_HALF_UP)),
-        constant(b"PHP_ROUND_HALF_DOWN", i64::from(PHP_ROUND_HALF_DOWN)),
-        constant(b"PHP_ROUND_HALF_EVEN", i64::from(PHP_ROUND_HALF_EVEN)),
-        constant(b"PHP_ROUND_HALF_ODD", i64::from(PHP_ROUND_HALF_ODD)),
-    ]
+#[php_const]
+pub(crate) mod constants {
+    pub(crate) const M_E: f64 = std::f64::consts::E;
+    pub(crate) const M_LOG2E: f64 = std::f64::consts::LOG2_E;
+    pub(crate) const M_LOG10E: f64 = std::f64::consts::LOG10_E;
+    pub(crate) const M_LN2: f64 = std::f64::consts::LN_2;
+    pub(crate) const M_LN10: f64 = std::f64::consts::LN_10;
+    pub(crate) const M_PI: f64 = std::f64::consts::PI;
+    pub(crate) const M_PI_2: f64 = std::f64::consts::FRAC_PI_2;
+    pub(crate) const M_PI_4: f64 = std::f64::consts::FRAC_PI_4;
+    pub(crate) const M_1_PI: f64 = std::f64::consts::FRAC_1_PI;
+    pub(crate) const M_2_PI: f64 = std::f64::consts::FRAC_2_PI;
+    pub(crate) const M_SQRTPI: f64 = 1.772_453_850_905_516_f64;
+    pub(crate) const M_2_SQRTPI: f64 = std::f64::consts::FRAC_2_SQRT_PI;
+    pub(crate) const M_LNPI: f64 = 1.144_729_885_849_400_2_f64;
+    pub(crate) const M_EULER: f64 = 0.577_215_664_901_532_9_f64;
+    pub(crate) const M_SQRT2: f64 = std::f64::consts::SQRT_2;
+    pub(crate) const M_SQRT1_2: f64 = std::f64::consts::FRAC_1_SQRT_2;
+    pub(crate) const M_SQRT3: f64 = 1.732_050_807_568_877_2_f64;
+    pub(crate) const INF: f64 = f64::INFINITY;
+    pub(crate) const NAN: f64 = f64::NAN;
+    pub(crate) const PHP_ROUND_HALF_UP: i32 = 0x01;
+    pub(crate) const PHP_ROUND_HALF_DOWN: i32 = 0x02;
+    pub(crate) const PHP_ROUND_HALF_EVEN: i32 = 0x03;
+    pub(crate) const PHP_ROUND_HALF_ODD: i32 = 0x04;
 }
 
 /// `enum RoundingMode` as `basic_functions.stub.php` declares it, its
@@ -121,65 +98,57 @@ pub(crate) fn constants() -> Vec<ConstDecl> {
 /// string(11) "TowardsZero"
 /// bool(true)
 /// ```
-pub(crate) fn classes() -> Vec<(ClassDecl, Vec<(MethodDecl, Entry)>)> {
-    let name = || Name(b"RoundingMode".as_slice().into());
-    let decl = ClassDecl {
-        name: name(),
-        kind: ClassKind::Enum,
-        flags: ClassFlags {
-            is_final: true,
-            ..ClassFlags::default()
-        },
-        parent: None,
-        interfaces: vec![Name(b"UnitEnum".as_slice().into())],
-        traits: Vec::new(),
-        adaptations: Vec::new(),
-        backing: EnumBacking::Pure,
-        constants: ROUNDING_MODES
-            .iter()
-            .map(|(case, _)| ClassConstDecl {
-                name: Name((*case).into()),
-                visibility: Visibility::Public,
-                is_final: false,
-                is_case: true,
-                ty: None,
-                value: ConstExpr::EnumCase {
-                    class: name(),
-                    case: Name((*case).into()),
-                },
-                attributes: Vec::new(),
-                doc_comment: None,
-            })
-            .collect(),
-        properties: vec![PropertyDecl {
-            name: Name(b"name".as_slice().into()),
-            visibility: Visibility::Public,
-            set_visibility: None,
-            is_instance: true,
-            is_readonly: true,
-            is_final: false,
-            is_promoted: false,
-            is_virtual: false,
-            ty: Some(Type::String),
-            default: None,
-            attributes: Vec::new(),
-            doc_comment: None,
-            hooks: None,
-        }],
-        methods: Vec::new(),
-        attributes: Vec::new(),
-        doc_comment: None,
-        file: Name(Box::new([])),
-        line: 0,
-        end_line: 0,
-    };
-    vec![(decl, Vec::new())]
+#[php_class]
+pub(crate) enum RoundingMode {
+    HalfAwayFromZero,
+    HalfTowardsZero,
+    HalfEven,
+    HalfOdd,
+    TowardsZero,
+    AwayFromZero,
+    NegativeInfinity,
+    PositiveInfinity,
 }
 
-/// The declarations, as `basic_functions.stub.php` has them. `round`'s
-/// `$mode` defaults to `RoundingMode::HalfAwayFromZero`, which
-/// Reflection here prints as `<default>`, since its printer reads no
-/// enum case yet.
+#[php_class]
+impl RoundingMode {}
+
+impl RoundingMode {
+    /// The rounding `php_math_round_mode_from_enum` reads a case as.
+    fn mode(self) -> i32 {
+        match self {
+            RoundingMode::HalfAwayFromZero => PHP_ROUND_HALF_UP,
+            RoundingMode::HalfTowardsZero => PHP_ROUND_HALF_DOWN,
+            RoundingMode::HalfEven => PHP_ROUND_HALF_EVEN,
+            RoundingMode::HalfOdd => PHP_ROUND_HALF_ODD,
+            RoundingMode::TowardsZero => PHP_ROUND_TOWARD_ZERO,
+            RoundingMode::AwayFromZero => PHP_ROUND_AWAY_FROM_ZERO,
+            RoundingMode::NegativeInfinity => PHP_ROUND_FLOOR,
+            RoundingMode::PositiveInfinity => PHP_ROUND_CEILING,
+        }
+    }
+}
+
+/// `abs(int|float $num): int|float`, php's `PHP_FUNCTION(abs)`
+/// (`Z/ext/standard/math.c:249`): the magnitude, an int for an int
+/// except `PHP_INT_MIN`, whose magnitude is a float.
+///
+/// ```php
+/// var_dump(abs(-5), abs(-5.5), abs(PHP_INT_MIN), abs("-3"), abs(-0.0), abs(true));
+/// try { abs("x"); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// int(5)
+/// float(5.5)
+/// float(9.223372036854776E+18)
+/// int(3)
+/// float(0)
+/// int(1)
+/// abs(): Argument #1 ($num) must be of type int|float, string given
+/// ```
+///
+/// The declarations of `math.c` Reflection is asked for most, as
+/// `basic_functions.stub.php` has them.
 ///
 /// ```php
 /// foreach (['abs', 'log', 'pow', 'intdiv', 'number_format', 'base_convert', 'dechex', 'pi'] as $f) echo new ReflectionFunction($f);
@@ -249,261 +218,14 @@ pub(crate) fn classes() -> Vec<(ClassDecl, Vec<(MethodDecl, Entry)>)> {
 ///   - Return [ float ]
 /// }
 /// ```
-// One row per native, in the stub's order: the table is the declaration.
-#[allow(clippy::too_many_lines)]
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    let number = || Type::Union(vec![Type::Int, Type::Float]);
-    let float = |name: &[u8], entry: Entry| {
-        (
-            declared(name, &[parameter(b"num", Type::Float)], Type::Float),
-            entry,
-        )
-    };
-    let two = |name: &[u8], first: &[u8], second: &[u8], returns: Type, entry: Entry| {
-        (
-            declared(
-                name,
-                &[
-                    parameter(first, Type::Float),
-                    parameter(second, Type::Float),
-                ],
-                returns,
-            ),
-            entry,
-        )
-    };
-    let from_string = |name: &[u8], parameter_name: &[u8], entry: Entry| {
-        (
-            declared(
-                name,
-                &[parameter(parameter_name, Type::String)],
-                Type::Union(vec![Type::Int, Type::Float]),
-            ),
-            entry,
-        )
-    };
-    let to_string = |name: &[u8], entry: Entry| {
-        (
-            declared(name, &[parameter(b"num", Type::Int)], Type::String),
-            entry,
-        )
-    };
-    vec![
-        (
-            declared(b"abs", &[parameter(b"num", number())], number()),
-            abs as Entry,
-        ),
-        (
-            declared(b"ceil", &[parameter(b"num", number())], Type::Float),
-            ceil,
-        ),
-        (
-            declared(b"floor", &[parameter(b"num", number())], Type::Float),
-            floor,
-        ),
-        (
-            declared(
-                b"round",
-                &[
-                    parameter(b"num", number()),
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::long(0)),
-                        ..parameter(b"precision", Type::Int)
-                    },
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::EnumCase {
-                            class: Name(b"RoundingMode".as_slice().into()),
-                            case: Name(b"HalfAwayFromZero".as_slice().into()),
-                        }),
-                        ..parameter(
-                            b"mode",
-                            Type::Union(vec![
-                                Type::Int,
-                                Type::Named(Name(b"RoundingMode".as_slice().into())),
-                            ]),
-                        )
-                    },
-                ],
-                Type::Float,
-            ),
-            round,
-        ),
-        float(b"sin", sin),
-        float(b"cos", cos),
-        float(b"tan", tan),
-        float(b"asin", asin),
-        float(b"acos", acos),
-        float(b"atan", atan),
-        two(b"atan2", b"y", b"x", Type::Float, atan2),
-        float(b"sinh", sinh),
-        float(b"cosh", cosh),
-        float(b"tanh", tanh),
-        float(b"asinh", asinh),
-        float(b"acosh", acosh),
-        float(b"atanh", atanh),
-        float(b"expm1", expm1),
-        float(b"log1p", log1p),
-        (declared(b"pi", &[], Type::Float), pi),
-        (
-            declared(b"is_finite", &[parameter(b"num", Type::Float)], Type::Bool),
-            is_finite,
-        ),
-        (
-            declared(b"is_nan", &[parameter(b"num", Type::Float)], Type::Bool),
-            is_nan,
-        ),
-        (
-            declared(
-                b"intdiv",
-                &[parameter(b"num1", Type::Int), parameter(b"num2", Type::Int)],
-                Type::Int,
-            ),
-            intdiv,
-        ),
-        (
-            declared(
-                b"is_infinite",
-                &[parameter(b"num", Type::Float)],
-                Type::Bool,
-            ),
-            is_infinite,
-        ),
-        (
-            declared(
-                b"pow",
-                &[
-                    parameter(b"num", Type::Mixed),
-                    parameter(b"exponent", Type::Mixed),
-                ],
-                Type::Union(vec![Type::Int, Type::Float, Type::Object]),
-            ),
-            pow,
-        ),
-        float(b"exp", exp),
-        (
-            declared(
-                b"log",
-                &[
-                    parameter(b"num", Type::Float),
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Constant(Name(
-                            b"M_E".as_slice().into(),
-                        ))),
-                        ..parameter(b"base", Type::Float)
-                    },
-                ],
-                Type::Float,
-            ),
-            log,
-        ),
-        float(b"log10", log10),
-        float(b"sqrt", sqrt),
-        two(b"hypot", b"x", b"y", Type::Float, hypot),
-        float(b"deg2rad", deg2rad),
-        float(b"rad2deg", rad2deg),
-        from_string(b"bindec", b"binary_string", bindec),
-        from_string(b"hexdec", b"hex_string", hexdec),
-        from_string(b"octdec", b"octal_string", octdec),
-        to_string(b"decbin", decbin),
-        to_string(b"decoct", decoct),
-        (frameless(to_string(b"dechex", dechex).0, &[1]), dechex),
-        (
-            declared(
-                b"base_convert",
-                &[
-                    parameter(b"num", Type::String),
-                    parameter(b"from_base", Type::Int),
-                    parameter(b"to_base", Type::Int),
-                ],
-                Type::String,
-            ),
-            base_convert,
-        ),
-        (
-            declared(
-                b"number_format",
-                &[
-                    parameter(b"num", Type::Float),
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::long(0)),
-                        ..parameter(b"decimals", Type::Int)
-                    },
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Str(b".".as_slice().into())),
-                        ..parameter(b"decimal_separator", Type::Nullable(Box::new(Type::String)))
-                    },
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Str(b",".as_slice().into())),
-                        ..parameter(
-                            b"thousands_separator",
-                            Type::Nullable(Box::new(Type::String)),
-                        )
-                    },
-                ],
-                Type::String,
-            ),
-            number_format,
-        ),
-        two(b"fmod", b"num1", b"num2", Type::Float, fmod),
-        two(b"fdiv", b"num1", b"num2", Type::Float, fdiv),
-        two(b"fpow", b"num", b"exponent", Type::Float, fpow),
-    ]
-}
-
-/// `Z_PARAM_NUMBER` at `position`: an int or a float, `coerce_param`'s
-/// over `int|float`.
-fn number_argument(req: &mut Request, position: u32) -> Result<Value, Thrown> {
-    let given = req.argument(position).unwrap_or_default();
-    coerce_param(
-        req,
-        &given,
-        &Type::Union(vec![Type::Int, Type::Float]),
-        position,
-    )
-}
-
-/// One `float` argument, and the native's answer over it.
-fn unary(req: &mut Request, apply: fn(f64) -> f64) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let num = double_argument(req, 1)?;
-    Ok(Value::float(apply(num)))
-}
-
-/// Two `float` arguments, and the native's answer over them.
-fn binary(req: &mut Request, apply: fn(f64, f64) -> f64) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let a = double_argument(req, 1)?;
-    let b = double_argument(req, 2)?;
-    Ok(Value::float(apply(a, b)))
-}
-
-/// `abs(int|float $num): int|float`, php's `PHP_FUNCTION(abs)`
-/// (`Z/ext/standard/math.c:249`): the magnitude, an int for an int
-/// except `PHP_INT_MIN`, whose magnitude is a float.
-///
-/// ```php
-/// var_dump(abs(-5), abs(-5.5), abs(PHP_INT_MIN), abs("-3"), abs(-0.0), abs(true));
-/// try { abs("x"); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// int(5)
-/// float(5.5)
-/// float(9.223372036854776E+18)
-/// int(3)
-/// float(0)
-/// int(1)
-/// abs(): Argument #1 ($num) must be of type int|float, string given
-/// ```
-fn abs(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let num = number_argument(req, 1)?;
-    Ok(match num.as_ref() {
+#[php_function]
+fn abs(num: Number) -> Number {
+    match num {
         #[allow(clippy::cast_precision_loss)]
-        ValueRef::Int(i64::MIN) => Value::float(-(i64::MIN as f64)),
-        ValueRef::Int(n) => Value::int(n.abs()),
-        ValueRef::Float(f) => Value::float(f.abs()),
-        _ => num,
-    })
+        Union::A(i64::MIN) => Union::B(-(i64::MIN as f64)),
+        Union::A(n) => Union::A(n.abs()),
+        Union::B(f) => Union::B(f.abs()),
+    }
 }
 
 /// `ceil(int|float $num): float`, php's `PHP_FUNCTION(ceil)`: the least
@@ -519,8 +241,9 @@ fn abs(req: &mut Request) -> Result<Value, Thrown> {
 /// float(3)
 /// float(-0)
 /// ```
-fn ceil(req: &mut Request) -> Result<Value, Thrown> {
-    whole(req, f64::ceil)
+#[php_function]
+fn ceil(num: Number) -> f64 {
+    whole(num, f64::ceil)
 }
 
 /// `floor(int|float $num): float`, php's `PHP_FUNCTION(floor)`: the
@@ -536,19 +259,17 @@ fn ceil(req: &mut Request) -> Result<Value, Thrown> {
 /// float(3)
 /// float(0)
 /// ```
-fn floor(req: &mut Request) -> Result<Value, Thrown> {
-    whole(req, f64::floor)
+#[php_function]
+fn floor(num: Number) -> f64 {
+    whole(num, f64::floor)
 }
 
-fn whole(req: &mut Request, apply: fn(f64) -> f64) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let num = number_argument(req, 1)?;
-    Ok(Value::float(match num.as_ref() {
+fn whole(num: Number, apply: fn(f64) -> f64) -> f64 {
+    match num {
         #[allow(clippy::cast_precision_loss)]
-        ValueRef::Int(n) => n as f64,
-        ValueRef::Float(f) => apply(f),
-        _ => 0.0,
-    }))
+        Union::A(n) => n as f64,
+        Union::B(f) => apply(f),
+    }
 }
 
 /// `round(int|float $num, int $precision = 0, int|RoundingMode $mode = RoundingMode::HalfAwayFromZero): float`,
@@ -592,19 +313,35 @@ fn whole(req: &mut Request, apply: fn(f64) -> f64) -> Result<Value, Thrown> {
 /// round(): Argument #3 ($mode) must be a valid rounding mode (RoundingMode::*)
 /// round(): Argument #3 ($mode) must be of type RoundingMode|int, string given
 /// ```
-fn round(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 3)?;
-    let num = number_argument(req, 1)?;
-    let places = if req.argument_count() >= 2 {
-        let precision = long_argument(req, 2)?;
-        i32::try_from(precision).unwrap_or(if precision < 0 { i32::MIN } else { i32::MAX })
-    } else {
-        0
-    };
-    let mode = if req.argument_count() == 3 {
-        rounding_mode(req, 3)?
-    } else {
-        PHP_ROUND_HALF_UP
+///
+/// The declaration, `$mode`'s default the enum case php renders.
+///
+/// ```php
+/// echo new ReflectionFunction('round');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function round ] {
+///
+///   - Parameters [3] {
+///     Parameter #0 [ <required> int|float $num ]
+///     Parameter #1 [ <optional> int $precision = 0 ]
+///     Parameter #2 [ <optional> RoundingMode|int $mode = RoundingMode::HalfAwayFromZero ]
+///   }
+///   - Return [ float ]
+/// }
+/// ```
+#[php_function]
+fn round(
+    req: &mut Request,
+    num: Number,
+    #[php(default = 0)] precision: i64,
+    #[php(default = RoundingMode::HalfAwayFromZero)] mode: Union<i64, RoundingMode>,
+) -> Result<f64, Thrown> {
+    let places =
+        i32::try_from(precision).unwrap_or(if precision < 0 { i32::MIN } else { i32::MAX });
+    let mode = match mode {
+        Union::A(mode) => i32::try_from(mode).unwrap_or(0),
+        Union::B(case) => case.mode(),
     };
     if !(PHP_ROUND_HALF_UP..=PHP_ROUND_AWAY_FROM_ZERO).contains(&mode) {
         return Err(arg_value_error(
@@ -613,36 +350,13 @@ fn round(req: &mut Request) -> Result<Value, Thrown> {
             "be a valid rounding mode (RoundingMode::*)",
         ));
     }
-    Ok(Value::float(match num.as_ref() {
+    Ok(match num {
         #[allow(clippy::cast_precision_loss)]
-        ValueRef::Int(n) if places >= 0 => n as f64,
+        Union::A(n) if places >= 0 => n as f64,
         #[allow(clippy::cast_precision_loss)]
-        ValueRef::Int(n) => math_round(n as f64, places, mode),
-        ValueRef::Float(f) => math_round(f, places, mode),
-        _ => 0.0,
-    }))
-}
-
-/// `Z_PARAM_OBJ_OF_CLASS_OR_LONG(mode_object, rounding_mode_ce, mode)`:
-/// a `RoundingMode` case as the rounding its name is, or an int.
-fn rounding_mode(req: &mut Request, position: u32) -> Result<i32, Thrown> {
-    let given = req.argument(position).unwrap_or_default();
-    let ty = Type::Union(vec![
-        Type::Named(Name(b"RoundingMode".as_slice().into())),
-        Type::Int,
-    ]);
-    let coerced = coerce_param(req, &given, &ty, position)?;
-    if let Some(object) = coerced.as_object().copied() {
-        let name = object
-            .prop(req, b"name")
-            .and_then(|name| name.as_str_bytes().map(<[u8]>::to_vec))
-            .unwrap_or_default();
-        return Ok(ROUNDING_MODES
-            .iter()
-            .find(|(case, _)| *case == name.as_slice())
-            .map_or(PHP_ROUND_HALF_UP, |(_, mode)| *mode));
-    }
-    Ok(i32::try_from(coerced.as_int().unwrap_or(0)).unwrap_or(0))
+        Union::A(n) => math_round(n as f64, places, mode),
+        Union::B(f) => math_round(f, places, mode),
+    })
 }
 
 /// `sin(float $num): float`.
@@ -655,8 +369,9 @@ fn rounding_mode(req: &mut Request, position: u32) -> Result<i32, Thrown> {
 /// float(1)
 /// float(0.8414709848078965)
 /// ```
-fn sin(req: &mut Request) -> Result<Value, Thrown> {
-    unary(req, f64::sin)
+#[php_function]
+fn sin(num: f64) -> f64 {
+    num.sin()
 }
 
 /// `cos(float $num): float`.
@@ -668,8 +383,9 @@ fn sin(req: &mut Request) -> Result<Value, Thrown> {
 /// float(1)
 /// float(-1)
 /// ```
-fn cos(req: &mut Request) -> Result<Value, Thrown> {
-    unary(req, f64::cos)
+#[php_function]
+fn cos(num: f64) -> f64 {
+    num.cos()
 }
 
 /// `tan(float $num): float`.
@@ -681,8 +397,9 @@ fn cos(req: &mut Request) -> Result<Value, Thrown> {
 /// float(0)
 /// float(0.9999999999999999)
 /// ```
-fn tan(req: &mut Request) -> Result<Value, Thrown> {
-    unary(req, f64::tan)
+#[php_function]
+fn tan(num: f64) -> f64 {
+    num.tan()
 }
 
 /// `asin(float $num): float`.
@@ -694,8 +411,9 @@ fn tan(req: &mut Request) -> Result<Value, Thrown> {
 /// float(1.5707963267948966)
 /// float(NAN)
 /// ```
-fn asin(req: &mut Request) -> Result<Value, Thrown> {
-    unary(req, f64::asin)
+#[php_function]
+fn asin(num: f64) -> f64 {
+    num.asin()
 }
 
 /// `acos(float $num): float`.
@@ -707,8 +425,9 @@ fn asin(req: &mut Request) -> Result<Value, Thrown> {
 /// float(0)
 /// float(3.141592653589793)
 /// ```
-fn acos(req: &mut Request) -> Result<Value, Thrown> {
-    unary(req, f64::acos)
+#[php_function]
+fn acos(num: f64) -> f64 {
+    num.acos()
 }
 
 /// `atan(float $num): float`.
@@ -720,8 +439,9 @@ fn acos(req: &mut Request) -> Result<Value, Thrown> {
 /// float(0.7853981633974483)
 /// float(1.5707963267948966)
 /// ```
-fn atan(req: &mut Request) -> Result<Value, Thrown> {
-    unary(req, f64::atan)
+#[php_function]
+fn atan(num: f64) -> f64 {
+    num.atan()
 }
 
 /// `atan2(float $y, float $x): float`.
@@ -734,8 +454,9 @@ fn atan(req: &mut Request) -> Result<Value, Thrown> {
 /// float(3.141592653589793)
 /// float(-3.141592653589793)
 /// ```
-fn atan2(req: &mut Request) -> Result<Value, Thrown> {
-    binary(req, f64::atan2)
+#[php_function]
+fn atan2(y: f64, x: f64) -> f64 {
+    y.atan2(x)
 }
 
 /// `sinh(float $num): float`.
@@ -747,8 +468,9 @@ fn atan2(req: &mut Request) -> Result<Value, Thrown> {
 /// float(0)
 /// float(1.1752011936438014)
 /// ```
-fn sinh(req: &mut Request) -> Result<Value, Thrown> {
-    unary(req, f64::sinh)
+#[php_function]
+fn sinh(num: f64) -> f64 {
+    num.sinh()
 }
 
 /// `cosh(float $num): float`.
@@ -760,8 +482,9 @@ fn sinh(req: &mut Request) -> Result<Value, Thrown> {
 /// float(1)
 /// float(1.5430806348152437)
 /// ```
-fn cosh(req: &mut Request) -> Result<Value, Thrown> {
-    unary(req, f64::cosh)
+#[php_function]
+fn cosh(num: f64) -> f64 {
+    num.cosh()
 }
 
 /// `tanh(float $num): float`.
@@ -773,8 +496,9 @@ fn cosh(req: &mut Request) -> Result<Value, Thrown> {
 /// float(0)
 /// float(0.7615941559557649)
 /// ```
-fn tanh(req: &mut Request) -> Result<Value, Thrown> {
-    unary(req, f64::tanh)
+#[php_function]
+fn tanh(num: f64) -> f64 {
+    num.tanh()
 }
 
 /// `asinh(float $num): float`.
@@ -786,8 +510,9 @@ fn tanh(req: &mut Request) -> Result<Value, Thrown> {
 /// float(0)
 /// float(0.881373587019543)
 /// ```
-fn asinh(req: &mut Request) -> Result<Value, Thrown> {
-    unary(req, f64::asinh)
+#[php_function]
+fn asinh(num: f64) -> f64 {
+    num.asinh()
 }
 
 /// `acosh(float $num): float`.
@@ -800,8 +525,9 @@ fn asinh(req: &mut Request) -> Result<Value, Thrown> {
 /// float(1.3169578969248166)
 /// float(NAN)
 /// ```
-fn acosh(req: &mut Request) -> Result<Value, Thrown> {
-    unary(req, f64::acosh)
+#[php_function]
+fn acosh(num: f64) -> f64 {
+    num.acosh()
 }
 
 /// `atanh(float $num): float`.
@@ -814,8 +540,9 @@ fn acosh(req: &mut Request) -> Result<Value, Thrown> {
 /// float(0.5493061443340549)
 /// float(INF)
 /// ```
-fn atanh(req: &mut Request) -> Result<Value, Thrown> {
-    unary(req, f64::atanh)
+#[php_function]
+fn atanh(num: f64) -> f64 {
+    num.atanh()
 }
 
 /// `expm1(float $num): float`, `exp(num) - 1` without the cancellation.
@@ -828,8 +555,9 @@ fn atanh(req: &mut Request) -> Result<Value, Thrown> {
 /// float(1.00000000005E-10)
 /// float(1.7182818284590453)
 /// ```
-fn expm1(req: &mut Request) -> Result<Value, Thrown> {
-    unary(req, f64::exp_m1)
+#[php_function]
+fn expm1(num: f64) -> f64 {
+    num.exp_m1()
 }
 
 /// `log1p(float $num): float`, `log(1 + num)` without the cancellation.
@@ -842,8 +570,9 @@ fn expm1(req: &mut Request) -> Result<Value, Thrown> {
 /// float(9.999999999500001E-11)
 /// float(-INF)
 /// ```
-fn log1p(req: &mut Request) -> Result<Value, Thrown> {
-    unary(req, f64::ln_1p)
+#[php_function]
+fn log1p(num: f64) -> f64 {
+    num.ln_1p()
 }
 
 /// `pi(): float`, `M_PI`.
@@ -855,9 +584,9 @@ fn log1p(req: &mut Request) -> Result<Value, Thrown> {
 /// float(3.141592653589793)
 /// bool(true)
 /// ```
-fn pi(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 0)?;
-    Ok(Value::float(std::f64::consts::PI))
+#[php_function]
+fn pi() -> f64 {
+    std::f64::consts::PI
 }
 
 /// `is_finite(float $num): bool`.
@@ -871,9 +600,9 @@ fn pi(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(true)
 /// ```
-fn is_finite(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    Ok(Value::bool(double_argument(req, 1)?.is_finite()))
+#[php_function]
+fn is_finite(num: f64) -> bool {
+    num.is_finite()
 }
 
 /// `is_nan(float $num): bool`.
@@ -886,9 +615,9 @@ fn is_finite(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(true)
 /// ```
-fn is_nan(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    Ok(Value::bool(double_argument(req, 1)?.is_nan()))
+#[php_function]
+fn is_nan(num: f64) -> bool {
+    num.is_nan()
 }
 
 /// `is_infinite(float $num): bool`.
@@ -901,9 +630,9 @@ fn is_nan(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(false)
 /// ```
-fn is_infinite(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    Ok(Value::bool(double_argument(req, 1)?.is_infinite()))
+#[php_function]
+fn is_infinite(num: f64) -> bool {
+    num.is_infinite()
 }
 
 /// `intdiv(int $num1, int $num2): int`, php's `PHP_FUNCTION(intdiv)`
@@ -922,10 +651,9 @@ fn is_infinite(req: &mut Request) -> Result<Value, Thrown> {
 /// Division by zero
 /// ArithmeticError: Division of PHP_INT_MIN by -1 is not an integer
 /// ```
-fn intdiv(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let dividend = long_argument(req, 1)?;
-    let divisor = long_argument(req, 2)?;
+#[php_function]
+fn intdiv(req: &mut Request, num1: i64, num2: i64) -> Result<i64, Thrown> {
+    let (dividend, divisor) = (num1, num2);
     if divisor == 0 {
         return Err(throw(req, "DivisionByZeroError", "Division by zero"));
     }
@@ -936,7 +664,7 @@ fn intdiv(req: &mut Request) -> Result<Value, Thrown> {
             "Division of PHP_INT_MIN by -1 is not an integer",
         ));
     }
-    Ok(Value::int(dividend / divisor))
+    Ok(dividend / divisor)
 }
 
 /// `pow(mixed $num, mixed $exponent): int|float|object`, php's
@@ -969,10 +697,9 @@ fn intdiv(req: &mut Request) -> Result<Value, Thrown> {
 /// Warning: A non-numeric value encountered in %s on line 5
 /// int(25)
 /// ```
-fn pow(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 2, 2)?;
-    let base = req.argument(1).unwrap_or_default().deref();
-    let exponent = req.argument(2).unwrap_or_default().deref();
+#[php_function]
+fn pow(req: &mut Request, num: Value, exponent: Value) -> Result<Union<Number, PhpObject>, Thrown> {
+    let base = num;
     let (Some(x), Some(y)) = (to_number(&base), to_number(&exponent)) else {
         return Err(unsupported(req, &base, &exponent));
     };
@@ -981,7 +708,7 @@ fn pow(req: &mut Request) -> Result<Value, Thrown> {
     }
     let x = x.settle(req);
     let y = y.settle(req);
-    Ok(pow_base(x, y))
+    Ok(Union::A(pow_base(x, y)))
 }
 
 /// What `zendi_try_convert_scalar_to_number` makes of one operand.
@@ -1089,7 +816,7 @@ fn type_name(req: &Request, value: &Value) -> String {
 }
 
 /// `pow_function_base`: the two number cases php has.
-fn pow_base(x: Value, y: Value) -> Value {
+fn pow_base(x: Value, y: Value) -> Number {
     #[allow(clippy::cast_precision_loss)]
     let double = |v: &Value| match v.as_ref() {
         ValueRef::Int(n) => n as f64,
@@ -1101,17 +828,17 @@ fn pow_base(x: Value, y: Value) -> Value {
     {
         return int_pow(base, exponent);
     }
-    Value::float(double(&x).powf(double(&y)))
+    Union::B(double(&x).powf(double(&y)))
 }
 
 /// The squaring loop of `pow_function_base` over two ints, the product
 /// finished in floats from the first overflow on.
-fn int_pow(base: i64, exponent: i64) -> Value {
+fn int_pow(base: i64, exponent: i64) -> Number {
     if exponent == 0 {
-        return Value::int(1);
+        return Union::A(1);
     }
     if base == 0 {
-        return Value::int(0);
+        return Union::A(0);
     }
     let (mut l1, mut l2, mut i) = (1i64, base, exponent);
     while i >= 1 {
@@ -1121,7 +848,7 @@ fn int_pow(base: i64, exponent: i64) -> Value {
                 #[allow(clippy::cast_precision_loss)]
                 let dval = l1 as f64 * l2 as f64;
                 #[allow(clippy::cast_precision_loss)]
-                return Value::float(dval * (l2 as f64).powf(i as f64));
+                return Union::B(dval * (l2 as f64).powf(i as f64));
             };
             l1 = product;
         } else {
@@ -1130,12 +857,12 @@ fn int_pow(base: i64, exponent: i64) -> Value {
                 #[allow(clippy::cast_precision_loss)]
                 let dval = l2 as f64 * l2 as f64;
                 #[allow(clippy::cast_precision_loss)]
-                return Value::float(l1 as f64 * dval.powf(i as f64));
+                return Union::B(l1 as f64 * dval.powf(i as f64));
             };
             l2 = square;
         }
     }
-    Value::int(l1)
+    Union::A(l1)
 }
 
 /// `exp(float $num): float`.
@@ -1148,8 +875,9 @@ fn int_pow(base: i64, exponent: i64) -> Value {
 /// float(1)
 /// float(INF)
 /// ```
-fn exp(req: &mut Request) -> Result<Value, Thrown> {
-    unary(req, f64::exp)
+#[php_function]
+fn exp(num: f64) -> f64 {
+    num.exp()
 }
 
 /// `log(float $num, float $base = M_E): float`, php's `PHP_FUNCTION(log)`
@@ -1174,14 +902,16 @@ fn exp(req: &mut Request) -> Result<Value, Thrown> {
 /// ```
 // php compares the base exactly.
 #[allow(clippy::float_cmp)]
-fn log(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 2)?;
-    let num = double_argument(req, 1)?;
-    if req.argument_count() == 1 {
-        return Ok(Value::float(num.ln()));
-    }
-    let base = double_argument(req, 2)?;
-    Ok(Value::float(if base == 2.0 {
+#[php_function]
+fn log(
+    req: &mut Request,
+    num: f64,
+    #[php(default = M_E)] base: Passed<f64>,
+) -> Result<f64, Thrown> {
+    let Passed::Given(base) = base else {
+        return Ok(num.ln());
+    };
+    Ok(if base == 2.0 {
         num.log2()
     } else if base == 10.0 {
         num.log10()
@@ -1191,7 +921,7 @@ fn log(req: &mut Request) -> Result<Value, Thrown> {
         return Err(arg_value_error(req, 2, "be greater than 0"));
     } else {
         num.ln() / base.ln()
-    }))
+    })
 }
 
 /// `log10(float $num): float`.
@@ -1204,8 +934,9 @@ fn log(req: &mut Request) -> Result<Value, Thrown> {
 /// float(-3)
 /// float(NAN)
 /// ```
-fn log10(req: &mut Request) -> Result<Value, Thrown> {
-    unary(req, f64::log10)
+#[php_function]
+fn log10(num: f64) -> f64 {
+    num.log10()
 }
 
 /// `sqrt(float $num): float`.
@@ -1219,8 +950,9 @@ fn log10(req: &mut Request) -> Result<Value, Thrown> {
 /// float(NAN)
 /// float(INF)
 /// ```
-fn sqrt(req: &mut Request) -> Result<Value, Thrown> {
-    unary(req, f64::sqrt)
+#[php_function]
+fn sqrt(num: f64) -> f64 {
+    num.sqrt()
 }
 
 /// `hypot(float $x, float $y): float`.
@@ -1233,8 +965,9 @@ fn sqrt(req: &mut Request) -> Result<Value, Thrown> {
 /// float(13)
 /// float(INF)
 /// ```
-fn hypot(req: &mut Request) -> Result<Value, Thrown> {
-    binary(req, f64::hypot)
+#[php_function]
+fn hypot(x: f64, y: f64) -> f64 {
+    x.hypot(y)
 }
 
 /// `deg2rad(float $num): float`, `(num / 180) * M_PI` in php's order.
@@ -1247,8 +980,9 @@ fn hypot(req: &mut Request) -> Result<Value, Thrown> {
 /// float(0.7853981633974483)
 /// float(-1.5707963267948966)
 /// ```
-fn deg2rad(req: &mut Request) -> Result<Value, Thrown> {
-    unary(req, |deg| (deg / 180.0) * std::f64::consts::PI)
+#[php_function]
+fn deg2rad(num: f64) -> f64 {
+    (num / 180.0) * std::f64::consts::PI
 }
 
 /// `rad2deg(float $num): float`, `(num / M_PI) * 180` in php's order.
@@ -1261,8 +995,9 @@ fn deg2rad(req: &mut Request) -> Result<Value, Thrown> {
 /// float(57.29577951308232)
 /// float(45)
 /// ```
-fn rad2deg(req: &mut Request) -> Result<Value, Thrown> {
-    unary(req, |rad| (rad / std::f64::consts::PI) * 180.0)
+#[php_function]
+fn rad2deg(num: f64) -> f64 {
+    (num / std::f64::consts::PI) * 180.0
 }
 
 /// `_php_math_basetozval` (`Z/ext/standard/math.c:791`): the digits of
@@ -1270,7 +1005,7 @@ fn rad2deg(req: &mut Request) -> Result<Value, Thrown> {
 /// `0b` prefix of that base skipped, every other byte skipped behind the
 /// 7.4 deprecation, an int until it would overflow and a float from then
 /// on.
-fn base_to_value(req: &mut Request, text: &[u8], base: u32) -> Value {
+fn base_to_value(req: &mut Request, text: &[u8], base: u32) -> Number {
     let mut s = 0;
     let mut e = text.len();
     let space = |c: u8| matches!(c, b' ' | b'\t' | b'\n' | 0x0B | 0x0C | b'\r');
@@ -1332,17 +1067,7 @@ fn base_to_value(req: &mut Request, text: &[u8], base: u32) -> Value {
             "Invalid characters passed for attempted conversion, these have been ignored",
         );
     }
-    if float {
-        Value::float(fnum)
-    } else {
-        Value::int(num)
-    }
-}
-
-fn from_base(req: &mut Request, base: u32) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let text = crate::string_argument(req, 1)?.as_bytes().to_vec();
-    Ok(base_to_value(req, &text, base))
+    if float { Union::B(fnum) } else { Union::A(num) }
 }
 
 /// `bindec(string $binary_string): int|float`, php's
@@ -1361,8 +1086,9 @@ fn from_base(req: &mut Request, base: u32) -> Result<Value, Thrown> {
 /// Deprecated: Invalid characters passed for attempted conversion, these have been ignored in %s on line 3
 /// int(1)
 /// ```
-fn bindec(req: &mut Request) -> Result<Value, Thrown> {
-    from_base(req, 2)
+#[php_function]
+fn bindec(req: &mut Request, binary_string: PhpString) -> Number {
+    base_to_value(req, binary_string.as_bytes(), 2)
 }
 
 /// `hexdec(string $hex_string): int|float`, php's `PHP_FUNCTION(hexdec)`.
@@ -1380,8 +1106,9 @@ fn bindec(req: &mut Request) -> Result<Value, Thrown> {
 /// Deprecated: Invalid characters passed for attempted conversion, these have been ignored in %s on line 3
 /// int(1)
 /// ```
-fn hexdec(req: &mut Request) -> Result<Value, Thrown> {
-    from_base(req, 16)
+#[php_function]
+fn hexdec(req: &mut Request, hex_string: PhpString) -> Number {
+    base_to_value(req, hex_string.as_bytes(), 16)
 }
 
 /// `octdec(string $octal_string): int|float`, php's `PHP_FUNCTION(octdec)`.
@@ -1396,12 +1123,18 @@ fn hexdec(req: &mut Request) -> Result<Value, Thrown> {
 /// int(15)
 /// int(7)
 /// ```
-fn octdec(req: &mut Request) -> Result<Value, Thrown> {
-    from_base(req, 8)
+#[php_function]
+fn octdec(req: &mut Request, octal_string: PhpString) -> Number {
+    base_to_value(req, octal_string.as_bytes(), 8)
 }
 
 /// `_php_math_longtobase_pwr2`: the long's bits, unsigned, in the digits
 /// of `2^bits`.
+/// `_php_math_longtobase_pwr2` as the string it builds.
+fn to_pwr2(req: &mut Request, num: i64, bits: u32) -> Result<PhpString, Thrown> {
+    PhpString::new(req, &long_to_pwr2(num, bits))
+}
+
 fn long_to_pwr2(value: i64, bits: u32) -> Vec<u8> {
     const DIGITS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
     let mut value = value.cast_unsigned();
@@ -1418,13 +1151,6 @@ fn long_to_pwr2(value: i64, bits: u32) -> Vec<u8> {
     out
 }
 
-fn to_pwr2(req: &mut Request, bits: u32) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let num = long_argument(req, 1)?;
-    let digits = long_to_pwr2(num, bits);
-    Ok(Value::string(PhpString::new(req, &digits)?))
-}
-
 /// `decbin(int $num): string`, php's `PHP_FUNCTION(decbin)`: the bits of
 /// the long as unsigned, so a negative one is its two's complement.
 ///
@@ -1437,8 +1163,9 @@ fn to_pwr2(req: &mut Request, bits: u32) -> Result<Value, Thrown> {
 /// string(64) "1111111111111111111111111111111111111111111111111111111111111111"
 /// string(4) "1100"
 /// ```
-fn decbin(req: &mut Request) -> Result<Value, Thrown> {
-    to_pwr2(req, 1)
+#[php_function]
+fn decbin(req: &mut Request, num: i64) -> Result<PhpString, Thrown> {
+    to_pwr2(req, num, 1)
 }
 
 /// `decoct(int $num): string`, php's `PHP_FUNCTION(decoct)`.
@@ -1451,8 +1178,9 @@ fn decbin(req: &mut Request) -> Result<Value, Thrown> {
 /// string(22) "1777777777777777777777"
 /// string(1) "0"
 /// ```
-fn decoct(req: &mut Request) -> Result<Value, Thrown> {
-    to_pwr2(req, 3)
+#[php_function]
+fn decoct(req: &mut Request, num: i64) -> Result<PhpString, Thrown> {
+    to_pwr2(req, num, 3)
 }
 
 /// `dechex(int $num): string`, php's `PHP_FUNCTION(dechex)` and its
@@ -1467,16 +1195,17 @@ fn decoct(req: &mut Request) -> Result<Value, Thrown> {
 /// string(16) "7fffffffffffffff"
 /// string(1) "0"
 /// ```
-fn dechex(req: &mut Request) -> Result<Value, Thrown> {
-    to_pwr2(req, 4)
+#[php_function(frameless(1))]
+fn dechex(req: &mut Request, num: i64) -> Result<PhpString, Thrown> {
+    to_pwr2(req, num, 4)
 }
 
 /// `_php_math_zvaltobase`: an int in the digits of `base`, and a float
 /// floored and taken apart digit by digit with `fmod`, php's
 /// `ValueError` for an infinite one.
-fn value_to_base(req: &mut Request, value: &Value, base: u32) -> Result<Vec<u8>, Thrown> {
+fn value_to_base(req: &mut Request, value: Number, base: u32) -> Result<Vec<u8>, Thrown> {
     const DIGITS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
-    if let Some(f) = value.as_float() {
+    if let Union::B(f) = value {
         let mut fvalue = f.floor();
         if fvalue.is_infinite() {
             return Err(throw(
@@ -1498,7 +1227,10 @@ fn value_to_base(req: &mut Request, value: &Value, base: u32) -> Result<Vec<u8>,
         out.reverse();
         return Ok(out);
     }
-    let mut value = value.as_int().unwrap_or(0).cast_unsigned();
+    let Union::A(value) = value else {
+        return Ok(Vec::new());
+    };
+    let mut value = value.cast_unsigned();
     let base = u64::from(base);
     let mut out = Vec::new();
     loop {
@@ -1535,11 +1267,15 @@ fn value_to_base(req: &mut Request, value: &Value, base: u32) -> Result<Vec<u8>,
 /// base_convert(): Argument #2 ($from_base) must be between 2 and 36 (inclusive)
 /// base_convert(): Argument #3 ($to_base) must be between 2 and 36 (inclusive)
 /// ```
-fn base_convert(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 3, 3)?;
-    let number = crate::string_argument(req, 1)?.as_bytes().to_vec();
-    let from = long_argument(req, 2)?;
-    let to = long_argument(req, 3)?;
+#[php_function]
+fn base_convert(
+    req: &mut Request,
+    num: PhpString,
+    from_base: i64,
+    to_base: i64,
+) -> Result<PhpString, Thrown> {
+    let number = num.as_bytes().to_vec();
+    let (from, to) = (from_base, to_base);
     if !(2..=36).contains(&from) {
         return Err(arg_value_error(req, 2, "be between 2 and 36 (inclusive)"));
     }
@@ -1549,8 +1285,8 @@ fn base_convert(req: &mut Request) -> Result<Value, Thrown> {
     let from = u32::try_from(from).unwrap_or(10);
     let to = u32::try_from(to).unwrap_or(10);
     let value = base_to_value(req, &number, from);
-    let digits = value_to_base(req, &value, to)?;
-    Ok(Value::string(PhpString::new(req, &digits)?))
+    let digits = value_to_base(req, value, to)?;
+    PhpString::new(req, &digits)
 }
 
 /// `number_format(float $num, int $decimals = 0, ?string $decimal_separator = ".", ?string $thousands_separator = ","): string`, php's `PHP_FUNCTION(number_format)` (`Z/ext/standard/math.c:1394`):
@@ -1579,32 +1315,33 @@ fn base_convert(req: &mut Request) -> Result<Value, Thrown> {
 /// string(4) "0.29"
 /// string(8) "1,234.00"
 /// ```
-fn number_format(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 4)?;
-    let num = number_argument(req, 1)?;
-    let decimals = if req.argument_count() >= 2 {
-        long_argument(req, 2)?
-    } else {
-        0
-    };
-    let separator = |req: &mut Request, position: u32, default: &[u8]| -> Result<Vec<u8>, Thrown> {
-        if req.argument_count() < position as usize {
-            return Ok(default.to_vec());
-        }
-        let given = req.argument(position).unwrap_or_default();
-        let coerced = coerce_param(
-            req,
-            &given,
-            &Type::Nullable(Box::new(Type::String)),
-            position,
-        )?;
-        Ok(match coerced.as_str_bytes() {
-            Some(bytes) => bytes.to_vec(),
+#[php_function]
+fn number_format(
+    req: &mut Request,
+    num: Raw<f64>,
+    #[php(default = 0)] decimals: Raw<i64>,
+    #[php(default = ".")] decimal_separator: Raw<Option<PhpString>>,
+    #[php(default = ",")] thousands_separator: Raw<Option<PhpString>>,
+) -> Result<PhpString, Thrown> {
+    // `Z_PARAM_NUMBER` under the stub's `float`, then the rest in order.
+    let num = coerce_param(
+        req,
+        &num.value(),
+        &Type::Union(vec![Type::Int, Type::Float]),
+        1,
+    )?;
+    let decimals = decimals.hold(req)?;
+    let separator = |req: &mut Request,
+                     given: Raw<Option<PhpString>>,
+                     default: &[u8]|
+     -> Result<Vec<u8>, Thrown> {
+        Ok(match given.hold(req)? {
+            Some(bytes) => bytes.as_bytes().to_vec(),
             None => default.to_vec(),
         })
     };
-    let point = separator(req, 3, b".")?;
-    let thousands = separator(req, 4, b",")?;
+    let point = separator(req, decimal_separator, b".")?;
+    let thousands = separator(req, thousands_separator, b",")?;
     let text = match num.as_ref() {
         ValueRef::Int(n) => format_long(n, decimals, &point, &thousands),
         ValueRef::Float(f)
@@ -1620,7 +1357,7 @@ fn number_format(req: &mut Request) -> Result<Value, Thrown> {
         }
         _ => Vec::new(),
     };
-    Ok(Value::string(PhpString::new(req, &text)?))
+    PhpString::new(req, &text)
 }
 
 /// `ZEND_DOUBLE_FITS_LONG`.
@@ -1730,8 +1467,9 @@ fn format_double(num: f64, dec: i32, point: &[u8], thousands: &[u8]) -> Vec<u8> 
 /// float(1)
 /// float(NAN)
 /// ```
-fn fmod(req: &mut Request) -> Result<Value, Thrown> {
-    binary(req, |a, b| a % b)
+#[php_function]
+fn fmod(num1: f64, num2: f64) -> f64 {
+    num1 % num2
 }
 
 /// `fdiv(float $num1, float $num2): float`, IEEE 754 division, a zero
@@ -1746,8 +1484,9 @@ fn fmod(req: &mut Request) -> Result<Value, Thrown> {
 /// float(NAN)
 /// float(2.5)
 /// ```
-fn fdiv(req: &mut Request) -> Result<Value, Thrown> {
-    binary(req, |a, b| a / b)
+#[php_function]
+fn fdiv(num1: f64, num2: f64) -> f64 {
+    num1 / num2
 }
 
 /// `fpow(float $num, float $exponent): float`, C's `pow`.
@@ -1761,8 +1500,9 @@ fn fdiv(req: &mut Request) -> Result<Value, Thrown> {
 /// float(INF)
 /// float(1024)
 /// ```
-fn fpow(req: &mut Request) -> Result<Value, Thrown> {
-    binary(req, f64::powf)
+#[php_function]
+fn fpow(num: f64, exponent: f64) -> f64 {
+    num.powf(exponent)
 }
 
 #[allow(dead_code)]

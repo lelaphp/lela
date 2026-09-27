@@ -235,6 +235,7 @@ fn core_natives() -> Vec<(FunctionDecl, output::Entry)> {
 ///   string(8) "Optional"
 /// }
 /// ```
+#[allow(clippy::too_many_lines)] // one line per native, in the stub's order
 pub fn extension() -> Extension {
     let directory = dir::directory_class();
     let builder = ExtensionBuilder::default()
@@ -251,7 +252,51 @@ pub fn extension() -> Extension {
         .functions(filestat::natives())
         .functions(basic_natives())
         .functions(file_natives())
-        .functions(math::natives())
+        .functions(vec![
+            math::abs::declared(),
+            math::ceil::declared(),
+            math::floor::declared(),
+            math::round::declared(),
+            math::sin::declared(),
+            math::cos::declared(),
+            math::tan::declared(),
+            math::asin::declared(),
+            math::acos::declared(),
+            math::atan::declared(),
+            math::atan2::declared(),
+            math::sinh::declared(),
+            math::cosh::declared(),
+            math::tanh::declared(),
+            math::asinh::declared(),
+            math::acosh::declared(),
+            math::atanh::declared(),
+            math::expm1::declared(),
+            math::log1p::declared(),
+            math::pi::declared(),
+            math::is_finite::declared(),
+            math::is_nan::declared(),
+            math::intdiv::declared(),
+            math::is_infinite::declared(),
+            math::pow::declared(),
+            math::exp::declared(),
+            math::log::declared(),
+            math::log10::declared(),
+            math::sqrt::declared(),
+            math::hypot::declared(),
+            math::deg2rad::declared(),
+            math::rad2deg::declared(),
+            math::bindec::declared(),
+            math::hexdec::declared(),
+            math::octdec::declared(),
+            math::decbin::declared(),
+            math::decoct::declared(),
+            math::dechex::declared(),
+            math::base_convert::declared(),
+            math::number_format::declared(),
+            math::fmod::declared(),
+            math::fdiv::declared(),
+            math::fpow::declared(),
+        ])
         .functions(vec![
             r#type::gettype::declared(),
             r#type::get_debug_type::declared(),
@@ -277,9 +322,9 @@ pub fn extension() -> Extension {
         .constants(array::constants())
         .constants(file::constants())
         .constants(file_constants())
-        .constants(math::constants())
+        .constants(math::constants::declared())
         .constants_with::<ImageHandler>(image::link_constants)
-        .classes(math::classes())
+        .class::<math::RoundingMode>()
         .classes(var::classes())
         .classes(user_filters::classes())
         .ini(var::ini())
