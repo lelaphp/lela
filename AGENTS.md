@@ -106,12 +106,12 @@ third-engine-design.md
 | heap | heap.lock | 292 |  | pass |
 | unit | unit.lock | 98 |  | pass |
 | ops | ops.lock | 209 |  | pass |
-| api | api.lock | 697 | 800 | pass |
+| api | api.lock | 701 | 800 | pass |
 | sapi | sapi.lock | 7 |  | pass |
 | tier | tier.lock |  |  | skip |
 | harness | xtask.lock | 334 |  | pass |
 
-<!-- /computed in=74443943093d052e4108b1c9fc28a10586030bd260a601601d30ce910c343c6d out=6214ec4bdd817dc18e0e840f1a168faf48798366f70e58cd0628d37a0a5941fd -->
+<!-- /computed in=8e3b54fd08f9db1bfa767d79a604b2677ca0dd17daa652b6e16fe6fcb1229590 out=d75ee91c64dfe470ff873c62846dd2fcd3083bc6019cb9b755b624bf1ac7dc4d -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading | text |
@@ -221,6 +221,7 @@ Options:
 ├── session
 ├── spl
 ├── standard
-└── tokenizer
+├── tokenizer
+└── zlib
 ```
-<!-- /computed in=642fe889e09075cd5c7439d397949d45b24bc8a087bc7567916e0b3e3a6aafa8 out=3ddad93dff769cb9fe450994a02fd5688a9fed64139fad260b105e969ed1566d -->
+<!-- /computed in=dc0b2dd949b50254ee438e2c9f55e09697f095fec7ad469dc8f8f82a8059d18b out=a078689a5efb0ebd084ed5553add57163e372afb107a5c34418eff22ea3c9b09 -->

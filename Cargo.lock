@@ -382,6 +382,7 @@ dependencies = [
  "php_ext_spl",
  "php_ext_standard",
  "php_ext_tokenizer",
+ "php_ext_zlib",
 ]
 
 [[package]]
@@ -586,6 +587,13 @@ dependencies = [
 
 [[package]]
 name = "php_ext_tokenizer"
+version = "0.0.0"
+dependencies = [
+ "php_ext",
+]
+
+[[package]]
+name = "php_ext_zlib"
 version = "0.0.0"
 dependencies = [
  "php_ext",

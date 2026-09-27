@@ -64,6 +64,8 @@ pub fn enabled() -> &'static [fn() -> Extension] {
         php_ext_ctype::extension,
         #[cfg(feature = "hash")]
         php_ext_hash::extension,
+        #[cfg(feature = "zlib")]
+        php_ext_zlib::extension,
     ]
 }
 
