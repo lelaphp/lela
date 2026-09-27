@@ -6497,6 +6497,27 @@ fn fetch_static_prop(
 /// int(-1)
 /// int(-1)
 /// ```
+///
+/// A `&__get` answers with its reference, and the temporary holds the
+/// value it names, so a `foreach` over it frees what it took and not
+/// the array the reference keeps:
+///
+/// ```php
+/// class A { private $k = []; function &__get($n) { return $this->k[$n]; } }
+/// $a = new A; $b = &$a->arr; $b = [1]; $b[] = 2;
+/// foreach ($a->arr as $v) { echo $v, "\n"; }
+/// var_dump($b);
+/// ```
+/// ```expect
+/// 1
+/// 2
+/// array(2) {
+///   [0]=>
+///   int(1)
+///   [1]=>
+///   int(2)
+/// }
+/// ```
 pub(crate) fn fetch_obj_r<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -6614,8 +6635,11 @@ fn fetch_obj(
     };
     name.release(req, frame, code, op);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
+    // `ZVAL_COPY_DEREF`, or `zend_unwrap_reference` where the slot
+    // answered into the temporary: a `&__get` hands back its reference,
+    // and the temporary holds the value, never the cell.
     let value = match read {
-        Ok(value) => value,
+        Ok(value) => req.unwrap_reference(value),
         Err(thrown) => return threw(req, frame, &thrown),
     };
     let slot = exec::temporary_slot(code, op.out);
