@@ -2604,6 +2604,21 @@ impl Request {
         self.serve_call(function, None, None, None, arguments, extra_named)
     }
 
+    /// `zend_call_function` (`Z/Zend/zend_execute_API.c:806`), which every
+    /// `serve_*` ends in: the callee pushed on a call of its own with the
+    /// arguments as its walk of `fci->params` places them. The call
+    /// allocates nothing the request's memory counts beside the frame,
+    /// so the first `__toString` a native serves costs what php's does:
+    ///
+    /// ```php
+    /// class Foo { function __toString(): string { return 'Foo'; } }
+    /// $f = new Foo;
+    /// $s = memory_get_usage(); md5($f); array_map(fn($x) => $x, [1]);
+    /// var_dump(memory_get_usage() - $s);
+    /// ```
+    /// ```expect
+    /// int(0)
+    /// ```
     fn serve_call(
         &mut self,
         function: Function,
@@ -2619,8 +2634,6 @@ impl Request {
             crate::attributes::deprecated_function(self, function)?;
         }
         let wrapped = self.values_for_references(function, arguments)?;
-        let name = self.declared_name(function);
-        let name = self.interned(name.as_bytes())?;
         let via_trampoline = self.via_trampoline(function);
         let mut sent = arguments.to_vec();
         for (at, argument) in sent.iter_mut().enumerate() {
@@ -2654,9 +2667,13 @@ impl Request {
         let may_have_undef = sent
             .iter()
             .any(|argument| matches!(argument.as_ref(), ValueRef::Undef));
+        // `zend_call_function` names the callee by
+        // `func->common.function_name`, which the function carries; no
+        // constant spelled it, so the call carries no name of its own
+        // and interns none into the request's memory.
         let call = CallState {
             function,
-            name: Some(name),
+            name: None,
             count: sent.len(),
             arguments: sent,
             this,
