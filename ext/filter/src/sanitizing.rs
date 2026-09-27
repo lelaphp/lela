@@ -8,11 +8,13 @@ use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
 use php_ext::values::Value;
 
-use crate::{
-    FLAG_ALLOW_FRACTION, FLAG_ALLOW_SCIENTIFIC, FLAG_ALLOW_THOUSAND, FLAG_EMPTY_STRING_NULL,
-    FLAG_ENCODE_AMP, FLAG_ENCODE_HIGH, FLAG_ENCODE_LOW, FLAG_NO_ENCODE_QUOTES, FLAG_STRIP_BACKTICK,
-    FLAG_STRIP_HIGH, FLAG_STRIP_LOW, Outcome, Run, string_value,
+use crate::constants::{
+    FILTER_FLAG_ALLOW_FRACTION, FILTER_FLAG_ALLOW_SCIENTIFIC, FILTER_FLAG_ALLOW_THOUSAND,
+    FILTER_FLAG_EMPTY_STRING_NULL, FILTER_FLAG_ENCODE_AMP, FILTER_FLAG_ENCODE_HIGH,
+    FILTER_FLAG_ENCODE_LOW, FILTER_FLAG_NO_ENCODE_QUOTES, FILTER_FLAG_STRIP_BACKTICK,
+    FILTER_FLAG_STRIP_HIGH, FILTER_FLAG_STRIP_LOW,
 };
+use crate::{Outcome, Run, string_value};
 
 const LOWALPHA: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
 const HIALPHA: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -30,9 +32,9 @@ fn strip(s: &[u8], flags: i64) -> Vec<u8> {
     s.iter()
         .copied()
         .filter(|&c| {
-            !((c >= 127 && flags & FLAG_STRIP_HIGH != 0)
-                || (c < 32 && flags & FLAG_STRIP_LOW != 0)
-                || (c == b'`' && flags & FLAG_STRIP_BACKTICK != 0))
+            !((c >= 127 && flags & FILTER_FLAG_STRIP_HIGH != 0)
+                || (c < 32 && flags & FILTER_FLAG_STRIP_LOW != 0)
+                || (c == b'`' && flags & FILTER_FLAG_STRIP_BACKTICK != 0))
         })
         .collect()
 }
@@ -43,17 +45,17 @@ fn strip(s: &[u8], flags: i64) -> Vec<u8> {
 /// from 127 up under `FILTER_FLAG_ENCODE_HIGH`.
 fn html_map(flags: i64, quotes: bool) -> [bool; 256] {
     let mut map = [false; 256];
-    if quotes && flags & FLAG_NO_ENCODE_QUOTES == 0 {
+    if quotes && flags & FILTER_FLAG_NO_ENCODE_QUOTES == 0 {
         map[usize::from(b'\'')] = true;
         map[usize::from(b'"')] = true;
     }
-    if flags & FLAG_ENCODE_AMP != 0 {
+    if flags & FILTER_FLAG_ENCODE_AMP != 0 {
         map[usize::from(b'&')] = true;
     }
-    if flags & FLAG_ENCODE_LOW != 0 {
+    if flags & FILTER_FLAG_ENCODE_LOW != 0 {
         map[..32].fill(true);
     }
-    if flags & FLAG_ENCODE_HIGH != 0 {
+    if flags & FILTER_FLAG_ENCODE_HIGH != 0 {
         map[127..].fill(true);
     }
     map
@@ -99,7 +101,7 @@ pub(crate) fn string(req: &mut Request, run: &Run, s: &[u8]) -> Result<Outcome, 
     let stripped = strip(s, run.flags);
     let encoded = encode_html(&stripped, &html_map(run.flags, true));
     let out = php_ext_standard::strip_tags_ex(&encoded, None, true);
-    if out.is_empty() && run.flags & FLAG_EMPTY_STRING_NULL != 0 {
+    if out.is_empty() && run.flags & FILTER_FLAG_EMPTY_STRING_NULL != 0 {
         return Ok(Outcome::Value(Value::null()));
     }
     value(req, &out)
@@ -139,7 +141,7 @@ pub(crate) fn encoded(req: &mut Request, run: &Run, s: &[u8]) -> Result<Outcome,
 /// string(6) "&#233;"
 /// ```
 pub(crate) fn special_chars(req: &mut Request, run: &Run, s: &[u8]) -> Result<Outcome, Thrown> {
-    let mut map = html_map(run.flags & FLAG_ENCODE_HIGH, false);
+    let mut map = html_map(run.flags & FILTER_FLAG_ENCODE_HIGH, false);
     for c in *b"'\"<>&" {
         map[usize::from(c)] = true;
     }
@@ -165,7 +167,7 @@ pub(crate) fn full_special_chars(
     run: &Run,
     s: &[u8],
 ) -> Result<Outcome, Thrown> {
-    let quotes = if run.flags & FLAG_NO_ENCODE_QUOTES == 0 {
+    let quotes = if run.flags & FILTER_FLAG_NO_ENCODE_QUOTES == 0 {
         3
     } else {
         0
@@ -192,7 +194,7 @@ pub(crate) fn unsafe_raw(req: &mut Request, run: &Run, s: &[u8]) -> Result<Outco
         let map = html_map(run.flags, false);
         return value(req, &encode_html(&strip(s, run.flags), &map));
     }
-    if s.is_empty() && run.flags & FLAG_EMPTY_STRING_NULL != 0 {
+    if s.is_empty() && run.flags & FILTER_FLAG_EMPTY_STRING_NULL != 0 {
         return Ok(Outcome::Value(Value::null()));
     }
     value(req, s)
@@ -279,9 +281,9 @@ pub(crate) fn number_int(req: &mut Request, _: &Run, s: &[u8]) -> Result<Outcome
 pub(crate) fn number_float(req: &mut Request, run: &Run, s: &[u8]) -> Result<Outcome, Thrown> {
     let mut allowed: Vec<&[u8]> = vec![b"+-", DIGIT];
     for (flag, set) in [
-        (FLAG_ALLOW_FRACTION, b".".as_slice()),
-        (FLAG_ALLOW_THOUSAND, b","),
-        (FLAG_ALLOW_SCIENTIFIC, b"eE"),
+        (FILTER_FLAG_ALLOW_FRACTION, b".".as_slice()),
+        (FILTER_FLAG_ALLOW_THOUSAND, b","),
+        (FILTER_FLAG_ALLOW_SCIENTIFIC, b"eE"),
     ] {
         if run.flags & flag != 0 {
             allowed.push(set);

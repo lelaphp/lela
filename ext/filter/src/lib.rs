@@ -36,15 +36,22 @@
 mod logical;
 mod sanitizing;
 
-use php_ext::abi::{Extension, ExtensionBuilder};
-use php_ext::coerce::{coerce_param, numeric_string, to_long, to_string, value_name};
-use php_ext::decl::{
-    Attribute, AttributeArgument, ClassDecl, ClassFlags, ClassKind, ConstDecl, ConstExpr,
-    EnumBacking, FunctionDecl, IniDecl, Name, Parameter, ParameterDefault, Type,
+use constants::{
+    FILTER_CALLBACK, FILTER_DEFAULT, FILTER_FORCE_ARRAY, FILTER_NULL_ON_FAILURE,
+    FILTER_REQUIRE_ARRAY, FILTER_REQUIRE_SCALAR, FILTER_SANITIZE_ADD_SLASHES,
+    FILTER_SANITIZE_EMAIL, FILTER_SANITIZE_ENCODED, FILTER_SANITIZE_FULL_SPECIAL_CHARS,
+    FILTER_SANITIZE_NUMBER_FLOAT, FILTER_SANITIZE_NUMBER_INT, FILTER_SANITIZE_SPECIAL_CHARS,
+    FILTER_SANITIZE_STRING, FILTER_SANITIZE_URL, FILTER_THROW_ON_FAILURE, FILTER_VALIDATE_BOOL,
+    FILTER_VALIDATE_DOMAIN, FILTER_VALIDATE_EMAIL, FILTER_VALIDATE_FLOAT, FILTER_VALIDATE_INT,
+    FILTER_VALIDATE_IP, FILTER_VALIDATE_MAC, FILTER_VALIDATE_REGEXP, FILTER_VALIDATE_URL,
+    INPUT_COOKIE, INPUT_ENV, INPUT_GET, INPUT_POST, INPUT_SERVER,
 };
+use php_ext::abi::{Extension, ExtensionBuilder, OrFalse, Union};
+use php_ext::attr::{php_class, php_const, php_function};
+use php_ext::coerce::{to_long, to_string, value_name};
+use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{
-    Level, Thrown, arg_count_error, arg_null_deprecated, arg_type_error, arg_value_error, docref,
-    new_throwable, throw, throw_value,
+    Level, Thrown, arg_type_error, arg_value_error, docref, new_throwable, throw, throw_value,
 };
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, PhpArray, PhpString, Value, ValueRef};
@@ -54,64 +61,91 @@ use php_ext::values::{ClassId, Key, PhpArray, PhpString, Value, ValueRef};
 #[derive(Default)]
 struct State {}
 
-// `filter_private.h`: the flags.
-const REQUIRE_ARRAY: i64 = 0x100_0000;
-const REQUIRE_SCALAR: i64 = 0x200_0000;
-const FORCE_ARRAY: i64 = 0x400_0000;
-const NULL_ON_FAILURE: i64 = 0x800_0000;
-const THROW_ON_FAILURE: i64 = 0x1000_0000;
-const FLAG_ALLOW_OCTAL: i64 = 0x0001;
-const FLAG_ALLOW_HEX: i64 = 0x0002;
-const FLAG_STRIP_LOW: i64 = 0x0004;
-const FLAG_STRIP_HIGH: i64 = 0x0008;
-const FLAG_ENCODE_LOW: i64 = 0x0010;
-const FLAG_ENCODE_HIGH: i64 = 0x0020;
-const FLAG_ENCODE_AMP: i64 = 0x0040;
-const FLAG_NO_ENCODE_QUOTES: i64 = 0x0080;
-const FLAG_EMPTY_STRING_NULL: i64 = 0x0100;
-const FLAG_STRIP_BACKTICK: i64 = 0x0200;
-const FLAG_ALLOW_FRACTION: i64 = 0x1000;
-const FLAG_ALLOW_THOUSAND: i64 = 0x2000;
-const FLAG_ALLOW_SCIENTIFIC: i64 = 0x4000;
-const FLAG_PATH_REQUIRED: i64 = 0x04_0000;
-const FLAG_QUERY_REQUIRED: i64 = 0x08_0000;
-const FLAG_IPV4: i64 = 0x10_0000;
-const FLAG_IPV6: i64 = 0x20_0000;
-const FLAG_NO_RES_RANGE: i64 = 0x40_0000;
-const FLAG_NO_PRIV_RANGE: i64 = 0x80_0000;
-const FLAG_GLOBAL_RANGE: i64 = 0x2000_0000;
-const FLAG_HOSTNAME: i64 = 0x10_0000;
-const FLAG_EMAIL_UNICODE: i64 = 0x10_0000;
-
-// The filter ids.
-const VALIDATE_INT: i64 = 0x0101;
-const VALIDATE_BOOL: i64 = 0x0102;
-const VALIDATE_FLOAT: i64 = 0x0103;
-const VALIDATE_REGEXP: i64 = 0x0110;
-const VALIDATE_URL: i64 = 0x0111;
-const VALIDATE_EMAIL: i64 = 0x0112;
-const VALIDATE_IP: i64 = 0x0113;
-const VALIDATE_MAC: i64 = 0x0114;
-const VALIDATE_DOMAIN: i64 = 0x0115;
-const DEFAULT: i64 = 0x0204;
-const SANITIZE_STRING: i64 = 0x0201;
-const SANITIZE_ENCODED: i64 = 0x0202;
-const SANITIZE_SPECIAL_CHARS: i64 = 0x0203;
-const SANITIZE_EMAIL: i64 = 0x0205;
-const SANITIZE_URL: i64 = 0x0206;
-const SANITIZE_NUMBER_INT: i64 = 0x0207;
-const SANITIZE_NUMBER_FLOAT: i64 = 0x0208;
-const SANITIZE_FULL_SPECIAL_CHARS: i64 = 0x020a;
-const SANITIZE_ADD_SLASHES: i64 = 0x020b;
-const CALLBACK: i64 = 0x0400;
-
-// `PARSE_POST`, `PARSE_GET`, `PARSE_COOKIE`, `PARSE_ENV` and
-// `PARSE_SERVER`, the `INPUT_*` constants.
-const INPUT_POST: i64 = 0;
-const INPUT_GET: i64 = 1;
-const INPUT_COOKIE: i64 = 2;
-const INPUT_ENV: i64 = 4;
-const INPUT_SERVER: i64 = 5;
+/// `register_filter_symbols`' constants, in its order: the `INPUT_*`
+/// types, `filter_private.h`'s flags and the filter ids,
+/// `FILTER_SANITIZE_STRING` and `FILTER_SANITIZE_STRIPPED` under the
+/// stub's `#[\Deprecated]`. The dispatch reads the flags and ids by
+/// these names.
+///
+/// ```php
+/// var_dump(INPUT_POST, INPUT_SERVER, FILTER_REQUIRE_ARRAY, FILTER_THROW_ON_FAILURE, FILTER_VALIDATE_BOOLEAN === FILTER_VALIDATE_BOOL, FILTER_DEFAULT, FILTER_CALLBACK, FILTER_FLAG_GLOBAL_RANGE, FILTER_FLAG_HOSTNAME);
+/// var_dump(FILTER_SANITIZE_STRIPPED);
+/// ```
+/// ```expect
+/// int(0)
+/// int(5)
+/// int(16777216)
+/// int(268435456)
+/// bool(true)
+/// int(516)
+/// int(1024)
+/// int(536870912)
+/// int(1048576)
+///
+/// Deprecated: Constant FILTER_SANITIZE_STRIPPED is deprecated since 8.1, use htmlspecialchars() instead in %s on line 3
+/// int(513)
+/// ```
+#[php_const]
+pub(crate) mod constants {
+    pub(crate) const INPUT_POST: i64 = 0;
+    pub(crate) const INPUT_GET: i64 = 1;
+    pub(crate) const INPUT_COOKIE: i64 = 2;
+    pub(crate) const INPUT_ENV: i64 = 4;
+    pub(crate) const INPUT_SERVER: i64 = 5;
+    pub(crate) const FILTER_FLAG_NONE: i64 = 0;
+    pub(crate) const FILTER_REQUIRE_SCALAR: i64 = 0x200_0000;
+    pub(crate) const FILTER_REQUIRE_ARRAY: i64 = 0x100_0000;
+    pub(crate) const FILTER_FORCE_ARRAY: i64 = 0x400_0000;
+    pub(crate) const FILTER_NULL_ON_FAILURE: i64 = 0x800_0000;
+    pub(crate) const FILTER_THROW_ON_FAILURE: i64 = 0x1000_0000;
+    pub(crate) const FILTER_VALIDATE_INT: i64 = 0x0101;
+    pub(crate) const FILTER_VALIDATE_BOOLEAN: i64 = FILTER_VALIDATE_BOOL;
+    pub(crate) const FILTER_VALIDATE_BOOL: i64 = 0x0102;
+    pub(crate) const FILTER_VALIDATE_FLOAT: i64 = 0x0103;
+    pub(crate) const FILTER_VALIDATE_REGEXP: i64 = 0x0110;
+    pub(crate) const FILTER_VALIDATE_DOMAIN: i64 = 0x0115;
+    pub(crate) const FILTER_VALIDATE_URL: i64 = 0x0111;
+    pub(crate) const FILTER_VALIDATE_EMAIL: i64 = 0x0112;
+    pub(crate) const FILTER_VALIDATE_IP: i64 = 0x0113;
+    pub(crate) const FILTER_VALIDATE_MAC: i64 = 0x0114;
+    pub(crate) const FILTER_DEFAULT: i64 = 0x0204;
+    pub(crate) const FILTER_UNSAFE_RAW: i64 = FILTER_DEFAULT;
+    #[php(deprecated(since = "8.1", message = "use htmlspecialchars() instead"))]
+    pub(crate) const FILTER_SANITIZE_STRING: i64 = 0x0201;
+    #[php(deprecated(since = "8.1", message = "use htmlspecialchars() instead"))]
+    pub(crate) const FILTER_SANITIZE_STRIPPED: i64 = FILTER_SANITIZE_STRING;
+    pub(crate) const FILTER_SANITIZE_ENCODED: i64 = 0x0202;
+    pub(crate) const FILTER_SANITIZE_SPECIAL_CHARS: i64 = 0x0203;
+    pub(crate) const FILTER_SANITIZE_FULL_SPECIAL_CHARS: i64 = 0x020a;
+    pub(crate) const FILTER_SANITIZE_EMAIL: i64 = 0x0205;
+    pub(crate) const FILTER_SANITIZE_URL: i64 = 0x0206;
+    pub(crate) const FILTER_SANITIZE_NUMBER_INT: i64 = 0x0207;
+    pub(crate) const FILTER_SANITIZE_NUMBER_FLOAT: i64 = 0x0208;
+    pub(crate) const FILTER_SANITIZE_ADD_SLASHES: i64 = 0x020b;
+    pub(crate) const FILTER_CALLBACK: i64 = 0x0400;
+    pub(crate) const FILTER_FLAG_ALLOW_OCTAL: i64 = 0x0001;
+    pub(crate) const FILTER_FLAG_ALLOW_HEX: i64 = 0x0002;
+    pub(crate) const FILTER_FLAG_STRIP_LOW: i64 = 0x0004;
+    pub(crate) const FILTER_FLAG_STRIP_HIGH: i64 = 0x0008;
+    pub(crate) const FILTER_FLAG_STRIP_BACKTICK: i64 = 0x0200;
+    pub(crate) const FILTER_FLAG_ENCODE_LOW: i64 = 0x0010;
+    pub(crate) const FILTER_FLAG_ENCODE_HIGH: i64 = 0x0020;
+    pub(crate) const FILTER_FLAG_ENCODE_AMP: i64 = 0x0040;
+    pub(crate) const FILTER_FLAG_NO_ENCODE_QUOTES: i64 = 0x0080;
+    pub(crate) const FILTER_FLAG_EMPTY_STRING_NULL: i64 = 0x0100;
+    pub(crate) const FILTER_FLAG_ALLOW_FRACTION: i64 = 0x1000;
+    pub(crate) const FILTER_FLAG_ALLOW_THOUSAND: i64 = 0x2000;
+    pub(crate) const FILTER_FLAG_ALLOW_SCIENTIFIC: i64 = 0x4000;
+    pub(crate) const FILTER_FLAG_PATH_REQUIRED: i64 = 0x04_0000;
+    pub(crate) const FILTER_FLAG_QUERY_REQUIRED: i64 = 0x08_0000;
+    pub(crate) const FILTER_FLAG_IPV4: i64 = 0x10_0000;
+    pub(crate) const FILTER_FLAG_IPV6: i64 = 0x20_0000;
+    pub(crate) const FILTER_FLAG_NO_RES_RANGE: i64 = 0x40_0000;
+    pub(crate) const FILTER_FLAG_NO_PRIV_RANGE: i64 = 0x80_0000;
+    pub(crate) const FILTER_FLAG_GLOBAL_RANGE: i64 = 0x2000_0000;
+    pub(crate) const FILTER_FLAG_HOSTNAME: i64 = 0x10_0000;
+    pub(crate) const FILTER_FLAG_EMAIL_UNICODE: i64 = 0x10_0000;
+}
 
 /// What one filter made of the string: its value, owned, or
 /// `RETURN_VALIDATION_FAILED`, which the flags turn into `false`, `null`
@@ -135,44 +169,57 @@ type FilterFn = fn(&mut Request, &Run, &[u8]) -> Result<Outcome, Thrown>;
 /// `filter_list`, in its order: the name `filter_list()` answers, the
 /// id, and the entry.
 const FILTERS: [(&str, i64, FilterFn); 21] = [
-    ("int", VALIDATE_INT, logical::int),
-    ("boolean", VALIDATE_BOOL, logical::boolean),
-    ("float", VALIDATE_FLOAT, logical::float),
-    ("validate_regexp", VALIDATE_REGEXP, logical::regexp),
-    ("validate_domain", VALIDATE_DOMAIN, logical::domain),
-    ("validate_url", VALIDATE_URL, logical::url),
-    ("validate_email", VALIDATE_EMAIL, logical::email),
-    ("validate_ip", VALIDATE_IP, logical::ip),
-    ("validate_mac", VALIDATE_MAC, logical::mac),
-    ("string", SANITIZE_STRING, sanitizing::string),
-    ("stripped", SANITIZE_STRING, sanitizing::string),
-    ("encoded", SANITIZE_ENCODED, sanitizing::encoded),
+    ("int", FILTER_VALIDATE_INT, logical::int),
+    ("boolean", FILTER_VALIDATE_BOOL, logical::boolean),
+    ("float", FILTER_VALIDATE_FLOAT, logical::float),
+    ("validate_regexp", FILTER_VALIDATE_REGEXP, logical::regexp),
+    ("validate_domain", FILTER_VALIDATE_DOMAIN, logical::domain),
+    ("validate_url", FILTER_VALIDATE_URL, logical::url),
+    ("validate_email", FILTER_VALIDATE_EMAIL, logical::email),
+    ("validate_ip", FILTER_VALIDATE_IP, logical::ip),
+    ("validate_mac", FILTER_VALIDATE_MAC, logical::mac),
+    ("string", FILTER_SANITIZE_STRING, sanitizing::string),
+    ("stripped", FILTER_SANITIZE_STRING, sanitizing::string),
+    ("encoded", FILTER_SANITIZE_ENCODED, sanitizing::encoded),
     (
         "special_chars",
-        SANITIZE_SPECIAL_CHARS,
+        FILTER_SANITIZE_SPECIAL_CHARS,
         sanitizing::special_chars,
     ),
     (
         "full_special_chars",
-        SANITIZE_FULL_SPECIAL_CHARS,
+        FILTER_SANITIZE_FULL_SPECIAL_CHARS,
         sanitizing::full_special_chars,
     ),
-    ("unsafe_raw", DEFAULT, sanitizing::unsafe_raw),
-    ("email", SANITIZE_EMAIL, sanitizing::email),
-    ("url", SANITIZE_URL, sanitizing::url),
-    ("number_int", SANITIZE_NUMBER_INT, sanitizing::number_int),
+    ("unsafe_raw", FILTER_DEFAULT, sanitizing::unsafe_raw),
+    ("email", FILTER_SANITIZE_EMAIL, sanitizing::email),
+    ("url", FILTER_SANITIZE_URL, sanitizing::url),
+    (
+        "number_int",
+        FILTER_SANITIZE_NUMBER_INT,
+        sanitizing::number_int,
+    ),
     (
         "number_float",
-        SANITIZE_NUMBER_FLOAT,
+        FILTER_SANITIZE_NUMBER_FLOAT,
         sanitizing::number_float,
     ),
-    ("add_slashes", SANITIZE_ADD_SLASHES, sanitizing::add_slashes),
-    ("callback", CALLBACK, sanitizing::callback),
+    (
+        "add_slashes",
+        FILTER_SANITIZE_ADD_SLASHES,
+        sanitizing::add_slashes,
+    ),
+    ("callback", FILTER_CALLBACK, sanitizing::callback),
 ];
+
+/// The warning for an id `PHP_FILTER_ID_EXISTS` refuses.
+fn unknown_filter(req: &mut Request, id: i64) {
+    docref(req, Level::Warning, &format!("Unknown filter with ID {id}"));
+}
 
 /// `PHP_FILTER_ID_EXISTS`.
 const fn id_exists(id: i64) -> bool {
-    matches!(id, 0x0200..=0x020b | 0x0100..=0x0115 | CALLBACK)
+    matches!(id, 0x0200..=0x020b | 0x0100..=0x0115 | FILTER_CALLBACK)
 }
 
 /// `php_find_filter`: the entry with the id, and the default's where
@@ -187,8 +234,9 @@ fn find_filter(id: i64) -> (&'static str, FilterFn) {
 }
 
 /// The extension value (design §7.1): the seven natives `filter.stub.php`
-/// declares, its constants in `register_filter_symbols`' order, the two
-/// throwable classes and the two ini entries.
+/// declares, each by `#[php_function]` in the stub's order, its constants
+/// in `register_filter_symbols`' order, the two throwable classes and the
+/// two ini entries.
 ///
 /// ```php
 /// var_dump(extension_loaded('filter'), ini_get('filter.default'), ini_get('filter.default_flags'));
@@ -217,101 +265,20 @@ fn find_filter(id: i64) -> (&'static str, FilterFn) {
 ///   - Return [ array|false|null ]
 /// }
 /// ```
-#[allow(clippy::too_many_lines)] // one row per native of the stub
 pub fn extension() -> Extension {
-    let int = |name: &[u8]| parameter(name, Type::Int, None);
-    let string = |name: &[u8]| parameter(name, Type::String, None);
-    let constant = || {
-        Some(ConstExpr::Constant(Name(
-            b"FILTER_DEFAULT".as_slice().into(),
-        )))
-    };
-    let options = |default: Option<ConstExpr>| {
-        parameter(
-            b"options",
-            Type::Union(vec![Type::Array, Type::Int]),
-            default,
-        )
-    };
-    let add_empty = || parameter(b"add_empty", Type::Bool, Some(ConstExpr::Bool(true)));
-    let array_or = || Type::Union(vec![Type::Array, Type::False, Type::Null]);
-    let natives: Vec<(FunctionDecl, Entry)> = vec![
-        (
-            declared(
-                b"filter_has_var",
-                vec![int(b"input_type"), string(b"var_name")],
-                Type::Bool,
-            ),
-            filter_has_var,
-        ),
-        (
-            declared(
-                b"filter_input",
-                vec![
-                    int(b"type"),
-                    string(b"var_name"),
-                    parameter(b"filter", Type::Int, constant()),
-                    options(Some(ConstExpr::long(0))),
-                ],
-                Type::Mixed,
-            ),
-            filter_input,
-        ),
-        (
-            declared(
-                b"filter_var",
-                vec![
-                    parameter(b"value", Type::Mixed, None),
-                    parameter(b"filter", Type::Int, constant()),
-                    options(Some(ConstExpr::long(0))),
-                ],
-                Type::Mixed,
-            ),
-            filter_var,
-        ),
-        (
-            declared(
-                b"filter_input_array",
-                vec![int(b"type"), options(constant()), add_empty()],
-                array_or(),
-            ),
-            filter_input_array,
-        ),
-        (
-            declared(
-                b"filter_var_array",
-                vec![
-                    parameter(b"array", Type::Array, None),
-                    options(constant()),
-                    add_empty(),
-                ],
-                array_or(),
-            ),
-            filter_var_array,
-        ),
-        (
-            declared(b"filter_list", Vec::new(), Type::Array),
-            filter_list,
-        ),
-        (
-            declared(
-                b"filter_id",
-                vec![string(b"name")],
-                Type::Union(vec![Type::Int, Type::False]),
-            ),
-            filter_id,
-        ),
-    ];
     ExtensionBuilder::default()
-        .constants(constants())
-        .functions(natives)
-        .classes(vec![
-            (class(b"Filter\\FilterException", b"Exception"), Vec::new()),
-            (
-                class(b"Filter\\FilterFailedException", b"Filter\\FilterException"),
-                Vec::new(),
-            ),
+        .constants(constants::declared())
+        .functions(vec![
+            filter_has_var::declared(),
+            filter_input::declared(),
+            filter_var::declared(),
+            filter_input_array::declared(),
+            filter_var_array::declared(),
+            filter_list::declared(),
+            filter_id::declared(),
         ])
+        .class::<FilterException>()
+        .class::<FilterFailedException>()
         .ini(vec![
             ini_entry(b"filter.default", b"unsafe_raw"),
             ini_entry(b"filter.default_flags", b""),
@@ -349,7 +316,7 @@ fn startup_default(req: &mut Request) -> Result<(), Thrown> {
     let named = FILTERS
         .iter()
         .find(|(name, _, _)| name.as_bytes().eq_ignore_ascii_case(&value));
-    if named.is_some_and(|(_, id, _)| *id != DEFAULT) {
+    if named.is_some_and(|(_, id, _)| *id != FILTER_DEFAULT) {
         php_ext::raising::startup(
             req,
             Level::Deprecated,
@@ -388,9 +355,6 @@ fn filter_info(req: &mut Request) {
     ]);
 }
 
-/// A native's entry, the shape `ExtensionBuilder::functions` takes.
-type Entry = fn(&mut Request) -> Result<Value, Thrown>;
-
 /// `STD_PHP_INI_ENTRY(..., PHP_INI_SYSTEM|PHP_INI_PERDIR, ...)`.
 fn ini_entry(name: &[u8], default: &[u8]) -> IniDecl {
     IniDecl {
@@ -402,114 +366,9 @@ fn ini_entry(name: &[u8], default: &[u8]) -> IniDecl {
     }
 }
 
-/// The constants `register_filter_symbols` registers, in its order,
-/// `FILTER_SANITIZE_STRING` and `FILTER_SANITIZE_STRIPPED` under the
-/// stub's `#[\Deprecated]`.
-///
-/// ```php
-/// var_dump(INPUT_POST, INPUT_SERVER, FILTER_REQUIRE_ARRAY, FILTER_THROW_ON_FAILURE, FILTER_VALIDATE_BOOLEAN === FILTER_VALIDATE_BOOL, FILTER_DEFAULT, FILTER_CALLBACK, FILTER_FLAG_GLOBAL_RANGE, FILTER_FLAG_HOSTNAME);
-/// var_dump(FILTER_SANITIZE_STRIPPED);
-/// ```
-/// ```expect
-/// int(0)
-/// int(5)
-/// int(16777216)
-/// int(268435456)
-/// bool(true)
-/// int(516)
-/// int(1024)
-/// int(536870912)
-/// int(1048576)
-///
-/// Deprecated: Constant FILTER_SANITIZE_STRIPPED is deprecated since 8.1, use htmlspecialchars() instead in %s on line 3
-/// int(513)
-/// ```
-fn constants() -> Vec<ConstDecl> {
-    let rows: [(&[u8], i64); 56] = [
-        (b"INPUT_POST", INPUT_POST),
-        (b"INPUT_GET", INPUT_GET),
-        (b"INPUT_COOKIE", INPUT_COOKIE),
-        (b"INPUT_ENV", INPUT_ENV),
-        (b"INPUT_SERVER", INPUT_SERVER),
-        (b"FILTER_FLAG_NONE", 0),
-        (b"FILTER_REQUIRE_SCALAR", REQUIRE_SCALAR),
-        (b"FILTER_REQUIRE_ARRAY", REQUIRE_ARRAY),
-        (b"FILTER_FORCE_ARRAY", FORCE_ARRAY),
-        (b"FILTER_NULL_ON_FAILURE", NULL_ON_FAILURE),
-        (b"FILTER_THROW_ON_FAILURE", THROW_ON_FAILURE),
-        (b"FILTER_VALIDATE_INT", VALIDATE_INT),
-        (b"FILTER_VALIDATE_BOOLEAN", VALIDATE_BOOL),
-        (b"FILTER_VALIDATE_BOOL", VALIDATE_BOOL),
-        (b"FILTER_VALIDATE_FLOAT", VALIDATE_FLOAT),
-        (b"FILTER_VALIDATE_REGEXP", VALIDATE_REGEXP),
-        (b"FILTER_VALIDATE_DOMAIN", VALIDATE_DOMAIN),
-        (b"FILTER_VALIDATE_URL", VALIDATE_URL),
-        (b"FILTER_VALIDATE_EMAIL", VALIDATE_EMAIL),
-        (b"FILTER_VALIDATE_IP", VALIDATE_IP),
-        (b"FILTER_VALIDATE_MAC", VALIDATE_MAC),
-        (b"FILTER_DEFAULT", DEFAULT),
-        (b"FILTER_UNSAFE_RAW", DEFAULT),
-        (b"FILTER_SANITIZE_STRING", SANITIZE_STRING),
-        (b"FILTER_SANITIZE_STRIPPED", SANITIZE_STRING),
-        (b"FILTER_SANITIZE_ENCODED", SANITIZE_ENCODED),
-        (b"FILTER_SANITIZE_SPECIAL_CHARS", SANITIZE_SPECIAL_CHARS),
-        (
-            b"FILTER_SANITIZE_FULL_SPECIAL_CHARS",
-            SANITIZE_FULL_SPECIAL_CHARS,
-        ),
-        (b"FILTER_SANITIZE_EMAIL", SANITIZE_EMAIL),
-        (b"FILTER_SANITIZE_URL", SANITIZE_URL),
-        (b"FILTER_SANITIZE_NUMBER_INT", SANITIZE_NUMBER_INT),
-        (b"FILTER_SANITIZE_NUMBER_FLOAT", SANITIZE_NUMBER_FLOAT),
-        (b"FILTER_SANITIZE_ADD_SLASHES", SANITIZE_ADD_SLASHES),
-        (b"FILTER_CALLBACK", CALLBACK),
-        (b"FILTER_FLAG_ALLOW_OCTAL", FLAG_ALLOW_OCTAL),
-        (b"FILTER_FLAG_ALLOW_HEX", FLAG_ALLOW_HEX),
-        (b"FILTER_FLAG_STRIP_LOW", FLAG_STRIP_LOW),
-        (b"FILTER_FLAG_STRIP_HIGH", FLAG_STRIP_HIGH),
-        (b"FILTER_FLAG_STRIP_BACKTICK", FLAG_STRIP_BACKTICK),
-        (b"FILTER_FLAG_ENCODE_LOW", FLAG_ENCODE_LOW),
-        (b"FILTER_FLAG_ENCODE_HIGH", FLAG_ENCODE_HIGH),
-        (b"FILTER_FLAG_ENCODE_AMP", FLAG_ENCODE_AMP),
-        (b"FILTER_FLAG_NO_ENCODE_QUOTES", FLAG_NO_ENCODE_QUOTES),
-        (b"FILTER_FLAG_EMPTY_STRING_NULL", FLAG_EMPTY_STRING_NULL),
-        (b"FILTER_FLAG_ALLOW_FRACTION", FLAG_ALLOW_FRACTION),
-        (b"FILTER_FLAG_ALLOW_THOUSAND", FLAG_ALLOW_THOUSAND),
-        (b"FILTER_FLAG_ALLOW_SCIENTIFIC", FLAG_ALLOW_SCIENTIFIC),
-        (b"FILTER_FLAG_PATH_REQUIRED", FLAG_PATH_REQUIRED),
-        (b"FILTER_FLAG_QUERY_REQUIRED", FLAG_QUERY_REQUIRED),
-        (b"FILTER_FLAG_IPV4", FLAG_IPV4),
-        (b"FILTER_FLAG_IPV6", FLAG_IPV6),
-        (b"FILTER_FLAG_NO_RES_RANGE", FLAG_NO_RES_RANGE),
-        (b"FILTER_FLAG_NO_PRIV_RANGE", FLAG_NO_PRIV_RANGE),
-        (b"FILTER_FLAG_GLOBAL_RANGE", FLAG_GLOBAL_RANGE),
-        (b"FILTER_FLAG_HOSTNAME", FLAG_HOSTNAME),
-        (b"FILTER_FLAG_EMAIL_UNICODE", FLAG_EMAIL_UNICODE),
-    ];
-    rows.into_iter()
-        .map(|(name, value)| ConstDecl {
-            name: Name(name.into()),
-            value: ConstExpr::long(value),
-            attributes: if name.starts_with(b"FILTER_SANITIZE_STR") {
-                vec![deprecated_since(b"8.1", b"use htmlspecialchars() instead")]
-            } else {
-                Vec::new()
-            },
-        })
-        .collect()
-}
-
-/// `#[\Deprecated(since: ..., message: ...)]`.
-fn deprecated_since(since: &[u8], message: &[u8]) -> Attribute {
-    let argument = |name: &[u8], value: &[u8]| AttributeArgument {
-        name: Some(Name(name.into())),
-        value: ConstExpr::Str(value.into()),
-    };
-    Attribute {
-        name: Name(b"Deprecated".as_slice().into()),
-        arguments: vec![argument(b"since", since), argument(b"message", message)],
-    }
-}
+/// Core's `Exception`, named for `extends`.
+#[php_class(extern)]
+struct Exception;
 
 /// `namespace Filter { class FilterException extends \Exception {} class
 /// FilterFailedException extends FilterException {} }`.
@@ -522,153 +381,17 @@ fn deprecated_since(since: &[u8], message: &[u8]) -> Attribute {
 /// string(22) "Filter\FilterException"
 /// string(57) "filter validation failed: filter int not satisfied by 'x'"
 /// ```
-fn class(name: &[u8], parent: &[u8]) -> ClassDecl {
-    ClassDecl {
-        name: Name(name.into()),
-        kind: ClassKind::Class,
-        flags: ClassFlags::default(),
-        parent: Some(Name(parent.into())),
-        interfaces: Vec::new(),
-        traits: Vec::new(),
-        adaptations: Vec::new(),
-        backing: EnumBacking::Pure,
-        constants: Vec::new(),
-        properties: Vec::new(),
-        methods: Vec::new(),
-        attributes: Vec::new(),
-        doc_comment: None,
-        file: Name(Box::new([])),
-        line: 0,
-        end_line: 0,
-    }
-}
+#[php_class(namespace(Filter), extends(Exception))]
+struct FilterException;
 
-/// One function as `filter.stub.php` declares it.
-fn declared(name: &[u8], parameters: Vec<Parameter>, returns: Type) -> FunctionDecl {
-    FunctionDecl {
-        name: Name(name.into()),
-        parameters,
-        return_type: Some(returns),
-        returns_by_ref: false,
-        is_generator: false,
-        attributes: Vec::new(),
-        doc_comment: None,
-        file: Name(Box::new([])),
-        line: 0,
-        end_line: 0,
-        frameless: Vec::new(),
-    }
-}
+#[php_class]
+impl FilterException {}
 
-fn parameter(name: &[u8], ty: Type, default: Option<ConstExpr>) -> Parameter {
-    Parameter {
-        name: Name(name.into()),
-        ty: Some(ty),
-        by_ref: false,
-        prefer_ref: false,
-        promoted: false,
-        variadic: false,
-        default: default.map_or(ParameterDefault::None, ParameterDefault::Expr),
-        attributes: Vec::new(),
-    }
-}
+#[php_class(namespace(Filter), extends(FilterException))]
+struct FilterFailedException;
 
-// ------------------------------------------------------------ arguments
-
-/// `ZEND_PARSE_PARAMETERS_START(min, max)`'s count check.
-fn arguments_between(req: &mut Request, min: usize, max: usize) -> Result<(), Thrown> {
-    let given = req.argument_count();
-    if (min..=max).contains(&given) {
-        return Ok(());
-    }
-    let (word, bound) = if min == max {
-        ("exactly", min)
-    } else if given < min {
-        ("at least", min)
-    } else {
-        ("at most", max)
-    };
-    let plural = if bound == 1 { "" } else { "s" };
-    Err(arg_count_error(
-        req,
-        &format!("{word} {bound} argument{plural}, {given} given"),
-    ))
-}
-
-/// The argument at `position` when the call gave one.
-fn given(req: &Request, position: u32) -> Option<Value> {
-    req.argument(position)
-        .filter(|value| !matches!(value.as_ref(), ValueRef::Undef))
-}
-
-/// `Z_PARAM_LONG`, `absent` where `Z_PARAM_OPTIONAL` left it.
-fn long_argument(req: &mut Request, position: u32, absent: i64) -> Result<i64, Thrown> {
-    let Some(value) = given(req, position) else {
-        return Ok(absent);
-    };
-    let coerced = coerce_param(req, &value, &Type::Int, position)?;
-    Ok(coerced.deref().as_int().unwrap_or(0))
-}
-
-/// `Z_PARAM_BOOL`, `absent` where `Z_PARAM_OPTIONAL` left it.
-fn bool_argument(req: &mut Request, position: u32, absent: bool) -> Result<bool, Thrown> {
-    let Some(value) = given(req, position) else {
-        return Ok(absent);
-    };
-    let coerced = coerce_param(req, &value, &Type::Bool, position)?;
-    Ok(coerced.deref().as_bool().unwrap_or(false))
-}
-
-/// `Z_PARAM_STR`.
-fn string_argument(req: &mut Request, position: u32) -> Result<Vec<u8>, Thrown> {
-    let value = req.argument(position).unwrap_or_default();
-    let coerced = coerce_param(req, &value, &Type::String, position)?;
-    Ok(coerced.deref().as_str_bytes().unwrap_or_default().to_vec())
-}
-
-/// `Z_PARAM_ARRAY_HT_OR_LONG` after `Z_PARAM_OPTIONAL`: the array, or
-/// the long, `absent` where the call gave none.
-fn array_or_long(
-    req: &mut Request,
-    position: u32,
-    absent: i64,
-) -> Result<(Option<PhpArray>, i64), Thrown> {
-    let Some(value) = given(req, position) else {
-        return Ok((None, absent));
-    };
-    let value = value.deref();
-    if let Some(array) = value.as_array() {
-        return Ok((Some(*array), 0));
-    }
-    // The weak long's refusals name the union, as
-    // `zend_parse_arg_array_ht_or_long` reports them.
-    let refused = match value.as_ref() {
-        ValueRef::Null => {
-            arg_null_deprecated(req, position, "array|int");
-            return Ok((None, 0));
-        }
-        ValueRef::Str(s) => {
-            let text = s.as_bytes().trim_ascii_start();
-            let text = text
-                .strip_prefix(b"-")
-                .or_else(|| text.strip_prefix(b"+"))
-                .unwrap_or(text);
-            numeric_string(s.as_bytes()).is_none() && !text.first().is_some_and(u8::is_ascii_digit)
-        }
-        ValueRef::Object(_) | ValueRef::Resource(_) => true,
-        _ => false,
-    };
-    if refused {
-        let name = value_name(req, &value);
-        return Err(arg_type_error(
-            req,
-            position,
-            &format!("be of type array|int, {name} given"),
-        ));
-    }
-    let coerced = coerce_param(req, &value, &Type::Int, position)?;
-    Ok((None, coerced.deref().as_int().unwrap_or(0)))
-}
+#[php_class]
+impl FilterFailedException {}
 
 /// `zend_hash_str_find` over an options array: the element under a
 /// string key, a view.
@@ -754,7 +477,7 @@ fn zval_filter(req: &mut Request, value: Value, filter: i64, run: &Run) -> Resul
         // #49274: an object with no `__toString` fails nicely, and
         // #67167 makes the failure `false` or `null`.
         req.release(value);
-        if flags & THROW_ON_FAILURE != 0 {
+        if flags & FILTER_THROW_ON_FAILURE != 0 {
             let class = req
                 .class_decl(object.class())
                 .map(|decl| c_string(&decl.name.0))
@@ -775,7 +498,7 @@ fn zval_filter(req: &mut Request, value: Value, filter: i64, run: &Run) -> Resul
         req.release(Value::string(string));
         match function(req, run, &bytes)? {
             Outcome::Value(value) => value,
-            Outcome::Failed if flags & THROW_ON_FAILURE != 0 => {
+            Outcome::Failed if flags & FILTER_THROW_ON_FAILURE != 0 => {
                 return Err(throw_failed(
                     req,
                     &format!(
@@ -788,7 +511,7 @@ fn zval_filter(req: &mut Request, value: Value, filter: i64, run: &Run) -> Resul
         }
     };
     // `handle_default`: the `default` option in place of the failure.
-    let failed = if flags & NULL_ON_FAILURE != 0 {
+    let failed = if flags & FILTER_NULL_ON_FAILURE != 0 {
         matches!(filtered.as_ref(), ValueRef::Null)
     } else {
         matches!(filtered.as_ref(), ValueRef::Bool(false))
@@ -810,7 +533,7 @@ fn zval_filter(req: &mut Request, value: Value, filter: i64, run: &Run) -> Resul
 
 /// What `RETURN_VALIDATION_FAILED` leaves without the throwable.
 fn failure(flags: i64) -> Value {
-    if flags & NULL_ON_FAILURE != 0 {
+    if flags & FILTER_NULL_ON_FAILURE != 0 {
         Value::null()
     } else {
         Value::bool(false)
@@ -829,13 +552,26 @@ fn zval_filter_recursive(
     let Some(array) = value.deref().as_array().copied() else {
         return zval_filter(req, value, filter, run);
     };
+    let built = filter_array(req, array, filter, run);
+    req.release(value);
+    built.map(PhpArray::to_value)
+}
+
+/// `php_zval_filter_recursive` over an array, the caller's own: a new
+/// array, or one already being walked handed back as it is, owned.
+fn filter_array(
+    req: &mut Request,
+    array: PhpArray,
+    filter: i64,
+    run: &Run,
+) -> Result<PhpArray, Thrown> {
     if array.is_recursive() {
-        return Ok(value);
+        req.addref(&array.to_value());
+        return Ok(array);
     }
     array.protect();
     let built = filter_elements(req, array, filter, run);
     array.unprotect();
-    req.release(value);
     built
 }
 
@@ -844,7 +580,7 @@ fn filter_elements(
     array: PhpArray,
     filter: i64,
     run: &Run,
-) -> Result<Value, Thrown> {
+) -> Result<PhpArray, Thrown> {
     let mut out = PhpArray::new(req)?;
     for (key, element) in array.snapshot() {
         req.addref(&element);
@@ -861,7 +597,7 @@ fn filter_elements(
             }
         }
     }
-    Ok(out.to_value())
+    Ok(out)
 }
 
 /// `php_filter_call`: `value` owned, what it became owned, and
@@ -871,27 +607,27 @@ fn filter_call(
     native: &'static str,
     value: Value,
     mut filter: i64,
-    arguments: (Option<PhpArray>, i64),
+    arguments: Union<PhpArray, i64>,
     mut flags: i64,
     options_position: u32,
 ) -> Result<Value, Thrown> {
     let mut options = None;
     match arguments {
-        (None, long) if filter != -1 => {
+        Union::B(long) if filter != -1 => {
             flags = long;
-            if flags & (REQUIRE_ARRAY | FORCE_ARRAY) == 0 {
-                flags |= REQUIRE_SCALAR;
+            if flags & (FILTER_REQUIRE_ARRAY | FILTER_FORCE_ARRAY) == 0 {
+                flags |= FILTER_REQUIRE_SCALAR;
             }
         }
-        (None, long) => filter = long,
-        (Some(table), _) => {
+        Union::B(long) => filter = long,
+        Union::A(table) => {
             let table = Some(table.to_value());
             if let Some(given) = find(table.as_ref(), b"filter") {
                 filter = to_long(req, &given.deref())?;
             }
             if let Some(given) = find(table.as_ref(), b"options") {
                 let given = given.deref();
-                if filter == CALLBACK {
+                if filter == FILTER_CALLBACK {
                     options = Some(given);
                     flags = 0;
                 } else if given.as_array().is_some() {
@@ -900,13 +636,13 @@ fn filter_call(
             }
             if let Some(given) = find(table.as_ref(), b"flags") {
                 flags = to_long(req, &given.deref())?;
-                if flags & (REQUIRE_ARRAY | FORCE_ARRAY) == 0 {
-                    flags |= REQUIRE_SCALAR;
+                if flags & (FILTER_REQUIRE_ARRAY | FILTER_FORCE_ARRAY) == 0 {
+                    flags |= FILTER_REQUIRE_SCALAR;
                 }
             }
         }
     }
-    if flags & NULL_ON_FAILURE != 0 && flags & THROW_ON_FAILURE != 0 {
+    if flags & FILTER_NULL_ON_FAILURE != 0 && flags & FILTER_THROW_ON_FAILURE != 0 {
         req.release(value);
         return Err(options_error(req, native, options_position, BOTH_FAILURES));
     }
@@ -916,9 +652,9 @@ fn filter_call(
         native,
     };
     if value.deref().as_array().is_some() {
-        if flags & REQUIRE_SCALAR != 0 {
+        if flags & FILTER_REQUIRE_SCALAR != 0 {
             req.release(value);
-            if flags & THROW_ON_FAILURE != 0 {
+            if flags & FILTER_THROW_ON_FAILURE != 0 {
                 return Err(throw_failed(
                     req,
                     "filter validation failed: not a scalar value (got an array)",
@@ -928,10 +664,10 @@ fn filter_call(
         }
         return zval_filter_recursive(req, value, filter, &run);
     }
-    if flags & REQUIRE_ARRAY != 0 {
+    if flags & FILTER_REQUIRE_ARRAY != 0 {
         let name = value_name(req, &value.deref());
         req.release(value);
-        if flags & THROW_ON_FAILURE != 0 {
+        if flags & FILTER_THROW_ON_FAILURE != 0 {
             return Err(throw_failed(
                 req,
                 &format!("filter validation failed: not an array (got {name})"),
@@ -940,7 +676,7 @@ fn filter_call(
         return Ok(failure(flags));
     }
     let filtered = zval_filter(req, value, filter, &run)?;
-    if flags & FORCE_ARRAY != 0 {
+    if flags & FILTER_FORCE_ARRAY != 0 {
         let mut wrapped = PhpArray::new(req)?;
         wrapped.append(req, filtered)?;
         return Ok(wrapped.to_value());
@@ -949,18 +685,26 @@ fn filter_call(
 }
 
 /// `php_filter_array_handler(input, op_ht, op_long, return_value,
-/// add_empty)`.
+/// add_empty)`. Without a definition it is `php_filter_call(input, -1,
+/// NULL, op_long, return_value, FILTER_REQUIRE_ARRAY)`, which walks the
+/// input array through the one filter `op_long` names.
 fn array_handler(
     req: &mut Request,
     native: &'static str,
     input: PhpArray,
-    definition: (Option<PhpArray>, i64),
+    definition: Union<PhpArray, i64>,
     add_empty: bool,
-) -> Result<Value, Thrown> {
-    let (Some(table), _) = definition else {
-        let copy = input.to_value();
-        req.addref(&copy);
-        return filter_call(req, native, copy, -1, definition, REQUIRE_ARRAY, 2);
+) -> Result<PhpArray, Thrown> {
+    let table = match definition {
+        Union::A(table) => table,
+        Union::B(filter) => {
+            let run = Run {
+                flags: FILTER_REQUIRE_ARRAY,
+                options: None,
+                native,
+            };
+            return filter_array(req, input, filter, &run);
+        }
     };
     let mut out = PhpArray::new(req)?;
     for (key, element) in table.snapshot() {
@@ -984,17 +728,17 @@ fn array_handler(
         };
         let element = element.deref();
         let arguments = if let Some(array) = element.as_array() {
-            (Some(*array), 0)
+            Union::A(*array)
         } else {
             let id = to_long(req, &element)?;
             if !id_exists(id) {
-                docref(req, Level::Warning, &format!("Unknown filter with ID {id}"));
+                unknown_filter(req, id);
             }
-            (None, id)
+            Union::B(id)
         };
         let found = found.deref();
         req.addref(&found);
-        match filter_call(req, native, found, -1, arguments, REQUIRE_SCALAR, 2) {
+        match filter_call(req, native, found, -1, arguments, FILTER_REQUIRE_SCALAR, 2) {
             Ok(filtered) => {
                 req.addref(&Value::string(name));
                 out.set(req, Key::Str(name), filtered)?;
@@ -1005,7 +749,7 @@ fn array_handler(
             }
         }
     }
-    Ok(out.to_value())
+    Ok(out)
 }
 
 /// `php_filter_get_storage`: the input array a type names, `None` where
@@ -1084,16 +828,14 @@ fn lookup(array: PhpArray, name: &[u8], numeric: bool) -> Option<Value> {
 /// bool(false)
 /// filter_has_var(): Argument #1 ($input_type) must be an INPUT_* constant
 /// ```
-fn filter_has_var(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 2, 2)?;
-    let input = long_argument(req, 1, 0)?;
-    let name = string_argument(req, 2)?;
-    let Some(array) = storage(req, input)? else {
-        return Ok(Value::bool(false));
+#[php_function]
+fn filter_has_var(req: &mut Request, input_type: i64, var_name: PhpString) -> Result<bool, Thrown> {
+    let Some(array) = storage(req, input_type)? else {
+        return Ok(false);
     };
-    let found = lookup(array, &name, false).is_some();
+    let found = lookup(array, var_name.as_bytes(), false).is_some();
     req.release(array.to_value());
-    Ok(Value::bool(found))
+    Ok(found)
 }
 
 /// `filter_input(int $type, string $var_name, int $filter =
@@ -1118,22 +860,21 @@ fn filter_has_var(req: &mut Request) -> Result<Value, Thrown> {
 /// Warning: filter_input(): Unknown filter with ID 9999 in %s on line 4
 /// bool(false)
 /// ```
-fn filter_input(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 2, 4)?;
-    let input = long_argument(req, 1, 0)?;
-    let name = string_argument(req, 2)?;
-    let filter = long_argument(req, 3, DEFAULT)?;
-    let arguments = array_or_long(req, 4, 0)?;
+#[php_function]
+fn filter_input(
+    req: &mut Request,
+    r#type: i64,
+    var_name: PhpString,
+    #[php(default = FILTER_DEFAULT)] filter: i64,
+    #[php(default = 0)] options: Union<PhpArray, i64>,
+) -> Result<Value, Thrown> {
+    let name = var_name.as_bytes();
     if !id_exists(filter) {
-        docref(
-            req,
-            Level::Warning,
-            &format!("Unknown filter with ID {filter}"),
-        );
+        unknown_filter(req, filter);
         return Ok(Value::bool(false));
     }
-    let array = storage(req, input)?;
-    let found = array.and_then(|array| lookup(array, &name, false).map(|v| v.deref()));
+    let array = storage(req, r#type)?;
+    let found = array.and_then(|array| lookup(array, name, false).map(|v| v.deref()));
     if let Some(found) = &found {
         req.addref(found);
     }
@@ -1146,24 +887,28 @@ fn filter_input(req: &mut Request) -> Result<Value, Thrown> {
             "filter_input",
             found,
             filter,
-            arguments,
-            REQUIRE_SCALAR,
+            options,
+            FILTER_REQUIRE_SCALAR,
             4,
         );
     }
-    let table = arguments.0.map(PhpArray::to_value);
-    let flags = match (&table, find(table.as_ref(), b"flags")) {
-        (None, _) => arguments.1,
-        (Some(_), Some(given)) => to_long(req, &given.deref())?,
-        (Some(_), None) => 0,
+    let (table, flags) = match options {
+        Union::B(flags) => (None, flags),
+        Union::A(table) => {
+            let table = Some(table.to_value());
+            match find(table.as_ref(), b"flags") {
+                Some(given) => (table, to_long(req, &given.deref())?),
+                None => (table, 0),
+            }
+        }
     };
-    if flags & NULL_ON_FAILURE != 0 && flags & THROW_ON_FAILURE != 0 {
+    if flags & FILTER_NULL_ON_FAILURE != 0 && flags & FILTER_THROW_ON_FAILURE != 0 {
         return Err(options_error(req, "filter_input", 4, BOTH_FAILURES));
     }
-    if flags & THROW_ON_FAILURE != 0 {
+    if flags & FILTER_THROW_ON_FAILURE != 0 {
         return Err(throw_failed(
             req,
-            &format!("input value '{}' not found", c_string(&name)),
+            &format!("input value '{}' not found", c_string(name)),
         ));
     }
     let options = find(table.as_ref(), b"options").map(|o| o.deref());
@@ -1176,7 +921,7 @@ fn filter_input(req: &mut Request) -> Result<Value, Thrown> {
     }
     // Inverted on purpose, as `filter.c` says: a missing variable is
     // `false` under the flag that makes a failure `null`.
-    Ok(if flags & NULL_ON_FAILURE != 0 {
+    Ok(if flags & FILTER_NULL_ON_FAILURE != 0 {
         Value::bool(false)
     } else {
         Value::null()
@@ -1190,10 +935,14 @@ fn filter_input(req: &mut Request) -> Result<Value, Thrown> {
 ///
 /// ```php
 /// try { filter_var_array([], ""); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { filter_var("7", FILTER_VALIDATE_INT, "5abc"); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { filter_var("7", FILTER_VALIDATE_INT, 9e30); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
 /// var_dump(filter_var("  42 ", FILTER_VALIDATE_INT), filter_var("abc"), filter_var(1.5), filter_var(true), filter_var(null), filter_var([1], FILTER_VALIDATE_INT), filter_var(["1", ["x", "3"]], FILTER_VALIDATE_INT, FILTER_REQUIRE_ARRAY), filter_var("5", FILTER_VALIDATE_INT, FILTER_FORCE_ARRAY), filter_var("5", FILTER_VALIDATE_INT, FILTER_REQUIRE_ARRAY));
 /// ```
 /// ```expect
 /// filter_var_array(): Argument #2 ($options) must be of type array|int, string given
+/// filter_var(): Argument #3 ($options) must be of type array|int, string given
+/// filter_var(): Argument #3 ($options) must be of type array|int, float given
 /// int(42)
 /// string(3) "abc"
 /// string(3) "1.5"
@@ -1244,17 +993,15 @@ fn filter_input(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(false)
 /// ```
-fn filter_var(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 1, 3)?;
-    let value = req.argument(1).unwrap_or_default().deref();
-    let filter = long_argument(req, 2, DEFAULT)?;
-    let arguments = array_or_long(req, 3, 0)?;
+#[php_function]
+fn filter_var(
+    req: &mut Request,
+    value: Value,
+    #[php(default = FILTER_DEFAULT)] filter: i64,
+    #[php(default = 0)] options: Union<PhpArray, i64>,
+) -> Result<Value, Thrown> {
     if !id_exists(filter) {
-        docref(
-            req,
-            Level::Warning,
-            &format!("Unknown filter with ID {filter}"),
-        );
+        unknown_filter(req, filter);
         return Ok(Value::bool(false));
     }
     req.addref(&value);
@@ -1263,8 +1010,8 @@ fn filter_var(req: &mut Request) -> Result<Value, Thrown> {
         "filter_var",
         value,
         filter,
-        arguments,
-        REQUIRE_SCALAR,
+        options,
+        FILTER_REQUIRE_SCALAR,
         3,
     )
 }
@@ -1287,25 +1034,25 @@ fn filter_var(req: &mut Request) -> Result<Value, Thrown> {
 /// array(0) {
 /// }
 /// ```
-fn filter_input_array(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 1, 3)?;
-    let input = long_argument(req, 1, 0)?;
-    let definition = array_or_long(req, 2, DEFAULT)?;
-    let add_empty = bool_argument(req, 3, true)?;
-    if definition.0.is_none() && !id_exists(definition.1) {
-        docref(
-            req,
-            Level::Warning,
-            &format!("Unknown filter with ID {}", definition.1),
-        );
-        return Ok(Value::bool(false));
+#[php_function]
+fn filter_input_array(
+    req: &mut Request,
+    r#type: i64,
+    #[php(default = FILTER_DEFAULT)] options: Union<PhpArray, i64>,
+    #[php(default = true)] add_empty: bool,
+) -> Result<Option<OrFalse<PhpArray>>, Thrown> {
+    if let Union::B(filter) = options
+        && !id_exists(filter)
+    {
+        unknown_filter(req, filter);
+        return Ok(Some(OrFalse::False));
     }
-    let Some(array) = storage(req, input)? else {
-        return Ok(Value::null());
+    let Some(array) = storage(req, r#type)? else {
+        return Ok(None);
     };
-    let filtered = array_handler(req, "filter_input_array", array, definition, add_empty);
+    let filtered = array_handler(req, "filter_input_array", array, options, add_empty);
     req.release(array.to_value());
-    filtered
+    Ok(Some(OrFalse::Value(filtered?)))
 }
 
 /// `filter_var_array(array $array, array|int $options = FILTER_DEFAULT,
@@ -1354,25 +1101,21 @@ fn filter_input_array(req: &mut Request) -> Result<Value, Thrown> {
 /// filter_var_array(): Argument #2 ($options) must contain only string keys
 /// filter_var_array(): Argument #2 ($options) cannot contain empty keys
 /// ```
-fn filter_var_array(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 1, 3)?;
-    let value = req.argument(1).unwrap_or_default();
-    let coerced = coerce_param(req, &value, &Type::Array, 1)?;
-    let array = coerced.deref().as_array().copied();
-    let definition = array_or_long(req, 2, DEFAULT)?;
-    let add_empty = bool_argument(req, 3, true)?;
-    if definition.0.is_none() && !id_exists(definition.1) {
-        docref(
-            req,
-            Level::Warning,
-            &format!("Unknown filter with ID {}", definition.1),
-        );
-        return Ok(Value::bool(false));
+#[php_function]
+fn filter_var_array(
+    req: &mut Request,
+    array: PhpArray,
+    #[php(default = FILTER_DEFAULT)] options: Union<PhpArray, i64>,
+    #[php(default = true)] add_empty: bool,
+) -> Result<Option<OrFalse<PhpArray>>, Thrown> {
+    if let Union::B(filter) = options
+        && !id_exists(filter)
+    {
+        unknown_filter(req, filter);
+        return Ok(Some(OrFalse::False));
     }
-    let Some(array) = array else {
-        return Ok(Value::null());
-    };
-    array_handler(req, "filter_var_array", array, definition, add_empty)
+    let filtered = array_handler(req, "filter_var_array", array, options, add_empty)?;
+    Ok(Some(OrFalse::Value(filtered)))
 }
 
 /// `filter_list(): array`: the names of `filter_list`, in its order.
@@ -1383,14 +1126,14 @@ fn filter_var_array(req: &mut Request) -> Result<Value, Thrown> {
 /// ```expect
 /// int,boolean,float,validate_regexp,validate_domain,validate_url,validate_email,validate_ip,validate_mac,string,stripped,encoded,special_chars,full_special_chars,unsafe_raw,email,url,number_int,number_float,add_slashes,callback
 /// ```
-fn filter_list(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 0, 0)?;
+#[php_function]
+fn filter_list(req: &mut Request) -> Result<PhpArray, Thrown> {
     let mut array = PhpArray::new(req)?;
     for (name, _, _) in FILTERS {
         let name = string_value(req, name.as_bytes())?;
         array.append(req, name)?;
     }
-    Ok(array.to_value())
+    Ok(array)
 }
 
 /// `filter_id(string $name): int|false`: the id of the filter so named,
@@ -1406,12 +1149,11 @@ fn filter_list(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(false)
 /// ```
-fn filter_id(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 1, 1)?;
-    let name = string_argument(req, 1)?;
-    let name = name.split(|&b| b == 0).next().unwrap_or(&[]);
-    Ok(FILTERS
+#[php_function]
+fn filter_id(name: PhpString) -> OrFalse<i64> {
+    let name = name.as_bytes().split(|&b| b == 0).next().unwrap_or(&[]);
+    FILTERS
         .iter()
         .find(|(n, _, _)| n.as_bytes() == name)
-        .map_or(Value::bool(false), |(_, id, _)| Value::int(*id)))
+        .map_or(OrFalse::False, |(_, id, _)| OrFalse::Value(*id))
 }

@@ -10,11 +10,13 @@ use php_ext::raising::{Thrown, fatal, throw};
 use php_ext::request::Request;
 use php_ext::values::{Key, Value, ValueRef};
 
-use crate::{
-    FLAG_ALLOW_HEX, FLAG_ALLOW_OCTAL, FLAG_ALLOW_THOUSAND, FLAG_GLOBAL_RANGE, FLAG_HOSTNAME,
-    FLAG_IPV4, FLAG_IPV6, FLAG_NO_PRIV_RANGE, FLAG_NO_RES_RANGE, FLAG_PATH_REQUIRED,
-    FLAG_QUERY_REQUIRED, Outcome, Run, find, sanitizing, string_value,
+use crate::constants::{
+    FILTER_FLAG_ALLOW_HEX, FILTER_FLAG_ALLOW_OCTAL, FILTER_FLAG_ALLOW_THOUSAND,
+    FILTER_FLAG_GLOBAL_RANGE, FILTER_FLAG_HOSTNAME, FILTER_FLAG_IPV4, FILTER_FLAG_IPV6,
+    FILTER_FLAG_NO_PRIV_RANGE, FILTER_FLAG_NO_RES_RANGE, FILTER_FLAG_PATH_REQUIRED,
+    FILTER_FLAG_QUERY_REQUIRED,
 };
+use crate::{Outcome, Run, find, sanitizing, string_value};
 
 /// `FETCH_LONG_OPTION`: `zval_get_long` of the option where it is set.
 fn long_option(req: &mut Request, run: &Run, name: &[u8]) -> Result<Option<i64>, Thrown> {
@@ -153,12 +155,12 @@ pub(crate) fn int(req: &mut Request, run: &Run, s: &[u8]) -> Result<Outcome, Thr
         return Ok(Outcome::Failed);
     }
     let parsed = if let Some(rest) = p.strip_prefix(b"0") {
-        if run.flags & FLAG_ALLOW_HEX != 0 && matches!(rest.first(), Some(b'x' | b'X')) {
+        if run.flags & FILTER_FLAG_ALLOW_HEX != 0 && matches!(rest.first(), Some(b'x' | b'X')) {
             match &rest[1..] {
                 [] => return Ok(Outcome::Failed),
                 digits => parse_base(digits, 16),
             }
-        } else if run.flags & FLAG_ALLOW_OCTAL != 0 {
+        } else if run.flags & FILTER_FLAG_ALLOW_OCTAL != 0 {
             match rest.first() {
                 Some(b'o' | b'O') if rest.len() == 1 => return Ok(Outcome::Failed),
                 Some(b'o' | b'O') => parse_base(&rest[1..], 8),
@@ -328,7 +330,7 @@ pub(crate) fn float(req: &mut Request, run: &Run, s: &[u8]) -> Result<Outcome, T
             break;
         }
         // `strchr(tsd_sep, *str)` finds the terminator for a NUL byte.
-        if run.flags & FLAG_ALLOW_THOUSAND != 0 && (byte == 0 || thousand.contains(&byte)) {
+        if run.flags & FILTER_FLAG_ALLOW_THOUSAND != 0 && (byte == 0 || thousand.contains(&byte)) {
             if if first { !(1..=3).contains(&n) } else { n != 3 } {
                 return Ok(Outcome::Failed);
             }
@@ -411,7 +413,7 @@ pub(crate) fn email(req: &mut Request, _: &Run, s: &[u8]) -> Result<Outcome, Thr
 /// dot, labels of at most 63, no empty label, and under
 /// `FILTER_FLAG_HOSTNAME` alphanumerics and inner hyphens alone.
 fn domain_ok(s: &[u8], flags: i64) -> bool {
-    let hostname = flags & FLAG_HOSTNAME != 0;
+    let hostname = flags & FILTER_FLAG_HOSTNAME != 0;
     let at = |i: usize| s.get(i).copied().unwrap_or(0);
     let mut end = s.len();
     if end > 0 && s[end - 1] == b'.' {
@@ -571,12 +573,12 @@ pub(crate) fn url(req: &mut Request, run: &Run, s: &[u8]) -> Result<Outcome, Thr
     let valid = !(web
         && host
             .as_deref()
-            .is_none_or(|h| !ipv6_host(h) && !domain_ok(h, FLAG_HOSTNAME)))
+            .is_none_or(|h| !ipv6_host(h) && !domain_ok(h, FILTER_FLAG_HOSTNAME)))
         && scheme.as_deref().is_some_and(|scheme| {
             host.is_some() || matches!(scheme, b"mailto" | b"news" | b"file")
         })
-        && (run.flags & FLAG_PATH_REQUIRED == 0 || part(b"path").is_some())
-        && (run.flags & FLAG_QUERY_REQUIRED == 0 || part(b"query").is_some())
+        && (run.flags & FILTER_FLAG_PATH_REQUIRED == 0 || part(b"path").is_some())
+        && (run.flags & FILTER_FLAG_QUERY_REQUIRED == 0 || part(b"query").is_some())
         && part(b"user").is_none_or(|u| userinfo_ok(&u))
         && part(b"pass").is_none_or(|p| userinfo_ok(&p));
     req.release(parts);
@@ -791,7 +793,7 @@ pub(crate) fn ip(req: &mut Request, run: &Run, s: &[u8]) -> Result<Outcome, Thro
     if !v6 && !s.contains(&b'.') {
         return Ok(Outcome::Failed);
     }
-    let (four, six) = (flags & FLAG_IPV4 != 0, flags & FLAG_IPV6 != 0);
+    let (four, six) = (flags & FILTER_FLAG_IPV4 != 0, flags & FILTER_FLAG_IPV6 != 0);
     if (four && !six && v6) || (six && !four && !v6) {
         return Ok(Outcome::Failed);
     }
@@ -809,9 +811,9 @@ pub(crate) fn ip(req: &mut Request, run: &Run, s: &[u8]) -> Result<Outcome, Thro
     let Some((global, reserved, private)) = status else {
         return same(req, s);
     };
-    if (flags & FLAG_GLOBAL_RANGE != 0 && !global)
-        || (flags & FLAG_NO_PRIV_RANGE != 0 && private)
-        || (flags & FLAG_NO_RES_RANGE != 0 && reserved)
+    if (flags & FILTER_FLAG_GLOBAL_RANGE != 0 && !global)
+        || (flags & FILTER_FLAG_NO_PRIV_RANGE != 0 && private)
+        || (flags & FILTER_FLAG_NO_RES_RANGE != 0 && reserved)
     {
         return Ok(Outcome::Failed);
     }
