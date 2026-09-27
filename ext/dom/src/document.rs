@@ -2,6 +2,7 @@
 //! switches, the node factories, loading and saving through libxml2, and
 //! validation.
 
+use php_ext::attr::php_class;
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw};
 use php_ext::request::Request;
 use php_ext::values::{PhpObject, Value};
@@ -2092,3 +2093,8 @@ pub(crate) const METHODS: &[(&str, Entry)] = &[
 pub(crate) const GET_ELEMENTS_BY_TAG_NAME: Entry = get_elements_by_tag_name;
 /// `getElementsByTagNameNS`, which `DOMElement` lists too.
 pub(crate) const GET_ELEMENTS_BY_TAG_NAME_NS: Entry = get_elements_by_tag_name_ns;
+
+/// `DOMDocument`, named for the types that hold it until its header is
+/// declared here.
+#[php_class(extern)]
+pub(crate) struct DOMDocument;

@@ -4,17 +4,21 @@
 //! of `xml_document.c` and `html_document.c` hand out, and the cached
 //! objects php keeps in a declared property's slot.
 
-use php_ext::abi::{ObjectHandlers, PropertyTest, Std};
+use php_ext::abi::{Instance, ObjectHandlers, OrFalse, PropertyTest, Raw, Std, This};
+use php_ext::attr::php_class;
 use php_ext::raising::{Thrown, arg_value_error, throw};
 use php_ext::request::Request;
-use php_ext::values::{PhpObject, PhpString, Value};
-use php_ext_libxml::ffi::{ClassType, DocString, Library, Node, Parsed, Parser, Source};
+use php_ext::values::{PhpArray, PhpObject, PhpString, Value};
+use php_ext_libxml::ffi::{ClassType, DocString, Library, Parsed, Parser, Source};
 use php_ext_libxml::{Errors, ffi as f};
 
-use crate::object::Code;
+use crate::node::DOMNode;
+use crate::object::{Code, Dom};
+use crate::parent::is_parent_invalid;
 use crate::private::Private;
 use crate::{
-    Entry, arity, bytes_arg, dom, dom_mut, dom_throw, long_arg, node_of, nullable_bytes_arg,
+    Entry, arity, bytes_arg, dom, dom_mut, dom_throw, fetch, invalidate, long_arg, node_of,
+    nullable_bytes_arg, object_for, returned,
 };
 
 /// `php_dom_follow_spec_intern`: whether the object's document hands out
@@ -34,29 +38,6 @@ pub(crate) fn follows_spec(req: &Request, object: PhpObject) -> bool {
     dom(req, object).is_some_and(|d| d.obj.class_type() == ClassType::Modern)
 }
 
-/// `Dom\Node::__construct()`: private and final, so a program reaches it
-/// through Reflection alone, and is refused; `Dom\TokenList` and
-/// `Dom\NamespaceInfo` alias it.
-///
-/// ```php
-/// try { new Dom\Element(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
-/// $doc = Dom\XMLDocument::createEmpty();
-/// try { (new ReflectionMethod($doc, '__construct'))->invoke($doc); } catch (Error $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// Call to private Dom\Node::__construct() from global scope
-/// Cannot directly construct Dom\XMLDocument, use document methods instead
-/// ```
-fn node_construct(req: &mut Request) -> Result<Value, Thrown> {
-    let this = crate::this(req)?;
-    let class = crate::class_name(req, this.class());
-    Err(throw(
-        req,
-        "Error",
-        &format!("Cannot directly construct {class}, use document methods instead"),
-    ))
-}
-
 /// A fresh object of `class` standing for `doc`, a document nothing counts
 /// yet, pinned to the `Dom\` classes with its private data laid down:
 /// `php_dom_instantiate_object_helper`, `dom_set_xml_class` and
@@ -74,7 +55,7 @@ fn node_construct(req: &mut Request) -> Result<Value, Thrown> {
 pub(crate) fn document_object(
     req: &mut Request,
     class: &str,
-    doc: Node,
+    doc: f::Node,
 ) -> Result<PhpObject, Thrown> {
     let class = crate::class(req, class)?;
     let object = php_ext::call::new_object(req, class)?;
@@ -126,7 +107,7 @@ fn xml_create_empty(req: &mut Request) -> Result<Value, Thrown> {
             "is not a valid document encoding",
         ));
     }
-    let Some(doc) = Node::new_doc(Some(&version)) else {
+    let Some(doc) = f::Node::new_doc(Some(&version)) else {
         return Err(dom_throw(req, Code::InvalidState));
     };
     doc.set_doc_string(DocString::Encoding, Some(&encoding));
@@ -301,7 +282,7 @@ fn xml_load(req: &mut Request, from_file: bool) -> Result<Value, Thrown> {
 /// xmlns:b=urn:b 'http://www.w3.org/2000/xmlns/'
 /// c=1 NULL
 /// ```
-pub(crate) fn convert_to_modern(req: &mut Request, object: PhpObject, doc: Node) {
+pub(crate) fn convert_to_modern(req: &mut Request, object: PhpObject, doc: f::Node) {
     let Some(private) = dom_mut(req, object).and_then(|d| crate::private::of(&mut d.obj)) else {
         return;
     };
@@ -578,10 +559,423 @@ pub(crate) fn is_stream_path(path: &[u8]) -> bool {
                 .is_some_and(|s| s.eq_ignore_ascii_case(b"data")))
 }
 
+/// `class Dom\Node`, `@strict-properties`: the standard's node, whose
+/// fourteen properties are `@virtual` and served by
+/// [`crate::object::NODE_HANDLERS`] over the one payload, [`Dom`]. It
+/// shares `DOMNode`'s bodies where php's stub says
+/// `@implementation-alias`, and its own where the standard's checks are
+/// not the legacy ones.
+#[php_class(
+    namespace(Dom),
+    dynamic_properties = forbidden,
+    payload = Dom,
+    handlers = crate::object::NODE_HANDLERS
+)]
+pub(crate) struct Node;
+
+#[php_class]
+impl Node {
+    const DOCUMENT_POSITION_DISCONNECTED: i64 = 0x01;
+    const DOCUMENT_POSITION_PRECEDING: i64 = 0x02;
+    const DOCUMENT_POSITION_FOLLOWING: i64 = 0x04;
+    const DOCUMENT_POSITION_CONTAINS: i64 = 0x08;
+    const DOCUMENT_POSITION_CONTAINED_BY: i64 = 0x10;
+    const DOCUMENT_POSITION_IMPLEMENTATION_SPECIFIC: i64 = 0x20;
+    #[php(property, virtual)]
+    const nodeType: i64;
+    #[php(property, virtual)]
+    const nodeName: PhpString;
+    #[php(property, virtual)]
+    const baseURI: PhpString;
+    #[php(property, virtual)]
+    const isConnected: bool;
+    #[php(property, virtual)]
+    const ownerDocument: Option<Instance<Document>>;
+    #[php(property, virtual)]
+    const parentNode: Option<Instance<Node>>;
+    #[php(property, virtual)]
+    const parentElement: Option<Instance<crate::element::Element>>;
+    #[php(property, virtual)]
+    const childNodes: Instance<crate::map::NodeList>;
+    #[php(property, virtual)]
+    const firstChild: Option<Instance<Node>>;
+    #[php(property, virtual)]
+    const lastChild: Option<Instance<Node>>;
+    #[php(property, virtual)]
+    const previousSibling: Option<Instance<Node>>;
+    #[php(property, virtual)]
+    const nextSibling: Option<Instance<Node>>;
+    #[php(property, virtual)]
+    const nodeValue: Option<PhpString>;
+    #[php(property, virtual)]
+    const textContent: Option<PhpString>;
+
+    /// `Dom\Node::__construct()`: private and final, so a program reaches it
+    /// through Reflection alone, and is refused; `Dom\TokenList` and
+    /// `Dom\NamespaceInfo` alias it.
+    ///
+    /// ```php
+    /// try { new Dom\Element(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// $doc = Dom\XMLDocument::createEmpty();
+    /// try { (new ReflectionMethod($doc, '__construct'))->invoke($doc); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Call to private Dom\Node::__construct() from global scope
+    /// Cannot directly construct Dom\XMLDocument, use document methods instead
+    /// ```
+    #[php(private, final, arity = manual)]
+    fn __construct(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
+        let class = crate::class_name(req, this.object().class());
+        Err(throw(
+            req,
+            "Error",
+            &format!("Cannot directly construct {class}, use document methods instead"),
+        ))
+    }
+    #[php(implementation = DOMNode::getRootNode)]
+    fn getRootNode(this: This<Self>, #[php(default = [])] options: PhpArray) -> Instance<Node>;
+    #[php(implementation = DOMNode::hasChildNodes)]
+    fn hasChildNodes(this: This<Self>) -> bool;
+    #[php(implementation = DOMNode::normalize)]
+    fn normalize(this: This<Self>);
+    #[php(implementation = DOMNode::cloneNode)]
+    fn cloneNode(this: This<Self>, #[php(default = false)] deep: bool) -> Instance<Node>;
+
+    /// `Dom\Node::isEqualNode(?Dom\Node $otherNode): bool`.
+    ///
+    /// ```php
+    /// $d = Dom\XMLDocument::createFromString('<r><a xmlns:p="urn:p" x="1">t</a><a x="1">t</a><a x="1" xmlns:p="urn:p">t</a></r>');
+    /// $r = $d->documentElement;
+    /// $a = $r->childNodes[0];
+    /// $b = $r->childNodes[1];
+    /// $c = $r->childNodes[2];
+    /// $copy = $d->cloneNode(true);
+    /// var_dump($a->isEqualNode($b), $a->isEqualNode($c), $a->isEqualNode(null), $d->isEqualNode($copy));
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// ```
+    fn isEqualNode(
+        req: &mut Request,
+        this: This<Self>,
+        otherNode: Option<Instance<Node>>,
+    ) -> Result<bool, Thrown> {
+        crate::node::is_equal_node_of(req, this.object(), otherNode.map(|o| o.object()), true)
+    }
+
+    /// `Dom\Node::isSameNode(?Dom\Node $otherNode): bool`, `null` never
+    /// the same.
+    ///
+    /// ```php
+    /// $d = Dom\XMLDocument::createFromString('<r><a/></r>');
+    /// $r = $d->documentElement;
+    /// var_dump($r->isSameNode($d->firstChild), $r->isSameNode($r->firstChild), $r->isSameNode(null));
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(false)
+    /// bool(false)
+    /// ```
+    fn isSameNode(
+        req: &mut Request,
+        this: This<Self>,
+        otherNode: Option<Instance<Node>>,
+    ) -> Result<bool, Thrown> {
+        crate::node::is_same_node(req, this.object(), otherNode.map(|o| o.object()))
+    }
+
+    #[php(implementation = DOMNode::compareDocumentPosition)]
+    fn compareDocumentPosition(this: This<Self>, other: Instance<Node>) -> i64;
+
+    /// `Dom\Node::contains(?Dom\Node $other): bool`.
+    ///
+    /// ```php
+    /// $d = Dom\XMLDocument::createFromString('<r><a/></r>');
+    /// $a = $d->documentElement->firstChild;
+    /// var_dump($d->contains($a), $a->contains($d), $a->contains($a), $d->contains(null));
+    /// try { $d->contains(new DOMDocument); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// bool(false)
+    /// Dom\Node::contains(): Argument #1 ($other) must be of type ?Dom\Node, DOMDocument given
+    /// ```
+    fn contains(
+        req: &mut Request,
+        this: This<Self>,
+        other: Option<Instance<Node>>,
+    ) -> Result<bool, Thrown> {
+        let Some(other) = other else {
+            return Ok(false);
+        };
+        let other = fetch(req, other.object())?;
+        let node = fetch(req, this.object())?;
+        Ok(crate::node::contains_node(node, other))
+    }
+
+    /// `Dom\Node::lookupPrefix(?string $namespace): ?string`.
+    ///
+    /// ```php
+    /// $d = Dom\XMLDocument::createFromString('<r xmlns:p="urn:p" xmlns:q="urn:q"><q:c a="1"/></r>');
+    /// $c = $d->documentElement->firstChild;
+    /// $a = $c->attributes[0];
+    /// var_dump($c->lookupPrefix('urn:p'), $c->lookupPrefix('urn:q'), $a->lookupPrefix('urn:p'), $d->lookupPrefix(null), $d->lookupPrefix('urn:x'));
+    /// ```
+    /// ```expect
+    /// string(1) "p"
+    /// string(1) "q"
+    /// string(1) "p"
+    /// NULL
+    /// NULL
+    /// ```
+    fn lookupPrefix(
+        req: &mut Request,
+        this: This<Self>,
+        namespace: Option<PhpString>,
+    ) -> Result<Option<PhpString>, Thrown> {
+        crate::node::lookup_prefix(req, this.object(), namespace, true)
+    }
+
+    #[php(implementation = DOMNode::lookupNamespaceURI)]
+    fn lookupNamespaceURI(this: This<Self>, prefix: Option<PhpString>) -> Option<PhpString>;
+
+    /// `Dom\Node::isDefaultNamespace(?string $namespace): bool`: the default
+    /// namespace the standard locates, null and the empty string alike.
+    ///
+    /// ```php
+    /// $d = Dom\XMLDocument::createFromString('<r xmlns="urn:d"><c xmlns=""/></r>');
+    /// $c = $d->documentElement->firstChild;
+    /// var_dump($d->isDefaultNamespace('urn:d'), $c->isDefaultNamespace(null), $c->isDefaultNamespace(''), $c->isDefaultNamespace('urn:d'));
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// ```
+    fn isDefaultNamespace(
+        req: &mut Request,
+        this: This<Self>,
+        namespace: Option<PhpString>,
+    ) -> Result<bool, Thrown> {
+        let uri = namespace
+            .map(|n| n.as_bytes().to_vec())
+            .filter(|u| !u.is_empty());
+        let node = fetch(req, this.object())?;
+        let located = crate::node::locate_namespace(node, None);
+        let uri = uri
+            .as_deref()
+            .map(|u| &u[..u.iter().position(|b| *b == 0).unwrap_or(u.len())]);
+        Ok(located.as_deref() == uri)
+    }
+
+    /// `Dom\Node::insertBefore(Dom\Node $node, ?Dom\Node $child): Dom\Node`:
+    /// the standard's pre-insert.
+    ///
+    /// ```php
+    /// $d = Dom\XMLDocument::createFromString('<!DOCTYPE r><r><b/></r>');
+    /// $r = $d->documentElement;
+    /// $b = $r->firstChild;
+    /// $r->insertBefore($d->createComment('a'), $b);
+    /// $r->insertBefore($d->createTextNode('c'), null);
+    /// $a = $r->firstChild;
+    /// $r->insertBefore($a, null);
+    /// foreach ($r->childNodes as $n) echo $n->nodeName, "\n";
+    /// $x = $d->createComment('x');
+    /// $dt = $d->doctype;
+    /// foreach ([fn() => $d->insertBefore($x, $b), fn() => $d->insertBefore($x, $dt), fn() => $d->insertBefore($dt, $r), fn() => $d->insertBefore($r->cloneNode(), $dt)] as $f) {
+    ///     try { $f(); echo "ok\n"; } catch (DOMException $e) { echo $e->getMessage(), "\n"; }
+    /// }
+    /// ```
+    /// ```expect
+    /// b
+    /// #text
+    /// #comment
+    /// Not Found Error
+    /// ok
+    /// Cannot have more than one document type
+    /// Cannot have more than one element child in a document
+    /// ```
+    fn insertBefore(
+        req: &mut Request,
+        this: This<Self>,
+        node: Instance<Node>,
+        child: Option<Instance<Node>>,
+    ) -> Result<Raw<Instance<Node>>, Thrown> {
+        let this = this.object();
+        let parent = fetch(req, this)?;
+        let node = fetch(req, node.object())?;
+        if is_parent_invalid(parent) {
+            return Err(dom_throw(req, Code::HierarchyRequest));
+        }
+        let point = match child {
+            Some(r) => Some(fetch(req, r.object())?),
+            None => None,
+        };
+        invalidate(req, this);
+        crate::parent::pre_insert(req, this, node, parent, point)?;
+        let inserted = object_for(req, node, Some(this))?;
+        returned(req, inserted)
+    }
+
+    /// `Dom\Node::appendChild(Dom\Node $node): Dom\Node`: the standard's
+    /// append, which checks what a document may hold and merges no text.
+    ///
+    /// ```php
+    /// $d = Dom\XMLDocument::createFromString('<r>a</r>');
+    /// $r = $d->documentElement;
+    /// $t = $r->appendChild($d->createTextNode('b'));
+    /// $first = $r->firstChild;
+    /// var_dump($r->childNodes->length, $t->data, $r->appendChild($first) === $first, $r->lastChild->data);
+    /// $text = $d->createTextNode('t');
+    /// $copy = $r->cloneNode();
+    /// $comment = $d->createComment('c');
+    /// foreach ([fn() => $d->appendChild($text), fn() => $d->appendChild($copy), fn() => $r->appendChild($r), fn() => $t->appendChild($comment)] as $f) {
+    ///     try { $f(); } catch (DOMException $e) { echo $e->getMessage(), "\n"; }
+    /// }
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// string(1) "b"
+    /// bool(true)
+    /// string(1) "a"
+    /// Cannot insert text as a child of a document
+    /// Cannot have more than one element child in a document
+    /// Hierarchy Request Error
+    /// Hierarchy Request Error
+    /// ```
+    fn appendChild(
+        req: &mut Request,
+        this: This<Self>,
+        node: Instance<Node>,
+    ) -> Result<Raw<Instance<Node>>, Thrown> {
+        let this = this.object();
+        let parent = fetch(req, this)?;
+        let node = fetch(req, node.object())?;
+        if is_parent_invalid(parent) {
+            return Err(dom_throw(req, Code::HierarchyRequest));
+        }
+        invalidate(req, this);
+        crate::parent::pre_insert(req, this, node, parent, None)?;
+        let appended = object_for(req, node, Some(this))?;
+        returned(req, appended)
+    }
+
+    /// `Dom\Node::replaceChild(Dom\Node $node, Dom\Node $child): Dom\Node`.
+    ///
+    /// ```php
+    /// $d = Dom\XMLDocument::createFromString('<!DOCTYPE r><r><a/><b/></r>');
+    /// $r = $d->documentElement;
+    /// $a = $r->firstChild;
+    /// $b = $r->lastChild;
+    /// $old = $r->replaceChild($b, $a);
+    /// echo $old->nodeName, ' ', $r->childNodes->length, ' ', $r->firstChild->nodeName, "\n";
+    /// $t = $d->createTextNode('t');
+    /// $c = $b->cloneNode();
+    /// $dt = $d->doctype;
+    /// foreach ([fn() => $d->replaceChild($t, $r), fn() => $d->replaceChild($c, $dt), fn() => $r->replaceChild($r, $b)] as $f) {
+    ///     try { $f(); } catch (DOMException $e) { echo $e->getMessage(), "\n"; }
+    /// }
+    /// ```
+    /// ```expect
+    /// a 1 b
+    /// Cannot insert text as a child of a document
+    /// Cannot have more than one element child in a document
+    /// Hierarchy Request Error
+    /// ```
+    fn replaceChild(
+        req: &mut Request,
+        this: This<Self>,
+        node: Instance<Node>,
+        child: Instance<Node>,
+    ) -> Result<Raw<Instance<Node>>, Thrown> {
+        let old =
+            crate::node::replace_child(req, this.object(), node.object(), child.object(), true)?;
+        returned(req, old)
+    }
+
+    #[php(implementation = DOMNode::removeChild)]
+    fn removeChild(this: This<Self>, child: Instance<Node>) -> Instance<Node>;
+    #[php(implementation = DOMNode::getLineNo)]
+    fn getLineNo(this: This<Self>) -> i64;
+
+    /// `Dom\Node::getNodePath(): string`.
+    ///
+    /// ```php
+    /// $d = Dom\XMLDocument::createFromString('<r xmlns:p="urn:p"><a/><p:a><b x="1"/></p:a></r>');
+    /// $b = $d->documentElement->lastChild->firstChild;
+    /// echo $b->getNodePath(), ' ', $b->attributes[0]->getNodePath(), ' ', $d->getNodePath(), "\n";
+    /// ```
+    /// ```expect
+    /// /r/p:a/b /r/p:a/b/@x /
+    /// ```
+    fn getNodePath(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+        match fetch(req, this.object())?.path() {
+            Some(p) => PhpString::new(req, &p),
+            None => Err(dom_throw(req, Code::InvalidState)),
+        }
+    }
+
+    #[php(implementation = DOMNode::C14N)]
+    fn C14N(
+        this: This<Self>,
+        #[php(default = false)] exclusive: bool,
+        #[php(default = false)] withComments: bool,
+        #[php(default = null)] xpath: Option<PhpArray>,
+        #[php(default = null)] nsPrefixes: Option<PhpArray>,
+    ) -> OrFalse<PhpString>;
+    #[php(implementation = DOMNode::C14NFile)]
+    fn C14NFile(
+        this: This<Self>,
+        uri: PhpString,
+        #[php(default = false)] exclusive: bool,
+        #[php(default = false)] withComments: bool,
+        #[php(default = null)] xpath: Option<PhpArray>,
+        #[php(default = null)] nsPrefixes: Option<PhpArray>,
+    ) -> OrFalse<i64>;
+    #[php(implementation = DOMNode::__sleep)]
+    fn __sleep(this: This<Self>) -> PhpArray;
+    #[php(implementation = DOMNode::__wakeup)]
+    fn __wakeup(this: This<Self>);
+}
+
+/// `readonly final class Dom\NamespaceInfo`, `@not-serializable` and
+/// `@strict-properties`: what `getInScopeNamespaces` answers, three
+/// readonly properties in slots, and `Dom\Node`'s refusing constructor.
+#[php_class(
+    namespace(Dom),
+    final,
+    readonly,
+    not_serializable,
+    dynamic_properties = forbidden
+)]
+pub(crate) struct NamespaceInfo;
+
+#[php_class]
+impl NamespaceInfo {
+    #[php(property, readonly)]
+    const prefix: Option<PhpString>;
+    #[php(property, readonly)]
+    const namespaceURI: Option<PhpString>;
+    #[php(property, readonly)]
+    const element: Instance<crate::element::Element>;
+    #[php(private, implementation = Node::__construct)]
+    fn __construct(this: This<Self>);
+}
+
 /// The methods, `Class::method` to entry.
 pub(crate) const METHODS: &[(&str, Entry)] = &[
-    ("Dom\\Node::__construct", node_construct),
     ("Dom\\XMLDocument::createEmpty", xml_create_empty),
     ("Dom\\XMLDocument::createFromString", xml_create_from_string),
     ("Dom\\XMLDocument::createFromFile", xml_create_from_file),
 ];
+
+/// `Dom\Document`, named for the types that hold it until its header is
+/// declared here.
+#[php_class(extern, namespace(Dom))]
+pub(crate) struct Document;

@@ -47,8 +47,8 @@ mod xml_serializer;
 mod xpath;
 
 use php_ext::abi::{
-    Dependency, DependencyKind, Extension, ExtensionBuilder, ObjectHandlers, PropertyPlace,
-    PropertyPurpose, PropertyRead, PropertyTest, Std,
+    Dependency, DependencyKind, Extension, ExtensionBuilder, FromArgument, ObjectHandlers,
+    PropertyPlace, PropertyPurpose, PropertyRead, PropertyTest, Raw, Std,
 };
 use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::{argument, to_string, truthy};
@@ -118,120 +118,6 @@ class DOMImplementation
 
     /** @tentative-return-type */
     public function createDocument(?string $namespace = null, string $qualifiedName = "", ?DOMDocumentType $doctype = null): DOMDocument {}
-}
-class DOMNode
-{
-    public const int DOCUMENT_POSITION_DISCONNECTED = 0x01;
-    public const int DOCUMENT_POSITION_PRECEDING = 0x02;
-    public const int DOCUMENT_POSITION_FOLLOWING = 0x04;
-    public const int DOCUMENT_POSITION_CONTAINS = 0x08;
-    public const int DOCUMENT_POSITION_CONTAINED_BY = 0x10;
-    public const int DOCUMENT_POSITION_IMPLEMENTATION_SPECIFIC = 0x20;
-
-    /**
-     * @readonly
-     * @virtual
-     */
-    public string $nodeName;
-    public ?string $nodeValue;
-    public int $nodeType;
-    public ?DOMNode $parentNode;
-    public ?DOMElement $parentElement;
-    public DOMNodeList $childNodes;
-    public ?DOMNode $firstChild;
-    public ?DOMNode $lastChild;
-    public ?DOMNode $previousSibling;
-    public ?DOMNode $nextSibling;
-    public ?DOMNamedNodeMap $attributes;
-    public bool $isConnected;
-    public ?DOMDocument $ownerDocument;
-    public ?string $namespaceURI;
-    public string $prefix;
-    public ?string $localName;
-    public ?string $baseURI;
-    public string $textContent;
-
-    /** @return DOMNode|false */
-    public function appendChild(DOMNode $node) {}
-
-    /** @tentative-return-type */
-    public function C14N(bool $exclusive = false, bool $withComments = false, ?array $xpath = null, ?array $nsPrefixes = null): string|false {}
-
-    /** @tentative-return-type */
-    public function C14NFile(string $uri, bool $exclusive = false, bool $withComments = false, ?array $xpath = null, ?array $nsPrefixes = null): int|false {}
-
-    /** @return DOMNode|false */
-    public function cloneNode(bool $deep = false) {}
-
-    /** @tentative-return-type */
-    public function getLineNo(): int {}
-
-    /** @tentative-return-type */
-    public function getNodePath(): ?string {}
-
-    /** @tentative-return-type */
-    public function hasAttributes(): bool {}
-
-    /** @tentative-return-type */
-    public function hasChildNodes(): bool {}
-
-    /** @return DOMNode|false */
-    public function insertBefore(DOMNode $node, ?DOMNode $child = null) {}
-
-    /** @tentative-return-type */
-    public function isDefaultNamespace(string $namespace): bool {}
-
-    /** @tentative-return-type */
-    public function isSameNode(DOMNode $otherNode): bool {}
-
-    public function isEqualNode(?DOMNode $otherNode): bool {}
-
-    /** @tentative-return-type */
-    public function isSupported(string $feature, string $version): bool {}
-
-    /** @tentative-return-type */
-    public function lookupNamespaceURI(?string $prefix): ?string {}
-
-    /** @tentative-return-type */
-    public function lookupPrefix(string $namespace): ?string {}
-
-    /** @tentative-return-type */
-    public function normalize(): void {}
-
-    /** @return DOMNode|false */
-    public function removeChild(DOMNode $child) {}
-
-    /** @return DOMNode|false */
-    public function replaceChild(DOMNode $node, DOMNode $child) {}
-
-    public function contains(DOMNode|DOMNameSpaceNode|null $other): bool {}
-
-    public function getRootNode(?array $options = null): DOMNode {}
-
-    public function compareDocumentPosition(DOMNode $other): int {}
-
-    public function __sleep(): array {}
-
-    public function __wakeup(): void {}
-}
-class DOMNameSpaceNode
-{
-    public string $nodeName;
-    public ?string $nodeValue;
-    public int $nodeType;
-    public string $prefix;
-    public ?string $localName;
-    public ?string $namespaceURI;
-    public bool $isConnected;
-    public ?DOMDocument $ownerDocument;
-    public ?DOMNode $parentNode;
-    public ?DOMElement $parentElement;
-
-    /** @implementation-alias DOMNode::__sleep */
-    public function __sleep(): array {}
-
-    /** @implementation-alias DOMNode::__wakeup */
-    public function __wakeup(): void {}
 }
 class DOMDocumentFragment extends DOMNode implements DOMParentNode
 {
@@ -731,62 +617,6 @@ class Implementation
     public function createDocument(?string $namespace, string $qualifiedName, ?DocumentType $doctype = null): XMLDocument {}
     public function createHTMLDocument(?string $title = null): HTMLDocument {}
 }
-/** @strict-properties */
-class Node
-{
-    private final function __construct() {}
-    public int $nodeType;
-    public string $nodeName;
-    public string $baseURI;
-    public bool $isConnected;
-    public ?Document $ownerDocument;
-    /** @implementation-alias DOMNode::getRootNode */
-    public function getRootNode(array $options = []): Node {}
-    public ?Node $parentNode;
-    public ?Element $parentElement;
-    /** @implementation-alias DOMNode::hasChildNodes */
-    public function hasChildNodes(): bool {}
-    public NodeList $childNodes;
-    public ?Node $firstChild;
-    public ?Node $lastChild;
-    public ?Node $previousSibling;
-    public ?Node $nextSibling;
-    public ?string $nodeValue;
-    public ?string $textContent;
-    /** @implementation-alias DOMNode::normalize */
-    public function normalize(): void {}
-    /** @implementation-alias DOMNode::cloneNode */
-    public function cloneNode(bool $deep = false): Node {}
-    public function isEqualNode(?Node $otherNode): bool {}
-    public function isSameNode(?Node $otherNode): bool {}
-    public const int DOCUMENT_POSITION_DISCONNECTED = 0x01;
-    public const int DOCUMENT_POSITION_PRECEDING = 0x02;
-    public const int DOCUMENT_POSITION_FOLLOWING = 0x04;
-    public const int DOCUMENT_POSITION_CONTAINS = 0x08;
-    public const int DOCUMENT_POSITION_CONTAINED_BY = 0x10;
-    public const int DOCUMENT_POSITION_IMPLEMENTATION_SPECIFIC = 0x20;
-    public function compareDocumentPosition(Node $other): int {}
-    public function contains(?Node $other): bool {}
-    public function lookupPrefix(?string $namespace): ?string {}
-    /** @implementation-alias DOMNode::lookupNamespaceURI */
-    public function lookupNamespaceURI(?string $prefix): ?string {}
-    public function isDefaultNamespace(?string $namespace): bool {}
-    public function insertBefore(Node $node, ?Node $child): Node {}
-    public function appendChild(Node $node): Node {}
-    public function replaceChild(Node $node, Node $child): Node {}
-    public function removeChild(Node $child): Node {}
-    /** @implementation-alias DOMNode::getLineNo */
-    public function getLineNo(): int {}
-    public function getNodePath(): string {}
-    /** @implementation-alias DOMNode::C14N */
-    public function C14N(bool $exclusive = false, bool $withComments = false, ?array $xpath = null, ?array $nsPrefixes = null): string|false {}
-    /** @implementation-alias DOMNode::C14NFile */
-    public function C14NFile(string $uri, bool $exclusive = false, bool $withComments = false, ?array $xpath = null, ?array $nsPrefixes = null): int|false {}
-    /** @implementation-alias DOMNode::__sleep */
-    public function __sleep(): array {}
-    /** @implementation-alias DOMNode::__wakeup */
-    public function __wakeup(): void {}
-}
 class NodeList implements \IteratorAggregate, \Countable
 {
     public int $length;
@@ -1137,18 +967,6 @@ final class TokenList implements \IteratorAggregate, \Countable
     public function count(): int {}
     public function getIterator(): \Iterator {}
 }
-/**
- * @not-serializable
- * @strict-properties
- */
-readonly final class NamespaceInfo
-{
-    public ?string $prefix;
-    public ?string $namespaceURI;
-    public Element $element;
-    /** @implementation-alias Dom\Node::__construct */
-    private function __construct() {}
-}
 /** @not-serializable */
 final class XPath
 {
@@ -1243,7 +1061,6 @@ const MINIT_ORDER: [&str; 50] = [
 /// ```
 pub fn extension() -> Extension {
     let entries: Vec<(&str, Entry)> = [
-        node::METHODS,
         token_list::METHODS,
         document::METHODS,
         element::METHODS,
@@ -1259,6 +1076,16 @@ pub fn extension() -> Extension {
     ]
     .iter()
     .flat_map(|m| m.iter().copied())
+    .chain([
+        (
+            "DOMNode::hasAttributes",
+            node::DOMNode::__php_entry_hasAttributes as Entry,
+        ),
+        (
+            "Dom\\Node::__construct",
+            modern::Node::__php_entry___construct as Entry,
+        ),
+    ])
     .collect();
     let mut builder = ExtensionBuilder::default()
         .functions(vec![
@@ -1279,13 +1106,21 @@ pub fn extension() -> Extension {
         ]);
     let mut declared = stub::classes(STUB, &entries);
     declared.extend(stub::classes(MODERN_STUB, &entries));
-    declared.sort_by_key(|(decl, _)| {
-        MINIT_ORDER
+    for name in MINIT_ORDER {
+        builder = match name {
+            "DOMNode" => builder.class::<node::DOMNode>(),
+            "DOMNameSpaceNode" => builder.class::<node::DOMNameSpaceNode>(),
+            "Dom\\Node" => builder.class::<modern::Node>(),
+            "Dom\\NamespaceInfo" => builder.class::<modern::NamespaceInfo>(),
+            _ => builder,
+        };
+        let Some(at) = declared
             .iter()
-            .position(|name| name.as_bytes() == &*decl.name.0)
-            .unwrap_or(MINIT_ORDER.len())
-    });
-    for (decl, methods) in declared {
+            .position(|(d, _)| &*d.name.0 == name.as_bytes())
+        else {
+            continue;
+        };
+        let (decl, methods) = declared.remove(at);
         let handlers: Option<&'static dyn ObjectHandlers> = match decl.name.0.as_ref() {
             b"DOMException"
             | b"DOMParentNode"
@@ -1782,6 +1617,12 @@ fn array_get(req: &mut Request, array: PhpArray, name: &[u8]) -> Result<Option<V
 /// A string value of `bytes`, one owner the caller's.
 fn string(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
     Ok(Value::string(PhpString::new(req, bytes)?))
+}
+
+/// A body's value returned under its declared type `T`, as php returns
+/// one: php verifies a native's return in its debug builds only.
+fn returned<T: FromArgument>(req: &mut Request, value: Value) -> Result<Raw<T>, Thrown> {
+    <Raw<T> as FromArgument>::from_value(req, value)
 }
 
 /// A string value, or `null` for none.

@@ -5,6 +5,7 @@
 
 use php_ext::abi::CloneObj;
 use php_ext::abi::{DimensionRead, ObjectHandlers, PropertyPlace, PropertyRead, PropertyTest};
+use php_ext::attr::php_class;
 use php_ext::coerce::{numeric_string, to_long};
 use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
@@ -901,3 +902,14 @@ impl ObjectHandlers for MapHandlers {
         }
     }
 }
+
+/// `DOMNodeList`, `DOMNamedNodeMap` and `Dom\NodeList`, named for the
+/// types that hold them until their headers are declared here.
+#[php_class(extern)]
+pub(crate) struct DOMNodeList;
+
+#[php_class(extern)]
+pub(crate) struct DOMNamedNodeMap;
+
+#[php_class(extern, namespace(Dom))]
+pub(crate) struct NodeList;

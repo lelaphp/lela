@@ -1,6 +1,7 @@
 //! `DOMElement` (`element.c`): construction, the attribute methods, the
 //! ID switches and the adjacent insertions.
 
+use php_ext::attr::php_class;
 use php_ext::raising::{Thrown, arg_null_deprecated, arg_value_error};
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpObject, Value, ValueRef};
@@ -1788,3 +1789,11 @@ pub(crate) const METHODS: &[(&str, Entry)] = &[
     ),
     ("Dom\\Element::rename", rename),
 ];
+
+/// `DOMElement` and `Dom\Element`, named for the types that hold them
+/// until their headers are declared here.
+#[php_class(extern)]
+pub(crate) struct DOMElement;
+
+#[php_class(extern, namespace(Dom))]
+pub(crate) struct Element;
