@@ -8,7 +8,7 @@
 
 use std::cmp::Ordering;
 
-use php_ext::abi::{OrFalse, Passed, Raw, Union, Untyped};
+use php_ext::abi::{OrFalse, Passed, PropertyRead, PropertyTest, Raw, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::{
     BinaryOp, binary_op, float_to_long, identical, loose_eq, numeric_string, to_string, value_name,
@@ -1073,6 +1073,31 @@ fn lval_safe(req: &mut Request, f: f64) -> i64 {
 /// array(0) {
 /// }
 /// ```
+///
+/// An object's property is asked of its handlers, `has_property` with
+/// `ZEND_PROPERTY_EXISTS` and then `ZEND_PROPERTY_ISSET`, and read through
+/// `read_property`: a property the caller may not see is `__isset`'s and
+/// `__get`'s, and one that is there holding `null` is taken.
+///
+/// ```php
+/// class M { private $p = 1; function __isset($n) { echo "isset $n\n"; return $n != "q"; } function __get($n) { return "get $n"; } }
+/// class N { public $x = null; }
+/// var_dump(array_column([new M, new N], "p"), array_column([new M], "q"), array_column([new N], "x"));
+/// ```
+/// ```expect
+/// isset p
+/// isset q
+/// array(1) {
+///   [0]=>
+///   string(5) "get p"
+/// }
+/// array(0) {
+/// }
+/// array(1) {
+///   [0]=>
+///   NULL
+/// }
+/// ```
 #[php_function]
 fn array_column(
     req: &mut Request,
@@ -1120,10 +1145,6 @@ fn array_column(
     Ok(out)
 }
 
-/// `array_column_fetch_prop`: the value `name` names in a row, one more
-/// owner, a reference followed; an array row read by key
-/// (`zend_symtable_find`), an object row read where its property is
-/// public, and anything else nothing.
 /// A `string|int` column or index as the key it reads.
 fn column_of(key: Union<PhpString, i64>) -> Key {
     match key {
@@ -1132,6 +1153,13 @@ fn column_of(key: Union<PhpString, i64>) -> Key {
     }
 }
 
+/// `array_column_fetch_prop` (`Z/ext/standard/array.c:4634`): the value
+/// `name` names in a row, one more owner, a reference followed; an array
+/// row read by key (`zend_symtable_find`), an object row read through its
+/// `read_property` where its `has_property` finds the property there
+/// (`ZEND_PROPERTY_EXISTS`) or set (`ZEND_PROPERTY_ISSET`, which a
+/// `__isset` answers), in the scope that called, so a property it may not
+/// see is its `__get`'s; anything else nothing.
 fn fetch(req: &mut Request, row: &Value, name: &Key) -> Result<Option<Value>, Thrown> {
     if let Some(array) = row.as_array() {
         let key = match name {
@@ -1149,16 +1177,14 @@ fn fetch(req: &mut Request, row: &Value, name: &Key) -> Result<Option<Value>, Th
             Key::Int(n) => n.to_string().into_bytes(),
             Key::Str(s) => s.as_bytes().to_vec(),
         };
-        let visible = object
-            .props_for(req, php_ext::abi::PropertyPurpose::ArrayCast)?
-            .into_iter()
-            .find(|(prop, _)| prop.as_bytes() == text.as_slice())
-            .map(|(_, value)| value);
-        return Ok(visible.map(|value| {
-            let value = value.deref();
-            req.addref(&value);
-            value
-        }));
+        let handlers = object.handlers(req);
+        if handlers.has_property(req, object, &text, PropertyTest::Exists)?
+            || handlers.has_property(req, object, &text, PropertyTest::Isset)?
+        {
+            let value = handlers.read_property(req, object, &text, PropertyRead::Warning)?;
+            return Ok(Some(value));
+        }
+        return Ok(None);
     }
     Ok(None)
 }
