@@ -4917,6 +4917,32 @@ pub(crate) fn init_parent_property_hook_call<T: Tier>(
 /// #0 {main}
 ///   thrown in %s on line 2
 /// ```
+///
+/// A static method called through an object gives the frame's owner of
+/// the receiver up before the call, so a temporary receiver is
+/// destructed first, and the called scope is its class, read while it
+/// stood; a destructor that throws is the throw, and the call is not
+/// made.
+///
+/// ```php
+/// class A {
+///     static function name() { return 'A'; }
+///     static function baz() {
+///         $fn = function () { return static::name(); };
+///         echo static::name(), ' ', $fn(), "\n";
+///     }
+///     function __destruct() { echo "destructed\n"; }
+/// }
+/// class B extends A { static function name() { return 'B'; } }
+/// (new B)->baz();
+/// class T { static function s() { echo "called\n"; } function __destruct() { throw new Exception('in dtor'); } }
+/// try { (new T)->s(); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// destructed
+/// B B
+/// in dtor
+/// ```
 pub(crate) fn init_method_call<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -4977,6 +5003,10 @@ pub(crate) fn init_method_call<T: Tier>(
         }
         None => object,
     };
+    // `called_scope = obj->ce`, read while the frame's owner stands: a
+    // static method gives that owner up here, and the receiver it was
+    // may go with it, its destructor served before the call.
+    let called = object.class();
     let this = if req
         .method_decl(function)
         .is_some_and(|decl| decl.is_instance)
@@ -4984,6 +5014,10 @@ pub(crate) fn init_method_call<T: Tier>(
         Some(object)
     } else {
         req.release(object.as_value());
+        if req.is_pending() {
+            req.release(Value::string(name));
+            return threw(req, frame, &Thrown::of(None));
+        }
         None
     };
     req.vm_mut().push_call(CallState {
@@ -4992,7 +5026,7 @@ pub(crate) fn init_method_call<T: Tier>(
         arguments: Vec::new(),
         count: usize::try_from(op.extended_value).unwrap_or(0),
         this,
-        called_scope: Some(object.class()),
+        called_scope: Some(called),
         closure: None,
         extra_named: Vec::new(),
         stage: CallStage::Building,
