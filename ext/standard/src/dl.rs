@@ -7,32 +7,10 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_ext::decl::FunctionDecl;
-use php_ext::raising::{Level, Thrown, docref};
+use php_ext::attr::php_function;
+use php_ext::raising::{Level, docref};
 use php_ext::request::Request;
-use php_ext::values::Value;
-
-use crate::output::Entry;
-use crate::stub::stub;
-use crate::{argument_count_between, string_argument};
-
-/// The one native, `dl.stub.php`'s.
-///
-/// ```php
-/// echo new ReflectionFunction("dl");
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function dl ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <required> string $extension_filename ]
-///   }
-///   - Return [ bool ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![(stub("dl(string $extension_filename): bool"), dl as Entry)]
-}
+use php_ext::values::PhpString;
 
 /// `dl(string $extension_filename): bool`, `PHP_FUNCTION(dl)` and
 /// `php_load_extension`'s checks before it opens anything: `enable_dl`
@@ -51,10 +29,22 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
 /// bool(false)
 /// bool(false)
 /// ```
-fn dl(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let filename = string_argument(req, 1)?;
-    let filename = filename.as_bytes();
+///
+/// ```php
+/// echo new ReflectionFunction("dl");
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function dl ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <required> string $extension_filename ]
+///   }
+///   - Return [ bool ]
+/// }
+/// ```
+#[php_function]
+fn dl(req: &mut Request, extension_filename: PhpString) -> bool {
+    let filename = extension_filename.as_bytes();
     if !req
         .ini_get(b"enable_dl")
         .is_some_and(Request::ini_parse_bool)
@@ -64,14 +54,14 @@ fn dl(req: &mut Request) -> Result<Value, Thrown> {
             Level::Warning,
             "Dynamically loaded extensions aren't enabled",
         );
-        return Ok(Value::bool(false));
+        return false;
     }
     // `MAXPATHLEN`, the host's `PATH_MAX`.
     let max = usize::try_from(libc::PATH_MAX).unwrap_or(usize::MAX);
     if filename.len() >= max {
         let text = format!("Filename exceeds the maximum allowed length of {max} characters");
         docref(req, Level::Warning, &text);
-        return Ok(Value::bool(false));
+        return false;
     }
     let text = if filename.contains(&b'/') {
         String::from("Temporary module name should contain only filename")
@@ -82,5 +72,5 @@ fn dl(req: &mut Request) -> Result<Value, Thrown> {
         )
     };
     docref(req, Level::Warning, &text);
-    Ok(Value::bool(false))
+    false
 }

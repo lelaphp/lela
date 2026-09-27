@@ -8,16 +8,15 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use php_ext::abi::{OrFalse, Union};
+use php_ext::attr::php_function;
 use php_ext::call::{lookup_class, new_object};
-use php_ext::decl::{FunctionDecl, IniDecl, Name};
+use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
 
-use crate::output::Entry;
-use crate::stub::stub;
-use crate::zpp::{nullable_string, optional_bool};
-use crate::{State, argument_count_between};
+use crate::State;
 use php_ext::syntax::{IniEvent as Event, IniScanner, IniValue as Scalar};
 
 /// `BROWSCAP_NUM_CONTAINS`: how many fixed runs after the prefix a
@@ -68,30 +67,6 @@ pub(crate) fn ini() -> Vec<IniDecl> {
         per_dir: false,
         system: true,
     }]
-}
-
-/// The one native.
-///
-/// ```php
-/// echo new ReflectionFunction('get_browser');
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function get_browser ] {
-///
-///   - Parameters [2] {
-///     Parameter #0 [ <optional> ?string $user_agent = null ]
-///     Parameter #1 [ <optional> bool $return_array = false ]
-///   }
-///   - Return [ object|array|false ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![(
-        stub(
-            "get_browser(?string $user_agent = null, bool $return_array = false): object|array|false",
-        ),
-        get_browser as Entry,
-    )]
 }
 
 fn is_placeholder(c: u8) -> bool {
@@ -378,14 +353,31 @@ fn lookup_entry(data: &Browscap, lookup: &[u8]) -> Option<usize> {
 /// Warning: get_browser(): browscap ini directive not set in %s on line 2
 /// bool(false)
 /// ```
-fn get_browser(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 2)?;
-    let agent = nullable_string(req, 1)?;
-    let return_array = optional_bool(req, 2, false)?;
+///
+/// ```php
+/// echo new ReflectionFunction('get_browser');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function get_browser ] {
+///
+///   - Parameters [2] {
+///     Parameter #0 [ <optional> ?string $user_agent = null ]
+///     Parameter #1 [ <optional> bool $return_array = false ]
+///   }
+///   - Return [ object|array|false ]
+/// }
+/// ```
+#[php_function]
+fn get_browser(
+    req: &mut Request,
+    #[php(default = null)] user_agent: Option<PhpString>,
+    #[php(default = false)] return_array: bool,
+) -> Result<Union<PhpObject, OrFalse<PhpArray>>, Thrown> {
+    let agent = user_agent;
     loaded(req)?;
     if req.state::<State>().browscap.entries.is_empty() {
         docref(req, Level::Warning, "browscap ini directive not set");
-        return Ok(Value::bool(false));
+        return Ok(Union::B(OrFalse::False));
     }
     let agent = if let Some(agent) = agent {
         agent.as_bytes().to_vec()
@@ -402,7 +394,7 @@ fn get_browser(req: &mut Request) -> Result<Value, Thrown> {
                     Level::Warning,
                     "HTTP_USER_AGENT variable is not set, cannot determine user agent name",
                 );
-                return Ok(Value::bool(false));
+                return Ok(Union::B(OrFalse::False));
             };
             found
         }
@@ -411,7 +403,7 @@ fn get_browser(req: &mut Request) -> Result<Value, Thrown> {
     let data = &req.state::<State>().browscap;
     let found = lookup_entry(data, &lookup);
     let Some(found) = found else {
-        return Ok(Value::bool(false));
+        return Ok(Union::B(OrFalse::False));
     };
     let mut rows: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     let entry = &data.entries[found];
@@ -439,10 +431,10 @@ fn get_browser(req: &mut Request) -> Result<Value, Thrown> {
         array.set(req, key, value)?;
     }
     if return_array {
-        return Ok(Value::array(array));
+        return Ok(Union::B(OrFalse::Value(array)));
     }
     let Some(class) = lookup_class(req, b"stdClass")? else {
-        return Ok(Value::array(array));
+        return Ok(Union::B(OrFalse::Value(array)));
     };
     let object = new_object(req, class)?;
     for (key, value) in array.snapshot() {
@@ -453,5 +445,5 @@ fn get_browser(req: &mut Request) -> Result<Value, Thrown> {
         }
     }
     req.release(Value::array(array));
-    Ok(Value::object(object))
+    Ok(Union::A(object))
 }

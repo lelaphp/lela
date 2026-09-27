@@ -4,55 +4,17 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_ext::decl::FunctionDecl;
+use php_ext::abi::{OrFalse, Union};
+use php_ext::attr::php_function;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 
-use crate::argument_count_between;
 use crate::ffi::{Who, rusage};
-use crate::output::Entry;
-use crate::stub::stub;
 use crate::uniqid::now;
-use crate::zpp::{optional_bool, optional_long, string_value};
 
 /// `MICRO_IN_SEC`.
 const MICRO_IN_SEC: f64 = 1_000_000.0;
-
-/// The three, in the stub's order.
-///
-/// ```php
-/// echo new ReflectionFunction('microtime'), new ReflectionFunction('gettimeofday');
-/// ```
-/// ```expect
-/// Function [ <internal:standard> function microtime ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <optional> bool $as_float = false ]
-///   }
-///   - Return [ string|float ]
-/// }
-/// Function [ <internal:standard> function gettimeofday ] {
-///
-///   - Parameters [1] {
-///     Parameter #0 [ <optional> bool $as_float = false ]
-///   }
-///   - Return [ array|float ]
-/// }
-/// ```
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        (
-            stub("microtime(bool $as_float = false): string|float"),
-            microtime as Entry,
-        ),
-        (
-            stub("gettimeofday(bool $as_float = false): array|float"),
-            gettimeofday,
-        ),
-        (stub("getrusage(int $mode = 0): array|false"), getrusage),
-    ]
-}
 
 /// `getrusage(int $mode = 0): array|false`, php's
 /// `PHP_FUNCTION(getrusage)`: the process's resource usage, or its
@@ -104,21 +66,24 @@ pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
 /// bool(true)
 /// string(5) "array"
 /// ```
-fn getrusage(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 1)?;
-    let who = match optional_long(req, 1, 0)? {
+#[php_function]
+fn getrusage(
+    req: &mut Request,
+    #[php(default = 0)] mode: i64,
+) -> Result<OrFalse<PhpArray>, Thrown> {
+    let who = match mode {
         1 => Who::Children,
         _ => Who::Process,
     };
     let Some(fields) = rusage(who) else {
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     };
     let mut usage = PhpArray::new(req)?;
     for (name, value) in fields {
         let key = Key::Str(PhpString::new(req, name.as_bytes())?);
         usage.set(req, key, Value::int(value))?;
     }
-    Ok(Value::array(usage))
+    Ok(OrFalse::Value(usage))
 }
 
 /// The time as a double, `tv_sec + tv_usec / MICRO_IN_SEC`.
@@ -144,15 +109,30 @@ fn as_float(sec: u64, usec: u32) -> f64 {
 /// bool(true)
 /// bool(true)
 /// ```
-fn microtime(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 1)?;
-    let float = optional_bool(req, 1, false)?;
+///
+/// ```php
+/// echo new ReflectionFunction('microtime');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function microtime ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <optional> bool $as_float = false ]
+///   }
+///   - Return [ string|float ]
+/// }
+/// ```
+#[php_function]
+fn microtime(
+    req: &mut Request,
+    #[php(default = false)] as_float: bool,
+) -> Result<Union<PhpString, f64>, Thrown> {
     let (sec, usec) = now();
-    if float {
-        return Ok(Value::float(as_float(sec, usec)));
+    if as_float {
+        return Ok(Union::B(self::as_float(sec, usec)));
     }
     let text = format!("{:.8} {sec}", f64::from(usec) / MICRO_IN_SEC);
-    string_value(req, text.as_bytes())
+    PhpString::new(req, text.as_bytes()).map(Union::A)
 }
 
 /// `gettimeofday(bool $as_float = false): array|float`: `sec`, `usec`,
@@ -182,12 +162,27 @@ fn microtime(req: &mut Request) -> Result<Value, Thrown> {
 /// int(0)
 /// int(180)
 /// ```
-fn gettimeofday(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 0, 1)?;
-    let float = optional_bool(req, 1, false)?;
+///
+/// ```php
+/// echo new ReflectionFunction('gettimeofday');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function gettimeofday ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <optional> bool $as_float = false ]
+///   }
+///   - Return [ array|float ]
+/// }
+/// ```
+#[php_function]
+fn gettimeofday(
+    req: &mut Request,
+    #[php(default = false)] as_float: bool,
+) -> Result<Union<PhpArray, f64>, Thrown> {
     let (sec, usec) = now();
-    if float {
-        return Ok(Value::float(as_float(sec, usec)));
+    if as_float {
+        return Ok(Union::B(self::as_float(sec, usec)));
     }
     let sec = i64::try_from(sec).unwrap_or(i64::MAX);
     let offset = php_ext_date::get_timezone_info(req)?.offset_at(sec);
@@ -202,5 +197,5 @@ fn gettimeofday(req: &mut Request) -> Result<Value, Thrown> {
         let key = Key::Str(PhpString::new(req, name)?);
         array.set(req, key, Value::int(value))?;
     }
-    Ok(Value::array(array))
+    Ok(Union::A(array))
 }

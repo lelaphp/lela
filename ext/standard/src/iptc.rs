@@ -5,6 +5,8 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use php_ext::abi::OrFalse;
+use php_ext::attr::php_function;
 use php_ext::decl::FunctionDecl;
 use php_ext::raising::{Level, Thrown, docref, throw};
 use php_ext::request::Request;
@@ -26,7 +28,7 @@ const M_APP13: u32 = 0xed;
 /// length's two bytes, and the Photoshop resource header.
 const PSHEADER: &[u8; 28] = b"\xFF\xED\0\0Photoshop 3.0\x008BIM\x04\x04\0\0\0\0";
 
-/// The two natives.
+/// The native not yet declared by the attributes.
 ///
 /// ```php
 /// echo new ReflectionFunction('iptcembed'), new ReflectionFunction('iptcparse');
@@ -50,16 +52,10 @@ const PSHEADER: &[u8; 28] = b"\xFF\xED\0\0Photoshop 3.0\x008BIM\x04\x04\0\0\0\0"
 /// }
 /// ```
 pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        (
-            stub("iptcembed(string $iptc_data, string $filename, int $spool = 0): string|bool"),
-            iptcembed as Entry,
-        ),
-        (
-            stub("iptcparse(string $iptc_block): array|false"),
-            iptcparse,
-        ),
-    ]
+    vec![(
+        stub("iptcembed(string $iptc_data, string $filename, int $spool = 0): string|bool"),
+        iptcembed as Entry,
+    )]
 }
 
 /// The file `iptcembed` reads and where its bytes go: `spool` above zero
@@ -300,9 +296,22 @@ fn embed(s: &mut Embedding, data: &[u8]) -> bool {
 /// bool(false)
 /// bool(false)
 /// ```
-fn iptcparse(req: &mut Request) -> Result<Value, Thrown> {
-    argument_count_between(req, 1, 1)?;
-    let block = string_argument(req, 1)?;
+///
+/// ```php
+/// echo new ReflectionFunction('iptcparse');
+/// ```
+/// ```expect
+/// Function [ <internal:standard> function iptcparse ] {
+///
+///   - Parameters [1] {
+///     Parameter #0 [ <required> string $iptc_block ]
+///   }
+///   - Return [ array|false ]
+/// }
+/// ```
+#[php_function]
+fn iptcparse(req: &mut Request, iptc_block: PhpString) -> Result<OrFalse<PhpArray>, Thrown> {
+    let block = iptc_block;
     let buffer = block.as_bytes();
     let len = buffer.len();
     let at = |i: usize| buffer.get(i).copied().unwrap_or(0);
@@ -344,7 +353,7 @@ fn iptcparse(req: &mut Request) -> Result<Value, Thrown> {
         inx += size;
     }
     if tags.is_empty() {
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     }
     let mut array = PhpArray::new(req)?;
     for (key, values) in tags {
@@ -356,5 +365,5 @@ fn iptcparse(req: &mut Request) -> Result<Value, Thrown> {
         let key = Key::Str(PhpString::new(req, key.as_bytes())?);
         array.set(req, key, Value::array(list))?;
     }
-    Ok(Value::array(array))
+    Ok(OrFalse::Value(array))
 }
