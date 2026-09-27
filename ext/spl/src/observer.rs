@@ -1482,6 +1482,37 @@ impl ObjectHandlers for Handlers {
         }
     }
 
+    /// `spl_object_storage_compare_objects`: two `SplObjectStorage`s of
+    /// the class itself compared row by row, `zend_hash_compare` over
+    /// `spl_object_storage_compare_info`; a row the comparison of an
+    /// earlier one detached is not compared.
+    ///
+    /// ```php
+    /// class T {
+    ///     function __construct(public $s, public $drop = null) {}
+    ///     function __toString(): string {
+    ///         global $l;
+    ///         echo "toString {$this->s}\n";
+    ///         if ($this->drop) { unset($l[$this->drop]); $this->drop = null; }
+    ///         return $this->s;
+    ///     }
+    ///     function __destruct() { echo "gone {$this->s}\n"; }
+    /// }
+    /// $a = new stdClass; $b = new stdClass; $c = new stdClass;
+    /// $l = new SplObjectStorage; $r = new SplObjectStorage;
+    /// $l[$a] = new T('x', $b); $l[$b] = new T('y'); $l[$c] = new T('z');
+    /// $r[$a] = 'x'; $r[$b] = 'y'; $r[$c] = 'z';
+    /// var_dump($l == $r, count($l));
+    /// ```
+    /// ```expect
+    /// toString x
+    /// gone y
+    /// toString z
+    /// bool(true)
+    /// int(2)
+    /// gone x
+    /// gone z
+    /// ```
     fn compare(
         &self,
         req: &mut Request,
@@ -1498,28 +1529,39 @@ impl ObjectHandlers for Handlers {
         if Some(l.class()) != base || Some(r.class()) != base {
             return Ok(None);
         }
-        let a = with(req, l, |s| {
-            s.rows
-                .iter()
-                .flatten()
-                .map(|(k, _, i)| (k.clone(), *i))
-                .collect::<Vec<_>>()
-        })?;
-        let b = with(req, r, |s| s.places.clone())?;
-        let b_rows = with(req, r, |s| {
-            s.rows
-                .iter()
-                .map(|row| row.as_ref().map(|x| x.2))
-                .collect::<Vec<_>>()
-        })?;
-        if a.len() != b.len() {
-            return Ok(Some(a.len().cmp(&b.len())));
+        let (left_len, right_len) = (with(req, l, |s| s.len())?, with(req, r, |s| s.len())?);
+        if left_len != right_len {
+            return Ok(Some(left_len.cmp(&right_len)));
         }
-        for (key, inf) in a {
-            let Some(other) = b.get(&key).and_then(|at| b_rows[*at]) else {
+        // `zend_hash_compare` walks the left table live, reading each slot
+        // as it stands, and finds each row's key in the right one again;
+        // the two informations are held across `zend_compare`, which can
+        // reach PHP code that detaches either row.
+        let mut from = 0;
+        while let Some((at, key, inf)) = with(req, l, |s| {
+            let at = s.valid_from(from);
+            s.rows
+                .get(at)
+                .and_then(Option::as_ref)
+                .map(|(key, _, inf)| (at, key.clone(), *inf))
+        })? {
+            from = at + 1;
+            let other = with(req, r, |s| {
+                s.places
+                    .get(&key)
+                    .and_then(|at| s.rows.get(*at))
+                    .and_then(Option::as_ref)
+                    .map(|row| row.2)
+            })?;
+            let Some(other) = other else {
                 return Ok(Some(std::cmp::Ordering::Greater));
             };
-            let ordering = compare(req, &inf, &other)?;
+            let inf = Held::take(req, inf);
+            let other = Held::take(req, other);
+            let ordering = compare(req, &inf.value(), &other.value());
+            other.let_go(req);
+            inf.let_go(req);
+            let ordering = ordering?;
             if ordering != std::cmp::Ordering::Equal {
                 return Ok(Some(ordering));
             }
