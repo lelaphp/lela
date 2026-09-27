@@ -50,6 +50,7 @@ use php_ext::abi::{
     Dependency, DependencyKind, Extension, ExtensionBuilder, FromArgument, ObjectHandlers, OrFalse,
     Passed, PropertyPlace, PropertyPurpose, PropertyRead, PropertyTest, Raw, Std,
 };
+use php_ext::attr::php_class;
 use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::{argument, to_string, truthy};
 use php_ext::decl::{self, Attribute, AttributeArgument, ConstDecl, ConstExpr};
@@ -65,6 +66,17 @@ use document::{XML_NS, XMLNS_NS};
 use map::{Map, MapKind};
 use object::{Code, Dom, Extra, State};
 use props::Prop;
+
+/// Core's interfaces the lists implement and hand out, named for
+/// `implements` and the types that hold them.
+#[php_class(extern)]
+pub(crate) struct IteratorAggregate;
+
+#[php_class(extern)]
+pub(crate) struct Countable;
+
+#[php_class(extern)]
+pub(crate) struct Iterator;
 
 /// A native's entry, the shape `ExtensionBuilder` takes.
 type Entry = fn(&mut Request) -> Result<Value, Thrown>;
@@ -83,36 +95,6 @@ final class DOMException extends Exception
      * @var int
      */
     public $code = 0;
-}
-class DOMNodeList implements IteratorAggregate, Countable
-{
-    public int $length;
-
-    /** @tentative-return-type */
-    public function count(): int {}
-
-    public function getIterator(): Iterator {}
-
-    /** @return DOMElement|DOMNode|DOMNameSpaceNode|null */
-    public function item(int $index) {}
-}
-class DOMNamedNodeMap implements IteratorAggregate, Countable
-{
-    public int $length;
-
-    /** @tentative-return-type */
-    public function getNamedItem(string $qualifiedName): ?DOMNode {}
-
-    /** @tentative-return-type */
-    public function getNamedItemNS(?string $namespace, string $localName): ?DOMNode {}
-
-    /** @tentative-return-type */
-    public function item(int $index): ?DOMNode {}
-
-    /** @tentative-return-type */
-    public function count(): int {}
-
-    public function getIterator(): Iterator {}
 }
 /** @not-serializable */
 class DOMXPath
@@ -145,75 +127,6 @@ class DOMXPath
 const MODERN_STUB: &str = r"
 namespace Dom
 {
-class NodeList implements \IteratorAggregate, \Countable
-{
-    public int $length;
-    /** @implementation-alias DOMNodeList::count */
-    public function count(): int {}
-    /** @implementation-alias DOMNodeList::getIterator */
-    public function getIterator(): \Iterator {}
-    /** @implementation-alias DOMNodeList::item */
-    public function item(int $index): ?Node {}
-}
-class NamedNodeMap implements \IteratorAggregate, \Countable
-{
-    public int $length;
-    /** @implementation-alias DOMNamedNodeMap::item */
-    public function item(int $index): ?Attr {}
-    /** @implementation-alias DOMNamedNodeMap::getNamedItem */
-    public function getNamedItem(string $qualifiedName): ?Attr {}
-    /** @implementation-alias DOMNamedNodeMap::getNamedItemNS */
-    public function getNamedItemNS(?string $namespace, string $localName): ?Attr {}
-    /** @implementation-alias DOMNamedNodeMap::count */
-    public function count(): int {}
-    /** @implementation-alias DOMNamedNodeMap::getIterator */
-    public function getIterator(): \Iterator {}
-}
-class DtdNamedNodeMap implements \IteratorAggregate, \Countable
-{
-    public int $length;
-    /** @implementation-alias DOMNamedNodeMap::item */
-    public function item(int $index): Entity|Notation|null {}
-    /** @implementation-alias DOMNamedNodeMap::getNamedItem */
-    public function getNamedItem(string $qualifiedName): Entity|Notation|null {}
-    /** @implementation-alias DOMNamedNodeMap::getNamedItemNS */
-    public function getNamedItemNS(?string $namespace, string $localName): Entity|Notation|null {}
-    /** @implementation-alias DOMNamedNodeMap::count */
-    public function count(): int {}
-    /** @implementation-alias DOMNamedNodeMap::getIterator */
-    public function getIterator(): \Iterator {}
-}
-class HTMLCollection implements \IteratorAggregate, \Countable
-{
-    public int $length;
-    /** @implementation-alias DOMNodeList::item */
-    public function item(int $index): ?Element {}
-    public function namedItem(string $key): ?Element {}
-    /** @implementation-alias DOMNodeList::count */
-    public function count(): int {}
-    /** @implementation-alias DOMNodeList::getIterator */
-    public function getIterator(): \Iterator {}
-}
-/**
- * @not-serializable
- * @strict-properties
- */
-final class TokenList implements \IteratorAggregate, \Countable
-{
-    /** @implementation-alias Dom\Node::__construct */
-    private function __construct() {}
-    public int $length;
-    public function item(int $index): ?string {}
-    public function contains(string $token): bool {}
-    public function add(string ...$tokens): void {}
-    public function remove(string ...$tokens): void {}
-    public function toggle(string $token, ?bool $force = null): bool {}
-    public function replace(string $token, string $newToken): bool {}
-    public function supports(string $token): bool {}
-    public string $value;
-    public function count(): int {}
-    public function getIterator(): \Iterator {}
-}
 /** @not-serializable */
 final class XPath
 {
@@ -369,6 +282,13 @@ pub fn extension() -> Extension {
             "Dom\\Document" => builder.class::<document::Document>(),
             "Dom\\HTMLDocument" => builder.class::<html_document::HTMLDocument>(),
             "Dom\\XMLDocument" => builder.class::<document::XMLDocument>(),
+            "DOMNodeList" => builder.class::<map::DOMNodeList>(),
+            "Dom\\NodeList" => builder.class::<map::NodeList>(),
+            "DOMNamedNodeMap" => builder.class::<map::DOMNamedNodeMap>(),
+            "Dom\\NamedNodeMap" => builder.class::<map::NamedNodeMap>(),
+            "Dom\\DtdNamedNodeMap" => builder.class::<map::DtdNamedNodeMap>(),
+            "Dom\\HTMLCollection" => builder.class::<map::HTMLCollection>(),
+            "Dom\\TokenList" => builder.class::<token_list::TokenList>(),
             _ => builder,
         };
         let Some(at) = declared
@@ -380,9 +300,7 @@ pub fn extension() -> Extension {
         let (decl, methods) = declared.remove(at);
         let handlers: Option<&'static dyn ObjectHandlers> = match decl.name.0.as_ref() {
             b"DOMException" => None,
-            b"DOMXPath" | b"Dom\\XPath" => Some(&xpath::HANDLERS),
-            b"Dom\\TokenList" => Some(&token_list::HANDLERS),
-            _ => Some(&map::HANDLERS),
+            _ => Some(&xpath::HANDLERS),
         };
         builder = match handlers {
             Some(h) => builder.class_payload::<object::Dom>(decl, methods, h),
@@ -399,14 +317,7 @@ pub fn extension() -> Extension {
 /// The entries the stub reader's classes name, `Class::method` to entry,
 /// until each class is declared by the attributes.
 fn entries() -> Vec<(&'static str, Entry)> {
-    [token_list::METHODS, map::METHODS, xpath::METHODS]
-        .iter()
-        .flat_map(|m| m.iter().copied())
-        .chain([(
-            "Dom\\Node::__construct",
-            modern::Node::__php_entry___construct as Entry,
-        )])
-        .collect()
+    xpath::METHODS.to_vec()
 }
 
 /// `zend_register_class_alias("Dom\\DOMException", ...)` of
@@ -809,28 +720,11 @@ fn bytes_arg(req: &mut Request, position: u32) -> Result<Vec<u8>, Thrown> {
         .unwrap_or_default())
 }
 
-/// `Z_PARAM_STR_OR_NULL`: `None` for `null` or nothing given.
-fn nullable_bytes_arg(req: &mut Request, position: u32) -> Result<Option<Vec<u8>>, Thrown> {
-    Ok(arg(req, position)?.and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec)))
-}
-
-/// `Z_PARAM_LONG`, `default` where the call gave none.
-fn long_arg(req: &mut Request, position: u32, default: i64) -> Result<i64, Thrown> {
-    Ok(arg(req, position)?
-        .and_then(|v| v.as_int())
-        .unwrap_or(default))
-}
-
 /// `Z_PARAM_BOOL`, `default` where the call gave none.
 fn bool_arg(req: &mut Request, position: u32, default: bool) -> Result<bool, Thrown> {
     Ok(arg(req, position)?
         .and_then(|v| v.as_bool())
         .unwrap_or(default))
-}
-
-/// `Z_PARAM_BOOL_OR_NULL`.
-fn nullable_bool_arg(req: &mut Request, position: u32) -> Result<Option<bool>, Thrown> {
-    Ok(arg(req, position)?.and_then(|v| v.as_bool()))
 }
 
 /// `Z_PARAM_OBJECT_OF_CLASS[_OR_NULL]`: the object, the declared class

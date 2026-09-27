@@ -5,7 +5,8 @@
 //! again whenever the attribute has changed under it.
 
 use php_ext::abi::{
-    CloneObj, DimensionRead, ObjectHandlers, PropertyPlace, PropertyRead, PropertyTest,
+    CloneObj, DimensionRead, Instance, ObjectHandlers, Path, PropertyPlace, PropertyRead,
+    PropertyTest, Raw, This, Variadic,
 };
 use php_ext::attr::php_class;
 use php_ext::coerce::{to_long, truthy};
@@ -15,9 +16,7 @@ use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::Node;
 
 use crate::object::{Code, Dom, Extra};
-use crate::{
-    Entry, arity, class_name, dom_error_message, dom_mut, long_arg, nullable_bool_arg, string, this,
-};
+use crate::{class_name, dom_error_message, dom_mut, string};
 
 /// `ascii_whitespace`, infra's.
 pub(crate) const ASCII_WHITESPACE: &[u8] = b"\x09\x0A\x0C\x0D\x20";
@@ -244,45 +243,6 @@ fn validate(req: &mut Request, token: &[u8]) -> Result<(), Thrown> {
     Ok(())
 }
 
-/// `Z_PARAM_PATH_STR`: the bytes, php's `ValueError` where they hold a NUL.
-fn path_str(req: &mut Request, position: u32) -> Result<Vec<u8>, Thrown> {
-    crate::path_arg(req, position)
-}
-
-/// `dom_validate_tokens_varargs` over the call's arguments, as passed:
-/// `Z_PARAM_VARIADIC('*')` coerces nothing, so a token that is no string
-/// is php's `TypeError`, which names no parameter.
-fn varargs(req: &mut Request, method: &str) -> Result<Vec<Vec<u8>>, Thrown> {
-    let mut out = Vec::new();
-    for i in 0..req.argument_count() {
-        let position = u32::try_from(i + 1).unwrap_or(u32::MAX);
-        let arg = req
-            .argument(position)
-            .map(|v| v.deref())
-            .unwrap_or_default();
-        let Some(bytes) = arg.as_str_bytes().map(<[u8]>::to_vec) else {
-            let given = php_ext::coerce::value_name(req, &arg);
-            return Err(throw(
-                req,
-                "TypeError",
-                &format!(
-                    "Dom\\TokenList::{method}(): Argument #{position} must be of type string, {given} given"
-                ),
-            ));
-        };
-        if bytes.contains(&0) {
-            return Err(php_ext::raising::arg_value_error(
-                req,
-                position,
-                "not contain any null bytes",
-            ));
-        }
-        validate(req, &bytes)?;
-        out.push(bytes);
-    }
-    Ok(out)
-}
-
 /// `dom_token_list_item_read`: the token at `index`, `null` past the end.
 fn item_value(req: &mut Request, object: PhpObject, index: i64) -> Result<Value, Thrown> {
     let tokens = tokens(req, object);
@@ -291,176 +251,6 @@ fn item_value(req: &mut Request, object: PhpObject, index: i64) -> Result<Value,
         None => Ok(Value::null()),
     }
 }
-
-/// `Dom\TokenList::item(int $index): ?string`.
-///
-/// ```php
-/// $d = Dom\HTMLDocument::createEmpty();
-/// $e = $d->createElement('p');
-/// $e->setAttribute('class', ' a  b a c ');
-/// $l = $e->classList;
-/// var_dump($l->length, $l->item(1), $l->item(9), $l[0], isset($l[2]), $l->value, count($l));
-/// foreach ($l as $k => $t) echo $k, '=', $t, ' ';
-/// echo "\n";
-/// ```
-/// ```expect
-/// int(3)
-/// string(1) "b"
-/// NULL
-/// string(1) "a"
-/// bool(true)
-/// string(10) " a  b a c "
-/// int(3)
-/// 0=a 1=b 2=c
-/// ```
-fn item(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 1, 1)?;
-    let index = long_arg(req, 1, 0)?;
-    let this = this(req)?;
-    item_value(req, this, index)
-}
-
-/// `Dom\TokenList::contains(string $token): bool`.
-fn contains(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 1, 1)?;
-    let token = path_str(req, 1)?;
-    let this = this(req)?;
-    Ok(Value::bool(tokens(req, this).contains(&token)))
-}
-
-/// `Dom\TokenList::add(string ...$tokens): void`.
-///
-/// ```php
-/// $d = Dom\HTMLDocument::createEmpty();
-/// $e = $d->createElement('p');
-/// $l = $e->classList;
-/// $l->add('a', 'b', 'a');
-/// $l->remove('a', 'z');
-/// var_dump($l->toggle('c'), $l->toggle('b'), $l->toggle('d', false), $l->replace('c', 'e'), $l->contains('e'));
-/// echo $e->getAttribute('class'), "\n";
-/// try { $l->add(''); } catch (DOMException $x) { echo $x->getMessage(), ' ', $x->code, "\n"; }
-/// try { $l->add('a b'); } catch (DOMException $x) { echo $x->getMessage(), ' ', $x->code, "\n"; }
-/// try { $l->supports('a'); } catch (TypeError $x) { echo $x->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// bool(true)
-/// bool(false)
-/// bool(false)
-/// bool(true)
-/// bool(true)
-/// e
-/// The empty string is not a valid token 12
-/// The token must not contain any ASCII whitespace 5
-/// Attribute "class" does not define any supported tokens
-/// ```
-fn add(req: &mut Request) -> Result<Value, Thrown> {
-    let added = varargs(req, "add")?;
-    let this = this(req)?;
-    let mut set = tokens(req, this);
-    for token in added {
-        if !set.contains(&token) {
-            set.push(token);
-        }
-    }
-    update(req, this, set);
-    Ok(Value::null())
-}
-
-/// `Dom\TokenList::remove(string ...$tokens): void`.
-fn remove(req: &mut Request) -> Result<Value, Thrown> {
-    let removed = varargs(req, "remove")?;
-    let this = this(req)?;
-    let mut set = tokens(req, this);
-    set.retain(|t| !removed.contains(t));
-    update(req, this, set);
-    Ok(Value::null())
-}
-
-/// `Dom\TokenList::toggle(string $token, ?bool $force = null): bool`.
-fn toggle(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 1, 2)?;
-    let token = path_str(req, 1)?;
-    let force = nullable_bool_arg(req, 2)?;
-    validate(req, &token)?;
-    let this = this(req)?;
-    let mut set = tokens(req, this);
-    if let Some(at) = set.iter().position(|t| *t == token) {
-        if force != Some(true) {
-            set.remove(at);
-            update(req, this, set);
-            return Ok(Value::bool(false));
-        }
-        return Ok(Value::bool(true));
-    }
-    if force != Some(false) {
-        set.push(token);
-        update(req, this, set);
-        return Ok(Value::bool(true));
-    }
-    Ok(Value::bool(false))
-}
-
-/// `Dom\TokenList::replace(string $token, string $newToken): bool`: the
-/// token renamed in place, or dropped where the new one is there already.
-fn replace(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 2, 2)?;
-    let token = path_str(req, 1)?;
-    let fresh = path_str(req, 2)?;
-    validate(req, &token)?;
-    validate(req, &fresh)?;
-    let this = this(req)?;
-    let mut set = tokens(req, this);
-    let Some(at) = set.iter().position(|t| *t == token) else {
-        return Ok(Value::bool(false));
-    };
-    if set.iter().enumerate().any(|(i, t)| i != at && *t == fresh) {
-        set.remove(at);
-    } else if let Some(slot) = set.get_mut(at) {
-        *slot = fresh;
-    }
-    update(req, this, set);
-    Ok(Value::bool(true))
-}
-
-/// `Dom\TokenList::supports(string $token): bool`: `classList` defines no
-/// supported tokens, so php's `TypeError`.
-fn supports(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 1, 1)?;
-    path_str(req, 1)?;
-    Err(throw(
-        req,
-        "TypeError",
-        "Attribute \"class\" does not define any supported tokens",
-    ))
-}
-
-/// `Dom\TokenList::count(): int`.
-fn count(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 0, 0)?;
-    let this = this(req)?;
-    let n = tokens(req, this).len();
-    Ok(Value::int(i64::try_from(n).unwrap_or(i64::MAX)))
-}
-
-/// `Dom\TokenList::getIterator(): Iterator`.
-fn get_iterator(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 0, 0)?;
-    let this = this(req)?;
-    Ok(php_ext::call::internal_iterator(req, &this)?.as_value())
-}
-
-/// The methods, `Class::method` to entry.
-pub(crate) const METHODS: &[(&str, Entry)] = &[
-    ("Dom\\TokenList::item", item),
-    ("Dom\\TokenList::contains", contains),
-    ("Dom\\TokenList::add", add),
-    ("Dom\\TokenList::remove", remove),
-    ("Dom\\TokenList::toggle", toggle),
-    ("Dom\\TokenList::replace", replace),
-    ("Dom\\TokenList::supports", supports),
-    ("Dom\\TokenList::count", count),
-    ("Dom\\TokenList::getIterator", get_iterator),
-];
 
 /// `dom_token_list_length_read`.
 #[allow(clippy::unnecessary_wraps)] // the reader shape every row of a property table has
@@ -669,7 +459,235 @@ impl ObjectHandlers for TokenListHandlers {
     }
 }
 
-/// `Dom\TokenList`, named for the types that hold it until its header is
-/// declared here.
-#[php_class(extern, namespace(Dom))]
+/// `dom_validate_tokens_varargs` over the tokens as passed:
+/// `Z_PARAM_VARIADIC('*')` coerces nothing, so a token that is no string
+/// is php's `TypeError`, which names no parameter.
+fn varargs(
+    req: &mut Request,
+    tokens: &[Raw<PhpString>],
+    method: &str,
+) -> Result<Vec<Vec<u8>>, Thrown> {
+    let mut out = Vec::new();
+    for (i, token) in tokens.iter().enumerate() {
+        let position = u32::try_from(i + 1).unwrap_or(u32::MAX);
+        let arg = token.value();
+        let Some(bytes) = arg.as_str_bytes().map(<[u8]>::to_vec) else {
+            let given = php_ext::coerce::value_name(req, &arg);
+            return Err(throw(
+                req,
+                "TypeError",
+                &format!(
+                    "Dom\\TokenList::{method}(): Argument #{position} must be of type string, {given} given"
+                ),
+            ));
+        };
+        if bytes.contains(&0) {
+            return Err(php_ext::raising::arg_value_error(
+                req,
+                position,
+                "not contain any null bytes",
+            ));
+        }
+        validate(req, &bytes)?;
+        out.push(bytes);
+    }
+    Ok(out)
+}
+
+/// `final class Dom\TokenList implements IteratorAggregate, Countable`,
+/// `@not-serializable` and `@strict-properties`: an element's `class`
+/// attribute as an ordered set, its `length` and `value` `@virtual`,
+/// served by [`HANDLERS`]; `Dom\Node`'s refusing constructor.
+///
+/// ```php
+/// $d = Dom\HTMLDocument::createEmpty();
+/// $e = $d->createElement('p');
+/// $e->setAttribute('class', ' a  b a c ');
+/// $l = $e->classList;
+/// var_dump($l->length, $l->item(1), $l->item(9), $l[0], isset($l[2]), $l->value, count($l));
+/// foreach ($l as $k => $t) echo $k, '=', $t, ' ';
+/// echo "\n";
+/// ```
+/// ```expect
+/// int(3)
+/// string(1) "b"
+/// NULL
+/// string(1) "a"
+/// bool(true)
+/// string(10) " a  b a c "
+/// int(3)
+/// 0=a 1=b 2=c
+/// ```
+///
+/// ```php
+/// $d = Dom\HTMLDocument::createEmpty();
+/// $e = $d->createElement('p');
+/// $l = $e->classList;
+/// $l->add('a', 'b', 'a');
+/// $l->remove('a', 'z');
+/// var_dump($l->toggle('c'), $l->toggle('b'), $l->toggle('d', false), $l->replace('c', 'e'), $l->contains('e'));
+/// echo $e->getAttribute('class'), "\n";
+/// try { $l->add(''); } catch (DOMException $x) { echo $x->getMessage(), ' ', $x->code, "\n"; }
+/// try { $l->add('a b'); } catch (DOMException $x) { echo $x->getMessage(), ' ', $x->code, "\n"; }
+/// try { $l->supports('a'); } catch (TypeError $x) { echo $x->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// e
+/// The empty string is not a valid token 12
+/// The token must not contain any ASCII whitespace 5
+/// Attribute "class" does not define any supported tokens
+/// ```
+#[php_class(
+    namespace(Dom),
+    final,
+    implements(crate::IteratorAggregate, crate::Countable),
+    not_serializable,
+    dynamic_properties = forbidden,
+    payload = Dom,
+    handlers = HANDLERS
+)]
 pub(crate) struct TokenList;
+
+#[php_class]
+impl TokenList {
+    #[php(property, virtual)]
+    const length: i64;
+    #[php(property, virtual)]
+    const value: PhpString;
+
+    #[php(private, implementation = crate::modern::Node::__construct)]
+    fn __construct(this: This<Self>);
+
+    /// `Dom\TokenList::item(int $index): ?string`.
+    fn item(
+        req: &mut Request,
+        this: This<Self>,
+        index: i64,
+    ) -> Result<Raw<Option<PhpString>>, Thrown> {
+        let token = item_value(req, this.object(), index)?;
+        crate::returned(req, token)
+    }
+
+    /// `Dom\TokenList::contains(string $token): bool`.
+    fn contains(req: &mut Request, this: This<Self>, token: Path) -> bool {
+        let token = token.0.as_bytes();
+        tokens(req, this.object())
+            .iter()
+            .any(|t| t.as_slice() == token)
+    }
+
+    /// `Dom\TokenList::add(string ...$tokens): void`.
+    fn add(
+        req: &mut Request,
+        this: This<Self>,
+        tokens: Variadic<Raw<PhpString>>,
+    ) -> Result<(), Thrown> {
+        let added = varargs(req, &tokens.0, "add")?;
+        let this = this.object();
+        let mut set = self::tokens(req, this);
+        for token in added {
+            if !set.contains(&token) {
+                set.push(token);
+            }
+        }
+        update(req, this, set);
+        Ok(())
+    }
+
+    /// `Dom\TokenList::remove(string ...$tokens): void`.
+    fn remove(
+        req: &mut Request,
+        this: This<Self>,
+        tokens: Variadic<Raw<PhpString>>,
+    ) -> Result<(), Thrown> {
+        let removed = varargs(req, &tokens.0, "remove")?;
+        let this = this.object();
+        let mut set = self::tokens(req, this);
+        set.retain(|t| !removed.contains(t));
+        update(req, this, set);
+        Ok(())
+    }
+
+    /// `Dom\TokenList::toggle(string $token, ?bool $force = null): bool`.
+    fn toggle(
+        req: &mut Request,
+        this: This<Self>,
+        token: Path,
+        #[php(default = null)] force: Option<bool>,
+    ) -> Result<bool, Thrown> {
+        let token = token.0.as_bytes().to_vec();
+        validate(req, &token)?;
+        let this = this.object();
+        let mut set = tokens(req, this);
+        if let Some(at) = set.iter().position(|t| *t == token) {
+            if force != Some(true) {
+                set.remove(at);
+                update(req, this, set);
+                return Ok(false);
+            }
+            return Ok(true);
+        }
+        if force != Some(false) {
+            set.push(token);
+            update(req, this, set);
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// `Dom\TokenList::replace(string $token, string $newToken): bool`: the
+    /// token renamed in place, or dropped where the new one is there
+    /// already.
+    fn replace(
+        req: &mut Request,
+        this: This<Self>,
+        token: Path,
+        newToken: Path,
+    ) -> Result<bool, Thrown> {
+        let (token, fresh) = (token.0.as_bytes(), newToken.0.as_bytes().to_vec());
+        validate(req, token)?;
+        validate(req, &fresh)?;
+        let this = this.object();
+        let mut set = tokens(req, this);
+        let Some(at) = set.iter().position(|t| t.as_slice() == token) else {
+            return Ok(false);
+        };
+        if set.iter().enumerate().any(|(i, t)| i != at && *t == fresh) {
+            set.remove(at);
+        } else if let Some(slot) = set.get_mut(at) {
+            *slot = fresh;
+        }
+        update(req, this, set);
+        Ok(true)
+    }
+
+    /// `Dom\TokenList::supports(string $token): bool`: `classList` defines
+    /// no supported tokens, so php's `TypeError`.
+    fn supports(req: &mut Request, _this: This<Self>, token: Path) -> Result<bool, Thrown> {
+        let _ = token;
+        Err(throw(
+            req,
+            "TypeError",
+            "Attribute \"class\" does not define any supported tokens",
+        ))
+    }
+
+    /// `Dom\TokenList::count(): int`.
+    fn count(req: &mut Request, this: This<Self>) -> i64 {
+        let n = tokens(req, this.object()).len();
+        i64::try_from(n).unwrap_or(i64::MAX)
+    }
+
+    /// `Dom\TokenList::getIterator(): Iterator`.
+    fn getIterator(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Instance<crate::Iterator>, Thrown> {
+        php_ext::call::internal_iterator(req, &this.object()).map(Instance::of)
+    }
+}
