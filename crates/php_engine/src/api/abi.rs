@@ -932,7 +932,9 @@ pub trait ObjectHandlers: Send + Sync {
     }
 
     /// `get_property_ptr_ptr`, `zend_std_get_property_ptr_ptr` at
-    /// `Std`: where a write to `name` goes, [`PropertyPlace::Std`] for
+    /// `Std`: where a write to `name` goes, the `Err` where the class
+    /// refuses any write with a throwable, php's `&EG(error_zval)` beside
+    /// it (`incomplete_class_get_property_ptr_ptr`), [`PropertyPlace::Std`] for
     /// the standard place the kernel lays down itself, and
     /// [`PropertyPlace::Handlers`], php's `NULL`, for a name the class
     /// serves. The answer is a verdict with no effect, so `ASSIGN_OBJ`
@@ -970,8 +972,8 @@ pub trait ObjectHandlers: Send + Sync {
         req: &mut Request,
         object: PhpObject,
         name: &[u8],
-    ) -> PropertyPlace {
-        req.property_place(object, name)
+    ) -> Result<PropertyPlace, Thrown> {
+        Ok(req.property_place(object, name))
     }
 
     /// `has_property`, `zend_std_has_property` at `Std`: whether the

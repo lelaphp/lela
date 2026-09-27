@@ -1783,9 +1783,9 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         object: PhpObject,
         name: &[u8],
-    ) -> PropertyPlace {
+    ) -> Result<PropertyPlace, Thrown> {
         if as_props(req, object, name).unwrap_or(false) {
-            return PropertyPlace::Handlers;
+            return Ok(PropertyPlace::Handlers);
         }
         Std.get_property_ptr_ptr(req, object, name)
     }

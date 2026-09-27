@@ -912,7 +912,7 @@ impl php_ext::abi::ObjectHandlers for XPathHandlers {
         req: &mut Request,
         object: PhpObject,
         name: &[u8],
-    ) -> php_ext::abi::PropertyPlace {
+    ) -> Result<php_ext::abi::PropertyPlace, Thrown> {
         crate::property_place(req, object, name)
     }
 

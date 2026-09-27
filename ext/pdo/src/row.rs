@@ -237,9 +237,9 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         object: PhpObject,
         name: &[u8],
-    ) -> PropertyPlace {
+    ) -> Result<PropertyPlace, Thrown> {
         let _ = (req, object, name);
-        PropertyPlace::Handlers
+        Ok(PropertyPlace::Handlers)
     }
 
     /// `row_prop_exists`: a column there and not `null`, or not empty;

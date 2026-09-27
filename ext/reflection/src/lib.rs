@@ -4576,9 +4576,9 @@ impl ObjectHandlers for ReflectorHandlers {
         req: &mut Request,
         object: PhpObject,
         name: &[u8],
-    ) -> PropertyPlace {
+    ) -> Result<PropertyPlace, Thrown> {
         if read_only(req, object, name) {
-            PropertyPlace::Handlers
+            Ok(PropertyPlace::Handlers)
         } else {
             Std.get_property_ptr_ptr(req, object, name)
         }

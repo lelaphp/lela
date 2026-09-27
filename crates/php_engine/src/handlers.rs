@@ -7428,7 +7428,17 @@ fn property_place(
             )));
         }
     };
-    let placed = match place_of(req, object, &name) {
+    let place = match place_of(req, object, &name) {
+        Ok(place) => place,
+        // The class refused the place with a throwable, php's
+        // `&EG(error_zval)`.
+        Err(thrown) => {
+            return Ok(PropertyFound::Threw(freeing_container(
+                req, frame, code, op, thrown,
+            )));
+        }
+    };
+    let placed = match place {
         // `if (NULL == ptr) ptr = zobj->handlers->read_property(...)`:
         // a name the class serves is read, not placed.
         PropertyPlace::Handlers => return Ok(PropertyFound::Served(object, name)),
@@ -10971,7 +10981,13 @@ fn assign_property(
     let place = if lazy {
         PropertyPlace::Handlers
     } else {
-        place_of(req, object, bytes)
+        match place_of(req, object, bytes) {
+            Ok(place) => place,
+            Err(thrown) => {
+                req.release(value);
+                return Ok(Err(thrown));
+            }
+        }
     };
     let placed = match place {
         // `zobj->handlers->write_property`: the class serves the name,
@@ -13093,7 +13109,15 @@ fn step_property(
         }
     };
     let mut precomputed: Option<Value> = None;
-    let placed = match place_of(req, object, &bytes) {
+    let place = match place_of(req, object, &bytes) {
+        Ok(place) => place,
+        Err(thrown) => {
+            exec::free_operand(req, frame, code, data.op1_type, data.op1);
+            write_out(req, frame, code, op, &Value::null());
+            return Ok(Err(thrown));
+        }
+    };
+    let placed = match place {
         // php's `NULL` from the class's own slot: the class serves the
         // name, so the pair of handlers takes the site.
         PropertyPlace::Handlers => {
@@ -13755,7 +13779,14 @@ fn incdec_property(
             return Ok(Err(thrown));
         }
     };
-    let placed = match place_of(req, object, &bytes) {
+    let place = match place_of(req, object, &bytes) {
+        Ok(place) => place,
+        Err(thrown) => {
+            write_out(req, frame, code, op, &Value::null());
+            return Ok(Err(thrown));
+        }
+    };
+    let placed = match place {
         // php's `NULL` from the class's own slot: the class serves the
         // name, so the pair of handlers takes the site.
         PropertyPlace::Handlers => {
@@ -13981,7 +14012,7 @@ fn overloaded_incdec(
 /// ([`PropertyPlace`]): whether a write to `name` on the object is the
 /// standard place, which the property kernels lay down themselves, or
 /// goes through the class's `read_property` and `write_property`.
-fn place_of(req: &mut Request, object: PhpObject, name: &[u8]) -> PropertyPlace {
+fn place_of(req: &mut Request, object: PhpObject, name: &[u8]) -> Result<PropertyPlace, Thrown> {
     let table = req.object_handlers(object.heap());
     table.get_property_ptr_ptr(req, object, name)
 }

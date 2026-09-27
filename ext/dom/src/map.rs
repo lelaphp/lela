@@ -581,7 +581,7 @@ impl ObjectHandlers for MapHandlers {
         req: &mut Request,
         object: PhpObject,
         name: &[u8],
-    ) -> PropertyPlace {
+    ) -> Result<PropertyPlace, Thrown> {
         crate::property_place(req, object, name)
     }
 

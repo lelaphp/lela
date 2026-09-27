@@ -854,9 +854,9 @@ impl ObjectHandlers for IntervalHandlers {
         req: &mut Request,
         object: PhpObject,
         name: &[u8],
-    ) -> PropertyPlace {
+    ) -> Result<PropertyPlace, Thrown> {
         if INTERVAL_FIELDS.contains(&name) {
-            return PropertyPlace::Handlers;
+            return Ok(PropertyPlace::Handlers);
         }
         Std.get_property_ptr_ptr(req, object, name)
     }
@@ -1082,9 +1082,9 @@ impl ObjectHandlers for PeriodHandlers {
         req: &mut Request,
         object: PhpObject,
         name: &[u8],
-    ) -> PropertyPlace {
+    ) -> Result<PropertyPlace, Thrown> {
         if PERIOD_FIELDS.contains(&name) {
-            return PropertyPlace::Handlers;
+            return Ok(PropertyPlace::Handlers);
         }
         Std.get_property_ptr_ptr(req, object, name)
     }

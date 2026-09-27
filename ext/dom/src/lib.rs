@@ -724,9 +724,13 @@ fn write_property(
 /// `dom_get_property_ptr_ptr`: php's `NULL` for a name a handler
 /// serves, so every write to it reaches `dom_write_property`, and the
 /// standard place for every other name.
-fn property_place(req: &mut Request, object: PhpObject, name: &[u8]) -> PropertyPlace {
+fn property_place(
+    req: &mut Request,
+    object: PhpObject,
+    name: &[u8],
+) -> Result<PropertyPlace, Thrown> {
     if handler(req, object, name).is_some() {
-        return PropertyPlace::Handlers;
+        return Ok(PropertyPlace::Handlers);
     }
     Std.get_property_ptr_ptr(req, object, name)
 }

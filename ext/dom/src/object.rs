@@ -160,7 +160,7 @@ impl ObjectHandlers for NodeHandlers {
         req: &mut Request,
         object: PhpObject,
         name: &[u8],
-    ) -> PropertyPlace {
+    ) -> Result<PropertyPlace, Thrown> {
         property_place(req, object, name)
     }
 
