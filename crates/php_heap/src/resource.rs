@@ -314,11 +314,10 @@ impl RegularList {
     }
 
     /// `zend_hash_index_del(&EG(regular_list), handle)` without the
-    /// entry's destructor, which the caller serves.
-    fn del(&mut self, id: i64) {
-        if let Some(arr) = self.arr {
-            index_del(arr, id);
-        }
+    /// entry's destructor, which the caller serves; whether an entry
+    /// stood there, php's `SUCCESS`.
+    fn del(&mut self, id: i64) -> bool {
+        self.arr.and_then(|arr| index_del(arr, id)).is_some()
     }
 
     /// How many entries name a live resource, `zend_hash_num_elements`.
@@ -518,8 +517,46 @@ impl Heap {
     /// destructor, `list_entry_destructor` (`Z/Zend/zend_list.c:174`):
     /// the entry taken off the list, the per-type destructor served
     /// while the resource stands open, and the bytes given back.
+    ///
+    /// The entry is the owner of the bytes, as the hash's destructor is
+    /// php's only `efree` of a resource: a destructor that takes an owner
+    /// of its own resource and gives it up again, as a user filter's
+    /// `$this->stream` does while the stream's free flushes it, reaches
+    /// here a second time, finds no entry, and frees nothing, where php's
+    /// `zend_hash_index_del` finds none either.
+    ///
+    /// A stream whose last owner goes while a user filter is on its write
+    /// chain: the free flushes the chain, the filter's call puts the
+    /// stream in `$this->stream` and takes it out again, and the stream
+    /// is freed once, so the resources made after it stand.
+    ///
+    /// ```php
+    /// class F extends php_user_filter {
+    ///     function filter($in, $out, &$consumed, $closing): int {
+    ///         echo $closing ? "closing\n" : "filter\n";
+    ///         return PSFS_ERR_FATAL;
+    ///     }
+    /// }
+    /// stream_filter_register('f', 'F');
+    /// for ($i = 0; $i < 3; $i++) {
+    ///     $m = fopen('php://memory', 'w+');
+    ///     stream_filter_append($m, 'f', STREAM_FILTER_WRITE);
+    ///     $m = null;
+    ///     $a[] = fopen('php://memory', 'r');
+    /// }
+    /// var_dump(count($a), get_resource_type($a[0]));
+    /// ```
+    /// ```expect
+    /// closing
+    /// closing
+    /// closing
+    /// int(3)
+    /// string(6) "stream"
+    /// ```
     pub(crate) fn resource_free(hooks: &mut dyn HeapHooks, r: Res) {
-        hooks.heap().resources.del(r.id());
+        if !hooks.heap().resources.del(r.id()) {
+            return;
+        }
         Heap::resource_dtor(hooks, r);
         // SAFETY: the resource came from `resource_alloc`, its entry is
         // gone and its payload dropped, so nothing names it.
