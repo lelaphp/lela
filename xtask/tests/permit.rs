@@ -635,6 +635,174 @@ fn a_file_in_a_worktree_beside_the_checkout_is_judged_against_that_worktree() {
     assert_eq!(call.path(&root), None);
 }
 
+/// A worktree beside a scratch checkout, on a branch of its own: the
+/// place `worktree add` lays one (revision 56).
+fn worktree_beside(tree: &Path, root: &Path, branch: &str) -> PathBuf {
+    let beside = tree.join("repo-worktrees").join(branch);
+    sh(
+        root,
+        &[
+            "git",
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            branch,
+            beside.to_str().unwrap(),
+        ],
+    );
+    beside.canonicalize().unwrap()
+}
+
+/// The hook's stdin for one call, placed by `cwd` when it has no file.
+fn hook_stdin(tool: &str, cwd: &Path, input: &serde_json::Value) -> String {
+    serde_json::json!({"session_id": "3f1c0d2a-9b7e-4c55-8f1a-2d6e7b9c0a11",
+        "tool_name": tool, "cwd": cwd.to_str().unwrap(), "tool_input": input})
+    .to_string()
+}
+
+/// A worktree laid before a `seams.toml` change carries rules no build of
+/// the checkout is compiled against, and each tree is judged by the rules
+/// it carries: the checkout's build hands a call there to the worktree's
+/// own, which judges it against its own tree, and returns its decision
+/// (#1047). A rule only the worktree's manifest carries fires on a write
+/// there and not on the same write in the checkout; a Bash call is placed
+/// by its working directory the same way, and a row the worktree words
+/// differently is denied in the worktree's words; the readings are the
+/// worktree's build's, in its store. The walk in the worktree passes over
+/// the checkout's build seeded into its `target/debug`, which refuses a
+/// manifest it was not compiled against, and `cargo run` there builds the
+/// harness under test against the worktree's manifest.
+#[test]
+fn a_call_in_a_worktree_whose_manifest_differs_is_judged_by_that_worktrees_build() {
+    let tree = Tree::new("permit-hand-off").unwrap();
+    let root = tree.join("repo");
+    xtask::scratch::repository(workspace(), &root).unwrap();
+    let beside = worktree_beside(&tree, &root, "t-x/handed");
+    let marker = "not available to agents, says the worktree's manifest";
+    let manifest = std::fs::read_to_string(beside.join("seams.toml")).unwrap();
+    let manifest = manifest.replacen("not available to agents.", &format!("{marker}."), 1);
+    assert!(
+        manifest.contains(marker),
+        "the git.no-verify text is rewritten"
+    );
+    std::fs::write(
+        beside.join("seams.toml"),
+        format!(
+            "{manifest}\n[[rule]]\nid = \"worktree.only\"\ntool = [\"Edit\", \"Write\"]\n\
+             scope = \"only-here/**\"\ndeny = true\n\
+             text = \"A file under only-here/ is refused by the worktree's manifest alone.\"\n"
+        ),
+    )
+    .unwrap();
+    // The checkout's dependency build, seeded the way `worktree add` seeds
+    // it; where the volume cannot clone, the build there starts cold.
+    std::fs::create_dir_all(beside.join("target")).unwrap();
+    let _ = Command::new("cp")
+        .args(["-c", "-R"])
+        .arg(workspace().join("target/debug"))
+        .arg(beside.join("target/debug"))
+        .output();
+
+    let write = |file: &Path| {
+        hook_stdin(
+            "Write",
+            &root,
+            &serde_json::json!({"file_path": file.to_str().unwrap(), "content": "one\n"}),
+        )
+    };
+    let (code, out, err) = permit(&root, &write(&beside.join("only-here/one.txt")), &[]);
+    assert_eq!(code, 0, "the worktree's build judged the call: {err}");
+    assert!(out.contains("worktree.only"), "{out}{err}");
+    assert!(out.contains("\"deny\""), "{out}");
+    let reading = Store::of_workspace(&beside)
+        .read("permit", "worktree.only")
+        .unwrap()
+        .expect("the worktree's build recorded its denial in its own store");
+    assert_eq!(reading.status, Status::Fail);
+    assert!(
+        Store::of_workspace(&root)
+            .read("permit", "permit.unjudged-call")
+            .unwrap()
+            .is_none()
+            && Store::of_workspace(&beside)
+                .read("permit", "permit.unjudged-call")
+                .unwrap()
+                .is_none(),
+        "nothing went unjudged"
+    );
+
+    // The same write in the checkout is the checkout's to judge, by rules
+    // that carry no such row.
+    let (code, out, err) = permit(&root, &write(&root.join("only-here/one.txt")), &[]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!out.contains("worktree.only"), "{out}");
+    assert!(!out.contains("\"deny\""), "{out}");
+
+    // A Bash call is placed by its working directory: in the worktree it
+    // is denied in the worktree's words, in the checkout in the checkout's.
+    let commit = |cwd: &Path| {
+        hook_stdin(
+            "Bash",
+            cwd,
+            &serde_json::json!({"command": "git commit --no-verify -m x"}),
+        )
+    };
+    let (code, out, err) = permit(&root, &commit(&beside), &[]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains(marker), "the worktree's rule: {out}{err}");
+    let (code, out, err) = permit(&root, &commit(&root), &["--above-the-command-hook"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("git.no-verify"), "{out}");
+    assert!(!out.contains(marker), "the checkout's rule: {out}");
+}
+
+/// A hand-off that does not run decides nothing, and nothing is allowed on
+/// its silence (#1047): the worktree here has no build to hand the call
+/// to, so the checkout's build exits without judging, as it did before
+/// there was a hand-off, and the call reaches the end of the hook's walk
+/// unjudged. Every candidate of that walk hands the call to the same
+/// worktree, so it is the failure no rebuild repairs, in the worktree's
+/// store, naming the worktree's manifest.
+#[test]
+fn a_hand_off_that_does_not_run_leaves_the_call_unjudged() {
+    let tree = Tree::new("permit-hand-off-fails").unwrap();
+    let root = tree.join("repo");
+    scratch_workspace(workspace(), &root).unwrap();
+    let beside = worktree_beside(&tree, &root, "t-x/unbuilt");
+    let manifest = std::fs::read_to_string(beside.join("seams.toml")).unwrap();
+    std::fs::write(
+        beside.join("seams.toml"),
+        format!("{manifest}\n# a row a person has since settled\n"),
+    )
+    .unwrap();
+    let stdin = hook_stdin(
+        "Write",
+        &root,
+        &serde_json::json!({"file_path": beside.join("README.md").to_str().unwrap(),
+            "content": "one\n"}),
+    );
+    let (code, out, err) = permit(&root, &stdin, &[]);
+    assert_ne!(code, 0, "the call was not judged: {out}");
+    assert!(out.trim().is_empty(), "and nothing was decided: {out}");
+    assert!(
+        err.contains(&beside.join("seams.toml").display().to_string()),
+        "{err}"
+    );
+    let reading = Store::of_workspace(&beside)
+        .read("permit", "permit.unjudged-call")
+        .unwrap()
+        .expect("the refusal was recorded");
+    assert_eq!(reading.status, Status::Fail);
+    assert!(
+        Store::of_workspace(&beside)
+            .read("permit", "permit.stale-build")
+            .unwrap()
+            .is_none(),
+        "no rebuild of the checkout judges it"
+    );
+}
+
 /// The unsafe attribute written into a file of the `unsafe.homes` fixture.
 fn edit_of(file: &Path) -> Call {
     Call::parse(

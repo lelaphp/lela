@@ -3,15 +3,16 @@
 //! the command both are over: the call on stdin, the hook's JSON on stdout,
 //! the findings as readings, and the refusal when this build cannot judge.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
 use super::call::Call;
+use super::hand_off::hand_off;
 use super::rules::{Judgement, Kind, deny_output, judge};
 use super::{INSTRUMENT, STALE_RULE, UNJUDGED_RULE};
-use crate::built::{self, Refusal};
+use crate::built::{self, Judge, Refusal};
 use crate::manifest::{self, Manifest};
 use crate::reading::{Reading, Status, Store};
 
@@ -98,8 +99,9 @@ pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
         },
         |json| Ok(json.to_owned()),
     );
-    let call = match text.and_then(|text| Call::parse(&text)) {
-        Ok(call) => call,
+    let call = text.and_then(|text| Call::parse(&text).map(|call| (text, call)));
+    let (text, call) = match call {
+        Ok(read) => read,
         Err(err) => {
             println!(
                 "{}",
@@ -119,9 +121,22 @@ pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
     // three failing is a refusal to decide, and a refusal decides nothing
     // whichever way the decision would have fallen. A manifest that will
     // not parse is the refusal no rebuild repairs, so it joins the two
-    // digests as the kind of refusal that ends the walk (#118).
-    let manifest = built::judges(&checkout, &crate::built_root())
-        .and_then(|()| Manifest::load(&workspace).map_err(Refusal::Unreadable));
+    // digests as the kind of refusal that ends the walk (#118). A call in
+    // a worktree whose manifest this build was not compiled against is
+    // that worktree's build's to judge, and its decision is this one's
+    // (#1047).
+    let manifest = match built::judges(&checkout, root, &crate::built_root()) {
+        Ok(Judge::This) => Manifest::load(&workspace).map_err(Refusal::Unreadable),
+        Ok(Judge::Checkout(other)) => match hand_off(&other, &text, adapter) {
+            Ok(decision) => {
+                return std::io::stdout()
+                    .write_all(&decision)
+                    .context("printing the decision the worktree's build made");
+            }
+            Err(refusal) => Err(refusal),
+        },
+        Err(refusal) => Err(refusal),
+    };
     let manifest = match manifest {
         Ok(manifest) => manifest,
         Err(refusal) => {
@@ -159,7 +174,9 @@ pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
 /// judges it; that is the walk working, not a judgement the harness is
 /// missing, so it is a skip under [`STALE_RULE`] that names where the call
 /// went. A manifest no build reads ends the walk with the call unjudged,
-/// which is the outage itself, so it is a failure under [`UNJUDGED_RULE`].
+/// which is the outage itself, so it is a failure under [`UNJUDGED_RULE`];
+/// so is a hand-off to a worktree's build that did not judge, since every
+/// candidate of the walk hands the call to that same build (#1047).
 /// Two rules and not one status apart, since the store keeps one file per
 /// rule and a skip would otherwise write over the failure beneath it.
 fn record_the_refusal(root: &Path, call: &Call, refusal: &Refusal) {
