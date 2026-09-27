@@ -21,8 +21,8 @@ use php_heap::{
     SortEntry, VmStack, Zval, ZvalRef,
 };
 use php_unit::decl::{
-    Attribute, ClassConstDecl, ClassDecl, ClassKind, FunctionDecl, HookKind, IniDecl, MethodDecl,
-    Name, PropertyDecl, Visibility,
+    Attribute, ClassConstDecl, ClassDecl, ClassFlags, ClassKind, FunctionDecl, HookKind, IniDecl,
+    MethodDecl, Name, PropertyDecl, Visibility,
 };
 use php_unit::{CacheSlot, FramelessEntry, OpArray, Opcode, Unit};
 
@@ -8110,10 +8110,10 @@ impl Request {
         name: &[u8],
     ) -> Result<(), Thrown> {
         use php_unit::decl::DynamicProperties;
-        let Some(decl) = self.class_decl(class) else {
+        let Some(flags) = self.class_flags(class) else {
             return Ok(());
         };
-        let carries = decl.flags.dynamic_properties;
+        let carries = flags.dynamic_properties;
         if carries == DynamicProperties::Allowed {
             return Ok(());
         }
@@ -14075,6 +14075,61 @@ impl Request {
             None => self.shared.classes.get(at),
             Some(declared) => self.declared.get(declared)?.decl(),
         }
+    }
+
+    /// `ce->ce_flags` of a linked class: its declaration's flags with
+    /// what `zend_do_inheritance_ex` ORs in from its parent
+    /// (`Z/Zend/zend_inheritance.c:2055`), `ZEND_ACC_NOT_SERIALIZABLE`
+    /// and `ZEND_ACC_ALLOW_DYNAMIC_PROPERTIES`, the two of that mask a
+    /// program can observe. A parent's flags already hold its own
+    /// parent's, so the walk takes each class up the chain; a class
+    /// that forbids dynamic properties keeps forbidding them, since
+    /// `zend_std_write_property` reads `ZEND_ACC_NO_DYNAMIC_PROPERTIES`
+    /// first. The one reader of the bits inheritance moves: what a
+    /// dynamic property's creation and `serialize` ask of a class.
+    /// The walk is cut at a depth no declaration can make.
+    ///
+    /// ```php
+    /// class S extends stdClass {}
+    /// $s = new S; $s->x = 1;
+    /// #[AllowDynamicProperties] class P {}
+    /// class C extends P {}
+    /// class D extends C {}
+    /// $d = new D; $d->y = 2;
+    /// class R extends ReflectionClass {}
+    /// class RR extends R {}
+    /// try { serialize(new RR('stdClass')); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+    /// class N {}
+    /// class M extends N {}
+    /// $m = new M; $m->z = 3;
+    /// var_dump($s->x, $d->y);
+    /// ```
+    /// ```expect
+    /// Serialization of 'RR' is not allowed
+    ///
+    /// Deprecated: Creation of dynamic property M::$z is deprecated in %s on line 13
+    /// int(1)
+    /// int(2)
+    /// ```
+    #[must_use]
+    pub fn class_flags(&self, class: ClassId) -> Option<ClassFlags> {
+        use php_unit::decl::DynamicProperties;
+        let mut flags = self.class_decl(class)?.flags;
+        let mut at = self.class_parent(class);
+        for _ in 0..64 {
+            let Some(parent) = at else { break };
+            let Some(passed) = self.class_decl(parent).map(|decl| decl.flags) else {
+                break;
+            };
+            flags.not_serializable |= passed.not_serializable;
+            if passed.dynamic_properties == DynamicProperties::Allowed
+                && flags.dynamic_properties == DynamicProperties::Deprecated
+            {
+                flags.dynamic_properties = DynamicProperties::Allowed;
+            }
+            at = self.class_parent(parent);
+        }
+        Some(flags)
     }
 
     /// `ZEND_FLF_FUNC(opline)`: the native and the arity the engine's
