@@ -467,6 +467,7 @@ dependencies = [
 name = "php_ext_ctype"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "php_ext",
 ]
 
