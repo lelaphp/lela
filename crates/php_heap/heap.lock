@@ -171,9 +171,11 @@ Obj::protect
 Obj::refcount
 Obj::set_destructor_called
 Obj::set_laziness
+Obj::set_slot_uninit
 Obj::set_weakly_referenced
 Obj::slot
 Obj::slot_ref
+Obj::slot_uninit
 Obj::slots
 Obj::unprotect
 ObjectId
@@ -258,6 +260,7 @@ Zval::kind
 Zval::long
 Zval::null
 Zval::object
+Zval::prop_uninit
 Zval::ptr
 Zval::reference
 Zval::resource
@@ -266,6 +269,7 @@ Zval::string
 ZvalRef
 ZvalRef::read
 ZvalRef::set_fe_pos
+ZvalRef::set_prop_uninit
 ZvalRef::write
 ZvalType
 call_stack_bounds

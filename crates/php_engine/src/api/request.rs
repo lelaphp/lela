@@ -5482,10 +5482,13 @@ impl Request {
     /// from here; a typed property with none stays uninitialised.
     fn init_properties(&mut self, object: PhpObject, defaults: Vec<Option<Value>>) {
         for (i, value) in defaults.into_iter().enumerate() {
+            let slot = u32::try_from(i).unwrap_or(u32::MAX);
+            // A typed slot with no default is `IS_UNDEF` and
+            // `IS_PROP_UNINIT`, as `object_properties_init` copies it.
             let Some(value) = value else {
+                object.heap().set_slot_uninit(slot, true);
                 continue;
             };
-            let slot = u32::try_from(i).unwrap_or(u32::MAX);
             Heap::object_set_slot(&mut Hooks(self), object.heap(), slot, value.into_zval());
         }
     }
@@ -6693,6 +6696,19 @@ impl Request {
         Ok(())
     }
 
+    /// php's `Error` for a typed property read before anything wrote it
+    /// (`zend_throw_error` under `uninit_error`), naming the class that
+    /// declared it, `prop_info->ce`.
+    fn uninitialized_property(&mut self, declaring: ClassId, name: &[u8]) -> Thrown {
+        let class = self.class_name(declaring);
+        let shown = String::from_utf8_lossy(name).into_owned();
+        crate::api::raising::throw(
+            self,
+            "Error",
+            &format!("Typed property {class}::${shown} must not be accessed before initialization"),
+        )
+    }
+
     /// `zend_bad_property_access`: php's `Error` for a property the
     /// scope may not reach.
     fn inaccessible_property(
@@ -6947,19 +6963,17 @@ impl Request {
                     return self.read_property(instance, name, read);
                 }
                 // `IS_PROP_UNINIT`: a typed slot nothing has written
-                // skips `__get` and is the uninitialised-access error.
-                if placed.typed {
+                // skips `__get` and is the uninitialised-access error; one
+                // an `unset` emptied is the magic methods' where the class
+                // has one that answers, and the same error where not
+                // (`uninit_error` with `prop_info` set).
+                let magic = self.serves_accessor(class, b"__get")
+                    || (silent && self.serves_accessor(class, b"__isset"));
+                if placed.typed && (o.slot_uninit(placed.slot) || !magic) {
                     if silent {
                         return Ok(Value::null());
                     }
-                    let class = self.class_name(class);
-                    return Err(crate::api::raising::throw(
-                        self,
-                        "Error",
-                        &format!(
-                            "Typed property {class}::${shown} must not be accessed before initialization"
-                        ),
-                    ));
+                    return Err(self.uninitialized_property(placed.declaring, name));
                 }
             } else {
                 if !silent && !self.serves_accessor(class, b"__get") {
@@ -7123,6 +7137,18 @@ impl Request {
             }
             return Err(self.inaccessible_property(class, placed.visibility, name));
         }
+        // A slot an `unset` emptied, on a class with a `__set`, is the
+        // setter's: `zend_std_write_property` reaches the magic method
+        // before the set visibility, which `write_std_property` holds the
+        // write to after it.
+        let o = object.heap();
+        if o.slot(placed.slot).is_undef()
+            && !o.slot_uninit(placed.slot)
+            && !self.lazy_slot(o, placed.slot)
+            && self.serves_accessor(class, b"__set")
+        {
+            return Ok(None);
+        }
         // An initialised readonly property is refused as readonly, the
         // caller's, ahead of its set visibility
         // (`zend_std_write_property`).
@@ -7132,7 +7158,7 @@ impl Request {
             && !self.has_set_access(placed.declaring, set)
         {
             return Err(self.set_inaccessible_property(
-                class,
+                placed.declaring,
                 set,
                 placed.readonly,
                 name,
@@ -7342,7 +7368,9 @@ impl Request {
             if self.lazy_slot(o, p.slot) {
                 return self.lazy_write(object, name, value, false);
             }
-            if p.typed {
+            // `IS_PROP_UNINIT`: a slot nothing has written passes `__set`
+            // by; one an `unset` emptied is the setter's.
+            if o.slot_uninit(p.slot) {
                 return self.write_std_property(object, name, value);
             }
         }
@@ -7487,6 +7515,23 @@ impl Request {
     ) -> Result<(), Thrown> {
         let o = object.heap();
         if let Some(placed) = self.declared_slot(object.class(), name.as_bytes()) {
+            // `write_std_property`'s own set-visibility arm, which a write
+            // the magic setter passed on, or made from inside it, meets.
+            if !placed.readonly
+                && let Some(set) = placed.set_visibility
+                && !self.has_set_access(placed.declaring, set)
+            {
+                self.release(value);
+                self.release(Value::string(name));
+                let thrown = self.set_inaccessible_property(
+                    placed.declaring,
+                    set,
+                    false,
+                    name.as_bytes(),
+                    "modify",
+                );
+                return Err(thrown);
+            }
             let value = if placed.typed {
                 let Some(typed) = self.declared_typed_property(object.class(), name.as_bytes())
                 else {
@@ -9400,6 +9445,36 @@ impl Request {
     /// }
     /// unset w
     /// ```
+    ///
+    /// `IS_PROP_UNINIT` tells a typed slot nothing has written, which
+    /// passes the magic methods by, from one an `unset` emptied, which
+    /// reaches them; the set visibility is checked where php checks it,
+    /// inside the accessor, and names the class that declared the
+    /// property:
+    ///
+    /// ```php
+    /// class C { public private(set) int $a = 1; public int $u;
+    ///     function __construct() { unset($this->a); } }
+    /// class D extends C {
+    ///     function __unset($n) { echo "__unset $n\n"; unset($this->a); }
+    ///     function __get($n) { echo "__get $n\n"; return 7; }
+    /// }
+    /// $d = new D;
+    /// try { unset($d->a); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump($d->a);
+    /// try { var_dump($d->u); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// unset($d->u);
+    /// var_dump($d->u);
+    /// ```
+    /// ```expect
+    /// __unset a
+    /// Cannot unset private(set) property C::$a from scope D
+    /// __get a
+    /// int(7)
+    /// Typed property C::$u must not be accessed before initialization
+    /// __get u
+    /// int(7)
+    /// ```
     pub(crate) fn unset_property(&mut self, object: PhpObject, name: &[u8]) -> Result<(), Thrown> {
         let class = object.class();
         let o = object.heap();
@@ -9419,7 +9494,9 @@ impl Request {
                 // are held to the set visibility here; an untyped slot
                 // an `unset` emptied is the `__unset`'s.
                 let waits = self.lazy_slot(o, placed.slot);
-                if !empty || placed.typed || waits {
+                let uninit = o.slot_uninit(placed.slot);
+                let in_unset = unsetter.is_some() && self.guard_word(object, name) & IN_UNSET != 0;
+                if !empty || uninit || unsetter.is_none() || in_unset || waits {
                     // `zend_readonly_property_unset_error`, ahead of the
                     // set visibility. php raises it in the class's own
                     // scope too, save in `__clone`, where the slot is
@@ -9444,7 +9521,7 @@ impl Request {
                         && !self.has_set_access(placed.declaring, set)
                     {
                         return Err(self.set_inaccessible_property(
-                            class,
+                            placed.declaring,
                             set,
                             placed.readonly,
                             name,
@@ -9456,6 +9533,13 @@ impl Request {
                             self.slot_source_gone(object, placed.slot, cell);
                         }
                         Heap::object_set_slot(&mut Hooks(self), o, placed.slot, Zval::UNDEF);
+                        // An emptied slot is no longer `IS_PROP_UNINIT`,
+                        // whatever it was made with.
+                        o.set_slot_uninit(placed.slot, false);
+                    } else if uninit && !waits {
+                        // `Z_PROP_FLAG_P(slot) = 0`: the bit reset and
+                        // `__unset` passed by.
+                        o.set_slot_uninit(placed.slot, false);
                     } else if waits {
                         // `IS_PROP_LAZY`: the object initialised and the
                         // property unset on what that answers.

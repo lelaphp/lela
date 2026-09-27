@@ -49,6 +49,11 @@ pub enum ZvalType {
     Ptr = 13,
 }
 
+/// `IS_PROP_UNINIT` (`Z/Zend/zend_types.h`), the bit of a declared
+/// property slot's `u2` word, `Z_PROP_FLAG_P`, that says nothing has written
+/// the slot since the object was made.
+const PROP_UNINIT: u32 = 1;
+
 /// A zval in place, php's `zval *` at the sites a handler keeps one from
 /// one opline to the next: a frame slot ([`crate::Frame::slot_ptr`]) or a
 /// declared property slot ([`Obj::slot_ref`]). `Copy`, owning nothing,
@@ -126,6 +131,22 @@ impl ZvalRef {
     pub fn set_fe_pos(self, pos: u32) {
         let mut z = self.read();
         z.set_fe_pos(pos);
+        // SAFETY: as `read`.
+        unsafe { self.0.as_ptr().write(z) };
+    }
+
+    /// `Z_PROP_FLAG_P(slot)`'s `IS_PROP_UNINIT` set or cleared on a
+    /// declared property slot, its `u2` word alone, the value it holds
+    /// untouched: set where an object lays down a typed slot with no
+    /// default, cleared where `unset` empties the slot, which is what
+    /// sends a later read, write, `isset` or `unset` to the magic method.
+    pub fn set_prop_uninit(self, on: bool) {
+        let mut z = self.read();
+        if on {
+            z.u2 |= PROP_UNINIT;
+        } else {
+            z.u2 &= !PROP_UNINIT;
+        }
         // SAFETY: as `read`.
         unsafe { self.0.as_ptr().write(z) };
     }
@@ -372,6 +393,15 @@ impl Zval {
     /// Write `Z_FE_POS`.
     pub const fn set_fe_pos(&mut self, pos: u32) {
         self.u2 = pos;
+    }
+
+    /// `Z_PROP_FLAG_P(z) & IS_PROP_UNINIT` (`Z/Zend/zend_types.h`): a
+    /// declared property slot nothing has written since the object was
+    /// made, which a read, a write, `isset` and `unset` each take past the
+    /// magic method; an `unset` slot is not one ([`ZvalRef::set_prop_uninit`]).
+    #[must_use]
+    pub const fn prop_uninit(self) -> bool {
+        self.u2 & PROP_UNINIT != 0
     }
 
     /// The payload of a `Long`, else `None`.

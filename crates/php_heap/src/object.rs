@@ -385,6 +385,24 @@ impl Obj {
         unsafe { self.slot_ptr(i).read() }
     }
 
+    /// `IS_PROP_UNINIT` over declared slot `i`: undefined, and nothing has
+    /// written it since the object was made, so a read is the
+    /// uninitialised-property error and a write, `isset` and `unset` pass
+    /// the magic methods by, where a slot an `unset` emptied reaches them.
+    #[must_use]
+    pub fn slot_uninit(&self, i: u32) -> bool {
+        let z = self.slot(i);
+        z.is_undef() && z.prop_uninit()
+    }
+
+    /// Set or clear `IS_PROP_UNINIT` on declared slot `i`, the value it
+    /// holds untouched; nothing for a slot the class did not lay down.
+    pub fn set_slot_uninit(&self, i: u32, on: bool) {
+        if let Some(slot) = self.slot_ref(i) {
+            slot.set_prop_uninit(on);
+        }
+    }
+
     /// `OBJ_PROP_NUM` in place: the declared slot as a name a handler
     /// keeps to the next opline, what `FETCH_OBJ_W` leaves in its `VAR`
     /// (`zend_std_get_property_ptr_ptr`); none for a slot the class did
