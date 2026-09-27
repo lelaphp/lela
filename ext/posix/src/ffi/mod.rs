@@ -54,16 +54,33 @@ pub(crate) fn times() -> Result<Times, Errno> {
     // SAFETY: `t` is a `tms` this frame owns, and `times` writes it and
     // nothing else.
     let ticks = unsafe { libc::times(&raw mut t) };
-    if ticks == libc::clock_t::MAX {
+    // `times` fails with `(clock_t) -1`, which is `clock_t::MAX` where the
+    // platform's `clock_t` is unsigned (macOS) and `-1` where it is signed
+    // (Linux); `as_clock` answers the one bit pattern either way.
+    if ticks == as_clock(-1) {
         return Err(Errno::last());
     }
     Ok(Times {
-        ticks: ticks.cast_signed(),
-        utime: t.tms_utime.cast_signed(),
-        stime: t.tms_stime.cast_signed(),
-        cutime: t.tms_cutime.cast_signed(),
-        cstime: t.tms_cstime.cast_signed(),
+        ticks: from_clock(ticks),
+        utime: from_clock(t.tms_utime),
+        stime: from_clock(t.tms_stime),
+        cutime: from_clock(t.tms_cutime),
+        cstime: from_clock(t.tms_cstime),
     })
+}
+
+/// A `clock_t` read as php's `zend_long` reads it: its bits as a signed
+/// 64-bit count, whether the platform's `clock_t` is unsigned (macOS) or
+/// already signed (Linux).
+#[allow(clippy::cast_possible_wrap, clippy::unnecessary_cast)]
+const fn from_clock(c: libc::clock_t) -> i64 {
+    c as i64
+}
+
+/// `(clock_t) n`, as C writes the failure value `times` returns.
+#[allow(clippy::cast_sign_loss, clippy::unnecessary_cast)]
+const fn as_clock(n: i64) -> libc::clock_t {
+    n as libc::clock_t
 }
 
 /// `getlogin()`: the login name, copied out of the C library's static
@@ -116,7 +133,19 @@ pub(crate) fn getgroups() -> Result<Vec<u32>, Errno> {
 /// `initgroups(name, basegid)`: whether it succeeded.
 pub(crate) fn initgroups(name: &CStr, group: i64) -> bool {
     // SAFETY: `name` is NUL-terminated and outlives the call.
-    unsafe { libc::initgroups(name.as_ptr(), as_c_int(group)) == 0 }
+    unsafe { libc::initgroups(name.as_ptr(), initgroups_gid(group)) == 0 }
+}
+
+/// `initgroups`' group parameter as the platform declares it: a C `int`
+/// on macOS and the BSDs, a `gid_t` on Linux, each taking the
+/// `zend_long` as C converts it.
+#[cfg(target_os = "linux")]
+fn initgroups_gid(group: i64) -> libc::gid_t {
+    crate::as_id(group)
+}
+#[cfg(not(target_os = "linux"))]
+fn initgroups_gid(group: i64) -> libc::c_int {
+    as_c_int(group)
 }
 
 /// `sysconf(name)`, whatever number the program passed.
@@ -163,6 +192,8 @@ fn limit(value: libc::rlim_t) -> Option<i64> {
 }
 
 /// `getrlimit(resource, &rl)`, whatever number the program passed.
+// the resource is C's `int` on macOS and an unsigned `__rlimit_resource_t` on Linux; the cast is C's own conversion.
+#[allow(clippy::cast_sign_loss)]
 pub(crate) fn getrlimit(resource: i64) -> Result<Limits, Errno> {
     let mut rl = libc::rlimit {
         rlim_cur: 0,
@@ -181,6 +212,8 @@ pub(crate) fn getrlimit(resource: i64) -> Result<Limits, Errno> {
 
 /// `setrlimit(resource, &rl)` with the two numbers as php stores them,
 /// `rl.rlim_cur = cur`, a `-1` included.
+// the resource is C's `int` on macOS and an unsigned `__rlimit_resource_t` on Linux; the cast is C's own conversion.
+#[allow(clippy::cast_sign_loss)]
 pub(crate) fn setrlimit(resource: i64, soft: i64, hard: i64) -> Result<(), Errno> {
     let rl = libc::rlimit {
         rlim_cur: soft.cast_unsigned(),

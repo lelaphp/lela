@@ -74,7 +74,7 @@ pub(crate) const fn as_c_int(n: i64) -> libc::c_int {
 /// A `zend_long` handed to a `uid_t` or `gid_t` parameter, as C converts
 /// it: the low 32 bits, unsigned, so `-1` is `4294967295`.
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-const fn as_id(n: i64) -> u32 {
+pub(crate) const fn as_id(n: i64) -> u32 {
     n as u32
 }
 
@@ -934,6 +934,8 @@ fn posix_mkfifo(req: &mut Request, filename: PhpString, permissions: i64) -> boo
 /// posix_mknod(): Argument #3 ($major) cannot be 0 for the POSIX_S_IFCHR and POSIX_S_IFBLK modes
 /// ```
 #[php_function]
+// `makedev` takes `int` majors and minors on macOS and unsigned ones on Linux; the cast is C's own conversion.
+#[allow(clippy::cast_sign_loss)]
 fn posix_mknod(
     req: &mut Request,
     filename: PhpString,

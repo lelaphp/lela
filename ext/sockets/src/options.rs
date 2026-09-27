@@ -295,9 +295,9 @@ fn mcast(
             let mut mreq = v6.ip().octets().to_vec();
             mreq.extend_from_slice(&index.to_ne_bytes());
             let op = if join {
-                libc::IPV6_JOIN_GROUP
+                IPV6_JOIN_GROUP
             } else {
-                libc::IPV6_LEAVE_GROUP
+                IPV6_LEAVE_GROUP
             };
             (op, mreq)
         }
@@ -554,3 +554,16 @@ fn is_bindtodevice(option: i64) -> bool {
     let _ = option;
     false
 }
+
+/// `IPV6_JOIN_GROUP` and `IPV6_LEAVE_GROUP`, the names `multicast.c`
+/// uses: macOS and the BSDs declare them, and glibc aliases them to
+/// `IPV6_ADD_MEMBERSHIP` and `IPV6_DROP_MEMBERSHIP`, which is all the
+/// `libc` crate carries for Linux.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const IPV6_JOIN_GROUP: libc::c_int = libc::IPV6_ADD_MEMBERSHIP;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const IPV6_LEAVE_GROUP: libc::c_int = libc::IPV6_DROP_MEMBERSHIP;
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+const IPV6_JOIN_GROUP: libc::c_int = libc::IPV6_JOIN_GROUP;
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+const IPV6_LEAVE_GROUP: libc::c_int = libc::IPV6_LEAVE_GROUP;

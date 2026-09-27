@@ -524,6 +524,8 @@ pub(crate) struct Received {
 
 /// `sendmsg(fd, &msghdr, flags)` over the name, the buffers and the
 /// ancillary data php's conversions laid out.
+// `msg_iovlen` and `msg_controllen` are `size_t` on Linux and `int`/`socklen_t` on macOS: the conversion does work on one platform and none on the other.
+#[allow(clippy::useless_conversion)]
 pub(crate) fn sendmsg(
     fd: RawFd,
     name: Option<&Addr>,
@@ -567,6 +569,8 @@ fn msghdr() -> libc::msghdr {
 /// `recvmsg(fd, &msghdr, flags)` into a name of `name_len` bytes where
 /// one is asked for, one buffer of `size` bytes and `controllen` bytes
 /// of ancillary room where some is.
+// `msg_iovlen` and `msg_controllen` are `size_t` on Linux and `int`/`socklen_t` on macOS: the conversion does work on one platform and none on the other.
+#[allow(clippy::useless_conversion)]
 pub(crate) fn recvmsg(
     fd: RawFd,
     name_len: Option<usize>,

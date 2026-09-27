@@ -17,8 +17,10 @@ use php_ext::attr::php_class;
 use php_ext::attr::php_function;
 use php_ext::coerce::{to_long, to_string};
 #[cfg(target_vendor = "apple")]
+use php_ext::raising::arity;
+#[cfg(target_vendor = "apple")]
 use php_ext::raising::throw;
-use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, arity, docref};
+use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 
