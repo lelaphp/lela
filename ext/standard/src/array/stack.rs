@@ -476,6 +476,27 @@ fn array_unshift(
 ///   int(9)
 /// }
 /// ```
+///
+/// What the call hands back keeps a string key and renumbers an integer
+/// one, `zend_hash_add_new(removed, p->key, entry)`.
+///
+/// ```php
+/// $a = ["x" => 1, 5 => 2, "y" => 3, 4]; var_dump(array_splice($a, 0, 3), $a);
+/// ```
+/// ```expect
+/// array(3) {
+///   ["x"]=>
+///   int(1)
+///   [0]=>
+///   int(2)
+///   ["y"]=>
+///   int(3)
+/// }
+/// array(1) {
+///   [0]=>
+///   int(4)
+/// }
+/// ```
 #[php_function]
 fn array_splice(
     req: &mut Request,
@@ -522,15 +543,22 @@ fn array_splice(
             // `zend_hash_packed_del_val` and `zend_hash_del_bucket` with
             // `ZVAL_PTR_DTOR`, under the owner `GC_ADDREF(in_hash)` took:
             // a destructor served here that writes the array separates it.
+            // `zend_hash_add_new(removed, p->key, entry)`: a string key is
+            // kept, copied before the delete gives the bucket's up.
+            let kept = match (&removed, &key) {
+                (Some(_), Key::Str(_)) => Some(key_copy(req, &key)),
+                _ => None,
+            };
             req.addref(&element);
             stack.array.unset(req, &key)?;
             let table = stack.array.to_value();
             if holder == Holder::Shared {
                 req.addref(&table);
             }
-            match removed.as_mut() {
-                Some(removed) => removed.append(req, element)?,
-                None => req.release(element),
+            match (removed.as_mut(), kept) {
+                (Some(removed), Some(key)) => removed.set(req, key, element)?,
+                (Some(removed), None) => removed.append(req, element)?,
+                (None, _) => req.release(element),
             }
             if holder == Holder::Shared {
                 if table.refcount() == 1 {
