@@ -170,6 +170,10 @@ pub(crate) struct Subset {
     pub scope: String,
     /// The directories, in the order the row names them.
     pub dirs: Vec<Dir>,
+    /// The pinned php-src tree on this machine, the working directory
+    /// every program of the subset runs in, as run-tests.php runs them
+    /// from `TEST_PHP_SRCDIR` (run-tests.php:1173, #952).
+    pub root: PathBuf,
 }
 
 impl Subset {
@@ -199,6 +203,7 @@ impl Subset {
             return Ok(Subset {
                 scope: named.to_owned(),
                 dirs: vec![Dir::at(source, under)],
+                root: source.to_path_buf(),
             });
         }
         bail!(
@@ -223,6 +228,7 @@ impl Subset {
         (!dirs.is_empty()).then(|| Subset {
             scope: krate.name.clone(),
             dirs,
+            root: source.to_path_buf(),
         })
     }
 
@@ -260,6 +266,7 @@ impl Subset {
                 subsets.push(Subset {
                     scope: under.to_string_lossy().into_owned(),
                     dirs: vec![Dir::at(source, under)],
+                    root: source.to_path_buf(),
                 });
             }
         };

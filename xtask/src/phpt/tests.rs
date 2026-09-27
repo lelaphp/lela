@@ -98,6 +98,7 @@ fn subset(name: &str, tests: &[(&str, &str)]) -> (Tree, Subset) {
             under: PathBuf::from("ext/fixture/tests"),
             dir: dir.path().to_path_buf(),
         }],
+        root: dir.path().to_path_buf(),
     };
     (dir, subset)
 }
@@ -144,6 +145,36 @@ fn a_test_that_meets_its_expect_section_passes() {
             "--TEST--\nEcho\n--FILE--\n<?php echo \"one\\n\", 2 + 2;\n--EXPECT--\none\n4\n",
         )],
     );
+    let tally = run(&subset, &registry(""));
+    assert_eq!(only(&tally).0, Judgement::Pass, "{tally:#?}");
+}
+
+#[test]
+fn a_test_and_its_skipif_run_from_the_php_src_root_as_run_tests_php_runs_them() {
+    if oracle().is_none() {
+        return;
+    }
+    // The tests stand at `<root>/ext/fixture/tests`, as they would in
+    // php-src; the program and its SKIPIF each ask where they run (#952).
+    let root = Tree::new("phpt-judge-cwd").unwrap();
+    let dir = root.join("ext/fixture/tests");
+    fs::create_dir_all(&dir).unwrap();
+    let asks = "getcwd() === realpath(__DIR__ . '/../../..')";
+    fs::write(
+        dir.join("cwd.phpt"),
+        format!(
+            "--TEST--\ncwd\n--SKIPIF--\n<?php if (!({asks})) echo 'skip ', getcwd();\n--FILE--\n<?php var_dump({asks});\n--EXPECT--\nbool(true)\n"
+        ),
+    )
+    .unwrap();
+    let subset = Subset {
+        scope: "ext/fixture".to_owned(),
+        dirs: vec![Dir {
+            under: PathBuf::from("ext/fixture/tests"),
+            dir,
+        }],
+        root: root.path().to_path_buf(),
+    };
     let tally = run(&subset, &registry(""));
     assert_eq!(only(&tally).0, Judgement::Pass, "{tally:#?}");
 }
