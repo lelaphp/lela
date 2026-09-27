@@ -13,7 +13,8 @@ use std::sync::{Arc, Mutex};
 
 use php_heap::{Fatal, Heap, Obj};
 use php_unit::decl::{
-    ClassConstDecl, ClassDecl, ConstDecl, FunctionDecl, IniDecl, MethodDecl, Name,
+    ClassConstDecl, ClassDecl, ConstDecl, FunctionDecl, IniDecl, MethodDecl, Name, PropertyDecl,
+    Visibility,
 };
 
 use crate::api::call::{Function, Target};
@@ -326,6 +327,11 @@ impl ExtensionBuilder {
         let (constants, properties, methods) = C::members();
         class.constants.extend(constants);
         class.properties.extend(properties);
+        class.properties = class
+            .properties
+            .into_iter()
+            .map(declared_property)
+            .collect();
         C::register(self, class, methods)
     }
 
@@ -515,6 +521,19 @@ impl ExtensionBuilder {
             trampolines: self.trampolines,
         }
     }
+}
+
+/// A property as `zend_declare_typed_property` declares one on an
+/// internal class (`Z/Zend/zend_API.c:4517`): a public readonly property
+/// with no set visibility of its own is `protected(set)`.
+fn declared_property(mut property: PropertyDecl) -> PropertyDecl {
+    if property.is_readonly
+        && property.visibility == Visibility::Public
+        && property.set_visibility.is_none()
+    {
+        property.set_visibility = Some(Visibility::Protected);
+    }
+    property
 }
 
 /// A validated callable: a function name, a `[$object, 'method']` pair,

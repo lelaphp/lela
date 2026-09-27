@@ -40,17 +40,15 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 use php_compile::StackLimit;
-use php_heap::{Block, Fatal, FiberStack, Heap, Host, Obj, StackRefused, Suspensions, Switched};
-use php_unit::decl::{
-    ClassDecl, ClassFlags, ClassKind, ConstExpr, DynamicProperties, EnumBacking, FunctionDecl,
-    MethodDecl, Name, Parameter, ParameterDefault, Type, Visibility,
-};
+use php_heap::{Block, FiberStack, Host, StackRefused, Suspensions, Switched};
+use php_macros::php_class;
 
-use crate::api::abi::{Callable, CloneObj, Entry, NativeClassDecl, ObjectHandlers};
+use crate::api::abi::{Callable, CloneObj, Instance, NamedVariadic, ObjectHandlers, This};
 use crate::api::call::call_named;
-use crate::api::raising::{Thrown, arg_count_error, throw};
+use crate::api::raising::{Thrown, throw};
 use crate::api::request::Request;
 use crate::api::values::{PhpObject, PhpString, Value};
+use crate::classes::{Error, Throwable};
 use crate::exec::Vm;
 
 /// `sizeof(zend_fiber_stack)` on a 64-bit build without Valgrind or
@@ -142,7 +140,7 @@ impl Host for Request {
 
 /// `zend_fiber`, the payload a `Fiber` object carries (design §5.4).
 #[derive(Default)]
-struct Fiber {
+pub(crate) struct ZendFiber {
     status: Status,
     /// `ZEND_FIBER_FLAG_THREW`: the callable left a throwable or the
     /// unwind exit.
@@ -180,7 +178,7 @@ impl ObjectHandlers for FiberHandlers {
 
     /// `zend_fiber_object_free`: the callable and `fiber->result` given up.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        let Some(fiber) = object.native_mut::<Fiber>(req) else {
+        let Some(fiber) = object.native_mut::<ZendFiber>(req) else {
             return;
         };
         let callable = fiber.callable.take();
@@ -232,7 +230,7 @@ impl ObjectHandlers for FiberHandlers {
     /// done
     /// ```
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
-        let Some(fiber) = object.native::<Fiber>(req) else {
+        let Some(fiber) = object.native::<ZendFiber>(req) else {
             return;
         };
         if let Some(callable) = &fiber.callable {
@@ -293,61 +291,19 @@ pub(crate) fn serves_destructor(table: &'static dyn ObjectHandlers) -> bool {
     std::ptr::addr_eq(table, &raw const FIBER)
 }
 
-/// `zend_fiber_object_create`: a fresh payload, `ZEND_FIBER_STATUS_INIT`.
-fn new_fiber(heap: &mut Heap, class: u32, slots: u32) -> Result<Obj, Fatal> {
-    heap.object_with(class, slots, Fiber::default())
-}
-
-/// `final class Fiber` and `final class FiberError extends Error`, as
-/// `zend_register_fiber_ce` registers them after the classes Zend
-/// declares before them.
-pub(crate) fn classes() -> Vec<NativeClassDecl> {
-    vec![
-        (
-            fiber_class(),
-            fiber_methods(),
-            Some(&FIBER),
-            Some(new_fiber as crate::api::abi::NativeNew),
-        ),
-        (
-            ClassDecl {
-                flags: ClassFlags {
-                    is_final: true,
-                    ..ClassFlags::default()
-                },
-                parent: Some(Name(b"Error".as_slice().into())),
-                ..class(b"FiberError")
-            },
-            vec![(
-                method(b"__construct", Vec::new(), None, true),
-                fiber_error_construct as Entry,
-            )],
-            None,
-            None,
-        ),
-    ]
-}
-
-/// A class of Core's with nothing on it but its name.
-fn class(name: &[u8]) -> ClassDecl {
-    ClassDecl {
-        name: Name(name.into()),
-        kind: ClassKind::Class,
-        flags: ClassFlags::default(),
-        parent: None,
-        interfaces: Vec::new(),
-        traits: Vec::new(),
-        adaptations: Vec::new(),
-        backing: EnumBacking::Pure,
-        constants: Vec::new(),
-        properties: Vec::new(),
-        methods: Vec::new(),
-        attributes: Vec::new(),
-        doc_comment: None,
-        file: Name(Box::new([])),
-        line: 0,
-        end_line: 0,
+/// The payload of `object`, which a `Fiber`'s object always carries.
+fn payload(req: &mut Request, object: PhpObject) -> Result<&mut ZendFiber, Thrown> {
+    if object.native::<ZendFiber>(req).is_none() {
+        return Err(throw(req, "Error", "Fiber object with no fiber payload"));
     }
+    object
+        .native_mut::<ZendFiber>(req)
+        .ok_or_else(|| Thrown::of(None))
+}
+
+/// `FiberError` with php's sentence.
+fn fiber_error(req: &mut Request, message: &str) -> Thrown {
+    throw(req, "FiberError", message)
 }
 
 /// `Fiber`: `ZEND_ACC_FINAL`, `@strict-properties` and
@@ -455,349 +411,494 @@ fn class(name: &[u8]) -> ClassDecl {
 ///   }
 /// }
 /// ```
-fn fiber_class() -> ClassDecl {
-    ClassDecl {
-        flags: ClassFlags {
-            is_final: true,
-            not_serializable: true,
-            dynamic_properties: DynamicProperties::Forbidden,
-            ..ClassFlags::default()
-        },
-        ..class(b"Fiber")
-    }
-}
-
-/// `class_Fiber_methods`, in the stub's order, each with its entry.
-fn fiber_methods() -> Vec<(MethodDecl, Entry)> {
-    let value = || Parameter {
-        default: ParameterDefault::Expr(ConstExpr::Null),
-        ..parameter(b"value", Type::Mixed)
-    };
-    let fiber = Type::Nullable(Box::new(Type::Named(Name(b"Fiber".as_slice().into()))));
-    vec![
-        (
-            method(
-                b"__construct",
-                vec![parameter(b"callback", Type::Callable)],
-                None,
-                true,
-            ),
-            construct as Entry,
-        ),
-        (
-            method(
-                b"start",
-                vec![Parameter {
-                    variadic: true,
-                    ..parameter(b"args", Type::Mixed)
-                }],
-                Some(Type::Mixed),
-                true,
-            ),
-            start as Entry,
-        ),
-        (
-            method(b"resume", vec![value()], Some(Type::Mixed), true),
-            resume as Entry,
-        ),
-        (
-            method(
-                b"throw",
-                vec![parameter(
-                    b"exception",
-                    Type::Named(Name(b"Throwable".as_slice().into())),
-                )],
-                Some(Type::Mixed),
-                true,
-            ),
-            throw_into as Entry,
-        ),
-        (
-            method(b"isStarted", Vec::new(), Some(Type::Bool), true),
-            is_started as Entry,
-        ),
-        (
-            method(b"isSuspended", Vec::new(), Some(Type::Bool), true),
-            is_suspended as Entry,
-        ),
-        (
-            method(b"isRunning", Vec::new(), Some(Type::Bool), true),
-            is_running as Entry,
-        ),
-        (
-            method(b"isTerminated", Vec::new(), Some(Type::Bool), true),
-            is_terminated as Entry,
-        ),
-        (
-            method(b"getReturn", Vec::new(), Some(Type::Mixed), true),
-            get_return as Entry,
-        ),
-        (
-            method(b"getCurrent", Vec::new(), Some(fiber), false),
-            get_current as Entry,
-        ),
-        (
-            method(b"suspend", vec![value()], Some(Type::Mixed), false),
-            suspend as Entry,
-        ),
-    ]
-}
-
-/// One public method as the stub declares it, neither abstract nor
-/// final, an instance member or one on the class.
-fn method(
-    name: &[u8],
-    parameters: Vec<Parameter>,
-    returns: Option<Type>,
-    is_instance: bool,
-) -> MethodDecl {
-    MethodDecl {
-        function: FunctionDecl {
-            name: Name(name.into()),
-            parameters,
-            return_type: returns,
-            returns_by_ref: false,
-            is_generator: false,
-            attributes: Vec::new(),
-            doc_comment: None,
-            file: Name(Box::new([])),
-            line: 0,
-            end_line: 0,
-            frameless: Vec::new(),
-        },
-        visibility: Visibility::Public,
-        is_instance,
-        is_abstract: false,
-        is_final: false,
-        tentative_return: false,
-    }
-}
-
-/// `type $name`: a required parameter, taken by value.
-fn parameter(name: &[u8], ty: Type) -> Parameter {
-    Parameter {
-        name: Name(name.into()),
-        ty: Some(ty),
-        by_ref: false,
-        prefer_ref: false,
-        promoted: false,
-        variadic: false,
-        default: ParameterDefault::None,
-        attributes: Vec::new(),
-    }
-}
-
-/// The receiver of a `Fiber` method, `ZEND_THIS`.
-fn this_fiber(req: &mut Request) -> Result<PhpObject, Thrown> {
-    req.this()
-        .filter(|this| this.native::<Fiber>(req).is_some())
-        .ok_or_else(|| throw(req, "Error", "Fiber method called with no fiber receiver"))
-}
-
-/// The payload of `object`, which a `Fiber`'s object always carries.
-fn payload(req: &mut Request, object: PhpObject) -> Result<&mut Fiber, Thrown> {
-    if object.native::<Fiber>(req).is_none() {
-        return Err(throw(req, "Error", "Fiber object with no fiber payload"));
-    }
-    object
-        .native_mut::<Fiber>(req)
-        .ok_or_else(|| Thrown::of(None))
-}
-
-/// `ZEND_PARSE_PARAMETERS_NONE()`: php's `ArgumentCountError`,
-/// `expects exactly 0 arguments, N given`.
-fn no_arguments(req: &mut Request) -> Result<(), Thrown> {
-    let count = req.argument_count();
-    if count == 0 {
-        return Ok(());
-    }
-    Err(arg_count_error(
-        req,
-        &format!("exactly 0 arguments, {count} given"),
-    ))
-}
-
-/// `Z_PARAM_OPTIONAL Z_PARAM_ZVAL(value)` over at most one argument:
-/// the value one more owner for the transfer that carries it
-/// (`ZVAL_COPY`), `null` where none was given.
-fn optional_value(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count > 1 {
-        return Err(arg_count_error(
-            req,
-            &format!("at most 1 argument, {count} given"),
-        ));
-    }
-    let value = req.argument(1).map_or(Value::null(), |value| value.deref());
-    req.addref(&value);
-    Ok(value)
-}
-
-/// `FiberError` with php's sentence.
-fn fiber_error(req: &mut Request, message: &str) -> Thrown {
-    throw(req, "FiberError", message)
-}
-
-/// `Fiber::__construct(callable $callback)`: the callable resolved
-/// where it is taken, `Z_PARAM_FUNC`, and one owner of it kept while
-/// the fiber runs; a second call is php's `FiberError`.
+///
+/// Its status, asked before the start, while it runs, while it is
+/// suspended and once it has returned:
 ///
 /// ```php
-/// $f = new Fiber('strlen');
-/// try { $f->__construct('strlen'); } catch (FiberError $e) { echo $e->getMessage(), "\n"; }
-/// try { new Fiber('nope'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// $f = new Fiber(function () { var_dump(Fiber::getCurrent()->isRunning()); Fiber::suspend(); });
+/// var_dump($f->isStarted(), $f->isSuspended(), $f->isTerminated());
+/// $f->start();
+/// var_dump($f->isStarted(), $f->isSuspended(), $f->isRunning());
+/// $f->resume();
+/// var_dump($f->isSuspended(), $f->isTerminated());
 /// ```
 /// ```expect
-/// Cannot call constructor twice
-/// Fiber::__construct(): Argument #1 ($callback) must be a valid callback, function "nope" not found or invalid function name
-/// ```
-fn construct(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count != 1 {
-        return Err(arg_count_error(
-            req,
-            &format!("exactly 1 argument, {count} given"),
-        ));
-    }
-    let Some(callable) = crate::api::coerce::callable_argument(req, 1)? else {
-        return Err(crate::api::raising::fatal(
-            req,
-            "InternalError: a callable parameter read no callable",
-        ));
-    };
-    let this = this_fiber(req)?;
-    let fiber = payload(req, this)?;
-    if fiber.status != Status::Init || fiber.callable.is_some() {
-        return Err(fiber_error(req, "Cannot call constructor twice"));
-    }
-    let held = callable.value();
-    fiber.callable = Some(callable);
-    req.addref(&held);
-    Ok(Value::null())
-}
-
-/// `Fiber::start(mixed ...$args): mixed`: the stack laid down at
-/// `fiber.stack_size`, the callable called on it with the arguments,
-/// positional and named, and what the fiber first suspends with handed
-/// back, or `null` where it returned without suspending.
-///
-/// ```php
-/// $f = new Fiber(fn() => Fiber::suspend(1));
-/// var_dump($f->start(), $f->resume(2));
-/// ```
-/// ```expect
-/// int(1)
-/// NULL
-/// ```
-///
-/// The order is php's: the body runs up to its first suspend inside
-/// `start`, each `resume` runs it to the next, and the value a resume
-/// sends is what that suspend returns.
-///
-/// ```php
-/// $f = new Fiber(function (string $x, string $y) {
-///     echo "a $x $y\n";
-///     $v = Fiber::suspend("s1");
-///     echo "b $v\n";
-///     $w = Fiber::suspend("s2");
-///     echo "c $w\n";
-///     return "r";
-/// });
-/// echo "start\n"; var_dump($f->start("x", "y"));
-/// echo "resume\n"; var_dump($f->resume("v1"));
-/// var_dump($f->resume("v2"), $f->getReturn(), $f->isTerminated());
-/// ```
-/// ```expect
-/// start
-/// a x y
-/// string(2) "s1"
-/// resume
-/// b v1
-/// string(2) "s2"
-/// c v2
-/// NULL
-/// string(1) "r"
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(false)
 /// bool(true)
 /// ```
-///
-/// A second start is php's `FiberError`.
-///
-/// ```php
-/// $f = new Fiber(fn() => 1);
-/// $f->start();
-/// $f->start();
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught FiberError: Cannot start a fiber that has already been started in %s:4
-/// Stack trace:
-/// #0 %s(4): Fiber->start()
-/// #1 {main}
-///   thrown in %s on line 4
-/// ```
-fn start(req: &mut Request) -> Result<Value, Thrown> {
-    let count = u32::try_from(req.argument_count()).unwrap_or(u32::MAX);
-    let arguments: Vec<Value> = (1..=count).filter_map(|at| req.argument(at)).collect();
-    let named: Vec<(PhpString, Value)> = req.named_arguments();
-    let this = this_fiber(req)?;
-    let size = stack_size(req);
-    let reserved = u64::try_from(Request::ini_parse_bytes(
-        req.ini_get(b"zend.reserved_stack_size").unwrap_or(b"0"),
-    ))
-    .unwrap_or(0);
-    let fiber = payload(req, this)?;
-    if fiber.status != Status::Init {
-        return Err(fiber_error(
-            req,
-            "Cannot start a fiber that has already been started",
-        ));
+#[php_class(
+    final,
+    not_serializable,
+    dynamic_properties = forbidden,
+    payload = ZendFiber,
+    handlers = FIBER
+)]
+pub(crate) struct Fiber;
+
+#[php_class]
+impl Fiber {
+    /// `Fiber::__construct(callable $callback)`: the callable resolved
+    /// where it is taken, `Z_PARAM_FUNC`, and one owner of it kept while
+    /// the fiber runs; a second call is php's `FiberError`.
+    ///
+    /// ```php
+    /// $f = new Fiber('strlen');
+    /// try { $f->__construct('strlen'); } catch (FiberError $e) { echo $e->getMessage(), "\n"; }
+    /// try { new Fiber('nope'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Cannot call constructor twice
+    /// Fiber::__construct(): Argument #1 ($callback) must be a valid callback, function "nope" not found or invalid function name
+    /// ```
+    fn __construct(req: &mut Request, this: This<Self>, callback: Callable) -> Result<(), Thrown> {
+        let callable = callback;
+        let this = this.object();
+        let fiber = payload(req, this)?;
+        if fiber.status != Status::Init || fiber.callable.is_some() {
+            return Err(fiber_error(req, "Cannot call constructor twice"));
+        }
+        let held = callable.value();
+        fiber.callable = Some(callable);
+        req.addref(&held);
+        Ok(())
     }
-    let Some(callable) = fiber.callable.clone() else {
-        return Err(throw(
+
+    /// `Fiber::start(mixed ...$args): mixed`: the stack laid down at
+    /// `fiber.stack_size`, the callable called on it with the arguments,
+    /// positional and named, and what the fiber first suspends with handed
+    /// back, or `null` where it returned without suspending.
+    ///
+    /// ```php
+    /// $f = new Fiber(fn() => Fiber::suspend(1));
+    /// var_dump($f->start(), $f->resume(2));
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// NULL
+    /// ```
+    ///
+    /// The order is php's: the body runs up to its first suspend inside
+    /// `start`, each `resume` runs it to the next, and the value a resume
+    /// sends is what that suspend returns.
+    ///
+    /// ```php
+    /// $f = new Fiber(function (string $x, string $y) {
+    ///     echo "a $x $y\n";
+    ///     $v = Fiber::suspend("s1");
+    ///     echo "b $v\n";
+    ///     $w = Fiber::suspend("s2");
+    ///     echo "c $w\n";
+    ///     return "r";
+    /// });
+    /// echo "start\n"; var_dump($f->start("x", "y"));
+    /// echo "resume\n"; var_dump($f->resume("v1"));
+    /// var_dump($f->resume("v2"), $f->getReturn(), $f->isTerminated());
+    /// ```
+    /// ```expect
+    /// start
+    /// a x y
+    /// string(2) "s1"
+    /// resume
+    /// b v1
+    /// string(2) "s2"
+    /// c v2
+    /// NULL
+    /// string(1) "r"
+    /// bool(true)
+    /// ```
+    ///
+    /// A second start is php's `FiberError`.
+    ///
+    /// ```php
+    /// $f = new Fiber(fn() => 1);
+    /// $f->start();
+    /// $f->start();
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught FiberError: Cannot start a fiber that has already been started in %s:4
+    /// Stack trace:
+    /// #0 %s(4): Fiber->start()
+    /// #1 {main}
+    ///   thrown in %s on line 4
+    /// ```
+    fn start(
+        req: &mut Request,
+        this: This<Self>,
+        args: NamedVariadic<Value>,
+    ) -> Result<Value, Thrown> {
+        let named: Vec<(PhpString, Value)> = args.named().to_vec();
+        let arguments = args.positional;
+        let this = this.object();
+        let size = stack_size(req);
+        let reserved = u64::try_from(Request::ini_parse_bytes(
+            req.ini_get(b"zend.reserved_stack_size").unwrap_or(b"0"),
+        ))
+        .unwrap_or(0);
+        let fiber = payload(req, this)?;
+        if fiber.status != Status::Init {
+            return Err(fiber_error(
+                req,
+                "Cannot start a fiber that has already been started",
+            ));
+        }
+        let Some(callable) = fiber.callable.clone() else {
+            return Err(throw(
+                req,
+                "Error",
+                "Cannot start a fiber whose constructor was not called",
+            ));
+        };
+        let stack = FiberStack::new(size, move |req: &mut Request, _first: Transfer| {
+            run(req, this, &callable, &arguments, &named)
+        });
+        let stack = match stack {
+            Ok(stack) => stack,
+            Err(StackRefused::TooSmall(least)) => {
+                return Err(throw(
+                    req,
+                    "Exception",
+                    &format!(
+                        "Fiber stack size is too small, it needs to be at least {least} bytes"
+                    ),
+                ));
+            }
+            Err(StackRefused::Allocate(error)) => {
+                let errno = error.raw_os_error().unwrap_or(0);
+                let text = error.to_string();
+                let text = text
+                    .strip_suffix(&format!(" (os error {errno})"))
+                    .unwrap_or(&text)
+                    .to_string();
+                return Err(throw(
+                    req,
+                    "Exception",
+                    &format!("Fiber stack allocate failed: mmap failed: {text} ({errno})"),
+                ));
+            }
+        };
+        let execution = Execution {
+            stack: php_heap::VmStack::fiber(),
+            vm: Vm::default(),
+            error_reporting: req.ini_error_reporting(),
+            stack_limit: StackLimit::fiber(stack.base(), stack.end(), reserved),
+        };
+        let record = req.heap_mut().block(STACK_RECORD);
+        let record = req.fatal_of(record)?;
+        let fiber = payload(req, this)?;
+        fiber.blocks.push(record);
+        fiber.stack = Some(stack);
+        fiber.execution = Some(execution);
+        let back = switch_into(req, this, Transfer::Value(Value::null()))?;
+        delegate(back)
+    }
+
+    /// `Fiber::resume(mixed $value = null): mixed`: the suspended fiber runs
+    /// on from its suspend, which returns `$value`, until it suspends again
+    /// or returns. A fiber that is not suspended is php's `FiberError`, a
+    /// fiber resumed twice past its end among them.
+    ///
+    /// ```php
+    /// $f = new Fiber(fn() => Fiber::suspend());
+    /// $f->start();
+    /// $f->resume();
+    /// $f->resume();
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught FiberError: Cannot resume a fiber that is not suspended in %s:5
+    /// Stack trace:
+    /// #0 %s(5): Fiber->resume()
+    /// #1 {main}
+    ///   thrown in %s on line 5
+    /// ```
+    ///
+    /// A fiber resuming itself is running and not suspended, and the trace
+    /// walks from the fiber's frames on into its resumer's, as php's
+    /// `stack_bottom->prev_execute_data` does.
+    ///
+    /// ```php
+    /// $fiber = new Fiber(function (): void {
+    ///     Fiber::getCurrent()->resume();
+    /// });
+    /// $fiber->start();
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught FiberError: Cannot resume a fiber that is not suspended in %s:3
+    /// Stack trace:
+    /// #0 %s(3): Fiber->resume()
+    /// #1 [internal function]: {closure:%s:2}()
+    /// #2 %s(5): Fiber->start()
+    /// #3 {main}
+    ///   thrown in %s on line 3
+    /// ```
+    fn resume(
+        req: &mut Request,
+        this: This<Self>,
+        #[php(default = null)] value: Value,
+    ) -> Result<Value, Thrown> {
+        let this = this.object();
+        if payload(req, this)?.status != Status::Suspended {
+            return Err(fiber_error(
+                req,
+                "Cannot resume a fiber that is not suspended",
+            ));
+        }
+        req.addref(&value);
+        let back = switch_into(req, this, Transfer::Value(value))?;
+        delegate(back)
+    }
+
+    /// `Fiber::throw(Throwable $exception): mixed`: the suspended fiber runs
+    /// on with `$exception` raised at its suspend.
+    ///
+    /// ```php
+    /// $f = new Fiber(function () {
+    ///     try { Fiber::suspend(1); } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+    ///     return 2;
+    /// });
+    /// $f->start();
+    /// var_dump($f->throw(new Exception("x")), $f->getReturn());
+    /// ```
+    /// ```expect
+    /// caught x
+    /// NULL
+    /// int(2)
+    /// ```
+    ///
+    /// A throwable the fiber does not catch leaves it through the `throw`
+    /// that raised it, and the fiber is dead.
+    ///
+    /// ```php
+    /// $f = new Fiber(function () { Fiber::suspend(); });
+    /// $f->start();
+    /// try { $f->throw(new TypeError("y")); } catch (TypeError $e) { echo get_class($e), " ", $e->getMessage(), "\n"; }
+    /// var_dump($f->isTerminated());
+    /// try { $f->getReturn(); } catch (FiberError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// TypeError y
+    /// bool(true)
+    /// Cannot get fiber return value: The fiber threw an exception
+    /// ```
+    fn throw(
+        req: &mut Request,
+        this: This<Self>,
+        exception: Instance<Throwable>,
+    ) -> Result<Value, Thrown> {
+        let throwable = exception.object();
+        let this = this.object();
+        if payload(req, this)?.status != Status::Suspended {
+            return Err(fiber_error(
+                req,
+                "Cannot resume a fiber that is not suspended",
+            ));
+        }
+        req.addref(&throwable.as_value());
+        let back = switch_into(req, this, Transfer::Throw(Thrown::of(Some(throwable))))?;
+        delegate(back)
+    }
+
+    /// `Fiber::isStarted()`, `isSuspended()`, `isRunning()` and
+    /// `isTerminated()`, which read the status php keeps with `caller`:
+    /// running is running or resuming another.
+    ///
+    /// ```php
+    /// $f = new Fiber(function () use (&$f) {
+    ///     var_dump($f->isStarted(), $f->isSuspended(), $f->isRunning(), $f->isTerminated());
+    ///     Fiber::suspend();
+    /// });
+    /// var_dump($f->isStarted(), $f->isSuspended(), $f->isRunning(), $f->isTerminated());
+    /// $f->start();
+    /// var_dump($f->isStarted(), $f->isSuspended(), $f->isRunning(), $f->isTerminated());
+    /// $f->resume();
+    /// var_dump($f->isStarted(), $f->isSuspended(), $f->isRunning(), $f->isTerminated());
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// bool(false)
+    /// bool(false)
+    /// bool(false)
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// bool(false)
+    /// bool(true)
+    /// bool(false)
+    /// bool(false)
+    /// bool(true)
+    /// ```
+    fn isStarted(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        status_is(req, this.object(), |status| status != Status::Init)
+    }
+
+    fn isSuspended(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        status_is(req, this.object(), |status| status == Status::Suspended)
+    }
+
+    fn isRunning(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        status_is(req, this.object(), |status| status == Status::Running)
+    }
+
+    fn isTerminated(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
+        status_is(req, this.object(), |status| status == Status::Dead)
+    }
+
+    /// `Fiber::getReturn(): mixed`: what the callable returned, dereferenced
+    /// and one more owner, once the fiber is dead; php's `FiberError` naming
+    /// why before then or where it ended otherwise.
+    ///
+    /// ```php
+    /// $f = new Fiber(function () { Fiber::suspend(); return 1; });
+    /// try { $f->getReturn(); } catch (FiberError $e) { echo $e->getMessage(), "\n"; }
+    /// $f->start();
+    /// try { $f->getReturn(); } catch (FiberError $e) { echo $e->getMessage(), "\n"; }
+    /// $f->resume();
+    /// var_dump($f->getReturn());
+    /// ```
+    /// ```expect
+    /// Cannot get fiber return value: The fiber has not been started
+    /// Cannot get fiber return value: The fiber has not returned
+    /// int(1)
+    /// ```
+    fn getReturn(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+        let this = this.object();
+        let fiber = payload(req, this)?;
+        let message = match fiber.status {
+            Status::Dead if fiber.threw => "The fiber threw an exception",
+            Status::Dead if fiber.bailout => "The fiber exited with a fatal error",
+            Status::Dead => {
+                let value = fiber.result.deref();
+                req.addref(&value);
+                return Ok(value);
+            }
+            Status::Init => "The fiber has not been started",
+            Status::Running | Status::Suspended => "The fiber has not returned",
+        };
+        Err(fiber_error(
+            req,
+            &format!("Cannot get fiber return value: {message}"),
+        ))
+    }
+
+    /// `Fiber::getCurrent(): ?Fiber`: the innermost fiber running, one more
+    /// owner, and `null` on the request's own stack.
+    ///
+    /// ```php
+    /// var_dump(Fiber::getCurrent());
+    /// $f = new Fiber(function () use (&$f) { var_dump(Fiber::getCurrent() === $f); });
+    /// $f->start();
+    /// ```
+    /// ```expect
+    /// NULL
+    /// bool(true)
+    /// ```
+    fn getCurrent(req: &mut Request) -> Option<Instance<Fiber>> {
+        let fiber = req.fibers().active()?;
+        req.addref(&fiber.as_value());
+        Some(Instance::of(fiber))
+    }
+
+    /// `Fiber::suspend(mixed $value = null): mixed`: the innermost running
+    /// fiber suspends, the `start`, `resume` or `throw` that ran it returns
+    /// `$value`, and this returns what the next `resume` sends or raises
+    /// what the next `throw` does. Outside a fiber it is php's `FiberError`.
+    ///
+    /// ```php
+    /// Fiber::suspend();
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught FiberError: Cannot suspend outside of a fiber in %s:2
+    /// Stack trace:
+    /// #0 %s(2): Fiber::suspend()
+    /// #1 {main}
+    ///   thrown in %s on line 2
+    /// ```
+    ///
+    /// A fiber that resumes another is running while the other runs, and
+    /// the other's suspend returns to it and not to the request's stack.
+    ///
+    /// ```php
+    /// $outer = new Fiber(function () {
+    ///     $inner = new Fiber(function () { $v = Fiber::suspend("i1"); echo "inner got $v\n"; return "done"; });
+    ///     $v = $inner->start(); echo "outer got $v\n";
+    ///     $v = Fiber::suspend("o1"); echo "outer got $v\n";
+    ///     $inner->resume("to inner");
+    ///     echo "inner returned ", $inner->getReturn(), "\n";
+    /// });
+    /// $v = $outer->start(); echo "main got $v\n";
+    /// $outer->resume("to outer");
+    /// ```
+    /// ```expect
+    /// outer got i1
+    /// main got o1
+    /// outer got to outer
+    /// inner got to inner
+    /// inner returned done
+    /// ```
+    fn suspend(req: &mut Request, #[php(default = null)] value: Value) -> Result<Value, Thrown> {
+        let Some(fiber) = req.fibers().active() else {
+            return Err(fiber_error(req, "Cannot suspend outside of a fiber"));
+        };
+        if payload(req, fiber)?.destroyed {
+            return Err(fiber_error(req, "Cannot suspend in a force-closed fiber"));
+        }
+        req.addref(&value);
+        let back = php_heap::suspend(req, Transfer::Value(value));
+        let back = req.fatal_of(back)?;
+        delegate(back)
+    }
+}
+
+/// `final class FiberError extends Error`, which only the engine makes.
+#[php_class(final, extends(Error))]
+pub(crate) struct FiberError;
+
+#[php_class]
+impl FiberError {
+    /// `FiberError::__construct()`: php's `Error`, since only the engine
+    /// makes one.
+    ///
+    /// ```php
+    /// new FiberError();
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Uncaught Error: The "FiberError" class is reserved for internal use and cannot be manually instantiated in %s:2
+    /// Stack trace:
+    /// #0 %s(2): FiberError->__construct()
+    /// #1 {main}
+    ///   thrown in %s on line 2
+    /// ```
+    ///
+    /// Its body parses no parameter, so what it is handed changes nothing:
+    ///
+    /// ```php
+    /// try { new FiberError(1, 2); } catch (Error $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Error: The "FiberError" class is reserved for internal use and cannot be manually instantiated
+    /// ```
+    #[php(arity = manual)]
+    fn __construct(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
+        let name = req.class_name(this.object().class());
+        Err(throw(
             req,
             "Error",
-            "Cannot start a fiber whose constructor was not called",
-        ));
-    };
-    let stack = FiberStack::new(size, move |req: &mut Request, _first: Transfer| {
-        run(req, this, &callable, &arguments, &named)
-    });
-    let stack = match stack {
-        Ok(stack) => stack,
-        Err(StackRefused::TooSmall(least)) => {
-            return Err(throw(
-                req,
-                "Exception",
-                &format!("Fiber stack size is too small, it needs to be at least {least} bytes"),
-            ));
-        }
-        Err(StackRefused::Allocate(error)) => {
-            let errno = error.raw_os_error().unwrap_or(0);
-            let text = error.to_string();
-            let text = text
-                .strip_suffix(&format!(" (os error {errno})"))
-                .unwrap_or(&text)
-                .to_string();
-            return Err(throw(
-                req,
-                "Exception",
-                &format!("Fiber stack allocate failed: mmap failed: {text} ({errno})"),
-            ));
-        }
-    };
-    let execution = Execution {
-        stack: php_heap::VmStack::fiber(),
-        vm: Vm::default(),
-        error_reporting: req.ini_error_reporting(),
-        stack_limit: StackLimit::fiber(stack.base(), stack.end(), reserved),
-    };
-    let record = req.heap_mut().block(STACK_RECORD);
-    let record = req.fatal_of(record)?;
-    let fiber = payload(req, this)?;
-    fiber.blocks.push(record);
-    fiber.stack = Some(stack);
-    fiber.execution = Some(execution);
-    let back = switch_into(req, this, Transfer::Value(Value::null()))?;
-    delegate(back)
+            &format!(
+                "The \"{name}\" class is reserved for internal use and cannot be manually instantiated"
+            ),
+        ))
+    }
 }
 
 /// `EG(fiber_stack_size)`: what `OnUpdateFiberStackSize` last wrote,
@@ -899,21 +1000,21 @@ fn run(
 ) -> Transfer {
     let opened = req.open_stack();
     if req.fatal_of(opened).is_err() {
-        if let Some(fiber) = object.native_mut::<Fiber>(req) {
+        if let Some(fiber) = object.native_mut::<ZendFiber>(req) {
             fiber.bailout = true;
         }
         return Transfer::Fatal;
     }
     let outcome = call_named(req, callable, arguments, named);
     let held = object
-        .native_mut::<Fiber>(req)
+        .native_mut::<ZendFiber>(req)
         .and_then(|fiber| fiber.callable.take());
     if let Some(held) = held {
         req.release(held.value());
     }
     match outcome {
         Ok(value) => {
-            if let Some(fiber) = object.native_mut::<Fiber>(req) {
+            if let Some(fiber) = object.native_mut::<ZendFiber>(req) {
                 let previous = std::mem::replace(&mut fiber.result, value);
                 req.release(previous);
             }
@@ -921,7 +1022,7 @@ fn run(
         }
         Err(thrown) => {
             let threw = thrown.exception().is_some() || req.unwind_exit();
-            if let Some(fiber) = object.native_mut::<Fiber>(req) {
+            if let Some(fiber) = object.native_mut::<ZendFiber>(req) {
                 if threw {
                     fiber.threw = true;
                 } else {
@@ -1031,324 +1132,10 @@ fn delegate(transfer: Transfer) -> Result<Value, Thrown> {
     }
 }
 
-/// `Fiber::resume(mixed $value = null): mixed`: the suspended fiber runs
-/// on from its suspend, which returns `$value`, until it suspends again
-/// or returns. A fiber that is not suspended is php's `FiberError`, a
-/// fiber resumed twice past its end among them.
-///
-/// ```php
-/// $f = new Fiber(fn() => Fiber::suspend());
-/// $f->start();
-/// $f->resume();
-/// $f->resume();
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught FiberError: Cannot resume a fiber that is not suspended in %s:5
-/// Stack trace:
-/// #0 %s(5): Fiber->resume()
-/// #1 {main}
-///   thrown in %s on line 5
-/// ```
-///
-/// A fiber resuming itself is running and not suspended, and the trace
-/// walks from the fiber's frames on into its resumer's, as php's
-/// `stack_bottom->prev_execute_data` does.
-///
-/// ```php
-/// $fiber = new Fiber(function (): void {
-///     Fiber::getCurrent()->resume();
-/// });
-/// $fiber->start();
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught FiberError: Cannot resume a fiber that is not suspended in %s:3
-/// Stack trace:
-/// #0 %s(3): Fiber->resume()
-/// #1 [internal function]: {closure:%s:2}()
-/// #2 %s(5): Fiber->start()
-/// #3 {main}
-///   thrown in %s on line 3
-/// ```
-fn resume(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count > 1 {
-        return Err(arg_count_error(
-            req,
-            &format!("at most 1 argument, {count} given"),
-        ));
-    }
-    let this = this_fiber(req)?;
-    if payload(req, this)?.status != Status::Suspended {
-        return Err(fiber_error(
-            req,
-            "Cannot resume a fiber that is not suspended",
-        ));
-    }
-    let value = optional_value(req)?;
-    let back = switch_into(req, this, Transfer::Value(value))?;
-    delegate(back)
-}
-
-/// `Fiber::throw(Throwable $exception): mixed`: the suspended fiber runs
-/// on with `$exception` raised at its suspend.
-///
-/// ```php
-/// $f = new Fiber(function () {
-///     try { Fiber::suspend(1); } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
-///     return 2;
-/// });
-/// $f->start();
-/// var_dump($f->throw(new Exception("x")), $f->getReturn());
-/// ```
-/// ```expect
-/// caught x
-/// NULL
-/// int(2)
-/// ```
-///
-/// A throwable the fiber does not catch leaves it through the `throw`
-/// that raised it, and the fiber is dead.
-///
-/// ```php
-/// $f = new Fiber(function () { Fiber::suspend(); });
-/// $f->start();
-/// try { $f->throw(new TypeError("y")); } catch (TypeError $e) { echo get_class($e), " ", $e->getMessage(), "\n"; }
-/// var_dump($f->isTerminated());
-/// try { $f->getReturn(); } catch (FiberError $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// TypeError y
-/// bool(true)
-/// Cannot get fiber return value: The fiber threw an exception
-/// ```
-fn throw_into(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count != 1 {
-        return Err(arg_count_error(
-            req,
-            &format!("exactly 1 argument, {count} given"),
-        ));
-    }
-    let given = req.argument(1).unwrap_or_default();
-    let ty = Type::Named(Name(b"Throwable".as_slice().into()));
-    let given = crate::api::coerce::coerce_param(req, &given, &ty, 1)?;
-    let Some(throwable) = given.as_object().copied() else {
-        return Err(crate::api::raising::fatal(
-            req,
-            "InternalError: coerce_param held a value that is no object to a class",
-        ));
-    };
-    let this = this_fiber(req)?;
-    if payload(req, this)?.status != Status::Suspended {
-        return Err(fiber_error(
-            req,
-            "Cannot resume a fiber that is not suspended",
-        ));
-    }
-    req.addref(&throwable.as_value());
-    let back = switch_into(req, this, Transfer::Throw(Thrown::of(Some(throwable))))?;
-    delegate(back)
-}
-
-/// `Fiber::isStarted()`, `isSuspended()`, `isRunning()` and
-/// `isTerminated()`, which read the status php keeps with `caller`:
-/// running is running or resuming another.
-///
-/// ```php
-/// $f = new Fiber(function () use (&$f) {
-///     var_dump($f->isStarted(), $f->isSuspended(), $f->isRunning(), $f->isTerminated());
-///     Fiber::suspend();
-/// });
-/// var_dump($f->isStarted(), $f->isSuspended(), $f->isRunning(), $f->isTerminated());
-/// $f->start();
-/// var_dump($f->isStarted(), $f->isSuspended(), $f->isRunning(), $f->isTerminated());
-/// $f->resume();
-/// var_dump($f->isStarted(), $f->isSuspended(), $f->isRunning(), $f->isTerminated());
-/// ```
-/// ```expect
-/// bool(false)
-/// bool(false)
-/// bool(false)
-/// bool(false)
-/// bool(true)
-/// bool(false)
-/// bool(true)
-/// bool(false)
-/// bool(true)
-/// bool(true)
-/// bool(false)
-/// bool(false)
-/// bool(true)
-/// bool(false)
-/// bool(false)
-/// bool(true)
-/// ```
-fn is_started(req: &mut Request) -> Result<Value, Thrown> {
-    status_is(req, |status| status != Status::Init)
-}
-
-fn is_suspended(req: &mut Request) -> Result<Value, Thrown> {
-    status_is(req, |status| status == Status::Suspended)
-}
-
-fn is_running(req: &mut Request) -> Result<Value, Thrown> {
-    status_is(req, |status| status == Status::Running)
-}
-
-fn is_terminated(req: &mut Request) -> Result<Value, Thrown> {
-    status_is(req, |status| status == Status::Dead)
-}
-
 /// One of the four status tests, over no arguments.
-fn status_is(req: &mut Request, test: fn(Status) -> bool) -> Result<Value, Thrown> {
-    no_arguments(req)?;
-    let this = this_fiber(req)?;
+fn status_is(req: &mut Request, this: PhpObject, test: fn(Status) -> bool) -> Result<bool, Thrown> {
     let status = payload(req, this)?.status;
-    Ok(Value::bool(test(status)))
-}
-
-/// `Fiber::getReturn(): mixed`: what the callable returned, dereferenced
-/// and one more owner, once the fiber is dead; php's `FiberError` naming
-/// why before then or where it ended otherwise.
-///
-/// ```php
-/// $f = new Fiber(function () { Fiber::suspend(); return 1; });
-/// try { $f->getReturn(); } catch (FiberError $e) { echo $e->getMessage(), "\n"; }
-/// $f->start();
-/// try { $f->getReturn(); } catch (FiberError $e) { echo $e->getMessage(), "\n"; }
-/// $f->resume();
-/// var_dump($f->getReturn());
-/// ```
-/// ```expect
-/// Cannot get fiber return value: The fiber has not been started
-/// Cannot get fiber return value: The fiber has not returned
-/// int(1)
-/// ```
-fn get_return(req: &mut Request) -> Result<Value, Thrown> {
-    no_arguments(req)?;
-    let this = this_fiber(req)?;
-    let fiber = payload(req, this)?;
-    let message = match fiber.status {
-        Status::Dead if fiber.threw => "The fiber threw an exception",
-        Status::Dead if fiber.bailout => "The fiber exited with a fatal error",
-        Status::Dead => {
-            let value = fiber.result.deref();
-            req.addref(&value);
-            return Ok(value);
-        }
-        Status::Init => "The fiber has not been started",
-        Status::Running | Status::Suspended => "The fiber has not returned",
-    };
-    Err(fiber_error(
-        req,
-        &format!("Cannot get fiber return value: {message}"),
-    ))
-}
-
-/// `Fiber::getCurrent(): ?Fiber`: the innermost fiber running, one more
-/// owner, and `null` on the request's own stack.
-///
-/// ```php
-/// var_dump(Fiber::getCurrent());
-/// $f = new Fiber(function () use (&$f) { var_dump(Fiber::getCurrent() === $f); });
-/// $f->start();
-/// ```
-/// ```expect
-/// NULL
-/// bool(true)
-/// ```
-fn get_current(req: &mut Request) -> Result<Value, Thrown> {
-    no_arguments(req)?;
-    let Some(fiber) = req.fibers().active() else {
-        return Ok(Value::null());
-    };
-    let value = fiber.as_value();
-    req.addref(&value);
-    Ok(value)
-}
-
-/// `Fiber::suspend(mixed $value = null): mixed`: the innermost running
-/// fiber suspends, the `start`, `resume` or `throw` that ran it returns
-/// `$value`, and this returns what the next `resume` sends or raises
-/// what the next `throw` does. Outside a fiber it is php's `FiberError`.
-///
-/// ```php
-/// Fiber::suspend();
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught FiberError: Cannot suspend outside of a fiber in %s:2
-/// Stack trace:
-/// #0 %s(2): Fiber::suspend()
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-///
-/// A fiber that resumes another is running while the other runs, and
-/// the other's suspend returns to it and not to the request's stack.
-///
-/// ```php
-/// $outer = new Fiber(function () {
-///     $inner = new Fiber(function () { $v = Fiber::suspend("i1"); echo "inner got $v\n"; return "done"; });
-///     $v = $inner->start(); echo "outer got $v\n";
-///     $v = Fiber::suspend("o1"); echo "outer got $v\n";
-///     $inner->resume("to inner");
-///     echo "inner returned ", $inner->getReturn(), "\n";
-/// });
-/// $v = $outer->start(); echo "main got $v\n";
-/// $outer->resume("to outer");
-/// ```
-/// ```expect
-/// outer got i1
-/// main got o1
-/// outer got to outer
-/// inner got to inner
-/// inner returned done
-/// ```
-fn suspend(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count > 1 {
-        return Err(arg_count_error(
-            req,
-            &format!("at most 1 argument, {count} given"),
-        ));
-    }
-    let Some(fiber) = req.fibers().active() else {
-        return Err(fiber_error(req, "Cannot suspend outside of a fiber"));
-    };
-    if payload(req, fiber)?.destroyed {
-        return Err(fiber_error(req, "Cannot suspend in a force-closed fiber"));
-    }
-    let value = optional_value(req)?;
-    let back = php_heap::suspend(req, Transfer::Value(value));
-    let back = req.fatal_of(back)?;
-    delegate(back)
-}
-
-/// `FiberError::__construct()`: php's `Error`, since only the engine
-/// makes one.
-///
-/// ```php
-/// new FiberError();
-/// ```
-/// ```expect exit=255
-/// Fatal error: Uncaught Error: The "FiberError" class is reserved for internal use and cannot be manually instantiated in %s:2
-/// Stack trace:
-/// #0 %s(2): FiberError->__construct()
-/// #1 {main}
-///   thrown in %s on line 2
-/// ```
-fn fiber_error_construct(req: &mut Request) -> Result<Value, Thrown> {
-    let name = req.this().map_or_else(
-        || String::from("FiberError"),
-        |this| req.class_name(this.class()),
-    );
-    Err(throw(
-        req,
-        "Error",
-        &format!(
-            "The \"{name}\" class is reserved for internal use and cannot be manually instantiated"
-        ),
-    ))
+    Ok(test(status))
 }
 
 /// `zend_fiber_object_destroy` for a fiber that is suspended, in the
@@ -1376,7 +1163,7 @@ fn destroy(req: &mut Request, object: PhpObject) {
     if req.destructors_marked() {
         return;
     }
-    let Some(fiber) = object.native_mut::<Fiber>(req) else {
+    let Some(fiber) = object.native_mut::<ZendFiber>(req) else {
         return;
     };
     if fiber.status != Status::Suspended {
@@ -1424,7 +1211,7 @@ fn destroy(req: &mut Request, object: PhpObject) {
     };
     req.switch_execution(&mut execution);
     execution.stack.close(req.heap_mut());
-    let Some(fiber) = object.native_mut::<Fiber>(req) else {
+    let Some(fiber) = object.native_mut::<ZendFiber>(req) else {
         return;
     };
     fiber.status = Status::Dead;

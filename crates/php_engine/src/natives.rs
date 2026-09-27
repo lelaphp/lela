@@ -25,330 +25,107 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_unit::decl::{
-    ClassKind, ConstExpr, FunctionDecl, Name, Parameter, ParameterDefault, Type, Visibility,
-};
+use php_macros::php_function;
+use php_unit::decl::{ClassKind, Type, Visibility};
 
-use crate::api::abi::{Callable, Entry};
-use crate::api::coerce::{coerce_param, to_string};
-use crate::api::raising::{
-    Thrown, arg_count_error, arg_type_error, deprecated, throw, too_few_arguments, warning,
-};
+use crate::api::abi::{Callable, Entry, Never, OrFalse, Passed, Raw, Union, Variadic};
+use crate::api::coerce::to_string;
+use crate::api::raising::{Thrown, arg_type_error, deprecated, throw, warning};
 use crate::api::request::Request;
-use crate::api::values::{ClassId, Key, PhpArray, PhpString, Value, ValueRef};
+use crate::api::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_unit::decl::FunctionDecl;
 
 mod backtrace;
 mod classes;
 mod errors;
 mod functions;
-mod stub;
 
-/// The engine's own natives, each declaration beside its entry: the
-/// ones of `zend_builtin_functions.c` first, in the order its stub
-/// declares them, which is the order `get_defined_functions()` and
-/// `get_extension_funcs('Core')` list them in; then the ones php keeps
-/// in `ext/standard` and this engine here, in the order they were
-/// declared.
-pub(crate) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    let mut natives = zend_natives();
-    natives.extend(constant_natives());
-    natives.extend(class_natives());
-    natives.extend(classes::natives());
-    natives.extend(functions::natives());
-    natives.extend(errors::natives());
-    natives.extend(backtrace::natives());
-    natives.sort_by_key(|(decl, _)| {
-        CORE.iter()
-            .position(|name| name.as_bytes() == decl.name.0.as_ref())
-            .unwrap_or(CORE.len())
-    });
-    natives
-}
-
-/// `zend_builtin_functions.stub.php`'s functions in its order,
-/// `zend_thread_id`, which a build without `ZEND_DEBUG` and `ZTS` does
-/// not declare, left out.
-const CORE: &[&str] = &[
-    "clone",
-    "exit",
-    "die",
-    "zend_version",
-    "func_num_args",
-    "func_get_arg",
-    "func_get_args",
-    "strlen",
-    "strcmp",
-    "strncmp",
-    "strcasecmp",
-    "strncasecmp",
-    "error_reporting",
-    "define",
-    "defined",
-    "get_class",
-    "get_called_class",
-    "get_parent_class",
-    "is_subclass_of",
-    "is_a",
-    "get_class_vars",
-    "get_object_vars",
-    "get_mangled_object_vars",
-    "get_class_methods",
-    "method_exists",
-    "property_exists",
-    "class_exists",
-    "interface_exists",
-    "trait_exists",
-    "enum_exists",
-    "function_exists",
-    "class_alias",
-    "get_included_files",
-    "get_required_files",
-    "trigger_error",
-    "user_error",
-    "set_error_handler",
-    "restore_error_handler",
-    "get_error_handler",
-    "set_exception_handler",
-    "restore_exception_handler",
-    "get_exception_handler",
-    "get_declared_classes",
-    "get_declared_traits",
-    "get_declared_interfaces",
-    "get_defined_functions",
-    "get_defined_vars",
-    "get_resource_type",
-    "get_resource_id",
-    "get_resources",
-    "get_loaded_extensions",
-    "get_defined_constants",
-    "debug_backtrace",
-    "debug_print_backtrace",
-    "extension_loaded",
-    "get_extension_funcs",
-    "gc_mem_caches",
-    "gc_collect_cycles",
-    "gc_enabled",
-    "gc_enable",
-    "gc_disable",
-    "gc_status",
-];
-
-/// The two that read the linked table (#259), `clone`, which reads an
-/// object's handler table (#281), and `exit` with `die`, in the order
-/// `zend_builtin_functions_arginfo.h` has them: `die` is
-/// `ZEND_RAW_FENTRY("die", zif_exit, arginfo_die, ...)`, the same body
-/// and parameters under a second name.
-fn class_natives() -> Vec<(FunctionDecl, Entry)> {
-    let status = Parameter {
-        default: ParameterDefault::Expr(ConstExpr::long(0)),
-        ..parameter(
-            b"status",
-            Some(Type::Union(vec![Type::String, Type::Int])),
-            false,
-        )
-    };
+/// The natives php keeps in `ext/standard` and this engine here, in
+/// the order they were declared, which follow Core's
+/// ([`crate::core::extension`]) in the function table.
+pub(crate) fn standard() -> Vec<(FunctionDecl, Entry)> {
     vec![
-        (
-            declared(
-                b"clone",
-                &[
-                    parameter(b"object", Some(Type::Object), false),
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Array(Vec::new())),
-                        ..parameter(b"withProperties", Some(Type::Array), false)
-                    },
-                ],
-                Some(Type::Object),
-            ),
-            clone as Entry,
-        ),
-        (
-            declared(b"exit", std::slice::from_ref(&status), Some(Type::Never)),
-            exit as Entry,
-        ),
-        (
-            declared(b"die", std::slice::from_ref(&status), Some(Type::Never)),
-            exit as Entry,
-        ),
-        (
-            declared(
-                b"class_exists",
-                &[
-                    parameter(b"class", Some(Type::String), false),
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Bool(true)),
-                        ..parameter(b"autoload", Some(Type::Bool), false)
-                    },
-                ],
-                Some(Type::Bool),
-            ),
-            class_exists as Entry,
-        ),
-        (
-            declared(
-                b"enum_exists",
-                &[
-                    parameter(b"enum", Some(Type::String), false),
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Bool(true)),
-                        ..parameter(b"autoload", Some(Type::Bool), false)
-                    },
-                ],
-                Some(Type::Bool),
-            ),
-            enum_exists as Entry,
-        ),
-        (
-            declared(
-                b"get_class",
-                // `object $object = UNKNOWN`: optional, nothing to show.
-                &[Parameter {
-                    default: ParameterDefault::Unshown,
-                    ..parameter(b"object", Some(Type::Object), false)
-                }],
-                Some(Type::String),
-            ),
-            get_class as Entry,
-        ),
+        var_dump::declared(),
+        memory_get_usage::declared(),
+        memory_get_peak_usage::declared(),
+        memory_reset_peak_usage::declared(),
+        ini_get::declared(),
+        ini_set::declared(),
+        ini_alter::declared(),
+        set_time_limit::declared(),
+        register_shutdown_function::declared(),
     ]
 }
 
-/// The ten of `zend_builtin_functions.c` and `ext/standard` that need
-/// the engine's frames, allocator and ini table.
-/// `define` and `defined`, the constant natives of
-/// `zend_builtin_functions.stub.php`.
-fn constant_natives() -> Vec<(FunctionDecl, Entry)> {
+/// Core's natives, `zend_builtin_functions.stub.php`'s functions in its
+/// order, which is the order `get_defined_functions()` and
+/// `get_extension_funcs('Core')` list them in; `zend_thread_id`, which a
+/// build without `ZEND_DEBUG` and `ZTS` does not declare, left out.
+pub(crate) fn core() -> Vec<(FunctionDecl, Entry)> {
     vec![
-        (
-            declared(
-                b"define",
-                &[
-                    parameter(b"constant_name", Some(Type::String), false),
-                    parameter(b"value", Some(Type::Mixed), false),
-                    Parameter {
-                        default: ParameterDefault::Expr(ConstExpr::Bool(false)),
-                        ..parameter(b"case_insensitive", Some(Type::Bool), false)
-                    },
-                ],
-                Some(Type::Bool),
-            ),
-            define as Entry,
-        ),
-        (
-            declared(
-                b"defined",
-                &[parameter(b"constant_name", Some(Type::String), false)],
-                Some(Type::Bool),
-            ),
-            defined as Entry,
-        ),
+        clone::declared(),
+        exit::declared(),
+        die::declared(),
+        functions::zend_version::declared(),
+        functions::func_num_args::declared(),
+        functions::func_get_arg::declared(),
+        functions::func_get_args::declared(),
+        strlen::declared(),
+        functions::strcmp::declared(),
+        functions::strncmp::declared(),
+        functions::strcasecmp::declared(),
+        functions::strncasecmp::declared(),
+        error_reporting::declared(),
+        define::declared(),
+        defined::declared(),
+        get_class::declared(),
+        classes::get_called_class::declared(),
+        classes::get_parent_class::declared(),
+        classes::is_subclass_of::declared(),
+        classes::is_a::declared(),
+        classes::get_class_vars::declared(),
+        classes::get_object_vars::declared(),
+        classes::get_mangled_object_vars::declared(),
+        classes::get_class_methods::declared(),
+        classes::method_exists::declared(),
+        classes::property_exists::declared(),
+        class_exists::declared(),
+        classes::interface_exists::declared(),
+        classes::trait_exists::declared(),
+        classes::enum_exists::declared(),
+        functions::function_exists::declared(),
+        classes::class_alias::declared(),
+        functions::get_included_files::declared(),
+        functions::get_required_files::declared(),
+        errors::trigger_error::declared(),
+        errors::user_error::declared(),
+        errors::set_error_handler::declared(),
+        errors::restore_error_handler::declared(),
+        errors::get_error_handler::declared(),
+        errors::set_exception_handler::declared(),
+        errors::restore_exception_handler::declared(),
+        errors::get_exception_handler::declared(),
+        classes::get_declared_classes::declared(),
+        classes::get_declared_traits::declared(),
+        classes::get_declared_interfaces::declared(),
+        functions::get_defined_functions::declared(),
+        functions::get_defined_vars::declared(),
+        functions::get_resource_type::declared(),
+        functions::get_resource_id::declared(),
+        functions::get_resources::declared(),
+        functions::get_loaded_extensions::declared(),
+        functions::get_defined_constants::declared(),
+        backtrace::debug_backtrace::declared(),
+        backtrace::debug_print_backtrace::declared(),
+        extension_loaded::declared(),
+        functions::get_extension_funcs::declared(),
+        gc_mem_caches::declared(),
+        gc_collect_cycles::declared(),
+        gc_enabled::declared(),
+        gc_enable::declared(),
+        gc_disable::declared(),
+        gc_status::declared(),
     ]
-}
-
-fn zend_natives() -> Vec<(FunctionDecl, Entry)> {
-    let mut natives = vec![
-        (
-            declared(
-                b"var_dump",
-                &[parameter(b"value", None, true)],
-                Some(Type::Void),
-            ),
-            var_dump as Entry,
-        ),
-        (
-            declared(
-                b"memory_get_usage",
-                &[real_usage_parameter()],
-                Some(Type::Int),
-            ),
-            memory_get_usage as Entry,
-        ),
-        (
-            declared(
-                b"memory_get_peak_usage",
-                &[real_usage_parameter()],
-                Some(Type::Int),
-            ),
-            memory_get_peak_usage as Entry,
-        ),
-        (
-            declared(b"memory_reset_peak_usage", &[], Some(Type::Void)),
-            memory_reset_peak_usage as Entry,
-        ),
-        (
-            declared(
-                b"extension_loaded",
-                &[parameter(b"extension", Some(Type::String), false)],
-                Some(Type::Bool),
-            ),
-            extension_loaded as Entry,
-        ),
-    ];
-    natives.extend(gc_natives());
-    natives.extend(ini_natives());
-    natives.extend([
-        (
-            declared(
-                b"strlen",
-                &[parameter(b"string", Some(Type::String), false)],
-                Some(Type::Int),
-            ),
-            strlen as Entry,
-        ),
-        (
-            declared(
-                b"register_shutdown_function",
-                &[
-                    parameter(b"callback", Some(Type::Callable), false),
-                    parameter(b"args", Some(Type::Mixed), true),
-                ],
-                Some(Type::Void),
-            ),
-            register_shutdown_function as Entry,
-        ),
-    ]);
-    natives
-}
-
-/// The six that read and drive the cycle collector (design §5.12),
-/// each `ZEND_PARSE_PARAMETERS_NONE`.
-fn gc_natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        (
-            declared(b"gc_mem_caches", &[], Some(Type::Int)),
-            gc_mem_caches as Entry,
-        ),
-        (
-            declared(b"gc_collect_cycles", &[], Some(Type::Int)),
-            gc_collect_cycles as Entry,
-        ),
-        (
-            declared(b"gc_enabled", &[], Some(Type::Bool)),
-            gc_enabled as Entry,
-        ),
-        (
-            declared(b"gc_enable", &[], Some(Type::Void)),
-            gc_enable as Entry,
-        ),
-        (
-            declared(b"gc_disable", &[], Some(Type::Void)),
-            gc_disable as Entry,
-        ),
-        (
-            declared(b"gc_status", &[], Some(Type::Array)),
-            gc_status as Entry,
-        ),
-    ]
-}
-
-/// `ZEND_PARSE_PARAMETERS_NONE`: an argument is php's
-/// `ArgumentCountError`.
-fn no_arguments(req: &mut Request) -> Result<(), Thrown> {
-    let count = req.argument_count();
-    if count != 0 {
-        return Err(wrong_argument_count(req, 0, 0, count));
-    }
-    Ok(())
 }
 
 /// `gc_mem_caches(): int`, `zend_mm_gc`: the bin `runs` wholly free
@@ -367,10 +144,9 @@ fn no_arguments(req: &mut Request) -> Result<(), Thrown> {
 /// bool(true)
 /// int(0)
 /// ```
-fn gc_mem_caches(req: &mut Request) -> Result<Value, Thrown> {
-    no_arguments(req)?;
-    let freed = req.heap_mut().gc_mem_caches();
-    Ok(Value::int(as_long(freed)))
+#[php_function]
+fn gc_mem_caches(req: &mut Request) -> i64 {
+    as_long(req.heap_mut().gc_mem_caches())
 }
 
 /// `gc_collect_cycles(): int`, `zend_gc_collect_cycles`: a collection over the
@@ -429,9 +205,9 @@ fn gc_mem_caches(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// int(1)
 /// ```
-fn gc_collect_cycles(req: &mut Request) -> Result<Value, Thrown> {
-    no_arguments(req)?;
-    Ok(Value::int(req.gc_collect()))
+#[php_function]
+fn gc_collect_cycles(req: &mut Request) -> i64 {
+    req.gc_collect()
 }
 
 /// `gc_enabled(): bool`: whether a full root buffer runs the collector,
@@ -455,9 +231,9 @@ fn gc_collect_cycles(req: &mut Request) -> Result<Value, Thrown> {
 /// string(1) "1"
 /// bool(false)
 /// ```
-fn gc_enabled(req: &mut Request) -> Result<Value, Thrown> {
-    no_arguments(req)?;
-    Ok(Value::bool(req.gc_enabled()))
+#[php_function]
+fn gc_enabled(req: &mut Request) -> bool {
+    req.gc_enabled()
 }
 
 /// `gc_enable(): void`, `zend.enable_gc` altered to `1`. The collector
@@ -479,10 +255,9 @@ fn gc_enabled(req: &mut Request) -> Result<Value, Thrown> {
 /// int(1)
 /// bool(true)
 /// ```
-fn gc_enable(req: &mut Request) -> Result<Value, Thrown> {
-    no_arguments(req)?;
+#[php_function]
+fn gc_enable(req: &mut Request) {
     req.gc_enable(true);
-    Ok(Value::null())
 }
 
 /// `gc_disable(): void`, `zend.enable_gc` altered to `0`. With the
@@ -501,10 +276,9 @@ fn gc_enable(req: &mut Request) -> Result<Value, Thrown> {
 /// int(10001)
 /// int(10001)
 /// ```
-fn gc_disable(req: &mut Request) -> Result<Value, Thrown> {
-    no_arguments(req)?;
+#[php_function]
+fn gc_disable(req: &mut Request) {
     req.gc_enable(false);
-    Ok(Value::null())
 }
 
 /// `gc_status(): array`, `zend_gc_get_status` in php 8.5's twelve
@@ -579,70 +353,9 @@ fn gc_disable(req: &mut Request) -> Result<Value, Thrown> {
 /// int(1)
 /// int(10001)
 /// ```
-fn gc_status(req: &mut Request) -> Result<Value, Thrown> {
-    no_arguments(req)?;
-    Ok(Value::array(req.gc_status()?))
-}
-
-/// The four that read and move the engine's ini table and the word
-/// beside it: `ini_get`, `ini_set`, `set_time_limit` and
-/// `error_reporting`.
-fn ini_natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        (
-            declared(
-                b"ini_get",
-                &[parameter(b"option", Some(Type::String), false)],
-                Some(Type::Union(vec![Type::String, Type::False])),
-            ),
-            ini_get as Entry,
-        ),
-        (
-            declared(
-                b"ini_set",
-                &[
-                    parameter(b"option", Some(Type::String), false),
-                    parameter(
-                        b"value",
-                        Some(Type::Union(vec![
-                            Type::String,
-                            Type::Int,
-                            Type::Float,
-                            Type::Bool,
-                            Type::Null,
-                        ])),
-                        false,
-                    ),
-                ],
-                Some(Type::Union(vec![Type::String, Type::False])),
-            ),
-            ini_set as Entry,
-        ),
-        (ini_alter_declared(), ini_set as Entry),
-        (
-            declared(
-                b"set_time_limit",
-                &[parameter(b"seconds", Some(Type::Int), false)],
-                Some(Type::Bool),
-            ),
-            set_time_limit as Entry,
-        ),
-        (
-            declared(
-                b"error_reporting",
-                &[Parameter {
-                    default: ParameterDefault::Expr(ConstExpr::Null),
-                    ..parameter(
-                        b"error_level",
-                        Some(Type::Nullable(Box::new(Type::Int))),
-                        false,
-                    )
-                }],
-                Some(Type::Int),
-            ),
-            error_reporting as Entry,
-        ),
-    ]
+#[php_function]
+fn gc_status(req: &mut Request) -> Result<PhpArray, Thrown> {
+    req.gc_status()
 }
 
 /// `clone(object $object, array $withProperties = []): object`, php
@@ -663,30 +376,34 @@ fn ini_natives() -> Vec<(FunctionDecl, Entry)> {
 /// bool(false)
 /// bool(true)
 /// ```
-fn clone(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if !(1..=2).contains(&count) {
-        return Err(wrong_argument_count(req, 1, 2, count));
-    }
-    let given = req.argument(1).unwrap_or_default();
-    let given = coerce_param(req, &given, &Type::Object, 1)?;
-    let Some(object) = given.as_object().copied() else {
-        return Err(crate::api::raising::fatal(
-            req,
-            "InternalError: coerce_param held a value that is no object to `object`",
-        ));
-    };
-    let with = if count == 2 {
-        let with = req.argument(2).unwrap_or_default();
-        coerce_param(req, &with, &Type::Array, 2)?
-            .deref()
-            .as_array()
-            .copied()
-    } else {
-        None
+///
+/// A call the compiler cannot make `ZEND_CLONE` of reaches the native:
+/// by a name held in a variable, and with the properties to write.
+///
+/// ```php
+/// class C { public $p = 1; }
+/// $c = new C; $f = 'clone';
+/// $d = $f($c);
+/// $e = $f($c, ['p' => 2]);
+/// var_dump($d->p, $c === $d, $e->p, $c->p);
+/// ```
+/// ```expect
+/// int(1)
+/// bool(false)
+/// int(2)
+/// int(1)
+/// ```
+#[php_function]
+fn clone(
+    req: &mut Request,
+    object: PhpObject,
+    #[php(default = [])] withProperties: Passed<PhpArray>,
+) -> Result<PhpObject, Thrown> {
+    let with = match withProperties {
+        Passed::Given(with) => Some(with),
+        Passed::Omitted => None,
     };
     req.clone_object(object, with)
-        .map(|cloned| cloned.as_value())
 }
 
 /// `exit(string|int $status = 0): never`, `ZEND_FUNCTION(exit)`
@@ -878,15 +595,14 @@ fn clone(req: &mut Request) -> Result<Value, Thrown> {
 /// #1 {main}
 ///   thrown in %s on line 2
 /// ```
-fn exit(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count > 1 {
-        return Err(wrong_argument_count(req, 0, 1, count));
-    }
-    let status = if count == 0 {
-        Value::int(0)
-    } else {
-        string_or_long_argument(req, 1)?
+#[php_function(aliases(die))]
+fn exit(
+    req: &mut Request,
+    #[php(default = 0)] status: Union<PhpString, i64>,
+) -> Result<Never, Thrown> {
+    let status = match status {
+        Union::A(string) => Value::string(string),
+        Union::B(code) => Value::int(code),
     };
     Err(crate::api::raising::exit(req, &status))
 }
@@ -912,50 +628,13 @@ fn exit(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(false)
 /// ```
-fn class_exists(req: &mut Request) -> Result<Value, Thrown> {
-    classes::exists(req, &[ClassKind::Class, ClassKind::Enum])
-}
-
-/// `enum_exists(string $enum, bool $autoload = true): bool`, php's
-/// `class_exists_impl` with `ZEND_ACC_ENUM` to have: [`class_exists`]'s
-/// lookup, true for an enum alone.
-///
-/// ```php
-/// enum Suit { case Hearts; }
-/// var_dump(enum_exists('Suit'), enum_exists('\suit'), enum_exists('stdClass'), enum_exists('PropertyHookType'), enum_exists('Nope', false));
-/// ```
-/// ```expect
-/// bool(true)
-/// bool(true)
-/// bool(false)
-/// bool(true)
-/// bool(false)
-/// ```
-fn enum_exists(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if !(1..=2).contains(&count) {
-        return Err(wrong_argument_count(req, 1, 2, count));
-    }
-    let name = string_argument(req, 1)?;
-    let autoload = if count == 2 {
-        let given = req.argument(2).unwrap_or_default();
-        coerce_param(req, &given, &Type::Bool, 2)?
-            .as_bool()
-            .unwrap_or(true)
-    } else {
-        true
-    };
-    let bytes = name.as_bytes();
-    let bytes = bytes.strip_prefix(b"\\").unwrap_or(bytes);
-    let found = match req.class_named(bytes) {
-        Some(class) => Some(class),
-        None if autoload => crate::api::call::autoload(req, bytes)?,
-        None => None,
-    };
-    let exists = found
-        .and_then(|class| req.class_decl(class))
-        .is_some_and(|decl| decl.kind == ClassKind::Enum);
-    Ok(Value::bool(exists))
+#[php_function]
+fn class_exists(
+    req: &mut Request,
+    class: PhpString,
+    #[php(default = true)] autoload: bool,
+) -> Result<bool, Thrown> {
+    classes::exists(req, class, autoload, &[ClassKind::Class, ClassKind::Enum])
 }
 
 /// `get_class(object $object = UNKNOWN): string`, php's
@@ -992,12 +671,11 @@ fn enum_exists(req: &mut Request) -> Result<Value, Thrown> {
 /// ```expect
 /// Error: get_class() without arguments must be called from within a class
 /// ```
-fn get_class(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count > 1 {
-        return Err(wrong_argument_count(req, 0, 1, count));
-    }
-    let class = if count == 0 {
+#[php_function]
+fn get_class(req: &mut Request, object: Passed<PhpObject>) -> Result<PhpString, Thrown> {
+    let class = if let Passed::Given(object) = object {
+        object.class()
+    } else {
         match req.scope() {
             Some(scope) => {
                 deprecated(req, "Calling get_class() without arguments is deprecated");
@@ -1011,16 +689,9 @@ fn get_class(req: &mut Request) -> Result<Value, Thrown> {
                 ));
             }
         }
-    } else {
-        let given = req.argument(1).unwrap_or_default();
-        let object = coerce_param(req, &given, &Type::Object, 1)?;
-        match object.as_object() {
-            Some(object) => object.class(),
-            None => return Ok(Value::null()),
-        }
     };
     let name = req.class_name_bytes(class);
-    Ok(Value::string(PhpString::new(req, &name)?))
+    PhpString::new(req, &name)
 }
 
 /// `strlen(string $string): int`, php's `ZEND_FUNCTION(strlen)`
@@ -1041,13 +712,9 @@ fn get_class(req: &mut Request) -> Result<Value, Thrown> {
 /// #1 {main}
 ///   thrown in %s on line 2
 /// ```
-fn strlen(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count != 1 {
-        return Err(wrong_argument_count(req, 1, 1, count));
-    }
-    let string = string_argument(req, 1)?;
-    Ok(Value::int(as_long(string.len())))
+#[php_function]
+fn strlen(string: PhpString) -> i64 {
+    as_long(string.len())
 }
 
 /// `define(string $constant_name, mixed $value, bool $case_insensitive
@@ -1125,22 +792,14 @@ fn strlen(req: &mut Request) -> Result<Value, Thrown> {
 /// #1 {main}
 ///   thrown in %s on line 2
 /// ```
-fn define(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if !(2..=3).contains(&count) {
-        return Err(wrong_argument_count(req, 2, 3, count));
-    }
-    let name = string_argument(req, 1)?;
-    let value = req.argument(2).unwrap_or_default().deref();
-    let ignored = if count == 3 {
-        let given = req.argument(3).unwrap_or_default();
-        coerce_param(req, &given, &Type::Bool, 3)?
-            .as_bool()
-            .unwrap_or(false)
-    } else {
-        false
-    };
-    let bytes = name.as_bytes();
+#[php_function]
+fn define(
+    req: &mut Request,
+    constant_name: PhpString,
+    value: Value,
+    #[php(default = false)] case_insensitive: bool,
+) -> Result<bool, Thrown> {
+    let bytes = constant_name.as_bytes();
     if bytes.windows(2).any(|pair| pair == b"::") {
         return Err(throw(
             req,
@@ -1148,7 +807,7 @@ fn define(req: &mut Request) -> Result<Value, Thrown> {
             "define(): Argument #1 ($constant_name) cannot be a class constant",
         ));
     }
-    if ignored {
+    if case_insensitive {
         warning(
             req,
             "define(): Argument #3 ($case_insensitive) is ignored since declaration of case-insensitive constants is no longer supported",
@@ -1176,7 +835,7 @@ fn define(req: &mut Request) -> Result<Value, Thrown> {
         || key.eq_ignore_ascii_case(b"false")
         || key.eq_ignore_ascii_case(b"null");
     if !special && req.define_constant(&key, value)? {
-        return Ok(Value::bool(true));
+        return Ok(true);
     }
     let shown = key
         .iter()
@@ -1190,7 +849,7 @@ fn define(req: &mut Request) -> Result<Value, Thrown> {
         ),
     );
     req.release(value);
-    Ok(Value::bool(false))
+    Ok(false)
 }
 
 /// `validate_constant_array_argument`: no array in the value, through
@@ -1284,13 +943,9 @@ fn copy_constant_array(req: &mut Request, array: PhpArray) -> Result<PhpArray, T
 /// #1 {main}
 ///   thrown in %s on line 2
 /// ```
-fn defined(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count != 1 {
-        return Err(wrong_argument_count(req, 1, 1, count));
-    }
-    let name = string_argument(req, 1)?;
-    let mut bytes = name.as_bytes();
+#[php_function]
+fn defined(req: &mut Request, constant_name: PhpString) -> Result<bool, Thrown> {
+    let mut bytes = constant_name.as_bytes();
     if let Some(rest) = bytes.strip_prefix(b"\\") {
         bytes = rest;
     }
@@ -1310,17 +965,15 @@ fn defined(req: &mut Request) -> Result<Value, Thrown> {
                 None => crate::api::call::autoload(req, class_name)?,
             }
         };
-        return Ok(Value::bool(
-            class.is_some_and(|class| req.class_constant_defined(class, constant)),
-        ));
+        return Ok(class.is_some_and(|class| req.class_constant_defined(class, constant)));
     }
     if let Some(separator) = bytes.iter().rposition(|b| *b == b'\\') {
         let (namespace, constant) = bytes.split_at(separator);
         let mut lowered = namespace.to_ascii_lowercase();
         lowered.extend_from_slice(constant);
-        return Ok(Value::bool(req.constant_named(&lowered).is_some()));
+        return Ok(req.constant_named(&lowered).is_some());
     }
-    Ok(Value::bool(crate::ops::defined(req, bytes)))
+    Ok(crate::ops::defined(req, bytes))
 }
 
 /// `var_dump(mixed $value, mixed ...$values): void`, php's
@@ -1571,18 +1224,13 @@ fn defined(req: &mut Request) -> Result<Value, Thrown> {
 /// object(stdClass)#1 (0) {
 /// }
 /// ```
-fn var_dump(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count == 0 {
-        return Err(too_few_arguments(req, 1, 0));
-    }
-    for position in 1..=u32::try_from(count).unwrap_or(u32::MAX) {
-        let value = req.argument(position).unwrap_or_default();
+#[php_function]
+fn var_dump(req: &mut Request, value: Value, values: Variadic<Value>) {
+    for value in std::iter::once(value).chain(values.0) {
         let mut out = Vec::new();
         dump(req, &mut out, &value, 1);
         req.write(&out);
     }
-    Ok(Value::null())
 }
 
 /// One value as `php_var_dump(zv, level)` prints it, with its newline:
@@ -2101,9 +1749,9 @@ fn type_text(ty: &Type) -> String {
 /// int(3014680)
 /// int(3014656)
 /// ```
-fn memory_get_usage(req: &mut Request) -> Result<Value, Thrown> {
-    let real = real_usage(req)?;
-    Ok(Value::int(as_long(req.memory_usage(real))))
+#[php_function]
+fn memory_get_usage(req: &mut Request, #[php(default = false)] real_usage: bool) -> i64 {
+    as_long(req.memory_usage(real_usage))
 }
 
 /// `memory_get_peak_usage(bool $real_usage = false): int`, php's
@@ -2156,57 +1804,30 @@ fn memory_get_usage(req: &mut Request) -> Result<Value, Thrown> {
 /// int(28728)
 /// int(28728)
 /// ```
-fn memory_get_peak_usage(req: &mut Request) -> Result<Value, Thrown> {
-    let real = real_usage(req)?;
-    Ok(Value::int(as_long(req.memory_peak(real))))
+#[php_function]
+fn memory_get_peak_usage(req: &mut Request, #[php(default = false)] real_usage: bool) -> i64 {
+    as_long(req.memory_peak(real_usage))
 }
 
 /// `memory_reset_peak_usage(): void`, php's
 /// `zend_memory_reset_peak_usage`: both peaks become what is in use now.
 /// `ZEND_PARSE_PARAMETERS_NONE` takes no argument at all, so one is
 /// php's `ArgumentCountError` and not an ignored extra.
-fn memory_reset_peak_usage(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count != 0 {
-        return Err(wrong_argument_count(req, 0, 0, count));
-    }
+///
+/// ```php
+/// $s = str_repeat("x", 4000000); unset($s);
+/// $before = memory_get_peak_usage();
+/// memory_reset_peak_usage();
+/// var_dump(memory_get_peak_usage() < $before - 3000000);
+/// try { memory_reset_peak_usage(1); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// bool(true)
+/// memory_reset_peak_usage() expects exactly 0 arguments, 1 given
+/// ```
+#[php_function]
+fn memory_reset_peak_usage(req: &mut Request) {
     req.reset_memory_peak();
-    Ok(Value::null())
-}
-
-/// php's `ZEND_PARSE_PARAMETERS_START(0, 1)` over one optional
-/// `Z_PARAM_BOOL`: no argument is `false`, a second is php's
-/// `ArgumentCountError`, and what is there is coerced as php coerces a
-/// bool parameter of a native, `null` included, which is the
-/// 8.1 deprecation and then `false`. The two shared helpers this reaches
-/// for read `$real_usage` off the declaration, so their text is php's.
-fn real_usage(req: &mut Request) -> Result<bool, Thrown> {
-    let count = req.argument_count();
-    if count > 1 {
-        return Err(wrong_argument_count(req, 0, 1, count));
-    }
-    let Some(given) = req.argument(1) else {
-        return Ok(false);
-    };
-    let coerced = coerce_param(req, &given, &Type::Bool, 1)?;
-    Ok(coerced.as_bool().unwrap_or(false))
-}
-
-/// `zend_wrong_parameters_count_error` for a call outside a native's
-/// arity: `exactly` where the maximum is also the minimum, else `at
-/// least` under it and `at most` over it, the bound the call missed, and
-/// that bound's own plural.
-fn wrong_argument_count(req: &mut Request, least: usize, most: usize, given: usize) -> Thrown {
-    let how = if least == most {
-        "exactly"
-    } else if given < least {
-        "at least"
-    } else {
-        "at most"
-    };
-    let bound = if given < least { least } else { most };
-    let word = if bound == 1 { "argument" } else { "arguments" };
-    arg_count_error(req, &format!("{how} {bound} {word}, {given} given"))
 }
 
 /// A byte count as php's `RETURN_LONG` returns one.
@@ -2237,16 +1858,12 @@ fn as_long(bytes: usize) -> i64 {
 /// Warning: unexpected NAN value was coerced to string in %s on line 2
 /// bool(false)
 /// ```
-fn extension_loaded(req: &mut Request) -> Result<Value, Thrown> {
-    let Some(given) = req.argument(1) else {
-        return Err(too_few_arguments(req, 1, 0));
-    };
-    let wanted = crate::ops::to_string(req, &given)?;
-    let lowered = wanted.as_bytes().to_ascii_lowercase();
-    req.release(Value::string(wanted));
-    Ok(Value::bool(req.loaded_extensions().iter().any(|name| {
-        name.as_bytes().to_ascii_lowercase() == lowered
-    })))
+#[php_function]
+fn extension_loaded(req: &mut Request, extension: PhpString) -> bool {
+    let lowered = extension.as_bytes().to_ascii_lowercase();
+    req.loaded_extensions()
+        .iter()
+        .any(|name| name.as_bytes().to_ascii_lowercase() == lowered)
 }
 
 /// `ini_get(string $option): string|false`, php's `PHP_FUNCTION(ini_get)`
@@ -2267,18 +1884,18 @@ fn extension_loaded(req: &mut Request) -> Result<Value, Thrown> {
 /// string(2) "10"
 /// bool(false)
 /// ```
-fn ini_get(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count != 1 {
-        return Err(wrong_argument_count(req, 1, 1, count));
-    }
-    let option = string_argument(req, 1)?;
+#[php_function]
+fn ini_get(req: &mut Request, option: PhpString) -> Result<OrFalse<PhpString>, Thrown> {
     let value = req.ini_get(option.as_bytes()).map(<[u8]>::to_vec);
     Ok(match value {
-        Some(value) => Value::string(PhpString::new(req, &value)?),
-        None => Value::bool(false),
+        Some(value) => OrFalse::Value(PhpString::new(req, &value)?),
+        None => OrFalse::False,
     })
 }
+
+/// `string|int|float|bool|null`, the value `ini_set` declares and reads
+/// raw, refusing what is none of these before it reads the table.
+type IniValue = Option<Union<PhpString, Union<i64, Union<f64, bool>>>>;
 
 /// `ini_set(string $option, string|int|float|bool|null $value):
 /// string|false`, php's `PHP_FUNCTION(ini_set)`: the entry's value
@@ -2312,14 +1929,25 @@ fn ini_get(req: &mut Request) -> Result<Value, Thrown> {
 /// string(0) ""
 /// string(1) "1"
 /// ```
-fn ini_set(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count != 2 {
-        return Err(wrong_argument_count(req, 2, 2, count));
-    }
-    let option = string_argument(req, 1)?;
-    let value = req.argument(2).unwrap_or_default();
-    let value = &value.deref();
+///
+/// `ini_alter`, the stub's `@alias ini_set`, is the same entry under a
+/// second name with `ini_set`'s declaration:
+///
+/// ```php
+/// var_dump(ini_alter('precision', 10), ini_get('precision'), ini_alter('nope', 1));
+/// ```
+/// ```expect
+/// string(2) "14"
+/// string(2) "10"
+/// bool(false)
+/// ```
+#[php_function(aliases(ini_alter))]
+fn ini_set(
+    req: &mut Request,
+    option: PhpString,
+    value: Raw<IniValue>,
+) -> Result<OrFalse<PhpString>, Thrown> {
+    let value = &value.value();
     if matches!(
         value.as_ref(),
         ValueRef::Array(_) | ValueRef::Object(_) | ValueRef::Resource(_)
@@ -2334,24 +1962,9 @@ fn ini_set(req: &mut Request) -> Result<Value, Thrown> {
     let set = req.ini_set(option.as_bytes(), value.as_bytes());
     req.release(Value::string(value));
     Ok(match set? {
-        Some(previous) => Value::string(PhpString::new(req, &previous)?),
-        None => Value::bool(false),
+        Some(previous) => OrFalse::Value(PhpString::new(req, &previous)?),
+        None => OrFalse::False,
     })
-}
-
-/// `ini_alter`, the stub's `@alias ini_set`: the same entry under a
-/// second name with `ini_set`'s declaration.
-///
-/// ```php
-/// var_dump(ini_alter('precision', 10), ini_get('precision'), ini_alter('nope', 1));
-/// ```
-/// ```expect
-/// string(2) "14"
-/// string(2) "10"
-/// bool(false)
-/// ```
-fn ini_alter_declared() -> FunctionDecl {
-    stub::stub("ini_alter(string $option, string|int|float|bool|null $value): string|false")
 }
 
 /// `set_time_limit(int $seconds): bool`, php's `PHP_FUNCTION(set_time_limit)`
@@ -2373,13 +1986,9 @@ fn ini_alter_declared() -> FunctionDecl {
 ///
 /// What the seconds do once armed is the witness beside
 /// [`crate::interrupt::interrupted`].
-fn set_time_limit(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count != 1 {
-        return Err(wrong_argument_count(req, 1, 1, count));
-    }
-    let seconds = long_argument(req, 1)?;
-    Ok(Value::bool(req.set_time_limit(seconds)))
+#[php_function]
+fn set_time_limit(req: &mut Request, seconds: i64) -> bool {
+    req.set_time_limit(seconds)
 }
 
 /// `error_reporting(?int $error_level = null): int`, php's
@@ -2420,24 +2029,15 @@ fn set_time_limit(req: &mut Request) -> Result<Value, Thrown> {
 /// string(2) "2x"
 /// int(0)
 /// ```
-fn error_reporting(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count > 1 {
-        return Err(wrong_argument_count(req, 0, 1, count));
-    }
+#[php_function]
+fn error_reporting(req: &mut Request, #[php(default = null)] error_level: Option<i64>) -> i64 {
     let old = req.error_reporting();
-    if count == 1 {
-        let given = req.argument(1).unwrap_or_default();
-        if !matches!(given.deref().as_ref(), ValueRef::Null | ValueRef::Undef) {
-            let level = coerce_param(req, &given, &Type::Int, 1)?
-                .as_int()
-                .unwrap_or(0);
-            if level != old {
-                req.alter_error_reporting(level);
-            }
-        }
+    if let Some(level) = error_level
+        && level != old
+    {
+        req.alter_error_reporting(level);
     }
-    Ok(Value::int(old))
+    old
 }
 
 /// `register_shutdown_function(callable $callback, mixed ...$args): void`,
@@ -2532,21 +2132,17 @@ fn error_reporting(req: &mut Request) -> Result<Value, Thrown> {
 /// #1 {main}
 ///   thrown in %s on line 2
 /// ```
-fn register_shutdown_function(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count == 0 {
-        return Err(too_few_arguments(req, 1, 0));
-    }
-    let callback = callable_argument(req, 1)?;
+#[php_function]
+fn register_shutdown_function(
+    req: &mut Request,
+    callback: Callable,
+    args: Variadic<Value>,
+) -> Result<(), Thrown> {
     callback.addref(req);
-    let mut arguments = Vec::new();
-    for position in 2..=u32::try_from(count).unwrap_or(u32::MAX) {
-        let value = req.argument(position).unwrap_or_default();
-        req.addref(&value);
-        arguments.push(value);
+    for value in &args.0 {
+        req.addref(value);
     }
-    req.register_shutdown_function(callback, arguments)?;
-    Ok(Value::null())
+    req.register_shutdown_function(callback, args.0)
 }
 
 /// `php_call_shutdown_functions` (`Z/ext/standard/basic_functions.c:1650`),
@@ -2617,101 +2213,6 @@ pub(crate) fn call_shutdown_functions(req: &mut Request) {
                 return;
             }
         }
-    }
-}
-
-/// One `Z_PARAM_FUNC` of a native, php's `"F"`: the argument at
-/// `position` resolved into the callee it names, `zend_parse_arg_func`
-/// over `zend_is_callable_ex`, so a callback is held to being one where
-/// it is taken and not where it is served. The sentence a miss takes is
-/// php's `*error` for that miss, the one `zend_is_callable_ex` wrote.
-fn callable_argument(req: &mut Request, position: u32) -> Result<Callable, Thrown> {
-    match crate::api::coerce::callable_argument(req, position)? {
-        Some(callable) => Ok(callable),
-        None => Err(crate::api::raising::fatal(
-            req,
-            "InternalError: a callable parameter read no callable",
-        )),
-    }
-}
-
-/// One `Z_PARAM_LONG` of a native, the argument at `position` read off
-/// the call frame, `coerce_param` over `int`, whose `null` is the 8.1
-/// deprecation and then zero under the weak rule.
-fn long_argument(req: &mut Request, position: u32) -> Result<i64, Thrown> {
-    let given = req.argument(position).unwrap_or_default();
-    let coerced = coerce_param(req, &given, &Type::Int, position)?;
-    Ok(coerced.as_int().unwrap_or(0))
-}
-
-/// One `Z_PARAM_STR` of a native, the argument at `position` read off
-/// the call frame, `coerce_param` over `string`: `null` is the 8.1
-/// deprecation and then the empty string under the weak rule and the
-/// `TypeError` under `strict_types`. The string is the frame's, a view
-/// the native holds while the call stands.
-fn string_argument(req: &mut Request, position: u32) -> Result<PhpString, Thrown> {
-    let given = req.argument(position).unwrap_or_default();
-    let coerced = coerce_param(req, &given, &Type::String, position)?;
-    match coerced.as_php_string() {
-        Some(s) => Ok(*s),
-        None => PhpString::new(req, b""),
-    }
-}
-
-/// One `Z_PARAM_STR_OR_LONG` of a native, the argument at `position`
-/// read off the call frame (`zend_parse_arg_str_or_long`,
-/// `Z/Zend/zend_API.h`): `coerce_param` over `string|int`, whose weak
-/// rule is `zend_parse_arg_str_or_long_slow`'s two tries in order, the
-/// int's and then the string's, and whose `null` is the 8.1 deprecation
-/// and `0`.
-fn string_or_long_argument(req: &mut Request, position: u32) -> Result<Value, Thrown> {
-    let given = req.argument(position).unwrap_or_default();
-    coerce_param(
-        req,
-        &given,
-        &Type::Union(vec![Type::String, Type::Int]),
-        position,
-    )
-}
-
-/// One declared parameter.
-fn parameter(name: &[u8], ty: Option<Type>, variadic: bool) -> Parameter {
-    Parameter {
-        name: Name(name.into()),
-        ty,
-        by_ref: false,
-        prefer_ref: false,
-        promoted: false,
-        variadic,
-        default: ParameterDefault::None,
-        attributes: Vec::new(),
-    }
-}
-
-/// `bool $real_usage = false`, the one parameter the two memory readers
-/// share.
-fn real_usage_parameter() -> Parameter {
-    Parameter {
-        default: ParameterDefault::Expr(ConstExpr::Bool(false)),
-        ..parameter(b"real_usage", Some(Type::Bool), false)
-    }
-}
-
-/// One native's declaration, as the macros derive an extension's from
-/// its Rust signature.
-fn declared(name: &[u8], parameters: &[Parameter], returns: Option<Type>) -> FunctionDecl {
-    FunctionDecl {
-        name: Name(name.into()),
-        parameters: parameters.to_vec(),
-        return_type: returns,
-        returns_by_ref: false,
-        is_generator: false,
-        attributes: Vec::new(),
-        doc_comment: None,
-        file: Name(Box::new([])),
-        line: 0,
-        end_line: 0,
-        frameless: Vec::new(),
     }
 }
 

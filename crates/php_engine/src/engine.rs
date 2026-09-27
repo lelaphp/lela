@@ -366,19 +366,17 @@ struct LinkedClasses {
     trampolines: Vec<MethodDecl>,
 }
 
-/// [`LinkedClasses`] for `extensions`.
-fn link_classes(extensions: &[Extension]) -> LinkedClasses {
+/// [`LinkedClasses`] for Core's and then `extensions`'.
+fn link_classes(core: &Extension, extensions: &[Extension]) -> LinkedClasses {
     // `zend_register_internal_class_with_flags` and `zend_register_functions`
     // over the class's methods: each declaration takes its methods,
     // and each method's entry is numbered in the order it is met.
-    let mut zend = crate::interfaces::classes();
-    zend.extend(crate::classes::zend_classes());
-    zend.extend(crate::fiber::classes());
     let mut classes: Vec<ClassDecl> = Vec::new();
     let mut handlers = Vec::new();
     let mut natives = Vec::new();
     let mut methods = Vec::new();
-    for (decl, entries, table, native) in zend
+    for (decl, entries, table, native) in core
+        .classes
         .iter()
         .chain(extensions.iter().flat_map(|e| e.classes.iter()))
     {
@@ -510,12 +508,6 @@ impl Shared {
             functions: &self.functions,
             classes: &self.classes,
         }
-    }
-
-    /// The engine's own constants, Core's, in php's order
-    /// ([`crate::constants::core_constants`]).
-    fn zend_constants() -> Vec<ConstDecl> {
-        crate::constants::core_constants()
     }
 
     /// One source compiled with its constant strings interned into the
@@ -1172,6 +1164,7 @@ fn disabled_functions(list: &[u8]) -> Vec<&[u8]> {
 /// The one place the disabled set is decided: what it takes out is in no
 /// table the compiler or a request reads.
 fn function_table(
+    core: &Extension,
     extensions: &[Extension],
     ini: &[(Vec<u8>, Vec<u8>)],
 ) -> (Vec<Option<ExtensionId>>, Vec<(FunctionDecl, Entry)>) {
@@ -1180,8 +1173,10 @@ fn function_table(
         .find(|(name, _)| name.as_slice() == b"disable_functions")
         .map_or(&[][..], |(_, list)| list.as_slice());
     let disabled = disabled_functions(list);
-    crate::natives::natives()
-        .into_iter()
+    core.functions
+        .iter()
+        .cloned()
+        .chain(crate::natives::standard())
         .map(|native| (None, native))
         .chain(extensions.iter().zip(0u32..).flat_map(|(e, at)| {
             e.functions
@@ -1279,7 +1274,8 @@ impl EngineBuilder {
                 ini.push((entry.name.0.to_vec(), entry.default.to_vec()));
             }
         }
-        let zend_constants = Shared::zend_constants();
+        let core = crate::core::extension();
+        let zend_constants = core.constants.clone();
         let configuration = Configuration::read(&self.ini_entries, &zend_constants);
         // An entry with an `on_modify` keeps its default until the
         // handler has taken the value the host set ([`Engine::register_ini`]).
@@ -1292,7 +1288,7 @@ impl EngineBuilder {
             ini.retain(|(n, _)| *n != name);
             ini.push((name, value));
         }
-        let (function_modules, functions) = function_table(&extensions, &ini);
+        let (function_modules, functions) = function_table(&core, &extensions, &ini);
         let function_flags = functions
             .iter()
             .map(|(decl, _)| crate::attributes::Flags::of(&decl.attributes))
@@ -1304,7 +1300,7 @@ impl EngineBuilder {
             natives,
             methods,
             trampolines,
-        } = link_classes(&extensions);
+        } = link_classes(&core, &extensions);
         // Zend's own constants stand before the bundle's, as
         // `zend_register_standard_constants` runs before any `MINIT`.
         let constants: Vec<ConstDecl> = zend_constants

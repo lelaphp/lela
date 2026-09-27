@@ -6,91 +6,13 @@
 //! measured against `zend_get_executed_scope`, which is the scope the
 //! native was called from ([`Request::scope`]).
 
-use php_unit::decl::{ClassKind, FunctionDecl, PropertyDecl, Type, Visibility};
+use php_macros::php_function;
+use php_unit::decl::{ClassKind, PropertyDecl, Visibility};
 
-use super::stub::stub;
-use super::{string_argument, wrong_argument_count};
-use crate::api::abi::{Entry, PropertyPurpose, PropertyTest};
-use crate::api::coerce::coerce_param;
+use crate::api::abi::{OrFalse, Passed, PropertyPurpose, PropertyTest, Raw, Union, Untyped};
 use crate::api::raising::{Thrown, arg_type_error, deprecated, throw, warning};
 use crate::api::request::Request;
 use crate::api::values::{ClassId, Key, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
-
-/// The seventeen, in the stub's order.
-pub(super) fn natives() -> Vec<(FunctionDecl, Entry)> {
-    vec![
-        (
-            stub("get_called_class(): string"),
-            get_called_class as Entry,
-        ),
-        (
-            stub("get_parent_class(object|string $object_or_class = UNKNOWN): string|false"),
-            get_parent_class as Entry,
-        ),
-        (
-            stub(
-                "is_subclass_of(mixed $object_or_class, string $class, bool $allow_string = true): bool",
-            ),
-            is_subclass_of as Entry,
-        ),
-        (
-            stub("is_a(mixed $object_or_class, string $class, bool $allow_string = false): bool"),
-            is_a as Entry,
-        ),
-        (
-            stub("get_class_vars(string $class): array"),
-            get_class_vars as Entry,
-        ),
-        (
-            stub("get_object_vars(object $object): array"),
-            get_object_vars as Entry,
-        ),
-        (
-            stub("get_mangled_object_vars(object $object): array"),
-            get_mangled_object_vars as Entry,
-        ),
-        (
-            stub("get_class_methods(object|string $object_or_class): array"),
-            get_class_methods as Entry,
-        ),
-        (
-            stub("method_exists($object_or_class, string $method): bool"),
-            method_exists as Entry,
-        ),
-        (
-            stub("property_exists($object_or_class, string $property): bool"),
-            property_exists as Entry,
-        ),
-        (
-            stub("interface_exists(string $interface, bool $autoload = true): bool"),
-            interface_exists as Entry,
-        ),
-        (
-            stub("trait_exists(string $trait, bool $autoload = true): bool"),
-            trait_exists as Entry,
-        ),
-        (
-            stub("enum_exists(string $enum, bool $autoload = true): bool"),
-            enum_exists as Entry,
-        ),
-        (
-            stub("class_alias(string $class, string $alias, bool $autoload = true): bool"),
-            class_alias as Entry,
-        ),
-        (
-            stub("get_declared_classes(): array"),
-            get_declared_classes as Entry,
-        ),
-        (
-            stub("get_declared_traits(): array"),
-            get_declared_traits as Entry,
-        ),
-        (
-            stub("get_declared_interfaces(): array"),
-            get_declared_interfaces as Entry,
-        ),
-    ]
-}
 
 /// `zend_lookup_class_ex`: a leading `\` dropped, the table under the
 /// lowered name, and the autoloaders where the table has none and
@@ -110,33 +32,10 @@ pub(super) fn lookup_class(
     crate::api::call::autoload(req, bare)
 }
 
-/// One `Z_PARAM_BOOL` of a native, coerced as php coerces a bool
-/// parameter.
-fn bool_argument(req: &mut Request, position: u32) -> Result<bool, Thrown> {
-    let given = req.argument(position).unwrap_or_default();
-    Ok(coerce_param(req, &given, &Type::Bool, position)?
-        .as_bool()
-        .unwrap_or(false))
-}
-
-/// One `Z_PARAM_OBJ` of a native, the object or php's `TypeError`.
-fn object_argument(req: &mut Request, position: u32) -> Result<PhpObject, Thrown> {
-    let given = req.argument(position).unwrap_or_default();
-    let object = coerce_param(req, &given, &Type::Object, position)?;
-    match object.as_object() {
-        Some(object) => Ok(*object),
-        None => Err(crate::api::raising::fatal(
-            req,
-            "InternalError: coerce_param held a value that is no object to `object`",
-        )),
-    }
-}
-
 /// One `Z_PARAM_OBJ_OR_CLASS_NAME` of a native: an object's class, or
 /// the class a string names, looked up with the autoloaders; anything
 /// else, and a name no class has, is php's `TypeError`.
-fn object_or_class_name(req: &mut Request, position: u32) -> Result<ClassId, Thrown> {
-    let given = req.argument(position).unwrap_or_default().deref();
+fn object_or_class_name(req: &mut Request, given: Value, position: u32) -> Result<ClassId, Thrown> {
     match given.as_ref() {
         ValueRef::Object(object) => return Ok(object.class()),
         ValueRef::Str(name) => {
@@ -155,9 +54,9 @@ fn object_or_class_name(req: &mut Request, position: u32) -> Result<ClassId, Thr
 }
 
 /// The declared name of a class as a string of the request's.
-fn class_name_value(req: &mut Request, class: ClassId) -> Result<Value, Thrown> {
+fn class_name(req: &mut Request, class: ClassId) -> Result<PhpString, Thrown> {
     let name = req.class_name_bytes(class);
-    Ok(Value::string(PhpString::new(req, &name)?))
+    PhpString::new(req, &name)
 }
 
 /// `get_called_class(): string`, php's `ZEND_FUNCTION(get_called_class)`
@@ -180,13 +79,10 @@ fn class_name_value(req: &mut Request, class: ClassId) -> Result<Value, Thrown> 
 /// string(1) "B"
 /// get_called_class() must be called from within a class
 /// ```
-fn get_called_class(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count != 0 {
-        return Err(wrong_argument_count(req, 0, 0, count));
-    }
+#[php_function]
+fn get_called_class(req: &mut Request) -> Result<PhpString, Thrown> {
     match req.called_scope() {
-        Some(class) => class_name_value(req, class),
+        Some(class) => class_name(req, class),
         None => Err(throw(
             req,
             "Error",
@@ -220,13 +116,13 @@ fn get_called_class(req: &mut Request) -> Result<Value, Thrown> {
 /// #1 {main}
 ///   thrown in %s on line 5
 /// ```
-fn get_parent_class(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count > 1 {
-        return Err(wrong_argument_count(req, 0, 1, count));
-    }
-    let class = if count == 1 {
-        Some(object_or_class_name(req, 1)?)
+#[php_function]
+fn get_parent_class(
+    req: &mut Request,
+    object_or_class: Passed<Raw<Union<PhpObject, PhpString>>>,
+) -> Result<OrFalse<PhpString>, Thrown> {
+    let class = if let Passed::Given(given) = object_or_class {
+        Some(object_or_class_name(req, given.value(), 1)?)
     } else {
         deprecated(
             req,
@@ -238,8 +134,8 @@ fn get_parent_class(req: &mut Request) -> Result<Value, Thrown> {
         req.scope()
     };
     match class.and_then(|class| req.class_parent(class)) {
-        Some(parent) => class_name_value(req, parent),
-        None => Ok(Value::bool(false)),
+        Some(parent) => class_name(req, parent).map(OrFalse::Value),
+        None => Ok(OrFalse::False),
     }
 }
 
@@ -249,39 +145,32 @@ fn get_parent_class(req: &mut Request) -> Result<Value, Thrown> {
 /// otherwise the class named looked up without the autoloaders and
 /// `instanceof_function` over the two, which `is_subclass_of` refuses
 /// for the class itself.
-fn is_a_impl(req: &mut Request, only_subclass: bool) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if !(2..=3).contains(&count) {
-        return Err(wrong_argument_count(req, 2, 3, count));
-    }
-    let object = req.argument(1).unwrap_or_default().deref();
-    let class_name = string_argument(req, 2)?;
-    let allow_string = if count == 3 {
-        bool_argument(req, 3)?
-    } else {
-        only_subclass
-    };
+fn is_a_impl(
+    req: &mut Request,
+    (object, class_name, allow_string): (Value, PhpString, bool),
+    only_subclass: bool,
+) -> Result<bool, Thrown> {
     let instance = match object.as_ref() {
         ValueRef::Str(name) if allow_string => {
             let name = name.as_bytes().to_vec();
             match lookup_class(req, &name, true)? {
                 Some(class) => class,
-                None => return Ok(Value::bool(false)),
+                None => return Ok(false),
             }
         }
         ValueRef::Object(object) => object.class(),
-        _ => return Ok(Value::bool(false)),
+        _ => return Ok(false),
     };
     let wanted = class_name.as_bytes().to_vec();
     if !only_subclass && req.class_name_bytes(instance) == wanted {
-        return Ok(Value::bool(true));
+        return Ok(true);
     }
     let answer = match lookup_class(req, &wanted, false)? {
         None => false,
         Some(class) if only_subclass && class == instance => false,
         Some(class) => req.instance_of(instance, class),
     };
-    Ok(Value::bool(answer))
+    Ok(answer)
 }
 
 /// `is_subclass_of(mixed $object_or_class, string $class, bool
@@ -302,8 +191,14 @@ fn is_a_impl(req: &mut Request, only_subclass: bool) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(false)
 /// ```
-fn is_subclass_of(req: &mut Request) -> Result<Value, Thrown> {
-    is_a_impl(req, true)
+#[php_function]
+fn is_subclass_of(
+    req: &mut Request,
+    object_or_class: Value,
+    class: PhpString,
+    #[php(default = true)] allow_string: bool,
+) -> Result<bool, Thrown> {
+    is_a_impl(req, (object_or_class, class, allow_string), true)
 }
 
 /// `is_a(mixed $object_or_class, string $class, bool $allow_string =
@@ -323,8 +218,14 @@ fn is_subclass_of(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(false)
 /// ```
-fn is_a(req: &mut Request) -> Result<Value, Thrown> {
-    is_a_impl(req, false)
+#[php_function]
+fn is_a(
+    req: &mut Request,
+    object_or_class: Value,
+    class: PhpString,
+    #[php(default = false)] allow_string: bool,
+) -> Result<bool, Thrown> {
+    is_a_impl(req, (object_or_class, class, allow_string), false)
 }
 
 /// `ce->properties_info` in its order: the class's own declarations,
@@ -446,13 +347,9 @@ fn visible(
 /// array(0) {
 /// }
 /// ```
-fn get_class_vars(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count != 1 {
-        return Err(wrong_argument_count(req, 1, 1, count));
-    }
-    let name = string_argument(req, 1)?;
-    let bytes = name.as_bytes().to_vec();
+#[php_function]
+fn get_class_vars(req: &mut Request, class: PhpString) -> Result<PhpArray, Thrown> {
+    let bytes = class.as_bytes().to_vec();
     let Some(class) = lookup_class(req, &bytes, true)? else {
         let tail = format!(
             "be a valid class name, {} given",
@@ -478,7 +375,7 @@ fn get_class_vars(req: &mut Request) -> Result<Value, Thrown> {
             array.set(req, key, value)?;
         }
     }
-    Ok(Value::array(array))
+    Ok(array)
 }
 
 /// `zend_get_property_info` under the executed scope, as
@@ -581,12 +478,8 @@ fn property_info(
 ///   int(2)
 /// }
 /// ```
-fn get_object_vars(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count != 1 {
-        return Err(wrong_argument_count(req, 1, 1, count));
-    }
-    let object = object_argument(req, 1)?;
+#[php_function]
+fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thrown> {
     let class = object.class();
     let scope = req.scope();
     // `zend_get_properties_for(ZEND_PROP_PURPOSE_GET_OBJECT_VARS)`: a
@@ -614,7 +507,7 @@ fn get_object_vars(req: &mut Request) -> Result<Value, Thrown> {
             };
             array.set(req, key, value)?;
         }
-        return Ok(Value::array(array));
+        return Ok(array);
     }
     let placed = req.placed_properties(class);
     let rows = req.property_rows(object)?;
@@ -657,7 +550,7 @@ fn get_object_vars(req: &mut Request) -> Result<Value, Thrown> {
         };
         array.set(req, key, value)?;
     }
-    Ok(Value::array(array))
+    Ok(array)
 }
 
 /// `get_object_vars()` over the table a class's `get_properties_for`
@@ -685,7 +578,7 @@ fn answered_vars(
     class: ClassId,
     scope: Option<ClassId>,
     rows: Vec<(PhpString, Value)>,
-) -> Result<Value, Thrown> {
+) -> Result<PhpArray, Thrown> {
     let placed = req.placed_properties(class);
     let mut array = PhpArray::new(req)?;
     for (name, value) in rows {
@@ -704,7 +597,7 @@ fn answered_vars(
         req.addref(&value);
         array.set(req, key, value)?;
     }
-    Ok(Value::array(array))
+    Ok(array)
 }
 
 /// `get_mangled_object_vars(object $object): array`, php's
@@ -724,16 +617,12 @@ fn answered_vars(
 ///   int(1)
 /// }
 /// ```
-fn get_mangled_object_vars(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count != 1 {
-        return Err(wrong_argument_count(req, 1, 1, count));
-    }
-    let object = object_argument(req, 1)?;
+#[php_function]
+fn get_mangled_object_vars(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thrown> {
     // `zend_get_properties_no_lazy_init`: a lazy object's table as it
     // stands, nothing initialised for it.
     let rows = req.properties_no_lazy_init(object)?;
-    Ok(Value::array(crate::ops::mangled_array(req, object, rows)?))
+    crate::ops::mangled_array(req, object, rows)
 }
 
 /// `ce->function_table` in its order: the class's own methods as
@@ -806,12 +695,12 @@ fn function_table(req: &Request, class: ClassId) -> Vec<(Box<[u8]>, Visibility, 
 /// #1 {main}
 ///   thrown in %s on line 5
 /// ```
-fn get_class_methods(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count != 1 {
-        return Err(wrong_argument_count(req, 1, 1, count));
-    }
-    let class = object_or_class_name(req, 1)?;
+#[php_function]
+fn get_class_methods(
+    req: &mut Request,
+    object_or_class: Raw<Union<PhpObject, PhpString>>,
+) -> Result<PhpArray, Thrown> {
+    let class = object_or_class_name(req, object_or_class.value(), 1)?;
     let scope = req.scope();
     let names: Vec<Box<[u8]>> = function_table(req, class)
         .into_iter()
@@ -823,15 +712,14 @@ fn get_class_methods(req: &mut Request) -> Result<Value, Thrown> {
         let name = Value::string(PhpString::new(req, &name)?);
         array.append(req, name)?;
     }
-    Ok(Value::array(array))
+    Ok(array)
 }
 
 /// The class a `$object_or_class` of `method_exists` and
 /// `property_exists` names, php's two arms before `zend_argument_type_error`:
 /// an object's, a string's looked up with the autoloaders, `None` for a
 /// name no class has, and the `TypeError` for anything else.
-fn class_of_argument(req: &mut Request) -> Result<(Option<ClassId>, bool), Thrown> {
-    let given = req.argument(1).unwrap_or_default().deref();
+fn class_of_argument(req: &mut Request, given: Value) -> Result<(Option<ClassId>, bool), Thrown> {
     match given.as_ref() {
         ValueRef::Object(object) => Ok((Some(object.class()), true)),
         ValueRef::Str(name) => {
@@ -875,27 +763,25 @@ fn class_of_argument(req: &mut Request) -> Result<(Option<ClassId>, bool), Throw
 /// #1 {main}
 ///   thrown in %s on line 4
 /// ```
-fn method_exists(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count != 2 {
-        return Err(wrong_argument_count(req, 2, 2, count));
-    }
-    let (class, is_object) = class_of_argument(req)?;
-    let method = string_argument(req, 2)?;
+#[php_function]
+fn method_exists(
+    req: &mut Request,
+    object_or_class: Untyped<Value>,
+    method: PhpString,
+) -> Result<bool, Thrown> {
+    let (class, is_object) = class_of_argument(req, object_or_class.0)?;
     let Some(class) = class else {
-        return Ok(Value::bool(false));
+        return Ok(false);
     };
     let lowered = method.as_bytes().to_ascii_lowercase();
     if let Some(function) = req.method_named(class, &lowered) {
         let private = req
             .method_decl(function)
             .is_some_and(|decl| decl.visibility == Visibility::Private);
-        return Ok(Value::bool(
-            is_object || !private || req.method_class(function) == Some(class),
-        ));
+        return Ok(is_object || !private || req.method_class(function) == Some(class));
     }
     let closure = req.class_named(b"Closure") == Some(class);
-    Ok(Value::bool(closure && lowered == b"__invoke"))
+    Ok(closure && lowered == b"__invoke")
 }
 
 /// `property_exists($object_or_class, string $property): bool`, php's
@@ -934,56 +820,47 @@ fn method_exists(req: &mut Request) -> Result<Value, Thrown> {
 /// #1 {main}
 ///   thrown in %s on line 6
 /// ```
-fn property_exists(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count != 2 {
-        return Err(wrong_argument_count(req, 2, 2, count));
-    }
-    let (class, is_object) = class_of_argument(req)?;
-    let property = string_argument(req, 2)?;
+#[php_function]
+fn property_exists(
+    req: &mut Request,
+    object_or_class: Untyped<Value>,
+    property: PhpString,
+) -> Result<bool, Thrown> {
+    let given = object_or_class.0;
+    let (class, is_object) = class_of_argument(req, given)?;
     let Some(class) = class else {
-        return Ok(Value::bool(false));
+        return Ok(false);
     };
     let name = property.as_bytes();
     if properties_info(req, class).iter().any(|(declaring, p)| {
         &*p.name.0 == name && (p.visibility != Visibility::Private || *declaring == class)
     }) {
-        return Ok(Value::bool(true));
+        return Ok(true);
     }
-    if is_object && let Some(object) = req.argument(1).unwrap_or_default().deref().as_object() {
+    if is_object && let Some(object) = given.as_object() {
         let object = *object;
         let table = req.object_handlers(object.heap());
         let name = name.to_vec();
-        return Ok(Value::bool(table.has_property(
-            req,
-            object,
-            &name,
-            PropertyTest::Exists,
-        )?));
+        return table.has_property(req, object, &name, PropertyTest::Exists);
     }
-    Ok(Value::bool(false))
+    Ok(false)
 }
 
 /// `class_exists_impl` (`Z/Zend/zend_builtin_functions.c:1115`): the
 /// class the name finds, with or without the autoloaders, answered by
 /// whether its kind is one `kinds` takes.
-pub(super) fn exists(req: &mut Request, kinds: &[ClassKind]) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if !(1..=2).contains(&count) {
-        return Err(wrong_argument_count(req, 1, 2, count));
-    }
-    let name = string_argument(req, 1)?;
-    let autoload = if count == 2 {
-        bool_argument(req, 2)?
-    } else {
-        true
-    };
+pub(super) fn exists(
+    req: &mut Request,
+    name: PhpString,
+    autoload: bool,
+    kinds: &[ClassKind],
+) -> Result<bool, Thrown> {
     let bytes = name.as_bytes().to_vec();
     let found = lookup_class(req, &bytes, autoload)?;
     let answer = found
         .and_then(|class| req.class_decl(class))
         .is_some_and(|decl| kinds.contains(&decl.kind));
-    Ok(Value::bool(answer))
+    Ok(answer)
 }
 
 /// `interface_exists(string $interface, bool $autoload = true): bool`,
@@ -1000,8 +877,13 @@ pub(super) fn exists(req: &mut Request, kinds: &[ClassKind]) -> Result<Value, Th
 /// bool(true)
 /// bool(false)
 /// ```
-fn interface_exists(req: &mut Request) -> Result<Value, Thrown> {
-    exists(req, &[ClassKind::Interface])
+#[php_function]
+fn interface_exists(
+    req: &mut Request,
+    interface: PhpString,
+    #[php(default = true)] autoload: bool,
+) -> Result<bool, Thrown> {
+    exists(req, interface, autoload, &[ClassKind::Interface])
 }
 
 /// `trait_exists(string $trait, bool $autoload = true): bool`, php's
@@ -1020,8 +902,13 @@ fn interface_exists(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(false)
 /// bool(false)
 /// ```
-fn trait_exists(req: &mut Request) -> Result<Value, Thrown> {
-    exists(req, &[ClassKind::Trait])
+#[php_function]
+fn trait_exists(
+    req: &mut Request,
+    r#trait: PhpString,
+    #[php(default = true)] autoload: bool,
+) -> Result<bool, Thrown> {
+    exists(req, r#trait, autoload, &[ClassKind::Trait])
 }
 
 /// `enum_exists(string $enum, bool $autoload = true): bool`, php's
@@ -1038,8 +925,28 @@ fn trait_exists(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(false)
 /// ```
-fn enum_exists(req: &mut Request) -> Result<Value, Thrown> {
-    exists(req, &[ClassKind::Enum])
+///
+/// The name is looked up as `class_exists` looks one up, a leading `\`
+/// dropped and the case folded:
+///
+/// ```php
+/// enum Suit { case Hearts; }
+/// var_dump(enum_exists('Suit'), enum_exists('\suit'), enum_exists('stdClass'), enum_exists('PropertyHookType'), enum_exists('Nope', false));
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// ```
+#[php_function]
+fn enum_exists(
+    req: &mut Request,
+    r#enum: PhpString,
+    #[php(default = true)] autoload: bool,
+) -> Result<bool, Thrown> {
+    exists(req, r#enum, autoload, &[ClassKind::Enum])
 }
 
 /// `zend_is_reserved_class_name` (`Z/Zend/zend_compile.c:224`): the
@@ -1127,19 +1034,14 @@ fn kind_word(kind: ClassKind) -> &'static str {
 ///
 /// Fatal error: Cannot use "int" as a class alias as it is reserved in %s on line 3
 /// ```
-fn class_alias(req: &mut Request) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if !(2..=3).contains(&count) {
-        return Err(wrong_argument_count(req, 2, 3, count));
-    }
-    let class_name = string_argument(req, 1)?;
-    let alias = string_argument(req, 2)?;
-    let autoload = if count == 3 {
-        bool_argument(req, 3)?
-    } else {
-        true
-    };
-    let class_bytes = class_name.as_bytes().to_vec();
+#[php_function]
+fn class_alias(
+    req: &mut Request,
+    class: PhpString,
+    alias: PhpString,
+    #[php(default = true)] autoload: bool,
+) -> Result<bool, Thrown> {
+    let class_bytes = class.as_bytes().to_vec();
     let alias_bytes = alias.as_bytes().to_vec();
     let Some(class) = lookup_class(req, &class_bytes, autoload)? else {
         warning(
@@ -1149,7 +1051,7 @@ fn class_alias(req: &mut Request) -> Result<Value, Thrown> {
                 String::from_utf8_lossy(&class_bytes)
             ),
         );
-        return Ok(Value::bool(false));
+        return Ok(false);
     };
     let lowered = alias_bytes
         .strip_prefix(b"\\")
@@ -1168,7 +1070,7 @@ fn class_alias(req: &mut Request) -> Result<Value, Thrown> {
         deprecated(req, "Using \"_\" as a class alias is deprecated since 8.4");
     }
     if req.class_alias(class, &lowered) {
-        return Ok(Value::bool(true));
+        return Ok(true);
     }
     let shown = String::from_utf8_lossy(&alias_bytes).into_owned();
     let message = match req.class_decl(class) {
@@ -1182,18 +1084,14 @@ fn class_alias(req: &mut Request) -> Result<Value, Thrown> {
         None => format!("Cannot redeclare class {shown}"),
     };
     warning(req, &message);
-    Ok(Value::bool(false))
+    Ok(false)
 }
 
 /// `get_declared_class_impl` (`Z/Zend/zend_builtin_functions.c:1430`):
 /// `EG(class_table)` in its order, each row whose kind `kinds` takes, by
 /// the class's declared name, and an alias's row by the lowered name it
 /// is keyed by.
-fn declared(req: &mut Request, kinds: &[ClassKind]) -> Result<Value, Thrown> {
-    let count = req.argument_count();
-    if count != 0 {
-        return Err(wrong_argument_count(req, 0, 0, count));
-    }
+fn declared(req: &mut Request, kinds: &[ClassKind]) -> Result<PhpArray, Thrown> {
     let names: Vec<Vec<u8>> = req
         .class_table()
         .into_iter()
@@ -1212,7 +1110,7 @@ fn declared(req: &mut Request, kinds: &[ClassKind]) -> Result<Value, Thrown> {
         let name = Value::string(PhpString::new(req, &name)?);
         array.append(req, name)?;
     }
-    Ok(Value::array(array))
+    Ok(array)
 }
 
 /// `get_declared_classes(): array`, php's
@@ -1232,7 +1130,8 @@ fn declared(req: &mut Request, kinds: &[ClassKind]) -> Result<Value, Thrown> {
 /// string(1) "A"
 /// string(1) "B"
 /// ```
-fn get_declared_classes(req: &mut Request) -> Result<Value, Thrown> {
+#[php_function]
+fn get_declared_classes(req: &mut Request) -> Result<PhpArray, Thrown> {
     declared(req, &[ClassKind::Class, ClassKind::Enum])
 }
 
@@ -1251,7 +1150,8 @@ fn get_declared_classes(req: &mut Request) -> Result<Value, Thrown> {
 ///   string(1) "U"
 /// }
 /// ```
-fn get_declared_traits(req: &mut Request) -> Result<Value, Thrown> {
+#[php_function]
+fn get_declared_traits(req: &mut Request) -> Result<PhpArray, Thrown> {
     declared(req, &[ClassKind::Trait])
 }
 
@@ -1269,6 +1169,7 @@ fn get_declared_traits(req: &mut Request) -> Result<Value, Thrown> {
 /// bool(true)
 /// bool(false)
 /// ```
-fn get_declared_interfaces(req: &mut Request) -> Result<Value, Thrown> {
+#[php_function]
+fn get_declared_interfaces(req: &mut Request) -> Result<PhpArray, Thrown> {
     declared(req, &[ClassKind::Interface])
 }
