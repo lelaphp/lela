@@ -652,19 +652,50 @@ impl ObjectHandlers for Handlers {
         true
     }
 
+    /// `spl_fixedarray_object_get_properties_for`: a table of its own,
+    /// the elements and then the object's properties under the keys its
+    /// table holds them by, mangled where they are protected or private;
+    /// `get_object_vars()`'s the properties alone, which, read from a
+    /// copy, it hands back as they stand.
+    ///
+    /// ```php
+    /// class F extends SplFixedArray { public $a = 1; protected $b = 2; private $c = 3; }
+    /// echo json_encode(get_object_vars(new F(2))), "\n";
+    /// var_dump(new F(1));
+    /// ```
+    /// ```expect
+    /// {"a":1,"\u0000*\u0000b":2,"\u0000F\u0000c":3}
+    /// object(F)#1 (4) {
+    ///   [0]=>
+    ///   NULL
+    ///   ["a"]=>
+    ///   int(1)
+    ///   ["b":protected]=>
+    ///   int(2)
+    ///   ["c":"F":private]=>
+    ///   int(3)
+    /// }
+    /// ```
     fn get_properties_for(
         &self,
         req: &mut Request,
         object: PhpObject,
         purpose: PropertyPurpose,
     ) -> Result<Option<Vec<(PhpString, Value)>>, Thrown> {
-        // "The array elements are not *real properties*": what
-        // `get_object_vars()` reads is the object's own table alone.
-        if purpose == PropertyPurpose::GetObjectVars {
+        // php asserts no serializer asks, the class having `__serialize`;
+        // what reads the table under that purpose reads the object's own.
+        if purpose == PropertyPurpose::Serialize {
             return Ok(None);
         }
-        let elements = with(req, object, |a| a.elements.clone())?;
-        let props = Std.get_properties(req, object)?;
+        // "The array elements are not *real properties*": what
+        // `get_object_vars()` reads is the object's own table alone, a
+        // copy, so its mangled names reach the reader as they stand.
+        let elements = if purpose == PropertyPurpose::GetObjectVars {
+            Vec::new()
+        } else {
+            with(req, object, |a| a.elements.clone())?
+        };
+        let props = crate::std_properties(req, object)?;
         if elements.is_empty() && props.is_empty() {
             return Ok(None);
         }
@@ -672,7 +703,13 @@ impl ObjectHandlers for Handlers {
         for (at, value) in elements.into_iter().enumerate() {
             out.push((PhpString::new(req, at.to_string().as_bytes())?, value));
         }
-        out.extend(props);
+        for (key, value) in props {
+            let name = match key {
+                Key::Str(name) => name,
+                Key::Int(n) => PhpString::new(req, n.to_string().as_bytes())?,
+            };
+            out.push((name, value));
+        }
         Ok(Some(out))
     }
 

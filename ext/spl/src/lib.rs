@@ -484,6 +484,14 @@ fn serialized(req: &mut Request, value: Value) -> Result<Vec<u8>, Thrown> {
     Ok(out)
 }
 
+/// `zend_std_get_properties`: the object's own table, the declared
+/// properties that hold a value and then the dynamic ones, each under
+/// the key the table holds it by, mangled for a protected or a private
+/// property; views, no owner taken.
+fn std_properties(req: &mut Request, object: PhpObject) -> Result<Vec<(Key, Value)>, Thrown> {
+    object.entries(req)
+}
+
 /// The members, `zend_std_get_properties` as an array of its own.
 fn members(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thrown> {
     let mut out = PhpArray::new(req)?;
