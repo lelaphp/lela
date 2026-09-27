@@ -18,7 +18,7 @@ use crate::modern::follows_spec;
 use crate::node::DOMNode;
 use crate::object::{Code, Dom};
 use crate::private::Private;
-use crate::{dom_error, dom_throw, fetch, object_for, returned, strict, string};
+use crate::{dom_error, dom_throw, fetch, object_for, passed, returned, strict, string};
 
 /// The content of a character node, the empty string for none:
 /// `php_dom_get_content_or_empty`.
@@ -189,15 +189,6 @@ fn construct(req: &mut Request, this: PhpObject, node: Option<Node>) -> Result<(
             Ok(())
         }
         None => Err(dom_throw(req, Code::InvalidState)),
-    }
-}
-
-/// The bytes of an optional string argument, none where the call gave
-/// none, as `|s` leaves a C string `NULL`.
-fn passed(given: Passed<PhpString>) -> Option<Vec<u8>> {
-    match given {
-        Passed::Given(s) => Some(s.as_bytes().to_vec()),
-        Passed::Omitted => None,
     }
 }
 

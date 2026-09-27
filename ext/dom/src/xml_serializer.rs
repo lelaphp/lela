@@ -861,11 +861,3 @@ pub(crate) fn well_formed(
             .all(|node| serialize(dump, *node, false, true, false, private))
     })
 }
-
-/// `Dom\XMLDocument::saveXml(?Dom\Node $node = null, int $options = 0): string|false`,
-/// which `Dom\HTMLDocument` aliases: `dom_document_save_xml` over the
-/// `Dom\` document handlers.
-const SAVE_XML: crate::Entry = crate::document::save_xml;
-
-/// The methods, `Class::method` to entry.
-pub(crate) const METHODS: &[(&str, crate::Entry)] = &[("Dom\\XMLDocument::saveXml", SAVE_XML)];

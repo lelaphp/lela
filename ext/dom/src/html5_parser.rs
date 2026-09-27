@@ -7,7 +7,7 @@
 
 use php_ext::raising::{Thrown, arg_value_error, throw};
 use php_ext::request::Request;
-use php_ext::values::{PhpObject, Value};
+use php_ext::values::{PhpObject, PhpString, Value};
 use php_ext_lexbor::ffi::encoding::{
     DECODE_CONTINUE, Decoder, Encoder, Encoding, MAX_CODEPOINT, REPLACEMENT_BYTES, Status,
 };
@@ -20,7 +20,7 @@ use php_ext_libxml::ffi::{DocString, Kind, Node, NodeObject, Ns, Quirks};
 
 use crate::object::Code;
 use crate::private::{self, HTML_NS, MATHML_NS, SVG_NS, XLINK_NS};
-use crate::{Entry, arity, bytes_arg, dom_mut, dom_throw, long_arg, nullable_bytes_arg};
+use crate::{dom_mut, dom_throw};
 
 /// `HTML_PARSE_NOERROR`, `XML_PARSE_NOERROR` under another name.
 const NOERROR: i64 = 1 << 5;
@@ -860,8 +860,12 @@ fn finish(
 }
 
 /// The override encoding argument, `None` where none was given.
-fn override_encoding(req: &mut Request, position: u32) -> Result<Option<Encoding>, Thrown> {
-    let Some(name) = nullable_bytes_arg(req, position)? else {
+fn override_encoding(
+    req: &mut Request,
+    position: u32,
+    given: Option<PhpString>,
+) -> Result<Option<Encoding>, Thrown> {
+    let Some(name) = given.map(|n| n.as_bytes().to_vec()) else {
         return Ok(None);
     };
     if name.contains(&0) {
@@ -875,141 +879,6 @@ fn override_encoding(req: &mut Request, position: u32) -> Result<Option<Encoding
             "be a valid document encoding",
         )),
     }
-}
-
-/// `Dom\HTMLDocument::createFromString(string $source, int $options = 0, ?string $overrideEncoding = null): Dom\HTMLDocument`.
-///
-/// ```php
-/// $d = Dom\HTMLDocument::createFromString('<!doctype html><p class=a>x<b>y</p>');
-/// var_dump(get_class($d), $d->documentElement->tagName, $d->body->firstChild->className, $d->characterSet);
-/// $e = Dom\HTMLDocument::createFromString('<p>x', LIBXML_NOERROR);
-/// var_dump($e->body->textContent);
-/// $f = Dom\HTMLDocument::createFromString('<p>x</p>', LIBXML_HTML_NOIMPLIED);
-/// var_dump($f->documentElement->tagName);
-/// try { Dom\HTMLDocument::createFromString('', 1); } catch (ValueError $x) { echo $x->getMessage(), "\n"; }
-/// ```
-/// ```expect
-///
-/// Warning: Dom\HTMLDocument::createFromString(): tree error unexpected-element-in-open-elements-stack in Entity, line: 1, column: 34 in %s on line 2
-/// string(16) "Dom\HTMLDocument"
-/// string(4) "HTML"
-/// string(1) "a"
-/// string(5) "UTF-8"
-/// string(1) "x"
-/// string(1) "P"
-/// Dom\HTMLDocument::createFromString(): Argument #2 ($options) contains invalid flags (allowed flags: LIBXML_NOERROR, LIBXML_COMPACT, LIBXML_HTML_NOIMPLIED, Dom\HTML_NO_DEFAULT_NS)
-/// ```
-fn create_from_string(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 1, 3)?;
-    let source = bytes_arg(req, 1)?;
-    let options = long_arg(req, 2, 0)?;
-    check_options(req, 2, options)?;
-    let encoding = override_encoding(req, 3)?;
-    let (parsed, found) = parse(req, b"Entity", &Input::String(&source), options, encoding)?;
-    finish(req, &parsed, found, options, None)
-}
-
-/// `Dom\HTMLDocument::createFromFile(string $path, int $options = 0, ?string $overrideEncoding = null): Dom\HTMLDocument`.
-///
-/// ```php
-/// $f = tempnam(sys_get_temp_dir(), 'dom');
-/// file_put_contents($f, "<!doctype html>\n<title>t</title><p>x");
-/// $d = Dom\HTMLDocument::createFromFile($f);
-/// var_dump($d->title, $d->body->textContent, $d->URL === 'file://' . realpath($f));
-/// unlink($f);
-/// try { @Dom\HTMLDocument::createFromFile('/nonexistent/x.html'); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// string(1) "t"
-/// string(1) "x"
-/// bool(true)
-/// Cannot open file '/nonexistent/x.html'
-/// ```
-fn create_from_file(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 1, 3)?;
-    let path = bytes_arg(req, 1)?;
-    let options = long_arg(req, 2, 0)?;
-    if path.contains(&0) {
-        return Err(arg_value_error(req, 1, "not contain any null bytes"));
-    }
-    if path.windows(3).any(|w| w == b"%00") {
-        return Err(arg_value_error(
-            req,
-            1,
-            "not contain percent-encoded NUL bytes",
-        ));
-    }
-    check_options(req, 2, options)?;
-    let encoding = override_encoding(req, 3)?;
-    let Some(stream) = req.open_stream(&path, b"rb", false)? else {
-        let name = String::from_utf8_lossy(&path).into_owned();
-        return Err(throw(
-            req,
-            "Exception",
-            &format!("Cannot open file '{name}'"),
-        ));
-    };
-    let mut source = Vec::new();
-    let mut chunks = Vec::new();
-    let read = loop {
-        match stream.read(req, BUFFER) {
-            Ok(Some(chunk)) if !chunk.is_empty() => {
-                chunks.push(chunk.len());
-                source.extend_from_slice(chunk.as_bytes());
-                req.release(Value::string(chunk));
-            }
-            Ok(_) => break Ok(()),
-            Err(thrown) => break Err(thrown),
-        }
-    };
-    stream.close(req);
-    read?;
-    let (parsed, found) = parse(req, &path, &Input::File(&source, chunks), options, encoding)?;
-    let url = if crate::modern::is_stream_path(&path) {
-        path.clone()
-    } else {
-        let absolute = req.realpath(&path).map_or_else(
-            || path.clone(),
-            |p| p.0.to_string_lossy().into_owned().into_bytes(),
-        );
-        let uri = php_ext_libxml::ffi::Library::path_to_uri(&absolute).unwrap_or(absolute);
-        if uri.starts_with(b"file:/") {
-            uri
-        } else {
-            [b"file://".as_slice(), &uri].concat()
-        }
-    };
-    finish(req, &parsed, found, options, Some(url))
-}
-
-/// `Dom\HTMLDocument::createEmpty(string $encoding = "UTF-8"): Dom\HTMLDocument`.
-///
-/// ```php
-/// $d = Dom\HTMLDocument::createEmpty();
-/// var_dump(get_class($d), $d->characterSet, $d->childNodes->length, $d->documentElement);
-/// var_dump(Dom\HTMLDocument::createEmpty('latin1')->charset);
-/// try { Dom\HTMLDocument::createEmpty('nope'); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// string(16) "Dom\HTMLDocument"
-/// string(5) "UTF-8"
-/// int(0)
-/// NULL
-/// string(6) "latin1"
-/// Dom\HTMLDocument::createEmpty(): Argument #1 ($encoding) must be a valid document encoding
-/// ```
-fn create_empty(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 0, 1)?;
-    let encoding = match crate::arg(req, 1)? {
-        Some(_) => crate::path_arg(req, 1)?,
-        None => b"UTF-8".to_vec(),
-    };
-    if Encoding::by_name(&encoding).is_none() {
-        return Err(arg_value_error(req, 1, "be a valid document encoding"));
-    }
-    let doc = new_html_doc(req)?;
-    doc.set_doc_string(DocString::Encoding, Some(&encoding));
-    Ok(crate::modern::document_object(req, "Dom\\HTMLDocument", doc)?.as_value())
 }
 
 /// `dom_html_fragment_parsing_algorithm`'s parse and bridge: `input`
@@ -1084,9 +953,86 @@ pub(crate) fn parse_fragment(
     Ok(root)
 }
 
-/// The methods, `Class::method` to entry.
-pub(crate) const METHODS: &[(&str, Entry)] = &[
-    ("Dom\\HTMLDocument::createEmpty", create_empty),
-    ("Dom\\HTMLDocument::createFromString", create_from_string),
-    ("Dom\\HTMLDocument::createFromFile", create_from_file),
-];
+/// `Dom\HTMLDocument::createFromString`'s body.
+pub(crate) fn create_from_string(
+    req: &mut Request,
+    source: &[u8],
+    options: i64,
+    given_encoding: Option<PhpString>,
+) -> Result<Value, Thrown> {
+    check_options(req, 2, options)?;
+    let encoding = override_encoding(req, 3, given_encoding)?;
+    let (parsed, found) = parse(req, b"Entity", &Input::String(source), options, encoding)?;
+    finish(req, &parsed, found, options, None)
+}
+
+/// `Dom\HTMLDocument::createFromFile`'s body.
+pub(crate) fn create_from_file(
+    req: &mut Request,
+    path: &[u8],
+    options: i64,
+    given_encoding: Option<PhpString>,
+) -> Result<Value, Thrown> {
+    let path = path.to_vec();
+    if path.contains(&0) {
+        return Err(arg_value_error(req, 1, "not contain any null bytes"));
+    }
+    if path.windows(3).any(|w| w == b"%00") {
+        return Err(arg_value_error(
+            req,
+            1,
+            "not contain percent-encoded NUL bytes",
+        ));
+    }
+    check_options(req, 2, options)?;
+    let encoding = override_encoding(req, 3, given_encoding)?;
+    let Some(stream) = req.open_stream(&path, b"rb", false)? else {
+        let name = String::from_utf8_lossy(&path).into_owned();
+        return Err(throw(
+            req,
+            "Exception",
+            &format!("Cannot open file '{name}'"),
+        ));
+    };
+    let mut source = Vec::new();
+    let mut chunks = Vec::new();
+    let read = loop {
+        match stream.read(req, BUFFER) {
+            Ok(Some(chunk)) if !chunk.is_empty() => {
+                chunks.push(chunk.len());
+                source.extend_from_slice(chunk.as_bytes());
+                req.release(Value::string(chunk));
+            }
+            Ok(_) => break Ok(()),
+            Err(thrown) => break Err(thrown),
+        }
+    };
+    stream.close(req);
+    read?;
+    let (parsed, found) = parse(req, &path, &Input::File(&source, chunks), options, encoding)?;
+    let url = if crate::modern::is_stream_path(&path) {
+        path.clone()
+    } else {
+        let absolute = req.realpath(&path).map_or_else(
+            || path.clone(),
+            |p| p.0.to_string_lossy().into_owned().into_bytes(),
+        );
+        let uri = php_ext_libxml::ffi::Library::path_to_uri(&absolute).unwrap_or(absolute);
+        if uri.starts_with(b"file:/") {
+            uri
+        } else {
+            [b"file://".as_slice(), &uri].concat()
+        }
+    };
+    finish(req, &parsed, found, options, Some(url))
+}
+
+/// `Dom\HTMLDocument::createEmpty`'s body.
+pub(crate) fn create_empty(req: &mut Request, encoding: &[u8]) -> Result<PhpObject, Thrown> {
+    if Encoding::by_name(encoding).is_none() {
+        return Err(arg_value_error(req, 1, "be a valid document encoding"));
+    }
+    let doc = new_html_doc(req)?;
+    doc.set_doc_string(DocString::Encoding, Some(encoding));
+    crate::modern::document_object(req, "Dom\\HTMLDocument", doc)
+}

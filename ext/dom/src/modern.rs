@@ -16,10 +16,7 @@ use crate::node::DOMNode;
 use crate::object::{Code, Dom};
 use crate::parent::is_parent_invalid;
 use crate::private::Private;
-use crate::{
-    Entry, arity, bytes_arg, dom, dom_mut, dom_throw, fetch, invalidate, long_arg, node_of,
-    nullable_bytes_arg, object_for, returned,
-};
+use crate::{dom, dom_mut, dom_throw, fetch, invalidate, node_of, object_for, returned};
 
 /// `php_dom_follow_spec_intern`: whether the object's document hands out
 /// the `Dom\` classes.
@@ -69,51 +66,6 @@ pub(crate) fn document_object(
     Ok(object)
 }
 
-/// `Dom\XMLDocument::createEmpty(string $version = "1.0", string $encoding = "UTF-8"): Dom\XMLDocument`.
-///
-/// ```php
-/// $d = Dom\XMLDocument::createEmpty();
-/// var_dump(get_class($d), $d->xmlVersion, $d->xmlEncoding, $d->childNodes->length);
-/// $d = Dom\XMLDocument::createEmpty('1.1', 'ISO-8859-1');
-/// var_dump($d->xmlVersion, $d->characterSet);
-/// try { Dom\XMLDocument::createEmpty('1.0', 'nope'); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// string(15) "Dom\XMLDocument"
-/// string(3) "1.0"
-/// string(5) "UTF-8"
-/// int(0)
-/// string(3) "1.1"
-/// string(10) "ISO-8859-1"
-/// Dom\XMLDocument::createEmpty(): Argument #2 ($encoding) is not a valid document encoding
-/// ```
-fn xml_create_empty(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 0, 2)?;
-    let version = match crate::arg(req, 1)? {
-        Some(v) => v
-            .as_str_bytes()
-            .map_or_else(|| b"1.0".to_vec(), <[u8]>::to_vec),
-        None => b"1.0".to_vec(),
-    };
-    let encoding = match crate::arg(req, 2)? {
-        Some(_) => crate::path_arg(req, 2)?,
-        None => b"UTF-8".to_vec(),
-    };
-    if !Library::known_encoding(&encoding) {
-        return Err(php_ext::raising::argument_error(
-            req,
-            "ValueError",
-            2,
-            "is not a valid document encoding",
-        ));
-    }
-    let Some(doc) = f::Node::new_doc(Some(&version)) else {
-        return Err(dom_throw(req, Code::InvalidState));
-    };
-    doc.set_doc_string(DocString::Encoding, Some(&encoding));
-    Ok(document_object(req, "Dom\\XMLDocument", doc)?.as_value())
-}
-
 /// `check_options_validity` of `xml_document.c`: the flags the modern XML
 /// parser takes, `LIBXML_NO_XXE` not among them before libxml 2.13.
 const XML_OPTIONS: i64 = (f::XML_PARSE_RECOVER
@@ -142,11 +94,13 @@ struct LoadArgs {
     override_encoding: Option<Vec<u8>>,
 }
 
-fn xml_load_args(req: &mut Request, from_file: bool) -> Result<LoadArgs, Thrown> {
-    arity(req, 1, 3)?;
-    let source = bytes_arg(req, 1)?;
-    let options = long_arg(req, 2, 0)?;
-    let override_encoding = nullable_bytes_arg(req, 3)?;
+fn xml_load_args(
+    req: &mut Request,
+    (source, options, override_encoding): (PhpString, i64, Option<PhpString>),
+    from_file: bool,
+) -> Result<LoadArgs, Thrown> {
+    let source = source.as_bytes().to_vec();
+    let override_encoding = override_encoding.map(|e| e.as_bytes().to_vec());
     if from_file && source.contains(&0) {
         return Err(arg_value_error(req, 1, "not contain any null bytes"));
     }
@@ -196,12 +150,16 @@ fn xml_load_args(req: &mut Request, from_file: bool) -> Result<LoadArgs, Thrown>
     })
 }
 
-fn xml_load(req: &mut Request, from_file: bool) -> Result<Value, Thrown> {
+pub(crate) fn xml_load(
+    req: &mut Request,
+    given: (PhpString, i64, Option<PhpString>),
+    from_file: bool,
+) -> Result<PhpObject, Thrown> {
     let LoadArgs {
         source,
         options,
         override_encoding,
-    } = xml_load_args(req, from_file)?;
+    } = xml_load_args(req, given, from_file)?;
     let recover = options & f::XML_PARSE_RECOVER != 0;
     let (parsed, raised, thrown) = if from_file {
         match crate::file_path(req, &source) {
@@ -267,7 +225,7 @@ fn xml_load(req: &mut Request, from_file: bool) -> Result<Value, Thrown> {
     }
     let object = document_object(req, "Dom\\XMLDocument", doc)?;
     convert_to_modern(req, object, doc);
-    Ok(object.as_value())
+    Ok(object)
 }
 
 /// `dom_document_convert_to_modern`'s walk, `dom_mark_namespaces_as_attributes_too`:
@@ -295,52 +253,6 @@ pub(crate) fn convert_to_modern(req: &mut Request, object: PhpObject, doc: f::No
     }
 }
 
-/// `Dom\XMLDocument::createFromString(string $source, int $options = 0, ?string $overrideEncoding = null): Dom\XMLDocument`.
-///
-/// ```php
-/// $d = Dom\XMLDocument::createFromString('<r xmlns="urn:a" xmlns:p="urn:p"><p:c/></r>');
-/// $r = $d->documentElement;
-/// var_dump(get_class($r), $r->namespaceURI, $r->attributes->length, $r->firstChild->prefix, $r->firstChild->namespaceURI);
-/// try { Dom\XMLDocument::createFromString('<a>'); } catch (DOMException $e) { echo $e->getMessage(), "\n"; }
-/// try { Dom\XMLDocument::createFromString(''); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// string(11) "Dom\Element"
-/// string(5) "urn:a"
-/// int(2)
-/// string(1) "p"
-/// string(5) "urn:p"
-///
-/// Warning: Dom\XMLDocument::createFromString(): Premature end of data in tag a line 1 in Entity, line: 1 in %s on line 5
-/// XML fragment is not well-formed
-/// Dom\XMLDocument::createFromString(): Argument #1 ($source) must not be empty
-/// ```
-fn xml_create_from_string(req: &mut Request) -> Result<Value, Thrown> {
-    xml_load(req, false)
-}
-
-/// `Dom\XMLDocument::createFromFile(string $path, int $options = 0, ?string $overrideEncoding = null): Dom\XMLDocument`.
-///
-/// ```php
-/// $f = tempnam(sys_get_temp_dir(), 'dom');
-/// file_put_contents($f, '<r xmlns:p="urn:p"><p:a/></r>');
-/// $d = Dom\XMLDocument::createFromFile($f);
-/// var_dump($d->documentElement->firstChild->namespaceURI, str_starts_with($d->URL, 'file://'), $d->URL === 'file://' . realpath($f));
-/// unlink($f);
-/// try { Dom\XMLDocument::createFromFile(''); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
-/// try { Dom\XMLDocument::createFromFile('a%00b'); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// string(5) "urn:p"
-/// bool(true)
-/// bool(true)
-/// Dom\XMLDocument::createFromFile(): Argument #1 ($path) must not be empty
-/// Dom\XMLDocument::createFromFile(): Argument #1 ($path) must not contain percent-encoded NUL bytes
-/// ```
-fn xml_create_from_file(req: &mut Request) -> Result<Value, Thrown> {
-    xml_load(req, true)
-}
-
 /// `Dom\import_simplexml(object $node): Dom\Attr|Dom\Element`: there is no
 /// simplexml, so a modern element or attribute answers as itself.
 ///
@@ -354,7 +266,7 @@ fn xml_create_from_file(req: &mut Request) -> Result<Value, Thrown> {
 /// Dom\import_simplexml(): Argument #1 ($node) is not a valid node type
 /// ```
 pub(crate) fn import_simplexml(req: &mut Request) -> Result<Value, Thrown> {
-    arity(req, 1, 1)?;
+    crate::arity(req, 1, 1)?;
     let object = crate::object_arg(req, 1)?;
     let node = object
         .filter(|o| crate::instance_of(req, *o, "Dom\\Node"))
@@ -590,7 +502,7 @@ impl Node {
     #[php(property, virtual)]
     const isConnected: bool;
     #[php(property, virtual)]
-    const ownerDocument: Option<Instance<Document>>;
+    const ownerDocument: Option<Instance<crate::document::Document>>;
     #[php(property, virtual)]
     const parentNode: Option<Instance<Node>>;
     #[php(property, virtual)]
@@ -967,18 +879,6 @@ impl NamespaceInfo {
     #[php(private, implementation = Node::__construct)]
     fn __construct(this: This<Self>);
 }
-
-/// The methods, `Class::method` to entry.
-pub(crate) const METHODS: &[(&str, Entry)] = &[
-    ("Dom\\XMLDocument::createEmpty", xml_create_empty),
-    ("Dom\\XMLDocument::createFromString", xml_create_from_string),
-    ("Dom\\XMLDocument::createFromFile", xml_create_from_file),
-];
-
-/// `Dom\Document`, named for the types that hold it until its header is
-/// declared here.
-#[php_class(extern, namespace(Dom))]
-pub(crate) struct Document;
 
 /// `class Dom\Attr extends Dom\Node`: an attribute, its seven properties
 /// `@virtual`; `isId` is `DOMAttr`'s and `rename` `Dom\Element`'s

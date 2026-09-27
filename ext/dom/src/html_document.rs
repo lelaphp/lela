@@ -3,10 +3,11 @@
 //! `implementation`, `URL`, the encoding names, and `body`, `head` and
 //! `title` as the HTML standard defines them over the tree.
 
+use php_ext::abi::{Instance, OrFalse, Path, Raw, This};
 use php_ext::attr::php_class;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{PhpObject, Value};
+use php_ext::values::{PhpObject, PhpString, Value};
 use php_ext_libxml::ffi::{Kind, Node};
 
 use crate::object::Code;
@@ -339,7 +340,169 @@ fn set_character_set(req: &mut Request, object: PhpObject, value: &Value) -> Res
     }
 }
 
-/// `Dom\HTMLDocument`, named for the types that hold it until its header
-/// is declared here.
-#[php_class(extern, namespace(Dom))]
+/// `final class Dom\HTMLDocument extends Dom\Document`: the HTML5
+/// parser's factories of `html_document.c`, php's HTML serialiser, and
+/// `DOMDocument`'s XML savers.
+#[php_class(
+    namespace(Dom),
+    final,
+    extends(crate::document::Document),
+    handlers = crate::object::NODE_HANDLERS
+)]
 pub(crate) struct HTMLDocument;
+
+#[php_class]
+impl HTMLDocument {
+    /// `Dom\HTMLDocument::createEmpty(string $encoding = "UTF-8"): Dom\HTMLDocument`.
+    ///
+    /// ```php
+    /// $d = Dom\HTMLDocument::createEmpty();
+    /// var_dump(get_class($d), $d->characterSet, $d->childNodes->length, $d->documentElement);
+    /// var_dump(Dom\HTMLDocument::createEmpty('latin1')->charset);
+    /// try { Dom\HTMLDocument::createEmpty('nope'); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// string(16) "Dom\HTMLDocument"
+    /// string(5) "UTF-8"
+    /// int(0)
+    /// NULL
+    /// string(6) "latin1"
+    /// Dom\HTMLDocument::createEmpty(): Argument #1 ($encoding) must be a valid document encoding
+    /// ```
+    fn createEmpty(
+        req: &mut Request,
+        #[php(default = "UTF-8")] encoding: Path,
+    ) -> Result<Instance<HTMLDocument>, Thrown> {
+        crate::html5_parser::create_empty(req, encoding.0.as_bytes()).map(Instance::of)
+    }
+
+    /// `Dom\HTMLDocument::createFromFile(string $path, int $options = 0, ?string $overrideEncoding = null): Dom\HTMLDocument`.
+    ///
+    /// ```php
+    /// $f = tempnam(sys_get_temp_dir(), 'dom');
+    /// file_put_contents($f, "<!doctype html>\n<title>t</title><p>x");
+    /// $d = Dom\HTMLDocument::createFromFile($f);
+    /// var_dump($d->title, $d->body->textContent, $d->URL === 'file://' . realpath($f));
+    /// unlink($f);
+    /// try { @Dom\HTMLDocument::createFromFile('/nonexistent/x.html'); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// string(1) "t"
+    /// string(1) "x"
+    /// bool(true)
+    /// Cannot open file '/nonexistent/x.html'
+    /// ```
+    fn createFromFile(
+        req: &mut Request,
+        path: PhpString,
+        #[php(default = 0)] options: i64,
+        #[php(default = null)] overrideEncoding: Option<PhpString>,
+    ) -> Result<Raw<Instance<HTMLDocument>>, Thrown> {
+        let made =
+            crate::html5_parser::create_from_file(req, path.as_bytes(), options, overrideEncoding)?;
+        crate::returned(req, made)
+    }
+
+    /// `Dom\HTMLDocument::createFromString(string $source, int $options = 0, ?string $overrideEncoding = null): Dom\HTMLDocument`.
+    ///
+    /// ```php
+    /// $d = Dom\HTMLDocument::createFromString('<!doctype html><p class=a>x<b>y</p>');
+    /// var_dump(get_class($d), $d->documentElement->tagName, $d->body->firstChild->className, $d->characterSet);
+    /// $e = Dom\HTMLDocument::createFromString('<p>x', LIBXML_NOERROR);
+    /// var_dump($e->body->textContent);
+    /// $f = Dom\HTMLDocument::createFromString('<p>x</p>', LIBXML_HTML_NOIMPLIED);
+    /// var_dump($f->documentElement->tagName);
+    /// try { Dom\HTMLDocument::createFromString('', 1); } catch (ValueError $x) { echo $x->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    ///
+    /// Warning: Dom\HTMLDocument::createFromString(): tree error unexpected-element-in-open-elements-stack in Entity, line: 1, column: 34 in %s on line 2
+    /// string(16) "Dom\HTMLDocument"
+    /// string(4) "HTML"
+    /// string(1) "a"
+    /// string(5) "UTF-8"
+    /// string(1) "x"
+    /// string(1) "P"
+    /// Dom\HTMLDocument::createFromString(): Argument #2 ($options) contains invalid flags (allowed flags: LIBXML_NOERROR, LIBXML_COMPACT, LIBXML_HTML_NOIMPLIED, Dom\HTML_NO_DEFAULT_NS)
+    /// ```
+    fn createFromString(
+        req: &mut Request,
+        source: PhpString,
+        #[php(default = 0)] options: i64,
+        #[php(default = null)] overrideEncoding: Option<PhpString>,
+    ) -> Result<Raw<Instance<HTMLDocument>>, Thrown> {
+        let made = crate::html5_parser::create_from_string(
+            req,
+            source.as_bytes(),
+            options,
+            overrideEncoding,
+        )?;
+        crate::returned(req, made)
+    }
+
+    #[php(implementation = crate::document::DOMDocument::saveXML)]
+    fn saveXml(
+        this: This<Self>,
+        #[php(default = null)] node: Option<Instance<crate::modern::Node>>,
+        #[php(default = 0)] options: i64,
+    ) -> OrFalse<PhpString>;
+    #[php(implementation = crate::document::DOMDocument::save)]
+    fn saveXmlFile(
+        this: This<Self>,
+        filename: PhpString,
+        #[php(default = 0)] options: i64,
+    ) -> OrFalse<i64>;
+
+    /// `Dom\HTMLDocument::saveHtml(?Dom\Node $node = null): string`.
+    ///
+    /// ```php
+    /// $d = Dom\HTMLDocument::createEmpty();
+    /// $html = $d->appendChild($d->createElement('html'));
+    /// $p = $html->appendChild($d->createElement('p'));
+    /// $p->setAttribute('title', "a\"b&\u{a0}<");
+    /// $p->append("x<y> & \u{a0}", $d->createElement('br'), $d->createComment('c'));
+    /// $s = $html->appendChild($d->createElement('script'));
+    /// $s->append('if (a < b) {}');
+    /// echo $d->saveHtml(), "\n", $d->saveHtml($p), "\n";
+    /// $x = Dom\XMLDocument::createEmpty();
+    /// try { $d->saveHtml($x->createElement('q')); } catch (DOMException $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// <html><p title="a&quot;b&amp;&nbsp;<">x&lt;y&gt; &amp; &nbsp;<br><!--c--></p><script>if (a < b) {}</script></html>
+    /// <p title="a&quot;b&amp;&nbsp;<">x&lt;y&gt; &amp; &nbsp;<br><!--c--></p>
+    /// Wrong Document Error
+    /// ```
+    fn saveHtml(
+        req: &mut Request,
+        this: This<Self>,
+        #[php(default = null)] node: Option<Instance<crate::modern::Node>>,
+    ) -> Result<PhpString, Thrown> {
+        crate::html5_serializer::save_html(req, this.object(), node.map(|n| n.object()))
+    }
+
+    /// `Dom\HTMLDocument::saveHtmlFile(string $filename): int|false`: the
+    /// document written through php's streams, each piece as it is made.
+    ///
+    /// ```php
+    /// $d = Dom\HTMLDocument::createEmpty();
+    /// $d->appendChild($d->createElement('p'))->append("\u{e9}");
+    /// $f = tempnam(sys_get_temp_dir(), 'dom');
+    /// var_dump($d->saveHtmlFile($f), file_get_contents($f));
+    /// unlink($f);
+    /// try { $d->saveHtmlFile(''); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// int(9)
+    /// string(9) "<p>é</p>"
+    /// Dom\HTMLDocument::saveHtmlFile(): Argument #1 ($filename) must not be empty
+    /// ```
+    fn saveHtmlFile(
+        req: &mut Request,
+        this: This<Self>,
+        filename: Path,
+    ) -> Result<OrFalse<i64>, Thrown> {
+        let written =
+            crate::html5_serializer::save_html_file(req, this.object(), filename.0.as_bytes())?;
+        Ok(written.map_or(OrFalse::False, OrFalse::Value))
+    }
+}
