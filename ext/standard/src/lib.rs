@@ -379,9 +379,9 @@ fn file_constants() -> Vec<ConstDecl> {
         assert::constants(),
         syslog::constants(),
         image::constants(),
-        dns::constants(),
+        dns::constants::declared(),
         info::constants(),
-        sockets::constants(),
+        sockets::constants::declared(),
         user_filters::constants(),
         userspace::constants::declared(),
     ]
