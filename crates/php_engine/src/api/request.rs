@@ -6698,6 +6698,93 @@ impl Request {
         Ok(())
     }
 
+    /// `fn_flags & ZEND_ACC_STRICT_TYPES` over a user function: whether the
+    /// file it was declared in is `strict_types`. A native carries no such
+    /// bit.
+    pub(crate) fn function_strict_types(&self, function: Function) -> bool {
+        self.user_function(function).is_some_and(|user| {
+            crate::exec::body_of(&user.unit, user.body).is_some_and(|code| code.strict_types)
+        })
+    }
+
+    /// `zend_verify_prop_assignable_by_ref_ex` under
+    /// `ZEND_VERIFY_PROP_ASSIGNABLE_BY_REF_CONTEXT_MAGIC_GET`: what `__get`
+    /// answered for a typed property an `unset` emptied, held to the
+    /// property's type under `__get`'s own `strict_types`, converted by the
+    /// weak rule where it can be, and php's `TypeError` naming `__get`
+    /// where not. A name that is no typed declared property the scope
+    /// reaches is the answer as it is.
+    ///
+    /// ```php
+    /// class T { public int $i = 1; public int $u;
+    ///     function __get($n) { echo "__get $n\n"; return $n === 'i' ? "42" : "x"; }
+    ///     function __isset($n) { echo "__isset $n\n"; return true; } }
+    /// $t = new T; unset($t->i);
+    /// var_dump($t->i, isset($t->u));
+    /// unset($t->u);
+    /// try { var_dump($t->u); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// __get i
+    /// int(42)
+    /// bool(false)
+    /// __get u
+    /// Value of type string returned from T::__get() must be compatible with unset property T::$u of type int
+    /// ```
+    fn hold_magic_get(
+        &mut self,
+        class: ClassId,
+        name: &[u8],
+        getter: Function,
+        got: Value,
+    ) -> Result<Value, Thrown> {
+        let Some(placed) = self
+            .declared_slot(class, name)
+            .filter(|p| p.typed && self.may_access(p.declaring, p.visibility))
+        else {
+            return Ok(got);
+        };
+        let Some(typed) = self.declared_typed_property(class, name) else {
+            return Ok(got);
+        };
+        let strict = self.function_strict_types(getter);
+        let held = got.deref();
+        let admitted = match crate::ops::property_type_admits(
+            self,
+            &held,
+            &typed.ty,
+            placed.declaring,
+            strict,
+        ) {
+            Ok(admitted) => admitted,
+            Err(thrown) => {
+                self.release(got);
+                return Err(thrown);
+            }
+        };
+        match admitted {
+            crate::ops::Admitted::As => Ok(got),
+            crate::ops::Admitted::Converted(coerced) => {
+                self.release(got);
+                Ok(coerced)
+            }
+            crate::ops::Admitted::Refused => {
+                let given = crate::ops::type_name(self, &held);
+                self.release(got);
+                let class = self.class_name(placed.declaring);
+                let ty = crate::api::coerce::declared_type_name(&typed.ty);
+                let shown = String::from_utf8_lossy(name).into_owned();
+                Err(crate::api::raising::throw(
+                    self,
+                    "TypeError",
+                    &format!(
+                        "Value of type {given} returned from {class}::__get() must be compatible with unset property {class}::${shown} of type {ty}"
+                    ),
+                ))
+            }
+        }
+    }
+
     /// `zend_readonly_property_modification_error` (`Cannot modify
     /// readonly property C::$p`) and
     /// `zend_readonly_property_indirect_modification_error` (`Cannot
@@ -7071,11 +7158,13 @@ impl Request {
             if let Some(getter) = getter
                 && self.guard_word(object, name) & IN_GET == 0
             {
-                return self.call_accessor(object, getter, IN_GET, name, &[]);
+                let got = self.call_accessor(object, getter, IN_GET, name, &[])?;
+                return self.hold_magic_get(class, name, getter, got);
             }
         } else if let Some(getter) = getter {
             if self.guard_word(object, name) & IN_GET == 0 {
-                return self.call_accessor(object, getter, IN_GET, name, &[]);
+                let got = self.call_accessor(object, getter, IN_GET, name, &[])?;
+                return self.hold_magic_get(class, name, getter, got);
             }
             // `zend_wrong_offset`: the guard stands and the placement
             // was one the scope may not reach, so it is made again,
@@ -9450,6 +9539,11 @@ impl Request {
                 PropertyTest::Isset => value.tag() != TypeTag::Null,
                 PropertyTest::NotEmpty => crate::api::coerce::truthy(self, &value),
             });
+        }
+        // `IS_PROP_UNINIT`: "Skip __isset() for uninitialized typed
+        // properties", which answer no whatever the test.
+        if placed_slot.is_some_and(|slot| o.slot_uninit(slot)) {
+            return Ok(false);
         }
         // `lazy_init:`, which a slot that waits reaches past `__isset`
         // and a name the placement found no slot for reaches where no
