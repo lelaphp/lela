@@ -416,18 +416,30 @@ impl Socket {
     /// and a listening socket with a connection waiting, whose peek
     /// fails with `ENOTCONN`.
     ///
+    /// Each `true` below is read after `stream_select` has seen the end or
+    /// the connection arrive, since the check waits for nothing and the
+    /// kernel hands a close or a connection to the other end when it
+    /// does: read without the wait, a loaded machine answers `false` there
+    /// now and then, under the oracle and this engine alike (#975). Each
+    /// `false` holds whether or not anything has arrived yet.
+    ///
     /// ```php
+    /// $ready = function ($s) { $r = [$s]; $w = $e = null; stream_select($r, $w, $e, 10); };
     /// [$a, $b] = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);
     /// var_dump(feof($b));
     /// fwrite($a, "x"); fclose($a);
-    /// var_dump(feof($b), fread($b, 10), feof($b));
+    /// var_dump(feof($b), fread($b, 10));
+    /// $ready($b);
+    /// var_dump(feof($b));
     /// [$c, $d] = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);
     /// stream_set_blocking($d, false);
     /// fclose($c);
+    /// $ready($d);
     /// var_dump(feof($d));
     /// $s = stream_socket_server('tcp://127.0.0.1:0');
     /// var_dump(feof($s));
     /// $client = stream_socket_client(stream_socket_get_name($s, false));
+    /// $ready($s);
     /// var_dump(feof($s), feof($client));
     /// ```
     /// ```expect
