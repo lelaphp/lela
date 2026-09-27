@@ -11,10 +11,10 @@
 
 use php_ext::abi::{
     CloneObj, ExtensionBuilder, False, Instance, Null, ObjectHandlers, OrFalse, Passed,
-    Path as PathArg, Raw, Ref, This, Union, Untyped, Variadic,
+    Path as PathArg, Raw, Ref, Std, This, Union, Untyped, Variadic,
 };
 use php_ext::attr::php_class;
-use php_ext::call::{call_method, instantiate, lookup_class, new_object};
+use php_ext::call::{Function, call_method, instantiate, lookup_class, new_object};
 use php_ext::coerce::coerce_param;
 use php_ext::decl::Type as DeclType;
 use php_ext::raising::{Thrown, arg_type_error, arg_value_error, throw};
@@ -68,9 +68,11 @@ pub(crate) struct Handlers;
 
 pub(crate) static HANDLERS: Handlers = Handlers;
 
-/// `spl_filesystem_object_check_handlers`, `SplFileObject`'s and
-/// `SplTempFileObject`'s: the same slots with `clone_obj` null, so the
-/// two are uncloneable as php's are.
+/// `spl_filesystem_object_check_handlers`, `GlobIterator`'s,
+/// `SplFileObject`'s and `SplTempFileObject`'s: the same slots with
+/// `clone_obj` null, so the three are uncloneable as php's are, and a
+/// `get_method` that refuses every call on an object whose constructor
+/// never ran.
 pub(crate) struct FileHandlers;
 
 pub(crate) static FILE_HANDLERS: FileHandlers = FileHandlers;
@@ -1001,7 +1003,12 @@ impl RecursiveDirectoryIterator {
 /// /a.txt a.txt
 /// /b.txt b.txt
 /// ```
-#[php_class(extends(FilesystemIterator), implements(Countable))]
+#[php_class(
+    extends(FilesystemIterator),
+    implements(Countable),
+    payload = Fs,
+    handlers = FILE_HANDLERS
+)]
 pub(crate) struct GlobIterator;
 
 #[php_class]
@@ -1348,7 +1355,16 @@ impl SplFileObject {
                 [one] => (Some(*one), true),
                 _ => return Err(arg_value_error(req, 3, "be empty or a single character")),
             },
-            Passed::Omitted => (Some(b'\\'), false),
+            Passed::Omitted => {
+                // `php_csv_handle_escape_argument(NULL, 3)`.
+                php_ext::raising::docref(
+                    req,
+                    php_ext::raising::Level::Deprecated,
+                    "the $escape parameter must be provided as its default value will change",
+                );
+                php_ext::raising::pending(req)?;
+                (Some(b'\\'), false)
+            }
         };
         fs(req, this.object(), |it| {
             it.delimiter = delimiter;
@@ -1929,6 +1945,33 @@ impl ObjectHandlers for Handlers {
     fn clone_obj(&self) -> Option<CloneObj> {
         Some(clone_fs)
     }
+
+    /// `spl_filesystem_object_destroy_object`: the class's `__destruct`,
+    /// then the directory or the file closed, so a method served on the
+    /// object after its destructor finds no stream.
+    ///
+    /// ```php
+    /// class Target { public $f; function __destruct() { try { $this->f->flock(LOCK_SH); } catch (Error $e) { echo $e->getMessage(), "\n"; } } }
+    /// class Run { static $f; static $t; }
+    /// Run::$f = new SplTempFileObject; Run::$t = new Target; Run::$t->f = Run::$f;
+    /// ```
+    /// ```expect
+    /// Object not initialized
+    /// ```
+    fn dtor_obj(&self, req: &mut Request, object: PhpObject) {
+        Std.dtor_obj(req, object);
+        let held = object
+            .native_mut::<Fs>(req)
+            .map(|it| (it.dir.take(), it.stream.take()));
+        if let Some((dir, stream)) = held {
+            if let Some(dir) = dir {
+                dir.close(req);
+            }
+            if let Some(stream) = stream {
+                stream.close(req);
+            }
+        }
+    }
 }
 
 impl ObjectHandlers for FileHandlers {
@@ -1936,8 +1979,47 @@ impl ObjectHandlers for FileHandlers {
         HANDLERS.free_obj(req, object);
     }
 
+    fn dtor_obj(&self, req: &mut Request, object: PhpObject) {
+        HANDLERS.dtor_obj(req, object);
+    }
+
     fn clone_obj(&self) -> Option<CloneObj> {
         None
+    }
+
+    /// `spl_filesystem_object_get_method_check`: every method, the
+    /// class's own and one a user class declares alike, refused with
+    /// php's `Error` while the object opened neither a directory nor a
+    /// file, which is an object whose constructor never ran.
+    ///
+    /// ```php
+    /// class F extends SplFileObject { function __construct() {} function fpassthru(): int { return 0; } }
+    /// class G extends GlobIterator { function __construct() {} }
+    /// foreach ([new F, new G] as $o) {
+    ///     try { $o->fpassthru(); } catch (Error $e) { echo count($e->getTrace()), " ", $e->getMessage(), "\n"; }
+    /// }
+    /// ```
+    /// ```expect
+    /// 0 The parent constructor was not called: the object is in an invalid state
+    /// 0 The parent constructor was not called: the object is in an invalid state
+    /// ```
+    fn get_method(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        lowered: &[u8],
+    ) -> Result<Option<Function>, Thrown> {
+        let unopened = fs(req, object, |it| {
+            it.dir.is_none() && it.glob.is_none() && it.orig_path.is_none()
+        })?;
+        if unopened {
+            return Err(throw(
+                req,
+                "Error",
+                "The parent constructor was not called: the object is in an invalid state",
+            ));
+        }
+        Std.get_method(req, object, lowered)
     }
 }
 
