@@ -20,9 +20,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 use php_heap::{Intern, Strings, Zval};
-use php_unit::decl::{Attribute, AttributeArgument, ConstDecl, ConstExpr, Name};
-
-use crate::api::request::PHP_VERSION;
+use php_macros::php_const;
 
 /// `PHP_INCLUDE_PATH`, the pinned build's `.:${PEAR_INSTALLDIR}`: what
 /// `DEFAULT_INCLUDE_PATH` says and what `include_path` defaults to.
@@ -31,35 +29,6 @@ pub(crate) const PHP_INCLUDE_PATH: &str = ".:/opt/homebrew/Cellar/php/8.5.9/shar
 /// `PHP_EXTENSION_DIR`, the pinned build's: the constant, and the
 /// default of `extension_dir`, which `dl()` names a library under.
 pub(crate) const PHP_EXTENSION_DIR: &str = "/opt/homebrew/Cellar/php/8.5.9/lib/php/20250925";
-
-/// The install paths the pinned build's `configure` wrote into
-/// `main/build-defs.h`, in `register_main_symbols`' order from
-/// `PEAR_INSTALL_DIR` to `PHP_CONFIG_FILE_SCAN_DIR`.
-const BUILD_PATHS: [(&str, &str); 14] = [
-    (
-        "PEAR_INSTALL_DIR",
-        "/opt/homebrew/Cellar/php/8.5.9/share/php/pear",
-    ),
-    (
-        "PEAR_EXTENSION_DIR",
-        "/opt/homebrew/Cellar/php/8.5.9/lib/php/20250925",
-    ),
-    ("PHP_EXTENSION_DIR", PHP_EXTENSION_DIR),
-    ("PHP_PREFIX", "/opt/homebrew/Cellar/php/8.5.9"),
-    ("PHP_BINDIR", "/opt/homebrew/Cellar/php/8.5.9/bin"),
-    ("PHP_SBINDIR", "/opt/homebrew/Cellar/php/8.5.9/sbin"),
-    ("PHP_MANDIR", "/opt/homebrew/Cellar/php/8.5.9/share/man"),
-    ("PHP_LIBDIR", "/opt/homebrew/Cellar/php/8.5.9/lib/php"),
-    ("PHP_DATADIR", "/opt/homebrew/Cellar/php/8.5.9/share/php"),
-    ("PHP_SYSCONFDIR", "/opt/homebrew/etc/php/8.5"),
-    ("PHP_LOCALSTATEDIR", "/opt/homebrew/var"),
-    ("PHP_CONFIG_FILE_PATH", "/opt/homebrew/etc/php/8.5"),
-    (
-        "PHP_CONFIG_FILE_SCAN_DIR",
-        "/opt/homebrew/etc/php/8.5/conf.d",
-    ),
-    ("PHP_SHLIB_SUFFIX", SHLIB_SUFFIX),
-];
 
 /// `PHP_SHLIB_SUFFIX`: `dll` on Windows and `so` everywhere else, macOS
 /// included, as php's `configure` sets it.
@@ -138,84 +107,6 @@ pub(crate) fn host_names(strings: &mut Strings) -> Vec<(Box<[u8]>, Zval)> {
         .collect()
 }
 
-/// A string constant's row.
-fn string(name: &'static str, value: &str) -> (&'static str, ConstExpr) {
-    (name, ConstExpr::Str(value.as_bytes().into()))
-}
-
-/// The error levels `register_zend_constants_symbols` registers
-/// (`Z/Zend/zend_constants_arginfo.h:6-20`), in the order php
-/// registers them, with `E_STRICT` among them carrying the one
-/// attribute `zend_add_global_constant_attribute` hangs on a Zend
-/// constant at the tag: `#[\Deprecated(since: '8.4', message: 'the
-/// error level was removed')]`, which is the whole of its
-/// `CONST_DEPRECATED` (`Z/Zend/zend_constants_arginfo.h:32-37`), so a
-/// read of it is the deprecation and a fold of it is refused. `E_ALL`
-/// after them is their union without `E_STRICT`, the level 8.4 dropped
-/// from the mask (`Z/Zend/zend_errors.h:43`).
-///
-/// ```php
-/// var_dump(E_ERROR, E_WARNING, E_USER_DEPRECATED, E_ALL);
-/// var_dump(E_ALL, E_STRICT & E_ALL, E_ALL & ~E_WARNING);
-/// var_dump(error_reporting(E_ALL & ~E_DEPRECATED), error_reporting());
-/// ```
-/// ```expect
-/// int(1)
-/// int(2)
-/// int(16384)
-/// int(30719)
-///
-/// Deprecated: Constant E_STRICT is deprecated since 8.4, the error level was removed in %s on line 3
-/// int(30719)
-/// int(0)
-/// int(30717)
-/// int(32767)
-/// int(22527)
-/// ```
-fn error_levels() -> Vec<ConstDecl> {
-    [
-        ("E_ERROR", 1 << 0),
-        ("E_WARNING", 1 << 1),
-        ("E_PARSE", 1 << 2),
-        ("E_NOTICE", 1 << 3),
-        ("E_CORE_ERROR", 1 << 4),
-        ("E_CORE_WARNING", 1 << 5),
-        ("E_COMPILE_ERROR", 1 << 6),
-        ("E_COMPILE_WARNING", 1 << 7),
-        ("E_USER_ERROR", 1 << 8),
-        ("E_USER_WARNING", 1 << 9),
-        ("E_USER_NOTICE", 1 << 10),
-        ("E_STRICT", 1 << 11),
-        ("E_RECOVERABLE_ERROR", 1 << 12),
-        ("E_DEPRECATED", 1 << 13),
-        ("E_USER_DEPRECATED", 1 << 14),
-        ("E_ALL", 30719),
-    ]
-    .into_iter()
-    .map(|(name, value)| ConstDecl {
-        name: Name::from(name),
-        value: ConstExpr::long(value),
-        attributes: if name == "E_STRICT" {
-            vec![Attribute {
-                name: Name::from("Deprecated"),
-                arguments: vec![
-                    AttributeArgument {
-                        name: Some(Name::from("since")),
-                        value: ConstExpr::Str(b"8.4".as_slice().into()),
-                    },
-                    AttributeArgument {
-                        name: Some(Name::from("message")),
-                        value: ConstExpr::Str(b"the error level was removed".as_slice().into()),
-                    },
-                ],
-            }]
-        } else {
-            Vec::new()
-        },
-    })
-    .collect()
-}
-
 /// Core's constants in php's order, each a `ConstDecl` the compiler
 /// folds where it stands (`zend_try_ct_eval_const`, design §6.1) and
 /// the request's table reads while a program executes, from one row.
@@ -288,99 +179,148 @@ fn error_levels() -> Vec<ConstDecl> {
 /// string(3) "cli"
 /// bool(true)
 /// ```
-pub(crate) fn core_constants() -> Vec<ConstDecl> {
-    let mut out = error_levels();
-    let mut rows: Vec<(&'static str, ConstExpr)> = vec![
-        ("DEBUG_BACKTRACE_PROVIDE_OBJECT", ConstExpr::long(1)),
-        ("DEBUG_BACKTRACE_IGNORE_ARGS", ConstExpr::long(2)),
-        ("ZEND_THREAD_SAFE", ConstExpr::Bool(false)),
-        ("ZEND_DEBUG_BUILD", ConstExpr::Bool(false)),
-        (
-            "ZEND_VM_KIND",
-            ConstExpr::Str(b"ZEND_VM_KIND_TAILCALL".as_slice().into()),
-        ),
-        ("TRUE", ConstExpr::Bool(true)),
-        ("FALSE", ConstExpr::Bool(false)),
-        ("NULL", ConstExpr::Null),
-        ("PHP_VERSION", ConstExpr::Str(PHP_VERSION.as_bytes().into())),
-        ("PHP_MAJOR_VERSION", ConstExpr::long(8)),
-        ("PHP_MINOR_VERSION", ConstExpr::long(5)),
-        ("PHP_RELEASE_VERSION", ConstExpr::long(9)),
-        ("PHP_EXTRA_VERSION", ConstExpr::Str(Box::new([]))),
-        ("PHP_VERSION_ID", ConstExpr::long(80509)),
-        (
-            "PHP_BUILD_DATE",
-            ConstExpr::Str(b"Jul 28 2026 13:06:52".as_slice().into()),
-        ),
-        (
-            "PHP_BUILD_PROVIDER",
-            ConstExpr::Str(b"Homebrew".as_slice().into()),
-        ),
-        ("PHP_ZTS", ConstExpr::Bool(false)),
-        ("PHP_DEBUG", ConstExpr::Bool(false)),
-        ("PHP_OS", ConstExpr::Str(OS.as_bytes().into())),
-        ("PHP_OS_FAMILY", ConstExpr::Str(OS_FAMILY.as_bytes().into())),
-        (
-            "DEFAULT_INCLUDE_PATH",
-            ConstExpr::Str(PHP_INCLUDE_PATH.as_bytes().into()),
-        ),
-    ];
-    rows.extend(BUILD_PATHS.iter().map(|(name, value)| string(name, value)));
-    rows.extend([
-        ("PHP_EOL", ConstExpr::Str(b"\n".as_slice().into())),
-        ("PHP_MAXPATHLEN", ConstExpr::long(MAXPATHLEN)),
-        ("PHP_INT_MAX", ConstExpr::long(i64::MAX)),
-        ("PHP_INT_MIN", ConstExpr::long(i64::MIN)),
-        ("PHP_INT_SIZE", ConstExpr::long(8)),
-        ("PHP_FD_SETSIZE", ConstExpr::long(1024)),
-        ("PHP_FLOAT_DIG", ConstExpr::long(15)),
-        ("PHP_FLOAT_EPSILON", ConstExpr::Double(f64::EPSILON)),
-        ("PHP_FLOAT_MAX", ConstExpr::Double(f64::MAX)),
-        ("PHP_FLOAT_MIN", ConstExpr::Double(f64::MIN_POSITIVE)),
-    ]);
+///
+/// The error levels are `register_zend_constants_symbols`'
+/// (`Z/Zend/zend_constants_arginfo.h:6-20`), in the order php registers
+/// them, with `E_STRICT` among them carrying the one attribute
+/// `zend_add_global_constant_attribute` hangs on a Zend constant at the
+/// tag, `#[\Deprecated(since: '8.4', message: 'the error level was
+/// removed')]`, which is the whole of its `CONST_DEPRECATED`
+/// (`Z/Zend/zend_constants_arginfo.h:32-37`), so a read of it is the
+/// deprecation and a fold of it is refused. `E_ALL` after them is their
+/// union without `E_STRICT`, the level 8.4 dropped from the mask
+/// (`Z/Zend/zend_errors.h:43`).
+///
+/// ```php
+/// var_dump(E_ERROR, E_WARNING, E_USER_DEPRECATED, E_ALL);
+/// var_dump(E_ALL, E_STRICT & E_ALL, E_ALL & ~E_WARNING);
+/// var_dump(error_reporting(E_ALL & ~E_DEPRECATED), error_reporting());
+/// ```
+/// ```expect
+/// int(1)
+/// int(2)
+/// int(16384)
+/// int(30719)
+///
+/// Deprecated: Constant E_STRICT is deprecated since 8.4, the error level was removed in %s on line 3
+/// int(30719)
+/// int(0)
+/// int(30717)
+/// int(32767)
+/// int(22527)
+/// ```
+#[php_const]
+pub(crate) mod startup {
+    use super::{MAXPATHLEN, OS, OS_FAMILY, PHP_INCLUDE_PATH, SHLIB_SUFFIX};
+    use crate::api::abi::ConstValue;
+
+    const E_ERROR: i64 = 1 << 0;
+    const E_WARNING: i64 = 1 << 1;
+    const E_PARSE: i64 = 1 << 2;
+    const E_NOTICE: i64 = 1 << 3;
+    const E_CORE_ERROR: i64 = 1 << 4;
+    const E_CORE_WARNING: i64 = 1 << 5;
+    const E_COMPILE_ERROR: i64 = 1 << 6;
+    const E_COMPILE_WARNING: i64 = 1 << 7;
+    const E_USER_ERROR: i64 = 1 << 8;
+    const E_USER_WARNING: i64 = 1 << 9;
+    const E_USER_NOTICE: i64 = 1 << 10;
+    #[php(deprecated(since = "8.4", message = "the error level was removed"))]
+    const E_STRICT: i64 = 1 << 11;
+    const E_RECOVERABLE_ERROR: i64 = 1 << 12;
+    const E_DEPRECATED: i64 = 1 << 13;
+    const E_USER_DEPRECATED: i64 = 1 << 14;
+    const E_ALL: i64 = 30719;
+    const DEBUG_BACKTRACE_PROVIDE_OBJECT: i64 = 1;
+    const DEBUG_BACKTRACE_IGNORE_ARGS: i64 = 2;
+    const ZEND_THREAD_SAFE: bool = false;
+    const ZEND_DEBUG_BUILD: bool = false;
+    const ZEND_VM_KIND: &str = "ZEND_VM_KIND_TAILCALL";
+    const TRUE: bool = true;
+    const FALSE: bool = false;
+    const NULL: ConstValue = ConstValue::Null;
+    // `register_main_symbols` (`Z/main/main_arginfo.h`): the version,
+    // the build and the host, a build's fact the pinned oracle's.
+    const PHP_VERSION: &str = crate::api::request::PHP_VERSION;
+    const PHP_MAJOR_VERSION: i64 = 8;
+    const PHP_MINOR_VERSION: i64 = 5;
+    const PHP_RELEASE_VERSION: i64 = 9;
+    const PHP_EXTRA_VERSION: &str = "";
+    const PHP_VERSION_ID: i64 = 80509;
+    const PHP_BUILD_DATE: &str = "Jul 28 2026 13:06:52";
+    const PHP_BUILD_PROVIDER: &str = "Homebrew";
+    const PHP_ZTS: bool = false;
+    const PHP_DEBUG: bool = false;
+    const PHP_OS: &str = OS;
+    const PHP_OS_FAMILY: &str = OS_FAMILY;
+    const DEFAULT_INCLUDE_PATH: &str = PHP_INCLUDE_PATH;
+    // The install paths the pinned build's `configure` wrote into
+    // `main/build-defs.h`, from `PEAR_INSTALL_DIR` to
+    // `PHP_CONFIG_FILE_SCAN_DIR`, and the shared library suffix.
+    const PEAR_INSTALL_DIR: &str = "/opt/homebrew/Cellar/php/8.5.9/share/php/pear";
+    const PEAR_EXTENSION_DIR: &str = "/opt/homebrew/Cellar/php/8.5.9/lib/php/20250925";
+    const PHP_EXTENSION_DIR: &str = super::PHP_EXTENSION_DIR;
+    const PHP_PREFIX: &str = "/opt/homebrew/Cellar/php/8.5.9";
+    const PHP_BINDIR: &str = "/opt/homebrew/Cellar/php/8.5.9/bin";
+    const PHP_SBINDIR: &str = "/opt/homebrew/Cellar/php/8.5.9/sbin";
+    const PHP_MANDIR: &str = "/opt/homebrew/Cellar/php/8.5.9/share/man";
+    const PHP_LIBDIR: &str = "/opt/homebrew/Cellar/php/8.5.9/lib/php";
+    const PHP_DATADIR: &str = "/opt/homebrew/Cellar/php/8.5.9/share/php";
+    const PHP_SYSCONFDIR: &str = "/opt/homebrew/etc/php/8.5";
+    const PHP_LOCALSTATEDIR: &str = "/opt/homebrew/var";
+    const PHP_CONFIG_FILE_PATH: &str = "/opt/homebrew/etc/php/8.5";
+    const PHP_CONFIG_FILE_SCAN_DIR: &str = "/opt/homebrew/etc/php/8.5/conf.d";
+    const PHP_SHLIB_SUFFIX: &str = SHLIB_SUFFIX;
+    const PHP_EOL: &str = "\n";
+    const PHP_MAXPATHLEN: i64 = MAXPATHLEN;
+    const PHP_INT_MAX: i64 = i64::MAX;
+    const PHP_INT_MIN: i64 = i64::MIN;
+    const PHP_INT_SIZE: i64 = 8;
+    const PHP_FD_SETSIZE: i64 = 1024;
+    const PHP_FLOAT_DIG: i64 = 15;
+    const PHP_FLOAT_EPSILON: f64 = f64::EPSILON;
+    const PHP_FLOAT_MAX: f64 = f64::MAX;
+    const PHP_FLOAT_MIN: f64 = f64::MIN_POSITIVE;
     // `main/main.stub.php`: the constants of `php_output.h`, the
     // operation `ob_start`'s callback is handed and the flags it is
     // started with.
-    rows.extend(
-        [
-            ("PHP_OUTPUT_HANDLER_START", 0x01),
-            ("PHP_OUTPUT_HANDLER_WRITE", 0x00),
-            ("PHP_OUTPUT_HANDLER_FLUSH", 0x04),
-            ("PHP_OUTPUT_HANDLER_CLEAN", 0x02),
-            ("PHP_OUTPUT_HANDLER_FINAL", 0x08),
-            ("PHP_OUTPUT_HANDLER_CONT", 0x00),
-            ("PHP_OUTPUT_HANDLER_END", 0x08),
-            ("PHP_OUTPUT_HANDLER_CLEANABLE", 0x10),
-            ("PHP_OUTPUT_HANDLER_FLUSHABLE", 0x20),
-            ("PHP_OUTPUT_HANDLER_REMOVABLE", 0x40),
-            ("PHP_OUTPUT_HANDLER_STDFLAGS", 0x70),
-            ("PHP_OUTPUT_HANDLER_STARTED", 0x1000),
-            ("PHP_OUTPUT_HANDLER_DISABLED", 0x2000),
-            ("PHP_OUTPUT_HANDLER_PROCESSED", 0x4000),
-            ("UPLOAD_ERR_OK", 0),
-            ("UPLOAD_ERR_INI_SIZE", 1),
-            ("UPLOAD_ERR_FORM_SIZE", 2),
-            ("UPLOAD_ERR_PARTIAL", 3),
-            ("UPLOAD_ERR_NO_FILE", 4),
-            ("UPLOAD_ERR_NO_TMP_DIR", 6),
-            ("UPLOAD_ERR_CANT_WRITE", 7),
-            ("UPLOAD_ERR_EXTENSION", 8),
-        ]
-        .map(|(name, value)| (name, ConstExpr::long(value))),
-    );
-    // `php_binary_init` (`Z/main/main.c:418`): the realpath of the
-    // executable the process runs, and the empty string where there is
-    // none to name.
-    let binary = std::env::current_exe()
-        .ok()
-        .and_then(|path| std::fs::canonicalize(path).ok())
-        .map(|path| path.as_os_str().as_encoded_bytes().to_vec())
-        .unwrap_or_default();
-    rows.push(("PHP_BINARY", ConstExpr::Str(binary.into())));
-    out.extend(rows.into_iter().map(|(name, value)| ConstDecl {
-        name: Name::from(name),
-        value,
-        attributes: Vec::new(),
-    }));
-    out
+    const PHP_OUTPUT_HANDLER_START: i64 = 0x01;
+    const PHP_OUTPUT_HANDLER_WRITE: i64 = 0x00;
+    const PHP_OUTPUT_HANDLER_FLUSH: i64 = 0x04;
+    const PHP_OUTPUT_HANDLER_CLEAN: i64 = 0x02;
+    const PHP_OUTPUT_HANDLER_FINAL: i64 = 0x08;
+    const PHP_OUTPUT_HANDLER_CONT: i64 = 0x00;
+    const PHP_OUTPUT_HANDLER_END: i64 = 0x08;
+    const PHP_OUTPUT_HANDLER_CLEANABLE: i64 = 0x10;
+    const PHP_OUTPUT_HANDLER_FLUSHABLE: i64 = 0x20;
+    const PHP_OUTPUT_HANDLER_REMOVABLE: i64 = 0x40;
+    const PHP_OUTPUT_HANDLER_STDFLAGS: i64 = 0x70;
+    const PHP_OUTPUT_HANDLER_STARTED: i64 = 0x1000;
+    const PHP_OUTPUT_HANDLER_DISABLED: i64 = 0x2000;
+    const PHP_OUTPUT_HANDLER_PROCESSED: i64 = 0x4000;
+    // `php_rfc1867_register_constants`' upload errors.
+    const UPLOAD_ERR_OK: i64 = 0;
+    const UPLOAD_ERR_INI_SIZE: i64 = 1;
+    const UPLOAD_ERR_FORM_SIZE: i64 = 2;
+    const UPLOAD_ERR_PARTIAL: i64 = 3;
+    const UPLOAD_ERR_NO_FILE: i64 = 4;
+    const UPLOAD_ERR_NO_TMP_DIR: i64 = 6;
+    const UPLOAD_ERR_CANT_WRITE: i64 = 7;
+    const UPLOAD_ERR_EXTENSION: i64 = 8;
+
+    /// `php_binary_init` (`Z/main/main.c:418`): the realpath of the
+    /// executable the process runs, and the empty string where there is
+    /// none to name.
+    fn PHP_BINARY() -> Vec<u8> {
+        std::env::current_exe()
+            .ok()
+            .and_then(|path| std::fs::canonicalize(path).ok())
+            .map(|path| path.as_os_str().as_encoded_bytes().to_vec())
+            .unwrap_or_default()
+    }
+}
+
+/// Core's constants in php's order, [`startup`]'s.
+pub(crate) fn core_constants() -> Vec<php_unit::decl::ConstDecl> {
+    startup::declared()
 }
