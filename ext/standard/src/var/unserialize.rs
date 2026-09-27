@@ -1067,7 +1067,22 @@ impl State<'_> {
         }
     }
 
-    /// The scanner without a var hash, what reads a key.
+    /// The scanner without a var hash, what reads a key: a scalar, and
+    /// php's failure for anything else, where php's rule leaves `*p`.
+    ///
+    /// ```php
+    /// var_dump(unserialize('a:1:{a:0:{}i:1;}'), unserialize('a:1:{R:1;i:1;}'), unserialize('a:1:{O:8:"stdClass":0:{}i:1;}'));
+    /// ```
+    /// ```expect
+    /// Warning: unserialize(): Error at offset 10 of 16 bytes in %s on line 2
+    ///
+    /// Warning: unserialize(): Error at offset 9 of 14 bytes in %s on line 2
+    ///
+    /// Warning: unserialize(): Error at offset 5 of 29 bytes in %s on line 2
+    /// bool(false)
+    /// bool(false)
+    /// bool(false)
+    /// ```
     fn key(&mut self, req: &mut Request) -> Option<Scalar> {
         let start = self.p;
         if start >= self.buf.len() {
@@ -1101,9 +1116,21 @@ impl State<'_> {
                 self.p = end;
                 Some(Scalar::Other)
             }
-            (b'a' | b'O' | b'C' | b'E', b':') => {
-                // The token's header matched; with no var hash php
-                // answers failure where the header ended.
+            // With no var hash php's rules answer failure: `a:` and the
+            // references where their header ended, the objects and the
+            // enum, with the rest, where they began.
+            (b'a', b':') => {
+                let end = self.uiv(start + 2)?;
+                if self.at(end) == b':' && self.at(end + 1) == b'{' && end + 1 < self.buf.len() {
+                    self.p = end + 2;
+                }
+                None
+            }
+            (b'R' | b'r', b':') => {
+                let end = self.uiv(start + 2)?;
+                if self.at(end) == b';' && end < self.buf.len() {
+                    self.p = end + 1;
+                }
                 None
             }
             (b'}', _) => {
