@@ -13295,6 +13295,22 @@ impl Emit<'_> {
     /// (`zend_try_ct_eval_binary_op`) and a call of a name in
     /// [`crate::special`]'s table over constants
     /// (`zend_try_compile_special_func`).
+    ///
+    /// A string with a variable in it folds nothing and lays no opline
+    /// down: the array it stands in compiles it once, where the element
+    /// wants it, and a rope in a loop writes its temporary afresh each
+    /// time round.
+    ///
+    /// ```php
+    /// function f(array $a, &$p) { return 1; }
+    /// for ($i = 0; $i < 3; $i++) {
+    ///     $r[] = f(["x", "-r", "a $i b $i"], $pipes);
+    /// }
+    /// echo "done\n";
+    /// ```
+    /// ```expect
+    /// done
+    /// ```
     #[allow(clippy::too_many_lines)]
     pub(crate) fn constant_expr(&mut self, expr: tree::Expr) -> Result<Zval, CompileError> {
         // `zend_eval_const_expr` checks the stack and leaves
@@ -13345,10 +13361,25 @@ impl Emit<'_> {
             // A `"…"` or a heredoc with nothing interpolated is one
             // string php's parser folded before the compiler saw it;
             // one with a variable in it is `ZEND_AST_ENCAPS_LIST`, whose
-            // oplines no fold replaces.
+            // oplines no fold replaces and `zend_eval_const_expr` leaves
+            // standing uncompiled, its `default` arm. Only the folded
+            // kind is compiled here, which lays no opline down: compiling
+            // the other left its oplines behind once for every fold that
+            // asked, each result a temporary written and never read.
             // Its line is the parser's and no compile's, so the compile
             // that reads it leaves `CG(zend_lineno)` where it stood.
             tree::Expr::InterpolatedStringExpr(_) | tree::Expr::HeredocExpr(_) => {
+                let parts: &[tree::StringPart] = match expr {
+                    tree::Expr::InterpolatedStringExpr(id) => &tree[id].parts,
+                    tree::Expr::HeredocExpr(id) => &tree[id].parts,
+                    _ => &[],
+                };
+                if parts
+                    .iter()
+                    .any(|part| !matches!(part, tree::StringPart::LiteralStringPart(_)))
+                {
+                    return Err(self.fatal("an interpolated string is no constant expression"));
+                }
                 let line = self.line;
                 let value = self.expr(expr);
                 self.line = line;
