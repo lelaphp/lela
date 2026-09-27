@@ -727,7 +727,7 @@ impl Stream {
         if req.held_streams.contains(&self.0) {
             return false;
         }
-        self.0.close(req);
+        crate::streams::PhpStream::close_open(req, self);
         true
     }
 }

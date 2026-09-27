@@ -982,13 +982,68 @@ impl PhpStream {
     /// are one path: the owed flush, then the kind closed, then the
     /// stream dropped.
     fn free(mut self, req: &mut Request) -> i32 {
+        self.flush_owed(req);
+        self.release(req)
+    }
+
+    /// `_php_stream_free`'s "make sure everything is saved": the write
+    /// chain flushed closing, where the stream was written or has one.
+    fn flush_owed(&mut self, req: &mut Request) {
         if self.flags.was_written || !self.writefilters.is_empty() {
             self.flush_closing(req, true);
         }
+    }
+
+    /// `_php_stream_free` past the flush: the kind closed, then each
+    /// filter taken off, and what the close answered.
+    fn release(mut self, req: &mut Request) -> i32 {
         let Self { ops, .. } = &mut self;
         let ret = ops.close(req);
         self.free_filters(req);
         ret
+    }
+
+    /// `php_stream_free(stream, PHP_STREAM_FREE_KEEP_RSRC | ...)` as
+    /// `fclose` reaches it: the owed flush while the resource is still
+    /// open, so a user filter's `$this->stream` is the open `resource`
+    /// php hands it; then `zend_list_close`, whose destructor finds the
+    /// stream in its free already (php's `in_free` guard) and leaves it;
+    /// then the kind closed and the filters taken off. The last owner's
+    /// release reaches the free through the destructor instead, the
+    /// resource closed already, as `zend_resource_dtor` closes it first.
+    ///
+    /// ```php
+    /// class F extends php_user_filter {
+    ///     function filter($in, $out, &$consumed, $closing): int {
+    ///         while ($b = stream_bucket_make_writeable($in)) { $consumed += $b->datalen; stream_bucket_append($out, $b); }
+    ///         if ($closing) echo get_resource_type($this->stream), "\n";
+    ///         return PSFS_PASS_ON;
+    ///     }
+    /// }
+    /// stream_filter_register('f', 'F');
+    /// $m = fopen('php://memory', 'w');
+    /// stream_filter_append($m, 'f', STREAM_FILTER_WRITE);
+    /// fwrite($m, 'x');
+    /// var_dump(fclose($m));
+    /// $m = fopen('php://memory', 'w');
+    /// stream_filter_append($m, 'f', STREAM_FILTER_WRITE);
+    /// $m = null;
+    /// ```
+    /// ```expect
+    /// stream
+    /// bool(true)
+    /// Unknown
+    /// ```
+    pub(crate) fn close_open(req: &mut Request, stream: Stream) {
+        let res = stream.resource();
+        req.stream_op(stream, |req, s| s.flush_owed(req));
+        let taken = req
+            .resource_native_mut::<Option<PhpStream>>(res.heap())
+            .and_then(Option::take);
+        res.close(req);
+        if let Some(taken) = taken {
+            req.pclose_ret = taken.release(req);
+        }
     }
 }
 
