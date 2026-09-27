@@ -71,6 +71,70 @@ const FLOCK_EX: i64 = 2;
 /// int(0)
 /// int(0)
 /// ```
+///
+/// The `STREAM_*` constants the streams natives read or hand back,
+/// with this host's values where the stub takes a header's.
+///
+/// ```php
+/// var_dump(STREAM_NOTIFY_CONNECT, STREAM_NOTIFY_RESOLVE, STREAM_NOTIFY_SEVERITY_ERR, STREAM_FILTER_ALL, STREAM_CLIENT_CONNECT, STREAM_CRYPTO_METHOD_ANY_CLIENT, STREAM_CRYPTO_METHOD_TLSv1_3_SERVER, STREAM_CRYPTO_PROTO_TLSv1_2, STREAM_SHUT_RDWR, STREAM_PF_INET6, STREAM_PF_UNIX, STREAM_IPPROTO_RAW, STREAM_SOCK_SEQPACKET, STREAM_SOCK_RDM, STREAM_PEEK, STREAM_OOB, STREAM_SERVER_BIND, STREAM_SERVER_LISTEN);
+/// ```
+/// ```expect
+/// int(2)
+/// int(1)
+/// int(2)
+/// int(3)
+/// int(4)
+/// int(127)
+/// int(64)
+/// int(32)
+/// int(2)
+/// int(30)
+/// int(1)
+/// int(255)
+/// int(5)
+/// int(4)
+/// int(2)
+/// int(1)
+/// int(4)
+/// int(8)
+/// ```
+///
+/// The socket constants, with the values this host's `<sys/socket.h>`
+/// and php's headers give them, and `default_socket_timeout`.
+///
+/// ```php
+/// var_dump(STREAM_CLIENT_PERSISTENT, STREAM_CLIENT_ASYNC_CONNECT, STREAM_CLIENT_CONNECT, STREAM_CRYPTO_METHOD_ANY_CLIENT, STREAM_CRYPTO_METHOD_TLS_CLIENT, STREAM_CRYPTO_METHOD_TLS_SERVER, STREAM_CRYPTO_PROTO_TLSv1_3, STREAM_SHUT_RD, STREAM_SHUT_WR, STREAM_SHUT_RDWR, STREAM_PF_INET, STREAM_PF_INET6, STREAM_PF_UNIX, STREAM_IPPROTO_IP, STREAM_IPPROTO_TCP, STREAM_IPPROTO_UDP, STREAM_IPPROTO_ICMP, STREAM_IPPROTO_RAW, STREAM_SOCK_STREAM, STREAM_SOCK_DGRAM, STREAM_SOCK_RAW, STREAM_SOCK_SEQPACKET, STREAM_SOCK_RDM, STREAM_PEEK, STREAM_OOB, STREAM_SERVER_BIND, STREAM_SERVER_LISTEN, ini_get('default_socket_timeout'));
+/// ```
+/// ```expect
+/// int(1)
+/// int(2)
+/// int(4)
+/// int(127)
+/// int(121)
+/// int(120)
+/// int(64)
+/// int(0)
+/// int(1)
+/// int(2)
+/// int(2)
+/// int(30)
+/// int(1)
+/// int(0)
+/// int(6)
+/// int(17)
+/// int(1)
+/// int(255)
+/// int(1)
+/// int(2)
+/// int(3)
+/// int(5)
+/// int(4)
+/// int(2)
+/// int(1)
+/// int(4)
+/// int(8)
+/// string(2) "60"
+/// ```
 #[php_const]
 pub(crate) mod constants {
     /// `SEEK_SET`, `SEEK_CUR` and `SEEK_END` as `<stdio.h>` has them.
@@ -83,6 +147,75 @@ pub(crate) mod constants {
     pub(crate) const LOCK_EX: i64 = 2;
     pub(crate) const LOCK_UN: i64 = 3;
     pub(crate) const LOCK_NB: i64 = 4;
+    /// `PHP_STREAM_NOTIFY_*` and `PHP_STREAM_NOTIFY_SEVERITY_*`
+    /// (`Z/main/streams/php_stream_context.h`), a notifier's codes.
+    pub(crate) const STREAM_NOTIFY_CONNECT: i64 = 2;
+    pub(crate) const STREAM_NOTIFY_AUTH_REQUIRED: i64 = 3;
+    pub(crate) const STREAM_NOTIFY_AUTH_RESULT: i64 = 10;
+    pub(crate) const STREAM_NOTIFY_MIME_TYPE_IS: i64 = 4;
+    pub(crate) const STREAM_NOTIFY_FILE_SIZE_IS: i64 = 5;
+    pub(crate) const STREAM_NOTIFY_REDIRECTED: i64 = 6;
+    pub(crate) const STREAM_NOTIFY_PROGRESS: i64 = 7;
+    pub(crate) const STREAM_NOTIFY_FAILURE: i64 = 9;
+    pub(crate) const STREAM_NOTIFY_COMPLETED: i64 = 8;
+    pub(crate) const STREAM_NOTIFY_RESOLVE: i64 = 1;
+    pub(crate) const STREAM_NOTIFY_SEVERITY_INFO: i64 = 0;
+    pub(crate) const STREAM_NOTIFY_SEVERITY_WARN: i64 = 1;
+    pub(crate) const STREAM_NOTIFY_SEVERITY_ERR: i64 = 2;
+    /// `PHP_STREAM_FILTER_*` (`Z/main/streams/php_stream_filter_api.h`),
+    /// the chains `stream_filter_append` and `_prepend` name.
+    pub(crate) const STREAM_FILTER_READ: i64 = 1;
+    pub(crate) const STREAM_FILTER_WRITE: i64 = 2;
+    pub(crate) const STREAM_FILTER_ALL: i64 = 3;
+    /// `PHP_STREAM_CLIENT_*` and `STREAM_XPORT_*` (`Z/main/php_streams.h`,
+    /// `Z/main/streams/php_stream_transport.h`): what `$flags` holds.
+    pub(crate) const STREAM_CLIENT_PERSISTENT: i64 = 1;
+    pub(crate) const STREAM_CLIENT_ASYNC_CONNECT: i64 = 2;
+    pub(crate) const STREAM_CLIENT_CONNECT: i64 = 4;
+    pub(crate) const STREAM_CRYPTO_METHOD_ANY_CLIENT: i64 = 127;
+    pub(crate) const STREAM_CRYPTO_METHOD_SSLv2_CLIENT: i64 = 3;
+    pub(crate) const STREAM_CRYPTO_METHOD_SSLv3_CLIENT: i64 = 5;
+    pub(crate) const STREAM_CRYPTO_METHOD_SSLv23_CLIENT: i64 = 57;
+    pub(crate) const STREAM_CRYPTO_METHOD_TLS_CLIENT: i64 = 121;
+    pub(crate) const STREAM_CRYPTO_METHOD_TLSv1_0_CLIENT: i64 = 9;
+    pub(crate) const STREAM_CRYPTO_METHOD_TLSv1_1_CLIENT: i64 = 17;
+    pub(crate) const STREAM_CRYPTO_METHOD_TLSv1_2_CLIENT: i64 = 33;
+    pub(crate) const STREAM_CRYPTO_METHOD_TLSv1_3_CLIENT: i64 = 65;
+    pub(crate) const STREAM_CRYPTO_METHOD_ANY_SERVER: i64 = 126;
+    pub(crate) const STREAM_CRYPTO_METHOD_SSLv2_SERVER: i64 = 2;
+    pub(crate) const STREAM_CRYPTO_METHOD_SSLv3_SERVER: i64 = 4;
+    pub(crate) const STREAM_CRYPTO_METHOD_SSLv23_SERVER: i64 = 120;
+    pub(crate) const STREAM_CRYPTO_METHOD_TLS_SERVER: i64 = 120;
+    pub(crate) const STREAM_CRYPTO_METHOD_TLSv1_0_SERVER: i64 = 8;
+    pub(crate) const STREAM_CRYPTO_METHOD_TLSv1_1_SERVER: i64 = 16;
+    pub(crate) const STREAM_CRYPTO_METHOD_TLSv1_2_SERVER: i64 = 32;
+    pub(crate) const STREAM_CRYPTO_METHOD_TLSv1_3_SERVER: i64 = 64;
+    pub(crate) const STREAM_CRYPTO_PROTO_SSLv3: i64 = 4;
+    pub(crate) const STREAM_CRYPTO_PROTO_TLSv1_0: i64 = 8;
+    pub(crate) const STREAM_CRYPTO_PROTO_TLSv1_1: i64 = 16;
+    pub(crate) const STREAM_CRYPTO_PROTO_TLSv1_2: i64 = 32;
+    pub(crate) const STREAM_CRYPTO_PROTO_TLSv1_3: i64 = 64;
+    /// `STREAM_SHUT_*`, what `stream_socket_shutdown` takes.
+    pub(crate) const STREAM_SHUT_RD: i64 = 0;
+    pub(crate) const STREAM_SHUT_WR: i64 = 1;
+    pub(crate) const STREAM_SHUT_RDWR: i64 = 2;
+    pub(crate) const STREAM_PF_INET: i64 = 2;
+    pub(crate) const STREAM_PF_INET6: i64 = 30;
+    pub(crate) const STREAM_PF_UNIX: i64 = 1;
+    pub(crate) const STREAM_IPPROTO_IP: i64 = 0;
+    pub(crate) const STREAM_IPPROTO_TCP: i64 = 6;
+    pub(crate) const STREAM_IPPROTO_UDP: i64 = 17;
+    pub(crate) const STREAM_IPPROTO_ICMP: i64 = 1;
+    pub(crate) const STREAM_IPPROTO_RAW: i64 = 255;
+    pub(crate) const STREAM_SOCK_STREAM: i64 = 1;
+    pub(crate) const STREAM_SOCK_DGRAM: i64 = 2;
+    pub(crate) const STREAM_SOCK_RAW: i64 = 3;
+    pub(crate) const STREAM_SOCK_SEQPACKET: i64 = 5;
+    pub(crate) const STREAM_SOCK_RDM: i64 = 4;
+    pub(crate) const STREAM_PEEK: i64 = 2;
+    pub(crate) const STREAM_OOB: i64 = 1;
+    pub(crate) const STREAM_SERVER_BIND: i64 = 4;
+    pub(crate) const STREAM_SERVER_LISTEN: i64 = 8;
     /// `PHP_FILE_*` (`Z/ext/standard/file.h`), the bits of `$flags`.
     pub(crate) const FILE_USE_INCLUDE_PATH: i64 = 1;
     pub(crate) const FILE_IGNORE_NEW_LINES: i64 = 2;

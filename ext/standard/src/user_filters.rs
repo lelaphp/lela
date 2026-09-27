@@ -59,8 +59,8 @@ impl BrigadeCell {
 /// A bucket: its bytes, and the brigade it is on, `bucket->brigade`.
 struct BucketCell(Vec<u8>, Option<Resource>);
 
-/// The constants `user_filters.stub.php` and `file.stub.php` declare
-/// for filters.
+/// The constants `user_filters.stub.php` declares for filters, beside
+/// `file.stub.php`'s `STREAM_FILTER_*` the filter natives take.
 ///
 /// ```php
 /// var_dump(PSFS_PASS_ON, PSFS_FEED_ME, PSFS_ERR_FATAL, PSFS_FLAG_NORMAL, PSFS_FLAG_FLUSH_INC, PSFS_FLAG_FLUSH_CLOSE, STREAM_FILTER_READ, STREAM_FILTER_WRITE, STREAM_FILTER_ALL);
@@ -85,9 +85,6 @@ pub(crate) mod constants {
     pub(crate) const PSFS_FLAG_NORMAL: i64 = 0;
     pub(crate) const PSFS_FLAG_FLUSH_INC: i64 = 1;
     pub(crate) const PSFS_FLAG_FLUSH_CLOSE: i64 = 2;
-    pub(crate) const STREAM_FILTER_READ: i64 = 1;
-    pub(crate) const STREAM_FILTER_WRITE: i64 = 2;
-    pub(crate) const STREAM_FILTER_ALL: i64 = 3;
 }
 
 /// `php_user_filter` and `StreamBucket`, as `user_filters.stub.php`

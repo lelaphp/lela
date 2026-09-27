@@ -373,7 +373,6 @@ fn file_constants() -> Vec<ConstDecl> {
         html::constants(),
         basic_functions::constants(),
         dir::constants::declared(),
-        streamsfuncs::constants(),
         crypt::constants(),
         password::constants(),
         assert::constants(),
@@ -381,7 +380,6 @@ fn file_constants() -> Vec<ConstDecl> {
         image::constants(),
         dns::constants::declared(),
         info::constants(),
-        sockets::constants::declared(),
         user_filters::constants::declared(),
         userspace::constants::declared(),
     ]

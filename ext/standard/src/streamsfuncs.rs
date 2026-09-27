@@ -22,16 +22,16 @@ use std::os::unix::ffi::OsStrExt;
 use php_ext::abi::{OrFalse, Passed, Path, Raw, True, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::callable_checked;
-use php_ext::decl::{ConstDecl, FunctionDecl};
+use php_ext::decl::FunctionDecl;
 use php_ext::raising::{
     Level, Thrown, arg_count_error, arg_type_error, arg_value_error, deprecated, docref, throw,
 };
 use php_ext::request::{OptionAnswer, Request, Resolve, Stream, StreamOption, Whence};
 use php_ext::values::{Key, PhpArray, PhpString, Resource, ResourceType, Value, ValueRef};
 
+use crate::State;
 use crate::output::Entry;
 use crate::virtual_cwd::MAXPATHLEN;
-use crate::{State, constant};
 
 /// What the request keeps for the `contexts`: the resource type, once
 /// registered, and `FG(default_context)`.
@@ -49,103 +49,6 @@ struct Context {
 
 /// `PHP_STREAM_COPY_ALL` as `stream_get_contents` spells it, `-1`.
 const COPY_ALL: i64 = -1;
-
-/// The `STREAM_*` constants of `file.stub.php` the streams natives read
-/// or hand back, in its order, with this host's values where the stub
-/// takes a header's.
-///
-/// ```php
-/// var_dump(STREAM_NOTIFY_CONNECT, STREAM_NOTIFY_RESOLVE, STREAM_NOTIFY_SEVERITY_ERR, STREAM_FILTER_ALL, STREAM_CLIENT_CONNECT, STREAM_CRYPTO_METHOD_ANY_CLIENT, STREAM_CRYPTO_METHOD_TLSv1_3_SERVER, STREAM_CRYPTO_PROTO_TLSv1_2, STREAM_SHUT_RDWR, STREAM_PF_INET6, STREAM_PF_UNIX, STREAM_IPPROTO_RAW, STREAM_SOCK_SEQPACKET, STREAM_SOCK_RDM, STREAM_PEEK, STREAM_OOB, STREAM_SERVER_BIND, STREAM_SERVER_LISTEN);
-/// ```
-/// ```expect
-/// int(2)
-/// int(1)
-/// int(2)
-/// int(3)
-/// int(4)
-/// int(127)
-/// int(64)
-/// int(32)
-/// int(2)
-/// int(30)
-/// int(1)
-/// int(255)
-/// int(5)
-/// int(4)
-/// int(2)
-/// int(1)
-/// int(4)
-/// int(8)
-/// ```
-pub(crate) fn constants() -> Vec<ConstDecl> {
-    [
-        ("STREAM_NOTIFY_CONNECT", 2),
-        ("STREAM_NOTIFY_AUTH_REQUIRED", 3),
-        ("STREAM_NOTIFY_AUTH_RESULT", 10),
-        ("STREAM_NOTIFY_MIME_TYPE_IS", 4),
-        ("STREAM_NOTIFY_FILE_SIZE_IS", 5),
-        ("STREAM_NOTIFY_REDIRECTED", 6),
-        ("STREAM_NOTIFY_PROGRESS", 7),
-        ("STREAM_NOTIFY_FAILURE", 9),
-        ("STREAM_NOTIFY_COMPLETED", 8),
-        ("STREAM_NOTIFY_RESOLVE", 1),
-        ("STREAM_NOTIFY_SEVERITY_INFO", 0),
-        ("STREAM_NOTIFY_SEVERITY_WARN", 1),
-        ("STREAM_NOTIFY_SEVERITY_ERR", 2),
-        ("STREAM_FILTER_READ", 1),
-        ("STREAM_FILTER_WRITE", 2),
-        ("STREAM_FILTER_ALL", 3),
-        ("STREAM_CLIENT_PERSISTENT", 1),
-        ("STREAM_CLIENT_ASYNC_CONNECT", 2),
-        ("STREAM_CLIENT_CONNECT", 4),
-        ("STREAM_CRYPTO_METHOD_ANY_CLIENT", 127),
-        ("STREAM_CRYPTO_METHOD_SSLv2_CLIENT", 3),
-        ("STREAM_CRYPTO_METHOD_SSLv3_CLIENT", 5),
-        ("STREAM_CRYPTO_METHOD_SSLv23_CLIENT", 57),
-        ("STREAM_CRYPTO_METHOD_TLS_CLIENT", 121),
-        ("STREAM_CRYPTO_METHOD_TLSv1_0_CLIENT", 9),
-        ("STREAM_CRYPTO_METHOD_TLSv1_1_CLIENT", 17),
-        ("STREAM_CRYPTO_METHOD_TLSv1_2_CLIENT", 33),
-        ("STREAM_CRYPTO_METHOD_TLSv1_3_CLIENT", 65),
-        ("STREAM_CRYPTO_METHOD_ANY_SERVER", 126),
-        ("STREAM_CRYPTO_METHOD_SSLv2_SERVER", 2),
-        ("STREAM_CRYPTO_METHOD_SSLv3_SERVER", 4),
-        ("STREAM_CRYPTO_METHOD_SSLv23_SERVER", 120),
-        ("STREAM_CRYPTO_METHOD_TLS_SERVER", 120),
-        ("STREAM_CRYPTO_METHOD_TLSv1_0_SERVER", 8),
-        ("STREAM_CRYPTO_METHOD_TLSv1_1_SERVER", 16),
-        ("STREAM_CRYPTO_METHOD_TLSv1_2_SERVER", 32),
-        ("STREAM_CRYPTO_METHOD_TLSv1_3_SERVER", 64),
-        ("STREAM_CRYPTO_PROTO_SSLv3", 4),
-        ("STREAM_CRYPTO_PROTO_TLSv1_0", 8),
-        ("STREAM_CRYPTO_PROTO_TLSv1_1", 16),
-        ("STREAM_CRYPTO_PROTO_TLSv1_2", 32),
-        ("STREAM_CRYPTO_PROTO_TLSv1_3", 64),
-        ("STREAM_SHUT_RD", 0),
-        ("STREAM_SHUT_WR", 1),
-        ("STREAM_SHUT_RDWR", 2),
-        ("STREAM_PF_INET", 2),
-        ("STREAM_PF_INET6", 30),
-        ("STREAM_PF_UNIX", 1),
-        ("STREAM_IPPROTO_IP", 0),
-        ("STREAM_IPPROTO_TCP", 6),
-        ("STREAM_IPPROTO_UDP", 17),
-        ("STREAM_IPPROTO_ICMP", 1),
-        ("STREAM_IPPROTO_RAW", 255),
-        ("STREAM_SOCK_STREAM", 1),
-        ("STREAM_SOCK_DGRAM", 2),
-        ("STREAM_SOCK_RAW", 3),
-        ("STREAM_SOCK_SEQPACKET", 5),
-        ("STREAM_SOCK_RDM", 4),
-        ("STREAM_PEEK", 2),
-        ("STREAM_OOB", 1),
-        ("STREAM_SERVER_BIND", 4),
-        ("STREAM_SERVER_LISTEN", 8),
-    ]
-    .into_iter()
-    .map(|(name, value)| constant(name.as_bytes(), value))
-    .collect()
-}
 
 /// The natives, as the stub declares them.
 ///
