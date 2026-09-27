@@ -2,19 +2,21 @@
 //! (`Z/ext/pcre/php_pcre.c:2567`, `:2928`): a subject cut at each match,
 //! and the entries of an array that match or, inverted, do not.
 
-use php_ext::coerce::{coerce_param, to_string};
-use php_ext::decl::Type;
+use php_ext::abi::OrFalse;
+use php_ext::attr::php_function;
+use php_ext::coerce::to_string;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, Value};
+use php_ext::values::{Key, PhpArray, PhpString, Value};
 
+use crate::constants::{
+    PREG_GREP_INVERT, PREG_INTERNAL_ERROR, PREG_NO_ERROR, PREG_SPLIT_DELIM_CAPTURE,
+    PREG_SPLIT_NO_EMPTY, PREG_SPLIT_OFFSET_CAPTURE,
+};
 use crate::ffi::{self, Subject};
 use crate::matching::{Scratch, offset_pair, piece, unit_length};
 use crate::pattern::{Pattern, compiled};
-use crate::{
-    GREP_INVERT, NO_ERROR, SPLIT_DELIM_CAPTURE, SPLIT_NO_EMPTY, SPLIT_OFFSET_CAPTURE,
-    arguments_between, error_code, exec_error, long_argument, set_error, string_argument,
-};
+use crate::{error_code, exec_error, set_error};
 
 /// `preg_split(string $pattern, string $subject, int $limit = -1, int
 /// $flags = 0): array|false`: the pieces between matches, at most
@@ -121,14 +123,16 @@ use crate::{
 /// bool(false)
 /// bool(false)
 /// ```
-pub(crate) fn preg_split(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 2, 4)?;
-    let regex = string_argument(req, 1)?;
-    let subject = string_argument(req, 2)?;
-    let limit = long_argument(req, 3, -1)?;
-    let flags = long_argument(req, 4, 0)?;
-    let Some(pattern) = compiled(req, regex.as_bytes()) else {
-        return Ok(Value::bool(false));
+#[php_function]
+fn preg_split(
+    req: &mut Request,
+    pattern: PhpString,
+    subject: PhpString,
+    #[php(default = -1)] limit: i64,
+    #[php(default = 0)] flags: i64,
+) -> Result<OrFalse<PhpArray>, Thrown> {
+    let Some(pattern) = compiled(req, pattern.as_bytes()) else {
+        return Ok(OrFalse::False);
     };
     split_impl(req, &pattern, subject.as_bytes(), limit, flags)
 }
@@ -141,14 +145,14 @@ pub(super) fn split_impl(
     bytes: &[u8],
     mut limit: i64,
     flags: i64,
-) -> Result<Value, Thrown> {
-    let no_empty = flags & SPLIT_NO_EMPTY != 0;
-    let delimiters = flags & SPLIT_DELIM_CAPTURE != 0;
-    let offsets = flags & SPLIT_OFFSET_CAPTURE != 0;
+) -> Result<OrFalse<PhpArray>, Thrown> {
+    let no_empty = flags & PREG_SPLIT_NO_EMPTY != 0;
+    let delimiters = flags & PREG_SPLIT_DELIM_CAPTURE != 0;
+    let offsets = flags & PREG_SPLIT_OFFSET_CAPTURE != 0;
     let mut out = PhpArray::new(req)?;
     let len = bytes.len();
     let mut last = 0;
-    set_error(req, NO_ERROR);
+    set_error(req, PREG_NO_ERROR);
     let add = |req: &mut Request, out: &mut PhpArray, start: usize, end: usize| {
         let value = if offsets {
             offset_pair(req, bytes, (start, end), false)?
@@ -163,7 +167,7 @@ pub(super) fn split_impl(
     if limit == -1 || limit > 1 {
         let Some(mut scratch) = Scratch::take(req, pattern) else {
             req.release(out.to_value());
-            return Ok(Value::bool(false));
+            return Ok(OrFalse::False);
         };
         let mut subject = Subject::new(bytes);
         let mut start;
@@ -177,7 +181,7 @@ pub(super) fn split_impl(
                 loop {
                     let (match_start, match_end) = scratch.group(0);
                     if match_end < match_start {
-                        set_error(req, crate::INTERNAL_ERROR);
+                        set_error(req, PREG_INTERNAL_ERROR);
                         break 'search Ok(());
                     }
                     if !no_empty || match_start != last {
@@ -234,15 +238,15 @@ pub(super) fn split_impl(
         };
         scratch.give_back(req);
         walked?;
-        if error_code(req) != NO_ERROR {
+        if error_code(req) != PREG_NO_ERROR {
             req.release(out.to_value());
-            return Ok(Value::bool(false));
+            return Ok(OrFalse::False);
         }
     }
     if !no_empty || last < len {
         add(req, &mut out, last, len)?;
     }
-    Ok(out.to_value())
+    Ok(OrFalse::Value(out))
 }
 
 /// `preg_grep(string $pattern, array $array, int $flags = 0):
@@ -274,23 +278,22 @@ pub(super) fn split_impl(
 /// }
 /// int(4)
 /// ```
-pub(crate) fn preg_grep(req: &mut Request) -> Result<Value, Thrown> {
-    arguments_between(req, 2, 3)?;
-    let regex = string_argument(req, 1)?;
-    let given = req.argument(2).unwrap_or_default();
-    let input = coerce_param(req, &given, &Type::Array, 2)?.deref();
-    let flags = long_argument(req, 3, 0)?;
-    let Some(pattern) = compiled(req, regex.as_bytes()) else {
-        return Ok(Value::bool(false));
+#[php_function]
+fn preg_grep(
+    req: &mut Request,
+    pattern: PhpString,
+    array: PhpArray,
+    #[php(default = 0)] flags: i64,
+) -> Result<OrFalse<PhpArray>, Thrown> {
+    let Some(pattern) = compiled(req, pattern.as_bytes()) else {
+        return Ok(OrFalse::False);
     };
-    let invert = flags & GREP_INVERT != 0;
+    let invert = flags & PREG_GREP_INVERT != 0;
     let mut out = PhpArray::new(req)?;
-    set_error(req, NO_ERROR);
-    let Some(entries) = input.as_array().map(PhpArray::snapshot_refs) else {
-        return Ok(out.to_value());
-    };
+    set_error(req, PREG_NO_ERROR);
+    let entries = array.snapshot_refs();
     let Some(mut scratch) = Scratch::take(req, &pattern) else {
-        return Ok(out.to_value());
+        return Ok(OrFalse::Value(out));
     };
     let mut kept = Ok(());
     for (key, entry) in entries {
@@ -328,5 +331,5 @@ pub(crate) fn preg_grep(req: &mut Request) -> Result<Value, Thrown> {
     }
     scratch.give_back(req);
     kept?;
-    Ok(out.to_value())
+    Ok(OrFalse::Value(out))
 }

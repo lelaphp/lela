@@ -13,8 +13,9 @@ use php_ext::abi::{Cache, StartupIni};
 use php_ext::raising::{Level, docref};
 use php_ext::request::Request;
 
+use crate::constants::PREG_INTERNAL_ERROR;
 use crate::ffi::{self, Code};
-use crate::{INTERNAL_ERROR, set_error};
+use crate::set_error;
 
 /// `PCRE_CACHE_SIZE`.
 const CACHE_SIZE: usize = 4096;
@@ -73,13 +74,13 @@ pub(super) fn compiled(req: &mut Request, regex: &[u8]) -> Option<Arc<Pattern>> 
     };
     if let Some(message) = jit_failure {
         docref(req, Level::Warning, &message);
-        set_error(req, INTERNAL_ERROR);
+        set_error(req, PREG_INTERNAL_ERROR);
     }
     match &*built {
         Ok(pattern) => Some(Arc::clone(pattern)),
         Err(message) => {
             docref(req, Level::Warning, message);
-            set_error(req, INTERNAL_ERROR);
+            set_error(req, PREG_INTERNAL_ERROR);
             None
         }
     }

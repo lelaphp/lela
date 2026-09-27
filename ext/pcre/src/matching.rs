@@ -4,17 +4,19 @@
 //! the shape of one match's array, which `preg_replace_callback` hands
 //! its callback too.
 
+use php_ext::abi::{OrFalse, Ref, Untyped};
+use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value};
 
+use crate::constants::{
+    PREG_INTERNAL_ERROR, PREG_NO_ERROR, PREG_OFFSET_CAPTURE, PREG_PATTERN_ORDER, PREG_SET_ORDER,
+    PREG_UNMATCHED_AS_NULL,
+};
 use crate::ffi::{self, Context, MatchData, Subject};
 use crate::pattern::{Pattern, compiled};
-use crate::{
-    INTERNAL_ERROR, NO_ERROR, OFFSET_CAPTURE, PATTERN_ORDER, SET_ORDER, State, UNMATCHED_AS_NULL,
-    arguments_between, error_code, exec_error, ini_bool, ini_long, long_argument, set_error,
-    string_argument,
-};
+use crate::{State, error_code, exec_error, ini_bool, ini_long, set_error};
 
 /// `PHP_PCRE_PREALLOC_MDATA_SIZE`.
 const PREALLOC_PAIRS: u32 = 32;
@@ -50,7 +52,7 @@ impl Scratch {
             (MatchData::for_code(&pattern.code), false)
         };
         let (Some(mut context), Some(data)) = (context, data) else {
-            set_error(req, INTERNAL_ERROR);
+            set_error(req, PREG_INTERNAL_ERROR);
             return None;
         };
         context.configure(backtrack, recursion, jit);
@@ -226,8 +228,8 @@ pub(super) fn populate(
     count: usize,
     flags: i64,
 ) -> Result<(), Thrown> {
-    let offsets = flags & OFFSET_CAPTURE != 0;
-    let as_null = flags & UNMATCHED_AS_NULL != 0;
+    let offsets = flags & PREG_OFFSET_CAPTURE != 0;
+    let as_null = flags & PREG_UNMATCHED_AS_NULL != 0;
     let name = |group: usize| pattern.names.get(group).and_then(|n| n.as_deref());
     for group in 0..count {
         let at = scratch.group(group);
@@ -464,6 +466,28 @@ pub(super) fn populate(
 /// string(14) "Internal error"
 /// ```
 ///
+/// `$matches` is written through the reference as `ZEND_TRY_ASSIGN_REF`
+/// writes, held to the type of a typed property the reference is:
+/// the empty array php lays first is refused before anything matches.
+///
+/// ```php
+/// class T { public int $m = 0; public ?array $a = null; }
+/// $t = new T;
+/// try { preg_match('/a/', 'a', $t->m); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($t->m, preg_match('/(a)/', 'a', $t->a), $t->a);
+/// ```
+/// ```expect
+/// Cannot assign array to reference held by property T::$m of type int
+/// int(0)
+/// int(1)
+/// array(2) {
+///   [0]=>
+///   string(1) "a"
+///   [1]=>
+///   string(1) "a"
+/// }
+/// ```
+///
 /// A `/u` match from offset zero that ends without an error records on
 /// the string that its bytes are valid UTF-8, php's `IS_STR_VALID_UTF8`,
 /// so the calls after it skip the library's check, which is what keeps
@@ -483,8 +507,16 @@ pub(super) fn populate(
 /// bool(false)
 /// string(56) "Malformed UTF-8 characters, possibly incorrectly encoded"
 /// ```
-pub(crate) fn preg_match(req: &mut Request) -> Result<Value, Thrown> {
-    do_match(req, false)
+#[php_function(frameless(2))]
+fn preg_match(
+    req: &mut Request,
+    pattern: PhpString,
+    subject: PhpString,
+    #[php(default = null)] matches: Ref<Untyped<Value>>,
+    #[php(default = 0)] flags: i64,
+    #[php(default = 0)] offset: i64,
+) -> Result<OrFalse<i64>, Thrown> {
+    do_match(req, pattern, subject, &matches, flags, offset, false)
 }
 
 /// `preg_match_all(string $pattern, string $subject, &$matches = null,
@@ -646,20 +678,32 @@ pub(crate) fn preg_match(req: &mut Request) -> Result<Value, Thrown> {
 /// }
 /// preg_match_all(): Argument #4 ($flags) must be a PREG_* constant
 /// ```
-pub(crate) fn preg_match_all(req: &mut Request) -> Result<Value, Thrown> {
-    do_match(req, true)
+#[php_function]
+fn preg_match_all(
+    req: &mut Request,
+    pattern: PhpString,
+    subject: PhpString,
+    #[php(default = null)] matches: Ref<Untyped<Value>>,
+    #[php(default = 0)] flags: i64,
+    #[php(default = 0)] offset: i64,
+) -> Result<OrFalse<i64>, Thrown> {
+    do_match(req, pattern, subject, &matches, flags, offset, true)
 }
 
-/// `php_do_pcre_match`.
-fn do_match(req: &mut Request, global: bool) -> Result<Value, Thrown> {
-    arguments_between(req, 2, 5)?;
-    let regex = string_argument(req, 1)?;
-    let subject = string_argument(req, 2)?;
-    let wants = req.argument_count() >= 3;
-    let flags = long_argument(req, 4, 0)?;
-    let offset = long_argument(req, 5, 0)?;
+/// `php_do_pcre_match` past its ZPP: `$matches` is wanted where the call
+/// passed it.
+fn do_match(
+    req: &mut Request,
+    regex: PhpString,
+    subject: PhpString,
+    matches: &Ref<Untyped<Value>>,
+    flags: i64,
+    offset: i64,
+    global: bool,
+) -> Result<OrFalse<i64>, Thrown> {
+    let wants = matches.is_given();
     let Some(pattern) = compiled(req, regex.as_bytes()) else {
-        return Ok(Value::bool(false));
+        return Ok(OrFalse::False);
     };
     if offset == i64::MIN {
         return Err(arg_value_error(
@@ -671,11 +715,11 @@ fn do_match(req: &mut Request, global: bool) -> Result<Value, Thrown> {
     // `zend_try_array_init`: `$matches` is `[]` before anything else.
     if wants {
         let empty = PhpArray::new(req)?;
-        crate::assign_ref(req, 3, empty.to_value())?;
+        matches.set(req, Untyped(empty.to_value()))?;
     }
-    let (value, matches) = match_impl(req, &pattern, subject, wants, global, flags, offset)?;
-    if let Some(matches) = matches {
-        crate::assign_ref(req, 3, matches.to_value())?;
+    let (value, found) = match_impl(req, &pattern, subject, wants, global, flags, offset)?;
+    if let Some(found) = found {
+        matches.set(req, Untyped(found.to_value()))?;
     }
     Ok(value)
 }
@@ -691,11 +735,13 @@ pub(super) fn match_impl(
     global: bool,
     flags: i64,
     offset: i64,
-) -> Result<(Value, Option<PhpArray>), Thrown> {
-    let mut order = if global { PATTERN_ORDER } else { 0 };
+) -> Result<(OrFalse<i64>, Option<PhpArray>), Thrown> {
+    let mut order = if global { PREG_PATTERN_ORDER } else { 0 };
     if flags & 0xff != 0 {
         order = flags & 0xff;
-        if (global && !(PATTERN_ORDER..=SET_ORDER).contains(&order)) || (!global && order != 0) {
+        if (global && !(PREG_PATTERN_ORDER..=PREG_SET_ORDER).contains(&order))
+            || (!global && order != 0)
+        {
             return Err(arg_value_error(req, 4, "be a PREG_* constant"));
         }
     }
@@ -709,11 +755,11 @@ pub(super) fn match_impl(
     };
     if start > len {
         exec_error(req, ffi::PCRE2_ERROR_BADOFFSET);
-        return Ok((Value::bool(false), None));
+        return Ok((OrFalse::False, None));
     }
-    set_error(req, NO_ERROR);
+    set_error(req, PREG_NO_ERROR);
     let Some(mut scratch) = Scratch::take(req, pattern) else {
-        return Ok((Value::bool(false), None));
+        return Ok((OrFalse::False, None));
     };
     let from_start = start == 0;
     let outcome = matches_loop(
@@ -730,15 +776,15 @@ pub(super) fn match_impl(
     scratch.give_back(req);
     let (count, out) = outcome?;
     let value = match count {
-        Some(count) if error_code(req) == NO_ERROR => {
+        Some(count) if error_code(req) == PREG_NO_ERROR => {
             // The library checked every byte from offset zero under `/u`,
             // or the string already said they were valid.
             if pattern.utf && from_start {
                 subject_string.mark_valid_utf8();
             }
-            Value::int(count)
+            OrFalse::Value(count)
         }
-        _ => Value::bool(false),
+        _ => OrFalse::False,
     };
     Ok((value, out))
 }
@@ -758,15 +804,15 @@ fn matches_loop(
     flags: i64,
 ) -> Result<(Option<i64>, Option<PhpArray>), Thrown> {
     let bytes = string.as_bytes();
-    let offsets = flags & OFFSET_CAPTURE != 0;
-    let as_null = flags & UNMATCHED_AS_NULL != 0;
+    let offsets = flags & PREG_OFFSET_CAPTURE != 0;
+    let as_null = flags & PREG_UNMATCHED_AS_NULL != 0;
     let mut out = if wants {
         Some(PhpArray::new(req)?)
     } else {
         None
     };
     let mut sets = Vec::new();
-    if global && wants && order == PATTERN_ORDER {
+    if global && wants && order == PREG_PATTERN_ORDER {
         for _ in 0..pattern.groups {
             sets.push(PhpArray::new(req)?);
         }
@@ -794,7 +840,7 @@ fn matches_loop(
                         populate(req, out, pattern, scratch, bytes, n, flags)?;
                         break 'search;
                     }
-                    if order == PATTERN_ORDER {
+                    if order == PREG_PATTERN_ORDER {
                         for (group, set) in sets.iter_mut().enumerate().take(n) {
                             let at = scratch.group(group);
                             let value = if offsets {

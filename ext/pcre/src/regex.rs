@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use php_ext::abi::IntoReturn;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpString, Value};
@@ -66,7 +67,7 @@ impl Regex {
             Some(matches) => matches,
             None => PhpArray::new(req)?,
         };
-        Ok((value, matches))
+        Ok((value.into_return(req)?, matches))
     }
 
     /// `php_pcre_split_impl`: what `preg_split` answers.
@@ -77,7 +78,7 @@ impl Regex {
         limit: i64,
         flags: i64,
     ) -> Result<Value, Thrown> {
-        split_impl(req, &self.0, subject, limit, flags)
+        split_impl(req, &self.0, subject, limit, flags)?.into_return(req)
     }
 
     /// `php_pcre_replace_impl`: what `preg_replace` makes of one
