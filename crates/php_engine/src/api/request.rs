@@ -818,8 +818,9 @@ pub struct StreamWrapper {
     /// `stream_opener`, `None` for a wrapper that opens no stream, php's
     /// `wrapper does not support stream open`; the opener's own `None`
     /// is the open that failed, which `php_stream_display_wrapper_errors`
-    /// reports as `operation failed`.
-    pub open: Option<fn(&mut Request, &[u8], &[u8]) -> Result<Option<Stream>, Thrown>>,
+    /// reports as `operation failed`. It is handed the path, the `mode` and
+    /// the [`Opening`] php hands it, `REPORT_ERRORS` cleared.
+    pub open: Option<fn(&mut Request, &[u8], &[u8], Opening) -> Result<Option<Stream>, Thrown>>,
     /// `dir_opener`: the directory's entries, in the order `readdir`
     /// gives them, which the engine serves as a directory stream under
     /// the wrapper's label (`rewinddir` back to the first); `None` is the
@@ -834,6 +835,18 @@ pub struct StreamWrapper {
     /// [`WrapperOp::Owner`] and [`WrapperOp::Group`], with the path as
     /// the program wrote it.
     pub set_stat: Option<fn(&mut Request, &[u8], WrapperOp<'_>) -> Result<bool, Thrown>>,
+}
+
+/// The `options` of `php_stream_open_wrapper_ex` a wrapper's opener
+/// reads and hands on to an open of its own, [`Request::open_stream_with`]:
+/// `USE_PATH`, the path looked for along `include_path` first, and
+/// `REPORT_ERRORS`, a refusal a warning. The engine clears `warn` before
+/// it asks an opener, as php does, so what fails inside one is the
+/// generic `operation failed` alone unless the opener warns of it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Opening {
+    pub use_path: bool,
+    pub warn: bool,
 }
 
 /// One wrapper operation past opening, php's `php_stream_wrapper_ops`
@@ -17259,6 +17272,19 @@ impl Request {
         use_include_path: bool,
     ) -> Result<Option<Stream>, Thrown> {
         self.open_stream_wrapper(path, mode, use_include_path)
+    }
+
+    /// `php_stream_open_wrapper_ex(path, mode, options)` under the
+    /// options an opener was handed, or a native chose: what
+    /// [`Request::open_stream`] is with `REPORT_ERRORS` and `USE_PATH`
+    /// each as `opening` says.
+    pub fn open_stream_with(
+        &mut self,
+        path: &[u8],
+        mode: &[u8],
+        opening: Opening,
+    ) -> Result<Option<Stream>, Thrown> {
+        self.open_wrapper_with(path, mode, opening)
     }
 
     /// `php_stream_open_wrapper_ex(url, mode, REPORT_ERRORS |

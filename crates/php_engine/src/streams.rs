@@ -2823,6 +2823,21 @@ impl Request {
         self.open_wrapper_ex(path, mode, options)
     }
 
+    /// `_php_stream_open_wrapper_ex` under an extension's [`Opening`].
+    pub(crate) fn open_wrapper_with(
+        &mut self,
+        path: &[u8],
+        mode: &[u8],
+        opening: crate::api::request::Opening,
+    ) -> Result<Option<Stream>, Thrown> {
+        let options = OpenOptions {
+            use_path: opening.use_path,
+            report: opening.warn,
+            ..OpenOptions::REPORT
+        };
+        self.open_wrapper_ex(path, mode, options)
+    }
+
     /// `_php_stream_open_wrapper_ex` under `REPORT_ERRORS | STREAM_USE_URL`,
     /// what `get_headers` opens with: a wrapper located that is no URL
     /// wrapper, the plain files one, `php://` and a registered one not
@@ -2854,10 +2869,12 @@ impl Request {
             return Err(throw(self, "ValueError", "Path must not be empty"));
         }
         let mut to_open = path.to_vec();
+        let mut use_path = options.use_path;
         if options.use_path
             && let Ok(resolved) = self.resolve_path(path)
         {
             to_open = resolved;
+            use_path = false;
         }
         let (wrapper, path_to_open) = self.locate(&to_open, options);
         if options.use_url && !wrapper.is_url() {
@@ -2892,8 +2909,16 @@ impl Request {
                 match open {
                     Some(open) => (
                         label,
-                        open(self, &path_to_open, mode)?
-                            .ok_or_else(|| String::from("operation failed")),
+                        open(
+                            self,
+                            &path_to_open,
+                            mode,
+                            crate::api::request::Opening {
+                                use_path,
+                                warn: false,
+                            },
+                        )?
+                        .ok_or_else(|| String::from("operation failed")),
                     ),
                     None => (
                         label,
