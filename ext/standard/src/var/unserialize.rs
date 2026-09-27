@@ -1430,7 +1430,23 @@ impl State<'_> {
     /// `unserialize_callback_func`: the function the ini names, handed the
     /// class name, then the class looked for again, loader and all;
     /// `true` where it stands after that, and php's warning where the
-    /// function did not define it.
+    /// function did not define it. A name that is no callable is
+    /// `call_user_function`'s `Error`, which fails the read.
+    ///
+    /// ```php
+    /// function check($name) { echo "asked for $name\n"; }
+    /// ini_set('unserialize_callback_func', 'check');
+    /// var_dump(unserialize('O:3:"Foo":0:{}') instanceof __PHP_Incomplete_Class);
+    /// ini_set('unserialize_callback_func', 'Nonexistent');
+    /// try { unserialize('O:3:"Foo":0:{}'); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// asked for Foo
+    ///
+    /// Warning: unserialize(): Function check() hasn't defined the class it was called for in %s on line 4
+    /// bool(true)
+    /// Invalid callback Nonexistent, function "Nonexistent" not found or invalid function name
+    /// ```
     fn callback(req: &mut Request, name: &[u8]) -> Result<bool, Thrown> {
         let Some(function) = req
             .ini_get(b"unserialize_callback_func")
@@ -1443,12 +1459,20 @@ impl State<'_> {
         let callee = Value::string(PhpString::new(req, &function)?);
         let checked = callable_checked(req, &callee);
         req.release(callee);
-        if let Ok(callable) = checked {
-            let argument = Value::string(PhpString::new(req, name)?);
-            let answer = call(req, &callable, &[argument]);
-            req.release(argument);
-            req.release(answer?);
-        }
+        let callable = match checked {
+            Ok(callable) => callable,
+            Err(error) => {
+                return Err(throw(
+                    req,
+                    "Error",
+                    &format!("Invalid callback {shown}, {error}"),
+                ));
+            }
+        };
+        let argument = Value::string(PhpString::new(req, name)?);
+        let answer = call(req, &callable, &[argument]);
+        req.release(argument);
+        req.release(answer?);
         if lookup_class(req, name)?.is_some() {
             return Ok(true);
         }
